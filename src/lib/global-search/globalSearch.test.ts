@@ -203,6 +203,7 @@ describe('globalSearch — smart-sniff', () => {
     await db.node.createMany({ data: Array.from({ length: 250 }, (_, i) => ({
       id: generateId(), memoryId: memory.id, loc: `plain:${i}`, name: `Plain ${i}`,
     })) });
+    await db.node.updateMany({ where: { memoryId: memory.id, loc: 'plain:0' }, data: { name: 'Capneedle context' } });
     const target = await db.node.create({ data: {
       id: generateId(), memoryId: fx.memoryA, loc: 'cap-target', name: 'Capneedle',
     } });
@@ -213,13 +214,49 @@ describe('globalSearch — smart-sniff', () => {
     expect(result.hits[0].id).toBe(target.id);
     expect(result.hits[0].matchedField).toBe('name');
     expect(result.total).toBeLessThanOrEqual(200);
+    expect(ids(result.hits).size).toBe(result.hits.length);
     // Plain words still match memory URNs when urn is explicitly requested.
     // Restricting that branch to colon queries would violate the match set.
     const onlyUrn = await globalSearch(db, { ...params, fields: ['urn'] }, principal);
     expect(onlyUrn.hits).toHaveLength(200);
     expect(onlyUrn.hits.every(hit => hit.memoryId === memory.id)).toBe(true);
     const onlyName = await globalSearch(db, { ...params, fields: ['name'] }, principal);
-    expect(ids(onlyName.hits)).toEqual(new Set([target.id]));
+    expect(ids(onlyName.hits)).toContain(target.id);
+    expect(onlyName.hits).toHaveLength(2);
+  });
+
+  it('keeps memory-only candidates scoped and excludes comments (#1586 fallbackscope)', async () => {
+    await db.memory.update({ where: { id: fx.memoryB }, data: { urn: 'org-b:capsecret' } });
+    const hidden = await db.node.create({ data: {
+      memoryId: fx.memoryB, loc: 'plain', name: 'Plain',
+    } });
+    const params = { query: 'capsecret', entityTypes: ['node'] as SearchEntityType[] };
+    for (const p of [viewerP(), anonP(), { ...adminP(), orgScopeId: fx.orgA }]) {
+      expect((await globalSearch(db, { ...params, fields: ['urn'] }, p)).hits).toEqual([]);
+    }
+    expect(ids((await globalSearch(db, { ...params, fields: ['urn'] }, adminP())).hits)).toEqual(new Set([hidden.id]));
+    await resolvers.Mutation.createComment({}, { targetRef: fx.nodeA, body: 'A comment' }, {
+      db, userId: fx.viewer, roles: [],
+    } as Context);
+    const visible = await globalSearch(db, { query: 'org-a:alpha', fields: ['urn'], entityTypes: ['node'] }, viewerP());
+    expect(ids(visible.hits)).toEqual(new Set([fx.nodeA]));
+  });
+
+  it.each(['memory-tail', 'loc-head'])('keeps %s boundary precision before the cap (#1586 boundarycap)', async arm => {
+    // Insert the real target AFTER 250 contains-only decoys: final scoring
+    // cannot rescue it if a loosened SQL predicate fills the candidate cap.
+    await db.node.delete({ where: { id: fx.nodeA } });
+    const decoyMemory = arm === 'memory-tail'
+      ? await db.memory.create({ data: { organizationId: fx.orgA, urn: 'org-a:alpha-suffix', name: 'Decoy', class: 'knowledge' } })
+      : { id: fx.memoryA };
+    await db.node.createMany({ data: Array.from({ length: 250 }, (_, i) => ({
+      id: generateId(), memoryId: decoyMemory.id,
+      loc: arm === 'memory-tail' ? `guide:${i}` : `wrong:guide:${i}`, name: `Decoy ${i}`,
+    })) });
+    const target = await db.node.create({ data: { memoryId: fx.memoryA, loc: 'guide:intro', name: 'Target' } });
+    const principal = { ...viewerP(), accessibleMemoryIds: [...viewerP().accessibleMemoryIds!, decoyMemory.id] };
+    const result = await globalSearch(db, { query: 'alpha:guide', entityTypes: ['node'] }, principal);
+    expect(ids(result.hits)).toEqual(new Set([target.id]));
   });
 
   it('bare-loc search finds its node even amid many same-tail locs (#301)', async () => {

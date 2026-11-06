@@ -103,12 +103,14 @@ function textPred(column: string, q: string): AnyWhere {
  * or crosses their separator. Try every separator of the normalized query as
  * that boundary: the memory must END with the left half and loc START with
  * the right half. No assumption about how many leading atoms were supplied.
- * Memory URNs may still store the legacy double-colon spelling; loc is stored
- * single-colon. Final scoring continues to use the shared URN emitter.
+ * This builds the loc/boundary predicates; memory-only matches fill unused
+ * slots separately in searchNodes. Memory URNs may still store the legacy
+ * double-colon spelling; loc is single-colon. Final scoring uses the shared
+ * URN emitter.
  */
 function nodeUrnPreds(urnTerm: string): AnyWhere[] {
   const term = urnTerm.replace(/:+/g, ':');
-  const preds: AnyWhere[] = [textPred('loc', term), { memory: { OR: urnPreds('urn', term) } }];
+  const preds: AnyWhere[] = [textPred('loc', term)];
   for (let i = 0; i < term.length; i++) {
     if (term[i] !== ':') continue;
     const memoryTail = term.slice(0, i);
@@ -285,6 +287,10 @@ async function searchNodes(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
   };
   if (fields.has('content')) nodeSelect.content = true;
 
+  // #1586: direct node-field and cross-boundary matches take candidate slots
+  // before memory-only matches. A large memory whose address contains a word
+  // must not crowd out a node named that word. Fill only the remaining slots,
+  // so the total fetched/scored node budget stays ctx.cap (not cap per branch).
   const rows = await ctx.db.node.findMany({
     where: {
       // #1608 (cor:dmo:110:08) — global search is content only; comments are
@@ -294,6 +300,22 @@ async function searchNodes(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
     select: nodeSelect,
     take: ctx.cap,
   });
+
+  if (fields.has('urn') && rows.length < ctx.cap) {
+    const memoryOnly = await ctx.db.node.findMany({
+      where: {
+        AND: [
+          nodeScopeWhere(principal), { deletedAt: null },
+          { nodeType: { not: COMMENT_NODE_TYPE } },
+          { id: { notIn: rows.map(row => row.id) } },
+          { memory: { OR: urnPreds('urn', urnTerm.replace(/:+/g, ':')) } },
+        ],
+      } as Prisma.NodeWhereInput,
+      select: nodeSelect,
+      take: ctx.cap - rows.length,
+    });
+    rows.push(...memoryOnly);
+  }
 
   const hits: GlobalSearchHit[] = [];
   for (const r of rows) {
