@@ -87,6 +87,8 @@ export async function readLocSegments(
   const { memoryIds, excludeNodeIds, parent, limit, after } = args;
   if (memoryIds.length === 0) return { items: [], hasMore: false, endCursor: null };
 
+  // #3596 / ruling 0229: prove a flat prefix with a sibling-bounded ordered probe,
+  // then scan only its index range; otherwise keep the skip-scan below.
   // Skip-scan over nodes_memory_segment_key_idx: ':' is chr(1) in the key, so one segment's locs are a
   // contiguous block; each step probes the first eligible row at or after the previous block's end
   // (key||chr(2)). The prefix is compared bytewise on the key, never with LIKE.
@@ -96,9 +98,27 @@ export async function readLocSegments(
   const upperKey = prefixKey.slice(0, -1) + '\u0002';
   const hasUpper = prefix !== '';
   const rows = await db.$queryRaw<Array<{ memory_id: string; seg: string; has_node: boolean; pos: number | null }>>`
-    WITH RECURSIVE walk AS (
-      SELECT m.memory_id, f.loc, f.seq
+    WITH RECURSIVE shape AS MATERIALIZED (
+      SELECT m.memory_id, NOT EXISTS (
+        -- OFFSET 0 keeps this ordered subquery ahead of the descendant test.
+        -- The first descendant stops the probe; all preceding eligible rows
+        -- are distinct direct children, so chooser work is sibling-bounded.
+        SELECT 1 FROM (
+          SELECT probe_node.loc FROM nodes probe_node
+          WHERE probe_node.memory_id = m.memory_id
+            AND (replace(probe_node.loc, ':', chr(1))) COLLATE "C" >= ${prefixKey}::text COLLATE "C"
+            AND (NOT ${hasUpper}::boolean OR (replace(probe_node.loc, ':', chr(1))) COLLATE "C" < ${upperKey}::text COLLATE "C")
+            AND probe_node.deleted_at IS NULL AND probe_node.node_type <> 'system' AND probe_node.node_type <> 'comment' AND probe_node.loc <> ''
+            AND NOT (probe_node.id = ANY(${excludeNodeIds}::text[]))
+          ORDER BY (replace(probe_node.loc, ':', chr(1))) COLLATE "C" ASC
+          OFFSET 0
+        ) ordered_nodes
+        WHERE strpos(substr(ordered_nodes.loc, length(${prefix}::text) + 1), ':') > 0
+      ) AS flat
       FROM unnest(${memoryIds}::text[]) AS m(memory_id)
+    ), walk AS (
+      SELECT m.memory_id, f.loc, f.seq
+      FROM shape m
       CROSS JOIN LATERAL (
         SELECT n.loc, n.seq FROM nodes n
         WHERE n.memory_id = m.memory_id
@@ -109,6 +129,7 @@ export async function readLocSegments(
         ORDER BY (replace(n.loc, ':', chr(1))) COLLATE "C" ASC
         LIMIT 1
       ) f
+      WHERE NOT m.flat
       UNION ALL
       SELECT w.memory_id, f.loc, f.seq
       FROM walk w
@@ -129,6 +150,27 @@ export async function readLocSegments(
              (loc = ${prefix} || split_part(substr(loc, length(${prefix}::text) + 1), ':', 1)) AS has_node,
              CASE WHEN loc = ${prefix} || split_part(substr(loc, length(${prefix}::text) + 1), ':', 1) THEN seq END AS pos
       FROM walk
+      UNION ALL
+      -- A flat prefix has exactly one eligible row per sibling. Only the
+      -- ordered no-descendant proof above can select this arm (ruling 0229).
+      SELECT flat_rows.memory_id,
+             substr(flat_rows.loc, length(${prefix}::text) + 1) AS seg,
+             true AS has_node, flat_rows.seq AS pos
+      FROM shape m
+      CROSS JOIN LATERAL (
+        SELECT flat_node.memory_id, flat_node.loc, flat_node.seq
+        FROM nodes flat_node
+        WHERE flat_node.memory_id = m.memory_id
+          AND (replace(flat_node.loc, ':', chr(1))) COLLATE "C" >= ${prefixKey}::text COLLATE "C"
+          AND (NOT ${hasUpper}::boolean OR (replace(flat_node.loc, ':', chr(1))) COLLATE "C" < ${upperKey}::text COLLATE "C")
+          AND flat_node.deleted_at IS NULL AND flat_node.node_type <> 'system' AND flat_node.node_type <> 'comment' AND flat_node.loc <> ''
+          AND NOT (flat_node.id = ANY(${excludeNodeIds}::text[]))
+        -- Retain the parent's index range even when a broad scan/sort would
+        -- otherwise look cheaper to the planner at the current table size.
+        ORDER BY (replace(flat_node.loc, ':', chr(1))) COLLATE "C" ASC
+        OFFSET 0
+      ) flat_rows
+      WHERE m.flat
     )
     SELECT memory_id, seg, has_node, pos
     FROM segs
