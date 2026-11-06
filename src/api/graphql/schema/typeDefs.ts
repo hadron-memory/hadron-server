@@ -12817,6 +12817,8 @@ export const typeDefs = `#graphql
     """
     Trigger an on-demand sync for one memory (org ADMIN or CONTRIBUTOR).
 
+    Refuses SYNC_NOT_ATTEMPTED with reason NO_SOURCE or NO_INSTALLATION when no sync can be attempted;
+    no sync status, timestamp or report is written. Access is checked first; encrypted-memory refusal is unchanged.
     Accepts the entity's ID or URN.
     """
     syncMemory(id: ID!): Memory!
