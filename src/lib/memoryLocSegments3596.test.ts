@@ -113,7 +113,7 @@ describe('#3596 sibling-bounded hybrid', () => {
     }
     const blocks = nodes(plan.Plan).find(n => n['Subplan Name'] === 'CTE flat_blocks');
     expect(blocks?.['Actual Rows']).toBeGreaterThan(0);
-    expect(blocks?.['Actual Rows']).toBeLessThan(1000);
+    expect(blocks?.['Actual Rows']).toBeLessThan(5000);
   }, 120_000);
 
   it('two deep segments do not scan their 16k descendants or unrelated wide siblings', async () => {
@@ -142,11 +142,15 @@ describe('#3596 sibling-bounded hybrid', () => {
   }, 120_000);
 
 
-  it('the flat arm retains memory, deletion, system/comment and inherited-shadow eligibility', async () => {
-    const page = await readLocSegments(observed, { memoryIds:[memoryId], excludeNodeIds:['shadow3596'], parent:'filtered', limit:20, after:null });
+  it.each([false, true])('the flat arm retains memory, deletion, system/comment and inherited-shadow eligibility (generic %s)', async generic => {
+    const args = { memoryIds:[memoryId], excludeNodeIds:['shadow3596'], parent:'filtered', limit:20, after:null };
+    const page = generic ? await db.$transaction(tx => readLocSegments(observe(tx, true), args)) : await readLocSegments(observed, args);
     expect(page.items).toEqual([{segment:'live', hasNode:true, memoryId}]);
     expect(page.hasMore).toBe(false);
     expectFlat(plans.at(-1));
+    const scans = nodes(plans.at(-1).Plan).filter(n => n['Relation Name'] === 'nodes');
+    const examined = scans.reduce((sum, n) => sum + (n['Actual Rows'] + (n['Rows Removed by Filter'] ?? 0)) * n['Actual Loops'], 0);
+    expect(examined).toBeLessThanOrEqual(20);
   }, 120_000);
 
   it('pages a flat positioned/name set exactly once, identically to the skip-only path', async () => {

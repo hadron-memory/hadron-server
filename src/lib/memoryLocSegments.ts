@@ -117,7 +117,7 @@ export async function readLocSegments(
             AND flat_node.deleted_at IS NULL AND flat_node.node_type <> 'system' AND flat_node.node_type <> 'comment' AND flat_node.loc <> ''
             AND NOT (flat_node.id = ANY(${excludeNodeIds}::text[]))
           ORDER BY (replace(flat_node.loc, ':', chr(1))) COLLATE "C" ASC
-          LIMIT 256
+          LIMIT 64
         ) batch`;
   const rows = await db.$queryRaw<Array<{ memory_id: string; seg: string; has_node: boolean; pos: number | null }>>`
     WITH RECURSIVE shape AS MATERIALIZED (
