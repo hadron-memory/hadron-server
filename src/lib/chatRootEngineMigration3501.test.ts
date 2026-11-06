@@ -5,6 +5,8 @@ import { beforeEach, it, expect } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
+import { validEngineValue } from './chatRootEngineState.js';
+import { updateChatRootData } from './chatRoot.js';
 import { ensureCurrentNodeRevisionInTransaction } from './nodeRevisionSnapshot.js';
 const migration = readFileSync(new URL('../../prisma/migrations/20261106010000_chat_root_engine_state/migration.sql', import.meta.url), 'utf8');
 let memoryId: string;
@@ -49,4 +51,65 @@ it('real table PK/FK cascades hard root deletion and has no memoryId/plaintext r
   const columns = await c.query("SELECT column_name FROM information_schema.columns WHERE table_name='chat_root_engine_states' ORDER BY ordinal_position"); expect(columns.rows.map(r => r.column_name)).toEqual(['chat_root_node_id','state','updated_at']);
   await c.query('DELETE FROM nodes WHERE id=$1',[n.id]); expect((await c.query('SELECT count(*)::int n FROM chat_root_engine_states')).rows).toEqual([{ n: 0 }]);
  } finally { await c.query('ROLLBACK'); await c.end(); }
+});
+
+const parityFixtures: Array<[string, unknown, boolean]> = [
+  ['routeHistory', [{ action: 'ENTER', timestamp: '2026-01-01T00:00:00Z', language: 5 }], true],
+  ['goalStack', [{ description: 'goal', createdBy: 'USER', status: 'ACTIVE', createdAt: '2026-01-01T00:00:00Z', language: 5 }], false],
+  ['lastOffTrackAt', '2026-02-30T00:00:00Z', false],
+  ['lastOffTrackAt', '2024-02-29T00:00:00Z', true],
+  ['lastOffTrackAt', '2026-02-29T00:00:00Z', false],
+  ['lastOffTrackAt', '2026-01-01T00:00:00', true],
+  ['lastOffTrackAt', '2026-01-01T00:00Z', true],
+  ['lastOffTrackAt', '2026-01-01T24:00:00Z', true],
+  ['lastOffTrackAt', '2026-01-01T24:00:01Z', false],
+  ['lastOffTrackAt', '2026-01-01T00:00:00+23:59', true],
+  ['lastOffTrackAt', '2026-01-01T00:00:00+24:00', false],
+  ['lastOffTrackAt', '2026-01-01T00:00:60Z', false],
+  ['lastOffTrackAt', null, false],
+  ['stageName', '\t', false],
+  ['stageName', '\u00a0', false],
+  ['stageName', '\ufeff', false],
+  ['stageName', ' first ', true],
+  ['routeHistory', [{ action: 'ENTER', timestamp: '2026-01-01T00:00:00Z', trigger: { type: 'X', content: null } }], false],
+];
+it.each(parityFixtures)('SQL/runtime JSON-domain parity %s %j', async (key, value, expected) => {
+  const c = new pg.Client({ connectionString: process.env.DATABASE_URL }); await c.connect();
+  try {
+    await c.query('BEGIN');
+    await c.query(migration.slice(0, migration.indexOf('DO $$')));
+    for (const zone of ['UTC', 'Pacific/Auckland']) {
+      await c.query("SELECT set_config('TimeZone',$1,true)", [zone]);
+      const sql = await c.query('SELECT hadron_3501_valid($1,$2::jsonb) valid', [key, JSON.stringify(value)]);
+      expect({ zone, sql: sql.rows[0].valid, runtime: validEngineValue(key, value) }).toEqual({ zone, sql: expected, runtime: expected });
+    }
+  } finally { await c.query('ROLLBACK'); await c.end(); }
+});
+it.each([
+  ['routeHistory', [{ action: 'ENTER', timestamp: '2026-01-01T00:00:00Z', language: 5 }]],
+  ['lastOffTrackAt', '2026-02-30T00:00:00Z'],
+] as Array<[string, unknown]>)('migration then real locked write never loses legacy %s', async (key, value) => {
+  const n = await root('chats:parity', { ...state, [key]: value });
+  await run();
+  await updateChatRootData(db, { id: n.id, memoryId, loc: n.loc }, { id: memoryId, isEncrypted: false }, d => d);
+  const data = (await db.node.findUniqueOrThrow({ where: { id: n.id } })).data as Record<string, unknown>;
+  const engine = (await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: n.id } })).state as Record<string, unknown>;
+  expect(Object.hasOwn(engine, key) ? engine[key] : data[key]).toEqual(value);
+});
+it('a legacy value absent from an existing authoritative row stays inert and is not silently deleted', async () => {
+  const history = [{ action: 'ENTER', timestamp: '2026-01-01T00:00:00Z' }];
+  const n = await root('chats:unrepresented', { ...state, routeHistory: history });
+  await db.chatRootEngineState.create({ data: { chatRootNodeId: n.id, state: { conversationName: 'intake', stageName: 'first' } } });
+  let seen: unknown = 'not called';
+  await updateChatRootData(db, { id: n.id, memoryId, loc: n.loc }, { id: memoryId, isEncrypted: false }, d => { seen = d.routeHistory; return d; });
+  expect(seen).toBeUndefined(); // no fallback into the live engine
+  expect((await db.node.findUniqueOrThrow({ where: { id: n.id } })).data).toHaveProperty('routeHistory', history);
+  expect((await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: n.id } })).state).not.toHaveProperty('routeHistory');
+});
+it('migration updated_at is UTC even in a non-UTC database session', async () => {
+  const n = await root(); const c = new pg.Client({ connectionString: process.env.DATABASE_URL }); await c.connect();
+  try { await c.query('BEGIN'); await c.query("SET LOCAL TIME ZONE 'Pacific/Auckland'"); await c.query(migration);
+    const out = await c.query("SELECT abs(extract(epoch from (updated_at-(CURRENT_TIMESTAMP AT TIME ZONE 'UTC'))))::float seconds FROM chat_root_engine_states WHERE chat_root_node_id=$1", [n.id]);
+    expect(out.rows[0].seconds).toBeLessThan(60);
+  } finally { await c.query('ROLLBACK'); await c.end(); }
 });
