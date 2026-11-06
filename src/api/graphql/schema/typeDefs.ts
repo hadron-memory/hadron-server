@@ -4347,6 +4347,8 @@ export const typeDefs = `#graphql
     memoryId: ID!
     "Role-ascending."
     rules: [NodeRoleRule!]!
+    "#3426 — org-default rules skipped when this memory was created (a reference deleted, unreadable to the organization or not a task). Managers only, like the config. Proposed addition to hrn:node:hadronmemory.com:specs:cor:api:290."
+    defaultSkips: [MemoryConfigDefaultSkip!]!
     createdAt: DateTime
     createdBy: ID
     updatedAt: DateTime
@@ -4433,6 +4435,22 @@ export const typeDefs = `#graphql
     deleted: Boolean!
   }
 
+  """
+  #3426 — one org-default rule skipped at memory creation. Stores no task URN and no state: \`ref\` and \`refState\` are the
+  template rule's reference as the CALLING manager sees it now. Null/BROKEN once the template or rule is gone.
+  """
+  type MemoryConfigDefaultSkip {
+    role: String!
+    "authorTask, validationTask or descriptionNode."
+    field: String!
+    "REFERENCE_UNAVAILABLE: deleted, unreadable to the organization, or not a task."
+    reason: String!
+    sourceTemplate: NodeRoleRuleSourceTemplate
+    ref: String
+    refState: NodeRoleRuleRefState!
+    createdAt: DateTime!
+  }
+
   "#1325 — a non-fatal finding about a saved rule. Never changes the mutation's success."
   type MemoryConfigWarning {
     code: String!
@@ -4464,6 +4482,8 @@ export const typeDefs = `#graphql
     description: String
     "Applied as locked rules (#1334)."
     required: Boolean!
+    "#3426 — applied to every new org knowledge/group memory at creation. Always false for a non-organization owner. Proposed addition to hrn:node:hadronmemory.com:specs:cor:api:290."
+    orgDefault: Boolean!
     ownerType: MemoryConfigTemplateOwnerType!
     "ID of the owning organization, user or App; null for the server."
     ownerId: ID
@@ -4513,6 +4533,15 @@ export const typeDefs = `#graphql
     name: String!
     description: String
     required: Boolean
+    """
+    #3426 — an ORGANIZATION-owned template applied to every new org \`knowledge\` or \`group\` memory at its creation
+    (\`createMemory\` only; never clone, extract, App, install, agent or chat creation). A starting configuration, not a
+    boundary. User-, App- and server-owned templates refuse true (BAD_USER_INPUT, reason ORG_DEFAULT_ORG_ONLY).
+    At most 10 live defaults per organization (ORG_DEFAULT_LIMIT). Setting it true validates every reference as readable
+    to the ORGANIZATION as well as the saver (NODE_NOT_FOUND otherwise); clearing it never validates.
+    Proposed addition built on the #3426 gate to hrn:node:hadronmemory.com:specs:cor:api:290.
+    """
+    orgDefault: Boolean
     "Each role at most once (NODE_ROLE_RULE_EXISTS)."
     rules: [CreateNodeRoleRuleInput!]
   }
@@ -4526,6 +4555,15 @@ export const typeDefs = `#graphql
     name: String
     description: String
     required: Boolean
+    """
+    #3426 — an ORGANIZATION-owned template applied to every new org \`knowledge\` or \`group\` memory at its creation
+    (\`createMemory\` only; never clone, extract, App, install, agent or chat creation). A starting configuration, not a
+    boundary. User-, App- and server-owned templates refuse true (BAD_USER_INPUT, reason ORG_DEFAULT_ORG_ONLY).
+    At most 10 live defaults per organization (ORG_DEFAULT_LIMIT). Setting it true validates every reference as readable
+    to the ORGANIZATION as well as the saver (NODE_NOT_FOUND otherwise); clearing it never validates.
+    Proposed addition built on the #3426 gate to hrn:node:hadronmemory.com:specs:cor:api:290.
+    """
+    orgDefault: Boolean
     rules: [CreateNodeRoleRuleInput!]
   }
 

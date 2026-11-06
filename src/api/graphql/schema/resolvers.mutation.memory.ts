@@ -1,4 +1,5 @@
 // memoryMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { applyOrgDefaultsAtCreation } from './resolvers.memoryConfigOrgDefault.js';
 import { endApprovalsOnEncryptedEntry } from '../../../lib/nodeApproval.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { generateId } from '../../../lib/id.js';
@@ -830,6 +831,13 @@ export const memoryMutations = {
           name: rootName,
           description: 'Root node for this memory.',
         }, tx);
+        // #3426 (C3): the ONE site where the org's default templates are applied — an org-owned knowledge or group memory
+        // created here. Not personal/private (the owner alone manages those), not user-owned, and no other creation path
+        // (App, install, agent, chat, worker, clone, extract). No flag opts a caller out, so `source` changes nothing.
+        // Inside this transaction: a failure rolls the memory, its root node and its rules back together.
+        if (resolvedOrgId && (requestedClass === 'knowledge' || requestedClass === 'group')) {
+          await applyOrgDefaultsAtCreation(tx, { memoryId: created.id, orgId: resolvedOrgId, actor: ctx.userId ?? ctx.clientId ?? 'system' });
+        }
         return created;
       }));
 

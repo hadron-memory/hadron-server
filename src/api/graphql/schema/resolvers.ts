@@ -177,6 +177,7 @@ export const resolvers = {
   NodeApproval: nodeApprovalFieldResolvers.NodeApproval,
   NodeMintStatus: nodeApprovalFieldResolvers.NodeMintStatus,
   MemoryConfig: memoryConfigFieldResolvers.MemoryConfig,
+  MemoryConfigDefaultSkip: memoryConfigFieldResolvers.MemoryConfigDefaultSkip,
   NodeRoleRule: memoryConfigFieldResolvers.NodeRoleRule,
   MemoryConfigTemplate: memoryConfigTemplateFieldResolvers.MemoryConfigTemplate,
   MemoryConfigTemplateRule: memoryConfigTemplateFieldResolvers.MemoryConfigTemplateRule,
