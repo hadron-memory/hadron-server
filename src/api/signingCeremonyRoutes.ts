@@ -100,7 +100,7 @@ function setTitle(t){$('title').textContent=t;document.title=t;}
 function finish(title,text){view.replaceChildren();start.hidden=true;view.hidden=false;view.appendChild(el('p',text));setTitle(title);say('');focusTitle();}
 function ended(state){const w={COMPLETED:'This request was already signed.',DECLINED:'This request was declined.',EXPIRED:'This request expired.',STALE:'The text changed after this was requested, so this request can no longer be signed.',WITHDRAWN:'The person who asked withdrew this request.'};
  finish('This request has ended',(w[state]||'This request has ended.')+' Ask for a new signature request to sign again.');}
-function render(out){
+function render(out, focusDecline=false){
  view.replaceChildren();start.hidden=true;view.hidden=false;setTitle('Review and sign');
  const v=out.view;
  const meta=section('This request');
@@ -121,6 +121,7 @@ function render(out){
  else{chg.appendChild(el('p','Compared with revision '+v.previous.revision+'.'));['title','abstract','content'].forEach((k)=>{const rows=v.previous.diff[k];if(rows.some((r)=>r.kind!=='same')){chg.appendChild(el('h3',k[0].toUpperCase()+k.slice(1)));lines(chg,rows);}});}
  view.appendChild(chg);
  const actions=el('div');
+ let focusAfterRender=focusTitle;
  if(!out.canSign){actions.appendChild(el('p','You can read this, but you are not allowed to sign it.'));}
  else{
   const sign=el('button','Sign with passkey');sign.type='button';
@@ -152,7 +153,7 @@ function render(out){
    if(busy)return;
    actions.replaceChildren(el('p','Decline this request? It will be ended and can no longer be signed.'));
    const yes=el('button','Yes, decline');yes.type='button';const no=el('button','Cancel');no.type='button';
-   no.addEventListener('click',()=>render(out));
+   no.addEventListener('click',()=>render(out,true));
    yes.addEventListener('click',async()=>{yes.disabled=true;no.disabled=true;say('');
     try{const r=await post('decline',{ceremonyId:(await (await post('challenge')).json()).ceremonyId});if(r.status>=500)throw new Error('uncertain');
      const j=await r.json().catch(()=>null);
@@ -164,8 +165,9 @@ function render(out){
    actions.appendChild(yes);actions.appendChild(no);no.focus();
   });
   actions.appendChild(sign);actions.appendChild(dec);
+  if(focusDecline)focusAfterRender=()=>dec.focus();
  }
- view.appendChild(actions);focusTitle();say('');
+ view.appendChild(actions);focusAfterRender();say('');
 }
 go.addEventListener('click',async()=>{
  go.disabled=true;say('');
