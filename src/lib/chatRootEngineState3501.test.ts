@@ -407,3 +407,21 @@ it.each([{ stageName: '\t', unknown: 'keep opaque' }, ['malformed', 'shape'], 42
   expect(decryptNodeFields({ data: stored }, { id: root.memoryId, isEncrypted: true }).data).toEqual(state);
   expect(await db.$transaction(tx => encryptChatEngineStateWithKey(tx, root.id, key))).toBe(false);
 });
+
+it('security: real encryptMemory completes past malformed engine state and encrypts later content', async () => {
+  const { memoryMutations } = await import('../api/graphql/schema/resolvers.mutation.memory.js');
+  const key = generateDataKey();
+  await db.memory.update({ where: { id: root.memoryId }, data: { class: 'private' } });
+  await db.chatRootEngineState.create({ data: { chatRootNodeId: root.id, state: { stageName: '\t' } } });
+  const later = await db.node.create({ data: { id: generateId(), memoryId: root.memoryId, loc: 'zz:later', name: 'later', nodeType: 'note', content: 'SYNTHETIC-LATER-CONTENT' } });
+  await memoryMutations.encryptMemory(null, { memoryId: root.memoryId, dataKey: key.raw.toString('base64') }, ctx);
+  const state = (await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } })).state;
+  const after = await db.node.findUniqueOrThrow({ where: { id: later.id } });
+  expect(state).toHaveProperty('__enc');
+  expect(after.content).not.toContain('SYNTHETIC-LATER-CONTENT');
+  expect(decryptNodeFields({ content: after.content }, { id: root.memoryId, isEncrypted: true }).content).toBe('SYNTHETIC-LATER-CONTENT');
+  expect(decryptNodeFields({ data: state }, { id: root.memoryId, isEncrypted: true }).data).toEqual({ stageName: '\t' });
+  const before = await raw();
+  await expect(updateChatRootData(db, root, { id: root.memoryId, isEncrypted: true }, d => d)).rejects.toMatchObject({ extensions: { code: 'CHAT_STATE_INVALID' } });
+  expect(await raw()).toEqual(before);
+});
