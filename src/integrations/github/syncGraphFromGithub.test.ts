@@ -2726,7 +2726,7 @@ describe('#1477 Git placeholder marker', () => {
       id: reserved.id, loc: reserved.loc, name: reserved.name, tags: [],
       role: reserved.role, isRunnable: reserved.isRunnable,
       isPlaceholder: reserved.isPlaceholder, authorshipKind: null, authoredByTask: null, authoredByRevision: null, outgoingEdges: [],
-    });
+    }, undefined, false);
     await db.node.delete({ where: { id } });
     expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
     expect(await stored()).toMatchObject({ id, role: 'spec', content: null, isPlaceholder: true });

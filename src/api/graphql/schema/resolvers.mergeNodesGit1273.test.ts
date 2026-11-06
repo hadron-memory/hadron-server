@@ -64,7 +64,7 @@ beforeEach(async () => {
   targetId = target.id;
   localPath = join(paths.root, org.urn, 'mirror');
   mkdirSync(join(localPath, '.git'), { recursive: true });
-  mirror.writeNodeFile(localPath, await payload());
+  mirror.writeNodeFile(localPath, await payload(), undefined, false);
   originalFile = readFileSync(join(localPath, 'target.md'));
   warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
   jobs = [];
