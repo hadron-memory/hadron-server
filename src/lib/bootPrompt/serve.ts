@@ -98,7 +98,7 @@ export async function resolveServedBootPrompt(
 ): Promise<ServedBootPrompt> {
   if(t.appId){
     const app=await db.app.findUnique({where:{id:t.appId},select:{organizationId:true,ownerUserId:true}});
-    if(app && !(await personalOrgAgentLicenseHolds(db,app,t.agent.id))) throw bootPromptRefusal('BOOT_PROMPT_INSTALL_LICENSE_INACTIVE',{surface:t.surface,agentName:t.agent.name});
+    if(app && !(await personalOrgAgentLicenseHolds(db,app,t.agent.id))) throw bootPromptRefusal('BOOT_PROMPT_INSTALL_LICENSE_INACTIVE',{surface:t.surface,agentName:''});
   }
   if (page && t.workerId) {
     const own = page.workerPointer !== undefined
