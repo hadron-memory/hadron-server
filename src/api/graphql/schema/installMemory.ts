@@ -1,4 +1,5 @@
 import { lockAppInstallation } from '../../../lib/appInstallations.js';
+import { isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
 /**
  * #2044 (S7), cor:agt:040:06 — the LIFECYCLE of an App's INSTALL MEMORY: lazy
  * creation by the App's first customisation, and the lookup that creates
@@ -108,6 +109,11 @@ export async function withInstallMemory<T>(
       const installed = await lockAppInstallation(tx, app.id, agentId);
       if (!installed) {
         throw installError('AGENT_NOT_INSTALLED', 'That Agent is not installed in this App, so there is nothing to customise.');
+      }
+      // cor:agt:040:15 / ruling 0234: a derived witness proves membership,
+      // not the App holder's licence. Preserve the physical-row door unchanged.
+      if (installed.installationKind === 'DERIVED' && !(await isAgentInstalledAndLicensed(tx, app.id, agentId))) {
+        throw installError('AGENT_ORG_GRANT_REQUIRED', 'This organisation needs an active grant to customise that Agent.');
       }
       const memory = options.create === false
         ? await findInstallMemory(tx, app.id, agentId)
