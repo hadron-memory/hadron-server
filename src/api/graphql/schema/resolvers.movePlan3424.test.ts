@@ -242,4 +242,42 @@ describe('planNodeMove #3424', () => {
     expect(plan.linkWarnings).toMatchObject([{ target: 'outside', status: 'MISSING' }]);
   });
 
+  it('keeps historical MEMORY prefix aliases in plan/real warning agreement', async () => {
+    const dest = await db.memory.create({ data: { name: 'Destination', urn: 'plan3424:dest-new', class: 'knowledge', visibility: 'PUBLIC' } });
+    await createDbNode(db, { memoryId: memory.id, loc: 'old-link' });
+    const other = await createDbNode(db, { memoryId: dest.id, loc: 'new-target' });
+    await db.urnAlias.create({ data: { entityType: 'MEMORY', entityId: dest.id, urn: 'plan3424:dest-old', reason: 'RENAME' } });
+    await db.urnAlias.create({ data: { entityType: 'NODE', entityId: other.id, urn: 'plan3424:dest-old:old-link', reason: 'RENAME' } });
+    const root = await createDbNode(db, { memoryId: memory.id, loc: 'a', content: '[[old-link]]' });
+    const args = { sourceRef: root.id, targetMemoryRef: dest.id };
+    const plan = await M.planNodeMove(null, args, context());
+    const moved = await M.moveNode(null, args, context());
+    expect(moved.moveLinkWarnings).toMatchObject([{ target: 'old-link', status: 'RETARGETED' }]);
+    expect(plan.linkWarnings).toEqual(moved.moveLinkWarnings);
+  });
+
+  it.each(['key', 'sign-in'] as const)('plans install moves with a live %s credential and refuses its revocation', async credential => {
+    const org = await db.organization.create({ data: { name: 'Credential plan', urn: 'credential3424' } });
+    const agent = await db.agent.create({ data: { name: 'Agent', urn: 'credential3424:agent', organizationId: org.id } });
+    const { app } = await createDbAppWithKey(db, 'credential-plan', org.id);
+    await createDbAppAgent(db, app.id, agent.id);
+    await db.orgMember.create({ data: { organizationId: org.id, userId, role: 'ADMIN' } });
+    await createDbAppMember(db, app.id, userId, 'member');
+    const root = await M.createNode(null, { input: { install: { appRef: app.id, agentRef: agent.id }, loc: 'a', name: 'A' } }, context());
+    const mem = await db.memory.findUniqueOrThrow({ where: { id: root.memoryId } });
+    const key = await db.userApiKey.create({ data: { userId, keyHash: generateId(), keyPreview: '3424', oauthScopes: [] } });
+    const signIn = await db.signIn.create({ data: { userId, method: 'email', expiresAt: new Date(Date.now() + 60_000) } });
+    const ctx: Context = { ...context(), ...(credential === 'key' ? { apiKeyId: key.id } : { signInId: signIn.id }) };
+    const args = { sourceRef: root.id, targetUrn: `hrn:node:${mem.urn}:z` };
+    const before = await db.node.findUniqueOrThrow({ where: { id: root.id } });
+    const plan = await M.planNodeMove(null, args, ctx);
+    expect(plan.nodes).toMatchObject([{ id: root.id, newUrn: args.targetUrn }]);
+    expect(await db.node.findUniqueOrThrow({ where: { id: root.id } })).toEqual(before);
+    if (credential === 'key') await db.userApiKey.update({ where: { id: key.id }, data: { revokedAt: new Date() } });
+    else await db.signIn.update({ where: { id: signIn.id }, data: { endedAt: new Date(), endReason: 'revoked' } });
+    const real = await M.moveNode(null, args, ctx).catch((e: unknown) => e);
+    expect(real.extensions.code).toBe('FORBIDDEN');
+    await expect(M.planNodeMove(null, args, ctx)).rejects.toMatchObject({ message: real.message, extensions: real.extensions });
+  });
+
 });
