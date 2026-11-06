@@ -1258,6 +1258,12 @@
       "resolver": "src/api/graphql/schema/resolvers.types.ts::MemorySubscription",
       "target": "MemorySubscription"
     },
+    "MemoryConfig.defaultSkips": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.memoryConfig.ts::defaultSkips",
+      "gate": "canManageMemoryConfig",
+      "target": "MemoryConfigDefaultSkip"
+    },
     "MemoryConfig.rules": {
       "class": "parent-implies-child",
       "audience": "MemoryConfig is produced only by Memory.config (canManageMemoryConfig) and Query.memoryConfig (managedMemory, same gate); rules belong to that config",
@@ -1269,6 +1275,12 @@
       "audience": "the entry exists only in the applyMemoryConfigTemplate answer, which requires managedMemory and managedTemplate",
       "resolver": "src/api/graphql/schema/resolvers.memoryConfigApply.ts::managedMemory",
       "target": "NodeRoleRule"
+    },
+    "MemoryConfigDefaultSkip.sourceTemplate": {
+      "class": "parent-implies-child",
+      "audience": "a skip record is reachable only through MemoryConfig.defaultSkips, which re-asks canManageMemoryConfig itself; the template's id, name and deleted flag go to that memory's manager (the same projection as NodeRoleRule.sourceTemplate)",
+      "resolver": "src/api/graphql/schema/resolvers.memoryConfig.ts::defaultSkips",
+      "target": "NodeRoleRuleSourceTemplate"
     },
     "MemoryConfigBulkApplyEntry.error": {
       "class": "parent-implies-child",

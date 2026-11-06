@@ -1,3 +1,4 @@
+import { openThreadsWhere } from '../../../lib/comments/openThreads.js';
 import { admitOperationRate } from '../../../lib/rateLimit/index.js';
 import { transportRateIdentity } from '../../../lib/rateLimit/identity.js';
 import { normalizeFindNodesPaging } from '../../../lib/findNodesPaging.js';
@@ -141,6 +142,7 @@ export interface FindNodesArgs {
     objectType?: string | null;
     tags?: string[] | null;
     isRunnable?: boolean | null;
+    hasOpenThreads?: boolean | null;
     role?: string | null;
     locPrefix?: string | null;
     /** #2832 — direct children of this loc only ("" = top level); null/absent = no filter. */
@@ -166,6 +168,7 @@ export interface FindNodesArgs {
 }
 
 type AppNodesFilter = {
+    hasOpenThreads?: boolean | null;
     // Memory-scope fields — NOT supported by appNodes (the App's scope is
     // authoritative). Present only so we can reject them explicitly.
     memoryIds?: string[] | null;
@@ -205,6 +208,9 @@ async function appNodesRead(ctx: Context, appRef: string, filter: AppNodesFilter
   // computation, shared with appMemoryScope: a second copy would drift.
   // #3113 — validated before the scope, so an unknown or denied App refuses a bad list the same way.
   // #2832: reject an unsupported narrowing filter before any App lookup, in both list forms.
+  if (filter?.hasOpenThreads != null) {
+    throw new GraphQLError('appNodes: filter.hasOpenThreads is not supported. Use findNodes to filter open threads.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
   if (filter?.childrenOf != null) {
     throw new GraphQLError('appNodes: filter.childrenOf is not supported. Use findNodes to read direct children.', { extensions: { code: 'BAD_USER_INPUT' } });
   }
@@ -1522,6 +1528,8 @@ export const nodeQueries = {
       const inheritance = await effectiveScope(ctx.db, scopeIds);
       scopeIds = inheritance.memoryIds;
       const inheritanceExcluded = new Set(inheritance.excludeNodeIds);
+      const syntheticCommentMemoryIds = [...inheritance.inheritedFrom.keys()];
+      const threadWhere = openThreadsWhere(f.hasOpenThreads, syntheticCommentMemoryIds);
 
       // Structured node-attribute filters (cor:api:090:02), AND-combined. Applied
       // to BOTH the no-query list path and the ranked-query path (via re-fetch),
@@ -1565,6 +1573,7 @@ export const nodeQueries = {
           ...(f.approvalState != null || f.minted != null ? [{ nodeType: { not: COMMENT_NODE_TYPE } }] : []),
           ...(scopeWhere ? [scopeWhere] : []),
           ...(inheritance.excludeNodeIds.length > 0 ? [{ id: { notIn: inheritance.excludeNodeIds } }] : []),
+          ...(threadWhere ? [threadWhere] : []),
         ],
       };
       const nodeInclude = {
@@ -1589,6 +1598,7 @@ export const nodeQueries = {
         nodeTypes,
         objectType: f.objectType ?? null,
         isRunnable: f.isRunnable ?? null,
+        hasOpenThreads: f.hasOpenThreads ?? null, syntheticCommentMemoryIds,
         role: f.role ?? null,
         tags: f.tags ?? null,
         locPrefix: f.locPrefix ?? null,
@@ -1633,8 +1643,8 @@ export const nodeQueries = {
         // → run the filtered browse in SQL (ordered ids), then hydrate. The plain
         // browse (no where, no property sort) keeps the Prisma path below.
         // #2832: the direct-children filter is a SQL expression Prisma cannot write, so it takes this path too.
-        // Order A (pending Holger, rulings item 7): a children read is a sibling list, so unless the caller names a sort it
-        // comes in cor:dmo:020:01 order (Node.seq first, then loc). A different ruling changes only this default.
+        // cor:api:090:02, ruling 0121 (A): a children read is a sibling list, so unless the caller names a sort it
+        // comes in cor:dmo:020:01 order (Node.seq first, then loc).
         if (f.where != null || sortProperty != null || f.childrenOf != null) {
           const browseSort: BrowseSort | undefined =
             sort === 'seq' ? 'seq' : sort === 'updatedAt' ? 'updatedAt' : (sort == null || sort === 'relevance') && f.childrenOf != null ? 'seq' : undefined;
@@ -1692,7 +1702,7 @@ export const nodeQueries = {
       // A selective structured filter can drop many ranked candidates, so over-fetch
       // from the retrieval layer to keep the page full after post-filtering + offset.
       const hasStructuredFilters = !!(
-        f.nodeType || nodeTypes || f.objectType || f.isRunnable != null || f.role != null || f.tags?.length || f.locPrefix || f.childrenOf != null ||
+        f.nodeType || nodeTypes || f.objectType || f.isRunnable != null || f.hasOpenThreads != null || f.role != null || f.tags?.length || f.locPrefix || f.childrenOf != null ||
         f.createdBy || f.updatedAfter || f.updatedBefore || f.includeDeleted || f.where || f.approvalState || f.minted != null
       );
       const page = off + finalLimit;
@@ -1823,7 +1833,7 @@ export const nodeQueries = {
             // governed edge must not pull it into a content search, or its
             // target into a comments-only one (cor:dmo:110:08).
             const nRows = await ctx.db.node.findMany({
-              where: { id: { in: neighbourIds }, memoryId: { in: scopeIds }, deletedAt: null, ...(scopeWhere ? { AND: [scopeWhere] } : {}) },
+              where: { id: { in: neighbourIds }, memoryId: { in: scopeIds }, deletedAt: null, ...((scopeWhere || threadWhere) ? { AND: [...(scopeWhere ? [scopeWhere] : []), ...(threadWhere ? [threadWhere] : [])] } : {}) },
               include: nodeInclude,
             });
             await decryptNodesBatch(ctx.db, nRows);
@@ -1882,7 +1892,7 @@ export const nodeQueries = {
             ctx.db, pageRows.map((n) => n.id), expandDepth, { memoryIds: scopeIds },
           )).filter((id) => !shown.has(id) && !inheritanceExcluded.has(id));
           if (neighbourIds.length > 0) {
-            const nRows = await ctx.db.node.findMany({ where: { id: { in: neighbourIds }, memoryId: { in: scopeIds }, deletedAt: null, ...(scopeWhere ? { AND: [scopeWhere] } : {}) }, include: nodeInclude }); // #1608
+            const nRows = await ctx.db.node.findMany({ where: { id: { in: neighbourIds }, memoryId: { in: scopeIds }, deletedAt: null, ...((scopeWhere || threadWhere) ? { AND: [...(scopeWhere ? [scopeWhere] : []), ...(threadWhere ? [threadWhere] : [])] } : {}) }, include: nodeInclude }); // #1608
             await decryptNodesBatch(ctx.db, nRows);
             const nById = new Map(nRows.map((n) => [n.id, n]));
             for (const id of neighbourIds) { const n = nById.get(id); if (n) hits.push({ node: n, score: null, vector: null }); }
@@ -2043,7 +2053,7 @@ export const nodeQueries = {
         // review, Codex): filter before paging so a floor drops sub-threshold
         // chunks rather than silently returning them.
         const rawChunks = await widenVectorWindow((limit, onWindow) =>
-          provider.vectorSearchChunks({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit, onWindow, contentScope }),
+          provider.vectorSearchChunks({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit, onWindow, contentScope, hasOpenThreads: f.hasOpenThreads, syntheticCommentMemoryIds }),
         );
         const scoredChunks = scoreFloor == null ? rawChunks : rawChunks.filter((c) => c.score >= scoreFloor);
         const candidateParentIds = [...new Set(scoredChunks.map((c) => c.nodeId))];
@@ -2121,7 +2131,7 @@ export const nodeQueries = {
       }
 
       const vecHits = await widenVectorWindow((limit, onWindow) =>
-        provider.vectorSearch({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit, onWindow, contentScope }),
+        provider.vectorSearch({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit, onWindow, contentScope, hasOpenThreads: f.hasOpenThreads, syntheticCommentMemoryIds }),
       );
 
       if (effectiveMode === 'vector') {

@@ -99,6 +99,11 @@ function triggerFilter(input: { triggerKind?: string | null; triggerId?: string 
   if (input.triggerId != null && input.triggerKind == null) {
     throw new GraphQLError('triggerKind is required with triggerId.', { extensions: { code: 'BAD_USER_INPUT' } });
   }
+  // #3403: bounded NUL-only hardening, after final grant admission at the
+  // caller. Other control characters keep their existing filter semantics.
+  if (input.triggerId?.includes('\u0000')) {
+    throw new GraphQLError('triggerId must not contain U+0000.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
   return {
     ...(input.triggerKind != null ? { triggerKind: input.triggerKind } : {}),
     ...(input.triggerId != null ? { triggerId: input.triggerId } : {}),

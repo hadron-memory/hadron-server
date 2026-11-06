@@ -1,3 +1,4 @@
+import { openThreadsSql } from '../comments/openThreads.js';
 /**
  * Postgres implementation of the node retrieval seam (cor:rag:010:02).
  *
@@ -75,6 +76,8 @@ function filterClause(f: NodeSqlFilter | undefined, bind: (v: unknown) => string
   // #1607 (cor:dmo:110:06) — approval and mint status sets never contain comments.
   if (approval || flt.minted != null) parts.push("node_type <> 'comment'");
   // #1608 (cor:dmo:110:08) — content, comments or both; CONTENT by default.
+  const threads = openThreadsSql(flt.hasOpenThreads, bind, 'nodes.id', 'nodes.memory_id', flt.syntheticCommentMemoryIds);
+  if (threads) parts.push(threads);
   const scope = contentScopeSql(effectiveContentScope(flt));
   if (scope) parts.push(scope);
   return parts.length ? ' AND ' + parts.join(' AND ') : '';
@@ -290,6 +293,7 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
       onWindow: opts.onWindow,
       candidateNodeIds: opts.candidateNodeIds,
       abstractOnly: opts.abstractOnly,
+      hasOpenThreads: opts.hasOpenThreads, syntheticCommentMemoryIds: opts.syntheticCommentMemoryIds,
       scope: opts.contentScope ?? 'CONTENT', // #1608: content by default for every caller
     });
   },
@@ -300,6 +304,7 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
       queryEmbedding: opts.queryEmbedding,
       limit: opts.limit,
       onWindow: opts.onWindow,
+      hasOpenThreads: opts.hasOpenThreads, syntheticCommentMemoryIds: opts.syntheticCommentMemoryIds,
       scope: opts.contentScope ?? 'CONTENT', // #1608: content by default for every caller
     });
   },

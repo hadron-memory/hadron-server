@@ -341,7 +341,7 @@ describe('#2190 — over the real GraphQL HTTP boundary', () => {
     expect(rows.filter((r) => r.viewerCanWrite)).toEqual([]);
 
     const created = await post(token, 'mutation($i: CreateNodeInput!) { createNode(input: $i) { id } }',
-      { i: { memoryId: writable[0]!.memoryId, loc: `probe:imp-${n}`, name: 'probe' } }, 500);
+      { i: { memoryId: writable[0]!.memoryId, loc: `probe:imp-${n}`, name: 'probe' } }, 403);
     expect(created.errors?.[0]?.extensions?.code).toBe('IMPERSONATION_READ_ONLY');
     expect(await db.node.count({ where: { memoryId: writable[0]!.memoryId, loc: `probe:imp-${n}` } })).toBe(0);
   });

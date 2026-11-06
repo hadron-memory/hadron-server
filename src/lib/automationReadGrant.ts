@@ -21,6 +21,8 @@ import { isAgentInstalled } from './appAgent.js';
 import { grantCoversLoc } from './appWriteGrant.js';
 import { LINK_CAP_MEMORY_SELECT, independentReach, type LinkCapMemory } from './auth/agentMemoryLinkCap.js';
 
+export type ReadGrantPrincipal = Pick<AuthContext, 'userId' | 'appId'>;
+
 export type ReadGrantTriggerKind = 'SCHEDULE' | 'WEBHOOK';
 export interface RootTrigger { kind: ReadGrantTriggerKind; id: string }
 
@@ -144,7 +146,7 @@ export async function readGrantTargetRefusal(
  */
 export async function runHoldsReadGrant(
   db: PrismaClient,
-  principal: Pick<AuthContext, 'userId' | 'appId'>,
+  principal: ReadGrantPrincipal,
   runId: string,
   memoryId: string,
   loc: string,
@@ -168,5 +170,5 @@ export async function runHoldsReadGrant(
   if (!principal.userId) return true;
   const user = await db.user.findFirst({ where: { id: principal.userId, deletedAt: null }, select: { id: true, roles: true } });
   if (!user) return false;
-  return canReadMemory(db, { userId: user.id, roles: user.roles } as AuthContext, memoryId);
+  return canReadMemory(db, { userId: user.id, roles: user.roles }, memoryId);
 }

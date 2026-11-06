@@ -95,6 +95,7 @@ import { agentTaskMatchingQueries, agentTaskMatchingFieldResolvers } from './res
 import { memoryConfigMutations, memoryConfigQueries, memoryConfigFieldResolvers } from './resolvers.memoryConfig.js';
 import { memoryConfigApplyMutations } from './resolvers.memoryConfigApply.js';
 import { nodeApprovalFieldResolvers, nodeApprovalMutations, nodeApprovalQueries } from './resolvers.nodeApproval.js';
+import { contentValidationReportMutations } from './resolvers.contentValidationReport.js';
 import { nodeAttributionFieldResolvers } from './resolvers.nodeAttribution.js';
 import { agentExtendedByFieldResolvers } from './resolvers.agentExtendedBy.js';
 import { agentOfferReadinessFieldResolvers } from './resolvers.agentOfferReadiness.js';
@@ -177,6 +178,7 @@ export const resolvers = {
   NodeApproval: nodeApprovalFieldResolvers.NodeApproval,
   NodeMintStatus: nodeApprovalFieldResolvers.NodeMintStatus,
   MemoryConfig: memoryConfigFieldResolvers.MemoryConfig,
+  MemoryConfigDefaultSkip: memoryConfigFieldResolvers.MemoryConfigDefaultSkip,
   NodeRoleRule: memoryConfigFieldResolvers.NodeRoleRule,
   MemoryConfigTemplate: memoryConfigTemplateFieldResolvers.MemoryConfigTemplate,
   MemoryConfigTemplateRule: memoryConfigTemplateFieldResolvers.MemoryConfigTemplateRule,
@@ -295,6 +297,7 @@ export const resolvers = {
     ...specCorpusRenumberMutations,
     ...specCorpusMintMutations,
     ...nodeApprovalMutations,
+    ...contentValidationReportMutations,
     ...signingMutations,
     ...commentMutations,
     ...decisionMutations,

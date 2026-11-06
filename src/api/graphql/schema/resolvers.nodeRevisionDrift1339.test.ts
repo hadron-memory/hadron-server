@@ -293,7 +293,7 @@ describe('#1339 review round 5', () => {
 });
 
 describe('#1339 review round 6', () => {
-  it('Node.revision never hands a stale parent the number of a newer edge-only write (@codex P1)', async () => {
+  it('edge-only writes keep the revision; stale parents still cannot acquire a later tracked revision (#3497)', async () => {
     const anchor = await db.node.create({ data: { id: generateId(), memoryId, loc: 'drift:anchor', name: 'a' } });
     const node = await db.node.create({ data: { id: generateId(), memoryId, loc: 'drift:edgy', name: 'n', content: 'x' } });
     const parent = await db.node.findUniqueOrThrow({ where: { id: node.id } }); // revision 1, no edges
@@ -302,9 +302,22 @@ describe('#1339 review round 6', () => {
       ctx(),
       'update', { authoring: attestedAuthoring(null) },
     );
-    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).revSeq).toBe(2);
-    // The parent's fields still match (edges are not tracked fields), but its
-    // edges are stale: its own number is the only self-consistent answer.
+    // Rulings0149+0198 supersede the old edge-consumes-revision premise:
+    // edges apply but are deliberately outside the node's revision state.
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).revSeq).toBe(1);
+    expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(0);
+    expect(await db.edge.findMany({
+      where: { sourceId: node.id, deletedAt: null },
+      select: { targetId: true, name: true },
+    })).toEqual([{ targetId: anchor.id, name: 'links-to' }]);
+    expect(await resolvers.Node.revision(parent as never, {}, ctx())).toBe(1);
+    // Retain the original stale-parent safety check for an actual tracked edit.
+    await writeNodeCore(
+      { memoryId, loc: node.loc, content: 'new tracked state' },
+      ctx(), 'update', { authoring: attestedAuthoring(null) },
+    );
+    const current = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    expect(await resolvers.Node.revision(current as never, {}, ctx())).toBe(2);
     expect(await resolvers.Node.revision(parent as never, {}, ctx())).toBe(1);
   });
 });

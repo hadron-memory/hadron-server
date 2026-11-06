@@ -170,6 +170,7 @@ describe('raw-SQL Node writers: the covered and the intentionally exempt (#2176 
   // Every `UPDATE nodes` in src/ bypasses the central stamp. Each listed one touches no authored field
   // (or is a delete), so leaving attribution alone is correct. A new one must be added HERE, with a reason.
   const EXEMPT: Record<string, string> = {
+    'src/lib/chatRootCounters.ts': '#3496 strips operational counter keys only, preserves authored fields and editor attribution, and conditionally refreshes an already-current fingerprint',
     'src/services/embedding/enqueue.ts': 'internal4 backfill/retry change embedding obligation metadata only, never authored fields or attribution',
     'src/services/embedding/obligation.ts': 'internal4 batch reset changes embedding obligation metadata only, never authored fields or attribution',
     'src/services/embedding/vectors.ts': '#887 vector replacement/purges update truncation/work-token metadata only, never authored fields or attribution',

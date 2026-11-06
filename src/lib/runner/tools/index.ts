@@ -20,6 +20,7 @@ import { DRIVE_TOOLS } from './driveTools.js';
 import { TASK_TOOLS } from './taskTools.js';
 import { TEAM_CHAT_TOOLS } from './teamChatTools.js';
 import { GITHUB_TOOLS } from './githubTools.js';
+import { CONTENT_VALIDATION_TOOLS } from './contentValidationTools.js';
 
 export { AuthorFailError };
 export { hadronReadNode, hadronCreateNode, hadronUpdateNode } from './nodeTools.js';
@@ -36,6 +37,7 @@ export { hadronTaskCreate, hadronTaskUntrackedList, hadronTaskUntrackedClaim } f
 export { teamChatRead } from './teamChatTools.js';
 export { hadronTeamSnapshot } from './teamSnapshotTools.js';
 export { githubIssueSnapshot } from './githubTools.js';
+export { hadronRecordContentValidation } from './contentValidationTools.js';
 export type { RunToolDef, RunToolContext };
 
 /** The author's printf — lands on the hop's trail element (D-TL-2). */
@@ -97,6 +99,7 @@ const REGISTRY = new Map<string, RunToolDef>(
     ...TEAM_CHAT_TOOLS,
     ...GITHUB_TOOLS,
     ...TEAM_SNAPSHOT_TOOLS,
+    ...CONTENT_VALIDATION_TOOLS,
   ].map((t) => [t.name, t]),
 );
 

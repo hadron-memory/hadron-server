@@ -243,6 +243,18 @@ export const typeDefs = `#graphql
     #2999 — runnability is tri-state. true returns only runnable rows; false returns only rows explicitly marked not runnable. A row never marked (NULL) matches neither, and only an omitted filter returns it. (hrn:node:hadronmemory.com:specs:cor:api:060:04)
     """
     isRunnable: Boolean
+    """
+    #3494 — true selects nodes with a live OPEN top-level comment; false selects nodes with none.
+    Deleted roots and deleted-with-replies stubs never count (hrn:node:hadronmemory.com:specs:cor:dmo:110:05 / hrn:node:hadronmemory.com:specs:cor:dmo:110:10).
+    Null or omitted leaves results unchanged. AND-combined before ranking, counts and paging in every
+    findNodes mode; it grants no access. Inherited projections have a zero summary: true
+    excludes them, false includes them. Concealed install-write responses are not search projections.
+    Unscored expansion context adds only this thread check to its existing memory/deletion/content-scope
+    checks; other filters keep their candidate-only behavior there. Counts exclude appended context.
+    appNodes/appNodesPage refuse either boolean with BAD_USER_INPUT.
+    Proposed addition built on the #3494 gate to hrn:node:hadronmemory.com:specs:cor:api:090:02; comment result scope stays hrn:node:hadronmemory.com:specs:cor:dmo:110:08.
+    """
+    hasOpenThreads: Boolean
     "#1322 — role-family filter. 'spec' matches 'spec' and 'spec.*' on a dot boundary, never 'special' / 'specification'."
     role: String
     locPrefix: String
@@ -2084,12 +2096,26 @@ export const typeDefs = `#graphql
 
   enum NodeContentValidationOutcome { PASS FAIL ERROR }
   enum NodeContentValidationState { UNVALIDATED STALE PASS FAIL ERROR }
+  "#1332 (hrn:node:hadronmemory.com:specs:cor:dmo:160:01) — CHECKED: R's recorded author was compared with the reporter and differs, never a claim of independence. AUTHOR_UNKNOWN: there was nothing recorded to compare."
+  enum NodeContentValidationAuthorCheck { CHECKED AUTHOR_UNKNOWN }
   type NodeContentValidationReport {
     nodeRevision: Int!
     validationTaskRef: String
     validationTaskRevision: Int
     outcome: NodeContentValidationOutcome!
     reportedAt: DateTime!
+    "#1332 — the author check made when the report was recorded. Null on a report recorded before #1332."
+    authorCheck: NodeContentValidationAuthorCheck
+  }
+  "#1332 — the answer of recordNodeContentValidationReport."
+  type NodeContentValidationReportReceipt {
+    "The node the report is about."
+    nodeId: ID!
+    "True when an earlier report with the same runId, from the same reporter, for the same node revision and task revision, was returned and nothing was written."
+    replayed: Boolean!
+    report: NodeContentValidationReport!
+    "The validation state of the node's current revision after this call. A report for an older revision leaves it UNVALIDATED or STALE."
+    state: NodeContentValidationState!
   }
   type NodeContentValidationStatus {
     state: NodeContentValidationState!
@@ -2890,6 +2916,8 @@ export const typeDefs = `#graphql
 
   "#1606 — the trust cue (hrn:node:hadronmemory.com:specs:cor:dmo:110:07). Counts live threads; zeros on a memory that cannot hold comments."
   type CommentSummary {
+    "Earliest creation time of a live open root comment, or null. Replies, edits and reopen times do not move it. Null on synthetic inherited/install summaries. Proposed addition built on the #3494 gate (hrn:node:hadronmemory.com:specs:cor:api:090:02)."
+    oldestOpenThreadAt: DateTime
     openThreads: Int!
     resolvedThreads: Int!
     "Every live comment, top-level and replies, deleted stubs included."
@@ -3861,6 +3889,24 @@ export const typeDefs = `#graphql
   }
 
   """
+  What the credential presented on THIS request came to (hrn:node:hadronmemory.com:specs:cor:aut:010:05).
+  """
+  enum AuthenticationStatus {
+    """
+    The credential resolved a user or an App.
+    """
+    AUTHENTICATED
+    """
+    A credential was presented and did not authenticate. One answer for every cause, with no reason.
+    """
+    REFUSED
+    """
+    No credential was presented.
+    """
+    ANONYMOUS
+  }
+
+  """
   The resolved principal for the credential presented on THIS request
   (issue #562). Exposes the AuthContext the server already resolves per
   request (cor:aut:020:02) read-only, so any surface (CLI, portal) can
@@ -4301,6 +4347,8 @@ export const typeDefs = `#graphql
     memoryId: ID!
     "Role-ascending."
     rules: [NodeRoleRule!]!
+    "#3426 — org-default rules skipped when this memory was created (a reference deleted, unreadable to the organization or not a task). Managers only, like the config. Proposed addition to hrn:node:hadronmemory.com:specs:cor:api:290."
+    defaultSkips: [MemoryConfigDefaultSkip!]!
     createdAt: DateTime
     createdBy: ID
     updatedAt: DateTime
@@ -4387,6 +4435,22 @@ export const typeDefs = `#graphql
     deleted: Boolean!
   }
 
+  """
+  #3426 — one org-default rule skipped at memory creation. Stores no task URN and no state: \`ref\` and \`refState\` are the
+  template rule's reference as the CALLING manager sees it now. Null/BROKEN once the template or rule is gone.
+  """
+  type MemoryConfigDefaultSkip {
+    role: String!
+    "authorTask, validationTask or descriptionNode."
+    field: String!
+    "REFERENCE_UNAVAILABLE: deleted, unreadable to the organization, or not a task."
+    reason: String!
+    sourceTemplate: NodeRoleRuleSourceTemplate
+    ref: String
+    refState: NodeRoleRuleRefState!
+    createdAt: DateTime!
+  }
+
   "#1325 — a non-fatal finding about a saved rule. Never changes the mutation's success."
   type MemoryConfigWarning {
     code: String!
@@ -4418,6 +4482,8 @@ export const typeDefs = `#graphql
     description: String
     "Applied as locked rules (#1334)."
     required: Boolean!
+    "#3426 — applied to every new org knowledge/group memory at creation. Always false for a non-organization owner. Proposed addition to hrn:node:hadronmemory.com:specs:cor:api:290."
+    orgDefault: Boolean!
     ownerType: MemoryConfigTemplateOwnerType!
     "ID of the owning organization, user or App; null for the server."
     ownerId: ID
@@ -4467,6 +4533,15 @@ export const typeDefs = `#graphql
     name: String!
     description: String
     required: Boolean
+    """
+    #3426 — an ORGANIZATION-owned template applied to every new org \`knowledge\` or \`group\` memory at its creation
+    (\`createMemory\` only; never clone, extract, App, install, agent or chat creation). A starting configuration, not a
+    boundary. User-, App- and server-owned templates refuse true (BAD_USER_INPUT, reason ORG_DEFAULT_ORG_ONLY).
+    At most 10 live defaults per organization (ORG_DEFAULT_LIMIT). Setting it true validates every reference as readable
+    to the ORGANIZATION as well as the saver (NODE_NOT_FOUND otherwise); clearing it never validates.
+    Proposed addition built on the #3426 gate to hrn:node:hadronmemory.com:specs:cor:api:290.
+    """
+    orgDefault: Boolean
     "Each role at most once (NODE_ROLE_RULE_EXISTS)."
     rules: [CreateNodeRoleRuleInput!]
   }
@@ -4480,6 +4555,15 @@ export const typeDefs = `#graphql
     name: String
     description: String
     required: Boolean
+    """
+    #3426 — an ORGANIZATION-owned template applied to every new org \`knowledge\` or \`group\` memory at its creation
+    (\`createMemory\` only; never clone, extract, App, install, agent or chat creation). A starting configuration, not a
+    boundary. User-, App- and server-owned templates refuse true (BAD_USER_INPUT, reason ORG_DEFAULT_ORG_ONLY).
+    At most 10 live defaults per organization (ORG_DEFAULT_LIMIT). Setting it true validates every reference as readable
+    to the ORGANIZATION as well as the saver (NODE_NOT_FOUND otherwise); clearing it never validates.
+    Proposed addition built on the #3426 gate to hrn:node:hadronmemory.com:specs:cor:api:290.
+    """
+    orgDefault: Boolean
     rules: [CreateNodeRoleRuleInput!]
   }
 
@@ -6269,10 +6353,17 @@ export const typeDefs = `#graphql
   and that task's current revision (Node.revSeq). The server compares both with
   the rule and refuses a mismatch: AUTHORING_ATTESTATION_MISSING,
   AUTHORING_ATTESTATION_WRONG_TASK, AUTHORING_ATTESTATION_STALE, or
-  AUTHOR_TASK_BROKEN when the rule's task is gone. A match records a TASK stamp.
-  This does not prove the task was read or followed. With no applicable rule
-  the claim is ignored. People in the portal are exempt, derived from their
-  sign-in; no client field selects that.
+  AUTHOR_TASK_BROKEN when the rule's task is gone, unusable or unreadable to the
+  writer, whatever the claim. A match records a TASK stamp. This does not prove
+  the task was read or followed. With no applicable rule the claim is ignored.
+  People in the portal are exempt, derived from their sign-in; no client field
+  selects that.
+
+  #1329 — each refusal carries extensions taskAccess, task, taskId, taskRevision
+  and load. READABLE gives the task's URN (null when it has none that resolves),
+  id, current revision and the node read per surface. UNAVAILABLE gives nulls and
+  is the same for an unreadable task and a missing one: an owner must fix access
+  or the rule.
   """
   input AuthoredWithInput {
     "The task's id or canonical URN."
@@ -9130,6 +9221,16 @@ export const typeDefs = `#graphql
     authContext: AuthContext
 
     """
+    Whether the credential THIS request presented authenticated
+    (hrn:node:hadronmemory.com:specs:cor:aut:010:05). REFUSED is the identical answer, in status and body for the same
+    operation, for every cause: garbage, expired, wrongly signed, revoked, from an ended sign-in, for a deleted user, or
+    an ended impersonation. Timing is an accepted limit. It takes no argument, so it cannot test a token the caller does
+    not hold. A credential check that could not complete is the ordinary internal error for this field, never REFUSED;
+    every other field answers as before. me and authContext are unchanged (null for a refused credential).
+    """
+    authenticationStatus: AuthenticationStatus!
+
+    """
     One admin-impersonation audit record by id. Resolvable to the session's
     admin, an org ADMIN/OWNER of its org, or a platform admin; anyone else
     gets null (denied and missing are indistinguishable).
@@ -11603,6 +11704,23 @@ export const typeDefs = `#graphql
     cached session key.
     """
     approveNode(nodeRef: ID!, revision: Int): NodeApprovalReceipt!
+    """
+    #1332 (hrn:node:hadronmemory.com:specs:cor:dmo:160:01) — record the result of running the node's validation task on revision nodeRevision of the node. Advisory: it never edits the node or blocks a write, and a report for an older revision is stored as history without changing the current revision's state. validationTaskRef is the task the node's role rule names NOW (its id or node URN; read it from NodeRoleRule.validationTask) and validationTaskRevision the task revision that ran.
+
+    Any writer of the node's memory may record one except the author of nodeRevision, decided from its authorship stamp: for HUMAN, that person acting as themselves through any credential is refused (a worker they hold may report); for TASK, a headless run whose entry task is the author task is refused (another run is CHECKED; any other caller is AUTHOR_UNKNOWN); with no stamp every writer is AUTHOR_UNKNOWN. The reporter is derived by the server (a run, a worker session, a person by user id, or an App key), never from the request.
+
+    runId (1-200 characters) makes a retry idempotent: within this node in this memory, the same runId from the same reporter for the same nodeRevision and task revision returns the first report (replayed: true); any other use of it is CONTENT_VALIDATION_RUN_ID_CONFLICT, which carries nothing from the stored report.
+
+    Refusals, in order, each writing nothing: NODE_NOT_FOUND (unreadable or missing memory, missing node); FORBIDDEN (not a writer); SESSION_NOT_BOUND (the request named a session that is not one of the caller's open sessions); CONTENT_VALIDATION_REPORTER_UNKNOWN; CONTENT_VALIDATION_NODE_REVISION_INVALID (newer than the current revision); CONTENT_VALIDATION_NOT_CONFIGURED (no validation task for the node's role); CONTENT_VALIDATION_WRONG_TASK for EVERY report from a caller who cannot read a validation task the rule names, whatever task and revision it names and whether or not that task is broken, so the later checks never run for that caller (a reference that no longer resolves, the task or its memory deleted, is TASK_BROKEN for every caller); CONTENT_VALIDATION_TASK_BROKEN; CONTENT_VALIDATION_WRONG_TASK (a task other than the one the node's rule names); CONTENT_VALIDATION_TASK_REVISION_INVALID (newer than the task's current revision); CONTENT_VALIDATION_REPORTER_IS_AUTHOR; CONTENT_VALIDATION_RUN_ID_CONFLICT. BAD_USER_INPUT for a malformed argument, and a retryable CONFLICT if the node changed during the call.
+    """
+    recordNodeContentValidationReport(
+      nodeRef: ID!
+      nodeRevision: Int!
+      validationTaskRef: ID!
+      validationTaskRevision: Int!
+      outcome: NodeContentValidationOutcome!
+      runId: String
+    ): NodeContentValidationReportReceipt!
     """
     #1632 (hrn:node:hadronmemory.com:specs:cor:dmo:130:03) — ask for a node's current content to be signed. Any reader of the node may ask, agents included; agents never sign. expectedRevision, when given, must still be current (REVISION_MISMATCH). signerRef names one signer (a user id); omitted, any writer of the memory may sign. Refusals: NODE_NOT_FOUND, ENCRYPTED_MEMORY_NOT_APPLICABLE, and (hrn:node:hadronmemory.com:specs:cor:dmo:130:02, Holger #10430) COMMENT_NOT_SIGNABLE, NODE_IS_PLACEHOLDER, REVISION_MISMATCH, SIGNER_NOT_FOUND, and (Holger #11094, #1904) SIGNER_NOT_A_WRITER when the named signer may not write the node's memory (checked again when they sign or decline). No call takes an assertion: the signer signs on the server-hosted ceremony page (S2b-2).
     """
