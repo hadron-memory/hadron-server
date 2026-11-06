@@ -1,3 +1,4 @@
+import { SYNC_NOT_ATTEMPTED, syncNotAttemptedMessage } from '../integrations/github/syncNotAttempted.js';
 import { MCP_WORKER_BINDING_UNSUPPORTED, offTeamTool } from './disabledTools.js';
 import { registerAutomationTeamSnapshotGrantTools } from './automationTeamSnapshotGrantTools.js';
 import { appendDeliveryPending } from '../lib/tickers/deliveryPending.js';
@@ -252,6 +253,10 @@ import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.
 // reconnect recovery admits exactly whom startSession admitted, rather than a
 // narrower member-row copy that would drift from it.
 import { resolveNodeContent } from '../lib/includes/resolveNodeContent.js';
+import {
+  CONTENT_RESOLUTION_LIMIT_EXCEEDED, isContentResolutionLimitError, resolutionLimitPhrase,
+  type ResolutionLimit,
+} from '../lib/includes/resolutionBudget.js';
 import { checkNodeTypesFilter, NodeTypesFilterError } from '../lib/retrieval/nodeTypeList.js';
 import { lintWarningPageForNodeId, renderLintWarnings } from '../lib/bootPromptLint.js';
 
@@ -5643,6 +5648,8 @@ export function createMcpServerInstance(
       // per-node parity with hadron_get_node).
       const blocks: string[] = [];
       const omitted: string[] = [];
+      // hadron-internal#40: nodes whose resolved read is over a resolution limit, with the limit (never partial text).
+      const refused: Array<{ urn: string; limit: ResolutionLimit }> = [];
       const readEvents: UsageNodeRef[] = [];
       let bytes = 0;
       let truncated = false;
@@ -5721,9 +5728,17 @@ export function createMcpServerInstance(
         // fall back to the single renderer's current provenance reads.
         const provenance = n.revSeq === metadata.revSeq ? batchProvenance : undefined;
         const lockState = mcpDecryptOrMark(n); // spec 041 — same posture as hadron_get_node
-        const served = lockState === 'locked' || raw
-          ? n
-          : { ...n, content: await resolveNodeContent(batchReadCtx, n, { raw }) };
+        let served = n;
+        if (lockState !== 'locked' && !raw) {
+          try {
+            served = { ...n, content: await resolveNodeContent(batchReadCtx, n, { raw }) };
+          } catch (e) {
+            // A per-node, loud reason (cor:api:040:02); the other nodes still return.
+            if (!isContentResolutionLimitError(e)) throw e;
+            refused.push({ urn: await nodeUrn(n.loc, n.memoryId, memoryUrnOf), limit: e.limit });
+            continue;
+          }
+        }
         const projection = await renderNodeReadProjection(served, scope, {
           locked: lockState === 'locked',
           encryptedMemory: lockState !== 'plaintext',
@@ -5756,6 +5771,7 @@ export function createMcpServerInstance(
 
       const headerParts = [`returned ${blocks.length} node(s)`];
       if (unavailable.length) headerParts.push(`${unavailable.length} unavailable`);
+      if (refused.length) headerParts.push(`${refused.length} refused`);
       if (truncated) headerParts.push(`truncated: response-size cap reached, ${omitted.length} omitted`);
       const parts: string[] = [`Batch read — ${headerParts.join('; ')}.`];
       if (blocks.length) {
@@ -5764,6 +5780,13 @@ export function createMcpServerInstance(
       if (unavailable.length) {
         parts.push(
           `Unavailable (denied or not found):\n${unavailable.map((u) => `  - ${u}`).join('\n')}`,
+        );
+      }
+      if (refused.length) {
+        parts.push(
+          `Refused (${CONTENT_RESOLUTION_LIMIT_EXCEEDED}: over a content resolution limit; nothing partial returned — read it with raw: true for the stored text):\n${refused
+            .map((r) => `  - ${r.urn} (over ${resolutionLimitPhrase(r.limit)}; limit: ${r.limit})`)
+            .join('\n')}`,
         );
       }
       if (truncated) {
@@ -11835,13 +11858,10 @@ function ageOf(at: Date, now: Date = new Date()): string {
         include: { organization: true },
       });
       if (!memory) return refusalResult('Memory not found.');
-      // R206 / cor:sec:040:05: an encrypted memory gets the typed refusal from the sync itself
-      // even with no source, so the no-source reply never reads as a healthy sync.
-      if (!memory.source && !memory.isEncrypted) return textResult('Memory has no source repository configured.');
-
       // Import and call syncGraphFromGithub
       const { syncGraphFromGithub, describeSyncOutcome } = await import('../integrations/github/syncGraphFromGithub.js');
       const result = await syncGraphFromGithub(memory as Parameters<typeof syncGraphFromGithub>[0]);
+      if (result.notAttemptedReason) return refusalResult(`[${SYNC_NOT_ATTEMPTED}] ${syncNotAttemptedMessage(result.notAttemptedReason)}`);
 
       if (result.fault) throw new Error(result.error ?? 'sync fault');
       if (result.error) return refusalResult(`Sync failed${result.errorCode ? ` [${result.errorCode}]` : ''}: ${result.error}`);

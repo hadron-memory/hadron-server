@@ -1,5 +1,8 @@
+import { chatNotFoundError } from '../../../lib/chatNotFound.js';
+import { readChatEngineStates } from '../../../lib/chatRootEngineState.js';
 import { readChatCounters } from '../../../lib/chatRootCounters.js';
 import { appInstallationWhere } from '../../../lib/appInstallations.js';
+import { translateSessionExpired } from '../../../lib/channels.js';
 // chatQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
 import {
   decryptNodeFields,
@@ -146,6 +149,7 @@ type ChatRootRow = { id: string; loc: string; memoryId: string; data: unknown; c
 
 async function toChatRows(ctx: Context, tops: ChatRootRow[]) {
   const counters = await readChatCounters(ctx.db,tops,ctx.sessionId);
+  const engine = await readChatEngineStates(ctx.db, tops);
   // First-message lookup, scoped to the visible page only (was: every
   // candidate chat). Parallelized via Promise.all.
   const firstMessageEntries = await Promise.all(
@@ -185,8 +189,8 @@ async function toChatRows(ctx: Context, tops: ChatRootRow[]) {
       id: node.id,
       loc: node.loc,
       title,
-      conversationName: (data.conversationName as string) ?? null,
-      stageName: (data.stageName as string) ?? null,
+      conversationName: (engine.get(node.id)?.conversationName as string) ?? null,
+      stageName: (engine.get(node.id)?.stageName as string) ?? null,
       messageCount: counters.get(node.id)?.messageCount ?? 0,
       createdAt: node.createdAt,
       lastMessageAt: counters.get(node.id)?.lastMessageAt ?? null,
@@ -265,7 +269,7 @@ export const chatQueries = {
         }),
         chatId,
       );
-      if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
+      if (!chatNode) throw chatNotFoundError(chatId);
       // #1196 — the SHARED node-content gate, replacing a hand-rolled
       // per-class one. `cor:acl:030:01`: a chat has no access layer of its own;
       // read falls through the host memory's per-class rules. This resolver
@@ -357,7 +361,7 @@ export const chatQueries = {
       // suffix.
       const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
       if (memEncInfo.isEncrypted) {
-        for (const m of rows) decryptNodeFields(m, memEncInfo);
+        for (const m of rows) translateSessionExpired(memEncInfo.id, () => decryptNodeFields(m, memEncInfo));
       }
       // #1061 — a transcript read returns each message's content, so it is one
       // read per message returned. Recorded here, AFTER the decrypt above: an

@@ -1,6 +1,8 @@
+import { chatNotFoundError } from '../../../lib/chatNotFound.js';
+import { ENGINE_KEYS, engineState } from '../../../lib/chatRootEngineState.js';
 import { appInstallationWhere } from '../../../lib/appInstallations.js';
 // chatMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
-import { assertAuthoring, attestedAuthoring } from '../../../lib/authoringAttestation.js';
+import { assertAuthoring, attestedAuthoring, authoringFromRequest } from '../../../lib/authoringAttestation.js';
 import { authoredContentChanged, clearNodeAuthorship } from '../../../lib/nodeAuthorship.js';
 import {
   buildNodeRevisionSnapshot,
@@ -14,7 +16,7 @@ import { LINK_CAP_MEMORY_SELECT, linkWriteTargetAdmits } from '../../../lib/auth
 import { isDeepStrictEqual } from 'node:util';
 import { clientReportedChatModel } from '../../../lib/bootPrompt/chatModel.js';
 import { generateId } from '../../../lib/id.js';
-import { lockAncestorsForCreateMany, lockLocForWrite } from '../../../lib/nodeSubtreeLock.js';
+import { lockAncestorsForCreateMany, lockLocForWrite, lockPathForCreateUnder } from '../../../lib/nodeSubtreeLock.js';
 import {
   DATA_HOST_MEMORY_SELECT,
   declaredMemoryWideFields,
@@ -28,6 +30,7 @@ import {
   type ChatTxRunner,
 } from '../../../lib/chatRoot.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
+import { translateSessionExpired } from '../../../lib/channels.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
 import {
   encryptNodeFields,
@@ -39,6 +42,7 @@ import {
   agentSlugFromUrn,
 } from '../../../lib/urn.js';
 import { compileTemplate } from '../../../lib/template.js';
+import { chargeRequestServed } from '../../../lib/includes/resolveNodeContent.js';
 import { applyPlatformVariables } from '../../../lib/personaDescription.js';
 import { agentPlatformValues } from '../../../lib/bootPrompt/variables.js';
 import { recordServedPrompt, resolveServedBootPrompt, type ServedBootPrompt } from '../../../lib/bootPrompt/serve.js';
@@ -113,12 +117,14 @@ async function chatWriteTx(
   ctx: Context,
   memoryId: string,
 ): Promise<ChatTxRunner> {
-  const memory = await ctx.db.memory.findUnique({ where: { id: memoryId }, select: { appId: true } });
+  const memory = await ctx.db.memory.findUnique({ where: { id: memoryId }, select: { appId: true, isEncrypted: true } });
   const anchors = memory?.appId ? [{ kind: 'app' as const, id: memory.appId }] : [];
   return (fn) => withAuthorizedMemoryTx(
     ctx, memoryId, anchors,
     async (txCtx) => {
       await requireMemoryWriteAccess(txCtx, memoryId);
+      const fresh = await txCtx.db.memory.findUnique({ where: { id: memoryId }, select: { isEncrypted: true } });
+      if (!fresh || fresh.isEncrypted !== memory?.isEncrypted) throw new GraphQLError('Chat authority changed; retry with fresh context.', { extensions: { code: 'CHAT_AUTHORITY_SCOPE_CHANGED' } });
     },
     (tx) => fn(tx),
   );
@@ -608,7 +614,8 @@ export const chatMutations = {
               )
             : await memoryAccessFilter(ctx);
         // #910: the first prompt reads the starter's own extracted values only.
-        systemMessage = await compileTemplate(promptContent, null, targetMemoryId, ctx.db, access, ctx.userId ?? null);
+        // #40: a served resolved read, so it counts toward the request's aggregate like any other.
+        systemMessage = chargeRequestServed(ctx, promptContent, await compileTemplate(promptContent, null, targetMemoryId, ctx.db, access, ctx.userId ?? null));
       }
 
       // Build tool schema from hierarchical extraction spec
@@ -755,6 +762,14 @@ export const chatMutations = {
             if (effectiveUserId !== 'anonymous' && !isTestRun) {
               await ensureAgentSubscription(tx, effectiveUserId, resolvedAgentId);
             }
+            // #3501: names and conversational text use the SAME fresh encryption decision.
+            await tx.$queryRaw`SELECT id FROM memories WHERE id=${targetMemoryId} FOR SHARE`;
+            const stateInfo = await tx.memory.findUniqueOrThrow({ where: { id: targetMemoryId }, select: { id: true, isEncrypted: true } });
+            const initialState = engineState(JSON.parse(JSON.stringify(initialChatData)), false);
+            const initialData = { ...initialChatData };
+            for (const key of ENGINE_KEYS) if (key !== 'conversationName' && key !== 'stageName') delete initialData[key];
+            const storedRoot = encryptNodeFields({ data: initialData }, stateInfo);
+            const storedState = encryptNodeFields({ data: initialState }, stateInfo);
             await lockAncestorsForCreateMany(tx, targetMemoryId, [chatLoc, `${chatLoc}:messages`]);
             const chatNodeId = generateId();
             startedNodes.push({ id: chatNodeId, loc: chatLoc, memoryId: targetMemoryId });
@@ -763,7 +778,7 @@ export const chatMutations = {
                 id: chatNodeId, memoryId: targetMemoryId, loc: chatLoc, name: chatName,
                 nodeType: 'record',
                 description: `Chat: ${convName}`,
-                data: initialChatData as InputJsonValue,
+                data: storedRoot.data as InputJsonValue,
                 // #914: record the creator on the audit column too, not only
                 // inside `data.userId`. The column survives encryption and is
                 // what #915's audit expects to find. It stays PROVENANCE — the
@@ -773,6 +788,7 @@ export const chatMutations = {
               },
             });
             await tx.chatRootCounter.create({data:{chatRootNodeId:chatNodeId}});
+            await tx.chatRootEngineState.create({ data: { chatRootNodeId: chatNodeId, state: storedState.data as InputJsonValue } });
             // #2047: the chat's record, written with the chat so neither exists without the other (R37).
             if (chatServed) {
               await recordServedPrompt(tx, { kind: 'CHAT', chatId: chatNodeId, appId: chatAppId, agentId: resolvedAgentId }, chatServed.served, chatServed.variables);
@@ -831,7 +847,7 @@ export const chatMutations = {
         }),
         chatId,
       );
-      if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
+      if (!chatNode) throw chatNotFoundError(chatId);
       // #1717: a chat has no ACL of its own (cor:acl:030:01) — writing it is
       // writing its host memory, so it takes CURRENT write access there. The
       // lookup's author and memory-creator arms only narrow candidates; they
@@ -842,7 +858,7 @@ export const chatMutations = {
       // Decrypt the chat node's metadata (it holds conversationName, stageName,
       // messageCount in `data`) if the memory is encrypted.
       const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
-      if (memEncInfo.isEncrypted) decryptNodeFields(chatNode, memEncInfo);
+      if (memEncInfo.isEncrypted) translateSessionExpired(memEncInfo.id, () => decryptNodeFields(chatNode, memEncInfo));
 
       // #919: rebound below to the copy read under the chat lock. Everything
       // before that point reads only `scope`, which is immutable for a chat's
@@ -1145,7 +1161,8 @@ export const chatMutations = {
         if (promptContent.includes('{{')) {
           // #910: the sender's own extracted values, never another participant's
           // (the same identity the user message is attributed to, #914).
-          systemMessage = await compileTemplate(promptContent, null, chatNode.memoryId, ctx.db, access, senderUserId);
+          // #40: a served resolved read, so it counts toward the request's aggregate like any other.
+          systemMessage = chargeRequestServed(ctx, promptContent, await compileTemplate(promptContent, null, chatNode.memoryId, ctx.db, access, senderUserId));
         } else {
           systemMessage = promptContent;
         }
@@ -1200,7 +1217,7 @@ export const chatMutations = {
       // transcript oldest-first like everyone else.
       messages.reverse();
       if (memEncInfo.isEncrypted) {
-        for (const m of messages) decryptNodeFields(m, memEncInfo);
+        for (const m of messages) translateSessionExpired(memEncInfo.id, () => decryptNodeFields(m, memEncInfo));
       }
 
       // Role detection is agent-agnostic (Constitution Invariant #14):
@@ -1287,7 +1304,7 @@ export const chatMutations = {
         }),
         chatId,
       );
-      if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
+      if (!chatNode) throw chatNotFoundError(chatId);
       // #1717: a chat has no ACL of its own (cor:acl:030:01) — writing it is
       // writing its host memory, so it takes CURRENT write access there. The
       // lookup's author and memory-creator arms only narrow candidates; they
@@ -1296,7 +1313,7 @@ export const chatMutations = {
       const inTx = await chatWriteTx(ctx, chatNode.memoryId);
 
       const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
-      if (memEncInfo.isEncrypted) decryptNodeFields(chatNode, memEncInfo);
+      if (memEncInfo.isEncrypted) translateSessionExpired(memEncInfo.id, () => decryptNodeFields(chatNode, memEncInfo));
 
       // #919: rebound below to the copy read under the chat lock (see
       // sendChatMessage). Only `scope`, which is immutable, is read before.
@@ -1418,7 +1435,7 @@ export const chatMutations = {
         if (located) await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${located.id} FOR UPDATE`;
         const dataNode = located ? await tx.node.findFirst({ where: dataNodeWhere }) : null;
         if (dataNode) {
-          if (memEncInfo.isEncrypted) decryptNodeFields(dataNode, memEncInfo);
+          if (memEncInfo.isEncrypted) translateSessionExpired(memEncInfo.id, () => decryptNodeFields(dataNode, memEncInfo));
           const existingData = (dataNode.data as Record<string, unknown>) ?? {};
           const merged = fold(existingData, data);
           // #1328 — extraction states no task, so it cannot change a `data`
@@ -1722,7 +1739,7 @@ export const chatMutations = {
         }),
         chatId,
       );
-      if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
+      if (!chatNode) throw chatNotFoundError(chatId);
       // #1717: a chat has no ACL of its own (cor:acl:030:01) — writing it is
       // writing its host memory, so it takes CURRENT write access there. The
       // lookup's author and memory-creator arms only narrow candidates; they
@@ -1786,7 +1803,7 @@ export const chatMutations = {
         }),
         chatId,
       );
-      if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
+      if (!chatNode) throw chatNotFoundError(chatId);
       // #1717: a chat has no ACL of its own (cor:acl:030:01) — writing it is
       // writing its host memory, so it takes CURRENT write access there. The
       // lookup's author and memory-creator arms only narrow candidates; they
@@ -1795,20 +1812,33 @@ export const chatMutations = {
       // #1991: provenance is not authority; the shared gate re-runs in tx.
       const inTx = await chatWriteTx(ctx, chatNode.memoryId);
       const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
-      // #919: a rename is a whole-blob write like any other, so it goes through
-      // the serializer too. Renaming is nowhere near a message append in
-      // intent, but the root is stored whole — writing `{...blobReadAbove,
-      // title}` would restore whatever `messageCount` was current when the
-      // entitlement query ran, and the next send would then reuse a live `seq`.
-      // The gate above stays exactly where it is: it authorizes before we take
-      // any lock.
-      await updateChatRootData(
-        ctx.db,
-        { id: chatNode.id, memoryId: chatNode.memoryId, loc: chatNode.loc },
-        memEncInfo,
-        (fresh) => ({ ...fresh, title: title.trim() }),
-        { inTx },
-      );
+      // #3501/0208: no-op is checked under the same root lock, before any maintenance.
+      await inTx(async tx => {
+        await lockPathForCreateUnder(tx, chatNode.memoryId, `${chatNode.loc}:messages`);
+        await tx.$queryRaw`SELECT id FROM nodes WHERE id=${chatNode.id} FOR UPDATE`;
+        const locked = await tx.node.findUniqueOrThrow({ where: { id: chatNode.id } });
+        if (locked.memoryId !== chatNode.memoryId || locked.loc !== chatNode.loc) throw new GraphQLError('Chat authority changed.', { extensions: { code: 'CHAT_AUTHORITY_SCOPE_CHANGED' } });
+        const plain = translateSessionExpired(memEncInfo.id, () => decryptNodeFields({ data: locked.data }, memEncInfo)).data as Record<string, unknown> | null;
+        if (plain?.title === title.trim()) return;
+        await withChatRootLock(ctx.db, chatNode, memEncInfo, async ({ chatData }) => {
+          // Only trusted portal identity mints HUMAN; governed token/run/App writes refuse.
+          const stamp = await assertAuthoring(tx, chatNode.memoryId, {
+            priorRole: locked.role, priorRunnable: locked.isRunnable,
+            role: locked.role, runnable: locked.isRunnable, mintHuman: true, authoredChange: true,
+          }, authoringFromRequest(ctx));
+          return { chatData: { ...chatData, title: title.trim() }, value: undefined,
+            persist: async (_tx, stored) => {
+              await ensureCurrentNodeRevisionInTransaction(tx, chatNode.id, { expectedMemoryId: chatNode.memoryId });
+              const current = await tx.node.findUniqueOrThrow({ where: { id: chatNode.id } });
+              await createNodeRevision(tx, buildNodeRevisionSnapshot(current, editorFromAuth(ctx), { changes: ['data'] }));
+              await tx.node.update({ where: { id: chatNode.id }, data: {
+                data: stored, revisionContentHash: revisionStateHashRefreshMarker(),
+                ...clearNodeAuthorship(), ...stamp,
+              } });
+            },
+          };
+        }, { inTx: fn => fn(tx) });
+      });
       return true;
     },
 
@@ -1827,7 +1857,7 @@ export const chatMutations = {
         }),
         chatId,
       );
-      if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
+      if (!chatNode) throw chatNotFoundError(chatId);
       // #1717: a chat has no ACL of its own (cor:acl:030:01) — writing it is
       // writing its host memory, so it takes CURRENT write access there. The
       // lookup's author and memory-creator arms only narrow candidates; they

@@ -1,8 +1,8 @@
 {
   "src/api/graphql/schema/resolvers.contentValidationReport.ts :: withReconciledNodeRead": 1,
   "src/api/graphql/schema/resolvers.decisions.ts :: ensureCurrentNodeRevisionInTransaction": 2,
-  "src/api/graphql/schema/resolvers.mutation.chat.ts :: createNodeRevision": 1,
-  "src/api/graphql/schema/resolvers.mutation.chat.ts :: ensureCurrentNodeRevisionInTransaction": 1,
+  "src/api/graphql/schema/resolvers.mutation.chat.ts :: createNodeRevision": 2,
+  "src/api/graphql/schema/resolvers.mutation.chat.ts :: ensureCurrentNodeRevisionInTransaction": 2,
   "src/api/graphql/schema/resolvers.mutation.memory.ts :: ensureCurrentNodeRevisionInTransaction": 2,
   "src/api/graphql/schema/resolvers.mutation.node.ts :: createNodeRevision": 5,
   "src/api/graphql/schema/resolvers.mutation.node.ts :: ensureCurrentNodeRevisionInTransaction": 6,

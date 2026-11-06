@@ -4466,7 +4466,7 @@ export const typeDefs = `#graphql
     createdAt: DateTime!
   }
 
-  "#1325 — a non-fatal finding about a saved rule. Never changes the mutation's success."
+  "#1325 — a non-fatal finding about a saved rule. Never changes the mutation's success. Today the only code is TASK_LESS_VISIBLE (#1327): a task the saver can read that some reader of the memory may not; taskUrn and taskState are the saver's own reference projection, so a task the saver cannot read is named by state alone. It is also what a save answers when that check could not be completed after the rule was saved (containment not established, not proof that a reader is missing): the save still succeeds, and taskUrn and taskState are then null when the saver's own projection was unavailable. An App write or automation read grant on the memory counts as a reader that cannot be proven to read the task."
   type MemoryConfigWarning {
     code: String!
     role: String!
@@ -4584,7 +4584,7 @@ export const typeDefs = `#graphql
 
   type MemoryConfigTemplatePayload {
     template: MemoryConfigTemplate!
-    "Empty until #1327 adds its visibility warnings."
+    "Always empty for a template save: less-visible-task warnings are computed when a template is applied to a memory (there is no target memory here)."
     warnings: [MemoryConfigWarning!]!
   }
 
@@ -4616,7 +4616,7 @@ export const typeDefs = `#graphql
     dryRun: Boolean!
     "One per template rule, role-ascending."
     entries: [MemoryConfigApplyEntry!]!
-    "Empty until #1327 adds its visibility warnings."
+    "TASK_LESS_VISIBLE for each rule this apply wrote, or on a dry run would write. A dry run and the real apply report the same warnings."
     warnings: [MemoryConfigWarning!]!
   }
 
@@ -4652,7 +4652,7 @@ export const typeDefs = `#graphql
 
   type NodeRoleRulePayload {
     rule: NodeRoleRule!
-    "Empty until #1327 adds its visibility warnings."
+    "TASK_LESS_VISIBLE for each task reference of the saved rule that a reader of this memory may not be able to read. Advisory: it never changes the save. Empty for unlock."
     warnings: [MemoryConfigWarning!]!
   }
 
@@ -4688,6 +4688,24 @@ export const typeDefs = `#graphql
     writers: NodeRoleWriters
     validateBy: ContentValidator
     enabled: Boolean
+  }
+
+  "#3456 - one row of memoryLocSegments: a next loc segment under the parent, and the memory it comes from."
+  type LocSegment {
+    "The next segment name (no colon)."
+    segment: String!
+    "True when an eligible node sits at exactly <parent>:<segment> in this memory; false for a branch that only has nodes below it."
+    hasNode: Boolean!
+    "The memory the row comes from (an inherited system memory names itself)."
+    memoryId: ID!
+  }
+
+  "#3456 - one page of memoryLocSegments."
+  type LocSegmentsPage {
+    items: [LocSegment!]!
+    "Opaque. Null when hasMore is false."
+    endCursor: String
+    hasMore: Boolean!
   }
 
   "#2177 - one page of Agent.extendedBy."
@@ -5705,6 +5723,13 @@ export const typeDefs = `#graphql
     UNSET
     NO_TEAM
     REPORTS_TO
+  }
+
+  "#3599: a non-reserving delete preview. No census detail is returned."
+  type DeleteWorkerPreview {
+    workerId: ID!
+    "Always true: the real delete still requires the caller's explicit external-attribution confirmation."
+    attestationRequired: Boolean!
   }
 
   """
@@ -8106,6 +8131,32 @@ export const typeDefs = `#graphql
     reason: SpecReferenceProblem
   }
 
+  "#1302 — a Feature's specs as one document (see Query.specDocument)."
+  type SpecDocument {
+    memoryId: ID!
+    "The citation the document was built for."
+    loc: String!
+    "The time in the text's header."
+    renderedAt: DateTime!
+    "The whole document, one Markdown string (hrn:node:hadronmemory.com:specs:cor:spc:030:02). Every client shows this string unchanged."
+    markdown: String!
+    "One entry per spec the document covers, in document order, the Feature first."
+    entries: [SpecDocumentEntry!]!
+  }
+
+  "#1302 — one spec in a document, read as the caller would read the node."
+  type SpecDocumentEntry {
+    loc: String!
+    urn: String!
+    name: String!
+    revision: Int!
+    "The body as an ordinary read returns it (includes resolved under the caller's own access). Null for a placeholder."
+    content: String
+    isPlaceholder: Boolean!
+    approvalStatus: NodeApprovalStatus!
+    mintStatus: NodeMintStatus!
+  }
+
   "#3222 (#2213 S3) — one page of a spec-reference list, counted over the whole list."
   type SpecReferencePage {
     items: [SpecReference!]!
@@ -9714,6 +9765,19 @@ export const typeDefs = `#graphql
     appNodesPage(appRef: ID!, filter: NodeFilter, limit: Int, offset: Int): NodePage!
 
     """
+    #3456 (hrn:node:hadronmemory.com:specs:cor:api:090:05): one page of the distinct next loc segments
+    under parentLoc ("" for the root), including a branch with no node of its own. Reads over exactly
+    the nodes findNodes would read for the same memoryIds with no query: the same readable set, access
+    intersection, defaults and inheritance. memoryIds is required and non-empty (an empty list is
+    BAD_USER_INPUT); when no entry survives the gate the answer is the empty page, never the caller's
+    default scope. An unreadable, unresolvable or empty memory, and a parent with nothing at or under
+    it, all give the identical empty page. Rows are grouped by memory id; inside a memory, node-backed
+    segments with a position come first by position, then every other segment by name (ruling 0217).
+    Default page 20, cap 200 (larger is served as 200); after is the previous page's endCursor.
+    """
+    memoryLocSegments(memoryIds: [ID!]!, parentLoc: String!, limit: Int, after: String): LocSegmentsPage!
+
+    """
     #2190 (hrn:node:hadronmemory.com:specs:cor:dmo:050:17): the memories appNodes
     reads for this caller, one row per memory with every reason it is in scope,
     ordered by memoryUrn and paged (default 20, cap 200; over the cap returns a
@@ -10373,6 +10437,16 @@ export const typeDefs = `#graphql
     effectiveModelGroups(appRef: ID!): [EffectiveModelGroup!]!
 
     """
+    #3599: preview deleteWorker without deleting anything: the same act gate and typed refusals
+    (WORKER_NOT_FOUND, FORBIDDEN, WORKER_IN_USE), nothing reserved. The real delete still requires
+    confirmNoExternalAttribution and may refuse if anything changed
+    (hrn:node:hadronmemory.com:specs:cor:agt:020:03). A validated instruction claim is recorded
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:12); the target is its subject. No census detail,
+    removal plan, attestation bypass or durable lock/lease is returned.
+    """
+    deleteWorkerPreview(workerRef: ID!, instruction: ActInstructionInput): DeleteWorkerPreview!
+
+    """
     Dry-run castWorker (#964): run the cast's exact resolution — same
     arguments, same typed refusals (WORKER_AGENT_NOT_FOUND / _AMBIGUOUS /
     _NOT_INSTALLED, WORKER_NAME_REQUIRED, WORKER_NAME_TAKEN,
@@ -10559,6 +10633,20 @@ export const typeDefs = `#graphql
     work: each page still scans the whole corpus. memoryRef accepts the memory's ID or URN.
     """
     specBacklinksPage(memoryRef: ID!, loc: String!, limit: Int, offset: Int): SpecReferencePage!
+
+    """
+    #1302 (R218, hrn:node:hadronmemory.com:specs:cor:spc:030:01) — a Feature's specs as ONE ordered document, built on
+    the server for the CLI and the portal. loc names the Feature (any live spec is accepted, and the document starts with
+    it); the document covers it and its live descendants on colon boundaries. markdown is the whole document in the form
+    of hrn:node:hadronmemory.com:specs:cor:spc:030:02; entries are the same specs with their records, in document order. Same read gate and refusals as
+    specBacklinks: an unreadable and a missing memory answer alike, and an encrypted readable one refuses with
+    SPEC_CORPUS_ENCRYPTED_UNSUPPORTED. A readable memory with no live spec at loc answers NODE_NOT_FOUND (a deleted spec
+    and a never-written loc alike). Over 300 specs it refuses with SPEC_DOCUMENT_TOO_LARGE and extensions.cap, and never
+    returns part of the document. Reads only: nothing is stored, approved or minted. The render time is the only part of
+    the text that differs between two calls over the same specs, approval and mint state, includes, caller access and
+    portal origin. No MCP tool offers this.
+    """
+    specDocument(memoryRef: ID!, loc: String!): SpecDocument!
 
     """
     #1449 — references in a spec corpus (any memory since #1591) that do not reach a written
@@ -12622,7 +12710,7 @@ export const typeDefs = `#graphql
     history, embeddings (re-stamped), assets (their bytes stay with the source), git-sync config, the editor lock
     and published-revision pointer, Worker castings, App installs, and the source organization's subscriptions
     and grants. A base or import is licensed for the TARGET organization at clone time, or the clone refuses
-    (BASE_UNUSABLE, IMPORT_UNUSABLE). A refusal's blocker subjects carry a name only when you can read the
+    (CLONE_BASE_UNUSABLE, CLONE_IMPORT_UNUSABLE). A refusal's blocker subjects carry a name only when you can read the
     subject; otherwise only a position. The clone's origin is Agent.clonedFromAgentRef.
     """
     cloneAgent(source: ID!, target: ID!, name: String, slug: String): Agent!
@@ -12792,6 +12880,8 @@ export const typeDefs = `#graphql
     """
     Trigger an on-demand sync for one memory (org ADMIN or CONTRIBUTOR).
 
+    Refuses SYNC_NOT_ATTEMPTED with reason NO_SOURCE or NO_INSTALLATION when no sync can be attempted;
+    no sync status, timestamp or report is written. Access is checked first; encrypted-memory refusal is unchanged.
     Accepts the entity's ID or URN.
     """
     syncMemory(id: ID!): Memory!
@@ -13096,7 +13186,10 @@ export const typeDefs = `#graphql
     # subscription is provisioned in the transaction that creates the chat.
     startChat(agentId: ID!, userId: String, conversationName: String, scope: ChatScope = private, isTestRun: Boolean = false, "#3096 / hrn:node:hadronmemory.com:specs:cor:dmo:150:08: optional client-reported model id, at most 256 UTF-16 code units, no control/format/line-separator characters or unpaired surrogates. Omitted or null fills empty for this call. Used only for prompt text and its immutable record, labelled client-reported; never billing, quotas or authorization. Invalid input refuses BAD_USER_INPUT without echoing it." llmModel: String): ChatStartResult!
     """
-    Process a user message (saves message, builds context, returns next prompt)
+    Process a user message (saves message, builds context, returns next prompt).
+    #3501: CHAT_STATE_INVALID refuses unusable conversational state before the turn writes or builds a model prompt.
+    CHAT_AUTHORITY_SCOPE_CHANGED refuses a write when the memory encryption flag changed before its lock; obtain
+    fresh context, never automatically resubmit a model call or a turn after an uncertain commit.
     """
     sendChatMessage(chatId: String!, userMessage: String!, "#3096 / hrn:node:hadronmemory.com:specs:cor:dmo:150:08: optional client-reported model id, at most 256 UTF-16 code units, no control/format/line-separator characters or unpaired surrogates. Omitted or null fills empty for this call. Used only for prompt text and its immutable record, labelled client-reported; never billing, quotas or authorization. Invalid input refuses BAD_USER_INPUT without echoing it." llmModel: String): ChatPromptResult!
     """
@@ -13128,6 +13221,10 @@ export const typeDefs = `#graphql
     saveChatSummary(chatId: String!, summary: String!): Boolean!
     """
     Rename a saved chat with current write access to its host memory.
+    A changed trimmed title is revisioned once (hrn:node:hadronmemory.com:specs:cor:dmo:060:04).
+    A same-title rename writes nothing. Only trusted portal identity mints HUMAN
+    (hrn:node:hadronmemory.com:specs:cor:dmo:060:16); other callers follow the memory's authoring rules and cannot
+    supply authoredWith here. A governed refusal changes neither title, revision nor stamp.
     """
     updateChatTitle(chatId: String!, title: String!): Boolean!
     """

@@ -1222,6 +1222,7 @@ enum NodeContentValidationReporterKind {
 
 model Node {
   chatRootCounter ChatRootCounter?
+  chatRootEngineState ChatRootEngineState?
   /// UUIDv7 from `node.yaml` when supplied by the importer (stable across
   /// moves); falls back to `cuid()` for inserts that omit `id`.
   id                  String              @id @default(cuid())
@@ -6862,6 +6863,9 @@ model WorkerDeliveryTick {
   ackedByUserId   String?  @map("acked_by_user_id")
   ackedByWorkerId String?  @map("acked_by_worker_id")
   ackedByAppKeyId String?  @map("acked_by_app_key_id")
+  /// #3509 (cor:agt:100:03, cor:agt:080:04): when the worker last CHECKED a channel this ticker covers after the wake
+  /// `ackedAt` records; null = not yet. Written by the check (DB clock), cleared by a newer delivery. Latest wake only.
+  respondedAt     DateTime? @map("responded_at")
 
   worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
   ticker Ticker @relation(fields: [tickerId], references: [id], onDelete: Cascade)
@@ -7427,4 +7431,13 @@ model ChatRootCounter {
   updatedAt DateTime @updatedAt @map("updated_at")
   chatRoot Node @relation(fields: [chatRootNodeId], references: [id], onDelete: Cascade)
   @@map("chat_root_counters")
+}
+
+/// #3501 — encrypted conversational operational state, never revisioned.
+model ChatRootEngineState {
+  chatRootNodeId String @id @map("chat_root_node_id")
+  state Json
+  updatedAt DateTime @updatedAt @map("updated_at")
+  chatRoot Node @relation(fields: [chatRootNodeId], references: [id], onDelete: Cascade)
+  @@map("chat_root_engine_states")
 }

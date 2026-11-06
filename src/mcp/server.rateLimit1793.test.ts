@@ -6,6 +6,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { FixtureLifetime } from '../test/fixtureLifetime.js';
+import { closeFixtureResources } from '../test/fixtureResources.js';
 import { withinOneRateWindow } from '../test/rateWindow.js';
 import { createServer } from '../server.js';
 import { signJwt } from '../auth/jwt.js';
@@ -16,15 +17,11 @@ vi.mock('../integrations/github/writeNodeToGit.js',()=>({writeNodeToGit:vi.fn().
 vi.mock('../integrations/github/syncGraphFromGithub.js',()=>({syncGraphFromGithub:vi.fn().mockResolvedValue({error:null})}));
 let server:Server|undefined,client:Client|undefined;
 const lifetime = new FixtureLifetime();
-const closeResources = async () => {
-  const currentClient = client;
-  await currentClient?.close();
-  if (client === currentClient) client = undefined;
-  const currentServer = server;
-  currentServer?.closeAllConnections();
-  if(currentServer) await new Promise<void>(r=>currentServer.close(()=>r()));
-  if (server === currentServer) server = undefined;
+const resources = {
+  get client() { return client; }, set client(value: Client | undefined) { client = value; },
+  get server() { return server; }, set server(value: Server | undefined) { server = value; },
 };
+const closeResources = () => closeFixtureResources(resources);
 const fixtureIt = (name: string, body: () => Promise<void>) => it(name, () => lifetime.run(body));
 beforeEach(async()=>{
   // Also joins a prior afterEach whose runner deadline expired.
