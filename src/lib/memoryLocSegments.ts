@@ -56,7 +56,10 @@ export function decodeLocSegmentsCursor(raw: string): Cursor | null {
     if (!Array.isArray(v) || v.length !== 3) return null;
     const [m, s, n] = v as unknown[];
     if (typeof m !== 'string' || typeof n !== 'string') return null;
-    if (s !== null && !(typeof s === 'number' && Number.isInteger(s))) return null;
+    // The position is bound as int4 and the strings as text: a value Postgres cannot take must be a refused
+    // cursor, not an internal error.
+    if (m.includes('\0') || n.includes('\0')) return null;
+    if (s !== null && !(typeof s === 'number' && Number.isInteger(s) && s >= -2147483648 && s <= 2147483647)) return null;
     return { m, s: s as number | null, n };
   } catch {
     return null;
@@ -113,7 +116,7 @@ export async function readLocSegments(
         SELECT n.loc, n.seq FROM nodes n
         WHERE n.memory_id = w.memory_id
           AND (replace(n.loc, ':', chr(1))) COLLATE "C" >=
-              (${prefixKey}::text || replace(split_part(substr(w.loc, ${prefix.length + 1}::int), ':', 1), ':', chr(1)) || chr(2)) COLLATE "C"
+              (${prefixKey}::text || replace(split_part(substr(w.loc, length(${prefix}::text) + 1), ':', 1), ':', chr(1)) || chr(2)) COLLATE "C"
           AND (NOT ${hasUpper}::boolean OR (replace(n.loc, ':', chr(1))) COLLATE "C" < ${upperKey}::text COLLATE "C")
           AND n.deleted_at IS NULL AND n.node_type <> 'system' AND n.node_type <> 'comment' AND n.loc <> ''
           AND NOT (n.id = ANY(${excludeNodeIds}::text[]))
@@ -122,9 +125,9 @@ export async function readLocSegments(
       ) f
     ), segs AS (
       SELECT memory_id,
-             split_part(substr(loc, ${prefix.length + 1}::int), ':', 1) AS seg,
-             (loc = ${prefix} || split_part(substr(loc, ${prefix.length + 1}::int), ':', 1)) AS has_node,
-             CASE WHEN loc = ${prefix} || split_part(substr(loc, ${prefix.length + 1}::int), ':', 1) THEN seq END AS pos
+             split_part(substr(loc, length(${prefix}::text) + 1), ':', 1) AS seg,
+             (loc = ${prefix} || split_part(substr(loc, length(${prefix}::text) + 1), ':', 1)) AS has_node,
+             CASE WHEN loc = ${prefix} || split_part(substr(loc, length(${prefix}::text) + 1), ':', 1) THEN seq END AS pos
       FROM walk
     )
     SELECT memory_id, seg, has_node, pos

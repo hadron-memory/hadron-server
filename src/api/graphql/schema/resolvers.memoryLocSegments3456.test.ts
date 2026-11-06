@@ -242,3 +242,56 @@ describe('#3456 input validation', () => {
     expect(String(err.message)).not.toContain('not-a-cursor');
   });
 });
+
+describe('#3586 review folds', () => {
+  it('a memory named more than once (same id repeated) is read once: each row once, and paging returns every row once', async () => {
+    await mk('a'); await mk('b'); await mk('c');
+    const once = await segs({ memoryIds: [M.id], parentLoc: '' });
+    const rep = await segs({ memoryIds: [M.id, M.id, M.id], parentLoc: '' });
+    expect(rep.items).toEqual(once.items);
+    const seen: string[] = [];
+    let after: string | null = null;
+    for (let i = 0; i < 5; i++) {
+      const pg: any = await segs({ memoryIds: [M.id, M.id], parentLoc: '', limit: 2, after });
+      seen.push(...names(pg));
+      if (!pg.hasMore) break;
+      after = pg.endCursor;
+    }
+    expect(seen).toEqual(['a', 'b', 'c']);
+  });
+
+  it('the same memory named by id and by its URN is read once', async () => {
+    await mk('a'); await mk('b');
+    const m = await db.memory.findUniqueOrThrow({ where: { id: M.id } });
+    const page = await segs({ memoryIds: [M.id, (m as any).urn], parentLoc: '' });
+    expect(names(page)).toEqual(['a', 'b']);
+  });
+
+  it('a parent loc with an astral-plane character keeps the first character of each segment', async () => {
+    await mk('𝕏:alpha'); await mk('𝕏:beta:deep');
+    const page = await segs({ memoryIds: [M.id], parentLoc: '𝕏' });
+    expect(page.items.map((i: any) => [i.segment, i.hasNode])).toEqual([['alpha', true], ['beta', false]]);
+  });
+
+  it('a cursor Postgres could not take (int4 overflow, NUL) is a refused cursor, not an internal error', async () => {
+    const enc = (v: unknown[]) => Buffer.from(JSON.stringify(v), 'utf8').toString('base64url');
+    for (const bad of [[M.id, 2147483648, 'a'], [M.id, -2147483649, 'a'], [M.id, null, 'a\u0000b'], ['m\u0000', 1, 'a']]) {
+      await expect(segs({ memoryIds: [M.id], parentLoc: '', after: enc(bad) })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    }
+  });
+
+  it('the key-encoding control characters are not valid in a parent loc', async () => {
+    for (const bad of ['a\u0001b', 'a\u0002b']) {
+      await expect(segs({ memoryIds: [M.id], parentLoc: bad })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    }
+  });
+
+  it('a system-type node that sorts first under the prefix does not become a segment (first probe)', async () => {
+    await mk('0sys:x', { nodeType: 'system' });
+    await mk('real');
+    expect(names(await segs({ memoryIds: [M.id], parentLoc: '' }))).toEqual(['real']);
+    await mk('p:0sys', { nodeType: 'system' });
+    await mk('p:real');
+    expect(names(await segs({ memoryIds: [M.id], parentLoc: 'p' }))).toEqual(['real']);
+  });
+});

@@ -2714,7 +2714,7 @@ export const nodeQueries = {
       if (!Array.isArray(args.memoryIds) || args.memoryIds.length === 0) {
         throw refuse('memoryLocSegments: memoryIds must name at least one memory.');
       }
-      if (args.parentLoc.startsWith(':') || args.parentLoc.endsWith(':') || args.parentLoc.includes('::') || args.parentLoc.includes('\0')) {
+      if (args.parentLoc.startsWith(':') || args.parentLoc.endsWith(':') || args.parentLoc.includes('::') || /[\u0000-\u0002]/.test(args.parentLoc)) {
         throw refuse('memoryLocSegments: parentLoc is not a valid loc.');
       }
       let after: ReturnType<typeof decodeLocSegmentsCursor> = null;
@@ -2725,12 +2725,14 @@ export const nodeQueries = {
       const limit = normalizeLocSegmentsLimit(args.limit);
       await admitOperationRate(ctx, ctx.db, 'FAN_OUT_READS', ctx.limiterIdentity ?? transportRateIdentity(ctx));
       const empty = { items: [], hasMore: false, endCursor: null };
-      const gated = await resolveNodeReadScopeIds(ctx, { memoryIds: args.memoryIds }, null);
+      // Each memory is read once however many times (or by which alias) it was named: a repeat would repeat
+      // its rows, break the continuation and multiply the walk (#3586 review).
+      const gated = [...new Set(await resolveNodeReadScopeIds(ctx, { memoryIds: args.memoryIds }, null))];
       if (gated.length === 0) return empty;
       const inheritance = await effectiveScope(ctx.db, gated);
       return readLocSegments(ctx.db, {
-        memoryIds: inheritance.memoryIds,
-        excludeNodeIds: inheritance.excludeNodeIds,
+        memoryIds: [...new Set(inheritance.memoryIds)],
+        excludeNodeIds: [...new Set(inheritance.excludeNodeIds)],
         parent: args.parentLoc,
         limit,
         after,
