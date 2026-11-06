@@ -1982,7 +1982,7 @@ it('3501: encrypted startChat stores ciphertext root and state at birth, with on
   sessionKeyCache.set(generateId(), memory.id, key);
   try {
     const result = await resolvers.Mutation.startChat({}, { agentId: agent.id }, userCtx(adminUser.id));
-    const root = await db.node.findUniqueOrThrow({ where: { memoryId_loc: { memoryId: memory.id, loc: result.chatId } } });
+    const root = await db.node.findUniqueOrThrow({ where: { loc_memoryId: { memoryId: memory.id, loc: result.chatId } } });
     const engine = await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } });
     expect(root.data).toHaveProperty('__enc'); expect(engine.state).toHaveProperty('__enc');
     const info = { id: memory.id, isEncrypted: true };
