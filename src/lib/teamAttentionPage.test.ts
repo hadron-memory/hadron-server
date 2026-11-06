@@ -10,7 +10,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from './workerSignature.js';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../integrations/db/client.js';
-import { cleanDb } from '../test/helpers.js';
+import { cleanDb, suspendChatSeqUniqueness } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { ensureChannelWithRoot } from './channels.js';
 import { appendChatMessage } from './chatRoot.js';
@@ -506,7 +506,10 @@ describe('family 9 — consolidated review corrections (#3051/#3053/#3054)', () 
   it('duplicate seq at the frozen max is fully scanned (finding 4)', async () => {
     // Two message rows sharing seq=1 (the legacy duplicate-seq shape): the
     // relevant mention rides the row with the LARGER id. Envelopes encrypt
-    // exactly as appendChatMessage would in this encrypted memory.
+    // exactly as appendChatMessage would in this encrypted memory. Planting
+    // them needs #992's constraint aside — such rows can no longer be
+    // written, but pre-constraint ones persist until each chat's repair.
+    await suspendChatSeqUniqueness(db);
     const memEnc = await getMemoryEncryptionInfo(db, channel.memoryId);
     for (const [id, mentions] of [['aaa-dup', []], ['zzz-dup', ['dara']]] as const) {
       const enc = encryptNodeFields({ content: null, data: { mentions } }, memEnc);

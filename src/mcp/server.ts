@@ -2,6 +2,7 @@ import { SYNC_NOT_ATTEMPTED, syncNotAttemptedMessage } from '../integrations/git
 import { MCP_WORKER_BINDING_UNSUPPORTED, offTeamTool } from './disabledTools.js';
 import { registerAutomationTeamSnapshotGrantTools } from './automationTeamSnapshotGrantTools.js';
 import { appendDeliveryPending } from '../lib/tickers/deliveryPending.js';
+import { isChatSeqUniqueViolation, CHAT_SEQ_CONFLICT_MESSAGE } from '../lib/prismaErrors.js';
 import { mcpRequestSessionContext } from './requestSession.js';
 import { liveTxContext, liveReadSnapshotContext } from '../api/graphql/schema/authorizedTx.js';
 import { withReconciledNodeRead } from '../lib/includes/reconciledNodeRead.js';
@@ -6849,6 +6850,12 @@ export function createMcpServerInstance(
           return written;
         });
       } catch (e) {
+        // #2622: this tool writes through its own inline Prisma calls (not
+        // writeNodeCore), so the #992 per-chat seq conflict must be typed HERE
+        // or the caller sees a raw internal error instead of the named refusal.
+        if (isChatSeqUniqueViolation(e)) {
+          return refusalResult(`[chat_message_seq_conflict] ${CHAT_SEQ_CONFLICT_MESSAGE}`);
+        }
         if (e instanceof NodeSchemaViolation) return refusalResult(`Schema violation: ${e.message}`);
         if (e === LIVE_LOC_CONFLICT) {
           return refusalResult(`Node already exists at "${rawUrn}" — use hadron_update_node.`);
@@ -7301,6 +7308,11 @@ export function createMcpServerInstance(
             existing.abstract = embeddedPlaintext.abstract;
           });
         } catch (e) {
+          // #2622: same as hadron_create_node — an inline writer needs its own
+          // typed branch for the #992 per-chat seq conflict.
+          if (isChatSeqUniqueViolation(e)) {
+            return refusalResult(`[chat_message_seq_conflict] ${CHAT_SEQ_CONFLICT_MESSAGE}`);
+          }
           if (e instanceof NodeSchemaViolation) return refusalResult(`Schema violation: ${e.message}`);
           if (e instanceof LocProtectedError) return refusalResult(`[loc_protected] ${e.message}`);
           if (isLegacyMessageSeqError(e)) return refusalResult(`[seq_protected] ${e.message}`);
