@@ -146,6 +146,25 @@ describe('findNodes leaves chat-message nodes out of unqualified search (cor:api
     expect(denied.hits).toEqual([]);
   });
 
+  // #2832's direct-children read: the default holds under childrenOf, and an
+  // explicit nodeType still returns the messages (acceptance 1 and 2).
+  it.each(MODES)('%s: childrenOf a team chat messages branch returns no messages without a nodeType', async (_m, args) => {
+    const team = await findNodes({ ...args, filter: { memoryIds: [memory.id], childrenOf: `${CHAT_ROOT}:messages` }, limit: 50 });
+    expect(locs(team)).toEqual([]);
+    const bot = await findNodes({ ...args, filter: { memoryIds: [memory.id], childrenOf: `${BOT_ROOT}:messages` }, limit: 50 });
+    expect(locs(bot)).toEqual([BOT_MSG]);
+  });
+
+  it.each(MODES)('%s: childrenOf with nodeType chat-message returns the direct messages', async (_m, args) => {
+    const res = await findNodes({ ...args, filter: { memoryIds: [memory.id], childrenOf: `${CHAT_ROOT}:messages`, nodeType: 'chat-message' }, limit: 50 });
+    expect(locs(res)).toEqual(MSG_LOCS);
+  });
+
+  it.each(MODES)('%s: an explicit nodeTypes list naming chat-message returns them', async (_m, args) => {
+    const res = await findNodes({ ...args, filter: { memoryIds: [memory.id], nodeTypes: ['chat-message', 'record'] }, limit: 50 });
+    expect(locs(res)).toEqual([...MSG_LOCS, BOT_MSG, 'run-output'].sort());
+  });
+
   it('system stays excluded and explicit system still wins (the list is shared, not replaced)', async () => {
     await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'sys', name: 'harbor sys', nodeType: 'system', abstract: 'harbor plan' } });
     expect(locs(await findNodes({ query: 'harbor', mode: 'keyword', filter: { memoryIds: [memory.id] }, limit: 50 }))).not.toContain('sys');
