@@ -49,7 +49,7 @@ describe('phase-1 retirement', () => {
  });
  it('legacy isolation data cannot override NO_TASK, an active task, or PAUSED', async () => {
   // Model the prior-schema read result, including a column the new select no longer requests.
-  // The populated migration proof separately exercises real storage removal.
+  // The populated retained-row proof exercises the stored data separately.
   const now = new Date();
   const fake = {
    app: { findUnique: async () => ({ teamPausedAt: null }) },
@@ -79,48 +79,35 @@ describe('phase-1 retirement', () => {
  });
 });
 
-it('migrates populated prior storage: exactly four columns disappear, every other value and row survives', async () => {
- const { Client } = await import('pg');
- const { readFileSync } = await import('node:fs');
- const pg = new Client({ connectionString: process.env.DATABASE_URL }); await pg.connect();
- try {
-  await pg.query('BEGIN');
-  // Reconstruct only the four removed columns on the actual populated private worker schema.
-  await pg.query(`ALTER TABLE apps ADD COLUMN IF NOT EXISTS delivery_standby_enabled boolean NOT NULL DEFAULT false;
-   ALTER TABLE worker_wake_settings ADD COLUMN IF NOT EXISTS isolated_until timestamp(3),
-    ADD COLUMN IF NOT EXISTS isolated_at timestamp(3), ADD COLUMN IF NOT EXISTS isolated_by_user_id text;`);
-  await pg.query(`UPDATE apps SET delivery_standby_enabled=true, ticker_min_cadence_seconds=130,
-   delivery_busy_delay_seconds=700, delivery_stuck_window_seconds=1500, delivery_check_period_seconds=720,
-   delivery_dark_alarm_window_seconds=1900 WHERE id=$1`, [appId]);
-  const worker = await db.worker.findUniqueOrThrow({ where: { id: targetId } });
-  // All fixture creation stays outside the DDL transaction's locked tables.
-  const ids = [targetId];
-  for (let i=0;i<3;i++) {
-   const id = generateId(); ids.push(id);
-   await pg.query(`INSERT INTO workers (id,app_id,agent_id,name,slug,role,signature,trailer)
-     VALUES ($1,$2,$3,$4,$4,'engineer','','')`,[id,appId,worker.agentId,`migration-${i}`]);
-  }
-  for (let i=0;i<ids.length;i++) await pg.query(`INSERT INTO worker_wake_settings
-   (worker_id,mentions,paused_until,isolated_until,isolated_at,isolated_by_user_id,exempt_ended_at,updated_by)
-   VALUES ($1,'OFF',$2,$3,$4,$5,$6,'synthetic-migration')`, [ids[i],
-    i===2?new Date('2099-01-01'):null, i===0?new Date('2099-02-01'):i===1?new Date('2000-01-01'):null,
-    i<2?new Date('1999-01-01'):null,i<2?holderId:null,i===2?new Date('2020-01-01'):null]);
-  const snapshot = async () => ({
-   apps:(await pg.query(`SELECT to_jsonb(a)-'delivery_standby_enabled' AS row FROM apps a ORDER BY id`)).rows,
-   settings:(await pg.query(`SELECT to_jsonb(w)-ARRAY['isolated_until','isolated_at','isolated_by_user_id'] AS row FROM worker_wake_settings w ORDER BY worker_id`)).rows,
-  });
-  const before = await snapshot();
-  const beforeCols = (await pg.query(`SELECT table_name,column_name FROM information_schema.columns WHERE table_schema='public' AND table_name IN ('apps','worker_wake_settings') ORDER BY table_name,column_name`)).rows;
-  const sql = readFileSync(new URL('../../../../prisma/migrations/20261106130000_retire_s7_isolation_standby/migration.sql',import.meta.url),'utf8');
-  await pg.query(sql);
+it('retains all four inert columns and preserves populated rows after both deprecated doors', async () => {
+ const columns = await db.$queryRawUnsafe<Array<{table_name:string;column_name:string}>>(`
+  SELECT table_name,column_name FROM information_schema.columns WHERE table_schema='public' AND
+  ((table_name='apps' AND column_name='delivery_standby_enabled') OR
+   (table_name='worker_wake_settings' AND column_name IN ('isolated_until','isolated_at','isolated_by_user_id')))
+  ORDER BY table_name,column_name`);
+ expect(columns).toHaveLength(4);
+ await db.workerWakeSettings.create({data:{workerId:targetId,mentions:'OFF',exemptEndedAt:new Date('2020-01-01')}});
+ await db.$executeRawUnsafe(`UPDATE worker_wake_settings SET isolated_until='2099-01-01',
+  isolated_at='2020-01-01',isolated_by_user_id=$1 WHERE worker_id=$2`,holderId,targetId);
+ await db.$executeRawUnsafe('UPDATE apps SET delivery_standby_enabled=true WHERE id=$1',appId);
+ const snapshot=async()=>({
+  settings:await db.$queryRawUnsafe('SELECT to_jsonb(w) AS row FROM worker_wake_settings w ORDER BY worker_id'),
+  apps:await db.$queryRawUnsafe('SELECT to_jsonb(a) AS row FROM apps a ORDER BY id'),
+  events:await db.agentTeamEvent.findMany({where:{appId}}),
+ });
+ const before=await snapshot();
+ await expect(M.isolateWorker({}, {workerRef:targetId,until:'not-a-date'},ctx(holderId)))
+  .rejects.toMatchObject({extensions:{code:'WORKER_ISOLATION_UNAVAILABLE'}});
+ expect(await snapshot()).toEqual(before);
+ for(const userId of [holderId,adminId]) {
+  const result=await M.clearWorkerIsolation({}, {workerRef:targetId},ctx(userId));
+  expect(await F.isolated(result,{},ctx(userId))).toBe(false);
+  expect(await F.isolatedUntil(result,{},ctx(userId))).toBeNull();
+  expect(await F.isolatedAt(result,{},ctx(userId))).toBeNull();
+  expect(await F.isolatedByHandle(result,{},ctx(userId))).toBeNull();
   expect(await snapshot()).toEqual(before);
-  const afterCols = (await pg.query(`SELECT table_name,column_name FROM information_schema.columns WHERE table_schema='public' AND table_name IN ('apps','worker_wake_settings') ORDER BY table_name,column_name`)).rows;
-  expect(beforeCols.filter(c=>!afterCols.some(a=>a.table_name===c.table_name&&a.column_name===c.column_name)))
-   .toEqual([{table_name:'apps',column_name:'delivery_standby_enabled'},
-    {table_name:'worker_wake_settings',column_name:'isolated_at'},
-    {table_name:'worker_wake_settings',column_name:'isolated_by_user_id'},
-    {table_name:'worker_wake_settings',column_name:'isolated_until'}]);
- } finally { await pg.query('ROLLBACK'); await pg.end(); }
+ }
+ expect((await loadPendingReasons(db,appId,[targetId],new Date())).get(targetId)).toBe('NO_TASK');
 });
 
 it.each(['cli-wake','cli-delivery','portal-delivery'])('validates frozen released-client selections: %s', async name => {
@@ -135,6 +122,8 @@ const principalCodes = [
  ['holder','WORKER_ISOLATION_UNAVAILABLE',null],
  ['participant','WORKER_ISOLATION_UNAVAILABLE','WORKER_ISOLATION_FORBIDDEN'],
  ['worker-no-instruction','WORKER_ISOLATION_FORBIDDEN','WORKER_ISOLATION_FORBIDDEN'],
+ ['worker-missing','WORKER_NOT_FOUND','WORKER_NOT_FOUND'],
+ ['worker-foreign','WORKER_NOT_FOUND','WORKER_NOT_FOUND'],
  ['instructed-manager','WORKER_ISOLATION_UNAVAILABLE',null],
  ['instructed-holder','WORKER_ISOLATION_UNAVAILABLE',null],
  ['instructed-neither','WORKER_ISOLATION_UNAVAILABLE','WORKER_ISOLATION_FORBIDDEN'],
@@ -152,7 +141,7 @@ it.each(principalCodes)('source-exact deprecated doors for %s (main 8652fe90)', 
  let c = ctx(kind==='manager'?adminId:kind==='participant'||kind==='instructed-neither'?memberId:holderId);
  let ref = targetId; let instruction: unknown;
  let caller: {id:string}|undefined;
- if (kind.startsWith('instructed')||kind==='worker-no-instruction'||kind==='refused-binding') {
+ if (kind.startsWith('instructed')||kind.startsWith('worker-')||kind==='refused-binding') {
   const userId = kind==='instructed-manager'?adminId:kind==='instructed-holder'?holderId:memberId;
   caller = await db.worker.create({data:{appId,agentId:worker.agentId,name:'Caller',slug:'caller',signature:'',trailer:'',heldByUserId:userId}});
   const session = await db.session.create({data:{id:generateId(),appId,workerId:caller.id,agentId:worker.agentId,userId}});
@@ -163,7 +152,12 @@ it.each(principalCodes)('source-exact deprecated doors for %s (main 8652fe90)', 
  if(kind==='unauthenticated') c=ctx();
  if(kind==='impersonation') c=ctx(adminId,{impersonation:{sessionId:generateId(),actorUserId:memberId,orgId:(await db.app.findUniqueOrThrow({where:{id:appId}})).organizationId,expiresAt:new Date(Date.now()+60_000)}} as never);
  if(kind==='refused-binding') { await db.worker.update({where:{id:caller!.id},data:{retiredAt:new Date()}}); c={...c,sessionBindingRefused:true}; }
- if(kind==='missing') ref=generateId();
+ if(kind==='missing'||kind==='worker-missing') ref=generateId();
+ if(kind==='worker-foreign') {
+  const foreignOrg=await db.organization.create({data:{name:'Foreign',urn:'foreign-retirement3606.test'}});
+  const foreignApp=await db.app.create({data:{organizationId:foreignOrg.id,name:'Foreign',urn:'foreign-retirement3606.test:app'}});
+  ref=(await db.worker.create({data:{appId:foreignApp.id,agentId:worker.agentId,name:'Foreign',slug:'foreign',signature:'',trailer:''}})).id;
+ }
  if(kind==='retired-target') await db.worker.update({where:{id:targetId},data:{retiredAt:new Date()}});
  if(kind==='deleted-app') await db.app.update({where:{id:appId},data:{deletedAt:new Date()}});
  if(kind==='uninstalled-app') await db.app.update({where:{id:appId},data:{uninstalledAt:new Date()}});
