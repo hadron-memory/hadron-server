@@ -81,21 +81,22 @@ describe('phase-1 retirement', () => {
  });
 });
 
-it('retains all four inert columns and preserves populated rows after both deprecated doors', async () => {
+it('retains inert columns through deprecated doors and actual wake and delivery writes', async () => {
  const columns = await db.$queryRawUnsafe<Array<{table_name:string;column_name:string}>>(`
   SELECT table_name,column_name FROM information_schema.columns WHERE table_schema='public' AND
   ((table_name='apps' AND column_name='delivery_standby_enabled') OR
    (table_name='worker_wake_settings' AND column_name IN ('isolated_until','isolated_at','isolated_by_user_id')))
   ORDER BY table_name,column_name`);
  expect(columns).toHaveLength(4);
- await db.workerWakeSettings.create({data:{workerId:targetId,mentions:'OFF',exemptEndedAt:new Date('2020-01-01')}});
+ await db.workerWakeSettings.create({data:{workerId:targetId,mentions:'OFF',pausedUntil:new Date('2099-01-01'),exemptEndedAt:new Date('2020-01-01')}});
  await db.$executeRawUnsafe(`UPDATE worker_wake_settings SET isolated_until='2099-01-01',
   isolated_at='2020-01-01',isolated_by_user_id=$1 WHERE worker_id=$2`,holderId,targetId);
+ await db.app.update({where:{id:appId},data:{deliveryBusyDelaySeconds:600,deliveryStuckWindowSeconds:1800,deliveryCheckPeriodSeconds:90,deliveryDarkAlarmWindowSeconds:3600}});
  await db.$executeRawUnsafe('UPDATE apps SET delivery_standby_enabled=true WHERE id=$1',appId);
  const snapshot=async()=>({
   settings:await db.$queryRawUnsafe('SELECT to_jsonb(w) AS row FROM worker_wake_settings w ORDER BY worker_id'),
   apps:await db.$queryRawUnsafe('SELECT to_jsonb(a) AS row FROM apps a ORDER BY id'),
-  events:await db.agentTeamEvent.findMany({where:{appId}}),
+  events:await db.agentTeamEvent.findMany({where:{appId},orderBy:{id:'asc'}}),
  });
  const before=await snapshot();
  for(const input of [{standbyEnabled:false},{}]) {
@@ -113,6 +114,31 @@ it('retains all four inert columns and preserves populated rows after both depre
   expect(await F.isolatedByHandle(result,{},ctx(userId))).toBeNull();
   expect(await snapshot()).toEqual(before);
  }
+ expect((await loadPendingReasons(db,appId,[targetId],new Date())).get(targetId)).toBe('PAUSED');
+ const inertColumns=async()=>({
+  wake:await db.$queryRawUnsafe('SELECT isolated_until,isolated_at,isolated_by_user_id FROM worker_wake_settings WHERE worker_id=$1',targetId),
+  app:await db.$queryRawUnsafe('SELECT delivery_standby_enabled FROM apps WHERE id=$1',appId),
+ });
+ const inertBefore=await inertColumns();
+ await M.setWorkerWakeSettings({}, {workerRef:targetId,input:{mentions:'IMMEDIATE'}},ctx(holderId));
+ expect((await db.workerWakeSettings.findUniqueOrThrow({where:{workerId:targetId}})).mentions).toBe('IMMEDIATE');
+ expect(await inertColumns()).toEqual(inertBefore);
+ const pausedUntil=new Date('2098-01-01');
+ await M.setWorkerWakeSettings({}, {workerRef:targetId,input:{pausedUntil}},ctx(holderId));
+ expect((await db.workerWakeSettings.findUniqueOrThrow({where:{workerId:targetId}})).pausedUntil).toEqual(pausedUntil);
+ expect(await inertColumns()).toEqual(inertBefore);
+ const clearStart=Date.now();
+ await M.setWorkerWakeSettings({}, {workerRef:targetId,input:{clearPause:true}},ctx(holderId));
+ const clearEnd=Date.now();
+ const cleared=await db.workerWakeSettings.findUniqueOrThrow({where:{workerId:targetId}});
+ expect(cleared.pausedUntil).toBeNull();
+ expect(cleared.exemptEndedAt!.getTime()).toBeGreaterThanOrEqual(clearStart);
+ expect(cleared.exemptEndedAt!.getTime()).toBeLessThanOrEqual(clearEnd);
+ expect(await inertColumns()).toEqual(inertBefore);
+ const changed=await M.setAppDeliverySettings({}, {appRef:appId,input:{busyDelaySeconds:601}},ctx(adminId));
+ expect(changed).toMatchObject({busyDelaySeconds:601,stuckWindowSeconds:1800,checkPeriodSeconds:90,darkAlarmWindowSeconds:3600});
+ expect((await db.app.findUniqueOrThrow({where:{id:appId}})).deliveryBusyDelaySeconds).toBe(601);
+ expect(await inertColumns()).toEqual(inertBefore);
  expect((await loadPendingReasons(db,appId,[targetId],new Date())).get(targetId)).toBe('NO_TASK');
 });
 
