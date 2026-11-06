@@ -29,6 +29,7 @@ import {
   type ChatTxRunner,
 } from '../../../lib/chatRoot.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
+import { translateSessionExpired } from '../../../lib/channels.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
 import {
   encryptNodeFields,
@@ -854,7 +855,7 @@ export const chatMutations = {
       // Decrypt the chat node's metadata (it holds conversationName, stageName,
       // messageCount in `data`) if the memory is encrypted.
       const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
-      if (memEncInfo.isEncrypted) decryptNodeFields(chatNode, memEncInfo);
+      if (memEncInfo.isEncrypted) translateSessionExpired(memEncInfo.id, () => decryptNodeFields(chatNode, memEncInfo));
 
       // #919: rebound below to the copy read under the chat lock. Everything
       // before that point reads only `scope`, which is immutable for a chat's
@@ -1212,7 +1213,7 @@ export const chatMutations = {
       // transcript oldest-first like everyone else.
       messages.reverse();
       if (memEncInfo.isEncrypted) {
-        for (const m of messages) decryptNodeFields(m, memEncInfo);
+        for (const m of messages) translateSessionExpired(memEncInfo.id, () => decryptNodeFields(m, memEncInfo));
       }
 
       // Role detection is agent-agnostic (Constitution Invariant #14):
@@ -1308,7 +1309,7 @@ export const chatMutations = {
       const inTx = await chatWriteTx(ctx, chatNode.memoryId);
 
       const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
-      if (memEncInfo.isEncrypted) decryptNodeFields(chatNode, memEncInfo);
+      if (memEncInfo.isEncrypted) translateSessionExpired(memEncInfo.id, () => decryptNodeFields(chatNode, memEncInfo));
 
       // #919: rebound below to the copy read under the chat lock (see
       // sendChatMessage). Only `scope`, which is immutable, is read before.
@@ -1430,7 +1431,7 @@ export const chatMutations = {
         if (located) await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${located.id} FOR UPDATE`;
         const dataNode = located ? await tx.node.findFirst({ where: dataNodeWhere }) : null;
         if (dataNode) {
-          if (memEncInfo.isEncrypted) decryptNodeFields(dataNode, memEncInfo);
+          if (memEncInfo.isEncrypted) translateSessionExpired(memEncInfo.id, () => decryptNodeFields(dataNode, memEncInfo));
           const existingData = (dataNode.data as Record<string, unknown>) ?? {};
           const merged = fold(existingData, data);
           // #1328 — extraction states no task, so it cannot change a `data`
@@ -1813,7 +1814,7 @@ export const chatMutations = {
         await tx.$queryRaw`SELECT id FROM nodes WHERE id=${chatNode.id} FOR UPDATE`;
         const locked = await tx.node.findUniqueOrThrow({ where: { id: chatNode.id } });
         if (locked.memoryId !== chatNode.memoryId || locked.loc !== chatNode.loc) throw new GraphQLError('Chat authority changed.', { extensions: { code: 'CHAT_AUTHORITY_SCOPE_CHANGED' } });
-        const plain = decryptNodeFields({ data: locked.data }, memEncInfo).data as Record<string, unknown> | null;
+        const plain = translateSessionExpired(memEncInfo.id, () => decryptNodeFields({ data: locked.data }, memEncInfo)).data as Record<string, unknown> | null;
         if (plain?.title === title.trim()) return;
         await withChatRootLock(ctx.db, chatNode, memEncInfo, async ({ chatData }) => {
           // Only trusted portal identity mints HUMAN; governed token/run/App writes refuse.
