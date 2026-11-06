@@ -98,6 +98,10 @@ it('retains all four inert columns and preserves populated rows after both depre
   events:await db.agentTeamEvent.findMany({where:{appId}}),
  });
  const before=await snapshot();
+ for(const input of [{standbyEnabled:false},{}]) {
+  expect(await M.setAppDeliverySettings({}, {appRef:appId,input},ctx(adminId))).toMatchObject({standbyEnabled:false,standbyEffective:false});
+  expect(await snapshot()).toEqual(before);
+ }
  await expect(M.isolateWorker({}, {workerRef:targetId,until:'not-a-date'},ctx(holderId)))
   .rejects.toMatchObject({extensions:{code:'WORKER_ISOLATION_UNAVAILABLE'}});
  expect(await snapshot()).toEqual(before);
