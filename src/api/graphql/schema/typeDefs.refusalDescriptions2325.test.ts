@@ -57,3 +57,13 @@ describe('#2325 owner directives name the reporting-worker audience as the chain
     expect(description('setWorkerAvailability')).toMatch(/A worker another reports to directly may also clear only a stall-rule/);
   });
 });
+
+
+describe('#3590 cloneAgent names the public refusal codes', () => {
+  it('uses wire codes rather than the internal blocker keys', () => {
+    const text = description('cloneAgent');
+    expect(text).toContain('CLONE_BASE_UNUSABLE');
+    expect(text).toContain('CLONE_IMPORT_UNUSABLE');
+    expect(text).not.toMatch(/\b(?:BASE_UNUSABLE|IMPORT_UNUSABLE)\b/);
+  });
+});

@@ -1,3 +1,4 @@
+import { SYNC_NOT_ATTEMPTED, syncNotAttemptedMessage } from '../integrations/github/syncNotAttempted.js';
 import { MCP_WORKER_BINDING_UNSUPPORTED, offTeamTool } from './disabledTools.js';
 import { registerAutomationTeamSnapshotGrantTools } from './automationTeamSnapshotGrantTools.js';
 import { appendDeliveryPending } from '../lib/tickers/deliveryPending.js';
@@ -11857,13 +11858,10 @@ function ageOf(at: Date, now: Date = new Date()): string {
         include: { organization: true },
       });
       if (!memory) return refusalResult('Memory not found.');
-      // R206 / cor:sec:040:05: an encrypted memory gets the typed refusal from the sync itself
-      // even with no source, so the no-source reply never reads as a healthy sync.
-      if (!memory.source && !memory.isEncrypted) return textResult('Memory has no source repository configured.');
-
       // Import and call syncGraphFromGithub
       const { syncGraphFromGithub, describeSyncOutcome } = await import('../integrations/github/syncGraphFromGithub.js');
       const result = await syncGraphFromGithub(memory as Parameters<typeof syncGraphFromGithub>[0]);
+      if (result.notAttemptedReason) return refusalResult(`[${SYNC_NOT_ATTEMPTED}] ${syncNotAttemptedMessage(result.notAttemptedReason)}`);
 
       if (result.fault) throw new Error(result.error ?? 'sync fault');
       if (result.error) return refusalResult(`Sync failed${result.errorCode ? ` [${result.errorCode}]` : ''}: ${result.error}`);

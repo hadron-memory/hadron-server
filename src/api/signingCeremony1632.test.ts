@@ -139,44 +139,117 @@ function signingBody(p: Proved, key: SoftPasskey, over: { uv?: boolean; origin?:
 
 const FORBIDDEN = '{"error":"forbidden"}';
 
-/** Execute the served renderer with the proven HTTP response; transport/auth are exercised above it. */
-async function renderedProof(requestId: string, proof: unknown, extraResponses: Array<{ status: number; body: unknown }> = []) {
-  type Element = { tag: string; textContent: string; children: Element[]; hidden: boolean;
-    listeners: Record<string, () => Promise<void>>; appendChild: (child: Element) => void;
-    replaceChildren: (...children: Element[]) => void; addEventListener: (event: string, fn: () => Promise<void>) => void; focus: () => void };
-  let activeElement: Element | null = null;
-  const make = (tag: string): Element => {
-    const e: Element = { tag, textContent: '', children: [], hidden: false, listeners: {},
-      appendChild: child => { e.children.push(child); }, replaceChildren: (...children) => { e.children = children; },
-      addEventListener: (event, fn) => { e.listeners[event] = fn; }, focus: () => { activeElement = e; } };
+/**
+ * A minimal modelled DOM for the served ceremony script (#3563). It is VM state-machine evidence, not native DOM or
+ * assistive-technology evidence: it models only what the focus cells need. Shell roots are attached to a rooted
+ * document; a created element is connected only once appended under a connected ancestor, and `focus()` is a no-op
+ * for a disabled, hidden-ancestry or detached control, as in a browser.
+ */
+interface FakeElement {
+  tag: string; textContent: string; children: FakeElement[]; parent: FakeElement | null; hidden: boolean; disabled: boolean;
+  listeners: Record<string, () => Promise<void>>; appendChild: (child: FakeElement) => void;
+  replaceChildren: (...children: FakeElement[]) => void; addEventListener: (event: string, fn: () => Promise<void>) => void; focus: () => void;
+}
+function createFakeDom(shellIds: Array<{ id: string; hidden?: boolean }>) {
+  let active: FakeElement | null = null;
+  const accepted: FakeElement[] = [];
+  const contains = (ancestor: FakeElement, node: FakeElement | null): boolean => { for (let n = node; n; n = n.parent) if (n === ancestor) return true; return false; };
+  const detach = (child: FakeElement) => {
+    if (child.parent) child.parent.children = child.parent.children.filter(c => c !== child);
+    child.parent = null;
+    if (contains(child, active)) active = null; // a removed active element leaves focus on the body
+  };
+  const make = (tag: string): FakeElement => {
+    const e: FakeElement = { tag, textContent: '', children: [], parent: null, hidden: false, disabled: false, listeners: {},
+      appendChild: child => { detach(child); e.children.push(child); child.parent = e; },
+      replaceChildren: (...children) => { [...e.children].forEach(detach); children.forEach(c => e.appendChild(c)); },
+      addEventListener: (event, fn) => { e.listeners[event] = fn; },
+      focus: () => {
+        const hiddenAncestry = (() => { for (let n: FakeElement | null = e; n; n = n.parent) if (n.hidden) return true; return false; })();
+        if (!contains(root, e) || e.disabled || hiddenAncestry) return;
+        active = e; accepted.push(e);
+      } };
     return e;
   };
-  const ids = Object.fromEntries(['title', 'msg', 'view', 'start', 'go'].map(id => [id, make(id)]));
+  const root = make('#document');
+  const ids: Record<string, FakeElement> = {};
+  for (const shell of shellIds) { const e = make(shell.id); e.hidden = shell.hidden ?? false; root.appendChild(e); ids[shell.id] = e; }
   const document = { getElementById: (id: string) => ids[id], createElement: make,
     createTextNode: (text: string) => Object.assign(make('#text'), { textContent: text }), title: '',
-    get activeElement() { return activeElement; } };
-  const responses = [{ status: 200, body: { ceremonyId: 'proof', challenge: 'AA', rpId: RP } },
-    { status: 200, body: proof }, ...extraResponses];
+    get activeElement() { return active; } };
+  return { document, ids, root, make, accepted, isConnected: (e: FakeElement) => contains(root, e) };
+}
+
+/**
+ * Independent request accounting for the served script's fetch. The expected sequence is test data, not derived from
+ * what the script sends. Every call is recorded BEFORE any exception can reach the script's own catch, and a wrong
+ * or extra call lands in a side channel the script cannot swallow.
+ */
+function createRequestLedger(requestId: string, expected: Array<{ path: string; status: number; body: unknown }>) {
+  const observed: Array<{ method: string; path: string; body: any; rawBody: unknown; credentials: unknown; contentType: unknown }> = [];
+  const unexpected: string[] = [];
+  let consumed = 0;
+  const fetchFake = async (url: string, init: { method?: string; body?: string; credentials?: unknown; headers?: Record<string, string> } = {}) => {
+    // Record the raw metadata FIRST: a URL or body that fails to parse must still land in the side channel, never
+    // throw before the call is on record where the script's catch could swallow it.
+    const call: (typeof observed)[number] = { method: init.method ?? 'GET', path: String(url), body: undefined, rawBody: init.body,
+      credentials: init.credentials, contentType: init.headers?.['content-type'] };
+    observed.push(call);
+    try { call.path = new URL(String(url), 'https://ledger.invalid').pathname; }
+    catch { unexpected.push(`unparseable URL ${String(url)}`); throw new Error('Unexpected renderer request'); }
+    if (init.body !== undefined) {
+      try { call.body = JSON.parse(init.body); }
+      catch { unexpected.push(`malformed JSON body on ${call.method} ${call.path}`); throw new Error('Unexpected renderer request'); }
+    }
+    const want = expected[consumed];
+    if (!want) { unexpected.push(`extra ${call.method} ${call.path}`); throw new Error('Unexpected renderer request'); }
+    const wantPath = `/signing/${requestId}/${want.path}`;
+    if (call.method !== 'POST' || call.path !== wantPath) {
+      unexpected.push(`wanted POST ${wantPath}, got ${call.method} ${call.path}`); throw new Error('Unexpected renderer request');
+    }
+    consumed++;
+    return { ok: want.status >= 200 && want.status < 300, status: want.status, json: async () => want.body };
+  };
+  /** Assert, outside the script's catch: the exact sequence, no wrong or extra call, every response consumed. */
+  const verify = () => {
+    expect(unexpected, 'unexpected renderer requests').toEqual([]);
+    expect(observed.map(c => `${c.method} /${c.path.split('/').slice(3).join('/')}`)).toEqual(expected.map(e => `POST /${e.path}`));
+    expect(consumed, 'unconsumed responses').toBe(expected.length);
+    for (const c of observed) { expect(c.credentials).toBe('same-origin'); expect(c.contentType).toBe('application/json'); }
+  };
+  return { fetchFake, observed, unexpected, verify };
+}
+
+/** Execute the served renderer with the proven HTTP response; transport/auth are exercised above it. */
+async function renderedProof(requestId: string, proof: unknown, extraResponses: Array<{ path: 'challenge' | 'complete' | 'decline'; status: number; body: unknown }> = []) {
+  const dom = createFakeDom([{ id: 'title' }, { id: 'msg' }, { id: 'view', hidden: true }, { id: 'start' }, { id: 'go' }]);
+  const { ids, document } = dom;
+  const ledger = createRequestLedger(requestId, [
+    { path: 'proof/challenge', status: 200, body: { ceremonyId: 'proof', challenge: 'AA', rpId: RP } },
+    { path: 'proof', status: 200, body: proof }, ...extraResponses]);
   const script = await (await fetch(`${base}/signing/ceremony.js`)).text();
-  runInNewContext(script, { document, location: { pathname: `/signing/${requestId}` },
-    fetch: async () => {
-      const response = responses.shift();
-      if (!response) throw new Error('Unexpected renderer request');
-      return { ok: response.status >= 200 && response.status < 300, status: response.status, json: async () => response.body };
-    },
+  runInNewContext(script, { document, location: { pathname: `/signing/${requestId}` }, fetch: ledger.fetchFake,
     navigator: { credentials: { get: async () => ({ rawId: new Uint8Array([1]), response: {
       authenticatorData: new Uint8Array([1]), clientDataJSON: new Uint8Array([1]), signature: new Uint8Array([1]) } }) } },
     window: { PublicKeyCredential: function () {} }, btoa, atob, Uint8Array, JSON, Date, Error });
   await ids.go.listeners.click();
-  const texts = (e: Element): string[] => [e.textContent, ...e.children.flatMap(texts)];
-  const button = (label: string): Element => {
-    const find = (e: Element): Element | undefined => e.tag === 'button' && e.textContent === label
-      ? e : e.children.map(find).find(Boolean);
-    const found = find(ids.view);
+  const texts = (e: FakeElement): string[] => [e.textContent, ...e.children.flatMap(texts)];
+  const find = (label: string): FakeElement | undefined => {
+    const walk = (e: FakeElement): FakeElement | undefined => e.tag === 'button' && e.textContent === label ? e : e.children.map(walk).find(Boolean);
+    return walk(ids.view);
+  };
+  const button = (label: string): FakeElement => {
+    const found = find(label);
     if (!found) throw new Error('Missing renderer button: ' + label);
     return found;
   };
-  return { ids, texts, document, button };
+  /** The button is attached, enabled and the one holding modelled focus. */
+  const expectFocused = (el: FakeElement) => {
+    expect(dom.isConnected(el), 'focused control attached').toBe(true);
+    expect(el.disabled, 'focused control enabled').toBe(false);
+    expect(document.activeElement).toBe(el);
+  };
+  return { ids, texts, document, button, find, dom, ledger, expectFocused, verify: ledger.verify };
 }
 
 describe('the surface is mounted only through signingSurfacePolicy()', () => {
@@ -253,17 +326,206 @@ describe('a link alone reveals nothing (cor:dmo:130:08)', () => {
   });
 });
 
-describe('#3482 served-script focus after decline Cancel', () => {
-  it('returns focus to the NEW Decline control after Cancel', async () => {
+describe('#3563 harness self-controls (the oracle is not validated only by the handler it judges)', () => {
+  const shell = () => createFakeDom([{ id: 'a' }, { id: 'hid', hidden: true }]);
+
+  it('an attached, enabled control accepts focus', () => {
+    const d = shell();
+    const b = d.make('button'); d.ids.a.appendChild(b);
+    expect(d.isConnected(b)).toBe(true);
+    b.focus();
+    expect(d.document.activeElement).toBe(b);
+    expect(d.accepted).toEqual([b]);
+  });
+
+  it('a disabled control ignores focus, and focus works again once it is enabled', () => {
+    const d = shell();
+    const b = d.make('button'); d.ids.a.appendChild(b);
+    b.disabled = true; b.focus();
+    expect(d.document.activeElement).toBeNull();
+    b.disabled = false; b.focus();
+    expect(d.document.activeElement).toBe(b);
+  });
+
+  it('a created element is not connected, and ignores focus, until it is appended under a connected ancestor', () => {
+    const d = shell();
+    const b = d.make('button'), wrap = d.make('div');
+    wrap.appendChild(b);
+    expect(d.isConnected(b)).toBe(false);
+    b.focus();
+    expect(d.document.activeElement).toBeNull();
+    d.ids.a.appendChild(wrap);
+    expect(d.isConnected(b)).toBe(true);
+    b.focus();
+    expect(d.document.activeElement).toBe(b);
+  });
+
+  it('a control removed by replaceChildren is detached, ignores focus, and drops focus it held to the body', () => {
+    const d = shell();
+    const old = d.make('button'); d.ids.a.appendChild(old); old.focus();
+    expect(d.document.activeElement).toBe(old);
+    d.ids.a.replaceChildren(d.make('button'));
+    expect(d.isConnected(old)).toBe(false);
+    expect(d.document.activeElement).toBeNull();
+    old.focus();
+    expect(d.document.activeElement).toBeNull();
+  });
+
+  it('a control under a hidden ancestor ignores focus', () => {
+    const d = shell();
+    const b = d.make('button'); d.ids.hid.appendChild(b); b.focus();
+    expect(d.document.activeElement).toBeNull();
+    d.ids.hid.hidden = false; b.focus();
+    expect(d.document.activeElement).toBe(b);
+  });
+
+  const ledgerCall = (l: ReturnType<typeof createRequestLedger>, path: string, method = 'POST') =>
+    l.fetchFake('/signing/REQ/' + path, { method, body: '{}', credentials: 'same-origin', headers: { 'content-type': 'application/json' } });
+
+  it('the ledger accepts the exact sequence and verify() passes', async () => {
+    const l = createRequestLedger('REQ', [{ path: 'challenge', status: 200, body: {} }, { path: 'complete', status: 400, body: { error: 'x' } }]);
+    expect((await ledgerCall(l, 'challenge')).status).toBe(200);
+    expect((await ledgerCall(l, 'complete')).status).toBe(400);
+    expect(() => l.verify()).not.toThrow();
+  });
+
+  it('the ledger records a wrong endpoint in the side channel even though the script would swallow the throw', async () => {
+    const l = createRequestLedger('REQ', [{ path: 'complete', status: 200, body: {} }]);
+    await expect(ledgerCall(l, 'decline')).rejects.toThrow('Unexpected renderer request');
+    expect(l.unexpected).toEqual(['wanted POST /signing/REQ/complete, got POST /signing/REQ/decline']);
+    expect(() => l.verify()).toThrow();
+  });
+
+  it('the ledger rejects a substring-matching path and a wrong method', async () => {
+    const l = createRequestLedger('REQ', [{ path: 'proof', status: 200, body: {} }, { path: 'complete', status: 200, body: {} }]);
+    await expect(ledgerCall(l, 'proof/challenge')).rejects.toThrow();
+    await expect(ledgerCall(l, 'proof', 'GET')).rejects.toThrow();
+    expect(l.unexpected).toHaveLength(2);
+  });
+
+  it('the ledger records an extra request after every response is consumed, and verify() fails', async () => {
+    const l = createRequestLedger('REQ', [{ path: 'challenge', status: 200, body: {} }]);
+    await ledgerCall(l, 'challenge');
+    await expect(ledgerCall(l, 'challenge')).rejects.toThrow();
+    expect(l.unexpected).toEqual(['extra POST /signing/REQ/challenge']);
+    expect(() => l.verify()).toThrow();
+  });
+
+  it('the ledger records a malformed-JSON extra POST in the side channel even though the script would swallow the throw', async () => {
+    const l = createRequestLedger('REQ', [{ path: 'challenge', status: 200, body: {} }]);
+    await ledgerCall(l, 'challenge');
+    await expect(l.fetchFake('/signing/REQ/unexpected', { method: 'POST', body: '{not json', credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' } })).rejects.toThrow('Unexpected renderer request');
+    expect(l.observed).toHaveLength(2);
+    expect(l.observed[1]).toMatchObject({ method: 'POST', rawBody: '{not json' });
+    expect(l.unexpected).toEqual(['malformed JSON body on POST /signing/REQ/unexpected']);
+    expect(() => l.verify()).toThrow();
+  });
+
+  it('the ledger records an unparseable URL in the side channel and verify() fails', async () => {
+    const l = createRequestLedger('REQ', [{ path: 'challenge', status: 200, body: {} }]);
+    await ledgerCall(l, 'challenge');
+    await expect(l.fetchFake('http://', { method: 'POST', body: '{}' })).rejects.toThrow('Unexpected renderer request');
+    expect(l.unexpected).toEqual(['unparseable URL http://']);
+    expect(() => l.verify()).toThrow();
+  });
+
+  it('the ledger fails verify() when an intended request is never sent', async () => {
+    const l = createRequestLedger('REQ', [{ path: 'challenge', status: 200, body: {} }, { path: 'complete', status: 200, body: {} }]);
+    await ledgerCall(l, 'challenge');
+    expect(l.unexpected).toEqual([]);
+    expect(() => l.verify()).toThrow();
+  });
+});
+
+describe('#3482/#3563 served-script focus, with modelled focus and independent request accounting', () => {
+  // Modelled focus is VM state-machine evidence, not native DOM or assistive-technology evidence.
+  const challenge = { path: 'challenge', status: 200, body: { ceremonyId: 'action', challenge: 'AA', rpId: RP, allowCredentials: [] } } as const;
+
+  it('focuses the title on an ordinary writable proof, with Sign and Decline present', async () => {
+    const req = await openRequest(), proof = await prove(req.id, signer);
+    expect(proof.json.canSign).toBe(true);
+    const page = await renderedProof(req.id, proof.json);
+    page.expectFocused(page.ids.title);
+    expect(page.find('Sign with passkey')).toBeDefined();
+    expect(page.find('Decline')).toBeDefined();
+    page.verify();
+  });
+
+  // cor:dmo:130:02 S3 (only someone who may write the memory may sign) and cor:dmo:130:08 S6 (a reader sees the node
+  // but can't complete the ceremony): the real synthetic reader proof, not a relabelled writer.
+  it('a real reader proof: title focus, no Sign or Decline, and no action request (cor:dmo:130:02 S3, cor:dmo:130:08 S6)', async () => {
+    const req = await openRequest(), proof = await prove(req.id, reader);
+    expect(proof.json.outcome).toBe('open');
+    expect(proof.json.canSign).toBe(false);
+    const page = await renderedProof(req.id, proof.json);
+    page.expectFocused(page.ids.title);
+    expect(page.find('Sign with passkey')).toBeUndefined();
+    expect(page.find('Decline')).toBeUndefined();
+    expect(page.texts(page.ids.view)).toContain('You can read this, but you are not allowed to sign it.');
+    page.verify();
+  });
+
+  it('failed sign → Decline → Cancel: Sign is re-enabled and focused, Cancel sends nothing, the NEW Decline is focused', async () => {
+    const req = await openRequest(), proof = await prove(req.id, signer);
+    const page = await renderedProof(req.id, proof.json, [challenge,
+      { path: 'complete', status: 400, body: { error: 'SIGNATURE_NOT_VERIFIED' } }]);
+    const sign = page.button('Sign with passkey'), oldDecline = page.button('Decline');
+    await sign.listeners.click();
+    expect(sign.disabled).toBe(false);
+    expect(oldDecline.disabled).toBe(false);
+    page.expectFocused(sign);
+    expect(page.ids.msg.textContent).toBe('That did not verify. Nothing was recorded. You can try again.');
+    // The request stays open after a recoverable failure (pins current behaviour; no spec governs it).
+    const callsBefore = page.ledger.observed.length;
+    await oldDecline.listeners.click();
+    page.expectFocused(page.button('Cancel'));
+    await page.button('Cancel').listeners.click();
+    const newDecline = page.button('Decline');
+    expect(newDecline).not.toBe(oldDecline);
+    page.expectFocused(newDecline);
+    expect(page.dom.isConnected(oldDecline)).toBe(false);
+    expect(page.document.activeElement).not.toBe(oldDecline);
+    expect(page.ledger.observed.length, 'opening the confirmation and pressing Cancel send nothing').toBe(callsBefore);
+    expect(page.ledger.observed.some(c => c.path.endsWith('/decline'))).toBe(false);
+    page.verify();
+  });
+
+  it('only Confirm Decline calls /decline: challenge then decline, then the Declined title takes focus', async () => {
+    const req = await openRequest(), proof = await prove(req.id, signer);
+    const page = await renderedProof(req.id, proof.json, [challenge, { path: 'decline', status: 200, body: {} }]);
+    await page.button('Decline').listeners.click();
+    expect(page.ledger.observed.filter(c => c.path.endsWith('/decline'))).toHaveLength(0);
+    await page.button('Yes, decline').listeners.click();
+    expect(page.ledger.observed.at(-1)!.body).toEqual({ ceremonyId: 'action' });
+    expect(page.ids.title.textContent).toBe('Declined');
+    page.expectFocused(page.ids.title);
+    page.verify();
+  });
+
+  it('Sign: challenge then complete with a full assertion body, then the Signed title takes focus', async () => {
+    const req = await openRequest(), proof = await prove(req.id, signer);
+    const page = await renderedProof(req.id, proof.json, [challenge, { path: 'complete', status: 200, body: {} }]);
+    await page.button('Sign with passkey').listeners.click();
+    expect(Object.keys(page.ledger.observed.at(-1)!.body).sort())
+      .toEqual(['authenticatorData', 'ceremonyId', 'clientDataJson', 'credentialId', 'signature']);
+    expect(page.ledger.observed.at(-1)!.body.ceremonyId).toBe('action');
+    expect(page.ids.title.textContent).toBe('Signed');
+    page.expectFocused(page.ids.title);
+    page.verify();
+  });
+
+  it('returns focus to the NEW Decline control after Cancel, with no request sent', async () => {
     const req = await openRequest(), proof = await prove(req.id, signer);
     const page = await renderedProof(req.id, proof.json);
-    expect(page.document.activeElement).toBe(page.ids.title);
+    page.expectFocused(page.ids.title);
     const oldDecline = page.button('Decline');
     await oldDecline.listeners.click();
-    expect(page.document.activeElement).toBe(page.button('Cancel'));
+    page.expectFocused(page.button('Cancel'));
     await page.button('Cancel').listeners.click();
-    expect(page.document.activeElement).toBe(page.button('Decline'));
+    page.expectFocused(page.button('Decline'));
     expect(page.button('Decline')).not.toBe(oldDecline);
+    page.verify();
   });
 
   for (const [action, status, body, expected] of [
@@ -273,13 +535,12 @@ describe('#3482 served-script focus after decline Cancel', () => {
     ['Yes, decline', 502, {}, 'Reload this page'],
   ] as const) it('preserves ' + action + '/' + status + ' focus on ' + expected, async () => {
     const req = await openRequest(), proof = await prove(req.id, signer);
-    const page = await renderedProof(req.id, proof.json, [
-      { status: 200, body: { ceremonyId: 'action', challenge: 'AA', rpId: RP, allowCredentials: [] } },
-      { status, body },
-    ]);
+    const last = action === 'Yes, decline' ? 'decline' : 'complete';
+    const page = await renderedProof(req.id, proof.json, [challenge, { path: last, status, body }]);
     if (action === 'Yes, decline') await page.button('Decline').listeners.click();
     await page.button(action).listeners.click();
-    expect(page.document.activeElement).toBe(page.button(expected));
+    page.expectFocused(page.button(expected));
+    page.verify();
   });
 });
 

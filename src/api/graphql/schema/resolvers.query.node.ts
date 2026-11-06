@@ -11,6 +11,7 @@ import { markBatchReadNodes } from './resolvers.nodeBatchEdges.js';
 import { contentScopeWhere, effectiveContentScope, type ContentScope } from '../../../lib/comments/scope.js';
 import { isConcealedCommentHistory } from './resolvers.comments.js';
 import { COMMENT_NODE_TYPE } from '../../../lib/comments/index.js';
+import { decodeLocSegmentsCursor, normalizeLocSegmentsLimit, readLocSegments } from '../../../lib/memoryLocSegments.js';
 import { effectiveScope, findEffectiveNodeIdByLoc, markInherited, retainEffective, stillInherited, type InheritedFrom } from '../../../lib/effectiveSystemMemory.js';
 import {
   renderNodeExport,
@@ -165,6 +166,81 @@ export interface FindNodesArgs {
   orgId?: string | null;
   limit?: number | null;
   offset?: number | null;
+}
+
+/**
+ * The memories a node read may search: the caller's accessible set intersected with the memories the
+ * request names (ID/URN mix), then the class and organisation narrowing (#463, #1987, #3306). ONE
+ * computation shared by `findNodes` and the loc-segments read (#3456), so the two cannot disagree about
+ * who may read what. Returns the gated ids BEFORE system-memory inheritance (`effectiveScope`), which
+ * each caller applies itself. An empty list is the one answer for an unreadable, missing or empty scope.
+ */
+export async function resolveNodeReadScopeIds(
+  ctx: Context,
+  f: { memoryIds?: string[] | null; memoryClasses?: string[] | null; isRunnable?: boolean | null },
+  orgScopeId: string | null,
+): Promise<string[]> {
+  // ── Resolve scope: accessible ∩ requested memories (ID/URN mix) ──
+  const explicitIds = !!(f.memoryIds && f.memoryIds.length > 0);
+  // #3306: resolve the named memories first so the PUBLIC-knowledge arm (pure App key / userless run) looks up
+  // only those, never every PUBLIC memory.
+  const requestedIds = explicitIds
+    ? (await Promise.all(
+        f.memoryIds!.map((ref) =>
+          isId(ref)
+            ? Promise.resolve(ref)
+            : resolveMemoryRef(ctx.db, ref).then((r) => r.id).catch(() => null)),
+      )).filter((id): id is string => id !== null)
+    : [];
+  const accessible = await getAccessibleMemoryIds(ctx, undefined, { publicTargetIds: requestedIds });
+  const memClassClause: unknown =
+    f.memoryClasses && f.memoryClasses.length > 0
+      ? { in: f.memoryClasses }
+      : (!explicitIds ? { not: 'system' } : undefined); // broad search hides system-class; explicit ids win
+
+  // #463: push the org narrowing straight into the scope queries (rather
+  // than selecting all ids then intersecting) so the admin/broad path never
+  // materializes every memory id just to filter it down.
+  // #1987 (R208 A, cor:api:060:04): the organisation's TASK catalogue lists
+  // only the organisation's own memories, never an App's. A memory that
+  // belongs to an App carries app_id (required for class 'app', set for an
+  // App-scoped knowledge/group, #653), so the runnable listing narrows to
+  // app_id IS NULL, the same predicate as ORG_INCLUDE.memories. Narrowing
+  // only: it composes with the accessible set above and adds no audience.
+  // Org-scoped non-runnable search is deliberately unchanged (no ruling).
+  const orgWhere = orgScopeId
+    ? { organizationId: orgScopeId, ...(f.isRunnable === true ? { appId: null } : {}) }
+    : {};
+
+  let scopeIds: string[];
+  if (explicitIds) {
+    const requested = requestedIds;
+    const allowed = accessible === null ? null : new Set(accessible);
+    scopeIds = allowed === null ? requested : requested.filter((id) => allowed.has(id));
+    // Query only when a class or org filter must be applied to the requested
+    // set; otherwise the requested ∩ accessible ids stand as-is.
+    if ((memClassClause || orgScopeId) && scopeIds.length > 0) {
+      const rows = await ctx.db.memory.findMany({
+        where: { id: { in: scopeIds }, ...(memClassClause ? { class: memClassClause as never } : {}), ...orgWhere },
+        select: { id: true },
+      });
+      scopeIds = rows.map((m) => m.id);
+    }
+  } else if (accessible === null) {
+    // Admin/broad — resolve scope + class + org filter in one query.
+    const rows = await ctx.db.memory.findMany({
+      where: { deletedAt: null, ...(memClassClause ? { class: memClassClause as never } : {}), ...orgWhere },
+      select: { id: true },
+    });
+    scopeIds = rows.map((m) => m.id);
+  } else {
+    const rows = await ctx.db.memory.findMany({
+      where: { id: { in: accessible }, ...(memClassClause ? { class: memClassClause as never } : {}), ...orgWhere },
+      select: { id: true },
+    });
+    scopeIds = rows.map((m) => m.id);
+  }
+  return scopeIds;
 }
 
 type AppNodesFilter = {
@@ -1459,66 +1535,8 @@ export const nodeQueries = {
         orgScopeId = resolvedOrgId;
       }
 
-      // ── Resolve scope: accessible ∩ requested memories (ID/URN mix) ──
-      const explicitIds = !!(f.memoryIds && f.memoryIds.length > 0);
-      // #3306: resolve the named memories first so the PUBLIC-knowledge arm (pure App key / userless run) looks up
-      // only those, never every PUBLIC memory.
-      const requestedIds = explicitIds
-        ? (await Promise.all(
-            f.memoryIds!.map((ref) =>
-              isId(ref)
-                ? Promise.resolve(ref)
-                : resolveMemoryRef(ctx.db, ref).then((r) => r.id).catch(() => null)),
-          )).filter((id): id is string => id !== null)
-        : [];
-      const accessible = await getAccessibleMemoryIds(ctx, undefined, { publicTargetIds: requestedIds });
-      const memClassClause: unknown =
-        f.memoryClasses && f.memoryClasses.length > 0
-          ? { in: f.memoryClasses }
-          : (!explicitIds ? { not: 'system' } : undefined); // broad search hides system-class; explicit ids win
-
-      // #463: push the org narrowing straight into the scope queries (rather
-      // than selecting all ids then intersecting) so the admin/broad path never
-      // materializes every memory id just to filter it down.
-      // #1987 (R208 A, cor:api:060:04): the organisation's TASK catalogue lists
-      // only the organisation's own memories, never an App's. A memory that
-      // belongs to an App carries app_id (required for class 'app', set for an
-      // App-scoped knowledge/group, #653), so the runnable listing narrows to
-      // app_id IS NULL, the same predicate as ORG_INCLUDE.memories. Narrowing
-      // only: it composes with the accessible set above and adds no audience.
-      // Org-scoped non-runnable search is deliberately unchanged (no ruling).
-      const orgWhere = orgScopeId
-        ? { organizationId: orgScopeId, ...(f.isRunnable === true ? { appId: null } : {}) }
-        : {};
-
-      let scopeIds: string[];
-      if (explicitIds) {
-        const requested = requestedIds;
-        const allowed = accessible === null ? null : new Set(accessible);
-        scopeIds = allowed === null ? requested : requested.filter((id) => allowed.has(id));
-        // Query only when a class or org filter must be applied to the requested
-        // set; otherwise the requested ∩ accessible ids stand as-is.
-        if ((memClassClause || orgScopeId) && scopeIds.length > 0) {
-          const rows = await ctx.db.memory.findMany({
-            where: { id: { in: scopeIds }, ...(memClassClause ? { class: memClassClause as never } : {}), ...orgWhere },
-            select: { id: true },
-          });
-          scopeIds = rows.map((m) => m.id);
-        }
-      } else if (accessible === null) {
-        // Admin/broad — resolve scope + class + org filter in one query.
-        const rows = await ctx.db.memory.findMany({
-          where: { deletedAt: null, ...(memClassClause ? { class: memClassClause as never } : {}), ...orgWhere },
-          select: { id: true },
-        });
-        scopeIds = rows.map((m) => m.id);
-      } else {
-        const rows = await ctx.db.memory.findMany({
-          where: { id: { in: accessible }, ...(memClassClause ? { class: memClassClause as never } : {}), ...orgWhere },
-          select: { id: true },
-        });
-        scopeIds = rows.map((m) => m.id);
-      }
+      // Shared with the loc-segments read (#3456): one readable-set computation.
+      let scopeIds: string[] = await resolveNodeReadScopeIds(ctx, f, orgScopeId);
       if (scopeIds.length === 0) {
         return { hits: [], passages: [], total: 0, reason: null, degraded: null };
       }
@@ -2680,6 +2698,46 @@ export const nodeQueries = {
         include: APP_NODES_INCLUDE,
       });
       return finishAppNodes(ctx, results, read.inheritance);
+    },
+
+    /**
+     * #3456 (cor:api:090:05): one page of the distinct next loc segments under a parent loc. The readable
+     * set is `resolveNodeReadScopeIds` + `effectiveScope`, the SAME computation as `findNodes` with no query,
+     * so the two cannot disagree. Every no-access shape (unreadable, unresolvable, empty memory, a parent with
+     * nothing below it) is the one empty page; a request with no memoryIds is refused before any read.
+     */
+    memoryLocSegments: async (
+      _: unknown,
+      args: { memoryIds: string[]; parentLoc: string; limit?: number | null; after?: string | null },
+      ctx: Context,
+    ) => {
+      const refuse = (msg: string) => new GraphQLError(msg, { extensions: { code: 'BAD_USER_INPUT' } });
+      if (!Array.isArray(args.memoryIds) || args.memoryIds.length === 0) {
+        throw refuse('memoryLocSegments: memoryIds must name at least one memory.');
+      }
+      if (args.parentLoc.startsWith(':') || args.parentLoc.endsWith(':') || args.parentLoc.includes('::') || args.parentLoc.includes('\0')) {
+        throw refuse('memoryLocSegments: parentLoc is not a valid loc.');
+      }
+      let after: ReturnType<typeof decodeLocSegmentsCursor> = null;
+      if (args.after != null && args.after !== '') {
+        after = decodeLocSegmentsCursor(args.after);
+        if (!after) throw refuse('memoryLocSegments: after is not a cursor this field issued.');
+      }
+      const limit = normalizeLocSegmentsLimit(args.limit);
+      await admitOperationRate(ctx, ctx.db, 'FAN_OUT_READS', ctx.limiterIdentity ?? transportRateIdentity(ctx));
+      const empty = { items: [], hasMore: false, endCursor: null };
+      // Each memory is read once however many times (or by which alias) it was named: a repeat would repeat
+      // its rows, break the continuation and multiply the walk (#3586 review).
+      const gated = [...new Set(await resolveNodeReadScopeIds(ctx, { memoryIds: args.memoryIds }, null))];
+      if (gated.length === 0) return empty;
+      const inheritance = await effectiveScope(ctx.db, gated);
+      return readLocSegments(ctx.db, {
+        memoryIds: [...new Set(inheritance.memoryIds)],
+        excludeNodeIds: [...new Set(inheritance.excludeNodeIds)],
+        parent: args.parentLoc,
+        limit,
+        after,
+      });
     },
 
     /**
