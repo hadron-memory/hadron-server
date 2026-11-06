@@ -1,3 +1,5 @@
+import { HADRON_HEADER, HADRON_HEADER_STYLE } from './hadron-header.template.js';
+
 /**
  * #168 — server-hosted sign-in prompt for an MCP connector flow.
  *
@@ -28,9 +30,11 @@ export const SIGNIN_PROMPT_TEMPLATE = `<!doctype html>
   <meta name="robots" content="noindex">
   <title>Sign in to Hadron</title>
 ${SHARED_STYLE}
+${HADRON_HEADER_STYLE}
 </head>
 <body>
   <main>
+    ${HADRON_HEADER}
     <h1>Sign in to Hadron</h1>
     <p><strong>{{clientName}}</strong> is asking to connect to your Hadron account.</p>
     <p class="muted">Returns to: <code>{{redirectAnchor}}</code></p>

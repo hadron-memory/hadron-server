@@ -1,3 +1,5 @@
+import { HADRON_HEADER, HADRON_HEADER_STYLE } from './hadron-header.template.js';
+
 /**
  * Human-readable failure page for the first-party login callbacks
  * (GitHub / Google / Apple), in the same minimal-CSS family as
@@ -60,9 +62,11 @@ export const LOGIN_ERROR_TEMPLATE = `<!doctype html>
     }
     h1 { font-size: 1.25rem; margin: 0 0 1rem; }
   </style>
+${HADRON_HEADER_STYLE}
 </head>
 <body>
   <main>
+    ${HADRON_HEADER}
     <h1>Sign-in didn&#39;t complete</h1>
     <p>Your sign-in session expired or was interrupted. Please return to the app and try again.</p>
   </main>

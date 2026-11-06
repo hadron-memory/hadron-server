@@ -1,3 +1,5 @@
+import { HADRON_HEADER, HADRON_HEADER_STYLE } from './hadron-header.template.js';
+
 /**
  * Spec 025-oauth-for-mcp T037 — consent screen template.
  *
@@ -113,9 +115,11 @@ export const CONSENT_TEMPLATE = `<!doctype html>
     button[name="decision"][value="deny"]      { background: transparent; color: var(--text); border: 1px solid var(--deny-border); }
     button[name="decision"][value="deny"]:hover { background: var(--deny-hover); }
   </style>
+${HADRON_HEADER_STYLE}
 </head>
 <body>
   <main>
+    ${HADRON_HEADER}
     <h1>Authorize {{clientName}}</h1>
     <p>The application <strong>{{clientName}}</strong> is requesting access to your Hadron account.</p>
     <p>Returns to: <code>{{redirectAnchor}}</code></p>

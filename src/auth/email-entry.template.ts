@@ -1,3 +1,5 @@
+import { HADRON_HEADER, HADRON_HEADER_STYLE } from './hadron-header.template.js';
+
 /**
  * #804 — OAuth email magic-link sign-in: server-hosted pages.
  *
@@ -105,9 +107,11 @@ export const EMAIL_ENTRY_TEMPLATE = `<!doctype html>
   <meta name="robots" content="noindex">
   <title>Sign in to Hadron</title>
 ${SHARED_STYLE}
+${HADRON_HEADER_STYLE}
 </head>
 <body>
   <main>
+    ${HADRON_HEADER}
     <h1>Sign in to Hadron</h1>
     <p>Enter your email address and we&#39;ll send you a sign-in link, so you can continue authorizing <strong>{{clientName}}</strong>.</p>
     <form method="post" action="/oauth/authorize/email">
@@ -131,9 +135,11 @@ export const EMAIL_SENT_TEMPLATE = `<!doctype html>
   <meta name="robots" content="noindex">
   <title>Check your email</title>
 ${SHARED_STYLE}
+${HADRON_HEADER_STYLE}
 </head>
 <body>
   <main>
+    ${HADRON_HEADER}
     <h1>Check your email</h1>
     <p>We sent a sign-in link to <strong>{{email}}</strong>.</p>
     <p>Open the link on this device to continue — after signing in you&#39;ll be asked to finish authorizing the application.</p>
@@ -159,9 +165,11 @@ export const REVIEW_CODE_TEMPLATE = `<!doctype html>
   <meta name="robots" content="noindex">
   <title>Enter access code</title>
 ${SHARED_STYLE}
+${HADRON_HEADER_STYLE}
 </head>
 <body>
   <main>
+    ${HADRON_HEADER}
     <h1>Enter access code</h1>
     <p>This account uses a pre-shared access code instead of an emailed link.</p>
     <form method="post" action="/oauth/authorize/email/code">
