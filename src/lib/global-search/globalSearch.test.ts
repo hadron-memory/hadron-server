@@ -160,6 +160,42 @@ describe('globalSearch — smart-sniff', () => {
     expect(ids(byType(hits, 'node'))).toEqual(new Set([fx.nodeA]));
   });
 
+  it('matches substrings across the memory/loc boundary (#1586)', async () => {
+    // The memory atom is part of the match: nodeC has the same loc in "other".
+    // Also exercise partial atoms, schemes, case and normalized separators.
+    for (const query of [
+      'alpha:guide:intro', 'ALPHA::GUIDE:INTRO',
+      'hrn:node:alpha:guide:intro', 'urn:node:alpha::guide::intro',
+      'pha:gui', 'alpha:', ':guide', 'org-a:alpha',
+    ]) {
+      const result = await globalSearch(db, { query, entityTypes: ['node'] }, viewerP());
+      const expected = query === ':guide' ? [fx.nodeA, fx.nodeC] : [fx.nodeA];
+      expect(ids(result.hits), query).toEqual(new Set(expected));
+      expect(result.hits.every((hit) => hit.matchedField === 'urn')).toBe(true);
+    }
+    // A partial URN remains scoped even if an inaccessible memory matches it.
+    await db.memory.update({ where: { id: fx.memoryB }, data: { urn: 'org-b:alpha' } });
+    const hidden = await db.node.create({ data: {
+      id: generateId(), memoryId: fx.memoryB, loc: 'guide:intro', name: 'Hidden', tags: [],
+    } });
+    const params = { query: 'alpha:guide:intro', entityTypes: ['node'] as SearchEntityType[] };
+    expect(ids((await globalSearch(db, params, viewerP())).hits)).toEqual(new Set([fx.nodeA]));
+    expect(ids((await globalSearch(db, params, anonP())).hits)).toEqual(new Set());
+    expect(ids((await globalSearch(db, params, { ...viewerP(), orgScopeId: fx.orgB })).hits)).toEqual(new Set());
+    expect(ids((await globalSearch(db, params, { ...adminP(), orgScopeId: fx.orgA })).hits)).toEqual(new Set([fx.nodeA]));
+    expect(ids((await globalSearch(db, params, adminP())).hits)).toEqual(new Set([fx.nodeA, hidden.id]));
+    // Explicit fields still override sniffing.
+    expect((await globalSearch(db, { ...params, fields: ['name'] }, viewerP())).hits).toEqual([]);
+  });
+
+  it('normalizes stored memory separators for partial node URNs (#1586)', async () => {
+    await db.memory.update({ where: { id: fx.memoryA }, data: { urn: 'org-a::alpha' } });
+    for (const query of ['alpha:guide:intro', 'org-a:alpha:gui', 'org-a::alpha::guide::intro']) {
+      expect(ids((await globalSearch(db, { query, entityTypes: ['node'] }, viewerP())).hits), query)
+        .toEqual(new Set([fx.nodeA]));
+    }
+  });
+
   it('bare-loc search finds its node even amid many same-tail locs (#301)', async () => {
     // Regression: the loc predicate once fell back to the query's LAST atom
     // ("01"), which matches a huge fraction of a spec corpus. With take: 100
