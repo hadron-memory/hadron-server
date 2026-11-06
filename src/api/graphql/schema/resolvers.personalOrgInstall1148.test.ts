@@ -185,14 +185,15 @@ it('a later chat turn cannot re-serve org text after the individual participant 
  expect(started.systemMessage).toContain('PRIVATE ORG CHAT SENTINEL');
  // Use a legal user-owned holding memory so its independent write right survives org removal.
  const chat=await chatNodeByLocOrThrow(db,started.chatId);
- await db.memory.update({where:{id:chat.memoryId},data:{organizationId:null,ownerUserId:outsiderId,appId}});
+ await db.memory.update({where:{id:chat.memoryId},data:{organizationId:null,ownerUserId:outsiderId,appId:null}});
+ expect((await mutation.sendChatMessage({}, {chatId:started.chatId,userMessage:'Member control'},caller)).systemMessage).toContain('PRIVATE ORG CHAT SENTINEL');
  await db.orgMember.update({where:{organizationId_userId:{organizationId:orgId,userId:outsiderId}},data:{deletedAt:new Date()}});
  await expect(mutation.sendChatMessage({}, {chatId:started.chatId,userMessage:'Continue'},caller))
   .rejects.toMatchObject({code:'AGENT_NOT_FOUND'});
 });
 it('a missing personal owner cannot match a null Agent owner in the shared install predicate',async()=>{
  const agent=await db.agent.findUniqueOrThrow({where:{id:agentId}});
- await expect(requirePersonalAppAgentInstall(context(),agent,agentId,null as never))
+ await expect(requirePersonalAppAgentInstall(context(),agent,agentId,null))
   .rejects.toMatchObject({extensions:{code:'ORGANIZATION_MISMATCH'}});
 });
 it('the database excludes the dual-owned Agent assumed by the own-org licence finding',async()=>{
@@ -216,4 +217,38 @@ it('install-memory write point and list agree for a non-member manager and after
  await db.orgMember.create({data:{organizationId:orgId,userId:outsiderId,role:'READER'}});
  expect((await installMemoryAudience(db,context(outsiderId),await installRow())).write).toBe(true);
  expect(await writableInstallMemoryIds(db,context(outsiderId))).toContain(installMemoryId);
+});
+
+for(const state of ['deleted','personal'] as const) it(`retained chat ${state} visibility never discloses the current Agent name`,async()=>{
+ if(state==='personal') await db.orgMember.update({where:{organizationId_userId:{organizationId:orgId,userId:ownerId}},data:{deletedAt:new Date()}});
+ await db.agent.update({where:{id:agentId},data:{name:'UNREADABLE RENAMED AGENT',...(state==='deleted'?{deletedAt:new Date()}:{visibility:'PERSONAL'})}});
+ try {
+  await mutation.startChat({}, {agentId,scope:'private'},context());
+  throw new Error('expected refusal');
+ } catch(error) {
+  if(state==='deleted') expect(error).toMatchObject({code:'AGENT_NOT_FOUND'});
+  else expect(error).toMatchObject({extensions:{code:'BOOT_PROMPT_INSTALL_LICENSE_INACTIVE'}});
+  expect(JSON.stringify(error)).not.toContain('UNREADABLE RENAMED AGENT');
+ }
+});
+
+for (const state of ['ex-member', 'personal'] as const) {
+ for (const door of ['cast', 'preview'] as const) it(`${door} refuses a retained org install after ${state} licence loss`, async () => {
+  await db.agent.update({where:{id:agentId},data:{personaRole:'researcher'}});
+  if(state==='ex-member') await db.orgMember.update({where:{organizationId_userId:{organizationId:orgId,userId:ownerId}},data:{deletedAt:new Date()}});
+  else await db.agent.update({where:{id:agentId},data:{visibility:'PERSONAL'}});
+  const args={appRef:appId,agentRef:agentId,name:'RefusedCast'};
+  const call=door==='cast' ? mutation.castWorker({},args,context()) : (resolvers.Query as any).castWorkerPreview({},args,context());
+  await expect(call).rejects.toMatchObject({extensions:{code:'BOOT_PROMPT_INSTALL_LICENSE_INACTIVE'}});
+  expect(await db.worker.count({where:{appId}})).toBe(0);
+ });
+}
+it('reusing a retired Agent name preserves the retained org-text install memory audience', async () => {
+ await db.orgMember.update({where:{organizationId_userId:{organizationId:orgId,userId:ownerId}},data:{role:'ADMIN'}});
+ await mutation.uninstallAgentFromApp({}, {appRef:appId,agentRef:agentId},context());
+ expect(await mutation.deleteAgent({}, {ref:agentId},context())).toBe(true);
+ await expect(mutation.createAgent({}, {orgId,name:'Assistant',visibility:'ORGANIZATION'},context())).rejects.toMatchObject({extensions:{code:'AGENT_URN_TAKEN'}});
+ expect((await installRow()).installOfAgentId).toBe(agentId);
+ expect((await installMemoryAudience(db,context(outsiderId),await installRow())).read).toBe(false);
+ expect(await readableInstallMemoryIds(db,context(outsiderId))).not.toContain(installMemoryId);
 });
