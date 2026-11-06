@@ -1,3 +1,4 @@
+import { chatNotFoundError } from '../../../lib/chatNotFound.js';
 import { ENGINE_KEYS, engineState } from '../../../lib/chatRootEngineState.js';
 import { appInstallationWhere } from '../../../lib/appInstallations.js';
 // chatMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
@@ -844,7 +845,7 @@ export const chatMutations = {
         }),
         chatId,
       );
-      if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
+      if (!chatNode) throw chatNotFoundError(chatId);
       // #1717: a chat has no ACL of its own (cor:acl:030:01) — writing it is
       // writing its host memory, so it takes CURRENT write access there. The
       // lookup's author and memory-creator arms only narrow candidates; they
@@ -1300,7 +1301,7 @@ export const chatMutations = {
         }),
         chatId,
       );
-      if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
+      if (!chatNode) throw chatNotFoundError(chatId);
       // #1717: a chat has no ACL of its own (cor:acl:030:01) — writing it is
       // writing its host memory, so it takes CURRENT write access there. The
       // lookup's author and memory-creator arms only narrow candidates; they
@@ -1735,7 +1736,7 @@ export const chatMutations = {
         }),
         chatId,
       );
-      if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
+      if (!chatNode) throw chatNotFoundError(chatId);
       // #1717: a chat has no ACL of its own (cor:acl:030:01) — writing it is
       // writing its host memory, so it takes CURRENT write access there. The
       // lookup's author and memory-creator arms only narrow candidates; they
@@ -1799,7 +1800,7 @@ export const chatMutations = {
         }),
         chatId,
       );
-      if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
+      if (!chatNode) throw chatNotFoundError(chatId);
       // #1717: a chat has no ACL of its own (cor:acl:030:01) — writing it is
       // writing its host memory, so it takes CURRENT write access there. The
       // lookup's author and memory-creator arms only narrow candidates; they
@@ -1853,7 +1854,7 @@ export const chatMutations = {
         }),
         chatId,
       );
-      if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
+      if (!chatNode) throw chatNotFoundError(chatId);
       // #1717: a chat has no ACL of its own (cor:acl:030:01) — writing it is
       // writing its host memory, so it takes CURRENT write access there. The
       // lookup's author and memory-creator arms only narrow candidates; they
