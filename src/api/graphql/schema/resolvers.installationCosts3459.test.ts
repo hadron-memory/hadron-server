@@ -34,9 +34,9 @@ const helpers = [
   vi.spyOn(installs, 'resolveAppInstallation'),
 ];
 const table: any[] = [];
-let userId: string, orgId: string, vendorId: string, orgUrn: string;
+let userId: string, fullUserId: string, orgId: string, vendorId: string, orgUrn: string;
 let apps: string[] = [], agents: any[] = [];
-const context = (full = false, appId?: string): Context => ({ db: measured as any, userId, roles: full ? ['ADMIN'] : ['READER'], ...(appId ? { appId, organizationId: orgId } : {}) });
+const context = (full = false, appId?: string): Context => ({ db: measured as any, userId: full ? fullUserId : userId, roles: full ? ['ADMIN'] : ['READER'], ...(appId ? { appId, organizationId: orgId } : {}) });
 const audit = 'agent{id} createdAt createdBy updatedAt updatedBy';
 const appQuery = (ids: string[], fields: string) => `query{${ids.map((id, i) => `a${i}:app(ref:"${id}"){${fields}}`).join(' ')}}`;
 const toData = (response: any) => {
@@ -87,6 +87,8 @@ beforeAll(async () => {
   const org = await db.organization.create({ data: { name: 'Cost holder', urn: `cost-${key}.example` } }); orgId = org.id; orgUrn = org.urn;
   const vendor = await db.organization.create({ data: { name: 'Cost vendor', urn: `vendor-${key}.example` } }); vendorId = vendor.id;
   userId = (await db.user.create({ data: { handle: `cost-${key}`, roles: ['READER'] } })).id;
+  fullUserId = (await db.user.create({ data: { handle: `cost-full-${key}`, roles: ['ADMIN'] } })).id;
+  expect(fullUserId).not.toBe(userId);
   await db.orgMember.create({ data: { organizationId: orgId, userId, role: 'ADMIN' } });
   for (let i = 0; i < 4; i++) {
     const organizationId = i % 2 ? vendorId : orgId;
