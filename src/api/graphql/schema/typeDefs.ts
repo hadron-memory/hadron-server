@@ -4451,7 +4451,7 @@ export const typeDefs = `#graphql
     createdAt: DateTime!
   }
 
-  "#1325 — a non-fatal finding about a saved rule. Never changes the mutation's success."
+  "#1325 — a non-fatal finding about a saved rule. Never changes the mutation's success. Today the only code is TASK_LESS_VISIBLE (#1327): a task the saver can read that some reader of the memory may not; taskUrn and taskState are the saver's own reference projection, so a task the saver cannot read is named by state alone. It is also what a save answers when that check could not be completed after the rule was saved (containment not established, not proof that a reader is missing): the save still succeeds, and taskUrn and taskState are then null when the saver's own projection was unavailable. An App write or automation read grant on the memory counts as a reader that cannot be proven to read the task."
   type MemoryConfigWarning {
     code: String!
     role: String!
@@ -4569,7 +4569,7 @@ export const typeDefs = `#graphql
 
   type MemoryConfigTemplatePayload {
     template: MemoryConfigTemplate!
-    "Empty until #1327 adds its visibility warnings."
+    "Always empty for a template save: less-visible-task warnings are computed when a template is applied to a memory (there is no target memory here)."
     warnings: [MemoryConfigWarning!]!
   }
 
@@ -4601,7 +4601,7 @@ export const typeDefs = `#graphql
     dryRun: Boolean!
     "One per template rule, role-ascending."
     entries: [MemoryConfigApplyEntry!]!
-    "Empty until #1327 adds its visibility warnings."
+    "TASK_LESS_VISIBLE for each rule this apply wrote, or on a dry run would write. A dry run and the real apply report the same warnings."
     warnings: [MemoryConfigWarning!]!
   }
 
@@ -4637,7 +4637,7 @@ export const typeDefs = `#graphql
 
   type NodeRoleRulePayload {
     rule: NodeRoleRule!
-    "Empty until #1327 adds its visibility warnings."
+    "TASK_LESS_VISIBLE for each task reference of the saved rule that a reader of this memory may not be able to read. Advisory: it never changes the save. Empty for unlock."
     warnings: [MemoryConfigWarning!]!
   }
 
@@ -5708,6 +5708,13 @@ export const typeDefs = `#graphql
     UNSET
     NO_TEAM
     REPORTS_TO
+  }
+
+  "#3599: a non-reserving delete preview. No census detail is returned."
+  type DeleteWorkerPreview {
+    workerId: ID!
+    "Always true: the real delete still requires the caller's explicit external-attribution confirmation."
+    attestationRequired: Boolean!
   }
 
   """
@@ -10413,6 +10420,16 @@ export const typeDefs = `#graphql
     them. An App with no Team Agent has only its own. Refusals: APP_NOT_FOUND, TEAM_AGENT_AMBIGUOUS, SESSION_NOT_BOUND.
     """
     effectiveModelGroups(appRef: ID!): [EffectiveModelGroup!]!
+
+    """
+    #3599: preview deleteWorker without deleting anything: the same act gate and typed refusals
+    (WORKER_NOT_FOUND, FORBIDDEN, WORKER_IN_USE), nothing reserved. The real delete still requires
+    confirmNoExternalAttribution and may refuse if anything changed
+    (hrn:node:hadronmemory.com:specs:cor:agt:020:03). A validated instruction claim is recorded
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:12); the target is its subject. No census detail,
+    removal plan, attestation bypass or durable lock/lease is returned.
+    """
+    deleteWorkerPreview(workerRef: ID!, instruction: ActInstructionInput): DeleteWorkerPreview!
 
     """
     Dry-run castWorker (#964): run the cast's exact resolution — same

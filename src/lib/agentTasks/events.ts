@@ -487,7 +487,7 @@ export const STAFFING_EVENT_TYPES = [
 ] as const;
 export type StaffingEventType = (typeof STAFFING_EVENT_TYPES)[number];
 
-/** The census treats these on the subject as bookkeeping, not use. Instruction-claim subjects occur only for no-op retirement. */
+/** The census treats these on the subject as bookkeeping, not use. Instruction-claim subjects occur for no-op retirement and delete previews (#3599). */
 export const SELF_BOOKKEEPING_EVENT_TYPES = ['worker.cast', 'worker.retired', 'worker.instruction-claimed'] as const;
 
 async function appendStaffingEvent(
@@ -630,7 +630,7 @@ function instructionPayload(instruction?: ActInstruction): Prisma.InputJsonObjec
 export async function appendStaffingInstructionClaim(
   tx: Prisma.TransactionClient,
   args: { appId: string; admission: StaffActAdmission } & (
-    | { operation: 'worker.retire'; workerId: string; userId?: never; agentId?: never }
+    | { operation: 'worker.retire' | 'worker.delete-preview'; workerId: string; userId?: never; agentId?: never }
     | { operation: 'worker.preview'; agentId: string; workerId?: never; userId?: never }
     | { operation: 'member.ensure' | 'member.remove'; userId: string; workerId?: never; agentId?: never }
   ),
@@ -638,8 +638,8 @@ export async function appendStaffingInstructionClaim(
   const instruction = staffingInstruction(args.admission);
   if (!instruction) return;
   await appendStaffingEvent(tx, { appId: args.appId, actor: staffingActActor(args.admission),
-    type: 'worker.instruction-claimed', subjectWorkerId: args.operation === 'worker.retire' ? args.workerId : undefined,
-    payload: { operation: args.operation, ...(args.operation === 'worker.retire' ? { workerId: args.workerId } : {}),
+    type: 'worker.instruction-claimed', subjectWorkerId: (args.operation === 'worker.retire' || args.operation === 'worker.delete-preview') ? args.workerId : undefined,
+    payload: { operation: args.operation, ...((args.operation === 'worker.retire' || args.operation === 'worker.delete-preview') ? { workerId: args.workerId } : {}),
       ...(args.userId ? { userId: args.userId } : {}), ...(args.agentId ? { agentId: args.agentId } : {}),
       ...instructionPayload(instruction) } });
 }
