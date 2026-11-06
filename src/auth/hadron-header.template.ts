@@ -7,9 +7,6 @@ export const HADRON_HEADER_STYLE = `<style>
   .hadron-header { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1.5rem; color: var(--text); font-size: 1.5rem; font-weight: 600; }
   .hadron-header picture { display: flex; flex: 0 0 48px; }
   .hadron-header img { display: block; width: 48px; height: 48px; }
-  /* The existing cards use content-box sizing; keep their padding inside the
-     available width on a 390px viewport. */
-  main { box-sizing: border-box; }
 </style>`;
 
 export const HADRON_HEADER = `<header class="hadron-header">

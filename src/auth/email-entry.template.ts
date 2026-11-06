@@ -1,5 +1,3 @@
-import { HADRON_HEADER, HADRON_HEADER_STYLE } from './hadron-header.template.js';
-
 /**
  * #804 — OAuth email magic-link sign-in: server-hosted pages.
  *
@@ -32,6 +30,8 @@ import { HADRON_HEADER, HADRON_HEADER_STYLE } from './hadron-header.template.js'
  *   - The hidden `_csrf` input MUST match the cookie set by the
  *     `generateCsrfToken` call in the GET handler's email branch.
  */
+
+import { HADRON_HEADER, HADRON_HEADER_STYLE } from './hadron-header.template.js';
 
 /** Shared <style> block for both pages — the consent screen's palette. */
 export const SHARED_STYLE = `  <style>
@@ -66,7 +66,10 @@ export const SHARED_STYLE = `  <style>
       display: flex; justify-content: center;
     }
     main {
-      max-width: 480px; width: 100%;
+      /* Keep the original 480px content + padding/border desktop width,
+         while containing the padding on narrow screens. Layout belongs here. */
+      box-sizing: border-box;
+      max-width: calc(480px + 4rem + 2px); width: 100%;
       background: var(--card-bg); color: var(--text);
       border: 1px solid var(--card-border); border-radius: 8px;
       padding: 1.5rem 2rem;

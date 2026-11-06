@@ -1,5 +1,3 @@
-import { HADRON_HEADER, HADRON_HEADER_STYLE } from './hadron-header.template.js';
-
 /**
  * #168 — server-hosted sign-in prompt for an MCP connector flow.
  *
@@ -19,6 +17,8 @@ import { HADRON_HEADER, HADRON_HEADER_STYLE } from './hadron-header.template.js'
  * allow-listed provider and `encodeURIComponent(req.originalUrl)` only; `emailUrl` is the fixed local
  * `/oauth/authorize` path plus the original query.
  */
+
+import { HADRON_HEADER, HADRON_HEADER_STYLE } from './hadron-header.template.js';
 
 import { SHARED_STYLE } from './email-entry.template.js';
 

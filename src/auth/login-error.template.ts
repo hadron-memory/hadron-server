@@ -1,5 +1,3 @@
-import { HADRON_HEADER, HADRON_HEADER_STYLE } from './hadron-header.template.js';
-
 /**
  * Human-readable failure page for the first-party login callbacks
  * (GitHub / Google / Apple), in the same minimal-CSS family as
@@ -19,6 +17,8 @@ import { HADRON_HEADER, HADRON_HEADER_STYLE } from './hadron-header.template.js'
  * a forced/auto dark mode can never split a fg/bg pair into an
  * unreadable combination. Keep that property when editing.
  */
+
+import { HADRON_HEADER, HADRON_HEADER_STYLE } from './hadron-header.template.js';
 
 import type { Response } from 'express';
 
@@ -55,7 +55,10 @@ export const LOGIN_ERROR_TEMPLATE = `<!doctype html>
       display: flex; justify-content: center;
     }
     main {
-      max-width: 480px; width: 100%;
+      /* Keep the original 480px content + padding/border desktop width,
+         while containing the padding on narrow screens. Layout belongs here. */
+      box-sizing: border-box;
+      max-width: calc(480px + 4rem + 2px); width: 100%;
       background: var(--card-bg); color: var(--text);
       border: 1px solid var(--card-border); border-radius: 8px;
       padding: 1.5rem 2rem;

@@ -41,3 +41,14 @@ describe('#3451 shared OAuth branding', () => {
 it('the branding stylesheet is scoped to the header, not main layout', () => {
   expect(HADRON_HEADER_STYLE).not.toMatch(/(?:^|[}\s])main\s*\{/);
 });
+
+it('the shared header stays parameter-free and cannot introduce network CSS or protocol-relative resources', () => {
+  expect(HADRON_HEADER).not.toMatch(/{{/);
+  expect(HADRON_HEADER_STYLE).not.toMatch(/@import|url\(\s*["']?\s*(?:https?:)?\/\//i);
+  const { document } = parseHTML(HADRON_HEADER);
+  for (const resource of document.querySelectorAll('[src], [srcset], link[href]')) {
+    for (const attr of ['src', 'srcset', 'href']) {
+      expect(resource.getAttribute(attr) ?? '').not.toMatch(/(?:^|,\s*)(?:https?:)?\/\//i);
+    }
+  }
+});
