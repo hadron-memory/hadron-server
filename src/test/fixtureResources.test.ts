@@ -79,3 +79,15 @@ it('does not clear replacements and closes resources created by a live tail', as
   try { await body; await cleanup; expect(resources.server).toBeUndefined(); }
   finally { if (resources.server) await dispose(resources.server); }
 });
+
+it('clears already-closed and never-listened servers and permits repeated drains', async () => {
+  const stopped = await listen();
+  await dispose(stopped);
+  for (const server of [stopped, createServer()]) {
+    const resources = { server: server as Server | undefined };
+    const lifetime = new FixtureLifetime();
+    await lifetime.drain(() => closeFixtureResources(resources));
+    expect(resources.server).toBeUndefined();
+    await lifetime.drain(() => closeFixtureResources(resources));
+  }
+});
