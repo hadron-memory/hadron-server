@@ -259,6 +259,22 @@ describe('globalSearch — smart-sniff', () => {
     expect(ids(result.hits)).toEqual(new Set([target.id]));
   });
 
+  it.each(['alpha:', ':guide'])('reserves direct loc matches before one-sided %s matches (#1586 onesidedcap)', async query => {
+    await db.node.delete({ where: { id: fx.nodeA } });
+    await db.node.createMany({ data: Array.from({ length: 250 }, (_, i) => ({
+      id: generateId(), memoryId: fx.memoryA,
+      loc: query === 'alpha:' ? `plain:${i}` : `guide:${i}`, name: `Decoy ${i}`,
+    })) });
+    const target = await db.node.create({ data: {
+      memoryId: fx.memoryC, loc: query === 'alpha:' ? 'alpha:target' : 'x:guide:target', name: 'AAA target',
+    } });
+    const result = await globalSearch(db, { query, entityTypes: ['node'], limit: 200 }, viewerP());
+    expect(ids(result.hits)).toContain(target.id);
+    expect(result.total).toBeLessThanOrEqual(200);
+    // The broad arm still contributes valid matches after reserving direct matches.
+    expect(result.hits.some(hit => hit.memoryId === fx.memoryA)).toBe(true);
+  });
+
   it('bare-loc search finds its node even amid many same-tail locs (#301)', async () => {
     // Regression: the loc predicate once fell back to the query's LAST atom
     // ("01"), which matches a huge fraction of a spec corpus. With take: 100
