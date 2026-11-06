@@ -1,4 +1,4 @@
-/** #3459 diagnostic slice: no source optimization, no invented numeric budget.
+/** #3459 diagnostic slice: no source optimization; explicitly approved per-shape ceilings.
  * The logged client belongs only to this file/run's disposable database.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -13,6 +13,9 @@ import * as installs from '../../../lib/appInstallations.js';
 import { locateTeamAgent } from '../../../lib/auth/workerRead.js';
 import { writeFileSync } from 'node:fs';
 import approved from '../../../test/fixtures/installationCosts3459.approved.json';
+import originalObserved from '../../../test/fixtures/installationCosts3459.observed.json';
+import distinctObserved from '../../../test/fixtures/installationCosts3459.distinct-observed.json';
+import { PARALLEL_DBS, workerDbName } from '../../../test/dbWorkers.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const logged = new PrismaClient({ datasourceUrl: process.env.DATABASE_URL, log: [{ emit: 'event', level: 'query' }] });
 let active = false;
@@ -20,6 +23,7 @@ let sql: string[] = [];
 let operations: string[] = [];
 let projectedPageReads = 0;
 let responseBytes = 0;
+let graphqlOperations = 0;
 logged.$on('query', event => { if (active) sql.push(event.query); });
 const measured = logged.$extends({ query: { $allModels: { async $allOperations({ model, operation, args, query }) {
   if (active) {
@@ -50,10 +54,10 @@ async function barrier() {
   await logged.$queryRaw`SELECT 'installation-cost-3459-log-barrier'`;
   await vi.waitFor(() => expect(sql.some(q => q.includes('installation-cost-3459-log-barrier'))).toBe(true));
 }
-async function measure(label: string, run: () => Promise<any>, apiRequests: number, rows: (data: any) => number) {
+async function measure(label: string, run: () => Promise<any>, rows: (data: any) => number) {
   // Setup is complete before the event span; no process-global query listener.
   for (const helper of helpers) helper.mockClear();
-  sql = []; operations = []; projectedPageReads = 0; responseBytes = 0; active = true;
+  sql = []; operations = []; projectedPageReads = 0; responseBytes = 0; graphqlOperations = 0; active = true;
   let data: any;
   try { data = await run(); await barrier(); }
   finally { active = false; }
@@ -62,29 +66,32 @@ async function measure(label: string, run: () => Promise<any>, apiRequests: numb
   expect(operations.length, 'positive Prisma-operation discriminator').toBeGreaterThan(0);
   const out = { label, sqlCount: statements.length, prismaOperations: operations.length,
     pagePrismaReads: projectedPageReads, helperEntries: helpers.map(h => h.mock.calls.length),
-    apiRequests, projectedRows: rows(data), responseUtf8Bytes: apiRequests ? responseBytes : null,
+    apiRequests: graphqlOperations, projectedRows: rows(data), responseUtf8Bytes: graphqlOperations ? responseBytes : null,
     operations: [...operations], sql: statements, data };
+  table.push(out); // Retain even the failing observation for diagnostics.
   const ceiling = approved.metrics.find(row => row.label === label);
   expect(ceiling, `${label}: explicitly approved shape`).toBeDefined();
-  if (ceiling) {
+  if (ceiling) { // Explicit narrowing for TypeScript after the runtime assertion.
     for (const metric of ['sqlCount', 'prismaOperations', 'pagePrismaReads'] as const)
       expect(out[metric], `${label}: approved ${metric} ceiling`).toBeLessThanOrEqual(ceiling[metric]);
-    out.helperEntries.forEach((entries, i) =>
-      expect(entries, `${label}: approved helper ${i} ceiling`).toBeLessThanOrEqual(ceiling.helperEntries[i]));
+    if (ceiling.pagePrismaReads > 0) expect(out.pagePrismaReads, `${label}: positive page instrumentation`).toBeGreaterThan(0);
+    out.helperEntries.forEach((entries, i) => {
+      expect(entries, `${label}: approved helper ${i} ceiling`).toBeLessThanOrEqual(ceiling.helperEntries[i]);
+      if (ceiling.helperEntries[i] > 0) expect(entries, `${label}: positive helper ${i} instrumentation`).toBeGreaterThan(0);
+    });
     expect(out.apiRequests, `${label}: exact GraphQL operations`).toBe(ceiling.apiRequests);
     expect(out.projectedRows, `${label}: exact semantic rows`).toBe(ceiling.projectedRows);
     if (ceiling.responseUtf8Bytes === null) expect(out.responseUtf8Bytes).toBeNull();
     else expect(out.responseUtf8Bytes, `${label}: approved response byte ceiling`).toBeLessThanOrEqual(ceiling.responseUtf8Bytes);
   }
-  table.push(out);
   return out;
 }
 const wire = async (query: string, ctx: Context) => {
+  if (active) graphqlOperations++;
   const response = await server.executeOperation({ query }, { contextValue: ctx });
   if (response.body.kind === 'single' && active) responseBytes += Buffer.byteLength(JSON.stringify(response.body.singleResult), 'utf8');
   return toData(response);
 };
-const installationIds = (data: any) => Object.values(data).map((app: any) => app.appAgents?.map((r: any) => r.agent?.id ?? null));
 
 async function addApp(index: number) {
   const app = await db.app.create({ data: { name: `App ${index}`, urn: `${orgUrn}:app${index}`, organizationId: orgId, createdAt: new Date('2026-01-01') } });
@@ -94,7 +101,15 @@ async function addApp(index: number) {
 }
 
 beforeAll(async () => {
-  expect(new URL(process.env.DATABASE_URL!).pathname).not.toMatch(/^\/(hadron|hadron_test)$/);
+  // The shared harness stamps the run scope and creates this exact worker clone.
+  // Check BOTH connected clients before cleanDb; a URL denylist is not ownership.
+  expect(PARALLEL_DBS, 'diagnostic requires a run-owned parallel worker clone').toBe(true);
+  const expected = workerDbName(process.env.VITEST_POOL_ID ?? '1');
+  expect(new URL(process.env.DATABASE_URL!).pathname).toBe(`/${expected}`);
+  const fixtureDb = await db.$queryRaw<{ name: string }[]>`SELECT current_database() AS name`;
+  const measuredDb = await logged.$queryRaw<{ name: string }[]>`SELECT current_database() AS name`;
+  expect(fixtureDb[0]?.name, 'fixture connected DB must be this run worker clone').toBe(expected);
+  expect(measuredDb[0]?.name, 'measured connected DB must be this run worker clone').toBe(expected);
   await cleanDb(db);
   const key = generateId().toLowerCase();
   const org = await db.organization.create({ data: { name: 'Cost holder', urn: `cost-${key}.example` } }); orgId = org.id; orgUrn = org.urn;
@@ -121,6 +136,7 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   active = false;
+  try {
   if (process.env.HADRON_3459_ARTIFACT) writeFileSync(process.env.HADRON_3459_ARTIFACT, JSON.stringify({
     sourceHead: process.env.HADRON_3459_HEAD ?? 'working-tree', metricDefinitions: {
       sqlCount: 'dedicated-client query events excluding named barrier, measured span only',
@@ -130,7 +146,19 @@ afterAll(async () => {
       responseUtf8Bytes: 'UTF8 JSON singleResult including data envelope, not DB wire bytes; API request means in-process GraphQL operation, not HTTP',
     }, table,
   }, null, 2));
-  await server.stop(); await logged.$disconnect(); vi.restoreAllMocks();
+    // Whole-file execution is required: neither a missing shape nor a removed
+    // shape+ceiling may silently reduce the stamped 53+2 coverage.
+    expect(table, 'all 55 selected diagnostic shapes were measured').toHaveLength(55);
+    expect(approved.metrics, 'all 55 selected ceilings remain present').toHaveLength(55);
+    const observed = [...originalObserved.metrics, ...distinctObserved.metrics].map(row => ({ ...row,
+      label: row.label.replace('importedBy/1-parents', 'importedBy/one-Agent-1-aliases').replace('importedBy/3-parents', 'importedBy/one-Agent-3-aliases'),
+    }));
+    expect([...approved.metrics].sort((a, b) => a.label.localeCompare(b.label)), 'approved original observations remain unchanged').toEqual(observed.sort((a, b) => a.label.localeCompare(b.label)));
+    expect(table.map(row => row.label).sort(), 'measured and approved label sets').toEqual(approved.metrics.map(row => row.label).sort());
+  } finally {
+    try { await server.stop(); }
+    finally { try { await logged.$disconnect(); } finally { vi.restoreAllMocks(); } }
+  }
 });
 
 describe('#3459 owned-client fixed roster diagnostics', () => {
@@ -144,13 +172,13 @@ describe('#3459 owned-client fixed roster diagnostics', () => {
           const ctx = context(full);
           for (const phase of ['cold', 'same-context-repeat', 'fresh-context']) {
             const out = await measure(`A${count}/${name}/${full ? 'full' : 'partial'}/${phase}`,
-              () => wire(appQuery(ids, fields), phase === 'fresh-context' ? context(full) : ctx), 1,
+              () => wire(appQuery(ids, fields), phase === 'fresh-context' ? context(full) : ctx),
               data => Object.values(data).reduce((n: number, app: any) => n + (app.agents?.length ?? 0) + (app.appAgents?.length ?? 0), 0));
             expect(Object.keys(out.data)).toHaveLength(count);
             for (const app of Object.values(out.data) as any[]) {
               if (app.appAgents) {
                 expect(app.appAgents).toHaveLength(4);
-                if (!full) for (const row of app.appAgents) expect(row).toMatchObject({ createdBy: null, updatedAt: null, updatedBy: null });
+                if (!full) for (const row of app.appAgents) expect(row).toMatchObject({ createdAt: new Date('2026-01-01').toISOString(), createdBy: null, updatedAt: null, updatedBy: null });
                 else expect(app.appAgents.filter((r: any) => r.createdBy === userId)).toHaveLength(2);
               }
               if (app.agents) expect(app.agents.map((a: any) => a.id).sort()).toEqual((full ? agents : [agents[0], agents[2]]).map(a => a.id).sort());
@@ -160,15 +188,15 @@ describe('#3459 owned-client fixed roster diagnostics', () => {
       }
       for (const full of [false, true]) {
         const q = `query{agent(ref:"${agents[2].id}"){appAgents{app{id} ${audit}}}}`;
-        const out = await measure(`A${count}/reverse/${full ? 'full' : 'partial'}`, () => wire(q, context(full)), 1, data => data.agent.appAgents.length);
+        const out = await measure(`A${count}/reverse/${full ? 'full' : 'partial'}`, () => wire(q, context(full)), data => data.agent.appAgents.length);
         expect(out.data.agent.appAgents).toHaveLength(count);
       }
     }
-    // One versus three parent Agent field reads; not recursion/depth expansion.
+    // One Agent selected through one/three aliases; not distinct roots or depth expansion.
     for (const count of [1, 3]) {
       const targets = Array.from({ length: count }, () => agents[2]); // repeated parent aliases expose repeated authorization work
       const query = `query{${targets.map((a, i) => `p${i}:agent(ref:"${a.id}"){importedBy{parentAgentId parentAgent{id}}}`).join(' ')}}`;
-      const out = await measure(`importedBy/one-Agent-${count}-aliases`, () => wire(query, context(false, apps[0])), 1,
+      const out = await measure(`importedBy/one-Agent-${count}-aliases`, () => wire(query, context(false, apps[0])),
         data => Object.values(data).reduce((n: number, a: any) => n + a.importedBy.length, 0));
       expect(out.data.p0.importedBy).toHaveLength(2);
       expect(out.data.p0.importedBy.map((row: any) => row.parentAgentId).sort()).toEqual([agents[0].id, agents[1].id].sort());
@@ -186,30 +214,33 @@ describe('#3459 owned-client fixed roster diagnostics', () => {
         await createDbAgentImport(db, agents[0].id, agents[3].id, { position: 200 });
         await createDbAgentImport(db, agents[1].id, agents[2].id, { position: 100 });
       }
-      const out = await measure(`role-definition/${count}-agents`, () => wire(`query{teamRoles(appRef:"${apps[0]}",teamAgentRef:"${agents[0].id}"){items{role} total}}`, context(true)), 1,
+      expect(await installs.listAppInstallations(db, apps[0]), `role fixture has ${count} installed Agents`).toHaveLength(count);
+      const out = await measure(`role-definition/${count}-agents`, () => wire(`query{teamRoles(appRef:"${apps[0]}",teamAgentRef:"${agents[0].id}"){items{role} total}}`, context(true)),
         data => data.teamRoles.items.length);
-      expect(out.data.teamRoles.total).toBe(1);
+      expect(out.data.teamRoles).toEqual({ items: [{ role: 'role0' }], total: 1 });
       const marker = await measure(`role-marker/${count}-agents`, async () => {
         try { const agent = await locateTeamAgent(context(true), apps[0], null); return { agentId: agent.id, code: null }; }
         catch (error: any) { return { agentId: null, code: error.extensions?.code }; }
-      }, 0, data => data.agentId ? 1 : 0);
+      }, data => data.agentId ? 1 : 0);
       expect(marker.data).toEqual(count === 1 ? { agentId: agents[0].id, code: null } : { agentId: null, code: 'TEAM_AGENT_AMBIGUOUS' });
     }
     for (const [kind, id] of [['ROW', agents[0].id], ['DERIVED', agents[2].id], ['absent', generateId()]] as const) {
-      const out = await measure(`single/${kind}`, () => installs.resolveAppInstallation(measured as any, apps[0], id), 0, data => data ? 1 : 0);
+      const out = await measure(`single/${kind}`, () => installs.resolveAppInstallation(measured as any, apps[0], id), data => data ? 1 : 0);
       expect(out.data?.installationKind ?? null).toBe(kind === 'absent' ? null : kind);
     }
-    // Two principals alternate without sharing Context; new request after revocation.
+    // Fresh partial-principal requests after each license change; opposing principals were measured above.
     const query = appQuery([apps[0]], `appAgents{${audit}}`);
-    const before = await measure('grant/active/partial', () => wire(query, context(false)), 1, data => data.a0.appAgents.length);
+    const before = await measure('grant/active/partial', () => wire(query, context(false)), data => data.a0.appAgents.length);
     expect(before.data.a0.appAgents).toHaveLength(4);
     for (const state of ['inactive', 'revoked', 'expired'] as const) {
       await db.agentOrgGrant.update({ where: { orgId_agentId: { orgId, agentId: agents[3].id } }, data: {
         activatedAt: state === 'inactive' ? null : new Date('2026-01-01'), revokedAt: state === 'revoked' ? new Date('2026-01-01') : null,
         expiresAt: state === 'expired' ? new Date('2026-01-01') : null,
       } });
-      const out = await measure(`grant/${state}/fresh`, () => wire(query, context(false)), 1, data => data.a0.appAgents.length);
+      const out = await measure(`grant/${state}/fresh`, () => wire(query, context(false)), data => data.a0.appAgents.length);
       expect(out.data.a0.appAgents).toHaveLength(3);
+      expect(out.data.a0.appAgents.map((row: any) => row.agent?.id ?? null).sort()).toEqual([agents[0].id, agents[2].id, null].sort());
+      for (const row of out.data.a0.appAgents) expect(row).toMatchObject({ createdAt: new Date('2026-01-01').toISOString(), createdBy: null, updatedAt: null, updatedBy: null });
     }
   }, 60000);
   it('records only the missing one/three DISTINCT readable parent-Agent baseline shapes', async () => {
@@ -221,13 +252,14 @@ describe('#3459 owned-client fixed roster diagnostics', () => {
       const targets = [agents[2], agents[3], agents[0]].slice(0, count);
       expect(new Set(targets.map(a => a.id)).size).toBe(count);
       const query = `query{${targets.map((a, i) => `p${i}:agent(ref:"${a.id}"){id importedBy{parentAgentId parentAgent{id}}}`).join(' ')}}`;
-      const out = await measure(`importedBy/${count}-distinct-Agents/full`, () => wire(query, context(true, apps[0])), 1,
+      const out = await measure(`importedBy/${count}-distinct-Agents/full`, () => wire(query, context(true, apps[0])),
         data => Object.values(data).reduce((n: number, a: any) => n + a.importedBy.length, 0));
       expect(Object.values(out.data).map((a: any) => a.id)).toEqual(targets.map(a => a.id));
       expect(out.data.p0.importedBy.map((r: any) => r.parentAgentId).sort()).toEqual([agents[0].id, agents[1].id].sort());
       expect(out.data.p0.importedBy.every((r: any) => r.parentAgent !== null)).toBe(true);
       if (count === 3) {
         expect(out.data.p1.importedBy.map((r: any) => r.parentAgentId)).toEqual([agents[0].id]);
+        expect(out.data.p1.importedBy[0].parentAgent).toEqual({ id: agents[0].id });
         expect(out.data.p2.importedBy).toEqual([]);
       }
     }
