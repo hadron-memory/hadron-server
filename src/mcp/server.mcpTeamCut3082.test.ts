@@ -141,7 +141,12 @@ async function outcome(auth: AuthContext, name: string, args: Record<string, unk
 }
 const text = (r: unknown) => ((r as { content?: Array<{ text?: string }> }).content ?? []).map((c) => c.text ?? '').join('\n');
 
-const createWhoamiUser = (sfx: string) => db.user.create({ data: { id: generateId(), githubId: 308_200 + Math.floor(Math.random() * 90_000), githubUsername: `cut3082-${sfx}`, roles: ['READER'] } });
+// One file-local sequence for every user fixture; cleanDb runs before the first allocation.
+// Random entropy (including a constant or overlapping sequence) cannot reuse an id within this file.
+let fixtureGithubId = 3_082_000;
+const nextFixtureGithubId = () => ++fixtureGithubId;
+
+const createWhoamiUser = (sfx: string) => db.user.create({ data: { id: generateId(), githubId: nextFixtureGithubId(), githubUsername: `cut3082-${sfx}`, roles: ['READER'] } });
 
 beforeAll(async () => {
   await cleanDb(db);
@@ -258,7 +263,7 @@ describe('#3082 R2: no worker binding on MCP', () => {
 describe('#3082 ask 4: whoami no-session guidance points at the CLI, never at an MCP worker bind', () => {
   it.each([[{}, 'no open sessions'], [{ includeEnded: true }, 'You have no sessions']])('empty whoami %j names the CLI and no workerRef', async (args, lead) => {
     const sfx = `${Date.now()}-${Math.floor(Math.random() * 100_000)}`;
-    const lone = await db.user.create({ data: { id: generateId(), githubId: 408_200 + Math.floor(Math.random() * 90_000), githubUsername: `lone3082-${sfx}`, roles: ['READER'] } });
+    const lone = await db.user.create({ data: { id: generateId(), githubId: nextFixtureGithubId(), githubUsername: `lone3082-${sfx}`, roles: ['READER'] } });
     const out = await createTestableMcpServer({ userId: lone.id, roles: ['READER'], clientId: `user:${lone.id}` } as never).callToolText('hadron_whoami', args);
     expect(out).toContain(lead);
     expect(out).toContain('hadron team session start');
@@ -337,7 +342,7 @@ describe('#3082 hadron_end_session still recovers App scope from the session id,
   async function fixture() {
     const sfx = `${Date.now()}-${Math.floor(Math.random() * 100_000)}`;
     const o = await db.organization.create({ data: { id: generateId(), name: 'end-3082', urn: `end3082-${sfx}.com` } });
-    const mk = (n: string) => db.user.create({ data: { id: generateId(), githubId: 308_300 + Math.floor(Math.random() * 90_000), githubUsername: `end3082-${n}-${sfx}`, roles: ['READER'] } });
+    const mk = (n: string) => db.user.create({ data: { id: generateId(), githubId: nextFixtureGithubId(), githubUsername: `end3082-${n}-${sfx}`, roles: ['READER'] } });
     const owner = await mk('o');
     const stranger = await mk('s');
     await db.orgMember.create({ data: { id: generateId(), organizationId: o.id, userId: owner.id, role: 'CONTRIBUTOR' } });
