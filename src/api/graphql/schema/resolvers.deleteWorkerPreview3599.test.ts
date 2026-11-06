@@ -66,8 +66,6 @@ describe('#3599 deleteWorkerPreview contract', () => {
   expect(await preview(bound(),f.target.id,instruction)).toEqual({workerId:f.target.id,attestationRequired:true});
   const after=(await events()).filter(e=>!before.some(x=>x.id===e.id));
   const fenceAfter=await fences();
-  // Make the real delete the primary poisoning assertion, before checking event metadata.
-  expect(await remove()).toBe(true);
   expect(after).toHaveLength(1);
   expect(after[0]).toMatchObject({type:'worker.instruction-claimed',subjectWorkerId:f.target.id,actorWorkerId:f.caller.id,actorUserId:f.holder.id});
   expect(after[0].payload).toEqual({operation:'worker.delete-preview',workerId:f.target.id,instruction});
@@ -75,7 +73,66 @@ describe('#3599 deleteWorkerPreview contract', () => {
   const changed=fenceAfter.filter(r=>BigInt(r.version)!==old.get(r.subject_id));
   expect(changed.map(r=>r.subject_id).sort()).toEqual([...new Set([f.target.id,f.caller.id])].sort());
   for(const r of changed) expect(BigInt(r.version)).toBe((old.get(r.subject_id)??-1n)+1n);
+  // All fence assertions above precede the destructive call.
+  expect(await remove()).toBe(true);
   expect(await db.worker.findUnique({where:{id:f.target.id}})).toBeNull();
+ });
+ it('repeating the same instructed preview adds one claim and one actor/target fence increment per call', async () => {
+  const initialEvents = await events();
+  let previousFences = new Map((await fences()).map(row => [row.subject_id, BigInt(row.version)]));
+  for (let call = 1; call <= 2; call++) {
+   expect(await preview(bound(), f.target.id, instruction)).toEqual({workerId:f.target.id,attestationRequired:true});
+   const claims = (await events()).filter(row => !initialEvents.some(old => old.id === row.id));
+   expect(claims).toHaveLength(call);
+   for (const claim of claims) expect(claim).toMatchObject({type:'worker.instruction-claimed',subjectWorkerId:f.target.id,payload:{operation:'worker.delete-preview',workerId:f.target.id,instruction}});
+   const currentFences = await fences();
+   const changed = currentFences.filter(row => BigInt(row.version) !== previousFences.get(row.subject_id));
+   expect(changed.map(row => row.subject_id).sort()).toEqual([f.caller.id,f.target.id].sort());
+   for (const row of changed) expect(BigInt(row.version)).toBe((previousFences.get(row.subject_id) ?? -1n) + 1n);
+   previousFences = new Map(currentFences.map(row => [row.subject_id,BigInt(row.version)]));
+  }
+  const claimsBeforeDelete = await db.agentTeamEvent.findMany({where:{appId:f.app.id,type:'worker.instruction-claimed'},orderBy:{id:'asc'}});
+  expect(await M.deleteWorker({}, {workerRef:f.target.id,confirmNoExternalAttribution:true,instruction}, bound())).toBe(true);
+  expect(await db.agentTeamEvent.findMany({where:{id:{in:claimsBeforeDelete.map(row=>row.id)}},orderBy:{id:'asc'}})).toEqual(claimsBeforeDelete);
+  const deleted = await db.agentTeamEvent.findMany({where:{appId:f.app.id,type:'worker.deleted'}});
+  expect(deleted).toHaveLength(1);
+  expect(deleted[0].payload).toMatchObject({instruction});
+ });
+ it('event actor and subject are retained ids rather than Worker foreign keys', async () => {
+  const workerForeignKeys = await db.$queryRaw<Array<{name:string}>>`SELECT con.conname AS name FROM pg_constraint con WHERE con.conrelid='agent_team_events'::regclass AND con.contype='f' AND con.confrelid='workers'::regclass`;
+  expect(workerForeignKeys).toEqual([]);
+  await preview(bound(),f.target.id,instruction);
+  const claims = await db.agentTeamEvent.findMany({where:{appId:f.app.id,type:'worker.instruction-claimed'}});
+  expect(claims).toHaveLength(1);
+  expect(await remove()).toBe(true);
+  expect(await db.agentTeamEvent.findMany({where:{id:claims[0].id}})).toEqual(claims);
+ });
+ it('real delete commits after the census and before an instructed claim: typed reference refusal, no partial claim', async () => {
+  let deleted = false;
+  const client = new Proxy(db,{get(object,key){
+   if(key==='$transaction') return (callback:any,options:any)=>object.$transaction(tx=>callback(new Proxy(tx,{get(transaction,modelKey){
+    if(modelKey==='agentTeamEvent') return new Proxy(transaction.agentTeamEvent,{get(model,method){
+     if(method==='create') return async(args:any)=>{
+      if(args.data.type==='worker.instruction-claimed') {
+       expect(deleted).toBe(false);
+       // A separate real resolver transaction commits while the preview transaction is still open.
+       expect(await remove()).toBe(true);
+       deleted=true;
+      }
+      return model.create(args);
+     };
+     const value=(model as any)[method];return typeof value==='function'?value.bind(model):value;
+    }});
+    const value=(transaction as any)[modelKey];return typeof value==='function'?value.bind(transaction):value;
+   }})),options);
+   const value=(object as any)[key];return typeof value==='function'?value.bind(object):value;
+  }});
+  const refusal = await error(preview(bound({db:client}),f.target.id,instruction));
+  expect(deleted).toBe(true);
+  expect(refusal.extensions.code).toBe('WORKER_REFERENCE_NOT_FOUND');
+  expect(await db.worker.findUnique({where:{id:f.target.id}})).toBeNull();
+  expect(await db.agentTeamEvent.count({where:{appId:f.app.id,type:'worker.instruction-claimed'}})).toBe(0);
+  expect(await db.agentTeamEvent.count({where:{appId:f.app.id,type:'worker.deleted'}})).toBe(1);
  });
  it('a granted worker previews without an instruction claim or any durable changes', async () => {
   await M.grantApp({}, {appRef:f.app.id,workerRef:f.caller.id,name:'WORKERS_STAFF'},ctx());
@@ -119,7 +176,7 @@ describe('#3599 deleteWorkerPreview contract', () => {
   expect(denied.extensions).toEqual({code:'WORKER_IN_USE',workerId:f.target.id});
   expect(await state()).toEqual(before);
  });
- it('does not take a target Worker FOR UPDATE or the real delete fence/isolation',async()=>{
+ it.each([false,true])('does not take the target row lock with instructed=%s',async(instructed)=>{
   let unlock!:()=>void;let locked!:()=>void;
   const ready=new Promise<void>(r=>locked=r);const release=new Promise<void>(r=>unlock=r);
   const holder=db.$transaction(async tx=>{await tx.$queryRaw`SELECT id FROM workers WHERE id=${f.target.id} FOR UPDATE`;locked();await release;},{timeout:15000});
@@ -132,7 +189,7 @@ describe('#3599 deleteWorkerPreview contract', () => {
     },opts);
     const v=(t as any)[k];return typeof v==='function'?v.bind(t):v;
    }});
-   expect(await preview(ctx({db:client}))).toEqual({workerId:f.target.id,attestationRequired:true});
+   expect(await preview(instructed?bound({db:client}):ctx({db:client}),f.target.id,instructed?instruction:undefined)).toEqual({workerId:f.target.id,attestationRequired:true});
   } finally {unlock();await holder;}
  },20000);
  it('baseline: the existing real delete admits a pristine worker in an uninstalled App',async()=>{
