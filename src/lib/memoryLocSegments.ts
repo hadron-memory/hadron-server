@@ -18,6 +18,9 @@ import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
+/** The indexed key expression (nodes_memory_segment_key_idx); the walk query inlines it and must match it unchanged. */
+export const SEGMENT_KEY_SQL = `(replace(loc, ':', chr(1))) COLLATE "C"`;
+
 export const LOC_SEGMENTS_DEFAULT_LIMIT = 20;
 export const LOC_SEGMENTS_MAX_LIMIT = 200;
 
@@ -81,26 +84,48 @@ export async function readLocSegments(
   const { memoryIds, excludeNodeIds, parent, limit, after } = args;
   if (memoryIds.length === 0) return { items: [], hasMore: false, endCursor: null };
 
-  // The prefix is compared with starts_with() (collation-independent, literal `_` and `%`), never LIKE.
+  // Skip-scan over nodes_memory_segment_key_idx: ':' is chr(1) in the key, so one segment's locs are a
+  // contiguous block; each step probes the first eligible row at or after the previous block's end
+  // (key||chr(2)). The prefix is compared bytewise on the key, never with LIKE.
   const prefix = parent === '' ? '' : `${parent}:`;
+  const prefixKey = prefix.replaceAll(':', '\u0001');
+  // Every key under the prefix starts with prefixKey (ends in chr(1)); the first key past them is the same with chr(2).
+  const upperKey = prefixKey.slice(0, -1) + '\u0002';
+  const hasUpper = prefix !== '';
   const rows = await db.$queryRaw<Array<{ memory_id: string; seg: string; has_node: boolean; pos: number | null }>>`
-    WITH eligible AS (
-      SELECT memory_id, loc, seq
-      FROM nodes
-      WHERE memory_id = ANY(${memoryIds}::text[])
-        AND deleted_at IS NULL
-        AND node_type <> 'system'
-        AND node_type <> 'comment'
-        AND loc <> ''
-        AND NOT (id = ANY(${excludeNodeIds}::text[]))
-        AND starts_with(loc, ${prefix})
+    WITH RECURSIVE walk AS (
+      SELECT m.memory_id, f.loc, f.seq
+      FROM unnest(${memoryIds}::text[]) AS m(memory_id)
+      CROSS JOIN LATERAL (
+        SELECT n.loc, n.seq FROM nodes n
+        WHERE n.memory_id = m.memory_id
+          AND (replace(n.loc, ':', chr(1))) COLLATE "C" >= ${prefixKey}::text COLLATE "C"
+          AND (NOT ${hasUpper}::boolean OR (replace(n.loc, ':', chr(1))) COLLATE "C" < ${upperKey}::text COLLATE "C")
+          AND n.deleted_at IS NULL AND n.node_type <> 'system' AND n.node_type <> 'comment' AND n.loc <> ''
+          AND NOT (n.id = ANY(${excludeNodeIds}::text[]))
+        ORDER BY (replace(n.loc, ':', chr(1))) COLLATE "C" ASC
+        LIMIT 1
+      ) f
+      UNION ALL
+      SELECT w.memory_id, f.loc, f.seq
+      FROM walk w
+      CROSS JOIN LATERAL (
+        SELECT n.loc, n.seq FROM nodes n
+        WHERE n.memory_id = w.memory_id
+          AND (replace(n.loc, ':', chr(1))) COLLATE "C" >=
+              (${prefixKey}::text || replace(split_part(substr(w.loc, ${prefix.length + 1}::int), ':', 1), ':', chr(1)) || chr(2)) COLLATE "C"
+          AND (NOT ${hasUpper}::boolean OR (replace(n.loc, ':', chr(1))) COLLATE "C" < ${upperKey}::text COLLATE "C")
+          AND n.deleted_at IS NULL AND n.node_type <> 'system' AND n.node_type <> 'comment' AND n.loc <> ''
+          AND NOT (n.id = ANY(${excludeNodeIds}::text[]))
+        ORDER BY (replace(n.loc, ':', chr(1))) COLLATE "C" ASC
+        LIMIT 1
+      ) f
     ), segs AS (
       SELECT memory_id,
              split_part(substr(loc, ${prefix.length + 1}::int), ':', 1) AS seg,
-             bool_or(loc = ${prefix} || split_part(substr(loc, ${prefix.length + 1}::int), ':', 1)) AS has_node,
-             min(seq) FILTER (WHERE loc = ${prefix} || split_part(substr(loc, ${prefix.length + 1}::int), ':', 1)) AS pos
-      FROM eligible
-      GROUP BY 1, 2
+             (loc = ${prefix} || split_part(substr(loc, ${prefix.length + 1}::int), ':', 1)) AS has_node,
+             CASE WHEN loc = ${prefix} || split_part(substr(loc, ${prefix.length + 1}::int), ':', 1) THEN seq END AS pos
+      FROM walk
     )
     SELECT memory_id, seg, has_node, pos
     FROM segs
