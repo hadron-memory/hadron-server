@@ -11,9 +11,12 @@ export function assertFixtureWiring(source: string): void {
   const registrations = statements.filter(s => ts.isExpressionStatement(s) && call(s.expression, 'fixtureIt'));
   if (registrations.length !== 8 || statements.some(s => ts.isExpressionStatement(s) && call(s.expression, 'it'))) fail('eight fixture registrations required');
   let wrapper: ts.ArrowFunction | undefined;
+  let closer: ts.ArrowFunction | undefined;
   for (const s of statements) if (ts.isVariableStatement(s)) for (const d of s.declarationList.declarations) {
+    if (id(d.name, 'closeResources') && d.initializer && ts.isArrowFunction(d.initializer)) closer = d.initializer;
     if (id(d.name, 'fixtureIt') && d.initializer && ts.isArrowFunction(d.initializer)) wrapper = d.initializer;
   }
+  if (!closer || !call(closer.body, 'closeFixtureResources') || !id(closer.body.arguments[0], 'resources')) fail('closeResources must delegate to closeFixtureResources(resources)');
   const wrapped = wrapper?.body;
   if (!call(wrapped, 'it')) return fail('fixtureIt must call it');
   const callback = wrapped.arguments[1];

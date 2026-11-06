@@ -1,5 +1,6 @@
 import { expect, it } from 'vitest';
-import { createServer, type Server } from 'node:http';
+import { createServer, get, type Server, type IncomingMessage } from 'node:http';
+import type { AddressInfo, Socket } from 'node:net';
 import { closeFixtureResources } from './fixtureResources.js';
 import { FixtureLifetime } from './fixtureLifetime.js';
 
@@ -89,5 +90,28 @@ it('clears already-closed and never-listened servers and permits repeated drains
     await lifetime.drain(() => closeFixtureResources(resources));
     expect(resources.server).toBeUndefined();
     await lifetime.drain(() => closeFixtureResources(resources));
+  }
+});
+
+it('closes an owned active stream before awaiting the close callback', async () => {
+  const server = createServer((_request, response) => { response.writeHead(200); response.write('open'); });
+  let socket: Socket | undefined;
+  server.once('connection', value => { socket = value; });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  let response: IncomingMessage | undefined;
+  const request = get(`http://127.0.0.1:${(server.address() as AddressInfo).port}`, value => { response = value; });
+  const connected = new Promise<void>((resolve, reject) => { request.once('response', () => resolve()); request.once('error', reject); });
+  let cleanup: Promise<void> | undefined;
+  try {
+    await connected;
+    cleanup = closeFixtureResources({ server });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(socket).toBeDefined();
+    expect(socket!.destroyed).toBe(true);
+    await cleanup;
+  } finally {
+    response?.destroy(); request.destroy();
+    await dispose(server);
+    await cleanup;
   }
 });

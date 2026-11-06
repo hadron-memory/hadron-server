@@ -14,7 +14,12 @@ export async function closeFixtureResources<C extends { close(): Promise<void> }
   try {
     if (server) {
       server.closeAllConnections();
-      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+      await new Promise<void>((resolve, reject) => server.close(error => {
+        // Node reports this when setup never listened or the body already
+        // stopped its server. There is no live resource left to retry.
+        if (!error || (error as NodeJS.ErrnoException).code === 'ERR_SERVER_NOT_RUNNING') resolve();
+        else reject(error);
+      }));
     }
     if (resources.server === server) resources.server = undefined;
   } catch (error) { errors.push(error); }
