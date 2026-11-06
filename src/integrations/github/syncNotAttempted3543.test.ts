@@ -74,7 +74,7 @@ describe('#3543 no attempt', () => {
     await setup(reason);
     memory = await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true }, include: { organization: true } });
     before = await snapshot();
-    expect((await graphQL()).errors?.[0]?.extensions.code).toBe('ENCRYPTED_GIT_SYNC_UNAVAILABLE');
+    expect((await graphQL()).errors?.[0]?.extensions?.code).toBe('ENCRYPTED_GIT_SYNC_UNAVAILABLE');
     expect(await mcp().callToolText('hadron_sync_graph', { memoryUrn: `hrn:mem:${memory.urn}` })).toContain('[ENCRYPTED_GIT_SYNC_UNAVAILABLE]');
     expect(await snapshot()).toEqual(before);
   });
