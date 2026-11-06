@@ -456,6 +456,11 @@ CREATE INDEX IF NOT EXISTS nodes_tsv_gin ON nodes USING gin (tsv);
 CREATE INDEX IF NOT EXISTS nodes_memory_parent_loc_idx
   ON nodes (memory_id, (regexp_replace(loc, '(^|:)[^:]*$', '')));
 
+-- #3456: loc-segment skip-scan (memoryLocSegments). Mirrors prisma/migrations/20261106030000_nodes_segment_key_index
+-- (keep in lockstep). The expression is SEGMENT_KEY_SQL in src/lib/memoryLocSegments.ts.
+CREATE INDEX IF NOT EXISTS nodes_memory_segment_key_idx
+  ON nodes (memory_id, ((replace(loc, ':', chr(1))) COLLATE "C"));
+
 -- ── #719 structured/faceted query: value-cast guard functions + JSONB GIN ────
 -- Mirrors prisma/migrations/20260718120000_where_query_helpers/migration.sql
 -- (keep in lockstep). The `where` predicate compiler (src/lib/retrieval/
