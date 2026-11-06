@@ -168,6 +168,17 @@ describe('#3509 OVERDUE is measured from a delivered wake', () => {
     expect(await responded(t.id)).not.toBeNull();
   });
 
+  it('row 7: a check that stamps nothing answers no ticker, the default (team channel) one included', async () => {
+    await seat(120);
+    const t = await ticker(30);
+    await delivered(t.id, -10);
+    expect(await stampChannelCheck(db, worker.id, other.id)).toBe(false); // not a team channel: nothing stamped
+    expect(await responded(t.id)).toBeNull();
+    await db.channel.update({ where: { id: team.id }, data: { deletedAt: new Date() } });
+    expect(await stampTeamChannelChecks(db, worker.id)).toBe(0); // no live team channel: nothing stamped
+    expect(await responded(t.id)).toBeNull();
+  });
+
   it('row 7: a check of the team channel does not answer a wake whose ticker covers only another channel', async () => {
     await seat(12);
     const t = await ticker(30, { channelIds: [other.id] });
@@ -204,6 +215,21 @@ describe('#3509 OVERDUE is measured from a delivered wake', () => {
     await seat(120);
     const t = await ticker(30, { enabled: false });
     await delivered(t.id, -1);
+    expect(await status(at(0))).toBe('OVERDUE'); // settings timer: 120 min > 25
+  });
+  it.each([
+    ['an ended subscription', (t: { id: string }) => db.tickerSubscription.updateMany({ where: { tickerId: t.id }, data: { endedAt: new Date(), endedReason: 'UNSUBSCRIBED' } })],
+    ['a deleted ticker', (t: { id: string }) => db.ticker.update({ where: { id: t.id }, data: { deletedAt: new Date() } })],
+    ['a ticker of another App', async (t: { id: string }) => {
+      const org2 = await db.organization.create({ data: { id: generateId(), name: 'o2', urn: `o2-${generateId().slice(-6)}.com` } });
+      const app2 = await db.app.create({ data: { id: generateId(), organizationId: org2.id, name: 'T2', urn: `${org2.urn}:t2` } });
+      await db.ticker.update({ where: { id: t.id }, data: { appId: app2.id } });
+    }],
+  ])('row 10: %s does not count as a ticker subscription', async (_n, kill) => {
+    await seat(120);
+    const t = await ticker(30);
+    await delivered(t.id, -1);
+    await kill(t);
     expect(await status(at(0))).toBe('OVERDUE'); // settings timer: 120 min > 25
   });
 });

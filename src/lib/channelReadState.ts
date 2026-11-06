@@ -134,10 +134,10 @@ export async function stampChannelCheck(db: Db, workerId: string, channelId: str
  */
 function respondedTicks(channels: Prisma.Sql, workerId: string): Prisma.Sql {
   return Prisma.sql`
-      UPDATE worker_delivery_ticks d SET responded_at = (now() AT TIME ZONE 'UTC')
+      UPDATE worker_delivery_ticks d SET responded_at = (clock_timestamp() AT TIME ZONE 'UTC')
       FROM tickers t
       WHERE d.worker_id = ${workerId} AND t.id = d.ticker_id
-        AND (cardinality(t.channel_ids) = 0 OR EXISTS (SELECT 1 FROM (${channels}) s WHERE s.channel_id = ANY (t.channel_ids)))
+        AND EXISTS (SELECT 1 FROM (${channels}) s WHERE cardinality(t.channel_ids) = 0 OR s.channel_id = ANY (t.channel_ids))
       RETURNING 1`;
 }
 

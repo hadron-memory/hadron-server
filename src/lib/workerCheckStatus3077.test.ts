@@ -20,6 +20,7 @@ const SETTINGS = { checkPeriodSeconds: 600, failedChecksToOverdue: 2 };
 const base = (over: Partial<WorkerCheckInputs> = {}): WorkerCheckInputs => ({
   liveSessionStartedAt: ago(60 * MIN),
   pendingReason: null,
+  tickerWakes: null,
   lastAssignedAt: ago(50 * MIN),
   lastCheckedAt: ago(1 * MIN),
   pausedUntil: null,

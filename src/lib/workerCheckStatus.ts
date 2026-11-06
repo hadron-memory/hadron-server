@@ -76,10 +76,10 @@ export type WorkerCheckInputs = {
   /** #2755: when an active pause or isolation was cleared on purpose (`WorkerWakeSettings.exemptEndedAt`). */
   exemptEndedAt?: Date | null;
   /**
-   * #3509: the latest delivered wake of each of its ENABLED ticker subscriptions (`WorkerDeliveryTick`). Undefined or
+   * #3509: the latest delivered wake of each of its ENABLED ticker subscriptions (`WorkerDeliveryTick`). Required, so a caller cannot forget it:
    * null = it has no enabled ticker, so the settings timer applies; an empty array = tickers, nothing delivered yet.
    */
-  tickerWakes?: Array<{ deliveredAt: Date; respondedAt: Date | null }> | null;
+  tickerWakes: Array<{ deliveredAt: Date; respondedAt: Date | null }> | null;
 };
 
 export type CheckSettings = { checkPeriodSeconds: number; failedChecksToOverdue: number };
