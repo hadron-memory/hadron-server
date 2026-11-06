@@ -1,3 +1,4 @@
+import { resolveAppInstallation } from '../../../lib/appInstallations.js';
 /**
  * #2045 (S8 step 8b, cor:agt:040:07, R23/R24) — the three direct pointer
  * setters: `setAgentBootPrompt`, `setAppAgentBootPrompt`, `setWorkerBootPrompt`.
@@ -146,7 +147,12 @@ export const bootPromptPointerMutations = {
     const notInstalled = () => new AgentNotFoundError(args.agentRef);
     if (!agentId) throw notInstalled();
     await writePointer(ctx, { field: 'APP_AGENT', appId: app.id, agentId }, nodeRef, notInstalled);
-    return ctx.db.appAgent.findUniqueOrThrow({ where: { appId_agentId: { appId: app.id, agentId } } });
+    const installation = await resolveAppInstallation(ctx.db, app.id, agentId);
+    if (!installation) return null;
+    // Membership selects only the Agent columns its gates need. Let the nested
+    // GraphQL resolver load the complete entity for the caller's selection.
+    const { agent: _membershipAgent, ...payload } = installation;
+    return payload;
   },
 
   /** Set or clear `Worker.bootPromptRef`: the worker's App's manager, as themselves (R23). */

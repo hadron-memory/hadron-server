@@ -1,3 +1,4 @@
+import { attestedAuthoring } from '../../../lib/authoringAttestation.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -62,7 +63,7 @@ describe('#1326 content provenance reads', () => {
     await writeNodeCore(
       { memoryId: nodeMemoryId, loc: 'authored', content: 'new body' },
       { db, userId: readerId, roles: ['ADMIN'] } as Context,
-      'update',
+      'update', { authoring: attestedAuthoring(null) },
     );
     const live = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
     expect(live).toMatchObject({
@@ -96,7 +97,7 @@ describe('#1326 content provenance reads', () => {
     await writeNodeCore(
       { memoryId: nodeMemoryId, loc: 'authored', abstract: 'A summary.' },
       { db, userId: readerId, roles: ['ADMIN'] } as Context,
-      'update',
+      'update', { authoring: attestedAuthoring(null) },
     );
     expect(await db.node.findUniqueOrThrow({ where: { id: nodeId } })).toMatchObject({
       abstractOriginHash: computeContentHash('body'),
@@ -167,7 +168,7 @@ describe('#1326 content provenance reads', () => {
     await writeNodeCore(
       { memoryId: nodeMemoryId, loc: 'authored', content: 'body' },
       { db, userId: readerId, roles: ['ADMIN'] } as Context,
-      'update',
+      'update', { authoring: attestedAuthoring(null) },
     );
     expect(await db.node.findUniqueOrThrow({ where: { id: nodeId } })).toMatchObject({
       authorshipKind: 'TASK', authoredByTask: taskId, authoredByRevision: 4, authoredAt: at,
@@ -222,7 +223,7 @@ describe('#1326 content provenance reads', () => {
     await writeNodeCore(
       { memoryId: nodeMemoryId, loc: 'authored', content: 'newer body' },
       { db, userId: readerId, roles: ['ADMIN'] } as Context,
-      'update',
+      'update', { authoring: attestedAuthoring(null) },
     );
 
     expect(await typeResolvers.Node.authorship(staleParent, null, reader())).toBeNull();

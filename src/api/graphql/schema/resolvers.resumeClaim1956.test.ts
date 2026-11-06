@@ -281,45 +281,9 @@ describe('the fast path, no claim', () => {
   });
 });
 
-describe('MCP: hadron_resume_session and the claim tools', () => {
-  const mcp = (userId: string) => createTestableMcpServer({ userId, roles: ['READER'], clientId: `user:${userId}` }, { sessionId: generateId() });
-
-  it('a shed through MCP: write the claim, then one no-argument call binds and returns the briefing', async () => {
-    const s = await start(holder, ada);
-    const srv = mcp(holder);
-    expect(await srv.callToolText('hadron_create_resume_claim', { session: s.id })).toContain('60');
-    const text = await srv.callToolText('hadron_resume_session', {});
-    expect(text).toContain(`Session resumed: ${s.id}`);
-    expect(text).toContain('Working as Ada');
-  });
-
-  it('a rotation through MCP: end with the claim, then the no-argument call starts the next stint', async () => {
-    const s = await start(holder, ada);
-    const srv = mcp(holder);
-    await srv.callToolText('hadron_end_session', { id: s.id, handoff: 'open items', resumeClaim: true });
-    const text = await srv.callToolText('hadron_resume_session', {});
-    expect(text).toMatch(/Session started: \S+/);
-    expect(text).toContain('Working as Ada');
-    expect(text).toContain('open items');
-  });
-
-  it('several claims list by worker name and session id, with no claim id; nothing is a typed refusal that binds nothing', async () => {
-    const a = await start(holder, ada, 'ada work');
-    const b = await start(holder, bea, 'bea work');
-    await claim(holder, a.id);
-    await claim(holder, b.id);
-    const srv = mcp(holder);
-    const list = await srv.callToolText('hadron_resume_session', {});
-    expect(list).toContain('Ada');
-    expect(list).toContain('Bea');
-    expect(list).toContain(a.id);
-    for (const { id } of await db.resumeClaim.findMany({ select: { id: true } })) expect(list).not.toContain(id);
-    const before = await footprint();
-    const none = await mcp(other).callToolText('hadron_resume_session', {});
-    expect(none).toContain('NOTHING_TO_RESUME');
-    expect(await footprint()).toEqual(before);
-  });
-});
+// #3082: the MCP wrappers hadron_resume_session / hadron_create_resume_claim are disabled. Their rules stay pinned above
+// through the resolvers: 'redeeming: one claim binds' (shed and rotation, handoff inherited), 'several claims list' (CHOOSE,
+// no claim id) and 'nothing to resume' (one answer, no footprint).
 
 describe('fix head: Anne\'s blind review on #1966', () => {
   it('P2-1: a claim is recovery intent, not a waiver — the name moved to another holder refuses, nothing is touched', async () => {

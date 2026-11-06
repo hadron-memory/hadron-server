@@ -81,6 +81,17 @@ const definitionHash = (format: AutomationPinFormat, state: Record<string, unkno
   return hash(json(content));
 };
 
+/**
+ * Every run tool a flow node can call: the `data.tools` it hands a model, plus the one tool a script node declares
+ * (#670, cor:agt:010:04), so a script call's registration identity is pinned and approved like a model-called tool's.
+ */
+export function flowToolNames(data: unknown): string[] {
+  const d = (data && typeof data === 'object' ? data : {}) as { tools?: unknown; script?: { call?: { tool?: unknown } } };
+  const declared = Array.isArray(d.tools) ? d.tools.filter((name): name is string => typeof name === 'string') : [];
+  const scripted = d.script?.call?.tool;
+  return typeof scripted === 'string' ? [...declared, scripted] : declared;
+}
+
 /** Capture routed flow definitions and instruction partials. Documents, data
  * references and output destinations remain mutable, read-gated data (#7894). */
 export interface AutomationPreview extends PinBase {
@@ -181,7 +192,7 @@ export async function captureAutomationPin(db: PrismaClient, appId: string, user
     }
   }
   if (Object.keys(edges).length > 1000) throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation graph exceeds 1000 edges');
-  const tools = [...flows].flatMap(id => { const node = nodes[id]; const data = node.state.data as { tools?: unknown } | null; return Array.isArray(data?.tools) ? data.tools.filter((name): name is string => typeof name === 'string') : []; });
+    const tools = [...flows].flatMap(id => flowToolNames(nodes[id].state.data));
   const resources = await executionIdentities(db, appId, organizationId, tools, selection);
   const value = { resources, format, appId, userId, entry, entryId, nodes, edges, flows: [...flows].sort(), absentPartials: [...absentPartials.values()].sort((a, b) => a.urn.localeCompare(b.urn)) };
   const result: AutomationPreview = { ...value, hash: storedAutomationPin({ ...value, hash: '' }).hash };
@@ -189,9 +200,14 @@ export async function captureAutomationPin(db: PrismaClient, appId: string, user
   return result;
 }
 
-/** Keep D20's observable failed AppRun for unresolved setup, while never
- * turning a missing graph into execution consent or swallowing infrastructure errors. */
-export async function captureSetupConsent(...args: Parameters<typeof captureAutomationPin>): Promise<unknown> {
+/** What capturing consent for a setup produced: the full pin, or the unadopted marker create stores. */
+export type SetupCapture =
+  | { adoptable: true; pin: AutomationPreview }
+  | { adoptable: false; marker: { format: 'hadron-automation-unadopted-v1'; message: string; reason?: 'MEMORY_UNREADABLE' } };
+
+/** The ONE setup capture (#3457): createAgentSchedule's stored consent and the schedule preview both come from
+ * here, so a preview cannot describe a different pin than create stores. Infrastructure errors still throw. */
+export async function captureSetupOutcome(...args: Parameters<typeof captureAutomationPin>): Promise<SetupCapture> {
   try {
     const preview = await captureAutomationPin(...args);
     const [db, appId, userId, , organizationId] = args;
@@ -200,14 +216,21 @@ export async function captureSetupConsent(...args: Parameters<typeof captureAuto
     for (const node of Object.values(preview.nodes)) {
       if (!await canReadMemory(db, principal, String(node.state.memoryId))) throw new AutomationPinError('AUTOMATION_UNADOPTED', 'Automation definition is not readable by its run principal', 'MEMORY_UNREADABLE');
     }
-    return storedAutomationPin(preview);
+    return { adoptable: true, pin: preview };
   }
   catch (e) {
     if (e instanceof NodeNotFoundError || e instanceof AutomationPinError) {
-      return { format: 'hadron-automation-unadopted-v1', message: 'Setup graph is missing, unreadable, encrypted or exceeds the consent bounds', ...((e instanceof NodeNotFoundError ? 'MEMORY_UNREADABLE' : e.reason) ? { reason: 'MEMORY_UNREADABLE' } : {}) };
+      return { adoptable: false, marker: { format: 'hadron-automation-unadopted-v1', message: 'Setup graph is missing, unreadable, encrypted or exceeds the consent bounds', ...((e instanceof NodeNotFoundError ? 'MEMORY_UNREADABLE' : e.reason) ? { reason: 'MEMORY_UNREADABLE' as const } : {}) } };
     }
     throw e;
   }
+}
+
+/** Keep D20's observable failed AppRun for unresolved setup, while never
+ * turning a missing graph into execution consent or swallowing infrastructure errors. */
+export async function captureSetupConsent(...args: Parameters<typeof captureAutomationPin>): Promise<unknown> {
+  const outcome = await captureSetupOutcome(...args);
+  return outcome.adoptable ? storedAutomationPin(outcome.pin) : outcome.marker;
 }
 
 /** Invalid persisted consent is never treated as an absent optional gate. */

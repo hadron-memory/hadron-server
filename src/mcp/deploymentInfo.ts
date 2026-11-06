@@ -134,19 +134,18 @@ export const HADRON_SERVER_VERSION = '0.21.0';
  * change to the same clients that learned to depend on it, so a feature that
  * goes away keeps its token only if the surface still honours it.
  */
+/**
+ * #3082 (MCP team cut S1, V7 R1/R2): the TEAM capability tokens (`worker-model`, `worker-boot-briefing`, `team-chat`,
+ * `team-worklog`, `session-app-recovery`, `transcript-backward-cursor`, `channels`, `team-chat-monitor`,
+ * `worklog-model`, and the dynamic `team-attention` / `team-attention-paged`) are no longer advertised: the tools
+ * they described are disabled on MCP, so a client that tests for one learns correctly that the surface is not there.
+ * The "additive and permanent" rule above is about a feature the surface still honours; this feature was removed on
+ * purpose, and the absence of `worker-model` already means "bind with the CLI". The deliberate removal is the one
+ * exception, recorded here.
+ */
 export const MCP_SURFACE_CAPABILITIES = [
   /** Spec 026 — hadron_list_apps / hadron_set_active_app selection regimes. */
   'app-selection',
-  /** #974/#990/#997 — workerRef binding, hadron_cast_worker, hadron_list_workers. */
-  'worker-model',
-  /** #990 — hadron_start_session returns the worker's resolved boot briefing. */
-  'worker-boot-briefing',
-  /** #939 — hadron_team_chat_read / hadron_team_chat_post. */
-  'team-chat',
-  /** #947 — hadron_record_work / hadron_team_work_items. */
-  'team-worklog',
-  /** #1005/#1009 — App scope pinned at bind and recoverable from a session id. */
-  'session-app-recovery',
   /** #1009 — refusals caused by a reconnect say so instead of reading as a client limit. */
   'reconnect-notice',
   /**
@@ -156,39 +155,11 @@ export const MCP_SURFACE_CAPABILITIES = [
    */
   'client-session-state',
   /**
-   * #1116 — `beforeSeq` on the transcript readers: page BACKWARD from a stable
-   * cursor rather than a positional offset. Worth a token rather than a version
-   * comparison alone, because MCP drops unknown arguments: a client that sends
-   * `beforeSeq` to a build lacking it is handed the OLDEST page in silence,
-   * which reads as a working call returning the wrong end of the conversation.
-   */
-  'transcript-backward-cursor',
-  /**
    * Spec 049 Phase 1 — `hadron_set_active_org` and the active-organization
    * ladder (D-2026-09-13-003). Absent ⇒ the org view is portal-only on this
    * build; name the org per call instead.
    */
   'active-org',
-  /**
-   * Spec 049 Phases 4–8 — Channels, the chat register, and Channel-addressed
-   * chat (`hadron_channel_post` / `hadron_channel_read`, the `channel` selector
-   * on the team-chat tools). Absent ⇒ a `channel` argument is DROPPED by the
-   * older build and the call lands in the default team chat; address only the
-   * default team chat on such a build.
-   */
-  'channels',
-  /** #1265 — register-routed team-chat monitor with durable read state. */
-  'team-chat-monitor',
-  /**
-   * #1398 — per-milestone model attribution on the worklog: the `model`
-   * argument on `hadron_record_work` and `TeamWorkItem.model` on reads. Worth
-   * a token rather than a version comparison alone, because MCP drops unknown
-   * arguments: a client that sends `model` to a build lacking it gets a
-   * healthy receipt whose record silently carries the session fallback — a
-   * wrong answer, not a failure (the `transcript-backward-cursor` shape). On
-   * such a build, record without `model` and read `model` as null.
-   */
-  'worklog-model',
 ] as const;
 
 /**

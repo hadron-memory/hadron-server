@@ -1,6 +1,7 @@
 import { withIncludeHistoryTransaction, includeHistoryClient, type IncludeHistoryTransaction } from '../../../lib/includes/includeHistoryFence.js';
 import { liveTxContext, liveReadSnapshotContext } from './authorizedTx.js';
 import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
+import { isContentResolutionLimitError, type ContentResolutionLimitError } from '../../../lib/includes/resolutionBudget.js';
 import { GraphQLError } from 'graphql';
 import { createHash } from 'node:crypto';
 import { BATCH_READ_MAX_BYTES } from '../../../lib/batchRead.js';
@@ -45,7 +46,7 @@ import {
   type NodeFacts,
   type SkillNode,
 } from '../../../lib/skilldoc/index.js';
-import { lintBrokenIncludes } from '../../../lib/skilldoc/lintIncludes.js';
+import { lintBrokenIncludes, lintResolutionLimit } from '../../../lib/skilldoc/lintIncludes.js';
 
 /**
  * #1177 §3 — the seam: the server judges, the client does I/O.
@@ -920,11 +921,22 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
     const rowById = new Map(actionableRows.map((r) => [r.id, r]));
     const exportBodies = new Map<string, string>();
     const brokenCounts = new Map<string, number>();
+    // hadron-internal#40: nodes over a resolution limit. Per node only, no request budget (ruling 0197 (4)):
+    // the refused node is left out and named in its findings; the others export.
+    const limitRefusals = new Map<string, ContentResolutionLimitError>();
     for (const n of skillNodes) {
       const row = rowById.get(n._id);
       if (!row || lockedIds.has(n._id) || !row.content) continue;
       const broken = { count: 0 };
-      exportBodies.set(n._id, (await resolveNodeContent(ctx, row, { mode: 'includes', broken })) ?? '');
+      try {
+        exportBodies.set(
+          n._id, (await resolveNodeContent(ctx, row, { mode: 'includes', broken, requestBudget: false, surface: 'export' })) ?? '',
+        );
+      } catch (e) {
+        if (!isContentResolutionLimitError(e)) throw e;
+        limitRefusals.set(n._id, e);
+        continue;
+      }
       brokenCounts.set(n._id, broken.count);
     }
     const bodyOf = (n: { _id: string; content: string }) => exportBodies.get(n._id) ?? n.content;
@@ -944,6 +956,8 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
       // #2048 S11d (R9): the exporter's resolved body, which the pure rules above never see. A warning only.
       const brokenIncludes = lockedIds.has(n._id) ? null : lintBrokenIncludes(n, brokenCounts.get(n._id) ?? 0);
       if (brokenIncludes) findingsById.get(n._id)?.push(brokenIncludes);
+      const overLimit = lintResolutionLimit(n, limitRefusals.get(n._id));
+      if (overLimit) findingsById.get(n._id)?.push(overLimit);
     }
     // Per host: one name on a node's Claude and Codex declarations is by
     // design, and two nodes sharing a Codex name collide only for Codex.

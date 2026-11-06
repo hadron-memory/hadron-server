@@ -13,10 +13,13 @@ import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 
 describe('ticker-invariants.sql (#1747)', () => {
-  it('the migration carries a byte-identical copy of the invariants file', () => {
+  it('the original migration keeps its original invariants; #3308 expands only the grant CHECK later', () => {
     const source = readFileSync(new URL('../../../prisma/ticker-invariants.sql', import.meta.url), 'utf8');
     const migration = readFileSync(new URL('../../../prisma/migrations/20261011020000_tickers/migration.sql', import.meta.url), 'utf8');
-    expect(migration.endsWith(source)).toBe(true);
+    // Applied migrations stay immutable. The separate #3308 DDL expands this one closed list;
+    // its replay and resulting DB constraints are exercised in resolvers.staffGrantNames3308.test.ts.
+    const original = source.replace("name IN ('ticker.subscribe-workers', 'workers.staff', 'app.members')", "name IN ('ticker.subscribe-workers')");
+    expect(migration.endsWith(original)).toBe(true);
   });
 
   it('post-push.sql includes the invariants file', () => {

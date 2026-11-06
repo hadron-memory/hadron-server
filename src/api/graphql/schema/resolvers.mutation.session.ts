@@ -23,7 +23,7 @@ import { lockAncestorsForCreate, lockAncestorsForCreateMany, lockPathForCreateUn
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { canReadMemory, filterReadableMemoryIds } from '../../../mcp/access-control.js';
-import { isAgentInstalled } from '../../../lib/appAgent.js';
+import { isAgentInstalledForAppOperation } from '../../../lib/appAgent.js';
 import { hasRequestOperationKey, getRequestOperationKey } from '../../../lib/requestOperationKey.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { makeKeyVerifier, verifyDataKey } from '../../../lib/memoryUnlock.js';
@@ -60,6 +60,7 @@ import { generateUniqueHandle } from '../../../lib/userHandle.js';
 import { ensureUserPrincipal } from '../../../lib/principal/mintPrincipal.js';
 import { isRoutingName, routingNameOf } from '../../../lib/runner/selectNextEdge.js';
 import { compileTemplate } from '../../../lib/template.js';
+import { chargeRequestServed } from '../../../lib/includes/resolveNodeContent.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { NodeNotFoundError, AgentNotFoundError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
@@ -115,7 +116,7 @@ import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/au
 import { deriveFamily, normalizeFamily } from '../../../lib/agentTasks/family.js';
 import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
 import { forbiddenError } from '../../../lib/refusals.js';
-import { currentActor } from '../../../lib/requestActor.js';
+import { requirePersonAsThemselves } from '../../../lib/auth/personAsThemselves.js';
 import { oauthSurfaceRefusal, oauthSurfaceRefusalMessage } from '../../../middleware/auth.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { OrganizationNotFoundError } from '../../../lib/entityRef/errors.js';
@@ -465,6 +466,7 @@ export async function writeSessionHandoff(
         },
         writerCtx,
         'create',
+        { authoring: { kind: 'platform', record: 'session-handoff' } },
       );
     }
 
@@ -484,6 +486,7 @@ export async function writeSessionHandoff(
       },
       writerCtx,
       'create',
+      { authoring: { kind: 'platform', record: 'session-handoff' } },
     );
   } catch (e) {
     throw new GraphQLError(
@@ -1924,7 +1927,7 @@ export const sessionMutations = {
         // IS NULL) cannot operate any agent.
         // 023-app-shape Phase 2b: App↔Agent goes through AppAgent. Check
         // that the requested Agent is installed in the calling App.
-        if (!(await isAgentInstalled(tx, app.id, agentId))) {
+        if (!(await isAgentInstalledForAppOperation(tx, app.id, agentId))) {
           throw forbiddenError('Forbidden: App is not allowed to operate this agent');
         }
 
@@ -2557,7 +2560,8 @@ export const sessionMutations = {
         });
       }
       // An App run on behalf of the org's ADMIN carries both appId and userId; the grant is the App's, not theirs.
-      if (ctx.appId || currentActor().workerId) throw forbiddenError();
+      if (ctx.appId) throw forbiddenError();
+      await requirePersonAsThemselves(ctx, forbiddenError);
       const surfaceRefusal = oauthSurfaceRefusal(ctx, 'account');
       if (surfaceRefusal) {
         throw new GraphQLError(
@@ -2580,7 +2584,7 @@ export const sessionMutations = {
           await requireOrgRole(ctx, orgId, 'ADMIN');
           throw new ConnectProviderNotConfiguredError(provider);
         }
-        const { nonce, expiresAt } = await issueConnectStart(cfg, {
+        const { nonce, expiresAt, flowId } = await issueConnectStart(cfg, {
           userId: ctx.userId,
           roles: ctx.roles,
           orgId,
@@ -2588,6 +2592,7 @@ export const sessionMutations = {
           origin: 'graphql',
         });
         return {
+          flowId,
           provider,
           orgId,
           authorizeUrl: `${getProjectBaseUrl()}/auth/${cfg.routeName}?nonce=${nonce}`,
@@ -3124,8 +3129,9 @@ export const sessionMutations = {
           {
             memoryUrnOf: async (memoryId) =>
               (await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { urn: true } })).urn,
+            // #40: each compiled piece is served, so it counts toward the request's aggregate.
             compileTemplate: (content, data, memoryId) =>
-              compileTemplate(content, data, memoryId, ctx.db, {}),
+              compileTemplate(content, data, memoryId, ctx.db, {}).then(text => chargeRequestServed(ctx, content, text)),
             includeTarget: target => !!target && readableTargets.has(target.memoryId),
             onTargetInlined: (target) => inlined.push(target),
           },

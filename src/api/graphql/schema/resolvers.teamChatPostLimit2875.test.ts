@@ -24,7 +24,6 @@ vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGrap
 
 const M = resolvers.Mutation as any;
 const ctx = (userId?: string): Context => ({ db, userId, roles: ['READER'] }) as Context;
-const MIN = 60_000;
 
 type W = { id: string; name: string; holder: string; session: string };
 
@@ -51,17 +50,10 @@ async function mkWorker(name: string, holder: string, reportsTo?: string): Promi
   return { ...w, holder, session };
 }
 
-const humanSays = (userId: string, body: string) => teamChatMutations.createTeamChatMessage({}, { appRef: app.id, body, replyToSeq: null, sessionRef: null }, ctx(userId));
 const workerSays = (w: W, body: string) =>
   runAsActor({ workerId: w.id, agentId: agent.id }, () => teamChatMutations.createTeamChatMessage({}, { appRef: app.id, body, replyToSeq: null, sessionRef: w.session }, ctx(w.holder)));
-const workerSaysIn = (w: W, ch: { id: string }, body: string) =>
-  runAsActor({ workerId: w.id, agentId: agent.id }, () => M.createChannelMessage({}, { channelRef: ch.id, body, replyToSeq: null, sessionRef: w.session }, ctx(w.holder)));
 
-/** Move every message of the worker back in time by `ms` (they were posted just now). */
-const age = (w: W, ms: number) =>
-  db.node.updateMany({ where: { nodeType: 'chat-message', createdByWorkerId: w.id }, data: { createdAt: new Date(Date.now() - ms) } });
 const post = async (w: W, n: number, tag: string) => { for (let i = 0; i < n; i++) await workerSays(w, `${tag} ${i}`); };
-const messageCount = () => db.node.count({ where: { nodeType: 'chat-message' } });
 const alarms = () => db.agentTeamEvent.findMany({ where: { type: 'alarm.post-limit' } });
 
 beforeEach(async () => {

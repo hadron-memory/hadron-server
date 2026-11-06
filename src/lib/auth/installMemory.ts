@@ -1,3 +1,4 @@
+import { resolveAppInstallation } from '../appInstallations.js';
 /**
  * #2044 (S7), cor:agt:040:06 / cor:acl:010:01 — the AUDIENCE of an App's
  * INSTALL MEMORY: the per-(App, Agent) `class='system'` memory holding the
@@ -121,7 +122,7 @@ export async function installMemoryAudience(
   // A detached install (its Agent was erased, R94 C) is no longer a customisation of anything: it
   // is read, found and deleted, never written.
   const installed = manages && memory.installOfAgentId
-    ? (await client.appAgent.count({ where: { appId: app.id, agentId: memory.installOfAgentId } })) > 0
+    ? (await resolveAppInstallation(client, app.id, memory.installOfAgentId)) !== null
     : false;
   return {
     read: participates,

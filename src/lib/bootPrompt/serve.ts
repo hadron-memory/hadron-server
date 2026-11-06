@@ -1,3 +1,4 @@
+import { readInstallBootPrompt } from '../appInstallations.js';
 /**
  * #2047 (S10, cor:agt:040:07/:09/:10) — the ONE resolver that decides which boot prompt a bind, a chatbot chat or a
  * headless run is served, and refuses all three the same way.
@@ -16,7 +17,7 @@ import { newestApprovedRevisionOf } from '../nodeApproval.js';
 import { resolveBootPromptPointer, type StoredBootPromptPointer } from '../bootPromptPointer.js';
 import { readCompiledRevision, sha256Hex } from '../bootCompile/provenance.js';
 import { generateId } from '../id.js';
-import { bootPromptRefusal, type BootPromptSurface } from './refusal.js';
+import { BOOT_PROMPT_REFUSAL_CODES, bootPromptRefusal, type BootPromptRefusalCode, type BootPromptSurface } from './refusal.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -65,7 +66,7 @@ async function decidingPointer(
     const w = await db.worker.findUnique({ where: { id: t.workerId }, select });
     if (w?.bootPromptNodeId) return { level: 'WORKER', stored: w };
   }
-  const install = t.appId ? await db.appAgent.findFirst({ where: { appId: t.appId, agentId: t.agent.id }, select }) : null;
+  const install = t.appId ? await readInstallBootPrompt(db, t.appId, t.agent.id) : null;
   if (install?.bootPromptNodeId) return { level: 'APP_AGENT', stored: install };
   const agent = await db.agent.findUnique({ where: { id: t.agent.id }, select });
   if (agent?.bootPromptNodeId) return { level: 'AGENT', stored: agent };
@@ -160,6 +161,36 @@ async function resolveFrom(db: Db, t: ServeTarget, skipWorker: boolean): Promise
     provenance: revision.provenance.occurrences.map((o) => ({ nodeId: o.nodeId, revSeq: o.revNo, hash: o.hash })),
     content,
   };
+}
+
+/** The refusals a fresh serve can return (a recorded-revision refusal belongs to an open session, never to a new serve). */
+export type BootPromptServeRefusalCode = Exclude<BootPromptRefusalCode, 'BOOT_PROMPT_RECORDED_REVISION_DELETED'>;
+
+/** Exactly one of `served` and `refusal` is set. */
+export type BootPromptServeOutcome =
+  | { served: ServedBootPrompt; refusal: null }
+  | { served: null; refusal: BootPromptServeRefusalCode };
+
+const SERVE_REFUSALS: ReadonlySet<string> = new Set(
+  BOOT_PROMPT_REFUSAL_CODES.filter((c) => c !== 'BOOT_PROMPT_RECORDED_REVISION_DELETED'),
+);
+
+/**
+ * #2708 (cor:agt:040:10) — what a serve to `t` would decide NOW, as a value: the decision, or the typed code the serve
+ * would be refused with. It IS `resolveServedBootPrompt`, the resolver a bind, a chat and a run use, so it applies the
+ * same resolution rules and never substitutes a fallback. It is a preview of the CURRENT state: a later serve agrees
+ * with it only while that state is unchanged (a pointer edit or an approval in between can change the answer). Only the typed serve refusals are caught; anything
+ * else (a dropped connection) still throws. Reads only and records nothing. The CALLER gates: run it only for a caller
+ * who may see the target's pointer, so a masked caller learns nothing (not even NOT_SET).
+ */
+export async function previewServedBootPrompt(db: Db, t: ServeTarget): Promise<BootPromptServeOutcome> {
+  try {
+    return { served: await resolveServedBootPrompt(db, t), refusal: null };
+  } catch (err) {
+    const code = (err as { extensions?: { code?: unknown } }).extensions?.code;
+    if (typeof code === 'string' && SERVE_REFUSALS.has(code)) return { served: null, refusal: code as BootPromptServeRefusalCode };
+    throw err;
+  }
 }
 
 /** How many times the approved revision is re-selected when a concurrent edit moves it between selection and read. */

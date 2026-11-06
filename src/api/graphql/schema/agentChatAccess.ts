@@ -1,3 +1,4 @@
+import { appInstallationWhere } from '../../../lib/appInstallations.js';
 import type { Context } from './resolvers.helpers.js';
 import { isAuthorizationDenial, requireOwnerOrOrgRole } from './resolvers.helpers.js';
 import { activeAppInstallLicenseIdsForAgent } from '../../../lib/appAgent.js';
@@ -30,7 +31,7 @@ export async function chatCarrierApps(
     ? [ctx.appId]
     : ctx.userId
       ? (await ctx.db.appMember.findMany({
-          where: { userId: ctx.userId, app: { appAgents: { some: { agentId } } } },
+          where: { userId: ctx.userId, app: appInstallationWhere(agentId) },
           select: { appId: true },
         })).map((m) => m.appId)
       : [];

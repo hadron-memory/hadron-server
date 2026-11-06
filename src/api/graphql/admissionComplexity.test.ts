@@ -22,16 +22,22 @@ const REVIEWED_PAGED_FIELDS = [
   "Agent.extendedBy",
   "AgentTask.blockedBy", // #2644: pageArgs default20, cap200; common omitted bound100 is conservative.
   "AgentTask.blocks", // Same shared dependency page resolver.
+  "AgentTask.clones", // #2646: the same shared page resolver as blocks/blockedBy (pageArgs default 20, cap 200).
+  "AgentTask.findingDispositions", // #2663: pageArgs default20/cap200.
+  "AgentTaskResult.findings", // #2662: pageArgs default20/cap200; result itself is bounded at100 findings.
   "AppKey.hostUses",
   "Chat.servedPrompts",
   "CompiledBootPrompt.lintWarnings", // #2048: default 50, cap 100; shared pageLintWarnings.
+  "Mutation.claimUntrackedTaskItems", // #3125 S3: limit default 1, cap 10; common omitted bound 100 is conservative.
   "Mutation.collectHostOperations",
   "Node.lintWarnings",
   "Node.signingRequests",
   "NodeApprovalReceipt.lintWarnings",
+  "Query.actionRegisterIndex", // #3287: pageArgs, default 20, cap 200; below the common 100, so omission overestimates.
   "Query.actionTickets",
   "Query.agentAssets",
   "Query.agentSchedules",
+  "Query.agentSubscriptionsPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.agentTaskList", // #2421: limit applies only when symptom is present; default 3, cap 3.
   "Query.agentTasks",
   "Query.agentTeamEvents",
@@ -39,12 +45,15 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.agents",
   "Query.aiModelPrices",
   "Query.aiServiceConfigs",
+  "Query.appKeysPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.appMemoryScope",
   "Query.appNodes",
+  "Query.appNodesPage",
   "Query.appRuns",
   "Query.apps",
   "Query.assets",
   "Query.automationApprovals",
+  "Query.automationTeamSnapshotGrants", // #3350: pageTake default20/cap200; common omitted100 is conservative.
   "Query.calendarEvents",
   "Query.channelMessageSearch", // #2299: default 20, cap 50, scan 1,000 (teamChatSearch.ts); under the shared 100 default.
   "Query.channelMessages",
@@ -78,8 +87,12 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.memoryAssets",
   "Query.memoryConfigTemplates",
   "Query.memoryEdges",
+  "Query.memoryLocSegments",
   "Query.memoryNodes",
+  "Query.myAgentSubscriptionsPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.myChats",
+  "Query.myChatsPage", // #2212 A3: pageArgs, default 20, cap 200.
+  "Query.myUserApiKeysPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.nodeEdgeRemovals",
   "Query.nodeRevisions",
   "Query.nodeRevisionsPage",
@@ -97,6 +110,8 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.sessions",
   "Query.sessionsPage",
   "Query.slackConnections",
+  "Query.specBacklinksPage", // #3222 (#2213 S3): pageArgs, default 20, cap 200; in PAGE_ARGS_FIELDS.
+  "Query.specUnresolvedReferencesPage", // #3222: as specBacklinksPage.
   "Query.teamAttentionPage",
   "Query.teamAttentionPreviewPage",
   "Query.teamChatMessages",
@@ -105,6 +120,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.teamStopSignals",
   "Query.teamWorkItems",
   "Query.tickersPage",
+  "Query.untrackedTaskItems", // #3125 S3: limit default 20, cap 100.
   "Query.usageEvents",
   "Query.usageEventsPage",
   "Query.users",
@@ -246,6 +262,28 @@ describe('cost (graphql-query-complexity), enforce', () => {
     expect(cost('{ __typename }')).toBe(0);
   });
 
+  it('#3381 HTTP admission refuses over-budget metadata before the resolver', async () => {
+    const query = '{ automationTeamSnapshotGrant(id: "g") { id appId triggerKind triggerId grantedBy createdAt revokedAt revokedBy } }';
+    const spy = vi.spyOn(Query, 'automationTeamSnapshotGrant').mockResolvedValue({
+      id: 'g', appId: 'a', triggerKind: 'SCHEDULE', triggerId: 't', grantedBy: 'u',
+      createdAt: new Date('2026-11-01T00:00:00Z'), revokedAt: null, revokedBy: null,
+    });
+    try {
+      const tight = await boot({ GRAPHQL_MAX_COST: '8' });
+      const refused = await post(tight, { query });
+      expect(refused.status).toBe(400);
+      expect((await refused.json()).errors[0].extensions.code).toBe(QUERY_TOO_COMPLEX);
+      expect(spy).not.toHaveBeenCalled();
+      const allowed = await boot({ GRAPHQL_MAX_COST: '9' });
+      expect((await (await post(allowed, { query })).json()).errors).toBeUndefined();
+      expect(spy).toHaveBeenCalledTimes(1);
+    } finally { spy.mockRestore(); }
+  });
+
+  it('#3381 single grant metadata costs one object plus eight leaves, not a page', () => {
+    expect(cost('{ automationTeamSnapshotGrant(id: "g") { id appId triggerKind triggerId grantedBy createdAt revokedAt revokedBy } }')).toBe(9);
+  });
+
   it('a list that states its page size multiplies by it; a wrapper around a list does too (the dominant shape)', () => {
     expect(cost('{ usageEvents(limit: 200) { id } }')).toBe(1 + 200 * 1);
     // edges is EdgesPage { items [Edge] total }: items costs 1 + 10 x 1 = 11, total 1, wrapper = 1 + (200 / 10) x 12
@@ -269,16 +307,19 @@ describe('cost (graphql-query-complexity), enforce', () => {
     expect(cost('{ memoryNodes(memoryRef: "m") { nodes { id } } }')).toBe(1 + 100 * (1 + 10));
   });
 
-  it('every field whose resolver default exceeds the common one is costed at THAT default when the size is omitted or null', () => {
+  it('every reviewed resolver default is used when the size is omitted or null', () => {
     const pagedList = (name: string) => `{ ${name} }`;
-    expect(OMITTED_PAGE_SIZE['Query.appNodes']).toBe(500); // take: limit ?? 500
-    expect(cost('{ appNodes(appRef: "a") { id } }')).toBe(1 + 500);
-    expect(cost('{ appNodes(appRef: "a", limit: null) { id } }')).toBe(1 + 500);
+    expect(OMITTED_PAGE_SIZE['Query.appNodes']).toBe(20); // #3210: legacy take: limit ?? 20
+    expect(cost('{ appNodes(appRef: "a") { id } }')).toBe(1 + 20);
+    expect(cost('{ appNodes(appRef: "a", limit: null) { id } }')).toBe(1 + 20);
     expect(cost('{ appNodes(appRef: "a", limit: 500) { id } }')).toBe(1 + 500);
     expect(cost('{ memoryEdges(memoryRef: "m") { edges { id } } }')).toBe(1 + 100 * (1 + 10));
     expect(cost('{ validateMemory(memoryRef: "m") { total } }')).toBeGreaterThan(0);
     void pagedList;
-    for (const [field, size] of Object.entries(OMITTED_PAGE_SIZE)) expect(size).toBeGreaterThan(DEFAULT_OMITTED_PAGE_SIZE - 1);
+    for (const [field, size] of Object.entries(OMITTED_PAGE_SIZE)) {
+      if (field === 'Query.appNodes' || field === 'Query.memoryLocSegments') expect(size).toBe(20); // The explicit lower legacy default (#3210); the loc-segment page default (#3456).
+      else expect(size).toBeGreaterThan(DEFAULT_OMITTED_PAGE_SIZE - 1);
+    }
     expect(DEFAULT_OMITTED_PAGE_SIZE).toBe(100);
   });
 
@@ -301,6 +342,14 @@ describe('cost (graphql-query-complexity), enforce', () => {
     }
     expect(found.sort()).toEqual(REVIEWED_PAGED_FIELDS);
     for (const key of Object.keys(OMITTED_PAGE_SIZE)) expect(REVIEWED_PAGED_FIELDS).toContain(key);
+  });
+
+  it('#2662 findings admission charges the clamped page for literals and variables', () => {
+    const q = (n: string) => `{ agentTask(id: "x") { result { findings(limit: ${n}) { items { id severity text } total hasMore } } } }`;
+    const variables = 'query($n:Int){agentTask(id:"x"){result{findings(limit:$n){items{id severity text} total hasMore}}}}';
+    expect(cost(q('2147483647'))).toBe(cost(q('200')));
+    expect(cost(variables, {n:2147483647})).toBe(cost(q('200')));
+    expect(cost(q('0'))).toBeLessThan(cost(q('200')));
   });
 
   it('saturates: a huge page size cannot wrap around or go non-finite', () => {

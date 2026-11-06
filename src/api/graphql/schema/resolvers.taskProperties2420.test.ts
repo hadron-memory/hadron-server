@@ -9,15 +9,12 @@ import * as workerResolvers from './resolvers.worker.js';
 import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { pendingTaskWakes } from '../../../lib/agentTasks/taskWakes.js';
 import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { runAsActor } from '../../../lib/requestActor.js';
-import { createMcpServerInstance } from '../../../mcp/server.js';
 import { resolvers } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -499,30 +496,16 @@ describe('surfaces #2420', () => {
     await apollo.stop();
   });
 
-  it('MCP hadron_task_create and hadron_task_update carry properties through the same resolver', async () => {
-    const session = await db.session.create({ data: { id: generateId(), userId: owner.id } });
-    const server = createMcpServerInstance({ userId: owner.id, roles: ['READER'], clientId: `user:${owner.id}` } as any, () => undefined, { kind: 'multi-app' });
-    const client = new Client({ name: 'props', version: '1' });
-    const [a, b] = InMemoryTransport.createLinkedPair();
-    await server.connect(b);
-    await client.connect(a);
-    try {
-      const upd = await client.callTool({ name: 'hadron_task_update', arguments: { taskId: task.id, input: { properties: { via: 'mcp' } }, session: session.id } });
-      expect(upd.isError).not.toBe(true);
-      expect((await stored()).properties).toEqual({ via: 'mcp' });
-      const bad = await client.callTool({ name: 'hadron_task_update', arguments: { taskId: task.id, input: { properties: [1] }, session: session.id } });
-      expect(bad.isError).toBe(true);
-      expect(JSON.stringify(bad.content)).toContain('[properties_not_an_object]');
-      const created = await client.callTool({ name: 'hadron_task_create', arguments: { appRef: app.id, title: 'Mcp', source: 's', properties: { made: 'mcp' }, session: session.id } });
-      expect(created.isError).not.toBe(true);
-      expect((await db.agentTask.findFirstOrThrow({ where: { title: 'Mcp' } }) as any).properties).toEqual({ made: 'mcp' });
-    } finally {
-      await client.close();
-      await server.close();
-    }
+  // #3082: hadron_task_create / hadron_task_update are off over MCP; the same calls are pinned at the resolvers they delegated to.
+  it('createAgentTask and updateAgentTask carry properties, and a non-object is PROPERTIES_NOT_AN_OBJECT', async () => {
+    await setProps({ via: 'resolver' });
+    expect((await stored()).properties).toEqual({ via: 'resolver' });
+    await expect(setProps([1])).rejects.toMatchObject({ extensions: { code: 'PROPERTIES_NOT_AN_OBJECT' } });
+    expect((await stored()).properties).toEqual({ via: 'resolver' });
+    const created = await M.createAgentTask({}, { input: { appRef: app.id, title: 'Made', source: 's', properties: { made: 'resolver' } } }, ctx());
+    expect((await stored(created.id)).properties).toEqual({ made: 'resolver' });
   });
 });
-
 
 // #2891: defensive branches left unpinned by #2877. No properties value or event may escape a refused update.
 describe('review follow-up pins #2891', () => {

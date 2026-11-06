@@ -1,17 +1,15 @@
 /**
- * #2252 Slice D1 — `minTier` through the REAL GraphQL transport (validation, resolver, stored JSON, output) and the
- * registered MCP handlers (create, update, read). There is no `maxTier` anywhere: GraphQL validation and the MCP
- * schema refuse it, and a refusal leaves the task, its assignment and its events as they were.
+ * #2252 Slice D1 — `minTier` through the REAL GraphQL transport (validation, resolver, stored JSON, output). The MCP
+ * wrappers were disabled by #3082; the same rules stay pinned here through GraphQL. There is no `maxTier` anywhere: GraphQL validation
+ * refuses it, and a refusal leaves the task, its assignment and its events as they were.
  */
 import { afterAll, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createServer } from '../../../server.js';
 import { mintUserApiKey } from '../../../middleware/auth.js';
-import { createTestableMcpServer } from '../../../mcp/server.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
-import { generateId } from '../../../lib/id.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
@@ -44,7 +42,6 @@ async function post(query: string, variables: Record<string, unknown>) {
 const CREATE = 'mutation($i: CreateAgentTaskInput!) { createAgentTask(input: $i) { id requirements { role minTier familyIn } } }';
 const UPDATE = 'mutation($id: ID!, $i: UpdateAgentTaskInput!) { updateAgentTask(taskId: $id, input: $i) { id requirements { role minTier familyIn } } }';
 const READ = 'query($id: ID!) { agentTask(id: $id) { requirements { role minTier } } }';
-const mcpFor = () => createTestableMcpServer({ userId, roles: ['READER'], clientId: `user:${userId}` });
 const eventCount = () => db.agentTeamEvent.count({ where: { appId } });
 
 it('GraphQL stores minTier in the requirements JSON and returns it on create, update and read', async () => {
@@ -88,45 +85,4 @@ it('GraphQL has no maxTier: input is refused by validation, output has no such f
   expect(await eventCount()).toBe(events);
   const output = await post('query($id: ID!) { agentTask(id: $id) { requirements { maxTier } } }', { id });
   expect(output.errors?.length).toBeGreaterThan(0);
-});
-
-it('MCP task-create stores minTier and task-get shows it', async () => {
-  const session = await db.session.create({ data: { id: generateId(), userId, appId } });
-  const mcp = mcpFor();
-  const text = await mcp.callToolText('hadron_task_create', { session: session.id, appRef: appId, title: 'MCP tier', requirements: { role: 'reviewer', minTier: 'mid' } });
-  expect(text).toContain('Created');
-  const row = await db.agentTask.findFirstOrThrow({ where: { title: 'MCP tier' } });
-  expect(row.requirements).toEqual({ role: 'reviewer', minTier: 'mid' });
-  expect(await mcp.callToolText('hadron_task_get', { session: session.id, taskId: row.id })).toContain('"minTier":"mid"');
-});
-
-it('MCP task-update replaces the requirements with a new minTier', async () => {
-  const session = await db.session.create({ data: { id: generateId(), userId, appId } });
-  const mcp = mcpFor();
-  await mcp.callToolText('hadron_task_create', { session: session.id, appRef: appId, title: 'MCP edit', requirements: { minTier: 'low' } });
-  const row = await db.agentTask.findFirstOrThrow({ where: { title: 'MCP edit' } });
-  await mcp.callToolText('hadron_task_update', { session: session.id, taskId: row.id, input: { requirements: { minTier: 'high' } } });
-  expect((await db.agentTask.findUniqueOrThrow({ where: { id: row.id } })).requirements).toEqual({ minTier: 'high' });
-});
-
-it('MCP refuses maxTier on create and update and stores nothing', async () => {
-  const session = await db.session.create({ data: { id: generateId(), userId, appId } });
-  const mcp = mcpFor();
-  const created = await mcp.callToolText('hadron_task_create', { session: session.id, appRef: appId, title: 'MCP cap', requirements: { maxTier: 'high' } }).catch((e: unknown) => String(e));
-  expect(created).not.toContain('Created');
-  expect(await db.agentTask.count({ where: { title: 'MCP cap' } })).toBe(0);
-  await mcp.callToolText('hadron_task_create', { session: session.id, appRef: appId, title: 'MCP cap2', requirements: { minTier: 'low' } });
-  const row = await db.agentTask.findFirstOrThrow({ where: { title: 'MCP cap2' } });
-  const events = await eventCount();
-  const edit = await mcp.callToolText('hadron_task_update', { session: session.id, taskId: row.id, input: { requirements: { minTier: 'high', maxTier: 'high' } } }).catch((e: unknown) => String(e));
-  expect(edit).not.toContain('Updated');
-  expect((await db.agentTask.findUniqueOrThrow({ where: { id: row.id } })).requirements).toEqual({ minTier: 'low' });
-  expect(await eventCount()).toBe(events);
-});
-
-it('MCP refuses a malformed minTier', async () => {
-  const session = await db.session.create({ data: { id: generateId(), userId, appId } });
-  const out = await mcpFor().callToolText('hadron_task_create', { session: session.id, appRef: appId, title: 'MCP bad', requirements: { minTier: 'medium' } }).catch((e: unknown) => String(e));
-  expect(out).not.toContain('Created');
-  expect(await db.agentTask.count({ where: { title: 'MCP bad' } })).toBe(0);
 });

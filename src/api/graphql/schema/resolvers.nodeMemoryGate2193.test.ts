@@ -453,7 +453,7 @@ describe('#474 / #2193 — preload and no-preload twins over HTTP', () => {
     // or the refusal it must give. A principal whose list vanished fails here, not silently.
     const expected: Record<string, { ids: string[] } | { refused: true }> = {
       owner: { ids: [node.sys!, node.know!] }, admin: { ids: [node.sys!, node.know!] },
-      reader: { ids: [node.sys!, node.know!] }, member: { ids: [node.sys!, node.know!] }, stranger: { refused: true },
+      reader: { ids: [node.sys!, node.know!] }, member: { ids: [node.sys!] }, stranger: { refused: true },
     };
     const q = 'query($a: ID!) { appNodes(appRef: $a) { id memory { id name description createdAt } } }';
     for (const who of Object.keys(expected)) {
@@ -464,6 +464,13 @@ describe('#474 / #2193 — preload and no-preload twins over HTTP', () => {
       expect(app.errors, `${who}: appNodes`).toBeUndefined();
       const preload = new Map<string, any>(app.data.appNodes.map((x: any) => [x.id, x.memory]));
       expect([...preload.keys()].sort(), `${who}: nodes served`).toEqual([...want.ids].sort());
+      if (who === 'member') {
+        // #3305: the non-org member loses item-only knowledge on both twins,
+        // while its independently admitted system node remains in the list.
+        const hidden = await post(bearer, 'query($r: ID!) { node(ref: $r) { id } }', { r: node.know });
+        expect(hidden.errors).toBeUndefined();
+        expect(hidden.data.node).toBeNull();
+      }
       for (const id of want.ids) {
         const one = await post(bearer, 'query($r: ID!) { node(ref: $r) { memory { id name description createdAt } } }', { r: id });
         expect(one.errors, `${who}: node(ref)`).toBeUndefined();
@@ -511,9 +518,11 @@ describe('#2193 — run principal', () => {
         const viaNode = await NodeR.memory({ memoryId }, {}, c);
         expect(viaNode?.id ?? null, `run for ${who}: ${key}`).toBe(record?.id ?? null);
       }
-      // Stated up front: the run reaches the installed Agent's knowledge memory, so the
-      // control is not vacuously null on both sides.
-      expect(await NodeR.memory({ memoryId: mem.know }, {}, c), `run for ${who}: know`).toMatchObject({ id: mem.know });
+      // #3280 / ruling0105 A: keep a positive admin control, while an App member
+      // with no independent org access is explicitly refused by both record doors.
+      const know = await NodeR.memory({ memoryId: mem.know }, {}, c);
+      if (who === 'admin') expect(know, `run for ${who}: know`).toMatchObject({ id: mem.know });
+      else expect(know, `run for ${who}: know`).toBeNull();
     }
   });
 });

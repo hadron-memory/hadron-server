@@ -1,3 +1,4 @@
+import { resolveAppInstallation, listAppInstallations } from '../../../lib/appInstallations.js';
 /**
  * Spec 049 Phase 5 — the register's read + write surface (D-2026-09-13-007).
  *
@@ -222,7 +223,7 @@ async function readableAttendee(
       const [{ id: agentId }, { id: resolvedAppId }] = await Promise.all([resolveAgentRef(ctx.db, attendeeRef), resolveAppRef(ctx.db, appRef)]);
       // An Agent-in-App attendee EXISTS only as a live install — the same
       // rule resolveRegister's attendeeColumns applies (Codex P1 on PR #1168).
-      const install = await ctx.db.appAgent.findUnique({ where: { appId_agentId: { appId: resolvedAppId, agentId } }, select: { agentId: true } });
+      const install = await resolveAppInstallation(ctx.db,resolvedAppId,agentId);
       if (!install) return null;
       attendee = { agentId, appId: resolvedAppId };
       appId = resolvedAppId;

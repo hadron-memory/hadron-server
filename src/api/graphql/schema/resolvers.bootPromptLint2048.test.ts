@@ -14,6 +14,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { describeServedWorker } from './resolvers.worker.js';
 import { lintSourceWarnings, lintWarningPageForNodeId } from '../../../lib/bootPromptLint.js';
 import { typeDefs } from './typeDefs.js';
 import { generateDataKey } from '../../../lib/crypto.js';
@@ -382,16 +383,16 @@ describe('#2048 S11b transport and ambiguity controls', () => {
     // No current pointer is needed to lint an immutable record of the open session.
     const got = await (resolvers as any).Worker.promptLintWarnings(worker, {}, { db, userId, roles: [] });
     expect(got).toMatchObject({ items: [{ kind: 'RECOMPILE_AVAILABLE' }] });
-    const workerText = await callMountedTool('hadron_get_worker', { workerRef: worker.id });
+    const workerText = await describeServedWorker(ctx(), worker);
     expect(workerText).toContain('Served prompt lint (compile revision 1)');
     expect(workerText).toContain('[RECOMPILE_AVAILABLE]');
     expect(workerText).toContain("The worker's open session was served revision 1");
     await db.node.update({ where: { id: root.id }, data: { content: 'no tags', revSeq: 1 } });
-    const cleanText = await callMountedTool('hadron_get_worker', { workerRef: worker.id });
+    const cleanText = await describeServedWorker(ctx(), worker);
     expect(cleanText).toContain('Served prompt lint (compile revision 1):\nNo lint warnings.');
     await (resolvers.Mutation as any).approveNode(null, { nodeRef: compiled.id }, { db, userId, roles: [] });
     await db.agent.update({ where: { id: agent.id }, data: { bootPromptNodeId: compiled.id, bootPromptUrn: `hrn:node:${memoryUrn}:boot:compiled` } });
-    const bothCleanText = await callMountedTool('hadron_get_worker', { workerRef: worker.id });
+    const bothCleanText = await describeServedWorker(ctx(), worker);
     expect(bothCleanText).toContain('Current prompt lint (compile revision 1):\nNo lint warnings.');
     expect(bothCleanText).toContain('Served prompt lint (compile revision 1):\nNo lint warnings.');
   });

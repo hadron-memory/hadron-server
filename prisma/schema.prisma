@@ -427,6 +427,7 @@ model User {
   memoryMemberships             MemoryMember[]              @relation("MemoryMemberships")
   // 025-oauth-for-mcp: user-level credential + OAuth back-relations.
   userApiKeys                   UserApiKey[]
+  userApiKeyDeletions           UserApiKeyDeletion[]
   authCodes                     AuthCode[]
   passkeyCredentials            PasskeyCredential[]
   freshSignIns                  FreshSignIn[]
@@ -435,6 +436,7 @@ model User {
   pendingEmailSignIns           PendingEmailSignIn[]
   signIns                       SignIn[]
   authHandoffCodes              AuthHandoffCode[]
+  connectionFlows               ConnectionFlow[]
   // #620: revisions this user approved (NodeRevision.approvedBy).
   approvedNodeRevisions         NodeRevision[]              @relation("NodeRevisionApprover")
   // 046-usage-metering: billing attribution back-relation.
@@ -619,6 +621,7 @@ model Organization {
 
   invitations            UserInvitation[]        @relation("OrgInvitations")
   exchangeConnections    ExchangeConnection[]
+  connectionFlows        ConnectionFlow[]
   slackConnections       SlackConnection[]
   mcpServers             McpServer[]
   homeAssistantInstances HomeAssistantInstance[]
@@ -792,6 +795,8 @@ model Memory {
   /// prisma/post-push.sql (Prisma cannot model the WHERE). Enforced by
   /// chk_memory_class_app_id (system ⇒ both set or both NULL).
   installOfAgentId      String? @map("install_of_agent_id")
+
+
   /// R94 C (#2064): TRUE for an App's install memory, for its whole life. The
   /// link to the Agent above is NULLed when the Agent is erased with its
   /// owner's account (the memory stays with its App, a detached install), so
@@ -1019,8 +1024,11 @@ model Memory {
   /// creation (there is no shared creation helper to hang that on —
   /// hadron-server findings:memory-creation-has-no-shared-helper).
   config              MemoryConfig?
+  defaultSkips        MemoryConfigDefaultSkip[]
   /// #2484 — Apps holding a prefix-scoped write grant on this memory for their userless runs.
   appWriteGrants      AppMemoryWriteGrant[]
+  /// #2883 — automation read grants on this memory.
+  automationReadGrants AppAutomationReadGrant[]
   gitMirrorObligations GitMirrorObligation[]
 
   // #723: ONE shared app-class memory per (App, Agent) — the find-or-create key
@@ -1194,7 +1202,27 @@ enum NodeContentValidationOutcome {
   ERROR
 }
 
+/// #1332 (cor:dmo:160:01) — whether a content-validation report's author check
+/// compared R's recorded author with the reporter. CHECKED means compared and
+/// different, never "independent". NULL only on a report written before #1332.
+enum NodeContentValidationAuthorCheck {
+  CHECKED
+  AUTHOR_UNKNOWN
+}
+
+/// #1332 (cor:dmo:160:01 refusal 5) — the kind of server-derived reporter, the
+/// first that applies: a headless run, a worker session, a person acting
+/// directly (any credential, by user id), an App key with no user or worker.
+enum NodeContentValidationReporterKind {
+  RUN
+  WORKER
+  PERSON
+  APP_KEY
+}
+
 model Node {
+  chatRootCounter ChatRootCounter?
+  chatRootEngineState ChatRootEngineState?
   /// UUIDv7 from `node.yaml` when supplied by the importer (stable across
   /// moves); falls back to `cuid()` for inserts that omit `id`.
   id                  String              @id @default(cuid())
@@ -2143,6 +2171,7 @@ model Agent {
   userSubscriptions  AgentSubscription[] @relation("AgentUserSubscriptions")
   // 023-app-shape Phase 2b: App↔Agent goes through `AppAgent` (N:M).
   // The direct `App[]` back-relation is gone (dropped with App.agentId).
+  appAgentCustomizations AppAgentCustomization[]
   appAgents          AppAgent[]
   imports            AgentImport[]       @relation("ParentAgent")
   importedBy         AgentImport[]       @relation("ImportedAgent")
@@ -2653,11 +2682,10 @@ model NodeRevision {
   /// column landed — revision history would otherwise silently drop
   /// abstract edits.
   abstract           String?
-  /// Spec 032 — snapshot of `Node.abstractOriginHash` at the time of
-  /// revision capture. Restored verbatim by `restoreNodeRevision`;
-  /// legacy revisions (pre-spec) have NULL here, which short-circuits
-  /// the staleness check on the live row after restore (no false
-  /// positives).
+  /// Revision snapshot of `Node.abstractOriginHash` at capture time
+  /// (cor:dmo:020:03, cor:dmo:060:02). Restored verbatim by `restoreNodeRevision`.
+  /// A restored NULL on a node with both an abstract and content means the abstract is
+  /// unverified, neither stale nor fresh. A NULL on a node with no abstract or no content needs no check.
   abstractOriginHash String?             @map("abstract_origin_hash")
   content            String?
   tags               String[]
@@ -2764,13 +2792,34 @@ model NodeContentValidationReport {
   validationTaskRevSeq Int                          @map("validation_task_rev_seq")
   outcome              NodeContentValidationOutcome
   reportedAt           DateTime                     @default(now()) @map("reported_at")
-  /// Optional producer-run identity for idempotent insertion by #1332.
-  runId                String?                      @unique @map("run_id")
+  /// Optional caller-supplied run id for idempotent insertion (#1332). Unique per
+  /// (node, memory snapshot) only, so a run id never answers across memories. It
+  /// is never an identity: the reporter columns below are.
+  runId                String?                      @map("run_id")
+  /// #1332 — the author check made when the report was recorded. NULL: pre-#1332.
+  authorCheck          NodeContentValidationAuthorCheck? @map("author_check")
+  /// #1332 — the reporter, derived by the server from the request, immutable
+  /// after insert (trigger in post-push.sql) except that reporterUserId follows
+  /// a user merge's survivor. Plain ids, never FKs: a deleted principal keeps
+  /// its history and can never be matched again. NULL kind: no recorded
+  /// reporter, which never replays.
+  reporterKind         NodeContentValidationReporterKind? @map("reporter_kind")
+  /// RUN: the server's AppRun id, never the request's runId.
+  reporterRunId        String?                      @map("reporter_run_id")
+  /// WORKER: the bound worker and its agent.
+  reporterWorkerId     String?                      @map("reporter_worker_id")
+  reporterAgentId      String?                      @map("reporter_agent_id")
+  /// PERSON: the user, never the key it authenticated with.
+  reporterUserId       String?                      @map("reporter_user_id")
+  /// APP_KEY: the App key with no user or worker behind it.
+  reporterAppKeyId     String?                      @map("reporter_app_key_id")
 
   node Node @relation(fields: [nodeId], references: [id], onDelete: Cascade)
 
+  @@unique([nodeId, memoryId, runId], map: "node_validation_node_memory_run_uniq")
   @@index([nodeId, nodeRevSeq, reportedAt], map: "node_validation_node_rev_reported_idx")
   @@index([memoryId])
+  @@index([reporterUserId], map: "node_validation_reporter_user_idx")
   @@map("node_content_validation_reports")
 }
 
@@ -2847,6 +2896,29 @@ model ExchangeConnection {
   // inbound email — this lookup must be indexed (#396 Phase 4).
   @@index([toolConnectionId])
   @@map("exchange_connections")
+}
+
+/// #2913 (cor:dmo:080:04 "Finding the connection a flow made"): where one GraphQL-started connect flow is. Created
+/// pending by `startConnection`; settled once by the callback with the connection id (the existing row on a
+/// reconnect) or the done page's failure code. Readable only by `userId`, for one hour from `startedAt` judged on the
+/// database clock. `connectionId` is a plain id, not a relation: a flow that resolved keeps saying which connection it made.
+model ConnectionFlow {
+  id             String    @id
+  userId         String    @map("user_id")
+  organizationId String    @map("organization_id")
+  provider       String
+  startedAt      DateTime  @default(now()) @map("started_at")
+  connectionId   String?   @map("connection_id")
+  failureCode    String?   @map("failure_code")
+  settledAt      DateTime? @map("settled_at")
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([startedAt])
+  @@index([userId])
+  @@index([organizationId])
+  @@map("connection_flows")
 }
 
 /// User→App scoped delegation on a user-owned connection (spec-042 Track B,
@@ -3315,6 +3387,13 @@ model App {
   tickerLiveCap                     Int                  @default(20) @map("ticker_live_cap")
   /// Null = derived (subscribed workers x (86400 / self-subscribe cadence) x 2).
   wakeDailyBudget                   Int?                 @map("wake_daily_budget")
+  /// #3125 S1 (cor:dmo:050:02, cor:dmo:050:20): the App's own JSON object, the App equivalent of `Node.properties`.
+  /// Written whole by whoever manages the App (`setAppProperties`); never a credential. The platform reads only the
+  /// reserved `taskIntegrations` key (cor:agt:120:01). NULL = no properties. CHECK: an object when set.
+  properties                        Json?                @map("properties")
+  /// #3125 S1 (V34): moved by every changing `setAppProperties` write, the optional expected-revision check's counter.
+  /// Its own column, not `updatedAt`, which every other App write moves.
+  propertiesRevision                Int                  @default(0) @map("properties_revision")
   /// **Deprecated** — superseded by `surfaces`. Scheduled for removal
   /// in a follow-up cleanup spec (per 008 R-4); kept in place to
   /// avoid spurious portal churn.
@@ -3381,6 +3460,7 @@ model App {
   organization            Organization?             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   // 023-app-shape Phase 2b: App↔Agent is N:M through AppAgent. The
   // direct `agent` relation is gone (dropped with `agentId`).
+  appAgentCustomizations AppAgentCustomization[]
   appAgents               AppAgent[]
   /// #974 — this App's STAFF: the named castings of installed agents
   /// (cor:dmo:050:11). Distinct from `appAgents`: the roster join says an
@@ -3397,11 +3477,18 @@ model App {
   wakeReservations        AppWakeReservation[]
   agentTeamEvents         AgentTeamEvent[]
   darkWorkerEpisodes      DarkWorkerEpisode[]
+  cadenceEpisodes         CoordinatorCadenceEpisode[]
+  cadenceClocks           CoordinatorCadenceClock[]
   postLimitEpisodes       PostLimitEpisode[]
   automationAdoptionEvents AutomationAdoptionEvent[]
   /// #2484 — this App's prefix-scoped write grants for its userless runs, and their append-only history.
   memoryWriteGrants       AppMemoryWriteGrant[]
   memoryWriteGrantEvents  AppMemoryWriteGrantEvent[]
+  /// #2883 — this App's automation read grants and their append-only history.
+  automationReadGrants    AppAutomationReadGrant[]
+  automationReadGrantEvents AppAutomationReadGrantEvent[]
+  automationTeamSnapshotGrants AppAutomationTeamSnapshotGrant[]
+  automationTeamSnapshotGrantEvents AppAutomationTeamSnapshotGrantEvent[]
   /// #1706 — model-family availability (cor:agt:060:03) and the stall schedule.
   modelFamilyAvailability ModelFamilyAvailability[]
   agentTaskStallSchedule  AgentTaskStallSchedule?
@@ -3762,6 +3849,22 @@ model AppLogEntry {
 /// the row) does NOT cascade-delete the (app_id, agent_id, *) memories
 /// (FR-005; orphan retention preserved). Duplicate inserts for the
 /// same (app_id, agent_id) are rejected by the composite PK.
+/// #2168: App-level customisation state for an installation derived from an
+/// import. This is NOT an install: membership comes only from app_agents or
+/// agent_imports. It outlives deletion of its install memory/compiled target,
+/// so a set pointer whose target is deleted remains a refusal (R27).
+model AppAgentCustomization {
+  appId String @map("app_id")
+  agentId String @map("agent_id")
+  bootPromptNodeId String? @map("boot_prompt_node_id")
+  bootPromptUrn String? @map("boot_prompt_urn")
+  app App @relation(fields:[appId],references:[id],onDelete:Cascade)
+  agent Agent @relation(fields:[agentId],references:[id],onDelete:Cascade)
+  @@id([appId,agentId])
+  @@index([bootPromptNodeId])
+  @@map("app_agent_customizations")
+}
+
 model AppAgent {
   appId            String    @map("app_id")
   agentId          String    @map("agent_id")
@@ -3820,6 +3923,8 @@ model AppAgent {
 model Worker {
   id                String    @id @default(cuid())
   darkWorkerEpisodes DarkWorkerEpisode[]
+  cadenceEpisodes    CoordinatorCadenceEpisode[]
+  cadenceClock       CoordinatorCadenceClock?
   postLimitEpisodes PostLimitEpisode[]
   appId             String    @map("app_id")
   agentId           String    @map("agent_id")
@@ -4057,6 +4162,8 @@ model MemoryMember {
 /// append-once with a single terminal state transition (revoked);
 /// `revokedAt` carries the lifecycle info, and there is no edit
 /// operation. Soft-delete is meaningless for a revocable credential.
+/// #2659 (cor:dmo:070:03): its user may HARD-delete a key
+/// (`deleteUserApiKey`); the trace is a separate UserApiKeyDeletion row.
 model UserApiKey {
   id          String    @id @default(cuid())
   userId      String    @map("user_id")
@@ -4086,7 +4193,9 @@ model UserApiKey {
   hiddenAt    DateTime? @map("hidden_at")
 
   /// Authenticated credential that minted this key (#1253). Null means
-  /// direct issuance or unknown legacy ancestry; never inferred/backfilled.
+  /// direct issuance, unknown legacy ancestry, or (#2659) a minting key its
+  /// user has since deleted, the break recorded once in that key's
+  /// UserApiKeyDeletion row; never inferred/backfilled.
   mintedByKeyId String?      @map("minted_by_key_id")
   mintedByKey   UserApiKey?  @relation("UserKeyLineage", fields: [mintedByKeyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   mintedKeys    UserApiKey[] @relation("UserKeyLineage")
@@ -4428,6 +4537,27 @@ model PasskeyCredential {
   @@map("passkey_credentials")
 }
 
+/// #2659 (hrn:node:hadronmemory.com:specs:cor:dmo:070:03, ruling 0007 A): the one append-only trace of a user
+/// deleting one of their own API keys. Who (the key's own user: ruling 0006 lets no one else delete it), which key
+/// (its id and masked preview) and when; never its secret or its hash. `revokedKeyIds` names the keys the delete itself
+/// revoked (the key when live, and its live subtree, cor:aut:010:02 rule 9); `mintedKeyIds` names the keys it had
+/// minted, whose link to it broke (ruling 0005 B: they stay, revoked, with no parent). No FK to the key: it is gone.
+/// Never updated, and never deleted while its user row exists (prisma/user-api-key-deletion-invariants.sql).
+model UserApiKeyDeletion {
+  id            String   @id @default(cuid())
+  userId        String   @map("user_id")
+  keyId         String   @map("key_id")
+  keyPreview    String   @map("key_preview")
+  revokedKeyIds String[] @map("revoked_key_ids")
+  mintedKeyIds  String[] @map("minted_key_ids")
+  deletedAt     DateTime @default(now()) @map("deleted_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, deletedAt])
+  @@map("user_api_key_deletions")
+}
+
 /// #1897 / cor:aut:030:02 + R66: a completed, factor-protected sign-in. Its id is
 /// the `sid` claim of the JWT it publishes and the root of every code/key that
 /// descends from it, so ending it (the first-passkey cancel link) can revoke
@@ -4564,6 +4694,8 @@ model AuthHandoffCode {
   createdAt       DateTime  @default(now()) @map("created_at")
   /// #1897: the sign-in this handoff publishes (null = not factor-protected).
   signInId        String?   @map("sign_in_id")
+  /// #2913: exchange_start (GraphQL origin) only — the ConnectionFlow this nonce belongs to. No FK: the flow outlives the nonce.
+  flowId          String?   @map("flow_id")
 
   user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
   signIn SignIn? @relation(fields: [signInId, userId], references: [id, userId], onDelete: NoAction, onUpdate: NoAction)
@@ -5478,6 +5610,10 @@ model MemoryConfigTemplate {
   name           String
   description    String?
   required       Boolean   @default(false)
+  /// #3426 — an org-owned template applied to every new org `knowledge`/`group` memory at its creation (`createMemory`
+  /// only; never clone, extract or App sites). CHECK `chk_memory_config_template_org_default_org_only` (post-push.sql
+  /// and the migration): org-owned only. Independent of `required`.
+  orgDefault     Boolean   @default(false) @map("org_default")
   /// Optimistic-concurrency counter, as on NodeRoleRule. Rules are replaced
   /// wholesale with the template, so the template's revision covers them.
   revision       Int       @default(1)
@@ -5497,7 +5633,9 @@ model MemoryConfigTemplate {
   ownerUser    User?                      @relation("MemoryConfigTemplateOwnerUser", fields: [ownerUserId], references: [id], onDelete: Cascade)
   app          App?                       @relation(fields: [appId], references: [id], onDelete: Cascade)
   rules        MemoryConfigTemplateRule[]
+  defaultSkips MemoryConfigDefaultSkip[]
 
+  @@index([organizationId, orgDefault])
   @@index([hadronServerId])
   @@index([organizationId])
   @@index([ownerUserId])
@@ -5525,12 +5663,37 @@ model MemoryConfigTemplateRule {
   authorTask      Node?                @relation("TemplateRuleAuthorTask", fields: [authorTaskId], references: [id], onDelete: SetNull)
   validationTask  Node?                @relation("TemplateRuleValidationTask", fields: [validationTaskId], references: [id], onDelete: SetNull)
   descriptionNode Node?                @relation("TemplateRuleDescriptionNode", fields: [descriptionNodeId], references: [id], onDelete: SetNull)
+  defaultSkips    MemoryConfigDefaultSkip[]
 
   @@unique([templateId, role])
   @@index([authorTaskId])
   @@index([validationTaskId])
   @@index([descriptionNodeId])
   @@map("memory_config_template_rules")
+}
+
+/// #3426 (C6) — an org-default rule skipped at memory creation because its reference was deleted, unreadable to the
+/// org or not a task. Written in the creation transaction; readable only behind the memory-config manage gate. It
+/// stores NO task URN and NO state: a manager's read recomputes the current per-caller view from `templateRuleId`.
+model MemoryConfigDefaultSkip {
+  id             String   @id @default(cuid())
+  memoryId       String   @map("memory_id")
+  templateId     String?  @map("template_id")
+  templateRuleId String?  @map("template_rule_id")
+  role           String
+  /// "authorTask" | "validationTask" | "descriptionNode"
+  field          String
+  reason         String   @default("REFERENCE_UNAVAILABLE")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  memory       Memory                    @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  template     MemoryConfigTemplate?     @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  templateRule MemoryConfigTemplateRule? @relation(fields: [templateRuleId], references: [id], onDelete: SetNull)
+
+  @@index([memoryId])
+  @@index([templateId])
+  @@index([templateRuleId])
+  @@map("memory_config_default_skips")
 }
 
 /// #1655 DAE/DAG: immutable compiled code; approval is the temporary DZ-3
@@ -5620,8 +5783,62 @@ model AppMemoryWriteGrantEvent {
   @@map("app_memory_write_grant_events")
 }
 
+/// #2883 (ruling 0081 = A; cor:agt:010:01 read-grant rule) — an automation's READ grant on ONE memory, optionally under
+/// one loc prefix (a NULL prefix is the whole memory). "The automation" is the TRIGGER ROW a run executes
+/// (`AgentSchedule` / `AgentWebhook`, keyed `(appId, triggerKind, triggerId)`); the key carries across an edit and a
+/// re-adoption, and the grant ends on revoke or when the trigger is soft-deleted (judged live at the read: no FK, the
+/// trigger is polymorphic). Read-only, consulted only by the run `hadron_read_node` read (`src/lib/automationReadGrant.ts`).
+/// A row is never edited: it ends with a terminal `revokedAt` (trigger + CHECKs in app-automation-read-grant-invariants.sql,
+/// where the partial unique index also lives). `grantedBy` / `revokedBy` carry no FK: sealed history that survives
+/// user erasure.
+model AppAutomationReadGrant {
+  id          String    @id @default(cuid())
+  appId       String    @map("app_id")
+  /// SCHEDULE | WEBHOOK (CHECK in app-automation-read-grant-invariants.sql).
+  triggerKind String    @map("trigger_kind")
+  triggerId   String    @map("trigger_id")
+  memoryId    String    @map("memory_id")
+  /// NULL = the whole memory; otherwise a loc prefix covering itself and its `:`-boundary descendants.
+  prefix      String?
+  grantedBy   String    @map("granted_by")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  revokedAt   DateTime? @map("revoked_at")
+  revokedBy   String?   @map("revoked_by")
+
+  app    App    @relation(fields: [appId], references: [id], onDelete: Cascade)
+  memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@index([appId, createdAt])
+  @@index([memoryId])
+  @@index([appId, triggerKind, triggerId])
+  @@map("app_automation_read_grants")
+}
+
+/// #2883 — append-only record of every automation read grant and revocation: who, which App, trigger, memory and
+/// prefix, and nothing of any node's content. Written in the SAME transaction as the row change and nowhere else.
+/// Memory, grant and actor carry no FK on purpose; the App FK cascades so a hard delete still works.
+model AppAutomationReadGrantEvent {
+  id          String   @id @default(cuid())
+  appId       String   @map("app_id")
+  triggerKind String   @map("trigger_kind")
+  triggerId   String   @map("trigger_id")
+  memoryId    String   @map("memory_id")
+  grantId     String   @map("grant_id")
+  prefix      String?
+  /// GRANT | REVOKE (CHECK in app-automation-read-grant-invariants.sql).
+  action      String
+  actorUserId String   @map("actor_user_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@index([appId, createdAt])
+  @@index([grantId])
+  @@map("app_automation_read_grant_events")
+}
+
 /// #430 (first slice) — a Git-mirror attempt that did NOT land, recorded so the divergence is no longer silent.
-/// One row per (memory, node, kind, remove_loc): a WRITE row per node, plus one REMOVE row per distinct old loc a move
+/// One row per (memory, node, kind, remove_loc, branch): a WRITE row per node/branch, plus one REMOVE row per distinct old loc/branch a move
 /// left behind (remove_loc is '' for WRITE). `node_id` carries NO foreign key on purpose, so a REMOVE row survives the
 /// node's hard delete; the memory FK cascades. A row exists only while the last settled attempt failed: success, and
 /// ordinary writes to a memory that is not mirrored delete it. The sweep leaves ineligible memories untouched.
@@ -5635,6 +5852,8 @@ model GitMirrorObligation {
   nodeId        String                   @map("node_id")
   kind          GitMirrorObligationKind
   removeLoc     String                   @default("") @map("remove_loc")
+  /// #3042: resolved attempted branch; empty only for legacy unknown-branch debt.
+  branch        String                   @default("")
   state         GitMirrorObligationState
   errorClass    String                   @map("error_class")
   attempts      Int                      @default(1)
@@ -5643,7 +5862,7 @@ model GitMirrorObligation {
 
   memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
 
-  @@id([memoryId, nodeId, kind, removeLoc])
+  @@id([memoryId, nodeId, kind, removeLoc, branch])
   @@index([memoryId, state])
   @@map("git_mirror_obligations")
 }
@@ -5718,8 +5937,15 @@ model AgentTask {
   description          String?
   /// Opaque origin reference (an issue URL, a node URN). Not interpreted.
   source               String?
+  /// #3125 S2 (V29, V46; cor:agt:120:02): the claim on an outside item, set once at create. Unique within an App,
+  /// whatever the task's state, through the partial unique index agent_tasks_app_external_id_uniq (raw SQL in
+  /// agent-task-external-id-invariants.sql: Prisma cannot model a partial unique). Compared exactly as written.
+  externalId           String?   @map("external_id")
   /// Null for a root task. Always in the same App (cor:agt:050:01).
   parentTaskId         String?   @map("parent_task_id")
+  /// #2646 (cor:agt:050:02, What a clone does): the task this one was cloned from, set once at creation and never
+  /// changed. Always in the same App (the clone is made in the source's App). Null for every task not made by a clone.
+  clonedFromId         String?   @map("cloned_from_id")
   ownerWorkerId        String?   @map("owner_worker_id")
   ownerUserId          String?   @map("owner_user_id")
   /// Both null ⇒ queued while pending (cor:agt:050:03).
@@ -5727,6 +5953,14 @@ model AgentTask {
   assigneeUserId       String?   @map("assignee_user_id")
   /// For the matcher (T3): `{ role?, familyIn?, familyNotIn?, excludeWorkerIds? }`.
   requirements         Json?
+  /// #2829: reserve an opt-in match before create commits, so automatic runs cannot race it.
+  matchPending         Boolean   @default(false) @map("match_pending")
+  /// #3246 (cor:agt:060:10, ruling 0085 A): the sweep's claim on an interrupted reservation: one guarded write, so
+  /// concurrent sweeps make the one attempt once. A claim older than the bound is reclaimable (its attempt died too).
+  matchClaimedAt       DateTime? @map("match_claimed_at")
+  /// A single-shot failure remains until assignment; cancellation clears it (cor:agt:050:01, ruling 0015).
+  matchFailedAt        DateTime? @map("match_failed_at")
+  matchFailedReason    String?   @map("match_failed_reason")
   /// #2420 (cor:agt:050:28): this task's OWN optional, platform-opaque JSON object (the team's namespaces: review
   /// schedule, complexity, a seat's reviewed head). Never inherited, never matcher or authorization input; written by
   /// the cor:agt:050:09 set and the task's assignee, validated against the Team Agent's `schema:task-properties`.
@@ -5750,12 +5984,22 @@ model AgentTask {
   resultOutcome        String?   @map("result_outcome")
   resultSummary        String?   @map("result_summary")
   resultEvidence       String?   @map("result_evidence")
+  /// #2662: immutable ordered findings, set only with the finish result; null is legacy/omitted.
+  resultFindings       Json?     @map("result_findings")
+  /// #2663: latest disposition for each finding, stored beside the immutable result (at most100).
+  findingDispositions  Json      @default("[]") @map("finding_dispositions")
+  /// Derived by the database trigger from resultFindings + findingDispositions; filter before SQL paging.
+  unresolvedFindingIds String[]  @default([]) @map("unresolved_finding_ids")
   /// #2651 (cor:agt:050:29, :01): the latest hand-back — its code (closed set, chk_agent_tasks_hand_back), optional
   /// text (<= 2,000 characters; never put into an event) and time. A later hand-back replaces all three.
   handBackReasonCode   String?   @map("hand_back_reason_code")
   handBackReasonText   String?   @map("hand_back_reason_text")
   handedBackAt         DateTime? @map("handed_back_at")
   tags                 String[]  @default([])
+  /// #2649 (cor:agt:050:01 References, :09): the task's ordered typed references, a JSON array of
+  /// {kind, target, label} (at most 20, chk_agent_tasks_references). Targets are stored as given and never resolved.
+  /// Column named task_references: REFERENCES is reserved in SQL.
+  references           Json      @default("[]") @map("task_references")
   /// Set by whoever assigns; T6 acts on it (cor:agt:050:10). False unless the assigner asks (R182, #2249): the
   /// default only reaches a raw insert, since every create path writes the resolved value.
   closeSessionWhenDone Boolean   @default(false) @map("close_session_when_done")
@@ -5780,6 +6024,8 @@ model AgentTask {
   app            App                 @relation(fields: [appId], references: [id], onDelete: Cascade)
   parent         AgentTask?          @relation("AgentTaskParent", fields: [parentTaskId], references: [id], onDelete: NoAction)
   children       AgentTask[]         @relation("AgentTaskParent")
+  clonedFrom     AgentTask?          @relation("AgentTaskClone", fields: [clonedFromId], references: [id], onDelete: SetNull)
+  clones         AgentTask[]         @relation("AgentTaskClone")
   /// #2553: the counter of the numbers issued under this task.
   childCounters  AgentTaskCounter[]
   blockerLinks AgentTaskBlocker[] @relation("TaskBlockedBy")
@@ -5795,6 +6041,7 @@ model AgentTask {
   @@unique([appId, handle])
   @@index([appId, status])
   @@index([parentTaskId])
+  @@index([clonedFromId])
   @@index([ownerWorkerId])
   @@index([ownerUserId])
   @@index([assigneeWorkerId])
@@ -5855,8 +6102,14 @@ model AgentTeamEvent {
   actorAgentId           String?   @map("actor_agent_id")
   /// #1756: the headless run that acted, when one did; the other actor columns are then null.
   actorRunId             String?   @map("actor_run_id")
+  /// #3132 (cor:agt:050:11, :23): the App key that acted, when one did (its one task write is a claim); the other
+  /// actor columns are then null. No FK: like the other actor ids, a sealed record of who acted at the time.
+  actorAppKeyId          String?   @map("actor_app_key_id")
   /// The worker the event concerns, if any (e.g. the new assignee).
   subjectWorkerId        String?   @map("subject_worker_id")
+  /// #3132 (rulings:0009): the PERSON the event concerns, when a key or run acted for one it cannot itself resolve
+  /// (the assignee its claim named). Never the actor. No FK, sealed like the actor ids (not rewritten by a merge).
+  subjectUserId          String?   @map("subject_user_id")
   /// null for an ordinary event, 'alarm' for an alarm.
   severity               String?
   /// Alarms only: the owner chain when raised, nearest first.
@@ -5879,6 +6132,7 @@ model AgentTeamEvent {
   wakes      AgentTeamAlarmSchedule[]
   deliveries WorkerDeliveryTaskEvent[]
   darkEpisode DarkWorkerEpisode?
+  cadenceEpisode CoordinatorCadenceEpisode?
   postLimitEpisode PostLimitEpisode?
 
   @@unique([taskId, type, episodeStart], map: "agent_team_events_episode_uniq")
@@ -5940,6 +6194,39 @@ model DarkWorkerEpisode {
 
   @@index([appId, endedAt])
   @@map("dark_worker_episodes")
+}
+
+/// #2763 — one coordinator-cadence episode: a coordinator that stopped assigning while a lane worker was free (cor:agt:050:31,
+/// Proposed). It de-duplicates the task-less alarm raised with it (agent_team_events, type `alarm.coordinator-cadence`, task_id
+/// NULL, which `agent_team_events_episode_uniq` cannot dedupe). At most one OPEN row per coordinator (partial unique index in
+/// prisma/coordinator-cadence-invariants.sql); the episode ends only at the coordinator's next counted assignment.
+model CoordinatorCadenceEpisode {
+  id       String    @id @default(cuid())
+  appId    String    @map("app_id")
+  workerId String    @map("worker_id")
+  eventId  String    @unique @map("event_id")
+  openedAt DateTime  @map("opened_at")
+  endedAt  DateTime? @map("ended_at")
+
+  app    App            @relation(fields: [appId], references: [id], onDelete: Cascade)
+  worker Worker         @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  event  AgentTeamEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([appId, endedAt])
+  @@map("coordinator_cadence_episodes")
+}
+
+/// #2763 — when the evaluator first saw each coordinator, so a coordinator that existed before the deploy (or never assigned)
+/// is not late at the first pass. Inserted once, `ON CONFLICT DO NOTHING`; never updated.
+model CoordinatorCadenceClock {
+  workerId   String   @id @map("worker_id")
+  appId      String   @map("app_id")
+  observedAt DateTime @map("observed_at")
+
+  app    App    @relation(fields: [appId], references: [id], onDelete: Cascade)
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@map("coordinator_cadence_clocks")
 }
 
 /// #2014 — one post-limit episode: the first refusal of a worker's team-chat post by the rate limit in an hour. It only
@@ -6576,6 +6863,9 @@ model WorkerDeliveryTick {
   ackedByUserId   String?  @map("acked_by_user_id")
   ackedByWorkerId String?  @map("acked_by_worker_id")
   ackedByAppKeyId String?  @map("acked_by_app_key_id")
+  /// #3509 (cor:agt:100:03, cor:agt:080:04): when the worker last CHECKED a channel this ticker covers after the wake
+  /// `ackedAt` records; null = not yet. Written by the check (DB clock), cleared by a newer delivery. Latest wake only.
+  respondedAt     DateTime? @map("responded_at")
 
   worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
   ticker Ticker @relation(fields: [tickerId], references: [id], onDelete: Cascade)
@@ -6881,7 +7171,7 @@ model ServedPrompt {
   sessionId           String?                  @map("session_id")
   chatId              String?                  @map("chat_id")
   runId               String?                  @map("run_id")
-  /// 1 for a bind or a run; a chat records again when its served revision changes (R37), counting up.
+  /// 1 for a bind or a run; a chat records again when its served revision or filled variables change (R37, #3096), counting up.
   ordinal             Int                      @default(1)
   /// Null only for a chat held in a memory no App owns (chk_served_prompts_app, prisma/served-prompt-app-invariants.sql).
   appId               String?                  @map("app_id")
@@ -7096,4 +7386,58 @@ model RateLimitPolicyAudit {
   changeReference String   @map("change_reference")
   createdAt       DateTime @default(now()) @map("created_at")
   @@map("rate_limit_policy_audits")
+}
+
+/// #3350 / ruling 0112 amended: a read-only team snapshot grant on one automation, never an App-wide permission.
+/// Rows are immutable except for terminal revoke; live trigger identity is checked on every read.
+model AppAutomationTeamSnapshotGrant {
+  id          String    @id @default(cuid())
+  appId       String    @map("app_id")
+  triggerKind String    @map("trigger_kind")
+  triggerId   String    @map("trigger_id")
+  grantedBy   String    @map("granted_by")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  revokedAt   DateTime? @map("revoked_at")
+  revokedBy   String?   @map("revoked_by")
+  app         App       @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@index([appId, createdAt], map: "automation_team_snapshot_grants_app_created_idx")
+  @@map("app_automation_team_snapshot_grants")
+}
+
+/// #3350: one append-only content-free event per give/revoke, in the same transaction. Actor and grant ids survive erasure.
+model AppAutomationTeamSnapshotGrantEvent {
+  id          String   @id @default(cuid())
+  appId       String   @map("app_id")
+  triggerKind String   @map("trigger_kind")
+  triggerId   String   @map("trigger_id")
+  grantId     String   @map("grant_id")
+  action      String
+  actorUserId String   @map("actor_user_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  app         App      @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@index([appId, createdAt], map: "automation_team_snapshot_events_app_created_idx")
+  @@index([grantId], map: "automation_team_snapshot_events_grant_idx")
+  @@map("app_automation_team_snapshot_grant_events")
+}
+
+/// #3496 — operational chat state; deliberately outside NodeRevision's fingerprint.
+/// Classified plaintext under cor:sec:040:03; survives message deletion, not root hard deletion.
+model ChatRootCounter {
+  chatRootNodeId String @id @map("chat_root_node_id")
+  messageCount Int @default(0) @map("message_count")
+  lastMessageAt DateTime? @map("last_message_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  chatRoot Node @relation(fields: [chatRootNodeId], references: [id], onDelete: Cascade)
+  @@map("chat_root_counters")
+}
+
+/// #3501 — encrypted conversational operational state, never revisioned.
+model ChatRootEngineState {
+  chatRootNodeId String @id @map("chat_root_node_id")
+  state Json
+  updatedAt DateTime @updatedAt @map("updated_at")
+  chatRoot Node @relation(fields: [chatRootNodeId], references: [id], onDelete: Cascade)
+  @@map("chat_root_engine_states")
 }

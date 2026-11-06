@@ -53,6 +53,7 @@ import { mintProviderNonce, nonceExpectation, recordNonceRefusal } from './auth/
 import { failLoginCallback, type LoginFailureReason } from './auth/login-error.template.js';
 import { mountDevLoginRoutes } from './auth/devLogin.js';
 import { mountPasskeyCeremonyRoutes } from './api/passkeyCeremonyRoutes.js';
+import { mountSigningCeremonyRoutes } from './api/signingCeremonyRoutes.js';
 import { beginPasskeySignIn, mountPasskeySignInRoutes } from './api/passkeySignInRoutes.js';
 import { signingSurfacePolicy } from './lib/signing/surface.js';
 import { completeCeremonyLeg, mountFreshSignInRoutes } from './api/freshSignInRoutes.js';
@@ -62,6 +63,8 @@ import {
   oauthSurfaceRefusalMessage,
   hasCurrentPlatformAdminRole,
   resolveAuthContext,
+  resolveAuthContextWithStatus,
+  portalHumanUserId,
 } from './middleware/auth.js';
 import { initCloudflareIps } from './auth/cloudflare-ips.js';
 import { startRateBucketCleanupLoop } from './lib/rateLimit/maintenance.js';
@@ -88,6 +91,7 @@ import { assignRequestId, bindRequestId, REQUEST_ID_HEADER } from './lib/request
 import { internalFaultErrorHandler, respondInternalFault } from './lib/internalFault.js';
 import { handleMcpRequest, handleMcpDelete, startMcpTransportSweepLoop } from './mcp/server.js';
 import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories.js';
+import { startPasskeyCeremonySweepLoop } from './jobs/sweepPasskeyCeremonies.js';
 import { startMergeConsentSweepLoop } from './jobs/sweepMergeConsents.js';
 import { startGitMirrorObligationSweepLoop } from './jobs/sweepGitMirrorObligations.js';
 import { startOauthClientGcLoop } from './jobs/gcOauthClients.js';
@@ -103,11 +107,12 @@ import { stopEmbeddingPublisher } from './services/embedding/enqueue.js';
 import { startGitMirrorSubscriber } from './integrations/github/nodeWrittenSubscriber.js';
 import { GraphQLError, buildSchema, printSchema } from 'graphql';
 import {
+  encryptMemoryTargetRef,
   stageRequestMemoryKeys,
   MemoryUnlockError,
   REQUEST_KEYS_HEADER,
 } from './lib/memoryUnlock.js';
-import { requestKeyStorage } from './lib/requestKeys.js';
+import { requestFirstEncryptionStorage, requestKeyStorage } from './lib/requestKeys.js';
 import { OPERATION_KEY_HEADER, requestOperationKeyStorage, stageRequestOperationKey } from './lib/requestOperationKey.js';
 import { emptyActor, requestActorStorage } from './lib/requestActor.js';
 import { isEmbeddingConfigured } from './lib/embedding/index.js';
@@ -1103,6 +1108,8 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // NODE_ENV + localhost Host; otherwise indistinguishable from a 404).
   mountDevLoginRoutes(app, db);
   mountPasskeyCeremonyRoutes(app);
+  // #1632 S2b-2 (cor:dmo:130:08): the signing ceremony page; mounted only when the signing switch is on (#1895).
+  mountSigningCeremonyRoutes(app);
   mountPasskeySignInRoutes(app);
   mountFreshSignInRoutes(app, { emailSendPerIpRateLimit, emailRecipientRateLimit });
 
@@ -1274,13 +1281,14 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     // context — aborted responses included (PR-514 review, Codex P1 ×2).
     bindRequestId,
     (_req, _res, next) => requestKeyStorage.run(new Map(), next),
+    (_req, _res, next) => requestFirstEncryptionStorage.run(new Map(), next),
     (_req, _res, next) => requestOperationKeyStorage.run({}, next),
     // #1610: the Worker / Agent behind this request's writes, filled by
     // resolveAuthContext from the validated session binding.
     (_req, _res, next) => requestActorStorage.run(emptyActor(), next),
     expressMiddleware(apollo, {
       context: async ({ req }) => {
-        const auth = await resolveAuthContext(req, db);
+        const { auth, credentialStatus } = await resolveAuthContextWithStatus(req, db);
         const surfaceRefusal = oauthSurfaceRefusal(auth, 'account');
         if (surfaceRefusal) {
           // #1303: `code` and prose unchanged; `reason` & co. are additive.
@@ -1301,13 +1309,18 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
           db,
           req.headers[REQUEST_KEYS_HEADER],
           (auth as { userId?: string | null }).userId,
+          {
+            impersonated: !!(auth as { impersonation?: unknown }).impersonation,
+            encryptMemoryTarget: () => encryptMemoryTargetRef(req.body),
+          },
         ).catch((err) => {
           if (err instanceof MemoryUnlockError) {
             throw new GraphQLError(err.message, { extensions: { code: err.code } });
           }
           throw err;
         });
-        return { db, ...auth };
+        const portalHuman = portalHumanUserId(auth);
+        return { db, ...auth, credentialStatus, ...(portalHuman ? { portalHumanUserId: portalHuman } : {}) };
       },
     }),
   );
@@ -1884,6 +1897,9 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_MERGE_CONSENT_SWEEP !== 'true') {
     startMergeConsentSweepLoop(db);
   }
+
+  // #3122: transient passkey/signing ceremonies; independent of feature flags so old rows still retire.
+  startPasskeyCeremonySweepLoop(db);
 
   // #155 — collect unused DCR OAuth clients 7 days past their expiry (soft delete). Dry run, logging
   // the count it would collect, until OAUTH_CLIENT_GC_ENABLED=true (R220).

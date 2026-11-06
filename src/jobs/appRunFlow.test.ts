@@ -77,16 +77,16 @@ beforeEach(async () => {
     data: { id: generateId(), organizationId: orgId, name: 'flow-app', urn: `${ORG_URN}::flow-app` },
   });
   appId = app.id;
-  // Headless runs write an explicitly granted knowledge memory, not team space.
+  // #3278: items never grant a userless run read or write access. The fixture's
+  // flow is PUBLIC for reads; its known output/tool prefixes have explicit App write grants.
   const memory = await db.memory.create({
     data: {
       id: generateId(), organizationId: orgId, name: 'flowmem',
-      urn: MEM_URN, class: 'knowledge', visibility: 'ORGANIZATION',
+      urn: MEM_URN, class: 'knowledge', visibility: 'PUBLIC',
     },
   });
   memoryId = memory.id;
-  // The run principal's access rides the App's installed Agent's memory map
-  // (getAppMemoryAccess): Agent + AppAgent install + read-write AgentMemoryItem.
+  // The installed Agent's item discovers the PUBLIC memory read-only.
   const agent = await db.agent.create({
     data: { id: generateId(), organizationId: orgId, name: 'flow-agent', urn: `${ORG_URN}:flow-agent` },
   });
@@ -96,6 +96,12 @@ beforeEach(async () => {
   await db.agentMemoryItem.create({
     data: { agentId: agent.id, memoryId, role: 'read-write' },
   });
+  const grantor = await createDbRunConsentPrincipal(db, orgId, appId);
+  await db.orgMember.update({ where: { organizationId_userId: { organizationId: orgId, userId: grantor.userId } }, data: { role: 'ADMIN' } });
+  await db.appMemoryWriteGrant.createMany({ data: ['runs', 'flow', 'tasks', 'notes'].map(prefix => ({
+    appId, memoryId, prefix, grantedBy: grantor.userId,
+    registerNodeUrn: 'hrn:node:example.com:fixture:authority',
+  })) });
 
   const classify = await makeNode('flow:classify', {
     content: 'Classify the report about {{topic}}. Score your confidence.',
@@ -269,6 +275,24 @@ describe('3-node flow through production deps (§10)', () => {
     });
     expect(appended.name).toBe('alerts');
     expect(appended.content).toContain('---'); // append separator
+  });
+
+  it('run output states no task, so a role-governed target refuses and stays as it was (#1328)', async () => {
+    const task = await db.node.create({ data: { id: generateId(), memoryId, loc: 'author-task', name: 'Task', isRunnable: true } });
+    const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId } });
+    await db.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, role: 'guide', authorTaskId: task.id, authorTaskRequired: true } });
+    await db.node.create({ data: { id: generateId(), memoryId, loc: 'flow:governed', name: 'governed', role: 'guide', content: 'kept' } });
+    await db.node.update({
+      where: { loc_memoryId: { loc: 'flow:act', memoryId } },
+      data: { data: { output: { writeTo: `${ORG_URN}::flowmem::flow:governed` } } as never },
+    });
+    const run = await mintFlow();
+    expect(await executeAppRun(db, run.id, flowDeps(0.92).deps)).not.toBe('completed');
+    const failure = JSON.stringify((await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).failure);
+    expect(failure).toContain('OUTPUT_WRITE_FAILED');
+    // #1329: the refusal reaches the run's author with the task and the run's own read.
+    expect(failure).toContain('hadron_read_node');
+    expect((await db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc: 'flow:governed', memoryId } } })).content).toBe('kept');
   });
 
   it('an encrypted node anywhere in the setup graph prevents execution (#1719 R5b)', async () => {

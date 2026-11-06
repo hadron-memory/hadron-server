@@ -1,3 +1,4 @@
+import { attestedAuthoring } from '../../../lib/authoringAttestation.js';
 import { withTestOperationKey } from '../../../test/operationKey.js';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -370,7 +371,7 @@ describe('createNode with encryption', () => {
     }) as never);
     try {
       await writeNodeCore({ memoryId: session.memoryId!, loc: 'locked-reaffirm',
-        abstract: 'Summary' }, sessionCtx, 'update');
+        abstract: 'Summary' }, sessionCtx, 'update', { authoring: attestedAuthoring(null) });
     } finally {
       probe.mockRestore();
     }

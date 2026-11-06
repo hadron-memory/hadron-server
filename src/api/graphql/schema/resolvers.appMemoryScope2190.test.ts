@@ -167,8 +167,8 @@ describe('#2190 — what is in scope, and why', () => {
     );
   });
 
-  it('an external App member gets the first Agent and the team space only', async () => {
-    expect(keysOf(await scopeAll('external'))).toEqual(['KnowA', 'KnowEmpty', 'KnowShared', 'TeamSpace', 'sysAlpha']);
+  it('#3305: an external App member keeps system/team reach but no item-only knowledge', async () => {
+    expect(keysOf(await scopeAll('external'))).toEqual(['TeamSpace', 'sysAlpha']);
   });
 
   it('never lists a worker memory, another App\'s memory, an unlicensed Agent\'s memory, a link capped to nothing, or a base with nothing inherited', async () => {
@@ -190,7 +190,9 @@ describe('#2190 — what is in scope, and why', () => {
     expect(by('KnowEmpty')).toMatchObject({ name: 'KnowEmpty', class: 'knowledge' });
   });
 
-  it('an external member sees only the first Agent\'s link on a memory two Agents share', async () => {
+  it('an independently subscribed external member sees only the first Agent\'s link on a memory two Agents share', async () => {
+    await db.orgMember.create({ data: { organizationId: foreignOrg.id, userId: user.external!, role: 'READER' } });
+    await db.memorySubscription.create({ data: { memoryId: mem.KnowShared!, organizationId: foreignOrg.id, role: 'READER' } });
     const shared = (await scopeAll('external')).find((r) => r.memoryId === mem.KnowShared)!;
     expect(shared.sources).toEqual([{ kind: 'AGENT_LINK', agentId: agent.Alpha }]);
   });
@@ -339,7 +341,7 @@ describe('#2190 — over the real GraphQL HTTP boundary', () => {
     expect(rows.filter((r) => r.viewerCanWrite)).toEqual([]);
 
     const created = await post(token, 'mutation($i: CreateNodeInput!) { createNode(input: $i) { id } }',
-      { i: { memoryId: writable[0]!.memoryId, loc: `probe:imp-${n}`, name: 'probe' } }, 500);
+      { i: { memoryId: writable[0]!.memoryId, loc: `probe:imp-${n}`, name: 'probe' } }, 403);
     expect(created.errors?.[0]?.extensions?.code).toBe('IMPERSONATION_READ_ONLY');
     expect(await db.node.count({ where: { memoryId: writable[0]!.memoryId, loc: `probe:imp-${n}` } })).toBe(0);
   });

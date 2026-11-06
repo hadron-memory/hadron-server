@@ -163,11 +163,11 @@ describe('#2026 per-call SDK and committed marks',()=>{
   const client=new Client({name:'footer-parallel',version:'1'});const [local,remote]=InMemoryTransport.createLinkedPair();
   await server.connect(remote);await client.connect(local);
   try {
-   const [kit,empty]=await Promise.all([session.id,otherSession.id].map(session=>client.callTool({name:'hadron_delivery_settings_get',arguments:{appRef:app.id,session}})));
+   const [kit,empty]=await Promise.all([session.id,otherSession.id].map(session=>client.callTool({name:'hadron_validate',arguments:{memoryUrn:'footer2026:shared',session}})));
    expect(kit.isError).not.toBe(true);expect(empty.isError).not.toBe(true);
    expect(kit._meta?.['hadron/deliveryPending']).toEqual(metadata(13));
    expect(empty._meta?.['hadron/deliveryPending']).toEqual(metadata(0));
-   const invalid=await client.callTool({name:'hadron_delivery_settings_get',arguments:{appRef:app.id,session:generateId()}});
+   const invalid=await client.callTool({name:'hadron_validate',arguments:{memoryUrn:'footer2026:shared',session:generateId()}});
    expect(invalid.isError).toBe(true);expect(invalid._meta?.['hadron/deliveryPending']).toBeUndefined();
   } finally {await client.close();await server.close();}
  });
@@ -215,7 +215,7 @@ describe('#2026 review closure controls', () => {
    const pull = await loadDeliveryBatches({ctx:context() as any,app,hostId:null,workerIds:[worker.id]});
    expect(pull.batches[0].ranges[0].seqs).toEqual([rows[0].seq]);
    expect(await deliveryPending(context() as any)).toEqual(metadata(1));
-   expect((await appendDeliveryPending({content:[]},context() as any)).content).toEqual([{type:'text',text:'1 message waiting; pull with hadron_team_chat_inbox.'}]);
+   expect((await appendDeliveryPending({content:[]},context() as any)).content).toEqual([{type:'text',text:'1 message waiting; pull with `hadron team chat inbox`.'}]);
   } finally {setS7AvailableForTest(false);}
  });
  it('preserves the ambient actor semantics of an actor-neutral callback', async () => {

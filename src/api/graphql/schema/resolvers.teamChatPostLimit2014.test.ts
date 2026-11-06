@@ -28,6 +28,14 @@ vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGrap
 const M = resolvers.Mutation as any;
 const ctx = (userId?: string): Context => ({ db, userId, roles: ['READER'] }) as Context;
 const MIN = 60_000;
+/**
+ * #3032: the two hourly-window tests below each make 61 real `createTeamChatMessage` calls (the limiter counts admitted
+ * posts, so the loop is the boundary under test and is not seeded). Measured on a private DB: 1.39-1.63 s quiet,
+ * 1.43-2.05 s under contention, about 23-29 ms per post with no single post over 57 ms, so the time is steady work, not
+ * a blocked wait. On loaded shared hosts and hosted shards they crossed vitest's 5 s default. This budget applies to
+ * those two tests only; the global default is unchanged. 30 s follows #3369's per-test budget.
+ */
+const HOURLY_WINDOW_BUDGET_MS = 30_000;
 
 type W = { id: string; name: string; holder: string; session: string };
 
@@ -114,7 +122,7 @@ describe('#2014 the limit', () => {
     for (let round = 0; round < 6; round++) { await post(liam, 10, `r${round}`); await age(liam, 2 * MIN + round); }
     const err: any = await workerSays(liam, 'sixty-first').catch((e) => e);
     expect(err.extensions).toMatchObject({ code: 'TEAM_CHAT_POST_RATE_LIMITED', limit: '60 per hour' });
-  });
+  }, HOURLY_WINDOW_BUDGET_MS);
 
   it('with both windows breached, resetsAt is when the LAST breached window clears and names that window', async () => {
     for (let round = 0; round < 5; round++) { await post(liam, 10, `r${round}`); await age(liam, 2 * MIN + round); }
@@ -123,7 +131,7 @@ describe('#2014 the limit', () => {
     expect(err.extensions.limit).toBe('60 per hour');
     // Hour-based: the minute window alone would reset within 60s.
     expect(new Date(err.extensions.resetsAt).getTime()).toBeGreaterThan(Date.now() + 2 * MIN);
-  });
+  }, HOURLY_WINDOW_BUDGET_MS);
 
   it('an identical post at the quota boundary is refused as a duplicate, not as a rate limit, and raises no alarm', async () => {
     await post(liam, 10, 'a');
@@ -150,7 +158,7 @@ describe('#2014 the alarm', () => {
     const events = await alarms();
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ severity: 'alarm', subjectWorkerId: liam.id, taskId: null, appId: app.id });
-    expect((events[0]!.chain as any[])[0]).toEqual({ workerId: boss.id });
+    expect(events[0]!.chain).toEqual([{ workerId: boss.id }]);
     expect(await db.postLimitEpisode.count({ where: { workerId: liam.id, endedAt: null } })).toBe(1);
     const sched = await db.agentTeamAlarmSchedule.findMany({ where: { eventId: events[0]!.id }, orderBy: { chainIndex: 'asc' } });
     expect(sched[0]!.wokenAt).not.toBeNull();
@@ -259,5 +267,30 @@ describe('#2014 the alarm', () => {
     let err: unknown;
     try { err = await raisePostLimitAlarm(db, liam.id, '10 per minute').catch((e) => e); } finally { spy.mockRestore(); }
     expect(err).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+  });
+});
+
+
+describe('#3358 post-limit alarm shares the reporting-line-only chain (cor:agt:020:14)', () => {
+  it.each(['none', 'retired', 'foreign'] as const)('no live same-App head (%s) uses managers', async (kind) => {
+    if (kind === 'none') await db.worker.update({ where: { id: liam.id }, data: { reportsToWorkerId: null } });
+    if (kind === 'retired') await db.worker.update({ where: { id: boss.id }, data: { retiredAt: new Date() } });
+    if (kind === 'foreign') {
+      const foreign = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Other', urn: `${org.urn}:other` } });
+      await db.worker.update({ where: { id: boss.id }, data: { appId: foreign.id } });
+    }
+    const id = await raisePostLimitAlarm(db, liam.id, '10 per minute');
+    const event = await db.agentTeamEvent.findUniqueOrThrow({ where: { id: id! } });
+    expect(event.chain).toEqual([{ userId: manager.id, via: 'manager' }]);
+    expect(await db.agentTeamAlarmSchedule.count({ where: { eventId: id! } })).toBe(1);
+  });
+
+  it('a line excludes managers from schedules while a manager may still acknowledge it', async () => {
+    const id = await raisePostLimitAlarm(db, liam.id, '10 per minute');
+    const event = await db.agentTeamEvent.findUniqueOrThrow({ where: { id: id! } });
+    expect(event.chain).toEqual([{ workerId: boss.id }]);
+    expect(await db.agentTeamAlarmSchedule.count({ where: { eventId: id! } })).toBe(1);
+    const acked = await M.acknowledgeAlarm({}, { eventId: id }, ctx(manager.id));
+    expect(acked.acknowledgedByUserId).toBe(manager.id);
   });
 });

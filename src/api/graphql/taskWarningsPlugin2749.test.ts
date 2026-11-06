@@ -7,6 +7,7 @@
  *  - the encrypted merge and restore paths and an existing section's save advise through the real response carrier;
  *  - the final response cap is MAX_WARNINGS_PER_RESPONSE over a mixed task + include response.
  */
+import { attestedAuthoring } from '../../lib/authoringAttestation.js';
 import { ApolloServer } from '@apollo/server';
 import { GraphQLError } from 'graphql';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -137,7 +138,7 @@ describe('a field that errors after its write committed, and a rolled-back write
     const effects: Array<() => void> = [];
     try {
       await db.$transaction(async (tx) => {
-        await writeNodeCore({ memoryId, loc: 'nested', name: 'Nested', content: pin() } as never, c, 'create', {
+        await writeNodeCore({ memoryId, loc: 'nested', name: 'Nested', content: pin() } as never, c, 'create', { authoring: attestedAuthoring(null),
           governedContext: 'node-write',
           transaction: { tx, pooledDb: db, afterCommit: (effect) => effects.push(effect) },
         });

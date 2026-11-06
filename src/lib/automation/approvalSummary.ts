@@ -25,8 +25,11 @@ const NOT_STATED = 'not stated';
 const asRecord = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {});
 const dataOf = (state: Record<string, unknown>) => asRecord(state.data);
 const toolsOf = (state: Record<string, unknown>): string[] => {
-  const tools = dataOf(state).tools;
-  return Array.isArray(tools) ? [...new Set(tools.filter((t): t is string => typeof t === 'string'))].sort() : [];
+  const data = dataOf(state);
+  const tools = Array.isArray(data.tools) ? data.tools.filter((t): t is string => typeof t === 'string') : [];
+  // #670: the approver sees a script node's declared tool too.
+  const scripted = asRecord(asRecord(data.script).call).tool;
+  return [...new Set(typeof scripted === 'string' ? [...tools, scripted] : tools)].sort();
 };
 const nameOf = (state: Record<string, unknown>, fallback: string) => typeof state.name === 'string' && state.name ? state.name : fallback;
 

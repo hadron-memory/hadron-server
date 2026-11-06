@@ -1,3 +1,4 @@
+import { openThreadsSql } from '../comments/openThreads.js';
 /**
  * Postgres implementation of the node retrieval seam (cor:rag:010:02).
  *
@@ -29,6 +30,7 @@ import { compileBooleanQuery } from './tsquery.js';
 import { compileNodeWhere, compileNodePropertySort } from './nodeWhere.js';
 import { regexSearchTimeoutMs } from './regexTimeout.js';
 import { UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES } from './defaultNodeTypes.js';
+import { PARENT_LOC_SQL } from '../childLoc.js';
 
 /** Ordered parameter accumulator — appends a value and returns its `$n` placeholder. */
 function paramBuilder(seed: unknown[] = []) {
@@ -45,7 +47,9 @@ function filterClause(f: NodeSqlFilter | undefined, bind: (v: unknown) => string
   }
   // Explicit nodeType wins; otherwise exclude the unqualified-search defaults,
   // system and chat-message (#2836; node_type is NOT NULL, default 'info').
-  if (flt.nodeType) parts.push(`node_type = ${bind(flt.nodeType)}`);
+  // #3113 — an explicit list is also explicit: it narrows to the named types and replaces the default.
+  if (flt.nodeTypes) parts.push(`node_type = ANY(${bind(flt.nodeTypes)}::text[])`);
+  else if (flt.nodeType) parts.push(`node_type = ${bind(flt.nodeType)}`);
   else parts.push(`node_type <> ALL(${bind([...UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES])}::text[])`);
   if (flt.objectType) parts.push(`object_type = ${bind(flt.objectType)}`); // #725 collection facet
   if (flt.isRunnable != null) parts.push(`is_runnable = ${bind(flt.isRunnable)}`);
@@ -56,9 +60,14 @@ function filterClause(f: NodeSqlFilter | undefined, bind: (v: unknown) => string
   }
   if (flt.tags && flt.tags.length) parts.push(`tags @> ARRAY[${flt.tags.map((t) => bind(t)).join(', ')}]::text[]`);
   if (flt.locPrefix) parts.push(`starts_with(loc, ${bind(flt.locPrefix)})`);
+  // #2832 — compared against the SAME expression the expression index is built on, with an equality (never a
+  // LIKE), so the planner uses it and `_` / `%` in a loc stay literal. An empty loc (the mirror root) is nobody's child.
+  if (flt.childrenOf != null) parts.push(`(${PARENT_LOC_SQL} = ${bind(flt.childrenOf)} AND loc <> '')`);
   if (flt.createdBy) parts.push(`created_by = ${bind(flt.createdBy)}`);
-  if (flt.updatedAfter) parts.push(`updated_at >= ${bind(flt.updatedAfter)}::timestamptz`);
-  if (flt.updatedBefore) parts.push(`updated_at <= ${bind(flt.updatedBefore)}::timestamptz`);
+  // #3193: use the same Date parse as the ORM path (including date-only inputs and caller offsets), then bind UTC-naive.
+  // Keep the column bare for indexes; PostgreSQL must not interpret an offset-less bound in the session's zone.
+  if (flt.updatedAfter) parts.push(`updated_at >= ${bind(new Date(flt.updatedAfter).toISOString())}::timestamp`);
+  if (flt.updatedBefore) parts.push(`updated_at <= ${bind(new Date(flt.updatedBefore).toISOString())}::timestamp`);
   // #719 — structured predicate over properties/data JSONB, compiled to a
   // parameterized boolean expr sharing this query's `bind` accumulator.
   if (flt.where) parts.push(`(${compileNodeWhere(flt.where, bind)})`);
@@ -69,6 +78,8 @@ function filterClause(f: NodeSqlFilter | undefined, bind: (v: unknown) => string
   // #1607 (cor:dmo:110:06) — approval and mint status sets never contain comments.
   if (approval || flt.minted != null) parts.push("node_type <> 'comment'");
   // #1608 (cor:dmo:110:08) — content, comments or both; CONTENT by default.
+  const threads = openThreadsSql(flt.hasOpenThreads, bind, 'nodes.id', 'nodes.memory_id', flt.syntheticCommentMemoryIds);
+  if (threads) parts.push(threads);
   const scope = contentScopeSql(effectiveContentScope(flt));
   if (scope) parts.push(scope);
   return parts.length ? ' AND ' + parts.join(' AND ') : '';
@@ -284,6 +295,7 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
       onWindow: opts.onWindow,
       candidateNodeIds: opts.candidateNodeIds,
       abstractOnly: opts.abstractOnly,
+      hasOpenThreads: opts.hasOpenThreads, syntheticCommentMemoryIds: opts.syntheticCommentMemoryIds,
       scope: opts.contentScope ?? 'CONTENT', // #1608: content by default for every caller
     });
   },
@@ -294,6 +306,7 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
       queryEmbedding: opts.queryEmbedding,
       limit: opts.limit,
       onWindow: opts.onWindow,
+      hasOpenThreads: opts.hasOpenThreads, syntheticCommentMemoryIds: opts.syntheticCommentMemoryIds,
       scope: opts.contentScope ?? 'CONTENT', // #1608: content by default for every caller
     });
   },

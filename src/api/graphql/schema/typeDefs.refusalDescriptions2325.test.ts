@@ -35,7 +35,7 @@ describe('#2325 isolateWorker names the refusal ordering the resolver implements
     const body = src('resolvers.ticker.ts');
     const fn = body.slice(body.indexOf('async function writeWorkerIsolation'));
     const at = (needle: string) => fn.indexOf(needle);
-    const steps = ['workerForRead(', "actor.kind !== 'user'", '!s7Available()', 'writeInApp(', 'actorManagesApp('].map(at);
+    const steps = ['workerForRead(', "resolved.kind !== 'user'", '!s7Available()', 'writeInApp(', 'actorManagesApp('].map(at);
     expect(steps.every(i => i > 0)).toBe(true);
     expect([...steps].sort((a, b) => a - b)).toEqual(steps);
     expect(src('resolvers.agentTask.ts')).toMatch(/Impersonation sessions are read-only/);
@@ -55,5 +55,15 @@ describe('#2325 owner directives name the reporting-worker audience as the chain
   });
   it('availability keeps its direct-report exception', () => {
     expect(description('setWorkerAvailability')).toMatch(/A worker another reports to directly may also clear only a stall-rule/);
+  });
+});
+
+
+describe('#3590 cloneAgent names the public refusal codes', () => {
+  it('uses wire codes rather than the internal blocker keys', () => {
+    const text = description('cloneAgent');
+    expect(text).toContain('CLONE_BASE_UNUSABLE');
+    expect(text).toContain('CLONE_IMPORT_UNUSABLE');
+    expect(text).not.toMatch(/\b(?:BASE_UNUSABLE|IMPORT_UNUSABLE)\b/);
   });
 });

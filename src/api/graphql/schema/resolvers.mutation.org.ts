@@ -48,6 +48,7 @@ import { AuthoritySnapshotStale } from '../../../lib/auth/authorityAnchors.js';
 import { assertIssuerInvitationSnapshotFresh, revokeOrgInvitationsByIssuer } from '../../../lib/auth/revokeOrgInvitations.js';
 import { unauthenticatedError } from '../../../lib/refusals.js';
 import { forbiddenError } from '../../../lib/refusals.js';
+import { assertInviteLimits, inviteExpiresAt, inviteMaxActivations } from '../../../lib/invitationLimits.js';
 
 /** #2871: expected org-member refusals are typed so the boundary does not mask them. */
 const orgMemberRefusal = (code: 'CONFLICT' | 'NOT_FOUND', message: string) =>
@@ -534,29 +535,30 @@ export const orgMutations = {
       // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
       const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
       const slug = generateId().slice(0, 16);
-      const expiresAt = expiresInDays
-        ? new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000)
-        : null;
       const invite = await withAuthorizedTx(
         ctx,
         [{ kind: 'org', id: resolvedOrgId }],
         (txCtx) => requireOrgRole(txCtx, resolvedOrgId, 'ADMIN'),
-        (tx) => tx.userInvitation.create({
-          data: {
-            id: generateId(),
-            slug,
-            senderUserId: ctx.userId ?? null,
-            organizationId: resolvedOrgId,
-            memberRole: (memberRole as Role) ?? 'READER',
-            name: name ?? null,
-            email: email ?? null,
-            githubUsername: githubUsername ?? null,
-            maxActivations: maxActivations ?? 1,
-            expiresAt,
-            createdBy: ctx.userId ?? ctx.clientId ?? null,
-          },
-          include: { sender: true, organization: true, activations: true },
-        }),
+        (tx) => {
+          // #2984: judged after the role gate, so a refused caller gets the same answer whatever the values.
+          assertInviteLimits({ expiresInDays, maxActivations });
+          return tx.userInvitation.create({
+            data: {
+              id: generateId(),
+              slug,
+              senderUserId: ctx.userId ?? null,
+              organizationId: resolvedOrgId,
+              memberRole: (memberRole as Role) ?? 'READER',
+              name: name ?? null,
+              email: email ?? null,
+              githubUsername: githubUsername ?? null,
+              maxActivations: inviteMaxActivations(maxActivations),
+              expiresAt: inviteExpiresAt(expiresInDays),
+              createdBy: ctx.userId ?? ctx.clientId ?? null,
+            },
+            include: { sender: true, organization: true, activations: true },
+          });
+        },
       );
       return { ...invite, activationCount: invite.activations.length };
     },
@@ -570,10 +572,8 @@ export const orgMutations = {
       ctx: Context,
     ) => {
       if (!ctx.userId) throw unauthenticatedError();
+      assertInviteLimits({ expiresInDays, maxActivations }); // #2984
       const slug = generateId().slice(0, 16);
-      const expiresAt = expiresInDays
-        ? new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000)
-        : null;
       const invite = await ctx.db.userInvitation.create({
         data: {
           id: generateId(),
@@ -584,8 +584,8 @@ export const orgMutations = {
           name: name ?? null,
           email: email ?? null,
           githubUsername: githubUsername ?? null,
-          maxActivations: maxActivations ?? 1,
-          expiresAt,
+          maxActivations: inviteMaxActivations(maxActivations),
+          expiresAt: inviteExpiresAt(expiresInDays),
           createdBy: ctx.userId,
         },
         include: { sender: true, organization: true, activations: true },

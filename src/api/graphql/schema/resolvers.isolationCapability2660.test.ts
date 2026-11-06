@@ -6,7 +6,6 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { setS7AvailableForTest } from '../../../lib/tickers/s7Availability.js';
-import { createTestableMcpServer } from '../../../mcp/server.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 
@@ -22,7 +21,6 @@ const cap = async (c: Context) => {
   expect(F.canManageIsolation, 'capability field resolver exists').toBeTypeOf('function');
   return F.canManageIsolation(row, {}, c);
 };
-const text = (r: any) => r.content.map((x: any) => x.text ?? '').join('\n');
 beforeEach(async () => {
   await cleanDb(db);
   setS7AvailableForTest(true);
@@ -120,12 +118,13 @@ describe('#2660 capability differential', () => {
     } finally { await server.stop(); }
   });
 
-  it('MCP wake-settings read carries the same capability for person and worker sessions', async () => {
-    const mcp = createTestableMcpServer({ userId: adminId, roles: ['READER'], clientId: `user:${adminId}` } as never);
+  it('the wake-settings read carries the same capability for person and worker sessions (moved from the MCP wrapper, #3082)', async () => {
     const plain = await db.session.create({ data: { id: generateId(), userId: adminId } });
     const bound = await db.session.create({ data: { id: generateId(), userId: adminId, appId, workerId: otherId, agentId } });
-    expect(text(await mcp.callTool('hadron_worker_wake_settings', { workerRef: targetId, session: plain.id }))).toContain('canManageIsolation: true');
-    expect(text(await mcp.callTool('hadron_worker_wake_settings', { workerRef: targetId, session: bound.id }))).toContain('canManageIsolation: false');
+    expect(await cap(ctx(adminId, { sessionId: plain.id }))).toBe(true);
+    await runAsActor({ workerId: otherId, agentId }, async () => {
+      expect(await cap(ctx(adminId, { sessionId: bound.id }))).toBe(false);
+    });
   });
 
   it('propagates a capability lookup failure instead of silently advertising a denial', async () => {

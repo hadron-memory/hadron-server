@@ -4,7 +4,7 @@
 cor:acl:010:01 2
 cor:acl:030:01 4
 cor:acl:040 1
-cor:acl:040:02 7
+cor:acl:040:02 5
 cor:acl:040:06 1
 cor:acl:050 1
 cor:acl:050:04 2

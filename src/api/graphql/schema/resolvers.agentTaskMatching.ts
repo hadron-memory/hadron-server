@@ -1,3 +1,4 @@
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 // #1707 — Task Management slice T3: the team roster (plan
 // design:agent-tasks §7.4). Matching itself has no public surface: the
 // platform assigns (src/lib/agentTasks/matcher.ts). Host registration is a
@@ -11,7 +12,7 @@
 
 import { matchingModelGroupNames } from '../../../lib/agentTasks/modelGroups.js';
 import { type Context, withoutRequestCaches } from './resolvers.helpers.js';
-import { mayReadAppTasks, resolveParticipatedApp } from './resolvers.agentTask.js';
+import { mayReadAppTasks, resolveParticipatedApp, withReadableApp, type TaskApp } from './resolvers.agentTask.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { loadRosterTaskSummaries, type RosterTaskSummary } from '../../../lib/agentTasks/rosterSummary.js';
 import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
@@ -24,38 +25,44 @@ import { canSeeUserPersonalFieldsMany } from '../../../lib/auth/userVisibility.j
 
 const toGqlWord = (s: string): string => s.toUpperCase().replace(/-/g, '_');
 
-/** Shared admission and projected rows: both reads use one bounded RepeatableRead snapshot. */
+/** Shared projected rows. Person and run reads use RepeatableRead; run reads also hold live authority anchors through projection. */
 async function readTeamRoster(ctx: Context, appRef: string) {
+    if (isRunPrincipal(ctx) && !ctx.userId) return withReadableApp(ctx, appRef, projectTeamRoster, true);
     // Admission, status and assignment projections share one read snapshot, including MCP callers.
     return ctx.db.$transaction(async (tx) => {
       const readCtx = withoutRequestCaches(ctx, tx);
       const { app } = await resolveParticipatedApp(readCtx, appRef);
-      const asOf = new Date();
-      const [entries, checks] = await Promise.all([
-        loadTeamRoster(tx, app.id, asOf),
-        // #2138 §3.4 — the same derivation as Worker.checkStatus, at the roster's instant.
-        loadAppWorkerCheckStatuses(readCtx, app.id, { now: asOf }),
-      ]);
-      const workerIds = entries.map((e) => e.workerId);
-      const canReadTasks = await mayReadAppTasks(readCtx, app.id);
-      const [settings, tasks] = await Promise.all([
-        tx.workerWakeSettings.findMany({ where: { workerId: { in: workerIds } }, select: { workerId: true, pausedUntil: true } }),
-        canReadTasks ? loadRosterTaskSummaries(tx, app.id, workerIds) : new Map<string, RosterTaskSummary>(),
-      ]);
-      const pauses = new Map(settings.map((s) => [s.workerId, s.pausedUntil]));
-      const workingStateVisible = workerIds.length > 0 && await maySeeWorkerInternals(readCtx, app.id);
-      const { holders, terminals } = await loadRosterWorkingState(readCtx, tx, workerIds, workingStateVisible);
-      return {
-        appId: app.id,
-        asOf,
-        workers: entries.map((e) => ({ ...e, appId: app.id, teamPlacement: workingStateVisible ? e.teamPlacement : null, appUrn: app.urn, checkStatus: checks.get(e.workerId) ?? null,
-          pausedUntil: pauses.get(e.workerId) ?? null, currentTask: tasks.get(e.workerId) ?? null,
-          heldBy: holders.get(e.workerId)?.heldBy ?? null, heldAt: holders.get(e.workerId)?.heldAt ?? null,
-          terminal: terminals.get(e.workerId) ?? null })),
-      };
+      return projectTeamRoster(readCtx, app);
     // An explicit, bounded read budget avoids imposing Prisma's implicit 5s interactive-transaction default
     // on the now-serialized bulk roster loaders. This does not change query/lock or test timeouts.
     }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 20_000 });
+}
+
+async function projectTeamRoster(readCtx: Context, app: TaskApp) {
+  const tx = readCtx.db;
+  const asOf = new Date();
+  const [entries, checks] = await Promise.all([
+    loadTeamRoster(tx, app.id, asOf),
+    // #2138 §3.4 — the same derivation as Worker.checkStatus, at the roster's instant.
+    loadAppWorkerCheckStatuses(readCtx, app.id, { now: asOf }),
+  ]);
+  const workerIds = entries.map((e) => e.workerId);
+  const canReadTasks = await mayReadAppTasks(readCtx, app.id);
+  const [settings, tasks] = await Promise.all([
+    tx.workerWakeSettings.findMany({ where: { workerId: { in: workerIds } }, select: { workerId: true, pausedUntil: true } }),
+    canReadTasks ? loadRosterTaskSummaries(tx, app.id, workerIds) : new Map<string, RosterTaskSummary>(),
+  ]);
+  const pauses = new Map(settings.map((s) => [s.workerId, s.pausedUntil]));
+  const workingStateVisible = workerIds.length > 0 && await maySeeWorkerInternals(readCtx, app.id);
+  const { holders, terminals } = await loadRosterWorkingState(readCtx, tx, workerIds, workingStateVisible);
+  return {
+    appId: app.id,
+    asOf,
+    workers: entries.map((e) => ({ ...e, appId: app.id, teamPlacement: workingStateVisible ? e.teamPlacement : null, appUrn: app.urn, checkStatus: checks.get(e.workerId) ?? null,
+      pausedUntil: pauses.get(e.workerId) ?? null, currentTask: tasks.get(e.workerId) ?? null,
+      heldBy: holders.get(e.workerId)?.heldBy ?? null, heldAt: holders.get(e.workerId)?.heldAt ?? null,
+      terminal: terminals.get(e.workerId) ?? null })),
+  };
 }
 
 export const agentTaskMatchingQueries = {

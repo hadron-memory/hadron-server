@@ -27,6 +27,7 @@
  * the decision row. Never a log lock taken while a decision row is held.
  */
 import { createHash } from 'crypto';
+import { canWriteToMemory } from '../../../mcp/access-control.js';
 import { GraphQLError } from 'graphql';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
@@ -35,7 +36,6 @@ import {
   getAccessibleMemoryIds,
   isAuthorizationDenial,
   isMemoryReadableCached,
-  isMemoryReadableFresh,
   isPlatformAdmin,
   requireMemoryManageAccess,
   requireMemoryWriteAccess,
@@ -297,19 +297,19 @@ async function resolveGovernedNode(
 }
 
 /**
- * §6.1a — each named decider is a live user who can read the log's memory
- * now. Evaluated as that user (no platform-admin bypass rides along), on the
- * transaction's client.
+ * #3161 / cor:dmo:130:09: each named decider is a live user who can write the log's memory
+ * now. Reuse the canonical write gate as that user, with no platform-admin role bypass,
+ * on the current transaction client (never the pooled client or a request's cached read map).
  */
 async function assertDecidersEligible(tx: Tx, memoryId: string, userIds: readonly string[]): Promise<void> {
   for (const userId of userIds) {
     const user = await tx.user.findUnique({ where: { id: userId }, select: { deletedAt: true } });
-    const readable = user && !user.deletedAt &&
-      await isMemoryReadableFresh({ db: tx, userId, roles: [] } as unknown as Context, memoryId, tx);
-    if (!readable) {
+    const writable = user && !user.deletedAt &&
+      await canWriteToMemory(tx as unknown as Context['db'], { userId, roles: [] }, memoryId);
+    if (!writable) {
       throw decisionError(
         'DECISION_DECIDER_NOT_ELIGIBLE',
-        `User ${userId} cannot be a decider here: a decider is a user who can read the decision log's memory.`,
+        `User ${userId} cannot be a decider here: a decider is a user who can write the decision log's memory.`,
         { userId },
       );
     }
@@ -605,7 +605,7 @@ export const decisionMutations = {
         },
         txCtx,
         'create',
-        { ownsKind: 'decision', governedContext: 'node-write', transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) } },
+        { authoring: { kind: 'platform', record: 'decision' }, ownsKind: 'decision', governedContext: 'node-write', transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) } },
       );
       const row = await tx.node.findUniqueOrThrow({ where: { id: (node as { id: string }).id }, select: LOG_ROW_SELECT });
       return { row, data };
@@ -649,7 +649,7 @@ export const decisionMutations = {
         { memoryId: log.memoryId, loc: row.loc, ...logContentOf(row.name, data), reason },
         txCtx,
         'update',
-        {
+        { authoring: { kind: 'platform', record: 'decision' },
           targetNodeId: row.id, guardRevSeq: row.revSeq, ownsKind: 'decision', governedContext: 'node-write',
           transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) },
         },
@@ -720,7 +720,7 @@ export const decisionMutations = {
         },
         txCtx,
         'create',
-        { ownsKind: 'decision', governedContext: 'node-write', transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) } },
+        { authoring: { kind: 'platform', record: 'decision' }, ownsKind: 'decision', governedContext: 'node-write', transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) } },
       );
       // The counter, as chat roots keep theirs: a sanctioned direct write that
       // asks for a fingerprint refresh, so it is not reconciled as drift. The
@@ -828,7 +828,7 @@ export const decisionMutations = {
         { memoryId: target.memoryId, loc: row.loc, ...renderedFields(final), reason },
         txCtx,
         'update',
-        {
+        { authoring: { kind: 'platform', record: 'decision' },
           targetNodeId: row.id, guardRevSeq: row.revSeq, ownsKind: 'decision', governedContext: 'node-write',
           transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) },
         },
@@ -875,7 +875,7 @@ export const decisionMutations = {
         { memoryId: target.memoryId, loc: row.loc, ...renderedFields(next), reason },
         txCtx,
         'update',
-        {
+        { authoring: { kind: 'platform', record: 'decision' },
           targetNodeId: row.id, guardRevSeq: row.revSeq, ownsKind: 'decision', governedContext: 'node-write',
           transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) },
         },
@@ -928,7 +928,7 @@ export const decisionMutations = {
         { memoryId: target.memoryId, loc: lockedLog.loc, ...logContentOf(lockedLog.name, data), reason: `purge ${d.code}: ${reason}`.slice(0, REASON_MAX) },
         txCtx,
         'update',
-        {
+        { authoring: { kind: 'platform', record: 'decision' },
           targetNodeId: lockedLog.id, ownsKind: 'decision', governedContext: 'node-write',
           transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) },
         },

@@ -332,8 +332,9 @@ describe('node move URN aliases', () => {
     const denied = await outsiderMcp.callToolText('hadron_get_node', { urn: old });
     const missing = await outsiderMcp.callToolText('hadron_get_node', { urn: absent });
     expect(denied.replace(old, '<ref>')).toBe(missing.replace(absent, '<ref>'));
-    expect(await outsiderMcp.callToolText('hadron_channel_read', { channel: old }))
-      .toContain('channel_not_found');
+    // #3082: hadron_channel_read is disabled on MCP; the same refusal is the channelMessages resolver's.
+    await expect(resolvers.Query.channelMessages({}, { channelRef: old } as never, graphCtx(reader.id)))
+      .rejects.toMatchObject({ extensions: { code: 'CHANNEL_NOT_FOUND' } });
     for (const auth of [mcpAuth(), mcpAuth(reader.id)]) {
       const batch = await createTestableMcpServer(auth).callToolText('hadron_get_nodes', {
         refs: [old, nodeUrn(source, 'safe')],
@@ -432,9 +433,9 @@ describe('node move URN aliases', () => {
       reason: 'RENAME' as const, replacedByUrn: `${target.urn}:chats:one`,
     })) });
     expect(await resolvers.Query.channel(null, { ref: old }, graphCtx(reader.id))).toBeNull();
-    expect(await createTestableMcpServer(mcpAuth(reader.id)).callToolText(
-      'hadron_channel_read', { channel: old },
-    )).toContain('channel_not_found');
+    // #3082: hadron_channel_read is disabled on MCP; the same refusal is the channelMessages resolver's.
+    await expect(resolvers.Query.channelMessages({}, { channelRef: old } as never, graphCtx(reader.id)))
+      .rejects.toMatchObject({ extensions: { code: 'CHANNEL_NOT_FOUND' } });
   });
 
   it('coalesces projections when a batch reads many moved descendant addresses', async () => {

@@ -69,7 +69,7 @@ describe('GIT_TRANSPORT_GUARD', () => {
 });
 
 describe('execGit', () => {
-  it('never retains raw provider-code or signal strings on the wrapper (§10 canaries)', async () => {
+  it('drops non-allowlisted code, providerCode, signal and cause strings from the wrapper (synthetic-secret check)', async () => {
     const secret = 'synthetic-secret-3057';
     failure = Object.assign(new Error(secret), { code: secret, providerCode: secret, signal: secret, cause: secret });
     const error = await execGit(['fetch', 'origin']).catch(caught => caught);
@@ -132,6 +132,8 @@ describe('execGit', () => {
     const { execFile } = await import('child_process');
     await execGit(['status', '--porcelain'], { cwd: '/repo' });
     expect((execFile as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe('git');
+    // #2569: ordinary/network invocations retain their original options, with no implicit deadline.
+    expect((execFile as unknown as ReturnType<typeof vi.fn>).mock.lastCall?.[2]).toEqual({ cwd: '/repo' });
   });
 
   it('discards argv, URL userinfo, token shapes, and stderr on failure', async () => {

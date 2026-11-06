@@ -372,6 +372,8 @@ describe('castWorker — agent resolution', () => {
   it('agentRef without a name → WORKER_NAME_REQUIRED (#1050)', async () => {
     // Previously BAD_USER_INPUT, because with no role there was no register to
     // name. The missing thing was always the NAME, and now the error says so.
+    // #3256: this name-only case needs a valid Agent role; role refusal is judged first.
+    await db.agent.update({ where: { id: teamAgent.id }, data: { personaRole: 'test-worker' } });
     await expectCode(cast({ agentRef: teamAgent.id }), 'WORKER_NAME_REQUIRED');
   });
 
@@ -535,10 +537,11 @@ describe('#1024 — Worker.repos (resolved role affinity)', () => {
     const mutation = { operation: { operation: 'mutation' } };
 
     const shared = ctx(admin.id);
-    let spy = vi.spyOn(db.appAgent, 'findMany');
+    let spy = vi.spyOn(db.app, 'findMany');
     try {
       expect(await W.repos(a, {}, shared, query)).toEqual(['acme/api']);
       const afterFirst = spy.mock.calls.length;
+      expect(afterFirst).toBeGreaterThan(0); // the shared roster page actually ran
       expect(await W.repos(b, {}, shared, query)).toEqual(['acme/api']);
       expect(spy.mock.calls.length).toBe(afterFirst); // memoized
     } finally {
@@ -546,10 +549,11 @@ describe('#1024 — Worker.repos (resolved role affinity)', () => {
     }
 
     const inMutation = ctx(admin.id);
-    spy = vi.spyOn(db.appAgent, 'findMany');
+    spy = vi.spyOn(db.app, 'findMany');
     try {
       expect(await W.repos(a, {}, inMutation, mutation)).toEqual(['acme/api']);
       const afterFirst = spy.mock.calls.length;
+      expect(afterFirst).toBeGreaterThan(0); // the shared roster page actually ran
       expect(await W.repos(b, {}, inMutation, mutation)).toEqual(['acme/api']);
       // Re-read, deliberately: a mutation must not serve its own stale answer.
       expect(spy.mock.calls.length).toBeGreaterThan(afterFirst);
@@ -1348,6 +1352,7 @@ describe('Worker field resolvers', () => {
   });
 
   it('null when the agent serves no prompt', async () => {
+    await db.agent.update({ where: { id: teamAgent.id }, data: { personaRole: 'test-worker' } });
     const worker = await cast({ agentRef: teamAgent.id, name: 'Zoe' });
     const prompt = await W.prompt(worker, {}, ctx(admin.id));
     expect(prompt).toBeNull();
