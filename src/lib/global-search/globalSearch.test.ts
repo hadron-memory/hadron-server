@@ -160,6 +160,129 @@ describe('globalSearch — smart-sniff', () => {
     expect(ids(byType(hits, 'node'))).toEqual(new Set([fx.nodeA]));
   });
 
+  it('matches substrings across the memory/loc boundary (#1586)', async () => {
+    // The memory atom is part of the match: nodeC has the same loc in "other".
+    // Also exercise partial atoms, schemes, case and normalized separators.
+    for (const query of [
+      'alpha:guide:intro', 'ALPHA::GUIDE:INTRO',
+      'hrn:node:alpha:guide:intro', 'urn:node:alpha::guide::intro',
+      'pha:gui', 'alpha:', ':guide', 'org-a:alpha',
+    ]) {
+      const result = await globalSearch(db, { query, entityTypes: ['node'] }, viewerP());
+      const expected = query === ':guide' ? [fx.nodeA, fx.nodeC] : [fx.nodeA];
+      expect(ids(result.hits), query).toEqual(new Set(expected));
+      expect(result.hits.every((hit) => hit.matchedField === 'urn')).toBe(true);
+    }
+    // A partial URN remains scoped even if an inaccessible memory matches it.
+    await db.memory.update({ where: { id: fx.memoryB }, data: { urn: 'org-b:alpha' } });
+    const hidden = await db.node.create({ data: {
+      id: generateId(), memoryId: fx.memoryB, loc: 'guide:intro', name: 'Hidden', tags: [],
+    } });
+    const params = { query: 'alpha:guide:intro', entityTypes: ['node'] as SearchEntityType[] };
+    expect(ids((await globalSearch(db, params, viewerP())).hits)).toEqual(new Set([fx.nodeA]));
+    expect(ids((await globalSearch(db, params, anonP())).hits)).toEqual(new Set());
+    expect(ids((await globalSearch(db, params, { ...viewerP(), orgScopeId: fx.orgB })).hits)).toEqual(new Set());
+    expect(ids((await globalSearch(db, params, { ...adminP(), orgScopeId: fx.orgA })).hits)).toEqual(new Set([fx.nodeA]));
+    expect(ids((await globalSearch(db, params, adminP())).hits)).toEqual(new Set([fx.nodeA, hidden.id]));
+    // Explicit fields still override sniffing.
+    expect((await globalSearch(db, { ...params, fields: ['name'] }, viewerP())).hits).toEqual([]);
+  });
+
+  it('normalizes stored memory separators for partial node URNs (#1586)', async () => {
+    await db.memory.update({ where: { id: fx.memoryA }, data: { urn: 'org-a::alpha' } });
+    for (const query of ['alpha:guide:intro', 'org-a:alpha:gui', 'org-a::alpha::guide::intro']) {
+      expect(ids((await globalSearch(db, { query, entityTypes: ['node'] }, viewerP())).hits), query)
+        .toEqual(new Set([fx.nodeA]));
+    }
+  });
+
+  it('does not starve a name match with memory-only URN candidates (#1586 cap)', async () => {
+    const memory = await db.memory.create({ data: {
+      organizationId: fx.orgA, urn: 'org-a:capneedle-kb', name: 'Cap fixture', class: 'knowledge',
+    } });
+    await db.node.createMany({ data: Array.from({ length: 250 }, (_, i) => ({
+      id: generateId(), memoryId: memory.id, loc: `plain:${i}`, name: `Plain ${i}`,
+    })) });
+    await db.node.updateMany({ where: { memoryId: memory.id, loc: 'plain:0' }, data: { name: 'Capneedle context' } });
+    const target = await db.node.create({ data: {
+      id: generateId(), memoryId: fx.memoryA, loc: 'cap-target', name: 'Capneedle',
+    } });
+    const principal = { ...viewerP(), accessibleMemoryIds: [...viewerP().accessibleMemoryIds!, memory.id] };
+    const params = { query: 'capneedle', entityTypes: ['node'] as SearchEntityType[], limit: 200 };
+    const result = await globalSearch(db, params, principal);
+    expect(ids(result.hits)).toContain(target.id);
+    expect(result.hits[0].id).toBe(target.id);
+    expect(result.hits[0].matchedField).toBe('name');
+    expect(result.total).toBeLessThanOrEqual(200);
+    expect(ids(result.hits).size).toBe(result.hits.length);
+    // Plain words still match memory URNs when urn is explicitly requested.
+    // Restricting that branch to colon queries would violate the match set.
+    const onlyUrn = await globalSearch(db, { ...params, fields: ['urn'] }, principal);
+    expect(onlyUrn.hits).toHaveLength(200);
+    expect(onlyUrn.hits.every(hit => hit.memoryId === memory.id)).toBe(true);
+    const onlyName = await globalSearch(db, { ...params, fields: ['name'] }, principal);
+    expect(ids(onlyName.hits)).toContain(target.id);
+    expect(onlyName.hits).toHaveLength(2);
+  });
+
+  it('keeps memory-only candidates scoped and excludes comments (#1586 fallbackscope)', async () => {
+    await db.memory.update({ where: { id: fx.memoryB }, data: { urn: 'org-b:capsecret' } });
+    const hidden = await db.node.create({ data: {
+      memoryId: fx.memoryB, loc: 'plain', name: 'Plain',
+    } });
+    const params = { query: 'capsecret', entityTypes: ['node'] as SearchEntityType[] };
+    for (const p of [viewerP(), anonP(), { ...adminP(), orgScopeId: fx.orgA }]) {
+      expect((await globalSearch(db, { ...params, fields: ['urn'] }, p)).hits).toEqual([]);
+    }
+    expect(ids((await globalSearch(db, { ...params, fields: ['urn'] }, adminP())).hits)).toEqual(new Set([hidden.id]));
+    await resolvers.Mutation.createComment({}, { targetRef: fx.nodeA, body: 'A comment' }, {
+      db, userId: fx.viewer, roles: [],
+    } as Context);
+    const visible = await globalSearch(db, { query: 'org-a:alpha', fields: ['urn'], entityTypes: ['node'] }, viewerP());
+    expect(ids(visible.hits)).toEqual(new Set([fx.nodeA]));
+  });
+
+  it.each(['memory-tail', 'loc-head'])('keeps %s boundary precision before the cap (#1586 boundarycap)', async arm => {
+    // Insert the real target AFTER 250 contains-only decoys: final scoring
+    // cannot rescue it if a loosened SQL predicate fills the candidate cap.
+    await db.node.delete({ where: { id: fx.nodeA } });
+    const decoyMemory = arm === 'memory-tail'
+      ? await db.memory.create({ data: { organizationId: fx.orgA, urn: 'org-a:alpha-suffix', name: 'Decoy', class: 'knowledge' } })
+      : { id: fx.memoryA };
+    await db.node.createMany({ data: Array.from({ length: 250 }, (_, i) => ({
+      id: generateId(), memoryId: decoyMemory.id,
+      loc: arm === 'memory-tail' ? `guide:${i}` : `wrong:guide:${i}`, name: `Decoy ${i}`,
+    })) });
+    const target = await db.node.create({ data: { memoryId: fx.memoryA, loc: 'guide:intro', name: 'Target' } });
+    const principal = { ...viewerP(), accessibleMemoryIds: [...viewerP().accessibleMemoryIds!, decoyMemory.id] };
+    const result = await globalSearch(db, { query: 'alpha:guide', entityTypes: ['node'] }, principal);
+    expect(ids(result.hits)).toEqual(new Set([target.id]));
+  });
+
+  it.each(['alpha:', ':guide'])('reserves direct loc matches before one-sided %s matches (#1586 onesidedcap)', async query => {
+    await db.node.delete({ where: { id: fx.nodeA } });
+    await db.node.createMany({ data: Array.from({ length: 250 }, (_, i) => ({
+      id: generateId(), memoryId: fx.memoryA,
+      loc: query === 'alpha:' ? `plain:${i}` : `guide:${i}`, name: `Decoy ${i}`,
+    })) });
+    const target = await db.node.create({ data: {
+      memoryId: fx.memoryC, loc: query === 'alpha:' ? 'alpha:target' : 'x:guide:target', name: 'AAA target',
+    } });
+    const result = await globalSearch(db, { query, entityTypes: ['node'], limit: 200 }, viewerP());
+    expect(ids(result.hits)).toContain(target.id);
+    expect(result.total).toBeLessThanOrEqual(200);
+    // The broad arm still contributes valid matches after reserving direct matches.
+    expect(result.hits.some(hit => hit.memoryId === fx.memoryA)).toBe(true);
+  });
+
+  it('keeps colon-only URN matches within the same access scope (#1586 colon)', async () => {
+    const expected = await db.node.findMany({ where: { memoryId: { in: viewerP().accessibleMemoryIds! }, deletedAt: null, nodeType: { not: 'comment' } }, select: { id: true } });
+    for (const query of [':', '::']) {
+      const result = await globalSearch(db, { query, entityTypes: ['node'] }, viewerP());
+      expect(ids(result.hits)).toEqual(new Set(expected.map(row => row.id)));
+    }
+  });
+
   it('bare-loc search finds its node even amid many same-tail locs (#301)', async () => {
     // Regression: the loc predicate once fell back to the query's LAST atom
     // ("01"), which matches a huge fraction of a spec corpus. With take: 100
@@ -412,6 +535,16 @@ describe('globalSearch — an admin finds every matching org (spec 048)', () => 
 
 describe('globalSearch — GraphQL resolver wiring', () => {
   const ctxFor = (userId: string, admin = false): Context => ({ db, userId, roles: admin ? ['ADMIN'] : [] });
+
+  it('finds a partial node URN through the portal resolver without widening scope (#1586 resolver)', async () => {
+    const params = { query: 'alpha:guide:intro', entityTypes: ['node'] as SearchEntityType[] };
+    const found = await resolvers.Query.globalSearch({}, params, ctxFor(fx.viewer));
+    expect(ids(found.hits)).toEqual(new Set([fx.nodeA]));
+    expect(found.total).toBe(1);
+    const scopedOut = await resolvers.Query.globalSearch({}, { ...params, orgId: fx.orgB }, ctxFor(fx.viewer));
+    expect(scopedOut.hits).toEqual([]);
+    expect(scopedOut.total).toBe(0);
+  });
 
   it('scopes via the real ctx gates', async () => {
     const r = await resolvers.Query.globalSearch({}, { query: 'Alpha' }, ctxFor(fx.viewer));

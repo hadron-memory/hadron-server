@@ -13123,7 +13123,10 @@ export const typeDefs = `#graphql
     # subscription is provisioned in the transaction that creates the chat.
     startChat(agentId: ID!, userId: String, conversationName: String, scope: ChatScope = private, isTestRun: Boolean = false, "#3096 / hrn:node:hadronmemory.com:specs:cor:dmo:150:08: optional client-reported model id, at most 256 UTF-16 code units, no control/format/line-separator characters or unpaired surrogates. Omitted or null fills empty for this call. Used only for prompt text and its immutable record, labelled client-reported; never billing, quotas or authorization. Invalid input refuses BAD_USER_INPUT without echoing it." llmModel: String): ChatStartResult!
     """
-    Process a user message (saves message, builds context, returns next prompt)
+    Process a user message (saves message, builds context, returns next prompt).
+    #3501: CHAT_STATE_INVALID refuses unusable conversational state before the turn writes or builds a model prompt.
+    CHAT_AUTHORITY_SCOPE_CHANGED refuses a write when the memory encryption flag changed before its lock; obtain
+    fresh context, never automatically resubmit a model call or a turn after an uncertain commit.
     """
     sendChatMessage(chatId: String!, userMessage: String!, "#3096 / hrn:node:hadronmemory.com:specs:cor:dmo:150:08: optional client-reported model id, at most 256 UTF-16 code units, no control/format/line-separator characters or unpaired surrogates. Omitted or null fills empty for this call. Used only for prompt text and its immutable record, labelled client-reported; never billing, quotas or authorization. Invalid input refuses BAD_USER_INPUT without echoing it." llmModel: String): ChatPromptResult!
     """
@@ -13155,6 +13158,10 @@ export const typeDefs = `#graphql
     saveChatSummary(chatId: String!, summary: String!): Boolean!
     """
     Rename a saved chat with current write access to its host memory.
+    A changed trimmed title is revisioned once (hrn:node:hadronmemory.com:specs:cor:dmo:060:04).
+    A same-title rename writes nothing. Only trusted portal identity mints HUMAN
+    (hrn:node:hadronmemory.com:specs:cor:dmo:060:16); other callers follow the memory's authoring rules and cannot
+    supply authoredWith here. A governed refusal changes neither title, revision nor stamp.
     """
     updateChatTitle(chatId: String!, title: String!): Boolean!
     """
