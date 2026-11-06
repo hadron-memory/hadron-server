@@ -66,8 +66,8 @@ import { normalizeObjectType } from './enforceNodeSchema.js';
 import { recordUrnRename } from './urnAlias.js';
 import { assertNoMintedSpecRemoval } from './mintedSpecPermanence.js';
 import { safeNodeUrnV2 } from './urnEmit.js';
-import { UrnNotQualifiedError, UrnParseError } from './urn.js';
-import { resolveNodeRef } from './entityRef/nodeRef.js';
+import { UrnNotQualifiedError, UrnParseError, normalizeUrnForLookup } from './urn.js';
+import { resolveNodeRef, type NodeRefProjection } from './entityRef/nodeRef.js';
 import { AmbiguousLegacyUrnError, NodeNotFoundError } from './entityRef/errors.js';
 import { isId } from './entityRef/shape.js';
 import { validateNodeAgainstSchema, NodeSchemaViolation } from './validateNodeAgainstSchema.js';
@@ -201,17 +201,14 @@ async function aliasTargetId(
   tx: Prisma.TransactionClient,
   target: string,
   memoryId: string,
-  virtualMovedIds?: ReadonlySet<string>,
+  projection?: NodeRefProjection,
 ): Promise<string | 'AMBIGUOUS' | null> {
   try {
-    const memory = virtualMovedIds
-      ? await tx.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { urn: true } }) : null;
-    const ref = memory ? safeNodeUrnV2(memory.urn, target) : target;
-    const { id } = await resolveNodeRef(tx, ref, memoryId);
+    const { id } = await resolveNodeRef(tx, target, memoryId, { projection });
     // The report is about a memory-relative link. A bare qualified spelling
     // that happens to parse here cannot turn this into a foreign-memory probe.
     const node = await tx.node.findUnique({ where: { id }, select: { memoryId: true } });
-    return node && (node.memoryId === memoryId || virtualMovedIds?.has(id)) ? id : null;
+    return node && (projection?.nodes.get(id)?.memoryId ?? node.memoryId) === memoryId ? id : null;
   } catch (error) {
     if (
       error instanceof NodeNotFoundError ||
@@ -598,6 +595,39 @@ export async function moveNodeSubtree(
     }
   }
 
+  // The same alias eligibility as the real write: a plan must project both
+  // arriving addresses and the aliases that write will create, not rewrite
+  // the reference spelling or lose historical memory-prefix lookup (#3424).
+  const sourceMemoryUrn = memoryUrns.get(srcMemoryId)!;
+  const targetMemoryUrn = memoryUrns.get(destMemoryId)!;
+  const aliasKey = (memoryUrn: string, loc: string) =>
+    safeNodeUrnV2(memoryUrn, loc).slice('hrn:node:'.length);
+  const leavesAlias = new Set(subtree.filter(isMintedRow));
+  if (leavesAlias.size < subtree.length) {
+    const srcIsAgentSystemMemory = await tx.agent.findFirst({
+      where: { systemMemoryId: srcMemoryId, deletedAt: null },
+      select: { id: true },
+    });
+    if (srcIsAgentSystemMemory) {
+      for (const n of subtree) {
+        if (n.loc.startsWith('register:')) leavesAlias.add(n);
+      }
+    }
+  }
+  const plannedAliases = new Map<string, string[]>();
+  if (opts.planOnly) {
+    for (const n of leavesAlias) {
+      const key = normalizeUrnForLookup(aliasKey(sourceMemoryUrn, n.loc));
+      const ids = plannedAliases.get(key) ?? [];
+      ids.push(n.id);
+      plannedAliases.set(key, ids);
+    }
+  }
+  const projection: NodeRefProjection | undefined = opts.planOnly ? {
+    nodes: new Map(subtree.map(n => [n.id, { memoryId: destMemoryId, loc: newLocById.get(n.id)! }])),
+    aliases: plannedAliases,
+  } : undefined;
+
   /** Compare content links against either the committed or virtual destination. */
   async function linkWarningsAfterMove(virtual: boolean): Promise<MoveLinkWarning[]> {
     const destinationTargets = targets.length
@@ -612,7 +642,7 @@ export async function moveNodeSubtree(
     }
     for (const target of targets) {
       if (destinationIdByLoc.has(target)) continue;
-      const id = await aliasTargetId(tx, target, destMemoryId, virtual ? movedIds : undefined);
+      const id = await aliasTargetId(tx, target, destMemoryId, virtual ? projection : undefined);
       if (id) destinationIdByLoc.set(target, id);
     }
     return contentLinks.flatMap((link) => {
@@ -657,22 +687,6 @@ export async function moveNodeSubtree(
   // behavior is untouched: only `register:` locs in the SOURCE memory when that
   // memory is some live Agent's system memory — exactly the nodes an action URN
   // can key on.
-  const sourceMemoryUrn = memoryUrns.get(srcMemoryId)!;
-  const targetMemoryUrn = memoryUrns.get(destMemoryId)!;
-  const aliasKey = (memoryUrn: string, loc: string) =>
-    safeNodeUrnV2(memoryUrn, loc).slice('hrn:node:'.length);
-  const leavesAlias = new Set(subtree.filter(isMintedRow));
-  if (leavesAlias.size < subtree.length) {
-    const srcIsAgentSystemMemory = await tx.agent.findFirst({
-      where: { systemMemoryId: srcMemoryId, deletedAt: null },
-      select: { id: true },
-    });
-    if (srcIsAgentSystemMemory) {
-      for (const n of subtree) {
-        if (n.loc.startsWith('register:')) leavesAlias.add(n);
-      }
-    }
-  }
   for (const n of leavesAlias) {
     await recordUrnRename(tx, {
       entityType: 'NODE',

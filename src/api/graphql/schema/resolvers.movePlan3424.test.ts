@@ -256,10 +256,12 @@ describe('planNodeMove #3424', () => {
     expect(plan.linkWarnings).toEqual(moved.moveLinkWarnings);
   });
 
-  it('projects the alias that a minted same-memory move creates', async () => {
+  it('projects a newly created alias reachable through a historical destination prefix', async () => {
+    const dest = (await createDbOrgAndGraph(db, { orgName: 'dest3424', graphName: 'dest', visibility: 'PUBLIC' })).graph;
+    await db.urnAlias.create({ data: { entityType: 'MEMORY', entityId: dest.id, urn: memory.urn, reason: 'RENAME' } });
     const root = await createDbNode(db, { memoryId: memory.id, loc: 'a', content: '[[a]]' });
     await db.node.update({ where: { id: root.id }, data: { mintedAt: new Date(), mintedByInfo: 'test' } });
-    const args = { sourceRef: root.id, targetUrn: targetUrn('z') };
+    const args = { sourceRef: root.id, targetUrn: `hrn:node:${dest.urn}:z` };
     const plan = await M.planNodeMove(null, args, context());
     expect(await db.urnAlias.count({ where: { entityType: 'NODE', entityId: root.id } })).toBe(0);
     const moved = await M.moveNode(null, args, context());

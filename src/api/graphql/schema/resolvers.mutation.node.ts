@@ -162,7 +162,7 @@ import {
 } from './resolvers.helpers.js';
 import { type ToolDriveFile } from '../../../lib/emailClient.js';
 import { concealWriteBeyondRead, findInstallMemory, lockInstallAuthoritiesFirst, lockInstallAuthorityFirst, resolveInstallTarget, withInstallMemory, type InstallTarget } from './installMemory.js';
-import { liveTxContext } from './authorizedTx.js';
+import { liveReadSnapshotContext, liveTxContext } from './authorizedTx.js';
 import { searchReplaceInSpecNodes } from './resolvers.searchReplaceSpec.js';
 import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
 import { attachIncludePinWarnings, carryIncludePinWarnings, captureIncludePinWarningLifetime } from '../../../lib/includes/plainPinWarnings.js';
@@ -2224,12 +2224,15 @@ function shallowMergeProperties(existing: unknown, patch: Record<string, unknown
  * and roles after its authority wait. Keep the existing ordinary-memory
  * context contract; this cut does not change those doors' principal model.
  */
-async function nodeDoorTxContext(ctx: Context, tx: Prisma.TransactionClient, memoryIds: readonly string[]): Promise<Context> {
-  // The complete install authority set has already been acquired by the door.
-  // Any install gate will independently refresh again under those same locks.
-  return (await tx.memory.findFirst({ where: { isInstallMemory: true, class: 'system',
-    id: { in: [...memoryIds] } }, select: { id: true } }))
-    ? liveTxContext(ctx, tx) : withoutRequestCaches(ctx, tx);
+async function nodeDoorTxContext(ctx: Context, tx: Prisma.TransactionClient, memoryIds: readonly string[], preview = false): Promise<Context> {
+  // Writes refresh under authority/credential locks. A plan validates the same
+  // live credential facts in its read-only repeatable-read snapshot (#3424).
+  const install = await tx.memory.findFirst({ where: { isInstallMemory: true, class: 'system',
+    id: { in: [...memoryIds] } }, select: { id: true } });
+  const fresh = install
+    ? await (preview ? liveReadSnapshotContext(ctx, tx) : liveTxContext(ctx, tx))
+    : withoutRequestCaches(ctx, tx);
+  return preview ? { ...fresh, installWritePreview: true } : fresh;
 }
 
 /** #2734: conceal an install-memory preflight denial without changing the
@@ -2329,7 +2332,7 @@ export const nodeMoveOps = {
             if (planOnly) await tx.$executeRaw`SET TRANSACTION READ ONLY`;
             // #2206 (#2233): an Agent definition's authority, at either end, before any loc or row lock.
             if (!planOnly) await lockInstallAuthoritiesFirst(tx, ctx, [source.memoryId, destMemoryId]);
-            const txCtx = { ...await nodeDoorTxContext(ctx, tx, [source.memoryId, destMemoryId]), installWritePreview: planOnly };
+            const txCtx = await nodeDoorTxContext(ctx, tx, [source.memoryId, destMemoryId], planOnly);
             for (const memoryId of new Set([source.memoryId, destMemoryId])) {
               await concealUnreadableNodeDenial(txCtx, memoryId, () => nodeNotFoundError(sourceRef), () => requireMemoryWriteAccess(txCtx, memoryId));
             }
@@ -2392,7 +2395,7 @@ export const nodeMoveOps = {
           },
           // A large subtree touches many rows; the default 5s interactive-txn
           // timeout is too tight (mirrors extractParentNodeGraph / cloneMemory).
-          { timeout: 120_000 },
+          { timeout: 120_000, ...(planOnly ? { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead } : {}) },
         );
         if (planOnly) {
           const memories = await ctx.db.memory.findMany({ where: { id: { in: [source.memoryId, destMemoryId] } }, select: { id: true, urn: true } });
