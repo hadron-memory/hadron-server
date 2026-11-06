@@ -256,3 +256,49 @@ it('an explicit derived cast validates its license before role-mismatch metadata
   await createDbAgentOrgGrant(db,holder.id,target.id);
   await expect(M.castWorker({},input,ctx())).rejects.toMatchObject({extensions:{code:'WORKER_ROLE_OVERRIDE_REFUSED'}});
 });
+
+/** Ruling 0234 / cor:agt:040:15 S8: membership without a grant is not customisation authority. */
+it.each(['missing', 'revoked', 'expired', 'unactivated'] as const)(
+  '#3476 customisation of an unlicensed DERIVED Agent (%s) is typed and writes nothing',
+  async (state) => {
+    if (state !== 'missing') {
+      await createDbAgentOrgGrant(db, holder.id, target.id);
+      await db.agentOrgGrant.update({
+        where: { orgId_agentId: { orgId: holder.id, agentId: target.id } },
+        data: state === 'revoked' ? { revokedAt: new Date() }
+          : state === 'expired' ? { expiresAt: new Date('2000-01-01') }
+          : { activatedAt: null },
+      });
+    }
+    const snapshot = async () => ({
+      memories: await db.memory.count(), nodes: await db.node.count(),
+      revisions: await db.nodeRevision.count(), customisations: await db.appAgentCustomization.count(),
+    });
+    const before = await snapshot();
+    await expect(M.createNode({}, {
+      input: { install: { appRef: app.id, agentRef: target.id }, loc: 'custom:3476', name: 'No write', content: 'refused' },
+    }, ctx())).rejects.toMatchObject({ extensions: { code: 'AGENT_ORG_GRANT_REQUIRED' } });
+    expect(await snapshot()).toEqual(before);
+    expect(await db.memory.count({ where: { appId: app.id, installOfAgentId: target.id } })).toBe(0);
+  },
+);
+
+it('#3476 an active grant permits the same DERIVED customisation without a physical install row', async () => {
+  await createDbAgentOrgGrant(db, holder.id, target.id);
+  const written = await M.createNode({}, {
+    input: { install: { appRef: app.id, agentRef: target.id }, loc: 'custom:3476', name: 'Allowed', content: 'customised' },
+  }, ctx());
+  expect(written).toMatchObject({ loc: 'custom:3476', content: 'customised' });
+  expect(await db.memory.findUniqueOrThrow({ where: { id: written.memoryId } }))
+    .toMatchObject({ appId: app.id, installOfAgentId: target.id, isInstallMemory: true });
+  expect(await db.appAgent.count({ where: { appId: app.id, agentId: target.id } })).toBe(0);
+});
+
+it('#3476 an absent Agent still answers AGENT_NOT_INSTALLED before writes (S9)', async () => {
+  await db.agentImport.deleteMany({ where: { importedAgentId: target.id } });
+  const before = { memories: await db.memory.count(), nodes: await db.node.count() };
+  await expect(M.createNode({}, {
+    input: { install: { appRef: app.id, agentRef: target.id }, loc: 'custom:3476', name: 'Absent', content: 'no write' },
+  }, ctx())).rejects.toMatchObject({ extensions: { code: 'AGENT_NOT_INSTALLED' } });
+  expect({ memories: await db.memory.count(), nodes: await db.node.count() }).toEqual(before);
+});
