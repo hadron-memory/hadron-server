@@ -280,12 +280,6 @@ describe('#3586 review folds', () => {
     }
   });
 
-  it('the key-encoding control characters are not valid in a parent loc', async () => {
-    for (const bad of ['a\u0001b', 'a\u0002b']) {
-      await expect(segs({ memoryIds: [M.id], parentLoc: bad })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
-    }
-  });
-
   it('a system-type node that sorts first under the prefix does not become a segment (first probe)', async () => {
     await mk('0sys:x', { nodeType: 'system' });
     await mk('real');

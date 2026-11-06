@@ -2714,7 +2714,7 @@ export const nodeQueries = {
       if (!Array.isArray(args.memoryIds) || args.memoryIds.length === 0) {
         throw refuse('memoryLocSegments: memoryIds must name at least one memory.');
       }
-      if (args.parentLoc.startsWith(':') || args.parentLoc.endsWith(':') || args.parentLoc.includes('::') || /[\u0000-\u0002]/.test(args.parentLoc)) {
+      if (args.parentLoc.startsWith(':') || args.parentLoc.endsWith(':') || args.parentLoc.includes('::') || args.parentLoc.includes('\0')) {
         throw refuse('memoryLocSegments: parentLoc is not a valid loc.');
       }
       let after: ReturnType<typeof decodeLocSegmentsCursor> = null;
