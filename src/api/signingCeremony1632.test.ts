@@ -186,13 +186,21 @@ function createFakeDom(shellIds: Array<{ id: string; hidden?: boolean }>) {
  * or extra call lands in a side channel the script cannot swallow.
  */
 function createRequestLedger(requestId: string, expected: Array<{ path: string; status: number; body: unknown }>) {
-  const observed: Array<{ method: string; path: string; body: any; credentials: unknown; contentType: unknown }> = [];
+  const observed: Array<{ method: string; path: string; body: any; rawBody: unknown; credentials: unknown; contentType: unknown }> = [];
   const unexpected: string[] = [];
   let consumed = 0;
   const fetchFake = async (url: string, init: { method?: string; body?: string; credentials?: unknown; headers?: Record<string, string> } = {}) => {
-    const call = { method: init.method ?? 'GET', path: new URL(url, 'https://ledger.invalid').pathname,
-      body: init.body === undefined ? undefined : JSON.parse(init.body), credentials: init.credentials, contentType: init.headers?.['content-type'] };
+    // Record the raw metadata FIRST: a URL or body that fails to parse must still land in the side channel, never
+    // throw before the call is on record where the script's catch could swallow it.
+    const call: (typeof observed)[number] = { method: init.method ?? 'GET', path: String(url), body: undefined, rawBody: init.body,
+      credentials: init.credentials, contentType: init.headers?.['content-type'] };
     observed.push(call);
+    try { call.path = new URL(String(url), 'https://ledger.invalid').pathname; }
+    catch { unexpected.push(`unparseable URL ${String(url)}`); throw new Error('Unexpected renderer request'); }
+    if (init.body !== undefined) {
+      try { call.body = JSON.parse(init.body); }
+      catch { unexpected.push(`malformed JSON body on ${call.method} ${call.path}`); throw new Error('Unexpected renderer request'); }
+    }
     const want = expected[consumed];
     if (!want) { unexpected.push(`extra ${call.method} ${call.path}`); throw new Error('Unexpected renderer request'); }
     const wantPath = `/signing/${requestId}/${want.path}`;
@@ -400,6 +408,25 @@ describe('#3563 harness self-controls (the oracle is not validated only by the h
     await ledgerCall(l, 'challenge');
     await expect(ledgerCall(l, 'challenge')).rejects.toThrow();
     expect(l.unexpected).toEqual(['extra POST /signing/REQ/challenge']);
+    expect(() => l.verify()).toThrow();
+  });
+
+  it('the ledger records a malformed-JSON extra POST in the side channel even though the script would swallow the throw', async () => {
+    const l = createRequestLedger('REQ', [{ path: 'challenge', status: 200, body: {} }]);
+    await ledgerCall(l, 'challenge');
+    await expect(l.fetchFake('/signing/REQ/unexpected', { method: 'POST', body: '{not json', credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' } })).rejects.toThrow('Unexpected renderer request');
+    expect(l.observed).toHaveLength(2);
+    expect(l.observed[1]).toMatchObject({ method: 'POST', rawBody: '{not json' });
+    expect(l.unexpected).toEqual(['malformed JSON body on POST /signing/REQ/unexpected']);
+    expect(() => l.verify()).toThrow();
+  });
+
+  it('the ledger records an unparseable URL in the side channel and verify() fails', async () => {
+    const l = createRequestLedger('REQ', [{ path: 'challenge', status: 200, body: {} }]);
+    await ledgerCall(l, 'challenge');
+    await expect(l.fetchFake('http://', { method: 'POST', body: '{}' })).rejects.toThrow('Unexpected renderer request');
+    expect(l.unexpected).toEqual(['unparseable URL http://']);
     expect(() => l.verify()).toThrow();
   });
 
