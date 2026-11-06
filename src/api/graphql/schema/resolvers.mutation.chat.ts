@@ -42,6 +42,7 @@ import {
   agentSlugFromUrn,
 } from '../../../lib/urn.js';
 import { compileTemplate } from '../../../lib/template.js';
+import { chargeRequestServed } from '../../../lib/includes/resolveNodeContent.js';
 import { applyPlatformVariables } from '../../../lib/personaDescription.js';
 import { agentPlatformValues } from '../../../lib/bootPrompt/variables.js';
 import { recordServedPrompt, resolveServedBootPrompt, type ServedBootPrompt } from '../../../lib/bootPrompt/serve.js';
@@ -613,7 +614,8 @@ export const chatMutations = {
               )
             : await memoryAccessFilter(ctx);
         // #910: the first prompt reads the starter's own extracted values only.
-        systemMessage = await compileTemplate(promptContent, null, targetMemoryId, ctx.db, access, ctx.userId ?? null);
+        // #40: a served resolved read, so it counts toward the request's aggregate like any other.
+        systemMessage = chargeRequestServed(ctx, promptContent, await compileTemplate(promptContent, null, targetMemoryId, ctx.db, access, ctx.userId ?? null));
       }
 
       // Build tool schema from hierarchical extraction spec
@@ -1159,7 +1161,8 @@ export const chatMutations = {
         if (promptContent.includes('{{')) {
           // #910: the sender's own extracted values, never another participant's
           // (the same identity the user message is attributed to, #914).
-          systemMessage = await compileTemplate(promptContent, null, chatNode.memoryId, ctx.db, access, senderUserId);
+          // #40: a served resolved read, so it counts toward the request's aggregate like any other.
+          systemMessage = chargeRequestServed(ctx, promptContent, await compileTemplate(promptContent, null, chatNode.memoryId, ctx.db, access, senderUserId));
         } else {
           systemMessage = promptContent;
         }
