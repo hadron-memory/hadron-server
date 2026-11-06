@@ -84,7 +84,10 @@ describe('#3052 hadron_move_node source read recheck', () => {
     const f = await fixture();
     const before = await populate(f);
     const result = await f.server.callTool('hadron_move_node', { urn: f.sourceUrn, targetUrn: f.destUrn('moved') });
+    // MCP success may omit the optional flag; an explicit error must never pass this control.
+    expect(result.isError ?? false).toBe(false);
     expect(text(result)).not.toMatch(/not found|denied|internal/i);
+    expect(await db.node.findUniqueOrThrow({ where: { id: f.node.id } })).toMatchObject({ memoryId: f.destination.id, loc: 'moved' });
     const after = await state([f.memory.id, f.destination.id]);
     expect(after.nodes).not.toEqual(before.nodes);
     expect(after.edges).not.toEqual(before.edges);
