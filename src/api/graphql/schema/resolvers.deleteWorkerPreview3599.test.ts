@@ -109,7 +109,7 @@ describe('#3599 deleteWorkerPreview contract', () => {
  });
  for(const kind of ['persisted-reference','unreleased-stint','unverifiable-encryption'] as const) it(`same closed WORKER_IN_USE for ${kind}, with no preview writes`,async()=>{
   if(kind==='persisted-reference') await db.node.create({data:{memoryId:f.agent.systemMemoryId,loc:'work',name:'Work',createdByWorkerId:f.target.id}});
-  if(kind==='unreleased-stint') await db.session.create({data:{appId:f.app.id,workerId:f.target.id,userId:f.holder.id}});
+  if(kind==='unreleased-stint') await db.session.create({data:{id:generateId(),appId:f.app.id,workerId:f.target.id,userId:f.holder.id}});
   if(kind==='unverifiable-encryption') {
    const data=encryptNodeFieldsWithKey({data:{authorWorkerId:f.target.id}},generateDataKey()).data;
    await db.node.create({data:{memoryId:f.agent.systemMemoryId,loc:'sealed',name:'Sealed',data:data as never}});
