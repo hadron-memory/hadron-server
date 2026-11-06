@@ -1203,6 +1203,7 @@ enum NodeContentValidationOutcome {
 }
 
 model Node {
+  chatRootCounter ChatRootCounter?
   /// UUIDv7 from `node.yaml` when supplied by the importer (stable across
   /// moves); falls back to `cuid()` for inserts that omit `id`.
   id                  String              @id @default(cuid())
@@ -7376,4 +7377,15 @@ model AppAutomationTeamSnapshotGrantEvent {
   @@index([appId, createdAt], map: "automation_team_snapshot_events_app_created_idx")
   @@index([grantId], map: "automation_team_snapshot_events_grant_idx")
   @@map("app_automation_team_snapshot_grant_events")
+}
+
+/// #3496 — operational chat state; deliberately outside NodeRevision's fingerprint.
+/// Classified plaintext under cor:sec:040:03; survives message deletion, not root hard deletion.
+model ChatRootCounter {
+  chatRootNodeId String @id @map("chat_root_node_id")
+  messageCount Int @default(0) @map("message_count")
+  lastMessageAt DateTime? @map("last_message_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  chatRoot Node @relation(fields: [chatRootNodeId], references: [id], onDelete: Cascade)
+  @@map("chat_root_counters")
 }

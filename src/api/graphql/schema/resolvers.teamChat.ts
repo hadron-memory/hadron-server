@@ -20,9 +20,9 @@ import { requireWorkerReadAccess } from './resolvers.worker.js';
 //
 // Storage shape (D-2026-08-07-001/-004, kept field-compatible with the #921
 // storage rework so it can absorb this surface without a data migration):
-//   - chat root: nodeType `chat`, storage keys (`messageCount`,
-//     `lastMessageAt`) top-level in `data`; there is no root-level audience
-//     marker because access derives from the host memory.
+//   - chat root: nodeType `chat`; messageCount/lastMessageAt live in the
+//     non-revisioned ChatRootCounter row (#3496). No root-level audience
+//     marker: access derives from the host memory.
 //   - message: body in `Node.content`, envelope in `Node.data`, nodeType
 //     `chat-message`, ordering key in `Node.seq` (allocated atomically by
 //     `chatRoot.appendChatMessage` — #919; a hand-rolled node write here IS
