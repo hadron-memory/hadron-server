@@ -1024,6 +1024,7 @@ model Memory {
   /// creation (there is no shared creation helper to hang that on —
   /// hadron-server findings:memory-creation-has-no-shared-helper).
   config              MemoryConfig?
+  defaultSkips        MemoryConfigDefaultSkip[]
   /// #2484 — Apps holding a prefix-scoped write grant on this memory for their userless runs.
   appWriteGrants      AppMemoryWriteGrant[]
   /// #2883 — automation read grants on this memory.
@@ -1201,7 +1202,27 @@ enum NodeContentValidationOutcome {
   ERROR
 }
 
+/// #1332 (cor:dmo:160:01) — whether a content-validation report's author check
+/// compared R's recorded author with the reporter. CHECKED means compared and
+/// different, never "independent". NULL only on a report written before #1332.
+enum NodeContentValidationAuthorCheck {
+  CHECKED
+  AUTHOR_UNKNOWN
+}
+
+/// #1332 (cor:dmo:160:01 refusal 5) — the kind of server-derived reporter, the
+/// first that applies: a headless run, a worker session, a person acting
+/// directly (any credential, by user id), an App key with no user or worker.
+enum NodeContentValidationReporterKind {
+  RUN
+  WORKER
+  PERSON
+  APP_KEY
+}
+
 model Node {
+  chatRootCounter ChatRootCounter?
+  chatRootEngineState ChatRootEngineState?
   /// UUIDv7 from `node.yaml` when supplied by the importer (stable across
   /// moves); falls back to `cuid()` for inserts that omit `id`.
   id                  String              @id @default(cuid())
@@ -2771,13 +2792,34 @@ model NodeContentValidationReport {
   validationTaskRevSeq Int                          @map("validation_task_rev_seq")
   outcome              NodeContentValidationOutcome
   reportedAt           DateTime                     @default(now()) @map("reported_at")
-  /// Optional producer-run identity for idempotent insertion by #1332.
-  runId                String?                      @unique @map("run_id")
+  /// Optional caller-supplied run id for idempotent insertion (#1332). Unique per
+  /// (node, memory snapshot) only, so a run id never answers across memories. It
+  /// is never an identity: the reporter columns below are.
+  runId                String?                      @map("run_id")
+  /// #1332 — the author check made when the report was recorded. NULL: pre-#1332.
+  authorCheck          NodeContentValidationAuthorCheck? @map("author_check")
+  /// #1332 — the reporter, derived by the server from the request, immutable
+  /// after insert (trigger in post-push.sql) except that reporterUserId follows
+  /// a user merge's survivor. Plain ids, never FKs: a deleted principal keeps
+  /// its history and can never be matched again. NULL kind: no recorded
+  /// reporter, which never replays.
+  reporterKind         NodeContentValidationReporterKind? @map("reporter_kind")
+  /// RUN: the server's AppRun id, never the request's runId.
+  reporterRunId        String?                      @map("reporter_run_id")
+  /// WORKER: the bound worker and its agent.
+  reporterWorkerId     String?                      @map("reporter_worker_id")
+  reporterAgentId      String?                      @map("reporter_agent_id")
+  /// PERSON: the user, never the key it authenticated with.
+  reporterUserId       String?                      @map("reporter_user_id")
+  /// APP_KEY: the App key with no user or worker behind it.
+  reporterAppKeyId     String?                      @map("reporter_app_key_id")
 
   node Node @relation(fields: [nodeId], references: [id], onDelete: Cascade)
 
+  @@unique([nodeId, memoryId, runId], map: "node_validation_node_memory_run_uniq")
   @@index([nodeId, nodeRevSeq, reportedAt], map: "node_validation_node_rev_reported_idx")
   @@index([memoryId])
+  @@index([reporterUserId], map: "node_validation_reporter_user_idx")
   @@map("node_content_validation_reports")
 }
 
@@ -5568,6 +5610,10 @@ model MemoryConfigTemplate {
   name           String
   description    String?
   required       Boolean   @default(false)
+  /// #3426 — an org-owned template applied to every new org `knowledge`/`group` memory at its creation (`createMemory`
+  /// only; never clone, extract or App sites). CHECK `chk_memory_config_template_org_default_org_only` (post-push.sql
+  /// and the migration): org-owned only. Independent of `required`.
+  orgDefault     Boolean   @default(false) @map("org_default")
   /// Optimistic-concurrency counter, as on NodeRoleRule. Rules are replaced
   /// wholesale with the template, so the template's revision covers them.
   revision       Int       @default(1)
@@ -5587,7 +5633,9 @@ model MemoryConfigTemplate {
   ownerUser    User?                      @relation("MemoryConfigTemplateOwnerUser", fields: [ownerUserId], references: [id], onDelete: Cascade)
   app          App?                       @relation(fields: [appId], references: [id], onDelete: Cascade)
   rules        MemoryConfigTemplateRule[]
+  defaultSkips MemoryConfigDefaultSkip[]
 
+  @@index([organizationId, orgDefault])
   @@index([hadronServerId])
   @@index([organizationId])
   @@index([ownerUserId])
@@ -5615,12 +5663,37 @@ model MemoryConfigTemplateRule {
   authorTask      Node?                @relation("TemplateRuleAuthorTask", fields: [authorTaskId], references: [id], onDelete: SetNull)
   validationTask  Node?                @relation("TemplateRuleValidationTask", fields: [validationTaskId], references: [id], onDelete: SetNull)
   descriptionNode Node?                @relation("TemplateRuleDescriptionNode", fields: [descriptionNodeId], references: [id], onDelete: SetNull)
+  defaultSkips    MemoryConfigDefaultSkip[]
 
   @@unique([templateId, role])
   @@index([authorTaskId])
   @@index([validationTaskId])
   @@index([descriptionNodeId])
   @@map("memory_config_template_rules")
+}
+
+/// #3426 (C6) — an org-default rule skipped at memory creation because its reference was deleted, unreadable to the
+/// org or not a task. Written in the creation transaction; readable only behind the memory-config manage gate. It
+/// stores NO task URN and NO state: a manager's read recomputes the current per-caller view from `templateRuleId`.
+model MemoryConfigDefaultSkip {
+  id             String   @id @default(cuid())
+  memoryId       String   @map("memory_id")
+  templateId     String?  @map("template_id")
+  templateRuleId String?  @map("template_rule_id")
+  role           String
+  /// "authorTask" | "validationTask" | "descriptionNode"
+  field          String
+  reason         String   @default("REFERENCE_UNAVAILABLE")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  memory       Memory                    @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  template     MemoryConfigTemplate?     @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  templateRule MemoryConfigTemplateRule? @relation(fields: [templateRuleId], references: [id], onDelete: SetNull)
+
+  @@index([memoryId])
+  @@index([templateId])
+  @@index([templateRuleId])
+  @@map("memory_config_default_skips")
 }
 
 /// #1655 DAE/DAG: immutable compiled code; approval is the temporary DZ-3
@@ -6790,6 +6863,9 @@ model WorkerDeliveryTick {
   ackedByUserId   String?  @map("acked_by_user_id")
   ackedByWorkerId String?  @map("acked_by_worker_id")
   ackedByAppKeyId String?  @map("acked_by_app_key_id")
+  /// #3509 (cor:agt:100:03, cor:agt:080:04): when the worker last CHECKED a channel this ticker covers after the wake
+  /// `ackedAt` records; null = not yet. Written by the check (DB clock), cleared by a newer delivery. Latest wake only.
+  respondedAt     DateTime? @map("responded_at")
 
   worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
   ticker Ticker @relation(fields: [tickerId], references: [id], onDelete: Cascade)
@@ -7344,4 +7420,24 @@ model AppAutomationTeamSnapshotGrantEvent {
   @@index([appId, createdAt], map: "automation_team_snapshot_events_app_created_idx")
   @@index([grantId], map: "automation_team_snapshot_events_grant_idx")
   @@map("app_automation_team_snapshot_grant_events")
+}
+
+/// #3496 — operational chat state; deliberately outside NodeRevision's fingerprint.
+/// Classified plaintext under cor:sec:040:03; survives message deletion, not root hard deletion.
+model ChatRootCounter {
+  chatRootNodeId String @id @map("chat_root_node_id")
+  messageCount Int @default(0) @map("message_count")
+  lastMessageAt DateTime? @map("last_message_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  chatRoot Node @relation(fields: [chatRootNodeId], references: [id], onDelete: Cascade)
+  @@map("chat_root_counters")
+}
+
+/// #3501 — encrypted conversational operational state, never revisioned.
+model ChatRootEngineState {
+  chatRootNodeId String @id @map("chat_root_node_id")
+  state Json
+  updatedAt DateTime @updatedAt @map("updated_at")
+  chatRoot Node @relation(fields: [chatRootNodeId], references: [id], onDelete: Cascade)
+  @@map("chat_root_engine_states")
 }

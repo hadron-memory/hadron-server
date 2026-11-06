@@ -1367,14 +1367,17 @@ async function writeNodeCoreRaw(
             // ownerRepo deliberately remains outside restorable node history,
             // so an unguarded ownerRepo-only update keeps its legacy
             // revision-free behaviour. A guarded update is different: every
-            // successful state change must consume the claimed token or the
-            // same expectedRevision could be reused to overwrite it (#937).
+            // ownerRepo change must consume the claimed token or the same
+            // expectedRevision could be reused to overwrite it (#937). The
+            // edge-only exception below does not change ownerRepo behaviour.
+            // #3497 / rulings0149+0198: inline edges are not node revision state.
+            // They still reach finalizeNodeWrite, and a guarded edge-only write
+            // checks its token without consuming it.
             const needsRevision =
-              resolvedEdges !== null ||
               changes.length > 0 ||
               (opts?.forceRevision === true && inCompileScope()) ||
               (opts?.guardRevSeq !== undefined && changesUnversionedField);
-            if (!needsRevision && !changesUnversionedField) {
+            if (!needsRevision && !changesUnversionedField && resolvedEdges === null) {
               // A stale guard is refused even when the write is a no-op: the
               // compare-and-swap protects the caller's merge base, and an
               // idempotent write must not report success against a revision
@@ -1405,7 +1408,7 @@ async function writeNodeCoreRaw(
               priorRole: current.role, priorRunnable: current.isRunnable,
               role: input.role === undefined ? current.role : input.role,
               runnable: mergedGovernedState(current, { role: input.role, isRunnable: input.isRunnable }).isRunnable,
-              authoredChange: authoredContentChanged(changes),
+              mintHuman: true, authoredChange: authoredContentChanged(changes),
             }, opts.authoring);
 
             // A guarded claim happens only after the no-op decision and inside
@@ -1696,7 +1699,7 @@ async function writeNodeCoreRaw(
               priorRole: authoritative?.role ?? null, priorRunnable: authoritative?.isRunnable ?? null,
               role: input.role === undefined ? (authoritative?.role ?? null) : input.role,
               runnable: mergedGovernedState(authoritative, { role: input.role, isRunnable: input.isRunnable }).isRunnable,
-              authoredChange: authoredByWrite,
+              mintHuman: true, authoredChange: authoredByWrite,
             }, opts.authoring);
 
             // #1460 — a tombstone still owns its old abstract and chunk
@@ -3159,7 +3162,7 @@ export const nodeMutations = {
           // like every check here.
           authoredStamps.set(p.raw.id, await assertAuthoring(tx, p.raw.memoryId, {
             priorRole: locked.role, priorRunnable: locked.isRunnable,
-            role: locked.role, runnable: locked.isRunnable, authoredChange: p.authoredChange,
+            role: locked.role, runnable: locked.isRunnable, mintHuman: true, authoredChange: p.authoredChange,
           }, authoring));
         }
         for (const p of plans) {
@@ -4457,6 +4460,7 @@ export const nodeMutations = {
           priorRole: lockedTarget.role, priorRunnable: lockedTarget.isRunnable,
           role: lockedTarget.role, runnable: lockedTarget.isRunnable,
           authoredChange: Object.keys(changed).length > 0,
+          mintHuman: false, // a fold, not an authoring write (D-2026-09-26-D)
         }, authoringFromRequest(ctx, input.authoredWith));
         await createNodeRevision(
           tx,
@@ -5181,7 +5185,7 @@ export const nodeMutations = {
       decryptNodeFields(node, memEncInfo);
       // A Google Doc is a read for a human: includes resolve with the exporter's
       // access (cor:dmo:150:03); variables stay as stored, as before.
-      const exported = await resolveNodeContent(ctx, node, { mode: 'includes' });
+      const exported = await resolveNodeContent(ctx, node, { mode: 'includes', surface: 'export' });
       const markdown = exported && exported.trim().length > 0 ? exported : `# ${node.name}`;
 
       const { file } = await runOwnedEmailOperation<{ file: ToolDriveFile }>(ctx, connectionRef, 'create-doc', {

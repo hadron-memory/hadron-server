@@ -111,16 +111,34 @@ export async function readStateIncarnations(
  */
 export async function stampChannelCheck(db: Db, workerId: string, channelId: string): Promise<boolean> {
   const rows = await db.$queryRaw<Array<{ ok: number }>>`
-    INSERT INTO channel_read_states (id, worker_id, channel_id, last_seen_seq, last_checked_at, updated_at)
-    SELECT ${generateId()}, w.id, c.id, 0, (now() AT TIME ZONE 'UTC'), (now() AT TIME ZONE 'UTC')
-    FROM workers w
-    JOIN channels c ON c.id = ${channelId} AND c.deleted_at IS NULL AND c.loc = ${TEAM_CHAT_LOC}
-    JOIN memories m ON m.id = c.memory_id AND m.app_id = w.app_id
-    WHERE w.id = ${workerId} AND w.retired_at IS NULL
-    ON CONFLICT (worker_id, channel_id) WHERE worker_id IS NOT NULL
-      DO UPDATE SET last_checked_at = (now() AT TIME ZONE 'UTC')
-    RETURNING 1 AS ok`;
+    WITH stamped AS (
+      INSERT INTO channel_read_states (id, worker_id, channel_id, last_seen_seq, last_checked_at, updated_at)
+      SELECT ${generateId()}, w.id, c.id, 0, (now() AT TIME ZONE 'UTC'), (now() AT TIME ZONE 'UTC')
+      FROM workers w
+      JOIN channels c ON c.id = ${channelId} AND c.deleted_at IS NULL AND c.loc = ${TEAM_CHAT_LOC}
+      JOIN memories m ON m.id = c.memory_id AND m.app_id = w.app_id
+      WHERE w.id = ${workerId} AND w.retired_at IS NULL
+      ON CONFLICT (worker_id, channel_id) WHERE worker_id IS NOT NULL
+        DO UPDATE SET last_checked_at = (now() AT TIME ZONE 'UTC')
+      RETURNING channel_id
+    ), responded AS (${respondedTicks(Prisma.sql`SELECT channel_id FROM stamped`, workerId)})
+    SELECT 1 AS ok FROM stamped`;
   return rows.length > 0;
+}
+
+/**
+ * #3509 (cor:agt:100:03, cor:agt:080:04) — the response to a delivered wake: a check of a channel a ticker covers
+ * (none named = the team channel, the only channel a check counts on) fills `responded_at` on that worker's delivery
+ * row for the ticker, in the SAME statement as the check, so a check can never be recorded without its response.
+ * `channels` is a subquery naming the channel ids just stamped.
+ */
+function respondedTicks(channels: Prisma.Sql, workerId: string): Prisma.Sql {
+  return Prisma.sql`
+      UPDATE worker_delivery_ticks d SET responded_at = (clock_timestamp() AT TIME ZONE 'UTC')
+      FROM tickers t
+      WHERE d.worker_id = ${workerId} AND t.id = d.ticker_id
+        AND EXISTS (SELECT 1 FROM (${channels}) s WHERE cardinality(t.channel_ids) = 0 OR s.channel_id = ANY (t.channel_ids))
+      RETURNING 1`;
 }
 
 /**
@@ -129,15 +147,18 @@ export async function stampChannelCheck(db: Db, workerId: string, channelId: str
  */
 export async function stampTeamChannelChecks(db: Db, workerId: string): Promise<number> {
   const rows = await db.$queryRaw<Array<{ ok: number }>>`
-    INSERT INTO channel_read_states (id, worker_id, channel_id, last_seen_seq, last_checked_at, updated_at)
-    SELECT gen_random_uuid()::text, w.id, c.id, 0, (now() AT TIME ZONE 'UTC'), (now() AT TIME ZONE 'UTC')
-    FROM workers w
-    JOIN memories m ON m.app_id = w.app_id
-    JOIN channels c ON c.memory_id = m.id AND c.deleted_at IS NULL AND c.loc = ${TEAM_CHAT_LOC}
-    WHERE w.id = ${workerId} AND w.retired_at IS NULL
-    ON CONFLICT (worker_id, channel_id) WHERE worker_id IS NOT NULL
-      DO UPDATE SET last_checked_at = (now() AT TIME ZONE 'UTC')
-    RETURNING 1 AS ok`;
+    WITH stamped AS (
+      INSERT INTO channel_read_states (id, worker_id, channel_id, last_seen_seq, last_checked_at, updated_at)
+      SELECT gen_random_uuid()::text, w.id, c.id, 0, (now() AT TIME ZONE 'UTC'), (now() AT TIME ZONE 'UTC')
+      FROM workers w
+      JOIN memories m ON m.app_id = w.app_id
+      JOIN channels c ON c.memory_id = m.id AND c.deleted_at IS NULL AND c.loc = ${TEAM_CHAT_LOC}
+      WHERE w.id = ${workerId} AND w.retired_at IS NULL
+      ON CONFLICT (worker_id, channel_id) WHERE worker_id IS NOT NULL
+        DO UPDATE SET last_checked_at = (now() AT TIME ZONE 'UTC')
+      RETURNING channel_id
+    ), responded AS (${respondedTicks(Prisma.sql`SELECT channel_id FROM stamped`, workerId)})
+    SELECT 1 AS ok FROM stamped`;
   return rows.length;
 }
 

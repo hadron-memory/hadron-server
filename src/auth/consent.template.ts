@@ -19,6 +19,8 @@
  *   - The hidden `_csrf` input MUST match the cookie set by the
  *     `generateCsrfToken` call in the GET handler.
  */
+
+import { HADRON_HEADER, HADRON_HEADER_STYLE } from './hadron-header.template.js';
 export const CONSENT_TEMPLATE = `<!doctype html>
 <html lang="en">
 <head>
@@ -92,7 +94,10 @@ export const CONSENT_TEMPLATE = `<!doctype html>
       margin: 0 0 1rem;
     }
     main {
-      max-width: 480px; width: 100%;
+      /* Keep the original 480px content + padding/border desktop width,
+         while containing the padding on narrow screens. Layout belongs here. */
+      box-sizing: border-box;
+      max-width: calc(480px + 4rem + 2px); width: 100%;
       background: var(--card-bg); color: var(--text);
       border: 1px solid var(--card-border); border-radius: 8px;
       padding: 1.5rem 2rem;
@@ -113,9 +118,11 @@ export const CONSENT_TEMPLATE = `<!doctype html>
     button[name="decision"][value="deny"]      { background: transparent; color: var(--text); border: 1px solid var(--deny-border); }
     button[name="decision"][value="deny"]:hover { background: var(--deny-hover); }
   </style>
+${HADRON_HEADER_STYLE}
 </head>
 <body>
   <main>
+    ${HADRON_HEADER}
     <h1>Authorize {{clientName}}</h1>
     <p>The application <strong>{{clientName}}</strong> is requesting access to your Hadron account.</p>
     <p>Returns to: <code>{{redirectAnchor}}</code></p>

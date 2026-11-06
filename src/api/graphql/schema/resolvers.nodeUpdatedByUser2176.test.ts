@@ -170,11 +170,14 @@ describe('raw-SQL Node writers: the covered and the intentionally exempt (#2176 
   // Every `UPDATE nodes` in src/ bypasses the central stamp. Each listed one touches no authored field
   // (or is a delete), so leaving attribution alone is correct. A new one must be added HERE, with a reason.
   const EXEMPT: Record<string, string> = {
+    'src/lib/chatRootEngineState.ts': '#3501 strips only valid operational legacy engine keys; leaves authored title/editor attribution intact and conditionally refreshes an already-current fingerprint; rollback mirror edits still reconcile honestly',
+    'src/lib/chatRootCounters.ts': '#3496 strips operational counter keys only, preserves authored fields and editor attribution, and conditionally refreshes an already-current fingerprint',
     'src/services/embedding/enqueue.ts': 'internal4 backfill/retry change embedding obligation metadata only, never authored fields or attribution',
     'src/services/embedding/obligation.ts': 'internal4 batch reset changes embedding obligation metadata only, never authored fields or attribution',
     'src/services/embedding/vectors.ts': '#887 vector replacement/purges update truncation/work-token metadata only, never authored fields or attribution',
     'src/lib/channels.ts': 'wake-stamp strip on adopting a pre-Channel row (server repair) and the soft-delete tombstone move: no authored edit',
     'src/api/graphql/schema/resolvers.specCorpus.ts': 'mint columns only: operational, already stamps minted_by',
+    'src/controller/operations/mergeUsers.ts': '#1336 a user merge retargets the HUMAN stamp person (authored_by_human) to the survivor: an identity rewrite, no authored field or edit attribution changes (the updated_by actor columns follow in the audit loop)',
   };
   const walk = (dir: string): string[] => readdirSync(dir).flatMap((f) => {
     const p = join(dir, f);

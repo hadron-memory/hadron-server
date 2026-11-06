@@ -113,7 +113,7 @@ export const impersonationReadOnlyPlugin: ApolloServerPlugin<{
         if (blocked.length > 0) {
           throw new GraphQLError(
             'This is a read-only impersonation session; mutations are disabled.',
-            { extensions: { code: 'IMPERSONATION_READ_ONLY', blockedFields: blocked } },
+            { extensions: { code: 'IMPERSONATION_READ_ONLY', blockedFields: blocked, http: { status: 403 } } },
           );
         }
       },

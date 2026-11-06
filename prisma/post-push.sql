@@ -282,6 +282,12 @@ ALTER TABLE memory_config_templates
 ALTER TABLE memory_config_templates
   ADD CONSTRAINT chk_memory_config_template_owner
   CHECK (num_nonnulls(hadron_server_id, organization_id, owner_user_id, app_id) = 1);
+-- #3426 — an organization default is org-owned only (synced with 20261105230000_org_default_templates).
+ALTER TABLE memory_config_templates
+  DROP CONSTRAINT IF EXISTS chk_memory_config_template_org_default_org_only;
+ALTER TABLE memory_config_templates
+  ADD CONSTRAINT chk_memory_config_template_org_default_org_only
+  CHECK (NOT org_default OR organization_id IS NOT NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS memory_config_templates_server_name_uniq
   ON memory_config_templates (hadron_server_id, name) WHERE hadron_server_id IS NOT NULL AND deleted_at IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS memory_config_templates_org_name_uniq
@@ -450,6 +456,11 @@ CREATE INDEX IF NOT EXISTS nodes_tsv_gin ON nodes USING gin (tsv);
 CREATE INDEX IF NOT EXISTS nodes_memory_parent_loc_idx
   ON nodes (memory_id, (regexp_replace(loc, '(^|:)[^:]*$', '')));
 
+-- #3456: loc-segment skip-scan (memoryLocSegments). Mirrors prisma/migrations/20261106030000_nodes_segment_key_index
+-- (keep in lockstep). The expression is SEGMENT_KEY_SQL in src/lib/memoryLocSegments.ts.
+CREATE INDEX IF NOT EXISTS nodes_memory_segment_key_idx
+  ON nodes (memory_id, ((replace(loc, ':', chr(1))) COLLATE "C"));
+
 -- ── #719 structured/faceted query: value-cast guard functions + JSONB GIN ────
 -- Mirrors prisma/migrations/20260718120000_where_query_helpers/migration.sql
 -- (keep in lockstep). The `where` predicate compiler (src/lib/retrieval/
@@ -581,6 +592,9 @@ ALTER TABLE "nodes" ADD CONSTRAINT "chk_node_approval_complete" CHECK (CASE
 ALTER TABLE "node_content_validation_reports" DROP CONSTRAINT IF EXISTS "chk_node_content_validation_revisions_positive";
 ALTER TABLE "node_content_validation_reports" ADD CONSTRAINT "chk_node_content_validation_revisions_positive"
   CHECK ("node_rev_seq" > 0 AND "validation_task_rev_seq" > 0);
+
+-- #1332: the report's author check and server-derived reporter (shape + append-only).
+\ir content-validation-report-invariants.sql
 
 -- Preserve a pre-existing drift mismatch when widening the fingerprint. On a
 -- fresh DB the old function is absent, so there is no old hash to translate.

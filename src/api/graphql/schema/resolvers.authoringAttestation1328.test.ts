@@ -44,8 +44,6 @@ const codeOf = async (promise: Promise<unknown>) => {
 const expectRefused = async (promise: Promise<unknown>, code: string, role = 'guide') => {
   const e = await codeOf(promise);
   expect(e.extensions).toMatchObject({ code, role });
-  // #1329 owns the task, revision and remedy: this issue discloses code and role only.
-  expect(Object.keys(e.extensions).sort()).toEqual(['code', 'role']);
 };
 
 beforeEach(async () => {
@@ -182,7 +180,7 @@ describe('#1328 a broken required task fails closed (H5)', () => {
 describe('#1328 trusted portal human', () => {
   it('the portal path writes without a claim and records no task', async () => {
     await create('a', {}, portal());
-    expect(await stored('a')).toMatchObject({ role: 'guide', authoredByTask: null, authorshipKind: null });
+    expect(await stored('a')).toMatchObject({ role: 'guide', authoredByTask: null, authorshipKind: 'HUMAN', authoredByHuman: userId }); // #1336
   });
 
   it('no write input carries a human flag', () => {
@@ -284,6 +282,7 @@ describe('#1328 merges and bulk edits', () => {
     await create('imp', { authoredWith: claim() });
     const base = { memoryId, loc: 'imp', content: 'imported', contentType: 'text/markdown' };
     await expectRefused(M.importNode({}, { input: base }, ctx()), 'AUTHORING_ATTESTATION_MISSING');
+    await expect(M.importNode({}, { input: base }, ctx())).rejects.toMatchObject({ extensions: { taskAccess: 'READABLE' } });
     expect((await stored('imp')).content).toBe('body');
     await M.importNode({}, { input: { ...base, authoredWith: claim() } }, ctx());
     expect(await stored('imp')).toMatchObject({ content: 'imported', authoredByTask: taskId });
@@ -341,7 +340,7 @@ describe('#1328 races: the rulebook lock orders the check against a rule change'
       data: { id: generateId(), configId, role: 'guide', authorTaskId: taskId, authorTaskRequired: true },
     }).then(() => undefined));
     const judged = db.$transaction((tx) => judgeAuthoring(tx, memoryId, {
-      priorRole: null, priorRunnable: null, role: 'guide', runnable: null, authoredChange: true,
+      priorRole: null, priorRunnable: null, role: 'guide', runnable: null, mintHuman: true, authoredChange: true,
     }, attestedAuthoring(null)));
     await waitForLockWaitersOfType(db, 'advisory', 1);
     rule.release();

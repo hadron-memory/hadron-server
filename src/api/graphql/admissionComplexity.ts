@@ -56,6 +56,7 @@ import {
 import { getComplexity, simpleEstimator, type ComplexityEstimator } from 'graphql-query-complexity';
 import type { GraphqlAdmissionConfig } from './admission.js';
 import { pageTake } from './pageBounds.js';
+import { SPEC_DOCUMENT_MAX_NODES, SPEC_DOCUMENT_CALL_COST } from '../../lib/specDocument/limits.js';
 
 export const QUERY_TOO_COMPLEX = 'QUERY_TOO_COMPLEX';
 
@@ -105,6 +106,22 @@ export const PAGE_ARGS_FIELDS: ReadonlySet<string> = new Set([
   'Query.specUnresolvedReferencesPage',
 ]);
 
+/**
+ * Lists with no page argument whose length is bounded by a refusal instead: costed at that bound, not at
+ * `GRAPHQL_LIST_FACTOR`. #1302: `specDocument` refuses a document over its cap, so `entries` never exceeds it.
+ */
+export const FIXED_LIST_SIZE: Readonly<Record<string, number>> = {
+  'SpecDocument.entries': SPEC_DOCUMENT_MAX_NODES,
+};
+
+/**
+ * Fields whose resolver does heavy work whatever is selected: a fixed cost added to the children's.
+ * #1302: `specDocument` reads and renders the whole document for `{ markdown }` as much as for `entries`.
+ */
+export const FIXED_FIELD_COST: Readonly<Record<string, number>> = {
+  'Query.specDocument': SPEC_DOCUMENT_CALL_COST,
+};
+
 export const DEFAULT_OMITTED_PAGE_SIZE = 100;
 /** Explicit resolver defaults that differ from the common fallback (reviewed against the resolvers). */
 export const OMITTED_PAGE_SIZE: Readonly<Record<string, number>> = {
@@ -112,6 +129,7 @@ export const OMITTED_PAGE_SIZE: Readonly<Record<string, number>> = {
   'Query.memoryEdges': 1000,
   'Query.validateMemory': 200,
   'Query.appNodes': 20,
+  'Query.memoryLocSegments': 20, // #3456: the resolver's own default page
 };
 /** The library's fragment expansion is not memoized; this bounds it (L3 runs earlier at validation). */
 export const MAX_QUERY_NODES = 10_000;
@@ -137,13 +155,15 @@ export function hadronListEstimator(limits: Pick<GraphqlAdmissionConfig, 'maxCos
   const ceiling = limits.maxCost + 1;
   return ({ type, field, args, childComplexity }) => {
     if (field.name === '__schema' || field.name === '__type' || field.name === '__typename') return 0;
+    const fixed = FIXED_FIELD_COST[`${type.name}.${field.name}`];
+    if (fixed !== undefined) return Math.min(fixed + childComplexity, ceiling);
     const isList = isListType(getNullableType(field.type));
     // #2421: agentTaskList's limit is conditional on symptom. Its legacy
     // unfiltered form ignores limit, so keep that form's unpaged cost too.
     const unfilteredTaskList = type.name === 'Query' && field.name === 'agentTaskList' && args.symptom == null;
     const declared = unfilteredTaskList ? undefined : field.args.find((a) => PAGE_ARG.test(a.name))?.name;
     if (!isList && declared === undefined) return undefined;
-    const size = pageSizeOf(`${type.name}.${field.name}`, declared, args) ?? limits.listFactor;
+    const size = FIXED_LIST_SIZE[`${type.name}.${field.name}`] ?? pageSizeOf(`${type.name}.${field.name}`, declared, args) ?? limits.listFactor;
     // A list multiplies its children by its size; a wrapper around a list corrects the factor its list child was
     // costed at (the list inside it carries no argument of its own).
     const factor = isList ? size : Math.max(1, size / limits.listFactor);

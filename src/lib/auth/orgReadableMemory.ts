@@ -33,10 +33,50 @@
  * NEVER returned here — callers gate those by strict ownership.
  */
 
-import type { PrismaClient } from '../../generated/prisma/index.js';
+import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { getManagedSystemMemoryIds } from './managedSystemMemory.js';
 import { LIVE_ORG_MEMBERSHIP } from './liveOrgMembership.js';
 import { subscribedMemoryWhere } from './memorySubscriptionAccess.js';
+
+/**
+ * #3426 (C1) — the identity-free ORG arms of the readable set, shared so a caller that has no user (the org-default
+ * application at memory creation) judges "readable to the org" by the SAME predicate and cannot drift from it (#362).
+ * The group-member arm, the managed-system arm and anything else that needs a user identity stay out of it.
+ */
+export function orgReadableArms(orgIds: string[]): Prisma.MemoryWhereInput[] {
+  return [
+    // #653: `appId: null` — an APP-SCOPED knowledge memory is
+    // NOT org-wide readable; it's reachable only through the App
+    // surface (getAppMemoryAccess), like an app-class memory. Without
+    // this, a knowledge memory provisioned for App A would leak to
+    // every org member (codex review on #660).
+    { organizationId: { in: orgIds }, class: 'knowledge' as any, appId: null, userMemoryOfAgentId: null },
+    // Cross-org subscriptions never reach owner-only personal/private,
+    // and never GROUP or SYSTEM (#1807): createMemorySubscription only admits
+    // PUBLIC memories while group visibility is CHECK-forced to
+    // GROUP, so a group-subscription row is API-invalid legacy state,
+    // not a grant cor:acl:010:01's exclusive MemoryMember audience
+    // should honor. `deletedAt: null` on the subscription so a
+    // REVOKED (soft-deleted) subscription stops granting read.
+    // `appId: null` — app-scoped memories are App-internal, never
+    // cross-org-subscription-readable.
+    subscribedMemoryWhere(orgIds),
+  ];
+}
+
+/** PUBLIC memories — defensively excluding personal/private, per-user holdings, system and app-scoped (#653, #758). */
+export const PUBLIC_READABLE_ARM: Prisma.MemoryWhereInput = {
+  visibility: 'PUBLIC' as any,
+  class: { notIn: ['personal', 'private', 'system'] as any },
+  appId: null,
+  userMemoryOfAgentId: null,
+  ownerUserId: null,
+};
+
+/** Live memories readable to one ORGANIZATION as such: the org arms plus PUBLIC, no user identity (#3426). */
+export function orgReadableWhere(orgId: string): Prisma.MemoryWhereInput {
+  return { deletedAt: null, OR: [...orgReadableArms([orgId]), PUBLIC_READABLE_ARM] };
+}
 
 export async function getOrgReadableMemoryIds(
   db: PrismaClient,
@@ -77,26 +117,7 @@ export async function getOrgReadableMemoryIds(
         // (userMemoryOfAgentId set — e.g. the startChat no-App knowledge
         // downgrade) are owner-only and excluded here (caller re-admits its
         // own via the identity clause).
-        ...(orgIds.length > 0
-          ? [
-              // #653: `appId: null` — an APP-SCOPED knowledge memory is
-              // NOT org-wide readable; it's reachable only through the App
-              // surface (getAppMemoryAccess), like an app-class memory. Without
-              // this, a knowledge memory provisioned for App A would leak to
-              // every org member (codex review on #660).
-              { organizationId: { in: orgIds }, class: 'knowledge' as any, appId: null, userMemoryOfAgentId: null },
-              // Cross-org subscriptions never reach owner-only personal/private,
-              // and never GROUP or SYSTEM (#1807): createMemorySubscription only admits
-              // PUBLIC memories while group visibility is CHECK-forced to
-              // GROUP, so a group-subscription row is API-invalid legacy state,
-              // not a grant cor:acl:010:01's exclusive MemoryMember audience
-              // should honor. `deletedAt: null` on the subscription so a
-              // REVOKED (soft-deleted) subscription stops granting read.
-              // `appId: null` — app-scoped memories are App-internal, never
-              // cross-org-subscription-readable.
-              subscribedMemoryWhere(orgIds),
-            ]
-          : []),
+        ...(orgIds.length > 0 ? orgReadableArms(orgIds) : []),
         // #1208 / cor:acl:010:01 — group memories are readable ONLY through
         // MemoryMember (reader/writer/owner), the symmetric counterpart of
         // MemoryShare. Split out of the org clause for two reasons at once:
@@ -132,7 +153,7 @@ export async function getOrgReadableMemoryIds(
         // The per-memory point reads have their own ownerUserId early-returns;
         // this is the list/search side (getAccessibleMemoryIds + MCP
         // getMemoryAccess both build on it).
-        { visibility: 'PUBLIC' as any, class: { notIn: ['personal', 'private', 'system'] as any }, appId: null, userMemoryOfAgentId: null, ownerUserId: null },
+        PUBLIC_READABLE_ARM,
       ],
     },
     select: { id: true },

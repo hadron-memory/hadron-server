@@ -361,6 +361,20 @@ export async function cloneMemoryGraphInTx(
     await resetEmbeddingObligations(tx, nodeRows.map(row => row.id!), memoryIsVectorIndexed(source));
   }
 
+  // #3496: operational history follows each cloned chat root, including hard-deleted high-water seqs.
+  const counterRoots = await tx.chatRootCounter.findMany({where:{chatRoot:{memoryId:source.id}},select:{chatRootNodeId:true}});
+  const counterIdMap = Object.fromEntries(counterRoots.filter(c=>idMap.has(c.chatRootNodeId))
+    .map(c=>[c.chatRootNodeId,idMap.get(c.chatRootNodeId)!]));
+  // Copy the timestamp in SQL: finite PostgreSQL years need not fit in JS Date/Prisma DateTime.
+  if(counterRoots.length) await tx.$executeRaw`INSERT INTO chat_root_counters(chat_root_node_id,message_count,last_message_at,updated_at)
+    SELECT mapped.value,c.message_count,c.last_message_at,CURRENT_TIMESTAMP AT TIME ZONE 'UTC'
+    FROM chat_root_counters c JOIN jsonb_each_text(${JSON.stringify(counterIdMap)}::jsonb) mapped ON mapped.key=c.chat_root_node_id`;
+
+  // #3501: encrypted sources already refuse above. Plaintext operational state follows the cloned root id.
+  const engines = await tx.chatRootEngineState.findMany({ where: { chatRoot: { memoryId: source.id } } });
+  const engineCopies = engines.filter(row => idMap.has(row.chatRootNodeId)).map(row => ({ chatRootNodeId: idMap.get(row.chatRootNodeId)!, state: row.state as Prisma.InputJsonValue }));
+  if (engineCopies.length) await tx.chatRootEngineState.createMany({ data: engineCopies });
+
   // ── Edges ──────────────────────────────────────────────────────────
   // Clone every live edge whose SOURCE lives in this memory. Targets:
   //   - live internal node → remapped to its clone
