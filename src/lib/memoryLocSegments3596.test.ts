@@ -108,7 +108,7 @@ describe('#3596 sibling-bounded hybrid', () => {
     const flatScans = nodes(plan.Plan).filter(n => /^flat_node(?:_\d+)?$/.test(n.Alias ?? ''));
     expect(flatScans.length).toBeGreaterThan(0);
     for (const scan of flatScans) {
-      expect(scan['Index Name']).toBe('nodes_memory_segment_key_idx');
+      expect(scan['Index Name']).toBe('nodes_memory_segment_key_v2_idx');
       expect(scan['Rows Removed by Filter'] ?? 0).toBeLessThanOrEqual(5);
       expect(scan['Actual Rows']).toBeLessThanOrEqual(1000);
     }

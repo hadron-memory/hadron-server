@@ -461,6 +461,10 @@ CREATE INDEX IF NOT EXISTS nodes_memory_parent_loc_idx
 CREATE INDEX IF NOT EXISTS nodes_memory_segment_key_idx
   ON nodes (memory_id, ((replace(loc, ':', chr(1))) COLLATE "C"));
 
+-- #3601: additive collision-safe key; matches migration 20261106040000 and SEGMENT_KEY_SQL.
+CREATE INDEX IF NOT EXISTS nodes_memory_segment_key_v2_idx
+  ON nodes (memory_id, ((replace(replace(replace(loc, chr(2), chr(2)||'2'), chr(1), chr(2)||'1'), ':', chr(1))) COLLATE "C"));
+
 -- ── #719 structured/faceted query: value-cast guard functions + JSONB GIN ────
 -- Mirrors prisma/migrations/20260718120000_where_query_helpers/migration.sql
 -- (keep in lockstep). The `where` predicate compiler (src/lib/retrieval/

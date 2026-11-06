@@ -18,8 +18,18 @@ import { Prisma, type PrismaClient } from '../generated/prisma/index.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
-/** The indexed key expression (nodes_memory_segment_key_idx); the walk query inlines it and must match it unchanged. */
-export const SEGMENT_KEY_SQL = `(replace(loc, ':', chr(1))) COLLATE "C"`;
+/** One SQL expression for every key site, including the bound next-probe operand. */
+function sqlSegmentKey(expression: Prisma.Sql): Prisma.Sql {
+  return Prisma.sql`(replace(replace(replace(${expression}, chr(2), chr(2)||'2'), chr(1), chr(2)||'1'), ':', chr(1))) COLLATE "C"`;
+}
+
+/** Injective internal key; matches the additive nodes_memory_segment_key_v2_idx. */
+export const SEGMENT_KEY_SQL = sqlSegmentKey(Prisma.raw('loc')).text;
+
+/** Escape data before mapping structural colons; stored loc grammar is unchanged. */
+export function segmentKey(loc: string): string {
+  return loc.replaceAll('\u0002', '\u00022').replaceAll('\u0001', '\u00021').replaceAll(':', '\u0001');
+}
 
 export const LOC_SEGMENTS_DEFAULT_LIMIT = 20;
 export const LOC_SEGMENTS_MAX_LIMIT = 200;
@@ -89,11 +99,11 @@ export async function readLocSegments(
 
   // #3596 / ruling 0229: prove a flat prefix with a sibling-bounded ordered probe,
   // then scan only its index range; otherwise keep the skip-scan below.
-  // Skip-scan over nodes_memory_segment_key_idx: ':' is chr(1) in the key, so one segment's locs are a
+  // Skip-scan over nodes_memory_segment_key_v2_idx: ':' is chr(1) in the key, so one segment's locs are a
   // contiguous block; each step probes the first eligible row at or after the previous block's end
   // (key||chr(2)). The prefix is compared bytewise on the key, never with LIKE.
   const prefix = parent === '' ? '' : `${parent}:`;
-  const prefixKey = prefix.replaceAll(':', '\u0001');
+  const prefixKey = segmentKey(prefix);
   // Every key under the prefix starts with prefixKey (ends in chr(1)); the first key past them is the same with chr(2).
   const upperKey = prefixKey.slice(0, -1) + '\u0002';
   // Emit a real range predicate for non-root parents: a parameterized OR can
@@ -101,22 +111,22 @@ export async function readLocSegments(
   // never caller input; prefix values remain bound parameters.
   const upperBound = (alias: 'probe_node' | 'n' | 'flat_node') => prefix === ''
     ? Prisma.empty
-    : Prisma.sql`AND (replace(${Prisma.raw(alias)}.loc, ':', chr(1))) COLLATE "C" < ${upperKey}::text COLLATE "C"`;
+    : Prisma.sql`AND ${sqlSegmentKey(Prisma.raw(`${alias}.loc`))} < ${upperKey}::text COLLATE "C"`;
   const flatBlock = (afterKey: boolean) => Prisma.sql`
         SELECT array_agg(batch.loc ORDER BY batch.key) AS locs,
                array_agg(batch.seq ORDER BY batch.key) AS positions,
                max(batch.key COLLATE "C") AS last_key
         FROM (
           SELECT flat_node.loc, flat_node.seq,
-                 (replace(flat_node.loc, ':', chr(1))) COLLATE "C" AS key
+                 ${sqlSegmentKey(Prisma.raw('flat_node.loc'))} AS key
           FROM nodes flat_node
           WHERE flat_node.memory_id = m.memory_id
-            AND (replace(flat_node.loc, ':', chr(1))) COLLATE "C" >= ${prefixKey}::text COLLATE "C"
+            AND ${sqlSegmentKey(Prisma.raw('flat_node.loc'))} >= ${prefixKey}::text COLLATE "C"
             ${upperBound('flat_node')}
-            ${afterKey ? Prisma.sql`AND (replace(flat_node.loc, ':', chr(1))) COLLATE "C" > m.last_key COLLATE "C"` : Prisma.empty}
+            ${afterKey ? Prisma.sql`AND ${sqlSegmentKey(Prisma.raw('flat_node.loc'))} > m.last_key COLLATE "C"` : Prisma.empty}
             AND flat_node.deleted_at IS NULL AND flat_node.node_type <> 'system' AND flat_node.node_type <> 'comment' AND flat_node.loc <> ''
             AND NOT (flat_node.id = ANY(${excludeNodeIds}::text[]))
-          ORDER BY (replace(flat_node.loc, ':', chr(1))) COLLATE "C" ASC
+          ORDER BY ${sqlSegmentKey(Prisma.raw('flat_node.loc'))} ASC
           LIMIT 64
         ) batch`;
   const rows = await db.$queryRaw<Array<{ memory_id: string; seg: string; has_node: boolean; pos: number | null }>>`
@@ -128,11 +138,11 @@ export async function readLocSegments(
         SELECT 1 FROM (
           SELECT probe_node.loc FROM nodes probe_node
           WHERE probe_node.memory_id = m.memory_id
-            AND (replace(probe_node.loc, ':', chr(1))) COLLATE "C" >= ${prefixKey}::text COLLATE "C"
+            AND ${sqlSegmentKey(Prisma.raw('probe_node.loc'))} >= ${prefixKey}::text COLLATE "C"
             ${upperBound('probe_node')}
             AND probe_node.deleted_at IS NULL AND probe_node.node_type <> 'system' AND probe_node.node_type <> 'comment' AND probe_node.loc <> ''
             AND NOT (probe_node.id = ANY(${excludeNodeIds}::text[]))
-          ORDER BY (replace(probe_node.loc, ':', chr(1))) COLLATE "C" ASC
+          ORDER BY ${sqlSegmentKey(Prisma.raw('probe_node.loc'))} ASC
           OFFSET 0
         ) ordered_nodes
         WHERE strpos(substr(ordered_nodes.loc, length(${prefix}::text) + 1), ':') > 0
@@ -144,11 +154,11 @@ export async function readLocSegments(
       CROSS JOIN LATERAL (
         SELECT n.loc, n.seq FROM nodes n
         WHERE n.memory_id = m.memory_id
-          AND (replace(n.loc, ':', chr(1))) COLLATE "C" >= ${prefixKey}::text COLLATE "C"
+          AND ${sqlSegmentKey(Prisma.raw('n.loc'))} >= ${prefixKey}::text COLLATE "C"
           ${upperBound('n')}
           AND n.deleted_at IS NULL AND n.node_type <> 'system' AND n.node_type <> 'comment' AND n.loc <> ''
           AND NOT (n.id = ANY(${excludeNodeIds}::text[]))
-        ORDER BY (replace(n.loc, ':', chr(1))) COLLATE "C" ASC
+        ORDER BY ${sqlSegmentKey(Prisma.raw('n.loc'))} ASC
         LIMIT 1
       ) f
       WHERE NOT m.flat
@@ -158,12 +168,12 @@ export async function readLocSegments(
       CROSS JOIN LATERAL (
         SELECT n.loc, n.seq FROM nodes n
         WHERE n.memory_id = w.memory_id
-          AND (replace(n.loc, ':', chr(1))) COLLATE "C" >=
-              (${prefixKey}::text || replace(split_part(substr(w.loc, length(${prefix}::text) + 1), ':', 1), ':', chr(1)) || chr(2)) COLLATE "C"
+          AND ${sqlSegmentKey(Prisma.raw('n.loc'))} >=
+              (${prefixKey}::text || ${sqlSegmentKey(Prisma.sql`split_part(substr(w.loc, length(${prefix}::text) + 1), ':', 1)`)} || chr(2)) COLLATE "C"
           ${upperBound('n')}
           AND n.deleted_at IS NULL AND n.node_type <> 'system' AND n.node_type <> 'comment' AND n.loc <> ''
           AND NOT (n.id = ANY(${excludeNodeIds}::text[]))
-        ORDER BY (replace(n.loc, ':', chr(1))) COLLATE "C" ASC
+        ORDER BY ${sqlSegmentKey(Prisma.raw('n.loc'))} ASC
         LIMIT 1
       ) f
     ), flat_blocks AS (
