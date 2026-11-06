@@ -450,7 +450,7 @@ describe('globalSearch — GraphQL resolver wiring', () => {
   const ctxFor = (userId: string, admin = false): Context => ({ db, userId, roles: admin ? ['ADMIN'] : [] });
 
   it('finds a partial node URN through the portal resolver without widening scope (#1586 resolver)', async () => {
-    const params = { query: 'alpha:guide:intro', entityTypes: ['node'] };
+    const params = { query: 'alpha:guide:intro', entityTypes: ['node'] as SearchEntityType[] };
     const found = await resolvers.Query.globalSearch({}, params, ctxFor(fx.viewer));
     expect(ids(found.hits)).toEqual(new Set([fx.nodeA]));
     expect(found.total).toBe(1);
