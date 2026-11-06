@@ -1,3 +1,4 @@
+import { personalOrgAgentLicenseHolds } from '../auth/personalOrgAgentInstall.js';
 import { readInstallBootPrompt } from '../appInstallations.js';
 /**
  * #2047 (S10, cor:agt:040:07/:09/:10) — the ONE resolver that decides which boot prompt a bind, a chatbot chat or a
@@ -95,6 +96,10 @@ export async function resolveServedBootPrompt(
   t: ServeTarget,
   page?: { memo: PageServedMemo; workerPointer?: { bootPromptNodeId: string | null; bootPromptUrn: string | null } | null },
 ): Promise<ServedBootPrompt> {
+  if(t.appId){
+    const app=await db.app.findUnique({where:{id:t.appId},select:{organizationId:true,ownerUserId:true}});
+    if(app && !(await personalOrgAgentLicenseHolds(db,app,t.agent.id))) throw bootPromptRefusal('BOOT_PROMPT_INSTALL_LICENSE_INACTIVE',{surface:t.surface,agentName:t.agent.name});
+  }
   if (page && t.workerId) {
     const own = page.workerPointer !== undefined
       ? page.workerPointer

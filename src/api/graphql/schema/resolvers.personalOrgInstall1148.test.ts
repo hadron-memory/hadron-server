@@ -7,6 +7,8 @@ import { resolvers, type Context } from './resolvers.js';
 import { isAgentInstalledAndLicensed, activeAppInstallLicenseIdsForAgent } from '../../../lib/appAgent.js';
 import { installMemoryAudience, readableInstallMemoryIds } from '../../../lib/auth/installMemory.js';
 import { resolveServedBootPrompt } from '../../../lib/bootPrompt/serve.js';
+import { canReadMemory, participantSystemMemoryFolds, getAppMemoryAccess } from '../../../mcp/access-control.js';
+import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds.js';
 import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js',()=>({writeNodeToGit:vi.fn().mockResolvedValue(undefined)}));
 const mutation=resolvers.Mutation as any;
@@ -36,7 +38,7 @@ it('current member creates a personal App referencing the org-visible Agent',asy
 });
 it('the same owner installs through the existing-App door',async()=>{
  await db.appAgent.delete({where:{appId_agentId:{appId,agentId}}});
- expect(await mutation.installAgentIntoApp({}, {appRef:appId,agentRef:agentId},context())).toMatchObject({agentId,appId});
+ expect(await mutation.installAgentIntoApp({}, {appRef:appId,agentRef:agentId},context())).toMatchObject({appAgent:{agentId,appId}});
 });
 it('owner membership revoke and rejoin changes live install readers without deleting anything',async()=>{
  expect(await isAgentInstalledAndLicensed(db,appId,agentId)).toBe(true);
@@ -85,4 +87,44 @@ it('required and explicitly requested optional dependencies remain rejected befo
  await db.agentImport.update({where:{parentAgentId_importedAgentId:{parentAgentId:agentId,importedAgentId:dependency.id}},data:{required:false}});
  await expect(mutation.createApp({}, {agentRef:agentId,name:'Optional',installOptional:[dependency.id]},context())).rejects.toMatchObject({extensions:{code:'BAD_USER_INPUT'}});
  expect(await db.app.count()).toBe(count);
+});
+
+it('system-definition point and participant folds agree for current, foreign and revoked principals',async()=>{
+ const agent=await db.agent.findUniqueOrThrow({where:{id:agentId},select:{systemMemoryId:true}});
+ const id=agent.systemMemoryId!;
+ expect(await canReadMemory(db,context(),id)).toBe(true);
+ expect(await canReadMemory(db,context(outsiderId),id)).toBe(false);
+ expect((await participantSystemMemoryFolds(db,context(outsiderId))).some(fold=>fold.map.has(id))).toBe(false);
+ expect((await getAppMemoryAccess(db,appId,{callerUserId:outsiderId,memberAdmitted:true})).has(id)).toBe(false);
+ await db.orgMember.update({where:{organizationId_userId:{organizationId:orgId,userId:ownerId}},data:{deletedAt:new Date()}});
+ expect(await canReadMemory(db,context(),id)).toBe(false);
+ expect((await participantSystemMemoryFolds(db,context())).some(fold=>fold.map.has(id))).toBe(false);
+});
+it('platform definition access without membership is not a personal-install licence',async()=>{
+ await db.user.update({where:{id:outsiderId},data:{roles:['ADMIN']}});
+ await expect(mutation.createApp({}, {agentRef:agentId,name:'No membership bypass'},{...context(outsiderId),roles:['ADMIN']} )).rejects.toMatchObject({extensions:{code:'ORGANIZATION_MISMATCH'}});
+});
+it('the owner own-Agent control needs no subscription',async()=>{
+ const own=await mutation.createAgent({}, {name:'Own personal'},context());
+ const created=await mutation.createApp({}, {agentRef:own.id,name:'Own App'},context());
+ expect(created).toMatchObject({organizationId:null,ownerUserId:ownerId});
+ expect(await isAgentInstalledAndLicensed(db,created.id,own.id)).toBe(true);
+ expect(await db.agentSubscription.count({where:{agentId:own.id,userId:ownerId}})).toBe(0);
+});
+
+it('session App-key system-memory provenance still requires the individual current membership',async()=>{
+ const id=(await db.agent.findUniqueOrThrow({where:{id:agentId},select:{systemMemoryId:true}})).systemMemoryId!;
+ const own=await db.session.create({data:{id:generateId(),appId,agentId,userId:ownerId}});
+ const other=await db.session.create({data:{id:generateId(),appId,agentId,userId:outsiderId}});
+ expect(await sessionScopedMemoryIds(db,appId,own.id)).toContain(id);
+ expect(await sessionScopedMemoryIds(db,appId,other.id)).not.toContain(id);
+ await db.orgMember.update({where:{organizationId_userId:{organizationId:orgId,userId:ownerId}},data:{deletedAt:new Date()}});
+ expect(await sessionScopedMemoryIds(db,appId,own.id)).not.toContain(id);
+});
+it('the real chat entry refuses an owner whose retained personal install lost membership with the common licence code',async()=>{
+ await serveAgentBootPrompt(db,agentId,'Synthetic served content.');
+ await db.orgMember.update({where:{organizationId_userId:{organizationId:orgId,userId:ownerId}},data:{deletedAt:new Date()}});
+ const before=await db.node.count();
+ await expect(mutation.startChat({}, {agentId,scope:'private'},context())).rejects.toMatchObject({extensions:{code:'BOOT_PROMPT_INSTALL_LICENSE_INACTIVE'}});
+ expect(await db.node.count()).toBe(before);
 });

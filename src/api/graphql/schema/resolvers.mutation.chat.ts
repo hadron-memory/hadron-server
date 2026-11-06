@@ -1,3 +1,6 @@
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { personalOrgAgentLicenseHolds } from '../../../lib/auth/personalOrgAgentInstall.js';
+import { bootPromptRefusal } from '../../../lib/bootPrompt/refusal.js';
 import { chatNotFoundError } from '../../../lib/chatNotFound.js';
 import { ENGINE_KEYS, engineState } from '../../../lib/chatRootEngineState.js';
 import { appInstallationWhere } from '../../../lib/appInstallations.js';
@@ -223,6 +226,18 @@ export const chatMutations = {
         select: { id: true, organizationId: true, ownerUserId: true, visibility: true, deletedAt: true },
       });
       if (!gateRow || !(await canChatWithAgent(ctx, gateRow))) {
+        // #1148: an owner already knows their own retained install. Give its licence refusal,
+        // without widening the Agent read gate or exposing another person's installation.
+        if (gateRow && ctx.userId && !ctx.impersonation && !isRunPrincipal(ctx)) {
+          const knownInstall = await ctx.db.app.findFirst({where:{
+            ownerUserId:ctx.userId,organizationId:null,deletedAt:null,uninstalledAt:null,
+            ...(ctx.appId ? {id:ctx.appId} : {}),appAgents:{some:{agentId:resolvedAgentId}},
+          },select:{id:true,organizationId:true,ownerUserId:true}});
+          if(knownInstall && !(await personalOrgAgentLicenseHolds(ctx.db,knownInstall,resolvedAgentId))) {
+            const named=await ctx.db.agent.findUnique({where:{id:resolvedAgentId},select:{name:true}});
+            throw bootPromptRefusal('BOOT_PROMPT_INSTALL_LICENSE_INACTIVE',{surface:'chat',agentName:named?.name??''});
+          }
+        }
         throw new AgentNotFoundError(agentId);
       }
       // A session-bound App key chats only with its session's Agent: the chat
