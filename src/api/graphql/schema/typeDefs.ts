@@ -12647,7 +12647,7 @@ export const typeDefs = `#graphql
     history, embeddings (re-stamped), assets (their bytes stay with the source), git-sync config, the editor lock
     and published-revision pointer, Worker castings, App installs, and the source organization's subscriptions
     and grants. A base or import is licensed for the TARGET organization at clone time, or the clone refuses
-    (BASE_UNUSABLE, IMPORT_UNUSABLE). A refusal's blocker subjects carry a name only when you can read the
+    (CLONE_BASE_UNUSABLE, CLONE_IMPORT_UNUSABLE). A refusal's blocker subjects carry a name only when you can read the
     subject; otherwise only a position. The clone's origin is Agent.clonedFromAgentRef.
     """
     cloneAgent(source: ID!, target: ID!, name: String, slug: String): Agent!
@@ -12817,6 +12817,8 @@ export const typeDefs = `#graphql
     """
     Trigger an on-demand sync for one memory (org ADMIN or CONTRIBUTOR).
 
+    Refuses SYNC_NOT_ATTEMPTED with reason NO_SOURCE or NO_INSTALLATION when no sync can be attempted;
+    no sync status, timestamp or report is written. Access is checked first; encrypted-memory refusal is unchanged.
     Accepts the entity's ID or URN.
     """
     syncMemory(id: ID!): Memory!

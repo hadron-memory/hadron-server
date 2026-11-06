@@ -2,6 +2,7 @@ import { chatNotFoundError } from '../../../lib/chatNotFound.js';
 import { readChatEngineStates } from '../../../lib/chatRootEngineState.js';
 import { readChatCounters } from '../../../lib/chatRootCounters.js';
 import { appInstallationWhere } from '../../../lib/appInstallations.js';
+import { translateSessionExpired } from '../../../lib/channels.js';
 // chatQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
 import {
   decryptNodeFields,
@@ -360,7 +361,7 @@ export const chatQueries = {
       // suffix.
       const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
       if (memEncInfo.isEncrypted) {
-        for (const m of rows) decryptNodeFields(m, memEncInfo);
+        for (const m of rows) translateSessionExpired(memEncInfo.id, () => decryptNodeFields(m, memEncInfo));
       }
       // #1061 — a transcript read returns each message's content, so it is one
       // read per message returned. Recorded here, AFTER the decrypt above: an

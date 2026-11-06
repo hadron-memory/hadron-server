@@ -1993,3 +1993,49 @@ it('3501: encrypted startChat stores ciphertext root and state at birth, with on
     expect(state).toMatchObject({ conversationName: 'research', stageName: 'scope', goalStack: expect.any(Array), routeHistory: expect.any(Array) });
   } finally { sessionKeyCache.clear(); }
 });
+
+describe('3583: a keyless turn on an encrypted chat', () => {
+  async function encryptedKeylessChat() {
+    const { sessionKeyCache } = await import('../../../lib/sessionKeyCache.js');
+    const started = await resolvers.Mutation.startChat({}, { agentId: agent.id }, userCtx(adminUser.id));
+    await resolvers.Mutation.sendChatMessage({}, { chatId: started.chatId, userMessage: 'before' }, userCtx(adminUser.id));
+    const memory = await db.memory.findFirstOrThrow({ where: { userMemoryOfAgentId: agent.id, createdBy: adminUser.id } });
+    await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true } });
+    sessionKeyCache.clear(); // no session key is cached for this memory
+    const rootBefore = await db.node.findUniqueOrThrow({ where: { loc_memoryId: { memoryId: memory.id, loc: started.chatId } } });
+    const snapshot = async () => ({
+      nodes: await db.node.count({ where: { memoryId: memory.id } }),
+      revisions: await db.nodeRevision.count({ where: { nodeId: rootBefore.id } }),
+      root: await db.node.findUniqueOrThrow({ where: { id: rootBefore.id } }).then((r) => ({ data: r.data, updatedAt: r.updatedAt, revSeq: r.revSeq })),
+    });
+    return { chatId: started.chatId, snapshot };
+  }
+
+  it('sendChatMessage refuses with the typed SESSION_EXPIRED code and writes nothing', async () => {
+    const { chatId, snapshot } = await encryptedKeylessChat();
+    const before = await snapshot();
+    const refused = await resolvers.Mutation.sendChatMessage({}, { chatId, userMessage: 'hello' }, userCtx(adminUser.id)).then(() => null, (e: any) => e);
+    expect(refused?.extensions?.code).toBe('SESSION_EXPIRED');
+    expect(String(refused?.message)).toMatch(/^SESSION_EXPIRED: /);
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it('processChatResponse and updateChatTitle are the same typed refusal, writing nothing', async () => {
+    const { chatId, snapshot } = await encryptedKeylessChat();
+    const before = await snapshot();
+    for (const call of [
+      () => resolvers.Mutation.processChatResponse({}, { chatId, toolResponse: {} }, userCtx(adminUser.id)),
+      () => resolvers.Mutation.updateChatTitle({}, { chatId, title: 'renamed' }, userCtx(adminUser.id)),
+    ]) {
+      const refused = await call().then(() => null, (e: any) => e);
+      expect(refused?.extensions?.code).toBe('SESSION_EXPIRED');
+    }
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it('the transcript read is the same typed refusal', async () => {
+    const { chatId } = await encryptedKeylessChat();
+    const refused = await resolvers.Query.chatHistory({}, { chatId }, userCtx(adminUser.id)).then(() => null, (e: any) => e);
+    expect(refused?.extensions?.code).toBe('SESSION_EXPIRED');
+  });
+});
