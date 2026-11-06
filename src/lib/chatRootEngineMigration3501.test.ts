@@ -54,6 +54,12 @@ it('real table PK/FK cascades hard root deletion and has no memoryId/plaintext r
 });
 
 const parityFixtures: Array<[string, unknown, boolean]> = [
+  ['routeHistory', [{ action: ['ENTER'], timestamp: '2026-01-01T00:00:00Z' }], false],
+  ['goalStack', [{ description: 'goal', createdBy: ['USER'], status: 'ACTIVE', createdAt: '2026-01-01T00:00:00Z' }], false],
+  ['goalStack', [{ description: 'goal', createdBy: 'USER', status: ['ACTIVE'], createdAt: '2026-01-01T00:00:00Z' }], false],
+  ...['2026-01-01T12:00:00 BC', '2026-01-01T12:00:00 PST', '2026-01-01T12:00:00 America/New_York', '2026-01-01T12:00:00+05', '2026-01-01T1200', '2026-01-01T12:00:60Z'].map(value => ['lastOffTrackAt', value, false] as [string, unknown, boolean]),
+  ['stageName', '\n', false],
+  ['stageName', '\u3000', false],
   ['routeHistory', [{ action: 'ENTER', timestamp: '2026-01-01T00:00:00Z', language: 5 }], true],
   ['goalStack', [{ description: 'goal', createdBy: 'USER', status: 'ACTIVE', createdAt: '2026-01-01T00:00:00Z', language: 5 }], false],
   ['lastOffTrackAt', '2026-02-30T00:00:00Z', false],

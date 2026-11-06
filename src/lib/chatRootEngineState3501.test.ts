@@ -382,3 +382,28 @@ it('13: a migrated partial row cannot turn an invalid legacy stage into an absen
   await expect(updateChatRootData(db, root, enc(), d => { called = true; return d; })).rejects.toMatchObject({ extensions: { code: 'CHAT_STATE_INVALID' } });
   expect(called).toBe(false); expect(await raw()).toEqual(before);
 });
+
+it('security: malformed listed roots do not suppress a healthy chat on either list surface', async () => {
+  const { chatQueries } = await import('../api/graphql/schema/resolvers.query.chat.js');
+  const memory = await db.memory.findUniqueOrThrow({ where: { id: root.memoryId } });
+  const bad = await db.node.create({ data: { id: generateId(), memoryId: root.memoryId, loc: 'chats:bad', name: 'bad', nodeType: 'note', createdBy: userId, data: { stageName: 5 } } });
+  const before = await db.node.findUniqueOrThrow({ where: { id: bad.id } });
+  for (const result of [await chatQueries.myChats(null, { agentRef: memory.userMemoryOfAgentId! }, ctx),
+    (await chatQueries.myChatsPage(null, { agentRef: memory.userMemoryOfAgentId!, limit: 20, offset: 0 }, ctx)).items]) {
+    expect(result.find(r => r.id === root.id)).toMatchObject({ conversationName: 'intake', stageName: 'first' });
+    expect(result.find(r => r.id === bad.id)).toMatchObject({ conversationName: null, stageName: null });
+  }
+  expect(await db.node.findUniqueOrThrow({ where: { id: bad.id } })).toEqual(before);
+  expect(await db.chatRootEngineState.count()).toBe(0);
+});
+it.each([{ stageName: '\t', unknown: 'keep opaque' }, ['malformed', 'shape'], 42].map(state => ({ state })))('security: conversion preserves arbitrary plaintext state JSON $state without executing it', async ({ state }) => {
+  const { encryptChatEngineStateWithKey } = await import('./chatRootEngineState.js');
+  const key = generateDataKey();
+  await db.chatRootEngineState.create({ data: { chatRootNodeId: root.id, state } });
+  await db.$transaction(tx => encryptChatEngineStateWithKey(tx, root.id, key));
+  const stored = (await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } })).state;
+  expect(stored).toHaveProperty('__enc');
+  sessionKeyCache.set(generateId(), root.memoryId, key);
+  expect(decryptNodeFields({ data: stored }, { id: root.memoryId, isEncrypted: true }).data).toEqual(state);
+  expect(await db.$transaction(tx => encryptChatEngineStateWithKey(tx, root.id, key))).toBe(false);
+});
