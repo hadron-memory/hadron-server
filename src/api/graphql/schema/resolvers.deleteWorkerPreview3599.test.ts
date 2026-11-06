@@ -46,25 +46,35 @@ beforeEach(async () => {
  await db.appAgent.create({data:{appId:app.id,agentId:agent.id}});
  const caller = await db.worker.create({data:{...WORKER_SIGNATURE_DEFAULTS,appId:app.id,agentId:agent.id,name:'Caller',slug:'caller',heldByUserId:holder.id}});
  const session = await db.session.create({data:{id:generateId(),appId:app.id,agentId:agent.id,workerId:caller.id,userId:holder.id,tool:'vitest'}});
- const target = await M.castWorker({}, {appRef:app.id,agentRef:agent.id,name:'Miscast',noTeam:true},ctx());
- f={...f,agent,caller,session,target};
+ await M.createAgentTickerTemplate({}, {agentRef:agent.id,input:{name:'Pristine tick',cadenceSeconds:600}},ctx());
+ const target = await M.castWorker({}, {appRef:app.id,agentRef:agent.id,name:'Miscast'},ctx());
+ const memory=await db.memory.create({data:{class:'knowledge',appId:app.id,organizationId:org.id,name:'Synthetic working memory',urn:'preview3599.test:miscast-work'}});
+ await db.worker.update({where:{id:target.id},data:{memoryId:memory.id}});
+ f={...f,agent,caller,session,target,memory};
 });
 afterEach(() => sessionKeyCache.clear());
 
 describe('#3599 deleteWorkerPreview contract', () => {
  it('returns only workerId and always-required attestation; pristine state and all fences are unchanged', async () => {
   const before=await state();
+  expect(before.tickers.length).toBeGreaterThan(0);expect(before.memories.some(m=>m.id===f.memory.id)).toBe(true);
   expect(await preview()).toEqual({workerId:f.target.id,attestationRequired:true});
   expect(await state()).toEqual(before);
  });
  it('instructed preview records one subject-qualified claim and does not poison the later real delete', async () => {
-  const before=await events();
+  const before=await events();const fenceBefore=await fences();
   expect(await preview(bound(),f.target.id,instruction)).toEqual({workerId:f.target.id,attestationRequired:true});
   const after=(await events()).filter(e=>!before.some(x=>x.id===e.id));
+  const fenceAfter=await fences();
+  // Make the real delete the primary poisoning assertion, before checking event metadata.
+  expect(await remove()).toBe(true);
   expect(after).toHaveLength(1);
   expect(after[0]).toMatchObject({type:'worker.instruction-claimed',subjectWorkerId:f.target.id,actorWorkerId:f.caller.id,actorUserId:f.holder.id});
   expect(after[0].payload).toEqual({operation:'worker.delete-preview',workerId:f.target.id,instruction});
-  expect(await remove()).toBe(true);
+  const old=new Map(fenceBefore.map(r=>[r.subject_id,BigInt(r.version)]));
+  const changed=fenceAfter.filter(r=>BigInt(r.version)!==old.get(r.subject_id));
+  expect(changed.map(r=>r.subject_id).sort()).toEqual([...new Set([f.target.id,f.caller.id])].sort());
+  for(const r of changed) expect(BigInt(r.version)).toBe((old.get(r.subject_id)??-1n)+1n);
   expect(await db.worker.findUnique({where:{id:f.target.id}})).toBeNull();
  });
  it('a granted worker previews without an instruction claim or any durable changes', async () => {
@@ -116,9 +126,91 @@ describe('#3599 deleteWorkerPreview contract', () => {
   await ready;
   try {
    // A READ COMMITTED census can read the committed target while another transaction holds its row.
-   expect(await preview()).toEqual({workerId:f.target.id,attestationRequired:true});
+   const client=new Proxy(db,{get(t,k){
+    if(k==='$transaction') return (fn:any,opts:any)=>t.$transaction(async tx=>{
+     await tx.$executeRaw`SET LOCAL lock_timeout = '500ms'`;return fn(tx);
+    },opts);
+    const v=(t as any)[k];return typeof v==='function'?v.bind(t):v;
+   }});
+   expect(await preview(ctx({db:client}))).toEqual({workerId:f.target.id,attestationRequired:true});
   } finally {unlock();await holder;}
  },20000);
+ it('baseline: the existing real delete admits a pristine worker in an uninstalled App',async()=>{
+  await db.app.update({where:{id:f.app.id},data:{uninstalledAt:new Date()}});
+  expect(await remove()).toBe(true);
+ });
+ it('a retained uninstalled App has the same preview admission as its real delete',async()=>{
+  await db.app.update({where:{id:f.app.id},data:{uninstalledAt:new Date()}});
+  const before=await state();
+  expect(await preview()).toEqual({workerId:f.target.id,attestationRequired:true});
+  expect(await state()).toEqual(before);
+  expect(await remove()).toBe(true);
+ });
+ it('uses READ COMMITTED, never the real delete SERIALIZABLE transaction',async()=>{
+  const seen:string[]=[];
+  const client=new Proxy(db,{get(t,k){
+   if(k==='$transaction') return (fn:any,opts:any)=>t.$transaction(async tx=>{
+    const rows=await tx.$queryRaw<Array<{transaction_isolation:string}>>`SHOW transaction_isolation`;
+    seen.push(rows[0].transaction_isolation);return fn(tx);
+   },opts);
+   const v=(t as any)[k];return typeof v==='function'?v.bind(t):v;
+  }});
+  expect(await preview(ctx({db:client}))).toEqual({workerId:f.target.id,attestationRequired:true});
+  expect(seen).toEqual(['read committed']);
+ });
+ it('re-reads a target removed after preflight and returns the real delete in-tx miss',async()=>{
+  const client=new Proxy(db,{get(t,k){
+   if(k==='$transaction') return async(fn:any,opts:any)=>{
+    await db.worker.delete({where:{id:f.target.id}});return t.$transaction(fn,opts);
+   };
+   const v=(t as any)[k];return typeof v==='function'?v.bind(t):v;
+  }});
+  expect(await error(preview(ctx({db:client})))).toEqual({message:'Worker not found.',extensions:{code:'WORKER_NOT_FOUND',workerRef:f.target.id}});
+ });
+ it('an uninstalled App in-use target has byte-identical refusal parity',async()=>{
+  await db.node.create({data:{memoryId:f.agent.systemMemoryId,loc:'used',name:'Used',createdByWorkerId:f.target.id}});
+  await db.app.update({where:{id:f.app.id},data:{uninstalledAt:new Date()}});
+  expect(await error(preview())).toEqual(await error(remove()));
+ });
+ it('a soft-deleted App gives the same concealed miss as real delete',async()=>{
+  await db.app.update({where:{id:f.app.id},data:{deletedAt:new Date()}});
+  const got=await error(preview());expect(got).toEqual(await error(remove()));
+  expect(got.extensions.code).toBe('WORKER_NOT_FOUND');
+ });
+ it('a platform ADMIN on a soft-deleted organization gets byte-identical real-delete refusal',async()=>{
+  await db.user.update({where:{id:f.holder.id},data:{roles:['ADMIN']}});
+  await db.organization.update({where:{id:f.org.id},data:{deletedAt:new Date()}});
+  const p=await error(preview(ctx({roles:['ADMIN']})));
+  expect(p).toEqual(await error(M.deleteWorker({}, {workerRef:f.target.id,confirmNoExternalAttribution:true},ctx({roles:['ADMIN']}))));
+  expect(p.extensions.code).toBe('WORKER_NOT_FOUND');
+ });
+ it('revalidates the caller deleted after initial admission inside the transaction',async()=>{
+  const client=new Proxy(db,{get(t,k){
+   if(k==='$transaction') return async(fn:any,opts:any)=>{
+    await db.user.update({where:{id:f.holder.id},data:{deletedAt:new Date()}});return t.$transaction(fn,opts);
+   };
+   const v=(t as any)[k];return typeof v==='function'?v.bind(t):v;
+  }});
+  expect((await error(preview(ctx({db:client})))).extensions.code).toBe('FORBIDDEN');
+ });
+ it('the deciding admission sees a holder role demoted after first admission and before caller locks',async()=>{
+  let demoted=false;
+  const client=new Proxy(db,{get(t,k){
+   if(k==='$transaction') return (fn:any,opts:any)=>t.$transaction(tx=>fn(new Proxy(tx,{get(a,b){
+    if(b==='$executeRaw') return async(...args:any[])=>{
+     if(!demoted && String(args[0]).includes('agent-task-matcher:worker')) {
+      await db.orgMember.update({where:{organizationId_userId:{organizationId:f.org.id,userId:f.holder.id}},data:{role:'READER'}});demoted=true;
+     }
+     return (a.$executeRaw as any)(...args);
+    };
+    const v=(a as any)[b];return typeof v==='function'?v.bind(a):v;
+   }})),opts);
+   const v=(t as any)[k];return typeof v==='function'?v.bind(t):v;
+  }});
+  const before=await events();
+  expect((await error(preview(bound({db:client}),f.target.id,instruction))).extensions.code).toBe('FORBIDDEN');
+  expect(demoted).toBe(true);expect(await events()).toEqual(before);
+ });
  it('schema has the Query closed shape with no attestation input; real delete signature unchanged',()=>{
   const schema=buildSchema(typeDefs);const q=schema.getQueryType()!.getFields().deleteWorkerPreview;
   expect(q).toBeDefined();expect(String(q.type)).toBe('DeleteWorkerPreview!');
