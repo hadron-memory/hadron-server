@@ -143,6 +143,7 @@
     "TeamWorkItemsPage": "envelope",
     "WorkersPage": "envelope",
     "CastWorkerPreview": "envelope",
+    "DeleteWorkerPreview": "envelope",
     "CastPreviewTicker": "value",
     "TeamRolesPage": "envelope",
     "DeleteTeamRolePayload": "envelope",
