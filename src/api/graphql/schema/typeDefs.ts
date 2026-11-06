@@ -8091,6 +8091,32 @@ export const typeDefs = `#graphql
     reason: SpecReferenceProblem
   }
 
+  "#1302 — a Feature's specs as one document (see Query.specDocument)."
+  type SpecDocument {
+    memoryId: ID!
+    "The citation the document was built for."
+    loc: String!
+    "The time in the text's header."
+    renderedAt: DateTime!
+    "The whole document, one Markdown string (hrn:node:hadronmemory.com:specs:cor:spc:030:02). Every client shows this string unchanged."
+    markdown: String!
+    "One entry per spec the document covers, in document order, the Feature first."
+    entries: [SpecDocumentEntry!]!
+  }
+
+  "#1302 — one spec in a document, read as the caller would read the node."
+  type SpecDocumentEntry {
+    loc: String!
+    urn: String!
+    name: String!
+    revision: Int!
+    "The body as an ordinary read returns it (includes resolved under the caller's own access). Null for a placeholder."
+    content: String
+    isPlaceholder: Boolean!
+    approvalStatus: NodeApprovalStatus!
+    mintStatus: NodeMintStatus!
+  }
+
   "#3222 (#2213 S3) — one page of a spec-reference list, counted over the whole list."
   type SpecReferencePage {
     items: [SpecReference!]!
@@ -10544,6 +10570,20 @@ export const typeDefs = `#graphql
     work: each page still scans the whole corpus. memoryRef accepts the memory's ID or URN.
     """
     specBacklinksPage(memoryRef: ID!, loc: String!, limit: Int, offset: Int): SpecReferencePage!
+
+    """
+    #1302 (R218, hrn:node:hadronmemory.com:specs:cor:spc:030:01) — a Feature's specs as ONE ordered document, built on
+    the server for the CLI and the portal. loc names the Feature (any live spec is accepted, and the document starts with
+    it); the document covers it and its live descendants on colon boundaries. markdown is the whole document in the form
+    of hrn:node:hadronmemory.com:specs:cor:spc:030:02; entries are the same specs with their records, in document order. Same read gate and refusals as
+    specBacklinks: an unreadable and a missing memory answer alike, and an encrypted readable one refuses with
+    SPEC_CORPUS_ENCRYPTED_UNSUPPORTED. A readable memory with no live spec at loc answers NODE_NOT_FOUND (a deleted spec
+    and a never-written loc alike). Over 300 specs it refuses with SPEC_DOCUMENT_TOO_LARGE and extensions.cap, and never
+    returns part of the document. Reads only: nothing is stored, approved or minted. The render time is the only part of
+    the text that differs between two calls over the same specs, approval and mint state, includes, caller access and
+    portal origin. No MCP tool offers this.
+    """
+    specDocument(memoryRef: ID!, loc: String!): SpecDocument!
 
     """
     #1449 — references in a spec corpus (any memory since #1591) that do not reach a written
