@@ -78,3 +78,168 @@ describe('phase-1 retirement', () => {
   if (isInputObjectType(input)) expect(input.getFields().standbyEnabled?.deprecationReason).toBeTruthy();
  });
 });
+
+it('migrates populated prior storage: exactly four columns disappear, every other value and row survives', async () => {
+ const { Client } = await import('pg');
+ const { readFileSync } = await import('node:fs');
+ const pg = new Client({ connectionString: process.env.DATABASE_URL }); await pg.connect();
+ try {
+  await pg.query('BEGIN');
+  // Reconstruct only the four removed columns on the actual populated private worker schema.
+  await pg.query(`ALTER TABLE apps ADD COLUMN IF NOT EXISTS delivery_standby_enabled boolean NOT NULL DEFAULT false;
+   ALTER TABLE worker_wake_settings ADD COLUMN IF NOT EXISTS isolated_until timestamp(3),
+    ADD COLUMN IF NOT EXISTS isolated_at timestamp(3), ADD COLUMN IF NOT EXISTS isolated_by_user_id text;`);
+  await pg.query(`UPDATE apps SET delivery_standby_enabled=true, ticker_min_cadence_seconds=130,
+   delivery_busy_delay_seconds=700, delivery_stuck_window_seconds=1500, delivery_check_period_seconds=720,
+   delivery_dark_alarm_window_seconds=1900 WHERE id=$1`, [appId]);
+  const worker = await db.worker.findUniqueOrThrow({ where: { id: targetId } });
+  // All fixture creation stays outside the DDL transaction's locked tables.
+  const ids = [targetId];
+  for (let i=0;i<3;i++) {
+   const id = generateId(); ids.push(id);
+   await pg.query(`INSERT INTO workers (id,app_id,agent_id,name,slug,role,signature,trailer)
+     VALUES ($1,$2,$3,$4,$4,'engineer','','')`,[id,appId,worker.agentId,`migration-${i}`]);
+  }
+  for (let i=0;i<ids.length;i++) await pg.query(`INSERT INTO worker_wake_settings
+   (worker_id,mentions,paused_until,isolated_until,isolated_at,isolated_by_user_id,exempt_ended_at,updated_by)
+   VALUES ($1,'OFF',$2,$3,$4,$5,$6,'synthetic-migration')`, [ids[i],
+    i===2?new Date('2099-01-01'):null, i===0?new Date('2099-02-01'):i===1?new Date('2000-01-01'):null,
+    i<2?new Date('1999-01-01'):null,i<2?holderId:null,i===2?new Date('2020-01-01'):null]);
+  const snapshot = async () => ({
+   apps:(await pg.query(`SELECT to_jsonb(a)-'delivery_standby_enabled' AS row FROM apps a ORDER BY id`)).rows,
+   settings:(await pg.query(`SELECT to_jsonb(w)-ARRAY['isolated_until','isolated_at','isolated_by_user_id'] AS row FROM worker_wake_settings w ORDER BY worker_id`)).rows,
+  });
+  const before = await snapshot();
+  const beforeCols = (await pg.query(`SELECT table_name,column_name FROM information_schema.columns WHERE table_schema='public' AND table_name IN ('apps','worker_wake_settings') ORDER BY table_name,column_name`)).rows;
+  const sql = readFileSync(new URL('../../../../prisma/migrations/20261106130000_retire_s7_isolation_standby/migration.sql',import.meta.url),'utf8');
+  await pg.query(sql);
+  expect(await snapshot()).toEqual(before);
+  const afterCols = (await pg.query(`SELECT table_name,column_name FROM information_schema.columns WHERE table_schema='public' AND table_name IN ('apps','worker_wake_settings') ORDER BY table_name,column_name`)).rows;
+  expect(beforeCols.filter(c=>!afterCols.some(a=>a.table_name===c.table_name&&a.column_name===c.column_name)))
+   .toEqual([{table_name:'apps',column_name:'delivery_standby_enabled'},
+    {table_name:'worker_wake_settings',column_name:'isolated_at'},
+    {table_name:'worker_wake_settings',column_name:'isolated_by_user_id'},
+    {table_name:'worker_wake_settings',column_name:'isolated_until'}]);
+ } finally { await pg.query('ROLLBACK'); await pg.end(); }
+});
+
+it.each(['cli-wake','cli-delivery','portal-delivery'])('validates frozen released-client selections: %s', async name => {
+ const { readFileSync } = await import('node:fs');
+ const { parse, validate } = await import('graphql');
+ const document = readFileSync(new URL(`../../../test/fixtures/s7-retirement3606/${name}.graphql`,import.meta.url),'utf8');
+ expect(validate(buildSchema(typeDefs),parse(document)).map(e=>e.message)).toEqual([]);
+});
+
+const principalCodes = [
+ ['manager','WORKER_ISOLATION_UNAVAILABLE',null],
+ ['holder','WORKER_ISOLATION_UNAVAILABLE',null],
+ ['participant','WORKER_ISOLATION_UNAVAILABLE','WORKER_ISOLATION_FORBIDDEN'],
+ ['worker-no-instruction','WORKER_ISOLATION_FORBIDDEN','WORKER_ISOLATION_FORBIDDEN'],
+ ['instructed-manager','WORKER_ISOLATION_UNAVAILABLE',null],
+ ['instructed-holder','WORKER_ISOLATION_UNAVAILABLE',null],
+ ['instructed-neither','WORKER_ISOLATION_UNAVAILABLE','WORKER_ISOLATION_FORBIDDEN'],
+ ['app-key','WORKER_NOT_FOUND','WORKER_NOT_FOUND'],
+ ['impersonation','WORKER_ISOLATION_UNAVAILABLE','FORBIDDEN'],
+ ['refused-binding','WORKER_NOT_FOUND','WORKER_NOT_FOUND'],
+ ['missing','WORKER_NOT_FOUND','WORKER_NOT_FOUND'],
+ ['retired-target','WORKER_ISOLATION_UNAVAILABLE','WORKER_NOT_FOUND'],
+ ['unauthenticated','WORKER_NOT_FOUND','WORKER_NOT_FOUND'],
+ ['deleted-app','WORKER_NOT_FOUND','WORKER_NOT_FOUND'],
+ ['uninstalled-app','WORKER_ISOLATION_UNAVAILABLE','APP_UNINSTALLED'],
+] as const;
+it.each(principalCodes)('source-exact deprecated doors for %s (main 8652fe90)', async (kind,setCode,clearCode) => {
+ const worker = await db.worker.findUniqueOrThrow({ where: { id: targetId } });
+ let c = ctx(kind==='manager'?adminId:kind==='participant'||kind==='instructed-neither'?memberId:holderId);
+ let ref = targetId; let instruction: unknown;
+ let caller: {id:string}|undefined;
+ if (kind.startsWith('instructed')||kind==='worker-no-instruction'||kind==='refused-binding') {
+  const userId = kind==='instructed-manager'?adminId:kind==='instructed-holder'?holderId:memberId;
+  caller = await db.worker.create({data:{appId,agentId:worker.agentId,name:'Caller',slug:'caller',signature:'',trailer:'',heldByUserId:userId}});
+  const session = await db.session.create({data:{id:generateId(),appId,workerId:caller.id,agentId:worker.agentId,userId}});
+  c = ctx(userId,{sessionId:session.id});
+  if(kind.startsWith('instructed')) instruction={kind:'LIVE_CHAT',ref:'synthetic:retirement3606'};
+ }
+ if(kind==='app-key') c=ctx(undefined,{appId} as never);
+ if(kind==='unauthenticated') c=ctx();
+ if(kind==='impersonation') c=ctx(adminId,{impersonation:{sessionId:generateId(),actorUserId:memberId,orgId:(await db.app.findUniqueOrThrow({where:{id:appId}})).organizationId,expiresAt:new Date(Date.now()+60_000)}} as never);
+ if(kind==='refused-binding') { await db.worker.update({where:{id:caller!.id},data:{retiredAt:new Date()}}); c={...c,sessionBindingRefused:true}; }
+ if(kind==='missing') ref=generateId();
+ if(kind==='retired-target') await db.worker.update({where:{id:targetId},data:{retiredAt:new Date()}});
+ if(kind==='deleted-app') await db.app.update({where:{id:appId},data:{deletedAt:new Date()}});
+ if(kind==='uninstalled-app') await db.app.update({where:{id:appId},data:{uninstalledAt:new Date()}});
+ const before={settings:await db.workerWakeSettings.findMany(),events:await db.agentTeamEvent.findMany({where:{appId}})};
+ const run = async (clear:boolean) => {
+  const call=()=>clear?M.clearWorkerIsolation({}, {workerRef:ref,instruction},c):M.isolateWorker({}, {workerRef:ref,until:'not-a-date',instruction},c);
+  if(caller){const{runAsActor}=await import('../../../lib/requestActor.js');return runAsActor({workerId:caller.id,agentId:worker.agentId},call);}
+  return call();
+ };
+ await expect(run(false)).rejects.toMatchObject({extensions:{code:setCode}});
+ if(clearCode) await expect(run(true)).rejects.toMatchObject({extensions:{code:clearCode}});
+ else expect(await run(true)).toMatchObject({workerId:targetId,pausedUntil:null});
+ expect({settings:await db.workerWakeSettings.findMany(),events:await db.agentTeamEvent.findMany({where:{appId}})}).toEqual(before);
+});
+
+it('preserves TEAM_PAUSED > STOPPED > PAUSED > NO_TASK through pending and roster', async () => {
+ await db.session.create({data:{id:generateId(),appId,userId:holderId,workerId:targetId,agentId:(await db.worker.findUniqueOrThrow({where:{id:targetId}})).agentId,startedAt:new Date(),updatedAt:new Date()}});
+ const now=new Date();
+ const status=async()=>{
+  const c=ctx(holderId);const roster=await Q.teamRoster({}, {appRef:appId}, c);
+  const entry=roster.workers.find((w:any)=>w.name==='Target');
+  return (resolvers as any).TeamRosterEntry.checkStatus(entry,{},c);
+ };
+ const reason=async()=> (await loadPendingReasons(db,appId,[targetId],now)).get(targetId);
+ expect(await reason()).toBe('NO_TASK');expect((await status()).pendingReason).toBe('NO_TASK');
+ await db.workerWakeSettings.create({data:{workerId:targetId,pausedUntil:new Date(now.getTime()+60_000)}});
+ expect(await reason()).toBe('PAUSED');expect((await status()).pendingReason).toBe('PAUSED');
+ await db.teamStopSignal.create({data:{id:generateId(),appId,level:'pause',scope:'worker',targetWorkerId:targetId,setAt:now,setByUserId:adminId}});
+ expect(await reason()).toBe('STOPPED');expect((await status()).pendingReason).toBe('STOPPED');
+ await db.app.update({where:{id:appId},data:{teamPausedAt:now}});
+ expect(await reason()).toBe('TEAM_PAUSED');expect((await status()).pendingReason).toBe('TEAM_PAUSED');
+});
+
+it('ignores a legacy isolation clock but retains the clearPause exemption end', async () => {
+ const {deriveWorkerCheckStatus}=await import('../../../lib/workerCheckStatus.js');
+ const now=new Date('2026-11-06T12:00:00Z');const ago=(min:number)=>new Date(now.getTime()-min*60_000);
+ const input={liveSessionStartedAt:ago(120),pendingReason:null,tickerWakes:null,lastAssignedAt:ago(100),lastCheckedAt:ago(80),pausedUntil:null,isolatedUntil:ago(1),exemptEndedAt:ago(10)};
+ const result=deriveWorkerCheckStatus(input,{checkPeriodSeconds:600,failedChecksToOverdue:2},now);
+ expect(result.resumedAt).toEqual(ago(10));expect(result.status).toBe('OK');
+});
+
+it('standby false or omission is an authorized no-op; true refuses before every write', async () => {
+ const before = await db.app.findUniqueOrThrow({where:{id:appId}});
+ const events = await db.agentTeamEvent.findMany({where:{appId}});
+ for (const input of [{standbyEnabled:false},{}]) {
+  const output=await M.setAppDeliverySettings({}, {appRef:appId,input},ctx(adminId));
+  expect(output).toMatchObject({standbyEnabled:false,standbyEffective:false});
+  expect(await db.app.findUniqueOrThrow({where:{id:appId}})).toEqual(before);
+ }
+ await expect(M.setAppDeliverySettings({}, {appRef:appId,input:{standbyEnabled:true}},ctx(adminId)))
+  .rejects.toMatchObject({extensions:{code:'DELIVERY_STANDBY_UNAVAILABLE'}});
+ expect(await db.app.findUniqueOrThrow({where:{id:appId}})).toEqual(before);
+ expect(await db.agentTeamEvent.findMany({where:{appId}})).toEqual(events);
+});
+
+it('executes released CLI get/pause/clear-pause and portal get/set documents with compatibility constants', async () => {
+ const {ApolloServer}=await import('@apollo/server');const{readFileSync}=await import('node:fs');
+ const server=new ApolloServer<Context>({typeDefs,resolvers:resolvers as never});await server.start();
+ const execute=async(name:string,file:string,variables:Record<string,unknown>,c:Context)=>{
+  const query=readFileSync(new URL(`../../../test/fixtures/s7-retirement3606/${file}.graphql`,import.meta.url),'utf8');
+  const result=await server.executeOperation({query,operationName:name,variables},{contextValue:c});
+  expect(result.body.kind).toBe('single');if(result.body.kind!=='single')throw new Error('single result required');
+  expect(result.body.singleResult.errors).toBeUndefined();return result.body.singleResult.data as any;
+ };
+ const wakeConstants={isolated:false,isolatedAt:null,isolatedUntil:null,isolatedByHandle:null,canManageIsolation:false};
+ try {
+  expect((await execute('WorkerWakeSettings','cli-wake',{workerRef:targetId},ctx(holderId))).workerWakeSettings).toMatchObject(wakeConstants);
+  const until=new Date(Date.now()+60_000).toISOString();
+  expect((await execute('SetWorkerWakeSettings','cli-wake',{workerRef:targetId,input:{pausedUntil:until}},ctx(holderId))).setWorkerWakeSettings).toMatchObject({...wakeConstants,pausedUntil:until});
+  expect((await execute('SetWorkerWakeSettings','cli-wake',{workerRef:targetId,input:{clearPause:true}},ctx(holderId))).setWorkerWakeSettings).toMatchObject({...wakeConstants,pausedUntil:null});
+  expect((await execute('ClearWorkerIsolation','cli-wake',{workerRef:targetId},ctx(holderId))).clearWorkerIsolation).toMatchObject(wakeConstants);
+  for(const[name,file,variables,key]of[
+   ['TeamDeliverySettings','cli-delivery',{appRef:appId},'appDeliverySettings'],
+   ['TeamDeliverySettingsSet','cli-delivery',{appRef:appId,input:{standbyEnabled:false}},'setAppDeliverySettings'],
+   ['AppDeliverySettings','portal-delivery',{appRef:appId},'appDeliverySettings'],
+   ['SetAppDeliverySettings','portal-delivery',{appRef:appId,input:{busyDelaySeconds:500}},'setAppDeliverySettings'],
+  ] as const)expect((await execute(name,file,variables,ctx(adminId)))[key]).toMatchObject({standbyEnabled:false,standbyEffective:false});
+ } finally {await server.stop();}
+});

@@ -3366,8 +3366,6 @@ model App {
   deliveryBusyDelaySeconds          Int                  @default(600) @map("delivery_busy_delay_seconds")
   /// Proposed bounds: 1..604800; strictly greater than busy delay + cadence floor.
   deliveryStuckWindowSeconds        Int                  @default(900) @map("delivery_stuck_window_seconds")
-  /// Stored OFF; enabling is refused until #2023 supplies standby behavior.
-  deliveryStandbyEnabled            Boolean              @default(false) @map("delivery_standby_enabled")
   /// #2138 §3.2 — a worker with a task is expected to check its team channel every period (seconds);
   /// the team ticker's cadence is set together with it.
   deliveryCheckPeriodSeconds        Int                  @default(600) @map("delivery_check_period_seconds")
@@ -6791,12 +6789,7 @@ model WorkerWakeSettings {
   workerId          String    @id @map("worker_id")
   mentions          String    @default("IMMEDIATE")
   pausedUntil       DateTime? @map("paused_until")
-  /// S7 (#2023, R85) — ISOLATION is its own state, never `pausedUntil`: written only by
-  /// isolateWorker / clearWorkerIsolation, always by a human acting as themselves.
-  isolatedUntil     DateTime? @map("isolated_until")
-  isolatedAt        DateTime? @map("isolated_at")
-  isolatedByUserId  String?   @map("isolated_by_user_id")
-  /// #2755 — when an ACTIVE pause or isolation was ended on purpose (clearPause, clearWorkerIsolation), which erases
+  /// #2755 — when an ACTIVE pause was ended on purpose (clearPause), which erases
   /// the only timestamp that said when the exemption ended. Natural expiry needs none (its own end stays stored).
   exemptEndedAt     DateTime? @map("exempt_ended_at")
   updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at")

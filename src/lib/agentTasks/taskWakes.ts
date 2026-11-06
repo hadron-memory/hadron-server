@@ -57,7 +57,6 @@ export type PendingTaskWake = {
   handle: string;
   at: Date;
   /** S7 (R90): the held count the assignment raise stored on the event (assigned events only). */
-  standbyHeld?: number;
 };
 
 const ASSIGNED_KIND: Record<(typeof ASSIGNED_EVENT_TYPES)[number], TaskWakeEvent> = {
@@ -106,7 +105,7 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
   const ids = Prisma.join(workerIds);
   const assignedTypes = Prisma.join([...ASSIGNED_EVENT_TYPES]);
 
-  type Row = { workerId: string; taskId: string; eventId: string; type: string; title: string; handle: string; at: Date; standbyHeld?: number };
+  type Row = { workerId: string; taskId: string; eventId: string; type: string; title: string; handle: string; at: Date };
   const [assigned, finished, alarms, endSession, darkAlarms] = await Promise.all([
     // The task's LATEST assignment event, to its current worker assignee, who has not acted on the task since
     // (an assignment the worker made itself counts as acting: `>=` includes the event).
@@ -118,8 +117,7 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
         WHERE t.assignee_worker_id IN (${ids}) AND t.status IN ${OPEN} AND e.type IN (${assignedTypes})
         ORDER BY e.task_id, e.created_at DESC, e.id DESC
       )
-      SELECT l.subject_worker_id AS "workerId", t.id AS "taskId", l.id AS "eventId", l.type, t.title, t.handle, l.created_at AS at,
-             COALESCE((l.payload ->> 'standbyHeld')::int, 0) AS "standbyHeld"
+      SELECT l.subject_worker_id AS "workerId", t.id AS "taskId", l.id AS "eventId", l.type, t.title, t.handle, l.created_at AS at
       FROM latest l
       JOIN agent_tasks t ON t.id = l.task_id
       JOIN workers w ON w.id = l.subject_worker_id AND w.app_id = t.app_id
@@ -196,7 +194,7 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
   const push = (w: PendingTaskWake) => out.set(w.workerId, [...(out.get(w.workerId) ?? []), w]);
   for (const r of assigned) {
     push({ workerId: r.workerId, taskId: r.taskId, eventId: r.eventId, title: r.title, handle: r.handle, at: r.at, chainIndex: 0,
-      event: ASSIGNED_KIND[r.type as keyof typeof ASSIGNED_KIND], ...(r.standbyHeld ? { standbyHeld: r.standbyHeld } : {}) });
+      event: ASSIGNED_KIND[r.type as keyof typeof ASSIGNED_KIND] });
   }
   for (const r of finished) push({ ...r, chainIndex: 0, event: 'CHILD_FINISHED' });
   for (const r of endSession) push({ ...r, chainIndex: 0, event: 'END_SESSION' });

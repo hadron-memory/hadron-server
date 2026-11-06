@@ -14,7 +14,6 @@ import type { FindingCounts } from './findings.js';
  * passing a bag through.
  */
 
-import { raiseDeliveredOnAssignment } from '../tickers/standbyAssignment.js';
 import type { Prisma } from '../../generated/prisma/index.js';
 import { currentActor } from '../requestActor.js';
 import { generateId } from '../id.js';
@@ -211,11 +210,6 @@ export async function appendTaskEvent(
   },
 ): Promise<void> {
   const subject = subjectWorkerId(args.event) ?? args.forParty?.workerId ?? null;
-  // S7 (#2023, R90): an assignment to a worker that was on standby raises its delivered mark past the held messages, in this
-  // same transaction, and the count rides the event so the task wake returns it exactly once.
-  const standbyHeld = subject && (ASSIGNED_EVENT_TYPES as readonly string[]).includes(args.event.type)
-    ? await raiseDeliveredOnAssignment(tx, { workerId: subject, taskId: args.taskId, actor: { userId: args.actor.userId, workerId: args.actor.workerId }, now: args.createdAt })
-    : 0;
   await tx.agentTeamEvent.create({
     data: {
       appId: args.appId,
@@ -228,7 +222,7 @@ export async function appendTaskEvent(
       actorAppKeyId: args.actor.appKeyId ?? null,
       subjectWorkerId: subject,
       subjectUserId: args.forParty?.userId ?? null,
-      payload: standbyHeld > 0 ? { ...payloadJson(args.event), standbyHeld } : payloadJson(args.event),
+      payload: payloadJson(args.event),
       ...(args.createdAt ? { createdAt: args.createdAt } : {}),
     },
   });
@@ -686,7 +680,7 @@ export type ManagerAct =
   // #3321 (S4b): the host-operation, stop-signal, ticker, settings, isolation and wake doors.
   | `host-operation.${'worker.start' | 'worker.end' | 'worktree.create' | 'worktree.remove'}`
   | 'stop.set' | 'stop.lift' | 'ticker.update' | 'ticker.delete' | 'ticker.subscribe' | 'ticker.unsubscribe'
-  | 'ticker.templates-apply' | 'worker.wake-settings' | 'worker.isolate' | 'worker.isolation-clear'
+  | 'ticker.templates-apply' | 'worker.wake-settings'
   | 'app.ticker-settings' | 'app.delivery-settings' | 'team.pause' | 'team.resume' | 'wake.read';
 
 /** The ids an instructed App-manager act concerns; never content (cor:agt:050:11). */
