@@ -45,7 +45,15 @@ export class InvalidNodeNameError extends Error {
   }
 }
 
+/** Accepted parse provenance, internal to this load attempt, never frontmatter/report data. */
+export interface AcceptedSource {
+  source: string;
+  node: Partial<Node>;
+}
+
 export interface GraphEdge {
+  /** Checkout-relative source identity; two files can derive the same loc. */
+  sourceFile?: string;
   sourceId: string;
   /** Source node's loc — used to derive the edge loc at sync-write time. */
   sourceLoc: string;
@@ -74,8 +82,9 @@ export const loadGraphFromFs = async (
   graphPath: string,
   graphName: string,
   ownerRepo: string,
-): Promise<{ graph: FsGraph; edges: GraphEdge[]; skippedInvalidLoc: SkippedFile[]; unreadable: UnreadableFile[]; rootNode?: Partial<Node> }> => {
+): Promise<{ graph: FsGraph; edges: GraphEdge[]; skippedInvalidLoc: SkippedFile[]; unreadable: UnreadableFile[]; rootNode?: Partial<Node>; sources: AcceptedSource[] }> => {
   const nodes: Partial<Node>[] = [];
+  const sources: AcceptedSource[] = [];
   let rootNode: Partial<Node> | undefined;
   const edges: GraphEdge[] = [];
   // Files skipped for an unusable path (#1224). The caller must keep the rows
@@ -142,6 +151,7 @@ export const loadGraphFromFs = async (
       }
       nodes.push(result.node);
       const sourcePath = relative(graphPath, source).split(sep).join('/');
+      sources.push({ source: sourcePath, node: result.node });
       if (['', '.hadron', 'README.md', '.hadron/README.md'].includes(sourcePath)) {
         if (rootNode) throw new InvalidRootMemoryError('Git sync has more than one root page.');
         rootNode = result.node;
@@ -149,6 +159,7 @@ export const loadGraphFromFs = async (
 
       for (const edge of result.edges) {
         edges.push({
+          sourceFile: sourcePath,
           sourceId: result.node.id!,
           sourceLoc: result.node.loc!,
           targetId: edge.targetId,
@@ -195,6 +206,7 @@ export const loadGraphFromFs = async (
     edges,
     skippedInvalidLoc,
     unreadable,
+    sources,
     ...(rootNode ? { rootNode } : {}),
   };
 };
