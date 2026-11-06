@@ -402,7 +402,16 @@ export async function revisionApprovalOf(
   db: Pick<PrismaClient, 'node' | 'nodeRevision' | 'memory'> | Prisma.TransactionClient,
   nodeId: string,
   revNo: number,
+  /** #40: a resolved read's budget. Every query is charged before it runs and every loaded text after. */
+  meter?: ApprovalReadMeter,
+  /**
+   * #40 (LOCAL delta): the one memory the caller may serve a revision from. A revision captured anywhere else
+   * answers NOT_APPROVED before any of its text is charged, so whether such a row exists, and how large it is,
+   * never changes what the reader sees. Unset keeps the full verdict for callers that judge any capture.
+   */
+  servableFrom?: string,
 ): Promise<RevisionApproval> {
+  meter?.chargeLookup();
   const live = await db.node.findUnique({
     where: { id: nodeId },
     select: {
@@ -411,13 +420,21 @@ export async function revisionApprovalOf(
     },
   });
   if (!live) return NOT_APPROVED_REVISION;
+  chargeTexts(meter, live);
+  meter?.chargeLookup();
   const target = await db.nodeRevision.findFirst({
     where: { nodeId, revNo },
-    select: { memoryId: true, name: true, abstract: true, content: true },
+    select: {
+      memoryId: true, name: true, abstract: true, content: true,
+      revNo: true, approvedBy: true, approvedByInfo: true, approvedAt: true, approvalHash: true,
+    },
   });
   const isLive = !target && revNo === live.revSeq;
   if (!target && !isLive) return NOT_APPROVED_REVISION;
   const captureMemoryId = target ? (target.memoryId ?? live.memoryId) : live.memoryId;
+  if (servableFrom !== undefined && captureMemoryId !== servableFrom) return NOT_APPROVED_REVISION;
+  if (target) chargeTexts(meter, target);
+  meter?.chargeLookup();
   const memories = await db.memory.findMany({
     where: { id: { in: [...new Set([captureMemoryId, live.memoryId])] } },
     select: { isEncrypted: true },
@@ -427,35 +444,74 @@ export async function revisionApprovalOf(
   const hashOf = (f: { name: string; abstract: string | null; content: string | null }) =>
     computeApprovalHash({ title: f.name, abstract: f.abstract, content: f.content });
   const wanted = hashOf(target ?? live);
+  const served = { content: (target ?? live).content, memoryId: captureMemoryId };
+  type Row = {
+    revNo: number | null; approvedBy: string | null; approvedByInfo: string | null; approvedAt: Date | null;
+    approvalHash: string | null; name: string; abstract: string | null; content: string | null;
+  };
+  // A snapshot's copied approval is a record only while the text it hashed still hashes to it (an altered
+  // snapshot is not an approval), and only one covering this revision's text counts here.
+  const recordOf = (r: Row): NodeApprovalRecord | null => (
+    r.revNo != null && r.approvedAt != null && r.approvalHash === wanted && hashOf(r) === r.approvalHash
+      ? { revision: r.revNo, approvedBy: r.approvedBy, approvedByInfo: r.approvedByInfo, approvedAt: r.approvedAt, hash: r.approvalHash }
+      : null
+  );
+  const currentRecord = captureMemoryId === live.memoryId ? approvalRecordOf(live) : null;
+  const current = currentRecord && approvalHoldsFor(live) && hashOf(live) === currentRecord.hash && currentRecord.hash === wanted
+    ? currentRecord : null;
 
-  const rows = await db.nodeRevision.findMany({
-    where: {
-      nodeId, approvalHash: { not: null }, revNo: { not: null }, approvedAt: { not: null },
-      OR: [{ memoryId: captureMemoryId }, ...(captureMemoryId === live.memoryId ? [{ memoryId: null }] : [])],
-    },
-    select: {
-      revNo: true, approvedBy: true, approvedByInfo: true, approvedAt: true, approvalHash: true,
-      name: true, abstract: true, content: true,
-    },
-    orderBy: { revNo: 'asc' },
-  });
-  const candidates: NodeApprovalRecord[] = [];
-  for (const r of rows) {
-    if (hashOf(r) !== r.approvalHash) continue; // altered snapshot: not an approval
-    candidates.push({
-      revision: r.revNo!, approvedBy: r.approvedBy, approvedByInfo: r.approvedByInfo,
-      approvedAt: r.approvedAt!, hash: r.approvalHash!,
+  // Prefer the record made AT this revision: its own snapshot (already loaded, and always from the capture
+  // memory), else the node's current approval when it was made at this revision.
+  const atRevision = (target ? recordOf(target as Row) : null) ?? (current?.revision === revNo ? current : null);
+  if (atRevision) return { state: 'APPROVED', record: atRevision, served };
+
+  // Else the earliest record that covers it. Only rows carrying this text's hash can cover it, and they are read
+  // oldest first in bounded pages, each charged before it runs and its texts after, so a long approval history
+  // is never materialized past the budget (#40). A snapshot sorts before the current approval on a tie.
+  const where: Prisma.NodeRevisionWhereInput = {
+    nodeId, approvalHash: wanted, revNo: { not: null }, approvedAt: { not: null },
+    OR: [{ memoryId: captureMemoryId }, ...(captureMemoryId === live.memoryId ? [{ memoryId: null }] : [])],
+  };
+  let earliest: NodeApprovalRecord | null = null;
+  let after: number | null = null;
+  for (;;) {
+    meter?.chargeLookup();
+    const page: Row[] = await db.nodeRevision.findMany({
+      where: after == null ? where : { AND: [where, { revNo: { gt: after } }] },
+      select: {
+        revNo: true, approvedBy: true, approvedByInfo: true, approvedAt: true, approvalHash: true,
+        name: true, abstract: true, content: true,
+      },
+      orderBy: { revNo: 'asc' },
+      take: APPROVAL_RECORD_PAGE,
     });
+    // Every row the page returned was loaded, so every row is charged before one is chosen (#40 delta).
+    for (const r of page) chargeTexts(meter, r);
+    earliest = page.map(recordOf).find((r): r is NodeApprovalRecord => r != null) ?? null;
+    if (earliest || page.length < APPROVAL_RECORD_PAGE) break;
+    // Past the current approval's revision no snapshot can be the earliest.
+    after = page[page.length - 1].revNo;
+    if (current && after != null && after >= current.revision) break;
   }
-  const current = captureMemoryId === live.memoryId ? approvalRecordOf(live) : null;
-  if (current && approvalHoldsFor(live) && hashOf(live) === current.hash) candidates.push(current);
+  const record = earliest && (!current || earliest.revision <= current.revision) ? earliest : current;
+  if (!record) return NOT_APPROVED_REVISION;
+  return { state: 'APPROVED', record, served };
+}
 
-  const covering = candidates.filter((c) => c.hash === wanted);
-  if (covering.length === 0) return NOT_APPROVED_REVISION;
-  // Prefer the record made AT this revision, else the earliest that covers it.
-  const record = covering.find((c) => c.revision === revNo)
-    ?? covering.reduce((a, b) => (b.revision < a.revision ? b : a));
-  return { state: 'APPROVED', record, served: { content: (target ?? live).content, memoryId: captureMemoryId } };
+/** #40: what an approval read charges against a resolved read's budget (a `ResolutionBudget` is one). */
+export interface ApprovalReadMeter {
+  chargeLookup(count?: number): void;
+  chargeLoaded(text: string | null | undefined): void;
+}
+
+/** Rows of approval history read per query when looking for the earliest covering record. */
+export const APPROVAL_RECORD_PAGE = 8;
+
+function chargeTexts(meter: ApprovalReadMeter | undefined, f: { name: string; abstract: string | null; content: string | null }): void {
+  if (!meter) return;
+  meter.chargeLoaded(f.name);
+  meter.chargeLoaded(f.abstract);
+  meter.chargeLoaded(f.content);
 }
 
 /** How many revisions `newestApprovedRevisionOf` examines before it gives up (newest first). */
@@ -488,11 +544,15 @@ export async function newestApprovedRevisionOf(
   db: Pick<PrismaClient, 'node' | 'nodeRevision' | 'memory'> | Prisma.TransactionClient,
   nodeId: string,
   cap: number = NEWEST_APPROVED_REVISION_SCAN_CAP,
+  /** #40: a resolved read's budget, charged for this walk's own queries and every verdict it asks for. */
+  meter?: ApprovalReadMeter,
 ): Promise<NewestApprovedRevision> {
   const none: NewestApprovedRevision = { found: null, truncated: false };
+  meter?.chargeLookup();
   const live = await db.node.findUnique({ where: { id: nodeId }, select: { memoryId: true, revSeq: true } });
   if (!live) return none;
   // Snapshots servable from the node's CURRENT memory only (a foreign-memory capture is never selected).
+  meter?.chargeLookup();
   const snapshots = await db.nodeRevision.findMany({
     where: { nodeId, revNo: { not: null }, OR: [{ memoryId: null }, { memoryId: live.memoryId }] },
     select: { revNo: true },
@@ -503,11 +563,12 @@ export async function newestApprovedRevisionOf(
   // `revisionApprovalOf` resolves a number to its snapshot row first, whichever memory captured it, so the live
   // revision is offered only while NO snapshot at all holds its number: a foreign-memory snapshot at `revSeq` would
   // otherwise be read through, and reported as live.
+  meter?.chargeLookup();
   const liveNumberHeld = (await db.nodeRevision.findFirst({ where: { nodeId, revNo: live.revSeq }, select: { id: true } })) != null;
   const candidates = [...(liveNumberHeld ? [] : [live.revSeq]), ...snapshotNos].sort((a, b) => b - a);
   const examined = candidates.slice(0, cap);
   for (const revNo of examined) {
-    const verdict = await revisionApprovalOf(db, nodeId, revNo);
+    const verdict = await revisionApprovalOf(db, nodeId, revNo, meter);
     if (verdict.state === 'NOT_APPLICABLE') return none;
     if (verdict.state === 'APPROVED') {
       return { found: { revNo, record: verdict.record!, source: snapshotNos.has(revNo) ? 'snapshot' : 'live' }, truncated: false };

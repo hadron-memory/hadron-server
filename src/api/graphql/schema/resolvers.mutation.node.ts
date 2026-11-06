@@ -5182,7 +5182,7 @@ export const nodeMutations = {
       decryptNodeFields(node, memEncInfo);
       // A Google Doc is a read for a human: includes resolve with the exporter's
       // access (cor:dmo:150:03); variables stay as stored, as before.
-      const exported = await resolveNodeContent(ctx, node, { mode: 'includes' });
+      const exported = await resolveNodeContent(ctx, node, { mode: 'includes', surface: 'export' });
       const markdown = exported && exported.trim().length > 0 ? exported : `# ${node.name}`;
 
       const { file } = await runOwnedEmailOperation<{ file: ToolDriveFile }>(ctx, connectionRef, 'create-doc', {
