@@ -1,13 +1,14 @@
 /** #1148 / ruling0235: current owner membership is a live licence condition, not a one-time install grant. */
 import { beforeEach, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb, createDbAgentImport, createDbAgentOrgGrant } from '../../../test/helpers.js';
+import { cleanDb, chatNodeByLocOrThrow, createDbAgentImport, createDbAgentOrgGrant } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { isAgentInstalledAndLicensed, activeAppInstallLicenseIdsForAgent } from '../../../lib/appAgent.js';
-import { installMemoryAudience, readableInstallMemoryIds } from '../../../lib/auth/installMemory.js';
+import { installMemoryAudience, readableInstallMemoryIds, writableInstallMemoryIds } from '../../../lib/auth/installMemory.js';
 import { resolveServedBootPrompt } from '../../../lib/bootPrompt/serve.js';
 import { canReadMemory, participantSystemMemoryFolds, getAppMemoryAccess } from '../../../mcp/access-control.js';
+import { requirePersonalAppAgentInstall } from './resolvers.helpers.js';
 import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds.js';
 import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js',()=>({writeNodeToGit:vi.fn().mockResolvedValue(undefined)}));
@@ -32,13 +33,17 @@ beforeEach(async()=>{
 });
 const installRow=()=>db.memory.findUniqueOrThrow({where:{id:installMemoryId}});
 it('current member creates a personal App referencing the org-visible Agent',async()=>{
+ await db.agentSubscription.deleteMany({where:{userId:ownerId,agentId}});
  const app=await mutation.createApp({}, {agentRef:agentId,name:'New personal'},context());
  expect(app).toMatchObject({ownerUserId:ownerId,organizationId:null});
+ expect(await isAgentInstalledAndLicensed(db,app.id,agentId)).toBe(true);
  expect(await db.appAgent.findUnique({where:{appId_agentId:{appId:app.id,agentId}}})).not.toBeNull();
 });
 it('the same owner installs through the existing-App door',async()=>{
  await db.appAgent.delete({where:{appId_agentId:{appId,agentId}}});
+ await db.agentSubscription.deleteMany({where:{userId:ownerId,agentId}});
  expect(await mutation.installAgentIntoApp({}, {appRef:appId,agentRef:agentId},context())).toMatchObject({appAgent:{agentId,appId}});
+ expect(await isAgentInstalledAndLicensed(db,appId,agentId)).toBe(true);
 });
 it('owner membership revoke and rejoin changes live install readers without deleting anything',async()=>{
  expect(await isAgentInstalledAndLicensed(db,appId,agentId)).toBe(true);
@@ -151,4 +156,64 @@ it('a recorded worker briefing stops returning org text when the owner membershi
  expect(refused.text).toBeNull();
  expect(refused.refusal).toBe('FORBIDDEN');
  expect((await db.session.findUniqueOrThrow({where:{id:open.id}})).endedAt).toBeNull();
+});
+
+async function seedChatConversation() {
+ const memoryId=(await db.agent.findUniqueOrThrow({where:{id:agentId}})).systemMemoryId!;
+ const nodes=[
+  {loc:'conversations',name:'conversations'},
+  {loc:'conversations:research',name:'research',data:{stageOrder:['scope'],isSetup:false}},
+  {loc:'conversations:research:scope',name:'scope',data:{promptRef:'prompts:research:scope'}},
+  {loc:'prompts',name:'prompts'},
+  {loc:'prompts:research',name:'research'},
+  {loc:'prompts:research:scope',name:'scope',content:'Scope the research.'},
+ ];
+ for(const n of nodes) await db.node.create({data:{...n,id:generateId(),memoryId,nodeType:'system'}});
+ await serveAgentBootPrompt(db,agentId,'PRIVATE ORG CHAT SENTINEL');
+}
+it('startChat never returns organization boot text to a non-member App participant',async()=>{
+ await seedChatConversation();
+ expect((await mutation.startChat({}, {agentId,scope:'private'},{...context(),appId})).systemMessage).toContain('PRIVATE ORG CHAT SENTINEL');
+ await expect(mutation.startChat({}, {agentId,scope:'private'},{...context(outsiderId),appId}))
+  .rejects.toMatchObject({code:'AGENT_NOT_FOUND'});
+});
+it('a later chat turn cannot re-serve org text after the individual participant loses membership',async()=>{
+ await seedChatConversation();
+ await db.orgMember.create({data:{organizationId:orgId,userId:outsiderId,role:'READER'}});
+ const caller={...context(outsiderId),appId};
+ const started=await mutation.startChat({}, {agentId,scope:'private'},caller);
+ expect(started.systemMessage).toContain('PRIVATE ORG CHAT SENTINEL');
+ // Use a legal user-owned holding memory so its independent write right survives org removal.
+ const chat=await chatNodeByLocOrThrow(db,started.chatId);
+ await db.memory.update({where:{id:chat.memoryId},data:{organizationId:null,ownerUserId:outsiderId,appId}});
+ await db.orgMember.update({where:{organizationId_userId:{organizationId:orgId,userId:outsiderId}},data:{deletedAt:new Date()}});
+ await expect(mutation.sendChatMessage({}, {chatId:started.chatId,userMessage:'Continue'},caller))
+  .rejects.toMatchObject({code:'AGENT_NOT_FOUND'});
+});
+it('a missing personal owner cannot match a null Agent owner in the shared install predicate',async()=>{
+ const agent=await db.agent.findUniqueOrThrow({where:{id:agentId}});
+ await expect(requirePersonalAppAgentInstall(context(),agent,agentId,null as never))
+  .rejects.toMatchObject({extensions:{code:'ORGANIZATION_MISMATCH'}});
+});
+it('the database excludes the dual-owned Agent assumed by the own-org licence finding',async()=>{
+ await expect(db.agent.update({where:{id:agentId},data:{ownerUserId:ownerId}})).rejects.toThrow(/chk_agent_owner_xor/);
+});
+it('retained-install chat refusal does not disclose an unreadable Agent current name',async()=>{
+ await db.orgMember.update({where:{organizationId_userId:{organizationId:orgId,userId:ownerId}},data:{deletedAt:new Date()}});
+ await db.agent.update({where:{id:agentId},data:{name:'UNREADABLE CURRENT NAME'}});
+ try {
+  await mutation.startChat({}, {agentId,scope:'private'},context());
+  throw new Error('expected refusal');
+ } catch(error) {
+  expect(error).toMatchObject({extensions:{code:'BOOT_PROMPT_INSTALL_LICENSE_INACTIVE'}});
+  expect(JSON.stringify(error)).not.toContain('UNREADABLE CURRENT NAME');
+ }
+});
+it('install-memory write point and list agree for a non-member manager and after membership is granted',async()=>{
+ await db.appMember.update({where:{appId_userId:{appId,userId:outsiderId}},data:{role:'owner'}});
+ expect((await installMemoryAudience(db,context(outsiderId),await installRow())).write).toBe(false);
+ expect(await writableInstallMemoryIds(db,context(outsiderId))).not.toContain(installMemoryId);
+ await db.orgMember.create({data:{organizationId:orgId,userId:outsiderId,role:'READER'}});
+ expect((await installMemoryAudience(db,context(outsiderId),await installRow())).write).toBe(true);
+ expect(await writableInstallMemoryIds(db,context(outsiderId))).toContain(installMemoryId);
 });
