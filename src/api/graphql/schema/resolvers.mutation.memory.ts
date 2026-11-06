@@ -1,3 +1,4 @@
+import { encryptChatEngineStateWithKey } from '../../../lib/chatRootEngineState.js';
 // memoryMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { endApprovalsOnEncryptedEntry } from '../../../lib/nodeApproval.js';
 import { Prisma } from '../../../generated/prisma/index.js';
@@ -2416,6 +2417,13 @@ export const memoryMutations = {
               },
             });
           }
+          // #3501: promotion also converts operational state on tombstoned roots.
+          // Memory FOR UPDATE is held; node locks are deterministic, as in the content pass.
+          const engineRoots = await tx.chatRootEngineState.findMany({ where: { chatRoot: { memoryId: resolvedMemoryId } }, select: { chatRootNodeId: true }, orderBy: { chatRootNodeId: 'asc' } });
+          for (const engine of engineRoots) {
+            await tx.$queryRaw`SELECT id FROM nodes WHERE id=${engine.chatRootNodeId} FOR UPDATE`;
+            await encryptChatEngineStateWithKey(tx, engine.chatRootNodeId, key);
+          }
           // #1079 (PR #1080 third review, Codex P2) — linking an anonymous
           // memory to a user REPLACES its urn, which is a rename by any other
           // name and owes an alias. Already inside this transaction, so the
@@ -2785,10 +2793,11 @@ export const memoryMutations = {
                 }
               }
 
+              const engineConverted = await encryptChatEngineStateWithKey(tx, current.id, key);
               const plaintextContent = current.content != null && !isAuthenticatedStringEnvelope(current.content, key);
               const plaintextAbstract = current.abstract != null && !isAuthenticatedStringEnvelope(current.abstract, key);
               const plaintextData = current.data != null && !isAuthenticatedDataEnvelope(current.data, key);
-              if (!plaintextContent && !plaintextAbstract && !plaintextData) return false;
+              if (!plaintextContent && !plaintextAbstract && !plaintextData) return engineConverted;
               const encrypted = encryptNodeFieldsWithKey(
                 { content: current.content, abstract: current.abstract, data: current.data }, key,
               );

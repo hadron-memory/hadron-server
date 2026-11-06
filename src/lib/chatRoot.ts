@@ -41,6 +41,8 @@
  * read pattern needs a snapshot taken AFTER the lock is granted, which a frozen
  * REPEATABLE READ / SERIALIZABLE snapshot would not give.
  */
+import { GraphQLError } from 'graphql';
+import { ENGINE_KEYS, validEngineValue, lockedChatEngineState, writeChatEngineState } from './chatRootEngineState.js';
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import { maxMessageSeqAtLiteralLocPrefix } from './literalLocPrefix.js';
 import type { InputJsonValue } from '../generated/prisma/runtime/library.js';
@@ -75,6 +77,8 @@ export interface ChatRootRef {
 export interface ChatRootOutcome<T> {
   chatData?: Record<string, unknown>;
   value: T;
+  /** A revisioned writer supplies its existing revision protocol for the final locked root update. */
+  persist?: (tx: Prisma.TransactionClient, data: InputJsonValue) => Promise<void>;
 }
 
 /**
@@ -119,6 +123,12 @@ export async function withChatRootLock<T>(
 ): Promise<T> {
   const inTx: ChatTxRunner = opts?.inTx ?? ((fn) => db.$transaction(fn));
   return inTx(async (tx) => {
+    // #3501: the memory lock serializes encryption flips, and the fresh flag
+    // governs ALL encryption in this transaction, including the rollback mirror.
+    const memories = await tx.$queryRaw<Array<{id:string;isEncrypted:boolean}>>`SELECT id,is_encrypted AS "isEncrypted" FROM memories WHERE id=${chat.memoryId} FOR SHARE`;
+    const freshInfo = memories[0];
+    if (!freshInfo || freshInfo.isEncrypted !== memEncInfo.isEncrypted) throw new GraphQLError('Chat authority changed; retry with fresh context.', { extensions: { code: 'CHAT_AUTHORITY_SCOPE_CHANGED' } });
+    memEncInfo = freshInfo;
     // The Channel's own operation passes the protected-loc gate that every
     // generic writer is refused by (spec 049 S4); a chat that is not a Channel
     // passes either way.
@@ -127,21 +137,41 @@ export async function withChatRootLock<T>(
     // snapshot, so it sees whatever committed while we waited to be granted it.
     const row = await tx.node.findUnique({
       where: { id: chat.id },
-      select: { data: true },
+      select: { data: true, memoryId: true, loc: true, nodeType: true },
     });
     if (!row) throw new Error(`Chat "${chat.loc}" not found`);
-    const decrypted = decryptNodeFields({ data: row.data }, memEncInfo);
+    if (row.memoryId !== chat.memoryId || row.loc !== chat.loc) throw new GraphQLError('Chat authority changed.', { extensions: { code: 'CHAT_AUTHORITY_SCOPE_CHANGED' } });
+    let decrypted: { data: unknown };
+    try { decrypted = decryptNodeFields({ data: row.data }, memEncInfo); }
+    catch (error) {
+      if (error instanceof Error && error.message.startsWith('SESSION_EXPIRED:')) throw error;
+      throw new GraphQLError('Chat state is unavailable.', { extensions: { code: 'CHAT_STATE_INVALID' } });
+    }
     const counter = await lockedChatCounter(tx, chat.id, memEncInfo, decrypted.data);
     const chatData = {...chatDataObject(decrypted.data)};
     delete chatData.messageCount; delete chatData.lastMessageAt;
 
-    // The callback may mutate this object (including nested values) in place.
-    // Capture the comparison before handing it out, not from its later alias.
+    const isEngineRoot = row.nodeType === 'record' && /^chats:[^:]+$/.test(row.loc);
+    const engine = isEngineRoot ? await lockedChatEngineState(tx, chat.id, memEncInfo, chatData) : null;
+    const malformedLegacy = engine ? Object.fromEntries(ENGINE_KEYS.filter(key => key !== 'conversationName' && key !== 'stageName' && Object.hasOwn(chatData, key) && !validEngineValue(key, chatData[key])).map(key => [key, chatData[key]])) : {};
     const baseline = JSON.stringify(chatData);
+    const engineBaseline = JSON.stringify(engine);
+    // Row wins over legacy/restored fields, but unknown revisioned fields stay put.
+    if (engine) {
+      for (const key of ENGINE_KEYS) delete chatData[key];
+      Object.assign(chatData, engine);
+    }
     const outcome = await body({ tx, chatData, counter });
 
-    if (outcome.chatData) {
-      const clean = {...outcome.chatData};
+    if (outcome.chatData || engine) {
+      const clean = {...(outcome.chatData ?? chatData)};
+      if (engine) {
+        const next = Object.fromEntries(ENGINE_KEYS.filter(key => Object.hasOwn(clean, key)).map(key => [key, clean[key]]));
+        if (JSON.stringify(next) !== engineBaseline) await writeChatEngineState(tx, chat.id, memEncInfo, next);
+        // 0209: mirror names on EVERY locked write, including a post-restore resync.
+        for (const key of ENGINE_KEYS) if (key !== 'conversationName' && key !== 'stageName') delete clean[key];
+        Object.assign(clean, malformedLegacy);
+      }
       if (Object.hasOwn(clean, 'lastMessageAt')) {
         await setChatCounterTime(tx, chat.id, clean.lastMessageAt);
         await tx.node.update({where:{id:chat.id},data:{updatedAt:new Date()}});
@@ -153,7 +183,8 @@ export async function withChatRootLock<T>(
         { content: null, data: clean },
         memEncInfo,
       );
-      await tx.node.update({
+      if (outcome.persist) await outcome.persist(tx, (enc.data ?? null) as InputJsonValue);
+      else await tx.node.update({
         where: { id: chat.id },
         data: { data: (enc.data ?? null) as InputJsonValue },
       });
