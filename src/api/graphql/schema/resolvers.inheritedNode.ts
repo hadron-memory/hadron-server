@@ -85,7 +85,7 @@ const INHERITED_PROJECTION: Record<string, (value: () => Promise<any>, parent: a
   asComment: none,
   asset: none,
   signingRequests: empty,
-  commentSummary: () => ({ openThreads: 0, resolvedThreads: 0, comments: 0, viewerOpenThreadId: null }),
+  commentSummary: () => ({ openThreads: 0, resolvedThreads: 0, comments: 0, viewerOpenThreadId: null, oldestOpenThreadAt: null }),
   approvalStatus: async (value) => {
     const s = await value();
     return { state: s.state, approval: null };

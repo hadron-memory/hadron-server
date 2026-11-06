@@ -184,7 +184,8 @@ describe('createTeamChatMessage — happy path + bootstrap', () => {
     // Bootstrap delegates to the same Channel creation core as createChannel;
     // the retired shared/private marker must not reappear on this path.
     expect(rootData.scope).toBeUndefined();
-    expect(rootData.messageCount).toBe(1);
+    expect(rootData).not.toHaveProperty('messageCount');
+    expect((await db.chatRootCounter.findUniqueOrThrow({where:{chatRootNodeId:root!.id}})).messageCount).toBe(1);
 
     const row = await db.node.findUnique({ where: { id: msg.nodeId } });
     expect(row!.nodeType).toBe('chat-message');
@@ -222,7 +223,7 @@ describe('createTeamChatMessage — happy path + bootstrap', () => {
       // loc-scope-ok: scoped to the fixture App via the memory relation
       where: { loc: TEAM_CHAT_LOC, memory: { appId: app.id, class: 'app' } },
     });
-    expect((root!.data as Record<string, unknown>).messageCount).toBe(4);
+    expect((await db.chatRootCounter.findUniqueOrThrow({where:{chatRootNodeId:root!.id}})).messageCount).toBe(4);
   });
 
   it('falls back to the single installed Agent when no roles: branch marks a Team Agent', async () => {
@@ -351,7 +352,7 @@ describe('createTeamChatMessage — replyToSeq', () => {
       where: { loc: TEAM_CHAT_LOC, memory: { appId: app.id, class: 'app' } },
     });
     // The failed reply consumed no seq and left no row.
-    expect((root!.data as Record<string, unknown>).messageCount).toBe(1);
+    expect((await db.chatRootCounter.findUniqueOrThrow({where:{chatRootNodeId:root!.id}})).messageCount).toBe(1);
     const messages = await db.node.count({
       where: { memoryId: root!.memoryId, loc: { startsWith: `${TEAM_CHAT_MESSAGES_LOC}:` } },
     });
@@ -1589,4 +1590,24 @@ describe('#1874 — the reply fold on an ENCRYPTED team chat (cor:agt:020:04 has
     const env = decryptNodeFieldsWithKey({ data: sealed!.data as unknown }, key).data as Record<string, unknown>;
     expect(env.mentions).toBeUndefined();
   });
+});
+
+it('#3496: fingerprinted team posts do not revision counters, and canonical delete/revive keeps the counter', async () => {
+  const session = await workerSession(admin.id, 'Counter');
+  await post(ctx(admin.id), {sessionRef:session.sessionId,body:'counter 1'});
+  const root = await db.node.findFirstOrThrow({where:{loc:TEAM_CHAT_LOC,memory:{appId:app.id,class:'app'}}}); // loc-scope-ok: this App's canonical team root
+  await db.node.update({where:{id:root.id},data:{authorshipKind:'TASK',authoredByTask:'tasks:author',authoredByRevision:1,authoredAt:new Date(),revisionContentHash:'refresh'}});
+  const before = await db.node.findUniqueOrThrow({where:{id:root.id}});
+  await post(ctx(admin.id), {sessionRef:session.sessionId,body:'counter 2'});
+  await post(ctx(admin.id), {sessionRef:session.sessionId,body:'counter 3'});
+  const {ensureCurrentNodeRevisionInTransaction}=await import('../../../lib/nodeRevisionSnapshot.js');
+  await db.$transaction(tx=>ensureCurrentNodeRevisionInTransaction(tx,root.id,{expectedMemoryId:root.memoryId}));
+  const after=await db.node.findUniqueOrThrow({where:{id:root.id}});
+  expect(after.revSeq).toBe(before.revSeq);expect(after.authoredByTask).toBe(before.authoredByTask);
+  const count=(await db.chatRootCounter.findUniqueOrThrow({where:{chatRootNodeId:root.id}})).messageCount;
+  await db.node.update({where:{id:root.id},data:{deletedAt:new Date()}});
+  const revived=await post(ctx(admin.id),{sessionRef:session.sessionId,body:'counter 4'});
+  expect(revived.seq).toBe(count+1);
+  expect((await db.node.findUniqueOrThrow({where:{id:root.id}})).deletedAt).toBeNull();
+  expect((await db.chatRootCounter.findUniqueOrThrow({where:{chatRootNodeId:root.id}})).messageCount).toBe(count+1);
 });

@@ -9,14 +9,24 @@
  * installed Agent's own system memory) refuses it, so only the grant can admit it. The system-memory cases
  * (who may give, the live installed check) name the second Agent's system memory explicitly.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { GraphQLError } from 'graphql';
+import { managesReadGrantTarget } from './resolvers.automationReadGrant.js';
+import { READ_GRANT_MEMORY_SELECT } from '../../../lib/automationReadGrant.js';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAppAgent, createDbAppWithKey } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
-import { runHoldsReadGrant } from '../../../lib/automationReadGrant.js';
-import { hadronReadNode } from '../../../lib/runner/tools/nodeTools.js';
+import { runHoldsReadGrant, rootTriggerOfRun } from '../../../lib/automationReadGrant.js';
+import { hadronReadNode, hadronUpdateNode } from '../../../lib/runner/tools/nodeTools.js';
+import { createTestableMcpServer } from '../../../mcp/server.js';
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
+import { MemoryNotFoundError, AmbiguousLegacyUrnError } from '../../../lib/entityRef/errors.js';
+import { UrnNotQualifiedError, UrnParseError } from '../../../lib/urn.js';
 import { RUN_CLIENT_PREFIX } from '../../../lib/auth/runPrincipal.js';
+import { judgeAuthoring } from '../../../lib/authoringAttestation.js';
+import { runAuthoring, runReadsNode } from '../../../lib/runner/runAuthoring.js';
+import { isMemoryReadableFresh } from './resolvers.helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 
 const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<any>>;
@@ -173,7 +183,7 @@ describe('scope: only the granted automation', () => {
   it('runHoldsReadGrant, user-backed branch (positive pin): the on-behalf-of user can read the memory, so a covering grant is true; outside the prefix and after revoke it is false', async () => {
     const g = await give();
     const r = await run('SCHEDULE', f.s1.id, null, f.member.id);
-    const holds = (loc: string) => runHoldsReadGrant(db, { userId: f.member.id, appId: f.app.id } as never, r.id, f.know.id, loc);
+    const holds = (loc: string) => runHoldsReadGrant(db, { userId: f.member.id, appId: f.app.id }, r.id, f.know.id, loc);
     expect(await holds('tasks:report')).toBe(true);
     expect(await holds('other:x')).toBe(false);
     await M.revokeAutomationReadGrant({}, { id: g.id }, f.adminCtx);
@@ -351,5 +361,197 @@ describe('audit', () => {
       await db.$executeRawUnsafe('DROP TRIGGER t_fail_ev_trg ON app_automation_read_grant_events');
       await db.$executeRawUnsafe('DROP FUNCTION t_fail_ev()');
     }
+  });
+});
+
+describe('#1329 an author task the run reads through its grant', () => {
+  const setUp = async () => {
+    const t = await db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc: 'tasks:report', memoryId: f.know.id } } });
+    await db.node.update({ where: { id: t.id }, data: { isRunnable: true } });
+    const dest = await db.memory.create({ data: { id: generateId(), name: 'dest', urn: `${f.org.urn}:dest`, class: 'knowledge', visibility: 'PUBLIC', organizationId: f.org.id } });
+    await M.setAppMemoryWriteGrant({}, { appRef: f.app.id, memoryRef: dest.id, prefix: 'reports', registerNodeUrn: 'hrn:node:example.com:register:grants' }, f.adminCtx);
+    await db.node.create({ data: { id: generateId(), memoryId: dest.id, loc: 'reports:a', name: 'a', content: 'initial', role: 'guide' } });
+    const cfg = await db.memoryConfig.create({ data: { id: generateId(), memoryId: dest.id } });
+    await db.nodeRoleRule.create({ data: { id: generateId(), configId: cfg.id, role: 'guide', authorTaskId: t.id, authorTaskRequired: true } });
+    const r = await run('SCHEDULE', f.s1.id);
+    const principal = { db, appId: r.appId, organizationId: f.org.id, clientId: `${RUN_CLIENT_PREFIX}${r.id}`, roles: [] } as unknown as Context;
+    const write = (authoredWith?: { task: string; revision: number }) => hadronUpdateNode.execute(
+      { db, run: r, principal, log: () => {} } as never,
+      { urn: `hrn:node:${dest.urn}:reports:a`, content: 'updated', ...(authoredWith ? { authoredWith } : {}) },
+    );
+    return { t, dest, write, claim: { task: t.id, revision: t.revSeq } };
+  };
+  const refusal = (promise: Promise<unknown>) => promise.then(() => null, (e: { message?: string; extensions?: Record<string, unknown> }) => e.extensions ?? { thrown: e.message });
+
+  it('a live covering grant reads the task, so the refusal gives it and an exact claim writes', async () => {
+    const { t, dest, write, claim } = await setUp();
+    await give();
+    expect(await refusal(write())).toMatchObject({ code: 'AUTHORING_ATTESTATION_MISSING', taskAccess: 'READABLE', taskId: t.id });
+    await write(claim);
+    expect(await db.node.findFirstOrThrow({ where: { memoryId: dest.id, loc: 'reports:a' } }))
+      .toMatchObject({ content: 'updated', authoredByTask: t.id });
+  });
+
+  it("a run never outruns its own read: another App's personal memory the on-behalf-of user owns is unavailable", async () => {
+    const owned = (slug: string, appId: string) => db.memory.create({ data: {
+      id: generateId(), name: slug, urn: `${f.org.urn}:${slug}`, class: 'personal', organizationId: f.org.id,
+      userId: f.member.id, appId, userMemoryOfAgentId: f.first.id,
+    } });
+    const dest = await owned('mine', f.app.id);
+    const elsewhere = await owned('elsewhere', f.otherApp.id);
+    const hidden = await db.node.create({ data: { id: generateId(), memoryId: elsewhere.id, loc: 'hidden', name: 'Hidden', isRunnable: true } });
+    await db.node.create({ data: { id: generateId(), memoryId: dest.id, loc: 'a', name: 'a', content: 'initial', role: 'guide' } });
+    const cfg = await db.memoryConfig.create({ data: { id: generateId(), memoryId: dest.id } });
+    await db.nodeRoleRule.create({ data: { id: generateId(), configId: cfg.id, role: 'guide', authorTaskId: hidden.id, authorTaskRequired: true } });
+    const r = await run('SCHEDULE', f.s1.id, null, f.member.id);
+    await expect(readAs(r, elsewhere.urn, 'hidden')).rejects.toThrow();
+    const principal = { db, appId: r.appId, userId: f.member.id, organizationId: f.org.id, clientId: `${RUN_CLIENT_PREFIX}${r.id}`, roles: [] } as unknown as Context;
+    // The shared gate admits this memory, which is why the run's own read has to decide.
+    expect(await isMemoryReadableFresh(principal, elsewhere.id)).toBe(true);
+    const judged = (claim: { task: string; revision: number } | null) => db.$transaction((tx) => judgeAuthoring(tx, dest.id, {
+      priorRole: 'guide', priorRunnable: false, role: 'guide', runnable: false, mintHuman: true, authoredChange: true,
+    }, runAuthoring(principal, r, claim)));
+    const unavailable = { refused: 'AUTHOR_TASK_BROKEN', recovery: { taskAccess: 'UNAVAILABLE', task: null, taskId: null } };
+    expect(await judged(null)).toMatchObject(unavailable);
+    expect(await judged({ task: hidden.id, revision: hidden.revSeq })).toMatchObject(unavailable);
+  });
+
+  it("a user-backed run does not reach another org through its user's membership", async () => {
+    const org = await db.organization.create({ data: { id: generateId(), name: 'rg-other-org', urn: 'rg-other-org' } });
+    await db.orgMember.create({ data: { organizationId: org.id, userId: f.member.id, role: 'CONTRIBUTOR' } });
+    const other = await db.memory.create({ data: { id: generateId(), name: 'other', urn: 'rg-other-org:other', class: 'knowledge', organizationId: org.id } });
+    const r = await run('SCHEDULE', f.s1.id, null, f.member.id);
+    const principal = { db, appId: null, userId: f.member.id, organizationId: f.org.id, clientId: `${RUN_CLIENT_PREFIX}${r.id}`, roles: [] } as unknown as Context;
+    expect(await canReadMemory(db, { userId: f.member.id, roles: [] } as never, other.id)).toBe(true);
+    expect(await runReadsNode(db, principal, r, other.id, 'x')).toBe(false);
+  });
+
+  it('runs are unavailable on encrypted memories, even PUBLIC knowledge in another org', async () => {
+    const org = await db.organization.create({ data: { id: generateId(), name: 'rg-enc', urn: 'rg-enc' } });
+    const open = await db.memory.create({ data: { id: generateId(), name: 'open', urn: 'rg-enc:open', class: 'knowledge', visibility: 'PUBLIC', organizationId: org.id } });
+    const sealed = await db.memory.create({ data: { id: generateId(), name: 'sealed', urn: 'rg-enc:sealed', class: 'knowledge', visibility: 'PUBLIC', organizationId: org.id, isEncrypted: true } });
+    const r = await run('SCHEDULE', f.s1.id);
+    const principal = { db, appId: r.appId, organizationId: f.org.id, clientId: `${RUN_CLIENT_PREFIX}${r.id}`, roles: [] } as unknown as Context;
+    expect(await runReadsNode(db, principal, r, open.id, 'x')).toBe(true);
+    expect(await runReadsNode(db, principal, r, sealed.id, 'x')).toBe(false);
+  });
+
+  it('a grant that does not cover the task, and a revoked one, read as unavailable', async () => {
+    const { write, claim } = await setUp();
+    const unavailable = { code: 'AUTHOR_TASK_BROKEN', taskAccess: 'UNAVAILABLE', task: null };
+    await give(f.adminCtx, { prefix: 'tasks:reportX' });
+    expect(await refusal(write(claim))).toMatchObject(unavailable);
+    const covering = await give();
+    await M.revokeAutomationReadGrant({}, { id: covering.id }, f.adminCtx);
+    expect(await refusal(write(claim))).toMatchObject(unavailable);
+  });
+});
+
+describe('#3275 read-grant follow-up pins', () => {
+  async function workerContext() {
+    const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: f.app.id, agentId: f.first.id, name: 'Worker3275', slug: 'worker3275', heldByUserId: f.admin.id, heldAt: new Date() } });
+    const session = await db.session.create({ data: { id: generateId(), appId: f.app.id, userId: f.admin.id, agentId: f.first.id, workerId: worker.id } });
+    return { ...f.adminCtx, sessionId: session.id };
+  }
+  it('A3: an approval lists only its own trigger kind/id/App live rows', async () => {
+    const wanted = await give();
+    await give(f.adminCtx, { triggerId: f.s2.id });
+    const ended = await give(f.adminCtx, { prefix: 'ended' });
+    await M.revokeAutomationReadGrant({}, { id: ended.id }, f.adminCtx);
+    // Same trigger id in a different kind and App: these rows must not enter the approval.
+    for (const extra of [{ triggerKind: 'WEBHOOK', appId: f.app.id }, { triggerKind: 'SCHEDULE', appId: f.otherApp.id }] as const) {
+      await db.appAutomationReadGrant.create({ data: { ...extra, triggerId: f.s1.id, memoryId: f.know.id, prefix: 'other', grantedBy: f.admin.id } });
+    }
+    // The fixture's stored entry is absent: exercise the real stale-entry approval path too.
+    const result = await Q.automationApproval({}, { triggerKind: 'SCHEDULE', triggerRef: f.s1.id }, f.adminCtx);
+    expect(result.readGrants).toEqual([wanted]);
+    const second = await Q.automationApproval({}, { triggerKind: 'SCHEDULE', triggerRef: f.s2.id }, f.adminCtx);
+    expect(second.readGrants).toHaveLength(1);
+    expect(second.readGrants[0].triggerId).toBe(f.s2.id);
+  });
+  it('R25: list refuses a run and an uninstructed bound worker even carrying a manager userId', async () => {
+    const g = await give();
+    expect((await Q.automationReadGrants({}, { appRef: f.app.id }, f.adminCtx)).map((x: any) => x.id)).toEqual([g.id]);
+    await forbidden(Q.automationReadGrants({}, { appRef: f.app.id }, { ...f.adminCtx, clientId: `${RUN_CLIENT_PREFIX}x` }));
+    await forbidden(Q.automationReadGrants({}, { appRef: f.app.id }, await workerContext()));
+  });
+  it('uninstructed bound worker cannot revoke and leaves the row/event unchanged', async () => {
+    const g = await give();
+    await forbidden(M.revokeAutomationReadGrant({}, { id: g.id }, await workerContext()));
+    expect(await db.appAutomationReadGrant.findUnique({ where: { id: g.id } })).toMatchObject({ revokedAt: null });
+    expect(await db.appAutomationReadGrantEvent.count({ where: { grantId: g.id, action: 'REVOKE' } })).toBe(0);
+  });
+  it('F7: a foreign installed system-memory grant enforces its colon-boundary prefix at the read arm', async () => {
+    const org = await db.organization.create({ data: { name: 'Foreign3275', urn: `foreign3275-${generateId()}.example` } });
+    const user = await db.user.create({ data: { handle: `foreign3275-${generateId()}` } });
+    await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
+    const agent = await M.createAgent({}, { orgId: org.id, name: 'Foreign3275' }, uctx(user.id));
+    await createDbAppAgent(db, f.app.id, agent.id);
+    const target = await db.memory.findUniqueOrThrow({ where: { id: agent.systemMemoryId } });
+    for (const loc of ['tasks:report', 'tasks:report:child', 'tasks:reportX', 'other:x']) await node(target.id, loc);
+    const r = await run('SCHEDULE', f.s1.id);
+    await expect(readAs(r, target.urn, 'tasks:report')).rejects.toThrow();
+    await give(uctx(user.id), { memoryRef: target.id, prefix: 'tasks:report' });
+    for (const loc of ['tasks:report', 'tasks:report:child']) expect(await readAs(r, target.urn, loc)).toMatchObject({ content: `body of ${loc}` });
+    for (const loc of ['tasks:reportX', 'other:x']) await expect(readAs(r, target.urn, loc)).rejects.toThrow('Flow memory not found');
+  });
+  it('measures uncached lineage reads before introducing any cache', async () => {
+    const root = await run('SCHEDULE', f.s1.id);
+    let current = root;
+    const samples = [];
+    for (let depth = 1; depth <= 64; depth++) {
+      if (depth > 1) current = await run('SPAWN', null, current.id);
+      if (![1, 4, 16, 64].includes(depth)) continue;
+      const lookup = vi.spyOn(db.appRun, 'findUnique');
+      try {
+        const start = performance.now();
+        expect(await rootTriggerOfRun(db, current.id)).toEqual({ kind: 'SCHEDULE', id: f.s1.id });
+        samples.push({ depth, runReads: lookup.mock.calls.length, elapsedMs: performance.now() - start });
+        expect(lookup).toHaveBeenCalledTimes(depth);
+      } finally { lookup.mockRestore(); }
+    }
+    console.info('#3275 synthetic local lineage measurements (not a production bound)', samples);
+  });
+  it.each([
+    ['missing', () => new MemoryNotFoundError('opaque')],
+    ['unqualified', () => new UrnNotQualifiedError('opaque')],
+    ['malformed', () => new UrnParseError('opaque', 'malformed-grammar')],
+    ['ambiguous', () => new AmbiguousLegacyUrnError('opaque')],
+  ] as const)('conceals typed %s reference errors independently of their message', async (_, makeError) => {
+    const fault = makeError();
+    fault.message = 'opaque reference refusal';
+    const lookup = vi.spyOn(db.memory, 'findFirst').mockRejectedValueOnce(fault);
+    try { expect(await Q.automationReadGrants({}, { memoryRef: f.know.id }, f.adminCtx)).toEqual([]); }
+    finally { lookup.mockRestore(); }
+  });
+  it('target management recognizes typed FORBIDDEN independently of its text, and rethrows faults', async () => {
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: f.know.id }, select: { ...READ_GRANT_MEMORY_SELECT, urn: true } });
+    const lookup = vi.spyOn(db.orgMember, 'findFirst');
+    try {
+      lookup.mockRejectedValueOnce(new GraphQLError('opaque refusal', { extensions: { code: 'FORBIDDEN' } }));
+      expect(await managesReadGrantTarget(f.adminCtx, memory)).toBe(false);
+      const fault = new Error('Forbidden');
+      lookup.mockRejectedValueOnce(fault);
+      await expect(managesReadGrantTarget(f.adminCtx, memory)).rejects.toBe(fault);
+    } finally { lookup.mockRestore(); }
+  });
+  it('an unexpected lookup fault containing URN is not concealed as an empty list', async () => {
+    const fault = new Error('URN storage failed');
+    const lookup = vi.spyOn(db.memory, 'findFirst').mockRejectedValueOnce(fault);
+    try {
+      await expect(Q.automationReadGrants({}, { memoryRef: f.know.id }, f.adminCtx)).rejects.toBe(fault);
+    } finally { lookup.mockRestore(); }
+  });
+  it('MCP give/list/revoke wrappers reach the same live grant and terminal state', async () => {
+    const mcp = createTestableMcpServer({ userId: f.admin.id, roles: ['READER'], clientId: `user:${f.admin.id}` });
+    const given = await mcp.callToolText('hadron_set_automation_read_grant', { app: f.app.id, triggerKind: 'SCHEDULE', triggerId: f.s1.id, memory: f.know.id, prefix: 'tasks' });
+    expect(given).toContain('Granted.');
+    const row = await db.appAutomationReadGrant.findFirstOrThrow({ where: { appId: f.app.id, triggerId: f.s1.id } });
+    const listed = await mcp.callToolText('hadron_list_automation_read_grants', { app: f.app.id });
+    expect(listed).toContain(row.id);
+    expect(listed).toContain('under tasks');
+    expect(await mcp.callToolText('hadron_revoke_automation_read_grant', { id: row.id })).toContain('Revoked.');
+    expect(await mcp.callToolText('hadron_list_automation_read_grants', { app: f.app.id })).toBe('No automation read grants.');
+    expect(await db.appAutomationReadGrant.findUnique({ where: { id: row.id } })).toMatchObject({ revokedBy: f.admin.id });
   });
 });

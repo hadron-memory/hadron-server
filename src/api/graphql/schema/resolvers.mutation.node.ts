@@ -1367,14 +1367,17 @@ async function writeNodeCoreRaw(
             // ownerRepo deliberately remains outside restorable node history,
             // so an unguarded ownerRepo-only update keeps its legacy
             // revision-free behaviour. A guarded update is different: every
-            // successful state change must consume the claimed token or the
-            // same expectedRevision could be reused to overwrite it (#937).
+            // ownerRepo change must consume the claimed token or the same
+            // expectedRevision could be reused to overwrite it (#937). The
+            // edge-only exception below does not change ownerRepo behaviour.
+            // #3497 / rulings0149+0198: inline edges are not node revision state.
+            // They still reach finalizeNodeWrite, and a guarded edge-only write
+            // checks its token without consuming it.
             const needsRevision =
-              resolvedEdges !== null ||
               changes.length > 0 ||
               (opts?.forceRevision === true && inCompileScope()) ||
               (opts?.guardRevSeq !== undefined && changesUnversionedField);
-            if (!needsRevision && !changesUnversionedField) {
+            if (!needsRevision && !changesUnversionedField && resolvedEdges === null) {
               // A stale guard is refused even when the write is a no-op: the
               // compare-and-swap protects the caller's merge base, and an
               // idempotent write must not report success against a revision

@@ -15,7 +15,9 @@ import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import { withAuthorizedTx } from './authorizedTx.js';
-import { requireOwnerOrOrgRole, safeCanonicalUrn, type Context } from './resolvers.helpers.js';
+import { requireOwnerOrOrgRole, type Context } from './resolvers.helpers.js';
+
+import { projectAutomationReadGrant } from './automationReadGrantProjection.js';
 
 export type AutomationTriggerKind = 'SCHEDULE' | 'WEBHOOK' | 'MANUAL';
 export interface AutomationTriggerRef { triggerKind: AutomationTriggerKind; triggerRef: string }
@@ -270,8 +272,7 @@ async function liveReadGrants(ctx: Context, kind: AutomationTriggerRef['triggerK
   for (const g of rows) {
     const memory = await canReadMemory(ctx.db, ctx as never, g.memoryId)
       ? await ctx.db.memory.findFirst({ where: { id: g.memoryId, deletedAt: null }, select: { urn: true } }) : null;
-    out.push({ id: g.id, appId: g.appId, triggerKind: g.triggerKind, triggerId: g.triggerId, memoryUrn: memory ? safeCanonicalUrn('memory', memory.urn) : null,
-      prefix: g.prefix, grantedBy: g.grantedBy, createdAt: g.createdAt, revokedAt: null, revokedBy: null });
+    out.push(projectAutomationReadGrant(g, memory));
   }
   return out;
 }

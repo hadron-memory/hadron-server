@@ -667,7 +667,6 @@ export const chatMutations = {
         stageName: firstStage,
         userId: effectiveUserId,
         startedWithRevision: publishedLoc ?? null,
-        messageCount: 0,
         createdAt: new Date().toISOString(),
         goalStack: [{
           description: initialGoal,
@@ -775,6 +774,7 @@ export const chatMutations = {
                 createdBy: ctx.userId ?? null,
               },
             });
+            await tx.chatRootCounter.create({data:{chatRootNodeId:chatNodeId}});
             // #2047: the chat's record, written with the chat so neither exists without the other (R37).
             if (chatServed) {
               await recordServedPrompt(tx, { kind: 'CHAT', chatId: chatNodeId, appId: chatAppId, agentId: resolvedAgentId }, chatServed.served, chatServed.variables);
@@ -1431,7 +1431,7 @@ export const chatMutations = {
           const stamp = await assertAuthoring(tx, chatNode.memoryId, {
             priorRole: dataNode.role, priorRunnable: dataNode.isRunnable,
             role: dataNode.role, runnable: dataNode.isRunnable, mintHuman: true, authoredChange,
-          }, attestedAuthoring(null));
+          }, attestedAuthoring(ctx));
           // Nothing changed, so nothing is written. Rewriting would re-encrypt
           // an encrypted row, and fresh ciphertext reads as drift that clears the stamp.
           if (!authoredChange) return null;
@@ -1744,8 +1744,8 @@ export const chatMutations = {
       // a value no in-flight turn can still change out from under it.
       // #1061 — minted under the lock, recorded after it releases.
       let summaryRef: { id: string; loc: string; memoryId: string } | null = null;
-      await withChatRootLock(ctx.db, chatRef, memEncInfo, async ({ tx, chatData }) => {
-        const messageCount = (chatData.messageCount as number) ?? 0;
+      await withChatRootLock(ctx.db, chatRef, memEncInfo, async ({ tx, counter }) => {
+        const messageCount = counter.messageCount;
         const summaryName = `${String(messageCount).padStart(3, '0')}a-summary`;
         const summaryId = generateId();
         const summaryLoc = `${chatId}:messages:${summaryName}`;

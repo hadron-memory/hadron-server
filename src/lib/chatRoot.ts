@@ -49,6 +49,7 @@ import {
   encryptNodeFields,
   type MemoryEncryptionInfo,
 } from './nodeCrypto.js';
+import { chatDataObject, lockedChatCounter, setChatCounterTime, type ChatCounter } from './chatRootCounters.js';
 import { lockPathForCreateUnder } from './nodeSubtreeLock.js';
 
 /**
@@ -112,6 +113,7 @@ export async function withChatRootLock<T>(
   body: (args: {
     tx: Prisma.TransactionClient;
     chatData: Record<string, unknown>;
+    counter: ChatCounter;
   }) => Promise<ChatRootOutcome<T>>,
   opts?: ChatRootOpts,
 ): Promise<T> {
@@ -129,13 +131,26 @@ export async function withChatRootLock<T>(
     });
     if (!row) throw new Error(`Chat "${chat.loc}" not found`);
     const decrypted = decryptNodeFields({ data: row.data }, memEncInfo);
-    const chatData = (decrypted.data as Record<string, unknown> | null) ?? {};
+    const counter = await lockedChatCounter(tx, chat.id, memEncInfo, decrypted.data);
+    const chatData = {...chatDataObject(decrypted.data)};
+    delete chatData.messageCount; delete chatData.lastMessageAt;
 
-    const outcome = await body({ tx, chatData });
+    // The callback may mutate this object (including nested values) in place.
+    // Capture the comparison before handing it out, not from its later alias.
+    const baseline = JSON.stringify(chatData);
+    const outcome = await body({ tx, chatData, counter });
 
     if (outcome.chatData) {
+      const clean = {...outcome.chatData};
+      if (Object.hasOwn(clean, 'lastMessageAt')) {
+        await setChatCounterTime(tx, chat.id, clean.lastMessageAt);
+        await tx.node.update({where:{id:chat.id},data:{updatedAt:new Date()}});
+      }
+      delete clean.messageCount; delete clean.lastMessageAt;
+      // A counter-only update must not re-encrypt/rewrite the root or bless other operational keys.
+      if (JSON.stringify(clean) === baseline) return outcome.value;
       const enc = encryptNodeFields(
-        { content: null, data: outcome.chatData },
+        { content: null, data: clean },
         memEncInfo,
       );
       await tx.node.update({
@@ -186,9 +201,9 @@ export async function withChatRootLock<T>(
 async function highWaterSeq(
   tx: Prisma.TransactionClient,
   chat: ChatRootRef,
-  chatData: Record<string, unknown>,
+  state: ChatCounter,
 ): Promise<number> {
-  const counter = (chatData.messageCount as number) ?? 0;
+  const counter = state.messageCount;
   const top = await maxMessageSeqAtLiteralLocPrefix(tx, chat.memoryId, `${chat.loc}:messages:`);
   return Math.max(counter, top);
 }
@@ -217,8 +232,8 @@ export async function appendChatMessage<T>(
   }) => Promise<T>,
   opts?: ChatRootOpts,
 ): Promise<{ seq: number; chatData: Record<string, unknown>; inserted: T }> {
-  return withChatRootLock(db, chat, memEncInfo, async ({ tx, chatData }) => {
-    const seq = (await highWaterSeq(tx, chat, chatData)) + 1;
+  return withChatRootLock(db, chat, memEncInfo, async ({ tx, chatData, counter }) => {
+    const seq = (await highWaterSeq(tx, chat, counter)) + 1;
     const inserted = await insert({
       tx,
       seq,
@@ -234,12 +249,10 @@ export async function appendChatMessage<T>(
       where: { chatRootNodeId: chat.id },
       data: { lastSeq: seq, lastMessageAt: now },
     });
-    const next = {
-      ...chatData,
-      messageCount: seq,
-      lastMessageAt: now.toISOString(),
-    };
-    return { chatData: next, value: { seq, chatData: next, inserted } };
+    await tx.chatRootCounter.update({where:{chatRootNodeId:chat.id},data:{messageCount:seq,lastMessageAt:now}});
+    // List order remains based on root activity; updatedAt is not revisioned.
+    await tx.node.update({where:{id:chat.id},data:{updatedAt:now}});
+    return { value: { seq, chatData, inserted } };
   }, opts);
 }
 

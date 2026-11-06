@@ -85,6 +85,54 @@ for (const args of [{ triggerKind: 'MANUAL' }, { triggerKind: '' }, { triggerId:
   expect(await events()).toHaveLength(0);
 });
 
+/** #3404: injected late projection, NOT a naturally reachable session-end race under held locks.
+ * Refusal order is #3386's accepted gate; zero event on refusal is cor:dmo:050:12 / 0111A. */
+it('final instructed admission refuses before malformed filter validation (#3404 f06)', async () => {
+  const before = await db.appAutomationTeamSnapshotGrant.findMany({ where: { appId: f.app.id }, orderBy: { id: 'asc' } });
+  const real = db.$transaction.bind(db);
+  let fences = 0, injections = 0;
+  const transaction = vi.spyOn(db, '$transaction').mockImplementation(((fn: any, options: any) => real(async (tx: any) => {
+    let fenced = false;
+    const session = new Proxy(tx.session, { get: (target, key) => key === 'findUnique' ? async (args: any) => {
+      const row = await target.findUnique(args);
+      if (fenced && args.where.id === f.session.id && row) {
+        injections++;
+        return { ...row, endedAt: new Date('2025-03-01') };
+      }
+      return row;
+    } : target[key] });
+    const wrapped = new Proxy(tx, { get: (target, key) => {
+      if (key === 'session') return session;
+      if (key === '$queryRaw') return async (...args: any[]) => {
+        const result = await target.$queryRaw(...args);
+        const sql = Array.isArray(args[0]) ? args[0].join('?') : '';
+        if (/FROM sessions WHERE id = .*FOR SHARE/.test(sql) && args[1] === f.session.id) {
+          fences++;
+          fenced = true;
+        }
+        return result;
+      };
+      return target[key];
+    } });
+    return fn(wrapped);
+  }, options)) as any);
+  try {
+    const result = await refusal(list({ triggerKind: 'MANUAL', instruction }, ctx({ sessionId: f.session.id })));
+    // Primary discriminant comes first: f06 must fail on BAD_USER_INPUT vs FORBIDDEN, not hook counts.
+    expect(result.code).toBe('FORBIDDEN');
+    expect(fences).toBe(1);
+    expect(injections).toBe(1);
+  } finally { transaction.mockRestore(); }
+  expect(await events()).toHaveLength(0);
+  expect(await db.appAutomationTeamSnapshotGrant.findMany({ where: { appId: f.app.id }, orderBy: { id: 'asc' } })).toEqual(before);
+  expect((await db.session.findUniqueOrThrow({ where: { id: f.session.id } })).endedAt).toBeNull();
+  // Uninjected controls use the same live session and actual final gate.
+  expect((await refusal(list({ triggerKind: 'MANUAL', instruction }, ctx({ sessionId: f.session.id })))).code).toBe('BAD_USER_INPUT');
+  expect(await events()).toHaveLength(0);
+  expect((await list({ triggerKind: 'SCHEDULE', triggerId: f.one.id, instruction }, ctx({ sessionId: f.session.id }))).items).toEqual([f.live]);
+  expect(await events()).toHaveLength(1);
+});
+
 it('instructed filtered lists each record exactly one event, including empty pages; refused calls none', async () => {
   const c = ctx({ sessionId: f.session.id });
   expect((await list({ triggerKind: 'SCHEDULE', triggerId: f.one.id, instruction }, c)).items).toEqual([f.live]);

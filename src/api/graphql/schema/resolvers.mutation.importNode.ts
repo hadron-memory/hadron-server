@@ -243,7 +243,7 @@ export const importNodeMutations = {
       },
       writeCtx,
       name === undefined ? 'update' : 'upsert',
-      { transaction, authoring: attestedAuthoring(input.authoredWith) },
+      { transaction, authoring: attestedAuthoring(ctx, input.authoredWith) },
     );
 
     if (!taskRun) {

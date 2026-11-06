@@ -3,6 +3,7 @@ import { isPrismaClientError } from '../lib/prismaErrors.js';
 import { isTrustedRefusal } from '../api/graphql/formatError.js';
 import { faultRequestId, internalFaultEnvelope, internalFaultText, logInternalFault } from '../lib/internalFault.js';
 import { textResult } from './textResult.js';
+import { attestationRefusalResult } from '../lib/authoringAttestation.js';
 import { isContentResolutionLimitError, type ContentResolutionLimitError } from '../lib/includes/resolutionBudget.js';
 
 // Backstop for wrappers that copied the diagnostic and discarded its class.
@@ -84,9 +85,11 @@ export function toolErrorResult(
   domainText: () => string,
   site = 'mcp_tool',
 ): ReturnType<typeof refusalResult> | ReturnType<typeof toolFaultResult> | ReturnType<typeof rateLimitedResult>
-  | ReturnType<typeof resolutionLimitResult> {
+  | ReturnType<typeof resolutionLimitResult> | NonNullable<ReturnType<typeof attestationRefusalResult>> {
   if (error instanceof RateLimited) return rateLimitedResult(error);
   if (isContentResolutionLimitError(error)) return resolutionLimitResult(error);
+  const attestation = attestationRefusalResult(error);
+  if (attestation) return attestation;
   if (containsDatabaseDiagnostic(error) || !isTrustedRefusal(error)) return toolFaultResult(error, site);
   return refusalResult(domainText());
 }
@@ -102,6 +105,8 @@ export function withToolErrorBoundary(
     } catch (error) {
       if (error instanceof RateLimited) return rateLimitedResult(error);
       if (isContentResolutionLimitError(error)) return resolutionLimitResult(error);
+      const attestation = attestationRefusalResult(error);
+      if (attestation) return attestation;
       // A typed refusal retains the SDK's existing error handling; any other throw is a fault.
       if (!containsDatabaseDiagnostic(error) && isTrustedRefusal(error)) throw error;
       return toolFaultResult(error, `${name}:handler`);
