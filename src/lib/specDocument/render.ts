@@ -103,7 +103,7 @@ interface OpenFence { ch: string; len: number }
  */
 function stepFence(line: string, open: OpenFence | null): { open: OpenFence | null; fenceLine: boolean } {
   if (open === null) {
-    const f = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    const f = /^ {0,3}(?=(`{3,}|~{3,}))\1(.*)$/.exec(line);
     if (f && !(f[1][0] === '`' && f[2].includes('`'))) return { open: { ch: f[1][0], len: f[1].length }, fenceLine: true };
     return { open: null, fenceLine: false };
   }
@@ -190,10 +190,10 @@ export function hasOpenQuestions(body: string): boolean {
   let level: number | null = null;
   let found = false;
   eachOutsideFence(body, (line) => {
-    const h = /^(#{1,6})\s+(.*)$/.exec(line);
+    const h = /^(#{1,6})(?=(\s+))\2(.*)$/.exec(line);
     if (h) {
       if (level !== null && h[1].length <= level) level = null;
-      if (/^open questions\b/i.test(h[2].trim())) level = h[1].length;
+      if (/^open questions\b/i.test(h[3].trim())) level = h[1].length;
     } else if (level !== null && /^\s*(?:[-*+]|\d+[.)])\s+\S/.test(line)) found = true;
     return line;
   });

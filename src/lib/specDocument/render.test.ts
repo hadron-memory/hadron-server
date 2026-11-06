@@ -92,6 +92,32 @@ describe('linear trim (§10 delta P1)', () => {
   });
 });
 
+describe('linear fence and heading scan (§10 delta P1)', () => {
+  // `(.*)$` after a run, failing on `\r`, gave the run back one character at a time: quadratic, synchronous.
+  const timed = (fn: () => unknown): number => { const t = Date.now(); fn(); return Date.now() - t; };
+  const render = (body: string): string =>
+    renderSpecDocument({ memory: 'o:m', renderedAt: at, feature: part('x:1', 'Feature: F', 'f'), links: new Map(), parts: [part('x:1:1', 'Rule: R', body)] });
+  const N = 60_000;
+  const shapes: Array<[string, string]> = [
+    ['backtick run then CR', `# Rule: R\n\n${'`'.repeat(N)}\rx\n\ntext`],
+    ['tilde run then CR', `# Rule: R\n\n${'~'.repeat(N)}\rx\n\ntext`],
+    ['backtick run then space-CR', `# Rule: R\n\n${'`'.repeat(N)} \rx\n\ntext`],
+    ['heading, spaces then CR', `# Rule: R\n\n# ${' '.repeat(N)}a\rb\n\ntext`],
+  ];
+  for (const [name, body] of shapes) {
+    it(`${name} renders in linear time`, () => {
+      expect(timed(() => render(body))).toBeLessThan(1000);
+    });
+  }
+  it('hasOpenQuestions scans a heading with a long space run in linear time', () => {
+    expect(timed(() => hasOpenQuestions(`# ${' '.repeat(N)}a\rb`))).toBeLessThan(1000);
+  });
+  it('the atomic forms still open fences and read headings as before', () => {
+    expect(render('# Rule: R\n\n```js\ncode\n```\n\nafter')).toContain('```js\ncode\n```');
+    expect(hasOpenQuestions('##   Open Questions\n\n- Who?')).toBe(true);
+  });
+});
+
 describe('open questions and links', () => {
   it('an Open Questions section counts only with a bullet in it', () => {
     expect(hasOpenQuestions('## Open Questions\n\n- Who decides?')).toBe(true);
