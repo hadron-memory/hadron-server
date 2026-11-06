@@ -155,7 +155,7 @@ describe('#3459 owned-client fixed roster diagnostics', () => {
     for (const count of [1, 3]) {
       const targets = Array.from({ length: count }, () => agents[2]); // repeated parent aliases expose repeated authorization work
       const query = `query{${targets.map((a, i) => `p${i}:agent(ref:"${a.id}"){importedBy{parentAgentId parentAgent{id}}}`).join(' ')}}`;
-      const out = await measure(`importedBy/${count}-parents`, () => wire(query, context(false, apps[0])), 1,
+      const out = await measure(`importedBy/one-Agent-${count}-aliases`, () => wire(query, context(false, apps[0])), 1,
         data => Object.values(data).reduce((n: number, a: any) => n + a.importedBy.length, 0));
       expect(out.data.p0.importedBy).toHaveLength(2);
       expect(out.data.p0.importedBy.map((row: any) => row.parentAgentId).sort()).toEqual([agents[0].id, agents[1].id].sort());
@@ -197,6 +197,26 @@ describe('#3459 owned-client fixed roster diagnostics', () => {
       } });
       const out = await measure(`grant/${state}/fresh`, () => wire(query, context(false)), 1, data => data.a0.appAgents.length);
       expect(out.data.a0.appAgents).toHaveLength(3);
+    }
+  }, 60000);
+  it('records only the missing one/three DISTINCT readable parent-Agent baseline shapes', async () => {
+    // Same four Agents and import witnesses. A full principal can read all three
+    // distinct selected Agents independently of App-key/partial-reader audiences.
+    await db.agentOrgGrant.update({ where: { orgId_agentId: { orgId, agentId: agents[3].id } },
+      data: { activatedAt: new Date('2026-01-01'), revokedAt: null, expiresAt: null } });
+    for (const count of [1, 3]) {
+      const targets = [agents[2], agents[3], agents[0]].slice(0, count);
+      expect(new Set(targets.map(a => a.id)).size).toBe(count);
+      const query = `query{${targets.map((a, i) => `p${i}:agent(ref:"${a.id}"){id importedBy{parentAgentId parentAgent{id}}}`).join(' ')}}`;
+      const out = await measure(`importedBy/${count}-distinct-Agents/full`, () => wire(query, context(true, apps[0])), 1,
+        data => Object.values(data).reduce((n: number, a: any) => n + a.importedBy.length, 0));
+      expect(Object.values(out.data).map((a: any) => a.id)).toEqual(targets.map(a => a.id));
+      expect(out.data.p0.importedBy.map((r: any) => r.parentAgentId).sort()).toEqual([agents[0].id, agents[1].id].sort());
+      expect(out.data.p0.importedBy.every((r: any) => r.parentAgent !== null)).toBe(true);
+      if (count === 3) {
+        expect(out.data.p1.importedBy.map((r: any) => r.parentAgentId)).toEqual([agents[0].id]);
+        expect(out.data.p2.importedBy).toEqual([]);
+      }
     }
   }, 60000);
 });

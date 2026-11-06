@@ -1,12 +1,12 @@
 # Installation roster diagnostics (#3459)
 
-Observed on production source `6ea55eec762dd8014351cb6a958cf6c7df439f00`, synthetic owned run-private Postgres, dedicated Prisma6.19.2 client. No production observation, latency threshold, cache or optimization. Numeric budgets are **not approved yet**; the observed JSON is evidence, not a chosen passing ceiling.
+Observed on production source `6ea55eec762dd8014351cb6a958cf6c7df439f00`, synthetic owned run-private Postgres, dedicated Prisma6.19.2 client. No production observation, latency threshold, cache or optimization. The original 53 numeric ceilings were approved without slack in Xavier ruling 6696871831. The original observed JSON remains immutable baseline evidence; approved ceilings will be stored separately. Two additional distinct-Agent observations below await their own ceiling disposition.
 
 Reproduce with `HADRON_3459_ARTIFACT=/private/scratch/metrics.json HADRON_3459_HEAD=$(git rev-parse HEAD) node node_modules/vitest/vitest.mjs run src/api/graphql/schema/resolvers.installationCosts3459.test.ts`. The normal test setup creates the checkout-specific run-owned DB; the test refuses dev/base DB names. The optional artifact contains synthetic SQL text and response data, no connection strings or real corpus. The logged client is disconnected in afterAll; run-owned DB cleanup remains the test harness's responsibility.
 
 SQL counts are dedicated-client query events within the measured span, after setup, with a named later SQL log barrier excluded. Prisma operations are separate model-extension entries (raw barrier excluded); page reads are App.findMany/select.appAgents operations. Exported helper-entry spies are separately labeled; same-module direct calls may bypass them. One Prisma operation can emit multiple SQL statements. Projected rows count selected top-level Agent/install/import/role rows, not database fetched rows. GraphQL response bytes are UTF8 JSON singleResult including data envelope; API requests mean in-process GraphQL operations, not HTTP. Direct single-install/marker helpers have zero API requests and null response bytes. No DB-wire-byte claim.
 
-A1 is one App; A3 extends the fixture to three Apps. Each has two physical and two distinct licensed derived Agents, including a duplicate import witness. A shared derived target is installed across all Apps. One foreign physical Agent is unreadable for the partial caller and causes whole-App audit masking. ImportedBy1/3-parent rows are one/three aliases of the same readable target, intentionally exposing repeated identical parent-field work; not three distinct targets. Role definition/marker cases use one/four installed Agents, at most two nodes each. Fresh Context and opposing principals plus inactive/revoked/expired holder-license requests assert semantic outputs; no Proposed audit rule is described as Decided law.
+A1 is one App; A3 extends the fixture to three Apps. Each has two physical and two distinct licensed derived Agents, including a duplicate import witness. A shared derived target is installed across all Apps. One foreign physical Agent is unreadable for the partial caller and causes whole-App audit masking. ImportedBy one-Agent-1/3-alias rows are one/three aliases of the same readable target, intentionally exposing repeated identical parent-field work; not three distinct targets. Role definition/marker cases use one/four installed Agents, at most two nodes each. Fresh Context and opposing principals plus inactive/revoked/expired holder-license requests assert semantic outputs; no Proposed audit rule is described as Decided law.
 
 ## Observed table
 
@@ -73,3 +73,14 @@ Repeated same-Context and fresh-Context samples have the same measured counts/by
 Xavier must approve numeric regression budgets after this baseline. Candidate policy is to pin these fixed-shape SQL/operation/page/row/byte values, without elapsed-time thresholds, then show +1 page/audit read and unused-text projection mutants fail. Instrument disabled/reset-early controls already fail the positive SQL discriminator. Existing semantic suites remain authoritative for derived membership, licensing, audit/date and role-tier guards; the #3048 28-operation ticker budget is unchanged and is not this roster budget.
 
 Reader census refreshed at this source: App.agents/App.appAgents; reverse Agent.appAgents audit fallbacks; Agent.importedBy; resolveAppInstallation ROW/DERIVED/absent; teamRoles explicit definition and locateTeamAgent marker walks. Attendee/register/pointer consumers delegate to single-install/page helpers, but this table is not a fresh execution of every attendee/pointer entry point. They remain pointer-only where so defined. Background/job consumers (App runs, channel backfill, shared-memory adoption) are outside this first request-reader slice. No paging/depth/cap/audience changes.
+
+## Additional distinct-Agent baseline (awaiting ceiling disposition)
+
+The same four-Agent fixture supplies one or three distinct readable root Agents under the full principal. Root IDs are selected and asserted distinct; importedBy parent IDs and readable nested identities are asserted exactly. These are in-process GraphQL operations, not HTTP. Only this additional test ran; the original 53 observations were not repeated or overwritten.
+
+| Shape | SQL | Prisma | Page | Helper entries | GraphQL | Rows | UTF8 bytes |
+|---|---:|---:|---:|---|---:|---:|---:|
+| importedBy/1-distinct-Agents/full | 5 | 5 | 0 | [0,0,0] | 1 | 2 | 290 |
+| importedBy/3-distinct-Agents/full | 14 | 12 | 0 | [0,0,0] | 1 | 3 | 524 |
+
+Zero exported helper entries retain the same-module spy limitation; they do not prove absence of underlying work. The original observed labels importedBy/1-parents and importedBy/3-parents map to importedBy/one-Agent-1-aliases and importedBy/one-Agent-3-aliases; their values remain unchanged.
