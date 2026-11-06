@@ -1,3 +1,4 @@
+import type { SyncNotAttemptedReason } from './syncNotAttempted.js';
 import { committedSyncReport, failedSyncReport, type SyncReportEntry } from './syncReport.js';
 import { GitCommandError } from './execGit.js';
 import { stampEmbeddingObligation } from '../../services/embedding/obligation.js';
@@ -323,6 +324,8 @@ const syncGraphFromGithubAsSystem = async (
   graph: MemoryWithOrg,
   edgeEndpointPreflightAttempt = 0,
 ): Promise<{
+  /** Configuration refused an attempt; callers must not serve an old report as this run's outcome. */
+  notAttemptedReason?: SyncNotAttemptedReason;
   error?: string;
   errorCode?: 'BAD_USER_INPUT' | typeof ENCRYPTED_GIT_SYNC_UNAVAILABLE;
   /** #1789: `error` is an unexpected exception's text (driver, filesystem, git), not a typed refusal; callers must not echo it. */
@@ -379,23 +382,21 @@ const syncGraphFromGithubAsSystem = async (
     // syncMemory call gets a meaningful message rather than a silent no-op
     // (startup's batch loop guards on `organization` before calling).
     // R206 / cor:sec:040:05: an explicit sync of an encrypted memory fails loudly
-    // with the typed code BEFORE the DB-only and no-organization no-ops, so a
+    // with the typed code BEFORE the not-attempted and no-organization results, so a
     // memory with no source (or no org) never reads as a healthy sync. The row
     // is left untouched: there is nothing to mark ERROR on a memory that has no
     // sync to fail.
     if ((await db.memory.findUnique({ where: { id: graph.id }, select: { isEncrypted: true } }))?.isEncrypted) {
       return { error: ENCRYPTED_GIT_SYNC_MESSAGE, errorCode: ENCRYPTED_GIT_SYNC_UNAVAILABLE };
     }
+    // These are not attempts: return before validation, status/report writes or Git work.
+    // Keep encryption first, and let explicit callers map this only after their access gate.
+    if (!graph.source) return { notAttemptedReason: 'NO_SOURCE' };
     if (!graph.organization) {
       return { error: 'Memory has no organization (user-owned memories are not git-synced)' };
     }
     const organization = graph.organization;
-
-    // DB-only mode — skip all git operations
-    if (!graph.source) {
-      console.log(`[syncGraphFromGithub] "${graphName}" is DB-only — skipping git sync`);
-      return {};
-    }
+    if (!organization.githubInstallationId) return { notAttemptedReason: 'NO_INSTALLATION' };
 
     // #561 — re-validate the STORED value, not just the incoming one.
     //
@@ -435,14 +436,6 @@ const syncGraphFromGithubAsSystem = async (
     const slug = graphName.includes(':') ? graphName.split(':').slice(1).join(':') : graphName;
     const localPath = pathUnderGraphsRoot(GRAPHS_PATH, organization.urn, slug);
     const ownerRepo = extractOwnerRepo(graph.source);
-
-    // 1. Get installation token (requires GitHub App installation)
-    if (!organization.githubInstallationId) {
-      console.warn(
-        `[syncGraphFromGithub] "${graphName}" — skipping: organization "${organization.urn}" has no githubInstallationId`,
-      );
-      return {};
-    }
 
     // Build per-org credentials if available
     const org = organization;
