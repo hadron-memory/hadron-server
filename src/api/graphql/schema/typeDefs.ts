@@ -6475,7 +6475,7 @@ export const typeDefs = `#graphql
   only while the App is live and the Agent installed. An Agent held only through
   an import without the App organisation's active grant is refused with
   AGENT_ORG_GRANT_REQUIRED; an absent Agent is refused with AGENT_NOT_INSTALLED.
-  Both refusals leave no node or install memory behind (cor:agt:040:15).
+  Both refusals leave no node or install memory behind (hrn:node:hadronmemory.com:specs:cor:agt:040:15).
   """
   input InstallTargetInput {
     appRef: String!
