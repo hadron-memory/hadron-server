@@ -93,7 +93,7 @@ export async function resolveNodeContent(
  * Charge `text` to the request's aggregate (ruling 0197 (2)) for a served resolved read that does
  * not come through `resolveNodeContent`: a direct `compileTemplate` whose result the request
  * returns or sends on (the chat system message, the run-node render). Over the aggregate it throws
- * the typed `requestBytes` refusal and the text is not served (#40 LOCAL review). `stored` is the
+ * the typed `requestBytes` refusal and the text is not served (#40). `stored` is the
  * source text, `text` what the compile produced from it.
  */
 export function chargeRequestServed(ctx: Context, stored: string, text: string): string {

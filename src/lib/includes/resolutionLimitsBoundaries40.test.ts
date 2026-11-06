@@ -107,7 +107,7 @@ describe('#40 repetition is charged per tag', () => {
 
 describe('#40 loaded text', () => {
   // The approval reads load the live row again (its name `t` and its content), and that is charged: the meter
-  // counts what each query actually loads, not what is served (private #40, second engineering read P2-2).
+  // counts what each query actually loads, not what is served (#40).
   it('a target with no qualifying approved revision still charges its loaded text, though only the notice is served', async () => {
     await target('t', 'L'.repeat(100), false);
     await mk('p', '{{> t approved}}');

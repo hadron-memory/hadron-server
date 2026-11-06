@@ -1,7 +1,6 @@
 /**
- * hadron-internal#40 — pins for the review findings on the first review head (private PR #30): the
- * second engineering read, the §10 security review, the FULL BLIND review and the UX copy review. Each
- * pin uses only modules that exist on that head, so it runs red there as written. Fixtures are tiny
+ * hadron-internal#40 — pins for lookup-cost parity, approval-history charging, context-stack lookup
+ * charging, the bounded include parse, the request aggregate and the refusal remedies. Fixtures are tiny
  * (limits lowered through `setResolutionLimits`) except the render-depth read, which runs at the
  * default limits on purpose and stays well under a megabyte.
  */
@@ -61,7 +60,7 @@ beforeEach(async () => {
 });
 afterEach(() => setResolutionLimits(null));
 
-describe('#40 second read P2-1: a missing and an unreadable URN target cost the same at the lookup bound', () => {
+describe('#40: a missing and an unreadable URN target cost the same at the lookup bound', () => {
   // Lookups: the URN identity and its target (charged together, before the identity is known), then the
   // default data node. A missing target and an existing one the reader may not read both cost 3.
   beforeEach(async () => {
@@ -83,7 +82,7 @@ describe('#40 second read P2-1: a missing and an unreadable URN target cost the 
   });
 });
 
-describe('#40 second read P2-2 / LOCAL P2-1: an approval history is charged as it is read', () => {
+describe('#40: an approval history is charged as it is read', () => {
   /**
    * `t` is at revision 21. Snapshot 20 holds the text with no approval of its own; snapshot 19 is the
    * earliest valid approval of that text; snapshots 1-18 carry the same approval hash over altered text
@@ -119,7 +118,7 @@ describe('#40 second read P2-2 / LOCAL P2-1: an approval history is charged as i
   });
 });
 
-describe('#40 §10 P2-1 / P3-1: a lookup is charged by the context stack it may walk', () => {
+describe('#40: a lookup is charged by the context stack it may walk', () => {
   // Root: 1 entry + 1 token (#n), at depth 1 (no extra) = 2. Depth 2: 1 + 1 (#n) + 1 lookup × 1 = 3.
   // Depth 3: 1 + 2 (a, b) + 2 lookups × 2 = 7. Total 12.
   const template = '{{#n}}{{#n}}{{a}}{{b}}{{/n}}{{/n}}';
@@ -137,7 +136,7 @@ describe('#40 §10 P2-1 / P3-1: a lookup is charged by the context stack it may 
       .toThrow(expect.objectContaining({ limit: 'steps' }));
   });
 
-  // The review's shape, scaled down: 300 nested sections over a number around 1,000 distinct names that all
+  // Scaled down: 300 nested sections over a number around 1,000 distinct names that all
   // miss. Each miss walks all 301 contexts, so the render is ~300k probes; the token visits alone are ~1.3k.
   const names = Array.from({ length: 1_000 }, (_, i) => `{{v${i}}}`).join('');
   it('deep nesting over many missing names refuses as steps at the default limits, through a GraphQL read', async () => {
@@ -151,7 +150,7 @@ describe('#40 §10 P2-1 / P3-1: a lookup is charged by the context stack it may 
   });
 });
 
-describe('#40 FULL BLIND P2: the include parse is bounded by the expansions left', () => {
+describe('#40: the include parse is bounded by the expansions left', () => {
   it('more well-formed tags than expansions allowed refuses before a later malformed tag is reached', async () => {
     await mk('a', 'A');
     await mk('p', '{{> a}}{{> a}}{{> a}}{{> a}} {{> }}');
@@ -171,7 +170,7 @@ describe('#40 FULL BLIND P2: the include parse is bounded by the expansions left
   });
 });
 
-describe('#40 FULL BLIND P2: a refused read consumes none of the request aggregate', () => {
+describe('#40: a refused read consumes none of the request aggregate', () => {
   it('served, refused, then a smaller read that fits is still served', () => {
     const request = new RequestResolutionBudget(10);
     request.chargeServed('x'.repeat(6));
@@ -181,7 +180,7 @@ describe('#40 FULL BLIND P2: a refused read consumes none of the request aggrega
   });
 });
 
-describe('#40 LOCAL P2-2: a direct compile charges the request like a resolved read', () => {
+describe('#40: a direct compile charges the request like a resolved read', () => {
   it('a compiled template is charged; a body with no template syntax is served as stored, uncharged', () => {
     setResolutionLimits({ requestMaxBytes: 4 });
     const c = ctx();
@@ -191,7 +190,7 @@ describe('#40 LOCAL P2-2: a direct compile charges the request like a resolved r
   });
 });
 
-describe('#40 UX review: the refusal names a remedy the surface offers', () => {
+describe('#40: the refusal names a remedy the surface offers', () => {
   it('a read keeps the raw remedy', async () => {
     await mk('t', 'x'.repeat(20));
     await mk('p', '{{> t}}');

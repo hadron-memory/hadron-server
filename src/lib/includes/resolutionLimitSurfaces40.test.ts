@@ -121,7 +121,7 @@ describe('#40 skill export: the refused node is left out and named; the others e
     const finding = big.findings.find((f: any) => f.rule === 'skill-content-resolution-limit');
     expect(finding).toMatchObject({ severity: 'error' });
     expect(finding.message).toMatch(/size limit/);
-    // An export has no raw read, so its remedy is the export one (UX review P2).
+    // An export has no raw read, so its remedy is the export one.
     expect(finding.message).toContain('Export it after shortening the content, or read the stored text instead.');
     expect(finding.message).not.toContain('raw: true');
     expect(big.renderedBody).toBeNull();
@@ -177,7 +177,7 @@ describe('#40 run renders refuse before any record', () => {
   });
 });
 
-describe('#40 run renders count toward the request aggregate (LOCAL review P2-2)', () => {
+describe('#40 run renders count toward the request aggregate', () => {
   it('renderRunNode and the render-only runTask past the aggregate refuse as requestBytes', async () => {
     await mk('t', 'x'.repeat(20));
     await mk('task', 'do {{> t}} now', { isRunnable: true });

@@ -164,7 +164,7 @@ async function approvedText(
 ): Promise<{ revNo: number; text: string } | null> {
   // Not memoized, so every approved tag pays for its work. The approval helpers charge each query they run
   // and each text they load (the search's verdicts and the chosen revision's alike), so a long approval
-  // history is bounded by the read's budget rather than a flat charge (#40, second engineering read P2-2).
+  // history is bounded by the read's budget rather than a flat charge (#40).
   const revNo = pinned ?? (await newestApprovedRevisionOf(db, target.id, undefined, budget)).found?.revNo;
   if (revNo === undefined) return null;
   const verdict = await revisionApprovalOf(db, target.id, revNo, budget, target.memoryId);
@@ -218,7 +218,7 @@ async function expandTag(
   if (tag.kind === 'urn') {
     let identity = memo.targetIdentityByUrn.get(tag.target);
     if (!identity) {
-      // #40 (second engineering read P2-1): the identity query AND the target lookup are charged here, before
+      // #40: the identity query AND the target lookup are charged here, before
       // anything depends on what the identity finds. A missing node, a foreign one this read may not follow, an
       // unreadable one and a readable one then cost the same, so the lookup bound is no existence oracle.
       opts.budget?.chargeLookup(2);
@@ -255,7 +255,7 @@ async function spliceWithin(
     opts.budget?.chargeSpliced(content);
     return content;
   }
-  // #40 delta: the text is masked once, and the bounded parse runs first, so a text with more tags than the
+  // #40: the text is masked once, and the bounded parse runs first, so a text with more tags than the
   // expansions left refuses before anything else walks its tags. Literal tags are found after the parse.
   const masked = maskCode(content);
   let literal: Array<{ index: number; raw: string }> = [];
@@ -272,7 +272,7 @@ async function spliceWithin(
   };
   let tags: Array<IncludeTag & { index: number }>;
   try {
-    // #40 (FULL BLIND review): every tag located here is expanded, and each expansion is charged, so the
+    // #40: every tag located here is expanded, and each expansion is charged, so the
     // parse builds no more tags than the expansions still allowed. One more refuses before it is built.
     tags = locateIncludeTags(content, opts.budget?.remainingExpansions(), masked);
   } catch (e) {

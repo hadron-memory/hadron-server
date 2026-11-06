@@ -405,7 +405,7 @@ export async function revisionApprovalOf(
   /** #40: a resolved read's budget. Every query is charged before it runs and every loaded text after. */
   meter?: ApprovalReadMeter,
   /**
-   * #40 (LOCAL delta): the one memory the caller may serve a revision from. A revision captured anywhere else
+   * #40: the one memory the caller may serve a revision from. A revision captured anywhere else
    * answers NOT_APPROVED before any of its text is charged, so whether such a row exists, and how large it is,
    * never changes what the reader sees. Unset keeps the full verdict for callers that judge any capture.
    */
@@ -485,7 +485,7 @@ export async function revisionApprovalOf(
       orderBy: { revNo: 'asc' },
       take: APPROVAL_RECORD_PAGE,
     });
-    // Every row the page returned was loaded, so every row is charged before one is chosen (#40 delta).
+    // Every row the page returned was loaded, so every row is charged before one is chosen (#40).
     for (const r of page) chargeTexts(meter, r);
     earliest = page.map(recordOf).find((r): r is NodeApprovalRecord => r != null) ?? null;
     if (earliest || page.length < APPROVAL_RECORD_PAGE) break;

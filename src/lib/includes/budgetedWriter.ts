@@ -16,7 +16,7 @@ import type { ResolutionBudget } from './resolutionBudget.js';
  *   each enclosing context in turn, so inside N nested sections one `{{name}}` that misses costs N
  *   context probes, not one. Each lookup token (`{{name}}`, `{{&name}}`, `{{#name}}`, `{{^name}}`)
  *   is charged one step per context above the root, on top of its visit, so deep nesting cannot
- *   multiply render work past the step limit (#40 security review P2-1). At the root (no section)
+ *   multiply render work past the step limit (#40). At the root (no section)
  *   the charge is the visit alone.
  */
 /** Token types whose render looks a name up through the context stack. */
@@ -46,7 +46,7 @@ export class BudgetedWriter extends Mustache.Writer {
   ): string {
     let lookups = 0;
     // A lookup walks each dot segment at each context level (mustache's Context.lookup), so it is charged
-    // by its segments, not once (#40 §10 delta).
+    // by its segments, not once (#40).
     for (const token of tokens) if (LOOKUP_TOKENS.has(token[0])) lookups += String(token[1]).split('.').length;
     this.budget.chargeStep(1 + tokens.length + lookups * (this.depthOf(context) - 1));
     return super.renderTokens(tokens, context, partials, originalTemplate, config);

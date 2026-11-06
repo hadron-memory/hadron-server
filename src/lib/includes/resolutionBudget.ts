@@ -65,7 +65,7 @@ const LIMIT_TEXT: Record<ResolutionLimit, string> = {
 };
 
 /**
- * Where a refusal is shown, which decides its remedy (UX review, private #40). A read (MCP, GraphQL)
+ * Where a refusal is shown, which decides its remedy (#40). A read (MCP, GraphQL)
  * can ask for the stored text with `raw: true`; an export has no such option.
  */
 export type ResolutionSurface = 'read' | 'export';
@@ -122,7 +122,7 @@ export class RequestResolutionBudget {
   constructor(readonly maxBytes: number = currentRequestMaxBytes()) {}
   /**
    * Checked before it is committed: a refused read serves nothing, so it consumes none of the
-   * allowance and a smaller sibling read that fits is still served (#40 FULL BLIND review).
+   * allowance and a smaller sibling read that fits is still served (#40).
    */
   chargeServed(text: string): void {
     const next = this.served + utf8Bytes(text);

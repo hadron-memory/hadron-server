@@ -88,7 +88,7 @@ describe('#40 chat prompts', () => {
       .rejects.toMatchObject({ extensions: { code: CONTENT_RESOLUTION_LIMIT_EXCEEDED, limit: 'bytes' } });
   });
 
-  // #40 LOCAL review P2-2: a compiled chat prompt is a served resolved read, so it counts toward the request's
+  // #40: a compiled chat prompt is a served resolved read, so it counts toward the request's
   // aggregate like every other. The prompt compiles to "ask  " plus 20 bytes; one byte of
   // aggregate is far below it.
   it('startChat past the request aggregate refuses as requestBytes and leaves no chat', async () => {

@@ -1,7 +1,7 @@
 /**
- * hadron-internal#40: pins for the delta findings on the combined fix head 18038090 (private PR #30): the
- * same-holder LOCAL, second engineering, BLIND and UX deltas. Each pin uses only modules that exist on that
- * head, so it runs red there as written. Fixtures are tiny; limits are lowered through `setResolutionLimits`.
+ * hadron-internal#40: pins for revision scoping, approval-page charging, the bounded literal-tag scan, the
+ * request-aggregate remedy and per-segment lookup charging. Fixtures are tiny; limits are lowered through
+ * `setResolutionLimits`.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
@@ -61,7 +61,7 @@ beforeEach(async () => {
 });
 afterEach(() => { setResolutionLimits(null); vi.restoreAllMocks(); });
 
-describe('#40 delta (LOCAL 1): a revision captured in a memory the include cannot serve is never charged', () => {
+describe('#40: a revision captured in a memory the include cannot serve is never charged', () => {
   // `victim` is live at revision 2 with content `v`; the parent asks for `rev=1 approved`. Whether revision 1
   // is absent or was captured in another org's memory (small or large), the reader must see the same answer.
   let victimId: string;
@@ -91,7 +91,7 @@ describe('#40 delta (LOCAL 1): a revision captured in a memory the include canno
   });
 });
 
-describe('#40 delta (LOCAL 2 = second read P2-2 = BLIND P2): every row of a fetched approval page is charged', () => {
+describe('#40: every row of a fetched approval page is charged', () => {
   // `t` is live at revision 10 (`v`). Snapshot 9 holds `H` with no approval of its own. Snapshot 1 is a valid
   // approval of `H`, so it is the earliest record; snapshots 2-8 carry the same hash over 100-byte altered text
   // (not approvals) and arrive in the same page of eight. They were loaded, so they are charged.
@@ -113,7 +113,7 @@ describe('#40 delta (LOCAL 2 = second read P2-2 = BLIND P2): every row of a fetc
   });
 });
 
-describe('#40 delta (LOCAL 3 = BLIND P2): literal-tag discovery runs only within the expansions left', () => {
+describe('#40: literal-tag discovery runs only within the expansions left', () => {
   /** Every match each `matchAll` call yields, in call order. */
   function countMatches(): number[] {
     const counts: number[] = [];
@@ -143,7 +143,7 @@ describe('#40 delta (LOCAL 3 = BLIND P2): literal-tag discovery runs only within
   });
 });
 
-describe('#40 delta (UX P3): the request-aggregate remedy fits every surface that meets it', () => {
+describe('#40: the request-aggregate remedy fits every surface that meets it', () => {
   it('chat and run renders are not told to request fewer nodes', () => {
     expect(resolutionLimitMessage('requestBytes')).toBe(
       'This content could not be resolved: it exceeds the per-request size limit for a resolved read. '
@@ -152,7 +152,7 @@ describe('#40 delta (UX P3): the request-aggregate remedy fits every surface tha
   });
 });
 
-describe('#40 delta (§10 P2-1 residual, P3-2): a lookup is charged by every segment it walks at every level', () => {
+describe('#40: a lookup is charged by every segment it walks at every level', () => {
   // Root 2; depth 2: 1 + 1 (#n) + 1 × 1 = 3; depth 3: 1 + 1 token + 2 segments (a.b) × 2 levels = 6. Total 11.
   const dotted = '{{#n}}{{#n}}{{a.b}}{{/n}}{{/n}}';
   it('a dotted name: the exact count, at the step', () => {
@@ -169,7 +169,7 @@ describe('#40 delta (§10 P2-1 residual, P3-2): a lookup is charged by every seg
       .toThrow(expect.objectContaining({ limit: 'steps' }));
   });
 
-  // The review's shape: 550 nested sections over 40 long dotted names that all miss, at the default limits.
+  // The shape: 550 nested sections over 40 long dotted names that all miss, at the default limits.
   const longName = (i: number) => `q${i}` + '.a'.repeat(10_500);
   it('long dotted names in deep nesting refuse as steps at the default limits', () => {
     const body = Array.from({ length: 40 }, (_, i) => `{{${longName(i)}}}`).join('');

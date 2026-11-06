@@ -103,13 +103,13 @@ export function parseIncludeTags(content: string): IncludeTag[] {
  */
 export function locateLiteralIncludeTags(
   content: string,
-  /** `maskCode(content)` when the caller already has it (#40 delta: one mask per text, not one per pass). */
+  /** `maskCode(content)` when the caller already has it (#40: one mask per text, not one per pass). */
   masked: string = content.includes('{{>') ? maskCode(content) : content,
 ): Array<{ index: number; raw: string }> {
   if (!content.includes('{{>')) return [];
   const literal: Array<{ index: number; raw: string }> = [];
   // Both match streams ascend by offset, so one forward walk finds every overlap: linear, and the active
-  // tags are read one at a time as the walk reaches them, never collected into a list (#40 delta).
+  // tags are read one at a time as the walk reaches them, never collected into a list (#40).
   const active = masked.matchAll(TAG);
   let current = active.next();
   for (const m of content.matchAll(TAG)) {

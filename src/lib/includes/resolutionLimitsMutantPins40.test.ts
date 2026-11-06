@@ -1,5 +1,5 @@
 /**
- * hadron-internal#40 — pins added for the mutants the first run left alive. Each block names the guard it holds.
+ * hadron-internal#40 — boundary pins, one block per guard. Each block names the guard it holds.
  * The includes-only reads matter: a full read also renders, and the render's own byte charge can hide a missing
  * splice charge, so the splice charges are pinned where nothing renders after them.
  */
