@@ -29,21 +29,25 @@ function runtimeImports(source: string): string[] {
   return imports;
 }
 
-function reaches(graph: Map<string, string[]>, from: string, target: string): boolean {
-  const seen = new Set<string>();
-  const pending = [...(graph.get(from) ?? [])];
-  while (pending.length) {
-    const next = pending.pop()!;
-    if (next === target) return true;
-    if (seen.has(next)) continue;
-    seen.add(next);
-    pending.push(...(graph.get(next) ?? []));
+// A closed witness, not an invented sequence of every declared root.
+function cycleWitness(graph: Map<string, string[]>, roots: string[]): string[] | null {
+  function reaches(from: string, target: string): boolean {
+    const seen = new Set<string>();
+    const pending = [...(graph.get(from) ?? [])];
+    while (pending.length) {
+      const next = pending.pop()!;
+      if (next === target) return true;
+      if (seen.has(next)) continue;
+      seen.add(next);
+      pending.push(...(graph.get(next) ?? []));
+    }
+    return false;
   }
-  return false;
+  return roots.some(root => reaches(root, root)) ? [...roots, roots[0]!] : null;
 }
 
 function hasCycle(graph: Map<string, string[]>, roots: string[]): boolean {
-  return roots.some(root => reaches(graph, root, root));
+  return cycleWitness(graph, roots) !== null;
 }
 
 describe('#3332 instructed-act runtime import graph', () => {
@@ -81,7 +85,23 @@ describe('#3332 instructed-act runtime import graph', () => {
         });
       graph.set(file, deps);
     }
-    const witness = roots.map(file => relative(src, file)).concat(relative(src, roots[0]!)).join(' -> ');
-    expect(hasCycle(graph, roots), 'runtime dependency cycle: ' + witness).toBe(false);
+    const witness = cycleWitness(graph, roots);
+    expect(witness, 'runtime dependency cycle: ' + witness?.map(file => relative(src, file)).join(' -> ')).toBeNull();
+  });
+});
+
+// #3560: fixtures model source edges only; no project module is imported/evaluated.
+describe('#3560 discovered cycle diagnostics (synthetic)', () => {
+  it('reports actual edges of a two-node cycle, never an isolated third root', () => {
+    const graph = new Map([['worker', ['instruction']], ['instruction', ['worker']], ['teamChat', []]]);
+    const witness = cycleWitness(graph, [...graph.keys()]);
+    expect(witness).not.toBeNull();
+    expect(witness![0]).toBe(witness!.at(-1));
+    expect(witness).not.toContain('teamChat');
+    for (let i = 1; i < witness!.length; i++) expect(graph.get(witness![i - 1]!)).toContain(witness![i]);
+  });
+  it('handles acyclic and self-cycle graphs', () => {
+    expect(cycleWitness(new Map([['a', ['b']], ['b', []]]), ['a', 'b'])).toBeNull();
+    expect(cycleWitness(new Map([['a', ['a']]]), ['a'])).toEqual(['a', 'a']);
   });
 });
