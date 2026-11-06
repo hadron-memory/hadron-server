@@ -103,26 +103,30 @@ function textPred(column: string, q: string): AnyWhere {
  * or crosses their separator. Try every separator of the normalized query as
  * that boundary: the memory must END with the left half and loc START with
  * the right half. No assumption about how many leading atoms were supplied.
- * This builds the loc/boundary predicates; memory-only matches fill unused
- * slots separately in searchNodes. Memory URNs may still store the legacy
- * double-colon spelling; loc is single-colon. Final scoring uses the shared
+ * Two-sided boundaries join the direct loc predicates; memory-only and
+ * one-sided matches fill unused slots separately in searchNodes. Memory URNs
+ * may still store the legacy double-colon spelling; loc is single-colon. Final scoring uses the shared
  * URN emitter.
  */
-function nodeUrnPreds(urnTerm: string): AnyWhere[] {
+function nodeUrnPreds(urnTerm: string): { direct: AnyWhere[]; broad: AnyWhere[] } {
   const term = urnTerm.replace(/:+/g, ':');
-  const preds: AnyWhere[] = [textPred('loc', term)];
+  const direct: AnyWhere[] = [textPred('loc', term)];
+  const broad: AnyWhere[] = [{ memory: { OR: urnPreds('urn', term) } }];
   for (let i = 0; i < term.length; i++) {
     if (term[i] !== ':') continue;
     const memoryTail = term.slice(0, i);
     const locHead = term.slice(i + 1);
     for (const variant of urnSearchVariants(memoryTail)) {
-      preds.push({ AND: [
+      // One-sided splits are real URN substrings, but can match an entire
+      // memory or every loc prefix. Like #301, they must not flood the cap
+      // before direct matches; keep them in the remaining-slot pool.
+      (memoryTail && locHead ? direct : broad).push({ AND: [
         { memory: { urn: { endsWith: variant, mode: 'insensitive' } } },
         { loc: { startsWith: locHead, mode: 'insensitive' } },
       ] });
     }
   }
-  return preds;
+  return { direct, broad };
 }
 
 /**
@@ -255,7 +259,12 @@ async function searchNodes(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
   const { fields, q, urnTerm, principal } = ctx;
   const preds: AnyWhere[] = [];
   if (fields.has('pk')) preds.push(pkPred(q));
-  if (fields.has('urn')) preds.push(...nodeUrnPreds(urnTerm));
+  let broadUrnPreds: AnyWhere[] = [];
+  if (fields.has('urn')) {
+    const urnPredicates = nodeUrnPreds(urnTerm);
+    preds.push(...urnPredicates.direct);
+    broadUrnPreds = urnPredicates.broad;
+  }
   if (fields.has('name')) preds.push(textPred('name', q));
   if (fields.has('description')) preds.push(textPred('description', q));
   if (fields.has('content')) {
@@ -287,9 +296,9 @@ async function searchNodes(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
   };
   if (fields.has('content')) nodeSelect.content = true;
 
-  // #1586: direct node-field and cross-boundary matches take candidate slots
-  // before memory-only matches. A large memory whose address contains a word
-  // must not crowd out a node named that word. Fill only the remaining slots,
+  // #1586: direct node-field and two-sided boundary matches take candidate slots
+  // before memory-only and one-sided matches. A large memory whose address
+  // contains a word must not crowd out a node named that word. Fill only the remaining slots,
   // so the total fetched/scored node budget stays ctx.cap (not cap per branch).
   const rows = await ctx.db.node.findMany({
     where: {
@@ -301,20 +310,20 @@ async function searchNodes(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
     take: ctx.cap,
   });
 
-  if (fields.has('urn') && rows.length < ctx.cap) {
-    const memoryOnly = await ctx.db.node.findMany({
+  if (broadUrnPreds.length > 0 && rows.length < ctx.cap) {
+    const broadMatches = await ctx.db.node.findMany({
       where: {
         AND: [
           nodeScopeWhere(principal), { deletedAt: null },
           { nodeType: { not: COMMENT_NODE_TYPE } },
           { id: { notIn: rows.map(row => row.id) } },
-          { memory: { OR: urnPreds('urn', urnTerm.replace(/:+/g, ':')) } },
+          { OR: broadUrnPreds },
         ],
       } as Prisma.NodeWhereInput,
       select: nodeSelect,
       take: ctx.cap - rows.length,
     });
-    rows.push(...memoryOnly);
+    rows.push(...broadMatches);
   }
 
   const hits: GlobalSearchHit[] = [];

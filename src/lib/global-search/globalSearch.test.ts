@@ -275,6 +275,14 @@ describe('globalSearch — smart-sniff', () => {
     expect(result.hits.some(hit => hit.memoryId === fx.memoryA)).toBe(true);
   });
 
+  it('keeps colon-only URN matches within the same access scope (#1586 colon)', async () => {
+    const expected = await db.node.findMany({ where: { memoryId: { in: viewerP().accessibleMemoryIds! }, deletedAt: null, nodeType: { not: 'comment' } }, select: { id: true } });
+    for (const query of [':', '::']) {
+      const result = await globalSearch(db, { query, entityTypes: ['node'] }, viewerP());
+      expect(ids(result.hits)).toEqual(new Set(expected.map(row => row.id)));
+    }
+  });
+
   it('bare-loc search finds its node even amid many same-tail locs (#301)', async () => {
     // Regression: the loc predicate once fell back to the query's LAST atom
     // ("01"), which matches a huge fraction of a spec corpus. With take: 100
