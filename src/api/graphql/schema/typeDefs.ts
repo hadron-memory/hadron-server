@@ -11024,7 +11024,7 @@ export const typeDefs = `#graphql
     """
     setWorkerWakeSettings(workerRef: String!, input: WorkerWakeSettingsInput!, instruction: ActInstructionInput): WorkerWakeSettings!
     """
-    S7 (#2023, R85) — isolate a worker until a time (default 2 hours, at most 7 days; a later time extends, an earlier one shortens).
+    Deprecated compatibility door: isolation is removed; this call retains its existing audience and refuses without writing.
     #3606 phase-1 compatibility door. Isolation is removed. Refusals retain the source-exact order:
     an unknown worker, or one the caller cannot read (a pure App key among them), is WORKER_NOT_FOUND;
     a worker session with no instruction is WORKER_ISOLATION_FORBIDDEN; everyone else receives
@@ -16340,7 +16340,7 @@ export const typeDefs = `#graphql
     STOPPED
     "Its own pause (pausedUntil) is in force."
     PAUSED
-    "In isolation (unreachable until isolation is built)."
+    "Deprecated compatibility value; isolation is removed and this value is never returned."
     ISOLATED @deprecated(reason: "Removed; never returned (#3606).")
     "Compatibility-only value: standby has been removed; never returned."
     STANDBY @deprecated(reason: "Removed; never returned (#3606).")

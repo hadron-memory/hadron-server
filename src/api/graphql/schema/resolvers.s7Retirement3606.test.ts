@@ -61,6 +61,8 @@ describe('phase-1 retirement', () => {
   expect((await loadPendingReasons(fake as never, appId, ['legacy'], now)).get('legacy')).toBe('NO_TASK');
   fake.agentTask.findMany = async () => [{ assigneeWorkerId: 'legacy' }] as never;
   expect((await loadPendingReasons(fake as never, appId, ['legacy'], now)).get('legacy')).toBeNull();
+  fake.workerWakeSettings.findMany = async () => [{ workerId: 'legacy', pausedUntil: new Date(now.getTime()+60_000), isolatedUntil: new Date(now.getTime()+120_000) }] as never;
+  expect((await loadPendingReasons(fake as never, appId, ['legacy'], now)).get('legacy')).toBe('PAUSED');
  });
  it('retains and deprecates every released-client selected field and both doors', () => {
   const schema = buildSchema(typeDefs);

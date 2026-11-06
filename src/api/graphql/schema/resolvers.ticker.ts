@@ -863,7 +863,7 @@ async function deprecatedIsolationDoor(ctx: Context, workerRef: string, clear: b
     const w = await lockWorker(tx, target.id);
     if (!w || w.appId !== fresh.id || w.retiredAt) throw workerNotFound(workerRef);
     if (!(await mayClearRetiredIsolation(txCtx, fresh, actor, w))) throw isolationForbidden();
-    // No row creation, exemption change, or manager act: there is no isolation left to clear.
+    // No row creation, exemption change, or manager act. Legacy stored values stay inert and byte-identical.
     return tx.workerWakeSettings.findUnique({ where: { workerId: w.id } });
   });
   return wakeSettingsOut(target.id, row);
