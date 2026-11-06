@@ -163,6 +163,7 @@ import {
 import { refusalResult, toolErrorResult, withToolErrorBoundary } from './toolError.js';
 import { refNamesNothing } from '../lib/entityRef/refNamesNothing.js';
 import { textResult } from './textResult.js';
+import { publicErrorExtensions } from '../lib/errorDiagnostics.js';
 import { tagsInputSchema } from './tagsInput.js';
 import { foreignIdentityScopedMemoryFilter } from '../lib/auth/memoryOwnership.js';
 
@@ -1141,6 +1142,17 @@ async function replaceOutgoingEdgesInTransaction(
  * to the raw stored bare urn if a row can't compose to v2 — display strings must
  * never crash a tool (serve-and-fall-back).
  */
+/**
+ * #1332: a trusted resolver refusal as `[<code>] <message>`, then its public extensions as
+ * `key: value` lines (the comment tools' format). Only called for a trusted refusal.
+ */
+function codedRefusalText(e: unknown): string {
+  if (!(e instanceof GraphQLError)) return 'Error: refused';
+  const { code, ...rest } = publicErrorExtensions(e.extensions ?? {});
+  const extras = Object.entries(rest).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
+  return [`[${String(code ?? 'ERROR').toLowerCase()}] ${e.message}`, ...extras].join('\n');
+}
+
 function safeEmitEntityUrnV2(type: 'memory' | 'app' | 'agent' | 'org', bareUrn: string): string {
   try {
     return emitEntityUrnV2(type, bareUrn);
@@ -3412,6 +3424,51 @@ export function createMcpServerInstance(
         return textResult(`Memory created: ${safeEmitEntityUrnV2('memory', created.urn)} (class: app, id: ${created.id}).`);
       } catch (e) {
         return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'create failed'}`, 'hadron_create_app_memory:resolver');
+      }
+    },
+  );
+
+  // #1332 (cor:dmo:160:01): one write path for content-validation reports, delegated to the
+  // GraphQL resolver, so the gates, the ordered refusals and the server-derived reporter are
+  // computed once. The reporter is never an argument: a bound worker session reports as that
+  // worker, otherwise the caller's own user or App key does.
+  server.tool(
+    'hadron_record_content_validation',
+    'Record the result of running a node\'s validation task on one revision of the node (cor:dmo:160:01). Advisory: it never edits the node or blocks a write. '
+      + 'validationTaskRef is the task the node\'s role rule names now, and validationTaskRevision the task revision that ran. Any writer of the memory may report except the author of that node revision; '
+      + 'if you started a worker session with hadron_start_session, the report is recorded as that worker. runId makes a retry idempotent (same runId, same reporter, same revisions returns the first report); '
+      + 'any other reuse is refused [content_validation_run_id_conflict]. A [conflict] means the node changed during the call: nothing was written, re-read it and decide whether to report again.',
+    SHAPE_HADRON_RECORD_CONTENT_VALIDATION,
+    async ({ nodeRef, nodeRevision, validationTaskRef, validationTaskRevision, outcome, runId, session }) => {
+      // The #1701 gate already published the named session's actor, or cleared it when the
+      // session did not validate. A refused argument is carried to the resolver, which refuses
+      // SESSION_NOT_BOUND only after the not-found and writer gates; it never falls back to
+      // recording the report as the caller's own principal.
+      const requestSession = mcpRequestSessionContext(auth);
+      const argumentRefused = typeof session === 'string' && session.length > 0
+        && !(await validateSessionBinding(db, auth, session));
+      const ctx: Context = {
+        db, userId: auth.userId, clientId: auth.clientId,
+        appId: auth.appId, appKeyId: auth.appKeyId,
+        ...requestSession,
+        sessionBindingRefused: requestSession.sessionBindingRefused || argumentRefused,
+        apiKeyId: auth.apiKeyId, signInId: auth.signInId,
+        roles: auth.roles, organizationId: auth.organizationId,
+        impersonation: auth.impersonation,
+      };
+      try {
+        const receipt = await resolvers.Mutation.recordNodeContentValidationReport(
+          {}, { nodeRef, nodeRevision, validationTaskRef, validationTaskRevision, outcome, runId }, ctx,
+        );
+        const r = receipt.report;
+        return textResult(
+          `${receipt.replayed ? 'Replayed (nothing written)' : 'Recorded'}: ${r.outcome} for revision ${r.nodeRevision} of node ${receipt.nodeId}`
+            + ` (task ${r.validationTaskRef ?? 'unreadable'}${r.validationTaskRevision ? ` revision ${r.validationTaskRevision}` : ''}; author check ${r.authorCheck}).`
+            + ` Current revision state: ${receipt.state}.`,
+        );
+      } catch (e) {
+        if (e instanceof UrnNotQualifiedError) return refusalResult(`[bad_user_input] ${e.message}`);
+        return toolErrorResult(e, () => codedRefusalText(e), 'hadron_record_content_validation:resolver');
       }
     },
   );
@@ -12807,6 +12864,19 @@ const SHAPE_HADRON_SET_ACTIVE_MEMORY = {
 };
 
 // #2661 / #2260: immutable, principal-independent parameter schemas are shared.
+const SHAPE_HADRON_RECORD_CONTENT_VALIDATION = {
+  nodeRef: z.string().min(1).describe('The node reported on: its id or fully-qualified node URN.'),
+  nodeRevision: z.number().int().min(1).describe('The node revision the validation task ran on.'),
+  validationTaskRef: z.string().min(1).describe("The validation task the node's role rule names now: its id or node URN."),
+  validationTaskRevision: z.number().int().min(1).describe('The task revision that ran.'),
+  outcome: z.enum(['PASS', 'FAIL', 'ERROR']).describe('PASS, FAIL, or ERROR when the task could not be run to a verdict.'),
+  runId: z.string().min(1).max(200).optional().describe('Your own label for this run (1-200 characters); makes a retry idempotent. Never an identity.'),
+  // #1332 (Xanthos FIT 6670593797, Xavier #81384): the recorder owns its session argument, so a
+  // refused session is judged after the not-found and writer refusals (cor:dmo:160:01), not by
+  // the #1701 gate before them.
+  session: z.string().optional().describe('Your worker session id, to record the report as that worker. A session that is not one of your open sessions is refused [session_not_bound] after the read and write checks; nothing is written.'),
+};
+
 const SHAPE_HADRON_CREATE_APP_MEMORY = {
   app: z.string().describe('App ID or URN.'),
   name: z.string().min(1).describe('Memory name; determines its slug.'),

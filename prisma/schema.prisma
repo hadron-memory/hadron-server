@@ -1201,6 +1201,24 @@ enum NodeContentValidationOutcome {
   ERROR
 }
 
+/// #1332 (cor:dmo:160:01) — whether a content-validation report's author check
+/// compared R's recorded author with the reporter. CHECKED means compared and
+/// different, never "independent". NULL only on a report written before #1332.
+enum NodeContentValidationAuthorCheck {
+  CHECKED
+  AUTHOR_UNKNOWN
+}
+
+/// #1332 (cor:dmo:160:01 refusal 5) — the kind of server-derived reporter, the
+/// first that applies: a headless run, a worker session, a person acting
+/// directly (any credential, by user id), an App key with no user or worker.
+enum NodeContentValidationReporterKind {
+  RUN
+  WORKER
+  PERSON
+  APP_KEY
+}
+
 model Node {
   chatRootCounter ChatRootCounter?
   /// UUIDv7 from `node.yaml` when supplied by the importer (stable across
@@ -2772,13 +2790,34 @@ model NodeContentValidationReport {
   validationTaskRevSeq Int                          @map("validation_task_rev_seq")
   outcome              NodeContentValidationOutcome
   reportedAt           DateTime                     @default(now()) @map("reported_at")
-  /// Optional producer-run identity for idempotent insertion by #1332.
-  runId                String?                      @unique @map("run_id")
+  /// Optional caller-supplied run id for idempotent insertion (#1332). Unique per
+  /// (node, memory snapshot) only, so a run id never answers across memories. It
+  /// is never an identity: the reporter columns below are.
+  runId                String?                      @map("run_id")
+  /// #1332 — the author check made when the report was recorded. NULL: pre-#1332.
+  authorCheck          NodeContentValidationAuthorCheck? @map("author_check")
+  /// #1332 — the reporter, derived by the server from the request, immutable
+  /// after insert (trigger in post-push.sql) except that reporterUserId follows
+  /// a user merge's survivor. Plain ids, never FKs: a deleted principal keeps
+  /// its history and can never be matched again. NULL kind: no recorded
+  /// reporter, which never replays.
+  reporterKind         NodeContentValidationReporterKind? @map("reporter_kind")
+  /// RUN: the server's AppRun id, never the request's runId.
+  reporterRunId        String?                      @map("reporter_run_id")
+  /// WORKER: the bound worker and its agent.
+  reporterWorkerId     String?                      @map("reporter_worker_id")
+  reporterAgentId      String?                      @map("reporter_agent_id")
+  /// PERSON: the user, never the key it authenticated with.
+  reporterUserId       String?                      @map("reporter_user_id")
+  /// APP_KEY: the App key with no user or worker behind it.
+  reporterAppKeyId     String?                      @map("reporter_app_key_id")
 
   node Node @relation(fields: [nodeId], references: [id], onDelete: Cascade)
 
+  @@unique([nodeId, memoryId, runId], map: "node_validation_node_memory_run_uniq")
   @@index([nodeId, nodeRevSeq, reportedAt], map: "node_validation_node_rev_reported_idx")
   @@index([memoryId])
+  @@index([reporterUserId], map: "node_validation_reporter_user_idx")
   @@map("node_content_validation_reports")
 }
 

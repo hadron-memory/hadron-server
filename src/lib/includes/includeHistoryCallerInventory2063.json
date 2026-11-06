@@ -1,4 +1,5 @@
 {
+  "src/api/graphql/schema/resolvers.contentValidationReport.ts :: withReconciledNodeRead": 1,
   "src/api/graphql/schema/resolvers.decisions.ts :: ensureCurrentNodeRevisionInTransaction": 2,
   "src/api/graphql/schema/resolvers.mutation.chat.ts :: createNodeRevision": 1,
   "src/api/graphql/schema/resolvers.mutation.chat.ts :: ensureCurrentNodeRevisionInTransaction": 1,
