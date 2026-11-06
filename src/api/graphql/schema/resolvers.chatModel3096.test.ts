@@ -101,6 +101,10 @@ describe('#3096 client-reported chat model', () => {
     const afterY = await records(start.chatId);
     expect(afterY.map(r => [r.ordinal, report(r)['session.llmModel']])).toEqual([[1, 'provider/model-X'], [2, 'provider/model-Y']]);
     expect(afterY.map(r => report(r)['session.llmModel.source'])).toEqual(['client-reported', 'client-reported']);
+    // #3513: unrelated nodes with matching text must never satisfy the chat's persistence pin.
+    for (const content of ['one', 'two', 'three', 'four']) {
+      await db.node.create({ data: { id: generateId(), memoryId: systemMemoryId, loc: `persistence-decoy:${content}`, name: 'not a chat message', content } });
+    }
     // Deduplicating the RECORD must not skip the turn: every user message still persisted.
     const persisted = async () => (await db.node.findMany({ where: { content: { in: ['one', 'two', 'three', 'four'] } }, select: { content: true } })).map(n => n.content).sort();
     expect(await persisted()).toEqual(['one', 'three', 'two']);
