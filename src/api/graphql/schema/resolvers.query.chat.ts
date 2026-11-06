@@ -1,3 +1,4 @@
+import { readChatEngineStates } from '../../../lib/chatRootEngineState.js';
 import { readChatCounters } from '../../../lib/chatRootCounters.js';
 import { appInstallationWhere } from '../../../lib/appInstallations.js';
 // chatQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
@@ -146,6 +147,7 @@ type ChatRootRow = { id: string; loc: string; memoryId: string; data: unknown; c
 
 async function toChatRows(ctx: Context, tops: ChatRootRow[]) {
   const counters = await readChatCounters(ctx.db,tops,ctx.sessionId);
+  const engine = await readChatEngineStates(ctx.db, tops);
   // First-message lookup, scoped to the visible page only (was: every
   // candidate chat). Parallelized via Promise.all.
   const firstMessageEntries = await Promise.all(
@@ -185,8 +187,8 @@ async function toChatRows(ctx: Context, tops: ChatRootRow[]) {
       id: node.id,
       loc: node.loc,
       title,
-      conversationName: (data.conversationName as string) ?? null,
-      stageName: (data.stageName as string) ?? null,
+      conversationName: (engine.get(node.id)?.conversationName as string) ?? null,
+      stageName: (engine.get(node.id)?.stageName as string) ?? null,
       messageCount: counters.get(node.id)?.messageCount ?? 0,
       createdAt: node.createdAt,
       lastMessageAt: counters.get(node.id)?.lastMessageAt ?? null,
