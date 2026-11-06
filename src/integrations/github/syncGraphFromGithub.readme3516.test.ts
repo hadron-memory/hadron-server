@@ -125,7 +125,7 @@ it('keeps a parsed governance-refused parent present while reporting only the ch
   expect((await report()).entries).toEqual(expect.arrayContaining([collisionEntry,{kind:'protected',loc:'p',code:'PROTECTED_DECISION'}]));
   expect(await db.edge.findUniqueOrThrow({where:{id:f.stored.id}})).toEqual(f.stored);
 });
-it.each(['absent-parent','idless-child','foreign-child','deleted-child','deleted-parent','wrong-child-loc','duplicate-child','duplicate-invalid-child','ordinary-source','wrong-parent-resolution'])('keeps existing baseline behavior for %s (no guessed recognized pair)',async shape=>{
+it.each(['absent-parent','idless-child','foreign-child','deleted-child','deleted-parent','wrong-child-loc','duplicate-child','duplicate-parent','duplicate-invalid-child','ordinary-source','wrong-parent-resolution'].flatMap(shape=>[false,true].map(reverse=>({shape,reverse}))))('keeps baseline for $shape (reverse=$reverse, no guessed pair)',async({shape,reverse})=>{
   const load=await import('../localFs/loadGraphFromFs.js');const original=load.loadGraphFromFs;
   const run=async(disable:boolean)=>{
     rmSync(root(),{recursive:true,force:true}); await resetDb();const f=await fixture();
@@ -145,10 +145,11 @@ it.each(['absent-parent','idless-child','foreign-child','deleted-child','deleted
     }
     if(shape==='wrong-child-loc')await db.node.update({where:{id:f.child.id},data:{loc:'q'}});
     if(shape==='duplicate-child')file('z.md',f.child.id,'duplicate child');
+    if(shape==='duplicate-parent')file('z.md',f.parent.id,'duplicate parent');
     if(shape==='duplicate-invalid-child')file('evil--> x.md',f.child.id,'duplicate unusable-path claim');
     if(shape==='ordinary-source'){rmSync(join(root(),'p/README.md'));file('.hadron/p.md',f.child.id,'ordinary duplicate loc');}
     const spy=vi.spyOn(load,'loadGraphFromFs').mockImplementation(async(...args)=>{
-      const result=await original(...args);return disable?{...result,sources:[]}:result;
+      const result=await original(...args);if(reverse)result.graph.nodes.reverse();return disable?{...result,sources:[]}:result;
     });
     const result=await syncGraphFromGithub(graph);spy.mockRestore();
     const nodes=await db.node.findMany({where:{memoryId:graph.id},select:{loc:true,content:true,deletedAt:true},orderBy:{loc:'asc'}});
@@ -262,4 +263,20 @@ it('rebuilds prelocks for a candidate arriving after the governed-row scan',asyn
   expect(inserted).toBe(true);expect(retried).toContain('EdgeEndpointPreflightStale');
   expect((await report()).entries.filter((entry:{fromLoc?:string})=>entry.fromLoc==='p:README')).toEqual([collisionEntry]);
   expect(await db.node.findUniqueOrThrow({where:{id:f.child.id}})).toMatchObject({loc:'p:README',content:'late stored child'});
+});
+
+it('preserves the existing canonical-root duplicate-source refusal before any import',async()=>{
+  const f=await fixture();rmSync(join(root(),'p/README.md'));
+  const parent=await db.node.create({data:{memoryId:graph.id,loc:'readme-memory',name:'Root',content:'old root',ownerRepo:'test/repo'}});
+  const child=await db.node.create({data:{memoryId:graph.id,loc:'readme-memory:README',name:'Root child',content:'stored root child',ownerRepo:'test/repo'}});
+  const stored=await db.edge.create({data:{memoryId:graph.id,sourceId:child.id,targetId:f.a.id,name:'root-stored',loc:deriveEdgeLoc(child.loc,'root-stored',f.a.loc)}});
+  file('README.md',parent.id,'edited canonical root');
+  file('readme-memory/README.md',child.id,'refused root child',[{targetId:f.b.id,name:'root-E2'}]);
+  file('third.md',f.third.id,'third',[{targetId:child.id,name:'root-E3'}]);
+  expect((await syncGraphFromGithub(graph)).error).toContain('Git root README slug is occupied');
+  expect(await db.node.findUniqueOrThrow({where:{id:parent.id}})).toEqual(parent);
+  expect(await db.node.findUniqueOrThrow({where:{id:child.id}})).toEqual(child);
+  expect(await db.edge.findUniqueOrThrow({where:{id:stored.id}})).toEqual(stored);
+  expect(await db.edge.count({where:{memoryId:graph.id,name:{in:['root-E2','root-E3','E1']}}})).toBe(0);
+  expect((await report()).outcome).toBe('failed');
 });

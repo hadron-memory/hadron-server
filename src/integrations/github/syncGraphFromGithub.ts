@@ -734,6 +734,7 @@ const syncGraphFromGithubAsSystem = async (
       // Refuse only the child SOURCE; it remains present and keeps its row and
       // stored edges. Its declarations are unapplied, not target-missing pending.
       const readmeCollisions = new Map<string, { parent: Node; child: Node }>();
+      const readmeSourceRows = new Map<string, string>();
       for (const candidate of readmeSources) {
         const fileId = candidate.node.id;
         if (!fileId || idOccurrences.get(fileId) !== 1) continue;
@@ -774,6 +775,10 @@ const syncGraphFromGithubAsSystem = async (
           if (claimedParent?.memoryId === graph.id && claimedParent.id !== parent.id) continue;
         }
         readmeCollisions.set(candidate.source, { parent, child });
+        // Only recognized pairs use source-qualified resolution; unrelated
+        // duplicate-loc imports retain their existing loc-keyed semantics.
+        readmeSourceRows.set(candidate.source, child.id);
+        readmeSourceRows.set(parentSources[0].source, parent.id);
       }
 
       // Locs of files refused for their role: nothing of theirs is written,
@@ -922,6 +927,7 @@ const syncGraphFromGithubAsSystem = async (
         memoryId: graph.id,
         contents: new Map(fsGraph.nodes.filter((n) => n.loc && !readmeCollisions.has(sourceOf.get(n) ?? '')).map((n) => [n.loc!, n.content ?? null] as const)),
       };
+      const reportedReadmePairs = new Set<string>();
       for (const node of fsGraph.nodes) {
         const source = sourceOf.get(node);
         const collision = source ? readmeCollisions.get(source) : undefined;
@@ -929,8 +935,12 @@ const syncGraphFromGithubAsSystem = async (
           protectedRowIds.add(collision.child.id);
           claimedFileIds.add(collision.child.id);
           fileIdToRowId.set(collision.child.id, collision.child.id);
-          heldMoves.push(`${collision.child.loc} → ${collision.parent.loc}`);
-          reportEntries.push({ kind: 'held_move', loc: collision.parent.loc, fromLoc: collision.child.loc, code: 'MOVE_HELD' });
+          const pairKey = `${graph.id}\0${collision.parent.id}\0${collision.child.id}`;
+          if (!reportedReadmePairs.has(pairKey)) {
+            reportedReadmePairs.add(pairKey);
+            heldMoves.push(`${collision.child.loc} → ${collision.parent.loc}`);
+            reportEntries.push({ kind: 'held_move', loc: collision.parent.loc, fromLoc: collision.child.loc, code: 'MOVE_HELD' });
+          }
           continue;
         }
         const loc = node.loc!;
@@ -1587,7 +1597,7 @@ const syncGraphFromGithubAsSystem = async (
         // Resolve endpoints through the remaps: the source is always a file
         // in this repo (by loc); the target prefers this repo's claimant of
         // the referenced id, else stays raw (a cross-repo target).
-        const edgeSourceId = locToRowId.get(edge.sourceLoc) ?? edge.sourceId;
+        const edgeSourceId = (edge.sourceFile ? readmeSourceRows.get(edge.sourceFile) : undefined) ?? locToRowId.get(edge.sourceLoc) ?? edge.sourceId;
         const edgeTargetId = fileIdToRowId.get(edge.targetId) ?? edge.targetId;
         const sourceExists = await tx.node.findUnique({
           where: { id: edgeSourceId, deletedAt: null },
