@@ -9,16 +9,33 @@ import { chatDataObject } from './chatRootCounters.js';
 export const ENGINE_KEYS = ['conversationName', 'stageName', 'routeHistory', 'goalStack', 'lastOffTrackReason', 'lastOffTrackAt'] as const;
 const MOVED = ['routeHistory', 'goalStack', 'lastOffTrackReason', 'lastOffTrackAt'] as const;
 const invalid = () => new GraphQLError('Chat state is unavailable.', { extensions: { code: 'CHAT_STATE_INVALID' } });
+/** Calendar validation without Date.parse rollover or database timezone conversion. */
+function validEngineTime(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  const m = /^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2})(:([0-9]{2})([.][0-9]+)?)?([Zz]|[+-][0-9]{2}:?[0-9]{2})?$/.exec(value);
+  if (!m) return false;
+  const [year, month, day, hour, minute, second] = [m[1], m[2], m[3], m[4], m[5], m[7] ?? '0'].map(Number);
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (month < 1 || month > 12 || day < 1 || day > days[month - 1] || minute > 59 || second > 59 || hour > 24) return false;
+  if (hour === 24 && (minute !== 0 || second !== 0 || /[1-9]/.test(m[8] ?? ''))) return false;
+  const zone = m[9];
+  if (zone && zone !== 'Z' && zone !== 'z') {
+    const digits = zone.slice(1).replace(':', '');
+    if (Number(digits.slice(0, 2)) > 23 || Number(digits.slice(2)) > 59) return false;
+  }
+  return true;
+}
 export function validEngineValue(key: string, value: unknown): boolean {
   if (key === 'conversationName' || key === 'stageName') return typeof value === 'string' && value.trim().length > 0;
   if (key === 'lastOffTrackReason') return typeof value === 'string';
-  if (key === 'lastOffTrackAt') return typeof value === 'string' && /^\d{4}-\d\d-\d\dT/.test(value) && Number.isFinite(Date.parse(value));
+  if (key === 'lastOffTrackAt') return validEngineTime(value);
   if (!Array.isArray(value)) return false;
   return value.every(entry => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
     const e = entry as Record<string, unknown>;
     const strings = (keys: string[]) => keys.every(k => !Object.hasOwn(e, k) || e[k] === undefined || typeof e[k] === 'string');
-    const time = (v: unknown) => typeof v === 'string' && /^\d{4}-\d\d-\d\dT/.test(v) && Number.isFinite(Date.parse(v));
+    const time = validEngineTime;
     if (key === 'routeHistory') return ['ENTER','EXIT','COMPLETED','FOLLOWED'].includes(String(e.action)) && time(e.timestamp)
       && strings(['nodeUrn','topicUrn','conversationUrn','edgeUrn'])
       && (!Object.hasOwn(e,'trigger') || (!!e.trigger && typeof e.trigger === 'object' && !Array.isArray(e.trigger)
@@ -85,7 +102,7 @@ export async function lockedChatEngineState(tx: Prisma.TransactionClient, rootId
   }
   const decoded = chatDataObject(decryptNodeFields({ data: row.state }, info).data);
   if (Object.keys(decoded).some(key => !(ENGINE_KEYS as readonly string[]).includes(key))) await writeChatEngineState(tx, rootId, info, state);
-  const keys = MOVED.filter(key => Object.hasOwn(data, key) && validEngineValue(key, data[key]));
+  const keys = MOVED.filter(key => Object.hasOwn(data, key) && Object.hasOwn(state, key) && validEngineValue(key, data[key]));
   if (keys.length) {
     if (info.isEncrypted) {
       const clean = { ...data }; for (const key of keys) delete clean[key];
