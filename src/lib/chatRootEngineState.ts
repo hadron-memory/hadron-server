@@ -3,8 +3,9 @@
  * Ruling0209 retains the two names as encrypted rollback mirrors until #3557.
  */
 import { GraphQLError } from 'graphql';
+import { encryptString } from './crypto.js';
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
-import { decryptNodeFields, encryptNodeFields, encryptNodeFieldsWithKey, isAuthenticatedDataEnvelope, type MemoryEncryptionInfo } from './nodeCrypto.js';
+import { decryptNodeFields, encryptNodeFields, isAuthenticatedDataEnvelope, type MemoryEncryptionInfo } from './nodeCrypto.js';
 import { chatDataObject } from './chatRootCounters.js';
 export const ENGINE_KEYS = ['conversationName', 'stageName', 'routeHistory', 'goalStack', 'lastOffTrackReason', 'lastOffTrackAt'] as const;
 const MOVED = ['routeHistory', 'goalStack', 'lastOffTrackReason', 'lastOffTrackAt'] as const;
@@ -36,13 +37,13 @@ export function validEngineValue(key: string, value: unknown): boolean {
     const e = entry as Record<string, unknown>;
     const strings = (keys: string[]) => keys.every(k => !Object.hasOwn(e, k) || e[k] === undefined || typeof e[k] === 'string');
     const time = validEngineTime;
-    if (key === 'routeHistory') return ['ENTER','EXIT','COMPLETED','FOLLOWED'].includes(String(e.action)) && time(e.timestamp)
+    if (key === 'routeHistory') return typeof e.action === 'string' && ['ENTER','EXIT','COMPLETED','FOLLOWED'].includes(e.action) && time(e.timestamp)
       && strings(['nodeUrn','topicUrn','conversationUrn','edgeUrn'])
       && (!Object.hasOwn(e,'trigger') || (!!e.trigger && typeof e.trigger === 'object' && !Array.isArray(e.trigger)
         && typeof (e.trigger as Record<string,unknown>).type === 'string'
         && (!Object.hasOwn(e.trigger,'content') || (e.trigger as Record<string,unknown>).content === undefined || typeof (e.trigger as Record<string,unknown>).content === 'string')));
-    return typeof e.description === 'string' && ['ASSISTANT','USER'].includes(String(e.createdBy))
-      && ['ACTIVE','COMPLETED','ABANDONED'].includes(String(e.status)) && time(e.createdAt)
+    return typeof e.description === 'string' && typeof e.createdBy === 'string' && ['ASSISTANT','USER'].includes(e.createdBy)
+      && typeof e.status === 'string' && ['ACTIVE','COMPLETED','ABANDONED'].includes(e.status) && time(e.createdAt)
       && strings(['language','topicUrn','conversationUrn','nodeUrn','edgeUrn'])
       && (!Object.hasOwn(e,'completedAt') || time(e.completedAt));
   });
@@ -81,7 +82,13 @@ export async function readChatEngineStates(db: PrismaClient, roots: readonly { i
     // Preserve myChats' existing encrypted-row null names, even for an unlocked memory.
     if (!info || info.isEncrypted) { result.set(root.id, {}); continue; }
     const row = byId.get(root.id);
-    result.set(root.id, row ? plaintext(row.state, info) : engineState(root.data, false));
+    try { result.set(root.id, row ? plaintext(row.state, info) : engineState(root.data, false)); }
+    catch (error) {
+      // Display-only isolation: a corrupt root must not suppress healthy rows.
+      // Never hide database/key failures or use legacy state as a repair fallback.
+      if (!(error instanceof GraphQLError) || error.extensions.code !== 'CHAT_STATE_INVALID') throw error;
+      result.set(root.id, {});
+    }
   }
   return result;
 }
@@ -129,8 +136,10 @@ export async function encryptChatEngineStateWithKey(tx: Prisma.TransactionClient
   if (!row || isAuthenticatedDataEnvelope(row.state, key)) return false;
   // A failed authentication is not plaintext. Preserve it and refuse, never nest or reseed it.
   if (row.state && typeof row.state === 'object' && Object.hasOwn(row.state, '__enc')) throw invalid();
-  const state = engineState(row.state);
-  const stored = encryptNodeFieldsWithKey({ data: state }, key).data;
+  // Conversion is a confidentiality operation, not an engine execution/read.
+  // Preserve all stored JSON (including malformed shapes and JSON null) verbatim;
+  // strict semantic validation remains at the turn boundary after decryption.
+  const stored = { __enc: encryptString(JSON.stringify(row.state), key) };
   await tx.chatRootEngineState.update({ where: { chatRootNodeId: rootId }, data: { state: stored as Prisma.InputJsonValue } });
   return true;
 }

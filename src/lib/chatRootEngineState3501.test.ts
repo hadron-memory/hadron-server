@@ -419,9 +419,21 @@ it('security: real encryptMemory completes past malformed engine state and encry
   const after = await db.node.findUniqueOrThrow({ where: { id: later.id } });
   expect(state).toHaveProperty('__enc');
   expect(after.content).not.toContain('SYNTHETIC-LATER-CONTENT');
+  sessionKeyCache.set(generateId(), root.memoryId, key);
   expect(decryptNodeFields({ content: after.content }, { id: root.memoryId, isEncrypted: true }).content).toBe('SYNTHETIC-LATER-CONTENT');
   expect(decryptNodeFields({ data: state }, { id: root.memoryId, isEncrypted: true }).data).toEqual({ stageName: '\t' });
   const before = await raw();
   await expect(updateChatRootData(db, root, { id: root.memoryId, isEncrypted: true }, d => d)).rejects.toMatchObject({ extensions: { code: 'CHAT_STATE_INVALID' } });
   expect(await raw()).toEqual(before);
+});
+
+it('3501: lazy seed on an unchanged encrypted turn is ciphertext at birth', async () => {
+  const info = { id: root.memoryId, isEncrypted: true }, key = generateDataKey();
+  sessionKeyCache.set(generateId(), root.memoryId, key);
+  await db.memory.update({ where: { id: root.memoryId }, data: { isEncrypted: true } });
+  await db.node.update({ where: { id: root.id }, data: { data: encryptNodeFields({ data: (await raw()).data }, info).data! } });
+  await updateChatRootData(db, root, info, d => d);
+  const state = (await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } })).state;
+  expect(state).toHaveProperty('__enc');
+  expect(decryptNodeFields({ data: state }, info).data).toMatchObject({ stageName: 'first' });
 });
