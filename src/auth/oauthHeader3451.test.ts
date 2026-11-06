@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { parseHTML } from 'linkedom';
+import { HADRON_HEADER, HADRON_HEADER_STYLE } from './hadron-header.template.js';
 import { SIGNIN_PROMPT_TEMPLATE } from './signin-prompt.template.js';
 import { EMAIL_ENTRY_TEMPLATE, EMAIL_SENT_TEMPLATE, REVIEW_CODE_TEMPLATE } from './email-entry.template.js';
 import { CONSENT_TEMPLATE } from './consent.template.js';
@@ -34,4 +35,9 @@ describe('#3451 shared OAuth branding', () => {
     expect(CONSENT_TEMPLATE).toContain('action="/oauth/authorize"');
     expect(EMAIL_ENTRY_TEMPLATE).toContain('action="/oauth/authorize/email"');
   });
+});
+
+// A reusable branding fragment must not restyle the containing page card.
+it('the branding stylesheet is scoped to the header, not main layout', () => {
+  expect(HADRON_HEADER_STYLE).not.toMatch(/(?:^|[}\s])main\s*\{/);
 });
