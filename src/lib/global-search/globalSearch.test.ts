@@ -449,6 +449,16 @@ describe('globalSearch — an admin finds every matching org (spec 048)', () => 
 describe('globalSearch — GraphQL resolver wiring', () => {
   const ctxFor = (userId: string, admin = false): Context => ({ db, userId, roles: admin ? ['ADMIN'] : [] });
 
+  it('finds a partial node URN through the portal resolver without widening scope (#1586 resolver)', async () => {
+    const params = { query: 'alpha:guide:intro', entityTypes: ['node'] };
+    const found = await resolvers.Query.globalSearch({}, params, ctxFor(fx.viewer));
+    expect(ids(found.hits)).toEqual(new Set([fx.nodeA]));
+    expect(found.total).toBe(1);
+    const scopedOut = await resolvers.Query.globalSearch({}, { ...params, orgId: fx.orgB }, ctxFor(fx.viewer));
+    expect(scopedOut.hits).toEqual([]);
+    expect(scopedOut.total).toBe(0);
+  });
+
   it('scopes via the real ctx gates', async () => {
     const r = await resolvers.Query.globalSearch({}, { query: 'Alpha' }, ctxFor(fx.viewer));
     expect(r.hits.some((h) => h.id === fx.memoryA)).toBe(true);
