@@ -5,7 +5,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb } from '../../../test/helpers.js';
+import { cleanDb, createDbNode } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -271,9 +271,28 @@ describe('#3426 where defaults apply (C3, C4)', () => {
     await tpl('base', [rule('spec', taskA)], { orgDefault: true });
     const src = await newMemory('src1');
     await db.nodeRoleRule.deleteMany({ where: { config: { memoryId: src.id } } });
-    const CLONE = `mutation($s: ID!, $n: String!) { cloneMemory(sourceRef: $s, name: $n) { id } }`;
-    const r = await gql(as(admin), CLONE, { s: src.id, n: 'copy1' });
-    if (!r.errors) expect(await rulesOf(r.data!.cloneMemory.id)).toEqual([]);
+    const CLONE = `mutation($r: ID!, $t: String!) { cloneMemory(ref: $r, targetUrn: $t) { id } }`;
+    const r = await gql(as(admin), CLONE, { r: src.id, t: 'hrn:mem:acme.com:copy1' });
+    expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
+    expect(await rulesOf(r.data!.cloneMemory.id)).toEqual([]);
+    const parent = await createDbNode(db, { loc: 'findings:auth', memoryId: src.id, content: 'root' });
+    await createDbNode(db, { loc: 'findings:auth:leaf', memoryId: src.id, content: 'leaf' });
+    const EXTRACT = `mutation($p: ID!, $t: String!) { extractParentNodeToMemory(parentRef: $p, targetUrn: $t) { id } }`;
+    const x = await gql(as(admin), EXTRACT, { p: parent.id, t: 'hrn:mem:acme.com:extracted1' });
+    expect(x.errors, JSON.stringify(x.errors)).toBeUndefined();
+    expect(await rulesOf(x.data!.extractParentNodeToMemory.id)).toEqual([]);
+  });
+
+  it('a rules update that omits the flag cannot slip an org-unreadable ref into a template enabled meanwhile (CONFLICT)', async () => {
+    const t = await tpl('racing', [rule('spec', taskA)]);
+    faults.beforeLockRefs = async () => {
+      const on = await gql(as(admin), UPDATE_TPL, { r: t.id, i: { orgDefault: true } });
+      expect(on.errors, JSON.stringify(on.errors)).toBeUndefined();
+    };
+    const r = await gql(as(admin), UPDATE_TPL, { r: t.id, i: { rules: [rule('spec', privTask)] } });
+    expect(errCode(r)).toBe('CONFLICT');
+    const rows = await db.memoryConfigTemplateRule.findMany({ where: { templateId: t.id } });
+    expect(rows.map((x) => x.authorTaskId)).toEqual([taskA.id]);
   });
 
   it('createMemory(source:) still gets the defaults (no caller-selectable opt-out)', async () => {

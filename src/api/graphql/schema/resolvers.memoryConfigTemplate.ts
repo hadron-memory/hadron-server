@@ -537,11 +537,14 @@ export const memoryConfigTemplateMutations = {
         if (!current) throw new MemoryConfigTemplateNotFoundError(ref);
         await reassertManageOwner(ctx, tx, current, () => new MemoryConfigTemplateNotFoundError(ref));
         if (expectedRevision != null && current.revision !== expectedRevision) throw conflict(current.revision, 'template');
+        // The validation plan above rests on the flag read before the lock. When the request does not set the flag and
+        // it moved meanwhile (a concurrent enable), that plan is stale: refuse rather than save unvalidated references.
+        if (input.orgDefault == null && current.orgDefault !== before.orgDefault) throw conflict(current.revision, 'template');
         if (validateDefault) {
           if (storedRules) {
             // The rules moved between the unlocked read and the lock: judge nothing against a stale list.
             const again = await tx.memoryConfigTemplateRule.findMany({ where: { templateId: id }, orderBy: { role: 'asc' } });
-            const sig = (rs: typeof again) => JSON.stringify(rs.map((r) => [r.id, r.role, r.authorTaskId, r.validationTaskId, r.descriptionNodeId]));
+            const sig = (rs: typeof again) => JSON.stringify(rs.map((r) => [r.id, r.role, r.authorTaskId, r.validationTaskId, r.descriptionNodeId, r.authorTaskRequired, r.validationTaskRequired]));
             if (sig(again) !== sig(storedRules)) throw conflict(current.revision, 'template');
           }
           await assertRefsReadableToOrg(tx, current.organizationId!, resolved);
