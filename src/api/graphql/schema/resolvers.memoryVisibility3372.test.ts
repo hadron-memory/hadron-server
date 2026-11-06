@@ -146,3 +146,44 @@ describe('#3372 controls and access precedence', () => {
     },
   );
 });
+
+
+describe('#3559 retained GROUP direction and readable-reader precedence', () => {
+  it.each(noVisibility)('%s/GROUP keeps the older direction refusal before newer class checks', async memoryClass => {
+    const row = await memory(memoryClass);
+    const before = await snapshot(row.id);
+    const error = await errorOf({
+      id: row.id, visibility: 'GROUP', name: 'must-not-write',
+      urn: 'visibility3372.example:must-not-rename',
+    });
+    expect(error).toBeInstanceOf(GraphQLError);
+    expect((error as GraphQLError).extensions.code).toBe('INVALID_GROUP_MEMORY_VISIBILITY');
+    expect(await snapshot(row.id)).toEqual(before);
+  });
+
+  // Record readability follows cor:acl:010:01; denying settings changes to
+  // this reader pins current requireMemoryManageAccess behavior, not a
+  // corpus rule about who may manage a memory's settings (FIT #3559).
+  it.each([
+    { memoryClass: 'knowledge' as const, visibility: null },
+    { memoryClass: 'app' as const, visibility: 'PUBLIC' },
+  ])('readable $memoryClass reader keeps management denial before invalid $visibility', async ({ memoryClass, visibility }) => {
+    const row = await memory(memoryClass);
+    if (memoryClass === 'app') {
+      await db.appMember.create({ data: { appId, userId: readerId, role: 'reader' } });
+    }
+    expect(await resolvers.Query.memory({}, { ref: row.id }, ctx(readerId))).toMatchObject({ id: row.id });
+    const before = await snapshot(row.id);
+    const omitted = await errorOf({ id: row.id }, ctx(readerId)) as GraphQLError;
+    expect(omitted).toBeInstanceOf(GraphQLError);
+    expect(omitted.extensions.code).toBe('FORBIDDEN');
+    expect(await snapshot(row.id)).toEqual(before);
+    const invalid = await errorOf({
+      id: row.id, visibility, name: 'must-not-write',
+      urn: 'visibility3372.example:must-not-rename',
+    }, ctx(readerId)) as GraphQLError;
+    expect(invalid).toBeInstanceOf(GraphQLError);
+    expect({ message: invalid.message, extensions: invalid.extensions }).toEqual({ message: omitted.message, extensions: omitted.extensions });
+    expect(await snapshot(row.id)).toEqual(before);
+  });
+});
