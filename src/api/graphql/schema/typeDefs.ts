@@ -6315,10 +6315,17 @@ export const typeDefs = `#graphql
   and that task's current revision (Node.revSeq). The server compares both with
   the rule and refuses a mismatch: AUTHORING_ATTESTATION_MISSING,
   AUTHORING_ATTESTATION_WRONG_TASK, AUTHORING_ATTESTATION_STALE, or
-  AUTHOR_TASK_BROKEN when the rule's task is gone. A match records a TASK stamp.
-  This does not prove the task was read or followed. With no applicable rule
-  the claim is ignored. People in the portal are exempt, derived from their
-  sign-in; no client field selects that.
+  AUTHOR_TASK_BROKEN when the rule's task is gone, unusable or unreadable to the
+  writer, whatever the claim. A match records a TASK stamp. This does not prove
+  the task was read or followed. With no applicable rule the claim is ignored.
+  People in the portal are exempt, derived from their sign-in; no client field
+  selects that.
+
+  #1329 — each refusal carries extensions taskAccess, task, taskId, taskRevision
+  and load. READABLE gives the task's URN (null when it has none that resolves),
+  id, current revision and the node read per surface. UNAVAILABLE gives nulls and
+  is the same for an unreadable task and a missing one: an owner must fix access
+  or the rule.
   """
   input AuthoredWithInput {
     "The task's id or canonical URN."

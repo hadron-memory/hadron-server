@@ -55,7 +55,8 @@ import {
   editorFromAuth,
   diffNodeChanges,
 } from '../lib/nodeRevisionSnapshot.js';
-import { assertAuthoring, assertRenameAuthoring, attestationRefusalText, attestedAuthoring } from '../lib/authoringAttestation.js';
+import { assertAuthoring, assertRenameAuthoring, attestedAuthoring } from '../lib/authoringAttestation.js';
+import { mcpReadsTask } from './taskReadGate.js';
 import { authoredContentChanged, clearNodeAuthorship, type NodeAuthorshipStamp } from '../lib/nodeAuthorship.js';
 import {
   parseUrnInput,
@@ -3816,6 +3817,7 @@ export function createMcpServerInstance(
   /** GraphQL Context for the scope tools — appId + sessionId are load-bearing (#206). */
   const scopeCtx = (): Context => ({
     db,
+    readsAuthorTask: mcpReadsTask(auth), // #1329: every direct writer's reader comes from here, through recoveryCtx()
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
     apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
@@ -4422,7 +4424,7 @@ export function createMcpServerInstance(
             sectionStamp = await assertAuthoring(tx, memoryId, {
               priorRole: current.role, priorRunnable: current.isRunnable,
               role: current.role, runnable: current.isRunnable, mintHuman: true, authoredChange: sectionChanged,
-            }, attestedAuthoring(authoredWith));
+            }, attestedAuthoring(recoveryCtx(), authoredWith));
             await createNodeRevision(tx, {
               id: generateId(),
               ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), { changes }),
@@ -4453,8 +4455,6 @@ export function createMcpServerInstance(
         if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return refusalResult(`[role_governed] ${(e as Error).message}`);
         const includeText = includeRefusalText(e);
         if (includeText) return refusalResult(includeText);
-        const attestationRefusal = attestationRefusalText(e);
-        if (attestationRefusal) return refusalResult(attestationRefusal);
         const writerRefusal = roleWriterRefusalText(e);
         if (writerRefusal) return refusalResult(writerRefusal);
         if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
@@ -6284,18 +6284,7 @@ export function createMcpServerInstance(
     install: { app: string; agent: string },
     fields: Record<string, unknown>,
   ) => {
-    const ctx: Context = {
-      db,
-      transport: 'mcp',
-      governedCanReplay: () => true,
-      clientId: auth.clientId ?? undefined,
-      userId: auth.userId ?? undefined,
-      apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
-      appId: auth.appId ?? undefined,
-      sessionId: auth.sessionId ?? undefined,
-      roles: auth.roles as Context['roles'],
-      organizationId: auth.organizationId ?? undefined,
-    };
+    const ctx = doorCtx(() => true);
     const input = { ...Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined)), install: { appRef: install.app, agentRef: install.agent } };
     try {
       const node = op === 'create'
@@ -6304,7 +6293,7 @@ export function createMcpServerInstance(
       const urn = await nodeUrn(node.loc, node.memoryId);
       return textResult(`${op === 'create' ? 'Node created' : 'Node updated'} in the App's install memory: ${urn} (id: ${node.id})${renderIncludePinWarnings(await includePinWarningsFor(ctx, node))}`);
     } catch (e) {
-      return toolErrorResult(e, () => attestationRefusalText(e) ?? `Error: ${e instanceof Error ? e.message : `${op} failed`}`, `hadron_${op}_node:install`);
+      return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : `${op} failed`}`, `hadron_${op}_node:install`);
     }
   };
 
@@ -6787,7 +6776,7 @@ export function createMcpServerInstance(
             role: role === undefined ? (pre?.role ?? null) : role,
             runnable: mergedGovernedState(pre, { role, isRunnable }).isRunnable,
             mintHuman: true, authoredChange: true,
-          }, attestedAuthoring(authoredWith));
+          }, attestedAuthoring(recoveryCtx(), authoredWith));
           // #1460 — the locked tombstone can retain vectors from its old
           // plaintext. Purge both kinds before the upsert makes it searchable.
           if (pre?.deletedAt) {
@@ -6845,8 +6834,6 @@ export function createMcpServerInstance(
         if (isLegacyMessageSeqError(e)) return refusalResult(`[seq_protected] ${e.message}`);
         const includeText = includeRefusalText(e);
         if (includeText) return refusalResult(includeText);
-        const attestationRefusal = attestationRefusalText(e);
-        if (attestationRefusal) return refusalResult(attestationRefusal);
         const writerRefusal = roleWriterRefusalText(e);
         if (writerRefusal) return refusalResult(writerRefusal);
         if (e instanceof InlineEdgeEndpointError) return refusalResult(e.message);
@@ -7252,7 +7239,7 @@ export function createMcpServerInstance(
               role: role === undefined ? current.role : role,
               runnable: mergedGovernedState(current, { role, isRunnable }).isRunnable,
               mintHuman: true, authoredChange,
-            }, attestedAuthoring(authoredWith));
+            }, attestedAuthoring(recoveryCtx(), authoredWith));
             await createNodeRevision(tx, {
               id: generateId(),
               ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), {
@@ -7297,8 +7284,6 @@ export function createMcpServerInstance(
           if (e instanceof RoleNotDeclaredError) return refusalResult(`[role_not_declared] ${e.message}`);
           const includeText = includeRefusalText(e);
         if (includeText) return refusalResult(includeText);
-        const attestationRefusal = attestationRefusalText(e);
-        if (attestationRefusal) return refusalResult(attestationRefusal);
         const writerRefusal = roleWriterRefusalText(e);
           if (writerRefusal) return refusalResult(writerRefusal);
           if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
@@ -7379,6 +7364,7 @@ export function createMcpServerInstance(
   /** The GraphQL context for a delegated door call — same shape as chatCtx below. */
   const doorCtx = (canReplay?: Context['governedCanReplay']): Context => ({
     db,
+    readsAuthorTask: mcpReadsTask(auth), // #1329
     // #1301: a refusal from the delegated door addresses an MCP caller, and
     // names an MCP door only if this call could be replayed through it.
     transport: 'mcp',
@@ -7541,6 +7527,7 @@ export function createMcpServerInstance(
       // the chatbot tools, #1141; the requirement it got wrong is not.)
       const ctx: Context = {
         db,
+        readsAuthorTask: mcpReadsTask(auth), // #1329
         // #1301: a refusal from the delegated resolver addresses an MCP caller;
         // a door takes a whole `data` object, so the replace it names replays.
         transport: 'mcp',
@@ -7563,7 +7550,7 @@ export function createMcpServerInstance(
         const urn = await nodeUrn(node.loc, node.memoryId);
         return textResult(`Node data merged: ${urn} (id: ${node.id})${renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), node.id))}`);
       } catch (e) {
-        return toolErrorResult(e, () => attestationRefusalText(e) ?? `Error: ${e instanceof Error ? e.message : 'update failed'}`, 'hadron_update_node_data:resolver');
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'update failed'}`, 'hadron_update_node_data:resolver');
       }
     },
   );
@@ -7580,6 +7567,7 @@ export function createMcpServerInstance(
 
   const objectCtx = (): Context => ({
     db,
+    readsAuthorTask: mcpReadsTask(auth), // #1329
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
     apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
@@ -7687,6 +7675,7 @@ export function createMcpServerInstance(
       // same way it does for hadron_create_node / hadron_update_node.
       const ctx: Context = {
         db,
+        readsAuthorTask: mcpReadsTask(auth), // #1329
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
         apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
@@ -7767,7 +7756,7 @@ export function createMcpServerInstance(
         }
         return textResult([header, coverage, ...guidance, ...lines, ...lintLines].join('\n'));
       } catch (e) {
-        return toolErrorResult(e, () => attestationRefusalText(e) ?? `Error: ${e instanceof Error ? e.message : 'search-and-replace failed'}`, 'hadron_replace_text:resolver');
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'search-and-replace failed'}`, 'hadron_replace_text:resolver');
       }
     },
   );
@@ -8361,7 +8350,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
                 const renameStamp = await assertRenameAuthoring(tx, fromMemory.id, toMemory.id, {
                   priorRole: locked.role, priorRunnable: locked.isRunnable,
                   role: locked.role, runnable: locked.isRunnable, mintHuman: true, authoredChange: true,
-                }, attestedAuthoring(authoredWith));
+                }, attestedAuthoring(recoveryCtx(), authoredWith));
                 await createNodeRevision(tx, {
                   id: generateId(),
                   ...buildNodeRevisionSnapshot(locked, editorFromAuth(auth), {
@@ -8435,7 +8424,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
                 destMemoryId: crossMemory ? toMemory.id : undefined,
                 editor: editorFromAuth(auth),
                 renameSourceLeaf: renameToLeaf === true,
-                renameAuthoring: attestedAuthoring(authoredWith),
+                renameAuthoring: attestedAuthoring(recoveryCtx(), authoredWith),
                 authorizeLockedMemory: (memoryId) => assertLockedMemoryWriteAccess(tx, attemptAuth, memoryId),
                 principal: attemptAuth,
               });
@@ -8528,8 +8517,6 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         }
         const includeText = includeRefusalText(e);
         if (includeText) return refusalResult(includeText);
-        const attestationRefusal = attestationRefusalText(e);
-        if (attestationRefusal) return refusalResult(attestationRefusal);
         const writerRefusal = roleWriterRefusalText(e);
         if (writerRefusal) return refusalResult(writerRefusal);
         if (

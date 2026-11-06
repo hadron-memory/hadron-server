@@ -44,8 +44,6 @@ const codeOf = async (promise: Promise<unknown>) => {
 const expectRefused = async (promise: Promise<unknown>, code: string, role = 'guide') => {
   const e = await codeOf(promise);
   expect(e.extensions).toMatchObject({ code, role });
-  // #1329 owns the task, revision and remedy: this issue discloses code and role only.
-  expect(Object.keys(e.extensions).sort()).toEqual(['code', 'role']);
 };
 
 beforeEach(async () => {
@@ -284,6 +282,7 @@ describe('#1328 merges and bulk edits', () => {
     await create('imp', { authoredWith: claim() });
     const base = { memoryId, loc: 'imp', content: 'imported', contentType: 'text/markdown' };
     await expectRefused(M.importNode({}, { input: base }, ctx()), 'AUTHORING_ATTESTATION_MISSING');
+    await expect(M.importNode({}, { input: base }, ctx())).rejects.toMatchObject({ extensions: { taskAccess: 'READABLE' } });
     expect((await stored('imp')).content).toBe('body');
     await M.importNode({}, { input: { ...base, authoredWith: claim() } }, ctx());
     expect(await stored('imp')).toMatchObject({ content: 'imported', authoredByTask: taskId });

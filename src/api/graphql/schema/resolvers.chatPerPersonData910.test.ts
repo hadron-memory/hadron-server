@@ -405,7 +405,7 @@ describe('#1328 — extraction into a data node a rule governs', () => {
     await governedDataNode(chat.chatId);
 
     const refused = await extract(alice.id, chat.chatId, { region: 'US' }).then(() => null, (e) => e);
-    expect(refused?.extensions).toMatchObject({ code: 'AUTHORING_ATTESTATION_MISSING', role: 'guide' });
+    expect(refused?.extensions).toMatchObject({ code: 'AUTHORING_ATTESTATION_MISSING', role: 'guide', taskAccess: 'READABLE' });
     expect((await dataNodeOf(chat.chatId)).data).toEqual(before);
   });
 

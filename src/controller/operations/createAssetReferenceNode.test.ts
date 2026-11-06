@@ -117,7 +117,7 @@ describe('createAssetReferenceNode', () => {
     await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'files:plan', name: 'plan', role: 'guide', deletedAt: new Date() } });
     await expect(createAssetReferenceNode(db, callerFor(user.id), ctxFor(user.id), {
       assetRef: assetId, nodeUrn: `hrn:node:${org.urn}:docs:files:plan`,
-    })).rejects.toMatchObject({ extensions: { code: 'AUTHORING_ATTESTATION_MISSING' } });
+    })).rejects.toMatchObject({ extensions: { code: 'AUTHORING_ATTESTATION_MISSING', taskAccess: 'READABLE' } });
   });
 
   it('creates a reference node carrying the asset pointer', async () => {
