@@ -200,13 +200,26 @@ it.each(['encrypt', 'promote'])('12/11: real %s commits on a second connection b
     await db.memory.update({ where: { id: memory.id }, data: { class: 'app', appId: app.id, userId: null, createdBy: null, anonymousExpiresAt: new Date(Date.now() + 86400000) } });
     flip = () => withTestOperationKey(key.raw.toString('base64'), app.id, () => memoryMutations.linkMemoryToUser(null, { memoryId: memory.id, externalUserId: '3501-synthetic' }, { db, appId: app.id, roles: [] } as Context));
   }
+  let observedAtPromotionCommit = false;
+  const originalCompletion = memoryMutations.encryptMemory;
+  const completion = method === 'promote' ? vi.spyOn(memoryMutations, 'encryptMemory').mockImplementationOnce(async (parent, args, principal) => {
+    // The promotion transaction has committed, but its history-completion pass has not begun.
+    const atCommit = await db.chatRootEngineState.findMany();
+    expect(atCommit).toHaveLength(2);
+    for (const row of atCommit) expect(row.state).toHaveProperty('__enc');
+    observedAtPromotionCommit = true;
+    return originalCompletion(parent, args, principal);
+  }) : null;
   let observedPid = 0;
   // This transaction occupies one pool connection before the real flip uses another.
   const inTx = <T>(fn: (tx: import('../generated/prisma/index.js').Prisma.TransactionClient) => Promise<T>) => db.$transaction(async tx => {
     const [row] = await tx.$queryRaw<Array<{pid:number}>>`SELECT pg_backend_pid() AS pid`; observedPid = row.pid;
     await flip(); return fn(tx);
   }, { timeout: 30000 });
-  await expect(updateChatRootData(db, root, enc(), d => ({ ...d, stageName: 'must-not-write' }), { inTx })).rejects.toMatchObject({ extensions: { code: 'CHAT_AUTHORITY_SCOPE_CHANGED' } });
+  try {
+    await expect(updateChatRootData(db, root, enc(), d => ({ ...d, stageName: 'must-not-write' }), { inTx })).rejects.toMatchObject({ extensions: { code: 'CHAT_AUTHORITY_SCOPE_CHANGED' } });
+  } finally { completion?.mockRestore(); }
+  if (method === 'promote') expect(observedAtPromotionCommit).toBe(true);
   expect(observedPid).toBeGreaterThan(0);
   expect((await db.memory.findUniqueOrThrow({ where: { id: root.memoryId } })).isEncrypted).toBe(true);
   const rows = await db.chatRootEngineState.findMany(); expect(rows).toHaveLength(2);
@@ -285,4 +298,78 @@ it('11/13: conversion never nests an undecryptable existing envelope as fresh pl
   const row = await db.chatRootEngineState.create({ data: { chatRootNodeId: root.id, state: { __enc: 'tampered' } } });
   await expect(db.$transaction(tx => encryptChatEngineStateWithKey(tx, root.id, generateDataKey()))).rejects.toMatchObject({ extensions: { code: 'CHAT_STATE_INVALID' } });
   expect(await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } })).toEqual(row);
+});
+it('14: exact loc and id cannot substitute a root from outside the gated memory', async () => {
+  const own = await db.memory.findUniqueOrThrow({ where: { id: root.memoryId } });
+  const other = await db.memory.create({ data: { id: generateId(), organizationId: own.organizationId, name: 'other', urn: `engine3501:other-${generateId()}`, class: 'knowledge' } });
+  await expect(updateChatRootData(db, { ...root, memoryId: other.id }, { id: other.id, isEncrypted: false }, d => d)).rejects.toMatchObject({ extensions: { code: 'CHAT_AUTHORITY_SCOPE_CHANGED' } });
+  expect(await db.chatRootEngineState.count()).toBe(0);
+});
+it('14: unknown state keys are removed even on an otherwise unchanged locked write', async () => {
+  await updateChatRootData(db, root, enc(), d => d);
+  await db.chatRootEngineState.update({ where: { chatRootNodeId: root.id }, data: { state: { conversationName: 'intake', stageName: 'first', unexpected: 'drop' } } });
+  await updateChatRootData(db, root, enc(), d => d);
+  expect((await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } })).state).toEqual({ conversationName: 'intake', stageName: 'first' });
+});
+it('10: actual soft delete and retained-node restore preserve the operational row', async () => {
+  const { recoveryMutations } = await import('../api/graphql/schema/resolvers.recovery.js');
+  await updateChatRootData(db, root, enc(), d => ({ ...d, stageName: 'live-stage' }));
+  const before = await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } });
+  await chatMutations.deleteChat(null, { chatId: root.loc }, ctx);
+  expect((await raw()).deletedAt).not.toBeNull();
+  expect(await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } })).toEqual(before);
+  await recoveryMutations.restoreNode(null, { nodeRef: root.id }, ctx);
+  expect((await raw()).deletedAt).toBeNull();
+  expect(await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } })).toEqual(before);
+});
+it('11: a plaintext cross-memory chat move still refuses, and merge relocation retains state by stable id', async () => {
+  const { moveNodeSubtree } = await import('./nodeSubtreeMove.js');
+  const { mergeMemoryGraph } = await import('../controller/operations/mergeMemories.js');
+  await updateChatRootData(db, root, enc(), d => ({ ...d, stageName: 'live-stage' }));
+  const own = await db.memory.findUniqueOrThrow({ where: { id: root.memoryId } });
+  const target = await db.memory.create({ data: { id: generateId(), organizationId: own.organizationId, name: 'target', urn: `engine3501:target-${generateId()}`, class: 'knowledge' } });
+  const source = await raw();
+  await expect(db.$transaction(tx => moveNodeSubtree(tx, { source, destLoc: 'chats:moved', destMemoryId: target.id, editor: { userId } }))).rejects.toThrow('chat');
+  await mergeMemoryGraph(db, { sourceMemoryId: root.memoryId, targetMemoryId: target.id, fields: new Set(), deleteSourceMem: false, editor: { userId } });
+  expect((await raw()).memoryId).toBe(target.id);
+  expect((await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } })).state).toHaveProperty('stageName', 'live-stage');
+});
+
+it('11: encrypted clone, transfer and memory merge retain their existing typed refusals', async () => {
+  const { memoryMutations } = await import('../api/graphql/schema/resolvers.mutation.memory.js');
+  const { memoryTransferMutations } = await import('../api/graphql/schema/resolvers.mutation.memoryTransfer.js');
+  const { mergeMemoryGraph } = await import('../controller/operations/mergeMemories.js');
+  await updateChatRootData(db, root, enc(), d => d);
+  const own = await db.memory.findUniqueOrThrow({ where: { id: root.memoryId } });
+  const target = await db.memory.create({ data: { id: generateId(), organizationId: own.organizationId, name: 'target', urn: `engine3501:target-${generateId()}`, class: 'knowledge' } });
+  // Controlled flag fixture: these refusals must precede any attempt to copy or re-key state.
+  await db.memory.update({ where: { id: root.memoryId }, data: { class: 'private', isEncrypted: true } });
+  const before = await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } });
+  await expect(memoryMutations.cloneMemory(null, { ref: root.memoryId, targetUrn: 'hrn:mem:example.com:synthetic-copy' }, ctx)).rejects.toMatchObject({ extensions: { code: 'ENCRYPTED_MEMORY_CLONE_UNSUPPORTED' } });
+  const receivingOrg = await db.organization.create({ data: { id: generateId(), name: 'receiving', urn: `engine3501-receiving-${generateId()}` } });
+  await db.orgMember.create({ data: { organizationId: receivingOrg.id, userId, role: 'ADMIN' } });
+  await expect(memoryTransferMutations.transferMemoryOwnership(null, { memoryRef: root.memoryId, orgRef: receivingOrg.id, targetClass: 'knowledge' }, ctx)).rejects.toMatchObject({ extensions: { code: 'ENCRYPTED_MEMORY_TRANSFER_UNSUPPORTED' } });
+  await expect(mergeMemoryGraph(db, { sourceMemoryId: root.memoryId, targetMemoryId: target.id, fields: new Set(), deleteSourceMem: false, editor: { userId } })).rejects.toMatchObject({ extensions: { code: 'ENCRYPTED_MEMORY_MERGE_UNSUPPORTED' } });
+  expect(await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } })).toEqual(before);
+});
+
+it.each(['row', 'legacy', 'absent'] as const)('11: collision preserves target %s engine and cascades source without a future source seed', async kind => {
+  const { mergeMemoryGraph } = await import('../controller/operations/mergeMemories.js');
+  await updateChatRootData(db, root, enc(), d => ({ ...d, stageName: 'source-stage' }));
+  const own = await db.memory.findUniqueOrThrow({ where: { id: root.memoryId } });
+  const target = await db.memory.create({ data: { id: generateId(), organizationId: own.organizationId, name: 'target', urn: `engine3501:collision-${generateId()}`, class: 'knowledge' } });
+  const targetData = kind === 'absent' ? { title: 'Target' } : { title: 'Target', conversationName: 'target-conversation', stageName: 'target-stage' };
+  const survivor = await db.node.create({ data: { id: generateId(), memoryId: target.id, loc: root.loc, nodeType: 'record', name: 'Target', data: targetData } });
+  if (kind === 'row') await db.chatRootEngineState.create({ data: { chatRootNodeId: survivor.id, state: { conversationName: 'target-conversation', stageName: 'target-live' } } });
+  await mergeMemoryGraph(db, { sourceMemoryId: root.memoryId, targetMemoryId: target.id, fields: new Set(['DATA']), deleteSourceMem: false, editor: { userId } });
+  expect(await db.chatRootEngineState.findUnique({ where: { chatRootNodeId: root.id } })).toBeNull();
+  const merged = await db.node.findUniqueOrThrow({ where: { id: survivor.id } });
+  if (kind === 'absent') {
+    expect(await db.chatRootEngineState.findUnique({ where: { chatRootNodeId: survivor.id } })).toBeNull();
+    expect(merged.data).not.toHaveProperty('stageName');
+    expect(merged.data).not.toHaveProperty('conversationName');
+  }
+  let seen: unknown;
+  await updateChatRootData(db, { id: survivor.id, memoryId: target.id, loc: survivor.loc }, { id: target.id, isEncrypted: false }, d => { seen = d.stageName; return d; });
+  expect(seen).toBe(kind === 'row' ? 'target-live' : kind === 'legacy' ? 'target-stage' : undefined);
 });
