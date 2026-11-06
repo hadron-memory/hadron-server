@@ -1,3 +1,4 @@
+import { chatNotFoundError } from '../../../lib/chatNotFound.js';
 import { readChatEngineStates } from '../../../lib/chatRootEngineState.js';
 import { readChatCounters } from '../../../lib/chatRootCounters.js';
 import { appInstallationWhere } from '../../../lib/appInstallations.js';
@@ -267,7 +268,7 @@ export const chatQueries = {
         }),
         chatId,
       );
-      if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
+      if (!chatNode) throw chatNotFoundError(chatId);
       // #1196 — the SHARED node-content gate, replacing a hand-rolled
       // per-class one. `cor:acl:030:01`: a chat has no access layer of its own;
       // read falls through the host memory's per-class rules. This resolver
