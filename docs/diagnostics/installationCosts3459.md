@@ -1,6 +1,6 @@
 # Installation roster diagnostics (#3459)
 
-Observed on production source `6ea55eec762dd8014351cb6a958cf6c7df439f00`, synthetic owned run-private Postgres, dedicated Prisma6.19.2 client. No production observation, latency threshold, cache or optimization. The original 53 numeric ceilings were approved without slack in Xavier ruling 6696871831. The original observed JSON remains immutable baseline evidence; approved ceilings are stored separately in `installationCosts3459.approved.json`. Two additional distinct-Agent observations below await their own ceiling disposition.
+Observed on production source `6ea55eec762dd8014351cb6a958cf6c7df439f00`, synthetic owned run-private Postgres, dedicated Prisma6.19.2 client. No production observation, latency threshold, cache or optimization. The original 53 numeric ceilings were approved without slack in Xavier ruling 6696871831. The original observed JSON remains immutable baseline evidence; approved ceilings are stored separately in `installationCosts3459.approved.json`. The two additional distinct-Agent ceilings below were approved exactly in Xavier ruling 6697041514.
 
 Reproduce with `HADRON_3459_ARTIFACT=/private/scratch/metrics.json HADRON_3459_HEAD=$(git rev-parse HEAD) node node_modules/vitest/vitest.mjs run src/api/graphql/schema/resolvers.installationCosts3459.test.ts`. The normal test setup creates the checkout-specific run-owned DB; the test refuses dev/base DB names. The optional artifact contains synthetic SQL text and response data, no connection strings or real corpus. The logged client is disconnected in afterAll; run-owned DB cleanup remains the test harness's responsibility.
 
@@ -74,7 +74,7 @@ Xavier must approve numeric regression budgets after this baseline. Candidate po
 
 Reader census refreshed at this source: App.agents/App.appAgents; reverse Agent.appAgents audit fallbacks; Agent.importedBy; resolveAppInstallation ROW/DERIVED/absent; teamRoles explicit definition and locateTeamAgent marker walks. Attendee/register/pointer consumers delegate to single-install/page helpers, but this table is not a fresh execution of every attendee/pointer entry point. They remain pointer-only where so defined. Background/job consumers (App runs, channel backfill, shared-memory adoption) are outside this first request-reader slice. No paging/depth/cap/audience changes.
 
-## Additional distinct-Agent baseline (awaiting ceiling disposition)
+## Additional distinct-Agent baseline (approved ceilings: 6697041514)
 
 The same four-Agent fixture supplies one or three distinct readable root Agents under the full principal. Root IDs are selected and asserted distinct; importedBy parent IDs and readable nested identities are asserted exactly. These are in-process GraphQL operations, not HTTP. Only this additional test ran; the original 53 observations were not repeated or overwritten.
 

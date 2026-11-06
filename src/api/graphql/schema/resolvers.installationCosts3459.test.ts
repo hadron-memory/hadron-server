@@ -65,6 +65,7 @@ async function measure(label: string, run: () => Promise<any>, apiRequests: numb
     apiRequests, projectedRows: rows(data), responseUtf8Bytes: apiRequests ? responseBytes : null,
     operations: [...operations], sql: statements, data };
   const ceiling = approved.metrics.find(row => row.label === label);
+  expect(ceiling, `${label}: explicitly approved shape`).toBeDefined();
   if (ceiling) {
     for (const metric of ['sqlCount', 'prismaOperations', 'pagePrismaReads'] as const)
       expect(out[metric], `${label}: approved ${metric} ceiling`).toBeLessThanOrEqual(ceiling[metric]);
@@ -74,9 +75,6 @@ async function measure(label: string, run: () => Promise<any>, apiRequests: numb
     expect(out.projectedRows, `${label}: exact semantic rows`).toBe(ceiling.projectedRows);
     if (ceiling.responseUtf8Bytes === null) expect(out.responseUtf8Bytes).toBeNull();
     else expect(out.responseUtf8Bytes, `${label}: approved response byte ceiling`).toBeLessThanOrEqual(ceiling.responseUtf8Bytes);
-  } else {
-    // Only the two published additional baseline shapes await a separate ruling.
-    expect(label).toMatch(/^importedBy\/[13]-distinct-Agents\/full$/);
   }
   table.push(out);
   return out;

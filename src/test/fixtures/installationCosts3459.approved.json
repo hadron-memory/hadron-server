@@ -744,6 +744,35 @@
       "apiRequests": 1,
       "projectedRows": 3,
       "responseUtf8Bytes": 420
+    },
+    {
+      "label": "importedBy/1-distinct-Agents/full",
+      "sqlCount": 5,
+      "prismaOperations": 5,
+      "pagePrismaReads": 0,
+      "helperEntries": [
+        0,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 2,
+      "responseUtf8Bytes": 290
+    },
+    {
+      "label": "importedBy/3-distinct-Agents/full",
+      "sqlCount": 14,
+      "prismaOperations": 12,
+      "pagePrismaReads": 0,
+      "helperEntries": [
+        0,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 3,
+      "responseUtf8Bytes": 524
     }
-  ]
+  ],
+  "additionalRuling": "https://github.com/hadron-memory/hadron-server/issues/3459#issuecomment-6697041514"
 }
