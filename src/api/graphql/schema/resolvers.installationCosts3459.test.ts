@@ -12,6 +12,7 @@ import { typeDefs } from './typeDefs.js';
 import * as installs from '../../../lib/appInstallations.js';
 import { locateTeamAgent } from '../../../lib/auth/workerRead.js';
 import { writeFileSync } from 'node:fs';
+import approved from '../../../test/fixtures/installationCosts3459.approved.json';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const logged = new PrismaClient({ datasourceUrl: process.env.DATABASE_URL, log: [{ emit: 'event', level: 'query' }] });
 let active = false;
@@ -63,6 +64,20 @@ async function measure(label: string, run: () => Promise<any>, apiRequests: numb
     pagePrismaReads: projectedPageReads, helperEntries: helpers.map(h => h.mock.calls.length),
     apiRequests, projectedRows: rows(data), responseUtf8Bytes: apiRequests ? responseBytes : null,
     operations: [...operations], sql: statements, data };
+  const ceiling = approved.metrics.find(row => row.label === label);
+  if (ceiling) {
+    for (const metric of ['sqlCount', 'prismaOperations', 'pagePrismaReads'] as const)
+      expect(out[metric], `${label}: approved ${metric} ceiling`).toBeLessThanOrEqual(ceiling[metric]);
+    out.helperEntries.forEach((entries, i) =>
+      expect(entries, `${label}: approved helper ${i} ceiling`).toBeLessThanOrEqual(ceiling.helperEntries[i]));
+    expect(out.apiRequests, `${label}: exact GraphQL operations`).toBe(ceiling.apiRequests);
+    expect(out.projectedRows, `${label}: exact semantic rows`).toBe(ceiling.projectedRows);
+    if (ceiling.responseUtf8Bytes === null) expect(out.responseUtf8Bytes).toBeNull();
+    else expect(out.responseUtf8Bytes, `${label}: approved response byte ceiling`).toBeLessThanOrEqual(ceiling.responseUtf8Bytes);
+  } else {
+    // Only the two published additional baseline shapes await a separate ruling.
+    expect(label).toMatch(/^importedBy\/[13]-distinct-Agents\/full$/);
+  }
   table.push(out);
   return out;
 }
@@ -121,7 +136,7 @@ afterAll(async () => {
 });
 
 describe('#3459 owned-client fixed roster diagnostics', () => {
-  it('captures A=1/A=3 reader shapes and repeated/fresh Context controls without selecting a budget', async () => {
+  it('captures A=1/A=3 reader shapes and repeated/fresh Context controls against explicitly approved ceilings', async () => {
     for (const count of [1, 3]) {
       while (apps.length < count) await addApp(apps.length);
       const ids = apps.slice(0, count);

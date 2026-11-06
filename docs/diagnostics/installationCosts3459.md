@@ -1,6 +1,6 @@
 # Installation roster diagnostics (#3459)
 
-Observed on production source `6ea55eec762dd8014351cb6a958cf6c7df439f00`, synthetic owned run-private Postgres, dedicated Prisma6.19.2 client. No production observation, latency threshold, cache or optimization. The original 53 numeric ceilings were approved without slack in Xavier ruling 6696871831. The original observed JSON remains immutable baseline evidence; approved ceilings will be stored separately. Two additional distinct-Agent observations below await their own ceiling disposition.
+Observed on production source `6ea55eec762dd8014351cb6a958cf6c7df439f00`, synthetic owned run-private Postgres, dedicated Prisma6.19.2 client. No production observation, latency threshold, cache or optimization. The original 53 numeric ceilings were approved without slack in Xavier ruling 6696871831. The original observed JSON remains immutable baseline evidence; approved ceilings are stored separately in `installationCosts3459.approved.json`. Two additional distinct-Agent observations below await their own ceiling disposition.
 
 Reproduce with `HADRON_3459_ARTIFACT=/private/scratch/metrics.json HADRON_3459_HEAD=$(git rev-parse HEAD) node node_modules/vitest/vitest.mjs run src/api/graphql/schema/resolvers.installationCosts3459.test.ts`. The normal test setup creates the checkout-specific run-owned DB; the test refuses dev/base DB names. The optional artifact contains synthetic SQL text and response data, no connection strings or real corpus. The logged client is disconnected in afterAll; run-owned DB cleanup remains the test harness's responsibility.
 
@@ -84,3 +84,9 @@ The same four-Agent fixture supplies one or three distinct readable root Agents 
 | importedBy/3-distinct-Agents/full | 14 | 12 | 0 | [0,0,0] | 1 | 3 | 524 |
 
 Zero exported helper entries retain the same-module spy limitation; they do not prove absence of underlying work. The original observed labels importedBy/1-parents and importedBy/3-parents map to importedBy/one-Agent-1-aliases and importedBy/one-Agent-3-aliases; their values remain unchanged.
+
+## Approved-ceiling discriminators
+
+Ruling 6696871831 approves the original 53 per-shape upper ceilings without slack; semantic projected-row counts and in-process operation counts remain exact, and null response bytes remain unmeasured. Expected ceilings are static checked-in data, never derived from the current run. Positive SQL/Prisma instrumentation checks remain mandatory.
+
+Named controls: an additional page query raises A1/agents/partial/cold SQL from 21 to 27 and fails its 21 ceiling; a repeated whole-App audit lookup raises A1/reverse/partial SQL from 61 to 93 and fails its 61 ceiling; selecting unused 4096-byte Agent descriptions raises A1/agents/partial/cold response bytes from 112 to 8338 and fails its 112 ceiling. Each control was applied separately and restored. These are discrimination proofs, not production regressions or performance improvements.
