@@ -2012,7 +2012,7 @@
     "Worker.app": {
       "class": "self-gated",
       "resolver": "src/api/graphql/schema/resolvers.worker.ts::app",
-      "gate": "requireOwnerOrOrgRole",
+      "gate": "requireAppRead",
       "target": "App"
     },
     "Worker.continuity": {

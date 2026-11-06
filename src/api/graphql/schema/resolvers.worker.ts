@@ -96,8 +96,8 @@ import { workerTerminalView, type StoredWorkerTerminal } from '../../../lib/work
 import {
   type Context,
   requireOrgRole,
+  requireAppRead,
   requireReadableAgent,
-  requireOwnerOrOrgRole,
   isNonReaderAppMember,
   isPlatformAdmin,
   clampListTake,
@@ -3401,7 +3401,10 @@ export const workerFieldResolvers = {
       const app = await ctx.db.app.findUnique({ where: { id: worker.appId } });
       if (!app || app.deletedAt) return null;
       try {
-        await requireOwnerOrOrgRole(ctx, app, 'READER');
+        // #2089: the App-specific read gate, so Worker.app agrees with Query.app
+        // (org arms unchanged, plus a current owner-role member of a user-owned
+        // App). The App's children keep their own per-field withholding.
+        await requireAppRead(ctx, app);
       } catch {
         return null;
       }
