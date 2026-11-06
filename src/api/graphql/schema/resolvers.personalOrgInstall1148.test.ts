@@ -6,6 +6,7 @@ import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { isAgentInstalledAndLicensed, activeAppInstallLicenseIdsForAgent } from '../../../lib/appAgent.js';
 import { installMemoryAudience, readableInstallMemoryIds, writableInstallMemoryIds } from '../../../lib/auth/installMemory.js';
+import { serveChatPrompt } from './resolvers.mutation.chat.js';
 import { resolveServedBootPrompt } from '../../../lib/bootPrompt/serve.js';
 import { canReadMemory, participantSystemMemoryFolds, getAppMemoryAccess } from '../../../mcp/access-control.js';
 import { requirePersonalAppAgentInstall } from './resolvers.helpers.js';
@@ -251,4 +252,41 @@ it('reusing a retired Agent name preserves the retained org-text install memory 
  expect((await installRow()).installOfAgentId).toBe(agentId);
  expect((await installMemoryAudience(db,context(outsiderId),await installRow())).read).toBe(false);
  expect(await readableInstallMemoryIds(db,context(outsiderId))).not.toContain(installMemoryId);
+});
+
+it('the App-scoped chat serve refuses when the individual stays a member but the owner licence ends',async()=>{
+ await seedChatConversation();
+ await db.orgMember.create({data:{organizationId:orgId,userId:outsiderId,role:'READER'}});
+ const agent=await db.agent.findUniqueOrThrow({where:{id:agentId}});
+ const caller={...context(outsiderId),appId};
+ expect((await serveChatPrompt(db,agent,appId,null,caller)).text).toContain('PRIVATE ORG CHAT SENTINEL');
+ await db.orgMember.update({where:{organizationId_userId:{organizationId:orgId,userId:ownerId}},data:{deletedAt:new Date()}});
+ expect(await db.orgMember.findFirst({where:{organizationId:orgId,userId:outsiderId,deletedAt:null}})).not.toBeNull();
+ await expect(serveChatPrompt(db,agent,appId,null,caller)).rejects.toMatchObject({code:'AGENT_NOT_FOUND'});
+});
+
+it('a refused bind conceals the current name of an unreadable retained Agent',async()=>{
+ await db.agent.update({where:{id:agentId},data:{personaRole:'engineer'}});
+ await serveAgentBootPrompt(db,agentId,'PRIVATE ORGANIZATION BRIEFING');
+ const worker=await mutation.castWorker({}, {appRef:appId,agentRef:agentId,name:'Retained'},context());
+ await db.agent.update({where:{id:agentId},data:{name:'UNREADABLE CURRENT AGENT NAME',visibility:'PERSONAL'}});
+ await db.orgMember.update({where:{organizationId_userId:{organizationId:orgId,userId:ownerId}},data:{deletedAt:new Date()}});
+ await expect(mutation.startSession({}, {input:{id:generateId(),tool:'vitest',appRef:appId,workerRef:worker.id,force:true}},context()))
+  .rejects.toMatchObject({extensions:{code:'BOOT_PROMPT_INSTALL_LICENSE_INACTIVE',surface:'bind',agentName:''}});
+ expect(await db.session.count({where:{workerId:worker.id}})).toBe(0);
+ expect(await db.servedPrompt.count({where:{workerId:worker.id}})).toBe(0);
+});
+for(const clientId of ['app-key','run:synthetic1148']) it(`userless ${clientId} gains no personal org chat text`,async()=>{
+ await expect(mutation.startChat({}, {agentId,scope:'private'},{db,appId,clientId,roles:[]}))
+  .rejects.toMatchObject({code:'AGENT_NOT_FOUND'});
+});
+it('fresh chat serving preserves PUBLIC and own-Agent controls outside the personal-org rule',async()=>{
+ await serveAgentBootPrompt(db,agentId,'PUBLIC CONTROL');
+ await db.agent.update({where:{id:agentId},data:{visibility:'PUBLIC'}});
+ await db.orgMember.update({where:{organizationId_userId:{organizationId:orgId,userId:ownerId}},data:{deletedAt:new Date()}});
+ const publicAgent=await db.agent.findUniqueOrThrow({where:{id:agentId}});
+ expect((await serveChatPrompt(db,publicAgent,appId,null,context(outsiderId))).text).toContain('PUBLIC CONTROL');
+ const own=await mutation.createAgent({}, {name:'Own control'},context());
+ await serveAgentBootPrompt(db,own.id,'OWN CONTROL');
+ expect((await serveChatPrompt(db,own,null,null,context())).text).toContain('OWN CONTROL');
 });
