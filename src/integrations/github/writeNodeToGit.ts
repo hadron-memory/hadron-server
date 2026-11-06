@@ -2,11 +2,9 @@ import { mkdirSync, writeFileSync, rmSync } from 'fs';
 import { dirname } from 'path';
 import { stringify } from 'yaml';
 import { withMirrorCheckout } from './gitMirrorCheckout.js';
-import { db } from '../db/client.js';
-import { getRequestKey } from '../../lib/requestKeys.js';
+import { db as defaultDb } from '../db/client.js';
 import { isCiphertext } from '../../lib/crypto.js';
 import {
-  buildEdgeFrontmatter,
   buildNodeFrontmatter,
   preserveUnmanagedFrontmatter,
   nodeFilePath,
@@ -55,6 +53,10 @@ export interface NodeForGit {
   isRunnable: boolean | null;
   /** Required so every incremental producer decides the server-set marker. */
   isPlaceholder: boolean;
+  /** #1328 — required for the #1218 reason: the incremental path must not silently drop a verified claim. */
+  authorshipKind: string | null;
+  authoredByTask: string | null;
+  authoredByRevision: number | null;
   outgoingEdges: Array<{
     /** `INCLUDE` edges are derived from content and never mirrored (#2040). */
     governedKind?: string | null;
@@ -72,33 +74,6 @@ export interface NodeForGit {
     /** Resolution-order hook (lower fires first), DB default 0. */
     priority?: number | null;
   }>;
-  /** Internal freshness fence for plaintext snapshots of encrypted nodes. */
-  mirrorRevSeq?: number;
-}
-
-function canonicalJson(value: unknown): string {
-  return JSON.stringify(value, (_key, v) =>
-    v && typeof v === 'object' && !Array.isArray(v)
-      ? Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)))
-      : v,
-  );
-}
-
-function edgeSignature(edges: NodeForGit['outgoingEdges']): string {
-  const entries = buildEdgeFrontmatter(edges);
-  entries.sort((a, b) => String(a.edgeLoc ?? a.id).localeCompare(String(b.edgeLoc ?? b.id)));
-  return canonicalJson(entries);
-}
-
-async function isCurrentEncryptedSnapshot(node: NodeForGit, memoryId: string): Promise<boolean> {
-  const current = await db.node.findUnique({
-    where: { id: node.id },
-    include: { outgoingEdges: { include: { target: true } } },
-  });
-  return current != null && current.deletedAt == null && current.memoryId === memoryId &&
-    current.revSeq === node.mirrorRevSeq &&
-    current.loc === node.loc && current.isPlaceholder === node.isPlaceholder &&
-    edgeSignature(current.outgoingEdges) === edgeSignature(node.outgoingEdges);
 }
 
 /** Reserved at-rest envelopes never belong in a plaintext Git payload. */
@@ -119,7 +94,9 @@ export function nodePayloadHasCiphertext(node: Pick<NodeForGit, 'content' | 'abs
  * SEVERAL nodes (the move mirror) can batch them into one commit. Returns
  * false for a ciphertext-shaped payload without touching the filesystem.
  */
-export function writeNodeFile(localPath: string, node: NodeForGit, memoryUrn?: string): boolean {
+/** Async mirror callers supply the same-memory live-child decision under the checkout lock (#3507).
+ * Pure file fixtures default to legacy cleanup; a disk id alone cannot distinguish a stale parent README. */
+export function writeNodeFile(localPath: string, node: NodeForGit, memoryUrn?: string, hasLiveReadmeChild = false): boolean {
   // #1273: inspect the actual payload, independently of raced memory flags
   // or key probes. Refuse before writes OR legacy-path cleanup.
   if (nodePayloadHasCiphertext(node)) {
@@ -171,7 +148,8 @@ export function writeNodeFile(localPath: string, node: NodeForGit, memoryUrn?: s
   // deletions. Skipped for the root, whose file IS README.md.
   if (node.loc !== '' && mdPath === nodeFilePath(localPath, node.loc)) {
     const legacy = orphanedLegacyPaths(localPath, node.loc);
-    rmSync(legacy.readme, { force: true });
+    // Xan #3507: only a live <loc>:README in THIS memory protects the path. A stale/id-less parent can overwrite on sync.
+    if (!hasLiveReadmeChild) rmSync(legacy.readme, { force: true });
     rmSync(legacy.sidecar, { recursive: true, force: true });
   }
   return true;
@@ -219,42 +197,47 @@ export function removeNodeFile(localPath: string, loc: string, expectedNodeId: s
  * Write a node to the appropriate git repo and branch, then push.
  * Fire-and-forget safe — errors are logged, not thrown.
  */
+type RetryWriteOptions = Pick<Parameters<typeof withMirrorCheckout>[0], 'db' | 'retry' | 'beforeGit'>;
+// An identity-only retry MUST supply its in-lock loader; ordinary writers retain the full-payload API.
+export function writeNodeToGit(
+  node: Pick<NodeForGit, 'id'>, ownerRepo: string, clientId: string | null | undefined, memoryId: string,
+  refresh: () => Promise<NodeForGit | null>, retryOptions: RetryWriteOptions,
+): Promise<void>;
+export function writeNodeToGit(
+  node: NodeForGit, ownerRepo: string, clientId?: string | null, memoryId?: string,
+  refresh?: () => Promise<NodeForGit | null>,
+): Promise<void>;
 export async function writeNodeToGit(
-  node: NodeForGit,
+  node: NodeForGit | Pick<NodeForGit, 'id'>,
   ownerRepo: string,
   clientId?: string | null,
   memoryId?: string,
   refresh?: () => Promise<NodeForGit | null>,
+  retryOptions: RetryWriteOptions = {},
 ): Promise<void> {
-  // Capture key availability while the producing request is active. A key
-  // cached by another session (earlier OR later) is not this request's grant.
-  const nodeWriteKeyAvailable = memoryId != null && getRequestKey(memoryId) != null;
   await withMirrorCheckout(
     {
+      ...retryOptions,
       memoryId,
-      nodeWriteKeyAvailable,
       ownerRepo,
       clientId,
-      commitSubject: `Update node ${node.loc}`,
+      commitSubject: `Update node ${'loc' in node ? node.loc : node.id}`,
       logPrefix: '[writeNodeToGit]',
+      // #430: a failed attempt leaves this node's WRITE obligation. Every caller (the node.written event, edge-source
+      // announcements, recovery, merges, search-replace) reaches the repository through here, so none needs an edit.
+      obligations: [{ nodeId: node.id, kind: 'WRITE' }],
     },
-    async ({ localPath, memoryUrn }) => {
+    async ({ localPath, memoryUrn, memoryId: checkoutMemoryId }) => {
       // The node.written subscriber supplies a loader. It must run AFTER the
       // checkout lock is acquired: a snapshot taken while waiting could land
       // after a newer write and roll the Git file backwards.
-      const latest = refresh ? await refresh() : node;
+      const latest = refresh ? await refresh() : ('loc' in node ? node : null);
       if (!latest) return false;
-      // Encrypted request-time exports cannot re-read plaintext after the
-      // request key disappears. Reject a prepared snapshot that went stale
-      // while waiting for another checkout writer; the later event owns the
-      // newest state. revSeq ignores operational updatedAt churn, while
-      // the edge signature catches Edge CRUD (which does not bump revSeq).
-      if (latest.mirrorRevSeq != null && memoryId &&
-          !(await isCurrentEncryptedSnapshot(latest, memoryId))) {
-        console.warn(`[git-mirror] Skipping stale encrypted snapshot for node ${latest.id}`);
-        return false;
-      }
-      return writeNodeFile(localPath, latest, memoryUrn);
+      if (!checkoutMemoryId) throw new Error('Mirror checkout omitted memory identity');
+      const child = latest.loc ? await (retryOptions.db ?? defaultDb).node.findFirst({
+        where: { memoryId: checkoutMemoryId, loc: latest.loc + ':README', deletedAt: null }, select: { id: true },
+      }) : null;
+      return writeNodeFile(localPath, latest, memoryUrn, child !== null);
     },
   );
 }

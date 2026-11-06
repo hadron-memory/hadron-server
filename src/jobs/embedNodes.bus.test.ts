@@ -3,20 +3,22 @@
  *
  * What this file pins (bus module mocked — the broker transport itself is
  * pinned by src/lib/bus/bus.test.ts):
- *   - enqueueNodeEmbedding publishes a { nodeId } wake-up AFTER the durable
+ *   - enqueueNodeEmbedding publishes a coalesced empty wake AFTER the durable
  *     marker stamp (PR-507 review: the wake must not ride
  *     evt.node.written.v1 — the fact event races the stamp) for
  *     vector-indexed memories and nothing otherwise; a publish failure
  *     never breaks enqueue.
  *   - backfillMemoryEmbeddings publishes an empty drain ping.
- *   - handleEmbedWake: { nodeId } embeds off the stored marker (idempotent —
- *     a cleared marker skips); a transient failure THROWS (bus nak/redelivery
- *     contract); an empty payload drains the queue to exhaustion.
+ *   - valid wakes only nudge bounded shared admission; due durable obligations
+ *     are eventually drained, with transient failures rescheduled in Postgres.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
+import { randomUUID } from 'node:crypto';
+import { setEmbeddingClientForTests, resetEmbeddingClientForTests } from '../lib/embedding/index.js';
+import { stampEmbeddingObligation } from '../services/embedding/obligation.js';
 import { generateId } from '../lib/id.js';
 import type { EmbeddingClient } from '../lib/embedding/client.js';
 
@@ -27,7 +29,7 @@ vi.mock('../lib/bus/index.js', () => ({
 }));
 
 import { enqueueNodeEmbedding, backfillMemoryEmbeddings } from '../services/embedding/enqueue.js';
-import { handleEmbedWake, EMBED_WAKE_SUBJECT } from './embedNodes.js';
+import { handleEmbedWake, EMBED_WAKE_SUBJECT, embeddingDispatcher } from './embedNodes.js';
 
 const DIM = 768;
 
@@ -53,7 +55,7 @@ async function createNodeRow(loc: string, pending = true) {
       content: `content of ${loc}`,
       abstract: `Abstract of ${loc}.`,
       tags: [],
-      ...(pending ? { embeddingPendingAt: new Date() } : {}),
+      ...(pending ? { embeddingPendingAt: new Date(), embeddingWorkToken: randomUUID() } : {}),
     },
   });
 }
@@ -61,6 +63,7 @@ async function createNodeRow(loc: string, pending = true) {
 beforeEach(async () => {
   vi.clearAllMocks();
   busAvailable = true;
+  setEmbeddingClientForTests(fakeClient());
   process.env.EMBEDDING_API_URL = 'http://embedding.test.invalid';
   await cleanDb(db);
   const org = await db.organization.create({
@@ -80,12 +83,18 @@ beforeEach(async () => {
   memoryId = memory.id;
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await vi.waitFor(() => {
+    const state = embeddingDispatcher(db).state();
+    expect(state.active).toBe(0);
+    expect(state.selecting || state.scheduled).toBe(false);
+  });
+  resetEmbeddingClientForTests();
   delete process.env.EMBEDDING_API_URL;
 });
 
 describe('publishes on the write path', () => {
-  it('enqueueNodeEmbedding publishes a { nodeId } wake-up AFTER stamping the marker', async () => {
+  it('enqueueNodeEmbedding coalesces a wake AFTER the writer commits its marker', async () => {
     // No endpoint for the prompt-drain in this test — delete AFTER fixture
     // setup so isEmbeddingConfigured() is false during enqueue and the
     // prompt-drain doesn't race the assertion.
@@ -99,13 +108,14 @@ describe('publishes on the write path', () => {
       const row = await db.node.findUnique({ where: { id: node.id } });
       markerAtPublish = row?.embeddingPendingAt ?? null;
     });
-    await enqueueNodeEmbedding(db, { nodeId: node.id, memoryId, plaintext: {} });
+    const workToken = await db.$transaction(tx => stampEmbeddingObligation(tx, node.id, memoryId));
+    await enqueueNodeEmbedding(db, { nodeId: node.id, memoryId, workToken, plaintext: {} });
     // The wake publish is void-fired; wait for the snapshot inside the mock.
     await vi.waitFor(() => expect(markerAtPublish).not.toBeUndefined());
     expect(publish).toHaveBeenCalledWith(
       EMBED_WAKE_SUBJECT,
-      { nodeId: node.id },
-      expect.objectContaining({ idempotencyKey: expect.stringContaining(node.id) }),
+      {},
+      expect.objectContaining({ idempotencyKey: expect.any(String) }),
     );
     expect(markerAtPublish).not.toBeNull();
   });
@@ -113,7 +123,8 @@ describe('publishes on the write path', () => {
   it('does not publish for a non-indexed memory', async () => {
     await db.memory.update({ where: { id: memoryId }, data: { vectorIndexEnabled: false } });
     const node = await createNodeRow('p2', false);
-    await enqueueNodeEmbedding(db, { nodeId: node.id, memoryId, plaintext: {} });
+    const workToken = await db.$transaction(tx => stampEmbeddingObligation(tx, node.id, memoryId));
+    await enqueueNodeEmbedding(db, { nodeId: node.id, memoryId, workToken, plaintext: {} });
     expect(publish).not.toHaveBeenCalled();
   });
 
@@ -121,7 +132,8 @@ describe('publishes on the write path', () => {
     delete process.env.EMBEDDING_API_URL;
     publish.mockRejectedValueOnce(new Error('broker down'));
     const node = await createNodeRow('p3', false);
-    await enqueueNodeEmbedding(db, { nodeId: node.id, memoryId, plaintext: {} });
+    const workToken = await db.$transaction(tx => stampEmbeddingObligation(tx, node.id, memoryId));
+    await enqueueNodeEmbedding(db, { nodeId: node.id, memoryId, workToken, plaintext: {} });
     const row = await db.node.findUnique({ where: { id: node.id } });
     expect(row?.embeddingPendingAt).not.toBeNull();
   });
@@ -137,7 +149,7 @@ describe('publishes on the write path', () => {
     await createNodeRow('p4', false);
     const count = await backfillMemoryEmbeddings(db, memoryId);
     expect(count).toBe(1);
-    expect(publish).toHaveBeenCalledWith(EMBED_WAKE_SUBJECT, {}, expect.anything());
+    await vi.waitFor(() => expect(publish).toHaveBeenCalledWith(EMBED_WAKE_SUBJECT, {}, expect.anything()));
   });
 });
 
@@ -145,8 +157,12 @@ describe('handleEmbedWake', () => {
   it('embeds a marked node and clears its marker', async () => {
     const node = await createNodeRow('w1');
     const client = fakeClient();
+    setEmbeddingClientForTests(client);
     await handleEmbedWake(db, { nodeId: node.id }, client);
-    expect(client.embed).toHaveBeenCalled();
+    await vi.waitFor(async () => {
+      expect(client.embed).toHaveBeenCalled();
+      expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).embeddingPendingAt).toBeNull();
+    });
     const row = await db.node.findUnique({ where: { id: node.id } });
     expect(row?.embeddingPendingAt).toBeNull();
   });
@@ -154,6 +170,7 @@ describe('handleEmbedWake', () => {
   it('is idempotent: a node whose marker is already cleared skips cheaply', async () => {
     const node = await createNodeRow('w2', false);
     const client = fakeClient();
+    setEmbeddingClientForTests(client);
     await handleEmbedWake(db, { nodeId: node.id }, client);
     expect(client.embed).not.toHaveBeenCalled();
   });
@@ -168,20 +185,23 @@ describe('handleEmbedWake', () => {
       data: { embeddingPendingAt: new Date(Date.now() + 60_000) },
     });
     const client = fakeClient();
+    setEmbeddingClientForTests(client);
     await handleEmbedWake(db, { nodeId: node.id }, client); // resolves (ack), no throw
     expect(client.embed).not.toHaveBeenCalled();
     const row = await db.node.findUnique({ where: { id: node.id } });
     expect(row?.embeddingPendingAt).not.toBeNull(); // schedule untouched
   });
 
-  it('THROWS on a transient failure so the bus naks/redelivers', async () => {
+  it('acks a coalesced wake while a transient failure leaves a backed-off durable obligation', async () => {
     const node = await createNodeRow('w3');
     const client = fakeClient({
       embed: vi.fn(async () => {
         throw new Error('connect ECONNREFUSED');
       }),
     });
-    await expect(handleEmbedWake(db, { nodeId: node.id }, client)).rejects.toThrow(/transient/);
+    setEmbeddingClientForTests(client);
+    await expect(handleEmbedWake(db, { nodeId: node.id }, client)).resolves.toBeUndefined();
+    await vi.waitFor(async () => expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).embeddingAttempts).toBe(1));
     // Attempts incremented, marker retained (retryable).
     const row = await db.node.findUnique({ where: { id: node.id } });
     expect(row?.embeddingAttempts).toBeGreaterThanOrEqual(1);
@@ -193,7 +213,11 @@ describe('handleEmbedWake', () => {
     const b = await createNodeRow('d2');
     const c = await createNodeRow('d3');
     const client = fakeClient();
+    setEmbeddingClientForTests(client);
     await handleEmbedWake(db, {}, client);
+    await vi.waitFor(async () => expect(await db.node.count({
+      where: { memoryId, embeddingPendingAt: { not: null } },
+    })).toBe(0));
     const rows = await db.node.findMany({
       where: { id: { in: [a.id, b.id, c.id] } },
       select: { embeddingPendingAt: true },
@@ -216,6 +240,7 @@ describe('handleEmbedWake', () => {
     });
     const node = await createNodeRow('enc1');
     const client = fakeClient();
+    setEmbeddingClientForTests(client);
     await handleEmbedWake(db, { nodeId: node.id }, client);
     expect(client.embed).not.toHaveBeenCalled();
     // Marker retained — NOT flipped to a permanent encrypted-no-plaintext
@@ -236,7 +261,7 @@ describe('handleEmbedWake', () => {
     expect(row?.embeddingPendingAt).not.toBeNull();
   });
 
-  it('drain ping stops on a failing FULL batch by throwing (nak → spaced continuation)', async () => {
+  it('a full failing batch yields to durable backoff without burning retries', async () => {
     // 26 pending rows (> one batch of 25), client always fails transiently:
     // without the guard the loop would re-select the same failing rows
     // back-to-back and burn the 5-attempt cap in milliseconds (Gemini).
@@ -246,7 +271,9 @@ describe('handleEmbedWake', () => {
         throw new Error('connect ECONNREFUSED');
       }),
     });
-    await expect(handleEmbedWake(db, {}, failing)).rejects.toThrow(/nak for spaced/);
+    setEmbeddingClientForTests(failing);
+    await expect(handleEmbedWake(db, {}, failing)).resolves.toBeUndefined();
+    await vi.waitFor(async () => expect(await db.node.count({ where: { memoryId, embeddingAttempts: 1 } })).toBe(26));
     // Exactly ONE drain round ran: every row has at most 1 attempt.
     const rows = await db.node.findMany({ where: { memoryId }, select: { embeddingAttempts: true } });
     expect(Math.max(...rows.map((r) => r.embeddingAttempts))).toBeLessThanOrEqual(1);
@@ -259,6 +286,7 @@ describe('handleEmbedWake', () => {
         throw new Error('connect ECONNREFUSED');
       }),
     });
+    setEmbeddingClientForTests(failing);
     await expect(handleEmbedWake(db, {}, failing)).resolves.toBeUndefined();
   });
 });

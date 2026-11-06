@@ -29,11 +29,12 @@ import { type Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { loadWorkersActivity } from '../../api/graphql/schema/resolvers.worker.js';
 import { toNaiveUtc } from '../sessionActivity.js';
 import { appendAvailabilityEvent, PLATFORM_ACTOR, type AvailabilityReason } from './events.js';
+import { familySpellings, normalizeFamily } from './family.js';
 
 export const AVAILABILITY_REASONS: readonly AvailabilityReason[] = ['stalled', 'out-of-tokens', 'host-down', 'other'];
 
 /** A model family is a lowercase token (cor:agt:060:04), as chk_model_family_availability_shape pins it. */
-export const FAMILY_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+export { FAMILY_PATTERN } from './family.js';
 
 /** The fields of an availability record the predicate reads. */
 export type AvailabilityRecord = {
@@ -41,6 +42,8 @@ export type AvailabilityRecord = {
   reason: string | null;
   until: Date | null;
   setAt: Date;
+  /** #2162: a `resetting` mark's stop instant; activity after it ends the mark. Absent reads as null. */
+  clearsOnActivityAfter?: Date | null;
 } | null;
 
 /**
@@ -54,6 +57,11 @@ export function recordInEffect(record: AvailabilityRecord, now: Date, lastActivi
   if (record.until && record.until.getTime() <= now.getTime()) return false;
   // cor:agt:060:07 (Proposed): the worker's next activity ends a stall mark.
   if (record.reason === 'stalled' && lastActivityAt && lastActivityAt.getTime() > record.setAt.getTime()) return false;
+  // #2162 (cor:agt:050:27): the relaunched agent's first activity ends a `resetting` mark. Only activity AFTER the host
+  // reported the old agent stopped counts, never after the mark was set: the old agent's own last calls, between the
+  // claim and the stop, must not lift it.
+  if (record.reason === 'resetting' && record.clearsOnActivityAfter && lastActivityAt
+      && lastActivityAt.getTime() > record.clearsOnActivityAfter.getTime()) return false;
   return true;
 }
 
@@ -110,20 +118,22 @@ export async function loadAvailabilityByFamily(
 ): Promise<Map<string, WorkerAvailabilityView>> {
   if (workers.length === 0) return new Map();
   const ids = workers.map((w) => w.id);
-  const pairs = workers.flatMap((w) => w.families.map((family) => ({ appId: w.appId, family })));
+  const pairs = workers.flatMap((w) => w.families.flatMap((family) => familySpellings(family).map((f) => ({ appId: w.appId, family: f }))));
   const [own, activity, families] = await Promise.all([
     db.workerAvailability.findMany({ where: { workerId: { in: ids } } }),
     loadWorkersActivity({ db } as unknown as Context, ids, now),
     pairs.length ? db.modelFamilyAvailability.findMany({ where: { OR: pairs } }) : Promise.resolve([]),
   ]);
   const ownBy = new Map(own.map((r) => [r.workerId, r]));
-  const familyBy = new Map(families.map((r) => [`${r.appId}\u0000${r.family}`, r]));
+  // Legacy aliases may coexist: an effective refusal under either spelling
+  // still applies. Never make an old unavailable mark disappear on rollout.
+  const unavailable = new Set(families.filter((r) => recordInEffect(r, now)).map((r) => `${r.appId}\u0000${normalizeFamily(r.family)}`));
   return new Map(workers.map((w) => {
     const record = ownBy.get(w.id) ?? null;
     return [w.id, {
       own: record,
       ownInEffect: !isAvailableForWork({ worker: record, family: null, lastActivityAt: activity.get(w.id)?.lastActiveAt ?? null }, now),
-      familyAvailable: new Map(w.families.map((f) => [f, !recordInEffect(familyBy.get(`${w.appId}\u0000${f}`) ?? null, now)])),
+      familyAvailable: new Map(w.families.map((f) => [f, !unavailable.has(`${w.appId}\u0000${normalizeFamily(f)}`)])),
     }];
   }));
 }
@@ -161,7 +171,7 @@ export async function markStalled(
       where: { workerId: args.workerId },
       data: {
         state: 'unavailable', reason: 'stalled', until: null, setAt: args.now, setBy: 'stall-rule',
-        setByUserId: null, setByWorkerId: null, setByAgentId: null, setByHostId: null,
+        setByUserId: null, setByWorkerId: null, setByAgentId: null, setByHostId: null, clearsOnActivityAfter: null, contextResetId: null,
       },
     });
     changed = !stalled;
@@ -293,7 +303,7 @@ async function recordLapse(db: PrismaClient, r: LapsedRecord, now: Date): Promis
       where: { workerId: r.workerId, state: 'unavailable', until: r.until, setAt: r.setAt },
       data: {
         state: 'available', reason: null, until: null, setAt: r.until, setBy: 'lapse',
-        setByUserId: null, setByWorkerId: null, setByAgentId: null, setByHostId: null,
+        setByUserId: null, setByWorkerId: null, setByAgentId: null, setByHostId: null, clearsOnActivityAfter: null, contextResetId: null,
       },
     });
     if (n.count === 0) return false;

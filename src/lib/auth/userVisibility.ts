@@ -86,22 +86,32 @@ function viewerOrgIds(ctx: UserVisibilityCtx, viewerId: string): Promise<string[
   return memo.viewerOrgIds;
 }
 
-function sharesOrgWith(ctx: UserVisibilityCtx, viewerId: string, targetUserId: string): Promise<boolean> {
+/**
+ * Which of `targetUserIds` share a live org with the viewer, in ONE membership
+ * query for the ids the request has not already asked about (#2223). Results
+ * land in the same per-target memo `sharesOrgWith` reads, so the single-target
+ * and bulk paths can never disagree and a request asks each target once.
+ */
+function sharesOrgWithMany(ctx: UserVisibilityCtx, viewerId: string, targetUserIds: readonly string[]): Promise<Map<string, boolean>> {
   const memo = memoFor(ctx);
-  let p = memo.shares.get(targetUserId);
-  if (!p) {
-    p = (async () => {
+  const missing = [...new Set(targetUserIds)].filter((id) => !memo.shares.has(id));
+  if (missing.length > 0) {
+    const members = (async () => {
       const orgIds = await viewerOrgIds(ctx, viewerId);
-      if (orgIds.length === 0) return false;
-      const row = await ctx.db.orgMember.findFirst({
-        where: { userId: targetUserId, organizationId: { in: orgIds }, ...LIVE_ORG_MEMBERSHIP },
+      if (orgIds.length === 0) return new Set<string>();
+      const rows = await ctx.db.orgMember.findMany({
+        where: { userId: { in: missing }, organizationId: { in: orgIds }, ...LIVE_ORG_MEMBERSHIP },
         select: { userId: true },
       });
-      return row !== null;
+      return new Set(rows.map((r) => r.userId));
     })();
-    memo.shares.set(targetUserId, p);
+    for (const id of missing) memo.shares.set(id, members.then((set) => set.has(id)));
   }
-  return p;
+  return Promise.all(targetUserIds.map(async (id) => [id, await memo.shares.get(id)!] as const)).then((e) => new Map(e));
+}
+
+async function sharesOrgWith(ctx: UserVisibilityCtx, viewerId: string, targetUserId: string): Promise<boolean> {
+  return (await sharesOrgWithMany(ctx, viewerId, [targetUserId])).get(targetUserId)!;
 }
 
 function viewerRoleInOrg(ctx: UserVisibilityCtx, viewerId: string, orgId: string): Promise<string | null> {
@@ -131,10 +141,33 @@ export async function canSeeUserPersonalFields(
   targetUserId: string | null | undefined,
 ): Promise<boolean> {
   if (!targetUserId) return false;
-  if (ctx.userId && ctx.userId === targetUserId) return true; // self
-  if (isPlatformAdmin(ctx)) return true;
-  if (!ctx.userId) return false; // unauthenticated / App-Key caller
-  return sharesOrgWith(ctx, ctx.userId, targetUserId);
+  return (await canSeeUserPersonalFieldsMany(ctx, [targetUserId])).has(targetUserId);
+}
+
+/**
+ * {@link canSeeUserPersonalFields} for many targets at once (#2223): the set of
+ * targets whose `name` and `email` the viewer may see. The rule has ONE
+ * definition — the single-target form delegates here — and the membership
+ * lookup is one query however many targets there are. A falsy id is never
+ * visible.
+ */
+export async function canSeeUserPersonalFieldsMany(
+  ctx: UserVisibilityCtx,
+  targetUserIds: ReadonlyArray<string | null | undefined>,
+): Promise<Set<string>> {
+  const ids = [...new Set(targetUserIds.filter((id): id is string => !!id))];
+  if (ids.length === 0) return new Set();
+  if (isPlatformAdmin(ctx)) return new Set(ids);
+  const visible = new Set<string>();
+  if (ctx.userId) {
+    if (ids.includes(ctx.userId)) visible.add(ctx.userId); // self
+  } else {
+    return visible; // unauthenticated / App-Key caller
+  }
+  const others = ids.filter((id) => id !== ctx.userId);
+  if (others.length === 0) return visible;
+  for (const [id, shares] of await sharesOrgWithMany(ctx, ctx.userId, others)) if (shares) visible.add(id);
+  return visible;
 }
 
 /**

@@ -42,6 +42,15 @@ that choice consistent for teardown; auto teardown uses the recorded choice. Doc
 the Incus publication binds the disposable instance's interfaces, reachable
 only through the private QA bridge and the host-loopback forwarder.
 
+On Incus, `dns-guard.sh` probes name resolution inside the fresh instance before
+anything needs the network (`E2E_DNS_POLL_SECONDS`, `E2E_DNS_SEED_AFTER`,
+`E2E_DNS_WAIT_PROBES`). A resolver that comes up by itself is left alone. Only
+if it stays dead is `1.1.1.1` seeded, by REPLACING the instance's
+`/etc/resolv.conf` (a fresh image's is a symlink into `/run/systemd/resolve/`
+that can still dangle; appending through it fails with `Directory nonexistent`).
+If the write fails it says so on stderr, and the run stops with `DNS not
+answering` unless a later probe succeeds. Only the disposable instance is touched.
+
 The first slice includes server and DB. Run a local portal as described below;
 MinIO, NATS, external-provider mocks, git-source fixtures and automated browser
 suites are not part of this slice. Mail, LLM spend and headless workers are off.
@@ -207,3 +216,38 @@ Run `down`/`up`/`check` on a fresh stack. Lifecycle/forwarder regressions run wi
 `node --test scripts/e2e/*.test.mjs`. Keep epic-specific fixtures (passkeys,
 virtual authenticators, comments) in their later slices; do not change the
 canonical dev seed or shared `hadron_test` database for an E2E fixture.
+
+## Synthetic scale fixture (#2899)
+
+`scale-fixture.mjs` emits a bounded bulk-SQL program, not a million-row host file.
+It accepts a node count (1..1,000,000) and an optional deterministic seed. Pipe it
+only to the **named disposable stack's** `e2e` database, after the normal seed:
+
+```sh
+node scripts/e2e/scale-fixture.mjs 10000 | \
+  incus exec hadron-e2e-YOUR-NAME -- \
+  docker exec -i hadron-e2e-YOUR-NAME-db-1 psql -X -U e2e -d e2e
+```
+
+Use `set -o pipefail` in the invoking shell. The SQL refuses a non-`e2e`
+database/role, missing synthetic catalog, an existing scale memory, or a
+colliding control identity. It inserts one count-specific knowledge memory and
+one shared one-node control per seed. Repeating a count refuses rather than
+replacing anything. The same seed/count produces identical ids and counts.
+`stack.sh down YOUR-NAME` removes all calibration and final fixture data.
+
+The data is synthetic: about 900 bytes of body per node, deterministic tags,
+1000 top-level folders, wide groups of up to 5000 children, and a final chain
+(maximum loc depth 11). Small calibration counts have correspondingly smaller
+shapes. The generated `nodes.tsv` and revision-fingerprint triggers stay on;
+approval-hash v1 and abstract lineage are populated. Each node has one pre-edit
+history snapshot at revision 1 and live revision 2 with identical curated
+content. This models a metadata-only edit without inventing a history row for
+the live revision. No embeddings are generated; vector indexing is disabled
+for these memories, leaving the shared vector index without fixture entries.
+
+Before a million-node pass, measure 10k and 100k first and record their build
+cost and storage slope. Set the stack's CPU/memory limits **before** bulk
+seeding; use private disk-backed TMPDIR, monitor the host owner's stated
+load/free-space limits, and stop on a threshold. Do not infer permission to
+load-test, retain a staging server, or seed any host database from this script.

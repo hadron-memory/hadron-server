@@ -71,4 +71,14 @@ describe('git sync include tags (#2040)', () => {
     expect(await db.edge.count({ where: { memoryId: graph.id, governedKind: 'INCLUDE' } })).toBe(0);
     expect(await db.node.count({ where: { memoryId: graph.id, loc: 'ok' } })).toBe(1);
   });
+
+  it('an over-depth chain syncs and is not reported as skipped (#2134, cor:dmo:150:06)', async () => {
+    file('n0', 'leaf');
+    for (let i = 1; i <= 11; i++) file(`n${i}`, `{{> n${i - 1}}}`);
+    const result = await syncGraphFromGithub(graph);
+    expect(result.error).toBeUndefined();
+    expect(result.skippedInvalidIncludes ?? []).toEqual([]);
+    expect(await db.node.count({ where: { memoryId: graph.id, loc: { startsWith: 'n' } } })).toBe(12);
+    expect(await db.edge.count({ where: { memoryId: graph.id, governedKind: 'INCLUDE' } })).toBe(11);
+  });
 });

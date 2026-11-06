@@ -24,10 +24,17 @@
 // grace, is src/lib/hostOperations/sessionEnd.ts.
 
 import { GraphQLError } from 'graphql';
+import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
+import { recordNodeWrite } from '../../../lib/usageRecorder.js';
+import { publishNodeWritten } from '../../../lib/events/nodeWritten.js';
+import { enqueueNodeEmbedding } from '../../../services/embedding/enqueue.js';
+import type { CheckpointWrite } from '../../../lib/contextReset/contextReset.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
 import {
   actorManagesApp,
+  recordInstructedManagerAct,
+  withInstruction,
   inTaskWriteTx,
   loadApp,
   requireWritable,
@@ -59,7 +66,8 @@ import {
   HOST_ID_PATTERN,
   HOST_LAPSE_CHECK_INS_DEFAULT,
 } from '../../../lib/agentTasks/hosts.js';
-import { appendAvailabilityEvent, appendHostOperationEvent, eventActor, PLATFORM_ACTOR } from '../../../lib/agentTasks/events.js';
+import { appendAvailabilityEvent, appendHostOperationEvent, eventActor, PLATFORM_ACTOR, type ManagerAct } from '../../../lib/agentTasks/events.js';
+import type { ActInstruction } from '../../../lib/auth/instructedAct.js';
 import { recordInEffect } from '../../../lib/agentTasks/availability.js';
 import { matchAfterChange } from '../../../lib/agentTasks/matcher.js';
 import { fenceHostDecision, insertWorkerStart, LaunchRefusal, liveRegistrationsFor, lockStartableWorker, mintLaunchGrants } from '../../../lib/hostOperations/launch.js';
@@ -67,6 +75,26 @@ import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { sessionHasHandoff } from '../../../lib/hostOperations/settle.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { normalizeAvailability, type AvailabilityInput } from './resolvers.agentTaskAlarms.js';
+import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
+import { buildWorkerTerminal, validateTerminalBatch, type StoredWorkerTerminal, type TerminalReportInput } from '../../../lib/workerTerminal.js';
+import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
+import {
+  authorizeContextResetStop,
+  cancelLiveReset,
+  holdForStopLease,
+  outstandingStopLease,
+  claimContextReset,
+  readContextResetForHost,
+  ContextResetError,
+  onContextResetReported,
+  registerContextResetRecovery,
+  reportContextResetAgentStopped,
+  reportContextResetRelaunched,
+  reportContextResetRelaunchFailed,
+  type ContextResetStep,
+  type ContextResetRow,
+  type ResetHost,
+} from '../../../lib/contextReset/contextReset.js';
 
 const appNotFound = (appRef: string): GraphQLError => taskError('APP_NOT_FOUND', 'App not found.', { appRef });
 const opNotFound = (id: string): GraphQLError => taskError('HOST_OPERATION_NOT_FOUND', 'Host operation not found.', { id });
@@ -92,7 +120,7 @@ const scopeRequired = (): GraphQLError =>
  * foreign App is "not found"); the key holds host:operate now; it carries no session. Returns the key as its host, and
  * the re-check to run inside the write's transaction under the App's anchor, where the host must still be the same one.
  */
-async function hostKeyEntry(ctx: Context, appRef: string): Promise<{ app: TaskApp; host: HostKey; authorize: (tx: Prisma.TransactionClient) => Promise<void> }> {
+export async function hostKeyEntry(ctx: Context, appRef: string): Promise<{ app: TaskApp; host: HostKey; authorize: (tx: Prisma.TransactionClient) => Promise<void> }> {
   const key = appKeyCaller(ctx);
   if (!key) {
     throw taskError('HOST_KEY_REQUIRED', "Only a host, with its App key's host:operate scope, does this.");
@@ -140,6 +168,8 @@ type RegisterHostInput = {
   label: string;
   pollIntervalSeconds: number;
   workers?: { worker: string; family: string; worktrees?: string[] | null }[] | null;
+  /** #2162: the capability-gated operation types this host performs (cor:agt:070:01, Proposed). */
+  capabilities?: string[] | null;
 };
 
 type HostOperationRow = Prisma.HostOperationGetPayload<Record<string, never>>;
@@ -156,7 +186,7 @@ function refusalCode(e: unknown): string | null {
  * a key that is or was a host key records its use, with the refusal's code, in its own write after the refusal, so
  * rolling the refused call back cannot erase it. An accepted write records inside its own transaction, as before.
  */
-async function recordingRefusal<T>(ctx: Context, action: HostKeyAction, operationId: unknown, fn: () => Promise<T>): Promise<T> {
+export async function recordingRefusal<T>(ctx: Context, action: HostKeyAction, operationId: unknown, fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
   } catch (e) {
@@ -187,7 +217,10 @@ export const hostOperationMutations = {
     try {
       await registerHost(
         ctx.db,
-        { appId: app.id, hostId: host.hostId, label: input.label, pollIntervalSeconds: input.pollIntervalSeconds, workers },
+        {
+          appId: app.id, hostId: host.hostId, label: input.label, pollIntervalSeconds: input.pollIntervalSeconds, workers,
+          capabilities: input.capabilities ?? [],
+        },
         new Date(),
         {
           authorize,
@@ -212,7 +245,7 @@ export const hostOperationMutations = {
    * host's, in its own App.
    */
   collectHostOperations: async (_: unknown, a: { appRef: string; first?: number | null }, ctx: Context) => recordingRefusal(ctx, 'collect', null, async () => {
-    const first = Math.min(Math.max(a.first ?? 50, 1), PAGE_MAX);
+    const first = Math.min(Math.max(a.first ?? 20, 1), PAGE_MAX);
     return asHost(ctx, a.appRef, async (tx, app, host) => {
       const now = new Date();
       const out: Array<HostOperationRow & { launchGrant: string | null }> = [];
@@ -315,6 +348,15 @@ export const hostOperationMutations = {
           result = { handoff: await sessionHasHandoff(tx, args.workerId, args.sessionId) };
         }
       }
+      if (op.type === 'worker.reset-context') {
+        // #2162: the reset's own outcome first. SUCCEEDED needs the agent relaunched; FAILED names its closed reason.
+        try {
+          await onContextResetReported(tx, op, status, status === 'failed' ? reason : null, now);
+        } catch (e) {
+          if (e instanceof ContextResetError) throw taskError(e.code === 'CONTEXT_RESET_WRONG_PHASE' ? 'HOST_OPERATION_NOT_DONE' : e.code, e.message, { id: op.id });
+          throw e;
+        }
+      }
       const updated = await tx.hostOperation.update({
         where: { id: op.id },
         data: {
@@ -366,6 +408,8 @@ export const hostOperationMutations = {
     const app = await asHost(ctx, input.appRef, async (tx, freshApp, host) => {
       workerId = await resolveTaskWorkerId(ctx, freshApp.id, input.worker);
       if (!workerId) throw notRegistered();
+      // #2162: the per-worker assignment lock before the worker row (src/lib/agentTasks/workerLock.ts).
+      await lockWorkersForAssignment(tx, [workerId]);
       const [w] = await tx.$queryRaw<{ appId: string; retiredAt: Date | null }[]>`
         SELECT app_id AS "appId", retired_at AS "retiredAt" FROM workers WHERE id = ${workerId} FOR UPDATE`;
       // FOR UPDATE, not SHARE (#1876 review, Diego P2-3): the worker row exists before any availability row, so it is
@@ -387,23 +431,37 @@ export const hostOperationMutations = {
         SELECT state, reason, until, set_at AS "setAt", set_by AS "setBy", set_by_host_id AS "setByHostId"
         FROM worker_availability WHERE worker_id = ${workerId} FOR UPDATE`;
       const ownMark = cur?.setBy === 'host' && cur.setByHostId === host.hostId;
-      const othersMarkInEffect = cur && cur.state === 'unavailable' && !ownMark && recordInEffect(cur, now);
+      // #2162: a host marking the worker DOWN replaces a context reset's `resetting` mark and cancels the reset; the
+      // worker stays unavailable at least until a granted stop's lease ends (cor:agt:050:27 §2.4).
+      const overReset = state === 'unavailable' && reason === 'host-down' && cur?.reason === 'resetting' && cur.setBy === 'context-reset';
+      const othersMarkInEffect = cur && cur.state === 'unavailable' && !ownMark && !overReset && recordInEffect(cur, now);
       if (state === 'unavailable' && othersMarkInEffect) {
         throw taskError('AVAILABILITY_NOT_PERMITTED', 'This worker is unavailable by someone else\'s mark; a host does not replace it.');
       }
       if (state === 'available' && !(ownMark && cur!.state === 'unavailable')) {
         throw taskError('AVAILABILITY_NOT_PERMITTED', 'A host clears only a mark it set itself.');
       }
+      let markUntil = until;
+      // #2255 review: a granted stop still outstanding (its reset live or already ended) floors every host write: the
+      // host's own clear keeps the worker unavailable until the lease ends, and its mark lapses no earlier.
+      const lease = overReset ? await cancelLiveReset(tx, workerId, 'HOST_LOST', now) : await outstandingStopLease(tx, workerId, now);
+      if (lease && state === 'available') {
+        await holdForStopLease(tx, { workerId, appId: freshApp.id }, lease, now);
+        await recordHostKeyUse(tx, host, 'availability', { count: 1 });
+        return freshApp;
+      }
+      if (lease && markUntil && markUntil.getTime() < lease.leaseEnd.getTime()) markUntil = lease.leaseEnd;
       const data = {
-        state, reason, until, setAt: now, setBy: 'host',
-        setByUserId: null, setByWorkerId: null, setByAgentId: null, setByHostId: host.hostId,
+        state, reason, until: markUntil, setAt: now, setBy: 'host',
+        setByUserId: null, setByWorkerId: null, setByAgentId: null, setByHostId: host.hostId, clearsOnActivityAfter: null,
+        contextResetId: null,
       };
       await tx.workerAvailability.upsert({ where: { workerId }, create: { workerId, ...data }, update: data });
       await appendAvailabilityEvent(tx, {
         appId: freshApp.id,
         actor: PLATFORM_ACTOR,
         event: {
-          kind: 'worker', workerId, state, reason: reason as 'out-of-tokens' | 'host-down' | null, until, setBy: 'host', hostId: host.hostId,
+          kind: 'worker', workerId, state, reason: reason as 'out-of-tokens' | 'host-down' | null, until: markUntil, setBy: 'host', hostId: host.hostId,
         },
       });
       await recordHostKeyUse(tx, host, 'availability', { count: 1 });
@@ -414,13 +472,85 @@ export const hostOperationMutations = {
   }),
 
   /**
+   * #2771 (proposed cor:agt:070:09) — a host reports the terminal state of workers it registers. The host key's gate
+   * (cor:agt:070:04, #1749 order) runs once, in asHost. The WHOLE batch is validated before any lock, and a malformed
+   * one refuses everything (BAD_USER_INPUT, nothing stored). A worker the host may not report is refused for that item
+   * only, exactly `setHostWorkerAvailability`'s test (this App, not retired, listed in THIS host's registration; the
+   * registration's `lostAt` is irrelevant), so a worker retired between the host's refresh and its sweep does not blank
+   * the team's report. An older report than the stored one is skipped. Lock order: every batch worker FOR UPDATE in id
+   * order, then the registration FOR SHARE once (workers before registration, as registerHost, so no cycle).
+   *
+   * The server builds what it stores (`buildWorkerTerminal`): `host` is the key's host and its registration's label,
+   * `reportedAt` is the server's clock. The report decides nothing. The alarm verdict is computed from the stored
+   * rows after the write and returned, never stored, and names only coordinators THIS host registers.
+   */
+  setHostWorkerTerminals: async (
+    _: unknown,
+    { input }: { input: { appRef: string; reports: TerminalReportInput[] } },
+    ctx: Context,
+  ) => recordingRefusal(ctx, 'terminal', null, async () => {
+    if (!input) throw badInput('input is required.');
+    const now = new Date();
+    const checked = validateTerminalBatch(input.reports, now);
+    if (!checked.ok) throw badInput(checked.message);
+    return asHost(ctx, input.appRef, async (tx, app, host) => {
+      const refs = new Map<string, string | null>();
+      for (const r of checked.reports) refs.set(r.worker, await resolveTaskWorkerId(ctx, app.id, r.worker));
+      // #2791 §10: the resolver spans every App, so a worker of ANOTHER tenant must read as absent BEFORE the duplicate
+      // check; otherwise naming it twice answers BAD_USER_INPUT while an absent worker answers WORKER_NOT_FOUND twice.
+      const resolved = [...refs.values()].filter((id): id is string => id !== null);
+      const inApp = new Set(
+        resolved.length
+          ? (await tx.worker.findMany({ where: { id: { in: resolved }, appId: app.id }, select: { id: true } })).map((w) => w.id)
+          : [],
+      );
+      for (const [k, id] of refs) if (id !== null && !inApp.has(id)) refs.set(k, null);
+      // Two refs naming one worker (an id and its name) are one report twice: sender's bug, nothing stored.
+      const named = [...refs.values()].filter((id): id is string => id !== null);
+      if (new Set(named).size !== named.length) throw badInput('A worker is reported at most once per call.');
+      const rows = new Map<string, { appId: string; retiredAt: Date | null; slug: string; terminal: StoredWorkerTerminal | null }>();
+      for (const id of [...named].sort()) {
+        const [w] = await tx.$queryRaw<{ appId: string; retiredAt: Date | null; slug: string; terminal: StoredWorkerTerminal | null }[]>`
+          SELECT app_id AS "appId", retired_at AS "retiredAt", slug, terminal FROM workers WHERE id = ${id} FOR UPDATE`;
+        if (w) rows.set(id, w);
+      }
+      const [reg] = await tx.$queryRaw<{ id: string; label: string }[]>`
+        SELECT id, label FROM host_registrations WHERE app_id = ${app.id} AND host_id = ${host.hostId} FOR SHARE`;
+      const listed = new Set(
+        reg && named.length
+          ? (await tx.hostRegistrationWorker.findMany({ where: { registrationId: reg.id, workerId: { in: named } }, select: { workerId: true } })).map((l) => l.workerId)
+          : [],
+      );
+      const stored: { id: string; urn: string }[] = [];
+      const refused: { worker: string; code: string }[] = [];
+      for (const r of checked.reports) {
+        const id = refs.get(r.worker) ?? null;
+        const w = id ? rows.get(id) : undefined;
+        if (!id || !w || !reg || w.appId !== app.id || w.retiredAt || !listed.has(id)) {
+          refused.push({ worker: r.worker, code: 'WORKER_NOT_FOUND' });
+          continue;
+        }
+        if (w.terminal && new Date(w.terminal.checkedAt).getTime() > r.checkedAt.getTime()) {
+          refused.push({ worker: r.worker, code: 'TERMINAL_REPORT_STALE' });
+          continue;
+        }
+        const terminal = buildWorkerTerminal(r, { id: host.hostId, label: reg.label }, now);
+        await tx.worker.update({ where: { id }, data: { terminal: terminal as unknown as Prisma.InputJsonObject } });
+        stored.push({ id, urn: composeWorkerUrn(app.urn, w.slug) });
+      }
+      await recordHostKeyUse(tx, host, 'terminal', { count: stored.length });
+      return { stored, refused };
+    });
+  }),
+
+  /**
    * cor:agt:070:05 — issue an operation to one of the App's registered hosts. This slice issues the worktree
    * operations: the worker's holder, the worker it reports to (through its session), or whoever manages the App. The
    * type is checked first: anything outside the closed set is refused HOST_OPERATION_TYPE_UNKNOWN (cor:agt:070:03).
    */
   issueHostOperation: async (
     _: unknown,
-    { input }: { input: { appRef: string; hostId: string; worker: string; type: string; args?: Record<string, unknown> | null } },
+    { input, instruction }: { input: { appRef: string; hostId: string; worker: string; type: string; args?: Record<string, unknown> | null }; instruction?: ActInstruction | null },
     ctx: Context,
   ) => recordingRefusal(ctx, 'issue', null, async () => {
     if (!input) throw badInput('input is required.');
@@ -442,9 +572,16 @@ export const hostOperationMutations = {
         'worker.deliver is not issued until a host has a delivery path for it (hadron-cli#829).',
       );
     }
+    if (validated.type === 'worker.reset-context') {
+      // #2162 (cor:agt:050:27 §8): only a task's end requests a reset; nobody issues one by hand.
+      throw taskError('HOST_OPERATION_NOT_ISSUABLE', 'worker.reset-context is issued only by the platform, when a task ends.');
+    }
     const hostId = (input.hostId ?? '').trim();
     if (!HOST_ID_PATTERN.test(hostId)) throw badInput('hostId is a host token.');
-    const { app, actor } = await resolveParticipatedApp(ctx, input.appRef);
+    const participated = await resolveParticipatedApp(ctx, input.appRef);
+    const { app } = participated;
+    // #3321 (cor:dmo:050:12): the manager arm on an instruction; the other arms below need none.
+    const actor = withInstruction(participated.actor, instruction);
     requireWritable(ctx, app);
     const workerId = await resolveTaskWorkerId(ctx, app.id, input.worker);
     const workerNotFound = () => taskError('WORKER_NOT_FOUND', 'Worker not found.', { worker: input.worker });
@@ -463,7 +600,7 @@ export const hostOperationMutations = {
       if (target.retiredAt) throw taskError('WORKER_RETIRED', 'This worker is retired.', { workerId });
       if (validated.type === 'worker.end') {
         // Starting or ending a worker is whoever manages the App's (070:05); worktree authority alone is not enough.
-        if (!(await actorManagesApp(txCtx, freshApp, actor))) {
+        if (!(await actorManagesApp(txCtx, freshApp, actor, actor.instructed))) {
           throw taskError('HOST_OPERATION_NOT_PERMITTED', "Only whoever manages the App ends a worker's session through its host.");
         }
         const [session] = await tx.$queryRaw<{ workerId: string | null; endedAt: Date | null; deletedAt: Date | null }[]>`
@@ -502,10 +639,90 @@ export const hostOperationMutations = {
           ...issuer(ctx, actor),
         },
       });
+      await recordInstructedManagerAct(tx, freshApp.id, actor, `host-operation.${validated.type}` as ManagerAct, { workerId });
     });
     return ctx.db.hostOperation.findUniqueOrThrow({ where: { id } });
   }),
+
+  // ── #2162 (cor:agt:050:27): a context reset's protocol steps, the host's own key only ──────────────────────
+  // Each names the reset and epoch and is idempotent; checkpoint-writing registration has its own `checkpoint` use.
+
+  /** Take the fence: the worker becomes `resetting` (§1.5). Refused steps end the reset and say why. */
+  claimContextReset: (_: unknown, { input }: { input: ResetStepInput & { process: unknown } }, ctx: Context) =>
+    resetStep(ctx, input, (tx, host, now) => claimContextReset(tx, host, input.resetId, input.epoch, input.process, now)),
+
+  /** Register the durable checkpoint before any process control (§3.4). */
+  registerContextResetRecovery: (
+    _: unknown,
+    { input }: { input: ResetStepInput & { checkpointNode?: string | null; checkpoint?: {title:string;content:string} | null; sessionId: string; taskId: string } },
+    ctx: Context,
+  ) => {
+    let write: CheckpointWrite | undefined;
+    return resetStep(ctx, input, (tx, host, now) => registerContextResetRecovery(
+      tx, host, input.resetId, input.epoch, input, now, captured => { write = captured; },
+    ), input?.checkpoint != null ? 'checkpoint' : 'reset', () => {
+      if (!write) return;
+      recordNodeWrite(ctx.db, { id: write.nodeId, loc: write.loc, memoryId: write.memoryId }, ctx);
+      void publishNodeWritten({ nodeId: write.nodeId, memoryId: write.memoryId, clientId: ctx.clientId });
+      void enqueueNodeEmbedding(ctx.db, {
+        nodeId: write.nodeId, memoryId: write.memoryId, workToken: write.workToken,
+        plaintext: { content: write.content, abstract: null },
+      });
+    });
+  },
+
+  /** The single stop grant (§2.1): the host signals only within `stopLeaseMs` of its own send time. */
+  authorizeContextResetStop: (_: unknown, { input }: { input: ResetStepInput & { process: unknown } }, ctx: Context) =>
+    resetStep(ctx, input, (tx, host, now) => authorizeContextResetStop(tx, host, input.resetId, input.epoch, input.process, now)),
+
+  /** The old agent stopped: the mark now waits for the relaunched agent's first activity. */
+  reportContextResetAgentStopped: (_: unknown, { input }: { input: ResetStepInput & { lateStopMs?: number | null } }, ctx: Context) =>
+    resetStep(ctx, input, (tx, host, now) => reportContextResetAgentStopped(tx, host, input.resetId, input.epoch, now, input.lateStopMs)),
+
+  /** The agent was relaunched under its wrapper, with the new process. */
+  reportContextResetRelaunched: (_: unknown, { input }: { input: ResetStepInput & { process: unknown } }, ctx: Context) =>
+    resetStep(ctx, input, (tx, host, now) => reportContextResetRelaunched(tx, host, input.resetId, input.epoch, input.process, now)),
+
+  /** A failure after the claim that the host saw; the reset ends and its mark is released under §2. */
+  reportContextResetRelaunchFailed: (_: unknown, { input }: { input: ResetStepInput & { reason: string } }, ctx: Context) =>
+    resetStep(ctx, input, (tx, host, now) => reportContextResetRelaunchFailed(tx, host, input.resetId, input.epoch, input.reason, now)),
 };
+
+type ResetStepInput = { appRef: string; resetId: string; epoch: number };
+
+/**
+ * One host step of a context reset: the host-key gate (cor:agt:070:04), one transaction under the App's anchor, the
+ * step, and the key's use recorded with it. A refusal that changes nothing (a wrong id, a stale epoch, a step out of
+ * order) is a typed error, recorded apart like every refused host call.
+ */
+async function resetStep(
+  ctx: Context,
+  input: ResetStepInput | null | undefined,
+  run: (tx: Prisma.TransactionClient, host: ResetHost, now: Date) => Promise<ContextResetStep>,
+  action: HostKeyAction = 'reset',
+  afterCommit?: () => void,
+) {
+  return recordingRefusal(ctx, action, null, async () => {
+    if (!input) throw badInput('input is required.');
+    try {
+      const out = await asHost(ctx, input.appRef, async (tx, app, host) => {
+        const result = await run(tx, { appId: app.id, hostId: host.hostId, appKeyId: host.appKeyId }, new Date());
+        await recordHostKeyUse(tx, host, action, {
+          operationId: result.reset.hostOperationId ?? undefined,
+          ...(action === 'checkpoint' && result.refused ? { refusedCode: result.refused } : {}),
+        });
+        return result;
+      });
+      afterCommit?.();
+      // A refusal or failure may have released the worker; a queued task may now match (cor:agt:060:06).
+      if (out.refused) await matchAfterChange(ctx.db, out.reset.appId);
+      return out;
+    } catch (e) {
+      if (e instanceof ContextResetError) throw taskError(e.code, e.message, e.code === 'CONTEXT_RESET_NOT_FOUND' && action === 'checkpoint' ? {} : { resetId: input.resetId });
+      throw e;
+    }
+  });
+}
 
 /**
  * cor:agt:070:05 — start a worker: whoever manages the App, with a task or without (Holger via Vera #10774: a manager
@@ -518,7 +735,7 @@ async function issueWorkerStart(
   let id = '';
   try {
     await inTaskWriteTx(ctx, app, actor, () => appNotFound(appRef), async (tx, txCtx, freshApp) => {
-      if (!(await actorManagesApp(txCtx, freshApp, actor))) {
+      if (!(await actorManagesApp(txCtx, freshApp, actor, actor.instructed))) {
         throw taskError('HOST_OPERATION_NOT_PERMITTED', 'Only whoever manages the App starts a worker through its host.');
       }
       const now = new Date();
@@ -542,8 +759,12 @@ async function issueWorkerStart(
       const e = issuer(ctx, actor);
       id = await insertWorkerStart(tx, {
         appId: freshApp.id, hostId, workerId, worktree: args.worktree!, family: args.family!, taskId: args.taskId ?? null,
-        issuer: { issuedBy: 'user', issuedByUserId: e.issuedByUserId!, issuedByAgentId: e.issuedByAgentId }, hold,
+        issuer: actor.kind === 'worker'
+          ? { issuedBy: 'worker', issuedByUserId: e.issuedByUserId, issuedByWorkerId: actor.workerId, issuedByAgentId: e.issuedByAgentId }
+          : { issuedBy: 'user', issuedByUserId: e.issuedByUserId!, issuedByAgentId: e.issuedByAgentId },
+        hold,
       });
+      await recordInstructedManagerAct(tx, freshApp.id, actor, 'host-operation.worker.start', { workerId });
     });
   } catch (e) {
     if (e instanceof LaunchRefusal) throw taskError(e.code, e.message, { workerId });
@@ -559,9 +780,9 @@ async function mayIssueWorktreeOp(
   actor: TaskActor,
   target: { heldByUserId: string | null; reportsToWorkerId: string | null },
 ): Promise<boolean> {
-  if (actor.kind === 'worker') return target.reportsToWorkerId !== null && target.reportsToWorkerId === actor.workerId;
-  if (target.heldByUserId !== null && target.heldByUserId === actor.userId) return true;
-  return actorManagesApp(txCtx, app, actor);
+  if (actor.kind === 'worker' && target.reportsToWorkerId !== null && target.reportsToWorkerId === actor.workerId) return true;
+  if (actor.kind === 'user' && target.heldByUserId !== null && target.heldByUserId === actor.userId) return true;
+  return actorManagesApp(txCtx, app, actor, actor.instructed);
 }
 
 function issuer(ctx: Context, actor: TaskActor) {
@@ -605,11 +826,29 @@ async function loadRegistrationViews(ctx: Context, appId: string, hostId?: strin
     registeredAt: r.registeredAt,
     refreshedAt: r.refreshedAt,
     live: isRegistrationLive(r, now, checkIns),
+    capabilities: r.capabilities,
     workers: r.workers.map((w) => ({ workerId: w.workerId, family: w.family, worktrees: w.worktrees })),
   }));
 }
 
 export const hostOperationQueries = {
+  /** #3273: one host-owned collected reset; audit use but never advance its protocol. */
+  contextReset: (_: unknown, a: { appRef: string; resetId: string }, ctx: Context) =>
+    recordingRefusal(ctx, 'read', null, async () => {
+      let reset;
+      try {
+        reset = await asHost(ctx, a.appRef, (tx, app, host) =>
+          readContextResetForHost(tx, { appId: app.id, hostId: host.hostId }, a.resetId));
+      } catch (e) {
+        // Unlike a step, this read must never echo the guessed reset id in its wire error.
+        if (e instanceof ContextResetError) throw taskError(e.code, e.message);
+        throw e;
+      }
+      const key = appKeyCaller(ctx)!; // asHost has admitted the current App key.
+      await recordHostKeyUseApart(ctx.db, key, 'read', { count: 1 });
+      return reset;
+    }),
+
   /** The App's host registrations: whoever reads its tasks and events (cor:agt:050:21), the App's own key included. */
   hostRegistrations: (_: unknown, a: { appRef: string }, ctx: Context) =>
     recordingRefusal(ctx, 'read', null, async () => {
@@ -633,7 +872,7 @@ export const hostOperationQueries = {
       if (await wasEverHostKey(c)) {
         throw taskError('FORBIDDEN', "A host key reads its own host's operations by collecting them, not from the App's listing.");
       }
-      const first = Math.min(Math.max(a.first ?? 50, 1), PAGE_MAX);
+      const first = Math.min(Math.max(a.first ?? 20, 1), PAGE_MAX);
       const status = a.status ? a.status.toLowerCase() : null;
       if (status && !['issued', 'collected', 'succeeded', 'failed'].includes(status)) {
         throw badInput('status is ISSUED, COLLECTED, SUCCEEDED or FAILED.');
@@ -678,6 +917,21 @@ async function wasEverHostKey(c: Context): Promise<boolean> {
 }
 
 export const hostOperationFieldResolvers = {
+  ContextReset: {
+    /** #3300: reset state behind the seven existing host gates, never a node-content read or a new reader. */
+    checkpointNode: async (r: ContextResetRow, _a: unknown, ctx: Context): Promise<string | null> => {
+      const ref = r.recoveryRef;
+      if (!r.recoveryRegisteredAt || !ref || typeof ref !== 'object' || Array.isArray(ref)) return null;
+      if (typeof ref.checkpointNodeUrn === 'string') return ref.checkpointNodeUrn;
+      // Pre-#3300 rows stored only the id. Include tombstones, but never backfill on this read or guess after purge.
+      if (typeof ref.checkpointNodeId !== 'string') return null;
+      const node = await ctx.db.node.findUnique({
+        where: { id: ref.checkpointNodeId },
+        select: { loc: true, memory: { select: { urn: true } } },
+      });
+      return node ? emitNodeUrnV2(node.memory.urn, node.loc) : null;
+    },
+  },
   HostOperation: {
     type: (o: HostOperationRow) => o.type,
     status: (o: HostOperationRow) => o.status.toUpperCase(),
@@ -698,6 +952,6 @@ export async function appKeyHostUses(key: { id: string; appId: string }, a: { fi
   if (!app || !(await managesApp(ctx, app))) {
     throw taskError('FORBIDDEN', "Only whoever manages this App can read what its keys did.");
   }
-  const first = Math.min(Math.max(a.first ?? 50, 1), PAGE_MAX);
+  const first = Math.min(Math.max(a.first ?? 20, 1), PAGE_MAX);
   return ctx.db.hostKeyUse.findMany({ where: { appKeyId: key.id }, orderBy: [{ usedAt: 'desc' }, { id: 'desc' }], take: first });
 }

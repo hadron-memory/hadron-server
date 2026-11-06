@@ -23,6 +23,7 @@ import {
   decodeProtectedHeader,
   type JWTVerifyGetKey,
 } from 'jose';
+import { mintProviderNonce } from './providerNonce.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import {
@@ -34,6 +35,9 @@ import {
   resolveAppleUser,
   type AppleIdentity,
 } from './apple.js';
+
+// Pre-#2204 rows carry no nonce hash; the nonce paths have their own tests in providerNonce.test.ts.
+const LEGACY = { legacyUnbound: true } as const;
 
 const CLIENT_ID = 'com.hadronmemory.signin';
 const TEAM_ID = 'TEAMID9999';
@@ -62,8 +66,14 @@ describe('isAppleConfigured', () => {
 });
 
 describe('buildAppleAuthUrl', () => {
+  it('#2204: sends the nonce it is given, and requires one', () => {
+    expect(new URL(buildAppleAuthUrl('s', 'nonce-xyz')).searchParams.get('nonce')).toBe('nonce-xyz');
+    // @ts-expect-error — the nonce is a required argument, there is no default
+    expect(() => buildAppleAuthUrl('s')).not.toThrow();
+  });
+
   it('carries login-only scopes, form_post, and the state', () => {
-    const url = new URL(buildAppleAuthUrl('state-abc'));
+    const url = new URL(buildAppleAuthUrl('state-abc', 'n'));
     expect(url.origin + url.pathname).toBe('https://appleid.apple.com/auth/authorize');
     expect(url.searchParams.get('client_id')).toBe(CLIENT_ID);
     expect(url.searchParams.get('response_type')).toBe('code');
@@ -75,7 +85,7 @@ describe('buildAppleAuthUrl', () => {
 
   it('derives redirect_uri from BASE_URL, not per-request headers', () => {
     vi.stubEnv('BASE_URL', 'https://hadron.example.com');
-    const url = new URL(buildAppleAuthUrl('s'));
+    const url = new URL(buildAppleAuthUrl('s', 'n'));
     expect(url.searchParams.get('redirect_uri')).toBe(
       'https://hadron.example.com/auth/apple/callback',
     );
@@ -146,7 +156,7 @@ describe('verifyAppleIdToken', () => {
       email_verified: true,
       is_private_email: false,
     });
-    expect(await verifyAppleIdToken(token, getKey)).toEqual({
+    expect(await verifyAppleIdToken(token, LEGACY, getKey)).toEqual({
       sub: '001234.abcd1234ef567890.0102',
       email: 'ada@example.com',
       emailVerified: true,
@@ -161,7 +171,7 @@ describe('verifyAppleIdToken', () => {
       email_verified: 'true',
       is_private_email: 'true',
     });
-    const identity = await verifyAppleIdToken(token, getKey);
+    const identity = await verifyAppleIdToken(token, LEGACY, getKey);
     expect(identity.emailVerified).toBe(true);
     expect(identity.isPrivateEmail).toBe(true);
   });
@@ -169,31 +179,66 @@ describe('verifyAppleIdToken', () => {
   it('fails closed on any other email_verified shape', async () => {
     for (const v of ['false', false, 'yes', 1, undefined]) {
       const token = await mintIdToken({ sub: '42', email: 'a@b.com', email_verified: v });
-      expect((await verifyAppleIdToken(token, getKey)).emailVerified).toBe(false);
+      expect((await verifyAppleIdToken(token, LEGACY, getKey)).emailVerified).toBe(false);
     }
   });
 
   it('lowercases the email claim (magic-link/Google parity)', async () => {
     const token = await mintIdToken({ sub: '42', email: 'Ada@Example.COM' });
-    expect((await verifyAppleIdToken(token, getKey)).email).toBe('ada@example.com');
+    expect((await verifyAppleIdToken(token, LEGACY, getKey)).email).toBe('ada@example.com');
   });
 
   it('rejects wrong audience, wrong issuer, wrong key, and missing sub', async () => {
     await expect(
-      verifyAppleIdToken(await mintIdToken({ sub: '42' }, { audience: 'other' }), getKey),
+      verifyAppleIdToken(await mintIdToken({ sub: '42' }, { audience: 'other' }), LEGACY, getKey),
     ).rejects.toThrow();
     await expect(
       verifyAppleIdToken(
         await mintIdToken({ sub: '42' }, { issuer: 'https://evil.example' }),
+        LEGACY,
         getKey,
       ),
     ).rejects.toThrow();
     await expect(
-      verifyAppleIdToken(await mintIdToken({ sub: '42' }, { key: wrongKey }), getKey),
+      verifyAppleIdToken(await mintIdToken({ sub: '42' }, { key: wrongKey }), LEGACY, getKey),
     ).rejects.toThrow();
     await expect(
-      verifyAppleIdToken(await mintIdToken({ email: 'a@b.com' }), getKey),
+      verifyAppleIdToken(await mintIdToken({ email: 'a@b.com' }), LEGACY, getKey),
     ).rejects.toThrow(/sub/);
+  });
+
+  describe('#2204 nonce', () => {
+    const { nonce, nonceHash } = mintProviderNonce();
+    const bound = { bound: nonceHash };
+    beforeEach(() => vi.spyOn(console, 'warn').mockImplementation(() => undefined));
+    afterEach(() => vi.restoreAllMocks());
+
+    it('accepts a token whose nonce hashes to the stored value', async () => {
+      expect((await verifyAppleIdToken(await mintIdToken({ sub: '42', nonce }), bound, getKey)).sub).toBe('42');
+    });
+
+    it.each([
+      ['missing', undefined],
+      ['empty', ''],
+      ['not a string', 42],
+      ['another attempt\'s', mintProviderNonce().nonce],
+    ])('refuses a %s nonce on a bound row with a fixed message', async (_c, claim) => {
+      const token = await mintIdToken({ sub: '42', nonce: claim });
+      const err = await verifyAppleIdToken(token, bound, getKey).catch((e: Error) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toBe('ID token nonce missing or mismatched');
+      expect((err as Error).message).not.toContain(token);
+    });
+
+    it('still refuses a wrong signature, issuer or audience when the nonce is right', async () => {
+      await expect(verifyAppleIdToken(await mintIdToken({ sub: '42', nonce }, { key: wrongKey }), bound, getKey)).rejects.toThrow();
+      await expect(verifyAppleIdToken(await mintIdToken({ sub: '42', nonce }, { audience: 'other' }), bound, getKey)).rejects.toThrow();
+      await expect(verifyAppleIdToken(await mintIdToken({ sub: '42', nonce }, { issuer: 'https://evil.example' }), bound, getKey)).rejects.toThrow();
+    });
+
+    it('Apple refuses a token without a nonce even when it claims nonce_supported: false (no exception without Apple\'s text)', async () => {
+      await expect(verifyAppleIdToken(await mintIdToken({ sub: '42', nonce_supported: false }), bound, getKey)).rejects.toThrow('ID token nonce missing or mismatched');
+    });
   });
 });
 

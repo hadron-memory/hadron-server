@@ -8,13 +8,13 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb, createDbNode, createDbOrgAndGraph, createDbWorkerAttribution } from '../../test/helpers.js';
 import { insertSoftPasskey, softPasskey, type SoftPasskey } from '../../test/softPasskey.js';
 import { computeApprovalHash } from '../approvalHash.js';
-import { signaturePayloadBytes, SIGNATURE_PAYLOAD_V1 } from './payload.js';
+import { signaturePayloadBytes, SIGNATURE_PAYLOAD_V3 } from './payload.js';
 import { SigningNotConfiguredError } from './config.js';
 import { clearSignatureVerifyCache, signatureRecordVerifies } from './verify.js';
 import { loadSignatureStatuses } from './status.js';
 import {
   completeSigningRequestInTransaction, createSigningRequestInTransaction, declineSigningRequestInTransaction,
-  effectiveRequestState, SigningRefusal, withdrawSigningRequestInTransaction, type SigningRequester,
+  effectiveRequestState, newSigningRequestId, SigningRefusal, withdrawSigningRequestInTransaction, type SigningRequester,
 } from './requests.js';
 
 const ORIGIN = 'https://sign.example.test';
@@ -42,8 +42,8 @@ const create = (opts: Partial<Parameters<typeof createSigningRequestInTransactio
     memoryId, requester: asUser(requesterId), mayWrite: writer, ...opts,
   }));
 
-function assertionFor(req: { nodeId: string; approvalHash: string }, over: Partial<Parameters<SoftPasskey['assert']>[0]> = {}) {
-  const payload = signaturePayloadBytes(SIGNATURE_PAYLOAD_V1, { nodeId: req.nodeId, approvalHash: req.approvalHash });
+function assertionFor(req: { id: string; nodeId: string; approvalHash: string }, over: Partial<Parameters<SoftPasskey['assert']>[0]> = {}) {
+  const payload = signaturePayloadBytes(SIGNATURE_PAYLOAD_V3, { nodeId: req.nodeId, approvalHash: req.approvalHash, requestId: req.id });
   return key.assert({ payload, origin: ORIGIN, rpId: RP, ...over });
 }
 
@@ -77,11 +77,11 @@ afterEach(() => {
 });
 
 describe('requestNodeSignature: what a request pins (cor:dmo:130:03)', () => {
-  it('opens on the current revision with the v1 approval hash and a 24h default lifetime', async () => {
+  it('opens on the current revision with the approval hash, the v3 payload and a 24h default lifetime', async () => {
     const req = await create();
     expect(req.state).toBe('open');
     expect(req.revision).toBe(1);
-    expect(req.payloadVersion).toBe('hadron-signature-v1');
+    expect(req.payloadVersion).toBe('hadron-signature-v3');
     expect(req.approvalHash).toBe(computeApprovalHash({ title: 'Retention', abstract: null, content: 'Retention is 30 days.' }));
     expect(req.requesterUserId).toBe(requesterId);
     expect(req.id).toMatch(/^[A-Za-z0-9_-]{22}$/); // 128 bits, base64url
@@ -221,8 +221,12 @@ describe('complete: server-side verification, one record, one end (cor:dmo:130:0
     for (const over of [{ origin: 'https://portal.example.test' }, { uv: false }, { rpId: 'evil.test' }, { type: 'webauthn.create' }]) {
       expect((await refusal(complete(req, { assertion: assertionFor(req, over) }))).code).toBe('SIGNATURE_NOT_VERIFIED');
     }
-    const foreign = assertionFor({ nodeId: 'another-node', approvalHash: req.approvalHash });
+    const foreign = assertionFor({ id: req.id, nodeId: 'another-node', approvalHash: req.approvalHash });
     expect((await refusal(complete(req, { assertion: foreign }))).code).toBe('SIGNATURE_NOT_VERIFIED');
+    // v3 binds the request id: a genuine assertion over the SAME node and hash for ANOTHER request never completes this one.
+    const other = await create({ node: req.nodeId }).catch(() => null);
+    const replay = assertionFor({ id: other?.id ?? newSigningRequestId(), nodeId: req.nodeId, approvalHash: req.approvalHash });
+    expect((await refusal(complete(req, { assertion: replay }))).code).toBe('SIGNATURE_NOT_VERIFIED');
     expect((await db.signingRequest.findUniqueOrThrow({ where: { id: req.id } })).state).toBe('open');
   });
 
@@ -231,10 +235,22 @@ describe('complete: server-side verification, one record, one end (cor:dmo:130:0
     const theirs = softPasskey();
     await insertSoftPasskey(db, requesterId, theirs);
     expect((await refusal(complete(req, { credentialId: theirs.credentialId,
-      assertion: theirs.assert({ payload: signaturePayloadBytes(SIGNATURE_PAYLOAD_V1, req), origin: ORIGIN, rpId: RP }) }))).code)
+      assertion: theirs.assert({ payload: signaturePayloadBytes(SIGNATURE_PAYLOAD_V3, { nodeId: req.nodeId, approvalHash: req.approvalHash, requestId: req.id }), origin: ORIGIN, rpId: RP }) }))).code)
       .toBe('SIGNATURE_NOT_VERIFIED');
     await db.$executeRaw`UPDATE passkey_credentials SET revoked_at = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3) WHERE owner_id = ${signerId}`;
     expect((await refusal(complete(req))).code).toBe('SIGNATURE_NOT_VERIFIED');
+  });
+
+  it('refuses the signer\'s own passkey enrolled under another RP ID, even with a valid assertion for this one (#1631 PR1b)', async () => {
+    const req = await create();
+    const moved = softPasskey();
+    await insertSoftPasskey(db, signerId, moved, { rpId: 'old.example' });
+    expect((await refusal(complete(req, { credentialId: moved.credentialId,
+      assertion: moved.assert({ payload: signaturePayloadBytes(SIGNATURE_PAYLOAD_V3, { nodeId: req.nodeId, approvalHash: req.approvalHash, requestId: req.id }), origin: ORIGIN, rpId: RP }) }))).code)
+      .toBe('SIGNATURE_NOT_VERIFIED');
+    expect((await db.signingRequest.findUniqueOrThrow({ where: { id: req.id } })).state).toBe('open');
+    // Control: the same request completes with the passkey enrolled under this RP ID.
+    expect((await complete(req)).state).toBe('completed');
   });
 
   it('only a writer of the memory, and only the named signer, may sign', async () => {
@@ -314,7 +330,7 @@ describe('signature state on read (cor:dmo:130:04)', () => {
     await db.$executeRaw`INSERT INTO node_signatures
       (id, node_id, signing_request_id, signer_id, passkey_credential_id, revision, approval_hash, payload_version,
        rp_id, authenticator_data, client_data_json, signature)
-      VALUES ('forged', ${nodeId}, ${req.id}, ${signerId}, ${credential.id}, 1, ${req.approvalHash}, 'hadron-signature-v1',
+      VALUES ('forged', ${nodeId}, ${req.id}, ${signerId}, ${credential.id}, 1, ${req.approvalHash}, 'hadron-signature-v3',
         ${RP}, ${good.authenticatorData}, ${good.clientDataJson}, ${Buffer.from('not-a-signature')})`;
     const s = await status();
     expect(s.signatures).toEqual([]);
@@ -331,7 +347,7 @@ describe('signature state on read (cor:dmo:130:04)', () => {
 
   it('a first passkey\'s signature reads PENDING while its window is open', async () => {
     key = softPasskey();
-    await db.$executeRaw`TRUNCATE TABLE node_signatures, signing_requests, passkey_credentials`;
+    await db.$executeRaw`TRUNCATE TABLE node_signatures, signing_requests, sign_ins, passkey_credentials CASCADE`;
     await insertSoftPasskey(db, signerId, key, { firstWindow: true });
     await complete(await create());
     expect((await status()).signatures[0].state).toBe('PENDING');

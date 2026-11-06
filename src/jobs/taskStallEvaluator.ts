@@ -12,6 +12,15 @@
  *   5. (#1709) resolve each session-end request whose grace has passed
  *      (cor:agt:050:10): the session ended, or the platform issues
  *      `worker.end` for it to a live host, or there is no live host.
+ *   6. (#2162) end each context reset whose claim lease lapsed, whose session
+ *      ended, or whose `worker.reset-context` operation settled, and release
+ *      the `resetting` marks they held (cor:agt:050:27). It runs after the
+ *      host-operation settle so an operation timed out this pass ends its
+ *      reset in the same pass.
+ *   7. (#2755) raise the dark-worker alarm for each worker that is OVERDUE or has a wake unacknowledged past the
+ *      App's window, once per episode, and end the episodes that cleared (cor:agt:100:06, Proposed).
+ *   8. (#2763) raise the coordinator-cadence alarm for each coordinator that made no assignment for 60 minutes while a
+ *      worker in its lane was free for work, once per episode (cor:agt:050:31, Proposed).
  *
  * No claim race, unlike the scheduler: every write is idempotent on its own
  * key (the episode's unique index, a conditional wake stamp, a conditional
@@ -29,16 +38,35 @@ import { clearStalledMarks } from '../lib/agentTasks/availability.js';
 import { recordUndeliverableTaskWakes } from '../lib/agentTasks/taskWakes.js';
 import { sweepSessionEndRequests } from '../lib/hostOperations/sessionEnd.js';
 import { sweepUnreportedHostOperations } from '../lib/hostOperations/settle.js';
+import { anchorNow } from '../lib/stopSignals/state.js';
+import { sweepContextResets } from '../lib/contextReset/contextReset.js';
+import { evaluateDarkWorkers } from '../lib/agentTasks/darkWorker.js';
+import { evaluateCoordinatorCadence } from '../lib/agentTasks/coordinatorCadence.js';
 
-export type TaskStallTickResult = { raised: number; woken: number; cleared: number; undeliverable: number; sessionEnds: number; hostOperationsSettled: number };
+export type TaskStallTickResult = { raised: number; woken: number; cleared: number; undeliverable: number; sessionEnds: number; hostOperationsSettled: number; contextResetsEnded: number; darkRaised: number; cadenceRaised: number };
 
 /** One pass at `now`. Each step runs even when an earlier one failed. */
 export async function taskStallTick(db: PrismaClient, now = new Date()): Promise<TaskStallTickResult> {
-  const result: TaskStallTickResult = { raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0 };
+  const result: TaskStallTickResult = { raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0, contextResetsEnded: 0, darkRaised: 0, cadenceRaised: 0 };
+  // #2022: the monotonic half of `now`'s sample, so a raise decides at its own moment (stall.ts raiseStallAlarm).
+  const anchor = anchorNow();
   try {
-    result.raised = (await evaluateStalls(db, now)).length;
+    result.raised = (await evaluateStalls(db, now, anchor)).length;
   } catch (err) {
     console.error('[task-stall] evaluation failed:', err);
+  }
+  // #2755: before the escalation below, so an episode whose conditions cleared is ended first and its next owner is not
+  // woken on a stale schedule (the task alarms re-derive that inside wakeDueOwners; the dark alarm settles it here).
+  try {
+    result.darkRaised = (await evaluateDarkWorkers(db, now)).length;
+  } catch (err) {
+    console.error('[task-stall] dark-worker evaluation failed:', err);
+  }
+  // #2763: with the dark-worker pass, before the escalation, for the same reason.
+  try {
+    result.cadenceRaised = (await evaluateCoordinatorCadence(db, now)).length;
+  } catch (err) {
+    console.error('[task-stall] coordinator-cadence evaluation failed:', err);
   }
   try {
     result.woken = await wakeDueOwners(db, now);
@@ -65,6 +93,11 @@ export async function taskStallTick(db: PrismaClient, now = new Date()): Promise
     result.hostOperationsSettled = await sweepUnreportedHostOperations(db, now);
   } catch (err) {
     console.error('[task-stall] settling unreported host operations failed:', err);
+  }
+  try {
+    result.contextResetsEnded = await sweepContextResets(db, now);
+  } catch (err) {
+    console.error('[task-stall] sweeping context resets failed:', err);
   }
   return result;
 }

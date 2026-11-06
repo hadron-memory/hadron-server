@@ -27,6 +27,10 @@ export interface WatchedSet {
   name: string;
   source: string;
   members: readonly string[];
+  /** Optional exact SDL coordinates; required for ordinary-word sets. */
+  coordinates?: readonly string[];
+  /** Optional first capture isolates a promised list from incidental examples. */
+  enumerationPattern?: RegExp;
 }
 
 /**

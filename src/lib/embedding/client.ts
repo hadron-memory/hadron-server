@@ -38,6 +38,8 @@ export interface HttpEmbeddingClientOptions {
   apiKey?: string;
   /** Override for tests; defaults to global fetch. */
   fetchImpl?: typeof fetch;
+  /** Query-only deadline; undefined preserves the direct-constructor default. */
+  queryTimeoutMs?: number;
 }
 
 const PREFIX: Record<EmbedPurpose, string> = {
@@ -155,6 +157,7 @@ export class HttpEmbeddingClient implements EmbeddingClient {
   private readonly url: string;
   private readonly apiKey?: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly queryTimeoutMs?: number;
 
   constructor(opts: HttpEmbeddingClientOptions) {
     this.url = opts.url;
@@ -163,16 +166,20 @@ export class HttpEmbeddingClient implements EmbeddingClient {
     this.provider = opts.provider ?? 'local';
     this.apiKey = opts.apiKey;
     this.fetchImpl = opts.fetchImpl ?? fetch;
+    this.queryTimeoutMs = opts.queryTimeoutMs;
   }
 
   async embed(texts: string[], purpose: EmbedPurpose): Promise<number[][]> {
     if (texts.length === 0) return [];
     const input = applyNomicPrefix(texts, purpose);
 
+    const signal = purpose === 'query' && this.queryTimeoutMs !== undefined
+      ? AbortSignal.timeout(this.queryTimeoutMs) : undefined;
     let res: Response;
     try {
       res = await this.fetchImpl(this.url, {
         method: 'POST',
+        ...(signal ? { signal } : {}),
         headers: {
           'content-type': 'application/json',
           ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}),
@@ -180,6 +187,7 @@ export class HttpEmbeddingClient implements EmbeddingClient {
         body: JSON.stringify({ model: this.model, input }),
       });
     } catch (err) {
+      if (signal?.aborted) throw new EmbeddingRequestError(`query embed timed out after ${this.queryTimeoutMs}ms`);
       throw new EmbeddingRequestError(err instanceof Error ? err.message : String(err));
     }
 
@@ -198,6 +206,7 @@ export class HttpEmbeddingClient implements EmbeddingClient {
     try {
       body = await res.json();
     } catch {
+      if (signal?.aborted) throw new EmbeddingRequestError(`query embed timed out after ${this.queryTimeoutMs}ms`);
       throw new EmbeddingRequestError('response was not valid JSON');
     }
 

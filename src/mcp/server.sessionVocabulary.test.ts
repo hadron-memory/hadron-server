@@ -157,14 +157,12 @@ describe('#1034 — MCP tool descriptions distinguish a worker session from a ch
   it('hadron_start_session says both terms exist and that ending one does not end the other', () => {
     const d = srv().toolDescription('hadron_start_session');
 
-    // Both terms present: naming only one leaves the reader to assume the
-    // other is the same thing, which is the collision itself.
+    // #3082: MCP no longer binds a worker, so start_session no longer carries the worker-taken consequence; it still
+    // names both terms, says ending the chat does not end the session, and points at the refusal and the CLI.
     expect(d.toLowerCase()).toContain('worker session');
     expect(d.toLowerCase()).toContain('chat session');
-    // The independence fact, not merely the two nouns.
-    expect(statesIndependence(d)).toBe(true);
-    // The consequence a driver actually needs: the worker stays taken.
-    expect(d.toLowerCase()).toMatch(/taken|still open|leaves the worker session open/);
+    expect(d).toMatch(/ending the chat does not end it/);
+    expect(d).toContain('MCP_WORKER_BINDING_UNSUPPORTED');
   });
 
   it('hadron_end_session says THIS is what ends the worker session, and closing a window is not', () => {
@@ -187,9 +185,7 @@ describe('#1034 — MCP tool descriptions distinguish a worker session from a ch
     const start = flat(srv().toolDescription('hadron_start_session'));
     const end = flat(srv().toolDescription('hadron_end_session'));
 
-    expect(start).toMatch(/remains untouched past its idle window.*stops blocking a bind/);
-    expect(start).toMatch(/most recent activity is outside its idle window/);
-    expect(start).toMatch(/human-held name stays held until explicit release/);
+    // #3082: the start-side liveness/hold lines went with the worker bind (MCP binds no worker); the end side stays.
     expect(end).toMatch(/while open and recently active inside its idle window/);
     expect(end).toMatch(/session block falls away/);
     expect(end).toMatch(/human hold remains independent until explicit release/);
@@ -236,9 +232,10 @@ describe('#1034 — MCP tool descriptions distinguish a worker session from a ch
     // whoami is where a compacted agent lands, so it is the one place the
     // distinction has to be learnable cold rather than assumed known — which
     // means naming both terms is not enough here either.
+    // #3082: MCP starts no worker session, so the chat-session independence wording left this description with the
+    // bind; what stays pinned is that a bound row is the CLI's and that not every row is a worker session.
     expect(d.toLowerCase()).toContain('worker session');
-    expect(d.toLowerCase()).toContain('chat session');
-    expect(statesIndependence(d)).toBe(true);
+    expect(d).toMatch(/MCP does not start worker sessions/);
     // The result set includes UNBOUND sessions, and this description must not
     // read as though every row is a worker session — an LLM recovering context
     // would otherwise treat a general session as a binding it does not have.

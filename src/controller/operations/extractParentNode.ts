@@ -1,4 +1,4 @@
-import { resyncDerivedIncludesForNodes } from '../../lib/includes/writeIncludes.js';
+import { assertCopiedIncludesWritable, resyncDerivedIncludesForNodes, type ReadableMemoryIds } from '../../lib/includes/writeIncludes.js';
 import { assertRoleWritersForNodes, type RoleWriterPrincipal } from '../../lib/nodeRoleWriters.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { decisionContainedError, isDecisionFamilyRole } from '../../lib/decisions/index.js';
@@ -8,8 +8,11 @@ import { Prisma } from '../../generated/prisma/index.js';
 import { generateId } from '../../lib/id.js';
 import { ensureCurrentNodeRevisionInTransaction, jsonOrDbNull } from '../../lib/nodeRevisionSnapshot.js';
 import { carryGovernedSignals } from '../../lib/governedSignals.js';
-import { carryNodeAuthorship } from '../../lib/nodeAuthorship.js';
+import { carryNodeAuthorship, clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
+import { computeContentHash } from '../../lib/contentHash.js';
+import { rebindIncludeTags } from '../../lib/includes/rebindIncludeTags.js';
 import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
+import { resetEmbeddingObligations } from '../../services/embedding/obligation.js';
 import type { MemoryClass, MemoryVisibility } from '../../generated/prisma/index.js';
 
 /**
@@ -85,6 +88,8 @@ export interface ExtractParentNodeArgs {
   move: boolean;
   /** Audit attribution for createdBy / deletedBy columns. */
   actorId: string | null;
+  /** #2167 — memories the copier may read (`getAccessibleMemoryIds`); `null` = unrestricted. */
+  copierReadableMemoryIds: ReadableMemoryIds;
 }
 
 export interface ExtractParentNodeResult {
@@ -308,7 +313,17 @@ export async function extractParentNodeGraph(
       }
       const movedIds = [...idMap.keys()];
 
-      const nodeRows: Prisma.NodeCreateManyInput[] = nodes.map((n) => ({
+      // R180 (#2167) — include tags naming a copied node follow it to its rebased loc.
+      const rebasedLocByLoc = new Map(nodes.map((n) => [n.loc, newLocById.get(n.id)!]));
+      const nodeRows: Prisma.NodeCreateManyInput[] = nodes.map((n) => {
+        const content = rebindIncludeTags(n.content, rebasedLocByLoc, source.urn, args.newUrn);
+        const contentChanged = content !== n.content;
+        // Spec 032, as clone's URN rewrite: a FRESH abstract stays fresh
+        // against the rewritten content; a stale one keeps its stale hash.
+        const abstractOriginHash = contentChanged && n.abstractOriginHash !== null && n.abstractOriginHash === computeContentHash(n.content)
+          ? computeContentHash(content)
+          : n.abstractOriginHash;
+        return {
         id: idMap.get(n.id)!,
         memoryId,
         nodeType: n.nodeType,
@@ -318,12 +333,13 @@ export async function extractParentNodeGraph(
         loc: newLocById.get(n.id)!,
         isLink: n.isLink,
         description: n.description,
-        // Content copied verbatim (v1 — no URN/loc rewrite). contentHash and
-        // abstractOriginHash therefore still describe these exact bytes.
+        // Content is verbatim except for R180's include rebinding. A rebound
+        // node's contentHash (the external-producer domain) would describe
+        // other bytes, so it is nulled, as on clone.
         abstract: n.abstract,
-        content: n.content,
-        contentHash: n.contentHash,
-        abstractOriginHash: n.abstractOriginHash,
+        content,
+        contentHash: contentChanged ? null : n.contentHash,
+        abstractOriginHash,
         tags: n.tags,
         properties: jsonOrDbNull(n.properties),
         data: jsonOrDbNull(n.data),
@@ -346,16 +362,19 @@ export async function extractParentNodeGraph(
         // back to `n` keeps the copy correct if a row vanished from the
         // re-read.
         ...carryGovernedSignals(refreshed.has(n.id) ? n : freshSignals?.get(n.loc) ?? n),
-        // Content and attribution both come from the reconciled source.
-        ...carryNodeAuthorship(n),
+        // Content and attribution both come from the reconciled source; a
+        // rebound node's content is no longer what its author wrote (cor:api:150:01).
+        ...(contentChanged ? clearNodeAuthorship() : carryNodeAuthorship(n)),
         llmModel: n.llmModel,
         aiAgent: n.aiAgent,
         tokens: n.tokens,
         // Embedding markers start clean; the caller backfills if indexed.
         createdBy: args.actorId,
-      }));
+        };
+      });
       if (nodeRows.length > 0) {
         await tx.node.createMany({ data: nodeRows });
+        await resetEmbeddingObligations(tx, nodeRows.map(row => row.id!), args.vectorIndexEnabled);
       }
 
       // ── Edges (intra-subtree only) ───────────────────────────────────────
@@ -401,8 +420,12 @@ export async function extractParentNodeGraph(
       if (edgeRows.length > 0) {
         await tx.edge.createMany({ data: edgeRows });
       }
+      // #2167 — every copied tag is an added tag, resolved where it landed: the
+      // content is verbatim, so a relative tag resolves against the rebased locs.
+      const copiedIds = nodeRows.map((r) => r.id as string);
+      await assertCopiedIncludesWritable(tx, copiedIds, memoryId, args.copierReadableMemoryIds);
       // #2040 — the copies' include edges are re-derived from their content.
-      await resyncDerivedIncludesForNodes(tx, nodeRows.map((r) => r.id as string));
+      await resyncDerivedIncludesForNodes(tx, copiedIds);
 
       // ── Move disposition ─────────────────────────────────────────────────
       // Soft-delete the source subtree so the parent is truly relocated.
@@ -431,7 +454,7 @@ export async function extractParentNodeGraph(
         });
         await tx.node.updateMany({
           where: { memoryId: args.sourceMemoryId, id: { in: movedIds }, deletedAt: null },
-          data: { deletedAt: now, deletedBy: args.actorId },
+          data: { deletedAt: now, deletedBy: args.actorId, embeddingPendingAt: null, embeddingWorkToken: null },
         });
         // PendingEdges hang off moved nodes (sourceId, Cascade) — soft-delete
         // them too so none dangle at a now-deleted node, and keep the source's

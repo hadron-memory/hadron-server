@@ -161,6 +161,7 @@ describe('durable pending login state', () => {
         provider: 'apple',
         redirect: '/',
         clientState: 'c'.repeat(64),
+        providerNonceHash: 'a'.repeat(64),
         expiresAt: new Date(Date.now() - 1000),
       },
     });
@@ -218,6 +219,7 @@ describe('durable pending login state', () => {
         state: 'd'.repeat(32),
         provider: 'google',
         redirect: '/',
+        providerNonceHash: 'a'.repeat(64),
         expiresAt: new Date(Date.now() - 1000),
       },
     });

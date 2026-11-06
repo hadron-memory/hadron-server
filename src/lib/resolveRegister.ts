@@ -1,3 +1,4 @@
+import { resolveAppInstallation, listAppInstallations } from './appInstallations.js';
 /**
  * Spec 049 Phase 6 — `resolveRegister` (plan §4.3, D5 local / D-2026-09-13-007)
  * and `renderDerivedBlocks` (the ONE composition point for the briefing's
@@ -36,6 +37,7 @@ import { composeWorkerUrn } from './entityRef/workerRef.js';
 import { normalizeUrnForLookup } from './urn.js';
 import { emitEntityUrnV2 } from './urnEmit.js';
 import { readStatesFor } from './channelReadState.js';
+import { openSessionPlacement } from './sessionPlacement.js';
 
 /** v2 entity URN for display; falls back to the bare urn (display strings never throw). */
 function safeEmitEntityUrnV2(type: 'memory' | 'agent', bareUrn: string): string {
@@ -105,6 +107,7 @@ type EntryRow = RegisterEntry;
 async function attendeeColumns(
   db: Context['db'],
   attendee: RegisterAttendee,
+  actingSessionId?: string | null,
 ): Promise<{ workerId: string | null; agentId: string; appId: string; organizationId: string | null; attendeeUrn: string | null; heldByUserId: string | null } | null> {
   if ('workerId' in attendee) {
     const w = await db.worker.findUnique({
@@ -118,7 +121,10 @@ async function attendeeColumns(
     } catch {
       urn = null;
     }
-    return { workerId: w.id, agentId: w.agentId, appId: w.appId, organizationId: w.app.organizationId, attendeeUrn: urn, heldByUserId: w.heldByUserId };
+    // #2458 (cor:dmo:050:11): the worker's OWN open session finishes under the agent it was bound with; any other reader
+    // sees the live row.
+    const placed = actingSessionId ? await openSessionPlacement(db, w.id, actingSessionId) : null;
+    return { workerId: w.id, agentId: placed?.agentId ?? w.agentId, appId: w.appId, organizationId: w.app.organizationId, attendeeUrn: urn, heldByUserId: w.heldByUserId };
   }
   // An Agent-in-App attendee EXISTS only as a live install: without the
   // AppAgent row the pair is fabricated, and resolving it would hand the
@@ -128,7 +134,7 @@ async function attendeeColumns(
   const [agent, app, install] = await Promise.all([
     db.agent.findFirst({ where: { id: attendee.agentId, deletedAt: null }, select: { urn: true } }),
     db.app.findFirst({ where: { id: attendee.appId, deletedAt: null }, select: { organizationId: true } }),
-    db.appAgent.findUnique({ where: { appId_agentId: { appId: attendee.appId, agentId: attendee.agentId } }, select: { agentId: true } }),
+    resolveAppInstallation(db, attendee.appId, attendee.agentId),
   ]);
   if (!agent || !app || !install) return null;
   return {
@@ -145,6 +151,7 @@ async function attendeeColumns(
 async function attendeeAccessActor(
   db: Context['db'],
   columns: NonNullable<Awaited<ReturnType<typeof attendeeColumns>>>,
+  share?: RegisterPageShare,
 ): Promise<{ actor: Context; unavailableReason: null } | { actor: null; unavailableReason: RegisterDisclosure }> {
   if (!columns.workerId) return { actor: { db, appId: columns.appId }, unavailableReason: null };
   if (!columns.heldByUserId) return { actor: null, unavailableReason: 'UNKNOWN_ACTOR' };
@@ -161,7 +168,8 @@ async function attendeeAccessActor(
     where: { id: columns.appId, deletedAt: null, uninstalledAt: null },
     select: { id: true, organizationId: true, ownerUserId: true },
   });
-  if (!app || !(await isAppParticipant(actor, app))) {
+  const holderKey = `holder:${holder.id}:${[...holder.roles].sort().join(',')}`;
+  if (!app || !(await sharedParticipant(share, `${holderKey}:app:${app.id}`, () => isAppParticipant(actor, app)))) {
     // The holder is no longer an eligible Worker driver. No actor can be
     // supplied for this projection; HOST/DRIVER_NOT_PARTICIPANT would claim
     // something about the Channel's host App that may be false.
@@ -182,8 +190,8 @@ function rank(e: EntryRow): number {
  * Worker › Agent › everyone). Rows only — no gates, no watermarks; what the
  * run snapshot stores and `resolveRegister` builds its view from.
  */
-export async function collectRegisterRows(db: Context['db'], attendee: RegisterAttendee): Promise<{ columns: NonNullable<Awaited<ReturnType<typeof attendeeColumns>>>; rows: EntryRow[] } | null> {
-  const columns = await attendeeColumns(db, attendee);
+export async function collectRegisterRows(db: Context['db'], attendee: RegisterAttendee, actingSessionId?: string | null): Promise<{ columns: NonNullable<Awaited<ReturnType<typeof attendeeColumns>>>; rows: EntryRow[] } | null> {
+  const columns = await attendeeColumns(db, attendee, actingSessionId);
   if (!columns) return null;
   const arms: Prisma.RegisterEntryWhereInput[] = [
     // Named the Agent in this App (App-owned), or the Agent anywhere in the org (org-owned).
@@ -216,6 +224,32 @@ export interface ResolveRegisterArgs {
   accessActor?: Context | null | 'ATTENDEE';
   /** Rows already collected (a run's snapshot) — otherwise collected live. */
   rows?: EntryRow[];
+  /**
+   * #2971 — accessible-memory sets shared by the registers of ONE `workers` page. Only the two INPUTS of the gates are
+   * shared, never a register view: the viewer's set (every worker of the page is read by the same caller) and a
+   * holder's set (workers held by one person are judged as that person). Each register is still resolved for its own
+   * worker, and the sets live and die with the page's memo (cor:agt:020:01: nothing here outlives the page).
+   */
+  shared?: RegisterPageShare;
+}
+
+/** The accessible-memory sets of one page; `viewer` is the page's caller, shared only when `actor` is that same object. */
+export interface RegisterPageShare {
+  viewer: Context;
+  sets: Map<string, Promise<string[] | null>>;
+  /** Gate answers for one (principal, App) or (principal, host memory): the same question asked of the same principal for each worker. */
+  participant: Map<string, Promise<boolean>>;
+}
+
+function sharedParticipant(share: RegisterPageShare | undefined, key: string | null, ask: () => Promise<boolean>): Promise<boolean> {
+  if (!share || !key) return ask();
+  let held = share.participant.get(key);
+  if (!held) {
+    held = ask();
+    share.participant.set(key, held);
+    held.catch(() => share.participant.delete(key));
+  }
+  return held;
 }
 
 /**
@@ -226,15 +260,15 @@ export interface ResolveRegisterArgs {
 export async function resolveRegister(db: Context['db'], args: ResolveRegisterArgs): Promise<RegisterView | null> {
   const collected = args.rows
     ? await (async () => {
-        const columns = await attendeeColumns(db, args.attendee);
+        const columns = await attendeeColumns(db, args.attendee, args.actor?.sessionId);
         return columns ? { columns, rows: args.rows! } : null;
       })()
-    : await collectRegisterRows(db, args.attendee);
+    : await collectRegisterRows(db, args.attendee, args.actor?.sessionId);
   if (!collected) return null;
   const { columns, rows } = collected;
   const viewer = args.actor ?? null;
   const attendeeAccess = args.accessActor === 'ATTENDEE'
-    ? await attendeeAccessActor(db, columns)
+    ? await attendeeAccessActor(db, columns, args.shared)
     : null;
   const actor: Context | null = args.accessActor === 'ATTENDEE'
     ? attendeeAccess!.actor
@@ -251,8 +285,24 @@ export async function resolveRegister(db: Context['db'], args: ResolveRegisterAr
       })
     ).map((c) => [c.id, c]),
   );
-  const viewerAccessible = viewer ? await getAccessibleMemoryIds(viewer) : null;
-  const accessible = actor === viewer ? viewerAccessible : actor ? await getAccessibleMemoryIds(actor) : null;
+  const setOf = (key: string, who: Context): Promise<string[] | null> => {
+    const share = args.shared;
+    if (!share) return getAccessibleMemoryIds(who);
+    let held = share.sets.get(key);
+    if (!held) {
+      held = getAccessibleMemoryIds(who);
+      share.sets.set(key, held);
+    }
+    return held;
+  };
+  const viewerAccessible = viewer ? await (args.shared && viewer === args.shared.viewer ? setOf('viewer', viewer) : getAccessibleMemoryIds(viewer)) : null;
+  // The attendee actor is built from the holder's id and roles alone (`attendeeAccessActor`), so those two ARE the key.
+  const holderKey = args.accessActor === 'ATTENDEE' && actor?.userId && !actor.impersonation
+    ? `holder:${actor.userId}:${[...(actor.roles ?? [])].sort().join(',')}`
+    : null;
+  const accessible = actor === viewer
+    ? viewerAccessible
+    : actor ? await (holderKey ? setOf(holderKey, actor) : getAccessibleMemoryIds(actor)) : null;
   // The two post-side gates, decided ONCE per host App and per host memory:
   // a register is unbounded and this runs on every briefing render, so the
   // N rows of one App must not cost N gate round trips (Copilot on PR #1167).
@@ -260,7 +310,8 @@ export async function resolveRegister(db: Context['db'], args: ResolveRegisterAr
   const participantOf = (app: { id: string; organizationId: string | null; ownerUserId: string | null }) => {
     let p = participantByApp.get(app.id);
     if (!p) {
-      p = isAppParticipant(actor!, app);
+      const who = holderKey ?? (args.shared && actor === args.shared.viewer ? 'viewer' : null);
+      p = sharedParticipant(args.shared, who ? `${who}:app:${app.id}` : null, () => isAppParticipant(actor!, app));
       participantByApp.set(app.id, p);
     }
     return p;
@@ -269,7 +320,8 @@ export async function resolveRegister(db: Context['db'], args: ResolveRegisterAr
   const writableMemory = (memoryId: string) => {
     let p = writableByMemory.get(memoryId);
     if (!p) {
-      p = requireMemoryWriteAccess(actor!, memoryId).then(() => true, () => false);
+      const who = holderKey ?? (args.shared && actor === args.shared.viewer ? 'viewer' : null);
+      p = sharedParticipant(args.shared, who ? `${who}:write:${memoryId}` : null, () => requireMemoryWriteAccess(actor!, memoryId).then(() => true, () => false));
       writableByMemory.set(memoryId, p);
     }
     return p;

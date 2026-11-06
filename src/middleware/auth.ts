@@ -1,16 +1,21 @@
+import { transportRateIdentity, type RateIdentity } from '../lib/rateLimit/identity.js';
 import { ownsSession } from '../lib/sessionOwnership.js';
 import { createHash, randomBytes } from 'crypto';
 import { DEFAULT_SESSION_DORMANCY_DAYS, isSessionDormant, loadLastEventBySession } from '../lib/sessionActivity.js';
 import type { Request } from 'express';
 import type { Prisma, PrismaClient, UserApiKey } from '../generated/prisma/index.js';
 import { lockAuthorityAnchors } from '../lib/auth/authorityAnchors.js';
-import { verifyJwt } from '../auth/jwt.js';
+import { type verifyJwt } from '../auth/jwt.js';
+import { verifyAuthenticatedJwt, lockLiveSignInRoot, SignInNotLive } from '../auth/signIn.js';
+import { errors as joseErrors } from 'jose';
 import type { HadronJwtPayload } from '../auth/jwt.js';
 import { canImpersonate, type ImpersonationContext } from '../lib/auth/impersonation.js';
 import { LIVE_ORG_MEMBERSHIP } from '../lib/auth/liveOrgMembership.js';
-import { publishActor } from '../lib/requestActor.js';
+import { publishActor, publishUser } from '../lib/requestActor.js';
 
 export interface AuthContext {
+  /** Server-owned, captured before active-App/session selection; never read from request arguments. */
+  limiterIdentity?: Readonly<RateIdentity>;
   login?: HadronJwtPayload['login'];
   clientId?: string;       // "github:<username>" / "email:<addr>" — only set for OAuth/JWT users
   userId?: string;         // User.id — only set for OAuth/JWT users
@@ -33,8 +38,10 @@ export interface AuthContext {
    */
   sessionBindingRefused?: boolean;
   /**
-   * An MCP transport keeps the context it opened with. For an App key, the session state of the CURRENT request
-   * (refreshed by the transport before each dispatch): the wake tools read this, not `sessionId` above (#1749, N5).
+   * An MCP transport keeps its initialization context. The transport refreshes
+   * this binding result for BOTH principal shapes before each dispatch under
+   * its request lock. Session-sensitive tools use mcpRequestSessionContext,
+   * preserving initialization refusal without changing retained attribution.
    */
   requestSession?: { sessionId?: string; refused: boolean };
   // Current User-row roles for ordinary user principals. HTTP auth resolves
@@ -42,7 +49,11 @@ export interface AuthContext {
   // request because its AuthContext otherwise outlives the credential check.
   roles?: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[];
   organizationId?: string; // set when the Client is scoped to an organization
+  /** #1897: the live factor-protected sign-in this credential descends from (JWT `sid` or key root). */
+  signInId?: string;
   apiKeyId?: string;       // UserApiKey.id — set when a user authenticated via an hdr_user_ key (not JWTs)
+  /** #1328: the credential is a person's sign-in JWT, the one the portal holds. Never an impersonation JWT. */
+  signInCredential?: true;
   /**
    * OAuth scopes bound to the presented `hdr_user_` key. Absent for JWTs,
    * App keys, and legacy/portal user keys whose empty scope list deliberately
@@ -177,12 +188,44 @@ export function hashUserApiKey(rawKey: string): string {
 // requests; bearer tokens require explicit attachment). Any future
 // "cookie auth" feature MUST be scoped to a separate middleware
 // mounted only on the consent-screen routes.
-export async function resolveAuthContext(
+export async function resolveAuthContext(req: Request, db: PrismaClient): Promise<AuthContext> {
+  return (await resolveAuthContextWithStatus(req, db)).auth;
+}
+
+/**
+ * What THIS request's own credential came to (cor:aut:010:05, #3532): `authenticated` (a user or an App resolved),
+ * `refused` (a credential was presented and did not authenticate, ONE value for every cause), `anonymous` (none
+ * presented) or `unavailable` (a credential was presented and the check could not complete: a database or
+ * configuration fault, never a verdict). Kept BESIDE the AuthContext rather than inside it, so the context every
+ * other consumer (MCP, the REST routes, the existing tests) reads stays byte-identical to what it was.
+ */
+export type CredentialStatus = 'authenticated' | 'refused' | 'anonymous' | 'unavailable';
+
+/** `resolveAuthContext` plus the credential's status; only the /graphql context builder needs the second half. */
+export async function resolveAuthContextWithStatus(
   req: Request,
   db: PrismaClient,
-): Promise<AuthContext> {
+): Promise<{ auth: AuthContext; credentialStatus: CredentialStatus }> {
+  const { auth, credentialStatus } = await resolveAuthContextInner(req, db);
+  const identity = transportRateIdentity(auth, req.ip);
+  return { auth: identity.principal || identity.ip ? { ...auth, limiterIdentity: identity } : auth, credentialStatus };
+}
+
+/**
+ * Contexts a `resolveJwt` catch returned because the check could not COMPLETE (a database or configuration fault),
+ * as opposed to a verdict. A WeakSet, so the AuthContext itself carries no new key (#3532).
+ */
+const incompleteChecks = new WeakSet<AuthContext>();
+
+async function resolveAuthContextInner(
+  req: Request,
+  db: PrismaClient,
+): Promise<{ auth: AuthContext; credentialStatus: CredentialStatus }> {
   const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith('Bearer ')) return {};
+  // Ruling 0192: another scheme (or none) presented no credential. Ruling 0193: `Bearer` with an empty token DID
+  // present one; HTTP parsers trim the trailing space, so the bare word counts too.
+  if (authHeader === 'Bearer') return { auth: {}, credentialStatus: 'refused' };
+  if (!authHeader?.startsWith('Bearer ')) return { auth: {}, credentialStatus: 'anonymous' };
 
   const token = authHeader.slice(7);
   const sessionIdHeader = req.headers['x-hadron-session'];
@@ -197,11 +240,18 @@ export async function resolveAuthContext(
     // JWTs have the form header.payload.signature — three base64url segments.
     ctx = await resolveJwt(token, db);
   } else {
-    return {};
+    return { auth: {}, credentialStatus: 'refused' };
   }
 
+  // Ruling 0194: the status describes the credential, so it is fixed BEFORE the worker-session binding is tried.
+  const credentialStatus: CredentialStatus = ctx.userId || ctx.appId
+    ? 'authenticated'
+    : incompleteChecks.has(ctx) ? 'unavailable' : 'refused';
   if (sessionId) await bindSession(db, ctx, sessionId);
-  return ctx;
+  // #2176: the validated user behind this request's writes, from the SAME resolved context
+  // `editorFromAuth` reads for the revision, never from anything the client asserts.
+  publishUser(ctx.userId ?? null);
+  return { auth: ctx, credentialStatus };
 }
 
 /**
@@ -395,9 +445,10 @@ async function resolveUserApiKey(
   const keyHash = hashUserApiKey(rawKey);
   const userApiKey = await db.userApiKey.findUnique({
     where: { keyHash },
-    include: { user: true },
+    include: { user: true, originSignIn: { select: { endedAt: true } } },
   });
-  if (!userApiKey || userApiKey.revokedAt || userApiKey.user.deletedAt) {
+  // #1897: a key descending from an ended sign-in is dead even if its own row was not yet stamped.
+  if (!userApiKey || userApiKey.revokedAt || userApiKey.user.deletedAt || userApiKey.originSignIn?.endedAt) {
     // Revoked / deleted-user keys fail authentication identically to
     // unknown keys — no information leakage per spec Edge Cases.
     return {};
@@ -434,10 +485,25 @@ async function resolveUserApiKey(
     // revokedAt). JWT-authenticated users have no UserApiKey, so this stays
     // unset on that path.
     apiKeyId: userApiKey.id,
+    ...(userApiKey.originSignInId ? { signInId: userApiKey.originSignInId } : {}),
     ...(userApiKey.oauthScopes.length > 0
       ? { oauthScopes: userApiKey.oauthScopes }
       : {}),
   };
+}
+
+/**
+ * #1328 — the trusted portal human: the user id behind a sign-in JWT, on a
+ * request with no key, App, worker session or impersonation. D-2026-09-24-004:
+ * the exemption follows the surface, so the CLI and MCP attest. The /graphql
+ * Apollo context is the ONLY caller; an MCP transport holding the same JWT never
+ * reaches this. Limit, accepted by that ruling: an agent driving the browser, or
+ * anyone replaying their own JWT, reads as the person.
+ */
+export function portalHumanUserId(auth: AuthContext): string | undefined {
+  if (auth.signInCredential !== true || !auth.userId) return undefined;
+  if (auth.apiKeyId || auth.appId || auth.sessionId || auth.sessionBindingRefused || auth.impersonation) return undefined;
+  return auth.userId;
 }
 
 /**
@@ -474,6 +540,12 @@ export interface MintUserApiKeyInput {
   oauthScopes?: readonly OAuthScope[];
   /** Server-derived authenticated parent; root issuance leaves it null. */
   mintedByKeyId?: string;
+  /**
+   * #1897 / R66: the factor-protected sign-in this key descends from, set only from authenticated
+   * server context (the claimed code's root, the JWT's `sid`). A key minted by another key always
+   * inherits that key's root, whatever is passed here. Null = direct or legacy; never inferred.
+   */
+  originSignInId?: string | null;
 }
 
 export interface MintUserApiKeyResult {
@@ -496,9 +568,21 @@ export async function mintUserApiKey(
 
 /** The GraphQL authority transaction already holds the user anchor. */
 export async function mintUserApiKeyInTx(
-  db: Pick<Prisma.TransactionClient, 'userApiKey'>,
+  db: Pick<Prisma.TransactionClient, 'userApiKey' | '$queryRaw'>,
   input: MintUserApiKeyInput,
 ): Promise<MintUserApiKeyResult> {
+  // R66: a descendant never sheds its root, and nothing is minted under an ended one. The caller
+  // holds the user authority anchor, so cancellation cannot interleave with this read-then-insert.
+  let originSignInId = input.originSignInId ?? null;
+  if (input.mintedByKeyId) {
+    const parent = await db.$queryRaw<Array<{ origin_sign_in_id: string | null }>>`
+      SELECT origin_sign_in_id FROM user_api_keys
+      WHERE id = ${input.mintedByKeyId} AND user_id = ${input.userId} FOR SHARE`;
+    if (!parent[0]) throw new Error('Minting key not found');
+    if (originSignInId && parent[0].origin_sign_in_id !== originSignInId) throw new Error('Sign-in root mismatch');
+    originSignInId = parent[0].origin_sign_in_id;
+  }
+  if (originSignInId) await lockLiveSignInRoot(db, originSignInId, input.userId);
   // 32 bytes / 256 bits / 64 hex chars + the hdr_user_ prefix. Same
   // entropy as AppKey; same length precheck in `resolveUserApiKey`
   // above (USER_API_KEY_PREFIX.length + 64 chars).
@@ -514,6 +598,7 @@ export async function mintUserApiKeyInTx(
       createdBy: input.createdBy,
       issuedVia: input.issuedVia,
       mintedByKeyId: input.mintedByKeyId ?? null,
+      originSignInId,
       oauthScopes: input.oauthScopes ? [...input.oauthScopes] : [],
     },
   });
@@ -522,7 +607,7 @@ export async function mintUserApiKeyInTx(
 
 async function resolveJwt(token: string, db: PrismaClient): Promise<AuthContext> {
   try {
-    const payload = await verifyJwt(token);
+    const payload = await verifyAuthenticatedJwt(token, db);
     // Impersonation tokens branch FIRST and own every liveness check they
     // need, including the target's. Ordering is load-bearing: `payload.sub`
     // is the TARGET on this path, so running the generic check below first
@@ -548,10 +633,20 @@ async function resolveJwt(token: string, db: PrismaClient): Promise<AuthContext>
       clientId,
       userId: payload.sub,
       login: payload.login,
+      signInCredential: true,
+      ...(payload.sid ? { signInId: payload.sid } : {}),
       roles: validatedUserRoles(user.roles),
     };
-  } catch {
-    return {}; // invalid or expired JWT
+  } catch (err) {
+    // An invalid, expired, wrongly signed or ended-sign-in JWT is a VERDICT: `{}`, the anonymous identity. Anything
+    // else (a database error, a missing JWT_SECRET) is a check that could not complete. It still returns `{}` so
+    // every existing consumer behaves exactly as before, but authenticationStatus must not call it a refusal (#3532).
+    // The list of VERDICT errors is deliberately the closed one: a fault nobody classified fails safe as incomplete,
+    // never as REFUSED (#3537 BLIND P2-2). A verdict that returns `{}` without throwing (unknown sub, deleted user,
+    // impersonation mismatch) never reaches this catch.
+    const ctx: AuthContext = {};
+    if (!(err instanceof joseErrors.JOSEError) && !(err instanceof SignInNotLive)) incompleteChecks.add(ctx);
+    return ctx;
   }
 }
 

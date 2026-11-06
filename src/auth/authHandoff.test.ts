@@ -37,7 +37,7 @@ describe('login handoff codes', () => {
     expect(code).toMatch(/^[0-9a-f]{64}$/); // 256-bit hex, never the JWT
 
     const redeemed = await redeemLoginCode(code);
-    expect(redeemed).toEqual({ userId, redirect: '/app/setup', isNew: true });
+    expect(redeemed).toEqual({ userId, redirect: '/app/setup', isNew: true, signInId: null });
 
     // Single use: a replay fails.
     expect(await redeemLoginCode(code)).toBeNull();
@@ -129,9 +129,35 @@ describe('exchange-start nonces', () => {
       userId,
       orgId: 'org_123',
       redirect: '/app/orgs/org_123/integrations',
+      origin: 'portal',
+      flowId: null, // #2913: only a GraphQL start has a flow
     });
     // Single use.
     expect(await redeemExchangeStartNonce(nonce)).toBeNull();
+  });
+
+  it('a GraphQL-started nonce redeems once as origin graphql, and only at its own provider (#2897)', async () => {
+    const nonce = await issueExchangeStartNonce({
+      userId,
+      orgId: 'org_123',
+      redirect: '/',
+      provider: 'gmail',
+      origin: 'graphql',
+    });
+    expect(await redeemExchangeStartNonce(nonce, 'ms-exchange')).toBeNull();
+    expect(await redeemExchangeStartNonce(nonce, 'gmail')).toEqual({
+      userId,
+      orgId: 'org_123',
+      redirect: '/',
+      origin: 'graphql',
+      flowId: null, // #2913: no flow was named at issue time
+    });
+    expect(await redeemExchangeStartNonce(nonce, 'gmail')).toBeNull();
+  });
+
+  it('a portal-started nonce keeps origin portal when it is provider-bound (#2897)', async () => {
+    const nonce = await issueExchangeStartNonce({ userId, orgId: 'org_123', redirect: '/', provider: 'gmail' });
+    expect((await redeemExchangeStartNonce(nonce, 'gmail'))?.origin).toBe('portal');
   });
 
   it('a login code is not redeemable as an exchange nonce (kind-scoped)', async () => {

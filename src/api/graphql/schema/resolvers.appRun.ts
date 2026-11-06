@@ -1,5 +1,8 @@
+import { isAgentInstalledForAppOperation, listAppInstallationsWithDerivedLicense } from '../../../lib/appAgent.js';
+import { triggerBudgetPatch, type TriggerRunBudgets } from '../../../lib/automation/runBudgets.js';
 import { configSelection } from '../../../lib/automation/identities.js';
-import { captureSetupConsent } from '../../../lib/automation/pins.js';
+import { captureSetupConsent, captureSetupOutcome } from '../../../lib/automation/pins.js';
+import { summarizeAutomation } from '../../../lib/automation/approvalSummary.js';
 // Headless-run surfaces (spec 040 plan §9): schedule CRUD, the run audit
 // read surface (cor:api:120-shaped), manual trigger, and the kill switch.
 
@@ -33,6 +36,8 @@ import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { type Context, requireOrgRole, requireOwnerOrOrgRole, isPlatformAdmin } from './resolvers.helpers.js';
 import { withAuthorizedTx } from './authorizedTx.js';
+import { requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
+import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { hasAppRelationship } from '../../../lib/auth/appRelationship.js';
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 
@@ -103,7 +108,10 @@ export function buildAppRunOrderBy(
   }
 }
 
-export interface CreateAgentScheduleInput {
+/** #3457: createAgentSchedule's input minus the schedule's own name, plus nothing: the pin never depends on the name. */
+export type PreviewAgentScheduleInput = Omit<CreateAgentScheduleInput, 'name' | 'policy' | 'scopeRef'>;
+
+export interface CreateAgentScheduleInput extends TriggerRunBudgets {
   /** App reference — PK or fully-qualified URN (the platform-wide `ref` convention). */
   appRef: string;
   name: string;
@@ -145,6 +153,30 @@ async function requireScheduleAdmin(ctx: Context, appRef: string) {
     });
   }
   return { id: app.id, organizationId: app.organizationId };
+}
+
+/**
+ * #2642: the automation's name for a failed run's plain reason, only when the
+ * CALLER passes the same gate that lists schedules and webhooks
+ * (`requireScheduleAdmin`). Any miss or failure — denied, user-owned App,
+ * deleted or foreign trigger, other trigger kind — is null, so the caller sees
+ * the generic wording with the same shape; the lookup is pinned to the run's
+ * own App.
+ */
+export async function authorizedTriggerLabel(
+  ctx: Context,
+  run: { appId?: string | null; triggerKind?: string | null; triggerId?: string | null },
+): Promise<string | null> {
+  try {
+    if (!run.appId || !run.triggerId) return null;
+    const app = await requireScheduleAdmin(ctx, run.appId);
+    const where = { id: run.triggerId, appId: app.id, organizationId: app.organizationId, deletedAt: null };
+    if (run.triggerKind === 'SCHEDULE') return (await ctx.db.agentSchedule.findFirst({ where, select: { name: true } }))?.name ?? null;
+    if (run.triggerKind === 'WEBHOOK') return (await ctx.db.agentWebhook.findFirst({ where, select: { name: true } }))?.name ?? null;
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 /** Next occurrence for a cron+timezone pair, as a typed BAD_USER_INPUT on invalid input. */
@@ -236,6 +268,25 @@ export async function mayReadAppRunWithoutOrgRole(
 }
 
 /**
+ * The run read gate as one boolean (#1577): the narrow own-run arm, else an org READER. `appRun` answers null on false,
+ * and a nested field that must be authorized on its own (`AppRun.servedPrompt`, #2047) asks the SAME predicate instead of
+ * leaning on the parent query. Only an authorization denial is false; any other error still surfaces.
+ */
+export async function canReadAppRun(
+  ctx: Context,
+  run: { appId: string; organizationId: string; userId: string | null; createdBy: string | null; triggerKind: string },
+): Promise<boolean> {
+  if (await mayReadAppRunWithoutOrgRole(ctx, run)) return true;
+  try {
+    await requireOrgRole(ctx, run.organizationId, 'READER');
+    return true;
+  } catch (err) {
+    if (err instanceof GraphQLError && err.extensions?.code === 'FORBIDDEN') return false;
+    throw err;
+  }
+}
+
+/**
  * Interactive / import MANUAL-run gate (#530, cor:acl). Ad-hoc runs
  * (`triggerAppRun`, `runTask(appRef:)`, `importNode(taskRef:)`) are the
  * end-user features these paths exist for, so — unlike schedules and webhooks,
@@ -289,8 +340,8 @@ async function requireManualRunAccess(ctx: Context, appRef: string) {
  */
 export async function assertManualRunAllowed(
   ctx: Context,
-  input: { appRef: string; entryNodeUrn: string; runAsSelf?: boolean | null },
-): Promise<{ id: string; organizationId: string }> {
+  input: { appRef: string; entryNodeUrn: string; runAsSelf?: boolean | null; agentRef?: string | null },
+): Promise<{ id: string; organizationId: string; agentId: string | null }> {
   const app = await requireManualRunAccess(ctx, input.appRef);
   assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
   // runAsSelf REQUIRES an authenticated user — surface it here (pre-write) too.
@@ -324,7 +375,31 @@ export async function assertManualRunAllowed(
       { extensions: { code: 'BAD_USER_INPUT' } },
     );
   }
-  return app;
+  // #2735 / cor:agt:040:10: which Agent the run is served as. Resolved here so
+  // every refusal lands before a caller's write (importNode).
+  return { ...app, agentId: await resolveManualRunAgent(ctx, app.id, input.agentRef) };
+}
+
+/**
+ * The Agent a MANUAL run is served as (#2735, cor:agt:040:10; Holger's R1): the
+ * named Agent, which must be installed in the App; else the App's single
+ * installed Agent; else, with several and none named, `RUN_AGENT_REQUIRED`. An
+ * App with no installed Agent yields null and keeps today's refusal at mint.
+ */
+async function resolveManualRunAgent(
+  ctx: Context,
+  appId: string,
+  agentRef: string | null | undefined,
+): Promise<string | null> {
+  const named = await resolveInstalledAgent(ctx, appId, agentRef);
+  if (named) return named;
+  const installed = (await listAppInstallationsWithDerivedLicense(ctx.db,appId)).slice(0,2);
+  if (installed.length > 1) {
+    throw new GraphQLError('This App has several installed Agents: pass agentRef to name the one the run is served as.', {
+      extensions: { code: 'RUN_AGENT_REQUIRED' },
+    });
+  }
+  return installed[0]?.agentId ?? null;
 }
 
 /**
@@ -342,21 +417,28 @@ export async function assertManualRunAllowed(
  */
 export async function mintManualRun(
   ctx: Context,
-  app: { id: string; organizationId: string },
+  app: { id: string; organizationId: string; agentId?: string | null },
   input: {
     entryNodeUrn: string;
     eventData?: Record<string, unknown> | null;
     runAsSelf?: boolean | null;
     aiConfigName?: string | null;
+    budgetTokens?: number | null;
+    budgetActions?: number | null;
   },
+  options: { publish?: boolean } = {},
 ) {
   try {
     return await mintAppRun(ctx.db, {
+      // #2737: a composed import publishes only after its outer transaction commits.
+      publish: options.publish,
       organizationId: app.organizationId,
       appId: app.id,
+      agentId: app.agentId ?? null,
       userId: resolveRunAsSelf(ctx, input.runAsSelf),
       triggerKind: 'MANUAL',
       consentPrincipal: ctx,
+      ...triggerBudgetPatch(input),
       entryNodeUrn: input.entryNodeUrn,
       eventData: {
         ...(input.eventData ?? {}),
@@ -376,10 +458,13 @@ export async function triggerManualRun(
   ctx: Context,
   input: {
     appRef: string;
+    agentRef?: string | null;
     entryNodeUrn: string;
     eventData?: Record<string, unknown> | null;
     runAsSelf?: boolean | null;
     aiConfigName?: string | null;
+    budgetTokens?: number | null;
+    budgetActions?: number | null;
   },
 ) {
   const app = await assertManualRunAllowed(ctx, input);
@@ -413,10 +498,7 @@ async function resolveInstalledAgent(
     if (e instanceof AgentNotFoundError) throw notInstalled();
     throw e;
   }
-  const installed = await ctx.db.appAgent.findFirst({
-    where: { appId, agentId },
-    select: { agentId: true },
-  });
+  const installed = await isAgentInstalledForAppOperation(ctx.db,appId,agentId);
   if (!installed) throw notInstalled();
   return agentId;
 }
@@ -429,6 +511,7 @@ export const appRunMutations = {
     ctx: Context,
   ) => {
     const app = await requireScheduleAdmin(ctx, input.appRef);
+    const budgets = triggerBudgetPatch(input);
     assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
     const agentId = await resolveInstalledAgent(ctx, app.id, input.agentRef);
     const timezone = input.timezone?.trim() || 'UTC';
@@ -452,6 +535,11 @@ export const appRunMutations = {
     // by this App's context; snapshotted onto each run at mint.
     const scopeId = input.scopeRef?.trim() ? await resolveScopeForTrigger(ctx, app.id, input.scopeRef) : null;
     const automationPin = await captureSetupConsent(ctx.db, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId, ctx, configSelection({ ...input, agentId }));
+    // #2438: the setup pin already resolved the entry — its entryId is the
+    // stable key. The unadopted marker carries none (⇒ null: an unresolvable
+    // entry keeps the URN path; D20 records the setup failure).
+    const entryNodeId = automationPin != null && typeof automationPin === 'object' && 'entryId' in automationPin
+      ? (automationPin as { entryId: string }).entryId : null;
     return ctx.db.agentSchedule.create({
       data: {
         id: generateId(),
@@ -468,7 +556,9 @@ export const appRunMutations = {
         runAt: input.runAt != null ? validatedRunAt(input.runAt) : null,
         timezone,
         entryNodeUrn: input.entryNodeUrn,
+        entryNodeId,
         automationPin: automationPin as never,
+        ...budgets,
         eventData: (input.eventData ?? undefined) as never,
         policy: (input.policy ?? undefined) as never,
         aiConfigName: input.aiConfigName ?? null,
@@ -551,13 +641,23 @@ export const appRunMutations = {
         return tx.agentSchedule.update({
           where: { id },
           data: {
+            ...triggerBudgetPatch(input),
             ...(input.name != null ? { name: input.name } : {}),
             ...modeFields,
             ...(input.timezone != null ? { timezone } : {}),
             ...(input.entryNodeUrn != null ? { entryNodeUrn: input.entryNodeUrn } : {}),
-            ...(input.entryNodeUrn != null || input.runAsSelf != null || input.aiConfigName !== undefined || agentId !== undefined ? { automationPin: await captureSetupConsent(tx as never, existing.appId,
+            ...(input.entryNodeUrn != null || input.runAsSelf != null || input.aiConfigName !== undefined || agentId !== undefined ? await captureSetupConsent(tx as never, existing.appId,
               input.runAsSelf != null ? resolveRunAsSelf(txCtx, input.runAsSelf) : existing.userId,
-              input.entryNodeUrn ?? existing.entryNodeUrn, existing.organizationId, txCtx, configSelection({ ...existing, ...input, agentId: agentId === undefined ? existing.agentId : agentId })) as never } : {}),
+              // #2438 BLIND P2 (Andi): with no new entry supplied, capture by
+              // the stamped id — after a rename the stored URN is stale, and
+              // re-capturing it would break a working schedule's consent.
+              input.entryNodeUrn ?? existing.entryNodeId ?? existing.entryNodeUrn, existing.organizationId, txCtx, configSelection({ ...existing, ...input, agentId: agentId === undefined ? existing.agentId : agentId })).then(consent => ({
+              // #2438: a re-captured setup pin re-stamps the entry id with
+              // it (the marker's absent entryId clears to null only when the
+              // entry itself no longer resolves — the URN path takes over).
+              automationPin: consent as never,
+              ...(consent != null && typeof consent === 'object' && 'entryId' in consent ? { entryNodeId: (consent as { entryId: string }).entryId } : { entryNodeId: null }),
+            })) : {}),
             ...(input.eventData !== undefined ? { eventData: input.eventData as never } : {}),
             ...(input.policy !== undefined ? { policy: input.policy as never } : {}),
             ...(input.aiConfigName !== undefined ? { aiConfigName: input.aiConfigName } : {}),
@@ -595,10 +695,13 @@ export const appRunMutations = {
     }: {
       input: {
         appRef: string;
+        agentRef?: string | null;
         entryNodeUrn: string;
         eventData?: Record<string, unknown> | null;
         runAsSelf?: boolean | null;
         aiConfigName?: string | null;
+    budgetTokens?: number | null;
+    budgetActions?: number | null;
       };
     },
     ctx: Context,
@@ -642,6 +745,8 @@ export const appRunMutations = {
         eventData?: Record<string, unknown> | null;
         policy?: unknown;
         aiConfigName?: string | null;
+    budgetTokens?: number | null;
+    budgetActions?: number | null;
         enabled?: boolean | null;
         scopeRef?: string | null;
       };
@@ -649,6 +754,7 @@ export const appRunMutations = {
     ctx: Context,
   ) => {
     const app = await requireScheduleAdmin(ctx, input.appRef);
+    const budgets = triggerBudgetPatch(input);
     assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
     const agentId = await resolveInstalledAgent(ctx, app.id, input.agentRef);
     const scopeId = input.scopeRef?.trim() ? await resolveScopeForTrigger(ctx, app.id, input.scopeRef) : null;
@@ -674,7 +780,12 @@ export const appRunMutations = {
         if (agentId) await resolveInstalledAgent(txCtx, app.id, input.agentRef);
         if (input.scopeRef?.trim()) await resolveScopeForTrigger(txCtx, app.id, input.scopeRef);
       },
-      async (tx) => tx.agentWebhook.create({
+      async (tx) => {
+        // #2438: stamp the entry's stable id from the setup pin's own
+        // resolution (same as createAgentSchedule); null on the unadopted
+        // marker — that row keeps the URN path.
+        const consent = await captureSetupConsent(tx as never, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId, ctx, configSelection({ ...input, agentId }));
+        return tx.agentWebhook.create({
         data: {
         id: generateId(),
         organizationId: app.organizationId,
@@ -685,15 +796,19 @@ export const appRunMutations = {
         name: input.name,
         secret: generateWebhookSecret(),
         argsSchema: (input.argsSchema ?? undefined) as never,
-        automationPin: await captureSetupConsent(tx as never, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId, ctx, configSelection({ ...input, agentId })) as never,
+        automationPin: consent as never,
         entryNodeUrn: input.entryNodeUrn,
+        entryNodeId: consent != null && typeof consent === 'object' && 'entryId' in consent
+          ? (consent as { entryId: string }).entryId : null,
+        ...budgets,
         eventData: (input.eventData ?? undefined) as never,
         policy: (input.policy ?? undefined) as never,
         aiConfigName: input.aiConfigName ?? null,
         enabled: input.enabled ?? true,
         createdBy: ctx.userId ?? ctx.clientId ?? null,
         },
-      }),
+      });
+      },
       { afterLock: async (tx) => {
         await tx.$queryRaw`SELECT id FROM apps WHERE id = ${app.id} FOR SHARE`;
       } },
@@ -706,12 +821,16 @@ export const appRunMutations = {
   rotateAgentWebhook: async (_: unknown, { id }: { id: string }, ctx: Context) => {
     const existing = await ctx.db.agentWebhook.findFirst({ where: { id, deletedAt: null } });
     if (!existing) throw new GraphQLError('Webhook not found.', { extensions: { code: 'NOT_FOUND' } });
+    // #3511 (ruling 0177, cor:dmo:050:12 r40): person-only, decided before any secret or token is minted, with the
+    // door's existing non-admin refusal.
+    await requirePersonOnlyAct(ctx, 'agent-webhook.rotate', authorizationDenied);
     await requireOrgRole(ctx, existing.organizationId, 'ADMIN');
     requireStoredRunOwner(ctx, existing.userId);
     const webhook = await withAuthorizedTx(
       ctx,
       [{ kind: 'org', id: existing.organizationId }, { kind: 'app', id: existing.appId }],
       async (txCtx) => {
+        await requirePersonOnlyAct(txCtx, 'agent-webhook.rotate', authorizationDenied);
         await requireOrgRole(txCtx, existing.organizationId, 'ADMIN');
         const current = await txCtx.db.agentWebhook.findFirst({ where: { id, deletedAt: null } });
         if (!current || current.appId !== existing.appId || current.organizationId !== existing.organizationId) {
@@ -891,6 +1010,42 @@ export const appRunMutations = {
 };
 
 export const appRunQueries = {
+  /**
+   * #3457 (Refs #2435): what a schedule would do, before it exists. Same authority as createAgentSchedule (org-ADMIN,
+   * checked first, before any node or Agent read) and the same pin: it comes from captureSetupOutcome, the call create
+   * stores its consent from, so previewed hash === the created schedule's automationApproval.hash while the graph is
+   * unchanged. Writes nothing. An entry create would store as UNADOPTED is a typed result (reason split as the marker's),
+   * not an error; admin, App, Agent and timing refusals are create's own errors.
+   */
+  previewAgentSchedule: async (
+    _: unknown,
+    { input }: { input: PreviewAgentScheduleInput },
+    ctx: Context,
+  ) => {
+    const app = await requireScheduleAdmin(ctx, input.appRef);
+    const budgets = triggerBudgetPatch(input);
+    assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
+    const agentId = await resolveInstalledAgent(ctx, app.id, input.agentRef);
+    const timezone = input.timezone?.trim() || 'UTC';
+    if ((input.cron == null) === (input.runAt == null)) {
+      throw new GraphQLError('Provide exactly one of cron (recurring) or runAt (one-shot).', {
+        extensions: { code: 'BAD_USER_INPUT' },
+      });
+    }
+    if (input.cron != null) validatedCronNext(input.cron, timezone);
+    const runAt = input.runAt != null ? validatedRunAt(input.runAt) : null;
+    const outcome = await captureSetupOutcome(ctx.db, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId, ctx, configSelection({ ...input, agentId }));
+    if (!outcome.adoptable) {
+      return { outcome: 'CANNOT_BE_ADOPTED', hash: null, summary: null, reason: outcome.marker.reason === 'MEMORY_UNREADABLE' ? 'MEMORY_UNREADABLE' : 'OTHER' };
+    }
+    const summary = summarizeAutomation(outcome.pin, {
+      kind: 'SCHEDULE',
+      budgets,
+      schedule: { cron: input.cron ?? null, timezone, runAt, enabled: input.enabled ?? true },
+    });
+    return { outcome: 'ADOPTABLE', hash: outcome.pin.hash, summary, reason: null };
+  },
+
   /** Paginated schedules for an App (org-ADMIN; cor:api:120 envelope). */
   agentSchedules: async (
     _: unknown,
@@ -899,7 +1054,7 @@ export const appRunQueries = {
   ) => {
     const app = await requireScheduleAdmin(ctx, appRef);
     const where = { appId: app.id, deletedAt: null };
-    const take = Math.min(Math.max(limit ?? 50, 1), 200);
+    const take = Math.min(Math.max(limit ?? 20, 1), 200);
     const [items, total] = await Promise.all([
       ctx.db.agentSchedule.findMany({ where, orderBy: { createdAt: 'desc' }, take, skip: Math.max(0, offset ?? 0) }),
       ctx.db.agentSchedule.count({ where }),
@@ -971,7 +1126,7 @@ export const appRunQueries = {
       // review, Gemini).
       ...(parentRunId !== undefined ? { parentRunId } : {}),
     };
-    const take = Math.min(Math.max(limit ?? 50, 1), 200);
+    const take = Math.min(Math.max(limit ?? 20, 1), 200);
     const [items, total] = await Promise.all([
       ctx.db.appRun.findMany({
         where,
@@ -991,7 +1146,7 @@ export const appRunQueries = {
   ) => {
     const app = await requireScheduleAdmin(ctx, appRef);
     const where = { appId: app.id, deletedAt: null };
-    const take = Math.min(Math.max(limit ?? 50, 1), 200);
+    const take = Math.min(Math.max(limit ?? 20, 1), 200);
     const [items, total] = await Promise.all([
       ctx.db.agentWebhook.findMany({ where, orderBy: { createdAt: 'desc' }, take, skip: Math.max(0, offset ?? 0) }),
       ctx.db.agentWebhook.count({ where }),
@@ -1010,7 +1165,7 @@ export const appRunQueries = {
     const { id: organizationId } = await resolveOrgRef(ctx.db, orgRef);
     await requireOrgRole(ctx, organizationId, 'ADMIN');
     const where = { organizationId };
-    const take = Math.min(Math.max(limit ?? 50, 1), 200);
+    const take = Math.min(Math.max(limit ?? 20, 1), 200);
     const [items, total] = await Promise.all([
       ctx.db.actionTicket.findMany({ where, orderBy: { createdAt: 'desc' }, take, skip: Math.max(0, offset ?? 0) }),
       ctx.db.actionTicket.count({ where }),
@@ -1034,19 +1189,12 @@ export const appRunQueries = {
     }
     const run = await ctx.db.appRun.findUnique({ where: { id } });
     if (!run) return null;
-    if (await mayReadAppRunWithoutOrgRole(ctx, run)) return run;
     // #1577 — an unreadable run reads as MISSING, never Forbidden: the
     // difference was an existence oracle over run ids. The platform's
     // concealment posture (#1316, #1381; Ada #5919) and what MCP
     // hadron_get_run already does. Only an authorization denial is concealed;
     // any other error still surfaces.
-    try {
-      await requireOrgRole(ctx, run.organizationId, 'READER');
-    } catch (err) {
-      if (err instanceof GraphQLError && err.extensions?.code === 'FORBIDDEN') return null;
-      throw err;
-    }
-    return run;
+    return (await canReadAppRun(ctx, run)) ? run : null;
   },
 
   /**

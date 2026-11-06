@@ -46,6 +46,29 @@ export interface PendingLoginState {
   returnTo?: string;
   /** #477 session-fixation binding — the portal's browser nonce. */
   clientState?: string;
+  /**
+   * #1631 PR1b: SHA-256 of the passkey ceremony's browser cookie. Present only on a state the ceremony's sign-in
+   * leg minted; its callback records a fresh sign-in and mints no session (never with returnTo/clientState, CHECK).
+   */
+  ceremonyNonceHash?: string;
+  /**
+   * #2204: SHA-256 of the OIDC `nonce` sent to Google/Apple. Distinct from `clientState` and `ceremonyNonceHash`, which
+   * bind the BROWSER; this binds the ID TOKEN. Absent only on a GitHub row, or a google/apple row minted before #2204.
+   */
+  providerNonceHash?: string;
+}
+
+/**
+ * What a start route may persist. Google and Apple REQUIRE the nonce hash at the type level (and the database refuses
+ * a new row without it, `chk_pending_login_provider_nonce`); GitHub has no ID token and takes none.
+ */
+export type NewPendingLogin =
+  | { provider: 'github'; data: PendingLoginState }
+  | { provider: 'google' | 'apple'; data: PendingLoginState & { providerNonceHash: string } };
+
+/** A claimed state, plus when it was minted (for re-authentication checks such as Google's `auth_time`). */
+export interface ClaimedLoginState extends PendingLoginState {
+  startedAt: Date;
 }
 
 /**
@@ -54,11 +77,8 @@ export interface PendingLoginState {
  * equivalent of the old Maps' sweep-on-start-route-hit, cheap at the
  * /auth/<provider> call rate (a few per minute at peak).
  */
-export async function createPendingLoginState(
-  state: string,
-  provider: LoginProvider,
-  data: PendingLoginState,
-): Promise<void> {
+export async function createPendingLoginState(state: string, login: NewPendingLogin): Promise<void> {
+  const { provider, data } = login;
   await db.pendingLoginState.deleteMany({ where: { expiresAt: { lt: new Date() } } });
   await db.pendingLoginState.create({
     data: {
@@ -67,6 +87,8 @@ export async function createPendingLoginState(
       redirect: data.redirect,
       returnTo: data.returnTo ?? null,
       clientState: data.clientState ?? null,
+      ceremonyNonceHash: data.ceremonyNonceHash ?? null,
+      providerNonceHash: data.providerNonceHash ?? null,
       expiresAt: new Date(Date.now() + LOGIN_STATE_TTL_MS),
     },
   });
@@ -74,7 +96,7 @@ export async function createPendingLoginState(
 
 /** Discriminated claim result — `reason` feeds the callback diagnostics. */
 export type ClaimResult =
-  | { ok: true; pending: PendingLoginState }
+  | { ok: true; pending: ClaimedLoginState }
   | { ok: false; reason: 'state_unknown' | 'state_expired' };
 
 /**
@@ -97,11 +119,11 @@ export async function claimPendingLoginState(
   // from the returned row. Prisma's `delete` only takes unique filters,
   // so use the raw equivalent: DELETE .. RETURNING.
   const rows = await db.$queryRaw<
-    { redirect: string | null; return_to: string | null; client_state: string | null; expires_at: Date }[]
+    { redirect: string | null; return_to: string | null; client_state: string | null; ceremony_nonce_hash: string | null; provider_nonce_hash: string | null; created_at: Date; expires_at: Date }[]
   >`
     DELETE FROM pending_login_states
     WHERE state = ${state} AND provider = ${provider}
-    RETURNING redirect, return_to, client_state, expires_at
+    RETURNING redirect, return_to, client_state, ceremony_nonce_hash, provider_nonce_hash, created_at, expires_at
   `;
   if (rows.length === 0) return { ok: false, reason: 'state_unknown' };
   const row = {
@@ -117,6 +139,9 @@ export async function claimPendingLoginState(
       redirect: row.redirect ?? '/',
       returnTo: row.returnTo ?? undefined,
       clientState: row.clientState ?? undefined,
+      ceremonyNonceHash: rows[0].ceremony_nonce_hash ?? undefined,
+      providerNonceHash: rows[0].provider_nonce_hash ?? undefined,
+      startedAt: rows[0].created_at,
     },
   };
 }

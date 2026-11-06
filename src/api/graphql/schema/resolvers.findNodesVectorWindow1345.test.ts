@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 /**
  * #1345 review, round 2.
  *
@@ -90,7 +91,7 @@ let otherMemId: string;
 let matchId: string;
 async function seed(memoryId: string, loc: string, content: string, fields: Record<string, unknown> = {}) {
   const id = generateId();
-  await db.node.create({ data: { id, memoryId, loc, name: loc, content, embeddingPendingAt: new Date(), ...fields } as any });
+  await db.node.create({ data: { id, memoryId, loc, name: loc, content, embeddingWorkToken: randomUUID(), embeddingPendingAt: new Date(), ...fields } as any });
   expect(await embedNode(db, id)).toBe('embedded');
   return id;
 }

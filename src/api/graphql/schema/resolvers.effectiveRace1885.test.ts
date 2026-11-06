@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 /**
  * #1885 slice 2, Diego's P2-1 on #1891: the effective set is computed BEFORE
  * the read that serves it, so a base can change in between. These pins stage
@@ -189,7 +190,7 @@ describe('P2-1 in chunk mode (Diego, #1891 at 65d3ce85): passages re-check their
     setEmbeddingClientForTests(stub);
     await db.memory.updateMany({ where: { id: { in: [engineer.mem, backend.mem] } }, data: { vectorIndexEnabled: true, embeddingSource: 'contentChunks' } });
     for (const id of [ids.engRelease, ids.engShip, ids.engKeep]) {
-      await db.node.update({ where: { id }, data: { embeddingPendingAt: new Date() } });
+      await db.node.update({ where: { id }, data: { embeddingWorkToken: randomUUID(), embeddingPendingAt: new Date() } });
       expect(await embedNode(db, id)).toBe('embedded');
     }
   });

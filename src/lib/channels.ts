@@ -1,3 +1,6 @@
+import { lockedChatCounter } from './chatRootCounters.js';
+import { isRawChatNode } from '../services/embedding/rawChat.js';
+import { randomUUID } from 'node:crypto';
 /**
  * Spec 049 Phase 4 — Channel creation and the App's default Channel
  * (D-2026-09-13-006 / -007 D2).
@@ -37,6 +40,7 @@
  * its own (#1194 is this change's draft ancestor).
  */
 
+import { refuseUnderDecisionLog } from './decisions/index.js';
 import { sessionKeyReleasedHint } from './sessionKeyCache.js';
 import { GraphQLError } from 'graphql';
 import { Prisma, type PrismaClient } from '../generated/prisma/index.js';
@@ -51,6 +55,7 @@ import { resolveAppTeamSpaceMemoryIds } from '../api/graphql/schema/resolvers.he
 import { pendingAtForRevival } from '../services/embedding/enqueue.js';
 import { assertNoMintedSpecRemoval } from './mintedSpecPermanence.js';
 import { archivedTombstoneLoc } from './tombstoneArchive.js';
+import { memoryIsVectorIndexed } from './embedding/indexing.js';
 
 /** The name of every App's default Channel — the row `chats:team` became. */
 export const DEFAULT_CHANNEL_NAME = 'team';
@@ -89,7 +94,32 @@ function translateSessionExpired<T>(memoryId: string, fn: () => T): T {
  * subtree locks use, so it never contends with them.
  */
 export async function lockMemoryForChannelChange(tx: Prisma.TransactionClient, memoryId: string): Promise<void> {
-  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'channel-host:' + memoryId}))`;
+  await lockMemoriesForChannelChange(tx, [memoryId]);
+}
+
+/**
+ * Acquire a complete memory set before loc or row locks. Order the resolved
+ * signed PostgreSQL keys, not memory IDs: hash collisions can invert ID order
+ * (#1213). Preserve the existing one-argument advisory namespace.
+ */
+export async function lockMemoriesForChannelChange(
+  tx: Prisma.TransactionClient,
+  memoryIds: readonly string[],
+): Promise<void> {
+  const ids = [...new Set(memoryIds)];
+  if (ids.length === 0) return;
+  if (ids.length === 1) {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'channel-host:' + ids[0]}))`;
+    return;
+  }
+  const rows = await tx.$queryRaw<Array<{ key: number }>>`
+    SELECT hashtext('channel-host:' || m.id) AS key
+    FROM jsonb_array_elements_text(${JSON.stringify(ids)}::jsonb) AS m(id)
+  `;
+  const keys = [...new Set(rows.map((row) => row.key))].sort((a, b) => a - b);
+  for (const key of keys) {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${key}::bigint)`;
+  }
 }
 
 /**
@@ -174,7 +204,8 @@ export async function ensureChannelRow(
     // pre-dates the Channel was written some other way, so whatever stamps it carries were never decided by that
     // rule: they are cleared as the row is adopted, not trusted (Rook, #1751 P3-1).
     await db.$executeRaw(Prisma.sql`
-      UPDATE nodes SET data = data - 'broadcastWakes' - 'managerPost'
+      UPDATE nodes n SET data = data - 'broadcastWakes' - 'managerPost',
+        revision_content_hash = CASE WHEN n.revision_content_hash=hadron_node_revision_state_hash(n) THEN 'refresh' ELSE n.revision_content_hash END
       WHERE memory_id = ${args.memoryId} AND starts_with(loc, ${prefix}) AND node_type = 'chat-message'
         AND deleted_at IS NULL AND message_channel_id IS NULL
         AND jsonb_typeof(data) = 'object' AND (data ? 'broadcastWakes' OR data ? 'managerPost')`);
@@ -238,14 +269,20 @@ async function resetReusedChannel(
   },
 ): Promise<void> {
   const now = new Date();
+  // #3193: raw Date binds are timestamptz; these columns store UTC-naive timestamps.
+  const nowUtc = now.toISOString();
   const root = await tx.node.findUniqueOrThrow({
     where: { id: args.rootId },
-    select: { abstract: true, content: true, data: true, embeddingPendingAt: true },
+    select: { abstract: true, content: true, data: true, embeddingPendingAt: true, embeddingWorkToken: true, nodeType: true, loc: true },
   });
+  const seedData = translateSessionExpired(args.memoryId, () => decryptNodeFields(root, args.memEncInfo).data);
+  await lockedChatCounter(tx, args.rootId, args.memEncInfo, seedData);
+  await tx.chatRootCounter.update({where:{chatRootNodeId:args.rootId},data:{lastMessageAt:null}});
   const encrypted = translateSessionExpired(args.memoryId, () => {
     const plain = decryptNodeFields(root, args.memEncInfo);
     const rootData = { ...((plain.data as Record<string, unknown> | null) ?? {}) };
     delete rootData.lastMessageAt;
+    delete rootData.messageCount;
     // Pre-#1196 team-chat roots stamped this retired audience marker. Reuse is
     // the canonical migration point: a new Channel derives access solely from
     // its host memory and must not inherit the legacy assertion.
@@ -263,7 +300,8 @@ async function resetReusedChannel(
       data: (encrypted.data ?? null) as InputJsonValue,
       // On a vector-indexed host the fresh marker from restoreOrCreate must
       // survive this payload reset; an old worker may still be in flight.
-      embeddingPendingAt: args.vectorIndexEnabled ? root.embeddingPendingAt : null,
+      embeddingPendingAt: args.vectorIndexEnabled && !isRawChatNode(root) ? root.embeddingPendingAt : null,
+      embeddingWorkToken: args.vectorIndexEnabled && !isRawChatNode(root) ? root.embeddingWorkToken : null,
       embeddingFailedAt: null,
       embeddingAttempts: 0,
       embeddingError: null,
@@ -275,6 +313,7 @@ async function resetReusedChannel(
   // can retain the previous incarnation's plaintext in `chunk_text`, so they
   // must leave atomically with the payload reset.
   await tx.nodeEmbedding.deleteMany({ where: { nodeId: args.rootId } });
+  await tx.node.updateMany({ where: { id: args.rootId }, data: { embeddingTruncatedChunks: null } });
   // #1468 (Codex on #1475) — a node under `:messages:` is an ordinary node
   // until this reset tombstones it, and one can carry the spec marker in a
   // minted corpus (written before the Channel existed, or before the mint).
@@ -291,7 +330,7 @@ async function resetReusedChannel(
   // deleted endpoints by stable id and expose the old message payload.
   await tx.$executeRaw`
     UPDATE edges AS e
-    SET deleted_at = ${now}, deleted_by = ${args.deletedBy}, updated_at = ${now}
+    SET deleted_at = ${nowUtc}::timestamp, deleted_by = ${args.deletedBy}, updated_at = ${nowUtc}::timestamp
     WHERE e.deleted_at IS NULL
       AND (
         e.source_id IN (
@@ -308,7 +347,7 @@ async function resetReusedChannel(
   `;
   await tx.$executeRaw`
     UPDATE nodes
-    SET deleted_at = ${now}, deleted_by = ${args.deletedBy}, updated_at = ${now}
+    SET deleted_at = ${nowUtc}::timestamp, deleted_by = ${args.deletedBy}, updated_at = ${nowUtc}::timestamp, embedding_truncated_chunks = NULL
     WHERE memory_id = ${args.memoryId}
       AND deleted_at IS NULL
       AND id = ANY(${doomed}::text[])
@@ -335,9 +374,10 @@ async function archiveChannelStructuralRow(
   // KEY SHARE lock. A fresh READ COMMITTED edge listing then includes it.
   await tx.node.update({
     where: { id: row.id },
-    data: { loc: archivedTombstoneLoc(row.loc, row.id), embeddingPendingAt: null },
+    data: { loc: archivedTombstoneLoc(row.loc, row.id), embeddingPendingAt: null, embeddingWorkToken: null },
   });
   await tx.nodeEmbedding.deleteMany({ where: { nodeId: row.id } });
+  await tx.node.updateMany({ where: { id: row.id }, data: { embeddingTruncatedChunks: null } });
   // Derived include edges (#2040) are re-derivable from content, and the
   // governed-edge trigger refuses to soft-delete them: drop them outright.
   await tx.edge.deleteMany({ where: { governedKind: 'INCLUDE', OR: [{ sourceId: row.id }, { targetId: row.id }] } });
@@ -400,7 +440,7 @@ export async function ensureChannelWithRoot(
   // now keys on `nodeType: 'chat'` instead (see its header).
   const rootFields = translateSessionExpired(args.memoryId, () =>
     encryptNodeFields(
-      { content: null, data: { messageCount: 0, createdAt: new Date().toISOString() } },
+      { content: null, data: { createdAt: new Date().toISOString() } },
       memEncInfo,
     ),
   );
@@ -419,12 +459,16 @@ export async function ensureChannelWithRoot(
     // Re-checked under that lock: the preflight above ran outside it.
     const live = await tx.memory.findFirst({
       where: { id: args.memoryId, deletedAt: null },
-      select: { id: true, vectorIndexEnabled: true },
+      select: { id: true, vectorIndexEnabled: true, class: true },
     });
     if (!live) throw new GraphQLError('Host memory not found.', { extensions: { code: 'NOT_FOUND' } });
     await args.authorizeLockedHost?.(tx);
     await lockAncestorsForCreateMany(tx, args.memoryId, [args.loc, messagesLoc], { owns: 'channel' });
     await assertNoChannelOverlap(tx, args.memoryId, args.loc);
+    // #1728: raw Channel roots share the decision-log code-space guard.
+    // Check under the path locks before any root/structural/Channel writes.
+    await refuseUnderDecisionLog(tx, args.memoryId, args.loc, 'Channel creation');
+    const indexNode = (nodeType: string, loc: string) => memoryIsVectorIndexed(live) && !isRawChatNode({ nodeType, loc });
     const restoreOrCreate = async (
       loc: string,
       create: () => Promise<{ id: string }>,
@@ -452,11 +496,13 @@ export async function ensureChannelWithRoot(
           // Channel creation may also revive tombstoned ancestor and
           // :messages nodes; their vectors belong to the old incarnation.
           await tx.nodeEmbedding.deleteMany({ where: { nodeId: existing.id } });
+          await tx.node.updateMany({ where: { id: existing.id }, data: { embeddingTruncatedChunks: null } });
           await tx.node.update({
             where: { id: existing.id },
             data: {
               deletedAt: null, deletedBy: null,
-              embeddingPendingAt: pendingAtForRevival(existing.embeddingPendingAt, live.vectorIndexEnabled),
+              embeddingPendingAt: pendingAtForRevival(existing.embeddingPendingAt, indexNode(existing.nodeType, loc)),
+              embeddingWorkToken: indexNode(existing.nodeType, loc) ? randomUUID() : null,
             },
           });
         }
@@ -468,7 +514,8 @@ export async function ensureChannelWithRoot(
       await restoreOrCreate(parent, () =>
         tx.node.create({
           data: { id: generateId(), memoryId: args.memoryId, loc: parent, name: parent.split(':').pop()!, nodeType: 'record', createdBy: args.createdBy,
-            embeddingPendingAt: live.vectorIndexEnabled ? new Date() : null },
+            embeddingPendingAt: indexNode('record', parent) ? new Date() : null,
+            embeddingWorkToken: indexNode('record', parent) ? randomUUID() : null },
           select: { id: true },
         }),
         () => true,
@@ -505,10 +552,14 @@ export async function ensureChannelWithRoot(
       // was a chat, so it is refused too.
       (row) => row.nodeType === 'chat',
     );
+    const counterRoot = await tx.node.findUniqueOrThrow({where:{id:rootId},select:{data:true}});
+    await lockedChatCounter(tx, rootId, memEncInfo,
+      translateSessionExpired(args.memoryId, () => decryptNodeFields(counterRoot,memEncInfo).data));
     await restoreOrCreate(messagesLoc, () =>
       tx.node.create({
         data: { id: generateId(), memoryId: args.memoryId, loc: messagesLoc, name: 'messages', nodeType: 'record', createdBy: args.createdBy,
-          embeddingPendingAt: live.vectorIndexEnabled ? new Date() : null },
+          embeddingPendingAt: indexNode('record', messagesLoc) ? new Date() : null,
+            embeddingWorkToken: indexNode('record', messagesLoc) ? randomUUID() : null },
         select: { id: true },
       }),
       () => true,
@@ -544,7 +595,7 @@ export async function ensureChannelWithRoot(
         messagesLoc,
         deletedBy: args.createdBy ?? null,
         memEncInfo,
-        vectorIndexEnabled: live.vectorIndexEnabled,
+        vectorIndexEnabled: memoryIsVectorIndexed(live),
       });
     }
     const channel = await ensureChannelRow(tx, { ...args, rootId, resetForReuse: reusingDeadAddress });

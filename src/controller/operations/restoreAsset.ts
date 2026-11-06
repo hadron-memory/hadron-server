@@ -12,6 +12,7 @@
 
 import type { Asset, PrismaClient } from '../../generated/prisma/index.js';
 import { headObject } from '../../integrations/r2/client.js';
+import { reportAssetBytesMissing } from '../../lib/asset/bytesMissingAlarm.js';
 import { logAssetEvent } from '../../lib/asset/audit.js';
 import { decryptStorageKey } from '../../lib/asset/encryption.js';
 import { sessionKeyCache } from '../../lib/sessionKeyCache.js';
@@ -99,9 +100,13 @@ export async function restoreAsset(
   }
   const head = await headObject(plainStorageKey);
   if (!head.exists) {
+    // #1140: the row is INSIDE its retention window, so the bytes were meant to
+    // be here. That is server-state inconsistency (unlike the expired branch
+    // above, where gone is expected), so alarm where it is discovered.
+    reportAssetBytesMissing({ assetId: asset.id, memoryId: asset.memory.id, source: 'restore' });
     throw new AssetUploadError(
       'ASSET_BYTES_GONE',
-      'R2 object has already been swept; cannot restore',
+      'asset bytes are missing from storage although the row is within its retention window; cannot restore',
     );
   }
 

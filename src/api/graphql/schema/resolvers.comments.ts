@@ -1,3 +1,4 @@
+import { stampEmbeddingObligation } from '../../../services/embedding/obligation.js';
 /**
  * #1606 — the comment path (`cor:dmo:110`): the ONE way a comment node is
  * created or changed (`cor:dmo:110:04`). Contract of record:
@@ -61,7 +62,7 @@ import {
   type CommentNodeData,
   type CommentOp,
 } from '../../../lib/comments/index.js';
-import { openThreadCounts, viewerOpenThreads } from '../../../lib/comments/summary.js';
+import { openThreadCounts, viewerOpenThreads, type CommentCounts } from '../../../lib/comments/summary.js';
 import { deleteThreadsInTx } from '../../../lib/comments/lifecycle.js';
 
 type Tx = Prisma.TransactionClient;
@@ -72,7 +73,7 @@ type Tx = Prisma.TransactionClient;
 const COMMENT_NODE_SELECT = {
   id: true, memoryId: true, loc: true, nodeType: true, revSeq: true, content: true, data: true,
   createdAt: true, updatedAt: true, createdBy: true, deletedAt: true,
-  commentMeta: true,
+  commentMeta: true, embeddingWorkToken: true,
 } as const;
 
 type CommentNodeRow = Prisma.NodeGetPayload<{ select: typeof COMMENT_NODE_SELECT }>;
@@ -142,6 +143,8 @@ function decryptComment(row: { content: string | null; data: unknown }, key: Enc
  * Load comments by id as views, in the given order. Missing or non-comment
  * ids are dropped. The caller has already passed the memory's read gate.
  */
+const embeddingTokenOfView = new WeakMap<CommentView, string | null>();
+
 async function loadCommentViews(db: Context['db'] | Tx, ids: string[], key: EncryptionKey | null): Promise<CommentView[]> {
   if (ids.length === 0) return [];
   const rows = await db.node.findMany({ where: { id: { in: ids }, nodeType: COMMENT_NODE_TYPE }, select: COMMENT_NODE_SELECT });
@@ -195,6 +198,8 @@ async function loadCommentViews(db: Context['db'] | Tx, ids: string[], key: Encr
       revSeq: row.revSeq,
       target,
     });
+    // Token and decrypted body originate in the SAME selected row; never adopt a later token for old text.
+    embeddingTokenOfView.set(byId.get(row.id)!, row.embeddingWorkToken);
   }
   return ids.map((id) => byId.get(id)).filter((v): v is CommentView => v != null);
 }
@@ -487,6 +492,7 @@ async function insertComment(
       createdBy,
     },
   });
+  await stampEmbeddingObligation(tx, id, args.memoryId);
   await tx.commentMeta.create({
     data: {
       nodeId: id,
@@ -578,6 +584,7 @@ async function reviseComment(
       revSeq: { increment: 1 }, revisionContentHash: revisionStateHashRefreshMarker(), ...extra,
     },
   });
+  if (patch.content !== undefined) await stampEmbeddingObligation(tx, row.id, row.memoryId);
 }
 
 /**
@@ -590,6 +597,7 @@ async function reviseComment(
 function indexed(ctx: Context, view: CommentView): CommentView {
   void enqueueNodeEmbedding(ctx.db, {
     nodeId: view.id,
+    workToken: embeddingTokenOfView.get(view) ?? null,
     memoryId: view.memoryId,
     plaintext: { content: view.body, abstract: null },
   }).catch((error) => console.error('[comments] embedding enqueue failed:', error));
@@ -670,6 +678,7 @@ async function deleteLockedComment(
   // chunk_text) go in the same transaction that conceals it, never by
   // eventual cleanup (#1674 review, Jane P2-4). A deleted comment's too.
   await tx.nodeEmbedding.deleteMany({ where: { nodeId: row.id } });
+  await tx.node.updateMany({ where: { id: row.id }, data: { embeddingTruncatedChunks: null } });
   if (!hasReplies) {
     await tx.commentMeta.update({ where: { nodeId: row.id }, data: deleted });
     await vanishComment(tx, txCtx, row, actorKey, cause);
@@ -1047,7 +1056,7 @@ export const commentQueries = {
     if (target.nodeType === COMMENT_NODE_TYPE) {
       throw commentError('COMMENT_TARGET_IS_COMMENT', 'A comment has no threads of its own; read its thread through its target.');
     }
-    const limit = Math.min(Math.max(args.limit ?? 50, 0), 200);
+    const limit = Math.min(Math.max(args.limit ?? 20, 0), 200);
     const offset = Math.max(args.offset ?? 0, 0);
     const where: Prisma.CommentMetaWhereInput = {
       targetNodeId: target.id,
@@ -1223,7 +1232,7 @@ export const commentFieldResolvers = {
 // Same-tick batching, the pattern of Node.approvalStatus: every Node in one
 // response asks in the same tick, and one grouped query answers all of them.
 type Batch<T> = { ids: Set<string>; flushed: boolean; result: Promise<Map<string, T>> };
-const summaryBatches = new WeakMap<Context, Batch<{ openThreads: number; resolvedThreads: number; comments: number }>>();
+const summaryBatches = new WeakMap<Context, Batch<CommentCounts>>();
 const viewerBatches = new WeakMap<Context, Batch<string>>();
 
 function batched<T>(
@@ -1251,7 +1260,7 @@ function batched<T>(
 
 async function loadSummary(ctx: Context, nodeId: string) {
   const counts = await batched(summaryBatches, ctx, nodeId, (ids) => openThreadCounts(ctx.db, ids));
-  return counts ?? { openThreads: 0, resolvedThreads: 0, comments: 0 };
+  return counts ?? { openThreads: 0, resolvedThreads: 0, comments: 0, oldestOpenThreadAt: null };
 }
 
 async function loadViewerOpen(ctx: Context, nodeId: string): Promise<string | null> {

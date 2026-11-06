@@ -2,30 +2,33 @@
  * #1632 / cor:dmo:130:01 — the signature payload: the exact bytes a passkey
  * signs over (as the SHA-256 WebAuthn challenge).
  *
- * v1 is the S0 contract (src/lib/signaturePayload.fixture.{json,md}, #1629):
+ * v3 is the only payload a server builds or verifies (Holger, R80):
  *
- *   hadron-signature-v1
+ *   hadron-signature-v3
  *   node <stable node id>
  *   approval-hash <64 lowercase hex>
+ *   request <signing request id>
  *
- * UTF-8, LF after every line including the last. Production signing writes v3
- * (the v1 lines under its own prefix plus a request-id line, #10392), whose
- * bytes and fixture are S2b-2's; until then asking for v3 is a loud error, not
- * a guess. `hadron-signature-v2` is retired and never accepted (#9837).
+ * UTF-8, LF after every line including the last. The request line is the
+ * stored id verbatim: 128 CSPRNG bits as 22 unpadded base64url characters
+ * (#10392), so one signature can never serve another request. The bytes are
+ * pinned by the conformance fixture (`signaturePayload.v3.fixture.*`).
+ * `hadron-signature-v1` is no longer produced and no verifier accepts it; a
+ * request still open with a v1 pin at the v3 deploy ends stale (R81,
+ * cor:dmo:130:03 S19). `hadron-signature-v2` is retired (#9837).
  */
 import { createHash } from 'node:crypto';
 
-export const SIGNATURE_PAYLOAD_V1 = 'hadron-signature-v1';
 export const SIGNATURE_PAYLOAD_V3 = 'hadron-signature-v3';
-export type SignaturePayloadVersion = typeof SIGNATURE_PAYLOAD_V1 | typeof SIGNATURE_PAYLOAD_V3;
+export type SignaturePayloadVersion = typeof SIGNATURE_PAYLOAD_V3;
 
-/** The payload version new requests pin. v1 until S2b-2 lands v3. */
-export const CURRENT_SIGNATURE_PAYLOAD_VERSION: SignaturePayloadVersion = SIGNATURE_PAYLOAD_V1;
+/** The payload version new requests pin. */
+export const CURRENT_SIGNATURE_PAYLOAD_VERSION: SignaturePayloadVersion = SIGNATURE_PAYLOAD_V3;
 
 export interface SignaturePayloadInput {
   nodeId: string;
   approvalHash: string;
-  /** Required by v3 (S2b-2); v1 has no request line. */
+  /** The signing request's id: v3's request line (22 unpadded base64url characters). */
   requestId?: string;
 }
 
@@ -40,8 +43,13 @@ export class UnsupportedSignaturePayloadError extends Error {
 export function signaturePayloadBytes(version: string, input: SignaturePayloadInput): Buffer {
   if (!/^[0-9a-f]{64}$/.test(input.approvalHash)) throw new Error('approval hash must be 64 lowercase hex');
   if (!input.nodeId || /[\r\n]/.test(input.nodeId)) throw new Error('node id must be a single non-empty line');
-  if (version !== SIGNATURE_PAYLOAD_V1) throw new UnsupportedSignaturePayloadError(version);
-  return Buffer.from(`${SIGNATURE_PAYLOAD_V1}\nnode ${input.nodeId}\napproval-hash ${input.approvalHash}\n`, 'utf8');
+  if (version !== SIGNATURE_PAYLOAD_V3) throw new UnsupportedSignaturePayloadError(version);
+  // A bad request line is refused, never repaired: re-encoding or trimming would sign bytes the fixture does not pin.
+  if (!input.requestId || !/^[A-Za-z0-9_-]{22}$/.test(input.requestId)) {
+    throw new Error('request id must be 22 unpadded base64url characters');
+  }
+  return Buffer.from(
+    `${SIGNATURE_PAYLOAD_V3}\nnode ${input.nodeId}\napproval-hash ${input.approvalHash}\nrequest ${input.requestId}\n`, 'utf8');
 }
 
 /** The WebAuthn challenge: the 32 raw bytes of SHA-256 over the payload bytes. */

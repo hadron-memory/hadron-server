@@ -92,6 +92,7 @@ describe('Memory.schema — carried through a memory clone', () => {
       ownerUserId: null,
       groupOwnerUserId: null,
       actorId: adminId,
+      copierReadableMemoryIds: null,
     });
     const clone = await db.memory.findUniqueOrThrow({ where: { id: cloneId } });
     expect((clone.schema as any).objectTypes.competitor.fields.name).toEqual({ type: 'text', required: true });
@@ -114,7 +115,7 @@ describe('Memory.schema — carried through a memory clone', () => {
     const orgId = (await db.memory.findUniqueOrThrow({ where: { id: memId } })).organizationId!;
     const { memoryId: cloneId } = await cloneMemoryGraph(db, {
       sourceMemoryId: memId, name: 'intel-copy', newUrn: 'ms-org:intel-copy',
-      targetOrganizationId: orgId, ownerUserId: null, groupOwnerUserId: null, actorId: adminId,
+      targetOrganizationId: orgId, ownerUserId: null, groupOwnerUserId: null, actorId: adminId, copierReadableMemoryIds: null,
     });
     const copies = await db.node.findMany({ where: { memoryId: cloneId } });
     const byLoc = new Map(copies.map((n) => [n.loc, n]));

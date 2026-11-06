@@ -76,6 +76,38 @@ describe('validateMemory — the five checks (#819)', () => {
     expect(r.findings.map((f: { kind: string }) => f.kind)).not.toContain('SPARSE');
   });
 
+  // #2516 (cor:api:020:03, Holger 2026-10-27): every object node is exempt —
+  // objects are data-only by design. The exemption keys on objectType alone.
+  it('SPARSE does NOT fire on a data-only object node (#2516)', async () => {
+    const n = await createDbNode(db, { loc: 'obj', memoryId: mem.id, name: 'Obj' });
+    await db.node.update({ where: { id: n.id }, data: { objectType: 'contact', properties: { email: 'a@b.c' } } });
+    const r = await validate();
+    expect(r.findings.map((f: { kind: string }) => f.kind)).not.toContain('SPARSE');
+  });
+
+  it('SPARSE still fires on a name-only node with no objectType (#2516)', async () => {
+    await createDbNode(db, { loc: 'plain', memoryId: mem.id, name: 'Plain' });
+    const n = await createDbNode(db, { loc: 'obj', memoryId: mem.id, name: 'Obj' });
+    await db.node.update({ where: { id: n.id }, data: { objectType: 'contact' } });
+    const r = await validate();
+    const sparse = r.findings.filter((f: { kind: string }) => f.kind === 'SPARSE');
+    expect(sparse.map((f: { nodeLoc: string }) => f.nodeLoc)).toEqual(['plain']);
+  });
+
+  it('a legacy blank objectType is no collection, so the node is still SPARSE (#2516, #725)', async () => {
+    const n = await createDbNode(db, { loc: 'blank', memoryId: mem.id, name: 'Blank' });
+    await db.node.update({ where: { id: n.id }, data: { objectType: '  ' } });
+    const r = await validate();
+    expect(r.findings.map((f: { kind: string }) => f.kind)).toContain('SPARSE');
+  });
+
+  it('an object node that also carries content is not SPARSE (#2516)', async () => {
+    const n = await createDbNode(db, { loc: 'objc', memoryId: mem.id, name: 'ObjC', content: 'body' });
+    await db.node.update({ where: { id: n.id }, data: { objectType: 'contact', description: 'd' } });
+    const r = await validate();
+    expect(r.findings.map((f: { kind: string }) => f.kind)).not.toContain('SPARSE');
+  });
+
   it('a soft-deleted node produces NO findings and is not counted (#884)', async () => {
     // The prod case that motivated #884: a tombstone carrying a stale
     // embeddingFailedAt and a stale abstract from before its deletion. Its

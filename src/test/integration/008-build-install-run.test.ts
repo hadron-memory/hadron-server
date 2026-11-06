@@ -84,11 +84,12 @@ describe('US1 Step (a): Bea creates Mealplan agent (FR-001 / FR-008 / FR-009)', 
       },
       adminCtx(bea.id),
     );
-    // Default knobs (set by the schema column defaults).
+    // Default knobs: memoryProvisioning from the column default; #2171 (R211)
+    // a new Agent offers owner and member.
     expect(agent.memoryProvisioning).toEqual({ appMemory: 'shared' });
     expect(agent.installationPolicy).toEqual({
       maxMembers: 'unlimited',
-      memberRoles: ['owner'],
+      memberRoles: ['owner', 'member'],
     });
 
     // Bea then refines the policy. createAgent doesn't take these knobs in

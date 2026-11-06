@@ -5,6 +5,8 @@ import { computeApprovalHash, type ApprovalHashFields } from './approvalHash.js'
 import type { EncryptionKey } from './crypto.js';
 import { decryptNodeFieldsWithKey } from './nodeCrypto.js';
 import { ensureCurrentNodeRevisionInTransaction, RECONCILE_EDITOR_INFO, type SnapshotEditor } from './nodeRevisionSnapshot.js';
+import { isBootPromptRole } from './bootPrompt.js';
+import { BOOT_PROMPT_APPROVAL_MESSAGES, type BootPromptApprovalGate, type BootPromptApprovalRefusalCode } from './bootPromptApproval.js';
 
 /**
  * #1591 — node approvals: approving a node's CURRENT revision, and the state
@@ -130,7 +132,8 @@ export class NodeApprovalRefusal extends Error {
       | 'REVISION_MISMATCH'
       | 'COMMENT_NOT_APPROVABLE'
       | 'DECISION_NOT_APPROVABLE'
-      | 'DECISION_LOG_NOT_APPROVABLE',
+      | 'DECISION_LOG_NOT_APPROVABLE'
+      | BootPromptApprovalRefusalCode,
     message: string,
     readonly details: Record<string, unknown> = {},
   ) {
@@ -161,8 +164,20 @@ export async function approveNodeInTransaction(
     key: EncryptionKey | null;
     expectedRevision?: number | null;
     now?: Date;
+    /** #2043 — the caller's boot-prompt approval decision for this memory (bootPromptApprovalGate). Required: no caller skips it. */
+    bootPromptGate: BootPromptApprovalGate;
   },
 ): Promise<{ node: NodeApprovalRow; approvedNow: boolean }> {
+  // #2043 (R30, cor:agt:040:18) — judged on the LOCKED row, before the revision
+  // reconcile below can write anything: a refusal changes nothing.
+  const gate = opts.bootPromptGate;
+  if (gate.placed && gate.refusal) {
+    const [row] = await tx.$queryRaw<Array<{ role: string | null }>>`
+      SELECT role FROM nodes WHERE id = ${nodeId} AND memory_id = ${opts.memoryId} AND deleted_at IS NULL FOR UPDATE`;
+    if (row && isBootPromptRole(row.role)) {
+      throw new NodeApprovalRefusal(gate.refusal, BOOT_PROMPT_APPROVAL_MESSAGES[gate.refusal], { op: 'approve' });
+    }
+  }
   const revision = await ensureCurrentNodeRevisionInTransaction(tx, nodeId, { expectedMemoryId: opts.memoryId });
   if (revision == null) throw new NodeApprovalRefusal('NODE_NOT_FOUND', 'Node not found');
   // Re-read under the lock, pinned to the authorized memory and to a LIVE row:
@@ -356,6 +371,11 @@ export interface RevisionApproval {
   state: 'APPROVED' | 'NOT_APPROVED' | 'NOT_APPLICABLE';
   /** The covering record, with the revision it was recorded at. Null unless APPROVED. */
   record: NodeApprovalRecord | null;
+  /**
+   * Only when APPROVED: the exact content this verdict hashed, and the memory that captured it. An include serves
+   * THIS text, so what is served is what qualified; it never re-reads the revision after the verdict (#2041).
+   */
+  served?: { content: string | null; memoryId: string };
 }
 
 const NOT_APPROVED_REVISION: RevisionApproval = { state: 'NOT_APPROVED', record: null };
@@ -435,7 +455,7 @@ export async function revisionApprovalOf(
   // Prefer the record made AT this revision, else the earliest that covers it.
   const record = covering.find((c) => c.revision === revNo)
     ?? covering.reduce((a, b) => (b.revision < a.revision ? b : a));
-  return { state: 'APPROVED', record };
+  return { state: 'APPROVED', record, served: { content: (target ?? live).content, memoryId: captureMemoryId } };
 }
 
 /** How many revisions `newestApprovedRevisionOf` examines before it gives up (newest first). */

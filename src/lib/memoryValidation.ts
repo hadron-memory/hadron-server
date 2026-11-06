@@ -19,12 +19,14 @@ import { validateNodeAgainstSchema, NodeSchemaViolation } from './validateNodeAg
 import { normalizeObjectType } from './enforceNodeSchema.js';
 import type { MemorySchema } from './memorySchema.js';
 
-/** The five checks. Mirrors the GraphQL MemoryValidationCheck enum. */
+/** The validation checks. Mirrors the GraphQL MemoryValidationCheck enum. */
 export type ValidationKind =
   | 'BROKEN_REF'
   | 'SPARSE'
   | 'STALE_ABSTRACT'
   | 'EMBED_FAILED'
+  | 'INDEX_TRUNCATED'
+  | 'GIT_MIRROR_FAILED'
   | 'SCHEMA';
 
 export interface ValidationFinding {
@@ -43,8 +45,12 @@ export interface ValidationReport {
   nodesChecked: number;
   /** Findings, capped at `maxFindings`. */
   findings: ValidationFinding[];
-  /** The TRUE count, even when `findings` was capped. */
+  /** The TRUE problem count, even when `findings` was capped. */
   totalFindings: number;
+  /** Non-informational findings, counted even beyond the retained page. */
+  totalProblems: number;
+  /** Informational declarations; never included in the problem count. */
+  totalInformational: number;
   /**
    * A check that could NOT run. Reported explicitly rather than silently
    * omitted: a clean bill of health that quietly skipped a check is worse than
@@ -111,11 +117,18 @@ export async function validateMemoryNodes(
     // no longer exists.
     include: { outgoingEdges: { where: { deletedAt: null } } },
   });
-  const findings: ValidationFinding[] = [];
+  const problems: ValidationFinding[] = [];
+  const informational: ValidationFinding[] = [];
   let totalFindings = 0;
+  let totalInformational = 0;
   const record = (f: ValidationFinding) => {
-    totalFindings += 1;
-    if (findings.length < maxFindings) findings.push(f);
+    if (f.kind === 'INDEX_TRUNCATED') {
+      totalInformational += 1;
+      if (informational.length < maxFindings) informational.push(f);
+    } else {
+      totalFindings += 1;
+      if (problems.length < maxFindings) problems.push(f);
+    }
   };
 
   // BROKEN_REF, corrected in #819. The pre-#819 check compared every edge
@@ -163,9 +176,15 @@ export async function validateMemoryNodes(
         });
       }
     }
+    // #725: normalizeObjectType so the audit matches write-seam semantics — a
+    // legacy blank objectType means "no collection", not an undeclared one.
+    // (Tombstone exclusion moved to the fetch itself in #884 — every check
+    // now sees live nodes only.)
+    const auditObjectType = normalizeObjectType(node.objectType);
     // Spec 031 FR-011: an abstract counts as legitimate content, so a node
-    // carrying only an abstract is NOT sparse.
-    if (!node.description && !node.content && !node.abstract) {
+    // carrying only an abstract is NOT sparse. #2516 (cor:api:020:03): an
+    // object node is never sparse — objects are data-only by design.
+    if (auditObjectType == null && !node.description && !node.content && !node.abstract) {
       record({
         kind: 'SPARSE',
         nodeId: node.id,
@@ -191,6 +210,10 @@ export async function validateMemoryNodes(
     // permanent encrypted-no-plaintext class. All are operator-useful, because
     // from outside this audit an empty vector index is indistinguishable from
     // "no hits matched".
+    if (node.embeddingTruncatedChunks != null && node.embeddingTruncatedChunks > 0) {
+      record({ kind: 'INDEX_TRUNCATED', nodeId: node.id, nodeLoc: node.loc,
+        detail: `${node.embeddingTruncatedChunks} passage chunks omitted by the per-node indexing cap (informational)` });
+    }
     if (node.embeddingFailedAt) {
       record({
         kind: 'EMBED_FAILED',
@@ -200,11 +223,6 @@ export async function validateMemoryNodes(
         detail: node.embeddingError?.trim() || 'unknown',
       });
     }
-    // #725: normalizeObjectType so the audit matches write-seam semantics — a
-    // legacy blank objectType means "no collection", not an undeclared one.
-    // (Tombstone exclusion moved to the fetch itself in #884 — every check
-    // now sees live nodes only.)
-    const auditObjectType = normalizeObjectType(node.objectType);
     if (conformanceSchema != null && auditObjectType != null) {
       try {
         validateNodeAgainstSchema(
@@ -225,7 +243,32 @@ export async function validateMemoryNodes(
     }
   }
 
-  return { nodesChecked: nodes.length, findings, totalFindings, skippedChecks };
+  // #430: a Git-mirror attempt that did not land leaves a row (src/integrations/github/mirrorObligations.ts). From outside, a
+  // stale mirror looks like a healthy one until the repo-wins sync reverts the lost write. Fixed class and loc only: the row
+  // never holds exception text. An encrypted memory never syncs to Git (R206), so a row it left behind is not a finding.
+  if (!memory?.isEncrypted) {
+    const liveLocById = new Map(nodes.map((n) => [n.id, n.loc]));
+    const obligations = await db.gitMirrorObligation.findMany({
+      where: { memoryId },
+      orderBy: [{ nodeId: 'asc' }, { kind: 'asc' }, { removeLoc: 'asc' }],
+    });
+    for (const o of obligations) {
+      // A REMOVE row names the path still owed; a WRITE row needs the node to be live (#884: no finding on a tombstone).
+      const nodeLoc = o.kind === 'REMOVE' ? o.removeLoc : liveLocById.get(o.nodeId);
+      if (nodeLoc === undefined) continue;
+      record({
+        kind: 'GIT_MIRROR_FAILED',
+        nodeId: o.nodeId,
+        nodeLoc,
+        detail: `${o.kind === 'REMOVE' ? 'Git mirror removal of this path' : 'Git mirror write'} did not land (${o.errorClass}, ${o.attempts} attempt${o.attempts === 1 ? '' : 's'}); the repository may be stale${o.state === 'EXHAUSTED' ? `; retries stopped after ${o.attempts} attempts` : ''}`,
+      });
+    }
+  }
+
+  // Keep each bucket bounded during the scan, and give actionable problems
+  // precedence regardless of where informational declarations were encountered.
+  const findings = problems.concat(informational.slice(0, Math.max(0, maxFindings - problems.length)));
+  return { nodesChecked: nodes.length, findings, totalFindings, totalProblems: totalFindings, totalInformational, skippedChecks };
 }
 
 /** The MCP prose line for one finding — the pre-#819 wording, preserved. */
@@ -235,6 +278,8 @@ export function formatFindingLine(f: ValidationFinding, nodeUrn: string): string
     SPARSE: 'sparse',
     STALE_ABSTRACT: 'stale-abstract',
     EMBED_FAILED: 'embed-failed',
+    INDEX_TRUNCATED: 'index-truncated',
+    GIT_MIRROR_FAILED: 'git-mirror-failed',
     SCHEMA: 'schema',
   }[f.kind];
   switch (f.kind) {

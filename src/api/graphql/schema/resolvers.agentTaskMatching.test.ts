@@ -12,10 +12,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
-import type { AuthContext } from '../../../middleware/auth.js';
-import { createTestableMcpServer } from '../../../mcp/server.js';
 import { taskStallTick } from '../../../jobs/taskStallEvaluator.js';
 import { registerHost } from '../../../lib/agentTasks/hosts.js';
 import { rosterState } from '../../../lib/agentTasks/roster.js';
@@ -59,6 +58,7 @@ beforeEach(async () => {
       select: { id: true },
     });
   }
+  await serveEveryAgent(db); // #2712: binds are served the Agent's boot prompt
 });
 
 /** Bind a worker in a session of `family`, driven `minutesAgo` minutes ago. */
@@ -158,12 +158,14 @@ describe('teamRoster — each state on its own (plan §7.4)', () => {
   });
 
   it('YOUR_MOVE only for an owner already woken: a higher owner not yet due is not', async () => {
+    // #2200: the alarm's episode start is the task's assignment, to the millisecond (the key the live classification reads).
+    const assignedAt = ago(30);
     const t = await db.agentTask.create({
-      data: { appId: app.id, title: 'Review', ownerWorkerId: w.Anne.id, assigneeWorkerId: w.Rook.id, assignedAt: ago(30), createdAt: ago(30) },
+      data: { appId: app.id, title: 'Review', ownerWorkerId: w.Anne.id, assigneeWorkerId: w.Rook.id, assignedAt, createdAt: assignedAt },
     });
     const alarm = await db.agentTeamEvent.create({
       data: {
-        appId: app.id, taskId: t.id, type: 'stall.not-started', severity: 'alarm', episodeStart: ago(30),
+        appId: app.id, taskId: t.id, type: 'stall.not-started', severity: 'alarm', episodeStart: assignedAt,
         chain: [{ workerId: w.Anne.id }, { workerId: w.Kit.id }], payload: { windowMinutes: 15 },
       },
     });
@@ -261,26 +263,14 @@ describe('teamRoster — order, audience, shape', () => {
   });
 });
 
-describe('hadron_team_roster (MCP)', () => {
-  const authOf = (userId: string) => ({ userId, roles: ['READER'], clientId: `user:${userId}` }) as AuthContext;
-  const mcp = (auth: AuthContext) =>
-    createTestableMcpServer(auth, { sessionId: `ro-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
-  const text = (r: { content: Array<{ text: string }> }) => r.content[0].text;
-
-  it('renders one line per worker with its state and facts; an outsider is refused', async () => {
-    await bind('Kit', 'codex');
-    const out = text(await mcp(authOf(mia.id)).callTool('hadron_team_roster', { appRef: app.id }));
-    expect(out).toMatch(/^Roster as of /);
-    expect(out).toMatch(/Kit — AVAILABLE: role engineer; bound as codex; free for work as codex; never assigned/);
-    expect(out).toMatch(/Anne — NOT_LAUNCHABLE: role engineer; unbound; never assigned/);
-    expect(text(await mcp(authOf(outsider.id)).callTool('hadron_team_roster', { appRef: app.id }))).toMatch(/^\[app_not_found\]/);
-  });
-
-  it('hadron_start_session takes a family', async () => {
-    const out = text(await mcp(authOf(mia.id)).callTool('hadron_start_session', {
-      description: 'stint', workerRef: w.Kit.id, family: 'glm', llmModel: 'claude-opus-5-5',
-    }));
-    expect(out).not.toMatch(/^\[/);
+// #3082: hadron_team_roster is disabled over MCP. Its roster rendering is covered by the GraphQL `teamRoster`
+// tests above (states and facts per worker, 'AVAILABLE' with a free family; an outsider is APP_NOT_FOUND).
+describe('startSession takes a family', () => {
+  it('startSession records the family (moved from the hadron_start_session MCP wrapper, #3082)', async () => {
+    const out = await M.startSession({}, {
+      input: { id: generateId(), tool: 'vitest', appRef: app.id, workerRef: w.Kit.id, description: 'stint', family: 'glm', llmModel: 'claude-opus-5-5' },
+    }, ctx(mia.id));
+    expect(out.id).toBeTruthy();
     const s = await db.session.findFirstOrThrow({ where: { workerId: w.Kit.id } });
     expect(s.family).toBe('glm');
   });

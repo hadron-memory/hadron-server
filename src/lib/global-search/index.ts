@@ -28,7 +28,7 @@ import {
 } from './types.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 
-const DEFAULT_LIMIT = 50;
+export const GLOBAL_SEARCH_DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 200;
 /**
  * Candidate rows fetched per entity before JS scoring. Also the ceiling on the
@@ -60,7 +60,7 @@ export async function globalSearch(
         [...new Set(params.entityTypes)].filter((t) => ALL_ENTITY_TYPES.includes(t))
       : [...ALL_ENTITY_TYPES];
 
-  const limit = Math.min(MAX_LIMIT, Math.max(1, params.limit ?? DEFAULT_LIMIT));
+  const limit = Math.min(MAX_LIMIT, Math.max(1, params.limit ?? GLOBAL_SEARCH_DEFAULT_LIMIT));
   const offset = Math.max(0, params.offset ?? 0);
 
   const ctx: AdapterCtx = {

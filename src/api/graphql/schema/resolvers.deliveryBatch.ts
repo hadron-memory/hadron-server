@@ -21,6 +21,7 @@ import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
 import { appKeyCaller, refuseSessionBound, requireKeyScope } from '../../../lib/appKeyScopes/scopes.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
+import { recordNoTeamChannelMiss, stampTeamChannelChecks } from '../../../lib/channelReadState.js';
 import { keyHostId, recordHostKeyUse, recordHostKeyUseApart, type HostKey } from '../../../lib/hostOperations/hostKey.js';
 import { liveCaller } from '../../../lib/tickers/liveCaller.js';
 import { batchProofPayload, loadDeliveryBatches, loadDeliveryChannelPolicy } from '../../../lib/tickers/deliveryBatch.js';
@@ -89,7 +90,7 @@ export async function batchKeyEntry(ctx: Context, appRef: string): Promise<{ app
 }
 
 /** R57: identity comes from the validated request binding, never a requested worker or an admin role. */
-async function ownBatchSession(ctx: Context, expectedAppId?: string, lock = false) {
+export async function ownBatchSession(ctx: Context, expectedAppId?: string, lock = false) {
   if (!ctx.sessionId || ctx.sessionBindingRefused || ctx.impersonation) throw taskError('SESSION_NOT_FOUND', 'Session not found.');
   const initial = await ctx.db.session.findUnique({ where: { id: ctx.sessionId } });
   if (!initial || initial.deletedAt || !ownsSession(ctx, initial)) throw taskError('SESSION_NOT_FOUND', 'Session not found.');
@@ -130,13 +131,17 @@ async function selfBatches(ctx: Context, a: { appRef: string; workerRefs?: strin
       if (id !== initial.worker.id) throw taskError('WORKER_NOT_FOUND', 'Worker not found.');
     }
   }
-  return withAuthorizedTx(ctx, appAnchors(app), async () => undefined, async (tx, txCtx) => {
+  let noTeamStamp: string | null = null;
+  const result = await withAuthorizedTx(ctx, appAnchors(app), async () => undefined, async (tx, txCtx) => {
     const { session, worker } = await ownBatchSession(txCtx, app.id, true);
     if (worker.id !== initial.worker.id) throw taskError('WORKER_NOT_FOUND', 'Worker not found.');
     const now = new Date();
     const page = await loadDeliveryBatches({ ctx: txCtx, app, hostId: null, workerIds: [worker.id], now });
     // Re-check the clock after loading too: a long read must not return after its promised expiry.
     await ownBatchSession(txCtx, app.id);
+    // #2138 §3.1: the inbox read through the worker's own session is a check of its App's team channel, empty or not.
+    // A miss is logged AFTER this transaction, best-effort: a failed diagnostic write must never abort a valid read.
+    if ((await stampTeamChannelChecks(tx, worker.id)) === 0) noTeamStamp = session.id;
     await tx.appLogEntry.create({ data: { appId: app.id, sessionId: session.id, level: 'INFO', message: 'delivery.batch.read', detail: { workerId: worker.id, count: page.batches.length } } });
     const channels = new Map((await tx.channel.findMany({ where: { id: { in: page.batches.flatMap(b => b.ranges.map(r => r.channelId)) } } })).map(c => [c.id, c]));
     return {
@@ -149,6 +154,8 @@ async function selfBatches(ctx: Context, a: { appRef: string; workerRefs?: strin
       })), pageInfo: { hasNextPage: false, endCursor: null },
     };
   });
+  if (noTeamStamp) await recordNoTeamChannelMiss(ctx.db, { appId: app.id, sessionId: noTeamStamp });
+  return result;
 }
 
 export const deliveryBatchQueries = {

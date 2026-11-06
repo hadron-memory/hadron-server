@@ -17,6 +17,8 @@ class AgentLinkSetChangedError extends Error {
 }
 import {
   assertSystemMemoryOwner,
+  assertNotInstallMemory,
+  assertNotAgentHolding,
   repairAgentSystemMemoryOwner,
 } from '../../../lib/agentSystemMemory.js';
 import {
@@ -39,6 +41,7 @@ import {
   MissingGrantError,
   PositionConflictError,
 } from '../../../controller/operations/publishAgentImport.js';
+import { assertMaySubscribeOrgToPublicAgent } from '../../../controller/operations/subscribeOrgToPublicAgent.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
 import { removeAgentImport } from '../../../controller/operations/removeAgentImport.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
@@ -70,13 +73,18 @@ import {
   rethrowAiConfigTyped,
   resolveUserRefArg,
   resolveReadableAgentRefArg,
+  getAccessibleMemoryIds,
+  requireMemoryWriteAccess,
   AGENT_INCLUDE,
 } from './resolvers.helpers.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
-import { withAuthorizedTx } from './authorizedTx.js';
+import { liveTxContext, withAuthorizedTx } from './authorizedTx.js';
+import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
+import { backfillMemoryEmbeddings } from '../../../services/embedding/enqueue.js';
 import { assertNoLiveAgentReferences } from '../../../lib/agentLiveReferences.js';
 import { assertNoMintedCorpusRemoval, reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
+import { DEFAULT_MEMBER_ROLES, normalizeMemberRoles } from '../../../lib/memberRoles.js';
 
 /**
  * #928/#929 review: persona role is trimmed, and a blank-after-trim
@@ -114,12 +122,17 @@ export interface CreateAgentCoreInput {
   namespace: string;
   name: string;
   description?: string;
-  systemPrompt?: string;
   systemMemoryId?: string;
   visibility?: string;
   type?: 'ASSISTANT' | 'CHATBOT';
   surfaces?: string[];
   personaRole?: string | null;
+  /** #2138 §3.5: false = every worker cast from this Agent counts as having a task. Default true. */
+  usesTasks?: boolean | null;
+  /** #2162 (cor:agt:050:27): reset a worker's context when its task ends. Default false; null means the default. */
+  resetContextAfterTask?: boolean | null;
+  /** #2171 (R211): omitted/null = the default, owner and member. */
+  memberRoles?: string[] | null;
 }
 
 /**
@@ -131,6 +144,146 @@ export interface CreateAgentCoreInput {
  * (blank-after-trim ⇒ NULL); the named
  * identity lives on the Worker entity, never here.
  */
+/** The columns {@link assertPromotableSystemMemory} decides on. */
+const PROMOTION_TARGET_SELECT = {
+  id: true, organizationId: true, ownerUserId: true, deletedAt: true,
+  appId: true, installOfAgentId: true, isInstallMemory: true,
+  userMemoryOfAgentId: true, sharedMemoryOfAgentId: true, userId: true, class: true,
+} as const;
+
+type PromotionTarget = {
+  id: string;
+  class: string;
+  deletedAt: Date | null;
+  appId: string | null;
+  installOfAgentId: string | null;
+  isInstallMemory: boolean;
+  userMemoryOfAgentId: string | null;
+  sharedMemoryOfAgentId: string | null;
+};
+
+/**
+ * The TARGET half of every promotion door (createAgent's `systemMemoryId`,
+ * updateAgent's first attach and its locked re-check), shared so they cannot
+ * drift. The org role the caller holds says nothing about this one memory:
+ * promotion turns it into a definition the caller then reads, so
+ *
+ * 1. the caller must read it. Missing, deleted and unreadable answer one
+ *    `MEMORY_NOT_FOUND`, byte for byte (cor:api:140:03), and come FIRST, so
+ *    nothing below tells a non-reader the id exists;
+ *    A platform ADMIN gets an explicit accessible set (live, non-identity-
+ *    scoped rows) and is admitted for those by design; only the operator
+ *    conversion principal answers `null`, and it never reaches these doors;
+ * 2. (checked last, after 3-5) the caller must WRITE it (the shared `requireMemoryWriteAccess`):
+ *    promotion rewrites the memory's class, name and audience, so a reader
+ *    must not do it (private#24 §10 P2-1: a group reader who is an org ADMIN
+ *    became a writer and opened the group to the org). A reader who cannot
+ *    write gets that gate's own refusal, which says nothing they can't see;
+ * 3. it is not a `group` memory, even for its owner or a writer: its audience
+ *    is its MemoryMember rows (cor:acl:010:01), which a system memory drops,
+ *    so the promotion would lock the owner out and widen the audience;
+ * 4. it is not an App's install memory ({@link assertNotInstallMemory});
+ * 5. it is not a memory an Agent holds for a person or an App
+ *    ({@link assertNotAgentHolding}), even when its owner asks.
+ *
+ * Owner congruence and the already-claimed check stay at the call sites.
+ */
+async function assertPromotableSystemMemory(ctx: Context, target: PromotionTarget | null): Promise<void> {
+  const notFound = promotionTargetNotFound;
+  if (!target || target.deletedAt) throw notFound();
+  const readable = await getAccessibleMemoryIds(ctx, target.id);
+  if (readable !== null && !readable.includes(target.id)) throw notFound();
+  // The refusals below reach only a reader, so their order discloses nothing;
+  // the specific ones come before the write gate so a reader learns why.
+  if (target.class === 'group') {
+    throw new GraphQLError("A group memory cannot become an Agent's system memory: its members would lose it.", {
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  }
+  assertNotInstallMemory(target);
+  assertNotAgentHolding(target);
+  await requireMemoryWriteAccess(ctx, target.id);
+}
+
+/** The owner columns a promotion target's authority anchors derive from. */
+type PromotionOwner = { organizationId: string | null; ownerUserId: string | null; userId: string | null };
+
+/**
+ * The advisory anchors a writer that can REVOKE the caller's read of `target`
+ * takes exclusively before it commits (`withAuthorizedMemoryTx`: the memory,
+ * its owning org and users, and the affected user, e.g. `removeMemoryMember`).
+ * A promotion takes them SHARED as the first locks of its deciding
+ * transaction, then decides readability on that transaction, so a revocation
+ * either commits before the decision (and is seen) or waits for the promotion
+ * to commit. Without the fence, a member removed between the read decision and
+ * the promotion write regained the memory as a definition.
+ */
+function promotionTargetAnchors(ctx: Context, memoryId: string, owner: PromotionOwner): AuthorityAnchor[] {
+  return [
+    { kind: 'memory', id: memoryId },
+    ...(owner.organizationId ? [{ kind: 'org' as const, id: owner.organizationId }] : []),
+    ...(owner.ownerUserId ? [{ kind: 'user' as const, id: owner.ownerUserId }] : []),
+    ...(owner.userId ? [{ kind: 'user' as const, id: owner.userId }] : []),
+    ...(ctx.userId ? [{ kind: 'user' as const, id: ctx.userId }] : []),
+  ];
+}
+
+/**
+ * The promotion target's owner moved between the snapshot its anchors were
+ * derived from and the locked read. Never surfaces: the deciding transaction
+ * is retried with anchors derived from the current owner (private#25 LOCAL
+ * P2: a plain "ownership changed" error, thrown before the read decision,
+ * told a non-reader that the id exists).
+ */
+class PromotionOwnerDriftError extends Error {
+  constructor() {
+    super('promotion target owner changed before its anchors were held');
+    this.name = 'PromotionOwnerDriftError';
+  }
+}
+
+/** Attempts at deciding a promotion under anchors that match the target's current owner. */
+const MAX_PROMOTION_OWNER_ATTEMPTS = 3;
+
+/** The one refusal a promotion target the caller can't read answers with (cor:api:140:03). */
+function promotionTargetNotFound(): GraphQLError {
+  return new GraphQLError('Memory not found', { extensions: { code: 'MEMORY_NOT_FOUND' } });
+}
+
+/**
+ * The owner columns a promotion's anchors derive from, read fresh. `null`
+ * (missing) is decided by the deciding transaction, which refuses it with the
+ * uniform not-found.
+ */
+async function observePromotionOwner(db: Context['db'], memoryId: string): Promise<PromotionOwner | null> {
+  return db.memory.findUnique({
+    where: { id: memoryId },
+    select: { organizationId: true, ownerUserId: true, userId: true },
+  });
+}
+
+/**
+ * Under the anchors from {@link promotionTargetAnchors}: the target must still
+ * have the owner the anchors were derived from (a transfer that won the race
+ * moved its revokers onto other anchors), and readability is decided with a
+ * context bound to `tx`. A moved owner throws {@link PromotionOwnerDriftError},
+ * which the caller retries under fresh anchors and, once its attempts run
+ * out, answers with the uniform not-found: nothing about the target is
+ * revealed before a read decision made under its current owner's anchors.
+ */
+async function fencedPromotionCtx(
+  ctx: Context,
+  tx: Prisma.TransactionClient,
+  observed: PromotionOwner,
+  locked: PromotionOwner | null,
+): Promise<Context> {
+  if (locked && (locked.organizationId !== observed.organizationId
+    || locked.ownerUserId !== observed.ownerUserId || locked.userId !== observed.userId)) {
+    throw new PromotionOwnerDriftError();
+  }
+  return liveTxContext(ctx, tx);
+}
+
 export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput) {
   const {
     organizationId: resolvedOrgId,
@@ -138,7 +291,6 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
     namespace,
     name,
     description,
-    systemPrompt,
     systemMemoryId,
     visibility,
     type,
@@ -147,6 +299,8 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
   // #929 review: normalize persona dressing inputs before anything touches
   // them.
   const personaRoleNorm = normalizePersonaField(input.personaRole);
+  // #2171: validated before anything is written.
+  const memberRolesNorm = input.memberRoles == null ? [...DEFAULT_MEMBER_ROLES] : normalizeMemberRoles(input.memberRoles);
   // #574: slugify the display name — a raw name would persist a
   // case-sensitive / space-bearing URN (and the system memory URN derives
   // from this one, so it inherits the clean slug).
@@ -201,10 +355,32 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
   // the dropped `type` column) and its `visibility` is always NULL
   // (chk_memory_visibility_class forbids a non-null visibility on
   // class='system'); agent visibility does not sync onto it.
-  const createdAgent = await ctx.db.$transaction(async (tx) => {
+  // A promotion decides under anchors derived from this owner snapshot; when
+  // the owner moved before they were held, the whole transaction is retried
+  // with a fresh snapshot (PromotionOwnerDriftError never surfaces).
+  let createdAgent!: Awaited<ReturnType<typeof createAgentTx>>;
+  for (let attempt = 1; ; attempt++) {
+    const promotionOwner = systemMemoryId ? await observePromotionOwner(ctx.db, systemMemoryId) : null;
+    try {
+      createdAgent = await createAgentTx(promotionOwner);
+      break;
+    } catch (e) {
+      if (!(e instanceof PromotionOwnerDriftError)) throw e;
+      if (attempt >= MAX_PROMOTION_OWNER_ATTEMPTS) throw promotionTargetNotFound();
+    }
+  }
+  function createAgentTx(promotionOwner: PromotionOwner | null) {
+  return ctx.db.$transaction(async (tx) => {
     let resolvedSystemMemoryId: string;
     if (systemMemoryId) {
-      const target = await tx.memory.findUniqueOrThrow({ where: { id: systemMemoryId } });
+      // First locks of this transaction: the target's revokers wait on these.
+      if (promotionOwner) {
+        await lockAuthorityAnchors(tx, promotionTargetAnchors(ctx, systemMemoryId, promotionOwner), 'shared');
+      }
+      const found = await tx.memory.findUnique({ where: { id: systemMemoryId }, select: PROMOTION_TARGET_SELECT });
+      const decideCtx = promotionOwner ? await fencedPromotionCtx(ctx, tx, promotionOwner, found) : ctx;
+      await assertPromotableSystemMemory(decideCtx, found);
+      const target = found!;
       // spec 047 / #949: the promoted memory must share the agent's owner —
       // same org (org-owned) OR same user (user-owned). One shared assertion
       // so this path and updateAgent's first-attach can't drift.
@@ -273,12 +449,17 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
 
     return tx.agent.create({
       data: {
-        organizationId: resolvedOrgId, ownerUserId, urn: agentUrn, name, description, systemPrompt, systemMemoryId: resolvedSystemMemoryId,
+        // #2171 (R211): a NEW Agent offers owner and member unless told otherwise.
+        // The column default stays owner-only so no existing row changes meaning.
+        installationPolicy: { maxMembers: 'unlimited', memberRoles: memberRolesNorm } as Prisma.InputJsonValue,
+        organizationId: resolvedOrgId, ownerUserId, urn: agentUrn, name, description, systemMemoryId: resolvedSystemMemoryId,
         visibility: agentVisibility,
         type: inferredType,
         surfaces: surfaces ?? defaultSurfaces,
         // #928 persona dressing — pure metadata (see schema.prisma).
         personaRole: personaRoleNorm,
+        ...(input.usesTasks != null ? { usesTasks: input.usesTasks } : {}),
+        ...(input.resetContextAfterTask != null ? { resetContextAfterTask: input.resetContextAfterTask } : {}),
         createdBy: ctx.userId ?? ctx.clientId ?? null,
       },
       include: AGENT_INCLUDE,
@@ -297,6 +478,15 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
     }
     throw e;
   });
+  }
+  // #2199 (cor:rag:010:01 r17): a memory promoted to class='system' is always summary-indexed. Its existing nodes were
+  // written while it was an ordinary memory, so stamp them for the drain (post-commit; a fresh auto-provisioned memory
+  // is empty and every later write enqueues itself). Never fails the create.
+  if (systemMemoryId && createdAgent.systemMemoryId) {
+    await backfillMemoryEmbeddings(ctx.db, createdAgent.systemMemoryId).catch((err) => {
+      console.warn('[createAgent] system memory embedding backfill failed:', err);
+    });
+  }
   return createdAgent;
 }
 
@@ -398,7 +588,7 @@ async function requireKnownImportedAgent(
 export const agentMutations = {
     createAgent: async (
       _: unknown,
-      { orgId, name, description, systemPrompt, systemMemoryId, visibility, type, surfaces, personaRole }: { orgId?: string | null; name: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string },
+      { orgId, name, description, systemMemoryId, visibility, type, surfaces, personaRole, usesTasks, resetContextAfterTask, memberRoles }: { orgId?: string | null; name: string; description?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; memberRoles?: string[] | null },
       ctx: Context,
     ) => {
       // spec 047: an agent is owned by EXACTLY ONE of an org or a user. `orgId`
@@ -450,18 +640,20 @@ export const agentMutations = {
         namespace,
         name,
         description,
-        systemPrompt,
         systemMemoryId,
         visibility,
         type,
         surfaces,
         personaRole,
+        usesTasks,
+        resetContextAfterTask,
+        memberRoles,
       });
     },
 
     updateAgent: async (
       _: unknown,
-      { ref, name, urn, description, systemPrompt, systemMemoryId, visibility, listedOnMarketplace, type, surfaces, personaRole, registerDefaults }: { ref: string; name?: string; urn?: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string | null; registerDefaults?: { mentionOnly?: boolean | null } | null },
+      { ref, name, urn, description, systemMemoryId, visibility, listedOnMarketplace, type, surfaces, personaRole, usesTasks, resetContextAfterTask, registerDefaults, memberRoles }: { ref: string; name?: string; urn?: string; description?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string | null; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; registerDefaults?: { mentionOnly?: boolean | null } | null; memberRoles?: string[] | null },
       ctx: Context,
     ) => {
       // #929 review: normalize persona dressing (blank-after-trim clears).
@@ -474,6 +666,9 @@ export const agentMutations = {
       const agent = await resolveReadableAgentRef(ctx, ref);
       const { id } = agent;
       await requireAgentAccess(ctx, agent, 'ADMIN');
+      // #2171 (R211): validated after the gate, so a caller who may not edit sees the refusal, not a shape error.
+      // Omitted and null both mean unchanged; an empty list is refused, not a reset.
+      const memberRolesNorm = memberRoles == null ? undefined : normalizeMemberRoles(memberRoles);
       // spec 047 (codex review, #682): a user-owned agent is owner-only in v1 —
       // it must NEVER become non-PERSONAL. The create-time guard alone is
       // insufficient: without this, an owner could create a PERSONAL agent and
@@ -518,10 +713,16 @@ export const agentMutations = {
       // Set when a first-attach promotion is due; performed inside the
       // deciding transaction so a refusal cannot leave it half-applied (#1364).
       let promoteSystemMemoryId: string | null = null;
+      let promoteObservedOwner: PromotionOwner | null = null;
       if (systemMemoryId !== undefined) {
         const incoming = systemMemoryId === '' ? null : systemMemoryId;
         if (agent.systemMemoryId && incoming !== agent.systemMemoryId) {
-          throw new Error('Cannot unset or change an agent\'s system memory. Delete the agent to replace it.');
+          // Typed, like the in-transaction twin below (#2856, cor:api:260:01): a plain
+          // Error reads as a fault, but this is a refusal of the caller's own input.
+          throw new GraphQLError(
+            "Cannot unset or change an agent's system memory. Delete the agent to replace it.",
+            { extensions: { code: 'BAD_USER_INPUT' } },
+          );
         }
         if (!agent.systemMemoryId && incoming) {
           // #1818 review (Emerson P2-C): on a USER-owned agent, first-attach is
@@ -546,10 +747,9 @@ export const agentMutations = {
           // this memory converted to class='system' with its visibility cleared
           // and uploads disabled, attached to nothing. Deferring the write is
           // what makes the refusal and the promotion succeed or fail together.
-          const target = await ctx.db.memory.findUniqueOrThrow({ where: { id: incoming } });
-          if (target.deletedAt) {
-            throw new GraphQLError('Memory not found', { extensions: { code: 'MEMORY_NOT_FOUND' } });
-          }
+          const found = await ctx.db.memory.findUnique({ where: { id: incoming } });
+          await assertPromotableSystemMemory(ctx, found);
+          const target = found!;
           // #949: was a bare `target.organizationId !== agent.organizationId`,
           // which for a USER-owned agent compares `null !== null` ⇒ false and
           // waves through ANOTHER user's memory
@@ -568,6 +768,7 @@ export const agentMutations = {
             throw new Error('This memory is already the system memory of another agent');
           }
           promoteSystemMemoryId = incoming;
+          promoteObservedOwner = { organizationId: target.organizationId, ownerUserId: target.ownerUserId, userId: target.userId };
           // These validations are re-run under the row locks in the deciding
           // transaction (@codex, PR #1357). Reading them here first keeps the
           // common refusal cheap and its message early; the authoritative pass
@@ -604,6 +805,41 @@ export const agentMutations = {
       for (let attempt = 1; ; attempt++) {
       try {
       published = await ctx.db.$transaction(async (tx) => {
+        // #2171 (BLIND/LOCAL on PR #2465): a memberRoles edit decides what a
+        // manager may later grant, so its authority is re-checked HERE, in the
+        // deciding transaction, behind the same anchors a revoker takes
+        // exclusively (the withAuthorizedTx protocol, whose order this keeps:
+        // advisory anchors, then org/user rows, then the memory and agent rows
+        // below). The pre-transaction gate alone left the authorize-then-write
+        // window open: a manager demoted in between still landed the edit.
+        // A first-attach promotion's target anchors join the SAME single
+        // advisory acquisition (one sorted order), ahead of every row lock.
+        const promotionAnchors = promoteSystemMemoryId && promoteObservedOwner
+          ? promotionTargetAnchors(ctx, promoteSystemMemoryId, promoteObservedOwner)
+          : [];
+        if (memberRolesNorm === undefined && promotionAnchors.length > 0) {
+          await lockAuthorityAnchors(tx, promotionAnchors, 'shared');
+        }
+        if (memberRolesNorm !== undefined) {
+          const anchors: AuthorityAnchor[] = [
+            { kind: 'agent', id },
+            ...(agent.organizationId ? [{ kind: 'org' as const, id: agent.organizationId }] : []),
+            ...(agent.ownerUserId ? [{ kind: 'user' as const, id: agent.ownerUserId }] : []),
+            ...(ctx.userId ? [{ kind: 'user' as const, id: ctx.userId }] : []),
+          ];
+          await lockAuthorityAnchors(tx, [...anchors, ...promotionAnchors], 'shared');
+          if (agent.organizationId) await tx.$queryRaw`SELECT id FROM organizations WHERE id = ${agent.organizationId} FOR SHARE`;
+          for (const uid of new Set(anchors.filter((a) => a.kind === 'user').map((a) => a.id)).values()) {
+            await tx.$queryRaw`SELECT id FROM users WHERE id = ${uid} FOR SHARE`;
+          }
+          const live = await liveTxContext(ctx, tx);
+          const current = await tx.agent.findUnique({ where: { id } });
+          if (!current || current.deletedAt) throw authorizationDenied();
+          if (current.organizationId !== agent.organizationId || current.ownerUserId !== agent.ownerUserId) {
+            throw new Error('Agent ownership changed; retry the update');
+          }
+          await requireAgentAccess(live, current, 'ADMIN');
+        }
         // Lock and RE-READ the urn inside the transaction (PR #1080 review,
         // Codex + Copilot P2). The row above was read before the transaction
         // opened, so two concurrent renames could both record the SAME old urn
@@ -652,6 +888,20 @@ export const agentMutations = {
           SELECT urn FROM agents WHERE id = ${id} FOR UPDATE
         `;
         predecessorUrn = lockedRow?.urn;
+        // #2171: the roles edit is a read-modify-write of the policy JSON, so it
+        // reads the stored policy HERE, under the agent row lock, and merges
+        // memberRoles only: maxMembers and selfJoinRole survive, and a concurrent
+        // edit cannot be lost. The same row is what an admission holds FOR SHARE.
+        let mergedPolicy: Prisma.InputJsonValue | undefined;
+        if (memberRolesNorm !== undefined) {
+          const stored = await tx.agent.findUniqueOrThrow({ where: { id }, select: { installationPolicy: true } });
+          const current = (stored.installationPolicy ?? {}) as Record<string, unknown>;
+          mergedPolicy = {
+            ...current,
+            maxMembers: current.maxMembers ?? 'unlimited',
+            memberRoles: memberRolesNorm,
+          } as Prisma.InputJsonValue;
+        }
         if (visibility === 'PUBLIC') {
           // Re-scan the link set now that the agent row is LOCKED (#1364,
           // @codex on PR #1357). The scan above happened before this lock, so
@@ -718,13 +968,15 @@ export const agentMutations = {
               { extensions: { code: 'BAD_USER_INPUT' } },
             );
           }
-          const lockedTarget = await tx.memory.findUniqueOrThrow({
+          const lockedFound = await tx.memory.findUnique({
             where: { id: promoteSystemMemoryId },
-            select: { organizationId: true, ownerUserId: true, id: true, deletedAt: true },
+            select: PROMOTION_TARGET_SELECT,
           });
-          if (lockedTarget.deletedAt) {
-            throw new GraphQLError('Memory not found', { extensions: { code: 'MEMORY_NOT_FOUND' } });
-          }
+          await assertPromotableSystemMemory(
+            await fencedPromotionCtx(ctx, tx, promoteObservedOwner!, lockedFound),
+            lockedFound,
+          );
+          const lockedTarget = lockedFound!;
           assertSystemMemoryOwner(lockedAgent, {
             organizationId: lockedTarget.organizationId,
             ownerUserId: lockedTarget.ownerUserId,
@@ -774,7 +1026,6 @@ export const agentMutations = {
           ...(name !== undefined ? { name } : {}),
           ...(newUrn !== undefined ? { urn: newUrn } : {}),
           ...(description !== undefined ? { description } : {}),
-          ...(systemPrompt !== undefined ? { systemPrompt } : {}),
           ...(systemMemoryId !== undefined ? { systemMemoryId } : {}),
           ...(visibility !== undefined ? { visibility: visibility as AgentVisibility } : {}),
           // cor:acl:080:04 — opt-in marketplace catalogue flag (advertisement,
@@ -786,8 +1037,13 @@ export const agentMutations = {
           // #928 persona dressing — pure metadata. An explicit null (or a
           // blank-after-trim string) clears the field; omitted preserves.
           ...(personaRoleNorm !== undefined ? { personaRole: personaRoleNorm } : {}),
+          ...(usesTasks != null ? { usesTasks } : {}),
+          // #2162 (cor:agt:050:27, R116): the same gate and lock as usesTasks; null and omitted change nothing. Turning
+          // it off cancels nothing in flight: a reset's claim re-reads it (SETTING_OFF).
+          ...(resetContextAfterTask != null ? { resetContextAfterTask } : {}),
           // Spec 049 Phase 5: the install-row defaults — a scalar declaration,
           // stored as given; null clears to the platform defaults.
+          ...(mergedPolicy !== undefined ? { installationPolicy: mergedPolicy } : {}),
           ...(registerDefaults !== undefined
             ? { registerDefaults: registerDefaults === null ? Prisma.JsonNull : { mentionOnly: registerDefaults.mentionOnly === true } }
             : {}),
@@ -797,6 +1053,15 @@ export const agentMutations = {
       });
       } catch (err) {
         if (err instanceof AgentLinkSetChangedError && attempt < MAX_PUBLISH_ATTEMPTS) continue;
+        // The first-attach target's owner moved before its anchors were held:
+        // re-derive them from the current owner and decide again. Out of
+        // attempts, the uniform not-found (never an existence signal).
+        if (err instanceof PromotionOwnerDriftError) {
+          if (attempt >= MAX_PROMOTION_OWNER_ATTEMPTS) throw promotionTargetNotFound();
+          promoteObservedOwner = await observePromotionOwner(ctx.db, promoteSystemMemoryId!);
+          if (!promoteObservedOwner) throw promotionTargetNotFound();
+          continue;
+        }
         if (err instanceof AgentLinkSetChangedError) {
           throw new GraphQLError(
             'The agent\'s knowledge links kept changing while publishing it; retry the request.',
@@ -806,6 +1071,14 @@ export const agentMutations = {
         throw err;
       }
       break;
+      }
+
+      // #2199: a memory promoted to class='system' by this update is now always summary-indexed — stamp its existing
+      // nodes post-commit (the provisioning-seam half of the amendment; never fails the update).
+      if (promoteSystemMemoryId && published?.systemMemoryId === promoteSystemMemoryId) {
+        await backfillMemoryEmbeddings(ctx.db, promoteSystemMemoryId).catch((err) => {
+          console.warn('[updateAgent] system memory embedding backfill failed:', err);
+        });
       }
 
       // ── URN sync for an auto-derived system memory.
@@ -1068,15 +1341,7 @@ export const agentMutations = {
       await withAuthorizedTx(
         ctx,
         [{ kind: 'org', id: resolvedOrgId }, { kind: 'agent', id: resolvedAgentId }],
-        async (txCtx) => {
-          await requireOrgRole(txCtx, resolvedOrgId, 'ADMIN');
-          const current = await txCtx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-          if (current.organizationId === resolvedOrgId || current.visibility !== 'PUBLIC') {
-            throw new GraphQLError('Only PUBLIC agents from another organization can be subscribed to.', {
-              extensions: { code: 'AGENT_NOT_PUBLIC', agentId: resolvedAgentId },
-            });
-          }
-        },
+        (txCtx) => assertMaySubscribeOrgToPublicAgent(txCtx, resolvedOrgId, resolvedAgentId),
         (tx) => ensureAgentOrgGrant(tx, resolvedOrgId, resolvedAgentId, {
           createdBy: ctx.userId ?? ctx.clientId ?? null,
         }),

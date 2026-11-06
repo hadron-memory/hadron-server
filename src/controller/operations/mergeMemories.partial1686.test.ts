@@ -1,3 +1,4 @@
+import * as embeddingQueue from '../../services/embedding/enqueue.js';
 /**
  * #1686 — a mergeMemories refusal raised after earlier batches committed
  * reports what was applied (extensions.partialMerge), and the merge resumes
@@ -208,13 +209,10 @@ describe('#1691 — the partial-state contract holds through the resolver and th
   });
 
   // Fail the resolver's re-index of the target, which runs after the whole merge committed.
-  const failBackfill = () => {
-    const updateMany = db.node.updateMany.bind(db.node);
-    return vi.spyOn(db.node, 'updateMany').mockImplementation(((args: { where?: { memoryId?: string }; data?: Record<string, unknown> }) => {
-      if (args.where?.memoryId === dst.id && args.data && 'embeddingPendingAt' in args.data) throw prismaFault();
-      return updateMany(args as never);
-    }) as never);
-  };
+  // The post-commit helper is the fault boundary. Intercepting Prisma's
+  // extended raw-query proxy itself can recursively re-enter that proxy.
+  const failBackfill = () => vi.spyOn(embeddingQueue, 'backfillMemoryEmbeddings')
+    .mockRejectedValueOnce(prismaFault());
 
   for (const deleteSourceMem of [false, true]) {
     it(`a failure after the merge committed reports the completed merge (deleteSourceMem: ${deleteSourceMem})`, async () => {

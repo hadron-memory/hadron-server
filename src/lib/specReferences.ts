@@ -191,3 +191,22 @@ export function findTextCitations(
 /** The text fields a corpus scan reads. `data`/`properties` (JSON) are not text. */
 export const SCANNED_FIELDS = ['name', 'description', 'abstract', 'content'] as const;
 export type ScannedField = (typeof SCANNED_FIELDS)[number];
+
+/**
+ * #1594 — every explicitly prefixed node URN (`hrn:node:` / `urn:node:`, any
+ * case) `text` contains, as written, deduplicated, in order. Unlike
+ * `corpusReferencePattern` this is not anchored on a known memory: it finds
+ * candidates for a CALLER-GATED resolver (`resolveNodeRefForCaller`) that owns
+ * the org/memory/loc split, which the grammar cannot make without the
+ * database. A bare `org:memory:loc` has no prefix and is deliberately not
+ * matched: it cannot be told apart from hostnames, ratios and other prose.
+ * Atoms end in an alphanumeric, so trailing `.`, `)` or `,` are never taken.
+ */
+const NODE_URN_TOKEN = new RegExp(
+  `(?<![A-Za-z0-9._:-])(?:[Hh][Rr][Nn]|[Uu][Rr][Nn]):[Nn][Oo][Dd][Ee]:${ATOM}(?:${SEP}${ATOM})+(?![A-Za-z0-9_-]|:[A-Za-z0-9])`,
+  'g',
+);
+export function findNodeUrnTokens(text: string | null | undefined): string[] {
+  if (!text) return [];
+  return [...new Set(text.match(NODE_URN_TOKEN) ?? [])];
+}

@@ -1,3 +1,6 @@
+import { createHash, randomBytes } from 'node:crypto';
+import { readFileSync, statSync } from 'node:fs';
+import { hostname } from 'node:os';
 import type { Client } from 'pg';
 
 /**
@@ -8,7 +11,7 @@ import type { Client } from 'pg';
  * Model: `globalSetup` clones the schema template built from empty for this
  * checkout (`hadron_test_s<fingerprint>`, #1922, see schemaTemplate.ts) into a
  * run template, applies its CHECK constraints, and workers clone that into one
- * DB each (`hadron_test_r<runId>_<poolId>`). `perWorkerDb.ts` (a setupFile)
+ * DB each (`hadron_test_r<scope>_p<pid>_<poolId>`). `perWorkerDb.ts` (a setupFile)
  * points each worker's `DATABASE_URL` at its own clone before the Prisma client
  * is constructed. Every worker still runs `cleanDb` per test — but only against
  * its own DB, so files never collide.
@@ -63,6 +66,23 @@ export const WORKER_CONNECTION_LIMIT = (() => {
   return n;
 })();
 
+/**
+ * Cap on vitest's fork count, from HADRON_TEST_MAX_WORKERS. Each fork holds its
+ * own Postgres clone, and vitest's default (~cores - 1) ran a shared 32-core host
+ * out of memory under parallel full suites (Hugo, 2026-10-21). Undefined keeps
+ * vitest's default, so CI and laptops are unchanged. An invalid value also keeps
+ * the default, with a warning: a typo should not refuse a test run.
+ */
+export function testMaxWorkers(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw.trim() === '') return undefined;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1) {
+    console.warn(`HADRON_TEST_MAX_WORKERS must be a positive integer, got: ${raw}; using vitest's default.`);
+    return undefined;
+  }
+  return n;
+}
+
 /** The template DB URL (CI/dev override via TEST_DATABASE_URL). */
 export function baseTestDbUrl(): string {
   return process.env.TEST_DATABASE_URL ?? 'postgresql://holger@localhost:5432/hadron_test';
@@ -111,6 +131,64 @@ export function testRunId(): string {
   return raw;
 }
 
+/** #1137: the kernel boot and PID namespace, not loopback reachability, bound PID liveness.
+ * Native non-Linux uses an explicit local-machine scope; remote DB support is not added.
+ * No inherited shell scope is trusted by globalSetup. u-scopes are serial-only unknowns,
+ * always preserved by orphan cleanup; their own exact root can still be torn down. */
+export function computeRunScope(
+  platform: string = process.platform,
+  readBoot: () => string = () => readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(),
+  readNamespace: () => { dev: bigint; ino: bigint } = () => statSync('/proc/self/ns/pid', { bigint: true }),
+  machine: () => string = hostname,
+): string {
+  let identity: string;
+  if (platform === 'linux') {
+    try {
+      const boot = readBoot();
+      const ns = readNamespace();
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(boot) || ns.dev < 0n || ns.ino <= 0n) throw new Error('unverifiable identity');
+      identity = `${boot.toLowerCase()}:${ns.dev}:${ns.ino}`;
+    } catch {
+      throw new Error('Cannot verify Linux test-run boot/PID namespace. Parallel mode refuses unsafe cleanup; use HADRON_TEST_PARALLEL=0.');
+    }
+  } else {
+    const host = machine();
+    if (!/^[a-z][a-z0-9]*$/.test(platform) || !host) throw new Error('Cannot verify native test-run platform scope.');
+    identity = `${platform}:${host}`;
+  }
+  return `${platform === 'linux' ? 'l' : 'n'}${createHash('sha256').update(identity).digest('hex').slice(0,20)}`;
+}
+
+export function stampTestRunIdentity(): void {
+  process.env.HADRON_TEST_RUN_ID = String(process.pid);
+  let scope: string;
+  try { scope = computeRunScope(); }
+  catch (error) {
+    if (PARALLEL_DBS) throw error;
+    scope = `u${randomBytes(10).toString('hex')}`;
+  }
+  process.env.HADRON_TEST_RUN_SCOPE = scope;
+}
+
+export function testRunScope(): string {
+  const scope = process.env.HADRON_TEST_RUN_SCOPE;
+  if (!scope || !/^[lnu][0-9a-f]{20}$/.test(scope)) throw new Error('HADRON_TEST_RUN_SCOPE must be stamped by globalSetup.');
+  return scope;
+}
+
+export function runToken(runId: string, scope = testRunScope()): string {
+  if (!/^[1-9][0-9]*$/.test(runId) || !/^[lnu][0-9a-f]{20}$/.test(scope)) throw new Error('Invalid test run ownership token.');
+  return `${scope}_p${runId}`;
+}
+
+export function testRunToken(): string { return runToken(testRunId()); }
+
+/** Only a same-scope PID is addressable in this process table. Unknown, legacy,
+ * prior-boot and foreign namespaces are preserved, never tested with kill(). */
+export function isOwnedRunDead(scope: string | null, pid: string | null, ownScope = testRunScope()): boolean {
+  return scope !== null && scope === ownScope && scope[0] !== 'u' && pid !== null && !isRunAlive(pid);
+}
+
 export function workerDbName(
   poolId: string | number,
   base = baseDbName(),
@@ -129,7 +207,7 @@ export function workerDbName(
         `with the run template's "_tpl" suffix and silently point a worker at the shared template.`,
     );
   }
-  return assertFitsIdentifier(`${base}_r${runId}_${poolId}`, base);
+  return assertFitsIdentifier(`${base}_r${runToken(runId)}_${poolId}`, base);
 }
 
 /**
@@ -171,7 +249,7 @@ export function templateLockKey(base = baseDbName()): number {
  * crashed run is garbage in exactly the same way.
  */
 export function runTemplateDbName(runId: string, base = baseDbName()): string {
-  return assertFitsIdentifier(`${base}_r${runId}_tpl`, base);
+  return assertFitsIdentifier(`${base}_r${runToken(runId)}_tpl`, base);
 }
 
 /** A plain (unpooled) URL for this run's private template. */
@@ -182,17 +260,10 @@ export function runTemplateUrl(runId: string, base = baseDbName()): string {
 }
 
 /**
- * Is the test database on THIS machine?
- *
- * The run id is a pid, and a pid means nothing across hosts (@codex, PR #1136):
- * two containers pointing at one Postgres both run as pid 1 and would claim the
- * same clone names, while a foreign pid checked against the local process table
- * reads as dead and would be dropped `WITH (FORCE)` out from under a live run.
- *
- * Parallel mode therefore REFUSES a non-local endpoint rather than guessing.
- * That is not a regression for anyone: before run-scoped names such a setup
- * collided unconditionally, so this turns silent corruption into a message. A
- * unix socket (no host) is local by construction.
+ * Admit existing local TCP endpoints and Unix sockets only. Loopback and shared
+ * sockets do NOT prove PID-namespace locality (#1137). Scope tokens provide that
+ * boundary for Linux runs sharing a local endpoint; non-Linux retains the local
+ * machine assumption. Remote DBs remain unsupported.
  */
 export function isLocalDbHost(url = baseTestDbUrl()): boolean {
   const host = new URL(url).hostname;
@@ -336,7 +407,7 @@ function assertFitsIdentifier(name: string, base: string): string {
  * A parsed clone. `runId` is null for a pre-#1091 `<base>_<digits>` name;
  * `poolId` is `tpl` for a run template rather than a worker DB.
  */
-export type WorkerCloneName = { datname: string; runId: string | null; poolId: string };
+export type WorkerCloneName = { datname: string; runId: string | null; poolId: string; scope: string | null; runToken: string | null };
 
 /**
  * Recognize a worker clone by exact prefix + shape, in JS rather than a SQL
@@ -353,10 +424,12 @@ export function parseWorkerDbName(datname: string, base = baseDbName()): WorkerC
   if (!datname.startsWith(prefix)) return null;
   const rest = datname.slice(prefix.length);
 
+  const owned = /^r([lnu][0-9a-f]{20})_p([1-9][0-9]*)_([0-9]+|tpl)$/.exec(rest);
+  if (owned) return { datname, scope: owned[1], runId: owned[2], poolId: owned[3], runToken: `${owned[1]}_p${owned[2]}` };
   const scoped = /^r([0-9]+)_([0-9]+|tpl)$/.exec(rest);
-  if (scoped) return { datname, runId: scoped[1], poolId: scoped[2] };
+  if (scoped) return { datname, runId: scoped[1], poolId: scoped[2], scope: null, runToken: null };
 
-  if (/^[0-9]+$/.test(rest)) return { datname, runId: null, poolId: rest };
+  if (/^[0-9]+$/.test(rest)) return { datname, runId: null, poolId: rest, scope: null, runToken: null };
   return null;
 }
 
@@ -367,9 +440,8 @@ export function parseWorkerDbName(datname: string, base = baseDbName()): WorkerC
  * EPERM means the process EXISTS and belongs to somebody else, so it counts as
  * alive — the direction that matters is never reporting a live run as dead.
  *
- * Pid reuse can report a dead run as alive, which leaves one orphan clone
- * un-dropped. That is the harmless direction, and the next run with a free pid
- * collects it.
+ * PID reuse and errors other than ESRCH preserve the clone. Only same-scope
+ * callers may use this result as deletion evidence (isOwnedRunDead).
  *
  * Assumes the Postgres server is local to the runs using it, which is what
  * `postgresql://…@localhost` in `baseTestDbUrl` already assumes. A SHARED test
@@ -383,7 +455,7 @@ export function isRunAlive(runId: string): boolean {
     process.kill(pid, 0);
     return true;
   } catch (e) {
-    return (e as { code?: string }).code === 'EPERM';
+    return (e as { code?: string }).code !== 'ESRCH';
   }
 }
 

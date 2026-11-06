@@ -12,7 +12,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { GRAPHS_PATH } from '../config.js';
-import { testRunId } from './dbWorkers.js';
+import { testRunId, runToken } from './dbWorkers.js';
 import {
   parseRunGraphRootName,
   prepareRunGraphRoot,
@@ -30,7 +30,7 @@ function deadPid(): string {
 
 describe('#1951 graph-fixture root', () => {
   it('points this run at its own root, named for the run id (the vitest main pid)', () => {
-    expect(GRAPHS_PATH).toBe(join(tmpdir(), 'hadron-test-graph-runs', `r${testRunId()}`));
+    expect(GRAPHS_PATH).toBe(join(tmpdir(), 'hadron-test-graph-runs', `r${runToken(testRunId())}`));
   });
 
   it('is not the old shared root', () => {
@@ -61,7 +61,8 @@ describe('#1951 graph-root lifecycle', () => {
   }
 
   it('reads the run id only from an r<digits> name', () => {
-    expect(parseRunGraphRootName('r12345')).toBe('12345');
+    expect(parseRunGraphRootName(`r${runToken('12345')}`)).toBe(runToken('12345'));
+    expect(parseRunGraphRootName('r12345')).toBeNull();
     for (const name of ['12345', 'r', 'r12a', 'rx', 'sp-mem-1792007591196-98039', 'r123/']) {
       expect(parseRunGraphRootName(name)).toBeNull();
     }
@@ -70,7 +71,7 @@ describe('#1951 graph-root lifecycle', () => {
   it('sweeps a root whose pid is dead', () => {
     const dead = deadPid();
     seedRoot(dead);
-    expect(sweepOrphanGraphRoots('1', parent)).toEqual([`r${dead}`]);
+    expect(sweepOrphanGraphRoots('1', parent)).toEqual([`r${runToken(dead)}`]);
     expect(readdirSync(parent)).toEqual([]);
   });
 
@@ -79,7 +80,7 @@ describe('#1951 graph-root lifecycle', () => {
     const live = [String(process.pid), String(process.ppid)];
     for (const pid of live) seedRoot(pid);
     expect(sweepOrphanGraphRoots('1', parent)).toEqual([]);
-    expect(readdirSync(parent).sort()).toEqual(live.map((p) => `r${p}`).sort());
+    expect(readdirSync(parent).sort()).toEqual(live.map((p) => `r${runToken(p)}`).sort());
   });
 
   it('leaves the calling run its own root, and anything that is not a run root', () => {
@@ -87,7 +88,7 @@ describe('#1951 graph-root lifecycle', () => {
     seedRoot(own);
     mkdirSync(join(parent, 'not-a-run'));
     expect(sweepOrphanGraphRoots(own, parent)).toEqual([]);
-    expect(readdirSync(parent).sort()).toEqual([`r${own}`, 'not-a-run'].sort());
+    expect(readdirSync(parent).sort()).toEqual([`r${runToken(own)}`, 'not-a-run'].sort());
   });
 
   it('prepare starts the run on an EMPTY root even when a crashed run with our pid left one', () => {
@@ -98,7 +99,7 @@ describe('#1951 graph-root lifecycle', () => {
     const root = prepareRunGraphRoot(own, parent);
     expect(root).toBe(runGraphRoot(own, parent));
     expect(readdirSync(root)).toEqual([]);
-    expect(readdirSync(parent)).toEqual([`r${own}`]);
+    expect(readdirSync(parent)).toEqual([`r${runToken(own)}`]);
   });
 
   it('teardown removes the root and returns the parent to its pre-run state', () => {

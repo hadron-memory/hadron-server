@@ -47,7 +47,7 @@ describe('#1558 inviter revocation', () => {
       roles: ['ADMIN'],
     } });
     const issued = await M.createUserInvitation(null, {
-      orgId, memberRole: 'READER', maxActivations: 1,
+      orgId, memberRole: 'READER', maxActivations: 2,
     }, ctx(platformAdmin.id));
     expect(await db.orgMember.findFirst({ where: { organizationId: orgId, userId: platformAdmin.id } }))
       .toBeNull();
@@ -61,7 +61,7 @@ describe('#1558 inviter revocation', () => {
       roles: ['ADMIN'],
     } });
     const issued = await M.createUserInvitation(null, {
-      orgId, memberRole: 'READER', maxActivations: 1,
+      orgId, memberRole: 'READER', maxActivations: 2,
     }, ctx(platformAdmin.id));
     await db.user.update({ where: { id: platformAdmin.id }, data: { roles: ['READER'] } });
     await expect(M.acceptInvitation(null, { slug: issued.slug }, ctx(inviteeId)))
@@ -76,7 +76,7 @@ describe('#1558 inviter revocation', () => {
       roles: ['ADMIN'],
     } });
     const issued = await M.createUserInvitation(null, {
-      orgId, memberRole: 'READER', maxActivations: 1,
+      orgId, memberRole: 'READER', maxActivations: 2,
     }, ctx(platformAdmin.id));
     let release!: () => void;
     let held!: () => void;
@@ -195,7 +195,7 @@ describe('#1558 inviter revocation', () => {
     await locked;
 
     const invitation = M.createUserInvitation(null, {
-      orgId, memberRole: 'READER', maxActivations: 1,
+      orgId, memberRole: 'READER', maxActivations: 2,
     }, ctx(adminId));
     try {
       await waitForLockWaitersOfType(db, 'transactionid', 1);

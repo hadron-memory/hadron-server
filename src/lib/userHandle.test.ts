@@ -145,3 +145,16 @@ describe('isHandleTaken', () => {
     expect(await isHandleTaken(mockDb([]), 'holger')).toBe(false);
   });
 });
+
+
+it('S3 keeps dot policy but types reserved team. handles only when enabled', () => {
+  const old = process.env.TEAM_TAGS_ENABLED;
+  try {
+    process.env.TEAM_TAGS_ENABLED = 'false';
+    expect(() => normalizeHandle('team.head')).toThrow();
+    process.env.TEAM_TAGS_ENABLED = 'true';
+    try { normalizeHandle('TEAM.Head'); throw new Error('accepted reserved handle'); }
+    catch (error) { expect(error).toMatchObject({extensions:{code:'USER_HANDLE_RESERVED_TEAM_PREFIX'}}); }
+    expect(normalizeHandle('teamster')).toBe('teamster');
+  } finally { if (old === undefined) delete process.env.TEAM_TAGS_ENABLED; else process.env.TEAM_TAGS_ENABLED = old; }
+});

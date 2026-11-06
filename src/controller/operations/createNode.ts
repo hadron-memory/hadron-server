@@ -1,11 +1,15 @@
+import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertBootPromptWriteAllowed, bootPromptCompiledWriteError, isBootPromptRole } from '../../lib/bootPrompt.js';
 import { assertIncludesWritable, syncDerivedIncludesEdges } from '../../lib/includes/writeIncludes.js';
+import type { Prisma } from '../../generated/prisma/index.js';
 import type { Node } from '../../index.d.js';
 import { runAsSystem } from '../../lib/requestActor.js';
 import { GRAPHS_PATH } from '../../config.js';
 import { generateId } from '../../lib/id.js';
 import { db } from '../../integrations/db/client.js';
 import { serializeTags } from '../../integrations/db/provider.js';
+import { assertAuthoring, attestedAuthoring } from '../../lib/authoringAttestation.js';
 import { authoredContentChanged, clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
+import { hasFsProjectionScope, projectionCleanupFor, registerFsProjectionCleanup, runCleanups, snapshotProjection } from '../../lib/fsProjectionRollback.js';
 import { saveNodeToFs } from '../../integrations/localFs/saveNodeToFs.js';
 import {
   ensureCurrentNodeRevisionInTransaction,
@@ -26,6 +30,7 @@ import {
  */
 const createNodeAsSystem = async (
   node: Partial<Node> & { memoryId: string },
+  transaction?: Prisma.TransactionClient,
 ): Promise<Node> => {
   if (!node.loc || !node.name || !node.memoryId) {
     throw new Error('Node requires loc, name, and memoryId');
@@ -33,13 +38,26 @@ const createNodeAsSystem = async (
   const loc = node.loc;
   const name = node.name;
 
-  // Save to filesystem
-  const fsResult = await saveNodeToFs(node, GRAPHS_PATH);
+  // Save to filesystem. #2731: a projection this call creates is undone when
+  // the database write does not commit.
+  // A caller-supplied transaction outlives this call and its rollback is invisible here, so
+  // its creator must hold a rollback scope; refuse before writing anything rather than orphan a file.
+  if (transaction && !hasFsProjectionScope()) {
+    throw new Error('createNode: a caller-supplied transaction requires withFsProjectionRollback (#2731).');
+  }
+  const fsPrior = snapshotProjection(loc, GRAPHS_PATH);
+  // #2731: the id is minted before the write so the projection's bytes are unique to this call (the
+  // cleanup's ownership proof): two creates at one loc, even with identical fields, never write equal bytes.
+  const id = node.id ?? generateId();
+  const fsResult = await saveNodeToFs({ ...node, id }, GRAPHS_PATH);
+  // Ownership is by the bytes this call wrote (a failed write may have written none).
+  const undoProjection = fsResult.written ? projectionCleanupFor(loc, GRAPHS_PATH, fsPrior, fsResult.written) : null;
   if (fsResult.error) {
+    // A partial write (directory made, file refused) is ours to undo too.
+    undoProjection?.();
     throw new Error(`Failed to save node to filesystem: ${fsResult.error}`);
   }
 
-  const id = node.id ?? generateId();
   const serializedTags = serializeTags(node.tags ?? []) as string[];
   const content = node.content ?? null;
   const fields = {
@@ -52,7 +70,7 @@ const createNodeAsSystem = async (
     ownerRepo: node.ownerRepo ?? null,
   };
 
-  const saved = await db.$transaction(async (tx) => {
+  const write = async (tx: Prisma.TransactionClient) => {
     // This legacy controller is still a real authoring seam. Declare its whole
     // path lock-set first, then use the normal create/update helpers for their
     // authoritative gates. A second call at the same loc must snapshot the
@@ -78,10 +96,22 @@ const createNodeAsSystem = async (
     if (prior && (!existing || existing.loc !== loc || existing.memoryId !== node.memoryId)) {
       throw new Error(`createNode: the node at "${loc}" moved during the write; retry.`);
     }
+    // #2043 — defensive: no boot-prompt role or compiled marker reaches this
+    // legacy path today (memory-root creation only); a future caller must not reopen it.
+    if (isBootPromptRole((node as { role?: string | null }).role) || (node as { nodeType?: string | null }).nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE) {
+      throw bootPromptCompiledWriteError('create', 'produces');
+    }
+    assertBootPromptWriteAllowed(existing, {}, 'update');
     let authoredEdit = false;
     if (existing) {
       const changes = diffNodeChanges(existing, fields);
       authoredEdit = authoredContentChanged(changes);
+      // #1328 — this seam states no task, so an edit of a governed row refuses
+      // before its revision. Its callers write a new memory's root, which has no rule.
+      await assertAuthoring(tx, node.memoryId, {
+        priorRole: existing.role, priorRunnable: existing.isRunnable,
+        role: existing.role, runnable: existing.isRunnable, mintHuman: true, authoredChange: authoredEdit,
+      }, attestedAuthoring(null));
       // An identical re-save is not a revision (@codex P2, PR #1339): a
       // snapshot here would manufacture history on every idempotent save and
       // evict real revisions under maxRevCount.
@@ -117,11 +147,29 @@ const createNodeAsSystem = async (
       },
     });
     // #2040 — this legacy seam runs as the system with no principal, so tags
-    // reach only the node's own memory; a refusal rolls the write back.
-    const tags = await assertIncludesWritable(tx, written, content, [node.memoryId]);
+    // reach only the node's own memory; a refusal rolls the write back. With no
+    // writing person it skips the writer's read check (#2041 S2b). Its only
+    // callers write a new memory's root node, with no caller content.
+    const tags = await assertIncludesWritable(tx, written, content, [node.memoryId], undefined, { includeSystemWrite: true });
     await syncDerivedIncludesEdges(tx, written, tags, [node.memoryId]);
     return written;
-  });
+  };
+  // New-memory callers can include scaffolding in their authority transaction:
+  // a root failure then rolls back the memory row as well. Existing callers
+  // retain their own transaction. Filesystem projection still precedes the DB write (#2731 undoes it on failure).
+  let saved;
+  if (transaction) {
+    // The caller's transaction outlives this call: its resolver runs the cleanup on failure.
+    if (undoProjection) registerFsProjectionCleanup(undoProjection);
+    saved = await write(transaction);
+  } else {
+    try {
+      saved = await db.$transaction(write);
+    } catch (err) {
+      if (undoProjection) runCleanups([undoProjection]);
+      throw err;
+    }
+  }
 
   return saved as unknown as Node;
 };

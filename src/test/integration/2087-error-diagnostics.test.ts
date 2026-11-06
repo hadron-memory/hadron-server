@@ -77,18 +77,9 @@ describe('#2087 development diagnostic boundaries',()=>{
     vi.mocked(formatGraphQLError).mockImplementationOnce(formatted=>formatted);
     const result=await gql(query,absent); expect(result.errors[0].extensions.code).toBe('APP_NOT_FOUND'); noDiagnostics(result);
   });
-  it.each(['hadron_delivery_settings_get','hadron_delivery_settings_set'])('real MCP %s keeps concealment and state',async name=>{
-    const id=await mcpOpen(), before=await db.app.findMany({orderBy:{id:'asc'}});
-    const args=(appRef:string)=>({appRef,...(name.endsWith('_set')?{session:sid,input:{busyDelaySeconds:502}}:{})});
-    const a=await tool(id,name,args(foreign)),b=await tool(id,name,args(absent));
-    for(const result of [a,b]) { expect(result.isError).toBe(true); expect(result.content[0].text).toMatch(/^\[app_not_found\]/); noDiagnostics(result); }
-    expect(normalized(a,foreign)).toBe(normalized(b,absent));
-    expect(await db.app.findMany({orderBy:{id:'asc'}})).toEqual(before);
-    const success=await tool(id,name,args(appId)); expect(success.isError).not.toBe(true); expect(JSON.parse(success.content[0].text)).toMatchObject({busyDelaySeconds:name.endsWith('_set')?502:501,standbyEnabled:false});
-    if(name.endsWith('_set')) expect((await db.app.findUniqueOrThrow({where:{id:appId}})).deliveryBusyDelaySeconds).toBe(502);
-  });
+  // #3082: the real-MCP delivery-settings get/set concealment tests were removed with the tools (off over MCP). The same
+  // foreign/absent concealment, stable code and no state change is pinned at the GraphQL boundary above (it.each [query, mutation]).
   it.each([
-    ['hadron_task_list','agentTasks',{appRef:absent}],
     ['hadron_get_comment','comment',{commentRef:'hrn:node:diagnostics2087.example:kb:comment'}],
   ])('MCP %s also strips diagnostics without changing public fields',async(name,resolver,args)=>{
     const id=await mcpOpen();
@@ -99,8 +90,9 @@ describe('#2087 development diagnostic boundaries',()=>{
   });
   it('MCP typed-error mapping strips supplied diagnostic extensions, preserving public extras',async()=>{
     const id=await mcpOpen();
-    const spy=vi.spyOn(resolvers.Query as any,'appDeliverySettings').mockRejectedValueOnce(new GraphQLError('App not found.',{extensions:{code:'APP_NOT_FOUND',appRef:absent,...diagnostics}}));
-    const result=await tool(id,'hadron_delivery_settings_get',{appRef:absent});
+    const spy=vi.spyOn(resolvers.Query as any,'comment').mockRejectedValueOnce(new GraphQLError('App not found.',{extensions:{code:'APP_NOT_FOUND',appRef:absent,...diagnostics}}));
+    // #3082: hadron_delivery_settings_get is off over MCP; hadron_get_comment exercises the same typed-error mapping.
+    const result=await tool(id,'hadron_get_comment',{commentRef:'hrn:node:diagnostics2087.example:kb:comment'});
     spy.mockRestore(); expect(result.isError).toBe(true); expect(result.content[0].text).toContain(`appRef: ${absent}`); noDiagnostics(result);
   });
 });
@@ -109,13 +101,19 @@ describe('#2087 formatter diagnostics supplied by callers',()=>{
     const error=new Prisma.PrismaClientValidationError('PRIVATE_QUERY_2087',{clientVersion:Prisma.prismaVersion.client});
     const result=formatGraphQLError({message:error.message,extensions:{code:'INTERNAL_SERVER_ERROR',...diagnostics}},error);
     noDiagnostics(result); expect(result.extensions?.code).toBe('INTERNAL_SERVER_ERROR');
-    expect(result.message).toBe('Unable to complete this request. Please try again.');
+    expect(result.message).toBe('Internal server error.'); expect(result.extensions?.requestId).toEqual(expect.any(String));
     expect(error.message).toBe('PRIVATE_QUERY_2087');
   });
-  it.each([new UrnNotQualifiedError('bad',undefined,'app'),new GraphQLError('typed',{extensions:{code:'APP_NOT_FOUND'}}),new Error('internal')])('strips diagnostics without losing public metadata (%s)',error=>{
+  it.each([new UrnNotQualifiedError('bad',undefined,'app'),new GraphQLError('typed',{extensions:{code:'APP_NOT_FOUND'}})])('strips diagnostics without losing public metadata (%s)',error=>{
     const result=formatGraphQLError({message:error.message,extensions:{code:'INTERNAL_SERVER_ERROR',appRef:absent,...diagnostics}},error);
     noDiagnostics(result); expect(result.extensions?.appRef).toBe(absent);
     expect(result.extensions?.code).toBe(error instanceof UrnNotQualifiedError?'URN_NOT_QUALIFIED':'INTERNAL_SERVER_ERROR');
+  });
+  it('a plain Error is a fault (#1789): generic envelope, no supplied metadata, no diagnostics',()=>{
+    const error=new Error('internal');
+    const result=formatGraphQLError({message:error.message,extensions:{code:'INTERNAL_SERVER_ERROR',appRef:absent,...diagnostics}},error);
+    noDiagnostics(result); expect(result.message).toBe('Internal server error.');
+    expect(result.extensions).toEqual({code:'INTERNAL_SERVER_ERROR',requestId:expect.any(String)});
   });
 });
 

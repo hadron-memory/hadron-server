@@ -174,3 +174,27 @@ DROP FUNCTION IF EXISTS worker_reference_fence_cleanup_1162();
 DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "worker_wake_acks";
 CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "worker_wake_acks"
   FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.worker_id', 'w:$.acked_by_worker_id');
+
+-- #2022: the stop signals' target worker and the coverage ledger's worker join the closed #1162 fence inventory.
+DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "team_stop_signals";
+CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "team_stop_signals"
+  FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.target_worker_id');
+DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "team_stop_coverage";
+CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "team_stop_coverage"
+  FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.worker_id');
+-- #2046: a compiled boot-prompt revision's target worker joins the closed #1162 fence inventory.
+DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "compiled_prompt_revisions";
+CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "compiled_prompt_revisions"
+  FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.target_worker_id');
+-- #2162: a context reset's worker and session join the closed #1162 fence inventory.
+DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "context_resets";
+CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "context_resets"
+  FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.worker_id', 's:$.session_id');
+-- #2024 (S8): a generated ticker's worker joins the closed #1162 fence inventory (generated_for_worker_id, no FK).
+DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "tickers";
+CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "tickers"
+  FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.owner_worker_id', 'w:$.generated_for_worker_id', 'w:$.created_by_worker_id', 'w:$.updated_by_worker_id', 'w:$.deleted_by_worker_id');
+-- #1332: a content-validation report's WORKER reporter joins the closed #1162 fence inventory (reporter_worker_id, no FK).
+DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "node_content_validation_reports";
+CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "node_content_validation_reports"
+  FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.reporter_worker_id');

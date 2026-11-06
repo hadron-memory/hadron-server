@@ -1,6 +1,18 @@
+import { appInstallationWhere } from '../../../lib/appInstallations.js';
 // chatMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { assertAuthoring, attestedAuthoring } from '../../../lib/authoringAttestation.js';
+import { authoredContentChanged, clearNodeAuthorship } from '../../../lib/nodeAuthorship.js';
+import {
+  buildNodeRevisionSnapshot,
+  createNodeRevision,
+  diffNodeChanges,
+  editorFromAuth,
+  ensureCurrentNodeRevisionInTransaction,
+  revisionStateHashRefreshMarker,
+} from '../../../lib/nodeRevisionSnapshot.js';
 import { LINK_CAP_MEMORY_SELECT, linkWriteTargetAdmits } from '../../../lib/auth/agentMemoryLinkCap.js';
-import { portalUrlForUrn } from '../../../lib/portalUrl.js';
+import { isDeepStrictEqual } from 'node:util';
+import { clientReportedChatModel } from '../../../lib/bootPrompt/chatModel.js';
 import { generateId } from '../../../lib/id.js';
 import { lockAncestorsForCreateMany, lockLocForWrite } from '../../../lib/nodeSubtreeLock.js';
 import {
@@ -28,6 +40,8 @@ import {
 } from '../../../lib/urn.js';
 import { compileTemplate } from '../../../lib/template.js';
 import { applyPlatformVariables } from '../../../lib/personaDescription.js';
+import { agentPlatformValues } from '../../../lib/bootPrompt/variables.js';
+import { recordServedPrompt, resolveServedBootPrompt, type ServedBootPrompt } from '../../../lib/bootPrompt/serve.js';
 import {
   evaluateEdgeCondition,
   userMessageFor,
@@ -51,6 +65,7 @@ import {
   ChatScopeError,
 } from './chat-scope.js';
 import { chatLocFilter, pickChatNode } from '../../../lib/chatLoc.js';
+import { reportPartialTurn } from '../../../lib/chatPartialTurn.js';
 import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
 import {
   type Context,
@@ -67,6 +82,10 @@ import { assertNoMintedSpecRemoval } from '../../../lib/mintedSpecPermanence.js'
 import { refuseDecisionFamily } from '../../../lib/decisions/index.js';
 import { assertBatchMutable } from '../../../lib/bulkMutationGate.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
+import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
+import { unauthenticatedError } from '../../../lib/refusals.js';
+import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds.js';
+import { pickUnnamedStartConversation, topLevelConversations } from '../../../lib/chatConversationOrder.js';
 
 /**
  * How many of a chat's most recent messages `sendChatMessage` hands the model.
@@ -106,23 +125,49 @@ async function chatWriteTx(
 }
 
 /**
- * The Agent's own identity bound into its template on the chat path (#2042, cor:dmo:150:08): a chat binds no worker,
- * so `worker.name` falls back to the Agent's name, `worker.role` to its persona role, `worker.url` is the Agent's
- * portal URL, and reports-to / signature / trailer are empty. The server calls no model in a chat (the client does),
- * so `session.llmModel` has no value here and is empty.
+ * #2047 (S10) — what a chat is served: the compiled boot prompt (approved revision, as-is), its platform
+ * variables bound to the Agent (a chat binds no worker). Resolved BEFORE the chat is created or answered, so a refusal
+ * is the same typed refusal a bind gives and leaves no chat behind. The App is the one the chat's holding memory belongs
+ * to; a chat held in a memory with no App serves the Agent's own pointer and has no App to record under.
  */
-export function bindAgentPrompt(agent: { systemPrompt: string | null; name: string; urn: string; personaRole: string | null }): string {
-  const role = agent.personaRole ?? '';
-  return applyPlatformVariables(agent.systemPrompt ?? '', {
-    'worker.name': agent.name,
-    'worker.role': role,
-    'agent.name': agent.name,
-    'worker.reportsTo.name': '',
-    'worker.signature': '',
-    'worker.trailer': '',
-    'worker.url': portalUrlForUrn(agent.urn) ?? '',
-    'session.llmModel': '',
-  }, { name: agent.name, role });
+export async function serveChatPrompt(
+  db: Context['db'],
+  agent: { id: string; name: string; urn: string; personaRole: string | null },
+  appId: string | null,
+  llmModel: string | null = null,
+): Promise<{ text: string; served: ServedBootPrompt; variables: Record<string, string> }> {
+  const served = await resolveServedBootPrompt(db, { surface: 'chat', appId, agent: { id: agent.id, name: agent.name } });
+  const variables = { ...agentPlatformValues(agent), 'session.llmModel': llmModel ?? '' };
+  // #3096 / cor:dmo:150:08: provenance label is record metadata, never another prompt variable.
+  return { text: applyPlatformVariables(served.content, variables), served, variables: {
+    ...variables, 'session.llmModel.source': llmModel === null ? 'unspecified' : 'client-reported',
+  } };
+}
+
+/**
+ * #2047 (R37) — a chat records what it was served again only when the served revision or its filled variable values CHANGED (#3096). (chat, ordinal) is unique, so
+ * two concurrent turns can race for one ordinal; the loser must not assume the winner recorded ITS revision (the two may
+ * have resolved different revisions around an approval). It re-reads the latest record and retries at the next ordinal
+ * until the latest record matches what this turn served, so a served revision or filled value set is never missing from the audit history.
+ */
+export async function recordChatServedIfChanged(
+  db: Context['db'],
+  chatId: string,
+  agentId: string,
+  appId: string | null,
+  chatServed: { served: ServedBootPrompt; variables: Record<string, string> },
+): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const last = await db.servedPrompt.findFirst({ where: { chatId }, orderBy: { ordinal: 'desc' }, select: { compiledNodeId: true, servedRevSeq: true, ordinal: true, variables: true } });
+    if (last && last.compiledNodeId === chatServed.served.compiledNodeId && last.servedRevSeq === chatServed.served.servedRevSeq && isDeepStrictEqual(last.variables, chatServed.variables)) return;
+    try {
+      await recordServedPrompt(db, { kind: 'CHAT', chatId, appId, agentId, ordinal: (last?.ordinal ?? 0) + 1 }, chatServed.served, chatServed.variables);
+      return;
+    } catch (err) {
+      if ((err as { code?: string }).code !== 'P2002') throw err;
+    }
+  }
+  throw new Error('chat served-prompt record kept conflicting');
 }
 
 export const chatMutations = {
@@ -134,6 +179,7 @@ export const chatMutations = {
         conversationName,
         scope,
         isTestRun,
+        llmModel,
       }: {
         agentId: string;
         userId?: string;
@@ -144,6 +190,7 @@ export const chatMutations = {
         // from the Tester. Defaults to false; see typeDefs for the
         // full rationale.
         isTestRun?: boolean;
+        llmModel?: string | null;
       },
       ctx: Context,
     ) => {
@@ -152,6 +199,8 @@ export const chatMutations = {
       // not by a role, so the role check applies to user principals only.
       const pureAppKey = Boolean(ctx.appId && !ctx.userId);
       if (!pureAppKey) requireRole(ctx, 'READER');
+      // Validate before provisioning memory, nodes or a subscription. This input grants nothing.
+      const reportedModel = clientReportedChatModel(llmModel);
 
       // Spec 017: default per FR-003. The GraphQL schema also defaults
       // scope to `private`; the resolver default is a defensive belt.
@@ -259,24 +308,29 @@ export const chatMutations = {
       if (conversationName) {
         convName = conversationName;
       } else {
-        const allConvs = await findSystemNodesByPrefix('conversations:');
-        const topLevel = allConvs.filter((n) => n.loc.split(':').length === 2);
-        const nonSetup = topLevel.find((n) => {
-          const d = (n.data as Record<string, unknown>) ?? {};
-          return d.isSetup !== true && d.isFallback !== true;
-        });
-        const chosen = nonSetup ?? topLevel[0];
-        if (!chosen) throw new Error('Agent has no conversations configured');
+        // #3405 (cor:cht:020:01 step 1, ruling 0127): ordinary by code-unit loc, then setup,
+        // then fallback. Same rule on the live and the published-snapshot script.
+        const chosen = pickUnnamedStartConversation(await findSystemNodesByPrefix('conversations:'));
+        if (!chosen) {
+          throw new ChatScopeError('AGENT_HAS_NO_CONVERSATIONS', 'Agent has no conversations configured.');
+        }
         convName = chosen.loc.split(':')[1];
       }
 
       const convNode = await findSystemNode(`conversations:${convName}`);
-      if (!convNode) throw new Error(`Conversation "${convName}" not found in agent's system memory`);
+      if (!convNode) {
+        throw new ChatScopeError(
+          'CONVERSATION_NOT_FOUND',
+          `Conversation "${convName}" not found in agent's system memory.`,
+        );
+      }
 
       const convData = (convNode.data as Record<string, unknown>) ?? {};
       const stageOrder = (convData.stageOrder as string[]) ?? [];
       const firstStage = stageOrder[0];
-      if (!firstStage) throw new Error(`Conversation "${convName}" has no stages`);
+      if (!firstStage) {
+        throw new ChatScopeError('CONVERSATION_HAS_NO_STAGES', `Conversation "${convName}" has no stages.`);
+      }
 
       // Load the first stage
       const stageNode = await findSystemNode(`conversations:${convName}:${firstStage}`);
@@ -331,7 +385,7 @@ export const chatMutations = {
           where: {
             userId: ctx.userId,
             app: {
-              appAgents: { some: { agentId: resolvedAgentId } },
+              ...appInstallationWhere(resolvedAgentId),
               deletedAt: null,
             },
           },
@@ -392,7 +446,16 @@ export const chatMutations = {
           where: { id: ctx.sessionId },
           select: { memoryId: true },
         });
-        targetMemoryId = session?.memoryId ?? null;
+        // #1376: the bound session's memory is a target only inside the session's verified reach
+        // (an item-linked org memory in Session.memoryId is not; Diego P1). The same set the read paths use,
+        // so a user's personal/private session memory (read-only in the access map) stays a chat target.
+        targetMemoryId = session?.memoryId &&
+          (await sessionScopedMemoryIds(ctx.db, ctx.appId, ctx.sessionId)).includes(session.memoryId)
+          ? session.memoryId : null;
+        // #2895 (Vera, option a): an Agent's system memory is the Agent's own definition, not a chat space. The read
+        // scope above keeps it (reads are unchanged), but no API path writes it into Session.memoryId, so a chat
+        // never lands in it. Refused through the same null as any unreadable target, so nothing is disclosed.
+        // (#3301 moved this check below the branch chain so every branch shares it.)
       } else if (ctx.userId) {
         const existing = await ctx.db.memory.findFirst({
           where: {
@@ -441,7 +504,7 @@ export const chatMutations = {
             ownerOrgIds.length > 0
               ? await ctx.db.app.findFirst({
                   where: {
-                    appAgents: { some: { agentId: resolvedAgentId } },
+                    ...appInstallationWhere(resolvedAgentId),
                     organizationId: { in: ownerOrgIds },
                     deletedAt: null,
                   },
@@ -497,7 +560,17 @@ export const chatMutations = {
           orderBy: { createdAt: 'asc' },
           select: { memoryId: true, role: true, memory: { select: LINK_CAP_MEMORY_SELECT } },
         });
-        targetMemoryId = writable.find((m) => linkWriteTargetAdmits(tenant, m.memory, m.role))?.memoryId ?? null;
+        // #3292: an item never grants a userless principal, including an AppRun, a chat target (cor:dmo:050:09).
+        targetMemoryId = !ctx.userId ? null : writable.find((m) => linkWriteTargetAdmits(tenant, m.memory, m.role))?.memoryId ?? null;
+      }
+
+      // #3301 (refs #2895, Vera's ruling option a; cor:cht:010:02): an Agent's system memory is the Agent's
+      // own definition, never a chat's target, on EVERY branch (session, shared, user, legacy item). One
+      // check after selection covers them all, so a branch added later is covered too. Refused through the
+      // same null as any unreadable target, so the answer discloses nothing. It sits BEFORE the chat write
+      // and, in the user branch, a found system row means nothing is provisioned.
+      if (targetMemoryId && await ctx.db.agent.findFirst({ where: { systemMemoryId: targetMemoryId }, select: { id: true } })) {
+        targetMemoryId = null;
       }
 
       if (!targetMemoryId) {
@@ -510,6 +583,9 @@ export const chatMutations = {
       // personal memories); private chats retain the caller's read filter.
       // #1835 intersects either filter with targetMemoryId, so bare refs stay
       // in the holding memory without weakening the chat's authority gate.
+      // #2047 (S10): the boot prompt is resolved first, so an unserveable one refuses before any chat exists.
+      const chatAppId = (await ctx.db.memory.findUnique({ where: { id: targetMemoryId }, select: { appId: true } }))?.appId ?? null;
+      const chatServed = await serveChatPrompt(ctx.db, agent, chatAppId, reportedModel);
       let systemMessage = promptContent;
       if (promptContent.includes('{{')) {
         const access =
@@ -567,7 +643,10 @@ export const chatMutations = {
           },
           update: {},
         });
-      } catch { /* exists */ }
+      } catch (err) {
+        // #2476: only the cold-path race loss means the parent exists.
+        if (!isNodeLocUniqueViolation(err)) throw err;
+      }
 
       // Look up the conversation's goal for the initial goal stack entry
       const convGoals = (convData.goalDescriptions as string[]) ?? [];
@@ -586,7 +665,6 @@ export const chatMutations = {
         stageName: firstStage,
         userId: effectiveUserId,
         startedWithRevision: publishedLoc ?? null,
-        messageCount: 0,
         createdAt: new Date().toISOString(),
         goalStack: [{
           description: initialGoal,
@@ -694,6 +772,11 @@ export const chatMutations = {
                 createdBy: ctx.userId ?? null,
               },
             });
+            await tx.chatRootCounter.create({data:{chatRootNodeId:chatNodeId}});
+            // #2047: the chat's record, written with the chat so neither exists without the other (R37).
+            if (chatServed) {
+              await recordServedPrompt(tx, { kind: 'CHAT', chatId: chatNodeId, appId: chatAppId, agentId: resolvedAgentId }, chatServed.served, chatServed.variables);
+            }
             // Create the messages parent (so the chat subtree is well-formed)
             const messagesNodeId = generateId();
             startedNodes.push({
@@ -719,21 +802,20 @@ export const chatMutations = {
       // messages parent), so it is two writes.
       recordNodeUsage(ctx.db, 'write', startedNodes, ctx);
 
-      // Bind the Agent's own identity on the chat path. Worker briefings bind
-      // the same template to the Worker's name and role instead.
-      if (agent.systemPrompt) {
-        systemMessage = bindAgentPrompt(agent) + '\n\n' + systemMessage;
-      }
+      // The served boot prompt leads the system message (#2047).
+      systemMessage = chatServed.text + '\n\n' + systemMessage;
 
       return { chatId: chatLoc, systemMessage, tools, conversationName: convName, stageName: firstStage };
     },
 
     sendChatMessage: async (
       _: unknown,
-      { chatId, userMessage }: { chatId: string; userMessage: string },
+      { chatId, userMessage, llmModel }: { chatId: string; userMessage: string; llmModel?: string | null },
       ctx: Context,
     ) => {
       requireRole(ctx, 'READER');
+      // Each turn reports independently: omission/null means empty, never an inferred model.
+      const reportedModel = clientReportedChatModel(llmModel);
 
       // Find the chat node
       // #829: narrow to chats this caller is entitled to BEFORE picking one.
@@ -939,15 +1021,16 @@ export const chatMutations = {
                 where: { memoryId: systemMemoryId, loc: startedWithRevision!, deletedAt: null },
                 select: { data: true },
               });
-              return ((revNode?.data as any)?.snapshot?.nodes as SnapshotNode[] ?? [])
-                .filter((n: SnapshotNode) => n.loc.startsWith('conversations:') && n.loc.split(':').length === 2);
+              return ((revNode?.data as any)?.snapshot?.nodes as SnapshotNode[] ?? []);
             }
             const nodes = await ctx.db.node.findMany({
               where: { memoryId: systemMemoryId, loc: { startsWith: 'conversations:' }, deletedAt: null },
               select: { loc: true, name: true, data: true, nodeType: true, description: true, content: true },
             });
-            return nodes.filter((n) => n.loc.split(':').length === 2) as SnapshotNode[];
-          })();
+            return nodes as SnapshotNode[];
+          })().then((nodes) => topLevelConversations(nodes));
+          // #3405: both scans below walk top-level conversations in code-unit `loc` order
+          // (cor:cht:030:02 step 3), so the first match and the default are deterministic.
 
           const msgLower = userMessage.toLowerCase();
           let bestMatch: { convName: string; firstStage: string } | null = null;
@@ -1067,9 +1150,12 @@ export const chatMutations = {
           systemMessage = promptContent;
         }
 
-        // Rebind on each chat turn so edits to the Agent's prompt take effect.
-        if (agent?.systemPrompt) {
-          systemMessage = bindAgentPrompt(agent) + '\n\n' + systemMessage;
+        // Re-served on each chat turn so a newly approved revision takes effect.
+        if (agent) {
+          // #2047: the same refusal as a bind; and a chat records again only when its revision or filled values CHANGED (R37, #3096), never per unchanged message.
+          const chatServed = await serveChatPrompt(ctx.db, agent, memory?.appId ?? null, reportedModel);
+          await recordChatServedIfChanged(ctx.db, chatNode.id, agent.id, memory?.appId ?? null, chatServed);
+          systemMessage = chatServed.text + '\n\n' + systemMessage;
         }
 
         // Build tools from hierarchical extraction spec
@@ -1325,17 +1411,50 @@ export const chatMutations = {
         // under different chat locks. Serialize the read-modify-write on the
         // `data` loc so neither turn loses the other's bucket.
         await lockLocForWrite(tx, chatNode.memoryId, 'data');
-        const dataNode = await tx.node.findFirst({
-          where: { loc: 'data', memoryId: chatNode.memoryId, deletedAt: null },
-        });
+        const dataNodeWhere = { loc: 'data', memoryId: chatNode.memoryId, deletedAt: null };
+        // #1328 — the row lock, not only the loc lock: the check below judges
+        // this row, and a writer that takes no loc lock (git sync) can change it.
+        const located = await tx.node.findFirst({ where: dataNodeWhere, select: { id: true } });
+        if (located) await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${located.id} FOR UPDATE`;
+        const dataNode = located ? await tx.node.findFirst({ where: dataNodeWhere }) : null;
         if (dataNode) {
           if (memEncInfo.isEncrypted) decryptNodeFields(dataNode, memEncInfo);
           const existingData = (dataNode.data as Record<string, unknown>) ?? {};
           const merged = fold(existingData, data);
+          // #1328 — extraction states no task, so it cannot change a `data`
+          // node a rule governs. Compared on plaintext: a turn that extracts
+          // what is stored changes nothing authored, and needs no claim.
+          const authoredChange = authoredContentChanged(diffNodeChanges({ data: existingData }, { data: merged }));
+          const stamp = await assertAuthoring(tx, chatNode.memoryId, {
+            priorRole: dataNode.role, priorRunnable: dataNode.isRunnable,
+            role: dataNode.role, runnable: dataNode.isRunnable, mintHuman: true, authoredChange,
+          }, attestedAuthoring(ctx));
+          // Nothing changed, so nothing is written. Rewriting would re-encrypt
+          // an encrypted row, and fresh ciphertext reads as drift that clears the stamp.
+          if (!authoredChange) return null;
+          // A stamp is about to go: keep the stamped predecessor in history.
+          // Reconciling first means a stamp raw drift already falsified is
+          // dropped rather than snapshotted as if it described this content.
+          // An unstamped row has no attribution to lose, and keeps the
+          // revision-free write extraction has always made.
+          let revisioned = false;
+          if (dataNode.authorshipKind != null) {
+            await ensureCurrentNodeRevisionInTransaction(tx, dataNode.id, { expectedMemoryId: chatNode.memoryId });
+            const current = await tx.node.findUniqueOrThrow({ where: { id: dataNode.id } });
+            if (current.authorshipKind != null) {
+              await createNodeRevision(tx, buildNodeRevisionSnapshot(current, editorFromAuth(ctx), { changes: ['data'] }));
+              revisioned = true;
+            }
+          }
           const encData = encryptNodeFields({ content: null, data: merged }, memEncInfo);
           await tx.node.update({
             where: { id: dataNode.id },
-            data: { data: (encData.data ?? null) as InputJsonValue, updatedBy: ctx.userId ?? null },
+            data: {
+              data: (encData.data ?? null) as InputJsonValue,
+              updatedBy: ctx.userId ?? null,
+              ...(stamp ?? clearNodeAuthorship()),
+              ...(revisioned ? { revisionContentHash: revisionStateHashRefreshMarker() } : {}),
+            },
           });
           // #1061 — folding extracted data into the memory's `data` node
           // rewrites a real node, so it is its own write.
@@ -1354,7 +1473,8 @@ export const chatMutations = {
           // #1061 — first extraction into this memory mints the `data` node.
           return { id: dataNodeId, loc: 'data', memoryId: chatNode.memoryId };
         }
-      }), ctx);
+      // #3514: the assistant message and counter are already committed above; a refused extraction says so.
+      }).catch(reportPartialTurn), ctx);
 
       // Handle stage transition + edge evaluation
       let stageTransitioned = false;
@@ -1621,8 +1741,8 @@ export const chatMutations = {
       // a value no in-flight turn can still change out from under it.
       // #1061 — minted under the lock, recorded after it releases.
       let summaryRef: { id: string; loc: string; memoryId: string } | null = null;
-      await withChatRootLock(ctx.db, chatRef, memEncInfo, async ({ tx, chatData }) => {
-        const messageCount = (chatData.messageCount as number) ?? 0;
+      await withChatRootLock(ctx.db, chatRef, memEncInfo, async ({ tx, counter }) => {
+        const messageCount = counter.messageCount;
         const summaryName = `${String(messageCount).padStart(3, '0')}a-summary`;
         const summaryId = generateId();
         const summaryLoc = `${chatId}:messages:${summaryName}`;
@@ -1652,7 +1772,7 @@ export const chatMutations = {
       { chatId, title }: { chatId: string; title: string },
       ctx: Context,
     ) => {
-      if (!ctx.userId) throw new Error('Unauthenticated');
+      if (!ctx.userId) throw unauthenticatedError();
       // #829: narrow to chats this caller is entitled to BEFORE picking one.
       // `loc` is unique per memory, so an attacker who learns a chat id could
       // plant a node at that loc; filtering by entitlement first means it can
@@ -1693,7 +1813,7 @@ export const chatMutations = {
     },
 
     deleteChat: async (_: unknown, { chatId }: { chatId: string }, ctx: Context) => {
-      if (!ctx.userId) throw new Error('Unauthenticated');
+      if (!ctx.userId) throw unauthenticatedError();
       // #829: narrow to chats this caller is entitled to BEFORE picking one.
       // `loc` is unique per memory, so an attacker who learns a chat id could
       // plant a node at that loc; filtering by entitlement first means it can

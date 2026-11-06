@@ -22,6 +22,8 @@ BEGIN
     WHEN 'worker.deliver' THEN required := ARRAY['workerId', 'sessionId', 'eventId'];
     WHEN 'worker.end' THEN required := ARRAY['workerId', 'sessionId'];
     WHEN 'worktree.remove' THEN required := ARRAY['workerId', 'worktree'];
+    -- #2162 (cor:agt:050:27): reset a worker's context, a shed and never a session end.
+    WHEN 'worker.reset-context' THEN required := ARRAY['workerId', 'sessionId', 'taskId', 'resetId'];
     ELSE RETURN false;
   END CASE;
   FOREACH k IN ARRAY required LOOP
@@ -30,7 +32,7 @@ BEGIN
   FOR k, v IN SELECT * FROM jsonb_each(args) LOOP
     IF NOT (k = ANY (required) OR k = ANY (optional)) THEN RETURN false; END IF;
     IF jsonb_typeof(v) IS DISTINCT FROM 'string' THEN RETURN false; END IF;
-    IF k IN ('workerId', 'sessionId', 'eventId', 'taskId') THEN
+    IF k IN ('workerId', 'sessionId', 'eventId', 'taskId', 'resetId') THEN
       IF NOT (v #>> '{}') ~ '^[A-Za-z0-9_-]{1,64}$' THEN RETURN false; END IF;
     ELSIF k = 'family' THEN
       IF NOT (v #>> '{}') ~ '^[a-z0-9][a-z0-9._-]{0,63}$' THEN RETURN false; END IF;
@@ -136,12 +138,13 @@ CREATE TRIGGER trg_host_operations_forward_only
 -- never changed, removed only with its key (the cascade).
 ALTER TABLE host_key_uses DROP CONSTRAINT IF EXISTS chk_host_key_uses_shape;
 ALTER TABLE host_key_uses ADD CONSTRAINT chk_host_key_uses_shape CHECK (
-  action IN ('register', 'collect', 'report', 'availability', 'read', 'session', 'issue', 'deliver') AND
+  action IN ('register', 'collect', 'report', 'availability', 'read', 'session', 'issue', 'deliver', 'stop', 'reset', 'terminal', 'checkpoint') AND
   host_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$' AND
   (count IS NULL OR count >= 0) AND
-  -- A refused report may name no operation it could see; an accepted one always names its own.
-  (CASE WHEN refused_code IS NULL THEN (action = 'report') = (operation_id IS NOT NULL)
-        ELSE (operation_id IS NULL OR action = 'report') AND refused_code ~ '^[A-Z][A-Z0-9_]{0,63}$' END)
+  -- A refused report may name no operation it could see; an accepted one always names its own. #2162: so does a
+  -- context-reset protocol step (`reset`).
+  (CASE WHEN refused_code IS NULL THEN (action IN ('report', 'reset', 'checkpoint')) = (operation_id IS NOT NULL)
+        ELSE (operation_id IS NULL OR action IN ('report', 'reset', 'checkpoint')) AND refused_code ~ '^[A-Z][A-Z0-9_]{0,63}$' END)
 );
 
 CREATE OR REPLACE FUNCTION host_key_use_append_only() RETURNS trigger
@@ -171,4 +174,28 @@ ALTER TABLE task_session_end_requests ADD CONSTRAINT chk_task_session_end_reques
   ((resolved_at IS NULL) = (resolution IS NULL)) AND
   (resolution IS NULL OR resolution IN ('ended', 'end-issued', 'no-live-host')) AND
   ((resolution IS NOT DISTINCT FROM 'end-issued') = (operation_id IS NOT NULL))
+);
+
+-- #2771 (proposed cor:agt:070:09) — a worker's stored terminal report holds exactly the server-built keys and nothing
+-- else (no screen text), with its closed value sets, so a write that bypasses the resolver cannot store more.
+ALTER TABLE workers DROP CONSTRAINT IF EXISTS chk_workers_terminal_shape;
+ALTER TABLE workers ADD CONSTRAINT chk_workers_terminal_shape CHECK (
+  terminal IS NULL OR (
+    jsonb_typeof(terminal) = 'object' AND
+    terminal ?& ARRAY['host', 'status', 'prompt', 'reason', 'lastTurnAt', 'checkedAt', 'reportedAt'] AND
+    (terminal - 'host' - 'status' - 'prompt' - 'reason' - 'lastTurnAt' - 'checkedAt' - 'reportedAt') = '{}'::jsonb AND
+    jsonb_typeof(terminal -> 'host') = 'object' AND
+    terminal -> 'host' ?& ARRAY['id', 'label'] AND
+    ((terminal -> 'host') - 'id' - 'label') = '{}'::jsonb AND
+    jsonb_typeof(terminal -> 'host' -> 'id') = 'string' AND
+    jsonb_typeof(terminal -> 'host' -> 'label') = 'string' AND
+    COALESCE((terminal ->> 'status') IN ('busy', 'idle', 'locked', 'dark'), false) AND
+    COALESCE((terminal ->> 'prompt') IN ('empty', 'not_empty', 'menu', 'unknown'), false) AND
+    (CASE WHEN (terminal ->> 'status') IN ('locked', 'dark')
+          THEN COALESCE((terminal ->> 'reason') IN ('model_at_capacity', 'token_budget_exhausted', 'rate_limited', 'guardrail_triggered', 'menu_or_question', 'shed_staged_not_relaunched', 'unrecognized', 'no_turn_for_due_ticker', 'no_terminal', 'bare_shell', 'no_agent'), false)
+          ELSE jsonb_typeof(terminal -> 'reason') = 'null' END) AND
+    jsonb_typeof(terminal -> 'lastTurnAt') IN ('string', 'null') AND
+    jsonb_typeof(terminal -> 'checkedAt') = 'string' AND
+    jsonb_typeof(terminal -> 'reportedAt') = 'string'
+  )
 );

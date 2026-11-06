@@ -15,19 +15,24 @@ import { verifyAutomationPin, checkAutomationRevisions, assertPinnedAiIdentity, 
  *  - resolveConfig: trigger override name → spec-036 registry walk.
  *  - writeOutput: the CURRENT node's data.output { writeTo, mode } →
  *    node-write core under the run principal ('replace' default; 'append'
- *    folds onto existing content). No output spec → runs:<runId> beside
+ *    folds onto existing content). A writeTo may carry {runId}/{runTime}
+ *    destination tokens (#2437) — expanded at write time, then
+ *    grant-checked (writeToPattern.ts). No output spec → runs:<runId> beside
  *    that node.
  */
 
 import type { PrismaClient, AppRun } from '../generated/prisma/index.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { writeNodeCore } from '../api/graphql/schema/resolvers.mutation.node.js';
+import { runAuthoring } from '../lib/runner/runAuthoring.js';
 import { resolveAiConfigWithFallback, type ResolvedAiConfig } from '../lib/aiConfig.js';
 import { generateText, generateExtraction, generateWithTools, type ExtractionField } from '../lib/llm/index.js';
 import { validateExtractionSpec } from '../lib/edge-conditions/reserved-names.js';
 import { selectNextEdge } from '../lib/runner/selectNextEdge.js';
 import { loadFlowNode, resolveFlowMemory } from '../lib/runner/loadFlowNode.js';
+import { expandWriteTo } from '../lib/runner/writeToPattern.js';
 import { resolveRunTools } from '../lib/runner/tools/index.js';
+import { admitAndExecuteTool, type ToolCallRecord } from '../lib/runner/toolAdmission.js';
 import {
   isMcpRunToolName,
   materializeMcpRunTools,
@@ -39,6 +44,7 @@ import {
   unknownHaToolNames,
 } from '../lib/runner/tools/haTools.js';
 import { splitNodeUrn } from '../lib/urn.js';
+import { canWriteToMemory } from '../mcp/access-control.js';
 import { runAuthContext } from '../lib/auth/runPrincipal.js';
 import type { RunExecutionDeps, RunNodeSpec } from './appRuns.js';
 import { dispatchRunCallback } from '../api/webhooks.js';
@@ -134,6 +140,35 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
           tools = names;
         }
       }
+      // #670 (cor:agt:010:04 rules 1-2): a script node declares one tool call and no model. Its tool is validated
+      // by the same unknown-name check as `data.tools`, and `script` excludes both other bodies.
+      let script: RunNodeSpec['script'] = null;
+      if (data.script !== undefined && data.script !== null) {
+        const call = (data.script as { call?: { tool?: unknown; args?: unknown } } | null)?.call;
+        if (!call || typeof call.tool !== 'string' || call.tool.length === 0) {
+          throw new Error(`Node "${nodeUrn}" declares data.script without a call.tool (cor:agt:010:04).`);
+        }
+        if (call.args !== undefined && (call.args === null || typeof call.args !== 'object' || Array.isArray(call.args))) {
+          throw new Error(`Node "${nodeUrn}" has data.script.call.args that is not an object (cor:agt:010:04).`);
+        }
+        // Presence counts, even an empty list: the same exclusion the automation import format applies.
+        if (tools || extractionSpec || Array.isArray(data.tools) || Array.isArray(data.extractionSpec)) {
+          throw new Error(
+            `Node "${nodeUrn}" declares data.script together with data.tools or data.extractionSpec — ` +
+              `a script node has one body (cor:agt:010:04 rule 1).`,
+          );
+        }
+        const name = call.tool;
+        const unknown = isMcpRunToolName(name)
+          ? await unknownMcpToolNames(db, run.organizationId, [name])
+          : isHaRunToolName(name)
+            ? await unknownHaToolNames(db, run.organizationId, [name])
+            : resolveRunTools([name]).unknown;
+        if (unknown.length > 0) {
+          throw new Error(`Unknown tool(s) on "${nodeUrn}": ${unknown.join(', ')}.`);
+        }
+        script = { tool: name, args: (call.args ?? {}) as Record<string, unknown> };
+      }
       // D-TL-5: tools × extraction are mutually exclusive per node (v1).
       if (tools && extractionSpec) {
         throw new Error(
@@ -141,7 +176,7 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
             `v1 supports one per node (plan-tools D-TL-5).`,
         );
       }
-      return { extractionSpec, hasOutput: data.output != null, tools };
+      return { extractionSpec, hasOutput: data.output != null, tools, script };
     },
 
     selectNext: async (run, nodeUrn, view) => {
@@ -185,8 +220,25 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
       const haTools = await materializeHaRunTools(db, run, toolNames.filter(isHaRunToolName));
       return generateWithTools(resolved, req, [...tools, ...mcpTools, ...haTools], {
         onToolCall: opts.onToolCall,
-        toolCtx: { log: opts.log, db, run, principal: runContext(db, run) },
+        toolCtx: { log: opts.log, db, run, principal: runContext(db, run), nodeUrn: opts.nodeUrn },
       });
+    },
+
+    // #670: a script node's declared call. Same tool resolution as `llmTools`, same admission function.
+    callScript: async (run, call, opts) => {
+      const def = isMcpRunToolName(call.tool)
+        ? (await materializeMcpRunTools(db, run, [call.tool]))[0]
+        : isHaRunToolName(call.tool)
+          ? (await materializeHaRunTools(db, run, [call.tool]))[0]
+          : resolveRunTools([call.tool]).tools.find((t) => t.name === call.tool);
+      if (!def) throw new Error(`Script tool "${call.tool}" is not available to this run.`);
+      const toolCalls: ToolCallRecord[] = [];
+      const result = await admitAndExecuteTool(def, call.args, {
+        onToolCall: opts.onToolCall,
+        toolCtx: { log: opts.log, db, run, principal: runContext(db, run), nodeUrn: opts.nodeUrn },
+        record: (r) => toolCalls.push(r),
+      });
+      return { result, toolCalls };
     },
 
     onTerminal: (run) => dispatchRunCallback(db, run),
@@ -202,12 +254,31 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
       let targetMemoryId = memory.id;
       let targetLoc: string;
       if (spec.writeTo) {
-        const split = splitNodeUrn(spec.writeTo);
+        // #2437 (cor:agt:010:01, Vera's ruling on the issue): expand the
+        // destination pattern FIRST — a closed token set ({runId},
+        // {runTime}), so no eventData or user text rides into the
+        // destination — then resolve and grant-check the RESULTING URN at
+        // write time, never the pattern at authoring: writeTo is data, not
+        // the automation, so the grant check is the only control on where a
+        // run writes.
+        const expanded = expandWriteTo(spec.writeTo, run);
+        const split = splitNodeUrn(expanded);
         // Shared guards (tenant scope + encrypted-memory denial) — a writeTo
         // into an encrypted memory is denied like every other flow touch.
         const targetMemory = await resolveFlowMemory(
-          db, split.memoryUrn, run.organizationId, spec.writeTo,
+          db, split.memoryUrn, run.organizationId, expanded,
         );
+        // #2437 acceptance 2: the register-grant check (a memory-level
+        // grant covers any node under it) through the same shared predicate
+        // requireMemoryWriteAccess applies — surfaced here, before any
+        // write, as a plain message naming the destination and the next
+        // step instead of the generic Forbidden.
+        if (!(await canWriteToMemory(db, ctx, targetMemory.id, { destination: { loc: split.loc, verb: 'upsert' } }))) {
+          throw new Error(
+            `Output destination "${targetMemory.urn}" is not granted to this app — ` +
+              `grant the app read-write access to that memory (or a write grant for this location), or change the flow's output destination.`,
+          );
+        }
         targetMemoryId = targetMemory.id;
         targetLoc = split.loc;
       } else {
@@ -252,6 +323,8 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
         } as never,
         ctx,
         exists ? 'update' : 'create',
+        // #1328: generated output states no task, so a governed target refuses.
+        { authoring: runAuthoring(ctx, run) },
       );
       return written.id as string;
     },

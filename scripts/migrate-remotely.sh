@@ -2,7 +2,7 @@
 
 # docker run --rm \
 #   --add-host=host.docker.internal:host-gateway \
-#   -e DATABASE_URL="postgresql://hadron:71875b2ac2baa11ac45b5ee547a061e888307718@host.docker.internal:5432/hadron" \
+#   -e DATABASE_URL="$DATABASE_URL" \
 #   --entrypoint sh \
 #   ghcr.io/hadron-memory/hadron-server:latest \
 #   -c "npx prisma migrate deploy"

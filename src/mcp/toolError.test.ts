@@ -28,9 +28,14 @@ describe('MCP database-fault boundary', () => {
     const fallback = vi.fn(() => detail);
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});
     const result = toolErrorResult(error, fallback);
-    expect(result).toEqual({ isError: true, content: [{ type: 'text', text: '[internal_server_error] Unable to complete this request. Please try again.' }] });
+    const requestId = (result as { structuredContent: { error: { requestId: string } } }).structuredContent.error.requestId;
+    expect(result).toEqual({
+      isError: true,
+      content: [{ type: 'text', text: `[INTERNAL_SERVER_ERROR] Internal server error. Request id: ${requestId}` }],
+      structuredContent: { error: { code: 'INTERNAL_SERVER_ERROR', requestId, message: 'Internal server error.' } },
+    });
     expect(fallback).not.toHaveBeenCalled();
-    expect(log).toHaveBeenCalledWith('[mcp] tool_database_error', expect.objectContaining({ error }));
+    expect(log).toHaveBeenCalledWith('[mcp] internal_fault', expect.objectContaining({ requestId, error }));
   });
 
   it('redacts nested originalError/cause wrappers, including a cycle', () => {
@@ -41,10 +46,32 @@ describe('MCP database-fault boundary', () => {
     expect(toolErrorResult(error, () => detail).isError).toBe(true);
   });
 
-  it('preserves non-database domain output and tolerates a cyclic domain error', () => {
-    const error = new Error('Forbidden');
+  it('a typed refusal keeps its text and is flagged isError (#1789)', () => {
+    const error = new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
     Object.assign(error, { cause: error });
-    expect(toolErrorResult(error, () => 'Error: Forbidden')).toEqual(textResult('Error: Forbidden'));
+    expect(toolErrorResult(error, () => 'Error: Forbidden')).toEqual({ isError: true, ...textResult('Error: Forbidden') });
+  });
+
+  it('a plain Error is a fault however familiar its text (#1789)', () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const fallback = vi.fn(() => 'Error: Forbidden');
+    const result = toolErrorResult(new Error('Forbidden'), fallback) as { content: { text: string }[]; structuredContent: unknown };
+    expect(fallback).not.toHaveBeenCalled();
+    expect(result.content[0].text).not.toContain('Forbidden');
+    expect(result.structuredContent).toMatchObject({ error: { code: 'INTERNAL_SERVER_ERROR' } });
+    expect(log).toHaveBeenCalled();
+  });
+
+  it('a GraphQLError wearing the default INTERNAL_SERVER_ERROR code is a fault, not a refusal', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const result = toolErrorResult(new GraphQLError('boom detail', { extensions: { code: 'INTERNAL_SERVER_ERROR' } }), () => 'boom detail');
+    expect(JSON.stringify(result)).not.toContain('boom detail');
+  });
+
+  it('two identical faults get distinct request ids', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const ids = [0, 1].map(() => (toolErrorResult(new Error('same'), () => 'x') as { structuredContent: { error: { requestId: string } } }).structuredContent.error.requestId);
+    expect(ids[0]).not.toBe(ids[1]);
   });
 
   it('fails closed when an error cannot be inspected', () => {
@@ -58,5 +85,13 @@ describe('MCP database-fault boundary', () => {
     expect(await withToolErrorBoundary('test', () => result)({}, {})).toBe(result);
     const refusal = new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
     await expect(withToolErrorBoundary('test', async () => { throw refusal; })({}, {})).rejects.toBe(refusal);
+  });
+
+  it('the handler boundary turns any other throw into the generic envelope instead of the SDK echoing its message', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const result = await withToolErrorBoundary('test', async () => { throw new Error('private detail'); })({}, {}) as { isError: boolean; content: { text: string }[] };
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/^\[INTERNAL_SERVER_ERROR\] Internal server error\. Request id: /);
+    expect(JSON.stringify(result)).not.toContain('private detail');
   });
 });

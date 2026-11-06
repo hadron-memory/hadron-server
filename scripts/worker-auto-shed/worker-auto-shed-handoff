@@ -1,0 +1,71 @@
+#!/bin/bash
+# worker-auto-shed-handoff <worktree-cwd> <transcript.jsonl> [--dry]
+# Hadron issue hadron-server#2131: the PreCompact auto-shed kills a worker and
+# cannot ask it for a handoff, so the successor used to restart from whatever
+# manual shed existed (Eden 2026-10-19: 8h stale). This writes a MECHANICAL
+# handoff node (sheds:auto-<ts>) into the worker's own working memory BEFORE
+# the kill: identity, chat head, and the predecessor's last words and inbound
+# prompts mined from the transcript. It never blocks the shed: every failure
+# exits 0 and is logged by the caller.
+set -u
+cwd=${1:-}; transcript=${2:-}; dry=${3:-}
+[ -d "$cwd" ] || { echo "no cwd" >&2; exit 0; }
+cd "$cwd" || exit 0
+stamp=$(date -u +%Y%m%d-%H%M)
+who=$(timeout 20 hadron team session whoami 2>&1)
+name=$(printf '%s\n' "$who" | head -1)
+sess=$(printf '%s\n' "$who" | sed -n 's/.*worker session: \([0-9a-f]*\).*/\1/p' | head -1)
+wk=$(timeout 20 hadron team worker get "$(printf '%s' "$name" | awk '{print $1}')" 2>&1)
+mem=$(printf '%s\n' "$wk" | sed -n 's/^  memory: \([0-9a-f]*\).*/\1/p' | head -1)
+head=$(timeout 20 hadron team chat read --limit 1 2>&1 | sed -n 's/.*channel head #\([0-9]*\).*/\1/p' | head -1)
+body=$(mktemp)
+{
+  echo "## AUTO-SHED checkpoint (mechanical, written by the hook, not by the agent)"
+  echo
+  echo "Written $(date -u +%FT%TZ) just before the process was stopped. The predecessor could NOT be asked for a handoff (PreCompact hooks cannot reach the agent), so this node is mined from its transcript. Treat the newest MANUAL shed node as possibly stale; this node is newer than it."
+  echo
+  echo "- worker: $name"
+  echo "- worker session: ${sess:-unknown}"
+  echo "- worktree: $cwd"
+  echo "- chat head at shed: #${head:-unknown} (read unfiltered from your cursor; do not trust claims below across that gap)"
+  echo "- full transcript snapshot: ~/.local/state/hadron-worker-shed/ (newest ${name%% *}-transcript-*.jsonl, lowercase worker name)"
+  echo
+  python3 -I - "$transcript" <<'PY'
+import json,sys
+p=sys.argv[1]
+asst=[];inb=[];ts=None
+try:
+    for l in open(p,errors='replace'):
+        l=l.strip()
+        if not l.startswith('{'): continue
+        try: d=json.loads(l)
+        except Exception: continue
+        t=d.get('timestamp') or ts
+        ts=t or ts
+        ty=d.get('type'); m=d.get('message')
+        c=m.get('content') if isinstance(m,dict) else None
+        if ty=='assistant' and isinstance(c,list):
+            for b in c:
+                if isinstance(b,dict) and b.get('type')=='text' and b.get('text','').strip():
+                    asst.append((t,b['text'].strip()))
+        elif ty=='user':
+            s=c if isinstance(c,str) else None
+            if s and not s.startswith('<'): inb.append((t,s.strip()))
+except Exception as e:
+    print('transcript unreadable:',e)
+print('Transcript last activity:',ts)
+print()
+print('### Predecessor last statements (most recent last)')
+for t,s in asst[-8:]: print('- [%s] %s'%(t,s[:900].replace('\n',' ')))
+print()
+print('### Last inbound prompts / chat deliveries (most recent last)')
+for t,s in inb[-10:]: print('- [%s] %s'%(t,s[:500].replace('\n',' ')))
+PY
+  echo
+  echo "## Next"
+  echo "Run the recovery steps, re-verify any PR/ready-call state live (gh) before acting, then WRITE A REAL handoff and keep a rolling sheds: checkpoint updated at each state change."
+} >"$body" 2>&1
+if [ "$dry" = "--dry" ]; then echo "mem=$mem head=$head sess=$sess name=$name"; cat "$body"; rm -f "$body"; exit 0; fi
+[ -n "$mem" ] || { echo "no working memory id" >&2; rm -f "$body"; exit 0; }
+timeout 40 hadron node create -m "$mem" --loc "sheds:auto-$stamp" --name "AUTO shed checkpoint $stamp ($name)" --type info --content-file "$body" 2>&1
+rc=$?; rm -f "$body"; exit 0

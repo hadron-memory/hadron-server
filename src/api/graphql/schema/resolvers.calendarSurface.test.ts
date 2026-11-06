@@ -140,7 +140,7 @@ describe('calendar reads route through the tool with the google-cal provider', (
     expect(vi.mocked(runEmailOperation)).toHaveBeenCalledWith(
       'google-cal',
       'list-events',
-      expect.objectContaining({ connectionId: 'tool-cal-1', top: 25 }),
+      expect.objectContaining({ connectionId: 'tool-cal-1', top: 20 }),
     );
   });
 
@@ -239,10 +239,10 @@ describe('the shared connection gate applies to calendar ops', () => {
     expect(vi.mocked(runEmailOperation)).not.toHaveBeenCalled();
   });
 
-  it('reports a soft-deleted connection as not found', async () => {
+  it('answers a soft-deleted connection exactly as the denial (#2782)', async () => {
     await db.exchangeConnection.update({ where: { id: connectionId }, data: { deletedAt: new Date() } });
     const r = await run(EVENTS_QUERY(connectionId), { userId: owner.id, roles: ['READER'] });
-    expect(r.errors?.[0]?.message).toBe('Connection not found');
+    expect(r.errors?.map((e) => [e.message, e.extensions?.code])).toEqual([['Forbidden', 'FORBIDDEN']]);
   });
 });
 

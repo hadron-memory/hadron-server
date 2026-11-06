@@ -14,7 +14,7 @@ import { getMemoryEncryptionInfo } from './nodeCrypto.js';
 import { generateDataKey } from './crypto.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
-import { createTestableMcpServer } from '../mcp/server.js';
+import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.js';
 import type { AuthContext } from '../middleware/auth.js';
 import {
   teamAttentionPage,
@@ -27,6 +27,10 @@ import {
 vi.mock('./bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
+
+// #2138 §3.1: an own-session read of the team channel creates the row (lastCheckedAt) at seq 0, so "unread" is a position of 0.
+const seenSeq = async (workerId: string, channelId: string) =>
+  (await db.channelReadState.findFirst({ where: { workerId, channelId } }))?.lastSeenSeq ?? 0;
 
 const Q = resolvers.Query as any;
 const M = resolvers.Mutation as any;
@@ -181,13 +185,15 @@ afterEach(() => {
 });
 
 describe('worker-owned ordinary reads', () => {
-  it('#1628 exposes the opt-out only on the GraphQL team-chat read, defaulting true', () => {
+  it('#1628 exposes the opt-out on the GraphQL team-chat read, defaulting true (and, since #2181, on the pinned channelMessages)', () => {
     const schema = buildSchema(typeDefs);
     const field = schema.getQueryType()!.getFields().teamChatMessages;
     expect(field.args.find((arg) => arg.name === 'advanceReadState')?.defaultValue).toBe(true);
     expect(validate(schema, parse('{ teamChatMessages(appRef: "x", advanceReadState: false) { total } }'))).toEqual([]);
-    expect(validate(schema, parse('{ channelMessages(channelRef: "x", advanceReadState: false) { total } }')))
-      .toHaveLength(1);
+    // #2181: a pinned page must be able to defer its acknowledgement too (the client contract of hadron-cli#957).
+    expect(schema.getQueryType()!.getFields().channelMessages.args.find((arg) => arg.name === 'advanceReadState')?.defaultValue).toBe(true);
+    expect(validate(schema, parse('{ channelMessages(channelRef: "x", beforeSeq: 2, expectedIncarnation: 1, advanceReadState: false) { total } }')))
+      .toEqual([]);
     // Older-server refusal is a validation error naming exactly the new field/argument.
     const oldSchema = buildSchema(typeDefs.replace('advanceReadState: Boolean = true', ''));
     expect(validate(oldSchema, parse('{ teamChatMessages(appRef: "x", advanceReadState: false) { total } }'))[0].message)
@@ -199,7 +205,7 @@ describe('worker-owned ordinary reads', () => {
     const ctx = userCtx({ sessionId });
     const page = await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0, advanceReadState: false }, ctx);
     expect(page.items.map((m: { seq: number }) => m.seq)).toEqual([1]);
-    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
+    expect(await seenSeq(worker.id, channel.id)).toBe(0); // #2138: a read may stamp lastCheckedAt, but moves no read position
     await vi.waitFor(async () => {
       const reads = await db.usageEvent.findMany({ where: { type: 'read', memoryId: memory.id } });
       expect(reads).toHaveLength(1);
@@ -222,7 +228,7 @@ describe('worker-owned ordinary reads', () => {
     const ctx = userCtx({ sessionId });
     const latest = await Q.channelMessages({}, { channelRef: channel.id, limit: 2 }, ctx);
     expect(latest.items.map((m: { seq: number }) => m.seq)).toEqual([4, 5]);
-    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
+    expect(await seenSeq(worker.id, channel.id)).toBe(0); // #2138: a read may stamp lastCheckedAt, but moves no read position
 
     await Q.channelMessages({}, { channelRef: channel.id, sinceSeq: 0, limit: 2 }, ctx);
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toMatchObject({ lastSeenSeq: 2 });
@@ -232,7 +238,7 @@ describe('worker-owned ordinary reads', () => {
     await post('only message');
     const page = await Q.channelMessages({}, { channelRef: channel.id }, userCtx({ sessionId }));
     expect(page.items.map((m: { seq: number }) => m.seq)).toEqual([1]);
-    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
+    expect(await seenSeq(worker.id, channel.id)).toBe(0); // #2138: a read may stamp lastCheckedAt, but moves no read position
   });
 
   it('a partial page ending inside a legacy duplicate seq stops one short (#1362 review)', async () => {
@@ -285,7 +291,7 @@ describe('worker-owned ordinary reads', () => {
     const ctx = userCtx({ sessionId });
 
     await Q.channelMessages({}, { channelRef: channel.id, sinceSeq: 0, beforeSeq: null, mentionsRef: null, limit: 0, offset: 0 }, ctx);
-    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
+    expect(await seenSeq(worker.id, channel.id)).toBe(0); // #2138: a read may stamp lastCheckedAt, but moves no read position
     await Q.channelMessages({}, { channelRef: channel.id, sinceSeq: 0, beforeSeq: null, mentionsRef: null, limit: 50, offset: 0 }, ctx);
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toMatchObject({ lastSeenSeq: 1 });
 
@@ -295,7 +301,7 @@ describe('worker-owned ordinary reads', () => {
     // nothing (the lost-participation shape).
     await db.session.delete({ where: { id: sessionId } });
     await Q.channelMessages({}, { channelRef: channel.id, sinceSeq: 0, beforeSeq: null, mentionsRef: null, limit: 50, offset: 0 }, ctx);
-    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
+    expect(await seenSeq(worker.id, channel.id)).toBe(0); // #2138: a read may stamp lastCheckedAt, but moves no read position
   });
 
   it('derives the cursor owner App from the Worker session for a registered free-standing Channel', async () => {
@@ -612,8 +618,15 @@ describe('explicit switchover', () => {
   });
 });
 
-describe('MCP parity and discovery gate', () => {
-  const auth = (): AuthContext => ({ userId: user.id, appId: app.id, roles: ['READER'], clientId: `user:${user.id}` });
+// #3082: this block drove the MCP tools hadron_team_chat_read / hadron_channel_read / hadron_team_chat_mark_read, which are disabled
+// on MCP. The same rules are pinned here on the resolvers those tools delegated to (teamChatMessages, channelMessages,
+// markOwnTeamChatRead), with the Worker session presented as the request's session (ctx.sessionId), as the transport did.
+// Removed without a replacement: 'a blank explicit session is no session' (the MCP wrapper's argument trimming of a disabled
+// tool; a resolver never sees a blank session) and the two hadron_server_info capability tests ('stops advertising the
+// capability...', 'lists the tools for any user principal...'): no team capability is advertised any more, pinned by
+// the 'no team capability is advertised' test in src/mcp/server.mcpTeamCut3082.test.ts.
+describe('worker session reads and mark-read (resolver level; was the MCP parity block)', () => {
+  const asSession = (sid: string) => userCtx({ sessionId: sid });
 
   it('an explicit-session team-chat read advances the Channel it read, not a newer App default (#1362 review)', async () => {
     // `channel` is the App's OLDEST team-space root, which is what the
@@ -630,14 +643,14 @@ describe('MCP parity and discovery gate', () => {
     await post('one');
     await post('two');
 
-    const read = await createTestableMcpServer(auth()).callToolText('hadron_team_chat_read', { sinceSeq: 0, session: sessionId });
-    expect(read).toContain('two');
+    const read = await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0 }, asSession(sessionId));
+    expect(read.items.map((m: any) => m.body)).toContain('two');
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } }))
       .toMatchObject({ lastSeenSeq: 2 });
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: newer.channel.id } })).toBeNull();
   });
 
-  it('mark-read with no channel marks the Channel the convenience read serves, not a newer App default (#1362 review)', async () => {
+  it('the Channel the convenience read serves (not a newer App default) is the one a mark-read must name (#1362 review)', async () => {
     const other = await db.memory.create({
       data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:pilot-other2`, name: 'other2', class: 'app', appId: app.id },
     });
@@ -650,126 +663,48 @@ describe('MCP parity and discovery gate', () => {
     await post('one');
     await post('two');
 
-    const out = await createTestableMcpServer(auth()).callToolText('hadron_team_chat_mark_read', { session: sessionId, seq: 2 });
-    expect(out).toContain(`"channelId": "${channel.id}"`);
+    // The MCP tool resolved an omitted channel this way; the resolver takes the name, and the located channel is the oldest root.
+    const served = await locateTeamChatChannel(userCtx(), app.id);
+    expect(served?.channelId).toBe(channel.id);
+    const out = await M.markOwnTeamChatRead({}, { appRef: app.id, sessionRef: sessionId, channelRef: served!.channelId, seq: 2 }, userCtx());
+    expect(out).toMatchObject({ channelId: channel.id, lastSeenSeq: 2 });
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } }))
       .toMatchObject({ lastSeenSeq: 2 });
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: newer.channel.id } })).toBeNull();
   });
 
-  it('a blank explicit session is no session: the read behaves exactly as with none (#1362 review)', async () => {
-    await post('one');
-    await post('two');
-    const bound = createTestableMcpServer({ ...auth(), sessionId });
-    for (const tool of ['hadron_team_chat_read', 'hadron_channel_read'] as const) {
-      await db.channelReadState.deleteMany({});
-      const args = tool === 'hadron_channel_read' ? { channel: channel.id, sinceSeq: 0 } : { sinceSeq: 0 };
-      const blank = await bound.callToolText(tool, { ...args, session: '   ' });
-      const blankCursor = await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } });
-      await db.channelReadState.deleteMany({});
-      const omitted = await bound.callToolText(tool, args);
-      const omittedCursor = await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } });
-      expect(blank, tool).toBe(omitted);
-      expect(blankCursor?.lastSeenSeq ?? null, tool).toBe(omittedCursor?.lastSeenSeq ?? null);
-    }
-  });
-
-  it('a monitor read never advances the Worker cursor, even with the session bound to the transport (#1362 review)', async () => {
+  it('a monitor read never advances the Worker cursor, even with the session bound to the request (#1362 review)', async () => {
     await post('first');
     await post('second');
-    // The transport carries the Worker's own session: exactly the shape an
-    // ordinary read auto-advances under the pilot. The monitor's contract is
-    // that only an explicit acknowledge moves the cursor.
-    const bound = createTestableMcpServer({ ...auth(), sessionId });
-    const monitored = await bound.callToolText('hadron_team_chat_read', { monitor: true });
-    expect(monitored).toContain('second');
-    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
+    // The monitor read is advanceReadState:false: only an explicit acknowledge moves the cursor.
+    const monitored = await Q.teamChatMessages({}, { appRef: app.id, advanceReadState: false }, asSession(sessionId));
+    expect(monitored.items.map((m: any) => m.body)).toContain('second');
+    expect(await seenSeq(worker.id, channel.id)).toBe(0); // #2138: a read may stamp lastCheckedAt, but moves no read position
 
-    // Control: an ordinary read on the same transport does advance it.
-    await bound.callToolText('hadron_team_chat_read', { sinceSeq: 0 });
+    // Control: an ordinary read on the same session does advance it.
+    await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0 }, asSession(sessionId));
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } }))
       .toMatchObject({ lastSeenSeq: 2 });
   });
 
-  it('stops advertising the capability once the tools would refuse the App (#1362 review)', async () => {
-    const probe = () => createTestableMcpServer(auth()).callToolText('hadron_server_info', {});
-    expect(await probe()).toContain('team-attention');
-    await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
-    expect(await probe()).not.toContain('team-attention');
-    await db.app.update({ where: { id: app.id }, data: { uninstalledAt: null } });
-    // Losing participation: no AppMember row, and an org role too weak to admit.
-    await db.appMember.delete({ where: { appId_userId: { appId: app.id, userId: user.id } } });
-    await db.orgMember.updateMany({ where: { organizationId: org.id, userId: user.id }, data: { role: 'READER' } });
-    expect(await probe()).not.toContain('team-attention');
-  });
-
-  it('lists the tools for any user principal while the capability stays participation-gated', async () => {
-    const enabled = createTestableMcpServer(auth());
-    expect(await enabled.callToolText('hadron_server_info', {})).toContain('team-attention');
-    expect(await enabled.callToolText('hadron_server_info', {})).toContain('team-attention-paged');
-    await post('compact, no body in the result');
-    const retired = await enabled.callToolText('hadron_team_attention', {});
-    expect(retired).toContain('[upgrade_required]');
-    const out = await enabled.callToolText('hadron_team_attention_page', {});
-    expect(out).toContain(`"worker": "${worker.id}"`);
-    expect(out).toContain('"unread": 1');
-    expect(out).not.toContain('compact, no body in the result');
-
-    // #1353: the pilot operator allowlist no longer hides discovery — an
-    // ordinary non-participant still LISTS the tools (registration follows
-    // the user principal) but gets no capability advertisement (the probe
-    // requires live-App participation) and a concealed per-call refusal.
-    const outsider = await db.user.create({
-      data: { id: generateId(), githubId: 1353004, githubUsername: `unlisted-${Date.now()}` },
-    });
-    const outsiderServer = createTestableMcpServer({ ...auth(), userId: outsider.id });
-    const attentionTools = ['hadron_team_attention', 'hadron_team_attention_page', 'hadron_team_attention_switchover', 'hadron_team_chat_mark_read'];
-    expect(enabled.toolNames()).toEqual(expect.arrayContaining(attentionTools));
-    for (const name of attentionTools) expect(outsiderServer.toolNames()).toContain(name);
-    expect(await outsiderServer.callToolText('hadron_server_info', {})).not.toContain('team-attention');
-    // The RETIRED v1 stub refuses uniformly (UPGRADE_REQUIRED before any
-    // App resolution — no existence oracle), while the live paged doors
-    // carry the concealment: a non-participant learns nothing.
-    const refusedV1 = await outsiderServer.callTool('hadron_team_attention', { app: app.id });
-    expect((refusedV1.content[0]?.text ?? '')).toContain('[upgrade_required]');
-    const refused = await outsiderServer.callTool('hadron_team_attention_page', { app: app.id });
-    expect((refused.content[0]?.text ?? '')).toContain('[app_not_found] App not found.');
-  });
-
-  it('ordinary MCP reads own the cursor and the explicit mark-read door covers filtered reads', async () => {
+  it('ordinary reads own the cursor and the explicit mark-read door covers filtered reads', async () => {
     await post('@dara first', { mentions: ['dara'] });
     await post('second');
-    const server = createTestableMcpServer(auth());
 
-    await server.callToolText('hadron_team_chat_read', { session: sessionId, app: app.id, mentions: worker.id });
-    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
+    await Q.teamChatMessages({}, { appRef: app.id, mentionsRef: worker.id }, asSession(sessionId));
+    expect(await seenSeq(worker.id, channel.id)).toBe(0); // #2138: a read may stamp lastCheckedAt, but moves no read position
 
-    const marked = await server.callToolText('hadron_team_chat_mark_read', {
-      session: sessionId,
-      app: app.id,
-      channel: channel.id,
-      seq: 1,
-    });
-    expect(marked).toContain('"lastSeenSeq": 1');
+    const marked = await M.markOwnTeamChatRead({}, { appRef: app.id, sessionRef: sessionId, channelRef: channel.id, seq: 1 }, userCtx());
+    expect(marked).toMatchObject({ lastSeenSeq: 1 });
 
-    const blank = await server.callToolText('hadron_team_chat_mark_read', {
-      session: sessionId,
-      app: app.id,
-      channel: '   ',
-      seq: 2,
-    });
-    expect(blank).toContain('[channel_not_found]');
+    await expect(M.markOwnTeamChatRead({}, { appRef: app.id, sessionRef: sessionId, channelRef: '   ', seq: 2 }, userCtx()))
+      .rejects.toMatchObject({ extensions: { code: 'CHANNEL_NOT_FOUND' } });
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toMatchObject({ lastSeenSeq: 1 });
 
-    const markedDefault = await server.callToolText('hadron_team_chat_mark_read', {
-      session: sessionId,
-      app: app.id,
-      seq: 2,
-    });
-    expect(markedDefault).toContain(`"channelId": "${channel.id}"`);
-    expect(markedDefault).toContain('"lastSeenSeq": 2');
+    const markedDefault = await M.markOwnTeamChatRead({}, { appRef: app.id, sessionRef: sessionId, channelRef: channel.id, seq: 2 }, userCtx());
+    expect(markedDefault).toMatchObject({ channelId: channel.id, lastSeenSeq: 2 });
 
-    await server.callToolText('hadron_team_chat_read', { session: sessionId, app: app.id, sinceSeq: 1 });
+    await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 1 }, asSession(sessionId));
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toMatchObject({ lastSeenSeq: 2 });
   });
 
@@ -781,7 +716,7 @@ describe('MCP parity and discovery gate', () => {
       { appRef: app.urn, sessionRef: sessionId, channelRef: channel.id, seq: 1 },
       userCtx(),
     );
-    expect(marked).toEqual({ workerId: worker.id, channelId: channel.id, lastSeenSeq: 1 });
+    expect(marked).toEqual({ workerId: worker.id, channelId: channel.id, lastSeenSeq: 1, channelIncarnation: 1, cursorIncarnation: 1 });
 
     await expect(M.markOwnTeamChatRead(
       {},
@@ -798,26 +733,17 @@ describe('MCP parity and discovery gate', () => {
     )).rejects.toMatchObject({ extensions: { code: 'SESSION_NOT_LIVE' } });
   });
 
-  it('an explicit MCP session advances only that Worker, not the different header-bound session', async () => {
+  it('a read presenting one Worker session advances only that Worker, not another Worker of the App', async () => {
     const iris = await addWorker('Iris');
     await post('one message for both');
-    const server = createTestableMcpServer({ ...auth(), sessionId });
 
-    await server.callToolText('hadron_channel_read', {
-      channel: channel.id,
-      session: iris.sessionId,
-      sinceSeq: 0,
-    });
-    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
+    await Q.channelMessages({}, { channelRef: channel.id, sinceSeq: 0 }, asSession(iris.sessionId));
+    expect(await seenSeq(worker.id, channel.id)).toBe(0); // #2138: a read may stamp lastCheckedAt, but moves no read position
     expect(await db.channelReadState.findFirst({ where: { workerId: iris.id, channelId: channel.id } })).toMatchObject({ lastSeenSeq: 1 });
 
     await db.channelReadState.deleteMany();
-    await server.callToolText('hadron_team_chat_read', {
-      app: app.id,
-      session: iris.sessionId,
-      sinceSeq: 0,
-    });
-    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
+    await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0 }, asSession(iris.sessionId));
+    expect(await seenSeq(worker.id, channel.id)).toBe(0); // #2138: a read may stamp lastCheckedAt, but moves no read position
     expect(await db.channelReadState.findFirst({ where: { workerId: iris.id, channelId: channel.id } })).toMatchObject({ lastSeenSeq: 1 });
   });
 
@@ -854,10 +780,8 @@ describe('MCP parity and discovery gate', () => {
     await db.orgMember.updateMany({
       where: { organizationId: org.id, userId: user.id }, data: { role: 'READER' },
     });
-    const read = await createTestableMcpServer(auth()).callToolText('hadron_channel_read', {
-      channel: independent.id, session: sessionId, sinceSeq: 0,
-    });
-    expect(read).toContain('still readable');
+    const read = await Q.channelMessages({}, { channelRef: independent.id, sinceSeq: 0 }, asSession(sessionId));
+    expect(read.items.map((m: any) => m.body)).toContain('still readable');
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: independent.id } }))
       .toBeNull();
   });
@@ -893,9 +817,8 @@ describe('MCP parity and discovery gate', () => {
 
     // Soft delete stamps the org only: the App row and every membership stay.
     await db.organization.update({ where: { id: org.id }, data: { deletedAt: new Date() } });
-    await createTestableMcpServer(auth()).callToolText('hadron_channel_read', {
-      channel: independent.id, session: sessionId, sinceSeq: 0,
-    });
+    await expect(Q.channelMessages({}, { channelRef: independent.id, sinceSeq: 0 }, asSession(sessionId)))
+      .rejects.toMatchObject({ extensions: { code: 'CHANNEL_NOT_FOUND' } });
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: independent.id } }))
       .toBeNull();
     // The pilot door answers a deleted org's App exactly like an absent one.
@@ -940,29 +863,27 @@ describe('MCP parity and discovery gate', () => {
       .toMatchObject({ lastSeenSeq: 1 });
   });
 
-  it('returns successful MCP transcripts when the best-effort cursor write fails', async () => {
+  it('returns successful transcripts when the best-effort cursor write fails', async () => {
     await post('the transcript survives');
-    const server = createTestableMcpServer(auth());
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const queryRaw = vi.spyOn(db, '$queryRaw').mockRejectedValue(new Error('cursor store unavailable'));
     try {
-      const channelRead = await server.callToolText('hadron_channel_read', {
-        channel: channel.id,
-        session: sessionId,
-        sinceSeq: 0,
-      });
-      expect(channelRead).toContain('the transcript survives');
-      expect(channelRead).not.toContain('cursor store unavailable');
+      const channelRead = await Q.channelMessages({}, { channelRef: channel.id, sinceSeq: 0 }, asSession(sessionId));
+      expect(channelRead.items.map((m: any) => m.body)).toContain('the transcript survives');
 
-      const teamRead = await server.callToolText('hadron_team_chat_read', {
-        app: app.id,
-        session: sessionId,
-        sinceSeq: 0,
-      });
-      expect(teamRead).toContain('the transcript survives');
-      expect(teamRead).not.toContain('cursor store unavailable');
-      expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
-      expect(warn).toHaveBeenCalledTimes(2);
+      const teamRead = await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0 }, asSession(sessionId));
+      expect(teamRead.items.map((m: any) => m.body)).toContain('the transcript survives');
+      expect(await seenSeq(worker.id, channel.id)).toBe(0); // #2138: a read may stamp lastCheckedAt, but moves no read position
+      // Footer omission diagnostics may also warn; pin the two cursor failures
+      // this test induces without coupling to independent best-effort features.
+      const cursorWarnings = warn.mock.calls.filter(([message]) =>
+        message === '[channelMessages] pilot read-state advance failed:' ||
+        message === '[teamChatMessages] pilot read-state advance failed:',
+      );
+      expect(cursorWarnings.map(([message]) => message)).toEqual([
+        '[channelMessages] pilot read-state advance failed:',
+        '[teamChatMessages] pilot read-state advance failed:',
+      ]);
     } finally {
       queryRaw.mockRestore();
       warn.mockRestore();
@@ -982,7 +903,7 @@ describe('#1540 — a mark-read through a live session keeps it live', () => {
     expect(page.items).toEqual([]);
     expect((await db.session.findUniqueOrThrow({ where: { id: sessionId } })).updatedAt!.getTime())
       .toBe(t0.getTime() + 20 * H);
-    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
+    expect(await seenSeq(worker.id, channel.id)).toBe(0); // #2138: a read may stamp lastCheckedAt, but moves no read position
     await post('later message');
     vi.setSystemTime(new Date(t0.getTime() + 30 * H));
     await expect(M.markOwnTeamChatRead({}, { appRef: app.id, channelRef: channel.id, sessionRef: sessionId, seq: 1 }, userCtx()))
@@ -1038,5 +959,119 @@ describe('#1540 — a mark-read through a live session keeps it live', () => {
     vi.setSystemTime(new Date(t0.getTime() + 30 * H));
     await expect(M.markOwnTeamChatRead({}, { appRef: app.urn, sessionRef: sessionId, channelRef: channel.id, seq: 1 }, userCtx()))
       .rejects.toMatchObject({ extensions: { code: 'SESSION_NOT_LIVE' } });
+  });
+});
+
+describe('#2138 §3.1 — channel checks: lastCheckedAt', () => {
+  const checkedAt = async (workerId: string, channelId: string) =>
+    (await db.channelReadState.findFirst({ where: { workerId, channelId } }))?.lastCheckedAt ?? null;
+
+  it('an EMPTY read of the team channel through the worker\'s own session is a check, and moves no position', async () => {
+    expect(await checkedAt(worker.id, channel.id)).toBeNull();
+    const page = await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0 }, userCtx({ sessionId }));
+    expect(page.items).toEqual([]);
+    expect(await checkedAt(worker.id, channel.id)).toBeInstanceOf(Date);
+    expect(await seenSeq(worker.id, channel.id)).toBe(0);
+  });
+
+  it('a read that defers its acknowledgement (advanceReadState:false) and a filtered mentions read both check', async () => {
+    await post('one');
+    await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0, advanceReadState: false }, userCtx({ sessionId }));
+    const first = await checkedAt(worker.id, channel.id);
+    expect(first).toBeInstanceOf(Date);
+    await db.channelReadState.updateMany({ where: { workerId: worker.id }, data: { lastCheckedAt: new Date('2026-01-01T00:00:00Z') } });
+    await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0, mentionsRef: worker.id }, userCtx({ sessionId }));
+    expect((await checkedAt(worker.id, channel.id))!.getTime()).toBeGreaterThan(new Date('2026-01-01T00:00:00Z').getTime());
+  });
+
+  it('a bare mark-read (nothing new) is a check; a refused mark-read (beyond the watermark) is not', async () => {
+    await expect(M.markOwnTeamChatRead({}, { appRef: app.id, channelRef: channel.id, sessionRef: sessionId, seq: 99 }, userCtx())).rejects.toThrow();
+    expect(await checkedAt(worker.id, channel.id)).toBeNull();
+    await M.markOwnTeamChatRead({}, { appRef: app.id, channelRef: channel.id, sessionRef: sessionId, seq: 0 }, userCtx());
+    expect(await checkedAt(worker.id, channel.id)).toBeInstanceOf(Date);
+  });
+
+  it('a read by a person (no worker session) checks nothing', async () => {
+    await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0 }, userCtx());
+    expect(await db.channelReadState.count({ where: { lastCheckedAt: { not: null } } })).toBe(0);
+  });
+
+  it("another worker's read stamps only that worker", async () => {
+    const iris = await addWorker('Iris');
+    await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0 }, userCtx({ sessionId: iris.sessionId }));
+    expect(await checkedAt(iris.id, channel.id)).toBeInstanceOf(Date);
+    expect(await checkedAt(worker.id, channel.id)).toBeNull();
+  });
+
+  it('a read of another channel does not count', async () => {
+    const other = await ensureChannelWithRoot(db, { memoryId: memory.id, loc: 'chats:ops', name: 'ops', createdBy: user.id });
+    await db.registerEntry.create({ data: { id: generateId(), appId: app.id, channelId: other.channel.id, attendeeWorkerId: worker.id, role: 'BOTH' } });
+    await M.markOwnTeamChatRead({}, { appRef: app.id, channelRef: other.channel.id, sessionRef: sessionId, seq: 0 }, userCtx());
+    expect(await checkedAt(worker.id, other.channel.id)).toBeNull();
+    expect(await checkedAt(worker.id, channel.id)).toBeNull();
+  });
+
+  it('#2013: a stamped @all post appears in the worker\'s own mentions read (the mentions-from-mark read)', async () => {
+    const iris = await addWorker('Iris');
+    await post('everyone: standup moved', { authorWorkerId: iris.id, mentions: ['all'], broadcastWakes: true });
+    await post('plain chatter, no tag');
+    const page = await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0, mentionsRef: worker.id }, userCtx({ sessionId }));
+    expect(page.items.map((m: { seq: number }) => m.seq)).toEqual([1]);
+  });
+
+  describe('channel.check.miss (log-only diagnostics)', () => {
+    const misses = () => db.appLogEntry.findMany({ where: { message: 'channel.check.miss' }, orderBy: { createdAt: 'asc' } });
+
+    it('a counted check logs nothing', async () => {
+      await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0 }, userCtx({ sessionId }));
+      expect(await checkedAt(worker.id, channel.id)).toBeInstanceOf(Date);
+      expect(await misses()).toEqual([]);
+    });
+
+    it('a request that NAMED a session the server refused logs BINDING_REFUSED (reason and route only) and changes nothing else', async () => {
+      await post('one');
+      const page = await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0 }, userCtx({ sessionBindingRefused: true }));
+      expect(page.items.map((m: { seq: number }) => m.seq)).toEqual([1]);
+      expect(await checkedAt(worker.id, channel.id)).toBeNull();
+      const logs = await misses();
+      expect(logs).toHaveLength(1);
+      expect(logs[0]).toMatchObject({ appId: app.id, level: 'WARN', sessionId: null, detail: { reason: 'BINDING_REFUSED', via: 'read' } });
+      expect(Object.keys(logs[0].detail as object).sort()).toEqual(['reason', 'via']); // no worker, channel or content
+    });
+
+    it('a session that is not the caller\'s own live worker session logs SESSION_NOT_OWN_LIVE, carrying that session id', async () => {
+      await db.session.update({ where: { id: sessionId }, data: { endedAt: new Date() } });
+      await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0 }, userCtx({ sessionId }));
+      expect(await checkedAt(worker.id, channel.id)).toBeNull();
+      const logs = await misses();
+      expect(logs).toHaveLength(1);
+      expect(logs[0]).toMatchObject({ sessionId, detail: { reason: 'SESSION_NOT_OWN_LIVE', via: 'read' } });
+    });
+
+    it("a worker of another App reading this App's team channel logs CROSS_APP and stamps nothing", async () => {
+      const foreign = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: otherApp.id, agentId: agent.id, name: 'Foreign', slug: 'foreign' } });
+      await db.registerEntry.create({ data: { id: generateId(), appId: otherApp.id, channelId: channel.id, attendeeWorkerId: foreign.id, role: 'BOTH' } });
+      const foreignSession = await db.session.create({ data: { id: generateId(), appId: otherApp.id, userId: user.id, workerId: foreign.id, agentId: agent.id, type: 'DEVELOPER', startedAt: new Date() } });
+      await Q.channelMessages({}, { channelRef: channel.id, sinceSeq: 0, beforeSeq: null, mentionsRef: null, limit: 20, offset: 0 }, userCtx({ sessionId: foreignSession.id }));
+      expect(await checkedAt(foreign.id, channel.id)).toBeNull();
+      const logs = await misses();
+      expect(logs).toHaveLength(1);
+      expect(logs[0]).toMatchObject({ sessionId: foreignSession.id, detail: { reason: 'CROSS_APP', via: 'read' } });
+    });
+
+    it('a dead session reading an ordinary (non-team) channel logs nothing either: only the team channel can miss', async () => {
+      const other = await ensureChannelWithRoot(db, { memoryId: memory.id, loc: 'chats:ops2', name: 'ops2', createdBy: user.id });
+      await db.registerEntry.create({ data: { id: generateId(), appId: app.id, channelId: other.channel.id, attendeeWorkerId: worker.id, role: 'BOTH' } });
+      await db.session.update({ where: { id: sessionId }, data: { endedAt: new Date() } });
+      await Q.channelMessages({}, { channelRef: other.channel.id, sinceSeq: 0, beforeSeq: null, mentionsRef: null, limit: 20, offset: 0 }, userCtx({ sessionId }));
+      expect(await misses()).toEqual([]);
+    });
+
+    it('a read of an ordinary (non-team) channel logs nothing even though it stamps nothing', async () => {
+      const other = await ensureChannelWithRoot(db, { memoryId: memory.id, loc: 'chats:ops', name: 'ops', createdBy: user.id });
+      await db.registerEntry.create({ data: { id: generateId(), appId: app.id, channelId: other.channel.id, attendeeWorkerId: worker.id, role: 'BOTH' } });
+      await Q.channelMessages({}, { channelRef: other.channel.id, sinceSeq: 0, beforeSeq: null, mentionsRef: null, limit: 20, offset: 0 }, userCtx({ sessionId }));
+      expect(await misses()).toEqual([]);
+    });
   });
 });

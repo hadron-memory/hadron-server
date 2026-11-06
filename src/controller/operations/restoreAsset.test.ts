@@ -4,10 +4,14 @@ import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../../lib/id.js';
 import { ASSET_RETENTION_WINDOW_MS } from '../../lib/asset/retention.js';
 import { restoreAsset } from './restoreAsset.js';
+import { resetAssetBytesMissingDedupe } from '../../lib/asset/bytesMissingAlarm.js';
 import { resolvers } from '../../api/graphql/schema/resolvers.js';
 import { isOrgAdminFor as isAdminFor } from '../../api/graphql/schema/resolvers.helpers.js';
 
 const headObjectMock = vi.hoisted(() => vi.fn());
+const captureMessage = vi.hoisted(() => vi.fn());
+
+vi.mock('@sentry/node', () => ({ captureMessage }));
 
 vi.mock('../../integrations/r2/client.js', () => ({
   headObject: headObjectMock,
@@ -42,6 +46,8 @@ async function seed(over: { deletedAt?: Date | null; uploadedBy?: string } = {})
 beforeEach(async () => {
   await cleanDb(db);
   headObjectMock.mockReset();
+  captureMessage.mockReset();
+  resetAssetBytesMissingDedupe();
   headObjectMock.mockResolvedValue({ exists: true, contentLength: 1024, contentType: 'application/pdf' });
 
   org = await db.organization.create({
@@ -149,14 +155,39 @@ describe('restoreAsset', () => {
     await expect(
       restoreAsset(db, { userId: user.id }, { assetId }, isAdminFor),
     ).rejects.toMatchObject({ code: 'ASSET_BYTES_GONE' });
+    // Expected, not an inconsistency (#1140): the bytes are meant to be gone.
+    expect(captureMessage).not.toHaveBeenCalled();
+    expect(headObjectMock).not.toHaveBeenCalled();
   });
 
-  it('rejects with ASSET_BYTES_GONE when the R2 object is gone', async () => {
+  it('rejects with ASSET_BYTES_GONE and alarms when a row INSIDE the window has no object', async () => {
     await seed();
     headObjectMock.mockResolvedValueOnce({ exists: false });
     await expect(
       restoreAsset(db, { userId: user.id }, { assetId }, isAdminFor),
-    ).rejects.toMatchObject({ code: 'ASSET_BYTES_GONE' });
+    ).rejects.toMatchObject({
+      code: 'ASSET_BYTES_GONE',
+      message: expect.stringMatching(/missing from storage.*within its retention window/i),
+    });
+    expect(captureMessage).toHaveBeenCalledTimes(1);
+    const [, ctx] = captureMessage.mock.calls[0];
+    expect(ctx.tags['asset.bytes_missing']).toBe('true');
+    expect(ctx.fingerprint).toEqual(['asset.bytes_missing', assetId]);
+  });
+
+  it('does not alarm when the object is present', async () => {
+    await seed();
+    await restoreAsset(db, { userId: user.id }, { assetId }, isAdminFor);
+    expect(captureMessage).not.toHaveBeenCalled();
+  });
+
+  it('does not alarm when headObject itself fails (a store outage is not a missing object)', async () => {
+    await seed();
+    headObjectMock.mockRejectedValueOnce(new Error('503 store down'));
+    await expect(
+      restoreAsset(db, { userId: user.id }, { assetId }, isAdminFor),
+    ).rejects.toThrow(/503/);
+    expect(captureMessage).not.toHaveBeenCalled();
   });
 
   it('rejects non-uploader, non-admin callers with PERMISSION_DENIED', async () => {

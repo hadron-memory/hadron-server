@@ -1,3 +1,5 @@
+import { buildSchema, type GraphQLObjectType } from 'graphql';
+import { typeDefs } from './typeDefs.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #964 — castWorkerPreview: the dry-run for the one IRREVERSIBLE act in the
@@ -15,6 +17,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { workerSlugBase } from '../../../lib/workerSlug.js';
+import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -84,11 +87,11 @@ beforeEach(async () => {
       orgId: org.id,
       name: 'CWP Backend Engineer',
       personaRole: 'backend-engineer',
-      systemPrompt: 'You are {{name}}, a {{role}}.',
     },
     ctx(admin.id),
   );
   roleAgent = { id: role.id };
+  await serveAgentBootPrompt(db, role.id, 'You are {{worker.name}}, a {{worker.role}}.');
 
   app = await db.app.create({
     data: { id: generateId(), organizationId: org.id, name: 'CWP Team App', urn: `${org.urn}:team` },
@@ -147,14 +150,13 @@ describe('#964 — castWorkerPreview', () => {
     );
   });
 
-  it('explicit name: free previews with the override appended; taken refuses WORKER_NAME_TAKEN (retired included)', async () => {
+  it('explicit name: free previews the served prompt with the name bound; taken refuses WORKER_NAME_TAKEN (retired included)', async () => {
     const p = await preview(ctx(admin.id), {
       agentRef: roleAgent.id,
       name: 'Zoe',
-      promptOverride: 'Be terse.',
     });
     expect(p.name).toBe('Zoe');
-    expect(p.prompt).toBe('You are Zoe, a backend-engineer.\n\nBe terse.');
+    expect(p.prompt).toBe('You are Zoe, a backend-engineer.');
     await db.worker.create({
       data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: roleAgent.id, name: 'zoe', slug: 'zoe', retiredAt: new Date() },
     });
@@ -162,6 +164,22 @@ describe('#964 — castWorkerPreview', () => {
       preview(ctx(admin.id), { agentRef: roleAgent.id, name: 'Zoe' }),
       'WORKER_NAME_TAKEN',
     );
+  });
+
+  it('binds {{worker.name}} in the preview prompt with the new variable set (#2049)', async () => {
+    await serveAgentBootPrompt(db, roleAgent.id, 'You are {{worker.name}}, the {{worker.role}}.');
+    const p = await preview(ctx(admin.id), { role: 'backend-engineer', name: 'Gwen' });
+    expect(p.prompt).toBe('You are Gwen, the backend-engineer.');
+    expect(p.hasNamePlaceholder).toBeNull();
+  });
+
+  it('the SDL keeps hasNamePlaceholder on TeamRole and CastWorkerPreview, deprecated (#2049)', () => {
+    const schema = buildSchema(typeDefs.replace('#graphql', ''), { assumeValidSDL: true });
+    for (const type of ['TeamRole', 'CastWorkerPreview']) {
+      const field = (schema.getType(type) as GraphQLObjectType).getFields().hasNamePlaceholder;
+      expect(field.deprecationReason).toMatch(/#2049/);
+      expect(String(field.type)).toBe('Boolean');
+    }
   });
 
   it('typed refusals behave identically to the cast (the point of a preview)', async () => {
@@ -181,27 +199,25 @@ describe('#964 — castWorkerPreview', () => {
     );
   });
 
-  it('flags a nameless template before the name is burned', async () => {
-    await db.agent.update({
-      where: { id: roleAgent.id },
-      data: { systemPrompt: 'You are a {{role}}.' },
-    });
+  it('binds a template without a name token as written; hasNamePlaceholder is retired and null (#2049)', async () => {
+    await serveAgentBootPrompt(db, roleAgent.id, 'You are a {{worker.role}}.');
     const p = await preview(ctx(admin.id), { role: 'backend-engineer', name: 'Gwen' });
-    expect(p.hasNamePlaceholder).toBe(false);
+    expect(p.hasNamePlaceholder).toBeNull();
     expect(p.prompt).toBe('You are a backend-engineer.');
   });
 
-  it('detection shares the composer\'s exact token: "{{ name }}" is NOT bound (#985 review)', async () => {
-    // applyPersonaTemplate substitutes the exact token {{name}} only — a
-    // whitespace-tolerant probe would bless precisely the template that
-    // silently produces a nameless worker.
-    await db.agent.update({
-      where: { id: roleAgent.id },
-      data: { systemPrompt: 'You are {{ name }}, a {{role}}.' },
-    });
+  it('binds only the exact token: "{{ worker.name }}" stays literal, and the retired field stays null (#985 review, #2049)', async () => {
+    await serveAgentBootPrompt(db, roleAgent.id, 'You are {{ worker.name }}, a {{worker.role}}.');
     const p = await preview(ctx(admin.id), { role: 'backend-engineer', name: 'Gwen' });
-    expect(p.hasNamePlaceholder).toBe(false);
-    expect(p.prompt).toBe('You are {{ name }}, a backend-engineer.');
+    expect(p.hasNamePlaceholder).toBeNull();
+    expect(p.prompt).toBe('You are {{ worker.name }}, a backend-engineer.');
+  });
+
+  it('leaves legacy {{name}} / {{role}} literal in the preview while the closed set binds (#2902, #1772 step 3)', async () => {
+    // The preview is a live path: only a retained record replay still binds the legacy tokens (applyRecordedVariables).
+    await serveAgentBootPrompt(db, roleAgent.id, 'Hi {{name}}, a {{role}}: {{worker.name}} / {{worker.role}}.');
+    const p = await preview(ctx(admin.id), { role: 'backend-engineer', name: 'Gwen' });
+    expect(p.prompt).toBe('Hi {{name}}, a {{role}}: Gwen / backend-engineer.');
   });
 
   it('takes the MINT gate, not a read gate: outsiders and pure App-key principals are refused', async () => {

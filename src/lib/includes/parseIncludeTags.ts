@@ -85,6 +85,25 @@ export function parseIncludeTags(content: string): IncludeTag[] {
   return locateIncludeTags(content).map(({ index: _index, ...tag }) => tag);
 }
 
+/**
+ * The include-shaped text that `locateIncludeTags` skips because it is written
+ * as code, with each span's offset (#2135). Same `maskCode`, so the splice and
+ * the renderer cannot disagree about what is code. Never throws.
+ */
+export function locateLiteralIncludeTags(content: string): Array<{ index: number; raw: string }> {
+  if (!content.includes('{{>')) return [];
+  const masked = maskCode(content);
+  const active: Array<[number, number]> = [...masked.matchAll(TAG)].map(m => [m.index!, m.index! + m[0].length]);
+  const literal: Array<{ index: number; raw: string }> = [];
+  for (const m of content.matchAll(TAG)) {
+    const start = m.index!;
+    const end = start + m[0].length;
+    if (active.some(([a, b]) => start < b && a < end)) continue;
+    literal.push({ index: start, raw: m[0] });
+  }
+  return literal;
+}
+
 /** `parseIncludeTags` with each tag's offset in `content`, for the reader that splices resolved text in (#2041). */
 export function locateIncludeTags(content: string): Array<IncludeTag & { index: number }> {
   if (!content.includes('{{>')) return [];
@@ -103,7 +122,10 @@ export function locateIncludeTags(content: string): Array<IncludeTag & { index: 
       else if (p === 'signed' && !settings.signed) settings.signed = true;
       else throw new IncludeSyntaxError(raw, `unknown or repeated setting "${p}"`);
     }
-    if (target.startsWith('hrn:') || target.startsWith('urn:')) {
+    if (target.startsWith('hrn:node:')) {
+      // cor:dmo:150:02 / R78: include URNs use only flat v2, even though
+      // the general URN parser deliberately still accepts legacy aliases.
+      if (target.includes('::')) throw new IncludeSyntaxError(raw, 'target must be a flat v2 node URN');
       try {
         splitNodeUrn(target);
       } catch {

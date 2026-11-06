@@ -26,6 +26,7 @@
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { ensureAppMember } from './ensureAppMember.js';
 import { AppNotFoundError } from '../../lib/entityRef/errors.js';
+import { loadOfferedMemberRoles } from '../../lib/memberRoles.js';
 
 /**
  * #1714: the App's Agent has not opted into self-service joining (no valid
@@ -120,7 +121,9 @@ async function resolveSelfJoinRole(db: PrismaClient | Prisma.TransactionClient, 
   });
   const policy = (appAgent?.agent?.installationPolicy ?? {}) as InstallationPolicyShape;
   const role = policy.selfJoinRole;
-  const memberRoles = Array.isArray(policy.memberRoles) ? policy.memberRoles : [];
+  // #2171 (R211): the role must be offered by the App, the union over its
+  // installed Agents, the same reader ensureAppMember decides with.
+  const { roles: memberRoles } = await loadOfferedMemberRoles(db, appId);
   if (typeof role !== 'string' || role === NEVER_SELF_GRANTED || !memberRoles.includes(role)) {
     throw new SelfJoinNotAllowedError(appId);
   }

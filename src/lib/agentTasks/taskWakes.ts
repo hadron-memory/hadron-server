@@ -37,7 +37,7 @@ import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { loadWorkersActivity } from '../../api/graphql/schema/resolvers.worker.js';
 import { isWorkerDormant, toNaiveUtc } from '../sessionActivity.js';
-import { ASSIGNED_EVENT_TYPES } from './events.js';
+import { ASSIGNED_EVENT_TYPES, PASSIVE_EVENT_TYPES } from './events.js';
 import { alarmEpisodeKey, currentAlarmEpisodes } from './stall.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
@@ -53,6 +53,8 @@ export type PendingTaskWake = {
   event: TaskWakeEvent;
   /** The team's own words for the task: what the nudge names (not event payload; cor:agt:050:11). */
   title: string;
+  /** #2553: the task's handle (`AT3.405`), printed first in the nudge. */
+  handle: string;
   at: Date;
   /** S7 (R90): the held count the assignment raise stored on the event (assigned events only). */
   standbyHeld?: number;
@@ -63,6 +65,21 @@ const ASSIGNED_KIND: Record<(typeof ASSIGNED_EVENT_TYPES)[number], TaskWakeEvent
   'task.reassigned': 'REASSIGNED',
   'assignment.matched': 'MATCHED',
 };
+
+/**
+ * The task-less alarm types (#2755, #2014): how each one's nudge title and handle are built (words only, never evidence),
+ * and whether delivery needs an open episode. Only the dark-worker alarm's episode is a condition (it ends when the worker
+ * is no longer dark); the post-limit alarm is delivered and escalated until acknowledged, like any alarm.
+ */
+const TASKLESS_ALARMS = [
+  { type: 'alarm.dark-worker', handle: 'DARK', openEpisodeRequired: 'd',
+    title: Prisma.sql`sw.name || ' has gone dark (' || COALESCE(e.payload ->> 'reason', 'dark') || ')'` },
+  // #2763: stops with its episode, which ends at the coordinator's next counted assignment.
+  { type: 'alarm.coordinator-cadence', handle: 'CADENCE', openEpisodeRequired: 'c',
+    title: Prisma.sql`sw.name || ' has stopped assigning work'` },
+  { type: 'alarm.post-limit', handle: 'LIMIT', openEpisodeRequired: false,
+    title: Prisma.sql`sw.name || '''s team-chat post was refused by the post limit' || CASE WHEN e.payload ->> 'limit' IS NULL THEN '' ELSE ' (' || (e.payload ->> 'limit') || ')' END` },
+] as const;
 
 const OPEN = Prisma.sql`('pending', 'started')`;
 
@@ -89,8 +106,8 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
   const ids = Prisma.join(workerIds);
   const assignedTypes = Prisma.join([...ASSIGNED_EVENT_TYPES]);
 
-  type Row = { workerId: string; taskId: string; eventId: string; type: string; title: string; at: Date; standbyHeld?: number };
-  const [assigned, finished, alarms, endSession] = await Promise.all([
+  type Row = { workerId: string; taskId: string; eventId: string; type: string; title: string; handle: string; at: Date; standbyHeld?: number };
+  const [assigned, finished, alarms, endSession, darkAlarms] = await Promise.all([
     // The task's LATEST assignment event, to its current worker assignee, who has not acted on the task since
     // (an assignment the worker made itself counts as acting: `>=` includes the event).
     db.$queryRaw<Row[]>(Prisma.sql`
@@ -101,7 +118,7 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
         WHERE t.assignee_worker_id IN (${ids}) AND t.status IN ${OPEN} AND e.type IN (${assignedTypes})
         ORDER BY e.task_id, e.created_at DESC, e.id DESC
       )
-      SELECT l.subject_worker_id AS "workerId", t.id AS "taskId", l.id AS "eventId", l.type, t.title, l.created_at AS at,
+      SELECT l.subject_worker_id AS "workerId", t.id AS "taskId", l.id AS "eventId", l.type, t.title, t.handle, l.created_at AS at,
              COALESCE((l.payload ->> 'standbyHeld')::int, 0) AS "standbyHeld"
       FROM latest l
       JOIN agent_tasks t ON t.id = l.task_id
@@ -109,12 +126,12 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
       WHERE l.subject_worker_id = t.assignee_worker_id
         AND ${liveApp('t')}
         AND NOT EXISTS (SELECT 1 FROM agent_team_events x
-                        WHERE x.task_id = t.id AND x.actor_worker_id = l.subject_worker_id AND x.created_at >= l.created_at)
+                        WHERE x.task_id = t.id AND x.actor_worker_id = l.subject_worker_id AND x.created_at >= l.created_at AND x.type NOT LIKE 'app.%' AND x.type NOT IN (${Prisma.join([...PASSIVE_EVENT_TYPES])}))
         AND ${undelivered('l.subject_worker_id', 'l.id', '0')}`),
     // A child's finish, for its owner, while the parent is open and the owner has not acted on the parent since.
     // An owner who finished the child itself already knows.
     db.$queryRaw<Row[]>(Prisma.sql`
-      SELECT c.owner_worker_id AS "workerId", c.id AS "taskId", e.id AS "eventId", e.type, c.title, e.created_at AS at
+      SELECT c.owner_worker_id AS "workerId", c.id AS "taskId", e.id AS "eventId", e.type, c.title, c.handle, e.created_at AS at
       FROM agent_team_events e
       JOIN agent_tasks c ON c.id = e.task_id
       JOIN agent_tasks p ON p.id = c.parent_task_id
@@ -123,11 +140,11 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
         AND e.actor_worker_id IS DISTINCT FROM c.owner_worker_id
         AND ${liveApp('c')}
         AND NOT EXISTS (SELECT 1 FROM agent_team_events x
-                        WHERE x.task_id = p.id AND x.actor_worker_id = c.owner_worker_id AND x.created_at >= e.created_at)
+                        WHERE x.task_id = p.id AND x.actor_worker_id = c.owner_worker_id AND x.created_at >= e.created_at AND x.type NOT LIKE 'app.%' AND x.type NOT IN (${Prisma.join([...PASSIVE_EVENT_TYPES])}))
         AND ${undelivered('c.owner_worker_id', 'e.id', '0')}`),
     // An unacknowledged alarm's highest woken chain position, when that position names one of these workers.
     db.$queryRaw<(Row & { chainIndex: number; episodeStart: Date | null })[]>(Prisma.sql`
-      SELECT (e.chain -> s.idx ->> 'workerId') AS "workerId", t.id AS "taskId", e.id AS "eventId", e.type, t.title,
+      SELECT (e.chain -> s.idx ->> 'workerId') AS "workerId", t.id AS "taskId", e.id AS "eventId", e.type, t.title, t.handle,
              e.created_at AS at, s.idx AS "chainIndex", e.episode_start AS "episodeStart"
       FROM agent_team_events e
       JOIN agent_tasks t ON t.id = e.task_id
@@ -143,7 +160,7 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
     // reads the request on the task it just finished.
     db.$queryRaw<Row[]>(Prisma.sql`
       SELECT q.worker_id AS "workerId", t.id AS "taskId", q.event_id AS "eventId", 'task.session-end-requested' AS type,
-             t.title, q.requested_at AS at
+             t.title, t.handle, q.requested_at AS at
       FROM task_session_end_requests q
       JOIN agent_tasks t ON t.id = q.task_id
       JOIN sessions s ON s.id = q.session_id AND s.ended_at IS NULL AND s.deleted_at IS NULL
@@ -152,19 +169,43 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
         AND q.requested_by_worker_id IS DISTINCT FROM q.worker_id
         AND ${liveApp('t')}
         AND ${undelivered('q.worker_id', 'q.event_id', '0')}`),
+    // #2755, #2014: a task-less alarm (dark worker, post limit). Its nudge is built from the worker's name and words only,
+    // never evidence; `taskId` carries the ALARM's id. What differs per type is the table above: how the title and handle
+    // are built, and whether delivery needs an open episode (a dark-worker alarm stops with its episode; a post-limit
+    // alarm stays open until acknowledged, its episode only de-duplicates it).
+    db.$queryRaw<(Row & { chainIndex: number })[]>(Prisma.sql`
+      SELECT (e.chain -> s.idx ->> 'workerId') AS "workerId", e.id AS "taskId", e.id AS "eventId", e.type,
+             CASE e.type ${Prisma.join(TASKLESS_ALARMS.map((t) => Prisma.sql`WHEN ${t.type}::text THEN ${t.title}`), ' ')} END AS title,
+             CASE e.type ${Prisma.join(TASKLESS_ALARMS.map((t) => Prisma.sql`WHEN ${t.type}::text THEN ${t.handle}::text`), ' ')} END AS handle,
+             e.created_at AS at, s.idx AS "chainIndex"
+      FROM agent_team_events e
+      LEFT JOIN dark_worker_episodes d ON d.event_id = e.id
+      LEFT JOIN coordinator_cadence_episodes c ON c.event_id = e.id
+      JOIN workers sw ON sw.id = e.subject_worker_id
+      JOIN LATERAL (SELECT max(chain_index) AS idx FROM agent_team_alarm_schedule
+                    WHERE event_id = e.id AND woken_at IS NOT NULL) s ON s.idx IS NOT NULL
+      JOIN workers w ON w.id = (e.chain -> s.idx ->> 'workerId') AND w.app_id = e.app_id
+      WHERE e.type IN (${Prisma.join(TASKLESS_ALARMS.map((t) => Prisma.sql`${t.type}::text`))}) AND e.severity = 'alarm' AND e.acknowledged_at IS NULL
+        AND (${Prisma.join(TASKLESS_ALARMS.map((t) => t.openEpisodeRequired === 'd' ? Prisma.sql`(e.type = ${t.type}::text AND d.ended_at IS NULL AND d.id IS NOT NULL)` : t.openEpisodeRequired === 'c' ? Prisma.sql`(e.type = ${t.type}::text AND c.ended_at IS NULL AND c.id IS NOT NULL)` : Prisma.sql`e.type = ${t.type}::text`), ' OR ')})
+        AND (e.chain -> s.idx ->> 'workerId') IN (${ids})
+        AND ${liveApp('e')}
+        AND ${undelivered("(e.chain -> s.idx ->> 'workerId')", 'e.id', 's.idx')}`),
   ]);
 
   const current = await currentAlarmEpisodes(db, alarms, now);
   const push = (w: PendingTaskWake) => out.set(w.workerId, [...(out.get(w.workerId) ?? []), w]);
   for (const r of assigned) {
-    push({ workerId: r.workerId, taskId: r.taskId, eventId: r.eventId, title: r.title, at: r.at, chainIndex: 0,
+    push({ workerId: r.workerId, taskId: r.taskId, eventId: r.eventId, title: r.title, handle: r.handle, at: r.at, chainIndex: 0,
       event: ASSIGNED_KIND[r.type as keyof typeof ASSIGNED_KIND], ...(r.standbyHeld ? { standbyHeld: r.standbyHeld } : {}) });
   }
   for (const r of finished) push({ ...r, chainIndex: 0, event: 'CHILD_FINISHED' });
   for (const r of endSession) push({ ...r, chainIndex: 0, event: 'END_SESSION' });
   for (const r of alarms) {
     if (!r.episodeStart || !current.has(alarmEpisodeKey(r.taskId, r.type, r.episodeStart))) continue;
-    push({ workerId: r.workerId, taskId: r.taskId, eventId: r.eventId, title: r.title, at: r.at, chainIndex: r.chainIndex, event: 'ALARM' });
+    push({ workerId: r.workerId, taskId: r.taskId, eventId: r.eventId, title: r.title, handle: r.handle, at: r.at, chainIndex: r.chainIndex, event: 'ALARM' });
+  }
+  for (const r of darkAlarms) {
+    push({ workerId: r.workerId, taskId: r.taskId, eventId: r.eventId, title: r.title, handle: r.handle, at: r.at, chainIndex: r.chainIndex, event: 'ALARM' });
   }
   for (const list of out.values()) {
     list.sort((a, b) => a.at.getTime() - b.at.getTime() || a.eventId.localeCompare(b.eventId) || a.chainIndex - b.chainIndex);

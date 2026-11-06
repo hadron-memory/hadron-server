@@ -9,6 +9,7 @@
  * classification.
  */
 
+import { restoreChkMemoryClassAppId } from '../memoryClassCheck.js';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { Client } from 'pg';
 import { db } from '../../integrations/db/client.js';
@@ -52,7 +53,7 @@ afterEach(async () => {
   `);
   await pgClient.query(`ALTER TABLE memories ALTER COLUMN class SET NOT NULL`);
   // Restore each constraint to its CURRENT definition (must stay in sync with
-  // prisma/post-push.sql + src/test/globalSetup.ts) — re-adding a stale
+  // prisma/post-push.sql, the test template's only DDL source since #434) — re-adding a stale
   // definition clobbers the constraint for every test file that runs after
   // this one. 034-memory-class-access re-keyed ownership onto class and
   // relaxed the app_id / agent requirements.
@@ -60,15 +61,7 @@ afterEach(async () => {
     ALTER TABLE memories ADD CONSTRAINT chk_personal_visibility_user
       CHECK ((class IN ('personal', 'private')) = (user_id IS NOT NULL))
   `);
-  await pgClient.query(`
-    ALTER TABLE memories
-      ADD CONSTRAINT chk_memory_class_app_id
-      CHECK (
-        (class = 'app' AND app_id IS NOT NULL)
-        OR (class = 'system' AND app_id IS NULL)
-        OR (class IN ('knowledge', 'group', 'personal', 'private'))
-      )
-  `);
+  await restoreChkMemoryClassAppId((sql) => pgClient.query(sql));
   await pgClient.end();
 });
 

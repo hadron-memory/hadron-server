@@ -1,3 +1,4 @@
+import { stampEmbeddingObligation } from '../../../services/embedding/obligation.js';
 /**
  * #1294: the spec-only bulk door. Selection is explicit and belongs to one
  * draft corpus. Apply locks that corpus and every selected row, rebuilds the
@@ -19,19 +20,19 @@ import {
 import {
   computeRevisionStateHash,
   createNodeRevision,
+  diffNodeChanges,
   buildNodeRevisionSnapshot,
   editorFromAuth,
   revisionStateHashRefreshMarker,
 } from '../../../lib/nodeRevisionSnapshot.js';
-import { getMemoryEncryptionInfo, decryptNodeFields, encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
+import { decryptNodeFields, encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
-import { clearNodeAuthorship } from '../../../lib/nodeAuthorship.js';
+import { assertAuthoring, authoringFromRequest, type AuthoredWith } from '../../../lib/authoringAttestation.js';
+import { authoredContentChanged, clearNodeAuthorship } from '../../../lib/nodeAuthorship.js';
 import { recordNodeUsage, toUsageNodeRefs } from '../../../lib/usageRecorder.js';
 import { enqueueNodeEmbedding } from '../../../services/embedding/enqueue.js';
 import { publishNodeWritten } from '../../../lib/events/nodeWritten.js';
-import { writeNodeToGit } from '../../../integrations/github/writeNodeToGit.js';
-import { deserializeTags } from '../../../integrations/db/provider.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import {
   type Context,
@@ -39,9 +40,12 @@ import {
   concealUnreadableDenial,
   getAccessibleMemoryIds,
 } from './resolvers.helpers.js';
+import { attachIncludePinWarnings } from '../../../lib/includes/plainPinWarnings.js';
 import { assertIncludesWritable, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
 
 export interface SpecSearchReplaceInput {
+  /** #1328 — one claim for every changed spec. */
+  authoredWith?: AuthoredWith | null;
   memoryRef: string;
   nodeIds: string[];
   oldText: string;
@@ -63,9 +67,13 @@ interface ChangedNode {
   raw: NodeRow;
   changed: { content?: string; abstract?: string | null };
   plaintext: { content: string | null; abstract: string | null };
+  /** #2041 S2b — the content before replacement, read under the apply transaction's row locks. */
+  storedContent: string | null;
   isEncrypted: boolean;
   contentChanged: boolean;
   abstractChanged: boolean;
+  /** #1328 — a match is not a change: replacing a text with itself authors nothing. */
+  authoredChange: boolean;
   total: number;
   fields: Array<{ field: 'content' | 'abstract'; matches: number }>;
 }
@@ -274,9 +282,11 @@ export async function searchReplaceInSpecNodes(
         raw: row,
         changed: {},
         plaintext: { content: pt.content, abstract: pt.abstract },
+        storedContent: pt.content,
         isEncrypted: encryption.isEncrypted,
         contentChanged: false,
         abstractChanged: false,
+        authoredChange: false,
         total: 0,
         fields: [],
       };
@@ -306,6 +316,7 @@ export async function searchReplaceInSpecNodes(
           replacement.fields.push({ field: 'abstract', matches: next.count });
         }
       }
+      replacement.authoredChange = authoredContentChanged(diffNodeChanges(pt, replacement.changed));
       if (replacement.total > 0) changed.push(replacement);
     }
 
@@ -375,6 +386,11 @@ export async function searchReplaceInSpecNodes(
       throw error('The replacement exceeds maxNodesChanged.', 'SEARCH_REPLACE_MAX_NODES_CHANGED');
     }
     for (const node of current.changed) {
+      // #1328 — a spec's role rule answers to the same claim as any other writer.
+      const authoredStamp = await assertAuthoring(tx, memoryId, {
+        priorRole: node.raw.role, priorRunnable: node.raw.isRunnable,
+        role: node.raw.role, runnable: node.raw.isRunnable, mintHuman: true, authoredChange: node.authoredChange,
+      }, authoringFromRequest(ctx, input.authoredWith));
       await createNodeRevision(tx, buildNodeRevisionSnapshot(node.raw, editorFromAuth(ctx), {
         revLabel: input.reason,
         changes: Object.keys(node.changed),
@@ -396,14 +412,18 @@ export async function searchReplaceInSpecNodes(
         data.abstractOriginHash = computeContentHash(node.plaintext.content);
       }
       data.revisionContentHash = revisionStateHashRefreshMarker();
-      Object.assign(data, clearNodeAuthorship());
+      if (node.authoredChange) Object.assign(data, authoredStamp ?? clearNodeAuthorship());
       await tx.node.update({ where: { id: node.raw.id }, data });
+      if (node.contentChanged || node.abstractChanged) {
+        node.raw.embeddingWorkToken = await stampEmbeddingObligation(tx, node.raw.id, memoryId);
+      }
       // #2040 — a content rewrite re-checks its include tags inside the batch.
       if (node.contentChanged) {
         const text = node.plaintext.content;
         readableForIncludes ??= text?.includes('{{>') ? await getAccessibleMemoryIds(ctx) : null;
-        const tags = await assertIncludesWritable(tx, node.raw, text, readableForIncludes);
-        await syncDerivedIncludesEdges(tx, node.raw, tags, readableForIncludes);
+        const stored = { storedPlaintext: node.storedContent };
+        const tags = await assertIncludesWritable(tx, node.raw, text, readableForIncludes, undefined, stored);
+        await syncDerivedIncludesEdges(tx, node.raw, tags, readableForIncludes, stored);
       }
     }
     return current;
@@ -416,6 +436,7 @@ export async function searchReplaceInSpecNodes(
     if (node.contentChanged || node.abstractChanged) {
       void enqueueNodeEmbedding(ctx.db, {
         nodeId: node.raw.id,
+        workToken: node.raw.embeddingWorkToken,
         memoryId,
         plaintext: node.plaintext,
       });
@@ -426,28 +447,10 @@ export async function searchReplaceInSpecNodes(
       ownerRepo: node.raw.ownerRepo ?? '',
       clientId: ctx.clientId,
     });
-    if (node.isEncrypted) {
-      void (async () => {
-        const fresh = await ctx.db.node.findUnique({
-          where: { id: node.raw.id },
-          include: { outgoingEdges: { include: { target: true } } },
-        });
-        if (!fresh) return;
-        const info = await getMemoryEncryptionInfo(ctx.db, fresh.memoryId);
-        decryptNodeFields(fresh, info);
-        await writeNodeToGit({
-          id: fresh.id, loc: fresh.loc, name: fresh.name, nodeType: fresh.nodeType,
-          alias: fresh.alias, description: fresh.description, abstract: fresh.abstract,
-          abstractOriginHash: fresh.abstractOriginHash, contentHash: fresh.contentHash,
-          content: fresh.content, tags: deserializeTags(fresh.tags) as string[],
-          seq: fresh.seq, data: fresh.data, properties: fresh.properties,
-          role: fresh.role ?? null, isRunnable: fresh.isRunnable ?? null,
-          isPlaceholder: fresh.isPlaceholder,
-          outgoingEdges: fresh.outgoingEdges ?? [],
-          mirrorRevSeq: fresh.revSeq,
-        }, node.raw.ownerRepo ?? '', ctx.clientId, fresh.memoryId);
-      })().catch((cause) => console.error('[searchReplaceInSpecNodes] git write error:', cause));
-    }
+  }
+  for (let i = 0; i < applied.changed.length; i++) {
+    const node = applied.changed[i]!;
+    if (node.contentChanged) attachIncludePinWarnings(ctx, applied.result.results[i]!, node.plaintext.content, node.storedContent);
   }
   return applied.result;
 }

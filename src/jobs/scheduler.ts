@@ -82,6 +82,7 @@ export async function schedulerTick(db: PrismaClient, now = new Date()): Promise
         triggerKind: 'SCHEDULE',
         triggerId: s.id,
         entryNodeUrn: s.entryNodeUrn,
+        entryNodeId: s.entryNodeId,
         eventData: {
           ...(s.eventData && typeof s.eventData === 'object' && !Array.isArray(s.eventData)
             ? (s.eventData as Record<string, unknown>)

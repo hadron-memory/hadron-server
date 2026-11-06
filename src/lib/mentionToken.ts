@@ -9,6 +9,8 @@
 
 /** Broadcast mentions route once to every registered destination. */
 export const BROADCAST_MENTION_TOKENS = ['all', 'team'] as const;
+/** Name reservation is unconditional, including when new bare-team routing retires. */
+export const RESERVED_WORKER_MENTION_TOKENS = ['all', 'team'] as const;
 
 /**
  * Canonical mention token of a display name — the slug both sides of the

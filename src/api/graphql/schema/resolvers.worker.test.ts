@@ -2,8 +2,8 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #974 (re-cut) — the Worker model (spec cor:dmo:050:11, cor:agt:020:01/:02).
  *
- * A persona is universal DRESSING on an Agent (`personaRole` + the
- * `systemPrompt` template with {{name}}/{{role}} placeholders); the Worker is
+ * A persona is universal DRESSING on an Agent (`personaRole` + a served boot
+ * prompt with {{worker.name}}/{{worker.role}} placeholders, #2712); the Worker is
  * the named casting of an installed agent into an App — the local identity
  * ("Iris") that does attributable work. `castWorker` mints nothing: it casts
  * an EXISTING installed agent under a name, allocating the name against the
@@ -24,9 +24,11 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { resolveReadableWorkerRef } from './resolvers.worker.js';
 import { deleteUserAccount } from '../../../controller/operations/deleteUser.js';
 import { sessionActivityAt, loadLastEventBySession, isSessionLive } from '../../../lib/sessionActivity.js';
 import { lockWorkerNames } from '../../../lib/workerName.js';
+import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -59,7 +61,7 @@ async function expectCode(p: Promise<unknown>, code: string) {
 
 /** The role-agent's persona dressing — bound per-worker at read time. */
 const TEMPLATE =
-  'You are {{name}}, a {{role}} on this team.\nWork from your own memories.';
+  'You are {{worker.name}}, a {{worker.role}} on this team.\nWork from your own memories.';
 
 let org: { id: string; urn: string };
 let admin: { id: string };
@@ -143,18 +145,18 @@ beforeEach(async () => {
   await createRoleNode(teamAgent.systemMemoryId, 'backend-engineer');
 
   // The role-agent — the persona dressing lives HERE (#974): personaRole is
-  // the role-resolution key, systemPrompt the {{name}}/{{role}} template.
+  // the role-resolution key; its served boot prompt is the {{worker.name}}/{{worker.role}} template (#2712).
   const role = await M.createAgent(
     {},
     {
       orgId: org.id,
       name: 'Backend Engineer',
       personaRole: 'backend-engineer',
-      systemPrompt: TEMPLATE,
     },
     ctx(admin.id),
   );
   roleAgent = { id: role.id, urn: role.urn, systemMemoryId: role.systemMemoryId };
+  await serveAgentBootPrompt(db, roleAgent.id, TEMPLATE);
 
   app = await db.app.create({
     data: { id: generateId(), organizationId: org.id, name: 'Team App', urn: `${org.urn}:team` },
@@ -175,7 +177,8 @@ describe('castWorker — happy path', () => {
     expect(worker.agentId).toBe(roleAgent.id);
     // Role defaults from the agent's personaRole dressing.
     expect(worker.role).toBe('backend-engineer');
-    expect(worker.promptOverride).toBeNull();
+    // #2712: a worker carries no authored prompt text of its own.
+    expect(worker).not.toHaveProperty('promptOverride');
     expect(worker.retiredAt).toBeNull();
     expect(worker.createdBy).toBe(admin.id);
     // Working memory provisioned at cast: app-class, in the App's container,
@@ -200,18 +203,11 @@ describe('castWorker — happy path', () => {
     expect(worker.appId).toBe(app.id);
   });
 
-  it('an explicit role wins over the agent personaRole', async () => {
-    const worker = await cast({ agentRef: roleAgent.id, role: 'debugger', name: 'Zoe' });
-    expect(worker.role).toBe('debugger');
-  });
-
-  it('stores a promptOverride verbatim', async () => {
-    const worker = await cast({
-      agentRef: roleAgent.id,
-      name: 'Zoe',
-      promptOverride: 'Prefer boring solutions.',
-    });
-    expect(worker.promptOverride).toBe('Prefer boring solutions.');
+  it('an explicit role beside agentRef cannot override the agent personaRole (#2458, R222)', async () => {
+    // Before R222 an explicit role won; a cast now takes the agent's own role.
+    await expectCode(cast({ agentRef: roleAgent.id, role: 'debugger', name: 'Zoe' }), 'WORKER_ROLE_OVERRIDE_REFUSED');
+    const worker = await cast({ agentRef: roleAgent.id, role: 'backend-engineer', name: 'Zoe' });
+    expect(worker.role).toBe('backend-engineer');
   });
 
   it('a blank caller-supplied name counts as ABSENT and refuses (#1050)', async () => {
@@ -328,8 +324,9 @@ describe('castWorker — agent resolution', () => {
   it('the personaRole match is case-insensitive', async () => {
     const worker = await cast({ role: 'Backend-Engineer', name: 'Zoe' });
     expect(worker.agentId).toBe(roleAgent.id);
-    // The casting's role keeps the caller's (normalized-by-trim) spelling.
-    expect(worker.role).toBe('Backend-Engineer');
+    // #2458 / R222: the casting's role is the AGENT's (cor:dmo:050:11), so its
+    // spelling, not the selector's, is what the worker carries.
+    expect(worker.role).toBe('backend-engineer');
   });
 
   it('no installed agent carries the personaRole → WORKER_AGENT_NOT_FOUND', async () => {
@@ -375,6 +372,8 @@ describe('castWorker — agent resolution', () => {
   it('agentRef without a name → WORKER_NAME_REQUIRED (#1050)', async () => {
     // Previously BAD_USER_INPUT, because with no role there was no register to
     // name. The missing thing was always the NAME, and now the error says so.
+    // #3256: this name-only case needs a valid Agent role; role refusal is judged first.
+    await db.agent.update({ where: { id: teamAgent.id }, data: { personaRole: 'test-worker' } });
     await expectCode(cast({ agentRef: teamAgent.id }), 'WORKER_NAME_REQUIRED');
   });
 
@@ -538,10 +537,11 @@ describe('#1024 — Worker.repos (resolved role affinity)', () => {
     const mutation = { operation: { operation: 'mutation' } };
 
     const shared = ctx(admin.id);
-    let spy = vi.spyOn(db.appAgent, 'findMany');
+    let spy = vi.spyOn(db.app, 'findMany');
     try {
       expect(await W.repos(a, {}, shared, query)).toEqual(['acme/api']);
       const afterFirst = spy.mock.calls.length;
+      expect(afterFirst).toBeGreaterThan(0); // the shared roster page actually ran
       expect(await W.repos(b, {}, shared, query)).toEqual(['acme/api']);
       expect(spy.mock.calls.length).toBe(afterFirst); // memoized
     } finally {
@@ -549,10 +549,11 @@ describe('#1024 — Worker.repos (resolved role affinity)', () => {
     }
 
     const inMutation = ctx(admin.id);
-    spy = vi.spyOn(db.appAgent, 'findMany');
+    spy = vi.spyOn(db.app, 'findMany');
     try {
       expect(await W.repos(a, {}, inMutation, mutation)).toEqual(['acme/api']);
       const afterFirst = spy.mock.calls.length;
+      expect(afterFirst).toBeGreaterThan(0); // the shared roster page actually ran
       expect(await W.repos(b, {}, inMutation, mutation)).toEqual(['acme/api']);
       // Re-read, deliberately: a mutation must not serve its own stale answer.
       expect(spy.mock.calls.length).toBeGreaterThan(afterFirst);
@@ -742,7 +743,7 @@ describe('castWorker — user-owned App (spec 047)', () => {
     });
     const agent = await M.createAgent(
       {},
-      { name: 'My Engineer', personaRole: 'backend-engineer', systemPrompt: TEMPLATE },
+      { name: 'My Engineer', personaRole: 'backend-engineer' },
       ctx(owner.id),
     );
     personalAgent = { id: agent.id };
@@ -857,9 +858,14 @@ describe('worker / workers queries', () => {
     expect(worker.name).toBe('Iris');
   });
 
-  it('worker(ref) denies a non-member', async () => {
-    // #1742: a denial answers like an absent worker, so the read is no existence oracle.
-    await expectCode(Q.worker({}, { ref: iris.id }, ctx(outsider.id)), 'WORKER_NOT_FOUND');
+  it('worker(ref) gives a signed-in non-member the profile only (#1149)', async () => {
+    // #1149 (cor:dmo:050:11): naming a worker by id opens its profile to any
+    // signed-in user; the working state stays behind the participant gate.
+    const w = await Q.worker({}, { ref: iris.id }, ctx(outsider.id));
+    expect(w.name).toBe('Iris');
+    expect(await W.prompt(w, {}, ctx(outsider.id))).toBeNull();
+    // An anonymous caller is still refused like an absent worker (#1742).
+    await expectCode(Q.worker({}, { ref: iris.id }, { db, roles: [] } as Context), 'WORKER_NOT_FOUND');
   });
 
   it('a pure App-key reads its OWN App staff; a foreign App key is denied', async () => {
@@ -1067,7 +1073,8 @@ describe('#1344 — heldWorkers across readable Apps', () => {
     // the wider historical Session.worker surface; working state is not.
     expect(await W.urn(hidden, {}, ctx(outsider.id))).toContain('visible-identity');
     expect(await W.heldByUserId(hidden, {}, ctx(outsider.id))).toBeNull();
-    expect(await W.appUrn(hidden, {}, ctx(outsider.id))).toBeNull();
+    // #1149: appUrn is a PROFILE field, readable by any signed-in user.
+    expect(await W.appUrn(hidden, {}, ctx(outsider.id))).toMatch(/^hrn:app:/);
     expect(await Q.heldWorkers({}, { userRef: 'visible-target' }, ctx(outsider.id))).toEqual({
       items: [],
       total: 0,
@@ -1230,10 +1237,11 @@ describe('#1344 — heldWorkers across readable Apps', () => {
     }
   });
 
-  it('DIFFERENTIAL: a held worker is on the page exactly when the point read worker(ref) admits it (#1347 review)', async () => {
+  it('DIFFERENTIAL: a held worker is on the page exactly when the participant point read admits it (#1347 review)', async () => {
     // The page's App set (workerReadableAppIds, with a hand-written platform
     // arm) and the point gate (requireWorkerReadAccess) are two implementations
-    // of one audience. This matrix pins them together across principal and
+    // of one audience. #1149: worker(ref) itself now opens the wider PROFILE,
+    // so the point read here is the participant resolve, resolveReadableWorkerRef. This matrix pins them together across principal and
     // App shapes, so a change to either that is not made to the other reds.
     const otherOrg = await db.organization.create({ data: { id: generateId(), name: 'other-org', urn: `other-org-${Date.now()}.com` } });
     const shapes = {
@@ -1268,7 +1276,7 @@ describe('#1344 — heldWorkers across readable Apps', () => {
       const onPage = new Set(page.items.map((row: { id: string }) => row.id));
       expect(page.total, who).toBe(onPage.size);
       for (const [workerId, shape] of workers) {
-        const pointRead = await Q.worker({}, { ref: workerId }, c).then(() => true, () => false);
+        const pointRead = await resolveReadableWorkerRef(c, workerId).then(() => true, () => false);
         expect(onPage.has(workerId), `${who} / ${shape}`).toBe(pointRead);
         if (pointRead) admitted++;
       }
@@ -1329,38 +1337,23 @@ describe('Worker field resolvers', () => {
     expect(resolvedApp?.id).toBe(app.id);
   });
 
-  it('prompt binds {{name}}/{{role}} and appends the override as its own paragraph', async () => {
-    const worker = await cast({
-      agentRef: roleAgent.id,
-      name: 'Zoe',
-      promptOverride: 'Prefer boring solutions.',
-    });
+  it('prompt binds {{worker.name}}/{{worker.role}} in the served text', async () => {
+    const worker = await cast({ agentRef: roleAgent.id, name: 'Zoe' });
     const prompt = await W.prompt(worker, {}, ctx(admin.id));
-    expect(prompt).toBe(
-      'You are Zoe, a backend-engineer on this team.\nWork from your own memories.\n\nPrefer boring solutions.',
-    );
+    expect(prompt).toBe('You are Zoe, a backend-engineer on this team.\nWork from your own memories.');
   });
 
-  it('prompt binds the CASTING role when it differs from the agent personaRole', async () => {
-    const worker = await cast({ agentRef: roleAgent.id, role: 'debugger', name: 'Zoe' });
-    const prompt = await W.prompt(worker, {}, ctx(admin.id));
-    expect(prompt).toContain('You are Zoe, a debugger on this team.');
+  it('prompt binds the CASTING role, which is the agent personaRole (#2458, R222)', async () => {
+    // A casting role that differs from the agent's can no longer be cast (WORKER_ROLE_OVERRIDE_REFUSED); the
+    // prompt still binds the worker's stored role, so a worker cast with an override before R222 keeps its own.
+    const cast0 = await cast({ agentRef: roleAgent.id, name: 'Legacy' });
+    const legacy = await db.worker.update({ where: { id: cast0.id }, data: { role: 'debugger' } });
+    expect(await W.prompt(legacy, {}, ctx(admin.id))).toContain('You are Legacy, a debugger on this team.');
   });
 
-  it('override-only when the agent carries no template', async () => {
-    // The team agent has no systemPrompt dressing.
-    const worker = await cast({
-      agentRef: teamAgent.id,
-      role: 'coordinator',
-      name: 'Zoe',
-      promptOverride: 'Coordinate the team.',
-    });
-    const prompt = await W.prompt(worker, {}, ctx(admin.id));
-    expect(prompt).toBe('Coordinate the team.');
-  });
-
-  it('null when the agent carries no template and the worker no override', async () => {
-    const worker = await cast({ agentRef: teamAgent.id, role: 'coordinator', name: 'Zoe' });
+  it('null when the agent serves no prompt', async () => {
+    await db.agent.update({ where: { id: teamAgent.id }, data: { personaRole: 'test-worker' } });
+    const worker = await cast({ agentRef: teamAgent.id, name: 'Zoe' });
     const prompt = await W.prompt(worker, {}, ctx(admin.id));
     expect(prompt).toBeNull();
   });
@@ -2720,5 +2713,126 @@ describe('#1050 — deleting a holder releases their names', () => {
     // The casting itself is untouched — the name stays allocated to it.
     expect(after.name).toBe('Iris');
     expect(after.retiredAt).toBeNull();
+  });
+});
+
+/**
+ * #2252 Slice A (R189) — Worker.model / modelReportedAt / tier: derived read fields.
+ *
+ * Same fold and same gate as `family`: the newest open session's report, never
+ * an older session's when the newest reported none, masked to null on deny.
+ * Self-declared and advisory; nothing here authorizes or routes.
+ */
+describe('#2252 — Worker.model / modelReportedAt / tier', () => {
+  const OPUS = 'claude-opus-5-5';
+  const SONNET = 'claude-sonnet-5-5';
+  const mins = (n: number) => new Date(Date.now() - n * 60_000);
+  const fields = async (workerId: string, c: Context = ctx(admin.id)) => {
+    const row = await db.worker.findUniqueOrThrow({ where: { id: workerId } });
+    return {
+      model: await W.model(row, {}, c),
+      modelReportedAt: await W.modelReportedAt(row, {}, c),
+      tier: await W.tier(row, {}, c),
+    };
+  };
+  const open = (workerId: string, data: Record<string, unknown> = {}) =>
+    db.session.create({ data: { id: generateId(), workerId, appId: app.id, userId: appMember.id, ...data } });
+
+  it('is null on every field for an unbound worker, and once its session ends', async () => {
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    expect(await fields(w.id)).toEqual({ model: null, modelReportedAt: null, tier: null });
+    const s = await open(w.id, { llmModel: OPUS, modelReportedAt: mins(5), startedAt: mins(10) });
+    expect(await fields(w.id)).toMatchObject({ model: OPUS, tier: 'high' });
+    await db.session.update({ where: { id: s.id }, data: { endedAt: new Date() } });
+    expect(await fields(w.id)).toEqual({ model: null, modelReportedAt: null, tier: null });
+  });
+
+  it('reads the newest open session, and a newer bind that reported none does not inherit the older one\'s', async () => {
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    const reported = mins(30);
+    await open(w.id, { llmModel: OPUS, modelReportedAt: reported, startedAt: mins(60) });
+    expect(await fields(w.id)).toEqual({ model: OPUS, modelReportedAt: reported, tier: 'high' });
+    await open(w.id, { startedAt: mins(10) });
+    expect(await fields(w.id)).toEqual({ model: null, modelReportedAt: null, tier: null });
+  });
+
+  it('model and timestamp belong to the SAME session, and a tied start breaks by id', async () => {
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    const at = mins(20);
+    const low = await db.session.create({ data: { id: '0000-low', workerId: w.id, appId: app.id, userId: appMember.id, startedAt: at, llmModel: OPUS, modelReportedAt: mins(3) } });
+    const high = await db.session.create({ data: { id: 'zzzz-high', workerId: w.id, appId: app.id, userId: appMember.id, startedAt: at, llmModel: SONNET, modelReportedAt: mins(9) } });
+    expect(low.id < high.id).toBe(true);
+    expect(await fields(w.id)).toEqual({ model: SONNET, modelReportedAt: high.modelReportedAt, tier: 'mid' });
+  });
+
+  it('a report stamps modelReportedAt: bind, update, and a repeated same-model report refreshes it; other writes and a null report do not', async () => {
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    const s = await M.startSession({}, { input: { id: generateId(), workerRef: w.id, appRef: app.id, llmModel: SONNET } }, ctx(appMember.id));
+    const first = (await fields(w.id)).modelReportedAt as Date;
+    expect(first).toBeInstanceOf(Date);
+    expect(Math.abs(first.getTime() - Date.now())).toBeLessThan(60_000);
+    await db.session.update({ where: { id: s.id }, data: { modelReportedAt: mins(120) } });
+    const old = (await fields(w.id)).modelReportedAt as Date;
+    // Unrelated writes (a branch edit, a model-less update) never move it.
+    await M.updateSession({}, { id: s.id, branch: 'feature/x' }, ctx(appMember.id));
+    await M.updateSession({}, { id: s.id, llmModel: null }, ctx(appMember.id));
+    expect((await fields(w.id)).modelReportedAt).toEqual(old);
+    // The same model reported again is still a report.
+    await M.updateSession({}, { id: s.id, llmModel: SONNET }, ctx(appMember.id));
+    const again = (await fields(w.id)).modelReportedAt as Date;
+    expect(again.getTime()).toBeGreaterThan(old.getTime());
+    // A switch changes model and tier on the next read.
+    await M.updateSession({}, { id: s.id, llmModel: OPUS }, ctx(appMember.id));
+    expect(await fields(w.id)).toMatchObject({ model: OPUS, tier: 'high' });
+  });
+
+  it('a session that never reported keeps a null timestamp even when it has a model (no historical backfill)', async () => {
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    await open(w.id, { llmModel: SONNET });
+    expect(await fields(w.id)).toEqual({ model: SONNET, modelReportedAt: null, tier: 'mid' });
+  });
+
+  it('an unmapped model has a model and no tier', async () => {
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    await open(w.id, { llmModel: 'gpt-5.1-codex', modelReportedAt: mins(1) });
+    expect(await fields(w.id)).toMatchObject({ model: 'gpt-5.1-codex', tier: null });
+  });
+
+  it('is masked to null for a caller outside the App, on the same gate as family', async () => {
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    await open(w.id, { llmModel: OPUS, modelReportedAt: mins(1) });
+    expect(await fields(w.id, ctx(outsider.id))).toEqual({ model: null, modelReportedAt: null, tier: null });
+  });
+
+  it('the held-workers page serves them from the same single fold query', async () => {
+    const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
+    await db.worker.update({ where: { id: w.id }, data: { heldByUserId: appMember.id } });
+    await open(w.id, { llmModel: OPUS, modelReportedAt: mins(1) });
+    const raw = vi.spyOn(db, '$queryRaw');
+    try {
+      const page = await Q.heldWorkers({}, { userRef: appMember.id }, ctx(admin.id));
+      const row = page.items.find((r: { id: string }) => r.id === w.id);
+      expect(await W.model(row, {}, ctx(admin.id))).toBe(OPUS);
+      expect(await W.tier(row, {}, ctx(admin.id))).toBe('high');
+      expect(await W.modelReportedAt(row, {}, ctx(admin.id))).toBeInstanceOf(Date);
+      expect(raw).toHaveBeenCalledTimes(1);
+    } finally {
+      raw.mockRestore();
+    }
+  });
+});
+
+
+describe('S3 default-OFF prefix reservation and G4 safe bare names', () => {
+  afterEach(() => vi.unstubAllEnvs());
+  it('leaves dotted names available OFF and refuses canonical team. prefixes ON in cast and preview', async () => {
+    vi.stubEnv('TEAM_TAGS_ENABLED','false');
+    await expect(cast({role:'backend-engineer',name:'team.legacy'})).resolves.toMatchObject({name:'team.legacy'});
+    vi.stubEnv('TEAM_TAGS_ENABLED','true');
+    await expectCode(cast({role:'backend-engineer',name:'TEAM.New'}),'WORKER_NAME_RESERVED_TEAM_PREFIX');
+    const Q = resolvers.Query as any;
+    await expectCode(Q.castWorkerPreview({}, {appRef:app.id,role:'backend-engineer',name:'Team.Preview'},ctx(admin.id)),'WORKER_NAME_RESERVED_TEAM_PREFIX');
+    await expectCode(cast({role:'backend-engineer',name:'TEAM'}),'WORKER_NAME_RESERVED');
+    await expect(cast({role:'backend-engineer',name:'other.dotted'})).resolves.toMatchObject({name:'other.dotted'});
   });
 });

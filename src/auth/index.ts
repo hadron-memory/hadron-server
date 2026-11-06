@@ -1,4 +1,5 @@
-export { signJwt, verifyJwt, type HadronJwtPayload } from './jwt.js';
+export { signJwt, type HadronJwtPayload } from './jwt.js';
+export { verifyAuthenticatedJwt, SignInNotLive } from './signIn.js';
 export {
   buildAuthUrl,
   exchangeCode,

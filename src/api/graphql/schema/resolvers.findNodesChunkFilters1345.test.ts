@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 /**
  * #1345 review (@codex P2, echoed by Copilot) — chunk-granularity passages honor
  * every structured node filter, not just #719's `where`.
@@ -47,7 +48,7 @@ const ids: Record<string, string> = {};
 async function seed(loc: string, fields: Record<string, unknown>) {
   const id = generateId();
   await db.node.create({
-    data: { id, memoryId: memId, loc, name: loc, content: `${loc} content body about memory`, embeddingPendingAt: new Date(), ...fields } as any,
+    data: { id, memoryId: memId, loc, name: loc, content: `${loc} content body about memory`, embeddingWorkToken: randomUUID(), embeddingPendingAt: new Date(), ...fields } as any,
   });
   expect(await embedNode(db, id)).toBe('embedded');
   ids[loc] = id;

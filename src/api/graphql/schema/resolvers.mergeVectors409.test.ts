@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 /** #409: merge relocation must revoke the source's vector capability atomically. */
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -17,7 +18,7 @@ const ctx = (): Context => ({ db, userId: actorId, roles: ['ADMIN'] });
 async function seed(loc = 'relocate', nodeType = 'info') {
   const comment = nodeType === 'comment' ? await resolvers.Mutation.createComment({}, { targetRef: (await db.node.create({ data: { id: generateId(), memoryId: source.id, loc: 'comment-target', name: 'target' } })).id, body: 'old comment' }, ctx()) : null;
   const data = { memoryId: source.id, loc: comment?.loc ?? loc, name: loc, nodeType,
-    content: 'source secret payload', abstract: 'destination summary', embeddingPendingAt: oldStamp,
+    content: 'source secret payload', abstract: 'destination summary', embeddingWorkToken: randomUUID(), embeddingPendingAt: oldStamp,
     embeddingFailedAt: oldStamp, embeddingAttempts: 8, embeddingError: 'old retry' };
   const node = comment ? await db.node.update({ where: { id: comment.id }, data }) : await db.node.create({ data: { id: generateId(), ...data } });
   await upsertAbstractVector(db, { nodeId: node.id, memoryId: source.id, provider: 'test', model: 'test', dim: 768, embedding: q });
@@ -54,7 +55,7 @@ describe('#409 merge vector isolation', () => {
     const moved = await db.node.findUniqueOrThrow({ where: { id: node.id } });
     expect(moved.memoryId).toBe(target.id);
     expect(moved.embeddingPendingAt === null).toBe(!indexed);
-    if (indexed) expect(moved.embeddingPendingAt!.getTime()).not.toBe(oldStamp.getTime());
+    if (indexed) expect(moved.embeddingWorkToken).not.toBe(node.embeddingWorkToken);
     expect(moved).toMatchObject({ embeddingFailedAt: null, embeddingError: null, embeddingAttempts: 0 });
     expect(await vectorSearchChunks(db, vectorOpts())).toEqual([]);
     expect(await vectorSearchNodes(db, vectorOpts())).toEqual([]);
@@ -158,7 +159,7 @@ describe('#409 merge vector isolation', () => {
     expect(await db.nodeEmbedding.count({ where: { nodeId: node.id } })).toBe(0);
   }, 15000);
 
-  it('uses a distinct due stamp even when relocation shares the old worker millisecond', async () => {
+  it('uses a distinct work token even when relocation shares the old worker millisecond', async () => {
     const node = await seed();
     await db.memory.update({ where: { id: target.id }, data: { vectorIndexEnabled: true } });
     vi.useFakeTimers({ toFake: ['Date'] });
@@ -166,7 +167,8 @@ describe('#409 merge vector isolation', () => {
     try {
       await rawMerge();
       const moved = await db.node.findUniqueOrThrow({ where: { id: node.id } });
-      expect(moved.embeddingPendingAt!.getTime()).toBeLessThan(oldStamp.getTime());
+      expect(moved.embeddingWorkToken).toMatch(/^[0-9a-f-]{36}$/);
+      expect(moved.embeddingWorkToken).not.toBe(node.embeddingWorkToken);
     } finally { vi.useRealTimers(); }
   });
 

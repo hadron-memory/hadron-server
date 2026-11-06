@@ -2,17 +2,35 @@ import { Prisma } from '../generated/prisma/index.js';
 import { AuthoritySnapshotStale } from './auth/authorityAnchors.js';
 
 /**
- * How many times a SERIALIZABLE transaction is re-run after a P2034
- * serialization abort before the error propagates.
+ * How many times a SERIALIZABLE transaction is re-run after a serialization
+ * abort (see `isSerializationFailure`) before the error propagates.
  */
 export const SERIALIZATION_RETRIES = 5;
 
 /** Upper bound, in ms, of the first retry's random delay; it doubles per attempt. */
 const BASE_BACKOFF_MS = 10;
 
-/** True when `e` is Postgres's serialization failure (40001) as Prisma reports it. */
+/** Shared full-jitter wait for a retry's one-based attempt, without selecting its errors or budget. */
+export async function waitForSerializationRetry(attempt: number): Promise<void> {
+  const ceiling = BASE_BACKOFF_MS * 2 ** (attempt - 1);
+  await new Promise((resolve) => setTimeout(resolve, Math.random() * ceiling));
+}
+
+/**
+ * True when `e` is Postgres's serialization failure (SQLSTATE 40001) as Prisma
+ * reports it: P2034 from a model operation or the transaction, or P2010 with
+ * `meta.code === '40001'` from a raw statement (`$queryRaw` / `$executeRaw`).
+ *
+ * The raw form matters because the authority gates' locking reads are raw
+ * (`withAuthorizedTx`'s anchor rows, `afterLock` hooks): a caller revoked while
+ * queued on the anchor gets 40001 there, and must be retried into the
+ * in-transaction refusal rather than escape as an internal error (#2876). A
+ * P2010 wrapping any other database code is a real failure and is not retried.
+ */
 export function isSerializationFailure(e: unknown): boolean {
-  return e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2034';
+  if (!(e instanceof Prisma.PrismaClientKnownRequestError)) return false;
+  if (e.code === 'P2034') return true;
+  return e.code === 'P2010' && (e.meta as { code?: unknown } | undefined)?.code === '40001';
 }
 
 /**
@@ -42,8 +60,7 @@ export async function retryOnSerializationFailure<T>(
       return await run();
     } catch (e) {
       if ((!isSerializationFailure(e) && !(e instanceof AuthoritySnapshotStale)) || attempt > retries) throw e;
-      const ceiling = BASE_BACKOFF_MS * 2 ** (attempt - 1);
-      await new Promise((resolve) => setTimeout(resolve, Math.random() * ceiling));
+      await waitForSerializationRetry(attempt);
     }
   }
 }

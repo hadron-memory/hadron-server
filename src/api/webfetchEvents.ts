@@ -12,6 +12,7 @@ import type { PrismaClient } from '../generated/prisma/index.js';
 import { safeEqual } from '../lib/constantTime.js';
 import { frameUntrustedExternalContent } from '../lib/untrustedContent.js';
 import { redactUrl } from '../lib/webUrl.js';
+import { respondInternalFault } from '../lib/internalFault.js';
 
 export type WebFetchPollEventKind = 'poll.triggered' | 'poll.expired' | 'poll.failed';
 
@@ -221,8 +222,7 @@ export function mountWebFetchEventRoutes(app: Express): void {
         res.status(409).json({ error: 'event rejected', message: err.message });
         return;
       }
-      console.error('[webfetch-events] dispatch failed:', err);
-      res.status(500).json({ error: 'dispatch failed' });
+      respondInternalFault(res, 'webfetch-events', err);
     }
   });
 }

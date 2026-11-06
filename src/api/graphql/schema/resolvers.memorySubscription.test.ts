@@ -12,7 +12,9 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { ApolloServer } from '@apollo/server';
 import { resolvers, type Context } from './resolvers.js';
+import { typeDefs } from './typeDefs.js';
 
 let ownerOrg: { id: string; urn: string };
 let subscriberOrg: { id: string; urn: string };
@@ -131,7 +133,7 @@ describe('createMemorySubscription', () => {
         { memoryId: privateMemory.id, orgId: subscriberOrg.id, role: 'READER' },
         adminCtx(subscriberAdminUser.id),
       ),
-    ).rejects.toThrow(/public/);
+    ).rejects.toMatchObject({ extensions: { code: 'SUBSCRIPTION_REQUIRES_PUBLIC_MEMORY' } });
   });
 
   it('rejects when subscriber-org admin role is missing', async () => {
@@ -157,7 +159,105 @@ describe('createMemorySubscription', () => {
         { memoryId: publicMemory.id, orgId: ownerOrg.id, role: 'READER' },
         adminCtx(ownerAdminUser.id),
       ),
-    ).rejects.toThrow(/implicit access/);
+    ).rejects.toMatchObject({ extensions: { code: 'OWNER_ORG_CANNOT_SUBSCRIBE' } });
+  });
+
+  // #2572: the typed codes sit behind the hidden-memory refusal (#1381): a
+  // caller who cannot open the memory gets the not-found miss, never a code
+  // that would confirm the memory exists.
+  it('a caller who cannot open a non-public memory gets not-found, not the typed code', async () => {
+    const outsider = await db.user.create({
+      data: { id: generateId(), githubId: 9604, githubUsername: 'sub-outsider', roles: ['READER'] },
+    });
+    const err = await resolvers.Mutation.createMemorySubscription(
+      null,
+      { memoryId: privateMemory.id, orgId: subscriberOrg.id, role: 'READER' },
+      readerCtx(outsider.id),
+    ).then(() => null, (e: unknown) => e);
+    expect(err).not.toBeNull();
+    expect((err as { extensions?: { code?: string } }).extensions?.code).not.toMatch(
+      /SUBSCRIPTION_REQUIRES_PUBLIC_MEMORY|OWNER_ORG_CANNOT_SUBSCRIBE/,
+    );
+  });
+
+  // #2572 (local review P2): the in-transaction re-checks are the sites a race
+  // reaches. The request-context read is served a stale row once, after the
+  // real row changed, so only the transaction's own re-read can refuse.
+  function staleMemoryOnce(realDb: typeof db, change: () => Promise<unknown>): Context['db'] {
+    let served = false;
+    return new Proxy(realDb, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver);
+        if (prop !== 'memory') return typeof value === 'function' ? value.bind(target) : value;
+        return new Proxy(value, {
+          get(mTarget, mProp) {
+            const member = Reflect.get(mTarget, mProp);
+            if (mProp !== 'findUniqueOrThrow' || served) {
+              return typeof member === 'function' ? member.bind(mTarget) : member;
+            }
+            return async (args: unknown) => {
+              const stale = await member.call(mTarget, args);
+              served = true;
+              await change();
+              return stale;
+            };
+          },
+        });
+      },
+    }) as Context['db'];
+  }
+
+  it('in-transaction re-check: memory made non-public after the first read is refused with the typed code', async () => {
+    // Still able to open the memory once it is ORGANIZATION-visible (hidden-first
+    // would answer not-found otherwise), so only the typed refusal can fire.
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: ownerOrg.id, userId: subscriberAdminUser.id, role: 'READER' },
+    });
+    const ctx = {
+      ...adminCtx(subscriberAdminUser.id),
+      db: staleMemoryOnce(db, () => db.memory.update({ where: { id: publicMemory.id }, data: { visibility: 'ORGANIZATION' } })),
+    };
+    await expect(
+      resolvers.Mutation.createMemorySubscription(null, { memoryId: publicMemory.id, orgId: subscriberOrg.id, role: 'READER' }, ctx),
+    ).rejects.toMatchObject({
+      message: 'Only public memories can be subscribed to by other organizations',
+      extensions: { code: 'SUBSCRIPTION_REQUIRES_PUBLIC_MEMORY' },
+    });
+  });
+
+  it('in-transaction re-check: memory moved to the subscriber org after the first read is refused with the typed code', async () => {
+    const ctx = {
+      ...adminCtx(subscriberAdminUser.id),
+      db: staleMemoryOnce(db, () => db.memory.update({ where: { id: publicMemory.id }, data: { organizationId: subscriberOrg.id } })),
+    };
+    await expect(
+      resolvers.Mutation.createMemorySubscription(null, { memoryId: publicMemory.id, orgId: subscriberOrg.id, role: 'READER' }, ctx),
+    ).rejects.toMatchObject({
+      message: 'Owner organization has implicit access and cannot subscribe',
+      extensions: { code: 'OWNER_ORG_CANNOT_SUBSCRIBE' },
+    });
+  });
+
+  it('a duplicate subscription (unique violation) stays a server fault, not a typed refusal', async () => {
+    const args = { memoryId: publicMemory.id, orgId: subscriberOrg.id, role: 'READER' };
+    await resolvers.Mutation.createMemorySubscription(null, args, adminCtx(subscriberAdminUser.id));
+    const err = await resolvers.Mutation.createMemorySubscription(null, args, adminCtx(subscriberAdminUser.id))
+      .then(() => null, (e: unknown) => e);
+    // The raw Prisma unique violation, unwrapped: no typed code of ours.
+    expect(err).toMatchObject({ code: 'P2002' });
+    expect((err as { extensions?: unknown }).extensions).toBeUndefined();
+    // Through the real GraphQL boundary it is the generic server fault.
+    const server = new ApolloServer<Context>({ typeDefs, resolvers });
+    const out = await server.executeOperation(
+      {
+        query: 'mutation($m: String!, $o: String!) { createMemorySubscription(memoryRef: $m, orgRef: $o, role: READER) { id } }',
+        variables: { m: publicMemory.id, o: subscriberOrg.id },
+      },
+      { contextValue: adminCtx(subscriberAdminUser.id) },
+    );
+    if (out.body.kind !== 'single') throw new Error('unexpected incremental result');
+    const res = out.body.singleResult;
+    expect(res.errors?.[0]?.extensions?.code).toBe('INTERNAL_SERVER_ERROR');
   });
 
   // #764: the shared resolveRefArg helper maps every entity-ref miss to the

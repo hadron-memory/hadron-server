@@ -32,7 +32,7 @@
  */
 
 /** Shared <style> block for both pages — the consent screen's palette. */
-const SHARED_STYLE = `  <style>
+export const SHARED_STYLE = `  <style>
     /* Matched light/dark pairs via custom properties (issue #318): a
        background and its foreground can never resolve to different
        schemes, even under a forced/auto dark transformation. */
@@ -87,6 +87,14 @@ const SHARED_STYLE = `  <style>
       background: #0a66ff; color: #fff;
     }
     button[type="submit"]:hover { background: #0855d0; }
+    a.button {
+      display: inline-block; margin-top: 1.5rem;
+      padding: 0.6rem 1rem;
+      font: inherit; font-weight: 500; text-decoration: none;
+      border-radius: 6px;
+      background: #0a66ff; color: #fff;
+    }
+    a.button:hover { background: #0855d0; }
   </style>`;
 
 export const EMAIL_ENTRY_TEMPLATE = `<!doctype html>

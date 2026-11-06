@@ -16,3 +16,5 @@
  */
 export const BATCH_READ_MAX_NODES = 200;
 export const BATCH_READ_MAX_BYTES = 1_000_000;
+/** Requested edge rows share this budget; endpoints remain gated, lazy Node reads. */
+export const BATCH_READ_MAX_EDGES = 2_000;

@@ -1,3 +1,6 @@
+import { withIncludeHistoryTransaction } from './includes/includeHistoryFence.js';
+import { waitForLockWaitersOfType } from '../test/lockWait.js';
+import { drainNodeUsage } from './usageRecorder.js';
 /** #1449: backlinks, unresolved references and renumber in a draft spec corpus. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
@@ -1213,5 +1216,109 @@ describe('an ambiguous citation blocks the mint as MISSING (#1505)', () => {
     expect(await unresolvedAt('pas:500')).toEqual(baseline);
     expect(await mintBlocksOn('pas:500')).toBe(baselineMint);
     expect(await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:500' }, as())).toEqual(baselineBacklinks);
+  });
+});
+
+
+
+/**
+ * #3011: the usage write renumber's move leaves behind (`recordNodeWrite`, fire-and-forget,
+ * tracked by `trackUsageWrite` on this client) inserts a `usage_events` row whose `nodeId` FK
+ * takes FOR KEY SHARE on the moved node, which conflicts with the probe's FOR UPDATE NOWAIT.
+ * This holds THAT real `createMany` (the recorder's own call, on the moved node) open inside
+ * a transaction until `release()`, so the interleaving is deterministic instead of load-dependent.
+ */
+function holdMovedNodeUsageWrite(movedNodeId: string) {
+  let entered!: () => void;
+  let release!: () => void;
+  const hasEntered = new Promise<void>((r) => { entered = r; });
+  const gate = new Promise<void>((r) => { release = r; });
+  const calls: string[] = [];
+  const pass = db.usageEvent.createMany.bind(db.usageEvent);
+  let held = false;
+  const spy = vi.spyOn(db.usageEvent, 'createMany').mockImplementation((async (args: Parameters<typeof pass>[0]) => {
+    const rows = (Array.isArray(args!.data) ? args!.data : [args!.data]) as Array<{ nodeId?: string | null }>;
+    calls.push(...rows.map((r) => String(r.nodeId)));
+    if (held || !rows.some((r) => r.nodeId === movedNodeId)) return pass(args!);
+    held = true;
+    return db.$transaction(async (tx) => {
+      const result = await tx.usageEvent.createMany(args!);
+      entered();
+      await gate;
+      return result;
+    });
+  }) as unknown as typeof db.usageEvent.createMany);
+  return { hasEntered, release, calls, restore: () => spy.mockRestore() };
+}
+
+describe('#2063 standalone renumber reconciliation boundary', () => {
+  it.each([false, true])('waits before standalone reconciliation and rechecks write authority (revoked=%s)', async (revoked) => {
+    await db.node.update({ where: { id: other.id }, data: { content: (await content('pas:020')) + '\nRaw drift.' } });
+    let entered!: () => void;
+    let release!: () => void;
+    const ready = new Promise<void>((r) => { entered = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    const usageHold = holdMovedNodeUsageWrite(feature.id);
+    const holder = withIncludeHistoryTransaction(db, async () => { entered(); await gate; });
+    await ready;
+    const pending = specCorpusRenumberMutations.renumberSpec(null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040' }, as());
+    const outcome = pending.then((value) => ({ value }), (error: unknown) => ({ error }));
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1, 750);
+      // The move's own usage write is in flight and holds a key-share lock on the moved node;
+      // let it finish, then nothing else can produce one while renumber waits at the fence.
+      await usageHold.hasEntered;
+      const writesBeforeDrain = usageHold.calls.length;
+      const releaseTimer = setTimeout(usageHold.release, 100);
+      await drainNodeUsage(db);
+      clearTimeout(releaseTimer);
+      expect((await db.node.findUniqueOrThrow({ where: { id: other.id } })).revSeq).toBe(1);
+      await db.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM nodes WHERE memory_id = ${draft.id} ORDER BY id FOR UPDATE NOWAIT`;
+      });
+      // No usage producer started between the drain and the probe: renumber is parked at the fence.
+      expect(usageHold.calls).toHaveLength(writesBeforeDrain);
+      if (revoked) await db.orgMember.deleteMany({ where: { userId: admin.id } });
+    } finally {
+      usageHold.release();
+      release();
+      await holder;
+      await outcome;
+      await drainNodeUsage(db);
+      usageHold.restore();
+    }
+    await pending;
+    if (revoked) {
+      expect((await db.node.findUniqueOrThrow({ where: { id: other.id } })).revSeq).toBe(1);
+      expect(await content('pas:020')).toContain('pas:010');
+      expect(await db.nodeRevision.count({ where: { nodeId: other.id } })).toBe(0);
+    } else expect(await content('pas:020')).toContain('pas:040');
+  });
+
+  it('CONTROL (#3011): without the drain, the held move usage write makes the same probe fail with 55P03', async () => {
+    let entered!: () => void;
+    let release!: () => void;
+    const ready = new Promise<void>((r) => { entered = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    const usageHold = holdMovedNodeUsageWrite(feature.id);
+    const holder = withIncludeHistoryTransaction(db, async () => { entered(); await gate; });
+    await ready;
+    const pending = specCorpusRenumberMutations.renumberSpec(null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040' }, as());
+    const outcome = pending.then((value) => ({ value }), (error: unknown) => ({ error }));
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1, 750);
+      await usageHold.hasEntered;
+      const probe = db.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM nodes WHERE memory_id = ${draft.id} ORDER BY id FOR UPDATE NOWAIT`;
+      });
+      await expect(probe).rejects.toThrow(/55P03|could not obtain lock/);
+    } finally {
+      usageHold.release();
+      release();
+      await holder;
+      await outcome;
+      await drainNodeUsage(db);
+      usageHold.restore();
+    }
   });
 });

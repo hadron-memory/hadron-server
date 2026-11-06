@@ -114,6 +114,15 @@ interface Fixtures {
     node: { urn: string; loc: string; memoryUrn: string; isRunnable: boolean; content: string; properties: unknown };
     findingsByHost: Record<string, { rule: string; severity: string; message: string }[]>;
   }[];
+  /** #2943 / hadron-cli#1166 — Go's LintFor PER HOST over authored contents:
+   *  an include tag `{{> part}}` gets no template finding, a placeholder still
+   *  does. Same shape as lintMarkup, stamped separately. */
+  lintTemplateSourceCommit: string;
+  lintTemplate: {
+    name: string;
+    node: { urn: string; loc: string; memoryUrn: string; isRunnable: boolean; content: string; properties: unknown };
+    findingsByHost: Record<string, { rule: string; severity: string; message: string }[]>;
+  }[];
   /** #1323 — Go's ParseFile over authored provenance-header edits: the `rev=`
    *  edge values (hadron-cli#724) and the separator cases, stamped separately. `revision` is Go's int: 0 means none, which the port
    *  spells null. A voided header reads back with an empty source. */
@@ -130,7 +139,7 @@ function loadFixtures(): Fixtures {
     'normalizeDescription', 'normalizeBody',
     'validName', 'hash', 'render', 'parseFile',
     'isNodeUrn', 'renderParseRoundTrip', 'lint', 'lintCollisions', 'declared',
-    'lintUnknownHostKeys', 'lintReserved', 'lintMarkup', 'parseHeader',
+    'lintUnknownHostKeys', 'lintReserved', 'lintMarkup', 'lintTemplate', 'parseHeader',
   ];
   for (const s of sections) {
     const v = f[s];
@@ -490,7 +499,7 @@ describe('#1177 §6 — lint agrees with Go, rule for rule and word for word', (
   // its "clean" verdict was an undeclared-node result (@codex / @copilot,
   // PR #1343). Every host in the server's table must have a Go verdict.
   it.each(
-    [...F.lintReserved.map((c) => ['reserved', c] as const), ...F.lintMarkup.map((c) => ['markup', c] as const)]
+    [...F.lintReserved.map((c) => ['reserved', c] as const), ...F.lintMarkup.map((c) => ['markup', c] as const), ...F.lintTemplate.map((c) => ['template', c] as const)]
       .flatMap(([section, c]) => SKILL_HOSTS.map((h) => [`${section}: ${c.name} @ ${h.key}`, c, h.key] as const)),
   )('%s', (_n, c, host) => {
     expect(Object.keys(c.findingsByHost).sort()).toEqual(SKILL_HOSTS.map((h) => h.key).sort());
@@ -513,6 +522,26 @@ describe('#1177 §6 — lint agrees with Go, rule for rule and word for word', (
     // The positive control that the Codex column is EVALUATED, not merely
     // undeclared: the capital trips the grammar there, the reservation does not.
     expect(rules('codex evaluates the name but does not reserve it', 'codexSkill')).toEqual(['skill-name-invalid']);
+  });
+
+  it('the template section: include tags get no finding, placeholders still warn, on every host (#2943)', () => {
+    // A section generated from a Go that warned on everything, or nothing,
+    // reds here rather than passing both sides of a port that agrees with it.
+    expect(F.lintTemplateSourceCommit).toBeTruthy();
+    const rules = (name: string, host: string) => {
+      const c = F.lintTemplate.find((x) => x.name === name);
+      expect(c, name).toBeDefined();
+      return c!.findingsByHost[host]!.map((f) => f.rule);
+    };
+    for (const host of SKILL_HOSTS.map((h) => h.key)) {
+      expect(rules('an include tag alone gets no finding', host), host).toEqual([]);
+      expect(rules('two include tags get no finding', host), host).toEqual([]);
+      expect(rules('no braces, no finding', host), host).toEqual([]);
+      for (const warns of ['a placeholder alone still warns', 'an include tag beside a placeholder still warns',
+        'a space before > is not an include tag, so it warns', 'an empty pair still warns']) {
+        expect(rules(warns, host), `${warns} @ ${host}`).toEqual(['skill-content-has-template']);
+      }
+    }
   });
 
   it('the markup section carries both measured answers, per host (#1341)', () => {

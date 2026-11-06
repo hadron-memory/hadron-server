@@ -1,3 +1,4 @@
+import { mirroredAuthoredWith } from '../../lib/authoringAttestation.js';
 import { InvalidRootMemoryError, rootLocForMemory } from '../localFs/loadNodeFromFs.js';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
@@ -40,6 +41,10 @@ export interface FrontmatterNodeFields {
   isRunnable?: boolean | null;
   /** Server-set reserved-citation state; false is the ordinary-node default. */
   isPlaceholder?: boolean;
+  /** #1328 — the stored stamp. A verified TASK stamp exports as `authoredWith`. */
+  authorshipKind?: string | null;
+  authoredByTask?: string | null;
+  authoredByRevision?: number | null;
 }
 
 /**
@@ -141,6 +146,10 @@ export function buildNodeFrontmatter(
   // Free to ship: 25 live nodes carry `isRunnable: false` and NONE of them is
   // mirrored (measured), so no file on disk gains a key today.
   if (node.role != null) frontmatter.role = node.role;
+  // #1328 — a verified task stamp round-trips as `task@revision`, for the next
+  // hand edit to restate or bump. Never a person's stamp: it is not a claim.
+  const authoredWith = mirroredAuthoredWith(node);
+  if (authoredWith) frontmatter.authoredWith = authoredWith;
   if (node.isRunnable != null) frontmatter.runnable = node.isRunnable;
   // #1477 — only the positive server-owned reservation needs an on-disk key.
   // Older mirrors with no key leave a stored placeholder alone on re-sync.
@@ -211,9 +220,9 @@ export function buildEdgeFrontmatter(outgoingEdges: EdgeForGit[]): Array<Record<
  * (from `a::b` or a trailing `:`) collapses `'.' + last` to `'.'` and would
  * make the sidecar path resolve to a *parent* directory (a `:` loc resolves to
  * the repo root), turning cleanup into a catastrophic recursive delete; a `..`
- * segment escapes `localPath` entirely on write.
+ * segment or a segment containing a slash/backslash can escape `localPath` on write.
  *
- * Valid locs (URN grammar) never contain empty / `.` / `..` segments, so this
+ * Valid non-root locs never contain empty / `.` / `..` or slash/backslash-bearing segments, so this
  * is defense-in-depth: throw loudly rather than silently write or delete the
  * wrong path. Shared by `nodeFilePath` and `orphanedLegacyPaths` so both reject
  * the same inputs consistently.
@@ -221,9 +230,9 @@ export function buildEdgeFrontmatter(outgoingEdges: EdgeForGit[]): Array<Record<
 function locToSegments(loc: string): string[] {
   const parts = loc.split(':');
   for (const p of parts) {
-    if (p === '' || p === '.' || p === '..') {
+    if (p === '' || p === '.' || p === '..' || /[/\\]/.test(p)) {
       throw new Error(
-        `Unsafe loc "${loc}": empty, '.', or '..' path segments are not allowed`,
+        `Unsafe loc "${loc}": empty, '.', '..', or path-separator segments are not allowed`,
       );
     }
   }
@@ -242,7 +251,7 @@ function locToSegments(loc: string): string[] {
  *   srv:msg:010:02:04  → <root>/srv/msg/010/02/04.md   (child lands in 02/)
  *   ''                 → <root>/README.md
  *
- * Throws on a malformed loc (empty / `.` / `..` segment) — see `locToSegments`.
+ * Throws on a malformed loc (empty / `.` / `..` or path-separator segment) — see `locToSegments`.
  */
 export function nodeFilePath(localPath: string, loc: string, memoryUrn?: string): string {
   // Compound legacy memories can still export ordinary non-root nodes;

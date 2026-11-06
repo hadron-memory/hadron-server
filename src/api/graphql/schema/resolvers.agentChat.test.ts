@@ -1,9 +1,11 @@
+import { isRawChatNode } from '../../../services/embedding/rawChat.js';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { BROKEN_INCLUDE_NOTICE as N } from '../../../lib/includes/spliceIncludes.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, chatNodeByLoc, chatNodeByLocOrThrow } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
+import { serveAgentBootPrompt, serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { withChatRootLock } from '../../../lib/chatRoot.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
@@ -115,6 +117,8 @@ beforeEach(async () => {
       },
     });
   }
+  // #2712: chats are served the Agent's boot prompt; an Agent without one is refused.
+  await serveEveryAgent(db);
 });
 
 // ---------------------------------------------------------------------------
@@ -657,6 +661,8 @@ describe('chatHistory', () => {
     const noAppSysMem = await db.memory.findUniqueOrThrow({
       where: { id: noAppAgent.systemMemoryId! },
     });
+    // #2712: created after beforeEach served the fixture, so serve it here.
+    await serveAgentBootPrompt(db, noAppAgent.id, 'Test boot prompt.');
     // Seed minimal conversation + stage so startChat can find a first stage.
     const seedNodes = [
       { loc: 'conversations', name: 'conversations', nodeType: 'system' },
@@ -968,18 +974,20 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     );
     // #1835: readable knowledge is a retrieval context, not a bare-loc
     // namespace. No foreign partial is borrowed before a local target exists.
-    expect(start.systemMessage).toBe(`${N} | ${N} | ${N} | ${N} | ${N} | ${N}`);
+    // #2712: the served boot prompt leads the system message.
+    const B = 'Test boot prompt.\n\n';
+    expect(start.systemMessage).toBe(`${B}${N} | ${N} | ${N} | ${N} | ${N} | ${N}`);
     const chatRoot = await chatNodeByLocOrThrow(db, start.chatId);
     await db.node.create({ data: { memoryId: chatRoot.memoryId, loc: 'y-secret', name: 'Local Y', content: 'LOCAL Y' } });
     await db.node.create({ data: { memoryId: chatRoot.memoryId, loc: 'global-note', name: 'Local global', content: 'LOCAL GLOBAL' } });
     const startedAgain = await resolvers.Mutation.startChat(
       {}, { agentId: agent.id, scope: 'shared' }, userCtx(adminUser.id),
     );
-    expect(startedAgain.systemMessage).toBe(`${N} | LOCAL Y | LOCAL GLOBAL | ${N} | ${N} | ${N}`);
+    expect(startedAgain.systemMessage).toBe(`${B}${N} | LOCAL Y | LOCAL GLOBAL | ${N} | ${N} | ${N}`);
     const sent = await resolvers.Mutation.sendChatMessage(
       {}, { chatId: start.chatId, userMessage: 'hello' }, userCtx(otherUser.id),
     );
-    expect(sent.systemMessage).toBe(`${N} | LOCAL Y | LOCAL GLOBAL | ${N} | ${N} | ${N}`);
+    expect(sent.systemMessage).toBe(`${B}${N} | LOCAL Y | LOCAL GLOBAL | ${N} | ${N} | ${N}`);
   });
 
   it('does not restore an uninstalled Agent when sending to its retained shared chat', async () => {
@@ -1170,6 +1178,7 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     });
     const userMsg = messages.find((m) => m.loc.endsWith('-user'));
     expect(userMsg).toBeDefined();
+    expect(isRawChatNode(userMsg!)).toBe(true);
 
     // The whole point: before the fix this was adminUser (the creator).
     expect(userMsg!.createdBy).toBe(otherUser.id);
@@ -1281,6 +1290,7 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     });
     const assistantMsg = messages.find((m) => m.loc.endsWith('-assistant'));
     expect(assistantMsg).toBeDefined();
+    expect(isRawChatNode(assistantMsg!)).toBe(true);
     expect(assistantMsg!.createdBy).toBeNull();
   });
 
@@ -1316,7 +1326,7 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     });
     return {
       rows,
-      messageCount: ((chatNode.data as Record<string, unknown>)?.messageCount as number) ?? 0,
+      messageCount: (await db.chatRootCounter.findUniqueOrThrow({where:{chatRootNodeId:chatNode.id}})).messageCount,
     };
   }
 
@@ -1406,10 +1416,11 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     let announceHeld: () => void = () => {};
     const gate = new Promise<void>((r) => { release = r; });
     const held = new Promise<void>((r) => { announceHeld = r; });
-    const turn = withChatRootLock(db, chatRef, memEnc, async ({ chatData }) => {
+    const turn = withChatRootLock(db, chatRef, memEnc, async ({ tx, chatData }) => {
+      await tx.chatRootCounter.update({where:{chatRootNodeId:chatRef.id},data:{messageCount:2}});
       announceHeld();
       await gate;
-      return { chatData: { ...chatData, messageCount: 2 }, value: null };
+      return { chatData, value: null };
     });
     await held;
 
@@ -1431,7 +1442,8 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     // The rename landed AND the turn's count survived it — applying to fresh
     // data is not the same as dropping the write.
     expect(data.title).toBe('Renamed mid-conversation');
-    expect(data.messageCount).toBe(2);
+    expect(data).not.toHaveProperty('messageCount');
+    expect((await db.chatRootCounter.findUniqueOrThrow({where:{chatRootNodeId:after.id}})).messageCount).toBe(2);
   });
 
   it('#919 — mixed sequential turns number 1..N with no gaps or repeats', async () => {

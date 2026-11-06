@@ -25,10 +25,15 @@ import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { fetchWebPage } from '../../../lib/webFetch.js';
 import { extractArticle } from '../../../lib/articleExtract.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
+import { attestedAuthoring, type AuthoredWith } from '../../../lib/authoringAttestation.js';
 import { assertManualRunAllowed, mintManualRun } from './resolvers.appRun.js';
-import { type Context, requireMemoryWriteAccess } from './resolvers.helpers.js';
+import { publishRunRequested } from '../../../jobs/appRuns.js';
+import { lockInstallAuthorityFirst } from './installMemory.js';
+import { type Context, requireMemoryWriteAccess, withoutRequestCaches } from './resolvers.helpers.js';
 
 export interface ImportNodeInput {
+  /** #1328 — import always attests, from any surface. */
+  authoredWith?: AuthoredWith | null;
   // Target — (memoryId + loc) XOR nodeUrn. The URN may name a
   // not-yet-existing node (import creates it), so it is SPLIT into
   // memory-URN + loc rather than resolved via resolveNodeRef.
@@ -51,6 +56,7 @@ export interface ImportNodeInput {
   taskArgs?: Record<string, unknown> | null;
   /** App to run under — PK or URN. Falls back to the caller's active App (ctx.appId). */
   appRef?: string | null;
+  agentRef?: string | null;
 }
 
 export const importNodeMutations = {
@@ -106,7 +112,16 @@ export const importNodeMutations = {
     // unauthorized caller must not be able to use importNode as an egress /
     // resource-consumption primitive (a full 30s fetch with redirects) just
     // to be denied at the write (PR-486 review, Codex P1).
-    await requireMemoryWriteAccess(ctx, memoryId);
+    //
+    // #3101: opt into the install-memory pre-flight like every other node-write door.
+    // On the pooled client `fencedInstallAudience` answers write:false for an install
+    // memory unless the door rechecks inside its own fenced transaction; this one does,
+    // because both store paths below go through `writeNodeCore`, which re-runs the gate
+    // under the install authority locks (and the composed path takes them first,
+    // `lockInstallAuthorityFirst`). Without the flag an App manager was refused here
+    // (cor:api:130:00 (1): an import admits exactly the direct-write audience;
+    // cor:agt:040:06). A reader who doesn't manage the App is still refused pre-fetch.
+    await requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, memoryId);
 
     // ── #528 — validate the post-import task-run preconditions BEFORE the
     // fetch/write, so a bad taskRef / missing App / non-runnable task fails
@@ -114,7 +129,7 @@ export const importNodeMutations = {
     // run itself is minted after the write (it needs the stored node's URN).
     let taskRun: {
       entryNodeUrn: string;
-      app: { id: string; organizationId: string };
+      app: { id: string; organizationId: string; agentId: string | null };
       runAsSelf: boolean;
       importedMemoryUrn: string;
     } | null = null;
@@ -156,7 +171,7 @@ export const importNodeMutations = {
       // never leaves an orphaned imported node. The run is minted after the
       // write (it needs the stored node's URN) via mintManualRun — WITHOUT
       // re-running the gate. mintAppRun's dynamic quota check stays at mint time.
-      const app = await assertManualRunAllowed(ctx, { entryNodeUrn, appRef: runAppRef, runAsSelf });
+      const app = await assertManualRunAllowed(ctx, { entryNodeUrn, appRef: runAppRef, runAsSelf, agentRef: input.agentRef });
       taskRun = { entryNodeUrn, app, runAsSelf, importedMemoryUrn: importedMemory.urn };
     }
 
@@ -216,7 +231,7 @@ export const importNodeMutations = {
     // eagerly, so an upsert without the required `name` column would reject
     // even though only the update branch could run (the same constraint
     // that shaped updateNode in Phase 0).
-    const node = await writeNodeCore(
+    const store = (writeCtx: Context, transaction?: NonNullable<Parameters<typeof writeNodeCore>[3]>['transaction']) => writeNodeCore(
       {
         memoryId,
         loc,
@@ -226,28 +241,52 @@ export const importNodeMutations = {
         nodeType: input.nodeType ?? defaultNodeType,
         properties,
       },
-      ctx,
+      writeCtx,
       name === undefined ? 'update' : 'upsert',
+      { transaction, authoring: attestedAuthoring(ctx, input.authoredWith) },
     );
 
-    // ── #528 — post-import task run ────────────────────────────────────
-    // The full launch prerequisites (auth gate, App, cross-org, on-behalf-of
-    // relationship) were validated pre-write via assertManualRunAllowed; now
-    // that the node exists, mint the run directly against the pre-resolved App
-    // (mintManualRun — no re-running the gate, #566). Async: return
-    // FETCH_PENDING + the run id as jobId (poll appRun(ref:) for status +
-    // output). The imported node's URN is passed in eventData so the task can
-    // target it (e.g. distill).
-    if (taskRun) {
-      const importedNodeUrn = emitNodeUrnV2(taskRun.importedMemoryUrn, node.loc);
-      const run = await mintManualRun(ctx, taskRun.app, {
-        entryNodeUrn: taskRun.entryNodeUrn,
-        eventData: { ...(input.taskArgs ?? {}), importedNodeUrn },
-        runAsSelf: taskRun.runAsSelf,
-      });
-      return { node, status: 'FETCH_PENDING', jobId: run.id };
+    if (!taskRun) {
+      const node = await store(ctx);
+      return { node, status: 'STORED', jobId: null };
     }
 
-    return { node, status: 'STORED', jobId: null };
+    // #2737 / cor:agt:040:10: mint-time refusals (including boot serving and
+    // dynamic quota) must roll back the import, its revision and run together.
+    // Keep the pre-fetch assertManualRunAllowed above; never compensate with a
+    // delete, which could erase a prior node or another concurrent writer.
+    const launch = taskRun;
+    const effects: Array<() => void> = [];
+    const result = await ctx.db.$transaction(async tx => {
+      // The write core's caller-owned transaction follows its normal lock order.
+      await lockInstallAuthorityFirst(tx, ctx, memoryId);
+      const txCtx = withoutRequestCaches(ctx, tx);
+      const node = await store(txCtx, {tx, pooledDb:ctx.db, afterCommit:effect=>effects.push(effect)});
+      const importedNodeUrn = emitNodeUrnV2(launch.importedMemoryUrn, node.loc);
+      const run = await mintManualRun(txCtx, launch.app, {
+        entryNodeUrn: launch.entryNodeUrn,
+        eventData: { ...(input.taskArgs ?? {}), importedNodeUrn },
+        runAsSelf: launch.runAsSelf,
+      }, {publish:false});
+      return { node, status: 'FETCH_PENDING', jobId: run.id };
+    }, {timeout:30_000});
+    // No event, git/embedding wake or run wake escapes a rolled-back import.
+    // #2737: persistence has committed. An effect failure must not turn this
+    // success into a retryable error or prevent another effect from running.
+    for (const effect of effects) {
+      try {
+        await effect();
+      } catch {
+        console.error('[import-node] committed node effect failed');
+      }
+    }
+    try {
+      await publishRunRequested(ctx.db, result.jobId);
+    } catch {
+      // Defense at the commit boundary even if the publisher's own catch
+      // changes later. PENDING/unpublished runs are recovered by the sweep.
+      console.error('[import-node] committed run wake failed; sweep will recover');
+    }
+    return result;
   },
 };

@@ -21,6 +21,7 @@ export async function withAuthorizedTx<T>(
   authorize: (txCtx: Context) => Promise<void>,
   write: (tx: Prisma.TransactionClient, txCtx: Context) => Promise<T>,
   options: {
+    afterAnchors?: (tx: Prisma.TransactionClient) => Promise<void>;
     afterLock?: (tx: Prisma.TransactionClient) => Promise<void>;
     lockMode?: 'shared' | 'exclusive';
     isolationLevel?: Prisma.TransactionIsolationLevel;
@@ -43,6 +44,10 @@ export async function withAuthorizedTx<T>(
     const uniqueRows = [...new Map(rowAnchors.map((a) => [`${a.kind}:${a.id}`, a])).values()]
       .sort((a, b) => rowOrder[a.kind] - rowOrder[b.kind] || a.id.localeCompare(b.id));
     await lockAuthorityAnchors(tx, rowAnchors, options.lockMode ?? 'shared');
+    // Advisory-only locks that must precede EVERY row lock below (#2245): a writer whose own order is
+    // "advisory key, then rows" (setAgentBase: graph lock, then child row) would otherwise cycle with
+    // the anchor rows taken here. Take no row lock in this hook.
+    await options.afterAnchors?.(tx);
     // Owner rows precede child rows, matching rename/transfer cascades. SHARE
     // (rather than KEY SHARE) makes a SERIALIZABLE waiter fail with 40001 if a
     // revoker soft-deleted or re-roled an anchor row before the lock arrived.
@@ -130,6 +135,7 @@ export async function withAuthorizedMemoryTx<T>(
   authorize: (txCtx: Context) => Promise<void>,
   write: (tx: Prisma.TransactionClient, txCtx: Context) => Promise<T>,
   options: {
+    afterAnchors?: (tx: Prisma.TransactionClient) => Promise<void>;
     afterLock?: (tx: Prisma.TransactionClient) => Promise<void>;
     lockMode?: 'shared' | 'exclusive';
     isolationLevel?: Prisma.TransactionIsolationLevel;
@@ -180,6 +186,26 @@ export async function withAuthorizedMemoryTx<T>(
  * that takes its anchors itself (#1708, Riana's demotion P2 on #1859).
  */
 export async function liveTxContext(ctx: Context, tx: Prisma.TransactionClient): Promise<Context> {
+  return readLiveContext(ctx, tx, true);
+}
+
+/**
+ * Pure reads in one READ ONLY / REPEATABLE READ snapshot validate credential
+ * liveness at that snapshot without row locks. They make no authority-granting
+ * write. Refuse other transaction modes so this cannot replace a write gate's
+ * credential locks. Drift reconciliation continues to use liveTxContext.
+ */
+export async function liveReadSnapshotContext(ctx: Context, tx: Prisma.TransactionClient): Promise<Context> {
+  const [mode] = await tx.$queryRaw<Array<{ readOnly: string; isolation: string }>>`
+    SELECT current_setting('transaction_read_only') AS "readOnly",
+      current_setting('transaction_isolation') AS isolation`;
+  if (mode?.readOnly !== 'on' || mode.isolation !== 'repeatable read') {
+    throw new Error('A read-only repeatable-read snapshot is required');
+  }
+  return readLiveContext(ctx, tx, false);
+}
+
+async function readLiveContext(ctx: Context, tx: Prisma.TransactionClient, lockCredentials: boolean): Promise<Context> {
   const actor = ctx.userId
     ? await tx.user.findUnique({ where: { id: ctx.userId }, select: { roles: true, deletedAt: true } })
     : null;
@@ -194,8 +220,17 @@ export async function liveTxContext(ctx: Context, tx: Prisma.TransactionClient):
     const keys = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT id FROM user_api_keys
       WHERE id = ${ctx.apiKeyId} AND user_id = ${ctx.userId} AND revoked_at IS NULL
-      FOR SHARE`;
+      ${lockCredentials ? Prisma.sql`FOR SHARE` : Prisma.empty}`;
     if (keys.length !== 1) throw authorizationDenied();
+  }
+  // #1897 / R66: a credential descending from a sign-in dies with it. The share lock orders this
+  // against the cancel path's exclusive user anchor, so no decision is taken on an ended root.
+  if (ctx.signInId) {
+    if (!ctx.userId) throw authorizationDenied();
+    const roots = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM sign_ins
+      WHERE id = ${ctx.signInId} AND user_id = ${ctx.userId} AND ended_at IS NULL ${lockCredentials ? Prisma.sql`FOR SHARE` : Prisma.empty}`;
+    if (roots.length !== 1) throw authorizationDenied();
   }
 
   return {

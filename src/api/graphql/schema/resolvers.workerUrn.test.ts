@@ -18,6 +18,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { workerSlugBase } from '../../../lib/workerSlug.js';
@@ -67,7 +68,6 @@ beforeEach(async () => {
       orgId: org.id,
       name: 'WURN Backend Engineer',
       personaRole: 'backend-engineer',
-      systemPrompt: 'You are {{name}}, a {{role}}.',
     },
     ctx(admin.id),
   );
@@ -83,6 +83,7 @@ beforeEach(async () => {
     },
   });
   await db.appAgent.create({ data: { appId: app.id, agentId: roleAgent.id } });
+  await serveEveryAgent(db); // #2712: binds need a served prompt
 });
 
 const cast = (name: string, c: Context = ctx(admin.id)) =>
@@ -192,14 +193,19 @@ describe('#991 — resolveUrn dispatch', () => {
     expect(res).toMatchObject({ kind: 'worker', id: w.id, organizationId: org.id });
   });
 
-  it('collapses to null for a caller outside the App — no existence oracle', async () => {
+  it('collapses to null for a caller the profile gate refuses — no existence oracle', async () => {
     const w = await cast('Iris');
     const urn = await W.urn(w, {}, ctx(admin.id));
-    expect(await Q.resolveUrn({}, { urn }, ctx(outsider.id))).toBeNull();
+    // #1149: a worker link opens its profile for any signed-in user, so the
+    // refused caller here is anonymous (no user, no App key).
+    const anonymous = { db, roles: [] } as unknown as Context;
+    expect(await Q.resolveUrn({}, { urn }, anonymous)).toBeNull();
     // Indistinguishable from a worker that does not exist at all.
     expect(
-      await Q.resolveUrn({}, { urn: `hrn:worker:${org.urn}:${appSlug}:ghost` }, ctx(outsider.id)),
+      await Q.resolveUrn({}, { urn: `hrn:worker:${org.urn}:${appSlug}:ghost` }, anonymous),
     ).toBeNull();
+    // A signed-in outsider resolves the link (the profile tier).
+    expect(await Q.resolveUrn({}, { urn }, ctx(outsider.id))).toMatchObject({ kind: 'worker', id: w.id });
     expect(w.id).toBeTruthy();
   });
 

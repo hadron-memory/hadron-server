@@ -155,7 +155,7 @@ describe('Channel-addressed chat', () => {
       },
     });
 
-    expect(await Q.channelMessages({}, { channelRef: underscored.id }, ctx(admin.id))).toEqual({ items: [], total: 0 });
+    expect(await Q.channelMessages({}, { channelRef: underscored.id }, ctx(admin.id))).toMatchObject({ items: [], total: 0 });
     await expect(
       M.createChannelMessage({}, { channelRef: underscored.id, body: 'reply', replyToSeq: 99 }, ctx(admin.id)),
     ).rejects.toMatchObject({ extensions: { code: 'TEAM_CHAT_REPLY_NOT_FOUND' } });

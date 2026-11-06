@@ -97,7 +97,7 @@ describe('#430 edge writes mirror their source node', () => {
     });
   });
 
-  it('uses the request key for an encrypted source instead of exporting ciphertext', async () => {
+  it('never exports an encrypted source, even with a warm session key (R206)', async () => {
     const key = generateDataKey();
     sessionKeyCache.set('edge-mirror-encrypted', memoryId, key);
     await db.memory.update({
@@ -108,13 +108,12 @@ describe('#430 edge writes mirror their source node', () => {
       where: { id: sourceId },
       data: { content: encryptNodeFieldsWithKey({ content: 'source secret' }, key).content },
     });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     await M.createEdge({}, { sourceRef: sourceId, targetRef: targetId, name: 'uses' }, context);
-    await vi.waitFor(() => expect(mirror).toHaveBeenCalledTimes(1));
-    expect(mirror.mock.lastCall?.[0]).toMatchObject({
-      id: sourceId,
-      content: 'source secret',
-      outgoingEdges: [{ name: 'uses' }],
-    });
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(mirror).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/ENCRYPTED_GIT_SYNC_UNAVAILABLE/));
+    warn.mockRestore();
   });
 });

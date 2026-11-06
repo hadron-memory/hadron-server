@@ -73,8 +73,10 @@ case "$action" in
       # Staged/tracked files only; never ship untracked notes or secrets.
       git -C "$ROOT" ls-files -z package.json pnpm-lock.yaml pnpm-workspace.yaml prisma.config.ts tsconfig.json prisma src .dockerignore scripts/e2e |
         tar -C "$ROOT" --null -T - -cf "$archive"
-      incus file push "$archive" "$project/tmp/source.tar"
-      incus exec "$project" -- sh -c 'mkdir -p /opt/hadron && tar -xf /tmp/source.tar -C /opt/hadron'
+      # Not /tmp (#2858): the instance mounts a tmpfs there shortly after
+      # launch, which would hide an archive pushed before it.
+      incus file push "$archive" "$project/opt/hadron-source.tar"
+      incus exec "$project" -- sh -c 'mkdir -p /opt/hadron && tar -xf /opt/hadron-source.tar -C /opt/hadron && rm -f /opt/hadron-source.tar'
       for i in {1..30}; do incus exec "$project" -- docker info >/dev/null 2>&1 && break; sleep 1; done
     fi
     compose up --build -d --wait --wait-timeout 300

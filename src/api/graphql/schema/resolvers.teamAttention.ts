@@ -44,9 +44,10 @@ export const teamAttentionMutations = {
       sessionRef,
       channelRef,
       seq,
-    }: { appRef: string; sessionRef: string; channelRef: string; seq: number },
+      expectedIncarnation,
+    }: { appRef: string; sessionRef: string; channelRef: string; seq: number; expectedIncarnation?: number | null },
     ctx: Context,
-  ) => markOwnTeamChatRead(ctx, { appRef, sessionRef, channelRef, seq }),
+  ) => markOwnTeamChatRead(ctx, { appRef, sessionRef, channelRef, seq, expectedIncarnation }),
 
   confirmTeamAttentionSwitchover: async (
     _: unknown,

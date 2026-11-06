@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 /**
  * 033-rag-vector-retrieval US4 — staleness served-and-marked on vector hits.
  *
@@ -86,7 +87,7 @@ async function seedEmbedded(opts: SeedOpts): Promise<string> {
       abstract: opts.abstract,
       content: opts.content,
       abstractOriginHash: computeContentHash(hashAgainst),
-      embeddingPendingAt: new Date(),
+      embeddingPendingAt: new Date(), embeddingWorkToken: randomUUID(),
     },
   });
   // Drive the real embedNode path so the vector lands in node_embeddings.
@@ -221,7 +222,7 @@ describe('US4 — stale abstract-vector hits served + marked', () => {
       where: { id: nodeId },
       data: {
         abstractOriginHash: computeContentHash('body v2 (edited)'),
-        embeddingPendingAt: new Date(),
+        embeddingPendingAt: new Date(), embeddingWorkToken: randomUUID(),
       },
     });
     await embedNode(db, nodeId);

@@ -21,7 +21,8 @@
  * rather than being guessed into one.
  */
 
-import { FAMILY_PATTERN } from './availability.js';
+/** Valid custom tokens remain legal; provider aliases have one canonical identity. */
+export const FAMILY_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
 /** Model-name fragments, checked in order. GLM first: a GLM model id never names Claude, but be explicit. */
 const MODEL_FAMILIES: readonly [RegExp, string][] = [
@@ -45,7 +46,38 @@ const TOOL_FAMILIES: Readonly<Record<string, string>> = {
 export function normalizeFamily(value: string | null | undefined): string | null {
   if (value == null) return null;
   const v = value.trim().toLowerCase();
-  return FAMILY_PATTERN.test(v) ? v : null;
+  if (!FAMILY_PATTERN.test(v)) return null;
+  return v === 'anthropic' ? 'claude' : v === 'openai' ? 'codex' : v;
+}
+
+/** All persisted spellings of an identity, for indexed reads of legacy rows. */
+export function familySpellings(family: string): string[] {
+  const f = normalizeFamily(family);
+  return f === 'claude' ? ['claude', 'anthropic'] : f === 'codex' ? ['codex', 'openai'] : f ? [f] : [];
+}
+
+/**
+ * #2252 / R189 — a coarse model tier, from the platform's ONE model-to-tier mapping (no per-App override). Raw model
+ * names churn every release, so coordinators reason in tiers: opus-class `high`, sonnet-class `mid`, haiku-class `low`.
+ *
+ * The mapping is a list of DELIBERATE model-id shapes, not a search for a tier word: the checked gate says an unknown
+ * model returns null, so a string that merely CONTAINS `opus`/`sonnet`/`haiku` (`octopus-v1`, `my-sonnet-finetune`,
+ * `gpt-opus-5`) or only names the tier (`opus`, `claude-opus`) is null, and `deriveFamily` (which is permissive on
+ * purpose, to classify a worker) is never a witness here. Only Anthropic's own id shapes are listed — current
+ * `claude-<tier>-<version>` and legacy `claude-<version>-<tier>`, with an optional Bedrock/Vertex `[region.]anthropic.`
+ * prefix — and R189 authorizes owning the mapping, not guessing another family's equivalents. The server team adds a
+ * shape here when a model appears. Advisory like the family: self-declared, never authorization.
+ */
+export type ModelTier = 'high' | 'mid' | 'low';
+const TIER_BY_NAME: Readonly<Record<string, ModelTier>> = { opus: 'high', sonnet: 'mid', haiku: 'low' };
+const CLAUDE_ID_PREFIX = '(?:(?:[a-z]{2}\\.)?anthropic\\.)?claude-';
+const CURRENT_ID = new RegExp(`^${CLAUDE_ID_PREFIX}(opus|sonnet|haiku)-\\d`);
+const LEGACY_ID = new RegExp(`^${CLAUDE_ID_PREFIX}\\d+(?:-\\d+)?-(opus|sonnet|haiku)(?:-|$)`);
+export function tierOf(llmModel: string | null | undefined): ModelTier | null {
+  const model = llmModel?.trim().toLowerCase();
+  if (!model) return null;
+  const name = (CURRENT_ID.exec(model) ?? LEGACY_ID.exec(model))?.[1];
+  return name ? TIER_BY_NAME[name] ?? null : null;
 }
 
 /** The family a reported model and tool imply, or null when they don't classify the session. */

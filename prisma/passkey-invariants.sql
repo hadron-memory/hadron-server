@@ -3,6 +3,9 @@ ALTER TABLE passkey_credentials DROP CONSTRAINT IF EXISTS chk_passkey_shape;
 ALTER TABLE passkey_credentials ADD CONSTRAINT chk_passkey_shape CHECK (
   octet_length(credential_id) BETWEEN 1 AND 1023 AND octet_length(public_key) > 0
   AND octet_length(user_handle) = 32 AND algorithm IN (-7, -257)
+  -- #1631 PR1b (Eden #10470): the enrollment RP ID is a bare lowercase host, never a URL or a port.
+  AND length(enrollment_rp_id) <= 253
+  AND enrollment_rp_id ~ '^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$'
   AND counter BETWEEN 0 AND 4294967295
   AND transports IS NOT NULL AND (NOT backed_up OR backup_eligible)
   AND (last_used_at IS NULL OR last_used_at >= registered_at)
@@ -55,8 +58,8 @@ BEGIN
   IF OLD.revoked_at IS NOT NULL AND OLD.cancelled_at IS NULL AND ROW(NEW.cancelled_at,NEW.cancel_ip,NEW.cancel_user_agent) IS DISTINCT FROM ROW(OLD.cancelled_at,OLD.cancel_ip,OLD.cancel_user_agent) THEN
     RAISE EXCEPTION 'Cancel provenance cannot be attached after revocation' USING ERRCODE = '23514';
   END IF;
-  IF ROW(NEW.id,NEW.owner_id,NEW.credential_id,NEW.public_key,NEW.algorithm,NEW.user_handle,NEW.registered_at,NEW.backup_eligible,NEW.registration_method,NEW.window_ends_at)
-    IS DISTINCT FROM ROW(OLD.id,OLD.owner_id,OLD.credential_id,OLD.public_key,OLD.algorithm,OLD.user_handle,OLD.registered_at,OLD.backup_eligible,OLD.registration_method,OLD.window_ends_at) THEN
+  IF ROW(NEW.id,NEW.owner_id,NEW.credential_id,NEW.public_key,NEW.algorithm,NEW.user_handle,NEW.enrollment_rp_id,NEW.registered_at,NEW.backup_eligible,NEW.registration_method,NEW.window_ends_at)
+    IS DISTINCT FROM ROW(OLD.id,OLD.owner_id,OLD.credential_id,OLD.public_key,OLD.algorithm,OLD.user_handle,OLD.enrollment_rp_id,OLD.registered_at,OLD.backup_eligible,OLD.registration_method,OLD.window_ends_at) THEN
     RAISE EXCEPTION 'Passkey identity is immutable' USING ERRCODE = '23514';
   END IF;
   IF OLD.revoked_at IS NOT NULL AND NEW.revoked_at IS DISTINCT FROM OLD.revoked_at THEN
@@ -65,8 +68,20 @@ BEGIN
   IF OLD.window_outcome IS NOT NULL AND ROW(NEW.window_outcome,NEW.window_ended_at) IS DISTINCT FROM ROW(OLD.window_outcome,OLD.window_ended_at) THEN
     RAISE EXCEPTION 'Passkey window outcome is immutable' USING ERRCODE = '23514';
   END IF;
-  IF OLD.cancelled_at IS NOT NULL AND ROW(NEW.cancelled_at,NEW.cancel_ip,NEW.cancel_user_agent) IS DISTINCT FROM ROW(OLD.cancelled_at,OLD.cancel_ip,OLD.cancel_user_agent) THEN
+  -- #1631 PR3 / cor:aut:040:05 (#10404): account deletion is the one exception. It erases the cancel IP address and
+  -- user agent to '' (once), and only while the owner is deleted; the cancel time stays.
+  IF OLD.cancelled_at IS NOT NULL AND ROW(NEW.cancelled_at,NEW.cancel_ip,NEW.cancel_user_agent) IS DISTINCT FROM ROW(OLD.cancelled_at,OLD.cancel_ip,OLD.cancel_user_agent)
+    AND NOT (NEW.cancelled_at IS NOT DISTINCT FROM OLD.cancelled_at
+      AND (NEW.cancel_ip IS NOT DISTINCT FROM OLD.cancel_ip OR NEW.cancel_ip = '')
+      AND (NEW.cancel_user_agent IS NOT DISTINCT FROM OLD.cancel_user_agent OR NEW.cancel_user_agent = '')
+      AND EXISTS (SELECT 1 FROM users u WHERE u.id = OLD.owner_id AND u.deleted_at IS NOT NULL)) THEN
     RAISE EXCEPTION 'Passkey cancellation provenance is immutable' USING ERRCODE = '23514';
+  END IF;
+  -- The label is set at registration and never edited (cor:aut:040:05); account deletion erases it to the fixed text
+  -- 'Erased passkey' (Holger, 2026-10-21), once.
+  IF NEW.label IS DISTINCT FROM OLD.label
+    AND NOT (NEW.label = 'Erased passkey' AND EXISTS (SELECT 1 FROM users u WHERE u.id = OLD.owner_id AND u.deleted_at IS NOT NULL)) THEN
+    RAISE EXCEPTION 'Passkey label is immutable' USING ERRCODE = '23514';
   END IF;
   IF NEW.counter < OLD.counter OR (OLD.last_used_at IS NOT NULL AND (NEW.last_used_at IS NULL OR NEW.last_used_at < OLD.last_used_at)) THEN
     RAISE EXCEPTION 'Passkey use state cannot move backwards' USING ERRCODE = '23514';

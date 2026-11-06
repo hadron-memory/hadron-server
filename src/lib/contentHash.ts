@@ -75,8 +75,12 @@ export function isAbstractUnverified(node: {
   abstract: string | null;
   content: string | null;
   abstractOriginHash: string | null;
-}): boolean {
+}, contentPresent?: boolean): boolean {
   if (node.abstract == null || node.abstract.length === 0) return false;
+  // A missing fingerprint can only be unconfirmed, never hash-verified. A
+  // read holding the node lock may supply plaintext presence without materializing its body.
+  // A real fingerprint always keeps the existing plaintext hash comparison.
+  if (node.abstractOriginHash == null && contentPresent !== undefined) return contentPresent;
   if (node.content == null || node.content.length === 0) return false;
   return node.abstractOriginHash !== computeContentHash(node.content);
 }

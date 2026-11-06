@@ -4,6 +4,7 @@ import { once } from 'node:events';
 import { generateKeyPair, SignJWT } from 'jose';
 import type { PrismaClient } from '../../src/generated/prisma/index.js';
 import { db as authDb } from '../../src/integrations/db/client.js';
+import { mintProviderNonce } from '../../src/auth/providerNonce.js';
 import { verifyGoogleIdToken, resolveGoogleUser } from '../../src/auth/google.js';
 import { verifyAppleIdToken, resolveAppleUser } from '../../src/auth/apple.js';
 
@@ -20,13 +21,15 @@ export async function provisionSignIns(db: PrismaClient): Promise<SignInEvidence
     const previous = process.env[envName];
     process.env[envName] = 'e2e-local-fixture';
     try {
-      const token = await new SignJWT({ email: `${handle}@e2e.test`, email_verified: true, name: handle })
+      // #2204: the verifier requires the login's nonce back; mint one the way the start routes do.
+      const { nonce, nonceHash } = mintProviderNonce();
+      const token = await new SignJWT({ email: `${handle}@e2e.test`, email_verified: true, name: handle, nonce })
         .setProtectedHeader({ alg: 'RS256' }).setSubject(`synthetic-${provider}-subject`)
         .setIssuer(provider === 'google' ? 'https://accounts.google.com' : 'https://appleid.apple.com')
         .setAudience('e2e-local-fixture').setIssuedAt().setExpirationTime('2m').sign(privateKey);
       const user = provider === 'google'
-        ? await resolveGoogleUser(await verifyGoogleIdToken(token, async () => publicKey))
-        : await resolveAppleUser(await verifyAppleIdToken(token, async () => publicKey), handle);
+        ? await resolveGoogleUser(await verifyGoogleIdToken(token, { bound: nonceHash }, async () => publicKey))
+        : await resolveAppleUser(await verifyAppleIdToken(token, { bound: nonceHash }, async () => publicKey), handle);
       assert.equal(user.identityProvider, provider.toUpperCase());
       assert.equal(user.handle, handle);
       evidence[handle] = { path: `${provider}-local-token` };

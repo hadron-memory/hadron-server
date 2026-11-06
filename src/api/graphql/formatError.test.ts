@@ -8,7 +8,7 @@
  * end-to-end proof that the code survives the real Apollo pipeline lives in
  * src/test/integration/918-asset-error-codes.test.ts.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { Prisma } from '../../generated/prisma/index.js';
 import { GraphQLError, type GraphQLFormattedError } from 'graphql';
 import { formatGraphQLError, isExpectedClientError } from './formatError.js';
@@ -29,6 +29,7 @@ import {
   WorkerNotFoundError,
 } from '../../lib/entityRef/errors.js';
 import { AssetUploadError } from '../../controller/operations/beginAssetUpload.js';
+import { SetAssetEnabledError } from '../../controller/operations/setAgentAssetUploadEnabled.js';
 
 /** What Apollo hands `formatError` for a thrown (non-GraphQLError) error. */
 function wrap(original: Error): { formatted: GraphQLFormattedError; error: GraphQLError } {
@@ -43,6 +44,15 @@ function format(original: Error): GraphQLFormattedError {
   const { formatted, error } = wrap(original);
   return formatGraphQLError(formatted, error);
 }
+
+describe('SetAssetEnabledError → extensions.code (#2979)', () => {
+  it.each(['PERMISSION_DENIED', 'NOT_FOUND'])('surfaces %s with its own message and no request id', (code) => {
+    const out = format(new SetAssetEnabledError(code, 'nope'));
+    expect(out.extensions?.code).toBe(code);
+    expect(out.message).toBe('nope');
+    expect(out.extensions).not.toHaveProperty('requestId');
+  });
+});
 
 describe('AssetUploadError → extensions.code (#918)', () => {
   // Every code the class throws today. The mapping is by CLASS, so this list is
@@ -109,8 +119,9 @@ describe('the pre-existing URN mappings still hold (extraction regression)', () 
 });
 
 describe('everything else is left alone', () => {
-  it('passes an unmapped error through untouched', () => {
-    const { formatted, error } = wrap(new Error('something actually broke'));
+  it('passes a coded GraphQLError through untouched', () => {
+    const error = new GraphQLError('refused', { extensions: { code: 'FORBIDDEN' } });
+    const formatted = { message: 'refused', extensions: { code: 'FORBIDDEN' } };
     expect(formatGraphQLError(formatted, error)).toBe(formatted);
   });
 
@@ -227,10 +238,11 @@ describe('#1688 Prisma failures never expose query internals', () => {
     new Prisma.PrismaClientInitializationError('Database credentials', 'test'),
     new Prisma.PrismaClientRustPanicError('Driver stack internals', 'test'),
   ])('sanitizes $name while retaining internal reporting', original => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
     const { formatted, error } = wrap(original);
     const result = formatGraphQLError({ ...formatted, extensions: { code: 'INTERNAL_SERVER_ERROR', stacktrace: ['Secret stack'], detail: 'query internals' }, path: ['createAgent', 'appCount'] }, error);
-    expect(result.message).toBe('Unable to complete this request. Please try again.');
-    expect(result.extensions).toEqual({ code: 'INTERNAL_SERVER_ERROR' });
+    expect(result.message).toBe('Internal server error.');
+    expect(result.extensions).toEqual({ code: 'INTERNAL_SERVER_ERROR', requestId: expect.any(String) });
     expect(result.path).toEqual(['createAgent', 'appCount']);
     expect(error.originalError).toBe(original);
     expect(isExpectedClientError(original)).toBe(false);

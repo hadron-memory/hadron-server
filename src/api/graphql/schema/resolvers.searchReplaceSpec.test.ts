@@ -72,6 +72,27 @@ describe('searchReplaceInSpecNodes', () => {
       .toMatchObject({ revLabel: 'draft typo' });
   });
 
+  it('#1328 judges each spec on what it changes: a no-op needs no claim and keeps its stamp', async () => {
+    const task = await db.node.create({
+      data: { id: generateId(), memoryId: draft.id, loc: 'author-task', name: 'Task', isRunnable: true, content: 'steps' },
+    });
+    const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: draft.id } });
+    await db.nodeRoleRule.create({
+      data: { id: generateId(), configId: config.id, role: 'spec', authorTaskId: task.id, authorTaskRequired: true },
+    });
+    const stamp = { authorshipKind: 'TASK' as const, authoredByTask: task.id, authoredByRevision: 1, authoredAt: new Date() };
+    const spec = await node('pas:010:01', stamp);
+    const same = { oldText: 'cat', newText: 'cat' };
+    const preview = await call(request([spec.id], same));
+    await call(request([spec.id], { ...same, dryRun: false, expectedPlan: preview.plan }));
+    expect(await db.node.findUniqueOrThrow({ where: { id: spec.id } }))
+      .toMatchObject({ content: 'cat cat scatter', authoredByTask: task.id, authoredByRevision: 1 });
+
+    const changing = await call(request([spec.id]));
+    await expect(call(request([spec.id], { dryRun: false, expectedPlan: changing.plan })))
+      .rejects.toMatchObject({ extensions: { code: 'AUTHORING_ATTESTATION_MISSING' } });
+  });
+
   it('refuses a changed plan, including a different reason, without any write', async () => {
     const spec = await node('pas:010:01');
     const preview = await call(request([spec.id]));
@@ -395,5 +416,17 @@ describe('searchReplaceInSpecNodes', () => {
     expect(response.body.singleResult.data?.searchReplaceInSpecNodes).toMatchObject({
       nodesSelected: 1, nodesScanned: 1, nodesSkipped: 0, nodesChanged: 1,
     });
+  });
+
+  it('refuses an apply that adds an include to a missing target, storing nothing (Ruth, #2226 P3)', async () => {
+    const spec = await node('pas:010:02');
+    const before = await db.node.findUniqueOrThrow({ where: { id: spec.id } });
+    const input = request([spec.id], { oldText: 'scatter', newText: '{{> pas:nowhere}}' });
+    const preview = await call(input);
+    await expect(call({ ...input, dryRun: false, expectedPlan: preview.plan }))
+      .rejects.toMatchObject({ extensions: { code: 'INCLUDE_TARGET_UNAVAILABLE', tag: '{{> pas:nowhere}}' } });
+    const after = await db.node.findUniqueOrThrow({ where: { id: spec.id } });
+    expect(after.content).toBe('cat cat scatter');
+    expect(after.revSeq).toBe(before.revSeq);
   });
 });

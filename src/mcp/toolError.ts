@@ -1,6 +1,9 @@
-import { isPrismaClientError, REDACTED_DB_ERROR_MESSAGE } from '../lib/prismaErrors.js';
-import { mcpLog } from './mcp-log.js';
+import { RateLimited } from '../lib/rateLimit/index.js';
+import { isPrismaClientError } from '../lib/prismaErrors.js';
+import { isTrustedRefusal } from '../api/graphql/formatError.js';
+import { faultRequestId, internalFaultEnvelope, internalFaultText, logInternalFault } from '../lib/internalFault.js';
 import { textResult } from './textResult.js';
+import { attestationRefusalResult } from '../lib/authoringAttestation.js';
 
 // Backstop for wrappers that copied the diagnostic and discarded its class.
 // Use distinctive ORM signatures, not broad words like "query" or "database",
@@ -33,25 +36,48 @@ function containsDatabaseDiagnostic(error: unknown): boolean {
   return false;
 }
 
+/** A refusal is a tool failure, not a success that happens to say "no": isError is set on every one (#1789). */
+export function refusalResult(text: string) {
+  return { isError: true as const, ...textResult(text) };
+}
+
 /**
- * The MCP fallback boundary (#1695). Classify before reading a message/code:
- * a Prisma error may contain arguments, paths and internal ids. The complete
- * exception stays in operator logs; only the fixed text leaves this boundary.
- * Existing domain refusals retain their wording and result shape.
+ * The generic internal-fault result (#1789, cor:api:260:01): fixed code and message plus the request id, as structured
+ * data a client reads and as text for one that cannot. The complete exception goes to the log under that id.
+ */
+export function toolFaultResult(error: unknown, site: string) {
+  const requestId = faultRequestId();
+  logInternalFault('mcp', site, requestId, error);
+  return {
+    isError: true as const,
+    ...textResult(internalFaultText(requestId)),
+    structuredContent: { error: internalFaultEnvelope(requestId) },
+  };
+}
+
+/** #1793: same structured error carrier as faults, with only caller-safe rate metadata. */
+function rateLimitedResult(error: RateLimited) {
+  return { isError: true as const, ...textResult(error.message), structuredContent: { error: {
+    code: 'RATE_LIMITED' as const, message: error.message, retryAfterSeconds: error.extensions.retryAfterSeconds,
+    fieldClass: error.extensions.fieldClass,
+  } } };
+}
+
+/**
+ * The MCP fallback boundary (#1695, #1789). Classify before reading a message/code: a Prisma error may contain
+ * arguments, paths and internal ids. A typed domain refusal keeps its wording (and is flagged isError); everything else,
+ * including a plain Error however familiar its text, is a fault and returns only the generic envelope.
  */
 export function toolErrorResult(
   error: unknown,
   domainText: () => string,
   site = 'mcp_tool',
-): ReturnType<typeof textResult> & { isError?: true } {
-  if (containsDatabaseDiagnostic(error)) {
-    mcpLog('error', 'tool_database_error', { site, error });
-    return {
-      isError: true as const,
-      ...textResult(`[internal_server_error] ${REDACTED_DB_ERROR_MESSAGE}`),
-    };
-  }
-  return textResult(domainText());
+): ReturnType<typeof refusalResult> | ReturnType<typeof toolFaultResult> | ReturnType<typeof rateLimitedResult> | NonNullable<ReturnType<typeof attestationRefusalResult>> {
+  if (error instanceof RateLimited) return rateLimitedResult(error);
+  const attestation = attestationRefusalResult(error);
+  if (attestation) return attestation;
+  if (containsDatabaseDiagnostic(error) || !isTrustedRefusal(error)) return toolFaultResult(error, site);
+  return refusalResult(domainText());
 }
 
 /** Catch before the SDK serializes an uncaught tool exception's raw message. */
@@ -63,8 +89,12 @@ export function withToolErrorBoundary(
     try {
       return await callback(args, extra);
     } catch (error) {
-      // Unrelated domain exceptions retain the SDK's existing error handling.
-      return toolErrorResult(error, () => { throw error; }, `${name}:handler`);
+      if (error instanceof RateLimited) return rateLimitedResult(error);
+      const attestation = attestationRefusalResult(error);
+      if (attestation) return attestation;
+      // A typed refusal retains the SDK's existing error handling; any other throw is a fault.
+      if (!containsDatabaseDiagnostic(error) && isTrustedRefusal(error)) throw error;
+      return toolFaultResult(error, `${name}:handler`);
     }
   };
 }
