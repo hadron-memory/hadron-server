@@ -132,6 +132,11 @@ function leafGraph(root: string, io: SourceReader): Map<string, string[]> {
     const path = pending.pop()!;
     const file = path.at(-1)!;
     if (graph.has(file)) continue;
+    // A forbidden target is terminal: report the path, never inspect a resolver closure.
+    if (file.includes('/api/graphql/schema/')) {
+      graph.set(file, []);
+      continue;
+    }
     const deps: string[] = [];
     for (const name of runtimeImports(io.read(file))) {
       if (!name.startsWith('.')) continue;
@@ -211,6 +216,15 @@ describe('#3560 bounded leaf guard controls (synthetic source, not runtime impor
       const graph = leafGraph(root, fixtureReader(new Map([[root, form]])));
       expect(graph.get(root)).toEqual([]);
       expect(schemaPath(root, graph)).toBeNull();
+    });
+    it('stops at the first resolver target without reading its closure from ' + name, () => {
+      const sources = new Map([[root, 'import "./via.js";'], [via, 'import "../../api/graphql/schema/resolvers.worker.js";'], [target, 'unreadable resolver body']]);
+      const io = fixtureReader(sources);
+      const read = (file: string) => {
+        if (file === target) throw new Error('must not read the resolver body');
+        return io.read(file);
+      };
+      expect(schemaPath(root, leafGraph(root, { ...io, read }))).toEqual([root, via, target]);
     });
     it('diagnoses unresolved handwritten relative dependencies from ' + name, () => {
       const sources = new Map([[root, 'import "./via.js";'], [via, 'export { gate } from "./missing.js";']]);
