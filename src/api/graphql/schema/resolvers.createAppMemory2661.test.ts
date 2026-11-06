@@ -11,7 +11,7 @@ import { waitForLockWaiters } from '../../../test/lockWait.js';
 import { typeDefs } from './typeDefs.js';
 import { buildSchema, graphql } from 'graphql';
 
-import * as rootFs from '../../../integrations/localFs/saveNodeToFs.js';
+import * as rootLocks from '../../../lib/nodeSubtreeLock.js';
 
 afterEach(() => vi.restoreAllMocks());
 const M = resolvers.Mutation as any;
@@ -92,7 +92,7 @@ describe('#2661 new free-standing app memory', () => {
     await refused(ctx(outsider.id), {appRef:personal.id});
   });
   it('rolls back the memory if creating its root fails', async () => {
-    vi.spyOn(rootFs, 'saveNodeToFs').mockResolvedValue({error:'injected root failure'});
+    vi.spyOn(rootLocks, 'lockLocForWrite').mockRejectedValue(new Error('injected root failure'));
     await expect(create()).rejects.toThrow('injected root failure');
     expect(await db.memory.count()).toBe(0);
     expect(await db.node.count()).toBe(0);

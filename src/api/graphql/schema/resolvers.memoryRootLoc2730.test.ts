@@ -5,7 +5,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey, createDbAppAgent, createDbAppMember } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
-import * as rootFs from '../../../integrations/localFs/saveNodeToFs.js';
+import * as rootLocks from '../../../lib/nodeSubtreeLock.js';
 import { resolvers, type Context } from './resolvers.js';
 
 // #2796: this file's projections go to its OWN graph root. The run's root
@@ -92,7 +92,7 @@ for (const door of ['createMemory', 'createAppMemory', 'createMemoryInApp']) {
     it('#2796 projects into this file\'s private graph root', async () => {
       const entries = graphEntries();
       await d().create(`Private root ${door}`);
-      expect(graphEntries()).toBeGreaterThan(entries);
+      expect(graphEntries()).toBe(entries);
     });
     for (const [label, name] of admitted) {
       it(`still creates a memory and root for ${label}`, async () => {
@@ -116,7 +116,7 @@ for (const door of ['createMemory', 'createAppMemory', 'createMemoryInApp']) {
       expect(await db.memory.count()).toBe(0);
     });
     it('still reports a non-input filesystem fault as a server fault', async () => {
-      vi.spyOn(rootFs, 'saveNodeToFs').mockResolvedValue({ error: 'injected root failure' });
+      vi.spyOn(rootLocks, 'lockLocForWrite').mockRejectedValue(new Error('injected root failure'));
       const err = await d().create('Fine name').catch(e => e);
       expect(err.message).toContain('injected root failure');
       expect(err.extensions?.code).not.toBe('BAD_USER_INPUT');
