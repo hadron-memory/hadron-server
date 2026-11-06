@@ -44,6 +44,9 @@ export const DIRECT_USER_REFERENCES: ReadonlyArray<readonly [string, string] | r
   // like the actor ids above, and is not rewritten.
   ['worker_availability', 'set_by_user_id'],
   ['model_family_availability', 'set_by_user_id'],
+  // #1332 (cor:dmo:160:01): a PERSON reporter is the user, never the key, so the survivor's retry
+  // replays the report. Only the user id moves; run, worker, agent and App key ids stay.
+  ['node_content_validation_reports', 'reporter_user_id'],
 ];
 
 /**
@@ -677,6 +680,15 @@ async function runMergeTxn(
         THEN 'refresh' ELSE revision_content_hash END
       WHERE authored_by_human = ${sourceUserId}`;
 
+    // #1715: the merge itself, for the records a merge may not rewrite. A
+    // decision's asker and deciders and a log's deciders sit inside its
+    // authenticated payload, so they keep the source's id, and readers follow
+    // it here to the target (src/lib/userMerges.ts). Keyed on the source, so a
+    // second merge of the same account can't record a second target.
+    // #1332: written BEFORE the reassignments below, because the content-validation report
+    // trigger admits a reporter_user_id change only along a merge recorded here.
+    await tx.userMerge.create({ data: { sourceUserId, targetUserId, mergedBy: actor, ...consent } });
+
     // Non-conflicting ownership, attribution, credential, and history links.
     // An optional third element names a lineage column: rows that carry one stay
     // put (see the #1897 note above).
@@ -700,12 +712,6 @@ async function runMergeTxn(
       where: { id: sourceUserId },
       data: { deletedAt: new Date(), deletedBy: actor, updatedBy: actor },
     });
-    // #1715: the merge itself, for the records a merge may not rewrite. A
-    // decision's asker and deciders and a log's deciders sit inside its
-    // authenticated payload, so they keep the source's id, and readers follow
-    // it here to the target (src/lib/userMerges.ts). Keyed on the source, so a
-    // second merge of the same account can't record a second target.
-    await tx.userMerge.create({ data: { sourceUserId, targetUserId, mergedBy: actor, ...consent } });
 
     return tx.user.findUniqueOrThrow({ where: { id: targetUserId } });
   }, {

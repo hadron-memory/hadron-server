@@ -140,29 +140,43 @@ function signingBody(p: Proved, key: SoftPasskey, over: { uv?: boolean; origin?:
 const FORBIDDEN = '{"error":"forbidden"}';
 
 /** Execute the served renderer with the proven HTTP response; transport/auth are exercised above it. */
-async function renderedProof(requestId: string, proof: unknown) {
+async function renderedProof(requestId: string, proof: unknown, extraResponses: Array<{ status: number; body: unknown }> = []) {
   type Element = { tag: string; textContent: string; children: Element[]; hidden: boolean;
     listeners: Record<string, () => Promise<void>>; appendChild: (child: Element) => void;
     replaceChildren: (...children: Element[]) => void; addEventListener: (event: string, fn: () => Promise<void>) => void; focus: () => void };
+  let activeElement: Element | null = null;
   const make = (tag: string): Element => {
     const e: Element = { tag, textContent: '', children: [], hidden: false, listeners: {},
       appendChild: child => { e.children.push(child); }, replaceChildren: (...children) => { e.children = children; },
-      addEventListener: (event, fn) => { e.listeners[event] = fn; }, focus: () => undefined };
+      addEventListener: (event, fn) => { e.listeners[event] = fn; }, focus: () => { activeElement = e; } };
     return e;
   };
   const ids = Object.fromEntries(['title', 'msg', 'view', 'start', 'go'].map(id => [id, make(id)]));
   const document = { getElementById: (id: string) => ids[id], createElement: make,
-    createTextNode: (text: string) => Object.assign(make('#text'), { textContent: text }), title: '' };
-  const responses = [{ ceremonyId: 'proof', challenge: 'AA', rpId: RP }, proof];
+    createTextNode: (text: string) => Object.assign(make('#text'), { textContent: text }), title: '',
+    get activeElement() { return activeElement; } };
+  const responses = [{ status: 200, body: { ceremonyId: 'proof', challenge: 'AA', rpId: RP } },
+    { status: 200, body: proof }, ...extraResponses];
   const script = await (await fetch(`${base}/signing/ceremony.js`)).text();
   runInNewContext(script, { document, location: { pathname: `/signing/${requestId}` },
-    fetch: async () => ({ ok: true, json: async () => responses.shift() }),
+    fetch: async () => {
+      const response = responses.shift();
+      if (!response) throw new Error('Unexpected renderer request');
+      return { ok: response.status >= 200 && response.status < 300, status: response.status, json: async () => response.body };
+    },
     navigator: { credentials: { get: async () => ({ rawId: new Uint8Array([1]), response: {
       authenticatorData: new Uint8Array([1]), clientDataJSON: new Uint8Array([1]), signature: new Uint8Array([1]) } }) } },
     window: { PublicKeyCredential: function () {} }, btoa, atob, Uint8Array, JSON, Date, Error });
   await ids.go.listeners.click();
   const texts = (e: Element): string[] => [e.textContent, ...e.children.flatMap(texts)];
-  return { ids, texts };
+  const button = (label: string): Element => {
+    const find = (e: Element): Element | undefined => e.tag === 'button' && e.textContent === label
+      ? e : e.children.map(find).find(Boolean);
+    const found = find(ids.view);
+    if (!found) throw new Error('Missing renderer button: ' + label);
+    return found;
+  };
+  return { ids, texts, document, button };
 }
 
 describe('the surface is mounted only through signingSurfacePolicy()', () => {
@@ -236,6 +250,36 @@ describe('a link alone reveals nothing (cor:dmo:130:08)', () => {
     expect(cookie).toMatch(/HttpOnly/i);
     expect(cookie).toMatch(/SameSite=Strict/i);
     expect(cookie).toMatch(/Path=\/signing/i);
+  });
+});
+
+describe('#3482 served-script focus after decline Cancel', () => {
+  it('returns focus to the NEW Decline control after Cancel', async () => {
+    const req = await openRequest(), proof = await prove(req.id, signer);
+    const page = await renderedProof(req.id, proof.json);
+    expect(page.document.activeElement).toBe(page.ids.title);
+    const oldDecline = page.button('Decline');
+    await oldDecline.listeners.click();
+    expect(page.document.activeElement).toBe(page.button('Cancel'));
+    await page.button('Cancel').listeners.click();
+    expect(page.document.activeElement).toBe(page.button('Decline'));
+    expect(page.button('Decline')).not.toBe(oldDecline);
+  });
+
+  for (const [action, status, body, expected] of [
+    ['Sign with passkey', 400, { error: 'SIGNATURE_NOT_VERIFIED' }, 'Sign with passkey'],
+    ['Sign with passkey', 502, {}, 'Reload this page'],
+    ['Yes, decline', 400, { error: 'refused' }, 'Yes, decline'],
+    ['Yes, decline', 502, {}, 'Reload this page'],
+  ] as const) it('preserves ' + action + '/' + status + ' focus on ' + expected, async () => {
+    const req = await openRequest(), proof = await prove(req.id, signer);
+    const page = await renderedProof(req.id, proof.json, [
+      { status: 200, body: { ceremonyId: 'action', challenge: 'AA', rpId: RP, allowCredentials: [] } },
+      { status, body },
+    ]);
+    if (action === 'Yes, decline') await page.button('Decline').listeners.click();
+    await page.button(action).listeners.click();
+    expect(page.document.activeElement).toBe(page.button(expected));
   });
 });
 
