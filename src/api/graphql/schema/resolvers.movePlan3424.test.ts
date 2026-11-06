@@ -243,7 +243,7 @@ describe('planNodeMove #3424', () => {
   });
 
   it('keeps historical MEMORY prefix aliases in plan/real warning agreement', async () => {
-    const dest = await db.memory.create({ data: { name: 'Destination', urn: 'plan3424:dest-new', class: 'knowledge', visibility: 'PUBLIC' } });
+    const dest = (await createDbOrgAndGraph(db, { orgName: 'dest3424', graphName: 'dest-new', visibility: 'PUBLIC' })).graph;
     await createDbNode(db, { memoryId: memory.id, loc: 'old-link' });
     const other = await createDbNode(db, { memoryId: dest.id, loc: 'new-target' });
     await db.urnAlias.create({ data: { entityType: 'MEMORY', entityId: dest.id, urn: 'plan3424:dest-old', reason: 'RENAME' } });
@@ -254,6 +254,18 @@ describe('planNodeMove #3424', () => {
     const moved = await M.moveNode(null, args, context());
     expect(moved.moveLinkWarnings).toMatchObject([{ target: 'old-link', status: 'RETARGETED' }]);
     expect(plan.linkWarnings).toEqual(moved.moveLinkWarnings);
+  });
+
+  it('projects the alias that a minted same-memory move creates', async () => {
+    const root = await createDbNode(db, { memoryId: memory.id, loc: 'a', content: '[[a]]' });
+    await db.node.update({ where: { id: root.id }, data: { mintedAt: new Date(), mintedByInfo: 'test' } });
+    const args = { sourceRef: root.id, targetUrn: targetUrn('z') };
+    const plan = await M.planNodeMove(null, args, context());
+    expect(await db.urnAlias.count({ where: { entityType: 'NODE', entityId: root.id } })).toBe(0);
+    const moved = await M.moveNode(null, args, context());
+    expect(moved.moveLinkWarnings).toEqual([]);
+    expect(plan.linkWarnings).toEqual(moved.moveLinkWarnings);
+    expect(await db.urnAlias.count({ where: { entityType: 'NODE', entityId: root.id } })).toBe(1);
   });
 
   it.each(['key', 'sign-in'] as const)('plans install moves with a live %s credential and refuses its revocation', async credential => {
