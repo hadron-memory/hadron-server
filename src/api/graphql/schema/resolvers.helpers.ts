@@ -2433,7 +2433,7 @@ export async function getAccessibleMemoryIds(
         deletedAt: null,
         OR: [
           { class: { in: ['personal', 'private'] as any }, userId: ctx.userId },
-          { userMemoryOfAgentId: { not: null }, createdBy: ctx.userId },
+          { class: 'knowledge', userMemoryOfAgentId: { not: null }, createdBy: ctx.userId },
           // spec 047: a user-owned memory is readable ONLY by its owner.
           //
           // NON-personal classes, for the reason MCP's `getMemoryAccess` states

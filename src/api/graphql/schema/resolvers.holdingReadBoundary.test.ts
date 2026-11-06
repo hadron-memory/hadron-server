@@ -66,7 +66,7 @@ describe('creator holdings preserve the current read boundary', () => {
       const { memory, node } = await transferred(memoryClass);
       expect(await point(node.id, user(b.id))).toMatchObject({ id: node.id, content: 'Written by the owner after transfer' });
       expect(await list(user(b.id))).toContain(node.id);
-      await drainNodeUsage();
+      await drainNodeUsage(db);
       const before = await protectedState(memory.id);
       expect(await canReadMemory(db, user(a.id), memory.id)).toBe(false);
       expect(await canReadMemory(db, user(b.id), memory.id)).toBe(true);
@@ -74,7 +74,7 @@ describe('creator holdings preserve the current read boundary', () => {
       expect.soft(await point(node.id, user(a.id))).toBeNull();
       expect.soft(await list(user(a.id))).not.toContain(node.id);
       expect.soft(await getAccessibleMemoryIds(user(a.id))).not.toContain(memory.id);
-      await drainNodeUsage();
+      await drainNodeUsage(db);
       expect(await protectedState(memory.id)).toEqual(before);
     });
   }
