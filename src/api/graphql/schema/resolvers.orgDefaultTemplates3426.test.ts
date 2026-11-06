@@ -376,6 +376,17 @@ describe('#3426 references at creation are judged for the ORG, live (C1, C5)', (
     expect((await skipsOf(m.id)).map((s) => s.role)).toEqual(['via.del', 'via.nat', 'via.sub']);
   });
 
+  it('a task in a since-deleted memory and one in a since-user-owned PUBLIC memory skip at creation (shared-arm guards)', async () => {
+    const gone = await mkMem({ organizationId: org.id, urn: 'acme.com:gone' });
+    const goneTask = await mkTask(gone.id, 'acme.com', 'gone', 'tasks:gone');
+    await tpl('arms', [rule('via.gone', goneTask), rule('via.pub', pubTask)], { orgDefault: true });
+    await db.memory.update({ where: { id: gone.id }, data: { deletedAt: new Date() } });
+    await db.memory.update({ where: { id: pubMem.id }, data: { organizationId: null, ownerUserId: userA } });
+    const m = await newMemory('arms1');
+    expect(await rulesOf(m.id)).toEqual([]);
+    expect((await skipsOf(m.id)).map((x) => x.role)).toEqual(['via.gone', 'via.pub']);
+  });
+
   it('two required defaults on one role give the same result for an admin and a granted creator (C5)', async () => {
     await tpl('r1', [rule('spec', taskA, { writers: 'ADMIN' })], { orgDefault: true, required: true });
     await tpl('r2', [rule('spec', taskB, { writers: 'OWNER' })], { orgDefault: true, required: true });
