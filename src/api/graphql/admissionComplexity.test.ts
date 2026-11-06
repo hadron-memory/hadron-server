@@ -87,6 +87,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.memoryAssets",
   "Query.memoryConfigTemplates",
   "Query.memoryEdges",
+  "Query.memoryLocSegments",
   "Query.memoryNodes",
   "Query.myAgentSubscriptionsPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.myChats",
@@ -316,7 +317,7 @@ describe('cost (graphql-query-complexity), enforce', () => {
     expect(cost('{ validateMemory(memoryRef: "m") { total } }')).toBeGreaterThan(0);
     void pagedList;
     for (const [field, size] of Object.entries(OMITTED_PAGE_SIZE)) {
-      if (field === 'Query.appNodes') expect(size).toBe(20); // The explicit lower legacy default (#3210).
+      if (field === 'Query.appNodes' || field === 'Query.memoryLocSegments') expect(size).toBe(20); // The explicit lower legacy default (#3210); the loc-segment page default (#3456).
       else expect(size).toBeGreaterThan(DEFAULT_OMITTED_PAGE_SIZE - 1);
     }
     expect(DEFAULT_OMITTED_PAGE_SIZE).toBe(100);
