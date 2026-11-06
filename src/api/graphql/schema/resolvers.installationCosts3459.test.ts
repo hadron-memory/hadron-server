@@ -1,0 +1,200 @@
+/** #3459 diagnostic slice: no source optimization, no invented numeric budget.
+ * The logged client belongs only to this file/run's disposable database.
+ */
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { ApolloServer } from '@apollo/server';
+import { PrismaClient } from '../../../generated/prisma/index.js';
+import { db } from '../../../integrations/db/client.js';
+import { cleanDb, createDbAgentImport, createDbAgentOrgGrant } from '../../../test/helpers.js';
+import { generateId } from '../../../lib/id.js';
+import { resolvers, type Context } from './resolvers.js';
+import { typeDefs } from './typeDefs.js';
+import * as installs from '../../../lib/appInstallations.js';
+import { locateTeamAgent } from '../../../lib/auth/workerRead.js';
+import { writeFileSync } from 'node:fs';
+vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
+const logged = new PrismaClient({ datasourceUrl: process.env.DATABASE_URL, log: [{ emit: 'event', level: 'query' }] });
+let active = false;
+let sql: string[] = [];
+let operations: string[] = [];
+let projectedPageReads = 0;
+let responseBytes = 0;
+logged.$on('query', event => { if (active) sql.push(event.query); });
+const measured = logged.$extends({ query: { $allModels: { async $allOperations({ model, operation, args, query }) {
+  if (active) {
+    operations.push(`${model}.${operation}`);
+    if (model === 'App' && operation === 'findMany' && (args as any)?.select?.appAgents) projectedPageReads++;
+  }
+  return query(args);
+} } } });
+const server = new ApolloServer<Context>({ typeDefs, resolvers });
+const helpers = [
+  vi.spyOn(installs, 'listAppInstallations'),
+  vi.spyOn(installs, 'loadAppInstallationPage'),
+  vi.spyOn(installs, 'resolveAppInstallation'),
+];
+const table: any[] = [];
+let userId: string, orgId: string, vendorId: string, orgUrn: string;
+let apps: string[] = [], agents: any[] = [];
+const context = (full = false, appId?: string): Context => ({ db: measured as any, userId, roles: full ? ['ADMIN'] : ['READER'], ...(appId ? { appId, organizationId: orgId } : {}) });
+const audit = 'agent{id} createdAt createdBy updatedAt updatedBy';
+const appQuery = (ids: string[], fields: string) => `query{${ids.map((id, i) => `a${i}:app(ref:"${id}"){${fields}}`).join(' ')}}`;
+const toData = (response: any) => {
+  expect(response.body.kind).toBe('single');
+  const result = response.body.singleResult;
+  expect(result.errors).toBeUndefined();
+  return result.data;
+};
+async function barrier() {
+  await logged.$queryRaw`SELECT 'installation-cost-3459-log-barrier'`;
+  await vi.waitFor(() => expect(sql.some(q => q.includes('installation-cost-3459-log-barrier'))).toBe(true));
+}
+async function measure(label: string, run: () => Promise<any>, apiRequests: number, rows: (data: any) => number) {
+  // Setup is complete before the event span; no process-global query listener.
+  for (const helper of helpers) helper.mockClear();
+  sql = []; operations = []; projectedPageReads = 0; responseBytes = 0; active = true;
+  let data: any;
+  try { data = await run(); await barrier(); }
+  finally { active = false; }
+  const statements = sql.filter(q => !q.includes('installation-cost-3459-log-barrier'));
+  expect(statements.length, 'positive SQL discriminator').toBeGreaterThan(0);
+  expect(operations.length, 'positive Prisma-operation discriminator').toBeGreaterThan(0);
+  const out = { label, sqlCount: statements.length, prismaOperations: operations.length,
+    pagePrismaReads: projectedPageReads, helperEntries: helpers.map(h => h.mock.calls.length),
+    apiRequests, projectedRows: rows(data), responseUtf8Bytes: apiRequests ? responseBytes : null,
+    operations: [...operations], sql: statements, data };
+  table.push(out);
+  return out;
+}
+const wire = async (query: string, ctx: Context) => {
+  const response = await server.executeOperation({ query }, { contextValue: ctx });
+  if (response.body.kind === 'single' && active) responseBytes += Buffer.byteLength(JSON.stringify(response.body.singleResult), 'utf8');
+  return toData(response);
+};
+const installationIds = (data: any) => Object.values(data).map((app: any) => app.appAgents?.map((r: any) => r.agent?.id ?? null));
+
+async function addApp(index: number) {
+  const app = await db.app.create({ data: { name: `App ${index}`, urn: `${orgUrn}:app${index}`, organizationId: orgId, createdAt: new Date('2026-01-01') } });
+  apps.push(app.id);
+  for (let j = 0; j < 2; j++) await db.appAgent.create({ data: { appId: app.id, agentId: agents[j].id,
+    createdAt: new Date(`2026-01-0${j + 2}`), createdBy: userId, updatedBy: userId } });
+}
+
+beforeAll(async () => {
+  expect(new URL(process.env.DATABASE_URL!).pathname).not.toMatch(/^\/(hadron|hadron_test)$/);
+  await cleanDb(db);
+  const key = generateId().toLowerCase();
+  const org = await db.organization.create({ data: { name: 'Cost holder', urn: `cost-${key}.example` } }); orgId = org.id; orgUrn = org.urn;
+  const vendor = await db.organization.create({ data: { name: 'Cost vendor', urn: `vendor-${key}.example` } }); vendorId = vendor.id;
+  userId = (await db.user.create({ data: { handle: `cost-${key}`, roles: ['READER'] } })).id;
+  await db.orgMember.create({ data: { organizationId: orgId, userId, role: 'ADMIN' } });
+  for (let i = 0; i < 4; i++) {
+    const organizationId = i % 2 ? vendorId : orgId;
+    const sys = await db.memory.create({ data: { name: `System ${i}`, urn: `${org.urn}:sys${i}`, class: 'system', organizationId } });
+    agents.push(await db.agent.create({ data: { name: `Agent ${i}`, urn: `${org.urn}:agent${i}`, organizationId,
+      visibility: 'ORGANIZATION', personaRole: `role${i}`, systemMemoryId: sys.id, description: 'x'.repeat(4096) } }));
+    await db.node.create({ data: { memoryId: sys.id, loc: 'roles', name: 'Roles', content: 'Roles' } });
+    await db.node.create({ data: { memoryId: sys.id, loc: `roles:role${i}`, name: `Role ${i}`, content: `Role ${i}` } });
+  }
+  for (const org of [orgId, vendorId]) for (const agent of [agents[2], agents[3]]) await createDbAgentOrgGrant(db, org, agent.id);
+  await createDbAgentImport(db, agents[0].id, agents[2].id, { position: 100 });
+  await createDbAgentImport(db, agents[0].id, agents[3].id, { position: 200 });
+  await createDbAgentImport(db, agents[1].id, agents[2].id, { position: 100 }); // duplicate derived witness
+  await addApp(0);
+  // Flush pre-span client startup independently; its listener is disabled here.
+  await logged.$connect();
+});
+afterAll(async () => {
+  active = false;
+  if (process.env.HADRON_3459_ARTIFACT) writeFileSync(process.env.HADRON_3459_ARTIFACT, JSON.stringify({
+    sourceHead: process.env.HADRON_3459_HEAD ?? 'working-tree', metricDefinitions: {
+      sqlCount: 'dedicated-client query events excluding named barrier, measured span only',
+      prismaOperations: 'dedicated-client model query-extension entries, raw barrier excluded',
+      pagePrismaReads: 'App.findMany with select.appAgents; NOT SQL count',
+      helperEntries: 'exported listAppInstallations/loadAppInstallationPage/resolveAppInstallation spy entries; same-module direct calls may not cross spies',
+      responseUtf8Bytes: 'UTF8 JSON singleResult including data envelope, not DB wire bytes; API request means in-process GraphQL operation, not HTTP',
+    }, table,
+  }, null, 2));
+  await server.stop(); await logged.$disconnect(); vi.restoreAllMocks();
+});
+
+describe('#3459 owned-client fixed roster diagnostics', () => {
+  it('captures A=1/A=3 reader shapes and repeated/fresh Context controls without selecting a budget', async () => {
+    for (const count of [1, 3]) {
+      while (apps.length < count) await addApp(apps.length);
+      const ids = apps.slice(0, count);
+      for (const [name, fields] of [['agents', 'agents{id}'], ['audits', `appAgents{${audit}}`],
+        ['siblings', `agents{id} appAgents{${audit}}`]] as const) {
+        for (const full of [false, true]) {
+          const ctx = context(full);
+          for (const phase of ['cold', 'same-context-repeat', 'fresh-context']) {
+            const out = await measure(`A${count}/${name}/${full ? 'full' : 'partial'}/${phase}`,
+              () => wire(appQuery(ids, fields), phase === 'fresh-context' ? context(full) : ctx), 1,
+              data => Object.values(data).reduce((n: number, app: any) => n + (app.agents?.length ?? 0) + (app.appAgents?.length ?? 0), 0));
+            expect(Object.keys(out.data)).toHaveLength(count);
+            for (const app of Object.values(out.data) as any[]) {
+              if (app.appAgents) {
+                expect(app.appAgents).toHaveLength(4);
+                if (!full) for (const row of app.appAgents) expect(row).toMatchObject({ createdBy: null, updatedAt: null, updatedBy: null });
+                else expect(app.appAgents.filter((r: any) => r.createdBy === userId)).toHaveLength(2);
+              }
+              if (app.agents) expect(app.agents.map((a: any) => a.id).sort()).toEqual((full ? agents : [agents[0], agents[2]]).map(a => a.id).sort());
+            }
+          }
+        }
+      }
+      for (const full of [false, true]) {
+        const q = `query{agent(ref:"${agents[2].id}"){appAgents{app{id} ${audit}}}}`;
+        const out = await measure(`A${count}/reverse/${full ? 'full' : 'partial'}`, () => wire(q, context(full)), 1, data => data.agent.appAgents.length);
+        expect(out.data.agent.appAgents).toHaveLength(count);
+      }
+    }
+    // One versus three parent Agent field reads; not recursion/depth expansion.
+    for (const count of [1, 3]) {
+      const targets = Array.from({ length: count }, () => agents[2]); // repeated parent aliases expose repeated authorization work
+      const query = `query{${targets.map((a, i) => `p${i}:agent(ref:"${a.id}"){importedBy{parentAgentId parentAgent{id}}}`).join(' ')}}`;
+      const out = await measure(`importedBy/${count}-parents`, () => wire(query, context(false, apps[0])), 1,
+        data => Object.values(data).reduce((n: number, a: any) => n + a.importedBy.length, 0));
+      expect(out.data.p0.importedBy).toHaveLength(2);
+      expect(out.data.p0.importedBy.map((row: any) => row.parentAgentId).sort()).toEqual([agents[0].id, agents[1].id].sort());
+      expect(out.data.p0.importedBy.find((row: any) => row.parentAgentId === agents[1].id).parentAgent).toBeNull();
+      if (count === 3) { expect(out.data.p1.importedBy).toHaveLength(2); expect(out.data.p2.importedBy).toHaveLength(2); }
+    }
+    for (const count of [1, 4]) {
+      // Same exact Team Agent, one/four licensed Agents in its role walk.
+      if (count === 1) {
+        await db.agentImport.deleteMany({ where: { parentAgentId: { in: [agents[0].id, agents[1].id] } } });
+        await db.appAgent.deleteMany({ where: { appId: apps[0], agentId: agents[1].id } });
+      } else {
+        await db.appAgent.create({ data: { appId: apps[0], agentId: agents[1].id } });
+        await createDbAgentImport(db, agents[0].id, agents[2].id, { position: 100 });
+        await createDbAgentImport(db, agents[0].id, agents[3].id, { position: 200 });
+        await createDbAgentImport(db, agents[1].id, agents[2].id, { position: 100 });
+      }
+      const out = await measure(`role-definition/${count}-agents`, () => wire(`query{teamRoles(appRef:"${apps[0]}",teamAgentRef:"${agents[0].id}"){items{role} total}}`, context(true)), 1,
+        data => data.teamRoles.items.length);
+      expect(out.data.teamRoles.total).toBe(1);
+      const marker = await measure(`role-marker/${count}-agents`, async () => {
+        try { const agent = await locateTeamAgent(context(true), apps[0], null); return { agentId: agent.id, code: null }; }
+        catch (error: any) { return { agentId: null, code: error.extensions?.code }; }
+      }, 0, data => data.agentId ? 1 : 0);
+      expect(marker.data).toEqual(count === 1 ? { agentId: agents[0].id, code: null } : { agentId: null, code: 'TEAM_AGENT_AMBIGUOUS' });
+    }
+    for (const [kind, id] of [['ROW', agents[0].id], ['DERIVED', agents[2].id], ['absent', generateId()]] as const) {
+      const out = await measure(`single/${kind}`, () => installs.resolveAppInstallation(measured as any, apps[0], id), 0, data => data ? 1 : 0);
+      expect(out.data?.installationKind ?? null).toBe(kind === 'absent' ? null : kind);
+    }
+    // Two principals alternate without sharing Context; new request after revocation.
+    const query = appQuery([apps[0]], `appAgents{${audit}}`);
+    const before = await measure('grant/active/partial', () => wire(query, context(false)), 1, data => data.a0.appAgents.length);
+    expect(before.data.a0.appAgents).toHaveLength(4);
+    for (const state of ['inactive', 'revoked', 'expired'] as const) {
+      await db.agentOrgGrant.update({ where: { orgId_agentId: { orgId, agentId: agents[3].id } }, data: {
+        activatedAt: state === 'inactive' ? null : new Date('2026-01-01'), revokedAt: state === 'revoked' ? new Date('2026-01-01') : null,
+        expiresAt: state === 'expired' ? new Date('2026-01-01') : null,
+      } });
+      const out = await measure(`grant/${state}/fresh`, () => wire(query, context(false)), 1, data => data.a0.appAgents.length);
+      expect(out.data.a0.appAgents).toHaveLength(3);
+    }
+  }, 60000);
+});
