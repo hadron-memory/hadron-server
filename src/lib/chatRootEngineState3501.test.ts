@@ -373,3 +373,12 @@ it.each(['row', 'legacy', 'absent'] as const)('11: collision preserves target %s
   await updateChatRootData(db, { id: survivor.id, memoryId: target.id, loc: survivor.loc }, { id: target.id, isEncrypted: false }, d => { seen = d.stageName; return d; });
   expect(seen).toBe(kind === 'row' ? 'target-live' : kind === 'legacy' ? 'target-stage' : undefined);
 });
+
+it('13: a migrated partial row cannot turn an invalid legacy stage into an absent stage', async () => {
+  await db.node.update({ where: { id: root.id }, data: { data: { conversationName: 'intake', stageName: 42 } } });
+  await db.chatRootEngineState.create({ data: { chatRootNodeId: root.id, state: { conversationName: 'intake' } } });
+  const before = await raw();
+  let called = false;
+  await expect(updateChatRootData(db, root, enc(), d => { called = true; return d; })).rejects.toMatchObject({ extensions: { code: 'CHAT_STATE_INVALID' } });
+  expect(called).toBe(false); expect(await raw()).toEqual(before);
+});
