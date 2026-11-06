@@ -78,6 +78,11 @@ export async function lockedChatEngineState(tx: Prisma.TransactionClient, rootId
     row = await tx.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: rootId } });
   }
   const state = plaintext(row.state, info);
+  // Migration preserves malformed legacy fields. A partial row must not turn
+  // such a name into the legacy no-stage case; a valid live row still wins.
+  for (const key of ['conversationName', 'stageName']) {
+    if (!Object.hasOwn(state, key) && Object.hasOwn(data, key) && !validEngineValue(key, data[key])) throw invalid();
+  }
   const decoded = chatDataObject(decryptNodeFields({ data: row.state }, info).data);
   if (Object.keys(decoded).some(key => !(ENGINE_KEYS as readonly string[]).includes(key))) await writeChatEngineState(tx, rootId, info, state);
   const keys = MOVED.filter(key => Object.hasOwn(data, key) && validEngineValue(key, data[key]));
@@ -105,7 +110,10 @@ export async function writeChatEngineState(tx: Prisma.TransactionClient, rootId:
 export async function encryptChatEngineStateWithKey(tx: Prisma.TransactionClient, rootId: string, key: import('./crypto.js').EncryptionKey): Promise<boolean> {
   const row = await tx.chatRootEngineState.findUnique({ where: { chatRootNodeId: rootId } });
   if (!row || isAuthenticatedDataEnvelope(row.state, key)) return false;
-  const stored = encryptNodeFieldsWithKey({ data: row.state }, key).data;
+  // A failed authentication is not plaintext. Preserve it and refuse, never nest or reseed it.
+  if (row.state && typeof row.state === 'object' && Object.hasOwn(row.state, '__enc')) throw invalid();
+  const state = engineState(row.state);
+  const stored = encryptNodeFieldsWithKey({ data: state }, key).data;
   await tx.chatRootEngineState.update({ where: { chatRootNodeId: rootId }, data: { state: stored as Prisma.InputJsonValue } });
   return true;
 }

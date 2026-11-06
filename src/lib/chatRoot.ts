@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 /**
  * Serialized read-modify-write of a chat's root `data` blob (#919).
  *
@@ -154,8 +155,8 @@ export async function withChatRootLock<T>(
     const isEngineRoot = row.nodeType === 'record' && /^chats:[^:]+$/.test(row.loc);
     const engine = isEngineRoot ? await lockedChatEngineState(tx, chat.id, memEncInfo, chatData) : null;
     const malformedLegacy = engine ? Object.fromEntries(ENGINE_KEYS.filter(key => key !== 'conversationName' && key !== 'stageName' && Object.hasOwn(chatData, key) && !validEngineValue(key, chatData[key])).map(key => [key, chatData[key]])) : {};
-    const baseline = JSON.stringify(chatData);
-    const engineBaseline = JSON.stringify(engine);
+    const baseline = structuredClone(chatData);
+    const engineBaseline = structuredClone(engine);
     // Row wins over legacy/restored fields, but unknown revisioned fields stay put.
     if (engine) {
       for (const key of ENGINE_KEYS) delete chatData[key];
@@ -167,7 +168,7 @@ export async function withChatRootLock<T>(
       const clean = {...(outcome.chatData ?? chatData)};
       if (engine) {
         const next = Object.fromEntries(ENGINE_KEYS.filter(key => Object.hasOwn(clean, key)).map(key => [key, clean[key]]));
-        if (JSON.stringify(next) !== engineBaseline) await writeChatEngineState(tx, chat.id, memEncInfo, next);
+        if (!isDeepStrictEqual(next, engineBaseline)) await writeChatEngineState(tx, chat.id, memEncInfo, next);
         // 0209: mirror names on EVERY locked write, including a post-restore resync.
         for (const key of ENGINE_KEYS) if (key !== 'conversationName' && key !== 'stageName') delete clean[key];
         Object.assign(clean, malformedLegacy);
@@ -178,7 +179,7 @@ export async function withChatRootLock<T>(
       }
       delete clean.messageCount; delete clean.lastMessageAt;
       // A counter-only update must not re-encrypt/rewrite the root or bless other operational keys.
-      if (JSON.stringify(clean) === baseline) return outcome.value;
+      if (isDeepStrictEqual(clean, baseline)) return outcome.value;
       const enc = encryptNodeFields(
         { content: null, data: clean },
         memEncInfo,
