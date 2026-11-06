@@ -102,6 +102,23 @@ export async function readLocSegments(
   const upperBound = (alias: 'probe_node' | 'n' | 'flat_node') => prefix === ''
     ? Prisma.empty
     : Prisma.sql`AND (replace(${Prisma.raw(alias)}.loc, ':', chr(1))) COLLATE "C" < ${upperKey}::text COLLATE "C"`;
+  const flatBlock = (afterKey: boolean) => Prisma.sql`
+        SELECT array_agg(batch.loc ORDER BY batch.key) AS locs,
+               array_agg(batch.seq ORDER BY batch.key) AS positions,
+               max(batch.key COLLATE "C") AS last_key
+        FROM (
+          SELECT flat_node.loc, flat_node.seq,
+                 (replace(flat_node.loc, ':', chr(1))) COLLATE "C" AS key
+          FROM nodes flat_node
+          WHERE flat_node.memory_id = m.memory_id
+            AND (replace(flat_node.loc, ':', chr(1))) COLLATE "C" >= ${prefixKey}::text COLLATE "C"
+            ${upperBound('flat_node')}
+            ${afterKey ? Prisma.sql`AND (replace(flat_node.loc, ':', chr(1))) COLLATE "C" > m.last_key COLLATE "C"` : Prisma.empty}
+            AND flat_node.deleted_at IS NULL AND flat_node.node_type <> 'system' AND flat_node.node_type <> 'comment' AND flat_node.loc <> ''
+            AND NOT (flat_node.id = ANY(${excludeNodeIds}::text[]))
+          ORDER BY (replace(flat_node.loc, ':', chr(1))) COLLATE "C" ASC
+          LIMIT 256
+        ) batch`;
   const rows = await db.$queryRaw<Array<{ memory_id: string; seg: string; has_node: boolean; pos: number | null }>>`
     WITH RECURSIVE shape AS MATERIALIZED (
       SELECT m.memory_id, NOT EXISTS (
@@ -149,6 +166,24 @@ export async function readLocSegments(
         ORDER BY (replace(n.loc, ':', chr(1))) COLLATE "C" ASC
         LIMIT 1
       ) f
+    ), flat_blocks AS (
+      -- Bounded, ordered keyset blocks keep the flat arm startup-sensitive;
+      -- an unbounded ORDER BY/OFFSET can choose a memory scan plus sort.
+      -- Node @@unique([loc, memoryId]) is non-partial; a proven flat prefix
+      -- has one key per eligible sibling, so strict continuation loses none.
+      SELECT m.memory_id, b.locs, b.positions, b.last_key
+      FROM shape m
+      CROSS JOIN LATERAL (
+        ${flatBlock(false)}
+      ) b
+      WHERE m.flat AND b.last_key IS NOT NULL
+      UNION ALL
+      SELECT m.memory_id, b.locs, b.positions, b.last_key
+      FROM flat_blocks m
+      CROSS JOIN LATERAL (
+        ${flatBlock(true)}
+      ) b
+      WHERE b.last_key IS NOT NULL
     ), segs AS (
       SELECT memory_id,
              split_part(substr(loc, length(${prefix}::text) + 1), ':', 1) AS seg,
@@ -156,26 +191,10 @@ export async function readLocSegments(
              CASE WHEN loc = ${prefix} || split_part(substr(loc, length(${prefix}::text) + 1), ':', 1) THEN seq END AS pos
       FROM walk
       UNION ALL
-      -- A flat prefix has exactly one eligible row per sibling. Only the
-      -- ordered no-descendant proof above can select this arm (ruling 0229).
-      SELECT flat_rows.memory_id,
-             substr(flat_rows.loc, length(${prefix}::text) + 1) AS seg,
-             true AS has_node, flat_rows.seq AS pos
-      FROM shape m
-      CROSS JOIN LATERAL (
-        SELECT flat_node.memory_id, flat_node.loc, flat_node.seq
-        FROM nodes flat_node
-        WHERE flat_node.memory_id = m.memory_id
-          AND (replace(flat_node.loc, ':', chr(1))) COLLATE "C" >= ${prefixKey}::text COLLATE "C"
-          ${upperBound('flat_node')}
-          AND flat_node.deleted_at IS NULL AND flat_node.node_type <> 'system' AND flat_node.node_type <> 'comment' AND flat_node.loc <> ''
-          AND NOT (flat_node.id = ANY(${excludeNodeIds}::text[]))
-        -- Retain the parent's index range even when a broad scan/sort would
-        -- otherwise look cheaper to the planner at the current table size.
-        ORDER BY (replace(flat_node.loc, ':', chr(1))) COLLATE "C" ASC
-        OFFSET 0
-      ) flat_rows
-      WHERE m.flat
+      SELECT f.memory_id, substr(item.loc, length(${prefix}::text) + 1) AS seg,
+             true AS has_node, item.pos
+      FROM flat_blocks f
+      CROSS JOIN LATERAL unnest(f.locs, f.positions) AS item(loc, pos)
     )
     SELECT memory_id, seg, has_node, pos
     FROM segs
