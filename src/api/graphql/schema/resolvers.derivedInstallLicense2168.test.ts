@@ -13,6 +13,7 @@ import { locateTeamAgent } from './resolvers.worker.js';
 import { chatCarrierApps } from './agentChatAccess.js';
 import { hasAppRelationship } from '../../../lib/auth/appRelationship.js';
 import { isAgentInstalled, isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
+import { compileBootPrompt } from './compileBootPrompt.js';
 import { mintAppRun } from '../../../jobs/appRuns.js';
 import { assertManualRunAllowed } from './resolvers.appRun.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -300,5 +301,53 @@ it('#3476 an absent Agent still answers AGENT_NOT_INSTALLED before writes (S9)',
   await expect(M.createNode({}, {
     input: { install: { appRef: app.id, agentRef: target.id }, loc: 'custom:3476', name: 'Absent', content: 'no write' },
   }, ctx())).rejects.toMatchObject({ extensions: { code: 'AGENT_NOT_INSTALLED' } });
+  expect({ memories: await db.memory.count(), nodes: await db.node.count() }).toEqual(before);
+});
+
+
+it.each(['ROW', 'DERIVED'] as const)('#3476 compile keeps its existing missing-grant refusal for %s, without writes', async kind => {
+  if (kind === 'ROW') await db.appAgent.create({ data: { appId: app.id, agentId: target.id } });
+  const agent = await db.agent.findUniqueOrThrow({ where: { id: target.id } });
+  await db.node.create({ data: { memoryId: agent.systemMemoryId!, loc: 'boot:source', name: 'Source', content: 'Compile source', role: 'boot-prompt' } });
+  const before = { memories: await db.memory.count(), nodes: await db.node.count(), revisions: await db.nodeRevision.count(), grants: await db.agentOrgGrant.count() };
+  await expect(compileBootPrompt(ctx(), { kind: 'APP_AGENT', appId: app.id, agentId: target.id }))
+    .rejects.toMatchObject({ extensions: { code: 'BOOT_PROMPT_INCLUDE_UNAVAILABLE' } });
+  expect({ memories: await db.memory.count(), nodes: await db.node.count(), revisions: await db.nodeRevision.count(), grants: await db.agentOrgGrant.count() }).toEqual(before);
+});
+
+
+it('#3476 preserves the physical ROW customisation door without adding the DERIVED refusal', async () => {
+  await db.appAgent.create({ data: { appId: app.id, agentId: target.id } });
+  const written = await M.createNode({}, {
+    input: { install: { appRef: app.id, agentRef: target.id }, loc: 'custom:row3476', name: 'Physical', content: 'physical baseline' },
+  }, ctx());
+  expect(written).toMatchObject({ loc: 'custom:row3476', content: 'physical baseline' });
+});
+
+
+it('#3476 licensed DERIVED compile still succeeds through the unchanged compile door', async () => {
+  await createDbAgentOrgGrant(db, holder.id, target.id);
+  const agent = await db.agent.findUniqueOrThrow({ where: { id: target.id } });
+  await db.node.create({ data: { memoryId: agent.systemMemoryId!, loc: 'boot:source', name: 'Source', content: 'Compile control', role: 'boot-prompt' } });
+  const compiled = await compileBootPrompt(ctx(), { kind: 'APP_AGENT', appId: app.id, agentId: target.id });
+  expect(await db.node.findUniqueOrThrow({ where: { id: compiled.nodeId } })).toMatchObject({ content: 'Compile control', nodeType: 'compiled-boot-prompt' });
+});
+
+it('#3476 physical ROW compile still reports a retired target after permission', async () => {
+  await db.appAgent.create({ data: { appId: app.id, agentId: target.id } });
+  await db.agent.update({ where: { id: target.id }, data: { deletedAt: new Date() } });
+  const before = { memories: await db.memory.count(), nodes: await db.node.count() };
+  await expect(compileBootPrompt(ctx(), { kind: 'APP_AGENT', appId: app.id, agentId: target.id }))
+    .rejects.toMatchObject({ extensions: { code: 'BOOT_PROMPT_TARGET_RETIRED' } });
+  expect({ memories: await db.memory.count(), nodes: await db.node.count() }).toEqual(before);
+});
+
+it('#3476 a non-manager participant gets no typed grant disclosure and writes nothing', async () => {
+  await db.appMember.create({ data: { appId: app.id, userId: stranger.id, role: 'member' } });
+  const before = { memories: await db.memory.count(), nodes: await db.node.count() };
+  await expect(M.createNode({}, {
+    input: { install: { appRef: app.id, agentRef: target.id }, loc: 'custom:3476', name: 'Unmanaged', content: 'no write' },
+  }, { db, userId: stranger.id, roles: ['READER'] } as Context))
+    .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
   expect({ memories: await db.memory.count(), nodes: await db.node.count() }).toEqual(before);
 });

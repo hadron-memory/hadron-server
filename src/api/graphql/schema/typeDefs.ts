@@ -6472,7 +6472,10 @@ export const typeDefs = `#graphql
   is created by the App's first customisation: a createNode through this target
   finds-or-creates it in the same transaction as the write, so a refused write
   leaves nothing behind. Only whoever manages the App may write through it, and
-  only while the App is live and the Agent installed.
+  only while the App is live and the Agent installed. An Agent held only through
+  an import without the App organisation's active grant is refused with
+  AGENT_ORG_GRANT_REQUIRED; an absent Agent is refused with AGENT_NOT_INSTALLED.
+  Both refusals leave no node or install memory behind (cor:agt:040:15).
   """
   input InstallTargetInput {
     appRef: String!
