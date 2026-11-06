@@ -396,6 +396,9 @@ const syncGraphFromGithubAsSystem = async (
       return { error: 'Memory has no organization (user-owned memories are not git-synced)' };
     }
     const organization = graph.organization;
+    // Even an invalid stored source is not attempted without an installation. Keep this before
+    // validation: its failure writes a failed report, whereas a not-attempted result must write nothing.
+    // Once installed, #561 still validates the stored source before any Git operation.
     if (!organization.githubInstallationId) return { notAttemptedReason: 'NO_INSTALLATION' };
 
     // #561 — re-validate the STORED value, not just the incoming one.

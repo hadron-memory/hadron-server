@@ -2,4 +2,6 @@
 export const SYNC_NOT_ATTEMPTED = 'SYNC_NOT_ATTEMPTED';
 export type SyncNotAttemptedReason = 'NO_SOURCE' | 'NO_INSTALLATION';
 export const syncNotAttemptedMessage = (reason: SyncNotAttemptedReason): string =>
-  `Sync was not attempted: ${reason}.`;
+  `Sync was not attempted: ${reason}. ${reason === 'NO_SOURCE'
+    ? 'Configure a source repository before syncing.'
+    : 'Install the GitHub App for this organization before syncing.'}`;
