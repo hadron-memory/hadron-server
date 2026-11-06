@@ -11,6 +11,7 @@ import { markBatchReadNodes } from './resolvers.nodeBatchEdges.js';
 import { contentScopeWhere, effectiveContentScope, type ContentScope } from '../../../lib/comments/scope.js';
 import { isConcealedCommentHistory } from './resolvers.comments.js';
 import { COMMENT_NODE_TYPE } from '../../../lib/comments/index.js';
+import { decodeLocSegmentsCursor, normalizeLocSegmentsLimit, readLocSegments } from '../../../lib/memoryLocSegments.js';
 import { effectiveScope, findEffectiveNodeIdByLoc, markInherited, retainEffective, stillInherited, type InheritedFrom } from '../../../lib/effectiveSystemMemory.js';
 import {
   renderNodeExport,
@@ -2696,6 +2697,44 @@ export const nodeQueries = {
         include: APP_NODES_INCLUDE,
       });
       return finishAppNodes(ctx, results, read.inheritance);
+    },
+
+    /**
+     * #3456 (cor:api:090:05): one page of the distinct next loc segments under a parent loc. The readable
+     * set is `resolveNodeReadScopeIds` + `effectiveScope`, the SAME computation as `findNodes` with no query,
+     * so the two cannot disagree. Every no-access shape (unreadable, unresolvable, empty memory, a parent with
+     * nothing below it) is the one empty page; a request with no memoryIds is refused before any read.
+     */
+    memoryLocSegments: async (
+      _: unknown,
+      args: { memoryIds: string[]; parentLoc: string; limit?: number | null; after?: string | null },
+      ctx: Context,
+    ) => {
+      const refuse = (msg: string) => new GraphQLError(msg, { extensions: { code: 'BAD_USER_INPUT' } });
+      if (!Array.isArray(args.memoryIds) || args.memoryIds.length === 0) {
+        throw refuse('memoryLocSegments: memoryIds must name at least one memory.');
+      }
+      if (args.parentLoc.startsWith(':') || args.parentLoc.endsWith(':') || args.parentLoc.includes('::') || args.parentLoc.includes('\0')) {
+        throw refuse('memoryLocSegments: parentLoc is not a valid loc.');
+      }
+      let after: ReturnType<typeof decodeLocSegmentsCursor> = null;
+      if (args.after != null && args.after !== '') {
+        after = decodeLocSegmentsCursor(args.after);
+        if (!after) throw refuse('memoryLocSegments: after is not a cursor this field issued.');
+      }
+      const limit = normalizeLocSegmentsLimit(args.limit);
+      await admitOperationRate(ctx, ctx.db, 'FAN_OUT_READS', ctx.limiterIdentity ?? transportRateIdentity(ctx));
+      const empty = { items: [], hasMore: false, endCursor: null };
+      const gated = await resolveNodeReadScopeIds(ctx, { memoryIds: args.memoryIds }, null);
+      if (gated.length === 0) return empty;
+      const inheritance = await effectiveScope(ctx.db, gated);
+      return readLocSegments(ctx.db, {
+        memoryIds: inheritance.memoryIds,
+        excludeNodeIds: inheritance.excludeNodeIds,
+        parent: args.parentLoc,
+        limit,
+        after,
+      });
     },
 
     /**

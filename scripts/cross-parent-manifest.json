@@ -120,6 +120,8 @@
     "MemoryConfigApplyResult": "envelope",
     "NodeRoleRulePayload": "envelope",
     "AgentExtensionPage": "envelope",
+    "LocSegmentsPage": "envelope",
+    "LocSegment": "value",
     "AgentOfferSubject": "value",
     "AgentOfferReason": "value",
     "AgentOfferReadiness": "value",

@@ -4675,6 +4675,24 @@ export const typeDefs = `#graphql
     enabled: Boolean
   }
 
+  "#3456 - one row of memoryLocSegments: a next loc segment under the parent, and the memory it comes from."
+  type LocSegment {
+    "The next segment name (no colon)."
+    segment: String!
+    "True when an eligible node sits at exactly <parent>:<segment> in this memory; false for a branch that only has nodes below it."
+    hasNode: Boolean!
+    "The memory the row comes from (an inherited system memory names itself)."
+    memoryId: ID!
+  }
+
+  "#3456 - one page of memoryLocSegments."
+  type LocSegmentsPage {
+    items: [LocSegment!]!
+    "Opaque. Null when hasMore is false."
+    endCursor: String
+    hasMore: Boolean!
+  }
+
   "#2177 - one page of Agent.extendedBy."
   type AgentExtensionPage {
     items: [Agent!]!
@@ -9723,6 +9741,19 @@ export const typeDefs = `#graphql
     Accepts the App's ID or URN.
     """
     appNodesPage(appRef: ID!, filter: NodeFilter, limit: Int, offset: Int): NodePage!
+
+    """
+    #3456 (hrn:node:hadronmemory.com:specs:cor:api:090:05): one page of the distinct next loc segments
+    under parentLoc ("" for the root), including a branch with no node of its own. Reads over exactly
+    the nodes findNodes would read for the same memoryIds with no query: the same readable set, access
+    intersection, defaults and inheritance. memoryIds is required and non-empty (an empty list is
+    BAD_USER_INPUT); when no entry survives the gate the answer is the empty page, never the caller's
+    default scope. An unreadable, unresolvable or empty memory, and a parent with nothing at or under
+    it, all give the identical empty page. Rows are grouped by memory id; inside a memory, node-backed
+    segments with a position come first by position, then every other segment by name (ruling 0217).
+    Default page 20, cap 200 (larger is served as 200); after is the previous page's endCursor.
+    """
+    memoryLocSegments(memoryIds: [ID!]!, parentLoc: String!, limit: Int, after: String): LocSegmentsPage!
 
     """
     #2190 (hrn:node:hadronmemory.com:specs:cor:dmo:050:17): the memories appNodes

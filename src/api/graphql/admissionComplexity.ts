@@ -129,6 +129,7 @@ export const OMITTED_PAGE_SIZE: Readonly<Record<string, number>> = {
   'Query.memoryEdges': 1000,
   'Query.validateMemory': 200,
   'Query.appNodes': 20,
+  'Query.memoryLocSegments': 20, // #3456: the resolver's own default page
 };
 /** The library's fragment expansion is not memoized; this bounds it (L3 runs earlier at validation). */
 export const MAX_QUERY_NODES = 10_000;

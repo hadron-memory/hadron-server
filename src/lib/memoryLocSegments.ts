@@ -1,0 +1,123 @@
+/**
+ * #3456 — the bounded read of the distinct next loc segments under a parent loc
+ * (cor:api:090:05). One level only: for a parent `P` it lists the names a tree shows as
+ * branches one level down, including a branch with no node of its own (`findings:flaky-ci`
+ * with no `findings` node lists `findings`, `hasNode: false`).
+ *
+ * The caller (`memoryLocSegments` in resolvers.query.node.ts) resolves WHICH memories and
+ * WHICH nodes are eligible through the same computation as `findNodes` and hands this module
+ * plain ids. This module only reads loc strings, so it holds no access rule of its own.
+ *
+ * Order (ruling 0217, cor:dmo:020:01): rows are grouped by memory id; inside a memory a
+ * node-backed segment whose node has a position (`seq`) comes first, by position, then every
+ * other segment by name. The keyset is (memory id, position-absent-last, segment name), which
+ * identifies every row, so following the continuation returns each row once.
+ */
+import { Buffer } from 'node:buffer';
+import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
+
+type Db = PrismaClient | Prisma.TransactionClient;
+
+export const LOC_SEGMENTS_DEFAULT_LIMIT = 20;
+export const LOC_SEGMENTS_MAX_LIMIT = 200;
+
+export interface LocSegmentRow {
+  segment: string;
+  hasNode: boolean;
+  memoryId: string;
+}
+
+export interface LocSegmentsPage {
+  items: LocSegmentRow[];
+  hasMore: boolean;
+  /** Opaque; null when `hasMore` is false. */
+  endCursor: string | null;
+}
+
+/** The page size a caller asked for: default 20 (also null), clamped to 1..cap, never refused for being large. */
+export function normalizeLocSegmentsLimit(limit: number | null | undefined): number {
+  if (limit == null || !Number.isFinite(limit)) return LOC_SEGMENTS_DEFAULT_LIMIT;
+  return Math.min(LOC_SEGMENTS_MAX_LIMIT, Math.max(1, Math.trunc(limit)));
+}
+
+interface Cursor { m: string; s: number | null; n: string }
+
+export function encodeLocSegmentsCursor(c: Cursor): string {
+  return Buffer.from(JSON.stringify([c.m, c.s, c.n]), 'utf8').toString('base64url');
+}
+
+/** Returns null for anything that is not a cursor this module issued (the caller refuses it). */
+export function decodeLocSegmentsCursor(raw: string): Cursor | null {
+  try {
+    const v: unknown = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
+    if (!Array.isArray(v) || v.length !== 3) return null;
+    const [m, s, n] = v as unknown[];
+    if (typeof m !== 'string' || typeof n !== 'string') return null;
+    if (s !== null && !(typeof s === 'number' && Number.isInteger(s))) return null;
+    return { m, s: s as number | null, n };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * One page. `memoryIds` and `excludeNodeIds` are the already-gated scope (readable set after
+ * system-memory inheritance). `parent` is "" for the root. `after` is a decoded cursor.
+ *
+ * Eligible nodes match findNodes' defaults: live (not soft-deleted), not system-type, not a
+ * comment, and not an overridden inherited node. A segment exists for a memory when an eligible
+ * node has loc `<parent>:<seg>` or starts with `<parent>:<seg>:` (root: `<seg>` / `<seg>:`).
+ */
+export async function readLocSegments(
+  db: Db,
+  args: {
+    memoryIds: string[];
+    excludeNodeIds: string[];
+    parent: string;
+    limit: number;
+    after: Cursor | null;
+  },
+): Promise<LocSegmentsPage> {
+  const { memoryIds, excludeNodeIds, parent, limit, after } = args;
+  if (memoryIds.length === 0) return { items: [], hasMore: false, endCursor: null };
+
+  // The prefix is compared with starts_with() (collation-independent, literal `_` and `%`), never LIKE.
+  const prefix = parent === '' ? '' : `${parent}:`;
+  const rows = await db.$queryRaw<Array<{ memory_id: string; seg: string; has_node: boolean; pos: number | null }>>`
+    WITH eligible AS (
+      SELECT memory_id, loc, seq
+      FROM nodes
+      WHERE memory_id = ANY(${memoryIds}::text[])
+        AND deleted_at IS NULL
+        AND node_type <> 'system'
+        AND node_type <> 'comment'
+        AND loc <> ''
+        AND NOT (id = ANY(${excludeNodeIds}::text[]))
+        AND starts_with(loc, ${prefix})
+    ), segs AS (
+      SELECT memory_id,
+             split_part(substr(loc, ${prefix.length + 1}::int), ':', 1) AS seg,
+             bool_or(loc = ${prefix} || split_part(substr(loc, ${prefix.length + 1}::int), ':', 1)) AS has_node,
+             min(seq) FILTER (WHERE loc = ${prefix} || split_part(substr(loc, ${prefix.length + 1}::int), ':', 1)) AS pos
+      FROM eligible
+      GROUP BY 1, 2
+    )
+    SELECT memory_id, seg, has_node, pos
+    FROM segs
+    WHERE seg <> ''
+      AND (${after === null}::boolean
+           OR (memory_id, (pos IS NULL), COALESCE(pos, 0), seg)
+              > (${after?.m ?? ''}::text, (${after?.s ?? null}::int IS NULL), COALESCE(${after?.s ?? null}::int, 0), ${after?.n ?? ''}::text))
+    ORDER BY memory_id ASC, (pos IS NULL) ASC, pos ASC, seg ASC
+    LIMIT ${limit + 1}::int`;
+
+  const more = rows.length > limit;
+  const page = more ? rows.slice(0, limit) : rows;
+  const items = page.map((r) => ({ segment: r.seg, hasNode: r.has_node, memoryId: r.memory_id }));
+  const last = page[page.length - 1];
+  return {
+    items,
+    hasMore: more,
+    endCursor: more && last ? encodeLocSegmentsCursor({ m: last.memory_id, s: last.pos, n: last.seg }) : null,
+  };
+}
