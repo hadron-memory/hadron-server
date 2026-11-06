@@ -288,7 +288,10 @@ describe('3-node flow through production deps (§10)', () => {
     });
     const run = await mintFlow();
     expect(await executeAppRun(db, run.id, flowDeps(0.92).deps)).not.toBe('completed');
-    expect(JSON.stringify((await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).failure)).toContain('OUTPUT_WRITE_FAILED');
+    const failure = JSON.stringify((await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).failure);
+    expect(failure).toContain('OUTPUT_WRITE_FAILED');
+    // #1329: the refusal reaches the run's author with the task and the run's own read.
+    expect(failure).toContain('hadron_read_node');
     expect((await db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc: 'flow:governed', memoryId } } })).content).toBe('kept');
   });
 

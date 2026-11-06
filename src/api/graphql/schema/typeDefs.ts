@@ -3875,6 +3875,24 @@ export const typeDefs = `#graphql
   }
 
   """
+  What the credential presented on THIS request came to (hrn:node:hadronmemory.com:specs:cor:aut:010:05).
+  """
+  enum AuthenticationStatus {
+    """
+    The credential resolved a user or an App.
+    """
+    AUTHENTICATED
+    """
+    A credential was presented and did not authenticate. One answer for every cause, with no reason.
+    """
+    REFUSED
+    """
+    No credential was presented.
+    """
+    ANONYMOUS
+  }
+
+  """
   The resolved principal for the credential presented on THIS request
   (issue #562). Exposes the AuthContext the server already resolves per
   request (cor:aut:020:02) read-only, so any surface (CLI, portal) can
@@ -6283,10 +6301,17 @@ export const typeDefs = `#graphql
   and that task's current revision (Node.revSeq). The server compares both with
   the rule and refuses a mismatch: AUTHORING_ATTESTATION_MISSING,
   AUTHORING_ATTESTATION_WRONG_TASK, AUTHORING_ATTESTATION_STALE, or
-  AUTHOR_TASK_BROKEN when the rule's task is gone. A match records a TASK stamp.
-  This does not prove the task was read or followed. With no applicable rule
-  the claim is ignored. People in the portal are exempt, derived from their
-  sign-in; no client field selects that.
+  AUTHOR_TASK_BROKEN when the rule's task is gone, unusable or unreadable to the
+  writer, whatever the claim. A match records a TASK stamp. This does not prove
+  the task was read or followed. With no applicable rule the claim is ignored.
+  People in the portal are exempt, derived from their sign-in; no client field
+  selects that.
+
+  #1329 — each refusal carries extensions taskAccess, task, taskId, taskRevision
+  and load. READABLE gives the task's URN (null when it has none that resolves),
+  id, current revision and the node read per surface. UNAVAILABLE gives nulls and
+  is the same for an unreadable task and a missing one: an owner must fix access
+  or the rule.
   """
   input AuthoredWithInput {
     "The task's id or canonical URN."
@@ -9116,6 +9141,16 @@ export const typeDefs = `#graphql
     AuthContext type for the full security posture.
     """
     authContext: AuthContext
+
+    """
+    Whether the credential THIS request presented authenticated
+    (hrn:node:hadronmemory.com:specs:cor:aut:010:05). REFUSED is the identical answer, in status and body for the same
+    operation, for every cause: garbage, expired, wrongly signed, revoked, from an ended sign-in, for a deleted user, or
+    an ended impersonation. Timing is an accepted limit. It takes no argument, so it cannot test a token the caller does
+    not hold. A credential check that could not complete is the ordinary internal error for this field, never REFUSED;
+    every other field answers as before. me and authContext are unchanged (null for a refused credential).
+    """
+    authenticationStatus: AuthenticationStatus!
 
     """
     One admin-impersonation audit record by id. Resolvable to the session's

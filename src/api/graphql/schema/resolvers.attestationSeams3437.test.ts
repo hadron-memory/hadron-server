@@ -226,7 +226,9 @@ describe('#3437 item 4: the seams a `carry` context would silently open', () => 
       await tombstone(first.id);
       const run = await runCtx();
       const args = { urn: `hrn:node:${ORG}:mem:files:report`, filename: 'report.md', content: 'text' };
-      await expectRefused(hadronStoreFile.execute(run as never, args), 'AUTHORING_ATTESTATION_MISSING');
+      await expect(hadronStoreFile.execute(run as never, args)).rejects.toMatchObject({
+        extensions: { code: 'AUTHORING_ATTESTATION_MISSING', role: 'guide', taskAccess: 'READABLE' },
+      });
       expect((await stored('files:report')).deletedAt).not.toBeNull();
       expect(await db.asset.count({ where: { memoryId } })).toBe(0);
       expect(deleteObject).toHaveBeenCalledTimes(1);
