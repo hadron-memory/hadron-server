@@ -11,6 +11,9 @@ import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
 import { createTestableMcpServer } from '../../mcp/server.js';
 import { startup } from '../../controller/startup.js';
 import { getInstallationToken } from './githubApp.js';
+import type { SyncNotAttemptedReason } from './syncNotAttempted.js';
+
+const reasons = ['NO_SOURCE', 'NO_INSTALLATION'] as const;
 
 vi.mock('./githubApp.js', () => ({ getInstallationToken: vi.fn(async () => { throw new Error('must not contact GitHub'); }), toHttpsUrl: vi.fn((s: string) => s) }));
 const server = new ApolloServer<Context>({ typeDefs, resolvers });
@@ -29,6 +32,7 @@ const mcp = (userId = ownerId) => createTestableMcpServer({ userId, roles: ['REA
 beforeEach(async () => {
   await cleanDb(db);
   const created = await createDbOrgAndGraph(db, { orgName: 'not-attempted', graphName: 'fixture' });
+  await db.organization.update({ where: { id: created.org.id }, data: { githubInstallationId: null } });
   const owner = await db.user.create({ data: { handle: 'not-attempted-owner' } });
   const reader = await db.user.create({ data: { handle: 'not-attempted-reader' } });
   ownerId = owner.id; readerId = reader.id;
@@ -37,18 +41,18 @@ beforeEach(async () => {
   vi.mocked(getInstallationToken).mockClear();
 });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
-async function setup(reason: string) {
+async function setup(reason: SyncNotAttemptedReason) {
   if (reason === 'NO_INSTALLATION') memory = await db.memory.update({ where: { id: memory.id }, data: { source: 'https://github.com/fixture/not-attempted' }, include: { organization: true } });
   before = await snapshot();
 }
 describe('#3543 no attempt', () => {
-  it.each(['NO_SOURCE', 'NO_INSTALLATION'])('shared sync returns a distinct %s outcome without writes', async reason => {
+  it.each(reasons)('shared sync returns a distinct %s outcome without writes', async reason => {
     await setup(reason);
     expect(await syncGraphFromGithub(memory)).toMatchObject({ notAttemptedReason: reason });
     expect(await snapshot()).toEqual(before);
     expect(getInstallationToken).not.toHaveBeenCalled();
   });
-  it.each(['NO_SOURCE', 'NO_INSTALLATION'])('GraphQL and MCP refuse with the same code/reason for %s, preserving stale metadata', async reason => {
+  it.each(reasons)('GraphQL and MCP refuse with the same code/reason for %s, preserving stale metadata', async reason => {
     await setup(reason);
     const result = await graphQL();
     expect(result.errors?.[0]?.extensions).toMatchObject({ code: 'SYNC_NOT_ATTEMPTED', reason });
@@ -58,11 +62,13 @@ describe('#3543 no attempt', () => {
     const text = tool.content.map(c => c.text).join('\n');
     expect(text).toContain('[SYNC_NOT_ATTEMPTED]');
     expect(text).toContain(reason);
+    expect(text).toContain(result.errors![0]!.message);
+    expect(text).toContain(reason === 'NO_SOURCE' ? 'Configure a source repository' : 'Install the GitHub App');
     expect(text).not.toContain('Synced');
     expect(await snapshot()).toEqual(before);
     expect(getInstallationToken).not.toHaveBeenCalled();
   });
-  it.each(['NO_SOURCE', 'NO_INSTALLATION'])('manage access still precedes %s', async reason => {
+  it.each(reasons)('manage access still precedes %s', async reason => {
     await setup(reason);
     const result = await graphQL(readerId);
     expect(result.errors).toHaveLength(1);
@@ -70,7 +76,7 @@ describe('#3543 no attempt', () => {
     expect(await mcp(readerId).callToolText('hadron_sync_graph', { memoryUrn: `hrn:mem:${memory.urn}` })).not.toContain('SYNC_NOT_ATTEMPTED');
     expect(await snapshot()).toEqual(before);
   });
-  it.each(['NO_SOURCE', 'NO_INSTALLATION'])('encrypted refusal precedes %s unchanged', async reason => {
+  it.each(reasons)('encrypted refusal precedes %s unchanged', async reason => {
     await setup(reason);
     memory = await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true }, include: { organization: true } });
     before = await snapshot();
@@ -114,13 +120,32 @@ describe('#3543 no attempt', () => {
       const signature = `sha256=${createHmac('sha256', 'not-attempted-fixture-secret').update(body).digest('hex')}`;
       const response = await fetch(`http://127.0.0.1:${address.port}/github/webhook`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-github-event': 'push', 'x-hub-signature-256': signature }, body });
       expect(response.status).toBe(200);
-      expect(sync).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => expect(sync).toHaveBeenCalledTimes(1));
       expect(await finished).toMatchObject({ notAttemptedReason: 'NO_INSTALLATION' });
       expect(error).not.toHaveBeenCalled(); expect(warn).not.toHaveBeenCalled();
       expect(await snapshot()).toEqual(before);
       expect(getInstallationToken).not.toHaveBeenCalled();
     } finally { await new Promise<void>((resolve, reject) => http.close(e => e ? reject(e) : resolve())); }
   }, 30_000);
+  it('without installation, even an invalid stored source is not attempted or recorded as failed', async () => {
+    await setup('NO_INSTALLATION');
+    memory = await db.memory.update({ where: { id: memory.id }, data: { source: 'https://not-github.invalid/fixture/repo' }, include: { organization: true } });
+    before = await snapshot();
+    expect(await syncGraphFromGithub(memory)).toMatchObject({ notAttemptedReason: 'NO_INSTALLATION' });
+    expect(await snapshot()).toEqual(before);
+    expect(getInstallationToken).not.toHaveBeenCalled();
+  });
+  it('a source with an installation still reaches the credential step and records a real failure', async () => {
+    await setup('NO_INSTALLATION');
+    await db.organization.update({ where: { id: memory.organizationId! }, data: { githubInstallationId: 12345 } });
+    memory = await db.memory.findUniqueOrThrow({ where: { id: memory.id }, include: { organization: true } });
+    // The fixture token provider throws before any network/Git; an attempted failure is still recorded.
+    expect(await syncGraphFromGithub(memory)).toMatchObject({ fault: true, error: 'must not contact GitHub' });
+    expect(getInstallationToken).toHaveBeenCalledExactlyOnceWith(12345, undefined);
+    const stored = await db.memory.findUniqueOrThrow({ where: { id: memory.id } });
+    expect(stored.syncStatus).toBe('ERROR');
+    expect(JSON.parse(stored.lastSyncReport!)).toMatchObject({ outcome: 'failed', code: 'SYNC_FAILED' });
+  });
   it('SDL documents the typed refusal and reasons', () => {
     const text = buildSchema(typeDefs).getMutationType()!.getFields().syncMemory!.description;
     expect(text).toContain('SYNC_NOT_ATTEMPTED');
