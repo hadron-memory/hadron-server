@@ -280,3 +280,35 @@ it('preserves the existing canonical-root duplicate-source refusal before any im
   expect(await db.edge.count({where:{memoryId:graph.id,name:{in:['root-E2','root-E3','E1']}}})).toBe(0);
   expect((await report()).outcome).toBe('failed');
 });
+
+it.each(['idless','foreign'].flatMap(parentKind=>[false,true].map(reverse=>({parentKind,reverse}))))('does not recognize an ambiguous $parentKind parent with another claimant (reverse=$reverse)',async({parentKind,reverse})=>{
+  const f=await fixture();
+  if(parentKind==='idless')writeFileSync(join(root(),'p.md'),readFileSync(join(root(),'p.md'),'utf8').replace(`id: ${f.parent.id}\n`,''));
+  else{
+    const other=await db.memory.create({data:{urn:'test-org:foreign-parent',name:'other',organizationId:graph.organizationId!,class:'knowledge'}});
+    const foreign=await db.node.create({data:{memoryId:other.id,loc:'parent',name:'foreign parent'}});
+    file('p.md',foreign.id,'edited parent',[{targetId:f.a.id,name:'E1'}]);
+  }
+  file('z.md',f.parent.id,'move the original parent to Z');
+  const load=await import('../localFs/loadGraphFromFs.js');const original=load.loadGraphFromFs;
+  vi.spyOn(load,'loadGraphFromFs').mockImplementation(async(...args)=>{const value=await original(...args);if(reverse)value.graph.nodes.reverse();return value;});
+  const result=await syncGraphFromGithub(graph);
+  if(result.error){
+    // Frozen head fails closed: do not describe this as a committed bad edge.
+    expect(await db.node.findUniqueOrThrow({where:{id:f.parent.id}})).toEqual(f.parent);
+    expect(await db.edge.count({where:{memoryId:graph.id,name:'E1'}})).toBe(0);
+  }
+  expect(result.error).toBeUndefined();
+  const e1=await db.edge.findFirst({where:{memoryId:graph.id,name:'E1'},include:{source:true}});
+  if(e1)expect(e1.source.loc).toBe('p');
+  expect((await report())?.entries??[]).not.toContainEqual(collisionEntry);
+});
+it('does not let a refused child role suppress its independently admitted parent edges',async()=>{
+  const f=await fixture();
+  writeFileSync(join(root(),'p/README.md'),readFileSync(join(root(),'p/README.md'),'utf8').replace('name: p/README.md','name: p/README.md\nrole: decision'));
+  expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+  expect(await db.edge.count({where:{memoryId:graph.id,name:'E1',sourceId:f.parent.id,targetId:f.a.id}})).toBe(1);
+  expect(await db.edge.count({where:{memoryId:graph.id,name:'E2'}})).toBe(0);
+  expect((await report()).entries).toEqual([collisionEntry]);
+  expect(await db.node.findUniqueOrThrow({where:{id:f.child.id}})).toEqual(f.child);
+});
