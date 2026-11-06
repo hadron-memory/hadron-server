@@ -11,6 +11,7 @@ import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { requestActorStorage, runAsActor } from '../../../lib/requestActor.js';
 import { registerAutomationTeamSnapshotGrantTools } from '../../../mcp/automationTeamSnapshotGrantTools.js';
+import { createMcpServerInstance } from '../../../mcp/server.js';
 import { formatGraphQLError } from '../formatError.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
@@ -136,4 +137,96 @@ it('rechecks manager authority inside the authority transaction', async () => {
     },
   } } });
   expect(await graphql(f.live.id, ctx(f.admin.id, { db: boundaryDb as unknown as Context['db'] }))).toEqual(GQL_NOT_FOUND);
+});
+
+/** #3406: defensive boundaries, not evidence of reachable session-binding/App-transfer writers. */
+for (const surface of ['graphql', 'production MCP'] as const) it('keeps an inside-transaction fault generic on ' + surface + ' (#3406 M5)', async () => {
+  const before = await db.appAutomationTeamSnapshotGrant.findMany({ orderBy: { id: 'asc' } });
+  const real = db.$transaction.bind(db);
+  let faults = 0;
+  const spy = vi.spyOn(db, '$transaction').mockImplementation(((fn: any, options: any) => real(async (tx: any) => {
+    const grant = new Proxy(tx.appAutomationTeamSnapshotGrant, { get: (target, key) => key === 'findUnique' ? async (args: any) => {
+      if (args.where.id === f.live.id) { faults++; throw Error('private-3406-transaction-diagnostic'); }
+      return target.findUnique(args);
+    } : target[key] });
+    return fn(new Proxy(tx, { get: (target, key) => key === 'appAutomationTeamSnapshotGrant' ? grant : target[key] }));
+  }, options)) as any);
+  try {
+    if (surface === 'graphql') {
+      const out = await graphql(f.live.id, ctx());
+      expect(out.errors[0].extensions.code).toBe('INTERNAL_SERVER_ERROR');
+      expect(out.errors[0].message).toBe('Internal server error.');
+      expect(out.errors[0].extensions.requestId).toEqual(expect.any(String));
+      expect(out.errors[0].extensions.requestId.length).toBeGreaterThan(0);
+      expect(out.data).toBeNull();
+      expect(JSON.stringify(out)).not.toContain('private-3406');
+    } else {
+      // Real registration installs withToolErrorBoundary; the baseline bare helper above does not.
+      const prod = createMcpServerInstance({ userId: f.admin.id, roles: ['READER'], clientId: 'user:3406' } as never,
+        () => undefined, { kind: 'multi-app' });
+      const client = new Client({ name: '3406', version: '1' });
+      const [a, b] = InMemoryTransport.createLinkedPair();
+      try {
+        await prod.connect(b); await client.connect(a);
+        const out: any = await client.callTool({ name: 'hadron_get_automation_team_snapshot_grant', arguments: { id: f.live.id } });
+        expect(out.structuredContent?.error?.code).toBe('INTERNAL_SERVER_ERROR');
+        expect(out.structuredContent.error.message).toBe('Internal server error.');
+        expect(out.structuredContent.error.requestId).toEqual(expect.any(String));
+        expect(out.structuredContent.error.requestId.length).toBeGreaterThan(0);
+        expect(out.isError).toBe(true);
+        expect(JSON.stringify(out)).not.toContain('private-3406');
+      } finally { await client.close(); await prod.close(); }
+    }
+    expect(faults).toBe(1);
+  } finally { spy.mockRestore(); }
+  expect(await db.appAutomationTeamSnapshotGrantEvent.count()).toBe(0);
+  expect(await db.agentTeamEvent.count()).toBe(0);
+  expect(await db.appAutomationTeamSnapshotGrant.findMany({ orderBy: { id: 'asc' } })).toEqual(before);
+});
+
+it('rechecks the same person session after an injected worker-binding transition (#3406 M3)', async () => {
+  const session = await db.session.create({ data: { id: generateId(), appId: f.app.id, userId: f.admin.id, tool: 'vitest' } });
+  const real = db.$transaction.bind(db);
+  let transitions = 0;
+  const spy = vi.spyOn(db, '$transaction').mockImplementation((async (fn: any, options: any) => {
+    // Outer person gate and grant lookup have completed. No production writer is claimed to do this.
+    await db.session.update({ where: { id: session.id }, data: { workerId: f.worker.id } });
+    transitions++;
+    return real(fn, options);
+  }) as any);
+  try {
+    expect(await graphql(f.live.id, ctx(f.admin.id, { sessionId: session.id }))).toEqual(GQL_NOT_FOUND);
+    expect(transitions).toBe(1);
+    expect((await db.session.findUniqueOrThrow({ where: { id: session.id } })).workerId).toBe(f.worker.id);
+    expect(await db.appAutomationTeamSnapshotGrantEvent.count()).toBe(0);
+    expect(await db.agentTeamEvent.count()).toBe(0);
+  } finally {
+    spy.mockRestore();
+    await db.session.update({ where: { id: session.id }, data: { workerId: null } });
+  }
+  expect((await graphql(f.live.id, ctx(f.admin.id, { sessionId: session.id }))).data.automationTeamSnapshotGrant.id).toBe(f.live.id);
+});
+
+it('refuses changed App scope despite management of the replacement scope (#3406 B8)', async () => {
+  const replacement = await db.organization.create({ data: { name: 'Replacement', urn: 'replacement3406.test' } });
+  await db.orgMember.create({ data: { organizationId: replacement.id, userId: f.admin.id, role: 'ADMIN' } });
+  const real = db.$transaction.bind(db);
+  let transitions = 0;
+  const spy = vi.spyOn(db, '$transaction').mockImplementation((async (fn: any, options: any) => {
+    // Deliberate fixture update after outer lookup: old authority anchors, new observed owner scope.
+    await db.app.update({ where: { id: f.app.id }, data: { organizationId: replacement.id } });
+    transitions++;
+    return real(fn, options);
+  }) as any);
+  try {
+    expect(await graphql(f.live.id, ctx())).toEqual(GQL_NOT_FOUND);
+    expect(transitions).toBe(1);
+    expect((await db.app.findUniqueOrThrow({ where: { id: f.app.id } })).organizationId).toBe(replacement.id);
+    expect(await db.appAutomationTeamSnapshotGrantEvent.count()).toBe(0);
+    expect(await db.agentTeamEvent.count()).toBe(0);
+  } finally {
+    spy.mockRestore();
+    await db.app.update({ where: { id: f.app.id }, data: { organizationId: f.org.id } });
+  }
+  expect((await graphql(f.live.id, ctx())).data.automationTeamSnapshotGrant.id).toBe(f.live.id);
 });
