@@ -5710,6 +5710,13 @@ export const typeDefs = `#graphql
     REPORTS_TO
   }
 
+  "#3599: a non-reserving delete preview. No census detail is returned."
+  type DeleteWorkerPreview {
+    workerId: ID!
+    "Always true: the real delete still requires the caller's explicit external-attribution confirmation."
+    attestationRequired: Boolean!
+  }
+
   """
   What castWorker WOULD do (#964) — an unsaved projection, deliberately not a
   Worker (no fake id to mistake for a real row). Scalars only: the ids/names
@@ -10413,6 +10420,16 @@ export const typeDefs = `#graphql
     them. An App with no Team Agent has only its own. Refusals: APP_NOT_FOUND, TEAM_AGENT_AMBIGUOUS, SESSION_NOT_BOUND.
     """
     effectiveModelGroups(appRef: ID!): [EffectiveModelGroup!]!
+
+    """
+    #3599: preview deleteWorker without deleting anything: the same act gate and typed refusals
+    (WORKER_NOT_FOUND, FORBIDDEN, WORKER_IN_USE), nothing reserved. The real delete still requires
+    confirmNoExternalAttribution and may refuse if anything changed
+    (hrn:node:hadronmemory.com:specs:cor:agt:020:03). A validated instruction claim is recorded
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:12); the target is its subject. No census detail,
+    removal plan, attestation bypass or durable lock/lease is returned.
+    """
+    deleteWorkerPreview(workerRef: ID!, instruction: ActInstructionInput): DeleteWorkerPreview!
 
     """
     Dry-run castWorker (#964): run the cast's exact resolution — same
