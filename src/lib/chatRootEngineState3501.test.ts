@@ -6,7 +6,7 @@ import { encryptNodeFields, decryptNodeFields } from './nodeCrypto.js';
 import { generateDataKey } from './crypto.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
 import { generateId } from './id.js';
-import { updateChatRootData } from './chatRoot.js';
+import { updateChatRootData, withChatRootLock } from './chatRoot.js';
 import { ensureCurrentNodeRevisionInTransaction } from './nodeRevisionSnapshot.js';
 import { chatMutations } from '../api/graphql/schema/resolvers.mutation.chat.js';
 import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
@@ -56,6 +56,8 @@ it('6: same trimmed title writes no root, revision or stamp', async () => {
   await chatMutations.updateChatTitle(null, { chatId: root.loc, title: ' Before ' }, ctx);
   expect(await raw()).toEqual(before);
   expect(await db.nodeRevision.count({ where: { nodeId: root.id } })).toBe(0);
+  expect(await db.chatRootEngineState.count()).toBe(0);
+  expect(await db.chatRootCounter.count()).toBe(0);
 });
 it('12: stale pre-transaction plaintext encryption metadata refuses before any root write', async () => {
   const before = await raw();
@@ -136,7 +138,7 @@ it.each(['wrong-key', 'tampered'])('13: %s state refuses before callback, no wri
   await db.memory.update({ where: { id: root.memoryId }, data: { isEncrypted: true } });
   await db.node.update({ where: { id: root.id }, data: { data: encryptNodeFields({ data: (await raw()).data }, info).data! } });
   await updateChatRootData(db, root, info, d => d);
-  const encrypted = encryptNodeFields({ data: { conversationName: 'intake', stageName: 'first' } }, info).data as { __enc: string };
+  const encrypted = encryptNodeFields({ data: { conversationName: 'intake', stageName: 'first' } }, info).data as unknown as { __enc: string };
   if (kind === 'wrong-key') { sessionKeyCache.clear(); sessionKeyCache.set(generateId(), root.memoryId, generateDataKey()); }
   else encrypted.__enc = encrypted.__enc.slice(0, -4) + 'AAAA';
   await db.chatRootEngineState.update({ where: { chatRootNodeId: root.id }, data: { state: encrypted } });
@@ -227,4 +229,60 @@ it('7: actual revision restore rewinds title, but myChats and the next turn reta
   expect(list.find((chat: {loc:string}) => chat.loc === root.loc)).toMatchObject({ title: 'Before', stageName: 'live-stage', conversationName: 'intake' });
   await updateChatRootData(db, root, enc(), d => d);
   expect((await raw()).data).toMatchObject({ title: 'Before', stageName: 'live-stage' });
+});
+
+it('15: shared root lock serializes state edits; every held turn is drained even on assertion failure', async () => {
+  await updateChatRootData(db, root, enc(), d => d); // seed both tables before the controlled lock wait
+  let enter!: () => void, release!: () => void, secondEntered = false;
+  const entered = new Promise<void>(r => { enter = r; }), gate = new Promise<void>(r => { release = r; });
+  const first = withChatRootLock(db, root, enc(), async ({ chatData }) => {
+    enter(); await gate; return { chatData: { ...chatData, lastOffTrackReason: 'first' }, value: null };
+  });
+  await entered;
+  const second = withChatRootLock(db, root, enc(), async ({ chatData }) => {
+    secondEntered = true; expect(chatData.lastOffTrackReason).toBe('first');
+    return { chatData: { ...chatData, lastOffTrackReason: 'second' }, value: null };
+  });
+  // Capture rejection immediately so a mutant cannot leak an unhandled promise during the observation.
+  const drained = Promise.allSettled([first, second]);
+  try { await new Promise(r => setTimeout(r, 60)); expect(secondEntered).toBe(false); }
+  finally { release(); await drained; }
+  const results = await drained;
+  for (const result of results) expect(result.status).toBe('fulfilled');
+  expect((await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } })).state).toHaveProperty('lastOffTrackReason', 'second');
+});
+it('15: lazy strip never certifies an unrelated pending drift', async () => {
+  await fingerprint(); const before = await raw();
+  await db.node.update({ where: { id: root.id }, data: { name: 'unrevisioned drift' } });
+  await updateChatRootData(db, root, enc(), d => ({ ...d, lastOffTrackReason: 'new' }));
+  await reconcile(); expect(await raw()).toMatchObject({ revSeq: before.revSeq + 1, authoredByHuman: null });
+});
+it('5: a real on-behalf-of run rename records a revision without HUMAN', async () => {
+  const memory = await db.memory.findUniqueOrThrow({ where: { id: root.memoryId } });
+  const app = await db.app.create({ data: { id: generateId(), organizationId: memory.organizationId!, name: 'run3501', urn: `run3501:${generateId()}` } });
+  await db.appAgent.create({ data: { appId: app.id, agentId: memory.userMemoryOfAgentId! } });
+  await db.agentSubscription.create({ data: { userId, agentId: memory.userMemoryOfAgentId!, activatedAt: new Date() } });
+  const run = await db.appRun.create({ data: { id: generateId(), organizationId: memory.organizationId!, appId: app.id, userId, triggerKind: 'MANUAL', entryNodeUrn: 'hrn:node:example.com:synthetic:entry' } });
+  await db.memory.update({ where: { id: memory.id }, data: { appId: app.id } });
+  await fingerprint(); const before = await raw();
+  await chatMutations.updateChatTitle(null, { chatId: root.loc, title: 'Run title' }, { ...ctx, appId: app.id, clientId: `run:${run.id}`, portalHumanUserId: undefined });
+  expect(await raw()).toMatchObject({ revSeq: before.revSeq + 1, authorshipKind: null, authoredByHuman: null });
+});
+
+it('1a encrypted FIRST unchanged-mirror turn strips legacy state without ciphertext-order drift or lost stamp', async () => {
+  const info = { id: root.memoryId, isEncrypted: true };
+  sessionKeyCache.set(generateId(), root.memoryId, generateDataKey());
+  await db.memory.update({ where: { id: root.memoryId }, data: { isEncrypted: true } });
+  // Deliberately not the object-property order the engine overlay constructs.
+  const data = { conversationName: 'intake', title: 'Before', stageName: 'first', scope: 'private', userId, goalStack: [], routeHistory: [] };
+  await db.node.update({ where: { id: root.id }, data: { data: encryptNodeFields({ data }, info).data } });
+  await fingerprint(); const before = await raw();
+  await updateChatRootData(db, root, info, d => ({ ...d, lastOffTrackReason: 'off track' }));
+  await reconcile(); expect(await raw()).toMatchObject({ revSeq: before.revSeq, authoredByHuman: userId });
+});
+it('11/13: conversion never nests an undecryptable existing envelope as fresh plaintext', async () => {
+  const { encryptChatEngineStateWithKey } = await import('./chatRootEngineState.js');
+  const row = await db.chatRootEngineState.create({ data: { chatRootNodeId: root.id, state: { __enc: 'tampered' } } });
+  await expect(db.$transaction(tx => encryptChatEngineStateWithKey(tx, root.id, generateDataKey()))).rejects.toMatchObject({ extensions: { code: 'CHAT_STATE_INVALID' } });
+  expect(await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } })).toEqual(row);
 });
