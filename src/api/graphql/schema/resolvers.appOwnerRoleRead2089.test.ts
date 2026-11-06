@@ -194,6 +194,20 @@ describe('#2089 list admission — Query.apps', () => {
     expect(page.items.map((a: { id: string }) => a.id)).not.toContain(app.id);
   });
 
+  it('does not let filter.agentId answer the install question the withheld fields refuse', async () => {
+    // The owner-role arm is membership-only; an agent filter would reveal which
+    // Agents the App installs, one readable Agent at a time (App.agents is WITHHELD).
+    const filter = { agentId };
+    for (const ctx of [as(boss.id), as(adminBoss.id, { roles: ['ADMIN'] })]) {
+      const page = await Q.apps({}, { filter }, ctx);
+      expect(page.total).toBe(0);
+      expect(page.items).toEqual([]);
+    }
+    // the true owner still finds it
+    const mine = await Q.apps({}, { filter }, as(owner.id));
+    expect(mine.items.map((a: { id: string }) => a.id)).toEqual([app.id]);
+  });
+
   it('adds the arm for a platform admin only through membership', async () => {
     const mine = await Q.apps({}, {}, as(adminBoss.id, { roles: ['ADMIN'] }));
     expect(mine.items.map((a: { id: string }) => a.id)).toContain(app.id);

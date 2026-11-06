@@ -152,7 +152,7 @@ export const appQueries = {
             { ownerUserId: null },
             { ownerUserId: ctx.userId ?? '__none__' },
           ];
-          if (ctx.userId && !ctx.impersonation) adminClauses.push(userOwnedAppOwnerMemberWhere(ctx.userId));
+          if (ctx.userId && !ctx.impersonation && f.agentId == null) adminClauses.push(userOwnedAppOwnerMemberWhere(ctx.userId));
           where = { deletedAt: null, OR: adminClauses, ...agentClause };
         } else {
           // Org-scoped view. In the DEFAULT (no orgId) view, also surface the
@@ -167,7 +167,9 @@ export const appQueries = {
             ownerClauses.push({ ownerUserId: ctx.userId });
             // #2089: user-owned Apps the caller manages as an owner-role
             // member. In the `where` itself, so count and paging see them.
-            ownerClauses.push(userOwnedAppOwnerMemberWhere(ctx.userId));
+            // Not under an agent filter: that would answer the install question
+            // App.agents WITHHOLDS from this reader (Riana's P3).
+            if (f.agentId == null) ownerClauses.push(userOwnedAppOwnerMemberWhere(ctx.userId));
           }
           where = { deletedAt: null, OR: ownerClauses, ...agentClause };
         }
