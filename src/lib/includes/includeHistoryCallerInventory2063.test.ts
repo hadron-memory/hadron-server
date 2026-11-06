@@ -7,6 +7,9 @@ import { expect, it } from 'vitest';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 it('requires explicit classification when a snapshot/reconcile/history-delete API site changes', () => {
+  // #3501 adds updateChatTitle's governed data-only rename: reconcile the
+  // current snapshot, then retain one pre-rename revision through the existing
+  // history writer. It changes no include definition or history-delete path.
   const inventory = JSON.parse(readFileSync(new URL('./includeHistoryCallerInventory2063.json', import.meta.url), 'utf8'));
   const counts: Record<string, number> = {};
   function walk(dir: string) {

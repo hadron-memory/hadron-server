@@ -1222,6 +1222,7 @@ enum NodeContentValidationReporterKind {
 
 model Node {
   chatRootCounter ChatRootCounter?
+  chatRootEngineState ChatRootEngineState?
   /// UUIDv7 from `node.yaml` when supplied by the importer (stable across
   /// moves); falls back to `cuid()` for inserts that omit `id`.
   id                  String              @id @default(cuid())
@@ -7430,4 +7431,13 @@ model ChatRootCounter {
   updatedAt DateTime @updatedAt @map("updated_at")
   chatRoot Node @relation(fields: [chatRootNodeId], references: [id], onDelete: Cascade)
   @@map("chat_root_counters")
+}
+
+/// #3501 — encrypted conversational operational state, never revisioned.
+model ChatRootEngineState {
+  chatRootNodeId String @id @map("chat_root_node_id")
+  state Json
+  updatedAt DateTime @updatedAt @map("updated_at")
+  chatRoot Node @relation(fields: [chatRootNodeId], references: [id], onDelete: Cascade)
+  @@map("chat_root_engine_states")
 }
