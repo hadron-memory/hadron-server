@@ -46,8 +46,11 @@ beforeAll(async () => {
 afterAll(async () => { await cleanDb(db); }, 120_000);
 
 describe('#3596 sibling-bounded hybrid', () => {
-  it('100k flat siblings avoid one recursive index probe per sibling', async () => {
-    const page = await read('wide');
+  it.each(['custom', 'generic'])('100k flat siblings avoid recursive probes and unrelated rows (%s plan)', async mode => {
+    const page = mode === 'custom' ? await read('wide') : await db.$transaction(async tx => {
+      await tx.$executeRaw`SET LOCAL plan_cache_mode = force_generic_plan`;
+      return readLocSegments(observe(tx), { memoryIds:[memoryId], excludeNodeIds:[], parent:'wide', limit:20, after:null });
+    });
     expect(page.items.map(row => row.segment)).toEqual(Array.from({length:20}, (_, i) => `n${String(i+1).padStart(6,'0')}`));
     expect(page.items.every(row => row.hasNode && row.memoryId === memoryId)).toBe(true);
     expect(page.hasMore).toBe(true);

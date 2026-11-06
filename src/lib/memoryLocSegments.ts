@@ -14,7 +14,7 @@
  * identifies every row, so following the continuation returns each row once.
  */
 import { Buffer } from 'node:buffer';
-import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
+import { Prisma, type PrismaClient } from '../generated/prisma/index.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -96,7 +96,12 @@ export async function readLocSegments(
   const prefixKey = prefix.replaceAll(':', '\u0001');
   // Every key under the prefix starts with prefixKey (ends in chr(1)); the first key past them is the same with chr(2).
   const upperKey = prefixKey.slice(0, -1) + '\u0002';
-  const hasUpper = prefix !== '';
+  // Emit a real range predicate for non-root parents: a parameterized OR can
+  // hide the upper index bound from generic plans. Aliases are fixed SQL names,
+  // never caller input; prefix values remain bound parameters.
+  const upperBound = (alias: 'probe_node' | 'n' | 'flat_node') => prefix === ''
+    ? Prisma.empty
+    : Prisma.sql`AND (replace(${Prisma.raw(alias)}.loc, ':', chr(1))) COLLATE "C" < ${upperKey}::text COLLATE "C"`;
   const rows = await db.$queryRaw<Array<{ memory_id: string; seg: string; has_node: boolean; pos: number | null }>>`
     WITH RECURSIVE shape AS MATERIALIZED (
       SELECT m.memory_id, NOT EXISTS (
@@ -107,7 +112,7 @@ export async function readLocSegments(
           SELECT probe_node.loc FROM nodes probe_node
           WHERE probe_node.memory_id = m.memory_id
             AND (replace(probe_node.loc, ':', chr(1))) COLLATE "C" >= ${prefixKey}::text COLLATE "C"
-            AND (NOT ${hasUpper}::boolean OR (replace(probe_node.loc, ':', chr(1))) COLLATE "C" < ${upperKey}::text COLLATE "C")
+            ${upperBound('probe_node')}
             AND probe_node.deleted_at IS NULL AND probe_node.node_type <> 'system' AND probe_node.node_type <> 'comment' AND probe_node.loc <> ''
             AND NOT (probe_node.id = ANY(${excludeNodeIds}::text[]))
           ORDER BY (replace(probe_node.loc, ':', chr(1))) COLLATE "C" ASC
@@ -123,7 +128,7 @@ export async function readLocSegments(
         SELECT n.loc, n.seq FROM nodes n
         WHERE n.memory_id = m.memory_id
           AND (replace(n.loc, ':', chr(1))) COLLATE "C" >= ${prefixKey}::text COLLATE "C"
-          AND (NOT ${hasUpper}::boolean OR (replace(n.loc, ':', chr(1))) COLLATE "C" < ${upperKey}::text COLLATE "C")
+          ${upperBound('n')}
           AND n.deleted_at IS NULL AND n.node_type <> 'system' AND n.node_type <> 'comment' AND n.loc <> ''
           AND NOT (n.id = ANY(${excludeNodeIds}::text[]))
         ORDER BY (replace(n.loc, ':', chr(1))) COLLATE "C" ASC
@@ -138,7 +143,7 @@ export async function readLocSegments(
         WHERE n.memory_id = w.memory_id
           AND (replace(n.loc, ':', chr(1))) COLLATE "C" >=
               (${prefixKey}::text || replace(split_part(substr(w.loc, length(${prefix}::text) + 1), ':', 1), ':', chr(1)) || chr(2)) COLLATE "C"
-          AND (NOT ${hasUpper}::boolean OR (replace(n.loc, ':', chr(1))) COLLATE "C" < ${upperKey}::text COLLATE "C")
+          ${upperBound('n')}
           AND n.deleted_at IS NULL AND n.node_type <> 'system' AND n.node_type <> 'comment' AND n.loc <> ''
           AND NOT (n.id = ANY(${excludeNodeIds}::text[]))
         ORDER BY (replace(n.loc, ':', chr(1))) COLLATE "C" ASC
@@ -162,7 +167,7 @@ export async function readLocSegments(
         FROM nodes flat_node
         WHERE flat_node.memory_id = m.memory_id
           AND (replace(flat_node.loc, ':', chr(1))) COLLATE "C" >= ${prefixKey}::text COLLATE "C"
-          AND (NOT ${hasUpper}::boolean OR (replace(flat_node.loc, ':', chr(1))) COLLATE "C" < ${upperKey}::text COLLATE "C")
+          ${upperBound('flat_node')}
           AND flat_node.deleted_at IS NULL AND flat_node.node_type <> 'system' AND flat_node.node_type <> 'comment' AND flat_node.loc <> ''
           AND NOT (flat_node.id = ANY(${excludeNodeIds}::text[]))
         -- Retain the parent's index range even when a broad scan/sort would
