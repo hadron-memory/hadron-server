@@ -51,6 +51,7 @@ import {
   touchConfig,
   type ResolvedRef,
 } from './resolvers.memoryConfig.js';
+import { copiedColumns, refsOf } from './resolvers.memoryConfigRefs.js';
 import {
   managedTemplate,
   MemoryConfigTemplateNotFoundError,
@@ -80,45 +81,6 @@ class DryRunRollback extends Error {
   constructor(readonly result: ApplyResult) {
     super('dry run');
   }
-}
-
-/** H5: a required task that has since been deleted. Copying it would plant a rule that refuses every use. */
-function refBroken(role: string, field: 'authorTask' | 'validationTask'): GraphQLError {
-  return new GraphQLError(
-    `The template's rule for role "${role}" points at a ${field === 'authorTask' ? 'author' : 'validation'} task that was deleted; repoint it in the template before applying.`,
-    { extensions: { code: 'NODE_ROLE_RULE_REF_BROKEN', role, field } },
-  );
-}
-
-/** The template rule's references, as the refs a create would re-check for the caller. */
-function refsOf(rule: MemoryConfigTemplateRule): ResolvedRef[] {
-  if (rule.authorTaskRequired && !rule.authorTaskId) throw refBroken(rule.role, 'authorTask');
-  if (rule.validationTaskRequired && !rule.validationTaskId) throw refBroken(rule.role, 'validationTask');
-  // `ref` is what a refusal echoes (NODE_NOT_FOUND). A template reference
-  // is stored, not caller-supplied, and the rule's field resolvers withhold
-  // its id when it's UNREADABLE, so the refusal names the rule and field
-  // instead of the node id (#1399 review).
-  const label = (field: string) => `template rule "${rule.role}" ${field}`;
-  const out: ResolvedRef[] = [];
-  if (rule.authorTaskId) out.push({ kind: 'authorTask', id: rule.authorTaskId, ref: label('authorTask') });
-  if (rule.validationTaskId) out.push({ kind: 'validationTask', id: rule.validationTaskId, ref: label('validationTask') });
-  if (rule.descriptionNodeId) out.push({ kind: 'descriptionNode', id: rule.descriptionNodeId, ref: label('descriptionNode') });
-  return out;
-}
-
-/** The copied columns: everything a rule carries except its identity, lock and audit fields. */
-function copiedColumns(rule: MemoryConfigTemplateRule) {
-  return {
-    authorTaskId: rule.authorTaskId,
-    authorTaskRequired: rule.authorTaskRequired,
-    validationTaskId: rule.validationTaskId,
-    validationTaskRequired: rule.validationTaskRequired,
-    descriptionNodeId: rule.descriptionNodeId,
-    strictSubRoles: rule.strictSubRoles,
-    writers: rule.writers,
-    validateBy: rule.validateBy,
-    enabled: rule.enabled,
-  };
 }
 
 export async function applyMemoryConfigTemplate(

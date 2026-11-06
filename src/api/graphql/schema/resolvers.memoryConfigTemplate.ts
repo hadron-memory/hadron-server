@@ -63,6 +63,13 @@ import {
 } from './resolvers.memoryConfig.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { forbiddenError } from '../../../lib/refusals.js';
+import { refsOf } from './resolvers.memoryConfigRefs.js';
+import {
+  assertOrgDefaultCapacity,
+  assertRefsReadableToOrg,
+  lockOrgDefaultSaves,
+  orgDefaultOrgOnly,
+} from './resolvers.memoryConfigOrgDefault.js';
 
 export type TemplateOwnerType = 'HADRON_SERVER' | 'ORGANIZATION' | 'USER' | 'APP';
 
@@ -75,6 +82,8 @@ export interface CreateMemoryConfigTemplateInput {
   name: string;
   description?: string | null;
   required?: boolean | null;
+  /** #3426 — an org default. Organization-owned templates only. */
+  orgDefault?: boolean | null;
   rules?: TemplateRuleInput[] | null;
 }
 
@@ -458,13 +467,23 @@ export const memoryConfigTemplateMutations = {
   ) => {
     const actor = requireWriter(ctx);
     const owner = await resolveOwnerForWrite(ctx, ownerType, ownerRef);
+    // #3426: judged AFTER the owner's manage gate above, so it is no existence oracle for a template the caller cannot manage.
+    const orgDefault = input.orgDefault === true;
+    if (orgDefault && !owner.organizationId) throw orgDefaultOrgOnly();
     const name = assertTemplateName(input.name);
     const rules = await prepareRules(ctx, input.rules ?? []);
     try {
       const template = await ctx.db.$transaction(async (tx) => {
+        // #3426: the org's default-saves serialize on an advisory lock taken before any other lock.
+        if (orgDefault) await lockOrgDefaultSaves(tx, owner.organizationId!);
         await lockLiveOwner(tx, owner);
-        await lockRuleRefs(ctx, tx, rules.flatMap((r) => r.resolved));
+        const resolved = rules.flatMap((r) => r.resolved);
+        await lockRuleRefs(ctx, tx, resolved);
         await reassertManageOwner(ctx, tx, owner, () => forbiddenError());
+        if (orgDefault) {
+          await assertRefsReadableToOrg(tx, owner.organizationId!, resolved);
+          await assertOrgDefaultCapacity(tx, owner.organizationId!, null);
+        }
         const id = generateId();
         const created = await tx.memoryConfigTemplate.create({
           data: {
@@ -472,6 +491,7 @@ export const memoryConfigTemplateMutations = {
             name,
             description: input.description ?? null,
             ...(input.required != null ? { required: input.required } : {}),
+            ...(orgDefault ? { orgDefault: true } : {}),
             ...owner,
             createdBy: actor,
             updatedBy: actor,
@@ -492,22 +512,51 @@ export const memoryConfigTemplateMutations = {
     ctx: Context,
   ) => {
     const actor = requireWriter(ctx);
-    const { id } = await managedTemplate(ctx, ref);
+    const before = await managedTemplate(ctx, ref);
+    const { id } = before;
+    // #3426: judged AFTER the manage gate above (managedTemplate conceals a template the caller cannot manage).
+    if (input.orgDefault === true && !before.organizationId) throw orgDefaultOrgOnly();
     const name = input.name != null ? assertTemplateName(input.name) : undefined;
     const rules = input.rules != null ? await prepareRules(ctx, input.rules) : null;
+    // The resulting flag. Validation runs when it is true AND the request sets the flag, the rules or `required`: an
+    // unrelated edit never re-validates, and clearing the flag never does (an admin can always clear a broken default).
+    const resultingDefault = input.orgDefault != null ? input.orgDefault : before.orgDefault;
+    const validateDefault =
+      resultingDefault && before.organizationId != null && (input.orgDefault === true || rules != null || input.required != null);
+    // Stored rules, judged when the request sends no rules: read here unlocked, locked below, re-read and compared.
+    const storedRules = validateDefault && rules == null
+      ? await ctx.db.memoryConfigTemplateRule.findMany({ where: { templateId: id }, orderBy: { role: 'asc' } })
+      : null;
+    const storedRefs = storedRules ? storedRules.flatMap(refsOf) : [];
     try {
       const template = await ctx.db.$transaction(async (tx) => {
-        await lockRuleRefs(ctx, tx, (rules ?? []).flatMap((r) => r.resolved));
+        if (validateDefault && input.orgDefault === true) await lockOrgDefaultSaves(tx, before.organizationId!);
+        const resolved = rules ? rules.flatMap((r) => r.resolved) : storedRefs;
+        await lockRuleRefs(ctx, tx, resolved);
         const current = await lockTemplate(tx, id);
         if (!current) throw new MemoryConfigTemplateNotFoundError(ref);
         await reassertManageOwner(ctx, tx, current, () => new MemoryConfigTemplateNotFoundError(ref));
         if (expectedRevision != null && current.revision !== expectedRevision) throw conflict(current.revision, 'template');
+        // The validation plan above rests on the flag read before the lock. When the request does not set the flag and
+        // it moved meanwhile (a concurrent enable), that plan is stale: refuse rather than save unvalidated references.
+        if (input.orgDefault == null && current.orgDefault !== before.orgDefault) throw conflict(current.revision, 'template');
+        if (validateDefault) {
+          if (storedRules) {
+            // The rules moved between the unlocked read and the lock: judge nothing against a stale list.
+            const again = await tx.memoryConfigTemplateRule.findMany({ where: { templateId: id }, orderBy: { role: 'asc' } });
+            const sig = (rs: typeof again) => JSON.stringify(rs.map((r) => [r.id, r.role, r.authorTaskId, r.validationTaskId, r.descriptionNodeId, r.authorTaskRequired, r.validationTaskRequired]));
+            if (sig(again) !== sig(storedRules)) throw conflict(current.revision, 'template');
+          }
+          await assertRefsReadableToOrg(tx, current.organizationId!, resolved);
+          if (input.orgDefault === true && !current.orgDefault) await assertOrgDefaultCapacity(tx, current.organizationId!, id);
+        }
         const updated = await tx.memoryConfigTemplate.update({
           where: { id },
           data: {
             ...(name !== undefined ? { name } : {}),
             ...('description' in input && input.description !== undefined ? { description: input.description } : {}),
             ...(input.required != null ? { required: input.required } : {}),
+            ...(input.orgDefault != null ? { orgDefault: input.orgDefault } : {}),
             updatedBy: actor,
             revision: { increment: 1 },
           },
