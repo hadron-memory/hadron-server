@@ -1510,11 +1510,20 @@ export async function requireReadableAgent(
 }
 
 /** #1148: one widened personal-install predicate; read concealment still comes from the canonical Agent gate. */
-export async function requirePersonalAppAgentInstall(ctx:Context,agent:Pick<Agent,'visibility'|'deletedAt'|'organizationId'|'ownerUserId'>|null,ref:string,ownerUserId:string):Promise<void> {
-  await requireReadableAgent(ctx,agent,ref);
-  if(agent && (agent.visibility==='PUBLIC'||agent.ownerUserId===ownerUserId||
-    (agent.visibility==='ORGANIZATION'&&agent.organizationId&&await currentAgentOrgMember(ctx.db,ownerUserId,agent.organizationId))))return;
-  throw new GraphQLError('A personal App may install only an Agent its owner qualifies for.',{extensions:{code:'ORGANIZATION_MISMATCH'}});
+export async function requirePersonalAppAgentInstall(
+  ctx: Context,
+  agent: Pick<Agent, 'visibility' | 'deletedAt' | 'organizationId' | 'ownerUserId'> | null,
+  ref: string,
+  ownerUserId: string | null,
+): Promise<void> {
+  await requireReadableAgent(ctx, agent, ref);
+  if (ownerUserId && agent && (agent.visibility === 'PUBLIC'
+    || (agent.ownerUserId !== null && agent.ownerUserId === ownerUserId)
+    || (agent.visibility === 'ORGANIZATION' && agent.organizationId
+      && await currentAgentOrgMember(ctx.db, ownerUserId, agent.organizationId)))) return;
+  throw new GraphQLError('A personal App may install only an Agent its owner qualifies for.', {
+    extensions: { code: 'ORGANIZATION_MISMATCH' },
+  });
 }
 
 /**
@@ -3194,7 +3203,7 @@ export async function installAgentIntoAppCore(
   // (leaking its definition via the returned AGENT_INCLUDE). Branch on the
   // App's ownership class instead, mirroring createApp's personal path.
   if (app.organizationId === null) {
-    await requirePersonalAppAgentInstall(ctx,agent,args.agentRef,app.ownerUserId!);
+    await requirePersonalAppAgentInstall(ctx,agent,args.agentRef,app.ownerUserId);
   }
   // Best-effort pre-check for the typed `DUPLICATE_APP_AGENT` error.
   // The race-safe fallback lives inside the transaction below — under
@@ -3236,7 +3245,7 @@ export async function installAgentIntoAppCore(
       await requireOwnerOrOrgRole(txCtx, currentApp, 'CONTRIBUTOR');
       const ownAgent = currentAgent.ownerUserId !== null && currentAgent.ownerUserId === currentApp.ownerUserId;
       if (currentApp.organizationId === null) {
-        await requirePersonalAppAgentInstall(txCtx,currentAgent,args.agentRef,currentApp.ownerUserId!);
+        await requirePersonalAppAgentInstall(txCtx,currentAgent,args.agentRef,currentApp.ownerUserId);
       } else {
         // Check the grant while the org/Agent anchors are held. A concurrent
         // revoke must not race a cross-org installation past this decision.

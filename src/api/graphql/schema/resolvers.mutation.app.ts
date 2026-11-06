@@ -574,7 +574,7 @@ export const appMutations = {
         });
         personalAgentOrgId = installAgent.organizationId;
         const isOwnAgent = installAgent.ownerUserId !== null && installAgent.ownerUserId === ctx.userId;
-        await requirePersonalAppAgentInstall(ctx,installAgent,agentRef,ctx.userId!);
+        await requirePersonalAppAgentInstall(ctx,installAgent,agentRef,ctx.userId ?? null);
         // spec 047: cascade-install provisions each dependency as its own
         // ORG-scoped App — unsupported for a personal App in v1. Reject BEFORE
         // any write (subscription / App create) so a rejected call never leaves
@@ -674,7 +674,7 @@ export const appMutations = {
               where: { id: resolvedAgentId },
               select: { visibility: true, ownerUserId: true, organizationId:true, deletedAt: true },
             });
-            await requirePersonalAppAgentInstall(txCtx,current,agentRef,ctx.userId!);
+            await requirePersonalAppAgentInstall(txCtx,current,agentRef,ctx.userId ?? null);
           }
         },
         async (tx) => {
