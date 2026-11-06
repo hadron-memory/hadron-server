@@ -55,7 +55,8 @@ import {
   editorFromAuth,
   diffNodeChanges,
 } from '../lib/nodeRevisionSnapshot.js';
-import { assertAuthoring, assertRenameAuthoring, attestationRefusalText, attestedAuthoring } from '../lib/authoringAttestation.js';
+import { assertAuthoring, assertRenameAuthoring, attestedAuthoring } from '../lib/authoringAttestation.js';
+import { mcpReadsTask } from './taskReadGate.js';
 import { authoredContentChanged, clearNodeAuthorship, type NodeAuthorshipStamp } from '../lib/nodeAuthorship.js';
 import {
   parseUrnInput,
@@ -3759,6 +3760,7 @@ export function createMcpServerInstance(
   /** GraphQL Context for the scope tools — appId + sessionId are load-bearing (#206). */
   const scopeCtx = (): Context => ({
     db,
+    readsAuthorTask: mcpReadsTask(auth), // #1329: every direct writer's reader comes from here, through recoveryCtx()
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
     apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
@@ -4365,7 +4367,7 @@ export function createMcpServerInstance(
             sectionStamp = await assertAuthoring(tx, memoryId, {
               priorRole: current.role, priorRunnable: current.isRunnable,
               role: current.role, runnable: current.isRunnable, mintHuman: true, authoredChange: sectionChanged,
-            }, attestedAuthoring(authoredWith));
+            }, attestedAuthoring(recoveryCtx(), authoredWith));
             await createNodeRevision(tx, {
               id: generateId(),
               ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), { changes }),
@@ -4396,8 +4398,6 @@ export function createMcpServerInstance(
         if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return refusalResult(`[role_governed] ${(e as Error).message}`);
         const includeText = includeRefusalText(e);
         if (includeText) return refusalResult(includeText);
-        const attestationRefusal = attestationRefusalText(e);
-        if (attestationRefusal) return refusalResult(attestationRefusal);
         const writerRefusal = roleWriterRefusalText(e);
         if (writerRefusal) return refusalResult(writerRefusal);
         if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
@@ -4421,7 +4421,7 @@ export function createMcpServerInstance(
     'hadron_find_nodes',
     'Relevance-ranked full-text search across nodes. Keyword mode (default) runs Postgres full-text search: terms are STEMMED (so "running" matches "run"), results are RANKED by field-weighted relevance (name/alias > loc/tags > description/abstract > body/data), and BODY + abstract ARE indexed. Boolean operators are supported — `(banana OR apple) AND shake`, quoted phrases, and `-term` / `NOT term` — operator words are UPPERCASE-ONLY (lowercase and/or/not are plain terms, so natural phrases search literally), and malformed boolean syntax degrades to a literal phrase search instead of erroring. A plain multi-word query ANDs its terms; if that matches nothing, the search auto-relaxes to OR (any term) and flags [degraded:and_relaxed_to_or] — so a single off-corpus word doesn\'t dead-end the query. Pass `query: "*"` (or `""`) to list every node (survey mode) — useful as a first pass before adding to a memory. mode:vector / mode:hybrid run semantic search over the memory\'s vector index; mode:regex matches a POSIX regular expression against node text. To browse the tree structure, use `hadron_list_nodes` instead. Scope with `parentRel` (a subtree), `memoryUrn` (one memory), or `memoryUrns` (a set); pass `allMemories: true` to search EVERY memory you can read — the stemmed, ranked org-wide "does anyone know about X?" probe (this is the right tool for cross-memory concept/content questions; hadron_search matches literal substrings only). Each scored hit shows its score as a percentage of the top hit; when many hits sit in a narrow band the result carries a [weak_results] note, meaning the ranking found nothing clearly relevant — treat that as "the answer is probably not here" rather than reading the whole list. Use `minScore` to drop weak hits and `limit` to widen the default 10-hit page. Soft-deleted nodes are excluded. Each hit in the default view carries a `URL:` line — the node\'s portal link; copy it verbatim when citing a source to a human rather than building a link from the URN (`brief: true` omits it, as it omits the abstract).',
     SHAPE_HADRON_FIND_NODES,
-    async ({ query, mode, parentRel, memoryUrn, memoryUrns, allMemories, isRunnable, role, objectType, nodeType, nodeTypes, nodeKind, childrenOf, brief, limit, minScore, expand, granularity, where, scope }) => {
+    async ({ query, mode, parentRel, memoryUrn, memoryUrns, allMemories, isRunnable, hasOpenThreads, role, objectType, nodeType, nodeTypes, nodeKind, childrenOf, brief, limit, minScore, expand, granularity, where, scope }) => {
       // #3113 — the shape of `nodeTypes` is judged first, before any scope work or
       // early return below, with the one validator the resolver also runs.
       try {
@@ -4648,6 +4648,7 @@ export function createMcpServerInstance(
             filter: {
               memoryIds: filterMemoryIds,
               isRunnable: isRunnable ?? undefined,
+              hasOpenThreads: hasOpenThreads ?? undefined,
               role: role ?? undefined,
               contentScope: nodeKind ?? undefined, // #1678: MCP nodeKind → GraphQL contentScope
               objectType: objectType ?? undefined,
@@ -6226,18 +6227,7 @@ export function createMcpServerInstance(
     install: { app: string; agent: string },
     fields: Record<string, unknown>,
   ) => {
-    const ctx: Context = {
-      db,
-      transport: 'mcp',
-      governedCanReplay: () => true,
-      clientId: auth.clientId ?? undefined,
-      userId: auth.userId ?? undefined,
-      apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
-      appId: auth.appId ?? undefined,
-      sessionId: auth.sessionId ?? undefined,
-      roles: auth.roles as Context['roles'],
-      organizationId: auth.organizationId ?? undefined,
-    };
+    const ctx = doorCtx(() => true);
     const input = { ...Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined)), install: { appRef: install.app, agentRef: install.agent } };
     try {
       const node = op === 'create'
@@ -6246,7 +6236,7 @@ export function createMcpServerInstance(
       const urn = await nodeUrn(node.loc, node.memoryId);
       return textResult(`${op === 'create' ? 'Node created' : 'Node updated'} in the App's install memory: ${urn} (id: ${node.id})${renderIncludePinWarnings(await includePinWarningsFor(ctx, node))}`);
     } catch (e) {
-      return toolErrorResult(e, () => attestationRefusalText(e) ?? `Error: ${e instanceof Error ? e.message : `${op} failed`}`, `hadron_${op}_node:install`);
+      return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : `${op} failed`}`, `hadron_${op}_node:install`);
     }
   };
 
@@ -6729,7 +6719,7 @@ export function createMcpServerInstance(
             role: role === undefined ? (pre?.role ?? null) : role,
             runnable: mergedGovernedState(pre, { role, isRunnable }).isRunnable,
             mintHuman: true, authoredChange: true,
-          }, attestedAuthoring(authoredWith));
+          }, attestedAuthoring(recoveryCtx(), authoredWith));
           // #1460 — the locked tombstone can retain vectors from its old
           // plaintext. Purge both kinds before the upsert makes it searchable.
           if (pre?.deletedAt) {
@@ -6787,8 +6777,6 @@ export function createMcpServerInstance(
         if (isLegacyMessageSeqError(e)) return refusalResult(`[seq_protected] ${e.message}`);
         const includeText = includeRefusalText(e);
         if (includeText) return refusalResult(includeText);
-        const attestationRefusal = attestationRefusalText(e);
-        if (attestationRefusal) return refusalResult(attestationRefusal);
         const writerRefusal = roleWriterRefusalText(e);
         if (writerRefusal) return refusalResult(writerRefusal);
         if (e instanceof InlineEdgeEndpointError) return refusalResult(e.message);
@@ -7194,7 +7182,7 @@ export function createMcpServerInstance(
               role: role === undefined ? current.role : role,
               runnable: mergedGovernedState(current, { role, isRunnable }).isRunnable,
               mintHuman: true, authoredChange,
-            }, attestedAuthoring(authoredWith));
+            }, attestedAuthoring(recoveryCtx(), authoredWith));
             await createNodeRevision(tx, {
               id: generateId(),
               ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), {
@@ -7239,8 +7227,6 @@ export function createMcpServerInstance(
           if (e instanceof RoleNotDeclaredError) return refusalResult(`[role_not_declared] ${e.message}`);
           const includeText = includeRefusalText(e);
         if (includeText) return refusalResult(includeText);
-        const attestationRefusal = attestationRefusalText(e);
-        if (attestationRefusal) return refusalResult(attestationRefusal);
         const writerRefusal = roleWriterRefusalText(e);
           if (writerRefusal) return refusalResult(writerRefusal);
           if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
@@ -7321,6 +7307,7 @@ export function createMcpServerInstance(
   /** The GraphQL context for a delegated door call — same shape as chatCtx below. */
   const doorCtx = (canReplay?: Context['governedCanReplay']): Context => ({
     db,
+    readsAuthorTask: mcpReadsTask(auth), // #1329
     // #1301: a refusal from the delegated door addresses an MCP caller, and
     // names an MCP door only if this call could be replayed through it.
     transport: 'mcp',
@@ -7483,6 +7470,7 @@ export function createMcpServerInstance(
       // the chatbot tools, #1141; the requirement it got wrong is not.)
       const ctx: Context = {
         db,
+        readsAuthorTask: mcpReadsTask(auth), // #1329
         // #1301: a refusal from the delegated resolver addresses an MCP caller;
         // a door takes a whole `data` object, so the replace it names replays.
         transport: 'mcp',
@@ -7505,7 +7493,7 @@ export function createMcpServerInstance(
         const urn = await nodeUrn(node.loc, node.memoryId);
         return textResult(`Node data merged: ${urn} (id: ${node.id})${renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), node.id))}`);
       } catch (e) {
-        return toolErrorResult(e, () => attestationRefusalText(e) ?? `Error: ${e instanceof Error ? e.message : 'update failed'}`, 'hadron_update_node_data:resolver');
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'update failed'}`, 'hadron_update_node_data:resolver');
       }
     },
   );
@@ -7522,6 +7510,7 @@ export function createMcpServerInstance(
 
   const objectCtx = (): Context => ({
     db,
+    readsAuthorTask: mcpReadsTask(auth), // #1329
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
     apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
@@ -7629,6 +7618,7 @@ export function createMcpServerInstance(
       // same way it does for hadron_create_node / hadron_update_node.
       const ctx: Context = {
         db,
+        readsAuthorTask: mcpReadsTask(auth), // #1329
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
         apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
@@ -7709,7 +7699,7 @@ export function createMcpServerInstance(
         }
         return textResult([header, coverage, ...guidance, ...lines, ...lintLines].join('\n'));
       } catch (e) {
-        return toolErrorResult(e, () => attestationRefusalText(e) ?? `Error: ${e instanceof Error ? e.message : 'search-and-replace failed'}`, 'hadron_replace_text:resolver');
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'search-and-replace failed'}`, 'hadron_replace_text:resolver');
       }
     },
   );
@@ -8303,7 +8293,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
                 const renameStamp = await assertRenameAuthoring(tx, fromMemory.id, toMemory.id, {
                   priorRole: locked.role, priorRunnable: locked.isRunnable,
                   role: locked.role, runnable: locked.isRunnable, mintHuman: true, authoredChange: true,
-                }, attestedAuthoring(authoredWith));
+                }, attestedAuthoring(recoveryCtx(), authoredWith));
                 await createNodeRevision(tx, {
                   id: generateId(),
                   ...buildNodeRevisionSnapshot(locked, editorFromAuth(auth), {
@@ -8377,7 +8367,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
                 destMemoryId: crossMemory ? toMemory.id : undefined,
                 editor: editorFromAuth(auth),
                 renameSourceLeaf: renameToLeaf === true,
-                renameAuthoring: attestedAuthoring(authoredWith),
+                renameAuthoring: attestedAuthoring(recoveryCtx(), authoredWith),
                 authorizeLockedMemory: (memoryId) => assertLockedMemoryWriteAccess(tx, attemptAuth, memoryId),
                 principal: attemptAuth,
               });
@@ -8470,8 +8460,6 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         }
         const includeText = includeRefusalText(e);
         if (includeText) return refusalResult(includeText);
-        const attestationRefusal = attestationRefusalText(e);
-        if (attestationRefusal) return refusalResult(attestationRefusal);
         const writerRefusal = roleWriterRefusalText(e);
         if (writerRefusal) return refusalResult(writerRefusal);
         if (
@@ -12951,6 +12939,7 @@ const SHAPE_HADRON_FIND_NODES = {
   memoryUrn: z.string().optional().describe('Scope search to a single memory (fully-qualified URN). Omit to search all memories you can read — see allMemories.'),
   memoryUrns: z.array(z.string()).min(1).optional().describe('Scope search to this SET of memories (each a fully-qualified memory URN, hrn:mem:<root>:<slug>) — a targeted multi-memory search. Must be non-empty (for "everything", use allMemories). Mutually exclusive with memoryUrn and allMemories.'),
   allMemories: z.boolean().optional().describe('Search across ALL memories you can read — the org-wide "does anyone know about X?" probe (stemmed + relevance-ranked in keyword mode). The explicit, self-documenting form of omitting a memory scope. Mutually exclusive with memoryUrn / memoryUrns.'),
+  hasOpenThreads: z.boolean().optional().describe('#3494 — NodeFilter.hasOpenThreads: true selects nodes with live open root comments, false selects nodes with none, omitted leaves the filter off. Applies before ranking/paging in every mode, with existing access and content scope. Deleted stubs do not count. Inherited projections have zero summary. Timestamp is GraphQL-only; hit output is unchanged.'),
   isRunnable: z.boolean().optional().describe('Filter by runnable status (applies in every mode). true = only task nodes (Node.isRunnable=true) — the canonical "tasks I can run" predicate hadron_run_task gates on. false = only nodes explicitly marked non-runnable (most nodes leave it NULL, so false does NOT include them). Omit to ignore runnable status. Spec cor:api:060.'),
   role: z.string().optional().describe('Filter by Node.role family in every mode. Segment-boundary prefix semantics: "spec" matches "spec" and dotted descendants such as "spec.rule", but never "special" or "specification" (#1322). Node.role remains an open string; this is a query filter, not role validation.'),
   nodeType: z.string().optional().describe('#331 — exact-match node-type facet (free-form, e.g. "task" / "parent" / "info"): only nodes whose nodeType equals this. Applies in every mode; with query "*" it lists all nodes of one type. Orthogonal to objectType. Without it, system nodes stay excluded; "comment" searches comments as the engine documents. Negation and multi-value are not supported here; use nodeTypes for a list of types.'),

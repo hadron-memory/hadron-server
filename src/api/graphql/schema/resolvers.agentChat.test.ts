@@ -1326,7 +1326,7 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     });
     return {
       rows,
-      messageCount: ((chatNode.data as Record<string, unknown>)?.messageCount as number) ?? 0,
+      messageCount: (await db.chatRootCounter.findUniqueOrThrow({where:{chatRootNodeId:chatNode.id}})).messageCount,
     };
   }
 
@@ -1416,10 +1416,11 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     let announceHeld: () => void = () => {};
     const gate = new Promise<void>((r) => { release = r; });
     const held = new Promise<void>((r) => { announceHeld = r; });
-    const turn = withChatRootLock(db, chatRef, memEnc, async ({ chatData }) => {
+    const turn = withChatRootLock(db, chatRef, memEnc, async ({ tx, chatData }) => {
+      await tx.chatRootCounter.update({where:{chatRootNodeId:chatRef.id},data:{messageCount:2}});
       announceHeld();
       await gate;
-      return { chatData: { ...chatData, messageCount: 2 }, value: null };
+      return { chatData, value: null };
     });
     await held;
 
@@ -1441,7 +1442,8 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     // The rename landed AND the turn's count survived it — applying to fresh
     // data is not the same as dropping the write.
     expect(data.title).toBe('Renamed mid-conversation');
-    expect(data.messageCount).toBe(2);
+    expect(data).not.toHaveProperty('messageCount');
+    expect((await db.chatRootCounter.findUniqueOrThrow({where:{chatRootNodeId:after.id}})).messageCount).toBe(2);
   });
 
   it('#919 — mixed sequential turns number 1..N with no gaps or repeats', async () => {

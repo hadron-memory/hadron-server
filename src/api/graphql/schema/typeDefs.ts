@@ -243,6 +243,18 @@ export const typeDefs = `#graphql
     #2999 — runnability is tri-state. true returns only runnable rows; false returns only rows explicitly marked not runnable. A row never marked (NULL) matches neither, and only an omitted filter returns it. (hrn:node:hadronmemory.com:specs:cor:api:060:04)
     """
     isRunnable: Boolean
+    """
+    #3494 — true selects nodes with a live OPEN top-level comment; false selects nodes with none.
+    Deleted roots and deleted-with-replies stubs never count (hrn:node:hadronmemory.com:specs:cor:dmo:110:05 / hrn:node:hadronmemory.com:specs:cor:dmo:110:10).
+    Null or omitted leaves results unchanged. AND-combined before ranking, counts and paging in every
+    findNodes mode; it grants no access. Inherited projections have a zero summary: true
+    excludes them, false includes them. Concealed install-write responses are not search projections.
+    Unscored expansion context adds only this thread check to its existing memory/deletion/content-scope
+    checks; other filters keep their candidate-only behavior there. Counts exclude appended context.
+    appNodes/appNodesPage refuse either boolean with BAD_USER_INPUT.
+    Proposed addition built on the #3494 gate to hrn:node:hadronmemory.com:specs:cor:api:090:02; comment result scope stays hrn:node:hadronmemory.com:specs:cor:dmo:110:08.
+    """
+    hasOpenThreads: Boolean
     "#1322 — role-family filter. 'spec' matches 'spec' and 'spec.*' on a dot boundary, never 'special' / 'specification'."
     role: String
     locPrefix: String
@@ -2890,6 +2902,8 @@ export const typeDefs = `#graphql
 
   "#1606 — the trust cue (hrn:node:hadronmemory.com:specs:cor:dmo:110:07). Counts live threads; zeros on a memory that cannot hold comments."
   type CommentSummary {
+    "Earliest creation time of a live open root comment, or null. Replies, edits and reopen times do not move it. Null on synthetic inherited/install summaries. Proposed addition built on the #3494 gate (hrn:node:hadronmemory.com:specs:cor:api:090:02)."
+    oldestOpenThreadAt: DateTime
     openThreads: Int!
     resolvedThreads: Int!
     "Every live comment, top-level and replies, deleted stubs included."
@@ -3858,6 +3872,24 @@ export const typeDefs = `#graphql
     USER
     APP
     AGENT
+  }
+
+  """
+  What the credential presented on THIS request came to (hrn:node:hadronmemory.com:specs:cor:aut:010:05).
+  """
+  enum AuthenticationStatus {
+    """
+    The credential resolved a user or an App.
+    """
+    AUTHENTICATED
+    """
+    A credential was presented and did not authenticate. One answer for every cause, with no reason.
+    """
+    REFUSED
+    """
+    No credential was presented.
+    """
+    ANONYMOUS
   }
 
   """
@@ -6269,10 +6301,17 @@ export const typeDefs = `#graphql
   and that task's current revision (Node.revSeq). The server compares both with
   the rule and refuses a mismatch: AUTHORING_ATTESTATION_MISSING,
   AUTHORING_ATTESTATION_WRONG_TASK, AUTHORING_ATTESTATION_STALE, or
-  AUTHOR_TASK_BROKEN when the rule's task is gone. A match records a TASK stamp.
-  This does not prove the task was read or followed. With no applicable rule
-  the claim is ignored. People in the portal are exempt, derived from their
-  sign-in; no client field selects that.
+  AUTHOR_TASK_BROKEN when the rule's task is gone, unusable or unreadable to the
+  writer, whatever the claim. A match records a TASK stamp. This does not prove
+  the task was read or followed. With no applicable rule the claim is ignored.
+  People in the portal are exempt, derived from their sign-in; no client field
+  selects that.
+
+  #1329 — each refusal carries extensions taskAccess, task, taskId, taskRevision
+  and load. READABLE gives the task's URN (null when it has none that resolves),
+  id, current revision and the node read per surface. UNAVAILABLE gives nulls and
+  is the same for an unreadable task and a missing one: an owner must fix access
+  or the rule.
   """
   input AuthoredWithInput {
     "The task's id or canonical URN."
@@ -9102,6 +9141,16 @@ export const typeDefs = `#graphql
     AuthContext type for the full security posture.
     """
     authContext: AuthContext
+
+    """
+    Whether the credential THIS request presented authenticated
+    (hrn:node:hadronmemory.com:specs:cor:aut:010:05). REFUSED is the identical answer, in status and body for the same
+    operation, for every cause: garbage, expired, wrongly signed, revoked, from an ended sign-in, for a deleted user, or
+    an ended impersonation. Timing is an accepted limit. It takes no argument, so it cannot test a token the caller does
+    not hold. A credential check that could not complete is the ordinary internal error for this field, never REFUSED;
+    every other field answers as before. me and authContext are unchanged (null for a refused credential).
+    """
+    authenticationStatus: AuthenticationStatus!
 
     """
     One admin-impersonation audit record by id. Resolvable to the session's

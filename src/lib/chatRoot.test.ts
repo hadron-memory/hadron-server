@@ -82,6 +82,8 @@ beforeEach(async () => {
   chat = { id: root.id, memoryId: memory.id, loc: CHAT_LOC };
 });
 
+async function storedCounter() { return db.chatRootCounter.findUniqueOrThrow({where:{chatRootNodeId:chat.id}}); }
+
 async function storedChatData(): Promise<Record<string, unknown>> {
   const row = await db.node.findUniqueOrThrow({ where: { id: chat.id } });
   return (row.data as Record<string, unknown>) ?? {};
@@ -92,7 +94,7 @@ describe('appendChatMessage — the counter is allocated under the lock', () => 
     const first = await appendChatMessage(db, chat, memEnc, insertMessage('user'));
     const second = await appendChatMessage(db, chat, memEnc, insertMessage('assistant'));
     expect([first.seq, second.seq]).toEqual([1, 2]);
-    expect((await storedChatData()).messageCount).toBe(2);
+    expect((await storedCounter()).messageCount).toBe(2);
   });
 
   it('makes a second allocator WAIT for an in-flight one, then read its result', async () => {
@@ -126,7 +128,7 @@ describe('appendChatMessage — the counter is allocated under the lock', () => 
     expect((await first).seq).toBe(1);
     const { seq } = await second;
     expect(seq).toBe(2);
-    expect((await storedChatData()).messageCount).toBe(2);
+    expect((await storedCounter()).messageCount).toBe(2);
 
     const messages = await db.node.findMany({
       where: { memoryId: chat.memoryId, loc: { startsWith: `${chat.loc}:messages:` } },
@@ -146,14 +148,14 @@ describe('appendChatMessage — the counter is allocated under the lock', () => 
     // takes the number it would have used.
     const next = await appendChatMessage(db, chat, memEnc, insertMessage('assistant'));
     expect(next.seq).toBe(2);
-    expect((await storedChatData()).messageCount).toBe(2);
+    expect((await storedCounter()).messageCount).toBe(2);
   });
 
   it('preserves the rest of the blob it did not touch', async () => {
     await appendChatMessage(db, chat, memEnc, insertMessage('user'));
     const data = await storedChatData();
     expect(data.conversationName).toBe('research');
-    expect(data.lastMessageAt).toEqual(expect.any(String));
+    expect((await storedCounter()).lastMessageAt).toBeInstanceOf(Date);
   });
 });
 
@@ -174,7 +176,7 @@ describe('updateChatRootData — a late write applies to fresh data', () => {
     expect(data.stageName).toBe('analysis');
     // Pre-#919 the turn wrote back the blob it read at its start, silently
     // reverting the count to 1 — and the NEXT message would then reuse seq 2.
-    expect(data.messageCount).toBe(2);
+    expect((await storedCounter()).messageCount).toBe(2);
   });
 
   it('serializes two concurrent read-modify-writes so neither is lost', async () => {
@@ -237,18 +239,20 @@ describe('#1141 — an ENCRYPTED chat root round-trips instead of being written 
     ).data as Record<string, unknown>;
     expect(after.goalStack).toEqual([{ description: 'encrypted goal' }]);
     expect(after.conversationName).toBe('research');
-    expect(after.messageCount).toBe(0);
+    expect(after).not.toHaveProperty('messageCount');
+    expect((await storedCounter()).messageCount).toBe(0);
   });
 });
 
 describe('withChatRootLock', () => {
-  it('leaves the chat root untouched when the body returns no data', async () => {
+  it('leaves authored data untouched when the body returns no data, scrubbing legacy counters', async () => {
     const before = await storedChatData();
     const value = await withChatRootLock(db, chat, memEnc, async ({ chatData }) => ({
       value: chatData.conversationName,
     }));
     expect(value).toBe('research');
-    expect(await storedChatData()).toEqual(before);
+    const {messageCount:_count,lastMessageAt:_time,...authored}=before;
+    expect(await storedChatData()).toEqual(authored);
   });
 
   it('throws when the chat root is gone', async () => {
@@ -276,7 +280,7 @@ describe('#992 — allocation is self-healing against direct message writes', ()
     // The reported repro, minimised: counter says 2, an archive occupies 1..142.
     await appendChatMessage(db, chat, memEnc, insertMessage('a'));
     await appendChatMessage(db, chat, memEnc, insertMessage('b'));
-    expect((await storedChatData()).messageCount).toBe(2);
+    expect((await storedCounter()).messageCount).toBe(2);
     for (const n of [3, 4, 5, 142]) await directMessage(n);
 
     const next = await appendChatMessage(db, chat, memEnc, insertMessage('after-import'));
@@ -288,7 +292,7 @@ describe('#992 — allocation is self-healing against direct message writes', ()
     const first = await appendChatMessage(db, chat, memEnc, insertMessage('x'));
     const second = await appendChatMessage(db, chat, memEnc, insertMessage('y'));
     expect([first.seq, second.seq]).toEqual([143, 144]);
-    expect((await storedChatData()).messageCount).toBe(144);
+    expect((await storedCounter()).messageCount).toBe(144);
   });
 
   it('never reuses a SOFT-DELETED message\'s seq', async () => {
@@ -314,7 +318,7 @@ describe('#992 — allocation is self-healing against direct message writes', ()
     await directMessage(2, 'abstract'); // the summary's slot
     const next = await appendChatMessage(db, chat, memEnc, insertMessage('b'));
     expect(next.seq).toBe(2);
-    expect((await storedChatData()).messageCount).toBe(2);
+    expect((await storedCounter()).messageCount).toBe(2);
   });
 
   it('does not count an off-road non-message nodeType', async () => {

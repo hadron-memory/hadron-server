@@ -949,6 +949,20 @@ export const memoryMutations = {
             { extensions: { code: 'INVALID_GROUP_MEMORY_VISIBILITY' } },
           );
         }
+        // #3372 / cor:dmo:060:01 / ruling0207: class decides whether
+        // visibility exists. Keep the older GROUP-direction refusals above
+        // unchanged; these missing cells get BAD_USER_INPUT after access and
+        // before rename/alias, grant or memory writes.
+        if (memory.class === 'knowledge' && visibility === null) {
+          throw new GraphQLError("Memory class 'knowledge' requires a non-null visibility.", {
+            extensions: { code: 'BAD_USER_INPUT' },
+          });
+        }
+        if (memory.class !== 'knowledge' && memory.class !== 'group' && visibility !== null) {
+          throw new GraphQLError(`Visibility must be null for memory class '${memory.class}'.`, {
+            extensions: { code: 'BAD_USER_INPUT' },
+          });
+        }
         await assertMemoryVisibilityChangeAllowed(ctx.db, memory, visibility);
       }
       // #1349 (@codex, PR #1357): narrowing out of PUBLIC also REVOKES the

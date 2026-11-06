@@ -63,6 +63,7 @@ import {
   oauthSurfaceRefusalMessage,
   hasCurrentPlatformAdminRole,
   resolveAuthContext,
+  resolveAuthContextWithStatus,
   portalHumanUserId,
 } from './middleware/auth.js';
 import { initCloudflareIps } from './auth/cloudflare-ips.js';
@@ -1287,7 +1288,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     (_req, _res, next) => requestActorStorage.run(emptyActor(), next),
     expressMiddleware(apollo, {
       context: async ({ req }) => {
-        const auth = await resolveAuthContext(req, db);
+        const { auth, credentialStatus } = await resolveAuthContextWithStatus(req, db);
         const surfaceRefusal = oauthSurfaceRefusal(auth, 'account');
         if (surfaceRefusal) {
           // #1303: `code` and prose unchanged; `reason` & co. are additive.
@@ -1319,7 +1320,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
           throw err;
         });
         const portalHuman = portalHumanUserId(auth);
-        return { db, ...auth, ...(portalHuman ? { portalHumanUserId: portalHuman } : {}) };
+        return { db, ...auth, credentialStatus, ...(portalHuman ? { portalHumanUserId: portalHuman } : {}) };
       },
     }),
   );

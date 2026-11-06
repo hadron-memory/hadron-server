@@ -12,7 +12,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { runContext } from '../../../jobs/appRunDeps.js';
 import { resolveRunTools } from '../../../lib/runner/tools/index.js';
-import { inRunTeamReadTx, loadApp, mayReadAppTasks, resolveTaskActor, withReadableApp } from './resolvers.agentTask.js';
+import { inRunTeamReadTx, loadApp, mayReadAppTasks, runMayReadTeam, resolveTaskActor, withReadableApp } from './resolvers.agentTask.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 import { formatGraphQLError } from '../formatError.js';
@@ -164,6 +164,20 @@ it.each(['app', 'org', 'run-ended', 'run-forged'] as const)('the live read gate 
   if (kind === 'run-ended') await db.appRun.update({ where: { id: run.id }, data: { status: 'COMPLETED' } });
   if (kind === 'run-forged') principal.clientId = `run:${generateId()}`;
   await denied(Q.agentTasks({}, { appRef: appId }, principal), 'APP_NOT_FOUND');
+});
+it.each([undefined, null, '', 'r', 'ru', 'run', 'run:', 'other:run'])('#3352 malformed run clientId refuses without INTERNAL: %s', async clientId => {
+  await enable();
+  const principal = runContext(db, await mintRun());
+  // Include runtime-null defensively without widening Context's declared clientId type.
+  Object.assign(principal, { clientId });
+  const app = await loadApp(principal, appId);
+  expect(app).not.toBeNull();
+  expect(await runMayReadTeam(principal, app!)).toBe(false);
+  expect(await mayReadAppTasks(principal, appId)).toBe(false);
+  await denied(Q.agentTasks({}, { appRef: appId }, principal), 'APP_NOT_FOUND');
+  const out = await wire('query($app:ID!){agentTasks(appRef:$app){id}}', { app: appId }, principal);
+  expect(out.errors?.[0].extensions.code).toBe('APP_NOT_FOUND');
+  expect(out.errors?.[0].extensions.code).not.toBe('INTERNAL_SERVER_ERROR');
 });
 it('registers one cost-zero snapshot tool with no caller-App or credential arguments', () => {
   const tool = snapshotTool();
