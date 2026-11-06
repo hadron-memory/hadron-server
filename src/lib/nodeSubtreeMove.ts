@@ -201,13 +201,17 @@ async function aliasTargetId(
   tx: Prisma.TransactionClient,
   target: string,
   memoryId: string,
+  virtualMovedIds?: ReadonlySet<string>,
 ): Promise<string | 'AMBIGUOUS' | null> {
   try {
-    const { id } = await resolveNodeRef(tx, target, memoryId);
+    const memory = virtualMovedIds
+      ? await tx.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { urn: true } }) : null;
+    const ref = memory ? safeNodeUrnV2(memory.urn, target) : target;
+    const { id } = await resolveNodeRef(tx, ref, memoryId);
     // The report is about a memory-relative link. A bare qualified spelling
     // that happens to parse here cannot turn this into a foreign-memory probe.
     const node = await tx.node.findUnique({ where: { id }, select: { memoryId: true } });
-    return node?.memoryId === memoryId ? id : null;
+    return node && (node.memoryId === memoryId || virtualMovedIds?.has(id)) ? id : null;
   } catch (error) {
     if (
       error instanceof NodeNotFoundError ||
@@ -283,6 +287,10 @@ export async function moveNodeSubtree(
   tx: Prisma.TransactionClient,
   opts: {
     source: SnapshotSourceNode;
+    /** cor:api:190:03: run shared checks without locks, reconciliation or writes. */
+    planOnly?: boolean;
+    /** Ruling 0211: do not resolve destination content links for an unreadable memory. */
+    withholdLinkWarnings?: boolean;
     destLoc: string;
     /** Destination memory. Omit / equal to source.memoryId for a same-memory move. */
     destMemoryId?: string;
@@ -325,7 +333,7 @@ export async function moveNodeSubtree(
 
   // Lock the source subtree + revalidate the source. The caller already holds
   // the destination ancestor lock.
-  await lockSourceForMove(tx, source);
+  if (!opts.planOnly) await lockSourceForMove(tx, source);
 
   // The subtree: the source node's descendants, on ':' path boundaries (so
   // `findings:auth` doesn't sweep in `findings:auth-v2`).
@@ -344,7 +352,7 @@ export async function moveNodeSubtree(
   // Take the complete Node set before the Memory fence. A merge fold holds
   // Node locks before its Memory FOR SHARE fence; taking Memory first here
   // deadlocks when each operation waits on the other's row.
-  for (const id of reconcileIds) {
+  for (const id of opts.planOnly ? [] : reconcileIds) {
     await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${id} FOR UPDATE`;
   }
 
@@ -357,9 +365,11 @@ export async function moveNodeSubtree(
   // A concurrent mint takes this row FOR UPDATE, so it cannot interleave with
   // the per-node mint state read below under the node locks.
   for (const memoryId of [...new Set([srcMemoryId, destMemoryId])].sort()) {
-    const [memory] = await tx.$queryRaw<Array<{ urn: string }>>`
-      SELECT urn FROM memories WHERE id = ${memoryId} FOR NO KEY UPDATE
-    `;
+    const memory = opts.planOnly
+      ? await tx.memory.findUnique({ where: { id: memoryId }, select: { urn: true } })
+      : (await tx.$queryRaw<Array<{ urn: string }>>`
+          SELECT urn FROM memories WHERE id = ${memoryId} FOR NO KEY UPDATE
+        `)[0];
     if (!memory) throw new Error(`Move memory ${memoryId} disappeared while locking; retry.`);
     memoryUrns.set(memoryId, memory.urn);
   }
@@ -367,7 +377,7 @@ export async function moveNodeSubtree(
     await opts.authorizeLockedMemory?.(memoryId);
   }
 
-  for (const id of reconcileIds) {
+  for (const id of opts.planOnly ? [] : reconcileIds) {
     await ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: srcMemoryId });
   }
   const lockedSource = await tx.node.findUnique({ where: { id: source.id } });
@@ -394,7 +404,7 @@ export async function moveNodeSubtree(
   }
   const subtree: SnapshotSourceNode[] = [lockedSource, ...descendants];
   if (opts.principal) {
-    await assertRoleWritersForNodes(tx, opts.principal, subtree, { from: srcMemoryId, to: destMemoryId });
+    await assertRoleWritersForNodes(tx, opts.principal, subtree, { from: srcMemoryId, to: destMemoryId }, { preview: opts.planOnly });
   }
   // Rebase a source-subtree loc onto the destination: source.loc → destLoc,
   // source.loc:x → destLoc:x. slice(source.loc.length) is '' for the source
@@ -410,7 +420,7 @@ export async function moveNodeSubtree(
   // existence alone. Only links that resolved in the source are move-caused
   // changes; pre-existing broken links and qualified URNs are outside this
   // report. Do not rewrite author text or expose source-memory addresses.
-  const contentLinks = crossMemory
+  const contentLinks = crossMemory && !opts.withholdLinkWarnings
     ? subtree.flatMap((n) => relativeContentLinks(n.content ?? '').map((link) => ({
         nodeId: n.id, nodeLoc: newLocById.get(n.id)!, ...link,
       })))
@@ -588,6 +598,42 @@ export async function moveNodeSubtree(
     }
   }
 
+  /** Compare content links against either the committed or virtual destination. */
+  async function linkWarningsAfterMove(virtual: boolean): Promise<MoveLinkWarning[]> {
+    const destinationTargets = targets.length
+      ? await tx.node.findMany({
+          where: { memoryId: destMemoryId, loc: { in: targets }, deletedAt: null },
+          select: { id: true, loc: true },
+        })
+      : [];
+    const destinationIdByLoc = new Map<string, string>(destinationTargets.map((n) => [n.loc, n.id]));
+    if (virtual) {
+      for (const n of subtree) destinationIdByLoc.set(newLocById.get(n.id)!, n.id);
+    }
+    for (const target of targets) {
+      if (destinationIdByLoc.has(target)) continue;
+      const id = await aliasTargetId(tx, target, destMemoryId, virtual ? movedIds : undefined);
+      if (id) destinationIdByLoc.set(target, id);
+    }
+    return contentLinks.flatMap((link) => {
+      const originalId = sourceIdByLoc.get(link.target);
+      if (!originalId) return [];
+      const nextId = destinationIdByLoc.get(link.target);
+      if (nextId === originalId) return [];
+      const status = nextId === 'AMBIGUOUS' ? 'AMBIGUOUS' : nextId ? 'RETARGETED' : 'MISSING';
+      return [{ ...link, status }];
+    });
+
+  }
+
+  if (opts.planOnly) {
+    return {
+      movedCount: subtree.length,
+      moved: subtree.map(n => ({ id: n.id, previousLoc: n.loc, loc: newLocById.get(n.id)! })),
+      linkWarnings: await linkWarningsAfterMove(true),
+    };
+  }
+
   // cor:urn:030:01 — each moved row leaves a published address behind, even
   // when its parent memory's stored URN never changes. Record every predecessor
   // in this SAME transaction as the two-phase rebase. The shared alias helper
@@ -707,26 +753,7 @@ export async function moveNodeSubtree(
   // Read the destination AFTER the rows and NODE aliases have moved. A live
   // occupant has precedence over aliases, and an alias to a node newly moved
   // into this memory can now resolve. Both cases are missed by a pre-move map.
-  const destinationTargets = targets.length
-    ? await tx.node.findMany({
-        where: { memoryId: destMemoryId, loc: { in: targets }, deletedAt: null },
-        select: { id: true, loc: true },
-      })
-    : [];
-  const destinationIdByLoc = new Map<string, string>(destinationTargets.map((n) => [n.loc, n.id]));
-  for (const target of targets) {
-    if (destinationIdByLoc.has(target)) continue;
-    const id = await aliasTargetId(tx, target, destMemoryId);
-    if (id) destinationIdByLoc.set(target, id);
-  }
-  result.linkWarnings = contentLinks.flatMap((link) => {
-    const originalId = sourceIdByLoc.get(link.target);
-    if (!originalId) return [];
-    const nextId = destinationIdByLoc.get(link.target);
-    if (nextId === originalId) return [];
-    const status = nextId === 'AMBIGUOUS' ? 'AMBIGUOUS' : nextId ? 'RETARGETED' : 'MISSING';
-    return [{ ...link, status }];
-  });
+  result.linkWarnings = await linkWarningsAfterMove(false);
 
   // ── Cross-memory carry-over ─────────────────────────────────────────────
   const movedIdList = [...movedIds];

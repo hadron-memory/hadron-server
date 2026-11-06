@@ -200,6 +200,9 @@ export async function installDeleteAllowed(ctx: Context, memory: InstallMemoryRe
 type InstallMemoryRef = { id: string; class: string; appId: string | null; installOfAgentId: string | null; isInstallMemory: boolean; organizationId: string | null; ownerUserId: string | null };
 
 async function fencedInstallAudience(ctx: Context, memory: InstallMemoryRef) {
+  // A plan reserves nothing. The planner sets READ ONLY before supplying this
+  // internal context, so a future accidental write cannot use this unfenced decision.
+  if (ctx.installWritePreview) return installMemoryAudience(ctx.db as never, ctx, memory);
   const db = ctx.db as unknown as Prisma.TransactionClient & { $transaction?: unknown };
   if (typeof db.$transaction === 'function' || !memory.appId) {
     const audience = await installMemoryAudience(ctx.db as never, ctx, memory);
