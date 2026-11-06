@@ -62,13 +62,18 @@ async function seat(sessionStartedMinutesAgo: number) {
   await db.agentTask.create({ data: { appId: app.id, title: 'T', ownerUserId: user.id, assigneeWorkerId: worker.id, assignedAt: at(-sessionStartedMinutesAgo) } });
 }
 async function ticker(cadenceMinutes: number, over: Record<string, unknown> = {}) {
-  const t = await db.ticker.create({ data: { tickCode: 'tick.fixture', id: generateId(), appId: app.id, ownerUserId: user.id, name: `T${cadenceMinutes}`, slug: `t${cadenceMinutes}-${generateId().slice(-4)}`, cadenceSeconds: cadenceMinutes * 60, anchorAt: at(-600), ...over } });
+  const t = await db.ticker.create({ data: { tickCode: 'tick.fixture', id: generateId(), appId: app.id, ownerUserId: user.id, name: `T${cadenceMinutes}-${generateId().slice(-6)}`, slug: `t${cadenceMinutes}-${generateId().slice(-4)}`, cadenceSeconds: cadenceMinutes * 60, anchorAt: at(-600), ...over } });
   await db.tickerSubscription.create({ data: { tickerId: t.id, workerId: worker.id } });
   return t;
 }
 /** A wake delivered to the worker at `minutes` (relative to T0) for this ticker. */
 const delivered = (tickerId: string, minutes: number, k = 1) =>
-  db.workerDeliveryTick.create({ data: { workerId: worker.id, tickerId, lastAckedTick: k, ackedAt: at(minutes), ackedByUserId: user.id } });
+  db.workerDeliveryTick.upsert({
+    where: { workerId_tickerId: { workerId: worker.id, tickerId } },
+    create: { workerId: worker.id, tickerId, lastAckedTick: k, ackedAt: at(minutes), ackedByUserId: user.id },
+    // A newer delivery clears the response, as acknowledgeWakes does.
+    update: { lastAckedTick: k, ackedAt: at(minutes), respondedAt: null },
+  });
 const status = async (now: Date) => (await loadWorkerCheckStatuses(db, { appId: app.id, teamChannelId: team.id, now })).get(worker.id)!.status;
 const alarms = () => db.agentTeamEvent.findMany({ where: { subjectWorkerId: worker.id, type: 'alarm.dark-worker' } });
 const responded = (tickerId: string) => db.$queryRaw<Array<{ r: Date | null }>>`SELECT responded_at AS r FROM worker_delivery_ticks WHERE worker_id = ${worker.id} AND ticker_id = ${tickerId}`.then((r) => r[0]?.r ?? null);
@@ -161,6 +166,14 @@ describe('#3509 OVERDUE is measured from a delivered wake', () => {
     await delivered(t.id, -10);
     expect(await stampTeamChannelChecks(db, worker.id)).toBe(1);
     expect(await responded(t.id)).not.toBeNull();
+  });
+
+  it('row 7: a check of the team channel does not answer a wake whose ticker covers only another channel', async () => {
+    await seat(12);
+    const t = await ticker(30, { channelIds: [other.id] });
+    await delivered(t.id, -10);
+    await stampChannelCheck(db, worker.id, team.id); // a check, but not of a channel this ticker covers
+    expect(await status(at(1))).toBe('OVERDUE');
   });
 
   it('row 8: PENDING (no task) and NO_SESSION still win over a delivered, unanswered wake', async () => {
