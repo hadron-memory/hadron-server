@@ -32,7 +32,8 @@ const observe = (client: Pick<PrismaClient, '$queryRaw' | '$executeRawUnsafe' | 
         expect(counters).toEqual([{ generic_plans: 1n, custom_plans: 0n }]);
         return await client.$queryRawUnsafe(execute);
       } finally {
-        await client.$executeRawUnsafe('DEALLOCATE loc3596_probe');
+        // An aborted EXECUTE transaction rejects DEALLOCATE too; preserve its primary error.
+        await client.$executeRawUnsafe('DEALLOCATE loc3596_probe').catch(() => {});
       }
     }
     const result: any = await client.$queryRaw(Prisma.sql`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${sql}`);
@@ -153,27 +154,71 @@ describe('#3596 sibling-bounded hybrid', () => {
     expect(examined).toBeLessThanOrEqual(20);
   }, 120_000);
 
-  it('pages a flat positioned/name set exactly once, identically to the skip-only path', async () => {
-    await db.node.createMany({ data: Array.from({ length: 45 }, (_, i) => ({
-      id: `pages3596-${i}`, memoryId, loc: `pages:n${String(i).padStart(2, '0')}`,
-      name: 'page', seq: i < 3 ? 3 - i : null,
+  it.each([64, 65, 128, 129])('pages %i flat siblings across block boundaries exactly once', async count => {
+    const parent = `pages${count}`;
+    await db.node.createMany({ data: Array.from({ length: count }, (_, i) => ({
+      id: `pages3596-${count}-${i}`, memoryId, loc: `${parent}:n${String(i).padStart(3, '0')}`,
+      name: 'page', seq: i === count - 1 ? -3 : i < 3 ? 3 - i : null,
     })) });
-    const args = { memoryIds: [memoryId], excludeNodeIds: [], parent: 'pages', limit: 7, after: null };
+    await db.node.createMany({ data: [
+      { id: `pages3596-${count}-deleted`, memoryId, loc: `${parent}:n063-deleted`, name: 'deleted', deletedAt: new Date(), seq: -20 },
+      { id: `pages3596-${count}-system`, memoryId, loc: `${parent}:n064-system`, name: 'system', nodeType: 'system', seq: -20 },
+    ] });
+    const args = { memoryIds: [memoryId], excludeNodeIds: [], parent, limit: 7, after: null };
     const expected = await readLocSegments(skipOnly, { ...args, limit: 200 });
     const seen: Awaited<ReturnType<typeof readLocSegments>>['items'] = [];
     let after: ReturnType<typeof decodeLocSegmentsCursor> = null;
-    for (let i = 0; i < 8; i++) {
-      const page = await readLocSegments(observed, { ...args, after });
+    let ended = false;
+    for (let i = 0; i <= Math.ceil(count / args.limit); i++) {
+      const page = await db.$transaction(async tx => {
+        // A non-advancing block cursor must fail this pin without an unbounded query.
+        await tx.$executeRaw`SET LOCAL statement_timeout = '5s'`;
+        return readLocSegments(observe(tx), { ...args, after });
+      }, { timeout: 10_000 });
       expectFlat(plans.at(-1));
       seen.push(...page.items);
-      if (!page.hasMore) { expect(page.endCursor).toBeNull(); break; }
+      if (!page.hasMore) { expect(page.endCursor).toBeNull(); ended = true; break; }
       expect(page.endCursor).not.toBeNull();
       after = decodeLocSegmentsCursor(page.endCursor!);
       expect(after).not.toBeNull();
     }
+    expect(ended).toBe(true);
     expect(seen).toEqual(expected.items);
-    expect(new Set(seen.map(row => row.segment)).size).toBe(45);
-  });
+    expect(seen).toHaveLength(count);
+    expect(new Set(seen.map(row => row.segment)).size).toBe(count);
+  }, 120_000);
+
+  it('pages two flat memories spanning multiple blocks identically to skip-only', async () => {
+    const other = (await createDbOrgAndGraph(db, { orgName: 'pages-two3596', graphName: 'pages-two3596' })).graph.id;
+    const memoryIds = [other, memoryId];
+    await db.node.createMany({ data: memoryIds.flatMap((mid, m) => Array.from({ length: 129 }, (_, i) => ({
+      id: `pages-two3596-${m}-${i}`, memoryId: mid, loc: `multipages:n${String(i).padStart(3, '0')}`,
+      name: 'page', seq: i === 128 ? -5 : i === 64 ? 2 : null,
+    }))) });
+    const args = { memoryIds, excludeNodeIds: [], parent: 'multipages', limit: 31, after: null };
+    async function collect(client: PrismaClient, checkPlan: boolean) {
+      const seen: Awaited<ReturnType<typeof readLocSegments>>['items'] = [];
+      let after: ReturnType<typeof decodeLocSegmentsCursor> = null;
+      for (let i = 0; i < 10; i++) {
+        const page = checkPlan ? await db.$transaction(async tx => {
+          await tx.$executeRaw`SET LOCAL statement_timeout = '5s'`;
+          return readLocSegments(observe(tx), { ...args, after });
+        }, { timeout: 10_000 }) : await readLocSegments(client, { ...args, after });
+        if (checkPlan) expectFlat(plans.at(-1));
+        seen.push(...page.items);
+        if (!page.hasMore) { expect(page.endCursor).toBeNull(); return seen; }
+        after = decodeLocSegmentsCursor(page.endCursor!);
+        expect(after).not.toBeNull();
+      }
+      throw new Error('Multi-memory pagination did not terminate');
+    }
+    const expected = await collect(skipOnly, false);
+    const seen = await collect(observed, true);
+    expect(seen).toEqual(expected);
+    expect(seen).toHaveLength(258);
+    expect(new Set(seen.map(row => `${row.memoryId}:${row.segment}`)).size).toBe(258);
+    for (const mid of memoryIds) expect(seen.filter(row => row.memoryId === mid)).toHaveLength(129);
+  }, 120_000);
 
   it('one late eligible descendant rejects the flat arm after direct children', async () => {
     await db.node.createMany({ data: [
