@@ -85,6 +85,7 @@ import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.j
 import { deletePristineGeneratedTickers, miscastHasReferences } from '../../../lib/workerMiscastRepair.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { runMayReadTeam } from '../../../lib/auth/runTeamRead.js';
 import { managesApp, lockAppManagerMemberships } from '../../../lib/auth/appManagement.js';
 import { withAuthorizedTx, liveTxContext } from './authorizedTx.js';
 import { resolveTaskActor, type TaskApp } from './resolvers.agentTask.js';
@@ -214,6 +215,12 @@ export async function requireWorkerProfileAccess(ctx: Context, app: AppRow): Pro
  */
 async function workerReadableWhere(ctx: Context): Promise<Prisma.WorkerWhereInput> {
   if (!ctx.userId) {
+    // #3360: a userless run reaches its own App only under its automation's grant, the same arm
+    // `requireWorkerReadAccess` applies; a key reaches its own App unconditionally.
+    if (isRunPrincipal(ctx)) {
+      const app = ctx.appId ? await ctx.db.app.findUnique({ where: { id: ctx.appId }, select: { id: true, organizationId: true, deletedAt: true } }) : null;
+      return { appId: { in: app && await runMayReadTeam(ctx, app) ? [app.id] : [] } };
+    }
     return { appId: { in: ctx.appId ? [ctx.appId] : [] } };
   }
   if (!isPlatformAdmin(ctx)) {
