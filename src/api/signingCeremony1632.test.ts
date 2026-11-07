@@ -549,9 +549,9 @@ describe('#3699 signing page slice 2: summary first, sticky bar, status in the b
   const challenge = { path: 'challenge', status: 200, body: { ceremonyId: 'action', challenge: 'AA', rpId: RP, allowCredentials: [] } } as const;
   const all = (e: FakeElement): FakeElement[] => [e, ...e.children.flatMap(all)];
   const order = (root: FakeElement, el: FakeElement) => all(root).indexOf(el);
-  const textOrder = (page: { texts: (e: FakeElement) => string[]; ids: { view: FakeElement } }, t: string | RegExp) =>
+  const textOrder = (page: { texts: (e: FakeElement) => string[]; ids: Record<string, FakeElement> }, t: string | RegExp) =>
     page.texts(page.ids.view).findIndex((x) => (typeof t === 'string' ? x === t : t.test(x)));
-  const bar = (page: { ids: { view: FakeElement } }) => all(page.ids.view).find((e) => e.className === 'bar');
+  const bar = (page: { ids: Record<string, FakeElement> }) => all(page.ids.view).find((e) => e.className === 'bar');
   const open = async (over: (v: any) => any = (v) => v) => {
     const req = await openRequest(), proof = await prove(req.id, signer);
     return { req, proof, json: { ...proof.json, view: over(proof.json.view) } };
