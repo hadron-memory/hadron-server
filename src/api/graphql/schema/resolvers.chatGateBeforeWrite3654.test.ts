@@ -55,6 +55,13 @@ beforeEach(async () => {
 });
 
 
+// The authoritative stage under the chat lock is the chatRootEngineState row, not the root's data (#3666): set both, or the
+// in-transaction gate fires on the row's stage in every test and the stage-less fixtures are not stage-less.
+async function setStage(chat: { id: string; data: unknown }, conversationName: string, stageName: string) {
+  await db.node.update({ where: { id: chat.id }, data: { data: { ...(chat.data as object), conversationName, stageName } } });
+  const row = await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: chat.id } });
+  await db.chatRootEngineState.update({ where: { chatRootNodeId: chat.id }, data: { state: { ...(row.state as object), conversationName, stageName } } });
+}
 // loc-scope-ok: counts the messages of the one chat under test, by its own prefix
 const messageNodes = (chatId: string) => db.node.count({ where: { loc: { startsWith: `${chatId}:messages:` } } });
 const snapshot = async (chatId: string) => {
@@ -91,7 +98,7 @@ describe('#3654 a refused sendChatMessage turn persists nothing', () => {
     const start = await M.startChat({}, { agentId: agent.id }, ctx());
     const chat = await chatNodeByLocOrThrow(db, start.chatId);
     // A chat parked in the fallback conversation with no stage: only the re-route would give this turn one.
-    await db.node.update({ where: { id: chat.id }, data: { data: { ...(chat.data as object), conversationName: 'fallback', stageName: '' } } });
+    await setStage(chat, 'fallback', '');
     const before = await snapshot(start.chatId);
     await db.node.update({ where: { id: node }, data: { deletedAt: new Date() } });
     expect(await code(M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'please research this topic' }, ctx()))).toBe('BOOT_PROMPT_TARGET_DELETED');
@@ -103,13 +110,13 @@ describe('#3654 a refused sendChatMessage turn persists nothing', () => {
     const start = await M.startChat({}, { agentId: agent.id }, ctx());
     const chat = await chatNodeByLocOrThrow(db, start.chatId);
     // Parked with no stage: the early gate does not apply to this turn.
-    await db.node.update({ where: { id: chat.id }, data: { data: { ...(chat.data as object), conversationName: 'research', stageName: '' } } });
+    await setStage(chat, 'research', '');
     const before = await snapshot(start.chatId);
     await db.node.update({ where: { id: node }, data: { deletedAt: new Date() } });
     // A concurrent turn gives the chat its stage after this turn read the root, before it takes the chat lock.
     const original = db.memory.findUniqueOrThrow.bind(db.memory);
     const spy = vi.spyOn(db.memory, 'findUniqueOrThrow').mockImplementationOnce(((args: any) => {
-      return db.node.update({ where: { id: chat.id }, data: { data: { ...(chat.data as object), conversationName: 'research', stageName: 'scope' } } }).then(() => original(args));
+      return setStage(chat, 'research', 'scope').then(() => original(args));
     }) as any);
     try {
       expect(await code(M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'racing turn' }, ctx()))).toBe('BOOT_PROMPT_TARGET_DELETED');
