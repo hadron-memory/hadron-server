@@ -276,7 +276,14 @@ it('a refused bind conceals the current name of an unreadable retained Agent',as
  expect(await db.session.count({where:{workerId:worker.id}})).toBe(0);
  expect(await db.servedPrompt.count({where:{workerId:worker.id}})).toBe(0);
 });
+// #3653 / cor:agt:040:10 (ruling 0235): serving checks the owner's licence, so while it holds a userless caller passes the
+// gate and stops at the target memory with no text. Once it lapses it is refused as before. A run with this shape is
+// synthetic: mintAppRun refuses a personal App.
 for(const clientId of ['app-key','run:synthetic1148']) it(`userless ${clientId} gains no personal org chat text`,async()=>{
+ await seedChatConversation();
+ await expect(mutation.startChat({}, {agentId,scope:'private'},{db,appId,clientId,roles:[]}))
+  .rejects.toThrow('No target memory available for this chat');
+ await db.orgMember.update({where:{organizationId_userId:{organizationId:orgId,userId:ownerId}},data:{deletedAt:new Date()}});
  await expect(mutation.startChat({}, {agentId,scope:'private'},{db,appId,clientId,roles:[]}))
   .rejects.toMatchObject({code:'AGENT_NOT_FOUND'});
 });
