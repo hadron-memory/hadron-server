@@ -10481,7 +10481,7 @@ export const typeDefs = `#graphql
       agentRef: ID
       role: String
       name: String
-      "Worker reference to report to. Requires worker-staffing access and App management. Supply either reportsTo or noTeam: true, never both. Null or a blank reference is invalid. Returns WORKER_REPORTING_CAST_UNAVAILABLE when casting with a reporting head is unavailable."
+      "Worker reference to report to. Requires worker-staffing access and App management. Supply either reportsTo or noTeam: true, never both. Null or a blank reference is invalid."
       reportsTo: ID
       "Set to true to record that the worker has no reporting head; do not supply reportsTo as well. Null or false is invalid. Omitting both arguments records no choice (UNSET) when omission is allowed; otherwise the request is refused with WORKER_TEAM_CHOICE_REQUIRED."
       noTeam: Boolean
@@ -11054,18 +11054,15 @@ export const typeDefs = `#graphql
     """
     setWorkerWakeSettings(workerRef: String!, input: WorkerWakeSettingsInput!, instruction: ActInstructionInput): WorkerWakeSettings!
     """
-    S7 (#2023, R85) — isolate a worker until a time (default 2 hours, at most 7 days; a later time extends, an earlier one shortens).
-    Only a person managing the App or holding the worker, as themselves or, on their instruction, through their held worker
-    (hrn:node:hadronmemory.com:specs:cor:agt:080:29, ruling 0118), recorded as one app.manager-act event, ids only. Refusals, in the order they are checked:
-    an unknown worker, or one the caller cannot read (a pure App key among them), is WORKER_NOT_FOUND; a worker session with no
-    instruction (even a manager's) is WORKER_ISOLATION_FORBIDDEN; while S7 activation is off, setting an isolation is WORKER_ISOLATION_UNAVAILABLE
-    (clearing is unaffected), so an ordinary person gets this before the manager/holder check; an impersonation that reaches the
-    write is refused FORBIDDEN (read-only); a participant who neither manages the App nor holds the worker is
-    WORKER_ISOLATION_FORBIDDEN. Never touches the worker's own pause.
+    Deprecated compatibility door: isolation is removed; this call retains its existing audience and refuses without writing.
+    #3606 phase-1 compatibility door. Isolation is removed. Refusals retain the source-exact order:
+    an unknown worker, or one the caller cannot read (a pure App key among them), is WORKER_NOT_FOUND;
+    a worker session with no instruction is WORKER_ISOLATION_FORBIDDEN; everyone else receives
+    WORKER_ISOLATION_UNAVAILABLE before the manager/holder check. The until input is not parsed and nothing is written.
     """
-    isolateWorker(workerRef: String!, until: DateTime, instruction: ActInstructionInput): WorkerWakeSettings!
-    "S7 — lift an isolation (same audience). Clearing when none is set changes nothing. #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only."
-    clearWorkerIsolation(workerRef: String!, instruction: ActInstructionInput): WorkerWakeSettings!
+    isolateWorker(workerRef: String!, until: DateTime, instruction: ActInstructionInput): WorkerWakeSettings! @deprecated(reason: "Isolation was removed; compatibility door will be removed after client migration (#3606).")
+    "Deprecated no-op: retains the original locked target and manager-or-holder audience (hrn:node:hadronmemory.com:specs:cor:agt:080:29, ruling 0118). Impersonation remains FORBIDDEN; an uninstalled App remains APP_UNINSTALLED. Authorized callers receive current wake settings with no isolation, exemption, or manager-act write."
+    clearWorkerIsolation(workerRef: String!, instruction: ActInstructionInput): WorkerWakeSettings! @deprecated(reason: "Isolation was removed; compatibility door will be removed after client migration (#3606).")
     "#1748 — record that wakes were delivered (hrn:node:hadronmemory.com:specs:cor:agt:080:16). Never moves a read position."
     acknowledgeWakes(proofs: [String!]!): AcknowledgeWakesResult!
     """
@@ -13808,7 +13805,7 @@ export const typeDefs = `#graphql
       keep the typed refusal. One rule, one message, both paths.
       """
       name: String
-      "Worker reference to report to. Requires worker-staffing access and App management. Supply either reportsTo or noTeam: true, never both. Null or a blank reference is invalid. Returns WORKER_REPORTING_CAST_UNAVAILABLE when casting with a reporting head is unavailable."
+      "Worker reference to report to. Requires worker-staffing access and App management. Supply either reportsTo or noTeam: true, never both. Null or a blank reference is invalid."
       reportsTo: ID
       "Set to true to record that the worker has no reporting head; do not supply reportsTo as well. Null or false is invalid. Omitting both arguments records no choice (UNSET) when omission is allowed; otherwise the request is refused with WORKER_TEAM_CHOICE_REQUIRED."
       noTeam: Boolean
@@ -15068,8 +15065,8 @@ export const typeDefs = `#graphql
     handle: String!
     "A stable label for the reason, e.g. TASK:<id>:assigned."
     ref: String!
-    "S7 (#2023, R90) — on an assignment to a worker that was on standby: how many messages were held from it and passed by the delivered mark. Returned with this one event, so once."
-    standbyHeld: Int
+    "Always null: standby has been removed."
+    standbyHeld: Int @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
   }
 
   "#1748 — one page of due wakes. Counts and ranges only (hrn:node:hadronmemory.com:specs:cor:agt:080:23)."
@@ -15532,8 +15529,8 @@ export const typeDefs = `#graphql
   "#1747 — a worker wake settings (hrn:node:hadronmemory.com:specs:cor:agt:080:03)."
   type WorkerWakeSettings {
     worker: Worker!
-    "Whether this caller, acting as a person, may set or clear isolation: whoever manages the App or holds the worker. False for worker sessions and impersonation. Reports permission even while isolation is unavailable; does not grant read access. hrn:node:hadronmemory.com:specs:cor:agt:080:29"
-    canManageIsolation: Boolean!
+    "Always false: isolation has been removed. Compatibility only; the deprecated clear door retains its original audience. hrn:node:hadronmemory.com:specs:cor:agt:080:29"
+    canManageIsolation: Boolean! @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
     mentions: MentionWake!
     "A pause belongs to the worker, not to a session."
     pausedUntil: DateTime
@@ -15543,13 +15540,13 @@ export const typeDefs = `#graphql
     effectiveCadenceSeconds: Int
     "None of the worker's sessions has had activity within the App's dormancy period (hrn:node:hadronmemory.com:specs:cor:agt:080:07). A dormant worker is never woken."
     dormant: Boolean!
-    "S7 (#2023, R85) — isolation is its own state, never pausedUntil. While live the worker gets no chat batches or ordinary wakes and is not matched."
-    isolatedUntil: DateTime
-    isolatedAt: DateTime
-    "The handle of the person who set it: only a person managing the App or holding the worker, acting as themselves, can."
-    isolatedByHandle: String
-    "Live: isolatedUntil is in the future."
-    isolated: Boolean!
+    "Always null: isolation storage and execution have been removed."
+    isolatedUntil: DateTime @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
+    isolatedAt: DateTime @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
+    "Always null: isolation has been removed."
+    isolatedByHandle: String @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
+    "Always false: isolation has been removed."
+    isolated: Boolean! @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
   }
 
   "#2138: the App's team pause. teamPausedAt is null when the team is not paused."
@@ -15571,10 +15568,10 @@ export const typeDefs = `#graphql
     failedChecksToOverdue: Int!
     "#2755: a worker's due wake left unacknowledged this long raises the dark-worker alarm. Whole seconds, 300..86400; default 1800. Independent of stuckWindowSeconds."
     darkAlarmWindowSeconds: Int!
-    "Stored configuration; default false. Enabling is refused until standby behavior ships."
-    standbyEnabled: Boolean!
-    "False until S7 supplies standby behavior; configuration alone has no effect."
-    standbyEffective: Boolean!
+    "Always false: standby storage and execution have been removed."
+    standbyEnabled: Boolean! @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
+    "Always false: standby has been removed."
+    standbyEffective: Boolean! @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
   }
 
   "Atomic patch: omit to preserve, explicit null refuses. Empty patch returns the current authorized settings."
@@ -15583,7 +15580,7 @@ export const typeDefs = `#graphql
     batchWindowSeconds: Int
     busyDelaySeconds: Int
     stuckWindowSeconds: Int
-    standbyEnabled: Boolean
+    standbyEnabled: Boolean @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
     "#2138: whole seconds, 60..86400."
     checkPeriodSeconds: Int
     "#2138: whole number, 1..100."
@@ -16365,7 +16362,7 @@ export const typeDefs = `#graphql
     OVERDUE
   }
 
-  "#2138 §3.4 — why a worker is PENDING. Precedence: TEAM_PAUSED, STOPPED, PAUSED, ISOLATED, STANDBY, NO_TASK."
+  "#2138 §3.4 — why a worker is PENDING. Precedence: TEAM_PAUSED, STOPPED, PAUSED, NO_TASK. ISOLATED and STANDBY are compatibility-only values never returned."
   enum WorkerPendingReason {
     "A team pause is in force (App.teamPausedAt); the worker can't lift it."
     TEAM_PAUSED
@@ -16373,10 +16370,10 @@ export const typeDefs = `#graphql
     STOPPED
     "Its own pause (pausedUntil) is in force."
     PAUSED
-    "In isolation (unreachable until isolation is built)."
-    ISOLATED
-    "On standby (unreachable until standby is built)."
-    STANDBY
+    "Deprecated compatibility value; isolation is removed and this value is never returned."
+    ISOLATED @deprecated(reason: "Removed; never returned (#3606).")
+    "Compatibility-only value: standby has been removed; never returned."
+    STANDBY @deprecated(reason: "Removed; never returned (#3606).")
     "No open task assigned, and its Agent uses tasks."
     NO_TASK
   }

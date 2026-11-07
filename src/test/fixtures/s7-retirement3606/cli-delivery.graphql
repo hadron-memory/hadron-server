@@ -1,0 +1,23 @@
+# Exact operation/fragment selections from hadron-cli v0.39.0; extracted with GraphQL AST.
+fragment AppDeliverySettingsFields on AppDeliverySettings {
+  darkAlarmWindowSeconds
+  batchWindowSeconds
+  busyDelaySeconds
+  stuckWindowSeconds
+  standbyEnabled
+  standbyEffective
+  checkPeriodSeconds
+  failedChecksToOverdue
+}
+
+query TeamDeliverySettings($appRef: String!) {
+  appDeliverySettings(appRef: $appRef) {
+    ...AppDeliverySettingsFields
+  }
+}
+
+mutation TeamDeliverySettingsSet($appRef: String!, $input: AppDeliverySettingsInput!) {
+  setAppDeliverySettings(appRef: $appRef, input: $input) {
+    ...AppDeliverySettingsFields
+  }
+}
