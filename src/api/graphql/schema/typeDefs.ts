@@ -10431,8 +10431,10 @@ export const typeDefs = `#graphql
     (WORKER_NOT_FOUND, FORBIDDEN, WORKER_IN_USE), nothing reserved. The real delete still requires
     confirmNoExternalAttribution and may refuse if anything changed
     (hrn:node:hadronmemory.com:specs:cor:agt:020:03). A validated instruction claim is recorded
-    (hrn:node:hadronmemory.com:specs:cor:dmo:050:12); the target is its subject. No census detail,
-    removal plan, attestation bypass or durable lock/lease is returned.
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:12); the target is its subject. If the delete wins
+    the race, the answer is WORKER_NOT_FOUND. WORKER_REFERENCE_NOT_FOUND refuses a claim only when the
+    acting worker or session no longer exists. No census detail, removal plan, attestation bypass or
+    durable lock/lease is returned.
     """
     deleteWorkerPreview(workerRef: ID!, instruction: ActInstructionInput): DeleteWorkerPreview!
 
