@@ -5,9 +5,15 @@ import { cleanDb, createDbAgentImport, createDbAgentOrgGrant, createDbAppMember 
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { withInstallMemory } from './installMemory.js';
+import { ApolloServer } from '@apollo/server';
+import { typeDefs } from './typeDefs.js';
+import { taskWarningsPlugin } from '../taskWarningsPlugin.js';
+import { includePinWarningsFor } from '../../../lib/includes/plainPinWarnings.js';
+import { publishNodeWritten } from '../../../lib/events/nodeWritten.js';
+vi.mock('../../../lib/events/nodeWritten.js', () => ({ publishNodeWritten: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const M = resolvers.Mutation as any;
-beforeEach(() => cleanDb(db));
+beforeEach(async () => { await cleanDb(db); vi.mocked(publishNodeWritten).mockClear(); });
 
 async function fixture(kind: 'ROW' | 'DERIVED' | 'absent', licensed = true, customised = true) {
   const key = generateId().toLowerCase();
@@ -116,3 +122,52 @@ it('physical-row licence behavior remains unchanged on an already customised ins
   const answer = await M.updateNode(null, { input: f.input }, f.context());
   expect(answer.content).toBe('after');
 });
+
+it.each(['ROW', 'DERIVED'] as const)('%s install update publishes once after commit and refuses without publishing', async kind => {
+  const f = await fixture(kind);
+  let checked = false;
+  const wrapped = new Proxy(db, { get(target, key) {
+    if (key === '$transaction') return async (work: any, options: any) => target.$transaction(async tx => {
+      const result = await work(tx);
+      expect(publishNodeWritten).not.toHaveBeenCalled();
+      checked = true;
+      return result;
+    }, options);
+    const value = Reflect.get(target, key); return typeof value === 'function' ? value.bind(target) : value;
+  } });
+  const result = await M.updateNode(null, { input: f.input }, { ...f.context(), db: wrapped });
+  expect(checked).toBe(true);
+  expect(publishNodeWritten).toHaveBeenCalledTimes(1);
+  expect(publishNodeWritten).toHaveBeenCalledWith(expect.objectContaining({ nodeId: result.id, memoryId: f.memoryId }));
+  expect((await db.node.findUniqueOrThrow({ where: { id: result.id } })).content).toBe('after');
+  vi.mocked(publishNodeWritten).mockClear();
+  await refuses(f, 'FORBIDDEN', f.context(f.member.id));
+  expect(publishNodeWritten).not.toHaveBeenCalled();
+});
+
+for (const kind of ['ROW', 'DERIVED'] as const) {
+  it(`${kind} install update keeps warnings on the outer request for the MCP-facing lookup`, async () => {
+    const f = await fixture(kind);
+    await db.node.create({ data: { memoryId: f.memoryId!, loc: 'target', name: 'Target', content: 'target' } });
+    const ctx = f.context();
+    const result = await M.updateNode(null, { input: { ...f.input, content: '{{> target rev=1}}' } }, ctx);
+    expect(await includePinWarningsFor(ctx, result)).toEqual([expect.objectContaining({ code: 'include.pin.unkept' })]);
+  });
+  it(`${kind} install update emits the Apollo warning at updateNode, with memoryId control`, async () => {
+    const f = await fixture(kind);
+    await db.node.create({ data: { memoryId: f.memoryId!, loc: 'target', name: 'Target', content: 'target' } });
+    const server = new ApolloServer<Context>({ typeDefs, resolvers, plugins: [taskWarningsPlugin] });
+    try {
+      const execute = async (input: Record<string, unknown>) => {
+        const result = await server.executeOperation({ query: 'mutation($i:UpdateNodeInput!){updateNode(input:$i){id}}', variables: { i: input } }, { contextValue: f.context() });
+        if (result.body.kind !== 'single') throw new Error('unexpected response');
+        expect(result.body.singleResult.errors).toBeUndefined();
+        return result.body.singleResult.extensions?.warnings;
+      };
+      const text = '{{> target rev=1}}';
+      expect(await execute({ memoryId: f.memoryId, loc: 'source', content: text })).toEqual([expect.objectContaining({ path: 'updateNode', code: 'include.pin.unkept' })]);
+      // Change content again so this is a committed write, not a no-op.
+      expect(await execute({ ...f.input, content: 'install ' + text })).toEqual([expect.objectContaining({ path: 'updateNode', code: 'include.pin.unkept' })]);
+    } finally { await server.stop(); }
+  });
+}

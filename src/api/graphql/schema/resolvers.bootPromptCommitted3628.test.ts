@@ -1,5 +1,7 @@
 /** #3628 item2: the non-null setter answers the snapshot written before commit. */
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { buildSchema, defaultFieldResolver, graphql } from 'graphql';
+import { typeDefs } from './typeDefs.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAgentImport, createDbAgentOrgGrant } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -8,7 +10,31 @@ import { resolveAppInstallation } from '../../../lib/appInstallations.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
-const boundary = { afterCommit: null as null | (() => Promise<void>) };
+const boundary = { afterCommit: null as null | (() => Promise<void>), missSnapshot: false, armMissAfterWrite: false, snapshotSawWrite: false };
+vi.mock('../../../lib/bootPromptPointer.js', async importOriginal => {
+  const real = await importOriginal<typeof import('../../../lib/bootPromptPointer.js')>();
+  return { ...real, setBootPromptPointer: async (...args: Parameters<typeof real.setBootPromptPointer>) => {
+    const result = await real.setBootPromptPointer(...args);
+    if (boundary.armMissAfterWrite) { boundary.armMissAfterWrite = false; boundary.missSnapshot = true; }
+    return result;
+  } };
+});
+vi.mock('../../../lib/appInstallations.js', async importOriginal => {
+  const real = await importOriginal<typeof import('../../../lib/appInstallations.js')>();
+  return { ...real, resolveAppInstallation: async (...args: Parameters<typeof real.resolveAppInstallation>) => {
+    const answer = await real.resolveAppInstallation(...args);
+    if (boundary.missSnapshot) {
+      boundary.missSnapshot = false;
+      const [client, appId, agentId] = args;
+      const key = { appId_agentId: { appId, agentId } };
+      const row = answer?.installationKind === 'ROW' ? await client.appAgent.findUnique({ where: key })
+        : await (client as unknown as Pick<typeof db, 'appAgentCustomization'>).appAgentCustomization.findUnique({ where: key });
+      boundary.snapshotSawWrite = row?.bootPromptNodeId != null;
+      return null;
+    }
+    return answer;
+  } };
+});
 vi.mock('./authorizedTx.js', async importOriginal => {
   const real = await importOriginal<typeof import('./authorizedTx.js')>();
   return { ...real, withAuthorizedTx: async (...args: Parameters<typeof real.withAuthorizedTx>) => {
@@ -21,7 +47,7 @@ vi.mock('./authorizedTx.js', async importOriginal => {
   } };
 });
 beforeEach(() => cleanDb(db));
-afterEach(() => { boundary.afterCommit = null; });
+afterEach(() => { boundary.afterCommit = null; boundary.missSnapshot = false; boundary.armMissAfterWrite = false; boundary.snapshotSawWrite = false; });
 
 async function fixture(kind: 'ROW' | 'DERIVED') {
   const key = generateId().toLowerCase();
@@ -41,7 +67,7 @@ async function fixture(kind: 'ROW' | 'DERIVED') {
     installOfAgentId: agent.id, isInstallMemory: true, name: 'Install', urn: `${org.urn}:install` } });
   const node = await withCompileWrite(() => db.node.create({ data: { memoryId: memory.id, loc: 'boot:compiled',
     name: 'Compiled', content: 'compiled', role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE } }));
-  return { app, agent, parent, node, ctx: { db, userId: user.id, roles: ['READER'] } as Context };
+  return { app, agent, parent, memory, node, ctx: { db, userId: user.id, roles: ['READER'] } as Context };
 }
 
 for (const kind of ['ROW', 'DERIVED'] as const) for (const clear of [false, true]) {
@@ -74,5 +100,45 @@ for (const kind of ['ROW', 'DERIVED'] as const) for (const clear of [false, true
     const answer = await (resolvers.Mutation as any).setAppAgentBootPrompt(null, { ...args, nodeRef: clear ? null : f.node.id }, f.ctx);
     expect(await resolveAppInstallation(db, f.app.id, f.agent.id)).toBeNull();
     expect(answer).toMatchObject({ appId: f.app.id, agentId: f.agent.id, installationKind: kind, bootPromptNodeId: kind === 'ROW' && !clear ? f.node.id : null });
+  });
+}
+
+const schema = buildSchema(typeDefs);
+async function wireSet(f: Awaited<ReturnType<typeof fixture>>, clear = false) {
+  return graphql({ schema, source: `mutation($a:String!,$g:String!,$n:String) {
+    setAppAgentBootPrompt(appRef:$a,agentRef:$g,nodeRef:$n) { __typename agent { id } bootPromptRef }
+  }`, variableValues: { a: f.app.id, g: f.agent.id, n: clear ? null : f.node.id }, contextValue: f.ctx,
+  fieldResolver: (parent, args, context, info) => {
+    const fn = (resolvers as any)[info.parentType.name]?.[info.fieldName];
+    return typeof fn === 'function' ? fn(parent, args, context, info) : defaultFieldResolver(parent, args, context, info);
+  } });
+}
+for (const kind of ['ROW', 'DERIVED'] as const) {
+  it(`${kind} exposes the committed pointer through the actual GraphQL field, not the raw membership slot`, async () => {
+    const f = await fixture(kind);
+    const result = await wireSet(f);
+    expect(result.errors).toBeUndefined();
+    expect(result.data?.setAppAgentBootPrompt).toMatchObject({ __typename: 'AppAgent', agent: { id: f.agent.id } });
+    expect((result.data?.setAppAgentBootPrompt as any).bootPromptRef).toBe(`hrn:node:${f.memory.urn}:${f.node.loc}`);
+    const cleared = await wireSet(f, true);
+    expect(cleared.errors).toBeUndefined();
+    expect((cleared.data?.setAppAgentBootPrompt as any).bootPromptRef).toBeNull();
+  });
+  it(`${kind} keeps the non-null GraphQL payload when a post-commit Agent deletion masks the nullable child`, async () => {
+    const f = await fixture(kind);
+    boundary.afterCommit = async () => { await db.agent.update({ where: { id: f.agent.id }, data: { deletedAt: new Date() } }); };
+    const result = await wireSet(f);
+    expect(result.errors).toBeUndefined();
+    expect(result.data?.setAppAgentBootPrompt).toMatchObject({ __typename: 'AppAgent', agent: null });
+  });
+  it(`${kind} refuses a pre-commit snapshot miss and rolls back the already-written pointer`, async () => {
+    const f = await fixture(kind);
+    boundary.armMissAfterWrite = true;
+    await expect((resolvers.Mutation as any).setAppAgentBootPrompt(null,
+      { appRef: f.app.id, agentRef: f.agent.id, nodeRef: f.node.id }, f.ctx)).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
+    expect(boundary.snapshotSawWrite).toBe(true);
+    const key = { appId_agentId: { appId: f.app.id, agentId: f.agent.id } };
+    if (kind === 'ROW') expect((await db.appAgent.findUniqueOrThrow({ where: key })).bootPromptNodeId).toBeNull();
+    else expect(await db.appAgentCustomization.findUnique({ where: key })).toBeNull();
   });
 }
