@@ -191,7 +191,9 @@ export function mountSigningCeremonyRoutes(app: Express, env: NodeJS.ProcessEnv 
   // X2 (#3698): a limited GET of the page gets a small static HTML answer; the script GET and every POST keep the
   // empty 429 the page script maps to its own message. The page is the same for every id: it names nothing.
   const limited = (req: Request, res: Response) => {
-    if (req.method === 'GET' && !req.path.endsWith('/ceremony.js')) res.status(429).set(PAGE_HEADERS).type('html').send(TOO_MANY_SHELL);
+    // Classified by the matched route, not the spelling of the path: Express also serves /signing/CEREMONY.JS and
+    // /signing/ceremony.js/ from the script route, and those keep the empty 429.
+    if (req.method === 'GET' && req.route?.path === `${SIGNING_CEREMONY_PATH}/:id`) res.status(429).set(PAGE_HEADERS).type('html').send(TOO_MANY_SHELL);
     else res.status(429).end();
   };
   if (!signingSurfacePolicy(env).signing) return;
