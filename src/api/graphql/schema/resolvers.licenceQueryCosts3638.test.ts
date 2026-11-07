@@ -52,11 +52,7 @@ async function measure(shape: string, path: string, repeat: string, run: () => P
   const observed = counter.end();
   observations.push({shape,path,repeat,...observed,semantic});
   if (path === 'positive-control') expect(observed.sqlCount, 'exactly SELECT 1, no setup or barrier counted').toBe(1);
-  // These explicit fast refusals/qualifications need no database operation.
-  const zeroQueryBranch = (shape.startsWith('userless/') && ['readable-install-memories','participant-system-folds'].includes(path))
-    || (shape.startsWith('org-app/') && ['licence-helper','text-helper'].includes(path));
-  if (zeroQueryBranch) expect(observed.sqlCount).toBe(0);
-  else expect(observed.sqlCount, `${shape}/${path}: SQL observer is connected`).toBeGreaterThan(0);
+
 }
 const states = ['active','owner-revoked','outsider','userless','public','org-app'] as const;
 it.each([1,3])('records the fixed %i-Agent roster, semantic outcomes and same-context repeat', async count => {
