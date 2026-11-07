@@ -208,7 +208,7 @@ describe('#3596 sibling-bounded hybrid', () => {
     const flatScans = nodes(plan.Plan).filter(n => /^flat_node(?:_\d+)?$/.test(n.Alias ?? ''));
     expect(flatScans.length).toBeGreaterThan(0);
     for (const scan of flatScans) {
-      expect(scan['Index Name']).toBe('nodes_memory_segment_key_idx');
+      expect(scan['Index Name']).toBe('nodes_memory_segment_key_eligible_idx');
       // Per-loop bounds alone would hide work repeated across every block.
       expect(tupleVisits(scan)).toBeLessThanOrEqual(110_000);
     }
