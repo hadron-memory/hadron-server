@@ -9,7 +9,7 @@
  *   partial index (a predicate the planner cannot prove would silently fall back to the full one).
  */
 import { readFileSync } from 'node:fs';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { Client } from 'pg';
 import { db } from '../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph } from '../test/helpers.js';
@@ -47,6 +47,19 @@ describe('#2836 eligible-row index: lockstep and list drift', () => {
 
 describe('#2836 eligible-row index: both walk legs scan it', () => {
   let memoryId: string;
+
+  // #3650: earlier files in a worker leave the partial index mostly empty pages (cleanDb DELETEs, VACUUM keeps
+  // the pages, and REINDEX keeps dead entries while any transaction is open on the server). Three live rows
+  // under those pages price it above the full index, whatever the query says. The churn makes that history the
+  // fixture's own, so this file cannot pass only because it ran first in its worker.
+  beforeAll(async () => {
+    await cleanDb(db);
+    const churn = ((await createDbOrgAndGraph(db, { orgName: 'seg-2836-churn', graphName: 'seg2836/churn' })).graph as { id: string }).id;
+    await db.$executeRaw`
+      INSERT INTO nodes (id, memory_id, loc, name, updated_at)
+      SELECT 'churn-' || g, ${churn}, 'churn:' || lpad(g::text, 6, '0'), 'n', now() FROM generate_series(1, 20000) g`;
+    await db.$executeRaw`DELETE FROM nodes WHERE memory_id = ${churn}`;
+  });
 
   beforeEach(async () => {
     await cleanDb(db);
