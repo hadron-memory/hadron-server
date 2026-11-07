@@ -137,12 +137,16 @@ describe('#3464 Q4: a soft-deleted org takes its Apps\' shared chats out of the 
     expect((await inventory(member.id, agent.id)).list).toEqual(['chats:live', 'chats:personal', 'chats:target']);
   });
 
+  // `chatHistory` addresses a chat by its loc (`chatLocFilter`), not its node id (Cooper, QA 6712573209).
   it('a direct read of the deleted org\'s chat keeps the existing not-found refusal', async () => {
+    // Positive control: before the delete the same loc reads, so the refusal below is caused by the delete.
+    await expect(Q.chatHistory(null, { chatId: 'chats:target' }, ctx(member.id))).resolves.toBeTruthy();
     await softDeleteTarget();
-    const unknown = await Q.chatHistory(null, { chatId: generateId() }, ctx(member.id)).catch((e: any) => e);
-    const deleted = await Q.chatHistory(null, { chatId: target.root.id }, ctx(member.id)).catch((e: any) => e);
+    const unknown = await Q.chatHistory(null, { chatId: 'chats:no-such-chat' }, ctx(member.id)).catch((e: any) => e);
+    const deleted = await Q.chatHistory(null, { chatId: 'chats:target' }, ctx(member.id)).catch((e: any) => e);
     expect(unknown?.extensions?.code).toBeTruthy();
     expect(deleted?.extensions?.code).toBe(unknown.extensions.code);
+    await expect(Q.chatHistory(null, { chatId: 'chats:live' }, ctx(member.id))).resolves.toBeTruthy();
   });
 
   it('a stranger, in a separate Context, lists nothing before or after the delete', async () => {
