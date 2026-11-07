@@ -178,6 +178,17 @@ describe('#3659 R1: the audience is the write\'s audience', () => {
     expect(await refusal(record(person(ann), v, 1))).toBe('FORBIDDEN');
   });
 
+  it('an anonymous reader of a PUBLIC node gets UNAVAILABLE, the same on a node with rules and one without (LOCAL 6704771677)', async () => {
+    await db.memory.update({ where: { id: memoryId }, data: { visibility: 'PUBLIC' } });
+    const anonymous = { db, roles: [] } as unknown as Context;
+    expect(await Q.node({}, { ref: nodeId }, anonymous)).not.toBeNull();
+    const unavailable = { state: 'UNAVAILABLE', tasks: [] };
+    expect(await read(anonymous)).toEqual(unavailable);
+    await setNode('other', false);
+    expect(await read(anonymous)).toEqual(unavailable);
+    expect(await refusal(record(anonymous, v, 1))).toBe('UNAUTHENTICATED');
+  });
+
   it('impersonation never records, so it reads UNAVAILABLE', async () => {
     expect(await read(person(leo, { impersonation: { orgId } } as Partial<Context>))).toEqual({ state: 'UNAVAILABLE', tasks: [] });
   });

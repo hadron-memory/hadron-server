@@ -12,6 +12,7 @@
  * The author check is deliberately not here. It depends on the revision reported on, not on the
  * node, so the node's author can be listed a task the recorder then refuses for that revision.
  */
+import { GraphQLError } from 'graphql';
 import { judgeValidationTaskSet, validationRules, VALIDATION_TASK_SELECT, type ValidationTaskRow, type ValidationTaskSet } from '../../../lib/contentValidationReport.js';
 import type { Context } from './resolvers.js';
 import { isAuthorizationDenial, isMemoryReadableCached, requireMemoryWriteAccess } from './resolvers.helpers.js';
@@ -27,9 +28,15 @@ async function mayRecordIn(ctx: Context, memoryId: string): Promise<boolean> {
     await requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, memoryId);
     return true;
   } catch (error) {
-    if (!isAuthorizationDenial(error)) throw error;
+    // An anonymous reader of a PUBLIC node is refused as UNAUTHENTICATED, which the shared classifier
+    // does not count as a denial (it decides existence answers elsewhere). Here it is one: R1's UNAVAILABLE.
+    if (!isAuthorizationDenial(error) && !isUnauthenticated(error)) throw error;
     return false;
   }
+}
+
+function isUnauthenticated(error: unknown): boolean {
+  return error instanceof GraphQLError && error.extensions.code === 'UNAUTHENTICATED';
 }
 
 /**

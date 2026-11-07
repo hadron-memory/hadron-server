@@ -77,6 +77,10 @@ describe('#3659 k. the read line, the same on both tools', () => {
     expect(await both(as(leo, { impersonation: { orgId } } as Partial<AuthContext>))).toEqual(onBoth('Validation tasks: unavailable'));
   });
 
+  it('a request whose named session did not bind cannot record, so it reads unavailable (§10 P3-1 6704680712)', async () => {
+    expect(await both(as(leo, { sessionBindingRefused: true } as Partial<AuthContext>))).toEqual(onBoth('Validation tasks: unavailable'));
+  });
+
   it('h. a session-bound App key lists a task in named PUBLIC knowledge, as the recorder accepts it', async () => {
     const { app, appKey } = await createDbAppWithKey(db, 'vtm-app', orgId);
     const agent = await db.agent.create({ data: { id: generateId(), organizationId: orgId, name: 'vtm-agent', urn: 'vtm-org:vtm-agent' } });
