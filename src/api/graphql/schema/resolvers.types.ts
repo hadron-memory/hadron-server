@@ -109,6 +109,7 @@ import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { isSessionLive, loadLastEventBySession, sessionLapsesAt, sessionState, DEFAULT_SESSION_DORMANCY_DAYS } from '../../../lib/sessionActivity.js';
 import type { SessionType } from '../../../generated/prisma/index.js';
 import { hasBoundAppSession, strictSessionMemoryFilter } from '../../../lib/auth/sessionPrivacy.js';
+import { projectSessionEventsFor } from './resolvers.usageProjection.js';
 
 // Request-local only: a session list computes the event memory set once.
 type SessionEventMemorySet = { ids: string[]; delegatedMemoryId: string | null };
@@ -2202,19 +2203,22 @@ export const typeResolvers = {
     servedPrompts: servedPromptOwnerFields.sessionServedPrompts,
     /** #1156 / cor:dmo:070:05: no new read gate; the parent Session is authorized. */
     endReason: sessionEndReason,
-    /** #1645: nested events inherit current session and memory read boundaries. */
+    /**
+     * #1645: nested events inherit current session and memory read boundaries. #3694 / ruling 0249: another
+     * principal's events are volume only, the caller's own session stays whole (projectSessionEventsFor).
+     */
     events: async (s: { id: string }, _: unknown, ctx: Context) => {
       const session = await ctx.db.session.findFirst({
         where: { AND: [{ id: s.id }, await sessionScopeFilter(ctx)] },
-        select: { id: true },
+        select: { id: true, userId: true },
       });
       if (!session) return [];
       const memoryIds = await sessionEventMemoryIds(ctx, s.id);
-      return ctx.db.usageEvent.findMany({
+      return projectSessionEventsFor(ctx, session, await ctx.db.usageEvent.findMany({
         where: { sessionId: s.id, OR: [{ memoryId: null }, { memoryId: { in: memoryIds } }] },
         orderBy: { createdAt: 'desc' },
         take: 50,
-      });
+      }));
     },
     outcomeMeta: (session: { outcomeMeta: unknown }) => deserializeJson(session.outcomeMeta),
     /**

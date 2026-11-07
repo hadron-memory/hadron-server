@@ -1973,6 +1973,14 @@ export const typeDefs = `#graphql
     ended or deleted session.
     """
     lapsesAt: DateTime
+    """
+    The session's latest 50 usage events in memories the caller can read
+    (hrn:node:hadronmemory.com:specs:cor:acl:090:01, ruling 0249). In the caller's own
+    session every event is whole. In any other session, an event another principal
+    recorded shows volume only: userId, organizationId and actionArgs are null,
+    appId is kept only when it is the calling App's own, and sessionId is this
+    session's id. Admins get the same.
+    """
     events: [UsageEvent!]!
     """
     #2047 / hrn:node:hadronmemory.com:specs:cor:agt:040:03: the boot prompt this session was served at its bind. Readable by whoever may read the

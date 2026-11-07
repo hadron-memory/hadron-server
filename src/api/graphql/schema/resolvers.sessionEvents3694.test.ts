@@ -118,6 +118,14 @@ describe('#3694 — the caller\'s own session is own activity and stays whole (r
     expect(byId(rows, mineByApp)).toMatchObject({ userId: null, sessionId: mySession, organizationId: orgId, appId, actionArgs: { q: 'app-query-in-mine' } });
   });
 
+  it('a session with no user is nobody\'s own: an App key with a null userId still gets volume only', async () => {
+    const userless = (await db.session.create({ data: { id: generateId(), userId: null, appId } })).id;
+    const row = generateId();
+    await db.usageEvent.create({ data: { id: row, type: 'read', nodeLoc: 'shared', memoryId: null, sessionId: userless, userId: other.id, organizationId: orgId, appId, actionArgs: { q: 'userless' }, tokensIn: 19 } });
+    const rows = (await events(userless, ctx({ appId, appKeyId, userId: null } as Partial<Context>)))!;
+    expect(byId(rows, row)).toEqual({ ...volumeOnly(row, userless, 19, appId), memoryId: null });
+  });
+
   it('an ADMIN reading my session is not me: the rows are volume only', async () => {
     const rows = (await events(mySession, ctx({ userId: other.id, roles: ['ADMIN'] })))!;
     expect(byId(rows, mineByApp)).toEqual(volumeOnly(mineByApp, mySession, 13));
