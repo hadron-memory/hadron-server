@@ -116,5 +116,14 @@ describe('#3659 k. the read line, the same on both tools', () => {
     expect(lineOf(await server.callToolText('hadron_get_nodes', { refs: [ref] }))).toBeNull();
     // Control: the same node read directly does get a line.
     expect(lineOf(await server.callToolText('hadron_get_node', { urn: 'hrn:node:vtm-org:base-system:guide-node' }))).not.toBeNull();
+    // BLIND 6704825426: one batch naming the node directly AND inherited returns one copy (the first);
+    // the line follows that copy, never the other one's.
+    const direct = 'hrn:node:vtm-org:base-system:guide-node';
+    const inheritedFirst = await server.callToolText('hadron_get_nodes', { refs: [ref, direct] });
+    expect(inheritedFirst.match(/^Inherited from:/gm)?.length).toBe(1);
+    expect(lineOf(inheritedFirst)).toBeNull();
+    const directFirst = await server.callToolText('hadron_get_nodes', { refs: [direct, ref] });
+    expect(directFirst.match(/^Inherited from:/gm)).toBeNull();
+    expect(directFirst.match(/^Validation tasks:/gm)?.length).toBe(1);
   });
 });

@@ -5769,7 +5769,9 @@ export function createMcpServerInstance(
           auth,
           batch: provenance,
           memoryUrnOf,
-          validationTasks: validationTaskSets.get(n.id),
+          // Gated on this copy, as the single read is: the map is keyed by node id, and an inherited
+          // copy carries the base node's id (BLIND 6704825426).
+          validationTasks: inheritedFrom ? undefined : validationTaskSets.get(n.id),
         });
         // Measured on the ANNOTATED block, which is what actually ships: sizing
         // the bare projection and pushing the annotated one lets a block cross
