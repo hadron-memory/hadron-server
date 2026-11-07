@@ -94,6 +94,29 @@ beforeAll(async () => {
 afterAll(async () => { await cleanDb(db); }, 120_000);
 
 describe('#3596 sibling-bounded hybrid', () => {
+  it('a failed generic observation preserves its SQL error and leaves no prepared statement', async () => {
+    await db.$transaction(async tx => {
+      await tx.$executeRawUnsafe("SET LOCAL statement_timeout = '5s'");
+      await tx.$executeRawUnsafe('SAVEPOINT caller_control');
+      let original: unknown;
+      try {
+        await observe(tx, true).$queryRaw`SELECT 1 / ${0}::int AS value`;
+      } catch (error) { original = error; }
+      expect(original).toMatchObject({ meta: { code: '22012' } });
+      // Recover the caller's transaction, then inspect the SAME connection.
+      await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT caller_control');
+      const retained = await tx.$queryRawUnsafe<Array<{ name: string }>>(
+        "SELECT name FROM pg_prepared_statements WHERE name = 'loc3596_probe'");
+      try {
+        expect(retained).toEqual([]);
+        expect(await observe(tx, true).$queryRaw`SELECT ${7}::int AS value`).toEqual([{ value: 7 }]);
+      } finally {
+        // Baseline reproduction owns this name; never leave it in the pool.
+        await tx.$executeRawUnsafe('DEALLOCATE ALL');
+      }
+    }, { timeout: 15_000 });
+  }, 30_000);
+
   it.each(['custom', 'generic'])('100k flat siblings avoid recursive probes and unrelated rows (%s plan)', async mode => {
     const page = mode === 'custom' ? await read('wide') : await db.$transaction(async tx => {
       await tx.$executeRaw`SET LOCAL plan_cache_mode = force_generic_plan`;
