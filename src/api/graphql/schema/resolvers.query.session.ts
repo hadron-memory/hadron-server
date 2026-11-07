@@ -197,6 +197,7 @@ async function usageEventsWhere(
       // exists (PR-986 review, Codex P2). The explicit `loc` argument below is
       // the unambiguous loc-filter path — and the nodeUsage migration target.
       let nodeIdFilter: string | undefined;
+      let nodeMemoryId: string | undefined;
       let nodeLocExact: string | undefined;
       if (loc) {
         // Verbatim — never shape-sniffed, so every loc works, including ones
@@ -223,6 +224,8 @@ async function usageEventsWhere(
           // contextMemoryId at the API boundary (spec 022).
           const { id: resolvedNodeId } = await resolveNodeRefForCaller(ctx, nodeId);
           nodeIdFilter = resolvedNodeId;
+          // The exact node names its memory, so that memory is a READ target like a named memoryId (Dorian P2-2).
+          nodeMemoryId = (await ctx.db.node.findUnique({ where: { id: resolvedNodeId }, select: { memoryId: true } }))?.memoryId;
         } else {
           nodeLocExact = nodeId;
         }
@@ -244,7 +247,15 @@ async function usageEventsWhere(
       // A named memory is checked against that one target (the scoped form of the same predicates), so a
       // gate that admits only a NAMED memory, such as an App key's PUBLIC knowledge read (#3306), applies.
       const resolvedMemoryId = memoryId ? (await resolveMemoryRef(ctx.db, memoryId)).id : undefined;
-      const accessibleMemoryIds = await getAccessibleMemoryIds(ctx, resolvedMemoryId);
+      let accessibleMemoryIds = await getAccessibleMemoryIds(ctx, resolvedMemoryId);
+      // An exact node (no memoryId) adds its own memory through the same scoped check, so a gate that admits only a
+      // NAMED memory (an App key's PUBLIC knowledge read) applies to the node's memory too. The scoped check answers
+      // [] for an unreadable memory, so this never widens past the memory's READ gate, and the nodeId filter below
+      // still bounds the rows to that one node.
+      if (!resolvedMemoryId && nodeMemoryId && accessibleMemoryIds !== null && !accessibleMemoryIds.includes(nodeMemoryId)) {
+        const nodeTarget = await getAccessibleMemoryIds(ctx, nodeMemoryId);
+        accessibleMemoryIds = nodeTarget === null ? null : [...accessibleMemoryIds, ...nodeTarget];
+      }
 
       // Per-memory scoping (issue #249, moved onto the column in #796): filter
       // on `UsageEvent.memoryId` directly. This was a UsageEvent→Node relation
