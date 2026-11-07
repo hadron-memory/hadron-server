@@ -138,6 +138,17 @@ describe('#3694 — the caller\'s own session is own activity and stays whole (r
     expect(byId(rows, mineByApp)).toEqual(volumeOnly(mineByApp, mySession, 13));
   });
 
+  it('impersonation is not ownership: the target\'s own row is volume only, in another session and in their own', async () => {
+    // cor:acl:100:03 / cor:acl:090:02: identity-keyed branches close under impersonation. ctx.userId is the TARGET
+    // (me); the reader is the impersonating actor, so even rows the target recorded are not the reader's activity.
+    const impersonation = { orgId, sessionId: generateId(), actorUserId: other.id, expiresAt: new Date(Date.now() + 60_000) };
+    const c = ctx({ userId: me.id, roles: [], impersonation } as Partial<Context>);
+    const mineInMine = generateId();
+    await db.usageEvent.create({ data: { id: mineInMine, type: 'read', nodeLoc: 'shared', memoryId: mem.id, sessionId: mySession, userId: me.id, organizationId: orgId, appId, actionArgs: { q: 'my-own-in-mine' }, tokensIn: 29 } });
+    expect(byId((await events(theirSession, c))!, theirsByMe)).toEqual(volumeOnly(theirsByMe, theirSession, 3));
+    expect(byId((await events(mySession, c))!, mineInMine)).toEqual(volumeOnly(mineInMine, mySession, 29));
+  });
+
   it('impersonation is not ownership: an impersonated read of the target\'s session masks the App\'s rows', async () => {
     const impersonation = { orgId, sessionId: generateId(), actorUserId: other.id, expiresAt: new Date(Date.now() + 60_000) };
     const rows = (await events(mySession, ctx({ userId: me.id, roles: [], impersonation } as Partial<Context>)))!;
