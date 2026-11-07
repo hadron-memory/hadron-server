@@ -165,10 +165,13 @@ describe('usageEvents memoryId filter', () => {
     expect(result[0].nodeLoc).toBe('beta');
   });
 
-  it('without memoryId, returns global results (unchanged behavior)', async () => {
-    const result = await resolvers.Query.usageEvents(null, {}, ctx());
-    // All 6 events across every memory (alpha×3, beta, gamma, otherMemory alpha).
-    expect(result).toHaveLength(6);
+  it('without any resource, returns the caller\'s own activity, not every memory\'s events (#2817)', async () => {
+    // cor:acl:090:01: naming no resource is own activity. Even an ADMIN gets no global feed;
+    // these fixture events carry no user, so they are nobody's own activity.
+    expect(await resolvers.Query.usageEvents(null, {}, ctx())).toEqual([]);
+    // All 6 events stay reachable through the resource scope of each memory.
+    const perMemory = await Promise.all([memory.id, otherMemory.id].map(memoryId => resolvers.Query.usageEvents(null, { memoryId }, ctx())));
+    expect(perMemory.flat()).toHaveLength(6);
   });
 
   it('rejects an unknown memoryId with MEMORY_NOT_FOUND', async () => {

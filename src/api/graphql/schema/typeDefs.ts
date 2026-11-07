@@ -9051,12 +9051,17 @@ export const typeDefs = `#graphql
     Either bound may be omitted; invalid bounds or since >= until are BAD_USER_INPUT.
     Windowing does not change scope (hrn:node:hadronmemory.com:specs:cor:acl:090:01).
 
-    Access control (#250): results are always scoped to memories the caller
-    may read (org membership / subscriptions / public / owned personal+private
-    per spec 034; ADMIN/OWNER see all EXCEPT another user's personal/private
-    memories and, per spec 047, another user's user-owned memories). A
-    memoryId the caller can't read returns [] (no existence leak); the global
-    form (no memoryId) is bounded to the readable set, never cross-tenant.
+    Scope (#2817, hrn:node:hadronmemory.com:specs:cor:acl:090:01): naming NO resource (no memoryId,
+    nodeId or loc) reads the caller's OWN activity, the events attributed to the calling user in any
+    memory or none. An App key has no own activity and gets an empty list, not an error. Naming a resource
+    reads every principal's events there, gated on READ access to the memory (#250: org membership /
+    subscriptions / public / owned personal+private per spec 034; ADMIN/OWNER see all EXCEPT another
+    user's personal/private memories and, per spec 047, another user's user-owned memories). A
+    memoryId the caller can't read answers MEMORY_NOT_FOUND exactly as a missing one
+    (hrn:node:hadronmemory.com:specs:cor:api:140:03). An empty resource scope never falls back to own
+    activity. An App key's resource read discloses volumes only: userId, sessionId, organizationId and
+    actionArgs are null, and appId is null unless it is the key's own App. limit pages as usageEventsPage does: default 20, at most 200
+    (hrn:node:hadronmemory.com:specs:cor:api:120:04).
 
     memoryId is a memory identifier — accepts the memory's ID or URN. Results
     are scoped on the denormalized UsageEvent.memoryId column (#796), so an
@@ -9083,8 +9088,8 @@ export const typeDefs = `#graphql
     """
     usageEvents(type: String, memoryId: ID, nodeId: ID, loc: String, since: DateTime, until: DateTime, limit: Int, offset: Int): [UsageEvent!]!
     """
-    #2212 - \`usageEvents\` as a page: the same READER gate, the same loc/nodeId rules and the same readable-memory
-    scope, ordered newest first with an id tiebreak, with the windowed total.
+    #2212 - \`usageEvents\` as a page: the same principal gate, the same loc/nodeId rules and the same two scopes
+    (own activity when no resource is named, #2817), ordered newest first with an id tiebreak, with the windowed total.
     since is inclusive and until is exclusive: since <= createdAt < until.
     Bounds must be ISO date-times with Z or an explicit offset.
     Either bound may be omitted; invalid bounds or since >= until are BAD_USER_INPUT.

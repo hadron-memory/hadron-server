@@ -104,6 +104,8 @@ export const PAGE_ARGS_FIELDS: ReadonlySet<string> = new Set([
   // #3222 (#2213 S3): pinned in admissionSpecReferencePages2213S3.test.ts.
   'Query.specBacklinksPage',
   'Query.specUnresolvedReferencesPage',
+  // #2817 (cor:api:120:04): the legacy list clamps through pageArgs too; pinned in resolvers.usageEventsScope2817.test.ts.
+  'Query.usageEvents',
 ]);
 
 /**
