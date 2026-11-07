@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -7,11 +7,12 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { FixtureLifetime } from '../test/fixtureLifetime.js';
 import { closeFixtureResources } from '../test/fixtureResources.js';
-import { withinOneRateWindow } from '../test/rateWindow.js';
+import { FORCED_REMAINING_MS, RATE_WINDOW_TEST_TIMEOUT_MS, untilRateWindowRemaining, withinOneRateWindow } from '../test/rateWindow.js';
 import { createServer } from '../server.js';
 import { signJwt } from '../auth/jwt.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../middleware/auth.js';
 import { generateId } from '../lib/id.js';
+import { DEFAULTS } from '../lib/rateLimit/config.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js',()=>({writeNodeToGit:vi.fn().mockResolvedValue(undefined)}));
 vi.mock('../integrations/github/syncGraphFromGithub.js',()=>({syncGraphFromGithub:vi.fn().mockResolvedValue({error:null})}));
@@ -22,13 +23,28 @@ const resources = {
   get server() { return server; }, set server(value: Server | undefined) { server = value; },
 };
 const closeResources = () => closeFixtureResources(resources);
-const fixtureIt = (name: string, body: () => Promise<void>) => it(name, () => lifetime.run(body));
+const fixtureIt = (name: string, body: () => Promise<void>, timeout?: number) => it(name, () => lifetime.run(body), timeout);
 beforeEach(async()=>{
   // Also joins a prior afterEach whose runner deadline expired.
   await lifetime.drain(closeResources);
   client=undefined;server=undefined;await cleanDb(db);
 });
 afterEach(()=>lifetime.drain(closeResources));
+/** The #1793 empty-scope site; shared with the #3480 forced-phase pin below. */
+async function emptyScopeSite() {
+  const u=await db.user.create({data:{githubId:179395,githubUsername:'rate-empty-scope',roles:['READER']}});
+  server=httpServer(await createServer());await new Promise<void>(r=>server!.listen(0,'127.0.0.1',r));await withinOneRateWindow(db,'FAN_OUT_READS');
+  const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const token=await signJwt({sub:u.id,githubId:u.githubId!,githubUsername:u.githubUsername!,roles:['READER']});
+  await db.rateLimitPolicy.update({where:{fieldClass:'FAN_OUT_READS'},data:{principalLimit:1,enforcementMode:'ENFORCING'}});
+  client=new Client({name:'rate1793-empty',version:'1'});
+  await client.connect(new StreamableHTTPClientTransport(new URL(base+'/mcp'),{requestInit:{headers:{Authorization:`Bearer ${token}`}}}));
+  const read=()=>client!.callTool({name:'hadron_find_nodes',arguments:{query:'*',scope:'global',limit:1}});
+  const first=await read();expect(first.isError).not.toBe(true);
+  expect(JSON.stringify(first.content)).toContain('Found 0 node(s)');
+  expect((await db.rateLimitBucket.findMany({where:{dimension:'principal'}})).map(r=>r.used)).toEqual([1n]);
+  expect(await read()).toMatchObject({isError:true,structuredContent:{error:{code:'RATE_LIMITED',fieldClass:'FAN_OUT_READS'}}});
+}
 fixtureIt('#1793 actual SDK and GraphQL share one search allowance and structured refusal',async()=>{
   const u=await db.user.create({data:{githubId:179399,githubUsername:'rate-wire',roles:['ADMIN']}});
   server=httpServer(await createServer());await new Promise<void>(r=>server!.listen(0,'127.0.0.1',r));await withinOneRateWindow(db,'FAN_OUT_READS');
@@ -45,7 +61,7 @@ fixtureIt('#1793 actual SDK and GraphQL share one search allowance and structure
   const r=await fetch(base+'/graphql',{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({query:'query { findNodes(limit:0) { total } }'})});
   expect(((await r.json()) as { errors: Array<{extensions:Record<string,unknown>}> }).errors[0].extensions).toMatchObject({code:'RATE_LIMITED',fieldClass:'FAN_OUT_READS'});
   expect((await db.rateLimitBucket.findMany({where:{dimension:'principal'}})).map(r=>r.used)).toEqual([1n]);
-});
+}, RATE_WINDOW_TEST_TIMEOUT_MS);
 
 fixtureIt('#1793 GraphQL threads the trusted transport IP into search and consent admission',async()=>{
   const u=await db.user.create({data:{githubId:179398,githubUsername:'rate-http-ip',roles:['ADMIN']}});
@@ -69,7 +85,7 @@ fixtureIt('#1793 GraphQL threads the trusted transport IP into search and consen
   await post(`mutation { beginMergeUsersConsent(source:"${u.id}",target:"${target.id}") { proof expiresAt } }`,'198.51.100.3');
   expect(await db.rateLimitBucket.count({where:{fieldClass:'CREDENTIALS',dimension:'ip'}})).toBe(1);
   expect(await db.userMergeConsent.count()).toBe(1);
-});
+}, RATE_WINDOW_TEST_TIMEOUT_MS);
 
 fixtureIt('#1793 each MCP tool call uses its current request IP, not the initialize address',async()=>{
   const u=await db.user.create({data:{githubId:179396,githubUsername:'rate-mcp-ip',roles:['ADMIN']}});
@@ -91,7 +107,7 @@ fixtureIt('#1793 each MCP tool call uses its current request IP, not the initial
   const buckets=await db.rateLimitBucket.findMany({where:{fieldClass:'FAN_OUT_READS',dimension:'ip'}});
   expect(buckets).toHaveLength(2);expect(buckets.map(r=>r.used)).toEqual([1n,1n]);
   expect((await db.rateLimitBucket.findMany({where:{dimension:'principal'}})).map(r=>r.used)).toEqual([2n]);
-});
+}, RATE_WINDOW_TEST_TIMEOUT_MS);
 
 fixtureIt('#1793 an App key charges principal, actual key and IP identically over GraphQL and MCP',async()=>{
   const suffix=generateId();
@@ -114,22 +130,9 @@ fixtureIt('#1793 an App key charges principal, actual key and IP identically ove
   // windowStart is part of the identity: a failure names the windows instead of showing look-alike rows (#3074).
   expect(after.map(r=>({dimension:r.dimension,subject:r.subject,windowStart:r.windowStart,used:r.used})))
     .toEqual(before.map(r=>({dimension:r.dimension,subject:r.subject,windowStart:r.windowStart,used:2n})));
-});
+}, RATE_WINDOW_TEST_TIMEOUT_MS);
 
-fixtureIt('#1793 an empty named MCP scope is still one admitted search attempt',async()=>{
-  const u=await db.user.create({data:{githubId:179395,githubUsername:'rate-empty-scope',roles:['READER']}});
-  server=httpServer(await createServer());await new Promise<void>(r=>server!.listen(0,'127.0.0.1',r));await withinOneRateWindow(db,'FAN_OUT_READS');
-  const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  const token=await signJwt({sub:u.id,githubId:u.githubId!,githubUsername:u.githubUsername!,roles:['READER']});
-  await db.rateLimitPolicy.update({where:{fieldClass:'FAN_OUT_READS'},data:{principalLimit:1,enforcementMode:'ENFORCING'}});
-  client=new Client({name:'rate1793-empty',version:'1'});
-  await client.connect(new StreamableHTTPClientTransport(new URL(base+'/mcp'),{requestInit:{headers:{Authorization:`Bearer ${token}`}}}));
-  const read=()=>client!.callTool({name:'hadron_find_nodes',arguments:{query:'*',scope:'global',limit:1}});
-  const first=await read();expect(first.isError).not.toBe(true);
-  expect(JSON.stringify(first.content)).toContain('Found 0 node(s)');
-  expect((await db.rateLimitBucket.findMany({where:{dimension:'principal'}})).map(r=>r.used)).toEqual([1n]);
-  expect(await read()).toMatchObject({isError:true,structuredContent:{error:{code:'RATE_LIMITED',fieldClass:'FAN_OUT_READS'}}});
-});
+fixtureIt('#1793 an empty named MCP scope is still one admitted search attempt',emptyScopeSite, RATE_WINDOW_TEST_TIMEOUT_MS);
 
 fixtureIt('#1793 live manifest/key disagreement refuses readiness without restarting healthy liveness',async()=>{
   const {beginRateKeyOverlap}=await import('../lib/rateLimit/lifecycle.js');
@@ -189,4 +192,11 @@ fixtureIt('#1793 transient policy read failure leaves /ready healthy when the DB
     expect(policyRead).toHaveBeenCalledTimes(1);
     expect((await fetch(base+'/health')).status).toBe(200);
   } finally {policyRead.mockRestore();}
+});
+
+/** #3480 red-first, MCP twin: the same forced phase through a `fixtureIt` site and its budget. */
+describe('#3480 forced phase: the boundary-forcing sleep fits the MCP site budget', () => {
+  // The sites never change the class window, so the seeded default is the one in force.
+  beforeEach(() => untilRateWindowRemaining(db, DEFAULTS.FAN_OUT_READS.windowSeconds, FORCED_REMAINING_MS), 130_000);
+  fixtureIt('the empty-scope site passes with under 5 s left in the window', emptyScopeSite, RATE_WINDOW_TEST_TIMEOUT_MS);
 });

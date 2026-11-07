@@ -4,6 +4,14 @@ import type { PrismaClient } from '../generated/prisma/index.js';
 export const RATE_WINDOW_MARGIN_MS = 5_000;
 /** Past the boundary, so the next window has certainly begun on the database clock. */
 const PAST_BOUNDARY_MS = 30;
+/**
+ * #3480. The Vitest budget for every test that calls `withinOneRateWindow`. The helper can
+ * sleep up to `RATE_WINDOW_MARGIN_MS + PAST_BOUNDARY_MS` before the test body runs, so a
+ * test that keeps Vitest's default 5000 ms budget can spend all of it asleep.
+ */
+export const RATE_WINDOW_TEST_TIMEOUT_MS = 5_000;
+/** #3480 forced-phase pins: time left in the window when the pinned site starts (inside the helper's sleep zone). */
+export const FORCED_REMAINING_MS = RATE_WINDOW_MARGIN_MS - 10;
 
 /**
  * Pure rule: how long to sleep so that `marginMs` remains in the fixed window
@@ -37,4 +45,17 @@ export async function untilBeforeRateBoundary(db: PrismaClient, windowSeconds: n
   const windowMs = windowSeconds * 1000;
   const remaining = windowMs - (now.getTime() % windowMs);
   if (remaining > msBefore) await new Promise(r => setTimeout(r, remaining - msBefore));
+}
+
+/**
+ * #3480. Sleeps on the database clock until EXACTLY `msBefore` (within scheduling slack)
+ * remains in the current window. Unlike `untilBeforeRateBoundary`, it never returns early
+ * when less than `msBefore` is already left: it waits into the next window first.
+ */
+export async function untilRateWindowRemaining(db: PrismaClient, windowSeconds: number, msBefore: number): Promise<void> {
+  const [{ now }] = await db.$queryRaw<Array<{ now: Date }>>`SELECT clock_timestamp() AT TIME ZONE 'UTC' AS now`;
+  const windowMs = windowSeconds * 1000;
+  const remaining = windowMs - (now.getTime() % windowMs);
+  const wait = remaining > msBefore ? remaining - msBefore : remaining + windowMs - msBefore;
+  await new Promise(r => setTimeout(r, wait));
 }
