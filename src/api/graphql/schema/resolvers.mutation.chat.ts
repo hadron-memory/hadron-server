@@ -907,6 +907,126 @@ export const chatMutations = {
       });
       const chatRef = { id: chatNode.id, memoryId: chatNode.memoryId, loc: chatNode.loc };
 
+      // #3654: resolved before the first write (was after the user message). Find the agent that owns this chat. Two ways a memory can belong
+      // to an agent: (1) it's a user memory via userMemoryOfAgentId, or
+      // (2) legacy — it's attached as a regular memoryItem with role
+      // read-write. Check the user-memory path first since that's the
+      // canonical portal chat path.
+      const memory = await ctx.db.memory.findUnique({ where: { id: chatNode.memoryId } });
+      if (!memory) throw new Error('Memory not found');
+      let agent = null;
+      if (memory.sharedMemoryOfAgentId || memory.userMemoryOfAgentId) {
+        agent = await ctx.db.agent.findUnique({
+          where: { id: memory.sharedMemoryOfAgentId ?? memory.userMemoryOfAgentId! },
+        });
+      } else {
+        const legacyAgents = await ctx.db.agent.findMany({
+          where: { deletedAt: null, memoryItems: { some: { memoryId: chatNode.memoryId } } },
+        });
+        agent = legacyAgents.find((a) => (a as any).systemMemoryId) ?? null;
+      }
+      // Uninstall leaves the App's shared chat memory in place. Its historical
+      // Agent pointer is not a live grant: after uninstall, participants may
+      // still post to the chat, but its old system prompt and linked knowledge
+      // must not re-enter template retrieval.
+      if (memory.class === 'app' && agent) {
+        const installed = memory.appId && await isAgentInstalledAndLicensed(ctx.db, memory.appId, agent.id);
+        if (!installed) agent = null;
+      }
+      const systemMemoryId = agent ? (agent as any).systemMemoryId as string : null;
+
+      // Pin to version: if the chat was started with a published revision,
+      // read from that snapshot so mid-conversation publishes don't change
+      // the prompts/stages under the user.
+      const startedWithRevision = chatData.startedWithRevision as string | null;
+      const snapshotLookup = systemMemoryId
+        ? await loadPublishedSnapshot(ctx.db, systemMemoryId, startedWithRevision)
+        : null;
+
+      async function findSystemNode(loc: string): Promise<SnapshotNode | null> {
+        if (snapshotLookup) return snapshotLookup(loc);
+        if (!systemMemoryId) return null;
+        const n = await ctx.db.node.findFirst({
+          where: { memoryId: systemMemoryId, loc, deletedAt: null },
+          select: { loc: true, name: true, nodeType: true, description: true, content: true, data: true },
+        });
+        return n as SnapshotNode | null;
+      }
+
+      // #3654: choose the fallback re-route target BEFORE any write, so the gate below sees the stage this turn will serve.
+      // Pure reads; the chat root is updated only after the user message lands (see below).
+      const preConvName = chatData.conversationName as string;
+      const preStageName = chatData.stageName as string;
+      let rerouteTarget: { convName: string; firstStage: string } | null = null;
+      if (systemMemoryId) {
+        const currentConv = await findSystemNode(`conversations:${preConvName}`);
+        const currentConvData = (currentConv?.data as Record<string, unknown>) ?? {};
+        if (currentConvData.isFallback === true) {
+          // Scan all conversations for a goal match
+          const allConvNodes = await (async () => {
+            if (snapshotLookup) {
+              const revNode = await ctx.db.node.findFirst({
+                where: { memoryId: systemMemoryId, loc: startedWithRevision!, deletedAt: null },
+                select: { data: true },
+              });
+              return ((revNode?.data as any)?.snapshot?.nodes as SnapshotNode[] ?? []);
+            }
+            const nodes = await ctx.db.node.findMany({
+              where: { memoryId: systemMemoryId, loc: { startsWith: 'conversations:' }, deletedAt: null },
+              select: { loc: true, name: true, data: true, nodeType: true, description: true, content: true },
+            });
+            return nodes as SnapshotNode[];
+          })().then((nodes) => topLevelConversations(nodes));
+          // #3405: both scans below walk top-level conversations in code-unit `loc` order
+          // (cor:cht:030:02 step 3), so the first match and the default are deterministic.
+
+          const msgLower = userMessage.toLowerCase();
+          let bestMatch: { convName: string; firstStage: string } | null = null;
+
+          for (const conv of allConvNodes) {
+            const cd = (conv.data as Record<string, unknown>) ?? {};
+            if (cd.isSetup === true || cd.isFallback === true) continue;
+            const signals = (cd.goalSignals as string[]) ?? [];
+            const goals = (cd.goalDescriptions as string[]) ?? [];
+            // Simple keyword matching: check if any signal appears in the message
+            const matched = signals.some((s) => msgLower.includes(s.toLowerCase())) ||
+              goals.some((g) => msgLower.includes(g.toLowerCase().split(' ').slice(0, 3).join(' ')));
+            if (matched) {
+              const stages = (cd.stageOrder as string[]) ?? [];
+              if (stages[0]) {
+                bestMatch = { convName: conv.loc.split(':')[1], firstStage: stages[0] };
+                break;
+              }
+            }
+          }
+
+          // If no signal matched but the message is substantive (more than
+          // a greeting), try picking the first non-setup, non-fallback
+          // conversation as a reasonable default.
+          if (!bestMatch && userMessage.trim().split(/\s+/).length >= 4) {
+            for (const conv of allConvNodes) {
+              const cd = (conv.data as Record<string, unknown>) ?? {};
+              if (cd.isSetup === true || cd.isFallback === true) continue;
+              const stages = (cd.stageOrder as string[]) ?? [];
+              if (stages[0]) {
+                bestMatch = { convName: conv.loc.split(':')[1], firstStage: stages[0] };
+                break;
+              }
+            }
+          }
+          rerouteTarget = bestMatch;
+        }
+      }
+
+      // #3654: the serve gate (canChatWithAgent, the licence check, the served boot prompt) runs BEFORE any write of this turn,
+      // so a refused turn persists nothing: no user message, no message-count bump, no re-route, no served-prompt record.
+      // The scope is as built (every turn, every App type; cor:dmo:050:02 is Proposed, not ruled). The stage test includes the
+      // fallback re-route target chosen above, so a turn that only gains its stage by re-routing is gated before the write too.
+      let chatServed: Awaited<ReturnType<typeof serveChatPrompt>> | null = null;
+      if (agent && systemMemoryId && ((preConvName && preStageName) || rerouteTarget)) {
+        chatServed = await serveChatPrompt(ctx.db, agent, memory?.appId ?? null, reportedModel, ctx);
+      }
+
       // Save user message. When the memory is encrypted we need to encrypt
       // the message content AND the chat node's updated `data`.
       // The `data.role` field is what the message-history reader uses to
@@ -973,7 +1093,13 @@ export const chatMutations = {
         ctx.db,
         chatRef,
         memEncInfo,
-        async ({ tx, seq, msgNum }) => {
+        async ({ tx, seq, msgNum, chatData: lockedChatData }) => {
+          // #3654: the stage the turn will serve is judged on the root read under the chat lock. A stage that appeared since the
+          // early read (a concurrent turn moved the chat) is gated HERE, before the insert, so the refusal rolls the whole
+          // transaction back: nothing persists. Only a chat the early gate skipped (no stage then) reaches this.
+          if (!chatServed && agent && systemMemoryId && lockedChatData.conversationName && lockedChatData.stageName) {
+            chatServed = await serveChatPrompt(ctx.db, agent, memory?.appId ?? null, reportedModel, ctx);
+          }
           const msgId = generateId();
           const msgLoc = `${chatId}:messages:${msgNum}-${generateId().slice(-8)}-user`;
           userMsgRef = { id: msgId, loc: msgLoc, memoryId: chatNode.memoryId };
@@ -999,139 +1125,37 @@ export const chatMutations = {
       const convName = chatData.conversationName as string;
       const stageName = chatData.stageName as string;
 
-      // Find the agent that owns this chat. Two ways a memory can belong
-      // to an agent: (1) it's a user memory via userMemoryOfAgentId, or
-      // (2) legacy — it's attached as a regular memoryItem with role
-      // read-write. Check the user-memory path first since that's the
-      // canonical portal chat path.
-      const memory = await ctx.db.memory.findUnique({ where: { id: chatNode.memoryId } });
-      if (!memory) throw new Error('Memory not found');
-      let agent = null;
-      if (memory.sharedMemoryOfAgentId || memory.userMemoryOfAgentId) {
-        agent = await ctx.db.agent.findUnique({
-          where: { id: memory.sharedMemoryOfAgentId ?? memory.userMemoryOfAgentId! },
-        });
-      } else {
-        const legacyAgents = await ctx.db.agent.findMany({
-          where: { deletedAt: null, memoryItems: { some: { memoryId: chatNode.memoryId } } },
-        });
-        agent = legacyAgents.find((a) => (a as any).systemMemoryId) ?? null;
-      }
-      // Uninstall leaves the App's shared chat memory in place. Its historical
-      // Agent pointer is not a live grant: after uninstall, participants may
-      // still post to the chat, but its old system prompt and linked knowledge
-      // must not re-enter template retrieval.
-      if (memory.class === 'app' && agent) {
-        const installed = memory.appId && await isAgentInstalledAndLicensed(ctx.db, memory.appId, agent.id);
-        if (!installed) agent = null;
-      }
-      const systemMemoryId = agent ? (agent as any).systemMemoryId as string : null;
-
-      // Pin to version: if the chat was started with a published revision,
-      // read from that snapshot so mid-conversation publishes don't change
-      // the prompts/stages under the user.
-      const startedWithRevision = chatData.startedWithRevision as string | null;
-      const snapshotLookup = systemMemoryId
-        ? await loadPublishedSnapshot(ctx.db, systemMemoryId, startedWithRevision)
-        : null;
-
-      async function findSystemNode(loc: string): Promise<SnapshotNode | null> {
-        if (snapshotLookup) return snapshotLookup(loc);
-        if (!systemMemoryId) return null;
-        const n = await ctx.db.node.findFirst({
-          where: { memoryId: systemMemoryId, loc, deletedAt: null },
-          select: { loc: true, name: true, nodeType: true, description: true, content: true, data: true },
-        });
-        return n as SnapshotNode | null;
-      }
 
       // If the chat is in a fallback conversation, try to re-route on
       // every turn. The user may have clarified their intent — check if
       // any non-fallback conversation's goalSignals match the message.
       let activeConvName = convName;
       let activeStageName = stageName;
-
-      if (systemMemoryId) {
-        const currentConv = await findSystemNode(`conversations:${convName}`);
-        const currentConvData = (currentConv?.data as Record<string, unknown>) ?? {};
-        if (currentConvData.isFallback === true) {
-          // Scan all conversations for a goal match
-          const allConvNodes = await (async () => {
-            if (snapshotLookup) {
-              const revNode = await ctx.db.node.findFirst({
-                where: { memoryId: systemMemoryId, loc: startedWithRevision!, deletedAt: null },
-                select: { data: true },
-              });
-              return ((revNode?.data as any)?.snapshot?.nodes as SnapshotNode[] ?? []);
-            }
-            const nodes = await ctx.db.node.findMany({
-              where: { memoryId: systemMemoryId, loc: { startsWith: 'conversations:' }, deletedAt: null },
-              select: { loc: true, name: true, data: true, nodeType: true, description: true, content: true },
-            });
-            return nodes as SnapshotNode[];
-          })().then((nodes) => topLevelConversations(nodes));
-          // #3405: both scans below walk top-level conversations in code-unit `loc` order
-          // (cor:cht:030:02 step 3), so the first match and the default are deterministic.
-
-          const msgLower = userMessage.toLowerCase();
-          let bestMatch: { convName: string; firstStage: string } | null = null;
-
-          for (const conv of allConvNodes) {
-            const cd = (conv.data as Record<string, unknown>) ?? {};
-            if (cd.isSetup === true || cd.isFallback === true) continue;
-            const signals = (cd.goalSignals as string[]) ?? [];
-            const goals = (cd.goalDescriptions as string[]) ?? [];
-            // Simple keyword matching: check if any signal appears in the message
-            const matched = signals.some((s) => msgLower.includes(s.toLowerCase())) ||
-              goals.some((g) => msgLower.includes(g.toLowerCase().split(' ').slice(0, 3).join(' ')));
-            if (matched) {
-              const stages = (cd.stageOrder as string[]) ?? [];
-              if (stages[0]) {
-                bestMatch = { convName: conv.loc.split(':')[1], firstStage: stages[0] };
-                break;
-              }
-            }
-          }
-
-          // If no signal matched but the message is substantive (more than
-          // a greeting), try picking the first non-setup, non-fallback
-          // conversation as a reasonable default.
-          if (!bestMatch && userMessage.trim().split(/\s+/).length >= 4) {
-            for (const conv of allConvNodes) {
-              const cd = (conv.data as Record<string, unknown>) ?? {};
-              if (cd.isSetup === true || cd.isFallback === true) continue;
-              const stages = (cd.stageOrder as string[]) ?? [];
-              if (stages[0]) {
-                bestMatch = { convName: conv.loc.split(':')[1], firstStage: stages[0] };
-                break;
-              }
-            }
-          }
-
-          if (bestMatch) {
-            activeConvName = bestMatch.convName;
-            activeStageName = bestMatch.firstStage;
-            // Update the chat node to reflect the re-route. #919: apply the
-            // re-route to a FRESH read under the chat lock — writing the blob
-            // we read before the allocation would roll back a turn that
-            // committed since, `messageCount` included.
-            chatData = await updateChatRootData(ctx.db, chatRef, memEncInfo, (fresh) => {
-              const next = {
-                ...fresh,
-                conversationName: activeConvName,
-                stageName: activeStageName,
-                lastMessageAt: new Date().toISOString(),
-              };
-              appendRouteEntry(next, {
-                conversationUrn: `conversations:${activeConvName}`,
-                nodeUrn: `conversations:${activeConvName}:${activeStageName}`,
-                action: 'ENTER',
-                trigger: { type: 'FALLBACK_REROUTE', content: userMessage.slice(0, 100) },
-              });
-              return next;
-            }, { inTx });
-          }
-        }
+      // #3654: the target was chosen before the first write (so the gate sees it); apply it only when no concurrent turn
+      // already moved the chat off the conversation it was chosen from.
+      if (rerouteTarget && convName === preConvName) {
+        const bestMatch = rerouteTarget;
+        activeConvName = bestMatch.convName;
+        activeStageName = bestMatch.firstStage;
+        // Update the chat node to reflect the re-route. #919: apply the
+        // re-route to a FRESH read under the chat lock — writing the blob
+        // we read before the allocation would roll back a turn that
+        // committed since, `messageCount` included.
+        chatData = await updateChatRootData(ctx.db, chatRef, memEncInfo, (fresh) => {
+          const next = {
+            ...fresh,
+            conversationName: activeConvName,
+            stageName: activeStageName,
+            lastMessageAt: new Date().toISOString(),
+          };
+          appendRouteEntry(next, {
+            conversationUrn: `conversations:${activeConvName}`,
+            nodeUrn: `conversations:${activeConvName}:${activeStageName}`,
+            action: 'ENTER',
+            trigger: { type: 'FALLBACK_REROUTE', content: userMessage.slice(0, 100) },
+          });
+          return next;
+        }, { inTx });
       }
 
       // Load current stage
@@ -1195,7 +1219,7 @@ export const chatMutations = {
         // Re-served on each chat turn so a newly approved revision takes effect.
         if (agent) {
           // #2047: the same refusal as a bind; and a chat records again only when its revision or filled values CHANGED (R37, #3096), never per unchanged message.
-          const chatServed = await serveChatPrompt(ctx.db, agent, memory?.appId ?? null, reportedModel, ctx);
+          chatServed ??= await serveChatPrompt(ctx.db, agent, memory?.appId ?? null, reportedModel, ctx);
           await recordChatServedIfChanged(ctx.db, chatNode.id, agent.id, memory?.appId ?? null, chatServed);
           systemMessage = chatServed.text + '\n\n' + systemMessage;
         }
