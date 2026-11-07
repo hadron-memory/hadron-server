@@ -53,9 +53,9 @@ for (const kind of ['ROW', 'DERIVED'] as const) for (const clear of [false, true
     let committed = false;
     boundary.afterCommit = async () => {
       // DERIVED pointers live in customization, not the virtual membership row.
-      const written = await (kind === 'ROW' ? db.appAgent : db.appAgentCustomization).findUnique({
-        where: { appId_agentId: { appId: f.app.id, agentId: f.agent.id } },
-      });
+      const where = { appId_agentId: { appId: f.app.id, agentId: f.agent.id } };
+      const written = kind === 'ROW' ? await db.appAgent.findUnique({ where })
+        : await db.appAgentCustomization.findUnique({ where });
       expect(written?.bootPromptNodeId).toBe(clear ? null : f.node.id);
       committed = true;
       if (kind === 'ROW') await db.appAgent.delete({ where: { appId_agentId: { appId: f.app.id, agentId: f.agent.id } } });

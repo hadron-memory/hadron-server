@@ -4,6 +4,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAgentImport, createDbAgentOrgGrant, createDbAppMember } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { withInstallMemory } from './installMemory.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const M = resolvers.Mutation as any;
 beforeEach(() => cleanDb(db));
@@ -91,4 +92,27 @@ it('rechecks manager authority under the shared transaction before touching cont
   } });
   await refuses(f, 'FORBIDDEN', { ...f.context(), db: wrapped });
   expect(crossed).toBe(true);
+});
+
+it('withInstallMemory create:false holds the owner-org anchor before any work callback', async () => {
+  const f = await fixture('DERIVED');
+  let entered = false;
+  await withInstallMemory(f.context(), f.input.install, async (_tx, _ctx, memory) => {
+    const rows = await db.$queryRaw<{ got: boolean }[]>`SELECT pg_try_advisory_xact_lock(hashtext('authorization:org'), hashtext(${f.holder.id})) AS got`;
+    expect(rows[0]?.got).toBe(false);
+    expect(memory.id).toBe(f.memoryId);
+    entered = true;
+  }, { create: false });
+  expect(entered).toBe(true);
+});
+it.each(['app-key', 'run'] as const)('%s cannot reach typed install refusals or write through an update', async kind => {
+  const f = await fixture('DERIVED', false, false);
+  const ctx = kind === 'run' ? { ...f.context(), clientId: `run:${generateId()}`, appId: f.app.id }
+    : { db, roles: [], appId: f.app.id, appKeyId: generateId() } as Context;
+  await refuses(f, 'FORBIDDEN', ctx);
+});
+it('physical-row licence behavior remains unchanged on an already customised install', async () => {
+  const f = await fixture('ROW', false);
+  const answer = await M.updateNode(null, { input: f.input }, f.context());
+  expect(answer.content).toBe('after');
 });

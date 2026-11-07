@@ -1981,7 +1981,7 @@ async function updateNodeCore(
   input: UpdateNodeInput,
   ctx: Context,
   op: string,
-  opts?: { ownsKind?: GovernedKind; governedContext?: GovernedContext },
+  opts?: { ownsKind?: GovernedKind; governedContext?: GovernedContext } & Pick<Parameters<typeof writeNodeCore>[3], 'transaction'>,
 ) {
   const { id, memoryId, loc, expectedRevision, ...fields } = input;
   // GraphQL guarantees a signed 32-bit integer on the wire, but resolver tests
@@ -2055,6 +2055,7 @@ async function updateNodeCore(
     authoring: authoringFromRequest(ctx, input.authoredWith),
     targetNodeId,
     guardRevSeq: expectedRevision ?? undefined,
+    transaction: opts?.transaction,
     ownsKind: opts?.ownsKind,
     governedContext: opts?.governedContext,
     concealUnreadable: {
@@ -2541,16 +2542,21 @@ export const nodeMutations = {
     // never moves. All content fields preserve-on-omit.
     updateNode: async (_: unknown, { input }: { input: UpdateNodeArgs }, ctx: Context) => {
       if (input.install) {
-        // #2044: select the node by the App's install memory + loc. Nothing is created
-        // here; a caller who cannot even open the record gets the not-found a missing
-        // customisation gives.
+        // #3628 / ruling0234: shared participant/manager gates and live-install
+        // refusals, with no lazy creation. The update uses the same held transaction.
         const { install, memoryId, id, ...rest } = input;
         if (memoryId != null || id != null) {
           throw new GraphQLError('updateNode: identify the node by `install` + `loc`, not also by `id` or `memoryId`.',
             { extensions: { code: 'BAD_USER_INPUT' } });
         }
-        const memory = await findCallerInstallMemory(ctx, install);
-        return updateNodeCore({ ...rest, memoryId: memory.id } as UpdateNodeInput, ctx, 'updateNode', { governedContext: 'node-write' });
+        const effects: Array<() => void> = [];
+        const written = await withInstallMemory(ctx, install, (tx, txCtx, memory) =>
+          updateNodeCore({ ...rest, memoryId: memory.id } as UpdateNodeInput, txCtx, 'updateNode', {
+            governedContext: 'node-write',
+            transaction: { tx, pooledDb: ctx.db, afterCommit: effect => effects.push(effect) },
+          }), { create: false });
+        for (const effect of effects) effect();
+        return written;
       }
       return updateNodeCore(input as UpdateNodeInput, ctx, 'updateNode', { governedContext: 'node-write' });
     },
