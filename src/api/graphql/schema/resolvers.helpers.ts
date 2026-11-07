@@ -127,6 +127,8 @@ export interface Context {
    * cannot hold the fence, so it fails closed.
    */
   installWritePreflight?: boolean;
+  /** cor:api:190:03: judge install-write audience without fences, only in a READ ONLY plan transaction. */
+  installWritePreview?: boolean;
   /**
    * #1301 — set by an MCP handler that DELEGATES to a GraphQL resolver (e.g.
    * `hadron_update_node_data` → `updateNodeData`), so a refusal addresses the
