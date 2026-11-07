@@ -55,8 +55,9 @@ async function mintKey(appId: string): Promise<string> {
   return k.id;
 }
 
-const ev = (o: { appKeyId?: string | null; userId?: string | null; memoryId?: string | null; createdAt?: Date; id?: string }) => ({
-  id: o.id ?? generateId(), type: 'read', nodeLoc: 'x', memoryId: o.memoryId ?? null,
+const ev = (o: { appKeyId?: string | null; userId?: string | null; memoryId?: string | null; createdAt?: Date; id?: string; nodeId?: string; nodeLoc?: string }) => ({
+  id: o.id ?? generateId(), type: 'read', nodeLoc: o.nodeLoc ?? 'x', memoryId: o.memoryId ?? null,
+  ...(o.nodeId ? { nodeId: o.nodeId } : {}),
   userId: o.userId ?? null, appId: o.appKeyId ? app.id : null, appKeyId: o.appKeyId ?? null,
   ...(o.createdAt ? { createdAt: o.createdAt } : {}),
 });
@@ -206,6 +207,54 @@ describe('#2944 items 2 and 4: whoever manages the App sees K in the memories th
 
   it('without the key filter the manager still reads own activity only (no broad feed restored)', async () => {
     expect(await list({}, asUser(mgr))).toHaveLength(1);
+  });
+});
+
+describe('#2944 blind P3 (#3714): nodeId and loc follow the same key rules as memoryId, on both surfaces', () => {
+  let nodeA: { id: string }, nodeB: { id: string }, kOnA: string, kOnB: string, k2OnA: string;
+  beforeEach(async () => {
+    nodeA = await db.node.create({ data: { id: generateId(), memoryId: memA.id, loc: 'u2944:n', name: 'n', content: 'a' } });
+    nodeB = await db.node.create({ data: { id: generateId(), memoryId: memB.id, loc: 'u2944:n', name: 'n', content: 'b' } });
+    kOnA = generateId(); kOnB = generateId(); k2OnA = generateId();
+    await db.usageEvent.createMany({ data: [
+      ev({ id: kOnA, appKeyId: keyK, memoryId: memA.id, nodeId: nodeA.id, nodeLoc: 'u2944:n' }),
+      ev({ id: kOnB, appKeyId: keyK, memoryId: memB.id, nodeId: nodeB.id, nodeLoc: 'u2944:n' }),
+      ev({ id: k2OnA, appKeyId: keyK2, memoryId: memA.id, nodeId: nodeA.id, nodeLoc: 'u2944:n' }),
+      ev({ userId: mgr.id, memoryId: memA.id, nodeId: nodeA.id, nodeLoc: 'u2944:n' }),
+    ] });
+  });
+
+  it('a manager naming a readable node or a loc gets only K there; the same loc in an unreadable memory stays hidden', async () => {
+    for (const run of [list, async (a: Record<string, unknown>, c: Context) => (await page(a, c)).items]) {
+      expect(ids(await run({ appKey: keyK, nodeId: nodeA.id }, asUser(mgr)))).toEqual([kOnA]);
+      expect(ids(await run({ appKey: keyK, loc: 'u2944:n' }, asUser(mgr)))).toEqual([kOnA]);
+    }
+    expect((await page({ appKey: keyK, loc: 'u2944:n' }, asUser(mgr))).total).toBe(1);
+  });
+
+  it('a manager naming a node in a memory they cannot read: the key filter neither shows K there nor changes the answer', async () => {
+    // Only a key-filtered read is #2944's. The unfiltered answer for an unreadable node versus a missing one is
+    // whatever main gives (reported separately); the key filter must add no row and no new distinction to it.
+    const missing = generateId();
+    const outcome = async (args: Record<string, unknown>, ref: string) => {
+      try { return { rows: ids(await list(args, asUser(mgr))) }; }
+      catch (e) { return { error: (e as Error).message.replace(ref, '<ref>') }; }
+    };
+    for (const ref of [nodeB.id, missing]) {
+      expect(await outcome({ appKey: keyK, nodeId: ref }, ref)).toEqual(await outcome({ nodeId: ref }, ref));
+    }
+    expect(await outcome({ appKey: keyK, nodeId: nodeB.id }, nodeB.id)).toEqual({ rows: [] });
+  });
+
+  it('a refused key answers APP_KEY_NOT_FOUND before any node or loc is resolved, on both surfaces', async () => {
+    const expected = { message: 'App key not found.', extensions: { code: 'APP_KEY_NOT_FOUND', id: keyK } };
+    for (const run of [list, page]) {
+      expect(await unknownKeyAnswer(run({ appKey: keyK, nodeId: nodeA.id }, asUser(plainMember)))).toEqual(expected);
+      expect(await unknownKeyAnswer(run({ appKey: keyK, nodeId: nodeB.id }, asUser(plainMember)))).toEqual(expected);
+      expect(await unknownKeyAnswer(run({ appKey: keyK, nodeId: generateId() }, asUser(plainMember)))).toEqual(expected);
+      expect(await unknownKeyAnswer(run({ appKey: keyK, loc: 'u2944:n' }, asUser(plainMember)))).toEqual(expected);
+      expect(await unknownKeyAnswer(run({ appKey: keyK, nodeId: nodeA.id }, asKey(keyK2)))).toEqual(expected);
+    }
   });
 });
 
