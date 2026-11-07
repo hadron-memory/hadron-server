@@ -5,6 +5,7 @@ import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../../lib/id.js';
 import { approvedMergeProof } from '../../test/mergeConsent.js';
 import { mergeUsers } from './mergeUsers.js';
+import { resolvers } from '../../api/graphql/schema/resolvers.js';
 
 let source: { id: string };
 let target: { id: string };
@@ -61,7 +62,6 @@ describe('mergeUsers: HUMAN authorship stamp (#1336)', () => {
 
 describe('mergeUsers: HUMAN stamp survives the next read (#1336 P2-2)', () => {
   it('a read after the merge neither clears the stamp nor bumps the revision', async () => {
-    const { resolvers } = await import('../../api/graphql/schema/resolvers.js');
     const mine = await humanNode('n:read', source.id);
     await mergeUsers(db, {
       sourceUserId: source.id, targetUserId: target.id, actorUserId: admin.id,
@@ -73,7 +73,6 @@ describe('mergeUsers: HUMAN stamp survives the next read (#1336 P2-2)', () => {
   });
 
   it('does not launder drift: a raw write unreconciled at merge time still reconciles on the next read (§10 P2-3)', async () => {
-    const { resolvers } = await import('../../api/graphql/schema/resolvers.js');
     const mine = await humanNode('n:drift', source.id);
     await db.$executeRaw`UPDATE nodes SET content = 'raw write' WHERE id = ${mine.id}`;
     await mergeUsers(db, {
