@@ -100,14 +100,20 @@ describe('readGrantForUpdate across a real lock wait (a second connection holds 
     const id = await insertGrantUnguarded(w, { activated_at: raw(`${DB_NOW} - interval '1 hour'`), expires_at: raw(`${DB_NOW} + interval '${expiresIn}'`) });
     const holder = new Client({ connectionString: process.env.DATABASE_URL });
     await holder.connect();
+    // A separate autocommit connection observes the wait: each of its statements reads a fresh activity snapshot (cleared explicitly too).
+    const observer = new Client({ connectionString: process.env.DATABASE_URL });
+    await observer.connect();
     try {
+      const holderPid = (await holder.query('SELECT pg_backend_pid() AS pid')).rows[0].pid as number;
       await holder.query('BEGIN');
       await holder.query('SELECT id FROM grants WHERE id = $1 FOR UPDATE', [id]);
       const read = db.$transaction((tx) => readGrantForUpdate(tx, id));
-      // Observe the wait for real: another backend is blocked on the holder's lock.
+      // Observe the wait for real: a backend other than the holder is blocked on exactly the holder's lock.
       const deadline = Date.now() + 5000;
       for (;;) {
-        const r = await holder.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND cardinality(pg_blocking_pids(pid)) > 0`);
+        await observer.query('SELECT pg_stat_clear_snapshot()');
+        const r = await observer.query(
+          `SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND pid <> $1 AND $1 = ANY(pg_blocking_pids(pid))`, [holderPid]);
         if (r.rows[0].n > 0) break;
         if (Date.now() > deadline) throw new Error('the read never blocked on the row lock');
         await new Promise((res) => setTimeout(res, 25));
@@ -116,6 +122,7 @@ describe('readGrantForUpdate across a real lock wait (a second connection holds 
       await holder.query('COMMIT');
       return (await read)!.live;
     } finally {
+      await observer.end();
       await holder.end();
     }
   }
