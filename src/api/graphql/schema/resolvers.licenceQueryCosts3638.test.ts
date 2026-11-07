@@ -3,7 +3,7 @@ import { afterAll, beforeAll, expect, it, vi } from 'vitest';
 import { writeFileSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { PrismaClient, type Agent } from '../../../generated/prisma/index.js';
+import { Prisma, PrismaClient, type Agent } from '../../../generated/prisma/index.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
@@ -101,7 +101,7 @@ it.each([1,3])('records the fixed %i-Agent roster, semantic outcomes and same-co
  expect(observations.length-start, 'complete six-state fixed roster for this Agent count').toBe(108);
  // Output is diagnostic evidence: no approved numeric baseline/ceiling assertions.
  if(process.env.HADRON_3638_ARTIFACT) writeFileSync(process.env.HADRON_3638_ARTIFACT,JSON.stringify({
-  productionSource:execFileSync('git',['merge-base','HEAD','origin/main'],{encoding:'utf8'}).trim(),harnessRevision:execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),postgresVersion,prismaVersion:'6.19.2',harnessSha256:createHash('sha256').update(readFileSync(new URL(import.meta.url))).update(readFileSync(new URL('../../../test/diagnostics/queryCount3638.ts',import.meta.url))).digest('hex'),complete:observations.length===217,expectedObservationCount:217,fixedWorkload:'6 states x 1/3 Agents x 9 paths x first/repeat; synthetic physical installs, one App',
+  productionSource:execFileSync('git',['merge-base','HEAD','origin/main'],{encoding:'utf8'}).trim(),harnessRevision:execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),postgresVersion,prismaVersion:Prisma.prismaVersion.client,nodeVersion:process.version,harnessSha256:createHash('sha256').update(readFileSync(new URL(import.meta.url))).update(readFileSync(new URL('../../../test/diagnostics/queryCount3638.ts',import.meta.url))).digest('hex'),complete:observations.length===217,expectedObservationCount:217,fixedWorkload:'6 states x 1/3 Agents x 9 paths x first/repeat; synthetic physical installs, one App',
   definitions:{sqlCount:'dedicated Prisma query events inside span; setup and named drain barrier excluded; includes transaction statements',tables:'statements mentioning each FROM/JOIN/UPDATE/INTO quoted table; overlaps not additive',repeat:'same explicit Context/client, not HTTP request or pooled-session/cache benchmark'},observations,
  },null,2));
 });
