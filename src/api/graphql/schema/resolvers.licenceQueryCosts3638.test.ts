@@ -3,7 +3,7 @@ import { afterAll, beforeAll, expect, it, vi } from 'vitest';
 import { writeFileSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { PrismaClient } from '../../../generated/prisma/index.js';
+import { PrismaClient, type Agent } from '../../../generated/prisma/index.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
@@ -67,7 +67,7 @@ it.each([1,3])('records the fixed %i-Agent roster, semantic outcomes and same-co
   await db.orgMember.create({data:{organizationId:org.id,userId:owner.id,role:'READER',deletedAt:state==='owner-revoked'?new Date():null}});
   const app = await db.app.create({data:{name:'Measured',urn:state==='org-app'?'diagnostic3638.test:app':'@diagnostic3638-owner:app',...(state==='org-app'?{organizationId:org.id}:{ownerUserId:owner.id})}});
   await db.appMember.createMany({data:[{appId:app.id,userId:owner.id,role:'owner'},{appId:app.id,userId:viewer.id,role:'member'}]});
-  const agents = [];
+  const agents: Agent[] = [];
   for (let i=0;i<count;i++) {
    const memory=await db.memory.create({data:{class:'system',organizationId:org.id,name:`Definition ${i}`,urn:`diagnostic3638.test:definition-${i}`}});
    const agent=await db.agent.create({data:{name:`Agent ${i}`,urn:`diagnostic3638.test:agent-${i}`,organizationId:org.id,visibility:state==='public'?'PUBLIC':'ORGANIZATION',systemMemoryId:memory.id}});
