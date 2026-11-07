@@ -31,7 +31,7 @@ import type { AgentSubscription, Memory, PrismaClient } from '../generated/prism
 import type { AuthContext } from '../middleware/auth.js';
 import { isActiveAgentSubscription } from '../lib/agentSubscription.js';
 import { isUserOwnedTeamSpaceMember, participantAppIds, userOwnedTeamSpaceIdsForMember } from '../lib/auth/appParticipation.js';
-import { activeAgentInstallLicenseIds, isAgentInstalled, isGrantedAgentMemoryRole } from '../lib/appAgent.js';
+import { activeAgentInstallLicenseIds, activeAgentInstallLicenseIdsAcross, isAgentInstalled, isGrantedAgentMemoryRole } from '../lib/appAgent.js';
 import { isAppSelectableBy, resolveUserApps } from '../auth/user-app-resolution.js';
 import { getOrgReadableMemoryIds } from '../lib/auth/orgReadableMemory.js';
 import { getOrgWritableMemoryIds } from '../lib/auth/orgWritableMemory.js';
@@ -664,9 +664,11 @@ async function installedSystemMemoryFolds(
   const checks = byApp.flatMap(({ app, agents }) => agents.map(agent => ({ app, agentId: agent.id, userId })));
   const texts = await personalOrgAgentTextBatch(db, checks);
   const textAdmitted = new Set(checks.flatMap((check, i) => texts[i] ? [`${check.app.id}:${check.agentId}`] : []));
-  const perApp = await Promise.all(byApp.map(async ({ app, agents }) => {
-    const licensed = await activeAgentInstallLicenseIds(db, app, agents);
-    return { appId: app.id, agents: agents.filter((a) => licensed.has(a.id) && textAdmitted.has(`${app.id}:${a.id}`) && a.systemMemoryId !== null) };
+  // #3655 (Dorian P2-1 on #3681): and one licence batch across every App, not activeAgentInstallLicenseIds per App.
+  const licensedByApp = await activeAgentInstallLicenseIdsAcross(db, byApp);
+  const perApp = byApp.map(({ app, agents }, i) => ({
+    appId: app.id,
+    agents: agents.filter((a) => licensedByApp[i].has(a.id) && textAdmitted.has(`${app.id}:${a.id}`) && a.systemMemoryId !== null),
   }));
   const wanted = [...new Set(perApp.flatMap((p) => p.agents.map((a) => a.systemMemoryId!)))];
   if (wanted.length === 0) return [];

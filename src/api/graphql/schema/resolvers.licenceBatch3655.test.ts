@@ -15,7 +15,7 @@ import { generateId } from '../../../lib/id.js';
 import type { Context } from './resolvers.js';
 import { getAppMemoryCandidates, participantSystemMemoryFolds } from '../../../mcp/access-control.js';
 import { readableInstallMemoryIds } from '../../../lib/auth/installMemory.js';
-import { activeAppInstallLicenseIdsForAgent } from '../../../lib/appAgent.js';
+import { activeAgentInstallLicenseIds, activeAgentInstallLicenseIdsAcross, activeAppInstallLicenseIdsForAgent } from '../../../lib/appAgent.js';
 import { resolveServedBootPrompt, type PageServedMemo } from '../../../lib/bootPrompt/serve.js';
 import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 import {
@@ -229,6 +229,24 @@ describe('#3655 differential: the batch answers exactly what the single helpers 
     // The roster must exercise both answers, or equality proves nothing.
     expect(new Set(licenceSingle)).toEqual(new Set([true, false]));
     expect(new Set(textSingle)).toEqual(new Set([true, false]));
+    // Dorian P2-1 on #3681: the fold now licenses every App in one batch. Hold it to the single-App helper over the
+    // same roster plus org-owned Apps (same-org, granted, revoked grant, deleted org) and an empty group.
+    const grantee = (await db.organization.create({ data: { id: generateId(), name: 'Grantee', urn: 'grantee3655d.test' } })).id;
+    await db.agentOrgGrant.createMany({ data: [
+      { orgId: grantee, agentId: agents.org, activatedAt: new Date('2020-01-01') },
+      { orgId: grantee, agentId: agents.expired, activatedAt: new Date('2020-01-01'), revokedAt: new Date() },
+    ] });
+    const shapes = await db.agent.findMany({ where: { id: { in: Object.values(agents) } }, select: { id: true, organizationId: true, ownerUserId: true } });
+    const roster = [...shapes, { id: agents.missing, organizationId: org, ownerUserId: null }];
+    const groups = [
+      ...apps,
+      { organizationId: grantee, ownerUserId: null },
+      { organizationId: goneOrg, ownerUserId: null },
+    ].map(app => ({ app, agents: roster })).concat([{ app: apps[0], agents: [] }]);
+    const across = (await activeAgentInstallLicenseIdsAcross(db, groups)).map(set => [...set].sort());
+    const perApp = await Promise.all(groups.map(async g => [...await activeAgentInstallLicenseIds(db, g.app, g.agents)].sort()));
+    expect(across).toEqual(perApp);
+    expect(perApp.some(ids => ids.length > 0) && perApp.some((ids, i) => ids.length < groups[i].agents.length)).toBe(true);
     expect(await personalOrgAgentLicenseBatch(db, [])).toEqual([]);
   });
 });
