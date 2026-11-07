@@ -26,6 +26,7 @@ import { passkeyRpId, signingCeremonyOrigins, SigningNotConfiguredError } from '
 import { SIGNING_CEREMONY_PATH } from '../lib/signing/ceremonyUrl.js';
 import { signingSurfacePolicy } from '../lib/signing/surface.js';
 import { SigningRefusal } from '../lib/signing/requests.js';
+import { ceremonyShell } from './ceremonyShell.js';
 import {
   CeremonyRefused, completeSigning, currentSigningChallenge, declineSigning, openProofCeremony, proveForSigning,
   SIGN_TTL_SECONDS,
@@ -71,14 +72,16 @@ const PAGE_HEADERS: Record<string, string> = {
 };
 
 /** The static shell. No request, node or person appears in it: it is byte-identical for every id. */
-const SHELL = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>Review and sign</title>
-<style>body{font-family:system-ui,sans-serif;margin:0}main{max-width:44rem;margin:2rem auto;padding:0 1rem}button{font:inherit;min-height:2.75rem;min-width:2.75rem;padding:.5rem 1rem;margin:.25rem .5rem .25rem 0}
-pre{white-space:pre-wrap;overflow-wrap:anywhere;background:rgba(127,127,127,.12);padding:.75rem;border-radius:.4rem}mark{background:rgba(255,200,0,.3);color:inherit;padding:0 .15rem}
-.diff-add{background:rgba(0,160,0,.18)}.diff-del{background:rgba(220,0,0,.18);text-decoration:line-through}:focus-visible{outline:3px solid #2563eb;outline-offset:2px}</style></head>
-<body><main><h1 id="title" tabindex="-1">Review and sign</h1>
+const SHELL = ceremonyShell({
+  title: 'Review and sign', wide: true, scriptSrc: `${SIGNING_CEREMONY_PATH}/ceremony.js`,
+  extraCss: 'pre{white-space:pre-wrap;overflow-wrap:anywhere;background:rgba(127,127,127,.12);padding:.75rem;border-radius:.4rem}mark{background:rgba(255,200,0,.3);color:inherit;padding:0 .15rem}.diff-add{background:rgba(0,160,0,.18)}.diff-del{background:rgba(220,0,0,.18);text-decoration:line-through}',
+  body: `<h1 id="title" tabindex="-1">Review and sign</h1>
 <noscript><p>This page needs JavaScript to ask for your passkey. Turn it on and reload.</p></noscript>
 <div id="start"><p>To see what you have been asked to sign, confirm it is you with your passkey. Nothing is shown until you do.</p><button id="go" type="button">Use passkey</button></div>
-<div id="view" hidden></div><p id="msg" role="status" aria-live="polite"></p></main><script src="${SIGNING_CEREMONY_PATH}/ceremony.js"></script></body></html>`;
+<div id="view" hidden></div><p id="msg" role="status" aria-live="polite"></p>`,
+});
+
+const TOO_MANY_SHELL = ceremonyShell({ title: 'Too many requests', body: '<p>Too many requests. Wait a minute, then reload this page.</p>' });
 
 /**
  * The page's script. It builds every node with textContent, never HTML, so nothing from a node can run. It holds no
@@ -185,16 +188,22 @@ go.addEventListener('click',async()=>{
 
 /** Mount the signing ceremony when the signing switch is on; the switch is read once, at mount. */
 export function mountSigningCeremonyRoutes(app: Express, env: NodeJS.ProcessEnv = process.env): void {
+  // X2 (#3698): a limited GET of the page gets a small static HTML answer; the script GET and every POST keep the
+  // empty 429 the page script maps to its own message. The page is the same for every id: it names nothing.
+  const limited = (req: Request, res: Response) => {
+    if (req.method === 'GET' && !req.path.endsWith('/ceremony.js')) res.status(429).set(PAGE_HEADERS).type('html').send(TOO_MANY_SHELL);
+    else res.status(429).end();
+  };
   if (!signingSurfacePolicy(env).signing) return;
   const limiter = rateLimit({
     windowMs: 60_000, limit: SIGNING_CEREMONY_RATE_LIMIT_PER_MINUTE, standardHeaders: false, legacyHeaders: false,
-    handler: (_req, res) => { res.status(429).end(); },
+    handler: limited,
   });
   const perRequest = rateLimit({
     windowMs: 15 * 60_000, limit: SIGNING_CEREMONY_PER_REQUEST_LIMIT, standardHeaders: false, legacyHeaders: false,
     keyGenerator: (req) => `signing:${req.ip ?? 'unknown'}:${sha256Hex(String(req.params.id))}`,
     validate: { keyGeneratorIpFallback: false },
-    handler: (_req, res) => { res.status(429).end(); },
+    handler: limited,
   });
   const body = express.json({ limit: '16kb' });
   const cookieOptions = (req: Request) => ({
