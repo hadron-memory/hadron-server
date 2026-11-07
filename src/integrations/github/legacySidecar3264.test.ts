@@ -36,6 +36,8 @@ const node = (loc: string, id = `id-${loc}`): NodeForGit => ({
 } as unknown as NodeForGit);
 const put = (rel: string, body: string) => { mkdirSync(dirname(join(repo, rel)), { recursive: true }); writeFileSync(join(repo, rel), body); };
 const seedMd = (loc: string, id: string) => put(nodeFilePath(repo, loc).slice(repo.length + 1), `---\nid: ${id}\nname: x\n---\n\nbody\n`);
+/** Assert presence first: a deleted file must fail as an assertion, not as an ENOENT from the read. */
+const kept = (path: string, body: string) => { expect(existsSync(path)).toBe(true); expect(readFileSync(path, 'utf8')).toBe(body); };
 const repoIntact = () => {
   expect(existsSync(join(repo, '.git'))).toBe(true);
   expect(git(repo, 'rev-parse', 'HEAD')).toBe(unpublished);
@@ -61,22 +63,22 @@ describe('#3264 reserved sidecar names are never touched', () => {
     writeNodeFile(repo, node(loc), undefined, false);
     seedMd(loc, 'n1');
     removeNodeFile(repo, loc, 'n1');
-    expect(readFileSync(join(repo, `.${loc}/edges.yaml`), 'utf8')).toBe('- rel: x\n');
-    expect(readFileSync(join(repo, `.${loc}/keep.txt`), 'utf8')).toBe('keep');
+    kept(join(repo, `.${loc}/edges.yaml`), '- rel: x\n');
+    kept(join(repo, `.${loc}/keep.txt`), 'keep');
     repoIntact();
   });
   it.each(['.git', '.node', '.hadron', '.github', '.GIT', '.Github'])('a/%s holding ONLY edges.yaml is untouched (write and remove)', (dir) => {
-    const loc = `a:${dir.slice(1).toLowerCase()}`;
+    const loc = `a:${dir.slice(1)}`; // loc atom keeps the case, so the sidecar IS `a/${dir}`
     put(`a/${dir}/edges.yaml`, '- rel: x\n');
     writeNodeFile(repo, node(loc), undefined, false);
     seedMd(loc, 'n1');
     removeNodeFile(repo, loc, 'n1');
-    expect(readFileSync(join(repo, `a/${dir}/edges.yaml`), 'utf8')).toBe('- rel: x\n');
+    kept(join(repo, `a/${dir}/edges.yaml`), '- rel: x\n');
   });
   it('a:git leaves a/.git (nested repository metadata) intact', () => {
     put('a/.git/HEAD', 'ref: refs/heads/main');
     writeNodeFile(repo, node('a:git'), undefined, false);
-    expect(readFileSync(join(repo, 'a/.git/HEAD'), 'utf8')).toBe('ref: refs/heads/main');
+    kept(join(repo, 'a/.git/HEAD'), 'ref: refs/heads/main');
   });
 });
 
@@ -97,28 +99,40 @@ describe('#3264 cleanup removes exactly edges.yaml', () => {
       if (route === 'write') writeNodeFile(repo, node('a:b'), undefined, false);
       else { seedMd('a:b', 'n1'); removeNodeFile(repo, 'a:b', 'n1'); }
       expect(existsSync(join(repo, 'a/.b/edges.yaml'))).toBe(false);
-      expect(readFileSync(join(repo, 'a/.b/keep.txt'), 'utf8')).toBe('keep');
+      kept(join(repo, 'a/.b/keep.txt'), 'keep');
       rmSync(join(repo, 'a/.b'), { recursive: true });
     }
   });
   it('edges.yaml that is a directory is untouched', () => {
     put('a/.b/edges.yaml/inner.txt', 'inner');
-    writeNodeFile(repo, node('a:b'), undefined, false);
-    expect(readFileSync(join(repo, 'a/.b/edges.yaml/inner.txt'), 'utf8')).toBe('inner');
+    expect(() => writeNodeFile(repo, node('a:b'), undefined, false)).not.toThrow();
+    kept(join(repo, 'a/.b/edges.yaml/inner.txt'), 'inner');
   });
   it('edges.yaml that is a symlink to a file outside the sidecar: link and target stay', () => {
     const outside = join(repo, 'outside.txt');
     writeFileSync(outside, 'target');
     mkdirSync(join(repo, 'a/.b'), { recursive: true });
     symlinkSync(outside, join(repo, 'a/.b/edges.yaml'));
-    writeNodeFile(repo, node('a:b'), undefined, false);
+    expect(() => writeNodeFile(repo, node('a:b'), undefined, false)).not.toThrow();
+    expect(existsSync(join(repo, 'a/.b/edges.yaml'))).toBe(true);
     expect(lstatSync(join(repo, 'a/.b/edges.yaml')).isSymbolicLink()).toBe(true);
     expect(readFileSync(outside, 'utf8')).toBe('target');
   });
   it('a sidecar that is a gitlink-style FILE does nothing and the write proceeds', () => {
     put('a/.b', 'gitdir: ../x');
     expect(writeNodeFile(repo, node('a:b'), undefined, false)).toBe(true);
-    expect(readFileSync(join(repo, 'a/.b'), 'utf8')).toBe('gitdir: ../x');
+    kept(join(repo, 'a/.b'), 'gitdir: ../x');
+  });
+  it('a sidecar that is a SYMLINK to a directory: the target edges.yaml stays', () => {
+    const target = mkdtempSync(join(tmpdir(), 'sidecar3264-target-'));
+    try {
+      writeFileSync(join(target, 'edges.yaml'), '- rel: x\n');
+      mkdirSync(join(repo, 'a'), { recursive: true });
+      symlinkSync(target, join(repo, 'a/.b'));
+      expect(() => writeNodeFile(repo, node('a:b'), undefined, false)).not.toThrow();
+      kept(join(target, 'edges.yaml'), '- rel: x\n');
+      expect(lstatSync(join(repo, 'a/.b')).isSymbolicLink()).toBe(true);
+    } finally { rmSync(target, { recursive: true, force: true }); }
   });
   it('no sidecar at all is a no-op', () => {
     expect(writeNodeFile(repo, node('a:b'), undefined, false)).toBe(true);
