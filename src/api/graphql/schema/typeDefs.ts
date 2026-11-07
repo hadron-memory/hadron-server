@@ -8273,9 +8273,10 @@ export const typeDefs = `#graphql
 
   """
   #1448 — the mint report. blockers must all be gone for a mint to succeed.
-  staleAbstracts are listed separately; they block only when
-  staleAbstractsBlock is true (once abstract re-affirmation is saved and
-  deployed, server#1408). openQuestions never block.
+  staleAbstracts are listed separately, over every node in this mint's scope
+  (a minted, unchanged node is not counted; spec validate audits the whole
+  memory); they block only when staleAbstractsBlock is true. openQuestions
+  never block.
   """
   type SpecCorpusMintReport {
     memoryId: ID!

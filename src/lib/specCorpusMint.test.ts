@@ -369,6 +369,31 @@ describe('mintSpecCorpus: report-only items (#1448)', () => {
   });
 });
 
+describe('mintSpecCorpus: stale abstracts cover every node in mint scope (#3436, ruling 0215)', () => {
+  const stale = { abstract: 'Summary of an older body.', abstractOriginHash: computeContentHash('Old body.') };
+  const plain = (loc: string, extra: Record<string, unknown> = {}) => db.node.create({
+    data: { id: generateId(), memoryId: draft.id, loc, name: loc, content: 'New body.', nodeType: 'info', tags: ['facts'], ...extra },
+  });
+
+  it('counts a stale abstract on a node with no spec marker and a non-citation loc (variant B)', async () => {
+    await plain('office-facts', stale);
+    await plain('fresh-facts', { abstract: 'Summary of the current body.', abstractOriginHash: computeContentHash('New body.') });
+    const report = await mint(true);
+    expect(report.staleAbstracts.map((s) => s.loc)).toEqual(['office-facts']);
+    // Report-only: it never blocks (cor:dmo:120:07), and the open-question scan keeps its spec-shaped scope.
+    expect(report.blockers).toEqual([]);
+    expect((await mint()).minted).toBe(true);
+  });
+
+  it('still counts the spec-shaped stale node, and a minted unchanged node leaves the count (ruling 0215)', async () => {
+    await spec('pas:090', 'New body.', stale);
+    await plain('office-facts', stale);
+    expect((await mint(true)).staleAbstracts.map((s) => s.loc).sort()).toEqual(['office-facts', 'pas:090']);
+    await mint();
+    expect((await mint(true)).staleAbstracts).toEqual([]);
+  });
+});
+
 describe('mintSpecCorpus: who may mint (#1448)', () => {
   it('refuses a reader and conceals the corpus from an outsider, minting nothing', async () => {
     expect(await codeOf(mint(false, reader.id))).not.toBe('NO_ERROR');
