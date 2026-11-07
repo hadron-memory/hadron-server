@@ -1,3 +1,4 @@
+import { currentAgentOrgMember } from '../../../lib/auth/personalOrgAgentInstall.js';
 import { requireOrgRole, isAppParticipant } from '../../../lib/auth/appParticipantRead.js';
 import { lockAppInstallation, readInstallBootPrompt, lockAppAgentCustomization, resolveAppInstallation } from '../../../lib/appInstallations.js';
 import type { AuthoredWith, TaskReadGate } from '../../../lib/authoringAttestation.js';
@@ -1506,6 +1507,23 @@ export async function requireReadableAgent(
     if (!(e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN')) throw e;
     throw new AgentNotFoundError(ref);
   }
+}
+
+/** #1148: one widened personal-install predicate; read concealment still comes from the canonical Agent gate. */
+export async function requirePersonalAppAgentInstall(
+  ctx: Context,
+  agent: Pick<Agent, 'visibility' | 'deletedAt' | 'organizationId' | 'ownerUserId'> | null,
+  ref: string,
+  ownerUserId: string | null,
+): Promise<void> {
+  await requireReadableAgent(ctx, agent, ref);
+  if (ownerUserId && agent && (agent.visibility === 'PUBLIC'
+    || (agent.ownerUserId !== null && agent.ownerUserId === ownerUserId)
+    || (agent.visibility === 'ORGANIZATION' && agent.organizationId
+      && await currentAgentOrgMember(ctx.db, ownerUserId, agent.organizationId)))) return;
+  throw new GraphQLError('A personal App may install only an Agent its owner qualifies for.', {
+    extensions: { code: 'ORGANIZATION_MISMATCH' },
+  });
 }
 
 /**
@@ -3185,18 +3203,7 @@ export async function installAgentIntoAppCore(
   // (leaking its definition via the returned AGENT_INCLUDE). Branch on the
   // App's ownership class instead, mirroring createApp's personal path.
   if (app.organizationId === null) {
-    // spec 047 personal install: no org ⇒ no AgentOrgGrant. A user-owned App
-    // may install ONLY a PUBLIC (marketplace) agent or its OWNER's own agent —
-    // never another user's or another org's private agent.
-    const isOwnAgent = agent.ownerUserId !== null && agent.ownerUserId === app.ownerUserId;
-    if (agent.visibility !== 'PUBLIC' && !isOwnAgent) {
-      // #1946: ORGANIZATION_MISMATCH (and its agentId) only for an Agent the
-      // caller can read; one they can't answers exactly as an absent one.
-      await requireReadableAgent(ctx, agent, args.agentRef);
-      throw new GraphQLError('A personal App may only install a PUBLIC agent or your own personal agent.', {
-        extensions: { code: 'ORGANIZATION_MISMATCH', appId: resolvedAppId, agentId: resolvedAgentId },
-      });
-    }
+    await requirePersonalAppAgentInstall(ctx,agent,args.agentRef,app.ownerUserId);
   }
   // Best-effort pre-check for the typed `DUPLICATE_APP_AGENT` error.
   // The race-safe fallback lives inside the transaction below — under
@@ -3219,6 +3226,7 @@ export async function installAgentIntoAppCore(
       { kind: 'app', id: resolvedAppId },
       { kind: 'agent', id: resolvedAgentId },
       ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+      ...(!app.organizationId && agent.organizationId ? [{kind:'org' as const,id:agent.organizationId}] : []),
       ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
     ],
     async (txCtx) => {
@@ -3237,12 +3245,7 @@ export async function installAgentIntoAppCore(
       await requireOwnerOrOrgRole(txCtx, currentApp, 'CONTRIBUTOR');
       const ownAgent = currentAgent.ownerUserId !== null && currentAgent.ownerUserId === currentApp.ownerUserId;
       if (currentApp.organizationId === null) {
-        if (currentAgent.visibility !== 'PUBLIC' && !ownAgent) {
-          await requireReadableAgent(txCtx, currentAgent, args.agentRef); // #1946, as above
-          throw new GraphQLError('A personal App may only install a PUBLIC agent or your own personal agent.', {
-            extensions: { code: 'ORGANIZATION_MISMATCH', appId: resolvedAppId, agentId: resolvedAgentId },
-          });
-        }
+        await requirePersonalAppAgentInstall(txCtx,currentAgent,args.agentRef,currentApp.ownerUserId);
       } else {
         // Check the grant while the org/Agent anchors are held. A concurrent
         // revoke must not race a cross-org installation past this decision.

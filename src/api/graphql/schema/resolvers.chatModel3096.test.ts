@@ -186,7 +186,7 @@ describe('#3096 client-reported chat model', () => {
     await compiled('Model={{session.llmModel}}.');
     const start = await M.startChat({}, { agentId: agent.id }, ctx());
     const chat = await chatNodeByLocOrThrow(db, start.chatId);
-    const base = await serveChatPrompt(db, agent, app.id);
+    const base = await serveChatPrompt(db, agent, app.id, null, {db,userId:user.id,roles:['ADMIN']});
     const one = { ...base, variables: { ...base.variables, 'session.llmModel': 'X', 'session.llmModel.source': 'client-reported' } };
     const two = { ...base, variables: { ...base.variables, 'session.llmModel': 'Y', 'session.llmModel.source': 'client-reported' } };
     await Promise.all([recordChatServedIfChanged(db, chat.id, agent.id, app.id, one), recordChatServedIfChanged(db, chat.id, agent.id, app.id, two)]);
