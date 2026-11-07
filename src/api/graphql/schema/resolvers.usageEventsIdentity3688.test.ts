@@ -8,6 +8,8 @@
  *      Admins and owners get the same.
  *   2. Own-activity rows (no resource named) are unchanged; the caller's own rows keep their identity.
  *   3. MEMORY_NOT_FOUND is unchanged.
+ *   4. The #2817 pin that kept a user principal's resource read raw flips to the masked expectation
+ *      (resolvers.usageEventsScope2817.test.ts).
  *   5. A READER-member pin (the issue's repro) and a nodeUsage pin, both through the real schema.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -17,6 +19,7 @@ import { generateId } from '../../../lib/id.js';
 import { ApolloServer } from '@apollo/server';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+import { projectUsageRowsFor, USAGE_VOLUME_FIELDS, USAGE_IDENTITY_FIELDS } from './resolvers.usageProjection.js';
 
 const IDENTITY = 'id userId sessionId appId organizationId actionArgs tokensIn nodeLoc memoryId';
 let me: { id: string };
@@ -80,6 +83,7 @@ describe('#3688 — a named memory discloses other principals\' volumes only, th
 
   it('the caller\'s own row inside the named memory keeps its identity: it is the caller\'s own activity', async () => {
     const res = await gql(`query($m: ID!){ a: usageEvents(memoryId: $m){ ${IDENTITY} } b: usageEventsPage(memoryId: $m){ items { ${IDENTITY} } } }`, { m: mem.id }, ctx({ userId: me.id, roles: ['READER'] }));
+    expect(res.errors).toBeUndefined();
     const data = res.data as any;
     expect(byId(data.a, mine)).toEqual(raw());
     expect(byId(data.b.items, mine)).toEqual(raw());
@@ -87,6 +91,7 @@ describe('#3688 — a named memory discloses other principals\' volumes only, th
 
   it('own activity (no resource named) is unchanged: the caller\'s rows, raw', async () => {
     const res = await gql(`{ a: usageEvents { ${IDENTITY} } b: usageEventsPage { items { ${IDENTITY} } } }`, {}, ctx({ userId: me.id, roles: ['READER'] }));
+    expect(res.errors).toBeUndefined();
     const data = res.data as any;
     expect(data.a).toEqual([raw()]);
     expect(data.b.items).toEqual([raw()]);
@@ -122,6 +127,42 @@ describe('#3688 — nodeUsage(loc), deprecated but live, masks the same way', ()
 
   it('an ADMIN gets the same masking', async () => {
     const res = await gql(`{ nodeUsage(loc: "shared"){ ${IDENTITY} } }`, {}, ctx({ userId: me.id, roles: ['ADMIN'] }));
+    expect(res.errors).toBeUndefined();
     expect(byId((res.data as any).nodeUsage, theirs)).toEqual(masked(theirs, 5));
+  });
+});
+
+describe('#3693 review — the projection is an allowlist, and every SDL field is classified (Gloria P2)', () => {
+  it('every UsageEvent field in the SDL is either a volume field or an identity field, and no field is both', async () => {
+    const res = await gql('{ __type(name: "UsageEvent") { fields { name } } }', {}, ctx({ userId: me.id, roles: ['READER'] }));
+    expect(res.errors).toBeUndefined();
+    const sdl = ((res.data as any).__type.fields as Array<{ name: string }>).map(f => f.name).sort();
+    const volume: readonly string[] = USAGE_VOLUME_FIELDS;
+    const identity: readonly string[] = USAGE_IDENTITY_FIELDS;
+    expect(volume.filter(f => identity.includes(f))).toEqual([]);
+    expect([...volume, ...identity].sort()).toEqual(sdl);
+  });
+
+  it('a column the projection does not know is dropped from another principal\'s row, not passed through', () => {
+    const row = { id: 'e1', type: 'read', userId: other.id, appId: null, ipAddress: '203.0.113.7', tokensIn: 4 };
+    const [out] = projectUsageRowsFor(ctx({ userId: me.id, roles: ['READER'] }), [row]) as any[];
+    expect(out.ipAddress).toBeUndefined();
+    expect(out).toMatchObject({ id: 'e1', type: 'read', tokensIn: 4, userId: null });
+  });
+
+  it('the caller\'s own row is passed whole, including columns the projection does not know', () => {
+    const row = { id: 'e2', type: 'read', userId: me.id, appId: null, ipAddress: '203.0.113.8' };
+    expect(projectUsageRowsFor(ctx({ userId: me.id, roles: ['READER'] }), [row])).toEqual([row]);
+  });
+
+  it('an App key through the unified projection keeps its own appId and masks the rest, on its own App\'s rows too', () => {
+    const key = ctx({ appId, appKeyId: 'k1', roles: [] });
+    const rows = [
+      { id: 'own', type: 'read', userId: other.id, sessionId: theirSession, organizationId: orgId, appId, actionArgs: { q: 'x' }, tokensIn: 2 },
+      { id: 'foreign', type: 'read', userId: null, sessionId: null, organizationId: orgId, appId: 'some-other-app', actionArgs: null, tokensIn: 1 },
+    ];
+    const [own, foreign] = projectUsageRowsFor(key, rows) as any[];
+    expect(own).toMatchObject({ id: 'own', appId, userId: null, sessionId: null, organizationId: null, actionArgs: null, tokensIn: 2 });
+    expect(foreign).toMatchObject({ id: 'foreign', appId: null, organizationId: null, tokensIn: 1 });
   });
 });
