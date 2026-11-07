@@ -19,7 +19,7 @@ const query = <T>(sql: string, ...params: unknown[]) => db.$queryRawUnsafe<T[]>(
 describe('prisma/grant-invariants.sql parity', () => {
   it('the grants migration ends with a byte-identical copy, and post-push includes the file', () => {
     const sql = readFileSync(new URL('../../../prisma/grant-invariants.sql', import.meta.url), 'utf8');
-    const dir = readdirSync(new URL('../../../prisma/migrations', import.meta.url)).find((d) => d.endsWith('_grants'));
+    const dir = readdirSync(new URL('../../../prisma/migrations', import.meta.url)).find((d) => d === '20261107010000_grants');
     expect(dir).toBeTruthy();
     expect(readFileSync(new URL(`../../../prisma/migrations/${dir}/migration.sql`, import.meta.url), 'utf8').endsWith(sql)).toBe(true);
     expect(readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8')).toContain('\\ir grant-invariants.sql');
@@ -49,7 +49,7 @@ describe('exactly one holder (user, agent, worker or App): a NULL truth table', 
 
 describe('one App, one registered action, a reason', () => {
   it('app_id is required (no org-only row)', async () => {
-    await refused(insertGrant(w, { app_id: null }), /null value in column "app_id"|not-null/i);
+    await refused(insertGrant(w, { app_id: null }), /23502|null value/i);
   });
   it('an unknown action is refused by the foreign key: no free-text or recorded-only stand-in', async () => {
     await refused(insertGrant(w, { action: 'made.up' }), /grants_action_fkey|foreign key/i);
@@ -61,7 +61,7 @@ describe('one App, one registered action, a reason', () => {
   });
   it('the reason is required and non-blank; counts and times are sane', async () => {
     await refused(insertGrant(w, { reason: '' }), /chk_grants_shape/);
-    await refused(insertGrant(w, { reason: null }), /null value in column "reason"|not-null/i);
+    await refused(insertGrant(w, { reason: null }), /23502|null value/i);
     await refused(insertGrant(w, { max_uses: 0 }), /chk_grants_shape/);
     await refused(insertGrantUnguarded(w, { use_count: -1 }), /chk_grants_shape/);
     await refused(insertGrant(w, { starts_at: dbNowPlus2h(), expires_at: raw(DB_NOW) }), /chk_grants_shape/);
@@ -127,31 +127,34 @@ describe('UPDATE guard: a row ends once, loses an erased issuer, follows a merge
     expect((await query<{ issuer_user_id: unknown; reason: string }>('SELECT issuer_user_id, reason FROM grants WHERE id = $1', id))[0]).toEqual({ issuer_user_id: null, reason: 'kept words' });
     await refused(exec(`UPDATE grants SET issuer_user_id = $2 WHERE id = $1`, id, w.user2Id), /grants are append-only/);
   });
-  it('a person link moves to another person ONLY inside a user merge (a transaction that declared it)', async () => {
+  const recordMerge = (from: string, to: string) => exec(`INSERT INTO user_merges (source_user_id, target_user_id, merged_at) VALUES ($1, $2, ${DB_NOW})`, from, to);
+  it('a person link moves ONLY from a merged-away user to its recorded survivor', async () => {
     const id = await insertGrant(w, { issuer_user_id: w.userId, requested_by_user_id: w.userId });
     const move = `UPDATE grants SET issuer_user_id = $2, requested_by_user_id = $2, user_id = $2 WHERE id = $1`;
+    await refused(exec(move, id, w.user2Id), /grants are append-only/); // no merge recorded
+    await recordMerge(w.user2Id, w.userId); // the WRONG direction proves nothing
     await refused(exec(move, id, w.user2Id), /grants are append-only/);
-    await db.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe(`SELECT set_config('hadron.user_merge', 'on', true)`);
-      await tx.$executeRawUnsafe(move, id, w.user2Id);
-    });
-    expect((await query<{ issuer_user_id: string; user_id: string }>('SELECT issuer_user_id, user_id FROM grants WHERE id = $1', id))[0]).toEqual({ issuer_user_id: w.user2Id, user_id: w.user2Id });
-    // The flag moves person links only: nothing else is editable inside a merge, and a merge cannot rewrite the App.
-    await db.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe(`SELECT set_config('hadron.user_merge', 'on', true)`);
-      await refused(tx.$executeRawUnsafe(`UPDATE grants SET reason = 'x' WHERE id = $1`, id), /grants are append-only/);
-    });
-    await db.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe(`SELECT set_config('hadron.user_merge', 'on', true)`);
-      await refused(tx.$executeRawUnsafe(`UPDATE grants SET app_id = $2 WHERE id = $1`, id, w.app2Id), /grants are append-only/);
-    });
+    await recordMerge(w.userId, w.user2Id);
+    await exec(move, id, w.user2Id);
+    expect((await query<{ issuer_user_id: string; user_id: string; requested_by_user_id: string }>('SELECT issuer_user_id, user_id, requested_by_user_id FROM grants WHERE id = $1', id))[0])
+      .toEqual({ issuer_user_id: w.user2Id, user_id: w.user2Id, requested_by_user_id: w.user2Id });
   });
-  it('a merge never turns a user holder into another kind of holder or leaves the holder column', async () => {
+  it('a recorded merge moves person links only: no other column, no App, no change of holder kind, nothing to a different user', async () => {
+    const id = await insertGrant(w, { issuer_user_id: w.userId });
+    await recordMerge(w.userId, w.user2Id);
+    await refused(exec(`UPDATE grants SET reason = 'x' WHERE id = $1`, id), /grants are append-only/);
+    await refused(exec(`UPDATE grants SET app_id = $2 WHERE id = $1`, id, w.app2Id), /grants are append-only/);
+    await refused(exec(`UPDATE grants SET user_id = NULL, agent_id = $2 WHERE id = $1`, id, w.agentId), /grants are append-only/);
+    const third = await db.user.create({ data: { handle: 'g3-other' } });
+    await refused(exec(`UPDATE grants SET issuer_user_id = $2 WHERE id = $1`, id, third.id), /grants are append-only/);
+    await refused(exec(`UPDATE grants SET user_id = NULL WHERE id = $1`, id), /grants are append-only|chk_grants_exactly_one_holder/);
+  });
+  it('a revoker follows a recorded merge too, and only then', async () => {
     const id = await insertGrant(w);
-    await db.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe(`SELECT set_config('hadron.user_merge', 'on', true)`);
-      await refused(tx.$executeRawUnsafe(`UPDATE grants SET user_id = NULL, agent_id = $2 WHERE id = $1`, id, w.agentId), /grants are append-only/);
-    });
+    await exec(`UPDATE grants SET revoked_at = ${DB_NOW}, revoked_by = $2 WHERE id = $1`, id, w.userId);
+    await refused(exec(`UPDATE grants SET revoked_by = $2 WHERE id = $1`, id, w.user2Id), /grants are append-only/);
+    await recordMerge(w.userId, w.user2Id);
+    await exec(`UPDATE grants SET revoked_by = $2 WHERE id = $1`, id, w.user2Id);
   });
 });
 
@@ -167,7 +170,31 @@ describe('DELETE: refused while the App lives; the App\'s hard delete carries th
     expect(await query('SELECT id FROM grants')).toHaveLength(0);
     expect(await query('SELECT id FROM grant_events')).toHaveLength(0);
   });
-  it('an App that merely HOLDS a grant is not "gone": the holder FK refuses its hard delete', async () => {
+  // INTERIM referential integrity (RESTRICT), accepted for S1a only on empty, producer-free tables (gate 6712456240).
+  // NOT the holder-erasure rule: cor:acl:140:08 leaves it Open for every holder kind.
+  it('INTERIM: a hard delete of any HOLDER kind is refused by its foreign key and writes nothing', async () => {
+    const holders: Array<[string, string, () => Promise<unknown>]> = [
+      ['user_id', 'grants_user_id_fkey', () => db.user.delete({ where: { id: w.user2Id } })],
+      ['agent_id', 'grants_agent_id_fkey', () => db.agent.delete({ where: { id: w.agentId } })],
+      ['worker_id', 'grants_worker_id_fkey', () => db.worker.delete({ where: { id: w.workerId } })],
+      ['grantee_app_id', 'grants_grantee_app_id_fkey', () => db.app.delete({ where: { id: w.app2Id } })],
+    ];
+    const ids: string[] = [];
+    for (const [col] of holders) {
+      const value = col === 'user_id' ? w.user2Id : col === 'agent_id' ? w.agentId : col === 'worker_id' ? w.workerId : w.app2Id;
+      ids.push(await insertGrant(w, { user_id: null, [col]: value }));
+    }
+    for (const [col, , del] of holders) await refused(del(), /foreign key|Foreign key|P2003|23503/i);
+    expect(await query('SELECT id FROM grants')).toHaveLength(holders.length);
+    expect(await db.user.count({ where: { id: w.user2Id } })).toBe(1);
+    expect(await db.app.count({ where: { id: w.app2Id } })).toBe(1);
+  });
+  it('an App that is BOTH a grant\'s scope and its holder deletes cleanly: the scope cascade takes the row first', async () => {
+    await insertGrant(w, { user_id: null, grantee_app_id: w.appId });
+    await db.app.delete({ where: { id: w.appId } });
+    expect(await query('SELECT id FROM grants')).toHaveLength(0);
+  });
+  it('an App that is only a HOLDER and a different App\'s scope is not "gone": the holder FK refuses', async () => {
     await insertGrant(w, { user_id: null, grantee_app_id: w.app2Id });
     await refused(db.app.delete({ where: { id: w.app2Id } }), /grants_grantee_app_id_fkey|foreign key|Foreign key/i);
   });

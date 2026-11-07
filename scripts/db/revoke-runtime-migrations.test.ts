@@ -183,19 +183,19 @@ it('a connected non-owner role naming itself never issues a REVOKE (is_current_u
   await using(url(serve), async c => {
     const before = fixtureSql.length;
     await revokeRuntimeMigrations(c, serve);
-    expect(fixtureSql.slice(before).filter(sql => /^\s*REVOKE\b/i.test(sql))).toEqual([]);
+    expect(fixtureSql.slice(before).filter(sql => /^\s*REVOKE\b[^;]*_prisma_migrations/i.test(sql))).toEqual([]);
   });
   // Control: the table owner is protected by owns_migrations, not by being connected.
   await using(workerUrl, async c => {
     const before = fixtureSql.length;
     await revokeRuntimeMigrations(c, owner);
-    expect(fixtureSql.slice(before).filter(sql => /^\s*REVOKE\b/i.test(sql))).toEqual([]);
+    expect(fixtureSql.slice(before).filter(sql => /^\s*REVOKE\b[^;]*_prisma_migrations/i.test(sql))).toEqual([]);
   });
   // Positive control: a different non-owner role still gets the REVOKE.
   await using(url(owner), async c => {
     const before = fixtureSql.length;
     await revokeRuntimeMigrations(c, serve);
-    expect(fixtureSql.slice(before).filter(sql => /^\s*REVOKE\b/i.test(sql))).toHaveLength(1);
+    expect(fixtureSql.slice(before).filter(sql => /^\s*REVOKE\b[^;]*_prisma_migrations/i.test(sql))).toHaveLength(1);
   });
   expect(await holdsMigrationAccess(serve)).toBe(false);
 });
@@ -220,4 +220,27 @@ it('a stalled connection fails within the bounded connect timeout without printi
   }
   expect(CONNECT_TIMEOUT_MS).toBeGreaterThan(0);
   expect(CONNECT_TIMEOUT_MS).toBeLessThanOrEqual(60_000);
+});
+
+// #3668 (S1a): the serve role READS `actions` and never writes it; the owner's upsert is the only writer.
+it('revokes the serve role\'s write on actions after migrate and keeps its read; nothing is revoked from a role that is not the table\'s connection owner', async () => {
+  const held = (c: Client, p: string) => c.query('SELECT has_table_privilege($1, \'public.actions\', $2) AS held', [serve, p]).then((r) => r.rows[0].held as boolean);
+  await using(workerUrl, async c => {
+    await c.query(`GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON public.actions TO ${q(serve)}`);
+    expect(await held(c, 'INSERT')).toBe(true);
+    const before = fixtureSql.length;
+    await revokeRuntimeMigrations(c, serve);
+    await revokeRuntimeMigrations(c, serve);
+    expect(fixtureSql.slice(before).filter(sql => /^\s*REVOKE\b[^;]*public\.actions/i.test(sql)).length).toBeGreaterThan(0);
+    for (const p of ['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']) expect(await held(c, p), p).toBe(false);
+    expect(await held(c, 'SELECT')).toBe(true);
+  });
+  // A connection that does not own the table cannot revoke on it, and says nothing.
+  await using(workerUrl, c => c.query(`GRANT INSERT ON public.actions TO ${q(serve)}`));
+  await using(url(owner), async c => {
+    const before = fixtureSql.length;
+    await revokeRuntimeMigrations(c, serve);
+    expect(fixtureSql.slice(before).filter(sql => /^\s*REVOKE\b[^;]*public\.actions/i.test(sql))).toEqual([]);
+  });
+  await using(workerUrl, c => c.query(`REVOKE ALL ON public.actions FROM ${q(serve)}`));
 });

@@ -892,3 +892,5 @@ CREATE INDEX IF NOT EXISTS "agents_organization_id_idx" ON "agents"("organizatio
 CREATE INDEX IF NOT EXISTS "agent_team_events_pr_frozen_head_idx"
   ON "agent_team_events" ("app_id", (("payload" ->> 'head')))
   WHERE "type" = 'pr.frozen';
+
+\ir grant-invariants.sql

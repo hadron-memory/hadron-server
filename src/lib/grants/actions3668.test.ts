@@ -77,7 +77,7 @@ describe('the table itself', () => {
     await expect(ins('test.s1a.s', '', 'SERVER')).rejects.toThrow(/chk_actions_shape/);
     await expect(ins('', 'PLATFORM', 'SERVER')).rejects.toThrow(/chk_actions_shape/);
     for (const e of ['SERVER', 'CREDENTIAL', 'HARNESS_INSTRUCTION', 'RECORDED_ONLY']) await ins(`test.s1a.${e}`, 'PLATFORM', e);
-    await expect(ins('test.s1a.SERVER', 'PLATFORM', 'SERVER')).rejects.toThrow(/actions_pkey|unique/i);
+    await expect(ins('test.s1a.SERVER', 'PLATFORM', 'SERVER')).rejects.toThrow(/23505|actions_pkey/i);
   });
 });
 

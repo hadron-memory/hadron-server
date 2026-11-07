@@ -7,7 +7,8 @@ import { dropTestActions, insertEvent, insertGrant, seedWorld, type World } from
 let w: World;
 beforeEach(async () => { await cleanDb(db); w = await seedWorld(); });
 afterAll(async () => { await cleanDb(db); await dropTestActions(); });
-const MISSING = /WORKER_REFERENCE_NOT_FOUND/;
+// Prisma surfaces the P1162 fence refusal as a typed message (src/lib/workerReferenceError.ts).
+const MISSING = /Cannot add a new (?:worker|session) reference|WORKER_REFERENCE_NOT_FOUND/;
 
 describe('grants', () => {
   it('requested_by_worker_id: a real worker passes, a missing one is refused by the fence', async () => {
@@ -20,7 +21,7 @@ describe('grants', () => {
   });
   it('the holder worker_id is fenced too: a missing worker never becomes a holder', async () => {
     await expect(insertGrant(w, { user_id: null, worker_id: w.workerId })).resolves.toBeTruthy();
-    await expect(insertGrant(w, { user_id: null, worker_id: 'no-such-worker' })).rejects.toThrow(/WORKER_REFERENCE_NOT_FOUND|foreign key/i);
+    await expect(insertGrant(w, { user_id: null, worker_id: 'no-such-worker' })).rejects.toThrow(/Cannot add a new worker reference|WORKER_REFERENCE_NOT_FOUND|foreign key/i);
   });
 });
 describe('grant_events (no foreign keys: sealed ids)', () => {

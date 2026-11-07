@@ -393,3 +393,44 @@ describe('runtime-role.sql + verify-runtime-role (#2413 S1)', { timeout: 60_000 
     });
   });
 });
+
+// #3668 (S1a): `actions` is written only by the owner's deploy-time upsert; the serve role reads it and nothing more.
+describe('the serve role and the actions table (#3668)', { timeout: 60_000 }, () => {
+  beforeAll(async () => {
+    await resetDb();
+    await migrate();
+    await asOwner((c) => c.query(`CREATE TABLE IF NOT EXISTS actions (name text PRIMARY KEY, enforcement text)`));
+    applyGrants();
+  });
+
+  it('runtime-role.sql leaves the serve role SELECT on actions and no write, and the verifier is clean', async () => {
+    expect(await verify()).toEqual([]);
+    const c = new Client({ connectionString: urlFor(SERVE, DB) });
+    await c.connect();
+    try {
+      await expect(c.query('SELECT name FROM actions')).resolves.toBeTruthy();
+      for (const sql of [`INSERT INTO actions VALUES ('x', 'SERVER')`, `UPDATE actions SET enforcement = 'x'`, 'DELETE FROM actions', 'TRUNCATE actions']) {
+        await expect(c.query(sql), sql).rejects.toMatchObject({ code: '42501' });
+      }
+      await expect(c.query(`INSERT INTO nodes VALUES ('ok', 'x')`)).resolves.toBeTruthy(); // every other table stays writable
+    } finally {
+      await c.end();
+    }
+  });
+
+  it('is idempotent, and still holds when the table appears AFTER the grants file (default privileges grant it, the revoke step removes it)', async () => {
+    applyGrants();
+    expect(await verify()).toEqual([]);
+    await asOwner((c) => c.query(`DROP TABLE actions; CREATE TABLE actions (name text PRIMARY KEY, enforcement text)`));
+    expect(await rules()).toEqual(['forbidden-table-privilege']);
+    applyGrants();
+    expect(await verify()).toEqual([]);
+  });
+
+  it('reports a serve role that can write actions', async () => {
+    await asOwner((c) => c.query(`GRANT INSERT ON actions TO ${SERVE}`));
+    const v = await verify();
+    expect(v.map((x) => x.rule)).toEqual(['forbidden-table-privilege']);
+    expect(v[0].detail).toContain('public.actions (INSERT)');
+  });
+});

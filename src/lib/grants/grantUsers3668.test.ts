@@ -3,8 +3,8 @@
  *  - cor:acl:140:08: erasing the ISSUER removes the link and keeps the reason.
  *  - mergeUsers rewrites the CURRENT holder, issuer, requester, revoker and verifier links to the survivor, with explicit
  *    old/new identity checks; grant_events actors stay sealed; a merge never moves a row to another App.
- *  - Holder (recipient) ERASURE is UNSELECTED (cor:acl:140:08 Open): deleteUser leaves a grant its erased person held
- *    exactly as it is. No revoke, no delete, no nulling. That is a boundary this slice exposes, not a choice it makes.
+ *  - Holder erasure is UNSELECTED (cor:acl:140:08 Open, all holder kinds). RESTRICT is INTERIM referential integrity on empty
+ *    tables (gate 6712456240), pinned here as what the database does today, NOT as the erasure rule.
  */
 import { beforeEach, afterAll, describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
@@ -30,12 +30,16 @@ describe('deleteUser', () => {
     await deleteUserAccount(db, { targetUserId: w.userId, actorUserId: w.userId });
     expect((await read(id)).issuer_user_id).toBe(w.user2Id);
   });
-  it('BOUNDARY (cor:acl:140:08 Open, unselected): erasing the HOLDER touches nothing: no revoke, no delete, no nulling', async () => {
-    const id = await insertGrant(w, { user_id: w.user2Id });
-    await deleteUserAccount(db, { targetUserId: w.user2Id, actorUserId: w.user2Id });
-    const row = await read(id);
-    expect(row.user_id).toBe(w.user2Id);
-    expect((await db.$queryRawUnsafe<Array<{ revoked_at: unknown }>>(`SELECT revoked_at FROM grants WHERE id = $1`, id))[0].revoked_at).toBeNull();
+  it('INTERIM, not the holder-erasure rule (cor:acl:140:08 Open): erasure that would hard-delete a HOLDER is refused whole by the RESTRICT foreign key, with no partial write', async () => {
+    // deleteUser hard-deletes the erased person's own Agents; one of them holds a grant, and the person issued another.
+    const agent = await db.agent.create({ data: { ownerUserId: w.user2Id, name: 'owned-agent', urn: `hrn:agent:owned-${w.user2Id}` } as never });
+    const held = await insertGrant(w, { user_id: null, agent_id: agent.id });
+    const issued = await insertGrant(w, { issuer_user_id: w.user2Id });
+    await expect(deleteUserAccount(db, { targetUserId: w.user2Id, actorUserId: w.user2Id })).rejects.toThrow();
+    expect((await db.user.findUniqueOrThrow({ where: { id: w.user2Id } })).deletedAt).toBeNull();
+    expect(await db.agent.count({ where: { id: agent.id } })).toBe(1);
+    expect(await read(held)).toMatchObject({ id: held });
+    expect((await read(issued)).issuer_user_id).toBe(w.user2Id); // the issuer nulling rolled back with the rest
   });
 });
 

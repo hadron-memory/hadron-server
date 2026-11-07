@@ -62,6 +62,13 @@ export function redact(text: string, secrets: string[] = []): string {
 
 const FORBIDDEN_TABLE_PRIVS = ['TRUNCATE', 'TRIGGER', 'REFERENCES'];
 const REQUIRED_TABLE_PRIVS = ['SELECT', 'INSERT', 'UPDATE', 'DELETE'];
+/**
+ * #3668 (S1a): `actions` is written only by the deploy-time upsert, as the OWNER. The serve role may READ it and must hold
+ * no write: "no runtime surface writes an action" is an application fact, and this is the database half of it, where the
+ * role exists. A serve role that can still write it is reported as a forbidden privilege.
+ */
+const ACTIONS_TABLE = 'actions';
+const ACTIONS_SERVE_FORBIDDEN = ['INSERT', 'UPDATE', 'DELETE'];
 
 /** Names only ever reach SQL as bind parameters; the cap keeps a log line short. */
 function names(rows: { rel: string }[], max = 5): string {
@@ -139,9 +146,10 @@ export async function verifyRuntimeRole(client: Client, role: string): Promise<V
       migrationsPresent = true;
       continue;
     }
+    const isActions = t.relname === ACTIONS_TABLE;
     const q = await client.query(
       `SELECT bool_and(has_table_privilege($1, $2::oid, p)) AS ok FROM unnest($3::text[]) p`,
-      [role, t.oid, REQUIRED_TABLE_PRIVS],
+      [role, t.oid, isActions ? ['SELECT'] : REQUIRED_TABLE_PRIVS],
     );
     if (!q.rows[0].ok) missing.push({ rel: `public.${t.relname}` });
     const f = await client.query(
@@ -149,7 +157,7 @@ export async function verifyRuntimeRole(client: Client, role: string): Promise<V
       `SELECT string_agg(p, '/') AS held FROM unnest($3::text[]) p
         WHERE has_table_privilege($1, $2::oid, p)
            OR (p = 'REFERENCES' AND has_any_column_privilege($1, $2::oid, p))`,
-      [role, t.oid, forbidden],
+      [role, t.oid, isActions ? [...forbidden, ...ACTIONS_SERVE_FORBIDDEN] : forbidden],
     );
     if (f.rows[0].held) extra.push({ rel: `public.${t.relname} (${f.rows[0].held})` });
   }
