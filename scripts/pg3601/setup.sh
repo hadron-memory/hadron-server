@@ -81,6 +81,23 @@ for kv in "listen_addresses ''" "logging_collector on" "log_directory /pgvol/log
 done
 ix sh -c 'mkdir -p /etc/systemd/system/postgresql@17-main.service.d && printf "[Service]\nProtectSystem=strict\nProtectHome=yes\nReadWritePaths=/pgvol/data /pgvol/log /run/postgresql\nPrivateTmp=yes\nLimitCORE=0\n" > /etc/systemd/system/postgresql@17-main.service.d/pg3601.conf && systemctl daemon-reload'
 
+log "setup: root-owned stop-request endpoint (the confined adapter's only stop lever)"
+# runner may create /pgvol/client/STOP_REQUEST and nothing more; a root path
+# unit answers it by killing the client and stopping the cluster immediately.
+ix sh -c 'cat > /etc/systemd/system/pg3601-stopreq.path <<UNIT
+[Path]
+PathExists=/pgvol/client/STOP_REQUEST
+Unit=pg3601-stopreq.service
+[Install]
+WantedBy=multi-user.target
+UNIT
+cat > /etc/systemd/system/pg3601-stopreq.service <<UNIT
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c "systemctl kill --signal=SIGKILL pg3601-client.service; pg_ctlcluster 17 main stop -m immediate; echo stopped > /pgvol/client/STOP_DONE"
+UNIT
+systemctl daemon-reload && systemctl enable --now pg3601-stopreq.path'
+
 log "setup: peer-only pg_hba and ident map from the adapter env"
 ix sh -c '. /opt/pg3601/adapter/pg3601.env
 : "${WRITER_ROLE:?}" "${OBSERVER_ROLE:?}" "${DBNAME:?}"

@@ -51,6 +51,9 @@ check postmaster.core.limit "0 0" "$(ix awk '/Max core file size/{print $5, $6}'
 stray=$(ix bash -c "comm -23 <(pgrep -u postgres | sort) <(sort /sys/fs/cgroup$cg/cgroup.procs)")
 check postgres.pids.outside.unit "" "$stray"
 
+check stopreq.path active "$(ix systemctl is-active pg3601-stopreq.path)"
+check stopreq.trigger /pgvol/client/STOP_REQUEST "$(ix systemctl show pg3601-stopreq.path -p Paths --value | sed 's/^PathExists=//')"
+
 echo "## V4 volume and quota identity"
 "${INCUS[@]}" storage volume show "$POOL" "$VOLUME"
 check volume.size 1GiB "$("${INCUS[@]}" storage volume get "$POOL" "$VOLUME" size)"
