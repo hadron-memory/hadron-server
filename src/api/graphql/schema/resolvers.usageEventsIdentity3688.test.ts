@@ -132,9 +132,9 @@ describe('#3688 — nodeUsage(loc), deprecated but live, masks the same way', ()
   });
 });
 
-describe('#3693 review — the projection is an allowlist, and every SDL field is classified (Gloria P2)', () => {
+describe('#3688 — the projection is an allowlist, and every SDL field is classified (cor:acl:090:01)', () => {
   it('every UsageEvent field in the SDL is either a volume field or an identity field, and no field is both', async () => {
-    const res = await gql('{ __type(name: "UsageEvent") { fields { name } } }', {}, ctx({ userId: me.id, roles: ['READER'] }));
+    const res = await gql('{ __type(name: "UsageEvent") { fields(includeDeprecated: true) { name } } }', {}, ctx({ userId: me.id, roles: ['READER'] }));
     expect(res.errors).toBeUndefined();
     const sdl = ((res.data as any).__type.fields as Array<{ name: string }>).map(f => f.name).sort();
     const volume: readonly string[] = USAGE_VOLUME_FIELDS;

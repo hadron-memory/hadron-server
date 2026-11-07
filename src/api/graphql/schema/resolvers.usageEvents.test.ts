@@ -119,9 +119,10 @@ describe('usageEvents memoryId filter', () => {
     expect(result).toHaveLength(4);
     const locs = new Set(result.map((e: { nodeLoc: string | null }) => e.nodeLoc));
     expect(locs).toEqual(new Set(['alpha', 'beta']));
-    // All belong to memory's nodes, not otherMemory's alpha.
-    const ids = new Set(result.map((e: { nodeId: string | null }) => e.nodeId));
-    expect(ids.has(otherAlphaNode.id)).toBe(false);
+    // All belong to memory, not otherMemory (read through the exposed memoryId: the projection drops the non-SDL
+    // nodeId from another principal's row, which made a nodeId check trivially true; #3694).
+    const memoryIds = new Set(result.map((e: { memoryId: string | null }) => e.memoryId));
+    expect(memoryIds).toEqual(new Set([memory.id]));
   });
 
   it('accepts a bare URN as memoryId — identical effect to ID', async () => {
