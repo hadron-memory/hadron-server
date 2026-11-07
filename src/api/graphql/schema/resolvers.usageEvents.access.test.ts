@@ -5,8 +5,9 @@
  * no tenant scoping, so any authenticated user saw every tenant's events. It is
  * now scoped to the memories the caller may read (getAccessibleMemoryIds —
  * principals + memory-class rules per spec 034):
- *   - global path (no memoryId) → bounded to the readable-memory set.
- *   - scoped path (memoryId) → denied with [] (no existence leak) if unreadable.
+ *   - no resource named → the caller's own activity (#2817, cor:acl:090:01); a bare loc spanning
+ *     memories → bounded to the readable-memory set.
+ *   - scoped path (memoryId) → MEMORY_NOT_FOUND if unreadable, exactly as if missing (#1381).
  *
  * Fixture: orgA {memA knowledge, privMem private-owned-by-member} + orgB {memB
  * knowledge}. userMember ∈ orgA; userOther ∈ orgA (not the private owner);
@@ -87,30 +88,41 @@ beforeEach(async () => {
 
 const locsOf = (rows: { nodeLoc: string | null }[]) => new Set(rows.map((r) => r.nodeLoc));
 
-describe('usageEvents access control — global path', () => {
+describe('usageEvents access control — no resource named, and a bare loc across memories', () => {
+  // #2817 (cor:acl:090:01): naming no resource is the caller's OWN activity, never a feed of the
+  // readable memories. The fixture events carry no user, so nobody owns them.
+  it('naming no resource returns the caller\'s own activity only (none of these unattributed events)', async () => {
+    for (const c of [asMember(), asOther(), asOutsider(), asAdmin()]) {
+      expect(await resolvers.Query.usageEvents(null, {}, c)).toEqual([]);
+    }
+  });
+
+  // The #250 tenant bounds now hold on the resource scope that spans memories: a bare loc matches
+  // in every READABLE memory, and only there.
+  const byLoc = async (c: Context) => {
+    const out = new Set<string | null>();
+    for (const loc of ['a-loc', 'b-loc', 'p-loc']) for (const r of await resolvers.Query.usageEvents(null, { loc }, c)) out.add(r.nodeLoc);
+    return out;
+  };
+
   it('org member sees only their org + their own private memory (not other tenants)', async () => {
-    const r = await resolvers.Query.usageEvents(null, {}, asMember());
-    expect(locsOf(r)).toEqual(new Set(['a-loc', 'p-loc'])); // memA + privMem, NOT memB
-    expect(r).toHaveLength(2);
+    expect(await byLoc(asMember())).toEqual(new Set(['a-loc', 'p-loc'])); // memA + privMem, NOT memB
   });
 
   it('a different org member does NOT see another member\'s private memory', async () => {
-    const r = await resolvers.Query.usageEvents(null, {}, asOther());
-    expect(locsOf(r)).toEqual(new Set(['a-loc'])); // memA only — privMem is owner-only
+    expect(await byLoc(asOther())).toEqual(new Set(['a-loc'])); // memA only — privMem is owner-only
   });
 
   it('an outsider (no org membership) sees nothing', async () => {
-    const r = await resolvers.Query.usageEvents(null, {}, asOutsider());
-    expect(r).toEqual([]);
+    expect(await byLoc(asOutsider())).toEqual(new Set());
   });
 
   it('ADMIN sees all tenants but NOT another user\'s private memory', async () => {
-    const r = await resolvers.Query.usageEvents(null, {}, asAdmin());
-    expect(locsOf(r)).toEqual(new Set(['a-loc', 'b-loc'])); // memA + memB, privMem excluded
+    expect(await byLoc(asAdmin())).toEqual(new Set(['a-loc', 'b-loc'])); // memA + memB, privMem excluded
   });
 
-  it('App key is rejected (roles: [] fails the READER gate)', async () => {
-    await expect(resolvers.Query.usageEvents(null, {}, asAppKey())).rejects.toThrow('Forbidden');
+  it('App key naming no resource gets an empty result, not an error (#2817)', async () => {
+    expect(await resolvers.Query.usageEvents(null, {}, asAppKey())).toEqual([]);
   });
 });
 

@@ -133,6 +133,13 @@ describe('#2817 — principals the change must not admit', () => {
     await expect(list({}, ctx({}))).rejects.toThrow('Forbidden');
     await expect(page({}, ctx({ userId: me.id, roles: [], impersonation: { orgId: 'x' } as Context['impersonation'] }))).rejects.toThrow('Forbidden');
   });
+
+  it('only a USERLESS App principal is admitted: an App context that carries a user identity keeps the READER gate', async () => {
+    // An impersonation session can carry an appId (resolvers.helpers.ts getAccessibleMemoryIds), and its roles are [].
+    const c = ctx({ appId: app.id, userId: me.id, roles: [], impersonation: { orgId: 'x' } as Context['impersonation'] });
+    await expect(list({}, c)).rejects.toThrow('Forbidden');
+    await expect(page({ memoryId: appMem.id }, c)).rejects.toThrow('Forbidden');
+  });
 });
 
 describe('#2817 item 4 — the legacy list is bounded and ordered', () => {

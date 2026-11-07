@@ -86,8 +86,16 @@ async function sessionsWhere(
 }
 
 /**
- * The `where` shared by `usageEvents` and `usageEventsPage` (#2212 A1): the READER gate, the loc/nodeId
- * addressing rules and the accessible-memory scope, all resolved before any query.
+ * The `where` shared by `usageEvents` and `usageEventsPage` (#2212 A1): the principal gate, the loc/nodeId
+ * addressing rules and the scope, all resolved before any query.
+ *
+ * #2817 — the two scopes of hrn:node:hadronmemory.com:specs:cor:acl:090:01 (ruling 0244 items 1 and 2):
+ *   - no resource named (no `memoryId`, `nodeId` or `loc`) → OWN ACTIVITY: the events attributed to the
+ *     calling user (`UsageEvent.userId`), in any memory or none. A principal with no user identity (an App
+ *     key, a userless run) has no own activity and gets an empty result, not an error.
+ *   - a resource named → RESOURCE SCOPE: every principal's events there, bounded by the memory READ gate
+ *     (`getAccessibleMemoryIds`, which handles App-key principals). An empty resource scope stays empty;
+ *     it never falls back to own activity.
  */
 // Like task-list bounds (#2692), usage windows require unambiguous instants.
 const usageWindowInstant = z.string().datetime({ offset: true });
@@ -99,7 +107,11 @@ async function usageEventsWhere(
     since?: string | null; until?: string | null;
   },
 ): Promise<Prisma.UsageEventWhereInput> {
-      requireRole(ctx, 'READER');
+      // #2817: a principal with no user identity (an hdr_app_ key, roles []) is admitted; its read is
+      // scoped below. Every principal WITH a user identity keeps the READER gate unchanged, so an
+      // impersonation session (roles []) and an unauthenticated caller are still refused.
+      const userlessAppPrincipal = !!ctx.appId && !ctx.userId;
+      if (!userlessAppPrincipal) requireRole(ctx, 'READER');
       // #2784: a half-open activity window narrows the existing scope. Reject
       // its order before resolving any resource, so the error reveals no access.
       if ((since != null && !usageWindowInstant.safeParse(since).success) ||
@@ -119,6 +131,20 @@ async function usageEventsWhere(
         throw new GraphQLError('Provide either nodeId or loc, not both', {
           extensions: { code: 'BAD_USER_INPUT' },
         });
+      }
+
+      const windowFilter = start || end ? { createdAt: { ...(start ? { gte: start } : {}), ...(end ? { lt: end } : {}) } } : {};
+
+      // #2817 (cor:acl:090:01): naming no resource selects OWN ACTIVITY, never the accessible-memories
+      // feed. "Named" uses the same truthiness that applies each filter below, so no request can reach
+      // the resource branch without a resource filter. `type` and the window narrow either scope.
+      if (!memoryId && !nodeId && !loc) {
+        return {
+          ...windowFilter,
+          ...(type ? { type } : {}),
+          // No user identity, no own activity: an empty result (matches no row), not an error.
+          ...(ctx.userId ? { userId: ctx.userId } : { id: { in: [] } }),
+        };
       }
 
       // Per-node scoping (issue #249 follow-up): a single node addressed by a
@@ -185,9 +211,8 @@ async function usageEventsWhere(
       // encapsulates every principal type and the memory-class rules (spec
       // 034): a JWT / user-API-key caller gets their org + subscription +
       // public + owned personal/private set; ADMIN/OWNER get all memories
-      // except other users' personal/private. App keys carry roles:[] and are
-      // already rejected by requireRole above (App usage reads aren't a GraphQL
-      // surface — they go through MCP).
+      // except other users' personal/private. An App key (#2817) gets the
+      // memories its App may read — the same READ gate as the memory's content.
       //
       // The return type is `string[] | null`, where null would mean
       // "unrestricted (no filter)". In practice every branch returns an
@@ -218,8 +243,8 @@ async function usageEventsWhere(
 
       // Resolve the memory filter:
       //  - memoryId scoped path → the single, already access-checked memory.
-      //  - otherwise → the caller's full accessible-memory set (#250). This
-      //    bounds both the global feed and any bare-loc nodeId filter to
+      //  - otherwise (a nodeId or loc was named) → the caller's full
+      //    accessible-memory set (#250), bounding any bare-loc filter to
       //    readable memories. A `null` accessible set = unrestricted.
       //
       // Either way an event with a NULL memoryId is excluded, exactly as the
@@ -234,7 +259,7 @@ async function usageEventsWhere(
             : undefined;
 
   return {
-          ...(start || end ? { createdAt: { ...(start ? { gte: start } : {}), ...(end ? { lt: end } : {}) } } : {}),
+          ...windowFilter,
           ...(type ? { type } : {}),
           ...(nodeIdFilter ? { nodeId: nodeIdFilter } : {}),
           ...(memoryFilter ?? {}),
@@ -291,11 +316,14 @@ export const sessionQueries = {
       ctx: Context,
     ) => {
       const where = await usageEventsWhere(ctx, args);
+      // #2817 (cor:api:120:04): the same size bounds as usageEventsPage — default 20, at most 200, a
+      // negative limit or offset is 0 — so the legacy list can never return an unbounded number of rows.
+      const { take, skip } = pageArgs(args);
       return ctx.db.usageEvent.findMany({
         where,
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-        take: args.limit ?? 20,
-        skip: args.offset ?? 0,
+        take,
+        skip,
       });
     },
 
