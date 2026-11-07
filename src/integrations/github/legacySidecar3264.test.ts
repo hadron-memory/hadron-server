@@ -50,10 +50,11 @@ const nodeAt = (loc: string, id = 'node-3264'): NodeForGit => ({
 });
 const put = (path: string, body: string) => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, body); };
 const idFile = (id: string) => `---\nid: ${id}\nname: n\n---\n\nbody\n`;
-const gitIntact = (repo: string) => {
+const gitIntact = (repo: string, stage = true) => {
   expect(lstatSync(join(repo, '.git')).isDirectory()).toBe(true);
   expect(git(repo, 'log', '--format=%s')).toContain('unpublished local commit');
-  git(repo, 'add', '-A'); // the step that used to fail with "not a repository"
+  // The step that used to fail with "not a repository". Git itself refuses a nested `.GIT` fixture.
+  if (stage) git(repo, 'add', '-A');
 };
 
 describe('#3264 loc `git` no longer deletes the checkout metadata', () => {
@@ -103,7 +104,7 @@ describe('#3264 the helper removes exactly edges.yaml, then an empty directory',
         put(join(repo, 'a', dir, 'edges.yaml'), '- {id: X, rel: keep}\n');
         run(repo, `a:${atom}`);
         expect(readFileSync(join(repo, 'a', dir, 'edges.yaml'), 'utf8')).toBe('- {id: X, rel: keep}\n');
-        gitIntact(repo);
+        gitIntact(repo, dir !== '.GIT');
       });
     }
 
@@ -112,6 +113,18 @@ describe('#3264 the helper removes exactly edges.yaml, then an empty directory',
       put(join(repo, 'a', '.b', 'edges.yaml', 'inner.txt'), 'inner');
       run(repo, 'a:b');
       expect(readFileSync(join(repo, 'a', '.b', 'edges.yaml', 'inner.txt'), 'utf8')).toBe('inner');
+    });
+
+    it(`${route}: a sidecar directory that is a symlink is not followed: target tree stays`, () => {
+      const repo = checkout();
+      const outside = mkdtempSync(join(tmpdir(), 'hadron-3264-out-'));
+      roots.push(outside);
+      writeFileSync(join(outside, 'edges.yaml'), 'outside');
+      mkdirSync(join(repo, 'a'), { recursive: true });
+      symlinkSync(outside, join(repo, 'a', '.b'));
+      run(repo, 'a:b');
+      expect(readFileSync(join(outside, 'edges.yaml'), 'utf8')).toBe('outside');
+      expect(lstatSync(join(repo, 'a', '.b')).isSymbolicLink()).toBe(true);
     });
 
     it(`${route}: an edges.yaml symlink is not followed: link and target both stay`, () => {
