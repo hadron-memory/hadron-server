@@ -906,6 +906,43 @@ export const chatMutations = {
       });
       const chatRef = { id: chatNode.id, memoryId: chatNode.memoryId, loc: chatNode.loc };
 
+      // #3654: resolved before the first write (was after the user message). Find the agent that owns this chat. Two ways a memory can belong
+      // to an agent: (1) it's a user memory via userMemoryOfAgentId, or
+      // (2) legacy — it's attached as a regular memoryItem with role
+      // read-write. Check the user-memory path first since that's the
+      // canonical portal chat path.
+      const memory = await ctx.db.memory.findUnique({ where: { id: chatNode.memoryId } });
+      if (!memory) throw new Error('Memory not found');
+      let agent = null;
+      if (memory.sharedMemoryOfAgentId || memory.userMemoryOfAgentId) {
+        agent = await ctx.db.agent.findUnique({
+          where: { id: memory.sharedMemoryOfAgentId ?? memory.userMemoryOfAgentId! },
+        });
+      } else {
+        const legacyAgents = await ctx.db.agent.findMany({
+          where: { deletedAt: null, memoryItems: { some: { memoryId: chatNode.memoryId } } },
+        });
+        agent = legacyAgents.find((a) => (a as any).systemMemoryId) ?? null;
+      }
+      // Uninstall leaves the App's shared chat memory in place. Its historical
+      // Agent pointer is not a live grant: after uninstall, participants may
+      // still post to the chat, but its old system prompt and linked knowledge
+      // must not re-enter template retrieval.
+      if (memory.class === 'app' && agent) {
+        const installed = memory.appId && await isAgentInstalledAndLicensed(ctx.db, memory.appId, agent.id);
+        if (!installed) agent = null;
+      }
+      const systemMemoryId = agent ? (agent as any).systemMemoryId as string : null;
+
+      // #3654: the serve gate (canChatWithAgent, the licence check, the served boot prompt) runs BEFORE any write of this turn,
+      // so a refused turn persists nothing: no user message, no message-count bump, no re-route, no served-prompt record.
+      // The scope is as built (every turn, every App type; cor:dmo:050:02 is Proposed, not ruled). A turn the re-route
+      // below first gives a stage serves at that later point instead, still ahead of the record write.
+      let chatServed: Awaited<ReturnType<typeof serveChatPrompt>> | null = null;
+      if (agent && systemMemoryId && chatData.conversationName && chatData.stageName) {
+        chatServed = await serveChatPrompt(ctx.db, agent, memory?.appId ?? null, reportedModel, ctx);
+      }
+
       // Save user message. When the memory is encrypted we need to encrypt
       // the message content AND the chat node's updated `data`.
       // The `data.role` field is what the message-history reader uses to
@@ -998,33 +1035,6 @@ export const chatMutations = {
       const convName = chatData.conversationName as string;
       const stageName = chatData.stageName as string;
 
-      // Find the agent that owns this chat. Two ways a memory can belong
-      // to an agent: (1) it's a user memory via userMemoryOfAgentId, or
-      // (2) legacy — it's attached as a regular memoryItem with role
-      // read-write. Check the user-memory path first since that's the
-      // canonical portal chat path.
-      const memory = await ctx.db.memory.findUnique({ where: { id: chatNode.memoryId } });
-      if (!memory) throw new Error('Memory not found');
-      let agent = null;
-      if (memory.sharedMemoryOfAgentId || memory.userMemoryOfAgentId) {
-        agent = await ctx.db.agent.findUnique({
-          where: { id: memory.sharedMemoryOfAgentId ?? memory.userMemoryOfAgentId! },
-        });
-      } else {
-        const legacyAgents = await ctx.db.agent.findMany({
-          where: { deletedAt: null, memoryItems: { some: { memoryId: chatNode.memoryId } } },
-        });
-        agent = legacyAgents.find((a) => (a as any).systemMemoryId) ?? null;
-      }
-      // Uninstall leaves the App's shared chat memory in place. Its historical
-      // Agent pointer is not a live grant: after uninstall, participants may
-      // still post to the chat, but its old system prompt and linked knowledge
-      // must not re-enter template retrieval.
-      if (memory.class === 'app' && agent) {
-        const installed = memory.appId && await isAgentInstalledAndLicensed(ctx.db, memory.appId, agent.id);
-        if (!installed) agent = null;
-      }
-      const systemMemoryId = agent ? (agent as any).systemMemoryId as string : null;
 
       // Pin to version: if the chat was started with a published revision,
       // read from that snapshot so mid-conversation publishes don't change
@@ -1194,7 +1204,7 @@ export const chatMutations = {
         // Re-served on each chat turn so a newly approved revision takes effect.
         if (agent) {
           // #2047: the same refusal as a bind; and a chat records again only when its revision or filled values CHANGED (R37, #3096), never per unchanged message.
-          const chatServed = await serveChatPrompt(ctx.db, agent, memory?.appId ?? null, reportedModel, ctx);
+          chatServed ??= await serveChatPrompt(ctx.db, agent, memory?.appId ?? null, reportedModel, ctx);
           await recordChatServedIfChanged(ctx.db, chatNode.id, agent.id, memory?.appId ?? null, chatServed);
           systemMessage = chatServed.text + '\n\n' + systemMessage;
         }
