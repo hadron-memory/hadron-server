@@ -2214,11 +2214,12 @@ export const typeResolvers = {
       });
       if (!session) return [];
       const memoryIds = await sessionEventMemoryIds(ctx, s.id);
-      return projectSessionEventsFor(ctx, session, await ctx.db.usageEvent.findMany({
+      const rows = await ctx.db.usageEvent.findMany({
         where: { sessionId: s.id, OR: [{ memoryId: null }, { memoryId: { in: memoryIds } }] },
         orderBy: { createdAt: 'desc' },
         take: 50,
-      }));
+      });
+      return projectSessionEventsFor(ctx, session, rows);
     },
     outcomeMeta: (session: { outcomeMeta: unknown }) => deserializeJson(session.outcomeMeta),
     /**

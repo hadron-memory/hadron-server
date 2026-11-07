@@ -120,7 +120,7 @@ describe('usageEvents memoryId filter', () => {
     const locs = new Set(result.map((e: { nodeLoc: string | null }) => e.nodeLoc));
     expect(locs).toEqual(new Set(['alpha', 'beta']));
     // All belong to memory, not otherMemory (read through the exposed memoryId: the projection drops the non-SDL
-    // nodeId from another principal's row, which made a nodeId check trivially true; #3693 review, Dorian P3-2).
+    // nodeId from another principal's row, which made a nodeId check trivially true; #3694).
     const memoryIds = new Set(result.map((e: { memoryId: string | null }) => e.memoryId));
     expect(memoryIds).toEqual(new Set([memory.id]));
   });

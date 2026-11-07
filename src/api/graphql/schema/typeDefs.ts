@@ -1974,12 +1974,13 @@ export const typeDefs = `#graphql
     """
     lapsesAt: DateTime
     """
-    The session's latest 50 usage events in memories the caller can read
-    (hrn:node:hadronmemory.com:specs:cor:acl:090:01, ruling 0249). In the caller's own
-    session every event is whole. In any other session, an event another principal
-    recorded shows volume only: userId, organizationId and actionArgs are null,
-    appId is kept only when it is the calling App's own, and sessionId is this
-    session's id. Admins get the same.
+    The session's latest 50 usage events that touched no memory or a memory the
+    caller can read (hrn:node:hadronmemory.com:specs:cor:acl:090:01, ruling 0249).
+    In the caller's own session every event is whole. In any other session, an
+    event the caller did not record (another user's, or the App's) shows volume
+    only: userId, organizationId and actionArgs are null, appId is kept only when
+    it is the calling App's own, and sessionId is this session's id. Admins get the
+    same, and an impersonated read is not the target's own session.
     """
     events: [UsageEvent!]!
     """

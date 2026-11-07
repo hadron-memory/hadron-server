@@ -7,7 +7,7 @@ export function isAppKeyPrincipal(ctx: Context): boolean {
 
 /**
  * The UsageEvent fields another principal's row may show: volume, never identity or content (cor:acl:090:01).
- * An ALLOWLIST (#3693 review, Gloria P2): a column not named here is dropped from another principal's row, so a
+ * An ALLOWLIST (#3693): a column not named here is dropped from another principal's row, so a
  * new identity-bearing column fails closed. Every SDL field must be in exactly one of these two lists; the
  * classification test in resolvers.usageEventsIdentity3688.test.ts fails until a new field is placed.
  */
@@ -23,7 +23,7 @@ type UsageVolumeField = (typeof USAGE_VOLUME_FIELDS)[number];
 /**
  * Another principal's row as the projection returns it: the volume columns the input row has, and the identity
  * fields null (appId only the calling App's own). Any other column of the input row is absent, so a consumer that
- * reads one gets a type error, not a silent undefined (#3693 review, Gloria N1).
+ * reads one gets a type error, not a silent undefined (#3694).
  */
 export type VolumeOnlyUsageRow<T, S extends string | null = null> = Pick<T, Extract<keyof T, UsageVolumeField>> & {
   userId: null;
@@ -78,8 +78,7 @@ export function projectSessionEventsFor<T extends { userId: string | null; appId
   rows: T[],
 ): Array<T | VolumeOnlyUsageRow<T, string>> {
   if (ctx.userId && !ctx.impersonation && session.userId === ctx.userId) return rows;
-  // Every row here has sessionId = session.id (the resolver's where), so restoring it on a masked row is exact.
-  return projectUsageRowsFor(ctx, rows).map((row) =>
-    row.sessionId === null ? ({ ...row, sessionId: session.id } as VolumeOnlyUsageRow<T, string>) : row,
-  );
+  // The resolver selects only this session's rows, so every row's sessionId IS session.id: setting it on every
+  // projected row (own rows included) is exact, with no masked-row sentinel to depend on.
+  return projectUsageRowsFor(ctx, rows).map((row) => ({ ...row, sessionId: session.id }) as T | VolumeOnlyUsageRow<T, string>);
 }
