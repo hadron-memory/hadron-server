@@ -122,7 +122,9 @@ describe('#3694 — the caller\'s own session is own activity and stays whole (r
     const userless = (await db.session.create({ data: { id: generateId(), userId: null, appId } })).id;
     const row = generateId();
     await db.usageEvent.create({ data: { id: row, type: 'read', nodeLoc: 'shared', memoryId: null, sessionId: userless, userId: other.id, organizationId: orgId, appId, actionArgs: { q: 'userless' }, tokensIn: 19 } });
-    const rows = (await events(userless, ctx({ appId, appKeyId, userId: null } as Partial<Context>)))!;
+    // A null userId is a real runtime context (src/lib/auth/operatorConversion.ts builds one), though the type says
+    // string | undefined; null === null must not make a userless session "own".
+    const rows = (await events(userless, { db, appId, appKeyId, userId: null } as unknown as Context))!;
     expect(byId(rows, row)).toEqual({ ...volumeOnly(row, userless, 19, appId), memoryId: null });
   });
 
