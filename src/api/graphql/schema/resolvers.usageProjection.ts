@@ -39,7 +39,7 @@ export type VolumeOnlyUsageRow<T, S extends string | null = null> = Pick<T, Extr
  * touched. Ruling 0246 (#3688): this holds for every reader, admins and owners included. So a row that is not the
  * caller's own keeps only the volume fields above; its identity fields are null.
  *
- * A row is the caller's own when a user caller recorded it (row.userId is the caller). Those rows are own activity,
+ * A row is the caller's own when a user caller recorded it (row.userId is the caller, not under impersonation). Those rows are own activity,
  * which the caller already knows by having performed it, so they stay whole. An App key has no own activity (#2817),
  * so every row it reads is masked; its own App's appId is the caller's own identity and stays.
  *
@@ -49,8 +49,9 @@ export function projectUsageRowsFor<T extends { userId: string | null; appId: st
   ctx: Context,
   rows: T[],
 ): Array<T | VolumeOnlyUsageRow<T>> {
-  // An App key carries no userId (isAppKeyPrincipal), so no row is its own.
-  const self = ctx.userId;
+  // An App key carries no userId (isAppKeyPrincipal), so no row is its own. Under impersonation ctx.userId is the
+  // TARGET, not the reader, so no row is the reader's own either (cor:acl:100:03, cor:acl:090:02; #3702 §10).
+  const self = ctx.impersonation ? null : ctx.userId;
   return rows.map((row) => {
     if (self && row.userId === self) return row;
     const masked: Record<string, unknown> = {};
