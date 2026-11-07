@@ -52,16 +52,19 @@ export interface GrantRowLive extends GrantLiveFields {
 }
 
 /**
- * Lock the row, THEN judge it: one statement takes `FOR UPDATE` and computes the verdict from the locked row on the
- * database clock, so a revocation that committed before the lock was granted is seen (a guarded read that waits on a lock
- * keeps its pre-wait snapshot under REPEATABLE READ/SERIALIZABLE only if it judges first). Null when the row is absent.
+ * Lock the row, THEN judge it, in TWO statements. One `SELECT ... FOR UPDATE` is not enough: the projection that computes
+ * `live` can be evaluated BEFORE the lock is granted, so a grant that expired while the query waited behind another
+ * transaction's lock (one that did not change the row) would still read live. The first statement takes the lock; the
+ * second reads the row and the verdict on the database clock while the lock is held. Null when the row is absent.
  */
 export async function readGrantForUpdate(tx: Prisma.TransactionClient, id: string): Promise<{ row: GrantRowLive; live: boolean } | null> {
+  const locked = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`SELECT g.id FROM grants g WHERE g.id = ${id} FOR UPDATE`);
+  if (locked.length === 0) return null;
   const rows = await tx.$queryRaw<Array<{
     id: string; app_id: string; activated_at: Date | null; revoked_at: Date | null; starts_at: Date | null; expires_at: Date | null;
     max_uses: number | null; use_count: number; live: boolean;
   }>>(Prisma.sql`SELECT g.id, g.app_id, g.activated_at, g.revoked_at, g.starts_at, g.expires_at, g.max_uses, g.use_count,
-      ${grantLiveSql('g')} AS live FROM grants g WHERE g.id = ${id} FOR UPDATE`);
+      ${grantLiveSql('g')} AS live FROM grants g WHERE g.id = ${id}`);
   const r = rows[0];
   if (!r) return null;
   return {
