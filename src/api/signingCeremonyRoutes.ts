@@ -100,11 +100,12 @@ const focusTitle=()=>{$('title').focus();};
 function lines(parent,rows){const pre=el('pre');rows.forEach((l)=>{const s=el('div',(l.kind==='add'?'+ ':l.kind==='del'?'- ':'  ')+l.text,l.kind==='add'?'diff-add':l.kind==='del'?'diff-del':'');pre.appendChild(s);});parent.appendChild(pre);}
 function section(t){const s=el('section');s.appendChild(el('h2',t));return s;}
 function setTitle(t){$('title').textContent=t;document.title=t;}
+const LBL={title:'Title',abstract:'Summary',content:'Text'};
 const home=msg.parentNode;
 const stamp=(d)=>d.toLocaleString(undefined,{day:'numeric',month:'short',year:'numeric',hour:'numeric',minute:'2-digit',timeZoneName:'short'});
 function finish(title,text,v,when){home.appendChild(msg);view.replaceChildren();start.hidden=true;view.hidden=false;
  if(v)view.appendChild(el('p',v.node.title));
- if(when)view.appendChild(el('p',when+' '+stamp(new Date())));
+ if(when)view.appendChild(el('p',when+' '+stamp(new Date())+' (device time)'));
  view.appendChild(el('p',text));setTitle(title);say('');focusTitle();}
 function ended(state,v){const w={COMPLETED:'This request was already signed.',DECLINED:'This request was declined.',EXPIRED:'This request expired.',STALE:'The text changed after this was requested, so this request can no longer be signed.',WITHDRAWN:'The person who asked withdrew this request.'};
  finish('This request has ended',(w[state]||'This request has ended.')+' Ask for a new signature request to sign again.',v);}
@@ -113,7 +114,7 @@ function render(out, focusDecline=false){
  const v=out.view;
  const sum=el('section');
  sum.appendChild(el('p',v.requester.name+' asks you to sign "'+v.node.title+'".'));
- sum.appendChild(el('p',!v.previous?'No earlier signature.':!v.previous.kept?'Earlier text no longer kept.':(()=>{const ch=['title','abstract','content'].filter((k)=>v.previous.diff[k].some((r)=>r.kind!=='same'));return ch.length?'Changed since revision '+v.previous.revision+': '+ch.join(', ')+'.':'No change to the title, abstract or content since revision '+v.previous.revision+'.';})()));
+ sum.appendChild(el('p',!v.previous?'No earlier signature.':!v.previous.kept?'Earlier text no longer kept.':(()=>{const ch=['title','abstract','content'].filter((k)=>v.previous.diff[k].some((r)=>r.kind!=='same'));return ch.length?'Changed since revision '+v.previous.revision+': '+ch.map((k)=>LBL[k].toLowerCase()).join(', ')+'.':'No change to the title, summary or text since revision '+v.previous.revision+'.';})()));
  sum.appendChild(el('p','Signing records your approval of exactly this text.'));
  view.appendChild(sum);
  const meta=section('This request');
@@ -132,7 +133,7 @@ function render(out, focusDecline=false){
  const chg=section('Changes since the last signed revision');
  if(!v.previous)chg.appendChild(el('p','No earlier signature on this node.'));
  else if(!v.previous.kept)chg.appendChild(el('p','Earlier text no longer kept (revision '+v.previous.revision+').'));
- else{chg.appendChild(el('p','Compared with revision '+v.previous.revision+'.'));['title','abstract','content'].forEach((k)=>{const rows=v.previous.diff[k];if(rows.some((r)=>r.kind!=='same')){chg.appendChild(el('h3',k[0].toUpperCase()+k.slice(1)));lines(chg,rows);}});}
+ else{chg.appendChild(el('p','Compared with revision '+v.previous.revision+'.'));['title','abstract','content'].forEach((k)=>{const rows=v.previous.diff[k];if(rows.some((r)=>r.kind!=='same')){chg.appendChild(el('h3',LBL[k]));lines(chg,rows);}});}
  view.appendChild(chg);
  const actions=el('div');
  const bar=el('div',undefined,'bar');const stat=el('div');

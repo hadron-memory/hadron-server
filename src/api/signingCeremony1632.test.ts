@@ -584,7 +584,9 @@ describe('#3699 signing page slice 2: summary first, sticky bar, status in the b
     const second = await openRequest();
     const p2 = await prove(second.id, signer, { counter: 3 });
     const changed = await renderedProof(second.id, p2.json);
-    expect(changed.texts(changed.ids.view)).toContain(`Changed since revision ${first.revision}: content.`);
+    expect(changed.texts(changed.ids.view)).toContain(`Changed since revision ${first.revision}: text.`);
+    expect(all(changed.ids.view).filter((e) => e.tag === 'h3').map((e) => e.textContent)).toContain('Text');
+    expect(all(changed.ids.view).filter((e) => e.tag === 'h3').map((e) => e.textContent)).not.toContain('Content');
     await db.nodeRevision.deleteMany({ where: { nodeId, revNo: first.revision } });
     const p3 = await prove(second.id, signer, { counter: 4 });
     const gone = await renderedProof(second.id, p3.json);
@@ -642,7 +644,7 @@ describe('#3699 signing page slice 2: summary first, sticky bar, status in the b
     await page.button('Yes, decline').listeners.click();
     const t = page.texts(page.ids.view);
     expect(t).toContain(TITLE);
-    expect(t.find((x) => x.startsWith('Declined '))).toMatch(/^Declined .*\d{4}/);
+    expect(t.find((x) => x.startsWith('Declined '))).toMatch(/^Declined .*\d{4}.*\(device time\)$/);
     expect(t).toContain('You declined this request. You can close this page.');
     expect(page.ids.msg.parent).toBe(page.dom.root);
     page.verify();
