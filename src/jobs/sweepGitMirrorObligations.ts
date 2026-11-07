@@ -13,6 +13,7 @@ import { Prisma } from '../generated/prisma/index.js';
 import { mirrorRetryBranchEligibleSql } from '../integrations/github/mirrorBranchEligibility.js';
 import { mutateMirrorFiles, hasIncompleteMirrorMutation } from '../integrations/github/mirrorFileMutation.js';
 import type { MirrorObligationRef } from '../integrations/github/mirrorObligations.js';
+import { removableSidecarEdgesFile } from '../integrations/localFs/legacySidecar.js';
 import { toNaiveUtc } from '../lib/sessionActivity.js';
 
 export const MAX_ATTEMPTS = 10;
@@ -123,7 +124,10 @@ export async function gitMirrorSweepTick(db: PrismaClient, now = new Date()): Pr
               // Root README must never snapshot/delete its entire checkout as a legacy path.
               if (!loc) return [file];
               const legacy = orphanedLegacyPaths(localPath, loc);
-              return [file, legacy.readme, legacy.sidecar];
+              // #3264: checkpoint exactly the files the writers may remove, never a sidecar directory.
+              // Reserved or foreign sidecars list nothing. An emptied sidecar directory needs no restore.
+              const edges = removableSidecarEdgesFile(legacy.sidecar);
+              return edges ? [file, legacy.readme, edges] : [file, legacy.readme];
             };
             const failedOperation = (err: unknown) => {
               console.error('[git-mirror-sweep] File mutation failed', mirrorFailureMetadata(err, 'tree', 'TREE_WRITE'));

@@ -230,9 +230,9 @@ export function buildEdgeFrontmatter(outgoingEdges: EdgeForGit[]): Array<Record<
 function locToSegments(loc: string): string[] {
   const parts = loc.split(':');
   for (const p of parts) {
-    if (p === '' || p === '.' || p === '..' || /[/\\]/.test(p)) {
+    if (p === '' || p === '.' || p === '..' || /[/\\]/.test(p) || p.toLowerCase() === '.git') {
       throw new Error(
-        `Unsafe loc "${loc}": empty, '.', '..', or path-separator segments are not allowed`,
+        `Unsafe loc "${loc}": empty, '.', '..', '.git', or path-separator segments are not allowed`,
       );
     }
   }

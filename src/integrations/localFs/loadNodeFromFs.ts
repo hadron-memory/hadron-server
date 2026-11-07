@@ -3,6 +3,7 @@ import { validateNodeDataExtractionSpecs } from '../../lib/edge-conditions/reser
 import { governedSignalsFromMirror } from '../../lib/governedSignals.js';
 import { join, relative, sep, basename, dirname } from 'path';
 import { parse } from 'yaml';
+import { isReservedSidecarName } from './legacySidecar.js';
 import type { Node } from '../../index.d.js';
 import { NodeAbstractTooLongError } from '../../lib/entityRef/errors.js';
 import { computeContentHash } from '../../lib/contentHash.js';
@@ -637,6 +638,8 @@ function loadSidecarEdges(mdPath: string): Array<LoadedEdge> {
     ? join(dirname(dir), '.' + basename(dir))   // server/README.md → .server/
     : join(dir, '.' + fileName);                 // architecture.md → .architecture/
 
+  // #3264: cleanup refuses reserved directories, so an edges.yaml there must not mask inline edges.
+  if (isReservedSidecarName(basename(sidecarDir))) return [];
   const edgesPath = join(sidecarDir, 'edges.yaml');
   if (!existsSync(edgesPath)) return [];
 
