@@ -45,6 +45,9 @@ describe('#2836 eligible-row index: lockstep and list drift', () => {
   });
 });
 
+/** server_version_num of PostgreSQL 16.0, the first release with EXPLAIN (GENERIC_PLAN). */
+const MIN_GENERIC_PLAN_VERSION_NUM = 160000;
+
 describe('#2836 eligible-row index: both walk legs scan it', () => {
   let memoryId: string;
 
@@ -68,36 +71,33 @@ describe('#2836 eligible-row index: both walk legs scan it', () => {
   type PlanNode = { 'Node Type': string; 'Relation Name'?: string; 'Index Name'?: string; Plans?: PlanNode[] };
   const flatten = (n: PlanNode): PlanNode[] => [n, ...(n.Plans ?? []).flatMap(flatten)];
 
-  it.each([['root', ''], ['a message-only branch', 'team-chat'], ['the messages prefix', 'team-chat:messages']])(
+  it.for([['root', ''], ['a message-only branch', 'team-chat'], ['the messages prefix', 'team-chat:messages']] as const)(
     '%s: every scan of nodes is an index scan of the eligible-row index, chooser, walk legs and flat blocks',
-    async (_label, parent) => {
+    async ([, parent], ctx) => {
+      // EXPLAIN (GENERIC_PLAN) needs PostgreSQL 16+, but README.md advertises PostgreSQL 15+ (#3639).
+      // Below 16 this pin is SKIPPED, visibly, rather than failing or being replaced by an observer
+      // whose plans were never compared with GENERIC_PLAN's. Hosted CI (16) and compose (17) run it.
+      const versionClient = new Client({ connectionString: process.env.DATABASE_URL });
+      await versionClient.connect();
+      let serverVersionNum: number;
+      try {
+        serverVersionNum = Number((await versionClient.query('SHOW server_version_num')).rows[0].server_version_num);
+      } finally {
+        await versionClient.end();
+      }
+      if (serverVersionNum < MIN_GENERIC_PLAN_VERSION_NUM) {
+        ctx.skip(`EXPLAIN (GENERIC_PLAN) needs PostgreSQL 16+; this server is ${serverVersionNum}`);
+      }
       const q = locSegmentsWalkSql({ memoryIds: [memoryId], excludeNodeIds: [], parent, limit: 20, after: null });
-      // A cached prepared statement can switch to a GENERIC plan, planned without the bound values, so
-      // the pin holds only if the predicate itself (the inlined literal) implies the index's; a bound
-      // list does not. EXPLAIN (GENERIC_PLAN) would plan the application's own $n text that way but
-      // needs PG16+, below the PG15 floor in README.md. PREPARE + plan_cache_mode = force_generic_plan
-      // + EXPLAIN EXECUTE (PG12+) plans the same text generically on every supported version.
+      // A cached prepared statement can switch to a GENERIC plan, planned without the bound values.
+      // EXPLAIN (GENERIC_PLAN) (PG16+) plans the application's own $n text that way, so the pin holds
+      // only if the predicate itself (the inlined literal) implies the index's; a bound list does not.
       // Prisma refuses $n text without values, so this goes over a raw connection on the per-worker DATABASE_URL.
       const pg = new Client({ connectionString: process.env.DATABASE_URL });
       await pg.connect();
-      const literal = (v: unknown): string => {
-        if (v === null) return 'NULL';
-        if (Array.isArray(v)) return v.length ? `ARRAY[${v.map(literal).join(',')}]::text[]` : 'ARRAY[]::text[]';
-        if (typeof v === 'number' || typeof v === 'boolean') return String(v);
-        if (typeof v === 'string') return pg.escapeLiteral(v);
-        throw new Error(`unsupported fixture parameter ${typeof v}`);
-      };
       let plan: PlanNode;
       try {
-        await pg.query(`PREPARE seg2836 AS ${q.text}`);
-        await pg.query('SET plan_cache_mode = force_generic_plan');
-        const execute = `EXECUTE seg2836(${q.values.map(literal).join(',')})`;
-        plan = (await pg.query(`EXPLAIN (FORMAT JSON) ${execute}`)).rows[0]['QUERY PLAN'][0].Plan;
-        // Prove the plan observed was the generic one the cached statement would use, not a custom plan.
-        await pg.query(execute);
-        const used = await pg.query("SELECT generic_plans::int AS g, custom_plans::int AS c FROM pg_prepared_statements WHERE name = 'seg2836'");
-        expect(used.rows[0].c).toBe(0);
-        expect(used.rows[0].g).toBeGreaterThan(0);
+        plan = (await pg.query(`EXPLAIN (FORMAT JSON, GENERIC_PLAN) ${q.text}`)).rows[0]['QUERY PLAN'][0].Plan;
       } finally {
         await pg.end();
       }
