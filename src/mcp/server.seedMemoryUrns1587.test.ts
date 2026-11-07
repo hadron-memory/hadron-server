@@ -1,6 +1,6 @@
 /** #1587: run the real fixture writer, then reuse its personal-memory addresses through registered MCP handlers.
  * cor:urn:010:01 has exactly one memory slug atom. No grammar, aliases or existing data are changed here.
- * QA separately runs the re-seeded fixture over the mounted server; this is the in-process MCP handler harness.
+ * Gate QA must separately run the re-seeded fixture over the mounted server; this is the in-process MCP handler harness.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { execFile } from 'node:child_process';
@@ -12,6 +12,7 @@ import { createTestableMcpServer } from './server.js';
 import { emitNodeUrnV2 } from '../lib/urnEmit.js';
 import { splitNodeUrn } from '../lib/urn.js';
 import { mintMemoryUrnV2 } from '../lib/mintMemoryUrnV2.js';
+import type { AuthContext } from '../middleware/auth.js';
 
 const exec = promisify(execFile);
 let mike: { id: string; roles: string[] };
@@ -37,7 +38,7 @@ async function fixture(root: string) {
   const memory = personal.find(m => m.appId === app.id)!;
   expect(memory).toBeDefined();
   expect(memory.userId).toBe(mike.id);
-  const client = createTestableMcpServer({ userId: mike.id, roles: mike.roles, clientId: `user:${mike.id}` });
+  const client = createTestableMcpServer({ userId: mike.id, roles: mike.roles as NonNullable<AuthContext['roles']>, clientId: `user:${mike.id}` });
   expect(await client.callToolText('hadron_set_active_app', { app: `hrn:app:${app.urn}` })).not.toMatch(/not found|not authenticated/i);
   return { memory, client };
 }
