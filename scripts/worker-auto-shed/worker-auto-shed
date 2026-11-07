@@ -72,7 +72,8 @@ Rebuild your state from the durable record, then continue your assigned work:
    mid-operation; verify or clean up before continuing.
 5. Your predecessor's full transcript snapshot is in
    $STATE_DIR/ (${name}-transcript-*.jsonl, newest) if you need a specific detail.
-6. Post one line to the team chat that you auto-shed and recovered, then carry on.
+6. Post nothing to the team chat about the shed; post one line only if the shed
+   outlasted about 5 minutes while something was waiting on you. Then carry on.
 EOF
 }
 
