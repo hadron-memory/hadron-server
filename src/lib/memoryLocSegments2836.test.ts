@@ -5,11 +5,13 @@
  * - Drift: the index's WHERE clause (migration and post-push.sql, byte for byte) is the walk's
  *   predicate, built from UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES plus comment. Adding a type to
  *   the default without a new index migration fails here.
- * - Reachability: EXPLAIN of the exact application query shows both walk legs scanning the
- *   partial index (a predicate the planner cannot prove would silently fall back to the full one).
+ * - Reachability: EXPLAIN of the exact application query, with the full index out of the planner's
+ *   choice, shows every leg scanning the partial index. A predicate the planner cannot prove fails
+ *   here. Which index it PREFERS is not pinned: that follows the index's density across the table
+ *   (#3650). memoryLocSegments3596.test.ts observes the choice on a populated table.
  */
 import { readFileSync } from 'node:fs';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { Client } from 'pg';
 import { db } from '../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph } from '../test/helpers.js';
@@ -50,6 +52,19 @@ const MIN_GENERIC_PLAN_VERSION_NUM = 160000;
 
 describe('#2836 eligible-row index: both walk legs scan it', () => {
   let memoryId: string;
+
+  // #3650: earlier files in a worker leave the partial index mostly empty pages (cleanDb DELETEs, VACUUM keeps
+  // the pages, and REINDEX keeps dead entries while any transaction is open on the server). Three live rows
+  // under those pages price it above the full index, whatever the query says. The churn makes that history the
+  // fixture's own, so this file cannot pass only because it ran first in its worker.
+  beforeAll(async () => {
+    await cleanDb(db);
+    const churn = ((await createDbOrgAndGraph(db, { orgName: 'seg-2836-churn', graphName: 'seg2836/churn' })).graph as { id: string }).id;
+    await db.$executeRaw`
+      INSERT INTO nodes (id, memory_id, loc, name, updated_at)
+      SELECT 'churn-' || g, ${churn}, 'churn:' || lpad(g::text, 6, '0'), 'n', now() FROM generate_series(1, 20000) g`;
+    await db.$executeRaw`DELETE FROM nodes WHERE memory_id = ${churn}`;
+  });
 
   beforeEach(async () => {
     await cleanDb(db);
@@ -97,20 +112,25 @@ describe('#2836 eligible-row index: both walk legs scan it', () => {
       await pg.connect();
       let plan: PlanNode;
       try {
+        // Reachability, independent of density: only the partial index can serve this ORDER BY here, so a
+        // predicate that does not imply its WHERE clause leaves a seq scan or a sort, and the checks below fail.
+        await pg.query('BEGIN');
+        await pg.query('DROP INDEX IF EXISTS nodes_memory_segment_key_idx');
+        await pg.query('SET LOCAL enable_seqscan = off');
+        await pg.query('SET LOCAL enable_sort = off');
+        await pg.query('SET LOCAL enable_bitmapscan = off');
         plan = (await pg.query(`EXPLAIN (FORMAT JSON, GENERIC_PLAN) ${q.text}`)).rows[0]['QUERY PLAN'][0].Plan;
       } finally {
+        await pg.query('ROLLBACK').catch(() => {});
         await pg.end();
       }
-      const nodes = flatten(plan);
-      const scans = nodes.filter((n) => n['Relation Name'] === 'nodes');
+      const scans = flatten(plan).filter((n) => n['Relation Name'] === 'nodes');
       // Hybrid: chooser + two skip legs + flat seed/continuation; every site must use the eligible index.
       expect(scans).toHaveLength(5);
       for (const s of scans) {
         expect(s['Node Type']).toBe('Index Scan');
         expect(s['Index Name']).toBe(SEGMENT_ELIGIBLE_INDEX);
       }
-      // The final ORDER BY sorts the few walk rows; a sort or bitmap OVER nodes would replace an Index Scan above.
-      expect(nodes.some((n) => /Bitmap/.test(n['Node Type']))).toBe(false);
     },
   );
 });
