@@ -109,16 +109,6 @@ ALTER TABLE "grants" ADD CONSTRAINT "grants_action_fkey" FOREIGN KEY ("action") 
 
 -- AddForeignKey
 ALTER TABLE "grant_events" ADD CONSTRAINT "grant_events_app_id_fkey" FOREIGN KEY ("app_id") REFERENCES "apps"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-┌─────────────────────────────────────────────────────────┐
-│  Update available 6.19.2 -> 8.0.0-rc.33                 │
-│                                                         │
-│  This is a major update - please follow the guide at    │
-│  https://pris.ly/d/major-version-upgrade                │
-│                                                         │
-│  Run the following to update                            │
-│    npm i --save-dev prisma@latest                       │
-│    npm i @prisma/client@latest                          │
-└─────────────────────────────────────────────────────────┘
 
 
 -- #3668 (S1a): the database half of the grant row, its events and the actions table. One source, shared verbatim with the
