@@ -9053,7 +9053,7 @@ export const typeDefs = `#graphql
 
     Scope (#2817, hrn:node:hadronmemory.com:specs:cor:acl:090:01): naming NO resource (no memoryId,
     nodeId or loc) reads the caller's OWN activity, the events attributed to the calling user in any
-    memory. An App key has no own activity and gets an empty list, not an error. Naming a resource
+    memory or none. An App key has no own activity and gets an empty list, not an error. Naming a resource
     reads every principal's events there, gated on READ access to the memory (#250: org membership /
     subscriptions / public / owned personal+private per spec 034; ADMIN/OWNER see all EXCEPT another
     user's personal/private memories and, per spec 047, another user's user-owned memories). A

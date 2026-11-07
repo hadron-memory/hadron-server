@@ -155,7 +155,7 @@ const post = (base: string, body: unknown): Promise<Reply> =>
 const Query = resolvers.Query as Record<string, (...a: unknown[]) => unknown>;
 let nodeSpy: ReturnType<typeof vi.spyOn>;
 let edgesSpy: ReturnType<typeof vi.spyOn>;
-let usageSpy: ReturnType<typeof vi.spyOn>;
+let sessionsSpy: ReturnType<typeof vi.spyOn>;
 let serverInfoSpy: ReturnType<typeof vi.spyOn>;
 let logSpy: { mock: { calls: unknown[][] }; mockRestore(): void };
 
@@ -164,7 +164,7 @@ const l4Lines = (): Array<Record<string, unknown>> =>
 const noResolverCalls = () => {
   expect(nodeSpy).not.toHaveBeenCalled();
   expect(edgesSpy).not.toHaveBeenCalled();
-  expect(usageSpy).not.toHaveBeenCalled();
+  expect(sessionsSpy).not.toHaveBeenCalled();
   expect(serverInfoSpy).not.toHaveBeenCalled();
 };
 
@@ -172,11 +172,11 @@ beforeAll(() => {
   nodeSpy = vi.spyOn(Query, 'node').mockResolvedValue(null as never);
   edgesSpy = vi.spyOn(Query, 'edges').mockResolvedValue({ items: [], total: 0 } as never);
   // #2817: `usageEvents` now clamps through pageArgs (PAGE_ARGS_FIELDS), so the raw-size stand-in is `sessions`.
-  usageSpy = vi.spyOn(Query, 'sessions').mockResolvedValue([] as never);
+  sessionsSpy = vi.spyOn(Query, 'sessions').mockResolvedValue([] as never);
   serverInfoSpy = vi.spyOn(Query, 'serverInfo').mockResolvedValue({ version: 'test' } as never);
 });
 beforeEach(() => {
-  nodeSpy.mockClear(); edgesSpy.mockClear(); usageSpy.mockClear(); serverInfoSpy.mockClear();
+  nodeSpy.mockClear(); edgesSpy.mockClear(); sessionsSpy.mockClear(); serverInfoSpy.mockClear();
   logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined) as unknown as typeof logSpy;
 });
 afterEach(() => { logSpy.mockRestore(); });
@@ -421,7 +421,7 @@ describe('cost (graphql-query-complexity), enforce', () => {
       const b = await post(base, { query: doc, operationName: 'B' });
       expect((await b.json()).errors).toBeUndefined();
       expect(serverInfoSpy).toHaveBeenCalledTimes(1);
-      expect(usageSpy).not.toHaveBeenCalled();
+      expect(sessionsSpy).not.toHaveBeenCalled();
       expect(l4Lines().filter((l) => l.outcome !== 'near_limit')).toEqual([]);
       const a = await post(base, { query: doc, operationName: 'A' });
       expect(a.status).toBe(400);
@@ -457,7 +457,7 @@ describe('modes', () => {
     const res = await post(base, { query: 'query Probe($m: String) { MARKER_ALIAS_QQ: sessions(limit: 2147483647, repo: $m) { id } }', variables: { m: marker } });
     const body = await res.json();
     expect(body.errors).toBeUndefined();
-    expect(usageSpy).toHaveBeenCalledTimes(1);
+    expect(sessionsSpy).toHaveBeenCalledTimes(1);
     const lines = l4Lines().filter((l) => l.outcome === 'would_refuse');
     expect(lines).toHaveLength(1);
     expect(lines[0]).toMatchObject({ mode: 'observe', outcome: 'would_refuse', limit: 'cost', max: 200_000, operationType: 'query', operationName: 'Probe', principal: 'anonymous' });
@@ -470,10 +470,10 @@ describe('modes', () => {
   it('the same request is refused under enforce and admitted under observe: only the environment differs', async () => {
     const enforce = await post(await boot({ GRAPHQL_COMPLEXITY_MODE: 'enforce' }), over);
     expect(enforce.status).toBe(400);
-    expect(usageSpy).not.toHaveBeenCalled();
+    expect(sessionsSpy).not.toHaveBeenCalled();
     const observe = await post(await boot({ GRAPHQL_COMPLEXITY_MODE: 'observe' }), over);
     expect((await observe.json()).errors).toBeUndefined();
-    expect(usageSpy).toHaveBeenCalledTimes(1);
+    expect(sessionsSpy).toHaveBeenCalledTimes(1);
   });
 
   it('an unset mode is enforce, and off, Observe, an empty value or a number refuse boot without echoing it', async () => {

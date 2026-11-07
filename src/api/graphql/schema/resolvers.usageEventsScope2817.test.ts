@@ -44,7 +44,7 @@ const asMe = () => ctx({ userId: me.id, roles: ['READER'] });
 const asKey = () => ctx({ appId: app.id, appKeyId, organizationId: undefined, roles: [] });
 
 const ev = (o: { userId?: string | null; memoryId?: string | null; nodeLoc?: string; type?: string; createdAt?: Date; id?: string }) => ({
-  id: o.id ?? generateId(), type: (o.type ?? 'read') as 'read', nodeLoc: o.nodeLoc ?? 'x', memoryId: o.memoryId ?? null, userId: o.userId ?? null,
+  id: o.id ?? generateId(), type: o.type ?? 'read', nodeLoc: o.nodeLoc ?? 'x', memoryId: o.memoryId ?? null, userId: o.userId ?? null,
   ...(o.createdAt ? { createdAt: o.createdAt } : {}),
 });
 const ids = (rows: Array<{ id: string }>) => rows.map(r => r.id).sort();
@@ -92,6 +92,12 @@ describe('#2817 item 1 — an App key is admitted', () => {
   it('naming a memory it can read answers that memory\'s resource scope (every principal\'s events)', async () => {
     expect(ids(await list({ memoryId: appMem.id }, asKey()))).toEqual([otherInApp]);
     expect(ids((await page({ memoryId: appMem.urn }, asKey())).items)).toEqual([otherInApp]);
+  });
+
+  it('an invalid window is still BAD_USER_INPUT for an App key, checked before any resource (Gloria P3-7)', async () => {
+    const bad = { since: '2026-01-02T00:00:00Z', until: '2026-01-01T00:00:00Z' };
+    await expect(list(bad, asKey())).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    await expect(page({ ...bad, memoryId: memB.id }, asKey())).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
   });
 
   it('naming a memory it cannot read answers MEMORY_NOT_FOUND, exactly like a missing one', async () => {
