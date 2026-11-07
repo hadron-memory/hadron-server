@@ -139,6 +139,27 @@ describe('UPDATE guard: a row ends once, loses an erased issuer, follows a merge
     expect((await query<{ issuer_user_id: string; user_id: string; requested_by_user_id: string }>('SELECT issuer_user_id, user_id, requested_by_user_id FROM grants WHERE id = $1', id))[0])
       .toEqual({ issuer_user_id: w.user2Id, user_id: w.user2Id, requested_by_user_id: w.user2Id });
   });
+  const LINKS: Array<[string, Record<string, unknown>]> = [
+    ['user_id', {}], ['issuer_user_id', { issuer_user_id: 'U' }], ['requested_by_user_id', { requested_by_user_id: 'U' }],
+  ];
+  for (const [col, extra] of LINKS) {
+    it(`${col} alone: refused without a recorded merge, refused to a different user, allowed to the recorded survivor`, async () => {
+      const id = await insertGrant(w, Object.fromEntries(Object.entries(extra).map(([k, v]) => [k, v === 'U' ? w.userId : v])));
+      const set = `UPDATE grants SET ${col} = $2 WHERE id = $1`;
+      await refused(exec(set, id, w.user2Id), /grants are append-only/);
+      const third = await db.user.create({ data: { handle: `g3-${col}` } });
+      await recordMerge(w.userId, w.user2Id);
+      await refused(exec(set, id, third.id), /grants are append-only/);
+      await exec(set, id, w.user2Id);
+      expect((await query<Record<string, string>>(`SELECT ${col} FROM grants WHERE id = $1`, id))[0][col]).toBe(w.user2Id);
+    });
+  }
+  it('verified_by alone follows the same rule', async () => {
+    const id = await insertGrantUnguarded(w, { activated_at: raw(DB_NOW), verified_by: w.userId });
+    await refused(exec(`UPDATE grants SET verified_by = $2 WHERE id = $1`, id, w.user2Id), /grants are append-only/);
+    await recordMerge(w.userId, w.user2Id);
+    await exec(`UPDATE grants SET verified_by = $2 WHERE id = $1`, id, w.user2Id);
+  });
   it('a recorded merge moves person links only: no other column, no App, no change of holder kind, nothing to a different user', async () => {
     const id = await insertGrant(w, { issuer_user_id: w.userId });
     await recordMerge(w.userId, w.user2Id);

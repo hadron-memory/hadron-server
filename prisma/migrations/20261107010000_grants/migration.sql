@@ -170,7 +170,7 @@ BEGIN
   END IF;
   IF TG_OP = 'INSERT' THEN
     IF NEW.activated_at IS NOT NULL OR NEW.verification_kind IS NOT NULL OR NEW.verified_by IS NOT NULL
-       OR NEW.signature_id IS NOT NULL OR NEW.revoked_at IS NOT NULL OR NEW.revoked_by IS NOT NULL
+       OR NEW.signature_id IS NOT NULL OR NEW.revoked_by IS NOT NULL -- (revoked_at alone is refused by the pair CHECK)
        OR NEW.use_count <> 0 OR NEW.version <> 1 THEN
       RAISE EXCEPTION 'grants must arrive pending' USING ERRCODE = '23514';
     END IF;

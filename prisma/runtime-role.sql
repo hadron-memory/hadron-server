@@ -81,10 +81,6 @@ BEGIN
   LOOP
     EXECUTE format('REVOKE ALL ON TABLE %s FROM %I', tbl.rel, serve);
     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %s TO %I', tbl.rel, serve);
-    -- #3668: `actions` is written only by the deploy-time upsert, as the owner; the serve role reads it.
-    IF tbl.rel::oid = to_regclass('public.actions')::oid THEN
-      EXECUTE format('REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE %s FROM %I', tbl.rel, serve);
-    END IF;
   END LOOP;
 
   EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM %I', serve);
@@ -100,6 +96,8 @@ BEGIN
   IF to_regclass('public._prisma_migrations') IS NOT NULL THEN
     EXECUTE format('REVOKE ALL ON TABLE public._prisma_migrations FROM %I', serve);
   END IF;
+  -- #3668: `actions` is written only by the deploy-time upsert, as the owner; the serve role reads it (a table created later
+  -- is revoked by scripts/db/revoke-runtime-migrations.ts after migrate).
   IF to_regclass('public.actions') IS NOT NULL THEN
     EXECUTE format('REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE public.actions FROM %I', serve);
   END IF;
