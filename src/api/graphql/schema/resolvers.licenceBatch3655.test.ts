@@ -8,7 +8,7 @@
  * linear. Behaviour is pinned separately: the differential at the end holds the batch to the single helpers, and every
  * existing #1148/#3653 pin is unchanged.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -103,6 +103,7 @@ describe('#3655: per-row licence and text reads do not grow with the roster', ()
       const map = await getAppMemoryCandidates(client, f.appId, { allAgents: true, callerUserId: f.viewerId });
       return f.systemIds.filter(id => map.has(id)).length;
     });
+    expect(cost[1], `the counter saw the per-row reads: ${JSON.stringify(cost)}`).toBeGreaterThan(0);
     expect(cost[4], JSON.stringify(cost)).toBe(cost[1]);
   });
 
@@ -112,6 +113,7 @@ describe('#3655: per-row licence and text reads do not grow with the roster', ()
       const ids = new Set(folds.flatMap(fold => [...fold.map.keys()]));
       return f.systemIds.filter(id => ids.has(id)).length;
     });
+    expect(cost[1], `the counter saw the per-row reads: ${JSON.stringify(cost)}`).toBeGreaterThan(0);
     expect(cost[4], JSON.stringify(cost)).toBe(cost[1]);
   });
 
@@ -136,11 +138,13 @@ describe('#3655: per-row licence and text reads do not grow with the roster', ()
       expect(folds.filter(fold => fold.map.has(systemMemoryId)).length, `all ${n} Apps folded`).toBe(n);
       cost[n] = counter.n;
     }
+    expect(cost[1], `the counter saw the per-row reads: ${JSON.stringify(cost)}`).toBeGreaterThan(0);
     expect(cost[4], JSON.stringify(cost)).toBe(cost[1]);
   });
 
   it('readableInstallMemoryIds (installMemory.ts)', async () => {
     const cost = await costAt(async (f, client) => (await readableInstallMemoryIds(client, viewer(f, client))).length);
+    expect(cost[1], `the counter saw the per-row reads: ${JSON.stringify(cost)}`).toBeGreaterThan(0);
     expect(cost[4], JSON.stringify(cost)).toBe(cost[1]);
   });
 
@@ -152,6 +156,7 @@ describe('#3655: per-row licence and text reads do not grow with the roster', ()
       expect((await activeAppInstallLicenseIdsForAgent(client, agentId, appIds)).size, `all ${n} Apps licensed`).toBe(n);
       cost[n] = counter.n;
     }
+    expect(cost[1], `the counter saw the per-row reads: ${JSON.stringify(cost)}`).toBeGreaterThan(0);
     expect(cost[4], JSON.stringify(cost)).toBe(cost[1]);
   });
 
@@ -168,7 +173,43 @@ describe('#3655: per-row licence and text reads do not grow with the roster', ()
       expect(served.every(s => s.content === 'SYNTHETIC 3655'), `all ${n} served`).toBe(true);
       cost[n] = counter.n;
     }
+    expect(cost[1], `the counter saw the per-row reads: ${JSON.stringify(cost)}`).toBeGreaterThan(0);
     expect(cost[4], JSON.stringify(cost)).toBe(cost[1]);
+  });
+});
+
+describe('#3655: the counter counts', () => {
+  it('one single-helper licence check through the counted client is seen as its Agent, OrgMember and AgentSubscription reads', async () => {
+    const f = await build(1);
+    const { client, counter } = counted();
+    expect(await personalOrgAgentLicenseHolds(client, { organizationId: null, ownerUserId: f.ownerId }, f.agentIds[0])).toBe(true);
+    expect(new Set(counter.ops.map(op => op.split('.')[0]))).toEqual(PER_ROW_MODELS);
+  });
+});
+
+describe('#3655: the cross-App licence batch keeps each App to its own rows', () => {
+  it('a grant licenses only its own org, and a deleted org licenses nothing through a retained grant or subscription', async () => {
+    await cleanDb(db);
+    const org = async (name: string, deletedAt: Date | null = null) =>
+      (await db.organization.create({ data: { id: generateId(), name, urn: `${name}3655x.test`, deletedAt } })).id;
+    const [publisher, granted, ungranted, gone] = [await org('publisher'), await org('granted'), await org('ungranted'), await org('gone', new Date())];
+    const owner = (await db.user.create({ data: { id: generateId(), handle: 'owner3655x', roles: ['READER'] } })).id;
+    const agent = async (name: string, organizationId: string, visibility: 'ORGANIZATION' | 'PUBLIC') =>
+      db.agent.create({ data: { id: generateId(), name, urn: `${name}3655x.test:agent`, organizationId, visibility }, select: { id: true, organizationId: true, ownerUserId: true } });
+    const foreign = await agent('foreign', publisher, 'ORGANIZATION');
+    const goneOwned = await agent('gone-public', gone, 'PUBLIC');
+    await db.agentOrgGrant.createMany({ data: [
+      { orgId: granted, agentId: foreign.id, activatedAt: new Date('2020-01-01') },
+      { orgId: gone, agentId: foreign.id, activatedAt: new Date('2020-01-01') },
+    ] });
+    await db.agentSubscription.create({ data: { userId: owner, agentId: goneOwned.id, activatedAt: new Date('2020-01-01') } });
+    const licensed = await activeAgentInstallLicenseIdsAcross(db, [
+      { app: { organizationId: granted, ownerUserId: null }, agents: [foreign] },
+      { app: { organizationId: ungranted, ownerUserId: null }, agents: [foreign] },
+      { app: { organizationId: gone, ownerUserId: null }, agents: [foreign] },
+      { app: { organizationId: null, ownerUserId: owner }, agents: [goneOwned] },
+    ]);
+    expect(licensed.map(set => [...set])).toEqual([[foreign.id], [], [], []]);
   });
 });
 
