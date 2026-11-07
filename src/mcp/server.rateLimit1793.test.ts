@@ -7,7 +7,7 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { FixtureLifetime } from '../test/fixtureLifetime.js';
 import { closeFixtureResources } from '../test/fixtureResources.js';
-import { FORCED_REMAINING_MS, RATE_WINDOW_TEST_TIMEOUT_MS, untilRateWindowRemaining, withinOneRateWindow } from '../test/rateWindow.js';
+import { FORCED_PHASE_HOOK_TIMEOUT_MS, RATE_WINDOW_TEST_TIMEOUT_MS, forceRateWindowSleepZone, withinOneRateWindow } from '../test/rateWindow.js';
 import { createServer } from '../server.js';
 import { signJwt } from '../auth/jwt.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../middleware/auth.js';
@@ -197,6 +197,6 @@ fixtureIt('#1793 transient policy read failure leaves /ready healthy when the DB
 /** #3480 red-first, MCP twin: the same forced phase through a `fixtureIt` site and its budget. */
 describe('#3480 forced phase: the boundary-forcing sleep fits the MCP site budget', () => {
   // The sites never change the class window, so the seeded default is the one in force.
-  beforeEach(() => untilRateWindowRemaining(db, DEFAULTS.FAN_OUT_READS.windowSeconds, FORCED_REMAINING_MS), 130_000);
+  beforeEach(() => forceRateWindowSleepZone(db, DEFAULTS.FAN_OUT_READS.windowSeconds), FORCED_PHASE_HOOK_TIMEOUT_MS);
   fixtureIt('the empty-scope site passes with under 5 s left in the window', emptyScopeSite, RATE_WINDOW_TEST_TIMEOUT_MS);
 });

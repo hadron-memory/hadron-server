@@ -2,7 +2,7 @@ import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { PrismaClient } from '../../generated/prisma/index.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
-import { FORCED_REMAINING_MS, RATE_WINDOW_TEST_TIMEOUT_MS, untilRateWindowRemaining, withinOneRateWindow } from '../../test/rateWindow.js';
+import { FORCED_PHASE_HOOK_TIMEOUT_MS, RATE_WINDOW_TEST_TIMEOUT_MS, forceRateWindowSleepZone, withinOneRateWindow } from '../../test/rateWindow.js';
 import { admitRate, admitRateInTx, assertRateReadiness, cleanupRateBuckets, configFence, RateLimited } from './index.js';
 import { beginRateKeyOverlap, retireRateKey } from './lifecycle.js';
 import { DEFAULTS, readRateKeys } from './config.js';
@@ -357,6 +357,6 @@ it.each(['CREDENTIALS','OUTBOUND'] as const)('#1793 ruled unknown-mode %s policy
  */
 describe('#3480 forced phase: the boundary-forcing sleep fits the site budget', () => {
   // The sites never change the class window, so the seeded default is the one in force.
-  beforeEach(() => untilRateWindowRemaining(db, DEFAULTS.FAN_OUT_READS.windowSeconds, FORCED_REMAINING_MS), 130_000);
+  beforeEach(() => forceRateWindowSleepZone(db, DEFAULTS.FAN_OUT_READS.windowSeconds), FORCED_PHASE_HOOK_TIMEOUT_MS);
   it('the config-fence site passes with under 5 s left in the window', configFenceSite, RATE_WINDOW_TEST_TIMEOUT_MS);
 });
