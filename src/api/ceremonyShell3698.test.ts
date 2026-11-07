@@ -14,6 +14,7 @@ import { cleanDb } from '../test/helpers.js';
 import { insertSoftPasskey, softPasskey } from '../test/softPasskey.js';
 import { generateId } from '../lib/id.js';
 import { page, PAGE_HEADERS, sendPage } from './ceremonyPages.js';
+import { CEREMONY_SCRIPT_PATH } from './ceremonyClientPages.js';
 import { SIGNING_CEREMONY_RATE_LIMIT_PER_MINUTE } from './signingCeremonyRoutes.js';
 
 const ORIGIN = 'https://sign.example.test';
@@ -175,5 +176,41 @@ describe('a rate-limited GET of the signing page answers a small HTML page', () 
     const limited = await fetch(`${base}/signing/ceremony.js`);
     expect(limited.status).toBe(429);
     expect(await limited.text()).toBe('');
+  });
+});
+
+describe('the shell keeps what the page scripts depend on (Dorian P2-1, #3703)', () => {
+  const mains = (html: string) => html.match(/<main[\s>][^>]*>?/g) ?? [];
+
+  it.each(['/passkeys/register', '/passkeys/window/end', '/passkeys/revoke'])('%s serves exactly one main, and it is the one carrying data-page', async (path) => {
+    const res = await fetch(`${base}${path}`);
+    expect(res.status).toBe(200);
+    const found = mains(await res.text());
+    expect(found).toHaveLength(1);
+    expect(found[0]).toContain('data-page=');
+  });
+
+  it('the served client script still reads its page metadata from the first main', async () => {
+    const js = await (await fetch(`${base}${CEREMONY_SCRIPT_PATH}`)).text();
+    expect(js).toContain("document.querySelector('main')");
+  });
+
+  it('page() wraps a main-less body in one main and leaves a body with its own main alone', () => {
+    expect(mains(page('T', '<h1>x</h1>'))).toHaveLength(1);
+    const own = page('T', '<main data-page="window"><p>x</p></main>');
+    expect(mains(own)).toEqual(['<main data-page="window">']);
+  });
+});
+
+describe('script aliases keep the empty 429 (Dorian P2-2, #3703)', () => {
+  it('/signing/CEREMONY.JS and /signing/ceremony.js/ answer the script route, and past the limit the empty 429', async () => {
+    expect((await fetch(`${base}/signing/CEREMONY.JS`)).status).toBe(200);
+    expect((await fetch(`${base}/signing/ceremony.js/`)).status).toBe(200);
+    for (let i = 0; i < SIGNING_CEREMONY_RATE_LIMIT_PER_MINUTE; i++) await fetch(`${base}/signing/ceremony.js`);
+    for (const path of ['/signing/CEREMONY.JS', '/signing/ceremony.js/', '/signing/ceremony.js']) {
+      const limited = await fetch(`${base}${path}`);
+      expect(limited.status, path).toBe(429);
+      expect(await limited.text(), path).toBe('');
+    }
   });
 });
