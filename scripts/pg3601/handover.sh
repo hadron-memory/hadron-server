@@ -33,7 +33,7 @@ ix sh -c 'echo pg3601-heartbeat-open'
 mark handover
 
 log "handover: author descriptor and grant (root-owned 0644 in /etc/pg3601)"
-ix sh -c 'install -d -o root -g root -m 0755 /etc/pg3601'
+ix install -d -o root -g root -m 0755 /etc/pg3601
 ids=$(ix sh -c 'echo "$(id -u runner) $(id -g runner)"')
 bins=$(ix python3 -I -c 'import hashlib,json,subprocess
 paths=["/usr/lib/postgresql/17/bin/postgres","/usr/lib/postgresql/17/bin/pg_ctl","/usr/bin/python3"]
@@ -44,47 +44,59 @@ for p in paths:
     r=os.path.realpath(p)
     if os.path.isfile(r): out.append({"path":p,"resolved":r,"sha256":hashlib.sha256(open(r,"rb").read()).hexdigest()})
 print(json.dumps(out))')
-python3 -I - "$ADAPTER_DIR/descriptor.template.json" "$RECEIPTS" "$ids" "$bins" "$ADAPTER_MANIFEST_SHA256" \
+verify_pre=$(basename "$last")
+python3 -I - "$ADAPTER_DIR" "$RECEIPTS" "$verify_pre" "$ids" "$bins" "$ADAPTER_MANIFEST_SHA256" \
   "$REGISTER_ROW_URN" "$SECURITY_ACCEPTANCE_URN" "$GATE_EXECUTION_URN" "$HARNESS_MANIFEST_SHA256" "$BINARY_APPLICABILITY_URN" <<'PY'
-import hashlib,json,sys,os,glob
-tpl,rec,ids,bins,amf,row,sec,gate,hmf,binurn=sys.argv[1:]
-d=json.load(open(tpl))
-def kv(f): return dict(l.strip().split("=",1) for l in open(os.path.join(rec,f)) if "=" in l)
-def h(f): return hashlib.sha256(open(os.path.join(rec,f),"rb").read()).hexdigest()
-verify=sorted(glob.glob(os.path.join(rec,"verify-pre-*.txt")))[-1]
+# Fills a2's templates exactly (adapter a2 manifest 3d99f40d: descriptor, grant,
+# runtime-index). Every value comes from a receipt; nothing is estimated.
+import hashlib,json,sys,os
+adir,rec,vpre,ids,bins,amf,row,sec,gate,hmf,binurn=sys.argv[1:]
+def raw(f): return open(os.path.join(rec,f),"rb").read()
+def h(b): return hashlib.sha256(b).hexdigest()
+def kv(f): return dict(l.strip().split("=",1) for l in raw(f).decode().splitlines() if "=" in l)
+lease_us=int(kv("lease-timer.armed")["NextElapseUSecMonotonic"])   # the timer's ACTUAL elapse
+stop_us=int(kv("stop-timer.armed")["NextElapseUSecMonotonic"])
+assert stop_us<lease_us, "stop must precede the lease end"
+assert b"## RESULT fails=0\n" in raw(vpre), "verify_pre not clean"
+files={"verify_pre":vpre,"lease_timer":"lease-timer.armed","stop_timer":"stop-timer.armed"}
+hashes={k:h(raw(f)) for k,f in files.items()}
+idx=json.load(open(os.path.join(adir,"runtime-index.template.json")))
+idx.update({"verifier_result":"PASS","lease_started_us":lease_us-3600*1000000,"lease_deadline_us":lease_us,
+  "experiment_deadline_us":stop_us,"instance_cgroup":"/sys/fs/cgroup","client_cgroup":"/sys/fs/cgroup/pg3601-clients.slice",
+  "raw_receipt_sha256":hashes,"binary_applicability_acceptance_urn":binurn})
+ib=json.dumps(idx,indent=2,sort_keys=True).encode()+b"\n"
+open(os.path.join(rec,"runtime-index.json"),"wb").write(ib)
+hashes["runtime_index"]=h(ib)
+dest={"verify_pre":"/etc/pg3601/receipts/verify-pre.txt","lease_timer":"/etc/pg3601/receipts/lease-timer.armed",
+      "stop_timer":"/etc/pg3601/receipts/stop-timer.armed","runtime_index":"/etc/pg3601/receipts/runtime-index.json"}
+d=json.load(open(os.path.join(adir,"descriptor.template.json")))
 uid,gid=ids.split()
-lease_end=int(kv("lease-timer.armed")["NextElapseUSecMonotonic"])/1e6
-stop_end=int(kv("stop-timer.armed")["NextElapseUSecMonotonic"])/1e6
 d.update({"status":"RUNTIME DESCRIPTOR authored by Hugo at handover from receipts",
   "runner_uid":int(uid),"runner_gid":int(gid),"harness_dir":"/opt/pg3601/harness",
-  "instance_cgroup":"/sys/fs/cgroup","client_cgroup":"/sys/fs/cgroup/pg3601-clients.slice",
-  "broker_socket":"/pgvol/broker/broker.sock",
-  "lease_started_monotonic":lease_end-3600,"lease_deadline_monotonic":lease_end,
-  "experiment_deadline_monotonic":stop_end,"binary_files":json.loads(bins)})
-receipts={"read_only_verifiers_passed":os.path.basename(verify),"host_60m_lease_armed":"lease-timer.armed",
-  "host_30m_stop_armed":"stop-timer.armed","lifecycle_monitor_active":"monitor.handover",
-  "storage_quota":"quota-fill.txt"}
-d["evidence_receipts"]={k:{"receipt":v,"sha256":h(v)} for k,v in receipts.items()}
-ev=d["evidence"]
-for k in ("read_only_verifiers_passed","writer_login_reset_role_verified","lifecycle_monitor_active",
-          "postmaster_write_paths_confined","host_30m_stop_armed","host_60m_lease_armed","stop_request_path_active"):
-    ev[k]=True   # each backed by a PASS line in the hashed verify receipt above
-ev["binary_build_layout_verified"]=True    # backed by the V7 lines in the verify receipt AND the accepted review below
-d["evidence_receipts"]["binary_build_layout_verified"]={"receipt":os.path.basename(verify),"sha256":h(os.path.basename(verify)),"acceptance_urn":binurn}
-ev["qgroup_hard_bytes"]=1073741824
-raw=json.dumps(d,indent=2,sort_keys=True).encode()+b"\n"
-open(os.path.join(rec,"descriptor.json"),"wb").write(raw)
-g={"execution_ready":True,"adapter_manifest_sha256":amf,"harness_manifest_sha256":hmf,
-   "descriptor_sha256":hashlib.sha256(raw).hexdigest(),"register_row_urn":row,
-   "security_acceptance_urn":sec,"gate_execution_urn":gate,"instance":"pg3601-run",
-   "expires_monotonic":stop_end}
+  "instance_cgroup":idx["instance_cgroup"],"client_cgroup":idx["client_cgroup"],
+  "lease_started_monotonic":idx["lease_started_us"]/1000000,"lease_deadline_monotonic":idx["lease_deadline_us"]/1000000,
+  "experiment_deadline_monotonic":idx["experiment_deadline_us"]/1000000,"binary_files":json.loads(bins),
+  "receipts":{k:{"path":dest[k],"sha256":hashes[k]} for k in dest}})
+assert d["broker_socket"]=="/pgvol/broker/broker.sock" and d["evidence"]["qgroup_hard_bytes"]==1073741824
+db=json.dumps(d,indent=2,sort_keys=True).encode()+b"\n"
+open(os.path.join(rec,"descriptor.json"),"wb").write(db)
+g=json.load(open(os.path.join(adir,"grant.template.json")))
+g.update({"execution_ready":True,"adapter_manifest_sha256":amf,"harness_manifest_sha256":hmf,"descriptor_sha256":h(db),
+  "register_row_urn":row,"security_acceptance_urn":sec,"gate_execution_urn":gate,"expires_monotonic":idx["experiment_deadline_us"]/1000000,
+  "receipt_sha256":dict(hashes)})
 open(os.path.join(rec,"grant.json"),"w").write(json.dumps(g,indent=2,sort_keys=True)+"\n")
 PY
+cp "$RECEIPTS/$verify_pre" "$RECEIPTS/verify-pre.txt"
+ix install -d -o root -g root -m 0755 /etc/pg3601/receipts
+for f in verify-pre.txt lease-timer.armed stop-timer.armed runtime-index.json; do
+  declare_push "/etc/pg3601/receipts/$f"
+  "${INCUS[@]}" file push --uid 0 --gid 0 --mode 0444 "$RECEIPTS/$f" "$INSTANCE/etc/pg3601/receipts/$f"
+done
 for f in descriptor.json grant.json; do
   declare_push "/etc/pg3601/$f"
   "${INCUS[@]}" file push --uid 0 --gid 0 --mode 0644 "$RECEIPTS/$f" "$INSTANCE/etc/pg3601/$f"
 done
-sha256sum "$RECEIPTS/descriptor.json" "$RECEIPTS/grant.json" | tee -a "$RECEIPTS/SHA256SUMS"
+sha256sum "$RECEIPTS/descriptor.json" "$RECEIPTS/grant.json" "$RECEIPTS/runtime-index.json" | tee -a "$RECEIPTS/SHA256SUMS"
 log "handover: 30-min hard stop armed; descriptor and grant in place; run window open"
 cat <<LAUNCH
 Atilla's single declared launch (run once, from the host):

@@ -104,7 +104,8 @@ log "setup: root-owned stop-request endpoint (the confined adapter's only stop l
 # runner may create /pgvol/client/STOP_REQUEST; root answers with SIGKILL of the
 # client slice members and an immediate cluster stop, and writes its marker in
 # root-owned /run/pg3601 (never in a runner-writable directory). RemainAfterExit
-# keeps the service active, so a persisting request file does not re-trigger it.
+# keeps the service active and the service then stops the path unit, so a
+# persisting request file can never re-trigger it (a2 REVIEW P3-1).
 ix sh -c 'cat > /etc/systemd/system/pg3601-stopreq.path <<UNIT
 [Path]
 PathExists=/pgvol/client/STOP_REQUEST
@@ -116,7 +117,7 @@ cat > /etc/systemd/system/pg3601-stopreq.service <<UNIT
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/sh -c "systemctl kill --signal=SIGKILL pg3601-client.service pg3601-broker.service; pg_ctlcluster 17 main stop -m immediate; date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ > /run/pg3601/STOP_DONE"
+ExecStart=/bin/sh -c "systemctl kill --signal=SIGKILL pg3601-client.service pg3601-broker.service; pg_ctlcluster 17 main stop -m immediate; date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ > /run/pg3601/STOP_DONE; systemctl --no-block stop pg3601-stopreq.path"
 UNIT'
 
 log "setup: install (do not start) the adapter slice and broker units"
