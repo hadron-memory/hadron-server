@@ -15,7 +15,7 @@
 export const CEREMONY_CSS =
   ':root{color-scheme:light dark}' +
   'body{font:1rem/1.5 system-ui,sans-serif;margin:0}' +
-  'main{display:block;max-width:32rem;margin:2rem auto;padding:1rem;border:1px solid rgba(127,127,127,.4);border-radius:.5rem}main.wide{max-width:44rem}' +
+  'main{display:block;box-sizing:border-box;width:min(32rem,calc(100% - 2rem));margin:2rem auto;padding:1rem;border:1px solid rgba(127,127,127,.4);border-radius:.5rem}main.wide{width:min(44rem,calc(100% - 2rem))}' +
   'h1{font-size:1.5rem;line-height:1.25;margin:0 0 1rem}h2{font-size:1.25rem;line-height:1.3;margin:1.25rem 0 .5rem}h3{font-size:1.0625rem;margin:1rem 0 .25rem}p{margin:0 0 1rem}' +
   'button,.button{font:inherit;display:inline-block;box-sizing:border-box;min-height:2.75rem;min-width:2.75rem;padding:.5rem 1rem;margin:.25rem .5rem .25rem 0;cursor:pointer}' +
   '.button{text-align:center;text-decoration:none;border:1px solid currentColor;border-radius:.25rem;line-height:1.5}' +

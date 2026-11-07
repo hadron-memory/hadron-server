@@ -102,6 +102,14 @@ describe('the shared shell is on every ceremony page', () => {
     expect(html).toContain('<title>Remove this passkey</title>');
   });
 
+  it('keeps a 1rem gutter either side of the card on a narrow screen (Charles, #3703)', () => {
+    // The card is the <main>; a bare max-width with auto margins sits flush with the viewport edge under ~546px.
+    const html = page('T', '<p>x</p>');
+    expect(html).toContain('width:min(32rem,calc(100% - 2rem))');
+    expect(html).toContain('main.wide{width:min(44rem,calc(100% - 2rem))}');
+    expect(html).not.toMatch(/main\{[^}]*max-width/);
+  });
+
   it('sendPage still sends the ceremony headers', () => {
     const sent: { status?: number; headers?: Record<string, string>; body?: string } = {};
     const res: any = {
