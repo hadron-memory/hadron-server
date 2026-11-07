@@ -14,7 +14,7 @@ const DROPPED = {
   apps: ['delivery_standby_enabled'],
   worker_wake_settings: ['isolated_until', 'isolated_at', 'isolated_by_user_id'],
 } as const;
-const KEPT_WAKE = ['worker_id', 'mentions', 'paused_until', 'exempt_ended_at', 'updated_at', 'updated_by'];
+const KEPT_WAKE = ['worker_id', 'mentions', 'paused_until', 'exempt_ended_at', 'updated_at', 'updated_by', 'updated_by_worker_id', 'updated_by_agent_id'];
 
 const columnsOf = async (table: string) =>
   (await db.$queryRaw<Array<{ column_name: string }>>`

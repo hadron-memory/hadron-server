@@ -127,5 +127,9 @@ BEGIN
 END $$;
 
 -- #2025: App delivery settings/high-floor backfill before a non-wiping schema push.
+-- #3695 (R1a): the included file still adds apps.delivery_standby_enabled, which the schema no longer
+-- has. That is deliberate: it is byte-pinned against the historical #2025 migration, and it only acts on
+-- a pre-#2025 push-synced database, where the same run's `db push` drops the column again. Never on an
+-- empty or current database (its guard returns early).
 \ir delivery-settings-pre-push.sql
 \ir ticker-tick-code-pre-push.sql
