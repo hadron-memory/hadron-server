@@ -321,7 +321,7 @@ describe('#3082 GREEN by design: GraphQL still serves each team family (the reso
     attention: ['teamAttention'],
     tasks: ['createAgentTask', 'updateAgentTask', 'startAgentTask', 'finishAgentTask', 'agentTasks'],
     'roster/events/alarms/availability': ['teamRoster', 'teamEvents', 'ackAlarm', 'setWorkerAvailability', 'setStallSchedule'],
-    'stop signals/pause': ['setStopSignal', 'liftStopSignal', 'teamStopSignals', 'setTeamPause', 'isolateWorker', 'clearWorkerIsolation'],
+    'stop signals/pause': ['setStopSignal', 'liftStopSignal', 'teamStopSignals', 'setTeamPause'],
     'tickers/wakes': ['tickers', 'createTicker', 'dueWakes', 'ackWakes', 'agentTickerTemplates'],
   };
   it('every family is still in the GraphQL schema or resolver maps', () => {

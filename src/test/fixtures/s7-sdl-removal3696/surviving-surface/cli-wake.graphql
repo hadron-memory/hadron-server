@@ -1,4 +1,4 @@
-# Exact operation/fragment selections from hadron-cli v0.39.0; extracted with GraphQL AST.
+# TEST-AUTHORED remaining-surface regression. NOT released/deployed client evidence for C1/R1(b).
 fragment WorkerWakeSettingsFields on WorkerWakeSettings {
   worker {
     id
@@ -21,11 +21,6 @@ fragment WorkerWakeSettingsFields on WorkerWakeSettings {
   }
   effectiveCadenceSeconds
   dormant
-  isolated
-  isolatedAt
-  isolatedByHandle
-  isolatedUntil
-  canManageIsolation
 }
 
 query WorkerWakeSettings($workerRef: String!) {
@@ -36,18 +31,6 @@ query WorkerWakeSettings($workerRef: String!) {
 
 mutation SetWorkerWakeSettings($workerRef: String!, $input: WorkerWakeSettingsInput!) {
   setWorkerWakeSettings(workerRef: $workerRef, input: $input) {
-    ...WorkerWakeSettingsFields
-  }
-}
-
-mutation IsolateWorker($workerRef: String!, $until: DateTime) {
-  isolateWorker(workerRef: $workerRef, until: $until) {
-    ...WorkerWakeSettingsFields
-  }
-}
-
-mutation ClearWorkerIsolation($workerRef: String!) {
-  clearWorkerIsolation(workerRef: $workerRef) {
     ...WorkerWakeSettingsFields
   }
 }

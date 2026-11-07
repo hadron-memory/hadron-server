@@ -230,13 +230,13 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
   );
   off(
     'hadron_delivery_settings_get',
-    'Read an App’s delivery settings as a participant (cor:agt:080:05). The batching window is also the ticker cadence floor. Standby is not effective until S7.',
+    'Read an App’s delivery settings as a participant (cor:agt:080:05). The batching window is also the ticker cadence floor.',
     SHAPE_HADRON_DELIVERY_SETTINGS_GET,
     async ({ appRef, session }) => read(session, async (ctx) => JSON.stringify(await Q.appDeliverySettings({}, { appRef }, ctx))),
   );
   off(
     'hadron_delivery_settings_set',
-    'Change delivery settings as the human App manager (cor:agt:080:19). Omitted preserves; null and unknown settings refuse atomically. The batching window changes ticker cadence too. Standby enabling is unavailable until S7.',
+    'Change delivery settings as the human App manager (cor:agt:080:19). Omitted preserves; null and unknown settings refuse atomically. The batching window changes ticker cadence too.',
     SHAPE_HADRON_DELIVERY_SETTINGS_SET,
     async ({ appRef, input, session }) => write('hadron_delivery_settings_set', session, async (ctx) =>
       JSON.stringify(await M.setAppDeliverySettings({}, { appRef, input }, ctx))),
@@ -526,7 +526,6 @@ const SHAPE_HADRON_DELIVERY_SETTINGS_SET = {
     batchWindowSeconds: z.number().nullable().optional().describe('The shared cadence floor/window in seconds; existing ticker limits apply.'),
     busyDelaySeconds: z.number().nullable().optional().describe('Whole seconds 1..86400, Proposed bounds.'),
     stuckWindowSeconds: z.number().nullable().optional().describe('Whole seconds 1..604800 and greater than busy delay + window, Proposed bounds/relation.'),
-    standbyEnabled: z.boolean().nullable().optional().describe('Deprecated: false is accepted; true remains unavailable.'),
     checkPeriodSeconds: z.number().nullable().optional().describe('#2138: whole seconds 60..86400; a worker with a task is expected to check its team channel this often. Set together with the team ticker cadence.'),
     failedChecksToOverdue: z.number().nullable().optional().describe('#2138: whole number 1..100; OVERDUE after this many missed periods + 5 minutes.'),
     darkAlarmWindowSeconds: z.number().nullable().optional().describe('#2755: whole seconds 300..86400, default 1800; a due wake unacknowledged this long raises the dark-worker alarm. Independent of stuckWindowSeconds.'),

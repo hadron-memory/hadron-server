@@ -1,11 +1,9 @@
-# Exact operation/fragment selections from hadron-cli v0.39.0; extracted with GraphQL AST.
+# TEST-AUTHORED remaining-surface regression. NOT released/deployed client evidence for C1/R1(b).
 fragment AppDeliverySettingsFields on AppDeliverySettings {
   darkAlarmWindowSeconds
   batchWindowSeconds
   busyDelaySeconds
   stuckWindowSeconds
-  standbyEnabled
-  standbyEffective
   checkPeriodSeconds
   failedChecksToOverdue
 }

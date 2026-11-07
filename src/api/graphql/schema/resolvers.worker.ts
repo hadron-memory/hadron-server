@@ -838,7 +838,7 @@ async function resolveCastTarget(ctx: Context, args: CastArgs, expectedAgentId?:
     if (!(await managesApp(ctx, app))) throw new GraphQLError('Only whoever manages the App may name a reporting head at cast.', { extensions: { code: 'WORKER_REPORTS_TO_FORBIDDEN' } });
     // Ada36559 supersedes the dropped push-model S5/S7 dependency (#2138r4/#2130).
     // A future pull-shaped standby activation MUST initialize coverage for existing reports
-    // before removing this guard and admitting new reports atomically under its common bracket.
+    // before admitting reports atomically under its common bracket.
     reportingHeadId = await resolveCastReportingHead(ctx, appId, choice.ref);
     const head = await ctx.db.worker.findUniqueOrThrow({ where: { id: reportingHeadId }, select: { retiredAt: true } });
     if (head.retiredAt) throw new GraphQLError('A worker cannot report to a retired worker.', { extensions: { code: 'WORKER_REPORTS_TO_RETIRED', reportsTo: reportingHeadId } });

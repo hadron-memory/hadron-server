@@ -24,10 +24,10 @@
  * EPISODES. The alarm stream is append-only and `agent_team_events_episode_uniq` does not dedupe a NULL task id, so the
  * episode is a row in `coordinator_cadence_episodes` whose partial unique index admits one OPEN row per coordinator,
  * inserted in the same SERIALIZABLE transaction as the event. The loser of a race rolls back and raises nothing. An
- * episode ends ONLY at the coordinator's next counted assignment: no lane worker being free, a pause or an isolation never
+ * episode ends ONLY at the coordinator's next counted assignment: neither no lane worker being free nor a pause
  * ends it, so busy/free toggles never raise a second alarm. The next lateness after that opens a new one.
  *
- * LIMIT (stated, not hidden): a coordinator that comes back from a pause, isolation or standby keeps its old clock, so one
+ * LIMIT (stated, not hidden): a coordinator that comes back from a pause keeps its old clock, so one
  * whose last assignment is older than 60 minutes is late on the first pass after it returns, if a lane worker is free.
  */
 
@@ -89,7 +89,7 @@ async function decide(db: PrismaClient, appId: string, workerId: string, now: Da
   const last = (await lastCountedAssignments(db, appId, [c.id])).get(c.id) ?? null;
   const first = (await firstSessionStarts(db, [c.id])).get(c.id);
   // The pending reason is read directly, not through the check status: NO_SESSION would hide it, and a coordinator with no
-  // live session is NOT exempt (cor:agt:050:31 r3), but a paused or isolated one without a session still is.
+  // live session is NOT exempt (cor:agt:050:31 r3), but a paused one without a session still is.
   const reason = (await loadPendingReasons(db, appId, [c.id], now)).get(c.id);
   if (reason && EXEMPT_PENDING.has(reason)) return null;
   const clock = Math.max(last?.getTime() ?? -Infinity, first?.getTime() ?? -Infinity, observed.get(c.id)?.getTime() ?? -Infinity);

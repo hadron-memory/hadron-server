@@ -1,7 +1,6 @@
 /**
- * #2325 — descriptions of the isolateWorker refusal ordering and of the task owner directives' reporting-worker
- * audience. Each fact is pinned against the code that decides it (resolvers.ticker.ts deprecatedIsolationDoor,
- * resolvers.agentTask.ts actorCoordinatesOwner, resolvers.hostOperation.ts), so a change there fails here
+ * #2325 — descriptions of the task owner directives' reporting-worker
+ * audience. Each fact is pinned against the code that decides it (resolvers.agentTask.ts actorCoordinatesOwner, resolvers.hostOperation.ts), so a change there fails here
  * rather than leaving the description wrong. Wording stays free.
  */
 
@@ -20,27 +19,6 @@ function description(field: string): string {
   expect(open).toBeGreaterThanOrEqual(0);
   return flat(typeDefs.slice(open, close));
 }
-
-describe('#2325 isolateWorker names the refusal ordering the resolver implements', () => {
-  const text = description('isolateWorker');
-  it('lists the codes in the order the resolver checks them', () => {
-    const order = ['WORKER_NOT_FOUND', 'WORKER_ISOLATION_FORBIDDEN', 'WORKER_ISOLATION_UNAVAILABLE']
-      .map(token => text.replace('refused FORBIDDEN (read-only)', 'FORBIDDEN (read-only)').indexOf(token));
-    expect(order.every(i => i > 0)).toBe(true);
-    expect([...order].sort((a, b) => a - b)).toEqual(order);
-    expect(text).toMatch(/pure App key/);
-    expect(text).toMatch(/before the manager\/holder check/);
-  });
-  it('matches the code: read, actor, availability, writability, then manager/holder', () => {
-    const body = src('resolvers.ticker.ts');
-    const fn = body.slice(body.indexOf('async function deprecatedIsolationDoor'));
-    const at = (needle: string) => fn.indexOf(needle);
-    const steps = ['workerForRead(', "resolved.kind !== 'user'", 'if (!clear)', 'writeInApp(', 'mayClearRetiredIsolation('].map(at);
-    expect(steps.every(i => i > 0)).toBe(true);
-    expect([...steps].sort((a, b) => a - b)).toEqual(steps);
-    expect(src('resolvers.agentTask.ts')).toMatch(/Impersonation sessions are read-only/);
-  });
-});
 
 describe('#2325 owner directives name the reporting-worker audience as the chain', () => {
   for (const field of ['assignAgentTask', 'reassignAgentTask', 'cancelAgentTask', 'parkAgentTask', 'makeAgentTaskReady']) {
