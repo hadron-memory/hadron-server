@@ -1,0 +1,34 @@
+{
+  "status": "Two additional observations awaiting ceiling approval; full principal, same four-Agent fixture",
+  "productionSource": "d3c2be02fa",
+  "metrics": [
+    {
+      "label": "importedBy/1-distinct-Agents/full",
+      "sqlCount": 5,
+      "prismaOperations": 5,
+      "pagePrismaReads": 0,
+      "helperEntries": [
+        0,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 2,
+      "responseUtf8Bytes": 290
+    },
+    {
+      "label": "importedBy/3-distinct-Agents/full",
+      "sqlCount": 14,
+      "prismaOperations": 12,
+      "pagePrismaReads": 0,
+      "helperEntries": [
+        0,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 3,
+      "responseUtf8Bytes": 524
+    }
+  ]
+}

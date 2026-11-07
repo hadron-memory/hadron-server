@@ -96,6 +96,7 @@ export function nodePayloadHasCiphertext(node: Pick<NodeForGit, 'content' | 'abs
  */
 /** Async mirror callers supply the same-memory live-child decision under the checkout lock (#3507).
  * Pure file fixtures default to legacy cleanup; a disk id alone cannot distinguish a stale parent README. */
+export function writeNodeFile(localPath: string, node: NodeForGit, memoryUrn: string | undefined, hasLiveReadmeChild: boolean): boolean;
 export function writeNodeFile(localPath: string, node: NodeForGit, memoryUrn?: string, hasLiveReadmeChild = false): boolean {
   // #1273: inspect the actual payload, independently of raced memory flags
   // or key probes. Refuse before writes OR legacy-path cleanup.

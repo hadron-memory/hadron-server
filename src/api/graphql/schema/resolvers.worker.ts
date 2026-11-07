@@ -1,3 +1,4 @@
+import { personalOrgAgentTextAllowed } from '../../../lib/auth/personalOrgAgentInstall.js';
 import { requireWorkerReadAccess, locateTeamAgent, forbidden, type AppRow } from '../../../lib/auth/workerRead.js';
 export { requireWorkerReadAccess, locateTeamAgent, ROLES_BRANCH_PREFIX } from '../../../lib/auth/workerRead.js';
 import { listAppInstallations, resolveAppInstallation, resolveUnfilteredAppInstallation, lockAppInstallation } from '../../../lib/appInstallations.js';
@@ -1841,6 +1842,44 @@ export const workerMutations = {
 
 export const workerQueries = {
   /**
+   * #3599: the delete's act admission and private census, without its destructive transaction.
+   * No attestation input or durable reservation (hrn:node:hadronmemory.com:specs:cor:agt:020:03).
+   * An instructed read records its claim with the target as subject, so bookkeeping never poisons the census
+   * (hrn:node:hadronmemory.com:specs:cor:dmo:050:12). Never return census details.
+   */
+  deleteWorkerPreview: async (
+    _: unknown,
+    { workerRef, instruction }: { workerRef: string; instruction?: ActInstruction | null },
+    ctx: Context,
+  ) => {
+    const { worker, app } = await resolveReadableWorkerRef(ctx, workerRef);
+    const initial = await admitWorkerStaffAct(ctx, app, instruction);
+    // The real delete deliberately supports retained uninstalled Apps. Reuse its exact authority
+    // prologue, not withAuthorizedTx's stricter App/org liveness checks (#3599 FIT correction).
+    return ctx.db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [
+        { kind: 'app', id: app.id }, ...(ctx.userId ? [{ kind: 'user' as const, id: ctx.userId }] : []),
+        ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+        ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+      ], 'shared');
+      await tx.$queryRaw`SELECT id FROM apps WHERE id = ${app.id} FOR SHARE`;
+      const txCtx = await liveTxContext(ctx, tx);
+      let admission = await admitWorkerStaffAct(txCtx, app, instruction, initial);
+      // Caller/grant locks only: never the target worker or the delete's MVCC fence.
+      await lockStaffingAct(tx, app, admission, ctx.sessionId);
+      admission = await admitWorkerStaffAct(txCtx, app, instruction, admission, true);
+      const current = await tx.worker.findUnique({ where: { id: worker.id } });
+      if (!current) throw new GraphQLError('Worker not found.', { extensions: { code: 'WORKER_NOT_FOUND', workerRef } });
+      if (await miscastHasReferences(tx, current)) {
+        throw new GraphQLError('This worker has persisted references, an unreleased stint, or encrypted attribution that cannot be verified. Retire it instead.', {
+          extensions: { code: 'WORKER_IN_USE', workerId: worker.id },
+        });
+      }
+      await appendStaffingInstructionClaim(tx, { appId: app.id, admission, operation: 'worker.delete-preview', workerId: worker.id });
+      return { workerId: worker.id, attestationRequired: true };
+    });
+  },
+  /**
    * Read one worker (cor:api:120 find-one). The ref is a Worker id, an
    * `hrn:worker:<root>:<app-slug>:<worker-slug>` URN (#991), or — with
    * `appRef` — the worker's NAME ("Iris", #990/#1015).
@@ -2552,6 +2591,8 @@ async function readServedWorkerText(
   page?: Parameters<typeof resolveServedBootPrompt>[2],
 ): Promise<{ text: string | null; refusal: string | null }> {
   const where = { surface: 'bind' as const, agentName };
+  const app = await ctx.db.app.findUnique({where:{id:worker.appId},select:{organizationId:true,ownerUserId:true}});
+  if(app && !(await personalOrgAgentTextAllowed(ctx.db,app,worker.agentId,ctx.userId))) return {text:null,refusal:'FORBIDDEN'};
   try {
     const recorded = ctx.sessionId
       ? await ctx.db.servedPrompt.findFirst({ where: { sessionId: ctx.sessionId, workerId: worker.id }, orderBy: { ordinal: 'desc' } })

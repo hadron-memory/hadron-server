@@ -42,6 +42,9 @@ beforeEach(async () => {
   agentId = (await db.agent.create({ data: { organizationId: org.id, name: 'Builder', urn: `${org.urn}:builder`,
     personaRole: 'server-engineer', visibility: 'ORGANIZATION' } })).id;
   await serveAgentBootPrompt(db, agentId, 'Work as {{worker.name}}.');
+  // #1148: personal-App bind controls need a qualified owner and a live subscription.
+  await db.orgMember.create({ data: { organizationId: org.id, userId: other.id, role: 'READER' } });
+  await db.agentSubscription.create({ data: { userId: other.id, agentId, activatedAt: new Date('2020-01-01') } });
   appA = await db.app.create({ data: { organizationId: org.id, name: 'Alpha', urn: `${org.urn}:alpha` } });
   appB = await db.app.create({ data: { organizationId: org.id, name: 'Beta', urn: `${org.urn}:beta` } });
   hiddenApp = await db.app.create({ data: { organizationId: foreign.id, name: 'Hidden app', urn: `${foreign.urn}:hidden` } });

@@ -69,7 +69,7 @@ describe('#2836 eligible-row index: both walk legs scan it', () => {
   const flatten = (n: PlanNode): PlanNode[] => [n, ...(n.Plans ?? []).flatMap(flatten)];
 
   it.each([['root', ''], ['a message-only branch', 'team-chat'], ['the messages prefix', 'team-chat:messages']])(
-    '%s: every scan of nodes is an index scan of the eligible-row index, one per leg',
+    '%s: every scan of nodes is an index scan of the eligible-row index, chooser, walk legs and flat blocks',
     async (_label, parent) => {
       const q = locSegmentsWalkSql({ memoryIds: [memoryId], excludeNodeIds: [], parent, limit: 20, after: null });
       // A cached prepared statement can switch to a GENERIC plan, planned without the bound values.
@@ -86,7 +86,8 @@ describe('#2836 eligible-row index: both walk legs scan it', () => {
       }
       const nodes = flatten(plan);
       const scans = nodes.filter((n) => n['Relation Name'] === 'nodes');
-      expect(scans).toHaveLength(2);
+      // Hybrid: chooser + two skip legs + flat seed/continuation; every site must use the eligible index.
+      expect(scans).toHaveLength(5);
       for (const s of scans) {
         expect(s['Node Type']).toBe('Index Scan');
         expect(s['Index Name']).toBe(SEGMENT_ELIGIBLE_INDEX);

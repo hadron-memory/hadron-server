@@ -352,6 +352,88 @@ describe('#3359 implicit asking Agent membership (ruling 0120)', () => {
   });
 });
 
+/**
+ * #3367: the live-cast arm of the asking gate reads THIS App only. The Agent below is installed nowhere and live-cast
+ * only in App B, so a cast lookup without `appId` would admit it to App A; A's refusal must be the one an outside Agent
+ * gets. Reachability, stated rather than implied: a worker session bound in App B never gets here, because App
+ * participation refuses it first (pinned below, and unchanged). What does get here is a named ref, or a session bound
+ * in B with an Agent and no worker, held by someone who participates in A. The `worker` fixture is the isolation one the
+ * #3359 pins use: App A's own worker row carrying this Agent as its request actor, which names no natural login.
+ */
+describe('#3367 action-register live cast is scoped to the asked App', () => {
+  const wire = async (p: Promise<unknown>) => {
+    try { await p; } catch (e: any) {
+      const error = new GraphQLError(e.message, { originalError: e, path: ['actionRegisterIndex'] });
+      const formatted = formatGraphQLError(error.toJSON(), error);
+      return JSON.stringify({ message: formatted.message, extensions: formatted.extensions });
+    }
+    throw new Error('expected a refusal');
+  };
+  const implicit = () => index({ agentRef: undefined });
+  const asRun = (agentId: string, fn: () => Promise<any>) => requestActorStorage.run({ workerId: null, agentId }, fn);
+  let otherApp: { id: string };
+  let castElsewhere: A;
+  let otherWorker: { id: string };
+  /** What an Agent with no tie to any App gets, with this Agent's URN swapped in: the cast in B adds nothing to it. */
+  const outsideRefusal = async () => {
+    const outside = await agent('Outside Control');
+    return (await wire(index({ agentRef: agentUrn(outside) }))).replaceAll(agentUrn(outside), agentUrn(castElsewhere));
+  };
+  const session = (workerId: string | null) => db.session.create({ data: {
+    id: generateId(), appId: otherApp.id, userId: admin.id, workerId, agentId: castElsewhere.id, tool: 'vitest',
+  } });
+
+  beforeEach(async () => {
+    otherApp = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Other', urn: `${org.urn}:other` } });
+    castElsewhere = await agent('Cast Elsewhere');
+    otherWorker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: otherApp.id, agentId: castElsewhere.id, name: 'Noa', slug: 'noa' }, select: { id: true } });
+  });
+
+  it('the fixture is live-cast in App B only and installed nowhere', async () => {
+    expect(await db.appAgent.count({ where: { agentId: castElsewhere.id } })).toBe(0);
+    expect(await db.worker.findMany({ where: { agentId: castElsewhere.id, retiredAt: null }, select: { appId: true } })).toEqual([{ appId: otherApp.id }]);
+  });
+
+  it('naming an Agent live-cast only in another App refuses like an outside Agent', async () => {
+    const refused = await wire(index({ agentRef: agentUrn(castElsewhere) }));
+    expect(JSON.parse(refused).extensions.code).toBe('AGENT_NOT_FOUND');
+    expect(refused).toBe(await outsideRefusal());
+  });
+
+  it.each(['worker', 'run'])('an implicit %s Agent live-cast only in another App refuses like an outside Agent', async (kind) => {
+    const refused = await wire((kind === 'worker' ? asWorker : asRun)(castElsewhere.id, implicit));
+    expect(JSON.parse(refused).extensions.code).toBe('AGENT_NOT_FOUND');
+    expect(refused).toBe(await outsideRefusal());
+  });
+
+  it('a workerless session bound in App B reaches the asking gate and is refused like an outside Agent', async () => {
+    const binding = await validateSessionBinding(db, { userId: admin.id }, (await session(null)).id);
+    expect(binding?.actor).toEqual({ workerId: null, agentId: castElsewhere.id });
+    expect(await wire(requestActorStorage.run(binding!.actor, implicit))).toBe(await outsideRefusal());
+  });
+
+  it('a worker session bound in App B stops at App participation, before the asking gate', async () => {
+    const binding = await validateSessionBinding(db, { userId: admin.id }, (await session(otherWorker.id)).id);
+    expect(binding?.actor).toEqual({ workerId: otherWorker.id, agentId: castElsewhere.id });
+    expect(JSON.parse(await wire(requestActorStorage.run(binding!.actor, implicit))).extensions.code).toBe('APP_NOT_FOUND');
+  });
+
+  it('a retired cast in the asked App does not borrow the live cast in another App', async () => {
+    await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: castElsewhere.id, name: 'Mira', slug: 'mira', retiredAt: new Date() } });
+    const outside = await outsideRefusal();
+    expect(await wire(index({ agentRef: agentUrn(castElsewhere) }))).toBe(outside);
+    expect(await wire(asRun(castElsewhere.id, implicit))).toBe(outside);
+  });
+
+  it('controls: a live cast in the asked App admits the same Agent, named and implicit', async () => {
+    await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: castElsewhere.id, name: 'Mira', slug: 'mira' } });
+    const named = await index({ agentRef: agentUrn(castElsewhere) });
+    expect(named.total).toBe(4);
+    expect(await asRun(castElsewhere.id, implicit)).toEqual(named);
+    expect(await asWorker(castElsewhere.id, implicit)).toEqual(named);
+  });
+});
+
 describe('#3365 implicit asking Agent readability (ruling 0122)', () => {
   const wire = async (p: Promise<unknown>) => {
     try { await p; } catch (e: any) {
