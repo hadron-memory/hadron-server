@@ -289,3 +289,58 @@ describe('#3586 review folds', () => {
     expect(names(await segs({ memoryIds: [M.id], parentLoc: 'p' }))).toEqual(['real']);
   });
 });
+
+// #2836 (cor:api:090:05 rev 5): segments share findNodes' default exclusions, so chat-message
+// nodes are left out like system ones. Each pin below targets one walk leg: reverting the seed
+// leg alone fails the first, reverting the recursive leg alone fails the second.
+describe('#2836: chat-message is a default exclusion for segments', () => {
+  const msg = (loc: string, seq = 1) => mk(loc, { nodeType: 'chat-message', seq });
+
+  it('seed leg: a message-only branch that sorts first under the prefix is not a segment', async () => {
+    await msg('0chat:messages:001');
+    await msg('0chat:messages:002', 2);
+    await mk('real');
+    expect(names(await segs({ memoryIds: [M.id], parentLoc: '' }))).toEqual(['real']);
+    await msg('p:0msgs:001');
+    await mk('p:real');
+    expect(names(await segs({ memoryIds: [M.id], parentLoc: 'p' }))).toEqual(['real']);
+  });
+
+  it('recursive leg: message-only and message-rooted branches after an eligible one; siblings, record and hasNode controls', async () => {
+    await mk('doc');
+    await mk('team-chat', { nodeType: 'chat' });
+    for (let i = 1; i <= 3; i++) await msg(`team-chat:messages:00${i}`, i);
+    await msg('mid-chat:messages:001');
+    // A segment with both a message block and an eligible node: listed, but only for the eligible node.
+    await msg('mixed:msgs:001');
+    await msg('mixed:msgs:002', 2);
+    await mk('mixed:note');
+    // A message at the segment's own loc does not make it node-backed.
+    await msg('withnode');
+    await mk('withnode:x');
+    await mk('zz-rec', { nodeType: 'record' });
+
+    const root = await segs({ memoryIds: [M.id], parentLoc: '' });
+    expect(root.items).toEqual([
+      { segment: 'doc', hasNode: true, memoryId: M.id },
+      { segment: 'mixed', hasNode: false, memoryId: M.id },
+      { segment: 'team-chat', hasNode: true, memoryId: M.id },
+      { segment: 'withnode', hasNode: false, memoryId: M.id },
+      { segment: 'zz-rec', hasNode: true, memoryId: M.id },
+    ]);
+    expect(names(await segs({ memoryIds: [M.id], parentLoc: 'team-chat' }))).toEqual([]);
+    expect(names(await segs({ memoryIds: [M.id], parentLoc: 'mixed' }))).toEqual(['note']);
+
+    // Parity with findNodes' unqualified read of the same memory.
+    const fn = await findNodes({ filter: { memoryIds: [M.id] }, limit: 200 });
+    const expected = [...new Set<string>(fn.hits.map((h: any) => (h.node.loc as string).split(':')[0]))].sort();
+    expect(names(root).sort()).toEqual(expected);
+  });
+
+  it('an explicit chat-message read is still findNodes\' job: the messages exist and stay readable there', async () => {
+    await msg('team-chat:messages:001');
+    const fn = await findNodes({ filter: { memoryIds: [M.id], nodeType: 'chat-message' }, limit: 10 });
+    expect(fn.hits.map((h: any) => h.node.loc)).toEqual(['team-chat:messages:001']);
+    expect(names(await segs({ memoryIds: [M.id], parentLoc: '' }))).toEqual([]);
+  });
+});

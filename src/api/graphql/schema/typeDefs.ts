@@ -215,12 +215,12 @@ export const typeDefs = `#graphql
     memoryIds: [ID!]
     "Restrict by memory class. SYSTEM is excluded by default; passing this (or naming a system memory in memoryIds) overrides that."
     memoryClasses: [MemoryClass!]
-    "An explicit 'comment' with no contentScope searches comments (as COMMENTS)."
+    "Without it, system and chat-message nodes are left out (hrn:node:hadronmemory.com:specs:cor:api:090:02); naming one of them returns it. record nodes are never left out. An explicit 'comment' with no contentScope searches comments (as COMMENTS)."
     nodeType: String
     """
     #3113 — an explicit list of node types, a union: only nodes whose type is in the list
     (hrn:node:hadronmemory.com:specs:cor:api:090:02). It narrows, ANDs every other filter and, being
-    explicit, replaces the default that leaves out system nodes; it never lifts the memory-class
+    explicit, replaces the default that leaves out system and chat-message nodes; it never lifts the memory-class
     default, access, deleted rows or inheritance. Values are exact and case-sensitive; an unknown
     value matches nothing. null is the same as omitted. Refused with BAD_USER_INPUT: an empty list,
     both nodeType and nodeTypes (an empty string counts as set), more than 20 entries (counted

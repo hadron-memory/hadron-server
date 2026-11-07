@@ -15,11 +15,38 @@
  */
 import { Buffer } from 'node:buffer';
 import { Prisma, type PrismaClient } from '../generated/prisma/index.js';
+import { UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES } from './retrieval/defaultNodeTypes.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
 /** The indexed key expression (nodes_memory_segment_key_idx); the walk query inlines it and must match it unchanged. */
 export const SEGMENT_KEY_SQL = `(replace(loc, ':', chr(1))) COLLATE "C"`;
+
+/**
+ * #2836 (cor:api:090:05 rev 5): the node types a segment never comes from. findNodes' unqualified
+ * defaults (system, chat-message), plus comment, which segments always left out.
+ */
+export const SEGMENT_INELIGIBLE_NODE_TYPES: readonly string[] = Object.freeze([...UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES, 'comment']);
+
+/** The partial index holding only eligible rows (prisma/migrations/20261106050000_nodes_segment_key_eligible_index). */
+export const SEGMENT_ELIGIBLE_INDEX = 'nodes_memory_segment_key_eligible_idx';
+
+/**
+ * The eligible-row predicate, with the type list inlined as a SQL literal, never a bound parameter:
+ * the planner can use the partial index only when it can prove the query's predicate implies the
+ * index's, and it cannot prove that from a parameter. With `alias` omitted this is, byte for byte,
+ * the index's WHERE clause (pinned against the migration and post-push.sql). A chat root holds tens
+ * of thousands of messages; as a row filter on the full index the walk would step over every one
+ * (and the planner, expecting that, flips plans and JIT-compiles every read).
+ */
+export function segmentEligibleSql(alias?: string): string {
+  const col = (c: string) => (alias ? `${alias}.${c}` : c);
+  const list = SEGMENT_INELIGIBLE_NODE_TYPES.map((t) => {
+    if (!/^[a-z][a-z0-9-]*$/.test(t)) throw new Error(`segmentEligibleSql: unexpected node type literal ${JSON.stringify(t)}`);
+    return `'${t}'`;
+  }).join(',');
+  return `${col('deleted_at')} IS NULL AND ${col('node_type')} <> ALL(ARRAY[${list}]) AND ${col('loc')} <> ''`;
+}
 
 export const LOC_SEGMENTS_DEFAULT_LIMIT = 20;
 export const LOC_SEGMENTS_MAX_LIMIT = 200;
@@ -70,23 +97,36 @@ export function decodeLocSegmentsCursor(raw: string): Cursor | null {
  * One page. `memoryIds` and `excludeNodeIds` are the already-gated scope (readable set after
  * system-memory inheritance). `parent` is "" for the root. `after` is a decoded cursor.
  *
- * Eligible nodes match findNodes' defaults: live (not soft-deleted), not system-type, not a
- * comment, and not an overridden inherited node. A segment exists for a memory when an eligible
+ * Eligible nodes match findNodes' defaults: live (not soft-deleted), not system/chat-message/comment, and not an overridden inherited node. A segment exists for a memory when an eligible
  * node has loc `<parent>:<seg>` or starts with `<parent>:<seg>:` (root: `<seg>` / `<seg>:`).
  */
-export async function readLocSegments(
-  db: Db,
-  args: {
-    memoryIds: string[];
-    excludeNodeIds: string[];
-    parent: string;
-    limit: number;
-    after: Cursor | null;
-  },
-): Promise<LocSegmentsPage> {
-  const { memoryIds, excludeNodeIds, parent, limit, after } = args;
-  if (memoryIds.length === 0) return { items: [], hasMore: false, endCursor: null };
+export interface LocSegmentsArgs {
+  memoryIds: string[];
+  excludeNodeIds: string[];
+  parent: string;
+  limit: number;
+  after: Cursor | null;
+}
 
+export async function readLocSegments(db: Db, args: LocSegmentsArgs): Promise<LocSegmentsPage> {
+  const { memoryIds, limit } = args;
+  if (memoryIds.length === 0) return { items: [], hasMore: false, endCursor: null };
+  const rows = await db.$queryRaw<Array<{ memory_id: string; seg: string; has_node: boolean; pos: number | null }>>`${locSegmentsWalkSql(args)}`;
+
+  const more = rows.length > limit;
+  const page = more ? rows.slice(0, limit) : rows;
+  const items = page.map((r) => ({ segment: r.seg, hasNode: r.has_node, memoryId: r.memory_id }));
+  const last = page[page.length - 1];
+  return {
+    items,
+    hasMore: more,
+    endCursor: more && last ? encodeLocSegmentsCursor({ m: last.memory_id, s: last.pos, n: last.seg }) : null,
+  };
+}
+
+/** The exact hybrid walk statement, exported for application-query plan regressions. */
+export function locSegmentsWalkSql(args: LocSegmentsArgs): Prisma.Sql {
+  const { memoryIds, excludeNodeIds, parent, limit, after } = args;
   // #3596 / ruling 0229: prove a flat prefix with a sibling-bounded ordered probe,
   // then scan only its index range; otherwise keep the skip-scan below.
   // Skip-scan over nodes_memory_segment_key_idx: ':' is chr(1) in the key, so one segment's locs are a
@@ -114,12 +154,12 @@ export async function readLocSegments(
             AND (replace(flat_node.loc, ':', chr(1))) COLLATE "C" >= ${prefixKey}::text COLLATE "C"
             ${upperBound('flat_node')}
             ${afterKey ? Prisma.sql`AND (replace(flat_node.loc, ':', chr(1))) COLLATE "C" > m.last_key COLLATE "C"` : Prisma.empty}
-            AND flat_node.deleted_at IS NULL AND flat_node.node_type <> 'system' AND flat_node.node_type <> 'comment' AND flat_node.loc <> ''
+            AND ${Prisma.raw(segmentEligibleSql('flat_node'))}
             AND NOT (flat_node.id = ANY(${excludeNodeIds}::text[]))
           ORDER BY (replace(flat_node.loc, ':', chr(1))) COLLATE "C" ASC
           LIMIT 64
         ) batch`;
-  const rows = await db.$queryRaw<Array<{ memory_id: string; seg: string; has_node: boolean; pos: number | null }>>`
+  return Prisma.sql`
     WITH RECURSIVE shape AS MATERIALIZED (
       SELECT m.memory_id, NOT EXISTS (
         -- OFFSET 0 keeps this ordered subquery ahead of the descendant test.
@@ -130,7 +170,7 @@ export async function readLocSegments(
           WHERE probe_node.memory_id = m.memory_id
             AND (replace(probe_node.loc, ':', chr(1))) COLLATE "C" >= ${prefixKey}::text COLLATE "C"
             ${upperBound('probe_node')}
-            AND probe_node.deleted_at IS NULL AND probe_node.node_type <> 'system' AND probe_node.node_type <> 'comment' AND probe_node.loc <> ''
+            AND ${Prisma.raw(segmentEligibleSql('probe_node'))}
             AND NOT (probe_node.id = ANY(${excludeNodeIds}::text[]))
           ORDER BY (replace(probe_node.loc, ':', chr(1))) COLLATE "C" ASC
           OFFSET 0
@@ -146,7 +186,7 @@ export async function readLocSegments(
         WHERE n.memory_id = m.memory_id
           AND (replace(n.loc, ':', chr(1))) COLLATE "C" >= ${prefixKey}::text COLLATE "C"
           ${upperBound('n')}
-          AND n.deleted_at IS NULL AND n.node_type <> 'system' AND n.node_type <> 'comment' AND n.loc <> ''
+          AND ${Prisma.raw(segmentEligibleSql('n'))}
           AND NOT (n.id = ANY(${excludeNodeIds}::text[]))
         ORDER BY (replace(n.loc, ':', chr(1))) COLLATE "C" ASC
         LIMIT 1
@@ -161,7 +201,7 @@ export async function readLocSegments(
           AND (replace(n.loc, ':', chr(1))) COLLATE "C" >=
               (${prefixKey}::text || replace(split_part(substr(w.loc, length(${prefix}::text) + 1), ':', 1), ':', chr(1)) || chr(2)) COLLATE "C"
           ${upperBound('n')}
-          AND n.deleted_at IS NULL AND n.node_type <> 'system' AND n.node_type <> 'comment' AND n.loc <> ''
+          AND ${Prisma.raw(segmentEligibleSql('n'))}
           AND NOT (n.id = ANY(${excludeNodeIds}::text[]))
         ORDER BY (replace(n.loc, ':', chr(1))) COLLATE "C" ASC
         LIMIT 1
@@ -204,14 +244,4 @@ export async function readLocSegments(
               > (${after?.m ?? ''}::text, (${after?.s ?? null}::int IS NULL), COALESCE(${after?.s ?? null}::int, 0), ${after?.n ?? ''}::text))
     ORDER BY memory_id ASC, (pos IS NULL) ASC, pos ASC, seg ASC
     LIMIT ${limit + 1}::int`;
-
-  const more = rows.length > limit;
-  const page = more ? rows.slice(0, limit) : rows;
-  const items = page.map((r) => ({ segment: r.seg, hasNode: r.has_node, memoryId: r.memory_id }));
-  const last = page[page.length - 1];
-  return {
-    items,
-    hasMore: more,
-    endCursor: more && last ? encodeLocSegmentsCursor({ m: last.memory_id, s: last.pos, n: last.seg }) : null,
-  };
 }
