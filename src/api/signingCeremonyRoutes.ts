@@ -188,12 +188,12 @@ go.addEventListener('click',async()=>{
 
 /** Mount the signing ceremony when the signing switch is on; the switch is read once, at mount. */
 export function mountSigningCeremonyRoutes(app: Express, env: NodeJS.ProcessEnv = process.env): void {
-  // X2 (#3698): a limited GET of the page gets a small static HTML answer; the script GET and every POST keep the
+  // X2 (#3698): a GET of the page past the per-minute limit gets a small static HTML answer; the script GET and every POST keep the
   // empty 429 the page script maps to its own message. The page is the same for every id: it names nothing.
   const limited = (req: Request, res: Response) => {
     // Classified by the matched route, not the spelling of the path: Express also serves /signing/CEREMONY.JS and
     // /signing/ceremony.js/ from the script route, and those keep the empty 429.
-    if (req.method === 'GET' && req.route?.path === `${SIGNING_CEREMONY_PATH}/:id`) res.status(429).set(PAGE_HEADERS).type('html').send(TOO_MANY_SHELL);
+    if (req.method === 'GET' && req.route?.path === `${SIGNING_CEREMONY_PATH}/:id`) res.status(429).set({ ...PAGE_HEADERS, 'Retry-After': '60' }).type('html').send(TOO_MANY_SHELL);
     else res.status(429).end();
   };
   if (!signingSurfacePolicy(env).signing) return;
@@ -205,7 +205,8 @@ export function mountSigningCeremonyRoutes(app: Express, env: NodeJS.ProcessEnv 
     windowMs: 15 * 60_000, limit: SIGNING_CEREMONY_PER_REQUEST_LIMIT, standardHeaders: false, legacyHeaders: false,
     keyGenerator: (req) => `signing:${req.ip ?? 'unknown'}:${sha256Hex(String(req.params.id))}`,
     validate: { keyGeneratorIpFallback: false },
-    handler: limited,
+    // POST routes only: the empty 429 the page script maps. Never the HTML page.
+    handler: (_req, res) => { res.status(429).end(); },
   });
   const body = express.json({ limit: '16kb' });
   const cookieOptions = (req: Request) => ({

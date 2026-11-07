@@ -51,7 +51,6 @@ const TEXT = {
   invalid: "This sign-in link can't be used It may have expired or already been used. Start again from the sign-in page.",
   signing: 'Review and sign This page needs JavaScript to ask for your passkey. Turn it on and reload. To see what you have been asked to sign, confirm it is you with your passkey. Nothing is shown until you do. Use passkey',
 };
-const SIGN_IN_CSP_TODAY = "default-src 'none'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 const SIGN_IN_CSP = "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 const TOO_MANY = 'Too many requests. Wait a minute, then reload this page.';
 
@@ -137,10 +136,7 @@ describe('the sign-in pages CSP gains exactly style-src', () => {
     }
   });
 
-  it('negative control: the string without style-src is not the pinned one, and removing the one directive gives today\'s', () => {
-    expect(SIGN_IN_CSP_TODAY).not.toBe(SIGN_IN_CSP);
-    expect(SIGN_IN_CSP.replace(" style-src 'unsafe-inline';", '')).toBe(SIGN_IN_CSP_TODAY);
-  });
+  // The red control is a mutant, not arithmetic: dropping the directive from the production string fails the exact pin above.
 });
 
 describe('a rate-limited GET of the signing page answers a small HTML page', () => {
@@ -159,6 +155,7 @@ describe('a rate-limited GET of the signing page answers a small HTML page', () 
       expect(limited.headers.get(k)).toBe(v);
     }
     expect(limited.headers.get('content-security-policy')).toContain("frame-ancestors 'none'");
+    expect(limited.headers.get('retry-after')).toBe('60');
     // Same page for a different id once the per-IP window is spent.
     expect(await (await fetch(`${base}/signing/${'c'.repeat(26)}`)).text()).toBe(html);
   });
@@ -212,5 +209,22 @@ describe('script aliases keep the empty 429 (Dorian P2-2, #3703)', () => {
       expect(limited.status, path).toBe(429);
       expect(await limited.text(), path).toBe('');
     }
+  });
+});
+
+describe('wiring the BLIND seat asked to see (#3703)', () => {
+  it('the signing page still loads its script, and the client pages allow the inline stylesheet', async () => {
+    expect(await (await fetch(`${base}/signing/${'a'.repeat(26)}`)).text()).toContain('<script src="/signing/ceremony.js"></script>');
+    for (const path of ['/passkeys/register', '/passkeys/window/end', '/passkeys/revoke']) {
+      const res = await fetch(`${base}${path}`);
+      expect(res.headers.get('content-security-policy'), path).toContain("style-src 'unsafe-inline'");
+      expect(await res.text(), path).toContain('<style>');
+    }
+  });
+
+  it('the title is text: markup in it is escaped', () => {
+    const html = page('A <b>&</b> "q"', '<p>x</p>');
+    expect(html).toContain('<title>A &lt;b&gt;&amp;&lt;/b&gt; &quot;q&quot;</title>');
+    expect(html).not.toContain('<b>');
   });
 });

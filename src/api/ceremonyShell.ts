@@ -7,7 +7,9 @@
  * more (no script or network source is involved in styling).
  *
  * The shell is static: callers pass fixed markup, never request data, so a link alone still reveals nothing
- * (cor:dmo:130:08). `body` and `extraCss` are authored by this repo, not by a person or a node.
+ * (cor:dmo:130:08). `body`, `extraCss` and `scriptSrc` are markup authored by this repo, never request- or
+ * node-derived: callers interpolate only constants. `title` is text and is escaped here, so the one text-shaped
+ * parameter cannot become a markup hole.
  */
 
 export const CEREMONY_CSS =
@@ -19,6 +21,8 @@ export const CEREMONY_CSS =
   '.button{text-align:center;text-decoration:none;border:1px solid currentColor;border-radius:.25rem;line-height:1.5}' +
   ':focus-visible{outline:3px solid #2563eb;outline-offset:2px}' +
   '@media (max-width:480px){button,.button{display:block;width:100%;margin:.5rem 0}}';
+
+const escapeText = (v: string) => v.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
 export interface CeremonyShellOptions {
   title: string;
@@ -37,7 +41,7 @@ export interface CeremonyShellOptions {
 }
 
 export function ceremonyShell({ title, body, scriptSrc, extraCss = '', wide = false }: CeremonyShellOptions): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>${title}</title>
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>${escapeText(title)}</title>
 <style>${CEREMONY_CSS}${extraCss}</style></head>
 <body>${/<main[\s>]/.test(body) ? body : `<main${wide ? ' class="wide"' : ''}>${body}</main>`}${scriptSrc ? `<script src="${scriptSrc}"></script>` : ''}</body></html>`;
 }
