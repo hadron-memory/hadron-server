@@ -215,12 +215,12 @@ export const typeDefs = `#graphql
     memoryIds: [ID!]
     "Restrict by memory class. SYSTEM is excluded by default; passing this (or naming a system memory in memoryIds) overrides that."
     memoryClasses: [MemoryClass!]
-    "An explicit 'comment' with no contentScope searches comments (as COMMENTS)."
+    "Without it, system and chat-message nodes are left out (hrn:node:hadronmemory.com:specs:cor:api:090:02); naming one of them returns it. record nodes are never left out. An explicit 'comment' with no contentScope searches comments (as COMMENTS)."
     nodeType: String
     """
     #3113 — an explicit list of node types, a union: only nodes whose type is in the list
     (hrn:node:hadronmemory.com:specs:cor:api:090:02). It narrows, ANDs every other filter and, being
-    explicit, replaces the default that leaves out system nodes; it never lifts the memory-class
+    explicit, replaces the default that leaves out system and chat-message nodes; it never lifts the memory-class
     default, access, deleted rows or inheritance. Values are exact and case-sensitive; an unknown
     value matches nothing. null is the same as omitted. Refused with BAD_USER_INPUT: an empty list,
     both nodeType and nodeTypes (an empty string counts as set), more than 20 entries (counted
@@ -1547,6 +1547,8 @@ export const typeDefs = `#graphql
     authorship: NodeAuthorship
     "#1326 — advisory validation for this exact revision. A report for an older revision is STALE."
     contentValidation: NodeContentValidationStatus!
+    "#3659 (hrn:node:hadronmemory.com:specs:cor:dmo:160:01) — the validation tasks a content-validation report for this node may name now, as the recorder judges them for this caller. Null on an inherited, install-concealed or deleted node, or one whose memory fails the node-content gate."
+    validationTasks: NodeValidationTaskSet
     "#1591 — whether the current revision is approved, and the latest approval on record."
     approvalStatus: NodeApprovalStatus!
     "#1591 — whether this node is minted, and the record of it."
@@ -2120,6 +2122,21 @@ export const typeDefs = `#graphql
   type NodeContentValidationStatus {
     state: NodeContentValidationState!
     latestReport: NodeContentValidationReport
+  }
+  "#3659 (hrn:node:hadronmemory.com:specs:cor:dmo:160:01) — READY: a report may name any listed task at revisions 1 to its revision. NOT_CONFIGURED: no rule applies. BROKEN: a rule's task reference is broken, so every report is refused, including one naming a listed task. UNAVAILABLE: the caller does not write the memory, or cannot read a task a rule names (ruling 0199); nothing is listed."
+  enum NodeValidationTaskSetState { READY NOT_CONFIGURED BROKEN UNAVAILABLE }
+  "#3659 — one task a report may name, or one broken rule. A broken entry has every other field null."
+  type NodeValidationTaskEntry {
+    broken: Boolean!
+    taskId: ID
+    "The canonical node URN. A report may name this or taskId."
+    taskRef: String
+    "The task's current revision, the newest a report may name."
+    revision: Int
+  }
+  type NodeValidationTaskSet {
+    state: NodeValidationTaskSetState!
+    tasks: [NodeValidationTaskEntry!]!
   }
 
   """
@@ -4297,7 +4314,7 @@ export const typeDefs = `#graphql
     agent: Agent
     syncStatus: SyncStatus!
     syncError: String
-    "Version 1 JSON outcome of the last sync: partial, failed or unknown. Null after a completed clean sync; consult lastSyncedAt/syncStatus for a never-synced memory. Same Memory-record read gate applies. Git sync: hrn:node:hadronmemory.com:specs:cor:int:010:01."
+    "Versioned JSON outcome of the last sync (v1, or v2 when an attestation-refused entry requires it): partial, failed or unknown. Null after a completed clean sync; consult lastSyncedAt/syncStatus for a never-synced memory. Same Memory-record read gate applies. Git sync: hrn:node:hadronmemory.com:specs:cor:int:010:01."
     lastSyncReport: String
     pendingEdgeCount: Int!
     lastSyncedAt: DateTime
@@ -5137,6 +5154,7 @@ export const typeDefs = `#graphql
   chat or run itself would get. BOOT_PROMPT_NOT_SIGNED cannot occur until an organisation can switch signing on (#1614).
   """
   enum BootPromptServeRefusal {
+    BOOT_PROMPT_INSTALL_LICENSE_INACTIVE
     BOOT_PROMPT_NOT_SET
     BOOT_PROMPT_TARGET_DELETED
     BOOT_PROMPT_NOT_APPROVED
@@ -10431,8 +10449,10 @@ export const typeDefs = `#graphql
     (WORKER_NOT_FOUND, FORBIDDEN, WORKER_IN_USE), nothing reserved. The real delete still requires
     confirmNoExternalAttribution and may refuse if anything changed
     (hrn:node:hadronmemory.com:specs:cor:agt:020:03). A validated instruction claim is recorded
-    (hrn:node:hadronmemory.com:specs:cor:dmo:050:12); the target is its subject. No census detail,
-    removal plan, attestation bypass or durable lock/lease is returned.
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:12); the target is its subject. If the delete wins
+    the race, the answer is WORKER_NOT_FOUND. WORKER_REFERENCE_NOT_FOUND refuses a claim only when the
+    acting worker or session no longer exists. No census detail, removal plan, attestation bypass or
+    durable lock/lease is returned.
     """
     deleteWorkerPreview(workerRef: ID!, instruction: ActInstructionInput): DeleteWorkerPreview!
 

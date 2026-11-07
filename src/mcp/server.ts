@@ -248,6 +248,8 @@ import {
 } from '../api/graphql/schema/resolvers.mutation.session.js';
 import { HADRON_SERVER_VERSION, MCP_SURFACE_CAPABILITIES, getDeploymentInfo } from './deploymentInfo.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+import { validationTaskSetsForNodes } from '../api/graphql/schema/resolvers.validationTaskSet.js';
+import type { ValidationTaskSet } from '../lib/contentValidationReport.js';
 import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.js';
 // #1005: the SHARED App-participation predicate (#943) — reused here so
 // reconnect recovery admits exactly whom startSession admitted, rather than a
@@ -1909,6 +1911,14 @@ async function batchActionUrns(nodes: ReadProjectionNode[]): Promise<Map<string,
   return out;
 }
 
+/** #3659: Node.validationTasks as a read line. No line when the set does not apply to this node. */
+function validationTasksLine(set: ValidationTaskSet | undefined): string {
+  if (!set) return '';
+  if (set.state === 'NOT_CONFIGURED') return 'Validation tasks: none configured';
+  if (set.state === 'READY') return `Validation tasks: ${set.tasks.map((t) => `${t.taskRef} @ revision ${t.revision}`).join(', ')}`;
+  return `Validation tasks: ${set.state.toLowerCase()}`;
+}
+
 async function renderNodeReadProjection(
   node: ReadProjectionNode,
   scope: 'content' | 'abstract' | 'all',
@@ -1928,6 +1938,8 @@ async function renderNodeReadProjection(
       actionUrns?: ReadonlyMap<string, string | null>;
     };
     memoryUrnOf?: (memoryId: string) => Promise<string>;
+    /** #3659: this node's validation task set; absent means no line. Never set for an inherited read. */
+    validationTasks?: ValidationTaskSet;
   } = {},
 ): Promise<string> {
   // #1885 (cor:dmo:050:14) — a node read through a child's effective system
@@ -2147,6 +2159,7 @@ async function renderNodeReadProjection(
       : '',
     authorshipLine,
     validationLine,
+    validationTasksLine(opts.validationTasks),
     approvalLine,
     await signatureLine,
     mintLine,
@@ -3440,7 +3453,7 @@ export function createMcpServerInstance(
   server.tool(
     'hadron_record_content_validation',
     'Record the result of running a node\'s validation task on one revision of the node (cor:dmo:160:01). Advisory: it never edits the node or blocks a write. '
-      + 'validationTaskRef is the task the node\'s role rule names now, and validationTaskRevision the task revision that ran. Any writer of the memory may report except the author of that node revision; '
+      + 'validationTaskRef is a task the node\'s rules name now (the "Validation tasks" line of hadron_get_node lists them), and validationTaskRevision the task revision that ran. Any writer of the memory may report except the author of that node revision; '
       + 'if you started a worker session with hadron_start_session, the report is recorded as that worker. runId makes a retry idempotent (same runId, same reporter, same revisions returns the first report); '
       + 'any other reuse is refused [content_validation_run_id_conflict]. A [conflict] means the node changed during the call: nothing was written, re-read it and decide whether to report again.',
     SHAPE_HADRON_RECORD_CONTENT_VALIDATION,
@@ -3831,6 +3844,13 @@ export function createMcpServerInstance(
     roles: auth.roles as Context['roles'],
     organizationId: auth.organizationId ?? undefined,
   });
+
+  /**
+   * #3659: Node.validationTasks reads as the recorder does, so it needs what the recorder's context
+   * carries and scopeCtx() does not: an impersonator would otherwise read as a writer.
+   */
+  const validationReadCtx = (): Context => ({ ...scopeCtx(), appKeyId: auth.appKeyId ?? undefined,
+    ...mcpRequestSessionContext(auth), impersonation: auth.impersonation ?? undefined });
 
   // #2175: explicit recovery twins delegate to the same writer-plus-reader resolver gate.
   const recoveryCtx = (): Context => ({ ...scopeCtx(), appKeyId: auth.appKeyId ?? undefined,
@@ -5138,6 +5158,8 @@ export function createMcpServerInstance(
         locked: lockState === 'locked',
         encryptedMemory: lockState !== 'plaintext',
         auth,
+        // The rules are the base memory's, and a report is recorded against the base node.
+        validationTasks: o.inheritedFrom ? undefined : (await validationTaskSetsForNodes(validationReadCtx(), [current.id])).get(current.id),
       });
 
       // Record usage event (fire-and-forget), AFTER the projection is in hand:
@@ -5705,6 +5727,8 @@ export function createMcpServerInstance(
       ]);
       const batchProvenance = { reports, taskRefs, humanNames, feedback, signatures, actionUrns };
       const batchReadCtx = scopeCtx(); // one memo for the whole call (#2041)
+      const validationTaskSets = await validationTaskSetsForNodes(validationReadCtx(),
+        visible.filter((n) => !(n as { inheritedFrom?: InheritedFrom }).inheritedFrom).map((n) => n.id));
       for (const metadata of visible) {
         if (truncated) {
           omitted.push(await nodeUrn(metadata.loc, metadata.memoryId, memoryUrnOf));
@@ -5745,6 +5769,9 @@ export function createMcpServerInstance(
           auth,
           batch: provenance,
           memoryUrnOf,
+          // Gated on this copy, as the single read is: the map is keyed by node id, and an inherited
+          // copy carries the base node's id (BLIND 6704825426).
+          validationTasks: inheritedFrom ? undefined : validationTaskSets.get(n.id),
         });
         // Measured on the ANNOTATED block, which is what actually ships: sizing
         // the bare projection and pushing the annotated one lets a block cross
@@ -13037,9 +13064,9 @@ const SHAPE_HADRON_FIND_NODES = {
   hasOpenThreads: z.boolean().optional().describe('#3494 — NodeFilter.hasOpenThreads: true selects nodes with live open root comments, false selects nodes with none, omitted leaves the filter off. Applies before ranking/paging in every mode, with existing access and content scope. Deleted stubs do not count. Inherited projections have zero summary. Timestamp is GraphQL-only; hit output is unchanged.'),
   isRunnable: z.boolean().optional().describe('Filter by runnable status (applies in every mode). true = only task nodes (Node.isRunnable=true) — the canonical "tasks I can run" predicate hadron_run_task gates on. false = only nodes explicitly marked non-runnable (most nodes leave it NULL, so false does NOT include them). Omit to ignore runnable status. Spec cor:api:060.'),
   role: z.string().optional().describe('Filter by Node.role family in every mode. Segment-boundary prefix semantics: "spec" matches "spec" and dotted descendants such as "spec.rule", but never "special" or "specification" (#1322). Node.role remains an open string; this is a query filter, not role validation.'),
-  nodeType: z.string().optional().describe('#331 — exact-match node-type facet (free-form, e.g. "task" / "parent" / "info"): only nodes whose nodeType equals this. Applies in every mode; with query "*" it lists all nodes of one type. Orthogonal to objectType. Without it, system nodes stay excluded; "comment" searches comments as the engine documents. Negation and multi-value are not supported here; use nodeTypes for a list of types.'),
+  nodeType: z.string().optional().describe('#331 — exact-match node-type facet (free-form, e.g. "task" / "parent" / "info"): only nodes whose nodeType equals this. Applies in every mode; with query "*" it lists all nodes of one type. Orthogonal to objectType. Without it, system and chat-message nodes stay excluded (name "chat-message" to search chat messages; record nodes are never excluded); "comment" searches comments as the engine documents. Negation and multi-value are not supported here; use nodeTypes for a list of types.'),
   objectType: z.string().optional().describe('#725 — collection facet: only nodes whose objectType equals this (the domain-object discriminator, e.g. "competitor" / "insight"). Orthogonal to nodeType. Composes with query/mode + where.'),
-  nodeTypes: z.array(z.string()).nullish().describe('#3113 — an explicit LIST of node types (GraphQL: NodeFilter.nodeTypes; null is the same as omitted), a union: only nodes whose nodeType is one of them. Applies in every mode. It narrows, ANDs the other filters and, being explicit, replaces the default that leaves out system nodes; it never lifts the memory-class default, access, deleted rows or inheritance. Values are exact and case-sensitive; an unknown value matches nothing. Refused: an empty list, nodeType together with nodeTypes, more than 20 entries (counted before duplicates are dropped), and a list containing "comment" (search comments with nodeType or nodeKind). Vector and hybrid keep their bounded, widening candidate window.'),
+  nodeTypes: z.array(z.string()).nullish().describe('#3113 — an explicit LIST of node types (GraphQL: NodeFilter.nodeTypes; null is the same as omitted), a union: only nodes whose nodeType is one of them. Applies in every mode. It narrows, ANDs the other filters and, being explicit, replaces the default that leaves out system and chat-message nodes; it never lifts the memory-class default, access, deleted rows or inheritance. Values are exact and case-sensitive; an unknown value matches nothing. Refused: an empty list, nodeType together with nodeTypes, more than 20 entries (counted before duplicates are dropped), and a list containing "comment" (search comments with nodeType or nodeKind). Vector and hybrid keep their bounded, widening candidate window.'),
   nodeKind: z.enum(['CONTENT', 'COMMENTS', 'ALL']).optional().describe('#1608/#1678 — which KIND of node to search (GraphQL: NodeFilter.contentScope). CONTENT (default): content nodes only. COMMENTS: comment nodes only (feedback about other nodes), found exhaustively in every mode before ranking and limits. ALL: both. A comment hit is labelled COMMENT and is never content of, or verified fact about, its target. Not hadron_get_node\'s contentScope, which picks the parts of one node to return.'),
   childrenOf: z.string().optional().describe('#2832 — list only the DIRECT children of this loc (GraphQL: NodeFilter.childrenOf). A direct child is a node whose loc is exactly this loc plus one more segment (no further colon); "" means the top-level nodes. It reads loc strings only (not edges, not parentRel), so a loc whose parent has no node of its own is still listed. Applies in every mode, with the same access and default exclusions as the rest of the search, and pairs with memoryUrn (loc is per memory). With no query and no sort the order is the sibling order (positioned nodes first, then by loc). Unlike parentRel, which scopes the WHOLE subtree.'),
   scope: z.string().optional().describe('Spec 049: search under a named scope — a scope id, a scope NAME (resolved in the active App\'s context), "app" (the active App\'s attached memories), or "global" (your active organization\'s view). Omitted with no memory selector: the ladder applies (active scope › active App › active organization), and the result says which. An explicit memoryUrn / memoryUrns / allMemories outranks the ambient scope but still intersects with one named here.'),

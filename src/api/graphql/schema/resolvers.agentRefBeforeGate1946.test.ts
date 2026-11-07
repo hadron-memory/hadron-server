@@ -211,6 +211,8 @@ describe('#1946 controls: the legitimate callers keep their answers', () => {
     await createDbAgentOrgGrant(db, orgB.id, pub.id);
     expect((await ask(ctx(adminB), 'mutation($a: ID!, $r: ID!) { installAgentIntoApp(appRef: $a, agentRef: $r) { appAgent { agent { id } } } }', { a: appB.id, r: pub.id })).error).toBeNull();
     await db.orgMember.create({ data: { organizationId: orgA.id, userId: ana, role: 'READER' } });
+    // #1148 admits ORGANIZATION-visible Agents for current members; PERSONAL stays non-installable.
+    await db.agent.update({ where: { id: secret.id }, data: { visibility: 'PERSONAL' } });
     const a = await ask(ctx(ana), 'mutation($a: ID!, $r: ID!) { installAgentIntoApp(appRef: $a, agentRef: $r) { appAgent { agent { id } } } }', { a: anaApp.id, r: secret.id });
     expect(a.error?.extensions.code).toBe('ORGANIZATION_MISMATCH');
   });

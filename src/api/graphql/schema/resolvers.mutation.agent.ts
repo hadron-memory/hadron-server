@@ -314,7 +314,10 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
   const existing = await ctx.db.agent.findUnique({ where: { urn: agentUrn } });
   if (existing) {
     if (existing.deletedAt) {
-      await ctx.db.agent.delete({ where: { id: existing.id } }).catch((e: unknown) => {
+      // A retained install memory still needs this identity to enforce its org-text audience.
+      const reclaimed = await ctx.db.agent.deleteMany({
+        where: { id: existing.id, installMemories: { none: {} } },
+      }).catch((e: unknown) => {
         // P2003 = a Worker casting still references the tombstone (Restrict):
         // the URN slot is genuinely occupied — refuse typed, don't 500.
         if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2003') {
@@ -325,6 +328,9 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
         }
         throw e;
       });
+      if (reclaimed.count === 0) {
+        throw new AgentUrnTakenError(agentUrn, `URN "${agentUrn}" belongs to a deleted agent whose retained install memories keep it reserved.`);
+      }
     } else {
       throw new AgentUrnTakenError(agentUrn);
     }

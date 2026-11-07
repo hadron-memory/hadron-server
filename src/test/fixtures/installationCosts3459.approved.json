@@ -1,0 +1,780 @@
+{
+  "ruling": "https://github.com/hadron-memory/hadron-server/issues/3459#issuecomment-6696871831",
+  "baselineCommit": "d3c2be02fa5a484842fe70efb4558f3ef497b941",
+  "policy": "Upper ceilings without slack for cost metrics; exact semantic rows and operation count. Null bytes remain unmeasured. Original observed artifact retained separately.",
+  "metrics": [
+    {
+      "label": "A1/agents/partial/cold",
+      "sqlCount": 21,
+      "prismaOperations": 11,
+      "pagePrismaReads": 1,
+      "helperEntries": [
+        1,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 2,
+      "responseUtf8Bytes": 112
+    },
+    {
+      "label": "A1/agents/partial/same-context-repeat",
+      "sqlCount": 21,
+      "prismaOperations": 11,
+      "pagePrismaReads": 1,
+      "helperEntries": [
+        1,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 2,
+      "responseUtf8Bytes": 112
+    },
+    {
+      "label": "A1/agents/partial/fresh-context",
+      "sqlCount": 21,
+      "prismaOperations": 11,
+      "pagePrismaReads": 1,
+      "helperEntries": [
+        1,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 2,
+      "responseUtf8Bytes": 112
+    },
+    {
+      "label": "A1/agents/full/cold",
+      "sqlCount": 16,
+      "prismaOperations": 6,
+      "pagePrismaReads": 1,
+      "helperEntries": [
+        1,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 4,
+      "responseUtf8Bytes": 196
+    },
+    {
+      "label": "A1/agents/full/same-context-repeat",
+      "sqlCount": 16,
+      "prismaOperations": 6,
+      "pagePrismaReads": 1,
+      "helperEntries": [
+        1,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 4,
+      "responseUtf8Bytes": 196
+    },
+    {
+      "label": "A1/agents/full/fresh-context",
+      "sqlCount": 16,
+      "prismaOperations": 6,
+      "pagePrismaReads": 1,
+      "helperEntries": [
+        1,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 4,
+      "responseUtf8Bytes": 196
+    },
+    {
+      "label": "A1/audits/partial/cold",
+      "sqlCount": 25,
+      "prismaOperations": 15,
+      "pagePrismaReads": 1,
+      "helperEntries": [
+        1,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 4,
+      "responseUtf8Bytes": 525
+    },
+    {
+      "label": "A1/audits/partial/same-context-repeat",
+      "sqlCount": 25,
+      "prismaOperations": 15,
+      "pagePrismaReads": 1,
+      "helperEntries": [
+        1,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 4,
+      "responseUtf8Bytes": 525
+    },
+    {
+      "label": "A1/audits/partial/fresh-context",
+      "sqlCount": 25,
+      "prismaOperations": 15,
+      "pagePrismaReads": 1,
+      "helperEntries": [
+        1,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 4,
+      "responseUtf8Bytes": 525
+    },
+    {
+      "label": "A1/audits/full/cold",
+      "sqlCount": 16,
+      "prismaOperations": 6,
+      "pagePrismaReads": 1,
+      "helperEntries": [
+        1,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 4,
+      "responseUtf8Bytes": 763
+    },
+    {
+      "label": "A1/audits/full/same-context-repeat",
+      "sqlCount": 16,
+      "prismaOperations": 6,
+      "pagePrismaReads": 1,
+      "helperEntries": [
+        1,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 4,
+      "responseUtf8Bytes": 763
+    },
+    {
+      "label": "A1/audits/full/fresh-context",
+      "sqlCount": 16,
+      "prismaOperations": 6,
+      "pagePrismaReads": 1,
+      "helperEntries": [
+        1,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 4,
+      "responseUtf8Bytes": 763
+    },
+    {
+      "label": "A1/siblings/partial/cold",
+      "sqlCount": 39,
+      "prismaOperations": 23,
+      "pagePrismaReads": 2,
+      "helperEntries": [
+        2,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 6,
+      "responseUtf8Bytes": 620
+    },
+    {
+      "label": "A1/siblings/partial/same-context-repeat",
+      "sqlCount": 39,
+      "prismaOperations": 23,
+      "pagePrismaReads": 2,
+      "helperEntries": [
+        2,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 6,
+      "responseUtf8Bytes": 620
+    },
+    {
+      "label": "A1/siblings/partial/fresh-context",
+      "sqlCount": 39,
+      "prismaOperations": 23,
+      "pagePrismaReads": 2,
+      "helperEntries": [
+        2,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 6,
+      "responseUtf8Bytes": 620
+    },
+    {
+      "label": "A1/siblings/full/cold",
+      "sqlCount": 26,
+      "prismaOperations": 10,
+      "pagePrismaReads": 2,
+      "helperEntries": [
+        2,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 8,
+      "responseUtf8Bytes": 942
+    },
+    {
+      "label": "A1/siblings/full/same-context-repeat",
+      "sqlCount": 26,
+      "prismaOperations": 10,
+      "pagePrismaReads": 2,
+      "helperEntries": [
+        2,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 8,
+      "responseUtf8Bytes": 942
+    },
+    {
+      "label": "A1/siblings/full/fresh-context",
+      "sqlCount": 26,
+      "prismaOperations": 10,
+      "pagePrismaReads": 2,
+      "helperEntries": [
+        2,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 8,
+      "responseUtf8Bytes": 942
+    },
+    {
+      "label": "A1/reverse/partial",
+      "sqlCount": 61,
+      "prismaOperations": 34,
+      "pagePrismaReads": 5,
+      "helperEntries": [
+        5,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 1,
+      "responseUtf8Bytes": 224
+    },
+    {
+      "label": "A1/reverse/full",
+      "sqlCount": 48,
+      "prismaOperations": 21,
+      "pagePrismaReads": 5,
+      "helperEntries": [
+        5,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 1,
+      "responseUtf8Bytes": 224
+    },
+    {
+      "label": "A3/agents/partial/cold",
+      "sqlCount": 63,
+      "prismaOperations": 33,
+      "pagePrismaReads": 3,
+      "helperEntries": [
+        3,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 6,
+      "responseUtf8Bytes": 316
+    },
+    {
+      "label": "A3/agents/partial/same-context-repeat",
+      "sqlCount": 63,
+      "prismaOperations": 33,
+      "pagePrismaReads": 3,
+      "helperEntries": [
+        3,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 6,
+      "responseUtf8Bytes": 316
+    },
+    {
+      "label": "A3/agents/partial/fresh-context",
+      "sqlCount": 63,
+      "prismaOperations": 33,
+      "pagePrismaReads": 3,
+      "helperEntries": [
+        3,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 6,
+      "responseUtf8Bytes": 316
+    },
+    {
+      "label": "A3/agents/full/cold",
+      "sqlCount": 48,
+      "prismaOperations": 18,
+      "pagePrismaReads": 3,
+      "helperEntries": [
+        3,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 12,
+      "responseUtf8Bytes": 568
+    },
+    {
+      "label": "A3/agents/full/same-context-repeat",
+      "sqlCount": 48,
+      "prismaOperations": 18,
+      "pagePrismaReads": 3,
+      "helperEntries": [
+        3,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 12,
+      "responseUtf8Bytes": 568
+    },
+    {
+      "label": "A3/agents/full/fresh-context",
+      "sqlCount": 48,
+      "prismaOperations": 18,
+      "pagePrismaReads": 3,
+      "helperEntries": [
+        3,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 12,
+      "responseUtf8Bytes": 568
+    },
+    {
+      "label": "A3/audits/partial/cold",
+      "sqlCount": 75,
+      "prismaOperations": 45,
+      "pagePrismaReads": 3,
+      "helperEntries": [
+        3,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 12,
+      "responseUtf8Bytes": 1555
+    },
+    {
+      "label": "A3/audits/partial/same-context-repeat",
+      "sqlCount": 75,
+      "prismaOperations": 45,
+      "pagePrismaReads": 3,
+      "helperEntries": [
+        3,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 12,
+      "responseUtf8Bytes": 1555
+    },
+    {
+      "label": "A3/audits/partial/fresh-context",
+      "sqlCount": 75,
+      "prismaOperations": 45,
+      "pagePrismaReads": 3,
+      "helperEntries": [
+        3,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 12,
+      "responseUtf8Bytes": 1555
+    },
+    {
+      "label": "A3/audits/full/cold",
+      "sqlCount": 48,
+      "prismaOperations": 18,
+      "pagePrismaReads": 3,
+      "helperEntries": [
+        3,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 12,
+      "responseUtf8Bytes": 2269
+    },
+    {
+      "label": "A3/audits/full/same-context-repeat",
+      "sqlCount": 48,
+      "prismaOperations": 18,
+      "pagePrismaReads": 3,
+      "helperEntries": [
+        3,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 12,
+      "responseUtf8Bytes": 2269
+    },
+    {
+      "label": "A3/audits/full/fresh-context",
+      "sqlCount": 48,
+      "prismaOperations": 18,
+      "pagePrismaReads": 3,
+      "helperEntries": [
+        3,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 12,
+      "responseUtf8Bytes": 2269
+    },
+    {
+      "label": "A3/siblings/partial/cold",
+      "sqlCount": 117,
+      "prismaOperations": 69,
+      "pagePrismaReads": 6,
+      "helperEntries": [
+        6,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 18,
+      "responseUtf8Bytes": 1840
+    },
+    {
+      "label": "A3/siblings/partial/same-context-repeat",
+      "sqlCount": 117,
+      "prismaOperations": 69,
+      "pagePrismaReads": 6,
+      "helperEntries": [
+        6,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 18,
+      "responseUtf8Bytes": 1840
+    },
+    {
+      "label": "A3/siblings/partial/fresh-context",
+      "sqlCount": 117,
+      "prismaOperations": 69,
+      "pagePrismaReads": 6,
+      "helperEntries": [
+        6,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 18,
+      "responseUtf8Bytes": 1840
+    },
+    {
+      "label": "A3/siblings/full/cold",
+      "sqlCount": 78,
+      "prismaOperations": 30,
+      "pagePrismaReads": 6,
+      "helperEntries": [
+        6,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 24,
+      "responseUtf8Bytes": 2806
+    },
+    {
+      "label": "A3/siblings/full/same-context-repeat",
+      "sqlCount": 78,
+      "prismaOperations": 30,
+      "pagePrismaReads": 6,
+      "helperEntries": [
+        6,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 24,
+      "responseUtf8Bytes": 2806
+    },
+    {
+      "label": "A3/siblings/full/fresh-context",
+      "sqlCount": 78,
+      "prismaOperations": 30,
+      "pagePrismaReads": 6,
+      "helperEntries": [
+        6,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 24,
+      "responseUtf8Bytes": 2806
+    },
+    {
+      "label": "A3/reverse/partial",
+      "sqlCount": 147,
+      "prismaOperations": 84,
+      "pagePrismaReads": 13,
+      "helperEntries": [
+        13,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 3,
+      "responseUtf8Bytes": 604
+    },
+    {
+      "label": "A3/reverse/full",
+      "sqlCount": 112,
+      "prismaOperations": 49,
+      "pagePrismaReads": 13,
+      "helperEntries": [
+        13,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 3,
+      "responseUtf8Bytes": 604
+    },
+    {
+      "label": "importedBy/one-Agent-1-aliases",
+      "sqlCount": 17,
+      "prismaOperations": 12,
+      "pagePrismaReads": 1,
+      "helperEntries": [
+        1,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 2,
+      "responseUtf8Bytes": 213
+    },
+    {
+      "label": "importedBy/one-Agent-3-aliases",
+      "sqlCount": 51,
+      "prismaOperations": 36,
+      "pagePrismaReads": 3,
+      "helperEntries": [
+        3,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 6,
+      "responseUtf8Bytes": 619
+    },
+    {
+      "label": "role-definition/1-agents",
+      "sqlCount": 15,
+      "prismaOperations": 10,
+      "pagePrismaReads": 1,
+      "helperEntries": [
+        1,
+        0,
+        1
+      ],
+      "apiRequests": 1,
+      "projectedRows": 1,
+      "responseUtf8Bytes": 61
+    },
+    {
+      "label": "role-marker/1-agents",
+      "sqlCount": 6,
+      "prismaOperations": 2,
+      "pagePrismaReads": 1,
+      "helperEntries": [
+        1,
+        0,
+        0
+      ],
+      "apiRequests": 0,
+      "projectedRows": 1,
+      "responseUtf8Bytes": null
+    },
+    {
+      "label": "role-definition/4-agents",
+      "sqlCount": 18,
+      "prismaOperations": 12,
+      "pagePrismaReads": 1,
+      "helperEntries": [
+        1,
+        0,
+        1
+      ],
+      "apiRequests": 1,
+      "projectedRows": 1,
+      "responseUtf8Bytes": 61
+    },
+    {
+      "label": "role-marker/4-agents",
+      "sqlCount": 12,
+      "prismaOperations": 7,
+      "pagePrismaReads": 1,
+      "helperEntries": [
+        1,
+        0,
+        0
+      ],
+      "apiRequests": 0,
+      "projectedRows": 0,
+      "responseUtf8Bytes": null
+    },
+    {
+      "label": "single/ROW",
+      "sqlCount": 2,
+      "prismaOperations": 1,
+      "pagePrismaReads": 0,
+      "helperEntries": [
+        0,
+        0,
+        1
+      ],
+      "apiRequests": 0,
+      "projectedRows": 1,
+      "responseUtf8Bytes": null
+    },
+    {
+      "label": "single/DERIVED",
+      "sqlCount": 9,
+      "prismaOperations": 4,
+      "pagePrismaReads": 1,
+      "helperEntries": [
+        0,
+        0,
+        1
+      ],
+      "apiRequests": 0,
+      "projectedRows": 1,
+      "responseUtf8Bytes": null
+    },
+    {
+      "label": "single/absent",
+      "sqlCount": 6,
+      "prismaOperations": 2,
+      "pagePrismaReads": 1,
+      "helperEntries": [
+        0,
+        0,
+        1
+      ],
+      "apiRequests": 0,
+      "projectedRows": 0,
+      "responseUtf8Bytes": null
+    },
+    {
+      "label": "grant/active/partial",
+      "sqlCount": 25,
+      "prismaOperations": 15,
+      "pagePrismaReads": 1,
+      "helperEntries": [
+        1,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 4,
+      "responseUtf8Bytes": 525
+    },
+    {
+      "label": "grant/inactive/fresh",
+      "sqlCount": 23,
+      "prismaOperations": 13,
+      "pagePrismaReads": 1,
+      "helperEntries": [
+        1,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 3,
+      "responseUtf8Bytes": 420
+    },
+    {
+      "label": "grant/revoked/fresh",
+      "sqlCount": 23,
+      "prismaOperations": 13,
+      "pagePrismaReads": 1,
+      "helperEntries": [
+        1,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 3,
+      "responseUtf8Bytes": 420
+    },
+    {
+      "label": "grant/expired/fresh",
+      "sqlCount": 23,
+      "prismaOperations": 13,
+      "pagePrismaReads": 1,
+      "helperEntries": [
+        1,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 3,
+      "responseUtf8Bytes": 420
+    },
+    {
+      "label": "importedBy/1-distinct-Agents/full",
+      "sqlCount": 5,
+      "prismaOperations": 5,
+      "pagePrismaReads": 0,
+      "helperEntries": [
+        0,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 2,
+      "responseUtf8Bytes": 290
+    },
+    {
+      "label": "importedBy/3-distinct-Agents/full",
+      "sqlCount": 14,
+      "prismaOperations": 12,
+      "pagePrismaReads": 0,
+      "helperEntries": [
+        0,
+        0,
+        0
+      ],
+      "apiRequests": 1,
+      "projectedRows": 3,
+      "responseUtf8Bytes": 524
+    }
+  ],
+  "additionalRuling": "https://github.com/hadron-memory/hadron-server/issues/3459#issuecomment-6697041514",
+  "productionSource": "6ea55eec762dd8014351cb6a958cf6c7df439f00",
+  "additionalBaselineCommit": "2d5e56f097"
+}

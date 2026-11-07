@@ -1,3 +1,4 @@
+import { personalOrgAgentServeAllowed } from '../../../lib/auth/personalOrgAgentInstall.js';
 import { appInstallationWhere } from '../../../lib/appInstallations.js';
 import type { Context } from './resolvers.helpers.js';
 import { isAuthorizationDenial, requireOwnerOrOrgRole } from './resolvers.helpers.js';
@@ -48,7 +49,9 @@ export async function chatCarrierApps(
   });
   if (apps.length === 0) return [];
   const licensed = await activeAppInstallLicenseIdsForAgent(ctx.db, agentId, apps.map((a) => a.id));
-  return apps.filter((a) => licensed.has(a.id));
+  const admitted = await Promise.all(apps.map(async (app) => licensed.has(app.id)
+    && await personalOrgAgentServeAllowed(ctx.db, app, agentId, ctx.userId) ? app : null));
+  return admitted.filter((app): app is (typeof apps)[number] => app !== null);
 }
 
 /**

@@ -1730,7 +1730,10 @@ export const TASK_BATCH_MAX = 25;
  * A create judged before its transaction: the App and actor it resolved to, its parent, its normalized fields and
  * the advice decided so far. Built by {@link prepareTaskCreate}; written by {@link applyTaskCreate}.
  */
-/** #2646: what a clone only copied (a copied value is left out, never refused, when the caller may not set it). */
+/**
+ * #2646: what a clone only copied. Copied properties or a copied priority the caller may not set are left out, never
+ * refused; copied requirements are checked as a create checks them, so a model group removed since refuses the clone.
+ */
 type CloneCopy = { sourceId: string; priorityCopied: boolean; propertiesCopied: boolean; requirements?: Prisma.JsonValue | null };
 
 type PreparedCreate = {
