@@ -10,11 +10,12 @@ import { resolveAppInstallation } from '../../../lib/appInstallations.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
-const boundary = { afterCommit: null as null | (() => Promise<void>), missSnapshot: false, armMissAfterWrite: false, snapshotSawWrite: false };
+const boundary = { beforeTransaction: null as null | (() => Promise<void>), pointerWritten: false, afterCommit: null as null | (() => Promise<void>), missSnapshot: false, armMissAfterWrite: false, snapshotSawWrite: false };
 vi.mock('../../../lib/bootPromptPointer.js', async importOriginal => {
   const real = await importOriginal<typeof import('../../../lib/bootPromptPointer.js')>();
   return { ...real, setBootPromptPointer: async (...args: Parameters<typeof real.setBootPromptPointer>) => {
     const result = await real.setBootPromptPointer(...args);
+    boundary.pointerWritten = true;
     if (boundary.armMissAfterWrite) { boundary.armMissAfterWrite = false; boundary.missSnapshot = true; }
     return result;
   } };
@@ -38,6 +39,9 @@ vi.mock('../../../lib/appInstallations.js', async importOriginal => {
 vi.mock('./authorizedTx.js', async importOriginal => {
   const real = await importOriginal<typeof import('./authorizedTx.js')>();
   return { ...real, withAuthorizedTx: async (...args: Parameters<typeof real.withAuthorizedTx>) => {
+    if (boundary.beforeTransaction) {
+      const hook = boundary.beforeTransaction; boundary.beforeTransaction = null; await hook();
+    }
     const result = await real.withAuthorizedTx(...args);
     if (boundary.afterCommit) {
       const hook = boundary.afterCommit; boundary.afterCommit = null;
@@ -47,7 +51,7 @@ vi.mock('./authorizedTx.js', async importOriginal => {
   } };
 });
 beforeEach(() => cleanDb(db));
-afterEach(() => { boundary.afterCommit = null; boundary.missSnapshot = false; boundary.armMissAfterWrite = false; boundary.snapshotSawWrite = false; });
+afterEach(() => { boundary.beforeTransaction = null; boundary.pointerWritten = false; boundary.afterCommit = null; boundary.missSnapshot = false; boundary.armMissAfterWrite = false; boundary.snapshotSawWrite = false; });
 
 async function fixture(kind: 'ROW' | 'DERIVED') {
   const key = generateId().toLowerCase();
@@ -147,12 +151,22 @@ it.each([false, true])('unlicensed DERIVED %s refuses before commit and preserve
   const f = await fixture('DERIVED');
   const owner = await db.organization.create({ data: { name: 'Foreign owner', urn: `foreign-${generateId().toLowerCase()}.example` } });
   await db.agent.update({ where: { id: f.agent.id }, data: { organizationId: owner.id } });
+  const importer = await db.organization.create({ data: { name: 'Importer', urn: `importer-${generateId().toLowerCase()}.example` } });
+  await db.agentImport.deleteMany({ where: { parentAgentId: f.parent.id, importedAgentId: f.agent.id } });
+  await db.agent.update({ where: { id: f.parent.id }, data: { organizationId: importer.id } });
+  await createDbAgentOrgGrant(db, importer.id, f.agent.id);
+  await createDbAgentImport(db, f.parent.id, f.agent.id);
   const args = { appRef: f.app.id, agentRef: f.agent.id, nodeRef: f.node.id };
   if (clear) await (resolvers.Mutation as any).setAppAgentBootPrompt(null, args, f.ctx);
-  await db.agentOrgGrant.deleteMany({ where: { agentId: f.agent.id } });
+  // Revocation wins after the pooled owner lookup but before the held write.
+  boundary.beforeTransaction = async () => {
+    await db.agentOrgGrant.updateMany({ where: { agentId: f.agent.id, orgId: f.app.organizationId! }, data: { revokedAt: new Date() } });
+  };
+  boundary.pointerWritten = false;
   const key = { appId_agentId: { appId: f.app.id, agentId: f.agent.id } };
   const before = await db.appAgentCustomization.findUnique({ where: key });
   await expect((resolvers.Mutation as any).setAppAgentBootPrompt(null,
     { ...args, nodeRef: clear ? null : f.node.id }, f.ctx)).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
+  expect(boundary.pointerWritten).toBe(true);
   expect(await db.appAgentCustomization.findUnique({ where: key })).toEqual(before);
 });
