@@ -1,10 +1,10 @@
 {
   "productionSource": "cd0da474f51b8742754ed6456db9987b86c7fc77",
-  "harnessRevision": "dfd4594aee1f22681a6d2e1fb106323b25cac5c2",
+  "harnessRevision": "adb21b402b1252462ecc97aca481219010ef0819",
   "postgresVersion": "PostgreSQL 17.11 (Debian 17.11-0+deb13u1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit",
   "prismaVersion": "6.19.2",
   "nodeVersion": "v22.23.3",
-  "harnessSha256": "685ccaf6d587e20e5082b1a55707902654eb274346a5e5ac5c7e9a0a8e4da6d0",
+  "harnessSha256": "9008c08a6e0023f6d8cd70b88e5ba07b7eb3a28dd715a912f4f5dd75c2d1a6a5",
   "complete": true,
   "expectedObservationCount": 217,
   "fixedWorkload": "6 states x 1/3 Agents x 9 paths x first/repeat; synthetic physical installs, one App",

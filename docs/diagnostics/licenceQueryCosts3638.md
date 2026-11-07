@@ -1,6 +1,6 @@
 # Personal-org Agent licence-check SQL diagnostic (#3638)
 
-Product baseline `cd0da474f51b8742754ed6456db9987b86c7fc77`; diagnostic revision `dfd4594aee1f22681a6d2e1fb106323b25cac5c2`, harness SHA256 `685ccaf6d587e20e5082b1a55707902654eb274346a5e5ac5c7e9a0a8e4da6d0`. PostgreSQL `PostgreSQL 17.11 (Debian 17.11-0+deb13u1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit`, Prisma `6.19.2`. Node `v22.23.3`. Synthetic run-owned local database only; no product changes, tuning, cache, SQL ceilings, latency or production measurement.
+Product baseline `cd0da474f51b8742754ed6456db9987b86c7fc77`; diagnostic revision `adb21b402b1252462ecc97aca481219010ef0819`, harness SHA256 `9008c08a6e0023f6d8cd70b88e5ba07b7eb3a28dd715a912f4f5dd75c2d1a6a5`. PostgreSQL `PostgreSQL 17.11 (Debian 17.11-0+deb13u1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit`, Prisma `6.19.2`. Node `v22.23.3`. Synthetic run-owned local database only; no product changes, tuning, cache, SQL ceilings, latency or production measurement.
 
 ## Reproduction
 
@@ -103,3 +103,5 @@ All entries refer to product baseline cd0da474; line numbers are navigation, not
 Not a complete cost census: no end-to-end MCP/HTTP, full chat lifecycle, worker/session/cast paths, transaction contention, item/derived/shared-target installations, many Apps, opposing async contexts or production cardinalities. Existing #3459 measures a DIFFERENT roster and cannot be subtracted from these counts as an optimization baseline. This campaign establishes an initial reproducible workload; any batching/memoization/tuning suggestion needs a separate issue/law/gate. No numeric ceilings approved here.
 
 Validation: observer red checkpoint3bf8e0ced0 gives2failed/1passed; completed observer+campaign5/5. Silent-listener and counted-barrier faults each fail the exact SELECT1 discriminator (0/2 instead of1), byte-restored; full repeated217-row observations, table histograms and semantics matched exactly. Initial tsc found an implicit-any roster, fixed; follow-up tsc passed. Final provenance/userless-role adjustment remeasured all217 observations unchanged. No local full suite or stack; hostedCI is separate.
+
+Path SQL totals remain entirely observational, including zero-query cases; only the separate SELECT1 instrumentation control asserts an exact statement count. The latest repeated roster matches all prior217counts and semantics after this assertion-only tightening.
