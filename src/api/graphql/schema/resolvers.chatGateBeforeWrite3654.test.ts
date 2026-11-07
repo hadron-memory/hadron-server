@@ -3,7 +3,7 @@
  * user message is written, so a refusal leaves no message node, no message-count bump and no served-prompt record behind.
  * The every-turn scope of the gate is deliberately unchanged (cor:dmo:050:02, Proposed, not ruled).
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { chatNodeByLocOrThrow, cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -11,7 +11,6 @@ import { computeApprovalHash } from '../../../lib/approvalHash.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
 import { sha256Hex, type CompiledProvenance } from '../../../lib/bootCompile/provenance.js';
 import { resolvers, type Context } from './resolvers.js';
-import { recordChatServedIfChanged, serveChatPrompt } from './resolvers.mutation.chat.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -36,14 +35,6 @@ async function compiled(content: string) {
   await db.agent.update({ where: { id: agent.id }, data: { bootPromptNodeId: node.id, bootPromptUrn: `u:${node.id}` } });
   return node.id as string;
 }
-async function recompileApproved(nodeId: string, content: string) {
-  const n = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
-  await db.nodeRevision.create({ data: { nodeId, memoryId: systemMemoryId, loc: n.loc, name: n.name, content: n.content, revNo: n.revSeq, tags: [], approvedAt: n.approvedAt, approvedByInfo: n.approvedByInfo, approvalHash: n.approvalHash } as never });
-  await withCompileWrite(() => db.node.update({ where: { id: nodeId }, data: { content, revSeq: n.revSeq + 1, contentRevSeq: n.revSeq + 1 } }));
-  await db.compiledPromptRevision.create({ data: { compiledNodeId: nodeId, compiledRevNo: n.revSeq + 1, contentHash: sha256Hex(content), targetKind: 'AGENT', targetAgentId: agent.id, provenance: provenance() as never, occurrenceCount: 1 } });
-  await approve(nodeId);
-}
-
 beforeEach(async () => {
   await cleanDb(db);
   org = await db.organization.create({ data: { id: generateId(), name: 'sc-org', urn: 'sc-org' } });
@@ -90,6 +81,20 @@ describe('#3654 a refused sendChatMessage turn persists nothing', () => {
     const before = await snapshot(start.chatId);
     await db.agent.update({ where: { id: agent.id }, data: { deletedAt: new Date() } });
     expect(await code(M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'refused' }, ctx()))).toMatch(/^AGENT_NOT_FOUND/);
+    expect(await snapshot(start.chatId)).toEqual(before);
+  });
+
+  it('a turn that gains its stage only by the fallback re-route is gated before the write too', async () => {
+    const node = await compiled('v1');
+    await db.node.create({ data: { id: generateId(), memoryId: systemMemoryId, loc: 'conversations:fallback', name: 'fallback', nodeType: 'system', data: { isFallback: true, stageOrder: ['hold'] } } });
+    await db.node.updateMany({ where: { memoryId: systemMemoryId, loc: 'conversations:research' }, data: { data: { stageOrder: ['scope'], isSetup: false, goalSignals: ['research'] } } });
+    const start = await M.startChat({}, { agentId: agent.id }, ctx());
+    const chat = await chatNodeByLocOrThrow(db, start.chatId);
+    // A chat parked in the fallback conversation with no stage: only the re-route would give this turn one.
+    await db.node.update({ where: { id: chat.id }, data: { data: { ...(chat.data as object), conversationName: 'fallback', stageName: '' } } });
+    const before = await snapshot(start.chatId);
+    await db.node.update({ where: { id: node }, data: { deletedAt: new Date() } });
+    expect(await code(M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'please research this topic' }, ctx()))).toBe('BOOT_PROMPT_TARGET_DELETED');
     expect(await snapshot(start.chatId)).toEqual(before);
   });
 
