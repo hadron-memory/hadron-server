@@ -15,6 +15,16 @@ PG_MAJOR=17
 PG_VERSION=17.11-0+deb13u1
 CLUSTER=main
 HARNESS_MANIFEST_SHA256=8b132fa42ac4bb2bba0c27906121503537f1505462828a7698763bf9eadb5a69
+# r5: user-988 is a restricted project, and Incus 6.0.4 forbids the low-level
+# key limits.memory.swap on its profiles and instances
+# (internal/server/project/permissions.go isContainerLowLevelOptionForbidden).
+# No-swap is enforced INSIDE the instance instead: one workload slice holds the
+# postgres unit and, by systemd's dash nesting, pg3601-clients.slice. The
+# descriptor's instance_cgroup names this slice; the profile's instance-wide
+# caps (1GiB, 1 CPU, 512 pids) still apply around it.
+WORKLOAD_SLICE=pg3601.slice
+WORKLOAD_CG=/sys/fs/cgroup/$WORKLOAD_SLICE
+CLIENT_CG=$WORKLOAD_CG/pg3601-clients.slice
 
 # Host-side state: the .deb closure, receipts, lifecycle log. Never inside /tmp.
 STATE=${PG3601_STATE:-$HOME/.local/state/pg3601}

@@ -23,7 +23,7 @@ mark setup-start
 log "setup: create profile"
 "${INCUS[@]}" profile create "$PROFILE"
 "${INCUS[@]}" profile set "$PROFILE" limits.cpu=1 limits.cpu.allowance=100ms/100ms \
-  limits.memory=1GiB limits.memory.enforce=hard limits.memory.swap=false \
+  limits.memory=1GiB limits.memory.enforce=hard \
   limits.processes=512 boot.autostart=false
 "${INCUS[@]}" profile device add "$PROFILE" root disk pool="$POOL" path=/ size=4GiB
 log "setup: create volume"
@@ -98,7 +98,13 @@ for kv in "listen_addresses ''" "logging_collector on" "log_directory /pgvol/log
   # shellcheck disable=SC2086
   ix pg_conftool "$PG_MAJOR" "$CLUSTER" set $kv
 done
-ix sh -c 'mkdir -p /etc/systemd/system/postgresql@17-main.service.d && printf "[Service]\nProtectSystem=strict\nProtectHome=yes\nReadWritePaths=/pgvol/data /pgvol/log /run/postgresql\nPrivateTmp=no\nLimitCORE=0\n" > /etc/systemd/system/postgresql@17-main.service.d/pg3601.conf'
+log "setup: workload slice (r5: in-instance no-swap; the profile cannot carry limits.memory.swap)"
+# Same bounds as the instance profile, set where in-instance root owns the
+# cgroup: memory 1GiB hard, swap 0, 1 CPU, 512 tasks. Residual (stated, not
+# isolation): processes OUTSIDE this slice (the instance's init, journald,
+# the stop-request unit) may still swap within the instance's 1GiB.
+ix sh -c 'printf "[Unit]\nDescription=pg3601 workload: postgres and the client slice\n[Slice]\nMemoryMax=1G\nMemorySwapMax=0\nCPUQuota=100%%\nTasksMax=512\n" > /etc/systemd/system/pg3601.slice'
+ix sh -c 'mkdir -p /etc/systemd/system/postgresql@17-main.service.d && printf "[Service]\nSlice=pg3601.slice\nProtectSystem=strict\nProtectHome=yes\nReadWritePaths=/pgvol/data /pgvol/log /run/postgresql\nPrivateTmp=no\nLimitCORE=0\n" > /etc/systemd/system/postgresql@17-main.service.d/pg3601.conf'
 
 log "setup: root-owned stop-request endpoint (the confined adapter's only stop lever)"
 # runner may create /pgvol/client/STOP_REQUEST; root answers with SIGKILL of the

@@ -41,7 +41,10 @@ def epoch(ts):
     m=re.match(r"(.*?\.\d{1,6})\d*(Z|[+-]\d\d:\d\d)$",ts) or re.match(r"(.*?)(Z|[+-]\d\d:\d\d)$",ts)
     return datetime.fromisoformat(m.group(1)+("+00:00" if m.group(2)=="Z" else m.group(2))).timestamp()
 marks={}
-for m in jl(os.path.join(rec,"marks.jsonl")): marks.setdefault(m["mark"],m["t"])
+if os.path.exists(os.path.join(rec,"marks.jsonl")):
+    for m in jl(os.path.join(rec,"marks.jsonl")): marks.setdefault(m["mark"],m["t"])
+else: fails.append("marks ABSENT")
+if not os.path.exists(logf): fails.append("lifecycle log ABSENT")
 def mk(prefix):
     v=[t for k,t in marks.items() if k.startswith(prefix)]
     return min(v) if v else None
@@ -49,13 +52,16 @@ start,tstart,end=mk("verify-start"),mk("teardown-start"),mk("teardown-done")
 if start is None or end is None: fails.append("window marks missing (verify-start/teardown-done)")
 start=start or 0; end=end or 9e18; tstart=tstart or end
 print(f"window {start:.3f} .. {end:.3f} (teardown-start {tstart:.3f})")
-led=[e for e in jl(ledf) if start-1<=e["t"]<=end]
+# r5: an absent ledger is reported as ABSENT and fails closed; it is never
+# created or read as "zero execs" (a stop before the first exec has no ledger).
+if os.path.exists(ledf): led=[e for e in jl(ledf) if start-1<=e["t"]<=end]
+else: led=[]; fails.append("declared-exec ledger ABSENT (not proof of zero execs)")
 want=Counter(tuple(e["argv"]) for e in led if e.get("kind","exec")=="exec")
 atilla=[e for e in led if e.get("who")=="atilla"]
 if len(atilla)!=1 or atilla[0]["argv"]!=["/opt/pg3601/adapter/launch.sh"]:
     fails.append(f"Atilla execs: expected exactly the one launch, got {[e['argv'] for e in atilla]}")
 got=Counter(); other=[]
-for e in jl(logf):
+for e in (jl(logf) if os.path.exists(logf) else []):
     md=e.get("metadata",{}); src=md.get("source","")
     if "pg3601-" not in src: continue
     t=epoch(e["timestamp"])

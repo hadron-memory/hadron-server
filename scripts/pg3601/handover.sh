@@ -52,11 +52,15 @@ assert any(b["path"].endswith("/libpq.so.5") for b in out),"libpq.so.5 not resol
 print(json.dumps(out))')
 verify_pre=$(basename "$last")
 python3 -I - "$ADAPTER_DIR" "$RECEIPTS" "$verify_pre" "$ids" "$bins" "$ADAPTER_MANIFEST_SHA256" "$armed_lease_us" "$armed_stop_us" \
-  "$REGISTER_ROW_URN" "$SECURITY_ACCEPTANCE_URN" "$GATE_EXECUTION_URN" "$HARNESS_MANIFEST_SHA256" "$BINARY_APPLICABILITY_URN" <<'PY'
+  "$REGISTER_ROW_URN" "$SECURITY_ACCEPTANCE_URN" "$GATE_EXECUTION_URN" "$HARNESS_MANIFEST_SHA256" "$BINARY_APPLICABILITY_URN" \
+  "$WORKLOAD_CG" "$CLIENT_CG" <<'PY'
 # Fills a2's templates exactly (adapter a2 manifest 3d99f40d: descriptor, grant,
 # runtime-index). Every value comes from a receipt; nothing is estimated.
 import hashlib,json,sys,os
-adir,rec,vpre,ids,bins,amf,lease_s,stop_s,row,sec,gate,hmf,binurn=sys.argv[1:]
+adir,rec,vpre,ids,bins,amf,lease_s,stop_s,row,sec,gate,hmf,binurn,wcg,ccg=sys.argv[1:]
+# r5: the guard's "instance_cgroup" bound (1GiB, swap 0, cpu, pids) is checked
+# on the workload slice, the only cgroup with swap 0 under a restricted project.
+assert wcg=="/sys/fs/cgroup/pg3601.slice" and ccg==wcg+"/pg3601-clients.slice",(wcg,ccg)
 def raw(f): return open(os.path.join(rec,f),"rb").read()
 def h(b): return hashlib.sha256(b).hexdigest()
 def kv(f): return dict(l.strip().split("=",1) for l in raw(f).decode().splitlines() if "=" in l)
@@ -75,7 +79,7 @@ files={"verify_pre":vpre,"lease_timer":"lease-timer.armed","stop_timer":"stop-ti
 hashes={k:h(raw(f)) for k,f in files.items()}
 idx=json.load(open(os.path.join(adir,"runtime-index.template.json")))
 idx.update({"verifier_result":"PASS","lease_started_us":started_us,"lease_deadline_us":lease_us,
-  "experiment_deadline_us":stop_us,"instance_cgroup":"/sys/fs/cgroup","client_cgroup":"/sys/fs/cgroup/pg3601-clients.slice",
+  "experiment_deadline_us":stop_us,"instance_cgroup":wcg,"client_cgroup":ccg,
   "raw_receipt_sha256":hashes,"binary_applicability_acceptance_urn":binurn})
 ib=json.dumps(idx,indent=2,sort_keys=True).encode()+b"\n"
 open(os.path.join(rec,"runtime-index.json"),"wb").write(ib)

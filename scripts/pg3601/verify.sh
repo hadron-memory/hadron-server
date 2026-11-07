@@ -12,7 +12,9 @@ psqlq() { ix su postgres -s /bin/sh -c "psql -X -A -t -q -c \"$1\""; }
 
 if [[ ${1:-pre} == client ]]; then
   # ONE exec per snapshot (P2-D); the ledger records its exact argv.
-  ix sh -c 'cd /sys/fs/cgroup/pg3601-clients.slice && echo "memory.max=$(cat memory.max)" && echo "memory.swap.max=$(cat memory.swap.max)" && systemctl show pg3601-client.service pg3601-broker.service -p Id -p User -p Slice -p ProtectSystem -p PrivateTmp -p LimitCORE -p ReadWritePaths -p RuntimeMaxUSec' > "$out" 2>&1
+  # r5: the client slice nests under the workload slice (systemd dash nesting);
+  # r4 named /sys/fs/cgroup/pg3601-clients.slice, a path that never exists.
+  ix sh -c 'cd "$1" && echo "memory.max=$(cat memory.max)" && echo "memory.swap.max=$(cat memory.swap.max)" && systemctl show pg3601-client.service pg3601-broker.service -p Id -p User -p Slice -p ProtectSystem -p PrivateTmp -p LimitCORE -p ReadWritePaths -p RuntimeMaxUSec' snap "$CLIENT_CG" > "$out" 2>&1
   { check slice.memory.max 536870912 "$(sed -n 's/^memory.max=//p' "$out")"
     check slice.memory.swap.max 0 "$(sed -n 's/^memory.swap.max=//p' "$out")"; } >> "$out"
   sha256sum "$out" >> "$RECEIPTS/SHA256SUMS"; grep -q ^FAIL "$out" && exit 1 || exit 0
@@ -30,12 +32,20 @@ check nic.count 0 "$("${INCUS[@]}" query "/1.0/instances/$INSTANCE?project=$PROJ
 check base_image "$IMAGE_FP" "$("${INCUS[@]}" config get "$INSTANCE" volatile.base_image)"
 check boot.autostart false "$("${INCUS[@]}" query "/1.0/instances/$INSTANCE?project=$PROJECT" | jq -r '.expanded_config["boot.autostart"]')"
 
-echo "## V2 instance cgroup"
+echo "## V2 instance cgroup (profile caps) and workload slice (r5 no-swap)"
 check memory.max 1073741824 "$(ix cat /sys/fs/cgroup/memory.max)"
-check memory.swap.max 0 "$(ix cat /sys/fs/cgroup/memory.swap.max)"
 check cpu.max "100000 100000" "$(ix cat /sys/fs/cgroup/cpu.max)"
 check cpuset.ncpus 1 "$(ix nproc)"
 check pids.max 512 "$(ix cat /sys/fs/cgroup/pids.max)"
+# r5: the restricted project cannot set limits.memory.swap, so the instance
+# root's memory.swap.max is recorded, not gated (expected "max"): the residual
+# is processes outside the workload slice. The gate moves to the slice.
+echo "instance memory.swap.max (recorded, residual) = $(ix cat /sys/fs/cgroup/memory.swap.max)"
+check workload.memory.max 1073741824 "$(ix cat "$WORKLOAD_CG/memory.max")"
+check workload.memory.swap.max 0 "$(ix cat "$WORKLOAD_CG/memory.swap.max")"
+check workload.cpu.max "100000 100000" "$(ix cat "$WORKLOAD_CG/cpu.max")"
+check workload.pids.max 512 "$(ix cat "$WORKLOAD_CG/pids.max")"
+check client.slice.path "/$WORKLOAD_SLICE/pg3601-clients.slice" "$(ix systemctl show pg3601-clients.slice -p ControlGroup --value)"
 
 echo "## V3 postgres unit sandbox and process placement"
 unit=postgresql@17-main.service
@@ -48,6 +58,8 @@ cg=$(ix systemctl show "$unit" -p ControlGroup --value)
 check postmaster.core.limit "0 0" "$(ix awk '/Max core file size/{print $5, $6}' "/proc/$pm/limits")"
 stray=$(ix bash -c "comm -23 <(pgrep -u postgres | sort) <(sort /sys/fs/cgroup$cg/cgroup.procs)")
 check postgres.pids.outside.unit "" "$stray"
+check unit.slice "$WORKLOAD_SLICE" "$(ix systemctl show "$unit" -p Slice --value)"
+check unit.cgroup.in.workload "/$WORKLOAD_SLICE/$unit" "$cg"
 
 check stopreq.path.enabled enabled "$(ix systemctl is-enabled pg3601-stopreq.path)"
 check stopreq.RemainAfterExit yes "$(ix systemctl show pg3601-stopreq.service -p RemainAfterExit --value)"

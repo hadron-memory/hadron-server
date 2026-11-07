@@ -25,6 +25,13 @@ rm -f "$HOME/.config/systemd/user/pg3601-boot-teardown.service"; systemctl --use
   echo "profiles:"; "${INCUS[@]}" profile list -f csv -c n | grep '^pg3601-' || echo "  none"
   echo "units:"; systemctl --user list-units --all --no-legend 'pg3601-*' | grep -v 'pg3601-lease' || echo "  none"
 } > "$RECEIPTS/teardown.txt"
-sha256sum "$RECEIPTS/teardown.txt" "$LIFECYCLE_LOG" "$DECLARED" "$RECEIPTS/marks.jsonl" "$RECEIPTS/events.log" | tee -a "$RECEIPTS/SHA256SUMS"
+# r5: hash what exists and NAME what is absent. r4 hashed a fixed list under
+# set -e, so a run that stopped before its first exec (no ledger file) exited 1
+# here and never reached the audit. Nothing is created to fill a gap: an absent
+# ledger is evidence of its own, never proof of zero execs.
+for f in "$RECEIPTS/teardown.txt" "$LIFECYCLE_LOG" "$DECLARED" "$RECEIPTS/marks.jsonl" "$RECEIPTS/events.log"; do
+  if [[ -f $f ]]; then sha256sum "$f"; else echo "ABSENT  $f"; fi
+done | tee -a "$RECEIPTS/SHA256SUMS"
 log "teardown: done"
-"$(dirname "$0")/audit-lifecycle.sh" || true
+# The audit always runs, and teardown's exit status is the audit's (CLEAN = 0).
+"$(dirname "$0")/audit-lifecycle.sh"
