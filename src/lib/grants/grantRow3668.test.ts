@@ -144,7 +144,7 @@ describe('UPDATE guard: a row ends once, loses an erased issuer, follows a merge
   ];
   for (const [col, extra] of LINKS) {
     it(`${col} alone: refused without a recorded merge, refused to a different user, allowed to the recorded survivor`, async () => {
-      const id = await insertGrant(w, Object.fromEntries(Object.entries(extra).map(([k, v]) => [k, v === 'U' ? w.userId : v])));
+      const id = await insertGrant(w, Object.fromEntries(Object.entries(extra).map(([k, v]) => [k, v === 'U' ? w.userId : v])) as never);
       const set = `UPDATE grants SET ${col} = $2 WHERE id = $1`;
       await refused(exec(set, id, w.user2Id), /grants are append-only/);
       const third = await db.user.create({ data: { handle: `g3-${col}` } });
