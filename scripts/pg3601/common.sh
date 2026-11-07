@@ -26,5 +26,13 @@ mkdir -p "$DEBS" "$RECEIPTS"
 ts() { date -u +%Y-%m-%dT%H:%M:%S.%3NZ; }
 mono() { awk '{print $1}' /proc/uptime; }
 log() { printf '%s mono=%s %s\n' "$(ts)" "$(mono)" "$*" | tee -a "$RECEIPTS/events.log" >&2; }
-ix() { "${INCUS[@]}" exec "$INSTANCE" -- "$@"; }
+# Every exec into the instance goes through the declared-exec ledger (P2-B/D):
+# one JSON line per exec with its exact argv, written BEFORE the exec, so the
+# audit can match each lifecycle instance-exec event by metadata.context.command.
+DECLARED=$RECEIPTS/declared-execs.jsonl
+declare_exec() { python3 -I -c 'import json,sys,time; print(json.dumps({"t":time.time(),"who":sys.argv[1],"argv":sys.argv[2:]}))' "${PG3601_WHO:-hugo}" "$@" >> "$DECLARED"; }
+ix() { declare_exec "$@"; "${INCUS[@]}" exec "$INSTANCE" -- "$@"; }
+declare_push() { python3 -I -c 'import json,sys,time; print(json.dumps({"t":time.time(),"who":"hugo","kind":"file-push","path":sys.argv[1]}))' "$1" >> "$DECLARED"; }
+mark() { python3 -I -c 'import json,sys,time; print(json.dumps({"t":time.time(),"mark":sys.argv[1]}))' "$1" >> "$RECEIPTS/marks.jsonl"; log "mark: $1"; }
+monitor_identity() { systemctl --user show pg3601-monitor.service -p InvocationID -p ActiveEnterTimestampMonotonic -p NRestarts -p ActiveState -p MainPID; }
 die() { log "FAIL: $*"; exit 1; }

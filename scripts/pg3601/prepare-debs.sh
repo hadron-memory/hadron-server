@@ -6,7 +6,7 @@ source "$(dirname "$0")/common.sh"
 cd "$DEBS"
 rm -f ./*.deb SHA256SUMS
 pkgs=$(apt-cache depends --recurse --no-recommends --no-suggests --no-conflicts \
-  --no-breaks --no-replaces --no-enhances "postgresql-$PG_MAJOR=$PG_VERSION" \
+  --no-breaks --no-replaces --no-enhances "postgresql-$PG_MAJOR=$PG_VERSION" python3 python3-psycopg \
   | grep -E '^[a-z0-9]' | grep -vx 'locales-all' | sort -u)
 # shellcheck disable=SC2086
 apt-get download $pkgs >/dev/null

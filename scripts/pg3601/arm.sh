@@ -32,4 +32,7 @@ systemctl --user enable --quiet pg3601-boot-teardown.service
 systemd-run --user --quiet --unit=pg3601-lease --on-active=60min \
   --timer-property=AccuracySec=1s "$here/teardown.sh" lease
 systemctl --user show pg3601-lease.timer -p ActiveState -p NextElapseUSecMonotonic > "$RECEIPTS/lease-timer.armed"
+sleep 1; monitor_identity > "$RECEIPTS/monitor.armed"
+[[ $(sed -n 's/^ActiveState=//p' "$RECEIPTS/monitor.armed") == active ]] || die "lifecycle monitor not active"
+mark armed
 log "arm: lease armed (60min, no extension); monitor on; boot-teardown enabled"
