@@ -668,6 +668,12 @@ describe('#3699 signing page slice 2: summary first, sticky bar, status in the b
     page.verify();
   });
 
+  it('copy: with no intermediary the requester line is just the name', async () => {
+    const { req, json } = await open();
+    const page = await renderedProof(req.id, json);
+    expect(page.texts(page.ids.view)).toContain('Requested by ceremony-requester.');
+  });
+
   it('copy: requester line, expiry without seconds and with a zone, field labels, includes note', async () => {
     const { req, json } = await open((v) => ({ ...v, requester: { name: 'Pat', via: 'Juno' } }));
     const page = await renderedProof(req.id, json);
@@ -682,8 +688,6 @@ describe('#3699 signing page slice 2: summary first, sticky bar, status in the b
     expect(h3).toEqual(['Document', 'Title', 'Summary', 'Text']);
     expect(t).toContain('Text that this page pulls in from elsewhere is shown as written and is not part of what you sign.');
     expect(t).not.toContain('Includes are shown as written. The text they pull in is not part of what you sign.');
-    const plain = await renderedProof(req.id, (await open()).json);
-    expect(plain.texts(plain.ids.view)).toContain('Requested by ceremony-requester.');
     const shell = await (await fetch(`${base}/signing/${req.id}`)).text();
     expect(shell).toContain('.diff-del{background:rgba(220,0,0,.18)}');
     expect(shell).not.toContain('line-through');

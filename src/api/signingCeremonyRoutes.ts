@@ -74,7 +74,7 @@ const PAGE_HEADERS: Record<string, string> = {
 /** The static shell. No request, node or person appears in it: it is byte-identical for every id. */
 const SHELL = ceremonyShell({
   title: 'Review and sign', wide: true, scriptSrc: `${SIGNING_CEREMONY_PATH}/ceremony.js`,
-  extraCss: 'pre{white-space:pre-wrap;overflow-wrap:anywhere;background:rgba(127,127,127,.12);padding:.75rem;border-radius:.4rem}mark{background:rgba(255,200,0,.3);color:inherit;padding:0 .15rem}.diff-add{background:rgba(0,160,0,.18)}.diff-del{background:rgba(220,0,0,.18);text-decoration:line-through}',
+  extraCss: 'pre{white-space:pre-wrap;overflow-wrap:anywhere;background:rgba(127,127,127,.12);padding:.75rem;border-radius:.4rem}mark{background:rgba(255,200,0,.3);color:inherit;padding:0 .15rem}.diff-add{background:rgba(0,160,0,.18)}.diff-del{background:rgba(220,0,0,.18)}.bar{position:sticky;bottom:0;background:Canvas;color:CanvasText;border-top:1px solid rgba(127,127,127,.4);margin-top:1rem;padding:.75rem 0 calc(.75rem + env(safe-area-inset-bottom))}.bar p{margin:0 0 .5rem}',
   body: `<h1 id="title" tabindex="-1">Review and sign</h1>
 <noscript><p>This page needs JavaScript to ask for your passkey. Turn it on and reload.</p></noscript>
 <div id="start"><p>To see what you have been asked to sign, confirm it is you with your passkey. Nothing is shown until you do.</p><button id="go" type="button">Use passkey</button></div>
@@ -100,23 +100,34 @@ const focusTitle=()=>{$('title').focus();};
 function lines(parent,rows){const pre=el('pre');rows.forEach((l)=>{const s=el('div',(l.kind==='add'?'+ ':l.kind==='del'?'- ':'  ')+l.text,l.kind==='add'?'diff-add':l.kind==='del'?'diff-del':'');pre.appendChild(s);});parent.appendChild(pre);}
 function section(t){const s=el('section');s.appendChild(el('h2',t));return s;}
 function setTitle(t){$('title').textContent=t;document.title=t;}
-function finish(title,text){view.replaceChildren();start.hidden=true;view.hidden=false;view.appendChild(el('p',text));setTitle(title);say('');focusTitle();}
-function ended(state){const w={COMPLETED:'This request was already signed.',DECLINED:'This request was declined.',EXPIRED:'This request expired.',STALE:'The text changed after this was requested, so this request can no longer be signed.',WITHDRAWN:'The person who asked withdrew this request.'};
- finish('This request has ended',(w[state]||'This request has ended.')+' Ask for a new signature request to sign again.');}
+const home=msg.parentNode;
+const stamp=(d)=>d.toLocaleString(undefined,{day:'numeric',month:'short',year:'numeric',hour:'numeric',minute:'2-digit',timeZoneName:'short'});
+function finish(title,text,v,when){home.appendChild(msg);view.replaceChildren();start.hidden=true;view.hidden=false;
+ if(v)view.appendChild(el('p',v.node.title));
+ if(when)view.appendChild(el('p',when+' '+stamp(new Date())));
+ view.appendChild(el('p',text));setTitle(title);say('');focusTitle();}
+function ended(state,v){const w={COMPLETED:'This request was already signed.',DECLINED:'This request was declined.',EXPIRED:'This request expired.',STALE:'The text changed after this was requested, so this request can no longer be signed.',WITHDRAWN:'The person who asked withdrew this request.'};
+ finish('This request has ended',(w[state]||'This request has ended.')+' Ask for a new signature request to sign again.',v);}
 function render(out, focusDecline=false){
  view.replaceChildren();start.hidden=true;view.hidden=false;setTitle('Review and sign');
  const v=out.view;
+ const sum=el('section');
+ sum.appendChild(el('p',v.requester.name+' asks you to sign "'+v.node.title+'".'));
+ sum.appendChild(el('p',!v.previous?'No earlier signature.':!v.previous.kept?'Earlier text no longer kept.':(()=>{const ch=['title','abstract','content'].filter((k)=>v.previous.diff[k].some((r)=>r.kind!=='same'));return ch.length?'Changed since revision '+v.previous.revision+': '+ch.join(', ')+'.':'No change to the title, abstract or content since revision '+v.previous.revision+'.';})()));
+ sum.appendChild(el('p','Signing records your approval of exactly this text.'));
+ view.appendChild(sum);
  const meta=section('This request');
- meta.appendChild(el('p','Requested by '+v.requester.name+(v.requester.via?' (through '+v.requester.via+')':'')+'. Revision '+v.revision+'. Expires '+new Date(v.expiresAt).toLocaleString()+'.'));
+ meta.appendChild(el('p','Requested by '+v.requester.name+(v.requester.via?' via '+v.requester.via:'')+'.'));
+ meta.appendChild(el('p','Expires '+stamp(new Date(v.expiresAt))+'.'));
  view.appendChild(meta);
  const what=section('Exactly what you are signing');
- what.appendChild(el('h3','Node'));what.appendChild(el('p',v.node.urn));
+ what.appendChild(el('h3','Document'));what.appendChild(el('p',v.node.urn));what.appendChild(el('p','Revision '+v.revision));
  what.appendChild(el('h3','Title'));what.appendChild(el('p',v.node.title));
- if(v.node.abstract){what.appendChild(el('h3','Abstract'));what.appendChild(el('p',v.node.abstract));}
- what.appendChild(el('h3','Content'));
+ if(v.node.abstract){what.appendChild(el('h3','Summary'));what.appendChild(el('p',v.node.abstract));}
+ what.appendChild(el('h3','Text'));
  const pre=el('pre');v.node.contentSegments.forEach((s)=>{if(s.include){const m=el('mark',s.text);m.title='Included text is not covered by this signature';pre.appendChild(m);pre.appendChild(el('span',' [not covered by this signature]'));}else pre.appendChild(document.createTextNode(s.text));});
  what.appendChild(pre);
- what.appendChild(el('p','Includes are shown as written. The text they pull in is not part of what you sign.'));
+ what.appendChild(el('p','Text that this page pulls in from elsewhere is shown as written and is not part of what you sign.'));
  view.appendChild(what);
  const chg=section('Changes since the last signed revision');
  if(!v.previous)chg.appendChild(el('p','No earlier signature on this node.'));
@@ -124,6 +135,7 @@ function render(out, focusDecline=false){
  else{chg.appendChild(el('p','Compared with revision '+v.previous.revision+'.'));['title','abstract','content'].forEach((k)=>{const rows=v.previous.diff[k];if(rows.some((r)=>r.kind!=='same')){chg.appendChild(el('h3',k[0].toUpperCase()+k.slice(1)));lines(chg,rows);}});}
  view.appendChild(chg);
  const actions=el('div');
+ const bar=el('div',undefined,'bar');const stat=el('div');
  let focusAfterRender=focusTitle;
  if(!out.canSign){actions.appendChild(el('p','You can read this, but you are not allowed to sign it.'));}
  else{
@@ -142,13 +154,13 @@ function render(out, focusDecline=false){
     if(r.status>=500)throw new Error('uncertain');
     const j=await r.json().catch(()=>null);
     if(j===null)throw new Error('uncertain');
-    if(r.ok){finish('Signed','Your signature was recorded. You can close this page.');return;}
-    if(j.error==='SIGNING_REQUEST_ENDED'){ended(j.state);return;}
+    if(r.ok){finish('Signed','Your signature was recorded. You can close this page.',v,'Signed');return;}
+    if(j.error==='SIGNING_REQUEST_ENDED'){ended(j.state,v);return;}
     if(j.error==='ENCRYPTED_MEMORY_NOT_APPLICABLE'){finish('Not signable','This node is in an encrypted memory, which is never signed.');return;}
     if(j.error==='SIGNATURE_NOT_VERIFIED'){say('That did not verify. Nothing was recorded. You can try again.');lock(false);sign.focus();return;}
     say('That did not work and nothing was recorded. Reload this page and start again.');lock(false);sign.focus();
    }catch(e){
-    if(sent){say('We could not confirm whether your signature was recorded. Reload this page and check before trying again.');const re=el('button','Reload this page');re.type='button';re.addEventListener('click',()=>location.reload());actions.appendChild(re);re.focus();}
+    if(sent){say('We could not confirm whether your signature was recorded. Reload this page and check before trying again.');const re=el('button','Reload this page');re.type='button';re.addEventListener('click',()=>location.reload());stat.appendChild(re);re.focus();}
     else{say('That did not work and nothing was recorded. You can try again.');lock(false);sign.focus();}
    }
   });
@@ -161,16 +173,17 @@ function render(out, focusDecline=false){
     try{const r=await post('decline',{ceremonyId:(await (await post('challenge')).json()).ceremonyId});if(r.status>=500)throw new Error('uncertain');
      const j=await r.json().catch(()=>null);
      if(j===null)throw new Error('uncertain');
-     if(r.ok){finish('Declined','You declined this request. You can close this page.');return;}
-     if(j.error==='SIGNING_REQUEST_ENDED'){ended(j.state);return;}
+     if(r.ok){finish('Declined','You declined this request. You can close this page.',v,'Declined');return;}
+     if(j.error==='SIGNING_REQUEST_ENDED'){ended(j.state,v);return;}
      say('That did not work and nothing was changed. Reload this page and start again.');yes.disabled=false;no.disabled=false;yes.focus();
-    }catch(e){say('We could not confirm whether the request was declined. Reload this page and check.');const re=el('button','Reload this page');re.type='button';re.addEventListener('click',()=>location.reload());actions.appendChild(re);re.focus();}});
+    }catch(e){say('We could not confirm whether the request was declined. Reload this page and check.');const re=el('button','Reload this page');re.type='button';re.addEventListener('click',()=>location.reload());stat.appendChild(re);re.focus();}});
    actions.appendChild(yes);actions.appendChild(no);no.focus();
   });
   actions.appendChild(sign);actions.appendChild(dec);
   if(focusDecline)focusAfterRender=()=>dec.focus();
  }
- view.appendChild(actions);focusAfterRender();say('');
+ if(out.canSign){bar.appendChild(stat);stat.appendChild(msg);bar.appendChild(actions);view.appendChild(bar);}else view.appendChild(actions);
+ focusAfterRender();say('');
 }
 go.addEventListener('click',async()=>{
  go.disabled=true;say('');
