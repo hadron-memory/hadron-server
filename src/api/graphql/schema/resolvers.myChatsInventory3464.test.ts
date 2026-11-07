@@ -126,6 +126,11 @@ describe('#3464 Q4: a soft-deleted org takes its Apps\' shared chats out of the 
     expect(await inventory(member.id, agent.id)).toEqual({ list: ['chats:personal'], page: ['chats:personal'], total: 1, countOnly: 1, countItems: 0 });
   });
 
+  it('an uninstalled App with a physical install keeps its historical chat (existing behaviour, includeUninstalled)', async () => {
+    await db.app.update({ where: { id: live.app.id }, data: { uninstalledAt: new Date('2026-11-01T00:00:00Z') } });
+    expect((await inventory(member.id, agent.id)).list).toEqual(['chats:live', 'chats:personal', 'chats:target']);
+  });
+
   it('restoring the org brings the chat back', async () => {
     await softDeleteTarget();
     await db.organization.update({ where: { id: target.org.id }, data: { deletedAt: null } });
@@ -150,7 +155,7 @@ describe('#3464 Q4: a soft-deleted org takes its Apps\' shared chats out of the 
 describe('#3464 Q3: a lapsed DERIVED install licence does not narrow the historical inventory', () => {
   let member: { id: string };
   let foreignAgent: { id: string };
-  let customer: { id: string };
+  let customer: { id: string; urn: string };
 
   beforeEach(async () => {
     await cleanDb(db);
