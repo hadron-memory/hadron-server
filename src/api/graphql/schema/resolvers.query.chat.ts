@@ -2,6 +2,7 @@ import { chatNotFoundError } from '../../../lib/chatNotFound.js';
 import { readChatEngineStates } from '../../../lib/chatRootEngineState.js';
 import { readChatCounters } from '../../../lib/chatRootCounters.js';
 import { appInstallationWhere } from '../../../lib/appInstallations.js';
+import { participantAppWhere } from '../../../lib/auth/appParticipation.js';
 import { translateSessionExpired } from '../../../lib/channels.js';
 // chatQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
 import {
@@ -77,16 +78,21 @@ async function myChatsScope(ctx: Context, agentRef: string): Promise<Prisma.Node
   // 023-app-shape Phase 2b: App↔Agent moved from `App.agentId` to the
   // N:M `AppAgent` join. Match Apps that have the resolved Agent
   // installed via the join.
-  const sharedMemberships = await ctx.db.appMember.findMany({
+  // #3464 Q4 (cor:dmo:010:04): an App of a soft-deleted org is not-found, and so are its chats. The installation
+  // filter is only a candidate bound, and its physical arm never checks the org, so the candidates are intersected
+  // with the shared participation set, which carries org liveness for org-owned Apps and keeps user-owned Apps.
+  // Separate AND operands, so neither filter's own AND/OR is overwritten. The AppMember requirement stays: this is
+  // an intersection, not a widening to the contributor or owner arms. `includeUninstalled` keeps the existing
+  // historical physical-arm behaviour, and no licence is consulted (Q3, cor:acl:030:01-02): inventory follows the
+  // host memory's gate. A null set means no shared contribution; personal chats above still list.
+  const participation = await participantAppWhere(ctx.db, ctx, { includeMemberships: true, includeUninstalled: true });
+  const sharedMemberships = participation ? await ctx.db.appMember.findMany({
     where: {
       userId: ctx.userId,
-      app: {
-        ...appInstallationWhere(resolvedAgentId),
-        deletedAt: null,
-      },
+      app: { AND: [appInstallationWhere(resolvedAgentId), { deletedAt: null }, participation] },
     },
     select: { app: { select: { id: true } } },
-  });
+  }) : [];
   if (sharedMemberships.length > 0) {
     const sharedMemories = await ctx.db.memory.findMany({
       where: {
