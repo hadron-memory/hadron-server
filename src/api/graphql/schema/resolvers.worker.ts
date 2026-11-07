@@ -1,4 +1,4 @@
-import { personalOrgAgentTextAllowed } from '../../../lib/auth/personalOrgAgentInstall.js';
+import { personalOrgAgentLicenseHolds, personalOrgAgentTextAllowed } from '../../../lib/auth/personalOrgAgentInstall.js';
 import { requireWorkerReadAccess, locateTeamAgent, forbidden, type AppRow } from '../../../lib/auth/workerRead.js';
 export { requireWorkerReadAccess, locateTeamAgent, ROLES_BRANCH_PREFIX } from '../../../lib/auth/workerRead.js';
 import { listAppInstallations, resolveAppInstallation, resolveUnfilteredAppInstallation, lockAppInstallation } from '../../../lib/appInstallations.js';
@@ -2592,7 +2592,12 @@ async function readServedWorkerText(
 ): Promise<{ text: string | null; refusal: string | null }> {
   const where = { surface: 'bind' as const, agentName };
   const app = await ctx.db.app.findUnique({where:{id:worker.appId},select:{organizationId:true,ownerUserId:true}});
-  if(app && !(await personalOrgAgentTextAllowed(ctx.db,app,worker.agentId,ctx.userId))) return {text:null,refusal:'FORBIDDEN'};
+  // #3653 / cor:agt:040:10 (ruling 0235): serving checks the App owner's licence, not the caller. An App key has no person
+  // to judge, so the licence alone decides for it; a person's own read keeps the narrower text gate, as built.
+  const serves = !app || (ctx.userId
+    ? await personalOrgAgentTextAllowed(ctx.db, app, worker.agentId, ctx.userId)
+    : await personalOrgAgentLicenseHolds(ctx.db, app, worker.agentId));
+  if (!serves) return { text: null, refusal: 'FORBIDDEN' };
   try {
     const recorded = ctx.sessionId
       ? await ctx.db.servedPrompt.findFirst({ where: { sessionId: ctx.sessionId, workerId: worker.id }, orderBy: { ordinal: 'desc' } })
