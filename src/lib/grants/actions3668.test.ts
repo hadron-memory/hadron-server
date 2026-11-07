@@ -115,7 +115,10 @@ describe('no surface writes an action, or a grant (S1a has no writer)', () => {
     expect(found.sort()).toEqual(BASELINE);
   });
 
-  it('no non-test source outside src/lib/grants touches the actions table', () => {
+  // A LIMITED regression check (it recognises a few client names and SQL spellings, under src only, and skips src/lib/grants):
+  // the real guarantees are the database permission pins (verify-runtime-role.test.ts, revoke-runtime-migrations.test.ts) and the
+  // GraphQL surface pins above.
+  it('limited scan: no non-test source outside src/lib/grants names the actions table in a write', () => {
     const offenders: string[] = [];
     const walk = (dir: string) => {
       for (const name of readdirSync(dir)) {

@@ -427,6 +427,18 @@ describe('the serve role and the actions table (#3668)', { timeout: 60_000 }, ()
     expect(await verify()).toEqual([]);
   });
 
+  it('reports a COLUMN-level write on actions too (has_table_privilege alone does not see it)', async () => {
+    await asOwner((c) => c.query(`REVOKE ALL ON actions FROM ${SERVE}; GRANT SELECT ON actions TO ${SERVE}`));
+    expect(await verify()).toEqual([]);
+    for (const grant of ['INSERT (name)', 'UPDATE (enforcement)']) {
+      await asOwner((c) => c.query(`GRANT ${grant} ON actions TO ${SERVE}`));
+      const v = await verify();
+      expect(v.map((x) => x.rule), grant).toEqual(['forbidden-table-privilege']);
+      expect(v[0].detail).toContain('public.actions');
+      await asOwner((c) => c.query(`REVOKE ALL ON actions FROM ${SERVE}; GRANT SELECT ON actions TO ${SERVE}`));
+    }
+  });
+
   it('reports a serve role that can write actions', async () => {
     await asOwner((c) => c.query(`GRANT INSERT ON actions TO ${SERVE}`));
     const v = await verify();

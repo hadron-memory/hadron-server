@@ -235,6 +235,16 @@ it('revokes the serve role\'s write on actions after migrate and keeps its read;
     for (const p of ['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']) expect(await held(c, p), p).toBe(false);
     expect(await held(c, 'SELECT')).toBe(true);
   });
+  // Column-level write grants are removed by the same revoke (a table-level REVOKE also clears the columns).
+  await using(workerUrl, c => c.query(`GRANT INSERT (name), UPDATE (enforcement) ON public.actions TO ${q(serve)}`));
+  await using(workerUrl, async c => {
+    const col = (p: string) => c.query('SELECT has_any_column_privilege($1, \'public.actions\', $2) AS held', [serve, p]).then((r) => r.rows[0].held as boolean);
+    expect(await col('INSERT')).toBe(true);
+    expect(await col('UPDATE')).toBe(true);
+    await revokeRuntimeMigrations(c, serve);
+    expect(await col('INSERT')).toBe(false);
+    expect(await col('UPDATE')).toBe(false);
+  });
   // A connection that does not own the table cannot revoke on it, and says nothing.
   await using(workerUrl, c => c.query(`GRANT INSERT ON public.actions TO ${q(serve)}`));
   await using(url(owner), async c => {

@@ -117,6 +117,9 @@ describe('UPDATE guard: a row ends once, loses an erased issuer, follows a merge
   it('revoking is allowed once, with revoked_by; a second revoke and an un-revoke are refused', async () => {
     const id = await insertGrant(w);
     await exec(`UPDATE grants SET revoked_at = ${DB_NOW}, revoked_by = $2, updated_at = ${DB_NOW} WHERE id = $1`, id, w.userId);
+    // A real later instant (timestamp(3) would often collide with the first stamp), so only the revoke-once arm can refuse.
+    await exec('SELECT pg_sleep(0.05)');
+    await refused(exec(`UPDATE grants SET revoked_at = ${DB_NOW} WHERE id = $1`, id), /grants are append-only/); // same revoker, re-stamped
     await refused(exec(`UPDATE grants SET revoked_at = ${DB_NOW}, revoked_by = 'other' WHERE id = $1`, id), /grants are append-only/);
     await refused(exec(`UPDATE grants SET revoked_at = NULL, revoked_by = NULL WHERE id = $1`, id), /grants are append-only/);
     await refused(exec(`UPDATE grants SET revoked_by = 'other' WHERE id = $1`, id), /grants are append-only/);

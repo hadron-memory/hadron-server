@@ -172,7 +172,8 @@ BEGIN
   END IF;
   -- The one revoke: stamped once, together with its revoker (the shape CHECK pairs the two).
   IF NEW.revoked_at IS DISTINCT FROM OLD.revoked_at THEN
-    IF OLD.revoked_at IS NOT NULL OR NEW.revoked_at IS NULL OR OLD.revoked_by IS NOT NULL THEN
+    -- (an already-revoked row has revoked_by set: the pair CHECK makes OLD.revoked_at redundant here)
+    IF NEW.revoked_at IS NULL OR OLD.revoked_by IS NOT NULL THEN
       RAISE EXCEPTION 'grants are append-only' USING ERRCODE = '23514';
     END IF;
   ELSIF NEW.revoked_by IS DISTINCT FROM OLD.revoked_by THEN
