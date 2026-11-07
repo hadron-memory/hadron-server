@@ -84,7 +84,8 @@ export async function withInstallMemory<T>(
     where: { id: appId },
     select: { id: true, organizationId: true, ownerUserId: true },
   });
-  if (!app) throw new AppNotFoundError(target.appRef);
+  // Conceal retired anchors before their liveness refusal; the held gate below still decides.
+  if (!app || !(await isAppParticipant(ctx, app))) throw new AppNotFoundError(target.appRef);
   return withAuthorizedTx(
     ctx,
     [
