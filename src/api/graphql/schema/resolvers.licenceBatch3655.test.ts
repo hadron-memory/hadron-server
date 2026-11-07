@@ -115,6 +115,30 @@ describe('#3655: per-row licence and text reads do not grow with the roster', ()
     expect(cost[4], JSON.stringify(cost)).toBe(cost[1]);
   });
 
+  it('participantSystemMemoryFolds across many personal Apps (installedSystemMemoryFolds licence per App, Dorian P2-1)', async () => {
+    const cost: Record<number, number> = {};
+    for (const n of [1, 4]) {
+      await cleanDb(db);
+      const ownerId = (await db.user.create({ data: { id: generateId(), handle: 'owner3655', roles: ['READER'] } })).id;
+      const viewerId = (await db.user.create({ data: { id: generateId(), handle: 'viewer3655', roles: ['READER'] } })).id;
+      const orgId = (await db.organization.create({ data: { id: generateId(), name: 'Publisher', urn: 'publisher3655.test' } })).id;
+      await db.orgMember.createMany({ data: [ownerId, viewerId].map(userId => ({ organizationId: orgId, userId, role: 'READER' as const })) });
+      const systemMemoryId = (await db.memory.create({ data: { class: 'system', organizationId: orgId, name: 'Definition', urn: 'publisher3655.test:definition' } })).id;
+      const agentId = (await db.agent.create({ data: { id: generateId(), organizationId: orgId, name: 'Shared', urn: 'publisher3655.test:shared', visibility: 'ORGANIZATION', systemMemoryId } })).id;
+      await db.agentSubscription.create({ data: { userId: ownerId, agentId, activatedAt: new Date('2020-01-01') } });
+      for (let i = 0; i < n; i++) {
+        const appId = (await db.app.create({ data: { id: generateId(), ownerUserId: ownerId, name: `Personal ${i}`, urn: `@owner3655:personal-${i}` } })).id;
+        await db.appMember.createMany({ data: [{ appId, userId: ownerId, role: 'owner' }, { appId, userId: viewerId, role: 'member' }] });
+        await db.appAgent.create({ data: { appId, agentId } });
+      }
+      const { client, counter } = counted();
+      const folds = await participantSystemMemoryFolds(client, { userId: viewerId });
+      expect(folds.filter(fold => fold.map.has(systemMemoryId)).length, `all ${n} Apps folded`).toBe(n);
+      cost[n] = counter.n;
+    }
+    expect(cost[4], JSON.stringify(cost)).toBe(cost[1]);
+  });
+
   it('readableInstallMemoryIds (installMemory.ts)', async () => {
     const cost = await costAt(async (f, client) => (await readableInstallMemoryIds(client, viewer(f, client))).length);
     expect(cost[4], JSON.stringify(cost)).toBe(cost[1]);
