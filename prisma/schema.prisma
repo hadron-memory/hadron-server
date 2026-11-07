@@ -7516,7 +7516,7 @@ model GrantEvent {
   appId        String   @map("app_id")
   /// CREATE | ACTIVATE | REVOKE | USE (CHECK in grant-invariants.sql).
   action       String
-  at           DateTime @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC')")) @db.Timestamp(3)
+  at           DateTime @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @db.Timestamp(3)
   actorUserId  String?  @map("actor_user_id")
   workerId     String?  @map("worker_id")
   sessionId    String?  @map("session_id")
