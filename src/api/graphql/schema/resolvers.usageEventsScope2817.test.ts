@@ -18,7 +18,9 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { ApolloServer } from '@apollo/server';
 import { resolvers, type Context } from './resolvers.js';
+import { typeDefs } from './typeDefs.js';
 
 const Q = resolvers.Query as unknown as Record<string, (p: unknown, a: Record<string, unknown>, c: Context) => Promise<any>>;
 const list = (args: Record<string, unknown>, c: Context) => Q.usageEvents(null, args, c);
@@ -31,6 +33,10 @@ let memB: { id: string; urn: string };
 let appMem: { id: string; urn: string };
 let app: { id: string };
 let appKeyId: string;
+let foreignApp: { id: string };
+let orgAId: string;
+let pubMem: { id: string; urn: string };
+let sessionId: string;
 
 const ctx = (o: Partial<Context>): Context => ({ db, ...o }) as Context;
 const asMe = () => ctx({ userId: me.id, roles: ['READER'] });
@@ -58,6 +64,11 @@ beforeEach(async () => {
   memB = await db.memory.create({ data: { id: generateId(), organizationId: orgB.id, urn: `${orgB.urn}:b`, name: 'b', class: 'knowledge' } });
   const k = await createDbAppWithKey(db, 'u2817-app', orgA.id);
   app = k.app; appKeyId = k.appKey.id;
+  orgAId = orgA.id;
+  foreignApp = (await createDbAppWithKey(db, 'u2817-foreign', orgA.id)).app;
+  // PUBLIC knowledge in another org, with no App and no owner (lib/auth/publicKnowledgeRead.ts).
+  pubMem = await db.memory.create({ data: { id: generateId(), organizationId: orgB.id, urn: `${orgB.urn}:pub`, name: 'pub', class: 'knowledge', visibility: 'PUBLIC' } });
+  sessionId = (await db.session.create({ data: { id: generateId(), userId: other.id } })).id;
   appMem = await db.memory.create({ data: { id: generateId(), organizationId: orgA.id, appId: app.id, urn: `${orgA.urn}:app`, name: 'app', class: 'app' } });
 
   mineInA = generateId(); mineInB = generateId(); mineNoMem = generateId(); otherInA = generateId(); otherInApp = generateId();
@@ -92,6 +103,67 @@ describe('#2817 item 1 — an App key is admitted', () => {
   it('a bare loc names a resource: the key gets that loc in its readable memories, never own activity', async () => {
     expect(ids(await list({ loc: 'app-loc' }, asKey()))).toEqual([otherInApp]);
     expect(await list({ loc: 'shared' }, asKey())).toEqual([]);
+  });
+});
+
+// Dorian LOCAL P2-1, Gloria BLIND P2-1, Rico §10 P3-1/P3-2 at a8ff08e0. cor:acl:090:01: the resource scope
+// discloses VOLUME, never another principal's identity and never the content they touched.
+describe('#2817 review — what an App key\'s resource read discloses', () => {
+  let identified: string, ownApp: string;
+  beforeEach(async () => {
+    identified = generateId(); ownApp = generateId();
+    await db.usageEvent.createMany({ data: [
+      { ...ev({ id: identified, userId: other.id, memoryId: appMem.id, nodeLoc: 'who' }), sessionId, appId: foreignApp.id, organizationId: orgAId, actionArgs: { q: 'secret' }, tokensIn: 7 },
+      { ...ev({ id: ownApp, userId: other.id, memoryId: appMem.id, nodeLoc: 'mine-app' }), appId: app.id },
+    ] });
+  });
+
+  it('masks other principals\' identity and the content they touched, keeping the volumes, on both fields', async () => {
+    const fromList = (await list({ memoryId: appMem.id }, asKey())).find((r: { id: string }) => r.id === identified);
+    const fromPage = (await page({ memoryId: appMem.id }, asKey())).items.find((r: { id: string }) => r.id === identified);
+    for (const row of [fromList, fromPage]) {
+      expect(row).toMatchObject({ userId: null, sessionId: null, appId: null, organizationId: null, actionArgs: null, tokensIn: 7, nodeLoc: 'who', memoryId: appMem.id });
+    }
+  });
+
+  it('keeps the App\'s own appId: that is the caller\'s own identity, not another principal\'s', async () => {
+    const row = (await list({ memoryId: appMem.id }, asKey())).find((r: { id: string }) => r.id === ownApp);
+    expect(row).toMatchObject({ appId: app.id, userId: null });
+  });
+
+  it('through the real schema: usageEvents and usageEventsPage answer userId null to an App key', async () => {
+    const server = new ApolloServer<Context>({ typeDefs, resolvers });
+    const r = await server.executeOperation(
+      { query: `query($m: ID!){ a: usageEvents(memoryId: $m){ id userId sessionId appId organizationId actionArgs } b: usageEventsPage(memoryId: $m){ items { id userId sessionId appId organizationId actionArgs } } }`, variables: { m: appMem.id } },
+      { contextValue: asKey() },
+    );
+    if (r.body.kind !== 'single') throw new Error('incremental response');
+    expect(r.body.singleResult.errors).toBeUndefined();
+    const data = r.body.singleResult.data as any;
+    for (const row of [...data.a, ...data.b.items].filter((x: { id: string }) => x.id === identified)) {
+      expect(row).toEqual({ id: identified, userId: null, sessionId: null, appId: null, organizationId: null, actionArgs: null });
+    }
+    expect([...data.a, ...data.b.items].filter((x: { id: string }) => x.id === identified)).toHaveLength(2);
+  });
+
+  it('a user principal\'s resource read is unchanged by this PR (raw rows; tracked separately)', async () => {
+    const row = (await list({ memoryId: appMem.id }, ctx({ userId: me.id, roles: ['ADMIN'] }))).find((r: { id: string }) => r.id === identified);
+    expect(row?.userId).toBe(other.id);
+  });
+
+  it('own scope stays empty for an App key even when events carry its appId (Rico P3-1)', async () => {
+    await db.usageEvent.create({ data: { ...ev({ userId: other.id, memoryId: memB.id }), appId: app.id } });
+    expect(await list({}, asKey())).toEqual([]);
+    expect(await page({}, asKey())).toEqual({ items: [], total: 0, hasMore: false });
+  });
+
+  it('naming PUBLIC knowledge answers its resource scope to an App key, as its READ gate admits (Rico P3-2)', async () => {
+    const pub = generateId();
+    await db.usageEvent.create({ data: ev({ id: pub, userId: other.id, memoryId: pubMem.id }) });
+    const rows = await list({ memoryId: pubMem.id }, asKey());
+    expect(ids(rows)).toEqual([pub]);
+    expect(rows[0].userId).toBeNull();
+    expect(ids((await page({ memoryId: pubMem.urn }, asKey())).items)).toEqual([pub]);
   });
 });
 
@@ -137,6 +209,14 @@ describe('#2817 — principals the change must not admit', () => {
   it('only a USERLESS App principal is admitted: an App context that carries a user identity keeps the READER gate', async () => {
     // An impersonation session can carry an appId (resolvers.helpers.ts getAccessibleMemoryIds), and its roles are [].
     const c = ctx({ appId: app.id, userId: me.id, roles: [], impersonation: { orgId: 'x' } as Context['impersonation'] });
+    await expect(list({}, c)).rejects.toThrow('Forbidden');
+    await expect(page({ memoryId: appMem.id }, c)).rejects.toThrow('Forbidden');
+  });
+});
+
+describe('#2817 review — the App-key admission keys on the key itself (Gloria P2-1)', () => {
+  it('an App context with no user but no hdr_app_ key keeps the READER gate', async () => {
+    const c = ctx({ appId: app.id, roles: [] });
     await expect(list({}, c)).rejects.toThrow('Forbidden');
     await expect(page({ memoryId: appMem.id }, c)).rejects.toThrow('Forbidden');
   });
