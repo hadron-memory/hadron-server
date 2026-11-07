@@ -17,8 +17,17 @@ type KeyApp = { id: string; organizationId: string | null; ownerUserId: string |
  * Use the authenticated actor, not App participation: org admins need no AppMember row.
  */
 export async function requireAppKeyManager(ctx: Context, app: KeyApp): Promise<void> {
-  if (currentActor().workerId) throw authorizationDenied();
-  if (!(await managesApp(ctx, app))) throw authorizationDenied();
+  if (!(await isAppKeyManager(ctx, app))) throw authorizationDenied();
+}
+
+/**
+ * The same person-only manager decision as {@link requireAppKeyManager}, as a boolean, for a door that must answer
+ * a refusal as something else: #2944's usage key filter answers a key the caller may not filter by exactly as an
+ * unknown key (hrn:node:hadronmemory.com:specs:cor:acl:090:01). One predicate, so the two doors cannot drift.
+ */
+export async function isAppKeyManager(ctx: Context, app: KeyApp): Promise<boolean> {
+  if (currentActor().workerId) return false;
+  return managesApp(ctx, app);
 }
 
 /**

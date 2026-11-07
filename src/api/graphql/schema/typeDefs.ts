@@ -9094,8 +9094,17 @@ export const typeDefs = `#graphql
     memories; not existence-checked. The migration target for the deprecated
     nodeUsage(loc:) above — same match, same gate (PR-986 review, Codex P2).
     Mutually exclusive with nodeId (BAD_USER_INPUT when both are passed).
+
+    appKey (#2944, hrn:node:hadronmemory.com:specs:cor:acl:090:01 "Filtering by App key") — an App key's id.
+    Keeps only the events made by requests that key authenticated; events made without a key, and every event
+    recorded before keys were attributed, are never returned. Open to whoever manages the key's App
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:12, acting as themselves) and to the key itself; anyone else
+    gets APP_KEY_NOT_FOUND, exactly as for a key that does not exist, before any memory or node is resolved.
+    A manager sees the key's events only in memories the manager can read (no resource named: every such
+    memory; a named memory still needs READ). The key, naming no resource, sees all of its own events. It
+    composes with the window, type and resource filters. Rows stay volume-only as above.
     """
-    usageEvents(type: String, memoryId: ID, nodeId: ID, loc: String, since: DateTime, until: DateTime, limit: Int, offset: Int): [UsageEvent!]!
+    usageEvents(type: String, memoryId: ID, nodeId: ID, loc: String, since: DateTime, until: DateTime, appKey: ID, limit: Int, offset: Int): [UsageEvent!]!
     """
     #2212 - \`usageEvents\` as a page: the same principal gate, the same loc/nodeId rules and the same two scopes
     (own activity when no resource is named, #2817), ordered newest first with an id tiebreak, with the windowed total.
@@ -9103,8 +9112,9 @@ export const typeDefs = `#graphql
     Bounds must be ISO date-times with Z or an explicit offset.
     Either bound may be omitted; invalid bounds or since >= until are BAD_USER_INPUT.
     hrn:node:hadronmemory.com:specs:cor:acl:090:01; paging: hrn:node:hadronmemory.com:specs:cor:api:120:04. Sizes as \`tickersPage\`.
+    appKey filters by an App key exactly as on usageEvents (#2944), and the total counts the filtered rows.
     """
-    usageEventsPage(type: String, memoryId: ID, nodeId: ID, loc: String, since: DateTime, until: DateTime, limit: Int, offset: Int): UsageEventPage!
+    usageEventsPage(type: String, memoryId: ID, nodeId: ID, loc: String, since: DateTime, until: DateTime, appKey: ID, limit: Int, offset: Int): UsageEventPage!
 
     """
     Revision history for a node, most recent first.

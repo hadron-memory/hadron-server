@@ -46,7 +46,7 @@ import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.j
 import { eventActor } from '../../../lib/agentTasks/events.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
-import { attributedRequestActivity, recordNodeUsage, toUsageNodeRefs, trackUsageWrite } from '../../../lib/usageRecorder.js';
+import { attributedRequestActivity, recordNodeUsage, toUsageNodeRefs, trackUsageWrite, usageAppKeyOf } from '../../../lib/usageRecorder.js';
 import {
   HANDOFFS_PARENT_LOC,
   HANDOFF_SESSION_KEY,
@@ -1882,6 +1882,8 @@ export const sessionMutations = {
             memoryId: node?.memoryId,
             actionArgs: serializeJson(event.actionArgs) as InputJsonValue | undefined,
             appId: ctx.appId,
+            // #2944: the authenticating App key (null for a user; recordUsage needs READER, so a key is refused today).
+            appKeyId: usageAppKeyOf(ctx),
             // Attribution from auth (spec 046 FR-001), as the MCP recorders do.
             // This path only ever set the audit `createdBy` string, so a signed-in
             // user's reads/writes recorded here were invisible to any query
@@ -3157,6 +3159,7 @@ export const sessionMutations = {
               nodeId: node.id,
               memoryId: node.memoryId, // #796
               appId: ctx.appId ?? null,
+              appKeyId: usageAppKeyOf(ctx), // #2944
               // Same attribution gap as recordUsage above: action-run isn't
               // counted by usageActivity today, but the bucket surface is meant
               // to grow to other event types, and the MCP action-run recorder
