@@ -2584,15 +2584,16 @@ export const nodeQueries = {
       // personal/private carve-out still applies — so the `!== null` guard is
       // defensive for the type contract rather than a live path.
       const accessibleMemoryIds = await getAccessibleMemoryIds(ctx);
-      // #3688: a loc names a resource, so other principals' rows are volumes only (cor:acl:090:01, ruling 0246).
-      return projectUsageRowsFor(ctx, await ctx.db.usageEvent.findMany({
+      const rows = await ctx.db.usageEvent.findMany({
         where: {
           nodeLoc: loc,
           ...(accessibleMemoryIds !== null ? { memoryId: { in: accessibleMemoryIds } } : {}),
         },
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: limit ?? 20,
-      }));
+      });
+      // #3688: a loc names a resource, so other principals' rows are volumes only (cor:acl:090:01, ruling 0246).
+      return projectUsageRowsFor(ctx, rows);
     },
 
     nodeEdgeRemovals: async (_: unknown, { nodeRef, limit }: { nodeRef: string; limit?: number }, ctx: Context) => {
