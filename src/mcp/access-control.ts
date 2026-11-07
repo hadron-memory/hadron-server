@@ -1,4 +1,4 @@
-import { personalOrgAgentTextAllowed } from '../lib/auth/personalOrgAgentInstall.js';
+import { personalOrgAgentTextBatch } from '../lib/auth/personalOrgAgentInstall.js';
 import { listAppInstallations, loadAppInstallationPage } from '../lib/appInstallations.js';
 /**
  * MCP access-control: which memories can the caller read/write?
@@ -159,7 +159,9 @@ async function buildAppMemoryMap(
   const agents = selected.map(row => ({ ...row.agent, memoryItems: row.agent.memoryItems ?? [] }));
   const appInstalls = agents.map(agent=>({agent}));
   const licensedAgentIds = await activeAgentInstallLicenseIds(db, app, agents);
-  const textAdmissions = new Map(await Promise.all(agents.map(async agent => [agent.id,await personalOrgAgentTextAllowed(db,app,agent.id,opts.callerUserId)] as const)));
+  // #3655: one batch for the page, not a text check per Agent.
+  const texts = await personalOrgAgentTextBatch(db, agents.map(agent => ({ app, agentId: agent.id, userId: opts.callerUserId })));
+  const textAdmissions = new Map(agents.map((agent, i) => [agent.id, texts[i]!] as const));
   const systemIds = agents
     .filter((agent) => licensedAgentIds.has(agent.id) && textAdmissions.get(agent.id) && agent.systemMemoryId !== null)
     .map((agent) => agent.systemMemoryId!);
@@ -657,11 +659,14 @@ async function installedSystemMemoryFolds(
   const page = await loadAppInstallationPage(db, ids);
   const apps = page.apps.filter(app => !app.deletedAt && !app.uninstalledAt);
   const installations = page.installations;
-  const perApp = await Promise.all(apps.map(async (app) => {
-    const agents = installations.filter(row=>row.appId===app.id).map(row=>row.agent);
+  const byApp = apps.map(app => ({ app, agents: installations.filter(row=>row.appId===app.id).map(row=>row.agent) }));
+  // #3655: one text batch across every App of the fold, not a check per (App, Agent).
+  const checks = byApp.flatMap(({ app, agents }) => agents.map(agent => ({ app, agentId: agent.id, userId })));
+  const texts = await personalOrgAgentTextBatch(db, checks);
+  const textAdmitted = new Set(checks.flatMap((check, i) => texts[i] ? [`${check.app.id}:${check.agentId}`] : []));
+  const perApp = await Promise.all(byApp.map(async ({ app, agents }) => {
     const licensed = await activeAgentInstallLicenseIds(db, app, agents);
-    const textAdmissions = new Map(await Promise.all(agents.map(async agent => [agent.id,await personalOrgAgentTextAllowed(db,app,agent.id,userId)] as const)));
-    return { appId: app.id, agents: agents.filter((a) => licensed.has(a.id) && textAdmissions.get(a.id) && a.systemMemoryId !== null) };
+    return { appId: app.id, agents: agents.filter((a) => licensed.has(a.id) && textAdmitted.has(`${app.id}:${a.id}`) && a.systemMemoryId !== null) };
   }));
   const wanted = [...new Set(perApp.flatMap((p) => p.agents.map((a) => a.systemMemoryId!)))];
   if (wanted.length === 0) return [];

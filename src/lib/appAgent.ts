@@ -1,4 +1,4 @@
-import { personalOrgAgentLicenseHolds } from './auth/personalOrgAgentInstall.js';
+import { personalOrgAgentLicenseBatch } from './auth/personalOrgAgentInstall.js';
 import { orgAgentLicenseUsable } from './auth/orgAgentInstallLicense.js';
 import { listAppInstallations, resolveAppInstallation, type InstallationDb } from './appInstallations.js';
 /**
@@ -56,12 +56,12 @@ export async function activeAgentInstallLicenseIds(
     const activeSubscriptions = new Set(
       subscriptions.filter((row) => isLifecycleActive(row, now)).map((row) => row.agentId),
     );
-    for (const agent of agents) {
-      if (agent.organizationId !== null && !liveOrgs.has(agent.organizationId)) continue;
-      if ((agent.ownerUserId === app.ownerUserId || activeSubscriptions.has(agent.id)) && await personalOrgAgentLicenseHolds(db,app,agent.id)) {
-        licensed.add(agent.id);
-      }
-    }
+    const candidates = agents.filter(agent =>
+      !(agent.organizationId !== null && !liveOrgs.has(agent.organizationId)) &&
+      (agent.ownerUserId === app.ownerUserId || activeSubscriptions.has(agent.id)));
+    // #3655: one licence batch for the roster, not a check per Agent.
+    const holds = await personalOrgAgentLicenseBatch(db, candidates.map(agent => ({ app, agentId: agent.id })));
+    candidates.forEach((agent, i) => { if (holds[i]) licensed.add(agent.id); });
     return licensed;
   }
   // Same-org installations are implicit; foreign Agents need an org grant.
@@ -145,6 +145,7 @@ export async function activeAppInstallLicenseIdsForAgent(
   const activeSubscriptions = new Set(
     subscriptions.filter((row) => isLifecycleActive(row, now)).map((row) => row.userId),
   );
+  const personal: Array<{ appId: string; app: (typeof installs)[number]['app'] }> = [];
   for (const { appId, app } of installs) {
     if (app.deletedAt || app.uninstalledAt) continue;
     if (app.organizationId !== null) {
@@ -153,10 +154,13 @@ export async function activeAppInstallLicenseIdsForAgent(
         licensed.add(appId);
       }
     } else if (app.ownerUserId !== null &&
-      (app.ownerUserId === agent.ownerUserId || activeSubscriptions.has(app.ownerUserId)) && await personalOrgAgentLicenseHolds(db,app,agent.id)) {
-      licensed.add(appId);
+      (app.ownerUserId === agent.ownerUserId || activeSubscriptions.has(app.ownerUserId))) {
+      personal.push({ appId, app });
     }
   }
+  // #3655: one licence batch across the personal Apps, not a check per App.
+  const holds = await personalOrgAgentLicenseBatch(db, personal.map(({ app }) => ({ app, agentId: agent.id })));
+  personal.forEach(({ appId }, i) => { if (holds[i]) licensed.add(appId); });
   return licensed;
 }
 

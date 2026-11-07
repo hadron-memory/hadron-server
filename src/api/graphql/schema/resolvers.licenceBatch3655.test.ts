@@ -5,7 +5,8 @@
  * (personalOrgAgentLicenseHolds: 3, personalOrgAgentTextAllowed: 5), so the cost grew with the roster.
  *
  * The pins count only those three models: everything else these paths read is out of #3655's scope and may stay
- * linear. Behaviour is pinned separately (the differential at the end, and every existing #1148/#3653 pin unchanged).
+ * linear. Behaviour is pinned separately: the differential at the end holds the batch to the single helpers, and every
+ * existing #1148/#3653 pin is unchanged.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -17,6 +18,9 @@ import { readableInstallMemoryIds } from '../../../lib/auth/installMemory.js';
 import { activeAppInstallLicenseIdsForAgent } from '../../../lib/appAgent.js';
 import { resolveServedBootPrompt, type PageServedMemo } from '../../../lib/bootPrompt/serve.js';
 import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
+import {
+  personalOrgAgentLicenseBatch, personalOrgAgentLicenseHolds, personalOrgAgentTextAllowed, personalOrgAgentTextBatch,
+} from '../../../lib/auth/personalOrgAgentInstall.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
@@ -141,5 +145,93 @@ describe('#3655: per-row licence and text reads do not grow with the roster', ()
       cost[n] = counter.n;
     }
     expect(cost[4], JSON.stringify(cost)).toBe(cost[1]);
+  });
+});
+
+describe('#3655 differential: the batch answers exactly what the single helpers answer', () => {
+  it('a mixed roster of Apps, Agents, licences and callers', async () => {
+    await cleanDb(db);
+    const user = async (handle: string) => (await db.user.create({ data: { id: generateId(), handle, roles: ['READER'] } })).id;
+    const [owner, lapsedOwner, departedOwner, member, outsider] = await Promise.all(
+      ['owner', 'lapsed', 'departed', 'member', 'outsider'].map(h => user(`${h}3655d`)));
+    const org = (await db.organization.create({ data: { id: generateId(), name: 'Publisher', urn: 'publisher3655d.test' } })).id;
+    const goneOrg = (await db.organization.create({ data: { id: generateId(), name: 'Gone', urn: 'gone3655d.test', deletedAt: new Date() } })).id;
+    await db.orgMember.createMany({ data: [
+      { organizationId: org, userId: owner, role: 'READER' },
+      { organizationId: org, userId: lapsedOwner, role: 'READER' },
+      { organizationId: org, userId: departedOwner, role: 'READER', deletedAt: new Date() },
+      { organizationId: org, userId: member, role: 'READER' },
+      { organizationId: goneOrg, userId: owner, role: 'READER' },
+    ] });
+    const agent = async (name: string, data: Record<string, unknown>) =>
+      (await db.agent.create({ data: { id: generateId(), name, urn: `publisher3655d.test:${name}`, ...data } })).id;
+    const agents = {
+      org: await agent('org', { organizationId: org, visibility: 'ORGANIZATION' }),
+      public: await agent('public', { organizationId: org, visibility: 'PUBLIC' }),
+      personalVis: await agent('personal-vis', { organizationId: org, visibility: 'PERSONAL' }),
+      deleted: await agent('deleted', { organizationId: org, visibility: 'ORGANIZATION', deletedAt: new Date() }),
+      goneOrg: await agent('gone-org', { organizationId: goneOrg, visibility: 'ORGANIZATION' }),
+      userOwned: await agent('user-owned', { ownerUserId: owner, visibility: 'PERSONAL' }),
+      unsubscribed: await agent('unsubscribed', { organizationId: org, visibility: 'ORGANIZATION' }),
+      expired: await agent('expired', { organizationId: org, visibility: 'ORGANIZATION' }),
+      missing: generateId(),
+    };
+    const subscribe = (userId: string, agentId: string, extra: Record<string, unknown> = {}) =>
+      db.agentSubscription.create({ data: { userId, agentId, activatedAt: new Date('2020-01-01'), ...extra } });
+    for (const id of [agents.org, agents.public, agents.personalVis, agents.deleted, agents.goneOrg]) {
+      await subscribe(owner, id);
+      await subscribe(departedOwner, id);
+    }
+    await subscribe(lapsedOwner, agents.org, { revokedAt: new Date() });
+    await subscribe(owner, agents.expired, { expiresAt: new Date('2021-01-01') });
+    await subscribe(lapsedOwner, agents.expired, { activatedAt: null });
+    const apps = [
+      { organizationId: null, ownerUserId: owner },
+      { organizationId: null, ownerUserId: lapsedOwner },
+      { organizationId: null, ownerUserId: departedOwner },
+      { organizationId: org, ownerUserId: null },
+      { organizationId: null, ownerUserId: null },
+    ];
+    const callers = [owner, member, outsider, departedOwner, null, undefined];
+    const checks = apps.flatMap(app => Object.values(agents).map(agentId => ({ app, agentId })));
+    const textChecks = checks.flatMap(check => callers.map(userId => ({ ...check, userId })));
+
+    const licenceBatch = await personalOrgAgentLicenseBatch(db, checks);
+    const licenceSingle = await Promise.all(checks.map(c => personalOrgAgentLicenseHolds(db, c.app, c.agentId)));
+    expect(licenceBatch).toEqual(licenceSingle);
+    const textBatch = await personalOrgAgentTextBatch(db, textChecks);
+    const textSingle = await Promise.all(textChecks.map(c => personalOrgAgentTextAllowed(db, c.app, c.agentId, c.userId)));
+    expect(textBatch).toEqual(textSingle);
+    // The roster must exercise both answers, or equality proves nothing.
+    expect(new Set(licenceSingle)).toEqual(new Set([true, false]));
+    expect(new Set(textSingle)).toEqual(new Set([true, false]));
+    expect(await personalOrgAgentLicenseBatch(db, [])).toEqual([]);
+  });
+});
+
+describe('#3655: shared answers stay per row', () => {
+  it('one page memo answers each Agent of an App for itself', async () => {
+    const f = await build(2);
+    for (const id of f.agentIds) await serveAgentBootPrompt(db, id, 'SYNTHETIC 3655');
+    await db.agentSubscription.update({ where: { userId_agentId: { userId: f.ownerId, agentId: f.agentIds[1]! } }, data: { revokedAt: new Date() } });
+    const memo: PageServedMemo = new Map();
+    const serve = (i: number) => resolveServedBootPrompt(db, { surface: 'bind', appId: f.appId, agent: { id: f.agentIds[i]!, name: `Agent ${i}` }, workerId: `worker-${i}` }, { memo, workerPointer: null });
+    expect((await serve(0)).content).toBe('SYNTHETIC 3655');
+    await expect(serve(1)).rejects.toMatchObject({ extensions: { code: 'BOOT_PROMPT_INSTALL_LICENSE_INACTIVE' } });
+  });
+
+  it('a fold admits each Agent on its own text answer, not the batch as a whole', async () => {
+    const f = await build(1);
+    const otherOrg = (await db.organization.create({ data: { id: generateId(), name: 'Elsewhere', urn: 'elsewhere3655.test' } })).id;
+    await db.orgMember.create({ data: { organizationId: otherOrg, userId: f.ownerId, role: 'READER' } });
+    const systemMemoryId = (await db.memory.create({ data: { class: 'system', organizationId: otherOrg, name: 'Elsewhere', urn: 'elsewhere3655.test:definition' } })).id;
+    const agentId = (await db.agent.create({ data: { id: generateId(), organizationId: otherOrg, name: 'Elsewhere', urn: 'elsewhere3655.test:agent', visibility: 'ORGANIZATION', systemMemoryId } })).id;
+    await db.agentSubscription.create({ data: { userId: f.ownerId, agentId, activatedAt: new Date('2020-01-01') } });
+    await db.appAgent.create({ data: { appId: f.appId, agentId } });
+    // The viewer is a member of the first org only: the second Agent's text is the owner's to read, not the viewer's.
+    const folds = await participantSystemMemoryFolds(db, viewer(f, db));
+    const ids = new Set(folds.flatMap(fold => [...fold.map.keys()]));
+    expect(ids.has(f.systemIds[0]!)).toBe(true);
+    expect(ids.has(systemMemoryId)).toBe(false);
   });
 });
