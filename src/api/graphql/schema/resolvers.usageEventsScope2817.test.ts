@@ -171,6 +171,24 @@ describe('#2817 review — what an App key\'s resource read discloses', () => {
     expect(rows[0].userId).toBeNull();
     expect(ids((await page({ memoryId: pubMem.urn }, asKey())).items)).toEqual([pub]);
   });
+
+  it('naming an exact node in PUBLIC knowledge answers it like naming the memory, on both fields (Dorian P2-2)', async () => {
+    const n = await db.node.create({ data: { id: generateId(), memoryId: pubMem.id, loc: 'pub-node', name: 'Pub node' } });
+    const pub = generateId();
+    await db.usageEvent.create({ data: { ...ev({ id: pub, userId: other.id, memoryId: pubMem.id, nodeLoc: n.loc }), nodeId: n.id } });
+    expect(ids(await list({ memoryId: pubMem.id }, asKey()))).toEqual([pub]);
+    const rows = await list({ nodeId: n.id }, asKey());
+    expect(ids(rows)).toEqual([pub]);
+    expect(rows[0].userId).toBeNull();
+    expect(ids((await page({ nodeId: `${pubMem.urn}:${n.loc}` }, asKey())).items)).toEqual([pub]);
+  });
+
+  it('naming an exact node in a memory the key cannot read still answers nothing (no widening)', async () => {
+    const n = await db.node.create({ data: { id: generateId(), memoryId: memB.id, loc: 'b-node', name: 'B node' } });
+    await db.usageEvent.create({ data: { ...ev({ userId: other.id, memoryId: memB.id, nodeLoc: n.loc }), nodeId: n.id } });
+    expect(await list({ nodeId: n.id }, asKey())).toEqual([]);
+    expect(await page({ nodeId: n.id }, asKey())).toEqual({ items: [], total: 0, hasMore: false });
+  });
 });
 
 describe('#2817 item 2 — missing and unreadable memories answer alike (regression)', () => {
