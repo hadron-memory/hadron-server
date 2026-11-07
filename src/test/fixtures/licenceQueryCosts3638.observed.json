@@ -1,0 +1,3334 @@
+{
+  "productionSource": "cd0da474f51b8742754ed6456db9987b86c7fc77",
+  "harnessRevision": "dfd4594aee1f22681a6d2e1fb106323b25cac5c2",
+  "postgresVersion": "PostgreSQL 17.11 (Debian 17.11-0+deb13u1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit",
+  "prismaVersion": "6.19.2",
+  "nodeVersion": "v22.23.3",
+  "harnessSha256": "685ccaf6d587e20e5082b1a55707902654eb274346a5e5ac5c7e9a0a8e4da6d0",
+  "complete": true,
+  "expectedObservationCount": 217,
+  "fixedWorkload": "6 states x 1/3 Agents x 9 paths x first/repeat; synthetic physical installs, one App",
+  "definitions": {
+    "sqlCount": "dedicated Prisma query events inside span; setup and named drain barrier excluded; includes transaction statements",
+    "tables": "statements mentioning each FROM/JOIN/UPDATE/INTO quoted table; overlaps not additive",
+    "repeat": "same explicit Context/client, not HTTP request or pooled-session/cache benchmark"
+  },
+  "observations": [
+    {
+      "shape": "observer",
+      "path": "positive-control",
+      "repeat": "first",
+      "sqlCount": 1,
+      "tables": {},
+      "semantic": "one statement"
+    },
+    {
+      "shape": "active/1-agents",
+      "path": "licence-helper",
+      "repeat": "first",
+      "sqlCount": 3,
+      "tables": {
+        "agents": 1,
+        "org_members": 1,
+        "organizations": 1,
+        "agent_subscriptions": 1
+      },
+      "semantic": "1/1"
+    },
+    {
+      "shape": "active/1-agents",
+      "path": "licence-helper",
+      "repeat": "same-context-repeat",
+      "sqlCount": 3,
+      "tables": {
+        "agents": 1,
+        "org_members": 1,
+        "organizations": 1,
+        "agent_subscriptions": 1
+      },
+      "semantic": "1/1"
+    },
+    {
+      "shape": "active/1-agents",
+      "path": "text-helper",
+      "repeat": "first",
+      "sqlCount": 5,
+      "tables": {
+        "agents": 2,
+        "org_members": 2,
+        "organizations": 2,
+        "agent_subscriptions": 1
+      },
+      "semantic": "1/1"
+    },
+    {
+      "shape": "active/1-agents",
+      "path": "text-helper",
+      "repeat": "same-context-repeat",
+      "sqlCount": 5,
+      "tables": {
+        "agents": 2,
+        "org_members": 2,
+        "organizations": 2,
+        "agent_subscriptions": 1
+      },
+      "semantic": "1/1"
+    },
+    {
+      "shape": "active/1-agents",
+      "path": "installed-licence",
+      "repeat": "first",
+      "sqlCount": 8,
+      "tables": {
+        "app_agents": 1,
+        "agents": 2,
+        "apps": 1,
+        "organizations": 2,
+        "agent_subscriptions": 2,
+        "org_members": 1
+      },
+      "semantic": "1/1"
+    },
+    {
+      "shape": "active/1-agents",
+      "path": "installed-licence",
+      "repeat": "same-context-repeat",
+      "sqlCount": 8,
+      "tables": {
+        "app_agents": 1,
+        "agents": 2,
+        "apps": 1,
+        "organizations": 2,
+        "agent_subscriptions": 2,
+        "org_members": 1
+      },
+      "semantic": "1/1"
+    },
+    {
+      "shape": "active/1-agents",
+      "path": "app-memory-candidates",
+      "repeat": "first",
+      "sqlCount": 17,
+      "tables": {
+        "apps": 1,
+        "app_agents": 1,
+        "agents": 5,
+        "agent_memory_items": 1,
+        "memories": 3,
+        "agent_imports": 1,
+        "organizations": 4,
+        "agent_subscriptions": 3,
+        "org_members": 3,
+        "workers": 1
+      },
+      "semantic": "1/1 definitions"
+    },
+    {
+      "shape": "active/1-agents",
+      "path": "app-memory-candidates",
+      "repeat": "same-context-repeat",
+      "sqlCount": 17,
+      "tables": {
+        "apps": 1,
+        "app_agents": 1,
+        "agents": 5,
+        "agent_memory_items": 1,
+        "memories": 3,
+        "agent_imports": 1,
+        "organizations": 4,
+        "agent_subscriptions": 3,
+        "org_members": 3,
+        "workers": 1
+      },
+      "semantic": "1/1 definitions"
+    },
+    {
+      "shape": "active/1-agents",
+      "path": "readable-install-memories",
+      "repeat": "first",
+      "sqlCount": 8,
+      "tables": {
+        "org_members": 3,
+        "organizations": 4,
+        "memories": 1,
+        "apps": 2,
+        "app_members": 1,
+        "agents": 2,
+        "agent_subscriptions": 1
+      },
+      "semantic": "1 installs"
+    },
+    {
+      "shape": "active/1-agents",
+      "path": "readable-install-memories",
+      "repeat": "same-context-repeat",
+      "sqlCount": 8,
+      "tables": {
+        "org_members": 3,
+        "organizations": 4,
+        "memories": 1,
+        "apps": 2,
+        "app_members": 1,
+        "agents": 2,
+        "agent_subscriptions": 1
+      },
+      "semantic": "1 installs"
+    },
+    {
+      "shape": "active/1-agents",
+      "path": "participant-system-folds",
+      "repeat": "first",
+      "sqlCount": 17,
+      "tables": {
+        "org_members": 4,
+        "organizations": 6,
+        "apps": 2,
+        "app_members": 1,
+        "app_agents": 1,
+        "agents": 5,
+        "agent_imports": 1,
+        "agent_subscriptions": 3,
+        "memories": 1
+      },
+      "semantic": "1/1 definitions"
+    },
+    {
+      "shape": "active/1-agents",
+      "path": "participant-system-folds",
+      "repeat": "same-context-repeat",
+      "sqlCount": 17,
+      "tables": {
+        "org_members": 4,
+        "organizations": 6,
+        "apps": 2,
+        "app_members": 1,
+        "app_agents": 1,
+        "agents": 5,
+        "agent_imports": 1,
+        "agent_subscriptions": 3,
+        "memories": 1
+      },
+      "semantic": "1/1 definitions"
+    },
+    {
+      "shape": "active/1-agents",
+      "path": "chat-carrier-apps",
+      "repeat": "first",
+      "sqlCount": 17,
+      "tables": {
+        "app_members": 1,
+        "apps": 4,
+        "organizations": 6,
+        "app_agents": 2,
+        "agents": 6,
+        "agent_imports": 2,
+        "users": 1,
+        "agent_subscriptions": 3,
+        "org_members": 3
+      },
+      "semantic": "1 apps"
+    },
+    {
+      "shape": "active/1-agents",
+      "path": "chat-carrier-apps",
+      "repeat": "same-context-repeat",
+      "sqlCount": 17,
+      "tables": {
+        "app_members": 1,
+        "apps": 4,
+        "organizations": 6,
+        "app_agents": 2,
+        "agents": 6,
+        "agent_imports": 2,
+        "users": 1,
+        "agent_subscriptions": 3,
+        "org_members": 3
+      },
+      "semantic": "1 apps"
+    },
+    {
+      "shape": "active/1-agents",
+      "path": "serve-chat-prompt",
+      "repeat": "first",
+      "sqlCount": 27,
+      "tables": {
+        "agents": 5,
+        "org_members": 4,
+        "organizations": 4,
+        "apps": 2,
+        "agent_subscriptions": 2,
+        "app_agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    },
+    {
+      "shape": "active/1-agents",
+      "path": "serve-chat-prompt",
+      "repeat": "same-context-repeat",
+      "sqlCount": 27,
+      "tables": {
+        "agents": 5,
+        "org_members": 4,
+        "organizations": 4,
+        "apps": 2,
+        "agent_subscriptions": 2,
+        "app_agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    },
+    {
+      "shape": "active/1-agents",
+      "path": "boot-serve-preview",
+      "repeat": "first",
+      "sqlCount": 19,
+      "tables": {
+        "apps": 1,
+        "agents": 2,
+        "org_members": 1,
+        "organizations": 1,
+        "agent_subscriptions": 1,
+        "app_agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    },
+    {
+      "shape": "active/1-agents",
+      "path": "boot-serve-preview",
+      "repeat": "same-context-repeat",
+      "sqlCount": 19,
+      "tables": {
+        "apps": 1,
+        "agents": 2,
+        "org_members": 1,
+        "organizations": 1,
+        "agent_subscriptions": 1,
+        "app_agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    },
+    {
+      "shape": "owner-revoked/1-agents",
+      "path": "licence-helper",
+      "repeat": "first",
+      "sqlCount": 2,
+      "tables": {
+        "agents": 1,
+        "org_members": 1,
+        "organizations": 1
+      },
+      "semantic": "0/1"
+    },
+    {
+      "shape": "owner-revoked/1-agents",
+      "path": "licence-helper",
+      "repeat": "same-context-repeat",
+      "sqlCount": 2,
+      "tables": {
+        "agents": 1,
+        "org_members": 1,
+        "organizations": 1
+      },
+      "semantic": "0/1"
+    },
+    {
+      "shape": "owner-revoked/1-agents",
+      "path": "text-helper",
+      "repeat": "first",
+      "sqlCount": 3,
+      "tables": {
+        "agents": 2,
+        "org_members": 1,
+        "organizations": 1
+      },
+      "semantic": "0/1"
+    },
+    {
+      "shape": "owner-revoked/1-agents",
+      "path": "text-helper",
+      "repeat": "same-context-repeat",
+      "sqlCount": 3,
+      "tables": {
+        "agents": 2,
+        "org_members": 1,
+        "organizations": 1
+      },
+      "semantic": "0/1"
+    },
+    {
+      "shape": "owner-revoked/1-agents",
+      "path": "installed-licence",
+      "repeat": "first",
+      "sqlCount": 7,
+      "tables": {
+        "app_agents": 1,
+        "agents": 2,
+        "apps": 1,
+        "organizations": 2,
+        "agent_subscriptions": 1,
+        "org_members": 1
+      },
+      "semantic": "0/1"
+    },
+    {
+      "shape": "owner-revoked/1-agents",
+      "path": "installed-licence",
+      "repeat": "same-context-repeat",
+      "sqlCount": 7,
+      "tables": {
+        "app_agents": 1,
+        "agents": 2,
+        "apps": 1,
+        "organizations": 2,
+        "agent_subscriptions": 1,
+        "org_members": 1
+      },
+      "semantic": "0/1"
+    },
+    {
+      "shape": "owner-revoked/1-agents",
+      "path": "app-memory-candidates",
+      "repeat": "first",
+      "sqlCount": 13,
+      "tables": {
+        "apps": 1,
+        "app_agents": 1,
+        "agents": 5,
+        "agent_memory_items": 1,
+        "memories": 2,
+        "agent_imports": 1,
+        "organizations": 3,
+        "agent_subscriptions": 1,
+        "org_members": 2,
+        "workers": 1
+      },
+      "semantic": "0/1 definitions"
+    },
+    {
+      "shape": "owner-revoked/1-agents",
+      "path": "app-memory-candidates",
+      "repeat": "same-context-repeat",
+      "sqlCount": 13,
+      "tables": {
+        "apps": 1,
+        "app_agents": 1,
+        "agents": 5,
+        "agent_memory_items": 1,
+        "memories": 2,
+        "agent_imports": 1,
+        "organizations": 3,
+        "agent_subscriptions": 1,
+        "org_members": 2,
+        "workers": 1
+      },
+      "semantic": "0/1 definitions"
+    },
+    {
+      "shape": "owner-revoked/1-agents",
+      "path": "readable-install-memories",
+      "repeat": "first",
+      "sqlCount": 6,
+      "tables": {
+        "org_members": 2,
+        "organizations": 3,
+        "memories": 1,
+        "apps": 2,
+        "app_members": 1,
+        "agents": 2
+      },
+      "semantic": "0 installs"
+    },
+    {
+      "shape": "owner-revoked/1-agents",
+      "path": "readable-install-memories",
+      "repeat": "same-context-repeat",
+      "sqlCount": 6,
+      "tables": {
+        "org_members": 2,
+        "organizations": 3,
+        "memories": 1,
+        "apps": 2,
+        "app_members": 1,
+        "agents": 2
+      },
+      "semantic": "0 installs"
+    },
+    {
+      "shape": "owner-revoked/1-agents",
+      "path": "participant-system-folds",
+      "repeat": "first",
+      "sqlCount": 13,
+      "tables": {
+        "org_members": 3,
+        "organizations": 5,
+        "apps": 2,
+        "app_members": 1,
+        "app_agents": 1,
+        "agents": 5,
+        "agent_imports": 1,
+        "agent_subscriptions": 1
+      },
+      "semantic": "0/1 definitions"
+    },
+    {
+      "shape": "owner-revoked/1-agents",
+      "path": "participant-system-folds",
+      "repeat": "same-context-repeat",
+      "sqlCount": 13,
+      "tables": {
+        "org_members": 3,
+        "organizations": 5,
+        "apps": 2,
+        "app_members": 1,
+        "app_agents": 1,
+        "agents": 5,
+        "agent_imports": 1,
+        "agent_subscriptions": 1
+      },
+      "semantic": "0/1 definitions"
+    },
+    {
+      "shape": "owner-revoked/1-agents",
+      "path": "chat-carrier-apps",
+      "repeat": "first",
+      "sqlCount": 11,
+      "tables": {
+        "app_members": 1,
+        "apps": 4,
+        "organizations": 4,
+        "app_agents": 2,
+        "agents": 4,
+        "agent_imports": 2,
+        "users": 1,
+        "agent_subscriptions": 1,
+        "org_members": 1
+      },
+      "semantic": "0 apps"
+    },
+    {
+      "shape": "owner-revoked/1-agents",
+      "path": "chat-carrier-apps",
+      "repeat": "same-context-repeat",
+      "sqlCount": 11,
+      "tables": {
+        "app_members": 1,
+        "apps": 4,
+        "organizations": 4,
+        "app_agents": 2,
+        "agents": 4,
+        "agent_imports": 2,
+        "users": 1,
+        "agent_subscriptions": 1,
+        "org_members": 1
+      },
+      "semantic": "0 apps"
+    },
+    {
+      "shape": "owner-revoked/1-agents",
+      "path": "serve-chat-prompt",
+      "repeat": "first",
+      "sqlCount": 13,
+      "tables": {
+        "agents": 5,
+        "org_members": 2,
+        "organizations": 5,
+        "app_members": 1,
+        "apps": 4,
+        "app_agents": 2,
+        "agent_imports": 2,
+        "users": 1,
+        "agent_subscriptions": 1
+      },
+      "semantic": "AGENT_NOT_FOUND"
+    },
+    {
+      "shape": "owner-revoked/1-agents",
+      "path": "serve-chat-prompt",
+      "repeat": "same-context-repeat",
+      "sqlCount": 13,
+      "tables": {
+        "agents": 5,
+        "org_members": 2,
+        "organizations": 5,
+        "app_members": 1,
+        "apps": 4,
+        "app_agents": 2,
+        "agent_imports": 2,
+        "users": 1,
+        "agent_subscriptions": 1
+      },
+      "semantic": "AGENT_NOT_FOUND"
+    },
+    {
+      "shape": "owner-revoked/1-agents",
+      "path": "boot-serve-preview",
+      "repeat": "first",
+      "sqlCount": 3,
+      "tables": {
+        "apps": 1,
+        "agents": 1,
+        "org_members": 1,
+        "organizations": 1
+      },
+      "semantic": "BOOT_PROMPT_INSTALL_LICENSE_INACTIVE"
+    },
+    {
+      "shape": "owner-revoked/1-agents",
+      "path": "boot-serve-preview",
+      "repeat": "same-context-repeat",
+      "sqlCount": 3,
+      "tables": {
+        "apps": 1,
+        "agents": 1,
+        "org_members": 1,
+        "organizations": 1
+      },
+      "semantic": "BOOT_PROMPT_INSTALL_LICENSE_INACTIVE"
+    },
+    {
+      "shape": "outsider/1-agents",
+      "path": "licence-helper",
+      "repeat": "first",
+      "sqlCount": 3,
+      "tables": {
+        "agents": 1,
+        "org_members": 1,
+        "organizations": 1,
+        "agent_subscriptions": 1
+      },
+      "semantic": "1/1"
+    },
+    {
+      "shape": "outsider/1-agents",
+      "path": "licence-helper",
+      "repeat": "same-context-repeat",
+      "sqlCount": 3,
+      "tables": {
+        "agents": 1,
+        "org_members": 1,
+        "organizations": 1,
+        "agent_subscriptions": 1
+      },
+      "semantic": "1/1"
+    },
+    {
+      "shape": "outsider/1-agents",
+      "path": "text-helper",
+      "repeat": "first",
+      "sqlCount": 5,
+      "tables": {
+        "agents": 2,
+        "org_members": 2,
+        "organizations": 2,
+        "agent_subscriptions": 1
+      },
+      "semantic": "0/1"
+    },
+    {
+      "shape": "outsider/1-agents",
+      "path": "text-helper",
+      "repeat": "same-context-repeat",
+      "sqlCount": 5,
+      "tables": {
+        "agents": 2,
+        "org_members": 2,
+        "organizations": 2,
+        "agent_subscriptions": 1
+      },
+      "semantic": "0/1"
+    },
+    {
+      "shape": "outsider/1-agents",
+      "path": "installed-licence",
+      "repeat": "first",
+      "sqlCount": 8,
+      "tables": {
+        "app_agents": 1,
+        "agents": 2,
+        "apps": 1,
+        "organizations": 2,
+        "agent_subscriptions": 2,
+        "org_members": 1
+      },
+      "semantic": "1/1"
+    },
+    {
+      "shape": "outsider/1-agents",
+      "path": "installed-licence",
+      "repeat": "same-context-repeat",
+      "sqlCount": 8,
+      "tables": {
+        "app_agents": 1,
+        "agents": 2,
+        "apps": 1,
+        "organizations": 2,
+        "agent_subscriptions": 2,
+        "org_members": 1
+      },
+      "semantic": "1/1"
+    },
+    {
+      "shape": "outsider/1-agents",
+      "path": "app-memory-candidates",
+      "repeat": "first",
+      "sqlCount": 16,
+      "tables": {
+        "apps": 1,
+        "app_agents": 1,
+        "agents": 5,
+        "agent_memory_items": 1,
+        "memories": 2,
+        "agent_imports": 1,
+        "organizations": 4,
+        "agent_subscriptions": 3,
+        "org_members": 3,
+        "workers": 1
+      },
+      "semantic": "0/1 definitions"
+    },
+    {
+      "shape": "outsider/1-agents",
+      "path": "app-memory-candidates",
+      "repeat": "same-context-repeat",
+      "sqlCount": 16,
+      "tables": {
+        "apps": 1,
+        "app_agents": 1,
+        "agents": 5,
+        "agent_memory_items": 1,
+        "memories": 2,
+        "agent_imports": 1,
+        "organizations": 4,
+        "agent_subscriptions": 3,
+        "org_members": 3,
+        "workers": 1
+      },
+      "semantic": "0/1 definitions"
+    },
+    {
+      "shape": "outsider/1-agents",
+      "path": "readable-install-memories",
+      "repeat": "first",
+      "sqlCount": 8,
+      "tables": {
+        "org_members": 3,
+        "organizations": 4,
+        "memories": 1,
+        "apps": 2,
+        "app_members": 1,
+        "agents": 2,
+        "agent_subscriptions": 1
+      },
+      "semantic": "0 installs"
+    },
+    {
+      "shape": "outsider/1-agents",
+      "path": "readable-install-memories",
+      "repeat": "same-context-repeat",
+      "sqlCount": 8,
+      "tables": {
+        "org_members": 3,
+        "organizations": 4,
+        "memories": 1,
+        "apps": 2,
+        "app_members": 1,
+        "agents": 2,
+        "agent_subscriptions": 1
+      },
+      "semantic": "0 installs"
+    },
+    {
+      "shape": "outsider/1-agents",
+      "path": "participant-system-folds",
+      "repeat": "first",
+      "sqlCount": 16,
+      "tables": {
+        "org_members": 4,
+        "organizations": 6,
+        "apps": 2,
+        "app_members": 1,
+        "app_agents": 1,
+        "agents": 5,
+        "agent_imports": 1,
+        "agent_subscriptions": 3
+      },
+      "semantic": "0/1 definitions"
+    },
+    {
+      "shape": "outsider/1-agents",
+      "path": "participant-system-folds",
+      "repeat": "same-context-repeat",
+      "sqlCount": 16,
+      "tables": {
+        "org_members": 4,
+        "organizations": 6,
+        "apps": 2,
+        "app_members": 1,
+        "app_agents": 1,
+        "agents": 5,
+        "agent_imports": 1,
+        "agent_subscriptions": 3
+      },
+      "semantic": "0/1 definitions"
+    },
+    {
+      "shape": "outsider/1-agents",
+      "path": "chat-carrier-apps",
+      "repeat": "first",
+      "sqlCount": 17,
+      "tables": {
+        "app_members": 1,
+        "apps": 4,
+        "organizations": 6,
+        "app_agents": 2,
+        "agents": 6,
+        "agent_imports": 2,
+        "users": 1,
+        "agent_subscriptions": 3,
+        "org_members": 3
+      },
+      "semantic": "0 apps"
+    },
+    {
+      "shape": "outsider/1-agents",
+      "path": "chat-carrier-apps",
+      "repeat": "same-context-repeat",
+      "sqlCount": 17,
+      "tables": {
+        "app_members": 1,
+        "apps": 4,
+        "organizations": 6,
+        "app_agents": 2,
+        "agents": 6,
+        "agent_imports": 2,
+        "users": 1,
+        "agent_subscriptions": 3,
+        "org_members": 3
+      },
+      "semantic": "0 apps"
+    },
+    {
+      "shape": "outsider/1-agents",
+      "path": "serve-chat-prompt",
+      "repeat": "first",
+      "sqlCount": 19,
+      "tables": {
+        "agents": 7,
+        "org_members": 4,
+        "organizations": 7,
+        "app_members": 1,
+        "apps": 4,
+        "app_agents": 2,
+        "agent_imports": 2,
+        "users": 1,
+        "agent_subscriptions": 3
+      },
+      "semantic": "AGENT_NOT_FOUND"
+    },
+    {
+      "shape": "outsider/1-agents",
+      "path": "serve-chat-prompt",
+      "repeat": "same-context-repeat",
+      "sqlCount": 19,
+      "tables": {
+        "agents": 7,
+        "org_members": 4,
+        "organizations": 7,
+        "app_members": 1,
+        "apps": 4,
+        "app_agents": 2,
+        "agent_imports": 2,
+        "users": 1,
+        "agent_subscriptions": 3
+      },
+      "semantic": "AGENT_NOT_FOUND"
+    },
+    {
+      "shape": "outsider/1-agents",
+      "path": "boot-serve-preview",
+      "repeat": "first",
+      "sqlCount": 19,
+      "tables": {
+        "apps": 1,
+        "agents": 2,
+        "org_members": 1,
+        "organizations": 1,
+        "agent_subscriptions": 1,
+        "app_agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    },
+    {
+      "shape": "outsider/1-agents",
+      "path": "boot-serve-preview",
+      "repeat": "same-context-repeat",
+      "sqlCount": 19,
+      "tables": {
+        "apps": 1,
+        "agents": 2,
+        "org_members": 1,
+        "organizations": 1,
+        "agent_subscriptions": 1,
+        "app_agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    },
+    {
+      "shape": "userless/1-agents",
+      "path": "licence-helper",
+      "repeat": "first",
+      "sqlCount": 3,
+      "tables": {
+        "agents": 1,
+        "org_members": 1,
+        "organizations": 1,
+        "agent_subscriptions": 1
+      },
+      "semantic": "1/1"
+    },
+    {
+      "shape": "userless/1-agents",
+      "path": "licence-helper",
+      "repeat": "same-context-repeat",
+      "sqlCount": 3,
+      "tables": {
+        "agents": 1,
+        "org_members": 1,
+        "organizations": 1,
+        "agent_subscriptions": 1
+      },
+      "semantic": "1/1"
+    },
+    {
+      "shape": "userless/1-agents",
+      "path": "text-helper",
+      "repeat": "first",
+      "sqlCount": 4,
+      "tables": {
+        "agents": 2,
+        "org_members": 1,
+        "organizations": 1,
+        "agent_subscriptions": 1
+      },
+      "semantic": "0/1"
+    },
+    {
+      "shape": "userless/1-agents",
+      "path": "text-helper",
+      "repeat": "same-context-repeat",
+      "sqlCount": 4,
+      "tables": {
+        "agents": 2,
+        "org_members": 1,
+        "organizations": 1,
+        "agent_subscriptions": 1
+      },
+      "semantic": "0/1"
+    },
+    {
+      "shape": "userless/1-agents",
+      "path": "installed-licence",
+      "repeat": "first",
+      "sqlCount": 8,
+      "tables": {
+        "app_agents": 1,
+        "agents": 2,
+        "apps": 1,
+        "organizations": 2,
+        "agent_subscriptions": 2,
+        "org_members": 1
+      },
+      "semantic": "1/1"
+    },
+    {
+      "shape": "userless/1-agents",
+      "path": "installed-licence",
+      "repeat": "same-context-repeat",
+      "sqlCount": 8,
+      "tables": {
+        "app_agents": 1,
+        "agents": 2,
+        "apps": 1,
+        "organizations": 2,
+        "agent_subscriptions": 2,
+        "org_members": 1
+      },
+      "semantic": "1/1"
+    },
+    {
+      "shape": "userless/1-agents",
+      "path": "app-memory-candidates",
+      "repeat": "first",
+      "sqlCount": 15,
+      "tables": {
+        "apps": 1,
+        "app_agents": 1,
+        "agents": 5,
+        "agent_memory_items": 1,
+        "memories": 2,
+        "agent_imports": 1,
+        "organizations": 3,
+        "agent_subscriptions": 3,
+        "org_members": 2,
+        "workers": 1
+      },
+      "semantic": "0/1 definitions"
+    },
+    {
+      "shape": "userless/1-agents",
+      "path": "app-memory-candidates",
+      "repeat": "same-context-repeat",
+      "sqlCount": 15,
+      "tables": {
+        "apps": 1,
+        "app_agents": 1,
+        "agents": 5,
+        "agent_memory_items": 1,
+        "memories": 2,
+        "agent_imports": 1,
+        "organizations": 3,
+        "agent_subscriptions": 3,
+        "org_members": 2,
+        "workers": 1
+      },
+      "semantic": "0/1 definitions"
+    },
+    {
+      "shape": "userless/1-agents",
+      "path": "readable-install-memories",
+      "repeat": "first",
+      "sqlCount": 0,
+      "tables": {},
+      "semantic": "0 installs"
+    },
+    {
+      "shape": "userless/1-agents",
+      "path": "readable-install-memories",
+      "repeat": "same-context-repeat",
+      "sqlCount": 0,
+      "tables": {},
+      "semantic": "0 installs"
+    },
+    {
+      "shape": "userless/1-agents",
+      "path": "participant-system-folds",
+      "repeat": "first",
+      "sqlCount": 0,
+      "tables": {},
+      "semantic": "0/1 definitions"
+    },
+    {
+      "shape": "userless/1-agents",
+      "path": "participant-system-folds",
+      "repeat": "same-context-repeat",
+      "sqlCount": 0,
+      "tables": {},
+      "semantic": "0/1 definitions"
+    },
+    {
+      "shape": "userless/1-agents",
+      "path": "chat-carrier-apps",
+      "repeat": "first",
+      "sqlCount": 15,
+      "tables": {
+        "apps": 3,
+        "organizations": 4,
+        "users": 1,
+        "app_agents": 1,
+        "agents": 5,
+        "agent_imports": 1,
+        "agent_subscriptions": 3,
+        "org_members": 2
+      },
+      "semantic": "0 apps"
+    },
+    {
+      "shape": "userless/1-agents",
+      "path": "chat-carrier-apps",
+      "repeat": "same-context-repeat",
+      "sqlCount": 15,
+      "tables": {
+        "apps": 3,
+        "organizations": 4,
+        "users": 1,
+        "app_agents": 1,
+        "agents": 5,
+        "agent_imports": 1,
+        "agent_subscriptions": 3,
+        "org_members": 2
+      },
+      "semantic": "0 apps"
+    },
+    {
+      "shape": "userless/1-agents",
+      "path": "serve-chat-prompt",
+      "repeat": "first",
+      "sqlCount": 16,
+      "tables": {
+        "agents": 6,
+        "apps": 3,
+        "organizations": 4,
+        "users": 1,
+        "app_agents": 1,
+        "agent_imports": 1,
+        "agent_subscriptions": 3,
+        "org_members": 2
+      },
+      "semantic": "AGENT_NOT_FOUND"
+    },
+    {
+      "shape": "userless/1-agents",
+      "path": "serve-chat-prompt",
+      "repeat": "same-context-repeat",
+      "sqlCount": 16,
+      "tables": {
+        "agents": 6,
+        "apps": 3,
+        "organizations": 4,
+        "users": 1,
+        "app_agents": 1,
+        "agent_imports": 1,
+        "agent_subscriptions": 3,
+        "org_members": 2
+      },
+      "semantic": "AGENT_NOT_FOUND"
+    },
+    {
+      "shape": "userless/1-agents",
+      "path": "boot-serve-preview",
+      "repeat": "first",
+      "sqlCount": 19,
+      "tables": {
+        "apps": 1,
+        "agents": 2,
+        "org_members": 1,
+        "organizations": 1,
+        "agent_subscriptions": 1,
+        "app_agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    },
+    {
+      "shape": "userless/1-agents",
+      "path": "boot-serve-preview",
+      "repeat": "same-context-repeat",
+      "sqlCount": 19,
+      "tables": {
+        "apps": 1,
+        "agents": 2,
+        "org_members": 1,
+        "organizations": 1,
+        "agent_subscriptions": 1,
+        "app_agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    },
+    {
+      "shape": "public/1-agents",
+      "path": "licence-helper",
+      "repeat": "first",
+      "sqlCount": 1,
+      "tables": {
+        "agents": 1
+      },
+      "semantic": "1/1"
+    },
+    {
+      "shape": "public/1-agents",
+      "path": "licence-helper",
+      "repeat": "same-context-repeat",
+      "sqlCount": 1,
+      "tables": {
+        "agents": 1
+      },
+      "semantic": "1/1"
+    },
+    {
+      "shape": "public/1-agents",
+      "path": "text-helper",
+      "repeat": "first",
+      "sqlCount": 1,
+      "tables": {
+        "agents": 1
+      },
+      "semantic": "1/1"
+    },
+    {
+      "shape": "public/1-agents",
+      "path": "text-helper",
+      "repeat": "same-context-repeat",
+      "sqlCount": 1,
+      "tables": {
+        "agents": 1
+      },
+      "semantic": "1/1"
+    },
+    {
+      "shape": "public/1-agents",
+      "path": "installed-licence",
+      "repeat": "first",
+      "sqlCount": 6,
+      "tables": {
+        "app_agents": 1,
+        "agents": 2,
+        "apps": 1,
+        "organizations": 1,
+        "agent_subscriptions": 1
+      },
+      "semantic": "1/1"
+    },
+    {
+      "shape": "public/1-agents",
+      "path": "installed-licence",
+      "repeat": "same-context-repeat",
+      "sqlCount": 6,
+      "tables": {
+        "app_agents": 1,
+        "agents": 2,
+        "apps": 1,
+        "organizations": 1,
+        "agent_subscriptions": 1
+      },
+      "semantic": "1/1"
+    },
+    {
+      "shape": "public/1-agents",
+      "path": "app-memory-candidates",
+      "repeat": "first",
+      "sqlCount": 11,
+      "tables": {
+        "apps": 1,
+        "app_agents": 1,
+        "agents": 4,
+        "agent_memory_items": 1,
+        "memories": 3,
+        "agent_imports": 1,
+        "organizations": 1,
+        "agent_subscriptions": 1,
+        "workers": 1
+      },
+      "semantic": "1/1 definitions"
+    },
+    {
+      "shape": "public/1-agents",
+      "path": "app-memory-candidates",
+      "repeat": "same-context-repeat",
+      "sqlCount": 11,
+      "tables": {
+        "apps": 1,
+        "app_agents": 1,
+        "agents": 4,
+        "agent_memory_items": 1,
+        "memories": 3,
+        "agent_imports": 1,
+        "organizations": 1,
+        "agent_subscriptions": 1,
+        "workers": 1
+      },
+      "semantic": "1/1 definitions"
+    },
+    {
+      "shape": "public/1-agents",
+      "path": "readable-install-memories",
+      "repeat": "first",
+      "sqlCount": 4,
+      "tables": {
+        "org_members": 1,
+        "organizations": 2,
+        "memories": 1,
+        "apps": 2,
+        "app_members": 1,
+        "agents": 1
+      },
+      "semantic": "1 installs"
+    },
+    {
+      "shape": "public/1-agents",
+      "path": "readable-install-memories",
+      "repeat": "same-context-repeat",
+      "sqlCount": 4,
+      "tables": {
+        "org_members": 1,
+        "organizations": 2,
+        "memories": 1,
+        "apps": 2,
+        "app_members": 1,
+        "agents": 1
+      },
+      "semantic": "1 installs"
+    },
+    {
+      "shape": "public/1-agents",
+      "path": "participant-system-folds",
+      "repeat": "first",
+      "sqlCount": 11,
+      "tables": {
+        "org_members": 1,
+        "organizations": 3,
+        "apps": 2,
+        "app_members": 1,
+        "app_agents": 1,
+        "agents": 4,
+        "agent_imports": 1,
+        "agent_subscriptions": 1,
+        "memories": 1
+      },
+      "semantic": "1/1 definitions"
+    },
+    {
+      "shape": "public/1-agents",
+      "path": "participant-system-folds",
+      "repeat": "same-context-repeat",
+      "sqlCount": 11,
+      "tables": {
+        "org_members": 1,
+        "organizations": 3,
+        "apps": 2,
+        "app_members": 1,
+        "app_agents": 1,
+        "agents": 4,
+        "agent_imports": 1,
+        "agent_subscriptions": 1,
+        "memories": 1
+      },
+      "semantic": "1/1 definitions"
+    },
+    {
+      "shape": "public/1-agents",
+      "path": "chat-carrier-apps",
+      "repeat": "first",
+      "sqlCount": 11,
+      "tables": {
+        "app_members": 1,
+        "apps": 4,
+        "organizations": 3,
+        "app_agents": 2,
+        "agents": 5,
+        "agent_imports": 2,
+        "users": 1,
+        "agent_subscriptions": 1
+      },
+      "semantic": "1 apps"
+    },
+    {
+      "shape": "public/1-agents",
+      "path": "chat-carrier-apps",
+      "repeat": "same-context-repeat",
+      "sqlCount": 11,
+      "tables": {
+        "app_members": 1,
+        "apps": 4,
+        "organizations": 3,
+        "app_agents": 2,
+        "agents": 5,
+        "agent_imports": 2,
+        "users": 1,
+        "agent_subscriptions": 1
+      },
+      "semantic": "1 apps"
+    },
+    {
+      "shape": "public/1-agents",
+      "path": "serve-chat-prompt",
+      "repeat": "first",
+      "sqlCount": 20,
+      "tables": {
+        "agents": 4,
+        "apps": 2,
+        "app_agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    },
+    {
+      "shape": "public/1-agents",
+      "path": "serve-chat-prompt",
+      "repeat": "same-context-repeat",
+      "sqlCount": 20,
+      "tables": {
+        "agents": 4,
+        "apps": 2,
+        "app_agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    },
+    {
+      "shape": "public/1-agents",
+      "path": "boot-serve-preview",
+      "repeat": "first",
+      "sqlCount": 17,
+      "tables": {
+        "apps": 1,
+        "agents": 2,
+        "app_agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    },
+    {
+      "shape": "public/1-agents",
+      "path": "boot-serve-preview",
+      "repeat": "same-context-repeat",
+      "sqlCount": 17,
+      "tables": {
+        "apps": 1,
+        "agents": 2,
+        "app_agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    },
+    {
+      "shape": "org-app/1-agents",
+      "path": "licence-helper",
+      "repeat": "first",
+      "sqlCount": 0,
+      "tables": {},
+      "semantic": "1/1"
+    },
+    {
+      "shape": "org-app/1-agents",
+      "path": "licence-helper",
+      "repeat": "same-context-repeat",
+      "sqlCount": 0,
+      "tables": {},
+      "semantic": "1/1"
+    },
+    {
+      "shape": "org-app/1-agents",
+      "path": "text-helper",
+      "repeat": "first",
+      "sqlCount": 0,
+      "tables": {},
+      "semantic": "1/1"
+    },
+    {
+      "shape": "org-app/1-agents",
+      "path": "text-helper",
+      "repeat": "same-context-repeat",
+      "sqlCount": 0,
+      "tables": {},
+      "semantic": "1/1"
+    },
+    {
+      "shape": "org-app/1-agents",
+      "path": "installed-licence",
+      "repeat": "first",
+      "sqlCount": 4,
+      "tables": {
+        "app_agents": 1,
+        "agents": 1,
+        "apps": 1,
+        "organizations": 1
+      },
+      "semantic": "1/1"
+    },
+    {
+      "shape": "org-app/1-agents",
+      "path": "installed-licence",
+      "repeat": "same-context-repeat",
+      "sqlCount": 4,
+      "tables": {
+        "app_agents": 1,
+        "agents": 1,
+        "apps": 1,
+        "organizations": 1
+      },
+      "semantic": "1/1"
+    },
+    {
+      "shape": "org-app/1-agents",
+      "path": "app-memory-candidates",
+      "repeat": "first",
+      "sqlCount": 9,
+      "tables": {
+        "apps": 1,
+        "organizations": 2,
+        "app_agents": 1,
+        "agents": 2,
+        "agent_memory_items": 1,
+        "memories": 3,
+        "agent_imports": 1,
+        "workers": 1
+      },
+      "semantic": "1/1 definitions"
+    },
+    {
+      "shape": "org-app/1-agents",
+      "path": "app-memory-candidates",
+      "repeat": "same-context-repeat",
+      "sqlCount": 9,
+      "tables": {
+        "apps": 1,
+        "organizations": 2,
+        "app_agents": 1,
+        "agents": 2,
+        "agent_memory_items": 1,
+        "memories": 3,
+        "agent_imports": 1,
+        "workers": 1
+      },
+      "semantic": "1/1 definitions"
+    },
+    {
+      "shape": "org-app/1-agents",
+      "path": "readable-install-memories",
+      "repeat": "first",
+      "sqlCount": 3,
+      "tables": {
+        "org_members": 1,
+        "organizations": 2,
+        "memories": 1,
+        "apps": 2,
+        "app_members": 1
+      },
+      "semantic": "1 installs"
+    },
+    {
+      "shape": "org-app/1-agents",
+      "path": "readable-install-memories",
+      "repeat": "same-context-repeat",
+      "sqlCount": 3,
+      "tables": {
+        "org_members": 1,
+        "organizations": 2,
+        "memories": 1,
+        "apps": 2,
+        "app_members": 1
+      },
+      "semantic": "1 installs"
+    },
+    {
+      "shape": "org-app/1-agents",
+      "path": "participant-system-folds",
+      "repeat": "first",
+      "sqlCount": 9,
+      "tables": {
+        "org_members": 1,
+        "organizations": 4,
+        "apps": 2,
+        "app_members": 1,
+        "app_agents": 1,
+        "agents": 2,
+        "agent_imports": 1,
+        "memories": 1
+      },
+      "semantic": "1/1 definitions"
+    },
+    {
+      "shape": "org-app/1-agents",
+      "path": "participant-system-folds",
+      "repeat": "same-context-repeat",
+      "sqlCount": 9,
+      "tables": {
+        "org_members": 1,
+        "organizations": 4,
+        "apps": 2,
+        "app_members": 1,
+        "app_agents": 1,
+        "agents": 2,
+        "agent_imports": 1,
+        "memories": 1
+      },
+      "semantic": "1/1 definitions"
+    },
+    {
+      "shape": "org-app/1-agents",
+      "path": "chat-carrier-apps",
+      "repeat": "first",
+      "sqlCount": 9,
+      "tables": {
+        "app_members": 1,
+        "apps": 4,
+        "organizations": 4,
+        "app_agents": 2,
+        "agents": 3,
+        "agent_imports": 2,
+        "users": 1
+      },
+      "semantic": "1 apps"
+    },
+    {
+      "shape": "org-app/1-agents",
+      "path": "chat-carrier-apps",
+      "repeat": "same-context-repeat",
+      "sqlCount": 9,
+      "tables": {
+        "app_members": 1,
+        "apps": 4,
+        "organizations": 4,
+        "app_agents": 2,
+        "agents": 3,
+        "agent_imports": 2,
+        "users": 1
+      },
+      "semantic": "1 apps"
+    },
+    {
+      "shape": "org-app/1-agents",
+      "path": "serve-chat-prompt",
+      "repeat": "first",
+      "sqlCount": 19,
+      "tables": {
+        "agents": 2,
+        "org_members": 1,
+        "organizations": 1,
+        "apps": 2,
+        "app_agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    },
+    {
+      "shape": "org-app/1-agents",
+      "path": "serve-chat-prompt",
+      "repeat": "same-context-repeat",
+      "sqlCount": 19,
+      "tables": {
+        "agents": 2,
+        "org_members": 1,
+        "organizations": 1,
+        "apps": 2,
+        "app_agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    },
+    {
+      "shape": "org-app/1-agents",
+      "path": "boot-serve-preview",
+      "repeat": "first",
+      "sqlCount": 16,
+      "tables": {
+        "apps": 1,
+        "app_agents": 1,
+        "agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    },
+    {
+      "shape": "org-app/1-agents",
+      "path": "boot-serve-preview",
+      "repeat": "same-context-repeat",
+      "sqlCount": 16,
+      "tables": {
+        "apps": 1,
+        "app_agents": 1,
+        "agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    },
+    {
+      "shape": "active/3-agents",
+      "path": "licence-helper",
+      "repeat": "first",
+      "sqlCount": 7,
+      "tables": {
+        "agents": 1,
+        "org_members": 3,
+        "organizations": 3,
+        "agent_subscriptions": 3
+      },
+      "semantic": "3/3"
+    },
+    {
+      "shape": "active/3-agents",
+      "path": "licence-helper",
+      "repeat": "same-context-repeat",
+      "sqlCount": 7,
+      "tables": {
+        "agents": 1,
+        "org_members": 3,
+        "organizations": 3,
+        "agent_subscriptions": 3
+      },
+      "semantic": "3/3"
+    },
+    {
+      "shape": "active/3-agents",
+      "path": "text-helper",
+      "repeat": "first",
+      "sqlCount": 11,
+      "tables": {
+        "agents": 2,
+        "org_members": 6,
+        "organizations": 6,
+        "agent_subscriptions": 3
+      },
+      "semantic": "3/3"
+    },
+    {
+      "shape": "active/3-agents",
+      "path": "text-helper",
+      "repeat": "same-context-repeat",
+      "sqlCount": 11,
+      "tables": {
+        "agents": 2,
+        "org_members": 6,
+        "organizations": 6,
+        "agent_subscriptions": 3
+      },
+      "semantic": "3/3"
+    },
+    {
+      "shape": "active/3-agents",
+      "path": "installed-licence",
+      "repeat": "first",
+      "sqlCount": 18,
+      "tables": {
+        "app_agents": 1,
+        "agents": 4,
+        "apps": 1,
+        "organizations": 6,
+        "agent_subscriptions": 6,
+        "org_members": 3
+      },
+      "semantic": "3/3"
+    },
+    {
+      "shape": "active/3-agents",
+      "path": "installed-licence",
+      "repeat": "same-context-repeat",
+      "sqlCount": 18,
+      "tables": {
+        "app_agents": 1,
+        "agents": 4,
+        "apps": 1,
+        "organizations": 6,
+        "agent_subscriptions": 6,
+        "org_members": 3
+      },
+      "semantic": "3/3"
+    },
+    {
+      "shape": "active/3-agents",
+      "path": "app-memory-candidates",
+      "repeat": "first",
+      "sqlCount": 29,
+      "tables": {
+        "apps": 1,
+        "app_agents": 1,
+        "agents": 7,
+        "agent_memory_items": 1,
+        "memories": 3,
+        "agent_imports": 1,
+        "organizations": 10,
+        "agent_subscriptions": 7,
+        "org_members": 9,
+        "workers": 1
+      },
+      "semantic": "3/3 definitions"
+    },
+    {
+      "shape": "active/3-agents",
+      "path": "app-memory-candidates",
+      "repeat": "same-context-repeat",
+      "sqlCount": 29,
+      "tables": {
+        "apps": 1,
+        "app_agents": 1,
+        "agents": 7,
+        "agent_memory_items": 1,
+        "memories": 3,
+        "agent_imports": 1,
+        "organizations": 10,
+        "agent_subscriptions": 7,
+        "org_members": 9,
+        "workers": 1
+      },
+      "semantic": "3/3 definitions"
+    },
+    {
+      "shape": "active/3-agents",
+      "path": "readable-install-memories",
+      "repeat": "first",
+      "sqlCount": 14,
+      "tables": {
+        "org_members": 7,
+        "organizations": 8,
+        "memories": 1,
+        "apps": 2,
+        "app_members": 1,
+        "agents": 2,
+        "agent_subscriptions": 3
+      },
+      "semantic": "3 installs"
+    },
+    {
+      "shape": "active/3-agents",
+      "path": "readable-install-memories",
+      "repeat": "same-context-repeat",
+      "sqlCount": 14,
+      "tables": {
+        "org_members": 7,
+        "organizations": 8,
+        "memories": 1,
+        "apps": 2,
+        "app_members": 1,
+        "agents": 2,
+        "agent_subscriptions": 3
+      },
+      "semantic": "3 installs"
+    },
+    {
+      "shape": "active/3-agents",
+      "path": "participant-system-folds",
+      "repeat": "first",
+      "sqlCount": 29,
+      "tables": {
+        "org_members": 10,
+        "organizations": 12,
+        "apps": 2,
+        "app_members": 1,
+        "app_agents": 1,
+        "agents": 7,
+        "agent_imports": 1,
+        "agent_subscriptions": 7,
+        "memories": 1
+      },
+      "semantic": "3/3 definitions"
+    },
+    {
+      "shape": "active/3-agents",
+      "path": "participant-system-folds",
+      "repeat": "same-context-repeat",
+      "sqlCount": 29,
+      "tables": {
+        "org_members": 10,
+        "organizations": 12,
+        "apps": 2,
+        "app_members": 1,
+        "app_agents": 1,
+        "agents": 7,
+        "agent_imports": 1,
+        "agent_subscriptions": 7,
+        "memories": 1
+      },
+      "semantic": "3/3 definitions"
+    },
+    {
+      "shape": "active/3-agents",
+      "path": "chat-carrier-apps",
+      "repeat": "first",
+      "sqlCount": 17,
+      "tables": {
+        "app_members": 1,
+        "apps": 4,
+        "organizations": 6,
+        "app_agents": 2,
+        "agents": 6,
+        "agent_imports": 2,
+        "users": 1,
+        "agent_subscriptions": 3,
+        "org_members": 3
+      },
+      "semantic": "1 apps"
+    },
+    {
+      "shape": "active/3-agents",
+      "path": "chat-carrier-apps",
+      "repeat": "same-context-repeat",
+      "sqlCount": 17,
+      "tables": {
+        "app_members": 1,
+        "apps": 4,
+        "organizations": 6,
+        "app_agents": 2,
+        "agents": 6,
+        "agent_imports": 2,
+        "users": 1,
+        "agent_subscriptions": 3,
+        "org_members": 3
+      },
+      "semantic": "1 apps"
+    },
+    {
+      "shape": "active/3-agents",
+      "path": "serve-chat-prompt",
+      "repeat": "first",
+      "sqlCount": 27,
+      "tables": {
+        "agents": 5,
+        "org_members": 4,
+        "organizations": 4,
+        "apps": 2,
+        "agent_subscriptions": 2,
+        "app_agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    },
+    {
+      "shape": "active/3-agents",
+      "path": "serve-chat-prompt",
+      "repeat": "same-context-repeat",
+      "sqlCount": 27,
+      "tables": {
+        "agents": 5,
+        "org_members": 4,
+        "organizations": 4,
+        "apps": 2,
+        "agent_subscriptions": 2,
+        "app_agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    },
+    {
+      "shape": "active/3-agents",
+      "path": "boot-serve-preview",
+      "repeat": "first",
+      "sqlCount": 19,
+      "tables": {
+        "apps": 1,
+        "agents": 2,
+        "org_members": 1,
+        "organizations": 1,
+        "agent_subscriptions": 1,
+        "app_agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    },
+    {
+      "shape": "active/3-agents",
+      "path": "boot-serve-preview",
+      "repeat": "same-context-repeat",
+      "sqlCount": 19,
+      "tables": {
+        "apps": 1,
+        "agents": 2,
+        "org_members": 1,
+        "organizations": 1,
+        "agent_subscriptions": 1,
+        "app_agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    },
+    {
+      "shape": "owner-revoked/3-agents",
+      "path": "licence-helper",
+      "repeat": "first",
+      "sqlCount": 4,
+      "tables": {
+        "agents": 1,
+        "org_members": 3,
+        "organizations": 3
+      },
+      "semantic": "0/3"
+    },
+    {
+      "shape": "owner-revoked/3-agents",
+      "path": "licence-helper",
+      "repeat": "same-context-repeat",
+      "sqlCount": 4,
+      "tables": {
+        "agents": 1,
+        "org_members": 3,
+        "organizations": 3
+      },
+      "semantic": "0/3"
+    },
+    {
+      "shape": "owner-revoked/3-agents",
+      "path": "text-helper",
+      "repeat": "first",
+      "sqlCount": 5,
+      "tables": {
+        "agents": 2,
+        "org_members": 3,
+        "organizations": 3
+      },
+      "semantic": "0/3"
+    },
+    {
+      "shape": "owner-revoked/3-agents",
+      "path": "text-helper",
+      "repeat": "same-context-repeat",
+      "sqlCount": 5,
+      "tables": {
+        "agents": 2,
+        "org_members": 3,
+        "organizations": 3
+      },
+      "semantic": "0/3"
+    },
+    {
+      "shape": "owner-revoked/3-agents",
+      "path": "installed-licence",
+      "repeat": "first",
+      "sqlCount": 15,
+      "tables": {
+        "app_agents": 1,
+        "agents": 4,
+        "apps": 1,
+        "organizations": 6,
+        "agent_subscriptions": 3,
+        "org_members": 3
+      },
+      "semantic": "0/3"
+    },
+    {
+      "shape": "owner-revoked/3-agents",
+      "path": "installed-licence",
+      "repeat": "same-context-repeat",
+      "sqlCount": 15,
+      "tables": {
+        "app_agents": 1,
+        "agents": 4,
+        "apps": 1,
+        "organizations": 6,
+        "agent_subscriptions": 3,
+        "org_members": 3
+      },
+      "semantic": "0/3"
+    },
+    {
+      "shape": "owner-revoked/3-agents",
+      "path": "app-memory-candidates",
+      "repeat": "first",
+      "sqlCount": 19,
+      "tables": {
+        "apps": 1,
+        "app_agents": 1,
+        "agents": 7,
+        "agent_memory_items": 1,
+        "memories": 2,
+        "agent_imports": 1,
+        "organizations": 7,
+        "agent_subscriptions": 1,
+        "org_members": 6,
+        "workers": 1
+      },
+      "semantic": "0/3 definitions"
+    },
+    {
+      "shape": "owner-revoked/3-agents",
+      "path": "app-memory-candidates",
+      "repeat": "same-context-repeat",
+      "sqlCount": 19,
+      "tables": {
+        "apps": 1,
+        "app_agents": 1,
+        "agents": 7,
+        "agent_memory_items": 1,
+        "memories": 2,
+        "agent_imports": 1,
+        "organizations": 7,
+        "agent_subscriptions": 1,
+        "org_members": 6,
+        "workers": 1
+      },
+      "semantic": "0/3 definitions"
+    },
+    {
+      "shape": "owner-revoked/3-agents",
+      "path": "readable-install-memories",
+      "repeat": "first",
+      "sqlCount": 8,
+      "tables": {
+        "org_members": 4,
+        "organizations": 5,
+        "memories": 1,
+        "apps": 2,
+        "app_members": 1,
+        "agents": 2
+      },
+      "semantic": "0 installs"
+    },
+    {
+      "shape": "owner-revoked/3-agents",
+      "path": "readable-install-memories",
+      "repeat": "same-context-repeat",
+      "sqlCount": 8,
+      "tables": {
+        "org_members": 4,
+        "organizations": 5,
+        "memories": 1,
+        "apps": 2,
+        "app_members": 1,
+        "agents": 2
+      },
+      "semantic": "0 installs"
+    },
+    {
+      "shape": "owner-revoked/3-agents",
+      "path": "participant-system-folds",
+      "repeat": "first",
+      "sqlCount": 19,
+      "tables": {
+        "org_members": 7,
+        "organizations": 9,
+        "apps": 2,
+        "app_members": 1,
+        "app_agents": 1,
+        "agents": 7,
+        "agent_imports": 1,
+        "agent_subscriptions": 1
+      },
+      "semantic": "0/3 definitions"
+    },
+    {
+      "shape": "owner-revoked/3-agents",
+      "path": "participant-system-folds",
+      "repeat": "same-context-repeat",
+      "sqlCount": 19,
+      "tables": {
+        "org_members": 7,
+        "organizations": 9,
+        "apps": 2,
+        "app_members": 1,
+        "app_agents": 1,
+        "agents": 7,
+        "agent_imports": 1,
+        "agent_subscriptions": 1
+      },
+      "semantic": "0/3 definitions"
+    },
+    {
+      "shape": "owner-revoked/3-agents",
+      "path": "chat-carrier-apps",
+      "repeat": "first",
+      "sqlCount": 11,
+      "tables": {
+        "app_members": 1,
+        "apps": 4,
+        "organizations": 4,
+        "app_agents": 2,
+        "agents": 4,
+        "agent_imports": 2,
+        "users": 1,
+        "agent_subscriptions": 1,
+        "org_members": 1
+      },
+      "semantic": "0 apps"
+    },
+    {
+      "shape": "owner-revoked/3-agents",
+      "path": "chat-carrier-apps",
+      "repeat": "same-context-repeat",
+      "sqlCount": 11,
+      "tables": {
+        "app_members": 1,
+        "apps": 4,
+        "organizations": 4,
+        "app_agents": 2,
+        "agents": 4,
+        "agent_imports": 2,
+        "users": 1,
+        "agent_subscriptions": 1,
+        "org_members": 1
+      },
+      "semantic": "0 apps"
+    },
+    {
+      "shape": "owner-revoked/3-agents",
+      "path": "serve-chat-prompt",
+      "repeat": "first",
+      "sqlCount": 13,
+      "tables": {
+        "agents": 5,
+        "org_members": 2,
+        "organizations": 5,
+        "app_members": 1,
+        "apps": 4,
+        "app_agents": 2,
+        "agent_imports": 2,
+        "users": 1,
+        "agent_subscriptions": 1
+      },
+      "semantic": "AGENT_NOT_FOUND"
+    },
+    {
+      "shape": "owner-revoked/3-agents",
+      "path": "serve-chat-prompt",
+      "repeat": "same-context-repeat",
+      "sqlCount": 13,
+      "tables": {
+        "agents": 5,
+        "org_members": 2,
+        "organizations": 5,
+        "app_members": 1,
+        "apps": 4,
+        "app_agents": 2,
+        "agent_imports": 2,
+        "users": 1,
+        "agent_subscriptions": 1
+      },
+      "semantic": "AGENT_NOT_FOUND"
+    },
+    {
+      "shape": "owner-revoked/3-agents",
+      "path": "boot-serve-preview",
+      "repeat": "first",
+      "sqlCount": 3,
+      "tables": {
+        "apps": 1,
+        "agents": 1,
+        "org_members": 1,
+        "organizations": 1
+      },
+      "semantic": "BOOT_PROMPT_INSTALL_LICENSE_INACTIVE"
+    },
+    {
+      "shape": "owner-revoked/3-agents",
+      "path": "boot-serve-preview",
+      "repeat": "same-context-repeat",
+      "sqlCount": 3,
+      "tables": {
+        "apps": 1,
+        "agents": 1,
+        "org_members": 1,
+        "organizations": 1
+      },
+      "semantic": "BOOT_PROMPT_INSTALL_LICENSE_INACTIVE"
+    },
+    {
+      "shape": "outsider/3-agents",
+      "path": "licence-helper",
+      "repeat": "first",
+      "sqlCount": 7,
+      "tables": {
+        "agents": 1,
+        "org_members": 3,
+        "organizations": 3,
+        "agent_subscriptions": 3
+      },
+      "semantic": "3/3"
+    },
+    {
+      "shape": "outsider/3-agents",
+      "path": "licence-helper",
+      "repeat": "same-context-repeat",
+      "sqlCount": 7,
+      "tables": {
+        "agents": 1,
+        "org_members": 3,
+        "organizations": 3,
+        "agent_subscriptions": 3
+      },
+      "semantic": "3/3"
+    },
+    {
+      "shape": "outsider/3-agents",
+      "path": "text-helper",
+      "repeat": "first",
+      "sqlCount": 11,
+      "tables": {
+        "agents": 2,
+        "org_members": 6,
+        "organizations": 6,
+        "agent_subscriptions": 3
+      },
+      "semantic": "0/3"
+    },
+    {
+      "shape": "outsider/3-agents",
+      "path": "text-helper",
+      "repeat": "same-context-repeat",
+      "sqlCount": 11,
+      "tables": {
+        "agents": 2,
+        "org_members": 6,
+        "organizations": 6,
+        "agent_subscriptions": 3
+      },
+      "semantic": "0/3"
+    },
+    {
+      "shape": "outsider/3-agents",
+      "path": "installed-licence",
+      "repeat": "first",
+      "sqlCount": 18,
+      "tables": {
+        "app_agents": 1,
+        "agents": 4,
+        "apps": 1,
+        "organizations": 6,
+        "agent_subscriptions": 6,
+        "org_members": 3
+      },
+      "semantic": "3/3"
+    },
+    {
+      "shape": "outsider/3-agents",
+      "path": "installed-licence",
+      "repeat": "same-context-repeat",
+      "sqlCount": 18,
+      "tables": {
+        "app_agents": 1,
+        "agents": 4,
+        "apps": 1,
+        "organizations": 6,
+        "agent_subscriptions": 6,
+        "org_members": 3
+      },
+      "semantic": "3/3"
+    },
+    {
+      "shape": "outsider/3-agents",
+      "path": "app-memory-candidates",
+      "repeat": "first",
+      "sqlCount": 28,
+      "tables": {
+        "apps": 1,
+        "app_agents": 1,
+        "agents": 7,
+        "agent_memory_items": 1,
+        "memories": 2,
+        "agent_imports": 1,
+        "organizations": 10,
+        "agent_subscriptions": 7,
+        "org_members": 9,
+        "workers": 1
+      },
+      "semantic": "0/3 definitions"
+    },
+    {
+      "shape": "outsider/3-agents",
+      "path": "app-memory-candidates",
+      "repeat": "same-context-repeat",
+      "sqlCount": 28,
+      "tables": {
+        "apps": 1,
+        "app_agents": 1,
+        "agents": 7,
+        "agent_memory_items": 1,
+        "memories": 2,
+        "agent_imports": 1,
+        "organizations": 10,
+        "agent_subscriptions": 7,
+        "org_members": 9,
+        "workers": 1
+      },
+      "semantic": "0/3 definitions"
+    },
+    {
+      "shape": "outsider/3-agents",
+      "path": "readable-install-memories",
+      "repeat": "first",
+      "sqlCount": 14,
+      "tables": {
+        "org_members": 7,
+        "organizations": 8,
+        "memories": 1,
+        "apps": 2,
+        "app_members": 1,
+        "agents": 2,
+        "agent_subscriptions": 3
+      },
+      "semantic": "0 installs"
+    },
+    {
+      "shape": "outsider/3-agents",
+      "path": "readable-install-memories",
+      "repeat": "same-context-repeat",
+      "sqlCount": 14,
+      "tables": {
+        "org_members": 7,
+        "organizations": 8,
+        "memories": 1,
+        "apps": 2,
+        "app_members": 1,
+        "agents": 2,
+        "agent_subscriptions": 3
+      },
+      "semantic": "0 installs"
+    },
+    {
+      "shape": "outsider/3-agents",
+      "path": "participant-system-folds",
+      "repeat": "first",
+      "sqlCount": 28,
+      "tables": {
+        "org_members": 10,
+        "organizations": 12,
+        "apps": 2,
+        "app_members": 1,
+        "app_agents": 1,
+        "agents": 7,
+        "agent_imports": 1,
+        "agent_subscriptions": 7
+      },
+      "semantic": "0/3 definitions"
+    },
+    {
+      "shape": "outsider/3-agents",
+      "path": "participant-system-folds",
+      "repeat": "same-context-repeat",
+      "sqlCount": 28,
+      "tables": {
+        "org_members": 10,
+        "organizations": 12,
+        "apps": 2,
+        "app_members": 1,
+        "app_agents": 1,
+        "agents": 7,
+        "agent_imports": 1,
+        "agent_subscriptions": 7
+      },
+      "semantic": "0/3 definitions"
+    },
+    {
+      "shape": "outsider/3-agents",
+      "path": "chat-carrier-apps",
+      "repeat": "first",
+      "sqlCount": 17,
+      "tables": {
+        "app_members": 1,
+        "apps": 4,
+        "organizations": 6,
+        "app_agents": 2,
+        "agents": 6,
+        "agent_imports": 2,
+        "users": 1,
+        "agent_subscriptions": 3,
+        "org_members": 3
+      },
+      "semantic": "0 apps"
+    },
+    {
+      "shape": "outsider/3-agents",
+      "path": "chat-carrier-apps",
+      "repeat": "same-context-repeat",
+      "sqlCount": 17,
+      "tables": {
+        "app_members": 1,
+        "apps": 4,
+        "organizations": 6,
+        "app_agents": 2,
+        "agents": 6,
+        "agent_imports": 2,
+        "users": 1,
+        "agent_subscriptions": 3,
+        "org_members": 3
+      },
+      "semantic": "0 apps"
+    },
+    {
+      "shape": "outsider/3-agents",
+      "path": "serve-chat-prompt",
+      "repeat": "first",
+      "sqlCount": 19,
+      "tables": {
+        "agents": 7,
+        "org_members": 4,
+        "organizations": 7,
+        "app_members": 1,
+        "apps": 4,
+        "app_agents": 2,
+        "agent_imports": 2,
+        "users": 1,
+        "agent_subscriptions": 3
+      },
+      "semantic": "AGENT_NOT_FOUND"
+    },
+    {
+      "shape": "outsider/3-agents",
+      "path": "serve-chat-prompt",
+      "repeat": "same-context-repeat",
+      "sqlCount": 19,
+      "tables": {
+        "agents": 7,
+        "org_members": 4,
+        "organizations": 7,
+        "app_members": 1,
+        "apps": 4,
+        "app_agents": 2,
+        "agent_imports": 2,
+        "users": 1,
+        "agent_subscriptions": 3
+      },
+      "semantic": "AGENT_NOT_FOUND"
+    },
+    {
+      "shape": "outsider/3-agents",
+      "path": "boot-serve-preview",
+      "repeat": "first",
+      "sqlCount": 19,
+      "tables": {
+        "apps": 1,
+        "agents": 2,
+        "org_members": 1,
+        "organizations": 1,
+        "agent_subscriptions": 1,
+        "app_agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    },
+    {
+      "shape": "outsider/3-agents",
+      "path": "boot-serve-preview",
+      "repeat": "same-context-repeat",
+      "sqlCount": 19,
+      "tables": {
+        "apps": 1,
+        "agents": 2,
+        "org_members": 1,
+        "organizations": 1,
+        "agent_subscriptions": 1,
+        "app_agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    },
+    {
+      "shape": "userless/3-agents",
+      "path": "licence-helper",
+      "repeat": "first",
+      "sqlCount": 7,
+      "tables": {
+        "agents": 1,
+        "org_members": 3,
+        "organizations": 3,
+        "agent_subscriptions": 3
+      },
+      "semantic": "3/3"
+    },
+    {
+      "shape": "userless/3-agents",
+      "path": "licence-helper",
+      "repeat": "same-context-repeat",
+      "sqlCount": 7,
+      "tables": {
+        "agents": 1,
+        "org_members": 3,
+        "organizations": 3,
+        "agent_subscriptions": 3
+      },
+      "semantic": "3/3"
+    },
+    {
+      "shape": "userless/3-agents",
+      "path": "text-helper",
+      "repeat": "first",
+      "sqlCount": 8,
+      "tables": {
+        "agents": 2,
+        "org_members": 3,
+        "organizations": 3,
+        "agent_subscriptions": 3
+      },
+      "semantic": "0/3"
+    },
+    {
+      "shape": "userless/3-agents",
+      "path": "text-helper",
+      "repeat": "same-context-repeat",
+      "sqlCount": 8,
+      "tables": {
+        "agents": 2,
+        "org_members": 3,
+        "organizations": 3,
+        "agent_subscriptions": 3
+      },
+      "semantic": "0/3"
+    },
+    {
+      "shape": "userless/3-agents",
+      "path": "installed-licence",
+      "repeat": "first",
+      "sqlCount": 18,
+      "tables": {
+        "app_agents": 1,
+        "agents": 4,
+        "apps": 1,
+        "organizations": 6,
+        "agent_subscriptions": 6,
+        "org_members": 3
+      },
+      "semantic": "3/3"
+    },
+    {
+      "shape": "userless/3-agents",
+      "path": "installed-licence",
+      "repeat": "same-context-repeat",
+      "sqlCount": 18,
+      "tables": {
+        "app_agents": 1,
+        "agents": 4,
+        "apps": 1,
+        "organizations": 6,
+        "agent_subscriptions": 6,
+        "org_members": 3
+      },
+      "semantic": "3/3"
+    },
+    {
+      "shape": "userless/3-agents",
+      "path": "app-memory-candidates",
+      "repeat": "first",
+      "sqlCount": 25,
+      "tables": {
+        "apps": 1,
+        "app_agents": 1,
+        "agents": 7,
+        "agent_memory_items": 1,
+        "memories": 2,
+        "agent_imports": 1,
+        "organizations": 7,
+        "agent_subscriptions": 7,
+        "org_members": 6,
+        "workers": 1
+      },
+      "semantic": "0/3 definitions"
+    },
+    {
+      "shape": "userless/3-agents",
+      "path": "app-memory-candidates",
+      "repeat": "same-context-repeat",
+      "sqlCount": 25,
+      "tables": {
+        "apps": 1,
+        "app_agents": 1,
+        "agents": 7,
+        "agent_memory_items": 1,
+        "memories": 2,
+        "agent_imports": 1,
+        "organizations": 7,
+        "agent_subscriptions": 7,
+        "org_members": 6,
+        "workers": 1
+      },
+      "semantic": "0/3 definitions"
+    },
+    {
+      "shape": "userless/3-agents",
+      "path": "readable-install-memories",
+      "repeat": "first",
+      "sqlCount": 0,
+      "tables": {},
+      "semantic": "0 installs"
+    },
+    {
+      "shape": "userless/3-agents",
+      "path": "readable-install-memories",
+      "repeat": "same-context-repeat",
+      "sqlCount": 0,
+      "tables": {},
+      "semantic": "0 installs"
+    },
+    {
+      "shape": "userless/3-agents",
+      "path": "participant-system-folds",
+      "repeat": "first",
+      "sqlCount": 0,
+      "tables": {},
+      "semantic": "0/3 definitions"
+    },
+    {
+      "shape": "userless/3-agents",
+      "path": "participant-system-folds",
+      "repeat": "same-context-repeat",
+      "sqlCount": 0,
+      "tables": {},
+      "semantic": "0/3 definitions"
+    },
+    {
+      "shape": "userless/3-agents",
+      "path": "chat-carrier-apps",
+      "repeat": "first",
+      "sqlCount": 15,
+      "tables": {
+        "apps": 3,
+        "organizations": 4,
+        "users": 1,
+        "app_agents": 1,
+        "agents": 5,
+        "agent_imports": 1,
+        "agent_subscriptions": 3,
+        "org_members": 2
+      },
+      "semantic": "0 apps"
+    },
+    {
+      "shape": "userless/3-agents",
+      "path": "chat-carrier-apps",
+      "repeat": "same-context-repeat",
+      "sqlCount": 15,
+      "tables": {
+        "apps": 3,
+        "organizations": 4,
+        "users": 1,
+        "app_agents": 1,
+        "agents": 5,
+        "agent_imports": 1,
+        "agent_subscriptions": 3,
+        "org_members": 2
+      },
+      "semantic": "0 apps"
+    },
+    {
+      "shape": "userless/3-agents",
+      "path": "serve-chat-prompt",
+      "repeat": "first",
+      "sqlCount": 16,
+      "tables": {
+        "agents": 6,
+        "apps": 3,
+        "organizations": 4,
+        "users": 1,
+        "app_agents": 1,
+        "agent_imports": 1,
+        "agent_subscriptions": 3,
+        "org_members": 2
+      },
+      "semantic": "AGENT_NOT_FOUND"
+    },
+    {
+      "shape": "userless/3-agents",
+      "path": "serve-chat-prompt",
+      "repeat": "same-context-repeat",
+      "sqlCount": 16,
+      "tables": {
+        "agents": 6,
+        "apps": 3,
+        "organizations": 4,
+        "users": 1,
+        "app_agents": 1,
+        "agent_imports": 1,
+        "agent_subscriptions": 3,
+        "org_members": 2
+      },
+      "semantic": "AGENT_NOT_FOUND"
+    },
+    {
+      "shape": "userless/3-agents",
+      "path": "boot-serve-preview",
+      "repeat": "first",
+      "sqlCount": 19,
+      "tables": {
+        "apps": 1,
+        "agents": 2,
+        "org_members": 1,
+        "organizations": 1,
+        "agent_subscriptions": 1,
+        "app_agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    },
+    {
+      "shape": "userless/3-agents",
+      "path": "boot-serve-preview",
+      "repeat": "same-context-repeat",
+      "sqlCount": 19,
+      "tables": {
+        "apps": 1,
+        "agents": 2,
+        "org_members": 1,
+        "organizations": 1,
+        "agent_subscriptions": 1,
+        "app_agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    },
+    {
+      "shape": "public/3-agents",
+      "path": "licence-helper",
+      "repeat": "first",
+      "sqlCount": 1,
+      "tables": {
+        "agents": 1
+      },
+      "semantic": "3/3"
+    },
+    {
+      "shape": "public/3-agents",
+      "path": "licence-helper",
+      "repeat": "same-context-repeat",
+      "sqlCount": 1,
+      "tables": {
+        "agents": 1
+      },
+      "semantic": "3/3"
+    },
+    {
+      "shape": "public/3-agents",
+      "path": "text-helper",
+      "repeat": "first",
+      "sqlCount": 1,
+      "tables": {
+        "agents": 1
+      },
+      "semantic": "3/3"
+    },
+    {
+      "shape": "public/3-agents",
+      "path": "text-helper",
+      "repeat": "same-context-repeat",
+      "sqlCount": 1,
+      "tables": {
+        "agents": 1
+      },
+      "semantic": "3/3"
+    },
+    {
+      "shape": "public/3-agents",
+      "path": "installed-licence",
+      "repeat": "first",
+      "sqlCount": 12,
+      "tables": {
+        "app_agents": 1,
+        "agents": 4,
+        "apps": 1,
+        "organizations": 3,
+        "agent_subscriptions": 3
+      },
+      "semantic": "3/3"
+    },
+    {
+      "shape": "public/3-agents",
+      "path": "installed-licence",
+      "repeat": "same-context-repeat",
+      "sqlCount": 12,
+      "tables": {
+        "app_agents": 1,
+        "agents": 4,
+        "apps": 1,
+        "organizations": 3,
+        "agent_subscriptions": 3
+      },
+      "semantic": "3/3"
+    },
+    {
+      "shape": "public/3-agents",
+      "path": "app-memory-candidates",
+      "repeat": "first",
+      "sqlCount": 13,
+      "tables": {
+        "apps": 1,
+        "app_agents": 1,
+        "agents": 6,
+        "agent_memory_items": 1,
+        "memories": 3,
+        "agent_imports": 1,
+        "organizations": 1,
+        "agent_subscriptions": 1,
+        "workers": 1
+      },
+      "semantic": "3/3 definitions"
+    },
+    {
+      "shape": "public/3-agents",
+      "path": "app-memory-candidates",
+      "repeat": "same-context-repeat",
+      "sqlCount": 13,
+      "tables": {
+        "apps": 1,
+        "app_agents": 1,
+        "agents": 6,
+        "agent_memory_items": 1,
+        "memories": 3,
+        "agent_imports": 1,
+        "organizations": 1,
+        "agent_subscriptions": 1,
+        "workers": 1
+      },
+      "semantic": "3/3 definitions"
+    },
+    {
+      "shape": "public/3-agents",
+      "path": "readable-install-memories",
+      "repeat": "first",
+      "sqlCount": 4,
+      "tables": {
+        "org_members": 1,
+        "organizations": 2,
+        "memories": 1,
+        "apps": 2,
+        "app_members": 1,
+        "agents": 1
+      },
+      "semantic": "3 installs"
+    },
+    {
+      "shape": "public/3-agents",
+      "path": "readable-install-memories",
+      "repeat": "same-context-repeat",
+      "sqlCount": 4,
+      "tables": {
+        "org_members": 1,
+        "organizations": 2,
+        "memories": 1,
+        "apps": 2,
+        "app_members": 1,
+        "agents": 1
+      },
+      "semantic": "3 installs"
+    },
+    {
+      "shape": "public/3-agents",
+      "path": "participant-system-folds",
+      "repeat": "first",
+      "sqlCount": 13,
+      "tables": {
+        "org_members": 1,
+        "organizations": 3,
+        "apps": 2,
+        "app_members": 1,
+        "app_agents": 1,
+        "agents": 6,
+        "agent_imports": 1,
+        "agent_subscriptions": 1,
+        "memories": 1
+      },
+      "semantic": "3/3 definitions"
+    },
+    {
+      "shape": "public/3-agents",
+      "path": "participant-system-folds",
+      "repeat": "same-context-repeat",
+      "sqlCount": 13,
+      "tables": {
+        "org_members": 1,
+        "organizations": 3,
+        "apps": 2,
+        "app_members": 1,
+        "app_agents": 1,
+        "agents": 6,
+        "agent_imports": 1,
+        "agent_subscriptions": 1,
+        "memories": 1
+      },
+      "semantic": "3/3 definitions"
+    },
+    {
+      "shape": "public/3-agents",
+      "path": "chat-carrier-apps",
+      "repeat": "first",
+      "sqlCount": 11,
+      "tables": {
+        "app_members": 1,
+        "apps": 4,
+        "organizations": 3,
+        "app_agents": 2,
+        "agents": 5,
+        "agent_imports": 2,
+        "users": 1,
+        "agent_subscriptions": 1
+      },
+      "semantic": "1 apps"
+    },
+    {
+      "shape": "public/3-agents",
+      "path": "chat-carrier-apps",
+      "repeat": "same-context-repeat",
+      "sqlCount": 11,
+      "tables": {
+        "app_members": 1,
+        "apps": 4,
+        "organizations": 3,
+        "app_agents": 2,
+        "agents": 5,
+        "agent_imports": 2,
+        "users": 1,
+        "agent_subscriptions": 1
+      },
+      "semantic": "1 apps"
+    },
+    {
+      "shape": "public/3-agents",
+      "path": "serve-chat-prompt",
+      "repeat": "first",
+      "sqlCount": 20,
+      "tables": {
+        "agents": 4,
+        "apps": 2,
+        "app_agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    },
+    {
+      "shape": "public/3-agents",
+      "path": "serve-chat-prompt",
+      "repeat": "same-context-repeat",
+      "sqlCount": 20,
+      "tables": {
+        "agents": 4,
+        "apps": 2,
+        "app_agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    },
+    {
+      "shape": "public/3-agents",
+      "path": "boot-serve-preview",
+      "repeat": "first",
+      "sqlCount": 17,
+      "tables": {
+        "apps": 1,
+        "agents": 2,
+        "app_agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    },
+    {
+      "shape": "public/3-agents",
+      "path": "boot-serve-preview",
+      "repeat": "same-context-repeat",
+      "sqlCount": 17,
+      "tables": {
+        "apps": 1,
+        "agents": 2,
+        "app_agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    },
+    {
+      "shape": "org-app/3-agents",
+      "path": "licence-helper",
+      "repeat": "first",
+      "sqlCount": 0,
+      "tables": {},
+      "semantic": "3/3"
+    },
+    {
+      "shape": "org-app/3-agents",
+      "path": "licence-helper",
+      "repeat": "same-context-repeat",
+      "sqlCount": 0,
+      "tables": {},
+      "semantic": "3/3"
+    },
+    {
+      "shape": "org-app/3-agents",
+      "path": "text-helper",
+      "repeat": "first",
+      "sqlCount": 0,
+      "tables": {},
+      "semantic": "3/3"
+    },
+    {
+      "shape": "org-app/3-agents",
+      "path": "text-helper",
+      "repeat": "same-context-repeat",
+      "sqlCount": 0,
+      "tables": {},
+      "semantic": "3/3"
+    },
+    {
+      "shape": "org-app/3-agents",
+      "path": "installed-licence",
+      "repeat": "first",
+      "sqlCount": 6,
+      "tables": {
+        "app_agents": 1,
+        "agents": 1,
+        "apps": 1,
+        "organizations": 3
+      },
+      "semantic": "3/3"
+    },
+    {
+      "shape": "org-app/3-agents",
+      "path": "installed-licence",
+      "repeat": "same-context-repeat",
+      "sqlCount": 6,
+      "tables": {
+        "app_agents": 1,
+        "agents": 1,
+        "apps": 1,
+        "organizations": 3
+      },
+      "semantic": "3/3"
+    },
+    {
+      "shape": "org-app/3-agents",
+      "path": "app-memory-candidates",
+      "repeat": "first",
+      "sqlCount": 9,
+      "tables": {
+        "apps": 1,
+        "organizations": 2,
+        "app_agents": 1,
+        "agents": 2,
+        "agent_memory_items": 1,
+        "memories": 3,
+        "agent_imports": 1,
+        "workers": 1
+      },
+      "semantic": "3/3 definitions"
+    },
+    {
+      "shape": "org-app/3-agents",
+      "path": "app-memory-candidates",
+      "repeat": "same-context-repeat",
+      "sqlCount": 9,
+      "tables": {
+        "apps": 1,
+        "organizations": 2,
+        "app_agents": 1,
+        "agents": 2,
+        "agent_memory_items": 1,
+        "memories": 3,
+        "agent_imports": 1,
+        "workers": 1
+      },
+      "semantic": "3/3 definitions"
+    },
+    {
+      "shape": "org-app/3-agents",
+      "path": "readable-install-memories",
+      "repeat": "first",
+      "sqlCount": 3,
+      "tables": {
+        "org_members": 1,
+        "organizations": 2,
+        "memories": 1,
+        "apps": 2,
+        "app_members": 1
+      },
+      "semantic": "3 installs"
+    },
+    {
+      "shape": "org-app/3-agents",
+      "path": "readable-install-memories",
+      "repeat": "same-context-repeat",
+      "sqlCount": 3,
+      "tables": {
+        "org_members": 1,
+        "organizations": 2,
+        "memories": 1,
+        "apps": 2,
+        "app_members": 1
+      },
+      "semantic": "3 installs"
+    },
+    {
+      "shape": "org-app/3-agents",
+      "path": "participant-system-folds",
+      "repeat": "first",
+      "sqlCount": 9,
+      "tables": {
+        "org_members": 1,
+        "organizations": 4,
+        "apps": 2,
+        "app_members": 1,
+        "app_agents": 1,
+        "agents": 2,
+        "agent_imports": 1,
+        "memories": 1
+      },
+      "semantic": "3/3 definitions"
+    },
+    {
+      "shape": "org-app/3-agents",
+      "path": "participant-system-folds",
+      "repeat": "same-context-repeat",
+      "sqlCount": 9,
+      "tables": {
+        "org_members": 1,
+        "organizations": 4,
+        "apps": 2,
+        "app_members": 1,
+        "app_agents": 1,
+        "agents": 2,
+        "agent_imports": 1,
+        "memories": 1
+      },
+      "semantic": "3/3 definitions"
+    },
+    {
+      "shape": "org-app/3-agents",
+      "path": "chat-carrier-apps",
+      "repeat": "first",
+      "sqlCount": 9,
+      "tables": {
+        "app_members": 1,
+        "apps": 4,
+        "organizations": 4,
+        "app_agents": 2,
+        "agents": 3,
+        "agent_imports": 2,
+        "users": 1
+      },
+      "semantic": "1 apps"
+    },
+    {
+      "shape": "org-app/3-agents",
+      "path": "chat-carrier-apps",
+      "repeat": "same-context-repeat",
+      "sqlCount": 9,
+      "tables": {
+        "app_members": 1,
+        "apps": 4,
+        "organizations": 4,
+        "app_agents": 2,
+        "agents": 3,
+        "agent_imports": 2,
+        "users": 1
+      },
+      "semantic": "1 apps"
+    },
+    {
+      "shape": "org-app/3-agents",
+      "path": "serve-chat-prompt",
+      "repeat": "first",
+      "sqlCount": 19,
+      "tables": {
+        "agents": 2,
+        "org_members": 1,
+        "organizations": 1,
+        "apps": 2,
+        "app_agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    },
+    {
+      "shape": "org-app/3-agents",
+      "path": "serve-chat-prompt",
+      "repeat": "same-context-repeat",
+      "sqlCount": 19,
+      "tables": {
+        "agents": 2,
+        "org_members": 1,
+        "organizations": 1,
+        "apps": 2,
+        "app_agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    },
+    {
+      "shape": "org-app/3-agents",
+      "path": "boot-serve-preview",
+      "repeat": "first",
+      "sqlCount": 16,
+      "tables": {
+        "apps": 1,
+        "app_agents": 1,
+        "agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    },
+    {
+      "shape": "org-app/3-agents",
+      "path": "boot-serve-preview",
+      "repeat": "same-context-repeat",
+      "sqlCount": 16,
+      "tables": {
+        "apps": 1,
+        "app_agents": 1,
+        "agents": 1,
+        "nodes": 5,
+        "memories": 2,
+        "node_revisions": 3,
+        "compiled_prompt_revisions": 2
+      },
+      "semantic": "served"
+    }
+  ]
+}
