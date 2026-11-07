@@ -311,6 +311,8 @@ async function writeNodeCoreRaw(
     transaction?: {
       tx: Prisma.TransactionClient;
       pooledDb: Context['db'];
+      /** Response advice belongs to the outer request; authorization still uses txCtx. */
+      requestContext?: Context;
       afterCommit: (effect: () => void) => void;
     };
     targetNodeId?: string;
@@ -1039,7 +1041,8 @@ async function writeNodeCoreRaw(
         ? await getAccessibleMemoryIds(ctx)
         : null;
       let writeEmbeddingWorkToken: string | null = null;
-      const includeWarningLifetime = captureIncludePinWarningLifetime(ctx);
+      const includeWarningContext = opts?.transaction?.requestContext ?? ctx;
+      const includeWarningLifetime = captureIncludePinWarningLifetime(includeWarningContext);
       let includeWarningContentSaved = false;
       let includeWarningStoredContent: string | null = null;
       // #2041 S2b — `storedPlaintext` is the includer's plaintext from the row
@@ -1838,7 +1841,7 @@ async function writeNodeCoreRaw(
       // commit succeeds. The callback uses the pooled client, never the tx.
       const afterCommit = () => {
         const pooledDb = opts?.transaction?.pooledDb ?? ctx.db;
-        if (includeWarningContentSaved) attachIncludePinWarnings(ctx, finalNode, input.content, includeWarningStoredContent, { ...ctx, db: pooledDb }, includeWarningLifetime);
+        if (includeWarningContentSaved) attachIncludePinWarnings(includeWarningContext, finalNode, input.content, includeWarningStoredContent, { ...ctx, db: pooledDb }, includeWarningLifetime);
         void publishNodeWritten({
           nodeId: finalNode.id,
           memoryId: input.memoryId,
@@ -2553,7 +2556,7 @@ export const nodeMutations = {
         const written = await withInstallMemory(ctx, install, (tx, txCtx, memory) =>
           updateNodeCore({ ...rest, memoryId: memory.id } as UpdateNodeInput, txCtx, 'updateNode', {
             governedContext: 'node-write',
-            transaction: { tx, pooledDb: ctx.db, afterCommit: effect => effects.push(effect) },
+            transaction: { tx, pooledDb: ctx.db, requestContext: ctx, afterCommit: effect => effects.push(effect) },
           }), { create: false });
         for (const effect of effects) effect();
         return written;
