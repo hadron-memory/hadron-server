@@ -112,7 +112,7 @@ describe('#3596 sibling-bounded hybrid', () => {
         expect(await observe(tx, true).$queryRaw`SELECT ${7}::int AS value`).toEqual([{ value: 7 }]);
       } finally {
         // Baseline reproduction owns this name; never leave it in the pool.
-        await tx.$executeRawUnsafe('DEALLOCATE ALL');
+        if (retained.length) await tx.$executeRawUnsafe('DEALLOCATE loc3596_probe');
       }
     }, { timeout: 15_000 });
   }, 30_000);
