@@ -1,5 +1,5 @@
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
-import { personalOrgAgentLicenseHolds, personalOrgAgentTextAllowed } from '../../../lib/auth/personalOrgAgentInstall.js';
+import { personalOrgAgentLicenseHolds, personalOrgAgentServeAllowed } from '../../../lib/auth/personalOrgAgentInstall.js';
 import { bootPromptRefusal } from '../../../lib/bootPrompt/refusal.js';
 import { chatNotFoundError } from '../../../lib/chatNotFound.js';
 import { ENGINE_KEYS, engineState } from '../../../lib/chatRootEngineState.js';
@@ -146,12 +146,13 @@ export async function serveChatPrompt(
   llmModel: string | null,
   caller: Context,
 ): Promise<{ text: string; served: ServedBootPrompt; variables: Record<string, string> }> {
-  // The caller receives this text in systemMessage, so App participation alone cannot grant org text.
+  // The caller receives this text in systemMessage, so App participation alone cannot grant org text; a key with no
+  // person is judged on the owner's licence (#3653).
   const current = await db.agent.findUnique({ where: { id: agent.id }, select: { id: true, organizationId: true, ownerUserId: true, visibility: true, deletedAt: true } });
   if (!current || !(await canChatWithAgent(caller, current))) throw new AgentNotFoundError(agent.id);
   if (appId) {
     const app = await db.app.findUnique({ where: { id: appId }, select: { organizationId: true, ownerUserId: true } });
-    if (app && !(await personalOrgAgentTextAllowed(db, app, agent.id, caller.userId))) {
+    if (app && !(await personalOrgAgentServeAllowed(db, app, agent.id, caller.userId))) {
       throw new AgentNotFoundError(agent.id);
     }
   }

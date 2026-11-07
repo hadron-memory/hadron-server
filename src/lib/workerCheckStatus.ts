@@ -6,7 +6,7 @@
  * - `NO_SESSION`: no live session (cor:agt:020:11, the shared `isSessionLive`),
  *   with its reason (#3077): IDLE, ENDED or NEVER_BOUND (`loadNoSessionReasons`).
  * - `PENDING`: not expected to check, with its reason: a team pause, its own
- *   pause, isolated, on standby, or no task. The reasons come from the ticker's
+ *   pause or no task. The reasons come from the ticker's
  *   own `loadPendingReasons`, so the roster and the `live-check` rule can't
  *   disagree about who is expected to check.
  * - `OK` / `OVERDUE` (#3509, cor:agt:100:03 r7): OVERDUE means the worker was REACHED and did not respond. With an
@@ -71,9 +71,7 @@ export type WorkerCheckInputs = {
   teamResumedAt?: Date | null;
   /** #2022: when the latest `pause` / `halt` stop signal coverage of the worker ended; restarts the clock likewise. */
   stopEndedAt?: Date | null;
-  /** #2755: when its isolation expired (an active one is PENDING ISOLATED); restarts the clock like a pause. */
-  isolatedUntil?: Date | null;
-  /** #2755: when an active pause or isolation was cleared on purpose (`WorkerWakeSettings.exemptEndedAt`). */
+  /** #2755: when an active pause was cleared on purpose (`WorkerWakeSettings.exemptEndedAt`). */
   exemptEndedAt?: Date | null;
   /**
    * #3509: the latest delivered wake of each of its ENABLED ticker subscriptions (`WorkerDeliveryTick`). Required, so a caller cannot forget it:
@@ -92,9 +90,9 @@ export function overdueAfterMs(s: CheckSettings): number {
   return s.failedChecksToOverdue * s.checkPeriodSeconds * 1000 + OVERDUE_SLACK_MS;
 }
 
-/** The ends of the worker's own isolation and of a pause or isolation cleared on purpose, as far as they are past. */
+/** The ends of the worker's pause cleared on purpose, as far as they are past. */
 function ownExemptionEnds(i: WorkerCheckInputs, now: Date): number[] {
-  return [i.isolatedUntil, i.exemptEndedAt].map((d) => (d && d.getTime() <= now.getTime() ? d.getTime() : -Infinity));
+  return [i.exemptEndedAt].map((d) => (d && d.getTime() <= now.getTime() ? d.getTime() : -Infinity));
 }
 
 /** The latest end of an exemption (or the live session's start); null when it has no live session. */
@@ -138,7 +136,7 @@ export function deriveWorkerCheckStatus(i: WorkerCheckInputs, s: CheckSettings, 
     i.teamResumedAt?.getTime() ?? -Infinity,
     // #2022: a stop signal's coverage that has ended (an active one is STOPPED above).
     i.stopEndedAt && i.stopEndedAt.getTime() <= now.getTime() ? i.stopEndedAt.getTime() : -Infinity,
-    // #2755: an isolation that has ended, and a pause or isolation cleared on purpose.
+    // #2755: an isolation that has ended, and a pause cleared on purpose.
     ...ownExemptionEnds(i, now),
   );
   if (i.tickerWakes != null) {
@@ -187,7 +185,7 @@ export async function loadWorkerCheckStatuses(
     teamChannelId
       ? db.channelReadState.findMany({ where: { workerId: { in: ids }, channelId: teamChannelId }, select: { workerId: true, lastCheckedAt: true } })
       : Promise.resolve([]),
-    db.workerWakeSettings.findMany({ where: { workerId: { in: ids } }, select: { workerId: true, pausedUntil: true, isolatedUntil: true, exemptEndedAt: true } }),
+    db.workerWakeSettings.findMany({ where: { workerId: { in: ids } }, select: { workerId: true, pausedUntil: true, exemptEndedAt: true } }),
     loadPendingReasons(db, appId, ids, now),
     // #3509: the delivery rows of each worker's ENABLED ticker subscriptions; a worker with a subscription but no row is
     // on tickers with nothing delivered, one with no subscription keeps the settings timer.
@@ -243,7 +241,6 @@ export async function loadWorkerCheckStatuses(
           lastAssignedAt: openTask.get(w.id) ?? null,
           lastCheckedAt: checkedAt.get(w.id) ?? null,
           pausedUntil: wake.get(w.id)?.pausedUntil ?? null,
-          isolatedUntil: wake.get(w.id)?.isolatedUntil ?? null,
           exemptEndedAt: wake.get(w.id)?.exemptEndedAt ?? null,
           teamResumedAt: app.teamResumedAt,
           stopEndedAt: stopEndOf.get(w.id) ?? null,

@@ -27,6 +27,7 @@ import { verifiedLoginEvidence } from '../auth/loginEvidence.js';
 import { issueLoginCode } from '../auth/authHandoff.js';
 import { signJwt } from '../auth/jwt.js';
 import { createSignIn } from '../auth/signIn.js';
+import { ceremonyShell } from './ceremonyShell.js';
 import {
   completePending, createPendingEmailSignIn, loadLivePending, setPendingCeremony, sweepPendingEmailSignIns,
   PENDING_EMAIL_SIGN_IN_TTL_SECONDS, PENDING_ENROLLMENT_TTL_SECONDS, type PendingContinuation,
@@ -125,12 +126,12 @@ const SECURITY_HEADERS: Record<string, string> = {
   // (measured on Chromium 145, #2242), but one policy across the family is the safer default. Still no Referer cross-origin.
   'Referrer-Policy': 'same-origin',
   'X-Content-Type-Options': 'nosniff',
-  'Content-Security-Policy': "default-src 'none'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+  'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
 };
 
-const PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in</title></head><body><main><h1>Confirm it's you</h1><p>Use your passkey to finish signing in.</p><button id="go" type="button">Use passkey</button><p id="msg" role="status"></p></main><script src="${PASSKEY_SIGN_IN_PATH}.js"></script></body></html>`;
-const ENROLL_PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in</title></head><body><main><h1>Add a passkey to finish signing in</h1><p>This account has no passkey yet. Add one, then come back to this page to sign in with it. You will confirm who you are once more, with a second link we email you, in this browser.</p><p><a href="${PASSKEY_ENROLL_PATH}">Add a passkey</a></p></main></body></html>`;
-const INVALID_PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in</title></head><body><main><h1>This sign-in link can't be used</h1><p>It may have expired or already been used. Start again from the sign-in page.</p></main></body></html>`;
+const PAGE = ceremonyShell({ title: 'Sign in', body: `<h1>Confirm it's you</h1><p>Use your passkey to finish signing in.</p><button id="go" type="button">Use passkey</button><p id="msg" role="status"></p>`, scriptSrc: `${PASSKEY_SIGN_IN_PATH}.js` });
+const ENROLL_PAGE = ceremonyShell({ title: 'Sign in', body: `<h1>Add a passkey to finish signing in</h1><p>This account has no passkey yet. Add one, then come back to this page to sign in with it. You will confirm who you are once more, with a second link we email you, in this browser.</p><p><a class="button" href="${PASSKEY_ENROLL_PATH}">Add a passkey</a></p>` });
+const INVALID_PAGE = ceremonyShell({ title: 'Sign in', body: `<h1>This sign-in link can't be used</h1><p>It may have expired or already been used. Start again from the sign-in page.</p>` });
 
 const SCRIPT = `(()=>{
 const b2u=(b)=>btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');

@@ -403,6 +403,7 @@ const CONCEALED_FIELDS: Record<string, () => unknown> = {
   mintStatus: () => ({ minted: false, mintedAt: null, mintedBy: null, mintedByInfo: null, revision: null, hash: null }),
   signatureStatus: () => ({ state: null, signatures: [], integrityProblems: 0 }),
   contentValidation: () => ({ state: 'UNVALIDATED', latestReport: null }),
+  validationTasks: () => null,
 };
 
 /** Fields in {@link CONCEALED_FIELDS}, for the drift pin. */

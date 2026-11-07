@@ -1,4 +1,4 @@
-import { personalOrgAgentTextAllowed } from '../../../lib/auth/personalOrgAgentInstall.js';
+import { personalOrgAgentServeAllowed } from '../../../lib/auth/personalOrgAgentInstall.js';
 import { requireWorkerReadAccess, locateTeamAgent, forbidden, type AppRow } from '../../../lib/auth/workerRead.js';
 export { requireWorkerReadAccess, locateTeamAgent, ROLES_BRANCH_PREFIX } from '../../../lib/auth/workerRead.js';
 import { listAppInstallations, resolveAppInstallation, resolveUnfilteredAppInstallation, lockAppInstallation } from '../../../lib/appInstallations.js';
@@ -32,7 +32,6 @@ import { normalizeFamily, tierOf } from '../../../lib/agentTasks/family.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
 import { reconcileStopCoverage } from '../../../lib/stopSignals/lifecycle.js';
 import { generateId } from '../../../lib/id.js';
-import { s7Available } from '../../../lib/tickers/s7Availability.js';
 import { GraphQLError } from 'graphql';
 import { WORKER_SIGNATURE_DEFAULTS, normalizeWorkerSignature, withWorkerSignatures } from '../../../lib/workerSignature.js';
 import { assertWorkerNameNotConfusable, lockWorkerNames } from '../../../lib/workerName.js';
@@ -840,7 +839,6 @@ async function resolveCastTarget(ctx: Context, args: CastArgs, expectedAgentId?:
     // Ada36559 supersedes the dropped push-model S5/S7 dependency (#2138r4/#2130).
     // A future pull-shaped standby activation MUST initialize coverage for existing reports
     // before removing this guard and admitting new reports atomically under its common bracket.
-    if (s7Available()) throw new GraphQLError('Casting with a reporting head is not available while standby integration is incomplete.', { extensions: { code: 'WORKER_REPORTING_CAST_UNAVAILABLE' } });
     reportingHeadId = await resolveCastReportingHead(ctx, appId, choice.ref);
     const head = await ctx.db.worker.findUniqueOrThrow({ where: { id: reportingHeadId }, select: { retiredAt: true } });
     if (head.retiredAt) throw new GraphQLError('A worker cannot report to a retired worker.', { extensions: { code: 'WORKER_REPORTS_TO_RETIRED', reportsTo: reportingHeadId } });
@@ -2605,7 +2603,7 @@ async function readServedWorkerText(
 ): Promise<{ text: string | null; refusal: string | null }> {
   const where = { surface: 'bind' as const, agentName };
   const app = await ctx.db.app.findUnique({where:{id:worker.appId},select:{organizationId:true,ownerUserId:true}});
-  if(app && !(await personalOrgAgentTextAllowed(ctx.db,app,worker.agentId,ctx.userId))) return {text:null,refusal:'FORBIDDEN'};
+  if (app && !(await personalOrgAgentServeAllowed(ctx.db, app, worker.agentId, ctx.userId))) return { text: null, refusal: 'FORBIDDEN' };
   try {
     const recorded = ctx.sessionId
       ? await ctx.db.servedPrompt.findFirst({ where: { sessionId: ctx.sessionId, workerId: worker.id }, orderBy: { ordinal: 'desc' } })
