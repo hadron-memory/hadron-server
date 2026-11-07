@@ -52,7 +52,10 @@ for (const kind of ['ROW', 'DERIVED'] as const) for (const clear of [false, true
     if (clear) await (resolvers.Mutation as any).setAppAgentBootPrompt(null, args, f.ctx);
     let committed = false;
     boundary.afterCommit = async () => {
-      const written = await resolveAppInstallation(db, f.app.id, f.agent.id);
+      // DERIVED pointers live in customization, not the virtual membership row.
+      const written = await (kind === 'ROW' ? db.appAgent : db.appAgentCustomization).findUnique({
+        where: { appId_agentId: { appId: f.app.id, agentId: f.agent.id } },
+      });
       expect(written?.bootPromptNodeId).toBe(clear ? null : f.node.id);
       committed = true;
       if (kind === 'ROW') await db.appAgent.delete({ where: { appId_agentId: { appId: f.app.id, agentId: f.agent.id } } });
@@ -61,7 +64,7 @@ for (const kind of ['ROW', 'DERIVED'] as const) for (const clear of [false, true
     const answer = await set();
     expect(committed).toBe(true);
     expect(await resolveAppInstallation(db, f.app.id, f.agent.id)).toBeNull();
-    expect(answer).toMatchObject({ appId: f.app.id, agentId: f.agent.id, installationKind: kind, bootPromptNodeId: clear ? null : f.node.id });
+    expect(answer).toMatchObject({ appId: f.app.id, agentId: f.agent.id, installationKind: kind, bootPromptNodeId: kind === 'ROW' && !clear ? f.node.id : null });
   });
   it(`${kind} ${clear ? 'clear' : 'set'} returns its committed snapshot after target soft deletion`, async () => {
     const f = await fixture(kind);
@@ -70,6 +73,6 @@ for (const kind of ['ROW', 'DERIVED'] as const) for (const clear of [false, true
     boundary.afterCommit = async () => { await db.agent.update({ where: { id: f.agent.id }, data: { deletedAt: new Date() } }); };
     const answer = await (resolvers.Mutation as any).setAppAgentBootPrompt(null, { ...args, nodeRef: clear ? null : f.node.id }, f.ctx);
     expect(await resolveAppInstallation(db, f.app.id, f.agent.id)).toBeNull();
-    expect(answer).toMatchObject({ appId: f.app.id, agentId: f.agent.id, installationKind: kind, bootPromptNodeId: clear ? null : f.node.id });
+    expect(answer).toMatchObject({ appId: f.app.id, agentId: f.agent.id, installationKind: kind, bootPromptNodeId: kind === 'ROW' && !clear ? f.node.id : null });
   });
 }
