@@ -50,6 +50,9 @@ describe('#2836 eligible-row index: lockstep and list drift', () => {
 /** server_version_num of PostgreSQL 16.0, the first release with EXPLAIN (GENERIC_PLAN). */
 const MIN_GENERIC_PLAN_VERSION_NUM = 160000;
 
+/** The churn is 20k inserts and a DELETE: on a busy shard that exceeds the default 10s hook budget. */
+const CHURN_HOOK_TIMEOUT_MS = 60_000;
+
 describe('#2836 eligible-row index: both walk legs scan it', () => {
   let memoryId: string;
 
@@ -64,7 +67,7 @@ describe('#2836 eligible-row index: both walk legs scan it', () => {
       INSERT INTO nodes (id, memory_id, loc, name, updated_at)
       SELECT 'churn-' || g, ${churn}, 'churn:' || lpad(g::text, 6, '0'), 'n', now() FROM generate_series(1, 20000) g`;
     await db.$executeRaw`DELETE FROM nodes WHERE memory_id = ${churn}`;
-  });
+  }, CHURN_HOOK_TIMEOUT_MS);
 
   beforeEach(async () => {
     await cleanDb(db);
