@@ -5137,6 +5137,7 @@ export const typeDefs = `#graphql
   chat or run itself would get. BOOT_PROMPT_NOT_SIGNED cannot occur until an organisation can switch signing on (#1614).
   """
   enum BootPromptServeRefusal {
+    BOOT_PROMPT_INSTALL_LICENSE_INACTIVE
     BOOT_PROMPT_NOT_SET
     BOOT_PROMPT_TARGET_DELETED
     BOOT_PROMPT_NOT_APPROVED
