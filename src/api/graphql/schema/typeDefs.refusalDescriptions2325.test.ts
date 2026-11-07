@@ -45,3 +45,8 @@ describe('#3590 cloneAgent names the public refusal codes', () => {
     expect(text).not.toMatch(/\b(?:BASE_UNUSABLE|IMPORT_UNUSABLE)\b/);
   });
 });
+
+
+it('task writes retain the impersonation refusal independently of removed isolation doors', () => {
+  expect(src('resolvers.agentTask.ts')).toMatch(/Impersonation sessions are read-only/);
+});

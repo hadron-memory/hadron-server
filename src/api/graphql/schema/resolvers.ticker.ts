@@ -756,7 +756,7 @@ export async function writeAppSettings(
       failedChecksToOverdue: patch.failedChecksToOverdue ?? cur.deliveryFailedChecksToOverdue,
       darkAlarmWindowSeconds: patch.darkAlarmWindowSeconds ?? cur.deliveryDarkAlarmWindowSeconds,
     };
-    validateDeliverySettings(delivery, patch);
+    validateDeliverySettings(delivery);
     const written = {
       tickerMinCadenceSeconds: floor, tickerSelfSubscribeCadenceSeconds: self,
       tickerLiveCap: cap, wakeDailyBudget: budget,

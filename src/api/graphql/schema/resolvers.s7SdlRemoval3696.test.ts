@@ -90,7 +90,6 @@ it('preserves TEAM_PAUSED > STOPPED > PAUSED > NO_TASK through pending and roste
  expect(await reason()).toBe('TEAM_PAUSED');expect((await status()).pendingReason).toBe('TEAM_PAUSED');
 });
 
-
 it('ignores a legacy isolation clock but retains the clearPause exemption end', async () => {
  const {deriveWorkerCheckStatus}=await import('../../../lib/workerCheckStatus.js');
  const now=new Date('2026-11-06T12:00:00Z');const ago=(min:number)=>new Date(now.getTime()-min*60_000);
@@ -98,7 +97,6 @@ it('ignores a legacy isolation clock but retains the clearPause exemption end', 
  const result=deriveWorkerCheckStatus(input,{checkPeriodSeconds:600,failedChecksToOverdue:2},now);
  expect(result.resumedAt).toEqual(ago(10));expect(result.status).toBe('OK');
 });
-
 
 it('retains inert columns through surviving wake and delivery writes', async () => {
  const columns = await db.$queryRawUnsafe<Array<{table_name:string;column_name:string}>>(`
@@ -148,7 +146,6 @@ it('retains inert columns through surviving wake and delivery writes', async () 
  expect((await loadPendingReasons(db,appId,[targetId],new Date())).get(targetId)).toBe('NO_TASK');
 });
 
-
 it('executes surviving wake get/pause/clearPause and delivery get/set; client provenance C1 remains separate', async () => {
  const {ApolloServer}=await import('@apollo/server');const{readFileSync}=await import('node:fs');
  const server=new ApolloServer<Context>({typeDefs,resolvers:resolvers as never});await server.start();
@@ -171,4 +168,29 @@ it('executes surviving wake get/pause/clearPause and delivery get/set; client pr
    ['SetAppDeliverySettings','portal-delivery',{appRef:appId,input:{busyDelaySeconds:500}},'setAppDeliverySettings'],
   ] as const)expect((await execute(name,file,variables,ctx(adminId)))[key]).not.toHaveProperty('standbyEnabled');
  }finally{await server.stop();}
+});
+
+it('legacy isolation cannot override an active task in pending derivation', async () => {
+ const now=new Date();
+ const fake={
+  app:{findUnique:async()=>({teamPausedAt:null})},
+  worker:{findMany:async()=>[{id:'legacy',agent:{usesTasks:true}}]},
+  workerWakeSettings:{findMany:async()=>[{workerId:'legacy',pausedUntil:null,isolatedUntil:new Date(now.getTime()+60_000)}]},
+  agentTask:{findMany:async()=>[{assigneeWorkerId:'legacy'}]},
+  $queryRaw:async()=>[{n:0n}],
+ };
+ expect((await loadPendingReasons(fake as never,appId,['legacy'],now)).get('legacy')).toBeNull();
+});
+
+it.each(['wake','delivery','teamPause'] as const)('refuses an impersonated manager on %s before writes', async door => {
+ const c=ctx(adminId,{impersonation:{sessionId:generateId(),actorUserId:memberId,orgId:(await db.app.findUniqueOrThrow({where:{id:appId}})).organizationId,expiresAt:new Date(Date.now()+60_000)}} as never);
+ const snapshot=async()=>({app:await db.app.findUniqueOrThrow({where:{id:appId}}),wake:await db.workerWakeSettings.findMany(),events:await db.agentTeamEvent.findMany({where:{appId}})});
+ const before=await snapshot();
+ const call=()=>door==='wake'
+  ?M.setWorkerWakeSettings({}, {workerRef:targetId,input:{mentions:'OFF'}},c)
+  :door==='delivery'
+   ?M.setAppDeliverySettings({}, {appRef:appId,input:{busyDelaySeconds:777}},c)
+   :M.setTeamPause({}, {appRef:appId,paused:true},c);
+ await expect(call()).rejects.toMatchObject({message:'Impersonation sessions are read-only.',extensions:{code:'FORBIDDEN'}});
+ expect(await snapshot()).toEqual(before);
 });

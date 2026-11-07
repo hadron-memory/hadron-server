@@ -7,7 +7,7 @@
  * the team is the follow-up, blocked on ruling 0116; nothing here sends one.
  *
  * WHO. A worker whose role is `coordinator` (cor:agt:110:05; no per-App role-name setting), not retired. The exemptions are the dark-worker alarm's, one source: `EXEMPT_PENDING` over the worker check status
- * (TEAM_PAUSED, PAUSED, ISOLATED, STANDBY, STOPPED), read from `loadPendingReasons`. A coordinator with no live session is NOT
+ * (TEAM_PAUSED, PAUSED, STOPPED), read from `loadPendingReasons`. A coordinator with no live session is NOT
  * exempt (cor:agt:050:31 r3: nobody driving it is a case this alarm exists to catch); its clock starts at the first pass that saw it.
  *
  * THE CLOCK. The latest of: the coordinator's last COUNTED assignment (`task.assigned` / `task.reassigned` with
@@ -24,7 +24,7 @@
  * EPISODES. The alarm stream is append-only and `agent_team_events_episode_uniq` does not dedupe a NULL task id, so the
  * episode is a row in `coordinator_cadence_episodes` whose partial unique index admits one OPEN row per coordinator,
  * inserted in the same SERIALIZABLE transaction as the event. The loser of a race rolls back and raises nothing. An
- * episode ends ONLY at the coordinator's next counted assignment: neither no lane worker being free nor a pause
+ * episode ends ONLY at the coordinator's next counted assignment: neither a shortage of free lane workers nor a pause
  * ends it, so busy/free toggles never raise a second alarm. The next lateness after that opens a new one.
  *
  * LIMIT (stated, not hidden): a coordinator that comes back from a pause keeps its old clock, so one

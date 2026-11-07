@@ -53,7 +53,7 @@ export function parseDeliverySettingsPatch(raw: unknown): DeliverySettingsPatch 
 }
 
 /** Validate the final candidate, not just the changed scalar: neither settings writer can evade the relation. */
-export function validateDeliverySettings(settings: DeliverySettings, patch: DeliverySettingsPatch): void {
+export function validateDeliverySettings(settings: DeliverySettings): void {
   for (const [field, min, max] of [
     ['busyDelaySeconds', DELIVERY_BUSY_MIN_SECONDS, DELIVERY_BUSY_MAX_SECONDS],
     ['stuckWindowSeconds', DELIVERY_STUCK_MIN_SECONDS, DELIVERY_STUCK_MAX_SECONDS],
