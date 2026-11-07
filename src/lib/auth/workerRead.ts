@@ -5,6 +5,8 @@ import { isAppParticipant } from './appParticipantRead.js';
 import { listAppInstallations, resolveAppInstallation } from '../appInstallations.js';
 import { resolveAgentRef } from '../entityRef/agentRef.js';
 import { AgentNotFoundError } from '../entityRef/errors.js';
+import { isRunPrincipal } from './runPrincipal.js';
+import { runMayReadTeam } from './runTeamRead.js';
 
 /** Loc prefix of the role-definition branch in a Team Agent's system memory. */
 export const ROLES_BRANCH_PREFIX = 'roles:';
@@ -32,6 +34,12 @@ export const forbidden = (): GraphQLError =>
  * App's staff (team automation follows the roster); impersonation reads are
  * bounded to the support session's single org (#876 class).
  *
+ * A userless RUN of the App is not the App's key (#3360,
+ * hrn:node:hadronmemory.com:specs:cor:agt:050:23, rulings:0112): it reads its
+ * own App's staff only while its automation holds a team snapshot grant
+ * (`runMayReadTeam`, the arm the task reads use). Without one it is refused
+ * exactly like another App's principal, so the refusal is no grant oracle.
+ *
  * An UNINSTALLED App's staff stay readable (the roster remains legible); a
  * soft-DELETED App's do not. Every other reader already refused a deleted App
  * on its own, but `worker(ref)` and `releaseWorker` load the row by id with
@@ -47,6 +55,10 @@ export async function requireWorkerReadAccess(ctx: Context, app: AppRow): Promis
     }
   }
   if (!ctx.userId) {
+    if (isRunPrincipal(ctx)) {
+      if (await runMayReadTeam(ctx, app)) return;
+      throw forbidden();
+    }
     if (ctx.appId && ctx.appId === app.id) return;
     throw forbidden();
   }

@@ -125,9 +125,10 @@ it('RED3360: a revoked grant, a sibling automation\'s grant and a finished run a
   refused(await reads(asRun(await runOf(granted))));
   const id = await grant(granted);
   const finished = await runOf(granted);
-  await db.appRun.update({ where: { id: finished.id }, data: { status: 'SUCCEEDED' } });
+  await db.appRun.update({ where: { id: finished.id }, data: { status: 'COMPLETED' } });
   refused(await reads(asRun(finished)));
-  await db.appAutomationTeamSnapshotGrant.update({ where: { id }, data: { revokedAt: new Date() } });
+  const revoked = await wire('mutation($id:ID!){revokeAutomationTeamSnapshotGrant(id:$id){id revokedAt}}', { id }, { db, userId: manager, roles: ['READER'] } as Context);
+  expect(revoked.errors).toBeUndefined();
   refused(await reads(asRun(await runOf(granted))));
 });
 
