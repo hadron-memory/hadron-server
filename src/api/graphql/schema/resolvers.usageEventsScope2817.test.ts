@@ -152,9 +152,9 @@ describe('#2817 review — what an App key\'s resource read discloses', () => {
     expect([...data.a, ...data.b.items].filter((x: { id: string }) => x.id === identified)).toHaveLength(2);
   });
 
-  it('a user principal\'s resource read is unchanged by this PR (raw rows; tracked separately)', async () => {
+  it('a user principal\'s resource read is masked the same way, admins included (#3688, ruling 0246)', async () => {
     const row = (await list({ memoryId: appMem.id }, ctx({ userId: me.id, roles: ['ADMIN'] }))).find((r: { id: string }) => r.id === identified);
-    expect(row?.userId).toBe(other.id);
+    expect(row).toMatchObject({ userId: null, sessionId: null, appId: null, organizationId: null, actionArgs: null, tokensIn: 7 });
   });
 
   it('own scope stays empty for an App key even when events carry its appId (Rico P3-1)', async () => {

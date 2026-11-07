@@ -6,6 +6,7 @@ import {
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { MemoryNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
+import { isAppKeyPrincipal, projectUsageRowsFor } from './resolvers.usageProjection.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { GraphQLError } from 'graphql';
@@ -85,6 +86,9 @@ async function sessionsWhere(
       };
 }
 
+// Like task-list bounds (#2692), usage windows require unambiguous instants.
+const usageWindowInstant = z.string().datetime({ offset: true });
+
 /**
  * The `where` shared by `usageEvents` and `usageEventsPage` (#2212 A1): the principal gate, the loc/nodeId
  * addressing rules and the scope, all resolved before any query.
@@ -97,32 +101,6 @@ async function sessionsWhere(
  *     (`getAccessibleMemoryIds`, which handles App-key principals). An empty resource scope stays empty;
  *     it never falls back to own activity.
  */
-/** #2817: an hdr_app_ key, identified by the key itself (`appKeyId`), not inferred from absent fields. */
-function isAppKeyPrincipal(ctx: Context): boolean {
-  return !!ctx.appKeyId && !!ctx.appId && !ctx.userId && !ctx.impersonation;
-}
-
-/**
- * #2817 review (Dorian P2-1): cor:acl:090:01's resource scope discloses VOLUME, never another principal's identity
- * and never the content they touched. An App key reaches usage rows only through that scope (its own activity is
- * empty), so its rows carry no user, session or organization, no other App, and no action arguments. The App's own
- * appId is the caller's own identity and stays. User principals are unchanged here (tracked separately).
- */
-function projectUsageRowsFor<T extends { appId: string | null }>(ctx: Context, rows: T[]): T[] {
-  if (!isAppKeyPrincipal(ctx)) return rows;
-  return rows.map((row) => ({
-    ...row,
-    userId: null,
-    sessionId: null,
-    organizationId: null,
-    actionArgs: null,
-    appId: row.appId === ctx.appId ? row.appId : null,
-  }));
-}
-
-// Like task-list bounds (#2692), usage windows require unambiguous instants.
-const usageWindowInstant = z.string().datetime({ offset: true });
-
 async function usageEventsWhere(
   ctx: Context,
   { type, memoryId, nodeId, loc, since, until }: {
