@@ -102,6 +102,8 @@ const INHERITED_PROJECTION: Record<string, (value: () => Promise<any>, parent: a
     const s = await value();
     return { state: s.state, latestReport: null };
   },
+  // #3659: the rules are the base memory's, and a report is recorded against the base node.
+  validationTasks: none,
 };
 
 /** The fields {@link withInheritedNodeProjection} covers, for the drift pin. */

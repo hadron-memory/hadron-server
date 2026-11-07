@@ -1547,6 +1547,8 @@ export const typeDefs = `#graphql
     authorship: NodeAuthorship
     "#1326 — advisory validation for this exact revision. A report for an older revision is STALE."
     contentValidation: NodeContentValidationStatus!
+    "#3659 (hrn:node:hadronmemory.com:specs:cor:dmo:160:01) — the validation tasks a content-validation report for this node may name now, as the recorder judges them for this caller. Null on an inherited, install-concealed or deleted node, or one whose memory fails the node-content gate."
+    validationTasks: NodeValidationTaskSet
     "#1591 — whether the current revision is approved, and the latest approval on record."
     approvalStatus: NodeApprovalStatus!
     "#1591 — whether this node is minted, and the record of it."
@@ -2120,6 +2122,21 @@ export const typeDefs = `#graphql
   type NodeContentValidationStatus {
     state: NodeContentValidationState!
     latestReport: NodeContentValidationReport
+  }
+  "#3659 (hrn:node:hadronmemory.com:specs:cor:dmo:160:01) — READY: a report may name any listed task at revisions 1 to its revision. NOT_CONFIGURED: no rule applies. BROKEN: a rule's task reference is broken, so every report is refused, including one naming a listed task. UNAVAILABLE: the caller does not write the memory, or cannot read a task a rule names (ruling 0199); nothing is listed."
+  enum NodeValidationTaskSetState { READY NOT_CONFIGURED BROKEN UNAVAILABLE }
+  "#3659 — one task a report may name, or one broken rule. A broken entry has every other field null."
+  type NodeValidationTaskEntry {
+    broken: Boolean!
+    taskId: ID
+    "The canonical node URN. A report may name this or taskId."
+    taskRef: String
+    "The task's current revision, the newest a report may name."
+    revision: Int
+  }
+  type NodeValidationTaskSet {
+    state: NodeValidationTaskSetState!
+    tasks: [NodeValidationTaskEntry!]!
   }
 
   """

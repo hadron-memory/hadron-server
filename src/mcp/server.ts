@@ -248,6 +248,8 @@ import {
 } from '../api/graphql/schema/resolvers.mutation.session.js';
 import { HADRON_SERVER_VERSION, MCP_SURFACE_CAPABILITIES, getDeploymentInfo } from './deploymentInfo.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+import { validationTaskSetsForNodes } from '../api/graphql/schema/resolvers.validationTaskSet.js';
+import type { ValidationTaskSet } from '../lib/contentValidationReport.js';
 import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.js';
 // #1005: the SHARED App-participation predicate (#943) — reused here so
 // reconnect recovery admits exactly whom startSession admitted, rather than a
@@ -1909,6 +1911,14 @@ async function batchActionUrns(nodes: ReadProjectionNode[]): Promise<Map<string,
   return out;
 }
 
+/** #3659: Node.validationTasks as a read line. No line when the set does not apply to this node. */
+function validationTasksLine(set: ValidationTaskSet | undefined): string {
+  if (!set) return '';
+  if (set.state === 'NOT_CONFIGURED') return 'Validation tasks: none configured';
+  if (set.state === 'READY') return `Validation tasks: ${set.tasks.map((t) => `${t.taskRef} @ revision ${t.revision}`).join(', ')}`;
+  return `Validation tasks: ${set.state.toLowerCase()}`;
+}
+
 async function renderNodeReadProjection(
   node: ReadProjectionNode,
   scope: 'content' | 'abstract' | 'all',
@@ -1928,6 +1938,8 @@ async function renderNodeReadProjection(
       actionUrns?: ReadonlyMap<string, string | null>;
     };
     memoryUrnOf?: (memoryId: string) => Promise<string>;
+    /** #3659: this node's validation task set; absent means no line. Never set for an inherited read. */
+    validationTasks?: ValidationTaskSet;
   } = {},
 ): Promise<string> {
   // #1885 (cor:dmo:050:14) — a node read through a child's effective system
@@ -2147,6 +2159,7 @@ async function renderNodeReadProjection(
       : '',
     authorshipLine,
     validationLine,
+    validationTasksLine(opts.validationTasks),
     approvalLine,
     await signatureLine,
     mintLine,
@@ -3440,7 +3453,7 @@ export function createMcpServerInstance(
   server.tool(
     'hadron_record_content_validation',
     'Record the result of running a node\'s validation task on one revision of the node (cor:dmo:160:01). Advisory: it never edits the node or blocks a write. '
-      + 'validationTaskRef is the task the node\'s role rule names now, and validationTaskRevision the task revision that ran. Any writer of the memory may report except the author of that node revision; '
+      + 'validationTaskRef is a task the node\'s rules name now (the "Validation tasks" line of hadron_get_node lists them), and validationTaskRevision the task revision that ran. Any writer of the memory may report except the author of that node revision; '
       + 'if you started a worker session with hadron_start_session, the report is recorded as that worker. runId makes a retry idempotent (same runId, same reporter, same revisions returns the first report); '
       + 'any other reuse is refused [content_validation_run_id_conflict]. A [conflict] means the node changed during the call: nothing was written, re-read it and decide whether to report again.',
     SHAPE_HADRON_RECORD_CONTENT_VALIDATION,
@@ -3831,6 +3844,13 @@ export function createMcpServerInstance(
     roles: auth.roles as Context['roles'],
     organizationId: auth.organizationId ?? undefined,
   });
+
+  /**
+   * #3659: Node.validationTasks reads as the recorder does, so it needs what the recorder's context
+   * carries and scopeCtx() does not: an impersonator would otherwise read as a writer.
+   */
+  const validationReadCtx = (): Context => ({ ...scopeCtx(), appKeyId: auth.appKeyId ?? undefined,
+    ...mcpRequestSessionContext(auth), impersonation: auth.impersonation ?? undefined });
 
   // #2175: explicit recovery twins delegate to the same writer-plus-reader resolver gate.
   const recoveryCtx = (): Context => ({ ...scopeCtx(), appKeyId: auth.appKeyId ?? undefined,
@@ -5138,6 +5158,8 @@ export function createMcpServerInstance(
         locked: lockState === 'locked',
         encryptedMemory: lockState !== 'plaintext',
         auth,
+        // The rules are the base memory's, and a report is recorded against the base node.
+        validationTasks: o.inheritedFrom ? undefined : (await validationTaskSetsForNodes(validationReadCtx(), [current.id])).get(current.id),
       });
 
       // Record usage event (fire-and-forget), AFTER the projection is in hand:
@@ -5705,6 +5727,8 @@ export function createMcpServerInstance(
       ]);
       const batchProvenance = { reports, taskRefs, humanNames, feedback, signatures, actionUrns };
       const batchReadCtx = scopeCtx(); // one memo for the whole call (#2041)
+      const validationTaskSets = await validationTaskSetsForNodes(validationReadCtx(),
+        visible.filter((n) => !(n as { inheritedFrom?: InheritedFrom }).inheritedFrom).map((n) => n.id));
       for (const metadata of visible) {
         if (truncated) {
           omitted.push(await nodeUrn(metadata.loc, metadata.memoryId, memoryUrnOf));
@@ -5745,6 +5769,7 @@ export function createMcpServerInstance(
           auth,
           batch: provenance,
           memoryUrnOf,
+          validationTasks: validationTaskSets.get(n.id),
         });
         // Measured on the ANNOTATED block, which is what actually ships: sizing
         // the bare projection and pushing the annotated one lets a block cross
