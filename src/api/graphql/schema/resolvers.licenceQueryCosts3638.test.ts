@@ -29,6 +29,7 @@ logged.$on('query', event => {
 type Observation = { shape: string; path: string; repeat: string; sqlCount: number; tables: Record<string,number>; semantic: string };
 const observations: Observation[] = [];
 beforeAll(async () => {
+  if (process.env.HADRON_3638_ARTIFACT) writeFileSync(process.env.HADRON_3638_ARTIFACT, JSON.stringify({complete:false,status:'starting; no completed measurements yet'}), {flag:'wx'});
   expect(PARALLEL_DBS, 'diagnostic requires run-owned parallel clone').toBe(true);
   const expected = workerDbName(process.env.VITEST_POOL_ID ?? '1');
   expect(new URL(process.env.DATABASE_URL!).pathname).toBe(`/${expected}`);
@@ -50,6 +51,7 @@ async function measure(shape: string, path: string, repeat: string, run: () => P
   } catch (error) { counter.end(); throw error; }
   const observed = counter.end();
   observations.push({shape,path,repeat,...observed,semantic});
+  if (path === 'positive-control') expect(observed.sqlCount, 'exactly SELECT 1, no setup or barrier counted').toBe(1);
   // These explicit fast refusals/qualifications need no database operation.
   const zeroQueryBranch = (shape.startsWith('userless/') && ['readable-install-memories','participant-system-folds'].includes(path))
     || (shape.startsWith('org-app/') && ['licence-helper','text-helper'].includes(path));
