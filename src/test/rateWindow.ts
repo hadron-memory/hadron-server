@@ -7,9 +7,10 @@ const PAST_BOUNDARY_MS = 30;
 /**
  * #3480. The Vitest budget for every test that calls `withinOneRateWindow`. The helper can
  * sleep up to `RATE_WINDOW_MARGIN_MS + PAST_BOUNDARY_MS` before the test body runs, so a
- * test that keeps Vitest's default 5000 ms budget can spend all of it asleep.
+ * test that keeps Vitest's default 5000 ms budget can spend all of it asleep. The budget is
+ * the worst-case sleep plus that same default for the body.
  */
-export const RATE_WINDOW_TEST_TIMEOUT_MS = 5_000;
+export const RATE_WINDOW_TEST_TIMEOUT_MS = RATE_WINDOW_MARGIN_MS + PAST_BOUNDARY_MS + 5_000;
 /** #3480 forced-phase pins: time left in the window when the pinned site starts (inside the helper's sleep zone). */
 export const FORCED_REMAINING_MS = RATE_WINDOW_MARGIN_MS - 10;
 
