@@ -374,13 +374,14 @@ async function main() {
 
   // ── Personal-class memories for Mike (one per Juno install) ────────────
   // The (app_id, user_id) pivot is what gives multi-install isolation.
+  // #1587 / cor:urn:010:01: one memory slug atom; App/user scope belongs in columns, not a compound slug.
   // These are seeded so a portal session can immediately demonstrate that
   // the two installs of the same Juno agent have separate user data.
   await db.memory.create({
     data: {
       id: generateId(),
       organizationId: mentorOrg.id,
-      urn: `${junoMentorApp.urn}:mike-personal`,
+      urn: `${mentorOrg.urn}:juno-mike-personal`,
       name: 'Mike\'s personal memory @ Mentor Co',
       class: 'personal',
       // 035-visibility-enum-cleanup: personal privacy is class-driven; NULL.
@@ -394,7 +395,7 @@ async function main() {
     data: {
       id: generateId(),
       organizationId: clientOrg.id,
-      urn: `${junoClientApp.urn}:mike-personal`,
+      urn: `${clientOrg.urn}:juno-mike-personal`,
       name: 'Mike\'s personal memory @ Client Co',
       class: 'personal',
       // 035-visibility-enum-cleanup: personal privacy is class-driven; NULL.
