@@ -107,13 +107,21 @@ describe('readGrantForUpdate across a real lock wait (a second connection holds 
       const holderPid = (await holder.query('SELECT pg_backend_pid() AS pid')).rows[0].pid as number;
       await holder.query('BEGIN');
       await holder.query('SELECT id FROM grants WHERE id = $1 FOR UPDATE', [id]);
-      const read = db.$transaction((tx) => readGrantForUpdate(tx, id));
-      // Observe the wait for real: a backend other than the holder is blocked on exactly the holder's lock.
+      // The reader reports its own backend PID from inside its transaction before it reads, so the wait is attributed to it and no other waiter.
+      let reportPid!: (pid: number) => void;
+      const readerPidP = new Promise<number>((res) => { reportPid = res; });
+      const read = db.$transaction(async (tx) => {
+        const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+        reportPid(pid);
+        return readGrantForUpdate(tx, id);
+      });
+      const readerPid = await Promise.race([readerPidP, read.then(() => { throw new Error('the read finished before it could block'); })]);
+      // Observe the wait for real: exactly the reader backend is blocked on exactly the holder's lock.
       const deadline = Date.now() + 5000;
       for (;;) {
         await observer.query('SELECT pg_stat_clear_snapshot()');
         const r = await observer.query(
-          `SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND pid <> $1 AND $1 = ANY(pg_blocking_pids(pid))`, [holderPid]);
+          `SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid = $2 AND wait_event_type = 'Lock' AND $1 = ANY(pg_blocking_pids(pid))`, [holderPid, readerPid]);
         if (r.rows[0].n > 0) break;
         if (Date.now() > deadline) throw new Error('the read never blocked on the row lock');
         await new Promise((res) => setTimeout(res, 25));
