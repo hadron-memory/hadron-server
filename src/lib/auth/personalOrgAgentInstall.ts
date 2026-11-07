@@ -33,6 +33,24 @@ export async function personalOrgAgentLicenseHolds(db: Db, app: AppScope, agentI
   return subscription !== null && isLifecycleActive(subscription);
 }
 
+/**
+ * #3653 / cor:agt:040:10 (ruling 0235): may this caller be SERVED this install's prompt? Serving checks the App owner's
+ * licence, not the caller, so a caller with no person (an App key, in a session or not) is judged on that licence alone.
+ * It gets no more than on any other install. A person keeps {@link personalOrgAgentTextAllowed}: the participant outside
+ * the organization is a separate, unruled departure. For serving only: reads of the system and install memory stay
+ * with that text gate (cor:acl:010:01), because a key alone is no participant.
+ */
+export async function personalOrgAgentServeAllowed(
+  db: Db,
+  app: AppScope,
+  agentId: string,
+  userId: string | null | undefined,
+): Promise<boolean> {
+  return userId
+    ? await personalOrgAgentTextAllowed(db, app, agentId, userId)
+    : await personalOrgAgentLicenseHolds(db, app, agentId);
+}
+
 /** An independently admitted participant must ALSO be a current member before reading this install's org text. */
 export async function personalOrgAgentTextAllowed(
   db: Db,
