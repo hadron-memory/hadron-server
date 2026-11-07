@@ -127,7 +127,7 @@ function render(out, focusDecline=false){
  what.appendChild(el('h3','Text'));
  const pre=el('pre');v.node.contentSegments.forEach((s)=>{if(s.include){const m=el('mark',s.text);m.title='Included text is not covered by this signature';pre.appendChild(m);pre.appendChild(el('span',' [not covered by this signature]'));}else pre.appendChild(document.createTextNode(s.text));});
  what.appendChild(pre);
- what.appendChild(el('p','Text that this page pulls in from elsewhere is shown as written and is not part of what you sign.'));
+ what.appendChild(el('p','Each include is shown as its tag, which you do sign. The text it pulls in from elsewhere is not shown here and is not part of what you sign.'));
  view.appendChild(what);
  const chg=section('Changes since the last signed revision');
  if(!v.previous)chg.appendChild(el('p','No earlier signature on this node.'));

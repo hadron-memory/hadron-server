@@ -686,7 +686,7 @@ describe('#3699 signing page slice 2: summary first, sticky bar, status in the b
     expect(t.join('\n')).not.toContain('(through');
     const h3 = all(page.ids.view).filter((e) => e.tag === 'h3').map((e) => e.textContent);
     expect(h3).toEqual(['Document', 'Title', 'Summary', 'Text']);
-    expect(t).toContain('Text that this page pulls in from elsewhere is shown as written and is not part of what you sign.');
+    expect(t).toContain('Each include is shown as its tag, which you do sign. The text it pulls in from elsewhere is not shown here and is not part of what you sign.');
     expect(t).not.toContain('Includes are shown as written. The text they pull in is not part of what you sign.');
     const shell = await (await fetch(`${base}/signing/${req.id}`)).text();
     expect(shell).toContain('.diff-del{background:rgba(220,0,0,.18)}');
