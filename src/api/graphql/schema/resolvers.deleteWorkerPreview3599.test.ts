@@ -32,6 +32,9 @@ const state = async () => ({
  memories: await db.memory.findMany({where:{appId:f.app.id},orderBy:{id:'asc'}}),
  sessions: await db.session.findMany({where:{appId:f.app.id},orderBy:{id:'asc'}}),
  tickers: await db.ticker.findMany({where:{appId:f.app.id},orderBy:{id:'asc'}}),
+ nodes: await db.node.findMany({where:{memory:{appId:f.app.id}},orderBy:{id:'asc'}}),
+ grants: await db.appGrant.findMany({where:{appId:f.app.id},orderBy:{id:'asc'}}),
+ members: await db.appMember.findMany({where:{appId:f.app.id},orderBy:{userId:'asc'}}),
  events: await events(), fences: await fences(),
 });
 beforeEach(async () => {
@@ -107,7 +110,7 @@ describe('#3599 deleteWorkerPreview contract', () => {
   expect(await remove()).toBe(true);
   expect(await db.agentTeamEvent.findMany({where:{id:claims[0].id}})).toEqual(claims);
  });
- it('real delete commits after the census and before an instructed claim: typed reference refusal, no partial claim', async () => {
+ it('real delete commits after the census and before an instructed claim: WORKER_NOT_FOUND, no partial claim', async () => {
   let deleted = false;
   const client = new Proxy(db,{get(object,key){
    if(key==='$transaction') return (callback:any,options:any)=>object.$transaction(tx=>callback(new Proxy(tx,{get(transaction,modelKey){
@@ -129,7 +132,8 @@ describe('#3599 deleteWorkerPreview contract', () => {
   }});
   const refusal = await error(preview(bound({db:client}),f.target.id,instruction));
   expect(deleted).toBe(true);
-  expect(refusal.extensions.code).toBe('WORKER_REFERENCE_NOT_FOUND');
+  // #3608: the preview door answers as the delete would. Other writers keep the fence refusal.
+  expect(refusal).toEqual({message:'Worker not found.',extensions:{code:'WORKER_NOT_FOUND',workerRef:f.target.id}});
   expect(await db.worker.findUnique({where:{id:f.target.id}})).toBeNull();
   expect(await db.agentTeamEvent.count({where:{appId:f.app.id,type:'worker.instruction-claimed'}})).toBe(0);
   expect(await db.agentTeamEvent.count({where:{appId:f.app.id,type:'worker.deleted'}})).toBe(1);
@@ -140,7 +144,7 @@ describe('#3599 deleteWorkerPreview contract', () => {
   expect(await preview(bound())).toEqual({workerId:f.target.id,attestationRequired:true});
   expect(await state()).toEqual(before);
  });
- for (const principal of ['app-key','impersonation','run','headless','launched','ambiguous'] as const) it(`${principal} is refused like real delete without writes`,async()=>{
+ for (const principal of ['app-key','impersonation','run','headless','launched','unknown-session'] as const) it(`${principal} is refused like real delete without writes`,async()=>{
   let c:Context;
   if(principal==='app-key') c={db,appId:f.app.id,appKeyId:generateId(),roles:[]} as Context;
   else if(principal==='impersonation') c=ctx({impersonation:{sessionId:generateId(),actorUserId:f.outsider.id,orgId:f.org.id,expiresAt:new Date('2099-01-01')}} as any);
@@ -148,7 +152,7 @@ describe('#3599 deleteWorkerPreview contract', () => {
   else {
    c=bound();
    if(principal==='launched') await db.session.update({where:{id:f.session.id},data:{launchOperationId:generateId(),launchHostId:generateId(),launchIssuedBy:'manager'}});
-   if(principal==='ambiguous') c=bound({sessionId:generateId()});
+   if(principal==='unknown-session') c=bound({sessionId:generateId()});
   }
   const before=await state();
   const got=await error(preview(c,f.target.id,principal==='headless'?undefined:instruction));
