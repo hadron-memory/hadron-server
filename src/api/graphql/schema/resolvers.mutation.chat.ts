@@ -1,3 +1,6 @@
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { personalOrgAgentLicenseHolds, personalOrgAgentTextAllowed } from '../../../lib/auth/personalOrgAgentInstall.js';
+import { bootPromptRefusal } from '../../../lib/bootPrompt/refusal.js';
 import { chatNotFoundError } from '../../../lib/chatNotFound.js';
 import { ENGINE_KEYS, engineState } from '../../../lib/chatRootEngineState.js';
 import { appInstallationWhere } from '../../../lib/appInstallations.js';
@@ -140,8 +143,18 @@ export async function serveChatPrompt(
   db: Context['db'],
   agent: { id: string; name: string; urn: string; personaRole: string | null },
   appId: string | null,
-  llmModel: string | null = null,
+  llmModel: string | null,
+  caller: Context,
 ): Promise<{ text: string; served: ServedBootPrompt; variables: Record<string, string> }> {
+  // The caller receives this text in systemMessage, so App participation alone cannot grant org text.
+  const current = await db.agent.findUnique({ where: { id: agent.id }, select: { id: true, organizationId: true, ownerUserId: true, visibility: true, deletedAt: true } });
+  if (!current || !(await canChatWithAgent(caller, current))) throw new AgentNotFoundError(agent.id);
+  if (appId) {
+    const app = await db.app.findUnique({ where: { id: appId }, select: { organizationId: true, ownerUserId: true } });
+    if (app && !(await personalOrgAgentTextAllowed(db, app, agent.id, caller.userId))) {
+      throw new AgentNotFoundError(agent.id);
+    }
+  }
   const served = await resolveServedBootPrompt(db, { surface: 'chat', appId, agent: { id: agent.id, name: agent.name } });
   const variables = { ...agentPlatformValues(agent), 'session.llmModel': llmModel ?? '' };
   // #3096 / cor:dmo:150:08: provenance label is record metadata, never another prompt variable.
@@ -223,6 +236,17 @@ export const chatMutations = {
         select: { id: true, organizationId: true, ownerUserId: true, visibility: true, deletedAt: true },
       });
       if (!gateRow || !(await canChatWithAgent(ctx, gateRow))) {
+        // #1148: an owner already knows their own retained install. Give its licence refusal,
+        // without widening the Agent read gate or exposing another person's installation.
+        if (gateRow && ctx.userId && !ctx.impersonation && !isRunPrincipal(ctx)) {
+          const knownInstall = await ctx.db.app.findFirst({where:{
+            ownerUserId:ctx.userId,organizationId:null,deletedAt:null,uninstalledAt:null,
+            ...(ctx.appId ? {id:ctx.appId} : {}),appAgents:{some:{agentId:resolvedAgentId}},
+          },select:{id:true,organizationId:true,ownerUserId:true}});
+          if(knownInstall && !(await personalOrgAgentLicenseHolds(ctx.db,knownInstall,resolvedAgentId))) {
+            throw bootPromptRefusal('BOOT_PROMPT_INSTALL_LICENSE_INACTIVE', { surface: 'chat', agentName: '' });
+          }
+        }
         throw new AgentNotFoundError(agentId);
       }
       // A session-bound App key chats only with its session's Agent: the chat
@@ -591,7 +615,7 @@ export const chatMutations = {
       // in the holding memory without weakening the chat's authority gate.
       // #2047 (S10): the boot prompt is resolved first, so an unserveable one refuses before any chat exists.
       const chatAppId = (await ctx.db.memory.findUnique({ where: { id: targetMemoryId }, select: { appId: true } }))?.appId ?? null;
-      const chatServed = await serveChatPrompt(ctx.db, agent, chatAppId, reportedModel);
+      const chatServed = await serveChatPrompt(ctx.db, agent, chatAppId, reportedModel, ctx);
       let systemMessage = promptContent;
       if (promptContent.includes('{{')) {
         const access =
@@ -1170,7 +1194,7 @@ export const chatMutations = {
         // Re-served on each chat turn so a newly approved revision takes effect.
         if (agent) {
           // #2047: the same refusal as a bind; and a chat records again only when its revision or filled values CHANGED (R37, #3096), never per unchanged message.
-          const chatServed = await serveChatPrompt(ctx.db, agent, memory?.appId ?? null, reportedModel);
+          const chatServed = await serveChatPrompt(ctx.db, agent, memory?.appId ?? null, reportedModel, ctx);
           await recordChatServedIfChanged(ctx.db, chatNode.id, agent.id, memory?.appId ?? null, chatServed);
           systemMessage = chatServed.text + '\n\n' + systemMessage;
         }

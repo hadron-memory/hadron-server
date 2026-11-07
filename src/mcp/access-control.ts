@@ -1,3 +1,4 @@
+import { personalOrgAgentTextAllowed } from '../lib/auth/personalOrgAgentInstall.js';
 import { listAppInstallations, loadAppInstallationPage } from '../lib/appInstallations.js';
 /**
  * MCP access-control: which memories can the caller read/write?
@@ -158,8 +159,9 @@ async function buildAppMemoryMap(
   const agents = selected.map(row => ({ ...row.agent, memoryItems: row.agent.memoryItems ?? [] }));
   const appInstalls = agents.map(agent=>({agent}));
   const licensedAgentIds = await activeAgentInstallLicenseIds(db, app, agents);
+  const textAdmissions = new Map(await Promise.all(agents.map(async agent => [agent.id,await personalOrgAgentTextAllowed(db,app,agent.id,opts.callerUserId)] as const)));
   const systemIds = agents
-    .filter((agent) => licensedAgentIds.has(agent.id) && agent.systemMemoryId !== null)
+    .filter((agent) => licensedAgentIds.has(agent.id) && textAdmissions.get(agent.id) && agent.systemMemoryId !== null)
     .map((agent) => agent.systemMemoryId!);
   const liveSystemRows = systemIds.length
     ? await db.memory.findMany({
@@ -642,13 +644,14 @@ export async function participantSystemMemoryFolds(
 ): Promise<Array<{ appId: string; map: Map<string, string> }>> {
   if (!principal.userId || isRunPrincipal(principal)) return [];
   const ids = await participantAppIds(db, principal, { includeMemberships: true });
-  return installedSystemMemoryFolds(db, ids);
+  return installedSystemMemoryFolds(db, ids, principal.userId);
 }
 
 /** #2233/#3233: one licence + own-definition policy for participant and run system-memory reads. */
 async function installedSystemMemoryFolds(
   db: PrismaClient,
   ids: string[],
+  userId?: string | null,
 ): Promise<Array<{ appId: string; map: Map<string, string> }>> {
   if (ids.length === 0) return [];
   const page = await loadAppInstallationPage(db, ids);
@@ -657,7 +660,8 @@ async function installedSystemMemoryFolds(
   const perApp = await Promise.all(apps.map(async (app) => {
     const agents = installations.filter(row=>row.appId===app.id).map(row=>row.agent);
     const licensed = await activeAgentInstallLicenseIds(db, app, agents);
-    return { appId: app.id, agents: agents.filter((a) => licensed.has(a.id) && a.systemMemoryId !== null) };
+    const textAdmissions = new Map(await Promise.all(agents.map(async agent => [agent.id,await personalOrgAgentTextAllowed(db,app,agent.id,userId)] as const)));
+    return { appId: app.id, agents: agents.filter((a) => licensed.has(a.id) && textAdmissions.get(a.id) && a.systemMemoryId !== null) };
   }));
   const wanted = [...new Set(perApp.flatMap((p) => p.agents.map((a) => a.systemMemoryId!)))];
   if (wanted.length === 0) return [];

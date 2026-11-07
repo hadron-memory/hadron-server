@@ -1,3 +1,4 @@
+import { personalOrgAgentTextAllowed } from './personalOrgAgentInstall.js';
 import { resolveAppInstallation } from '../appInstallations.js';
 /**
  * #2044 (S7), cor:agt:040:06 / cor:acl:010:01 — the AUDIENCE of an App's
@@ -118,7 +119,8 @@ export async function installMemoryAudience(
     // Participation died with the App; only a manager may still find and delete the record.
     return { read: false, record: manages, write: false, delete: manages };
   }
-  const participates = (await participantAppIds(client, principal, app)).length > 0;
+  const textAllowed = !memory.installOfAgentId || await personalOrgAgentTextAllowed(db,app,memory.installOfAgentId,principal.userId);
+  const participates = (await participantAppIds(client, principal, app)).length > 0 && textAllowed;
   // A detached install (its Agent was erased, R94 C) is no longer a customisation of anything: it
   // is read, found and deleted, never written.
   const installed = manages && memory.installOfAgentId
@@ -127,7 +129,7 @@ export async function installMemoryAudience(
   return {
     read: participates,
     record: participates || manages,
-    write: manages && installed,
+    write: manages && installed && textAllowed,
     delete: manages,
   };
 }
@@ -161,11 +163,10 @@ export async function readableInstallMemoryIds(
       class: 'system', deletedAt: null, isInstallMemory: true, appId: { not: null },
       app: { is: where },
     },
-    select: { id: true, appId: true, organizationId: true, ownerUserId: true, app: { select: { organizationId: true, ownerUserId: true } } },
+    select: { id: true, appId: true, installOfAgentId:true, organizationId: true, ownerUserId: true, app: { select: { organizationId: true, ownerUserId: true } } },
   });
-  return rows
-    .filter((r) => r.app && r.app.organizationId === r.organizationId && r.app.ownerUserId === r.ownerUserId)
-    .map((r) => r.id);
+  const admitted = await Promise.all(rows.map(async row => row.app && row.app.organizationId===row.organizationId && row.app.ownerUserId===row.ownerUserId && (!row.installOfAgentId || await personalOrgAgentTextAllowed(db,row.app,row.installOfAgentId,principal.userId)) ? row.id : null));
+  return admitted.filter((id):id is string=>id!==null);
 }
 
 /** The install memories a principal may WRITE (managers of a live App with the Agent installed). */

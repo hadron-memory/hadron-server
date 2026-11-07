@@ -68,6 +68,7 @@ describe('#1328 git sync', () => {
     expect(refused.error).toBeUndefined();
     expect(await db.node.count({ where: { memoryId, loc: { in: ['modern', 'legacy'] } } })).toBe(0);
     const report = JSON.parse((await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).lastSyncReport!);
+    expect(report.version).toBe(2); // #3612: a persisted attestation refusal is outside closed v1.
     expect(report.entries).toContainEqual(expect.objectContaining({ kind: 'attestation_refused', loc: 'modern', code: 'AUTHORING_ATTESTATION_MISSING' }));
 
     writeFrontmatterNode(join(repo(), 'modern.md'), { name: 'Modern', role: 'guide', authoredWith: `${taskId}@1` }, 'body');

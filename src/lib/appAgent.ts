@@ -1,3 +1,4 @@
+import { personalOrgAgentLicenseHolds } from './auth/personalOrgAgentInstall.js';
 import { orgAgentLicenseUsable } from './auth/orgAgentInstallLicense.js';
 import { listAppInstallations, resolveAppInstallation, type InstallationDb } from './appInstallations.js';
 /**
@@ -57,7 +58,7 @@ export async function activeAgentInstallLicenseIds(
     );
     for (const agent of agents) {
       if (agent.organizationId !== null && !liveOrgs.has(agent.organizationId)) continue;
-      if (agent.ownerUserId === app.ownerUserId || activeSubscriptions.has(agent.id)) {
+      if ((agent.ownerUserId === app.ownerUserId || activeSubscriptions.has(agent.id)) && await personalOrgAgentLicenseHolds(db,app,agent.id)) {
         licensed.add(agent.id);
       }
     }
@@ -152,7 +153,7 @@ export async function activeAppInstallLicenseIdsForAgent(
         licensed.add(appId);
       }
     } else if (app.ownerUserId !== null &&
-      (app.ownerUserId === agent.ownerUserId || activeSubscriptions.has(app.ownerUserId))) {
+      (app.ownerUserId === agent.ownerUserId || activeSubscriptions.has(app.ownerUserId)) && await personalOrgAgentLicenseHolds(db,app,agent.id)) {
       licensed.add(appId);
     }
   }
