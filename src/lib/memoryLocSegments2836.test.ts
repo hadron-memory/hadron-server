@@ -72,15 +72,32 @@ describe('#2836 eligible-row index: both walk legs scan it', () => {
     '%s: every scan of nodes is an index scan of the eligible-row index, chooser, walk legs and flat blocks',
     async (_label, parent) => {
       const q = locSegmentsWalkSql({ memoryIds: [memoryId], excludeNodeIds: [], parent, limit: 20, after: null });
-      // A cached prepared statement can switch to a GENERIC plan, planned without the bound values.
-      // EXPLAIN (GENERIC_PLAN) (PG16+) plans the application's own $n text that way, so the pin holds
-      // only if the predicate itself (the inlined literal) implies the index's; a bound list does not.
+      // A cached prepared statement can switch to a GENERIC plan, planned without the bound values, so
+      // the pin holds only if the predicate itself (the inlined literal) implies the index's; a bound
+      // list does not. EXPLAIN (GENERIC_PLAN) would plan the application's own $n text that way but
+      // needs PG16+, below the PG15 floor in README.md. PREPARE + plan_cache_mode = force_generic_plan
+      // + EXPLAIN EXECUTE (PG12+) plans the same text generically on every supported version.
       // Prisma refuses $n text without values, so this goes over a raw connection on the per-worker DATABASE_URL.
       const pg = new Client({ connectionString: process.env.DATABASE_URL });
       await pg.connect();
+      const literal = (v: unknown): string => {
+        if (v === null) return 'NULL';
+        if (Array.isArray(v)) return v.length ? `ARRAY[${v.map(literal).join(',')}]::text[]` : 'ARRAY[]::text[]';
+        if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+        if (typeof v === 'string') return pg.escapeLiteral(v);
+        throw new Error(`unsupported fixture parameter ${typeof v}`);
+      };
       let plan: PlanNode;
       try {
-        plan = (await pg.query(`EXPLAIN (FORMAT JSON, GENERIC_PLAN) ${q.text}`)).rows[0]['QUERY PLAN'][0].Plan;
+        await pg.query(`PREPARE seg2836 AS ${q.text}`);
+        await pg.query('SET plan_cache_mode = force_generic_plan');
+        const execute = `EXECUTE seg2836(${q.values.map(literal).join(',')})`;
+        plan = (await pg.query(`EXPLAIN (FORMAT JSON) ${execute}`)).rows[0]['QUERY PLAN'][0].Plan;
+        // Prove the plan observed was the generic one the cached statement would use, not a custom plan.
+        await pg.query(execute);
+        const used = await pg.query("SELECT generic_plans::int AS g, custom_plans::int AS c FROM pg_prepared_statements WHERE name = 'seg2836'");
+        expect(used.rows[0].c).toBe(0);
+        expect(used.rows[0].g).toBeGreaterThan(0);
       } finally {
         await pg.end();
       }
