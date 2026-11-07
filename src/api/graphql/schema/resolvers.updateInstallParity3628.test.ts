@@ -1,0 +1,89 @@
+/** #3628 item4, ruling0234: update install-door refusals after participant/manager gates. */
+import { beforeEach, expect, it, vi } from 'vitest';
+import { db } from '../../../integrations/db/client.js';
+import { cleanDb, createDbAgentImport, createDbAgentOrgGrant, createDbAppMember } from '../../../test/helpers.js';
+import { generateId } from '../../../lib/id.js';
+import { resolvers, type Context } from './resolvers.js';
+vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
+const M = resolvers.Mutation as any;
+beforeEach(() => cleanDb(db));
+
+async function fixture(kind: 'ROW' | 'DERIVED' | 'absent', licensed = true, customised = true) {
+  const key = generateId().toLowerCase();
+  const org = (name: string) => db.organization.create({ data: { name, urn: `${name}-${key}.example` } });
+  const [holder, owner, importer] = await Promise.all([org('holder'), org('owner'), org('importer')]);
+  const manager = await db.user.create({ data: { handle: `manager-${key}`, roles: ['READER'] } });
+  const member = await db.user.create({ data: { handle: `member-${key}`, roles: ['READER'] } });
+  const stranger = await db.user.create({ data: { handle: `stranger-${key}`, roles: ['READER'] } });
+  await db.orgMember.create({ data: { organizationId: holder.id, userId: manager.id, role: 'ADMIN' } });
+  const app = await db.app.create({ data: { organizationId: holder.id, name: 'Parity', urn: `${holder.urn}:app` } });
+  await createDbAppMember(db, app.id, member.id, 'member');
+  const target = await db.agent.create({ data: { organizationId: owner.id, name: 'Target', urn: `${owner.urn}:target` } });
+  const parent = await db.agent.create({ data: { organizationId: importer.id, name: 'Parent', urn: `${importer.urn}:parent` } });
+  await db.appAgent.create({ data: { appId: app.id, agentId: parent.id } });
+  await createDbAgentOrgGrant(db, importer.id, target.id);
+  if (licensed) await createDbAgentOrgGrant(db, holder.id, target.id);
+  if (kind === 'ROW') await db.appAgent.create({ data: { appId: app.id, agentId: target.id } });
+  if (kind === 'DERIVED') await createDbAgentImport(db, parent.id, target.id);
+  let memoryId: string | undefined;
+  if (customised) {
+    const memory = await db.memory.create({ data: { organizationId: holder.id, appId: app.id, installOfAgentId: target.id,
+      isInstallMemory: true, class: 'system', name: 'Install', urn: `${holder.urn}:install` } });
+    memoryId = memory.id;
+    await db.node.create({ data: { memoryId, loc: 'source', name: 'Source', content: 'before' } });
+  }
+  const context = (who = manager.id): Context => ({ db, userId: who, roles: ['READER'] });
+  const input = { install: { appRef: app.id, agentRef: target.id }, loc: 'source', content: 'after' };
+  return { holder, owner, importer, manager, member, stranger, app, target, parent, memoryId, context, input };
+}
+async function snapshot() {
+  return { memories: await db.memory.findMany({ orderBy: { id: 'asc' } }), nodes: await db.node.findMany({ orderBy: { id: 'asc' } }), revisions: await db.nodeRevision.findMany({ orderBy: { id: 'asc' } }) };
+}
+async function refuses(f: Awaited<ReturnType<typeof fixture>>, code: string, ctx = f.context()) {
+  const before = await snapshot();
+  await expect(M.updateNode(null, { input: f.input }, ctx)).rejects.toMatchObject({ extensions: { code } });
+  expect(await snapshot()).toEqual(before);
+}
+
+it.each([false, true])('unlicensed derived refusal is AGENT_ORG_GRANT_REQUIRED, customised=%s', async customised => {
+  await refuses(await fixture('DERIVED', false, customised), 'AGENT_ORG_GRANT_REQUIRED');
+});
+it.each([false, true])('absent installation refuses before retained memory lookup, customised=%s', async customised => {
+  await refuses(await fixture('absent', true, customised), 'AGENT_NOT_INSTALLED');
+});
+it.each(['ROW', 'DERIVED'] as const)('%s licensed with no install memory keeps INSTALL_MEMORY_NOT_FOUND and creates nothing', async kind => {
+  await refuses(await fixture(kind, true, false), 'INSTALL_MEMORY_NOT_FOUND');
+});
+it.each(['ROW', 'DERIVED'] as const)('%s licensed manager updates the existing node without creating another memory', async kind => {
+  const f = await fixture(kind); const before = await db.memory.count();
+  const answer = await M.updateNode(null, { input: f.input }, f.context());
+  expect(answer.content).toBe('after');
+  expect((await db.node.findFirstOrThrow({ where: { memoryId: f.memoryId, loc: 'source' } })).content).toBe('after');
+  expect(await db.memory.count()).toBe(before);
+});
+for (const kind of ['DERIVED', 'absent'] as const) for (const customised of [false, true]) {
+  it(`${kind} customised=${customised}: participant non-manager learns no install refusal`, async () => {
+    const f = await fixture(kind, false, customised); await refuses(f, 'FORBIDDEN', f.context(f.member.id));
+  });
+  it(`${kind} customised=${customised}: stranger cannot distinguish target state`, async () => {
+    const f = await fixture(kind, false, customised); await refuses(f, 'APP_NOT_FOUND', f.context(f.stranger.id));
+  });
+}
+it('create:false is update-only: a missing loc creates no node, memory or revision', async () => {
+  const f = await fixture('DERIVED'); f.input.loc = 'absent';
+  await refuses(f, 'NODE_NOT_FOUND');
+});
+it('rechecks manager authority under the shared transaction before touching content', async () => {
+  const f = await fixture('DERIVED');
+  let crossed = false;
+  const wrapped = new Proxy(db, { get(target, key) {
+    if (key === '$transaction') return async (work: any, options: any) => {
+      crossed = true;
+      await db.orgMember.update({ where: { organizationId_userId: { organizationId: f.holder.id, userId: f.manager.id } }, data: { role: 'READER' } });
+      return target.$transaction(work, options);
+    };
+    const value = Reflect.get(target, key); return typeof value === 'function' ? value.bind(target) : value;
+  } });
+  await refuses(f, 'FORBIDDEN', { ...f.context(), db: wrapped });
+  expect(crossed).toBe(true);
+});
