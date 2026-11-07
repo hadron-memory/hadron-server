@@ -98,6 +98,27 @@ describe('#3654 a refused sendChatMessage turn persists nothing', () => {
     expect(await snapshot(start.chatId)).toEqual(before);
   });
 
+  it('a stage that appears between the early read and the chat lock is gated inside the write transaction (nothing persists)', async () => {
+    const node = await compiled('v1');
+    const start = await M.startChat({}, { agentId: agent.id }, ctx());
+    const chat = await chatNodeByLocOrThrow(db, start.chatId);
+    // Parked with no stage: the early gate does not apply to this turn.
+    await db.node.update({ where: { id: chat.id }, data: { data: { ...(chat.data as object), conversationName: 'research', stageName: '' } } });
+    const before = await snapshot(start.chatId);
+    await db.node.update({ where: { id: node }, data: { deletedAt: new Date() } });
+    // A concurrent turn gives the chat its stage after this turn read the root, before it takes the chat lock.
+    const original = db.memory.findUniqueOrThrow.bind(db.memory);
+    const spy = vi.spyOn(db.memory, 'findUniqueOrThrow').mockImplementationOnce(((args: any) => {
+      return db.node.update({ where: { id: chat.id }, data: { data: { ...(chat.data as object), conversationName: 'research', stageName: 'scope' } } }).then(() => original(args));
+    }) as any);
+    try {
+      expect(await code(M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'racing turn' }, ctx()))).toBe('BOOT_PROMPT_TARGET_DELETED');
+    } finally { spy.mockRestore(); }
+    const after = await snapshot(start.chatId);
+    expect(after.messages).toBe(before.messages);
+    expect(after.served).toBe(before.served);
+  });
+
   it('the happy path still writes the turn', async () => {
     await compiled('v1');
     const start = await M.startChat({}, { agentId: agent.id }, ctx());

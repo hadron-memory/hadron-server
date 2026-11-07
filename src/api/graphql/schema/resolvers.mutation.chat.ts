@@ -1092,7 +1092,13 @@ export const chatMutations = {
         ctx.db,
         chatRef,
         memEncInfo,
-        async ({ tx, seq, msgNum }) => {
+        async ({ tx, seq, msgNum, chatData: lockedChatData }) => {
+          // #3654: the stage the turn will serve is judged on the root read under the chat lock. A stage that appeared since the
+          // early read (a concurrent turn moved the chat) is gated HERE, before the insert, so the refusal rolls the whole
+          // transaction back: nothing persists. Only a chat the early gate skipped (no stage then) reaches this.
+          if (!chatServed && agent && systemMemoryId && lockedChatData.conversationName && lockedChatData.stageName) {
+            chatServed = await serveChatPrompt(ctx.db, agent, memory?.appId ?? null, reportedModel, ctx);
+          }
           const msgId = generateId();
           const msgLoc = `${chatId}:messages:${msgNum}-${generateId().slice(-8)}-user`;
           userMsgRef = { id: msgId, loc: msgLoc, memoryId: chatNode.memoryId };
