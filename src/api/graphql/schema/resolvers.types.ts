@@ -99,6 +99,7 @@ import {
   sessionScopeFilter,
   CONTENT_RAW_DEFAULT,
 } from './resolvers.helpers.js';
+import { loadValidationTaskSet } from './resolvers.validationTaskSet.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { publicReadableMemoryWhere } from '../../../lib/orgDiscoverability.js';
 import { memoryRowToRef, agentRowToRef } from './publicRefs.js';
@@ -1116,6 +1117,7 @@ export const typeResolvers = {
       if (!selected.ok) throw selected.error;
       return selected.value;
     },
+    validationTasks: (n: { id: string }, _: unknown, ctx: Context) => loadValidationTaskSet(ctx, n.id),
     revision: async (
       n: SnapshotSourceNode & {
         revSeq: number;
