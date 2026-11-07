@@ -1,6 +1,6 @@
 /**
  * #3653 / cor:agt:040:10 (ruling 0235): serving a personal App's install of an organization's Agent checks the App
- * owner's licence, not the caller, so an App key with no user is served a worker's briefing while that licence holds.
+ * owner's licence, not the caller, so an App key with no user is served a worker's briefing and a chat while that licence holds.
  * Reads stay the reader's: this file pins that they did not move. A run has no case here, because it can't exist on a
  * personal App: see the last pin, and the trace on #3653 (6702873777).
  */
@@ -10,6 +10,8 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { composeWorkerPrompt } from './resolvers.worker.js';
+import { serveChatPrompt } from './resolvers.mutation.chat.js';
+import { canChatWithAgent, chatCarrierApps } from './agentChatAccess.js';
 import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds.js';
@@ -27,6 +29,21 @@ const revokeOwnerLicence = () =>
   db.agentSubscription.update({ where: { userId_agentId: { userId: ownerId, agentId } }, data: { revokedAt: new Date() } });
 const endOwnerMembership = () =>
   db.orgMember.update({ where: { organizationId_userId: { organizationId: orgId, userId: ownerId } }, data: { deletedAt: new Date() } });
+const agentRow = () => db.agent.findUniqueOrThrow({
+  where: { id: agentId },
+  select: { id: true, name: true, urn: true, personaRole: true, organizationId: true, ownerUserId: true, visibility: true, deletedAt: true },
+});
+const seedConversation = async () => {
+  const nodes = [
+    { loc: 'conversations', name: 'conversations' },
+    { loc: 'conversations:research', name: 'research', data: { stageOrder: ['scope'], isSetup: false } },
+    { loc: 'conversations:research:scope', name: 'scope', data: { promptRef: 'prompts:research:scope' } },
+    { loc: 'prompts', name: 'prompts' },
+    { loc: 'prompts:research', name: 'research' },
+    { loc: 'prompts:research:scope', name: 'scope', content: 'Scope the research.' },
+  ];
+  for (const n of nodes) await db.node.create({ data: { ...n, id: generateId(), memoryId: systemMemoryId, nodeType: 'system' } });
+};
 const castWorker = async () => {
   const made = await mutation.castWorker({}, { appRef: appId, agentRef: agentId, name: 'Briefed' }, person());
   return db.worker.findUniqueOrThrow({ where: { id: made.id } });
@@ -92,6 +109,66 @@ describe('worker briefing read', () => {
     const read = await composeWorkerPrompt(person(outsiderId), worker);
     expect(read.text).toBeNull();
     expect(read.refusal).toBe('FORBIDDEN');
+  });
+});
+
+describe('chat serve', () => {
+  const keyInSession = async (userId: string | null) => {
+    const memory = await db.memory.create({ data: {
+      id: generateId(), organizationId: orgId, urn: `publisher3653.test:session-${generateId().slice(-8)}`,
+      name: 'session memory', appId, userMemoryOfAgentId: agentId,
+      ...(userId ? { class: 'personal' as const, userId } : { class: 'app' as const }),
+    } });
+    const session = await db.session.create({ data: {
+      id: generateId(), appId, userId, agentId, memoryId: memory.id, type: 'CHATBOT', startedAt: new Date(),
+    } });
+    return appKey(appId, session.id);
+  };
+
+  it.each([['its session user', () => ownerId], ['an anonymous session', () => null]])(
+    'serves a session-bound App key with %s through startChat', async (_label, sessionUser) => {
+      await seedConversation();
+      const started = await mutation.startChat({}, { agentId, scope: 'private' }, await keyInSession(sessionUser()));
+      expect(started.systemMessage).toContain(SENTINEL);
+    },
+  );
+
+  // A chat needs a target memory, which only a session gives a key. So a key with no session passes the gate here and
+  // stops where it stops on any install: no more than on an ordinary one, and no longer as an unknown Agent.
+  it('stops a key with no session at the target memory, the same as an ordinary install', async () => {
+    await seedConversation();
+    const ordinaryAppId = (await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'Ordinary', urn: 'publisher3653.test:ordinary' } })).id;
+    await db.appAgent.create({ data: { appId: ordinaryAppId, agentId } });
+    const answer = (ctx: Context) => mutation.startChat({}, { agentId, scope: 'private' }, ctx).catch((error: Error) => error.message);
+    expect(await answer(appKey(ordinaryAppId))).toBe('No target memory available for this chat');
+    expect(await answer(appKey())).toBe('No target memory available for this chat');
+  });
+
+  it('admits a pure App key at the gate and at the serve', async () => {
+    expect((await chatCarrierApps(appKey(), agentId)).map(app => app.id)).toEqual([appId]);
+    expect(await canChatWithAgent(appKey(), await agentRow())).toBe(true);
+    expect((await serveChatPrompt(db, await agentRow(), appId, null, appKey())).text).toContain(SENTINEL);
+  });
+
+  it.each([['revoked licence', revokeOwnerLicence], ['owner left the organization', endOwnerMembership]])(
+    'refuses a pure App key after %s, as an unknown Agent', async (_label, lapse) => {
+      await seedConversation();
+      await lapse();
+      expect(await chatCarrierApps(appKey(), agentId)).toEqual([]);
+      await expect(mutation.startChat({}, { agentId, scope: 'private' }, await keyInSession(ownerId))).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
+      await expect(serveChatPrompt(db, await agentRow(), appId, null, appKey())).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
+    },
+  );
+
+  it('gives another App key no carrier', async () => {
+    expect(await chatCarrierApps(appKey(otherAppId), agentId)).toEqual([]);
+    await expect(mutation.startChat({}, { agentId, scope: 'private' }, appKey(otherAppId))).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
+  });
+
+  it('keeps a person outside the organization refused, as built', async () => {
+    await expect(mutation.startChat({}, { agentId, scope: 'private' }, { ...person(outsiderId), appId })).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
+    await expect(serveChatPrompt(db, await agentRow(), appId, null, { ...person(outsiderId), appId }))
+      .rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
   });
 });
 
