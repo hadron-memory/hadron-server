@@ -271,6 +271,25 @@ describe('#2944 item 5: K filtering by itself sees its own events', () => {
     // With no key and no resource named, the key still gets the empty own-activity result (#2817).
     expect(await list({}, asKey(keyK))).toEqual([]);
   });
+
+  it('naming a node, a loc or a memory it can read, the key gets only its own events there, on both surfaces (blind P3, #3714)', async () => {
+    const node = await db.node.create({ data: { id: generateId(), memoryId: appMem.id, loc: 'u2944:self', name: 's', content: 's' } });
+    const mine = generateId(), sibling = generateId(), user = generateId(), keyless = generateId();
+    await db.usageEvent.createMany({ data: [
+      ev({ id: mine, appKeyId: keyK, memoryId: appMem.id, nodeId: node.id, nodeLoc: 'u2944:self' }),
+      ev({ id: sibling, appKeyId: keyK2, memoryId: appMem.id, nodeId: node.id, nodeLoc: 'u2944:self' }),
+      ev({ id: user, userId: mgr.id, memoryId: appMem.id, nodeId: node.id, nodeLoc: 'u2944:self' }),
+      { ...ev({ id: keyless, memoryId: appMem.id, nodeId: node.id, nodeLoc: 'u2944:self' }), appId: app.id },
+    ] });
+    for (const run of [list, async (a: Record<string, unknown>, c: Context) => (await page(a, c)).items]) {
+      expect(ids(await run({ appKey: keyK, nodeId: node.id }, asKey(keyK)))).toEqual([mine]);
+      expect(ids(await run({ appKey: keyK, loc: 'u2944:self' }, asKey(keyK)))).toEqual([mine]);
+      expect(ids(await run({ appKey: keyK, memoryId: appMem.id }, asKey(keyK)))).toEqual([mine]);
+    }
+    expect((await page({ appKey: keyK, nodeId: node.id }, asKey(keyK))).total).toBe(1);
+    // The sibling key filtering by itself on the same node gets only its own row.
+    expect(ids(await list({ appKey: keyK2, nodeId: node.id }, asKey(keyK2)))).toEqual([sibling]);
+  });
 });
 
 describe('#2944 item 3: a key the caller may not filter by answers exactly as a nonexistent key', () => {
