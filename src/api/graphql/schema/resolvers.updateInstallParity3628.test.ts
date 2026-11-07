@@ -172,3 +172,26 @@ for (const kind of ['ROW', 'DERIVED'] as const) {
     } finally { await server.stop(); }
   });
 }
+
+for (const door of ['createNode', 'updateNode'] as const) for (const state of ['live', 'uninstalled', 'deleted-org', 'deleted-owner', 'deleted-app'] as const) {
+  it(`${door} conceals ${state} App state from a stranger before anchor liveness`, async () => {
+    const f = await fixture('ROW');
+    let appRef = f.app.id;
+    if (state === 'uninstalled') await db.app.update({ where: { id: f.app.id }, data: { uninstalledAt: new Date() } });
+    if (state === 'deleted-org') await db.organization.update({ where: { id: f.holder.id }, data: { deletedAt: new Date() } });
+    if (state === 'deleted-app') await db.app.update({ where: { id: f.app.id }, data: { deletedAt: new Date() } });
+    if (state === 'deleted-owner') {
+      const owner = await db.user.create({ data: { handle: `retired-${generateId().toLowerCase()}`, roles: [] } });
+      const app = await db.app.create({ data: { ownerUserId: owner.id, name: 'Personal', urn: `personal-${generateId().toLowerCase()}:app` } });
+      await db.appAgent.create({ data: { appId: app.id, agentId: f.target.id } });
+      await db.user.update({ where: { id: owner.id }, data: { deletedAt: new Date() } });
+      appRef = app.id;
+    }
+    const before = await snapshot();
+    const input = { ...f.input, install: { ...f.input.install, appRef }, ...(door === 'createNode' ? { name: 'Refused', loc: 'refused-create' } : {}) };
+    const result = await M[door](null, { input }, f.context(f.stranger.id)).then(
+      () => null, (error: any) => error.extensions?.code ?? error.code);
+    expect(result).toBe('APP_NOT_FOUND');
+    expect(await snapshot()).toEqual(before);
+  });
+}

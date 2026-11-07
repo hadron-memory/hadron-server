@@ -142,3 +142,17 @@ for (const kind of ['ROW', 'DERIVED'] as const) {
     else expect(await db.appAgentCustomization.findUnique({ where: key })).toBeNull();
   });
 }
+
+it.each([false, true])('unlicensed DERIVED %s refuses before commit and preserves pointer storage', async clear => {
+  const f = await fixture('DERIVED');
+  const owner = await db.organization.create({ data: { name: 'Foreign owner', urn: `foreign-${generateId().toLowerCase()}.example` } });
+  await db.agent.update({ where: { id: f.agent.id }, data: { organizationId: owner.id } });
+  const args = { appRef: f.app.id, agentRef: f.agent.id, nodeRef: f.node.id };
+  if (clear) await (resolvers.Mutation as any).setAppAgentBootPrompt(null, args, f.ctx);
+  await db.agentOrgGrant.deleteMany({ where: { agentId: f.agent.id } });
+  const key = { appId_agentId: { appId: f.app.id, agentId: f.agent.id } };
+  const before = await db.appAgentCustomization.findUnique({ where: key });
+  await expect((resolvers.Mutation as any).setAppAgentBootPrompt(null,
+    { ...args, nodeRef: clear ? null : f.node.id }, f.ctx)).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
+  expect(await db.appAgentCustomization.findUnique({ where: key })).toEqual(before);
+});
