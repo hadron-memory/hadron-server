@@ -1,7 +1,7 @@
 # pg3601: bounded PostgreSQL lab for server#3601
 
 Host tooling for the proposal
-`hrn:node:hadronmemory.com:hadron-dev-team-hugo:proposals:3601-bounded-pg` (r3).
+`hrn:node:hadronmemory.com:hadron-dev-team-hugo:proposals:3601-bounded-pg` (r4).
 **Nothing here runs without Holger's register rows A and B, which quote these files' hashes.**
 Not a product change, and not part of any PR.
 
@@ -24,3 +24,7 @@ Order (one attempt, never re-armed):
 8. `teardown.sh normal|lease|boot`: deletes everything, writes the proof, then runs `audit-lifecycle.sh` (CLEAN or INCONCLUSIVE).
 
 `stop.sh` is fired only by the stop timer. Every exec goes through the declared-exec ledger in `common.sh`.
+
+Inside the window (verify-start to teardown-done) nothing uses `incus file`: in Incus 6.0.4 it goes over the SFTP API, which writes no lifecycle event. Files go in as declared execs with the bytes on stdin (`put_file`), and the in-instance sha256 is compared. The audit therefore covers execs plus instance, config and storage lifecycle only. It cannot see SFTP file access.
+
+systemd 257 prints `NextElapseUSecMonotonic` as a timespan, so it is parsed with `span_us` and never read as an integer.

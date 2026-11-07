@@ -83,6 +83,10 @@ echo "role census:"; psqlq "SELECT rolname, rolsuper, rolinherit, rolcreaterole,
 echo "memberships:"; psqlq "SELECT m.rolname||' member of '||r.rolname||' admin='||a.admin_option||' inherit='||a.inherit_option||' set='||a.set_option FROM pg_auth_members a JOIN pg_roles r ON r.oid=a.roleid JOIN pg_roles m ON m.oid=a.member ORDER BY 1"
 echo "hba rules:"; psqlq "SELECT type, database, user_name, auth_method, options FROM pg_hba_file_rules ORDER BY rule_number"
 echo "ident map:"; psqlq "SELECT map_name, sys_name, pg_username FROM pg_ident_file_mappings ORDER BY 1,2,3"
+# r4 P3-4: the hba rules are checked exactly, not just printed.
+check hba.rules "local|all|postgres|peer|;local|pg3601|lab_writer|peer|map=pg3601" "$(psqlq "SELECT string_agg(type||'|'||array_to_string(database,',')||'|'||array_to_string(user_name,',')||'|'||auth_method||'|'||coalesce(array_to_string(options,','),''), ';' ORDER BY rule_number) FROM pg_hba_file_rules")"
+check hba.errors 0 "$(psqlq 'SELECT count(*) FROM pg_hba_file_rules WHERE error IS NOT NULL')"
+check adapter.env "pg3601 lab_writer" "$(ix sh -c '. /opt/pg3601/adapter/pg3601.env; echo "$DBNAME $WRITER_ROLE"')"
 check ident.map "pg3601|runner|lab_writer" "$(psqlq "SELECT string_agg(map_name||'|'||sys_name||'|'||pg_username, ',') FROM pg_ident_file_mappings")"
 
 echo "## V6 write-path audit inside the postmaster mount namespace, as postgres"
@@ -94,7 +98,14 @@ echo "## V7 binary applicability"
 echo "version: $(psqlq 'SELECT version()')"
 ix dpkg-query -W 'postgresql-17' 'postgresql-client-17' 'postgresql-common' 'libpq5'
 check postgresql-17.version "$PG_VERSION" "$(ix dpkg-query -W -f='${Version}' postgresql-17)"
-ix sh -c "/usr/lib/postgresql/17/bin/pg_controldata /pgvol/data | grep -E 'Database block size|WAL block size|Maximum size of a TOAST chunk|Database cluster state'"
+ctl=$(ix sh -c "/usr/lib/postgresql/17/bin/pg_controldata /pgvol/data | grep -E 'Database block size|WAL block size|Maximum size of a TOAST chunk|Database cluster state'")
+echo "$ctl"
+# r4 P3-6: checked, not printed. The binary applicability acceptance
+# (riana:reviews:3601-binary-applicability-pg17-11) is conditional on these.
+cdv() { awk -F: -v k="$1" '$1==k{gsub(/[ \t]/,"",$2); print $2}' <<<"$ctl"; }
+check controldata.block_size 8192 "$(cdv 'Database block size')"
+check controldata.wal_block_size 8192 "$(cdv 'WAL block size')"
+check controldata.toast_chunk 1996 "$(cdv 'Maximum size of a TOAST chunk')"
 echo "deb closure: $(sha256sum "$DEBS/SHA256SUMS")"
 
 echo "## V8 detection: lease timer, monitor identity, lifecycle self-test"
@@ -115,6 +126,29 @@ for line in open(sys.argv[1]):
 print("instance-exec events with argv:",n)
 sys.exit(0 if n>0 else 1)
 PY
+# r4 P2-E(b): what the log shows for setup's `incus file push` calls (SFTP in
+# Incus 6.0.4). Recorded, not gated: no file transfer happens in the window,
+# so the audit treats any logged file event there as undeclared.
+python3 -I - "$LIFECYCLE_LOG" "$RECEIPTS/marks.jsonl" <<'PY' || true
+import json,sys
+from datetime import datetime
+import re
+def jl(p):
+    for l in open(p):
+        try: yield json.loads(l)
+        except ValueError: pass
+t0=min((m["t"] for m in jl(sys.argv[2]) if m.get("mark")=="setup-start"),default=0)
+def epoch(ts):
+    m=re.match(r"(.*?\.\d{1,6})\d*(Z|[+-]\d\d:\d\d)$",ts) or re.match(r"(.*?)(Z|[+-]\d\d:\d\d)$",ts)
+    return datetime.fromisoformat(m.group(1)+("+00:00" if m.group(2)=="Z" else m.group(2))).timestamp()
+acts={}
+for e in jl(sys.argv[1]):
+    md=e.get("metadata",{})
+    if "pg3601-run" in md.get("source","") and "file" in md.get("action","") and epoch(e["timestamp"])>=t0:
+        acts[md["action"]]=acts.get(md["action"],0)+1
+print(f"file lifecycle events since setup-start (setup made 3 push invocations): {acts or 'none'}")
+PY
+echo "COVERAGE: file access over the Incus SFTP API is not lifecycle-logged in Incus 6.0.4; the audit covers execs and instance, config and storage lifecycle only."
 echo "NOTE: lifecycle.jsonl, the ledger and the timers are uid-988-writable: policy, not a control."
 
 echo "## RESULT fails=$fails"

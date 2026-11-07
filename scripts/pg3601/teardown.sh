@@ -8,6 +8,7 @@ reason=${1:-normal}
 mark "teardown-start:$reason"
 systemctl --user show pg3601-lease.timer -p ActiveState -p NextElapseUSecMonotonic > "$RECEIPTS/lease-timer.end" 2>&1 || true
 monitor_identity > "$RECEIPTS/monitor.end" 2>&1 || true
+[[ -e $RECEIPTS/stop-timer.handover ]] && { stop_timer_identity > "$RECEIPTS/stop-timer.end" 2>&1 || true; }   # r4 P3-2
 "${INCUS[@]}" delete --force "$INSTANCE" 2>&1 | tee -a "$RECEIPTS/events.log" || true
 "${INCUS[@]}" storage volume delete "$POOL" "$VOLUME" 2>&1 | tee -a "$RECEIPTS/events.log" || true
 "${INCUS[@]}" profile delete "$PROFILE" 2>&1 | tee -a "$RECEIPTS/events.log" || true

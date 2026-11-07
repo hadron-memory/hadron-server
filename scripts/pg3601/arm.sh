@@ -31,6 +31,9 @@ systemctl --user daemon-reload
 systemctl --user enable --quiet pg3601-boot-teardown.service
 systemd-run --user --quiet --unit=pg3601-lease --on-active=60min \
   --timer-property=AccuracySec=1s "$here/teardown.sh" lease
+# r4 P3-3: the lease start, measured right after the timer started (so the
+# deadline is at most 3600 s after it); handover uses this, never deadline-3600.
+python3 -I -c 'import time; print(int(time.clock_gettime(time.CLOCK_MONOTONIC)*1e6))' > "$RECEIPTS/lease-started.us"
 systemctl --user show pg3601-lease.timer -p ActiveState -p NextElapseUSecMonotonic > "$RECEIPTS/lease-timer.armed"
 sleep 1; monitor_identity > "$RECEIPTS/monitor.armed"
 [[ $(sed -n 's/^ActiveState=//p' "$RECEIPTS/monitor.armed") == active ]] || die "lifecycle monitor not active"

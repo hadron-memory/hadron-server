@@ -11,10 +11,17 @@
 #  - the monitor's InvocationID/ActiveEnter/NRestarts are identical at arm,
 #    verify, handover, close and end, and it was active (P2-A);
 #  - Atilla made exactly ONE exec, the launch;
-#  - declared file pushes match instance-file-pushed events by count;
 #  - before teardown-start, no other pg3601 lifecycle event (config, stop,
-#    volume, profile ...); the lease timer unchanged at arm/verify/handover/end;
-#  - the 30-min stop did not fire.
+#    volume, profile, and any file event: r4 moved every in-window transfer to
+#    declared stdin execs, so a logged file event is undeclared by definition);
+#  - the lease timer unchanged at arm/verify/handover/end;
+#  - the 30-min stop timer's ActiveState/NextElapse/InvocationID unchanged at
+#    handover, close and end (r4 P3-2), and it did not fire.
+# COVERAGE (r4 P2-E): file access over the Incus SFTP API (`incus file
+# push|pull|edit|mount`) writes no lifecycle event in Incus 6.0.4. The audit
+# covers execs and instance, config and storage lifecycle only; it cannot see
+# SFTP file access by any uid-988 session. verify.sh V8 records what the log
+# showed for setup's pushes.
 # Times are compared as float epoch seconds (Incus RFC3339Nano parsed; marks
 # and ledger written with time.time()).
 source "$(dirname "$0")/common.sh"
@@ -44,11 +51,10 @@ start=start or 0; end=end or 9e18; tstart=tstart or end
 print(f"window {start:.3f} .. {end:.3f} (teardown-start {tstart:.3f})")
 led=[e for e in jl(ledf) if start-1<=e["t"]<=end]
 want=Counter(tuple(e["argv"]) for e in led if e.get("kind","exec")=="exec")
-pushes=sum(1 for e in led if e.get("kind")=="file-push")
 atilla=[e for e in led if e.get("who")=="atilla"]
 if len(atilla)!=1 or atilla[0]["argv"]!=["/opt/pg3601/adapter/launch.sh"]:
     fails.append(f"Atilla execs: expected exactly the one launch, got {[e['argv'] for e in atilla]}")
-got=Counter(); other=[]; pushed=0
+got=Counter(); other=[]
 for e in jl(logf):
     md=e.get("metadata",{}); src=md.get("source","")
     if "pg3601-" not in src: continue
@@ -58,7 +64,6 @@ for e in jl(logf):
     if a=="instance-exec":
         cmd=(md.get("context") or {}).get("command")
         got[tuple(cmd) if isinstance(cmd,list) else ("<no argv>",)]+=1
-    elif a=="instance-file-pushed": pushed+=1
     elif t<tstart and not ("stop-fired" in marks and a in ("instance-stopped","instance-shutdown")):
         other.append((e["timestamp"],a,src))
 undeclared=got-want; unlogged=want-got
@@ -66,7 +71,6 @@ if undeclared: fails.append(f"undeclared execs: {dict(undeclared)}")
 if unlogged: fails.append(f"declared execs missing from the log (monitor gap): {dict(unlogged)}")
 for hb in ("open","close"):
     if got[("sh","-c",f"echo pg3601-heartbeat-{hb}")]<1: fails.append(f"heartbeat {hb} not logged")
-if pushed!=pushes: fails.append(f"file pushes: declared {pushes}, logged {pushed}")
 if other: fails.append(f"undeclared lifecycle events before teardown: {other}")
 def props(f):
     p=os.path.join(rec,f)
@@ -81,8 +85,12 @@ for f,p in ids:
 lease=[props(f) for f in ("lease-timer.armed","lease-timer.verify","lease-timer.handover","lease-timer.end")]
 if "teardown-start:lease" not in marks:
     if any(l is None or l!=lease[0] for l in lease): fails.append("lease timer changed or missing")
+st=[props(f) for f in ("stop-timer.handover","stop-timer.close","stop-timer.end")]
+if st[0] is not None and "stop-fired" not in marks:
+    if any(x is None or x!=st[0] for x in st) or st[0].get("ActiveState")!="active":
+        fails.append("30-min stop timer changed, inactive or missing at close/end")
 if "stop-fired" in marks: fails.append("30-min hard stop fired")
-print(f"execs logged {sum(got.values())}, declared {sum(want.values())}; pushes {pushed}/{pushes}")
+print(f"execs logged {sum(got.values())}, declared {sum(want.values())}")
 for f in fails: print("FAIL",f)
 print(f"## RESULT fails={len(fails)} ({'CLEAN' if not fails else 'INCONCLUSIVE'})")
 PY
