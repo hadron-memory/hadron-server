@@ -1,4 +1,4 @@
-import { personalOrgAgentTextAllowed } from './personalOrgAgentInstall.js';
+import { personalOrgAgentTextAllowed, personalOrgAgentTextBatch } from './personalOrgAgentInstall.js';
 import { resolveAppInstallation } from '../appInstallations.js';
 /**
  * #2044 (S7), cor:agt:040:06 / cor:acl:010:01 — the AUDIENCE of an App's
@@ -165,8 +165,12 @@ export async function readableInstallMemoryIds(
     },
     select: { id: true, appId: true, installOfAgentId:true, organizationId: true, ownerUserId: true, app: { select: { organizationId: true, ownerUserId: true } } },
   });
-  const admitted = await Promise.all(rows.map(async row => row.app && row.app.organizationId===row.organizationId && row.app.ownerUserId===row.ownerUserId && (!row.installOfAgentId || await personalOrgAgentTextAllowed(db,row.app,row.installOfAgentId,principal.userId)) ? row.id : null));
-  return admitted.filter((id):id is string=>id!==null);
+  const tenanted = rows.filter(row => row.app && row.app.organizationId===row.organizationId && row.app.ownerUserId===row.ownerUserId);
+  const checked = tenanted.filter(row => row.installOfAgentId);
+  // #3655: one text batch for the list, not a check per install memory.
+  const texts = await personalOrgAgentTextBatch(db, checked.map(row => ({ app: row.app!, agentId: row.installOfAgentId!, userId: principal.userId })));
+  const refused = new Set(checked.filter((_, i) => !texts[i]).map(row => row.id));
+  return tenanted.filter(row => !refused.has(row.id)).map(row => row.id);
 }
 
 /** The install memories a principal may WRITE (managers of a live App with the Agent installed). */
