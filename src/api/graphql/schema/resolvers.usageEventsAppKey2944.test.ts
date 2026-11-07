@@ -19,8 +19,11 @@ import { createHash } from 'node:crypto';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
-import { drainNodeUsage, recordNodeUsage } from '../../../lib/usageRecorder.js';
+import { drainNodeUsage, recordNodeUsage, usageAppKeyOf } from '../../../lib/usageRecorder.js';
+import { requestActorStorage } from '../../../lib/requestActor.js';
+import { ApolloServer } from '@apollo/server';
 import { resolvers, type Context } from './resolvers.js';
+import { typeDefs } from './typeDefs.js';
 
 const Q = resolvers.Query as unknown as Record<string, (p: unknown, a: Record<string, unknown>, c: Context) => Promise<any>>;
 const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: Record<string, unknown>, c: Context) => Promise<any>>;
@@ -128,6 +131,13 @@ describe('#2944 item 1: an App-key request records its key; nothing else does', 
     expect(rows.every(r => r.appKeyId === keyK)).toBe(true);
   });
 
+  it('only a pure App-key principal is attributed: a key id beside a user or under impersonation records none', () => {
+    expect(usageAppKeyOf({ appId: 'a', appKeyId: 'k' })).toBe('k');
+    expect(usageAppKeyOf({ appId: 'a', appKeyId: 'k', userId: 'u' })).toBeNull();
+    expect(usageAppKeyOf({ appId: 'a', appKeyId: 'k', impersonation: { orgId: 'o' } })).toBeNull();
+    expect(usageAppKeyOf({ appId: 'a', userId: 'u' })).toBeNull();
+  });
+
   it('a keyless event in the same App and memory is never returned by a key filter', async () => {
     const kRow = generateId();
     await db.usageEvent.createMany({ data: [
@@ -180,6 +190,20 @@ describe('#2944 items 2 and 4: whoever manages the App sees K in the memories th
     expect(ids(await list({ appKey: keyK, since: '2026-02-01T00:00:00Z' }, asUser(mgr)))).toEqual([kInA, kInApp].sort());
   });
 
+  it('over GraphQL: both fields take appKey, and a refused key is APP_KEY_NOT_FOUND on the wire', async () => {
+    const server = new ApolloServer<Context>({ typeDefs, resolvers });
+    const q = `query($k: ID!){ a: usageEvents(appKey: $k){ id } b: usageEventsPage(appKey: $k){ total items { id } } }`;
+    const ok = await server.executeOperation({ query: q, variables: { k: keyK } }, { contextValue: asUser(mgr) });
+    if (ok.body.kind !== 'single') throw new Error('incremental response');
+    expect(ok.body.singleResult.errors).toBeUndefined();
+    const data = ok.body.singleResult.data as { a: Array<{ id: string }>; b: { total: number; items: Array<{ id: string }> } };
+    expect(ids(data.a)).toEqual([kInA, kInApp].sort());
+    expect(data.b.total).toBe(2);
+    const denied = await server.executeOperation({ query: q, variables: { k: keyK } }, { contextValue: asUser(plainMember) });
+    if (denied.body.kind !== 'single') throw new Error('incremental response');
+    expect(denied.body.singleResult.errors?.[0]).toMatchObject({ message: 'App key not found.', extensions: { code: 'APP_KEY_NOT_FOUND', id: keyK } });
+  });
+
   it('without the key filter the manager still reads own activity only (no broad feed restored)', async () => {
     expect(await list({}, asUser(mgr))).toHaveLength(1);
   });
@@ -216,6 +240,11 @@ describe('#2944 item 3: a key the caller may not filter by answers exactly as a 
     expect(await unknownKeyAnswer(list({ appKey: keyK }, asKey(keyK2)))).toEqual(expected(keyK));
     expect(await unknownKeyAnswer(page({ appKey: keyK }, asUser(foreignMgr)))).toEqual(expected(keyK));
     expect(await unknownKeyAnswer(list({ appKey: foreignKey }, asUser(mgr)))).toEqual(expected(foreignKey));
+  });
+
+  it('a bound worker session whose holder manages the App gets the unknown-key answer (person-only gate)', async () => {
+    const asWorker = requestActorStorage.run({ workerId: generateId(), agentId: null }, () => list({ appKey: keyK }, asUser(mgr)));
+    expect(await unknownKeyAnswer(asWorker)).toEqual({ message: 'App key not found.', extensions: { code: 'APP_KEY_NOT_FOUND', id: keyK } });
   });
 
   it('the key is judged before any memory is resolved, so a refused key never reveals a memory', async () => {
