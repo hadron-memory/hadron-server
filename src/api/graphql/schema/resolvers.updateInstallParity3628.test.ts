@@ -18,6 +18,7 @@ async function fixture(kind: 'ROW' | 'DERIVED' | 'absent', licensed = true, cust
   await db.orgMember.create({ data: { organizationId: holder.id, userId: manager.id, role: 'ADMIN' } });
   const app = await db.app.create({ data: { organizationId: holder.id, name: 'Parity', urn: `${holder.urn}:app` } });
   await createDbAppMember(db, app.id, member.id, 'member');
+  await createDbAppMember(db, app.id, manager.id, 'member');
   const target = await db.agent.create({ data: { organizationId: owner.id, name: 'Target', urn: `${owner.urn}:target` } });
   const parent = await db.agent.create({ data: { organizationId: importer.id, name: 'Parent', urn: `${importer.urn}:parent` } });
   await db.appAgent.create({ data: { appId: app.id, agentId: parent.id } });
@@ -41,7 +42,11 @@ async function snapshot() {
 }
 async function refuses(f: Awaited<ReturnType<typeof fixture>>, code: string, ctx = f.context()) {
   const before = await snapshot();
-  await expect(M.updateNode(null, { input: f.input }, ctx)).rejects.toMatchObject({ extensions: { code } });
+  const result = await M.updateNode(null, { input: f.input }, ctx).then(
+    (value: unknown) => ({ value, code: null }),
+    (error: any) => ({ code: error.extensions?.code ?? error.code }),
+  );
+  expect(result).toEqual({ code });
   expect(await snapshot()).toEqual(before);
 }
 
