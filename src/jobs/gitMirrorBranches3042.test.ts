@@ -430,3 +430,112 @@ it('first-refresh failure cannot exhaust a healthy same-branch sibling', async (
  expect(remoteFile('first-load-healthy')).toContain('current content');
  expect(()=>remoteFile('first-load-bad')).toThrow();
 });
+
+// ───────── #3109 (test-only; Refs #3042 / #430): extend the parity matrix and the mixed-failure pins ─────────
+// SQL selection (mirrorRetryBranchEligibleSql) is selection-only; the in-lock TypeScript guard stays authoritative.
+// A row SQL wrongly ACCEPTS is retained without Git, sequence or attempt (it does not age out); a row SQL wrongly
+// REJECTS is the availability direction. No DB branch-shape CHECK is assumed.
+const eligibleSql = async (branch: string, template: string | null) =>
+  (await db.$queryRaw<Array<{eligible:boolean}>>(Prisma.sql`SELECT ${mirrorRetryBranchEligibleSql(Prisma.sql`${branch}`,Prisma.sql`${template}`)} AS eligible`))[0]!.eligible;
+const cps = (s: string) => Array.from(s);
+
+it('#3109 item 1: SQL selection agrees with the TypeScript guard for ..//~, non-ASCII, long and suffix-mismatched templates', async () => {
+ const templates = ['a..{client}', '{client}..x', 'x~/{client}', '{client}~y', 'é/{client}', '{client}-é', 'ï/{client}-ß', '😀/{client}', '{client}-😀',
+   `${'p'.repeat(150)}/{client}`, `{client}-${'s'.repeat(150)}`, '{client}-x', 'pre/{client}-x', 'a..b', 'x~y', 'é', '😀', 'l'.repeat(300)];
+ const clients = ['A', 'é', '😀', 'K'.repeat(250), 'a..b', 'a~b'];
+ const seen = { eligible: 0, refused: 0 };
+ for (const template of templates) {
+  const at = template.indexOf('{client}');
+  const branches = new Set<string>(['', 'x', 'A-y', 'A-x', '-x', template, 'main']);
+  if (at >= 0) {
+   const prefix = template.slice(0, at), suffix = template.slice(at + '{client}'.length);
+   for (const c of clients) branches.add(prefix + c + suffix);
+   branches.add(prefix + suffix); // empty client segment
+   if (suffix) branches.add(prefix + 'A' + cps(suffix).slice(0, -1).join('') + (suffix.endsWith('y') ? 'z' : 'y')); // length and prefix match, suffix does not
+   if (prefix) branches.add(cps(prefix).slice(0, -1).join('') + 'Z' + 'A' + suffix); // length and suffix match, prefix does not
+  }
+  for (const branch of branches) {
+   const final = at >= 0 ? branch : template;
+   const expected = isValidGitBranch(final) && (at < 0 || branchFitsTemplate(template, branch));
+   expect(await eligibleSql(branch, template), JSON.stringify({ template: template.slice(0, 24), branch: branch.slice(0, 24), len: branch.length })).toBe(expected);
+   expected ? seen.eligible++ : seen.refused++;
+  }
+ }
+ expect(seen.eligible).toBeGreaterThan(30); expect(seen.refused).toBeGreaterThan(30); // the matrix is not vacuous in either direction
+ // The named discriminating pair: same length and prefix, only the suffix differs (LOCAL P3-A).
+ expect(await eligibleSql('A-x', '{client}-x')).toBe(true);
+ expect(await eligibleSql('A-y', '{client}-x')).toBe(false);
+ expect(branchFitsTemplate('{client}-x', 'A-y')).toBe(false);
+ expect(await eligibleSql('-x', '{client}-x')).toBe(false); // empty client segment
+});
+
+it.each([['x..{client}', 'x..A'], ['{client}..x', 'A..x'], ['x~{client}', 'x~A'], ['{client}~y', 'A~y']])(
+ '#3109 item 1: invalid template %s retains the recorded row with no Git, no sequence and no attempt', async (template, branch) => {
+  const n = await makeNode(); await fail(n.id, branch); await age(); await db.memory.update({ where: { id: memoryId }, data: { writeBranch: template } });
+  const before = await rows(), seq = await takeAttemptSeq(db);
+  await tick();
+  expect(await takeAttemptSeq(db)).toBe(seq + 1n);
+  expect(await rows()).toEqual(before);
+  expect(commands).toEqual([]);
+ });
+
+it('#3109 item 1: a suffix-mismatched row stays retained while its routable sibling clears', async () => {
+ const stuck = await makeNode('stuck'), fine = await makeNode('fine');
+ await db.memory.update({ where: { id: memoryId }, data: { writeBranch: '{client}-x' } });
+ await owe(stuck.id, { branch: 'A-y' }); await owe(fine.id, { branch: 'B-x' });
+ const stuckBefore = (await rows()).find(r => r.nodeId === stuck.id);
+ await tick();
+ expect(await rows()).toEqual([stuckBefore]);
+ expect(on('B-x', 'fine')).toContain('current content');
+ expect(commands.filter(a => a[0] === 'push')).toHaveLength(1);
+});
+
+it.each([['é/{client}-ß', 'é/A-ß'], ['😀/{client}', '😀/A'], [`${'p'.repeat(150)}/{client}`, `${'p'.repeat(150)}/K`]])(
+ '#3109 item 1: routable non-ASCII / long branch %s is selected, retried and cleared (the availability direction)', async (template, branch) => {
+  const n = await makeNode(); await fail(n.id, branch); await age(); await db.memory.update({ where: { id: memoryId }, data: { writeBranch: template } });
+  await tick();
+  expect(await rows()).toEqual([]);
+  expect(on(branch)).toContain('current content');
+ });
+
+// Item 2: a ciphertext row beside a healthy sibling when the push fails.
+const encrypt = (id: string) => db.node.update({ where: { id }, data: { data: { __enc: 'synthetic-envelope' } } });
+const keyOf = (r: any) => [r.nodeId, r.branch, r.kind, r.removeLoc, r.attempts, r.errorClass, r.state].join('|');
+
+it('#3109 item 2: a ciphertext row takes one TREE_WRITE attempt and its healthy sibling its own PUSH_FAILED, with fences intact and no envelope in Git', async () => {
+ const bad = await makeNode('bad'), healthy = await makeNode('healthy');
+ await encrypt(bad.id);
+ await owe(bad.id, { branch: 'hadron-updates' }); await owe(healthy.id, { branch: 'hadron-updates' });
+ const prior = Math.max(...(await rows()).map(r => Number(r.attemptSeq)));
+ rejectPushes();
+ await tick();
+ const after = await rows();
+ expect(after.map(keyOf).sort()).toEqual([
+  [bad.id, 'hadron-updates', 'WRITE', '', 2, 'TREE_WRITE', 'FAILED'].join('|'),
+  [healthy.id, 'hadron-updates', 'WRITE', '', 2, 'PUSH_FAILED', 'FAILED'].join('|'),
+ ].sort());
+ for (const r of after) expect(Number(r.attemptSeq)).toBeGreaterThan(prior); // each charged row carries the new attempt's fence
+ expect(commands.filter(a => a[0] === 'push')).toHaveLength(1); // the healthy row alone reached a push
+ expect(existsSync(nodeFilePath(local, 'bad'))).toBe(false);
+ expect(git(local, 'log', '--all', '-p')).not.toContain('synthetic-envelope');
+ expect(git(env.bare, 'for-each-ref', '--format=%(refname)', 'refs/heads/hadron-updates')).toBe('');
+});
+
+it.each([true, false])('#3109 item 2: a fixed config changed x to y re-keys the failed rows to y with attempts+1 (healthy sibling present: %s)', async withHealthy => {
+ const bad = await makeNode('bad'); await encrypt(bad.id);
+ await owe(bad.id, { branch: 'x' });
+ const healthy = withHealthy ? await makeNode('healthy') : null;
+ if (healthy) await owe(healthy.id, { branch: 'x' });
+ const prior = Math.max(...(await rows()).map(r => Number(r.attemptSeq)));
+ await db.memory.update({ where: { id: memoryId }, data: { writeBranch: 'y' } });
+ if (withHealthy) rejectPushes();
+ await tick();
+ const after = await rows();
+ expect(after.map(keyOf).sort()).toEqual([
+  [bad.id, 'y', 'WRITE', '', 2, 'TREE_WRITE', 'FAILED'].join('|'),
+  ...(healthy ? [[healthy.id, 'y', 'WRITE', '', 2, 'PUSH_FAILED', 'FAILED'].join('|')] : []),
+ ].sort());
+ expect(after.some(r => r.branch === 'x')).toBe(false); // nothing left keyed to the old branch
+ for (const r of after) expect(Number(r.attemptSeq)).toBeGreaterThan(prior);
+ expect(git(local, 'log', '--all', '-p')).not.toContain('synthetic-envelope');
+});
