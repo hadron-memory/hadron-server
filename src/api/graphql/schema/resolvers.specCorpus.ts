@@ -1438,14 +1438,17 @@ async function fenceCorpusForMint(tx: Prisma.TransactionClient, memoryId: string
  *
  * Blocks (a real run refuses `SPEC_CORPUS_MINT_BLOCKED` while any hold):
  * a placeholder; a reference to a missing spec or a placeholder; one of the
- * four server lint rules over the citation-shaped nodes; a stale abstract once
- * STALE_ABSTRACT_BLOCKS_MINT is on (#1408); `NOT_APPROVED`, a node whose
+ * four server lint rules over the citation-shaped nodes; `NOT_APPROVED`, a node whose
  * current revision is not approved (ruling 2c); and `CITES_UNMINTED`, an edge
  * into another memory's node that is not minted yet ("a minted node may not
  * cite an unminted one"). A citation inside the memory cannot be unminted
  * after the mint, since every node in scope is minted together. A TEXT
  * citation of another memory's node is not resolved by the reference scan,
  * so it is not checked here (#1591 follow-up).
+ *
+ * Stale abstracts are reported, never blocking (cor:dmo:120:07), over every node
+ * in the mint scope (#3436, ruling 0215): a minted, unchanged node is outside it,
+ * and `spec validate` is the whole-memory audit.
  *
  * By any writer of the memory ({@link mayMintNodes}, ruling 2a). The check and
  * the stamp run inside {@link fenceCorpusForMint}, so no write lands between
@@ -1656,7 +1659,9 @@ async function mintMemoryNodes(
         }
       }
     }
-    const staleAbstracts: MintFinding[] = citedInScope
+    // #3436 (ruling 0215, cor:dmo:120:06/:07): every node in the mint's scope, not only the spec-shaped
+    // ones; a minted, unchanged node is outside the scope, and `spec validate` stays the whole-memory audit.
+    const staleAbstracts: MintFinding[] = inScope
       .filter((n) => isAbstractUnverified(n))
       .map((n) => ({
         kind: 'STALE_ABSTRACT' as const, loc: n.loc, rule: null, targetLoc: null,
