@@ -98,7 +98,8 @@ it.each(['usageEvents', 'usageEventsPage'])('%s never exposes unreadable-memory 
 
 
 it.each(['usageEvents', 'usageEventsPage'])('%s preserves missing/unreadable-memory refusals and the App key\'s empty result with a window', async field => {
-  const appKey: Context = { db, appId: generateId(), roles: [] };
+  // An hdr_app_ key context carries the key's own id (middleware/auth.ts resolveAppKey; #2817).
+  const appKey: Context = { db, appId: generateId(), appKeyId: generateId(), roles: [] };
   for (const [resource, ctx] of [
     [{ memoryId: foreignId }, principal],
     [{ memoryId: generateId() }, principal],

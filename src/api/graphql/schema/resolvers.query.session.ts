@@ -97,6 +97,29 @@ async function sessionsWhere(
  *     (`getAccessibleMemoryIds`, which handles App-key principals). An empty resource scope stays empty;
  *     it never falls back to own activity.
  */
+/** #2817: an hdr_app_ key, identified by the key itself (`appKeyId`), not inferred from absent fields. */
+function isAppKeyPrincipal(ctx: Context): boolean {
+  return !!ctx.appKeyId && !!ctx.appId && !ctx.userId && !ctx.impersonation;
+}
+
+/**
+ * #2817 review (Dorian P2-1): cor:acl:090:01's resource scope discloses VOLUME, never another principal's identity
+ * and never the content they touched. An App key reaches usage rows only through that scope (its own activity is
+ * empty), so its rows carry no user, session or organization, no other App, and no action arguments. The App's own
+ * appId is the caller's own identity and stays. User principals are unchanged here (tracked separately).
+ */
+function projectUsageRowsFor<T extends { appId: string | null }>(ctx: Context, rows: T[]): T[] {
+  if (!isAppKeyPrincipal(ctx)) return rows;
+  return rows.map((row) => ({
+    ...row,
+    userId: null,
+    sessionId: null,
+    organizationId: null,
+    actionArgs: null,
+    appId: row.appId === ctx.appId ? row.appId : null,
+  }));
+}
+
 // Like task-list bounds (#2692), usage windows require unambiguous instants.
 const usageWindowInstant = z.string().datetime({ offset: true });
 
@@ -107,11 +130,10 @@ async function usageEventsWhere(
     since?: string | null; until?: string | null;
   },
 ): Promise<Prisma.UsageEventWhereInput> {
-      // #2817: a principal with no user identity (an hdr_app_ key, roles []) is admitted; its read is
-      // scoped below. Every principal WITH a user identity keeps the READER gate unchanged, so an
-      // impersonation session (roles []) and an unauthenticated caller are still refused.
-      const userlessAppPrincipal = !!ctx.appId && !ctx.userId;
-      if (!userlessAppPrincipal) requireRole(ctx, 'READER');
+      // #2817: an hdr_app_ key (roles [], no user identity) is admitted; its read is scoped below.
+      // Every other principal keeps the READER gate unchanged, so an impersonation session (roles []),
+      // an unauthenticated caller and any App context that is not a key are still refused.
+      if (!isAppKeyPrincipal(ctx)) requireRole(ctx, 'READER');
       // #2784: a half-open activity window narrows the existing scope. Reject
       // its order before resolving any resource, so the error reveals no access.
       if ((since != null && !usageWindowInstant.safeParse(since).success) ||
@@ -219,7 +241,10 @@ async function usageEventsWhere(
       // explicit list — ADMIN/OWNER included, so the personal/private carve-out
       // still applies — so the `!== null` guards below are defensive for that
       // type contract rather than a live code path today.
-      const accessibleMemoryIds = await getAccessibleMemoryIds(ctx);
+      // A named memory is checked against that one target (the scoped form of the same predicates), so a
+      // gate that admits only a NAMED memory, such as an App key's PUBLIC knowledge read (#3306), applies.
+      const resolvedMemoryId = memoryId ? (await resolveMemoryRef(ctx.db, memoryId)).id : undefined;
+      const accessibleMemoryIds = await getAccessibleMemoryIds(ctx, resolvedMemoryId);
 
       // Per-memory scoping (issue #249, moved onto the column in #796): filter
       // on `UsageEvent.memoryId` directly. This was a UsageEvent→Node relation
@@ -228,9 +253,8 @@ async function usageEventsWhere(
       // SetNull, so a memory silently lost that history. The column keeps the
       // precision and survives deletion. memoryUsageSummary moved in lockstep.
       let memoryScopeId: string | undefined;
-      if (memoryId) {
-        // 007-entity-id-or-urn: memoryId may be ID, bare URN, or prefixed URN.
-        const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
+      if (memoryId && resolvedMemoryId) {
+        // 007-entity-id-or-urn: memoryId may be ID, bare URN, or prefixed URN (resolved above).
         // #250 denied an unreadable memory with [] to avoid leaking existence,
         // but a MISSING memory throws above, so [] itself meant "exists, not
         // yours". #1381 (`cor:api:140:03`): answer exactly as resolveMemoryRef's
@@ -319,12 +343,12 @@ export const sessionQueries = {
       // #2817 (cor:api:120:04): the same size bounds as usageEventsPage — default 20, at most 200, a
       // negative limit or offset is 0 — so the legacy list can never return an unbounded number of rows.
       const { take, skip } = pageArgs(args);
-      return ctx.db.usageEvent.findMany({
+      return projectUsageRowsFor(ctx, await ctx.db.usageEvent.findMany({
         where,
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take,
         skip,
-      });
+      }));
     },
 
     /** #2212 A1 — `usageEvents` as a page: the same gate and scope (one shared `where`), a stable `id` tiebreak, the real total. */
@@ -339,7 +363,7 @@ export const sessionQueries = {
         ctx.db.usageEvent.count({ where }),
         ctx.db.usageEvent.findMany({ where, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take, skip }),
       ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
-      return pageEnvelope(items, total, skip);
+      return pageEnvelope(projectUsageRowsFor(ctx, items), total, skip);
     },
 
     /**

@@ -31,6 +31,7 @@ let userMember: { id: string };
 let userOther: { id: string };
 let userOutsider: { id: string };
 let appKeyApp: { id: string };
+let appKeyId: string;
 
 function ctx(overrides: Partial<Context> = {}): Context {
   return { db, ...overrides } as Context;
@@ -40,7 +41,8 @@ const asOther = () => ctx({ userId: userOther.id, roles: ['READER'] });
 const asOutsider = () => ctx({ userId: userOutsider.id, roles: ['READER'] });
 const asAdmin = () => ctx({ userId: 'admin-user', roles: ['ADMIN'] });
 // Mirrors a real App-key context (resolveAppKey sets roles: []).
-const asAppKey = () => ctx({ appId: appKeyApp.id, roles: [] });
+// The real hdr_app_ key context (middleware/auth.ts resolveAppKey) carries the key's own id.
+const asAppKey = () => ctx({ appId: appKeyApp.id, appKeyId, roles: [] });
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -84,6 +86,7 @@ beforeEach(async () => {
 
   const a = await createDbAppWithKey(db, 'acc-app', orgA.id);
   appKeyApp = a.app;
+  appKeyId = a.appKey.id;
 });
 
 const locsOf = (rows: { nodeLoc: string | null }[]) => new Set(rows.map((r) => r.nodeLoc));

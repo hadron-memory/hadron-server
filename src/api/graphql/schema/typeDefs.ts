@@ -9059,7 +9059,8 @@ export const typeDefs = `#graphql
     user's personal/private memories and, per spec 047, another user's user-owned memories). A
     memoryId the caller can't read answers MEMORY_NOT_FOUND exactly as a missing one
     (hrn:node:hadronmemory.com:specs:cor:api:140:03). An empty resource scope never falls back to own
-    activity. limit pages as usageEventsPage does: default 20, at most 200
+    activity. An App key's resource read discloses volumes only: userId, sessionId, organizationId and
+    actionArgs are null, and appId is null unless it is the key's own App. limit pages as usageEventsPage does: default 20, at most 200
     (hrn:node:hadronmemory.com:specs:cor:api:120:04).
 
     memoryId is a memory identifier — accepts the memory's ID or URN. Results
