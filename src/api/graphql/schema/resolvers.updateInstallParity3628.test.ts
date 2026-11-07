@@ -156,6 +156,7 @@ for (const kind of ['ROW', 'DERIVED'] as const) {
   it(`${kind} install update emits the Apollo warning at updateNode, with memoryId control`, async () => {
     const f = await fixture(kind);
     await db.node.create({ data: { memoryId: f.memoryId!, loc: 'target', name: 'Target', content: 'target' } });
+    await db.node.create({ data: { memoryId: f.memoryId!, loc: 'control', name: 'Control', content: 'before' } });
     const server = new ApolloServer<Context>({ typeDefs, resolvers, plugins: [taskWarningsPlugin] });
     try {
       const execute = async (input: Record<string, unknown>) => {
@@ -165,8 +166,8 @@ for (const kind of ['ROW', 'DERIVED'] as const) {
         return result.body.singleResult.extensions?.warnings;
       };
       const text = '{{> target rev=1}}';
-      expect(await execute({ memoryId: f.memoryId, loc: 'source', content: text })).toEqual([expect.objectContaining({ path: 'updateNode', code: 'include.pin.unkept' })]);
-      // Change content again so this is a committed write, not a no-op.
+      expect(await execute({ memoryId: f.memoryId, loc: 'control', content: text })).toEqual([expect.objectContaining({ path: 'updateNode', code: 'include.pin.unkept' })]);
+      // The control writes another node so it cannot pre-acknowledge this pin.
       expect(await execute({ ...f.input, content: 'install ' + text })).toEqual([expect.objectContaining({ path: 'updateNode', code: 'include.pin.unkept' })]);
     } finally { await server.stop(); }
   });
