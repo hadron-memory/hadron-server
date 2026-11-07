@@ -80,7 +80,7 @@ it.each([1,3])('records the fixed %i-Agent roster, semantic outcomes and same-co
   }
   await serveAgentBootPrompt(db,agents[0].id,'Synthetic measured prompt.');
   const userId=state==='userless'?undefined:state==='outsider'?viewer.id:owner.id;
-  const ctx:Context={db:logged,userId,roles:['READER'],...(state==='userless'?{appId:app.id}:{} )};
+  const ctx:Context={db:logged,userId,roles:userId?['READER']:[],...(state==='userless'?{appId:app.id}:{} )};
   const licence=state!=='owner-revoked';
   const text=licence && state!=='outsider' && state!=='userless';
   const admitted=state==='org-app'||state==='public'||text;
