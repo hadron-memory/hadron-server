@@ -1,3 +1,4 @@
+import { resolveAppInstallation, listAppInstallations } from '../../../lib/appInstallations.js';
 /**
  * #3287 — `Query.actionRegisterIndex`: an App's action-register index, computed
  * at read (ruling 0101 A: no stored edge; ruling 0102 A: one server field the
@@ -47,7 +48,7 @@ const emptyPage = (): ActionRegisterIndexPage => ({ entries: [], total: 0, hasMo
 /** One installed-or-live-cast predicate for both asking paths (#3359, ruling 0120 A). */
 async function requireAskingAgentInApp(c: Context, appId: string, id: string, ref: string): Promise<void> {
   const [installed, cast] = await Promise.all([
-    c.db.appAgent.findUnique({ where: { appId_agentId: { appId, agentId: id } }, select: { agentId: true } }),
+    resolveAppInstallation(c.db,appId,id),
     c.db.worker.findFirst({ where: { appId, agentId: id, retiredAt: null }, select: { id: true } }),
   ]);
   if (!installed && !cast) throw new AgentNotFoundError(ref);

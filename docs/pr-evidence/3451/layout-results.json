@@ -1,0 +1,830 @@
+[
+  {
+    "name": "signin",
+    "scheme": "light",
+    "viewport": 320,
+    "metrics": [
+      {
+        "width": 288,
+        "documentWidth": 320,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": false
+      },
+      {
+        "width": 288,
+        "documentWidth": 320,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "email",
+    "scheme": "light",
+    "viewport": 320,
+    "metrics": [
+      {
+        "width": 292,
+        "documentWidth": 320,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": false
+      },
+      {
+        "width": 288,
+        "documentWidth": 320,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "sent",
+    "scheme": "light",
+    "viewport": 320,
+    "metrics": [
+      {
+        "width": 288,
+        "documentWidth": 320,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": false
+      },
+      {
+        "width": 288,
+        "documentWidth": 320,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "review",
+    "scheme": "light",
+    "viewport": 320,
+    "metrics": [
+      {
+        "width": 288,
+        "documentWidth": 320,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": false
+      },
+      {
+        "width": 288,
+        "documentWidth": 320,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "consent",
+    "scheme": "light",
+    "viewport": 320,
+    "metrics": [
+      {
+        "width": 321.328125,
+        "documentWidth": 321,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": false
+      },
+      {
+        "width": 288,
+        "documentWidth": 320,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "error",
+    "scheme": "light",
+    "viewport": 320,
+    "metrics": [
+      {
+        "width": 288,
+        "documentWidth": 320,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": false
+      },
+      {
+        "width": 288,
+        "documentWidth": 320,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "signin",
+    "scheme": "dark",
+    "viewport": 320,
+    "metrics": [
+      {
+        "width": 288,
+        "documentWidth": 320,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": false
+      },
+      {
+        "width": 288,
+        "documentWidth": 320,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "email",
+    "scheme": "dark",
+    "viewport": 320,
+    "metrics": [
+      {
+        "width": 292,
+        "documentWidth": 320,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": false
+      },
+      {
+        "width": 288,
+        "documentWidth": 320,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "sent",
+    "scheme": "dark",
+    "viewport": 320,
+    "metrics": [
+      {
+        "width": 288,
+        "documentWidth": 320,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": false
+      },
+      {
+        "width": 288,
+        "documentWidth": 320,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "review",
+    "scheme": "dark",
+    "viewport": 320,
+    "metrics": [
+      {
+        "width": 288,
+        "documentWidth": 320,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": false
+      },
+      {
+        "width": 288,
+        "documentWidth": 320,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "consent",
+    "scheme": "dark",
+    "viewport": 320,
+    "metrics": [
+      {
+        "width": 321.328125,
+        "documentWidth": 321,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": false
+      },
+      {
+        "width": 288,
+        "documentWidth": 320,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "error",
+    "scheme": "dark",
+    "viewport": 320,
+    "metrics": [
+      {
+        "width": 288,
+        "documentWidth": 320,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": false
+      },
+      {
+        "width": 288,
+        "documentWidth": 320,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "signin",
+    "scheme": "light",
+    "viewport": 390,
+    "metrics": [
+      {
+        "width": 358,
+        "documentWidth": 390,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": false
+      },
+      {
+        "width": 358,
+        "documentWidth": 390,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "email",
+    "scheme": "light",
+    "viewport": 390,
+    "metrics": [
+      {
+        "width": 358,
+        "documentWidth": 390,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": false
+      },
+      {
+        "width": 358,
+        "documentWidth": 390,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "sent",
+    "scheme": "light",
+    "viewport": 390,
+    "metrics": [
+      {
+        "width": 358,
+        "documentWidth": 390,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": false
+      },
+      {
+        "width": 358,
+        "documentWidth": 390,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "review",
+    "scheme": "light",
+    "viewport": 390,
+    "metrics": [
+      {
+        "width": 358,
+        "documentWidth": 390,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": false
+      },
+      {
+        "width": 358,
+        "documentWidth": 390,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "consent",
+    "scheme": "light",
+    "viewport": 390,
+    "metrics": [
+      {
+        "width": 358,
+        "documentWidth": 390,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": false
+      },
+      {
+        "width": 358,
+        "documentWidth": 390,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "error",
+    "scheme": "light",
+    "viewport": 390,
+    "metrics": [
+      {
+        "width": 358,
+        "documentWidth": 390,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": false
+      },
+      {
+        "width": 358,
+        "documentWidth": 390,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "signin",
+    "scheme": "dark",
+    "viewport": 390,
+    "metrics": [
+      {
+        "width": 358,
+        "documentWidth": 390,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": false
+      },
+      {
+        "width": 358,
+        "documentWidth": 390,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "email",
+    "scheme": "dark",
+    "viewport": 390,
+    "metrics": [
+      {
+        "width": 358,
+        "documentWidth": 390,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": false
+      },
+      {
+        "width": 358,
+        "documentWidth": 390,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "sent",
+    "scheme": "dark",
+    "viewport": 390,
+    "metrics": [
+      {
+        "width": 358,
+        "documentWidth": 390,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": false
+      },
+      {
+        "width": 358,
+        "documentWidth": 390,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "review",
+    "scheme": "dark",
+    "viewport": 390,
+    "metrics": [
+      {
+        "width": 358,
+        "documentWidth": 390,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": false
+      },
+      {
+        "width": 358,
+        "documentWidth": 390,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "consent",
+    "scheme": "dark",
+    "viewport": 390,
+    "metrics": [
+      {
+        "width": 358,
+        "documentWidth": 390,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": false
+      },
+      {
+        "width": 358,
+        "documentWidth": 390,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "error",
+    "scheme": "dark",
+    "viewport": 390,
+    "metrics": [
+      {
+        "width": 358,
+        "documentWidth": 390,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": false
+      },
+      {
+        "width": 358,
+        "documentWidth": 390,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "signin",
+    "scheme": "light",
+    "viewport": 1280,
+    "metrics": [
+      {
+        "width": 546,
+        "documentWidth": 1280,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": false
+      },
+      {
+        "width": 546,
+        "documentWidth": 1280,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "email",
+    "scheme": "light",
+    "viewport": 1280,
+    "metrics": [
+      {
+        "width": 546,
+        "documentWidth": 1280,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": false
+      },
+      {
+        "width": 546,
+        "documentWidth": 1280,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "sent",
+    "scheme": "light",
+    "viewport": 1280,
+    "metrics": [
+      {
+        "width": 546,
+        "documentWidth": 1280,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": false
+      },
+      {
+        "width": 546,
+        "documentWidth": 1280,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "review",
+    "scheme": "light",
+    "viewport": 1280,
+    "metrics": [
+      {
+        "width": 546,
+        "documentWidth": 1280,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": false
+      },
+      {
+        "width": 546,
+        "documentWidth": 1280,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "consent",
+    "scheme": "light",
+    "viewport": 1280,
+    "metrics": [
+      {
+        "width": 546,
+        "documentWidth": 1280,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": false
+      },
+      {
+        "width": 546,
+        "documentWidth": 1280,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "error",
+    "scheme": "light",
+    "viewport": 1280,
+    "metrics": [
+      {
+        "width": 546,
+        "documentWidth": 1280,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": false
+      },
+      {
+        "width": 546,
+        "documentWidth": 1280,
+        "background": "rgb(255, 255, 255)",
+        "color": "rgb(28, 28, 28)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "signin",
+    "scheme": "dark",
+    "viewport": 1280,
+    "metrics": [
+      {
+        "width": 546,
+        "documentWidth": 1280,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": false
+      },
+      {
+        "width": 546,
+        "documentWidth": 1280,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "email",
+    "scheme": "dark",
+    "viewport": 1280,
+    "metrics": [
+      {
+        "width": 546,
+        "documentWidth": 1280,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": false
+      },
+      {
+        "width": 546,
+        "documentWidth": 1280,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "sent",
+    "scheme": "dark",
+    "viewport": 1280,
+    "metrics": [
+      {
+        "width": 546,
+        "documentWidth": 1280,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": false
+      },
+      {
+        "width": 546,
+        "documentWidth": 1280,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "review",
+    "scheme": "dark",
+    "viewport": 1280,
+    "metrics": [
+      {
+        "width": 546,
+        "documentWidth": 1280,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": false
+      },
+      {
+        "width": 546,
+        "documentWidth": 1280,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "consent",
+    "scheme": "dark",
+    "viewport": 1280,
+    "metrics": [
+      {
+        "width": 546,
+        "documentWidth": 1280,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": false
+      },
+      {
+        "width": 546,
+        "documentWidth": 1280,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  },
+  {
+    "name": "error",
+    "scheme": "dark",
+    "viewport": 1280,
+    "metrics": [
+      {
+        "width": 546,
+        "documentWidth": 1280,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": false
+      },
+      {
+        "width": 546,
+        "documentWidth": 1280,
+        "background": "rgb(38, 38, 38)",
+        "color": "rgb(230, 230, 230)",
+        "logoLoaded": true,
+        "logoSrc": "data:image/png;base64,"
+      }
+    ],
+    "remoteRequests": 0
+  }
+]

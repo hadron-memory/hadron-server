@@ -82,6 +82,10 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin, role: 'ADMIN' } });
   await db.orgMember.create({ data: { organizationId: orgB.id, userId: outsider, role: 'ADMIN' } });
   agentId = (await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin))).id;
+  await db.agent.update({ where: { id: agentId }, data: { visibility: 'ORGANIZATION' } });
+  // #1148: the user-owned App below has the same live licence required by a real bind.
+  await db.orgMember.create({ data: { organizationId: org.id, userId: owner, role: 'READER' } });
+  await db.agentSubscription.create({ data: { userId: owner, agentId, activatedAt: new Date('2020-01-01') } });
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` }, select: { id: true, urn: true } });
   await db.appMember.create({ data: { appId: app.id, userId: participant, role: 'member' } });
   // The outsider's own App, in their own org: the appRef, credential and selection shapes all come from it.

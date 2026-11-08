@@ -1,6 +1,8 @@
+import { isAgentInstalledForAppOperation, listAppInstallationsWithDerivedLicense } from '../../../lib/appAgent.js';
 import { triggerBudgetPatch, type TriggerRunBudgets } from '../../../lib/automation/runBudgets.js';
 import { configSelection } from '../../../lib/automation/identities.js';
-import { captureSetupConsent } from '../../../lib/automation/pins.js';
+import { captureSetupConsent, captureSetupOutcome } from '../../../lib/automation/pins.js';
+import { summarizeAutomation } from '../../../lib/automation/approvalSummary.js';
 // Headless-run surfaces (spec 040 plan §9): schedule CRUD, the run audit
 // read surface (cor:api:120-shaped), manual trigger, and the kill switch.
 
@@ -34,6 +36,8 @@ import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { type Context, requireOrgRole, requireOwnerOrOrgRole, isPlatformAdmin } from './resolvers.helpers.js';
 import { withAuthorizedTx } from './authorizedTx.js';
+import { requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
+import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { hasAppRelationship } from '../../../lib/auth/appRelationship.js';
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 
@@ -104,6 +108,9 @@ export function buildAppRunOrderBy(
   }
 }
 
+/** #3457: createAgentSchedule's input minus the schedule's own name, plus nothing: the pin never depends on the name. */
+export type PreviewAgentScheduleInput = Omit<CreateAgentScheduleInput, 'name' | 'policy' | 'scopeRef'>;
+
 export interface CreateAgentScheduleInput extends TriggerRunBudgets {
   /** App reference — PK or fully-qualified URN (the platform-wide `ref` convention). */
   appRef: string;
@@ -127,7 +134,7 @@ export interface CreateAgentScheduleInput extends TriggerRunBudgets {
 }
 
 /** Resolve the App ref (PK or URN), require it live, and require org-ADMIN on its org. */
-async function requireScheduleAdmin(ctx: Context, appRef: string) {
+export async function requireScheduleAdmin(ctx: Context, appRef: string) {
   const { id } = await resolveAppRef(ctx.db, appRef);
   const app = await ctx.db.app.findFirst({
     where: { id, deletedAt: null },
@@ -386,7 +393,7 @@ async function resolveManualRunAgent(
 ): Promise<string | null> {
   const named = await resolveInstalledAgent(ctx, appId, agentRef);
   if (named) return named;
-  const installed = await ctx.db.appAgent.findMany({ where: { appId }, select: { agentId: true }, take: 2 });
+  const installed = (await listAppInstallationsWithDerivedLicense(ctx.db,appId)).slice(0,2);
   if (installed.length > 1) {
     throw new GraphQLError('This App has several installed Agents: pass agentRef to name the one the run is served as.', {
       extensions: { code: 'RUN_AGENT_REQUIRED' },
@@ -491,10 +498,7 @@ async function resolveInstalledAgent(
     if (e instanceof AgentNotFoundError) throw notInstalled();
     throw e;
   }
-  const installed = await ctx.db.appAgent.findFirst({
-    where: { appId, agentId },
-    select: { agentId: true },
-  });
+  const installed = await isAgentInstalledForAppOperation(ctx.db,appId,agentId);
   if (!installed) throw notInstalled();
   return agentId;
 }
@@ -817,12 +821,16 @@ export const appRunMutations = {
   rotateAgentWebhook: async (_: unknown, { id }: { id: string }, ctx: Context) => {
     const existing = await ctx.db.agentWebhook.findFirst({ where: { id, deletedAt: null } });
     if (!existing) throw new GraphQLError('Webhook not found.', { extensions: { code: 'NOT_FOUND' } });
+    // #3511 (ruling 0177, cor:dmo:050:12 r40): person-only, decided before any secret or token is minted, with the
+    // door's existing non-admin refusal.
+    await requirePersonOnlyAct(ctx, 'agent-webhook.rotate', authorizationDenied);
     await requireOrgRole(ctx, existing.organizationId, 'ADMIN');
     requireStoredRunOwner(ctx, existing.userId);
     const webhook = await withAuthorizedTx(
       ctx,
       [{ kind: 'org', id: existing.organizationId }, { kind: 'app', id: existing.appId }],
       async (txCtx) => {
+        await requirePersonOnlyAct(txCtx, 'agent-webhook.rotate', authorizationDenied);
         await requireOrgRole(txCtx, existing.organizationId, 'ADMIN');
         const current = await txCtx.db.agentWebhook.findFirst({ where: { id, deletedAt: null } });
         if (!current || current.appId !== existing.appId || current.organizationId !== existing.organizationId) {
@@ -1002,6 +1010,42 @@ export const appRunMutations = {
 };
 
 export const appRunQueries = {
+  /**
+   * #3457 (Refs #2435): what a schedule would do, before it exists. Same authority as createAgentSchedule (org-ADMIN,
+   * checked first, before any node or Agent read) and the same pin: it comes from captureSetupOutcome, the call create
+   * stores its consent from, so previewed hash === the created schedule's automationApproval.hash while the graph is
+   * unchanged. Writes nothing. An entry create would store as UNADOPTED is a typed result (reason split as the marker's),
+   * not an error; admin, App, Agent and timing refusals are create's own errors.
+   */
+  previewAgentSchedule: async (
+    _: unknown,
+    { input }: { input: PreviewAgentScheduleInput },
+    ctx: Context,
+  ) => {
+    const app = await requireScheduleAdmin(ctx, input.appRef);
+    const budgets = triggerBudgetPatch(input);
+    assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
+    const agentId = await resolveInstalledAgent(ctx, app.id, input.agentRef);
+    const timezone = input.timezone?.trim() || 'UTC';
+    if ((input.cron == null) === (input.runAt == null)) {
+      throw new GraphQLError('Provide exactly one of cron (recurring) or runAt (one-shot).', {
+        extensions: { code: 'BAD_USER_INPUT' },
+      });
+    }
+    if (input.cron != null) validatedCronNext(input.cron, timezone);
+    const runAt = input.runAt != null ? validatedRunAt(input.runAt) : null;
+    const outcome = await captureSetupOutcome(ctx.db, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId, ctx, configSelection({ ...input, agentId }));
+    if (!outcome.adoptable) {
+      return { outcome: 'CANNOT_BE_ADOPTED', hash: null, summary: null, reason: outcome.marker.reason === 'MEMORY_UNREADABLE' ? 'MEMORY_UNREADABLE' : 'OTHER' };
+    }
+    const summary = summarizeAutomation(outcome.pin, {
+      kind: 'SCHEDULE',
+      budgets,
+      schedule: { cron: input.cron ?? null, timezone, runAt, enabled: input.enabled ?? true },
+    });
+    return { outcome: 'ADOPTABLE', hash: outcome.pin.hash, summary, reason: null };
+  },
+
   /** Paginated schedules for an App (org-ADMIN; cor:api:120 envelope). */
   agentSchedules: async (
     _: unknown,

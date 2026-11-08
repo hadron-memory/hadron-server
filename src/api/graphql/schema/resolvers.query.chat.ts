@@ -1,3 +1,9 @@
+import { chatNotFoundError } from '../../../lib/chatNotFound.js';
+import { readChatEngineStates } from '../../../lib/chatRootEngineState.js';
+import { readChatCounters } from '../../../lib/chatRootCounters.js';
+import { appInstallationWhere } from '../../../lib/appInstallations.js';
+import { participantAppWhere } from '../../../lib/auth/appParticipation.js';
+import { translateSessionExpired } from '../../../lib/channels.js';
 // chatQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
 import {
   decryptNodeFields,
@@ -72,16 +78,21 @@ async function myChatsScope(ctx: Context, agentRef: string): Promise<Prisma.Node
   // 023-app-shape Phase 2b: App↔Agent moved from `App.agentId` to the
   // N:M `AppAgent` join. Match Apps that have the resolved Agent
   // installed via the join.
-  const sharedMemberships = await ctx.db.appMember.findMany({
+  // #3464 Q4 (cor:dmo:010:04): an App of a soft-deleted org is not-found, and so are its chats. The installation
+  // filter is only a candidate bound, and its physical arm never checks the org, so the candidates are intersected
+  // with the shared participation set, which carries org liveness for org-owned Apps and keeps user-owned Apps.
+  // Separate AND operands, so neither filter's own AND/OR is overwritten. The AppMember requirement stays: this is
+  // an intersection, not a widening to the contributor or owner arms. `includeUninstalled` keeps the existing
+  // historical physical-arm behaviour, and no licence is consulted (Q3, cor:acl:030:01-02): inventory follows the
+  // host memory's gate. A null set means no shared contribution; personal chats above still list.
+  const participation = await participantAppWhere(ctx.db, ctx, { includeMemberships: true, includeUninstalled: true });
+  const sharedMemberships = participation ? await ctx.db.appMember.findMany({
     where: {
       userId: ctx.userId,
-      app: {
-        appAgents: { some: { agentId: resolvedAgentId } },
-        deletedAt: null,
-      },
+      app: { AND: [appInstallationWhere(resolvedAgentId), { deletedAt: null }, participation] },
     },
     select: { app: { select: { id: true } } },
-  });
+  }) : [];
   if (sharedMemberships.length > 0) {
     const sharedMemories = await ctx.db.memory.findMany({
       where: {
@@ -122,8 +133,8 @@ async function myChatsScope(ctx: Context, agentRef: string): Promise<Prisma.Node
   // `chats:team-retro` still lists.
   //
   // Sort by Node.updatedAt (Prisma's @updatedAt) — bumped automatically
-  // each time sendChatMessage / processChatResponse writes the new
-  // `data.lastMessageAt` back to the chat-root row. That makes the
+  // each time sendChatMessage / processChatResponse advances activity
+  // in the counter row (#3496 explicitly bumps the root timestamp). That makes the
   // column an exact proxy for the previous "lastMessageAt || createdAt"
   // ordering, sortable at the DB layer with `take`/`skip` — no
   // application-side resort, no JS slice.
@@ -143,6 +154,8 @@ async function myChatsScope(ctx: Context, agentRef: string): Promise<Prisma.Node
 type ChatRootRow = { id: string; loc: string; memoryId: string; data: unknown; createdAt: Date; createdBy: string | null };
 
 async function toChatRows(ctx: Context, tops: ChatRootRow[]) {
+  const counters = await readChatCounters(ctx.db,tops,ctx.sessionId);
+  const engine = await readChatEngineStates(ctx.db, tops);
   // First-message lookup, scoped to the visible page only (was: every
   // candidate chat). Parallelized via Promise.all.
   const firstMessageEntries = await Promise.all(
@@ -182,11 +195,11 @@ async function toChatRows(ctx: Context, tops: ChatRootRow[]) {
       id: node.id,
       loc: node.loc,
       title,
-      conversationName: (data.conversationName as string) ?? null,
-      stageName: (data.stageName as string) ?? null,
-      messageCount: (data.messageCount as number) ?? 0,
+      conversationName: (engine.get(node.id)?.conversationName as string) ?? null,
+      stageName: (engine.get(node.id)?.stageName as string) ?? null,
+      messageCount: counters.get(node.id)?.messageCount ?? 0,
       createdAt: node.createdAt,
-      lastMessageAt: (data.lastMessageAt as string) ?? null,
+      lastMessageAt: counters.get(node.id)?.lastMessageAt ?? null,
       scope,
       createdBy: node.createdBy ?? null,
     };
@@ -262,7 +275,7 @@ export const chatQueries = {
         }),
         chatId,
       );
-      if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
+      if (!chatNode) throw chatNotFoundError(chatId);
       // #1196 — the SHARED node-content gate, replacing a hand-rolled
       // per-class one. `cor:acl:030:01`: a chat has no access layer of its own;
       // read falls through the host memory's per-class rules. This resolver
@@ -354,7 +367,7 @@ export const chatQueries = {
       // suffix.
       const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
       if (memEncInfo.isEncrypted) {
-        for (const m of rows) decryptNodeFields(m, memEncInfo);
+        for (const m of rows) translateSessionExpired(memEncInfo.id, () => decryptNodeFields(m, memEncInfo));
       }
       // #1061 — a transcript read returns each message's content, so it is one
       // read per message returned. Recorded here, AFTER the decrypt above: an

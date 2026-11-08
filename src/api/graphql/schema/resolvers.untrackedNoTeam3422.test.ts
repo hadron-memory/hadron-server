@@ -171,6 +171,30 @@ async function wire<T>(fn: (run: (query: string, variables?: Record<string, unkn
 }
 const LIST = 'total items{number}';
 
+/** Inside Vitest's 5 s test budget, with room left to release the gate and settle the claims. */
+const BARRIER_MS = 3_000;
+/**
+ * Hold concurrent claims at the tracker until `want` reads have arrived, then let them go. Two things end the wait
+ * early, so a broken claim reports its own failure rather than the framework's timeout (#3447): a claim settling, and
+ * the bound. `release` always runs, and the claims are settled before this returns, so none outlives its test. The bound
+ * covers arrival at the tracker only: a claim that hangs after release still runs to the framework's timeout.
+ */
+async function holdAtTracker(claims: Array<Promise<unknown>>, release: () => void, want = 2, boundMs = BARRIER_MS) {
+  let settled = false;
+  const mark = () => { settled = true; };
+  for (const c of claims) c.then(mark, mark);
+  try {
+    const by = Date.now() + boundMs;
+    while (reads < want && !settled) {
+      if (Date.now() > by) throw new Error(`barrier: ${reads} of ${want} tracker reads after ${boundMs} ms`);
+      await new Promise((r) => setTimeout(r, 5));
+    }
+  } finally {
+    release();
+    await Promise.allSettled(claims);
+  }
+}
+
 describe('the no-team filter lists what carries no team label (cor:agt:120:03)', () => {
   it('keeps exactly the bug-only and unlabelled items, oldest first, and the total counts only them', async () => {
     const r = await list({ noTeam: true });
@@ -261,9 +285,9 @@ describe('the no-team filter claims (cor:agt:120:03, S2)', () => {
     const a = claim({ noTeam: true, limit: 2 }, ctx(member.id));
     const b = claim({ noTeam: true, limit: 2 }, ctx(member2.id));
     // Both callers must hold the same pre-claim list, or the skip path never runs.
-    while (reads < 2) await new Promise((r) => setTimeout(r, 5));
-    release();
+    await holdAtTracker([a, b], release);
     const [ra, rb] = await Promise.all([a, b]);
+    expect(reads).toBe(2);
     const ia: string[] = ra.tasks.map((t: any) => t.externalId);
     const ib: string[] = rb.tasks.map((t: any) => t.externalId);
     expect(ia).toHaveLength(2);
@@ -273,10 +297,72 @@ describe('the no-team filter claims (cor:agt:120:03, S2)', () => {
     expect(await claimedCount()).toBe(4);
   });
 
+  it('the barrier ends when a claim fails first, so the failure is the claim\'s own', async () => {
+    let released = false;
+    const failed = Promise.reject(new Error('the claim\'s own failure'));
+    await holdAtTracker([failed], () => { released = true; });
+    expect(released).toBe(true);
+    await expect(failed).rejects.toThrow('the claim\'s own failure');
+  });
+
+  it('the barrier gives up at its bound, naming the shortfall, and still releases the gate', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    await expect(holdAtTracker([held], release, 2, 20)).rejects.toThrow('barrier: 0 of 2 tracker reads after 20 ms');
+    await expect(held).resolves.toBeUndefined();
+  });
+
+  it('the default bound fires inside the test budget, so it is the barrier that reports, not the framework', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    await expect(holdAtTracker([held], release)).rejects.toThrow(`barrier: 0 of 2 tracker reads after ${BARRIER_MS} ms`);
+    await expect(held).resolves.toBeUndefined();
+  });
+
   it("the App's own key claims with it, for the parties it names", async () => {
     const r = await claim({ noTeam: true, limit: 1, assignee: { worker: anne.id }, owner: { user: member.id } }, keyCtx(app.id, keyX.id));
     expect(r.tasks.map((t: any) => t.externalId)).toEqual([url('widgets', 4)]);
     expect(r.tasks[0]).toMatchObject({ status: 'started' });
+  });
+});
+
+/** #3447: a team map may be written with capitals, and an item's label may be cased either way. */
+const CAPITAL_MAP = () => setIntegration({ teams: [{ lead: anne.id, label: 'Team-A' }, { lead: liam.id, label: 'TEAM-B' }] });
+const CAPITAL_ITEMS = (): Issue[] => [
+  { number: 1, labels: ['team-a'] },
+  { number: 2, labels: ['Team-A', 'bug'] },
+  { number: 3, labels: ['TEAM-B'] },
+  { number: 4, labels: ['team-b'] },
+  { number: 5, labels: ['bug'] },
+  { number: 6, labels: [] },
+];
+
+describe('a team map written with capitals (cor:agt:120:01, :03)', () => {
+  beforeEach(async () => {
+    await CAPITAL_MAP();
+    repos.widgets = CAPITAL_ITEMS();
+  });
+
+  it('the list keeps out every cased form of a team label', async () => {
+    const r = await list({ noTeam: true });
+    expect(numbers(r)).toEqual([5, 6]);
+    expect(r.total).toBe(2);
+  });
+
+  it('a no-team claim takes no team-labelled item, however old', async () => {
+    const r = await claim({ noTeam: true, limit: 6 });
+    expect(r.tasks.map((t: any) => t.externalId)).toEqual([url('widgets', 5), url('widgets', 6)]);
+    expect(await claimedCount()).toBe(2);
+  });
+
+  it('the run tools answer the same', async () => {
+    expect(numbers(await runList({ noTeam: true }))).toEqual([5, 6]);
+    expect(claimedUrls(await runClaim({ noTeam: true }))).toEqual([url('widgets', 5)]);
+  });
+
+  it("a team filter still finds its own items: the map's capitals do not hide them", async () => {
+    expect(numbers(await list({ team: anne.id }))).toEqual([1, 2]);
+    expect(numbers(await list({ team: liam.id }))).toEqual([3, 4]);
   });
 });
 
@@ -320,6 +406,78 @@ describe('refusing the filter with a team (cor:agt:120:03)', () => {
   });
 });
 
+describe('a run tool refuses a team that is not text (#3471, cor:agt:120:03)', () => {
+  // A tool's arguments reach execute() as the model wrote them. A team that read as absent would turn a claim for one
+  // lane into an unfiltered one, handing out another lane's item.
+  const MESSAGE = 'team must be a worker id, URN or name.';
+  const allTasks = () => db.agentTask.count({ where: { appId: app.id } });
+
+  describe.each([
+    ['the run list tool', runList],
+    ['the run claim tool', runClaim],
+  ])('on %s', (_name, surface) => {
+    it.each([[5], [0], [true], [false], [{}], [[]], [['team-a']], [{ toString: null }]])('team %j is BAD_USER_INPUT with fixed text: no tracker request, no task', async (team) => {
+      const r = await refusal(surface({ team }));
+      expect(r).toEqual({ code: 'BAD_USER_INPUT', message: MESSAGE });
+      expect(calls).toBe(0);
+      expect(await allTasks()).toBe(0);
+    });
+
+    it.each([[false], [null]])('noTeam %j does not excuse it', async (noTeam) => {
+      expect(await refusal(surface({ noTeam, team: 5 }))).toEqual({ code: 'BAD_USER_INPUT', message: MESSAGE });
+      expect(calls).toBe(0);
+    });
+
+    it('with noTeam true, "not both" still wins', async () => {
+      expect(await refusal(surface({ noTeam: true, team: 5 }))).toEqual({ code: 'BAD_USER_INPUT', message: 'Ask for no team or for a team, not both.' });
+      expect(calls).toBe(0);
+    });
+
+    it('a malformed noTeam is judged first', async () => {
+      expect(await refusal(surface({ noTeam: 'true', team: 5 }))).toEqual({ code: 'BAD_USER_INPUT', message: 'noTeam must be true or false.' });
+    });
+
+    it('a blank team keeps TASK_INTEGRATION_TEAM_UNKNOWN', async () => {
+      expect((await refusal(surface({ team: '' }))).code).toBe('TASK_INTEGRATION_TEAM_UNKNOWN');
+      expect((await refusal(surface({ team: '   ' }))).code).toBe('TASK_INTEGRATION_TEAM_UNKNOWN');
+      expect(calls).toBe(0);
+    });
+
+    it('a finished run, an unknown integration and an unconnected repository each answer first', async () => {
+      const run = await mintRun(app.id, { status: 'COMPLETED' });
+      expect((await refusal(surface({ team: 5 }, run))).code).toBe('APP_NOT_FOUND');
+      expect((await refusal(surface({ integration: 'nope', team: 5 }))).code).toBe('TASK_INTEGRATION_NOT_FOUND');
+      expect((await refusal(surface({ repository: 'acme/other', team: 5 }))).code).toBe('TASK_INTEGRATION_REPOSITORY_NOT_CONNECTED');
+      expect(calls).toBe(0);
+    });
+
+    it("a run of another App naming this App is APP_NOT_FOUND, not the team's refusal", async () => {
+      const run = await mintRun(otherApp.id);
+      expect((await refusal(surface({ appRef: app.id, team: 5 }, run))).code).toBe('APP_NOT_FOUND');
+      expect(calls).toBe(0);
+    });
+  });
+
+  it.each([['absent', {}], ['null', { team: null }]])('a %s team stays no filter', async (_name, form) => {
+    expect(numbers(await runList(form))).toEqual([1, 2, 3, 4, 5]);
+    expect(claimedUrls(await runClaim(form))).toEqual([url('widgets', 1)]);
+  });
+
+  it('a team named as text still filters, by id and with spaces around it', async () => {
+    expect(numbers(await runList({ team: anne.id }))).toEqual([1, 3]);
+    expect(numbers(await runList({ team: ` ${liam.id} ` }))).toEqual([2, 3]);
+    expect(claimedUrls(await runClaim({ team: liam.id }))).toEqual([url('widgets', 2)]);
+  });
+
+  it('GraphQL is not touched: an ID argument arrives as text, so a number there is an unknown team', async () => {
+    await wire(async (run) => {
+      const r = await run(`query($a:ID!){untrackedTaskItems(appRef:$a,integration:"gh",team:5){${LIST}}}`);
+      expect(r.errors?.[0]?.extensions?.code).toBe('TASK_INTEGRATION_TEAM_UNKNOWN');
+    });
+    expect(calls).toBe(0);
+  });
+});
+
 describe('the run tools take no malformed form of the filter (their arguments are not schema-checked)', () => {
   // GraphQL refuses these at validation; a model's tool call reaches execute() as written. A value that read as absent
   // would turn a no-team claim into an unfiltered one, taking another lane's item.
@@ -360,6 +518,27 @@ describe('the run tools take no malformed form of the filter (their arguments ar
       const r = await refusal(surface({ noTeam: true, team: { toString: null } }, run));
       expect(r.code).toBe('APP_NOT_FOUND');
       expect(calls).toBe(0);
+    });
+  });
+});
+
+describe('omitted, false and null are no filter on the run tools (cor:agt:120:03)', () => {
+  describe.each([
+    ['omitted', {}],
+    ['false', { noTeam: false }],
+    ['null', { noTeam: null }],
+  ])('noTeam %s', (_name, form) => {
+    it('the run list lists every lane, and a team filter stands', async () => {
+      expect(numbers(await runList(form))).toEqual([1, 2, 3, 4, 5]);
+      expect(numbers(await runList({ ...form, team: anne.id }))).toEqual([1, 3]);
+    });
+
+    it('the run claim takes the oldest item of any lane', async () => {
+      expect(claimedUrls(await runClaim(form))).toEqual([url('widgets', 1)]);
+    });
+
+    it("the run claim keeps to a team's lane", async () => {
+      expect(claimedUrls(await runClaim({ ...form, team: liam.id }))).toEqual([url('widgets', 2)]);
     });
   });
 });
@@ -417,14 +596,17 @@ describe('the argument on the wire (cor:agt:120:03)', () => {
     });
   });
 
-  it('noTeam:false with a team is the team filter on the claim too, and an omitted noTeam takes the oldest of any lane', async () => {
+  it('omitted, false and null keep the team filter on the claim too, and take the oldest of any lane without one', async () => {
     await wire(async (run) => {
-      const r = await run('mutation($a:ID!,$t:ID){claimUntrackedTaskItems(appRef:$a,integration:"gh",team:$t,noTeam:false,limit:1){tasks{externalId}}}', { t: liam.id });
-      expect(r.errors).toBeUndefined();
-      expect(r.data.claimUntrackedTaskItems.tasks).toEqual([{ externalId: url('widgets', 2) }]);
-      const any = await run('mutation($a:ID!){claimUntrackedTaskItems(appRef:$a,integration:"gh",noTeam:false,limit:1){tasks{externalId}}}');
-      expect(any.errors).toBeUndefined();
-      expect(any.data.claimUntrackedTaskItems.tasks).toEqual([{ externalId: url('widgets', 1) }]);
+      for (const arg of ['', ',noTeam:false', ',noTeam:null']) {
+        const r = await run(`mutation($a:ID!,$t:ID){claimUntrackedTaskItems(appRef:$a,integration:"gh",team:$t${arg},limit:1){tasks{externalId}}}`, { t: liam.id });
+        expect(r.errors).toBeUndefined();
+        expect(r.data.claimUntrackedTaskItems.tasks).toEqual([{ externalId: url('widgets', 2) }]);
+        const any = await run(`mutation($a:ID!){claimUntrackedTaskItems(appRef:$a,integration:"gh"${arg},limit:1){tasks{externalId}}}`);
+        expect(any.errors).toBeUndefined();
+        expect(any.data.claimUntrackedTaskItems.tasks).toEqual([{ externalId: url('widgets', 1) }]);
+        await db.agentTask.deleteMany({ where: { appId: app.id } });
+      }
     });
   });
 

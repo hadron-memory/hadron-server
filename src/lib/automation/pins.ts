@@ -200,9 +200,14 @@ export async function captureAutomationPin(db: PrismaClient, appId: string, user
   return result;
 }
 
-/** Keep D20's observable failed AppRun for unresolved setup, while never
- * turning a missing graph into execution consent or swallowing infrastructure errors. */
-export async function captureSetupConsent(...args: Parameters<typeof captureAutomationPin>): Promise<unknown> {
+/** What capturing consent for a setup produced: the full pin, or the unadopted marker create stores. */
+export type SetupCapture =
+  | { adoptable: true; pin: AutomationPreview }
+  | { adoptable: false; marker: { format: 'hadron-automation-unadopted-v1'; message: string; reason?: 'MEMORY_UNREADABLE' } };
+
+/** The ONE setup capture (#3457): createAgentSchedule's stored consent and the schedule preview both come from
+ * here, so a preview cannot describe a different pin than create stores. Infrastructure errors still throw. */
+export async function captureSetupOutcome(...args: Parameters<typeof captureAutomationPin>): Promise<SetupCapture> {
   try {
     const preview = await captureAutomationPin(...args);
     const [db, appId, userId, , organizationId] = args;
@@ -211,14 +216,21 @@ export async function captureSetupConsent(...args: Parameters<typeof captureAuto
     for (const node of Object.values(preview.nodes)) {
       if (!await canReadMemory(db, principal, String(node.state.memoryId))) throw new AutomationPinError('AUTOMATION_UNADOPTED', 'Automation definition is not readable by its run principal', 'MEMORY_UNREADABLE');
     }
-    return storedAutomationPin(preview);
+    return { adoptable: true, pin: preview };
   }
   catch (e) {
     if (e instanceof NodeNotFoundError || e instanceof AutomationPinError) {
-      return { format: 'hadron-automation-unadopted-v1', message: 'Setup graph is missing, unreadable, encrypted or exceeds the consent bounds', ...((e instanceof NodeNotFoundError ? 'MEMORY_UNREADABLE' : e.reason) ? { reason: 'MEMORY_UNREADABLE' } : {}) };
+      return { adoptable: false, marker: { format: 'hadron-automation-unadopted-v1', message: 'Setup graph is missing, unreadable, encrypted or exceeds the consent bounds', ...((e instanceof NodeNotFoundError ? 'MEMORY_UNREADABLE' : e.reason) ? { reason: 'MEMORY_UNREADABLE' as const } : {}) } };
     }
     throw e;
   }
+}
+
+/** Keep D20's observable failed AppRun for unresolved setup, while never
+ * turning a missing graph into execution consent or swallowing infrastructure errors. */
+export async function captureSetupConsent(...args: Parameters<typeof captureAutomationPin>): Promise<unknown> {
+  const outcome = await captureSetupOutcome(...args);
+  return outcome.adoptable ? storedAutomationPin(outcome.pin) : outcome.marker;
 }
 
 /** Invalid persisted consent is never treated as an absent optional gate. */

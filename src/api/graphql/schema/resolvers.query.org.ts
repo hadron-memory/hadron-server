@@ -36,7 +36,7 @@ import {
   canOpenMemoryRecordById,
   isMemoryReadableCached,
   isAuthorizationDenial,
-  requireOwnerOrOrgRole,
+  requireAppRead,
 } from './resolvers.helpers.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { unauthenticatedError } from '../../../lib/refusals.js';
@@ -67,7 +67,7 @@ async function callerCanOpenResource(ctx: Context, resolved: ResolvedResource): 
         // — not the query itself, whose resolution step swallows EVERY error
         // into null and would turn an outage into "not found" (@codex /
         // @copilot, PR #1383).
-        await requireOwnerOrOrgRole(ctx, resolved.app, 'READER');
+        await requireAppRead(ctx, resolved.app);
         return resolved.app;
       case 'agent':
         return agentQueries.agent(null as never, { ref: resolved.agent.id }, ctx);
@@ -413,6 +413,25 @@ export const orgQueries = {
     me: async (_: unknown, __: unknown, ctx: Context) => {
       if (!ctx.userId) return null;
       return ctx.db.user.findUnique({ where: { id: ctx.userId } });
+    },
+
+    /**
+     * #3532 (cor:aut:010:05, rulings 0171-0174, 0192-0194): the answer for THIS request's own credential. Reads the
+     * context only: no database access, no argument, so it is no token oracle and adds no per-cause branch. A check
+     * that could not complete is the ordinary internal error (cor:api:260:01), never REFUSED.
+     */
+    // `async` only to match the resolver map's type. Only the /graphql context builder (the single ApolloServer) sets
+    // `credentialStatus`; MCP calls resolver functions directly and never executes this field, so a context without
+    // a status can only be a plumbing fault, which this field answers as the internal error rather than guess (#3537
+    // BLIND P2-3, decided).
+    authenticationStatus: async (_: unknown, __: unknown, ctx: Context) => {
+      switch (ctx.credentialStatus) {
+        case 'authenticated': return 'AUTHENTICATED';
+        case 'refused': return 'REFUSED';
+        case 'anonymous': return 'ANONYMOUS';
+        // 'unavailable', and a context nothing resolved a status for: the credential check is incomplete.
+        default: throw new Error('authenticationStatus: the credential check did not complete');
+      }
     },
 
     // #562: expose the request's already-resolved AuthContext (cor:aut:020:02)

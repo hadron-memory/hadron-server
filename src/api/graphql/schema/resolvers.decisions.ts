@@ -605,7 +605,7 @@ export const decisionMutations = {
         },
         txCtx,
         'create',
-        { ownsKind: 'decision', governedContext: 'node-write', transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) } },
+        { authoring: { kind: 'platform', record: 'decision' }, ownsKind: 'decision', governedContext: 'node-write', transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) } },
       );
       const row = await tx.node.findUniqueOrThrow({ where: { id: (node as { id: string }).id }, select: LOG_ROW_SELECT });
       return { row, data };
@@ -649,7 +649,7 @@ export const decisionMutations = {
         { memoryId: log.memoryId, loc: row.loc, ...logContentOf(row.name, data), reason },
         txCtx,
         'update',
-        {
+        { authoring: { kind: 'platform', record: 'decision' },
           targetNodeId: row.id, guardRevSeq: row.revSeq, ownsKind: 'decision', governedContext: 'node-write',
           transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) },
         },
@@ -720,7 +720,7 @@ export const decisionMutations = {
         },
         txCtx,
         'create',
-        { ownsKind: 'decision', governedContext: 'node-write', transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) } },
+        { authoring: { kind: 'platform', record: 'decision' }, ownsKind: 'decision', governedContext: 'node-write', transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) } },
       );
       // The counter, as chat roots keep theirs: a sanctioned direct write that
       // asks for a fingerprint refresh, so it is not reconciled as drift. The
@@ -828,7 +828,7 @@ export const decisionMutations = {
         { memoryId: target.memoryId, loc: row.loc, ...renderedFields(final), reason },
         txCtx,
         'update',
-        {
+        { authoring: { kind: 'platform', record: 'decision' },
           targetNodeId: row.id, guardRevSeq: row.revSeq, ownsKind: 'decision', governedContext: 'node-write',
           transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) },
         },
@@ -875,7 +875,7 @@ export const decisionMutations = {
         { memoryId: target.memoryId, loc: row.loc, ...renderedFields(next), reason },
         txCtx,
         'update',
-        {
+        { authoring: { kind: 'platform', record: 'decision' },
           targetNodeId: row.id, guardRevSeq: row.revSeq, ownsKind: 'decision', governedContext: 'node-write',
           transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) },
         },
@@ -928,7 +928,7 @@ export const decisionMutations = {
         { memoryId: target.memoryId, loc: lockedLog.loc, ...logContentOf(lockedLog.name, data), reason: `purge ${d.code}: ${reason}`.slice(0, REASON_MAX) },
         txCtx,
         'update',
-        {
+        { authoring: { kind: 'platform', record: 'decision' },
           targetNodeId: lockedLog.id, ownsKind: 'decision', governedContext: 'node-write',
           transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) },
         },

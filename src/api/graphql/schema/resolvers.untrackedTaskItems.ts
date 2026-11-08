@@ -59,7 +59,8 @@ const badInput = (message: string) => taskError('BAD_USER_INPUT', message);
 type Args = {
   appRef: string;
   integration: string;
-  team?: string | null;
+  /** Text on GraphQL (an ID). A run tool passes what the model wrote, so resolveIntegration judges its type (#3471). */
+  team?: unknown;
   noTeam?: boolean | null;
   repository?: string | null;
   ready?: ReadyFilter | null;
@@ -96,6 +97,9 @@ async function resolveIntegration(c: Context, app: TaskApp, args: Args): Promise
   if (noTeam && args.team != null) throw badInput('Ask for no team or for a team, not both.');
   let teamLabel: string | null = null;
   if (args.team != null) {
+    // #3471 (cor:agt:120:03): as with noTeam above, a team a run tool's call set must filter or be refused. Fixed text:
+    // the value is never echoed.
+    if (typeof args.team !== 'string') throw badInput('team must be a worker id, URN or name.');
     const ref = args.team.trim();
     const workerId = ref === '' ? null : await resolveTaskWorkerId(c, app.id, ref);
     const team = workerId ? (integration.teams ?? []).find((t) => t.lead === workerId) : undefined;

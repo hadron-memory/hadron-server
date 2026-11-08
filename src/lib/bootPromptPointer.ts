@@ -1,3 +1,4 @@
+import { resolveAppInstallation, lockAppInstallation, lockAppAgentCustomization } from './appInstallations.js';
 /**
  * #2045 (S8, cor:agt:040:07) — the three boot-prompt POINTERS: `Agent`,
  * `AppAgent` (the install) and `Worker`, each naming a compiled boot-prompt
@@ -94,11 +95,12 @@ export async function loadBootPromptPointerOwner(
     return agent ? { field: 'AGENT', agent } : null;
   }
   if (target.field === 'APP_AGENT') {
-    const row = await db.appAgent.findFirst({
-      where: { appId: target.appId, agentId: target.agentId, app: liveApp },
-      select: { agentId: true, app: { select: APP_OWNER_SELECT } },
-    });
-    return row ? { field: 'APP_AGENT', app: row.app, agentId: row.agentId } : null;
+    if (opts?.lockForWrite) await lockAppAgentCustomization(tx as Prisma.TransactionClient,target.appId,target.agentId);
+    const install = opts?.lockForWrite
+      ? await lockAppInstallation(tx as Prisma.TransactionClient,target.appId,target.agentId)
+      : await resolveAppInstallation(db,target.appId,target.agentId);
+    const app = install ? await db.app.findFirst({where:{id:target.appId,...liveApp},select:APP_OWNER_SELECT}) : null;
+    return app ? {field:'APP_AGENT',app,agentId:target.agentId} : null;
   }
   // #2458: changeWorkerAgent may now land while this worker has an open session, so the placement check below must judge
   // the agent the worker casts when this write commits. Same order as the change: assignment lock, the Agent row FOR
@@ -301,12 +303,23 @@ export async function setBootPromptPointer(
   canReadMemory: (memoryId: string) => Promise<boolean>,
 ): Promise<ResolvedBootPromptPointer | null> {
   await assertMayWriteBootPromptPointer(ctx, owner);
+  if (owner.field === 'APP_AGENT') await lockAppAgentCustomization(tx,owner.app.id,owner.agentId);
   const target = nodeRef === null ? null : await validateBootPromptPointer(tx, owner, nodeRef, canReadMemory);
   const data = { bootPromptNodeId: target?.id ?? null, bootPromptUrn: target?.urn ?? null };
   if (owner.field === 'AGENT') {
     await tx.agent.update({ where: { id: owner.agent.id }, data });
   } else if (owner.field === 'APP_AGENT') {
-    await tx.appAgent.update({ where: { appId_agentId: { appId: owner.app.id, agentId: owner.agentId } }, data });
+    const install = await lockAppInstallation(tx,owner.app.id,owner.agentId);
+    if (!install) throw new Error('Installation changed while setting its boot prompt');
+    if (install.installationKind === 'ROW') {
+      await tx.appAgent.update({where:{appId_agentId:{appId:owner.app.id,agentId:owner.agentId}},data});
+      await tx.appAgentCustomization.updateMany({where:{appId:owner.app.id,agentId:owner.agentId},data});
+    } else {
+      await tx.appAgentCustomization.upsert({
+        where:{appId_agentId:{appId:owner.app.id,agentId:owner.agentId}},
+        create:{appId:owner.app.id,agentId:owner.agentId,...data},update:data,
+      });
+    }
   } else {
     await tx.worker.update({ where: { id: owner.worker.id }, data });
   }

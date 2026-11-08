@@ -16,6 +16,7 @@ import {
   nodeFilePath,
   orphanedLegacyPaths,
 } from './nodeFrontmatter.js';
+import { removeLegacySidecar } from './legacySidecar.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
 import { hasIncompleteMirrorMutation } from './mirrorFileMutation.js';
 import { withMirrorCheckoutLock, EncryptedMemoryFenceError } from './mirrorCheckoutLock.js';
@@ -198,6 +199,7 @@ async function pushMemoryToGitUnderLock(
       return encryptedRefusal(memoryId);
     }
     const nodes = snapshot;
+    const liveLocs = new Set(nodes.map(node => node.loc));
 
     // 5. Write each node as a self-contained frontmatter markdown file. A node
     // — leaf or parent — is `<...loc>.md` (children live in the sibling
@@ -227,6 +229,9 @@ async function pushMemoryToGitUnderLock(
         role: node.role,
         isRunnable: node.isRunnable,
         isPlaceholder: node.isPlaceholder,
+        authorshipKind: node.authorshipKind,
+        authoredByTask: node.authoredByTask,
+        authoredByRevision: node.authoredByRevision,
       }, node.outgoingEdges);
       preserveUnmanagedFrontmatter(frontmatter, mdPath);
 
@@ -241,8 +246,9 @@ async function pushMemoryToGitUnderLock(
       // empty-loc root (its file IS README.md, owned by the manifest below).
       if (node.loc !== '' && mdPath === nodeFilePath(localPath, node.loc)) {
         const legacy = orphanedLegacyPaths(localPath, node.loc);
-        rmSync(legacy.readme, { force: true });
-        rmSync(legacy.sidecar, { recursive: true, force: true });
+        // The same-memory LIVE snapshot is authoritative; stale/id-less parent READMEs must not roll back rows on sync (#3507).
+        if (!liveLocs.has(node.loc + ':README')) rmSync(legacy.readme, { force: true });
+        removeLegacySidecar(legacy.sidecar);
       }
     }
 

@@ -12,11 +12,10 @@
  * no on-behalf-of user cannot touch personal/private memories.
  */
 
-import { publicKnowledgeAmong, readsPublicKnowledgeWithoutUser } from '../../auth/publicKnowledgeRead.js';
 import { writeNodeCore } from '../../../api/graphql/schema/resolvers.mutation.node.js';
-import { canReadMemory } from '../../../mcp/access-control.js';
+import type { AuthoredWith } from '../../authoringAttestation.js';
+import { runAuthoring, runReadsNode } from '../runAuthoring.js';
 import type { AuthContext } from '../../../middleware/auth.js';
-import { runHoldsReadGrant } from '../../automationReadGrant.js';
 import { splitNodeUrn, normalizeUrnForLookup, legacyMemoryUrnToCanonical } from '../../urn.js';
 import { resolveFlowMemory, loadFlowNode } from '../loadFlowNode.js';
 import type { RunToolDef, RunToolContext } from './types.js';
@@ -26,6 +25,12 @@ const WRITE_ARG_PROPERTIES = {
   urn: {
     type: 'string',
     description: 'Fully-qualified node URN (hrn:node:<root>:<memory>:<loc>). Same-org only.',
+  },
+  authoredWith: {
+    type: 'object',
+    description: 'The author task this write worked from, required when the node\'s role rule names one: its id or URN, and its current revision.',
+    properties: { task: { type: 'string' }, revision: { type: 'integer' } },
+    required: ['task', 'revision'],
   },
   name: { type: 'string', description: 'Node display name.' },
   content: { type: 'string', description: 'Markdown content.' },
@@ -96,15 +101,11 @@ export const hadronReadNode: RunToolDef = {
         select: { id: true, urn: true, isEncrypted: true },
       });
       // #3306 / ruling 0104: or the memory is PUBLIC knowledge, which a run with no user reads in any org, read-only.
-      const publicRead = foreign !== null && !foreign.isEncrypted && readsPublicKnowledgeWithoutUser(principalAuth(ctx)) &&
-        (await publicKnowledgeAmong(ctx.db, [foreign.id])).has(foreign.id);
-      if (!foreign || foreign.isEncrypted || !(publicRead || await runHoldsReadGrant(ctx.db, principalAuth(ctx), ctx.run.id, foreign.id, loc))) throw err;
+      if (!foreign || !(await runReadsNode(ctx.db, ctx.principal, ctx.run, foreign.id, loc))) throw err;
       memory = foreign;
       viaGrant = true;
     }
-    if (!viaGrant && !(await canReadMemory(ctx.db, principalAuth(ctx), memory.id)) &&
-        // #2883: the automation's read grant, consulted here only (the run data read), after the shared gate refused.
-        !(await runHoldsReadGrant(ctx.db, principalAuth(ctx), ctx.run.id, memory.id, loc))) {
+    if (!viaGrant && !(await runReadsNode(ctx.db, ctx.principal, ctx.run, memory.id, loc))) {
       throw new Error(`Memory not readable for "${urn}" under the run principal.`);
     }
     const node = await ctx.db.node.findUnique({
@@ -115,6 +116,17 @@ export const hadronReadNode: RunToolDef = {
     return { urn, name: node.name, content: node.content, data: node.data };
   },
 };
+
+/** #1328 — a run tool states its claim like any other writer. Never the portal path. */
+function runToolAuthoring(ctx: RunToolContext, args: Record<string, unknown>) {
+  const claim = args.authoredWith as Partial<AuthoredWith> | null | undefined;
+  return runAuthoring(
+    ctx.principal,
+    ctx.run,
+    claim && typeof claim.task === 'string' && typeof claim.revision === 'number'
+      ? { task: claim.task, revision: claim.revision } : null,
+  );
+}
 
 export const hadronCreateNode: RunToolDef = {
   name: 'hadron_create_node',
@@ -147,6 +159,7 @@ export const hadronCreateNode: RunToolDef = {
         } as never,
         ctx.principal,
         'create',
+        { authoring: runToolAuthoring(ctx, args) },
       );
       return { created: true, urn, id: written.id };
     } catch (err) {
@@ -197,7 +210,7 @@ export const hadronUpdateNode: RunToolDef = {
       } as never,
       ctx.principal,
       'update',
-      { targetNodeId: node.id },
+      { authoring: runToolAuthoring(ctx, args), targetNodeId: node.id },
     );
     return { updated: true, urn, id: written.id };
   },

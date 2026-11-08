@@ -211,6 +211,12 @@ jobs:
       - name: Apply PR's new migrations via prisma migrate deploy (as the migrator)
         run: pnpm prisma migrate deploy
 
+      # The entrypoint's step after migrate (scripts/docker-start.sh): default ACLs grant DML on every new table, so the
+      # serve role's write on `actions` (a table only the deploy-time upsert may write, #3668) is revoked here, exactly as
+      # it is for _prisma_migrations. Skipping it leaves the verifier correctly reporting a forbidden privilege.
+      - name: Revoke what the default ACLs granted on the new tables (as the migrator, the entrypoint's order)
+        run: pnpm -s tsx scripts/db/revoke-runtime-migrations.ts
+
       - name: Verify the serve role after the migrations
         run: pnpm -s tsx scripts/db/verify-runtime-role.ts
 

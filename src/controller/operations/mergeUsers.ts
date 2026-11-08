@@ -44,6 +44,17 @@ export const DIRECT_USER_REFERENCES: ReadonlyArray<readonly [string, string] | r
   // like the actor ids above, and is not rewritten.
   ['worker_availability', 'set_by_user_id'],
   ['model_family_availability', 'set_by_user_id'],
+  // #1332 (cor:dmo:160:01): a PERSON reporter is the user, never the key, so the survivor's retry
+  // replays the report. Only the user id moves; run, worker, agent and App key ids stay.
+  ['node_content_validation_reports', 'reporter_user_id'],
+  // #3668 (S1a): the CURRENT person links of a grant row follow the survivor: holder, issuer, requester, and the
+  // revoker and verifier of a row that ended or was signed. The row guard (prisma/grant-invariants.sql) allows exactly this move,
+  // and only along the user_merges row this merge records before these rewrites. grant_events' actor ids are
+  // deliberately NOT here: append-only history, sealed like agent_team_events above. A merge never moves a row's App.
+  ['grants', 'user_id'],
+  ['grants', 'issuer_user_id'],
+  ['grants', 'requested_by_user_id'],
+  ['grants', 'verified_by'],
 ];
 
 /**
@@ -126,6 +137,8 @@ export const AUDIT_USER_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   ticker_subscriptions: ['created_by', 'ended_by', 'via_grant_person_id', 'ended_via_grant_person_id'],
   worker_wake_settings: ['updated_by'],
   app_grants: ['granted_by', 'revoked_by'],
+  // #3668 (S1a): who ended a grant follows the survivor (the row guard allows it along the recorded merge).
+  grants: ['revoked_by'],
   app_key_scopes: ['granted_by_user_id', 'revoked_by_user_id'],
   // #1706 — who last changed an App's stall windows.
   agent_task_stall_schedule: ['updated_by'],
@@ -637,8 +650,9 @@ async function runMergeTxn(
       WHERE sender_user_id = ${sourceUserId} OR new_user_id = ${sourceUserId}`;
     await tx.$executeRaw`UPDATE node_revisions SET
       edited_by = CASE WHEN edited_by = ${sourceUserId} THEN ${targetUserId} ELSE edited_by END,
-      approved_by = CASE WHEN approved_by = ${sourceUserId} THEN ${targetUserId} ELSE approved_by END
-      WHERE edited_by = ${sourceUserId} OR approved_by = ${sourceUserId}`;
+      approved_by = CASE WHEN approved_by = ${sourceUserId} THEN ${targetUserId} ELSE approved_by END,
+      authored_by_human = CASE WHEN authored_by_human = ${sourceUserId} THEN ${targetUserId} ELSE authored_by_human END
+      WHERE edited_by = ${sourceUserId} OR approved_by = ${sourceUserId} OR authored_by_human = ${sourceUserId}`;
 
     // The remaining two rewrites interpolate table/column IDENTIFIERS, which a
     // tagged template cannot bind (Postgres parameters are values, not
@@ -661,6 +675,29 @@ async function runMergeTxn(
       WHERE user_id = ${sourceUserId} AND origin_sign_in_id IS NOT NULL AND revoked_at IS NULL`;
     await tx.$executeRaw`DELETE FROM auth_codes WHERE user_id = ${sourceUserId} AND sign_in_id IS NOT NULL`;
     await tx.$executeRaw`DELETE FROM auth_handoff_codes WHERE user_id = ${sourceUserId} AND sign_in_id IS NOT NULL`;
+
+    // #1336 (§10 P2-1/P2-2): a HUMAN authorship stamp names a person (no FK), so
+    // it follows the survivor. `authored_by_human` is part of the node's state
+    // fingerprint, so the rewrite carries the sanctioned 'refresh' marker: left
+    // out, the next read sees drift and the reconcile clears the stamp. rev_seq
+    // does not move. The revision-row copy is rewritten with the other
+    // node_revisions actor columns above.
+    // The marker is conditional (§10 P2-3): a node with unreconciled drift keeps
+    // its stored hash, so the next read still reconciles it instead of the merge
+    // laundering a tampered body into a clean one.
+    await tx.$executeRaw`UPDATE nodes SET authored_by_human = ${targetUserId},
+      revision_content_hash = CASE WHEN revision_content_hash = hadron_node_revision_state_hash(nodes)
+        THEN 'refresh' ELSE revision_content_hash END
+      WHERE authored_by_human = ${sourceUserId}`;
+
+    // #1715: the merge itself, for the records a merge may not rewrite. A
+    // decision's asker and deciders and a log's deciders sit inside its
+    // authenticated payload, so they keep the source's id, and readers follow
+    // it here to the target (src/lib/userMerges.ts). Keyed on the source, so a
+    // second merge of the same account can't record a second target.
+    // #1332: written BEFORE the reassignments below, because the content-validation report
+    // trigger admits a reporter_user_id change only along a merge recorded here.
+    await tx.userMerge.create({ data: { sourceUserId, targetUserId, mergedBy: actor, ...consent } });
 
     // Non-conflicting ownership, attribution, credential, and history links.
     // An optional third element names a lineage column: rows that carry one stay
@@ -685,12 +722,6 @@ async function runMergeTxn(
       where: { id: sourceUserId },
       data: { deletedAt: new Date(), deletedBy: actor, updatedBy: actor },
     });
-    // #1715: the merge itself, for the records a merge may not rewrite. A
-    // decision's asker and deciders and a log's deciders sit inside its
-    // authenticated payload, so they keep the source's id, and readers follow
-    // it here to the target (src/lib/userMerges.ts). Keyed on the source, so a
-    // second merge of the same account can't record a second target.
-    await tx.userMerge.create({ data: { sourceUserId, targetUserId, mergedBy: actor, ...consent } });
 
     return tx.user.findUniqueOrThrow({ where: { id: targetUserId } });
   }, {

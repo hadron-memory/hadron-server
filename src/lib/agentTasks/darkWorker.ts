@@ -12,7 +12,7 @@
  * instances, race for the one open row: the loser's transaction rolls back and raises nothing.
  *
  * EXCEPTIONS (cor:agt:050:26's, kept): a worker with no live session (NO_SESSION), a retired worker, a worker of a
- * dead App, and one that is PENDING because its team is paused, it is paused, isolated, on standby, or stopped
+ * dead App, and one that is PENDING because its team is paused, it is paused or stopped
  * (a `pause` / `halt` stop signal). `NO_TASK` exempts the OVERDUE trigger by itself (such a worker is never OVERDUE)
  * and does NOT exempt the unacknowledged-wake trigger.
  *
@@ -38,7 +38,7 @@ export const DARK_WORKER_EVENT_TYPE = 'alarm.dark-worker';
 export type DarkReason = 'overdue' | 'wake-unacked';
 
 /** The PENDING reasons that exempt a worker from every trigger (`NO_TASK` is not one of them). */
-export const EXEMPT_PENDING = new Set(['TEAM_PAUSED', 'PAUSED', 'ISOLATED', 'STANDBY', 'STOPPED']);
+export const EXEMPT_PENDING = new Set(['TEAM_PAUSED', 'PAUSED', 'STOPPED']);
 
 type DarkWorker = { workerId: string; reason: DarkReason; status: WorkerCheckStatus; oldestWakeAgeSeconds: number | null };
 

@@ -12,14 +12,17 @@
  * Read-only: it returns the grants a caller must provision and never writes, so the preview can run it too. A caller
  * that writes runs it again inside its deciding transaction and provisions with `provisionCastGrants`.
  */
+import { resolveUnfilteredAppInstallation, readInstallBootPrompt } from './appInstallations.js';
 import { isLifecycleActive } from '@hadron-memory/access-control';
 import { GraphQLError } from 'graphql';
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import { ensureAgentOrgGrant } from '../controller/operations/ensureAgentOrgGrant.js';
 import { classifyOrgAgentLicense } from './auth/orgAgentInstallLicense.js';
+import { personalOrgAgentLicenseHolds } from './auth/personalOrgAgentInstall.js';
+import { bootPromptRefusal } from './bootPrompt/refusal.js';
 import { parseCompiledProvenance } from './bootCompile/provenance.js';
 
-type Db = Pick<PrismaClient, 'agent' | 'agentOrgGrant' | 'agentSubscription' | 'appAgent' | 'compiledPromptRevision' | 'node'> | Prisma.TransactionClient;
+type Db = Pick<PrismaClient, 'app' | 'appAgentCustomization' | 'agentImport' | 'agent' | 'agentOrgGrant' | 'agentSubscription' | 'appAgent' | 'compiledPromptRevision' | 'node'> | Prisma.TransactionClient;
 
 export type CastingApp = { id: string; organizationId: string | null; ownerUserId: string | null; uninstalledAt: Date | null };
 export type CastingAgent = { id: string; name: string; urn: string; personaRole: string | null };
@@ -83,6 +86,11 @@ async function planLicence(db: Db, app: CastingApp, agentId: string, include: bo
   // A user-owned App: the owner's own Agent, or the owner's active subscription.
   const agent = await db.agent.findUnique({ where: { id: agentId }, select: { ownerUserId: true, deletedAt: true } });
   if (!agent || agent.deletedAt) throw unavailable();
+  if (!(await personalOrgAgentLicenseHolds(db as Prisma.TransactionClient, app, agentId))) {
+    // Included Agents keep the existing non-disclosing include refusal.
+    if (include) throw inactive();
+    throw bootPromptRefusal('BOOT_PROMPT_INSTALL_LICENSE_INACTIVE', { surface: 'bind', agentName: '' });
+  }
   if (app.ownerUserId && agent.ownerUserId === app.ownerUserId) return false;
   const sub = app.ownerUserId
     ? await db.agentSubscription.findUnique({ where: { userId_agentId: { userId: app.ownerUserId, agentId } } })
@@ -97,7 +105,7 @@ async function planLicence(db: Db, app: CastingApp, agentId: string, include: bo
  * authority for what that revision read). No pointer, no compiled prompt, no includes. The agent itself is excluded.
  */
 async function includedAgentIds(db: Db, appId: string, agentId: string): Promise<string[]> {
-  const appAgent = await db.appAgent.findUnique({ where: { appId_agentId: { appId, agentId } }, select: { bootPromptNodeId: true } });
+  const appAgent = await readInstallBootPrompt(db, appId, agentId);
   const agent = await db.agent.findUnique({ where: { id: agentId }, select: { bootPromptNodeId: true } });
   const pointer = appAgent?.bootPromptNodeId ?? agent?.bootPromptNodeId ?? null;
   if (!pointer) return [];
@@ -132,17 +140,15 @@ export async function assertCastable(
   if (app.uninstalledAt) {
     throw refusal('APP_UNINSTALLED', 'Cannot cast a worker in an uninstalled App.', { appId: app.id });
   }
-  const row = await db.appAgent.findUnique({
-    where: { appId_agentId: { appId: app.id, agentId } },
-    select: { agent: { select: { id: true, name: true, urn: true, personaRole: true, deletedAt: true } } },
-  });
+  const row = await resolveUnfilteredAppInstallation(db, app.id, agentId);
   if (!row || row.agent.deletedAt) throw workerAgentNotInstalled(app.id);
   const provisionGrantsFor: string[] = [];
   if (await planLicence(db, app, agentId, false)) provisionGrantsFor.push(agentId);
   for (const included of await includedAgentIds(db, app.id, agentId)) {
     if (await planLicence(db, app, included, true)) provisionGrantsFor.push(included);
   }
-  const { deletedAt: _deleted, ...agent } = row.agent;
+  const {id,name,urn,personaRole} = row.agent;
+  const agent = {id,name,urn,personaRole};
   return { agent, provisionGrantsFor };
 }
 

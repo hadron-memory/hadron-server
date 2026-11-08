@@ -1,8 +1,9 @@
+import { listAppInstallations } from '../../../lib/appInstallations.js';
 import { NodeNotFoundError, AmbiguousLegacyUrnError, UrnNotQualifiedError } from '../../../lib/entityRef/errors.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { buildTeamSnapshot, isReadableTeamHead, teamTagsEnabled, teamHeadInvalid, type TeamTagSnapshot } from '../../../lib/teamTagSnapshot.js';
 import { lockAppReportsTo } from '../../../lib/workerReportsTo.js';
-import { requireWorkerReadAccess } from './resolvers.worker.js';
+import { requireWorkerReadAccess } from '../../../lib/auth/workerRead.js';
 // Team-chat operations — #939: createTeamChatMessage + teamChatMessages as
 // platform operations (team logic lives server-side; CLI/MCP/portal are thin
 // surfaces — the #935/#936 wrapper precedent).
@@ -19,9 +20,9 @@ import { requireWorkerReadAccess } from './resolvers.worker.js';
 //
 // Storage shape (D-2026-08-07-001/-004, kept field-compatible with the #921
 // storage rework so it can absorb this surface without a data migration):
-//   - chat root: nodeType `chat`, storage keys (`messageCount`,
-//     `lastMessageAt`) top-level in `data`; there is no root-level audience
-//     marker because access derives from the host memory.
+//   - chat root: nodeType `chat`; messageCount/lastMessageAt live in the
+//     non-revisioned ChatRootCounter row (#3496). No root-level audience
+//     marker: access derives from the host memory.
 //   - message: body in `Node.content`, envelope in `Node.data`, nodeType
 //     `chat-message`, ordering key in `Node.seq` (allocated atomically by
 //     `chatRoot.appendChatMessage` — #919; a hand-rolled node write here IS
@@ -75,7 +76,7 @@ import {
 import { isTeamSpaceRow, teamSpaceAudienceFilter, teamSpaceOwnerFilter } from '../../../lib/auth/teamSpace.js';
 // Spec 049 Phase 4 — the Channel row the team chat became.
 import { DEFAULT_CHANNEL_NAME, ensureChannelWithRoot } from '../../../lib/channels.js';
-import { locateTeamAgent } from './resolvers.worker.js';
+import { locateTeamAgent } from '../../../lib/auth/workerRead.js';
 import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
@@ -285,10 +286,7 @@ async function bootstrapTeamChat(
     teamAgent = await locateTeamAgent(ctx, app.id, null);
   } catch (e) {
     if (!(e instanceof GraphQLError) || e.extensions?.code !== 'TEAM_AGENT_NOT_FOUND') throw e;
-    const installed = await ctx.db.appAgent.findMany({
-      where: { appId: app.id },
-      select: { agent: { select: { id: true, name: true, urn: true, deletedAt: true } } },
-    });
+    const installed = await listAppInstallations(ctx.db, app.id);
     const live = installed.map((r) => r.agent).filter((a) => a && !a.deletedAt);
     if (live.length !== 1) throw e;
     teamAgent = live[0];

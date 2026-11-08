@@ -220,6 +220,7 @@ const SWEEP: Array<[string, (agentRef: string) => { query: string; variables: Re
   ['releaseEditorLock', (ref) => ({ query: 'mutation($ref: ID!) { releaseEditorLock(agentId: $ref) }', variables: { ref } })],
   ['agentAIConfig', (ref) => ({ query: 'query($ref: ID!) { agentAIConfig(agentRef: $ref) { provider } }', variables: { ref } })],
   ['agentSubscriptions', (ref) => ({ query: 'query($ref: ID!) { agentSubscriptions(agentRef: $ref) { agentId } }', variables: { ref } })],
+  ['agentSubscriptionsPage', (ref) => ({ query: 'query($ref: ID!) { agentSubscriptionsPage(agentRef: $ref) { total } }', variables: { ref } })],
   ['publishAgentImport', (ref) => ({ query: 'mutation($ref: ID!, $imp: ID!) { publishAgentImport(parentAgentRef: $ref, importedAgentRef: $imp, position: 0) { parentAgentId } }', variables: { ref, imp: urnOf(pub) } })],
 ];
 

@@ -44,7 +44,7 @@ beforeEach(async () => { await cleanDb(db); f = await fixture(); });
 
 it('#3343 rejects ordinary item-only knowledge before any system-candidate lookup, preserving installed-system attribution', async () => {
   expect(await db.orgMember.count({ where: { userId: f.user.id } })).toBe(0); // App-only member, no independent org authority.
-  const appLookup = vi.spyOn(db.app, 'findUnique');
+  const appLookup = vi.spyOn(db.app, 'findMany');
   const agentLookup = vi.spyOn(db.agent, 'findFirst');
   try {
     const principal = { userId: f.user.id, roles: ['READER'] };
@@ -56,14 +56,18 @@ it('#3343 rejects ordinary item-only knowledge before any system-candidate looku
     expect(grants).toContainEqual(expect.objectContaining({ source: 'APP_MEMBER', role: 'member', via: f.app.urn }));
     expect(grants.every(grant => grant.caps.read && !grant.caps.write)).toBe(true);
     expect(agentLookup).toHaveBeenCalled();
-    expect(appLookup.mock.calls.some(([args]) => args.where.id === f.app.id && args.select?.appAgents)).toBe(true);
+    expect(appLookup.mock.calls.some(([args]) => {
+      const id = args?.where?.id;
+      return id && typeof id === 'object' && 'in' in id && Array.isArray(id.in)
+        && id.in.includes(f.app.id) && args?.select?.appAgents;
+    })).toBe(true);
   } finally { appLookup.mockRestore(); agentLookup.mockRestore(); }
 });
 
 it('#3343 computes one independent-user ceiling across three unselected App folds', async () => {
   const apps = [f.app, await f.addApp('second'), await f.addApp('third')];
   const memoryReads = vi.spyOn(db.memory, 'findMany');
-  const appReads = vi.spyOn(db.app, 'findUnique');
+  const appReads = vi.spyOn(db.app, 'findMany');
   try {
     const access = await getPrincipalAppMemoryAccess(db, { userId: f.user.id });
     expect(access.has(f.knowledge.id)).toBe(false);
@@ -72,8 +76,14 @@ it('#3343 computes one independent-user ceiling across three unselected App fold
     // This is the owned-memory query within the real independentUserItemAccess loader, not a mocked authority map.
     expect(memoryReads.mock.calls.filter(([args]) => args?.where?.ownerUserId === f.user.id &&
       args.where.isInstallMemory === false && args.select?.id === true)).toHaveLength(1);
-    const foldedAppIds = appReads.mock.calls.filter(([args]) => args.select?.appAgents).map(([args]) => args.where.id);
-    expect(foldedAppIds.sort()).toEqual(apps.map(app => app.id).sort());
+    const foldedAppIds = appReads.mock.calls.filter(([args]) => args?.select?.appAgents).flatMap(([args]) => {
+      const id = args?.where?.id;
+      return id && typeof id === 'object' && 'in' in id && Array.isArray(id.in) ? id.in : [];
+    });
+    // The shared installation page also serves the system-memory fold; its
+    // independent inventory read may include these Apps again. The user
+    // ceiling above must still load exactly once across all item folds.
+    expect([...new Set(foldedAppIds)].sort()).toEqual(apps.map(app => app.id).sort());
   } finally { memoryReads.mockRestore(); appReads.mockRestore(); }
 });
 

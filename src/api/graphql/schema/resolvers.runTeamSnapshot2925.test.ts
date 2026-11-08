@@ -12,7 +12,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { runContext } from '../../../jobs/appRunDeps.js';
 import { resolveRunTools } from '../../../lib/runner/tools/index.js';
-import { inRunTeamReadTx, loadApp, mayReadAppTasks, resolveTaskActor, withReadableApp } from './resolvers.agentTask.js';
+import { inRunTeamReadTx, loadApp, mayReadAppTasks, runMayReadTeam, resolveTaskActor, withReadableApp } from './resolvers.agentTask.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 import { formatGraphQLError } from '../formatError.js';
@@ -109,7 +109,10 @@ it.each(['member', 'own-key', 'run', 'worker', 'impersonation'] as const)('%s ca
   expect(await db.appAutomationTeamSnapshotGrant.count()).toBe(0);
   expect(await db.appAutomationTeamSnapshotGrantEvent.count()).toBe(0);
 });
-it('preserves the legacy default-off own-App worker list', async () => {
+// #3360 (cor:agt:050:23): the legacy default-off own-App worker list is gone; an ungranted run is refused.
+it('refuses the own-App worker list to a run whose automation holds no grant (#3360)', async () => {
+  await denied(Q.workers({}, { appRef: appId }, runContext(db, await mintRun())), 'FORBIDDEN');
+  await enable();
   const page = await Q.workers({}, { appRef: appId }, runContext(db, await mintRun()));
   expect(page.items.map((worker: { id: string }) => worker.id)).toContain(workerId);
 });
@@ -164,6 +167,20 @@ it.each(['app', 'org', 'run-ended', 'run-forged'] as const)('the live read gate 
   if (kind === 'run-ended') await db.appRun.update({ where: { id: run.id }, data: { status: 'COMPLETED' } });
   if (kind === 'run-forged') principal.clientId = `run:${generateId()}`;
   await denied(Q.agentTasks({}, { appRef: appId }, principal), 'APP_NOT_FOUND');
+});
+it.each([undefined, null, '', 'r', 'ru', 'run', 'run:', 'other:run'])('#3352 malformed run clientId refuses without INTERNAL: %s', async clientId => {
+  await enable();
+  const principal = runContext(db, await mintRun());
+  // Include runtime-null defensively without widening Context's declared clientId type.
+  Object.assign(principal, { clientId });
+  const app = await loadApp(principal, appId);
+  expect(app).not.toBeNull();
+  expect(await runMayReadTeam(principal, app!)).toBe(false);
+  expect(await mayReadAppTasks(principal, appId)).toBe(false);
+  await denied(Q.agentTasks({}, { appRef: appId }, principal), 'APP_NOT_FOUND');
+  const out = await wire('query($app:ID!){agentTasks(appRef:$app){id}}', { app: appId }, principal);
+  expect(out.errors?.[0].extensions.code).toBe('APP_NOT_FOUND');
+  expect(out.errors?.[0].extensions.code).not.toBe('INTERNAL_SERVER_ERROR');
 });
 it('registers one cost-zero snapshot tool with no caller-App or credential arguments', () => {
   const tool = snapshotTool();
@@ -362,7 +379,8 @@ it('the new tool uses live own-App opt-in even for a run backed by a nonparticip
   await enable();
   expect((await snapshotTool().execute(c, WINDOW) as { app: { id: string } }).app.id).toBe(appId);
 });
-it('preserves legacy own-App worker list, by-ref, held-worker and chat metadata reads independently of opt-in', async () => {
+// #3360 (cor:agt:050:23): these reads were legacy-open regardless of the grant; they now follow it.
+it('own-App worker list, by-ref, held-worker and chat metadata reads follow the automation grant (#3360)', async () => {
   const app = await db.app.findUniqueOrThrow({ where: { id: appId } });
   const memory = await db.memory.create({ data: { id: generateId(), organizationId: orgId, urn: `${app.urn}-shared`, name: 'shared', class: 'app', appId, sharedMemoryOfAgentId: agentId } });
   const channel = await ensureChannelWithRoot(db, { memoryId: memory.id, loc: 'chats:team', name: 'Team', createdBy: manager });
@@ -371,6 +389,13 @@ it('preserves legacy own-App worker list, by-ref, held-worker and chat metadata 
   const principal = runContext(db, await mintRun());
   for (const enabled of [false, true, false]) {
     if (enabled) await enable(); else if (await db.appAutomationTeamSnapshotGrant.count({ where: { appId, revokedAt: null } })) expect((await setting(false)).errors).toBeUndefined();
+    if (!enabled) {
+      await denied(Q.worker({}, { ref: workerId }, principal), 'WORKER_NOT_FOUND');
+      await denied(Q.workers({}, { appRef: appId }, principal), 'FORBIDDEN');
+      expect(await Q.heldWorkers({}, { userRef: manager }, principal)).toEqual({ items: [], total: 0 });
+      await denied(Q.teamChatMessages({}, { appRef: appId, untagged: true, advanceReadState: false }, principal), 'TEAM_CHAT_TEAM_METADATA_FORBIDDEN');
+      continue;
+    }
     expect(await Q.worker({}, { ref: workerId }, principal)).toMatchObject({ id: workerId });
     const page = await Q.workers({}, { appRef: appId }, principal);
     expect(page.items.map((worker: { id: string }) => worker.id)).toContain(workerId);

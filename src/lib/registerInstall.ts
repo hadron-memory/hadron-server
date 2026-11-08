@@ -1,3 +1,4 @@
+import { listAppInstallations } from './appInstallations.js';
 /**
  * Spec 049 Phase 5 — the install-created register row (D-2026-09-13-007 D2,
  * plan §3.5 / §7.3).
@@ -42,10 +43,7 @@ export async function ensureInstallRegisterRows(
 ): Promise<number> {
   const app = await db.app.findFirst({ where: { id: appId, deletedAt: null }, select: { defaultChannelId: true } });
   if (!app?.defaultChannelId) return 0;
-  const installs = await db.appAgent.findMany({
-    where: { appId, ...(opts.agentId ? { agentId: opts.agentId } : {}) },
-    select: { agentId: true, agent: { select: { deletedAt: true, registerDefaults: true } } },
-  });
+  const installs = await listAppInstallations(db, appId, opts.agentId);
   let inserted = 0;
   for (const install of installs) {
     if (!install.agent || install.agent.deletedAt) continue;

@@ -120,6 +120,7 @@ import {
   toUsageNodeRefs,
 } from '../../../lib/usageRecorder.js';
 import { assertRootAllocationAllowed, lockRootSiblings, markNodeWrittenInTx, nextSiblingSeq } from '../../../lib/nodeSeq.js';
+import { assertAuthoring, attestedAuthoring, authoringFromRequest, type AuthoredWith, type AuthoringContext } from '../../../lib/authoringAttestation.js';
 import { authoredContentChanged, carryNodeAuthorship, clearNodeAuthorship, type NodeAuthorshipStamp } from '../../../lib/nodeAuthorship.js';
 import { mergePropertiesPatch } from '../../../lib/skilldoc/exportsMerge.js';
 import {
@@ -299,11 +300,19 @@ async function writeNodeCoreRaw(
   // this option's original caller — updateTeamRole's expectedNames — but the
   // mechanism stays: it is the generic guarded-write primitive, and the next
   // caller-level precondition will need exactly it.)
-  opts?: {
+  opts: {
+    /**
+     * #1328 — what this writer is doing, in the terms of the authoring
+     * attestation check. REQUIRED, so a new call site cannot skip the check by
+     * omission (`src/lib/authoringAttestation.ts`).
+     */
+    authoring: AuthoringContext;
     /** Reuse a caller's lock transaction; effects wait for its commit. */
     transaction?: {
       tx: Prisma.TransactionClient;
       pooledDb: Context['db'];
+      /** Response advice belongs to the outer request; authorization still uses txCtx. */
+      requestContext?: Context;
       afterCommit: (effect: () => void) => void;
     };
     targetNodeId?: string;
@@ -381,7 +390,8 @@ async function writeNodeCoreRaw(
 ) {
       // Keep the historical `input` name so the body below stays a
       // minimal-diff move from the upsertNode resolver it used to be.
-      let input = rawInput;
+      // #1328: the claim travels in `opts.authoring`, never to the row.
+      let { authoredWith: _claim, ...input } = rawInput;
       // Spec 022: `memoryId` MUST be supplied (typeDefs marks it `String!`).
       // Route through `resolveMemoryRef` so:
       //   - ID-shape inputs (CUID / 32-char hex) dispatch via spec 007
@@ -926,6 +936,24 @@ async function writeNodeCoreRaw(
         (nodeFields as Record<string, unknown>).data = enc.data ?? undefined;
       }
 
+      // #277 / cor:api:210:01: null clears a nullable JSON column. In particular,
+      // encryption's omitted-field mapping above must not discard an explicit clear.
+      // Keep the caller's plaintext input untouched for revision/change comparison.
+      if (input.data === null) (nodeFields as Record<string, unknown>).data = Prisma.DbNull;
+
+      // #3727 / cor:api:210:01 / cor:dmo:020:03: the same law for the nullable
+      // STRING columns. `enc.abstract ?? undefined` above turns an explicit
+      // `abstract: null` into an omission, silently retaining the old
+      // ciphertext while the derived hash was already cleared — the stored
+      // fingerprint and the abstract disagree. Unlike the JSON `data` column
+      // above (which needs DbNull to avoid storing JSON null), a string
+      // column's JS null IS SQL NULL — no sentinel; the caller's plaintext
+      // input stays untouched for revision/change comparison, as with `data`.
+      // MCP's writer already maps `enc.abstract/content ?? null`, so this
+      // brings the two surfaces to the same meaning (cor:api:240).
+      if (input.abstract === null) (nodeFields as Record<string, unknown>).abstract = null;
+      if (input.content === null) (nodeFields as Record<string, unknown>).content = null;
+
       // When createOnly resurrects a soft-deleted node, the UPDATE branch
       // must clear `deletedAt`/`deletedBy` — otherwise the resurrected
       // node ends up with the new content but still flagged as deleted,
@@ -1031,7 +1059,8 @@ async function writeNodeCoreRaw(
         ? await getAccessibleMemoryIds(ctx)
         : null;
       let writeEmbeddingWorkToken: string | null = null;
-      const includeWarningLifetime = captureIncludePinWarningLifetime(ctx);
+      const includeWarningContext = opts?.transaction?.requestContext ?? ctx;
+      const includeWarningLifetime = captureIncludePinWarningLifetime(includeWarningContext);
       let includeWarningContentSaved = false;
       let includeWarningStoredContent: string | null = null;
       // #2041 S2b — `storedPlaintext` is the includer's plaintext from the row
@@ -1359,14 +1388,17 @@ async function writeNodeCoreRaw(
             // ownerRepo deliberately remains outside restorable node history,
             // so an unguarded ownerRepo-only update keeps its legacy
             // revision-free behaviour. A guarded update is different: every
-            // successful state change must consume the claimed token or the
-            // same expectedRevision could be reused to overwrite it (#937).
+            // ownerRepo change must consume the claimed token or the same
+            // expectedRevision could be reused to overwrite it (#937). The
+            // edge-only exception below does not change ownerRepo behaviour.
+            // #3497 / rulings0149+0198: inline edges are not node revision state.
+            // They still reach finalizeNodeWrite, and a guarded edge-only write
+            // checks its token without consuming it.
             const needsRevision =
-              resolvedEdges !== null ||
               changes.length > 0 ||
               (opts?.forceRevision === true && inCompileScope()) ||
               (opts?.guardRevSeq !== undefined && changesUnversionedField);
-            if (!needsRevision && !changesUnversionedField) {
+            if (!needsRevision && !changesUnversionedField && resolvedEdges === null) {
               // A stale guard is refused even when the write is a no-op: the
               // compare-and-swap protects the caller's merge base, and an
               // idempotent write must not report success against a revision
@@ -1388,6 +1420,17 @@ async function writeNodeCoreRaw(
               });
               return { conflict: false, node: unchanged };
             }
+
+            // #1328 — before the first write of this edit, and judged on the
+            // locked row: the role before and after, the claim, the current
+            // task revision. A write that changes no authored field needs no
+            // claim and carries its stamp.
+            const authoredStamp = await assertAuthoring(tx, input.memoryId, {
+              priorRole: current.role, priorRunnable: current.isRunnable,
+              role: input.role === undefined ? current.role : input.role,
+              runnable: mergedGovernedState(current, { role: input.role, isRunnable: input.isRunnable }).isRunnable,
+              mintHuman: true, authoredChange: authoredContentChanged(changes),
+            }, opts.authoring);
 
             // A guarded claim happens only after the no-op decision and inside
             // this transaction. Since revSeq names the CURRENT state, the
@@ -1420,8 +1463,8 @@ async function writeNodeCoreRaw(
             const data = {
               ...updatePayload,
               // The snapshot above keeps the old author. The new live content
-              // has no verified author until the attestation/human gates land.
-              ...(authoredContentChanged(changes) ? clearNodeAuthorship() : {}),
+              // has the author just verified, or none (a person's stamp is #1336).
+              ...(authoredContentChanged(changes) ? (authoredStamp ?? clearNodeAuthorship()) : {}),
               ...(lockedAbstractHash !== undefined ? { abstractOriginHash: lockedAbstractHash } : {}),
               // #1450 — writing real content to a reserved citation makes it a spec.
               ...placeholderFillPatch(current, input.content),
@@ -1668,6 +1711,18 @@ async function writeNodeCoreRaw(
               { platformWrite: opts?.platformWrite },
             );
 
+            // #1328 — a new row, a revived tombstone or a changed upsert is
+            // authored; an identical upsert carries its stamp. Judged before the
+            // row is written (the revision above rolls back with a refusal). A
+            // tombstone's role is judged: reviving it is not a way out of its rule.
+            const authoredByWrite = !authoritative || mode === 'create' || authoredContentChanged(authoritativeChanges);
+            const authoredStamp = await assertAuthoring(tx, input.memoryId, {
+              priorRole: authoritative?.role ?? null, priorRunnable: authoritative?.isRunnable ?? null,
+              role: input.role === undefined ? (authoritative?.role ?? null) : input.role,
+              runnable: mergedGovernedState(authoritative, { role: input.role, isRunnable: input.isRunnable }).isRunnable,
+              mintHuman: true, authoredChange: authoredByWrite,
+            }, opts.authoring);
+
             // #1460 — a tombstone still owns its old abstract and chunk
             // vectors. Remove them in this transaction before making the row
             // live, so a revive cannot publish its previous incarnation's
@@ -1710,7 +1765,7 @@ async function writeNodeCoreRaw(
             const nestedSeq = autoSeq ? await nextSiblingSeq(tx, input.memoryId, input.loc) : null;
             const upserted = await tx.node.upsert({
               ...upsertArgs,
-              create: { ...upsertArgs.create, ...(nestedSeq != null ? { seq: nestedSeq } : {}) },
+              create: { ...upsertArgs.create, ...(authoredStamp ?? {}), ...(nestedSeq != null ? { seq: nestedSeq } : {}) },
               update: {
                 ...upsertArgs.update,
                 // #1326 — this arm OVERWRITES an existing row. For a copy
@@ -1721,8 +1776,8 @@ async function writeNodeCoreRaw(
                 // (the create arm); here it clears (Codex on #1397 f650be49).
                 ...(opts?.copiedAuthorship
                   ? clearNodeAuthorship()
-                  : authoritative && (mode === 'create' || authoredContentChanged(authoritativeChanges))
-                    ? clearNodeAuthorship() : {}),
+                  : authoritative && authoredByWrite
+                    ? (authoredStamp ?? clearNodeAuthorship()) : {}),
                 ...(authoritativeAbstractHash !== undefined
                   ? { abstractOriginHash: authoritativeAbstractHash } : {}),
                 // #1450 — a create that revives a tombstone is a NEW node, so it
@@ -1804,7 +1859,7 @@ async function writeNodeCoreRaw(
       // commit succeeds. The callback uses the pooled client, never the tx.
       const afterCommit = () => {
         const pooledDb = opts?.transaction?.pooledDb ?? ctx.db;
-        if (includeWarningContentSaved) attachIncludePinWarnings(ctx, finalNode, input.content, includeWarningStoredContent, { ...ctx, db: pooledDb }, includeWarningLifetime);
+        if (includeWarningContentSaved) attachIncludePinWarnings(includeWarningContext, finalNode, input.content, includeWarningStoredContent, { ...ctx, db: pooledDb }, includeWarningLifetime);
         void publishNodeWritten({
           nodeId: finalNode.id,
           memoryId: input.memoryId,
@@ -1947,7 +2002,7 @@ async function updateNodeCore(
   input: UpdateNodeInput,
   ctx: Context,
   op: string,
-  opts?: { ownsKind?: GovernedKind; governedContext?: GovernedContext },
+  opts?: { ownsKind?: GovernedKind; governedContext?: GovernedContext } & Pick<Parameters<typeof writeNodeCore>[3], 'transaction'>,
 ) {
   const { id, memoryId, loc, expectedRevision, ...fields } = input;
   // GraphQL guarantees a signed 32-bit integer on the wire, but resolver tests
@@ -2018,8 +2073,10 @@ async function updateNodeCore(
   // move (which frees the loc for reuse) can't make the loc-keyed
   // write hit a different node.
   return writeNodeCore({ ...fields, memoryId: targetMemoryId, loc: targetLoc }, ctx, 'update', {
+    authoring: authoringFromRequest(ctx, input.authoredWith),
     targetNodeId,
     guardRevSeq: expectedRevision ?? undefined,
+    transaction: opts?.transaction,
     ownsKind: opts?.ownsKind,
     governedContext: opts?.governedContext,
     concealUnreadable: {
@@ -2043,7 +2100,7 @@ async function updateNodeCore(
  *   than guessing from the data whether an `exports` value is a declaration.
  */
 export async function updateNodePropertiesWith(
-  { nodeRef, properties, reason }: { nodeRef: string; properties: unknown; reason?: string | null },
+  { nodeRef, properties, reason, authoredWith }: { nodeRef: string; properties: unknown; reason?: string | null; authoredWith?: AuthoredWith | null },
   ctx: Context,
   // `governedContext`: set by `updateNodeProperties` only. `updateObject`
   // shares this body but its refusal must not send a reader to the NODE
@@ -2168,6 +2225,7 @@ export async function updateNodePropertiesWith(
       withoutRequestCaches(ctx, lockTx),
       'update',
       {
+        authoring: authoringFromRequest(ctx, authoredWith),
         targetNodeId: meta.id,
         governedMerge: 'properties',
         governedContext: opts.governedContext,
@@ -2415,6 +2473,7 @@ async function createNodeInInstallMemory(input: CreateNodeArgs, ctx: Context) {
   const effects: Array<() => void> = [];
   const written = await withInstallMemory(ctx, install!, (tx, txCtx, memory) =>
     writeNodeCore({ ...rest, memoryId: memory.id } as CreateNodeInput, txCtx, 'create', {
+      authoring: authoringFromRequest(ctx, input.authoredWith),
       governedContext: 'node-write',
       transaction: { tx, pooledDb: ctx.db, afterCommit: (effect) => effects.push(effect) },
     }));
@@ -2442,6 +2501,7 @@ export const nodeMutations = {
       if (input.install) return createNodeInInstallMemory(input, ctx);
       assertMemoryTargeted(input.memoryId, 'createNode');
       return writeNodeCore(input as CreateNodeInput, ctx, 'create', {
+        authoring: authoringFromRequest(ctx, input.authoredWith),
         governedContext: 'node-write',
         concealUnreadable: { entity: 'memory', ref: input.memoryId! },
       });
@@ -2484,6 +2544,7 @@ export const nodeMutations = {
           entry.doors.create,
           async (_: unknown, { input }: { input: CreateNodeInput }, ctx: Context) =>
             writeNodeCore(input, ctx, 'create', {
+              authoring: authoringFromRequest(ctx, input.authoredWith),
               ownsKind: entry.kind,
               governedContext: 'node-write',
               concealUnreadable: { entity: 'memory', ref: input.memoryId },
@@ -2502,16 +2563,21 @@ export const nodeMutations = {
     // never moves. All content fields preserve-on-omit.
     updateNode: async (_: unknown, { input }: { input: UpdateNodeArgs }, ctx: Context) => {
       if (input.install) {
-        // #2044: select the node by the App's install memory + loc. Nothing is created
-        // here; a caller who cannot even open the record gets the not-found a missing
-        // customisation gives.
+        // #3628 / ruling0234: shared participant/manager gates and live-install
+        // refusals, with no lazy creation. The update uses the same held transaction.
         const { install, memoryId, id, ...rest } = input;
         if (memoryId != null || id != null) {
           throw new GraphQLError('updateNode: identify the node by `install` + `loc`, not also by `id` or `memoryId`.',
             { extensions: { code: 'BAD_USER_INPUT' } });
         }
-        const memory = await findCallerInstallMemory(ctx, install);
-        return updateNodeCore({ ...rest, memoryId: memory.id } as UpdateNodeInput, ctx, 'updateNode', { governedContext: 'node-write' });
+        const effects: Array<() => void> = [];
+        const written = await withInstallMemory(ctx, install, (tx, txCtx, memory) =>
+          updateNodeCore({ ...rest, memoryId: memory.id } as UpdateNodeInput, txCtx, 'updateNode', {
+            governedContext: 'node-write',
+            transaction: { tx, pooledDb: ctx.db, requestContext: ctx, afterCommit: effect => effects.push(effect) },
+          }), { create: false });
+        for (const effect of effects) effect();
+        return written;
       }
       return updateNodeCore(input as UpdateNodeInput, ctx, 'updateNode', { governedContext: 'node-write' });
     },
@@ -2527,7 +2593,7 @@ export const nodeMutations = {
     // merged plaintext.
     updateNodeData: async (
       _: unknown,
-      { nodeRef, data, reason }: { nodeRef: string; data: unknown; reason?: string | null },
+      { nodeRef, data, reason, authoredWith }: { nodeRef: string; data: unknown; reason?: string | null; authoredWith?: AuthoredWith | null },
       ctx: Context,
     ) => {
       // The patch must be a JSON object — the operation merges keys, so an
@@ -2643,7 +2709,7 @@ export const nodeMutations = {
         },
         ctx,
         'update',
-        { targetNodeId: meta.id, governedMerge: 'data', governedContext: 'node-write' },
+        { authoring: authoringFromRequest(ctx, authoredWith), targetNodeId: meta.id, governedMerge: 'data', governedContext: 'node-write' },
       );
     },
 
@@ -2687,7 +2753,9 @@ export const nodeMutations = {
         caseInsensitive = false,
         regex = false,
         dryRun = false,
+        authoredWith,
       } = input;
+      const authoring = authoringFromRequest(ctx, authoredWith);
 
       const hasNodeIds = Array.isArray(nodeIds) && nodeIds.length > 0;
       const hasMemoryIds = Array.isArray(memoryIds) && memoryIds.length > 0;
@@ -2844,6 +2912,8 @@ export const nodeMutations = {
         total: number;
         abstractChanged: boolean;
         contentChanged: boolean;
+        /** #1328 — a match is not a change: replacing a text with itself authors nothing. */
+        authoredChange: boolean;
         ownerRepo: string;
       }
       const plans: Plan[] = [];
@@ -2969,6 +3039,10 @@ export const nodeMutations = {
             total,
             abstractChanged,
             contentChanged,
+            authoredChange: authoredContentChanged(diffNodeChanges(pt, {
+              ...changed,
+              ...('tags' in changed ? { tags: serializeTags(changed.tags as string[]) } : {}),
+            })),
             ownerRepo: (raw as { ownerRepo?: string | null }).ownerRepo ?? '',
           });
         }
@@ -3098,6 +3172,7 @@ export const nodeMutations = {
         for (const id of [...planMemory.keys()].sort()) {
           await ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: planMemory.get(id)! });
         }
+        const authoredStamps = new Map<string, NodeAuthorshipStamp | null>();
         for (const p of plans) {
           const locked = await tx.node.findUnique({ where: { id: p.raw.id } });
           // deletedAt is not a revisioned field, so a delete that committed
@@ -3108,6 +3183,14 @@ export const nodeMutations = {
               { extensions: { code: 'NODE_WRITE_CONFLICT', loc: p.raw.loc, memoryId: p.raw.memoryId } },
             );
           }
+          // #1328 — one claim for the batch, judged per row on its locked state
+          // and on what the row changes (compared on plaintext in the plan, which
+          // the check above just proved current); one refusal refuses the batch,
+          // like every check here.
+          authoredStamps.set(p.raw.id, await assertAuthoring(tx, p.raw.memoryId, {
+            priorRole: locked.role, priorRunnable: locked.isRunnable,
+            role: locked.role, runnable: locked.isRunnable, mintHuman: true, authoredChange: p.authoredChange,
+          }, authoring));
         }
         for (const p of plans) {
           const raw = p.raw;
@@ -3152,7 +3235,7 @@ export const nodeMutations = {
           }
           data.revisionContentHash = revisionStateHashRefreshMarker();
 
-          Object.assign(data, clearNodeAuthorship());
+          if (p.authoredChange) Object.assign(data, authoredStamps.get(raw.id) ?? clearNodeAuthorship());
           await tx.node.update({ where: { id: raw.id }, data });
           if (p.contentChanged || p.abstractChanged) {
             raw.embeddingWorkToken = await stampEmbeddingObligation(tx, raw.id, raw.memoryId);
@@ -4039,7 +4122,7 @@ export const nodeMutations = {
         srcPlain.abstract == null ||
         srcPlain.abstractOriginHash === computeContentHash(srcPlain.content)
       ) ? carryNodeAuthorship(source) : clearNodeAuthorship();
-      return writeNodeCore(input, ctx, 'create', { copiedAuthorship, copiesSeq: true });
+      return writeNodeCore(input, ctx, 'create', { authoring: { kind: 'carry' }, copiedAuthorship, copiesSeq: true });
     },
 
     // Fold a source node into a target node, returning the updated target.
@@ -4398,6 +4481,14 @@ export const nodeMutations = {
           const kinds = governedKindsOf({ role: lockedSource.role, isRunnable: lockedSource.isRunnable });
           if (kinds.length > 0) throw governedRemovalError([{ id: lockedSource.id, loc: lockedSource.loc, kinds }]);
         }
+        // #1328 — mergeNodes authors the target's new state. The source is
+        // folded, not authored, so only the surviving row answers to its rule.
+        const authoredStamp = await assertAuthoring(tx, target.memoryId, {
+          priorRole: lockedTarget.role, priorRunnable: lockedTarget.isRunnable,
+          role: lockedTarget.role, runnable: lockedTarget.isRunnable,
+          authoredChange: Object.keys(changed).length > 0,
+          mintHuman: false, // a fold, not an authoring write (D-2026-09-26-D)
+        }, authoringFromRequest(ctx, input.authoredWith));
         await createNodeRevision(
           tx,
           buildNodeRevisionSnapshot(target, editorFromAuth(ctx), {
@@ -4417,7 +4508,7 @@ export const nodeMutations = {
             where: { id: target.id },
             data: {
               ...writeData,
-              ...clearNodeAuthorship(),
+              ...(authoredStamp ?? clearNodeAuthorship()),
               // #1450 (@codex P2, PR #1452): merging real content into a
               // reserved citation writes the spec, same as updateSpecNode.
               ...placeholderFillPatch(lockedTarget, 'content' in changed ? changed.content : undefined),
@@ -5121,7 +5212,7 @@ export const nodeMutations = {
       decryptNodeFields(node, memEncInfo);
       // A Google Doc is a read for a human: includes resolve with the exporter's
       // access (cor:dmo:150:03); variables stay as stored, as before.
-      const exported = await resolveNodeContent(ctx, node, { mode: 'includes' });
+      const exported = await resolveNodeContent(ctx, node, { mode: 'includes', surface: 'export' });
       const markdown = exported && exported.trim().length > 0 ? exported : `# ${node.name}`;
 
       const { file } = await runOwnedEmailOperation<{ file: ToolDriveFile }>(ctx, connectionRef, 'create-doc', {

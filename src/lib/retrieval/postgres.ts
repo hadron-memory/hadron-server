@@ -1,3 +1,4 @@
+import { openThreadsSql } from '../comments/openThreads.js';
 /**
  * Postgres implementation of the node retrieval seam (cor:rag:010:02).
  *
@@ -28,6 +29,7 @@ import { vectorSearchNodes, vectorSearchChunks } from '../../services/embedding/
 import { compileBooleanQuery } from './tsquery.js';
 import { compileNodeWhere, compileNodePropertySort } from './nodeWhere.js';
 import { regexSearchTimeoutMs } from './regexTimeout.js';
+import { UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES } from './defaultNodeTypes.js';
 import { PARENT_LOC_SQL } from '../childLoc.js';
 
 /** Ordered parameter accumulator — appends a value and returns its `$n` placeholder. */
@@ -43,11 +45,12 @@ function filterClause(f: NodeSqlFilter | undefined, bind: (v: unknown) => string
   if (flt.tombstoneMemoryIds !== undefined) {
     parts.push(`(deleted_at IS NULL OR (node_type <> 'comment' AND memory_id = ANY(${bind(flt.tombstoneMemoryIds)}::text[])))`);
   }
-  // Explicit nodeType wins; otherwise exclude system-type nodes (node_type is NOT NULL, default 'info').
+  // Explicit nodeType wins; otherwise exclude the unqualified-search defaults,
+  // system and chat-message (#2836; node_type is NOT NULL, default 'info').
   // #3113 — an explicit list is also explicit: it narrows to the named types and replaces the default.
   if (flt.nodeTypes) parts.push(`node_type = ANY(${bind(flt.nodeTypes)}::text[])`);
   else if (flt.nodeType) parts.push(`node_type = ${bind(flt.nodeType)}`);
-  else parts.push(`node_type <> 'system'`);
+  else parts.push(`node_type <> ALL(${bind([...UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES])}::text[])`);
   if (flt.objectType) parts.push(`object_type = ${bind(flt.objectType)}`); // #725 collection facet
   if (flt.isRunnable != null) parts.push(`is_runnable = ${bind(flt.isRunnable)}`);
   if (flt.role != null) {
@@ -75,6 +78,8 @@ function filterClause(f: NodeSqlFilter | undefined, bind: (v: unknown) => string
   // #1607 (cor:dmo:110:06) — approval and mint status sets never contain comments.
   if (approval || flt.minted != null) parts.push("node_type <> 'comment'");
   // #1608 (cor:dmo:110:08) — content, comments or both; CONTENT by default.
+  const threads = openThreadsSql(flt.hasOpenThreads, bind, 'nodes.id', 'nodes.memory_id', flt.syntheticCommentMemoryIds);
+  if (threads) parts.push(threads);
   const scope = contentScopeSql(effectiveContentScope(flt));
   if (scope) parts.push(scope);
   return parts.length ? ' AND ' + parts.join(' AND ') : '';
@@ -290,6 +295,7 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
       onWindow: opts.onWindow,
       candidateNodeIds: opts.candidateNodeIds,
       abstractOnly: opts.abstractOnly,
+      hasOpenThreads: opts.hasOpenThreads, syntheticCommentMemoryIds: opts.syntheticCommentMemoryIds,
       scope: opts.contentScope ?? 'CONTENT', // #1608: content by default for every caller
     });
   },
@@ -300,6 +306,7 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
       queryEmbedding: opts.queryEmbedding,
       limit: opts.limit,
       onWindow: opts.onWindow,
+      hasOpenThreads: opts.hasOpenThreads, syntheticCommentMemoryIds: opts.syntheticCommentMemoryIds,
       scope: opts.contentScope ?? 'CONTENT', // #1608: content by default for every caller
     });
   },

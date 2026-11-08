@@ -1374,7 +1374,24 @@ describe('#2138 §3.3 — the live-check reason through the whole loader', () =>
     expect(ids(await due(ctx(manager.id)))).toContain(liam.id);
   });
 
-  it('paused, isolated-by-pause and a TEAM pause are never due', async () => {
+  it('#3606: a TEAM pause offers its stop notice alone, holding ticks and mentions', async () => {
+    const t = await liveTicker();
+    await subscribe(t.id, liam.id);
+    await task(liam.id);
+    await say(channel, 'synthetic @liam', { mentions: ['liam'] });
+    expect((await due(ctx(manager.id))).wakes.flatMap((w: any) => w.reasons).length).toBeGreaterThan(0);
+    await db.app.update({ where: { id: app.id }, data: { teamPausedAt: new Date() } });
+    const notice = await db.agentTeamEvent.create({ data: { appId: app.id, type: 'stop.notice', subjectWorkerId: liam.id,
+      payload: { signalId: generateId(), level: 'pause', notice: 'stop', interrupt: false } } });
+    const page = await due(ctx(manager.id), { accepts: ['STOP'] });
+    expect(page.wakes).toHaveLength(1);
+    expect(page.wakes[0].worker.id).toBe(liam.id);
+    expect(page.wakes[0].reasons.map((r: any) => r.kind)).toEqual(['STOP']);
+    expect(page.wakes[0].reasons[0].stop.eventId).toBe(notice.id);
+    expect(page.wakes[0].channels).toEqual([]);
+  });
+
+  it('paused workers and a TEAM pause are never due', async () => {
     const t = await liveTicker();
     await subscribe(t.id, liam.id);
     await task(liam.id);

@@ -111,7 +111,7 @@ describe('#2044 install memory — lazy creation', () => {
     expect(updated.content).toBe('second');
     await expect(M.updateNode({}, { input: { install: f.install, loc: 'prompts:lane', content: 'nope' } }, ctxOf(f.member.id))).rejects.toThrow(/Forbidden/);
     await expect(M.updateNode({}, { input: { install: f.install, loc: 'prompts:lane', content: 'nope' } }, ctxOf(f.stranger.id)))
-      .rejects.toMatchObject({ extensions: { code: 'INSTALL_MEMORY_NOT_FOUND' } });
+      .rejects.toMatchObject({ code: 'APP_NOT_FOUND' });
   });
 });
 
@@ -277,7 +277,7 @@ describe('#2064 full-scope §10 (Riana) — response and discovery boundaries', 
     try {
       const result = await server.executeOperation(
         { query: `mutation($i:UpdateNodeInput!){updateNode(input:$i){id memoryId loc name revision description abstract tags content data
-          memory{id} outgoingEdges{id} incomingEdges{id} asset{id} signingRequests{id} commentSummary{comments openThreads}
+          memory{id} outgoingEdges{id} incomingEdges{id} asset{id} signingRequests{id} commentSummary{comments openThreads oldestOpenThreadAt}
           approvalStatus{state approval{revision}} mintStatus{minted mintedByInfo} authorship{__typename} createdByWorker{id} updatedByAgent{id} updatedByUser{handle}
           contentValidation{state} signatureStatus{state signatures{id}}}}`, variables: { i: { install: f.install, loc: 'prompts:lane', description: 'only-this' } } },
         { contextValue: ctx },
@@ -295,7 +295,7 @@ describe('#2064 full-scope §10 (Riana) — response and discovery boundaries', 
         outgoingEdges: [], incomingEdges: [], asset: null, signingRequests: [], authorship: null, createdByWorker: null, updatedByAgent: null,
         // Ruth's #2064 merge condition: #2189's updatedByUser re-reads the last editor by node id, so it is concealed too.
         updatedByUser: null });
-      expect(out.commentSummary).toEqual({ comments: 0, openThreads: 0 });
+      expect(out.commentSummary).toEqual({ comments: 0, openThreads: 0, oldestOpenThreadAt: null });
       expect(out.approvalStatus).toEqual({ state: 'NOT_APPLICABLE', approval: null });
       // And it really was applied.
       expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).description).toBe('only-this');

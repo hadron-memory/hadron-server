@@ -1,3 +1,4 @@
+import { SYNC_NOT_ATTEMPTED, syncNotAttemptedMessage } from '../integrations/github/syncNotAttempted.js';
 import { MCP_WORKER_BINDING_UNSUPPORTED, offTeamTool } from './disabledTools.js';
 import { registerAutomationTeamSnapshotGrantTools } from './automationTeamSnapshotGrantTools.js';
 import { appendDeliveryPending } from '../lib/tickers/deliveryPending.js';
@@ -46,6 +47,7 @@ import {
   recordNodeWrite,
   trackUsageWrite,
   toUsageNodeRefs,
+  usageAppKeyOf,
 } from '../lib/usageRecorder.js';
 import {
   buildNodeRevisionSnapshot,
@@ -55,7 +57,9 @@ import {
   editorFromAuth,
   diffNodeChanges,
 } from '../lib/nodeRevisionSnapshot.js';
-import { authoredContentChanged, clearNodeAuthorship } from '../lib/nodeAuthorship.js';
+import { assertAuthoring, assertRenameAuthoring, attestedAuthoring } from '../lib/authoringAttestation.js';
+import { mcpReadsTask } from './taskReadGate.js';
+import { authoredContentChanged, clearNodeAuthorship, type NodeAuthorshipStamp } from '../lib/nodeAuthorship.js';
 import {
   parseUrnInput,
   assertFullyQualifiedUrn,
@@ -161,6 +165,7 @@ import {
 import { refusalResult, toolErrorResult, withToolErrorBoundary } from './toolError.js';
 import { refNamesNothing } from '../lib/entityRef/refNamesNothing.js';
 import { textResult } from './textResult.js';
+import { publicErrorExtensions } from '../lib/errorDiagnostics.js';
 import { tagsInputSchema } from './tagsInput.js';
 import { foreignIdentityScopedMemoryFilter } from '../lib/auth/memoryOwnership.js';
 
@@ -244,11 +249,17 @@ import {
 } from '../api/graphql/schema/resolvers.mutation.session.js';
 import { HADRON_SERVER_VERSION, MCP_SURFACE_CAPABILITIES, getDeploymentInfo } from './deploymentInfo.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+import { validationTaskSetsForNodes } from '../api/graphql/schema/resolvers.validationTaskSet.js';
+import type { ValidationTaskSet } from '../lib/contentValidationReport.js';
 import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.js';
 // #1005: the SHARED App-participation predicate (#943) — reused here so
 // reconnect recovery admits exactly whom startSession admitted, rather than a
 // narrower member-row copy that would drift from it.
 import { resolveNodeContent } from '../lib/includes/resolveNodeContent.js';
+import {
+  CONTENT_RESOLUTION_LIMIT_EXCEEDED, isContentResolutionLimitError, resolutionLimitPhrase,
+  type ResolutionLimit,
+} from '../lib/includes/resolutionBudget.js';
 import { checkNodeTypesFilter, NodeTypesFilterError } from '../lib/retrieval/nodeTypeList.js';
 import { lintWarningPageForNodeId, renderLintWarnings } from '../lib/bootPromptLint.js';
 
@@ -1139,6 +1150,17 @@ async function replaceOutgoingEdgesInTransaction(
  * to the raw stored bare urn if a row can't compose to v2 — display strings must
  * never crash a tool (serve-and-fall-back).
  */
+/**
+ * #1332: a trusted resolver refusal as `[<code>] <message>`, then its public extensions as
+ * `key: value` lines (the comment tools' format). Only called for a trusted refusal.
+ */
+function codedRefusalText(e: unknown): string {
+  if (!(e instanceof GraphQLError)) return 'Error: refused';
+  const { code, ...rest } = publicErrorExtensions(e.extensions ?? {});
+  const extras = Object.entries(rest).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
+  return [`[${String(code ?? 'ERROR').toLowerCase()}] ${e.message}`, ...extras].join('\n');
+}
+
 function safeEmitEntityUrnV2(type: 'memory' | 'app' | 'agent' | 'org', bareUrn: string): string {
   try {
     return emitEntityUrnV2(type, bareUrn);
@@ -1890,6 +1912,14 @@ async function batchActionUrns(nodes: ReadProjectionNode[]): Promise<Map<string,
   return out;
 }
 
+/** #3659: Node.validationTasks as a read line. No line when the set does not apply to this node. */
+function validationTasksLine(set: ValidationTaskSet | undefined): string {
+  if (!set) return '';
+  if (set.state === 'NOT_CONFIGURED') return 'Validation tasks: none configured';
+  if (set.state === 'READY') return `Validation tasks: ${set.tasks.map((t) => `${t.taskRef} @ revision ${t.revision}`).join(', ')}`;
+  return `Validation tasks: ${set.state.toLowerCase()}`;
+}
+
 async function renderNodeReadProjection(
   node: ReadProjectionNode,
   scope: 'content' | 'abstract' | 'all',
@@ -1909,6 +1939,8 @@ async function renderNodeReadProjection(
       actionUrns?: ReadonlyMap<string, string | null>;
     };
     memoryUrnOf?: (memoryId: string) => Promise<string>;
+    /** #3659: this node's validation task set; absent means no line. Never set for an inherited read. */
+    validationTasks?: ValidationTaskSet;
   } = {},
 ): Promise<string> {
   // #1885 (cor:dmo:050:14) — a node read through a child's effective system
@@ -2128,6 +2160,7 @@ async function renderNodeReadProjection(
       : '',
     authorshipLine,
     validationLine,
+    validationTasksLine(opts.validationTasks),
     approvalLine,
     await signatureLine,
     mintLine,
@@ -3414,6 +3447,51 @@ export function createMcpServerInstance(
     },
   );
 
+  // #1332 (cor:dmo:160:01): one write path for content-validation reports, delegated to the
+  // GraphQL resolver, so the gates, the ordered refusals and the server-derived reporter are
+  // computed once. The reporter is never an argument: a bound worker session reports as that
+  // worker, otherwise the caller's own user or App key does.
+  server.tool(
+    'hadron_record_content_validation',
+    'Record the result of running a node\'s validation task on one revision of the node (cor:dmo:160:01). Advisory: it never edits the node or blocks a write. '
+      + 'validationTaskRef is a task the node\'s rules name now (the "Validation tasks" line of hadron_get_node lists them), and validationTaskRevision the task revision that ran. Any writer of the memory may report except the author of that node revision; '
+      + 'if you started a worker session with hadron_start_session, the report is recorded as that worker. runId makes a retry idempotent (same runId, same reporter, same revisions returns the first report); '
+      + 'any other reuse is refused [content_validation_run_id_conflict]. A [conflict] means the node changed during the call: nothing was written, re-read it and decide whether to report again.',
+    SHAPE_HADRON_RECORD_CONTENT_VALIDATION,
+    async ({ nodeRef, nodeRevision, validationTaskRef, validationTaskRevision, outcome, runId, session }) => {
+      // The #1701 gate already published the named session's actor, or cleared it when the
+      // session did not validate. A refused argument is carried to the resolver, which refuses
+      // SESSION_NOT_BOUND only after the not-found and writer gates; it never falls back to
+      // recording the report as the caller's own principal.
+      const requestSession = mcpRequestSessionContext(auth);
+      const argumentRefused = typeof session === 'string' && session.length > 0
+        && !(await validateSessionBinding(db, auth, session));
+      const ctx: Context = {
+        db, userId: auth.userId, clientId: auth.clientId,
+        appId: auth.appId, appKeyId: auth.appKeyId,
+        ...requestSession,
+        sessionBindingRefused: requestSession.sessionBindingRefused || argumentRefused,
+        apiKeyId: auth.apiKeyId, signInId: auth.signInId,
+        roles: auth.roles, organizationId: auth.organizationId,
+        impersonation: auth.impersonation,
+      };
+      try {
+        const receipt = await resolvers.Mutation.recordNodeContentValidationReport(
+          {}, { nodeRef, nodeRevision, validationTaskRef, validationTaskRevision, outcome, runId }, ctx,
+        );
+        const r = receipt.report;
+        return textResult(
+          `${receipt.replayed ? 'Replayed (nothing written)' : 'Recorded'}: ${r.outcome} for revision ${r.nodeRevision} of node ${receipt.nodeId}`
+            + ` (task ${r.validationTaskRef ?? 'unreadable'}${r.validationTaskRevision ? ` revision ${r.validationTaskRevision}` : ''}; author check ${r.authorCheck}).`
+            + ` Current revision state: ${receipt.state}.`,
+        );
+      } catch (e) {
+        if (e instanceof UrnNotQualifiedError) return refusalResult(`[bad_user_input] ${e.message}`);
+        return toolErrorResult(e, () => codedRefusalText(e), 'hadron_record_content_validation:resolver');
+      }
+    },
+  );
+
   // ── hadron_server_info ────────────────────────────────────────────────────────
   //
   // #187 / #190 — exposes the bound deployment URL + hadron-server
@@ -3758,6 +3836,7 @@ export function createMcpServerInstance(
   /** GraphQL Context for the scope tools — appId + sessionId are load-bearing (#206). */
   const scopeCtx = (): Context => ({
     db,
+    readsAuthorTask: mcpReadsTask(auth), // #1329: every direct writer's reader comes from here, through recoveryCtx()
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
     apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
@@ -3766,6 +3845,13 @@ export function createMcpServerInstance(
     roles: auth.roles as Context['roles'],
     organizationId: auth.organizationId ?? undefined,
   });
+
+  /**
+   * #3659: Node.validationTasks reads as the recorder does, so it needs what the recorder's context
+   * carries and scopeCtx() does not: an impersonator would otherwise read as a writer.
+   */
+  const validationReadCtx = (): Context => ({ ...scopeCtx(), appKeyId: auth.appKeyId ?? undefined,
+    ...mcpRequestSessionContext(auth), impersonation: auth.impersonation ?? undefined });
 
   // #2175: explicit recovery twins delegate to the same writer-plus-reader resolver gate.
   const recoveryCtx = (): Context => ({ ...scopeCtx(), appKeyId: auth.appKeyId ?? undefined,
@@ -4184,7 +4270,7 @@ export function createMcpServerInstance(
     'hadron_create_parent_node',
     'Create a parent (section/category) node in the memory graph. Lightweight container for organizing nodes. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>).',
     SHAPE_HADRON_CREATE_PARENT_NODE,
-    async ({ urn: rawUrn, name: rawName, description, tags }) => {
+    async ({ urn: rawUrn, name: rawName, description, tags, authoredWith }) => {
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
@@ -4308,6 +4394,7 @@ export function createMcpServerInstance(
             select: { id: true, deletedAt: true, role: true, isRunnable: true },
           });
           let sectionChanged = false;
+          let sectionStamp: NodeAuthorshipStamp | null = null;
           // #1331 — an existing section keeps its role through this write, so the
           // role's writer level applies to the edit (and to reviving a tombstone).
           if (prior) {
@@ -4358,6 +4445,12 @@ export function createMcpServerInstance(
             });
             if (changes.length === 0) return current.id;
             sectionChanged = authoredContentChanged(changes);
+            // #1328 — a re-save is an update whatever the tool is called
+            // (`findings:parent-node-upsert-is-authoring`).
+            sectionStamp = await assertAuthoring(tx, memoryId, {
+              priorRole: current.role, priorRunnable: current.isRunnable,
+              role: current.role, runnable: current.isRunnable, mintHuman: true, authoredChange: sectionChanged,
+            }, attestedAuthoring(recoveryCtx(), authoredWith));
             await createNodeRevision(tx, {
               id: generateId(),
               ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), { changes }),
@@ -4373,7 +4466,7 @@ export function createMcpServerInstance(
           }
           const row = await tx.node.upsert({
             ...upsertArgs,
-            update: { ...upsertArgs.update, ...(sectionChanged ? clearNodeAuthorship() : {}), revisionContentHash: revisionStateHashRefreshMarker() },
+            update: { ...upsertArgs.update, ...(sectionChanged ? (sectionStamp ?? clearNodeAuthorship()) : {}), revisionContentHash: revisionStateHashRefreshMarker() },
           });
           await applyIncludesInTransaction(tx, row, content, auth, storedForIncludes);
           sectionContentSaved = true;
@@ -4411,7 +4504,7 @@ export function createMcpServerInstance(
     'hadron_find_nodes',
     'Relevance-ranked full-text search across nodes. Keyword mode (default) runs Postgres full-text search: terms are STEMMED (so "running" matches "run"), results are RANKED by field-weighted relevance (name/alias > loc/tags > description/abstract > body/data), and BODY + abstract ARE indexed. Boolean operators are supported — `(banana OR apple) AND shake`, quoted phrases, and `-term` / `NOT term` — operator words are UPPERCASE-ONLY (lowercase and/or/not are plain terms, so natural phrases search literally), and malformed boolean syntax degrades to a literal phrase search instead of erroring. A plain multi-word query ANDs its terms; if that matches nothing, the search auto-relaxes to OR (any term) and flags [degraded:and_relaxed_to_or] — so a single off-corpus word doesn\'t dead-end the query. Pass `query: "*"` (or `""`) to list every node (survey mode) — useful as a first pass before adding to a memory. mode:vector / mode:hybrid run semantic search over the memory\'s vector index; mode:regex matches a POSIX regular expression against node text. To browse the tree structure, use `hadron_list_nodes` instead. Scope with `parentRel` (a subtree), `memoryUrn` (one memory), or `memoryUrns` (a set); pass `allMemories: true` to search EVERY memory you can read — the stemmed, ranked org-wide "does anyone know about X?" probe (this is the right tool for cross-memory concept/content questions; hadron_search matches literal substrings only). Each scored hit shows its score as a percentage of the top hit; when many hits sit in a narrow band the result carries a [weak_results] note, meaning the ranking found nothing clearly relevant — treat that as "the answer is probably not here" rather than reading the whole list. Use `minScore` to drop weak hits and `limit` to widen the default 10-hit page. Soft-deleted nodes are excluded. Each hit in the default view carries a `URL:` line — the node\'s portal link; copy it verbatim when citing a source to a human rather than building a link from the URN (`brief: true` omits it, as it omits the abstract).',
     SHAPE_HADRON_FIND_NODES,
-    async ({ query, mode, parentRel, memoryUrn, memoryUrns, allMemories, isRunnable, role, objectType, nodeType, nodeTypes, nodeKind, childrenOf, brief, limit, minScore, expand, granularity, where, scope }) => {
+    async ({ query, mode, parentRel, memoryUrn, memoryUrns, allMemories, isRunnable, hasOpenThreads, role, objectType, nodeType, nodeTypes, nodeKind, childrenOf, brief, limit, minScore, expand, granularity, where, scope }) => {
       // #3113 — the shape of `nodeTypes` is judged first, before any scope work or
       // early return below, with the one validator the resolver also runs.
       try {
@@ -4638,6 +4731,7 @@ export function createMcpServerInstance(
             filter: {
               memoryIds: filterMemoryIds,
               isRunnable: isRunnable ?? undefined,
+              hasOpenThreads: hasOpenThreads ?? undefined,
               role: role ?? undefined,
               contentScope: nodeKind ?? undefined, // #1678: MCP nodeKind → GraphQL contentScope
               objectType: objectType ?? undefined,
@@ -5065,6 +5159,8 @@ export function createMcpServerInstance(
         locked: lockState === 'locked',
         encryptedMemory: lockState !== 'plaintext',
         auth,
+        // The rules are the base memory's, and a report is recorded against the base node.
+        validationTasks: o.inheritedFrom ? undefined : (await validationTaskSetsForNodes(validationReadCtx(), [current.id])).get(current.id),
       });
 
       // Record usage event (fire-and-forget), AFTER the projection is in hand:
@@ -5575,6 +5671,8 @@ export function createMcpServerInstance(
       // per-node parity with hadron_get_node).
       const blocks: string[] = [];
       const omitted: string[] = [];
+      // hadron-internal#40: nodes whose resolved read is over a resolution limit, with the limit (never partial text).
+      const refused: Array<{ urn: string; limit: ResolutionLimit }> = [];
       const readEvents: UsageNodeRef[] = [];
       let bytes = 0;
       let truncated = false;
@@ -5630,6 +5728,8 @@ export function createMcpServerInstance(
       ]);
       const batchProvenance = { reports, taskRefs, humanNames, feedback, signatures, actionUrns };
       const batchReadCtx = scopeCtx(); // one memo for the whole call (#2041)
+      const validationTaskSets = await validationTaskSetsForNodes(validationReadCtx(),
+        visible.filter((n) => !(n as { inheritedFrom?: InheritedFrom }).inheritedFrom).map((n) => n.id));
       for (const metadata of visible) {
         if (truncated) {
           omitted.push(await nodeUrn(metadata.loc, metadata.memoryId, memoryUrnOf));
@@ -5653,15 +5753,26 @@ export function createMcpServerInstance(
         // fall back to the single renderer's current provenance reads.
         const provenance = n.revSeq === metadata.revSeq ? batchProvenance : undefined;
         const lockState = mcpDecryptOrMark(n); // spec 041 — same posture as hadron_get_node
-        const served = lockState === 'locked' || raw
-          ? n
-          : { ...n, content: await resolveNodeContent(batchReadCtx, n, { raw }) };
+        let served = n;
+        if (lockState !== 'locked' && !raw) {
+          try {
+            served = { ...n, content: await resolveNodeContent(batchReadCtx, n, { raw }) };
+          } catch (e) {
+            // A per-node, loud reason (cor:api:040:02); the other nodes still return.
+            if (!isContentResolutionLimitError(e)) throw e;
+            refused.push({ urn: await nodeUrn(n.loc, n.memoryId, memoryUrnOf), limit: e.limit });
+            continue;
+          }
+        }
         const projection = await renderNodeReadProjection(served, scope, {
           locked: lockState === 'locked',
           encryptedMemory: lockState !== 'plaintext',
           auth,
           batch: provenance,
           memoryUrnOf,
+          // Gated on this copy, as the single read is: the map is keyed by node id, and an inherited
+          // copy carries the base node's id (BLIND 6704825426).
+          validationTasks: inheritedFrom ? undefined : validationTaskSets.get(n.id),
         });
         // Measured on the ANNOTATED block, which is what actually ships: sizing
         // the bare projection and pushing the annotated one lets a block cross
@@ -5688,6 +5799,7 @@ export function createMcpServerInstance(
 
       const headerParts = [`returned ${blocks.length} node(s)`];
       if (unavailable.length) headerParts.push(`${unavailable.length} unavailable`);
+      if (refused.length) headerParts.push(`${refused.length} refused`);
       if (truncated) headerParts.push(`truncated: response-size cap reached, ${omitted.length} omitted`);
       const parts: string[] = [`Batch read — ${headerParts.join('; ')}.`];
       if (blocks.length) {
@@ -5696,6 +5808,13 @@ export function createMcpServerInstance(
       if (unavailable.length) {
         parts.push(
           `Unavailable (denied or not found):\n${unavailable.map((u) => `  - ${u}`).join('\n')}`,
+        );
+      }
+      if (refused.length) {
+        parts.push(
+          `Refused (${CONTENT_RESOLUTION_LIMIT_EXCEEDED}: over a content resolution limit; nothing partial returned — read it with raw: true for the stored text):\n${refused
+            .map((r) => `  - ${r.urn} (over ${resolutionLimitPhrase(r.limit)}; limit: ${r.limit})`)
+            .join('\n')}`,
         );
       }
       if (truncated) {
@@ -6216,18 +6335,7 @@ export function createMcpServerInstance(
     install: { app: string; agent: string },
     fields: Record<string, unknown>,
   ) => {
-    const ctx: Context = {
-      db,
-      transport: 'mcp',
-      governedCanReplay: () => true,
-      clientId: auth.clientId ?? undefined,
-      userId: auth.userId ?? undefined,
-      apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
-      appId: auth.appId ?? undefined,
-      sessionId: auth.sessionId ?? undefined,
-      roles: auth.roles as Context['roles'],
-      organizationId: auth.organizationId ?? undefined,
-    };
+    const ctx = doorCtx(() => true);
     const input = { ...Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined)), install: { appRef: install.app, agentRef: install.agent } };
     try {
       const node = op === 'create'
@@ -6246,12 +6354,13 @@ export function createMcpServerInstance(
     'hadron_create_node',
     'Add a NEW node to the memory graph. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Requires write access to the memory. CREATE-ONLY: a loc that already holds a live node is REFUSED, not overwritten — use hadron_update_node to edit an existing node (#1181; same contract as the GraphQL createNode mutation). A loc holding a SOFT-DELETED node is the one exception: that row is resurrected and rewritten, so an omitted `description`, `abstract`, `content` or `tags` is CLEARED rather than carried over from the tombstone (the other fields — nodeType, objectType, isRunnable, seq, properties, data, llmModel, aiAgent — are kept when omitted). Resurrection snapshots the prior state to revision history first (#976), and encryption is honored.',
     SHAPE_HADRON_CREATE_NODE,
-    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, install }) => {
+    async ({ urn: rawUrn, authoredWith, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, install }) => {
       // #2044: an App's install memory is written through the GraphQL operation (one write path
       // for the first-customisation create), not this inline parity writer.
       if (install) {
         if (edges || isRunnable) return textResult('`install` does not support `edges` or `isRunnable`; write those with a plain memory node.');
         return writeInstallNodeViaGraphql('create', install, {
+          authoredWith,
           loc: rawUrn, name, nodeType, objectType, role: rawRole, description, abstract, content, seq, tags: tags as never,
           properties, data: nodeData, llmModel, aiAgent,
         });
@@ -6711,6 +6820,14 @@ export function createMcpServerInstance(
             priorRunnable: pre?.isRunnable ?? null,
             nextRunnable: mergedGovernedState(pre, { role, isRunnable }).isRunnable,
           });
+          // #1328 — parity with writeNodeCore: a new row or a revived tombstone
+          // is authored, with the tombstone's role judged on the locked row.
+          const authoredStamp = await assertAuthoring(tx, memoryId, {
+            priorRole: pre?.role ?? null, priorRunnable: pre?.isRunnable ?? null,
+            role: role === undefined ? (pre?.role ?? null) : role,
+            runnable: mergedGovernedState(pre, { role, isRunnable }).isRunnable,
+            mintHuman: true, authoredChange: true,
+          }, attestedAuthoring(recoveryCtx(), authoredWith));
           // #1460 — the locked tombstone can retain vectors from its old
           // plaintext. Purge both kinds before the upsert makes it searchable.
           if (pre?.deletedAt) {
@@ -6735,13 +6852,13 @@ export function createMcpServerInstance(
           const nestedSeq = autoSeq ? await nextSiblingSeq(tx, memoryId, loc) : null;
           const written = await tx.node.upsert({
             ...upsertArgs,
-            create: { ...upsertArgs.create, ...(nestedSeq != null ? { seq: nestedSeq } : {}) },
+            create: { ...upsertArgs.create, ...(authoredStamp ?? {}), ...(nestedSeq != null ? { seq: nestedSeq } : {}) },
             // Resurrect (#543) on the authoritative row, not the stale probe: a
             // tombstone that appeared after it would otherwise stay flagged
             // deleted while taking the new content.
             update: {
               ...upsertArgs.update,
-              ...(pre ? clearNodeAuthorship() : {}),
+              ...(pre ? (authoredStamp ?? clearNodeAuthorship()) : {}),
               ...(pre?.deletedAt ? { deletedAt: null, deletedBy: null, embeddingPendingAt: revivedPendingAt } : {}),
             } as any,
           });
@@ -6831,10 +6948,11 @@ export function createMcpServerInstance(
     'hadron_update_node',
     'Partially update an existing node. Only the fields you provide are changed — everything else is preserved. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Pass expectedRevision from hadron_get_node to refuse atomically if the node changed since you read it.',
     SHAPE_HADRON_UPDATE_NODE,
-    async ({ urn: rawUrn, expectedRevision, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason, install }) => {
+    async ({ urn: rawUrn, authoredWith, expectedRevision, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason, install }) => {
       if (install) {
         if (edges || isRunnable || abstractStillAccurate) return textResult('`install` does not support `edges`, `isRunnable` or `abstractStillAccurate`.');
         return writeInstallNodeViaGraphql('update', install, {
+          authoredWith,
           loc: rawUrn, expectedRevision, name, nodeType, objectType, role: rawRole, description, abstract, content, seq, tags: tags as never,
           properties, data: nodeData, llmModel, aiAgent, reason,
         });
@@ -7077,6 +7195,10 @@ export function createMcpServerInstance(
         if (data.data !== undefined) data.data = (enc.data ?? null) as never;
       }
 
+      // #277: normalize the persistence value only after preserving plaintextUpdates.
+      // Omitted data stays omitted; explicit null clears rather than storing JSON null.
+      if (nodeData === null) data.data = Prisma.DbNull;
+
       let includePinContentSaved = false;
       let includePinPriorContent: string | null = null;
       if (Object.keys(data).length > 0 || resolvedEdges !== null || expectedRevision !== undefined) {
@@ -7165,14 +7287,27 @@ export function createMcpServerInstance(
               : current;
             const changedFields = diffNodeChanges(currentForDiff, plaintextUpdates);
             if (changedFields.length === 0 && resolvedEdges === null) return;
-            await createNodeRevision(tx, {
-              id: generateId(),
-              ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), {
-                revLabel: reason,
-                changes: changedFields,
-              }),
-            });
-            if (authoredContentChanged(changedFields)) Object.assign(data, clearNodeAuthorship());
+            // #1328 — parity with writeNodeCore, before the snapshot.
+            const authoredChange = authoredContentChanged(changedFields);
+            const authoredStamp = await assertAuthoring(tx, memory.id, {
+              priorRole: current.role, priorRunnable: current.isRunnable,
+              role: role === undefined ? current.role : role,
+              runnable: mergedGovernedState(current, { role, isRunnable }).isRunnable,
+              mintHuman: true, authoredChange,
+            }, attestedAuthoring(recoveryCtx(), authoredWith));
+            // #3497 / rulings0149+0198: the token was checked above; an
+            // edge-only replacement applies below without consuming it.
+            // Mixed writes retain exactly one pre-edit snapshot.
+            if (changedFields.length > 0) {
+              await createNodeRevision(tx, {
+                id: generateId(),
+                ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), {
+                  revLabel: reason,
+                  changes: changedFields,
+                }),
+              });
+            }
+            if (authoredChange) Object.assign(data, authoredStamp ?? clearNodeAuthorship());
             data.revisionContentHash = revisionStateHashRefreshMarker();
             const updated = Object.keys(data).length > 0
               ? await tx.node.update({ where: { id: existing.id }, data })
@@ -7289,6 +7424,7 @@ export function createMcpServerInstance(
   /** The GraphQL context for a delegated door call — same shape as chatCtx below. */
   const doorCtx = (canReplay?: Context['governedCanReplay']): Context => ({
     db,
+    readsAuthorTask: mcpReadsTask(auth), // #1329
     // #1301: a refusal from the delegated door addresses an MCP caller, and
     // names an MCP door only if this call could be replayed through it.
     transport: 'mcp',
@@ -7443,7 +7579,7 @@ export function createMcpServerInstance(
     'hadron_update_node_data',
     "Merge a JSON object into a node's `data` bag, preserving keys you don't mention. The patch's top-level keys are written over the node's existing data (the patch wins on collision); other keys stay as they were; a node with no data yet takes the patch as-is. The merge is SHALLOW — a nested object value is replaced wholesale, not deep-merged. Use this for partial data edits; to REPLACE the whole `data` bag instead, use hadron_update_node's `data` argument. Honors write permissions, revision history, and encryption.",
     SHAPE_HADRON_UPDATE_NODE_DATA,
-    async ({ nodeUrn: rawNodeUrn, data }) => {
+    async ({ nodeUrn: rawNodeUrn, data, authoredWith }) => {
       // Build a GraphQL Context from the MCP auth, including appId + sessionId
       // so app-keyed write authorization resolves the same way it does for
       // hadron_update_node. Both fields are load-bearing and were once omitted
@@ -7451,6 +7587,7 @@ export function createMcpServerInstance(
       // the chatbot tools, #1141; the requirement it got wrong is not.)
       const ctx: Context = {
         db,
+        readsAuthorTask: mcpReadsTask(auth), // #1329
         // #1301: a refusal from the delegated resolver addresses an MCP caller;
         // a door takes a whole `data` object, so the replace it names replays.
         transport: 'mcp',
@@ -7467,7 +7604,7 @@ export function createMcpServerInstance(
       try {
         const node = await resolvers.Mutation.updateNodeData(
           {},
-          { nodeRef: rawNodeUrn, data },
+          { nodeRef: rawNodeUrn, data, authoredWith },
           ctx,
         );
         const urn = await nodeUrn(node.loc, node.memoryId);
@@ -7490,6 +7627,7 @@ export function createMcpServerInstance(
 
   const objectCtx = (): Context => ({
     db,
+    readsAuthorTask: mcpReadsTask(auth), // #1329
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
     apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
@@ -7591,12 +7729,13 @@ export function createMcpServerInstance(
     'hadron_replace_text',
     "Search-and-replace a piece of text across MANY nodes in one call. Selection is the union of explicit node URNs and whole memories (memoryUrns), optionally narrowed to a subtree by 'prefix' (a parent loc — matches that node plus its descendants on ':' path boundaries, so 'auth' matches 'auth' and 'auth:tokens' but not 'authoring'; requires memoryUrns). Searches the chosen text fields (content, name, alias, description, abstract, tags); JSON fields are not touched. Literal substring match by default; set regex:true to treat oldText as a regular expression and newText as a replacement pattern (supports $1/$& backrefs). ALWAYS run with dryRun:true first to preview match counts before writing — this tool can rewrite a lot of nodes at once. Governed nodes and Channel addresses are protected and reported as skipped rather than searched. Multi-node runs are all-or-nothing: a node whose edited field would violate a field cap (e.g. the 2000-character abstract cap, whose refusal reports the edit's delta and remaining headroom) refuses the WHOLE batch before any write — nothing is partially applied; fix the edit and re-run. Honors write permissions, revision history (each change is undoable), and re-embeds changed nodes.",
     SHAPE_HADRON_REPLACE_TEXT,
-    async ({ oldText, newText, nodeUrns, memoryUrns, prefix, fields, caseInsensitive, regex, dryRun }) => {
+    async ({ oldText, newText, nodeUrns, memoryUrns, prefix, fields, caseInsensitive, regex, dryRun, authoredWith }) => {
       // Build a GraphQL Context from the MCP auth. Include appId + sessionId so
       // app-keyed write authorization (requireMemoryWriteAccess) resolves the
       // same way it does for hadron_create_node / hadron_update_node.
       const ctx: Context = {
         db,
+        readsAuthorTask: mcpReadsTask(auth), // #1329
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
         apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
@@ -7613,6 +7752,7 @@ export function createMcpServerInstance(
           {},
           {
             input: {
+              authoredWith,
               oldText,
               newText,
               nodeIds: nodeUrns,
@@ -8087,7 +8227,7 @@ Atomicity: collision-evict → per-node NodeRevision snapshot → subtree move a
 
 On success returns the moved node's record: new URN, name, type, tags, edge counts, and immediate-child count (empty sections omitted). A cross-memory move also reports raw relative content links that now miss or point to a different node; content is not rewritten.`,
     SHAPE_HADRON_MOVE_NODE,
-    async ({ urn: rawFrom, targetUrn: rawTo, overwrite, renameToLeaf }) => {
+    async ({ urn: rawFrom, targetUrn: rawTo, overwrite, renameToLeaf, authoredWith }) => {
       // Spec 022: qualification at the API boundary for both source and target.
       try {
         assertFullyQualifiedUrn(rawFrom, 'node');
@@ -8266,6 +8406,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
                 // #1641 — a decision's name is its rendered `<code>: <title>`,
                 // which its approval covers; only the decision doors change it.
                 if (isDecisionFamilyRole(locked.role)) throw decisionContainedError('Renaming this node', [locked.loc]);
+                // #1328 — the name is authored; the address is not.
+                const renameStamp = await assertRenameAuthoring(tx, fromMemory.id, toMemory.id, {
+                  priorRole: locked.role, priorRunnable: locked.isRunnable,
+                  role: locked.role, runnable: locked.isRunnable, mintHuman: true, authoredChange: true,
+                }, attestedAuthoring(recoveryCtx(), authoredWith));
                 await createNodeRevision(tx, {
                   id: generateId(),
                   ...buildNodeRevisionSnapshot(locked, editorFromAuth(auth), {
@@ -8278,7 +8423,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
                     loc: toLoc,
                     name: newName,
                     memoryId: toMemory.id,
-                    ...clearNodeAuthorship(),
+                    ...(renameStamp ?? clearNodeAuthorship()),
                     revisionContentHash: revisionStateHashRefreshMarker(),
                   },
                 });
@@ -8339,6 +8484,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
                 destMemoryId: crossMemory ? toMemory.id : undefined,
                 editor: editorFromAuth(auth),
                 renameSourceLeaf: renameToLeaf === true,
+                renameAuthoring: attestedAuthoring(recoveryCtx(), authoredWith),
                 authorizeLockedMemory: (memoryId) => assertLockedMemoryWriteAccess(tx, attemptAuth, memoryId),
                 principal: attemptAuth,
               });
@@ -8677,6 +8823,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           nodeId: node.id,
           memoryId: node.memoryId, // #796 (as in hadron_get_node's event)
           appId: auth.appId ?? null,
+          appKeyId: usageAppKeyOf(auth), // #2944
           // 046-usage-metering FR-001 (as in hadron_get_node's event).
           userId: auth.userId ?? null,
           createdBy: auth.clientId ?? null,
@@ -11744,13 +11891,10 @@ function ageOf(at: Date, now: Date = new Date()): string {
         include: { organization: true },
       });
       if (!memory) return refusalResult('Memory not found.');
-      // R206 / cor:sec:040:05: an encrypted memory gets the typed refusal from the sync itself
-      // even with no source, so the no-source reply never reads as a healthy sync.
-      if (!memory.source && !memory.isEncrypted) return textResult('Memory has no source repository configured.');
-
       // Import and call syncGraphFromGithub
       const { syncGraphFromGithub, describeSyncOutcome } = await import('../integrations/github/syncGraphFromGithub.js');
       const result = await syncGraphFromGithub(memory as Parameters<typeof syncGraphFromGithub>[0]);
+      if (result.notAttemptedReason) return refusalResult(`[${SYNC_NOT_ATTEMPTED}] ${syncNotAttemptedMessage(result.notAttemptedReason)}`);
 
       if (result.fault) throw new Error(result.error ?? 'sync fault');
       if (result.error) return refusalResult(`Sync failed${result.errorCode ? ` [${result.errorCode}]` : ''}: ${result.error}`);
@@ -12687,7 +12831,14 @@ const recoveryEdgesArgs = {
   edgeIds: z.array(z.string()).nullable().optional().describe('Restrict the result, total included, to these edge ids (1 to 200). An id that is not a visible edge of this memory is absent.'),
 };
 
+/** #1328 — the claim, as every MCP node writer takes it. */
+const AUTHORED_WITH_ARG = z.object({
+  task: z.string().describe('The author task: its node id or canonical URN.'),
+  revision: z.number().int().positive().describe('The current revision of that task.'),
+}).optional().describe('The author task this write worked from, required when the node\'s role rule names one. The server compares it and records it; it does not prove the task was followed.');
+
 const governedDoorArgs = {
+  authoredWith: AUTHORED_WITH_ARG,
   urn: z.string().describe('Fully-qualified node URN (hrn:node:<root>:<memory>:<loc>).'),
   name: z.string().optional().describe('Node name. Required when creating.'),
   description: z.string().optional().describe('Short description'),
@@ -12766,6 +12917,19 @@ const SHAPE_HADRON_SET_ACTIVE_MEMORY = {
 };
 
 // #2661 / #2260: immutable, principal-independent parameter schemas are shared.
+const SHAPE_HADRON_RECORD_CONTENT_VALIDATION = {
+  nodeRef: z.string().min(1).describe('The node reported on: its id or fully-qualified node URN.'),
+  nodeRevision: z.number().int().min(1).describe('The node revision the validation task ran on.'),
+  validationTaskRef: z.string().min(1).describe("The validation task the node's role rule names now: its id or node URN."),
+  validationTaskRevision: z.number().int().min(1).describe('The task revision that ran.'),
+  outcome: z.enum(['PASS', 'FAIL', 'ERROR']).describe('PASS, FAIL, or ERROR when the task could not be run to a verdict.'),
+  runId: z.string().min(1).max(200).optional().describe('Your own label for this run (1-200 characters); makes a retry idempotent. Never an identity.'),
+  // #1332 (Xanthos FIT 6670593797, Xavier #81384): the recorder owns its session argument, so a
+  // refused session is judged after the not-found and writer refusals (cor:dmo:160:01), not by
+  // the #1701 gate before them.
+  session: z.string().optional().describe('Your worker session id, to record the report as that worker. A session that is not one of your open sessions is refused [session_not_bound] after the read and write checks; nothing is written.'),
+};
+
 const SHAPE_HADRON_CREATE_APP_MEMORY = {
   app: z.string().describe('App ID or URN.'),
   name: z.string().min(1).describe('Memory name; determines its slug.'),
@@ -12889,6 +13053,7 @@ const SHAPE_HADRON_SET_ACTIVE_SCOPE = {
 };
 
 const SHAPE_HADRON_CREATE_PARENT_NODE = {
+  authoredWith: AUTHORED_WITH_ARG,
   urn: z.string().describe('Fully-qualified node URN for the new section, e.g. "hrn:node:acme.com:mmdata:services" or "hrn:node:acme.com:mmdata:services:db-helpers"'),
   name: z.string().optional().describe('Display name (defaults to the last loc atom)'),
   description: z.string().optional().describe('What this section contains'),
@@ -12902,11 +13067,12 @@ const SHAPE_HADRON_FIND_NODES = {
   memoryUrn: z.string().optional().describe('Scope search to a single memory (fully-qualified URN). Omit to search all memories you can read — see allMemories.'),
   memoryUrns: z.array(z.string()).min(1).optional().describe('Scope search to this SET of memories (each a fully-qualified memory URN, hrn:mem:<root>:<slug>) — a targeted multi-memory search. Must be non-empty (for "everything", use allMemories). Mutually exclusive with memoryUrn and allMemories.'),
   allMemories: z.boolean().optional().describe('Search across ALL memories you can read — the org-wide "does anyone know about X?" probe (stemmed + relevance-ranked in keyword mode). The explicit, self-documenting form of omitting a memory scope. Mutually exclusive with memoryUrn / memoryUrns.'),
+  hasOpenThreads: z.boolean().optional().describe('#3494 — NodeFilter.hasOpenThreads: true selects nodes with live open root comments, false selects nodes with none, omitted leaves the filter off. Applies before ranking/paging in every mode, with existing access and content scope. Deleted stubs do not count. Inherited projections have zero summary. Timestamp is GraphQL-only; hit output is unchanged.'),
   isRunnable: z.boolean().optional().describe('Filter by runnable status (applies in every mode). true = only task nodes (Node.isRunnable=true) — the canonical "tasks I can run" predicate hadron_run_task gates on. false = only nodes explicitly marked non-runnable (most nodes leave it NULL, so false does NOT include them). Omit to ignore runnable status. Spec cor:api:060.'),
   role: z.string().optional().describe('Filter by Node.role family in every mode. Segment-boundary prefix semantics: "spec" matches "spec" and dotted descendants such as "spec.rule", but never "special" or "specification" (#1322). Node.role remains an open string; this is a query filter, not role validation.'),
-  nodeType: z.string().optional().describe('#331 — exact-match node-type facet (free-form, e.g. "task" / "parent" / "info"): only nodes whose nodeType equals this. Applies in every mode; with query "*" it lists all nodes of one type. Orthogonal to objectType. Without it, system nodes stay excluded; "comment" searches comments as the engine documents. Negation and multi-value are not supported here; use nodeTypes for a list of types.'),
+  nodeType: z.string().optional().describe('#331 — exact-match node-type facet (free-form, e.g. "task" / "parent" / "info"): only nodes whose nodeType equals this. Applies in every mode; with query "*" it lists all nodes of one type. Orthogonal to objectType. Without it, system and chat-message nodes stay excluded (name "chat-message" to search chat messages; record nodes are never excluded); "comment" searches comments as the engine documents. Negation and multi-value are not supported here; use nodeTypes for a list of types.'),
   objectType: z.string().optional().describe('#725 — collection facet: only nodes whose objectType equals this (the domain-object discriminator, e.g. "competitor" / "insight"). Orthogonal to nodeType. Composes with query/mode + where.'),
-  nodeTypes: z.array(z.string()).nullish().describe('#3113 — an explicit LIST of node types (GraphQL: NodeFilter.nodeTypes; null is the same as omitted), a union: only nodes whose nodeType is one of them. Applies in every mode. It narrows, ANDs the other filters and, being explicit, replaces the default that leaves out system nodes; it never lifts the memory-class default, access, deleted rows or inheritance. Values are exact and case-sensitive; an unknown value matches nothing. Refused: an empty list, nodeType together with nodeTypes, more than 20 entries (counted before duplicates are dropped), and a list containing "comment" (search comments with nodeType or nodeKind). Vector and hybrid keep their bounded, widening candidate window.'),
+  nodeTypes: z.array(z.string()).nullish().describe('#3113 — an explicit LIST of node types (GraphQL: NodeFilter.nodeTypes; null is the same as omitted), a union: only nodes whose nodeType is one of them. Applies in every mode. It narrows, ANDs the other filters and, being explicit, replaces the default that leaves out system and chat-message nodes; it never lifts the memory-class default, access, deleted rows or inheritance. Values are exact and case-sensitive; an unknown value matches nothing. Refused: an empty list, nodeType together with nodeTypes, more than 20 entries (counted before duplicates are dropped), and a list containing "comment" (search comments with nodeType or nodeKind). Vector and hybrid keep their bounded, widening candidate window.'),
   nodeKind: z.enum(['CONTENT', 'COMMENTS', 'ALL']).optional().describe('#1608/#1678 — which KIND of node to search (GraphQL: NodeFilter.contentScope). CONTENT (default): content nodes only. COMMENTS: comment nodes only (feedback about other nodes), found exhaustively in every mode before ranking and limits. ALL: both. A comment hit is labelled COMMENT and is never content of, or verified fact about, its target. Not hadron_get_node\'s contentScope, which picks the parts of one node to return.'),
   childrenOf: z.string().optional().describe('#2832 — list only the DIRECT children of this loc (GraphQL: NodeFilter.childrenOf). A direct child is a node whose loc is exactly this loc plus one more segment (no further colon); "" means the top-level nodes. It reads loc strings only (not edges, not parentRel), so a loc whose parent has no node of its own is still listed. Applies in every mode, with the same access and default exclusions as the rest of the search, and pairs with memoryUrn (loc is per memory). With no query and no sort the order is the sibling order (positioned nodes first, then by loc). Unlike parentRel, which scopes the WHOLE subtree.'),
   scope: z.string().optional().describe('Spec 049: search under a named scope — a scope id, a scope NAME (resolved in the active App\'s context), "app" (the active App\'s attached memories), or "global" (your active organization\'s view). Omitted with no memory selector: the ladder applies (active scope › active App › active organization), and the result says which. An explicit memoryUrn / memoryUrns / allMemories outranks the ambient scope but still intersects with one named here.'),
@@ -12978,6 +13144,7 @@ const SHAPE_HADRON_UNLOCK_MEMORY = {
 const SHAPE_HADRON_LOCK_MEMORY = { memoryUrn: z.string().describe('Memory URN or id') };
 
 const SHAPE_HADRON_CREATE_NODE = {
+  authoredWith: AUTHORED_WITH_ARG,
   urn: z.string().describe('Fully-qualified node URN, e.g. "hrn:node:acme.com:mmdata:review:sort-imports". Both bare and prefixed forms accepted, in either URN grammar. Relative-form URNs (no memory) are rejected.'),
   name: z.string().describe('Node name'),
   nodeType: z.string().optional().describe('Node classification (free-form; canonical values: abstract, chat, data, info (default), prompt, record, reference, system). Running is gated by isRunnable, independent of nodeType.'),
@@ -13007,6 +13174,7 @@ const SHAPE_HADRON_CREATE_NODE = {
 };
 
 const SHAPE_HADRON_UPDATE_NODE = {
+  authoredWith: AUTHORED_WITH_ARG,
   urn: z.string().describe('Fully-qualified node URN, e.g. "hrn:node:acme.com:mmdata:review:sort-imports"'),
   expectedRevision: z.number().int().positive().max(2_147_483_647).optional().describe('Optional positive Revision value from hadron_get_node. A mismatch refuses with [node_write_conflict]; omit for backward-compatible last-write-wins behavior.'),
   name: z.string().optional().describe('New node name'),
@@ -13021,7 +13189,7 @@ const SHAPE_HADRON_UPDATE_NODE = {
   seq: z.number().optional().describe('New sort order among siblings'),
   tags: tagsInputSchema.optional().describe('Replace tags'),
   properties: z.record(z.string(), z.unknown()).optional().describe('Structured key-value properties'),
-  data: z.record(z.string(), z.unknown()).optional().describe('Runtime data (e.g. stageOrder, promptRef, extractionSpec for chat config). REPLACES the whole data bag — to merge in a few keys while preserving the rest, use hadron_update_node_data instead.'),
+  data: z.record(z.string(), z.unknown()).nullable().optional().describe('Runtime data (e.g. stageOrder, promptRef, extractionSpec for chat config). REPLACES the whole data bag; null clears it and omission preserves it. To merge in a few keys while preserving the rest, use hadron_update_node_data instead.'),
   llmModel: z.string().optional().describe('LLM model used'),
   aiAgent: z.string().optional().describe('AI agent tool used'),
   edges: z.array(z.object({
@@ -13039,6 +13207,7 @@ const SHAPE_HADRON_UPDATE_NODE = {
 };
 
 const SHAPE_HADRON_UPDATE_NODE_DATA = {
+  authoredWith: AUTHORED_WITH_ARG,
   nodeUrn: z.string().describe('Node to update — a fully-qualified node URN (hrn:node:<root>:<memory>:<loc>) or an ID-shape PK.'),
   data: z.record(z.string(), z.unknown()).describe('JSON object to merge into the node\'s `data`. Must be an object (not an array or scalar). Its top-level keys overwrite existing ones; unmentioned keys are preserved.'),
 };
@@ -13077,6 +13246,7 @@ const SHAPE_HADRON_FIND_OBJECTS = {
 };
 
 const SHAPE_HADRON_REPLACE_TEXT = {
+  authoredWith: AUTHORED_WITH_ARG,
   oldText: z.string().describe('Text to find (literal substring), or a regular-expression source when regex:true. Must be non-empty.'),
   newText: z.string().describe('Replacement text. May be empty to delete the matched text. In regex mode, $1/$<name>/$& are honored.'),
   nodeUrns: z.array(z.string()).optional().describe('Explicit nodes to edit — fully-qualified node URNs (hrn:node:<root>:<memory>:<loc>) or ID-shape values.'),
@@ -13121,6 +13291,7 @@ const SHAPE_HADRON_DELETE_NODE = {
 };
 
 const SHAPE_HADRON_MOVE_NODE = {
+  authoredWith: AUTHORED_WITH_ARG,
   urn: z.string().describe('Current node fully-qualified URN, e.g. "hrn:node:acme.com:mmdata:services:db-helper"'),
   targetUrn: z.string().describe('Destination node fully-qualified URN. Different memory in the target URN performs a cross-memory move.'),
   overwrite: z.boolean().optional().describe('Default false (refuses on collision). Pass true to soft-delete an existing live target node before moving; the move then proceeds into the freed URN slot.'),

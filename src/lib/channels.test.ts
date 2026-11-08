@@ -145,7 +145,8 @@ describe('creation', () => {
     const root = await db.node.findUniqueOrThrow({ where: { id: rootId } });
     expect(root.nodeType).toBe('chat');
     expect((root.data as Record<string, unknown>).scope).toBeUndefined();
-    expect((root.data as Record<string, unknown>).messageCount).toBe(0);
+    expect(root.data).not.toHaveProperty('messageCount');
+    expect((await db.chatRootCounter.findUniqueOrThrow({where:{chatRootNodeId:root.id}})).messageCount).toBe(0);
   });
 
   it('createChannel refuses an address overlapping an existing Channel', async () => {

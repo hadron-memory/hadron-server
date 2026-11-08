@@ -1,3 +1,4 @@
+import { readInstallBootPrompt } from '../../../lib/appInstallations.js';
 /**
  * #2045 (S8, cor:agt:040:07) — the boot-prompt pointer READ fields on Agent,
  * AppAgent and Worker: `bootPromptRef` (the canonical URN of what the pointer
@@ -69,10 +70,7 @@ async function appAgentPointer(
   aa: Pointer & { appId: string; agentId: string },
   ctx: Context,
 ): Promise<ResolvedBootPromptPointer | null> {
-  const row = await storedPair(aa, () => ctx.db.appAgent.findUnique({
-    where: { appId_agentId: { appId: aa.appId, agentId: aa.agentId } },
-    select: { bootPromptNodeId: true, bootPromptUrn: true },
-  }));
+  const row = await readInstallBootPrompt(ctx.db,aa.appId,aa.agentId) ?? {bootPromptNodeId:null,bootPromptUrn:null};
   if (row.bootPromptNodeId === null) return null;
   if (!(await maySeeAppAgentPointer(aa, ctx))) return null;
   return resolvedFor(ctx, row);
