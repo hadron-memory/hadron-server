@@ -3192,12 +3192,16 @@ export const typeDefs = `#graphql
     when a later install is readable. Null is not proof that nothing is
     installed; \`appAgents\` lists every install, an entry whose \`agent\` is null
     being an installed Agent withheld from this caller.
+
+    A caller who reaches a user-owned App only as an owner-role member gets null on
+    both for a different reason: WITHHELD (#2089). Render it as unknown.
     """
     agentId: ID
     agent: Agent
     """
     SOFT-DEPRECATED convenience read: the FIRST installed Agent's canonical
     URN, matching agentId / agent. Use appAgents for the full install roster.
+    null can also mean WITHHELD from this caller (#2089), not only "none".
     An installed agent stays AUTHOR-ROOTED forever, so this is simply that
     Agent's own URN:
     hrn:agent:<author-org>:<agent-slug>. Two orgs installing same-slug
@@ -3214,8 +3218,10 @@ export const typeDefs = `#graphql
     installedAgentUrn: String
     trainingMode: Boolean!
     surfaces: [String!]!
-    members: [AppMember!]!
-    memberCount: Int!
+    "The App's members. null means WITHHELD from this caller (#2089): a user-owned App's owner-role member reaches the App record but not its roster. Never read null as an empty roster. The App's owning user, and callers of an org-owned App, get the real list (a real empty list included)."
+    members: [AppMember!]
+    "Member count. null means WITHHELD from this caller (#2089), never zero; the real count (a real 0 included) for callers who may see the roster."
+    memberCount: Int
     """
     The App's SHARED app-class memory (#965) — the team space the shared/team
     chat and the worklog live in, provisioned at install since #951. This is
@@ -3237,9 +3243,12 @@ export const typeDefs = `#graphql
     agentTools: [String!]!
     # 036-ai-service-config: the three AI fields below are registry-backed
     # reads of the App's config named 'default' (legacy columns dropped).
+    "null can mean WITHHELD from this caller (#2089), not only that it is not configured."
     aiProvider: String
+    "null can mean WITHHELD from this caller (#2089), not only that it is not configured."
     aiModel: String
-    hasAiApiKey: Boolean!
+    "Whether an AI API key is configured for this App. null means WITHHELD from this caller (#2089): only the owning user of a user-owned App holds its AI configuration. Never read null as false; a real false means no key."
+    hasAiApiKey: Boolean
     expiresAt: DateTime
     # App-original fields
     createUserPermission: CreateUserPermission!
@@ -3264,8 +3273,12 @@ export const typeDefs = `#graphql
     import of a physically installed Agent (#2168). Derived installations do not
     write an AppAgent row. One App credential
     routes to all of them via the URN supplied in the request.
+
+    null means WITHHELD from this caller (#2089): a user-owned App's
+    owner-role member does not see its installation roster. Never read null as
+    no installed Agents.
     """
-    appAgents: [AppAgent!]!
+    appAgents: [AppAgent!]
     """
     023-app-shape: convenience list of the installed Agents this caller may
     read: the non-null Agent entries of \`appAgents\`. A withheld install is
@@ -3275,8 +3288,10 @@ export const typeDefs = `#graphql
     one entry per install). Order matches the readable non-null entries of
     \`appAgents\`: served installation creation time, then Agent id. When any
     installed Agent is withheld, every entry shares the App date, so order is by id.
+
+    null means WITHHELD from this caller (#2089), never no Agents.
     """
-    agents: [Agent!]!
+    agents: [Agent!]
     "Key inventory, only for whoever manages the App as themselves, never through a worker session, instructed or not: a nested field carries no instruction, so an instructed worker lists through appKeys / appKeysPage (hrn:node:hadronmemory.com:specs:cor:dmo:050:05; hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6)."
     keys: [AppKey!]!
     createdAt: DateTime!
