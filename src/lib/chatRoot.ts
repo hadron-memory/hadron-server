@@ -1,3 +1,4 @@
+import { chatNotFoundError } from './chatNotFound.js';
 import { isDeepStrictEqual } from 'node:util';
 /**
  * Serialized read-modify-write of a chat's root `data` blob (#919).
@@ -140,7 +141,7 @@ export async function withChatRootLock<T>(
       where: { id: chat.id },
       select: { data: true, memoryId: true, loc: true, nodeType: true },
     });
-    if (!row) throw new Error(`Chat "${chat.loc}" not found`);
+    if (!row) throw chatNotFoundError(chat.loc);
     if (row.memoryId !== chat.memoryId || row.loc !== chat.loc) throw new GraphQLError('Chat authority changed.', { extensions: { code: 'CHAT_AUTHORITY_SCOPE_CHANGED' } });
     let decrypted: { data: unknown };
     try { decrypted = decryptNodeFields({ data: row.data }, memEncInfo); }

@@ -14,7 +14,6 @@ import type { FindingCounts } from './findings.js';
  * passing a bag through.
  */
 
-import { raiseDeliveredOnAssignment } from '../tickers/standbyAssignment.js';
 import type { Prisma } from '../../generated/prisma/index.js';
 import { currentActor } from '../requestActor.js';
 import { generateId } from '../id.js';
@@ -211,11 +210,6 @@ export async function appendTaskEvent(
   },
 ): Promise<void> {
   const subject = subjectWorkerId(args.event) ?? args.forParty?.workerId ?? null;
-  // S7 (#2023, R90): an assignment to a worker that was on standby raises its delivered mark past the held messages, in this
-  // same transaction, and the count rides the event so the task wake returns it exactly once.
-  const standbyHeld = subject && (ASSIGNED_EVENT_TYPES as readonly string[]).includes(args.event.type)
-    ? await raiseDeliveredOnAssignment(tx, { workerId: subject, taskId: args.taskId, actor: { userId: args.actor.userId, workerId: args.actor.workerId }, now: args.createdAt })
-    : 0;
   await tx.agentTeamEvent.create({
     data: {
       appId: args.appId,
@@ -228,7 +222,7 @@ export async function appendTaskEvent(
       actorAppKeyId: args.actor.appKeyId ?? null,
       subjectWorkerId: subject,
       subjectUserId: args.forParty?.userId ?? null,
-      payload: standbyHeld > 0 ? { ...payloadJson(args.event), standbyHeld } : payloadJson(args.event),
+      payload: payloadJson(args.event),
       ...(args.createdAt ? { createdAt: args.createdAt } : {}),
     },
   });
@@ -493,7 +487,7 @@ export const STAFFING_EVENT_TYPES = [
 ] as const;
 export type StaffingEventType = (typeof STAFFING_EVENT_TYPES)[number];
 
-/** The census treats these on the subject as bookkeeping, not use. Instruction-claim subjects occur only for no-op retirement. */
+/** The census treats these on the subject as bookkeeping, not use. Instruction-claim subjects occur for no-op retirement and delete previews (#3599). */
 export const SELF_BOOKKEEPING_EVENT_TYPES = ['worker.cast', 'worker.retired', 'worker.instruction-claimed'] as const;
 
 async function appendStaffingEvent(
@@ -636,7 +630,7 @@ function instructionPayload(instruction?: ActInstruction): Prisma.InputJsonObjec
 export async function appendStaffingInstructionClaim(
   tx: Prisma.TransactionClient,
   args: { appId: string; admission: StaffActAdmission } & (
-    | { operation: 'worker.retire'; workerId: string; userId?: never; agentId?: never }
+    | { operation: 'worker.retire' | 'worker.delete-preview'; workerId: string; userId?: never; agentId?: never }
     | { operation: 'worker.preview'; agentId: string; workerId?: never; userId?: never }
     | { operation: 'member.ensure' | 'member.remove'; userId: string; workerId?: never; agentId?: never }
   ),
@@ -644,8 +638,8 @@ export async function appendStaffingInstructionClaim(
   const instruction = staffingInstruction(args.admission);
   if (!instruction) return;
   await appendStaffingEvent(tx, { appId: args.appId, actor: staffingActActor(args.admission),
-    type: 'worker.instruction-claimed', subjectWorkerId: args.operation === 'worker.retire' ? args.workerId : undefined,
-    payload: { operation: args.operation, ...(args.operation === 'worker.retire' ? { workerId: args.workerId } : {}),
+    type: 'worker.instruction-claimed', subjectWorkerId: (args.operation === 'worker.retire' || args.operation === 'worker.delete-preview') ? args.workerId : undefined,
+    payload: { operation: args.operation, ...((args.operation === 'worker.retire' || args.operation === 'worker.delete-preview') ? { workerId: args.workerId } : {}),
       ...(args.userId ? { userId: args.userId } : {}), ...(args.agentId ? { agentId: args.agentId } : {}),
       ...instructionPayload(instruction) } });
 }
@@ -686,7 +680,7 @@ export type ManagerAct =
   // #3321 (S4b): the host-operation, stop-signal, ticker, settings, isolation and wake doors.
   | `host-operation.${'worker.start' | 'worker.end' | 'worktree.create' | 'worktree.remove'}`
   | 'stop.set' | 'stop.lift' | 'ticker.update' | 'ticker.delete' | 'ticker.subscribe' | 'ticker.unsubscribe'
-  | 'ticker.templates-apply' | 'worker.wake-settings' | 'worker.isolate' | 'worker.isolation-clear'
+  | 'ticker.templates-apply' | 'worker.wake-settings'
   | 'app.ticker-settings' | 'app.delivery-settings' | 'team.pause' | 'team.resume' | 'wake.read';
 
 /** The ids an instructed App-manager act concerns; never content (cor:agt:050:11). */

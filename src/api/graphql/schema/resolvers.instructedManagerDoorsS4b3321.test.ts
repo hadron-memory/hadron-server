@@ -15,7 +15,6 @@ import { declareAllStopLanes } from '../../../test/stopLanes.js';
 import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
-import { setS7AvailableForTest } from '../../../lib/tickers/s7Availability.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../../../middleware/auth.js';
 import { resolvers, type Context } from './resolvers.js';
 
@@ -129,18 +128,6 @@ const doors: Record<string, Door> = {
     took: async () => (await db.workerWakeSettings.findUnique({ where: { workerId: f.target.id } }))?.mentions === 'OFF',
     subject: () => ({ workerId: f.target.id }),
   },
-  isolateWorker: {
-    act: 'worker.isolate',
-    call: (i, c) => M.isolateWorker({}, { workerRef: f.target.id, instruction: i }, c),
-    took: async () => (await db.workerWakeSettings.findUnique({ where: { workerId: f.target.id } }))?.isolatedUntil != null,
-    subject: () => ({ workerId: f.target.id }),
-  },
-  clearWorkerIsolation: {
-    act: 'worker.isolation-clear',
-    call: (i, c) => M.clearWorkerIsolation({}, { workerRef: f.isolated.id, instruction: i }, c),
-    took: async () => (await db.workerWakeSettings.findUniqueOrThrow({ where: { workerId: f.isolated.id } })).isolatedUntil === null,
-    subject: () => ({ workerId: f.isolated.id }),
-  },
   setAppTickerSettings: {
     act: 'app.ticker-settings',
     call: (i, c) => M.setAppTickerSettings({}, { appRef: f.app.id, input: { liveCap: 7 }, instruction: i }, c),
@@ -165,8 +152,7 @@ const doors: Record<string, Door> = {
 };
 
 beforeEach(async () => {
-  await cleanDb(db);
-  setS7AvailableForTest(true); // isolation is inert until S7b; this file tests who may, not whether it is on yet
+  await cleanDb(db); // isolation is inert until S7b; this file tests who may, not whether it is on yet
   const n = generateId().slice(-8).toLowerCase();
   const holder = await db.user.create({ data: { handle: `holder-${n}`, roles: ['READER'] } });
   const other = await db.user.create({ data: { handle: `other-${n}`, roles: ['READER'] } });
@@ -212,10 +198,8 @@ beforeEach(async () => {
   await db.orgMember.update({ where: holderInOrg, data: { role: 'ADMIN' } });
   await M.createAgentTickerTemplate({}, { agentRef: agent.id, input: { name: 'Base', cadenceSeconds: 900 } }, asOwner);
   await db.orgMember.update({ where: holderInOrg, data: { role: 'CONTRIBUTOR' } });
-  await M.isolateWorker({}, { workerRef: isolated.id }, asOwner);
   f = { holder, other, boss, org, app, otherApp, agent, worker, target, idle, isolated, foreign, session, targetSession, key, signal, ticker, foreignTicker };
 });
-afterEach(() => setS7AvailableForTest(false));
 
 describe('#3321 the S4b doors admit an instructed worker on its holder\'s App-manager right', () => {
   for (const [name, door] of Object.entries(doors)) {
@@ -311,10 +295,6 @@ describe('#3321 the rows name the holder whose right was used', () => {
     await asWorker(() => doors.liftTeamStopSignal!.call(live, bound()));
     expect((await db.teamStopSignal.findUniqueOrThrow({ where: { id: f.signal.id } })).endedByUserId).toBe(f.holder.id);
   });
-  it('an isolation', async () => {
-    await asWorker(() => doors.isolateWorker!.call(live, bound()));
-    expect((await db.workerWakeSettings.findUniqueOrThrow({ where: { workerId: f.target.id } })).isolatedByUserId).toBe(f.holder.id);
-  });
 });
 
 describe('#3321 the record comes after every refusal (acceptance 6)', () => {
@@ -328,7 +308,6 @@ describe('#3321 the record comes after every refusal (acceptance 6)', () => {
       return M.updateTicker({}, { ref: f.ticker.id, input: { name: 'Taken' }, instruction: live }, bound());
     },
     'setAppTickerSettings out of range': () => M.setAppTickerSettings({}, { appRef: f.app.id, input: { liveCap: 0 }, instruction: live }, bound()),
-    'isolateWorker with an end in the past': () => M.isolateWorker({}, { workerRef: f.target.id, until: new Date('2001-01-01'), instruction: live }, bound()),
   };
   for (const [name, call] of Object.entries(refusedAfterGate)) {
     it(`${name}: refused after the gate, no record`, async () => {
@@ -359,11 +338,6 @@ describe('#3321 a no-op writes no record (acceptance 6)', () => {
   it('liftTeamStopSignal of a signal already ended', async () => {
     await M.liftTeamStopSignal({}, { appRef: f.app.id, id: f.signal.id }, ctx());
     expect(await answer(() => asWorker(() => doors.liftTeamStopSignal!.call(live, bound())))).toEqual({ code: 'RESOLVED' });
-    expect(await managerActs()).toHaveLength(0);
-  });
-
-  it('clearWorkerIsolation of a worker that is not isolated', async () => {
-    expect(await answer(() => asWorker(() => M.clearWorkerIsolation({}, { workerRef: f.target.id, instruction: live }, bound())))).toEqual({ code: 'RESOLVED' });
     expect(await managerActs()).toHaveLength(0);
   });
 
@@ -435,31 +409,6 @@ describe('#3321 other arms are unchanged and write no record (acceptance 5)', ()
     expect(plain.code).toBe('TICKER_CADENCE_NEEDS_CONSENT');
     expect(await answer(() => asWorker(() => M.updateTicker({}, { ref: t.id, input: { cadenceSeconds: 900 }, instruction: live }, bound())))).toEqual({ code: 'RESOLVED' });
     expect(await managerActs()).toHaveLength(1);
-  });
-
-  it('a person who holds the target isolates it as before, and writes no record', async () => {
-    await noRecord(() => M.isolateWorker({}, { workerRef: f.target.id }, asBoss()));
-  });
-
-  // Ruling 0118 / Xanthos #72869: isolation is the one door where the target's holder's right also travels.
-  it('isolation, holder arm: a worker whose holder holds the target, and does not manage, is admitted on an instruction, one record', async () => {
-    await demoteHolder();
-    await db.worker.update({ where: { id: f.target.id }, data: { heldByUserId: f.holder.id } });
-    expect((await answer(() => asWorker(() => doors.isolateWorker!.call(undefined, bound())))).code).toBe('WORKER_ISOLATION_FORBIDDEN');
-    expect(await answer(() => asWorker(() => doors.isolateWorker!.call(live, bound())))).toEqual({ code: 'RESOLVED' });
-    const acts = await managerActs();
-    expect(acts).toHaveLength(1);
-    expect(acts[0]!.payload).toMatchObject({ act: 'worker.isolate', workerId: f.target.id, instruction: live });
-    expect(await answer(() => asWorker(() => M.clearWorkerIsolation({}, { workerRef: f.target.id, instruction: live }, bound())))).toEqual({ code: 'RESOLVED' });
-    expect((await managerActs())[1]!.payload).toMatchObject({ act: 'worker.isolation-clear' });
-  });
-
-  it('isolation: a worker refused both rights gets its holder\'s refusal, even for itself', async () => {
-    await demoteHolder();
-    await db.worker.update({ where: { id: f.worker.id }, data: { heldByUserId: f.holder.id } });
-    const got = await answer(() => asWorker(() => doors.isolateWorker!.call(live, bound())));
-    expect(got).toEqual(await answer(() => doors.isolateWorker!.call(undefined, ctx())));
-    expect(await managerActs()).toHaveLength(0);
   });
 
   it('the other holder arms stay the person\'s: a held target gives a non-manager\'s worker nothing, instruction or not', async () => {
@@ -593,8 +542,6 @@ describe('#3321 refusal before oracle (acceptance 8)', () => {
     });
   }
   const workerCases: Record<string, (ref: string, i: unknown) => Promise<unknown>> = {
-    isolateWorker: (ref, i) => M.isolateWorker({}, { workerRef: ref, instruction: i }, bound()),
-    clearWorkerIsolation: (ref, i) => M.clearWorkerIsolation({}, { workerRef: ref, instruction: i }, bound()),
     setWorkerWakeSettings: (ref, i) => M.setWorkerWakeSettings({}, { workerRef: ref, input: { mentions: 'OFF' }, instruction: i }, bound()),
     applyAgentTickerTemplates: (ref, i) => M.applyAgentTickerTemplates({}, { workerRef: ref, instruction: i }, bound()),
     setTeamStopSignal: (ref, i) => M.setTeamStopSignal({}, { input: { appRef: f.app.id, level: 'PAUSE', scope: 'WORKER', worker: ref }, instruction: i }, bound()),
@@ -645,19 +592,13 @@ describe('#3321 refusal before oracle (acceptance 8)', () => {
 });
 
 describe('#3321 callers not wired here keep refusing a worker (acceptance 10, ask 2)', () => {
-  it('canManageIsolation stays false for a worker session: a read carries no instruction', async () => {
+  it('retired canManageIsolation stays false for every principal', async () => {
     const F = (resolvers as any).WorkerWakeSettings;
     expect(await asWorker(() => F.canManageIsolation({ workerId: f.target.id }, {}, bound()))).toBe(false);
-    expect(await F.canManageIsolation({ workerId: f.target.id }, {}, ctx())).toBe(true);
+    expect(await F.canManageIsolation({ workerId: f.target.id }, {}, ctx())).toBe(false);
     // The target's holder as well: the read never takes the holder arm for a worker.
     await db.worker.update({ where: { id: f.target.id }, data: { heldByUserId: f.holder.id } });
     expect(await asWorker(() => F.canManageIsolation({ workerId: f.target.id }, {}, bound()))).toBe(false);
-  });
-
-  it('with isolation off, a worker with no instruction is still refused first (the SDL\'s order)', async () => {
-    setS7AvailableForTest(false);
-    expect((await answer(() => asWorker(() => doors.isolateWorker!.call(undefined, bound())))).code).toBe('WORKER_ISOLATION_FORBIDDEN');
-    expect((await answer(() => asWorker(() => doors.isolateWorker!.call(live, bound())))).code).toBe('WORKER_ISOLATION_UNAVAILABLE');
   });
 
   it('grantApp and grantAppKeyScope answer a worker held by an App manager as on main, instruction or not', async () => {

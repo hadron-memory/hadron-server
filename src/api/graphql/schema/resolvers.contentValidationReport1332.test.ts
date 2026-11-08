@@ -9,13 +9,20 @@ import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
-import { runAsActor } from '../../../lib/requestActor.js';
+import { publishAmbiguousActor, runAsActor } from '../../../lib/requestActor.js';
+import { Client } from 'pg';
 import { runContext } from '../../../jobs/appRunDeps.js';
 import { DIRECT_USER_REFERENCES } from '../../../controller/operations/mergeUsers.js';
 import { mergeUsers } from '../../../test/mergeConsent.js';
 import { resolvers, type Context } from './resolvers.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
-import { ContentValidationRefusal, recordContentValidationReportInTx } from '../../../lib/contentValidationReport.js';
+import {
+  ContentValidationRefusal,
+  deriveReporter,
+  recordContentValidationReportInTx,
+  VALIDATION_TASK_SELECT,
+  type ContentValidationReportInput,
+} from '../../../lib/contentValidationReport.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
@@ -747,5 +754,163 @@ describe('#1332 storage invariants', () => {
     const migration = readFileSync('prisma/migrations/20261105170000_content_validation_reporter/migration.sql', 'utf8');
     expect(migration.endsWith(shared)).toBe(true);
     expect(readFileSync('prisma/post-push.sql', 'utf8')).toContain('\\ir content-validation-report-invariants.sql');
+  });
+});
+
+/**
+ * #3567: pins for the eight #3534 mutants that survived Ralion's §10 campaign (r8, r11, l3, l10, l11, l12, l15,
+ * v5_break). Tests only: production code is unchanged. Gate: Xavier (CHECKED T0 Light); scope: Liam 6680388409;
+ * FIT: Vera 6684068839. Where a pin pins built behavior rather than a spec rule, its name says so.
+ */
+describe('#3567 pins for the surviving #3534 mutants', () => {
+  /** A task in another org that leo can read only while he is a member there. */
+  async function taskInOtherOrg(urn: string, opts: { runnable?: boolean } = {}) {
+    const org = (await db.organization.create({ data: { id: generateId(), name: urn, urn } })).id;
+    const mem = (await db.memory.create({ data: { id: generateId(), organizationId: org, urn: `${urn}:tasks`, name: 'Tasks', class: 'knowledge', visibility: 'ORGANIZATION' } })).id;
+    const task = (await db.node.create({ data: { id: generateId(), memoryId: mem, loc: 'validate', name: 'V', isRunnable: opts.runnable ?? true, content: 'check' } })).id;
+    return { org, mem, task, urn: `hrn:node:${urn}:tasks:validate` };
+  }
+  /** The direct in-transaction write, as the authorized transaction calls it. */
+  const inTx = (extra: Partial<ContentValidationReportInput> = {}) => db.$transaction((tx) => recordContentValidationReportInTx(tx, {
+    nodeId, memoryId, nodeRevision: 1, validationTaskRef: validationTask, validationTaskRevision: 1,
+    outcome: 'PASS', runId: null, reporter: { kind: 'PERSON', userId: leo },
+    canReadTaskMemory: async () => true,
+    ...extra,
+  }));
+  const codeOf = (p: Promise<unknown>) => p.then(() => 'NO_ERROR', (e: unknown) => (e instanceof GraphQLError ? String(e.extensions?.code) : `untyped: ${(e as Error).message}`));
+
+  it('r11: a writer sending an outcome outside PASS, FAIL and ERROR to a direct call is BAD_USER_INPUT, nothing written (GraphQL and MCP refuse it by schema first)', async () => {
+    const error = await report(person(leo), { outcome: 'MAYBE' }).then(() => null, (e: unknown) => e);
+    expect(error).toBeInstanceOf(GraphQLError);
+    expect((error as GraphQLError).extensions?.code).toBe('BAD_USER_INPUT');
+    expect((error as GraphQLError).message).toBe('outcome must be PASS, FAIL or ERROR.');
+    expect(await reportCount()).toBe(0);
+  });
+
+  it('r8 (built behavior, injected race): the receipt hides the task when the caller loses read access to it after the commit; without the revocation it names the task', async () => {
+    // The task sits in a different memory from the node, so no readability answer for it is cached on ctx.
+    const t = await taskInOtherOrg('cv-r8');
+    const membership = { organizationId: t.org, userId: leo };
+    await db.orgMember.create({ data: { ...membership, role: 'READER' } });
+    await db.nodeRoleRule.updateMany({ where: { config: { memoryId } }, data: { validationTaskId: t.task } });
+    const run = async (revoke: boolean, runId: string) => {
+      let revoked = false;
+      const racing = new Proxy(db, { get(target, key, receiver) {
+        if (key !== 'node') return Reflect.get(target, key, receiver);
+        return new Proxy(target.node, { get(model, op, r) {
+          if (op !== 'findFirst') return Reflect.get(model, op, r);
+          return async (a: { where?: { id?: string } }) => {
+            // The post-commit receipt read of the task: revoke leo's read access to it just before.
+            if (revoke && !revoked && a.where?.id === t.task && (await db.nodeContentValidationReport.count({ where: { runId } })) === 1) {
+              revoked = true;
+              await db.orgMember.deleteMany({ where: membership });
+            }
+            return (model.findFirst as (x: unknown) => unknown)(a);
+          };
+        } });
+      } });
+      const out = await report(person(leo, { db: racing as typeof db }), { validationTaskRef: t.task, runId });
+      return { out, revoked };
+    };
+    // Control: no revocation, the receipt names the task and its revision.
+    const control = await run(false, 'r8-control');
+    expect((control.out.report as Record<string, unknown>)).toMatchObject({ validationTaskRef: t.urn, validationTaskRevision: 1 });
+    const raced = await run(true, 'r8-raced');
+    expect(raced.revoked).toBe(true);
+    expect((raced.out.report as Record<string, unknown>)).toMatchObject({ validationTaskRef: null, validationTaskRevision: null });
+    // The report itself was recorded: only the receipt's view of the task is hidden.
+    expect(await reportCount()).toBe(2);
+  });
+
+  it('l3 (defense in depth, unreachable through the shipped doors: MCP refuses an ambiguous session before the handler): an ambiguous actor is REPORTER_UNKNOWN, never a person', async () => {
+    const ambiguous = await runAsActor({ workerId: null, agentId: null }, async () => {
+      publishAmbiguousActor(['s1', 's2']);
+      return deriveReporter(db, { userId: leo }).then(() => 'NO_ERROR', (e: unknown) => (e as ContentValidationRefusal).code);
+    });
+    expect(ambiguous).toBe('CONTENT_VALIDATION_REPORTER_UNKNOWN');
+    // Control: the same person with no ambiguity is the PERSON reporter.
+    expect(await runAsActor({ workerId: null, agentId: null }, () => deriveReporter(db, { userId: leo }))).toEqual({ kind: 'PERSON', userId: leo });
+  });
+
+  it('l10 (injected race: the node moved after the gate): the in-transaction lock is scoped to the authorized memory, so a write under another memory is NODE_NOT_FOUND, nothing written', async () => {
+    // otherMemoryId has the same guide rule naming the readable, runnable validation task: only the scope stops the write.
+    expect(await codeOf(inTx({ memoryId: otherMemoryId }))).toBe('NODE_NOT_FOUND');
+    expect(await reportCount()).toBe(0);
+    // Control: under the node's own memory the same call records.
+    expect(await codeOf(inTx())).toBe('NO_ERROR');
+    expect(await reportCount()).toBe(1);
+  });
+
+  it('l11 (injected race: the node was soft-deleted after the gate): the in-transaction lock excludes a deleted node, NODE_NOT_FOUND, nothing written', async () => {
+    await db.node.update({ where: { id: nodeId }, data: { deletedAt: new Date() } });
+    await db.$executeRaw`UPDATE nodes SET revision_content_hash = hadron_node_revision_state_hash(nodes) WHERE id = ${nodeId}`;
+    expect(await codeOf(inTx())).toBe('NODE_NOT_FOUND');
+    expect(await reportCount()).toBe(0);
+  });
+
+  /**
+   * l12 and l15 (built behavior): the locks the write holds, observed from a SECOND real connection on the
+   * per-worker DATABASE_URL while the transaction is inside the task-readability callback (after both locks).
+   * NOWAIT and try-lock only: the probe never waits, and the probe connection is always closed.
+   */
+  async function probeInsideTx(probe: (c: Client) => Promise<unknown>): Promise<unknown> {
+    const client = new Client({ connectionString: process.env.DATABASE_URL });
+    await client.connect();
+    let seen: unknown = 'NOT_CALLED';
+    try {
+      await inTx({ canReadTaskMemory: async () => { seen = await probe(client); return true; } });
+    } finally {
+      await client.end();
+    }
+    return seen;
+  }
+
+  it('l12 (built behavior): the node row is held FOR SHARE, so a concurrent FOR UPDATE NOWAIT fails with 55P03', async () => {
+    const seen = await probeInsideTx(async (c) => c.query('SELECT 1 FROM nodes WHERE id = $1 FOR UPDATE NOWAIT', [nodeId])
+      .then(() => 'LOCK_TAKEN', (e: { code?: string }) => e.code));
+    expect(seen).toBe('55P03');
+    expect(await reportCount()).toBe(1);
+  });
+
+  it('l15 (built behavior): the memory-config advisory lock is held SHARED, so the exclusive try-lock a rule write takes is refused', async () => {
+    const seen = await probeInsideTx(async (c) => {
+      await c.query('BEGIN');
+      try {
+        const r = await c.query<{ ok: boolean }>("SELECT pg_try_advisory_xact_lock(hashtext('memory-config'), hashtext($1)) AS ok", [memoryId]);
+        return r.rows[0].ok;
+      } finally {
+        await c.query('ROLLBACK');
+      }
+    });
+    expect(seen).toBe(false);
+    // Control: after the write's transaction ends, the same try-lock succeeds.
+    const c = new Client({ connectionString: process.env.DATABASE_URL });
+    await c.connect();
+    try {
+      await c.query('BEGIN');
+      expect((await c.query<{ ok: boolean }>("SELECT pg_try_advisory_xact_lock(hashtext('memory-config'), hashtext($1)) AS ok", [memoryId])).rows[0].ok).toBe(true);
+      await c.query('ROLLBACK');
+    } finally {
+      await c.end();
+    }
+  });
+
+  it('v5 (cor:dmo:160:01 refusal 3, ruling 0199): a deleted task listed before a hidden live one still answers WRONG_TASK, not TASK_BROKEN', async () => {
+    // The deleted task is created FIRST and already deleted (a later UPDATE writes a new row version after the
+    // hidden task's), so the unordered task read returns it first (asserted below).
+    const deletedTask = (await db.node.create({ data: { id: generateId(), memoryId, loc: 'deleted-task', name: 'Gone', isRunnable: true, content: 'x', deletedAt: new Date() } })).id;
+    const hidden = await taskInOtherOrg('cv-v5');
+    // A runnable guide node is judged under two rule keys: 'guide' and 'task'.
+    await db.node.update({ where: { id: nodeId }, data: { isRunnable: true } });
+    await db.$executeRaw`UPDATE nodes SET revision_content_hash = hadron_node_revision_state_hash(nodes) WHERE id = ${nodeId}`;
+    const config = await db.memoryConfig.findUniqueOrThrow({ where: { memoryId } });
+    await db.nodeRoleRule.updateMany({ where: { configId: config.id, role: 'guide' }, data: { validationTaskId: deletedTask } });
+    await db.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, role: 'task', validationTaskId: hidden.task, validationTaskRequired: true } });
+    // Precondition, not a rule: the same unordered read the recorder makes returns the deleted task first.
+    // If the planner order ever flips, this fails loudly instead of the pin passing without testing anything.
+    const order = await db.$transaction((tx) => tx.node.findMany({ where: { id: { in: [deletedTask, hidden.task] } }, select: VALIDATION_TASK_SELECT }));
+    expect(order.map((t) => t.id)).toEqual([deletedTask, hidden.task]);
+    expect(await refusal(report(person(leo), { validationTaskRef: hidden.task }))).toBe('CONTENT_VALIDATION_WRONG_TASK');
+    expect(await reportCount()).toBe(0);
   });
 });

@@ -70,6 +70,7 @@ import { assertValidRuleRole, lockMemoryConfigExclusive } from '../../../lib/gov
 import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { generateId } from '../../../lib/id.js';
 import { forbiddenError, unauthenticatedError } from '../../../lib/refusals.js';
+import { taskVisibilityWarnings } from './resolvers.memoryConfigWarnings.js';
 
 export type Writers = 'ALL' | 'OWNER' | 'ADMIN';
 export type Validator = 'AGENT' | 'PLATFORM';
@@ -421,6 +422,10 @@ export function refViewOnce(ctx: Context, rule: RuleRefRow, kind: RefKind): Prom
     const cols = REF_COLUMNS[kind];
     pending = refView(ctx, rule[cols.id], cols.required ? rule[cols.required] : false);
     perRule.set(kind, pending);
+    // Keep no rejection in the memo (#1327): a one-shot projection fault must
+    // not replay through `authorTaskState` on a rule that was already saved.
+    const memo = perRule;
+    pending.catch(() => memo.delete(kind));
   }
   return pending;
 }
@@ -492,7 +497,7 @@ export const memoryConfigMutations = {
         await touchConfig(tx, configId, actor);
         return created;
       });
-      return { rule, warnings: [] };
+      return { rule, warnings: await taskVisibilityWarnings(ctx, memory.id, [rule]) };
     } catch (e) {
       translateRoleTaken(e, role);
     }
@@ -541,7 +546,8 @@ export const memoryConfigMutations = {
       await touchConfig(tx, current.configId, actor);
       return after;
     });
-    return { rule, warnings: [] };
+    // #1327: advisory, computed from the committed rule in the caller's own reference projection.
+    return { rule, warnings: await taskVisibilityWarnings(ctx, memoryId, [rule]) };
   },
 
   deleteNodeRoleRule: async (

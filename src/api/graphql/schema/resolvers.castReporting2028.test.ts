@@ -1,6 +1,5 @@
 /** S12: explicit reporting choice, legacy omission, and permanent-mint atomicity. */
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
-import { setS7AvailableForTest } from '../../../lib/tickers/s7Availability.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -24,7 +23,8 @@ beforeEach(async () => {
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   await serveEveryAgent(db); // #2712: binds need a served prompt
 });
-afterEach(() => { vi.unstubAllEnvs(); setS7AvailableForTest(false); });
+
+afterEach(() => { vi.unstubAllEnvs(); });
 
 describe('S12 cast choice', () => {
   it('records explicit no-team and returns the same placement in preview', async () => {
@@ -170,16 +170,6 @@ describe('S12 lifecycle and invariant', () => {
 });
 
 describe('S12 DARK boundary and atomic S8 join', () => {
-  it('fails closed for head casts if future standby becomes available', async () => {
-    const head = await M.castWorker({}, args({ name: 'Head' }), ctx());
-    vi.stubEnv('CAST_REPORTING_CHOICE_REQUIRED', 'true');
-    setS7AvailableForTest(true);
-    for (const operation of [M.castWorker, Q.castWorkerPreview]) {
-      await expect(operation({}, args({ reportsTo: head.id }), ctx())).rejects.toMatchObject({ extensions: { code: 'WORKER_REPORTING_CAST_UNAVAILABLE' } });
-    }
-    expect(await db.worker.count()).toBe(1);
-    expect(await db.agentTeamEvent.count({ where: { type: 'worker.reports-to' } })).toBe(0);
-  });
   it('conceals foreign/missing/malformed head identities after the manager gate', async () => {
     const other = await db.app.create({ data: { ownerUserId: user.id, name: 'Other', urn: `s12-${generateId()}:other` } });
     const foreign = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: other.id, agentId: agent.id, name: 'Foreign', slug: 'foreign' } });

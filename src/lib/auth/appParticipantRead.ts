@@ -33,6 +33,31 @@ export async function requireOrgRole(
 }
 
 
+/**
+ * App-participation predicate — "may this USER act as a member of this App?"
+ * (#939's team-chat gate, generalized in #943 so `startSession`'s `appRef`
+ * gate is the SAME predicate rather than a second copy of it).
+ *
+ * Admits: an AppMember at ANY role (of a user-owned App too, #1764) (participation follows the host memory's
+ * audience — `cor:acl:030:01`, so a 'reader' member counts), an org member
+ * with CONTRIBUTOR+ on the App's owning org (parity with the persona-mint
+ * gate's org branch, and platform ADMIN/OWNER via `requireOrgRole`), or the
+ * owner of a user-owned App (whose AppMembers are covered by the first arm).
+ *
+ * Under IMPERSONATION this narrows to the session's ONE shared org (#1094):
+ * every arm answers about the TARGET, so an unbounded one would admit an App in
+ * an org the support session was never scoped to. Same bound `requireOrgRole`
+ * and `isOrgMemberOrAdmin` apply; the owner arm's outright denial is that rule's
+ * degenerate case, since a user-owned App has no org to match.
+ *
+ * This is the USER branch only. Callers own their principal-shape policy
+ * around it (findings:auth-appid-credential-vs-selection): a caller with no
+ * `userId` is a pure App-key (or anonymous) principal and is false here —
+ * whether an App KEY may act for its own App is the caller's call, not this
+ * predicate's. A hybrid principal (userId + an active-App SELECTION from
+ * MCP's `requireAppScope`) is judged solely on the user, which is exactly
+ * what this returns.
+ */
 export async function isAppParticipant(
   ctx: Context,
   app: { id: string; organizationId: string | null; ownerUserId: string | null },

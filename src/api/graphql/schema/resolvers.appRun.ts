@@ -134,7 +134,7 @@ export interface CreateAgentScheduleInput extends TriggerRunBudgets {
 }
 
 /** Resolve the App ref (PK or URN), require it live, and require org-ADMIN on its org. */
-async function requireScheduleAdmin(ctx: Context, appRef: string) {
+export async function requireScheduleAdmin(ctx: Context, appRef: string) {
   const { id } = await resolveAppRef(ctx.db, appRef);
   const app = await ctx.db.app.findFirst({
     where: { id, deletedAt: null },

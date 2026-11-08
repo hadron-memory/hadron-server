@@ -34,7 +34,12 @@ export const taskWarningsPlugin: ApolloServerPlugin<Context> = {
           if (typeof head === 'string') errored.add(head);
         }
         await flushTaskWarningHistory(ctx, errored);
-        const warnings = [...shapeResponseWarnings(collected ?? [], errored), ...await responseIncludePinWarnings(ctx, errored)].slice(0, MAX_WARNINGS_PER_RESPONSE);
+        // Node-write advice is dropped only when the write itself failed (its root result is null). A field error
+        // inside a committed write's response, such as a selected `content` over a resolution limit
+        // (hadron-internal#40), must not drop the warning that explains it.
+        const data = body.singleResult.data as Record<string, unknown> | null | undefined;
+        const failedWrites = new Set([...errored].filter((head) => data?.[head] == null));
+        const warnings = [...shapeResponseWarnings(collected ?? [], errored), ...await responseIncludePinWarnings(ctx, failedWrites)].slice(0, MAX_WARNINGS_PER_RESPONSE);
         if (warnings.length === 0) return;
         body.singleResult.extensions = { ...body.singleResult.extensions, warnings };
       },

@@ -19,7 +19,7 @@
  */
 
 import { COMMENT_NODE_TYPE } from '../comments/index.js';
-import { searchContains, searchStartsWith } from '../../integrations/db/provider.js';
+import { searchContains } from '../../integrations/db/provider.js';
 import type { PrismaClient, Prisma } from '../../generated/prisma/index.js';
 import {
   bestMatch,
@@ -98,38 +98,35 @@ function textPred(column: string, q: string): AnyWhere {
   return searchContains(column, q) as AnyWhere;
 }
 
-function startsPred(column: string, q: string): AnyWhere {
-  return searchStartsWith(column, q) as AnyWhere;
-}
-
 /**
- * The loc portion of a node-URN query — everything after the leading org +
- * memory hierarchy atoms. A full node URN is `root:memory:loc` (v1: `org::memory::loc`), but the Node
- * row stores only `loc`, so matching the whole query against `loc` never hits;
- * we recover the loc here to build a PRECISE loc predicate.
- *
- * Earlier this returned just the LAST colon-atom (e.g. `cor:brd:010:01` → `01`),
- * which was so broad it flooded the candidate cap and crowded the real row out
- * before scoring — a bare-loc search returned nothing (#301). Stripping exactly
- * the org + memory atoms keeps the fallback precise.
- *
- * Separator-agnostic: collapse `::`/`:` runs to single-colon atoms (like
- * match.ts `singleColon`) before stripping, so v1 (`org::memory::loc`),
- * canonical v2 (`org:memory:loc`), and mixed (`org::memory:loc`) forms all yield the
- * loc. The Node row stores its loc single-colon, so rejoining with `:` matches.
- * Returns '' when there is no loc portion (≤ 2 atoms — an org/memory URN, not a
- * node URN).
- *
- * This is a heuristic: it can't know whether the first two atoms are really an
- * org + memory (full node URN) or just the start of a longer loc (a partial-loc
- * search like `brd:010:01`, where it wrongly yields `01`). The suffix is matched
- * with `startsWith`, NOT `contains` (see searchNodes), so a wrong guess like
- * `01` matches ~nothing and can't re-flood the cap — the precise whole-query
- * predicate carries partial-loc searches.
+ * A substring of memory.urn + ':' + loc is either wholly inside one column,
+ * or crosses their separator. Try every separator of the normalized query as
+ * that boundary: the memory must END with the left half and loc START with
+ * the right half. No assumption about how many leading atoms were supplied.
+ * Two-sided boundaries join the direct loc predicates; memory-only and
+ * one-sided matches fill unused slots separately in searchNodes. Memory URNs
+ * may still store the legacy double-colon spelling; loc is single-colon. Final scoring uses the shared
+ * URN emitter.
  */
-function locSuffix(urnTerm: string): string {
-  const atoms = urnTerm.replace(/:+/g, ':').split(':');
-  return atoms.length > 2 ? atoms.slice(2).join(':') : '';
+function nodeUrnPreds(urnTerm: string): { direct: AnyWhere[]; broad: AnyWhere[] } {
+  const term = urnTerm.replace(/:+/g, ':');
+  const direct: AnyWhere[] = [textPred('loc', term)];
+  const broad: AnyWhere[] = [{ memory: { OR: urnPreds('urn', term) } }];
+  for (let i = 0; i < term.length; i++) {
+    if (term[i] !== ':') continue;
+    const memoryTail = term.slice(0, i);
+    const locHead = term.slice(i + 1);
+    for (const variant of urnSearchVariants(memoryTail)) {
+      // One-sided splits are real URN substrings, but can match an entire
+      // memory or every loc prefix. Like #301, they must not flood the cap
+      // before direct matches; keep them in the remaining-slot pool.
+      (memoryTail && locHead ? direct : broad).push({ AND: [
+        { memory: { urn: { endsWith: variant, mode: 'insensitive' } } },
+        { loc: { startsWith: locHead, mode: 'insensitive' } },
+      ] });
+    }
+  }
+  return { direct, broad };
 }
 
 /**
@@ -262,22 +259,11 @@ async function searchNodes(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
   const { fields, q, urnTerm, principal } = ctx;
   const preds: AnyWhere[] = [];
   if (fields.has('pk')) preds.push(pkPred(q));
+  let broadUrnPreds: AnyWhere[] = [];
   if (fields.has('urn')) {
-    // Node URN is computed (memory.urn + loc), so match the stored `loc`:
-    //   1. CONTAINS the whole query — covers bare- and partial-loc searches
-    //      (`cor:brd:010:01`, `brd:010:01`), the common case.
-    //   2. STARTS WITH the loc portion of a full node-URN query —
-    //      covers pasting a complete node URN, whose loc the row stores without
-    //      the org/memory prefix.
-    // The suffix uses startsWith, not contains: locSuffix is a heuristic strip
-    // that mis-fires on partial locs (yielding e.g. `01`), and a broad
-    // `contains '01'` would flood the candidate cap and drop the real row
-    // (#301). An anchored startsWith for a bad guess matches ~nothing, so the
-    // precise predicate (1) still carries the search. Scoring re-anchors on the
-    // full node URN regardless.
-    preds.push(textPred('loc', urnTerm));
-    const suffix = locSuffix(urnTerm);
-    if (suffix && suffix !== urnTerm) preds.push(startsPred('loc', suffix));
+    const urnPredicates = nodeUrnPreds(urnTerm);
+    preds.push(...urnPredicates.direct);
+    broadUrnPreds = urnPredicates.broad;
   }
   if (fields.has('name')) preds.push(textPred('name', q));
   if (fields.has('description')) preds.push(textPred('description', q));
@@ -310,6 +296,10 @@ async function searchNodes(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
   };
   if (fields.has('content')) nodeSelect.content = true;
 
+  // #1586: direct node-field and two-sided boundary matches take candidate slots
+  // before memory-only and one-sided matches. A large memory whose address
+  // contains a word must not crowd out a node named that word. Fill only the remaining slots,
+  // so the total fetched/scored node budget stays ctx.cap (not cap per branch).
   const rows = await ctx.db.node.findMany({
     where: {
       // #1608 (cor:dmo:110:08) — global search is content only; comments are
@@ -319,6 +309,22 @@ async function searchNodes(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
     select: nodeSelect,
     take: ctx.cap,
   });
+
+  if (broadUrnPreds.length > 0 && rows.length < ctx.cap) {
+    const broadMatches = await ctx.db.node.findMany({
+      where: {
+        AND: [
+          nodeScopeWhere(principal), { deletedAt: null },
+          { nodeType: { not: COMMENT_NODE_TYPE } },
+          { id: { notIn: rows.map(row => row.id) } },
+          { OR: broadUrnPreds },
+        ],
+      } as Prisma.NodeWhereInput,
+      select: nodeSelect,
+      take: ctx.cap - rows.length,
+    });
+    rows.push(...broadMatches);
+  }
 
   const hits: GlobalSearchHit[] = [];
   for (const r of rows) {

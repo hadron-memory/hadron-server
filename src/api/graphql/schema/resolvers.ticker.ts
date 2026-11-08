@@ -41,7 +41,6 @@ import { type ActAdmission, type ActInstruction } from '../../../lib/auth/instru
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { admitAppManagement, requireInstructedActKeepingRuns, callerIsWorkerSession, lockCallerSession, readActInstruction } from './resolvers.instruction.js';
 import { appendCredentialInstructionEvent } from '../../../lib/agentTasks/events.js';
-import { s7Available } from '../../../lib/tickers/s7Availability.js';
 import { isDeepStrictEqual } from 'node:util';
 import { GraphQLError, type GraphQLResolveInfo } from 'graphql';
 import { RegisterLookup, type RegisterEntry } from '../../../lib/actionRegister/lookup.js';
@@ -174,7 +173,7 @@ type TickerSettings = {
 };
 export const SETTINGS_SELECT = {
   tickerMinCadenceSeconds: true, tickerSelfSubscribeCadenceSeconds: true, tickerLiveCap: true, wakeDailyBudget: true,
-  deliveryBusyDelaySeconds: true, deliveryStuckWindowSeconds: true, deliveryStandbyEnabled: true, deliveryDarkAlarmWindowSeconds: true,
+  deliveryBusyDelaySeconds: true, deliveryStuckWindowSeconds: true, deliveryDarkAlarmWindowSeconds: true,
   deliveryCheckPeriodSeconds: true, deliveryFailedChecksToOverdue: true,
 } as const;
 
@@ -754,7 +753,7 @@ export async function writeAppSettings(
       batchWindowSeconds: floor,
       busyDelaySeconds: patch.busyDelaySeconds ?? cur.deliveryBusyDelaySeconds,
       stuckWindowSeconds: patch.stuckWindowSeconds ?? cur.deliveryStuckWindowSeconds,
-      standbyEnabled: patch.standbyEnabled ?? cur.deliveryStandbyEnabled,
+      standbyEnabled: false,
       standbyEffective: false,
       checkPeriodSeconds: patch.checkPeriodSeconds ?? cur.deliveryCheckPeriodSeconds,
       failedChecksToOverdue: patch.failedChecksToOverdue ?? cur.deliveryFailedChecksToOverdue,
@@ -766,13 +765,12 @@ export async function writeAppSettings(
       tickerLiveCap: cap, wakeDailyBudget: budget,
       deliveryBusyDelaySeconds: delivery.busyDelaySeconds,
       deliveryStuckWindowSeconds: delivery.stuckWindowSeconds,
-      deliveryStandbyEnabled: delivery.standbyEnabled,
       deliveryCheckPeriodSeconds: delivery.checkPeriodSeconds,
       deliveryFailedChecksToOverdue: delivery.failedChecksToOverdue,
       deliveryDarkAlarmWindowSeconds: delivery.darkAlarmWindowSeconds,
     };
-    await tx.app.update({ where: { id: fresh.id }, data: written });
     if (Object.entries(written).some(([k, v]) => cur[k as keyof typeof written] !== v)) {
+      await tx.app.update({ where: { id: fresh.id }, data: written });
       await recordInstructedManagerAct(tx, fresh.id, actor, rawDeliveryPatch === undefined ? 'app.ticker-settings' : 'app.delivery-settings');
     }
     return { ticker: await settingsOut(tx, fresh.id), delivery: await loadDeliverySettings(tx, fresh.id) };
@@ -823,88 +821,50 @@ async function settingsOut(db: Pick<Context['db'], 'app' | 'worker'>, appId: str
 
 type WakeSettingsRow = {
   mentions: string; pausedUntil: Date | null;
-  isolatedUntil?: Date | null; isolatedAt?: Date | null; isolatedByUserId?: string | null;
 };
 function wakeSettingsOut(workerId: string, row: WakeSettingsRow | null) {
   return {
     workerId, mentions: row?.mentions ?? 'IMMEDIATE', pausedUntil: row?.pausedUntil ?? null,
-    // Inert until S7b: a stored isolation projects as none, matching its (absent) effect.
-    isolatedUntil: s7Available() ? row?.isolatedUntil ?? null : null, isolatedAt: s7Available() ? row?.isolatedAt ?? null : null,
-    isolatedByUserId: s7Available() ? row?.isolatedByUserId ?? null : null,
+    isolatedUntil: null, isolatedAt: null,
   };
 }
 
 // ── Isolation (S7, #2023, R85) ─────────────────────────────────────────────
 
-/** D-2026-10-16-005: the default; the maximum is an engineering bound (tunable), recorded in the S7 attach. */
-export const ISOLATION_DEFAULT_MS = 2 * 3_600_000;
-export const ISOLATION_MAX_MS = 7 * 24 * 3_600_000;
 const isolationForbidden = () => taskError(
   'WORKER_ISOLATION_FORBIDDEN',
   'Only a person managing this App, or the person holding this worker, acting as themselves, can isolate it or lift its isolation.',
 );
 
-/** #2660 / cor:agt:080:29: the same person-manager-or-holder predicate for the writer and its capability. S7 availability is separate. */
-async function canManageWorkerIsolation(
+/** #3606 / cor:agt:080:29: retain the original clear audience only; capability is now constant false. */
+async function mayClearRetiredIsolation(
   ctx: Context, app: TaskApp, actor: TaskActor | null,
   worker: { heldByUserId: string | null; retiredAt: Date | null },
 ): Promise<boolean> {
   if (!actor || ctx.impersonation || ctx.sessionBindingRefused || app.uninstalledAt || worker.retiredAt) return false;
   if (actor.kind === 'user') return await actorManagesApp(ctx, app, actor, actor.instructed) || worker.heldByUserId === actor.userId;
   // #3321 (ruling 0118, cor:agt:080:29): a worker only on an instruction, on either right of its holder. A read carries
-  // none, so `canManageIsolation` stays false for a worker session. No other door's holder arm takes an instruction.
+  // none. This holder arm remains only for the deprecated clear door.
   if (!actor.instructed) return false;
   if (await actorManagesApp(ctx, app, actor, actor.instructed)) return true;
   return admitOnHolderRight(ctx, app, actor, actor.instructed, () => worker.heldByUserId !== null && worker.heldByUserId === ctx.userId);
 }
 
-/**
- * The ONE isolation writer (GraphQL and MCP both reach it). Its audience is a human who manages the App or holds the
- * worker, as themselves, or their held worker on a clear instruction, recorded (ruling 0118; MCP passes none). Any other
- * worker session, an App key and an impersonation are refused, and the row is unchanged. Never reads or writes
- * paused_until: the worker's own pause is untouched (R85).
- */
-async function writeWorkerIsolation(
-  ctx: Context, workerRef: string, op: { kind: 'set'; until?: Date | string | null } | { kind: 'clear' }, instruction?: ActInstruction | null,
-) {
+/** #3606: deprecated compatibility doors; preserve main's distinct set and clear admission order. */
+async function deprecatedIsolationDoor(ctx: Context, workerRef: string, clear: boolean, instruction?: ActInstruction | null) {
   const target = await workerForRead(ctx, workerRef);
   const app = await appOf(ctx, target.appId);
   const resolved = await resolveTaskActor(ctx, app);
   if (!resolved || (resolved.kind !== 'user' && instruction == null)) throw isolationForbidden();
   const actor = withInstruction(resolved, instruction);
-  if (op.kind === 'set' && !s7Available()) {
-    throw taskError('WORKER_ISOLATION_UNAVAILABLE', 'Isolating a worker is not available yet (S7b). Nothing was changed.');
-  }
-  const until = op.kind === 'set' && op.until != null ? parseDate(op.until, 'until') : null;
+  // Set never reached the full audience check, or parsed until, on inert main.
+  if (!clear) throw taskError('WORKER_ISOLATION_UNAVAILABLE', 'Isolating a worker is not available yet (S7b). Nothing was changed.');
   const row = await writeInApp(ctx, app, actor, () => workerNotFound(workerRef), async (tx, txCtx, fresh) => {
     const w = await lockWorker(tx, target.id);
     if (!w || w.appId !== fresh.id || w.retiredAt) throw workerNotFound(workerRef);
-    if (!(await canManageWorkerIsolation(txCtx, fresh, actor, w))) throw isolationForbidden();
-    const now = new Date();
-    const stamp = updatedStamp(txCtx);
-    if (op.kind === 'clear') {
-      // #2755: an isolation still running ends now, and that moment is kept (see exemptEndedAt).
-      // An isolation that already expired keeps its own expiry as the end (the latest anchor wins).
-      const prior = await tx.workerWakeSettings.findUnique({ where: { workerId: w.id }, select: { isolatedUntil: true, exemptEndedAt: true } });
-      const ended = prior?.isolatedUntil ? (prior.isolatedUntil.getTime() > now.getTime() ? now : prior.isolatedUntil) : null;
-      const kept = ended && (!prior?.exemptEndedAt || prior.exemptEndedAt.getTime() < ended.getTime()) ? ended : null;
-      if (prior?.isolatedUntil) await recordInstructedManagerAct(tx, fresh.id, actor, 'worker.isolation-clear', { workerId: w.id });
-      return tx.workerWakeSettings.upsert({
-        where: { workerId: w.id },
-        create: { workerId: w.id },
-        update: { isolatedUntil: null, isolatedAt: null, isolatedByUserId: null, ...(kept ? { exemptEndedAt: kept } : {}) },
-      });
-    }
-    const end = until ?? new Date(now.getTime() + ISOLATION_DEFAULT_MS);
-    if (end.getTime() <= now.getTime()) throw badInput('until must be in the future.');
-    if (end.getTime() > now.getTime() + ISOLATION_MAX_MS) throw badInput(`until is at most ${ISOLATION_MAX_MS / 86_400_000} days ahead.`);
-    const set = { isolatedUntil: end, isolatedAt: now, isolatedByUserId: actor.userId };
-    await recordInstructedManagerAct(tx, fresh.id, actor, 'worker.isolate', { workerId: w.id });
-    return tx.workerWakeSettings.upsert({
-      where: { workerId: w.id },
-      create: { workerId: w.id, ...set, updatedBy: stamp.updatedBy, updatedByWorkerId: stamp.updatedByWorkerId, updatedByAgentId: stamp.updatedByAgentId },
-      update: { ...set, updatedAt: now, updatedBy: stamp.updatedBy, updatedByWorkerId: stamp.updatedByWorkerId, updatedByAgentId: stamp.updatedByAgentId },
-    });
+    if (!(await mayClearRetiredIsolation(txCtx, fresh, actor, w))) throw isolationForbidden();
+    // No row creation, exemption change, or manager act. Legacy stored values stay inert and byte-identical.
+    return tx.workerWakeSettings.findUnique({ where: { workerId: w.id } });
   });
   return wakeSettingsOut(target.id, row);
 }
@@ -1184,9 +1144,9 @@ const wakeAndGrantMutations = {
   },
 
   isolateWorker: (_: unknown, a: { workerRef: string; until?: Date | string | null; instruction?: ActInstruction | null }, ctx: Context) =>
-    writeWorkerIsolation(ctx, a.workerRef, { kind: 'set', until: a.until }, a.instruction),
+    deprecatedIsolationDoor(ctx, a.workerRef, false, a.instruction),
   clearWorkerIsolation: (_: unknown, a: { workerRef: string; instruction?: ActInstruction | null }, ctx: Context) =>
-    writeWorkerIsolation(ctx, a.workerRef, { kind: 'clear' }, a.instruction),
+    deprecatedIsolationDoor(ctx, a.workerRef, true, a.instruction),
 
   // ── The may-subscribe-workers grant (cor:agt:080:24) ──────────────────────
 
@@ -1341,12 +1301,7 @@ export const tickerFieldResolvers = {
   },
 
   WorkerWakeSettings: {
-    canManageIsolation: async (w: { workerId: string }, _: unknown, ctx: Context) => {
-      // Keep the existing read refusal before computing a permission; never reveal an unreadable worker.
-      const worker = await workerForRead(ctx, w.workerId);
-      const app = await appOf(ctx, worker.appId);
-      return canManageWorkerIsolation(ctx, app, await resolveTaskActor(ctx, app), worker);
-    },
+    canManageIsolation: () => false,
     worker: (w: { workerId: string }, _: unknown, ctx: Context) => ctx.db.worker.findUnique({ where: { id: w.workerId } }),
     subscriptions: (w: { workerId: string }, _: unknown, ctx: Context) =>
       ctx.db.tickerSubscription.findMany({
@@ -1361,9 +1316,10 @@ export const tickerFieldResolvers = {
       });
       return fastest._min.cadenceSeconds ?? null;
     },
-    isolated: (w: { isolatedUntil?: Date | null }) => s7Available() && !!w.isolatedUntil && w.isolatedUntil.getTime() > Date.now(),
-    isolatedByHandle: async (w: { isolatedByUserId?: string | null }, _: unknown, ctx: Context) =>
-      w.isolatedByUserId ? (await ctx.db.user.findUnique({ where: { id: w.isolatedByUserId }, select: { handle: true } }))?.handle ?? null : null,
+    isolated: () => false,
+    isolatedUntil: () => null,
+    isolatedAt: () => null,
+    isolatedByHandle: () => null,
     dormant: async (w: { workerId: string }, _: unknown, ctx: Context) => {
       const worker = await ctx.db.worker.findUnique({ where: { id: w.workerId }, select: { app: { select: { sessionDormancyDays: true } } } });
       if (!worker) return false;

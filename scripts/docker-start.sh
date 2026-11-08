@@ -44,6 +44,8 @@ run_setup db.runtime_role.migrate_failed "$migration_url" pnpm prisma migrate de
 # Default ACLs can grant this table when Prisma first creates it. Revoke only
 # after migrate, before verification, using the owner connection (no psql).
 run_setup db.runtime_role.revoke_failed "$migration_url" pnpm tsx scripts/db/revoke-runtime-migrations.ts || exit 1
+# #3668: the platform's actions are written ONLY here, as the owner, never by the running server. Idempotent; the list is empty in S1a.
+run_setup db.actions_upsert_failed "$migration_url" pnpm tsx scripts/db/upsert-actions.ts || exit 1
 # R3: verifier failure is deliberately warn-only during phase 1.
 if ! run_setup db.runtime_role.verify_failed "$migration_url" pnpm tsx scripts/db/verify-runtime-role.ts; then
   echo 'db.runtime_role.verify_warning: phase-1 warning; continuing' >&2

@@ -111,7 +111,7 @@ describe('#2044 install memory — lazy creation', () => {
     expect(updated.content).toBe('second');
     await expect(M.updateNode({}, { input: { install: f.install, loc: 'prompts:lane', content: 'nope' } }, ctxOf(f.member.id))).rejects.toThrow(/Forbidden/);
     await expect(M.updateNode({}, { input: { install: f.install, loc: 'prompts:lane', content: 'nope' } }, ctxOf(f.stranger.id)))
-      .rejects.toMatchObject({ extensions: { code: 'INSTALL_MEMORY_NOT_FOUND' } });
+      .rejects.toMatchObject({ code: 'APP_NOT_FOUND' });
   });
 });
 

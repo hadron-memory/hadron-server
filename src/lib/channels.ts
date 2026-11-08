@@ -72,7 +72,7 @@ export interface ChannelRow {
 }
 
 /** Preserve the public typed-error contract across every crypto step. */
-function translateSessionExpired<T>(memoryId: string, fn: () => T): T {
+export function translateSessionExpired<T>(memoryId: string, fn: () => T): T {
   try {
     return fn();
   } catch (e) {

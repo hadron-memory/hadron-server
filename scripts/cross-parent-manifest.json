@@ -64,6 +64,8 @@
     "ResumeClaimReceipt": "envelope",
     "NodeContentValidationReport": "envelope",
     "NodeContentValidationStatus": "value",
+    "NodeValidationTaskEntry": "value",
+    "NodeValidationTaskSet": "value",
     "AiModelPriceList": "envelope",
     "CreditLedgerEntryList": "envelope",
     "CreditBalance": "value",
@@ -120,6 +122,8 @@
     "MemoryConfigApplyResult": "envelope",
     "NodeRoleRulePayload": "envelope",
     "AgentExtensionPage": "envelope",
+    "LocSegmentsPage": "envelope",
+    "LocSegment": "value",
     "AgentOfferSubject": "value",
     "AgentOfferReason": "value",
     "AgentOfferReadiness": "value",
@@ -141,6 +145,7 @@
     "TeamWorkItemsPage": "envelope",
     "WorkersPage": "envelope",
     "CastWorkerPreview": "envelope",
+    "DeleteWorkerPreview": "envelope",
     "CastPreviewTicker": "value",
     "TeamRolesPage": "envelope",
     "DeleteTeamRolePayload": "envelope",
@@ -2009,7 +2014,7 @@
     "Worker.app": {
       "class": "self-gated",
       "resolver": "src/api/graphql/schema/resolvers.worker.ts::app",
-      "gate": "requireOwnerOrOrgRole",
+      "gate": "requireAppRead",
       "target": "App"
     },
     "Worker.continuity": {

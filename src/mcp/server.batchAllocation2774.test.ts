@@ -150,7 +150,9 @@ it.each((['forward', 'reverse'] as const).flatMap(order => ([['abstract', 'pk'],
   // edge loc then id (lexical, so dense-edge:0:10 precedes dense-edge:0:2), where the #2774 values
   // (abstract 8a33ebc7…, all ee49b72e…) hashed the pre-#2967 insertion order. Sorting each run of
   // edge lines in the new output reproduces those old hashes exactly: only edge-line order moved.
-  const baseline = { abstract: 'c74221db56f38c31130aff0fd5814fab5ec7f2febe1c612293a1d1ab1abf9279', all: '2ba30066fe96fe62d9f824c41e7b799fc00e0cfa327abf1247cd1e279102e06e' };
+  // #3659: every node now prints a Validation tasks line, where the #2967 values were c74221db… and
+  // 2ba30066…. Removing those lines from the new output reproduces those hashes exactly.
+  const baseline = { abstract: '2687cd290c2cb3b35c0422ba885adb12ad3c8ce7753b27d90b194070fab01049', all: 'd2a649b69b145f31087e165618def2179ef76f3dd6eab9078453fcec51ab30a5' };
   expect(result.hash).toBe(baseline[scope]);
   expect.soft(result.loads.reduce((n, l) => n + l.endpointBodyBytes, 0)).toBe(0);
   if (scope === 'abstract') {

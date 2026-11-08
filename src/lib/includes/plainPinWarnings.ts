@@ -9,12 +9,27 @@ import { nodeRevisionsScope } from '../../api/graphql/schema/resolvers.query.nod
 import { includeUrnTarget } from './includeUrnTarget.js';
 import { includeTagKey } from './writeIncludes.js';
 import { IncludeSyntaxError, parseIncludeTags } from './parseIncludeTags.js';
+import { ResolutionBudget, utf8Bytes } from './resolutionBudget.js';
 
-export interface IncludePinWarning { code: 'include.pin.unkept'; text: string }
+export interface IncludePinWarning { code: 'include.pin.unkept' | 'content.resolution.oversize'; text: string }
 const WARNING: IncludePinWarning = {
   code: 'include.pin.unkept',
   text: 'A pinned include revision carries no recorded approval or signature and may be automatically pruned, breaking the include.',
 };
+const OVERSIZE: IncludePinWarning = {
+  code: 'content.resolution.oversize',
+  text: 'Saved. This content uses template syntax and is larger than a resolved read allows, so reading it resolved may be refused; read it with raw: true to get the stored text.',
+};
+
+/**
+ * hadron-internal#40 (ruling 0197 (3)): a write whose stored text alone is over the resolved-read byte limit WARNS and
+ * never refuses. It judges the written text only (no include is followed, nothing is resolved or read), so it needs no
+ * access and cannot fail. A body with no template syntax is served as stored and gets no warning.
+ */
+export function oversizeContentWarnings(content: string | null | undefined): IncludePinWarning[] {
+  if (!content?.includes('{{')) return [];
+  return utf8Bytes(content) > new ResolutionBudget().limits.maxBytes ? [{ ...OVERSIZE }] : [];
+}
 
 export async function plainPinWarnings(
   ctx: Context, source: { memoryId: string }, content: string | null | undefined, storedContent?: string | null,
@@ -79,7 +94,10 @@ export async function plainPinWarnings(
 }
 
 export function renderIncludePinWarnings(warnings: readonly IncludePinWarning[] | null | undefined): string {
-  return warnings?.length ? `\n\nWarning [${WARNING.code}]: ${WARNING.text}` : '';
+  // Fixed text per code, once each, in the order given; never a payload from the warning object.
+  const fixed = new Map([[WARNING.code, WARNING.text], [OVERSIZE.code, OVERSIZE.text]]);
+  const codes = [...new Set((warnings ?? []).map((w) => w.code))];
+  return codes.map((code) => `\n\nWarning [${code}]: ${fixed.get(code)}`).join('');
 }
 
 // Response metadata is held outside the Node object and keyed by the exact
@@ -123,12 +141,14 @@ export function includePinWarningsFor(ctx: Context, result: object): Promise<Inc
   return null;
 }
 /** Advice is post-commit only: any lookup fault means unavailable advice,
- * never a failed/replayed committed write. No error prose leaves this seam. */
+ * never a failed/replayed committed write. No error prose leaves this seam.
+ * #40: the oversize warning needs no lookup, so a pin-lookup fault does not drop it. */
 export async function safePlainPinWarnings(
   ctx: Context, source: { memoryId: string }, content: string | null | undefined, storedContent?: string | null,
 ): Promise<IncludePinWarning[] | null> {
-  try { return await plainPinWarnings(ctx, source, content, storedContent); }
-  catch { return null; }
+  const oversize = oversizeContentWarnings(content);
+  try { return [...oversize, ...await plainPinWarnings(ctx, source, content, storedContent)]; }
+  catch { return oversize.length ? oversize : null; }
 }
 
 /** Preserve response-only advice across the writer's read-audience projection. */

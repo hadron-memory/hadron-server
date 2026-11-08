@@ -1,7 +1,8 @@
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
-import { rateWindowWaitMs, untilBeforeRateBoundary, withinOneRateWindow } from '../../test/rateWindow.js';
+import { RATE_WINDOW_MARGIN_MS, RATE_WINDOW_MAX_SLEEP_MS, rateBoundaryLeadWaitMs, rateWindowWaitMs, untilBeforeRateBoundary, withinOneRateWindow } from '../../test/rateWindow.js';
+import { DEFAULTS } from './config.js';
 import { admitRate, assertRateReadiness } from './index.js';
 
 const ring = { current:'old',keys:{old:'1'.repeat(64)} };
@@ -20,6 +21,40 @@ describe('#3074 withinOneRateWindow', () => {
     expect(rateWindowWaitMs(55_000, 900)).toBe(0);
     expect(rateWindowWaitMs(900_000 - 1_000, 900)).toBe(1_030);
     expect(rateWindowWaitMs(3_600_000 - 1_000, 3600)).toBe(1_030);
+  });
+
+  it('#3480 never sleeps longer than RATE_WINDOW_MAX_SLEEP_MS, for every class window length', () => {
+    const windows = [...new Set(Object.values(DEFAULTS).map(d => d.windowSeconds))];
+    expect(windows).toEqual(expect.arrayContaining([60, 900, 3600]));
+    for (const w of windows) {
+      const windowMs = w * 1000;
+      // Every millisecond of the sleep zone, plus points across the rest of the window.
+      for (let r = 1; r <= RATE_WINDOW_MARGIN_MS + 1; r++) expect(rateWindowWaitMs(windowMs - r, w)).toBeLessThanOrEqual(RATE_WINDOW_MAX_SLEEP_MS);
+      for (let t = 0; t < windowMs; t += 997) expect(rateWindowWaitMs(t, w)).toBeLessThanOrEqual(RATE_WINDOW_MAX_SLEEP_MS);
+    }
+    expect(rateWindowWaitMs(60_000 - 1, 60)).toBe(RATE_WINDOW_MAX_SLEEP_MS - (RATE_WINDOW_MARGIN_MS - 1));
+    expect(rateWindowWaitMs(60_000 - (RATE_WINDOW_MARGIN_MS - 1), 60)).toBe(RATE_WINDOW_MAX_SLEEP_MS - 1);
+  });
+
+  it('#3099 rateBoundaryLeadWaitMs lands msBefore before the NEXT boundary when less than msBefore remains', () => {
+    // Plenty left: unchanged, sleep down to the lead.
+    expect(rateBoundaryLeadWaitMs(0, 60, 1_000)).toBe(59_000);
+    expect(rateBoundaryLeadWaitMs(58_000, 60, 1_000)).toBe(1_000);
+    // Exactly the lead left: already there.
+    expect(rateBoundaryLeadWaitMs(59_000, 60, 1_000)).toBe(0);
+    // Less than the lead left (the late start): target the FOLLOWING boundary.
+    expect(rateBoundaryLeadWaitMs(59_001, 60, 1_000)).toBe(59_999);
+    expect(rateBoundaryLeadWaitMs(59_999, 60, 1_000)).toBe(59_001);
+    // Every late start waits into the next window and wakes with exactly the lead left.
+    for (const w of [60, 900, 3600]) {
+      const windowMs = w * 1000;
+      for (let r = 1; r < 1_000; r++) {
+        const now = windowMs * 7 - r;
+        const wait = rateBoundaryLeadWaitMs(now, w, 1_000);
+        expect(windowMs - ((now + wait) % windowMs)).toBe(1_000);
+        expect(wait).toBeGreaterThan(0);
+      }
+    }
   });
 
   it('a sequence forced across the boundary escapes the limit; the helper keeps it in one window', async () => {

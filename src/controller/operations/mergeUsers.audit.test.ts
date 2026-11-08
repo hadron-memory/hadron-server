@@ -47,6 +47,8 @@ const EXEMPT_AUDIT_COLUMNS = new Set([
   // record): who asked, who was named and who signed are sealed. A merged-away
   // named signer or requester fails closed (cannot sign or withdraw), the
   // automation run-as/signer rule above.
+  // #3668 — a grant's events are append-only history: who created, activated, revoked or used one is sealed.
+  'grant_events.actor_user_id',
   'signing_requests.requester_user_id',
   'signing_requests.named_signer_id',
   'node_signatures.signer_id',
@@ -85,6 +87,7 @@ describe('mergeUsers audit actor registry', () => {
           OR (table_name = 'app_automation_read_grant_events' AND column_name = 'actor_user_id')
           OR (table_name = 'app_automation_team_snapshot_grants' AND column_name = 'granted_by')
           OR (table_name = 'app_automation_team_snapshot_grant_events' AND column_name = 'actor_user_id')
+          OR (table_name = 'grant_events' AND column_name = 'actor_user_id')
           OR (table_name = 'signing_requests' AND column_name IN ('requester_user_id', 'named_signer_id'))
           OR (table_name = 'node_signatures' AND column_name = 'signer_id'))
     `;

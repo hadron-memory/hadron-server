@@ -69,6 +69,7 @@ import {
   installAgentIntoAppCore,
   uninstallAgentFromAppCore,
   requireReadableAgent,
+  requirePersonalAppAgentInstall,
 } from './resolvers.helpers.js';
 import { findOrCreateAppClassMemory } from './chat-scope.js';
 // Spec 049 Phase 4 — the App's default Channel, created with the App.
@@ -521,6 +522,7 @@ export const appMutations = {
       // #1573: the personal path licenses the install with the owner's
       // subscription, written inside the anchored App-creation transaction.
       let personalSubscription = false;
+      let personalAgentOrgId: string | null = null;
       let txAutoGrantIds: string[] = [];
       if (resolvedOrgId) {
         // Conceal an unlicensed foreign parent before resolving caller-supplied
@@ -563,23 +565,16 @@ export const appMutations = {
       } else {
         // spec 047 personal path: no org ⇒ no AgentOrgGrant. The install is
         // licensed by the OWNER's AgentSubscription instead. A user may install
-        // ONLY a PUBLIC (marketplace) agent or their OWN user-owned agent into a
-        // personal App — never another tenant's private agent (which would fold
-        // that tenant's memories into this App). Mirror installAgentIntoAppCore's
-        // accessibility gate for the org-less case.
+        // a PUBLIC Agent, their own Agent, or an ORGANIZATION-visible Agent
+        // whose organization they currently belong to (#1148). Both install
+        // doors use the same canonical read gate and eligibility predicate.
         const installAgent = await ctx.db.agent.findUniqueOrThrow({
           where: { id: resolvedAgentId },
           select: { visibility: true, ownerUserId: true, organizationId: true, deletedAt: true },
         });
+        personalAgentOrgId = installAgent.organizationId;
         const isOwnAgent = installAgent.ownerUserId !== null && installAgent.ownerUserId === ctx.userId;
-        if (installAgent.visibility !== 'PUBLIC' && !isOwnAgent) {
-          // #1946: ORGANIZATION_MISMATCH (and its agentId) only for an Agent
-          // the caller can read; one they can't answers as an absent one.
-          await requireReadableAgent(ctx, installAgent, agentRef);
-          throw new GraphQLError('A personal App may only install a PUBLIC agent or your own personal agent.', {
-            extensions: { code: 'ORGANIZATION_MISMATCH', agentId: resolvedAgentId },
-          });
-        }
+        await requirePersonalAppAgentInstall(ctx,installAgent,agentRef,ctx.userId ?? null);
         // spec 047: cascade-install provisions each dependency as its own
         // ORG-scoped App — unsupported for a personal App in v1. Reject BEFORE
         // any write (subscription / App create) so a rejected call never leaves
@@ -653,12 +648,13 @@ export const appMutations = {
       // exclusively: the owning org (or the owning user, added by the helper as
       // the actor) and every Agent being licensed. After the anchor wait the
       // gate re-runs on txCtx: org ADMIN and the #1584 license plan, or the
-      // personal PUBLIC-or-own rule.
+      // personal owner eligibility rule, including current org membership.
       const licensedAgentIds = [resolvedAgentId, ...selectedImports.map((imp) => imp.importedAgentId)];
       const createdApp = await withAuthorizedTx(
         ctx,
         [
           ...(resolvedOrgId ? [{ kind: 'org' as const, id: resolvedOrgId }] : []),
+          ...(personalAgentOrgId ? [{kind: 'org' as const,id:personalAgentOrgId}] : []),
           ...[...new Set(licensedAgentIds)].map((id) => ({ kind: 'agent' as const, id })),
         ],
         async (txCtx) => {
@@ -676,14 +672,9 @@ export const appMutations = {
           } else {
             const current = await txCtx.db.agent.findUnique({
               where: { id: resolvedAgentId },
-              select: { visibility: true, ownerUserId: true, deletedAt: true },
+              select: { visibility: true, ownerUserId: true, organizationId:true, deletedAt: true },
             });
-            const own = current?.ownerUserId != null && current.ownerUserId === ctx.userId;
-            if (!current || current.deletedAt || (current.visibility !== 'PUBLIC' && !own)) {
-              throw new GraphQLError('A personal App may only install a PUBLIC agent or your own personal agent.', {
-                extensions: { code: 'ORGANIZATION_MISMATCH', agentId: resolvedAgentId },
-              });
-            }
+            await requirePersonalAppAgentInstall(txCtx,current,agentRef,ctx.userId ?? null);
           }
         },
         async (tx) => {

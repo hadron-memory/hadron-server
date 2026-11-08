@@ -47,6 +47,14 @@ export const DIRECT_USER_REFERENCES: ReadonlyArray<readonly [string, string] | r
   // #1332 (cor:dmo:160:01): a PERSON reporter is the user, never the key, so the survivor's retry
   // replays the report. Only the user id moves; run, worker, agent and App key ids stay.
   ['node_content_validation_reports', 'reporter_user_id'],
+  // #3668 (S1a): the CURRENT person links of a grant row follow the survivor: holder, issuer, requester, and the
+  // revoker and verifier of a row that ended or was signed. The row guard (prisma/grant-invariants.sql) allows exactly this move,
+  // and only along the user_merges row this merge records before these rewrites. grant_events' actor ids are
+  // deliberately NOT here: append-only history, sealed like agent_team_events above. A merge never moves a row's App.
+  ['grants', 'user_id'],
+  ['grants', 'issuer_user_id'],
+  ['grants', 'requested_by_user_id'],
+  ['grants', 'verified_by'],
 ];
 
 /**
@@ -129,6 +137,8 @@ export const AUDIT_USER_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   ticker_subscriptions: ['created_by', 'ended_by', 'via_grant_person_id', 'ended_via_grant_person_id'],
   worker_wake_settings: ['updated_by'],
   app_grants: ['granted_by', 'revoked_by'],
+  // #3668 (S1a): who ended a grant follows the survivor (the row guard allows it along the recorded merge).
+  grants: ['revoked_by'],
   app_key_scopes: ['granted_by_user_id', 'revoked_by_user_id'],
   // #1706 — who last changed an App's stall windows.
   agent_task_stall_schedule: ['updated_by'],

@@ -3,6 +3,7 @@ import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createHmac } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { assertFixtureWiring } from '../test/fixtureWiring.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { FixtureLifetime } from '../test/fixtureLifetime.js';
@@ -159,11 +160,5 @@ it('keeps every rate parity case registered and joins cleanup before reset', () 
   // A source wiring guard complements the executable helper/deadline probes:
   // unwiring the integration file must not silently retain green unit tests.
   const source = readFileSync(new URL('./server.rateLimit1793.test.ts', import.meta.url), 'utf8');
-  expect(source.match(/^fixtureIt\(/gm)).toHaveLength(8);
-  expect(source).not.toMatch(/^it\(/m);
-  expect(source).toMatch(/const fixtureIt[^\n]*lifetime\.run\(body\)/);
-  const setup = source.slice(source.indexOf('beforeEach('), source.indexOf('afterEach('));
-  expect(setup.indexOf('await lifetime.drain(closeResources)')).toBeGreaterThanOrEqual(0);
-  expect(setup.indexOf('await lifetime.drain(closeResources)')).toBeLessThan(setup.indexOf('await cleanDb(db)'));
-  expect(source).toContain('afterEach(()=>lifetime.drain(closeResources))');
+  assertFixtureWiring(source);
 });
