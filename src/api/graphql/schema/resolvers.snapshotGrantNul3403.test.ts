@@ -2,6 +2,7 @@
 import { afterAll, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { Client as PgClient } from 'pg';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -103,6 +104,151 @@ for (const surface of ['graphql', 'mcp'] as const) for (const worker of [false, 
     const before = await snapshot();
     expect((await invoke(surface, worker, { triggerKind: 'MANUAL', triggerId: 'normal' })).error?.code).toBe('BAD_USER_INPUT');
     expect((await invoke(surface, worker, { triggerId: 'missing-kind' })).error?.code).toBe('BAD_USER_INPUT');
+    expect(await snapshot()).toEqual(before);
+  });
+}
+
+
+/** #3565 A: preservation of built LIST validation priority, not a general sanitizer contract. */
+for (const surface of ['graphql', 'mcp'] as const) for (const worker of [false, true]) {
+  const label = `${surface} ${worker ? 'instructed' : 'person'}`;
+  it(`#3565 A ${label}: NUL-only/leading/trailing and kind precedence preserve the fixed errors and zero writes`, async () => {
+    const before = await snapshot();
+    for (const triggerId of ['\u0000', '\u0000lead', 'trail\u0000']) {
+      for (const triggerKind of ['SCHEDULE', 'WEBHOOK']) {
+        expect((await invoke(surface, worker, { triggerKind, triggerId })).error).toEqual({
+          code: 'BAD_USER_INPUT', message: 'triggerId must not contain U+0000.',
+        });
+      }
+      for (const triggerKind of (surface === 'graphql' ? [undefined, null] : [undefined])) {
+        expect((await invoke(surface, worker, { triggerKind, triggerId })).error).toEqual({
+          code: 'BAD_USER_INPUT', message: 'triggerKind is required with triggerId.',
+        });
+      }
+      expect((await invoke(surface, worker, { triggerKind: 'MANUAL', triggerId })).error).toEqual({
+        code: 'BAD_USER_INPUT', message: 'triggerKind must be SCHEDULE or WEBHOOK.',
+      });
+    }
+    expect(await snapshot()).toEqual(before);
+  });
+  it(`#3565 A ${label}: an unauthorized caller gets the ordinary FORBIDDEN before any malformed filter`, async () => {
+    if (worker) await db.appMember.deleteMany({ where: { appId: f.app.id, userId: f.holder.id } });
+    const userId = worker ? f.holder.id : f.stranger.id;
+    const before = await snapshot();
+    const ordinary = await invoke(surface, worker, { triggerKind: 'SCHEDULE', triggerId: f.schedule.id }, userId);
+    expect(ordinary.error?.code).toBe('FORBIDDEN');
+    for (const triggerId of ['\u0000', '\u0000lead', 'trail\u0000']) {
+      for (const triggerKind of (surface === 'graphql' ? ['SCHEDULE', 'WEBHOOK', 'MANUAL', undefined, null] : ['SCHEDULE', 'WEBHOOK', 'MANUAL', undefined])) {
+        expect(await invoke(surface, worker, { triggerKind, triggerId }, userId)).toEqual(ordinary);
+      }
+    }
+    expect(await snapshot()).toEqual(before);
+  });
+}
+
+/**
+ * #3565 B: a real uncommitted session end, not an end-session endpoint protocol.
+ * Only the session row is held by the blocker. The request's delegated SQL/PID is observed, never altered.
+ */
+async function finalSessionWait(endSession: boolean) {
+  const blocker = new PgClient({ connectionString: process.env.DATABASE_URL, connectionTimeoutMillis: 5000, query_timeout: 5000 });
+  const observer = new PgClient({ connectionString: process.env.DATABASE_URL, connectionTimeoutMillis: 5000, query_timeout: 5000 });
+  let blockerConnected = false, observerConnected = false, open = false, failed = false;
+  let request: Promise<{ code: unknown; message?: string }> | undefined;
+  let pid = 0, enteredSessionShare = false, settled = false, sawWait = false;
+  const before = await snapshot();
+  try {
+    await blocker.connect(); blockerConnected = true;
+    await observer.connect(); observerConnected = true;
+    const blockerPid = Number((await blocker.query('SELECT pg_backend_pid() AS pid')).rows[0].pid);
+    expect(Number.isSafeInteger(blockerPid) && blockerPid > 0).toBe(true);
+    await blocker.query('BEGIN'); open = true;
+    await blocker.query('SET LOCAL lock_timeout = \'3s\'');
+    await blocker.query('SELECT id FROM sessions WHERE id = $1 FOR UPDATE', [f.session.id]);
+    if (endSession) await blocker.query('UPDATE sessions SET ended_at = clock_timestamp() WHERE id = $1', [f.session.id]);
+    const observedDb = new Proxy(db, { get(target, key) {
+      if (key !== '$transaction') { const v = Reflect.get(target, key); return typeof v === 'function' ? v.bind(target) : v; }
+      return (callback: (tx: unknown) => Promise<unknown>, options: unknown) => target.$transaction(async tx => {
+        pid = Number((await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`)[0].pid);
+        const observedTx = new Proxy(tx, { get(t, prop) {
+          const v = Reflect.get(t, prop);
+          if (prop !== '$queryRaw') return typeof v === 'function' ? v.bind(t) : v;
+          return (...args: unknown[]) => {
+            const text = Array.isArray(args[0]) ? args[0].join('?') : '';
+            if (/SELECT id FROM sessions WHERE id = \? FOR SHARE/.test(text)) enteredSessionShare = true;
+            return (v as (...a: unknown[]) => unknown).apply(t, args);
+          };
+        } });
+        return callback(observedTx);
+      }, options as never);
+    } });
+    const query = resolvers.Query as any;
+    const pending: Promise<{ code: unknown; message?: string }> = query.automationTeamSnapshotGrants(null, {
+      appRef: f.app.id, triggerKind: 'SCHEDULE', triggerId: nul, instruction,
+    }, { db: observedDb, userId: f.holder.id, roles: ['READER'], sessionId: f.session.id })
+      .then(() => ({ code: 'SUCCESS' }), (error: any) => ({ code: error.extensions?.code, message: error.message }))
+      .finally(() => { settled = true; });
+    request = pending;
+    const deadline = Date.now() + 5000;
+    while (!settled && Date.now() < deadline) {
+      if (pid > 0 && enteredSessionShare) {
+        const rows = await observer.query(`SELECT pid FROM pg_stat_activity
+          WHERE pid = $1 AND state = 'active' AND wait_event_type = 'Lock'
+            AND $2::int = ANY(pg_blocking_pids(pid))
+            AND query ~ 'SELECT id FROM sessions WHERE id = .* FOR SHARE'`, [pid, blockerPid]);
+        if (rows.rowCount === 1) { sawWait = true; break; }
+      }
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    await blocker.query(endSession ? 'COMMIT' : 'ROLLBACK'); open = false;
+    const result = await pending;
+    // Outcome first: a relocated validator is assertion-red even if it never reached the waiter.
+    expect(result.code).toBe(endSession ? 'FORBIDDEN' : 'BAD_USER_INPUT');
+    if (!endSession) expect(result.message).toBe('triggerId must not contain U+0000.');
+    expect(Number.isSafeInteger(pid) && pid > 0).toBe(true);
+    expect(enteredSessionShare).toBe(true);
+    expect(sawWait, 'the exact request backend must wait on the owned session blocker at final admission').toBe(true);
+    expect(await snapshot()).toEqual(before);
+  } catch (error) {
+    failed = true;
+    throw error;
+  } finally {
+    try { if (open) await blocker.query('ROLLBACK'); }
+    finally {
+      try { if (request) await request; }
+      finally {
+        const closed = await Promise.allSettled([
+          ...(observerConnected ? [observer.end()] : []),
+          ...(blockerConnected ? [blocker.end()] : []),
+        ]);
+        if (!failed) expect(closed.every(result => result.status === 'fulfilled')).toBe(true);
+      }
+    }
+  }
+}
+for (const end of [true, false]) {
+  it(`#3565 B final-session wait: ${end ? 'committed session end wins over NUL validation' : 'release without ending reaches NUL validation'}`, async () => {
+    await finalSessionWait(end);
+    if (end) {
+      expect((await invoke('graphql', true, { triggerKind: 'SCHEDULE', triggerId: f.schedule.id })).error?.code).toBe('FORBIDDEN');
+    } else {
+      const count = await db.agentTeamEvent.count();
+      expect((await invoke('graphql', true, { triggerKind: 'SCHEDULE', triggerId: f.schedule.id })).data?.total).toBe(1);
+      expect(await db.agentTeamEvent.count()).toBe(count + 1);
+    }
+  }, 45000);
+}
+
+
+// #3565 bounded adapter distinction accepted by Xavier: this is schema rejection, NOT handler/admission priority.
+for (const worker of [false, true]) for (const unauthorized of [false, true]) {
+  it(`#3565 A MCP explicit null kind is rejected by the registered schema (worker=${worker}, unauthorized=${unauthorized})`, async () => {
+    if (unauthorized && worker) await db.appMember.deleteMany({ where: { appId: f.app.id, userId: f.holder.id } });
+    const before = await snapshot();
+    const result = await invoke('mcp', worker, { triggerKind: null, triggerId: '\u0000' }, unauthorized && !worker ? f.stranger.id : f.holder.id);
+    expect(result.error?.code).toBeUndefined();
+    expect(result.error?.message).toContain('MCP error -32602: Input validation error:');
+    expect(result.error?.message).toContain('expected string, received null at triggerKind');
     expect(await snapshot()).toEqual(before);
   });
 }
