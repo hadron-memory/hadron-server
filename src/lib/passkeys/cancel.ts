@@ -13,8 +13,8 @@ import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
 import { endSignInsCompletedBy } from '../../auth/signIn.js';
 import { windowStillOpen } from './revoke.js';
 
-/** #3746: the window ended while the cancel waited; rolls the cancel back. */
-class WindowCrossed extends Error {}
+/** A refusal after the cancel's first write: rolls the whole transaction back (#3746: the window ended while it waited, or the token was spent). */
+class CancelRefused extends Error {}
 
 const sha256Hex = (v: string) => createHash('sha256').update(v).digest('hex');
 export const CANCEL_TOKEN = /^[A-Za-z0-9_-]{43}$/;
@@ -35,7 +35,7 @@ export async function issueCancelToken(tx: Prisma.TransactionClient, passkeyId: 
  * uniform refusal (unknown or spent token, window closed, passkey already revoked) and changes nothing.
  *
  * Order: find the passkey from the token without locks; then, in one transaction, take the owner's authority anchor,
- * lock the credential and re-check the open window and that the owner is not deleted (an erased owner's record takes no IP or user agent), spend the token, revoke, and end the sign-ins. Concurrent cancels
+ * lock the credential and re-check the open window and that the owner is not deleted (an erased owner's record takes no IP or user agent), revoke, spend the token, and end the sign-ins. Concurrent cancels
  * serialise on the anchor, and the second finds the token spent.
  *
  * #3746 (cor:aut:040:07): the cancellation takes effect at commit, so its last statement checks the window is still
@@ -55,34 +55,32 @@ export async function cancelFirstPasskey(
   try {
     return await db.$transaction(async (tx) => {
       await lockAuthorityAnchors(tx, [{ kind: 'user', id: probe.owner_id }], 'exclusive');
-      // Eligibility is decided by the clock NOW, after the anchor wait (findings:db-clock-must-order-after-lock-wait);
-      // the times recorded below use the transaction's platform clock, which the passkey guard requires and which is
-      // earlier. Both are the passkey platform clock (#3746).
+      // Eligibility is decided by the clock NOW, after the anchor wait (findings:db-clock-must-order-after-lock-wait),
+      // and the cancel is stamped with the wall clock once the credential is locked: the time it takes effect (#3746).
       const open = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM passkey_credentials
         WHERE id = ${probe.passkey_id} AND owner_id = ${probe.owner_id} AND revoked_at IS NULL AND window_outcome IS NULL
           AND window_ends_at > hadron_passkey_wall_now()
           AND EXISTS (SELECT 1 FROM users u WHERE u.id = owner_id AND u.deleted_at IS NULL)
         FOR UPDATE`;
       if (open.length !== 1) return false;
-      // used_at is naive UTC like every clock here (#3195). The guard trigger also stamps it with its own UTC clock, so
-      // this only matters where the trigger does not run; the single-use refusal is still this guarded update.
+      await tx.$executeRaw`WITH t AS (SELECT hadron_passkey_wall_now() AS at)
+        UPDATE passkey_credentials SET revoked_at = t.at, cancelled_at = t.at, window_ended_at = t.at,
+          window_outcome = 'cancelled', cancel_ip = ${input.ip}, cancel_user_agent = ${input.userAgent}
+        FROM t WHERE id = ${probe.passkey_id}`;
+      // used_at is naive UTC like every clock here (#3195), and never earlier than the cancel time above. The guard
+      // trigger also stamps it with its own UTC clock, so this only matters where the trigger does not run. The
+      // single-use refusal is still this guarded update; it rolls the cancel above back.
       const spent = await tx.$queryRaw<Array<{ id: string }>>`UPDATE passkey_cancel_tokens
         SET used_at = (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3)
         WHERE token_hash = ${tokenHash} AND used_at IS NULL RETURNING id`;
-      if (spent.length !== 1) return false;
-      await tx.$executeRaw`UPDATE passkey_credentials SET
-          revoked_at = hadron_passkey_now(),
-          cancelled_at = hadron_passkey_now(),
-          window_ended_at = hadron_passkey_now(),
-          window_outcome = 'cancelled', cancel_ip = ${input.ip}, cancel_user_agent = ${input.userAgent}
-        WHERE id = ${probe.passkey_id}`;
+      if (spent.length !== 1) throw new CancelRefused();
       await endSignInsCompletedBy(tx, probe.passkey_id);
       // Last statement before commit: the cancel stands only if the window is still open now, after every wait.
-      if (!(await windowStillOpen(tx, probe.passkey_id))) throw new WindowCrossed();
+      if (!(await windowStillOpen(tx, probe.passkey_id))) throw new CancelRefused();
       return true;
     });
   } catch (e) {
-    if (e instanceof WindowCrossed) return false;
+    if (e instanceof CancelRefused) return false;
     throw e;
   }
 }

@@ -113,11 +113,12 @@ class WindowCrossed extends Error {}
  * Revoke the owner's passkey named by `targetCredentialId`, consuming the bound ceremony.
  *
  * #3746 (cor:aut:040:07): a revocation counts as in a first passkey's window only if it takes effect before
- * `window_ends_at`. `revoked_at` must equal the transaction's platform clock (the passkey guard), and the CHECK forces
- * 'cancelled' whenever that is before the window end, so a transaction that started inside the window can only cancel.
- * When its waits (the owner's anchor, the rows `endSignInsCompletedBy` locks) carry it past the end, it rolls back and
- * the revocation is decided again in a fresh transaction, which starts after the end and revokes without cancelling.
- * That second attempt re-locks and re-checks everything; if it would still cancel (the clock stepped back), it refuses.
+ * `window_ends_at`. `revoked_at` is the wall clock once the owner's anchor and the rows are locked: the time the
+ * revocation takes effect, never the earlier transaction start, so a wait for the anchor that crosses the end simply
+ * revokes without cancelling. The CHECK forces 'cancelled' whenever `revoked_at` is before the window end. When a
+ * later wait (the rows `endSignInsCompletedBy` locks) carries the commit past the end, the attempt rolls back and the
+ * revocation is decided again in a fresh transaction, stamped after the end. That second attempt re-locks and
+ * re-checks everything; if it would still cancel (the clock stepped back), it refuses.
  */
 export async function finishRevoke(
   db: PrismaClient,
@@ -155,6 +156,7 @@ function revokeAttempt(
     const [ceremony] = await tx.$queryRaw<Array<{ user_id: string; vouch_passkey_id: string | null; sign_in_browser_hash: string | null }>>`
       SELECT user_id, vouch_passkey_id, sign_in_browser_hash FROM passkey_ceremonies
        WHERE id = ${input.ceremonyId} AND purpose = 'REVOKE' AND kind = 'revoke' AND browser_nonce_hash = ${input.ceremonyNonceHash}
+         AND consumed_at IS NULL
        FOR UPDATE`;
     if (!ceremony || ceremony.user_id !== userId) return null;
     // An identity-provider proof was spent at the prove step; finishing needs that same browser.
@@ -175,15 +177,16 @@ function revokeAttempt(
         AND (vouch_passkey_id IS NOT NULL OR sign_in_browser_hash = ${input.signInBrowserHash})
       RETURNING id`;
     if (consumed.length !== 1) return null;
-    // revoked_at is the platform clock the passkey guard requires (the transaction's). A first passkey whose window
-    // is still open at that time closes as cancelled, at the same instant; the passkey CHECK forces exactly that.
-    const [done] = await tx.$queryRaw<Array<{ window_outcome: string | null }>>`UPDATE passkey_credentials SET
-        revoked_at = hadron_passkey_now(),
-        window_outcome = CASE WHEN window_ends_at > hadron_passkey_now() AND window_outcome IS NULL
-          THEN 'cancelled' ELSE window_outcome END,
-        window_ended_at = CASE WHEN window_ends_at > hadron_passkey_now() AND window_outcome IS NULL
-          THEN hadron_passkey_now() ELSE window_ended_at END
-      WHERE id = ${target.id}
+    // #3746: revoked_at is the time the revocation takes effect: the wall clock read ONCE, here, after every lock above
+    // is held. From the owner's anchor on, nothing it is ordered against can happen (a signature completes under the
+    // same anchor), so a later commit does not make it earlier than any such event. A first passkey whose window is
+    // still open at that time closes as cancelled, at the same instant; the passkey CHECK forces exactly that.
+    const [done] = await tx.$queryRaw<Array<{ window_outcome: string | null }>>`WITH t AS (SELECT hadron_passkey_wall_now() AS at)
+      UPDATE passkey_credentials SET
+        revoked_at = t.at,
+        window_outcome = CASE WHEN window_ends_at > t.at AND window_outcome IS NULL THEN 'cancelled' ELSE window_outcome END,
+        window_ended_at = CASE WHEN window_ends_at > t.at AND window_outcome IS NULL THEN t.at ELSE window_ended_at END
+      FROM t WHERE id = ${target.id}
       RETURNING window_outcome`;
     const cancelled = done.window_outcome === 'cancelled';
     // A second attempt starts after the first saw the window end, so it can cancel only if the clock stepped back:
