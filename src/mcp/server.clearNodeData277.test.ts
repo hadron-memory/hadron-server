@@ -118,6 +118,12 @@ describe.each(['GraphQL', 'MCP'])('%s data replacement', (surface) => {
       await update(surface, { data: null });
       expect((await stored(enc)).data).toBeNull();
       expect(await revisions()).toBe(1);
+      const prior = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: node.id } });
+      expect((enc ? decryptNodeFieldsWithKey(prior, key) : prior).data).toEqual(original);
+      // Both writers persist the platform's canonical absent JSON value, not a JSON literal null.
+      const [persisted] = await db.$queryRaw<Array<{ absent: boolean }>>`
+        SELECT data IS NULL AS absent FROM nodes WHERE id = ${node.id}`;
+      expect(persisted?.absent).toBe(true);
       expect((await stored(enc)).content).toBe('body untouched');
     });
     it('omitting data preserves it', async () => {
@@ -132,8 +138,32 @@ describe.each(['GraphQL', 'MCP'])('%s data replacement', (surface) => {
       await update(surface, { data: { replacement: 2 } });
       expect((await stored(enc)).data).toEqual({ replacement: 2 });
     });
-    it('no write authority leaves data and history untouched', async () => {
-      await expect(update(surface, { data: null }, outsider)).rejects.toBeDefined();
+    it('no write authority returns the unchanged refusal and leaves data/history untouched', async () => {
+      if (surface === 'MCP') {
+        const client = createTestableMcpServer({
+          userId: outsider,
+          roles: ['READER'],
+          clientId: `user:${outsider}`,
+        });
+        expect(client.toolParamSchema('hadron_update_node', 'data').parse(null)).toBeNull();
+        const urn = emitNodeUrnV2(memory.urn, node.loc);
+        const control = await client.callToolText('hadron_update_node', { urn, name: 'Denied' });
+        const clear = await client.callToolText('hadron_update_node', { urn, data: null });
+        expect(clear).toBe(control);
+        expect(clear).not.toContain('Node updated:');
+      } else {
+        const errorOf = async (patch: Record<string, unknown>) => {
+          try {
+            await update(surface, patch, outsider);
+            return null;
+          } catch (error) {
+            return (error as Error).message;
+          }
+        };
+        const control = await errorOf({ name: 'Denied' });
+        expect(control).not.toBeNull();
+        expect(await errorOf({ data: null })).toBe(control);
+      }
       expect((await stored(enc)).data).toEqual(original);
       expect(await revisions()).toBe(0);
     });
@@ -162,7 +192,18 @@ it.each(['GraphQL', 'MCP'])(
   async (surface) => {
     await encrypted();
     sessionKeyCache.clear();
-    await expect(update(surface, { data: null })).rejects.toBeDefined();
+    if (surface === 'MCP') {
+      const client = createTestableMcpServer({ userId: owner, roles: ['READER'], clientId: `user:${owner}` });
+      expect(client.toolParamSchema('hadron_update_node', 'data').parse(null)).toBeNull();
+      const text = await client.callToolText('hadron_update_node', {
+        urn: emitNodeUrnV2(memory.urn, node.loc),
+        data: null,
+      });
+      expect(text).toContain('encrypted and locked');
+      expect(text).not.toContain('Node updated:');
+    } else {
+      await expect(update(surface, { data: null })).rejects.toThrow(/SESSION_EXPIRED/);
+    }
     expect((await stored(true)).data).toEqual(original);
     expect(await revisions()).toBe(0);
   },
