@@ -295,6 +295,105 @@ describe('#3727 entry points', () => {
   });
 });
 
+describe('#3727 generated kind doors — controls (acceptance 2: doors inherit the normalization, gates unchanged)', () => {
+  // Ground truth from the door sources: the decision doors refuse encrypted
+  // memories outright (decisions.ts: "a decision is verified by re-rendering
+  // its plaintext") and re-supply a STRING abstract on every write
+  // (logContentOf); the spec reservation door states nulls on CREATE only (the
+  // resurrection shape pinned above); no kind door sends an update-mode null
+  // abstract/content. The one internal caller that can carry a caller-supplied
+  // explicit null into the changed line is the run tool hadron_update_node
+  // (pickWriteFields drops undefined only).
+
+  it('CONTROL: the decision door on its plain domain — string abstract stored verbatim on create and door-update, gate refuses identically', async () => {
+    const M = resolvers.Mutation as unknown as Record<string, (a: unknown, b: Record<string, unknown>, c: Context) => Promise<{ id: string; row: { id: string } }>>;
+    const org = await db.organization.create({ data: { name: 'Door', urn: `n3727-door-${generateId()}.example` } });
+    const admin = (await db.user.create({ data: { handle: `n3727-adm-${generateId()}`, roles: ['ADMIN'] } })).id;
+    await db.orgMember.create({ data: { organizationId: org.id, userId: admin, role: 'ADMIN' } });
+    const doorMemory = (await M.createMemory(null, { orgId: org.id, name: 'Door memory' }, { db, userId: admin, roles: ['ADMIN'] } as Context)).id;
+    const adminCtx = { db, userId: admin, roles: ['ADMIN'] } as Context;
+
+    const log = await M.createDecisionLog(null, { memoryRef: doorMemory, loc: 'decisions', defaultDeciders: [admin] }, adminCtx);
+    const row = await db.node.findUniqueOrThrow({ where: { id: log.row.id } });
+    expect(row.abstract).toMatch(/^Decision log: codes /);
+
+    // An update-mode door write re-supplies the string: preserved verbatim,
+    // never an accidental clear.
+    await M.setDecisionLogDeciders(
+      null,
+      { logRef: log.row.id, defaultDeciders: [admin], expectedRevision: 1, reason: 'n3727 door control' },
+      adminCtx,
+    );
+    const after = await db.node.findUniqueOrThrow({ where: { id: log.row.id } });
+    expect(after.abstract).toBe(row.abstract);
+
+    // The door's own gate is unchanged: an org non-manager is refused, no artifact.
+    const reader = (await db.user.create({ data: { handle: `n3727-rd-${generateId()}`, roles: ['READER'] } })).id;
+    await db.orgMember.create({ data: { organizationId: org.id, userId: reader, role: 'READER' } });
+    const before = await db.node.findFirst({ where: { memoryId: doorMemory } });
+    const refused = await M.createDecisionLog(
+      null,
+      { memoryRef: doorMemory, loc: 'elsewhere', defaultDeciders: [admin] },
+      { db, userId: reader, roles: ['READER'] } as Context,
+    ).then(
+      () => 'NONE',
+      (error: { extensions?: { code?: string } }) => error.extensions?.code ?? 'UNKNOWN',
+    );
+    expect(refused).toBe('DECISION_FORBIDDEN');
+    expect(await db.node.findFirst({ where: { memoryId: doorMemory } })).toEqual(before);
+  });
+
+  it('CONTROL: the hadron_update_node run tool — its own gate refuses encrypted memories before the core; on a plain memory null clears and omission preserves through the real tool', async () => {
+    const { hadronUpdateNode } = await import('../../../lib/runner/tools/nodeTools.js');
+    const org = await db.organization.create({ data: { name: 'Run', urn: `n3727-run-${generateId()}.example` } });
+    const admin = (await db.user.create({ data: { handle: `n3727-run-${generateId()}`, roles: ['ADMIN'] } })).id;
+    await db.orgMember.create({ data: { organizationId: org.id, userId: admin, role: 'ADMIN' } });
+    const M = resolvers.Mutation as unknown as Record<string, (a: unknown, b: Record<string, unknown>, c: Context) => Promise<{ id: string }>>;
+    const runMemory = (await M.createMemory(null, { orgId: org.id, name: 'Run memory' }, { db, userId: admin, roles: ['ADMIN'] } as Context)).id;
+    const run = { principal: { db, roles: [], userId: admin }, db, run: { id: 'run-n3727', organizationId: org.id } } as never;
+    const memRow = await db.memory.findUniqueOrThrow({ where: { id: runMemory } });
+    const urn = `hrn:node:${memRow.urn}:runtool`;
+
+    const nodeId = generateId();
+    const seed = async (encrypted: boolean) => {
+      await db.node.create({
+        data: {
+          id: nodeId, memoryId: runMemory, loc: 'runtool', name: 'Run',
+          ...(encrypted
+            ? { ...encryptNodeFieldsWithKey({ content: 'run body', abstract: 'run abstract' }, key), abstractOriginHash: computeContentHash('run body'), revisionContentHash: revisionStateHashRefreshMarker() }
+            : { content: 'run body', abstract: 'run abstract', abstractOriginHash: computeContentHash('run body') }),
+        } as never,
+      });
+    };
+
+    // Encrypted: the tool's own gate refuses BEFORE the core — no run-tool
+    // write can reach the encrypted mapping at all (existing gate, unchanged).
+    await db.memory.update({ where: { id: runMemory }, data: { isEncrypted: true, vectorIndexEnabled: false } });
+    sessionKeyCache.set('n3727-run', runMemory, key);
+    await seed(true);
+    const encryptedRow = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
+    const toolRefusal = await hadronUpdateNode.execute(run, { urn, abstract: null }).then(
+      () => 'NONE',
+      (error: Error) => error.message,
+    );
+    expect(toolRefusal).toMatch(/Headless runs are unavailable on encrypted memories/);
+    expect(await db.node.findUniqueOrThrow({ where: { id: nodeId } })).toEqual(encryptedRow);
+
+    // Plain: the tool inherits the core's normalization end-to-end — an
+    // explicit null clears, an omitted abstract never becomes an accidental clear.
+    await db.node.delete({ where: { id: nodeId } });
+    await db.memory.update({ where: { id: runMemory }, data: { isEncrypted: false } });
+    await seed(false);
+    await hadronUpdateNode.execute(run, { urn, abstract: null });
+    expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).abstract).toBeNull();
+    await hadronUpdateNode.execute(run, { urn, abstract: 're-set', content: 'second body' });
+    await hadronUpdateNode.execute(run, { urn, name: 'Renamed by tool' });
+    const plainFinal = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
+    expect(plainFinal.abstract).toBe('re-set');
+    expect(plainFinal.content).toBe('second body');
+  });
+});
+
 describe('#3727 refusals — controls, nothing widens', () => {
   it('CONTROL: no cached session key refuses SESSION_EXPIRED before any write', async () => {
     await encrypted();
