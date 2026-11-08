@@ -169,13 +169,14 @@ async function usageEventsWhere(
       // feed. "Named" uses the same truthiness that applies each filter below, so no request can reach
       // the resource branch without a resource filter. `type` and the window narrow either scope.
       // #2944: a key filter is the one exception. K reading itself gets its own events in the memories it can read
-      // plus those attributed to none (ruling 0245 item 3, bounded by item 4 per AT0.5537); a manager falls through to the resource path below with no resource named, which bounds K's
+      // plus those attributed to none (ruling 0245 item 3, bounded by item 4 per ruling 0254); a manager falls through to the resource path below with no resource named, which bounds K's
       // events to every memory the manager can read (items 1 and 4) and never restores the broad feed, since
       // only a key-filtered read reaches it.
       if (!memoryId && !nodeId && !loc && keyFilter?.self) {
-        // AT0.5537 option 1 (hide): K's own events only in memories K can read NOW, plus its events attributed to
-        // no memory (those name no memory, so they reveal none). An event in a memory K has lost is hidden, as
-        // item 4 requires; the scope narrows, never widens.
+        // Ruling 0254 (hrn:node:hadronmemory.com:hadron-dev-team-shared:rulings:0254, Holger 2026-11-08, "Hide them"):
+        // K's own events only in memories K can read NOW; an event in a memory K has lost is not returned (0245
+        // item 4 governs where it meets item 3). Events attributed to no memory reveal none, so 0245 item 3 still
+        // returns them (Vera's reading, recorded in 0254).
         const readable = await getAccessibleMemoryIds(ctx);
         return {
           ...windowFilter,

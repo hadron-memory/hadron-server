@@ -12,7 +12,8 @@
  *   4. A manager sees K's events only in memories they can read; naming a memory still needs READ
  *      (MEMORY_NOT_FOUND). It does not restore the broad unfiltered feed.
  *   5. K filtering by itself sees its own events.
- * K's own events in a memory K can no longer read are hidden (Holger, AT0.5537 option 1).
+ *   6. Ruling 0254 (hadron-dev-team-shared:rulings:0254): K's own events in a memory K can no longer read are hidden;
+ *      its events attributed to no memory are still returned.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { createHash } from 'node:crypto';
@@ -265,11 +266,17 @@ describe('#2944 item 5: K filtering by itself sees its own events', () => {
       ev({ id: mine, appKeyId: keyK, memoryId: appMem.id }),
       ev({ id: mineNoMem, appKeyId: keyK, memoryId: null }),
       ev({ id: sibling, appKeyId: keyK2, memoryId: appMem.id }),
-      // AT0.5537 option 1: K's own event in a memory K cannot read (now) stays hidden.
+      // Ruling 0254: K's own event in a memory K cannot read now stays hidden.
       ev({ id: mineLost, appKeyId: keyK, memoryId: memB.id }),
     ] });
     expect(ids(await list({ appKey: keyK }, asKey(keyK)))).toEqual([mine, mineNoMem].sort());
     expect((await page({ appKey: keyK }, asKey(keyK))).total).toBe(2);
+    // Ruling 0254, both halves, on both surfaces: the lost-memory event is hidden; the no-memory event is returned.
+    for (const run of [list, async (a: Record<string, unknown>, c: Context) => (await page(a, c)).items]) {
+      const seen = ids(await run({ appKey: keyK }, asKey(keyK)));
+      expect(seen).not.toContain(mineLost);
+      expect(seen).toContain(mineNoMem);
+    }
     // With no key and no resource named, the key still gets the empty own-activity result (#2817).
     expect(await list({}, asKey(keyK))).toEqual([]);
   });
