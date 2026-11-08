@@ -3,12 +3,12 @@
  * consent card; complete values stay in the DOM (nothing truncated or hidden).
  *
  * Two layers. The static pins always run. The geometry pins render the real page in a real
- * Chromium (headless, no network, a file:// page) and measure it; they run only where a
+ * Chromium (headless, no network, a file:// page, viewport and color scheme emulated over CDP and asserted) and measure it; they run only where a
  * Chromium binary exists (CONSENT_BROWSER, else the Playwright cache) and are skipped otherwise,
  * because Playwright is operator-provided, not a repo dependency (see scripts/e2e).
  */
 import { describe, expect, it } from 'vitest';
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -37,26 +37,60 @@ const page = (over: Params) => renderConsent({
   state: 's', csrfToken: 't', grantProof: 'p', ...over,
 } as Parameters<typeof renderConsent>[0]);
 
-// Injected measurer: for every element with text, did its content run past the card's right edge?
-const MEASURE = `<script>addEventListener('load',()=>{const main=document.querySelector('main').getBoundingClientRect();
+// Measurer, run in the page by CDP: for every element with text, did its content run past the card's right edge?
+const MEASURE = `(() => {const main=document.querySelector('main').getBoundingClientRect();
 const bad=[];for(const el of document.querySelectorAll('main h1,main p,main li,main code,main strong,main button')){
 const r=el.getBoundingClientRect();if(el.scrollWidth>el.clientWidth+1||r.right>main.right+1)bad.push(el.tagName+':'+(el.textContent||'').slice(0,12));}
-const o=document.createElement('pre');o.id='m';o.textContent=JSON.stringify({bad,doc:document.documentElement.scrollWidth,vw:innerWidth,
-text:document.body.textContent});document.body.appendChild(o);});</script>`;
+return JSON.stringify({bad,doc:document.documentElement.scrollWidth,vw:innerWidth,dark:matchMedia('(prefers-color-scheme: dark)').matches,
+text:document.body.textContent});})()`;
 
-function measure(html: string, width: number, dark: boolean) {
+type Measured = { bad: string[]; doc: number; vw: number; dark: boolean; text: string };
+
+// Real viewport and media emulation over the DevTools protocol (the --window-size and
+// --blink-settings flags are not honoured by every headless Chromium build).
+async function measure(html: string, width: number, dark: boolean): Promise<Measured> {
   const dir = mkdtempSync(join(tmpdir(), 'consent3576-'));
+  const proc = spawn(browser!, ['--headless=new', '--no-sandbox', '--disable-gpu', `--user-data-dir=${join(dir, 'u')}`,
+    '--remote-debugging-port=0', 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
   try {
+    const wsUrl = await new Promise<string>((resolve, reject) => {
+      let buf = '';
+      const t = setTimeout(() => reject(new Error('no devtools endpoint: ' + buf.slice(0, 300))), 30000);
+      proc.stderr!.on('data', (d) => { buf += d; const m = /DevTools listening on (ws:\/\/\S+)/.exec(buf); if (m) { clearTimeout(t); resolve(m[1]); } });
+      proc.on('exit', () => { clearTimeout(t); reject(new Error('chromium exited: ' + buf.slice(0, 300))); });
+    });
     const f = join(dir, 'p.html');
-    writeFileSync(f, html.replace('</body>', MEASURE + '</body>'));
-    const r = spawnSync(browser!, ['--headless=new', '--no-sandbox', '--disable-gpu', `--user-data-dir=${join(dir, 'u')}`,
-      `--window-size=${width},900`, ...(dark ? ['--blink-settings=preferredColorScheme=1'] : []),
-      '--virtual-time-budget=2000', '--dump-dom', pathToFileURL(f).href], { encoding: 'utf8', timeout: 60000 });
-    const m = /<pre id="m">([\s\S]*?)<\/pre>/.exec(r.stdout);
-    if (!m) throw new Error('no measurement: ' + r.stderr.slice(0, 300));
-    return JSON.parse(m[1].replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')) as
-      { bad: string[]; doc: number; vw: number; text: string };
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+    writeFileSync(f, html);
+    const ws = new WebSocket(wsUrl);
+    await new Promise<void>((res, rej) => { ws.onopen = () => res(); ws.onerror = () => rej(new Error('ws connect failed')); });
+    let id = 0;
+    const pending = new Map<number, (r: any) => void>();
+    const loaded: Array<() => void> = [];
+    ws.onmessage = (e) => {
+      const msg = JSON.parse(String(e.data));
+      if (msg.id && pending.has(msg.id)) { pending.get(msg.id)!(msg); pending.delete(msg.id); }
+      if (msg.method === 'Page.loadEventFired') loaded.splice(0).forEach((fn) => fn());
+    };
+    const send = (method: string, params: object = {}, sessionId?: string) => new Promise<any>((res, rej) => {
+      const i = ++id; pending.set(i, (m) => (m.error ? rej(new Error(method + ': ' + m.error.message)) : res(m.result)));
+      ws.send(JSON.stringify({ id: i, method, params, sessionId }));
+    });
+    const { targetId } = await send('Target.createTarget', { url: 'about:blank' });
+    const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: true });
+    await send('Page.enable', {}, sessionId);
+    await send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false }, sessionId);
+    await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: dark ? 'dark' : 'light' }] }, sessionId);
+    const done = new Promise<void>((res) => loaded.push(res));
+    await send('Page.navigate', { url: pathToFileURL(f).href }, sessionId);
+    await done;
+    const r = await send('Runtime.evaluate', { expression: MEASURE, returnByValue: true }, sessionId);
+    ws.close();
+    const m = JSON.parse(r.result.value) as Measured;
+    // The requested state must be the measured state, or the geometry checks prove nothing.
+    expect(m.vw).toBe(width);
+    expect(m.dark).toBe(dark);
+    return m;
+  } finally { proc.kill('SIGKILL'); rmSync(dir, { recursive: true, force: true }); }
 }
 
 const cases: Array<[string, Params]> = [
@@ -69,16 +103,20 @@ const cases: Array<[string, Params]> = [
 
 describe.skipIf(!browser)('#3576 consent card geometry (real Chromium)', () => {
   for (const [name, over] of cases) for (const width of [1280, 390]) for (const dark of [false, true]) {
-    it(`${name} stays inside the card at ${width}px ${dark ? 'dark' : 'light'}`, () => {
-      const m = measure(page(over), width, dark);
+    it(`${name} stays inside the card at ${width}px ${dark ? 'dark' : 'light'}`, async () => {
+      const m = await measure(page(over), width, dark);
       expect(m.bad).toEqual([]);
       expect(m.doc).toBeLessThanOrEqual(m.vw);
-      for (const v of Object.values(over)) for (const s of [v].flat()) expect(m.text.toLowerCase()).toContain(String(s).replace(/^https:\/\//, '').slice(0, 40).toLowerCase()); // the anchor shows the host, which the URL parser lowercases
+      for (const v of Object.values(over)) for (const s of [v].flat()) expect(m.text.toLowerCase()).toContain(String(s).replace(/^https:\/\//, '').replace(/\/cb$/, '').toLowerCase()); // the anchor shows the host, which the URL parser lowercases
     });
   }
-  it('a long notice value (template level) wraps inside the card', () => {
-    const html = page({}).replace(/This token is limited[^<]*/, 'R'.repeat(80));
-    expect(measure(html, 390, false).bad).toEqual([]);
+  it('a long notice value (template level) wraps inside the card and stays fully present', async () => {
+    const notice = 'R'.repeat(80);
+    const html = page({}).replace(/This token is limited[^<]*/, notice);
+    const m = await measure(html, 390, false);
+    expect(m.bad).toEqual([]);
+    expect(m.doc).toBeLessThanOrEqual(m.vw);
+    expect(m.text).toContain(notice);
   });
 });
 
