@@ -70,6 +70,8 @@ export interface UsageActor {
   appId: string | null;
   clientId: string | null;
   sessionId: string | null;
+  /** #2944: the App key that authenticated the request, or null. See {@link usageAppKeyOf}. */
+  appKeyId: string | null;
   /** True when recording must be suppressed entirely — see {@link usageActorFrom}. */
   suppressed: boolean;
 }
@@ -85,8 +87,20 @@ export interface UsagePrincipal {
   appId?: string | null;
   clientId?: string | null;
   sessionId?: string | null;
+  /** AppKey.id, set only when an hdr_app_ key authenticated the request (#1749, #2944). */
+  appKeyId?: string | null;
   /** Present and truthy only on the GraphQL side, during admin impersonation. */
   impersonation?: unknown;
+}
+
+/**
+ * #2944 (hrn:node:hadronmemory.com:specs:cor:acl:090:01, ruling 0244 item 3): the App key an event is attributed
+ * to. Only a request an App key authenticated carries one: a principal with a user (a person, a user API key, a
+ * worker session) or under impersonation carries none, even if a key id is somehow present, so a key filter can
+ * never return a person's event. Every usage writer stamps `appKeyId` through this one function.
+ */
+export function usageAppKeyOf(principal: UsagePrincipal): string | null {
+  return principal.appKeyId && !principal.userId && !principal.impersonation ? principal.appKeyId : null;
 }
 
 /**
@@ -110,6 +124,7 @@ export function usageActorFrom(principal: UsagePrincipal): UsageActor {
     // there is one; `userId` is carried separately in its own column anyway.
     clientId: principal.clientId ?? principal.userId ?? null,
     sessionId: principal.sessionId ?? null,
+    appKeyId: usageAppKeyOf(principal),
     suppressed: Boolean(principal.impersonation),
   };
 }
@@ -210,6 +225,8 @@ export function recordNodeUsage(
       // #930 — the bound session doubles as the reaper's liveness heartbeat, so
       // an un-attributed event lets a busy session read as idle.
       sessionId: actor.sessionId,
+      // #2944: the authenticating App key, or null.
+      appKeyId: actor.appKeyId,
     }));
 
     // #1653 / DY-2: the rows count as ACTIVITY only if the bound session is

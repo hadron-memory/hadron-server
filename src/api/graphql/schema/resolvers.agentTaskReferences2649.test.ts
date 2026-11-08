@@ -158,10 +158,13 @@ describe('references edit (#2649, cor:agt:050:09)', () => {
     expect(await stored(b.id)).toEqual([]);
   });
 
-  it('only whoever may edit the task changes them: the assignee is refused, a manager is admitted', async () => {
+  // #3441 (ruling 0233): the assignee also writes references; a task member who is neither assignee nor director is refused.
+  it('its assignee and whoever may edit the task change references; another member is refused', async () => {
     const t = await create({ references: three, assignee: { user: assignee.id } });
-    await expect(edit(t.id, { references: [] }, assignee.id)).rejects.toMatchObject({ extensions: { code: 'TASK_NOT_OWNER' } });
+    await expect(edit(t.id, { references: [] }, member.id)).rejects.toMatchObject({ extensions: { code: 'TASK_NOT_OWNER' } });
     expect(await stored(t.id)).toHaveLength(3);
+    await edit(t.id, { references: [three[1]] }, assignee.id);
+    expect(await stored(t.id)).toHaveLength(1);
     await edit(t.id, { references: [] }, manager.id);
     expect(await stored(t.id)).toEqual([]);
   });

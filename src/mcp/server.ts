@@ -47,6 +47,7 @@ import {
   recordNodeWrite,
   trackUsageWrite,
   toUsageNodeRefs,
+  usageAppKeyOf,
 } from '../lib/usageRecorder.js';
 import {
   buildNodeRevisionSnapshot,
@@ -7194,6 +7195,10 @@ export function createMcpServerInstance(
         if (data.data !== undefined) data.data = (enc.data ?? null) as never;
       }
 
+      // #277: normalize the persistence value only after preserving plaintextUpdates.
+      // Omitted data stays omitted; explicit null clears rather than storing JSON null.
+      if (nodeData === null) data.data = Prisma.DbNull;
+
       let includePinContentSaved = false;
       let includePinPriorContent: string | null = null;
       if (Object.keys(data).length > 0 || resolvedEdges !== null || expectedRevision !== undefined) {
@@ -8818,6 +8823,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           nodeId: node.id,
           memoryId: node.memoryId, // #796 (as in hadron_get_node's event)
           appId: auth.appId ?? null,
+          appKeyId: usageAppKeyOf(auth), // #2944
           // 046-usage-metering FR-001 (as in hadron_get_node's event).
           userId: auth.userId ?? null,
           createdBy: auth.clientId ?? null,
@@ -13183,7 +13189,7 @@ const SHAPE_HADRON_UPDATE_NODE = {
   seq: z.number().optional().describe('New sort order among siblings'),
   tags: tagsInputSchema.optional().describe('Replace tags'),
   properties: z.record(z.string(), z.unknown()).optional().describe('Structured key-value properties'),
-  data: z.record(z.string(), z.unknown()).optional().describe('Runtime data (e.g. stageOrder, promptRef, extractionSpec for chat config). REPLACES the whole data bag — to merge in a few keys while preserving the rest, use hadron_update_node_data instead.'),
+  data: z.record(z.string(), z.unknown()).nullable().optional().describe('Runtime data (e.g. stageOrder, promptRef, extractionSpec for chat config). REPLACES the whole data bag; null clears it and omission preserves it. To merge in a few keys while preserving the rest, use hadron_update_node_data instead.'),
   llmModel: z.string().optional().describe('LLM model used'),
   aiAgent: z.string().optional().describe('AI agent tool used'),
   edges: z.array(z.object({

@@ -6,6 +6,7 @@
  * Same-origin requests carry the real Origin, and no referrer leaves the origin.
  */
 import type { Response } from 'express';
+import { ceremonyShell } from './ceremonyShell.js';
 
 export const PAGE_HEADERS = {
   'Cache-Control': 'no-store',
@@ -14,9 +15,7 @@ export const PAGE_HEADERS = {
   'X-Frame-Options': 'DENY',
 };
 
-export const page = (title: string, body: string) => `<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>${title}</title></head>
-<body style="font-family:system-ui,sans-serif;max-width:32rem;margin:3rem auto;padding:0 1rem">${body}</body></html>`;
+export const page = (title: string, body: string) => ceremonyShell({ title, body });
 
 /** Send a page with the ceremony headers. */
 export function sendPage(res: Response, status: number, title: string, body: string): void {

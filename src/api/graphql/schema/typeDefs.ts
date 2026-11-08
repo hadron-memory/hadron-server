@@ -1973,6 +1973,15 @@ export const typeDefs = `#graphql
     ended or deleted session.
     """
     lapsesAt: DateTime
+    """
+    The session's latest 50 usage events that touched no memory or a memory the
+    caller can read (hrn:node:hadronmemory.com:specs:cor:acl:090:01, ruling 0249).
+    In the caller's own session every event is whole. In any other session, an
+    event the caller did not record (another user's, or the App's) shows volume
+    only: userId, organizationId and actionArgs are null, appId is kept only when
+    it is the calling App's own, and sessionId is this session's id. Admins get the
+    same, and an impersonated read is not the target's own session.
+    """
     events: [UsageEvent!]!
     """
     #2047 / hrn:node:hadronmemory.com:specs:cor:agt:040:03: the boot prompt this session was served at its bind. Readable by whoever may read the
@@ -6490,12 +6499,15 @@ export const typeDefs = `#graphql
   is created by the App's first customisation: a createNode through this target
   finds-or-creates it in the same transaction as the write, so a refused write
   leaves nothing behind. Only whoever manages the App may write through it, and
-  only while the App is live and the Agent installed. For createNode(input.install),
-  an Agent held only through an import without the App organisation's active grant
-  is refused with AGENT_ORG_GRANT_REQUIRED; an absent Agent is refused with
-  AGENT_NOT_INSTALLED. Both createNode refusals leave no node or install memory
-  behind (hrn:node:hadronmemory.com:specs:cor:agt:040:15).
-  These typed createNode refusals do not describe updateNode's lookup/write errors.
+  only while the App is live and the Agent installed. After the App participant
+  and manager gates, both createNode(input.install) and updateNode(input.install)
+  refuse an Agent held only through an import without the App organisation's
+  active grant with AGENT_ORG_GRANT_REQUIRED, and an absent Agent with
+  AGENT_NOT_INSTALLED. These refusals write nothing; physical install rows keep
+  their existing behavior (hrn:node:hadronmemory.com:specs:cor:agt:040:15).
+  updateNode never creates an install memory: an installed, licensed Agent with
+  no customisation memory answers INSTALL_MEMORY_NOT_FOUND. A detached retained
+  memory does not make an Agent installed.
   """
   input InstallTargetInput {
     appRef: String!
@@ -8264,9 +8276,10 @@ export const typeDefs = `#graphql
 
   """
   #1448 — the mint report. blockers must all be gone for a mint to succeed.
-  staleAbstracts are listed separately; they block only when
-  staleAbstractsBlock is true (once abstract re-affirmation is saved and
-  deployed, server#1408). openQuestions never block.
+  staleAbstracts are listed separately, over every node in this mint's scope
+  (a minted, unchanged node is not counted; spec validate audits the whole
+  memory); they block only when staleAbstractsBlock is true. openQuestions
+  never block.
   """
   type SpecCorpusMintReport {
     memoryId: ID!
@@ -9085,8 +9098,19 @@ export const typeDefs = `#graphql
     memories; not existence-checked. The migration target for the deprecated
     nodeUsage(loc:) above — same match, same gate (PR-986 review, Codex P2).
     Mutually exclusive with nodeId (BAD_USER_INPUT when both are passed).
+
+    appKey (#2944, hrn:node:hadronmemory.com:specs:cor:acl:090:01 "Filtering by App key") — an App key's id.
+    Keeps only the events made by requests that key authenticated; events made without a key, and every event
+    recorded before keys were attributed, are never returned. Open to whoever manages the key's App
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:12, acting as themselves) and to the key itself; anyone else
+    gets APP_KEY_NOT_FOUND, exactly as for a key that does not exist, before any memory or node is resolved.
+    A manager sees the key's events only in memories the manager can read (no resource named: every such
+    memory; a named memory still needs READ). The key, naming no resource, sees its own events in the memories
+    it can read now, plus its events attributed to no memory (ruling 0254); naming a node, loc or memory, it sees
+    only its own events there, in memories it can read. It composes with the window, type and resource filters.
+    Rows stay volume-only as above.
     """
-    usageEvents(type: String, memoryId: ID, nodeId: ID, loc: String, since: DateTime, until: DateTime, limit: Int, offset: Int): [UsageEvent!]!
+    usageEvents(type: String, memoryId: ID, nodeId: ID, loc: String, since: DateTime, until: DateTime, appKey: ID, limit: Int, offset: Int): [UsageEvent!]!
     """
     #2212 - \`usageEvents\` as a page: the same principal gate, the same loc/nodeId rules and the same two scopes
     (own activity when no resource is named, #2817), ordered newest first with an id tiebreak, with the windowed total.
@@ -9094,8 +9118,9 @@ export const typeDefs = `#graphql
     Bounds must be ISO date-times with Z or an explicit offset.
     Either bound may be omitted; invalid bounds or since >= until are BAD_USER_INPUT.
     hrn:node:hadronmemory.com:specs:cor:acl:090:01; paging: hrn:node:hadronmemory.com:specs:cor:api:120:04. Sizes as \`tickersPage\`.
+    appKey filters by an App key exactly as on usageEvents (#2944), and the total counts the filtered rows.
     """
-    usageEventsPage(type: String, memoryId: ID, nodeId: ID, loc: String, since: DateTime, until: DateTime, limit: Int, offset: Int): UsageEventPage!
+    usageEventsPage(type: String, memoryId: ID, nodeId: ID, loc: String, since: DateTime, until: DateTime, appKey: ID, limit: Int, offset: Int): UsageEventPage!
 
     """
     Revision history for a node, most recent first.
@@ -10942,7 +10967,8 @@ export const typeDefs = `#graphql
     """
     #2645 — edit descriptive fields using assignment authority (Proposed Editing rule,
     hrn:node:hadronmemory.com:specs:cor:agt:050:09). Owner, reporting-chain coordinator or App manager;
-    never an assignee alone or an App key. Ended tasks refuse TASK_ENDED. Omitted fields stay unchanged;
+    an assignee alone may write only properties (hrn:node:hadronmemory.com:specs:cor:agt:050:28) and references
+    (#3441, ruling 0233); any other field it names refuses the whole call TASK_NOT_OWNER. Never an App key. Ended tasks refuse TASK_ENDED. Omitted fields stay unchanged;
     empty optional fields clear, tags/requirements replace whole. An edit is not progress and clears no wake.
     Source is fixed. Event carries changed field names only (hrn:node:hadronmemory.com:specs:cor:agt:050:11).
     #3323: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.
