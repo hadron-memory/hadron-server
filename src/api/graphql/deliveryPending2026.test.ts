@@ -256,6 +256,17 @@ describe('#2671 the selective oracle', () => {
   expect(()=>expectFooter(got,metadata(13))).toThrow();
   expect(()=>expectPair(undefined,metadata(0),0)).toThrow();
  });
+ it('4: only budget-class omissions excuse an absence; a leak or any other fault never does', () => {
+  // 'saturated' is what a leaked footer slot looks like: it must never excuse a missing footer.
+  recorded.reasons.length=0;
+  recorded.reasons.push('saturated','failure','read-only','unsafe-count','unavailable-app');
+  expect(loadOmissions()).toBe(0);
+  expect(()=>expectFooter({result:undefined,omitted:loadOmissions()},metadata(13))).toThrow();
+  recorded.reasons.length=0;
+  for(const r of ['transaction','pool','statement','deadline']){recorded.reasons.push(r);}
+  expect(loadOmissions()).toBe(4);
+  recorded.reasons.length=0;
+ });
 });
 
 describe('#2026 review closure controls', () => {
