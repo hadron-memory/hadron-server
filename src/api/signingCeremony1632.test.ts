@@ -146,7 +146,7 @@ const FORBIDDEN = '{"error":"forbidden"}';
  * for a disabled, hidden-ancestry or detached control, as in a browser.
  */
 interface FakeElement {
-  tag: string; textContent: string; children: FakeElement[]; parent: FakeElement | null; hidden: boolean; disabled: boolean;
+  tag: string; textContent: string; children: FakeElement[]; parent: FakeElement | null; hidden: boolean; disabled: boolean; className?: string; readonly parentNode: FakeElement | null;
   listeners: Record<string, () => Promise<void>>; appendChild: (child: FakeElement) => void;
   replaceChildren: (...children: FakeElement[]) => void; addEventListener: (event: string, fn: () => Promise<void>) => void; focus: () => void;
 }
@@ -163,6 +163,7 @@ function createFakeDom(shellIds: Array<{ id: string; hidden?: boolean }>) {
     const e: FakeElement = { tag, textContent: '', children: [], parent: null, hidden: false, disabled: false, listeners: {},
       appendChild: child => { detach(child); e.children.push(child); child.parent = e; },
       replaceChildren: (...children) => { [...e.children].forEach(detach); children.forEach(c => e.appendChild(c)); },
+      get parentNode() { return e.parent; },
       addEventListener: (event, fn) => { e.listeners[event] = fn; },
       focus: () => {
         const hiddenAncestry = (() => { for (let n: FakeElement | null = e; n; n = n.parent) if (n.hidden) return true; return false; })();
@@ -541,6 +542,157 @@ describe('#3482/#3563 served-script focus, with modelled focus and independent r
     await page.button(action).listeners.click();
     page.expectFocused(page.button(expected));
     page.verify();
+  });
+});
+
+describe('#3699 signing page slice 2: summary first, sticky bar, status in the bar, recap, copy (cor:dmo:130:08, ruling 0250)', () => {
+  const challenge = { path: 'challenge', status: 200, body: { ceremonyId: 'action', challenge: 'AA', rpId: RP, allowCredentials: [] } } as const;
+  const all = (e: FakeElement): FakeElement[] => [e, ...e.children.flatMap(all)];
+  const order = (root: FakeElement, el: FakeElement) => all(root).indexOf(el);
+  const textOrder = (page: { texts: (e: FakeElement) => string[]; ids: Record<string, FakeElement> }, t: string | RegExp) =>
+    page.texts(page.ids.view).findIndex((x) => (typeof t === 'string' ? x === t : t.test(x)));
+  const bar = (page: { ids: Record<string, FakeElement> }) => all(page.ids.view).find((e) => e.className === 'bar');
+  const open = async (over: (v: any) => any = (v) => v) => {
+    const req = await openRequest(), proof = await prove(req.id, signer);
+    return { req, proof, json: { ...proof.json, view: over(proof.json.view) } };
+  };
+
+  it('opens with the summary sentence, the change line and the covers sentence, then the open text: no <details> anywhere (ruling 0250)', async () => {
+    const { req, json } = await open();
+    const page = await renderedProof(req.id, json);
+    const first = page.texts(page.ids.view).filter((x) => x !== '');
+    expect(first.slice(0, 3)).toEqual([`ceremony-requester asks you to sign "${TITLE}".`, 'No earlier signature.', 'Signing records your approval of exactly this text.']);
+    const urn = textOrder(page, json.view.node.urn);
+    const rev = textOrder(page, `Revision ${json.view.revision}`);
+    const abs = textOrder(page, ABSTRACT);
+    expect(urn).toBeGreaterThan(2);
+    expect(rev, 'revision visible next to the identity, before signing').toBeGreaterThan(urn);
+    expect(abs).toBeGreaterThan(rev);
+    expect(all(page.ids.view).filter((e) => e.tag === 'details')).toHaveLength(0);
+    expect(all(page.ids.view).filter((e) => e.tag === 'pre').length).toBeGreaterThan(0);
+    expect(all(page.ids.view).some((e) => e.hidden)).toBe(false);
+    expect(page.ids.view.hidden).toBe(false);
+    expect(page.texts(page.ids.view)).toContain(' [not covered by this signature]');
+    page.verify();
+  });
+
+  it('the change line names what differs since the last signed revision, and says when the earlier text is gone', async () => {
+    const first = await openRequest();
+    const p1 = await prove(first.id, signer);
+    expect((await post(first.id, 'complete', signingBody(p1, signer.key), p1.cookie)).status).toBe(200);
+    await resolvers.Mutation.updateNode(null, { input: { id: nodeId, content: 'Records are kept 90 days.\n' } }, { db, userId: requester.id, roles: [] } as never);
+    const second = await openRequest();
+    const p2 = await prove(second.id, signer, { counter: 3 });
+    const changed = await renderedProof(second.id, p2.json);
+    expect(changed.texts(changed.ids.view)).toContain(`Changed since revision ${first.revision}: text.`);
+    expect(all(changed.ids.view).filter((e) => e.tag === 'h3').map((e) => e.textContent)).toContain('Text');
+    expect(all(changed.ids.view).filter((e) => e.tag === 'h3').map((e) => e.textContent)).not.toContain('Content');
+    await db.nodeRevision.deleteMany({ where: { nodeId, revNo: first.revision } });
+    const p3 = await prove(second.id, signer, { counter: 4 });
+    const gone = await renderedProof(second.id, p3.json);
+    expect(gone.texts(gone.ids.view)).toContain('Earlier text no longer kept.');
+  });
+
+  it('Sign and Decline sit in one sticky bottom bar, with the status message and Reload ahead of them', async () => {
+    const { req, json } = await open();
+    const page = await renderedProof(req.id, json, [challenge, { path: 'complete', status: 502, body: {} }]);
+    const b = bar(page)!;
+    expect(b, 'a bar element').toBeDefined();
+    const shell = await (await fetch(`${base}/signing/${req.id}`)).text();
+    expect(shell).toMatch(/\.bar\{[^}]*position:sticky[^}]*bottom:0/);
+    expect(shell).toMatch(/\.bar\{[^}]*env\(safe-area-inset-bottom\)/);
+    const sign = page.button('Sign with passkey'), dec = page.button('Decline');
+    for (const e of [sign, dec, page.ids.msg]) expect(all(b)).toContain(e);
+    expect(order(b, page.ids.msg)).toBeLessThan(order(b, sign));
+    expect(order(b, page.ids.msg)).toBeLessThan(order(b, dec));
+    expect(page.ids.view.children.at(-1), 'the bar is last in the view, so it can stick to the bottom').toBe(b);
+    await sign.listeners.click();
+    const reload = page.button('Reload this page');
+    expect(all(b)).toContain(reload);
+    expect(order(b, reload)).toBeLessThan(order(b, sign));
+    expect(page.ids.msg.textContent).toContain('could not confirm');
+    page.verify();
+  });
+
+  it('a reader has no bar, and the status message stays where the shell put it', async () => {
+    const req = await openRequest(), proof = await prove(req.id, reader);
+    const page = await renderedProof(req.id, proof.json);
+    expect(bar(page)).toBeUndefined();
+    expect(page.ids.msg.parent).toBe(page.dom.root);
+    page.verify();
+  });
+
+  it('after sign the recap shows the node title and the time of the action, and the status message goes back to its shell place', async () => {
+    const { req, json } = await open();
+    const page = await renderedProof(req.id, json, [challenge, { path: 'complete', status: 200, body: {} }]);
+    await page.button('Sign with passkey').listeners.click();
+    const t = page.texts(page.ids.view);
+    expect(t).toContain(TITLE);
+    const when = t.find((x) => x.startsWith('Signed '))!;
+    expect(when).toContain(String(new Date().getFullYear()));
+    expect(when).not.toMatch(/\d:\d\d:\d\d/);
+    expect(t).toContain('Your signature was recorded. You can close this page.');
+    expect(page.ids.msg.parent).toBe(page.dom.root);
+    expect(page.dom.isConnected(page.ids.msg)).toBe(true);
+    page.verify();
+  });
+
+  it('after decline the recap shows the title and "Declined" with the time', async () => {
+    const { req, json } = await open();
+    const page = await renderedProof(req.id, json, [challenge, { path: 'decline', status: 200, body: {} }]);
+    await page.button('Decline').listeners.click();
+    await page.button('Yes, decline').listeners.click();
+    const t = page.texts(page.ids.view);
+    expect(t).toContain(TITLE);
+    expect(t.find((x) => x.startsWith('Declined '))).toMatch(/^Declined .*\d{4}.*\(device time\)$/);
+    expect(t).toContain('You declined this request. You can close this page.');
+    expect(page.ids.msg.parent).toBe(page.dom.root);
+    page.verify();
+  });
+
+  for (const state of ['COMPLETED', 'DECLINED', 'EXPIRED', 'STALE', 'WITHDRAWN']) it(`an ended state reached after the proof (${state}) shows the title and no action time`, async () => {
+    const { req, json } = await open();
+    const page = await renderedProof(req.id, json, [challenge, { path: 'complete', status: 409, body: { error: 'SIGNING_REQUEST_ENDED', state } }]);
+    await page.button('Sign with passkey').listeners.click();
+    const t = page.texts(page.ids.view);
+    expect(t).toContain(TITLE);
+    expect(t.some((x) => /^(Signed|Declined) /.test(x))).toBe(false);
+    expect(page.ids.msg.parent).toBe(page.dom.root);
+    page.verify();
+  });
+
+  it('an ended state reached before any proof shows no title (a link alone still reveals nothing)', async () => {
+    const req = await openRequest();
+    await db.$transaction((tx) => withdrawSigningRequestInTransaction(tx, req.id, { memoryId, caller: { userId: requester.id, appId: null } }));
+    const proof = await prove(req.id, signer);
+    const page = await renderedProof(req.id, proof.json);
+    expect(page.texts(page.ids.view).join('\n')).not.toContain(TITLE);
+    page.verify();
+  });
+
+  it('copy: with no intermediary the requester line is just the name', async () => {
+    const { req, json } = await open();
+    const page = await renderedProof(req.id, json);
+    expect(page.texts(page.ids.view)).toContain('Requested by ceremony-requester.');
+  });
+
+  it('copy: requester line, expiry without seconds and with a zone, field labels, includes note', async () => {
+    const { req, json } = await open((v) => ({ ...v, requester: { name: 'Pat', via: 'Juno' } }));
+    const page = await renderedProof(req.id, json);
+    const t = page.texts(page.ids.view);
+    expect(t).toContain('Requested by Pat via Juno.');
+    const exp = t.find((x) => x.startsWith('Expires '))!;
+    expect(exp).toBeDefined();
+    expect(exp).not.toMatch(/\d:\d\d:\d\d/);
+    expect(exp).toMatch(/(UTC|GMT[+-]?\d*|[A-Z]{2,5})\.?$/);
+    expect(t.join('\n')).not.toContain('(through');
+    const h3 = all(page.ids.view).filter((e) => e.tag === 'h3').map((e) => e.textContent);
+    expect(h3).toEqual(['Document', 'Title', 'Summary', 'Text']);
+    expect(t).toContain('Each include is shown as its tag, which you do sign. The text it pulls in from elsewhere is not shown here and is not part of what you sign.');
+    expect(t).not.toContain('Includes are shown as written. The text they pull in is not part of what you sign.');
+    const shell = await (await fetch(`${base}/signing/${req.id}`)).text();
+    expect(shell).toContain('.diff-del{background:rgba(220,0,0,.18)}');
+    expect(shell).not.toContain('line-through');
   });
 });
 
