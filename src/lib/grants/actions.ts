@@ -8,6 +8,7 @@
  * DELETES: a grant may name any row it ever wrote (FK RESTRICT), and what a retired action allows is not defined yet.
  */
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
+import { summaryPlaceholders } from './summary.js';
 
 export const ACTION_ENFORCEMENT = ['SERVER', 'CREDENTIAL', 'HARNESS_INSTRUCTION', 'RECORDED_ONLY'] as const;
 export type ActionEnforcement = (typeof ACTION_ENFORCEMENT)[number];
@@ -57,6 +58,14 @@ function validate(list: readonly ActionDefinition[]): void {
     if (!(ACTION_ENFORCEMENT as readonly string[]).includes(a.enforcement)) throw new Error(`action ${a.name}: unknown enforcement level`);
     if (a.source !== 'PLATFORM') throw new Error(`action ${a.name}: source must be PLATFORM`);
     if (!a.issuerRule || !a.summaryTemplate) throw new Error(`action ${a.name}: issuerRule and summaryTemplate are required`);
+    // #3742: a template may name {app} and its action's parameters, nothing else, so no template can ask the renderer for text it must refuse.
+    const names = new Set(a.parameters.map((p) => p.name));
+    if (names.has('app')) throw new Error(`action ${a.name}: a parameter named "app" would be ambiguous with {app}`);
+    let placeholders: string[];
+    try { placeholders = summaryPlaceholders(a.summaryTemplate); } catch (e) { throw new Error(`action ${a.name}: summaryTemplate has a malformed placeholder or brace`, { cause: e }); }
+    for (const p of placeholders) {
+      if (p !== 'app' && !names.has(p)) throw new Error(`action ${a.name}: summaryTemplate names unknown placeholder {${p}}`);
+    }
   }
 }
 
