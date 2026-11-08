@@ -936,6 +936,11 @@ async function writeNodeCoreRaw(
         (nodeFields as Record<string, unknown>).data = enc.data ?? undefined;
       }
 
+      // #277 / cor:api:210:01: null clears a nullable JSON column. In particular,
+      // encryption's omitted-field mapping above must not discard an explicit clear.
+      // Keep the caller's plaintext input untouched for revision/change comparison.
+      if (input.data === null) (nodeFields as Record<string, unknown>).data = Prisma.DbNull;
+
       // When createOnly resurrects a soft-deleted node, the UPDATE branch
       // must clear `deletedAt`/`deletedBy` — otherwise the resurrected
       // node ends up with the new content but still flagged as deleted,
