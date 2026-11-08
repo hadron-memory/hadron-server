@@ -200,6 +200,22 @@ describe('#2026 per-call SDK and committed marks',()=>{
 });
 
 
+// #2671: the footer omits BY DESIGN when its 20/210/180 ms budget is exceeded (Prisma P2028, reason
+// 'transaction'), which a loaded CI shard does. The pins above assert presence, so one transient
+// omission failed them. This pin injects exactly one such omission on the FIRST attempt only
+// (the flag outlives the attempt, a retry re-runs the fixtures) and requires the pin to ride it out.
+let injectedTransientOmission = false;
+describe('#2671 a transient footer omission does not fail the presence pins', () => {
+ it('rides out one P2028 on the footer transaction and still pins the count', async () => {
+  if (!injectedTransientOmission) {
+   injectedTransientOmission = true;
+   vi.spyOn(db, '$transaction').mockRejectedValueOnce(Object.assign(new Error('Transaction already closed'), { code: 'P2028' }));
+  }
+  try { expect(await deliveryPending(context() as any)).toEqual(metadata(13)); }
+  finally { vi.restoreAllMocks(); }
+ });
+});
+
 describe('#2026 review closure controls', () => {
  it('preserves the ambient actor semantics of an actor-neutral callback', async () => {
   const server = createTestableMcpServer({userId:user.id,apiKeyId:key.id,appId:app.id,roles:['READER']});
