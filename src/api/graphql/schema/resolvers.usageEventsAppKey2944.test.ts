@@ -247,6 +247,58 @@ describe('#2944 blind P3 (#3714): nodeId and loc follow the same key rules as me
     expect(await outcome({ appKey: keyK, nodeId: nodeB.id }, nodeB.id)).toEqual({ rows: [] });
   });
 
+  // #3732 (Garth's optional P3 on #3714): K filtering by ITSELF while naming a resource it cannot read, or one that
+  // does not exist. K has its own event on nodeB in memB (kOnB), which K cannot read (another org).
+  const outcomeAs = async (run: typeof list, args: Record<string, unknown>, c: Context, ref: string) => {
+    try { return { rows: ids(await run(args, c)) }; }
+    catch (e) {
+      const err = e as { message: string; code?: unknown; extensions?: Record<string, unknown> };
+      return { error: err.message.replaceAll(ref, '<ref>'), code: err.code ?? err.extensions?.code };
+    }
+  };
+  const surfaces: Array<[string, typeof list]> = [
+    ['usageEvents', list],
+    ['usageEventsPage', async (a, c) => (await page(a, c)).items],
+  ];
+
+  it('K naming a memory it cannot read answers exactly as a missing memory, on both surfaces (#3732 pin 1)', async () => {
+    const missing = generateId();
+    for (const [, run] of surfaces) {
+      const unreadable = await outcomeAs(run, { appKey: keyK, memoryId: memB.id }, asKey(keyK), memB.id);
+      expect(unreadable).toEqual(await outcomeAs(run, { appKey: keyK, memoryId: missing }, asKey(keyK), missing));
+      expect(unreadable).toEqual({ error: 'MEMORY_NOT_FOUND: <ref>', code: 'MEMORY_NOT_FOUND' });
+      expect(unreadable).not.toHaveProperty('rows');
+    }
+  });
+
+  it('K naming a node in a memory it cannot read: the key filter adds no row and changes nothing, on both surfaces (#3732 pin 2)', async () => {
+    for (const [, run] of surfaces) {
+      const keyed = await outcomeAs(run, { appKey: keyK, nodeId: nodeB.id }, asKey(keyK), nodeB.id);
+      expect(keyed).toEqual(await outcomeAs(run, { nodeId: nodeB.id }, asKey(keyK), nodeB.id));
+      expect(keyed).not.toEqual({ rows: [kOnB] });
+      if ('rows' in keyed) expect(keyed.rows).toEqual([]);
+    }
+  });
+
+  it('K naming a missing node: the key filter changes nothing about the answer, on both surfaces (#3732 pin 3)', async () => {
+    const missing = generateId();
+    for (const [, run] of surfaces) {
+      const keyed = await outcomeAs(run, { appKey: keyK, nodeId: missing }, asKey(keyK), missing);
+      expect(keyed).toEqual(await outcomeAs(run, { nodeId: missing }, asKey(keyK), missing));
+      if ('rows' in keyed) expect(keyed.rows).toEqual([]);
+    }
+  });
+
+  it('K naming a loc that exists only in a memory it cannot read gets [], on both surfaces (#3732 pin 4)', async () => {
+    const onlyB = await db.node.create({ data: { id: generateId(), memoryId: memB.id, loc: 'u3732:only-b', name: 'o', content: 'o' } });
+    const kOnlyB = generateId();
+    await db.usageEvent.create({ data: ev({ id: kOnlyB, appKeyId: keyK, memoryId: memB.id, nodeId: onlyB.id, nodeLoc: 'u3732:only-b' }) });
+    for (const [, run] of surfaces) {
+      expect(await run({ appKey: keyK, loc: 'u3732:only-b' }, asKey(keyK))).toEqual([]);
+    }
+    expect((await page({ appKey: keyK, loc: 'u3732:only-b' }, asKey(keyK))).total).toBe(0);
+  });
+
   it('a refused key answers APP_KEY_NOT_FOUND before any node or loc is resolved, on both surfaces', async () => {
     const expected = { message: 'App key not found.', extensions: { code: 'APP_KEY_NOT_FOUND', id: keyK } };
     for (const run of [list, page]) {
