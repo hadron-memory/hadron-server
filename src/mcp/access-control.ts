@@ -40,6 +40,7 @@ import { sessionScopedMemoryIds } from '../lib/auth/sessionScopedMemoryIds.js';
 import { cappedLinkLevel, type LinkCapMemory } from '../lib/auth/agentMemoryLinkCap.js';
 import { LIVE_ORG_MEMBERSHIP } from '../lib/auth/liveOrgMembership.js';
 import { isRunPrincipal } from '../lib/auth/runPrincipal.js';
+import { mcpRequestSessionContext } from './requestSession.js';
 import { publicKnowledgeAmong, readsPublicKnowledgeWithoutUser } from '../lib/auth/publicKnowledgeRead.js';
 import { userlessRunHoldsWriteGrant, type WriteDestination } from '../lib/appWriteGrant.js';
 import { installMemoryAudience, isInstallMemoryRow, readableInstallMemoryIds } from '../lib/auth/installMemory.js';
@@ -1215,7 +1216,7 @@ export async function isWriteBeyondRead(
 
 type MemoryReadRow = Pick<
   Memory,
-  'id' | 'class' | 'userId' | 'userMemoryOfAgentId' | 'appId' | 'ownerUserId' | 'organizationId' | 'installOfAgentId' | 'isInstallMemory'
+  'id' | 'class' | 'userId' | 'userMemoryOfAgentId' | 'appId' | 'ownerUserId' | 'organizationId' | 'installOfAgentId' | 'isInstallMemory' | 'createdBy'
 >;
 type SubscriptionReadRow = Pick<AgentSubscription, 'activatedAt' | 'expiresAt' | 'revokedAt'>;
 
@@ -1226,6 +1227,22 @@ interface MemoryReadRowOptions extends MemoryGateOptions {
   subscriptionsByAgentId?: ReadonlyMap<string, SubscriptionReadRow>;
   /** #3306: the PUBLIC knowledge among a batch's candidates, looked up once for a principal with no user. */
   publicKnowledgeIds?: ReadonlySet<string>;
+}
+
+/**
+ * #3519 (rulings 0226 + 0232, cor:cht:010:02, cor:api:000): the no-App knowledge holding `startChat` creates is read by
+ * the user it serves, on MCP as on GraphQL. A pure function of the request's auth and the loaded row: never an access-map
+ * entry, so enumeration, writes and `getMemoryAccess` are untouched. `createdBy` is compared with the user id only, never
+ * with an App or client id (an anonymous session's memory stores an App id there). An AppRun, an App key, an
+ * impersonation, and any worker session bound to the request (at init or per request) get no arm; a named binding that
+ * was refused fails closed, so a worker never silently becomes its human creator (cor:agt:050:08).
+ */
+function readsOwnNoAppHolding(auth: AuthContext, memory: MemoryReadRow): boolean {
+  if (memory.class !== 'knowledge' || memory.appId !== null || memory.userMemoryOfAgentId === null) return false;
+  if (!auth.userId || memory.createdBy === null || memory.createdBy !== auth.userId) return false;
+  if (auth.impersonation || isRunPrincipal(auth) || auth.appKeyId) return false;
+  const binding = mcpRequestSessionContext(auth);
+  return !binding.sessionId && binding.sessionBindingRefused !== true;
 }
 
 /** Apply the canonical MCP memory-read gate to a row that is already loaded. */
@@ -1304,6 +1321,8 @@ async function canReadMemoryRow(
       (opts.publicKnowledgeIds ?? await publicKnowledgeAmong(db, [memory.id])).has(memory.id);
   }
 
+  if (readsOwnNoAppHolding(auth, memory)) return true;
+
   // Non-personal memory: ADMIN/OWNER bypass + access map check.
   // Per D-2026-05-21-003, when auth.appId is unset (multi-App OAuth caller
   // without selection), getMemoryAccess unions across all the user's
@@ -1347,6 +1366,7 @@ export async function canReadMemory(
       organizationId: true,
       installOfAgentId: true,
       isInstallMemory: true,
+      createdBy: true,
     },
   });
   if (!memory) return false;
@@ -1387,6 +1407,7 @@ export async function filterReadableMemoryIds(
       organizationId: true,
       installOfAgentId: true,
       isInstallMemory: true,
+      createdBy: true,
     },
   });
 
