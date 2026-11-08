@@ -257,6 +257,13 @@ describe('#3325 targeted findingDisposition',()=>{
   expect(await one('F1',await stored(t2.id))).toMatchObject({disposition:'rejected'});
   expect(await one('F1')).toMatchObject({disposition:'fixed'});
  });
+ it('a task with no dispositions (the stored empty array) reads null for every id, including a real finding id',async()=>{
+  const t=await stored();
+  expect(t.findingDispositions).toEqual([]);
+  for(const id of ['F1','F2','nope']) expect(await one(id,t)).toBeNull();
+  const q=await gql('query($id:ID!){agentTask(id:$id){findingDisposition(findingId:"F1"){findingId}}}');
+  expect(q.errors).toBeUndefined();expect(q.data).toEqual({agentTask:{findingDisposition:null}});
+ });
  it('read emits no event and changes no stored bytes',async()=>{
   await dispose('fixed');const before=await stored(),n=(await events()).length;
   await one('F1');await one('zzz');
