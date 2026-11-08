@@ -27,9 +27,20 @@ ALTER TABLE passkey_credentials ADD CONSTRAINT chk_passkey_shape CHECK (
       AND revoked_at IS NOT NULL AND window_outcome IS NOT NULL AND window_ended_at IS NOT NULL
       AND revoked_at = cancelled_at AND window_outcome = 'cancelled' AND window_ended_at = cancelled_at))
 );
+-- #3746: the passkey platform clock. hadron_passkey_now() is the transaction's own time, which the guard's equality rule
+-- below requires every lifecycle stamp to equal; hadron_passkey_wall_now() is the wall clock at the statement, after the
+-- caller's locks, which decides whether a first window is still open when a revocation takes effect. Both add
+-- hadron_passkey_clock_offset(), which is zero in every deployment. It is a test seam only: a test replaces it inside
+-- one fixture transaction to register a first passkey whose 72-hour window ends seconds from now, with every guard and
+-- CHECK enabled, and to model a database clock that steps backwards. Only the database owner can replace it.
+CREATE OR REPLACE FUNCTION hadron_passkey_clock_offset() RETURNS interval LANGUAGE sql STABLE AS $$ SELECT interval '0' $$;
+CREATE OR REPLACE FUNCTION hadron_passkey_now() RETURNS timestamp(3) LANGUAGE sql STABLE
+  AS $$ SELECT ((CURRENT_TIMESTAMP AT TIME ZONE 'UTC') + hadron_passkey_clock_offset())::timestamp(3) $$;
+CREATE OR REPLACE FUNCTION hadron_passkey_wall_now() RETURNS timestamp(3) LANGUAGE sql VOLATILE
+  AS $$ SELECT ((clock_timestamp() AT TIME ZONE 'UTC') + hadron_passkey_clock_offset())::timestamp(3) $$;
 CREATE OR REPLACE FUNCTION hadron_guard_passkey_credential() RETURNS trigger
 LANGUAGE plpgsql AS $$
-DECLARE platform_now timestamp(3) := (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3);
+DECLARE platform_now timestamp(3) := hadron_passkey_now();
 BEGIN
   IF TG_OP = 'DELETE' THEN
     RAISE EXCEPTION 'Passkey credentials are never deleted' USING ERRCODE = '23514';
