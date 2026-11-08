@@ -6,6 +6,21 @@
  * of the surface agents actually drive must get the same named refusal the
  * GraphQL surface gives, and the refused write must leave the row untouched.
  *
+ * SINCE #2987 (ruling V13) these pins assert the LAYERING, not the DB
+ * conflict: a seq-naming write on a message is refused pre-write with
+ * [seq_protected], and the write never reaches the constraint. The
+ * `[chat_message_seq_conflict]` branches in src/mcp/server.ts are
+ * DEFENSE-IN-DEPTH that no door input can reach today — these tools cannot
+ * change a node's loc (update identifies the row BY loc and refuses a move;
+ * relocation is moveNode's job), and every seq-naming message write is
+ * V13-gated — so they are intentionally kept untested-by-input rather than
+ * deleted: they exist so that any future input combination that DOES reach
+ * the constraint answers with the typed refusal instead of the raw P2002
+ * this file's origin found. The DB-level mapping is pinned where it is
+ * reachable: the clone and move pins in src/lib/chatSeqUnique.test.ts (the
+ * same writeNodeCore mapping, via cloneNode/moveNode) and the mutant kills
+ * in the §10 receipts.
+ *
  * The move half of the finding (GraphQL moveNode → nodeMoveOps.moveWithResult)
  * is pinned in src/lib/chatSeqUnique.test.ts with the constraint matrix.
  *
@@ -88,7 +103,7 @@ describe('MCP node tools — the #992 typed refusal reaches the real writers (#2
     expect(await db.node.findFirst({ where: { memoryId: memory.id, loc: 'qa:messages:001-collide' } })).toBeNull();
   });
 
-  it('hadron_update_node refuses moving an existing message INTO collision, leaving the row untouched', async () => {
+  it('hadron_update_node refuses a seq-naming update of an existing message pre-write, leaving the row untouched', async () => {
     await seedChatMessage('qa:messages:001-first', 1);
     const victim = await seedChatMessage('qa:messages:002-second', 2);
     const srv = createTestableMcpServer(adminAuth());

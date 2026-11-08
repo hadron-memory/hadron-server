@@ -31,7 +31,7 @@ import { fileURLToPath } from 'url';
 import { Client } from 'pg';
 import { GraphQLError } from 'graphql';
 import { db } from '../integrations/db/client.js';
-import { cleanDb } from '../test/helpers.js';
+import { cleanDb, suspendChatSeqUniqueness } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { Prisma } from '../generated/prisma/index.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
@@ -50,24 +50,35 @@ function ctx(userId?: string): Context {
 }
 
 async function expectCode(p: Promise<unknown>, code: string) {
+  // Flag pattern (Joshua BLIND P3-9, #2622 fix head): expect.fail INSIDE the
+  // try would be swallowed by this same catch and surface as a confusing
+  // toBeInstanceOf mismatch when the promise unexpectedly resolves.
+  let refused = false;
+  let caught: unknown;
   try {
     await p;
-    expect.fail(`expected rejection with extensions.code=${code}`);
   } catch (e) {
-    expect(e).toBeInstanceOf(GraphQLError);
-    expect((e as GraphQLError).extensions?.code).toBe(code);
+    refused = true;
+    caught = e;
   }
+  expect(refused, `expected rejection with extensions.code=${code}`).toBe(true);
+  expect(caught).toBeInstanceOf(GraphQLError);
+  expect((caught as GraphQLError).extensions?.code).toBe(code);
 }
 
 /** The raw P2002 the storage layer raises for a taken (chat, seq). */
 async function expectUniqueViolation(p: Promise<unknown>) {
+  let refused = false;
+  let caught: unknown;
   try {
     await p;
-    expect.fail('expected a unique violation');
   } catch (e) {
-    expect(e).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
-    expect((e as Prisma.PrismaClientKnownRequestError).code).toBe('P2002');
+    refused = true;
+    caught = e;
   }
+  expect(refused, 'expected a unique violation').toBe(true);
+  expect(caught).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+  expect((caught as Prisma.PrismaClientKnownRequestError).code).toBe('P2002');
 }
 
 /** The app-class shared memory the first team post bootstrapped the chat in.
@@ -430,8 +441,12 @@ describe('#992 — prisma/chat-seq-invariants.sql (the preflight + index)', () =
 
   it('refuses a colliding set safely, reporting the collision, and installs after repair', async () => {
     // The template built the index on an empty DB; take it away so this test
-    // exercises the file's own create path against real rows.
-    await db.$executeRawUnsafe(`DROP INDEX IF EXISTS "${INDEX_NAME}"`);
+    // exercises the file's own create path against real rows. The SUSPENSION
+    // helper (not a bare DROP) also resets the presence flag: if this test
+    // dies before its reinstall, the next cleanDb still restores the
+    // constraint instead of silently leaving it off for the worker (Joshua
+    // BLIND P3-5, #2622 fix head).
+    await suspendChatSeqUniqueness(db);
     expect(await indexExists()).toBe(false);
 
     const memId = legacyMem.id;
@@ -448,6 +463,95 @@ describe('#992 — prisma/chat-seq-invariants.sql (the preflight + index)', () =
       orderBy: { createdAt: 'asc' },
     });
     await db.node.delete({ where: { id: dupes[1].id } });
+    await runSql();
+    expect(await indexExists()).toBe(true);
+  });
+
+  it("carries the collision samples in the refusal's DETAIL (migrate deploy does not surface WARNINGs)", async () => {
+    await suspendChatSeqUniqueness(db);
+    const memId = legacyMem.id;
+    await seedMessage(memId, 7);
+    await seedMessage(memId, 7);
+
+    let refused = false;
+    let refusal: (Error & { detail?: string }) | undefined;
+    try {
+      await runSql();
+    } catch (e) {
+      refused = true;
+      refusal = e as Error & { detail?: string };
+    }
+    expect(refused, 'expected the preflight to refuse').toBe(true);
+    expect(refusal!.message).toMatch(/colliding \(chat, seq\) group\(s\) remain/);
+    // pg renders the exception's USING DETAIL on the error's detail field —
+    // the samples ride the refusal itself, wherever its text goes.
+    expect(refusal!.detail).toContain('seq 7');
+    expect(refusal!.detail).toContain(`${memId} / chat`);
+    expect(await indexExists()).toBe(false);
+  });
+
+  it('refuses a CHAT Channel address carrying a reserved "messages" segment, and installs after the rename', async () => {
+    await suspendChatSeqUniqueness(db);
+    // Pre-guard legacy shape: the row is planted directly, bypassing
+    // ensureChannelRow's guard — the census exists for exactly this data.
+    const rootId = generateId();
+    await db.node.create({
+      data: {
+        id: rootId, memoryId: legacyMem.id, loc: 'chats:legacy:messages:nested',
+        name: 'nested', nodeType: 'chat', content: 'root', createdBy: admin.id,
+      },
+    });
+    await db.channel.create({
+      data: {
+        id: generateId(), memoryId: legacyMem.id, loc: 'chats:legacy:messages:nested',
+        name: 'nested chat', kind: 'CHAT', chatRootNodeId: rootId, lastSeq: 0,
+      },
+    });
+
+    let refused = false;
+    let refusal: (Error & { detail?: string }) | undefined;
+    try {
+      await runSql();
+    } catch (e) {
+      refused = true;
+      refusal = e as Error & { detail?: string };
+    }
+    expect(refused, 'expected the preflight to refuse').toBe(true);
+    expect(refusal!.message).toMatch(/Channel address\(es\) contain a reserved "messages" segment/);
+    expect(refusal!.detail).toContain('chats:legacy:messages:nested');
+    expect(await indexExists()).toBe(false); // refused safely: nothing installed
+
+    // The repair is a rename (owner-approved, here the test's): move the
+    // address off the reserved segment, then installation succeeds.
+    await db.channel.update({ where: { chatRootNodeId: rootId }, data: { loc: 'chats:legacy-nested' } });
+    await db.node.update({ where: { id: rootId }, data: { loc: 'chats:legacy-nested' } });
+    await runSql();
+    expect(await indexExists()).toBe(true);
+  });
+
+  it('refuses a chat-message row under a nested ":messages:" separator (the folded-row shape), and installs after repair', async () => {
+    await suspendChatSeqUniqueness(db);
+    // A pre-guard Channel at 'qa:edge:messages:inner' would have appended at
+    // exactly this shape: the row folds into chat 'qa:edge' (split on the
+    // FIRST separator) while the allocator scanned its own prefix.
+    await seedMessage(legacyMem.id, 1, { loc: 'qa:edge:messages:inner:messages:001-folded' });
+
+    let refused = false;
+    let refusal: (Error & { detail?: string }) | undefined;
+    try {
+      await runSql();
+    } catch (e) {
+      refused = true;
+      refusal = e as Error & { detail?: string };
+    }
+    expect(refused, 'expected the preflight to refuse').toBe(true);
+    expect(refusal!.message).toMatch(/nested ":messages:" separator/);
+    expect(refusal!.detail).toContain('qa:edge:messages:inner:messages:001-folded');
+    expect(await indexExists()).toBe(false);
+
+    await db.node.delete({
+      where: { loc_memoryId: { loc: 'qa:edge:messages:inner:messages:001-folded', memoryId: legacyMem.id } },
+    });
     await runSql();
     expect(await indexExists()).toBe(true);
   });
