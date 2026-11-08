@@ -157,12 +157,21 @@ describe('#3727 encrypted update — the changed cell', () => {
     expect((await raw()).abstract).toBeNull();
   });
 
-  it('CONTROL: a string replaces with ciphertext at rest and recomputes the hash on plaintext', async () => {
+  it('CONTROL: a string abstract stores ciphertext at rest; the hash follows plaintext content', async () => {
     await update({ abstract: 'fresh summary' });
     const row = await raw();
     expect(isCiphertext(row.abstract!)).toBe(true);
     expect((await logical()).abstract).toBe('fresh summary');
+    // Abstract-only write: content is unchanged, so the derived hash keeps the
+    // seeded value (matrix: a string abstract hashes the CURRENT content).
     expect(row.abstractOriginHash).toBe(computeContentHash(OLD_CONTENT));
+    // Recomputation made OBSERVABLE (BLIND on bf3828e9): the assertion above
+    // equals the seeded hash and alone cannot tell a recompute from a
+    // never-touched hash. Changing content in the same write as an abstract
+    // must move the hash to the NEW plaintext's — never-touched would leave
+    // the old value, and hashing ciphertext would give anything but this.
+    await update({ abstract: 'second summary', content: 'fresh body' });
+    expect((await raw()).abstractOriginHash).toBe(computeContentHash('fresh body'));
   });
 
   it('CONTROL: an unrelated update preserves abstract, content and hash', async () => {
@@ -177,6 +186,15 @@ describe('#3727 encrypted update — the changed cell', () => {
 
 describe('#3727 plain GraphQL control — already clears, must stay', () => {
   it('abstract:null and content:null clear; omission preserves', async () => {
+    // Omission is checked FIRST, while the seeded values are still in place:
+    // after the clears both columns are NULL, and a null-to-null comparison
+    // cannot tell preservation from clearing (BLIND on bf3828e9).
+    const seeded = await raw();
+    await update({ name: 'Renamed plain' });
+    const preserved = await raw();
+    expect(preserved.abstract).toBe(seeded.abstract);
+    expect(preserved.content).toBe(seeded.content);
+    expect(preserved.abstractOriginHash).toBe(seeded.abstractOriginHash);
     await update({ abstract: null });
     expect((await raw()).abstract).toBeNull();
     expect((await raw()).abstractOriginHash).toBeNull();
@@ -184,12 +202,6 @@ describe('#3727 plain GraphQL control — already clears, must stay', () => {
     const row = await raw();
     expect(row.content).toBeNull();
     expect(row.abstract).toBeNull();
-    const before = await raw();
-    await update({ name: 'Renamed plain' });
-    const after = await raw();
-    expect(after.content).toBe(before.content);
-    expect(after.abstract).toBe(before.abstract);
-    expect(after.abstractOriginHash).toBe(before.abstractOriginHash);
   });
 });
 
