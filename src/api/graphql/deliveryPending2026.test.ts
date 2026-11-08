@@ -25,7 +25,7 @@ import { generateId } from '../../lib/id.js';
 // #2671: the footer omits by design when a loaded runner exceeds its 20/210/180 ms budget, and the pins
 // below assert presence. Re-running a failed pin (fixtures included) rides out that transient; a pin
 // that is wrong fails every attempt. Product budgets stay untouched and still exercised.
-vi.setConfig({ retry: 3 });
+const RIDE_OUT_LOAD = { retry: 3 } as const;
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -64,7 +64,7 @@ const metadata=(count:number)=>({v:1,count,complete:true,asOf:expect.any(String)
 async function request(binding=true,query='{ serverInfo { version } }'): Promise<any> {
  return (await fetch(base+'/graphql',{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${raw}`,...(binding?{'x-hadron-session':session.id}:{})},body:JSON.stringify({query})})).json();
 }
-describe('#2026 response footer',()=>{
+describe('#2026 response footer', RIDE_OUT_LOAD, ()=>{
  it('HTTP carries13 while C7 renders10 plus overflow3, without message metadata',async()=>{
   const now=new Date(); const pull=await loadDeliveryBatches({ctx:context() as any,app,hostId:null,workerIds:[worker.id],now});
   expect(pull.batches[0].overflow).toBe(3);
@@ -95,7 +95,7 @@ async function snapshot() {
  for(const {name} of tables) out[name]=await db.$queryRawUnsafe(`SELECT to_jsonb(t)::text AS row FROM public."${name.replaceAll('"','""')}" t ORDER BY 1`);
  return out;
 }
-describe('#2026 count boundaries and omission',()=>{
+describe('#2026 count boundaries and omission', RIDE_OUT_LOAD, ()=>{
  it('has zero effects on every public table',async()=>{
   const before=await snapshot();
   expect(await deliveryPending(context() as any)).toEqual(metadata(13));
@@ -159,7 +159,7 @@ describe('#2026 count boundaries and omission',()=>{
 });
 
 
-describe('#2026 per-call SDK and committed marks',()=>{
+describe('#2026 per-call SDK and committed marks', RIDE_OUT_LOAD, ()=>{
  it('keeps parallel named read sessions local to each call on one connection',async()=>{
   const other=await db.worker.create({data:{...WORKER_SIGNATURE_DEFAULTS,appId:app.id,agentId:worker.agentId,name:'Other',slug:'other',heldByUserId:user.id}});
   const otherSession=await db.session.create({data:{id:generateId(),appId:app.id,userId:user.id,workerId:other.id,agentId:worker.agentId}});
@@ -210,7 +210,7 @@ describe('#2026 per-call SDK and committed marks',()=>{
 // omission failed them. This pin injects exactly one such omission on the FIRST attempt only
 // (the flag outlives the attempt, a retry re-runs the fixtures) and requires the pin to ride it out.
 let injectedTransientOmission = false;
-describe('#2671 a transient footer omission does not fail the presence pins', () => {
+describe('#2671 a transient footer omission does not fail the presence pins', RIDE_OUT_LOAD, () => {
  it('rides out one P2028 on the footer transaction and still pins the count', async () => {
   if (!injectedTransientOmission) {
    injectedTransientOmission = true;
@@ -221,7 +221,7 @@ describe('#2671 a transient footer omission does not fail the presence pins', ()
  });
 });
 
-describe('#2026 review closure controls', () => {
+describe('#2026 review closure controls', RIDE_OUT_LOAD, () => {
  it('preserves the ambient actor semantics of an actor-neutral callback', async () => {
   const server = createTestableMcpServer({userId:user.id,apiKeyId:key.id,appId:app.id,roles:['READER']});
   const spy = vi.spyOn(resolvers.Mutation, 'startSession').mockImplementation(async () => {
