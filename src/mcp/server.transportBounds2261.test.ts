@@ -2,6 +2,7 @@
  * #2261 / #2259 — idle eviction and a per-principal cap on MCP transports.
  * Real Express server + real SDK transport over localhost HTTP/SSE, synthetic principals only.
  */
+import { startWorkerSessionGql } from '../test/startWorkerSessionGql.js';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { createServer as createHttpServer, request as httpRequest, type Server } from 'node:http';
@@ -357,7 +358,7 @@ describe('#2261 eviction touches connection-local state only', () => {
     return (msg.result?.content ?? []).map((c) => c.text ?? '').join('\n');
   }
 
-  async function workerFixture(): Promise<{ userId: string; token: string; workerId: string }> {
+  async function workerFixture(): Promise<{ userId: string; token: string; workerId: string; appId: string }> {
     const { id: userId, token } = await makeUser();
     const org = await db.organization.create({ data: { id: generateId(), name: 'Team', urn: `team-2261-${generateId().slice(-6)}.com` } });
     await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId, role: 'CONTRIBUTOR' } });
@@ -366,29 +367,24 @@ describe('#2261 eviction touches connection-local state only', () => {
     const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team App', urn: `${org.urn}:team` } });
     await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
     const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
-    return { userId, token, workerId: worker.id };
+    return { userId, token, workerId: worker.id, appId: app.id };
   }
 
-  it('leaves the durable Session row and worker hold unchanged; resume lands on the same open session', async () => {
-    const { userId, token, workerId } = await workerFixture();
+  // #3082: the worker session is started through GraphQL (MCP no longer binds a worker, and hadron_resume_session /
+  // hadron_create_resume_claim are disabled), so the resume leg of this pin is gone with the tools; the covered rule is
+  // that evicting the transport leaves the durable Session row and the worker hold untouched.
+  it('leaves the durable Session row and worker hold unchanged', async () => {
+    const { userId, token, workerId, appId } = await workerFixture();
     const sid = await open(token);
-    const started = await callTool(token, sid, 'hadron_start_session', { description: 'evict me', workerRef: workerId });
-    const sessionId = started.match(/Session started: (\S+)/)?.[1];
-    expect(sessionId, started).toBeTruthy();
-    const claim = await callTool(token, sid, 'hadron_create_resume_claim', { session: sessionId });
-    expect(claim).toContain(sessionId!);
+    const sessionId = await startWorkerSessionGql({ workerRef: workerId, userId, appId });
 
-    const beforeSession = await db.session.findUniqueOrThrow({ where: { id: sessionId! } });
+    const beforeSession = await db.session.findUniqueOrThrow({ where: { id: sessionId } });
     const beforeWorker = await db.worker.findUniqueOrThrow({ where: { id: workerId } });
     await sweepIdleMcpTransportsForTests(FAR_FUTURE());
     expect(mcpTransportStateForTests().sessionIds).not.toContain(sid);
-    expect(await db.session.findUniqueOrThrow({ where: { id: sessionId! } })).toEqual(beforeSession);
+    expect(await db.session.findUniqueOrThrow({ where: { id: sessionId } })).toEqual(beforeSession);
     expect(await db.worker.findUniqueOrThrow({ where: { id: workerId } })).toEqual(beforeWorker);
     expect(beforeSession.endedAt).toBeNull();
-
-    const fresh = await open(token);
-    const resumed = await callTool(token, fresh, 'hadron_resume_session', {});
-    expect(resumed).toContain(sessionId!);
     expect(await db.session.count({ where: { userId } })).toBe(1);
   });
 

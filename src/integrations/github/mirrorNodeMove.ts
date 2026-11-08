@@ -163,6 +163,10 @@ async function mirrorMove(
           console.warn(`[git-mirror] Deferring move into memory ${destMemoryId}: ciphertext payload`);
           return false;
         }
+        const children = live.length ? await db.node.findMany({
+          where: { memoryId: destMemoryId, deletedAt: null, loc: { in: live.map(row => row.loc + ':README') } }, select: { loc: true },
+        }) : [];
+        const liveChildLocs = new Set(children.map(row => row.loc));
         // Same-memory: the old paths live in THIS repo, so remove them in the
         // same commit.
         //
@@ -179,7 +183,7 @@ async function mirrorMove(
         if (!crossMemory) {
           for (const m of moved) removeNodeFile(localPath, m.previousLoc, m.id, memoryUrn);
         }
-        for (const row of live) writeNodeFile(localPath, toNodeForGit(row), memoryUrn);
+        for (const row of live) writeNodeFile(localPath, toNodeForGit(row), memoryUrn, liveChildLocs.has(row.loc + ':README'));
       },
     );
   }
@@ -214,6 +218,7 @@ function toNodeForGit(
     abstractOriginHash: string | null; contentHash: string | null; content: string | null;
     tags: string[] | string; seq: number | null; data: unknown; properties: unknown;
     role?: string | null; isRunnable?: boolean | null; isPlaceholder?: boolean;
+    authorshipKind?: string | null; authoredByTask?: string | null; authoredByRevision?: number | null;
     outgoingEdges?: NodeForGit['outgoingEdges'];
   },
 ): NodeForGit {
@@ -238,6 +243,9 @@ function toNodeForGit(
     role: row.role ?? null,
     isRunnable: row.isRunnable ?? null,
     isPlaceholder: row.isPlaceholder ?? false,
+    authorshipKind: row.authorshipKind ?? null,
+    authoredByTask: row.authoredByTask ?? null,
+    authoredByRevision: row.authoredByRevision ?? null,
     outgoingEdges: row.outgoingEdges ?? [],
   };
 }

@@ -1,3 +1,4 @@
+import { TEAM_SNAPSHOT_TOOLS } from './teamSnapshotTools.js';
 /**
  * Run-tool registry (plan-tools §4/§5 phase 1). Node tools
  * (hadron_create_node / hadron_update_node / hadron_read_node) land in
@@ -19,6 +20,7 @@ import { DRIVE_TOOLS } from './driveTools.js';
 import { TASK_TOOLS } from './taskTools.js';
 import { TEAM_CHAT_TOOLS } from './teamChatTools.js';
 import { GITHUB_TOOLS } from './githubTools.js';
+import { CONTENT_VALIDATION_TOOLS } from './contentValidationTools.js';
 
 export { AuthorFailError };
 export { hadronReadNode, hadronCreateNode, hadronUpdateNode } from './nodeTools.js';
@@ -33,7 +35,9 @@ export { hadronReadSecret } from './secretTools.js';
 export { driveSearch, driveGetFile, driveExportFile } from './driveTools.js';
 export { hadronTaskCreate, hadronTaskUntrackedList, hadronTaskUntrackedClaim } from './taskTools.js';
 export { teamChatRead } from './teamChatTools.js';
+export { hadronTeamSnapshot } from './teamSnapshotTools.js';
 export { githubIssueSnapshot } from './githubTools.js';
+export { hadronRecordContentValidation } from './contentValidationTools.js';
 export type { RunToolDef, RunToolContext };
 
 /** The author's printf — lands on the hop's trail element (D-TL-2). */
@@ -94,6 +98,8 @@ const REGISTRY = new Map<string, RunToolDef>(
     ...TASK_TOOLS,
     ...TEAM_CHAT_TOOLS,
     ...GITHUB_TOOLS,
+    ...TEAM_SNAPSHOT_TOOLS,
+    ...CONTENT_VALIDATION_TOOLS,
   ].map((t) => [t.name, t]),
 );
 

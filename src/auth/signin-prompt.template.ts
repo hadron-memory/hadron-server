@@ -18,6 +18,8 @@
  * `/oauth/authorize` path plus the original query.
  */
 
+import { HADRON_HEADER, HADRON_HEADER_STYLE } from './hadron-header.template.js';
+
 import { SHARED_STYLE } from './email-entry.template.js';
 
 export const SIGNIN_PROMPT_TEMPLATE = `<!doctype html>
@@ -28,9 +30,11 @@ export const SIGNIN_PROMPT_TEMPLATE = `<!doctype html>
   <meta name="robots" content="noindex">
   <title>Sign in to Hadron</title>
 ${SHARED_STYLE}
+${HADRON_HEADER_STYLE}
 </head>
 <body>
   <main>
+    ${HADRON_HEADER}
     <h1>Sign in to Hadron</h1>
     <p><strong>{{clientName}}</strong> is asking to connect to your Hadron account.</p>
     <p class="muted">Returns to: <code>{{redirectAnchor}}</code></p>

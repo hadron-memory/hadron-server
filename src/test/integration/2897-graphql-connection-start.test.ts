@@ -306,7 +306,8 @@ describe('startConnection: the server-hosted done page', () => {
   });
 
   it('authority lost during the round-trip: not_authorized, nothing written', async () => {
-    const { authorizeUrl } = await startAsAdmin();
+    const started = await startAsAdmin();
+    const { authorizeUrl } = started;
     const state = await consent(authorizeUrl);
     await db.orgMember.update({
       where: { organizationId_userId: { organizationId: orgId, userId: adminId } },
@@ -316,6 +317,14 @@ describe('startConnection: the server-hosted done page', () => {
     expect(cb.status).toBe(200);
     expect(await cb.text()).toContain('not_authorized');
     expect(vi.mocked(createToolConnection)).not.toHaveBeenCalled();
+    // #3303 N12: the flow ends with the page, not just the page text: settled FAILED not_authorized, no connection.
+    const flow = await db.connectionFlow.findFirstOrThrow({ where: { organizationId: orgId } });
+    expect(flow.failureCode).toBe('not_authorized');
+    expect(flow.settledAt).not.toBeNull();
+    expect(flow.connectionId).toBeNull();
+    // The state was consumed: a replay cannot turn the refusal into a success.
+    const replay = await fetch(`${baseUrl}/auth/gmail/callback?code=c&state=${state}`, { redirect: 'manual' });
+    expect(replay.status).toBe(400);
   });
 });
 

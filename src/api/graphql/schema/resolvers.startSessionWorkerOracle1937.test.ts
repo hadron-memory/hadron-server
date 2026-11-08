@@ -82,6 +82,10 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin, role: 'ADMIN' } });
   await db.orgMember.create({ data: { organizationId: orgB.id, userId: outsider, role: 'ADMIN' } });
   agentId = (await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin))).id;
+  await db.agent.update({ where: { id: agentId }, data: { visibility: 'ORGANIZATION' } });
+  // #1148: the user-owned App below has the same live licence required by a real bind.
+  await db.orgMember.create({ data: { organizationId: org.id, userId: owner, role: 'READER' } });
+  await db.agentSubscription.create({ data: { userId: owner, agentId, activatedAt: new Date('2020-01-01') } });
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` }, select: { id: true, urn: true } });
   await db.appMember.create({ data: { appId: app.id, userId: participant, role: 'member' } });
   // The outsider's own App, in their own org: the appRef, credential and selection shapes all come from it.
@@ -141,13 +145,13 @@ describe('an outsider cannot tell a foreign worker from an absent one', () => {
     }
   });
 
-  it('MCP hadron_start_session delegates: a real worker and a guessed one read identically to an outsider', async () => {
+  it('MCP hadron_start_session refuses a worker binding before any read (#3082): a real worker and a guessed one read identically to an outsider', async () => {
     const srv = createTestableMcpServer({ userId: outsider, roles: ['READER'], clientId: `user:${outsider}` });
     const guessed = composeWorkerUrn(app.urn, 'nobody');
     const real = await srv.callToolText('hadron_start_session', { description: 'probe', workerRef: ada.urn });
     const fake = await srv.callToolText('hadron_start_session', { description: 'probe', workerRef: guessed });
     expect(real).toBe(fake.replaceAll(guessed, ada.urn));
-    expect(real).toContain('Worker not found');
+    expect(real).toContain('MCP_WORKER_BINDING_UNSUPPORTED');
     expect(await db.session.count()).toBe(0);
   });
 });

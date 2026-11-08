@@ -216,6 +216,7 @@ describe('#3180 item 2: security-optional coverage (names the existing pin each 
   it('ordinary failures that reach the cap leave the row FAILED (shared counter) and the sweep makes no attempt', async () => {
     const node = await makeNode();
     await owe(node.id, { attempts: 9 });
+    await db.gitMirrorObligation.updateMany({where:{memoryId,nodeId:node.id},data:{branch:'hadron-updates'}});
     rejectPushes();
     await writeNodeToGit({ ...node, outgoingEdges: [] }, '', null, memoryId);
     expect((await rows())[0]).toMatchObject({ state: 'FAILED', attempts: 10 });  // no cap is passed on the ordinary path

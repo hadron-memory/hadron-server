@@ -3,7 +3,6 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
-import { setS7AvailableForTest } from '../../../lib/tickers/s7Availability.js';
 import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
@@ -42,7 +41,7 @@ beforeEach(async () => {
 describe('delivery settings #2025', () => {
   it('persists new App defaults and exposes them to a participant', async () => {
     const row = await db.app.findUniqueOrThrow({ where: { id: appId } }) as any;
-    expect(row).toMatchObject({ deliveryBusyDelaySeconds: 600, deliveryStuckWindowSeconds: 900, deliveryStandbyEnabled: false });
+    expect(row).toMatchObject({ deliveryBusyDelaySeconds: 600, deliveryStuckWindowSeconds: 900 });
     expect(await get(ctx(member.id))).toEqual(defaults);
   });
   it('supports each human manager arm, including a personal App owner', async () => {
@@ -93,13 +92,6 @@ describe('delivery settings #2025', () => {
   it('S7a is inert: enabling standby is refused with the typed error and nothing is written', async () => {
     await code(set({ standbyEnabled: true }), 'DELIVERY_STANDBY_UNAVAILABLE');
     expect(await set({ standbyEnabled: false })).toEqual(defaults);
-  });
-  it('S7: the standby switch is accepted and effective once on (S7b); off restores the defaults', async () => {
-    setS7AvailableForTest(true);
-    try {
-    expect(await set({ standbyEnabled: true })).toEqual({ ...defaults, standbyEnabled: true, standbyEffective: true });
-    expect(await set({ standbyEnabled: false })).toEqual(defaults);
-    } finally { setS7AvailableForTest(false); }
   });
   it('refuses ordinary members, keys, impersonation, invalid bindings and foreign Apps', async () => {
     await code(set({ busyDelaySeconds: 500 }, ctx(member.id)), 'FORBIDDEN');
@@ -179,7 +171,7 @@ describe('delivery settings #2025', () => {
     const overflow = { oldestPostedAt: new Date('2026-10-18T10:01:00Z'), lastDueMessageAt: new Date('2026-10-18T10:09:00Z') };
     expect(batchTiming(settings, overflow).deliverAfter).toEqual(new Date('2026-10-18T10:03:00Z'));
   });
-  it('GraphQL and MCP select and return the same contract; MCP requires a named plain session', async () => {
+  it('GraphQL and the resolver select and return the same contract', async () => {
     const { ApolloServer } = await import('@apollo/server');
     const { typeDefs } = await import('./typeDefs.js');
     const server = new ApolloServer<Context>({ typeDefs, resolvers });
@@ -189,14 +181,10 @@ describe('delivery settings #2025', () => {
       if (r.body.kind !== 'single') throw new Error('unexpected multipart result');
       expect(r.body.singleResult.errors).toBeUndefined();
       expect(r.body.singleResult.data?.setAppDeliverySettings).toEqual({ ...defaults, busyDelaySeconds: 500 });
-      const { createTestableMcpServer } = await import('../../../mcp/server.js');
-      const mcp = createTestableMcpServer({ userId: manager.id, roles: ['READER'], clientId: `user:${manager.id}` } as never, { sessionId: generateId(), cachedAppResolution: { kind: 'multi-app' } });
-      const plain = await db.session.create({ data: { id: generateId(), userId: manager.id } });
-      const text = (r: any) => r.content[0].text;
-      expect(text(await mcp.callTool('hadron_delivery_settings_get', { appRef: appId }))).toContain('"busyDelaySeconds":500');
-      expect(text(await mcp.callTool('hadron_delivery_settings_set', { appRef: appId, input: { busyDelaySeconds: 450 } }))).toMatch(/^\[session_required\]/);
-      expect(text(await mcp.callTool('hadron_delivery_settings_set', { appRef: appId, session: plain.id, input: { busyDelaySeconds: 450 } }))).toContain('"busyDelaySeconds":450');
-      expect(text(await mcp.callTool('hadron_delivery_settings_set', { appRef: appId, session: plain.id, input: { busyDelaySeconds: null } }))).toMatch(/^\[bad_user_input\]/);
+      // #3082: the hadron_delivery_settings_get/_set MCP legs are gone with the tools; the resolver keeps the same rules.
+      expect(await get()).toMatchObject({ busyDelaySeconds: 500 });
+      expect(await set({ busyDelaySeconds: 450 })).toMatchObject({ busyDelaySeconds: 450 });
+      await expect(set({ busyDelaySeconds: null })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
     } finally { await server.stop(); }
   });
 });
@@ -279,12 +267,10 @@ describe('#2138 §3.6 — the team pause', () => {
     expect((await db.workerWakeSettings.findUniqueOrThrow({ where: { workerId } })).pausedUntil).toEqual(until);
   });
 
-  it('is exposed on the App and has an MCP twin', async () => {
+  it('is exposed on the App (its MCP twin hadron_set_team_pause is disabled, #3082)', async () => {
     await pause(true);
     const { typeDefs } = await import('./typeDefs.js');
     expect(typeDefs).toContain('teamPausedAt: DateTime');
-    const { TICKER_WRITE_TOOLS } = await import('../../../mcp/tickerTools.js');
-    expect(TICKER_WRITE_TOOLS).toContain('hadron_set_team_pause');
   });
 });
 

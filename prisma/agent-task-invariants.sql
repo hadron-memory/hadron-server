@@ -1,5 +1,5 @@
 -- #1705 (Task Management T1): agent task shape and the append-only team event stream.
--- Source of truth for these objects; the migration carries a byte-identical copy
+-- Source of truth for these objects; migrations carry their corresponding blocks
 -- (pinned by src/lib/agentTasks/invariants.test.ts) and post-push.sql includes this file.
 
 -- cor:agt:050:01 / :02 — one owner, at most one assignee, the status
@@ -38,7 +38,9 @@ ALTER TABLE agent_tasks ADD CONSTRAINT chk_agent_tasks_shape CHECK (
 -- acknowledgement names who gave it.
 ALTER TABLE agent_team_events DROP CONSTRAINT IF EXISTS chk_agent_team_events_shape;
 ALTER TABLE agent_team_events ADD CONSTRAINT chk_agent_team_events_shape CHECK (
-  type ~ '^[a-z]+(\.[a-z]+(-[a-z]+)*)+$' AND
+  -- #3449: additive union; preserve ALL old-admitted types, not just the three legacy App producers.
+  (type ~ '^[a-z]+(\.[a-z]+(-[a-z]+)*)+$' OR
+    (length(type) <= 64 AND type ~ '^app\.[a-z0-9-]+(\.[a-z0-9][a-z0-9-]*)+$' AND type ~ '[a-z0-9]$')) AND
   (severity IS NULL OR severity = 'alarm') AND
   -- IS NOT NULL, not = 'alarm': a NULL severity would make that comparison
   -- NULL, and a CHECK that evaluates to NULL passes.

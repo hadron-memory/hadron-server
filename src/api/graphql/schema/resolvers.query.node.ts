@@ -1,15 +1,18 @@
+import { openThreadsWhere } from '../../../lib/comments/openThreads.js';
 import { admitOperationRate } from '../../../lib/rateLimit/index.js';
 import { transportRateIdentity } from '../../../lib/rateLimit/identity.js';
 import { normalizeFindNodesPaging } from '../../../lib/findNodesPaging.js';
 import { readCompiledRevision } from '../../../lib/bootCompile/provenance.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE } from '../../../lib/bootPrompt.js';
 import { liveTxContext, liveReadSnapshotContext } from './authorizedTx.js';
+import { projectUsageRowsFor } from './resolvers.usageProjection.js';
 import { withReconciledNodeRead } from '../../../lib/includes/reconciledNodeRead.js';
 import { markBatchReadNodes } from './resolvers.nodeBatchEdges.js';
 // nodeQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
 import { contentScopeWhere, effectiveContentScope, type ContentScope } from '../../../lib/comments/scope.js';
 import { isConcealedCommentHistory } from './resolvers.comments.js';
 import { COMMENT_NODE_TYPE } from '../../../lib/comments/index.js';
+import { decodeLocSegmentsCursor, normalizeLocSegmentsLimit, readLocSegments } from '../../../lib/memoryLocSegments.js';
 import { effectiveScope, findEffectiveNodeIdByLoc, markInherited, retainEffective, stillInherited, type InheritedFrom } from '../../../lib/effectiveSystemMemory.js';
 import {
   renderNodeExport,
@@ -29,6 +32,7 @@ import {
 import { composeHybridRanking, hybridKeywordCandidates } from '../../../lib/retrieval/hybrid.js';
 import { emitNodeUrnV2, bestEffortFlatNodeUrn } from '../../../lib/urnEmit.js';
 import { getRetrievalProvider } from '../../../lib/retrieval/postgres.js';
+import { UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES } from '../../../lib/retrieval/defaultNodeTypes.js';
 import { checkNodeTypesFilter, NodeTypesFilterError } from '../../../lib/retrieval/nodeTypeList.js';
 import { BooleanQueryError, literalQuery, relaxConjunctionToOr } from '../../../lib/retrieval/tsquery.js';
 import {
@@ -46,6 +50,7 @@ import { decryptReadableRevisions } from '../../../lib/nodeRevisionRead.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { sortSiblings } from '../../../lib/siblingOrder.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
+import { isDirectChildLoc } from '../../../lib/childLoc.js';
 import {
   parseUrnInput,
   parseUrnV2,
@@ -54,7 +59,7 @@ import {
   splitNodeUrn,
 } from '../../../lib/urn.js';
 import { compileTemplate } from '../../../lib/template.js';
-import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
+import { chargeRequestServed, resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
 import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
@@ -85,6 +90,7 @@ import {
   requireRole,
   requireOrgRole,
   isOwnerOrOrgMember,
+  canReadApp,
   canReadMemoryRecord,
   getAccessibleMemoryIds,
   pageArgs,
@@ -106,6 +112,7 @@ import { approvalStatePrismaWhere, mintedPrismaWhere, type NodeApprovalState } f
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { INDEXED_MEMORY_WHERE } from '../../../lib/embedding/indexing.js';
 import { edgeDisplayOrder, edgeRunOrder } from '../../../lib/edgeOrder.js';
+import { publicKnowledgeAmong, readsPublicKnowledgeWithoutUser } from '../../../lib/auth/publicKnowledgeRead.js';
 
 /**
  * #3113 — the validated `filter.nodeTypes` list (or null), refused as
@@ -139,8 +146,11 @@ export interface FindNodesArgs {
     objectType?: string | null;
     tags?: string[] | null;
     isRunnable?: boolean | null;
+    hasOpenThreads?: boolean | null;
     role?: string | null;
     locPrefix?: string | null;
+    /** #2832 — direct children of this loc only ("" = top level); null/absent = no filter. */
+    childrenOf?: string | null;
     createdBy?: string | null;
     updatedAfter?: string | null;
     updatedBefore?: string | null;
@@ -161,7 +171,83 @@ export interface FindNodesArgs {
   offset?: number | null;
 }
 
+/**
+ * The memories a node read may search: the caller's accessible set intersected with the memories the
+ * request names (ID/URN mix), then the class and organisation narrowing (#463, #1987, #3306). ONE
+ * computation shared by `findNodes` and the loc-segments read (#3456), so the two cannot disagree about
+ * who may read what. Returns the gated ids BEFORE system-memory inheritance (`effectiveScope`), which
+ * each caller applies itself. An empty list is the one answer for an unreadable, missing or empty scope.
+ */
+export async function resolveNodeReadScopeIds(
+  ctx: Context,
+  f: { memoryIds?: string[] | null; memoryClasses?: string[] | null; isRunnable?: boolean | null },
+  orgScopeId: string | null,
+): Promise<string[]> {
+  // ── Resolve scope: accessible ∩ requested memories (ID/URN mix) ──
+  const explicitIds = !!(f.memoryIds && f.memoryIds.length > 0);
+  // #3306: resolve the named memories first so the PUBLIC-knowledge arm (pure App key / userless run) looks up
+  // only those, never every PUBLIC memory.
+  const requestedIds = explicitIds
+    ? (await Promise.all(
+        f.memoryIds!.map((ref) =>
+          isId(ref)
+            ? Promise.resolve(ref)
+            : resolveMemoryRef(ctx.db, ref).then((r) => r.id).catch(() => null)),
+      )).filter((id): id is string => id !== null)
+    : [];
+  const accessible = await getAccessibleMemoryIds(ctx, undefined, { publicTargetIds: requestedIds });
+  const memClassClause: unknown =
+    f.memoryClasses && f.memoryClasses.length > 0
+      ? { in: f.memoryClasses }
+      : (!explicitIds ? { not: 'system' } : undefined); // broad search hides system-class; explicit ids win
+
+  // #463: push the org narrowing straight into the scope queries (rather
+  // than selecting all ids then intersecting) so the admin/broad path never
+  // materializes every memory id just to filter it down.
+  // #1987 (R208 A, cor:api:060:04): the organisation's TASK catalogue lists
+  // only the organisation's own memories, never an App's. A memory that
+  // belongs to an App carries app_id (required for class 'app', set for an
+  // App-scoped knowledge/group, #653), so the runnable listing narrows to
+  // app_id IS NULL, the same predicate as ORG_INCLUDE.memories. Narrowing
+  // only: it composes with the accessible set above and adds no audience.
+  // Org-scoped non-runnable search is deliberately unchanged (no ruling).
+  const orgWhere = orgScopeId
+    ? { organizationId: orgScopeId, ...(f.isRunnable === true ? { appId: null } : {}) }
+    : {};
+
+  let scopeIds: string[];
+  if (explicitIds) {
+    const requested = requestedIds;
+    const allowed = accessible === null ? null : new Set(accessible);
+    scopeIds = allowed === null ? requested : requested.filter((id) => allowed.has(id));
+    // Query only when a class or org filter must be applied to the requested
+    // set; otherwise the requested ∩ accessible ids stand as-is.
+    if ((memClassClause || orgScopeId) && scopeIds.length > 0) {
+      const rows = await ctx.db.memory.findMany({
+        where: { id: { in: scopeIds }, ...(memClassClause ? { class: memClassClause as never } : {}), ...orgWhere },
+        select: { id: true },
+      });
+      scopeIds = rows.map((m) => m.id);
+    }
+  } else if (accessible === null) {
+    // Admin/broad — resolve scope + class + org filter in one query.
+    const rows = await ctx.db.memory.findMany({
+      where: { deletedAt: null, ...(memClassClause ? { class: memClassClause as never } : {}), ...orgWhere },
+      select: { id: true },
+    });
+    scopeIds = rows.map((m) => m.id);
+  } else {
+    const rows = await ctx.db.memory.findMany({
+      where: { id: { in: accessible }, ...(memClassClause ? { class: memClassClause as never } : {}), ...orgWhere },
+      select: { id: true },
+    });
+    scopeIds = rows.map((m) => m.id);
+  }
+  return scopeIds;
+}
+
 type AppNodesFilter = {
+    hasOpenThreads?: boolean | null;
     // Memory-scope fields — NOT supported by appNodes (the App's scope is
     // authoritative). Present only so we can reject them explicitly.
     memoryIds?: string[] | null;
@@ -174,6 +260,10 @@ type AppNodesFilter = {
     isRunnable?: boolean | null;
     role?: string | null;
     locPrefix?: string | null;
+    /** #2832 — findNodes only; rejected by both App list forms. */
+    childrenOf?: string | null;
+    /** #3427 — findNodes only; rejected by both App list forms (an empty `{}` counts as present). */
+    where?: unknown;
     createdBy?: string | null;
     updatedAfter?: string | null;
     updatedBefore?: string | null;
@@ -196,6 +286,17 @@ async function appNodesRead(ctx: Context, appRef: string, filter: AppNodesFilter
   // #2190 (cor:dmo:050:17) — admission and the memory scope are ONE
   // computation, shared with appMemoryScope: a second copy would drift.
   // #3113 — validated before the scope, so an unknown or denied App refuses a bad list the same way.
+  // #2832: reject an unsupported narrowing filter before any App lookup, in both list forms.
+  if (filter?.hasOpenThreads != null) {
+    throw new GraphQLError('appNodes: filter.hasOpenThreads is not supported. Use findNodes to filter open threads.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+  if (filter?.childrenOf != null) {
+    throw new GraphQLError('appNodes: filter.childrenOf is not supported. Use findNodes to read direct children.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+  // #3427: `where` is the same kind of refusal, before the App lookup and with a fixed message (the predicate is never echoed).
+  if (filter?.where != null) {
+    throw new GraphQLError('appNodes: filter.where is not supported. Use findNodes to filter on node properties.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
   const nodeTypes = nodeTypesOrRefuse(filter, 'appNodes');
   const scope = await resolveAppNodeScope(ctx, appRef);
   if (!scope) return null;
@@ -603,8 +704,9 @@ export const nodeQueries = {
         {
           memoryUrnOf: (memoryId: string) =>
             loadMemoryUrn(ctx, memoryId).then((u: string | null) => u ?? memoryId),
+          // #40: each compiled piece is served, so it counts toward the request's aggregate.
           compileTemplate: (content: string, data: Record<string, string> | null, memoryId: string) =>
-            compileTemplate(content, data, memoryId, ctx.db, {}),
+            compileTemplate(content, data, memoryId, ctx.db, {}).then(text => chargeRequestServed(ctx, content, text)),
           // visibleEdges was already filtered through this caller's read gate.
           includeTarget: target => !!target,
           onTargetInlined: (target) => inlined.push(target),
@@ -874,7 +976,7 @@ export const nodeQueries = {
           }
           const app = await ctx.db.app.findUnique({
             where: { id },
-            select: { organizationId: true, ownerUserId: true },
+            select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true },
           });
           if (!app) return null;
           // The dedicated app(ref:) query admits any member of the App's org
@@ -883,7 +985,8 @@ export const nodeQueries = {
           // already open directly. isOwnerOrOrgMember covers the
           // global-admin bypass, the App's owner-user, and the
           // revoked-membership (deletedAt) rule.
-          if (!(await isOwnerOrOrgMember(ctx, app))) return null;
+          // #2089: plus a current owner-role member of a user-owned App.
+          if (!(await canReadApp(ctx, app))) return null;
           return { kind: 'app', id, organizationId: app.organizationId };
         }
         case 'user': {
@@ -1027,12 +1130,16 @@ export const nodeQueries = {
         incomingEdges: { include: { source: true }, orderBy: edgeDisplayOrder() },
       };
       // Denied ≡ not-found (null) — same non-disclosure the old queries had.
-      const allowed = (memoryId: string): boolean => {
+      const allowedByList = (memoryId: string): boolean => {
         if (access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId) {
           return (access.memoryId.in as string[]).includes(memoryId);
         }
         return true;
       };
+      // #3306: a pure App key / userless run also reads PUBLIC knowledge, one named row at a time (no id list).
+      const allowed = async (memoryId: string): Promise<boolean> =>
+        allowedByList(memoryId)
+        || (readsPublicKnowledgeWithoutUser(ctx) && (await publicKnowledgeAmong(ctx.db, [memoryId])).has(memoryId));
       // Decrypt + (unless raw) compile Mustache templates — shared tail of
       // every dispatch form. Generic so the full node row type flows through.
       const finish = async <T extends { id: string; loc: string; deletedAt: Date | null; content: string | null; data: unknown; memoryId: string }>(
@@ -1057,7 +1164,7 @@ export const nodeQueries = {
           current.deletedAt ||
           current.memoryId !== selected.memoryId ||
           current.loc !== selected.loc ||
-          (!inheritedFrom && !allowed(current.memoryId))
+          (!inheritedFrom && !(await allowed(current.memoryId)))
         ) return null;
         // An inherited selection is re-checked on the version actually served:
         // a base node turned boot prompt, or a child override added, since
@@ -1086,7 +1193,7 @@ export const nodeQueries = {
       // (findUnique can't carry deletedAt in its where, so guard post-fetch).
       if (isId(ref)) {
         const node = await ctx.db.node.findUnique({ where: { id: ref }, include });
-        if (!node || node.deletedAt || !allowed(node.memoryId)) return null;
+        if (!node || node.deletedAt || !(await allowed(node.memoryId))) return null;
         return finish(node);
       }
 
@@ -1106,7 +1213,7 @@ export const nodeQueries = {
           return null;
         }
         const memory = await resolveMemoryRef(ctx.db, parts.memoryUrn).catch(() => null);
-        if (!memory || !allowed(memory.id)) return null;
+        if (!memory || !(await allowed(memory.id))) return null;
         const effective = await findEffectiveNodeIdByLoc(ctx.db, memory.id, parts.loc);
         if (!effective?.inheritedFrom) return null;
         const inherited = await ctx.db.node.findUnique({ where: { id: effective.id }, include });
@@ -1121,7 +1228,7 @@ export const nodeQueries = {
           throw e;
         }
         const selected = await ctx.db.node.findUnique({ where: { id }, include });
-        return selected && !selected.deletedAt && allowed(selected.memoryId)
+        return selected && !selected.deletedAt && (await allowed(selected.memoryId))
           ? finish(selected)
           : null;
       };
@@ -1145,7 +1252,7 @@ export const nodeQueries = {
         // the node-content gate this resolver already computed, so the
         // concealment costs no second authorization round (@copilot, #1350).
         const { id: scopedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
-        if (!allowed(scopedMemoryId)) throw new MemoryNotFoundError(memoryRef);
+        if (!(await allowed(scopedMemoryId))) throw new MemoryNotFoundError(memoryRef);
         const node = await ctx.db.node.findFirst({
           where: { loc: value, memoryId: scopedMemoryId, deletedAt: null },
           include,
@@ -1178,7 +1285,7 @@ export const nodeQueries = {
           select: { id: true },
         });
         if (memory) {
-          if (allowed(memory.id)) {
+          if (await allowed(memory.id)) {
             const node = await ctx.db.node.findFirst({
               where: { loc: urnLoc, memoryId: memory.id, deletedAt: null },
               include,
@@ -1259,7 +1366,7 @@ export const nodeQueries = {
       // render (PDF, or `full: false`) reads like any reader, with includes
       // resolved by the exporter's access. Variables stay as stored in both.
       const exportContent = fmt === 'PDF' || full === false
-        ? await resolveNodeContent(ctx, node, { mode: 'includes' })
+        ? await resolveNodeContent(ctx, node, { mode: 'includes', surface: 'export' })
         : node.content;
 
       // PDF is a presentation render produced by the external hadrontool-pdf
@@ -1432,62 +1539,8 @@ export const nodeQueries = {
         orgScopeId = resolvedOrgId;
       }
 
-      // ── Resolve scope: accessible ∩ requested memories (ID/URN mix) ──
-      const accessible = await getAccessibleMemoryIds(ctx);
-      const explicitIds = !!(f.memoryIds && f.memoryIds.length > 0);
-      const memClassClause: unknown =
-        f.memoryClasses && f.memoryClasses.length > 0
-          ? { in: f.memoryClasses }
-          : (!explicitIds ? { not: 'system' } : undefined); // broad search hides system-class; explicit ids win
-
-      // #463: push the org narrowing straight into the scope queries (rather
-      // than selecting all ids then intersecting) so the admin/broad path never
-      // materializes every memory id just to filter it down.
-      // #1987 (R208 A, cor:api:060:04): the organisation's TASK catalogue lists
-      // only the organisation's own memories, never an App's. A memory that
-      // belongs to an App carries app_id (required for class 'app', set for an
-      // App-scoped knowledge/group, #653), so the runnable listing narrows to
-      // app_id IS NULL, the same predicate as ORG_INCLUDE.memories. Narrowing
-      // only: it composes with the accessible set above and adds no audience.
-      // Org-scoped non-runnable search is deliberately unchanged (no ruling).
-      const orgWhere = orgScopeId
-        ? { organizationId: orgScopeId, ...(f.isRunnable === true ? { appId: null } : {}) }
-        : {};
-
-      let scopeIds: string[];
-      if (explicitIds) {
-        const resolved = await Promise.all(
-          f.memoryIds!.map((ref) =>
-            isId(ref)
-              ? Promise.resolve(ref)
-              : resolveMemoryRef(ctx.db, ref).then((r) => r.id).catch(() => null)),
-        );
-        const requested = resolved.filter((id): id is string => id !== null);
-        const allowed = accessible === null ? null : new Set(accessible);
-        scopeIds = allowed === null ? requested : requested.filter((id) => allowed.has(id));
-        // Query only when a class or org filter must be applied to the requested
-        // set; otherwise the requested ∩ accessible ids stand as-is.
-        if ((memClassClause || orgScopeId) && scopeIds.length > 0) {
-          const rows = await ctx.db.memory.findMany({
-            where: { id: { in: scopeIds }, ...(memClassClause ? { class: memClassClause as never } : {}), ...orgWhere },
-            select: { id: true },
-          });
-          scopeIds = rows.map((m) => m.id);
-        }
-      } else if (accessible === null) {
-        // Admin/broad — resolve scope + class + org filter in one query.
-        const rows = await ctx.db.memory.findMany({
-          where: { deletedAt: null, ...(memClassClause ? { class: memClassClause as never } : {}), ...orgWhere },
-          select: { id: true },
-        });
-        scopeIds = rows.map((m) => m.id);
-      } else {
-        const rows = await ctx.db.memory.findMany({
-          where: { id: { in: accessible }, ...(memClassClause ? { class: memClassClause as never } : {}), ...orgWhere },
-          select: { id: true },
-        });
-        scopeIds = rows.map((m) => m.id);
-      }
+      // Shared with the loc-segments read (#3456): one readable-set computation.
+      let scopeIds: string[] = await resolveNodeReadScopeIds(ctx, f, orgScopeId);
       if (scopeIds.length === 0) {
         return { hits: [], passages: [], total: 0, reason: null, degraded: null };
       }
@@ -1498,6 +1551,8 @@ export const nodeQueries = {
       const inheritance = await effectiveScope(ctx.db, scopeIds);
       scopeIds = inheritance.memoryIds;
       const inheritanceExcluded = new Set(inheritance.excludeNodeIds);
+      const syntheticCommentMemoryIds = [...inheritance.inheritedFrom.keys()];
+      const threadWhere = openThreadsWhere(f.hasOpenThreads, syntheticCommentMemoryIds);
 
       // Structured node-attribute filters (cor:api:090:02), AND-combined. Applied
       // to BOTH the no-query list path and the ranked-query path (via re-fetch),
@@ -1507,11 +1562,12 @@ export const nodeQueries = {
       const recoverableIds = f.includeDeleted ? await recoveryMemoryIds(ctx, scopeIds) : [];
       const structuredWhere: Record<string, unknown> = {
         ...(f.includeDeleted ? {} : { deletedAt: null }),
-        // Explicit nodeType wins; otherwise exclude system-type nodes (orthogonal
-        // to the memory-class exclusion above).
+        // Explicit nodeType wins; otherwise exclude the unqualified-search
+        // defaults, system and chat-message (#2836; the system one is
+        // orthogonal to the memory-class exclusion above).
         // #3113 — an explicit list (validated above) is explicit too: it narrows
         // to the named types and replaces the default.
-        ...(nodeTypes ? { nodeType: { in: nodeTypes } } : f.nodeType ? { nodeType: f.nodeType } : { nodeType: { not: 'system' } }),
+        ...(nodeTypes ? { nodeType: { in: nodeTypes } } : f.nodeType ? { nodeType: f.nodeType } : { nodeType: { notIn: [...UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES] } }),
         ...(f.objectType ? { objectType: f.objectType } : {}),
         ...(f.isRunnable != null ? { isRunnable: f.isRunnable } : {}),
         ...(f.role != null
@@ -1541,6 +1597,7 @@ export const nodeQueries = {
           ...(f.approvalState != null || f.minted != null ? [{ nodeType: { not: COMMENT_NODE_TYPE } }] : []),
           ...(scopeWhere ? [scopeWhere] : []),
           ...(inheritance.excludeNodeIds.length > 0 ? [{ id: { notIn: inheritance.excludeNodeIds } }] : []),
+          ...(threadWhere ? [threadWhere] : []),
         ],
       };
       const nodeInclude = {
@@ -1548,6 +1605,11 @@ export const nodeQueries = {
         outgoingEdges: { include: { target: true }, orderBy: edgeDisplayOrder() },
         incomingEdges: { include: { source: true }, orderBy: edgeDisplayOrder() },
       } as const;
+      // #2832: every path re-reads its candidates by id through the Prisma `structuredWhere`, which cannot express the
+      // direct-children rule. Re-assert it on the rows read back, so a node that moved or was renamed between ranking
+      // and hydration is never returned against the filter, and an id list from any ranker stays exact.
+      const childrenOnly = <T extends { loc: string }>(rows: T[]): T[] =>
+        f.childrenOf == null ? rows : rows.filter((n) => isDirectChildLoc(n.loc, f.childrenOf!));
 
       const hasQuery = typeof query === 'string' && query.trim() !== '';
 
@@ -1560,9 +1622,11 @@ export const nodeQueries = {
         nodeTypes,
         objectType: f.objectType ?? null,
         isRunnable: f.isRunnable ?? null,
+        hasOpenThreads: f.hasOpenThreads ?? null, syntheticCommentMemoryIds,
         role: f.role ?? null,
         tags: f.tags ?? null,
         locPrefix: f.locPrefix ?? null,
+        childrenOf: f.childrenOf ?? null,
         createdBy: f.createdBy ?? null,
         updatedAfter: f.updatedAfter ?? null,
         updatedBefore: f.updatedBefore ?? null,
@@ -1602,9 +1666,12 @@ export const nodeQueries = {
         // property-path sort (an ORDER BY over a JSON path Prisma can't express)
         // → run the filtered browse in SQL (ordered ids), then hydrate. The plain
         // browse (no where, no property sort) keeps the Prisma path below.
-        if (f.where != null || sortProperty != null) {
+        // #2832: the direct-children filter is a SQL expression Prisma cannot write, so it takes this path too.
+        // cor:api:090:02, ruling 0121 (A): a children read is a sibling list, so unless the caller names a sort it
+        // comes in cor:dmo:020:01 order (Node.seq first, then loc).
+        if (f.where != null || sortProperty != null || f.childrenOf != null) {
           const browseSort: BrowseSort | undefined =
-            sort === 'seq' ? 'seq' : sort === 'updatedAt' ? 'updatedAt' : undefined;
+            sort === 'seq' ? 'seq' : sort === 'updatedAt' ? 'updatedAt' : (sort == null || sort === 'relevance') && f.childrenOf != null ? 'seq' : undefined;
           const ids = await provider.filterSearch({
             db: ctx.db, memoryIds: scopeIds, filter: sqlFilter,
             includeDeleted: !!f.includeDeleted, sort: browseSort,
@@ -1618,10 +1685,10 @@ export const nodeQueries = {
           // #1345 review (@copilot): the structured filters too, not only scope,
           // so a node that stopped matching (e.g. its role changed) between the
           // SQL filter and this read is not returned against the filter.
-          const rows = await ctx.db.node.findMany({
+          const rows = childrenOnly(await ctx.db.node.findMany({
             where: { id: { in: ids }, memoryId: { in: scopeIds }, ...structuredWhere },
             include: nodeInclude,
-          });
+          }));
           await decryptNodesBatch(ctx.db, rows);
           const byId = new Map(rows.map((n) => [n.id, n]));
           const ordered = ids.map((id) => byId.get(id)).filter((n): n is NonNullable<typeof n> => !!n);
@@ -1659,7 +1726,7 @@ export const nodeQueries = {
       // A selective structured filter can drop many ranked candidates, so over-fetch
       // from the retrieval layer to keep the page full after post-filtering + offset.
       const hasStructuredFilters = !!(
-        f.nodeType || nodeTypes || f.objectType || f.isRunnable != null || f.role != null || f.tags?.length || f.locPrefix ||
+        f.nodeType || nodeTypes || f.objectType || f.isRunnable != null || f.hasOpenThreads != null || f.role != null || f.tags?.length || f.locPrefix || f.childrenOf != null ||
         f.createdBy || f.updatedAfter || f.updatedBefore || f.includeDeleted || f.where || f.approvalState || f.minted != null
       );
       const page = off + finalLimit;
@@ -1679,10 +1746,10 @@ export const nodeQueries = {
             tombstoneMemoryIds: recoverableIds,
           });
         }
-        const rows = await ctx.db.node.findMany({
+        const rows = childrenOnly(await ctx.db.node.findMany({
           where: { id: { in: candidates }, memoryId: { in: scopeIds }, ...structuredWhere },
-          select: { id: true },
-        });
+          select: { id: true, loc: true },
+        }));
         return new Set(rows.map((r) => r.id));
       };
 
@@ -1695,6 +1762,12 @@ export const nodeQueries = {
        * filtered, floored hits fill the page, or the provider reports its raw
        * candidate window exhausted.
        * Past the cap a page can still be short; it is never wrong.
+       *
+       * #2836 review (Atilla P2): the check runs on EVERY vector search, not
+       * only with explicit filters. Without a nodeType the unqualified-search
+       * default exclusion (system, chat-message) still drops hits at hydration,
+       * and an older chat-message vector can fill an unfiltered window. The
+       * first window keeps its size (`fetchN`); it widens only when short.
        */
       const widenVectorWindow = async <T extends { nodeId: string; score: number }>(
         search: (limit: number, onWindow: (w: { exhausted: boolean }) => void) => Promise<T[]>,
@@ -1708,7 +1781,7 @@ export const nodeQueries = {
           // exhausted, so an unknown provider widens to the cap.
           let exhausted = false;
           const hits = await search(limit, (w) => { exhausted = w.exhausted; });
-          if (!hasStructuredFilters || limit >= VECTOR_FETCH_CAP || exhausted) return hits;
+          if (limit >= VECTOR_FETCH_CAP || exhausted) return hits;
           const floored = scoreFloor == null ? hits : hits.filter((h) => h.score >= scoreFloor);
           const ok = await eligibleIds([...new Set(floored.map((h) => h.nodeId))]);
           if (floored.filter((h) => ok.has(h.nodeId)).length >= page) return hits;
@@ -1749,10 +1822,10 @@ export const nodeQueries = {
         // #1345 review (@copilot): re-assert the memory scope at hydration. The
         // candidates were scoped when RANKED, in a separate query; a node moved
         // to another memory in between must not come back from outside scope.
-        const rows = await ctx.db.node.findMany({
+        const rows = childrenOnly(await ctx.db.node.findMany({
           where: { id: { in: candidateIds }, memoryId: { in: scopeIds }, ...structuredWhere },
           include: nodeInclude,
-        });
+        }));
         await decryptNodesBatch(ctx.db, rows);
         // #719 — a property-path sort re-orders the ranked candidate WINDOW in
         // memory (the vector/hybrid query ranks against node_embeddings, not the
@@ -1790,7 +1863,7 @@ export const nodeQueries = {
             // governed edge must not pull it into a content search, or its
             // target into a comments-only one (cor:dmo:110:08).
             const nRows = await ctx.db.node.findMany({
-              where: { id: { in: neighbourIds }, memoryId: { in: scopeIds }, deletedAt: null, ...(scopeWhere ? { AND: [scopeWhere] } : {}) },
+              where: { id: { in: neighbourIds }, memoryId: { in: scopeIds }, deletedAt: null, ...((scopeWhere || threadWhere) ? { AND: [...(scopeWhere ? [scopeWhere] : []), ...(threadWhere ? [threadWhere] : [])] } : {}) },
               include: nodeInclude,
             });
             await decryptNodesBatch(ctx.db, nRows);
@@ -1827,10 +1900,10 @@ export const nodeQueries = {
         // structured filters when RANKING; re-assert them at hydration, as
         // buildResult does, so a node whose role (or memory, or deletion) changed
         // in between is not returned against the filter it no longer meets.
-        const rows = await ctx.db.node.findMany({
+        const rows = childrenOnly(await ctx.db.node.findMany({
           where: { id: { in: ranked.map((r) => r.nodeId) }, memoryId: { in: scopeIds }, ...structuredWhere },
           include: nodeInclude,
-        });
+        }));
         await decryptNodesBatch(ctx.db, rows);
         const byId = new Map(rows.map((n) => [n.id, n]));
         const pageRows = ranked
@@ -1849,7 +1922,7 @@ export const nodeQueries = {
             ctx.db, pageRows.map((n) => n.id), expandDepth, { memoryIds: scopeIds },
           )).filter((id) => !shown.has(id) && !inheritanceExcluded.has(id));
           if (neighbourIds.length > 0) {
-            const nRows = await ctx.db.node.findMany({ where: { id: { in: neighbourIds }, memoryId: { in: scopeIds }, deletedAt: null, ...(scopeWhere ? { AND: [scopeWhere] } : {}) }, include: nodeInclude }); // #1608
+            const nRows = await ctx.db.node.findMany({ where: { id: { in: neighbourIds }, memoryId: { in: scopeIds }, deletedAt: null, ...((scopeWhere || threadWhere) ? { AND: [...(scopeWhere ? [scopeWhere] : []), ...(threadWhere ? [threadWhere] : [])] } : {}) }, include: nodeInclude }); // #1608
             await decryptNodesBatch(ctx.db, nRows);
             const nById = new Map(nRows.map((n) => [n.id, n]));
             for (const id of neighbourIds) { const n = nById.get(id); if (n) hits.push({ node: n, score: null, vector: null }); }
@@ -2010,7 +2083,7 @@ export const nodeQueries = {
         // review, Codex): filter before paging so a floor drops sub-threshold
         // chunks rather than silently returning them.
         const rawChunks = await widenVectorWindow((limit, onWindow) =>
-          provider.vectorSearchChunks({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit, onWindow, contentScope }),
+          provider.vectorSearchChunks({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit, onWindow, contentScope, hasOpenThreads: f.hasOpenThreads, syntheticCommentMemoryIds }),
         );
         const scoredChunks = scoreFloor == null ? rawChunks : rawChunks.filter((c) => c.score >= scoreFloor);
         const candidateParentIds = [...new Set(scoredChunks.map((c) => c.nodeId))];
@@ -2026,7 +2099,7 @@ export const nodeQueries = {
             }),
           );
         }
-        const parents = await ctx.db.node.findMany({
+        const parents = childrenOnly(await ctx.db.node.findMany({
           where: {
             id: { in: whereAllowed ? candidateParentIds.filter((id) => whereAllowed!.has(id)) : candidateParentIds },
             // @copilot: re-assert scope at hydration, as buildResult does.
@@ -2034,7 +2107,7 @@ export const nodeQueries = {
             ...structuredWhere,
           },
           include: { memory: { select: { urn: true } } },
-        });
+        }));
         // #1885 (Diego, #1891 P2-1, chunk mode): the scope's exclusions were a
         // snapshot, so re-check every hydrated parent against the effective
         // set now, before eligibility, paging, usage and passage text. A base
@@ -2088,7 +2161,7 @@ export const nodeQueries = {
       }
 
       const vecHits = await widenVectorWindow((limit, onWindow) =>
-        provider.vectorSearch({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit, onWindow, contentScope }),
+        provider.vectorSearch({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit, onWindow, contentScope, hasOpenThreads: f.hasOpenThreads, syntheticCommentMemoryIds }),
       );
 
       if (effectiveMode === 'vector') {
@@ -2513,7 +2586,7 @@ export const nodeQueries = {
       // personal/private carve-out still applies — so the `!== null` guard is
       // defensive for the type contract rather than a live path.
       const accessibleMemoryIds = await getAccessibleMemoryIds(ctx);
-      return ctx.db.usageEvent.findMany({
+      const rows = await ctx.db.usageEvent.findMany({
         where: {
           nodeLoc: loc,
           ...(accessibleMemoryIds !== null ? { memoryId: { in: accessibleMemoryIds } } : {}),
@@ -2521,6 +2594,8 @@ export const nodeQueries = {
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: limit ?? 20,
       });
+      // #3688: a loc names a resource, so other principals' rows are volumes only (cor:acl:090:01, ruling 0246).
+      return projectUsageRowsFor(ctx, rows);
     },
 
     nodeEdgeRemovals: async (_: unknown, { nodeRef, limit }: { nodeRef: string; limit?: number }, ctx: Context) => {
@@ -2636,6 +2711,46 @@ export const nodeQueries = {
         include: APP_NODES_INCLUDE,
       });
       return finishAppNodes(ctx, results, read.inheritance);
+    },
+
+    /**
+     * #3456 (cor:api:090:05): one page of the distinct next loc segments under a parent loc. The readable
+     * set is `resolveNodeReadScopeIds` + `effectiveScope`, the SAME computation as `findNodes` with no query,
+     * so the two cannot disagree. Every no-access shape (unreadable, unresolvable, empty memory, a parent with
+     * nothing below it) is the one empty page; a request with no memoryIds is refused before any read.
+     */
+    memoryLocSegments: async (
+      _: unknown,
+      args: { memoryIds: string[]; parentLoc: string; limit?: number | null; after?: string | null },
+      ctx: Context,
+    ) => {
+      const refuse = (msg: string) => new GraphQLError(msg, { extensions: { code: 'BAD_USER_INPUT' } });
+      if (!Array.isArray(args.memoryIds) || args.memoryIds.length === 0) {
+        throw refuse('memoryLocSegments: memoryIds must name at least one memory.');
+      }
+      if (args.parentLoc.startsWith(':') || args.parentLoc.endsWith(':') || args.parentLoc.includes('::') || args.parentLoc.includes('\0')) {
+        throw refuse('memoryLocSegments: parentLoc is not a valid loc.');
+      }
+      let after: ReturnType<typeof decodeLocSegmentsCursor> = null;
+      if (args.after != null && args.after !== '') {
+        after = decodeLocSegmentsCursor(args.after);
+        if (!after) throw refuse('memoryLocSegments: after is not a cursor this field issued.');
+      }
+      const limit = normalizeLocSegmentsLimit(args.limit);
+      await admitOperationRate(ctx, ctx.db, 'FAN_OUT_READS', ctx.limiterIdentity ?? transportRateIdentity(ctx));
+      const empty = { items: [], hasMore: false, endCursor: null };
+      // Each memory is read once however many times (or by which alias) it was named: a repeat would repeat
+      // its rows, break the continuation and multiply the walk (#3586 review).
+      const gated = [...new Set(await resolveNodeReadScopeIds(ctx, { memoryIds: args.memoryIds }, null))];
+      if (gated.length === 0) return empty;
+      const inheritance = await effectiveScope(ctx.db, gated);
+      return readLocSegments(ctx.db, {
+        memoryIds: [...new Set(inheritance.memoryIds)],
+        excludeNodeIds: [...new Set(inheritance.excludeNodeIds)],
+        parent: args.parentLoc,
+        limit,
+        after,
+      });
     },
 
     /**

@@ -1,4 +1,7 @@
-import { requireAppKeyManager } from './appKeyManagement.js';
+import { appInstallationWhere } from '../../../lib/appInstallations.js';
+import { admitCredentialList } from './resolvers.instruction.js';
+import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
+import type { ActInstruction } from '../../../lib/auth/instructedAct.js';
 // appQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
 import { decryptToken } from '../../../lib/tokenCrypto.js';
 import { DEFAULT_AI_CONFIG_NAME } from '../../../lib/aiConfig.js';
@@ -16,6 +19,8 @@ import {
   pageEnvelope,
   requireOrgRole,
   requireOwnerOrOrgRole,
+  requireAppRead,
+  userOwnedAppOwnerMemberWhere,
   resolveOrgScope,
   APP_INCLUDE,
 } from './resolvers.helpers.js';
@@ -30,11 +35,12 @@ import { forbiddenError } from '../../../lib/refusals.js';
  * ever read for a refused caller. Live keys only, newest first; the id
  * tiebreak puts keys minted in the same instant in one order on every read.
  */
-export async function appKeyInventoryScope(ctx: Context, appRef: string) {
+export async function appKeyInventoryScope(ctx: Context, appRef: string, instruction?: ActInstruction | null) {
   // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
   const { id: appId } = await resolveAppRef(ctx.db, appRef);
   const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
-  await requireAppKeyManager(ctx, app);
+  // #3311: a person as themselves, or their held worker on a validated instruction (one record per admitted call).
+  await admitCredentialList(ctx, app, authorizationDenied, instruction, 'app-key.list', true);
   return {
     where: { appId, revokedAt: null } satisfies Prisma.AppKeyWhereInput,
     orderBy: [{ createdAt: 'desc' as const }, { id: 'desc' as const }],
@@ -113,7 +119,7 @@ export const appQueries = {
           if (!(error instanceof AgentNotFoundError || error instanceof UrnNotQualifiedError || error instanceof AmbiguousLegacyUrnError)) throw error;
         }
         if (!target) return { items: [], total: 0 };
-        agentClause = { appAgents: { some: { agentId: target.id } } };
+        agentClause = appInstallationWhere(target.id);
       }
       let where: Record<string, unknown>;
       if (f.ownedByMe) {
@@ -140,11 +146,14 @@ export const appQueries = {
           // Every live App EXCEPT another user's user-owned App — spec 047
           // strict ownership (a user-owned App is owner-only; an admin sees
           // only their own). "org-owned OR mine" as a flat OR.
-          where = {
-            deletedAt: null,
-            OR: [{ ownerUserId: null }, { ownerUserId: ctx.userId ?? '__none__' }],
-            ...agentClause,
-          };
+          // #2089: plus the user-owned Apps they hold a CURRENT owner-role
+          // membership on (by membership, never by the admin bypass).
+          const adminClauses: Record<string, unknown>[] = [
+            { ownerUserId: null },
+            { ownerUserId: ctx.userId ?? '__none__' },
+          ];
+          if (ctx.userId && !ctx.impersonation && f.agentId == null) adminClauses.push(userOwnedAppOwnerMemberWhere(ctx.userId));
+          where = { deletedAt: null, OR: adminClauses, ...agentClause };
         } else {
           // Org-scoped view. In the DEFAULT (no orgId) view, also surface the
           // caller's OWN user-owned Apps (org NULL) so a personal App the caller
@@ -156,6 +165,11 @@ export const appQueries = {
           // so the leak did not depend on filter.ownedByMe.
           if (!scopedToOrg && ctx.userId && !ctx.impersonation) {
             ownerClauses.push({ ownerUserId: ctx.userId });
+            // #2089: user-owned Apps the caller manages as an owner-role
+            // member. In the `where` itself, so count and paging see them.
+            // Not under an agent filter: that would answer the install question
+            // App.agents WITHHOLDS from this reader (Riana's P3).
+            if (f.agentId == null) ownerClauses.push(userOwnedAppOwnerMemberWhere(ctx.userId));
           }
           where = { deletedAt: null, OR: ownerClauses, ...agentClause };
         }
@@ -191,7 +205,9 @@ export const appQueries = {
       // pre-473 org-ADMIN gate was stricter than the list a plain member
       // could already read this App through. Admin-only material (keys,
       // decrypted AI config) keeps its own gates (appKeys / appAIConfig).
-      await requireOwnerOrOrgRole(ctx, app, 'READER');
+      // #2089: the App-specific read gate (org arms unchanged, plus a current
+      // owner-role member of a user-owned App). Children stay gated per field.
+      await requireAppRead(ctx, app);
       return app;
     },
 
@@ -226,18 +242,18 @@ export const appQueries = {
       };
     },
 
-    appKeys: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
+    appKeys: async (_: unknown, { appRef, instruction }: { appRef: string; instruction?: ActInstruction | null }, ctx: Context) => {
       // #1744: inventory is manager-only, including under impersonation.
-      return ctx.db.appKey.findMany(await appKeyInventoryScope(ctx, appRef));
+      return ctx.db.appKey.findMany(await appKeyInventoryScope(ctx, appRef, instruction));
     },
 
     // #2213 S2: `appKeys` as a page — the same gate, rows and order, with the real total.
     appKeysPage: async (
       _: unknown,
-      args: { appRef: string; limit?: number | null; offset?: number | null },
+      args: { appRef: string; limit?: number | null; offset?: number | null; instruction?: ActInstruction | null },
       ctx: Context,
     ) => {
-      const { where, orderBy } = await appKeyInventoryScope(ctx, args.appRef);
+      const { where, orderBy } = await appKeyInventoryScope(ctx, args.appRef, args.instruction);
       const { take, skip } = pageArgs(args);
       const [total, items] = await ctx.db.$transaction([
         ctx.db.appKey.count({ where }),

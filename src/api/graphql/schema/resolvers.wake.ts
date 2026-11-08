@@ -16,6 +16,9 @@ import { GraphQLError } from 'graphql';
 import { Prisma } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
 import { actorManagesApp, loadApp, resolveParticipatedApp, resolveTaskActor, taskError, type TaskApp } from './resolvers.agentTask.js';
+import { admitInstructedRead, readActInstruction, requireInstructedActKeepingRuns } from './resolvers.instruction.js';
+import { appendManagerInstructionEvent } from '../../../lib/agentTasks/events.js';
+import type { ActInstruction } from '../../../lib/auth/instructedAct.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
@@ -34,11 +37,25 @@ type Reader = { manager: boolean; userId: string | null };
 /** `TASK:<id>:<event>`, the event lower-kebab: `TASK:t1:assigned`, `TASK:t1:child-finished`. */
 export const taskReasonRef = (taskId: string, event: string): string => `TASK:${taskId}:${event.toLowerCase().replace(/_/g, '-')}`;
 
-async function readerFor(ctx: Context, app: TaskApp, actor: Awaited<ReturnType<typeof resolveParticipatedApp>>['actor']): Promise<Reader> {
+async function readerFor(
+  ctx: Context, app: TaskApp, actor: Awaited<ReturnType<typeof resolveParticipatedApp>>['actor'], instruction?: ActInstruction | null,
+): Promise<Reader> {
+  const concealed = () => taskError('APP_NOT_FOUND', 'App not found.');
   // Concealed like any App the caller cannot reach: no oracle, and no key or impersonated session reads wakes here.
-  // Nor does a worker's session: it is the worker, not the person behind it, and a holder's reading right is theirs
-  // as a person (cor:agt:080:22). A worker that could read its holder's other workers could also silence them.
-  if (!ctx.userId || ctx.impersonation || actor.kind === 'worker') throw taskError('APP_NOT_FOUND', 'App not found.');
+  // Nor does a worker's session on its own: it is the worker, not the person behind it, and a holder's reading right is
+  // theirs as a person (cor:agt:080:22). It never acknowledges (080:17), so it cannot silence the workers it reads.
+  if (!ctx.userId || ctx.impersonation) throw concealed();
+  if (actor.kind === 'worker') {
+    if (instruction == null) throw concealed();
+    // #3321 (cor:dmo:050:12): the manager scope on the holder's right and an instruction, one record per admitted call,
+    // an empty page included. The holder's own read is a holder arm, which stays the person's (ask 3; Vera #72951): a
+    // worker whose holder does not manage the App gets what it gets with no instruction, and nothing is written.
+    await admitInstructedRead(ctx, app, concealed, instruction, (tx, admission) =>
+      appendManagerInstructionEvent(tx, { appId: app.id, admission, act: 'wake.read', subject: {} }));
+    return { manager: true, userId: ctx.userId };
+  }
+  // A person's present claim is validated, never recorded. A bad one is refused rather than narrowing their scope.
+  if (instruction != null) await requireInstructedActKeepingRuns(ctx, app.id, instruction, async () => true, readActInstruction, concealed);
   return { manager: await actorManagesApp(ctx, app, actor), userId: ctx.userId };
 }
 
@@ -95,9 +112,10 @@ const acceptsStop = (accepts: readonly string[] | null | undefined): boolean => 
 
 export async function dueWakesFor(
   requestCtx: Context,
-  a: { appRef: string; workerRefs?: string[] | null; first?: number | null; after?: string | null; accepts?: string[] | null },
+  a: { appRef: string; workerRefs?: string[] | null; first?: number | null; after?: string | null; accepts?: string[] | null; instruction?: ActInstruction | null; preview?: boolean | null },
 ) {
   const key = appKeyCaller(requestCtx);
+  const preview = a.preview === true;
   // Live platform roles: a manager arm taken from an old credential would widen the worker set (Diego P2-1).
   const ctx = (await liveCaller(requestCtx)) ?? (() => { throw taskError('APP_NOT_FOUND', 'App not found.'); })();
   let app: TaskApp;
@@ -112,7 +130,7 @@ export async function dueWakesFor(
   } else {
     const resolved = await resolveParticipatedApp(ctx, a.appRef);
     app = resolved.app;
-    reader = await readerFor(ctx, app, resolved.actor);
+    reader = await readerFor(ctx, app, resolved.actor, a.instruction);
   }
   let only: string[] | null = null;
   if (a.workerRefs && a.workerRefs.length > 0) {
@@ -123,6 +141,8 @@ export async function dueWakesFor(
   const result = await computeDueWakes({
     ctx, app, reader, requester: key ? { appKeyId: key.appKeyId } : { userId: reader.userId! },
     workerIds: only, first: a.first, after: a.after, authorize, workerWhere, acceptsStop: acceptsStop(a.accepts),
+    // #3455: the no-spend read, bounded by the caller's own reading rights (never the platform's).
+    ...(preview ? { preview: true, callerBounded: true } : {}),
     onWorkersSelected: ids => { selectedWorkerIds = ids; },
   });
 
@@ -137,7 +157,8 @@ export async function dueWakesFor(
   // Only a call that read the lane from its start to its end: no workerRefs, no `after` (a tail page skipped the prefix) and no
   // next page (#2432 BLIND, LOCAL). A lane larger than one page (max 200) cannot declare; the consumer asks for `first: 200`.
   const wholeLane = !(a.workerRefs && a.workerRefs.length > 0) && !a.after && result.nextAfter === null;
-  if (acceptsStop(a.accepts) && wholeLane) await declareStopLane(ctx, app, key ? { hostId: keyHostId } : reader.manager ? { hostId: null } : null);
+  // #3455: a preview declares no lane: a status look is not a serving consumer.
+  if (!preview && acceptsStop(a.accepts) && wholeLane) await declareStopLane(ctx, app, key ? { hostId: keyHostId } : reader.manager ? { hostId: null } : null);
   // The budget notice is posted by the platform itself, once a day per App, whoever's read triggered it: a person's or an
   // App key's (#1791, cor:agt:080:15). Posted only once an App key's answer is decided: a read that is refused posts nothing (Rook #1799).
   if (result.budgetNotice) await postBudgetNotice(ctx, app, result.budgetNotice);
@@ -160,7 +181,7 @@ export async function dueWakesFor(
         tickDueAt: r.kind === 'TICK' ? w.tickDueAt.get(r.tickerId) ?? null : null,
         // #1708: the task is gated in computeDueWakes (a reader of the App's tasks only), so it is shown as is.
         task: r.kind === 'TASK'
-          ? { id: r.taskId, eventId: r.eventId, chainIndex: r.chainIndex, event: r.event, title: r.title, handle: r.handle, ref: taskReasonRef(r.taskId, r.event), ...(r.standbyHeld ? { standbyHeld: r.standbyHeld } : {}) }
+          ? { id: r.taskId, eventId: r.eventId, chainIndex: r.chainIndex, event: r.event, title: r.title, handle: r.handle, ref: taskReasonRef(r.taskId, r.event) }
           : null,
         // #2022: a stop notice concerns the worker itself; whoever may read its wakes sees it.
         ...(r.kind === 'STOP'
@@ -176,7 +197,9 @@ export async function dueWakesFor(
       unread: w.wake.unread,
       unreadMentions: w.wake.unreadMentions,
       availability: w.availability,
-      proof: w.proof,
+      // #3455: a preview holds no reservation, so its proof is empty and verifies as nothing: acknowledging it would still record a
+      // delivery receipt and charge the day's budget. The field stays non-null for installed clients.
+      proof: preview ? '' : w.proof,
       tickText: w.tickText,
       anchorAt: w.timing.anchorAt,
       deliverAfter: w.timing.deliverAfter,
@@ -292,7 +315,7 @@ async function acknowledgeAsKey(requestCtx: Context, key: { appKeyId: string; ap
 const STOP_LEVEL_ENUM = { 'pause-dispatch': 'PAUSE_DISPATCH', pause: 'PAUSE', halt: 'HALT' } as const;
 
 export const wakeQueries = {
-  dueWakes: (_: unknown, a: { appRef: string; workerRefs?: string[] | null; first?: number | null; after?: string | null; accepts?: string[] | null }, ctx: Context) =>
+  dueWakes: (_: unknown, a: { appRef: string; workerRefs?: string[] | null; first?: number | null; after?: string | null; accepts?: string[] | null; instruction?: ActInstruction | null }, ctx: Context) =>
     dueWakesFor(ctx, a),
 };
 

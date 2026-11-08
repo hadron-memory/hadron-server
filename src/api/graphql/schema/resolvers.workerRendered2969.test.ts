@@ -9,7 +9,6 @@ import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
-import { createTestableMcpServer } from '../../../mcp/server.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const M = resolvers.Mutation as any, Q = resolvers.Query as any, W = resolvers.Worker as any;
@@ -132,18 +131,5 @@ describe('#2969 user-owned Agent: exactly the callers Worker.prompt reaches', ()
   });
 });
 
-describe('#2969 MCP parity', () => {
-  it('hadron_get_worker prints the same two values as GraphQL for the same caller', async () => {
-    const auth = { userId: admin.id, appId: app.id, roles: ['READER'], clientId: `user:${admin.id}` } as any;
-    const out = await createTestableMcpServer(auth).callToolText('hadron_get_worker', { workerRef: 'Anne' });
-    const [sig, trl] = await rendered(worker, ctx());
-    expect(out).toContain(`\nRendered signature:\n${sig}\n`);
-    expect(out).toContain(`\nRendered trailer:\n${trl}\n`);
-  });
-  it('a non-internals reader sees neither line', async () => {
-    const auth = { userId: outsider.id, appId: app.id, roles: ['READER'], clientId: `user:${outsider.id}` } as any;
-    const out = await createTestableMcpServer(auth).callToolText('hadron_get_worker', { workerRef: worker.id }).catch((e: Error) => String(e));
-    expect(out).not.toContain('Rendered signature');
-    expect(out).not.toContain('Rendered trailer');
-  });
-});
+// #3082: the 'MCP parity' block is removed (hadron_get_worker is disabled on MCP). The rendered values and their masking for a
+// non-internals reader stay pinned on Worker.renderedSignature/Trailer by the tests above.

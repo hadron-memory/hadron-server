@@ -65,12 +65,19 @@ beforeEach(async () => {
   orgId = (await db.organization.create({ data: { id: generateId(), name: ORG_URN, urn: ORG_URN } })).id;
   appId = (await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'script-app', urn: `${ORG_URN}::script-app` } })).id;
   memoryId = (await db.memory.create({
-    data: { id: generateId(), organizationId: orgId, name: 'flowmem', urn: `${ORG_URN}:flowmem`, class: 'knowledge', visibility: 'ORGANIZATION' },
+    // #3278: PUBLIC gives the userless run reads; explicit prefix grants below give its writes.
+    data: { id: generateId(), organizationId: orgId, name: 'flowmem', urn: `${ORG_URN}:flowmem`, class: 'knowledge', visibility: 'PUBLIC' },
   })).id;
   agentId = (await db.agent.create({ data: { id: generateId(), organizationId: orgId, name: 'script-agent', urn: `${ORG_URN}:script-agent` } })).id;
   await db.appAgent.create({ data: { appId, agentId } });
   await serveAgentBootPrompt(db, agentId, 'Test boot prompt.');
   await db.agentMemoryItem.create({ data: { agentId, memoryId, role: 'read-write' } });
+  const grantor = await createDbRunConsentPrincipal(db, orgId, appId);
+  await db.orgMember.update({ where: { organizationId_userId: { organizationId: orgId, userId: grantor.userId } }, data: { role: 'ADMIN' } });
+  await db.appMemoryWriteGrant.createMany({ data: ['tasks', 'runs'].map(prefix => ({
+    appId, memoryId, prefix, grantedBy: grantor.userId,
+    registerNodeUrn: 'hrn:node:example.com:fixture:authority',
+  })) });
 });
 
 function deps(opts: { noConfig?: boolean } = { noConfig: true }) {

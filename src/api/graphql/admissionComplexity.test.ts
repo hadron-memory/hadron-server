@@ -22,6 +22,9 @@ const REVIEWED_PAGED_FIELDS = [
   "Agent.extendedBy",
   "AgentTask.blockedBy", // #2644: pageArgs default20, cap200; common omitted bound100 is conservative.
   "AgentTask.blocks", // Same shared dependency page resolver.
+  "AgentTask.clones", // #2646: the same shared page resolver as blocks/blockedBy (pageArgs default 20, cap 200).
+  "AgentTask.findingDispositions", // #2663: pageArgs default20/cap200.
+  "AgentTaskResult.findings", // #2662: pageArgs default20/cap200; result itself is bounded at100 findings.
   "AppKey.hostUses",
   "Chat.servedPrompts",
   "CompiledBootPrompt.lintWarnings", // #2048: default 50, cap 100; shared pageLintWarnings.
@@ -30,6 +33,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Node.lintWarnings",
   "Node.signingRequests",
   "NodeApprovalReceipt.lintWarnings",
+  "Query.actionRegisterIndex", // #3287: pageArgs, default 20, cap 200; below the common 100, so omission overestimates.
   "Query.actionTickets",
   "Query.agentAssets",
   "Query.agentSchedules",
@@ -49,6 +53,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.apps",
   "Query.assets",
   "Query.automationApprovals",
+  "Query.automationTeamSnapshotGrants", // #3350: pageTake default20/cap200; common omitted100 is conservative.
   "Query.calendarEvents",
   "Query.channelMessageSearch", // #2299: default 20, cap 50, scan 1,000 (teamChatSearch.ts); under the shared 100 default.
   "Query.channelMessages",
@@ -82,6 +87,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.memoryAssets",
   "Query.memoryConfigTemplates",
   "Query.memoryEdges",
+  "Query.memoryLocSegments",
   "Query.memoryNodes",
   "Query.myAgentSubscriptionsPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.myChats",
@@ -149,7 +155,7 @@ const post = (base: string, body: unknown): Promise<Reply> =>
 const Query = resolvers.Query as Record<string, (...a: unknown[]) => unknown>;
 let nodeSpy: ReturnType<typeof vi.spyOn>;
 let edgesSpy: ReturnType<typeof vi.spyOn>;
-let usageSpy: ReturnType<typeof vi.spyOn>;
+let sessionsSpy: ReturnType<typeof vi.spyOn>;
 let serverInfoSpy: ReturnType<typeof vi.spyOn>;
 let logSpy: { mock: { calls: unknown[][] }; mockRestore(): void };
 
@@ -158,18 +164,19 @@ const l4Lines = (): Array<Record<string, unknown>> =>
 const noResolverCalls = () => {
   expect(nodeSpy).not.toHaveBeenCalled();
   expect(edgesSpy).not.toHaveBeenCalled();
-  expect(usageSpy).not.toHaveBeenCalled();
+  expect(sessionsSpy).not.toHaveBeenCalled();
   expect(serverInfoSpy).not.toHaveBeenCalled();
 };
 
 beforeAll(() => {
   nodeSpy = vi.spyOn(Query, 'node').mockResolvedValue(null as never);
   edgesSpy = vi.spyOn(Query, 'edges').mockResolvedValue({ items: [], total: 0 } as never);
-  usageSpy = vi.spyOn(Query, 'usageEvents').mockResolvedValue([] as never);
+  // #2817: `usageEvents` now clamps through pageArgs (PAGE_ARGS_FIELDS), so the raw-size stand-in is `sessions`.
+  sessionsSpy = vi.spyOn(Query, 'sessions').mockResolvedValue([] as never);
   serverInfoSpy = vi.spyOn(Query, 'serverInfo').mockResolvedValue({ version: 'test' } as never);
 });
 beforeEach(() => {
-  nodeSpy.mockClear(); edgesSpy.mockClear(); usageSpy.mockClear(); serverInfoSpy.mockClear();
+  nodeSpy.mockClear(); edgesSpy.mockClear(); sessionsSpy.mockClear(); serverInfoSpy.mockClear();
   logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined) as unknown as typeof logSpy;
 });
 afterEach(() => { logSpy.mockRestore(); });
@@ -256,8 +263,30 @@ describe('cost (graphql-query-complexity), enforce', () => {
     expect(cost('{ __typename }')).toBe(0);
   });
 
+  it('#3381 HTTP admission refuses over-budget metadata before the resolver', async () => {
+    const query = '{ automationTeamSnapshotGrant(id: "g") { id appId triggerKind triggerId grantedBy createdAt revokedAt revokedBy } }';
+    const spy = vi.spyOn(Query, 'automationTeamSnapshotGrant').mockResolvedValue({
+      id: 'g', appId: 'a', triggerKind: 'SCHEDULE', triggerId: 't', grantedBy: 'u',
+      createdAt: new Date('2026-11-01T00:00:00Z'), revokedAt: null, revokedBy: null,
+    });
+    try {
+      const tight = await boot({ GRAPHQL_MAX_COST: '8' });
+      const refused = await post(tight, { query });
+      expect(refused.status).toBe(400);
+      expect((await refused.json()).errors[0].extensions.code).toBe(QUERY_TOO_COMPLEX);
+      expect(spy).not.toHaveBeenCalled();
+      const allowed = await boot({ GRAPHQL_MAX_COST: '9' });
+      expect((await (await post(allowed, { query })).json()).errors).toBeUndefined();
+      expect(spy).toHaveBeenCalledTimes(1);
+    } finally { spy.mockRestore(); }
+  });
+
+  it('#3381 single grant metadata costs one object plus eight leaves, not a page', () => {
+    expect(cost('{ automationTeamSnapshotGrant(id: "g") { id appId triggerKind triggerId grantedBy createdAt revokedAt revokedBy } }')).toBe(9);
+  });
+
   it('a list that states its page size multiplies by it; a wrapper around a list does too (the dominant shape)', () => {
-    expect(cost('{ usageEvents(limit: 200) { id } }')).toBe(1 + 200 * 1);
+    expect(cost('{ sessions(limit: 200) { id } }')).toBe(1 + 200 * 1);
     // edges is EdgesPage { items [Edge] total }: items costs 1 + 10 x 1 = 11, total 1, wrapper = 1 + (200 / 10) x 12
     expect(cost('{ edges(limit: 200) { items { id } total } }')).toBe(1 + 20 * 12);
     // below the factor the wrapper never goes under its children
@@ -272,23 +301,26 @@ describe('cost (graphql-query-complexity), enforce', () => {
   });
 
   it('zero is not free, a negative size is its magnitude, and omitted/null falls back to the largest common default', () => {
-    expect(cost('{ usageEvents(limit: 0) { id } }')).toBe(1 + 1);
-    expect(cost('{ usageEvents(limit: -300) { id } }')).toBe(1 + 300);
-    expect(cost('{ usageEvents { id } }')).toBe(1 + 100);
-    expect(cost('{ usageEvents(limit: null) { id } }')).toBe(1 + 100);
+    expect(cost('{ sessions(limit: 0) { id } }')).toBe(1 + 1);
+    expect(cost('{ sessions(limit: -300) { id } }')).toBe(1 + 300);
+    expect(cost('{ sessions { id } }')).toBe(1 + 100);
+    expect(cost('{ sessions(limit: null) { id } }')).toBe(1 + 100);
     expect(cost('{ memoryNodes(memoryRef: "m") { nodes { id } } }')).toBe(1 + 100 * (1 + 10));
   });
 
-  it('every field whose resolver default exceeds the common one is costed at THAT default when the size is omitted or null', () => {
+  it('every reviewed resolver default is used when the size is omitted or null', () => {
     const pagedList = (name: string) => `{ ${name} }`;
-    expect(OMITTED_PAGE_SIZE['Query.appNodes']).toBe(500); // take: limit ?? 500
-    expect(cost('{ appNodes(appRef: "a") { id } }')).toBe(1 + 500);
-    expect(cost('{ appNodes(appRef: "a", limit: null) { id } }')).toBe(1 + 500);
+    expect(OMITTED_PAGE_SIZE['Query.appNodes']).toBe(20); // #3210: legacy take: limit ?? 20
+    expect(cost('{ appNodes(appRef: "a") { id } }')).toBe(1 + 20);
+    expect(cost('{ appNodes(appRef: "a", limit: null) { id } }')).toBe(1 + 20);
     expect(cost('{ appNodes(appRef: "a", limit: 500) { id } }')).toBe(1 + 500);
     expect(cost('{ memoryEdges(memoryRef: "m") { edges { id } } }')).toBe(1 + 100 * (1 + 10));
     expect(cost('{ validateMemory(memoryRef: "m") { total } }')).toBeGreaterThan(0);
     void pagedList;
-    for (const [field, size] of Object.entries(OMITTED_PAGE_SIZE)) expect(size).toBeGreaterThan(DEFAULT_OMITTED_PAGE_SIZE - 1);
+    for (const [field, size] of Object.entries(OMITTED_PAGE_SIZE)) {
+      if (field === 'Query.appNodes' || field === 'Query.memoryLocSegments') expect(size).toBe(20); // The explicit lower legacy default (#3210); the loc-segment page default (#3456).
+      else expect(size).toBeGreaterThan(DEFAULT_OMITTED_PAGE_SIZE - 1);
+    }
     expect(DEFAULT_OMITTED_PAGE_SIZE).toBe(100);
   });
 
@@ -313,14 +345,22 @@ describe('cost (graphql-query-complexity), enforce', () => {
     for (const key of Object.keys(OMITTED_PAGE_SIZE)) expect(REVIEWED_PAGED_FIELDS).toContain(key);
   });
 
+  it('#2662 findings admission charges the clamped page for literals and variables', () => {
+    const q = (n: string) => `{ agentTask(id: "x") { result { findings(limit: ${n}) { items { id severity text } total hasMore } } } }`;
+    const variables = 'query($n:Int){agentTask(id:"x"){result{findings(limit:$n){items{id severity text} total hasMore}}}}';
+    expect(cost(q('2147483647'))).toBe(cost(q('200')));
+    expect(cost(variables, {n:2147483647})).toBe(cost(q('200')));
+    expect(cost(q('0'))).toBeLessThan(cost(q('200')));
+  });
+
   it('saturates: a huge page size cannot wrap around or go non-finite', () => {
-    expect(cost('{ usageEvents(limit: 2147483647) { id } }')).toBe(25_001);
+    expect(cost('{ sessions(limit: 2147483647) { id } }')).toBe(25_001);
     expect(cost('{ edges(limit: 2147483647) { items { id } } }')).toBe(25_001);
   });
 
   it('mutant control: the simple estimator alone undercounts both pins (so they bite)', () => {
     const simple = (q: string) => getComplexity({ schema, query: parse(q), variables: {}, estimators: [simpleEstimator({ defaultComplexity: 1 })] });
-    expect(simple('{ usageEvents(limit: 2147483647) { id } }')).toBe(2);
+    expect(simple('{ sessions(limit: 2147483647) { id } }')).toBe(2);
     expect(simple('{ edges(limit: 5000) { items { id } } }')).toBeLessThan(10);
   });
 
@@ -359,8 +399,8 @@ describe('cost (graphql-query-complexity), enforce', () => {
 
     it('limit 2147483647 on a list is refused, as a literal and as a variable', async () => {
       for (const body of [
-        { query: '{ usageEvents(limit: 2147483647) { id } }' },
-        { query: 'query($n: Int) { usageEvents(limit: $n) { id } }', variables: { n: 2147483647 } },
+        { query: '{ sessions(limit: 2147483647) { id } }' },
+        { query: 'query($n: Int) { sessions(limit: $n) { id } }', variables: { n: 2147483647 } },
         { query: 'query($n: Int) { edges(limit: $n) { items { id } } }', variables: { n: 2147483647 } },
       ]) {
         const res = await post(base, body);
@@ -377,18 +417,18 @@ describe('cost (graphql-query-complexity), enforce', () => {
     });
 
     it('the unselected operation is never costed: an over-limit A does not stop B', async () => {
-      const doc = `query A { ${'usageEvents(limit: 2147483647) { id } '} } query B { serverInfo { version } }`;
+      const doc = `query A { ${'sessions(limit: 2147483647) { id } '} } query B { serverInfo { version } }`;
       const b = await post(base, { query: doc, operationName: 'B' });
       expect((await b.json()).errors).toBeUndefined();
       expect(serverInfoSpy).toHaveBeenCalledTimes(1);
-      expect(usageSpy).not.toHaveBeenCalled();
+      expect(sessionsSpy).not.toHaveBeenCalled();
       expect(l4Lines().filter((l) => l.outcome !== 'near_limit')).toEqual([]);
       const a = await post(base, { query: doc, operationName: 'A' });
       expect(a.status).toBe(400);
     });
 
     it('a bad variable gets the ordinary variable error, not this refusal, and no resolver call or L4 line', async () => {
-      const res = await post(base, { query: 'query($n: Int) { usageEvents(limit: $n) { id } }', variables: { n: 'x' } });
+      const res = await post(base, { query: 'query($n: Int) { sessions(limit: $n) { id } }', variables: { n: 'x' } });
       const body = await res.json();
       expect(body.errors[0].extensions.code).not.toBe(QUERY_TOO_COMPLEX);
       expect(body.errors[0].message).toBe('Invalid GraphQL variable input.');
@@ -409,31 +449,31 @@ describe('cost (graphql-query-complexity), enforce', () => {
 });
 
 describe('modes', () => {
-  const over = { query: '{ usageEvents(limit: 2147483647) { id } }' };
+  const over = { query: '{ sessions(limit: 2147483647) { id } }' };
 
   it('observe: the same over-limit request executes and returns its data; exactly one would_refuse line, with no source or values in it', async () => {
     const base = await boot({ GRAPHQL_COMPLEXITY_MODE: 'observe' });
     const marker = 'MARKER_ARG_VALUE_123';
-    const res = await post(base, { query: 'query Probe($m: String) { MARKER_ALIAS_QQ: usageEvents(limit: 2147483647, loc: $m) { id } }', variables: { m: marker } });
+    const res = await post(base, { query: 'query Probe($m: String) { MARKER_ALIAS_QQ: sessions(limit: 2147483647, repo: $m) { id } }', variables: { m: marker } });
     const body = await res.json();
     expect(body.errors).toBeUndefined();
-    expect(usageSpy).toHaveBeenCalledTimes(1);
+    expect(sessionsSpy).toHaveBeenCalledTimes(1);
     const lines = l4Lines().filter((l) => l.outcome === 'would_refuse');
     expect(lines).toHaveLength(1);
     expect(lines[0]).toMatchObject({ mode: 'observe', outcome: 'would_refuse', limit: 'cost', max: 200_000, operationType: 'query', operationName: 'Probe', principal: 'anonymous' });
     expect(typeof lines[0]!.queryHash).toBe('string');
     expect(JSON.stringify(lines)).not.toContain(marker);
-    expect(JSON.stringify(lines)).not.toContain('usageEvents');
+    expect(JSON.stringify(lines)).not.toContain('sessions');
     expect(JSON.stringify(lines)).not.toContain('MARKER_ALIAS_QQ');
   });
 
   it('the same request is refused under enforce and admitted under observe: only the environment differs', async () => {
     const enforce = await post(await boot({ GRAPHQL_COMPLEXITY_MODE: 'enforce' }), over);
     expect(enforce.status).toBe(400);
-    expect(usageSpy).not.toHaveBeenCalled();
+    expect(sessionsSpy).not.toHaveBeenCalled();
     const observe = await post(await boot({ GRAPHQL_COMPLEXITY_MODE: 'observe' }), over);
     expect((await observe.json()).errors).toBeUndefined();
-    expect(usageSpy).toHaveBeenCalledTimes(1);
+    expect(sessionsSpy).toHaveBeenCalledTimes(1);
   });
 
   it('an unset mode is enforce, and off, Observe, an empty value or a number refuse boot without echoing it', async () => {
@@ -499,7 +539,7 @@ describe('plugin branches the stack cannot reach', () => {
       const esm = await import('graphql/index.mjs');
       const foreign = esm.buildSchema(typeDefs);
       const cjs = require('graphql');
-      const document = cjs.parse('{ usageEvents(limit: 2147483647) { id } }');
+      const document = cjs.parse('{ sessions(limit: 2147483647) { id } }');
       const lines = [];
       const plugin = complexityAdmissionPlugin({ maxDepth: 12, maxCost: 25000, listFactor: 10, complexityMode: 'observe' }, { log: (l) => lines.push(l) });
       const hooks = await plugin.requestDidStart({});
@@ -515,14 +555,14 @@ describe('plugin branches the stack cannot reach', () => {
   it('operation names are untrusted labels: only a plain identifier is logged, cut to 100 characters', async () => {
     const lines: string[] = [];
     const p = complexityAdmissionPlugin(cfg('observe'), { log: (l) => lines.push(l) });
-    await run(p, 'query Ok { usageEvents(limit: 2147483647) { id } }', { request: { variables: {}, operationName: 'x"; DROP' } });
-    await run(p, 'query Ok { usageEvents(limit: 2147483646) { id } }', { queryHash: 'h2', request: { variables: {}, operationName: 'A'.repeat(300) } });
+    await run(p, 'query Ok { sessions(limit: 2147483647) { id } }', { request: { variables: {}, operationName: 'x"; DROP' } });
+    await run(p, 'query Ok { sessions(limit: 2147483646) { id } }', { queryHash: 'h2', request: { variables: {}, operationName: 'A'.repeat(300) } });
     expect(JSON.parse(lines[0]!).operationName).toBeNull();
     expect(JSON.parse(lines[1]!).operationName).toBeNull(); // 300 chars exceeds the identifier bound
   });
 
   describe('log bounds', () => {
-    const overQuery = 'query { usageEvents(limit: 2147483647) { id } }';
+    const overQuery = 'query { sessions(limit: 2147483647) { id } }';
     it('100 identical over-limit requests log one line; the count rides on the next permitted line, never as an extra line', async () => {
       let t = 1_000_000;
       const lines: string[] = [];
@@ -587,7 +627,7 @@ describe('plugin branches the stack cannot reach', () => {
     it('the printed query never reaches the log', async () => {
       const lines: string[] = [];
       const p = complexityAdmissionPlugin(cfg('observe'), { log: (l) => lines.push(l) });
-      await run(p, 'query Probe { usageEvents(limit: 2147483647, loc: "SECRET_LITERAL") { id } }');
+      await run(p, 'query Probe { sessions(limit: 2147483647, repo: "SECRET_LITERAL") { id } }');
       expect(lines.join('')).not.toContain('SECRET_LITERAL');
       expect(print(parse(small))).toBeTruthy();
     });

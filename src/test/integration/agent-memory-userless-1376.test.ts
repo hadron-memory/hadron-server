@@ -182,13 +182,13 @@ describe('#1376 — what a bare key keeps', () => {
   });
 });
 
-describe('#1376 — a request with a user behind it keeps the fold', () => {
-  it('an App member (no org role) reaches the item’s memory through the App, as before', async () => {
+describe('#1376/#3305 — a user also needs independent authority', () => {
+  it('an App member with no independent org role does not reach the item’s memory', async () => {
     const user = await db.user.create({ data: { id: generateId(), handle: `m-${generateId()}`, githubUsername: `m-${generateId()}` } });
     const { appId, appKey } = await link('homeOrg', 'read-write');
     await createDbAppMember(db, appId, user.id, 'member');
-    expect((await getPrincipalAppMemoryAccess(db, { appId, userId: user.id })).get(mem.homeOrg!.id)).toBe('READ_WRITE');
-    expect(await mcpReads({ appId, userId: user.id }, 'homeOrg')).toBe(true);
+    expect((await getPrincipalAppMemoryAccess(db, { appId, userId: user.id })).get(mem.homeOrg!.id)).toBeUndefined();
+    expect(await mcpReads({ appId, userId: user.id }, 'homeOrg')).toBe(false);
     // the same App's key without the user is still refused
     expect(await reads(appKey, 'homeOrg')).toBeNull();
   });

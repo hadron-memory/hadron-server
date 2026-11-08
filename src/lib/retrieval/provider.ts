@@ -37,6 +37,9 @@ export type LexicalSort = 'relevance' | 'loc' | 'seq' | 'updatedAt';
 export interface NodeSqlFilter {
   /** #2175: caller-scoped recovery audience. When set, other memories' tombstones never reach ranking/paging. */
   tombstoneMemoryIds?: string[];
+  /** #3494: open-root existence; synthetic inherited summaries are zero. */
+  hasOpenThreads?: boolean | null;
+  syntheticCommentMemoryIds?: string[];
   nodeType?: string | null;
   /** #3113 — an explicit, already validated list (`checkNodeTypesFilter`): `node_type = ANY(list)`. Never set together with `nodeType`. */
   nodeTypes?: string[] | null;
@@ -47,6 +50,11 @@ export interface NodeSqlFilter {
   role?: string | null;
   tags?: string[] | null;
   locPrefix?: string | null;
+  /**
+   * #2832 — direct children only (cor:api:090:02): locs that are exactly `<childrenOf>:<one segment>`;
+   * "" means the top-level locs. Null/undefined means no filter, so "" is a value, never "absent".
+   */
+  childrenOf?: string | null;
   createdBy?: string | null;
   updatedAfter?: string | null;
   updatedBefore?: string | null;
@@ -145,6 +153,8 @@ export interface RegexSearchOpts {
 
 export interface VectorSearchOpts {
   db: PrismaClient;
+  hasOpenThreads?: boolean | null;
+  syntheticCommentMemoryIds?: string[];
   /** #2421: filter before the vector window, not after its cap. */
   candidateNodeIds?: string[];
   abstractOnly?: boolean;

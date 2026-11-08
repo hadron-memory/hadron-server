@@ -372,9 +372,10 @@ async function claimUrn(tx: Prisma.TransactionClient, urn: string): Promise<void
   if (existing && !existing.deletedAt) throw new AgentUrnTakenError(urn);
   if (existing) {
     try {
-      await tx.agent.delete({ where: { id: existing.id } });
+      const reclaimed = await tx.agent.deleteMany({ where: { id: existing.id, installMemories: { none: {} } } });
+      if (reclaimed.count === 0) throw new AgentUrnTakenError(urn);
     } catch {
-      throw new AgentUrnTakenError(urn, `URN "${urn}" belongs to a deleted agent that still has Worker castings — their history keeps it reserved.`);
+      throw new AgentUrnTakenError(urn, `URN "${urn}" belongs to a deleted agent that still has Worker castings or retained install memories — their history keeps it reserved.`);
     }
   }
   const holder = await tx.memory.findUnique({ where: { urn: `${urn}-system` } });

@@ -102,6 +102,9 @@ export async function loadNodeForGit(
       role: node.role ?? null,
       isRunnable: node.isRunnable ?? null,
       isPlaceholder: node.isPlaceholder,
+      authorshipKind: node.authorshipKind,
+      authoredByTask: node.authoredByTask,
+      authoredByRevision: node.authoredByRevision,
       outgoingEdges: node.outgoingEdges ?? [],
     };
 }

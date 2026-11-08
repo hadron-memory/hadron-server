@@ -46,7 +46,8 @@ async function agent(org: { id: string; urn: string }, slug: string, visibility:
 
 let seq = 0;
 async function install(agentId: string) {
-  // createdAt decides which install is primary (orderBy createdAt asc).
+  // createdAt decides primary installation identity. A3 separately orders
+  // a partial App.appAgents projection by Agent id (one shared served date).
   await db.appAgent.create({ data: { appId: app.id, agentId, createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, seq++)) } });
 }
 
@@ -80,7 +81,9 @@ describe('App.agentId and installedAgentUrn answer as the Agent read does (#2640
     expect(data.agent).toBeNull();
     expect(data.installedAgentUrn).toBeNull();
     expect(data.agents).toEqual([{ id: readable.id }]);
-    expect(data.appAgents).toEqual([{ agent: null }, { agent: { id: readable.id } }]); // entry count unchanged
+    expect(data.appAgents).toEqual([
+      { id: hidden.id, agent: null }, { id: readable.id, agent: { id: readable.id } },
+    ].sort((a,b)=>a.id.localeCompare(b.id)).map(({agent})=>({agent}))); // entry count unchanged
     noLeak(json, hidden);
   });
 
@@ -91,7 +94,9 @@ describe('App.agentId and installedAgentUrn answer as the Agent read does (#2640
     expect(data.agent).toEqual({ id: readable.id });
     expect(data.installedAgentUrn).toBe(`hrn:agent:${readable.urn.split(':')[0]}:readable-p`);
     expect(data.agents).toEqual([{ id: readable.id }]);
-    expect(data.appAgents).toEqual([{ agent: { id: readable.id } }, { agent: null }]);
+    expect(data.appAgents).toEqual([
+      { id: readable.id, agent: { id: readable.id } }, { id: hidden.id, agent: null },
+    ].sort((a,b)=>a.id.localeCompare(b.id)).map(({agent})=>({agent})));
     noLeak(json, hidden);
   });
 

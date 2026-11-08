@@ -110,6 +110,56 @@ const rows = () => db.gitMirrorObligation.findMany({where:{memoryId}});
 const remoteFile = (loc='topic') => git(env.bare,'show',`refs/heads/hadron-updates:${loc}.md`);
 const rejectPushes = () => {const hook=join(env.bare,'hooks','pre-receive');writeFileSync(hook,'#!/bin/sh\nexit 1\n');chmodSync(hook,0o755);};
 let commands:string[][];
+
+/** #3444 diagnostic sink: one JSON line, stderr (console is mocked per test). */
+type DiagnosticSink = (record: Record<string, unknown>) => void;
+const stderrSink: DiagnosticSink = record => { process.stderr.write(`[#3444 diagnostic] ${JSON.stringify(record)}\n`); };
+type DiagnosticContext = { labels: Record<string, string>; counters: () => Record<string, unknown>; startedAt: number };
+const DIAGNOSTIC_CAP = 16;
+const clip = (value: unknown) => String(value).slice(0, 80);
+const scalar = (value: unknown) => typeof value === 'number' || typeof value === 'boolean' ? value : clip(value);
+/**
+ * #3444 (Refs only; the flake stays UNCONFIRMED): run one post-tick read, and only if it throws, emit one bounded,
+ * whitelisted record of the memory's obligation rows before rethrowing the ORIGINAL error object unchanged.
+ * A passing read costs nothing: no query, no counters call, no output. Bounds per the CHECKED gate: `take: 16` with a
+ * scalar `select` (never materialize then slice), at most 16 rows and 16 command categories (argv[0] only) with cap
+ * markers, every string at most 80 characters, node ids mapped to fixture labels or `other`. A capture or sink
+ * failure is swallowed after a note naming its class only; it never replaces the original error.
+ */
+async function readOrDiagnose<T>(read: () => Promise<T>, ctx: DiagnosticContext, emit: DiagnosticSink = stderrSink): Promise<T> {
+ try {
+  return await read();
+ } catch (original) {
+  try {
+   let record: Record<string, unknown>;
+   try {
+    const found = await db.gitMirrorObligation.findMany({
+     where: { memoryId }, orderBy: { lastAttemptAt: 'asc' }, take: DIAGNOSTIC_CAP,
+     select: { nodeId: true, kind: true, state: true, errorClass: true, attempts: true, attemptSeq: true, lastAttemptAt: true },
+    });
+    record = {
+     diagnostic: 'post_tick_read_failed',
+     elapsedMs: Date.now() - ctx.startedAt,
+     counters: Object.fromEntries(Object.entries(ctx.counters()).slice(0, DIAGNOSTIC_CAP).map(([k, v]) => [clip(k), scalar(v)])),
+     rows: found.map(row => ({
+      node: clip(ctx.labels[row.nodeId] ?? 'other'), kind: clip(row.kind), state: clip(row.state),
+      errorClass: clip(row.errorClass), attempts: row.attempts, attemptSeq: clip(row.attemptSeq), lastAttemptAt: clip(row.lastAttemptAt.toISOString()),
+     })),
+     rowCapReached: found.length >= DIAGNOSTIC_CAP,
+     commandCategories: commands.slice(0, DIAGNOSTIC_CAP).map(argv => clip(argv[0])),
+     commandCount: commands.length,
+     commandCapReached: commands.length > DIAGNOSTIC_CAP,
+    };
+   } catch (captureFailure) {
+    record = { diagnostic: 'capture_failed', class: clip((captureFailure as { constructor?: { name?: string } })?.constructor?.name ?? 'unknown') };
+   }
+   emit(record);
+  } catch {
+   // The sink itself failed; the original error still wins.
+  }
+  throw original;
+ }
+}
 const retryQueued = () => new Promise<void>(resolve => { env.onRetryLock = resolve; });
 const expectQueued = (waiting: Promise<void>, running: Promise<unknown>) => Promise.race([
  waiting, running.then(error => { throw error ?? new Error('sweep finished before requesting the checkout lock'); }),
@@ -176,7 +226,7 @@ it('exhausts the tenth failed attempt, exposes the cap in validate, and never re
  await tick(new Date(Date.now()+7*24*60*60_000));expect(commands).toEqual([]);expect((await rows())[0].attempts).toBe(10);
 });
 it('ordinary writer failure after EXHAUSTED stays outside the sweep cap, while ordinary success clears',async()=>{
- const n=await makeNode();await owe(n.id,{state:'EXHAUSTED',attempts:10});rejectPushes();
+ const n=await makeNode();await owe(n.id,{branch:'hadron-updates',state:'EXHAUSTED',attempts:10});rejectPushes();
  await writeNodeToGit({...n,outgoingEdges:[]},'',null,memoryId);
  expect((await rows())[0]).toMatchObject({state:'FAILED',attempts:11});commands=[];
  await tick(new Date(Date.now()+7*24*60*60_000));expect(commands).toEqual([]);
@@ -303,7 +353,7 @@ describe('#3056 shared row budget', () => {
 
     await tick();
     expect(await rows()).toEqual([untouched]);
-    expect(commands.filter(args => args[0] === 'push')).toHaveLength(2);
+    expect(commands.filter(args => args[0] === 'push')).toHaveLength(1); // #3042 batches the two funded rows on one branch
     commands = [];
     await tick();
     expect(await rows()).toEqual([]);
@@ -389,6 +439,7 @@ describe('#3056 shared row budget', () => {
 
 describe('#3151 second-refresh settlement', () => {
  it('a throwing second refresh settles its own TREE_WRITE attempt and lets the next due row proceed', async () => {
+  const startedAt=Date.now(); // #3444: the one baseline clock read the diagnostic's elapsedMs needs
   const first=await makeNode('refresh-fails'), next=await makeNode('next'), later=await makeNode('later');
   const firstDebt=await owe(first.id,{lastAttemptAt:new Date(old().getTime()-1000)});
   const nextDebt=await owe(next.id);
@@ -406,18 +457,120 @@ describe('#3151 second-refresh settlement', () => {
    return load(...args);
   });
   await tick();
-  const failed=await db.gitMirrorObligation.findFirstOrThrow({where:{memoryId,nodeId:first.id}});
+  const failed=await readOrDiagnose(()=>db.gitMirrorObligation.findFirstOrThrow({where:{memoryId,nodeId:first.id}}),{
+   labels:{[first.id]:'first',[next.id]:'next',[later.id]:'later'}, startedAt,
+   counters:()=>({firstReads,nextReads,nextAtEntry:nextAtEntry!==undefined,attemptSeqCalls:seqs.mock.calls.length}),
+  });
   expect(firstReads).toBe(2);
   expect(failed).toMatchObject({state:'FAILED',errorClass:'TREE_WRITE',attempts:2});
   expect(failed.lastAttemptAt.getTime()).toBeGreaterThan(firstDebt.lastAttemptAt.getTime());
-  expect(seqs.mock.calls.length).toBe(2);
+  expect(seqs.mock.calls.length).toBe(1); // one checkout/fence for the admitted branch group
   expect(failed.attemptSeq).toBe(await seqs.mock.results[0].value);
   expect(nextAtEntry).toEqual(nextDebt);
-  expect(nextReads).toBe(2);
+  expect(nextReads).toBe(1); // readiness short-circuits at first work; healthy payload loads after Git preparation
   expect(await db.gitMirrorObligation.findFirst({where:{memoryId,nodeId:next.id}})).toBeNull();
   expect(remoteFile('next')).toContain('current content');
   expect(commands.filter(a=>a[0]==='push')).toHaveLength(1);
   expect(await db.gitMirrorObligation.findFirstOrThrow({where:{memoryId,nodeId:later.id}})).toEqual(untouched);
   expect(()=>remoteFile('refresh-fails')).toThrow();
+ });
+});
+
+describe('#3444 failure-only diagnostics', () => {
+ const ROW_KEYS = ['node', 'kind', 'state', 'errorClass', 'attempts', 'attemptSeq', 'lastAttemptAt'];
+ const RECORD_KEYS = ['diagnostic', 'elapsedMs', 'counters', 'rows', 'rowCapReached', 'commandCategories', 'commandCount', 'commandCapReached'];
+ const missing = (nodeId: string) => db.gitMirrorObligation.findFirstOrThrow({ where: { memoryId, nodeId } });
+ async function failingRead(nodeId: string) {
+  let original: unknown;
+  const read = () => missing(nodeId).catch(error => { original = error; throw error; });
+  return { read, original: () => original };
+ }
+
+ it('rethrows the exact original P2025 object and emits only whitelisted, labelled scalars', async () => {
+  const first = await makeNode('first'), other = await makeNode('other-node');
+  await owe(first.id); await owe(other.id);
+  commands.push(['push', 'https://x-access-token:secret@github.com/acme/repo.git', '/tmp/path']);
+  const emitted: Record<string, unknown>[] = [];
+  const { read, original } = await failingRead('no-such-node');
+  let thrown: unknown;
+  try { await readOrDiagnose(read, { labels: { [first.id]: 'first' }, counters: () => ({ firstReads: 2, nextAtEntry: true }), startedAt: Date.now() }, r => emitted.push(r)); }
+  catch (error) { thrown = error; }
+  expect(thrown).toBe(original());
+  expect(thrown).toMatchObject({ code: 'P2025' });
+  expect(emitted).toHaveLength(1);
+  const record = emitted[0];
+  expect(Object.keys(record).sort()).toEqual([...RECORD_KEYS].sort());
+  const rowsOut = record.rows as Record<string, unknown>[];
+  expect(rowsOut).toHaveLength(2);
+  for (const row of rowsOut) {
+   expect(Object.keys(row).sort()).toEqual([...ROW_KEYS].sort());
+   for (const value of Object.values(row)) expect(typeof value === 'number' || (typeof value === 'string' && value.length <= 80)).toBe(true);
+  }
+  expect(rowsOut.map(r => r.node).sort()).toEqual(['first', 'other']);
+  expect(record.commandCategories).toEqual(['push']);
+  expect(record).toMatchObject({ diagnostic: 'post_tick_read_failed', rowCapReached: false, commandCount: 1, commandCapReached: false, counters: { firstReads: 2, nextAtEntry: true } });
+  const text = JSON.stringify(record);
+  for (const secret of [first.id, other.id, memoryId, 'secret', 'github.com', '/tmp', 'No record was found']) expect(text).not.toContain(secret);
+ });
+
+ it('caps the bounded query at 16 rows before materializing, and caps command categories at 16', async () => {
+  for (let i = 0; i < 20; i++) await owe((await makeNode(`n${i}`)).id);
+  for (let i = 0; i < 20; i++) commands.push([`cmd${i}`, '--arg']);
+  const findMany = vi.spyOn(db.gitMirrorObligation, 'findMany');
+  const emitted: Record<string, unknown>[] = [];
+  const { read } = await failingRead('no-such-node');
+  await expect(readOrDiagnose(read, { labels: {}, counters: () => ({}), startedAt: Date.now() }, r => emitted.push(r))).rejects.toMatchObject({ code: 'P2025' });
+  expect(findMany).toHaveBeenCalledTimes(1);
+  const args = findMany.mock.calls[0][0] as { take?: number; select?: Record<string, boolean> };
+  expect(args.take).toBe(16);
+  expect(Object.keys(args.select ?? {}).sort()).toEqual(['attemptSeq', 'attempts', 'errorClass', 'kind', 'lastAttemptAt', 'nodeId', 'state']);
+  expect(emitted[0]).toMatchObject({ rowCapReached: true, commandCount: 20, commandCapReached: true });
+  expect(emitted[0].rows).toHaveLength(16);
+  expect(emitted[0].commandCategories).toHaveLength(16);
+ });
+
+ it('clips every emitted string scalar to 80 characters, counters included', async () => {
+  vi.spyOn(db.gitMirrorObligation, 'findMany').mockResolvedValueOnce([{ nodeId: 'raw-node-id', kind: 'WRITE', state: 'FAILED', errorClass: 'E'.repeat(200), attempts: 3, attemptSeq: 7n, lastAttemptAt: new Date(0) }] as never);
+  const emitted: Record<string, unknown>[] = [];
+  const { read } = await failingRead('no-such-node');
+  commands.push(['C'.repeat(200)]);
+  await expect(readOrDiagnose(read, { labels: {}, counters: () => ({ note: 'N'.repeat(200), n: 4 }), startedAt: Date.now() }, r => emitted.push(r))).rejects.toMatchObject({ code: 'P2025' });
+  const record = emitted[0] as { rows: Record<string, unknown>[]; commandCategories: string[]; counters: Record<string, unknown> };
+  expect(record.rows[0]).toMatchObject({ node: 'other', attempts: 3, attemptSeq: '7', lastAttemptAt: new Date(0).toISOString() });
+  expect((record.rows[0].errorClass as string).length).toBe(80);
+  expect(record.commandCategories[0].length).toBe(80);
+  expect((record.counters.note as string).length).toBe(80);
+  expect(record.counters.n).toBe(4);
+  expect(JSON.stringify(record)).not.toContain('raw-node-id');
+ });
+
+ it('rethrows the original even when the capture itself throws, noting only the capture failure class', async () => {
+  vi.spyOn(db.gitMirrorObligation, 'findMany').mockRejectedValue(new TypeError('capture exploded with detail'));
+  const emitted: Record<string, unknown>[] = [];
+  const { read, original } = await failingRead('no-such-node');
+  let thrown: unknown;
+  try { await readOrDiagnose(read, { labels: {}, counters: () => ({}), startedAt: Date.now() }, r => emitted.push(r)); }
+  catch (error) { thrown = error; }
+  expect(thrown).toBe(original());
+  expect(emitted).toEqual([{ diagnostic: 'capture_failed', class: 'TypeError' }]);
+ });
+
+ it('rethrows the original even when the sink throws', async () => {
+  const { read, original } = await failingRead('no-such-node');
+  let thrown: unknown;
+  try { await readOrDiagnose(read, { labels: {}, counters: () => ({}), startedAt: Date.now() }, () => { throw new Error('sink down'); }); }
+  catch (error) { thrown = error; }
+  expect(thrown).toBe(original());
+ });
+
+ it('a passing read emits nothing and runs no extra query', async () => {
+  const n = await makeNode('present'); const debt = await owe(n.id);
+  const findMany = vi.spyOn(db.gitMirrorObligation, 'findMany');
+  const counters = vi.fn(() => ({}));
+  const emit = vi.fn();
+  await expect(readOrDiagnose(() => missing(n.id), { labels: {}, counters, startedAt: Date.now() }, emit)).resolves.toEqual(debt);
+  expect(emit).not.toHaveBeenCalled();
+  expect(findMany).not.toHaveBeenCalled();
+  expect(counters).not.toHaveBeenCalled();
  });
 });

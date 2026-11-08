@@ -80,7 +80,7 @@ describe('#3125 S1 SDL', () => {
     expect(String(app.getFields().properties?.type)).toBe('JSON');
     expect(String(app.getFields().propertiesRevision?.type)).toBe('Int');
     const m = schema.getMutationType()!.getFields().setAppProperties!;
-    expect(m.args.map((a) => `${a.name}:${String(a.type)}`)).toEqual(['appRef:String!', 'properties:JSON', 'expectedRevision:Int']);
+    expect(m.args.map((a) => `${a.name}:${String(a.type)}`)).toEqual(['appRef:String!', 'properties:JSON', 'expectedRevision:Int', 'instruction:ActInstructionInput']);
     expect(String(m.type)).toBe('App!');
   });
 });

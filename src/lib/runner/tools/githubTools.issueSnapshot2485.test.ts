@@ -192,7 +192,7 @@ beforeEach(async () => {
   });
   appId = app.id;
   const flowMem = await db.memory.create({
-    data: { id: generateId(), organizationId: orgId, name: 'flows', urn: FLOW_MEM_URN, class: 'knowledge', visibility: 'ORGANIZATION' },
+    data: { id: generateId(), organizationId: orgId, name: 'flows', urn: FLOW_MEM_URN, class: 'knowledge', visibility: 'PUBLIC' },
   });
   flowMemoryId = flowMem.id;
   const agent = await db.agent.create({

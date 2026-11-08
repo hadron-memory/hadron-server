@@ -106,6 +106,35 @@ describe('#2652 — no set, and sets that cannot be used', () => {
     await expectRefusedUnchanged('approved', 'TASK_OUTCOME_SET_UNUSABLE');
   });
 
+  it('two Team Agents, one inheriting a set through its base chain: unusable, refused (#3094)', async () => {
+    const otherMemory = await secondTeamAgent();
+    const baseMemory = await db.memory.create({ data: { organizationId: org.id, name: 'Other base', urn: `${org.urn}:other-base`, class: 'system' } });
+    const base = await db.agent.create({ data: { organizationId: org.id, name: 'Other base', urn: `${org.urn}:other-base-agent`, systemMemoryId: baseMemory.id } });
+    const other = await db.agent.findFirstOrThrow({ where: { systemMemoryId: otherMemory.id } });
+    await db.agent.update({ where: { id: other.id }, data: { extendsAgentId: base.id } });
+    await putSet({ outcomes: ['approved'] }, baseMemory.id);
+    await expectRefusedUnchanged('approved', 'TASK_OUTCOME_SET_UNUSABLE');
+  });
+
+  it('two Team Agents, one whose base holds no set: any one word, as before (#3094 control)', async () => {
+    const otherMemory = await secondTeamAgent();
+    const baseMemory = await db.memory.create({ data: { organizationId: org.id, name: 'Other base', urn: `${org.urn}:other-base`, class: 'system' } });
+    const base = await db.agent.create({ data: { organizationId: org.id, name: 'Other base', urn: `${org.urn}:other-base-agent`, systemMemoryId: baseMemory.id } });
+    const other = await db.agent.findFirstOrThrow({ where: { systemMemoryId: otherMemory.id } });
+    await db.agent.update({ where: { id: other.id }, data: { extendsAgentId: base.id } });
+    expect((await finish('anything')).resultOutcome).toBe('anything');
+  });
+
+  it.each([
+    ['no data', null],
+    ['an empty list', { outcomes: [] }],
+    ['an entry that is not one word', { outcomes: ['approved', 'two words'] }],
+  ])('two Team Agents and a malformed set (%s) on one: unusable, refused, never read as no set (#3094)', async (_, data) => {
+    const other = await secondTeamAgent();
+    await putSet(data, other.id);
+    await expectRefusedUnchanged('approved', 'TASK_OUTCOME_SET_UNUSABLE');
+  });
+
   it('the set is found through the Agent base chain', async () => {
     const baseMemory = await db.memory.create({ data: { organizationId: org.id, name: 'Base system', urn: `${org.urn}:base-system`, class: 'system' } });
     const base = await db.agent.create({ data: { organizationId: org.id, name: 'Base', urn: `${org.urn}:base`, systemMemoryId: baseMemory.id } });

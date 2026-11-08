@@ -1,10 +1,12 @@
+import { personalOrgAgentTextAllowed } from './personalOrgAgentInstall.js';
 /**
  * The App-key-with-active-session memory scope — the hard isolation boundary
  * for multi-user agents, as ONE predicate with two callers.
  *
- * When an App key operates inside a session, it is confined to that session's
- * memory plus the bound agent's system memory: even if an LLM asks for another
- * memory by id, the filter denies it. Two surfaces implement that confinement —
+ * This helper returns the session's own reach: its memory plus the bound agent's
+ * system memory. The read gates additionally admit explicitly named PUBLIC knowledge
+ * read-only (0114 B); that exception never enters this discovery set or permits a write.
+ * Two surfaces historically implemented the session confinement —
  * the GraphQL gate (`getAccessibleMemoryIds` in `resolvers.helpers.ts`) and the
  * MCP node-search scope (`src/mcp/server.ts`) — and until #945 each carried its
  * own copy of the rule, the second one annotated "mirrors the resolver's
@@ -66,7 +68,7 @@ export async function sessionScopedMemoryIds(
   const app = await db.app.findUnique({
     where: { id: appId },
     select: {
-      deletedAt: true, uninstalledAt: true,
+      organizationId:true, ownerUserId:true, deletedAt: true, uninstalledAt: true,
       organization: { select: { deletedAt: true } },
     },
   });
@@ -97,7 +99,8 @@ export async function sessionScopedMemoryIds(
   const hasLicensedInstall = async (): Promise<boolean> => {
     if (session.agentId === null) return false;
     if (licensedInstall === undefined) {
-      licensedInstall = await isAgentInstalledAndLicensed(db, appId, session.agentId);
+      licensedInstall = await isAgentInstalledAndLicensed(db, appId, session.agentId) &&
+        await personalOrgAgentTextAllowed(db,app,session.agentId,session.userId);
     }
     return licensedInstall;
   };

@@ -72,6 +72,7 @@ import { AmbiguousLegacyUrnError, NodeNotFoundError } from './entityRef/errors.j
 import { isId } from './entityRef/shape.js';
 import { validateNodeAgainstSchema, NodeSchemaViolation } from './validateNodeAgainstSchema.js';
 import type { MemorySchema } from './memorySchema.js';
+import { assertRenameAuthoring, attestedAuthoring, type AuthoringContext } from './authoringAttestation.js';
 import { clearNodeAuthorship } from './nodeAuthorship.js';
 import { memoryIsVectorIndexed } from './embedding/indexing.js';
 import {
@@ -297,6 +298,8 @@ export async function moveNodeSubtree(
      * opt-in `renameToLeaf` argument, and GraphQL `moveNode` still never sets it.
      */
     renameSourceLeaf?: boolean;
+    /** #1328 — what the rename is, in attestation terms. A rename without it is refused. */
+    renameAuthoring?: AuthoringContext;
     /** Refuse (SubtreeMoveMintedError) when any moved node is minted, read under this move's locks (#1591). */
     requireUnminted?: boolean;
     /** Recheck caller write authority after both Memory rows are locked. */
@@ -309,7 +312,7 @@ export async function moveNodeSubtree(
     principal?: RoleWriterPrincipal;
   },
 ): Promise<MoveNodeSubtreeResult> {
-  const { source, destLoc, editor, renameSourceLeaf } = opts;
+  const { source, destLoc, editor, renameSourceLeaf, renameAuthoring } = opts;
   const srcMemoryId = source.memoryId;
   const destMemoryId = opts.destMemoryId ?? srcMemoryId;
   const crossMemory = destMemoryId !== srcMemoryId;
@@ -651,10 +654,19 @@ export async function moveNodeSubtree(
     moved: subtree.map((n) => ({ id: n.id, previousLoc: n.loc, loc: newLocById.get(n.id)! })),
     linkWarnings: [],
   };
+  const leaf = destLoc.split(':').pop()!;
+  // #1328 — a rename is an authored name change. The rows are locked by now,
+  // and this refuses before the first write of the move.
+  const renamed = renameSourceLeaf === true ? subtree.find((n) => n.id === source.id && n.name !== leaf) : undefined;
+  const renameStamp = renamed
+    ? await assertRenameAuthoring(tx, srcMemoryId, destMemoryId, {
+        priorRole: renamed.role, priorRunnable: renamed.isRunnable,
+        role: renamed.role, runnable: renamed.isRunnable, mintHuman: true, authoredChange: true,
+      }, renameAuthoring ?? attestedAuthoring(null))
+    : null;
   for (const n of subtree) {
     await tx.node.update({ where: { id: n.id }, data: { loc: `__moving-${n.id}` } });
   }
-  const leaf = destLoc.split(':').pop()!;
   for (const n of subtree) {
     const newLoc = newLocById.get(n.id)!;
     const rename = renameSourceLeaf === true && n.id === source.id;
@@ -667,7 +679,7 @@ export async function moveNodeSubtree(
       where: { id: n.id },
       data: {
         ...changed,
-        ...(rename && n.name !== leaf ? clearNodeAuthorship() : {}),
+        ...(rename && n.name !== leaf ? (renameStamp ?? clearNodeAuthorship()) : {}),
         revisionContentHash: revisionStateHashRefreshMarker(),
       },
     });

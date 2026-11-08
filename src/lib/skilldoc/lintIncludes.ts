@@ -28,3 +28,22 @@ export function lintBrokenIncludes(
     message: `${broken} include${broken === 1 ? '' : 's'} in this node could not be resolved with your access, so the export carries "${BROKEN_INCLUDE_NOTICE}" in ${broken === 1 ? 'its' : 'their'} place — the target is missing or you cannot read it`,
   };
 }
+
+/**
+ * hadron-internal#40 (ruling 0197 (4)): a node whose resolved body is over a content resolution limit is left out of
+ * the export, never shortened, and named here. An error, so the node carries no body and its plan refuses; the other
+ * nodes still export. The message is the refusal's fixed text: it names the limit, never a target or a size.
+ */
+export function lintResolutionLimit(
+  node: { urn: string; memoryUrn: string },
+  refusal: { message: string } | undefined,
+): Finding | null {
+  if (!refusal) return null;
+  return {
+    urn: node.urn,
+    memory: node.memoryUrn,
+    rule: 'skill-content-resolution-limit',
+    severity: 'error',
+    message: refusal.message,
+  };
+}

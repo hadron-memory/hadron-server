@@ -2,8 +2,10 @@
  * #3125 S1 — `App.properties` and `setAppProperties` (cor:dmo:050:02, cor:dmo:050:20; the task-integration namespace
  * is cor:agt:120:01).
  *
- * Write gate (V33): whoever manages the App (`actorManagesApp`, the gate of the App's ticker and delivery settings,
- * cor:agt:080:19), a person acting as themselves; a worker session, an App key and an impersonation are refused. The
+ * Write gate (V33, ruling 0119 / #3323): whoever manages the App (`actorManagesApp`, the gate of the App's ticker and
+ * delivery settings, cor:agt:080:19): a person acting as themselves, or (#3323, cor:dmo:050:20 and :12) their held
+ * worker's session on a clear instruction, judged on the holder. A worker with no instruction, an App key and an
+ * impersonation are refused; ruling 0119's headless grant arm is not built here, so a headless run is refused too. The
  * gate is judged first, inside the App's EXCLUSIVE write transaction, so a caller who doesn't manage the App gets the
  * same refusal whatever the object holds. Read gate (PR #3131 security P2-1): the App row reaches a caller through
  * fields that don't gate it (`Ticker.app`, `AppGrant.app`), so these two fields judge the reader themselves, on the
@@ -18,7 +20,8 @@ import { GraphQLError } from 'graphql';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { requireOwnerOrOrgRole, type Context } from './resolvers.helpers.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
-import { actorManagesApp, resolveParticipatedApp, resolveTaskWorkerId, taskError } from './resolvers.agentTask.js';
+import { actorManagesApp, recordInstructedManagerAct, resolveParticipatedApp, resolveTaskWorkerId, taskError, withInstruction } from './resolvers.agentTask.js';
+import type { ActInstruction } from '../../../lib/auth/instructedAct.js';
 import { writeInApp } from './resolvers.ticker.js';
 import { appendAppPropertiesChangedEvent, eventActor } from '../../../lib/agentTasks/events.js';
 import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
@@ -92,10 +95,13 @@ export const appPropertiesTypeResolvers = {
 
 export async function writeAppProperties(
   ctx: Context, appRef: string, rawProperties: unknown, expectedRevision: number | null | undefined,
+  instruction?: ActInstruction | null,
 ) {
-  const { app, actor } = await resolveParticipatedApp(ctx, appRef);
+  const participated = await resolveParticipatedApp(ctx, appRef);
+  const { app } = participated;
+  const actor = withInstruction(participated.actor, instruction);
   return writeInApp(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, fresh) => {
-    if (!(await actorManagesApp(txCtx, fresh, actor))) {
+    if (!(await actorManagesApp(txCtx, fresh, actor, actor.instructed))) {
       throw taskError('FORBIDDEN', 'Only whoever manages this App can change its properties.');
     }
     let next: Prisma.InputJsonObject | null = null;
@@ -142,6 +148,7 @@ export async function writeAppProperties(
         throw taskError('APP_PROPERTIES_CONFLICT', 'The App\'s properties changed during this write. Read them again and resend. Nothing was changed.');
       }
       await appendAppPropertiesChangedEvent(tx, { appId: fresh.id, actor: eventActor(txCtx.userId), keys });
+      await recordInstructedManagerAct(tx, fresh.id, actor, 'app.properties');
     }
     return tx.app.findUniqueOrThrow({ where: { id: fresh.id } });
   }, { lockMode: 'exclusive' });
@@ -150,7 +157,7 @@ export async function writeAppProperties(
 export const appPropertiesMutations = {
   setAppProperties: async (
     _: unknown,
-    { appRef, properties, expectedRevision }: { appRef: string; properties?: unknown; expectedRevision?: number | null },
+    { appRef, properties, expectedRevision, instruction }: { appRef: string; properties?: unknown; expectedRevision?: number | null; instruction?: ActInstruction | null },
     ctx: Context,
-  ) => writeAppProperties(ctx, appRef, properties ?? null, expectedRevision),
+  ) => writeAppProperties(ctx, appRef, properties ?? null, expectedRevision, instruction),
 };

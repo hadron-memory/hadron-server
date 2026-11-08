@@ -1,7 +1,7 @@
 /**
  * #1632 (cor:dmo:130, S2b-1) — signing on MCP: an agent may REQUEST a
  * signature and read the outcome, never produce one (no tool takes an
- * assertion; a person signs on the server-hosted ceremony page, S2b-2).
+ * assertion; a person signs on the server-hosted ceremony page, cor:dmo:130:08).
  * Thin over the GraphQL resolvers, so refusals and authorization match
  * GraphQL exactly.
  */
@@ -31,6 +31,8 @@ async function renderRequest(row: RequestRow, ctx: Context): Promise<string> {
     `Node: ${nodeUrn ?? row.nodeId} at r${row.revision}`,
     `Signer: ${signer?.urn ?? (row.namedSignerId ? 'a named signer' : 'any writer of the memory')}`,
     `Expires: ${row.expiresAt.toISOString()}`,
+    // cor:dmo:130:08: the link only while there is something to open; the person signs there, never the agent.
+    R.state(row) === 'OPEN' ? `Ceremony link: ${R.ceremonyUrl(row)}` : '',
     signature
       ? `Signature: ${signature.state.toLowerCase()} by ${signerName?.urn ?? 'a former user'} (r${signature.revision}, ${JSON.stringify(signature.passkeyLabel)}) at ${signature.verifiedAt.toISOString()}`
       : '',
@@ -58,7 +60,7 @@ export function registerSigningTools(server: McpServer, deps: { db: PrismaClient
 
   server.tool(
     'hadron_request_signature',
-    'Ask for a node\'s current content to be signed by a person with a passkey (cor:dmo:130:03). Any reader of the node may ask; agents never sign. The request pins the current revision and ends exactly once: completed, declined, expired, stale (the title, abstract or content changed) or withdrawn. Read the outcome with hadron_get_signing_request; a node read\'s "Signatures:" line shows signatures. Refused on encrypted memories and comment nodes.',
+    'Ask for a node\'s current content to be signed by a person with a passkey (cor:dmo:130:03). Any reader of the node may ask; agents never sign. The request pins the current revision and ends exactly once: completed, declined, expired, stale (the title, abstract or content changed) or withdrawn. Read the outcome with hadron_get_signing_request; a node read\'s "Signatures:" line shows signatures. The result carries the ceremony link: hand it to the person who should sign, copied verbatim, never composed. Refused on encrypted memories and comment nodes.',
     SHAPE_HADRON_REQUEST_SIGNATURE,
     async ({ nodeRef, expectedRevision, signer }) => {
       const ctx = ctxOf();

@@ -1,26 +1,10 @@
+import { personalOrgAgentLicenseBatch } from './auth/personalOrgAgentInstall.js';
+import { orgAgentLicenseUsable } from './auth/orgAgentInstallLicense.js';
+import { listAppInstallations, resolveAppInstallation, type InstallationDb } from './appInstallations.js';
 /**
- * AppAgent helpers — spec 023-app-shape Phase 2b.
- *
- * After spec 023 dropped `App.agentId` in favor of the N:M `AppAgent`
- * join, code that previously read "the App's Agent" needs a new path.
- * Until US1's `installAgentIntoApp` ships the multi-Agent UI flows,
- * each App still has exactly one installed Agent in practice — the
- * defensive backfill in `20260517004132_023_drop_app_agent_id` made
- * sure of that for existing rows.
- *
- * These helpers wrap the lookup so callers don't reach into the join
- * table directly:
- *
- *   - `getPrimaryAgentId(db, appId)` — returns the first installed
- *     Agent's id, or null if the App has no Agents installed.
- *   - `getPrimaryAgent(db, appId, args?)` — returns the first
- *     installed Agent record with optional `include`.
- *
- * "Primary" is a v1 convenience: there is no business concept of a
- * "primary" Agent yet. Multi-Agent semantics (returning a list, or
- * resolving by URN from the request context) ship with the US1
- * resolvers in their own PR. Callers that need the full list should
- * use `db.appAgent.findMany({ where: { appId } })` directly.
+ * AppAgent convenience and license helpers. Installation membership includes
+ * one-hop imports through appInstallations.ts. "Primary" remains the oldest
+ * physical install: an audit-order convenience, never a membership test.
  */
 
 import type { PrismaClient, Prisma } from '../generated/prisma/index.js';
@@ -34,18 +18,34 @@ export function isGrantedAgentMemoryRole(role: string | null | undefined): boole
   return value === 'read' || value === 'read-write';
 }
 
+type LicenceApp = { organizationId: string | null; ownerUserId: string | null };
+type LicenceAgent = { id: string; organizationId: string | null; ownerUserId: string | null };
+
 /** Resolve install licenses in bounded queries for a multi-Agent App fold. */
 export async function activeAgentInstallLicenseIds(
   db: Db,
-  app: { organizationId: string | null; ownerUserId: string | null },
-  agents: Array<{ id: string; organizationId: string | null; ownerUserId: string | null }>,
+  app: LicenceApp,
+  agents: LicenceAgent[],
 ): Promise<Set<string>> {
-  const licensed = new Set<string>();
-  if (agents.length === 0) return licensed;
+  return (await activeAgentInstallLicenseIdsAcross(db, [{ app, agents }]))[0];
+}
+
+/**
+ * #3655 (Dorian P2-1 on #3681): {@link activeAgentInstallLicenseIds} for many Apps at once, one licensed-Agent set per
+ * group in order. The organization, subscription, grant and #1148 licence reads run once for every group together, not
+ * once per App; each group's decision is the single-App rule unchanged.
+ */
+export async function activeAgentInstallLicenseIdsAcross(
+  db: Db,
+  groups: Array<{ app: LicenceApp; agents: LicenceAgent[] }>,
+): Promise<Array<Set<string>>> {
+  const out = groups.map(() => new Set<string>());
+  const live = groups.flatMap((group, i) => group.agents.length ? [{ ...group, i }] : []);
+  if (live.length === 0) return out;
   // Soft deletion leaves Apps, Agents, and AppAgent joins behind. A retained
   // same-org join cannot license an install after its owning org is deleted.
   const orgIds = [...new Set(
-    [app.organizationId, ...agents.map((agent) => agent.organizationId)]
+    live.flatMap(({ app, agents }) => [app.organizationId, ...agents.map((agent) => agent.organizationId)])
       .filter((id): id is string => id != null),
   )];
   const liveOrgRows = orgIds.length
@@ -54,51 +54,59 @@ export async function activeAgentInstallLicenseIds(
       })
     : [];
   const liveOrgs = new Set(liveOrgRows.map((row) => row.id));
-  if (app.organizationId !== null && !liveOrgs.has(app.organizationId)) return licensed;
+  const orgDead = (agent: LicenceAgent) => agent.organizationId !== null && !liveOrgs.has(agent.organizationId);
   const now = new Date();
 
-  if (app.organizationId == null) {
-    if (app.ownerUserId == null) return licensed;
-    // A personal App needs no subscription to its owner's own Agent. Every
-    // other Agent is licensed by the App owner's live AgentSubscription.
-    const foreignIds = agents
-      .filter((agent) => agent.ownerUserId !== app.ownerUserId)
-      .map((agent) => agent.id);
-    const subscriptions = foreignIds.length
-      ? await db.agentSubscription.findMany({
-          where: { userId: app.ownerUserId, agentId: { in: foreignIds } },
-        })
-      : [];
-    const activeSubscriptions = new Set(
-      subscriptions.filter((row) => isLifecycleActive(row, now)).map((row) => row.agentId),
-    );
-    for (const agent of agents) {
-      if (agent.organizationId !== null && !liveOrgs.has(agent.organizationId)) continue;
-      if (agent.ownerUserId === app.ownerUserId || activeSubscriptions.has(agent.id)) {
-        licensed.add(agent.id);
-      }
-    }
-    return licensed;
-  }
+  // A personal App needs no subscription to its owner's own Agent. Every
+  // other Agent is licensed by the App owner's live AgentSubscription.
+  const personal = live.filter(({ app }) => app.organizationId == null && app.ownerUserId != null);
+  const subscriptionPairs = personal.flatMap(({ app, agents }) => agents
+    .filter((agent) => agent.ownerUserId !== app.ownerUserId)
+    .map((agent) => ({ userId: app.ownerUserId!, agentId: agent.id })));
+  const subscriptions = subscriptionPairs.length
+    ? await db.agentSubscription.findMany({
+        where: {
+          userId: { in: [...new Set(subscriptionPairs.map((p) => p.userId))] },
+          agentId: { in: [...new Set(subscriptionPairs.map((p) => p.agentId))] },
+        },
+      })
+    : [];
+  const activeSubscriptions = new Set(
+    subscriptions.filter((row) => isLifecycleActive(row, now)).map((row) => `${row.userId}:${row.agentId}`),
+  );
+  const candidates = personal.flatMap(({ app, agents, i }) => agents
+    .filter(agent => !orgDead(agent) &&
+      (agent.ownerUserId === app.ownerUserId || activeSubscriptions.has(`${app.ownerUserId}:${agent.id}`)))
+    .map(agent => ({ app, agentId: agent.id, i })));
+  // #3655: one licence batch for every personal App's roster, not a check per Agent or per App.
+  const holds = await personalOrgAgentLicenseBatch(db, candidates.map(({ app, agentId }) => ({ app, agentId })));
+  candidates.forEach(({ agentId, i }, k) => { if (holds[k]) out[i].add(agentId); });
+
   // Same-org installations are implicit; foreign Agents need an org grant.
-  const foreignIds = agents
+  const orgApps = live.filter(({ app }) => app.organizationId != null && liveOrgs.has(app.organizationId));
+  const grantPairs = orgApps.flatMap(({ app, agents }) => agents
     .filter((agent) => agent.organizationId !== app.organizationId)
-    .map((agent) => agent.id);
-  const grants = foreignIds.length
+    .map((agent) => ({ orgId: app.organizationId!, agentId: agent.id })));
+  const grants = grantPairs.length
     ? await db.agentOrgGrant.findMany({
-        where: { orgId: app.organizationId, agentId: { in: foreignIds } },
+        where: {
+          orgId: { in: [...new Set(grantPairs.map((p) => p.orgId))] },
+          agentId: { in: [...new Set(grantPairs.map((p) => p.agentId))] },
+        },
       })
     : [];
   const activeGrants = new Set(
-    grants.filter((row) => isLifecycleActive(row, now)).map((row) => row.agentId),
+    grants.filter((row) => isLifecycleActive(row, now)).map((row) => `${row.orgId}:${row.agentId}`),
   );
-  for (const agent of agents) {
-    if (agent.organizationId !== null && !liveOrgs.has(agent.organizationId)) continue;
-    if (agent.organizationId === app.organizationId || activeGrants.has(agent.id)) {
-      licensed.add(agent.id);
+  for (const { app, agents, i } of orgApps) {
+    for (const agent of agents) {
+      if (orgDead(agent)) continue;
+      if (agent.organizationId === app.organizationId || activeGrants.has(`${app.organizationId}:${agent.id}`)) {
+        out[i].add(agent.id);
+      }
     }
   }
-  return licensed;
+  return out;
 }
 
 /** The same cross-org install license used by the App access fold. */
@@ -118,13 +126,12 @@ export async function activeAppInstallLicenseIdsForAgent(
 ): Promise<Set<string>> {
   const licensed = new Set<string>();
   if (appIds.length === 0) return licensed;
-  const installs = await db.appAgent.findMany({
-    where: { agentId, appId: { in: appIds } },
-    select: {
-      appId: true,
-      app: { select: { organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true } },
-      agent: { select: { organizationId: true, ownerUserId: true, deletedAt: true } },
-    },
+  const rows = await listAppInstallations(db, appIds, agentId);
+  const apps = await db.app.findMany({where:{id:{in:rows.map(row=>row.appId)}},select:{id:true,organizationId:true,ownerUserId:true,deletedAt:true,uninstalledAt:true}});
+  const byId = new Map(apps.map(app=>[app.id,app]));
+  const installs = rows.flatMap(row=>{
+    const app = byId.get(row.appId);
+    return app ? [{...row,app}] : [];
   });
   if (installs.length === 0 || installs[0]!.agent.deletedAt !== null) return licensed;
   const agent = installs[0]!.agent;
@@ -162,6 +169,7 @@ export async function activeAppInstallLicenseIdsForAgent(
   const activeSubscriptions = new Set(
     subscriptions.filter((row) => isLifecycleActive(row, now)).map((row) => row.userId),
   );
+  const personal: Array<{ appId: string; app: (typeof installs)[number]['app'] }> = [];
   for (const { appId, app } of installs) {
     if (app.deletedAt || app.uninstalledAt) continue;
     if (app.organizationId !== null) {
@@ -171,10 +179,20 @@ export async function activeAppInstallLicenseIdsForAgent(
       }
     } else if (app.ownerUserId !== null &&
       (app.ownerUserId === agent.ownerUserId || activeSubscriptions.has(app.ownerUserId))) {
-      licensed.add(appId);
+      personal.push({ appId, app });
     }
   }
+  // #3655: one licence batch across the personal Apps, not a check per App.
+  const holds = await personalOrgAgentLicenseBatch(db, personal.map(({ app }) => ({ app, agentId: agent.id })));
+  personal.forEach(({ appId }, i) => { if (holds[i]) licensed.add(appId); });
   return licensed;
+}
+
+/** Preserve these readers' physical-row membership contract. New DERIVED
+ * entries additionally require the App holder's license, never the importer's.
+ * Readers that already required licenses for ROW must retain that stricter gate. */
+export async function listAppInstallationsWithDerivedLicense(db: Db, appId: string) {
+  return listAppInstallations(db, appId);
 }
 
 /** A retained AppAgent pointer is authority only while its install is live. */
@@ -183,17 +201,28 @@ export async function isAgentInstalledAndLicensed(
   appId: string,
   agentId: string,
 ): Promise<boolean> {
-  const install = await db.appAgent.findUnique({
-    where: { appId_agentId: { appId, agentId } },
-    select: {
-      app: { select: { organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true } },
-      agent: { select: { organizationId: true, ownerUserId: true, deletedAt: true } },
-    },
-  });
-  if (!install || install.app.deletedAt || install.app.uninstalledAt || install.agent.deletedAt) return false;
-  return hasActiveAgentInstallLicense(db, install.app, { id: agentId, ...install.agent });
+  const install = await resolveAppInstallation(db, appId, agentId);
+  if (!install) return false;
+  const app = await db.app.findUnique({where:{id:appId},select:{organizationId:true,ownerUserId:true,deletedAt:true,uninstalledAt:true}});
+  if (!app || app.deletedAt || app.uninstalledAt) return false;
+  if (!(await hasActiveAgentInstallLicense(db, app, install.agent))) return false;
+  if (install.installationKind==='DERIVED' && app.organizationId && install.agent.organizationId===app.organizationId) {
+    const grant=await db.agentOrgGrant.findUnique({where:{orgId_agentId:{orgId:app.organizationId,agentId}}});
+    return orgAgentLicenseUsable(app.organizationId,install.agent.organizationId,grant);
+  }
+  return true;
 }
 
+/** Existing operation doors used ROW membership. Keep that contract; only
+ * newly derived entries add the App-holder license check. Existing licensed
+ * memory readers continue using isAgentInstalledAndLicensed directly. */
+export async function isAgentInstalledForAppOperation(db:Db,appId:string,agentId:string):Promise<boolean> {
+  const install=await resolveAppInstallation(db,appId,agentId);
+  if(!install)return false;
+  return install.installationKind==='ROW' || isAgentInstalledAndLicensed(db,appId,agentId);
+}
+
+/** Primary is an audit-order convenience over physical rows, not an installation-membership test. */
 export async function getPrimaryAgentId(
   db: Pick<PrismaClient, 'appAgent'>,
   appId: string,
@@ -227,13 +256,9 @@ export async function getPrimaryAgent<
  * Check whether a specific Agent is installed in an App. Fast PK lookup.
  */
 export async function isAgentInstalled(
-  db: Pick<PrismaClient, 'appAgent'>,
+  db: InstallationDb,
   appId: string,
   agentId: string,
 ): Promise<boolean> {
-  const row = await db.appAgent.findUnique({
-    where: { appId_agentId: { appId, agentId } },
-    select: { appId: true },
-  });
-  return row !== null;
+  return (await resolveAppInstallation(db, appId, agentId)) !== null;
 }

@@ -26,6 +26,15 @@ export const REFERENCE_KIND_TO_GQL: Record<TaskReferenceKind, string> = {
 
 export class TaskReferenceError extends Error {}
 
+/**
+ * Ruling 0086 A (hrn:node:hadronmemory.com:specs:cor:agt:050:01, References → Refusals): the Hangul fillers U+115F,
+ * U+1160, U+3164 and U+FFA0, U+2800 BRAILLE PATTERN BLANK and U+034F COMBINING GRAPHEME JOINER. None is Cf or `\s`,
+ * so neither the V27 check nor the whitespace check catches them. Exactly this set; nothing beside it.
+ */
+const BLANK_LOOKING = /[\u115F\u1160\u3164\uFFA0\u2800\u034F]/u;
+/** Ruling 0086 A: U+FE00–U+FE0F and U+E0100–U+E01EF (the supplement is not Cf either). Refused in targets only. */
+const VARIATION_SELECTOR = /[\uFE00-\uFE0F\u{E0100}-\u{E01EF}]/u;
+
 /** The kind as stored: accepts the GraphQL enum value or the stored word; anything else is refused. */
 export function referenceKind(raw: unknown): TaskReferenceKind {
   if (typeof raw === 'string') {
@@ -98,6 +107,14 @@ export function normalizeTaskReferences(input: unknown): TaskReference[] {
     if (/\p{Cf}/u.test(target) || (typeof label === 'string' && /\p{Cf}/u.test(label))) {
       throw new TaskReferenceError(`${at}: a target or label may not contain an invisible format character.`);
     }
+    // #3252 / hrn:node:hadronmemory.com:specs:cor:agt:050:01 (ruling 0086 A): characters that render blank but are
+    // not Cf, refused in targets and labels; variation selectors in targets only (emoji labels need U+FE0F).
+    if (BLANK_LOOKING.test(target) || (typeof label === 'string' && BLANK_LOOKING.test(label))) {
+      throw new TaskReferenceError(`${at}: a target or label may not contain a blank-looking character.`);
+    }
+    if (VARIATION_SELECTOR.test(target)) {
+      throw new TaskReferenceError(`${at}: a target may not contain a variation selector.`);
+    }
     // Judge userinfo in the written authority, not URL.username/password: https://@host has empty parsed fields.
     // @ in the path, query or fragment is ordinary target data and stays accepted. Never echo either input.
     if ((kind === 'issue' || kind === 'pull_request' || kind === 'url')
@@ -111,6 +128,11 @@ export function normalizeTaskReferences(input: unknown): TaskReference[] {
     }
     if (label != null && typeof label !== 'string') throw new TaskReferenceError(`${at}: a label is text.`);
     if (typeof label === 'string' && label.length > TASK_REFERENCE_LABEL_MAX) throw new TaskReferenceError(`${at}: a label is at most ${TASK_REFERENCE_LABEL_MAX} characters.`);
+    // #3262: a target or label PostgreSQL cannot store is refused here, not left to fail at the jsonb write as an
+    // internal error. (NUL in a target is already refused above; a lone surrogate passed every http(s) target check.)
+    if (hasUnstorableJsonText(target) || (typeof label === 'string' && hasUnstorableJsonText(label))) {
+      throw new TaskReferenceError(`${at}: a target or label may not contain U+0000 or an unpaired surrogate.`);
+    }
     return { kind, target, label: label ? label : null };
   });
 }
@@ -122,6 +144,17 @@ const KIND_FORM: Record<TaskReferenceKind, string> = {
   task: 'an agent-task URN (hrn:agenttask:…)',
   url: 'an absolute http or https URL',
 };
+
+/**
+ * #3262 (hrn:node:hadronmemory.com:specs:cor:agt:050:01): text PostgreSQL text and jsonb cannot represent, U+0000 or
+ * an unpaired UTF-16 surrogate (a well-formed pair, such as an emoji, is one code point and passes). Checked before a
+ * write so the caller gets BAD_USER_INPUT, not the driver's error as INTERNAL_SERVER_ERROR. The one shared check for
+ * free text bound for a jsonb or text column on agent tasks (the second of #3258/#3262 to merge switches the other call
+ * site to it, Ada #67922).
+ */
+export function hasUnstorableJsonText(s: string): boolean {
+  return /\u0000|\p{Cs}/u.test(s);
+}
 
 /** The stored column read back as the list (anything else reads as none; the CHECK keeps it an array). */
 export function storedTaskReferences(value: unknown): TaskReference[] {
