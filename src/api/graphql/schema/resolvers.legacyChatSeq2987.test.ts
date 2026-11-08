@@ -245,9 +245,15 @@ describe('SECURITY §10 P2s on 7b2276e1 (Rico)', () => {
     expect((await db.node.findUniqueOrThrow({ where: { id: row.id } })).seq).toBe(40);
   });
 
-  it('P3-1: cloneNode of a message with a seq still works (the copiesSeq exemption)', async () => {
+  it('P3-1: cloneNode copying a seq — refused in the same chat (#992), legal into a fresh one', async () => {
     const src = await db.node.findFirstOrThrow({ where: { loc: 'chats:legacy:messages:001', memoryId: memory.id } });
-    const copy = await M.cloneNode(null, { sourceRef: src.id, targetUrn: urn('chats:legacy:messages:copy-of-001') }, as());
+    // Same chat identity (the loc prefix before ':messages:'): the copied seq collides with the source's
+    // own row — the exact #992 repro shape — so the per-chat seq unique index refuses it typed. V13 left
+    // clone undecided; #992 decides the colliding case: no duplicate, ever (cor:agt:020:04).
+    expect((await errorOf(M.cloneNode(null, { sourceRef: src.id, targetUrn: urn('chats:legacy:messages:copy-of-001') }, as()))).extensions.code).toBe('CHAT_MESSAGE_SEQ_CONFLICT');
+    expect(await db.node.findFirst({ where: { memoryId: memory.id, loc: 'chats:legacy:messages:copy-of-001' } })).toBeNull();
+    // The copiesSeq exemption survives where it cannot collide: a different chat identity takes the copy.
+    const copy = await M.cloneNode(null, { sourceRef: src.id, targetUrn: urn('chats:other:messages:copy-of-001') }, as());
     expect([copy.nodeType, copy.seq]).toEqual(['chat-message', 1]);
   });
 });

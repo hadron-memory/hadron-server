@@ -16,7 +16,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { parse, type FieldNode, type GraphQLResolveInfo, type OperationDefinitionNode, type FragmentDefinitionNode } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb } from '../../../test/helpers.js';
+import { cleanDb, suspendChatSeqUniqueness } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { ensureChannelWithRoot } from '../../../lib/channels.js';
 import { encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
@@ -91,8 +91,16 @@ async function filler(n: number): Promise<void> {
 /**
  * A second row at an existing message's seq, as a pre-#919 backfill left them (same envelope, its own loc). By default
  * it copies the source's createdAt; pass `createdAt` and a `loc` to build a tie that orders on createdAt first.
+ *
+ * #992: that shape is contract-impossible to WRITE now (the per-chat seq
+ * unique index refuses it), but it can still EXIST — chats corrupted before
+ * the constraint keep their duplicates until each one's approved repair, and
+ * the paged readers these tests pin must stay correct against them. The seed
+ * therefore plants it with the constraint aside (suspendChatSeqUniqueness);
+ * cleanDb in the beforeEach reinstalls it before the next test.
  */
 async function duplicateSeq(seq: number, opts: { createdAt?: Date; loc?: string } = {}): Promise<void> {
+  await suspendChatSeqUniqueness(db);
   const src = await db.node.findFirstOrThrow({ where: { memoryId: memory.id, nodeType: 'chat-message', seq }, orderBy: { createdAt: 'asc' } });
   const loc = opts.loc ?? `${src.loc}-dup`;
   await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc, name: loc.split(':').pop()!, nodeType: 'chat-message', seq, messageChannelId: channel.id, content: src.content, data: src.data as never, createdAt: opts.createdAt ?? src.createdAt } });
