@@ -33,7 +33,7 @@ const browser = findBrowser();
 type Params = Partial<Parameters<typeof renderConsent>[0]>;
 const page = (over: Params) => renderConsent({
   clientName: 'Synthetic QA Client', clientId: 'c1', redirectUri: 'https://synthetic.example/callback',
-  oauthScopes: ['mcp'], resource: 'https://synthetic.example/mcp', codeChallenge: 'x', codeChallengeMethod: 'S256',
+  oauthScopes: ['mcp'] as ('mcp' | 'account')[], resource: 'https://synthetic.example/mcp', codeChallenge: 'x', codeChallengeMethod: 'S256',
   state: 's', csrfToken: 't', grantProof: 'p', ...over,
 } as Parameters<typeof renderConsent>[0]);
 
@@ -62,7 +62,7 @@ function measure(html: string, width: number, dark: boolean) {
 const cases: Array<[string, Params]> = [
   ['control', {}],
   ['clientName', { clientName: LONG }],
-  ['scope', { oauthScopes: [LONG] }],
+  ['scope', { oauthScopes: [LONG] as unknown as ('mcp' | 'account')[] }],
   ['resource', { resource: 'https://' + LONG }],
   ['redirect', { redirectUri: 'https://' + LONG + '/cb' }],
 ];
@@ -73,7 +73,7 @@ describe.skipIf(!browser)('#3576 consent card geometry (real Chromium)', () => {
       const m = measure(page(over), width, dark);
       expect(m.bad).toEqual([]);
       expect(m.doc).toBeLessThanOrEqual(m.vw);
-      for (const v of Object.values(over)) for (const s of [v].flat()) expect(m.text).toContain(String(s).replace(/^https:\/\//, '').slice(0, 40));
+      for (const v of Object.values(over)) for (const s of [v].flat()) expect(m.text.toLowerCase()).toContain(String(s).replace(/^https:\/\//, '').slice(0, 40).toLowerCase()); // the anchor shows the host, which the URL parser lowercases
     });
   }
   it('a long notice value (template level) wraps inside the card', () => {
@@ -84,9 +84,11 @@ describe.skipIf(!browser)('#3576 consent card geometry (real Chromium)', () => {
 
 describe('#3576 static pins', () => {
   it('declares an emergency wrapping rule for every surface that shows an external value', () => {
-    for (const sel of ['h1', 'p', 'li', 'code', '.warn']) {
-      expect(CONSENT_TEMPLATE, sel).toMatch(new RegExp(`[^}]*${sel.replace('.', '\\.')}[^{}]*\\{[^}]*overflow-wrap:\\s*anywhere`));
-    }
+    const css = CONSENT_TEMPLATE.replace(/\/\*[\s\S]*?\*\//g, '');
+    const rule = /([^{}]+)\{[^}]*overflow-wrap:\s*anywhere[^}]*\}/.exec(css);
+    expect(rule).not.toBeNull();
+    // h1: client name; p: redirect anchor and the notice text; code: scope, resource, redirect; .warn: the notice.
+    expect(rule![1].split(',').map((x) => x.trim())).toEqual(expect.arrayContaining(['h1', 'p', 'code', '.warn']));
   });
   it('never truncates or hides: no ellipsis, no clipping, no hidden overflow', () => {
     expect(CONSENT_TEMPLATE).not.toMatch(/text-overflow|overflow:\s*hidden|overflow-x:\s*hidden|line-clamp|white-space:\s*nowrap/);
