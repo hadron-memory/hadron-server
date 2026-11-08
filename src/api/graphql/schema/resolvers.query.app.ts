@@ -19,6 +19,8 @@ import {
   pageEnvelope,
   requireOrgRole,
   requireOwnerOrOrgRole,
+  requireAppRead,
+  userOwnedAppOwnerMemberWhere,
   resolveOrgScope,
   APP_INCLUDE,
 } from './resolvers.helpers.js';
@@ -144,11 +146,14 @@ export const appQueries = {
           // Every live App EXCEPT another user's user-owned App — spec 047
           // strict ownership (a user-owned App is owner-only; an admin sees
           // only their own). "org-owned OR mine" as a flat OR.
-          where = {
-            deletedAt: null,
-            OR: [{ ownerUserId: null }, { ownerUserId: ctx.userId ?? '__none__' }],
-            ...agentClause,
-          };
+          // #2089: plus the user-owned Apps they hold a CURRENT owner-role
+          // membership on (by membership, never by the admin bypass).
+          const adminClauses: Record<string, unknown>[] = [
+            { ownerUserId: null },
+            { ownerUserId: ctx.userId ?? '__none__' },
+          ];
+          if (ctx.userId && !ctx.impersonation && f.agentId == null) adminClauses.push(userOwnedAppOwnerMemberWhere(ctx.userId));
+          where = { deletedAt: null, OR: adminClauses, ...agentClause };
         } else {
           // Org-scoped view. In the DEFAULT (no orgId) view, also surface the
           // caller's OWN user-owned Apps (org NULL) so a personal App the caller
@@ -160,6 +165,11 @@ export const appQueries = {
           // so the leak did not depend on filter.ownedByMe.
           if (!scopedToOrg && ctx.userId && !ctx.impersonation) {
             ownerClauses.push({ ownerUserId: ctx.userId });
+            // #2089: user-owned Apps the caller manages as an owner-role
+            // member. In the `where` itself, so count and paging see them.
+            // Not under an agent filter: that would answer the install question
+            // App.agents WITHHOLDS from this reader (Riana's P3).
+            if (f.agentId == null) ownerClauses.push(userOwnedAppOwnerMemberWhere(ctx.userId));
           }
           where = { deletedAt: null, OR: ownerClauses, ...agentClause };
         }
@@ -195,7 +205,9 @@ export const appQueries = {
       // pre-473 org-ADMIN gate was stricter than the list a plain member
       // could already read this App through. Admin-only material (keys,
       // decrypted AI config) keeps its own gates (appKeys / appAIConfig).
-      await requireOwnerOrOrgRole(ctx, app, 'READER');
+      // #2089: the App-specific read gate (org arms unchanged, plus a current
+      // owner-role member of a user-owned App). Children stay gated per field.
+      await requireAppRead(ctx, app);
       return app;
     },
 

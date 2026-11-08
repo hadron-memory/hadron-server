@@ -259,10 +259,19 @@ async function spendSigningCeremony(
 ): Promise<{ signerId: string; memoryId: string }> {
   const row = await tx.signingRequest.findUnique({ where: { id: a.requestId }, include: { node: { select: { memoryId: true } } } });
   if (!row) throw new CeremonyRefused();
+  // #3737 lock order. The proof takes the signer's user anchor, then the credential, then retires this browser's SIGN
+  // rows; completion used to take the SIGN row first and the credential last, a cycle PostgreSQL broke with 40P01.
+  // Completion now takes the SAME user anchor first, which serializes it with that signer's proof. The signer id read
+  // here (no lock) only NAMES the anchor: it authorizes nothing. The ceremony is locked and read again under the
+  // anchor, and a ceremony whose bound user is not the one anchored is the one refusal.
+  const [peek] = await tx.$queryRaw<Array<{ user_id: string | null }>>`
+    SELECT user_id FROM passkey_ceremonies WHERE id = ${a.ceremonyId} AND purpose = 'SIGN'`;
+  if (!peek?.user_id) throw new CeremonyRefused();
+  await lockAuthorityAnchors(tx, [{ kind: 'user', id: peek.user_id }], 'exclusive');
   const [cer] = await tx.$queryRaw<Array<{ user_id: string | null; challenge_hash: string | null }>>`
     SELECT user_id, challenge_hash FROM passkey_ceremonies
      WHERE id = ${a.ceremonyId} AND purpose = 'SIGN' FOR UPDATE`;
-  if (!cer?.user_id) throw new CeremonyRefused();
+  if (!cer?.user_id || cer.user_id !== peek.user_id) throw new CeremonyRefused();
   let expected: string;
   try {
     expected = sha256Hex(signatureChallenge(signaturePayloadBytes(row.payloadVersion, { nodeId: row.nodeId, approvalHash: row.approvalHash, requestId: row.id })));
