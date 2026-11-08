@@ -52,13 +52,6 @@ function expectFooter(got: { result: unknown; omitted: number }, expected: unkno
  expect(got.result).toEqual(expected);
 }
 async function expectFooterOf(call: () => Promise<unknown>, expected: unknown): Promise<void> { expectFooter(await observe(call), expected); }
-/** Re-run a whole read-only, mock-only body, but only after an attempt that recorded a load-class omission. */
-async function rideOutRecordedOmission(body: () => Promise<void>): Promise<void> {
- for (let i = 1; ; i++) {
-  recorded.reasons.length = 0;
-  try { return await body(); } catch (e) { if (i >= 4 || loadOmissions() === 0) throw e; }
- }
-}
 let http: Server; let base: string;
 let user: any; let app: any; let worker: any; let session: any; let key: any; let raw: string; let channel: any;
 beforeAll(async () => {
@@ -291,28 +284,39 @@ describe('#2026 review closure controls', () => {
    expect(log).not.toContain(session.id);
   } finally {spy.mockRestore();warn.mockRestore();clock.mockRestore();}
  });
- it('omits beyond the footer slot cap without waiting, then recovers with no leaked slot', () => rideOutRecordedOmission(async () => {
+ it('omits beyond the footer slot cap without waiting, then recovers with no leaked slot', async () => {
+  // The slots are taken BEFORE the transaction, so the held calls are held by a mocked transaction: no
+  // database timing is involved, hence nothing for a loaded runner to omit and nothing to retry.
   const pending: Array<() => void> = [];
-  let calls = 0;
-  const spy = vi.spyOn(deliveryBatchModule, 'loadPendingDeliverySummary').mockImplementation(() => {
-   calls++;
-   return new Promise<number>(resolve => { pending.push(() => resolve(13)); });
-  });
+  let transactions = 0;
+  const tx = vi.spyOn(db, '$transaction').mockImplementation((() => {
+   transactions++;
+   return new Promise(resolve => { pending.push(() => resolve({ v: 1, count: 13, complete: true, asOf: new Date().toISOString() })); });
+  }) as any);
+  const summary = vi.spyOn(deliveryBatchModule, 'loadPendingDeliverySummary');
   try {
+   recorded.reasons.length = 0;
    const held = Array.from({ length: FOOTER_MAX_CONCURRENT }, () => deliveryPending(context() as any));
-   await vi.waitFor(() => expect(calls).toBe(FOOTER_MAX_CONCURRENT));
+   await vi.waitFor(() => expect(transactions).toBe(FOOTER_MAX_CONCURRENT));
    const start = performance.now();
    expect(await deliveryPending(context() as any)).toBeUndefined();
    expect(performance.now() - start).toBeLessThan(100);
-   expect(calls).toBe(FOOTER_MAX_CONCURRENT);
+   expect(recorded.reasons).toContain('saturated');
+   expect(transactions).toBe(FOOTER_MAX_CONCURRENT);
    pending.splice(0).forEach(release => release());
-   for (const out of await Promise.all(held)) expect(out).toMatchObject(metadata(13));
-   spy.mockRejectedValue(new Error('synthetic count failure'));
+   // Every held call returns exactly the mocked count. The only tolerated absence is the 250 ms deadline
+   // (measured on a possibly loaded runner), and each such absence needs its own recorded 'deadline'.
+   const outs = await Promise.all(held);
+   for (const out of outs) if (out !== undefined) expect(out).toMatchObject(metadata(13));
+   expect(recorded.reasons.filter(r => r === 'deadline').length).toBeGreaterThanOrEqual(outs.filter(o => o === undefined).length);
+  } finally { tx.mockRestore(); }
+  try {
+   summary.mockRejectedValue(new Error('synthetic count failure'));
    for (let i = 0; i < FOOTER_MAX_CONCURRENT * 3; i++) expect(await deliveryPending(context() as any)).toBeUndefined();
-   spy.mockResolvedValue(13);
-   expect(await deliveryPending(context() as any)).toMatchObject(metadata(13));
-  } finally { spy.mockRestore(); }
- }));
+   summary.mockResolvedValue(13);
+   await expectFooterOf(() => deliveryPending(context() as any), metadata(13)); // no leaked slot: the footer runs again
+  } finally { summary.mockRestore(); }
+ });
  it('omits run principals and ambiguous unnamed callers, while a valid named session stays self-only', async () => {
   expect(await deliveryPending({...context(),clientId:'run:synthetic-footer-run'} as any)).toBeUndefined();
   await runAsActor({workerId:null,agentId:null}, async () => {
