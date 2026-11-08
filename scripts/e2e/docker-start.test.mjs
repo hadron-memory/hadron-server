@@ -47,12 +47,14 @@ test('migrates/revokes/verifies as owner, then execs server as serve without mig
   const run = boot(t);
   assert.equal(run.status, 0, run.stderr);
   assert.deepEqual(run.calls.map(row => row[0]), ['prisma generate', 'prisma migrate deploy',
-    'tsx scripts/db/revoke-runtime-migrations.ts', 'tsx scripts/db/verify-runtime-role.ts', 'tsx src/index.ts']);
+    'tsx scripts/db/revoke-runtime-migrations.ts', 'tsx scripts/db/upsert-actions.ts', 'tsx scripts/db/verify-runtime-role.ts', 'tsx src/index.ts']);
   assert.equal(run.calls[1][1], owner);
   assert.equal(run.calls[2][1], owner);
+  // #3668: the platform's actions are written ONLY by this step, as the owner, never by the running server.
   assert.equal(run.calls[3][1], owner);
-  assert.equal(run.calls[4][1], serve);
-  assert.equal(run.calls[4][2], 'unset');
+  assert.equal(run.calls[4][1], owner);
+  assert.equal(run.calls[5][1], serve);
+  assert.equal(run.calls[5][2], 'unset');
   noSecrets(run);
 });
 for (const migrate of [null, '']) test(`missing/empty migrator falls back loudly (${JSON.stringify(migrate)})`, t => {
@@ -62,7 +64,7 @@ for (const migrate of [null, '']) test(`missing/empty migrator falls back loudly
   assert(run.calls.every(row => row[1] === serve));
   noSecrets(run);
 });
-for (const step of ['prisma generate', 'prisma migrate deploy', 'tsx scripts/db/revoke-runtime-migrations.ts']) {
+for (const step of ['prisma generate', 'prisma migrate deploy', 'tsx scripts/db/revoke-runtime-migrations.ts', 'tsx scripts/db/upsert-actions.ts']) {
   test(`${step} failure stops boot and redacts command output`, t => {
     const run = boot(t, { fail: step });
     assert.notEqual(run.status, 0);

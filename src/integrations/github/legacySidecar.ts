@@ -18,7 +18,12 @@ import { basename, join } from 'path';
  */
 const RESERVED_SIDECAR_NAMES = new Set(['.git', '.node', '.hadron', '.github']);
 
-/** Whether a dotted directory name belongs to the checkout or the legacy layout, not to a sidecar. */
+/**
+ * Whether a dotted directory name belongs to the checkout or the legacy layout, not to a sidecar.
+ * The case-insensitive match is deliberately conservative for deletion (a `.GIT` or `.Hadron` directory is never
+ * touched, including on case-insensitive filesystems) and lossy for import (an `edges.yaml` beside such a name
+ * is ignored rather than read, so it cannot mask a node's inline edges).
+ */
 export function isReservedSidecarName(name: string): boolean {
   return RESERVED_SIDECAR_NAMES.has(name.toLowerCase());
 }

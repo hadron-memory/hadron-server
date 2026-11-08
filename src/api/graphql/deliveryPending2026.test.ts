@@ -1,6 +1,7 @@
 /** #2026: real authenticated HTTP + SDK responses count the pull's pre-cap admitted set, with no footer writes. */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
+import { Prisma } from '../../generated/prisma/index.js';
 import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -24,6 +25,33 @@ import { generateId } from '../../lib/id.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
+// #2671: the footer omits BY DESIGN when a loaded runner exceeds its 20/210/180 ms budget (Prisma P2028,
+// reason 'transaction'). The presence pins therefore accept the expected meta, OR no meta TOGETHER WITH a
+// recorded load-class omission diagnostic for that call; an omission with no such diagnostic still fails,
+// and the counts stay pinned (13 vs 0 on the pair) whenever the footer ran. The recorder wraps the REAL
+// reporter (its 30 s dedup and console sink are unchanged, so the diagnostics pins below still see them).
+const recorded = vi.hoisted(() => ({ reasons: [] as string[] }));
+vi.mock('../../lib/tickers/deliveryPendingDiagnostics.js', async importOriginal => {
+ const real = await importOriginal<typeof import('../../lib/tickers/deliveryPendingDiagnostics.js')>();
+ return { ...real, createFooterOmissionReporter: (...args: Parameters<typeof real.createFooterOmissionReporter>) => {
+  const write = real.createFooterOmissionReporter(...args);
+  return (reason: string) => { recorded.reasons.push(reason); write(reason); };
+ } };
+});
+const LOAD_REASONS = ['transaction', 'pool', 'statement', 'deadline'];
+const loadOmissions = () => recorded.reasons.filter(r => LOAD_REASONS.includes(r)).length;
+/** Run one footer-producing call; returns its result and how many load-class omissions it recorded. */
+async function observe<T>(call: () => Promise<T>): Promise<{ result: T; omitted: number }> {
+ recorded.reasons.length = 0;
+ const result = await call();
+ return { result, omitted: loadOmissions() };
+}
+/** The footer is what we expect, or it is absent AND this call recorded a load-class omission. */
+function expectFooter(got: { result: unknown; omitted: number }, expected: unknown): void {
+ if (got.result === undefined && got.omitted > 0) return;
+ expect(got.result).toEqual(expected);
+}
+async function expectFooterOf(call: () => Promise<unknown>, expected: unknown): Promise<void> { expectFooter(await observe(call), expected); }
 let http: Server; let base: string;
 let user: any; let app: any; let worker: any; let session: any; let key: any; let raw: string; let channel: any;
 beforeAll(async () => {
@@ -55,6 +83,13 @@ beforeEach(async()=>{
  await db.node.updateMany({where:{messageChannelId:channel.id},data:{createdAt:new Date(Date.now()-3600_000)}});
 });
 const context=()=>({db,appId:app.id,userId:user.id,apiKeyId:key.id,sessionId:session.id,roles:['READER']});
+/** Locality on the pair: each footer that ran carries its OWN count; each missing one needs its own recorded omission. */
+function expectPair(kit:unknown,empty:unknown,omitted:number):void{
+ const missing=[kit,empty].filter(x=>x===undefined).length;
+ expect(omitted).toBeGreaterThanOrEqual(missing);
+ if(kit!==undefined) expect(kit).toEqual(metadata(13));
+ if(empty!==undefined) expect(empty).toEqual(metadata(0));
+}
 const metadata=(count:number)=>({v:1,count,complete:true,asOf:expect.any(String)});
 async function request(binding=true,query='{ serverInfo { version } }'): Promise<any> {
  return (await fetch(base+'/graphql',{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${raw}`,...(binding?{'x-hadron-session':session.id}:{})},body:JSON.stringify({query})})).json();
@@ -63,8 +98,8 @@ describe('#2026 response footer',()=>{
  it('HTTP carries13 while C7 renders10 plus overflow3, without message metadata',async()=>{
   const now=new Date(); const pull=await loadDeliveryBatches({ctx:context() as any,app,hostId:null,workerIds:[worker.id],now});
   expect(pull.batches[0].overflow).toBe(3);
-  const out=await request();expect(out.errors).toBeUndefined();
-  expect(out.extensions?.hadron?.deliveryPending).toEqual(metadata(13));
+  const got=await observe(()=>request());const out=got.result;expect(out.errors).toBeUndefined();
+  expectFooter({result:out.extensions?.hadron?.deliveryPending,omitted:got.omitted},metadata(13));
   expect(JSON.stringify(out.extensions)).not.toMatch(/private-body|Private Author|chats:team/);
   expect(await db.channelReadState.count()).toBe(0);expect(await db.workerDeliveryChannel.count()).toBe(0);expect(await db.appLogEntry.count()).toBe(0);
  });
@@ -73,9 +108,9 @@ describe('#2026 response footer',()=>{
   const client=new Client({name:'footer2026',version:'1'});const [local,remote]=InMemoryTransport.createLinkedPair();
   await server.connect(remote);await client.connect(local);
   try {
-   const out=await client.callTool({name:'hadron_server_info',arguments:{}});
-   expect(out._meta?.['hadron/deliveryPending']).toEqual(metadata(13));
-   expect((out.content as any[]).filter(x=>x.type==='text'&&x.text.includes('13 messages waiting'))).toHaveLength(1);
+   const got=await observe(()=>client.callTool({name:'hadron_server_info',arguments:{}}));const out=got.result;
+   expectFooter({result:out._meta?.['hadron/deliveryPending'],omitted:got.omitted},metadata(13));
+   expect((out.content as any[]).filter(x=>x.type==='text'&&x.text.includes('13 messages waiting'))).toHaveLength(out._meta?.['hadron/deliveryPending']?1:0);
   } finally {await client.close();await server.close();}
  });
  it('omits on unbound and errored operations, preserving their results',async()=>{
@@ -93,7 +128,7 @@ async function snapshot() {
 describe('#2026 count boundaries and omission',()=>{
  it('has zero effects on every public table',async()=>{
   const before=await snapshot();
-  expect(await deliveryPending(context() as any)).toEqual(metadata(13));
+  await expectFooterOf(()=>deliveryPending(context() as any), metadata(13));
   expect(await snapshot()).toEqual(before);
  });
  it('enforces no effects in PostgreSQL even if a future count helper attempts a write',async()=>{
@@ -107,8 +142,12 @@ describe('#2026 count boundaries and omission',()=>{
  it('counts a complete empty set as zero and never emits a zero attention line',async()=>{
   await db.channelReadState.create({data:{workerId:worker.id,channelId:channel.id,lastSeenSeq:13}});
   const result={content:[{type:'text',text:'original'}],structuredContent:{ok:true},_meta:{old:1}};
-  const out=await appendDeliveryPending(result,context() as any);
-  expect(out._meta).toEqual({old:1,'hadron/deliveryPending':metadata(0)});expect(out.content).toEqual(result.content);expect(out.structuredContent).toEqual(result.structuredContent);
+  const got=await observe(()=>appendDeliveryPending(result,context() as any));const out=got.result;
+  const footer=(out._meta as Record<string,unknown>)?.['hadron/deliveryPending'];
+  expectFooter({result:footer,omitted:got.omitted},metadata(0));
+  // Whether the footer ran or was omitted with a recorded diagnostic, the original result is otherwise untouched: no zero attention line.
+  expect(out._meta).toEqual(footer===undefined?{old:1}:{old:1,'hadron/deliveryPending':metadata(0)});
+  expect(out.content).toEqual(result.content);expect(out.structuredContent).toEqual(result.structuredContent);
  });
  it.each(['encrypted','post-only','holder-refused'])('omits %s channels from the admitted set',async mode=>{
   if(mode==='encrypted') await db.memory.update({where:{id:channel.memoryId},data:{isEncrypted:true}});
@@ -117,12 +156,12 @@ describe('#2026 count boundaries and omission',()=>{
    const outsider=await db.user.create({data:{handle:'footer-outsider'}});
    await db.worker.update({where:{id:worker.id},data:{heldByUserId:outsider.id}});
   }
-  expect(await deliveryPending(context() as any)).toEqual(metadata(0));
+  await expectFooterOf(()=>deliveryPending(context() as any), metadata(0));
  });
  it('shares the timing boundary with the pull',async()=>{
   await db.node.updateMany({where:{messageChannelId:channel.id},data:{createdAt:new Date(Date.now()+60_000)}});
   expect((await loadDeliveryBatches({ctx:context() as any,app,hostId:null,workerIds:[worker.id]})).batches).toEqual([]);
-  expect(await deliveryPending(context() as any)).toEqual(metadata(0));
+  await expectFooterOf(()=>deliveryPending(context() as any), metadata(0));
  });
  it.each(['ended','foreign','refused','unbound'])('omits a %s binding',async mode=>{
   let ctx=context() as any;
@@ -162,10 +201,9 @@ describe('#2026 per-call SDK and committed marks',()=>{
   const client=new Client({name:'footer-parallel',version:'1'});const [local,remote]=InMemoryTransport.createLinkedPair();
   await server.connect(remote);await client.connect(local);
   try {
-   const [kit,empty]=await Promise.all([session.id,otherSession.id].map(session=>client.callTool({name:'hadron_validate',arguments:{memoryUrn:'footer2026:shared',session}})));
+   const {result:[kit,empty],omitted}=await observe(()=>Promise.all([session.id,otherSession.id].map(session=>client.callTool({name:'hadron_validate',arguments:{memoryUrn:'footer2026:shared',session}}))));
    expect(kit.isError).not.toBe(true);expect(empty.isError).not.toBe(true);
-   expect(kit._meta?.['hadron/deliveryPending']).toEqual(metadata(13));
-   expect(empty._meta?.['hadron/deliveryPending']).toEqual(metadata(0));
+   expectPair(kit._meta?.['hadron/deliveryPending'],empty._meta?.['hadron/deliveryPending'],omitted);
    const invalid=await client.callTool({name:'hadron_validate',arguments:{memoryUrn:'footer2026:shared',session:generateId()}});
    expect(invalid.isError).toBe(true);expect(invalid._meta?.['hadron/deliveryPending']).toBeUndefined();
   } finally {await client.close();await server.close();}
@@ -173,24 +211,24 @@ describe('#2026 per-call SDK and committed marks',()=>{
  it('uses the current read/delivered floor and restarts old-incarnation delivery marks',async()=>{
   await db.channelReadState.create({data:{workerId:worker.id,channelId:channel.id,lastSeenSeq:3}});
   await db.workerDeliveryChannel.create({data:{workerId:worker.id,channelId:channel.id,channelIncarnation:1,deliveredThroughSeq:8,deliveredAt:new Date()}});
-  expect(await deliveryPending(context() as any)).toEqual(metadata(5));
+  await expectFooterOf(()=>deliveryPending(context() as any), metadata(5));
   await db.channel.update({where:{id:channel.id},data:{incarnation:2}});
-  expect(await deliveryPending(context() as any)).toEqual(metadata(10));
+  await expectFooterOf(()=>deliveryPending(context() as any), metadata(10));
  });
  it('counts the remaining messages after a real signed batch acknowledgement commits',async()=>{
   const pulled=await request(true,`query { deliveryBatches(appRef: "${app.id}") { batches { id } } }`);
   expect(pulled.errors).toBeUndefined();
   const id=pulled.data.deliveryBatches.batches[0].id;
-  const acked=await request(true,`mutation { acknowledgeDeliveryBatches(batchIds: ["${id}"]) { acknowledged unchanged } }`);
+  const got=await observe(()=>request(true,`mutation { acknowledgeDeliveryBatches(batchIds: ["${id}"]) { acknowledged unchanged } }`));const acked=got.result;
   expect(acked.errors).toBeUndefined();expect(acked.data.acknowledgeDeliveryBatches.acknowledged).toBe(1);
-  expect(acked.extensions?.hadron?.deliveryPending).toEqual(metadata(3));
+  expectFooter({result:acked.extensions?.hadron?.deliveryPending,omitted:got.omitted},metadata(3));
  });
  it('counts each reached message once and omits own-authored or deleted rows',async()=>{
   const rows=await db.node.findMany({where:{messageChannelId:channel.id},orderBy:{seq:'asc'}});
   await db.node.update({where:{id:rows[0].id},data:{data:{mentions:['kit','@all']}}});
   await db.node.update({where:{id:rows[1].id},data:{data:{mentions:['kit'],authorWorkerId:worker.id}}});
   await db.node.update({where:{id:rows[2].id},data:{deletedAt:new Date()}});
-  expect(await deliveryPending(context() as any)).toEqual(metadata(11));
+  await expectFooterOf(()=>deliveryPending(context() as any), metadata(11));
  });
  it('omits a named session after its operation ended it',async()=>{
   const result=await request(true,`mutation { endSession(id: "${session.id}") { id } }`);
@@ -199,6 +237,51 @@ describe('#2026 per-call SDK and committed marks',()=>{
  });
 });
 
+
+describe('#2671 the selective oracle', () => {
+ const p2028=()=>new Prisma.PrismaClientKnownRequestError('Transaction already closed',{code:'P2028',clientVersion:'test'});
+ it('1: an injected P2028 omits, records its diagnostic, and the oracle accepts it only then', async () => {
+  const spy=vi.spyOn(db,'$transaction').mockRejectedValueOnce(p2028());
+  try {
+   const got=await observe(()=>deliveryPending(context() as any));
+   expect(got.result).toBeUndefined();expect(recorded.reasons).toContain('transaction');expect(got.omitted).toBe(1);
+   expectFooter(got,metadata(13));
+  } finally { spy.mockRestore(); }
+ });
+ it('2: swapped counts between the named sessions still fail the pair oracle', () => {
+  expect(()=>expectPair(metadata(0),metadata(13),0)).toThrow();   // swapped, footer ran for both
+  expect(()=>expectPair(metadata(0),undefined,1)).toThrow();      // swapped on the one that ran
+  expect(()=>expectPair(metadata(13),metadata(0),0)).not.toThrow();
+  expect(()=>expectPair(metadata(13),undefined,1)).not.toThrow();
+ });
+ it('3: an omission with no recorded diagnostic still fails', async () => {
+  const got=await observe(()=>deliveryPending({...context(),sessionId:undefined} as any)); // legitimate unbound omission: no load diagnostic
+  expect(got).toEqual({result:undefined,omitted:0});
+  expect(()=>expectFooter(got,metadata(13))).toThrow();
+  expect(()=>expectPair(undefined,metadata(0),0)).toThrow();
+ });
+ it('5: a forced P2028 at the zero-count appender is accepted only with its diagnostic and leaves the result untouched', async () => {
+  const result={content:[{type:'text',text:'original'}],structuredContent:{ok:true},_meta:{old:1}};
+  const spy=vi.spyOn(db,'$transaction').mockRejectedValueOnce(p2028());
+  try {
+   const got=await observe(()=>appendDeliveryPending(result,context() as any));
+   expect(got.omitted).toBe(1);expect(got.result).toBe(result);expect(got.result._meta).toEqual({old:1});
+   expectFooter({result:(got.result._meta as Record<string,unknown>)?.['hadron/deliveryPending'],omitted:got.omitted},metadata(0));
+   expect(()=>expectFooter({result:undefined,omitted:0},metadata(0))).toThrow();
+  } finally { spy.mockRestore(); }
+ });
+ it('4: only budget-class omissions excuse an absence; a leak or any other fault never does', () => {
+  // 'saturated' is what a leaked footer slot looks like: it must never excuse a missing footer.
+  recorded.reasons.length=0;
+  recorded.reasons.push('saturated','failure','read-only','unsafe-count','unavailable-app');
+  expect(loadOmissions()).toBe(0);
+  expect(()=>expectFooter({result:undefined,omitted:loadOmissions()},metadata(13))).toThrow();
+  recorded.reasons.length=0;
+  for(const r of ['transaction','pool','statement','deadline']){recorded.reasons.push(r);}
+  expect(loadOmissions()).toBe(4);
+  recorded.reasons.length=0;
+ });
+});
 
 describe('#2026 review closure controls', () => {
  it('preserves the ambient actor semantics of an actor-neutral callback', async () => {
@@ -227,33 +310,44 @@ describe('#2026 review closure controls', () => {
   } finally {spy.mockRestore();warn.mockRestore();clock.mockRestore();}
  });
  it('omits beyond the footer slot cap without waiting, then recovers with no leaked slot', async () => {
+  // The slots are taken BEFORE the transaction, so the held calls are held by a mocked transaction: no
+  // database timing is involved, hence nothing for a loaded runner to omit and nothing to retry.
   const pending: Array<() => void> = [];
-  let calls = 0;
-  const spy = vi.spyOn(deliveryBatchModule, 'loadPendingDeliverySummary').mockImplementation(() => {
-   calls++;
-   return new Promise<number>(resolve => { pending.push(() => resolve(13)); });
-  });
+  let transactions = 0;
+  const tx = vi.spyOn(db, '$transaction').mockImplementation((() => {
+   transactions++;
+   return new Promise(resolve => { pending.push(() => resolve({ v: 1, count: 13, complete: true, asOf: new Date().toISOString() })); });
+  }) as any);
+  const summary = vi.spyOn(deliveryBatchModule, 'loadPendingDeliverySummary');
   try {
+   recorded.reasons.length = 0;
    const held = Array.from({ length: FOOTER_MAX_CONCURRENT }, () => deliveryPending(context() as any));
-   await vi.waitFor(() => expect(calls).toBe(FOOTER_MAX_CONCURRENT));
+   await vi.waitFor(() => expect(transactions).toBe(FOOTER_MAX_CONCURRENT));
    const start = performance.now();
    expect(await deliveryPending(context() as any)).toBeUndefined();
    expect(performance.now() - start).toBeLessThan(100);
-   expect(calls).toBe(FOOTER_MAX_CONCURRENT);
+   expect(recorded.reasons).toContain('saturated');
+   expect(transactions).toBe(FOOTER_MAX_CONCURRENT);
    pending.splice(0).forEach(release => release());
-   for (const out of await Promise.all(held)) expect(out).toMatchObject(metadata(13));
-   spy.mockRejectedValue(new Error('synthetic count failure'));
+   // Every held call returns exactly the mocked count. The only tolerated absence is the 250 ms deadline
+   // (measured on a possibly loaded runner), and each such absence needs its own recorded 'deadline'.
+   const outs = await Promise.all(held);
+   for (const out of outs) if (out !== undefined) expect(out).toMatchObject(metadata(13));
+   expect(recorded.reasons.filter(r => r === 'deadline').length).toBeGreaterThanOrEqual(outs.filter(o => o === undefined).length);
+  } finally { tx.mockRestore(); }
+  try {
+   summary.mockRejectedValue(new Error('synthetic count failure'));
    for (let i = 0; i < FOOTER_MAX_CONCURRENT * 3; i++) expect(await deliveryPending(context() as any)).toBeUndefined();
-   spy.mockResolvedValue(13);
-   expect(await deliveryPending(context() as any)).toMatchObject(metadata(13));
-  } finally { spy.mockRestore(); }
+   summary.mockResolvedValue(13);
+   await expectFooterOf(() => deliveryPending(context() as any), metadata(13)); // no leaked slot: the footer runs again
+  } finally { summary.mockRestore(); }
  });
  it('omits run principals and ambiguous unnamed callers, while a valid named session stays self-only', async () => {
   expect(await deliveryPending({...context(),clientId:'run:synthetic-footer-run'} as any)).toBeUndefined();
   await runAsActor({workerId:null,agentId:null}, async () => {
    publishAmbiguousActor([session.id,generateId()]);
    expect(await deliveryPending(context() as any)).toBeUndefined();
-   expect(await deliveryPending(context() as any, session.id)).toEqual(metadata(13));
+   await expectFooterOf(()=>deliveryPending(context() as any, session.id), metadata(13));
   });
  });
  it('omits a foreign named session without falling back to the owned binding', async () => {
@@ -265,7 +359,7 @@ describe('#2026 review closure controls', () => {
  it('respects the delivery window for reached messages already posted', async () => {
   await db.node.updateMany({where:{messageChannelId:channel.id},data:{createdAt:new Date(Date.now()-1000)}});
   expect((await loadDeliveryBatches({ctx:context() as any,app,hostId:null,workerIds:[worker.id]})).batches).toEqual([]);
-  expect(await deliveryPending(context() as any)).toEqual(metadata(0));
+  await expectFooterOf(()=>deliveryPending(context() as any), metadata(0));
  });
  it('counts two admitted channels in one aggregate, with the same total as pull', async () => {
   const made=await ensureChannelWithRoot(db,{memoryId:channel.memoryId,loc:'chats:second',name:'Second',createdBy:user.id});

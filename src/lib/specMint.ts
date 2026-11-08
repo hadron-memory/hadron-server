@@ -267,10 +267,9 @@ export function parseOpenQuestions(content: string | null | undefined): OpenQues
 }
 
 /**
- * Whether a stale abstract BLOCKS minting (contract §5). It does, but only once
- * re-affirming an unchanged abstract is actually saved (server#1408) and the
- * CLI that sends it (hadron-cli#750) are deployed; until then an author cannot
- * clear a stale abstract without editing its text, so the report lists stale
- * abstracts without blocking. Flip this to `true` when both have shipped.
+ * Whether a stale abstract BLOCKS minting. It does not: cor:dmo:120:07 says a stale
+ * abstract is reported and does not block, so the report lists stale abstracts over
+ * the nodes in the mint scope (#3436, ruling 0215). The flag stays so the report's
+ * `staleAbstractsBlock` field and its wiring are one switch, should a ruling change it.
  */
 export const STALE_ABSTRACT_BLOCKS_MINT = false;

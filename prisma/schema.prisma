@@ -396,6 +396,8 @@ model User {
   deletedBy        String?           @map("deleted_by")
 
   memberships                   OrgMember[]
+  heldGrants                    Grant[]                     @relation("GrantHolderUser")
+  issuedGrants                  Grant[]                     @relation("GrantIssuer")
   sentInvitations               UserInvitation[]            @relation("SentInvitations")
   invitationActivations         UserInvitationActivation[]
   receivedMemberInvitations     OrgMemberInvitation[]       @relation("ReceivedMemberInvitations")
@@ -1936,6 +1938,10 @@ model UsageEvent {
   sessionId        String?   @map("session_id")
   /// The App that authored this event.
   appId            String?   @map("app_id")
+  /// #2944 (cor:acl:090:01, ruling 0244 item 3): the App key that authenticated the request that made this
+  /// event. Null for every other event: a user, a session, an async run, and every row recorded before the
+  /// column (no backfill). A key filter never returns a null row. Set null if the key row is deleted.
+  appKeyId         String?   @map("app_key_id")
   /// Key-value args when `type = 'action-run'`.
   actionArgs       Json?     @map("action_args")
   /// LLM model used for this specific event.
@@ -1980,6 +1986,7 @@ model UsageEvent {
   node         Node?         @relation(fields: [nodeId], references: [id], onDelete: SetNull)
   session      Session?      @relation(fields: [sessionId], references: [id], onDelete: SetNull)
   app          App?          @relation(fields: [appId], references: [id], onDelete: SetNull)
+  appKey       AppKey?       @relation(fields: [appKeyId], references: [id], onDelete: SetNull)
   user         User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
   organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
 
@@ -1997,6 +2004,8 @@ model UsageEvent {
   @@index([userId, createdAt])
   @@index([memoryId, createdAt])
   @@index([organizationId, createdAt])
+  /// #2944: the key-filtered read (usageEvents(appKey:)), newest first within a window.
+  @@index([appKeyId, createdAt])
   // #1903: session liveness also needs the PARTIAL index
   // usage_events_session_activity_idx (session_id, created_at) WHERE
   // counts_as_activity. Prisma can't model a partial index, so it lives in
@@ -2183,6 +2192,7 @@ model Agent {
   readStates         ChannelReadState[]  @relation("ReadStateAgent")
   /// #974 — the named castings of this agent into Apps (cor:dmo:050:11).
   workers            Worker[]
+  heldGrants         Grant[]             @relation("GrantHolderAgent")
   /// #1885 (cor:dmo:050:14) — the base this Agent extends, and the Agents
   /// that extend it. Never called a parent: that word belongs to imports.
   extendsAgent       Agent?              @relation("AgentBase", fields: [extendsAgentId], references: [id], onDelete: Restrict)
@@ -3487,6 +3497,10 @@ model App {
   automationReadGrantEvents AppAutomationReadGrantEvent[]
   automationTeamSnapshotGrants AppAutomationTeamSnapshotGrant[]
   automationTeamSnapshotGrantEvents AppAutomationTeamSnapshotGrantEvent[]
+  /// #3668 — grants issued in this App, the grants THIS App holds, and the grant events.
+  grants                  Grant[]      @relation("GrantApp")
+  heldGrants              Grant[]      @relation("GrantHolderApp")
+  grantEvents             GrantEvent[]
   /// #1706 — model-family availability (cor:agt:060:03) and the stall schedule.
   modelFamilyAvailability ModelFamilyAvailability[]
   agentTaskStallSchedule  AgentTaskStallSchedule?
@@ -3579,6 +3593,7 @@ model AppKey {
   scopes   AppKeyScope[]
   reads    AppKeyWakeRead[]
   hostUses HostKeyUse[]
+  usageEvents UsageEvent[]
 
   @@index([appId])
   @@map("app_keys")
@@ -4046,6 +4061,7 @@ model Worker {
   wakeAcks             WorkerWakeAck[]
   wakeReservation      AppWakeReservation?
   appGrants            AppGrant[]
+  heldGrants           Grant[]  @relation("GrantHolderWorker")
   launchableVia        HostRegistrationWorker[]
   hostOperations       HostOperation[]
   /// #2162 — this worker's context resets (cor:agt:050:27).
@@ -7433,4 +7449,108 @@ model ChatRootEngineState {
   updatedAt DateTime @updatedAt @map("updated_at")
   chatRoot Node @relation(fields: [chatRootNodeId], references: [id], onDelete: Cascade)
   @@map("chat_root_engine_states")
+}
+
+/// #3668 (S1a, cor:acl:140:01/:03/:08) — one grant: exactly one HOLDER (a user, an agent, a worker or an App), one App, one
+/// REGISTERED action (`actions`), the values it allows, its time frame and count, and why. Whether it is live is WORKED OUT
+/// (src/lib/grants/live.ts and the matching SQL fragment), never stored. Nothing in the server writes a row yet; the
+/// database guards (prisma/grant-invariants.sql) fix what any later writer may do: a row arrives pending, ends once by
+/// revocation, loses an erased issuer, and follows a user merge. Holder foreign keys are RESTRICT as INTERIM referential
+/// integrity on empty, producer-free tables (gate 6712456240); what an erased holder's grant becomes is UNSELECTED
+/// (cor:acl:140:08 Open, every holder kind), and no persistent producer may ship before it is ruled and re-gated.
+model Grant {
+  id                    String    @id @default(cuid())
+  appId                 String    @map("app_id")
+  /// The holder: exactly one of these four (chk_grants_exactly_one_holder).
+  userId                String?   @map("user_id")
+  agentId               String?   @map("agent_id")
+  workerId              String?   @map("worker_id")
+  granteeAppId          String?   @map("grantee_app_id")
+  /// Who issued it. Set to NULL when that account is erased (cor:acl:140:08); the reason stays.
+  issuerUserId          String?   @map("issuer_user_id")
+  /// Who asked for it. FK-free sealed ids (a merge moves the user link; the worker and session are fenced, #1162).
+  requestedByUserId     String?   @map("requested_by_user_id")
+  requestedByWorkerId   String?   @map("requested_by_worker_id")
+  requestedBySessionId  String?   @map("requested_by_session_id")
+  /// A registered action (FK): there is no free-text or recorded-only stand-in.
+  action                String
+  /// The values the grant allows (a single value, a list or a wildcard); never a secret.
+  values                Json      @map("action_values")
+  startsAt              DateTime? @map("starts_at")
+  expiresAt             DateTime? @map("expires_at")
+  maxUses               Int?      @map("max_uses")
+  useCount              Int       @default(0) @map("use_count")
+  reason                String
+  version               Int       @default(1)
+  /// Phase 2 (signing). Always NULL on a new row (INSERT guard); a pending row allows nothing.
+  activatedAt           DateTime? @map("activated_at")
+  verificationKind      String?   @map("verification_kind")
+  verifiedBy            String?   @map("verified_by")
+  signatureId           String?   @map("signature_id")
+  revokedAt             DateTime? @map("revoked_at")
+  revokedBy             String?   @map("revoked_by")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+
+  app         App     @relation("GrantApp", fields: [appId], references: [id], onDelete: Cascade)
+  user        User?   @relation("GrantHolderUser", fields: [userId], references: [id], onDelete: Restrict)
+  agent       Agent?  @relation("GrantHolderAgent", fields: [agentId], references: [id], onDelete: Restrict)
+  worker      Worker? @relation("GrantHolderWorker", fields: [workerId], references: [id], onDelete: Restrict)
+  granteeApp  App?    @relation("GrantHolderApp", fields: [granteeAppId], references: [id], onDelete: Restrict)
+  issuer      User?   @relation("GrantIssuer", fields: [issuerUserId], references: [id], onDelete: SetNull)
+  actionDef   Action  @relation(fields: [action], references: [name], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([appId, createdAt])
+  @@index([userId])
+  @@index([agentId])
+  @@index([workerId])
+  @@index([granteeAppId])
+  @@index([action])
+  @@map("grants")
+}
+
+/// #3668 (S1a, cor:acl:140:01) — append-only history of a grant: who did what, when. Grant, App-scope and actor ids carry no
+/// foreign key on purpose (sealed history; the App FK cascades so a hard delete still works). The CHECKs and triggers live
+/// in prisma/grant-invariants.sql.
+model GrantEvent {
+  id           String   @id @default(cuid())
+  grantId      String   @map("grant_id")
+  appId        String   @map("app_id")
+  /// CREATE | ACTIVATE | REVOKE | USE (CHECK in grant-invariants.sql).
+  action       String
+  at           DateTime @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @db.Timestamp(3)
+  actorUserId  String?  @map("actor_user_id")
+  workerId     String?  @map("worker_id")
+  sessionId    String?  @map("session_id")
+  runId        String?  @map("run_id")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@index([appId, at])
+  @@index([grantId])
+  @@map("grant_events")
+}
+
+/// #3668 (S1a, cor:acl:140:02) — a thing a grant can allow. Written ONLY by the idempotent deploy-time upsert
+/// (src/lib/grants/actions.ts, scripts/db/upsert-actions.ts) from a list in the server; no GraphQL, MCP, CLI or run-tool
+/// write exists, and the serve role holds no INSERT/UPDATE/DELETE on it (prisma/runtime-role.sql). The platform list is
+/// EMPTY in S1a. A row is never deleted by the upsert: a grant may name it (FK RESTRICT).
+model Action {
+  name            String   @id
+  /// PLATFORM now; a tool's id later (phase 5).
+  source          String   @default("PLATFORM")
+  /// [{ name, type, refusesWildcard }]
+  parameters      Json
+  tool            String?
+  /// SERVER | CREDENTIAL | HARNESS_INSTRUCTION | RECORDED_ONLY (CHECK in grant-invariants.sql).
+  enforcement     String
+  /// A closed key the server maps to a gate function; never SQL or code.
+  issuerRule      String   @map("issuer_rule")
+  summaryTemplate String   @map("summary_template")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  grants Grant[]
+
+  @@map("actions")
 }

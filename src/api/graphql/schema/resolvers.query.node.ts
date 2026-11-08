@@ -5,6 +5,7 @@ import { normalizeFindNodesPaging } from '../../../lib/findNodesPaging.js';
 import { readCompiledRevision } from '../../../lib/bootCompile/provenance.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE } from '../../../lib/bootPrompt.js';
 import { liveTxContext, liveReadSnapshotContext } from './authorizedTx.js';
+import { projectUsageRowsFor } from './resolvers.usageProjection.js';
 import { withReconciledNodeRead } from '../../../lib/includes/reconciledNodeRead.js';
 import { markBatchReadNodes } from './resolvers.nodeBatchEdges.js';
 // nodeQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
@@ -89,6 +90,7 @@ import {
   requireRole,
   requireOrgRole,
   isOwnerOrOrgMember,
+  canReadApp,
   canReadMemoryRecord,
   getAccessibleMemoryIds,
   pageArgs,
@@ -974,7 +976,7 @@ export const nodeQueries = {
           }
           const app = await ctx.db.app.findUnique({
             where: { id },
-            select: { organizationId: true, ownerUserId: true },
+            select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true },
           });
           if (!app) return null;
           // The dedicated app(ref:) query admits any member of the App's org
@@ -983,7 +985,8 @@ export const nodeQueries = {
           // already open directly. isOwnerOrOrgMember covers the
           // global-admin bypass, the App's owner-user, and the
           // revoked-membership (deletedAt) rule.
-          if (!(await isOwnerOrOrgMember(ctx, app))) return null;
+          // #2089: plus a current owner-role member of a user-owned App.
+          if (!(await canReadApp(ctx, app))) return null;
           return { kind: 'app', id, organizationId: app.organizationId };
         }
         case 'user': {
@@ -2583,7 +2586,7 @@ export const nodeQueries = {
       // personal/private carve-out still applies — so the `!== null` guard is
       // defensive for the type contract rather than a live path.
       const accessibleMemoryIds = await getAccessibleMemoryIds(ctx);
-      return ctx.db.usageEvent.findMany({
+      const rows = await ctx.db.usageEvent.findMany({
         where: {
           nodeLoc: loc,
           ...(accessibleMemoryIds !== null ? { memoryId: { in: accessibleMemoryIds } } : {}),
@@ -2591,6 +2594,8 @@ export const nodeQueries = {
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: limit ?? 20,
       });
+      // #3688: a loc names a resource, so other principals' rows are volumes only (cor:acl:090:01, ruling 0246).
+      return projectUsageRowsFor(ctx, rows);
     },
 
     nodeEdgeRemovals: async (_: unknown, { nodeRef, limit }: { nodeRef: string; limit?: number }, ctx: Context) => {
