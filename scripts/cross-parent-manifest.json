@@ -64,6 +64,8 @@
     "ResumeClaimReceipt": "envelope",
     "NodeContentValidationReport": "envelope",
     "NodeContentValidationStatus": "value",
+    "NodeValidationTaskEntry": "value",
+    "NodeValidationTaskSet": "value",
     "AiModelPriceList": "envelope",
     "CreditLedgerEntryList": "envelope",
     "CreditBalance": "value",

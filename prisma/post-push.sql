@@ -461,6 +461,13 @@ CREATE INDEX IF NOT EXISTS nodes_memory_parent_loc_idx
 CREATE INDEX IF NOT EXISTS nodes_memory_segment_key_idx
   ON nodes (memory_id, ((replace(loc, ':', chr(1))) COLLATE "C"));
 
+-- #2836: the eligible-row partial index for the same skip-scan (loc segments leave out system,
+-- chat-message and comment). Mirrors prisma/migrations/20261106050000_nodes_segment_key_eligible_index
+-- (keep in lockstep; pinned). The WHERE clause is segmentEligibleSql() in src/lib/memoryLocSegments.ts.
+CREATE INDEX IF NOT EXISTS nodes_memory_segment_key_eligible_idx
+  ON nodes (memory_id, ((replace(loc, ':', chr(1))) COLLATE "C"))
+  WHERE deleted_at IS NULL AND node_type <> ALL(ARRAY['system','chat-message','comment']) AND loc <> '';
+
 -- ── #719 structured/faceted query: value-cast guard functions + JSONB GIN ────
 -- Mirrors prisma/migrations/20260718120000_where_query_helpers/migration.sql
 -- (keep in lockstep). The `where` predicate compiler (src/lib/retrieval/
@@ -885,3 +892,5 @@ CREATE INDEX IF NOT EXISTS "agents_organization_id_idx" ON "agents"("organizatio
 CREATE INDEX IF NOT EXISTS "agent_team_events_pr_frozen_head_idx"
   ON "agent_team_events" ("app_id", (("payload" ->> 'head')))
   WHERE "type" = 'pr.frozen';
+
+\ir grant-invariants.sql

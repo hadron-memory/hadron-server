@@ -33,7 +33,7 @@ describe('#2391 shared body-framing fixture', () => {
     writeNodeFile(root, {
       id: generateId(), loc: 'node', name: 'fixture', nodeType: 'info', content: c.stored ?? null,
       tags: [], role: null, isRunnable: null, isPlaceholder: false, authorshipKind: null, authoredByTask: null, authoredByRevision: null, outgoingEdges: [],
-    });
+    }, undefined, false);
     const text = readFileSync(join(root, 'node.md'), 'utf-8');
     const close = text.indexOf('\n---\n');
     expect(close).toBeGreaterThan(0);

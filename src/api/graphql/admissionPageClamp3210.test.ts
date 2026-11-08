@@ -4,7 +4,7 @@ import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { readFileSync, readdirSync } from 'node:fs';
 import ts from 'typescript';
-import { buildSchema, parse, type GraphQLObjectType } from 'graphql';
+import { buildSchema, getNullableType, isListType, parse, type GraphQLObjectType } from 'graphql';
 import { getComplexity, simpleEstimator } from 'graphql-query-complexity';
 import { createServer } from '../../server.js';
 import { mintUserApiKey } from '../../middleware/auth.js';
@@ -49,7 +49,8 @@ beforeAll(async () => {
   nodeId = nodes[0].id;
   await db.node.createMany({ data: nodes });
   await db.session.createMany({ data: Array.from({ length: 241 }, () => ({ id: generateId(), userId: user.id, type: 'DEVELOPER' })) });
-  await db.usageEvent.createMany({ data: Array.from({ length: 241 }, () => ({ id: generateId(), memoryId: memory.id, type: 'fixture3210', nodeLoc: 'n0' })) });
+  // #2817 (cor:acl:090:01): a read naming no resource is the caller's own activity, so the fixture events are the caller's.
+  await db.usageEvent.createMany({ data: Array.from({ length: 241 }, () => ({ id: generateId(), memoryId: memory.id, userId: user.id, type: 'fixture3210', nodeLoc: 'n0' })) });
   await db.nodeRevision.createMany({ data: Array.from({ length: 241 }, (_, revNo) => ({
     id: generateId(), nodeId, memoryId: memory.id, loc: 'n0', name: 'n0', tags: [], changes: [], revNo,
   })) });
@@ -152,8 +153,10 @@ it.each([...PAGE_ARGS_FIELDS])('%s cost follows the shared pageTake for every st
   const field = (schema.getType(typeName) as any).getFields()[name];
   const estimator = hadronListEstimator({ maxCost: 200000, listFactor: 10 });
   for (const limit of [undefined, null, -5, 0, 1, 20, 200, 201, 1000, 1000000]) {
-    // A non-list Page wrapper scales its children; actual schema types/args are used, with fixed child cost 11.
+    // A non-list Page wrapper scales its children; a bare list (#2817: Query.usageEvents) is charged per row read.
+    // Actual schema types/args are used, with fixed child cost 11.
+    const rows = Math.max(1, pageTake(limit));
     expect(estimator({ type: schema.getType(typeName) as never, field, args: limit === undefined ? {} : { limit }, childComplexity: 11 } as never))
-      .toBe(1 + Math.max(1, Math.max(1, pageTake(limit)) / 10) * 11);
+      .toBe(isListType(getNullableType(field.type)) ? 1 + rows * 11 : 1 + Math.max(1, rows / 10) * 11);
   }
 });
