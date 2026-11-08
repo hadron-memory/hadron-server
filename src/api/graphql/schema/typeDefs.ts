@@ -10955,7 +10955,8 @@ export const typeDefs = `#graphql
     """
     #2645 — edit descriptive fields using assignment authority (Proposed Editing rule,
     hrn:node:hadronmemory.com:specs:cor:agt:050:09). Owner, reporting-chain coordinator or App manager;
-    never an assignee alone or an App key. Ended tasks refuse TASK_ENDED. Omitted fields stay unchanged;
+    an assignee alone may write only properties (hrn:node:hadronmemory.com:specs:cor:agt:050:28) and references
+    (#3441, ruling 0233); any other field it names refuses the whole call TASK_NOT_OWNER. Never an App key. Ended tasks refuse TASK_ENDED. Omitted fields stay unchanged;
     empty optional fields clear, tags/requirements replace whole. An edit is not progress and clears no wake.
     Source is fixed. Event carries changed field names only (hrn:node:hadronmemory.com:specs:cor:agt:050:11).
     #3323: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.
