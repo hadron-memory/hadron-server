@@ -154,6 +154,24 @@ describe('#3524 A2: the in-fence key is the writer\'s key (G2) and the view read
 });
 
 describe('#3524 A2: contract that stays', () => {
+  it('a projection that finds nothing inside the transaction refuses and rolls the write back', async () => {
+    const { target } = await memoryWithTarget({ encrypted: false, name: 'proj-empty' });
+    const seam = seamDb({ wrapTx: (tx) => new Proxy(tx, {
+      get(t, prop, r) {
+        const v = Reflect.get(t, prop, r);
+        if (prop !== 'node') return v;
+        return new Proxy(v, { get(nt, np, nr) {
+          if (np === 'findMany') return async (args: { where?: { nodeType?: string } }) =>
+            args?.where?.nodeType === 'comment' ? [] : (nt as any).findMany(args);
+          return Reflect.get(nt, np, nr);
+        } });
+      },
+    }) });
+    await expect(M.createComment(null, { targetRef: target.id, body: 'nothing' }, ctxOf(admin.id, seam)))
+      .rejects.toMatchObject({ extensions: { code: 'COMMENT_NOT_FOUND' } });
+    expect(await counts()).toEqual({ nodes: 0, metas: 0, anchors: 0, revisions: 0 });
+  });
+
   it('ordinary creation leaves 1 node, 1 meta, 1 anchor, 0 revisions; a second open root is refused', async () => {
     const { target } = await memoryWithTarget({ encrypted: false, name: 'plain-ok' });
     const view = await M.createComment(null, { targetRef: target.id, body: 'one' }, ctxOf(admin.id));
