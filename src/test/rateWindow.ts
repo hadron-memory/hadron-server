@@ -53,12 +53,35 @@ export async function withinOneRateWindow(db: PrismaClient, fieldClass: string, 
   if (wait > 0) await new Promise(r => setTimeout(r, wait));
 }
 
-/** Sleeps on the database clock until it is `msBefore` before the next window boundary (test-only boundary forcing). */
-export async function untilBeforeRateBoundary(db: PrismaClient, windowSeconds: number, msBefore: number): Promise<void> {
-  const [{ now }] = await db.$queryRaw<Array<{ now: Date }>>`SELECT clock_timestamp() AT TIME ZONE 'UTC' AS now`;
+/**
+ * #3099. Pure rule: how long to sleep so that `msBefore` remains before a window boundary.
+ * When at least `msBefore` remains, that is the current boundary; when less remains (a late
+ * start), the lead cannot be met in this window, so it targets the FOLLOWING boundary.
+ */
+export function rateBoundaryLeadWaitMs(nowMs: number, windowSeconds: number, msBefore: number): number {
   const windowMs = windowSeconds * 1000;
-  const remaining = windowMs - (now.getTime() % windowMs);
-  if (remaining > msBefore) await new Promise(r => setTimeout(r, remaining - msBefore));
+  const remaining = windowMs - (nowMs % windowMs);
+  return remaining >= msBefore ? remaining - msBefore : remaining + windowMs - msBefore;
+}
+
+/**
+ * Sleeps on the database clock until it is at most `msBefore` before a window boundary
+ * (test-only boundary forcing). A late start waits into the next window (#3099), and the
+ * database clock is rechecked after each sleep, so an early timer wake or a sleep that ran
+ * across a boundary is corrected rather than returned from.
+ */
+export async function untilBeforeRateBoundary(db: PrismaClient, windowSeconds: number, msBefore: number): Promise<void> {
+  const windowMs = windowSeconds * 1000;
+  if (!(msBefore > 0 && msBefore < windowMs)) throw new Error(`msBefore ${msBefore} must lie inside a ${windowMs} ms window`);
+  const [{ now }] = await db.$queryRaw<Array<{ now: Date }>>`SELECT clock_timestamp() AT TIME ZONE 'UTC' AS now`;
+  const first = rateBoundaryLeadWaitMs(now.getTime(), windowSeconds, msBefore);
+  if (first > 0) await new Promise(r => setTimeout(r, first));
+  for (let i = 0; i < 3; i++) {
+    const remaining = await dbRemainingMs(db, windowMs);
+    if (remaining <= msBefore) return;
+    await new Promise(r => setTimeout(r, remaining - msBefore));
+  }
+  throw new Error(`untilBeforeRateBoundary: lead ${msBefore} ms not reached`);
 }
 
 /** Time left in the current fixed window on the database clock. */
