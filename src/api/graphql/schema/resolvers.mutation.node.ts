@@ -941,6 +941,19 @@ async function writeNodeCoreRaw(
       // Keep the caller's plaintext input untouched for revision/change comparison.
       if (input.data === null) (nodeFields as Record<string, unknown>).data = Prisma.DbNull;
 
+      // #3727 / cor:api:210:01 / cor:dmo:020:03: the same law for the nullable
+      // STRING columns. `enc.abstract ?? undefined` above turns an explicit
+      // `abstract: null` into an omission, silently retaining the old
+      // ciphertext while the derived hash was already cleared — the stored
+      // fingerprint and the abstract disagree. Unlike the JSON `data` column
+      // above (which needs DbNull to avoid storing JSON null), a string
+      // column's JS null IS SQL NULL — no sentinel; the caller's plaintext
+      // input stays untouched for revision/change comparison, as with `data`.
+      // MCP's writer already maps `enc.abstract/content ?? null`, so this
+      // brings the two surfaces to the same meaning (cor:api:240).
+      if (input.abstract === null) (nodeFields as Record<string, unknown>).abstract = null;
+      if (input.content === null) (nodeFields as Record<string, unknown>).content = null;
+
       // When createOnly resurrects a soft-deleted node, the UPDATE branch
       // must clear `deletedAt`/`deletedBy` — otherwise the resurrected
       // node ends up with the new content but still flagged as deleted,
