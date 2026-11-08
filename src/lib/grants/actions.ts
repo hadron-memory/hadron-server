@@ -3,9 +3,9 @@
  * runs at deploy (scripts/db/upsert-actions.ts, from scripts/docker-start.sh as the owner role). A change to the list is a
  * code review; no GraphQL, MCP, CLI or run-tool call writes an action, so an agent's author cannot invent one.
  *
- * The list is EMPTY in S1a. The two named actions (`schedule.create`, `webhook.create`) are seeded in a later slice, after
- * their terms are ruled; this mechanism never seeds one by itself. The upsert never DELETES: a grant may name any row it
- * ever wrote (FK RESTRICT), and what a retired action allows is not defined yet.
+ * #3707 (S1b): the list carries the first two actions, `schedule.create` and `webhook.create`, with the terms
+ * cor:acl:140:02 states as ruled (0253, item 1). Seeding writes ACTION rows only: no holder, no grant. The upsert never
+ * DELETES: a grant may name any row it ever wrote (FK RESTRICT), and what a retired action allows is not defined yet.
  */
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 
@@ -28,8 +28,23 @@ export interface ActionDefinition {
   summaryTemplate: string;
 }
 
-/** EMPTY in S1a. */
-export const PLATFORM_ACTIONS: readonly ActionDefinition[] = [];
+/**
+ * Each takes one parameter, the entry node, refuses a wildcard value, is enforced by the server, and is issued by whoever may
+ * create one in that App themselves (`createAgentSchedule` / `createAgentWebhook`: `requireScheduleAdmin`, see ./issuers.ts).
+ * Enforcement itself is #3483; until it lands the level states what the platform promises, not what a gate does today.
+ */
+const ENTRY_NODE: ActionParameter = { name: 'entryNode', type: 'node-ref', refusesWildcard: true };
+
+export const PLATFORM_ACTIONS: readonly ActionDefinition[] = [
+  {
+    name: 'schedule.create', source: 'PLATFORM', parameters: [ENTRY_NODE], tool: null, enforcement: 'SERVER',
+    issuerRule: 'APP_SCHEDULE_ADMIN', summaryTemplate: 'Create a schedule in {app} that starts at the entry node {entryNode}',
+  },
+  {
+    name: 'webhook.create', source: 'PLATFORM', parameters: [ENTRY_NODE], tool: null, enforcement: 'SERVER',
+    issuerRule: 'APP_WEBHOOK_ADMIN', summaryTemplate: 'Create a webhook in {app} that starts at the entry node {entryNode}',
+  },
+];
 
 export interface UpsertResult { inserted: number; updated: number; unchanged: number }
 

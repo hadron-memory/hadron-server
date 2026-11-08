@@ -169,3 +169,26 @@ it('rollback after a failure inside the cleanup restores exactly the owned file 
   expect(existsSync(mirrorMutationMarker(checkout()))).toBe(false);
   survives();
 });
+
+it('#3692 rollback after the cleanup removed the directory recreates the parent and restores edges.yaml', async () => {
+  await checkoutWithUnpublishedCommit();
+  const sidecar = join(checkout(), 'a', '.b');
+  put(join(sidecar, 'edges.yaml'), '- {id: X, rel: stale}\n');
+  const node = await db.node.create({ data: { id: generateId(), memoryId, loc: 'a:b', name: 'b', content: 'fresh' } });
+  await dueRow(node.id, 'WRITE');
+  // The helper's rmdir really succeeds (the directory is gone), then the mutation fails afterwards.
+  vi.mocked(fs.rmdirSync).mockImplementationOnce(((path: string) => {
+    execFileSync('rmdir', [path]);
+    expect(existsSync(path)).toBe(false);
+    throw Object.assign(new Error('synthetic post-rmdir EIO'), { code: 'EIO' });
+  }) as never);
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  await gitMirrorSweepTick(db);
+  vi.restoreAllMocks();
+  expect(await db.gitMirrorObligation.count({ where: { memoryId, nodeId: node.id } })).toBe(1);
+  expect(lstatSync(sidecar).isDirectory()).toBe(true);
+  expect(readFileSync(join(sidecar, 'edges.yaml'), 'utf8')).toBe('- {id: X, rel: stale}\n');
+  expect(existsSync(join(checkout(), 'a', 'b.md'))).toBe(false);
+  expect(existsSync(mirrorMutationMarker(checkout()))).toBe(false);
+  survives();
+});

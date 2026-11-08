@@ -1938,6 +1938,10 @@ model UsageEvent {
   sessionId        String?   @map("session_id")
   /// The App that authored this event.
   appId            String?   @map("app_id")
+  /// #2944 (cor:acl:090:01, ruling 0244 item 3): the App key that authenticated the request that made this
+  /// event. Null for every other event: a user, a session, an async run, and every row recorded before the
+  /// column (no backfill). A key filter never returns a null row. Set null if the key row is deleted.
+  appKeyId         String?   @map("app_key_id")
   /// Key-value args when `type = 'action-run'`.
   actionArgs       Json?     @map("action_args")
   /// LLM model used for this specific event.
@@ -1982,6 +1986,7 @@ model UsageEvent {
   node         Node?         @relation(fields: [nodeId], references: [id], onDelete: SetNull)
   session      Session?      @relation(fields: [sessionId], references: [id], onDelete: SetNull)
   app          App?          @relation(fields: [appId], references: [id], onDelete: SetNull)
+  appKey       AppKey?       @relation(fields: [appKeyId], references: [id], onDelete: SetNull)
   user         User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
   organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
 
@@ -1999,6 +2004,8 @@ model UsageEvent {
   @@index([userId, createdAt])
   @@index([memoryId, createdAt])
   @@index([organizationId, createdAt])
+  /// #2944: the key-filtered read (usageEvents(appKey:)), newest first within a window.
+  @@index([appKeyId, createdAt])
   // #1903: session liveness also needs the PARTIAL index
   // usage_events_session_activity_idx (session_id, created_at) WHERE
   // counts_as_activity. Prisma can't model a partial index, so it lives in
@@ -3588,6 +3595,7 @@ model AppKey {
   scopes   AppKeyScope[]
   reads    AppKeyWakeRead[]
   hostUses HostKeyUse[]
+  usageEvents UsageEvent[]
 
   @@index([appId])
   @@map("app_keys")

@@ -7,6 +7,7 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { MemoryNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { isAppKeyPrincipal, projectUsageRowsFor } from './resolvers.usageProjection.js';
+import { isAppKeyManager } from './appKeyManagement.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { GraphQLError } from 'graphql';
@@ -101,11 +102,35 @@ const usageWindowInstant = z.string().datetime({ offset: true });
  *     (`getAccessibleMemoryIds`, which handles App-key principals). An empty resource scope stays empty;
  *     it never falls back to own activity.
  */
+/**
+ * #2944 (hrn:node:hadronmemory.com:specs:cor:acl:090:01 rev 7, "Filtering by App key"; rulings 0244 item 4, 0245):
+ * who may filter usage by App key K. K itself (`self`), and whoever manages K's App (cor:dmo:050:12) through the
+ * one person-only manager predicate the key inventory uses. Anyone else, including a non-owner App member, another
+ * key of the same App, a bound worker session and another tenant, gets EXACTLY the answer a nonexistent key gets:
+ * APP_KEY_NOT_FOUND naming the caller's own reference (the resolvers.appKeyScope.ts shape). A revoked key is still
+ * a key: its history stays filterable.
+ */
+async function admitUsageKeyFilter(ctx: Context, ref: string): Promise<{ id: string; self: boolean }> {
+  const unknownKey = () => new GraphQLError('App key not found.', { extensions: { code: 'APP_KEY_NOT_FOUND', id: ref } });
+  const key = await ctx.db.appKey.findUnique({
+    where: { id: ref },
+    select: { id: true, app: { select: { id: true, organizationId: true, ownerUserId: true } } },
+  });
+  if (!key) throw unknownKey();
+  // An App key may filter by itself only; its App's other keys are not its own.
+  if (isAppKeyPrincipal(ctx)) {
+    if (ctx.appKeyId === key.id) return { id: key.id, self: true };
+    throw unknownKey();
+  }
+  if (!(await isAppKeyManager(ctx, key.app))) throw unknownKey();
+  return { id: key.id, self: false };
+}
+
 async function usageEventsWhere(
   ctx: Context,
-  { type, memoryId, nodeId, loc, since, until }: {
+  { type, memoryId, nodeId, loc, since, until, appKey }: {
     type?: string; memoryId?: string; nodeId?: string; loc?: string;
-    since?: string | null; until?: string | null;
+    since?: string | null; until?: string | null; appKey?: string | null;
   },
 ): Promise<Prisma.UsageEventWhereInput> {
       // #2817: an hdr_app_ key (roles [], no user identity) is admitted; its read is scoped below.
@@ -135,10 +160,32 @@ async function usageEventsWhere(
 
       const windowFilter = start || end ? { createdAt: { ...(start ? { gte: start } : {}), ...(end ? { lt: end } : {}) } } : {};
 
+      // #2944: the key is judged after the input checks and BEFORE any resource is resolved, so a refused key
+      // answers as an unknown one whatever memory or node is also named, and never reveals one.
+      const keyFilter = appKey != null ? await admitUsageKeyFilter(ctx, appKey) : null;
+      const keyWhere = keyFilter ? { appKeyId: keyFilter.id } : {};
+
       // #2817 (cor:acl:090:01): naming no resource selects OWN ACTIVITY, never the accessible-memories
       // feed. "Named" uses the same truthiness that applies each filter below, so no request can reach
       // the resource branch without a resource filter. `type` and the window narrow either scope.
-      if (!memoryId && !nodeId && !loc) {
+      // #2944: a key filter is the one exception. K reading itself gets its own events in the memories it can read
+      // plus those attributed to none (ruling 0245 item 3, bounded by item 4 per ruling 0254); a manager falls through to the resource path below with no resource named, which bounds K's
+      // events to every memory the manager can read (items 1 and 4) and never restores the broad feed, since
+      // only a key-filtered read reaches it.
+      if (!memoryId && !nodeId && !loc && keyFilter?.self) {
+        // Ruling 0254 (hrn:node:hadronmemory.com:hadron-dev-team-shared:rulings:0254, Holger 2026-11-08, "Hide them"):
+        // K's own events only in memories K can read NOW; an event in a memory K has lost is not returned (0245
+        // item 4 governs where it meets item 3). Events attributed to no memory reveal none, so 0245 item 3 still
+        // returns them (Vera's reading, recorded in 0254).
+        const readable = await getAccessibleMemoryIds(ctx);
+        return {
+          ...windowFilter,
+          ...(type ? { type } : {}),
+          ...keyWhere,
+          ...(readable !== null ? { OR: [{ memoryId: { in: readable } }, { memoryId: null }] } : {}),
+        };
+      }
+      if (!memoryId && !nodeId && !loc && !keyFilter) {
         return {
           ...windowFilter,
           ...(type ? { type } : {}),
@@ -274,6 +321,7 @@ async function usageEventsWhere(
   return {
           ...windowFilter,
           ...(type ? { type } : {}),
+          ...keyWhere,
           ...(nodeIdFilter ? { nodeId: nodeIdFilter } : {}),
           ...(memoryFilter ?? {}),
           // nodeId-as-bare-loc → exact nodeLoc match (the supported loc filter
@@ -325,7 +373,7 @@ export const sessionQueries = {
 
     usageEvents: async (
       _: unknown,
-      args: { type?: string; memoryId?: string; nodeId?: string; loc?: string; since?: string | null; until?: string | null; limit?: number; offset?: number },
+      args: { type?: string; memoryId?: string; nodeId?: string; loc?: string; since?: string | null; until?: string | null; appKey?: string | null; limit?: number; offset?: number },
       ctx: Context,
     ) => {
       const where = await usageEventsWhere(ctx, args);
@@ -343,7 +391,7 @@ export const sessionQueries = {
     /** #2212 A1 — `usageEvents` as a page: the same gate and scope (one shared `where`), a stable `id` tiebreak, the real total. */
     usageEventsPage: async (
       _: unknown,
-      args: { type?: string; memoryId?: string; nodeId?: string; loc?: string; since?: string | null; until?: string | null; limit?: number | null; offset?: number | null },
+      args: { type?: string; memoryId?: string; nodeId?: string; loc?: string; since?: string | null; until?: string | null; appKey?: string | null; limit?: number | null; offset?: number | null },
       ctx: Context,
     ) => {
       const where = await usageEventsWhere(ctx, args);

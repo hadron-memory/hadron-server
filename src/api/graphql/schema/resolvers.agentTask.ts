@@ -2012,12 +2012,13 @@ export const agentTaskMutations = {
   /** #2645: Proposed cor:agt:050:09 Editing. The assignment gate and transaction are the only write door. */
   updateAgentTask: async (_: unknown, { taskId, input, instruction }: { taskId: string; input: Record<string, unknown>; instruction?: ActInstruction | null }, ctx: Context) =>
     mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
-      // #2420 (cor:agt:050:28): the task's assignee may write its `properties` and nothing else; a patch that names
-      // any other field needs the cor:agt:050:09 set, and is refused whole.
+      // #2420 (cor:agt:050:28) and #3441 (ruling 0233, cor:agt:050:01 / :09): the task's assignee may write its
+      // `properties` and its `references` and nothing else; a patch that names any other field needs the
+      // cor:agt:050:09 set, and is refused whole.
       const named = input && typeof input === 'object' && !Array.isArray(input) ? Object.keys(input) : [];
-      const assigneeWritesProperties = named.length > 0 && named.every(k => k === 'properties') && isAssignee(actor, task);
-      if (!assigneeWritesProperties && !(await mayDirectTask(tx, txCtx, app, actor, task))) {
-        throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, edits it; its assignee may write only its properties.", { taskId });
+      const assigneeWrites = named.length > 0 && named.every(k => k === 'properties' || k === 'references') && isAssignee(actor, task);
+      if (!assigneeWrites && !(await mayDirectTask(tx, txCtx, app, actor, task))) {
+        throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, edits it; its assignee may write only its properties and references.", { taskId });
       }
       refuseEnded(task);
       if (!input || typeof input !== 'object' || Array.isArray(input) || named.some(k => k !== 'properties' && !(TASK_EDIT_FIELDS as readonly string[]).includes(k))) {

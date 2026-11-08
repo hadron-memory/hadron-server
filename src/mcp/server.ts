@@ -47,6 +47,7 @@ import {
   recordNodeWrite,
   trackUsageWrite,
   toUsageNodeRefs,
+  usageAppKeyOf,
 } from '../lib/usageRecorder.js';
 import {
   buildNodeRevisionSnapshot,
@@ -8822,6 +8823,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           nodeId: node.id,
           memoryId: node.memoryId, // #796 (as in hadron_get_node's event)
           appId: auth.appId ?? null,
+          appKeyId: usageAppKeyOf(auth), // #2944
           // 046-usage-metering FR-001 (as in hadron_get_node's event).
           userId: auth.userId ?? null,
           createdBy: auth.clientId ?? null,

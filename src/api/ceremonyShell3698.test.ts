@@ -185,7 +185,13 @@ describe('a rate-limited GET of the signing page answers a small HTML page', () 
 });
 
 describe('the shell keeps what the page scripts depend on (Dorian P2-1, #3703)', () => {
-  const mains = (html: string) => html.match(/<main[\s>][^>]*>?/g) ?? [];
+  // A bounded start-tag matcher: each opening tag ends at its own `>`, so two nested mains count as two.
+  const mains = (html: string) => html.match(/<main(?=[\s>])[^>]*>/g) ?? [];
+
+  it('the matcher counts nested mains separately (a nested-main regression cannot hide as one match)', () => {
+    expect(mains('<main><main data-page="window"><p>x</p></main></main>')).toHaveLength(2);
+    expect(mains('<main class="wide"><mainly>x</mainly></main>')).toHaveLength(1);
+  });
 
   it.each(['/passkeys/register', '/passkeys/window/end', '/passkeys/revoke'])('%s serves exactly one main, and it is the one carrying data-page', async (path) => {
     const res = await fetch(`${base}${path}`);
