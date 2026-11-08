@@ -9,7 +9,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer, type Socket } from 'node:net';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -54,21 +55,27 @@ type Measured = { bad: string[]; doc: number; vw: number; dark: boolean; text: s
 
 // Real viewport and media emulation over the DevTools protocol (the --window-size and
 // --blink-settings flags are not honoured by every headless Chromium build).
-async function measure(html: string, width: number, dark: boolean): Promise<Measured> {
+// One absolute deadline covers the whole run (handshake, socket open, every command), set
+// below the explicit per-test timeout so the finally block always runs before vitest gives up.
+const DEADLINE_MS = 20000;
+const TEST_TIMEOUT_MS = 40000;
+async function measure(html: string, width: number, dark: boolean, opts: { bin?: string; deadlineMs?: number } = {}): Promise<Measured> {
+  const deadlineAt = Date.now() + (opts.deadlineMs ?? DEADLINE_MS);
+  const bounded = <T,>(p: Promise<T>, what: string) => Promise.race([p, new Promise<never>((_, rej) =>
+    setTimeout(() => rej(new Error('timed out: ' + what)), Math.max(0, deadlineAt - Date.now())).unref())]);
   const dir = mkdtempSync(join(tmpdir(), 'consent3576-'));
-  const proc = spawn(browser!, ['--headless=new', '--no-sandbox', '--disable-gpu', `--user-data-dir=${join(dir, 'u')}`,
+  const proc = spawn(opts.bin ?? browser!, ['--headless=new', '--no-sandbox', '--disable-gpu', `--user-data-dir=${join(dir, 'u')}`,
     '--remote-debugging-port=0', 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'], detached: true });
   try {
-    const wsUrl = await new Promise<string>((resolve, reject) => {
+    const wsUrl = await bounded(new Promise<string>((resolve, reject) => {
       let buf = '';
-      const t = setTimeout(() => reject(new Error('no devtools endpoint: ' + buf.slice(0, 300))), 30000);
-      proc.stderr!.on('data', (d) => { if (buf.length > 20000) return; buf += d; const m = /DevTools listening on (ws:\/\/\S+)/.exec(buf); if (m) { clearTimeout(t); resolve(m[1]); } });
-      proc.on('exit', () => { clearTimeout(t); reject(new Error('chromium exited: ' + buf.slice(0, 300))); });
-    });
+      proc.stderr!.on('data', (d) => { if (buf.length > 20000) return; buf += d; const m = /DevTools listening on (ws:\/\/\S+)/.exec(buf); if (m) resolve(m[1]); });
+      proc.on('exit', () => reject(new Error('chromium exited: ' + buf.slice(0, 300))));
+    }), 'devtools endpoint');
     const f = join(dir, 'p.html');
     writeFileSync(f, html);
     const ws = new WebSocket(wsUrl);
-    await new Promise<void>((res, rej) => { ws.onopen = () => res(); ws.onerror = () => rej(new Error('ws connect failed')); });
+    await bounded(new Promise<void>((res, rej) => { ws.onopen = () => res(); ws.onerror = () => rej(new Error('ws connect failed')); }), 'websocket open');
     let id = 0;
     const pending = new Map<number, (r: any) => void>();
     const loaded: Array<() => void> = [];
@@ -77,8 +84,7 @@ async function measure(html: string, width: number, dark: boolean): Promise<Meas
       if (msg.id && pending.has(msg.id)) { pending.get(msg.id)!(msg); pending.delete(msg.id); }
       if (msg.method === 'Page.loadEventFired') loaded.splice(0).forEach((fn) => fn());
     };
-    // Every wait is bounded, so a hung or crashed Chromium rejects and the finally below always runs.
-    const bounded = <T,>(p: Promise<T>, what: string) => Promise.race([p, new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timed out: ' + what)), 20000).unref())]);
+    // Every wait above and below is bounded by the one deadline, so the finally always runs.
     ws.onclose = () => { for (const fn of pending.values()) fn({ error: { message: 'socket closed' } }); pending.clear(); };
     const send = (method: string, params: object = {}, sessionId?: string) => bounded(new Promise<any>((res, rej) => {
       const i = ++id; pending.set(i, (m) => (m.error ? rej(new Error(method + ': ' + m.error.message)) : res(m.result)));
@@ -122,7 +128,7 @@ describe.skipIf(!browser)('#3576 consent card geometry (real Chromium)', () => {
       expect(m.bad).toEqual([]);
       expect(m.doc).toBeLessThanOrEqual(m.vw);
       for (const v of Object.values(over)) for (const s of [v].flat()) expect(m.text.toLowerCase()).toContain(String(s).replace(/^https:\/\//, '').replace(/\/cb$/, '').toLowerCase()); // the anchor shows the host, which the URL parser lowercases
-    });
+    }, TEST_TIMEOUT_MS);
   }
   it('a long notice value (template level) wraps inside the card and stays fully present', async () => {
     const notice = 'R'.repeat(80);
@@ -131,7 +137,36 @@ describe.skipIf(!browser)('#3576 consent card geometry (real Chromium)', () => {
     expect(m.bad).toEqual([]);
     expect(m.doc).toBeLessThanOrEqual(m.vw);
     expect(m.text).toContain(notice);
-  });
+  }, TEST_TIMEOUT_MS);
+});
+
+// Failure cleanup, proved without a real browser: a stub that announces a DevTools endpoint which
+// accepts the TCP connection but never completes the WebSocket upgrade, then sleeps. The run must
+// reject at its deadline AND leave neither the stub's process group nor its temp profile dir behind.
+describe.skipIf(process.platform === 'win32')('#3576 a stalled browser is reaped on failure', () => {
+  it('rejects at the deadline and leaves no process or temp dir', async () => {
+    const sockets: Socket[] = [];
+    const srv = createServer((sk) => { sockets.push(sk); });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
+    const port = (srv.address() as { port: number }).port;
+    const dir = mkdtempSync(join(tmpdir(), 'consent3576-stub-'));
+    const stub = join(dir, 'stub.sh');
+    const pidFile = join(dir, 'pid');
+    writeFileSync(stub, `#!/bin/sh\necho $$ > '${pidFile}'\necho 'DevTools listening on ws://127.0.0.1:${port}/devtools/browser/x' >&2\nsleep 300 &\nwait\n`);
+    chmodSync(stub, 0o755);
+    const tempDirs = () => readdirSync(tmpdir()).filter((n) => /^consent3576-[A-Za-z0-9]{6}$/.test(n)).sort();
+    const before = tempDirs();
+    try {
+      await expect(measure(page({}), 390, false, { bin: stub, deadlineMs: 1500 })).rejects.toThrow(/timed out: websocket open/);
+      const pid = Number(readFileSync(pidFile, 'utf8').trim());
+      expect(() => process.kill(pid, 0)).toThrow(); // the stub (group leader) is gone
+      expect(tempDirs()).toEqual(before);
+    } finally {
+      sockets.forEach((sk) => sk.destroy());
+      srv.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, TEST_TIMEOUT_MS);
 });
 
 describe('#3576 hostile values are escaped, not interpreted', () => {
