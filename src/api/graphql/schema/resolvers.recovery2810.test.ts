@@ -10,14 +10,22 @@
  *    unmasked), so every call pays the masked edge scan twice.
  * Budget fixture sizes are the local repro scale; the production trace calibrates
  * the reported page's own scale (gate: Xabat 2026-11-04, deliverable 3).
+ *
+ * #3454 (review dispositions): the masking-exactness describe carries the R4 pin
+ * (a deleted-comment endpoint in a write-gated memory) and the real hidden-edge id
+ * in the restricted soft-deleted-memory case; the snapshot describe pins the two
+ * review P1s — every statement of a call reads ONE RepeatableRead snapshot, so a
+ * tombstone, endpoint or memory delete committing between discovery and the masked
+ * page cannot tear the answer.
  */
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Prisma } from '../../../generated/prisma/index.js';
+import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
+import { generateId } from '../../../lib/id.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 
 const Q = resolvers.Query as unknown as Record<string, (p: unknown, a: any, c: Context) => Promise<any>>;
+const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: any, c: Context) => Promise<any>>;
 
 /** Median-of-N wall clock: robust to a single slow run on a shared CI box. */
 async function medianMs(times: number, fn: () => Promise<unknown>): Promise<number> {
@@ -28,6 +36,31 @@ async function medianMs(times: number, fn: () => Promise<unknown>): Promise<numb
     samples.push(Date.now() - start);
   }
   return samples.sort((a, b) => a - b)[Math.floor(times / 2)];
+}
+
+/**
+ * The #3454 snapshot seam. The resolver's only test surface is its ctx.db: wrap it so
+ * every raw statement — on the client itself, or inside the ONE interactive transaction
+ * the resolver opens — is forwarded verbatim and, once it resolves, reported to
+ * `afterStatement` with its SQL text. No production hook exists.
+ */
+function seamDb(afterStatement: (sql: string) => Promise<void> | void): typeof db {
+  const wrap = (client: any): any => new Proxy(client, {
+    get(target, prop) {
+      if (prop === '$transaction') return (arg: any, ...opts: any[]) =>
+        typeof arg === 'function'
+          ? target.$transaction(async (tx: any) => arg(wrap(tx)), ...opts)
+          : target.$transaction(arg, ...opts);
+      if (prop === '$queryRaw') return async (sql: any, ...rest: any[]) => {
+        const out = await target.$queryRaw(sql, ...rest);
+        await afterStatement(String(sql?.sql ?? sql));
+        return out;
+      };
+      const value = Reflect.get(target, prop, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  return wrap(db);
 }
 
 /** A prod-scale-shaped corpus: deep locs, tombstones, cross-memory endpoints, edge fan-out. */
@@ -115,19 +148,17 @@ describe('recoveryEdges bounded work (#2810)', () => {
   }, 120_000);
 
   it('derives the page and its total from ONE masked statement', async () => {
-    const raw = vi.spyOn(db, '$queryRaw');
-    try {
-      await Q.recoveryEdges({}, { memoryRef: memoryId, edgeIds: batchIds.slice(0, 3), limit: 3 }, ctx);
-      // The masked statement is the one carrying the visibility predicate and the window
-      // total (WITH page AS — endpoints joined by primary key with the masking predicate as
-      // a filter, count(*) OVER () riding the page); endpoint identity is fetched by plain
-      // key-lookup statements that compute no visibility, and are not the masked scan.
-      const masked = raw.mock.calls.filter((call) => {
-        const sql = (call[0] as Prisma.Sql)?.sql ?? '';
-        return sql.includes('WITH page AS');
-      });
-      expect(masked).toHaveLength(1);
-    } finally { raw.mockRestore(); }
+    // Observed through the #3454 seam: the masked statement now runs inside the
+    // resolver's one interactive transaction, so a ctx.db spy would see nothing.
+    const statements: string[] = [];
+    await Q.recoveryEdges({}, { memoryRef: memoryId, edgeIds: batchIds.slice(0, 3), limit: 3 },
+      { ...ctx, db: seamDb((sql) => { statements.push(sql); }) });
+    // The masked statement is the one carrying the visibility predicate and the window
+    // total (WITH page AS — endpoints joined by primary key with the masking predicate as
+    // a filter, count(*) OVER () riding the page); endpoint identity is fetched by plain
+    // key-lookup statements that compute no visibility, and are not the masked scan.
+    const masked = statements.filter((sql) => sql.includes('WITH page AS'));
+    expect(masked).toHaveLength(1);
   });
 });
 
@@ -150,10 +181,11 @@ describe('recoveryEdges masking stays exact (#2810)', () => {
     const hub = await node('hub', { deletedAt: null });
     const goneMemory = await db.memory.create({ data: { class: 'knowledge', name: 'Gone', urn: 'exact2810.example:gone', organizationId: (await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).organizationId, deletedAt: new Date() } });
     const goneEndpoint = await db.node.create({ data: { memoryId: goneMemory.id, loc: 'p', name: 'P', content: 'x', nodeType: 'info' } });
-    await edge(hub.id, goneEndpoint.id, 'hub:to:gone');
+    // #3454 review P3: name the HIDDEN edge's own id — a fabricated id probed nothing.
+    const hidden = await edge(hub.id, goneEndpoint.id, 'hub:to:gone');
     const retained = await node('z');
     const visible = await edge(hub.id, retained.id, 'hub:to:z');
-    for (const args of [{ limit: 200 }, { edgeIds: [visible.id, `e-${goneEndpoint.id}`], limit: 200 }] as const) {
+    for (const args of [{ limit: 200 }, { edgeIds: [visible.id, hidden.id], limit: 200 }] as const) {
       const page = await Q.recoveryEdges({}, { memoryRef: memoryId, ...args }, ctx());
       expect(page.total).toBe(1);
       expect(page.items.map((item: any) => item.id)).toEqual([visible.id]);
@@ -172,5 +204,130 @@ describe('recoveryEdges masking stays exact (#2810)', () => {
     // total there, and the exact total must still be reported (#2810 slice 2).
     const pastEnd = await Q.recoveryEdges({}, { memoryRef: memoryId, limit: 1, offset: 3 }, ctx());
     expect(pastEnd).toEqual({ total: 3, items: [] });
+  });
+
+  // #3454 pin (Ralion §10 P3-1, mutant R4): with NO ordinary tombstone in the memory,
+  // a deleted-comment endpoint is hidden by the readable/recoverable narrowing alone and
+  // the comment exclusion in ok()'s deleted-endpoint branch goes unproven — that mutant
+  // survived 62/62 at 28c28243 while main killed it. ONE ordinary (non-comment) tombstone
+  // in the same memory arms the gate (the memory holds a recoverable endpoint), so only
+  // the node_type <> 'comment' check keeps the deleted comment out of the edge list.
+  it('keeps an independently deleted comment endpoint out of recoveryEdges in a write-gated memory', async () => {
+    // A canonical id: the comment path resolves targetRef, which rejects loc-shaped ids.
+    const hub = await node('hub', { deletedAt: null, id: generateId() });
+    const ordinary = await node('ordinary', { nodeType: 'info' });
+    // A comment through the real comment path — the schema's COMMENT_INVARIANT trigger
+    // forbids raw comment-shaped node rows (only the comment path creates them).
+    const comment = await M.createComment({}, { targetRef: hub.id, body: 'removed feedback' }, ctx());
+    await M.deleteComment({}, { commentRef: comment.id, expectedRevision: 1 }, ctx());
+    const visible = await edge(hub.id, ordinary.id, 'hub:to:ordinary');
+    await edge(hub.id, comment.id, 'hub:to:note');
+    const page = await Q.recoveryEdges({}, { memoryRef: memoryId, limit: 200 }, ctx());
+    expect(page.total).toBe(1);
+    expect(page.items.map((item: any) => item.id)).toEqual([visible.id]);
+    expect(page.items[0].target.deletedAt).toBeTruthy();
+  });
+});
+
+describe('recoveryEdges answers ONE snapshot (#3454 review P1s)', () => {
+  let memoryId: string, writerId: string;
+  const ctx = (): Context => ({ db, userId: writerId, roles: [] });
+  beforeEach(async () => {
+    await cleanDb(db);
+    const org = await db.organization.create({ data: { name: 'Snap2810', urn: 'snap2810.example' } });
+    writerId = (await db.user.create({ data: { handle: 'snap2810-writer' } })).id;
+    await db.orgMember.create({ data: { organizationId: org.id, userId: writerId, role: 'CONTRIBUTOR' } });
+    memoryId = (await db.memory.create({ data: { organizationId: org.id, class: 'knowledge', name: 'Snap', urn: 'snap2810.example:corpus' } })).id;
+  });
+  const node = (loc: string, extra: Record<string, unknown> = {}) => db.node.create({ data: {
+    id: `s-${loc.replace(/[^a-z0-9]/gi, '-')}`, memoryId, loc, name: loc, content: 'x', deletedAt: null, ...extra } });
+  const edge = (sourceId: string, targetId: string, loc: string) =>
+    db.edge.create({ data: { memoryId, sourceId, targetId, loc } });
+
+  /**
+   * Runs one recoveryEdges call while `mutate` commits on another connection the moment
+   * the tombstone statement resolves — the exact window the two review P1s lived in
+   * (between endpoint/tombstone discovery and the masked page). `fired` proves the window
+   * was entered; a run that silently skipped the interleave would otherwise read as a pass.
+   * Asserts one-snapshot semantics: the in-flight call answers the state it started from,
+   * never a mixture of pre- and post-commit views.
+   */
+  async function inFlight(mutate: () => Promise<unknown>) {
+    let fired = false;
+    const seam = seamDb(async (sql) => {
+      if (!fired && sql.includes('deleted_at IS NOT NULL AND memory_id = ANY')) {
+        fired = true;
+        await mutate();
+      }
+    });
+    const page = await Q.recoveryEdges({}, { memoryRef: memoryId, limit: 200 }, { ...ctx(), db: seam });
+    return { page, fired };
+  }
+
+  it('does not tear the page when an endpoint is tombstoned mid-call', async () => {
+    const hub = await node('hub');
+    const victim = await node('victim');
+    const kept = await node('kept');
+    const eVictim = await edge(hub.id, victim.id, 'hub:to:victim');
+    const eKept = await edge(hub.id, kept.id, 'hub:to:kept');
+    const before = await Q.recoveryEdges({}, { memoryRef: memoryId, limit: 200 }, ctx());
+    expect(before.total).toBe(2);
+    // Pre-#3454 this interleaving produced a MIXTURE: the masked page saw the fresh
+    // tombstone while the verdict sets were stale, so the edge vanished mid-call — an
+    // answer no consistent snapshot ever exhibited. One snapshot keeps it whole.
+    const { page, fired } = await inFlight(() => db.node.update({ where: { id: victim.id }, data: { deletedAt: new Date() } }));
+    expect(fired).toBe(true);
+    expect(page.total).toBe(2);
+    expect(page.items.map((item: any) => item.id).sort()).toEqual([eKept, eVictim].map((e) => e.id).sort());
+    expect(page.items.find((item: any) => item.id === eVictim.id)!.target.deletedAt).toBe(null);
+    // The delete did land: a fresh call reports the endpoint as deleted — listed, because
+    // the memory is write-gated for the caller (an ordinary tombstone arms recoverable).
+    const after = await Q.recoveryEdges({}, { memoryRef: memoryId, limit: 200 }, ctx());
+    expect(after.total).toBe(2);
+    expect(after.items.find((item: any) => item.id === eVictim.id)!.target.deletedAt).toBeTruthy();
+  });
+
+  it('does not change the in-flight page when an ancestor is tombstoned mid-call', async () => {
+    const hub = await node('hub');
+    const anc = await node('anc');
+    const child = await node('anc:child');
+    const eAnc = await edge(hub.id, anc.id, 'hub:to:anc');
+    await edge(hub.id, child.id, 'hub:to:child');
+    const before = await Q.recoveryEdges({}, { memoryRef: memoryId, limit: 200 }, ctx());
+    expect(before.total).toBe(2);
+    // The ancestor half of the review P1: badIds and the page must come from ONE
+    // snapshot, so a tombstone committing between them cannot produce a page that is
+    // neither the pre- nor the post-commit view.
+    const { page, fired } = await inFlight(() => db.node.update({ where: { id: anc.id }, data: { deletedAt: new Date() } }));
+    expect(fired).toBe(true);
+    expect(page).toEqual(before);
+    // Fresh calls apply the ancestor mask: the live child under the tombstoned ancestor
+    // disappears; the tombstoned ancestor itself is listed as a deleted endpoint.
+    const after = await Q.recoveryEdges({}, { memoryRef: memoryId, limit: 200 }, ctx());
+    expect(after.total).toBe(1);
+    expect(after.items[0].id).toBe(eAnc.id);
+    expect(after.items[0].target.deletedAt).toBeTruthy();
+  });
+
+  it('does not change the in-flight page when an endpoint memory is deleted mid-call', async () => {
+    const hub = await node('hub');
+    const kept = await node('kept');
+    const other = await db.memory.create({ data: { class: 'knowledge', name: 'Other', urn: 'snap2810.example:other', organizationId: (await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).organizationId } });
+    const endpoint = await db.node.create({ data: { memoryId: other.id, loc: 'p', name: 'P', content: 'x', nodeType: 'info' } });
+    await edge(hub.id, endpoint.id, 'hub:to:other');
+    const eKept = await edge(hub.id, kept.id, 'hub:to:kept');
+    const before = await Q.recoveryEdges({}, { memoryRef: memoryId, limit: 200 }, ctx());
+    expect(before.total).toBe(2);
+    // The memory half of the review P1: the endpoint memory's liveness is read at the
+    // same snapshot as the page, so a delete committing between the readable verdicts
+    // and the masked scan cannot tear the answer.
+    const { page, fired } = await inFlight(() => db.memory.update({ where: { id: other.id }, data: { deletedAt: new Date() } }));
+    expect(fired).toBe(true);
+    expect(page).toEqual(before);
+    // Fresh calls conceal the deleted memory's endpoints entirely (the shared gate
+    // excludes soft-deleted memories, so readable never admits it again).
+    const after = await Q.recoveryEdges({}, { memoryRef: memoryId, limit: 200 }, ctx());
+    expect(after.total).toBe(1);
+    expect(after.items.map((item: any) => item.id)).toEqual([eKept.id]);
   });
 });
