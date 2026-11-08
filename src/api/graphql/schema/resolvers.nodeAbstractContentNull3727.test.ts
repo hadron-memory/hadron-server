@@ -171,11 +171,51 @@ describe('#3727 encrypted update — the changed cell', () => {
     // must move the hash to the NEW plaintext's — never-touched would leave
     // the old value, and hashing ciphertext would give anything but this.
     await update({ abstract: 'second summary', content: 'fresh body' });
-    expect((await raw()).abstractOriginHash).toBe(computeContentHash('fresh body'));
+    const written = await raw();
+    expect(written.abstractOriginHash).toBe(computeContentHash('fresh body'));
+    // #3752: at rest BOTH columns are ciphertext and both round-trip, so a
+    // regression that stored plaintext or dropped a column cannot pass.
+    expect(isCiphertext(written.abstract!)).toBe(true);
+    expect(isCiphertext(written.content!)).toBe(true);
+    expect((await logical()).abstract).toBe('second summary');
+    expect((await logical()).content).toBe('fresh body');
+  });
+
+  it('RED (#3752): { abstract:null, content:null } in one call clears both columns and the hash', async () => {
+    await update({ abstract: null, content: null });
+    const row = await raw();
+    expect(row.abstract).toBeNull();
+    expect(row.content).toBeNull();
+    expect(row.abstractOriginHash).toBeNull();
+    const l = await logical();
+    expect(l.abstract).toBeNull();
+    expect(l.content).toBeNull();
+  });
+
+  it('RED (#3752): { abstract:null, content:"new body" } clears the abstract and hash, stores the new body as ciphertext', async () => {
+    await update({ abstract: null, content: 'new body' });
+    const row = await raw();
+    expect(row.abstract).toBeNull();
+    // A cleared abstract has no origin: the hash goes with it even though the
+    // content changed in the same write (cor:dmo:020:03).
+    expect(row.abstractOriginHash).toBeNull();
+    expect(isCiphertext(row.content!)).toBe(true);
+    expect((await logical()).content).toBe('new body');
+  });
+
+  it('RED (#3752): { content:null, abstract:"kept" } clears content, stores the abstract as ciphertext', async () => {
+    await update({ content: null, abstract: 'kept summary' });
+    const row = await raw();
+    expect(row.content).toBeNull();
+    expect(isCiphertext(row.abstract!)).toBe(true);
+    expect((await logical()).abstract).toBe('kept summary');
   });
 
   it('CONTROL: an unrelated update preserves abstract, content and hash', async () => {
     const before = await raw();
+    expect(before.abstract).not.toBeNull(); // #3752: a null seed would make the checks below null === null
+    expect(before.content).not.toBeNull();
+    expect(before.abstractOriginHash).not.toBeNull();
     await update({ name: 'Renamed' });
     const row = await raw();
     expect(row.abstract).toBe(before.abstract);
@@ -190,6 +230,9 @@ describe('#3727 plain GraphQL control — already clears, must stay', () => {
     // after the clears both columns are NULL, and a null-to-null comparison
     // cannot tell preservation from clearing (BLIND on bf3828e9).
     const seeded = await raw();
+    expect(seeded.abstract).not.toBeNull(); // #3752: non-null seed guard
+    expect(seeded.content).not.toBeNull();
+    expect(seeded.abstractOriginHash).not.toBeNull();
     await update({ name: 'Renamed plain' });
     const preserved = await raw();
     expect(preserved.abstract).toBe(seeded.abstract);
@@ -217,6 +260,47 @@ describe('#3727 entry points', () => {
     );
     expect((await raw()).abstract).toBeNull();
     expect((await raw()).abstractOriginHash).toBeNull();
+  });
+
+  it('RED (#3752): the memoryId+loc selector clears content; the omitting control preserves it', async () => {
+    const before = await raw();
+    await gql(
+      'mutation($input:UpdateNodeInput!){updateNode(input:$input){id}}',
+      { input: { memoryId: memory.id, loc: node.loc, name: 'Selector rename' } },
+    );
+    expect((await raw()).content).toBe(before.content);
+    expect((await raw()).abstract).toBe(before.abstract);
+    await gql(
+      'mutation($input:UpdateNodeInput!){updateNode(input:$input){id}}',
+      { input: { memoryId: memory.id, loc: node.loc, content: null } },
+    );
+    const row = await raw();
+    expect(row.content).toBeNull();
+    expect(row.abstract).toBe(before.abstract); // the omitted abstract is untouched
+    expect((await logical()).abstract).toBe(OLD_ABSTRACT);
+    expect(row.abstractOriginHash).toBe(before.abstractOriginHash);
+  });
+
+  it('RED (#3752): tombstone resurrection — explicit content:null clears the old body', async () => {
+    await db.node.update({ where: { id: node.id }, data: { deletedAt: new Date(), deletedBy: 'test' } });
+    await gql(
+      'mutation($input:CreateNodeInput!){createNode(input:$input){id}}',
+      { input: { memoryId: memory.id, loc: node.loc, name: 'Back', abstract: 'revived summary', content: null } },
+    );
+    const row = await raw();
+    expect(row.deletedAt).toBeNull();
+    expect(row.content).toBeNull(); // the tombstone's body is cleared, not carried over
+    expect((await logical()).abstract).toBe('revived summary');
+  });
+
+  it('CONTROL (#3752): tombstone resurrection that omits content keeps the tombstone body', async () => {
+    await db.node.update({ where: { id: node.id }, data: { deletedAt: new Date(), deletedBy: 'test' } });
+    await gql(
+      'mutation($input:CreateNodeInput!){createNode(input:$input){id}}',
+      { input: { memoryId: memory.id, loc: node.loc, name: 'Back', abstract: 'revived summary' } },
+    );
+    expect((await raw()).deletedAt).toBeNull();
+    expect((await logical()).content).toBe(OLD_CONTENT);
   });
 
   it('RED: tombstone resurrection — explicit null clears the old field, omission preserves it', async () => {
@@ -258,6 +342,21 @@ describe('#3727 entry points', () => {
     expect(decryptNodeFieldsWithKey(withAbstract, key).abstract).toBe('seeded');
   });
 
+  it('RED (#3752): fresh create — content:null and omitted content both store SQL NULL, a string stores ciphertext', async () => {
+    const created = async (extra: Record<string, unknown>) => {
+      const out = await gql<{ createNode: { id: string } }>(
+        'mutation($input:CreateNodeInput!){createNode(input:$input){id}}',
+        { input: { memoryId: memory.id, loc: `fresh-c-${generateId()}`, name: 'FreshC', ...extra } },
+      );
+      return db.node.findUniqueOrThrow({ where: { id: out.createNode.id } });
+    };
+    expect((await created({ content: null })).content).toBeNull();
+    expect((await created({})).content).toBeNull();
+    const withContent = await created({ content: 'seeded body' });
+    expect(isCiphertext(withContent.content!)).toBe(true);
+    expect(decryptNodeFieldsWithKey(withContent, key).content).toBe('seeded body');
+  });
+
   it('CONTROL: a create onto a live loc still conflicts', async () => {
     const code = await gql(
       'mutation($input:CreateNodeInput!){createNode(input:$input){id}}',
@@ -282,6 +381,35 @@ describe('#3727 entry points', () => {
     const loc2 = `upsert-${generateId()}`;
     const insertedOmit = await writeNodeCoreUpsert({}, loc2);
     expect((await db.node.findUniqueOrThrow({ where: { id: insertedOmit.id } })).abstract).toBeNull();
+  });
+
+  it('RED (#3752): the internal upsert core — existing-row content:null clears, absent-row null stores SQL NULL, omission preserves', async () => {
+    // Omission control first, while the seeded body is in place.
+    const before = await raw();
+    expect(before.content).not.toBeNull();
+    await writeNodeCoreUpsert({ content: undefined, name: 'Upsert omit' });
+    expect((await raw()).content).toBe(before.content);
+    // Existing row (the update arm of upsert).
+    await writeNodeCoreUpsert({ content: null });
+    expect((await raw()).content).toBeNull();
+    // Absent row (the insert arm).
+    const inserted = await writeNodeCoreUpsert({ content: null }, `upsert-c-${generateId()}`);
+    expect((await db.node.findUniqueOrThrow({ where: { id: inserted.id } })).content).toBeNull();
+  });
+
+  it('RED (#3752): the install door content:null clears on the install memory; omission preserves', async () => {
+    const f = await installFixture();
+    const M = resolvers.Mutation as Record<string, (a: unknown, b: { input: Record<string, unknown> }, c: Context) => Promise<unknown>>;
+    const install = { appRef: f.appId, agentRef: f.agentId };
+    const seeded = await db.node.findUniqueOrThrow({ where: { id: f.nodeId } });
+    expect(seeded.content).not.toBeNull();
+    await M.updateNode(null, { input: { install, loc: 'source', name: 'Install rename' } }, f.ctx);
+    expect((await db.node.findUniqueOrThrow({ where: { id: f.nodeId } })).content).toBe(seeded.content);
+    await M.updateNode(null, { input: { install, loc: 'source', content: null } }, f.ctx);
+    const after = await db.node.findUniqueOrThrow({ where: { id: f.nodeId } });
+    expect(after.content).toBeNull();
+    expect(after.abstract).toBe(seeded.abstract); // the omitted abstract is untouched
+    expect(after.abstractOriginHash).toBe(seeded.abstractOriginHash);
   });
 
   it('RED: the install door update clears on the install memory; a refusal leaves no artifacts', async () => {
