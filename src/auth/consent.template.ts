@@ -103,6 +103,11 @@ export const CONSENT_TEMPLATE = `<!doctype html>
       padding: 1.5rem 2rem;
     }
     h1 { font-size: 1.25rem; margin: 0 0 1rem; }
+    /* #3576 — long unbroken values (client name, scope, resource, redirect, notice) wrap
+       inside the card at any character, with the complete value kept. Wrapping only:
+       never truncate, clip or hide an identity or permission value on a consent screen.
+       'anywhere' (not 'break-word') so the min-content width shrinks too. */
+    h1, p, code, .warn { overflow-wrap: anywhere; }
     ul { padding-left: 1.25rem; margin: 0.5rem 0 1.25rem; }
     li { margin: 0.25rem 0; }
     code { background: var(--code-bg); padding: 0.1em 0.35em; border-radius: 3px; font-size: 0.9em; }
