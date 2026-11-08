@@ -198,10 +198,16 @@ describe('GET /ready (#2998, cor:api:270:01)', () => {
   it('a /ready probe in flight when shutdown begins answers stopping, whatever the database says', async () => {
     for (const outcome of ['passes', 'fails'] as const) {
       let settleQuery!: () => void;
+      // #3019: the stub reports when the probe's query has really started, so the
+      // test never guesses (a fixed sleep) that the request is past the first
+      // stopping check and inside the probe.
+      let queryStarted!: () => void;
+      const started = new Promise<void>((resolve) => (queryStarted = resolve));
       const deferred: HealthDb = {
         $queryRaw: (() =>
           new Promise<void>((resolve, reject) => {
             settleQuery = outcome === 'passes' ? () => resolve() : () => reject(new Error('P1001'));
+            queryStarted();
           })) as HealthDb['$queryRaw'],
       };
       const r = tracker();
@@ -209,7 +215,7 @@ describe('GET /ready (#2998, cor:api:270:01)', () => {
       await settle();
       const base = await serve(deferred, r, 5_000);
       const pending = get(base, '/ready');
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await started;
       r.markStopping();
       settleQuery();
       const ready = await pending;

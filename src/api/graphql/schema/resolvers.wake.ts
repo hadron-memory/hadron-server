@@ -112,9 +112,10 @@ const acceptsStop = (accepts: readonly string[] | null | undefined): boolean => 
 
 export async function dueWakesFor(
   requestCtx: Context,
-  a: { appRef: string; workerRefs?: string[] | null; first?: number | null; after?: string | null; accepts?: string[] | null; instruction?: ActInstruction | null },
+  a: { appRef: string; workerRefs?: string[] | null; first?: number | null; after?: string | null; accepts?: string[] | null; instruction?: ActInstruction | null; preview?: boolean | null },
 ) {
   const key = appKeyCaller(requestCtx);
+  const preview = a.preview === true;
   // Live platform roles: a manager arm taken from an old credential would widen the worker set (Diego P2-1).
   const ctx = (await liveCaller(requestCtx)) ?? (() => { throw taskError('APP_NOT_FOUND', 'App not found.'); })();
   let app: TaskApp;
@@ -140,6 +141,8 @@ export async function dueWakesFor(
   const result = await computeDueWakes({
     ctx, app, reader, requester: key ? { appKeyId: key.appKeyId } : { userId: reader.userId! },
     workerIds: only, first: a.first, after: a.after, authorize, workerWhere, acceptsStop: acceptsStop(a.accepts),
+    // #3455: the no-spend read, bounded by the caller's own reading rights (never the platform's).
+    ...(preview ? { preview: true, callerBounded: true } : {}),
     onWorkersSelected: ids => { selectedWorkerIds = ids; },
   });
 
@@ -154,7 +157,8 @@ export async function dueWakesFor(
   // Only a call that read the lane from its start to its end: no workerRefs, no `after` (a tail page skipped the prefix) and no
   // next page (#2432 BLIND, LOCAL). A lane larger than one page (max 200) cannot declare; the consumer asks for `first: 200`.
   const wholeLane = !(a.workerRefs && a.workerRefs.length > 0) && !a.after && result.nextAfter === null;
-  if (acceptsStop(a.accepts) && wholeLane) await declareStopLane(ctx, app, key ? { hostId: keyHostId } : reader.manager ? { hostId: null } : null);
+  // #3455: a preview declares no lane: a status look is not a serving consumer.
+  if (!preview && acceptsStop(a.accepts) && wholeLane) await declareStopLane(ctx, app, key ? { hostId: keyHostId } : reader.manager ? { hostId: null } : null);
   // The budget notice is posted by the platform itself, once a day per App, whoever's read triggered it: a person's or an
   // App key's (#1791, cor:agt:080:15). Posted only once an App key's answer is decided: a read that is refused posts nothing (Rook #1799).
   if (result.budgetNotice) await postBudgetNotice(ctx, app, result.budgetNotice);
@@ -193,7 +197,9 @@ export async function dueWakesFor(
       unread: w.wake.unread,
       unreadMentions: w.wake.unreadMentions,
       availability: w.availability,
-      proof: w.proof,
+      // #3455: a preview holds no reservation, so its proof is empty and verifies as nothing: acknowledging it would still record a
+      // delivery receipt and charge the day's budget. The field stays non-null for installed clients.
+      proof: preview ? '' : w.proof,
       tickText: w.tickText,
       anchorAt: w.timing.anchorAt,
       deliverAfter: w.timing.deliverAfter,
