@@ -150,3 +150,22 @@ for (const [value, expectedNames, limit] of [[true, ['e1', 'e2'], 2], [false, ['
     });
   }
 }
+
+/**
+ * #3675 item 3: the interception is gated on the two ANN statements. Any other in-transaction `$queryRaw` must THROW
+ * rather than be answered `[]` (or labelled 'chunk'), so a second in-transaction query added to vectors.ts can never be
+ * swallowed silently. `SET LOCAL hnsw.ef_search` runs through `$executeRawUnsafe` and is never intercepted.
+ */
+describe('#3675: probe() refuses unexpected in-transaction SQL', () => {
+  for (const shortfall of [true, false]) {
+    it(`shortfall ${shortfall}: a second, unrelated tx.$queryRaw throws instead of returning silently`, async () => {
+      const { handle, seen } = probe(shortfall);
+      await expect((handle.$transaction as any)(async (tx: any) => {
+        await tx.$executeRawUnsafe('SET LOCAL hnsw.ef_search = 40');
+        return tx.$queryRaw`SELECT 1 AS one`;
+      })).rejects.toThrow(/^unexpected in-transaction SQL: SELECT 1 AS one/);
+      expect(seen.annIntercepted).toBe(0);
+      expect(seen.annKind).toBeNull();
+    });
+  }
+});
