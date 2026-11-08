@@ -12,7 +12,7 @@
  *   4. A manager sees K's events only in memories they can read; naming a memory still needs READ
  *      (MEMORY_NOT_FOUND). It does not restore the broad unfiltered feed.
  *   5. K filtering by itself sees its own events.
- * Not pinned (open for Holger): K's events in a memory K can no longer read.
+ * K's own events in a memory K can no longer read are hidden (Holger, AT0.5537 option 1).
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { createHash } from 'node:crypto';
@@ -260,11 +260,13 @@ describe('#2944 blind P3 (#3714): nodeId and loc follow the same key rules as me
 
 describe('#2944 item 5: K filtering by itself sees its own events', () => {
   it('naming no resource, the key gets its events and no other key\'s', async () => {
-    const mine = generateId(), mineNoMem = generateId(), sibling = generateId();
+    const mine = generateId(), mineNoMem = generateId(), sibling = generateId(), mineLost = generateId();
     await db.usageEvent.createMany({ data: [
       ev({ id: mine, appKeyId: keyK, memoryId: appMem.id }),
       ev({ id: mineNoMem, appKeyId: keyK, memoryId: null }),
       ev({ id: sibling, appKeyId: keyK2, memoryId: appMem.id }),
+      // AT0.5537 option 1: K's own event in a memory K cannot read (now) stays hidden.
+      ev({ id: mineLost, appKeyId: keyK, memoryId: memB.id }),
     ] });
     expect(ids(await list({ appKey: keyK }, asKey(keyK)))).toEqual([mine, mineNoMem].sort());
     expect((await page({ appKey: keyK }, asKey(keyK))).total).toBe(2);

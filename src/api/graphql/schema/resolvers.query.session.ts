@@ -168,12 +168,21 @@ async function usageEventsWhere(
       // #2817 (cor:acl:090:01): naming no resource selects OWN ACTIVITY, never the accessible-memories
       // feed. "Named" uses the same truthiness that applies each filter below, so no request can reach
       // the resource branch without a resource filter. `type` and the window narrow either scope.
-      // #2944: a key filter is the one exception. K reading itself gets all of its own events (ruling 0245
-      // item 3); a manager falls through to the resource path below with no resource named, which bounds K's
+      // #2944: a key filter is the one exception. K reading itself gets its own events in the memories it can read
+      // plus those attributed to none (ruling 0245 item 3, bounded by item 4 per AT0.5537); a manager falls through to the resource path below with no resource named, which bounds K's
       // events to every memory the manager can read (items 1 and 4) and never restores the broad feed, since
       // only a key-filtered read reaches it.
       if (!memoryId && !nodeId && !loc && keyFilter?.self) {
-        return { ...windowFilter, ...(type ? { type } : {}), ...keyWhere };
+        // AT0.5537 option 1 (hide): K's own events only in memories K can read NOW, plus its events attributed to
+        // no memory (those name no memory, so they reveal none). An event in a memory K has lost is hidden, as
+        // item 4 requires; the scope narrows, never widens.
+        const readable = await getAccessibleMemoryIds(ctx);
+        return {
+          ...windowFilter,
+          ...(type ? { type } : {}),
+          ...keyWhere,
+          ...(readable !== null ? { OR: [{ memoryId: { in: readable } }, { memoryId: null }] } : {}),
+        };
       }
       if (!memoryId && !nodeId && !loc && !keyFilter) {
         return {
