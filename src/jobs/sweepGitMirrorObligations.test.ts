@@ -115,9 +115,50 @@ let commands:string[][];
 type DiagnosticSink = (record: Record<string, unknown>) => void;
 const stderrSink: DiagnosticSink = record => { process.stderr.write(`[#3444 diagnostic] ${JSON.stringify(record)}\n`); };
 type DiagnosticContext = { labels: Record<string, string>; counters: () => Record<string, unknown>; startedAt: number };
-/** #3444 (Refs, UNCONFIRMED flake): failure-only diagnostics around one post-tick read. RED STUB. */
-async function readOrDiagnose<T>(read: () => Promise<T>, _ctx: DiagnosticContext, _emit: DiagnosticSink = stderrSink): Promise<T> {
- return read();
+const DIAGNOSTIC_CAP = 16;
+const clip = (value: unknown) => String(value).slice(0, 80);
+const scalar = (value: unknown) => typeof value === 'number' || typeof value === 'boolean' ? value : clip(value);
+/**
+ * #3444 (Refs only; the flake stays UNCONFIRMED): run one post-tick read, and only if it throws, emit one bounded,
+ * whitelisted record of the memory's obligation rows before rethrowing the ORIGINAL error object unchanged.
+ * A passing read costs nothing: no query, no counters call, no output. Bounds per the CHECKED gate: `take: 16` with a
+ * scalar `select` (never materialize then slice), at most 16 rows and 16 command categories (argv[0] only) with cap
+ * markers, every string at most 80 characters, node ids mapped to fixture labels or `other`. A capture or sink
+ * failure is swallowed after a note naming its class only; it never replaces the original error.
+ */
+async function readOrDiagnose<T>(read: () => Promise<T>, ctx: DiagnosticContext, emit: DiagnosticSink = stderrSink): Promise<T> {
+ try {
+  return await read();
+ } catch (original) {
+  try {
+   let record: Record<string, unknown>;
+   try {
+    const found = await db.gitMirrorObligation.findMany({
+     where: { memoryId }, orderBy: { lastAttemptAt: 'asc' }, take: DIAGNOSTIC_CAP,
+     select: { nodeId: true, kind: true, state: true, errorClass: true, attempts: true, attemptSeq: true, lastAttemptAt: true },
+    });
+    record = {
+     diagnostic: 'post_tick_read_failed',
+     elapsedMs: Date.now() - ctx.startedAt,
+     counters: Object.fromEntries(Object.entries(ctx.counters()).slice(0, DIAGNOSTIC_CAP).map(([k, v]) => [clip(k), scalar(v)])),
+     rows: found.map(row => ({
+      node: clip(ctx.labels[row.nodeId] ?? 'other'), kind: clip(row.kind), state: clip(row.state),
+      errorClass: clip(row.errorClass), attempts: row.attempts, attemptSeq: clip(row.attemptSeq), lastAttemptAt: clip(row.lastAttemptAt.toISOString()),
+     })),
+     rowCapReached: found.length >= DIAGNOSTIC_CAP,
+     commandCategories: commands.slice(0, DIAGNOSTIC_CAP).map(argv => clip(argv[0])),
+     commandCount: commands.length,
+     commandCapReached: commands.length > DIAGNOSTIC_CAP,
+    };
+   } catch (captureFailure) {
+    record = { diagnostic: 'capture_failed', class: clip((captureFailure as { constructor?: { name?: string } })?.constructor?.name ?? 'unknown') };
+   }
+   emit(record);
+  } catch {
+   // The sink itself failed; the original error still wins.
+  }
+  throw original;
+ }
 }
 const retryQueued = () => new Promise<void>(resolve => { env.onRetryLock = resolve; });
 const expectQueued = (waiting: Promise<void>, running: Promise<unknown>) => Promise.race([
@@ -398,6 +439,7 @@ describe('#3056 shared row budget', () => {
 
 describe('#3151 second-refresh settlement', () => {
  it('a throwing second refresh settles its own TREE_WRITE attempt and lets the next due row proceed', async () => {
+  const startedAt=Date.now(); // #3444: the one baseline clock read the diagnostic's elapsedMs needs
   const first=await makeNode('refresh-fails'), next=await makeNode('next'), later=await makeNode('later');
   const firstDebt=await owe(first.id,{lastAttemptAt:new Date(old().getTime()-1000)});
   const nextDebt=await owe(next.id);
@@ -415,7 +457,10 @@ describe('#3151 second-refresh settlement', () => {
    return load(...args);
   });
   await tick();
-  const failed=await db.gitMirrorObligation.findFirstOrThrow({where:{memoryId,nodeId:first.id}});
+  const failed=await readOrDiagnose(()=>db.gitMirrorObligation.findFirstOrThrow({where:{memoryId,nodeId:first.id}}),{
+   labels:{[first.id]:'first',[next.id]:'next',[later.id]:'later'}, startedAt,
+   counters:()=>({firstReads,nextReads,nextAtEntry:nextAtEntry!==undefined,attemptSeqCalls:seqs.mock.calls.length}),
+  });
   expect(firstReads).toBe(2);
   expect(failed).toMatchObject({state:'FAILED',errorClass:'TREE_WRITE',attempts:2});
   expect(failed.lastAttemptAt.getTime()).toBeGreaterThan(firstDebt.lastAttemptAt.getTime());
