@@ -112,14 +112,15 @@ for (const surface of ['graphql', 'mcp'] as const) for (const worker of [false, 
 /** #3565 A: preservation of built LIST validation priority, not a general sanitizer contract. */
 for (const surface of ['graphql', 'mcp'] as const) for (const worker of [false, true]) {
   const label = `${surface} ${worker ? 'instructed' : 'person'}`;
-  it(`#3565 A ${label}: NUL-only/leading/trailing and kind precedence preserve the fixed errors and zero writes`, async () => {
-    const before = await snapshot();
-    for (const triggerId of ['\u0000', '\u0000lead', 'trail\u0000']) {
+  for (const [position, triggerId] of [['only', '\u0000'], ['leading', '\u0000lead'], ['trailing', 'trail\u0000']] as const) {
+    it(`#3565 A ${label} ${position}: NUL boundary and kind precedence preserve fixed errors and zero writes`, async () => {
+      const before = await snapshot();
       for (const triggerKind of ['SCHEDULE', 'WEBHOOK']) {
         expect((await invoke(surface, worker, { triggerKind, triggerId })).error).toEqual({
           code: 'BAD_USER_INPUT', message: 'triggerId must not contain U+0000.',
         });
       }
+      // MCP's registered schema refuses explicit null before the handler (separate pin below, Xavier90561).
       for (const triggerKind of (surface === 'graphql' ? [undefined, null] : [undefined])) {
         expect((await invoke(surface, worker, { triggerKind, triggerId })).error).toEqual({
           code: 'BAD_USER_INPUT', message: 'triggerKind is required with triggerId.',
@@ -128,22 +129,20 @@ for (const surface of ['graphql', 'mcp'] as const) for (const worker of [false, 
       expect((await invoke(surface, worker, { triggerKind: 'MANUAL', triggerId })).error).toEqual({
         code: 'BAD_USER_INPUT', message: 'triggerKind must be SCHEDULE or WEBHOOK.',
       });
-    }
-    expect(await snapshot()).toEqual(before);
-  });
-  it(`#3565 A ${label}: an unauthorized caller gets the ordinary FORBIDDEN before any malformed filter`, async () => {
-    if (worker) await db.appMember.deleteMany({ where: { appId: f.app.id, userId: f.holder.id } });
-    const userId = worker ? f.holder.id : f.stranger.id;
-    const before = await snapshot();
-    const ordinary = await invoke(surface, worker, { triggerKind: 'SCHEDULE', triggerId: f.schedule.id }, userId);
-    expect(ordinary.error?.code).toBe('FORBIDDEN');
-    for (const triggerId of ['\u0000', '\u0000lead', 'trail\u0000']) {
+      expect(await snapshot()).toEqual(before);
+    });
+    it(`#3565 A ${label} ${position}: an unauthorized caller gets ordinary FORBIDDEN before malformed filters`, async () => {
+      if (worker) await db.appMember.deleteMany({ where: { appId: f.app.id, userId: f.holder.id } });
+      const userId = worker ? f.holder.id : f.stranger.id;
+      const before = await snapshot();
+      const ordinary = await invoke(surface, worker, { triggerKind: 'SCHEDULE', triggerId: f.schedule.id }, userId);
+      expect(ordinary.error?.code).toBe('FORBIDDEN');
       for (const triggerKind of (surface === 'graphql' ? ['SCHEDULE', 'WEBHOOK', 'MANUAL', undefined, null] : ['SCHEDULE', 'WEBHOOK', 'MANUAL', undefined])) {
         expect(await invoke(surface, worker, { triggerKind, triggerId }, userId)).toEqual(ordinary);
       }
-    }
-    expect(await snapshot()).toEqual(before);
-  });
+      expect(await snapshot()).toEqual(before);
+    });
+  }
 }
 
 /**
