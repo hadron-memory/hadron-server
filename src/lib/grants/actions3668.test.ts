@@ -1,6 +1,6 @@
 /**
  * #3668 S1a — the `actions` table and its ONE writer: an idempotent deploy-time upsert from a list in the server
- * (cor:acl:140:02). The platform list is EMPTY in S1a: nothing seeds an action, and no GraphQL, MCP, CLI or run-tool
+ * (cor:acl:140:02). The platform list carried no action in S1a (S1b #3707 seeds two: see seed3707.test.ts); nothing else seeds one, and no GraphQL, MCP, CLI or run-tool
  * surface can write one. Synthetic rows below live only inside this isolated test.
  */
 import { ApolloServer } from '@apollo/server';
@@ -26,10 +26,11 @@ beforeEach(async () => { await cleanDb(db); await dropTestActions(); });
 afterAll(async () => { await dropTestActions(); });
 
 describe('the platform list', () => {
-  it('is EMPTY in S1a: no action is seeded, and the upsert with the shipped list changes nothing', async () => {
-    expect(PLATFORM_ACTIONS).toEqual([]);
+  it('#3707 (S1b): the shipped list is exactly the two seeded actions, and a repeat of the upsert changes nothing (terms: seed3707.test.ts)', async () => {
+    expect(PLATFORM_ACTIONS.map((a) => a.name).sort()).toEqual(['schedule.create', 'webhook.create']);
+    await upsertPlatformActions(db);
     const before = await db.$queryRawUnsafe<Array<{ n: number }>>(`SELECT count(*)::int AS n FROM actions`);
-    expect(await upsertPlatformActions(db)).toEqual({ inserted: 0, updated: 0, unchanged: 0 });
+    expect(await upsertPlatformActions(db)).toEqual({ inserted: 0, updated: 0, unchanged: 2 });
     expect(await db.$queryRawUnsafe(`SELECT count(*)::int AS n FROM actions`)).toEqual(before);
   });
 });
