@@ -402,6 +402,12 @@ async function runDeletionTxn(
       // Grants the target issued on connections that survive elsewhere
       // (defensive — connections are owner-keyed, so normally swept above).
       await tx.connectionGrant.deleteMany({ where: { grantedByUserId: targetUserId } });
+      // #3668 (S1a, cor:acl:140:08): erasing the ISSUER of a grant removes the link and keeps the row and its reason.
+      // BOUNDARY, deliberately NOT decided here: what becomes of a grant whose HOLDER is erased (cor:acl:140:08 Open, every
+      // holder kind: this person, or an Agent, worker or App erased with them below). Until it is ruled, the holder foreign keys
+      // are RESTRICT as INTERIM referential integrity on empty, producer-free tables (#3668 S1a, gate 6712456240): an erasure
+      // that would hard-delete a holder fails whole. No persistent grant producer may ship before that ruling and a re-gate.
+      await tx.$executeRaw`UPDATE grants SET issuer_user_id = NULL WHERE issuer_user_id = ${targetUserId}`;
       await tx.principalGrant.deleteMany({ where: { principalId: targetUserId } });
       // Shares RECEIVED and shares GRANTED (grantor-of) by the target on
       // memories that survive (shares on erased memories already cascaded).
