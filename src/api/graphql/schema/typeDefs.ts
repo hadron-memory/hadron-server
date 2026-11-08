@@ -6499,12 +6499,15 @@ export const typeDefs = `#graphql
   is created by the App's first customisation: a createNode through this target
   finds-or-creates it in the same transaction as the write, so a refused write
   leaves nothing behind. Only whoever manages the App may write through it, and
-  only while the App is live and the Agent installed. For createNode(input.install),
-  an Agent held only through an import without the App organisation's active grant
-  is refused with AGENT_ORG_GRANT_REQUIRED; an absent Agent is refused with
-  AGENT_NOT_INSTALLED. Both createNode refusals leave no node or install memory
-  behind (hrn:node:hadronmemory.com:specs:cor:agt:040:15).
-  These typed createNode refusals do not describe updateNode's lookup/write errors.
+  only while the App is live and the Agent installed. After the App participant
+  and manager gates, both createNode(input.install) and updateNode(input.install)
+  refuse an Agent held only through an import without the App organisation's
+  active grant with AGENT_ORG_GRANT_REQUIRED, and an absent Agent with
+  AGENT_NOT_INSTALLED. These refusals write nothing; physical install rows keep
+  their existing behavior (hrn:node:hadronmemory.com:specs:cor:agt:040:15).
+  updateNode never creates an install memory: an installed, licensed Agent with
+  no customisation memory answers INSTALL_MEMORY_NOT_FOUND. A detached retained
+  memory does not make an Agent installed.
   """
   input InstallTargetInput {
     appRef: String!
@@ -10962,7 +10965,8 @@ export const typeDefs = `#graphql
     """
     #2645 — edit descriptive fields using assignment authority (Proposed Editing rule,
     hrn:node:hadronmemory.com:specs:cor:agt:050:09). Owner, reporting-chain coordinator or App manager;
-    never an assignee alone or an App key. Ended tasks refuse TASK_ENDED. Omitted fields stay unchanged;
+    an assignee alone may write only properties (hrn:node:hadronmemory.com:specs:cor:agt:050:28) and references
+    (#3441, ruling 0233); any other field it names refuses the whole call TASK_NOT_OWNER. Never an App key. Ended tasks refuse TASK_ENDED. Omitted fields stay unchanged;
     empty optional fields clear, tags/requirements replace whole. An edit is not progress and clears no wake.
     Source is fixed. Event carries changed field names only (hrn:node:hadronmemory.com:specs:cor:agt:050:11).
     #3323: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.

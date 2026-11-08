@@ -94,6 +94,7 @@ describe('#3264 the helper removes exactly edges.yaml, then an empty directory',
       put(join(repo, 'a', '.b', 'keep.txt'), 'not ours');
       run(repo, 'a:b');
       expect(existsSync(join(repo, 'a', '.b', 'edges.yaml'))).toBe(false);
+      expect(existsSync(join(repo, 'a', '.b', 'keep.txt'))).toBe(true);
       expect(readFileSync(join(repo, 'a', '.b', 'keep.txt'), 'utf8')).toBe('not ours');
     });
 
@@ -103,6 +104,7 @@ describe('#3264 the helper removes exactly edges.yaml, then an empty directory',
         const repo = checkout();
         put(join(repo, 'a', dir, 'edges.yaml'), '- {id: X, rel: keep}\n');
         run(repo, `a:${atom}`);
+        expect(existsSync(join(repo, 'a', dir, 'edges.yaml'))).toBe(true);
         expect(readFileSync(join(repo, 'a', dir, 'edges.yaml'), 'utf8')).toBe('- {id: X, rel: keep}\n');
         gitIntact(repo, dir !== '.GIT');
       });
@@ -112,6 +114,8 @@ describe('#3264 the helper removes exactly edges.yaml, then an empty directory',
       const repo = checkout();
       put(join(repo, 'a', '.b', 'edges.yaml', 'inner.txt'), 'inner');
       run(repo, 'a:b');
+      expect(lstatSync(join(repo, 'a', '.b', 'edges.yaml')).isDirectory()).toBe(true);
+      expect(existsSync(join(repo, 'a', '.b', 'edges.yaml', 'inner.txt'))).toBe(true);
       expect(readFileSync(join(repo, 'a', '.b', 'edges.yaml', 'inner.txt'), 'utf8')).toBe('inner');
     });
 
@@ -123,6 +127,7 @@ describe('#3264 the helper removes exactly edges.yaml, then an empty directory',
       mkdirSync(join(repo, 'a'), { recursive: true });
       symlinkSync(outside, join(repo, 'a', '.b'));
       run(repo, 'a:b');
+      expect(existsSync(join(outside, 'edges.yaml'))).toBe(true);
       expect(readFileSync(join(outside, 'edges.yaml'), 'utf8')).toBe('outside');
       expect(lstatSync(join(repo, 'a', '.b')).isSymbolicLink()).toBe(true);
     });
@@ -136,6 +141,7 @@ describe('#3264 the helper removes exactly edges.yaml, then an empty directory',
       symlinkSync(join(outside, 'target.yaml'), join(repo, 'a', '.b', 'edges.yaml'));
       run(repo, 'a:b');
       expect(lstatSync(join(repo, 'a', '.b', 'edges.yaml')).isSymbolicLink()).toBe(true);
+      expect(existsSync(join(outside, 'target.yaml'))).toBe(true);
       expect(readFileSync(join(outside, 'target.yaml'), 'utf8')).toBe('outside');
     });
   }

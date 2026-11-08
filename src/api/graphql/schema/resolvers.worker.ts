@@ -85,6 +85,7 @@ import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.j
 import { deletePristineGeneratedTickers, miscastHasReferences } from '../../../lib/workerMiscastRepair.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { runMayReadTeam } from '../../../lib/auth/runTeamRead.js';
 import { managesApp, lockAppManagerMemberships } from '../../../lib/auth/appManagement.js';
 import { withAuthorizedTx, liveTxContext } from './authorizedTx.js';
 import { resolveTaskActor, type TaskApp } from './resolvers.agentTask.js';
@@ -214,6 +215,12 @@ export async function requireWorkerProfileAccess(ctx: Context, app: AppRow): Pro
  */
 async function workerReadableWhere(ctx: Context): Promise<Prisma.WorkerWhereInput> {
   if (!ctx.userId) {
+    // #3360: a userless run reaches its own App only under its automation's grant, the same arm
+    // `requireWorkerReadAccess` applies; a key reaches its own App unconditionally.
+    if (isRunPrincipal(ctx)) {
+      const app = ctx.appId ? await ctx.db.app.findUnique({ where: { id: ctx.appId }, select: { id: true, organizationId: true, deletedAt: true } }) : null;
+      return { appId: { in: app && await runMayReadTeam(ctx, app) ? [app.id] : [] } };
+    }
     return { appId: { in: ctx.appId ? [ctx.appId] : [] } };
   }
   if (!isPlatformAdmin(ctx)) {
@@ -1949,12 +1956,12 @@ export const workerQueries = {
           extensions: { code: 'WORKER_NOT_FOUND', workerRef: trimmed },
         });
       }
-      return ctx.db.worker.findUniqueOrThrow({ where: { id: byName } });
+      return singleWorkerActivityRow(await ctx.db.worker.findUniqueOrThrow({ where: { id: byName } }));
     }
     // #1149: by id or URN the caller names one worker, so the PROFILE gate
     // admits; the field resolvers mask everything beyond the profile.
     const worker = await resolveProfileWorkerRef(ctx, ref);
-    return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    return singleWorkerActivityRow(await ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } }));
   },
 
   /**
@@ -2197,15 +2204,48 @@ export const workerQueries = {
  * lapsed but open session keeps its family; only an end, or a newer bind,
  * clears or replaces it (#1723 review, Diego P2-2).
  */
+/** #3674: only Query.worker marks its one-row result. Lists keep the App fold (no N+1). */
+const singleWorkerActivityRows = new WeakSet<object>();
+function singleWorkerActivityRow<T extends object>(row: T): T {
+  singleWorkerActivityRows.add(row);
+  return row;
+}
+type WorkerActivityParent = {
+  id: string; appId: string; __heldWorkerActivity?: WorkerActivity;
+};
+
+/** Same SQL/predicate as the roster and binder; only the rows whose history is folded change. */
+async function workerFieldActivity(
+  ctx: Context,
+  worker: WorkerActivityParent,
+  info?: { operation?: { operation?: string } },
+): Promise<Map<string, WorkerActivity>> {
+  const memoize = info?.operation?.operation === 'query';
+  if (!singleWorkerActivityRows.has(worker)) return loadAppWorkerActivity(ctx, worker.appId, { memoize });
+  // Query-only, request-local and separate from the App cache: an alias/list in
+  // the same operation must never inherit this single-worker result. Mutations
+  // and unmarked nested rows retain their existing fresh/App-wide behavior.
+  type Cache = Map<string, Promise<Map<string, WorkerActivity>>>;
+  const holder = ctx as Context & { singleWorkerActivityCache?: Cache };
+  const cache = memoize ? (holder.singleWorkerActivityCache ??= new Map()) : null;
+  const key = JSON.stringify([worker.appId, worker.id]);
+  let pending = cache?.get(key);
+  if (!pending) {
+    pending = queryWorkerActivity(ctx, Prisma.sql`w.app_id = ${worker.appId} AND w.id = ${worker.id}`, new Date());
+    cache?.set(key, pending);
+  }
+  return pending;
+}
+
 /** The #2252 fields' shared read: masked to null on the family gate, else the activity row of the one fold. */
 async function bindingModelOf(
   ctx: Context,
-  worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+  worker: WorkerActivityParent,
   info?: { operation?: { operation?: string } },
 ): Promise<WorkerActivity | null> {
   if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
   if (worker.__heldWorkerActivity) return worker.__heldWorkerActivity;
-  const activity = await loadAppWorkerActivity(ctx, worker.appId, { memoize: info?.operation?.operation === 'query' });
+  const activity = await workerFieldActivity(ctx, worker, info);
   return activity.get(worker.id) ?? null;
 }
 
@@ -3256,16 +3296,14 @@ export const workerFieldResolvers = {
      * and that conflation IS hadron-cli#487.
      */
     hasLiveSession: async (
-      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      worker: WorkerActivityParent,
       _: unknown,
       ctx: Context,
       info?: { operation?: { operation?: string } },
     ): Promise<boolean | null> => {
       if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
       if (worker.__heldWorkerActivity) return worker.__heldWorkerActivity.hasLiveSession;
-      const activity = await loadAppWorkerActivity(ctx, worker.appId, {
-        memoize: info?.operation?.operation === 'query',
-      });
+      const activity = await workerFieldActivity(ctx, worker, info);
       return activity.get(worker.id)?.hasLiveSession ?? false;
     },
     /**
@@ -3276,28 +3314,26 @@ export const workerFieldResolvers = {
      * as hasLiveSession). A matching input, never authorization.
      */
     family: async (
-      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      worker: WorkerActivityParent,
       _: unknown,
       ctx: Context,
       info?: { operation?: { operation?: string } },
     ): Promise<string | null> => {
       if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
       if (worker.__heldWorkerActivity) return worker.__heldWorkerActivity.bindingFamily;
-      const activity = await loadAppWorkerActivity(ctx, worker.appId, {
-        memoize: info?.operation?.operation === 'query',
-      });
+      const activity = await workerFieldActivity(ctx, worker, info);
       return activity.get(worker.id)?.bindingFamily ?? null;
     },
     /** #2252 — the model its binding last reported (the newest open session's; same gate and fold as `family`). Self-declared; never authorization. */
     model: async (
-      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      worker: WorkerActivityParent,
       _: unknown,
       ctx: Context,
       info?: { operation?: { operation?: string } },
     ): Promise<string | null> => (await bindingModelOf(ctx, worker, info))?.bindingModel ?? null,
     /** Live advisory membership uses the same newest-open model and working-state gate as `model`. */
     modelGroups: async (
-      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      worker: WorkerActivityParent,
       _: unknown,
       ctx: Context,
       info?: { operation?: { operation?: string } },
@@ -3309,14 +3345,14 @@ export const workerFieldResolvers = {
     },
     /** #2252 — when that model was self-reported; null when the session never reported one. */
     modelReportedAt: async (
-      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      worker: WorkerActivityParent,
       _: unknown,
       ctx: Context,
       info?: { operation?: { operation?: string } },
     ): Promise<Date | null> => (await bindingModelOf(ctx, worker, info))?.modelReportedAt ?? null,
     /** #2252 / R189 — the coarse tier of `model` from the server's one mapping; null when unmapped. Advisory only. */
     tier: async (
-      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      worker: WorkerActivityParent,
       _: unknown,
       ctx: Context,
       info?: { operation?: { operation?: string } },
@@ -3335,16 +3371,14 @@ export const workerFieldResolvers = {
      * shows and the one the reaper acts on. Masked on deny, as above.
      */
     lastActiveAt: async (
-      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      worker: WorkerActivityParent,
       _: unknown,
       ctx: Context,
       info?: { operation?: { operation?: string } },
     ): Promise<Date | null> => {
       if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
       if (worker.__heldWorkerActivity) return worker.__heldWorkerActivity.lastActiveAt;
-      const activity = await loadAppWorkerActivity(ctx, worker.appId, {
-        memoize: info?.operation?.operation === 'query',
-      });
+      const activity = await workerFieldActivity(ctx, worker, info);
       return activity.get(worker.id)?.lastActiveAt ?? null;
     },
     /**
