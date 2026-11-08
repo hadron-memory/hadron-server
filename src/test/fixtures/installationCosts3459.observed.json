@@ -4,8 +4,8 @@
   "metrics": [
     {
       "label": "A1/agents/partial/cold",
-      "sqlCount": 21,
-      "prismaOperations": 11,
+      "sqlCount": 22,
+      "prismaOperations": 12,
       "pagePrismaReads": 1,
       "helperEntries": [
         1,
@@ -18,8 +18,8 @@
     },
     {
       "label": "A1/agents/partial/same-context-repeat",
-      "sqlCount": 21,
-      "prismaOperations": 11,
+      "sqlCount": 22,
+      "prismaOperations": 12,
       "pagePrismaReads": 1,
       "helperEntries": [
         1,
@@ -32,8 +32,8 @@
     },
     {
       "label": "A1/agents/partial/fresh-context",
-      "sqlCount": 21,
-      "prismaOperations": 11,
+      "sqlCount": 22,
+      "prismaOperations": 12,
       "pagePrismaReads": 1,
       "helperEntries": [
         1,
@@ -46,8 +46,8 @@
     },
     {
       "label": "A1/agents/full/cold",
-      "sqlCount": 16,
-      "prismaOperations": 6,
+      "sqlCount": 17,
+      "prismaOperations": 7,
       "pagePrismaReads": 1,
       "helperEntries": [
         1,
@@ -60,8 +60,8 @@
     },
     {
       "label": "A1/agents/full/same-context-repeat",
-      "sqlCount": 16,
-      "prismaOperations": 6,
+      "sqlCount": 17,
+      "prismaOperations": 7,
       "pagePrismaReads": 1,
       "helperEntries": [
         1,
@@ -74,8 +74,8 @@
     },
     {
       "label": "A1/agents/full/fresh-context",
-      "sqlCount": 16,
-      "prismaOperations": 6,
+      "sqlCount": 17,
+      "prismaOperations": 7,
       "pagePrismaReads": 1,
       "helperEntries": [
         1,
@@ -88,8 +88,8 @@
     },
     {
       "label": "A1/audits/partial/cold",
-      "sqlCount": 25,
-      "prismaOperations": 15,
+      "sqlCount": 26,
+      "prismaOperations": 16,
       "pagePrismaReads": 1,
       "helperEntries": [
         1,
@@ -102,8 +102,8 @@
     },
     {
       "label": "A1/audits/partial/same-context-repeat",
-      "sqlCount": 25,
-      "prismaOperations": 15,
+      "sqlCount": 26,
+      "prismaOperations": 16,
       "pagePrismaReads": 1,
       "helperEntries": [
         1,
@@ -116,8 +116,8 @@
     },
     {
       "label": "A1/audits/partial/fresh-context",
-      "sqlCount": 25,
-      "prismaOperations": 15,
+      "sqlCount": 26,
+      "prismaOperations": 16,
       "pagePrismaReads": 1,
       "helperEntries": [
         1,
@@ -130,8 +130,8 @@
     },
     {
       "label": "A1/audits/full/cold",
-      "sqlCount": 16,
-      "prismaOperations": 6,
+      "sqlCount": 17,
+      "prismaOperations": 7,
       "pagePrismaReads": 1,
       "helperEntries": [
         1,
@@ -144,8 +144,8 @@
     },
     {
       "label": "A1/audits/full/same-context-repeat",
-      "sqlCount": 16,
-      "prismaOperations": 6,
+      "sqlCount": 17,
+      "prismaOperations": 7,
       "pagePrismaReads": 1,
       "helperEntries": [
         1,
@@ -158,8 +158,8 @@
     },
     {
       "label": "A1/audits/full/fresh-context",
-      "sqlCount": 16,
-      "prismaOperations": 6,
+      "sqlCount": 17,
+      "prismaOperations": 7,
       "pagePrismaReads": 1,
       "helperEntries": [
         1,
@@ -172,8 +172,8 @@
     },
     {
       "label": "A1/siblings/partial/cold",
-      "sqlCount": 39,
-      "prismaOperations": 23,
+      "sqlCount": 40,
+      "prismaOperations": 24,
       "pagePrismaReads": 2,
       "helperEntries": [
         2,
@@ -186,8 +186,8 @@
     },
     {
       "label": "A1/siblings/partial/same-context-repeat",
-      "sqlCount": 39,
-      "prismaOperations": 23,
+      "sqlCount": 40,
+      "prismaOperations": 24,
       "pagePrismaReads": 2,
       "helperEntries": [
         2,
@@ -200,8 +200,8 @@
     },
     {
       "label": "A1/siblings/partial/fresh-context",
-      "sqlCount": 39,
-      "prismaOperations": 23,
+      "sqlCount": 40,
+      "prismaOperations": 24,
       "pagePrismaReads": 2,
       "helperEntries": [
         2,
@@ -214,8 +214,8 @@
     },
     {
       "label": "A1/siblings/full/cold",
-      "sqlCount": 26,
-      "prismaOperations": 10,
+      "sqlCount": 27,
+      "prismaOperations": 11,
       "pagePrismaReads": 2,
       "helperEntries": [
         2,
@@ -228,8 +228,8 @@
     },
     {
       "label": "A1/siblings/full/same-context-repeat",
-      "sqlCount": 26,
-      "prismaOperations": 10,
+      "sqlCount": 27,
+      "prismaOperations": 11,
       "pagePrismaReads": 2,
       "helperEntries": [
         2,
@@ -242,8 +242,8 @@
     },
     {
       "label": "A1/siblings/full/fresh-context",
-      "sqlCount": 26,
-      "prismaOperations": 10,
+      "sqlCount": 27,
+      "prismaOperations": 11,
       "pagePrismaReads": 2,
       "helperEntries": [
         2,
@@ -284,8 +284,8 @@
     },
     {
       "label": "A3/agents/partial/cold",
-      "sqlCount": 63,
-      "prismaOperations": 33,
+      "sqlCount": 66,
+      "prismaOperations": 36,
       "pagePrismaReads": 3,
       "helperEntries": [
         3,
@@ -298,8 +298,8 @@
     },
     {
       "label": "A3/agents/partial/same-context-repeat",
-      "sqlCount": 63,
-      "prismaOperations": 33,
+      "sqlCount": 66,
+      "prismaOperations": 36,
       "pagePrismaReads": 3,
       "helperEntries": [
         3,
@@ -312,8 +312,8 @@
     },
     {
       "label": "A3/agents/partial/fresh-context",
-      "sqlCount": 63,
-      "prismaOperations": 33,
+      "sqlCount": 66,
+      "prismaOperations": 36,
       "pagePrismaReads": 3,
       "helperEntries": [
         3,
@@ -326,8 +326,8 @@
     },
     {
       "label": "A3/agents/full/cold",
-      "sqlCount": 48,
-      "prismaOperations": 18,
+      "sqlCount": 51,
+      "prismaOperations": 21,
       "pagePrismaReads": 3,
       "helperEntries": [
         3,
@@ -340,8 +340,8 @@
     },
     {
       "label": "A3/agents/full/same-context-repeat",
-      "sqlCount": 48,
-      "prismaOperations": 18,
+      "sqlCount": 51,
+      "prismaOperations": 21,
       "pagePrismaReads": 3,
       "helperEntries": [
         3,
@@ -354,8 +354,8 @@
     },
     {
       "label": "A3/agents/full/fresh-context",
-      "sqlCount": 48,
-      "prismaOperations": 18,
+      "sqlCount": 51,
+      "prismaOperations": 21,
       "pagePrismaReads": 3,
       "helperEntries": [
         3,
@@ -368,8 +368,8 @@
     },
     {
       "label": "A3/audits/partial/cold",
-      "sqlCount": 75,
-      "prismaOperations": 45,
+      "sqlCount": 78,
+      "prismaOperations": 48,
       "pagePrismaReads": 3,
       "helperEntries": [
         3,
@@ -382,8 +382,8 @@
     },
     {
       "label": "A3/audits/partial/same-context-repeat",
-      "sqlCount": 75,
-      "prismaOperations": 45,
+      "sqlCount": 78,
+      "prismaOperations": 48,
       "pagePrismaReads": 3,
       "helperEntries": [
         3,
@@ -396,8 +396,8 @@
     },
     {
       "label": "A3/audits/partial/fresh-context",
-      "sqlCount": 75,
-      "prismaOperations": 45,
+      "sqlCount": 78,
+      "prismaOperations": 48,
       "pagePrismaReads": 3,
       "helperEntries": [
         3,
@@ -410,8 +410,8 @@
     },
     {
       "label": "A3/audits/full/cold",
-      "sqlCount": 48,
-      "prismaOperations": 18,
+      "sqlCount": 51,
+      "prismaOperations": 21,
       "pagePrismaReads": 3,
       "helperEntries": [
         3,
@@ -424,8 +424,8 @@
     },
     {
       "label": "A3/audits/full/same-context-repeat",
-      "sqlCount": 48,
-      "prismaOperations": 18,
+      "sqlCount": 51,
+      "prismaOperations": 21,
       "pagePrismaReads": 3,
       "helperEntries": [
         3,
@@ -438,8 +438,8 @@
     },
     {
       "label": "A3/audits/full/fresh-context",
-      "sqlCount": 48,
-      "prismaOperations": 18,
+      "sqlCount": 51,
+      "prismaOperations": 21,
       "pagePrismaReads": 3,
       "helperEntries": [
         3,
@@ -452,8 +452,8 @@
     },
     {
       "label": "A3/siblings/partial/cold",
-      "sqlCount": 117,
-      "prismaOperations": 69,
+      "sqlCount": 120,
+      "prismaOperations": 72,
       "pagePrismaReads": 6,
       "helperEntries": [
         6,
@@ -466,8 +466,8 @@
     },
     {
       "label": "A3/siblings/partial/same-context-repeat",
-      "sqlCount": 117,
-      "prismaOperations": 69,
+      "sqlCount": 120,
+      "prismaOperations": 72,
       "pagePrismaReads": 6,
       "helperEntries": [
         6,
@@ -480,8 +480,8 @@
     },
     {
       "label": "A3/siblings/partial/fresh-context",
-      "sqlCount": 117,
-      "prismaOperations": 69,
+      "sqlCount": 120,
+      "prismaOperations": 72,
       "pagePrismaReads": 6,
       "helperEntries": [
         6,
@@ -494,8 +494,8 @@
     },
     {
       "label": "A3/siblings/full/cold",
-      "sqlCount": 78,
-      "prismaOperations": 30,
+      "sqlCount": 81,
+      "prismaOperations": 33,
       "pagePrismaReads": 6,
       "helperEntries": [
         6,
@@ -508,8 +508,8 @@
     },
     {
       "label": "A3/siblings/full/same-context-repeat",
-      "sqlCount": 78,
-      "prismaOperations": 30,
+      "sqlCount": 81,
+      "prismaOperations": 33,
       "pagePrismaReads": 6,
       "helperEntries": [
         6,
@@ -522,8 +522,8 @@
     },
     {
       "label": "A3/siblings/full/fresh-context",
-      "sqlCount": 78,
-      "prismaOperations": 30,
+      "sqlCount": 81,
+      "prismaOperations": 33,
       "pagePrismaReads": 6,
       "helperEntries": [
         6,
@@ -690,8 +690,8 @@
     },
     {
       "label": "grant/active/partial",
-      "sqlCount": 25,
-      "prismaOperations": 15,
+      "sqlCount": 26,
+      "prismaOperations": 16,
       "pagePrismaReads": 1,
       "helperEntries": [
         1,
@@ -704,8 +704,8 @@
     },
     {
       "label": "grant/inactive/fresh",
-      "sqlCount": 23,
-      "prismaOperations": 13,
+      "sqlCount": 24,
+      "prismaOperations": 14,
       "pagePrismaReads": 1,
       "helperEntries": [
         1,
@@ -718,8 +718,8 @@
     },
     {
       "label": "grant/revoked/fresh",
-      "sqlCount": 23,
-      "prismaOperations": 13,
+      "sqlCount": 24,
+      "prismaOperations": 14,
       "pagePrismaReads": 1,
       "helperEntries": [
         1,
@@ -732,8 +732,8 @@
     },
     {
       "label": "grant/expired/fresh",
-      "sqlCount": 23,
-      "prismaOperations": 13,
+      "sqlCount": 24,
+      "prismaOperations": 14,
       "pagePrismaReads": 1,
       "helperEntries": [
         1,
