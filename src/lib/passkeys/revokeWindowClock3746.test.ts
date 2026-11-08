@@ -4,7 +4,7 @@
  * without cancelling, at a truthful time, or refuses; a cancel link past the boundary revokes nothing.
  *
  * Every pin runs with the passkey guard and CHECK enabled. The closing window comes from the platform clock seam
- * (`hadron_passkey_clock_offset()`), replaced only inside the one fixture transaction that registers the passkey, so
+ * (`public.hadron_passkey_clock_offset()`), replaced only inside the one fixture transaction that registers the passkey, so
  * the passkey is registered "72 hours minus a moment" ago by the guard's own clock.
  */
 import { createHash } from 'node:crypto';
@@ -33,7 +33,7 @@ let first: SoftPasskey; let firstId: string;
 
 const setOffset = (tx: Pick<Prisma.TransactionClient, '$executeRawUnsafe'>, ms: number) => {
   if (!Number.isSafeInteger(ms)) throw new Error('offset must be an integer');
-  return tx.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION hadron_passkey_clock_offset() RETURNS interval LANGUAGE sql STABLE
+  return tx.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION public.hadron_passkey_clock_offset() RETURNS interval LANGUAGE sql STABLE
     AS $$ SELECT interval '${ms} milliseconds' $$`);
 };
 
@@ -46,7 +46,7 @@ async function insertClosingFirstPasskey(ownerId: string, key: SoftPasskey, msTo
       (id, owner_id, credential_id, public_key, algorithm, user_handle, enrollment_rp_id, label, registered_at, counter, transports,
        backup_eligible, backed_up, registration_method, window_ends_at)
       VALUES (${id}, ${ownerId}, ${key.credentialId}, ${key.cosePublicKey}, -7, ${Buffer.alloc(32, 7)}, ${RP}, 'Closing',
-        hadron_passkey_now(), 0, ARRAY['internal'], false, false, 'github', hadron_passkey_now() + interval '72 hours')`;
+        public.hadron_passkey_now(), 0, ARRAY['internal'], false, false, 'github', public.hadron_passkey_now() + interval '72 hours')`;
     await setOffset(tx, 0);
   });
   return id;
@@ -271,7 +271,7 @@ describe('the second attempt re-decides from what is true then', () => {
     firstId = await insertClosingFirstPasskey(ana, first, 1500);
     const id = await proved();
     const result = await crossThenChange(id, async (tx) => {
-      await tx.$executeRaw`UPDATE passkey_credentials SET revoked_at = hadron_passkey_now() WHERE id = ${phoneId}`;
+      await tx.$executeRaw`UPDATE passkey_credentials SET revoked_at = public.hadron_passkey_now() WHERE id = ${phoneId}`;
     });
     expect(result).toBeNull();
     await expectNothingChanged(id);
@@ -333,21 +333,45 @@ describe('the passkey guard accepts a lifecycle stamp from the transaction start
 
   it('accepts the wall clock after a wait, and refuses a stamp before the transaction or in the future', async () => {
     const a = softPasskey(); const aId = await insertSoftPasskey(db, ana, a, { firstWindow: true });
-    await refused(Prisma.sql`UPDATE passkey_credentials SET revoked_at = hadron_passkey_now() - interval '1 millisecond' WHERE id = ${aId}`);
-    await refused(Prisma.sql`UPDATE passkey_credentials SET revoked_at = hadron_passkey_wall_now() + interval '1 second' WHERE id = ${aId}`);
-    await refused(Prisma.sql`WITH t AS (SELECT hadron_passkey_wall_now() AS at) UPDATE passkey_credentials SET revoked_at = t.at,
+    await refused(Prisma.sql`UPDATE passkey_credentials SET revoked_at = public.hadron_passkey_now() - interval '1 millisecond' WHERE id = ${aId}`);
+    await refused(Prisma.sql`UPDATE passkey_credentials SET revoked_at = public.hadron_passkey_wall_now() + interval '1 second' WHERE id = ${aId}`);
+    await refused(Prisma.sql`WITH t AS (SELECT public.hadron_passkey_wall_now() AS at) UPDATE passkey_credentials SET revoked_at = t.at,
       window_ended_at = t.at - interval '1 hour', window_outcome = 'ended-early' FROM t WHERE id = ${aId}`);
-    await refused(Prisma.sql`WITH t AS (SELECT hadron_passkey_wall_now() AS at) UPDATE passkey_credentials SET revoked_at = t.at,
+    await refused(Prisma.sql`WITH t AS (SELECT public.hadron_passkey_wall_now() AS at) UPDATE passkey_credentials SET revoked_at = t.at,
       cancelled_at = t.at + interval '1 second', window_ended_at = t.at, window_outcome = 'cancelled', cancel_ip = 'x', cancel_user_agent = 'y'
       FROM t WHERE id = ${aId}`);
     expect((await rec(aId)).revokedAt).toBeNull();
     const at = await db.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_sleep(0.05)`;
-      const [row] = await tx.$queryRaw<Array<{ revoked_at: Date; started: Date }>>`WITH t AS (SELECT hadron_passkey_wall_now() AS at)
+      const [row] = await tx.$queryRaw<Array<{ revoked_at: Date; started: Date }>>`WITH t AS (SELECT public.hadron_passkey_wall_now() AS at)
         UPDATE passkey_credentials SET revoked_at = t.at, window_ended_at = t.at, window_outcome = 'cancelled'
-        FROM t WHERE id = ${aId} RETURNING revoked_at, hadron_passkey_now() AS started`;
+        FROM t WHERE id = ${aId} RETURNING revoked_at, public.hadron_passkey_now() AS started`;
       return row;
     });
     expect(at.revoked_at.getTime()).toBeGreaterThan(at.started.getTime());
+  });
+});
+
+describe('the guard\'s clock is the public one, whatever the session\'s search_path (#3761 blind P2)', () => {
+  it('a schema earlier on the search_path with its own clock offset moves nothing', async () => {
+    await db.$executeRawUnsafe('CREATE SCHEMA IF NOT EXISTS shadow3761');
+    await db.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION shadow3761.hadron_passkey_clock_offset() RETURNS interval LANGUAGE sql STABLE
+      AS $$ SELECT interval '-1 day' $$`);
+    try {
+      const k = softPasskey();
+      const insert = (tx: Prisma.TransactionClient, at: Prisma.Sql) => tx.$executeRaw`INSERT INTO passkey_credentials
+        (id, owner_id, credential_id, public_key, algorithm, user_handle, enrollment_rp_id, label, registered_at, counter, transports, backup_eligible, backed_up)
+        VALUES (${generateId()}, ${ana}, ${k.credentialId}, ${k.cosePublicKey}, -7, ${Buffer.alloc(32, 9)}, ${RP}, 'Shadow', ${at}, 0, ARRAY['internal'], false, false)`;
+      await expect(db.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe('SET LOCAL search_path = shadow3761, public');
+        await insert(tx, Prisma.sql`((CURRENT_TIMESTAMP AT TIME ZONE 'UTC') - interval '1 day')::timestamp(3)`);
+      })).rejects.toThrow(/platform clock/);
+      await db.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe('SET LOCAL search_path = shadow3761, public');
+        await insert(tx, Prisma.sql`(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3)`);
+      });
+    } finally {
+      await db.$executeRawUnsafe('DROP SCHEMA shadow3761 CASCADE');
+    }
   });
 });

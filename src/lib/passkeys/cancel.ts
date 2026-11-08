@@ -59,11 +59,11 @@ export async function cancelFirstPasskey(
       // and the cancel is stamped with the wall clock once the credential is locked: the time it takes effect (#3746).
       const open = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM passkey_credentials
         WHERE id = ${probe.passkey_id} AND owner_id = ${probe.owner_id} AND revoked_at IS NULL AND window_outcome IS NULL
-          AND window_ends_at > hadron_passkey_wall_now()
+          AND window_ends_at > public.hadron_passkey_wall_now()
           AND EXISTS (SELECT 1 FROM users u WHERE u.id = owner_id AND u.deleted_at IS NULL)
         FOR UPDATE`;
       if (open.length !== 1) return false;
-      await tx.$executeRaw`WITH t AS (SELECT hadron_passkey_wall_now() AS at)
+      await tx.$executeRaw`WITH t AS (SELECT public.hadron_passkey_wall_now() AS at)
         UPDATE passkey_credentials SET revoked_at = t.at, cancelled_at = t.at, window_ended_at = t.at,
           window_outcome = 'cancelled', cancel_ip = ${input.ip}, cancel_user_agent = ${input.userAgent}
         FROM t WHERE id = ${probe.passkey_id}`;

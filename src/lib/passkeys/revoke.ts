@@ -181,7 +181,7 @@ function revokeAttempt(
     // is held. From the owner's anchor on, nothing it is ordered against can happen (a signature completes under the
     // same anchor), so a later commit does not make it earlier than any such event. A first passkey whose window is
     // still open at that time closes as cancelled, at the same instant; the passkey CHECK forces exactly that.
-    const [done] = await tx.$queryRaw<Array<{ window_outcome: string | null }>>`WITH t AS (SELECT hadron_passkey_wall_now() AS at)
+    const [done] = await tx.$queryRaw<Array<{ window_outcome: string | null }>>`WITH t AS (SELECT public.hadron_passkey_wall_now() AS at)
       UPDATE passkey_credentials SET
         revoked_at = t.at,
         window_outcome = CASE WHEN window_ends_at > t.at AND window_outcome IS NULL THEN 'cancelled' ELSE window_outcome END,
@@ -203,7 +203,7 @@ function revokeAttempt(
 
 /** Is the passkey's first window still open on the platform wall clock, now (after the caller's locks)? */
 export async function windowStillOpen(tx: Pick<Prisma.TransactionClient, '$queryRaw'>, passkeyId: string): Promise<boolean> {
-  const [row] = await tx.$queryRaw<Array<{ open: boolean }>>`SELECT window_ends_at > hadron_passkey_wall_now() AS open
+  const [row] = await tx.$queryRaw<Array<{ open: boolean }>>`SELECT window_ends_at > public.hadron_passkey_wall_now() AS open
     FROM passkey_credentials WHERE id = ${passkeyId}`;
   return row?.open === true;
 }

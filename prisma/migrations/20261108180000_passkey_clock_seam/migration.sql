@@ -29,22 +29,24 @@ ALTER TABLE passkey_credentials ADD CONSTRAINT chk_passkey_shape CHECK (
       AND revoked_at IS NOT NULL AND window_outcome IS NOT NULL AND window_ended_at IS NOT NULL
       AND revoked_at = cancelled_at AND window_outcome = 'cancelled' AND window_ended_at = cancelled_at))
 );
--- #3746: the passkey platform clock. hadron_passkey_now() is the transaction's own time, which a registration time must
--- equal; hadron_passkey_wall_now() is the wall clock at the statement, after the caller's locks. A revocation, cancel or
+-- #3746: the passkey platform clock. public.hadron_passkey_now() is the transaction's own time, which a registration time must
+-- equal; public.hadron_passkey_wall_now() is the wall clock at the statement, after the caller's locks. A revocation, cancel or
 -- window closure is stamped with the wall clock once its locks are held (the time it takes effect, never the earlier
 -- transaction start), so the guard accepts those stamps from the transaction start up to the wall clock at the write:
 -- never before the transaction, never in the future. Both add
--- hadron_passkey_clock_offset(), which is zero in every deployment. It is a test seam only: a test replaces it inside
+-- public.hadron_passkey_clock_offset(), which is zero in every deployment. It is a test seam only: a test replaces it inside
 -- one fixture transaction to register a first passkey whose 72-hour window ends seconds from now, with every guard and
 -- CHECK enabled, and to model a database clock that steps backwards. Only the database owner can replace it.
-CREATE OR REPLACE FUNCTION hadron_passkey_clock_offset() RETURNS interval LANGUAGE sql STABLE AS $$ SELECT interval '0' $$;
-CREATE OR REPLACE FUNCTION hadron_passkey_now() RETURNS timestamp(3) LANGUAGE sql STABLE
-  AS $$ SELECT ((CURRENT_TIMESTAMP AT TIME ZONE 'UTC') + hadron_passkey_clock_offset())::timestamp(3) $$;
-CREATE OR REPLACE FUNCTION hadron_passkey_wall_now() RETURNS timestamp(3) LANGUAGE sql VOLATILE
-  AS $$ SELECT ((clock_timestamp() AT TIME ZONE 'UTC') + hadron_passkey_clock_offset())::timestamp(3) $$;
+-- Every reference is schema-qualified, so a schema earlier on a session's search_path can't supply its own clock
+-- (#3761 blind review).
+CREATE OR REPLACE FUNCTION public.hadron_passkey_clock_offset() RETURNS interval LANGUAGE sql STABLE AS $$ SELECT interval '0' $$;
+CREATE OR REPLACE FUNCTION public.hadron_passkey_now() RETURNS timestamp(3) LANGUAGE sql STABLE
+  AS $$ SELECT ((CURRENT_TIMESTAMP AT TIME ZONE 'UTC') + public.hadron_passkey_clock_offset())::timestamp(3) $$;
+CREATE OR REPLACE FUNCTION public.hadron_passkey_wall_now() RETURNS timestamp(3) LANGUAGE sql VOLATILE
+  AS $$ SELECT ((clock_timestamp() AT TIME ZONE 'UTC') + public.hadron_passkey_clock_offset())::timestamp(3) $$;
 CREATE OR REPLACE FUNCTION hadron_guard_passkey_credential() RETURNS trigger
 LANGUAGE plpgsql AS $$
-DECLARE platform_now timestamp(3) := hadron_passkey_now();
+DECLARE platform_now timestamp(3) := public.hadron_passkey_now();
 BEGIN
   IF TG_OP = 'DELETE' THEN
     RAISE EXCEPTION 'Passkey credentials are never deleted' USING ERRCODE = '23514';
@@ -57,13 +59,13 @@ BEGIN
   IF TG_OP = 'INSERT' AND NEW.registered_at IS DISTINCT FROM platform_now THEN
     RAISE EXCEPTION 'Passkey registration must use the platform clock' USING ERRCODE = '23514';
   END IF;
-  IF NEW.revoked_at IS NOT NULL AND (TG_OP = 'INSERT' OR OLD.revoked_at IS NULL) AND (NEW.revoked_at < platform_now OR NEW.revoked_at > hadron_passkey_wall_now()) THEN
+  IF NEW.revoked_at IS NOT NULL AND (TG_OP = 'INSERT' OR OLD.revoked_at IS NULL) AND (NEW.revoked_at < platform_now OR NEW.revoked_at > public.hadron_passkey_wall_now()) THEN
     RAISE EXCEPTION 'Passkey revocation must use the platform clock' USING ERRCODE = '23514';
   END IF;
-  IF NEW.cancelled_at IS NOT NULL AND (TG_OP = 'INSERT' OR OLD.cancelled_at IS NULL) AND (NEW.cancelled_at < platform_now OR NEW.cancelled_at > hadron_passkey_wall_now()) THEN
+  IF NEW.cancelled_at IS NOT NULL AND (TG_OP = 'INSERT' OR OLD.cancelled_at IS NULL) AND (NEW.cancelled_at < platform_now OR NEW.cancelled_at > public.hadron_passkey_wall_now()) THEN
     RAISE EXCEPTION 'Passkey cancellation must use the platform clock' USING ERRCODE = '23514';
   END IF;
-  IF NEW.window_ended_at IS NOT NULL AND (TG_OP = 'INSERT' OR OLD.window_ended_at IS NULL) AND (NEW.window_ended_at < platform_now OR NEW.window_ended_at > hadron_passkey_wall_now()) THEN
+  IF NEW.window_ended_at IS NOT NULL AND (TG_OP = 'INSERT' OR OLD.window_ended_at IS NULL) AND (NEW.window_ended_at < platform_now OR NEW.window_ended_at > public.hadron_passkey_wall_now()) THEN
     RAISE EXCEPTION 'Passkey window closure must use the platform clock' USING ERRCODE = '23514';
   END IF;
   IF TG_OP = 'INSERT' THEN RETURN NEW; END IF;
