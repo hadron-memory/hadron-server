@@ -72,10 +72,15 @@ function probe(shortfall: boolean) {
       if (prop !== '$queryRaw') return typeof v === 'function' ? v.bind(t) : v;
       return async (strings: TemplateStringsArray, ...vals: unknown[]) => {
         const sql = Array.isArray(strings) ? strings.join('?') : '';
+        // #3675: only the two ANN statements run in this transaction (vectors.ts withEfSearch): the node ANN carries
+        // `ann_rows`, the chunk ANN `ne.chunk_index`. Anything else is a new in-transaction query this harness would
+        // otherwise answer `[]` and mislabel, so it fails loudly before it runs.
+        const annKind = sql.includes('ann_rows') ? 'node' : sql.includes('ne.chunk_index') ? 'chunk' : null;
+        if (!annKind) throw new Error(`unexpected in-transaction SQL: ${sql.trim().replace(/\s+/g, ' ').slice(0, 80)}`);
         const real = await (v as any).call(t, strings, ...vals);
         if (!shortfall) return real;
         seen.annIntercepted++;
-        seen.annKind = sql.includes('ann_rows') ? 'node' : 'chunk';
+        seen.annKind = annKind;
         seen.annRealRows = (real as unknown[]).length;
         return [];
       };
