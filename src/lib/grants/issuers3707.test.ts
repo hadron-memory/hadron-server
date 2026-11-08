@@ -8,6 +8,8 @@ import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import type { Context } from '../../api/graphql/schema/resolvers.js';
 import { PLATFORM_ACTIONS } from './actions.js';
+import { runAsActor } from '../requestActor.js';
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { requireActionIssuer, ISSUER_RULES } from './issuers.js';
 
 let app: { id: string; urn: string };
@@ -66,5 +68,46 @@ describe('#3707: who may issue schedule.create and webhook.create', () => {
 
   it('every shipped action names a rule the server can map (the key set is closed)', () => {
     for (const a of PLATFORM_ACTIONS) expect(Object.keys(ISSUER_RULES), a.name).toContain(a.issuerRule);
+  });
+});
+
+// cor:acl:140:04 / cor:dmo:050:12 (ruling 0099): giving a grant is PERSON-ONLY. Authority over the App is necessary, not sufficient:
+// a worker acting with its ADMIN holder's identity is refused, as every other grant door refuses it (requirePersonOnlyAct).
+describe('#3707 (LOCAL P2-1): the issuer is a person acting as themselves, never a worker carrying a person\'s authority', () => {
+  async function workerFor(appId: string) {
+    const agent = await db.agent.create({ data: { organizationId: (await db.app.findUniqueOrThrow({ where: { id: appId } })).organizationId!, name: 'iss-agent', urn: `iss-agent-${generateId().slice(0, 6)}` } });
+    const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId, agentId: agent.id, name: 'iss-worker', slug: `iss-w-${generateId().slice(0, 6)}` } });
+    return { agent, worker };
+  }
+
+  for (const action of ACTIONS) {
+    it(`${action}: a worker-bound request carrying an ADMIN's user id is refused (the request actor)`, async () => {
+      const { agent, worker } = await workerFor(app.id);
+      await expect(runAsActor({ workerId: worker.id, agentId: agent.id }, () => requireActionIssuer(ctx(u.admin), action, app.id))).rejects.toThrow();
+    });
+
+    it(`${action}: a session row that names a worker is refused even with no request actor`, async () => {
+      const { agent, worker } = await workerFor(app.id);
+      const session = await db.session.create({ data: { id: generateId(), appId: app.id, workerId: worker.id, agentId: agent.id } as never });
+      await expect(requireActionIssuer({ ...ctx(u.admin), sessionId: session.id } as Context, action, app.id)).rejects.toThrow();
+    });
+
+    it(`${action}: a headless run principal, an impersonation and an App key are refused`, async () => {
+      await expect(requireActionIssuer({ ...ctx(u.admin), clientId: 'run:abc' } as Context, action, app.id)).rejects.toThrow();
+      await expect(requireActionIssuer({ ...ctx(u.admin), impersonation: { actorUserId: u.owner } } as unknown as Context, action, app.id)).rejects.toThrow();
+      await expect(requireActionIssuer({ ...ctx(u.admin), appKeyId: generateId() } as Context, action, app.id)).rejects.toThrow();
+    });
+  }
+
+  it('control: the same ADMIN as themselves, with a session row that names no worker, still issues', async () => {
+    const session = await db.session.create({ data: { id: generateId(), appId: app.id, userId: u.admin } as never });
+    await expect(requireActionIssuer({ ...ctx(u.admin), sessionId: session.id } as Context, 'schedule.create', app.id)).resolves.toBeUndefined();
+  });
+
+  it('a refusal for a worker is byte-identical to a refusal for a non-admin person (no oracle on who holds authority)', async () => {
+    const { agent, worker } = await workerFor(app.id);
+    const asWorker = await runAsActor({ workerId: worker.id, agentId: agent.id }, () => requireActionIssuer(ctx(u.admin), 'schedule.create', app.id)).catch((e) => e);
+    const asReader = await requireActionIssuer(ctx(u.reader), 'schedule.create', app.id).catch((e) => e);
+    expect([asWorker.message, asWorker.extensions?.code]).toEqual([asReader.message, asReader.extensions?.code]);
   });
 });
