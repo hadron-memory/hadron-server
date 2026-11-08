@@ -8558,8 +8558,9 @@ export const typeDefs = `#graphql
     no workerRefs, no after, and no next page (ask for first: 200; a lane larger than a page cannot declare). A worker whose host is lost has no serving lane until the host returns. Setting a stop signal is refused (STOP_SIGNAL_UNAVAILABLE)
     while any worker it would cover is on a lane with no fresh declaration.
     #3321: the manager's held worker reads the manager scope on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event per admitted call, ids only; it never reads its holder's personal scope, and never acknowledges.
+    #3455: preview: true is the no-spend read (default false = the read above, unchanged). It reserves no wake and counts no budget use (hrn:node:hadronmemory.com:specs:cor:agt:080:15), withholds nothing and posts no budget notice, declares no stop lane, and returns an empty proof, which acknowledges nothing. It reads exactly what the spending read may read, with the same reach and refusals; an App key's preview is still a read the key is recorded for (hrn:node:hadronmemory.com:specs:cor:agt:080:22).
     """
-    dueWakes(appRef: String!, workerRefs: [String!], first: Int, after: String, accepts: [WakeKind!], instruction: ActInstructionInput): DueWakePage!
+    dueWakes(appRef: String!, workerRefs: [String!], first: Int, after: String, accepts: [WakeKind!], instruction: ActInstructionInput, preview: Boolean): DueWakePage!
     """
     #2022 (hrn:node:hadronmemory.com:specs:cor:agt:090:07) — an App's stop signals, oldest set first. A person in the App sees
     every signal (worker narrows to those covering that worker now); a worker's session sees the live ones covering it; a
