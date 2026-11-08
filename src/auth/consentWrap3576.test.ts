@@ -57,12 +57,12 @@ type Measured = { bad: string[]; doc: number; vw: number; dark: boolean; text: s
 async function measure(html: string, width: number, dark: boolean): Promise<Measured> {
   const dir = mkdtempSync(join(tmpdir(), 'consent3576-'));
   const proc = spawn(browser!, ['--headless=new', '--no-sandbox', '--disable-gpu', `--user-data-dir=${join(dir, 'u')}`,
-    '--remote-debugging-port=0', 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
+    '--remote-debugging-port=0', 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'], detached: true });
   try {
     const wsUrl = await new Promise<string>((resolve, reject) => {
       let buf = '';
       const t = setTimeout(() => reject(new Error('no devtools endpoint: ' + buf.slice(0, 300))), 30000);
-      proc.stderr!.on('data', (d) => { buf += d; const m = /DevTools listening on (ws:\/\/\S+)/.exec(buf); if (m) { clearTimeout(t); resolve(m[1]); } });
+      proc.stderr!.on('data', (d) => { if (buf.length > 20000) return; buf += d; const m = /DevTools listening on (ws:\/\/\S+)/.exec(buf); if (m) { clearTimeout(t); resolve(m[1]); } });
       proc.on('exit', () => { clearTimeout(t); reject(new Error('chromium exited: ' + buf.slice(0, 300))); });
     });
     const f = join(dir, 'p.html');
@@ -77,10 +77,13 @@ async function measure(html: string, width: number, dark: boolean): Promise<Meas
       if (msg.id && pending.has(msg.id)) { pending.get(msg.id)!(msg); pending.delete(msg.id); }
       if (msg.method === 'Page.loadEventFired') loaded.splice(0).forEach((fn) => fn());
     };
-    const send = (method: string, params: object = {}, sessionId?: string) => new Promise<any>((res, rej) => {
+    // Every wait is bounded, so a hung or crashed Chromium rejects and the finally below always runs.
+    const bounded = <T,>(p: Promise<T>, what: string) => Promise.race([p, new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timed out: ' + what)), 20000).unref())]);
+    ws.onclose = () => { for (const fn of pending.values()) fn({ error: { message: 'socket closed' } }); pending.clear(); };
+    const send = (method: string, params: object = {}, sessionId?: string) => bounded(new Promise<any>((res, rej) => {
       const i = ++id; pending.set(i, (m) => (m.error ? rej(new Error(method + ': ' + m.error.message)) : res(m.result)));
       ws.send(JSON.stringify({ id: i, method, params, sessionId }));
-    });
+    }), method);
     const { targetId } = await send('Target.createTarget', { url: 'about:blank' });
     const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: true });
     await send('Page.enable', {}, sessionId);
@@ -88,7 +91,7 @@ async function measure(html: string, width: number, dark: boolean): Promise<Meas
     await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: dark ? 'dark' : 'light' }] }, sessionId);
     const done = new Promise<void>((res) => loaded.push(res));
     await send('Page.navigate', { url: pathToFileURL(f).href }, sessionId);
-    await done;
+    await bounded(done, 'Page.loadEventFired');
     const r = await send('Runtime.evaluate', { expression: MEASURE, returnByValue: true }, sessionId);
     ws.close();
     const m = JSON.parse(r.result.value) as Measured;
@@ -96,7 +99,12 @@ async function measure(html: string, width: number, dark: boolean): Promise<Meas
     expect(m.vw).toBe(width);
     expect(m.dark).toBe(dark);
     return m;
-  } finally { proc.kill('SIGKILL'); rmSync(dir, { recursive: true, force: true }); }
+  } finally {
+    const exited = new Promise<void>((res) => { if (proc.exitCode !== null || proc.signalCode) res(); else proc.once('exit', () => res()); });
+    try { process.kill(-proc.pid!, 'SIGKILL'); } catch { proc.kill('SIGKILL'); } // the whole group: helpers keep writing to the profile
+    await exited; // the profile dir is only removed once Chromium has stopped writing to it
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
 }
 
 const cases: Array<[string, Params]> = [
@@ -132,6 +140,7 @@ describe('#3576 hostile values are escaped, not interpreted', () => {
     const html = page({ clientName: evil, oauthScopes: [evil] as unknown as ('mcp' | 'account')[], resource: 'https://x.example/' + evil });
     expect(html).not.toContain('<img src=x');
     expect(html).not.toMatch(/<img[^>]*onerror/i);
+    expect(html).toContain('&lt;img src=x onerror=window.__pwned=1&gt;'); // present as escaped text
   });
 });
 
