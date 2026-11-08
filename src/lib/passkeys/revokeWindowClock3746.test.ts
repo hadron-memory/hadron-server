@@ -104,6 +104,13 @@ async function blockedBy(pid: number, n: number): Promise<number> {
   }
   return seen;
 }
+/** Is the passkey's window still open on the database clock? A crossing pin asserts this once its waiter is parked, so
+ * the waiter's decision provably fell inside the window and the crossing path really ran (#3761 blind P3-3). */
+async function windowOpen(passkeyId: string): Promise<boolean> {
+  const [{ open }] = await db.$queryRaw<Array<{ open: boolean }>>`SELECT (clock_timestamp() AT TIME ZONE 'UTC') < window_ends_at AS open
+    FROM passkey_credentials WHERE id = ${passkeyId}`;
+  return open;
+}
 /** Wait until the database clock has passed the passkey's window end. */
 async function pastWindow(passkeyId: string): Promise<void> {
   for (let i = 0; i < 500; i++) {
@@ -127,6 +134,7 @@ async function crossWhileHeld<T>(held: ReturnType<typeof holder>, waiter: () => 
     const pid = await held.pid;
     run = waiter();
     expect(await blockedBy(pid, 1)).toBe(1);
+    expect(await windowOpen(firstId)).toBe(true);
     await until();
     heldUntil = await dbNow();
   } finally {
@@ -253,6 +261,7 @@ describe('the second attempt re-decides from what is true then', () => {
         await change(tx);
       }, { timeout: 30_000 });
       expect(await anchorWaiters(1)).toBe(1);
+      expect(await windowOpen(firstId)).toBe(true);
       await pastWindow(firstId);
     } finally {
       s.release();
@@ -301,6 +310,7 @@ describe('the second attempt re-decides from what is true then', () => {
       expect(await blockedBy(pid, 1)).toBe(1);
       other = finishRevoke(db, { ceremonyId: id, ceremonyNonceHash: h(C), signInBrowserHash: null, targetCredentialId: tablet.credentialId });
       expect(await anchorWaiters(1)).toBe(1);
+      expect(await windowOpen(firstId)).toBe(true);
       await pastWindow(firstId);
     } finally {
       s.release();
