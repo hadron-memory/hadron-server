@@ -470,7 +470,7 @@ it('#3109 item 1: SQL selection agrees with the TypeScript guard for ..//~, non-
 });
 
 it.each([['x..{client}', 'x..A'], ['{client}..x', 'A..x'], ['x~{client}', 'x~A'], ['{client}~y', 'A~y']])(
- '#3109 item 1: invalid template %s retains the recorded row with no Git, no sequence and no attempt', async (template, branch) => {
+ '#3109 item 1: invalid template %s retains the recorded row untouched with no Git; the sweep takes no attempt sequence (the +1 is the probe\'s own take)', async (template, branch) => {
   const n = await makeNode(); await fail(n.id, branch); await age(); await db.memory.update({ where: { id: memoryId }, data: { writeBranch: template } });
   const before = await rows(), seq = await takeAttemptSeq(db);
   await tick();
@@ -492,10 +492,16 @@ it('#3109 item 1: a suffix-mismatched row stays retained while its routable sibl
 
 it.each([['é/{client}-ß', 'é/A-ß'], ['😀/{client}', '😀/A'], [`${'p'.repeat(150)}/{client}`, `${'p'.repeat(150)}/K`]])(
  '#3109 item 1: routable non-ASCII / long branch %s is selected, retried and cleared (the availability direction)', async (template, branch) => {
-  const n = await makeNode(); await fail(n.id, branch); await age(); await db.memory.update({ where: { id: memoryId }, data: { writeBranch: template } });
+  const n = await makeNode(); await fail(n.id, branch);
+  // A sibling the sweep must leave alone: recorded on a branch that does not fit the template, so it is retained.
+  const stuck = await makeNode('stuck'); await owe(stuck.id, { branch: 'no-client-segment' });
+  await age(); await db.memory.update({ where: { id: memoryId }, data: { writeBranch: template } });
+  const stuckBefore = (await rows()).find(r => r.nodeId === stuck.id), seq = await takeAttemptSeq(db);
   await tick();
-  expect(await rows()).toEqual([]);
+  expect(await rows()).toEqual([stuckBefore]); // the fence advanced only for the cleared row: the retained sibling is untouched
+  expect(commands.filter(a => a[0] === 'push')).toHaveLength(1); // exactly one push
   expect(on(branch)).toContain('current content');
+  expect((await takeAttemptSeq(db)) - seq).toBe(2n); // the sweep took exactly one attempt sequence (the fence) for its one push; the probe's take is the other
  });
 
 // Item 2: a ciphertext row beside a healthy sibling when the push fails.
