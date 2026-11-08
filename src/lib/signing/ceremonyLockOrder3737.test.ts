@@ -19,7 +19,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb, createDbNode, createDbOrgAndGraph } from '../../test/helpers.js';
 import { insertSoftPasskey, softPasskey, type SoftPasskey } from '../../test/softPasskey.js';
-import { createSigningRequestInTransaction } from './requests.js';
+import { createSigningRequestInTransaction, SigningRefusal } from './requests.js';
 import { CeremonyRefused, completeSigning, openProofCeremony, proofChallenge, proveForSigning } from './signingCeremony.js';
 import { signatureChallenge, signaturePayloadBytes } from './payload.js';
 import { clearSignatureVerifyCache } from './verify.js';
@@ -196,5 +196,46 @@ describe('#3737 proof vs completion lock order (real functions, two connections)
     expect(pr.ok && pr.value.outcome === 'open').toBe(true);
     expect(!cr.ok && cr.error instanceof CeremonyRefused).toBe(true);
     expect(await state(w)).toEqual({ request: 'open', signatures: 0, counter: 2, oldSignConsumed: true });
+  }, 40_000);
+  it('a signer id read before the anchor authorizes nothing: a ceremony spent while the completion waits is refused', async () => {
+    const w = await seed();
+    const before = await state(w);
+    // The gate holds the SIGNER's user anchor (the same advisory key the proof and the completion take).
+    await gate.query('BEGIN');
+    await gate.query(`SELECT pg_advisory_xact_lock(hashtext('authorization:user'), hashtext($1))`, [w.userId]);
+    const c = settle(completion(w, 3)());
+    const cWait = await waitBlocked();
+    expect(cWait.query).toMatch(/pg_advisory_xact_lock/);
+    // While it waits, the ceremony it pre-read is spent (a binding to another user is blocked by the DB's bound-once
+    // trigger, so the user-equality re-check after the lock is defense in depth that cannot be staged).
+    await gate.query(`UPDATE passkey_ceremonies SET consumed_at = (clock_timestamp() AT TIME ZONE 'UTC') WHERE id = $1`, [w.signCeremonyId]);
+    await gate.query('COMMIT');
+    const cr = await c;
+    expect(!cr.ok && cr.error instanceof CeremonyRefused, 'completion must re-judge the ceremony under the anchor').toBe(true);
+    const after = await state(w);
+    expect(after).toEqual({ ...before, oldSignConsumed: true });
+    expect(after.signatures).toBe(0);
+  }, 40_000);
+
+  it('completion locks only the signer\'s own credential: another person\'s credential row is never waited on', async () => {
+    const w = await seed();
+    const { org } = { org: await db.orgMember.findFirstOrThrow({ where: { userId: w.userId } }) };
+    const bob = await db.user.create({ data: { handle: 'lo-bob', roles: [] } });
+    await db.orgMember.create({ data: { organizationId: org.organizationId, userId: bob.id, role: 'CONTRIBUTOR' } });
+    const bobKey = softPasskey();
+    await insertSoftPasskey(db, bob.id, bobKey, { label: 'bob key' });
+    // Bob's proof is, in effect, holding his credential row.
+    await gate.query('BEGIN');
+    await gate.query('SELECT id FROM passkey_credentials WHERE owner_id = $1 FOR UPDATE', [bob.id]);
+    const a = bobKey.assert({ payload: Buffer.alloc(0), rawChallenge: w.signingChallenge, origin: ORIGIN, rpId: RP, counter: 3 });
+    const run = settle(completeSigning(db, {
+      requestId: w.requestId, ceremonyId: w.signCeremonyId, browserNonceHash: w.browserHash, credentialId: bobKey.credentialId, assertion: a,
+    }));
+    const outcome = await Promise.race([run, new Promise<'waited'>((res) => setTimeout(() => res('waited'), 4000))]);
+    await gate.query('COMMIT');
+    expect(outcome, 'completion with a foreign credential waited on that credential\'s row lock').not.toBe('waited');
+    const r = outcome as Awaited<typeof run>;
+    expect(!r.ok && r.error instanceof SigningRefusal && r.error.code === 'SIGNATURE_NOT_VERIFIED').toBe(true);
+    expect((await state(w)).signatures).toBe(0);
   }, 40_000);
 });
