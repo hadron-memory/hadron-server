@@ -142,8 +142,12 @@ describe('#2026 count boundaries and omission',()=>{
  it('counts a complete empty set as zero and never emits a zero attention line',async()=>{
   await db.channelReadState.create({data:{workerId:worker.id,channelId:channel.id,lastSeenSeq:13}});
   const result={content:[{type:'text',text:'original'}],structuredContent:{ok:true},_meta:{old:1}};
-  const out=await appendDeliveryPending(result,context() as any);
-  expect(out._meta).toEqual({old:1,'hadron/deliveryPending':metadata(0)});expect(out.content).toEqual(result.content);expect(out.structuredContent).toEqual(result.structuredContent);
+  const got=await observe(()=>appendDeliveryPending(result,context() as any));const out=got.result;
+  const footer=(out._meta as Record<string,unknown>)?.['hadron/deliveryPending'];
+  expectFooter({result:footer,omitted:got.omitted},metadata(0));
+  // Whether the footer ran or was omitted with a recorded diagnostic, the original result is otherwise untouched: no zero attention line.
+  expect(out._meta).toEqual(footer===undefined?{old:1}:{old:1,'hadron/deliveryPending':metadata(0)});
+  expect(out.content).toEqual(result.content);expect(out.structuredContent).toEqual(result.structuredContent);
  });
  it.each(['encrypted','post-only','holder-refused'])('omits %s channels from the admitted set',async mode=>{
   if(mode==='encrypted') await db.memory.update({where:{id:channel.memoryId},data:{isEncrypted:true}});
@@ -215,9 +219,9 @@ describe('#2026 per-call SDK and committed marks',()=>{
   const pulled=await request(true,`query { deliveryBatches(appRef: "${app.id}") { batches { id } } }`);
   expect(pulled.errors).toBeUndefined();
   const id=pulled.data.deliveryBatches.batches[0].id;
-  const acked=await request(true,`mutation { acknowledgeDeliveryBatches(batchIds: ["${id}"]) { acknowledged unchanged } }`);
+  const got=await observe(()=>request(true,`mutation { acknowledgeDeliveryBatches(batchIds: ["${id}"]) { acknowledged unchanged } }`));const acked=got.result;
   expect(acked.errors).toBeUndefined();expect(acked.data.acknowledgeDeliveryBatches.acknowledged).toBe(1);
-  expect(acked.extensions?.hadron?.deliveryPending).toEqual(metadata(3));
+  expectFooter({result:acked.extensions?.hadron?.deliveryPending,omitted:got.omitted},metadata(3));
  });
  it('counts each reached message once and omits own-authored or deleted rows',async()=>{
   const rows=await db.node.findMany({where:{messageChannelId:channel.id},orderBy:{seq:'asc'}});
@@ -255,6 +259,16 @@ describe('#2671 the selective oracle', () => {
   expect(got).toEqual({result:undefined,omitted:0});
   expect(()=>expectFooter(got,metadata(13))).toThrow();
   expect(()=>expectPair(undefined,metadata(0),0)).toThrow();
+ });
+ it('5: a forced P2028 at the zero-count appender is accepted only with its diagnostic and leaves the result untouched', async () => {
+  const result={content:[{type:'text',text:'original'}],structuredContent:{ok:true},_meta:{old:1}};
+  const spy=vi.spyOn(db,'$transaction').mockRejectedValueOnce(p2028());
+  try {
+   const got=await observe(()=>appendDeliveryPending(result,context() as any));
+   expect(got.omitted).toBe(1);expect(got.result).toBe(result);expect(got.result._meta).toEqual({old:1});
+   expectFooter({result:(got.result._meta as Record<string,unknown>)?.['hadron/deliveryPending'],omitted:got.omitted},metadata(0));
+   expect(()=>expectFooter({result:undefined,omitted:0},metadata(0))).toThrow();
+  } finally { spy.mockRestore(); }
  });
  it('4: only budget-class omissions excuse an absence; a leak or any other fault never does', () => {
   // 'saturated' is what a leaked footer slot looks like: it must never excuse a missing footer.
