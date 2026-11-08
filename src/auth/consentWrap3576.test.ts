@@ -19,16 +19,22 @@ import { CONSENT_TEMPLATE } from './consent.template.js';
 const LONG = 'Q'.repeat(80);
 
 function findBrowser(): string | null {
-  if (process.env.CONSENT_BROWSER) return existsSync(process.env.CONSENT_BROWSER) ? process.env.CONSENT_BROWSER : null;
+  if (process.env.CONSENT_BROWSER) {
+    // An explicit opt-in that points nowhere must fail loudly, not degrade to a skip.
+    if (!existsSync(process.env.CONSENT_BROWSER)) throw new Error('CONSENT_BROWSER does not exist: ' + process.env.CONSENT_BROWSER);
+    return process.env.CONSENT_BROWSER;
+  }
   const root = join(homedir(), '.cache', 'ms-playwright');
   if (!existsSync(root)) return null;
-  for (const d of readdirSync(root).filter((n) => /^chromium-\d+$/.test(n)).sort().reverse()) {
+  for (const d of readdirSync(root).filter((n) => /^chromium-\d+$/.test(n)).sort((a, b) => Number(b.split('-')[1]) - Number(a.split('-')[1]))) {
     const bin = join(root, d, 'chrome-linux64', 'chrome');
     if (existsSync(bin)) return bin;
   }
   return null;
 }
-const browser = findBrowser();
+let browser: string | null = null;
+try { browser = findBrowser(); } catch (e) { if (process.env.CONSENT_BROWSER) throw e; }
+if (!browser) console.warn('consentWrap3576: no Chromium found (set CONSENT_BROWSER); geometry layer skipped');
 
 type Params = Partial<Parameters<typeof renderConsent>[0]>;
 const page = (over: Params) => renderConsent({
@@ -117,6 +123,15 @@ describe.skipIf(!browser)('#3576 consent card geometry (real Chromium)', () => {
     expect(m.bad).toEqual([]);
     expect(m.doc).toBeLessThanOrEqual(m.vw);
     expect(m.text).toContain(notice);
+  });
+});
+
+describe('#3576 hostile values are escaped, not interpreted', () => {
+  it('renders markup in client name, scope and resource as text', () => {
+    const evil = '"><img src=x onerror=window.__pwned=1>';
+    const html = page({ clientName: evil, oauthScopes: [evil] as unknown as ('mcp' | 'account')[], resource: 'https://x.example/' + evil });
+    expect(html).not.toContain('<img src=x');
+    expect(html).not.toMatch(/<img[^>]*onerror/i);
   });
 });
 
