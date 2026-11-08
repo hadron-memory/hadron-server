@@ -9105,8 +9105,10 @@ export const typeDefs = `#graphql
     (hrn:node:hadronmemory.com:specs:cor:dmo:050:12, acting as themselves) and to the key itself; anyone else
     gets APP_KEY_NOT_FOUND, exactly as for a key that does not exist, before any memory or node is resolved.
     A manager sees the key's events only in memories the manager can read (no resource named: every such
-    memory; a named memory still needs READ). The key, naming no resource, sees all of its own events. It
-    composes with the window, type and resource filters. Rows stay volume-only as above.
+    memory; a named memory still needs READ). The key, naming no resource, sees its own events in the memories
+    it can read now, plus its events attributed to no memory (ruling 0254); naming a node, loc or memory, it sees
+    only its own events there, in memories it can read. It composes with the window, type and resource filters.
+    Rows stay volume-only as above.
     """
     usageEvents(type: String, memoryId: ID, nodeId: ID, loc: String, since: DateTime, until: DateTime, appKey: ID, limit: Int, offset: Int): [UsageEvent!]!
     """
