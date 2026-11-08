@@ -23,6 +23,7 @@ import { getMemoryEncryptionInfo } from '../nodeCrypto.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { teamChatMutations } from '../../api/graphql/schema/resolvers.teamChat.js';
 import { registerHost } from '../agentTasks/hosts.js';
+import { declareAllStopLanes } from '../../test/stopLanes.js';
 
 vi.mock('../bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -220,5 +221,25 @@ describe('#3455: a preview that lists STOP does not declare a serving consumer',
     expect(await db.stopConsumerDeclaration.count({ where: { appId: w.appId } })).toBe(before);
     await Q.dueWakes({}, { appRef: w.appId, accepts: ['STOP'] }, keyCtx(w.keyId));
     expect(await db.stopConsumerDeclaration.count({ where: { appId: w.appId } })).toBe(before + 1);
+  });
+});
+
+describe('#3455 (Vera, cor:agt:090:04): a STOP notice a preview shows is still offered to the next declaring consumer', () => {
+  it('a preview lists the notice and consumes nothing; the spending read then offers it and its proof acknowledges', async () => {
+    await build({ workers: 1, budget: 5 });
+    const manager = { db, roles: [], userId: w.userId, organizationId: w.orgId } as unknown as Context;
+    await declareAllStopLanes(db, w.appId);
+    const sig = await M.setTeamStopSignal({}, { input: { appRef: w.appId, level: 'HALT', scope: 'WORKER', worker: w.workers[0]!.id } }, manager);
+    const kinds = (p: any) => p.wakes.flatMap((x: any) => x.reasons.map((r: any) => r.kind));
+    const preview = await Q.dueWakes({}, { appRef: w.appId, accepts: ['STOP'], preview: true }, manager);
+    expect(kinds(preview)).toEqual(['STOP']);
+    expect(preview.wakes[0].reasons[0].stop.signalId).toBe(sig.id);
+    expect(await reservations()).toBe(0);
+    // Offered again, to a real consumer, as if the preview had not happened.
+    const real = await Q.dueWakes({}, { appRef: w.appId, accepts: ['STOP'] }, manager);
+    expect(kinds(real)).toEqual(['STOP']);
+    expect(real.wakes[0].reasons[0].stop.signalId).toBe(sig.id);
+    const ack = await M.acknowledgeWakes({}, { proofs: [real.wakes[0].proof] }, manager);
+    expect(ack.acknowledged).toBe(1);
   });
 });
