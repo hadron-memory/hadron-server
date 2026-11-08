@@ -131,7 +131,11 @@ export async function insertWorkerStart(
   tx: Prisma.TransactionClient,
   a: {
     appId: string; hostId: string; workerId: string; worktree: string; family: string; taskId: string | null;
-    issuer: { issuedBy: 'platform' } | { issuedBy: 'user'; issuedByUserId: string; issuedByAgentId: string | null };
+    issuer:
+      | { issuedBy: 'platform' }
+      | { issuedBy: 'user'; issuedByUserId: string; issuedByAgentId: string | null }
+      // #3321: a worker on its holder's instruction; the session it starts is still the manager's kind of launch.
+      | { issuedBy: 'worker'; issuedByUserId: string | null; issuedByWorkerId: string; issuedByAgentId: string | null };
     hold: StartHold;
   },
 ): Promise<string> {

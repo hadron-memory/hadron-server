@@ -92,8 +92,11 @@ describe('findNodes content scope (cor:dmo:110:08)', () => {
     const byType = await findNodes({ query: 'retention', filter: { memoryIds: [memory.id], nodeType: 'comment' }, limit: 10 });
     expect(byType.hits).toHaveLength(3);
     // Paging happens AFTER the scope: two pages of the three comments.
-    const page1 = await findNodes({ query: 'retention', filter: { memoryIds: [memory.id], contentScope: 'COMMENTS' }, limit: 2 });
-    const page2 = await findNodes({ query: 'retention', filter: { memoryIds: [memory.id], contentScope: 'COMMENTS' }, limit: 2, offset: 2 });
+    // #2986: keyword, not the hybrid default. createMemory turns the vector
+    // index on and each comment's embedding lands after its write returns, so
+    // a hybrid page 2 can rank against vectors page 1 did not see.
+    const page1 = await findNodes({ query: 'retention', mode: 'keyword', filter: { memoryIds: [memory.id], contentScope: 'COMMENTS' }, limit: 2 });
+    const page2 = await findNodes({ query: 'retention', mode: 'keyword', filter: { memoryIds: [memory.id], contentScope: 'COMMENTS' }, limit: 2, offset: 2 });
     expect([...page1.hits, ...page2.hits].map((h: any) => h.node.id).sort()).toEqual([...comments].sort());
     // ALL returns both kinds.
     const all = await findNodes({ query: 'feedback', filter: { memoryIds: [memory.id], contentScope: 'ALL' }, limit: 10 });

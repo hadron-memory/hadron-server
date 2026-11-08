@@ -119,7 +119,6 @@ beforeEach(async () => {
       orgId: org.id,
       name: 'TR Backend Engineer',
       personaRole: 'backend-engineer',
-      systemPrompt: 'You are {{name}}, a {{role}}.',
     },
     ctx(admin.id),
   );
@@ -178,12 +177,8 @@ describe('#960 — teamRoles read', () => {
     // No installed agent carries frontend-engineer dressing → no role-agent.
     const fe = page.items.find((r: any) => r.role === 'frontend-engineer');
     expect(fe.roleAgent).toBeNull();
-    // Deprecated field: whatever the template says, it resolves null.
-    for (const prompt of ['You are {{name}}.', 'You are {{worker.name}}.', 'You are a {{role}} with no name.']) {
-      await db.agent.update({ where: { id: roleAgent.id }, data: { systemPrompt: prompt } });
-      const again = await teamRoles(ctx(contrib.id));
-      for (const item of again.items) expect(item.hasNamePlaceholder).toBeNull();
-    }
+    // Deprecated field: it resolves null.
+    for (const item of page.items) expect(item.hasNamePlaceholder).toBeNull();
   });
 
   it('excludes role SUB-nodes and paginates deterministically', async () => {
@@ -805,4 +800,15 @@ describe('deleteTeamRole (#1002, simplified by #1050)', () => {
     await expect(del(ctx(outsider.id), { role: 'frontend-engineer' })).rejects.toThrow(/Forbidden/);
     expect(await roleLocs()).toContain('roles:frontend-engineer');
   });
+});
+
+it('#2168 ruling0141 role index prefers physical matches over a distinct derived role Agent',async()=>{
+ const derived=await M.createAgent({}, {orgId:org.id,name:'Imported backend',personaRole:'backend-engineer'},ctx(admin.id));
+ await db.agentOrgGrant.create({data:{orgId:org.id,agentId:derived.id,activatedAt:new Date()}});
+ await db.agentImport.create({data:{parentAgentId:teamAgent.id,importedAgentId:derived.id,position:100,required:true,agentOrgGrantOrgId:org.id,agentOrgGrantAgentId:derived.id}});
+ const page=await teamRoles(ctx(admin.id));
+ expect(page.items.find((r:any)=>r.role==='backend-engineer').roleAgent?.id).toBe(roleAgent.id);
+ // A role offered only by derivation still resolves; the tier rule is not a blanket exclusion.
+ await db.agent.update({where:{id:derived.id},data:{personaRole:'frontend-engineer'}});
+ expect((await teamRoles(ctx(admin.id))).items.find((r:any)=>r.role==='frontend-engineer').roleAgent?.id).toBe(derived.id);
 });

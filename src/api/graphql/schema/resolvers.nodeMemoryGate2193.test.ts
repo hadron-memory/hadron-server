@@ -366,13 +366,13 @@ describe('#2193 — App-key and session principals: Node.memory answers as Query
         if (one.data.node) served.push(one.data.node);
       }
       // Stated up front, per principal and node: what the Memory record must answer.
-      // The bare App key reaches the installed Agent's own memories (system, knowledge) and not
-      // the app-owned working memory. A session narrows it to the session's reach (cor:aut:020:02):
+      // The bare App key reaches the installed Agent's own system memory and not the org-owned
+      // knowledge its item links (#1376, R201: an item is a limit, never a grant) nor the app-owned
+      // working memory. A session narrows it to the session's reach (cor:aut:020:02):
       // the Agent's system memory only. Neither reaches a Worker's working memory record
       // (sessionScopedMemoryIds, #1349), though the parent still admits the handoff node.
-      const bare = !headers['x-hadron-session'];
       const expected: Record<string, string | null> = {
-        [node.sys!]: mem.sys!, [node.know!]: bare ? mem.know! : null, [node.handoff!]: null,
+        [node.sys!]: mem.sys!, [node.know!]: null, [node.handoff!]: null,
       };
       expect(served.map((x) => x.id), `${who}: handoff admitted`).toContain(node.handoff);
       for (const [id, memoryId] of Object.entries(expected)) {
@@ -453,7 +453,7 @@ describe('#474 / #2193 — preload and no-preload twins over HTTP', () => {
     // or the refusal it must give. A principal whose list vanished fails here, not silently.
     const expected: Record<string, { ids: string[] } | { refused: true }> = {
       owner: { ids: [node.sys!, node.know!] }, admin: { ids: [node.sys!, node.know!] },
-      reader: { ids: [node.sys!, node.know!] }, member: { ids: [node.sys!, node.know!] }, stranger: { refused: true },
+      reader: { ids: [node.sys!, node.know!] }, member: { ids: [node.sys!] }, stranger: { refused: true },
     };
     const q = 'query($a: ID!) { appNodes(appRef: $a) { id memory { id name description createdAt } } }';
     for (const who of Object.keys(expected)) {
@@ -464,6 +464,13 @@ describe('#474 / #2193 — preload and no-preload twins over HTTP', () => {
       expect(app.errors, `${who}: appNodes`).toBeUndefined();
       const preload = new Map<string, any>(app.data.appNodes.map((x: any) => [x.id, x.memory]));
       expect([...preload.keys()].sort(), `${who}: nodes served`).toEqual([...want.ids].sort());
+      if (who === 'member') {
+        // #3305: the non-org member loses item-only knowledge on both twins,
+        // while its independently admitted system node remains in the list.
+        const hidden = await post(bearer, 'query($r: ID!) { node(ref: $r) { id } }', { r: node.know });
+        expect(hidden.errors).toBeUndefined();
+        expect(hidden.data.node).toBeNull();
+      }
       for (const id of want.ids) {
         const one = await post(bearer, 'query($r: ID!) { node(ref: $r) { memory { id name description createdAt } } }', { r: id });
         expect(one.errors, `${who}: node(ref)`).toBeUndefined();
@@ -511,9 +518,11 @@ describe('#2193 — run principal', () => {
         const viaNode = await NodeR.memory({ memoryId }, {}, c);
         expect(viaNode?.id ?? null, `run for ${who}: ${key}`).toBe(record?.id ?? null);
       }
-      // Stated up front: the run reaches the installed Agent's knowledge memory, so the
-      // control is not vacuously null on both sides.
-      expect(await NodeR.memory({ memoryId: mem.know }, {}, c), `run for ${who}: know`).toMatchObject({ id: mem.know });
+      // #3280 / ruling0105 A: keep a positive admin control, while an App member
+      // with no independent org access is explicitly refused by both record doors.
+      const know = await NodeR.memory({ memoryId: mem.know }, {}, c);
+      if (who === 'admin') expect(know, `run for ${who}: know`).toMatchObject({ id: mem.know });
+      else expect(know, `run for ${who}: know`).toBeNull();
     }
   });
 });

@@ -152,6 +152,16 @@ export class SessionKeyCache {
     return entry.key;
   }
 
+  /** #3496: a read preserving locked-session semantics must not borrow another session's resident key.
+   * Request-staged keys are local to this call; a session key must belong to this exact session.
+   * Uses the normal TTL check, so an expired entry cannot authorize shape values either.
+   */
+  hasForSession(memoryId: string, sessionId?: string): boolean {
+    if (getRequestKey(memoryId)) return true;
+    if (!sessionId || !this.byMemory.get(memoryId)?.sessionIds.has(sessionId)) return false;
+    return this.getByMemoryId(memoryId) !== null;
+  }
+
   /**
    * True if a key is available for the given memory (request or session).
    *

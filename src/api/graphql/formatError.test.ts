@@ -29,6 +29,7 @@ import {
   WorkerNotFoundError,
 } from '../../lib/entityRef/errors.js';
 import { AssetUploadError } from '../../controller/operations/beginAssetUpload.js';
+import { SetAssetEnabledError } from '../../controller/operations/setAgentAssetUploadEnabled.js';
 
 /** What Apollo hands `formatError` for a thrown (non-GraphQLError) error. */
 function wrap(original: Error): { formatted: GraphQLFormattedError; error: GraphQLError } {
@@ -43,6 +44,15 @@ function format(original: Error): GraphQLFormattedError {
   const { formatted, error } = wrap(original);
   return formatGraphQLError(formatted, error);
 }
+
+describe('SetAssetEnabledError → extensions.code (#2979)', () => {
+  it.each(['PERMISSION_DENIED', 'NOT_FOUND'])('surfaces %s with its own message and no request id', (code) => {
+    const out = format(new SetAssetEnabledError(code, 'nope'));
+    expect(out.extensions?.code).toBe(code);
+    expect(out.message).toBe('nope');
+    expect(out.extensions).not.toHaveProperty('requestId');
+  });
+});
 
 describe('AssetUploadError → extensions.code (#918)', () => {
   // Every code the class throws today. The mapping is by CLASS, so this list is

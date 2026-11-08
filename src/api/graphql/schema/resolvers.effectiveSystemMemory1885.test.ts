@@ -218,7 +218,7 @@ describe('an inherited node shows its content and none of the base tenant\'s rec
     expect(await N.createdByWorker(got, {}, ctx(reader))).toBeNull();
     expect(await N.signingRequests(got, {}, ctx(reader))).toEqual([]);
     expect(await N.lintWarnings(got, { first: 50 }, ctx(reader))).toBeNull(); // #2048: unavailable, never the base owner's link state
-    expect(await N.commentSummary(got, {}, ctx(reader))).toEqual({ openThreads: 0, resolvedThreads: 0, comments: 0, viewerOpenThreadId: null });
+    expect(await N.commentSummary(got, {}, ctx(reader))).toEqual({ openThreads: 0, resolvedThreads: 0, comments: 0, viewerOpenThreadId: null, oldestOpenThreadAt: null });
     const approval = await N.approvalStatus(got, {}, ctx(reader));
     expect(approval.approval).toBeNull();
     expect(typeof approval.state).toBe('string');
@@ -245,9 +245,12 @@ describe('an inherited node shows its content and none of the base tenant\'s rec
     const body = sdl.slice(sdl.indexOf('\n  type Node {'), sdl.indexOf('\n  }', sdl.indexOf('\n  type Node {')));
     const fields = [...body.matchAll(/^    ([a-zA-Z]+)[:(]/gm)].map((m) => m[1]);
     const CONTENT = [
-      'id', 'revision', 'memoryId', 'nodeType', 'objectType', 'loc', 'urn', 'portalUrl', 'inheritedFrom',
+      // actionUrn (#2610) is the node's own address class, like urn/portalUrl: it
+      // names the entry under its HOLDING (base) Agent's slug — an identifier the
+      // served `urn` already discloses more of — and carries no record or person.
+      'id', 'revision', 'memoryId', 'nodeType', 'objectType', 'loc', 'urn', 'portalUrl', 'actionUrn', 'inheritedFrom',
       'isPlaceholder', 'isLink', 'name', 'alias', 'description', 'abstract', 'abstractOriginHash',
-      'embeddingPendingAt', 'embeddingFailedAt', 'embeddingError', 'embeddingAttempts', 'content', 'tokens',
+      'embeddingPendingAt', 'embeddingFailedAt', 'embeddingError', 'embeddingAttempts', 'indexTruncated', 'content', 'tokens',
       'tags', 'properties', 'data', 'seq', 'ownerRepo', 'isRunnable', 'role', 'llmModel', 'aiAgent',
       'createdAt', 'updatedAt',
     ];
@@ -276,4 +279,25 @@ it('nodeBatch rechecks inherited eligibility after identity selection and before
     expect(result.nodes.map((n: any) => n.id)).toEqual([ids.engRelease]);
     expect(result.unavailable).toEqual([refs[1]]);
   } finally { spy.mockRestore(); }
+});
+
+// #3494: the reported synthetic zero summary, never the base tenant's threads, judges inherited candidates.
+it('open-thread filter treats inherited summaries as zero across Prisma/SQL/lexical/count', async () => {
+  const M = resolvers.Mutation as any;
+  await M.createComment(null, { targetRef: ids.engRelease, body: 'open marker' }, ctx(manager));
+  for (const extra of [{}, {query:'engRelease',mode:'keyword'}, {filterWhere:true}]) {
+    const opts = extra as any;
+    for (const value of [true,false]) {
+      const result = await Q.findNodes(null, {
+        ...(opts.query ? {query:opts.query,mode:opts.mode}:{}), includeTotal:true,
+        filter:{memoryIds:[backend.mem],hasOpenThreads:value,...(opts.filterWhere?{where:{path:['unused'],exists:false}}:{})},
+      }, ctx(reader));
+      const hit = result.hits.find((h:any)=>h.node.id===ids.engRelease);
+      if(value) expect(hit).toBeUndefined();
+      else { expect(hit).toBeDefined(); expect(await N.commentSummary(hit.node,{},ctx(reader))).toMatchObject({openThreads:0,oldestOpenThreadAt:null}); }
+      if(!opts.query) expect(result.total).toBe(value?0:4);
+    }
+  }
+  const own = await Q.findNodes(null,{filter:{memoryIds:[engineer.mem],hasOpenThreads:true}},ctx(manager));
+  expect(hitIds(own)).toContain(ids.engRelease);
 });

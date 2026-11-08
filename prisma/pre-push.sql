@@ -83,36 +83,6 @@ BEGIN
   ALTER TABLE workers ALTER COLUMN slug SET NOT NULL;
 END $$;
 
--- ─── #1241: Agent prompt field fold ───────────────────────────────────────
--- Migration-managed databases run 20260928010000_agent_prompt_field instead.
--- Local dev/test databases have no migration history, so fold the authored
--- persona text before `prisma db push` can drop its column. Keep the UPDATE
--- identical to that migration; change one, change the other. Dropping the old
--- column here makes a second pre-push run a no-op.
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM information_schema.tables
-    WHERE table_schema = current_schema() AND table_name = 'agents'
-  ) OR NOT EXISTS (
-    SELECT 1 FROM information_schema.columns
-    WHERE table_schema = current_schema()
-      AND table_name = 'agents' AND column_name = 'persona_prompt'
-  ) THEN
-    RETURN;
-  END IF;
-
-  UPDATE "agents"
-  SET "system_prompt" = CASE
-    WHEN "persona_prompt" IS NULL THEN "system_prompt"
-    WHEN "system_prompt" IS NULL THEN "persona_prompt"
-    ELSE "persona_prompt" || E'\n\n' || "system_prompt"
-  END
-  WHERE "persona_prompt" IS NOT NULL;
-
-  ALTER TABLE "agents" DROP COLUMN "persona_prompt";
-END $$;
-
 -- ─── #1261: OAuth scopes on user keys + authorization codes ────────────────
 -- Migration-managed databases receive the same shape and backfill from
 -- 20260923010000_oauth_user_key_scopes. Local dev/test databases have no

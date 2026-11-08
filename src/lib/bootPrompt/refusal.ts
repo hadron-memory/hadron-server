@@ -9,6 +9,7 @@
 import { GraphQLError } from 'graphql';
 
 export const BOOT_PROMPT_REFUSAL_CODES = [
+  'BOOT_PROMPT_INSTALL_LICENSE_INACTIVE',
   'BOOT_PROMPT_NOT_SET',
   'BOOT_PROMPT_TARGET_DELETED',
   'BOOT_PROMPT_NOT_APPROVED',
@@ -20,6 +21,7 @@ export type BootPromptRefusalCode = (typeof BOOT_PROMPT_REFUSAL_CODES)[number];
 export type BootPromptSurface = 'bind' | 'chat' | 'run';
 
 const MESSAGES: Record<BootPromptRefusalCode, string> = {
+  BOOT_PROMPT_INSTALL_LICENSE_INACTIVE: 'The personal App owner no longer qualifies to use this organization Agent.',
   BOOT_PROMPT_NOT_SET: 'No boot prompt is set for this Agent, so it cannot be served.',
   BOOT_PROMPT_TARGET_DELETED: "This Agent's boot prompt was deleted, so it cannot be served.",
   BOOT_PROMPT_NOT_APPROVED: "This Agent's boot prompt has no approved revision, so it cannot be served.",

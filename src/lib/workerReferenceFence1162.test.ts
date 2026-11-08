@@ -8,12 +8,12 @@ const source = readFileSync(new URL('../../prisma/worker-reference-invariants.sq
 // A table created AFTER the closed #1162 migration cannot be added to it (the migration replays in order, so a trigger on
 // a later table would fail a fresh deploy). Such a table puts its fence trigger in its own invariants file; the inventory
 // is the union.
-const laterFences = ['served-prompt-invariants.sql', 'dark-alarm-invariants.sql'].map((f) => readFileSync(new URL(`../../prisma/${f}`, import.meta.url), 'utf8'));
+const laterFences = ['served-prompt-invariants.sql', 'dark-alarm-invariants.sql', 'coordinator-cadence-invariants.sql', 'post-limit-invariants.sql'].map((f) => readFileSync(new URL(`../../prisma/${f}`, import.meta.url), 'utf8'));
 const inventory = [source, ...laterFences].join('\n');
 describe('#1162 reference fence deployment', () => {
   it('ships byte-identical migration and post-push guards', () => {
     // The guard file is its migrations, in order: the #1162 fence, then each later table that joined the inventory.
-    const migrations = ['20261016050000_worker_reference_fence', '20261019040100_worker_wake_acks_fence', '20261020030200_stop_signal_worker_fence', '20261022000100_compiled_prompt_worker_fence', '20261024100300_context_reset_worker_fence', '20261024120100_ticker_generated_worker_fence']
+    const migrations = ['20261016050000_worker_reference_fence', '20261019040100_worker_wake_acks_fence', '20261020030200_stop_signal_worker_fence', '20261022000100_compiled_prompt_worker_fence', '20261024100300_context_reset_worker_fence', '20261024120100_ticker_generated_worker_fence', '20261105170100_content_validation_reporter_worker_fence', '20261107010100_grants_worker_fence']
       .map((m) => readFileSync(new URL(`../../prisma/migrations/${m}/migration.sql`, import.meta.url), 'utf8'));
     expect(migrations.join('')).toBe(source);
     expect(readFileSync(new URL('../../prisma/post-push.sql', import.meta.url), 'utf8')).toContain('\\ir worker-reference-invariants.sql');

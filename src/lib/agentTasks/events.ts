@@ -1,3 +1,5 @@
+import type { ActAdmission, ActInstruction, StaffActAdmission } from '../auth/instructedAct.js';
+import type { FindingCounts } from './findings.js';
 /**
  * #1705 — the application writer of `agent_team_events` (cor:agt:050:11).
  * #2644: SQL emits only the fixed empty platform task.released event when
@@ -12,11 +14,13 @@
  * passing a bag through.
  */
 
-import { raiseDeliveredOnAssignment } from '../tickers/standbyAssignment.js';
 import type { Prisma } from '../../generated/prisma/index.js';
 import { currentActor } from '../requestActor.js';
 import { generateId } from '../id.js';
 import { toNaiveUtc } from '../sessionActivity.js';
+import type { PropertiesFingerprint } from './properties.js';
+import type { PrProtocolEvent } from './prProtocol.js';
+export { PR_EVENT_TYPES } from './prProtocol.js';
 
 /** The task event types T1 writes (cor:agt:050:11; `task.reassigned` is Proposed there). */
 export const TASK_EVENT_TYPES = [
@@ -26,6 +30,7 @@ export const TASK_EVENT_TYPES = [
   'task.started',
   'task.progress',
   'task.finished',
+  'task.finding-disposed',
   'task.cancelled',
   // #1754 — the backlog moves (cor:agt:050:02).
   'task.parked',
@@ -33,6 +38,10 @@ export const TASK_EVENT_TYPES = [
   'task.warning',
   'task.released', 'task.priority', 'task.blocker-added', 'task.blocker-removed',
   'task.edited',
+  // #2420 (cor:agt:050:28): a change to the task's own properties, sizes and hashes only.
+  'task.properties-changed',
+  // #2651 (cor:agt:050:29): a started task handed back by its assignee; the reason code only, never its text.
+  'task.handed-back',
 ] as const;
 export type TaskEventType = (typeof TASK_EVENT_TYPES)[number];
 
@@ -53,13 +62,21 @@ export const ASSIGNMENT_EVENT_TYPES = ['assignment.queued', 'assignment.matched'
 export const ASSIGNED_EVENT_TYPES = ['task.assigned', 'task.reassigned', 'assignment.matched'] as const;
 
 /** Passive history must be excluded from EVERY later-event/activity predicate when a kind is added here. */
-export const PASSIVE_EVENT_TYPES = ['task.warning', 'task.edited'] as const;
+export const PASSIVE_EVENT_TYPES = ['task.warning', 'task.edited', 'task.properties-changed'] as const;
 /** #2609: only facts already readable by every team-event reader. Assignee state and future codes are excluded. */
 export const RECORDED_TASK_WARNING_CODES = ['task.create.no-source', 'task.finish.open-children'] as const;
 export type RecordedTaskWarningCode = (typeof RECORDED_TASK_WARNING_CODES)[number];
 
-export const TASK_EDIT_FIELDS = ['title', 'description', 'tags', 'requirements', 'startBy', 'closeSessionWhenDone'] as const;
+export const TASK_EDIT_FIELDS = ['title', 'description', 'tags', 'requirements', 'startBy', 'finishBy', 'closeSessionWhenDone', 'references'] as const;
 export type TaskEditField = typeof TASK_EDIT_FIELDS[number];
+
+/**
+ * #2651 (cor:agt:050:29, Proposed details): the closed set of reasons an assignee hands a started task back for, as
+ * stored on the task and carried by `task.handed-back`. A code outside it is refused (the resolver, and
+ * chk_agent_tasks_hand_back in the database).
+ */
+export const TASK_HAND_BACK_CODES = ['missing_input', 'cannot_do', 'refused', 'out_of_scope', 'duplicate'] as const;
+export type TaskHandBackCode = (typeof TASK_HAND_BACK_CODES)[number];
 
 /** A party to a task: exactly one of a Worker or a User. */
 export type TaskParty = { workerId: string; userId?: never; via?: never } | { userId: string; workerId?: never; via?: 'manager' };
@@ -69,11 +86,16 @@ export type EventActor = {
   userId: string | null; workerId: string | null; agentId: string | null;
   /** #1756: the headless run that acted. Then the three above are null. */
   runId?: string | null;
+  /** #3132 (cor:agt:050:23): the App key that acted (its claim). Then every other actor id is null. */
+  appKeyId?: string | null;
 };
 
-/** The payload each type carries. Ids, counts, outcome words and flags only — never text. */
+/** Closed per-type payloads: ids/counts/outcomes and the explicitly prescribed PR reference fields.
+ * Task properties and free-form task content never ride these events (cor:agt:050:28).
+ */
 export type TaskEventPayload =
-  | { type: 'task.created'; parentTaskId: string | null; owner: TaskParty; hasAssignee: boolean }
+  | PrProtocolEvent
+  | { type: 'task.created'; parentTaskId: string | null; owner: TaskParty; hasAssignee: boolean; /** #2646: the task a clone was made from. */ clonedFromTaskId?: string | null }
   | { type: 'task.assigned'; assignee: TaskParty; closeSessionWhenDone: boolean }
   | { type: 'task.reassigned'; from: TaskParty; to: TaskParty; closeSessionWhenDone: boolean }
   | { type: 'task.warning'; code: RecordedTaskWarningCode }
@@ -81,10 +103,15 @@ export type TaskEventPayload =
   | { type: 'task.priority'; priority: number }
   | { type: 'task.blocker-added' | 'task.blocker-removed'; blockerTaskId: string }
   | { type: 'task.edited'; fields: TaskEditField[] }
+  /** #2420: `null` is no properties. Size and SHA-256 of the canonical JSON; never the content (cor:agt:050:28). */
+  | { type: 'task.properties-changed'; from: PropertiesFingerprint | null; to: PropertiesFingerprint | null }
   | { type: 'task.started' }
   | { type: 'task.progress' }
-  | { type: 'task.finished'; outcome: string }
+  | { type: 'task.finding-disposed'; findingId: string; disposition: 'fixed' | 'accepted' | 'deferred' | 'rejected' }
+  | { type: 'task.finished'; outcome: string; findingCounts?: FindingCounts }
   | { type: 'task.cancelled'; fromStatus: 'backlog' | 'pending' | 'started'; openChildCount: number }
+  /** #2651: the code only. The optional reason text is on the task row, never here (cor:agt:050:29). */
+  | { type: 'task.handed-back'; code: TaskHandBackCode }
   | { type: 'task.parked' }
   | { type: 'task.ready' }
   | { type: 'assignment.queued' }
@@ -94,6 +121,13 @@ export type TaskEventPayload =
 export function eventActor(userId: string | null | undefined): EventActor {
   const actor = currentActor();
   return { userId: userId ?? null, workerId: actor.workerId, agentId: actor.agentId };
+}
+
+/** A fingerprint is exactly a byte count and a SHA-256 hex digest: nothing else can ride this event (never content). */
+function fingerprintJson(f: PropertiesFingerprint | null): Prisma.InputJsonObject | null {
+  if (f === null) return null;
+  if (!Number.isSafeInteger(f.bytes) || f.bytes < 0 || !/^[0-9a-f]{64}$/.test(f.sha256)) throw new Error('Unsupported properties fingerprint');
+  return { bytes: f.bytes, sha256: f.sha256 };
 }
 
 function partyJson(p: TaskParty): Prisma.InputJsonObject {
@@ -106,16 +140,23 @@ function partyJson(p: TaskParty): Prisma.InputJsonObject {
 /** The stored `payload` for a typed event. Exhaustive over the union, so a new type must be built here. */
 function payloadJson(e: TaskEventPayload): Prisma.InputJsonObject {
   switch (e.type) {
+    case 'review.scheduled': return { slots: e.slots };
+    case 'pr.frozen': return { head: e.head, pullRequest: e.pullRequest };
+    case 'review.seat.assigned': return { slot: e.slot, head: e.head, supersedes: e.supersedes };
+    case 'review.verdict': return { slot: e.slot, head: e.head, verdict: e.verdict, node: e.node, receipt: e.receipt };
+    case 'pr.ready': return { head: e.head };
     case 'task.edited':
       if (e.fields.some(f => !(TASK_EDIT_FIELDS as readonly string[]).includes(f))) throw new Error('Unsupported task edit field');
       return { fields: [...new Set(e.fields)] };
+    case 'task.properties-changed':
+      return { from: fingerprintJson(e.from), to: fingerprintJson(e.to) };
     case 'task.warning':
       if (!(RECORDED_TASK_WARNING_CODES as readonly string[]).includes(e.code)) throw new Error('Unsupported task warning history code');
       return { code: e.code };
     case 'task.created':
       // The owner rides task.created (#1757, cor:agt:050:01): a creator-named
       // owner is visible to the event stream from creation.
-      return { parentTaskId: e.parentTaskId, owner: partyJson(e.owner), hasAssignee: e.hasAssignee };
+      return { parentTaskId: e.parentTaskId, owner: partyJson(e.owner), hasAssignee: e.hasAssignee, ...(e.clonedFromTaskId ? { clonedFromTaskId: e.clonedFromTaskId } : {}) };
     case 'task.assigned':
       return { assignee: partyJson(e.assignee), closeSessionWhenDone: e.closeSessionWhenDone };
     case 'task.reassigned':
@@ -127,10 +168,14 @@ function payloadJson(e: TaskEventPayload): Prisma.InputJsonObject {
     case 'task.started':
     case 'task.progress':
       return {};
+    case 'task.finding-disposed': return { findingId: e.findingId, disposition: e.disposition };
     case 'task.finished':
-      return { outcome: e.outcome };
+      return { outcome: e.outcome, ...(e.findingCounts !== undefined ? { findingCounts: e.findingCounts } : {}) };
     case 'task.cancelled':
       return { fromStatus: e.fromStatus, openChildCount: e.openChildCount };
+    case 'task.handed-back':
+      if (!(TASK_HAND_BACK_CODES as readonly string[]).includes(e.code)) throw new Error('Unsupported task hand-back code');
+      return { code: e.code };
     case 'task.parked':
     case 'task.ready':
     case 'assignment.queued':
@@ -154,14 +199,17 @@ function subjectWorkerId(e: TaskEventPayload): string | null {
  */
 export async function appendTaskEvent(
   tx: Prisma.TransactionClient,
-  args: { appId: string; taskId: string; actor: EventActor; event: TaskEventPayload; createdAt?: Date },
+  args: {
+    appId: string; taskId: string; actor: EventActor; event: TaskEventPayload; createdAt?: Date;
+    /**
+     * #3132 (cor:agt:050:11, rulings:0009): whom the action was for, when the actor (a key or a run) cannot resolve
+     * it: recorded as the event's subject, never as its actor. A worker fills `subjectWorkerId` where the event
+     * names none of its own; a person fills `subjectUserId`.
+     */
+    forParty?: TaskParty | null;
+  },
 ): Promise<void> {
-  const subject = subjectWorkerId(args.event);
-  // S7 (#2023, R90): an assignment to a worker that was on standby raises its delivered mark past the held messages, in this
-  // same transaction, and the count rides the event so the task wake returns it exactly once.
-  const standbyHeld = subject && (ASSIGNED_EVENT_TYPES as readonly string[]).includes(args.event.type)
-    ? await raiseDeliveredOnAssignment(tx, { workerId: subject, taskId: args.taskId, actor: { userId: args.actor.userId, workerId: args.actor.workerId }, now: args.createdAt })
-    : 0;
+  const subject = subjectWorkerId(args.event) ?? args.forParty?.workerId ?? null;
   await tx.agentTeamEvent.create({
     data: {
       appId: args.appId,
@@ -171,8 +219,10 @@ export async function appendTaskEvent(
       actorWorkerId: args.actor.workerId,
       actorAgentId: args.actor.agentId,
       actorRunId: args.actor.runId ?? null,
+      actorAppKeyId: args.actor.appKeyId ?? null,
       subjectWorkerId: subject,
-      payload: standbyHeld > 0 ? { ...payloadJson(args.event), standbyHeld } : payloadJson(args.event),
+      subjectUserId: args.forParty?.userId ?? null,
+      payload: payloadJson(args.event),
       ...(args.createdAt ? { createdAt: args.createdAt } : {}),
     },
   });
@@ -190,8 +240,14 @@ export const ALARM_EVENT_TYPES = [
   'stall.no-progress',
   'stall.owner-unreactive',
   'assignment.unassignable',
+  // #2648: the finish-by deadline passed with the task neither finished nor cancelled (cor:agt:050:14).
+  'stall.finish-by',
   // #2755: a worker gone dark (cor:agt:100:06, Proposed). Task-less; its episode lives in `dark_worker_episodes`.
   'alarm.dark-worker',
+  // #2763: a coordinator that stopped assigning while a lane worker was free (cor:agt:050:31, Proposed). Task-less; its episode lives in `coordinator_cadence_episodes`.
+  'alarm.coordinator-cadence',
+  // #2014: a worker's team-chat post refused by the rate limit. Task-less; its episode lives in `post_limit_episodes`.
+  'alarm.post-limit',
 ] as const;
 export type AlarmEventType = (typeof ALARM_EVENT_TYPES)[number];
 
@@ -399,7 +455,7 @@ export async function appendWorkerCastingEvent(
   args: {
     appId: string; actor: EventActor; workerId: string;
     fromAgentId: string; toAgentId: string; fromRole: string | null; toRole: string | null;
-    clearedBootPromptNodeId: string | null;
+    clearedBootPromptNodeId: string | null; instruction?: ActInstruction;
   },
 ): Promise<void> {
   await tx.agentTeamEvent.create({
@@ -413,6 +469,7 @@ export async function appendWorkerCastingEvent(
       payload: {
         fromAgentId: args.fromAgentId, toAgentId: args.toAgentId, fromRole: args.fromRole, toRole: args.toRole,
         clearedBootPromptNodeId: args.clearedBootPromptNodeId,
+        ...(args.instruction ? { instruction: {kind:args.instruction.kind,ref:args.instruction.ref} } : {}),
       },
     },
   });
@@ -426,12 +483,12 @@ export async function appendWorkerCastingEvent(
  * for a person). Ids and role words only: no name, email, signature, message text or key.
  */
 export const STAFFING_EVENT_TYPES = [
-  'member.added', 'member.role-changed', 'member.removed', 'worker.cast', 'worker.retired', 'worker.deleted',
+  'member.added', 'member.role-changed', 'member.removed', 'worker.cast', 'worker.retired', 'worker.deleted', 'worker.instruction-claimed',
 ] as const;
 export type StaffingEventType = (typeof STAFFING_EVENT_TYPES)[number];
 
-/** The census (`miscastHasReferences`) treats these on the subject worker as the cast's own bookkeeping, not use. */
-export const SELF_BOOKKEEPING_EVENT_TYPES = ['worker.cast', 'worker.retired'] as const;
+/** The census treats these on the subject as bookkeeping, not use. Instruction-claim subjects occur for no-op retirement and delete previews (#3599). */
+export const SELF_BOOKKEEPING_EVENT_TYPES = ['worker.cast', 'worker.retired', 'worker.instruction-claimed'] as const;
 
 async function appendStaffingEvent(
   tx: Prisma.TransactionClient,
@@ -453,49 +510,73 @@ async function appendStaffingEvent(
 /** `member.added` (a new membership) or `member.role-changed` (an existing member's role changed); nothing for an unchanged role. */
 export async function appendMemberSetEvent(
   tx: Prisma.TransactionClient,
-  args: { appId: string; actor: EventActor; userId: string; priorRole: string | null; role: string },
+  args: { appId: string; actor: EventActor; userId: string; priorRole: string | null; role: string; instruction?: ActInstruction },
 ): Promise<void> {
   if (args.priorRole === args.role) return;
   if (args.priorRole === null) {
-    return appendStaffingEvent(tx, { appId: args.appId, actor: args.actor, type: 'member.added', payload: { userId: args.userId, role: args.role } });
+    return appendStaffingEvent(tx, { appId: args.appId, actor: args.actor, type: 'member.added', payload: { userId: args.userId, role: args.role, ...instructionPayload(args.instruction) } });
   }
   return appendStaffingEvent(tx, {
     appId: args.appId, actor: args.actor, type: 'member.role-changed',
-    payload: { userId: args.userId, fromRole: args.priorRole, toRole: args.role },
+    payload: { userId: args.userId, fromRole: args.priorRole, toRole: args.role, ...instructionPayload(args.instruction) },
   });
 }
 
 export async function appendMemberRemovedEvent(
   tx: Prisma.TransactionClient,
-  args: { appId: string; actor: EventActor; userId: string; role: string },
+  args: { appId: string; actor: EventActor; userId: string; role: string; instruction?: ActInstruction },
 ): Promise<void> {
-  await appendStaffingEvent(tx, { appId: args.appId, actor: args.actor, type: 'member.removed', payload: { userId: args.userId, role: args.role } });
+  await appendStaffingEvent(tx, { appId: args.appId, actor: args.actor, type: 'member.removed', payload: { userId: args.userId, role: args.role, ...instructionPayload(args.instruction) } });
 }
 
 export async function appendWorkerCastEvent(
   tx: Prisma.TransactionClient,
-  args: { appId: string; actor: EventActor; workerId: string; agentId: string; role: string | null; reportsToWorkerId: string | null },
+  args: { appId: string; actor: EventActor; workerId: string; agentId: string; role: string | null; reportsToWorkerId: string | null; instruction?: ActInstruction },
 ): Promise<void> {
   await appendStaffingEvent(tx, {
     appId: args.appId, actor: args.actor, type: 'worker.cast', subjectWorkerId: args.workerId,
-    payload: { workerId: args.workerId, agentId: args.agentId, role: args.role, reportsToWorkerId: args.reportsToWorkerId },
+    payload: { workerId: args.workerId, agentId: args.agentId, role: args.role, reportsToWorkerId: args.reportsToWorkerId, ...instructionPayload(args.instruction) },
   });
 }
 
 export async function appendWorkerRetiredEvent(
   tx: Prisma.TransactionClient,
-  args: { appId: string; actor: EventActor; workerId: string },
+  args: { appId: string; actor: EventActor; workerId: string; instruction?: ActInstruction },
 ): Promise<void> {
-  await appendStaffingEvent(tx, { appId: args.appId, actor: args.actor, type: 'worker.retired', subjectWorkerId: args.workerId, payload: { workerId: args.workerId } });
+  await appendStaffingEvent(tx, { appId: args.appId, actor: args.actor, type: 'worker.retired', subjectWorkerId: args.workerId, payload: { workerId: args.workerId, ...instructionPayload(args.instruction) } });
 }
 
 export async function appendWorkerDeletedEvent(
   tx: Prisma.TransactionClient,
-  args: { appId: string; actor: EventActor; workerId: string },
+  args: { appId: string; actor: EventActor; workerId: string; instruction?: ActInstruction },
 ): Promise<void> {
   // The id rides the payload only: a `subject_worker_id` naming a worker that no longer exists is refused by the
   // worker-reference fence (#1162), and this event is written after the row is gone.
-  await appendStaffingEvent(tx, { appId: args.appId, actor: args.actor, type: 'worker.deleted', payload: { workerId: args.workerId } });
+  await appendStaffingEvent(tx, { appId: args.appId, actor: args.actor, type: 'worker.deleted', payload: { workerId: args.workerId, ...instructionPayload(args.instruction) } });
+}
+
+// ── #3125 S1 (V43): who changed the App's properties ─────────────────────
+
+/**
+ * `app.properties-changed` (cor:agt:050:11): appended in the `setAppProperties` write's own transaction, after every
+ * refusal and before commit, only when the object changed. The payload names the changed TOP-LEVEL keys, sorted;
+ * never a value and never a nested path (Holger, V43). Each key must be a string; nothing else can ride this event.
+ */
+export async function appendAppPropertiesChangedEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; actor: EventActor; keys: string[] },
+): Promise<void> {
+  if (!args.keys.every((k) => typeof k === 'string')) throw new Error('Unsupported app.properties-changed payload');
+  await tx.agentTeamEvent.create({
+    data: {
+      appId: args.appId,
+      type: 'app.properties-changed',
+      actorUserId: args.actor.userId,
+      actorWorkerId: args.actor.workerId,
+      actorAgentId: args.actor.agentId,
+      payload: { keys: [...args.keys] },
+    },
+  });
 }
 
 /**
@@ -520,4 +601,124 @@ export async function appendReportsToEvent(
       },
     },
   });
+}
+
+/** #3307 / cor:dmo:050:12: one instruction record for a signature/trailer act; no template text is recorded. */
+export async function appendWorkerSignatureInstructionEvent(
+ tx: Prisma.TransactionClient,
+ args: {appId:string;workerId:string;admission:ActAdmission;fields:string[]},
+): Promise<void> {
+ if(args.admission.kind !== 'instructed-worker') return;
+ const a=args.admission;
+ await tx.agentTeamEvent.create({data:{appId:args.appId,type:'worker.signature-changed',subjectWorkerId:args.workerId,
+  actorUserId:a.userId,actorWorkerId:a.workerId,actorAgentId:a.agentId,
+  payload:{fields:args.fields.sort(),instruction:{kind:a.instruction.kind,ref:a.instruction.ref}}}});
+}
+
+/** #3308: explicit persisted admission supplies row-only session attribution too. */
+export function staffingActActor(admission: StaffActAdmission): EventActor {
+  return { userId: admission.userId, workerId: admission.kind === 'person' ? null : admission.workerId,
+    agentId: admission.kind === 'person' ? null : admission.agentId };
+}
+export function staffingInstruction(admission: StaffActAdmission): ActInstruction | undefined {
+  return admission.kind === 'instructed-worker' ? admission.instruction : undefined;
+}
+function instructionPayload(instruction?: ActInstruction): Prisma.InputJsonObject {
+  return instruction ? { instruction: { kind: instruction.kind, ref: instruction.ref } } : {};
+}
+/** One ids-only claim on an admitted instructed preview/no-op; never pretend the state changed (#3308/0111). */
+export async function appendStaffingInstructionClaim(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; admission: StaffActAdmission } & (
+    | { operation: 'worker.retire' | 'worker.delete-preview'; workerId: string; userId?: never; agentId?: never }
+    | { operation: 'worker.preview'; agentId: string; workerId?: never; userId?: never }
+    | { operation: 'member.ensure' | 'member.remove'; userId: string; workerId?: never; agentId?: never }
+  ),
+): Promise<void> {
+  const instruction = staffingInstruction(args.admission);
+  if (!instruction) return;
+  await appendStaffingEvent(tx, { appId: args.appId, actor: staffingActActor(args.admission),
+    type: 'worker.instruction-claimed', subjectWorkerId: (args.operation === 'worker.retire' || args.operation === 'worker.delete-preview') ? args.workerId : undefined,
+    payload: { operation: args.operation, ...((args.operation === 'worker.retire' || args.operation === 'worker.delete-preview') ? { workerId: args.workerId } : {}),
+      ...(args.userId ? { userId: args.userId } : {}), ...(args.agentId ? { agentId: args.agentId } : {}),
+      ...instructionPayload(instruction) } });
+}
+
+/** What an instructed credential act was: a revoke, or a list call (hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6). */
+export type CredentialAct =
+  | 'app-key.revoke' | 'app-key.scope-revoke' | 'app-grant.revoke' | 'app-write-grant.revoke'
+  | 'app-key.list' | 'app-write-grant.list'
+  | 'automation-read-grant.revoke' | 'automation-read-grant.list'
+  | 'automation-team-snapshot-grant.revoke' | 'automation-team-snapshot-grant.list'
+  /** #3322: an instructed switch of an App memory asset's public link that changed the flag. */
+  | 'asset.public-link';
+
+/**
+ * #3311 / rulings 0098, 0109, 0111: one record per admitted instructed revoke or list call. Names the worker, the
+ * instructing person, the App, the act kind and the instruction; NEVER a key, scope or grant id, and no key details
+ * (cor:agt:050:11: ids only, and this slice adds no manager-only events read gate). A person records nothing.
+ */
+export async function appendCredentialInstructionEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; admission: ActAdmission; act: CredentialAct },
+): Promise<void> {
+  if (args.admission.kind !== 'instructed-worker') return;
+  const a = args.admission;
+  await tx.agentTeamEvent.create({ data: {
+    appId: args.appId, type: 'app.credential-act',
+    actorUserId: a.userId, actorWorkerId: a.workerId, actorAgentId: a.agentId,
+    payload: { act: args.act, instruction: { kind: a.instruction.kind, ref: a.instruction.ref } },
+  } });
+}
+
+/** #3323: which S4a door an instructed App-manager act went through (hrn:node:hadronmemory.com:specs:cor:dmo:050:12). */
+export type ManagerAct =
+  | 'task.assign' | 'task.reassign' | 'task.cancel' | 'task.park' | 'task.ready' | 'task.update'
+  | 'task.finding-dispose' | 'task.priority' | 'task.blocker-add' | 'task.blocker-remove' | 'task.create'
+  | 'alarm.acknowledge' | 'worker.availability' | 'model-family.availability' | 'app.stall-schedule'
+  | 'app.model-group.set' | 'app.model-group.delete' | 'app.properties'
+  // #3321 (S4b): the host-operation, stop-signal, ticker, settings, isolation and wake doors.
+  | `host-operation.${'worker.start' | 'worker.end' | 'worktree.create' | 'worktree.remove'}`
+  | 'stop.set' | 'stop.lift' | 'ticker.update' | 'ticker.delete' | 'ticker.subscribe' | 'ticker.unsubscribe'
+  | 'ticker.templates-apply' | 'worker.wake-settings'
+  | 'app.ticker-settings' | 'app.delivery-settings' | 'team.pause' | 'team.resume' | 'wake.read';
+
+/** The ids an instructed App-manager act concerns; never content (cor:agt:050:11). */
+export type ManagerActSubject = { taskId?: string; workerId?: string; eventId?: string; tickerId?: string; signalId?: string };
+
+/**
+ * #3323 (S4a of #2483): one record per admitted instructed App-manager act, in the act's transaction. Names the worker,
+ * the instructing holder, the act, the instruction and the ids the act concerns; never a title, description,
+ * properties, patterns or any other content (cor:agt:050:11, ids only). The ids sit in the payload, not in `taskId` or
+ * `subjectWorkerId`, so the record never reads as a task's own transition or an assignment. A person records nothing.
+ */
+export async function appendManagerInstructionEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; admission: ActAdmission; act: ManagerAct; subject: ManagerActSubject },
+): Promise<void> {
+  if (args.admission.kind !== 'instructed-worker') return;
+  const a = args.admission;
+  const subject = Object.fromEntries(Object.entries(args.subject).filter(([, v]) => typeof v === 'string'));
+  await tx.agentTeamEvent.create({ data: {
+    appId: args.appId, type: 'app.manager-act',
+    actorUserId: a.userId, actorWorkerId: a.workerId, actorAgentId: a.agentId,
+    payload: { act: args.act, ...subject, instruction: { kind: a.instruction.kind, ref: a.instruction.ref } },
+  } });
+}
+
+/**
+ * #3449 (cor:agt:110:01, :050:21/:23): App-defined events are the explicit opaque-payload exception to
+ * the fixed platform builders above. Caller validates the code/current slug and 4KiB JSON object under
+ * the ordinary creator gate. App-wide readable: never put secrets here. No platform list gains the code.
+ */
+export async function appendAppActionEvent(tx: Prisma.TransactionClient, args: {
+  appId: string; taskId: string | null; code: string; payload: Prisma.InputJsonObject; actor: EventActor;
+}): Promise<string> {
+  const row = await tx.agentTeamEvent.create({ data: {
+    id: generateId(), appId: args.appId, taskId: args.taskId, type: args.code,
+    payload: { payload: args.payload }, actorUserId: args.actor.userId,
+    actorWorkerId: args.actor.workerId, actorAgentId: args.actor.agentId,
+    actorRunId: args.actor.runId ?? null, actorAppKeyId: args.actor.appKeyId ?? null,
+  }, select: { id: true } });
+  return row.id;
 }

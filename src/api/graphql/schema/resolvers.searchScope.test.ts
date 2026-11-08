@@ -145,10 +145,12 @@ describe('a scope named in the call', () => {
     const appKey = { db, appId: app.id, roles: [] } as unknown as Context;
     const nodes = await Q.findNodes({}, { scope: 'global' }, appKey);
     expect(nodes.scope).toMatchObject({ kind: 'global', label: orgA.urn });
-    expect(nodes.hits.length).toBeGreaterThan(0);
+    // #1376 (R201): the key resolves its App's org as scope but, with no user behind it, is not admitted to the
+    // org memories its Agent's items link, so the search finds nothing in them.
+    expect(nodes.hits).toHaveLength(0);
     const gs = await Q.globalSearch({}, { query: 'alpha', entityTypes: ['node'], scope: 'global' }, appKey);
     expect(gs.scope).toMatchObject({ kind: 'global', label: orgA.urn });
-    expect(gs.hits.length).toBeGreaterThan(0);
+    expect(gs.hits).toHaveLength(0);
   });
 
   it("globalSearch's memory + node slices run under the same scope and disclose it", async () => {

@@ -67,7 +67,7 @@ beforeEach(async () => {
 });
 
 describe('MCP node tools — the #992 typed refusal reaches the real writers (#2622)', () => {
-  it('hadron_create_node refuses a colliding (chat, seq) as [chat_message_seq_conflict], writing nothing', async () => {
+  it('hadron_create_node refuses a colliding (chat, seq) as [seq_protected], writing nothing', async () => {
     await seedChatMessage('qa:messages:001-first', 1);
     const srv = createTestableMcpServer(adminAuth());
     const text = await srv.callToolText('hadron_create_node', {
@@ -78,7 +78,12 @@ describe('MCP node tools — the #992 typed refusal reaches the real writers (#2
       content: 'duplicate seq',
     });
 
-    expect(text).toContain('[chat_message_seq_conflict]');
+    // Since #2987 (ruling V13) the MCP door refuses a seq-naming create of
+    // a message pre-write — the earliest gate wins and the write never
+    // reaches the constraint; the [chat_message_seq_conflict] mapping below
+    // the write remains the backstop (its GraphQL-door coverage is the
+    // clone pin in chatSeqUnique.test.ts).
+    expect(text).toContain('[seq_protected]');
     // A refusal that still wrote the row would satisfy a message-only assert.
     expect(await db.node.findFirst({ where: { memoryId: memory.id, loc: 'qa:messages:001-collide' } })).toBeNull();
   });
@@ -93,7 +98,9 @@ describe('MCP node tools — the #992 typed refusal reaches the real writers (#2
       content: 'now colliding',
     });
 
-    expect(text).toContain('[chat_message_seq_conflict]');
+    // Same V13 layering as the create pin: a seq-naming update of a
+    // message is refused pre-write, row untouched.
+    expect(text).toContain('[seq_protected]');
     const row = await db.node.findUniqueOrThrow({ where: { id: victim } });
     expect(row.seq).toBe(2);
     expect(row.content).toBe('seeded');

@@ -8,9 +8,8 @@ import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey, createDbAppAgent } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
-import { runAsActor } from '../../../lib/requestActor.js';
+import { currentActor, runAsActor } from '../../../lib/requestActor.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
-import { createTestableMcpServer } from '../../../mcp/server.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -19,7 +18,9 @@ vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGrap
 const M = resolvers.Mutation as any;
 const STAFFING_EVENT_TYPES = ['member.added', 'member.role-changed', 'member.removed', 'worker.cast', 'worker.retired', 'worker.deleted'] as const;
 
-const ctxOf = (userId: string): Context => ({ db, userId, roles: ['READER'], clientId: `user:${userId}` });
+const ctxOf = (userId: string): Context => ({ db, userId, roles: ['READER'], clientId: `user:${userId}`,
+  get sessionId() { return currentActor()?.workerId === caster?.id ? casterSessionId : undefined; },
+});
 const events = (type?: string) => db.agentTeamEvent.findMany({
   where: { appId: app.id, type: type ?? { in: [...STAFFING_EVENT_TYPES] } }, orderBy: { createdAt: 'asc' },
 });
@@ -33,6 +34,7 @@ let outsider: { id: string };
 let target: { id: string; email: string | null; name: string | null };
 let holder: { id: string };
 let caster: { id: string };
+let casterSessionId: string;
 
 /** Run as `caster` acting through its session, with `holder` (the person who holds it) behind the request. */
 const asWorker = (fn: () => Promise<any>): Promise<any> => runAsActor({ workerId: caster.id, agentId }, fn);
@@ -54,6 +56,9 @@ beforeEach(async () => {
   roleAgent = { id: role.id };
   await db.appAgent.create({ data: { appId: app.id, agentId: roleAgent.id } });
   caster = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId, name: 'Caster', slug: 'caster', heldByUserId: holder.id } });
+  casterSessionId = (await db.session.create({ data: { id: generateId(), appId: app.id, agentId, workerId: caster.id, userId: holder.id, tool: 'vitest' } })).id;
+  // #3308: these existing event-shape cases exercise the admitted headless arm.
+  for (const name of ['WORKERS_STAFF', 'APP_MEMBERS']) await M.grantApp({}, { appRef: app.id, workerRef: caster.id, name }, ctxOf(admin.id));
 });
 
 afterEach(async () => {
@@ -105,18 +110,18 @@ describe('#2766 a successful act records one event, with its actor', () => {
     expect(rows[0]!.payload).toEqual({ userId: target.id, role: 'member' });
   });
 
-  it('worker.cast by a worker session, and the MCP hadron_cast_worker door writes the same shape', async () => {
+  it('worker.cast by a worker session writes the event (the MCP hadron_cast_worker half was removed with the tool, #3082)', async () => {
     const viaGraphql = await asWorker(() => cast(ctxOf(admin.id), 'Iris'));
-    const srv = createTestableMcpServer({ userId: admin.id, appId: app.id, roles: ['READER'], clientId: `user:${admin.id}` });
-    const out = await srv.callToolText('hadron_cast_worker', { agent: roleAgent.id, name: 'Henry' });
-    expect(out).toContain('Henry');
     const rows = await events('worker.cast');
-    expect(rows).toHaveLength(2);
-    const henry = await db.worker.findFirstOrThrow({ where: { appId: app.id, name: 'Henry' } });
+    expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ appId: app.id, actorUserId: admin.id, actorWorkerId: caster.id, actorAgentId: agentId, subjectWorkerId: viaGraphql.id });
     expect(rows[0]!.payload).toEqual({ workerId: viaGraphql.id, agentId: roleAgent.id, role: 'backend-engineer', reportsToWorkerId: null });
-    expect(rows[1]).toMatchObject({ appId: app.id, actorUserId: admin.id, subjectWorkerId: henry.id });
-    expect(rows[1]!.payload).toEqual({ workerId: henry.id, agentId: roleAgent.id, role: 'backend-engineer', reportsToWorkerId: null });
+    // The person path (what the MCP door wrote, as a user with no worker session) has the same shape with a null actor worker.
+    const henry = await cast(ctxOf(admin.id), 'Henry');
+    const rows2 = await events('worker.cast');
+    expect(rows2).toHaveLength(2);
+    expect(rows2[1]).toMatchObject({ appId: app.id, actorUserId: admin.id, subjectWorkerId: henry.id });
+    expect(rows2[1]!.payload).toEqual({ workerId: henry.id, agentId: roleAgent.id, role: 'backend-engineer', reportsToWorkerId: null });
   });
 
   it('worker.cast names the reports-to worker when one is named at cast', async () => {
@@ -232,7 +237,46 @@ describe('#2766 admission is unchanged: the census treats the cast\'s own events
     await asWorker(() => ensure(ctxOf(admin.id), target.id, 'member'));
     await asWorker(() => removeMember(ctxOf(admin.id), target.id));
     expect((await events()).filter((e) => e.actorWorkerId === caster.id).length).toBeGreaterThan(0);
+    // Only event history is under test: the real session/grants introduced by #3308 are independent uses.
+    await db.session.delete({ where: { id: casterSessionId } });
+    await db.appGrant.deleteMany({ where: { granteeWorkerId: caster.id } });
     await expect(M.deleteWorker({}, { workerRef: caster.id, confirmNoExternalAttribution: true }, ctxOf(admin.id))).resolves.toBe(true);
+  });
+
+  // #2788: isolate the event's subject column: no current reports-to edge or payload id may mask a widened exemption.
+  it('worker.reports-to history about a worker is use, not subject-side self-bookkeeping', async () => {
+    const w = await cast(ctxOf(admin.id), 'Iris');
+    const control = await cast(ctxOf(admin.id), 'Unused');
+    // Equivalent cast-only history is removable before the reports-to event is inserted.
+    await expect(M.deleteWorker({}, { workerRef: control.id, confirmNoExternalAttribution: true }, ctxOf(admin.id))).resolves.toBe(true);
+    const event = await db.agentTeamEvent.create({ data: {
+      appId: app.id, type: 'worker.reports-to', actorUserId: admin.id, subjectWorkerId: w.id,
+      payload: { from: null, to: null, setBy: 'app-manager' },
+    } });
+    expect(event.actorWorkerId).toBeNull();
+    await expect(M.deleteWorker({}, { workerRef: w.id, confirmNoExternalAttribution: true }, ctxOf(admin.id)))
+      .rejects.toMatchObject({ extensions: { code: 'WORKER_IN_USE' } });
+    expect(await db.worker.count({ where: { id: w.id } })).toBe(1);
+  });
+
+  // #2788: isolate the actor column: a non-staffing event about ANOTHER worker is still this actor's history.
+  it('a non-staffing event performed by a worker is use, not actor-side staffing bookkeeping', async () => {
+    // Create both actors here: this test does not depend on the shared caster surviving another test.
+    const freshActor = (name: string) => db.worker.create({ data: {
+      ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId, name, slug: name.toLowerCase(), heldByUserId: admin.id,
+    } });
+    const actor = await freshActor('EventActor');
+    const control = await freshActor('UnusedActor');
+    const subject = await cast(ctxOf(admin.id), 'Iris');
+    await expect(M.deleteWorker({}, { workerRef: control.id, confirmNoExternalAttribution: true }, ctxOf(admin.id))).resolves.toBe(true);
+    const event = await db.agentTeamEvent.create({ data: {
+      appId: app.id, type: 'worker.reports-to', actorUserId: admin.id, actorWorkerId: actor.id, actorAgentId: agentId,
+      subjectWorkerId: subject.id, payload: { from: null, to: null, setBy: 'app-manager' },
+    } });
+    expect(event.subjectWorkerId).not.toBe(actor.id);
+    await expect(M.deleteWorker({}, { workerRef: actor.id, confirmNoExternalAttribution: true }, ctxOf(admin.id)))
+      .rejects.toMatchObject({ extensions: { code: 'WORKER_IN_USE' } });
+    expect(await db.worker.count({ where: { id: actor.id } })).toBe(1);
   });
 
   it('a NULL-subject staffing-typed event that names the worker in its payload still counts (null-safe exclusion)', async () => {
@@ -262,13 +306,12 @@ describe('#2766 payloads hold ids and role words only', () => {
   });
 });
 
-describe('#2766 read surface: the new events ride hadron_team_events for the readers it has today', () => {
+describe('#2766 read surface: the new events ride the agentTeamEvents read for the readers it has today', () => {
   it('a participant reads them; an outsider does not', async () => {
     await ensure(ctxOf(admin.id), target.id, 'member');
-    const read = (userId: string) => createTestableMcpServer({ userId, appId: app.id, roles: ['READER'], clientId: `user:${userId}` })
-      .callToolText('hadron_team_events', { appRef: app.id, types: ['member.added'] });
-    const seen = await read(target.id);
-    expect(seen).toContain('member.added');
-    expect(await read(outsider.id)).not.toContain('member.added');
+    const seen = await (resolvers.Query as any).agentTeamEvents({}, { appRef: app.id, types: ['member.added'] }, ctxOf(target.id));
+    expect(seen.map((e: any) => e.type)).toContain('member.added');
+    await expect((resolvers.Query as any).agentTeamEvents({}, { appRef: app.id, types: ['member.added'] }, ctxOf(outsider.id)))
+      .rejects.toMatchObject({ extensions: { code: 'APP_NOT_FOUND' } });
   });
 });

@@ -1,3 +1,4 @@
+import { lockAppInstallation } from '../../../lib/appInstallations.js';
 /**
  * #2046 (S9-4, cor:agt:040:12) — the compile: the ONE caller of the S9-1..S9-3
  * building blocks. GraphQL only (never MCP).
@@ -134,10 +135,15 @@ async function loadCompileOwner(tx: Tx, target: CompileTargetInput): Promise<Com
   }
   const liveApp = { deletedAt: null, uninstalledAt: null };
   if (target.kind === 'APP_AGENT') {
-    const row = await tx.appAgent.findFirst({
-      where: { appId: target.appId, agentId: target.agentId, app: liveApp },
-      select: { agentId: true, app: { select: { id: true, organizationId: true, ownerUserId: true } }, agent: { select: AGENT_SELECT } },
+    // This owner read deliberately retains a physical row for a retired Agent:
+    // its manager must receive TARGET_RETIRED after authority, not NOT_PERMITTED.
+    const physical = await tx.appAgent.findFirst({
+      where:{appId:target.appId,agentId:target.agentId,app:liveApp},
+      select:{agentId:true,agent:{select:AGENT_SELECT},app:{select:{id:true,organizationId:true,ownerUserId:true}}},
     });
+    const install = physical ? null : await lockAppInstallation(tx,target.appId,target.agentId);
+    const row = physical ?? (install ? {agentId:install.agentId,agent:install.agent,
+      app:await tx.app.findUniqueOrThrow({where:{id:target.appId},select:{id:true,organizationId:true,ownerUserId:true}})} : null);
     if (!row) return null;
     return {
       owner: { field: 'APP_AGENT', app: row.app, agentId: row.agentId },
@@ -407,6 +413,7 @@ async function decide(
       txCtx,
       existing ? 'update' : 'create',
       {
+        authoring: { kind: 'platform', record: 'boot-prompt-compile' },
         transaction: { tx, pooledDb: ctx.db, afterCommit: (effect) => effects.push(effect) },
         ...(existing ? { targetNodeId: existing.id } : {}),
         forceRevision: true,

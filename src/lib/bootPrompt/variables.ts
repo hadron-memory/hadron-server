@@ -1,7 +1,7 @@
 /**
  * #2047 (S10) — the platform variable values for a surface that binds no worker: a chat, and a headless run
  * (cor:dmo:150:08). `worker.name` falls back to the Agent's name, `worker.role` to its persona role, `worker.url` is
- * the Agent's portal URL, and reports-to / signature / trailer are empty and the model is empty here (a chat's model is the client's; a run's is filled
+ * the Agent's portal URL, and reports-to / signature / trailer are empty and the model is empty here (a chat supplies its bounded client report at serving; a run's is filled
  * by the run's mint). One definition, so a chat and a run cannot bind the same prompt differently.
  */
 import { portalUrlForUrn } from '../portalUrl.js';

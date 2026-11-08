@@ -3,13 +3,17 @@
  * check its team channel is doing so. Derived at read time, never stored, and a
  * status only (the alarm on it is deferred).
  *
- * - `NO_SESSION`: no live session (cor:agt:020:11, the shared `isSessionLive`).
+ * - `NO_SESSION`: no live session (cor:agt:020:11, the shared `isSessionLive`),
+ *   with its reason (#3077): IDLE, ENDED or NEVER_BOUND (`loadNoSessionReasons`).
  * - `PENDING`: not expected to check, with its reason: a team pause, its own
- *   pause, isolated, on standby, or no task. The reasons come from the ticker's
+ *   pause or no task. The reasons come from the ticker's
  *   own `loadPendingReasons`, so the roster and the `live-check` rule can't
  *   disagree about who is expected to check.
- * - `OK`: has a task and checked within `failedChecksToOverdue` × period + 5 minutes.
- * - `OVERDUE`: has a task and hasn't checked for longer than that.
+ * - `OK` / `OVERDUE` (#3509, cor:agt:100:03 r7): OVERDUE means the worker was REACHED and did not respond. With an
+ *   enabled ticker subscription it is judged on the wakes actually delivered (`WorkerDeliveryTick.ackedAt`): OVERDUE when
+ *   a wake was delivered after the clock start, the ticker's `respondedAt` (a check of a channel it covers) is still
+ *   empty, and more than 5 minutes have passed. No delivered wake, nothing expected. With NO enabled ticker it keeps the
+ *   settings timer: has a task and hasn't checked within `failedChecksToOverdue` × period + 5 minutes.
  *
  * A worker HAS A TASK when a task assigned to it is open (`pending` or
  * `started`), or when its Agent has `usesTasks: false`. The OVERDUE clock runs
@@ -29,10 +33,19 @@ type Db = PrismaClient | Prisma.TransactionClient;
 
 export type WorkerCheckState = 'NO_SESSION' | 'PENDING' | 'OK' | 'OVERDUE';
 export type WorkerPendingReason = PendingReason;
+/**
+ * #3077 — why a worker reads NO_SESSION (cor:agt:100:03; idle vs ended per cor:agt:020:03):
+ * - `IDLE`: it has an open session that would bind it again, but nobody drove it inside its idle window;
+ * - `ENDED`: every session it has had is over: ended, auto-expired, or past its promised `expiresAt`;
+ * - `NEVER_BOUND`: it has never had a session (soft-deleted sessions count for nothing).
+ */
+export type WorkerNoSessionReason = 'IDLE' | 'ENDED' | 'NEVER_BOUND';
 
 export type WorkerCheckStatus = {
   status: WorkerCheckState;
   pendingReason: WorkerPendingReason | null;
+  /** #3077: set only when status is NO_SESSION. */
+  noSessionReason: WorkerNoSessionReason | null;
   /** When it last checked the App's team channel through its own session; null if never. */
   lastCheckedAt: Date | null;
   /**
@@ -47,6 +60,8 @@ export type WorkerCheckInputs = {
   liveSessionStartedAt: Date | null;
   /** Why it isn't expected to check (`loadPendingReasons`); null = it has a task and is expected to. */
   pendingReason: WorkerPendingReason | null;
+  /** #3077: why it has no live session (`loadNoSessionReasons`); read only when `liveSessionStartedAt` is null. */
+  noSessionReason?: WorkerNoSessionReason | null;
   /** Its newest open assignment, if any. */
   lastAssignedAt: Date | null;
   lastCheckedAt: Date | null;
@@ -56,10 +71,13 @@ export type WorkerCheckInputs = {
   teamResumedAt?: Date | null;
   /** #2022: when the latest `pause` / `halt` stop signal coverage of the worker ended; restarts the clock likewise. */
   stopEndedAt?: Date | null;
-  /** #2755: when its isolation expired (an active one is PENDING ISOLATED); restarts the clock like a pause. */
-  isolatedUntil?: Date | null;
-  /** #2755: when an active pause or isolation was cleared on purpose (`WorkerWakeSettings.exemptEndedAt`). */
+  /** #2755: when an active pause was cleared on purpose (`WorkerWakeSettings.exemptEndedAt`). */
   exemptEndedAt?: Date | null;
+  /**
+   * #3509: the latest delivered wake of each of its ENABLED ticker subscriptions (`WorkerDeliveryTick`). Required, so a caller cannot forget it:
+   * null = it has no enabled ticker, so the settings timer applies; an empty array = tickers, nothing delivered yet.
+   */
+  tickerWakes: Array<{ deliveredAt: Date; respondedAt: Date | null }> | null;
 };
 
 export type CheckSettings = { checkPeriodSeconds: number; failedChecksToOverdue: number };
@@ -72,9 +90,9 @@ export function overdueAfterMs(s: CheckSettings): number {
   return s.failedChecksToOverdue * s.checkPeriodSeconds * 1000 + OVERDUE_SLACK_MS;
 }
 
-/** The ends of the worker's own isolation and of a pause or isolation cleared on purpose, as far as they are past. */
+/** The ends of the worker's pause cleared on purpose, as far as they are past. */
 function ownExemptionEnds(i: WorkerCheckInputs, now: Date): number[] {
-  return [i.isolatedUntil, i.exemptEndedAt].map((d) => (d && d.getTime() <= now.getTime() ? d.getTime() : -Infinity));
+  return [i.exemptEndedAt].map((d) => (d && d.getTime() <= now.getTime() ? d.getTime() : -Infinity));
 }
 
 /** The latest end of an exemption (or the live session's start); null when it has no live session. */
@@ -99,14 +117,17 @@ export function deriveWorkerCheckStatus(i: WorkerCheckInputs, s: CheckSettings, 
   const out = (status: WorkerCheckState, pendingReason: WorkerPendingReason | null = null): WorkerCheckStatus => ({
     status,
     pendingReason,
+    noSessionReason: status === 'NO_SESSION' ? (i.noSessionReason ?? null) : null,
     lastCheckedAt: i.lastCheckedAt,
     resumedAt: resumedAt(i, now),
   });
   if (!i.liveSessionStartedAt) return out('NO_SESSION');
   if (i.pendingReason) return out('PENDING', i.pendingReason);
 
+  // #3509: on tickers the response is held per ticker (`respondedAt`), so the worker's last check is not a clock restart.
+  const onTickers = i.tickerWakes != null;
   const clockStart = Math.max(
-    i.lastCheckedAt?.getTime() ?? -Infinity,
+    onTickers ? -Infinity : (i.lastCheckedAt?.getTime() ?? -Infinity),
     i.lastAssignedAt?.getTime() ?? -Infinity,
     i.liveSessionStartedAt.getTime(),
     // A pause that has ended (an active one is PAUSED above).
@@ -115,9 +136,13 @@ export function deriveWorkerCheckStatus(i: WorkerCheckInputs, s: CheckSettings, 
     i.teamResumedAt?.getTime() ?? -Infinity,
     // #2022: a stop signal's coverage that has ended (an active one is STOPPED above).
     i.stopEndedAt && i.stopEndedAt.getTime() <= now.getTime() ? i.stopEndedAt.getTime() : -Infinity,
-    // #2755: an isolation that has ended, and a pause or isolation cleared on purpose.
+    // #2755: an isolation that has ended, and a pause cleared on purpose.
     ...ownExemptionEnds(i, now),
   );
+  if (i.tickerWakes != null) {
+    const unanswered = i.tickerWakes.some((w) => w.respondedAt == null && w.deliveredAt.getTime() > clockStart && now.getTime() - w.deliveredAt.getTime() > OVERDUE_SLACK_MS);
+    return out(unanswered ? 'OVERDUE' : 'OK');
+  }
   return out(now.getTime() - clockStart > overdueAfterMs(s) ? 'OVERDUE' : 'OK');
 }
 
@@ -147,7 +172,7 @@ export async function loadWorkerCheckStatuses(
   if (workers.length === 0) return new Map();
   const ids = workers.map((w) => w.id);
 
-  const [sessions, tasks, readStates, wakeSettings, pending] = await Promise.all([
+  const [sessions, tasks, readStates, wakeSettings, pending, tickerRows] = await Promise.all([
     db.session.findMany({
       where: { workerId: { in: ids }, endedAt: null, deletedAt: null, ...recentlyTouchedFilter(now) },
       select: { id: true, workerId: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, expiresAt: true },
@@ -160,9 +185,27 @@ export async function loadWorkerCheckStatuses(
     teamChannelId
       ? db.channelReadState.findMany({ where: { workerId: { in: ids }, channelId: teamChannelId }, select: { workerId: true, lastCheckedAt: true } })
       : Promise.resolve([]),
-    db.workerWakeSettings.findMany({ where: { workerId: { in: ids } }, select: { workerId: true, pausedUntil: true, isolatedUntil: true, exemptEndedAt: true } }),
+    db.workerWakeSettings.findMany({ where: { workerId: { in: ids } }, select: { workerId: true, pausedUntil: true, exemptEndedAt: true } }),
     loadPendingReasons(db, appId, ids, now),
+    // #3509: the delivery rows of each worker's ENABLED ticker subscriptions; a worker with a subscription but no row is
+    // on tickers with nothing delivered, one with no subscription keeps the settings timer.
+    db.tickerSubscription.findMany({
+      where: { workerId: { in: ids }, endedAt: null, ticker: { appId, deletedAt: null, enabled: true } },
+      select: { workerId: true, tickerId: true },
+    }),
   ]);
+  const deliveryRows = tickerRows.length === 0 ? [] : await db.workerDeliveryTick.findMany({
+    where: { workerId: { in: [...new Set(tickerRows.map((r) => r.workerId))] }, tickerId: { in: [...new Set(tickerRows.map((r) => r.tickerId))] } },
+    select: { workerId: true, tickerId: true, ackedAt: true, respondedAt: true },
+  });
+  const deliveryOf = new Map(deliveryRows.map((d) => [`${d.workerId}:${d.tickerId}`, d]));
+  const tickerWakes = new Map<string, Array<{ deliveredAt: Date; respondedAt: Date | null }>>();
+  for (const r of tickerRows) {
+    const list = tickerWakes.get(r.workerId) ?? [];
+    const d = deliveryOf.get(`${r.workerId}:${r.tickerId}`);
+    if (d) list.push({ deliveredAt: d.ackedAt, respondedAt: d.respondedAt });
+    tickerWakes.set(r.workerId, list);
+  }
   // #2022: the latest end of each worker's pause/halt coverage (the earliest of leaving it, its signal's end, its until).
   const stopEnds = await db.$queryRaw<{ workerId: string; endedAt: Date }[]>(Prisma.sql`
     SELECT c.worker_id AS "workerId", max(LEAST(c.left_at, s.ended_at, s.until)) AS "endedAt"
@@ -180,6 +223,8 @@ export async function loadWorkerCheckStatuses(
     const prev = liveStart.get(s.workerId);
     if (!prev || s.startedAt > prev) liveStart.set(s.workerId, s.startedAt);
   }
+  // #3077: why the workers without a live session have none, in a separate read so the live-session read stays as it is.
+  const noSessionReasons = await loadNoSessionReasons(db, ids.filter((id) => !liveStart.has(id)), now);
   const openTask = new Map(tasks.map((t) => [t.assigneeWorkerId as string, t._max.assignedAt]));
   const checkedAt = new Map(readStates.map((r) => [r.workerId as string, r.lastCheckedAt]));
   const wake = new Map(wakeSettings.map((ws) => [ws.workerId, ws]));
@@ -192,13 +237,14 @@ export async function loadWorkerCheckStatuses(
         {
           liveSessionStartedAt: liveStart.get(w.id) ?? null,
           pendingReason: pending.get(w.id) ?? null,
+          noSessionReason: noSessionReasons.get(w.id) ?? null,
           lastAssignedAt: openTask.get(w.id) ?? null,
           lastCheckedAt: checkedAt.get(w.id) ?? null,
           pausedUntil: wake.get(w.id)?.pausedUntil ?? null,
-          isolatedUntil: wake.get(w.id)?.isolatedUntil ?? null,
           exemptEndedAt: wake.get(w.id)?.exemptEndedAt ?? null,
           teamResumedAt: app.teamResumedAt,
           stopEndedAt: stopEndOf.get(w.id) ?? null,
+          tickerWakes: tickerWakes.get(w.id) ?? null,
         },
         settings,
         now,
@@ -208,17 +254,46 @@ export async function loadWorkerCheckStatuses(
   return out;
 }
 
-const reasonWords = (r: WorkerPendingReason): string => r.toLowerCase().replace(/_/g, ' ');
+/**
+ * #3077 — the NO_SESSION reason of each worker in `workerIds`, all of which the caller has already found to have no
+ * live session (`isSessionLive` over their open, undeleted sessions). Gate settlement (issue comment 6554106259):
+ * - IDLE when an open (`endedAt` null), undeleted, not auto-expired session's promised `expiresAt` has not passed:
+ *   it is not live, so it was driven outside its window. An expiry at or before `now` has ended it (R5,
+ *   cor:agt:020:03), even before the reaper stamps `endedAt` (Pin A).
+ * - ENDED when any undeleted Session row exists, auto-expired rows included.
+ * - NEVER_BOUND when none does (Pin B): the same reader as `Worker.lastActiveAt` being null.
+ * Soft-deleted sessions count for nothing, as in the bind gate and `Worker.lastActiveAt` (gate amendment, after
+ * team chat #60698).
+ * Classification only: it never decides liveness, so it can't become a second liveness rule (cor:agt:020:11). It
+ * reveals nothing beyond the closed reason; callers expose it only inside the masked `checkStatus`.
+ */
+export async function loadNoSessionReasons(db: Db, workerIds: string[], now: Date): Promise<Map<string, WorkerNoSessionReason>> {
+  if (workerIds.length === 0) return new Map();
+  const [open, any] = await Promise.all([
+    db.session.groupBy({
+      by: ['workerId'],
+      where: { workerId: { in: workerIds }, endedAt: null, deletedAt: null, autoExpiredAt: null, OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
+    }),
+    db.session.groupBy({ by: ['workerId'], where: { workerId: { in: workerIds }, deletedAt: null } }),
+  ]);
+  const idle = new Set(open.map((r) => r.workerId));
+  const seen = new Set(any.map((r) => r.workerId));
+  return new Map(workerIds.map((id) => [id, idle.has(id) ? 'IDLE' : seen.has(id) ? 'ENDED' : 'NEVER_BOUND']));
+}
 
-/** The short form for a roster line: `check OK`, `check PENDING (no task)`. */
+const reasonWords = (r: WorkerPendingReason | WorkerNoSessionReason): string => r.toLowerCase().replace(/_/g, ' ');
+
+/** The short form for a roster line: `check OK`, `check PENDING (no task)`, `check NO_SESSION (idle)`. */
 export function renderCheckStatusShort(s: WorkerCheckStatus): string {
-  return `check ${s.status}${s.pendingReason ? ` (${reasonWords(s.pendingReason)})` : ''}`;
+  const reason = s.pendingReason ?? s.noSessionReason;
+  return `check ${s.status}${reason ? ` (${reasonWords(reason)})` : ''}`;
 }
 
 /** The long form for a single-worker read: the status, its reason and the last check. */
 export function renderCheckStatusLong(s: WorkerCheckStatus): string {
   const detail = [
     s.pendingReason ? reasonWords(s.pendingReason) : null,
+    s.noSessionReason ? reasonWords(s.noSessionReason) : null,
     s.lastCheckedAt ? `last checked ${s.lastCheckedAt.toISOString()}` : 'never checked',
   ].filter(Boolean);
   return `Check status: ${s.status} (${detail.join('; ')})`;

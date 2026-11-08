@@ -28,6 +28,7 @@
  *                    at write time, never persisted — no gap.
  */
 
+import { attestedAuthoring } from '../../lib/authoringAttestation.js';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
@@ -129,7 +130,7 @@ describe('#1219 Node.role empty normalization (cor:dmo:060:02, ruling A)', () =>
     await writeNodeCore(
       { memoryId: fx.memory.id, loc: 'r-core', name: 'Core path', role: '  ' } as never,
       fx.ctx,
-      'upsert',
+      'upsert', { authoring: attestedAuthoring(null) },
     );
     expect((await persisted('r-core')).role).toBeNull();
   });

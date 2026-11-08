@@ -7,6 +7,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, chatNodeByLoc } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
+import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -52,6 +53,8 @@ beforeEach(async () => {
   systemMemory = await db.memory.findUniqueOrThrow({
     where: { id: created.systemMemoryId! },
   });
+  // #2712: chats are served the Agent's boot prompt; an Agent without one is refused.
+  await serveEveryAgent(db);
 });
 
 // ---------------------------------------------------------------------------
@@ -260,7 +263,8 @@ describe('onTrack in processChatResponse', () => {
 
     // Verify it's stored on the chat node
     const chatNode = await chatNodeByLoc(db, chat.chatId, { includeDeleted: true });
-    const chatData = chatNode?.data as Record<string, unknown>;
+    // #3501: routing assertions follow operational state; mirrored names remain in data for rollback only.
+    const chatData = { ...(chatNode?.data as Record<string, unknown>), ...((await db.chatRootEngineState.findUnique({ where: { chatRootNodeId: chatNode!.id } }))?.state as Record<string, unknown>) };
     expect(chatData.lastOffTrackReason).toBe('User asking about billing, not onboarding');
   });
 });
@@ -292,7 +296,8 @@ describe('Goal stack and route history', () => {
     );
 
     const chatNode = await chatNodeByLoc(db, chat.chatId, { includeDeleted: true });
-    const chatData = chatNode?.data as Record<string, unknown>;
+    // #3501: routing assertions follow operational state; mirrored names remain in data for rollback only.
+    const chatData = { ...(chatNode?.data as Record<string, unknown>), ...((await db.chatRootEngineState.findUnique({ where: { chatRootNodeId: chatNode!.id } }))?.state as Record<string, unknown>) };
 
     // Goal stack should have one ACTIVE entry
     const goalStack = chatData.goalStack as Array<Record<string, unknown>>;
@@ -338,7 +343,8 @@ describe('Goal stack and route history', () => {
     );
 
     const chatNode = await chatNodeByLoc(db, chat.chatId, { includeDeleted: true });
-    const chatData = chatNode?.data as Record<string, unknown>;
+    // #3501: routing assertions follow operational state; mirrored names remain in data for rollback only.
+    const chatData = { ...(chatNode?.data as Record<string, unknown>), ...((await db.chatRootEngineState.findUnique({ where: { chatRootNodeId: chatNode!.id } }))?.state as Record<string, unknown>) };
     const history = chatData.routeHistory as Array<Record<string, unknown>>;
 
     // Should have 2 entries: initial ENTER + step2 ENTER
@@ -410,7 +416,8 @@ describe('Edge evaluation in processChatResponse', () => {
 
     // Verify the chat node was updated
     const chatNode = await chatNodeByLoc(db, chat.chatId, { includeDeleted: true });
-    const chatData = chatNode?.data as Record<string, unknown>;
+    // #3501: routing assertions follow operational state; mirrored names remain in data for rollback only.
+    const chatData = { ...(chatNode?.data as Record<string, unknown>), ...((await db.chatRootEngineState.findUnique({ where: { chatRootNodeId: chatNode!.id } }))?.state as Record<string, unknown>) };
     expect(chatData.conversationName).toBe('strategy');
     expect(chatData.stageName).toBe('diagnose');
   });
@@ -476,7 +483,8 @@ describe('Edge evaluation in processChatResponse', () => {
 
     // Should have pushed a goal (detour behavior)
     const chatNode = await chatNodeByLoc(db, chat.chatId, { includeDeleted: true });
-    const chatData = chatNode?.data as Record<string, unknown>;
+    // #3501: routing assertions follow operational state; mirrored names remain in data for rollback only.
+    const chatData = { ...(chatNode?.data as Record<string, unknown>), ...((await db.chatRootEngineState.findUnique({ where: { chatRootNodeId: chatNode!.id } }))?.state as Record<string, unknown>) };
     const goalStack = chatData.goalStack as Array<Record<string, unknown>>;
     // Original goal + detour goal
     expect(goalStack.filter((g) => g.status === 'ACTIVE')).toHaveLength(2);
@@ -896,7 +904,8 @@ describe('Goal descriptions on conversations', () => {
     );
 
     const chatNode = await chatNodeByLoc(db, chat.chatId, { includeDeleted: true });
-    const chatData = chatNode?.data as Record<string, unknown>;
+    // #3501: routing assertions follow operational state; mirrored names remain in data for rollback only.
+    const chatData = { ...(chatNode?.data as Record<string, unknown>), ...((await db.chatRootEngineState.findUnique({ where: { chatRootNodeId: chatNode!.id } }))?.state as Record<string, unknown>) };
     const goalStack = chatData.goalStack as Array<Record<string, unknown>>;
 
     expect(goalStack[0].description).toBe('Help the user find a mentor');
@@ -920,7 +929,8 @@ describe('Goal descriptions on conversations', () => {
     );
 
     const chatNode = await chatNodeByLoc(db, chat.chatId, { includeDeleted: true });
-    const chatData = chatNode?.data as Record<string, unknown>;
+    // #3501: routing assertions follow operational state; mirrored names remain in data for rollback only.
+    const chatData = { ...(chatNode?.data as Record<string, unknown>), ...((await db.chatRootEngineState.findUnique({ where: { chatRootNodeId: chatNode!.id } }))?.state as Record<string, unknown>) };
     const goalStack = chatData.goalStack as Array<Record<string, unknown>>;
 
     expect(goalStack[0].description).toBe('simple conversation');
@@ -980,7 +990,8 @@ describe('Fallback re-routing', () => {
 
     // The chat node should have been updated to mentoring
     const chatNode = await chatNodeByLoc(db, chat.chatId, { includeDeleted: true });
-    const chatData = chatNode?.data as Record<string, unknown>;
+    // #3501: routing assertions follow operational state; mirrored names remain in data for rollback only.
+    const chatData = { ...(chatNode?.data as Record<string, unknown>), ...((await db.chatRootEngineState.findUnique({ where: { chatRootNodeId: chatNode!.id } }))?.state as Record<string, unknown>) };
     expect(chatData.conversationName).toBe('mentoring');
     expect(chatData.stageName).toBe('start');
 
@@ -1016,7 +1027,8 @@ describe('Fallback re-routing', () => {
 
     // Should still be in fallback
     const chatNode = await chatNodeByLoc(db, chat.chatId, { includeDeleted: true });
-    const chatData = chatNode?.data as Record<string, unknown>;
+    // #3501: routing assertions follow operational state; mirrored names remain in data for rollback only.
+    const chatData = { ...(chatNode?.data as Record<string, unknown>), ...((await db.chatRootEngineState.findUnique({ where: { chatRootNodeId: chatNode!.id } }))?.state as Record<string, unknown>) };
     expect(chatData.conversationName).toBe('fallback');
   });
 });

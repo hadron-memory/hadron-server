@@ -128,6 +128,27 @@ describe('cor:agt:090:04 — the notice lane', () => {
     expect((await dueStop()).flatMap(kinds)).not.toContain('STOP');
   });
 
+  it('#3036: a coordinator\'s own halt and the pause-dispatch it coordinates are both offered, the halt first; the second stays pending across polls', async () => {
+    const agentId = (await db.worker.findUniqueOrThrow({ where: { id: liam.id }, select: { agentId: true } })).agentId;
+    const ada = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId, name: 'Ada', slug: 'ada', heldByUserId: holder.id, heldAt: new Date() }, select: { id: true } });
+    await db.worker.update({ where: { id: liam.id }, data: { reportsToWorkerId: ada.id } });
+    await db.tickerSubscription.create({ data: { id: generateId(), tickerId: ticker.id, workerId: ada.id, createdBy: manager.id } });
+    await declareAllStopLanes(db, app.id);
+    const halt = await M.setTeamStopSignal({}, { input: { appRef: app.id, level: 'HALT', scope: 'WORKER', worker: ada.id } }, ctx(manager.id));
+    const pd = await M.setTeamStopSignal({}, { input: { appRef: app.id, level: 'PAUSE_DISPATCH', scope: 'WORKER', worker: liam.id } }, ctx(manager.id));
+    const adaWake = async () => (await dueStop()).find((w: any) => w.worker.id === ada.id);
+    const first = await adaWake();
+    expect(first.reasons[0].stop).toMatchObject({ signalId: halt.id, level: 'HALT', notice: 'STOP' });
+    expect((await ack(first.proof)).acknowledged).toBe(1);
+    const second = await adaWake();
+    expect(second.reasons[0].stop).toMatchObject({ signalId: pd.id, level: 'PAUSE_DISPATCH', notice: 'STOP' });
+    // Polled again before acknowledging: the same notice is still the one pending (the stored-wake check keeps it).
+    const again = await adaWake();
+    expect(again.reasons[0].stop.eventId).toBe(second.reasons[0].stop.eventId);
+    expect((await ack(again.proof)).acknowledged).toBe(1);
+    expect(await adaWake()).toBeUndefined();
+  });
+
   it('R105: a stop notice reaches a worker under the #2138 team pause, alone; its own pause holds it', async () => {
     await db.app.update({ where: { id: app.id }, data: { teamPausedAt: new Date() } });
     await set('HALT');

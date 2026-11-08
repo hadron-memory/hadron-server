@@ -28,11 +28,15 @@ let agent: { id: string };
 let teamChannel: { id: string };
 const w: Record<string, { id: string }> = {};
 
+/** No GitHub ID is needed here: the old randomized ID overlapped all three outsider IDs (#3118). */
+const createBaseUser = (suffix: string) =>
+  db.user.create({ data: { id: generateId(), githubUsername: `dark-${suffix}`, roles: ['READER'] } });
+
 beforeEach(async () => {
   await cleanDb(db);
   const suffix = `${Date.now()}-${Math.floor(Math.random() * 100_000)}`;
   org = await db.organization.create({ data: { id: generateId(), name: 'dark-org', urn: `dark-${suffix}.com` } });
-  user = await db.user.create({ data: { id: generateId(), githubId: 98_100 + Math.floor(Math.random() * 1000), githubUsername: `dark-${suffix}`, roles: ['READER'] } });
+  user = await createBaseUser(suffix);
   agent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, name: 'Engineer', urn: `${org.urn}:engineer`, visibility: 'ORGANIZATION' } });
   app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
@@ -73,6 +77,23 @@ async function liamOverdue() {
   await assign('Liam', 100);
   await checked('Liam', 40);
 }
+
+describe('#3118 the base fixture does not reserve an outsider GitHub identity', () => {
+  it.each([98_999, 98_998, 98_997])('leaves githubId %i free even at its old collision draw', async (githubId) => {
+    // The enclosing fixture is unrelated to this probe. Do not let its original random draw preoccupy the target.
+    await db.user.update({ where: { id: user.id }, data: { githubId: null } });
+    // Every value is a legal draw from the old 98100..99099 allocator, forced without stochastic retries.
+    const random = vi.spyOn(Math, 'random').mockReturnValue((githubId - 98_100 + 0.25) / 1000);
+    try {
+      await createBaseUser(`collision-${githubId}`);
+    } finally {
+      random.mockRestore();
+    }
+    await expect(db.user.create({ data: {
+      id: generateId(), githubId, githubUsername: `outsider-${githubId}`, roles: ['READER'],
+    } })).resolves.toMatchObject({ githubId });
+  });
+});
 
 describe('#2755 OVERDUE raises one task-less alarm per episode', () => {
   it('raises on the first pass that sees OVERDUE, with the reason and evidence, and a second pass inserts nothing', async () => {
@@ -128,13 +149,11 @@ describe('#2755 exceptions: no alarm, no time counted', () => {
     expect(await evaluateDarkWorkers(db, NOW)).toEqual([]);
   });
 
-  it('a team pause, the worker\'s own pause and isolation raise none', async () => {
+  it('a team pause, the worker\'s own pause raise none', async () => {
     await liamOverdue();
     await db.workerWakeSettings.create({ data: { workerId: w.Liam.id, pausedUntil: new Date(NOW.getTime() + 60 * MIN) } });
     expect(await evaluateDarkWorkers(db, NOW)).toEqual([]);
-    await db.workerWakeSettings.update({ where: { workerId: w.Liam.id }, data: { pausedUntil: null, isolatedUntil: new Date(NOW.getTime() + 60 * MIN) } });
-    expect(await evaluateDarkWorkers(db, NOW)).toEqual([]);
-    await db.workerWakeSettings.update({ where: { workerId: w.Liam.id }, data: { isolatedUntil: null } });
+    await db.workerWakeSettings.update({ where: { workerId: w.Liam.id }, data: { pausedUntil: null } });
     await db.app.update({ where: { id: app.id }, data: { teamPausedAt: at(10) } });
     expect(await evaluateDarkWorkers(db, NOW)).toEqual([]);
     expect(await alarms('Liam')).toHaveLength(0);
@@ -157,15 +176,15 @@ describe('#2755 exceptions: no alarm, no time counted', () => {
 });
 
 describe('#2755 who is told: the reporting line, nearest first', () => {
-  it('chains the worker\'s reportsTo line, then whoever manages the App, and wakes the nearest at once', async () => {
+  it('chains only the worker\'s reportsTo line and wakes the nearest at once (#3358)', async () => {
     await db.worker.update({ where: { id: w.Ada.id }, data: { reportsToWorkerId: w.Tove.id } });
     await liamOverdue();
     await evaluateDarkWorkers(db, NOW);
     const [alarm] = await alarms('Liam');
     const chain = alarm.chain as Array<{ workerId?: string; userId?: string; via?: string }>;
-    expect(chain.slice(0, 2)).toEqual([{ workerId: w.Ada.id }, { workerId: w.Tove.id }]);
-    expect(chain.slice(2).every((p) => p.userId && p.via === 'manager')).toBe(true);
+    expect(chain).toEqual([{ workerId: w.Ada.id }, { workerId: w.Tove.id }]);
     const rows = await db.agentTeamAlarmSchedule.findMany({ where: { eventId: alarm.id }, orderBy: { chainIndex: 'asc' } });
+    expect(rows).toHaveLength(2);
     expect(rows[0].wokenAt).toEqual(NOW);
     expect(rows[1].wokenAt).toBeNull();
     // one window (the App's darkAlarmWindowSeconds, 1800 s) per step up the line
@@ -209,7 +228,7 @@ describe('#2755 escalation, acknowledgement and delivery', () => {
     expect(await wakeDueOwners(db, new Date(NOW.getTime() + 29 * MIN))).toBe(0);
     expect(await wakeDueOwners(db, later)).toBe(1);
     const rows = await db.agentTeamAlarmSchedule.findMany({ where: { eventId: alarm.id }, orderBy: { chainIndex: 'asc' } });
-    expect(rows.map((r) => r.wokenAt !== null)).toEqual([true, true, false]);
+    expect(rows.map((r) => r.wokenAt !== null)).toEqual([true, true]);
   });
 
   it('an acknowledged alarm wakes nobody further', async () => {
@@ -371,25 +390,22 @@ describe('#2755 one worker failing does not stop the App\'s pass', () => {
 });
 
 describe('#2755 a task-less alarm through the real acknowledge and merge paths', () => {
-  it('is acknowledged by its manager, and holds a merge of a chain member open until then (episode_start is NULL)', async () => {
+  it('a manager outside the reporting chain may acknowledge (episode_start is NULL, #3358)', async () => {
     await liamOverdue();
     await evaluateDarkWorkers(db, NOW);
     const [alarm] = await alarms('Liam');
     expect(alarm.episodeStart).toBeNull();
-    const other = await db.user.create({ data: { id: generateId(), githubId: 99_500 + Math.floor(Math.random() * 1000), githubUsername: `dark-o-${generateId()}`, roles: ['READER'] } });
-    const admin = await db.user.create({ data: { id: generateId(), githubId: 99_600 + Math.floor(Math.random() * 1000), githubUsername: `dark-a-${generateId()}`, roles: ['ADMIN'] } });
-    await expect(mergeUsers(db, { sourceUserId: other.id, targetUserId: user.id, actorUserId: admin.id })).rejects.toSatisfy(
-      (e) => e instanceof GraphQLError && e.extensions?.code === 'MERGE_USER_IN_OPEN_ALARMS' && e.extensions?.alarmCount === 1,
-    );
+    expect(alarm.chain).toEqual([{ workerId: w.Ada.id }]);
+    expect((alarm.chain as any[]).some((p) => p.userId === user.id)).toBe(false);
     const ctx: Context = { db, userId: user.id, roles: ['READER'] };
     const acked = await (resolvers.Mutation as any).acknowledgeAlarm({}, { eventId: alarm.id }, ctx);
     expect(acked).toMatchObject({ acknowledgedByUserId: user.id });
-    await expect(mergeUsers(db, { sourceUserId: other.id, targetUserId: user.id, actorUserId: admin.id })).resolves.toBeDefined();
   });
 });
 
 describe('#2755 the real tick settles a recovered episode before it escalates', () => {
   it('a worker that checks again is not escalated to the next owner on the pass that ends its episode', async () => {
+    await db.worker.update({ where: { id: w.Ada.id }, data: { reportsToWorkerId: w.Tove.id } });
     await liamOverdue();
     await evaluateDarkWorkers(db, NOW);
     const later = new Date(NOW.getTime() + 31 * MIN);
@@ -421,5 +437,72 @@ describe('#2755 a pass that derived "clear" cannot end an episode a concurrent p
     }
     expect(order.indexOf('open')).toBeGreaterThanOrEqual(0);
     expect(order.indexOf('open')).toBeLessThan(order.indexOf('derive'));
+  });
+});
+
+
+describe('#3358 fallback is only for an empty live same-App reporting line', () => {
+  it.each(['retired', 'foreign', 'self-cycle'] as const)('%s line falls back to managers', async (kind) => {
+    if (kind === 'retired') await db.worker.update({ where: { id: w.Ada.id }, data: { retiredAt: at(1) } });
+    if (kind === 'foreign') {
+      const foreign = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Other', urn: `${org.urn}:other` } });
+      await db.worker.update({ where: { id: w.Ada.id }, data: { appId: foreign.id } });
+    }
+    if (kind === 'self-cycle') await db.worker.update({ where: { id: w.Liam.id }, data: { reportsToWorkerId: w.Liam.id } });
+    await liamOverdue();
+    await evaluateDarkWorkers(db, NOW);
+    expect((await alarms('Liam'))[0].chain).toEqual([{ userId: user.id, via: 'manager' }]);
+  });
+
+  it('skips a retired nearer head but keeps a surviving live head, without managers', async () => {
+    await db.worker.update({ where: { id: w.Ada.id }, data: { reportsToWorkerId: w.Tove.id, retiredAt: at(1) } });
+    await liamOverdue(); await evaluateDarkWorkers(db, NOW);
+    expect((await alarms('Liam'))[0].chain).toEqual([{ workerId: w.Tove.id }]);
+  });
+
+  it('ends a cycle without duplicates and without manager fallback when one live head survives', async () => {
+    await db.worker.update({ where: { id: w.Ada.id }, data: { reportsToWorkerId: w.Liam.id } });
+    await liamOverdue(); await evaluateDarkWorkers(db, NOW);
+    expect((await alarms('Liam'))[0].chain).toEqual([{ workerId: w.Ada.id }]);
+  });
+
+  it('keeps an already raised alarm sealed when the reporting line later changes', async () => {
+    await liamOverdue(); await evaluateDarkWorkers(db, NOW);
+    const original = (await alarms('Liam'))[0];
+    await db.worker.update({ where: { id: w.Liam.id }, data: { reportsToWorkerId: null } });
+    await evaluateDarkWorkers(db, NOW);
+    expect((await alarms('Liam'))[0].chain).toEqual(original.chain);
+    expect(await alarms('Liam')).toHaveLength(1);
+  });
+
+  it('keeps the sealed line after every head retires, while a manager may still acknowledge', async () => {
+    await db.worker.update({ where: { id: w.Ada.id }, data: { reportsToWorkerId: w.Tove.id } });
+    await liamOverdue();
+    await evaluateDarkWorkers(db, NOW);
+    const original = (await alarms('Liam'))[0];
+    expect(original.chain).toEqual([{ workerId: w.Ada.id }, { workerId: w.Tove.id }]);
+    await db.worker.updateMany({ where: { id: { in: [w.Ada.id, w.Tove.id] } }, data: { retiredAt: at(1) } });
+    await evaluateDarkWorkers(db, NOW);
+    const [sealed] = await alarms('Liam');
+    expect(sealed.chain).toEqual(original.chain);
+    expect(await alarms('Liam')).toHaveLength(1);
+    const schedules = await db.agentTeamAlarmSchedule.findMany({ where: { eventId: sealed.id }, orderBy: { chainIndex: 'asc' } });
+    expect(schedules.map((row) => row.chainIndex)).toEqual([0, 1]);
+    const acked = await (resolvers.Mutation as any).acknowledgeAlarm({}, { eventId: sealed.id }, { db, userId: user.id, roles: ['READER'] });
+    expect(acked).toMatchObject({ acknowledgedByUserId: user.id });
+  });
+
+  it('a manager sealed in the no-line fallback still prevents a user merge until acknowledgement', async () => {
+    await db.worker.update({ where: { id: w.Liam.id }, data: { reportsToWorkerId: null } });
+    await liamOverdue(); await evaluateDarkWorkers(db, NOW);
+    const alarm = (await alarms('Liam'))[0];
+    expect(alarm.chain).toEqual([{ userId: user.id, via: 'manager' }]);
+    const other = await db.user.create({ data: { id: generateId(), handle: `other-${generateId()}`, roles: ['READER'] } });
+    const admin = await db.user.create({ data: { id: generateId(), handle: `admin-${generateId()}`, roles: ['ADMIN'] } });
+    await expect(mergeUsers(db, { sourceUserId: other.id, targetUserId: user.id, actorUserId: admin.id })).rejects.toSatisfy(
+      (e) => e instanceof GraphQLError && e.extensions?.code === 'MERGE_USER_IN_OPEN_ALARMS' && e.extensions?.alarmCount === 1,
+    );
+    await (resolvers.Mutation as any).acknowledgeAlarm({}, { eventId: alarm.id }, { db, userId: user.id, roles: ['READER'] });
+    await expect(mergeUsers(db, { sourceUserId: other.id, targetUserId: user.id, actorUserId: admin.id })).resolves.toBeDefined();
   });
 });

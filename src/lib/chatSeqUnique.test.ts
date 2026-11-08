@@ -289,9 +289,13 @@ describe('#992 — the constraint refuses duplicates the allocator cannot see', 
   it('types the refusal at the generic node door for an unchanneled chat prefix', async () => {
     await seedMessage(legacyMem.id, 3);
 
-    // A createNode at a colliding (root, seq): on main this SUCCEEDS; the
-    // constrained tree must answer a NAMED refusal, never a raw P2002
-    // leaking as INTERNAL_SERVER_ERROR.
+    // A createNode at a colliding (root, seq) is refused by the EARLIEST
+    // gate: since #2987 (ruling V13, 2026-10-31) a generic create cannot
+    // name a seq on a message node at all — SEQ_PROTECTED fires pre-write,
+    // so the write never reaches the constraint. The DB-level typed
+    // refusal for this door's ungated remainder (clone copiesSeq) is the
+    // clone pin below. Either way the caller sees a NAMED refusal, never a
+    // raw P2002 leaking as INTERNAL_SERVER_ERROR.
     await expectCode(
       M.createNode({}, {
         input: {
@@ -300,7 +304,7 @@ describe('#992 — the constraint refuses duplicates the allocator cannot see', 
           name: '003-dupe', nodeType: 'chat-message', seq: 3, content: 'dupe',
         },
       }, ctx(admin.id)),
-      'CHAT_MESSAGE_SEQ_CONFLICT',
+      'SEQ_PROTECTED',
     );
   });
 
@@ -320,9 +324,14 @@ describe('#992 — the constraint refuses duplicates the allocator cannot see', 
     const a = await seedMessage(legacyMem.id, 3);
     const b = await seedMessage(legacyMem.id, 7);
 
+    // An updateNode naming a colliding seq is likewise refused pre-write by
+    // #2987's V13 gate (a message's seq is protected history outside a
+    // Channel; only allocators set it) — SEQ_PROTECTED, never a raw P2002.
+    // A LOC change with no seq named (the move path) is NOT V13-gated and
+    // keeps its own typed pin.
     await expectCode(
       M.updateNode({}, { input: { id: b, seq: 3 } }, ctx(admin.id)),
-      'CHAT_MESSAGE_SEQ_CONFLICT',
+      'SEQ_PROTECTED',
     );
   });
 });

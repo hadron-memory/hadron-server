@@ -36,7 +36,7 @@ async function sourceAgent(o: { id: string; urn: string }, visibility: 'PUBLIC' 
   const memId = generateId();
   await db.memory.create({ data: { id: memId, organizationId: o.id, urn: `${o.urn}:${slug}-system`, name: `${slug} System`, class: 'system', acceptsUploads: false } as never });
   const id = generateId();
-  await db.agent.create({ data: { id, organizationId: o.id, urn: `${o.urn}:${slug}`, name: slug, description: 'd', systemPrompt: 'hello {{name}}', systemMemoryId: memId, visibility, surfaces: ['mcp'], personaRole: 'tester' } });
+  await db.agent.create({ data: { id, organizationId: o.id, urn: `${o.urn}:${slug}`, name: slug, description: 'd', systemMemoryId: memId, visibility, surfaces: ['mcp'], personaRole: 'tester' } });
   const nid = (loc: string) => db.node.create({ data: { id: generateId(), memoryId: memId, loc, name: loc, nodeType: 'page', content: `see ${o.urn}:${slug}-system:${loc}` } as never });
   const a = await nid('a');
   const b = await nid('b');
@@ -163,4 +163,15 @@ describe('cloneAgent: refusals leave nothing behind', () => {
     const src = await sourceAgent(orgA, 'PUBLIC');
     expect(await codeOf(clone(readerA, { source: src.urn, target: orgA.urn }))).toBe('FORBIDDEN');
   });
+});
+
+it('does not reclaim an Agent tombstone that retains install-memory provenance', async () => {
+ const src=await sourceAgent(orgA,'ORGANIZATION');
+ const ghost=await sourceAgent(orgA,'ORGANIZATION','held');
+ await db.agent.update({where:{id:ghost.id},data:{deletedAt:new Date()}});
+ await db.memory.update({where:{id:ghost.memId},data:{deletedAt:new Date()}});
+ const app=await db.app.create({data:{id:generateId(),ownerUserId:adminA,name:'Retained',urn:'clone-retained-app'}});
+ const memory=await db.memory.create({data:{class:'system',appId:app.id,ownerUserId:adminA,isInstallMemory:true,installOfAgentId:ghost.id,name:'Retained',urn:'clone-retained-memory'}});
+ expect(await codeOf(clone(adminA,{source:src.urn,target:orgA.urn,slug:'held'}))).toBe('AGENT_URN_TAKEN');
+ expect((await db.memory.findUniqueOrThrow({where:{id:memory.id}})).installOfAgentId).toBe(ghost.id);
 });

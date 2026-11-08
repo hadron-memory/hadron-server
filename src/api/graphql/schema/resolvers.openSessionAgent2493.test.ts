@@ -12,9 +12,10 @@ import { collectRegisterRows } from '../../../lib/resolveRegister.js';
 import { loadWorkerWorkStates, matchQueuedTasks } from '../../../lib/agentTasks/matcher.js';
 import { openSessionPlacement } from '../../../lib/sessionPlacement.js';
 import { setUpResetFixture, M as ResetM, ctx as resetCtx } from '../../../test/contextResetFixture.js';
-import { createTestableMcpServer } from '../../../mcp/server.js';
+import { validateSessionBinding } from '../../../middleware/auth.js';
 import { resolvers, type Context } from './resolvers.js';
 import { composeWorkerPrompt } from './resolvers.worker.js';
+import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -35,8 +36,10 @@ beforeEach(async () => {
   admin = await db.user.create({ data: { githubId: 93_000_000 + Math.floor(Math.random() * 1_000_000), githubUsername: `open-${n}`, roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
-  agentA = await M.createAgent({}, { orgId: org.id, name: 'Security', personaRole: 'security-engineer', systemPrompt: 'A-PROMPT {{worker.name}} {{worker.role}} {{agent.name}}' }, ctx());
-  agentB = await M.createAgent({}, { orgId: org.id, name: 'Specs', personaRole: 'specs-engineer', systemPrompt: 'B-PROMPT {{worker.name}} {{worker.role}} {{agent.name}}' }, ctx());
+  agentA = await M.createAgent({}, { orgId: org.id, name: 'Security', personaRole: 'security-engineer' }, ctx());
+  agentB = await M.createAgent({}, { orgId: org.id, name: 'Specs', personaRole: 'specs-engineer' }, ctx());
+  await serveAgentBootPrompt(db, agentA.id, 'A-PROMPT {{worker.name}} {{worker.role}} {{agent.name}}');
+  await serveAgentBootPrompt(db, agentB.id, 'B-PROMPT {{worker.name}} {{worker.role}} {{agent.name}}');
   for (const a of [agentA, agentB]) await db.appAgent.create({ data: { appId: app.id, agentId: a.id } });
   const made = await M.castWorker({}, { appRef: app.id, agentRef: agentA.id, name: 'Ruin' }, ctx());
   worker = await db.worker.findUniqueOrThrow({ where: { id: made.id } });
@@ -85,7 +88,10 @@ describe('#2493 an open session finishes under its own agent and role', () => {
     expect(await openSessionPlacement(db, worker.id, open.id)).toBeNull();
     expect(await channelsOf(open.id)).toEqual([chanB]);
     const live = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
-    expect((await composeWorkerPrompt(ctx({ sessionId: open.id }), live)).text).toContain('B-PROMPT');
+    // #2712: the text is the served record, which holds the open session to the revision it was bound with (#2047),
+    // whatever the placement; a read with no session renders the live row.
+    expect((await composeWorkerPrompt(ctx({ sessionId: open.id }), live)).text).toContain('A-PROMPT');
+    expect((await composeWorkerPrompt(ctx(), live)).text).toContain('B-PROMPT');
   });
 
   it('(c) matcher: role and uses_tasks come from the open session\'s agent; a new bind uses the new agent', async () => {
@@ -138,9 +144,17 @@ describe('#2493 context reset reads the open session\'s agent (c)', () => {
   });
 });
 
-describe('#2493 hadron_get_worker recovery: the explicit session argument selects the placement', () => {
-  const asUser = (u: { id: string }) => createTestableMcpServer({ userId: u.id, appId: app.id, roles: ['READER'], clientId: `user:${u.id}` } as any);
-  const read = (u: { id: string }, session: string) => asUser(u).callToolText('hadron_get_worker', { workerRef: worker.id, session });
+describe('#2493 worker recovery read: the presented session selects the placement', () => {
+  // #3082: hadron_get_worker is off over MCP. The session binding rule it applied (the one check behind X-Hadron-Session,
+  // `validateSessionBinding`) and the briefing composition (`composeWorkerPrompt`, what the resolver served) are called directly.
+  const asAuth = (u: { id: string }) => ({ userId: u.id, appId: app.id, roles: ['READER'], clientId: `user:${u.id}` } as any);
+  const readAs = async (auth: any, session: string) => {
+    const bound = await validateSessionBinding(db, auth, session);
+    const live = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    const c = ctx({ userId: auth.userId, appId: auth.appId, sessionId: bound?.sessionId });
+    return (await composeWorkerPrompt(c, live)).text ?? '';
+  };
+  const read = (u: { id: string }, session: string) => readAs(asAuth(u), session);
 
   it('the owner of the open session, reconnected with no session id, gets A\'s briefing and register', async () => {
     const open = await bind();
@@ -178,11 +192,10 @@ describe('#2493 hadron_get_worker recovery: the explicit session argument select
   it('impersonation never names a session; an App key of ANOTHER App does not own it (each pinned on its own)', async () => {
     const open = await bind();
     await change();
-    const imp = createTestableMcpServer({ userId: admin.id, appId: app.id, roles: [], clientId: `user:${admin.id}`, impersonation: { sessionId: generateId(), actorUserId: admin.id, orgId: org.id, expiresAt: new Date(Date.now() + 60_000) } } as any);
-    expect(await imp.callToolText('hadron_get_worker', { workerRef: worker.id, session: open.id })).not.toContain('A-PROMPT');
+    const imp = { userId: admin.id, appId: app.id, roles: [], clientId: `user:${admin.id}`, impersonation: { sessionId: generateId(), actorUserId: admin.id, orgId: org.id, expiresAt: new Date(Date.now() + 60_000) } } as any;
+    expect(await readAs(imp, open.id)).not.toContain('A-PROMPT');
     const other = await db.app.create({ data: { organizationId: org.id, name: 'Other', urn: `${org.urn}:other` } });
-    const foreign = createTestableMcpServer({ appId: other.id, roles: [] } as any);
-    expect(await foreign.callToolText('hadron_get_worker', { workerRef: worker.id, session: open.id })).not.toContain('A-PROMPT');
+    expect(await readAs({ appId: other.id, roles: [] } as any, open.id)).not.toContain('A-PROMPT');
   });
 
   it('a user who owns the session but is no longer a participant of its App reads the live row (callerStillDrives, on its own)', async () => {

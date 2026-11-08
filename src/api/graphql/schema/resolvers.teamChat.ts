@@ -1,6 +1,9 @@
+import { listAppInstallations } from '../../../lib/appInstallations.js';
+import { NodeNotFoundError, AmbiguousLegacyUrnError, UrnNotQualifiedError } from '../../../lib/entityRef/errors.js';
+import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { buildTeamSnapshot, isReadableTeamHead, teamTagsEnabled, teamHeadInvalid, type TeamTagSnapshot } from '../../../lib/teamTagSnapshot.js';
 import { lockAppReportsTo } from '../../../lib/workerReportsTo.js';
-import { requireWorkerReadAccess } from './resolvers.worker.js';
+import { requireWorkerReadAccess } from '../../../lib/auth/workerRead.js';
 // Team-chat operations — #939: createTeamChatMessage + teamChatMessages as
 // platform operations (team logic lives server-side; CLI/MCP/portal are thin
 // surfaces — the #935/#936 wrapper precedent).
@@ -17,9 +20,9 @@ import { requireWorkerReadAccess } from './resolvers.worker.js';
 //
 // Storage shape (D-2026-08-07-001/-004, kept field-compatible with the #921
 // storage rework so it can absorb this surface without a data migration):
-//   - chat root: nodeType `chat`, storage keys (`messageCount`,
-//     `lastMessageAt`) top-level in `data`; there is no root-level audience
-//     marker because access derives from the host memory.
+//   - chat root: nodeType `chat`; messageCount/lastMessageAt live in the
+//     non-revisioned ChatRootCounter row (#3496). No root-level audience
+//     marker: access derives from the host memory.
 //   - message: body in `Node.content`, envelope in `Node.data`, nodeType
 //     `chat-message`, ordering key in `Node.seq` (allocated atomically by
 //     `chatRoot.appendChatMessage` — #919; a hand-rolled node write here IS
@@ -33,12 +36,14 @@ import { requireWorkerReadAccess } from './resolvers.worker.js';
 //   sessionId      — the driving session (sessionRef path; D16 attribution)
 //   mentions       — lowercased mention tokens extracted server-side at write
 //   replyToSeq     — the seq this message replies to (also a `replies-to` edge)
-import { GraphQLError } from 'graphql';
+import { GraphQLError, type GraphQLResolveInfo } from 'graphql';
+import { selectsField } from '../selectsField.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { generateId } from '../../../lib/id.js';
 import { appendChatMessage } from '../../../lib/chatRoot.js';
-import { admissionTime, findEarlierDuplicate, lockWorkerPostAdmission } from '../../../lib/teamChatAdmission.js';
+import { raisePostLimitAlarm } from '../../../lib/agentTasks/postLimit.js';
+import { admissionTime, findBrokenPostLimit, findEarlierDuplicate, lockWorkerPostAdmission } from '../../../lib/teamChatAdmission.js';
 import { lockStampAuthority, wakeStampsFor } from '../../../lib/tickers/postStamp.js';
 import { deriveEdgeLoc, sanitizeLocAtom } from '../../../lib/edgeLoc.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
@@ -65,10 +70,13 @@ import { reachesWorker } from '../../../lib/mentionReach.js';
 import { extractMentions } from '../../../lib/teamChatMentions.js';
 import { TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC } from '../../../lib/teamChatLoc.js';
 import { recordCheckMiss } from '../../../lib/channelReadState.js';
+import {
+  TEAM_CHAT_SEARCH_SCAN_CAP, assertSearchQuery, decodeSearchCursor, encodeSearchCursor, searchBinding, searchCallerKey, searchPageSize,
+} from '../../../lib/teamChatSearch.js';
 import { isTeamSpaceRow, teamSpaceAudienceFilter, teamSpaceOwnerFilter } from '../../../lib/auth/teamSpace.js';
 // Spec 049 Phase 4 — the Channel row the team chat became.
 import { DEFAULT_CHANNEL_NAME, ensureChannelWithRoot } from '../../../lib/channels.js';
-import { locateTeamAgent } from './resolvers.worker.js';
+import { locateTeamAgent } from '../../../lib/auth/workerRead.js';
 import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
@@ -279,10 +287,7 @@ async function bootstrapTeamChat(
     teamAgent = await locateTeamAgent(ctx, app.id, null);
   } catch (e) {
     if (!(e instanceof GraphQLError) || e.extensions?.code !== 'TEAM_AGENT_NOT_FOUND') throw e;
-    const installed = await ctx.db.appAgent.findMany({
-      where: { appId: app.id },
-      select: { agent: { select: { id: true, name: true, urn: true, deletedAt: true } } },
-    });
+    const installed = await listAppInstallations(ctx.db, app.id);
     const live = installed.map((r) => r.agent).filter((a) => a && !a.deletedAt);
     if (live.length !== 1) throw e;
     teamAgent = live[0];
@@ -1000,11 +1005,14 @@ async function postToChannelRoot(
   let messageLoc: string | null = null;
   // #2015: the admission instant of a worker's post, stamped into its createdAt below; null for a human or system post.
   let admittedAt: Date | null = null;
+  let appended: { seq: number; inserted: Date };
+  try {
   // #992: the allocator holds the chat-root lock, so this cannot fire in
   // normal operation — but if the per-chat seq unique is ever violated here
   // (a bug, a repaired-back row), the caller sees the typed refusal, never a
-  // raw P2002.
-  const { seq, inserted: createdAt } = await mapChatSeqConflict(() => appendChatMessage(ctx.db, root, memEncInfo, async ({ tx, seq, msgNum }) => {
+  // raw P2002. Wrapped INSIDE the #2014 catch: mapChatSeqConflict rethrows
+  // every non-seq error untouched, so PostRateLimited still reaches it.
+  appended = await mapChatSeqConflict(() => appendChatMessage(ctx.db, root, memEncInfo, async ({ tx, seq, msgNum }) => {
     // The Channel is re-checked LIVE under the lock (Copilot on PR #1169):
     // deleteChannel takes this same key, so a delete that committed between
     // resolving the target and acquiring it is seen here — a message is
@@ -1071,6 +1079,11 @@ async function postToChannelRoot(
           { extensions: { code: 'TEAM_CHAT_DUPLICATE', earlierSeq, channelId: incarnation.id } },
         );
       }
+      // #2014 — the rolling limits, counted under the same lock and clock, AFTER the duplicate rule: an identical post is refused as a
+      // duplicate (do not retry) whatever the count, so it never raises the rate alarm. The refusal is thrown as a sentinel: it rolls this
+      // transaction back (nothing is stored), and the caller raises the alarm in its OWN committed transaction.
+      const broken = await findBrokenPostLimit(tx, postingWorkerId, admittedAt);
+      if (broken) throw new PostRateLimited(postingWorkerId, broken.name, broken.resetsAt);
     }
     // #1842 — the reply-target fold (Holger, #10394): when the target was
     // authored by a WORKER, that worker counts as mentioned, recorded at
@@ -1202,6 +1215,16 @@ async function postToChannelRoot(
     }
     return row.createdAt;
   }, { asChannel: true }));
+    } catch (e) {
+      if (!(e instanceof PostRateLimited)) throw e;
+      // #2014: the post is refused and nothing was stored; the alarm (once an hour) commits on its own.
+      await raisePostLimitAlarm(ctx.db, e.workerId, e.limit);
+      throw new GraphQLError(
+        `Your message was NOT posted: you have reached the team-chat post limit (${e.limit}). Do not retry in a loop: wait until ${e.resetsAt.toISOString()}, then post once.`,
+        { extensions: { code: 'TEAM_CHAT_POST_RATE_LIMITED', limit: e.limit, resetsAt: e.resetsAt.toISOString() } },
+      );
+    }
+  const { seq, inserted: createdAt } = appended;
 
   // #1061 — a chat message IS a node, so posting one is a write on the team's
   // shared chat memory. This was one of the largest blind spots in the old
@@ -1244,6 +1267,11 @@ async function postToChannelRoot(
  * team chat to post into or is gone; it never creates one.
  */
 class NoticeNotClaimed extends Error {}
+
+/** #2014: a worker's post refused by the rate limit; carries what the typed error and the alarm need. */
+class PostRateLimited extends Error {
+  constructor(readonly workerId: string, readonly limit: string, readonly resetsAt: Date) { super(limit); }
+}
 
 /**
  * Could a notice be posted into this App's team chat right now? (Read-only; nothing is created or restored.) Needs a
@@ -1301,6 +1329,31 @@ export async function postSystemNotice(
 }
 
 /**
+ * #2980 — batch sizes of the in-memory filter branch's bounded scan (`readChannelRoot` with `countAll: false`): the
+ * first batch, growing fourfold up to `maxBatch`. Each batch is one query that orders the memory's rows, so a sparse filter
+ * (a worker mentioned rarely) must not pay that per 200 rows across a long history: growth keeps the query count
+ * logarithmic while the common case (a recent match) still reads one small batch. Mutable only so a test can
+ * exercise batch boundaries with a small Channel.
+ */
+export const CHAT_FILTER_SCAN = { batch: 200, maxBatch: 51200 };
+
+/**
+ * #2980 — the rows strictly past `after` in the read order (seq, createdAt, loc; descending when `backward`). A
+ * keyset, not a Prisma cursor: it needs no row to still exist, and the three keys order every message totally
+ * (loc is unique in a memory), so no row is read twice or skipped between batches.
+ */
+function keysetPast(after: { seq: number | null; createdAt: Date; loc: string }, backward: boolean): Prisma.NodeWhereInput {
+  const op = backward ? 'lt' : 'gt';
+  return {
+    OR: [
+      { seq: { [op]: after.seq } },
+      { seq: after.seq, createdAt: { [op]: after.createdAt } },
+      { seq: after.seq, createdAt: after.createdAt, loc: { [op]: after.loc } },
+    ],
+  };
+}
+
+/**
  * Read a Channel's root — the one read path (#939, #1116): seq-ordered
  * ascending as a uniform `{ items, total }` page. Without a cursor or offset,
  * select the newest page; `sinceSeq` is a forward watermark (strictly greater),
@@ -1351,6 +1404,16 @@ async function readChannelRoot(
   appId: string | null,
   root: ChatRootRow,
   args: { replyToSeq?: number | null; sinceSeq?: number | null; beforeSeq?: number | null; mentionsRef?: string | null; teamHeadRef?: string | null; untagged?: boolean | null; limit?: number | null; offset?: number | null },
+  /**
+   * #2980 — `countAll: false` says the caller will not show `total` (a GraphQL selection without it, `selectsField`).
+   * Only the in-memory filter branch uses it: it then scans in batches in the paging direction and stops once the
+   * page is known, and the returned `total` is exact only when that scan reached the end of the range. Otherwise,
+   * on a forward page, it is a lower bound strictly greater than `items.length`, which is all the own-read advance
+   * reads from it (`total <= items.length` means exhausted); a backward page's total is not meaningful, and the
+   * advance never reads one (it acts only on a `sinceSeq` page without `beforeSeq`). Every other caller keeps the
+   * default, an exact count (cor:api:120:02, cor:agt:020:04).
+   */
+  opts: { countAll?: boolean } = {},
 ): Promise<{ items: TeamChatMessageOut[]; total: number }> {
   const { replyToSeq, sinceSeq, beforeSeq, mentionsRef, teamHeadRef, untagged, limit, offset } = args;
   // The outer resolver has already established read access. Validate independently of
@@ -1468,20 +1531,55 @@ async function readChannelRoot(
     const matches = (msg: TeamChatMessageOut): boolean =>
       (replyToSeq == null || msg.replyToSeq === replyToSeq) &&
       (!mentionsRef || (workerId !== null ? reachesWorker(msg, [workerId], tokens) : msg.mentions.some((t) => tokens.includes(t)))) && (!teamFiltered || !memEncInfo.isEncrypted || (selectedHead ? !!msg.teamTags?.some(t => t.headId === selectedHead) : untagged === false ? !!msg.teamTags?.length : !msg.teamTags?.length));
-    // Always scanned ASCENDING regardless of paging direction: this branch
-    // filters in memory, so the direction is applied to the RESULT below.
-    const rows = await ctx.db.node.findMany({ where, orderBy, select });
-    const matching = rows
-      .map((r) => ({ row: r, msg: projectMessage(r, memEncInfo, memBareUrn, metadataVisible) }))
-      .filter((m) => matches(m.msg));
-    const page =
-      take === 0
-        ? []
-        : backward
-          ? matching.slice(Math.max(0, matching.length - take))
-          : matching.slice(skip, skip + take);
+    type Hit = { row: MessageRow; msg: TeamChatMessageOut };
+    let page: Hit[];
+    let total: number;
+    if (opts.countAll !== false || take === 0) {
+      // An exact `total` needs every match in the range (and `limit: 0` is a pure count), so this path scans the
+      // whole range. Scanned ASCENDING regardless of paging direction; the direction is applied to the RESULT below.
+      const rows = await ctx.db.node.findMany({ where, orderBy, select });
+      const matching = rows
+        .map((r) => ({ row: r, msg: projectMessage(r, memEncInfo, memBareUrn, metadataVisible) }))
+        .filter((m) => matches(m.msg));
+      page =
+        take === 0
+          ? []
+          : backward
+            ? matching.slice(Math.max(0, matching.length - take))
+            : matching.slice(skip, skip + take);
+      total = matching.length;
+    } else {
+      // #2980: nobody will see `total`, so read only as far as the page needs: batches in the paging direction,
+      // stopping once the page is known. Same rows, same order and the same filter as the full scan above, so
+      // `items` are identical (offset is ignored backward, as there). A forward page reads one match past itself, so
+      // a full page still says whether more exist: the own-read advance (#2018) reads only forward pages. A
+      // backward page stops at `take`; nothing reads its total.
+      const want = backward ? take : skip + take + 1;
+      const found: Hit[] = [];
+      let after: { seq: number | null; createdAt: Date; loc: string } | null = null;
+      let batch = CHAT_FILTER_SCAN.batch;
+      for (;;) {
+        const rows: MessageRow[] = await ctx.db.node.findMany({
+          where: after ? { AND: [where, keysetPast(after, backward)] } : where,
+          orderBy: readOrder,
+          select,
+          take: batch,
+        });
+        for (const r of rows) {
+          const msg = projectMessage(r, memEncInfo, memBareUrn, metadataVisible);
+          if (matches(msg)) found.push({ row: r, msg });
+          if (found.length >= want) break;
+        }
+        if (found.length >= want || rows.length < batch) break;
+        const last = rows[rows.length - 1]!;
+        after = { seq: last.seq, createdAt: last.createdAt, loc: last.loc };
+        batch = Math.min(batch * 4, Math.max(CHAT_FILTER_SCAN.maxBatch, CHAT_FILTER_SCAN.batch));
+      }
+      page = backward ? found.slice(0, take).reverse() : found.slice(skip, skip + take);
+      total = found.length;
+    }
     recordRead(page.map((m) => m.row));
-    const out = { items: page.map((m) => m.msg), total: matching.length };
+    const out = { items: page.map((m) => m.msg), total };
     // #2018: the own-read advance moves marks only for the worker this page was filtered by.
     if (workerId !== null) recordMentionsWorker(out, workerId);
     return out;
@@ -1507,6 +1605,72 @@ async function readChannelRoot(
   recordRead(rows);
   return { items, total };
 }
+
+/**
+ * #2299 — search ONE channel's history (cor:agt:020:04, "Searching a chat's history"). The caller has already passed the
+ * read gate; this is everything after it. It matches against {@link projectMessage}, the same projection a read returns,
+ * so nothing a read withholds can be matched, counted, shown or encoded in the cursor; and it returns references only
+ * (no body, no snippet, no count). It writes nothing: no read mark, no usage, no heartbeat.
+ *
+ * A host in an encrypted memory is refused outright: its stored text is ciphertext, and decrypting a history to scan it
+ * is not a read the caller asked for. An empty page therefore only ever means a completed search.
+ */
+async function searchChannelRoot(
+  ctx: Context,
+  root: ChatRootRow,
+  channel: { id: string; incarnation: number },
+  args: { query: string; limit: number; cursor: string | null },
+): Promise<TeamChatSearchPageOut> {
+  const memEncInfo = await getMemoryEncryptionInfo(ctx.db, root.memoryId);
+  if (memEncInfo.isEncrypted) {
+    throw new GraphQLError('This chat is hosted in an encrypted memory and cannot be searched.', { extensions: { code: 'TEAM_CHAT_SEARCH_ENCRYPTED' } });
+  }
+  const binding = searchBinding(args.query, channel.id, channel.incarnation, searchCallerKey(ctx));
+  const before = args.cursor == null ? null : decodeSearchCursor(args.cursor, binding);
+  const memBareUrn = await hostMemoryUrn(ctx, root.memoryId);
+  const rows = await ctx.db.node.findMany({
+    where: {
+      memoryId: root.memoryId,
+      loc: { startsWith: escapePrismaLikePattern(`${root.loc}:messages:`) },
+      nodeType: 'chat-message',
+      deletedAt: null,
+      seq: before != null ? { lt: before } : { not: null },
+    },
+    orderBy: [{ seq: 'desc' }, { createdAt: 'desc' }, { loc: 'desc' }],
+    select: { id: true, loc: true, seq: true, content: true, data: true, createdAt: true },
+    take: TEAM_CHAT_SEARCH_SCAN_CAP,
+  });
+  const needle = args.query.toLowerCase();
+  const items: TeamChatSearchPageOut['items'] = [];
+  let filledAt = -1;
+  for (let i = 0; i < rows.length; i++) {
+    const msg = projectMessage(rows[i]!, memEncInfo, memBareUrn);
+    if (!msg.body.toLowerCase().includes(needle)) continue;
+    items.push({ nodeId: msg.nodeId, urn: msg.urn, seq: msg.seq, channelId: channel.id, channelIncarnation: channel.incarnation });
+    if (items.length >= args.limit) { filledAt = i; break; }
+  }
+  // Fewer rows than the bound means the scan reached the start of the history; exactly the bound means it may not have.
+  const reachedStart = rows.length < TEAM_CHAT_SEARCH_SCAN_CAP;
+  const page = { items, channelId: channel.id, channelIncarnation: channel.incarnation };
+  if (filledAt >= 0) {
+    // A full page continues after the last match returned.
+    if (filledAt === rows.length - 1 && reachedStart) return { ...page, complete: true, cursor: null };
+    return { ...page, complete: false, cursor: encodeSearchCursor(binding, items[items.length - 1]!.seq) };
+  }
+  if (reachedStart) return { ...page, complete: true, cursor: null };
+  // The scan bound fired first: resume just below the LAST SCANNED seq, so nothing is scanned twice or skipped.
+  return { ...page, complete: false, cursor: encodeSearchCursor(binding, rows[rows.length - 1]!.seq ?? 0) };
+}
+
+type TeamChatSearchPageOut = {
+  items: { nodeId: string; urn: string | null; seq: number; channelId: string; channelIncarnation: number }[];
+  complete: boolean;
+  cursor: string | null;
+  channelId: string | null;
+  channelIncarnation: number | null;
+};
+
+const EMPTY_COMPLETE_SEARCH: TeamChatSearchPageOut = { items: [], complete: true, cursor: null, channelId: null, channelIncarnation: null };
 
 export const teamChatMutations = {
   /**
@@ -1662,6 +1826,7 @@ export const teamChatQueries = {
       offset?: number | null;
     },
     ctx: Context,
+    info?: GraphQLResolveInfo,
   ): Promise<{ items: TeamChatMessageOut[]; total: number; channelId?: string | null; channelIncarnation?: number | null }> => {
     // #2520: the gate half is ONE function shared with the `team_chat_read` run tool.
     const target = await resolveTeamChatReadTarget(ctx, appRef);
@@ -1685,7 +1850,8 @@ export const teamChatQueries = {
       select: { id: true, lastSeq: true, incarnation: true },
     });
     const pilotChannel = ctx.sessionId || ctx.sessionBindingRefused ? readChannel : null;
-    const page = await readChannelRoot(ctx, appId, root, args);
+    // #2980: a selection without `total` lets a filtered read stop once its page is full (no info: count exactly).
+    const page = await readChannelRoot(ctx, appId, root, args, { countAll: selectsField(info, 'total') });
     // #2138 follow-up: a request that NAMED a session the server refused is served as a session-less read, so it can never
     // count as a check. Say so in the App log (reason code only); behaviour is unchanged.
     if (pilotChannel && !ctx.sessionId && ctx.sessionBindingRefused) {
@@ -1710,6 +1876,37 @@ export const teamChatQueries = {
     return Object.assign(page, { channelId: readChannel?.id ?? null, channelIncarnation: readChannel?.incarnation ?? null });
   },
 
+  /**
+   * #2299 — search the team chat's history: the `appRef` convenience over the same search `channelMessageSearch` runs.
+   * The two bound checks come first (fixed numbers, so the refusal is the same for everyone), then the read gate
+   * `teamChatMessages` uses, then the search. No read-state side effect.
+   */
+  teamChatSearch: async (
+    _: unknown,
+    { appRef, query, limit, cursor }: { appRef: string; query: string; limit?: number | null; cursor?: string | null },
+    ctx: Context,
+  ): Promise<TeamChatSearchPageOut> => {
+    assertSearchQuery(query);
+    const take = searchPageSize(limit);
+    const target = await resolveTeamChatReadTarget(ctx, appRef);
+    if (!target) return EMPTY_COMPLETE_SEARCH;
+    const channel = await ctx.db.channel.findFirst({ where: { chatRootNodeId: target.root.id, deletedAt: null }, select: { id: true, incarnation: true } });
+    if (!channel) return EMPTY_COMPLETE_SEARCH;
+    return searchChannelRoot(ctx, target.root, channel, { query, limit: take, cursor: cursor ?? null });
+  },
+
+  /** #2299 — search ANY Channel by ref, through the read gate `channelMessages` uses; unreadable is CHANNEL_NOT_FOUND. */
+  channelMessageSearch: async (
+    _: unknown,
+    { channelRef, query, limit, cursor }: { channelRef: string; query: string; limit?: number | null; cursor?: string | null },
+    ctx: Context,
+  ): Promise<TeamChatSearchPageOut> => {
+    assertSearchQuery(query);
+    const take = searchPageSize(limit);
+    const target = await resolveChannelTarget(ctx, channelRef, 'read');
+    return searchChannelRoot(ctx, target.root, { id: target.channelId, incarnation: target.incarnation.value }, { query, limit: take, cursor: cursor ?? null });
+  },
+
   /** Spec 049 Phase 8 — read ANY Channel by ref; a Channel the caller may not read is "no match". */
   channelMessages: async (
     _: unknown,
@@ -1730,6 +1927,7 @@ export const teamChatQueries = {
       expectedIncarnation?: number | null;
     },
     ctx: Context,
+    info?: GraphQLResolveInfo,
   ): Promise<{ items: TeamChatMessageOut[]; total: number; channelId: string; channelIncarnation: number }> => {
     const target = await resolveChannelTarget(ctx, channelRef, 'read');
     const pinned = expectedIncarnation != null;
@@ -1737,7 +1935,7 @@ export const teamChatQueries = {
     if (pinned && expectedIncarnation !== target.incarnation.value) {
       throw channelIncarnationChanged(target.channelId, target.incarnation.value);
     }
-    const page = await readChannelRoot(ctx, target.app?.id ?? null, target.root, args);
+    const page = await readChannelRoot(ctx, target.app?.id ?? null, target.root, args, { countAll: selectsField(info, 'total') });
     // (c): incarnation only rises, so equality before and after proves no recreation happened while the page was read;
     // otherwise old contents would be emitted under new metadata.
     if (pinned) {
@@ -1768,3 +1966,15 @@ export const teamChatQueries = {
     return Object.assign(page, { channelId: target.channelId, channelIncarnation: pinned ? expectedIncarnation : target.incarnation.value });
   },
 };
+
+/** #3307: a message instruction uses the SAME Channel read gate as channelMessages, with no cursor write. */
+export async function readableInstructionMessageApp(ctx: Context, ref: string): Promise<string | null> {
+  if (!/^hrn:node:/i.test(ref)) return null;
+  let nodeId: string;
+  try { nodeId = (await resolveNodeRef(ctx.db, ref)).id; }
+  catch (e) { if (e instanceof NodeNotFoundError || e instanceof AmbiguousLegacyUrnError || e instanceof UrnNotQualifiedError) return null; throw e; }
+  const node = await ctx.db.node.findUnique({where:{id:nodeId},select:{nodeType:true,messageChannelId:true,deletedAt:true,memory:{select:{appId:true}}}});
+  if (!node || node.deletedAt || node.nodeType !== 'chat-message' || !node.messageChannelId) return null;
+  try { await resolveChannelTarget(ctx, node.messageChannelId, 'read'); return node.memory.appId; }
+  catch (e) { if (e instanceof GraphQLError && e.extensions?.code === 'CHANNEL_NOT_FOUND') return null; throw e; }
+}

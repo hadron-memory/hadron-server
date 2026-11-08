@@ -45,7 +45,7 @@ const request = (nodeRef: string, userId = reader.id, args: Record<string, unkno
 async function signAs(req: { id: string; nodeId: string; approvalHash: string }, userId = writer.id) {
   const key = softPasskey();
   await insertSoftPasskey(db, userId, key, { label: 'Laptop' });
-  const payload = signaturePayloadBytes('hadron-signature-v1', req);
+  const payload = signaturePayloadBytes('hadron-signature-v3', { nodeId: req.nodeId, approvalHash: req.approvalHash, requestId: req.id });
   return db.$transaction((tx) => completeSigningRequestInTransaction(tx, req.id, {
     memoryId: memory.id, signerId: userId, credentialId: key.credentialId,
     assertion: key.assert({ payload, origin: ORIGIN, rpId: RP }), mayWrite: maySignInMemory(db),

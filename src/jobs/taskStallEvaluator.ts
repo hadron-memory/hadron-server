@@ -19,6 +19,8 @@
  *      reset in the same pass.
  *   7. (#2755) raise the dark-worker alarm for each worker that is OVERDUE or has a wake unacknowledged past the
  *      App's window, once per episode, and end the episodes that cleared (cor:agt:100:06, Proposed).
+ *   8. (#2763) raise the coordinator-cadence alarm for each coordinator that made no assignment for 60 minutes while a
+ *      worker in its lane was free for work, once per episode (cor:agt:050:31, Proposed).
  *
  * No claim race, unlike the scheduler: every write is idempotent on its own
  * key (the episode's unique index, a conditional wake stamp, a conditional
@@ -39,12 +41,13 @@ import { sweepUnreportedHostOperations } from '../lib/hostOperations/settle.js';
 import { anchorNow } from '../lib/stopSignals/state.js';
 import { sweepContextResets } from '../lib/contextReset/contextReset.js';
 import { evaluateDarkWorkers } from '../lib/agentTasks/darkWorker.js';
+import { evaluateCoordinatorCadence } from '../lib/agentTasks/coordinatorCadence.js';
 
-export type TaskStallTickResult = { raised: number; woken: number; cleared: number; undeliverable: number; sessionEnds: number; hostOperationsSettled: number; contextResetsEnded: number; darkRaised: number };
+export type TaskStallTickResult = { raised: number; woken: number; cleared: number; undeliverable: number; sessionEnds: number; hostOperationsSettled: number; contextResetsEnded: number; darkRaised: number; cadenceRaised: number };
 
 /** One pass at `now`. Each step runs even when an earlier one failed. */
 export async function taskStallTick(db: PrismaClient, now = new Date()): Promise<TaskStallTickResult> {
-  const result: TaskStallTickResult = { raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0, contextResetsEnded: 0, darkRaised: 0 };
+  const result: TaskStallTickResult = { raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0, contextResetsEnded: 0, darkRaised: 0, cadenceRaised: 0 };
   // #2022: the monotonic half of `now`'s sample, so a raise decides at its own moment (stall.ts raiseStallAlarm).
   const anchor = anchorNow();
   try {
@@ -58,6 +61,12 @@ export async function taskStallTick(db: PrismaClient, now = new Date()): Promise
     result.darkRaised = (await evaluateDarkWorkers(db, now)).length;
   } catch (err) {
     console.error('[task-stall] dark-worker evaluation failed:', err);
+  }
+  // #2763: with the dark-worker pass, before the escalation, for the same reason.
+  try {
+    result.cadenceRaised = (await evaluateCoordinatorCadence(db, now)).length;
+  } catch (err) {
+    console.error('[task-stall] coordinator-cadence evaluation failed:', err);
   }
   try {
     result.woken = await wakeDueOwners(db, now);

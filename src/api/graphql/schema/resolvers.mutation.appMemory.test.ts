@@ -16,7 +16,7 @@ import {
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
 import { getOrgReadableMemoryIds } from '../../../lib/auth/orgReadableMemory.js';
-import { canReadMemory, getAppMemoryAccess } from '../../../mcp/access-control.js';
+import { canReadMemory, getAppMemoryAccess, getAppMemoryCandidates } from '../../../mcp/access-control.js';
 import { requireMemoryWriteAccess, getAccessibleMemoryIds } from './resolvers.helpers.js';
 
 // Prevent git writes (createMemoryInApp creates a root node).
@@ -352,9 +352,9 @@ describe('#653 — app-scoped knowledge is App-internal (no org-wide leak)', () 
     expect(ids ?? []).not.toContain(knowledgeId);
   });
 
-  it('IS readable via the App surface (getAppMemoryAccess → READ_ONLY)', async () => {
-    const access = await getAppMemoryAccess(db, app.id);
-    expect(access.get(knowledgeId)).toBe('READ_ONLY');
+  it('is an App candidate, but a userless caller gains no item-derived authority (#3292)', async () => {
+    expect((await getAppMemoryCandidates(db, app.id)).get(knowledgeId)).toBe('READ_ONLY');
+    expect((await getAppMemoryAccess(db, app.id)).has(knowledgeId)).toBe(false);
   });
 
   it('is NOT writable by a JWT org CONTRIBUTOR (requireMemoryWriteAccess)', async () => {

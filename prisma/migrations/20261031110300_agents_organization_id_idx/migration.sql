@@ -1,0 +1,13 @@
+-- #451: an org's agent listing and the org-delete cascade filter
+-- agents.organization_id. The persona-name unique indexes on it are partial
+-- (WHERE persona_name IS NOT NULL) and cannot serve a plain lookup.
+--
+-- CONCURRENTLY cannot run inside a transaction block, and `prisma migrate
+-- deploy` sends a file as one simple query: one statement runs outside a
+-- transaction, several run as one implicit transaction (SQLSTATE 25001). Keep
+-- this file a single statement.
+--
+-- A failed CONCURRENTLY build leaves an INVALID index under this name, which
+-- IF NOT EXISTS would then skip. If it is ever INVALID, drop it and re-run
+-- this statement by hand.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "agents_organization_id_idx" ON "agents"("organization_id");

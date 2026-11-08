@@ -82,17 +82,20 @@ beforeEach(async () => {
 
 afterEach(() => sessionKeyCache.clear());
 
-async function denseFixture() {
+async function denseFixture(edgeInsertion: 'forward' | 'reverse' = 'forward') {
   const nodes: Array<{ id: string; loc: string }> = [];
   for (let i = 0; i < 12; i++) nodes.push(await db.node.create({ data: {
     id: `01a188c${i.toString(16).padStart(25, '0')}`,
     memoryId: fx.memory.id, loc: `dense:${i.toString().padStart(2, '0')}`,
     name: `Synthetic ${i}`, abstract: 'small abstract', content: 'X'.repeat(96 * 1024),
   } }));
-  await db.edge.createMany({ data: nodes.flatMap((a, i) => nodes.map((b, j) => ({
+  const edges = nodes.flatMap((a, i) => nodes.map((b, j) => ({
     id: generateId(), memoryId: fx.memory.id, sourceId: a.id, targetId: b.id,
     loc: `dense-edge:${i}:${j}`, name: 'synthetic-link',
-  }))) });
+  })));
+  // #2823/#2967: 'reverse' forces the physical row order to differ; the product edge order
+  // (loc, id) makes the raw output hash independent of it.
+  await db.edge.createMany({ data: edgeInsertion === 'reverse' ? edges.reverse() : edges });
   return nodes;
 }
 
@@ -135,16 +138,21 @@ async function measuredRead(scope: 'abstract' | 'all', refs: string[], form: 'pk
   } finally { many.mockRestore(); txSpy.mockRestore(); renderSpy.mockRestore(); }
 }
 
-it.each([['abstract', 'pk'], ['abstract', 'urn'], ['abstract', 'prefix'], ['all', 'pk'], ['all', 'urn'], ['all', 'prefix']] as const)('#2774 bounds endpoint/root payloads with byte-identical %s/%s output', async (scope, form) => {
-  const nodes = await denseFixture();
+it.each((['forward', 'reverse'] as const).flatMap(order => ([['abstract', 'pk'], ['abstract', 'urn'], ['abstract', 'prefix'], ['all', 'pk'], ['all', 'urn'], ['all', 'prefix']] as const).map(([scope, form]) => [scope, form, order] as const)))('#2774 bounds endpoint/root payloads with byte-identical %s/%s output (edge insertion %s)', async (scope, form, order) => {
+  const nodes = await denseFixture(order);
   const result = await measuredRead(scope, nodes.map(n => n.id), form);
   expect(result.text).not.toMatch(/^Error/);
   expect(result.loads.some(l => l.phase === 'initial' && l.rows === 12)).toBe(true);
   expect(result.loads.filter(l => l.phase === 'current').length).toBeGreaterThanOrEqual(12);
   expect(result.loads.filter(l => l.phase === 'current').every(l => l.rows === 1)).toBe(true);
   expect.soft(result.maxPendingBodies).toBeLessThanOrEqual(1);
-  // The main-source output hashes are captured on these same deterministic rows before the fix.
-  const baseline = { abstract: '8a33ebc7bc8d148e45a9b7ed590d8cd79a79a2e4f213ecae21fb9d5598c8d952', all: 'ee49b72e6151cf6c1b2717d0ca18d3b6f5b5c1af60a19c7ae15bbe8b60e6c94e' };
+  // The output hashes are captured on these same deterministic rows. #2967: edge lines now follow
+  // edge loc then id (lexical, so dense-edge:0:10 precedes dense-edge:0:2), where the #2774 values
+  // (abstract 8a33ebc7…, all ee49b72e…) hashed the pre-#2967 insertion order. Sorting each run of
+  // edge lines in the new output reproduces those old hashes exactly: only edge-line order moved.
+  // #3659: every node now prints a Validation tasks line, where the #2967 values were c74221db… and
+  // 2ba30066…. Removing those lines from the new output reproduces those hashes exactly.
+  const baseline = { abstract: '2687cd290c2cb3b35c0422ba885adb12ad3c8ce7753b27d90b194070fab01049', all: 'd2a649b69b145f31087e165618def2179ef76f3dd6eab9078453fcec51ab30a5' };
   expect(result.hash).toBe(baseline[scope]);
   expect.soft(result.loads.reduce((n, l) => n + l.endpointBodyBytes, 0)).toBe(0);
   if (scope === 'abstract') {

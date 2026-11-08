@@ -10,21 +10,43 @@
  * stands in for the grant (Holger, 2026-10-12, team chat #9789).
  *
  * Read-only: it returns the grants a caller must provision and never writes, so the preview can run it too. A caller
- * that writes runs it again inside its deciding transaction.
+ * that writes runs it again inside its deciding transaction and provisions with `provisionCastGrants`.
  */
+import { resolveUnfilteredAppInstallation, readInstallBootPrompt } from './appInstallations.js';
 import { isLifecycleActive } from '@hadron-memory/access-control';
 import { GraphQLError } from 'graphql';
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
+import { ensureAgentOrgGrant } from '../controller/operations/ensureAgentOrgGrant.js';
 import { classifyOrgAgentLicense } from './auth/orgAgentInstallLicense.js';
+import { personalOrgAgentLicenseHolds } from './auth/personalOrgAgentInstall.js';
+import { bootPromptRefusal } from './bootPrompt/refusal.js';
 import { parseCompiledProvenance } from './bootCompile/provenance.js';
 
-type Db = Pick<PrismaClient, 'agent' | 'agentOrgGrant' | 'agentSubscription' | 'appAgent' | 'compiledPromptRevision' | 'node'> | Prisma.TransactionClient;
+type Db = Pick<PrismaClient, 'app' | 'appAgentCustomization' | 'agentImport' | 'agent' | 'agentOrgGrant' | 'agentSubscription' | 'appAgent' | 'compiledPromptRevision' | 'node'> | Prisma.TransactionClient;
 
 export type CastingApp = { id: string; organizationId: string | null; ownerUserId: string | null; uninstalledAt: Date | null };
-export type CastingAgent = { id: string; name: string; urn: string; personaRole: string | null; systemPrompt: string | null };
+export type CastingAgent = { id: string; name: string; urn: string; personaRole: string | null };
 
 const refusal = (code: string, message: string, extensions: Record<string, unknown> = {}) =>
   new GraphQLError(message, { extensions: { code, ...extensions } });
+
+/**
+ * #3256 / hrn:node:hadronmemory.com:specs:cor:dmo:050:11: cast, preview and change take the Agent's own nonblank
+ * role. Call AFTER the existing installation/licence checks, and again on the cast's locked transaction read.
+ */
+export function requireWorkerAgentRole(agent: Pick<CastingAgent, 'personaRole'>, workerId?: string): string {
+  const role = (agent.personaRole ?? '').trim();
+  if (role === '') {
+    throw refusal(
+      'WORKER_AGENT_HAS_NO_ROLE',
+      workerId
+        ? 'That agent has no role of its own, so a worker cannot change to it; give the agent a personaRole first.'
+        : 'That agent has no role of its own, so a worker cannot be cast from it; give the agent a personaRole first.',
+      workerId ? { workerId } : {},
+    );
+  }
+  return role;
+}
 
 /** The one answer for an absent Agent and one not installed here (#1946 ruling A): no agentId, no existence oracle. */
 export const workerAgentNotInstalled = (appId: string) => refusal(
@@ -64,6 +86,11 @@ async function planLicence(db: Db, app: CastingApp, agentId: string, include: bo
   // A user-owned App: the owner's own Agent, or the owner's active subscription.
   const agent = await db.agent.findUnique({ where: { id: agentId }, select: { ownerUserId: true, deletedAt: true } });
   if (!agent || agent.deletedAt) throw unavailable();
+  if (!(await personalOrgAgentLicenseHolds(db as Prisma.TransactionClient, app, agentId))) {
+    // Included Agents keep the existing non-disclosing include refusal.
+    if (include) throw inactive();
+    throw bootPromptRefusal('BOOT_PROMPT_INSTALL_LICENSE_INACTIVE', { surface: 'bind', agentName: '' });
+  }
   if (app.ownerUserId && agent.ownerUserId === app.ownerUserId) return false;
   const sub = app.ownerUserId
     ? await db.agentSubscription.findUnique({ where: { userId_agentId: { userId: app.ownerUserId, agentId } } })
@@ -78,7 +105,7 @@ async function planLicence(db: Db, app: CastingApp, agentId: string, include: bo
  * authority for what that revision read). No pointer, no compiled prompt, no includes. The agent itself is excluded.
  */
 async function includedAgentIds(db: Db, appId: string, agentId: string): Promise<string[]> {
-  const appAgent = await db.appAgent.findUnique({ where: { appId_agentId: { appId, agentId } }, select: { bootPromptNodeId: true } });
+  const appAgent = await readInstallBootPrompt(db, appId, agentId);
   const agent = await db.agent.findUnique({ where: { id: agentId }, select: { bootPromptNodeId: true } });
   const pointer = appAgent?.bootPromptNodeId ?? agent?.bootPromptNodeId ?? null;
   if (!pointer) return [];
@@ -113,16 +140,35 @@ export async function assertCastable(
   if (app.uninstalledAt) {
     throw refusal('APP_UNINSTALLED', 'Cannot cast a worker in an uninstalled App.', { appId: app.id });
   }
-  const row = await db.appAgent.findUnique({
-    where: { appId_agentId: { appId: app.id, agentId } },
-    select: { agent: { select: { id: true, name: true, urn: true, personaRole: true, systemPrompt: true, deletedAt: true } } },
-  });
+  const row = await resolveUnfilteredAppInstallation(db, app.id, agentId);
   if (!row || row.agent.deletedAt) throw workerAgentNotInstalled(app.id);
   const provisionGrantsFor: string[] = [];
   if (await planLicence(db, app, agentId, false)) provisionGrantsFor.push(agentId);
   for (const included of await includedAgentIds(db, app.id, agentId)) {
     if (await planLicence(db, app, included, true)) provisionGrantsFor.push(included);
   }
-  const { deletedAt: _deleted, ...agent } = row.agent;
+  const {id,name,urn,personaRole} = row.agent;
+  const agent = {id,name,urn,personaRole};
   return { agent, provisionGrantsFor };
+}
+
+/**
+ * #2906 / cor:agt:040:08: write the same-organisation grants `assertCastable` planned, in the caller's deciding
+ * transaction, then judge the licence again. The plan is a read made BEFORE the write, and `ensureAgentOrgGrant`
+ * is ON CONFLICT DO NOTHING: a concurrent writer's row (even a REVOKED one, committed while this INSERT waited on it)
+ * leaves the plan stale and the write a no-op. The second `assertCastable` reads that row and refuses it with the
+ * licence's own code, so a stale plan can never become a success on a revoked grant. Never reactivates; the caller
+ * must call this only once every refusal it can return as a value (a taken name) has been judged, because a
+ * returned value commits the transaction.
+ */
+export async function provisionCastGrants(
+  tx: Prisma.TransactionClient,
+  app: CastingApp,
+  agentId: string,
+  plan: string[],
+  createdBy: string | null,
+): Promise<void> {
+  if (plan.length === 0 || !app.organizationId) return;
+  for (const grantAgentId of plan) await ensureAgentOrgGrant(tx, app.organizationId, grantAgentId, { createdBy });
+  await assertCastable(tx, app, agentId);
 }

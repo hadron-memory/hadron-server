@@ -1,4 +1,5 @@
 import { assertPositiveSessionTimeout } from '../../../lib/sessionTimeout.js';
+import { edgeRunOrder } from '../../../lib/edgeOrder.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
 import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
 import { isWorkerResetting } from '../../../lib/contextReset/contextReset.js';
@@ -22,7 +23,7 @@ import { lockAncestorsForCreate, lockAncestorsForCreateMany, lockPathForCreateUn
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { canReadMemory, filterReadableMemoryIds } from '../../../mcp/access-control.js';
-import { isAgentInstalled } from '../../../lib/appAgent.js';
+import { isAgentInstalledForAppOperation } from '../../../lib/appAgent.js';
 import { hasRequestOperationKey, getRequestOperationKey } from '../../../lib/requestOperationKey.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { makeKeyVerifier, verifyDataKey } from '../../../lib/memoryUnlock.js';
@@ -45,7 +46,7 @@ import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.j
 import { eventActor } from '../../../lib/agentTasks/events.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
-import { attributedRequestActivity, recordNodeUsage, toUsageNodeRefs, trackUsageWrite } from '../../../lib/usageRecorder.js';
+import { attributedRequestActivity, recordNodeUsage, toUsageNodeRefs, trackUsageWrite, usageAppKeyOf } from '../../../lib/usageRecorder.js';
 import {
   HANDOFFS_PARENT_LOC,
   HANDOFF_SESSION_KEY,
@@ -59,6 +60,7 @@ import { generateUniqueHandle } from '../../../lib/userHandle.js';
 import { ensureUserPrincipal } from '../../../lib/principal/mintPrincipal.js';
 import { isRoutingName, routingNameOf } from '../../../lib/runner/selectNextEdge.js';
 import { compileTemplate } from '../../../lib/template.js';
+import { chargeRequestServed } from '../../../lib/includes/resolveNodeContent.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { NodeNotFoundError, AgentNotFoundError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
@@ -97,6 +99,7 @@ import {
 } from './resolvers.helpers.js';
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
 import { preserveHeartbeatIfLapsed } from '../../../lib/sessionActivity.js';
+import { recordSessionOutcome as recordOutcome } from '../../../lib/sessionOutcome.js';
 import { consumeGrant, failOperation, loadLiveGrant, sameHold, type LoadedGrant } from '../../../lib/hostOperations/launch.js';
 import {
   consumeResumeClaim,
@@ -113,6 +116,24 @@ import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/au
 import { deriveFamily, normalizeFamily } from '../../../lib/agentTasks/family.js';
 import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
 import { forbiddenError } from '../../../lib/refusals.js';
+import { requirePersonAsThemselves } from '../../../lib/auth/personAsThemselves.js';
+import { oauthSurfaceRefusal, oauthSurfaceRefusalMessage } from '../../../middleware/auth.js';
+import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
+import { OrganizationNotFoundError } from '../../../lib/entityRef/errors.js';
+import { getProjectBaseUrl } from '../../../lib/baseUrl.js';
+import {
+  ConnectProviderNotConfiguredError,
+  getConnectProvider,
+  issueConnectStart,
+} from '../../../integrations/mailboxConnect.js';
+
+/** `ConnectionProvider` enum value -> the emailClient provider key a connect flow is mounted under (#2897). */
+const CONNECTION_PROVIDER_KEYS: Record<string, string> = {
+  MS_EXCHANGE: 'ms-exchange',
+  GMAIL: 'gmail',
+  GOOGLE_CAL: 'google-cal',
+  GOOGLE_DRIVE: 'google-drive',
+};
 
 /**
  * Strip explicit GraphQL nulls from a CalendarEventTimeInput so the tool's
@@ -445,6 +466,7 @@ export async function writeSessionHandoff(
         },
         writerCtx,
         'create',
+        { authoring: { kind: 'platform', record: 'session-handoff' } },
       );
     }
 
@@ -464,6 +486,7 @@ export async function writeSessionHandoff(
       },
       writerCtx,
       'create',
+      { authoring: { kind: 'platform', record: 'session-handoff' } },
     );
   } catch (e) {
     throw new GraphQLError(
@@ -1576,6 +1599,34 @@ export const sessionMutations = {
       });
     },
 
+    // #2896: report a session's outcome. The ONE implementation `POST /sessions/:id/outcome` also calls
+    // (`recordSessionOutcome`, src/lib/sessionOutcome.ts); each refusal maps onto the error shape the other session
+    // mutations use. An outcome report is a session WRITE (cor:dmo:070:05, strict owner cor:acl:010:02), not driving it.
+    recordSessionOutcome: async (
+      _: unknown,
+      { sessionId, outcome, outcomeRef, outcomeMeta }: { sessionId: string; outcome: number; outcomeRef?: string | null; outcomeMeta?: unknown },
+      ctx: Context,
+    ) => {
+      const result = await recordOutcome(ctx.db, async () => ctx, { sessionId, outcome, outcomeRef, outcomeMeta });
+      switch (result.kind) {
+        case 'out_of_range':
+          throw new GraphQLError('outcome must be a number between 0 and 1', { extensions: { code: 'BAD_USER_INPUT' } });
+        case 'oauth_surface':
+          throw new GraphQLError(
+            oauthSurfaceRefusalMessage(result.refusal, 'This OAuth credential is limited to the MCP surface.'),
+            { extensions: { code: 'FORBIDDEN', ...result.refusal } },
+          );
+        case 'no_credential':
+          throw new GraphQLError('A credential is required', { extensions: { code: 'UNAUTHENTICATED' } });
+        case 'not_found':
+          throw new GraphQLError(`Session not found: ${sessionId}`, { extensions: { code: 'BAD_USER_INPUT' } });
+        case 'forbidden':
+          throw authorizationDenied();
+        case 'ok':
+          return ctx.db.session.findUniqueOrThrow({ where: { id: sessionId }, include: SESSION_INCLUDE });
+      }
+    },
+
     endSession: async (
       _: unknown,
       {
@@ -1831,6 +1882,8 @@ export const sessionMutations = {
             memoryId: node?.memoryId,
             actionArgs: serializeJson(event.actionArgs) as InputJsonValue | undefined,
             appId: ctx.appId,
+            // #2944: the authenticating App key (null for a user; recordUsage needs READER, so a key is refused today).
+            appKeyId: usageAppKeyOf(ctx),
             // Attribution from auth (spec 046 FR-001), as the MCP recorders do.
             // This path only ever set the audit `createdBy` string, so a signed-in
             // user's reads/writes recorded here were invisible to any query
@@ -1876,7 +1929,7 @@ export const sessionMutations = {
         // IS NULL) cannot operate any agent.
         // 023-app-shape Phase 2b: App↔Agent goes through AppAgent. Check
         // that the requested Agent is installed in the calling App.
-        if (!(await isAgentInstalled(tx, app.id, agentId))) {
+        if (!(await isAgentInstalledForAppOperation(tx, app.id, agentId))) {
           throw forbiddenError('Forbidden: App is not allowed to operate this agent');
         }
 
@@ -2490,6 +2543,73 @@ export const sessionMutations = {
      * write or provider teardown; a repeat delete answers as missing. Only the
      * authorization failure maps to the denial: infrastructure errors stay errors.
      */
+    /**
+     * #2897 — start a connection's OAuth flow from GraphQL (the CLI's door; cor:api:240:02). The start itself is
+     * `issueConnectStart`, the one REST `POST /auth/{provider}/start` also uses. What is decided HERE is who may
+     * call it: this mints a credential-bearing start for a person's mailbox, calendar or Drive, so it follows the
+     * App-key-management rule (cor:dmo:050:05): a user acting as themselves, never an App key, a bound worker
+     * session, an impersonated request or an MCP-only OAuth credential.
+     */
+    startConnection: async (
+      _: unknown,
+      { provider, orgRef }: { provider: string; orgRef: string },
+      ctx: Context,
+    ) => {
+      if (ctx.impersonation) throw forbiddenError();
+      if (!ctx.userId) {
+        throw new GraphQLError('Starting a connection needs a signed-in user.', {
+          extensions: { code: 'UNAUTHENTICATED' },
+        });
+      }
+      // An App run on behalf of the org's ADMIN carries both appId and userId; the grant is the App's, not theirs.
+      if (ctx.appId) throw forbiddenError();
+      await requirePersonAsThemselves(ctx, forbiddenError);
+      const surfaceRefusal = oauthSurfaceRefusal(ctx, 'account');
+      if (surfaceRefusal) {
+        throw new GraphQLError(
+          oauthSurfaceRefusalMessage(surfaceRefusal, 'This OAuth credential is limited to the MCP surface and cannot start a connection.'),
+          { extensions: { code: 'FORBIDDEN', ...surfaceRefusal } },
+        );
+      }
+      // An unknown org answers exactly like an org the caller does not administer: no existence oracle.
+      let orgId: string;
+      try {
+        orgId = (await resolveOrgRef(ctx.db, orgRef)).id;
+      } catch (err) {
+        if (err instanceof OrganizationNotFoundError) throw authorizationDenied();
+        throw err;
+      }
+      const cfg = getConnectProvider(CONNECTION_PROVIDER_KEYS[provider] ?? '');
+      try {
+        if (!cfg) {
+          // Not mounted on this server: the same answer as an unconfigured provider, after the org gate.
+          await requireOrgRole(ctx, orgId, 'ADMIN');
+          throw new ConnectProviderNotConfiguredError(provider);
+        }
+        const { nonce, expiresAt, flowId } = await issueConnectStart(cfg, {
+          userId: ctx.userId,
+          roles: ctx.roles,
+          orgId,
+          redirect: '/',
+          origin: 'graphql',
+        });
+        return {
+          flowId,
+          provider,
+          orgId,
+          authorizeUrl: `${getProjectBaseUrl()}/auth/${cfg.routeName}?nonce=${nonce}`,
+          expiresAt,
+        };
+      } catch (err) {
+        if (err instanceof ConnectProviderNotConfiguredError) {
+          throw new GraphQLError(`${provider} connections are not configured on this server.`, {
+            extensions: { code: 'CONNECTION_PROVIDER_NOT_CONFIGURED', provider },
+          });
+        }
+        throw err;
+      }
+    },
+
     deleteExchangeConnection: async (_: unknown, { id }: { id: string }, ctx: Context) => {
       const connection = await ctx.db.exchangeConnection.findFirst({ where: { id, deletedAt: null } });
       if (!connection) throw authorizationDenied();
@@ -2966,7 +3086,7 @@ export const sessionMutations = {
 
         const node = await ctx.db.node.findUnique({
           where: { loc_memoryId: { loc, memoryId: memory.id } },
-          include: { outgoingEdges: { where: { deletedAt: null, target: { deletedAt: null } }, include: { target: true } } },
+          include: { outgoingEdges: { where: { deletedAt: null, target: { deletedAt: null } }, include: { target: true }, orderBy: edgeRunOrder() } },
         });
         if (!node) {
           throw new GraphQLError(`Node "${targetNodeUrn}" not found.`, {
@@ -3011,8 +3131,9 @@ export const sessionMutations = {
           {
             memoryUrnOf: async (memoryId) =>
               (await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { urn: true } })).urn,
+            // #40: each compiled piece is served, so it counts toward the request's aggregate.
             compileTemplate: (content, data, memoryId) =>
-              compileTemplate(content, data, memoryId, ctx.db, {}),
+              compileTemplate(content, data, memoryId, ctx.db, {}).then(text => chargeRequestServed(ctx, content, text)),
             includeTarget: target => !!target && readableTargets.has(target.memoryId),
             onTargetInlined: (target) => inlined.push(target),
           },
@@ -3038,6 +3159,7 @@ export const sessionMutations = {
               nodeId: node.id,
               memoryId: node.memoryId, // #796
               appId: ctx.appId ?? null,
+              appKeyId: usageAppKeyOf(ctx), // #2944
               // Same attribution gap as recordUsage above: action-run isn't
               // counted by usageActivity today, but the bucket surface is meant
               // to grow to other event types, and the MCP action-run recorder

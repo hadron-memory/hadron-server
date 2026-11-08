@@ -53,6 +53,7 @@
  * still mutated the row would satisfy the first half alone.
  */
 
+import { attestedAuthoring } from '../../../lib/authoringAttestation.js';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
@@ -110,7 +111,7 @@ async function expectCode(p: Promise<unknown>, code: string): Promise<GraphQLErr
 /** The update under test, reached at the core so both selector shapes are drivable. */
 async function update(input: Record<string, unknown>, targetNodeId?: string) {
   const { writeNodeCore } = await import('./resolvers.mutation.node.js');
-  return writeNodeCore(input as never, ctx(), 'update', targetNodeId ? { targetNodeId } : undefined);
+  return writeNodeCore(input as never, ctx(), 'update', { authoring: attestedAuthoring(null), ...(targetNodeId ? { targetNodeId } : {}) });
 }
 
 beforeEach(async () => {

@@ -13,9 +13,10 @@
  */
 
 import { writeNodeCore } from '../../../api/graphql/schema/resolvers.mutation.node.js';
-import { canReadMemory } from '../../../mcp/access-control.js';
+import type { AuthoredWith } from '../../authoringAttestation.js';
+import { runAuthoring, runReadsNode } from '../runAuthoring.js';
 import type { AuthContext } from '../../../middleware/auth.js';
-import { splitNodeUrn } from '../../urn.js';
+import { splitNodeUrn, normalizeUrnForLookup, legacyMemoryUrnToCanonical } from '../../urn.js';
 import { resolveFlowMemory, loadFlowNode } from '../loadFlowNode.js';
 import type { RunToolDef, RunToolContext } from './types.js';
 
@@ -24,6 +25,12 @@ const WRITE_ARG_PROPERTIES = {
   urn: {
     type: 'string',
     description: 'Fully-qualified node URN (hrn:node:<root>:<memory>:<loc>). Same-org only.',
+  },
+  authoredWith: {
+    type: 'object',
+    description: 'The author task this write worked from, required when the node\'s role rule names one: its id or URN, and its current revision.',
+    properties: { task: { type: 'string' }, revision: { type: 'integer' } },
+    required: ['task', 'revision'],
   },
   name: { type: 'string', description: 'Node display name.' },
   content: { type: 'string', description: 'Markdown content.' },
@@ -82,8 +89,23 @@ export const hadronReadNode: RunToolDef = {
     // to probe node existence via error-message differences (PR-545 review,
     // Copilot). Memory resolution leaks nothing beyond org scoping.
     const { memoryUrn, loc } = splitNodeUrn(urn);
-    const memory = await resolveFlowMemory(ctx.db, memoryUrn, ctx.run.organizationId, urn);
-    if (!(await canReadMemory(ctx.db, principalAuth(ctx), memory.id))) {
+    let memory: Awaited<ReturnType<typeof resolveFlowMemory>>;
+    let viaGrant = false;
+    try { memory = await resolveFlowMemory(ctx.db, memoryUrn, ctx.run.organizationId, urn); }
+    catch (err) {
+      // #2883: a grant may name a memory outside the run's org (an Agent of another org, installed in this App). Only a
+      // live grant admits it; every other shape rethrows the org-scoped answer unchanged, so a missing memory and an
+      // ungranted foreign one stay indistinguishable.
+      const foreign = await ctx.db.memory.findFirst({
+        where: { urn: { in: [normalizeUrnForLookup(memoryUrn), legacyMemoryUrnToCanonical(normalizeUrnForLookup(memoryUrn))] }, deletedAt: null },
+        select: { id: true, urn: true, isEncrypted: true },
+      });
+      // #3306 / ruling 0104: or the memory is PUBLIC knowledge, which a run with no user reads in any org, read-only.
+      if (!foreign || !(await runReadsNode(ctx.db, ctx.principal, ctx.run, foreign.id, loc))) throw err;
+      memory = foreign;
+      viaGrant = true;
+    }
+    if (!viaGrant && !(await runReadsNode(ctx.db, ctx.principal, ctx.run, memory.id, loc))) {
       throw new Error(`Memory not readable for "${urn}" under the run principal.`);
     }
     const node = await ctx.db.node.findUnique({
@@ -95,12 +117,23 @@ export const hadronReadNode: RunToolDef = {
   },
 };
 
+/** #1328 — a run tool states its claim like any other writer. Never the portal path. */
+function runToolAuthoring(ctx: RunToolContext, args: Record<string, unknown>) {
+  const claim = args.authoredWith as Partial<AuthoredWith> | null | undefined;
+  return runAuthoring(
+    ctx.principal,
+    ctx.run,
+    claim && typeof claim.task === 'string' && typeof claim.revision === 'number'
+      ? { task: claim.task, revision: claim.revision } : null,
+  );
+}
+
 export const hadronCreateNode: RunToolDef = {
   name: 'hadron_create_node',
   description:
     'Create a new Hadron node at the given fully-qualified URN (hrn:node:<root>:<memory>:<loc>). ' +
     'Fails if a node already exists there — use hadron_update_node to change one. ' +
-    'Set seq when appending ordered items (e.g. chat messages).',
+    'Set seq when appending ordered items of an ordinary node type. The default nodeType is record, and a record (or chat-message) outside a Channel refuses an explicit seq (SEQ_PROTECTED): seq is protected conversation order.',
   inputSchema: {
     type: 'object',
     properties: WRITE_ARG_PROPERTIES,
@@ -126,6 +159,7 @@ export const hadronCreateNode: RunToolDef = {
         } as never,
         ctx.principal,
         'create',
+        { authoring: runToolAuthoring(ctx, args) },
       );
       return { created: true, urn, id: written.id };
     } catch (err) {
@@ -176,7 +210,7 @@ export const hadronUpdateNode: RunToolDef = {
       } as never,
       ctx.principal,
       'update',
-      { targetNodeId: node.id },
+      { authoring: runToolAuthoring(ctx, args), targetNodeId: node.id },
     );
     return { updated: true, urn, id: written.id };
   },

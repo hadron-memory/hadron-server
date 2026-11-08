@@ -1,4 +1,7 @@
+import { encryptChatEngineStateWithKey } from '../../../lib/chatRootEngineState.js';
 // memoryMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { SYNC_NOT_ATTEMPTED, syncNotAttemptedMessage } from '../../../integrations/github/syncNotAttempted.js';
+import { applyOrgDefaultsAtCreation } from './resolvers.memoryConfigOrgDefault.js';
 import { endApprovalsOnEncryptedEntry } from '../../../lib/nodeApproval.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { generateId } from '../../../lib/id.js';
@@ -65,7 +68,12 @@ import {
   type MemoryVisibility,
 } from '../../../generated/prisma/index.js';
 import { parseDataKey } from '../../../lib/crypto.js';
-import { getRequestOperationKey } from '../../../lib/requestOperationKey.js';
+import {
+  getRequestOperationKey,
+  hasRequestOperationKey,
+  requestOperationKeyStorage,
+} from '../../../lib/requestOperationKey.js';
+import { getRequestKey, requestKeyStorage, takeRequestFirstEncryption } from '../../../lib/requestKeys.js';
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 import {
   generateKdfSalt,
@@ -825,6 +833,13 @@ export const memoryMutations = {
           name: rootName,
           description: 'Root node for this memory.',
         }, tx);
+        // #3426 (C3): the ONE site where the org's default templates are applied — an org-owned knowledge or group memory
+        // created here. Not personal/private (the owner alone manages those), not user-owned, and no other creation path
+        // (App, install, agent, chat, worker, clone, extract). No flag opts a caller out, so `source` changes nothing.
+        // Inside this transaction: a failure rolls the memory, its root node and its rules back together.
+        if (resolvedOrgId && (requestedClass === 'knowledge' || requestedClass === 'group')) {
+          await applyOrgDefaultsAtCreation(tx, { memoryId: created.id, orgId: resolvedOrgId, actor: ctx.userId ?? ctx.clientId ?? 'system' });
+        }
         return created;
       }));
 
@@ -943,6 +958,20 @@ export const memoryMutations = {
             'visibility=GROUP requires class=group (spec 023 FR-024).',
             { extensions: { code: 'INVALID_GROUP_MEMORY_VISIBILITY' } },
           );
+        }
+        // #3372 / cor:dmo:060:01 / ruling0207: class decides whether
+        // visibility exists. Keep the older GROUP-direction refusals above
+        // unchanged; these missing cells get BAD_USER_INPUT after access and
+        // before rename/alias, grant or memory writes.
+        if (memory.class === 'knowledge' && visibility === null) {
+          throw new GraphQLError("Memory class 'knowledge' requires a non-null visibility.", {
+            extensions: { code: 'BAD_USER_INPUT' },
+          });
+        }
+        if (memory.class !== 'knowledge' && memory.class !== 'group' && visibility !== null) {
+          throw new GraphQLError(`Visibility must be null for memory class '${memory.class}'.`, {
+            extensions: { code: 'BAD_USER_INPUT' },
+          });
         }
         await assertMemoryVisibilityChangeAllowed(ctx.db, memory, visibility);
       }
@@ -2215,6 +2244,11 @@ export const memoryMutations = {
       await concealUnreadableDenial(ctx, id, ref, () => requireMemoryManageAccess(ctx, memory, 'CONTRIBUTOR'));
 
       const result = await syncGraphFromGithub(memory);
+      if (result.notAttemptedReason) {
+        throw new GraphQLError(syncNotAttemptedMessage(result.notAttemptedReason), {
+          extensions: { code: SYNC_NOT_ATTEMPTED, reason: result.notAttemptedReason },
+        });
+      }
       // `fault` is judged on its own: an exception with an empty message must not read as success.
       if (result.fault) throw new Error(result.error ?? 'sync fault');
       if (result.error) {
@@ -2397,6 +2431,13 @@ export const memoryMutations = {
               },
             });
           }
+          // #3501: promotion also converts operational state on tombstoned roots.
+          // Memory FOR UPDATE is held; node locks are deterministic, as in the content pass.
+          const engineRoots = await tx.chatRootEngineState.findMany({ where: { chatRoot: { memoryId: resolvedMemoryId } }, select: { chatRootNodeId: true }, orderBy: { chatRootNodeId: 'asc' } });
+          for (const engine of engineRoots) {
+            await tx.$queryRaw`SELECT id FROM nodes WHERE id=${engine.chatRootNodeId} FOR UPDATE`;
+            await encryptChatEngineStateWithKey(tx, engine.chatRootNodeId, key);
+          }
           // #1079 (PR #1080 third review, Codex P2) — linking an anonymous
           // memory to a user REPLACES its urn, which is a rename by any other
           // name and owes an alias. Already inside this transaction, so the
@@ -2412,6 +2453,9 @@ export const memoryMutations = {
           // supplied a different key. Claim the flag and verifier together;
           // if another writer won, roll back every Node rewrite, reconcile,
           // and alias in this transaction.
+          // #3191: `memories.updated_at` / `anonymous_expires_at` are zone-less UTC columns, so the claim's clock is
+          // `clock_timestamp() AT TIME ZONE 'UTC'` (precedent: passkeys/registration.ts); a bare clock_timestamp()
+          // is read in the session zone. Same for the plaintext claim below.
           // Evaluate expiry in the claim statement, not against an application
           // clock or the transaction's start time (a lock wait can outlive it).
           // R206: this flip is serialized against an in-flight Git mirror's KEY SHARE
@@ -2420,10 +2464,10 @@ export const memoryMutations = {
             UPDATE memories SET urn = ${newUrn}, created_by = ${user.id},
               anonymous_expires_at = NULL, is_encrypted = true,
               key_verifier = ${makeKeyVerifier(key)}, class = 'private', user_id = ${user.id},
-              updated_by = ${ctx.appId}, updated_at = clock_timestamp()
+              updated_by = ${ctx.appId}, updated_at = (clock_timestamp() AT TIME ZONE 'UTC')
             WHERE id = ${resolvedMemoryId} AND is_encrypted = false AND key_verifier IS NULL
               AND urn = ${memory.urn} AND user_id IS NULL
-              AND anonymous_expires_at > clock_timestamp()
+              AND anonymous_expires_at > (clock_timestamp() AT TIME ZONE 'UTC')
               AND user_memory_of_agent_id IS NOT NULL
               AND app_id = ${ctx.appId} AND organization_id = ${app.organizationId}
               AND class = 'app' AND deleted_at IS NULL
@@ -2443,9 +2487,12 @@ export const memoryMutations = {
         // just installed. The owning App can recover an interrupted pass by
         // proving possession of this existing key; it cannot repeat promotion
         // or choose a replacement verifier (Holger's #1644 completion ruling).
-        await memoryMutations.encryptMemory(
-          {}, { memoryId: resolvedMemoryId, dataKey: key.raw.toString('base64') }, ctx,
-        );
+        // #1796 (cor:sec:040:04): no secret as an argument, even here. The key rides this one call's
+        // request scope. The empty operation-key scope is needed: this request's operation key is
+        // already consumed, and a second claim refuses.
+        await requestKeyStorage.run(new Map([[resolvedMemoryId, key]]), () =>
+          requestOperationKeyStorage.run({}, () =>
+            memoryMutations.encryptMemory({}, { memoryId: resolvedMemoryId }, ctx)));
         return ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
       }
 
@@ -2468,10 +2515,10 @@ export const memoryMutations = {
         });
         const claimed = await tx.$executeRaw`
           UPDATE memories SET urn = ${newUrn}, created_by = ${user.id},
-            anonymous_expires_at = NULL, updated_by = ${ctx.appId}, updated_at = clock_timestamp()
+            anonymous_expires_at = NULL, updated_by = ${ctx.appId}, updated_at = (clock_timestamp() AT TIME ZONE 'UTC')
           WHERE id = ${resolvedMemoryId} AND urn = ${memory.urn} AND user_id IS NULL
             AND class = 'app' AND app_id = ${ctx.appId} AND organization_id = ${app.organizationId}
-            AND deleted_at IS NULL AND anonymous_expires_at > clock_timestamp()
+            AND deleted_at IS NULL AND anonymous_expires_at > (clock_timestamp() AT TIME ZONE 'UTC')
             AND user_memory_of_agent_id IS NOT NULL AND is_encrypted = false AND key_verifier IS NULL
         `;
         if (claimed !== 1) {
@@ -2492,20 +2539,31 @@ export const memoryMutations = {
       _: unknown,
       {
         memoryId,
-        dataKey,
-        passphrase,
+        dataKey: dataKeyArgument,
+        passphrase: passphraseArgument,
       }: { memoryId: string; dataKey?: string | null; passphrase?: string | null },
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: memoryId may be ID, bare URN, or prefixed URN.
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
+      // #1796 (cor:sec:040:04): the secret travels beside the operation. A first encryption's entry
+      // comes from x-hadron-memory-keys, unverified because no verifier exists yet. A completion's key
+      // is either that header's verified staged key or the owning App's x-hadron-operation-key. The
+      // arguments stay for the deprecation window. Claiming the operation key waits for the encrypted
+      // branch: it is single-use, and nothing else here needs it.
+      const headerEntry = takeRequestFirstEncryption(resolvedMemoryId);
+      const dataKey = headerEntry ? headerEntry.dataKey : dataKeyArgument;
+      const passphrase = headerEntry ? headerEntry.passphrase : passphraseArgument;
+      const stagedKey = getRequestKey(resolvedMemoryId);
+      const operationKeySupplied = hasRequestOperationKey();
       // #1644: first encryption requires the strict owner. Holger's ruling
       // also permits completion by the owning App's actual key principal,
       // under the existing verifier, without fabricating an owner identity.
       const appCompletionOnly = ctx.userId == null && !ctx.impersonation && !!ctx.appId &&
         memory.appId === ctx.appId && memory.class === 'private' &&
-        memory.userId !== null && memory.isEncrypted && !!dataKey && !passphrase;
+        memory.userId !== null && memory.isEncrypted &&
+        (!!dataKey || !!stagedKey || operationKeySupplied) && !passphrase;
       await concealUnreadableDenial(ctx, resolvedMemoryId, memoryId, async () => {
         if (!isStrictOwner(ctx, memory.userId) && !appCompletionOnly) {
           throw new GraphQLError('Only the memory owner may encrypt it.', {
@@ -2513,6 +2571,11 @@ export const memoryMutations = {
           });
         }
       });
+      if (headerEntry && (dataKeyArgument || passphraseArgument)) {
+        throw new GraphQLError('Provide exactly one of dataKey or passphrase.', {
+          extensions: { code: 'BAD_UNLOCK_INPUT' },
+        });
+      }
       // Class gate (D-2026-07-06-B, #516 resolved): 'private' is the ONLY
       // encryptable class — no exceptions. Tier 2.5's SECRET-mode memories are
       // now born class='private' (resolvers.mutation.session.ts) and the anon→
@@ -2550,7 +2613,17 @@ export const memoryMutations = {
       let kdfFields: { kdfSalt?: string; kdfParams?: InputJsonValue } = {};
       if (memory.isEncrypted) {
         try {
-          key = await resolveSuppliedKey(memory, { dataKey, passphrase });
+          // Beside the operation, not an argument. Every supplied key must prove itself against the
+          // verifier, so a mismatch between channels can't pass: an operation key is verified here,
+          // the staged key was verified at staging, and an argument below.
+          const operationKey = operationKeySupplied ? getRequestOperationKey() : null;
+          if (operationKey && !verifyDataKey(memory.keyVerifier as string, operationKey)) {
+            throw new MemoryUnlockError('Wrong passphrase or data key for this memory.', 'WRONG_KEY');
+          }
+          const besideOperation = operationKey ?? stagedKey;
+          key = besideOperation && !dataKey && !passphrase
+            ? besideOperation
+            : await resolveSuppliedKey(memory, { dataKey, passphrase });
         } catch (e) {
           if (e instanceof MemoryUnlockError) {
             throw new GraphQLError(e.message, { extensions: { code: e.code, memoryId: resolvedMemoryId } });
@@ -2734,10 +2807,11 @@ export const memoryMutations = {
                 }
               }
 
+              const engineConverted = await encryptChatEngineStateWithKey(tx, current.id, key);
               const plaintextContent = current.content != null && !isAuthenticatedStringEnvelope(current.content, key);
               const plaintextAbstract = current.abstract != null && !isAuthenticatedStringEnvelope(current.abstract, key);
               const plaintextData = current.data != null && !isAuthenticatedDataEnvelope(current.data, key);
-              if (!plaintextContent && !plaintextAbstract && !plaintextData) return false;
+              if (!plaintextContent && !plaintextAbstract && !plaintextData) return engineConverted;
               const encrypted = encryptNodeFieldsWithKey(
                 { content: current.content, abstract: current.abstract, data: current.data }, key,
               );

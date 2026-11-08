@@ -18,7 +18,6 @@ import { darkAlarmChain, evaluateDarkWorkers } from './darkWorker.js';
 import { pendingTaskWakes } from './taskWakes.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { runAsActor } from '../requestActor.js';
-import { setS7AvailableForTest } from '../tickers/s7Availability.js';
 
 vi.mock('../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 
@@ -106,28 +105,6 @@ describe('#2807 item 1: the latest exemption end wins when an existing exemptEnd
     await atClock(after(40), () => runAsActor({ workerId: w.Tove.id, agentId: agent.id }, () =>
       M.setWorkerWakeSettings({}, { workerRef: w.Tove.id, input: { clearPause: true } }, holderCtx())));
     expect(await exemptEndedAt('Tove')).toBe(after(50).getTime());
-  });
-
-  it('clearWorkerIsolation on an isolation that ended at +20 keeps an existing exemptEndedAt of +30', async () => {
-    setS7AvailableForTest(true);
-    try {
-      await db.workerWakeSettings.create({ data: { workerId: w.Tove.id, isolatedUntil: after(20), exemptEndedAt: after(30) } });
-      await atClock(after(45), () => M.clearWorkerIsolation({}, { workerRef: w.Tove.id }, holderCtx()));
-      expect(await exemptEndedAt('Tove')).toBe(after(30).getTime());
-    } finally {
-      setS7AvailableForTest(false);
-    }
-  });
-
-  it('clearWorkerIsolation on a running isolation (ended now, +40) keeps an existing exemptEndedAt of +50', async () => {
-    setS7AvailableForTest(true);
-    try {
-      await db.workerWakeSettings.create({ data: { workerId: w.Tove.id, isolatedUntil: after(120), exemptEndedAt: after(50) } });
-      await atClock(after(40), () => M.clearWorkerIsolation({}, { workerRef: w.Tove.id }, holderCtx()));
-      expect(await exemptEndedAt('Tove')).toBe(after(50).getTime());
-    } finally {
-      setS7AvailableForTest(false);
-    }
   });
 
   it('and an earlier existing stamp is replaced by the later cleared end (the other direction of the same rule)', async () => {

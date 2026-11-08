@@ -96,6 +96,31 @@ async function seedSkew(tx: Tx): Promise<void> {
   await tx.$executeRawUnsafe('ANALYZE usage_events');
 }
 
+/**
+ * #2577: the flake's condition, made deterministic. The incident shape's two index paths, the created_at walk and
+ * the session-activity index, are a near tie on a clone's statistics; a hosted clone can break it either way. Rows
+ * with counts_as_activity=false sit only in usage_events_created_at_idx (the activity index is partial), so
+ * bulking them up makes the walk the costlier path and the planner takes the activity index for the bare max too.
+ */
+async function steerPlannerToActivityIndex(tx: Tx): Promise<void> {
+  await tx.$executeRawUnsafe(`
+    INSERT INTO usage_events (id, type, session_id, counts_as_activity, created_at)
+    SELECT 'ue-bulk-' || g, 'tool_call', 'sess-bulk-' || (g % 500), false,
+           timestamp '2026-08-01 00:00:00' + g * interval '1 second'
+    FROM generate_series(1, 20000) g`);
+  await tx.$executeRawUnsafe('ANALYZE usage_events');
+}
+
+/**
+ * #2577: the incident's condition by construction rather than by the planner's mood. Without the two session-keyed
+ * indexes (the state production was in before #1903) the bare max(created_at) has exactly one index path left, the
+ * created_at walk, whatever the statistics say. The shipped shape has no path to it either way.
+ */
+async function removeSessionKeyedIndexes(tx: Tx): Promise<void> {
+  await tx.$executeRawUnsafe(`DROP INDEX ${INDEX}`);
+  await tx.$executeRawUnsafe('DROP INDEX usage_events_session_id_idx');
+}
+
 /** A plan-assertion message that carries the plan, so a future failure is diagnosable from the log. */
 const withPlan = (plan: string) => `chosen plan:\n${plan}`;
 
@@ -123,12 +148,14 @@ describe('#1903 / #1952 roster liveness probe', () => {
     expect(plan, withPlan(plan)).not.toContain(WALK);
   });
 
-  it('the skew pin is not vacuous: the bare max(created_at) walks the created_at index under that skew', async () => {
-    const plan = await rolledBack(async (tx) => {
+  it('the skew pin is not vacuous: where the session-keyed indexes are gone, the bare max(created_at) walks the created_at index and the probe does not', async () => {
+    const plans = await rolledBack(async (tx) => {
       await seedSkew(tx);
-      return explain(tx, incidentShape(roster()));
+      await removeSessionKeyedIndexes(tx);
+      return { incident: await explain(tx, incidentShape(roster())), shipped: await explain(tx, roster()) };
     });
-    expect(plan, withPlan(plan)).toContain(WALK);
+    expect(plans.incident, withPlan(plans.incident)).toContain(WALK);
+    expect(plans.shipped, withPlan(plans.shipped)).not.toContain(WALK);
   });
 
   it('the index pin is not vacuous: without the index the probe plans elsewhere', async () => {
@@ -140,9 +167,11 @@ describe('#1903 / #1952 roster liveness probe', () => {
     expect(plan, withPlan(plan)).toMatch(/usage_events_\w+_idx/);
   });
 
-  it('moves only the plan: the answer is identical to the bare max(created_at) under both plans', async () => {
+  for (const steered of [false, true]) {
+  it(`moves only the plan: the answer is identical to the bare max(created_at) under both plans${steered ? ' (planner steered to the activity index, #2577)' : ''}`, async () => {
     const result = await rolledBack(async (tx) => {
       await seedSkew(tx);
+      if (steered) await steerPlannerToActivityIndex(tx);
       // The heavy session and a spread of liveness cases, all in scope. Times
       // are naive UTC, as the columns are.
       await tx.$executeRaw(Prisma.sql`
@@ -177,15 +206,24 @@ describe('#1903 / #1952 roster liveness probe', () => {
       const incident = incidentShape(shipped);
       const read = (sql: Prisma.Sql) =>
         tx.$queryRaw<Record<string, unknown>[]>(Prisma.sql`SELECT * FROM (${sql}) r ORDER BY r."workerId"`);
+      const shippedPlan = await explain(tx, shipped);
+      const shippedRows = await read(shipped);
+      // Steered, the incident shape must have left the walk BEFORE the drop: this is what proves the steer took
+      // (the red pin shows it deterministic). Without it, deleting the steer leaves every assertion green.
+      const steeredPlan = steered ? await explain(tx, incident) : null;
+      // The incident shape is read where it MUST walk created_at (#2577), not where the planner happens to.
+      await removeSessionKeyedIndexes(tx);
       return {
-        shippedPlan: await explain(tx, shipped),
+        steeredPlan,
+        shippedPlan,
         incidentPlan: await explain(tx, incident),
-        shipped: await read(shipped),
+        shipped: shippedRows,
         incident: await read(incident),
       };
     });
 
-    // Two genuinely different plans were compared...
+    if (steered) expect(result.steeredPlan, withPlan(result.steeredPlan!)).not.toContain(WALK);
+    // Two genuinely different plans were compared (by construction for the incident's, #2577)...
     expect(result.incidentPlan, withPlan(result.incidentPlan)).toContain(WALK);
     expect(result.shippedPlan, withPlan(result.shippedPlan)).not.toContain(WALK);
     // ...over a fixture that exercises the probe, not an empty roster...
@@ -196,4 +234,5 @@ describe('#1903 / #1952 roster liveness probe', () => {
     // ...and the answer is the same, row for row and field for field.
     expect(JSON.stringify(result.shipped)).toBe(JSON.stringify(result.incident));
   });
+  }
 });

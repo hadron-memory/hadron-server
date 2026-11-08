@@ -16,8 +16,12 @@ import {
   nodeFilePath,
   orphanedLegacyPaths,
 } from './nodeFrontmatter.js';
+import { removeLegacySidecar } from './legacySidecar.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
+import { hasIncompleteMirrorMutation } from './mirrorFileMutation.js';
 import { withMirrorCheckoutLock, EncryptedMemoryFenceError } from './mirrorCheckoutLock.js';
+import { RESTORE_DEADLINE_MS } from './originRestoreDeadline.js';
+import { mirrorFailureMetadata } from './mirrorFailureMetadata.js';
 import { ENCRYPTED_GIT_SYNC_MESSAGE, ENCRYPTED_GIT_SYNC_UNAVAILABLE, logEncryptedGitSyncRefusal } from './encryptedGitSync.js';
 
 function memoryLocalPath(orgUrn: string, memoryUrn: string): string {
@@ -92,6 +96,10 @@ async function pushMemoryToGitUnderLock(
   } catch (error) {
     if (error instanceof ProjectionPathError) return { nodeCount: 0, error: error.message };
     throw error;
+  }
+
+  if (hasIncompleteMirrorMutation(localPath)) {
+    return { nodeCount: 0, error: 'Checkout needs repair after an incomplete file mutation' };
   }
 
   // 2. Get installation token
@@ -191,6 +199,7 @@ async function pushMemoryToGitUnderLock(
       return encryptedRefusal(memoryId);
     }
     const nodes = snapshot;
+    const liveLocs = new Set(nodes.map(node => node.loc));
 
     // 5. Write each node as a self-contained frontmatter markdown file. A node
     // — leaf or parent — is `<...loc>.md` (children live in the sibling
@@ -220,6 +229,9 @@ async function pushMemoryToGitUnderLock(
         role: node.role,
         isRunnable: node.isRunnable,
         isPlaceholder: node.isPlaceholder,
+        authorshipKind: node.authorshipKind,
+        authoredByTask: node.authoredByTask,
+        authoredByRevision: node.authoredByRevision,
       }, node.outgoingEdges);
       preserveUnmanagedFrontmatter(frontmatter, mdPath);
 
@@ -234,8 +246,9 @@ async function pushMemoryToGitUnderLock(
       // empty-loc root (its file IS README.md, owned by the manifest below).
       if (node.loc !== '' && mdPath === nodeFilePath(localPath, node.loc)) {
         const legacy = orphanedLegacyPaths(localPath, node.loc);
-        rmSync(legacy.readme, { force: true });
-        rmSync(legacy.sidecar, { recursive: true, force: true });
+        // The same-memory LIVE snapshot is authoritative; stale/id-less parent READMEs must not roll back rows on sync (#3507).
+        if (!liveLocs.has(node.loc + ':README')) rmSync(legacy.readme, { force: true });
+        removeLegacySidecar(legacy.sidecar);
       }
     }
 
@@ -312,18 +325,17 @@ async function pushMemoryToGitUnderLock(
  * `finally`, and a restore failure must not replace the operation's own outcome.
  * A failed restore is NOT silent, though: until the next successful restore the
  * checkout's `.git/config` can still carry the installation token, so the log
- * says so. Only the fixed copy and the error code are logged, never the error
+ * says so. Only fixed copy and allowlisted diagnostics are logged, never the error
  * object, argv or the remote URL.
  */
 async function restoreRemote(localPath: string, originalUrl: string): Promise<void> {
   try {
     if (!existsSync(join(localPath, '.git'))) return;
-    await execGit(['remote', 'set-url', 'origin', originalUrl], { cwd: localPath });
+    await execGit(['remote', 'set-url', 'origin', originalUrl], { cwd: localPath, timeout: RESTORE_DEADLINE_MS });
   } catch (err) {
-    const code = (err as { code?: unknown } | null)?.code;
     console.error(
-      `[pushMemoryToGit] Failed to restore the origin URL at ${localPath}; the checkout may still hold an installation token until the next successful restore.`,
-      typeof code === 'string' ? code : 'unknown',
+      '[pushMemoryToGit] Failed to restore the origin URL; the checkout may still hold an installation token until the next successful restore. A config.lock can block future restores; safe recovery requires proven ownership.',
+      mirrorFailureMetadata(err, 'restore', 'REMOTE_RESTORE'),
     );
   }
 }

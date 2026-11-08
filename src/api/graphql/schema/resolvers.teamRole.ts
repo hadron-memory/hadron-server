@@ -1,7 +1,8 @@
+import { listAppInstallationsWithDerivedLicense } from '../../../lib/appAgent.js';
 // Team roles as a platform surface — #960 (cor:agt:020:01/:02), re-keyed by
 // the Worker model (#974): a role definition is the `roles:<role>` node in the
-// Team Agent's system memory. The persona prompt template is NOT here — it
-// lives on the role-agent as dressing (`Agent.personaRole` + `systemPrompt`),
+// Team Agent's system memory. The boot prompt is NOT here — it is the
+// role-agent's compiled boot prompt (`Agent.personaRole` names the role),
 // which this surface only points at.
 //
 // #1050 — the NAME REGISTER is gone. `data.names` and its conventions
@@ -35,6 +36,7 @@ import {
   ROLES_BRANCH_PREFIX,
 } from './resolvers.worker.js';
 import { writeNodeCore, nodeMutations } from './resolvers.mutation.node.js';
+import { authoringFromRequest } from '../../../lib/authoringAttestation.js';
 import {
   type Context,
   requireMemoryWriteAccess,
@@ -47,7 +49,7 @@ type WorkerRosterRow = Record<string, unknown> & { id: string; name: string };
 
 type RoleAgentEntry = {
   /** The single installed agent whose personaRole matches, or null (zero or 2+). */
-  agent: (Record<string, unknown> & { systemPrompt: string | null }) | null;
+  agent: Record<string, unknown> | null;
   /** How many installed agents carry the role — 2+ means castWorker would refuse ambiguous. */
   matches: number;
 };
@@ -61,15 +63,13 @@ async function loadRoleAgentIndex(
   ctx: Context,
   appId: string,
 ): Promise<Map<string, RoleAgentEntry>> {
-  const installed = await ctx.db.appAgent.findMany({
-    where: { appId },
-    orderBy: { createdAt: 'asc' },
-    select: { agent: true },
-  });
+  const installed = await listAppInstallationsWithDerivedLicense(ctx.db, appId);
   const index = new Map<string, RoleAgentEntry>();
-  for (const { agent } of installed) {
+  const installedRoles = new Set(installed.filter(r=>r.installationKind === 'ROW').map(r=>(r.agent.personaRole ?? '').trim().toLowerCase()));
+  for (const { agent, installationKind } of installed) {
+    if (installationKind === 'DERIVED' && installedRoles.has((agent.personaRole ?? '').trim().toLowerCase())) continue;
     if (!agent || agent.deletedAt || !agent.personaRole) continue;
-    const key = agent.personaRole.toLowerCase();
+    const key = agent.personaRole.trim().toLowerCase();
     const entry = index.get(key);
     if (!entry) {
       index.set(key, { agent: agent as RoleAgentEntry['agent'], matches: 1 });
@@ -194,18 +194,14 @@ async function buildTeamRole(
   if (entry?.agent) {
     // The agent OBJECT runs Query.agent's own read gate, masked to null on
     // deny — the same #552 posture as Worker.agent: a nested Agent hands the
-    // caller its field resolvers (systemPrompt included).
-    const agent = entry.agent as unknown as {
-      visibility: string | null;
-      organizationId: string | null;
-      ownerUserId: string | null;
-    };
-    if (agent.visibility === 'PUBLIC') {
-      roleAgent = entry.agent;
-    } else {
+    // caller its field resolvers (its definition included).
+    const agent = await ctx.db.agent.findUnique({where:{id:entry.agent.id as string}});
+    if (agent?.visibility === 'PUBLIC') {
+      roleAgent = agent;
+    } else if (agent) {
       try {
         await requireAgentAccess(ctx, agent, 'READER');
-        roleAgent = entry.agent;
+        roleAgent = agent;
       } catch {
         roleAgent = null;
       }
@@ -408,6 +404,8 @@ async function writeTeamRole(
       ? { ...mergeBase, repos: parseRepoAffinity(args.repos) }
       : undefined;
 
+    // #1328: a role node is authored by its caller; these mutations take no claim, so a governed one refuses.
+    const authoring = authoringFromRequest(ctx);
     try {
       await writeNodeCore(
         {
@@ -433,6 +431,7 @@ async function writeTeamRole(
         mode,
         mode === 'update'
           ? {
+              authoring,
               targetNodeId: existing!.id,
               // Only when this write carries data. A description-only edit stays
               // last-write-wins like any other node field, as it was before
@@ -448,7 +447,7 @@ async function writeTeamRole(
             // The refusal itself is correct; the residue is an audit artifact.
             ...(wantsRepoWrite ? { guardRevSeq: existing!.revSeq } : {}),
             }
-          : undefined,
+          : { authoring },
       );
     } catch (e) {
       // #1024: the guard fired. Translate rather than leak the generic node
@@ -639,11 +638,7 @@ export async function loadAppRepoAffinity(
     // environments (PR #1071 review, Copilot) — and the comment below claimed a
     // determinism the query did not provide. Install order is the meaningful
     // one: the agent installed first owns the role by default.
-    const installed = await ctx.db.appAgent.findMany({
-      where: { appId },
-      orderBy: [{ createdAt: 'asc' }, { agentId: 'asc' }],
-      select: { agent: { select: { systemMemoryId: true, deletedAt: true } } },
-    });
+    const installed = await listAppInstallationsWithDerivedLicense(ctx.db, appId);
     const memoryIds = [
       ...new Set(
         installed

@@ -21,8 +21,6 @@ export type RoutedMessage = {
   teamBroadcastWorkerIds?: readonly string[];
   /** Server-written at post time: the author manages the App (cor:agt:080:15 budget exemption). */
   managerPost: boolean;
-  /** S7 (#2023): a person, not a worker or the system, wrote it. Read only for a worker on standby (standby.ts). */
-  humanAuthored?: boolean;
   /** R63: when the message was posted (ms since epoch); the anchor of a mention. Optional so pure-rule fixtures need not carry it. */
   postedAtMs?: number;
 };
@@ -59,8 +57,6 @@ export type TaskWakeReason = {
   title: string;
   /** #2553: the task's handle, printed first in the nudge. */
   handle: string;
-  /** S7 (R90): messages held from a standby worker and passed at this assignment; rides the event, so returned once. */
-  standbyHeld?: number;
 };
 
 /**
@@ -138,7 +134,7 @@ export function workerWake(args: {
   subscriptions: SubscriptionInput[];
   /** #1708 — task events the worker is due for. They wake at once, like a mention, whatever the mentions setting. */
   tasks?: TaskWakeInput[];
-  /** #2138 §3.3: the worker is PENDING (not expected to check: no task, standby, isolated, paused): `live-check` is never due. */
+  /** #2138 §3.3: the worker is PENDING (not expected to check: no task or paused): `live-check` is never due. */
   checkPending?: boolean;
   now: Date;
 }): WorkerWake | null {
@@ -164,7 +160,10 @@ export function workerWake(args: {
   }
 
   // cor:agt:080:10 — each live subscription whose current tick is newer than the last acknowledged.
-  for (const sub of subscriptions) {
+  // #2949: in ticker-id order, never the order the rows were read in (that read has no ORDER BY, and the plan may walk
+  // the heap), so an unchanged outstanding wake is re-handed with the same reasons in the same order: the same proof
+  // bytes and the same stored wake. A worker holds one live subscription per ticker, so the order is total.
+  for (const sub of [...subscriptions].sort((x, y) => (x.ticker.id < y.ticker.id ? -1 : x.ticker.id > y.ticker.id ? 1 : 0))) {
     const k = currentTick(sub.ticker, now);
     if (k === null || k <= sub.lastAckedTick) continue;
     const scope = sub.ticker.channelIds.length > 0 ? new Set(sub.ticker.channelIds) : null;
@@ -196,7 +195,7 @@ export function workerWake(args: {
   }
 
   for (const t of args.tasks ?? []) {
-    reasons.push({ kind: 'TASK', taskId: t.taskId, eventId: t.eventId, chainIndex: t.chainIndex, event: t.event, title: t.title, handle: t.handle, ...(t.standbyHeld ? { standbyHeld: t.standbyHeld } : {}) });
+    reasons.push({ kind: 'TASK', taskId: t.taskId, eventId: t.eventId, chainIndex: t.chainIndex, event: t.event, title: t.title, handle: t.handle });
     if (t.atMs !== undefined) anchors.push(t.atMs);
   }
 

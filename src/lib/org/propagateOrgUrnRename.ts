@@ -61,11 +61,15 @@ export async function propagateOrgUrnRename(
   // spec-021 migration window, while every resolver queries the single-colon
   // form — so an un-normalized key would be stored somewhere nothing ever looks.
   // Bulk SQL cannot call the TypeScript normalizer, hence the inline mirror.
+  // #3196: created_at is written explicitly as UTC. The column is a naive
+  // timestamp holding UTC, and its DEFAULT CURRENT_TIMESTAMP would land as the
+  // session's wall time, hours off under a non-UTC session.
   await tx.$executeRaw`
-    INSERT INTO urn_aliases (id, urn, entity_type, entity_id, reason, replaced_by_urn, created_by)
+    INSERT INTO urn_aliases (id, urn, entity_type, entity_id, reason, replaced_by_urn, created_by, created_at)
     SELECT gen_random_uuid()::text, replace(m.urn, '::', ':'), 'MEMORY'::"UrnAliasEntityType", m.id,
            'ORG_RENAME_CASCADE'::"UrnAliasReason",
-           replace(${newOrgUrn} || substr(m.urn, strpos(m.urn, ':')), '::', ':'), ${createdBy}
+           replace(${newOrgUrn} || substr(m.urn, strpos(m.urn, ':')), '::', ':'), ${createdBy},
+           (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3)
     FROM memories m
     WHERE m.organization_id = ${organizationId} AND strpos(m.urn, ':') > 0
       AND NOT starts_with(m.urn, ${newOrgUrn} || ':')
@@ -73,10 +77,11 @@ export async function propagateOrgUrnRename(
       DO UPDATE SET replaced_by_urn = EXCLUDED.replaced_by_urn
   `;
   await tx.$executeRaw`
-    INSERT INTO urn_aliases (id, urn, entity_type, entity_id, reason, replaced_by_urn, created_by)
+    INSERT INTO urn_aliases (id, urn, entity_type, entity_id, reason, replaced_by_urn, created_by, created_at)
     SELECT gen_random_uuid()::text, replace(a.urn, '::', ':'), 'AGENT'::"UrnAliasEntityType", a.id,
            'ORG_RENAME_CASCADE'::"UrnAliasReason",
-           replace(${newOrgUrn} || substr(a.urn, strpos(a.urn, ':')), '::', ':'), ${createdBy}
+           replace(${newOrgUrn} || substr(a.urn, strpos(a.urn, ':')), '::', ':'), ${createdBy},
+           (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3)
     FROM agents a
     WHERE a.organization_id = ${organizationId} AND strpos(a.urn, ':') > 0
       AND NOT starts_with(a.urn, ${newOrgUrn} || ':')
@@ -84,10 +89,11 @@ export async function propagateOrgUrnRename(
       DO UPDATE SET replaced_by_urn = EXCLUDED.replaced_by_urn
   `;
   await tx.$executeRaw`
-    INSERT INTO urn_aliases (id, urn, entity_type, entity_id, reason, replaced_by_urn, created_by)
+    INSERT INTO urn_aliases (id, urn, entity_type, entity_id, reason, replaced_by_urn, created_by, created_at)
     SELECT gen_random_uuid()::text, replace(ap.urn, '::', ':'), 'APP'::"UrnAliasEntityType", ap.id,
            'ORG_RENAME_CASCADE'::"UrnAliasReason",
-           replace(${newOrgUrn} || substr(ap.urn, strpos(ap.urn, ':')), '::', ':'), ${createdBy}
+           replace(${newOrgUrn} || substr(ap.urn, strpos(ap.urn, ':')), '::', ':'), ${createdBy},
+           (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3)
     FROM apps ap
     WHERE ap.organization_id = ${organizationId} AND strpos(ap.urn, ':') > 0
       AND NOT starts_with(ap.urn, ${newOrgUrn} || ':')

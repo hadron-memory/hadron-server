@@ -64,7 +64,8 @@ describe('passkey credential schema (#1631)', () => {
     // The newest migration that touches the guard carries it verbatim (#1631 PR1b re-applies it).
     expect(readFileSync('prisma/migrations/20261022020000_passkey_erasure/migration.sql','utf8').endsWith(guard)).toBe(true);
     expect(readFileSync('prisma/post-push.sql','utf8')).toContain('\\ir passkey-invariants.sql');
-    expect(readFileSync('src/test/globalSetup.ts','utf8')).toContain('../../prisma/passkey-invariants.sql');
+    // #434: post-push.sql (above) is the test template's only path; the vitest global setup no longer re-applies it.
+    expect(readFileSync('src/test/globalSetup.ts','utf8')).not.toContain('passkey-invariants.sql');
   });
   it('a first window closes once and requires a complete outcome', async () => fixture(async (tx,id) => {
     await refused(tx,()=>tx.$executeRaw`UPDATE passkey_credentials SET window_outcome='ended-early' WHERE id=${id}`);

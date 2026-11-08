@@ -24,7 +24,7 @@ import { ensureUserPrincipal, RootNameTakenError } from '../lib/principal/mintPr
 const EMAIL_TARGETS = ['email', 'users_email_key'];
 const GITHUB_ID_TARGETS = ['githubId', 'github_id', 'users_github_id_key'];
 /** The handle uniques: the column unique and the `lower(handle)` functional index (what the engine reports for a case-variant). */
-const HANDLE_TARGETS = ['handle', 'lower(handle)', 'users_handle_key', 'users_handle_lower_uniq'];
+export const HANDLE_TARGETS = ['handle', 'lower(handle)', 'users_handle_key', 'users_handle_lower_uniq'];
 
 /**
  * True when `err` is a P2002 whose constraint is one of `targets`. A missing or

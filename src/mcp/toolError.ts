@@ -1,7 +1,10 @@
+import { RateLimited } from '../lib/rateLimit/index.js';
 import { isPrismaClientError } from '../lib/prismaErrors.js';
 import { isTrustedRefusal } from '../api/graphql/formatError.js';
 import { faultRequestId, internalFaultEnvelope, internalFaultText, logInternalFault } from '../lib/internalFault.js';
 import { textResult } from './textResult.js';
+import { attestationRefusalResult } from '../lib/authoringAttestation.js';
+import { isContentResolutionLimitError, type ContentResolutionLimitError } from '../lib/includes/resolutionBudget.js';
 
 // Backstop for wrappers that copied the diagnostic and discarded its class.
 // Use distinctive ORM signatures, not broad words like "query" or "database",
@@ -53,6 +56,25 @@ export function toolFaultResult(error: unknown, site: string) {
   };
 }
 
+/** #1793: same structured error carrier as faults, with only caller-safe rate metadata. */
+function rateLimitedResult(error: RateLimited) {
+  return { isError: true as const, ...textResult(error.message), structuredContent: { error: {
+    code: 'RATE_LIMITED' as const, message: error.message, retryAfterSeconds: error.extensions.retryAfterSeconds,
+    fieldClass: error.extensions.fieldClass,
+  } } };
+}
+
+/**
+ * hadron-internal#40 (rulings 0196/0197): a resolved read over a resolution limit is a trusted, typed refusal, never
+ * the generic fault: its fixed text (which names only the limit and the raw remedy) plus the code and the limit as
+ * structured data. Nothing partial accompanies it.
+ */
+export function resolutionLimitResult(error: ContentResolutionLimitError) {
+  return { isError: true as const, ...textResult(error.message), structuredContent: { error: {
+    code: error.extensions.code as string, message: error.message, limit: error.limit,
+  } } };
+}
+
 /**
  * The MCP fallback boundary (#1695, #1789). Classify before reading a message/code: a Prisma error may contain
  * arguments, paths and internal ids. A typed domain refusal keeps its wording (and is flagged isError); everything else,
@@ -62,7 +84,12 @@ export function toolErrorResult(
   error: unknown,
   domainText: () => string,
   site = 'mcp_tool',
-): ReturnType<typeof refusalResult> | ReturnType<typeof toolFaultResult> {
+): ReturnType<typeof refusalResult> | ReturnType<typeof toolFaultResult> | ReturnType<typeof rateLimitedResult>
+  | ReturnType<typeof resolutionLimitResult> | NonNullable<ReturnType<typeof attestationRefusalResult>> {
+  if (error instanceof RateLimited) return rateLimitedResult(error);
+  if (isContentResolutionLimitError(error)) return resolutionLimitResult(error);
+  const attestation = attestationRefusalResult(error);
+  if (attestation) return attestation;
   if (containsDatabaseDiagnostic(error) || !isTrustedRefusal(error)) return toolFaultResult(error, site);
   return refusalResult(domainText());
 }
@@ -76,6 +103,10 @@ export function withToolErrorBoundary(
     try {
       return await callback(args, extra);
     } catch (error) {
+      if (error instanceof RateLimited) return rateLimitedResult(error);
+      if (isContentResolutionLimitError(error)) return resolutionLimitResult(error);
+      const attestation = attestationRefusalResult(error);
+      if (attestation) return attestation;
       // A typed refusal retains the SDK's existing error handling; any other throw is a fault.
       if (!containsDatabaseDiagnostic(error) && isTrustedRefusal(error)) throw error;
       return toolFaultResult(error, `${name}:handler`);

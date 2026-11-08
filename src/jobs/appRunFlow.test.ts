@@ -17,9 +17,10 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
-import { cleanDb } from '../test/helpers.js';
+import { cleanDb, createDbRunConsentPrincipal } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { deriveEdgeLoc } from '../lib/edgeLoc.js';
+import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 
 vi.mock('../lib/bus/index.js', () => ({
   getBusClient: vi.fn(async () => null),
@@ -49,6 +50,7 @@ const DEFER = `${ORG_URN}::flowmem::flow:defer`;
 let orgId: string;
 let appId: string;
 let memoryId: string;
+let agentId: string;
 
 async function makeNode(loc: string, extra: Record<string, unknown> = {}): Promise<string> {
   const node = await db.node.create({
@@ -75,23 +77,31 @@ beforeEach(async () => {
     data: { id: generateId(), organizationId: orgId, name: 'flow-app', urn: `${ORG_URN}::flow-app` },
   });
   appId = app.id;
-  // Headless runs write an explicitly granted knowledge memory, not team space.
+  // #3278: items never grant a userless run read or write access. The fixture's
+  // flow is PUBLIC for reads; its known output/tool prefixes have explicit App write grants.
   const memory = await db.memory.create({
     data: {
       id: generateId(), organizationId: orgId, name: 'flowmem',
-      urn: MEM_URN, class: 'knowledge', visibility: 'ORGANIZATION',
+      urn: MEM_URN, class: 'knowledge', visibility: 'PUBLIC',
     },
   });
   memoryId = memory.id;
-  // The run principal's access rides the App's installed Agent's memory map
-  // (getAppMemoryAccess): Agent + AppAgent install + read-write AgentMemoryItem.
+  // The installed Agent's item discovers the PUBLIC memory read-only.
   const agent = await db.agent.create({
     data: { id: generateId(), organizationId: orgId, name: 'flow-agent', urn: `${ORG_URN}:flow-agent` },
   });
   await db.appAgent.create({ data: { appId, agentId: agent.id } });
+  agentId = agent.id;
+  await serveAgentBootPrompt(db, agentId, 'Test boot prompt.'); // #2712: a run is served its Agent's prompt
   await db.agentMemoryItem.create({
     data: { agentId: agent.id, memoryId, role: 'read-write' },
   });
+  const grantor = await createDbRunConsentPrincipal(db, orgId, appId);
+  await db.orgMember.update({ where: { organizationId_userId: { organizationId: orgId, userId: grantor.userId } }, data: { role: 'ADMIN' } });
+  await db.appMemoryWriteGrant.createMany({ data: ['runs', 'flow', 'tasks', 'notes'].map(prefix => ({
+    appId, memoryId, prefix, grantedBy: grantor.userId,
+    registerNodeUrn: 'hrn:node:example.com:fixture:authority',
+  })) });
 
   const classify = await makeNode('flow:classify', {
     content: 'Classify the report about {{topic}}. Score your confidence.',
@@ -166,9 +176,11 @@ async function mintFlow() {
   return mintAppRun(db, {
     organizationId: orgId,
     appId,
+    agentId,
     triggerKind: 'MANUAL',
     entryNodeUrn: ENTRY,
     eventData: { topic: 'ticks' },
+    consentPrincipal: await createDbRunConsentPrincipal(db, orgId, appId),
   });
 }
 
@@ -265,6 +277,24 @@ describe('3-node flow through production deps (§10)', () => {
     expect(appended.content).toContain('---'); // append separator
   });
 
+  it('run output states no task, so a role-governed target refuses and stays as it was (#1328)', async () => {
+    const task = await db.node.create({ data: { id: generateId(), memoryId, loc: 'author-task', name: 'Task', isRunnable: true } });
+    const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId } });
+    await db.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, role: 'guide', authorTaskId: task.id, authorTaskRequired: true } });
+    await db.node.create({ data: { id: generateId(), memoryId, loc: 'flow:governed', name: 'governed', role: 'guide', content: 'kept' } });
+    await db.node.update({
+      where: { loc_memoryId: { loc: 'flow:act', memoryId } },
+      data: { data: { output: { writeTo: `${ORG_URN}::flowmem::flow:governed` } } as never },
+    });
+    const run = await mintFlow();
+    expect(await executeAppRun(db, run.id, flowDeps(0.92).deps)).not.toBe('completed');
+    const failure = JSON.stringify((await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).failure);
+    expect(failure).toContain('OUTPUT_WRITE_FAILED');
+    // #1329: the refusal reaches the run's author with the task and the run's own read.
+    expect(failure).toContain('hadron_read_node');
+    expect((await db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc: 'flow:governed', memoryId } } })).content).toBe('kept');
+  });
+
   it('an encrypted node anywhere in the setup graph prevents execution (#1719 R5b)', async () => {
     // The launch gate only checks the entry — the guard must also fire on
     // routed hops, where the run has no session key.
@@ -330,7 +360,8 @@ describe('3-node flow through production deps (§10)', () => {
       const started = Date.now();
       await create.execute(
         { log: opts.log, db, run: r, principal: runContext(db, r) },
-        { urn: taskUrn, name: 'Investigate outage', content: 'Check MCP endpoint logs.', seq: 3, tags: ['urgent'] },
+        // #2987 (V13): the tool defaults nodeType to 'record', and a record outside a Channel refuses an explicit seq — name an ordinary type to keep the seq-parity assertion.
+        { urn: taskUrn, name: 'Investigate outage', content: 'Check MCP endpoint logs.', nodeType: 'info', seq: 3, tags: ['urgent'] },
       );
       opts.log('task node created');
       return {
@@ -431,7 +462,7 @@ describe('3-node flow through production deps (§10)', () => {
     const urn = `${ORG_URN}::flowmem::notes:standup`;
 
     await hadronCreateNode.execute(toolCtx, {
-      urn, name: 'Standup note', content: 'first', data: { a: 1, b: 2 }, seq: 7,
+      urn, name: 'Standup note', content: 'first', data: { a: 1, b: 2 }, nodeType: 'info', seq: 7, // #2987: record + seq is refused outside a Channel
     });
     // Create on an occupied loc must point authors at update, not clobber.
     await expect(hadronCreateNode.execute(toolCtx, { urn, name: 'again' })).rejects.toThrow(/already exists/);
