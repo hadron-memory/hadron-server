@@ -20,7 +20,7 @@ beforeEach(async () => {
   const t = generateId().slice(0, 8);
   const org = await db.organization.create({ data: { id: generateId(), name: 'iss', urn: `iss-${t}` } });
   const other = await db.organization.create({ data: { id: generateId(), name: 'iss-o', urn: `iss-o-${t}` } });
-  for (const k of Object.keys(u) as Array<keyof typeof u>) {
+  for (const k of ['admin', 'owner', 'contributor', 'reader', 'outsider', 'otherAdmin'] as const) {
     u[k] = (await db.user.create({ data: { id: generateId(), handle: `${k}-${t}` } })).id;
   }
   await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: u.admin, role: 'ADMIN' } });
