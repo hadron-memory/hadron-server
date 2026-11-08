@@ -7,6 +7,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { runAsActor } from '../../../lib/requestActor.js';
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { resolvers, type Context } from './resolvers.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
@@ -77,7 +79,7 @@ describe('everything else stays refused to the assignee (#3441)', () => {
 
   it('a non-assignee who cannot direct the task is refused unchanged', async () => {
     await expect(edit({ references: [{ kind: 'PULL_REQUEST', target: PR1 }] }, sibling.id)).rejects.toMatchObject(code('TASK_NOT_OWNER'));
-    await expect(edit({ references: [{ kind: 'PULL_REQUEST', target: PR1 }] }, outsider.id)).rejects.toBeDefined();
+    await expect(edit({ references: [{ kind: 'PULL_REQUEST', target: PR1 }] }, outsider.id)).rejects.toMatchObject(code('TASK_NOT_FOUND'));
     expect((await row()).references).toEqual([]);
   });
 
@@ -117,7 +119,34 @@ describe('§10 negatives (#3441)', () => {
 
   it('a removed App member who is still the recorded assignee is refused', async () => {
     await db.appMember.deleteMany({ where: { appId: app.id, userId: assignee.id } });
-    await expect(edit({ references: [{ kind: 'PULL_REQUEST', target: PR1 }] })).rejects.toBeDefined();
+    await expect(edit({ references: [{ kind: 'PULL_REQUEST', target: PR1 }] })).rejects.toMatchObject(code('TASK_NOT_FOUND'));
     expect((await row()).references).toEqual([]);
+  });
+});
+
+describe('a worker assignee (#3441, LOCAL P3 and §10 P3-1: the any-worker mutant)', () => {
+  let agent: any, worker: any, otherWorker: any, workerTask: any;
+  const asWorker = (w: any, input: Record<string, unknown>, userId: string) =>
+    runAsActor({ workerId: w.id, agentId: agent.id }, () => M.updateAgentTask({}, { taskId: workerTask.id, input }, ctx(userId)));
+  beforeEach(async () => {
+    const system = await db.memory.create({ data: { organizationId: org.id, name: 'Team system', urn: `${org.urn}:team-system`, class: 'system' } });
+    agent = await db.agent.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team`, systemMemoryId: system.id } });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Worker', slug: 'worker', heldByUserId: sibling.id } });
+    otherWorker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Other', slug: 'other', heldByUserId: sibling.id } });
+    workerTask = await db.agentTask.create({ data: { appId: app.id, title: 'W', ownerUserId: owner.id, assigneeWorkerId: worker.id, assignedAt: new Date() } });
+  });
+
+  it('the assignee worker writes references through its session; another worker with the same holder is refused', async () => {
+    await asWorker(worker, { references: [{ kind: 'PULL_REQUEST', target: PR1 }] }, sibling.id);
+    expect(((await row(workerTask.id)).references).map((r: any) => r.target)).toEqual([PR1]);
+    await expect(asWorker(otherWorker, { references: [{ kind: 'PULL_REQUEST', target: PR2 }] }, sibling.id)).rejects.toMatchObject(code('TASK_NOT_OWNER'));
+    expect(((await row(workerTask.id)).references).map((r: any) => r.target)).toEqual([PR1]);
+  });
+
+  it('the worker\'s holder acting as a person, with no worker actor, is refused', async () => {
+    await expect(M.updateAgentTask({}, { taskId: workerTask.id, input: { references: [{ kind: 'PULL_REQUEST', target: PR2 }] } }, ctx(sibling.id)))
+      .rejects.toMatchObject(code('TASK_NOT_OWNER'));
+    expect((await row(workerTask.id)).references).toEqual([]);
   });
 });

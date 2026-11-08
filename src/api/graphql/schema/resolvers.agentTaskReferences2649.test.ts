@@ -159,7 +159,7 @@ describe('references edit (#2649, cor:agt:050:09)', () => {
   });
 
   // #3441 (ruling 0233): the assignee also writes references; a task member who is neither assignee nor director is refused.
-  it('whoever may edit the task and its assignee change them; another member is refused', async () => {
+  it('its assignee and whoever may edit the task change references; another member is refused', async () => {
     const t = await create({ references: three, assignee: { user: assignee.id } });
     await expect(edit(t.id, { references: [] }, member.id)).rejects.toMatchObject({ extensions: { code: 'TASK_NOT_OWNER' } });
     expect(await stored(t.id)).toHaveLength(3);
