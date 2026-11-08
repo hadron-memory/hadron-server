@@ -3270,6 +3270,16 @@ export const agentTaskFieldResolvers = {
       const { take, skip } = pageArgs(args);
       return pageEnvelope(items.slice(skip, skip + take), items.length, skip);
     },
+    /**
+     * #3325: the one CURRENT stored disposition for `findingId` on THIS task (exact match, no trim or case-fold), or null.
+     * Reached only through the existing task read gate, like the paged field; a real-but-undisposed id, an unknown id and an
+     * id stored only on another task all read as null, so the field is no existence oracle. No event, no reference fetch.
+     */
+    findingDisposition: (t: TaskRow, args: { findingId: string }) => {
+      const rows = t.findingDispositions as unknown as { findingId: string; disposition: string; reference: TaskReference | null }[];
+      const d = rows.find(r => r.findingId === args.findingId);
+      return d ? { ...d, reference: d.reference ? { ...d.reference, kind: REFERENCE_KIND_TO_GQL[d.reference.kind] } : null } : null;
+    },
     blockedBy: async (task: TaskRow, args: { limit?: number | null; offset?: number | null }, ctx: Context) => taskRelations(ctx, task.id, 'blockedBy', args),
     blocks: async (task: TaskRow, args: { limit?: number | null; offset?: number | null }, ctx: Context) => taskRelations(ctx, task.id, 'blocks', args),
     /** #2646 (cor:agt:050:02): the clones made from this task, paged, in this task's own App; each as its own read answers. */

@@ -232,3 +232,55 @@ it('disposition reference preserves a valid paired-surrogate label',async()=>{
  const reference={kind:'URL',target:'https://example.test/safe',label:'Review 😀'};
  await dispose('fixed','F1',reference);expect((await read()).items[0].reference).toEqual(reference);
 });
+describe('#3325 targeted findingDisposition',()=>{
+ const one=async(findingId:string,t:any=null)=>R.AgentTask.findingDisposition(t??await stored(),{findingId},ctx());
+ const gql=async(source:string,c:any=ctx(),variableValues:any={id:task.id})=>{
+  const schema=buildSchema(typeDefs);const fieldResolver=(p:any,a:any,cx:any,i:any)=>typeof R[i.parentType.name]?.[i.fieldName]==='function'?R[i.parentType.name][i.fieldName](p,a,cx,i):defaultFieldResolver(p,a,cx,i);
+  return graphql({schema,source,variableValues,contextValue:c,fieldResolver});
+ };
+ it('returns the latest stored row with reference; null for undisposed, unknown and non-exact ids',async()=>{
+  const ref={kind:'PULL_REQUEST',target:'https://example.test/pull/7',label:'Review'};
+  await dispose('deferred','F1',ref);
+  expect(await one('F1')).toEqual({findingId:'F1',disposition:'deferred',reference:ref});
+  await dispose('fixed','F1',null);
+  expect(await one('F1')).toEqual({findingId:'F1',disposition:'fixed',reference:null});
+  for(const id of ['F2','nope',' F1','f1','F1 ','']) expect(await one(id)).toBeNull();
+ });
+ it('scopes to the task: a duplicate local id on another task never leaks',async()=>{
+  const t2=await M.createAgentTask({}, {input:{appRef:app.id,title:'T2',assignee:{user:assignee.id}}},ctx());
+  await M.startAgentTask({}, {taskId:t2.id},ctx(assignee.id));
+  await M.finishAgentTask({}, {taskId:t2.id,result:{outcome:'done',findings:[{severity:'P1',text:'other'}]}},ctx(assignee.id));
+  await dispose('rejected','F1',undefined,ctx(),t2.id);
+  expect(await one('F1')).toBeNull();
+  expect(await one('F1',await stored(t2.id))).toMatchObject({findingId:'F1',disposition:'rejected'});
+  await dispose('fixed','F1');
+  expect(await one('F1',await stored(t2.id))).toMatchObject({disposition:'rejected'});
+  expect(await one('F1')).toMatchObject({disposition:'fixed'});
+ });
+ it('read emits no event and changes no stored bytes',async()=>{
+  await dispose('fixed');const before=await stored(),n=(await events()).length;
+  await one('F1');await one('zzz');
+  expect(await stored()).toEqual(before);expect(await events()).toHaveLength(n);
+ });
+ it('GraphQL: exact shape, in the mutation response and by query, no page envelope or result text',async()=>{
+  const m=await gql('mutation($id:ID!){disposeAgentTaskFinding(taskRef:$id,findingId:"F1",disposition:accepted){id findingDisposition(findingId:"F1"){findingId disposition reference{kind target label}}}}');
+  expect(m.errors).toBeUndefined();
+  expect(m.data).toEqual({disposeAgentTaskFinding:{id:task.id,findingDisposition:{findingId:'F1',disposition:'accepted',reference:null}}});
+  const q=await gql('query($id:ID!){agentTask(id:$id){findingDisposition(findingId:"F2"){findingId}}}');
+  expect(q.errors).toBeUndefined();expect(q.data).toEqual({agentTask:{findingDisposition:null}});
+  expect(JSON.stringify(m)).not.toContain('secret');
+  const bad=await gql('query($id:ID!){agentTask(id:$id){findingDisposition{findingId}}}');
+  expect(bad.errors?.length).toBeGreaterThan(0);
+ });
+ it('non-reader gets the same refusal as the task read, hidden vs absent indistinguishable',async()=>{
+  const shape=(r:any)=>({data:r.data,errors:r.errors?.map((e:any)=>({m:e.message.replace(/[0-9a-f]{32}/g,'ID'),c:e.extensions?.code}))});
+  const q='query($id:ID!){agentTask(id:$id){findingDisposition(findingId:"F1"){findingId}}}';
+  const hidden=shape(await gql(q,ctx(outsider.id)));const absent=shape(await gql(q,ctx(outsider.id),{id:generateId()}));
+  expect(hidden).toEqual(absent);
+  const plain=shape(await gql('query($id:ID!){agentTask(id:$id){id}}',ctx(outsider.id)));
+  expect(hidden.errors?.[0]?.c).toBe(plain.errors?.[0]?.c);
+ });
+ it('write refusals unchanged: unknown finding still TASK_FINDING_NOT_FOUND',async()=>{
+  await expect(dispose('fixed','unknown')).rejects.toMatchObject(code('TASK_FINDING_NOT_FOUND'));
+ });
+});
