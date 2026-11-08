@@ -3,9 +3,9 @@ import { appendAppActionEvent } from '../../../lib/agentTasks/events.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import { requireAppActionCode } from '../../../lib/actionRegister/appCode.js';
 import { resolveActionAnswer } from '../../../lib/actionRegister/answer.js';
-import { rootTriggerOfRun } from '../../../lib/automationReadGrant.js';
+import { runMayReadTeam } from '../../../lib/auth/runTeamRead.js';
 import { retryOnSerializationFailure } from '../../../lib/serializableRetry.js';
-import { RUN_CLIENT_PREFIX, isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { finishFindings, countFindings, type TaskFinding } from '../../../lib/agentTasks/findings.js';
 import { isDeepStrictEqual } from 'node:util';
 import { lockTaskGraph, taskPriority, addTaskBlocker, removeTaskBlocker } from '../../../lib/agentTasks/blockers.js';
@@ -345,28 +345,7 @@ async function keyMayReadApp(ctx: Context, app: TaskApp): Promise<boolean> {
   return true;
 }
 
-/** #2925 / ruling0112: read-only own-App run arm, evaluated again inside the read's anchors. */
-export async function runMayReadTeam(ctx: Context, app: TaskApp): Promise<boolean> {
-  if (!isRunPrincipal(ctx) || ctx.impersonation || app.deletedAt || ctx.appId !== app.id) return false;
-  if (!ctx.organizationId || !await ctx.db.organization.findFirst({ where: { id: ctx.organizationId, deletedAt: null }, select: { id: true } })) return false;
-  const rows = await ctx.db.$queryRaw<Array<{ app_id: string; status: string; organization_id: string; user_id: string | null }>>`
-    SELECT app_id, status::text AS status, organization_id, user_id FROM app_runs WHERE id = ${ctx.clientId!.slice(RUN_CLIENT_PREFIX.length)} FOR SHARE`;
-  const run = rows[0];
-  const bound = rows.length === 1 && run!.app_id === app.id && run!.status === 'RUNNING'
-    && (app.organizationId === null || app.organizationId === run!.organization_id) && run!.organization_id === ctx.organizationId && (run!.user_id ?? undefined) === (ctx.userId ?? undefined);
-  if (!bound) return false;
-  const root = await rootTriggerOfRun(ctx.db, ctx.clientId!.slice(RUN_CLIENT_PREFIX.length));
-  if (!root) return false;
-  // A locking read detects a revoke/delete committed while this RepeatableRead reader waited for anchors.
-  // Advisory exclusion alone does not refresh an already-established snapshot (#3350).
-  const trigger = root.kind === 'SCHEDULE'
-    ? await ctx.db.$queryRaw<Array<{ id: string }>>`SELECT id FROM agent_schedules WHERE id = ${root.id} AND app_id = ${app.id} AND deleted_at IS NULL FOR SHARE`
-    : await ctx.db.$queryRaw<Array<{ id: string }>>`SELECT id FROM agent_webhooks WHERE id = ${root.id} AND app_id = ${app.id} AND deleted_at IS NULL FOR SHARE`;
-  if (trigger.length !== 1) return false;
-  const grants = await ctx.db.$queryRaw<Array<{ id: string }>>`SELECT id FROM app_automation_team_snapshot_grants
-    WHERE app_id = ${app.id} AND trigger_kind = ${root.kind} AND trigger_id = ${root.id} AND revoked_at IS NULL FOR SHARE`;
-  return grants.length === 1;
-}
+export { runMayReadTeam };
 
 /** The callback projection stays under shared authority anchors in one coherent view; later GraphQL fields re-gate separately. */
 export async function inRunTeamReadTx<T>(ctx: Context, appId: string, onGone: () => T, body: (c: Context, app: TaskApp) => Promise<T>): Promise<T> {
