@@ -15774,6 +15774,8 @@ export const typeDefs = `#graphql
     result: AgentTaskResult
     "#2663: dispositions beside the result, same readers; default20/max200/limit0 count-only (hrn:node:hadronmemory.com:specs:cor:agt:050:30)."
     findingDispositions(limit: Int, offset: Int): AgentTaskFindingDispositionPage!
+    "#3325: the one current disposition stored for this finding id on THIS task, or null (undisposed, unknown and other-task ids are indistinguishable). Exact id match; same readers as findingDispositions."
+    findingDisposition(findingId: String!): AgentTaskFindingDisposition
     "#2651: the task's latest hand-back by its assignee (hrn:node:hadronmemory.com:specs:cor:agt:050:29); null when it was never handed back. A later hand-back replaces it; every earlier code stays in the task.handed-back events."
     handBack: AgentTaskHandBack
     tags: [String!]!
