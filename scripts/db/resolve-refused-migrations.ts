@@ -21,6 +21,7 @@
  * refused-migration-boot.test.ts). A migration that raises with any other code keeps the old behaviour.
  */
 import { Client } from 'pg';
+import { writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { CONNECT_TIMEOUT_MS } from './revoke-runtime-migrations.js';
 
@@ -43,7 +44,7 @@ export function refusedMigrationNames(rows: UnfinishedMigration[]): string[] | n
   return names;
 }
 
-export async function main(env: NodeJS.ProcessEnv, out: (line: string) => void, log: (line: string) => void,
+export async function main(env: NodeJS.ProcessEnv, out: (names: string[]) => void, log: (line: string) => void,
   connectionTimeoutMillis = CONNECT_TIMEOUT_MS): Promise<number> {
   const connectionString = env.MIGRATE_DATABASE_URL || env.DATABASE_URL;
   if (!connectionString) {
@@ -58,7 +59,7 @@ export async function main(env: NodeJS.ProcessEnv, out: (line: string) => void, 
        WHERE finished_at IS NULL AND rolled_back_at IS NULL ORDER BY started_at`);
     const names = refusedMigrationNames(found.rows);
     if (!names) return 1;
-    for (const name of names) out(name);
+    out(names);
     return 0;
   } catch {
     // Never print pg errors: drivers can include credentials/connection URLs.
@@ -70,5 +71,10 @@ export async function main(env: NodeJS.ProcessEnv, out: (line: string) => void, 
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
-  process.exitCode = await main(process.env, line => console.log(line), line => console.error(line));
+  // The names go to a FILE when the entrypoint names one: `pnpm tsx ...` prints its own banner lines
+  // ("Already up to date", "Done in ...") on stdout, which a captured stdout cannot tell from an answer (#3770 QA).
+  const file = process.env.REFUSED_MIGRATIONS_FILE;
+  process.exitCode = await main(process.env,
+    names => (file ? writeFileSync(file, `${names.join('\n')}\n`) : console.log(names.join('\n'))),
+    line => console.error(line));
 }

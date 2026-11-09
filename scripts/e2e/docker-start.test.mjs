@@ -16,7 +16,10 @@ function boot(t, { migrate = owner, fail = '', noise = false, serving = serve, s
   const log = join(dir, 'calls');
   writeFileSync(join(dir, 'pnpm'), `#!/bin/sh
 printf '%s|%s|%s|%s\\n' "$*" "$DATABASE_URL" "\${MIGRATE_DATABASE_URL-unset}" "\${HADRON_MIGRATIONS_REFUSED-unset}" >> "$CALL_LOG"
-if [ "$*" = "tsx scripts/db/resolve-refused-migrations.ts" ] && [ -n "$HELPER_OUT" ]; then printf '%s\\n' "$HELPER_OUT"; exit 0; fi
+if [ "$*" = "tsx scripts/db/resolve-refused-migrations.ts" ] && [ -n "$HELPER_OUT" ]; then
+  printf 'Already up to date\\nDone in 215ms using pnpm v11.5.2\\n'  # pnpm's own stdout banner, as the real one prints it
+  printf '%s\\n' "$HELPER_OUT" > "$REFUSED_MIGRATIONS_FILE"; exit 0
+fi
 if [ "$*" = "$FAIL_STEP" ]; then
   printf '%s\\n' "$DATABASE_URL" >&2
   printf '%s\\n' "Error: \${FAIL_CODE}: \${FAIL_LINE:-fixture connection failure}" >&2

@@ -65,7 +65,7 @@ case "$*" in
   "prisma generate"|tsx\\ scripts/db/revoke-runtime-migrations.ts|tsx\\ scripts/db/upsert-actions.ts|tsx\\ scripts/db/verify-runtime-role.ts) exit 0 ;;
   "tsx src/index.ts") echo "started $HADRON_MIGRATIONS_REFUSED" >> "${serverLog}"; exit 0 ;;
   "prisma migrate"*) shift && cd "${dir}" && exec "${PRISMA}" "$@" --config "${dir}/prisma.config.ts" ;;
-  "tsx scripts/db/resolve-refused-migrations.ts") cd "${ROOT}" && exec "${ROOT}node_modules/.bin/tsx" scripts/db/resolve-refused-migrations.ts ;;
+  "tsx scripts/db/resolve-refused-migrations.ts") printf 'Already up to date\\nDone in 215ms using pnpm v11.5.2\\n'; cd "${ROOT}" && exec "${ROOT}node_modules/.bin/tsx" scripts/db/resolve-refused-migrations.ts ;;
 esac
 echo "unexpected pnpm call: $*" >&2; exit 99
 `);
