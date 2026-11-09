@@ -16,7 +16,7 @@ import { loadApp, resolveTaskActor } from './resolvers.agentTask.js';
  * key, not a run (a run carries an App and maybe a user but is not a session), not an impersonated session, and the worker
  * is live (not retired) in a live App the person can still drive (`resolveTaskActor`, the one gate every worker read shares).
  */
-async function resolveGrantReader(ctx: Context): Promise<GrantReader | null> {
+export async function resolveGrantReader(ctx: Context): Promise<GrantReader | null> {
   const bound = currentActor();
   if (!bound.workerId || !ctx.userId) return null;
   if (ctx.impersonation || appKeyCaller(ctx) || isRunPrincipal(ctx)) return null;
