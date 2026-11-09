@@ -169,6 +169,29 @@ describe('every other caller gets an empty page', () => {
     }
   });
 
+  it('the three worker shapes the shared person gate refuses (worker-bound session row, ambiguous actor, refused binding) get the empty page', async () => {
+    await mine();
+    const empty = { myGrants: { total: 0, items: [] } };
+    const row = await db.session.create({ data: { id: generateId(), appId: w.appId, userId: w.userId, workerId: w.workerId, agentId: w.agentId } });
+    const base = { db, userId: w.userId, roles: [] };
+    const shapes: Array<[string, Context, { workerId: null; agentId: null; userId: string; ambiguousSessionIds?: string[] }]> = [
+      ['worker-bound session row', { ...base, sessionId: row.id } as Context, { workerId: null, agentId: null, userId: w.userId }],
+      ['ambiguous actor', base as Context, { workerId: null, agentId: null, userId: w.userId, ambiguousSessionIds: [generateId(), generateId()] }],
+      ['refused binding', { ...base, sessionBindingRefused: true } as unknown as Context, { workerId: null, agentId: null, userId: w.userId }],
+    ];
+    for (const [name, contextValue, actor] of shapes) {
+      const a = await runAsActor(actor, () => direct.executeOperation({ query: LIST, variables: {} }, { contextValue }));
+      if (a.body.kind !== 'single') throw new Error('incremental');
+      const out = JSON.parse(JSON.stringify(a.body.singleResult));
+      expect(out.errors, name).toBeUndefined();
+      expect(out.data, name).toEqual(empty);
+    }
+    // Control: the same context shape with none of the three is the person, and lists.
+    const ok = await runAsActor({ workerId: null, agentId: null, userId: w.userId }, () => direct.executeOperation({ query: LIST, variables: {} }, { contextValue: base as Context }));
+    if (ok.body.kind !== 'single') throw new Error('incremental');
+    expect((ok.body.singleResult.data as any).myGrants.total).toBe(1);
+  });
+
   it('a person with a real list still gets it (the control for the empties above)', async () => {
     await mine();
     expect((await asMe()).data.myGrants.total).toBe(1);

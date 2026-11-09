@@ -5,6 +5,7 @@
  * No MCP tool: Holger's rule (2026-10-31), "Agents: yes, Workers: no". No writer exists on any surface.
  */
 import { appKeyCaller } from '../../../lib/appKeyScopes/scopes.js';
+import { requirePersonAsThemselves } from '../../../lib/auth/personAsThemselves.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { getGrantForWorker, listGrantsForPerson, listGrantsForWorker, type GrantReader } from '../../../lib/grants/read.js';
 import { currentActor } from '../../../lib/requestActor.js';
@@ -34,11 +35,14 @@ export async function resolveGrantReader(ctx: Context): Promise<GrantReader | nu
  * themselves: not an App key, not a run, not an impersonated session, and not a worker session (a worker reads its own App's
  * grants through `grants`; a stand-in is not the person). The caller gate only; the row scope is `listGrantsForPerson`.
  */
-export function resolveGrantPerson(ctx: Context): string | null {
-  if (!ctx.userId) return null;
-  // An App key carries no userId (appKeyCaller), so the first line already answers it.
-  if (ctx.impersonation || isRunPrincipal(ctx) || currentActor().workerId) return null;
-  return ctx.userId;
+export async function resolveGrantPerson(ctx: Context): Promise<string | null> {
+  // The shared person gate (a bespoke one drifted, #3800 §10): a worker-bound session row, an ambiguous actor and a refused
+  // binding are worker shapes too. An App key carries no userId (appKeyCaller), so it is refused as having no user.
+  try {
+    return await requirePersonAsThemselves(ctx, () => new Error('not a person'));
+  } catch {
+    return null;
+  }
 }
 
 export const grantQueries = {
@@ -52,7 +56,7 @@ export const grantQueries = {
     return listGrantsForWorker(ctx.db, reader, { take: clampListTake(limit), skip: Math.max(0, offset ?? 0) });
   },
   myGrants: async (_p: unknown, { limit, offset }: { limit?: number | null; offset?: number | null }, ctx: Context) => {
-    const userId = resolveGrantPerson(ctx);
+    const userId = await resolveGrantPerson(ctx);
     if (!userId) return { items: [], total: 0 };
     return listGrantsForPerson(ctx.db, userId, { take: clampListTake(limit), skip: Math.max(0, offset ?? 0) });
   },
