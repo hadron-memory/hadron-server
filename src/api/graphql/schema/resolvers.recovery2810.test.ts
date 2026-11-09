@@ -19,10 +19,12 @@
  * page cannot tear the answer.
  */
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { PrismaClient } from '../../../generated/prisma/index.js';
 import { db } from '../../../integrations/db/client.js';
 import { generateId } from '../../../lib/id.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
+import { getAccessibleMemoryIds } from './resolvers.helpers.js';
 
 const Q = resolvers.Query as unknown as Record<string, (p: unknown, a: any, c: Context) => Promise<any>>;
 const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: any, c: Context) => Promise<any>>;
@@ -329,5 +331,63 @@ describe('recoveryEdges answers ONE snapshot (#3454 review P1s)', () => {
     const after = await Q.recoveryEdges({}, { memoryRef: memoryId, limit: 200 }, ctx());
     expect(after.total).toBe(1);
     expect(after.items.map((item: any) => item.id)).toEqual([eKept.id]);
+  });
+
+  // #3454 review-delta pin (Ralion P2, Anne P2 — the #1360 class): every query the
+  // resolver runs inside its transaction rides the transaction's own connection. The
+  // tombstone fixture ARMS the write-verdict fan-out (a readable memory holding a
+  // non-comment tombstone), so a verdict asked of ctx.db mid-transaction would wait for
+  // a second connection — on a 1-connection pool that is a P2024 deadlock (verified red
+  // at 06ea4cbe); all-on-the-tx answers normally.
+  it('answers on a 1-connection pool with the write-verdict fan-out armed', async () => {
+    const hub = await node('hub');
+    const ordinary = await node('ordinary', { nodeType: 'info', deletedAt: new Date('2026-01-01') });
+    const kept = await node('kept');
+    const hidden = await edge(hub.id, ordinary.id, 'hub:to:ordinary');
+    const eKept = await edge(hub.id, kept.id, 'hub:to:kept');
+    const url = new URL(process.env.DATABASE_URL!);
+    url.searchParams.set('connection_limit', '1');
+    url.searchParams.set('pool_timeout', '5');
+    const one = new PrismaClient({ datasourceUrl: url.toString() });
+    try {
+      const page = await Q.recoveryEdges({}, { memoryRef: memoryId, limit: 200 }, { db: one as unknown as Context['db'], userId: writerId, roles: [] });
+      // The tombstoned endpoint is listed (deleted branch; the fan-out armed and ran).
+      expect(page.total).toBe(2);
+      expect(page.items.map((item: any) => item.id).sort()).toEqual([eKept.id, hidden.id].sort());
+      expect(page.items.find((item: any) => item.id === hidden.id)!.target.deletedAt).toBeTruthy();
+    } finally {
+      await one.$disconnect();
+    }
+  }, 30_000);
+
+  // #3454 review P3 (Anne, carried through the delta): recoveryEdges bases `readable`
+  // on ONE unscoped getAccessibleMemoryIds call instead of per-memory scoped calls. The
+  // equivalence this rests on is pinned here, not argued: for the supported principals
+  // (a direct user, a platform admin), unscoped ∩ {id} must equal the scoped answer for
+  // every memory in reach — accessible through the org, PUBLIC, or out of reach entirely.
+  it('unscoped gate membership equals the scoped answer across principals and unrelated memories', async () => {
+    const org = await db.organization.create({ data: { name: 'EqOrg', urn: 'eq2810.example:org' } });
+    const other = await db.organization.create({ data: { name: 'EqOther', urn: 'eq2810.example:other' } });
+    const member = (await db.user.create({ data: { handle: 'eq2810-member' } })).id;
+    await db.orgMember.create({ data: { organizationId: org.id, userId: member, role: 'READER' } });
+    const stranger = (await db.user.create({ data: { handle: 'eq2810-stranger' } })).id;
+    const mem = (data: Record<string, unknown>) => db.memory.create({ data: { class: 'knowledge', name: 'M', ...data } as any });
+    const inOrg = (await mem({ organizationId: org.id, urn: 'eq2810.example:a' })).id;
+    const secondOrg = (await mem({ organizationId: org.id, urn: 'eq2810.example:b' })).id;
+    // The PUBLIC branch is the widening one: this memory sits in an org the member does
+    // NOT belong to, so only its PUBLIC visibility can carry it into the accessible set.
+    const publicMemory = (await mem({ organizationId: other.id, urn: 'eq2810.example:pub', visibility: 'PUBLIC' })).id;
+    const foreignOrg = (await mem({ organizationId: other.id, urn: 'eq2810.example:foreign' })).id;
+    const personal = (await mem({ urn: 'eq2810.example:own', class: 'personal', userId: stranger, ownerUserId: stranger })).id;
+    const ids = [inOrg, secondOrg, publicMemory, foreignOrg, personal];
+    for (const ctx of [{ db, userId: member, roles: [] }, { db, userId: member, roles: ['ADMIN'] }] as Context[]) {
+      const unscoped = await getAccessibleMemoryIds(ctx);
+      const unscopedSet = new Set(unscoped ?? ids);
+      for (const id of ids) {
+        const scoped = await getAccessibleMemoryIds(ctx, id);
+        // null is the gate's unrestricted answer and reads as accessible in both shapes.
+        expect([id, scoped === null || scoped.includes(id)]).toEqual([id, unscopedSet.has(id)]);
+      }
+    }
   });
 });

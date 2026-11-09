@@ -108,20 +108,6 @@ async function recoveryTarget(ctx: Context, ref: string) {
   return node && await canRecoverMemory(ctx, node.memoryId) ? node : null;
 }
 
-/**
- * #2810: map with at most `limit` verdicts in flight. The fan-out endpoint loop's
- * verdicts are independent READS (liveness, readability, write access) on distinct
- * memories, so overlapping their round trips changes no answer — the sequential
- * loop is what made a 152-endpoint-memory batch pay ~2.6s of serial queries.
- */
-async function mapBound<T>(items: readonly T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
-  let next = 0;
-  const width = Math.min(limit, items.length);
-  await Promise.all(Array.from({ length: width }, async () => {
-    for (let i = next++; i < items.length; i = next++) await fn(items[i] as T);
-  }));
-}
-
 export const recoveryQueries = {
   /**
    * Explicit graph inspection; endpoint authority and ancestor liveness precede SQL count and page.
@@ -136,10 +122,11 @@ export const recoveryQueries = {
    * masked page disagree with the endpoint and tombstone sets it was masked with (the two P1s).
    * ONE RepeatableRead transaction now spans discovery, authorization, tombstones and pagination:
    * every statement reads the snapshot the first one took, so the call answers one consistent
-   * state, exactly as the single statement it replaced did. The write-verdict fan-out below
-   * deliberately rides ctx.db, not the tx — concurrent queries on one interactive tx are not
-   * supported — and a verdict fresher than the snapshot can only narrow, never widen, the page:
-   * recoverable ⊆ readable, and readable is pinned to the snapshot.
+   * state, exactly as the single statement it replaced did. Every query inside the transaction
+   * rides the transaction's own connection — the gate and the write-verdict loop through
+   * withoutRequestCaches(ctx, tx), because asking ctx.db while the tx holds a connection is
+   * the #1360 pool-starvation shape (K concurrent calls each holding one connection while
+   * waiting for more, all timing out; a 1-connection pool deadlocks outright).
    */
   recoveryEdges: async (_: unknown, args: { memoryRef: string; edgeIds?: string[] | null; limit?: number | null; offset?: number | null }, ctx: Context) => {
     const only = edgeRestriction(args.edgeIds);
@@ -177,9 +164,12 @@ export const recoveryQueries = {
       // endpoint memory (151 sequential round trips on a portal batch; the per-request cache
       // only deduped within one request, and a request is exactly the shape being paid here).
       // null is the gate's "no filter" answer and means readable, as in isMemoryReadableCached.
-      // #3454: the gate rides the tx (db: tx) so `readable` is pinned to the same snapshot as
-      // the page; on ctx.db it would need a second pool connection mid-transaction (#1360).
-      const accessible = await getAccessibleMemoryIds({ ...ctx, db: tx as unknown as Context['db'] });
+      // #3454: the gate rides the tx so `readable` is pinned to the same snapshot as the
+      // page. withoutRequestCaches is the documented in-transaction gate pattern: asked on
+      // ctx.db it would need a second pool connection mid-transaction (#1360), and the
+      // per-request memo must not carry promises created inside this tx beyond its end.
+      const txCtx = withoutRequestCaches(ctx, tx);
+      const accessible = await getAccessibleMemoryIds(txCtx);
       const accessibleSet = accessible === null ? null : new Set(accessible);
       const readable: string[] = [], recoverable: string[] = [];
       for (const id of endpointMemories) {
@@ -211,23 +201,31 @@ export const recoveryQueries = {
       const tombByKey = new Set(tombstones.map((t) => `${t.memory_id}\u0000${t.loc}`));
       const badIds = endpoints.filter((e) => !e.deleted_at
         && ancestorLocs(e.loc).some((ancestor) => tombByKey.has(`${e.memory_id}\u0000${ancestor}`))).map((e) => e.id);
-      await mapBound(readable.filter((id) => tombstoneMemories.has(id)), 16, async (id) => {
+      // #3454 (review delta): the write verdicts run SEQUENTIALLY on the tx's own connection,
+      // not concurrently on ctx.db — the tx already holds a connection, and waiting for more
+      // from the pool while holding it is the #1360 starvation class (K concurrent calls each
+      // hold one and wait for sixteen; a 1-connection pool deadlocks outright, P2024). The set
+      // is small — only readable memories holding a non-comment tombstone — and the verdict
+      // then sits on the page's snapshot too.
+      for (const id of readable) {
+        if (!tombstoneMemories.has(id)) continue;
         const row = rowById.get(id);
-        if (row && await canRecoverMemoryRow(ctx, row)) recoverable.push(id);
-      });
+        if (row && await canRecoverMemoryRow(txCtx, row)) recoverable.push(id);
+      }
       // The masked pass joins edges to the endpoint rows by PRIMARY KEY with visibility as a
       // filter — the join skeleton production's planner already picks healthily for this path
       // (every admissible plan is PK probes or a hash join; no unindexable CTE or LATERAL
       // remains for a differently-configured planner to cost as a nested loop). readable and
-      // recoverable are built from freshly fetched rows, and both already exclude a soft-deleted
-      // endpoint memory at the shared snapshot. The DTO joins below restate the memory-liveness
-      // contract in the statement itself (the pre-slice-2 join condition) — under the shared
-      // snapshot it cannot filter a row the pass admitted, but it keeps the statement's own
-      // concealment contract explicit should the transaction ever be lost. Node and memory DTO
-      // columns are joined AFTER the limit, for the returned page only. The total rides the SAME
-      // pass (count(*) OVER () evaluates before LIMIT), so the masked scan is paid once per
-      // call; an offset page PAST the end has no row to carry the window total, so that one
-      // case re-asks the first page and keeps only its total.
+      // recoverable are built from freshly fetched rows at the shared snapshot, and readable
+      // already excludes a soft-deleted endpoint memory there — that IS the memory-liveness
+      // condition. The DTO joins restate it in the statement itself (the pre-slice-2 join
+      // condition); under the shared snapshot they cannot filter a row the pass admitted, and
+      // they are a restatement, NOT an independent fallback — without the transaction these
+      // post-limit joins could underfill a page without adjusting its total. Node and memory
+      // DTO columns are joined AFTER the limit, for the returned page only. The total rides
+      // the SAME pass (count(*) OVER () evaluates before LIMIT), so the masked scan is paid
+      // once per call; an offset page PAST the end has no row to carry the window total, so
+      // that one case re-asks the first page and keeps only its total.
       const ok = (alias: string) => Prisma.sql`((${Prisma.raw(alias)}.deleted_at IS NULL
           AND ${Prisma.raw(alias)}.memory_id = ANY(${readable}::text[])
           AND ${Prisma.raw(alias)}.id <> ALL(${badIds}::text[]))
