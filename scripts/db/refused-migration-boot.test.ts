@@ -184,6 +184,76 @@ describe('#3770 refusing preflight through the real migrate-deploy + boot path',
   }, 180_000);
 });
 
+/**
+ * #3794: a failure that is NOT a refusal still stops boot (exit 1), but names the migration that failed so the
+ * operator does not need database access to read _prisma_migrations. Redaction is binding: the line carries a
+ * phase-style key, the migration NAME and the Prisma code, never the SQL text, the ledger's `logs` blob or a URL.
+ */
+describe('#3794 a non-refusal migration failure names the failed migration', () => {
+  const BROKEN = '20260101000300_broken_3794';
+  const LEAK = 'leak_marker_3794_missing';
+  async function withScratchDb<T>(fn: (url: string) => Promise<T>): Promise<T> {
+    const bad = `${DB}_n3794`;
+    const c = new Client({ connectionString: dbUrl('postgres') });
+    await c.connect();
+    await c.query(`CREATE DATABASE ${bad}`);
+    await c.end();
+    writeMigration(BROKEN, `SELECT 1 FROM ${LEAK};`);
+    try { return await fn(dbUrl(bad)); } finally {
+      rmSync(join(prismaDir, 'migrations', BROKEN), { recursive: true, force: true });
+      const d = new Client({ connectionString: dbUrl('postgres') });
+      await d.connect();
+      await d.query(`DROP DATABASE IF EXISTS ${bad} WITH (FORCE)`);
+      await d.end();
+    }
+  }
+  const bootOn = (url: string) => {
+    rmSync(serverLog, { force: true });
+    const env = { ...process.env, PATH: `${join(dir, 'bin')}:${process.env.PATH}`, DATABASE_URL: url, TMPDIR: dir };
+    delete env.MIGRATE_DATABASE_URL;
+    return spawnSync('sh', [ENTRYPOINT], { encoding: 'utf8', env, cwd: ROOT, timeout: 120_000 });
+  };
+  const named = (stderr: string) => stderr.split('\n').filter(l => l.startsWith('db.migration.failed'));
+
+  it('names the migration once, still exits 1, serves nothing, and leaks no SQL, ledger text or URL', async () => {
+    await withScratchDb(async (url) => {
+      const run = bootOn(url);
+      expect(run.status).toBe(1);
+      expect(existsSync(serverLog)).toBe(false);
+      const lines = named(run.stderr);
+      expect(lines, run.stderr).toHaveLength(1);
+      expect(lines[0]).toContain(`migration=${BROKEN}`);
+      expect(lines[0]).toContain('prisma=P3018');
+      expect(run.stderr).not.toContain('db.migration.refused_preflight');
+      for (const text of [run.stderr, run.stdout]) {
+        expect(text).not.toContain(LEAK);
+        expect(text).not.toContain('SELECT 1');
+        expect(text).not.toContain('Database error code');
+        expect(text).not.toContain('postgresql://');
+        expect(text).not.toContain(new URL(url).pathname.slice(1));
+      }
+    });
+  }, 180_000);
+
+  it('the next boot (P3009, not clearable) names it again and still exits 1', async () => {
+    await withScratchDb(async (url) => {
+      expect(bootOn(url).status).toBe(1);
+      const run = bootOn(url);
+      expect(run.status).toBe(1);
+      expect(existsSync(serverLog)).toBe(false);
+      expect(named(run.stderr), run.stderr).toHaveLength(1);
+      expect(named(run.stderr)[0]).toContain(`migration=${BROKEN}`);
+      expect(named(run.stderr)[0]).toContain('prisma=P3009');
+      expect(run.stderr).not.toContain(LEAK);
+    });
+  }, 180_000);
+
+  it('a clean boot prints no failure line', async () => {
+    const run = boot();
+    expect(named(run.stderr)).toHaveLength(0);
+  }, 180_000);
+});
+
 describe('refusedMigrationNames', () => {
   const refused = { migration_name: '20260101000100_x', logs: `a\nDatabase error code: ${REFUSAL_SQLSTATE}\nb` };
   it('names only refusals, and only when every unfinished migration is one', () => {
