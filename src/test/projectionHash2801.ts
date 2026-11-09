@@ -29,7 +29,16 @@ export function projectionFieldHashes(text: string): ProjectionFieldHashes {
   ]));
 }
 
-/** The old bare hash mismatch: #2801's red pin requires node/field diagnostics instead. */
-export function projectionHashDiagnostic(_text: string, _expected: ProjectionFieldHashes): string {
-  return 'response hash mismatch';
+/** #2801: identify changed node/field hashes without dumping expected or current content. */
+export function projectionHashDiagnostic(text: string, expected: ProjectionFieldHashes): string {
+  const actual = projectionFieldHashes(text);
+  const changed: string[] = [];
+  for (const node of new Set([...Object.keys(expected), ...Object.keys(actual)])) {
+    const before = expected[node] ?? {};
+    const after = actual[node] ?? {};
+    for (const field of new Set([...Object.keys(before), ...Object.keys(after)])) {
+      if (before[field] !== after[field]) changed.push(`node ${node}, field ${field}`);
+    }
+  }
+  return changed.length ? `response hash mismatch: ${changed.join('; ')}` : 'response hash mismatch: framing changed';
 }
