@@ -3,7 +3,7 @@
  * `nodeId` carry a signature that COUNTS? The per-revision predicate the signed serve selection walks, and (PR3) the
  * include `signed` setting will share.
  *
- * Three legs, all of which must hold for SOME one `NodeSignature` row on the node:
+ * Four legs, all of which must hold for SOME one `NodeSignature` row on the node:
  *
  * - **Coverage** (cor:dmo:130:09): the signature's revision ≤ N, and no revision in (its revision, N] changed the
  *   title, abstract or content. This is judged from the REVISION HISTORY — each span revision's snapshot must still
@@ -11,44 +11,60 @@
  *   (`loadSignatureStatuses` judges that; a later edit must not turn an earlier signature into EARLIER for every
  *   revision). A missing witness fails CLOSED: a deleted snapshot is not evidence of "no change", so deleting the
  *   A→B step of an A→B→A history cannot revive coverage of the restored text. A restore is itself a change and never
- *   revives coverage (cor:dmo:130:04).
+ *   revives coverage (cor:dmo:130:04). Span witnesses may come from ANY memory (the #92963 ruling: a witness captured
+ *   in another memory is complete-unchanged-HASH evidence, not a content change) — a hash is compared against a hash
+ *   already in the serve's own data, so no text crosses memories.
  * - **State (C2)**: re-verified now, on the DB signing clock (`hadron_signing_now()`, the same clock
  *   `loadSignatureStatuses` judges windows by; #3746's `hadron_passkey_now()` is the registration and lifecycle-stamp
  *   clock). The verdict is `deriveSignatureState`'s window logic with "changed" judged per revision above, so: pending
  *   until its first-key window ends normally, cancelled / invalid / not-applicable (an encrypted memory) never, and a
  *   passkey revoked after signing — outside the first-key window — does not stop it counting (cor:dmo:130:04).
- * - **Signer eligibility (C1, Q-E)**: judged WHEN THE SIGNATURE WAS MADE, never re-checked now — a signer who has
- *   since left still counts, and re-deriving eligibility now is exactly what Q-E forbids. The ceremony's durable
- *   verdict, the request it completed, is the record read here: a completed request pinning this node, this revision
- *   and this hash. For a compiled boot prompt (and, in PR3, an include's `signed`) the ceremony's own at-signing
- *   write-access check (cor:dmo:130:02) IS the eligibility rule — in those memories the writers are the managers
- *   (cor:agt:040:18) — so no present-day re-derivation exists in this predicate at all.
+ * - **Signer eligibility (C1, Q-E): the ceremony stamp** — judged WHEN THE SIGNATURE WAS MADE, never re-checked now.
+ *   The completed request (pins node/revision/hash) is necessary but not sufficient: a seeded row copies any static
+ *   column, so the durable verdict is the `ceremony_stamp` HMAC under a retained registry key
+ *   (`src/lib/signing/stampKeys.ts`), written only by the real completion after its locked authority checks. A stamp
+ *   absent (the pre-watermark rows) or unverified — unknown key id, tampered columns — fails closed and never counts.
+ *   A signer who has since left still counts (their stamp still verifies): Q-E keeps eligibility an at-signing fact.
+ * - **Requirement + memory binding (the #92963 fence)**: for `compiled-boot-prompt` the stamp must carry the MANAGER
+ *   grade — the completion judged the signer to manage an Agent or App, and the one it names must be the node's
+ *   CURRENT memory's owner (cor:agt:040:18 via the shared `bootPromptOwnerOfMemory`) — and the memory at signing
+ *   (the stamp's `stampMemoryId`, the durable capture-memory record: unprunable, HMAC-bound, impossible to seed) must
+ *   be the node's current memory. A cross-memory move ends the old signature's counting (Rico §10 P2-1: the ceremony
+ *   judged the OLD memory's managers; the requirement asks about the current one) and a move BACK restores it —
+ *   EXACT counting parity (Xylon 6750288978): a snapshot captured in another memory is not itself a content change,
+ *   so a metadata-only revision made elsewhere never blocks the restored count — no extra NOT_SIGNED refusal beyond
+ *   the law (Vera 6750258496's named deviation is deliberately NOT built). The writer grade alone (a lawful writer
+ *   who is not a manager) does not count for this requirement; PR3's include `signed` setting will ask for exactly
+ *   that grade of the same stamp.
  *
  * The predicate NEVER reads the deployment's surface policy: `PASSKEY_SIGNING_ENABLED` is G2's term and belongs to the
  * serve (`servingAppRequiresSignature`), which composes it with the organisation's switch. It reads nothing but the
- * node, its revision history, its signature records with their passkeys and their signing requests.
+ * node, its memory, its revision history, its signature records with their passkeys, their signing requests, and the
+ * stamp-key registry.
  */
 import type { PrismaClient, Prisma } from '../../generated/prisma/index.js';
 import { computeApprovalHash } from '../approvalHash.js';
+import { bootPromptOwnerOfMemory } from '../bootPromptApproval.js';
 import { deriveSignatureState } from './state.js';
 import { signatureRecordVerifies } from './verify.js';
+import { stampTagMatches, stampVerificationKey } from './stampKeys.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
 /** Which rule requires the signature. PR1 has one; PR3's include `signed` setting names its own. */
 export type SignatureRequirement = 'compiled-boot-prompt';
 
-interface SpanFields {
+interface WitnessFields {
   name: string;
   abstract: string | null;
   content: string | null;
 }
 
 /**
- * True only when some signature on the node covers `revision`, re-verifies to a counting state now, and was made
- * through a request the ceremony completed (its durable at-signing verdict). Pure read; `db` may be a transaction
- * client. A node that no longer exists, or an encrypted memory, counts nothing (cor:dmo:120:00 mirror: no
- * hash-dependent work is done on an encrypted node's records at all).
+ * True only when some signature on the node covers `revision`, re-verifies to a counting state now, was made
+ * through a request the ceremony completed AND carries that ceremony's stamp for `requirement` — the durable
+ * at-signing verdict. Pure read; `db` may be a transaction client. A node that no longer exists, or an encrypted
+ * memory, counts nothing (cor:dmo:120:00 mirror: no hash-dependent work is done on an encrypted node's records at all).
  */
 export async function revisionSignatureCounts(
   db: Db,
@@ -58,13 +74,14 @@ export async function revisionSignatureCounts(
 ): Promise<boolean> {
   switch (requirement) {
     case 'compiled-boot-prompt':
-      // The ceremony's at-signing check is the whole eligibility rule (header, C1); the completed request below is
-      // its durable verdict. There is deliberately no present-day eligibility re-derivation to branch on.
+      // The stamp's manager grade must name the CURRENT memory's Agent or App (the fence below); the writer grade
+      // alone never satisfies this requirement. There is still no present-day eligibility re-derivation — the owner
+      // resolution below asks WHERE the node serves, never WHO the signer now is.
       break;
   }
   const node = await db.node.findUnique({
     where: { id: nodeId },
-    select: { revSeq: true, name: true, abstract: true, content: true, memory: { select: { isEncrypted: true } } },
+    select: { revSeq: true, name: true, abstract: true, content: true, memoryId: true, memory: { select: { isEncrypted: true } } },
   });
   if (!node || node.memory.isEncrypted) return false;
 
@@ -76,7 +93,7 @@ export async function revisionSignatureCounts(
 
   // The ceremony's verdict for each signature's request, read once: a request the ceremony completed, pinning this
   // node at this revision and this hash. A request still open, or ended any other way (withdrawn, declined, expired,
-  // stale), is not a completed signing — the signature seeded beside it does not count (C1).
+  // stale), is not a completed signing — necessary, not sufficient: the stamp below is the signer-bound verdict.
   const requests = await db.signingRequest.findMany({
     where: { id: { in: [...new Set(signatures.map((s) => s.signingRequestId))] } },
     select: { id: true, state: true, nodeId: true, revision: true, approvalHash: true },
@@ -86,17 +103,22 @@ export async function revisionSignatureCounts(
   // The span evidence, read once for every revision any candidate signature must be judged over: the newest snapshot
   // at each number (by id, as every other revision read resolves duplicates), whichever memory captured it — only a
   // HASH is compared against a hash already in the serve's own data, so a snapshot captured in another memory is an
-  // honest witness here without any text crossing memories.
+  // honest witness here without any text crossing memories (and, per the fence ruling above, without its capture
+  // memory ever counting against the signature).
   const lowestSigned = Math.min(...signatures.map((s) => s.revision));
   const snapshots = await db.nodeRevision.findMany({
     where: { nodeId, revNo: { gt: lowestSigned, lte: revision } },
     orderBy: { id: 'desc' },
     select: { revNo: true, name: true, abstract: true, content: true },
   });
-  const spanFields = new Map<number, SpanFields>();
+  const spanFields = new Map<number, WitnessFields>();
   for (const s of snapshots) {
     if (s.revNo != null && !spanFields.has(s.revNo)) spanFields.set(s.revNo, { name: s.name, abstract: s.abstract, content: s.content });
   }
+
+  // The requirement's owner ask, resolved once: the Agent or App the node's CURRENT memory serves (null in a memory
+  // that is no Agent's system memory and no App's install memory — nothing can match, so nothing counts there).
+  const currentOwner = requirement === 'compiled-boot-prompt' ? await bootPromptOwnerOfMemory(db, node.memoryId) : null;
 
   const [{ now }] = await db.$queryRaw<Array<{ now: Date }>>`SELECT hadron_signing_now() AS now`;
 
@@ -104,6 +126,36 @@ export async function revisionSignatureCounts(
     // Eligibility (C1 / Q-E): the ceremony's durable verdict only, never a present-day re-derivation.
     const req = requestOf.get(sig.signingRequestId);
     if (!req || req.state !== 'completed' || req.nodeId !== nodeId || req.revision !== sig.revision || req.approvalHash !== sig.approvalHash) continue;
+
+    // The stamp: present, and verifying under the retained key it names, over the row's own identity fields plus the
+    // attested columns beside it (a tampered column breaks the tag; the rows are append-only, so this catches seeds).
+    // Unknown or undecryptable key ids fail closed. Pre-watermark rows (all stamp columns NULL) fail closed here.
+    if (sig.ceremonyStamp == null || sig.stampKeyId == null || sig.stampMemoryId == null) continue;
+    const stampKey = await stampVerificationKey(db, sig.stampKeyId);
+    if (stampKey == null) continue;
+    const stampInputOk = stampTagMatches(stampKey, {
+      keyId: sig.stampKeyId,
+      nodeId: sig.nodeId,
+      signingRequestId: sig.signingRequestId,
+      signerId: sig.signerId,
+      credentialId: Buffer.from(sig.passkey.credentialId),
+      revision: sig.revision,
+      approvalHash: sig.approvalHash,
+      memoryId: sig.stampMemoryId,
+      ownerKind: sig.stampOwnerKind as 'AGENT' | 'APP' | null,
+      ownerId: sig.stampOwnerId,
+    }, Buffer.from(sig.ceremonyStamp));
+    if (!stampInputOk) continue;
+
+    // The #92963 fence, for `compiled-boot-prompt`: the memory at signing is the node's current memory, and the
+    // manager grade names the memory's CURRENT Agent or App (the requirement's own owner, resolved above). A node in
+    // a memory with no boot-prompt owner counts nothing for this requirement. The stamp's `stampMemoryId` carries the
+    // capture-memory binding ALONE — durable and HMAC-bound, so a pruned history cannot weaken it and a metadata-only
+    // revision captured in another memory cannot trip it (exact counting parity; no extra NOT_SIGNED refusal).
+    if (requirement === 'compiled-boot-prompt') {
+      if (sig.stampMemoryId !== node.memoryId) continue;
+      if (currentOwner == null || sig.stampOwnerKind !== currentOwner.kind || sig.stampOwnerId !== currentOwner.id) continue;
+    }
 
     // Coverage (cor:dmo:130:09): every revision in (sig.revision, revision] must still be witnessed by a snapshot that
     // hashes to the signed hash — a missing or differing witness fails this signature closed.

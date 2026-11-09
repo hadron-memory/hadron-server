@@ -75,6 +75,9 @@ beforeEach(async () => {
   appId = (await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'run-app', urn: 'run-org::run-app' } })).id;
   userId = (await db.user.create({ data: { githubId: 297334, githubUsername: 'run-user', roles: ['READER'] } })).id;
   signerId = (await db.user.create({ data: { githubId: 297335, githubUsername: 'run-signer', roles: [] } })).id;
+  // The signer manages the agent (org ADMIN), so the ceremony's stamp carries the manager grade the signed serve
+  // requires; a writer-grade stamp would leave the run refused NOT_SIGNED (pinned in the predicate's own tests).
+  await db.orgMember.create({ data: { organizationId: orgId, userId: signerId, role: 'ADMIN' } });
   await db.appMember.create({ data: { appId, userId, role: 'member' } });
   memoryId = (await db.memory.create({ data: { id: generateId(), class: 'system', name: 'sys', urn: 'run-org:sys', organizationId: orgId } })).id;
   agentId = (await db.agent.create({ data: { id: generateId(), name: 'Runner', urn: 'run-org:runner', organizationId: orgId, systemMemoryId: memoryId } })).id;

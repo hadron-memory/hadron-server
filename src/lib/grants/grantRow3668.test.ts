@@ -17,9 +17,10 @@ const exec = (sql: string, ...params: unknown[]) => db.$executeRawUnsafe(sql, ..
 const query = <T>(sql: string, ...params: unknown[]) => db.$queryRawUnsafe<T[]>(sql, ...params);
 
 describe('prisma/grant-invariants.sql parity', () => {
-  it('the grants migration ends with a byte-identical copy, and post-push includes the file', () => {
+  it('the newest migration to carry it ends with a byte-identical copy, and post-push includes the file', () => {
     const sql = readFileSync(new URL('../../../prisma/grant-invariants.sql', import.meta.url), 'utf8');
-    const dir = readdirSync(new URL('../../../prisma/migrations', import.meta.url)).find((d) => d === '20261107010000_grants');
+    // #3690: the newest migration to carry the guard is the holder-departure one (the S1a migration carried it first).
+    const dir = readdirSync(new URL('../../../prisma/migrations', import.meta.url)).find((d) => d === '20261109170000_grant_holder_departure');
     expect(dir).toBeTruthy();
     expect(readFileSync(new URL(`../../../prisma/migrations/${dir}/migration.sql`, import.meta.url), 'utf8').endsWith(sql)).toBe(true);
     expect(readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8')).toContain('\\ir grant-invariants.sql');
@@ -126,6 +127,9 @@ describe('UPDATE guard: a row ends once, loses an erased issuer, follows a merge
   });
   it('erasing the issuer nulls the link and keeps the reason (cor:acl:140:08)', async () => {
     const id = await insertGrant(w, { issuer_user_id: w.userId, reason: 'kept words' });
+    // #3690: the link goes only for an ERASED person (the users row soft-deleted or gone); a live person's is refused.
+    await refused(exec(`UPDATE grants SET issuer_user_id = NULL WHERE id = $1`, id), /grants are append-only/);
+    await db.user.update({ where: { id: w.userId }, data: { deletedAt: new Date() } });
     await exec(`UPDATE grants SET issuer_user_id = NULL WHERE id = $1`, id);
     expect((await query<{ issuer_user_id: unknown; reason: string }>('SELECT issuer_user_id, reason FROM grants WHERE id = $1', id))[0]).toEqual({ issuer_user_id: null, reason: 'kept words' });
     await refused(exec(`UPDATE grants SET issuer_user_id = $2 WHERE id = $1`, id, w.user2Id), /grants are append-only/);
@@ -194,33 +198,11 @@ describe('DELETE: refused while the App lives; the App\'s hard delete carries th
     expect(await query('SELECT id FROM grants')).toHaveLength(0);
     expect(await query('SELECT id FROM grant_events')).toHaveLength(0);
   });
-  // INTERIM referential integrity (RESTRICT), accepted for S1a only on empty, producer-free tables (gate 6712456240).
-  // NOT the holder-erasure rule: cor:acl:140:08 leaves it Open for every holder kind.
-  it('INTERIM: a hard delete of any HOLDER kind is refused by its foreign key and writes nothing', async () => {
-    const holders: Array<[string, string, () => Promise<unknown>]> = [
-      ['user_id', 'grants_user_id_fkey', () => db.user.delete({ where: { id: w.user2Id } })],
-      ['agent_id', 'grants_agent_id_fkey', () => db.agent.delete({ where: { id: w.agentId } })],
-      ['worker_id', 'grants_worker_id_fkey', () => db.worker.delete({ where: { id: w.workerId } })],
-      ['grantee_app_id', 'grants_grantee_app_id_fkey', () => db.app.delete({ where: { id: w.app2Id } })],
-    ];
-    const ids: string[] = [];
-    for (const [col] of holders) {
-      const value = col === 'user_id' ? w.user2Id : col === 'agent_id' ? w.agentId : col === 'worker_id' ? w.workerId : w.app2Id;
-      ids.push(await insertGrant(w, { user_id: null, [col]: value }));
-    }
-    for (const [col, , del] of holders) await refused(del(), /foreign key|Foreign key|P2003|23503/i);
-    expect(await query('SELECT id FROM grants')).toHaveLength(holders.length);
-    expect(await db.user.count({ where: { id: w.user2Id } })).toBe(1);
-    expect(await db.app.count({ where: { id: w.app2Id } })).toBe(1);
-  });
+  // #3690 S2a-h replaced the S1a INTERIM RESTRICT: a holder that goes ends its grant (holderDeparture3690.test.ts pins every kind).
   it('an App that is BOTH a grant\'s scope and its holder deletes cleanly: the scope cascade takes the row first', async () => {
     await insertGrant(w, { user_id: null, grantee_app_id: w.appId });
     await db.app.delete({ where: { id: w.appId } });
     expect(await query('SELECT id FROM grants')).toHaveLength(0);
-  });
-  it('an App that is only a HOLDER and a different App\'s scope is not "gone": the holder FK refuses', async () => {
-    await insertGrant(w, { user_id: null, grantee_app_id: w.app2Id });
-    await refused(db.app.delete({ where: { id: w.app2Id } }), /grants_grantee_app_id_fkey|foreign key|Foreign key/i);
   });
 });
 

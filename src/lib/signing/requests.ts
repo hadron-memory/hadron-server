@@ -17,6 +17,9 @@ import { ensureCurrentNodeRevisionInTransaction } from '../nodeRevisionSnapshot.
 import { CURRENT_SIGNATURE_PAYLOAD_VERSION, signaturePayloadBytes } from './payload.js';
 import { passkeyRpId, signingCeremonyOrigins, signingRequestTtlSeconds, SigningNotConfiguredError } from './config.js';
 import { verifySigningAssertion, type AssertionParts } from './verify.js';
+import { bootPromptOwnerOfMemory } from '../bootPromptApproval.js';
+import { lockAppManagerMemberships, managesAgent, managesApp } from '../auth/appManagement.js';
+import { computeStampTag, mintStampSigningKey } from './stampKeys.js';
 
 export type SigningRequestState = 'open' | 'completed' | 'declined' | 'expired' | 'stale' | 'withdrawn';
 
@@ -283,6 +286,51 @@ export async function completeSigningRequestInTransaction(
     if (e instanceof SigningNotConfiguredError) throw e;
     throw new SigningRefusal('SIGNATURE_NOT_VERIFIED', 'The signature did not verify.');
   }
+  // #2973 C1 (cor:dmo:130:09, gate holds 6749839869 / 6750325233) — the at-signing
+  // eligibility stamp, written atomically with the signature row (the watermark: no
+  // code path after this change produces an unstamped signature). DUAL GRADE, and
+  // admission is never narrowed (Xylon #92967): requireSigner's writer check above is
+  // the whole ceremony gate and stays so — a lawful writer who is not a manager signs
+  // fine; their stamp simply carries the writer grade alone and does not count for
+  // `compiled-boot-prompt`. The manager grade is judged HERE, under this transaction's
+  // locks, for the SIGNER explicitly (never the request context — under impersonation
+  // that is the target user; Rico #92969 §3) — the shared managesAgent/managesApp
+  // gates (cor:agt:040:18), platform roles re-read from the user row (the
+  // withAuthorizedTx discipline: a stale token's role grants nothing), and the
+  // memberships the verdict rests on held FOR SHARE through the commit so a demotion
+  // cannot land between the check and the write.
+  const stampOwner = await bootPromptOwnerOfMemory(tx, opts.memoryId);
+  let stampOwnerKind: 'AGENT' | 'APP' | null = null;
+  let stampOwnerId: string | null = null;
+  if (stampOwner) {
+    if (stampOwner.kind === 'APP') {
+      await lockAppManagerMemberships(tx, opts.signerId, stampOwner);
+    } else if (stampOwner.organizationId) {
+      await tx.$queryRaw`SELECT user_id FROM org_members WHERE organization_id = ${stampOwner.organizationId} AND user_id = ${opts.signerId} FOR SHARE`;
+    }
+    const roles = (await tx.user.findUnique({ where: { id: opts.signerId }, select: { roles: true } }))?.roles ?? [];
+    const managerCtx = { db: tx, userId: opts.signerId, roles };
+    const manages = stampOwner.kind === 'APP'
+      ? await managesApp(managerCtx, stampOwner)
+      : await managesAgent(managerCtx, stampOwner);
+    if (manages) {
+      stampOwnerKind = stampOwner.kind;
+      stampOwnerId = stampOwner.id;
+    }
+  }
+  const stampKey = await mintStampSigningKey(tx);
+  const ceremonyStamp = computeStampTag(stampKey.key, {
+    keyId: stampKey.id,
+    nodeId: row.nodeId,
+    signingRequestId: row.id,
+    signerId: opts.signerId,
+    credentialId: Buffer.from(opts.credentialId),
+    revision: row.revision,
+    approvalHash: row.approvalHash,
+    memoryId: opts.memoryId,
+    ownerKind: stampOwnerKind,
+    ownerId: stampOwnerId,
+  });
   await tx.nodeSignature.create({
     data: {
       nodeId: row.nodeId,
@@ -296,6 +344,11 @@ export async function completeSigningRequestInTransaction(
       authenticatorData: new Uint8Array(opts.assertion.authenticatorData),
       clientDataJson: new Uint8Array(opts.assertion.clientDataJson),
       signature: new Uint8Array(opts.assertion.signature),
+      ceremonyStamp: new Uint8Array(ceremonyStamp),
+      stampKeyId: stampKey.id,
+      stampMemoryId: opts.memoryId,
+      stampOwnerKind,
+      stampOwnerId,
     },
   });
   await tx.$executeRaw`UPDATE passkey_credentials

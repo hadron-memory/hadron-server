@@ -37,7 +37,7 @@ const CASES: Case[] = [
   { name: 'no cap: use_count is irrelevant', live: true, row: { activatedAt: active, maxUses: null, useCount: 99 } },
   { name: 'pending AND expired AND revoked', live: false, row: { activatedAt: null, expiresAt: at(-1), revokedAt: at(-1) } },
 ];
-const full = (row: Partial<GrantLiveFields>): GrantLiveFields => ({ activatedAt: null, revokedAt: null, startsAt: null, expiresAt: null, maxUses: null, useCount: 0, ...row });
+const full = (row: Partial<GrantLiveFields>): GrantLiveFields => ({ activatedAt: null, revokedAt: null, holderDepartedAt: null, appDeletedAt: null, startsAt: null, expiresAt: null, maxUses: null, useCount: 0, ...row });
 
 describe('isGrantLive (the function)', () => {
   for (const c of CASES) it(c.name, () => expect(isGrantLive(full(c.row), NOW), c.name).toBe(c.live));

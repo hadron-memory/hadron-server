@@ -79,6 +79,10 @@ beforeEach(async () => {
   worker = await db.worker.findUniqueOrThrow({ where: { id: made.id } });
   memoryId = (await db.memory.create({ data: { id: generateId(), class: 'system', name: 'sys', urn: `${org.urn}:sys`, organizationId: org.id } })).id;
   signerId = (await db.user.create({ data: { githubId: 297333, githubUsername: `signer-${n}`, roles: [] } })).id;
+  // The compiled prompt lives in `memoryId`; the stamp's fence resolves the memory's Agent, so the agent's system
+  // memory must BE that memory, and the signer must manage it (org ADMIN → the stamp's manager grade).
+  await db.agent.update({ where: { id: agent.id }, data: { systemMemoryId: memoryId } });
+  await db.orgMember.create({ data: { organizationId: org.id, userId: signerId, role: 'ADMIN' } });
 });
 afterEach(() => {
   delete process.env.SIGNING_CEREMONY_ORIGINS;

@@ -41,33 +41,52 @@ export type BootPromptApprovalCaller = {
   clientId?: string | null;
 };
 
+/**
+ * #2973 C1 (cor:agt:040:18, shared with S6's approval gate) — WHO a memory's boot
+ * prompt is managed by: the App for an install memory, the Agent for its own system
+ * memory, null anywhere else (no Agent or App manager is resolved for an arbitrary
+ * memory). Carries the ownership columns the shared manager gates branch on, so the
+ * approval gate below, the signature stamp's manager grade and the counting fence
+ * all resolve the owner ONE way — the stamp's judged owner can never drift from the
+ * placement rule the approval leg and the serve already apply. Read-only; pass a
+ * transaction client to decide under the caller's own locks.
+ */
+export type BootPromptOwnerRef =
+  | { kind: 'AGENT'; id: string; organizationId: string | null; ownerUserId: string | null }
+  | { kind: 'APP'; id: string; organizationId: string | null; ownerUserId: string | null };
+
+export async function bootPromptOwnerOfMemory(
+  db: Pick<PrismaClient, 'memory' | 'agent' | 'app'>,
+  memoryId: string,
+): Promise<BootPromptOwnerRef | null> {
+  const memory = await db.memory.findUnique({
+    where: { id: memoryId },
+    select: { class: true, isInstallMemory: true, appId: true },
+  });
+  if (!memory) return null;
+  if (isInstallMemoryRow(memory)) {
+    if (!memory.appId) return null;
+    const app = await db.app.findUnique({
+      where: { id: memory.appId },
+      select: { id: true, organizationId: true, ownerUserId: true },
+    });
+    return app ? { kind: 'APP', ...app } : null;
+  }
+  const agent = await db.agent.findFirst({
+    where: { systemMemoryId: memoryId },
+    select: { id: true, organizationId: true, ownerUserId: true },
+  });
+  return agent ? { kind: 'AGENT', ...agent } : null;
+}
+
 /** Decide for one memory. Pass the transaction context to decide under the approval's own transaction. */
 export async function bootPromptApprovalGate(
   ctx: BootPromptApprovalCaller,
   memoryId: string,
 ): Promise<BootPromptApprovalGate> {
-  const memory = await ctx.db.memory.findUnique({
-    where: { id: memoryId },
-    select: { class: true, isInstallMemory: true, appId: true },
-  });
-  if (!memory) return { placed: false };
-  let manages: () => Promise<boolean>;
-  if (isInstallMemoryRow(memory)) {
-    if (!memory.appId) return { placed: false };
-    const app = await ctx.db.app.findUnique({
-      where: { id: memory.appId },
-      select: { id: true, organizationId: true, ownerUserId: true },
-    });
-    if (!app) return { placed: false };
-    manages = () => managesApp(ctx, app);
-  } else {
-    const agent = await ctx.db.agent.findFirst({
-      where: { systemMemoryId: memoryId },
-      select: { organizationId: true, ownerUserId: true },
-    });
-    if (!agent) return { placed: false };
-    manages = () => managesAgent(ctx, agent);
-  }
+  const owner = await bootPromptOwnerOfMemory(ctx.db, memoryId);
+  if (!owner) return { placed: false };
+  const manages = owner.kind === 'APP' ? () => managesApp(ctx, owner) : () => managesAgent(ctx, owner);
   if (boundWorkerId()) return { placed: true, refusal: 'BOOT_PROMPT_WORKER_SESSION_REFUSED' };
   if (isRunPrincipal(ctx)) return { placed: true, refusal: 'BOOT_PROMPT_APPROVAL_FORBIDDEN' };
   return { placed: true, refusal: (await manages()) ? null : 'BOOT_PROMPT_APPROVAL_FORBIDDEN' };

@@ -30,7 +30,8 @@ let memoryId: string;
 let agentId: string;
 let appId: string;
 let workerId: string;
-let signerId: string;
+let signerId: string; // org ADMIN: manages the agent, so live signatures carry the stamp's manager grade
+let writerId: string; // org CONTRIBUTOR: a lawful writer who manages nothing (the stamp's writer grade)
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -41,6 +42,9 @@ beforeEach(async () => {
   const org = await db.organization.create({ data: { id: generateId(), name: 'sv-org', urn: 'sv-org' } });
   orgId = org.id;
   signerId = (await db.user.create({ data: { githubId: 297331, githubUsername: 'r2973-serve-signer', roles: [] } })).id;
+  writerId = (await db.user.create({ data: { githubId: 297332, githubUsername: 'r2973-serve-writer', roles: [] } })).id;
+  await db.orgMember.create({ data: { organizationId: orgId, userId: signerId, role: 'ADMIN' } });
+  await db.orgMember.create({ data: { organizationId: orgId, userId: writerId, role: 'CONTRIBUTOR' } });
   memoryId = (await db.memory.create({ data: { id: generateId(), class: 'system', name: 'sys', urn: 'sv-org:sys', organizationId: orgId } })).id;
   agentId = (await db.agent.create({ data: { id: generateId(), name: 'Ada', urn: 'sv-org:ada', organizationId: orgId, systemMemoryId: memoryId } })).id;
   appId = (await db.app.create({ data: { id: generateId(), name: 'App', urn: 'sv-org:app', organizationId: orgId } })).id;
@@ -105,17 +109,21 @@ async function recompile(nodeId: string, content: string, approve = true) {
 
 /**
  * Sign the node's CURRENT revision through the real ceremony (create + complete; the signer was eligible when it was
- * made). `firstWindow` registers a first passkey whose 72-hour window is still open, so the signature starts PENDING —
- * the shape cor:dmo:130:04 reads as pending until the window ends normally.
+ * made). The org ADMIN signs by default (the stamp's manager grade, which counts for the boot prompt); `as:
+ * 'contributor'` signs as a lawful writer who manages nothing — admitted by the ceremony, but the stamp carries the
+ * writer grade alone and the serve refuses NOT_SIGNED on it. `firstWindow` registers a first passkey whose 72-hour
+ * window is still open, so the signature starts PENDING — the shape cor:dmo:130:04 reads as pending until the window
+ * ends normally.
  */
-async function sign(nodeId: string, opts: { firstWindow?: boolean } = {}) {
+async function sign(nodeId: string, opts: { firstWindow?: boolean; as?: 'admin' | 'contributor' } = {}) {
+  const who = opts.as === 'contributor' ? writerId : signerId;
   const key = softPasskey();
-  await insertSoftPasskey(db, signerId, key, { firstWindow: opts.firstWindow ?? false, label: 'Serve signer', rpId: RP });
+  await insertSoftPasskey(db, who, key, { firstWindow: opts.firstWindow ?? false, label: 'Serve signer', rpId: RP });
   const req = await db.$transaction((tx) => createSigningRequestInTransaction(tx, nodeId, {
-    memoryId, requester: { userId: signerId, appId: null, workerId: null, sessionId: null }, mayWrite: async () => true,
+    memoryId, requester: { userId: who, appId: null, workerId: null, sessionId: null }, mayWrite: async () => true,
   }));
   await db.$transaction((tx) => completeSigningRequestInTransaction(tx, req.id, {
-    memoryId, signerId, credentialId: key.credentialId,
+    memoryId, signerId: who, credentialId: key.credentialId,
     assertion: key.assert({
       payload: signaturePayloadBytes(SIGNATURE_PAYLOAD_V3, { nodeId, approvalHash: req.approvalHash, requestId: req.id }),
       origin: ORIGIN, rpId: RP,
@@ -186,6 +194,21 @@ describe('#2973 serve matrix — switch on and signing shipped (the conjunction 
     await sign(node, { firstWindow: true }); // PENDING: the window is open
     await pointAgent(node);
     expect(await code(serve())).toBe('BOOT_PROMPT_NOT_SIGNED');
+  });
+
+  it('refuses BOOT_PROMPT_NOT_SIGNED when the only signature is a lawful writer-grade one (a non-manager signed it)', async () => {
+    await switchOn();
+    signingShips(true);
+    const node = await compiled('writer text');
+    await sign(node, { as: 'contributor' }); // the ceremony admits the writer; the stamp carries no manager grade
+    await pointAgent(node);
+    // The row exists, is verified and current — but cor:dmo:130:09 names the boot prompt's signers as WHOEVER
+    // MANAGES its Agent, so a writer-grade stamp does not satisfy it. The node needs a manager's signature.
+    const rows = await db.nodeSignature.count({ where: { nodeId: node } });
+    expect(rows).toBe(1);
+    expect(await code(serve())).toBe('BOOT_PROMPT_NOT_SIGNED');
+    await sign(node); // the manager signs the same revision
+    expect(await serve()).toMatchObject({ servedRevSeq: 1, content: 'writer text' });
   });
 
   it('serves the newest revision that is BOTH approved and signed when a newer approved revision is unsigned (R35)', async () => {
