@@ -17,7 +17,7 @@ import { Client } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { maintenanceUrl } from '../../src/test/dbWorkers.js';
 import { endsImplicitTransaction } from './migrationTransaction.js';
-import { REFUSAL_SQLSTATE, refusedMigrationNames } from './resolve-refused-migrations.js';
+import { REFUSAL_SQLSTATE, failedMigrationNames, refusedMigrationNames } from './resolve-refused-migrations.js';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const ENTRYPOINT = join(ROOT, 'scripts/docker-start.sh');
@@ -252,6 +252,18 @@ describe('#3794 a non-refusal migration failure names the failed migration', () 
     const run = boot();
     expect(named(run.stderr)).toHaveLength(0);
   }, 180_000);
+});
+
+describe('failedMigrationNames (#3794)', () => {
+  it('returns well-formed names only and never the ledger logs', () => {
+    const rows = [
+      { migration_name: '20260101000100_ok', logs: 'SELECT secret FROM t; Database error code: 42P01' },
+      { migration_name: 'postgresql://u:p@h/db', logs: null },
+      { migration_name: '2026_short', logs: null },
+    ];
+    expect(failedMigrationNames(rows)).toEqual(['20260101000100_ok']);
+    expect(failedMigrationNames([])).toEqual([]);
+  });
 });
 
 describe('refusedMigrationNames', () => {
