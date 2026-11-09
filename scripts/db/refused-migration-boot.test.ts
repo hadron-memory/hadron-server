@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { Client } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { maintenanceUrl } from '../../src/test/dbWorkers.js';
+import { endsImplicitTransaction } from './migrationTransaction.js';
 import { REFUSAL_SQLSTATE, refusedMigrationNames } from './resolve-refused-migrations.js';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
@@ -195,20 +196,20 @@ describe('refusedMigrationNames', () => {
 // Blind review P2 (Dorian, #3772): the HDPRF code alone does not prove nothing was applied before the raise. What
 // does is that Prisma runs a migration file as ONE implicit transaction, so a raise rolls back every statement above
 // it. Pin both halves: the mechanism, and a guard that no HDPRF migration opts out of it.
-// Anything that ends the implicit transaction: COMMIT/ROLLBACK/ABORT (any form, incl. COMMIT AND CHAIN, on any line),
-// START TRANSACTION, a standalone BEGIN [TRANSACTION|WORK|ISOLATION|READ] (a DO block's own BEGIN is none of these), and
-// CONCURRENTLY. Comments and string literals are stripped first so a message that says "commit" cannot trip it.
-const ENDS_TRANSACTION = /\b(COMMIT|ROLLBACK|ABORT|CONCURRENTLY)\b|\bSTART\s+TRANSACTION\b|\bBEGIN\s*(;|TRANSACTION\b|WORK\b|ISOLATION\b|READ\b)/i;
-const stripNonCode = (sql: string) => sql.replace(/--.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '').replace(/'(?:[^']|'')*'/g, "''");
 describe('#3770 a refusal leaves no partial schema', () => {
   it('the opt-out detector sees what it must and ignores a DO block', () => {
     for (const bad of ['CREATE TABLE a(i int);\nCOMMIT;\n', 'CREATE TABLE a(i int); COMMIT;', 'COMMIT AND CHAIN;', 'x; commit and no chain;',
-      'ROLLBACK;', 'ABORT;', 'BEGIN;\nCREATE TABLE a(i int);', 'begin transaction;', 'START TRANSACTION;', 'CREATE INDEX CONCURRENTLY i ON t(c);']) {
-      expect(stripNonCode(bad), bad).toMatch(ENDS_TRANSACTION);
+      'ROLLBACK;', 'ABORT;', 'END;', 'x; END TRANSACTION;', 'BEGIN;\nCREATE TABLE a(i int);', 'begin transaction;', 'START TRANSACTION;',
+      'CREATE INDEX CONCURRENTLY i ON t(c);',
+      // a comment marker inside a string must not hide the real COMMIT after it (blind/local delta 2)
+      "SELECT '--'; COMMIT;", "SELECT '/*'; COMMIT; SELECT '*/';", "SELECT E'\\'--'; COMMIT;", 'SELECT "--"; COMMIT;',
+      '/* a /* nested */ still comment */ COMMIT;', "DO $a$ BEGIN NULL; END $a$; COMMIT;", "SELECT $$--$$; COMMIT;"]) {
+      expect(endsImplicitTransaction(bad), bad).toBe(true);
     }
     for (const ok of ["DO $$ BEGIN RAISE EXCEPTION 'x'; END $$;", "DO $$\nBEGIN\n  RAISE EXCEPTION 'x';\nEND $$;",
-      "DO $$ BEGIN RAISE EXCEPTION 'will commit later'; END $$; -- COMMIT", '/* COMMIT */ SELECT 1;']) {
-      expect(stripNonCode(ok), ok).not.toMatch(ENDS_TRANSACTION);
+      "DO $$ BEGIN RAISE EXCEPTION 'will commit later'; END $$; -- COMMIT", '/* COMMIT */ SELECT 1;', "SELECT 'COMMIT; END;';",
+      "DO $f$ BEGIN IF true THEN NULL; END IF; END $f$;", 'CREATE TABLE "commit" (i int);', 'SELECT 1 -- BEGIN; END;']) {
+      expect(endsImplicitTransaction(ok), ok).toBe(false);
     }
   });
 
@@ -250,8 +251,7 @@ export default defineConfig({ schema: "prisma/schema.prisma", migrations: { path
       if (!existsSync(file)) continue;
       const body = readFileSync(file, 'utf8');
       if (!body.includes(REFUSAL_SQLSTATE)) continue;
-      const code = stripNonCode(body);
-      expect(code, `${name} raises ${REFUSAL_SQLSTATE} but ends the implicit transaction`).not.toMatch(ENDS_TRANSACTION);
+      expect(endsImplicitTransaction(body), `${name} raises ${REFUSAL_SQLSTATE} but ends the implicit transaction`).toBe(false);
     }
   });
 });
