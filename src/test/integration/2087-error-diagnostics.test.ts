@@ -21,7 +21,7 @@ vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: 
 let server: Server, origin: string, token: string, appId: string, sid: string;
 const absent = 'hrn:app:diagnostics2087.example:absent';
 const foreign = 'hrn:app:diagnostics2087.example:foreign';
-const fields = 'batchWindowSeconds busyDelaySeconds stuckWindowSeconds standbyEnabled standbyEffective';
+const fields = 'batchWindowSeconds busyDelaySeconds stuckWindowSeconds';
 const query = `query($a:String!){appDeliverySettings(appRef:$a){${fields}}}`;
 const mutation = `mutation($a:String!){setAppDeliverySettings(appRef:$a,input:{busyDelaySeconds:501}){${fields}}}`;
 const diagnostics = { stacktrace: ['PRIVATE_STACK_2087'], exception: { stacktrace: ['PRIVATE_EXCEPTION_2087'] } };

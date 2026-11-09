@@ -27,9 +27,6 @@ describe('#2301 SDL S1 audited claims', () => {
     expect(text).toContain('reports to');
     expect(text).toContain('stall rule');
   });
-  it('states isolation is unavailable while its implementation switch is off', () => {
-    expect(description('Mutation', 'isolateWorker')).toContain('WORKER_ISOLATION_UNAVAILABLE');
-  });
   it('the default enumeration registry detects omitted host operation types', () => {
     const fixture = 'type Query { "worktree.create, worker.start" operations: String }';
     expect(findPartialEnumerations(fixture)).toEqual(expect.arrayContaining([

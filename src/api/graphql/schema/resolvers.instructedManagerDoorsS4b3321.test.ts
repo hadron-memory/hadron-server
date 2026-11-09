@@ -592,14 +592,6 @@ describe('#3321 refusal before oracle (acceptance 8)', () => {
 });
 
 describe('#3321 callers not wired here keep refusing a worker (acceptance 10, ask 2)', () => {
-  it('retired canManageIsolation stays false for every principal', async () => {
-    const F = (resolvers as any).WorkerWakeSettings;
-    expect(await asWorker(() => F.canManageIsolation({ workerId: f.target.id }, {}, bound()))).toBe(false);
-    expect(await F.canManageIsolation({ workerId: f.target.id }, {}, ctx())).toBe(false);
-    // The target's holder as well: the read never takes the holder arm for a worker.
-    await db.worker.update({ where: { id: f.target.id }, data: { heldByUserId: f.holder.id } });
-    expect(await asWorker(() => F.canManageIsolation({ workerId: f.target.id }, {}, bound()))).toBe(false);
-  });
 
   it('grantApp and grantAppKeyScope answer a worker held by an App manager as on main, instruction or not', async () => {
     const before = await snapshot();
