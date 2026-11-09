@@ -1607,6 +1607,11 @@
       "resolver": "src/api/graphql/schema/resolvers.grant.ts::resolveGrantReader",
       "target": "Grant"
     },
+    "GrantSigningRequest.requestedBy": {
+      "class": "open",
+      "evidence": "#3649 slice B: the same SigningRequester shape as SigningRequest.requestedBy, shown to whoever may read the grant (#3789 read gate); the private follow-up (hadron-internal#30) covers both; details withheld",
+      "target": "SigningRequester"
+    },
     "PrincipalGrantsPage.items": {
       "class": "parent-implies-child",
       "audience": "the caller's own grants, or any principal's grants in an org where the caller is an org admin",
