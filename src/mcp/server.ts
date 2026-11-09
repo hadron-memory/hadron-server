@@ -8563,6 +8563,15 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         relocated = completed.relocated;
         linkWarnings = completed.linkWarnings;
       } catch (e) {
+        // #3786 (Charles QA F1, from #3776's stamped QA matrix): the move is
+        // the third inline writer that can drive the #992 per-chat seq
+        // constraint — a rebase of a seq-bearing chat-message into a taken
+        // (chat, seq). Without this branch the caller saw the raw P2002 as an
+        // internal error while the GraphQL moveNode answered the typed
+        // refusal; the refused move itself was already atomic.
+        if (isChatSeqUniqueViolation(e)) {
+          return refusalResult(`[chat_message_seq_conflict] ${CHAT_SEQ_CONFLICT_MESSAGE}`);
+        }
         if (e instanceof ArchivePlanExhaustedError) return refusalResult('The node was moved concurrently; re-read it and retry.');
         if (e instanceof MoveSourceBeyondReadError) return refusalResult(`Source memory not found: "${fromMemoryUrn}".`);
         if (e instanceof MemoryWriteAccessChangedDuringWriteError) return refusalResult(e.message);
