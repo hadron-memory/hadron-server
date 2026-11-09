@@ -358,7 +358,7 @@ export async function cloneMemoryGraphInTx(
     };
   });
   if (nodeRows.length > 0) {
-    // #992/#2622 (Joshua BLIND P3-7): the copy preserves loc + seq.
+    // #992/#2622: the copy preserves loc + seq.
     // Unreachable by input today — a clone always lands in a NEW memory — but
     // the wrap is parity defense with every other chat-message writer: the day
     // a same-memory copy variant exists, a collision answers typed instead of

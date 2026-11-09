@@ -374,7 +374,7 @@ export async function extractParentNodeGraph(
         };
       });
       if (nodeRows.length > 0) {
-        // #992/#2622 (Joshua BLIND P3-7): this bulk copy preserves loc + seq.
+        // #992/#2622: this bulk copy preserves loc + seq.
         // Unreachable by input today — the op creates a FRESH target memory in
         // this transaction, so no colliding row can pre-exist — but the wrap is
         // parity defense with every other chat-message writer: the day an

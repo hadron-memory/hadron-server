@@ -50,7 +50,7 @@ function ctx(userId?: string): Context {
 }
 
 async function expectCode(p: Promise<unknown>, code: string) {
-  // Flag pattern (#2622 follow-up, Joshua BLIND P3-9): expect.fail INSIDE the
+  // Flag pattern (#2622 follow-up): expect.fail INSIDE the
   // try would be swallowed by this same catch and surface as a confusing
   // toBeInstanceOf mismatch when the promise unexpectedly resolves.
   let refused = false;
@@ -68,7 +68,7 @@ async function expectCode(p: Promise<unknown>, code: string) {
 
 /** The raw P2002 the storage layer raises for a taken (chat, seq). */
 async function expectUniqueViolation(p: Promise<unknown>) {
-  // Same flag pattern as expectCode (P3-9).
+  // Same flag pattern as expectCode.
   let refused = false;
   let caught: unknown;
   try {
@@ -298,7 +298,7 @@ describe('#992 — the constraint refuses duplicates the allocator cannot see', 
     expect(rejected).toHaveLength(1);
   });
 
-  it('types the refusal at the generic node door for an unchanneled chat prefix', async () => {
+  it('refuses a seq-bearing generic create at the EARLIEST gate (SEQ_PROTECTED, pre-write), unchanneled chat prefix', async () => {
     await seedMessage(legacyMem.id, 3);
 
     // A createNode at a colliding (root, seq) is refused by the EARLIEST
@@ -350,8 +350,8 @@ describe('#992 — the constraint refuses duplicates the allocator cannot see', 
     );
   });
 
-  it('types the refusal for an update that moves a message into collision', async () => {
-    const a = await seedMessage(legacyMem.id, 3);
+  it('refuses a seq-bearing generic update at the EARLIEST gate (SEQ_PROTECTED, pre-write)', async () => {
+    await seedMessage(legacyMem.id, 3);
     const b = await seedMessage(legacyMem.id, 7);
 
     await expectCode(
@@ -447,8 +447,12 @@ describe('#992 — prisma/chat-seq-invariants.sql (the preflight + index)', () =
     // 20261027193000 migration (applied databases checksum it — prod applied
     // it post-repair), so the current source rides a NEW no-op migration:
     // in every environment the censuses re-run and pass, the index create is
-    // IF NOT EXISTS. The convention the pin guards — what `db push` enforces
-    // is what `migrate deploy` enforced — holds via the newest one.
+    // gated on the catalog. The convention the pin guards — what `db push`
+    // enforces is what `migrate deploy` enforced — holds via the newest one.
+    // The `chat_seq_preflight_detail$` match is deliberately exact, not a
+    // trend: the glob picks the NEWEST `*_chat_seq*` migration and this pin
+    // then names it, so the next chat-seq migration cannot silently inherit
+    // the pin — it must retarget this test consciously.
     const dir = fileURLToPath(new URL('../../prisma/migrations/', import.meta.url));
     const migration = readdirSync(dir)
       .filter((m) => /_chat_seq/.test(m))
@@ -464,7 +468,7 @@ describe('#992 — prisma/chat-seq-invariants.sql (the preflight + index)', () =
     // The template built the index on an empty DB; take it away so this test
     // exercises the file's own create path against real rows.
     // Suspends the constraint AND resets the helper's known-present flag
-    // (P3-5): a bare DROP INDEX would leave the flag claiming the index
+    // A bare DROP INDEX would leave the flag claiming the index
     // exists, silently skipping re-creation for later tests in this worker.
     await suspendChatSeqUniqueness(db);
     expect(await indexExists()).toBe(false);
@@ -472,11 +476,15 @@ describe('#992 — prisma/chat-seq-invariants.sql (the preflight + index)', () =
     const memId = legacyMem.id;
     const keepId = await seedMessage(memId, 3);
     const dupId = await seedMessage(memId, 3); // the collision
+    // A SECOND colliding group (a different seq): the DETAIL lists groups in
+    // (memory, chat, seq) order, so the refusal's evidence is deterministic.
+    const keep7Id = await seedMessage(memId, 7);
+    await seedMessage(memId, 7);
 
-    // Joshua BLIND P2-2 (#2622 follow-up): the samples ride the EXCEPTION's
-    // DETAIL, so the refusal carries its own evidence even where the runner
-    // (e.g. `prisma migrate deploy`) does not surface server WARNINGs. Flag
-    // pattern (P3-9): expect.fail inside the catch would be swallowed here.
+    // (#2622 follow-up): the samples ride the EXCEPTION's DETAIL, so the
+    // refusal carries its own evidence even where the runner (e.g. `prisma
+    // migrate deploy`) does not surface server WARNINGs. Flag pattern:
+    // expect.fail inside the catch would be swallowed here.
     let refusal: unknown;
     let refused = false;
     try {
@@ -487,9 +495,12 @@ describe('#992 — prisma/chat-seq-invariants.sql (the preflight + index)', () =
     }
     expect(refused, 'expected the preflight to refuse').toBe(true);
     expect((refusal as Error).message).toMatch(/chat seq uniqueness/i);
-    expect(String((refusal as { detail?: string }).detail)).toContain(memId);
-    expect(String((refusal as { detail?: string }).detail)).toContain('seq 3');
-    expect(String((refusal as { detail?: string }).detail)).toContain(keepId);
+    const detail = String((refusal as { detail?: string }).detail);
+    expect(detail).toContain(`${memId} / chat ${TEAM_CHAT_LOC} / seq 3: 2 rows (e.g. {`);
+    expect(detail).toContain(keepId);
+    expect(detail).toContain(`${memId} / chat ${TEAM_CHAT_LOC} / seq 7: 2 rows (e.g. {`);
+    expect(detail).toContain(keep7Id);
+    expect(detail.indexOf('seq 3:')).toBeLessThan(detail.indexOf('seq 7:'));
     expect(await indexExists()).toBe(false); // refused safely: nothing installed
     // Atilla LOCAL P3-2: the preflight never renumbers or deletes.
     const afterRefusal = await db.node.findMany({ where: { id: { in: [keepId, dupId] } }, select: { id: true, seq: true } });
@@ -497,12 +508,15 @@ describe('#992 — prisma/chat-seq-invariants.sql (the preflight + index)', () =
     expect(afterRefusal).toHaveLength(2);
 
     // The synthetic-fixture repair (the authorized owner's selected repair —
-    // here, the test): remove the duplicate, then installation succeeds.
-    const dupes = await db.node.findMany({
-      where: { memoryId: memId, nodeType: 'chat-message', seq: 3 },
-      orderBy: { createdAt: 'asc' },
-    });
-    await db.node.delete({ where: { id: dupes[1].id } });
+    // here, the test): remove ONE duplicate from EACH colliding group, then
+    // installation succeeds.
+    for (const seq of [3, 7]) {
+      const dupes = await db.node.findMany({
+        where: { memoryId: memId, nodeType: 'chat-message', seq },
+        orderBy: { createdAt: 'asc' },
+      });
+      await db.node.delete({ where: { id: dupes[1].id } });
+    }
     await runSql();
     expect(await indexExists()).toBe(true);
   });
@@ -513,7 +527,7 @@ describe('#992 — prisma/chat-seq-invariants.sql (the preflight + index)', () =
   // installs once the owner's repair has relocated it.
   it('refuses to install while an EXISTING Channel address carries a messages segment, then installs after relocation', async () => {
     // Suspends the constraint AND resets the helper's known-present flag
-    // (P3-5): a bare DROP INDEX would leave the flag claiming the index
+    // A bare DROP INDEX would leave the flag claiming the index
     // exists, silently skipping re-creation for later tests in this worker.
     await suspendChatSeqUniqueness(db);
     const rootId = generateId();
@@ -524,8 +538,9 @@ describe('#992 — prisma/chat-seq-invariants.sql (the preflight + index)', () =
       data: { id: generateId(), memoryId: legacyMem.id, loc: 'ops:messages:alerts', name: 'alerts', kind: 'CHAT', chatRootNodeId: rootId, createdBy: admin.id },
     });
 
-    // Same DETAIL-evidence pin as the duplicates refusal (P2-2): the
-    // offender's kind, memory and ADDRESS ride the EXCEPTION itself.
+    // Same DETAIL-evidence pin as the duplicates refusal: the offender's
+    // kind, memory and ADDRESS ride the EXCEPTION itself, in the census's
+    // exact format.
     let refusal: unknown;
     let refused = false;
     try {
@@ -536,8 +551,8 @@ describe('#992 — prisma/chat-seq-invariants.sql (the preflight + index)', () =
     }
     expect(refused, 'expected the preflight to refuse').toBe(true);
     expect((refusal as Error).message).toMatch(/reserved "messages" loc segment/);
-    expect(String((refusal as { detail?: string }).detail)).toContain('channel');
-    expect(String((refusal as { detail?: string }).detail)).toContain('ops:messages:alerts');
+    expect(String((refusal as { detail?: string }).detail))
+      .toContain(`channel in memory ${legacyMem.id} at ops:messages:alerts (1 row(s))`);
     expect(await indexExists()).toBe(false);
 
     // The approved repair, played by the test: relocate the address.
@@ -548,12 +563,27 @@ describe('#992 — prisma/chat-seq-invariants.sql (the preflight + index)', () =
   });
 
   it('refuses to install while a transcript is nested under a messages-bearing chat root, with no Channel row', async () => {
-    // Suspends the constraint AND resets the helper's known-present flag
-    // (P3-5): a bare DROP INDEX would leave the flag claiming the index
-    // exists, silently skipping re-creation for later tests in this worker.
+    // Suspends the constraint AND resets the helper's known-present flag:
+    // a bare DROP INDEX would leave the flag claiming the index exists,
+    // silently skipping re-creation for later tests in this worker.
     await suspendChatSeqUniqueness(db);
     const nested = await seedMessage(legacyMem.id, 1, { loc: 'ops:messages:alerts:messages:001-x' });
-    await expect(runSql()).rejects.toThrow(/reserved "messages" loc segment/);
+    // The nested-transcript census branch reports the FOLDED root
+    // (`split_part` up to the first ':messages:'), not the full loc — pinned
+    // exactly, including the branch's own DETAIL format. Flag pattern:
+    // expect.fail inside the catch would be swallowed here.
+    let refusal: unknown;
+    let refused = false;
+    try {
+      await runSql();
+    } catch (e) {
+      refused = true;
+      refusal = e;
+    }
+    expect(refused, 'expected the preflight to refuse').toBe(true);
+    expect((refusal as Error).message).toMatch(/reserved "messages" loc segment/);
+    expect(String((refusal as { detail?: string }).detail))
+      .toContain(`nested-transcript in memory ${legacyMem.id} at ops (1 row(s))`);
     expect(await indexExists()).toBe(false);
     await db.node.delete({ where: { id: nested } });
     await runSql();
@@ -564,7 +594,7 @@ describe('#992 — prisma/chat-seq-invariants.sql (the preflight + index)', () =
   // cannot collide, so a nested loc on one must not block installation.
   it('does not refuse on a counterless chat-message under a messages-bearing loc (outside the index)', async () => {
     // Suspends the constraint AND resets the helper's known-present flag
-    // (P3-5): a bare DROP INDEX would leave the flag claiming the index
+    // A bare DROP INDEX would leave the flag claiming the index
     // exists, silently skipping re-creation for later tests in this worker.
     await suspendChatSeqUniqueness(db);
     const id = await seedMessage(legacyMem.id, null, { loc: 'ops:messages:alerts:messages:counterless' });
@@ -576,7 +606,7 @@ describe('#992 — prisma/chat-seq-invariants.sql (the preflight + index)', () =
   // Ralion §10 P3-A: a root ENDING in `messages` folds into its ancestor too.
   it('refuses a transcript under a root that ends in the messages segment', async () => {
     // Suspends the constraint AND resets the helper's known-present flag
-    // (P3-5): a bare DROP INDEX would leave the flag claiming the index
+    // A bare DROP INDEX would leave the flag claiming the index
     // exists, silently skipping re-creation for later tests in this worker.
     await suspendChatSeqUniqueness(db);
     await seedMessage(legacyMem.id, 1, { loc: 'ops:messages:messages:001-x' });
