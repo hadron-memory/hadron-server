@@ -49,9 +49,17 @@
 -- refusing-preflight convention the boot protocol recognizes. A deploy-time
 -- refusal then resolves as alarm + serve-the-existing-schema (the entrypoint
 -- marks the migration rolled back and starts the server), never the #3236
--- boot-brick class. This file keeps the convention's other half: no BEGIN,
--- COMMIT, ROLLBACK or CONCURRENTLY anywhere, so the wrapped transaction's
--- all-or-nothing rollback is what makes "nothing was applied" true.
+-- boot-brick class. The trade-off is deliberate: a rolled-back refusal is
+-- re-attempted by every later `migrate deploy`, so it re-alarms on each boot
+-- until the data is repaired — loud and serving beats quiet and bricked.
+--
+-- This file keeps the convention's other half: no transaction-control
+-- STATEMENTS (BEGIN/COMMIT/ROLLBACK as statements) and no CREATE INDEX
+-- CONCURRENTLY — the wrapped transaction's all-or-nothing rollback is what
+-- makes "nothing was applied" true. The PL/pgSQL BEGIN/END inside the DO
+-- blocks below are language block boundaries, not transaction control; the
+-- convention's checker (the #3772 migration scanner) tokenizes and ignores
+-- dollar-quoted bodies on exactly that distinction.
 --
 -- Both censuses make ONE ordered pass over the data and derive the count,
 -- the WARNING lines and the DETAIL samples from the same rows: the samples

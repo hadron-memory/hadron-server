@@ -497,8 +497,13 @@ describe('#992 — prisma/chat-seq-invariants.sql (the preflight + index)', () =
     expect((refusal as Error).message).toMatch(/chat seq uniqueness/i);
     // #3770 boot protocol: the refusal's SQLSTATE is the classifier's marker —
     // a deploy-time refusal resolves as alarm + serve-existing-schema, never
-    // the #3236 boot-brick class. Pinned here so the marker cannot drift
-    // from the convention the entrypoint reads off the ledger.
+    // the #3236 boot-brick class. The literal matches the classifier's
+    // REFUSAL_SQLSTATE constant (scripts/db/resolve-refused-migrations.ts,
+    // landing with #3772): this test cannot import it until #3772 is on main,
+    // so the rebase onto #3772-landed main replaces this literal with the
+    // import. The end-to-end link — the REAL classifier accepting this
+    // refusal's ledger shape and rejecting the old P0001 — is pinned by the
+    // LOCAL seat's fixture run (anne-local-delta-1e304cf8).
     expect((refusal as { code?: string }).code).toBe('HDPRF');
     const detail = String((refusal as { detail?: string }).detail);
     expect(detail).toContain(`${memId} / chat ${TEAM_CHAT_LOC} / seq 3: 2 rows (e.g. {`);
@@ -617,7 +622,21 @@ describe('#992 — prisma/chat-seq-invariants.sql (the preflight + index)', () =
     // exists, silently skipping re-creation for later tests in this worker.
     await suspendChatSeqUniqueness(db);
     await seedMessage(legacyMem.id, 1, { loc: 'ops:messages:messages:001-x' });
-    await expect(runSql()).rejects.toThrow(/reserved "messages" loc segment/);
+    // Joshua BLIND delta3 D2 fold: this fourth refusal door raises through
+    // the same census RAISE as the three doors above, so its SQLSTATE pin
+    // rides here too. Flag pattern: expect.fail inside the catch would be
+    // swallowed here.
+    let refusal: unknown;
+    let refused = false;
+    try {
+      await runSql();
+    } catch (e) {
+      refused = true;
+      refusal = e;
+    }
+    expect(refused, 'expected the preflight to refuse').toBe(true);
+    expect((refusal as Error).message).toMatch(/reserved "messages" loc segment/);
+    expect((refusal as { code?: string }).code).toBe('HDPRF');
     expect(await indexExists()).toBe(false);
   });
 });
