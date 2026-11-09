@@ -78,6 +78,8 @@ BEGIN
     IF NOT FOUND THEN
       RAISE EXCEPTION 'A grant signing request needs a pending grant at its current version' USING ERRCODE = '23514';
     END IF;
+    -- Re-read after the lock: an insert that waited behind a grant writer begins when it actually could.
+    platform_now := hadron_signing_now();
     NEW.created_at := platform_now;
     RETURN NEW;
   END IF;
@@ -132,7 +134,8 @@ FOR EACH ROW EXECUTE FUNCTION hadron_guard_grant_signing_request();
 CREATE OR REPLACE FUNCTION hadron_guard_grant_signature() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
-  platform_now timestamp(3) := hadron_signing_now();
+  -- Read only after both locks below: a clock sampled before a wait would judge a deadline that passed during it as unpassed.
+  platform_now timestamp(3);
   req grant_signing_requests%ROWTYPE;
   g grants%ROWTYPE;
 BEGIN
@@ -148,6 +151,7 @@ BEGIN
   -- The grant row first, then the request: the lock order every grant signing writer takes.
   SELECT * INTO g FROM grants WHERE id = NEW.grant_id FOR SHARE;
   SELECT * INTO req FROM grant_signing_requests WHERE id = NEW.signing_request_id FOR UPDATE;
+  platform_now := hadron_signing_now();
   IF NOT FOUND OR req.state <> 'open' OR platform_now >= req.expires_at THEN
     RAISE EXCEPTION 'A grant signature needs an open signing request' USING ERRCODE = '23514';
   END IF;

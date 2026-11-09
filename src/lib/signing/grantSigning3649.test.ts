@@ -193,6 +193,75 @@ describe('D1: signature records are insert-only against an open request whose pi
   });
 });
 
+/** Holds `lockSql` in its own transaction until a statement on this connection waits on it, then runs `whileHeld`. */
+async function whileBlocking<T>(lockSql: string, params: unknown[], start: () => Promise<T>, whileHeld: (blocker: Client) => Promise<void>): Promise<T> {
+  const blocker = new Client({ connectionString: process.env.DATABASE_URL });
+  await blocker.connect();
+  try {
+    await blocker.query('BEGIN');
+    await blocker.query(lockSql, params);
+    const blockerPid = (await blocker.query('SELECT pg_backend_pid() AS pid')).rows[0].pid as number;
+    const pending = start();
+    pending.catch(() => undefined);
+    let waited = false;
+    for (let i = 0; i < 200 && !waited; i++) {
+      await new Promise((res) => setTimeout(res, 25));
+      const [{ n }] = await query<{ n: bigint }>(`SELECT count(*) AS n FROM pg_stat_activity
+        WHERE wait_event_type = 'Lock' AND $1 = ANY(pg_blocking_pids(pid))`, blockerPid);
+      waited = Number(n) > 0;
+    }
+    expect(waited, 'the write under test waited on the blocker').toBe(true);
+    await whileHeld(blocker);
+    await blocker.query('COMMIT');
+    return await pending;
+  } finally {
+    await blocker.query('ROLLBACK').catch(() => undefined);
+    await blocker.end();
+  }
+}
+
+describe('D1: the guards read the DB clock after their locks, not before (#3802 LOCAL F1)', () => {
+  it('a record whose insert waited on its request past the deadline is refused', async () => {
+    const g = await insertGrant(w);
+    const r = await insertRequest(g, {}, `${DB_NOW} + interval '2 seconds'`);
+    const outcome = whileBlocking('SELECT id FROM grant_signing_requests WHERE id = $1 FOR UPDATE', [r],
+      () => insertSignature(r, g).then(() => 'inserted', (e: Error) => e.message),
+      async (blocker) => {
+        // Release only once the DB clock is past the request's deadline.
+        for (let i = 0; i < 200; i++) {
+          const { rows } = await blocker.query(`SELECT ${DB_NOW} > expires_at AS past FROM grant_signing_requests WHERE id = $1`, [r]);
+          if (rows[0].past) return;
+          await new Promise((res) => setTimeout(res, 50));
+        }
+        throw new Error('deadline never passed');
+      });
+    expect(await outcome).toMatch(/open signing request/);
+    expect(await query('SELECT 1 FROM grant_signatures WHERE signing_request_id = $1', r)).toHaveLength(0);
+  });
+
+  it('control: the same wait before a far deadline still records', async () => {
+    const g = await insertGrant(w);
+    const r = await insertRequest(g);
+    const outcome = whileBlocking('SELECT id FROM grant_signing_requests WHERE id = $1 FOR UPDATE', [r],
+      () => insertSignature(r, g).then(() => 'inserted', (e: Error) => e.message),
+      async () => { await new Promise((res) => setTimeout(res, 300)); });
+    expect(await outcome).toBe('inserted');
+  });
+
+  it('a request whose insert waited on its grant is stamped created_at after the wait', async () => {
+    const g = await insertGrant(w);
+    let released: Date | null = null;
+    const id = await whileBlocking('SELECT id FROM grants WHERE id = $1 FOR UPDATE', [g],
+      () => insertRequest(g),
+      async (blocker) => {
+        await new Promise((res) => setTimeout(res, 300));
+        released = (await blocker.query(`SELECT ${DB_NOW} AS t`)).rows[0].t as Date;
+      });
+    const [{ created_at }] = await query<{ created_at: Date }>('SELECT created_at FROM grant_signing_requests WHERE id = $1', id);
+    expect(created_at.getTime()).toBeGreaterThanOrEqual(released!.getTime());
+  });
+});
+
 describe('D3: an open request ends stale when its grant is revoked, its holder goes, or its terms move', () => {
   it('a revocation ends it stale', async () => {
     const g = await insertGrant(w);
