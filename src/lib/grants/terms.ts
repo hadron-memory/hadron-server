@@ -126,10 +126,19 @@ export function grantTermsFromRow(row: GrantTermsRow): GrantTerms {
  * else is refused: numbers (whose RFC 8785 form implementations disagree on), booleans, null, nested objects or lists,
  * the empty string and a lone surrogate.
  */
+function listElementsAreValues(list: unknown[], str: (v: unknown) => v is string): boolean {
+  for (let i = 0; i < list.length; i++) {
+    if (!Object.prototype.hasOwnProperty.call(list, i) || !str(list[i]) || list[i] === GRANT_WILDCARD) return false;
+  }
+  return true;
+}
+
 function checkValue(value: unknown): void {
   const str = (v: unknown): v is string => typeof v === 'string' && v !== '' && wellFormed(v);
   if (str(value)) return;
-  if (Array.isArray(value) && value.length > 0 && value.every((v) => str(v) && v !== GRANT_WILDCARD)
+  // Every INDEX is judged, holes included: `every` skips a hole, so `Array(1)` would be written as `[]` and `['a', , 'b']`
+  // as invalid JSON instead of being refused (#3649 slice A review, carried into slice B).
+  if (Array.isArray(value) && value.length > 0 && listElementsAreValues(value, str)
     && new Set(value).size === value.length) return;
   throw new GrantTermsError('BAD_VALUES', 'grant terms: a value must be a string, the wildcard, or a list of distinct strings');
 }

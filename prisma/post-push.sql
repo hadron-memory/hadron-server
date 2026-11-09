@@ -900,3 +900,7 @@ CREATE INDEX IF NOT EXISTS "agent_team_events_pr_frozen_head_idx"
   WHERE "type" = 'pr.frozen';
 
 \ir grant-invariants.sql
+
+-- #3649 slice B: grant signing requests, append-only grant signature records, the grant stale trigger. One source, shared
+-- verbatim with migration 20261109200000_grant_signing (after grant-invariants.sql: the tables it guards reference grants).
+\ir grant-signing-invariants.sql
