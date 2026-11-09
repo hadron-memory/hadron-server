@@ -495,6 +495,11 @@ describe('#992 — prisma/chat-seq-invariants.sql (the preflight + index)', () =
     }
     expect(refused, 'expected the preflight to refuse').toBe(true);
     expect((refusal as Error).message).toMatch(/chat seq uniqueness/i);
+    // #3770 boot protocol: the refusal's SQLSTATE is the classifier's marker —
+    // a deploy-time refusal resolves as alarm + serve-existing-schema, never
+    // the #3236 boot-brick class. Pinned here so the marker cannot drift
+    // from the convention the entrypoint reads off the ledger.
+    expect((refusal as { code?: string }).code).toBe('HDPRF');
     const detail = String((refusal as { detail?: string }).detail);
     expect(detail).toContain(`${memId} / chat ${TEAM_CHAT_LOC} / seq 3: 2 rows (e.g. {`);
     expect(detail).toContain(keepId);
@@ -551,6 +556,7 @@ describe('#992 — prisma/chat-seq-invariants.sql (the preflight + index)', () =
     }
     expect(refused, 'expected the preflight to refuse').toBe(true);
     expect((refusal as Error).message).toMatch(/reserved "messages" loc segment/);
+    expect((refusal as { code?: string }).code).toBe('HDPRF');
     expect(String((refusal as { detail?: string }).detail))
       .toContain(`channel in memory ${legacyMem.id} at ops:messages:alerts (1 row(s))`);
     expect(await indexExists()).toBe(false);
@@ -582,6 +588,7 @@ describe('#992 — prisma/chat-seq-invariants.sql (the preflight + index)', () =
     }
     expect(refused, 'expected the preflight to refuse').toBe(true);
     expect((refusal as Error).message).toMatch(/reserved "messages" loc segment/);
+    expect((refusal as { code?: string }).code).toBe('HDPRF');
     expect(String((refusal as { detail?: string }).detail))
       .toContain(`nested-transcript in memory ${legacyMem.id} at ops (1 row(s))`);
     expect(await indexExists()).toBe(false);

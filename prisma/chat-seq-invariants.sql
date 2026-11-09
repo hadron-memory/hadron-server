@@ -45,6 +45,14 @@
 -- wherever the error text goes. The WARNINGs stay for contexts that do
 -- surface notices.
 --
+-- REFUSAL CLASS (#3770): both refusals raise SQLSTATE 'HDPRF' — the
+-- refusing-preflight convention the boot protocol recognizes. A deploy-time
+-- refusal then resolves as alarm + serve-the-existing-schema (the entrypoint
+-- marks the migration rolled back and starts the server), never the #3236
+-- boot-brick class. This file keeps the convention's other half: no BEGIN,
+-- COMMIT, ROLLBACK or CONCURRENTLY anywhere, so the wrapped transaction's
+-- all-or-nothing rollback is what makes "nothing was applied" true.
+--
 -- Both censuses make ONE ordered pass over the data and derive the count,
 -- the WARNING lines and the DETAIL samples from the same rows: the samples
 -- are deterministic (memory, chat, seq order; created_at,id tiebreak inside
@@ -80,7 +88,8 @@ BEGIN
   END LOOP;
   IF groups > 0 THEN
     RAISE EXCEPTION 'chat seq uniqueness preflight: % colliding (chat, seq) group(s) remain — apply the approved repair first; refusing to create the unique index', groups
-      USING DETAIL = array_to_string(samples, '; '),
+      USING ERRCODE = 'HDPRF',
+      DETAIL = array_to_string(samples, '; '),
       HINT = 'The DETAIL (and the warnings above, where surfaced) list the first 10 colliding groups in (memory, chat, seq) order, as memory / chat root / seq / rows / sample ids. This migration never renumbers, deletes, exempts or chooses a repair.';
   END IF;
 END $$;
@@ -133,7 +142,8 @@ BEGIN
   END LOOP;
   IF total > 0 THEN
     RAISE EXCEPTION 'chat seq uniqueness preflight: % Channel/transcript row(s) use the reserved "messages" loc segment — relocate them under an approved repair first; refusing to create the unique index', total
-      USING DETAIL = array_to_string(samples, '; '),
+      USING ERRCODE = 'HDPRF',
+      DETAIL = array_to_string(samples, '; '),
       HINT = 'The DETAIL (and the warnings above, where surfaced) list the first 10 offending addresses in (kind, memory, address) order. This migration never renames, deletes, exempts or chooses a repair.';
   END IF;
 END $$;
