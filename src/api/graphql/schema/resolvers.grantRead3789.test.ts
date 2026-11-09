@@ -83,18 +83,23 @@ describe('who sees which rows', () => {
   it('a bound worker lists its direct-holder rows and its own pending requests, with total; nothing else', async () => {
     const mine = await live();
     const requested = await insertGrant(w, { requested_by_worker_id: w.workerId }); // holder: a person; pending; requested by me
-    // Absent: requested by me but already active (the requester arm is PENDING only), role agent, another worker, a person, an App.
-    await insertGrantUnguarded(w, { requested_by_worker_id: w.workerId, ...activated });
-    await insertGrant(w, { user_id: null, agent_id: w.agentId });
-    await insertGrant(w, { user_id: null, worker_id: otherWorkerId });
-    await insertGrant(w, { user_id: w.user2Id });
-    await insertGrant(w, { user_id: null, grantee_app_id: w.app2Id });
+    // Absent: requested by me but already active (the requester arm is PENDING only), withdrawn before activation, role agent,
+    // another worker, a person, an App. Each is also null by id: the same answer a missing id gets.
+    const hidden = [
+      await insertGrantUnguarded(w, { requested_by_worker_id: w.workerId, ...activated }),
+      await insertGrantUnguarded(w, { requested_by_worker_id: w.workerId, revoked_at: raw(DB_NOW), revoked_by: 'someone' }),
+      await insertGrant(w, { user_id: null, agent_id: w.agentId }),
+      await insertGrant(w, { user_id: null, worker_id: otherWorkerId }),
+      await insertGrant(w, { user_id: w.user2Id }),
+      await insertGrant(w, { user_id: null, grantee_app_id: w.app2Id }),
+    ];
     const r = await asWorker(LIST);
     expect(r.errors).toBeUndefined();
     expect(ids(r)).toEqual([mine, requested].sort());
     expect(r.data.grants.total).toBe(2);
     expect((await asWorker(ONE, { r: mine })).data.grant.id).toBe(mine);
     expect((await asWorker(ONE, { r: requested })).data.grant.id).toBe(requested);
+    for (const id of hidden) expect((await asWorker(ONE, { r: id })).data.grant, id).toBeNull();
   });
 
   it('every other caller gets an empty page and null for an existing id: the answer a missing id gets', async () => {
