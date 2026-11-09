@@ -1,6 +1,6 @@
 /**
  * #3789 (Grants S2a-read; cor:acl:140:05 List, :03 live, :01): the data-layer read of grants for a BOUND WORKER, shared by
- * the GraphQL `grant(ref:)` / `grants` resolvers and (#3710) the run tool, which calls it directly and not through the resolver.
+ * the GraphQL `grant(ref:)` / `grants` resolvers and, once it exists (#3710, not built), the run tool, which will call it directly and not through the resolver.
  *
  * Who is a reader is decided by the CALLER (the resolver's gate), which hands this module a {@link GrantReader}: a worker and
  * the App it belongs to. This module owns the row scope, and it is the same for every caller:
