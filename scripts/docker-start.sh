@@ -40,7 +40,47 @@ run_setup() {
   fi
 }
 run_setup db.runtime_role.generate_failed "$DATABASE_URL" pnpm prisma generate || exit 1
-run_setup db.runtime_role.migrate_failed "$migration_url" pnpm prisma migrate deploy || exit 1
+# #3770: a migration whose preflight REFUSES on data (SQLSTATE HDPRF, see
+# scripts/db/resolve-refused-migrations.ts) must not become an outage: a failed
+# migration is re-tried into P3009 on every restart. Mark each refused migration
+# rolled back, say so once, and serve the schema that exists; the next boot tries
+# it again. Any other failure, or one we cannot classify, still stops boot.
+# Never inherit a refusal list from outside: only this boot's own refusals reach the server.
+unset HADRON_MIGRATIONS_REFUSED
+refused_file=$(mktemp "${TMPDIR:-/tmp}/hadron-refused.XXXXXX")
+trap 'rm -f "$startup_log" "$refused_file"' EXIT
+migrate_attempts=0
+while ! run_setup db.runtime_role.migrate_failed "$migration_url" pnpm prisma migrate deploy; do
+  migrate_attempts=$((migrate_attempts + 1))
+  [ "$migrate_attempts" -le 3 ] || exit 1
+  case $setup_prisma in P3009|P3018) ;; *) exit 1 ;; esac
+  failed_code=$setup_prisma
+  # The helper writes its answer to a private file: pnpm prints banner lines on stdout that a capture cannot tell apart.
+  : >"$refused_file"
+  DATABASE_URL="$migration_url" REFUSED_MIGRATIONS_FILE="$refused_file" pnpm tsx scripts/db/resolve-refused-migrations.ts >/dev/null 2>&1 || exit 1
+  refused=$(cat "$refused_file")
+  [ -n "$refused" ] || exit 1
+  # Only well-formed migration names are acted on or printed (command output may carry URLs).
+  for refused_name in $refused; do
+    case $refused_name in
+      *[!A-Za-z0-9_]*) exit 1 ;;
+      [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_?*) ;;
+      *) exit 1 ;;
+    esac
+  done
+  for refused_name in $refused; do
+    run_setup db.migration.resolve_failed "$migration_url" pnpm prisma migrate resolve --rolled-back "$refused_name" || exit 1
+    # P3018: the refusal just happened in THIS deploy, so say so (once per migration per boot).
+    # P3009 is a failure an earlier boot left: clear it silently and try the migration again below.
+    if [ "$failed_code" = P3018 ]; then
+      HADRON_MIGRATIONS_REFUSED="${HADRON_MIGRATIONS_REFUSED:+$HADRON_MIGRATIONS_REFUSED }$refused_name"
+      export HADRON_MIGRATIONS_REFUSED
+      echo "db.migration.refused_preflight migration=$refused_name action=rolled_back_and_serving_existing_schema: later migrations were not applied; fix the data it reported, the next boot retries" >&2
+    fi
+  done
+  # P3018: running it again would only refuse again. P3009: the data may have been repaired since, so try once more.
+  [ "$failed_code" = P3009 ] || break
+done
 # Default ACLs can grant this table when Prisma first creates it. Revoke only
 # after migrate, before verification, using the owner connection (no psql).
 run_setup db.runtime_role.revoke_failed "$migration_url" pnpm tsx scripts/db/revoke-runtime-migrations.ts || exit 1
@@ -50,7 +90,7 @@ run_setup db.actions_upsert_failed "$migration_url" pnpm tsx scripts/db/upsert-a
 if ! run_setup db.runtime_role.verify_failed "$migration_url" pnpm tsx scripts/db/verify-runtime-role.ts; then
   echo 'db.runtime_role.verify_warning: phase-1 warning; continuing' >&2
 fi
-rm -f "$startup_log"
+rm -f "$startup_log" "$refused_file"
 trap - EXIT INT TERM HUP QUIT
-unset migration_url setup_url startup_log startup_umask
+unset migration_url setup_url startup_log startup_umask refused_file
 exec pnpm tsx src/index.ts

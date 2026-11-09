@@ -32,6 +32,18 @@
 import type { Express } from 'express';
 import type { PrismaClient } from '../generated/prisma/index.js';
 
+/**
+ * #3770: names of migrations the entrypoint rolled back because their preflight REFUSED on data
+ * (scripts/docker-start.sh exports them as HADRON_MIGRATIONS_REFUSED, space separated). Only well-formed
+ * migration directory names survive, so nothing else can reach the unauthenticated body.
+ */
+export function refusedMigrationsFromEnv(env: NodeJS.ProcessEnv = process.env): string[] {
+  return (env.HADRON_MIGRATIONS_REFUSED ?? '')
+    .split(/\s+/)
+    .filter((name) => /^[0-9]{14}_[A-Za-z0-9_]+$/.test(name))
+    .slice(0, 20);
+}
+
 /** How long the check waits for the pool and the query before answering 503. */
 export const HEALTH_DB_TIMEOUT_MS = 2_000;
 
@@ -104,7 +116,9 @@ export function createReadiness(): Readiness {
  *
  * `/health` (#1906): 200 `{ ok: true }` when `SELECT 1` completes through
  * `db` within `timeoutMs`, otherwise 503 `{ ok: false, error: 'database_unavailable' }`.
- * It never reads `readiness` or the rate configuration.
+ * It never reads `readiness` or the rate configuration. #3770: after the entrypoint rolled back a refusing
+ * migration the 200 body also carries `migration_refused: [<migration name>]` (names only); `/ready`'s five fixed
+ * bodies are unchanged.
  *
  * `/ready` (#2998, hrn:node:hadronmemory.com:specs:cor:api:270:01): exactly
  * one of five fixed bodies, checked in this order: 503 `stopping` once
@@ -125,7 +139,13 @@ export function mountHealthRoutes(
     timeoutMs = HEALTH_DB_TIMEOUT_MS,
     readiness = createReadiness(),
     checkConfiguration,
-  }: { timeoutMs?: number; readiness?: ReadinessSource; checkConfiguration?: () => Promise<void> } = {},
+    refusedMigrations = refusedMigrationsFromEnv(),
+  }: {
+    timeoutMs?: number;
+    readiness?: ReadinessSource;
+    checkConfiguration?: () => Promise<void>;
+    refusedMigrations?: string[];
+  } = {},
 ): void {
   let inFlight: Promise<void> | null = null;
   let readyInFlight: Promise<void> | null = null;
@@ -177,7 +197,8 @@ export function mountHealthRoutes(
   app.get('/health', async (_req, res) => {
     res.set('Cache-Control', 'no-store');
     if (await databaseAnswers('health')) {
-      res.json({ ok: true });
+      // #3770: still 200 (a refusal must not trigger a liveness restart loop); the body says the boot is degraded.
+      res.json(refusedMigrations.length > 0 ? { ok: true, migration_refused: refusedMigrations } : { ok: true });
     } else {
       res.status(503).json({ ok: false, error: 'database_unavailable' });
     }

@@ -1361,7 +1361,7 @@ export const agentMutations = {
       });
       if (!isLifecycleActive(grant)) {
         throw new GraphQLError(
-          'An AgentOrgGrant already exists for this organization and Agent, but it is not active. Ask the Agent owner to issue a new grant or clear the revocation.',
+          'An AgentOrgGrant already exists for this organization and Agent, but it is not active. A revoked or expired grant is not reactivated by createAgentOrgGrant (cor:dmo:050:07).',
           {
             extensions: {
               code: 'AGENT_ORG_GRANT_INACTIVE',

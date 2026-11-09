@@ -332,6 +332,13 @@ two-layer model without further setup:
   when `app_id` is set (`chk_memory_personal_agent_id`). **MCP gate:**
   `canReadMemory` / `canWriteToMemory` treat a free-standing row (app_id + agent
   both NULL) as owner-only and short-circuit the App-isolation checks.
+- **A migration that refuses on data must raise with SQLSTATE `HDPRF`** (#3770,
+  `RAISE EXCEPTION '...' USING ERRCODE = 'HDPRF'`). Boot (`scripts/docker-start.sh`) then marks
+  that migration rolled back, logs one `db.migration.refused_preflight` line naming it and serves
+  the schema that exists (later migrations are not applied; the next boot retries). Any other
+  failure still stops boot. A plain `RAISE EXCEPTION` is a boot-stopping failure and, on restart,
+  a P3009 crash loop (the 2026-11-08 outage, #3236). A refusal still needs its read-only
+  production preflight before the ready call.
 - **Composite-PK models** (`AgentSubscription`, `AppMember`, `AgentImport`,
   `AgentOrgGrant`) have no `id` column. The Prisma client extension at
   `src/integrations/db/client.ts` keeps these out of the auto-id-injection
