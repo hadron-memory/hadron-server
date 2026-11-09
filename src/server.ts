@@ -1212,6 +1212,10 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     maxTokens: admission.maxTokens, maxSelections: admission.maxSelections,
   }));
   const apollo = new ApolloServer({
+    // #3021: shutdown belongs to src/index.ts. Apollo's default handler runs stop() and then re-raises the
+    // signal (ApolloServer.js signalHandler), which killed the process in ~0.3 s before the stopping drain
+    // window could run (Otto's rehearsal, real image under `doppler run`).
+    stopOnTerminationSignals: false,
     // #2087: concealed errors must not depend on the deployment's NODE_ENV.
     includeStacktraceInErrorResponses: false,
     typeDefs,
