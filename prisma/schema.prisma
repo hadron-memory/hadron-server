@@ -620,6 +620,13 @@ model Organization {
   /// restriction (the layer is absent, not deny-all). Snapshotted into
   /// AppRun.policy at mint — edits apply to FUTURE runs only.
   policy          Json?
+  /// #2973 PR1 / cor:agt:040:09 — the organisation's boot-prompt signing
+  /// switch: when true, a compiled boot prompt served in this organisation's
+  /// Apps must be signed. DEFAULT false and NO control API in PR1, so no
+  /// organisation can be switched on and the serve check is inert through it;
+  /// PR2 adds the audience-gated switch (G1). The serve reads it only together
+  /// with the deployment's signing policy (G2, `signingSurfacePolicy().signing`).
+  bootPromptSigningRequired Boolean @default(false) @map("boot_prompt_signing_required")
 
   invitations            UserInvitation[]        @relation("OrgInvitations")
   exchangeConnections    ExchangeConnection[]
