@@ -304,20 +304,36 @@ describe('refusals at completion are judged before any write', () => {
     expect((await grantRow(g)).activated_at).toBeNull();
   });
 
-  it('a grant past its expiry can no longer be signed (ruling 0255 item 16)', async () => {
+  it('a grant past its expiry can no longer be signed (ruling 0255 item 16): judged on the clock, terms unchanged', async () => {
+    const id = generateId();
+    await db.$executeRawUnsafe(`INSERT INTO grants (id, app_id, worker_id, action, action_values, reason, max_uses, expires_at, created_at, updated_at)
+      VALUES ($1, $2, $3, 'schedule.create', $4::jsonb, $5, 3, (clock_timestamp() AT TIME ZONE 'UTC') + interval '1500 milliseconds',
+              (clock_timestamp() AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC'))`,
+    id, appId, workerId, JSON.stringify({ entryNode: entryNodeId }), REASON);
+    const req = await openRequest(id);
+    const p = await prove(req.id, admin);
+    expect(p.json.canSign).toBe(true);
+    await new Promise((res) => setTimeout(res, 1700));
+    const r = await post(req.id, 'complete', signingBody(p, admin), p.cookie);
+    expect(r.status).toBe(409);
+    expect(await r.json()).toEqual({ error: 'SIGNING_REQUEST_ENDED', state: 'EXPIRED' });
+    expect((await grantRow(id)).activated_at).toBeNull();
+  });
+
+  it('the completion judges the grant itself, not only its request: a revoked grant whose request stayed open is STALE', async () => {
     const g = await insertGrant();
     const req = await openRequest(g);
     const p = await prove(req.id, admin);
+    // Keep the request open across the revocation, so only the completion's own grant check can refuse it.
     await db.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER grants_guard');
       await tx.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER grant_signing_stale');
-      await tx.$executeRawUnsafe(`UPDATE grants SET expires_at = (clock_timestamp() AT TIME ZONE 'UTC') - interval '1 second' WHERE id = $1`, g);
+      await tx.$executeRawUnsafe(`UPDATE grants SET revoked_at = (clock_timestamp() AT TIME ZONE 'UTC'), revoked_by = $2 WHERE id = $1`, g, admin.id);
       await tx.$executeRawUnsafe('ALTER TABLE grants ENABLE TRIGGER grant_signing_stale');
-      await tx.$executeRawUnsafe('ALTER TABLE grants ENABLE TRIGGER grants_guard');
     });
+    expect(await requestState(req.id)).toBe('open');
     const r = await post(req.id, 'complete', signingBody(p, admin), p.cookie);
     expect(r.status).toBe(409);
-    expect(((await r.json()) as { error: string }).error).toBe('SIGNING_REQUEST_ENDED');
+    expect(await r.json()).toEqual({ error: 'SIGNING_REQUEST_ENDED', state: 'STALE' });
     expect((await grantRow(g)).activated_at).toBeNull();
   });
 });
@@ -331,6 +347,8 @@ describe('C7 + C8: a grant ceremony and a node ceremony never stand in for each 
     const p = await prove(a.id, admin);
     const r = await post(b.id, 'complete', signingBody(p, admin), p.cookie);
     expect(r.status).toBe(403);
+    // The ceremony's challenge names request A: the one uniform refusal, judged before any signature is checked.
+    expect(await r.text()).toBe(FORBIDDEN);
     expect(await records(g2)).toBe(0);
   });
 
