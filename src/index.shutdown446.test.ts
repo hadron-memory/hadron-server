@@ -20,6 +20,8 @@ const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve()
 beforeEach(async () => {
   vi.resetModules();
   vi.useFakeTimers();
+  // #3021: these pins are about the drain order and deadline, not the stopping window.
+  process.env.STOPPING_DRAIN_WINDOW_MS = '0';
   state.events.length = 0;
   signals = new Map();
   state.close.mockImplementation((cb) => { state.events.push('close'); closeDone = cb; });
@@ -37,7 +39,7 @@ beforeEach(async () => {
   await import('./index.js');
 });
 
-afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.clearAllMocks(); });
+afterEach(() => { delete process.env.STOPPING_DRAIN_WINDOW_MS; vi.useRealTimers(); vi.restoreAllMocks(); vi.clearAllMocks(); });
 
 describe('#446 Prisma disconnect inside graceful shutdown deadline', () => {
   it.each(['SIGTERM', 'SIGINT'])('%s drains HTTP and worker before disconnect, then exits after disconnect', async signal => {
