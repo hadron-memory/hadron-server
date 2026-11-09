@@ -57,13 +57,13 @@ afterEach(() => {
 });
 
 describe('#3021 stopping drain window', () => {
-  it('holds the listener open for the default 3000 ms while /ready already says stopping', async () => {
+  it('holds the listener open for the default 6000 ms while /ready already says stopping', async () => {
     await boot();
     signals.get('SIGTERM')!();
     await flush();
     expect(state.readiness!.stopping()).toBe(true);
     expect(state.close).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(2999);
+    await vi.advanceTimersByTimeAsync(5999);
     expect(state.close).not.toHaveBeenCalled();
     expect(state.readiness!.stopping()).toBe(true);
     await vi.advanceTimersByTimeAsync(1);
@@ -72,37 +72,47 @@ describe('#3021 stopping drain window', () => {
     expect(state.events).toEqual(['close', 'disconnect', 'exit:0']);
   });
 
-  it('honors STOPPING_DRAIN_WINDOW_MS inside the bound (0 closes at once, 5000 is the ceiling)', async () => {
+  it('honors STOPPING_DRAIN_WINDOW_MS inside the bound (0 closes at once)', async () => {
     await boot('0');
     signals.get('SIGTERM')!();
     await flush();
     expect(state.close).toHaveBeenCalledTimes(1);
   });
 
-  it('accepts the 5000 ms ceiling and waits all of it', async () => {
-    await boot('5000');
+  it('accepts the 30000 ms ceiling and waits all of it', async () => {
+    await boot('30000');
     signals.get('SIGTERM')!();
-    await vi.advanceTimersByTimeAsync(4999);
+    await vi.advanceTimersByTimeAsync(29999);
     expect(state.close).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
     expect(state.close).toHaveBeenCalledTimes(1);
   });
 
-  it.each(['5001', '600000', '-1', '1.5', 'abc', '', ' ', '1e3', '0x10'])(
-    'a value outside the bound or malformed (%j) falls back to 3000, never widening the window',
+  it.each(['30001', '600000', '-1', '1.5', 'abc', '', ' ', '1e3', '0x10'])(
+    'a value outside the bound or malformed (%j) falls back to 6000, never widening the window',
     async raw => {
       await boot(raw);
       signals.get('SIGTERM')!();
-      await vi.advanceTimersByTimeAsync(2999);
+      await vi.advanceTimersByTimeAsync(5999);
       expect(state.close).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1);
       expect(state.close).toHaveBeenCalledTimes(1);
     },
   );
 
-  it('the ten-second hard deadline still starts at the signal, not after the window', async () => {
+  it('the hard deadline is the window plus ten seconds, so a long window never eats the drain', async () => {
     state.close.mockImplementation((_cb: (e?: Error) => void) => { state.events.push('close'); }); // never drains
-    await boot('5000');
+    await boot('8000');
+    signals.get('SIGTERM')!();
+    await vi.advanceTimersByTimeAsync(17999);
+    expect(process.exit).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(state.events.at(-1)).toBe('exit:1');
+  });
+
+  it('with the window off the deadline is the original ten seconds from the signal', async () => {
+    state.close.mockImplementation((_cb: (e?: Error) => void) => { state.events.push('close'); });
+    await boot('0');
     signals.get('SIGTERM')!();
     await vi.advanceTimersByTimeAsync(9999);
     expect(process.exit).not.toHaveBeenCalled();
@@ -115,7 +125,7 @@ describe('#3021 stopping drain window', () => {
     signals.get('SIGTERM')!();
     await vi.advanceTimersByTimeAsync(1000);
     signals.get('SIGINT')!();
-    await vi.advanceTimersByTimeAsync(1999);
+    await vi.advanceTimersByTimeAsync(4999);
     expect(state.close).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
     expect(state.close).toHaveBeenCalledTimes(1);

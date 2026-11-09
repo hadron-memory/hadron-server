@@ -34,11 +34,11 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) process.once(signal, () => 
   shuttingDown = true;
   // #2998: probes still served while draining answer /ready 503 stopping.
   readiness.markStopping();
-  // The hard deadline starts at the signal; the #3021 window below is spent out of it.
-  const deadline = setTimeout(() => process.exit(1), 10_000);
   // #3021: keep accepting connections for a bounded window so a proxy polling
-  // /ready sees 503 stopping before the listener closes.
+  // /ready sees 503 stopping before the listener closes. The hard deadline is
+  // the window plus the original 10 s, so a long window never eats the drain.
   const windowMs = stoppingDrainWindowMs();
+  const deadline = setTimeout(() => process.exit(1), windowMs + 10_000);
   const requestsDrained = new Promise<boolean>(resolve => {
     const closeListener = () => httpServer.close(error => resolve(!error));
     // 0 closes synchronously, exactly as before the window existed.
