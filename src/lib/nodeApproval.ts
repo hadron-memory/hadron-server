@@ -517,11 +517,16 @@ function chargeTexts(meter: ApprovalReadMeter | undefined, f: { name: string; ab
 /** How many revisions `newestApprovedRevisionOf` examines before it gives up (newest first). */
 export const NEWEST_APPROVED_REVISION_SCAN_CAP = 100;
 
+/** #3801: how many `cap`-sized batches a SERVE walk examines before it stops (a hard ceiling on the work one serve read may do). */
+export const NEWEST_APPROVED_REVISION_SCAN_BATCHES = 10;
+
 export interface NewestApprovedRevision {
   /** Null when no examined revision is approved (or the node/memory yields nothing to read). */
   found: { revNo: number; record: NodeApprovalRecord; source: 'live' | 'snapshot' } | null;
   /** True when the scan stopped at the cap with older revisions unexamined: `found: null` is then not "never approved". */
   truncated: boolean;
+  /** #3801: set only with `truncated`: the oldest revision number examined, so a caller can continue below it. */
+  resumeBelow?: number;
 }
 
 /**
@@ -546,6 +551,8 @@ export async function newestApprovedRevisionOf(
   cap: number = NEWEST_APPROVED_REVISION_SCAN_CAP,
   /** #40: a resolved read's budget, charged for this walk's own queries and every verdict it asks for. */
   meter?: ApprovalReadMeter,
+  /** #3801: examine only revisions numbered below this (a continuation past a truncated batch). */
+  below?: number,
 ): Promise<NewestApprovedRevision> {
   const none: NewestApprovedRevision = { found: null, truncated: false };
   meter?.chargeLookup();
@@ -554,7 +561,7 @@ export async function newestApprovedRevisionOf(
   // Snapshots servable from the node's CURRENT memory only (a foreign-memory capture is never selected).
   meter?.chargeLookup();
   const snapshots = await db.nodeRevision.findMany({
-    where: { nodeId, revNo: { not: null }, OR: [{ memoryId: null }, { memoryId: live.memoryId }] },
+    where: { nodeId, revNo: below == null ? { not: null } : { not: null, lt: below }, OR: [{ memoryId: null }, { memoryId: live.memoryId }] },
     select: { revNo: true },
     orderBy: { revNo: 'desc' },
     take: cap + 1,
@@ -565,7 +572,7 @@ export async function newestApprovedRevisionOf(
   // otherwise be read through, and reported as live.
   meter?.chargeLookup();
   const liveNumberHeld = (await db.nodeRevision.findFirst({ where: { nodeId, revNo: live.revSeq }, select: { id: true } })) != null;
-  const candidates = [...(liveNumberHeld ? [] : [live.revSeq]), ...snapshotNos].sort((a, b) => b - a);
+  const candidates = [...(liveNumberHeld || (below != null && live.revSeq >= below) ? [] : [live.revSeq]), ...snapshotNos].sort((a, b) => b - a);
   const examined = candidates.slice(0, cap);
   for (const revNo of examined) {
     const verdict = await revisionApprovalOf(db, nodeId, revNo, meter);
@@ -574,7 +581,27 @@ export async function newestApprovedRevisionOf(
       return { found: { revNo, record: verdict.record!, source: snapshotNos.has(revNo) ? 'snapshot' : 'live' }, truncated: false };
     }
   }
-  return { found: null, truncated: candidates.length > cap };
+  const truncated = candidates.length > cap;
+  return truncated ? { found: null, truncated, resumeBelow: examined[examined.length - 1] } : { found: null, truncated };
+}
+
+/**
+ * #3801 (cor:dmo:150:05, cor:agt:040:12) — the walk a SERVE uses: `newestApprovedRevisionOf` continued past its scan cap in
+ * further `cap`-sized batches, so an approved revision buried under more than `cap` newer unapproved ones still serves
+ * (the cap is an implementation bound, not a rule that ends a revision's qualification). The work is bounded: at most
+ * `NEWEST_APPROVED_REVISION_SCAN_BATCHES` batches; past that it answers like the single walk, `found: null` with
+ * `truncated: true`, which the serve refuses as not approved (fail closed, never wrong text).
+ */
+export async function newestApprovedRevisionForServe(
+  db: Pick<PrismaClient, 'node' | 'nodeRevision' | 'memory'> | Prisma.TransactionClient,
+  nodeId: string,
+  cap: number = NEWEST_APPROVED_REVISION_SCAN_CAP,
+): Promise<NewestApprovedRevision> {
+  let result = await newestApprovedRevisionOf(db, nodeId, cap);
+  for (let batch = 1; batch < NEWEST_APPROVED_REVISION_SCAN_BATCHES && !result.found && result.truncated && result.resumeBelow != null; batch++) {
+    result = await newestApprovedRevisionOf(db, nodeId, cap, undefined, result.resumeBelow);
+  }
+  return result;
 }
 
 /**

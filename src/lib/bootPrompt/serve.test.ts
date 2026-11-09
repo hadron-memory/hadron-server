@@ -11,6 +11,7 @@ import { computeApprovalHash } from '../approvalHash.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../bootPrompt.js';
 import { sha256Hex, type CompiledProvenance } from '../bootCompile/provenance.js';
 import { resolveServedBootPrompt } from './serve.js';
+import { NEWEST_APPROVED_REVISION_SCAN_CAP, NEWEST_APPROVED_REVISION_SCAN_BATCHES } from '../nodeApproval.js';
 
 let orgId: string;
 let memoryId: string;
@@ -239,4 +240,33 @@ describe('#2047 PR-C: selection and cap-pruning serialize on the compiled node (
     await serving;
     expect(served).not.toMatchObject({ servedRevSeq: 1 });
   });
+});
+
+describe('#3801 serve past the scan cap (cor:dmo:150:05, cor:agt:040:12)', () => {
+  const recompiles = async (nodeId: string, n: number) => {
+    for (let i = 0; i < n; i++) await recompile(nodeId, `unapproved ${i}`);
+  };
+
+  it('an approved revision more than the cap below head still serves, on every surface', async () => {
+    const id = await compiled('deep', 'APPROVED text');
+    await recompiles(id, NEWEST_APPROVED_REVISION_SCAN_CAP + 5);
+    await point.agent(id);
+    for (const s of ['bind', 'chat', 'run'] as const) {
+      expect(await serve(s)).toMatchObject({ content: 'APPROVED text', servedRevSeq: 1, compiledNodeId: id });
+    }
+  }, 60_000);
+
+  it('genuine absence past the cap still refuses NOT_APPROVED', async () => {
+    const id = await compiled('never', 'x', false);
+    await recompiles(id, NEWEST_APPROVED_REVISION_SCAN_CAP + 5);
+    await point.agent(id);
+    expect(await code(serve())).toBe('BOOT_PROMPT_NOT_APPROVED');
+  }, 60_000);
+
+  it('past the hard ceiling it still refuses (bounded work), never serves wrong text', async () => {
+    const id = await compiled('toodeep', 'APPROVED text');
+    await recompiles(id, NEWEST_APPROVED_REVISION_SCAN_CAP * NEWEST_APPROVED_REVISION_SCAN_BATCHES + 5);
+    await point.agent(id);
+    expect(await code(serve())).toBe('BOOT_PROMPT_NOT_APPROVED');
+  }, 240_000);
 });
