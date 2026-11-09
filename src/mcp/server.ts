@@ -11954,6 +11954,12 @@ type ActiveMcpTransport = {
    * so a GET/SSE stream, a POST queued behind `requestTail` and a still-open response all pin it.
    */
   inFlight: number;
+  /**
+   * #3797: the held `GET /mcp` SSE responses on this transport (added when the stream opens, dropped when it
+   * ends). A held stream pins `inFlight` for its whole life, so shutdown must end these first and only then wait
+   * for the POSTs that are genuinely in flight.
+   */
+  streams: Set<Response>;
   /** #2261: arrival or completion time of the latest request (epoch ms). */
   lastActivityAt: number;
 };
@@ -11988,6 +11994,35 @@ function evictMcpTransport(sessionId: string, active: ActiveMcpTransport, reason
   unregisterMcpTransport(sessionId, active.transport);
   mcpLog('info', 'mcp_transport_evicted', { mcpSessionId: sessionId, reason, principalKey: active.principalKey });
   void active.transport.close().catch(() => undefined);
+}
+
+/**
+ * #3797: at the end of the stopping drain window, close every registered MCP transport so a held `GET /mcp` stream
+ * cannot keep `httpServer.close()` (and so the process) open to the hard deadline.
+ *
+ * Order matters. A held GET stream pins `inFlight` for its whole life, so waiting for `inFlight` to reach 0 first
+ * would never finish: the held GET streams are ended FIRST, then each transport waits for the requests genuinely in
+ * flight on it (a POST is never cut, bounded by the caller's hard deadline), and only then is it unregistered and
+ * closed (`transport.close()` ends every response on it). Connection-local state only, the same cleanup as
+ * `evictMcpTransport`: the durable worker Session and its hold are never touched (cor:agt:020:03; clients re-attribute
+ * through `X-Hadron-Session`). The synchronous part (ending the streams) runs before the first await.
+ */
+export async function closeMcpTransportsForShutdown(): Promise<number> {
+  const entries = [...transports];
+  for (const [, active] of entries) {
+    for (const res of [...active.streams]) {
+      if (!res.writableEnded) res.end();
+    }
+  }
+  await Promise.all(entries.map(async ([sid, active]) => {
+    while (active.inFlight > 0) await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    if (transports.get(sid) === active) {
+      unregisterMcpTransport(sid, active.transport);
+      mcpLog('info', 'mcp_transport_evicted', { mcpSessionId: sid, reason: 'shutdown', principalKey: active.principalKey });
+    }
+    await active.transport.close().catch(() => undefined);
+  }));
+  return entries.length;
 }
 
 /**
@@ -12474,6 +12509,9 @@ async function handleKnownMcpSession(
   // therefore does not mutate the shared authorization snapshot.
   if (req.method === 'GET') {
     if (!(await authenticateBoundMcpSession(req, res, sessionId, active))) return;
+    // #3797: tracked so the end of the stopping drain window can end it (closeMcpTransportsForShutdown).
+    active.streams.add(res);
+    releaseOnceOnResponseEnd(res, () => active.streams.delete(res));
     await active.transport.handleRequest(req, res, req.body);
     return;
   }
@@ -12779,7 +12817,7 @@ async function openOrRejectMcpSession(
     // ended while this handler was suspended, the reservation is already cancelled and its slot freed: do not
     // register, or a burst of aborted initializes would exceed the cap (#2261 review, Dara/Colin P2).
     if (reservation.convert()) {
-      transports.set(sid, { transport, auth, requestTail: Promise.resolve(), principalKey, inFlight: 0, lastActivityAt: Date.now() });
+      transports.set(sid, { transport, auth, requestTail: Promise.resolve(), principalKey, inFlight: 0, streams: new Set(), lastActivityAt: Date.now() });
     } else {
       unregisterMcpTransport(sid, transport);
       await transport.close().catch(() => undefined);

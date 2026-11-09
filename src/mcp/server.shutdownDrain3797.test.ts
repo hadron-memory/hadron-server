@@ -34,12 +34,14 @@ vi.mock('../middleware/auth.js', async (orig) => {
 });
 
 let server: Server;
+let expressApp: Awaited<ReturnType<typeof createServer>>;
 let port: number;
 let baseUrl: string;
 
 beforeEach(async () => {
   await cleanDb(db);
-  const app = await createServer();
+  expressApp = await createServer();
+  const app = expressApp;
   server = createHttpServer((req, res) => {
     if (req.url === '/__slow') {
       setTimeout(() => res.end('slow-ok'), 400);
@@ -198,7 +200,7 @@ describe('#3797 in-flight work still drains', () => {
 });
 
 describe('#3797 the durable session survives a shutdown-closed transport', () => {
-  it('leaves the worker Session open and its hold kept, and a reconnect can still attribute to it', async () => {
+  it('leaves the worker Session open and its hold kept; a reconnect re-attributes through X-Hadron-Session', async () => {
     const { id: userId, token } = await makeUser();
     const org = await db.organization.create({ data: { id: generateId(), name: 'Team', urn: `team-3797-${generateId().slice(-6)}.com` } });
     await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId, role: 'CONTRIBUTOR' } });
@@ -218,5 +220,28 @@ describe('#3797 the durable session survives a shutdown-closed transport', () =>
     expect(await db.session.findUniqueOrThrow({ where: { id: sessionId } })).toEqual(beforeSession);
     expect(await db.worker.findUniqueOrThrow({ where: { id: worker.id } })).toEqual(beforeWorker);
     expect(beforeSession.endedAt).toBeNull();
+
+    // A reconnecting client (the next listener, a fresh transport) re-attributes through X-Hadron-Session, never
+    // through hadron_resume_session (off on MCP, #3082).
+    const next = createHttpServer(expressApp);
+    await new Promise<void>((resolve) => next.listen(0, '127.0.0.1', resolve));
+    try {
+      const nextUrl = `http://127.0.0.1:${(next.address() as AddressInfo).port}/mcp`;
+      const headers = { accept: 'application/json, text/event-stream', 'content-type': 'application/json', authorization: `Bearer ${token}` };
+      const init = await fetch(nextUrl, { method: 'POST', headers, body: JSON.stringify(initialize) });
+      expect(init.status).toBe(200);
+      await init.text();
+      const sid2 = init.headers.get('mcp-session-id')!;
+      const call = await fetch(nextUrl, {
+        method: 'POST',
+        headers: { ...headers, 'mcp-session-id': sid2, 'x-hadron-session': sessionId },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'hadron_whoami', arguments: {} } }),
+      });
+      expect(call.status).toBe(200);
+      expect(await call.text()).toContain(sessionId);
+    } finally {
+      next.closeAllConnections?.();
+      await new Promise<void>((resolve) => next.close(() => resolve()));
+    }
   });
 });
