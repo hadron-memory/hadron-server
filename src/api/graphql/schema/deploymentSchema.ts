@@ -6,6 +6,8 @@ import { signingSurfacePolicy } from '../../../lib/signing/surface.js';
 const signingTypes = new Set([
   'SigningRequestState', 'SignatureState', 'SigningRequester',
   'SigningRequest', 'NodeSignature', 'NodeSignatureStatus',
+  // #3649 slice B: grant signing rides the same switch (ruling 0255, item 17).
+  'GrantSigningRequestState', 'GrantSigningRequest',
 ]);
 
 /** #1631 PR3: the owner's passkey records, a registration-switch read (#1895). */

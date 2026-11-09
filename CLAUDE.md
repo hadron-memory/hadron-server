@@ -337,7 +337,7 @@ two-layer model without further setup:
   `RAISE EXCEPTION '...' USING ERRCODE = 'HDPRF'`). Boot (`scripts/docker-start.sh`) then marks
   that migration rolled back, logs one `db.migration.refused_preflight` line naming it and serves
   the schema that exists (later migrations are not applied; the next boot retries). Any other
-  failure still stops boot. A plain `RAISE EXCEPTION` is a boot-stopping failure and, on restart,
+  failure still stops boot, now with one `db.migration.failed migration=<name> prisma=<code>` line per failed migration (#3794; the name and code only, never SQL text, ledger logs or a URL). A plain `RAISE EXCEPTION` is a boot-stopping failure and, on restart,
   a P3009 crash loop (the 2026-11-08 outage, #3236). A refusal still needs its read-only
   production preflight before the ready call.
 - **Composite-PK models** (`AgentSubscription`, `AppMember`, `AgentImport`,
