@@ -136,6 +136,27 @@ describe('who sees which rows', () => {
     expect((await asWorker(ONE, { r: mine })).data.grant).toBeNull();
   });
 
+  it('a retired worker, or a driver who lost their membership, reads nothing (the gate re-judges the worker and its driver)', async () => {
+    const mine = await live();
+    expect((await asWorker(LIST)).data.grants.total).toBe(1);
+    // The driver's org membership is revoked: the credential can no longer drive this App's workers.
+    await db.orgMember.updateMany({ where: { organizationId: w.orgId, userId: w.userId }, data: { deletedAt: new Date() } });
+    expect((await asWorker(LIST)).data).toEqual({ grants: { total: 0, items: [] } });
+    expect((await asWorker(ONE, { r: mine })).data.grant).toBeNull();
+    await db.orgMember.updateMany({ where: { organizationId: w.orgId, userId: w.userId }, data: { deletedAt: null } });
+    expect((await asWorker(LIST)).data.grants.total).toBe(1);
+    // The worker is retired.
+    await db.worker.update({ where: { id: w.workerId }, data: { retiredAt: new Date() } });
+    expect((await asWorker(LIST)).data).toEqual({ grants: { total: 0, items: [] } });
+    expect((await asWorker(ONE, { r: mine })).data.grant).toBeNull();
+  });
+
+  it('a request withdrawn before activation is not pending: it is absent for its requester', async () => {
+    const pending = await insertGrant(w, { requested_by_worker_id: w.workerId });
+    await insertGrantUnguarded(w, { requested_by_worker_id: w.workerId, revoked_at: raw(DB_NOW), revoked_by: 'someone' });
+    expect(ids(await asWorker(LIST))).toEqual([pending]);
+  });
+
   it('limit 0 is count-only, and a negative or oversized limit is clamped', async () => {
     for (let i = 0; i < 3; i++) await live();
     expect((await asWorker(LIST, { l: 0 })).data.grants).toEqual({ total: 3, items: [] });
