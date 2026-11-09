@@ -10301,6 +10301,14 @@ export const typeDefs = `#graphql
       mentionsRef: ID
       "Stable authorized head ID; mutually exclusive with untagged."
       teamHeadRef: ID
+      """
+      #3759 — several head IDs at once: messages tagged with ANY of them. Each entry is checked as teamHeadRef is, and one
+      bad entry refuses the whole call with the same TEAM_CHAT_TEAM_HEAD_INVALID text. Mutually exclusive with teamHeadRef
+      and with untagged (true or false). At most 20 entries (raw length, duplicates count; [A, A] reads as [A]); more is
+      BAD_USER_INPUT before any entry is looked up. An empty list is no team filter. A non-empty list needs team metadata
+      access, checked before any entry.
+      """
+      teamHeadRefs: [ID!]
       "Select no stored head identity (legacy absent or explicit empty). Requires metadata access."
       untagged: Boolean
       limit: Int
@@ -10346,6 +10354,14 @@ export const typeDefs = `#graphql
       mentionsRef: ID
       "Stable authorized head ID; mutually exclusive with untagged."
       teamHeadRef: ID
+      """
+      #3759 — several head IDs at once: messages tagged with ANY of them. Each entry is checked as teamHeadRef is, and one
+      bad entry refuses the whole call with the same TEAM_CHAT_TEAM_HEAD_INVALID text. Mutually exclusive with teamHeadRef
+      and with untagged (true or false). At most 20 entries (raw length, duplicates count; [A, A] reads as [A]); more is
+      BAD_USER_INPUT before any entry is looked up. An empty list is no team filter. A non-empty list needs team metadata
+      access, checked before any entry.
+      """
+      teamHeadRefs: [ID!]
       "Select no stored head identity (legacy absent or explicit empty). Requires metadata access."
       untagged: Boolean
       limit: Int
