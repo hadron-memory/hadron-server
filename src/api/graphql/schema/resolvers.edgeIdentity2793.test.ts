@@ -17,14 +17,17 @@ beforeEach(async () => {
 });
 afterEach(() => vi.restoreAllMocks());
 const context = (): Context => ({ db, userId, roles: ['READER'] });
-async function run(selection: string, refs: string[], suffix = '') {
+async function execute(query: string, variables: Record<string, unknown>) {
   const api = new ApolloServer<Context>({ typeDefs, resolvers });
   try {
-    const r = await api.executeOperation({ query: `query($refs:[ID!]){nodeBatch(refs:$refs){nodes{id outgoingEdges{source{${selection}} target{${selection}}}}}} ${suffix}`, variables: { refs } }, { contextValue: context() });
+    const r = await api.executeOperation({ query, variables }, { contextValue: context() });
     if (r.body.kind !== 'single') throw new Error('unexpected response');
     expect(r.body.singleResult.errors).toBeUndefined();
-    return (r.body.singleResult.data as any).nodeBatch.nodes;
+    return r.body.singleResult.data as any;
   } finally { await api.stop(); }
+}
+async function run(selection: string, refs: string[], suffix = '') {
+  return (await execute(`query($refs:[ID!]){nodeBatch(refs:$refs){nodes{id outgoingEdges{source{${selection}} target{${selection}}}}}} ${suffix}`, { refs })).nodeBatch.nodes;
 }
 async function pair() {
   const a = await createDbNode(db, { memoryId, loc: 'a', name: 'A', content: 'alpha' });
@@ -91,4 +94,30 @@ it.each(['id loc name', 'id content'])('keeps unreadable/deleted endpoints null:
   expect(nodes[0].outgoingEdges).toHaveLength(2);
   expect(nodes[0].outgoingEdges.map((e: any) => e.target)).toEqual([null, null]);
   expect(JSON.stringify(nodes)).not.toContain('NEVER_DISCLOSE');
+});
+
+it('separates simultaneous identity/body aliases and unions merged fields', async () => {
+  const { a, b } = await pair();
+  const result = await execute(`query($refs:[ID!]){nodeBatch(refs:$refs){nodes{outgoingEdges{
+    small:target{id} large:target{id content} merged:target{id} merged:target{content}
+  }}}}`, { refs: [a.id] });
+  expect(result.nodeBatch.nodes[0].outgoingEdges[0]).toEqual({ small: { id: b.id }, large: { id: b.id, content: 'bravo' }, merged: { id: b.id, content: 'bravo' } });
+});
+
+it.each(['id loc name', 'id content'])('keeps child-effective inherited endpoints: %s', async selection => {
+  const home = await db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { organizationId: true } });
+  const create = (resolvers.Mutation as any).createAgent;
+  const c = context();
+  const base = await create({}, { orgId: home.organizationId, name: 'Base2793' }, c);
+  const child = await create({}, { orgId: home.organizationId, name: 'Child2793' }, c);
+  await db.agent.update({ where: { id: child.id }, data: { extendsAgentId: base.id } });
+  const baseMemory = (await db.agent.findUniqueOrThrow({ where: { id: base.id } })).systemMemoryId!;
+  const childMemory = (await db.agent.findUniqueOrThrow({ where: { id: child.id } })).systemMemoryId!;
+  const a = await createDbNode(db, { memoryId: baseMemory, loc: 'a', name: 'A', content: 'alpha' });
+  const b = await createDbNode(db, { memoryId: baseMemory, loc: 'b', name: 'Base B', content: 'base' });
+  const override = await createDbNode(db, { memoryId: childMemory, loc: 'b', name: 'Child B', content: 'override' });
+  await db.edge.create({ data: { memoryId: baseMemory, loc: 'a-b', sourceId: a.id, targetId: b.id } });
+  const result = await execute(`query($memory:ID!){nodeBatch(memory:$memory,locPrefix:"a"){nodes{outgoingEdges{target{${selection}}}}}}`, { memory: childMemory });
+  const expected = Object.fromEntries(selection.split(' ').map(k => [k, (override as any)[k]]));
+  expect(result.nodeBatch.nodes[0].outgoingEdges).toEqual([{ target: expected }]);
 });

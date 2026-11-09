@@ -180,6 +180,8 @@ export interface Context {
   // identical node.findUnique calls when many edges in one response share an
   // endpoint (lazily created on first use; see loadEdgeEndpointNode). #381.
   edgeEndpointNodeCache?: Map<string, Promise<unknown>>;
+  /** #2793: identity projections never satisfy a later full-body endpoint read. */
+  edgeEndpointIdentityCache?: Map<string, Promise<unknown>>;
   // Request-scoped memo for per-memory READ-access checks (#781) — gates
   // Edge.source/target endpoint resolution on a cross-memory read. A graph
   // response's edges overwhelmingly share a few endpoint memories, so each
@@ -414,11 +416,17 @@ export type AppRow = {
  * lazily attached to the (request-scoped) Context, so contexts that never hit
  * the lazy path pay nothing.
  */
-export function loadEdgeEndpointNode(ctx: Context, id: string): Promise<unknown> {
-  const cache = (ctx.edgeEndpointNodeCache ??= new Map<string, Promise<unknown>>());
+export function loadEdgeEndpointNode(ctx: Context, id: string, identityOnly = false): Promise<unknown> {
+  // #2793(a): keep body and identity promises separate for mixed aliases/selections.
+  const cache = identityOnly
+    ? (ctx.edgeEndpointIdentityCache ??= new Map<string, Promise<unknown>>())
+    : (ctx.edgeEndpointNodeCache ??= new Map<string, Promise<unknown>>());
   let pending = cache.get(id);
   if (!pending) {
-    pending = ctx.db.node.findUnique({ where: { id } });
+    pending = ctx.db.node.findUnique({
+      where: { id },
+      ...(identityOnly ? { select: { id: true, loc: true, name: true, memoryId: true, deletedAt: true, role: true } } : {}),
+    });
     cache.set(id, pending);
   }
   return pending;
