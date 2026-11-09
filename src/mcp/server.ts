@@ -1,6 +1,8 @@
+import { SYNC_NOT_ATTEMPTED, syncNotAttemptedMessage } from '../integrations/github/syncNotAttempted.js';
 import { MCP_WORKER_BINDING_UNSUPPORTED, offTeamTool } from './disabledTools.js';
 import { registerAutomationTeamSnapshotGrantTools } from './automationTeamSnapshotGrantTools.js';
 import { appendDeliveryPending } from '../lib/tickers/deliveryPending.js';
+import { isChatSeqUniqueViolation, CHAT_SEQ_CONFLICT_MESSAGE } from '../lib/prismaErrors.js';
 import { mcpRequestSessionContext } from './requestSession.js';
 import { liveTxContext, liveReadSnapshotContext } from '../api/graphql/schema/authorizedTx.js';
 import { withReconciledNodeRead } from '../lib/includes/reconciledNodeRead.js';
@@ -46,6 +48,7 @@ import {
   recordNodeWrite,
   trackUsageWrite,
   toUsageNodeRefs,
+  usageAppKeyOf,
 } from '../lib/usageRecorder.js';
 import {
   buildNodeRevisionSnapshot,
@@ -163,6 +166,7 @@ import {
 import { refusalResult, toolErrorResult, withToolErrorBoundary } from './toolError.js';
 import { refNamesNothing } from '../lib/entityRef/refNamesNothing.js';
 import { textResult } from './textResult.js';
+import { publicErrorExtensions } from '../lib/errorDiagnostics.js';
 import { tagsInputSchema } from './tagsInput.js';
 import { foreignIdentityScopedMemoryFilter } from '../lib/auth/memoryOwnership.js';
 
@@ -246,11 +250,17 @@ import {
 } from '../api/graphql/schema/resolvers.mutation.session.js';
 import { HADRON_SERVER_VERSION, MCP_SURFACE_CAPABILITIES, getDeploymentInfo } from './deploymentInfo.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+import { validationTaskSetsForNodes } from '../api/graphql/schema/resolvers.validationTaskSet.js';
+import type { ValidationTaskSet } from '../lib/contentValidationReport.js';
 import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.js';
 // #1005: the SHARED App-participation predicate (#943) — reused here so
 // reconnect recovery admits exactly whom startSession admitted, rather than a
 // narrower member-row copy that would drift from it.
 import { resolveNodeContent } from '../lib/includes/resolveNodeContent.js';
+import {
+  CONTENT_RESOLUTION_LIMIT_EXCEEDED, isContentResolutionLimitError, resolutionLimitPhrase,
+  type ResolutionLimit,
+} from '../lib/includes/resolutionBudget.js';
 import { checkNodeTypesFilter, NodeTypesFilterError } from '../lib/retrieval/nodeTypeList.js';
 import { lintWarningPageForNodeId, renderLintWarnings } from '../lib/bootPromptLint.js';
 
@@ -1141,6 +1151,17 @@ async function replaceOutgoingEdgesInTransaction(
  * to the raw stored bare urn if a row can't compose to v2 — display strings must
  * never crash a tool (serve-and-fall-back).
  */
+/**
+ * #1332: a trusted resolver refusal as `[<code>] <message>`, then its public extensions as
+ * `key: value` lines (the comment tools' format). Only called for a trusted refusal.
+ */
+function codedRefusalText(e: unknown): string {
+  if (!(e instanceof GraphQLError)) return 'Error: refused';
+  const { code, ...rest } = publicErrorExtensions(e.extensions ?? {});
+  const extras = Object.entries(rest).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
+  return [`[${String(code ?? 'ERROR').toLowerCase()}] ${e.message}`, ...extras].join('\n');
+}
+
 function safeEmitEntityUrnV2(type: 'memory' | 'app' | 'agent' | 'org', bareUrn: string): string {
   try {
     return emitEntityUrnV2(type, bareUrn);
@@ -1892,6 +1913,14 @@ async function batchActionUrns(nodes: ReadProjectionNode[]): Promise<Map<string,
   return out;
 }
 
+/** #3659: Node.validationTasks as a read line. No line when the set does not apply to this node. */
+function validationTasksLine(set: ValidationTaskSet | undefined): string {
+  if (!set) return '';
+  if (set.state === 'NOT_CONFIGURED') return 'Validation tasks: none configured';
+  if (set.state === 'READY') return `Validation tasks: ${set.tasks.map((t) => `${t.taskRef} @ revision ${t.revision}`).join(', ')}`;
+  return `Validation tasks: ${set.state.toLowerCase()}`;
+}
+
 async function renderNodeReadProjection(
   node: ReadProjectionNode,
   scope: 'content' | 'abstract' | 'all',
@@ -1911,6 +1940,8 @@ async function renderNodeReadProjection(
       actionUrns?: ReadonlyMap<string, string | null>;
     };
     memoryUrnOf?: (memoryId: string) => Promise<string>;
+    /** #3659: this node's validation task set; absent means no line. Never set for an inherited read. */
+    validationTasks?: ValidationTaskSet;
   } = {},
 ): Promise<string> {
   // #1885 (cor:dmo:050:14) — a node read through a child's effective system
@@ -2130,6 +2161,7 @@ async function renderNodeReadProjection(
       : '',
     authorshipLine,
     validationLine,
+    validationTasksLine(opts.validationTasks),
     approvalLine,
     await signatureLine,
     mintLine,
@@ -3416,6 +3448,51 @@ export function createMcpServerInstance(
     },
   );
 
+  // #1332 (cor:dmo:160:01): one write path for content-validation reports, delegated to the
+  // GraphQL resolver, so the gates, the ordered refusals and the server-derived reporter are
+  // computed once. The reporter is never an argument: a bound worker session reports as that
+  // worker, otherwise the caller's own user or App key does.
+  server.tool(
+    'hadron_record_content_validation',
+    'Record the result of running a node\'s validation task on one revision of the node (cor:dmo:160:01). Advisory: it never edits the node or blocks a write. '
+      + 'validationTaskRef is a task the node\'s rules name now (the "Validation tasks" line of hadron_get_node lists them), and validationTaskRevision the task revision that ran. Any writer of the memory may report except the author of that node revision; '
+      + 'if you started a worker session with hadron_start_session, the report is recorded as that worker. runId makes a retry idempotent (same runId, same reporter, same revisions returns the first report); '
+      + 'any other reuse is refused [content_validation_run_id_conflict]. A [conflict] means the node changed during the call: nothing was written, re-read it and decide whether to report again.',
+    SHAPE_HADRON_RECORD_CONTENT_VALIDATION,
+    async ({ nodeRef, nodeRevision, validationTaskRef, validationTaskRevision, outcome, runId, session }) => {
+      // The #1701 gate already published the named session's actor, or cleared it when the
+      // session did not validate. A refused argument is carried to the resolver, which refuses
+      // SESSION_NOT_BOUND only after the not-found and writer gates; it never falls back to
+      // recording the report as the caller's own principal.
+      const requestSession = mcpRequestSessionContext(auth);
+      const argumentRefused = typeof session === 'string' && session.length > 0
+        && !(await validateSessionBinding(db, auth, session));
+      const ctx: Context = {
+        db, userId: auth.userId, clientId: auth.clientId,
+        appId: auth.appId, appKeyId: auth.appKeyId,
+        ...requestSession,
+        sessionBindingRefused: requestSession.sessionBindingRefused || argumentRefused,
+        apiKeyId: auth.apiKeyId, signInId: auth.signInId,
+        roles: auth.roles, organizationId: auth.organizationId,
+        impersonation: auth.impersonation,
+      };
+      try {
+        const receipt = await resolvers.Mutation.recordNodeContentValidationReport(
+          {}, { nodeRef, nodeRevision, validationTaskRef, validationTaskRevision, outcome, runId }, ctx,
+        );
+        const r = receipt.report;
+        return textResult(
+          `${receipt.replayed ? 'Replayed (nothing written)' : 'Recorded'}: ${r.outcome} for revision ${r.nodeRevision} of node ${receipt.nodeId}`
+            + ` (task ${r.validationTaskRef ?? 'unreadable'}${r.validationTaskRevision ? ` revision ${r.validationTaskRevision}` : ''}; author check ${r.authorCheck}).`
+            + ` Current revision state: ${receipt.state}.`,
+        );
+      } catch (e) {
+        if (e instanceof UrnNotQualifiedError) return refusalResult(`[bad_user_input] ${e.message}`);
+        return toolErrorResult(e, () => codedRefusalText(e), 'hadron_record_content_validation:resolver');
+      }
+    },
+  );
+
   // ── hadron_server_info ────────────────────────────────────────────────────────
   //
   // #187 / #190 — exposes the bound deployment URL + hadron-server
@@ -3769,6 +3846,13 @@ export function createMcpServerInstance(
     roles: auth.roles as Context['roles'],
     organizationId: auth.organizationId ?? undefined,
   });
+
+  /**
+   * #3659: Node.validationTasks reads as the recorder does, so it needs what the recorder's context
+   * carries and scopeCtx() does not: an impersonator would otherwise read as a writer.
+   */
+  const validationReadCtx = (): Context => ({ ...scopeCtx(), appKeyId: auth.appKeyId ?? undefined,
+    ...mcpRequestSessionContext(auth), impersonation: auth.impersonation ?? undefined });
 
   // #2175: explicit recovery twins delegate to the same writer-plus-reader resolver gate.
   const recoveryCtx = (): Context => ({ ...scopeCtx(), appKeyId: auth.appKeyId ?? undefined,
@@ -5076,6 +5160,8 @@ export function createMcpServerInstance(
         locked: lockState === 'locked',
         encryptedMemory: lockState !== 'plaintext',
         auth,
+        // The rules are the base memory's, and a report is recorded against the base node.
+        validationTasks: o.inheritedFrom ? undefined : (await validationTaskSetsForNodes(validationReadCtx(), [current.id])).get(current.id),
       });
 
       // Record usage event (fire-and-forget), AFTER the projection is in hand:
@@ -5586,6 +5672,8 @@ export function createMcpServerInstance(
       // per-node parity with hadron_get_node).
       const blocks: string[] = [];
       const omitted: string[] = [];
+      // hadron-internal#40: nodes whose resolved read is over a resolution limit, with the limit (never partial text).
+      const refused: Array<{ urn: string; limit: ResolutionLimit }> = [];
       const readEvents: UsageNodeRef[] = [];
       let bytes = 0;
       let truncated = false;
@@ -5641,6 +5729,8 @@ export function createMcpServerInstance(
       ]);
       const batchProvenance = { reports, taskRefs, humanNames, feedback, signatures, actionUrns };
       const batchReadCtx = scopeCtx(); // one memo for the whole call (#2041)
+      const validationTaskSets = await validationTaskSetsForNodes(validationReadCtx(),
+        visible.filter((n) => !(n as { inheritedFrom?: InheritedFrom }).inheritedFrom).map((n) => n.id));
       for (const metadata of visible) {
         if (truncated) {
           omitted.push(await nodeUrn(metadata.loc, metadata.memoryId, memoryUrnOf));
@@ -5664,15 +5754,26 @@ export function createMcpServerInstance(
         // fall back to the single renderer's current provenance reads.
         const provenance = n.revSeq === metadata.revSeq ? batchProvenance : undefined;
         const lockState = mcpDecryptOrMark(n); // spec 041 — same posture as hadron_get_node
-        const served = lockState === 'locked' || raw
-          ? n
-          : { ...n, content: await resolveNodeContent(batchReadCtx, n, { raw }) };
+        let served = n;
+        if (lockState !== 'locked' && !raw) {
+          try {
+            served = { ...n, content: await resolveNodeContent(batchReadCtx, n, { raw }) };
+          } catch (e) {
+            // A per-node, loud reason (cor:api:040:02); the other nodes still return.
+            if (!isContentResolutionLimitError(e)) throw e;
+            refused.push({ urn: await nodeUrn(n.loc, n.memoryId, memoryUrnOf), limit: e.limit });
+            continue;
+          }
+        }
         const projection = await renderNodeReadProjection(served, scope, {
           locked: lockState === 'locked',
           encryptedMemory: lockState !== 'plaintext',
           auth,
           batch: provenance,
           memoryUrnOf,
+          // Gated on this copy, as the single read is: the map is keyed by node id, and an inherited
+          // copy carries the base node's id (BLIND 6704825426).
+          validationTasks: inheritedFrom ? undefined : validationTaskSets.get(n.id),
         });
         // Measured on the ANNOTATED block, which is what actually ships: sizing
         // the bare projection and pushing the annotated one lets a block cross
@@ -5699,6 +5800,7 @@ export function createMcpServerInstance(
 
       const headerParts = [`returned ${blocks.length} node(s)`];
       if (unavailable.length) headerParts.push(`${unavailable.length} unavailable`);
+      if (refused.length) headerParts.push(`${refused.length} refused`);
       if (truncated) headerParts.push(`truncated: response-size cap reached, ${omitted.length} omitted`);
       const parts: string[] = [`Batch read — ${headerParts.join('; ')}.`];
       if (blocks.length) {
@@ -5707,6 +5809,13 @@ export function createMcpServerInstance(
       if (unavailable.length) {
         parts.push(
           `Unavailable (denied or not found):\n${unavailable.map((u) => `  - ${u}`).join('\n')}`,
+        );
+      }
+      if (refused.length) {
+        parts.push(
+          `Refused (${CONTENT_RESOLUTION_LIMIT_EXCEEDED}: over a content resolution limit; nothing partial returned — read it with raw: true for the stored text):\n${refused
+            .map((r) => `  - ${r.urn} (over ${resolutionLimitPhrase(r.limit)}; limit: ${r.limit})`)
+            .join('\n')}`,
         );
       }
       if (truncated) {
@@ -6769,6 +6878,12 @@ export function createMcpServerInstance(
           return written;
         });
       } catch (e) {
+        // #2622: this tool writes through its own inline Prisma calls (not
+        // writeNodeCore), so the #992 per-chat seq conflict must be typed HERE
+        // or the caller sees a raw internal error instead of the named refusal.
+        if (isChatSeqUniqueViolation(e)) {
+          return refusalResult(`[chat_message_seq_conflict] ${CHAT_SEQ_CONFLICT_MESSAGE}`);
+        }
         if (e instanceof NodeSchemaViolation) return refusalResult(`Schema violation: ${e.message}`);
         if (e === LIVE_LOC_CONFLICT) {
           return refusalResult(`Node already exists at "${rawUrn}" — use hadron_update_node.`);
@@ -7087,6 +7202,10 @@ export function createMcpServerInstance(
         if (data.data !== undefined) data.data = (enc.data ?? null) as never;
       }
 
+      // #277: normalize the persistence value only after preserving plaintextUpdates.
+      // Omitted data stays omitted; explicit null clears rather than storing JSON null.
+      if (nodeData === null) data.data = Prisma.DbNull;
+
       let includePinContentSaved = false;
       let includePinPriorContent: string | null = null;
       if (Object.keys(data).length > 0 || resolvedEdges !== null || expectedRevision !== undefined) {
@@ -7183,13 +7302,18 @@ export function createMcpServerInstance(
               runnable: mergedGovernedState(current, { role, isRunnable }).isRunnable,
               mintHuman: true, authoredChange,
             }, attestedAuthoring(recoveryCtx(), authoredWith));
-            await createNodeRevision(tx, {
-              id: generateId(),
-              ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), {
-                revLabel: reason,
-                changes: changedFields,
-              }),
-            });
+            // #3497 / rulings0149+0198: the token was checked above; an
+            // edge-only replacement applies below without consuming it.
+            // Mixed writes retain exactly one pre-edit snapshot.
+            if (changedFields.length > 0) {
+              await createNodeRevision(tx, {
+                id: generateId(),
+                ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), {
+                  revLabel: reason,
+                  changes: changedFields,
+                }),
+              });
+            }
             if (authoredChange) Object.assign(data, authoredStamp ?? clearNodeAuthorship());
             data.revisionContentHash = revisionStateHashRefreshMarker();
             const updated = Object.keys(data).length > 0
@@ -7216,6 +7340,11 @@ export function createMcpServerInstance(
             existing.abstract = embeddedPlaintext.abstract;
           });
         } catch (e) {
+          // #2622: same as hadron_create_node — an inline writer needs its own
+          // typed branch for the #992 per-chat seq conflict.
+          if (isChatSeqUniqueViolation(e)) {
+            return refusalResult(`[chat_message_seq_conflict] ${CHAT_SEQ_CONFLICT_MESSAGE}`);
+          }
           if (e instanceof NodeSchemaViolation) return refusalResult(`Schema violation: ${e.message}`);
           if (e instanceof LocProtectedError) return refusalResult(`[loc_protected] ${e.message}`);
           if (isLegacyMessageSeqError(e)) return refusalResult(`[seq_protected] ${e.message}`);
@@ -8706,6 +8835,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           nodeId: node.id,
           memoryId: node.memoryId, // #796 (as in hadron_get_node's event)
           appId: auth.appId ?? null,
+          appKeyId: usageAppKeyOf(auth), // #2944
           // 046-usage-metering FR-001 (as in hadron_get_node's event).
           userId: auth.userId ?? null,
           createdBy: auth.clientId ?? null,
@@ -11773,13 +11903,10 @@ function ageOf(at: Date, now: Date = new Date()): string {
         include: { organization: true },
       });
       if (!memory) return refusalResult('Memory not found.');
-      // R206 / cor:sec:040:05: an encrypted memory gets the typed refusal from the sync itself
-      // even with no source, so the no-source reply never reads as a healthy sync.
-      if (!memory.source && !memory.isEncrypted) return textResult('Memory has no source repository configured.');
-
       // Import and call syncGraphFromGithub
       const { syncGraphFromGithub, describeSyncOutcome } = await import('../integrations/github/syncGraphFromGithub.js');
       const result = await syncGraphFromGithub(memory as Parameters<typeof syncGraphFromGithub>[0]);
+      if (result.notAttemptedReason) return refusalResult(`[${SYNC_NOT_ATTEMPTED}] ${syncNotAttemptedMessage(result.notAttemptedReason)}`);
 
       if (result.fault) throw new Error(result.error ?? 'sync fault');
       if (result.error) return refusalResult(`Sync failed${result.errorCode ? ` [${result.errorCode}]` : ''}: ${result.error}`);
@@ -12802,6 +12929,19 @@ const SHAPE_HADRON_SET_ACTIVE_MEMORY = {
 };
 
 // #2661 / #2260: immutable, principal-independent parameter schemas are shared.
+const SHAPE_HADRON_RECORD_CONTENT_VALIDATION = {
+  nodeRef: z.string().min(1).describe('The node reported on: its id or fully-qualified node URN.'),
+  nodeRevision: z.number().int().min(1).describe('The node revision the validation task ran on.'),
+  validationTaskRef: z.string().min(1).describe("The validation task the node's role rule names now: its id or node URN."),
+  validationTaskRevision: z.number().int().min(1).describe('The task revision that ran.'),
+  outcome: z.enum(['PASS', 'FAIL', 'ERROR']).describe('PASS, FAIL, or ERROR when the task could not be run to a verdict.'),
+  runId: z.string().min(1).max(200).optional().describe('Your own label for this run (1-200 characters); makes a retry idempotent. Never an identity.'),
+  // #1332 (Xanthos FIT 6670593797, Xavier #81384): the recorder owns its session argument, so a
+  // refused session is judged after the not-found and writer refusals (cor:dmo:160:01), not by
+  // the #1701 gate before them.
+  session: z.string().optional().describe('Your worker session id, to record the report as that worker. A session that is not one of your open sessions is refused [session_not_bound] after the read and write checks; nothing is written.'),
+};
+
 const SHAPE_HADRON_CREATE_APP_MEMORY = {
   app: z.string().describe('App ID or URN.'),
   name: z.string().min(1).describe('Memory name; determines its slug.'),
@@ -12942,9 +13082,9 @@ const SHAPE_HADRON_FIND_NODES = {
   hasOpenThreads: z.boolean().optional().describe('#3494 — NodeFilter.hasOpenThreads: true selects nodes with live open root comments, false selects nodes with none, omitted leaves the filter off. Applies before ranking/paging in every mode, with existing access and content scope. Deleted stubs do not count. Inherited projections have zero summary. Timestamp is GraphQL-only; hit output is unchanged.'),
   isRunnable: z.boolean().optional().describe('Filter by runnable status (applies in every mode). true = only task nodes (Node.isRunnable=true) — the canonical "tasks I can run" predicate hadron_run_task gates on. false = only nodes explicitly marked non-runnable (most nodes leave it NULL, so false does NOT include them). Omit to ignore runnable status. Spec cor:api:060.'),
   role: z.string().optional().describe('Filter by Node.role family in every mode. Segment-boundary prefix semantics: "spec" matches "spec" and dotted descendants such as "spec.rule", but never "special" or "specification" (#1322). Node.role remains an open string; this is a query filter, not role validation.'),
-  nodeType: z.string().optional().describe('#331 — exact-match node-type facet (free-form, e.g. "task" / "parent" / "info"): only nodes whose nodeType equals this. Applies in every mode; with query "*" it lists all nodes of one type. Orthogonal to objectType. Without it, system nodes stay excluded; "comment" searches comments as the engine documents. Negation and multi-value are not supported here; use nodeTypes for a list of types.'),
+  nodeType: z.string().optional().describe('#331 — exact-match node-type facet (free-form, e.g. "task" / "parent" / "info"): only nodes whose nodeType equals this. Applies in every mode; with query "*" it lists all nodes of one type. Orthogonal to objectType. Without it, system and chat-message nodes stay excluded (name "chat-message" to search chat messages; record nodes are never excluded); "comment" searches comments as the engine documents. Negation and multi-value are not supported here; use nodeTypes for a list of types.'),
   objectType: z.string().optional().describe('#725 — collection facet: only nodes whose objectType equals this (the domain-object discriminator, e.g. "competitor" / "insight"). Orthogonal to nodeType. Composes with query/mode + where.'),
-  nodeTypes: z.array(z.string()).nullish().describe('#3113 — an explicit LIST of node types (GraphQL: NodeFilter.nodeTypes; null is the same as omitted), a union: only nodes whose nodeType is one of them. Applies in every mode. It narrows, ANDs the other filters and, being explicit, replaces the default that leaves out system nodes; it never lifts the memory-class default, access, deleted rows or inheritance. Values are exact and case-sensitive; an unknown value matches nothing. Refused: an empty list, nodeType together with nodeTypes, more than 20 entries (counted before duplicates are dropped), and a list containing "comment" (search comments with nodeType or nodeKind). Vector and hybrid keep their bounded, widening candidate window.'),
+  nodeTypes: z.array(z.string()).nullish().describe('#3113 — an explicit LIST of node types (GraphQL: NodeFilter.nodeTypes; null is the same as omitted), a union: only nodes whose nodeType is one of them. Applies in every mode. It narrows, ANDs the other filters and, being explicit, replaces the default that leaves out system and chat-message nodes; it never lifts the memory-class default, access, deleted rows or inheritance. Values are exact and case-sensitive; an unknown value matches nothing. Refused: an empty list, nodeType together with nodeTypes, more than 20 entries (counted before duplicates are dropped), and a list containing "comment" (search comments with nodeType or nodeKind). Vector and hybrid keep their bounded, widening candidate window.'),
   nodeKind: z.enum(['CONTENT', 'COMMENTS', 'ALL']).optional().describe('#1608/#1678 — which KIND of node to search (GraphQL: NodeFilter.contentScope). CONTENT (default): content nodes only. COMMENTS: comment nodes only (feedback about other nodes), found exhaustively in every mode before ranking and limits. ALL: both. A comment hit is labelled COMMENT and is never content of, or verified fact about, its target. Not hadron_get_node\'s contentScope, which picks the parts of one node to return.'),
   childrenOf: z.string().optional().describe('#2832 — list only the DIRECT children of this loc (GraphQL: NodeFilter.childrenOf). A direct child is a node whose loc is exactly this loc plus one more segment (no further colon); "" means the top-level nodes. It reads loc strings only (not edges, not parentRel), so a loc whose parent has no node of its own is still listed. Applies in every mode, with the same access and default exclusions as the rest of the search, and pairs with memoryUrn (loc is per memory). With no query and no sort the order is the sibling order (positioned nodes first, then by loc). Unlike parentRel, which scopes the WHOLE subtree.'),
   scope: z.string().optional().describe('Spec 049: search under a named scope — a scope id, a scope NAME (resolved in the active App\'s context), "app" (the active App\'s attached memories), or "global" (your active organization\'s view). Omitted with no memory selector: the ladder applies (active scope › active App › active organization), and the result says which. An explicit memoryUrn / memoryUrns / allMemories outranks the ambient scope but still intersects with one named here.'),
@@ -13061,7 +13201,7 @@ const SHAPE_HADRON_UPDATE_NODE = {
   seq: z.number().optional().describe('New sort order among siblings'),
   tags: tagsInputSchema.optional().describe('Replace tags'),
   properties: z.record(z.string(), z.unknown()).optional().describe('Structured key-value properties'),
-  data: z.record(z.string(), z.unknown()).optional().describe('Runtime data (e.g. stageOrder, promptRef, extractionSpec for chat config). REPLACES the whole data bag — to merge in a few keys while preserving the rest, use hadron_update_node_data instead.'),
+  data: z.record(z.string(), z.unknown()).nullable().optional().describe('Runtime data (e.g. stageOrder, promptRef, extractionSpec for chat config). REPLACES the whole data bag; null clears it and omission preserves it. To merge in a few keys while preserving the rest, use hadron_update_node_data instead.'),
   llmModel: z.string().optional().describe('LLM model used'),
   aiAgent: z.string().optional().describe('AI agent tool used'),
   edges: z.array(z.object({

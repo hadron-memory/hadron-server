@@ -1,6 +1,8 @@
 import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 import { LIVE_ORG_MEMBERSHIP } from '../lib/auth/liveOrgMembership.js';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'fs';
+import { fileURLToPath } from 'url';
+import { Client } from 'pg';
 import { generateId } from '../lib/id.js';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -19,6 +21,66 @@ export function buildAppKey(suffix?: string): string {
 // ---------------------------------------------------------------------------
 // Database helpers
 // ---------------------------------------------------------------------------
+
+const CHAT_SEQ_INDEX_NAME = 'nodes_chat_message_seq_unique_idx';
+const CHAT_SEQ_INVARIANTS_SQL = readFileSync(
+  fileURLToPath(new URL('../../prisma/chat-seq-invariants.sql', import.meta.url)),
+  'utf8',
+);
+
+/**
+ * #992 — per-worker state for the seq-unique index restore below. One vitest
+ * worker process owns exactly one database clone for its whole life
+ * (src/test/perWorkerDb.ts), so a process-local flag is per-database.
+ */
+let chatSeqIndexKnownPresent = false;
+
+/**
+ * #992 — suspend the per-chat message-seq uniqueness constraint on THIS test
+ * database, so a fixture can plant the legacy duplicate-seq shape. The
+ * constraint is the invariant cor:agt:020:04 always promised ("never
+ * duplicates"), so those rows are contract-impossible to WRITE now — but
+ * they can still EXIST: chats corrupted before the constraint (the #992
+ * report's migrated archive) keep their duplicates until each one's approved
+ * repair, and every paged reader must stay correct against them. Reader
+ * tests pin that with rows planted while the constraint is aside;
+ * cleanDb reinstalls it before the next test.
+ */
+export async function suspendChatSeqUniqueness(db: PrismaClient): Promise<void> {
+  await db.$executeRawUnsafe(`DROP INDEX IF EXISTS "${CHAT_SEQ_INDEX_NAME}"`);
+  chatSeqIndexKnownPresent = false;
+}
+
+/**
+ * #992 — make sure the per-chat seq unique index is present on this worker's
+ * clone. Called from cleanDb: a reader fixture may have dropped it
+ * (suspendChatSeqUniqueness), and vitest workers REUSE one clone across
+ * files, so the drop would leak into every later file on this worker and
+ * silently disable the constraint for them.
+ *
+ * Deliberately NO Prisma calls: some tests spy on the client to pin that a
+ * path issues no raw queries at all (sessionActivity.dy.test.ts), and a
+ * catalog probe through `db` would trip them. The probe and the reinstall
+ * both ride a raw pg connection — simple-query mode, since the invariant
+ * file is multi-statement and Prisma's prepared statements take exactly
+ * one. The process-local flag makes it one connect per worker except after
+ * an actual suspension.
+ */
+async function restoreChatSeqUniqueness(): Promise<void> {
+  if (chatSeqIndexKnownPresent) return;
+  const client = new Client({ connectionString: process.env.DATABASE_URL });
+  await client.connect();
+  try {
+    const probe = await client.query(
+      'SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = $1) AS present',
+      [CHAT_SEQ_INDEX_NAME],
+    );
+    if (!probe.rows[0]?.present) await client.query(CHAT_SEQ_INVARIANTS_SQL);
+    chatSeqIndexKnownPresent = true;
+  } finally {
+    await client.end();
+  }
+}
 
 /**
  * Delete all rows from every table in FK-safe order.
@@ -88,7 +150,7 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // fires no row triggers. #1706: agent_team_alarm_schedule references the events, so it is
   // truncated with them. #1708: so is worker_delivery_task_events, for the same reason.
   // #2022: a task's stop holds go with it.
-  await db.$executeRawUnsafe('TRUNCATE dark_worker_episodes, coordinator_cadence_episodes, coordinator_cadence_clocks, post_limit_episodes, worker_delivery_task_events, agent_team_alarm_schedule, agent_team_events, automation_adoption_events, app_memory_write_grant_events, app_memory_write_grants, app_automation_read_grant_events, app_automation_read_grants, agent_task_stop_holds, agent_task_counters, agent_task_blockers, agent_tasks');
+  await db.$executeRawUnsafe('TRUNCATE dark_worker_episodes, coordinator_cadence_episodes, coordinator_cadence_clocks, post_limit_episodes, worker_delivery_task_events, agent_team_alarm_schedule, agent_team_events, automation_adoption_events, app_memory_write_grant_events, app_memory_write_grants, app_automation_read_grant_events, app_automation_read_grants, grant_events, grants, agent_task_stop_holds, agent_task_counters, agent_task_blockers, agent_tasks');
   // #974 Workers before agents: workers_agent_id_fkey is RESTRICT.
   await db.worker.deleteMany();
   await db.node.deleteMany();
@@ -163,6 +225,10 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // and `SetNull` — node, session, app, user, organization — and `memoryId` is a
   // denormalized column with no FK at all (#796).
   await db.usageEvent.deleteMany();
+  // #992 — reinstall the per-chat seq unique index if a reader fixture
+  // dropped it (see restoreChatSeqUniqueness): vitest workers reuse one
+  // clone across files, and rows are gone by here, so reinstalling is safe.
+  await restoreChatSeqUniqueness();
 }
 
 /**

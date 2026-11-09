@@ -26,6 +26,7 @@ const DEFAULTS = { checkPeriodSeconds: 600, failedChecksToOverdue: 2 };
 const base = (over: Partial<WorkerCheckInputs> = {}): WorkerCheckInputs => ({
   liveSessionStartedAt: ago(60 * MIN),
   pendingReason: null,
+  tickerWakes: null,
   lastAssignedAt: ago(50 * MIN),
   lastCheckedAt: ago(1 * MIN),
   pausedUntil: null,
@@ -63,7 +64,7 @@ describe('NO_SESSION', () => {
 });
 
 describe('PENDING, with its reason', () => {
-  it.each(['TEAM_PAUSED', 'PAUSED', 'ISOLATED', 'STANDBY', 'NO_TASK'] as const)('%s, even with a stale check', (reason) => {
+  it.each(['TEAM_PAUSED', 'PAUSED', 'NO_TASK'] as const)('%s, even with a stale check', (reason) => {
     expect(derive({ pendingReason: reason, lastCheckedAt: ago(5 * 60 * MIN) })).toMatchObject({
       status: 'PENDING',
       pendingReason: reason,

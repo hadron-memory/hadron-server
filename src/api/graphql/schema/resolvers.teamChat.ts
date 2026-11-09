@@ -3,7 +3,7 @@ import { NodeNotFoundError, AmbiguousLegacyUrnError, UrnNotQualifiedError } from
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { buildTeamSnapshot, isReadableTeamHead, teamTagsEnabled, teamHeadInvalid, type TeamTagSnapshot } from '../../../lib/teamTagSnapshot.js';
 import { lockAppReportsTo } from '../../../lib/workerReportsTo.js';
-import { requireWorkerReadAccess } from './resolvers.worker.js';
+import { requireWorkerReadAccess } from '../../../lib/auth/workerRead.js';
 // Team-chat operations — #939: createTeamChatMessage + teamChatMessages as
 // platform operations (team logic lives server-side; CLI/MCP/portal are thin
 // surfaces — the #935/#936 wrapper precedent).
@@ -76,10 +76,11 @@ import {
 import { isTeamSpaceRow, teamSpaceAudienceFilter, teamSpaceOwnerFilter } from '../../../lib/auth/teamSpace.js';
 // Spec 049 Phase 4 — the Channel row the team chat became.
 import { DEFAULT_CHANNEL_NAME, ensureChannelWithRoot } from '../../../lib/channels.js';
-import { locateTeamAgent } from './resolvers.worker.js';
+import { locateTeamAgent } from '../../../lib/auth/workerRead.js';
 import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
+import { mapChatSeqConflict } from '../../../lib/prismaErrors.js';
 import { recordMentionsWorker } from '../../../lib/mentionsReadResolution.js';
 import {
   maybeAdvanceOwnChannelRead,
@@ -1004,9 +1005,13 @@ async function postToChannelRoot(
   let messageLoc: string | null = null;
   // #2015: the admission instant of a worker's post, stamped into its createdAt below; null for a human or system post.
   let admittedAt: Date | null = null;
+  // #992: the allocator holds the chat-root lock, so this cannot fire in
+  // normal operation — but if the per-chat seq unique is ever violated here
+  // (a bug, a repaired-back row), the caller sees the typed refusal, never a
+  // raw P2002.
   let appended: { seq: number; inserted: Date };
   try {
-  appended = await appendChatMessage(ctx.db, root, memEncInfo, async ({ tx, seq, msgNum }) => {
+  appended = await mapChatSeqConflict(() => appendChatMessage(ctx.db, root, memEncInfo, async ({ tx, seq, msgNum }) => {
     // The Channel is re-checked LIVE under the lock (Copilot on PR #1169):
     // deleteChannel takes this same key, so a delete that committed between
     // resolving the target and acquiring it is seen here — a message is
@@ -1208,7 +1213,7 @@ async function postToChannelRoot(
       });
     }
     return row.createdAt;
-  }, { asChannel: true });
+  }, { asChannel: true }));
     } catch (e) {
       if (!(e instanceof PostRateLimited)) throw e;
       // #2014: the post is refused and nothing was stored; the alarm (once an hour) commits on its own.

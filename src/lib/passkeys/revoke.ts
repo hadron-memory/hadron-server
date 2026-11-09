@@ -103,51 +103,109 @@ export async function bindRevokeByIdp(
   });
 }
 
-/** Revoke the owner's passkey named by `targetCredentialId`, consuming the bound ceremony. */
+/**
+ * #3746: the attempt decided 'cancelled' but the window had ended by the time the revocation would take effect
+ * (or, on the second attempt, still would cancel). The attempt rolls back; nothing is cancelled retroactively.
+ */
+class WindowCrossed extends Error {}
+
+/**
+ * Revoke the owner's passkey named by `targetCredentialId`, consuming the bound ceremony.
+ *
+ * #3746 (cor:aut:040:07): a revocation counts as in a first passkey's window only if it takes effect before
+ * `window_ends_at`. `revoked_at` is the wall clock once the owner's anchor and the rows are locked: the time the
+ * revocation takes effect, never the earlier transaction start, so a wait for the anchor that crosses the end simply
+ * revokes without cancelling. The CHECK forces 'cancelled' whenever `revoked_at` is before the window end. When a
+ * later wait (the rows `endSignInsCompletedBy` locks) carries the commit past the end, the attempt rolls back and the
+ * revocation is decided again in a fresh transaction, stamped after the end. That second attempt re-locks and
+ * re-checks everything; if it would still cancel (the clock stepped back), it refuses.
+ */
 export async function finishRevoke(
   db: PrismaClient,
   input: { ceremonyId: string; ceremonyNonceHash: string; signInBrowserHash: string | null; targetCredentialId: Buffer },
 ): Promise<{ passkeyId: string; windowCancelled: boolean } | null> {
   if (!HEX64.test(input.ceremonyNonceHash) || (input.signInBrowserHash !== null && !HEX64.test(input.signInBrowserHash))) return null;
-  const [bound] = await db.$queryRaw<Array<{ user_id: string; vouch_passkey_id: string | null; sign_in_browser_hash: string | null }>>`
-    SELECT user_id, vouch_passkey_id, sign_in_browser_hash FROM passkey_ceremonies
+  // Unlocked: this only locates whose anchor to take. Each attempt re-reads and re-checks the ceremony under it.
+  const [bound] = await db.$queryRaw<Array<{ user_id: string }>>`
+    SELECT user_id FROM passkey_ceremonies
      WHERE id = ${input.ceremonyId} AND purpose = 'REVOKE' AND kind = 'revoke' AND user_id IS NOT NULL AND consumed_at IS NULL`;
   if (!bound) return null;
-  // An identity-provider proof was spent at the prove step; finishing needs that same browser.
-  if (bound.vouch_passkey_id === null && input.signInBrowserHash !== bound.sign_in_browser_hash) return null;
+  try {
+    return await revokeAttempt(db, input, bound.user_id, false);
+  } catch (e) {
+    if (!(e instanceof WindowCrossed)) throw e;
+  }
+  try {
+    return await revokeAttempt(db, input, bound.user_id, true);
+  } catch (e) {
+    if (e instanceof WindowCrossed) return null;
+    throw e;
+  }
+}
+
+/** One revoke attempt in one transaction. Null refuses; WindowCrossed rolls the attempt back. */
+function revokeAttempt(
+  db: PrismaClient,
+  input: { ceremonyId: string; ceremonyNonceHash: string; signInBrowserHash: string | null; targetCredentialId: Buffer },
+  userId: string,
+  retry: boolean,
+): Promise<{ passkeyId: string; windowCancelled: boolean } | null> {
   return db.$transaction(async (tx) => {
-    await lockAuthorityAnchors(tx, [{ kind: 'user', id: bound.user_id }], 'exclusive');
-    if (!(await liveUser(tx, bound.user_id))) return null;
-    if (bound.vouch_passkey_id !== null) {
+    await lockAuthorityAnchors(tx, [{ kind: 'user', id: userId }], 'exclusive');
+    if (!(await liveUser(tx, userId))) return null;
+    const [ceremony] = await tx.$queryRaw<Array<{ user_id: string; vouch_passkey_id: string | null; sign_in_browser_hash: string | null }>>`
+      SELECT user_id, vouch_passkey_id, sign_in_browser_hash FROM passkey_ceremonies
+       WHERE id = ${input.ceremonyId} AND purpose = 'REVOKE' AND kind = 'revoke' AND browser_nonce_hash = ${input.ceremonyNonceHash}
+         AND consumed_at IS NULL
+       FOR UPDATE`;
+    if (!ceremony || ceremony.user_id !== userId) return null;
+    // An identity-provider proof was spent at the prove step; finishing needs that same browser.
+    if (ceremony.vouch_passkey_id === null
+      && (input.signInBrowserHash === null || input.signInBrowserHash !== ceremony.sign_in_browser_hash)) return null;
+    if (ceremony.vouch_passkey_id !== null) {
       const prover = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM passkey_credentials
-        WHERE id = ${bound.vouch_passkey_id} AND owner_id = ${bound.user_id} AND revoked_at IS NULL FOR SHARE`;
+        WHERE id = ${ceremony.vouch_passkey_id} AND owner_id = ${userId} AND revoked_at IS NULL FOR SHARE`;
       if (prover.length !== 1) return null;
     }
     const [target] = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM passkey_credentials
-      WHERE credential_id = ${input.targetCredentialId} AND owner_id = ${bound.user_id} AND revoked_at IS NULL FOR UPDATE`;
+      WHERE credential_id = ${input.targetCredentialId} AND owner_id = ${userId} AND revoked_at IS NULL FOR UPDATE`;
     // "Another" passkey: the prover never revokes itself through its own ceremony (cor:aut:040:08).
-    if (!target || target.id === bound.vouch_passkey_id) return null;
+    if (!target || target.id === ceremony.vouch_passkey_id) return null;
     const consumed = await tx.$queryRaw<Array<{ id: string }>>`UPDATE passkey_ceremonies SET consumed_at = (clock_timestamp() AT TIME ZONE 'UTC')
       WHERE id = ${input.ceremonyId} AND purpose = 'REVOKE' AND browser_nonce_hash = ${input.ceremonyNonceHash}
-        AND consumed_at IS NULL AND expires_at > (clock_timestamp() AT TIME ZONE 'UTC') AND user_id = ${bound.user_id}
+        AND consumed_at IS NULL AND expires_at > (clock_timestamp() AT TIME ZONE 'UTC') AND user_id = ${userId}
         AND (vouch_passkey_id IS NOT NULL OR sign_in_browser_hash = ${input.signInBrowserHash})
       RETURNING id`;
     if (consumed.length !== 1) return null;
-    // revoked_at is the platform clock the passkey guard requires (the transaction's). A first passkey whose window
-    // is still open at that time closes as cancelled, at the same instant; the passkey CHECK forces exactly that.
-    const [done] = await tx.$queryRaw<Array<{ window_outcome: string | null }>>`UPDATE passkey_credentials SET
-        revoked_at = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3),
-        window_outcome = CASE WHEN window_ends_at > (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3) AND window_outcome IS NULL
-          THEN 'cancelled' ELSE window_outcome END,
-        window_ended_at = CASE WHEN window_ends_at > (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3) AND window_outcome IS NULL
-          THEN (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3) ELSE window_ended_at END
-      WHERE id = ${target.id}
+    // #3746: revoked_at is the time the revocation takes effect: the wall clock read ONCE, here, after every lock above
+    // is held. From the owner's anchor on, nothing it is ordered against can happen (a signature completes under the
+    // same anchor), so a later commit does not make it earlier than any such event. A first passkey whose window is
+    // still open at that time closes as cancelled, at the same instant; the passkey CHECK forces exactly that.
+    const [done] = await tx.$queryRaw<Array<{ window_outcome: string | null }>>`WITH t AS (SELECT public.hadron_passkey_wall_now() AS at)
+      UPDATE passkey_credentials SET
+        revoked_at = t.at,
+        window_outcome = CASE WHEN window_ends_at > t.at AND window_outcome IS NULL THEN 'cancelled' ELSE window_outcome END,
+        window_ended_at = CASE WHEN window_ends_at > t.at AND window_outcome IS NULL THEN t.at ELSE window_ended_at END
+      FROM t WHERE id = ${target.id}
       RETURNING window_outcome`;
+    const cancelled = done.window_outcome === 'cancelled';
+    // A second attempt starts after the first saw the window end, so it can cancel only if the clock stepped back:
+    // fail closed rather than cancel a passkey whose window is over (#3746).
+    if (retry && cancelled) throw new WindowCrossed();
     // Holger, 2026-10-21 (#29507): revoking ends the sign-ins the passkey completed, with everything that descends
     // from them, as the cancel link does (R66 A), in this same transaction under the owner's anchor.
     await endSignInsCompletedBy(tx, target.id);
-    return { passkeyId: target.id, windowCancelled: done.window_outcome === 'cancelled' };
+    // Last statement before commit: a cancellation stands only if the window is still open now, after every wait.
+    if (cancelled && !(await windowStillOpen(tx, target.id))) throw new WindowCrossed();
+    return { passkeyId: target.id, windowCancelled: cancelled };
   });
+}
+
+/** Is the passkey's first window still open on the platform wall clock, now (after the caller's locks)? */
+export async function windowStillOpen(tx: Pick<Prisma.TransactionClient, '$queryRaw'>, passkeyId: string): Promise<boolean> {
+  const [row] = await tx.$queryRaw<Array<{ open: boolean }>>`SELECT window_ends_at > public.hadron_passkey_wall_now() AS open
+    FROM passkey_credentials WHERE id = ${passkeyId}`;
+  return row?.open === true;
 }
 
 /** The owner's passkeys, as the revocation page lists them after the proof. */

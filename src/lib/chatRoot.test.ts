@@ -226,7 +226,7 @@ describe('#1141 — an ENCRYPTED chat root round-trips instead of being written 
 
     await updateChatRootData(db, chat, encInfo, (d) => ({
       ...d,
-      goalStack: [{ description: 'encrypted goal' }],
+      goalStack: [{ description: 'encrypted goal', createdBy: 'ASSISTANT', status: 'ACTIVE', createdAt: '2026-11-06T00:00:00.000Z' }],
     }));
 
     // On disk it is still ONE opaque envelope — no plaintext field beside it.
@@ -237,7 +237,11 @@ describe('#1141 — an ENCRYPTED chat root round-trips instead of being written 
     const after = decryptNodeFields(
       { data: await storedChatData() }, encInfo,
     ).data as Record<string, unknown>;
-    expect(after.goalStack).toEqual([{ description: 'encrypted goal' }]);
+    const engine = await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: chat.id } });
+    expect(Object.keys(engine.state as object)).toEqual(['__enc']);
+    const state = decryptNodeFields({ data: engine.state }, encInfo).data as Record<string, unknown>;
+    expect(state.goalStack).toEqual([{ description: 'encrypted goal', createdBy: 'ASSISTANT', status: 'ACTIVE', createdAt: '2026-11-06T00:00:00.000Z' }]);
+    expect(after).not.toHaveProperty('goalStack');
     expect(after.conversationName).toBe('research');
     expect(after).not.toHaveProperty('messageCount');
     expect((await storedCounter()).messageCount).toBe(0);

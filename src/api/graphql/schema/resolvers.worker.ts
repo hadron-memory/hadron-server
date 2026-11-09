@@ -1,3 +1,6 @@
+import { personalOrgAgentServeAllowed } from '../../../lib/auth/personalOrgAgentInstall.js';
+import { requireWorkerReadAccess, locateTeamAgent, forbidden, type AppRow } from '../../../lib/auth/workerRead.js';
+export { requireWorkerReadAccess, locateTeamAgent, ROLES_BRANCH_PREFIX } from '../../../lib/auth/workerRead.js';
 import { listAppInstallations, resolveAppInstallation, resolveUnfilteredAppInstallation, lockAppInstallation } from '../../../lib/appInstallations.js';
 import { lockStaffingAct } from '../../../lib/auth/staffingAct.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
@@ -29,7 +32,6 @@ import { normalizeFamily, tierOf } from '../../../lib/agentTasks/family.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
 import { reconcileStopCoverage } from '../../../lib/stopSignals/lifecycle.js';
 import { generateId } from '../../../lib/id.js';
-import { s7Available } from '../../../lib/tickers/s7Availability.js';
 import { GraphQLError } from 'graphql';
 import { WORKER_SIGNATURE_DEFAULTS, normalizeWorkerSignature, withWorkerSignatures } from '../../../lib/workerSignature.js';
 import { assertWorkerNameNotConfusable, lockWorkerNames } from '../../../lib/workerName.js';
@@ -83,6 +85,7 @@ import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.j
 import { deletePristineGeneratedTickers, miscastHasReferences } from '../../../lib/workerMiscastRepair.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { runMayReadTeam } from '../../../lib/auth/runTeamRead.js';
 import { managesApp, lockAppManagerMemberships } from '../../../lib/auth/appManagement.js';
 import { withAuthorizedTx, liveTxContext } from './authorizedTx.js';
 import { resolveTaskActor, type TaskApp } from './resolvers.agentTask.js';
@@ -94,18 +97,14 @@ import { workerTerminalView, type StoredWorkerTerminal } from '../../../lib/work
 import {
   type Context,
   requireOrgRole,
+  requireAppRead,
   requireReadableAgent,
-  requireOwnerOrOrgRole,
   isNonReaderAppMember,
-  isAppParticipant,
   isPlatformAdmin,
   clampListTake,
   safeCanonicalUrn,
   isMemoryReadableCached,
 } from './resolvers.helpers.js';
-
-/** Loc prefix of the role-definition branch in a Team Agent's system memory. */
-export const ROLES_BRANCH_PREFIX = 'roles:';
 
 /**
  * Backstop on slug-race retries in `castWorker` (#991). Not an allocation
@@ -113,22 +112,6 @@ export const ROLES_BRANCH_PREFIX = 'roles:';
  * concurrent-cast count rather than at a handful.
  */
 const SLUG_RACE_RETRY_LIMIT = 50;
-
-type AppRow = {
-  id: string;
-  name: string;
-  urn: string;
-  organizationId: string | null;
-  ownerUserId: string | null;
-  uninstalledAt: Date | null;
-  /** Honoured by requireWorkerReadAccess whenever the row carries it (#1347 review). */
-  deletedAt?: Date | null;
-};
-
-const forbidden = (): GraphQLError =>
-  new GraphQLError('You are not authorized to manage workers in this App.', {
-    extensions: { code: 'FORBIDDEN' },
-  });
 
 /**
  * Staffing gate (inherited from #935's persona-mint lean): casting, retiring,
@@ -185,35 +168,6 @@ async function admitWorkerStaffAct(
 }
 
 /**
- * Read gate for the staff list (mirrors requireTeamChatAccess's 'read' mode —
- * cor:acl:030:01's audience): an AppMember at ANY role, org CONTRIBUTOR+, or
- * the owner of a user-owned App. A pure App-key principal may read its OWN
- * App's staff (team automation follows the roster); impersonation reads are
- * bounded to the support session's single org (#876 class).
- *
- * An UNINSTALLED App's staff stay readable (the roster remains legible); a
- * soft-DELETED App's do not. Every other reader already refused a deleted App
- * on its own, but `worker(ref)` and `releaseWorker` load the row by id with
- * `findUniqueOrThrow` and relied on this gate — so a participant could read a
- * deleted App's worker while its own field masks (`maySeeWorkerInternals`)
- * refused it. Found by the #1347 differential test; checked here, once.
- */
-export async function requireWorkerReadAccess(ctx: Context, app: AppRow): Promise<void> {
-  if (app.deletedAt) throw forbidden();
-  if (ctx.impersonation) {
-    if (app.organizationId === null || app.organizationId !== ctx.impersonation.orgId) {
-      throw forbidden();
-    }
-  }
-  if (!ctx.userId) {
-    if (ctx.appId && ctx.appId === app.id) return;
-    throw forbidden();
-  }
-  if (await isAppParticipant(ctx, app)) return;
-  throw forbidden();
-}
-
-/**
  * #1149 — the PROFILE tier's entry gate (hrn:node:hadronmemory.com:specs:cor:dmo:050:11,
  * "Who may see a worker"; hadron-concept D-2026-08-25-007). A worker signs its
  * output with a link to its page, so anyone who meets that output must be able
@@ -261,6 +215,12 @@ export async function requireWorkerProfileAccess(ctx: Context, app: AppRow): Pro
  */
 async function workerReadableWhere(ctx: Context): Promise<Prisma.WorkerWhereInput> {
   if (!ctx.userId) {
+    // #3360: a userless run reaches its own App only under its automation's grant, the same arm
+    // `requireWorkerReadAccess` applies; a key reaches its own App unconditionally.
+    if (isRunPrincipal(ctx)) {
+      const app = ctx.appId ? await ctx.db.app.findUnique({ where: { id: ctx.appId }, select: { id: true, organizationId: true, deletedAt: true } }) : null;
+      return { appId: { in: app && await runMayReadTeam(ctx, app) ? [app.id] : [] } };
+    }
     return { appId: { in: ctx.appId ? [ctx.appId] : [] } };
   }
   if (!isPlatformAdmin(ctx)) {
@@ -287,82 +247,6 @@ async function workerReadableWhere(ctx: Context): Promise<Prisma.WorkerWhereInpu
       },
     },
   };
-}
-
-type TeamAgentRow = {
-  id: string;
-  name: string;
-  urn: string;
-  systemMemoryId: string | null;
-};
-
-/**
- * Locate the Team Agent (#935 open question 1 — the marker default): with no
- * explicit teamAgentRef, the Team Agent is the SINGLE installed Agent whose
- * system memory carries a roles: branch — the marker makes the App
- * self-describing. Zero markers or two-plus markers are typed refusals, never
- * a guess. Also used by the team-chat and worklog bootstraps.
- */
-export async function locateTeamAgent(
-  ctx: Context,
-  appId: string,
-  teamAgentRef: string | null | undefined,
-): Promise<TeamAgentRow> {
-  if (teamAgentRef) {
-    // The explicit ref must name an agent INSTALLED in this App — otherwise
-    // the operation would read cast lists (and allocate against a register)
-    // from an agent the team App never adopted. #1946 (ruling A): an absent
-    // Agent gets the same answer as a not-installed one, and neither carries
-    // the Agent's id, so an App reader learns only what is installed here.
-    const notInstalled = () => new GraphQLError('teamAgentRef must name an Agent installed in this App.', {
-      extensions: { code: 'TEAM_AGENT_NOT_INSTALLED', appId },
-    });
-    let id: string;
-    try {
-      ({ id } = await resolveAgentRef(ctx.db, teamAgentRef));
-    } catch (e) {
-      if (e instanceof AgentNotFoundError) throw notInstalled();
-      throw e;
-    }
-    const row = await resolveAppInstallation(ctx.db, appId, id);
-    if (!row) throw notInstalled();
-    return row.agent;
-  }
-  const installed = await listAppInstallations(ctx.db, appId);
-  const candidates: TeamAgentRow[] = [];
-  for (const { agent } of installed) {
-    if (!agent || agent.deletedAt || !agent.systemMemoryId) continue;
-    const marker = await ctx.db.node.findFirst({
-      // Memory-scoped by construction (findings:unscoped-loc-lookup-crosses-
-      // memories): the loc match never leaves this agent's system memory.
-      where: {
-        memoryId: agent.systemMemoryId,
-        deletedAt: null,
-        OR: [{ loc: 'roles' }, { loc: { startsWith: ROLES_BRANCH_PREFIX } }],
-      },
-      select: { id: true },
-    });
-    if (marker) candidates.push(agent);
-  }
-  if (candidates.length === 1) return candidates[0];
-  if (candidates.length === 0) {
-    throw new GraphQLError(
-      'No installed Agent in this App carries a roles: branch in its system memory, so the Team Agent cannot be inferred. Pass teamAgentRef explicitly, or add role definitions (roles:<role> nodes) to the Team Agent\'s system memory.',
-      { extensions: { code: 'TEAM_AGENT_NOT_FOUND', appId } },
-    );
-  }
-  throw new GraphQLError(
-    `More than one installed Agent carries a roles: branch — pass teamAgentRef to pick one. Candidates: ${candidates
-      .map((c) => `${c.name} (${c.urn})`)
-      .join(', ')}.`,
-    {
-      extensions: {
-        code: 'TEAM_AGENT_AMBIGUOUS',
-        appId,
-        candidates: candidates.map((c) => ({ id: c.id, name: c.name, urn: c.urn })),
-      },
-    },
-  );
 }
 
 type WorkerRow = {
@@ -962,7 +846,6 @@ async function resolveCastTarget(ctx: Context, args: CastArgs, expectedAgentId?:
     // Ada36559 supersedes the dropped push-model S5/S7 dependency (#2138r4/#2130).
     // A future pull-shaped standby activation MUST initialize coverage for existing reports
     // before removing this guard and admitting new reports atomically under its common bracket.
-    if (s7Available()) throw new GraphQLError('Casting with a reporting head is not available while standby integration is incomplete.', { extensions: { code: 'WORKER_REPORTING_CAST_UNAVAILABLE' } });
     reportingHeadId = await resolveCastReportingHead(ctx, appId, choice.ref);
     const head = await ctx.db.worker.findUniqueOrThrow({ where: { id: reportingHeadId }, select: { retiredAt: true } });
     if (head.retiredAt) throw new GraphQLError('A worker cannot report to a retired worker.', { extensions: { code: 'WORKER_REPORTS_TO_RETIRED', reportsTo: reportingHeadId } });
@@ -1964,6 +1847,57 @@ export const workerMutations = {
 
 export const workerQueries = {
   /**
+   * #3599: the delete's act admission and private census, without its destructive transaction.
+   * No attestation input or durable reservation (hrn:node:hadronmemory.com:specs:cor:agt:020:03).
+   * An instructed read records its claim with the target as subject, so bookkeeping never poisons the census
+   * (hrn:node:hadronmemory.com:specs:cor:dmo:050:12). Never return census details.
+   *
+   * #3608: the preview takes no target lock, so the real delete can commit between the census and the
+   * claim, and the fence then refuses the claim. The worker has gone, so the door answers as the
+   * census would (cor:dmo:050:11). Caught outside the transaction, so the claim stays rolled back.
+   * `workerRef` is on the fence's refusal only for a worker reference. One naming another worker (the
+   * actor) or a session is a different fact and passes through.
+   */
+  deleteWorkerPreview: async (
+    _: unknown,
+    { workerRef, instruction }: { workerRef: string; instruction?: ActInstruction | null },
+    ctx: Context,
+  ) => {
+    const { worker, app } = await resolveReadableWorkerRef(ctx, workerRef);
+    const initial = await admitWorkerStaffAct(ctx, app, instruction);
+    // The real delete deliberately supports retained uninstalled Apps. Reuse its exact authority
+    // prologue, not withAuthorizedTx's stricter App/org liveness checks (#3599 FIT correction).
+    try {
+      return await ctx.db.$transaction(async (tx) => {
+        await lockAuthorityAnchors(tx, [
+          { kind: 'app', id: app.id }, ...(ctx.userId ? [{ kind: 'user' as const, id: ctx.userId }] : []),
+          ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+          ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+        ], 'shared');
+        await tx.$queryRaw`SELECT id FROM apps WHERE id = ${app.id} FOR SHARE`;
+        const txCtx = await liveTxContext(ctx, tx);
+        let admission = await admitWorkerStaffAct(txCtx, app, instruction, initial);
+        // Caller/grant locks only: never the target worker or the delete's MVCC fence.
+        await lockStaffingAct(tx, app, admission, ctx.sessionId);
+        admission = await admitWorkerStaffAct(txCtx, app, instruction, admission, true);
+        const current = await tx.worker.findUnique({ where: { id: worker.id } });
+        if (!current) throw new GraphQLError('Worker not found.', { extensions: { code: 'WORKER_NOT_FOUND', workerRef } });
+        if (await miscastHasReferences(tx, current)) {
+          throw new GraphQLError('This worker has persisted references, an unreleased stint, or encrypted attribution that cannot be verified. Retire it instead.', {
+            extensions: { code: 'WORKER_IN_USE', workerId: worker.id },
+          });
+        }
+        await appendStaffingInstructionClaim(tx, { appId: app.id, admission, operation: 'worker.delete-preview', workerId: worker.id });
+        return { workerId: worker.id, attestationRequired: true };
+      });
+    } catch (error) {
+      if (error instanceof GraphQLError && error.extensions.code === 'WORKER_REFERENCE_NOT_FOUND' && error.extensions.workerRef === worker.id) {
+        throw workerNotFound(workerRef);
+      }
+      throw error;
+    }
+  },
+  /**
    * Read one worker (cor:api:120 find-one). The ref is a Worker id, an
    * `hrn:worker:<root>:<app-slug>:<worker-slug>` URN (#991), or — with
    * `appRef` — the worker's NAME ("Iris", #990/#1015).
@@ -2022,12 +1956,12 @@ export const workerQueries = {
           extensions: { code: 'WORKER_NOT_FOUND', workerRef: trimmed },
         });
       }
-      return ctx.db.worker.findUniqueOrThrow({ where: { id: byName } });
+      return singleWorkerActivityRow(await ctx.db.worker.findUniqueOrThrow({ where: { id: byName } }));
     }
     // #1149: by id or URN the caller names one worker, so the PROFILE gate
     // admits; the field resolvers mask everything beyond the profile.
     const worker = await resolveProfileWorkerRef(ctx, ref);
-    return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    return singleWorkerActivityRow(await ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } }));
   },
 
   /**
@@ -2270,15 +2204,48 @@ export const workerQueries = {
  * lapsed but open session keeps its family; only an end, or a newer bind,
  * clears or replaces it (#1723 review, Diego P2-2).
  */
+/** #3674: only Query.worker marks its one-row result. Lists keep the App fold (no N+1). */
+const singleWorkerActivityRows = new WeakSet<object>();
+function singleWorkerActivityRow<T extends object>(row: T): T {
+  singleWorkerActivityRows.add(row);
+  return row;
+}
+type WorkerActivityParent = {
+  id: string; appId: string; __heldWorkerActivity?: WorkerActivity;
+};
+
+/** Same SQL/predicate as the roster and binder; only the rows whose history is folded change. */
+async function workerFieldActivity(
+  ctx: Context,
+  worker: WorkerActivityParent,
+  info?: { operation?: { operation?: string } },
+): Promise<Map<string, WorkerActivity>> {
+  const memoize = info?.operation?.operation === 'query';
+  if (!singleWorkerActivityRows.has(worker)) return loadAppWorkerActivity(ctx, worker.appId, { memoize });
+  // Query-only, request-local and separate from the App cache: an alias/list in
+  // the same operation must never inherit this single-worker result. Mutations
+  // and unmarked nested rows retain their existing fresh/App-wide behavior.
+  type Cache = Map<string, Promise<Map<string, WorkerActivity>>>;
+  const holder = ctx as Context & { singleWorkerActivityCache?: Cache };
+  const cache = memoize ? (holder.singleWorkerActivityCache ??= new Map()) : null;
+  const key = JSON.stringify([worker.appId, worker.id]);
+  let pending = cache?.get(key);
+  if (!pending) {
+    pending = queryWorkerActivity(ctx, Prisma.sql`w.app_id = ${worker.appId} AND w.id = ${worker.id}`, new Date());
+    cache?.set(key, pending);
+  }
+  return pending;
+}
+
 /** The #2252 fields' shared read: masked to null on the family gate, else the activity row of the one fold. */
 async function bindingModelOf(
   ctx: Context,
-  worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+  worker: WorkerActivityParent,
   info?: { operation?: { operation?: string } },
 ): Promise<WorkerActivity | null> {
   if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
   if (worker.__heldWorkerActivity) return worker.__heldWorkerActivity;
-  const activity = await loadAppWorkerActivity(ctx, worker.appId, { memoize: info?.operation?.operation === 'query' });
+  const activity = await workerFieldActivity(ctx, worker, info);
   return activity.get(worker.id) ?? null;
 }
 
@@ -2675,6 +2642,8 @@ async function readServedWorkerText(
   page?: Parameters<typeof resolveServedBootPrompt>[2],
 ): Promise<{ text: string | null; refusal: string | null }> {
   const where = { surface: 'bind' as const, agentName };
+  const app = await ctx.db.app.findUnique({where:{id:worker.appId},select:{organizationId:true,ownerUserId:true}});
+  if (app && !(await personalOrgAgentServeAllowed(ctx.db, app, worker.agentId, ctx.userId))) return { text: null, refusal: 'FORBIDDEN' };
   try {
     const recorded = ctx.sessionId
       ? await ctx.db.servedPrompt.findFirst({ where: { sessionId: ctx.sessionId, workerId: worker.id }, orderBy: { ordinal: 'desc' } })
@@ -3327,16 +3296,14 @@ export const workerFieldResolvers = {
      * and that conflation IS hadron-cli#487.
      */
     hasLiveSession: async (
-      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      worker: WorkerActivityParent,
       _: unknown,
       ctx: Context,
       info?: { operation?: { operation?: string } },
     ): Promise<boolean | null> => {
       if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
       if (worker.__heldWorkerActivity) return worker.__heldWorkerActivity.hasLiveSession;
-      const activity = await loadAppWorkerActivity(ctx, worker.appId, {
-        memoize: info?.operation?.operation === 'query',
-      });
+      const activity = await workerFieldActivity(ctx, worker, info);
       return activity.get(worker.id)?.hasLiveSession ?? false;
     },
     /**
@@ -3347,28 +3314,26 @@ export const workerFieldResolvers = {
      * as hasLiveSession). A matching input, never authorization.
      */
     family: async (
-      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      worker: WorkerActivityParent,
       _: unknown,
       ctx: Context,
       info?: { operation?: { operation?: string } },
     ): Promise<string | null> => {
       if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
       if (worker.__heldWorkerActivity) return worker.__heldWorkerActivity.bindingFamily;
-      const activity = await loadAppWorkerActivity(ctx, worker.appId, {
-        memoize: info?.operation?.operation === 'query',
-      });
+      const activity = await workerFieldActivity(ctx, worker, info);
       return activity.get(worker.id)?.bindingFamily ?? null;
     },
     /** #2252 — the model its binding last reported (the newest open session's; same gate and fold as `family`). Self-declared; never authorization. */
     model: async (
-      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      worker: WorkerActivityParent,
       _: unknown,
       ctx: Context,
       info?: { operation?: { operation?: string } },
     ): Promise<string | null> => (await bindingModelOf(ctx, worker, info))?.bindingModel ?? null,
     /** Live advisory membership uses the same newest-open model and working-state gate as `model`. */
     modelGroups: async (
-      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      worker: WorkerActivityParent,
       _: unknown,
       ctx: Context,
       info?: { operation?: { operation?: string } },
@@ -3380,14 +3345,14 @@ export const workerFieldResolvers = {
     },
     /** #2252 — when that model was self-reported; null when the session never reported one. */
     modelReportedAt: async (
-      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      worker: WorkerActivityParent,
       _: unknown,
       ctx: Context,
       info?: { operation?: { operation?: string } },
     ): Promise<Date | null> => (await bindingModelOf(ctx, worker, info))?.modelReportedAt ?? null,
     /** #2252 / R189 — the coarse tier of `model` from the server's one mapping; null when unmapped. Advisory only. */
     tier: async (
-      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      worker: WorkerActivityParent,
       _: unknown,
       ctx: Context,
       info?: { operation?: { operation?: string } },
@@ -3406,16 +3371,14 @@ export const workerFieldResolvers = {
      * shows and the one the reaper acts on. Masked on deny, as above.
      */
     lastActiveAt: async (
-      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      worker: WorkerActivityParent,
       _: unknown,
       ctx: Context,
       info?: { operation?: { operation?: string } },
     ): Promise<Date | null> => {
       if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
       if (worker.__heldWorkerActivity) return worker.__heldWorkerActivity.lastActiveAt;
-      const activity = await loadAppWorkerActivity(ctx, worker.appId, {
-        memoize: info?.operation?.operation === 'query',
-      });
+      const activity = await workerFieldActivity(ctx, worker, info);
       return activity.get(worker.id)?.lastActiveAt ?? null;
     },
     /**
@@ -3486,7 +3449,10 @@ export const workerFieldResolvers = {
       const app = await ctx.db.app.findUnique({ where: { id: worker.appId } });
       if (!app || app.deletedAt) return null;
       try {
-        await requireOwnerOrOrgRole(ctx, app, 'READER');
+        // #2089: the App-specific read gate, so Worker.app agrees with Query.app
+        // (org arms unchanged, plus a current owner-role member of a user-owned
+        // App). The App's children keep their own per-field withholding.
+        await requireAppRead(ctx, app);
       } catch {
         return null;
       }

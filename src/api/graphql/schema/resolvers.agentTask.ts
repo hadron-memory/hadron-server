@@ -3,9 +3,9 @@ import { appendAppActionEvent } from '../../../lib/agentTasks/events.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import { requireAppActionCode } from '../../../lib/actionRegister/appCode.js';
 import { resolveActionAnswer } from '../../../lib/actionRegister/answer.js';
-import { rootTriggerOfRun } from '../../../lib/automationReadGrant.js';
+import { runMayReadTeam } from '../../../lib/auth/runTeamRead.js';
 import { retryOnSerializationFailure } from '../../../lib/serializableRetry.js';
-import { RUN_CLIENT_PREFIX, isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { finishFindings, countFindings, type TaskFinding } from '../../../lib/agentTasks/findings.js';
 import { isDeepStrictEqual } from 'node:util';
 import { lockTaskGraph, taskPriority, addTaskBlocker, removeTaskBlocker } from '../../../lib/agentTasks/blockers.js';
@@ -345,28 +345,7 @@ async function keyMayReadApp(ctx: Context, app: TaskApp): Promise<boolean> {
   return true;
 }
 
-/** #2925 / ruling0112: read-only own-App run arm, evaluated again inside the read's anchors. */
-export async function runMayReadTeam(ctx: Context, app: TaskApp): Promise<boolean> {
-  if (!isRunPrincipal(ctx) || ctx.impersonation || app.deletedAt || ctx.appId !== app.id) return false;
-  if (!ctx.organizationId || !await ctx.db.organization.findFirst({ where: { id: ctx.organizationId, deletedAt: null }, select: { id: true } })) return false;
-  const rows = await ctx.db.$queryRaw<Array<{ app_id: string; status: string; organization_id: string; user_id: string | null }>>`
-    SELECT app_id, status::text AS status, organization_id, user_id FROM app_runs WHERE id = ${ctx.clientId!.slice(RUN_CLIENT_PREFIX.length)} FOR SHARE`;
-  const run = rows[0];
-  const bound = rows.length === 1 && run!.app_id === app.id && run!.status === 'RUNNING'
-    && (app.organizationId === null || app.organizationId === run!.organization_id) && run!.organization_id === ctx.organizationId && (run!.user_id ?? undefined) === (ctx.userId ?? undefined);
-  if (!bound) return false;
-  const root = await rootTriggerOfRun(ctx.db, ctx.clientId!.slice(RUN_CLIENT_PREFIX.length));
-  if (!root) return false;
-  // A locking read detects a revoke/delete committed while this RepeatableRead reader waited for anchors.
-  // Advisory exclusion alone does not refresh an already-established snapshot (#3350).
-  const trigger = root.kind === 'SCHEDULE'
-    ? await ctx.db.$queryRaw<Array<{ id: string }>>`SELECT id FROM agent_schedules WHERE id = ${root.id} AND app_id = ${app.id} AND deleted_at IS NULL FOR SHARE`
-    : await ctx.db.$queryRaw<Array<{ id: string }>>`SELECT id FROM agent_webhooks WHERE id = ${root.id} AND app_id = ${app.id} AND deleted_at IS NULL FOR SHARE`;
-  if (trigger.length !== 1) return false;
-  const grants = await ctx.db.$queryRaw<Array<{ id: string }>>`SELECT id FROM app_automation_team_snapshot_grants
-    WHERE app_id = ${app.id} AND trigger_kind = ${root.kind} AND trigger_id = ${root.id} AND revoked_at IS NULL FOR SHARE`;
-  return grants.length === 1;
-}
+export { runMayReadTeam };
 
 /** The callback projection stays under shared authority anchors in one coherent view; later GraphQL fields re-gate separately. */
 export async function inRunTeamReadTx<T>(ctx: Context, appId: string, onGone: () => T, body: (c: Context, app: TaskApp) => Promise<T>): Promise<T> {
@@ -1730,7 +1709,10 @@ export const TASK_BATCH_MAX = 25;
  * A create judged before its transaction: the App and actor it resolved to, its parent, its normalized fields and
  * the advice decided so far. Built by {@link prepareTaskCreate}; written by {@link applyTaskCreate}.
  */
-/** #2646: what a clone only copied (a copied value is left out, never refused, when the caller may not set it). */
+/**
+ * #2646: what a clone only copied. Copied properties or a copied priority the caller may not set are left out, never
+ * refused; copied requirements are checked as a create checks them, so a model group removed since refuses the clone.
+ */
 type CloneCopy = { sourceId: string; priorityCopied: boolean; propertiesCopied: boolean; requirements?: Prisma.JsonValue | null };
 
 type PreparedCreate = {
@@ -2030,12 +2012,13 @@ export const agentTaskMutations = {
   /** #2645: Proposed cor:agt:050:09 Editing. The assignment gate and transaction are the only write door. */
   updateAgentTask: async (_: unknown, { taskId, input, instruction }: { taskId: string; input: Record<string, unknown>; instruction?: ActInstruction | null }, ctx: Context) =>
     mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
-      // #2420 (cor:agt:050:28): the task's assignee may write its `properties` and nothing else; a patch that names
-      // any other field needs the cor:agt:050:09 set, and is refused whole.
+      // #2420 (cor:agt:050:28) and #3441 (ruling 0233, cor:agt:050:01 / :09): the task's assignee may write its
+      // `properties` and its `references` and nothing else; a patch that names any other field needs the
+      // cor:agt:050:09 set, and is refused whole.
       const named = input && typeof input === 'object' && !Array.isArray(input) ? Object.keys(input) : [];
-      const assigneeWritesProperties = named.length > 0 && named.every(k => k === 'properties') && isAssignee(actor, task);
-      if (!assigneeWritesProperties && !(await mayDirectTask(tx, txCtx, app, actor, task))) {
-        throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, edits it; its assignee may write only its properties.", { taskId });
+      const assigneeWrites = named.length > 0 && named.every(k => k === 'properties' || k === 'references') && isAssignee(actor, task);
+      if (!assigneeWrites && !(await mayDirectTask(tx, txCtx, app, actor, task))) {
+        throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, edits it; its assignee may write only its properties and references.", { taskId });
       }
       refuseEnded(task);
       if (!input || typeof input !== 'object' || Array.isArray(input) || named.some(k => k !== 'properties' && !(TASK_EDIT_FIELDS as readonly string[]).includes(k))) {
@@ -3286,6 +3269,16 @@ export const agentTaskFieldResolvers = {
       const items = rows.map(d => ({ ...d, reference: d.reference ? { ...d.reference, kind: REFERENCE_KIND_TO_GQL[d.reference.kind] } : null }));
       const { take, skip } = pageArgs(args);
       return pageEnvelope(items.slice(skip, skip + take), items.length, skip);
+    },
+    /**
+     * #3325: the one CURRENT stored disposition for `findingId` on THIS task (exact match, no trim or case-fold), or null.
+     * Reached only through the existing task read gate, like the paged field; a real-but-undisposed id, an unknown id and an
+     * id stored only on another task all read as null, so the field is no existence oracle. No event, no reference fetch.
+     */
+    findingDisposition: (t: TaskRow, args: { findingId: string }) => {
+      const rows = t.findingDispositions as unknown as { findingId: string; disposition: string; reference: TaskReference | null }[];
+      const d = rows.find(r => r.findingId === args.findingId);
+      return d ? { ...d, reference: d.reference ? { ...d.reference, kind: REFERENCE_KIND_TO_GQL[d.reference.kind] } : null } : null;
     },
     blockedBy: async (task: TaskRow, args: { limit?: number | null; offset?: number | null }, ctx: Context) => taskRelations(ctx, task.id, 'blockedBy', args),
     blocks: async (task: TaskRow, args: { limit?: number | null; offset?: number | null }, ctx: Context) => taskRelations(ctx, task.id, 'blocks', args),

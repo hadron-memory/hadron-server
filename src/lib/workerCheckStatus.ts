@@ -6,11 +6,14 @@
  * - `NO_SESSION`: no live session (cor:agt:020:11, the shared `isSessionLive`),
  *   with its reason (#3077): IDLE, ENDED or NEVER_BOUND (`loadNoSessionReasons`).
  * - `PENDING`: not expected to check, with its reason: a team pause, its own
- *   pause, isolated, on standby, or no task. The reasons come from the ticker's
+ *   pause or no task. The reasons come from the ticker's
  *   own `loadPendingReasons`, so the roster and the `live-check` rule can't
  *   disagree about who is expected to check.
- * - `OK`: has a task and checked within `failedChecksToOverdue` × period + 5 minutes.
- * - `OVERDUE`: has a task and hasn't checked for longer than that.
+ * - `OK` / `OVERDUE` (#3509, cor:agt:100:03 r7): OVERDUE means the worker was REACHED and did not respond. With an
+ *   enabled ticker subscription it is judged on the wakes actually delivered (`WorkerDeliveryTick.ackedAt`): OVERDUE when
+ *   a wake was delivered after the clock start, the ticker's `respondedAt` (a check of a channel it covers) is still
+ *   empty, and more than 5 minutes have passed. No delivered wake, nothing expected. With NO enabled ticker it keeps the
+ *   settings timer: has a task and hasn't checked within `failedChecksToOverdue` × period + 5 minutes.
  *
  * A worker HAS A TASK when a task assigned to it is open (`pending` or
  * `started`), or when its Agent has `usesTasks: false`. The OVERDUE clock runs
@@ -68,10 +71,13 @@ export type WorkerCheckInputs = {
   teamResumedAt?: Date | null;
   /** #2022: when the latest `pause` / `halt` stop signal coverage of the worker ended; restarts the clock likewise. */
   stopEndedAt?: Date | null;
-  /** #2755: when its isolation expired (an active one is PENDING ISOLATED); restarts the clock like a pause. */
-  isolatedUntil?: Date | null;
-  /** #2755: when an active pause or isolation was cleared on purpose (`WorkerWakeSettings.exemptEndedAt`). */
+  /** #2755: when an active pause was cleared on purpose (`WorkerWakeSettings.exemptEndedAt`). */
   exemptEndedAt?: Date | null;
+  /**
+   * #3509: the latest delivered wake of each of its ENABLED ticker subscriptions (`WorkerDeliveryTick`). Required, so a caller cannot forget it:
+   * null = it has no enabled ticker, so the settings timer applies; an empty array = tickers, nothing delivered yet.
+   */
+  tickerWakes: Array<{ deliveredAt: Date; respondedAt: Date | null }> | null;
 };
 
 export type CheckSettings = { checkPeriodSeconds: number; failedChecksToOverdue: number };
@@ -84,9 +90,9 @@ export function overdueAfterMs(s: CheckSettings): number {
   return s.failedChecksToOverdue * s.checkPeriodSeconds * 1000 + OVERDUE_SLACK_MS;
 }
 
-/** The ends of the worker's own isolation and of a pause or isolation cleared on purpose, as far as they are past. */
+/** The ends of the worker's pause cleared on purpose, as far as they are past. */
 function ownExemptionEnds(i: WorkerCheckInputs, now: Date): number[] {
-  return [i.isolatedUntil, i.exemptEndedAt].map((d) => (d && d.getTime() <= now.getTime() ? d.getTime() : -Infinity));
+  return [i.exemptEndedAt].map((d) => (d && d.getTime() <= now.getTime() ? d.getTime() : -Infinity));
 }
 
 /** The latest end of an exemption (or the live session's start); null when it has no live session. */
@@ -118,8 +124,10 @@ export function deriveWorkerCheckStatus(i: WorkerCheckInputs, s: CheckSettings, 
   if (!i.liveSessionStartedAt) return out('NO_SESSION');
   if (i.pendingReason) return out('PENDING', i.pendingReason);
 
+  // #3509: on tickers the response is held per ticker (`respondedAt`), so the worker's last check is not a clock restart.
+  const onTickers = i.tickerWakes != null;
   const clockStart = Math.max(
-    i.lastCheckedAt?.getTime() ?? -Infinity,
+    onTickers ? -Infinity : (i.lastCheckedAt?.getTime() ?? -Infinity),
     i.lastAssignedAt?.getTime() ?? -Infinity,
     i.liveSessionStartedAt.getTime(),
     // A pause that has ended (an active one is PAUSED above).
@@ -128,9 +136,13 @@ export function deriveWorkerCheckStatus(i: WorkerCheckInputs, s: CheckSettings, 
     i.teamResumedAt?.getTime() ?? -Infinity,
     // #2022: a stop signal's coverage that has ended (an active one is STOPPED above).
     i.stopEndedAt && i.stopEndedAt.getTime() <= now.getTime() ? i.stopEndedAt.getTime() : -Infinity,
-    // #2755: an isolation that has ended, and a pause or isolation cleared on purpose.
+    // #2755: an isolation that has ended, and a pause cleared on purpose.
     ...ownExemptionEnds(i, now),
   );
+  if (i.tickerWakes != null) {
+    const unanswered = i.tickerWakes.some((w) => w.respondedAt == null && w.deliveredAt.getTime() > clockStart && now.getTime() - w.deliveredAt.getTime() > OVERDUE_SLACK_MS);
+    return out(unanswered ? 'OVERDUE' : 'OK');
+  }
   return out(now.getTime() - clockStart > overdueAfterMs(s) ? 'OVERDUE' : 'OK');
 }
 
@@ -160,7 +172,7 @@ export async function loadWorkerCheckStatuses(
   if (workers.length === 0) return new Map();
   const ids = workers.map((w) => w.id);
 
-  const [sessions, tasks, readStates, wakeSettings, pending] = await Promise.all([
+  const [sessions, tasks, readStates, wakeSettings, pending, tickerRows] = await Promise.all([
     db.session.findMany({
       where: { workerId: { in: ids }, endedAt: null, deletedAt: null, ...recentlyTouchedFilter(now) },
       select: { id: true, workerId: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, expiresAt: true },
@@ -173,9 +185,27 @@ export async function loadWorkerCheckStatuses(
     teamChannelId
       ? db.channelReadState.findMany({ where: { workerId: { in: ids }, channelId: teamChannelId }, select: { workerId: true, lastCheckedAt: true } })
       : Promise.resolve([]),
-    db.workerWakeSettings.findMany({ where: { workerId: { in: ids } }, select: { workerId: true, pausedUntil: true, isolatedUntil: true, exemptEndedAt: true } }),
+    db.workerWakeSettings.findMany({ where: { workerId: { in: ids } }, select: { workerId: true, pausedUntil: true, exemptEndedAt: true } }),
     loadPendingReasons(db, appId, ids, now),
+    // #3509: the delivery rows of each worker's ENABLED ticker subscriptions; a worker with a subscription but no row is
+    // on tickers with nothing delivered, one with no subscription keeps the settings timer.
+    db.tickerSubscription.findMany({
+      where: { workerId: { in: ids }, endedAt: null, ticker: { appId, deletedAt: null, enabled: true } },
+      select: { workerId: true, tickerId: true },
+    }),
   ]);
+  const deliveryRows = tickerRows.length === 0 ? [] : await db.workerDeliveryTick.findMany({
+    where: { workerId: { in: [...new Set(tickerRows.map((r) => r.workerId))] }, tickerId: { in: [...new Set(tickerRows.map((r) => r.tickerId))] } },
+    select: { workerId: true, tickerId: true, ackedAt: true, respondedAt: true },
+  });
+  const deliveryOf = new Map(deliveryRows.map((d) => [`${d.workerId}:${d.tickerId}`, d]));
+  const tickerWakes = new Map<string, Array<{ deliveredAt: Date; respondedAt: Date | null }>>();
+  for (const r of tickerRows) {
+    const list = tickerWakes.get(r.workerId) ?? [];
+    const d = deliveryOf.get(`${r.workerId}:${r.tickerId}`);
+    if (d) list.push({ deliveredAt: d.ackedAt, respondedAt: d.respondedAt });
+    tickerWakes.set(r.workerId, list);
+  }
   // #2022: the latest end of each worker's pause/halt coverage (the earliest of leaving it, its signal's end, its until).
   const stopEnds = await db.$queryRaw<{ workerId: string; endedAt: Date }[]>(Prisma.sql`
     SELECT c.worker_id AS "workerId", max(LEAST(c.left_at, s.ended_at, s.until)) AS "endedAt"
@@ -211,10 +241,10 @@ export async function loadWorkerCheckStatuses(
           lastAssignedAt: openTask.get(w.id) ?? null,
           lastCheckedAt: checkedAt.get(w.id) ?? null,
           pausedUntil: wake.get(w.id)?.pausedUntil ?? null,
-          isolatedUntil: wake.get(w.id)?.isolatedUntil ?? null,
           exemptEndedAt: wake.get(w.id)?.exemptEndedAt ?? null,
           teamResumedAt: app.teamResumedAt,
           stopEndedAt: stopEndOf.get(w.id) ?? null,
+          tickerWakes: tickerWakes.get(w.id) ?? null,
         },
         settings,
         now,

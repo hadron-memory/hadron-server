@@ -230,9 +230,11 @@ export function buildEdgeFrontmatter(outgoingEdges: EdgeForGit[]): Array<Record<
 function locToSegments(loc: string): string[] {
   const parts = loc.split(':');
   for (const p of parts) {
-    if (p === '' || p === '.' || p === '..' || /[/\\]/.test(p)) {
+    // #3264: a `.git` segment (any case) would address repository metadata. No valid loc atom
+    // can start with a dot (validateLoc), so this only reaches corrupt or legacy stored data.
+    if (p === '' || p === '.' || p === '..' || /[/\\]/.test(p) || p.toLowerCase() === '.git') {
       throw new Error(
-        `Unsafe loc "${loc}": empty, '.', '..', or path-separator segments are not allowed`,
+        `Unsafe loc "${loc}": empty, '.', '..', '.git', or path-separator segments are not allowed`,
       );
     }
   }
@@ -281,8 +283,9 @@ export function nodeFilePath(localPath: string, loc: string, memoryUrn?: string)
  * edges. Callers pass only non-empty locs (the empty-loc root is handled
  * separately and must never be treated as orphaned).
  *
- * Throws on a malformed loc — `locToSegments` guards the `rmSync(recursive)`
- * the caller runs on `sidecar`, which would otherwise delete a parent dir.
+ * Throws on a malformed loc — `locToSegments` guards the sidecar path, which would
+ * otherwise collapse onto a parent dir. Callers clean `sidecar` only through
+ * `removeLegacySidecar` (#3264), never recursively.
  */
 export function orphanedLegacyPaths(
   localPath: string,

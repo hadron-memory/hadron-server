@@ -136,6 +136,7 @@ import {
   ALL_NODE_MERGE_FIELDS,
   type NodeMergeField,
 } from '../../../lib/nodeMerge.js';
+import { mapChatSeqConflict } from '../../../lib/prismaErrors.js';
 import {
   type Context,
   getAccessibleMemoryIds,
@@ -312,6 +313,8 @@ async function writeNodeCoreRaw(
     transaction?: {
       tx: Prisma.TransactionClient;
       pooledDb: Context['db'];
+      /** Response advice belongs to the outer request; authorization still uses txCtx. */
+      requestContext?: Context;
       afterCommit: (effect: () => void) => void;
     };
     targetNodeId?: string;
@@ -935,6 +938,24 @@ async function writeNodeCoreRaw(
         (nodeFields as Record<string, unknown>).data = enc.data ?? undefined;
       }
 
+      // #277 / cor:api:210:01: null clears a nullable JSON column. In particular,
+      // encryption's omitted-field mapping above must not discard an explicit clear.
+      // Keep the caller's plaintext input untouched for revision/change comparison.
+      if (input.data === null) (nodeFields as Record<string, unknown>).data = Prisma.DbNull;
+
+      // #3727 / cor:api:210:01 / cor:dmo:020:03: the same law for the nullable
+      // STRING columns. `enc.abstract ?? undefined` above turns an explicit
+      // `abstract: null` into an omission, silently retaining the old
+      // ciphertext while the derived hash was already cleared — the stored
+      // fingerprint and the abstract disagree. Unlike the JSON `data` column
+      // above (which needs DbNull to avoid storing JSON null), a string
+      // column's JS null IS SQL NULL — no sentinel; the caller's plaintext
+      // input stays untouched for revision/change comparison, as with `data`.
+      // MCP's writer already maps `enc.abstract/content ?? null`, so this
+      // brings the two surfaces to the same meaning (cor:api:240).
+      if (input.abstract === null) (nodeFields as Record<string, unknown>).abstract = null;
+      if (input.content === null) (nodeFields as Record<string, unknown>).content = null;
+
       // When createOnly resurrects a soft-deleted node, the UPDATE branch
       // must clear `deletedAt`/`deletedBy` — otherwise the resurrected
       // node ends up with the new content but still flagged as deleted,
@@ -1040,7 +1061,8 @@ async function writeNodeCoreRaw(
         ? await getAccessibleMemoryIds(ctx)
         : null;
       let writeEmbeddingWorkToken: string | null = null;
-      const includeWarningLifetime = captureIncludePinWarningLifetime(ctx);
+      const includeWarningContext = opts?.transaction?.requestContext ?? ctx;
+      const includeWarningLifetime = captureIncludePinWarningLifetime(includeWarningContext);
       let includeWarningContentSaved = false;
       let includeWarningStoredContent: string | null = null;
       // #2041 S2b — `storedPlaintext` is the includer's plaintext from the row
@@ -1368,14 +1390,17 @@ async function writeNodeCoreRaw(
             // ownerRepo deliberately remains outside restorable node history,
             // so an unguarded ownerRepo-only update keeps its legacy
             // revision-free behaviour. A guarded update is different: every
-            // successful state change must consume the claimed token or the
-            // same expectedRevision could be reused to overwrite it (#937).
+            // ownerRepo change must consume the claimed token or the same
+            // expectedRevision could be reused to overwrite it (#937). The
+            // edge-only exception below does not change ownerRepo behaviour.
+            // #3497 / rulings0149+0198: inline edges are not node revision state.
+            // They still reach finalizeNodeWrite, and a guarded edge-only write
+            // checks its token without consuming it.
             const needsRevision =
-              resolvedEdges !== null ||
               changes.length > 0 ||
               (opts?.forceRevision === true && inCompileScope()) ||
               (opts?.guardRevSeq !== undefined && changesUnversionedField);
-            if (!needsRevision && !changesUnversionedField) {
+            if (!needsRevision && !changesUnversionedField && resolvedEdges === null) {
               // A stale guard is refused even when the write is a no-op: the
               // compare-and-swap protects the caller's merge base, and an
               // idempotent write must not report success against a revision
@@ -1836,7 +1861,7 @@ async function writeNodeCoreRaw(
       // commit succeeds. The callback uses the pooled client, never the tx.
       const afterCommit = () => {
         const pooledDb = opts?.transaction?.pooledDb ?? ctx.db;
-        if (includeWarningContentSaved) attachIncludePinWarnings(ctx, finalNode, input.content, includeWarningStoredContent, { ...ctx, db: pooledDb }, includeWarningLifetime);
+        if (includeWarningContentSaved) attachIncludePinWarnings(includeWarningContext, finalNode, input.content, includeWarningStoredContent, { ...ctx, db: pooledDb }, includeWarningLifetime);
         void publishNodeWritten({
           nodeId: finalNode.id,
           memoryId: input.memoryId,
@@ -1979,7 +2004,7 @@ async function updateNodeCore(
   input: UpdateNodeInput,
   ctx: Context,
   op: string,
-  opts?: { ownsKind?: GovernedKind; governedContext?: GovernedContext },
+  opts?: { ownsKind?: GovernedKind; governedContext?: GovernedContext } & Pick<Parameters<typeof writeNodeCore>[3], 'transaction'>,
 ) {
   const { id, memoryId, loc, expectedRevision, ...fields } = input;
   // GraphQL guarantees a signed 32-bit integer on the wire, but resolver tests
@@ -2053,6 +2078,7 @@ async function updateNodeCore(
     authoring: authoringFromRequest(ctx, input.authoredWith),
     targetNodeId,
     guardRevSeq: expectedRevision ?? undefined,
+    transaction: opts?.transaction,
     ownsKind: opts?.ownsKind,
     governedContext: opts?.governedContext,
     concealUnreadable: {
@@ -2327,7 +2353,10 @@ export const nodeMoveOps = {
         let relocated: MoveNodeSubtreeResult['moved'] = [];
         let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
         let warningsWithheld = false;
-        const moved = await ctx.db.$transaction(
+        // #2622: a move rebases whole loc subtrees, so it is a chat-message
+        // writer like any other — the #992 conflict surfaces typed here, once,
+        // for every move caller (moveNode + the spec-corpus relocation).
+        const moved = await mapChatSeqConflict(() => ctx.db.$transaction(
           async (tx) => {
             if (planOnly) await tx.$executeRaw`SET TRANSACTION READ ONLY`;
             // #2206 (#2233): an Agent definition's authority, at either end, before any loc or row lock.
@@ -2396,7 +2425,7 @@ export const nodeMoveOps = {
           // A large subtree touches many rows; the default 5s interactive-txn
           // timeout is too tight (mirrors extractParentNodeGraph / cloneMemory).
           { timeout: 120_000, ...(planOnly ? { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead } : {}) },
-        );
+        ));
         if (planOnly) {
           const memories = await ctx.db.memory.findMany({ where: { id: { in: [source.memoryId, destMemoryId] } }, select: { id: true, urn: true } });
           const urns = new Map(memories.map(m => [m.id, m.urn]));
@@ -2576,16 +2605,21 @@ export const nodeMutations = {
     // never moves. All content fields preserve-on-omit.
     updateNode: async (_: unknown, { input }: { input: UpdateNodeArgs }, ctx: Context) => {
       if (input.install) {
-        // #2044: select the node by the App's install memory + loc. Nothing is created
-        // here; a caller who cannot even open the record gets the not-found a missing
-        // customisation gives.
+        // #3628 / ruling0234: shared participant/manager gates and live-install
+        // refusals, with no lazy creation. The update uses the same held transaction.
         const { install, memoryId, id, ...rest } = input;
         if (memoryId != null || id != null) {
           throw new GraphQLError('updateNode: identify the node by `install` + `loc`, not also by `id` or `memoryId`.',
             { extensions: { code: 'BAD_USER_INPUT' } });
         }
-        const memory = await findCallerInstallMemory(ctx, install);
-        return updateNodeCore({ ...rest, memoryId: memory.id } as UpdateNodeInput, ctx, 'updateNode', { governedContext: 'node-write' });
+        const effects: Array<() => void> = [];
+        const written = await withInstallMemory(ctx, install, (tx, txCtx, memory) =>
+          updateNodeCore({ ...rest, memoryId: memory.id } as UpdateNodeInput, txCtx, 'updateNode', {
+            governedContext: 'node-write',
+            transaction: { tx, pooledDb: ctx.db, requestContext: ctx, afterCommit: effect => effects.push(effect) },
+          }), { create: false });
+        for (const effect of effects) effect();
+        return written;
       }
       return updateNodeCore(input as UpdateNodeInput, ctx, 'updateNode', { governedContext: 'node-write' });
     },
@@ -5226,7 +5260,7 @@ export const nodeMutations = {
       decryptNodeFields(node, memEncInfo);
       // A Google Doc is a read for a human: includes resolve with the exporter's
       // access (cor:dmo:150:03); variables stay as stored, as before.
-      const exported = await resolveNodeContent(ctx, node, { mode: 'includes' });
+      const exported = await resolveNodeContent(ctx, node, { mode: 'includes', surface: 'export' });
       const markdown = exported && exported.trim().length > 0 ? exported : `# ${node.name}`;
 
       const { file } = await runOwnedEmailOperation<{ file: ToolDriveFile }>(ctx, connectionRef, 'create-doc', {
@@ -5248,7 +5282,12 @@ export const nodeMutations = {
  * An ordinary memory costs one indexed select.
  */
 export async function writeNodeCore(...args: Parameters<typeof writeNodeCoreRaw>): ReturnType<typeof writeNodeCoreRaw> {
-  const written = await writeNodeCoreRaw(...args);
+  // #992: a generic node write (create, clone, import, update, move — every
+  // door shares this core) that would place a `chat-message` row on a taken
+  // (chat, seq) answers the typed refusal here, never a raw P2002. The
+  // protected-loc gate already refuses channeled chat prefixes; this covers
+  // the unchanneled legacy prefixes the gate cannot see.
+  const written = await mapChatSeqConflict(() => writeNodeCoreRaw(...args));
   const ctx = args[1];
   if (!written || typeof written !== 'object' || typeof (written as { memoryId?: unknown }).memoryId !== 'string') return written;
   const projected = await concealWriteBeyondRead(ctx, written as { memoryId: string });

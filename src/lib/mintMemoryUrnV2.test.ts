@@ -18,6 +18,16 @@ function fakeDb(taken: Set<string>) {
 }
 
 describe('mintMemoryUrnV2', () => {
+  it.each(['mentor-co', 'client-co'])('keeps a %s personal-slug collision alias flat (independent of the seed writer)', async root => {
+    const urn = await mintMemoryUrnV2(fakeDb(new Set([`${root}:juno-mike-personal`])), {
+      root, desiredSlug: 'juno-mike-personal',
+      // An Agent-shaped author root must be sanitized into the same single slug atom.
+      authorRoot: 'platform-co:juno',
+    });
+    expect(urn.split(':')).toHaveLength(2);
+    expect(urn.split(':')[1]).toMatch(/^[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]$/);
+    expect(urn).not.toBe(`${root}:juno-mike-personal`);
+  });
   it('keeps the desired slug when free — the opaque-id (app-user/anon) path', async () => {
     const urn = await mintMemoryUrnV2(fakeDb(new Set()), {
       root: 'acme.com',

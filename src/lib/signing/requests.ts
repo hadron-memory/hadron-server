@@ -257,9 +257,12 @@ export async function completeSigningRequestInTransaction(
   if (!node || computeApprovalHash(approvalFieldsOf(node, null)) !== row.approvalHash) {
     throw new SigningRefusal('SIGNING_REQUEST_ENDED', 'The node changed since this signature was requested.', { state: 'STALE' });
   }
+  // #3737: only the SIGNER's own credential row is ever locked here, so this lock sits behind the signer's user anchor
+  // (taken first by the ceremony spend, same as the proof). A credential of anyone else matches no row and is the same
+  // SIGNATURE_NOT_VERIFIED as before, without locking a row another person's proof holds.
   const [credential] = await tx.$queryRaw<Array<{ id: string; owner_id: string; credential_id: Buffer; public_key: Buffer; counter: bigint; revoked_at: Date | null; enrollment_rp_id: string }>>`
     SELECT id, owner_id, credential_id, public_key, counter, revoked_at, enrollment_rp_id FROM passkey_credentials
-     WHERE credential_id = ${opts.credentialId} FOR UPDATE`;
+     WHERE credential_id = ${opts.credentialId} AND owner_id = ${opts.signerId} FOR UPDATE`;
   const rpId = passkeyRpId();
   // SEC-6: the credential's owner is the person signing; never the userHandle. A credential
   // enrolled under another RP ID never counts here (#1631 PR1b, Eden #10470; cor:aut:040:06).

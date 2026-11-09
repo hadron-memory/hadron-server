@@ -33,6 +33,7 @@
 import { GraphQLError } from 'graphql';
 import { Prisma, type MemoryConfigTemplateRule, type NodeRoleRule } from '../../../generated/prisma/index.js';
 import { type Context, withoutRequestCaches } from './resolvers.helpers.js';
+import { newWarningScope, taskVisibilityWarnings, type MemoryConfigWarning, type WarnableRule, type WarningScope } from './resolvers.memoryConfigWarnings.js';
 import { AmbiguousLegacyUrnError, MemoryNotFoundError } from '../../../lib/entityRef/errors.js';
 import { EntityNotFoundError } from '../../../lib/entityRef/entityNotFound.js';
 import { UrnNotQualifiedError, UrnParseError } from '../../../lib/urn.js';
@@ -51,6 +52,7 @@ import {
   touchConfig,
   type ResolvedRef,
 } from './resolvers.memoryConfig.js';
+import { copiedColumns, refsOf } from './resolvers.memoryConfigRefs.js';
 import {
   managedTemplate,
   MemoryConfigTemplateNotFoundError,
@@ -72,7 +74,8 @@ export interface ApplyResult {
   required: boolean;
   dryRun: boolean;
   entries: ApplyEntry[];
-  warnings: never[];
+  /** #1327: TASK_LESS_VISIBLE for every rule this apply wrote, or in a dry run would write. */
+  warnings: MemoryConfigWarning[];
 }
 
 /** Thrown inside a dry run's transaction so nothing it touched commits. */
@@ -80,45 +83,6 @@ class DryRunRollback extends Error {
   constructor(readonly result: ApplyResult) {
     super('dry run');
   }
-}
-
-/** H5: a required task that has since been deleted. Copying it would plant a rule that refuses every use. */
-function refBroken(role: string, field: 'authorTask' | 'validationTask'): GraphQLError {
-  return new GraphQLError(
-    `The template's rule for role "${role}" points at a ${field === 'authorTask' ? 'author' : 'validation'} task that was deleted; repoint it in the template before applying.`,
-    { extensions: { code: 'NODE_ROLE_RULE_REF_BROKEN', role, field } },
-  );
-}
-
-/** The template rule's references, as the refs a create would re-check for the caller. */
-function refsOf(rule: MemoryConfigTemplateRule): ResolvedRef[] {
-  if (rule.authorTaskRequired && !rule.authorTaskId) throw refBroken(rule.role, 'authorTask');
-  if (rule.validationTaskRequired && !rule.validationTaskId) throw refBroken(rule.role, 'validationTask');
-  // `ref` is what a refusal echoes (NODE_NOT_FOUND). A template reference
-  // is stored, not caller-supplied, and the rule's field resolvers withhold
-  // its id when it's UNREADABLE, so the refusal names the rule and field
-  // instead of the node id (#1399 review).
-  const label = (field: string) => `template rule "${rule.role}" ${field}`;
-  const out: ResolvedRef[] = [];
-  if (rule.authorTaskId) out.push({ kind: 'authorTask', id: rule.authorTaskId, ref: label('authorTask') });
-  if (rule.validationTaskId) out.push({ kind: 'validationTask', id: rule.validationTaskId, ref: label('validationTask') });
-  if (rule.descriptionNodeId) out.push({ kind: 'descriptionNode', id: rule.descriptionNodeId, ref: label('descriptionNode') });
-  return out;
-}
-
-/** The copied columns: everything a rule carries except its identity, lock and audit fields. */
-function copiedColumns(rule: MemoryConfigTemplateRule) {
-  return {
-    authorTaskId: rule.authorTaskId,
-    authorTaskRequired: rule.authorTaskRequired,
-    validationTaskId: rule.validationTaskId,
-    validationTaskRequired: rule.validationTaskRequired,
-    descriptionNodeId: rule.descriptionNodeId,
-    strictSubRoles: rule.strictSubRoles,
-    writers: rule.writers,
-    validateBy: rule.validateBy,
-    enabled: rule.enabled,
-  };
 }
 
 export async function applyMemoryConfigTemplate(
@@ -141,12 +105,17 @@ async function applyToTarget(
   memory: { id: string },
   template: { id: string; ownerUserId: string | null; appId: string | null },
   args: { templateRef: string; memoryRef: string; expectedTemplateRevision?: number | null; dryRun?: boolean | null },
+  // One memo and one read budget per CALL: a bulk apply hands every target the same scope (#1327).
+  warningScope: WarningScope = newWarningScope(),
 ): Promise<ApplyResult> {
   const dryRun = args.dryRun === true;
   const notFoundTemplate = () => new MemoryConfigTemplateNotFoundError(args.templateRef);
+  // The rules this apply writes (or would write), as they will read: the same list for a dry run and the real apply.
+  let written: WarnableRule[] = [];
 
+  let result: ApplyResult;
   try {
-    return await ctx.db.$transaction(async (tx) => {
+    result = await ctx.db.$transaction(async (tx) => {
       // The template row under a SHARE lock: its rules cannot change until we
       // commit (an update takes it FOR UPDATE), while two applies of the same
       // template proceed side by side.
@@ -287,7 +256,10 @@ async function applyToTarget(
         entries.push({ role: rule.role, outcome, rule: after });
       }
       if (writes) await touchConfig(tx, configId!, actor);
-      const result: ApplyResult = {
+      written = plan
+        .filter((p) => p.outcome === 'APPLIED' || p.outcome === 'REPLACED')
+        .map(({ rule }) => ({ role: rule.role, ...copiedColumns(rule) }));
+      const applied: ApplyResult = {
         memoryId: memory.id,
         template: { id: live.id, name: live.name, deleted: false },
         templateRevision: live.revision,
@@ -296,21 +268,26 @@ async function applyToTarget(
         entries,
         warnings: [],
       };
-      if (dryRun) throw new DryRunRollback(result);
-      return result;
+      if (dryRun) throw new DryRunRollback(applied);
+      return applied;
     });
   } catch (e) {
-    if (e instanceof DryRunRollback) return e.result;
-    // A concurrent createNodeRoleRule took a role between our read and our
-    // insert (it does not take the rows we lock). Nothing was written; the
-    // caller re-reads and retries.
-    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
-      throw new GraphQLError("The memory's config changed while the template was being applied; retry.", {
-        extensions: { code: 'CONFLICT' },
-      });
+    if (e instanceof DryRunRollback) result = e.result;
+    else {
+      // A concurrent createNodeRoleRule took a role between our read and our
+      // insert (it does not take the rows we lock). Nothing was written; the
+      // caller re-reads and retries.
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+        throw new GraphQLError("The memory's config changed while the template was being applied; retry.", {
+          extensions: { code: 'CONFLICT' },
+        });
+      }
+      throw e;
     }
-    throw e;
   }
+  // #1327: advisory, after the commit (or the dry run's rollback), from the rules written, in the caller's own projection.
+  result.warnings = await taskVisibilityWarnings(ctx, memory.id, written, warningScope);
+  return result;
 }
 
 /** The most memories one bulk call may name (#1334, Vera's recommended value; cor:api:040:02 analog). */
@@ -423,6 +400,7 @@ export async function applyMemoryConfigTemplateToMemories(
 
   const seen = new Set<string>();
   const results: BulkApplyEntry[] = [];
+  const warningScope = newWarningScope();
   for (let index = 0; index < refs.length; index += 1) {
     const memoryRef = refs[index]!;
     try {
@@ -439,7 +417,7 @@ export async function applyMemoryConfigTemplateToMemories(
       const template = await managedTemplate(fresh, args.templateRef);
       const result = await applyToTarget(fresh, actor, memory, template, {
         templateRef: args.templateRef, memoryRef, expectedTemplateRevision: args.expectedTemplateRevision, dryRun,
-      });
+      }, warningScope);
       results.push({ index, memoryRef, ok: true, result, error: null });
     } catch (e) {
       results.push({ index, memoryRef, ok: false, result: null, error: toEntryError(e) });

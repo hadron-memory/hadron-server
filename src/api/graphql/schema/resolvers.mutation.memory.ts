@@ -1,4 +1,7 @@
+import { encryptChatEngineStateWithKey } from '../../../lib/chatRootEngineState.js';
 // memoryMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { SYNC_NOT_ATTEMPTED, syncNotAttemptedMessage } from '../../../integrations/github/syncNotAttempted.js';
+import { applyOrgDefaultsAtCreation } from './resolvers.memoryConfigOrgDefault.js';
 import { endApprovalsOnEncryptedEntry } from '../../../lib/nodeApproval.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { generateId } from '../../../lib/id.js';
@@ -830,6 +833,13 @@ export const memoryMutations = {
           name: rootName,
           description: 'Root node for this memory.',
         }, tx);
+        // #3426 (C3): the ONE site where the org's default templates are applied — an org-owned knowledge or group memory
+        // created here. Not personal/private (the owner alone manages those), not user-owned, and no other creation path
+        // (App, install, agent, chat, worker, clone, extract). No flag opts a caller out, so `source` changes nothing.
+        // Inside this transaction: a failure rolls the memory, its root node and its rules back together.
+        if (resolvedOrgId && (requestedClass === 'knowledge' || requestedClass === 'group')) {
+          await applyOrgDefaultsAtCreation(tx, { memoryId: created.id, orgId: resolvedOrgId, actor: ctx.userId ?? ctx.clientId ?? 'system' });
+        }
         return created;
       }));
 
@@ -2234,6 +2244,11 @@ export const memoryMutations = {
       await concealUnreadableDenial(ctx, id, ref, () => requireMemoryManageAccess(ctx, memory, 'CONTRIBUTOR'));
 
       const result = await syncGraphFromGithub(memory);
+      if (result.notAttemptedReason) {
+        throw new GraphQLError(syncNotAttemptedMessage(result.notAttemptedReason), {
+          extensions: { code: SYNC_NOT_ATTEMPTED, reason: result.notAttemptedReason },
+        });
+      }
       // `fault` is judged on its own: an exception with an empty message must not read as success.
       if (result.fault) throw new Error(result.error ?? 'sync fault');
       if (result.error) {
@@ -2415,6 +2430,13 @@ export const memoryMutations = {
                 data: (encrypted.data ?? null) as InputJsonValue,
               },
             });
+          }
+          // #3501: promotion also converts operational state on tombstoned roots.
+          // Memory FOR UPDATE is held; node locks are deterministic, as in the content pass.
+          const engineRoots = await tx.chatRootEngineState.findMany({ where: { chatRoot: { memoryId: resolvedMemoryId } }, select: { chatRootNodeId: true }, orderBy: { chatRootNodeId: 'asc' } });
+          for (const engine of engineRoots) {
+            await tx.$queryRaw`SELECT id FROM nodes WHERE id=${engine.chatRootNodeId} FOR UPDATE`;
+            await encryptChatEngineStateWithKey(tx, engine.chatRootNodeId, key);
           }
           // #1079 (PR #1080 third review, Codex P2) — linking an anonymous
           // memory to a user REPLACES its urn, which is a rename by any other
@@ -2785,10 +2807,11 @@ export const memoryMutations = {
                 }
               }
 
+              const engineConverted = await encryptChatEngineStateWithKey(tx, current.id, key);
               const plaintextContent = current.content != null && !isAuthenticatedStringEnvelope(current.content, key);
               const plaintextAbstract = current.abstract != null && !isAuthenticatedStringEnvelope(current.abstract, key);
               const plaintextData = current.data != null && !isAuthenticatedDataEnvelope(current.data, key);
-              if (!plaintextContent && !plaintextAbstract && !plaintextData) return false;
+              if (!plaintextContent && !plaintextAbstract && !plaintextData) return engineConverted;
               const encrypted = encryptNodeFieldsWithKey(
                 { content: current.content, abstract: current.abstract, data: current.data }, key,
               );

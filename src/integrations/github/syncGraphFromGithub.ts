@@ -1,3 +1,4 @@
+import type { SyncNotAttemptedReason } from './syncNotAttempted.js';
 import { committedSyncReport, failedSyncReport, type SyncReportEntry } from './syncReport.js';
 import { GitCommandError } from './execGit.js';
 import { stampEmbeddingObligation } from '../../services/embedding/obligation.js';
@@ -323,6 +324,8 @@ const syncGraphFromGithubAsSystem = async (
   graph: MemoryWithOrg,
   edgeEndpointPreflightAttempt = 0,
 ): Promise<{
+  /** Configuration refused an attempt; callers must not serve an old report as this run's outcome. */
+  notAttemptedReason?: SyncNotAttemptedReason;
   error?: string;
   errorCode?: 'BAD_USER_INPUT' | typeof ENCRYPTED_GIT_SYNC_UNAVAILABLE;
   /** #1789: `error` is an unexpected exception's text (driver, filesystem, git), not a typed refusal; callers must not echo it. */
@@ -379,23 +382,24 @@ const syncGraphFromGithubAsSystem = async (
     // syncMemory call gets a meaningful message rather than a silent no-op
     // (startup's batch loop guards on `organization` before calling).
     // R206 / cor:sec:040:05: an explicit sync of an encrypted memory fails loudly
-    // with the typed code BEFORE the DB-only and no-organization no-ops, so a
+    // with the typed code BEFORE the not-attempted and no-organization results, so a
     // memory with no source (or no org) never reads as a healthy sync. The row
     // is left untouched: there is nothing to mark ERROR on a memory that has no
     // sync to fail.
     if ((await db.memory.findUnique({ where: { id: graph.id }, select: { isEncrypted: true } }))?.isEncrypted) {
       return { error: ENCRYPTED_GIT_SYNC_MESSAGE, errorCode: ENCRYPTED_GIT_SYNC_UNAVAILABLE };
     }
+    // These are not attempts: return before validation, status/report writes or Git work.
+    // Keep encryption first, and let explicit callers map this only after their access gate.
+    if (!graph.source) return { notAttemptedReason: 'NO_SOURCE' };
     if (!graph.organization) {
       return { error: 'Memory has no organization (user-owned memories are not git-synced)' };
     }
     const organization = graph.organization;
-
-    // DB-only mode — skip all git operations
-    if (!graph.source) {
-      console.log(`[syncGraphFromGithub] "${graphName}" is DB-only — skipping git sync`);
-      return {};
-    }
+    // Even an invalid stored source is not attempted without an installation. Keep this before
+    // validation: its failure writes a failed report, whereas a not-attempted result must write nothing.
+    // Once installed, #561 still validates the stored source before any Git operation.
+    if (!organization.githubInstallationId) return { notAttemptedReason: 'NO_INSTALLATION' };
 
     // #561 — re-validate the STORED value, not just the incoming one.
     //
@@ -436,14 +440,6 @@ const syncGraphFromGithubAsSystem = async (
     const localPath = pathUnderGraphsRoot(GRAPHS_PATH, organization.urn, slug);
     const ownerRepo = extractOwnerRepo(graph.source);
 
-    // 1. Get installation token (requires GitHub App installation)
-    if (!organization.githubInstallationId) {
-      console.warn(
-        `[syncGraphFromGithub] "${graphName}" — skipping: organization "${organization.urn}" has no githubInstallationId`,
-      );
-      return {};
-    }
-
     // Build per-org credentials if available
     const org = organization;
     const credentials = org.githubAppId && org.githubAppPrivateKeyEncrypted
@@ -458,7 +454,7 @@ const syncGraphFromGithubAsSystem = async (
     // Mirror writes use this same checkout. Hold their lock through the read:
     // otherwise a writer can switch to the write branch between checkout and
     // loadGraphFromFs, even when the read branch was selected correctly.
-    const { graph: fsGraph, edges, skippedInvalidLoc, unreadable, rootNode } = await withMirrorCheckoutLock(graph.id, async () => {
+    const { graph: fsGraph, edges, skippedInvalidLoc, unreadable, rootNode, sources = [] } = await withMirrorCheckoutLock(graph.id, async () => {
       try {
         await gitSync(cloneUrl, localPath, graph.readBranch ?? undefined);
         // Await the read so finally runs after its async success or failure.
@@ -467,6 +463,16 @@ const syncGraphFromGithubAsSystem = async (
         await restoreReadRemote(localPath, source);
       }
     });
+
+    // #3516: source identity is distinct from its derived loc. Census every
+    // parsed claim (including unusable-path claims) BEFORE first-claim moves.
+    const sourceOf = new Map(sources.map(source => [source.node, source.source]));
+    const idOccurrences = new Map<string, number>();
+    for (const id of [...fsGraph.nodes.map(node => node.id), ...skippedInvalidLoc.map(file => file.nodeId)]) {
+      if (id) idOccurrences.set(id, (idOccurrences.get(id) ?? 0) + 1);
+    }
+    const readmeSources = sources.filter(source => source.source.endsWith('/README.md')
+      && source.source !== '.hadron/README.md' && source.node !== rootNode);
 
     // 4. Upsert all nodes and edges into the database (transactional)
     // Git sync refuses encrypted memories under its authority transaction. Stamp
@@ -589,6 +595,10 @@ const syncGraphFromGithubAsSystem = async (
       // ancestors + exact loc) so a subtree move cannot relocate it after the
       // sync built its id map but before the edge insert.
       await acquireLockSet(tx, [
+        // #3516: exact candidate keys, path-derived before DB resolution, in
+        // this ONE acquisition. A top-level P has no strict ancestors.
+        ...readmeSources.flatMap(source => [source.node.loc!, source.node.loc! + ':README']
+          .map(loc => ({ memoryId: graph.id, loc }))),
         ...(rootNode ? [{ memoryId: graph.id, loc: rootNode.loc! }, { memoryId: graph.id, loc: '' }] : []),
         ...writableLocs.flatMap((loc) =>
           ancestorLocs(loc).map((ancestor) => ({ memoryId: graph.id, loc: ancestor })),
@@ -719,6 +729,65 @@ const syncGraphFromGithubAsSystem = async (
           ORDER BY r."id" FOR UPDATE OF r`;
         await lockMemoryConfigShared(tx, graph.id);
       }
+      // #3516 / ruling0231: positively identify live P/P:README pairs after
+      // the plaintext and prelock fences, before any loc-keyed overlay or move.
+      // Refuse only the child SOURCE; it remains present and keeps its row and
+      // stored edges. Its declarations are unapplied, not target-missing pending.
+      const readmeCollisions = new Map<string, { parent: Node; child: Node }>();
+      const readmeSourceRows = new Map<string, string>();
+      for (const candidate of readmeSources) {
+        const fileId = candidate.node.id;
+        if (!fileId || idOccurrences.get(fileId) !== 1) continue;
+        const parentLoc = candidate.node.loc!;
+        if (isProtected(parentLoc) || isProtected(parentLoc + ':README')) continue;
+        let rows = await tx.node.findMany({ where: {
+          memoryId: graph.id, deletedAt: null,
+          OR: [{ id: fileId }, { loc: parentLoc }],
+        } });
+        // No new row wait under the rulebook lock. With no rule lock, take
+        // candidate rows in id order, then re-read instead of trusting snapshots.
+        if (prelockedIds === null && rows.length) {
+          const ids = rows.map(row => row.id).sort();
+          await tx.$queryRaw`SELECT id FROM nodes WHERE id IN (${Prisma.join(ids)}) ORDER BY id FOR UPDATE`;
+          rows = await tx.node.findMany({ where: {
+            memoryId: graph.id, deletedAt: null,
+            OR: [{ id: fileId }, { loc: parentLoc }],
+          } });
+          if (rows.some(row => !ids.includes(row.id))) {
+            throw new EdgeEndpointPreflightStale('README candidate arrived after its row-lock scan');
+          }
+        }
+        const child = rows.find(row => row.id === fileId);
+        const parent = rows.find(row => row.loc === parentLoc);
+        if (!child || !parent || child.id === parent.id || child.memoryId !== graph.id || parent.memoryId !== graph.id
+          || child.deletedAt !== null || parent.deletedAt !== null || parent.loc !== parentLoc
+          || child.loc !== parentLoc + ':README') continue;
+        if (prelockedIds && (!prelockedIds.includes(child.id) || !prelockedIds.includes(parent.id))) {
+          throw new EdgeEndpointPreflightStale('README candidate arrived after the prelock scan');
+        }
+        // Parsed source presence, not successful application: a governed
+        // parent may be refused later and still owns its independent source.
+        const parentSources = sources.filter(source => source !== candidate && source.node.loc === parentLoc);
+        if (parentSources.length !== 1) continue;
+        const parentFile = parentSources[0].node;
+        // A loc-fallback parent can omit or carry a foreign id. Its stored
+        // row must still have no competing claimant elsewhere in this load:
+        // otherwise that file can move P after this classification.
+        if ((idOccurrences.get(parent.id) ?? 0) > (parentFile.id === parent.id ? 1 : 0)) continue;
+        if (parentFile.id) {
+          if (idOccurrences.get(parentFile.id) !== 1) continue;
+          const claimedParent = await tx.node.findUnique({ where: { id: parentFile.id }, select: { id: true, memoryId: true } });
+          // Existing ID-first semantics: a same-memory other row would move
+          // here, whereas absent/foreign ids and id-less files fall back to P.
+          if (claimedParent?.memoryId === graph.id && claimedParent.id !== parent.id) continue;
+        }
+        readmeCollisions.set(candidate.source, { parent, child });
+        // Only recognized pairs use source-qualified resolution; unrelated
+        // duplicate-loc imports retain their existing loc-keyed semantics.
+        readmeSourceRows.set(candidate.source, child.id);
+        readmeSourceRows.set(parentSources[0].source, parent.id);
+      }
+
       // Locs of files refused for their role: nothing of theirs is written,
       // including the edges they declare.
       const refusedRoleLocs = new Set<string>();
@@ -773,6 +842,7 @@ const syncGraphFromGithubAsSystem = async (
         // so the rows they name do not move this run (Codex on #1475).
         const protectedFileIds = new Set<string>();
         for (const n of fsGraph.nodes) {
+          if (readmeCollisions.has(sourceOf.get(n) ?? '')) continue;
           if (!n.id) continue;
           if (isProtected(n.loc!)) protectedFileIds.add(n.id);
           else if (!firstClaim.has(n.id)) firstClaim.set(n.id, n.loc!);
@@ -862,9 +932,24 @@ const syncGraphFromGithubAsSystem = async (
       // through another new file.
       const includeOverlay = {
         memoryId: graph.id,
-        contents: new Map(fsGraph.nodes.filter((n) => n.loc).map((n) => [n.loc!, n.content ?? null] as const)),
+        contents: new Map(fsGraph.nodes.filter((n) => n.loc && !readmeCollisions.has(sourceOf.get(n) ?? '')).map((n) => [n.loc!, n.content ?? null] as const)),
       };
+      const reportedReadmePairs = new Set<string>();
       for (const node of fsGraph.nodes) {
+        const source = sourceOf.get(node);
+        const collision = source ? readmeCollisions.get(source) : undefined;
+        if (collision) {
+          protectedRowIds.add(collision.child.id);
+          claimedFileIds.add(collision.child.id);
+          fileIdToRowId.set(collision.child.id, collision.child.id);
+          const pairKey = `${graph.id}\0${collision.parent.id}\0${collision.child.id}`;
+          if (!reportedReadmePairs.has(pairKey)) {
+            reportedReadmePairs.add(pairKey);
+            heldMoves.push(`${collision.child.loc} → ${collision.parent.loc}`);
+            reportEntries.push({ kind: 'held_move', loc: collision.parent.loc, fromLoc: collision.child.loc, code: 'MOVE_HELD' });
+          }
+          continue;
+        }
         const loc = node.loc!;
         if (isProtected(loc)) {
           // The file is PRESENT but intentionally skipped. Preserve the row it
@@ -1513,12 +1598,13 @@ const syncGraphFromGithubAsSystem = async (
       }
 
       for (const edge of edges) {
+        if (edge.sourceFile && readmeCollisions.has(edge.sourceFile)) continue;
         if (refusedRoleLocs.has(edge.sourceLoc) || deferredLocs.has(edge.sourceLoc) || refusedMoveLocs.has(edge.sourceLoc)) continue;
         if (!fileIdToRowId.has(edge.targetId) && unappliedFileIds.has(edge.targetId)) continue;
         // Resolve endpoints through the remaps: the source is always a file
         // in this repo (by loc); the target prefers this repo's claimant of
         // the referenced id, else stays raw (a cross-repo target).
-        const edgeSourceId = locToRowId.get(edge.sourceLoc) ?? edge.sourceId;
+        const edgeSourceId = (edge.sourceFile ? readmeSourceRows.get(edge.sourceFile) : undefined) ?? locToRowId.get(edge.sourceLoc) ?? edge.sourceId;
         const edgeTargetId = fileIdToRowId.get(edge.targetId) ?? edge.targetId;
         const sourceExists = await tx.node.findUnique({
           where: { id: edgeSourceId, deletedAt: null },

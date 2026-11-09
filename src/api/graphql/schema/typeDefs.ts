@@ -215,12 +215,12 @@ export const typeDefs = `#graphql
     memoryIds: [ID!]
     "Restrict by memory class. SYSTEM is excluded by default; passing this (or naming a system memory in memoryIds) overrides that."
     memoryClasses: [MemoryClass!]
-    "An explicit 'comment' with no contentScope searches comments (as COMMENTS)."
+    "Without it, system and chat-message nodes are left out (hrn:node:hadronmemory.com:specs:cor:api:090:02); naming one of them returns it. record nodes are never left out. An explicit 'comment' with no contentScope searches comments (as COMMENTS)."
     nodeType: String
     """
     #3113 — an explicit list of node types, a union: only nodes whose type is in the list
     (hrn:node:hadronmemory.com:specs:cor:api:090:02). It narrows, ANDs every other filter and, being
-    explicit, replaces the default that leaves out system nodes; it never lifts the memory-class
+    explicit, replaces the default that leaves out system and chat-message nodes; it never lifts the memory-class
     default, access, deleted rows or inheritance. Values are exact and case-sensitive; an unknown
     value matches nothing. null is the same as omitted. Refused with BAD_USER_INPUT: an empty list,
     both nodeType and nodeTypes (an empty string counts as set), more than 20 entries (counted
@@ -1565,6 +1565,8 @@ export const typeDefs = `#graphql
     authorship: NodeAuthorship
     "#1326 — advisory validation for this exact revision. A report for an older revision is STALE."
     contentValidation: NodeContentValidationStatus!
+    "#3659 (hrn:node:hadronmemory.com:specs:cor:dmo:160:01) — the validation tasks a content-validation report for this node may name now, as the recorder judges them for this caller. Null on an inherited, install-concealed or deleted node, or one whose memory fails the node-content gate."
+    validationTasks: NodeValidationTaskSet
     "#1591 — whether the current revision is approved, and the latest approval on record."
     approvalStatus: NodeApprovalStatus!
     "#1591 — whether this node is minted, and the record of it."
@@ -1989,6 +1991,15 @@ export const typeDefs = `#graphql
     ended or deleted session.
     """
     lapsesAt: DateTime
+    """
+    The session's latest 50 usage events that touched no memory or a memory the
+    caller can read (hrn:node:hadronmemory.com:specs:cor:acl:090:01, ruling 0249).
+    In the caller's own session every event is whole. In any other session, an
+    event the caller did not record (another user's, or the App's) shows volume
+    only: userId, organizationId and actionArgs are null, appId is kept only when
+    it is the calling App's own, and sessionId is this session's id. Admins get the
+    same, and an impersonated read is not the target's own session.
+    """
     events: [UsageEvent!]!
     """
     #2047 / hrn:node:hadronmemory.com:specs:cor:agt:040:03: the boot prompt this session was served at its bind. Readable by whoever may read the
@@ -2114,16 +2125,45 @@ export const typeDefs = `#graphql
 
   enum NodeContentValidationOutcome { PASS FAIL ERROR }
   enum NodeContentValidationState { UNVALIDATED STALE PASS FAIL ERROR }
+  "#1332 (hrn:node:hadronmemory.com:specs:cor:dmo:160:01) — CHECKED: R's recorded author was compared with the reporter and differs, never a claim of independence. AUTHOR_UNKNOWN: there was nothing recorded to compare."
+  enum NodeContentValidationAuthorCheck { CHECKED AUTHOR_UNKNOWN }
   type NodeContentValidationReport {
     nodeRevision: Int!
     validationTaskRef: String
     validationTaskRevision: Int
     outcome: NodeContentValidationOutcome!
     reportedAt: DateTime!
+    "#1332 — the author check made when the report was recorded. Null on a report recorded before #1332."
+    authorCheck: NodeContentValidationAuthorCheck
+  }
+  "#1332 — the answer of recordNodeContentValidationReport."
+  type NodeContentValidationReportReceipt {
+    "The node the report is about."
+    nodeId: ID!
+    "True when an earlier report with the same runId, from the same reporter, for the same node revision and task revision, was returned and nothing was written."
+    replayed: Boolean!
+    report: NodeContentValidationReport!
+    "The validation state of the node's current revision after this call. A report for an older revision leaves it UNVALIDATED or STALE."
+    state: NodeContentValidationState!
   }
   type NodeContentValidationStatus {
     state: NodeContentValidationState!
     latestReport: NodeContentValidationReport
+  }
+  "#3659 (hrn:node:hadronmemory.com:specs:cor:dmo:160:01) — READY: a report may name any listed task at revisions 1 to its revision. NOT_CONFIGURED: no rule applies. BROKEN: a rule's task reference is broken, so every report is refused, including one naming a listed task. UNAVAILABLE: the caller does not write the memory, or cannot read a task a rule names (ruling 0199); nothing is listed."
+  enum NodeValidationTaskSetState { READY NOT_CONFIGURED BROKEN UNAVAILABLE }
+  "#3659 — one task a report may name, or one broken rule. A broken entry has every other field null."
+  type NodeValidationTaskEntry {
+    broken: Boolean!
+    taskId: ID
+    "The canonical node URN. A report may name this or taskId."
+    taskRef: String
+    "The task's current revision, the newest a report may name."
+    revision: Int
+  }
+  type NodeValidationTaskSet {
+    state: NodeValidationTaskSetState!
+    tasks: [NodeValidationTaskEntry!]!
   }
 
   """
@@ -3170,12 +3210,16 @@ export const typeDefs = `#graphql
     when a later install is readable. Null is not proof that nothing is
     installed; \`appAgents\` lists every install, an entry whose \`agent\` is null
     being an installed Agent withheld from this caller.
+
+    A caller who reaches a user-owned App only as an owner-role member gets null on
+    both for a different reason: WITHHELD (#2089). Render it as unknown.
     """
     agentId: ID
     agent: Agent
     """
     SOFT-DEPRECATED convenience read: the FIRST installed Agent's canonical
     URN, matching agentId / agent. Use appAgents for the full install roster.
+    null can also mean WITHHELD from this caller (#2089), not only "none".
     An installed agent stays AUTHOR-ROOTED forever, so this is simply that
     Agent's own URN:
     hrn:agent:<author-org>:<agent-slug>. Two orgs installing same-slug
@@ -3192,8 +3236,10 @@ export const typeDefs = `#graphql
     installedAgentUrn: String
     trainingMode: Boolean!
     surfaces: [String!]!
-    members: [AppMember!]!
-    memberCount: Int!
+    "The App's members. null means WITHHELD from this caller (#2089): a user-owned App's owner-role member reaches the App record but not its roster. Never read null as an empty roster. The App's owning user, and callers of an org-owned App, get the real list (a real empty list included)."
+    members: [AppMember!]
+    "Member count. null means WITHHELD from this caller (#2089), never zero; the real count (a real 0 included) for callers who may see the roster."
+    memberCount: Int
     """
     The App's SHARED app-class memory (#965) — the team space the shared/team
     chat and the worklog live in, provisioned at install since #951. This is
@@ -3215,9 +3261,12 @@ export const typeDefs = `#graphql
     agentTools: [String!]!
     # 036-ai-service-config: the three AI fields below are registry-backed
     # reads of the App's config named 'default' (legacy columns dropped).
+    "null can mean WITHHELD from this caller (#2089), not only that it is not configured."
     aiProvider: String
+    "null can mean WITHHELD from this caller (#2089), not only that it is not configured."
     aiModel: String
-    hasAiApiKey: Boolean!
+    "Whether an AI API key is configured for this App. null means WITHHELD from this caller (#2089): only the owning user of a user-owned App holds its AI configuration. Never read null as false; a real false means no key."
+    hasAiApiKey: Boolean
     expiresAt: DateTime
     # App-original fields
     createUserPermission: CreateUserPermission!
@@ -3242,8 +3291,12 @@ export const typeDefs = `#graphql
     import of a physically installed Agent (#2168). Derived installations do not
     write an AppAgent row. One App credential
     routes to all of them via the URN supplied in the request.
+
+    null means WITHHELD from this caller (#2089): a user-owned App's
+    owner-role member does not see its installation roster. Never read null as
+    no installed Agents.
     """
-    appAgents: [AppAgent!]!
+    appAgents: [AppAgent!]
     """
     023-app-shape: convenience list of the installed Agents this caller may
     read: the non-null Agent entries of \`appAgents\`. A withheld install is
@@ -3253,8 +3306,10 @@ export const typeDefs = `#graphql
     one entry per install). Order matches the readable non-null entries of
     \`appAgents\`: served installation creation time, then Agent id. When any
     installed Agent is withheld, every entry shares the App date, so order is by id.
+
+    null means WITHHELD from this caller (#2089), never no Agents.
     """
-    agents: [Agent!]!
+    agents: [Agent!]
     "Key inventory, only for whoever manages the App as themselves, never through a worker session, instructed or not: a nested field carries no instruction, so an instructed worker lists through appKeys / appKeysPage (hrn:node:hadronmemory.com:specs:cor:dmo:050:05; hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6)."
     keys: [AppKey!]!
     createdAt: DateTime!
@@ -4301,7 +4356,7 @@ export const typeDefs = `#graphql
     agent: Agent
     syncStatus: SyncStatus!
     syncError: String
-    "Version 1 JSON outcome of the last sync: partial, failed or unknown. Null after a completed clean sync; consult lastSyncedAt/syncStatus for a never-synced memory. Same Memory-record read gate applies. Git sync: hrn:node:hadronmemory.com:specs:cor:int:010:01."
+    "Versioned JSON outcome of the last sync (v1, or v2 when an attestation-refused entry requires it): partial, failed or unknown. Null after a completed clean sync; consult lastSyncedAt/syncStatus for a never-synced memory. Same Memory-record read gate applies. Git sync: hrn:node:hadronmemory.com:specs:cor:int:010:01."
     lastSyncReport: String
     pendingEdgeCount: Int!
     lastSyncedAt: DateTime
@@ -4351,6 +4406,8 @@ export const typeDefs = `#graphql
     memoryId: ID!
     "Role-ascending."
     rules: [NodeRoleRule!]!
+    "#3426 — org-default rules skipped when this memory was created (a reference deleted, unreadable to the organization or not a task). Managers only, like the config. Proposed addition to hrn:node:hadronmemory.com:specs:cor:api:290."
+    defaultSkips: [MemoryConfigDefaultSkip!]!
     createdAt: DateTime
     createdBy: ID
     updatedAt: DateTime
@@ -4437,7 +4494,23 @@ export const typeDefs = `#graphql
     deleted: Boolean!
   }
 
-  "#1325 — a non-fatal finding about a saved rule. Never changes the mutation's success."
+  """
+  #3426 — one org-default rule skipped at memory creation. Stores no task URN and no state: \`ref\` and \`refState\` are the
+  template rule's reference as the CALLING manager sees it now. Null/BROKEN once the template or rule is gone.
+  """
+  type MemoryConfigDefaultSkip {
+    role: String!
+    "authorTask, validationTask or descriptionNode."
+    field: String!
+    "REFERENCE_UNAVAILABLE: deleted, unreadable to the organization, or not a task."
+    reason: String!
+    sourceTemplate: NodeRoleRuleSourceTemplate
+    ref: String
+    refState: NodeRoleRuleRefState!
+    createdAt: DateTime!
+  }
+
+  "#1325 — a non-fatal finding about a saved rule. Never changes the mutation's success. Today the only code is TASK_LESS_VISIBLE (#1327): a task the saver can read that some reader of the memory may not; taskUrn and taskState are the saver's own reference projection, so a task the saver cannot read is named by state alone. It is also what a save answers when that check could not be completed after the rule was saved (containment not established, not proof that a reader is missing): the save still succeeds, and taskUrn and taskState are then null when the saver's own projection was unavailable. An App write or automation read grant on the memory counts as a reader that cannot be proven to read the task."
   type MemoryConfigWarning {
     code: String!
     role: String!
@@ -4468,6 +4541,8 @@ export const typeDefs = `#graphql
     description: String
     "Applied as locked rules (#1334)."
     required: Boolean!
+    "#3426 — applied to every new org knowledge/group memory at creation. Always false for a non-organization owner. Proposed addition to hrn:node:hadronmemory.com:specs:cor:api:290."
+    orgDefault: Boolean!
     ownerType: MemoryConfigTemplateOwnerType!
     "ID of the owning organization, user or App; null for the server."
     ownerId: ID
@@ -4517,6 +4592,15 @@ export const typeDefs = `#graphql
     name: String!
     description: String
     required: Boolean
+    """
+    #3426 — an ORGANIZATION-owned template applied to every new org \`knowledge\` or \`group\` memory at its creation
+    (\`createMemory\` only; never clone, extract, App, install, agent or chat creation). A starting configuration, not a
+    boundary. User-, App- and server-owned templates refuse true (BAD_USER_INPUT, reason ORG_DEFAULT_ORG_ONLY).
+    At most 10 live defaults per organization (ORG_DEFAULT_LIMIT). Setting it true validates every reference as readable
+    to the ORGANIZATION as well as the saver (NODE_NOT_FOUND otherwise); clearing it never validates.
+    Proposed addition built on the #3426 gate to hrn:node:hadronmemory.com:specs:cor:api:290.
+    """
+    orgDefault: Boolean
     "Each role at most once (NODE_ROLE_RULE_EXISTS)."
     rules: [CreateNodeRoleRuleInput!]
   }
@@ -4530,12 +4614,21 @@ export const typeDefs = `#graphql
     name: String
     description: String
     required: Boolean
+    """
+    #3426 — an ORGANIZATION-owned template applied to every new org \`knowledge\` or \`group\` memory at its creation
+    (\`createMemory\` only; never clone, extract, App, install, agent or chat creation). A starting configuration, not a
+    boundary. User-, App- and server-owned templates refuse true (BAD_USER_INPUT, reason ORG_DEFAULT_ORG_ONLY).
+    At most 10 live defaults per organization (ORG_DEFAULT_LIMIT). Setting it true validates every reference as readable
+    to the ORGANIZATION as well as the saver (NODE_NOT_FOUND otherwise); clearing it never validates.
+    Proposed addition built on the #3426 gate to hrn:node:hadronmemory.com:specs:cor:api:290.
+    """
+    orgDefault: Boolean
     rules: [CreateNodeRoleRuleInput!]
   }
 
   type MemoryConfigTemplatePayload {
     template: MemoryConfigTemplate!
-    "Empty until #1327 adds its visibility warnings."
+    "Always empty for a template save: less-visible-task warnings are computed when a template is applied to a memory (there is no target memory here)."
     warnings: [MemoryConfigWarning!]!
   }
 
@@ -4567,7 +4660,7 @@ export const typeDefs = `#graphql
     dryRun: Boolean!
     "One per template rule, role-ascending."
     entries: [MemoryConfigApplyEntry!]!
-    "Empty until #1327 adds its visibility warnings."
+    "TASK_LESS_VISIBLE for each rule this apply wrote, or on a dry run would write. A dry run and the real apply report the same warnings."
     warnings: [MemoryConfigWarning!]!
   }
 
@@ -4603,7 +4696,7 @@ export const typeDefs = `#graphql
 
   type NodeRoleRulePayload {
     rule: NodeRoleRule!
-    "Empty until #1327 adds its visibility warnings."
+    "TASK_LESS_VISIBLE for each task reference of the saved rule that a reader of this memory may not be able to read. Advisory: it never changes the save. Empty for unlock."
     warnings: [MemoryConfigWarning!]!
   }
 
@@ -4639,6 +4732,24 @@ export const typeDefs = `#graphql
     writers: NodeRoleWriters
     validateBy: ContentValidator
     enabled: Boolean
+  }
+
+  "#3456 - one row of memoryLocSegments: a next loc segment under the parent, and the memory it comes from."
+  type LocSegment {
+    "The next segment name (no colon)."
+    segment: String!
+    "True when an eligible node sits at exactly <parent>:<segment> in this memory; false for a branch that only has nodes below it."
+    hasNode: Boolean!
+    "The memory the row comes from (an inherited system memory names itself)."
+    memoryId: ID!
+  }
+
+  "#3456 - one page of memoryLocSegments."
+  type LocSegmentsPage {
+    items: [LocSegment!]!
+    "Opaque. Null when hasMore is false."
+    endCursor: String
+    hasMore: Boolean!
   }
 
   "#2177 - one page of Agent.extendedBy."
@@ -5085,6 +5196,7 @@ export const typeDefs = `#graphql
   chat or run itself would get. BOOT_PROMPT_NOT_SIGNED cannot occur until an organisation can switch signing on (#1614).
   """
   enum BootPromptServeRefusal {
+    BOOT_PROMPT_INSTALL_LICENSE_INACTIVE
     BOOT_PROMPT_NOT_SET
     BOOT_PROMPT_TARGET_DELETED
     BOOT_PROMPT_NOT_APPROVED
@@ -5656,6 +5768,13 @@ export const typeDefs = `#graphql
     UNSET
     NO_TEAM
     REPORTS_TO
+  }
+
+  "#3599: a non-reserving delete preview. No census detail is returned."
+  type DeleteWorkerPreview {
+    workerId: ID!
+    "Always true: the real delete still requires the caller's explicit external-attribution confirmation."
+    attestationRequired: Boolean!
   }
 
   """
@@ -6413,7 +6532,15 @@ export const typeDefs = `#graphql
   is created by the App's first customisation: a createNode through this target
   finds-or-creates it in the same transaction as the write, so a refused write
   leaves nothing behind. Only whoever manages the App may write through it, and
-  only while the App is live and the Agent installed.
+  only while the App is live and the Agent installed. After the App participant
+  and manager gates, both createNode(input.install) and updateNode(input.install)
+  refuse an Agent held only through an import without the App organisation's
+  active grant with AGENT_ORG_GRANT_REQUIRED, and an absent Agent with
+  AGENT_NOT_INSTALLED. These refusals write nothing; physical install rows keep
+  their existing behavior (hrn:node:hadronmemory.com:specs:cor:agt:040:15).
+  updateNode never creates an install memory: an installed, licensed Agent with
+  no customisation memory answers INSTALL_MEMORY_NOT_FOUND. A detached retained
+  memory does not make an Agent installed.
   """
   input InstallTargetInput {
     appRef: String!
@@ -8057,6 +8184,32 @@ export const typeDefs = `#graphql
     reason: SpecReferenceProblem
   }
 
+  "#1302 — a Feature's specs as one document (see Query.specDocument)."
+  type SpecDocument {
+    memoryId: ID!
+    "The citation the document was built for."
+    loc: String!
+    "The time in the text's header."
+    renderedAt: DateTime!
+    "The whole document, one Markdown string (hrn:node:hadronmemory.com:specs:cor:spc:030:02). Every client shows this string unchanged."
+    markdown: String!
+    "One entry per spec the document covers, in document order, the Feature first."
+    entries: [SpecDocumentEntry!]!
+  }
+
+  "#1302 — one spec in a document, read as the caller would read the node."
+  type SpecDocumentEntry {
+    loc: String!
+    urn: String!
+    name: String!
+    revision: Int!
+    "The body as an ordinary read returns it (includes resolved under the caller's own access). Null for a placeholder."
+    content: String
+    isPlaceholder: Boolean!
+    approvalStatus: NodeApprovalStatus!
+    mintStatus: NodeMintStatus!
+  }
+
   "#3222 (#2213 S3) — one page of a spec-reference list, counted over the whole list."
   type SpecReferencePage {
     items: [SpecReference!]!
@@ -8156,9 +8309,10 @@ export const typeDefs = `#graphql
 
   """
   #1448 — the mint report. blockers must all be gone for a mint to succeed.
-  staleAbstracts are listed separately; they block only when
-  staleAbstractsBlock is true (once abstract re-affirmation is saved and
-  deployed, server#1408). openQuestions never block.
+  staleAbstracts are listed separately, over every node in this mint's scope
+  (a minted, unchanged node is not counted; spec validate audits the whole
+  memory); they block only when staleAbstractsBlock is true. openQuestions
+  never block.
   """
   type SpecCorpusMintReport {
     memoryId: ID!
@@ -8437,8 +8591,9 @@ export const typeDefs = `#graphql
     no workerRefs, no after, and no next page (ask for first: 200; a lane larger than a page cannot declare). A worker whose host is lost has no serving lane until the host returns. Setting a stop signal is refused (STOP_SIGNAL_UNAVAILABLE)
     while any worker it would cover is on a lane with no fresh declaration.
     #3321: the manager's held worker reads the manager scope on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event per admitted call, ids only; it never reads its holder's personal scope, and never acknowledges.
+    #3455: preview: true is the no-spend read (default false = the read above, unchanged). It reserves no wake and counts no budget use (hrn:node:hadronmemory.com:specs:cor:agt:080:15), withholds nothing and posts no budget notice, declares no stop lane, and returns an empty proof, which acknowledges nothing. It reads exactly what the spending read may read, with the same reach and refusals; an App key's preview is still a read the key is recorded for (hrn:node:hadronmemory.com:specs:cor:agt:080:22).
     """
-    dueWakes(appRef: String!, workerRefs: [String!], first: Int, after: String, accepts: [WakeKind!], instruction: ActInstructionInput): DueWakePage!
+    dueWakes(appRef: String!, workerRefs: [String!], first: Int, after: String, accepts: [WakeKind!], instruction: ActInstructionInput, preview: Boolean): DueWakePage!
     """
     #2022 (hrn:node:hadronmemory.com:specs:cor:agt:090:07) — an App's stop signals, oldest set first. A person in the App sees
     every signal (worker narrows to those covering that worker now); a worker's session sees the live ones covering it; a
@@ -8943,12 +9098,17 @@ export const typeDefs = `#graphql
     Either bound may be omitted; invalid bounds or since >= until are BAD_USER_INPUT.
     Windowing does not change scope (hrn:node:hadronmemory.com:specs:cor:acl:090:01).
 
-    Access control (#250): results are always scoped to memories the caller
-    may read (org membership / subscriptions / public / owned personal+private
-    per spec 034; ADMIN/OWNER see all EXCEPT another user's personal/private
-    memories and, per spec 047, another user's user-owned memories). A
-    memoryId the caller can't read returns [] (no existence leak); the global
-    form (no memoryId) is bounded to the readable set, never cross-tenant.
+    Scope (#2817, hrn:node:hadronmemory.com:specs:cor:acl:090:01): naming NO resource (no memoryId,
+    nodeId or loc) reads the caller's OWN activity, the events attributed to the calling user in any
+    memory or none. An App key has no own activity and gets an empty list, not an error. Naming a resource
+    reads every principal's events there, gated on READ access to the memory (#250: org membership /
+    subscriptions / public / owned personal+private per spec 034; ADMIN/OWNER see all EXCEPT another
+    user's personal/private memories and, per spec 047, another user's user-owned memories). A
+    memoryId the caller can't read answers MEMORY_NOT_FOUND exactly as a missing one
+    (hrn:node:hadronmemory.com:specs:cor:api:140:03). An empty resource scope never falls back to own
+    activity. An App key's resource read discloses volumes only: userId, sessionId, organizationId and
+    actionArgs are null, and appId is null unless it is the key's own App. limit pages as usageEventsPage does: default 20, at most 200
+    (hrn:node:hadronmemory.com:specs:cor:api:120:04).
 
     memoryId is a memory identifier — accepts the memory's ID or URN. Results
     are scoped on the denormalized UsageEvent.memoryId column (#796), so an
@@ -8972,17 +9132,29 @@ export const typeDefs = `#graphql
     memories; not existence-checked. The migration target for the deprecated
     nodeUsage(loc:) above — same match, same gate (PR-986 review, Codex P2).
     Mutually exclusive with nodeId (BAD_USER_INPUT when both are passed).
+
+    appKey (#2944, hrn:node:hadronmemory.com:specs:cor:acl:090:01 "Filtering by App key") — an App key's id.
+    Keeps only the events made by requests that key authenticated; events made without a key, and every event
+    recorded before keys were attributed, are never returned. Open to whoever manages the key's App
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:12, acting as themselves) and to the key itself; anyone else
+    gets APP_KEY_NOT_FOUND, exactly as for a key that does not exist, before any memory or node is resolved.
+    A manager sees the key's events only in memories the manager can read (no resource named: every such
+    memory; a named memory still needs READ). The key, naming no resource, sees its own events in the memories
+    it can read now, plus its events attributed to no memory (ruling 0254); naming a node, loc or memory, it sees
+    only its own events there, in memories it can read. It composes with the window, type and resource filters.
+    Rows stay volume-only as above.
     """
-    usageEvents(type: String, memoryId: ID, nodeId: ID, loc: String, since: DateTime, until: DateTime, limit: Int, offset: Int): [UsageEvent!]!
+    usageEvents(type: String, memoryId: ID, nodeId: ID, loc: String, since: DateTime, until: DateTime, appKey: ID, limit: Int, offset: Int): [UsageEvent!]!
     """
-    #2212 - \`usageEvents\` as a page: the same READER gate, the same loc/nodeId rules and the same readable-memory
-    scope, ordered newest first with an id tiebreak, with the windowed total.
+    #2212 - \`usageEvents\` as a page: the same principal gate, the same loc/nodeId rules and the same two scopes
+    (own activity when no resource is named, #2817), ordered newest first with an id tiebreak, with the windowed total.
     since is inclusive and until is exclusive: since <= createdAt < until.
     Bounds must be ISO date-times with Z or an explicit offset.
     Either bound may be omitted; invalid bounds or since >= until are BAD_USER_INPUT.
     hrn:node:hadronmemory.com:specs:cor:acl:090:01; paging: hrn:node:hadronmemory.com:specs:cor:api:120:04. Sizes as \`tickersPage\`.
+    appKey filters by an App key exactly as on usageEvents (#2944), and the total counts the filtered rows.
     """
-    usageEventsPage(type: String, memoryId: ID, nodeId: ID, loc: String, since: DateTime, until: DateTime, limit: Int, offset: Int): UsageEventPage!
+    usageEventsPage(type: String, memoryId: ID, nodeId: ID, loc: String, since: DateTime, until: DateTime, appKey: ID, limit: Int, offset: Int): UsageEventPage!
 
     """
     Revision history for a node, most recent first.
@@ -9665,6 +9837,19 @@ export const typeDefs = `#graphql
     appNodesPage(appRef: ID!, filter: NodeFilter, limit: Int, offset: Int): NodePage!
 
     """
+    #3456 (hrn:node:hadronmemory.com:specs:cor:api:090:05): one page of the distinct next loc segments
+    under parentLoc ("" for the root), including a branch with no node of its own. Reads over exactly
+    the nodes findNodes would read for the same memoryIds with no query: the same readable set, access
+    intersection, defaults and inheritance. memoryIds is required and non-empty (an empty list is
+    BAD_USER_INPUT); when no entry survives the gate the answer is the empty page, never the caller's
+    default scope. An unreadable, unresolvable or empty memory, and a parent with nothing at or under
+    it, all give the identical empty page. Rows are grouped by memory id; inside a memory, node-backed
+    segments with a position come first by position, then every other segment by name (ruling 0217).
+    Default page 20, cap 200 (larger is served as 200); after is the previous page's endCursor.
+    """
+    memoryLocSegments(memoryIds: [ID!]!, parentLoc: String!, limit: Int, after: String): LocSegmentsPage!
+
+    """
     #2190 (hrn:node:hadronmemory.com:specs:cor:dmo:050:17): the memories appNodes
     reads for this caller, one row per memory with every reason it is in scope,
     ordered by memoryUrn and paged (default 20, cap 200; over the cap returns a
@@ -10324,6 +10509,18 @@ export const typeDefs = `#graphql
     effectiveModelGroups(appRef: ID!): [EffectiveModelGroup!]!
 
     """
+    #3599: preview deleteWorker without deleting anything: the same act gate and typed refusals
+    (WORKER_NOT_FOUND, FORBIDDEN, WORKER_IN_USE), nothing reserved. The real delete still requires
+    confirmNoExternalAttribution and may refuse if anything changed
+    (hrn:node:hadronmemory.com:specs:cor:agt:020:03). A validated instruction claim is recorded
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:12); the target is its subject. If the delete wins
+    the race, the answer is WORKER_NOT_FOUND. WORKER_REFERENCE_NOT_FOUND refuses a claim only when the
+    acting worker or session no longer exists. No census detail, removal plan, attestation bypass or
+    durable lock/lease is returned.
+    """
+    deleteWorkerPreview(workerRef: ID!, instruction: ActInstructionInput): DeleteWorkerPreview!
+
+    """
     Dry-run castWorker (#964): run the cast's exact resolution — same
     arguments, same typed refusals (WORKER_AGENT_NOT_FOUND / _AMBIGUOUS /
     _NOT_INSTALLED, WORKER_NAME_REQUIRED, WORKER_NAME_TAKEN,
@@ -10343,7 +10540,7 @@ export const typeDefs = `#graphql
       agentRef: ID
       role: String
       name: String
-      "Worker reference to report to. Requires worker-staffing access and App management. Supply either reportsTo or noTeam: true, never both. Null or a blank reference is invalid. Returns WORKER_REPORTING_CAST_UNAVAILABLE when casting with a reporting head is unavailable."
+      "Worker reference to report to. Requires worker-staffing access and App management. Supply either reportsTo or noTeam: true, never both. Null or a blank reference is invalid."
       reportsTo: ID
       "Set to true to record that the worker has no reporting head; do not supply reportsTo as well. Null or false is invalid. Omitting both arguments records no choice (UNSET) when omission is allowed; otherwise the request is refused with WORKER_TEAM_CHOICE_REQUIRED."
       noTeam: Boolean
@@ -10510,6 +10707,20 @@ export const typeDefs = `#graphql
     work: each page still scans the whole corpus. memoryRef accepts the memory's ID or URN.
     """
     specBacklinksPage(memoryRef: ID!, loc: String!, limit: Int, offset: Int): SpecReferencePage!
+
+    """
+    #1302 (R218, hrn:node:hadronmemory.com:specs:cor:spc:030:01) — a Feature's specs as ONE ordered document, built on
+    the server for the CLI and the portal. loc names the Feature (any live spec is accepted, and the document starts with
+    it); the document covers it and its live descendants on colon boundaries. markdown is the whole document in the form
+    of hrn:node:hadronmemory.com:specs:cor:spc:030:02; entries are the same specs with their records, in document order. Same read gate and refusals as
+    specBacklinks: an unreadable and a missing memory answer alike, and an encrypted readable one refuses with
+    SPEC_CORPUS_ENCRYPTED_UNSUPPORTED. A readable memory with no live spec at loc answers NODE_NOT_FOUND (a deleted spec
+    and a never-written loc alike). Over 300 specs it refuses with SPEC_DOCUMENT_TOO_LARGE and extensions.cap, and never
+    returns part of the document. Reads only: nothing is stored, approved or minted. The render time is the only part of
+    the text that differs between two calls over the same specs, approval and mint state, includes, caller access and
+    portal origin. No MCP tool offers this.
+    """
+    specDocument(memoryRef: ID!, loc: String!): SpecDocument!
 
     """
     #1449 — references in a spec corpus (any memory since #1591) that do not reach a written
@@ -10790,7 +11001,8 @@ export const typeDefs = `#graphql
     """
     #2645 — edit descriptive fields using assignment authority (Proposed Editing rule,
     hrn:node:hadronmemory.com:specs:cor:agt:050:09). Owner, reporting-chain coordinator or App manager;
-    never an assignee alone or an App key. Ended tasks refuse TASK_ENDED. Omitted fields stay unchanged;
+    an assignee alone may write only properties (hrn:node:hadronmemory.com:specs:cor:agt:050:28) and references
+    (#3441, ruling 0233); any other field it names refuses the whole call TASK_NOT_OWNER. Never an App key. Ended tasks refuse TASK_ENDED. Omitted fields stay unchanged;
     empty optional fields clear, tags/requirements replace whole. An edit is not progress and clears no wake.
     Source is fixed. Event carries changed field names only (hrn:node:hadronmemory.com:specs:cor:agt:050:11).
     #3323: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.
@@ -10902,18 +11114,15 @@ export const typeDefs = `#graphql
     """
     setWorkerWakeSettings(workerRef: String!, input: WorkerWakeSettingsInput!, instruction: ActInstructionInput): WorkerWakeSettings!
     """
-    S7 (#2023, R85) — isolate a worker until a time (default 2 hours, at most 7 days; a later time extends, an earlier one shortens).
-    Only a person managing the App or holding the worker, as themselves or, on their instruction, through their held worker
-    (hrn:node:hadronmemory.com:specs:cor:agt:080:29, ruling 0118), recorded as one app.manager-act event, ids only. Refusals, in the order they are checked:
-    an unknown worker, or one the caller cannot read (a pure App key among them), is WORKER_NOT_FOUND; a worker session with no
-    instruction (even a manager's) is WORKER_ISOLATION_FORBIDDEN; while S7 activation is off, setting an isolation is WORKER_ISOLATION_UNAVAILABLE
-    (clearing is unaffected), so an ordinary person gets this before the manager/holder check; an impersonation that reaches the
-    write is refused FORBIDDEN (read-only); a participant who neither manages the App nor holds the worker is
-    WORKER_ISOLATION_FORBIDDEN. Never touches the worker's own pause.
+    Deprecated compatibility door: isolation is removed; this call retains its existing audience and refuses without writing.
+    #3606 phase-1 compatibility door. Isolation is removed. Refusals retain the source-exact order:
+    an unknown worker, or one the caller cannot read (a pure App key among them), is WORKER_NOT_FOUND;
+    a worker session with no instruction is WORKER_ISOLATION_FORBIDDEN; everyone else receives
+    WORKER_ISOLATION_UNAVAILABLE before the manager/holder check. The until input is not parsed and nothing is written.
     """
-    isolateWorker(workerRef: String!, until: DateTime, instruction: ActInstructionInput): WorkerWakeSettings!
-    "S7 — lift an isolation (same audience). Clearing when none is set changes nothing. #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only."
-    clearWorkerIsolation(workerRef: String!, instruction: ActInstructionInput): WorkerWakeSettings!
+    isolateWorker(workerRef: String!, until: DateTime, instruction: ActInstructionInput): WorkerWakeSettings! @deprecated(reason: "Isolation was removed; compatibility door will be removed after client migration (#3606).")
+    "Deprecated no-op: retains the original locked target and manager-or-holder audience (hrn:node:hadronmemory.com:specs:cor:agt:080:29, ruling 0118). Impersonation remains FORBIDDEN; an uninstalled App remains APP_UNINSTALLED. Authorized callers receive current wake settings with no isolation, exemption, or manager-act write."
+    clearWorkerIsolation(workerRef: String!, instruction: ActInstructionInput): WorkerWakeSettings! @deprecated(reason: "Isolation was removed; compatibility door will be removed after client migration (#3606).")
     "#1748 — record that wakes were delivered (hrn:node:hadronmemory.com:specs:cor:agt:080:16). Never moves a read position."
     acknowledgeWakes(proofs: [String!]!): AcknowledgeWakesResult!
     """
@@ -11630,6 +11839,23 @@ export const typeDefs = `#graphql
     cached session key.
     """
     approveNode(nodeRef: ID!, revision: Int): NodeApprovalReceipt!
+    """
+    #1332 (hrn:node:hadronmemory.com:specs:cor:dmo:160:01) — record the result of running the node's validation task on revision nodeRevision of the node. Advisory: it never edits the node or blocks a write, and a report for an older revision is stored as history without changing the current revision's state. validationTaskRef is the task the node's role rule names NOW (its id or node URN; read it from NodeRoleRule.validationTask) and validationTaskRevision the task revision that ran.
+
+    Any writer of the node's memory may record one except the author of nodeRevision, decided from its authorship stamp: for HUMAN, that person acting as themselves through any credential is refused (a worker they hold may report); for TASK, a headless run whose entry task is the author task is refused (another run is CHECKED; any other caller is AUTHOR_UNKNOWN); with no stamp every writer is AUTHOR_UNKNOWN. The reporter is derived by the server (a run, a worker session, a person by user id, or an App key), never from the request.
+
+    runId (1-200 characters) makes a retry idempotent: within this node in this memory, the same runId from the same reporter for the same nodeRevision and task revision returns the first report (replayed: true); any other use of it is CONTENT_VALIDATION_RUN_ID_CONFLICT, which carries nothing from the stored report.
+
+    Refusals, in order, each writing nothing: NODE_NOT_FOUND (unreadable or missing memory, missing node); FORBIDDEN (not a writer); SESSION_NOT_BOUND (the request named a session that is not one of the caller's open sessions); CONTENT_VALIDATION_REPORTER_UNKNOWN; CONTENT_VALIDATION_NODE_REVISION_INVALID (newer than the current revision); CONTENT_VALIDATION_NOT_CONFIGURED (no validation task for the node's role); CONTENT_VALIDATION_WRONG_TASK for EVERY report from a caller who cannot read a validation task the rule names, whatever task and revision it names and whether or not that task is broken, so the later checks never run for that caller (a reference that no longer resolves, the task or its memory deleted, is TASK_BROKEN for every caller); CONTENT_VALIDATION_TASK_BROKEN; CONTENT_VALIDATION_WRONG_TASK (a task other than the one the node's rule names); CONTENT_VALIDATION_TASK_REVISION_INVALID (newer than the task's current revision); CONTENT_VALIDATION_REPORTER_IS_AUTHOR; CONTENT_VALIDATION_RUN_ID_CONFLICT. BAD_USER_INPUT for a malformed argument, and a retryable CONFLICT if the node changed during the call.
+    """
+    recordNodeContentValidationReport(
+      nodeRef: ID!
+      nodeRevision: Int!
+      validationTaskRef: ID!
+      validationTaskRevision: Int!
+      outcome: NodeContentValidationOutcome!
+      runId: String
+    ): NodeContentValidationReportReceipt!
     """
     #1632 (hrn:node:hadronmemory.com:specs:cor:dmo:130:03) — ask for a node's current content to be signed. Any reader of the node may ask, agents included; agents never sign. expectedRevision, when given, must still be current (REVISION_MISMATCH). signerRef names one signer (a user id); omitted, any writer of the memory may sign. Refusals: NODE_NOT_FOUND, ENCRYPTED_MEMORY_NOT_APPLICABLE, and (hrn:node:hadronmemory.com:specs:cor:dmo:130:02, Holger #10430) COMMENT_NOT_SIGNABLE, NODE_IS_PLACEHOLDER, REVISION_MISMATCH, SIGNER_NOT_FOUND, and (Holger #11094, #1904) SIGNER_NOT_A_WRITER when the named signer may not write the node's memory (checked again when they sign or decline). No call takes an assertion: the signer signs on the server-hosted ceremony page (S2b-2).
     """
@@ -12559,7 +12785,7 @@ export const typeDefs = `#graphql
     history, embeddings (re-stamped), assets (their bytes stay with the source), git-sync config, the editor lock
     and published-revision pointer, Worker castings, App installs, and the source organization's subscriptions
     and grants. A base or import is licensed for the TARGET organization at clone time, or the clone refuses
-    (BASE_UNUSABLE, IMPORT_UNUSABLE). A refusal's blocker subjects carry a name only when you can read the
+    (CLONE_BASE_UNUSABLE, CLONE_IMPORT_UNUSABLE). A refusal's blocker subjects carry a name only when you can read the
     subject; otherwise only a position. The clone's origin is Agent.clonedFromAgentRef.
     """
     cloneAgent(source: ID!, target: ID!, name: String, slug: String): Agent!
@@ -12729,6 +12955,8 @@ export const typeDefs = `#graphql
     """
     Trigger an on-demand sync for one memory (org ADMIN or CONTRIBUTOR).
 
+    Refuses SYNC_NOT_ATTEMPTED with reason NO_SOURCE or NO_INSTALLATION when no sync can be attempted;
+    no sync status, timestamp or report is written. Access is checked first; encrypted-memory refusal is unchanged.
     Accepts the entity's ID or URN.
     """
     syncMemory(id: ID!): Memory!
@@ -13033,7 +13261,10 @@ export const typeDefs = `#graphql
     # subscription is provisioned in the transaction that creates the chat.
     startChat(agentId: ID!, userId: String, conversationName: String, scope: ChatScope = private, isTestRun: Boolean = false, "#3096 / hrn:node:hadronmemory.com:specs:cor:dmo:150:08: optional client-reported model id, at most 256 UTF-16 code units, no control/format/line-separator characters or unpaired surrogates. Omitted or null fills empty for this call. Used only for prompt text and its immutable record, labelled client-reported; never billing, quotas or authorization. Invalid input refuses BAD_USER_INPUT without echoing it." llmModel: String): ChatStartResult!
     """
-    Process a user message (saves message, builds context, returns next prompt)
+    Process a user message (saves message, builds context, returns next prompt).
+    #3501: CHAT_STATE_INVALID refuses unusable conversational state before the turn writes or builds a model prompt.
+    CHAT_AUTHORITY_SCOPE_CHANGED refuses a write when the memory encryption flag changed before its lock; obtain
+    fresh context, never automatically resubmit a model call or a turn after an uncertain commit.
     """
     sendChatMessage(chatId: String!, userMessage: String!, "#3096 / hrn:node:hadronmemory.com:specs:cor:dmo:150:08: optional client-reported model id, at most 256 UTF-16 code units, no control/format/line-separator characters or unpaired surrogates. Omitted or null fills empty for this call. Used only for prompt text and its immutable record, labelled client-reported; never billing, quotas or authorization. Invalid input refuses BAD_USER_INPUT without echoing it." llmModel: String): ChatPromptResult!
     """
@@ -13065,6 +13296,10 @@ export const typeDefs = `#graphql
     saveChatSummary(chatId: String!, summary: String!): Boolean!
     """
     Rename a saved chat with current write access to its host memory.
+    A changed trimmed title is revisioned once (hrn:node:hadronmemory.com:specs:cor:dmo:060:04).
+    A same-title rename writes nothing. Only trusted portal identity mints HUMAN
+    (hrn:node:hadronmemory.com:specs:cor:dmo:060:16); other callers follow the memory's authoring rules and cannot
+    supply authoredWith here. A governed refusal changes neither title, revision nor stamp.
     """
     updateChatTitle(chatId: String!, title: String!): Boolean!
     """
@@ -13633,7 +13868,7 @@ export const typeDefs = `#graphql
       keep the typed refusal. One rule, one message, both paths.
       """
       name: String
-      "Worker reference to report to. Requires worker-staffing access and App management. Supply either reportsTo or noTeam: true, never both. Null or a blank reference is invalid. Returns WORKER_REPORTING_CAST_UNAVAILABLE when casting with a reporting head is unavailable."
+      "Worker reference to report to. Requires worker-staffing access and App management. Supply either reportsTo or noTeam: true, never both. Null or a blank reference is invalid."
       reportsTo: ID
       "Set to true to record that the worker has no reporting head; do not supply reportsTo as well. Null or false is invalid. Omitting both arguments records no choice (UNSET) when omission is allowed; otherwise the request is refused with WORKER_TEAM_CHOICE_REQUIRED."
       noTeam: Boolean
@@ -14893,8 +15128,8 @@ export const typeDefs = `#graphql
     handle: String!
     "A stable label for the reason, e.g. TASK:<id>:assigned."
     ref: String!
-    "S7 (#2023, R90) — on an assignment to a worker that was on standby: how many messages were held from it and passed by the delivered mark. Returned with this one event, so once."
-    standbyHeld: Int
+    "Always null: standby has been removed."
+    standbyHeld: Int @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
   }
 
   "#1748 — one page of due wakes. Counts and ranges only (hrn:node:hadronmemory.com:specs:cor:agt:080:23)."
@@ -15357,8 +15592,8 @@ export const typeDefs = `#graphql
   "#1747 — a worker wake settings (hrn:node:hadronmemory.com:specs:cor:agt:080:03)."
   type WorkerWakeSettings {
     worker: Worker!
-    "Whether this caller, acting as a person, may set or clear isolation: whoever manages the App or holds the worker. False for worker sessions and impersonation. Reports permission even while isolation is unavailable; does not grant read access. hrn:node:hadronmemory.com:specs:cor:agt:080:29"
-    canManageIsolation: Boolean!
+    "Always false: isolation has been removed. Compatibility only; the deprecated clear door retains its original audience. hrn:node:hadronmemory.com:specs:cor:agt:080:29"
+    canManageIsolation: Boolean! @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
     mentions: MentionWake!
     "A pause belongs to the worker, not to a session."
     pausedUntil: DateTime
@@ -15368,13 +15603,13 @@ export const typeDefs = `#graphql
     effectiveCadenceSeconds: Int
     "None of the worker's sessions has had activity within the App's dormancy period (hrn:node:hadronmemory.com:specs:cor:agt:080:07). A dormant worker is never woken."
     dormant: Boolean!
-    "S7 (#2023, R85) — isolation is its own state, never pausedUntil. While live the worker gets no chat batches or ordinary wakes and is not matched."
-    isolatedUntil: DateTime
-    isolatedAt: DateTime
-    "The handle of the person who set it: only a person managing the App or holding the worker, acting as themselves, can."
-    isolatedByHandle: String
-    "Live: isolatedUntil is in the future."
-    isolated: Boolean!
+    "Always null: isolation storage and execution have been removed."
+    isolatedUntil: DateTime @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
+    isolatedAt: DateTime @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
+    "Always null: isolation has been removed."
+    isolatedByHandle: String @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
+    "Always false: isolation has been removed."
+    isolated: Boolean! @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
   }
 
   "#2138: the App's team pause. teamPausedAt is null when the team is not paused."
@@ -15396,10 +15631,10 @@ export const typeDefs = `#graphql
     failedChecksToOverdue: Int!
     "#2755: a worker's due wake left unacknowledged this long raises the dark-worker alarm. Whole seconds, 300..86400; default 1800. Independent of stuckWindowSeconds."
     darkAlarmWindowSeconds: Int!
-    "Stored configuration; default false. Enabling is refused until standby behavior ships."
-    standbyEnabled: Boolean!
-    "False until S7 supplies standby behavior; configuration alone has no effect."
-    standbyEffective: Boolean!
+    "Always false: standby storage and execution have been removed."
+    standbyEnabled: Boolean! @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
+    "Always false: standby has been removed."
+    standbyEffective: Boolean! @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
   }
 
   "Atomic patch: omit to preserve, explicit null refuses. Empty patch returns the current authorized settings."
@@ -15408,7 +15643,7 @@ export const typeDefs = `#graphql
     batchWindowSeconds: Int
     busyDelaySeconds: Int
     stuckWindowSeconds: Int
-    standbyEnabled: Boolean
+    standbyEnabled: Boolean @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
     "#2138: whole seconds, 60..86400."
     checkPeriodSeconds: Int
     "#2138: whole number, 1..100."
@@ -15560,6 +15795,8 @@ export const typeDefs = `#graphql
     result: AgentTaskResult
     "#2663: dispositions beside the result, same readers; default20/max200/limit0 count-only (hrn:node:hadronmemory.com:specs:cor:agt:050:30)."
     findingDispositions(limit: Int, offset: Int): AgentTaskFindingDispositionPage!
+    "#3325: the one current disposition stored for this finding id on THIS task, or null (undisposed, unknown and other-task ids are indistinguishable). Exact id match; same readers as findingDispositions."
+    findingDisposition(findingId: String!): AgentTaskFindingDisposition
     "#2651: the task's latest hand-back by its assignee (hrn:node:hadronmemory.com:specs:cor:agt:050:29); null when it was never handed back. A later hand-back replaces it; every earlier code stays in the task.handed-back events."
     handBack: AgentTaskHandBack
     tags: [String!]!
@@ -16190,7 +16427,7 @@ export const typeDefs = `#graphql
     OVERDUE
   }
 
-  "#2138 §3.4 — why a worker is PENDING. Precedence: TEAM_PAUSED, STOPPED, PAUSED, ISOLATED, STANDBY, NO_TASK."
+  "#2138 §3.4 — why a worker is PENDING. Precedence: TEAM_PAUSED, STOPPED, PAUSED, NO_TASK. ISOLATED and STANDBY are compatibility-only values never returned."
   enum WorkerPendingReason {
     "A team pause is in force (App.teamPausedAt); the worker can't lift it."
     TEAM_PAUSED
@@ -16198,10 +16435,10 @@ export const typeDefs = `#graphql
     STOPPED
     "Its own pause (pausedUntil) is in force."
     PAUSED
-    "In isolation (unreachable until isolation is built)."
-    ISOLATED
-    "On standby (unreachable until standby is built)."
-    STANDBY
+    "Deprecated compatibility value; isolation is removed and this value is never returned."
+    ISOLATED @deprecated(reason: "Removed; never returned (#3606).")
+    "Compatibility-only value: standby has been removed; never returned."
+    STANDBY @deprecated(reason: "Removed; never returned (#3606).")
     "No open task assigned, and its Agent uses tasks."
     NO_TASK
   }
