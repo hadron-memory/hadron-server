@@ -181,3 +181,42 @@ describe('newestApprovedRevisionForServe (#3801)', () => {
     expect(await newestApprovedRevisionForServe(db, n.id, 2)).toMatchObject({ found: null, truncated: false });
   });
 });
+
+describe('the unmetered walk pre-filters by approval hash (#3801)', () => {
+  const meter = { chargeLookup: () => {}, chargeLoaded: () => {} }; // a metered walk examines every revision by verdict
+  const same = async (id: string, cap?: number) => {
+    const fast = await newestApprovedRevisionOf(db, id, cap);
+    const slow = await newestApprovedRevisionOf(db, id, cap, meter);
+    expect(fast).toEqual(slow);
+    return fast;
+  };
+
+  it('agrees with the per-verdict walk: approved, superseded, edited-after, metadata-only, never approved', async () => {
+    const a = await mk('d:1'); await approve(a.id); await edit(a.id, 'x2'); await edit(a.id, 'x3');
+    expect((await same(a.id)).found).toMatchObject({ revNo: 1 });
+    const b = await mk('d:2'); await approve(b.id); await edit(b.id, 'y2'); await approve(b.id); await edit(b.id, 'y3');
+    expect((await same(b.id)).found).toMatchObject({ revNo: 2 });
+    const c = await mk('d:3'); await approve(c.id); await touchMeta(c.id, ['t']); await touchMeta(c.id, ['u']);
+    expect((await same(c.id)).found).not.toBeNull();
+    const d = await mk('d:4'); await edit(d.id, 'z2'); await edit(d.id, 'z3');
+    expect((await same(d.id))).toEqual({ found: null, truncated: false });
+    expect((await same(a.id, 1))).toEqual(await newestApprovedRevisionOf(db, a.id, 1, meter));
+  });
+
+  it('an encrypted memory selects nothing and is not reported truncated, as the per-verdict walk answers', async () => {
+    const n = await mk('d:6'); await approve(n.id);
+    for (let i = 0; i < 3; i++) await edit(n.id, `e${i}`);
+    await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true, vectorIndexEnabled: false } });
+    expect(await same(n.id, 1)).toEqual({ found: null, truncated: false });
+  });
+
+  it('a revision whose text matches no recorded approval hash costs no verdict query', async () => {
+    const n = await mk('d:5'); await approve(n.id);
+    for (let i = 0; i < 4; i++) await edit(n.id, `w${i}`);
+    const spy = vi.spyOn(db.node, 'findUnique');
+    await newestApprovedRevisionOf(db, n.id);
+    // one for the walk's own live read; a per-verdict walk would add one per examined revision
+    expect(spy.mock.calls.length).toBeLessThanOrEqual(2);
+    spy.mockRestore();
+  });
+});

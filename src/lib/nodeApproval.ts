@@ -517,8 +517,8 @@ function chargeTexts(meter: ApprovalReadMeter | undefined, f: { name: string; ab
 /** How many revisions `newestApprovedRevisionOf` examines before it gives up (newest first). */
 export const NEWEST_APPROVED_REVISION_SCAN_CAP = 100;
 
-/** #3801: how many `cap`-sized batches a SERVE walk examines before it stops (a hard ceiling on the work one serve read may do; a 10-batch walk measured ~2.7 s on a local database, so 5 keeps the worst case near 1.4 s). */
-export const NEWEST_APPROVED_REVISION_SCAN_BATCHES = 5;
+/** #3801: how many `cap`-sized batches a SERVE walk examines before it stops (a hard ceiling on the work one serve read may do; with the set-wise pre-filter a ceiling-deep miss of 1,000 revisions with 12 KB texts measured ~0.1 s locally, against ~2.7 s per-verdict). */
+export const NEWEST_APPROVED_REVISION_SCAN_BATCHES = 10;
 
 export interface NewestApprovedRevision {
   /** Null when no examined revision is approved (or the node/memory yields nothing to read). */
@@ -556,7 +556,7 @@ export async function newestApprovedRevisionOf(
 ): Promise<NewestApprovedRevision> {
   const none: NewestApprovedRevision = { found: null, truncated: false };
   meter?.chargeLookup();
-  const live = await db.node.findUnique({ where: { id: nodeId }, select: { memoryId: true, revSeq: true } });
+  const live = await db.node.findUnique({ where: { id: nodeId }, select: { memoryId: true, revSeq: true, name: true, abstract: true, content: true, approvalHash: true } });
   if (!live) return none;
   // Snapshots servable from the node's CURRENT memory only (a foreign-memory capture is never selected).
   meter?.chargeLookup();
@@ -574,7 +574,10 @@ export async function newestApprovedRevisionOf(
   const liveNumberHeld = (await db.nodeRevision.findFirst({ where: { nodeId, revNo: live.revSeq }, select: { id: true } })) != null;
   const candidates = [...(liveNumberHeld || (below != null && live.revSeq >= below) ? [] : [live.revSeq]), ...snapshotNos].sort((a, b) => b - a);
   const examined = candidates.slice(0, cap);
+  // A metered walk (an include's resolved read) keeps its per-verdict charges, which #40 pins; only an unmetered one pre-filters.
+  const skippable = meter ? new Set<number>() : await revisionsWithNoApprovalHash(db, nodeId, live, examined);
   for (const revNo of examined) {
+    if (skippable.has(revNo)) continue;
     const verdict = await revisionApprovalOf(db, nodeId, revNo, meter);
     if (verdict.state === 'NOT_APPLICABLE') return none;
     if (verdict.state === 'APPROVED') {
@@ -583,6 +586,18 @@ export async function newestApprovedRevisionOf(
   }
   const truncated = candidates.length > cap;
   return truncated ? { found: null, truncated, resumeBelow: examined[examined.length - 1] } : { found: null, truncated };
+}
+
+const CEILING_WARN_INTERVAL_MS = 60_000;
+const ceilingWarned = new Map<string, number>();
+/** At most one ceiling warning per node per minute: a hot serve path must not flood the very state it reports. */
+function ceilingWarnDue(nodeId: string): boolean {
+  const now = Date.now();
+  const last = ceilingWarned.get(nodeId);
+  if (last != null && now - last < CEILING_WARN_INTERVAL_MS) return false;
+  if (ceilingWarned.size > 1000) ceilingWarned.clear();
+  ceilingWarned.set(nodeId, now);
+  return true;
 }
 
 /**
@@ -603,10 +618,46 @@ export async function newestApprovedRevisionForServe(
   }
   // The ceiling stopped the walk with older revisions unexamined: the serve will refuse as not approved, so leave the one
   // signal an operator needs to tell this from genuine absence.
-  if (!result.found && result.truncated) {
+  if (!result.found && result.truncated && ceilingWarnDue(nodeId)) {
     console.warn(`[boot-prompt-serve] scan ceiling reached for node ${nodeId}: ${cap * NEWEST_APPROVED_REVISION_SCAN_BATCHES} revisions examined, older ones unexamined (refusing as not approved)`);
   }
   return result;
+}
+
+/**
+ * #3801 — the revisions of `revNos` that `revisionApprovalOf` cannot read APPROVED, found set-wise instead of one verdict
+ * each. Every route to APPROVED there needs a record whose hash equals the hash of THAT revision's text (its own snapshot's
+ * copied approval, the node's current approval, or an earlier covering snapshot), so a revision whose text hashes to none of
+ * the node's recorded approval hashes is not approved, whatever else is true. Three queries per batch instead of ~3 per
+ * revision. It only ever ADDS skips for revisions it positively hashed: a number held by more than one row, or one it
+ * cannot read, is left to the verdict, and an encrypted memory skips nothing (the verdict answers NOT_APPLICABLE).
+ */
+async function revisionsWithNoApprovalHash(
+  db: Pick<PrismaClient, 'node' | 'nodeRevision' | 'memory'> | Prisma.TransactionClient,
+  nodeId: string,
+  live: { memoryId: string; revSeq: number; name: string; abstract: string | null; content: string | null; approvalHash: string | null },
+  revNos: number[],
+): Promise<Set<number>> {
+  const skip = new Set<number>();
+  if (revNos.length === 0) return skip;
+  const [memory, carriers, rows] = await Promise.all([
+    db.memory.findUnique({ where: { id: live.memoryId }, select: { isEncrypted: true } }),
+    db.nodeRevision.findMany({ where: { nodeId, approvalHash: { not: null } }, select: { approvalHash: true }, distinct: ['approvalHash'] }),
+    db.nodeRevision.findMany({ where: { nodeId, revNo: { in: revNos } }, select: { revNo: true, name: true, abstract: true, content: true } }),
+  ]);
+  if (!memory || memory.isEncrypted) return skip;
+  const recorded = new Set<string>(carriers.map((c) => c.approvalHash!));
+  if (live.approvalHash) recorded.add(live.approvalHash);
+  const hashOf = (f: { name: string; abstract: string | null; content: string | null }) =>
+    computeApprovalHash({ title: f.name, abstract: f.abstract, content: f.content });
+  const byNo = new Map<number, typeof rows>();
+  for (const r of rows) byNo.set(r.revNo!, [...(byNo.get(r.revNo!) ?? []), r]);
+  for (const revNo of revNos) {
+    const held = byNo.get(revNo) ?? [];
+    const text = held.length === 1 ? held[0] : held.length === 0 && revNo === live.revSeq ? live : null;
+    if (text && !recorded.has(hashOf(text))) skip.add(revNo);
+  }
+  return skip;
 }
 
 /**
