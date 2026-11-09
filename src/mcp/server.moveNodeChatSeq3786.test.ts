@@ -96,4 +96,56 @@ describe('MCP hadron_move_node — the #992 typed refusal (#3786)', () => {
     expect(row.seq).toBe(1);
     expect(await db.node.findFirst({ where: { memoryId: memory.id, loc: 'qa:messages:001-moved' } })).toBeNull();
   });
+
+  it('leaves a NON-colliding seq-bearing move alone (negative control: the branch must not over-catch)', async () => {
+    // Same door, same seq-bearing mover — but the destination chat holds
+    // nothing, so the #992 index never fires and the fix's branch must stay
+    // silent: the move succeeds exactly as before the fix.
+    await seedChatMessage('qb:messages:001-x', 1);
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('hadron_move_node', {
+      urn: `urn:node:${memory.urn}:qb:messages:001-x`,
+      targetUrn: `urn:node:${memory.urn}:qc:messages:001-x`,
+    });
+
+    expect(text).toContain('Moved "');
+    expect(text).not.toContain('[chat_message_seq_conflict]');
+    expect(text).not.toMatch(/P2002|INTERNAL_SERVER_ERROR/i);
+    const row = await db.node.findFirstOrThrow({ where: { memoryId: memory.id, nodeType: 'chat-message' } });
+    expect(row.loc).toBe('qc:messages:001-x');
+    expect(row.seq).toBe(1); // the move preserves seq; only the chat changed
+    expect(await db.node.findFirst({ where: { memoryId: memory.id, loc: 'qb:messages:001-x' } })).toBeNull();
+  });
+
+  it('types the refusal when a SUBTREE member hits the taken (chat, seq) — the whole move rolls back', async () => {
+    // A two-row subtree: the ROOT's own slot in the destination is free
+    // (('qa', 2) — qa only holds seq 1), so the root's write lands and the
+    // constraint fires on the CHILD's rebase. This is the case that proves
+    // the typed catch wraps moveNodeSubtree's WHOLE transaction: the refusal
+    // is named AND every already-written row of the subtree rolls back.
+    await seedChatMessage('qa:messages:001-first', 1);
+    const parentId = await seedChatMessage('qb:messages:002-parent', 2);
+    const childId = await seedChatMessage('qb:messages:002-parent:m1', 1);
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('hadron_move_node', {
+      urn: `urn:node:${memory.urn}:qb:messages:002-parent`,
+      targetUrn: `urn:node:${memory.urn}:qa:messages:009-parent`,
+    });
+
+    expect(text).toContain('[chat_message_seq_conflict]');
+    expect(text).toContain('A chat message with this sequence number already exists in this chat.');
+    expect(text).not.toMatch(/P2002|nodes_chat_message_seq_unique_idx|Unique constraint|INTERNAL_SERVER_ERROR/i);
+    // Atomic across the subtree: parent and child exactly where they were,
+    // nothing at the destination — not even the root, whose own write had
+    // already succeeded inside the aborted transaction.
+    const parent = await db.node.findUniqueOrThrow({ where: { id: parentId } });
+    expect(parent.loc).toBe('qb:messages:002-parent');
+    expect(parent.seq).toBe(2);
+    const child = await db.node.findUniqueOrThrow({ where: { id: childId } });
+    expect(child.loc).toBe('qb:messages:002-parent:m1');
+    expect(child.seq).toBe(1);
+    expect(await db.node.findFirst({
+      where: { memoryId: memory.id, loc: { startsWith: 'qa:messages:009-parent' } },
+    })).toBeNull();
+  });
 });
