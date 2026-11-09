@@ -190,3 +190,60 @@ describe('refusedMigrationNames', () => {
     expect(refusedMigrationNames([{ ...refused, logs: `see Database error code: ${REFUSAL_SQLSTATE} here` }])).toBeNull();
   });
 });
+
+// Blind review P2 (Dorian, #3772): the HDPRF code alone does not prove nothing was applied before the raise. What
+// does is that Prisma runs a migration file as ONE implicit transaction, so a raise rolls back every statement above
+// it. Pin both halves: the mechanism, and a guard that no HDPRF migration opts out of it.
+// A statement that is alone on its line (a DO block's own BEGIN has no semicolon) or CONCURRENTLY.
+const ENDS_TRANSACTION = /^\s*(BEGIN|COMMIT|ROLLBACK|END|START\s+TRANSACTION)\s*;|\bCONCURRENTLY\b/im;
+describe('#3770 a refusal leaves no partial schema', () => {
+  it('the opt-out detector sees what it must and ignores a DO block', () => {
+    expect('CREATE TABLE a(i int);\nCOMMIT;\n').toMatch(ENDS_TRANSACTION);
+    expect('BEGIN;\nCREATE TABLE a(i int);').toMatch(ENDS_TRANSACTION);
+    expect('CREATE INDEX CONCURRENTLY i ON t(c);').toMatch(ENDS_TRANSACTION);
+    expect("DO $$ BEGIN RAISE EXCEPTION 'x'; END $$;").not.toMatch(ENDS_TRANSACTION);
+    expect("DO $$\nBEGIN\n  RAISE EXCEPTION 'x';\nEND $$;").not.toMatch(ENDS_TRANSACTION);
+  });
+  it('statements before the raise are rolled back with it (one implicit transaction per migration file)', async () => {
+    const pdb = `${DB}_partial`;
+    const pdir = mkdtempSync(join(tmpdir(), 'refused-partial-'));
+    const c = new Client({ connectionString: dbUrl('postgres') });
+    await c.connect();
+    await c.query(`CREATE DATABASE ${pdb}`);
+    await c.end();
+    try {
+      mkdirSync(join(pdir, 'prisma/migrations/20260101000000_mutate_then_refuse'), { recursive: true });
+      writeFileSync(join(pdir, 'prisma/schema.prisma'), 'datasource db {\n  provider = "postgresql"\n  url = env("DATABASE_URL")\n}\n');
+      writeFileSync(join(pdir, 'prisma/migrations/migration_lock.toml'), 'provider = "postgresql"\n');
+      writeFileSync(join(pdir, 'prisma/migrations/20260101000000_mutate_then_refuse/migration.sql'),
+        `CREATE TABLE partial_t (id int);\nINSERT INTO partial_t VALUES (1);\nDO $$ BEGIN RAISE EXCEPTION 'refused' USING ERRCODE = '${REFUSAL_SQLSTATE}'; END $$;\n`);
+      writeFileSync(join(pdir, 'prisma.config.ts'), `import { defineConfig, env } from "prisma/config";
+export default defineConfig({ schema: "prisma/schema.prisma", migrations: { path: "prisma/migrations" }, engine: "classic", datasource: { url: env("DATABASE_URL") } });
+`);
+      const run = spawnSync(PRISMA, ['migrate', 'deploy', '--config', join(pdir, 'prisma.config.ts')], {
+        encoding: 'utf8', cwd: pdir, env: { ...process.env, DATABASE_URL: dbUrl(pdb) } });
+      expect(`${run.stdout}${run.stderr}`).toContain('P3018');
+      const found = await sql<{ t: string }>(pdb, `SELECT tablename AS t FROM pg_tables WHERE schemaname='public' AND tablename='partial_t'`);
+      expect(found).toEqual([]);
+    } finally {
+      rmSync(pdir, { recursive: true, force: true });
+      const d = new Client({ connectionString: dbUrl('postgres') });
+      await d.connect();
+      await d.query(`DROP DATABASE IF EXISTS ${pdb} WITH (FORCE)`);
+      await d.end();
+    }
+  }, 60_000);
+
+  it('no checked-in migration that raises HDPRF opts out of the transaction', async () => {
+    const { readdirSync } = await import('node:fs');
+    const migrations = join(ROOT, 'prisma/migrations');
+    for (const name of readdirSync(migrations)) {
+      const file = join(migrations, name, 'migration.sql');
+      if (!existsSync(file)) continue;
+      const body = readFileSync(file, 'utf8');
+      if (!body.includes(REFUSAL_SQLSTATE)) continue;
+      const code = body.replace(/--.*$/gm, '');
+      expect(code, `${name} raises ${REFUSAL_SQLSTATE} but ends the implicit transaction`).not.toMatch(ENDS_TRANSACTION);
+    }
+  });
+});

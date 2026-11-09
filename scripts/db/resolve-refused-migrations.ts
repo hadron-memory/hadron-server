@@ -14,7 +14,11 @@
  * CONVENTION for a refusing preflight: raise with this SQLSTATE,
  *   RAISE EXCEPTION '...' USING ERRCODE = 'HDPRF';
  * Prisma stores the database error code in the ledger row's logs, which is what
- * this reads. A migration that raises with any other code keeps the old behaviour.
+ * this reads. The code does not itself prove nothing was applied: that holds because
+ * Prisma runs a migration file as one implicit transaction, so a refusal rolls back
+ * every statement above it. A refusing migration must therefore not use BEGIN, COMMIT,
+ * CONCURRENTLY or anything else that ends that transaction (pinned in
+ * refused-migration-boot.test.ts). A migration that raises with any other code keeps the old behaviour.
  */
 import { Client } from 'pg';
 import { pathToFileURL } from 'node:url';
