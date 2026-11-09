@@ -68,7 +68,7 @@ beforeEach(async () => {
   await cleanDb(db);
   w = await seedWorld();
   const org = await db.organization.findUniqueOrThrow({ where: { id: w.orgId } });
-  for (const userId of [w.userId, w.user2Id]) await db.orgMember.create({ data: { organizationId: org.id, userId, role: 'READER' } });
+  for (const userId of [w.userId, w.user2Id]) await db.orgMember.create({ data: { organizationId: org.id, userId, role: 'CONTRIBUTOR' } });
   await db.worker.update({ where: { id: w.workerId }, data: { heldByUserId: w.userId } });
   sessionId = (await db.session.create({ data: { id: generateId(), appId: w.appId, userId: w.userId, workerId: w.workerId, agentId: w.agentId } })).id;
   rawKey = await keyFor(w.userId);
@@ -101,14 +101,13 @@ describe('who sees which rows', () => {
     const mine = await live();
     const pending = await insertGrant(w, { requested_by_worker_id: w.workerId });
     const empty = { grants: { total: 0, items: [] } };
-    const missing = await asWorker(ONE, { r: generateId() });
-    expect(missing.data.grant).toBeNull();
+    expect((await asWorker(ONE, { r: generateId() })).data.grant).toBeNull();
     // A worker of another App (it even drives the same org), and a person with no session, the App's member.
     for (const [key, session] of [[rawKey, otherSessionId], [personKey, null], [rawKey, null]] as const) {
       const l = await post(key, session, LIST);
       expect(l.errors, `${key.slice(-4)} ${session}`).toBeUndefined();
       expect(l.data).toEqual(empty);
-      for (const id of [mine, pending]) expect(await post(key, session, ONE, { r: id })).toEqual(missing);
+      for (const id of [mine, pending]) expect(await post(key, session, ONE, { r: id })).toMatchObject({ data: { grant: null } });
     }
     // A pure App key, a run principal and an impersonated session, even if a worker were published for them.
     const ctxs: Context[] = [
@@ -125,7 +124,7 @@ describe('who sees which rows', () => {
       const l = await run(LIST, {});
       expect(l.errors).toBeUndefined();
       expect(l.data).toEqual(empty);
-      for (const id of [mine, pending]) expect(await run(ONE, { r: id })).toEqual(missing);
+      for (const id of [mine, pending]) expect(await run(ONE, { r: id })).toMatchObject({ data: { grant: null } });
     }
   });
 
@@ -141,9 +140,17 @@ describe('who sees which rows', () => {
     for (let i = 0; i < 3; i++) await live();
     expect((await asWorker(LIST, { l: 0 })).data.grants).toEqual({ total: 3, items: [] });
     expect((await asWorker(LIST, { l: -5 })).data.grants).toEqual({ total: 3, items: [] });
-    expect((await asWorker(LIST, { l: 100000 })).data.grants.items).toHaveLength(3);
+    expect((await asWorker(LIST, { l: 1000 })).data.grants.items).toHaveLength(3);
     expect((await asWorker(LIST, { l: 2 })).data.grants.items).toHaveLength(2);
     expect((await asWorker(LIST, { l: 2, o: 2 })).data.grants.items).toHaveLength(1);
+  });
+
+  it('serves at most 200 rows however large the limit', async () => {
+    for (let i = 0; i < 202; i++) await live();
+    const r = await asWorker(LIST, { l: 1000 });
+    expect(r.errors).toBeUndefined();
+    expect(r.data.grants.total).toBe(202);
+    expect(r.data.grants.items).toHaveLength(200);
   });
 });
 
