@@ -4,7 +4,7 @@
  * scripts/docker-start.sh runs unmodified, and so do real `prisma migrate deploy` / `migrate resolve` and the real
  * resolve-refused-migrations.ts against a scratch Postgres database with a colliding row set. Only the steps that
  * have nothing to do with migrations are stubbed (generate, revoke, upsert, verify) and the server itself (a marker
- * line instead of `tsx src/index.ts`). Before #3770 a refusing preflight exited 1 and every restart hit P3009 (the
+ * line instead of `node --import tsx src/index.ts`). Before #3770 a refusing preflight exited 1 and every restart hit P3009 (the
  * 2026-11-08 outage, #3236); a mocked `migrate deploy` could not show that.
  */
 import { spawnSync } from 'node:child_process';
@@ -63,13 +63,18 @@ export default defineConfig({ schema: "prisma/schema.prisma", migrations: { path
   writeFileSync(join(shim, 'pnpm'), `#!/bin/sh
 case "$*" in
   "prisma generate"|tsx\\ scripts/db/revoke-runtime-migrations.ts|tsx\\ scripts/db/upsert-actions.ts|tsx\\ scripts/db/verify-runtime-role.ts) exit 0 ;;
-  "tsx src/index.ts") echo "started $HADRON_MIGRATIONS_REFUSED" >> "${serverLog}"; exit 0 ;;
   "prisma migrate"*) shift && cd "${dir}" && exec "${PRISMA}" "$@" --config "${dir}/prisma.config.ts" ;;
   "tsx scripts/db/resolve-refused-migrations.ts") printf 'Already up to date\\nDone in 215ms using pnpm v11.5.2\\n'; cd "${ROOT}" && exec "${ROOT}node_modules/.bin/tsx" scripts/db/resolve-refused-migrations.ts ;;
 esac
 echo "unexpected pnpm call: $*" >&2; exit 99
 `);
   chmodSync(join(shim, 'pnpm'), 0o700);
+  // #3021: the server is exec'd as `node --import tsx src/index.ts` (no pnpm/tsx wrapper to swallow SIGTERM).
+  writeFileSync(join(shim, 'node'), `#!/bin/sh
+if [ "$*" = "--import tsx src/index.ts" ]; then echo "started $HADRON_MIGRATIONS_REFUSED" >> "${serverLog}"; exit 0; fi
+exec ${process.execPath} "$@"
+`);
+  chmodSync(join(shim, 'node'), 0o700);
   const c = new Client({ connectionString: dbUrl('postgres') });
   await c.connect();
   await c.query(`CREATE DATABASE ${DB}`);

@@ -93,4 +93,7 @@ fi
 rm -f "$startup_log" "$refused_file"
 trap - EXIT INT TERM HUP QUIT
 unset migration_url setup_url startup_log startup_umask refused_file
-exec pnpm tsx src/index.ts
+# #3021: exec node itself, not `pnpm tsx`. Under the pnpm and tsx CLI wrappers a SIGTERM ended the whole
+# container in about 0.36 s (exit 143) and src/index.ts's graceful path (stopping drain window, request drain,
+# disconnect) never ran; `node --import tsx` leaves node as PID 1 to handle the signal itself.
+exec node --import tsx src/index.ts

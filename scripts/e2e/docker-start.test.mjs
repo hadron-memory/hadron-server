@@ -27,6 +27,14 @@ if [ "$*" = "$FAIL_STEP" ]; then
 fi
 if [ "$NOISE" = yes ]; then printf '%s\\n' "$DATABASE_URL"; fi
 `, { mode: 0o700 });
+  // #3021: the server must be exec'd as node itself (PID 1 in the container) so SIGTERM reaches src/index.ts's
+  // graceful path; a pnpm or tsx-CLI wrapper dies at once and takes the drain with it. Recorded like the pnpm calls.
+  writeFileSync(join(dir, 'node'), `#!/bin/sh
+if [ "$*" = "--import tsx src/index.ts" ]; then
+  printf 'node %s|%s|%s|%s\\n' "$*" "$DATABASE_URL" "\${MIGRATE_DATABASE_URL-unset}" "\${HADRON_MIGRATIONS_REFUSED-unset}" >> "$CALL_LOG"; exit 0
+fi
+exec ${process.execPath} "$@"
+`, { mode: 0o700 });
   const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, DATABASE_URL: serving,
     TMPDIR: dir, CALL_LOG: log, FAIL_STEP: fail, FAIL_LINE: failLine, FAIL_CODE: failCode, HELPER_OUT: helperOut, NOISE: noise ? 'yes' : 'no' };
   delete env.MIGRATE_DATABASE_URL;
@@ -51,7 +59,7 @@ test('migrates/revokes/verifies as owner, then execs server as serve without mig
   const run = boot(t);
   assert.equal(run.status, 0, run.stderr);
   assert.deepEqual(run.calls.map(row => row[0]), ['prisma generate', 'prisma migrate deploy',
-    'tsx scripts/db/revoke-runtime-migrations.ts', 'tsx scripts/db/upsert-actions.ts', 'tsx scripts/db/verify-runtime-role.ts', 'tsx src/index.ts']);
+    'tsx scripts/db/revoke-runtime-migrations.ts', 'tsx scripts/db/upsert-actions.ts', 'tsx scripts/db/verify-runtime-role.ts', 'node --import tsx src/index.ts']);
   assert.equal(run.calls[1][1], owner);
   assert.equal(run.calls[2][1], owner);
   // #3668: the platform's actions are written ONLY by this step, as the owner, never by the running server.
@@ -73,7 +81,7 @@ for (const step of ['prisma generate', 'prisma migrate deploy', 'tsx scripts/db/
     const run = boot(t, { fail: step });
     assert.notEqual(run.status, 0);
     assert.equal(run.calls.at(-1)?.[0], step);
-    assert(!run.calls.some(row => row[0] === 'tsx src/index.ts'));
+    assert(!run.calls.some(row => row[0] === 'node --import tsx src/index.ts'));
     noSecrets(run);
   });
 }
@@ -86,7 +94,7 @@ test('#3770: a refused preflight (P3018) is rolled back as owner, alarmed once, 
   assert(rows.includes(`prisma migrate resolve --rolled-back ${refusedName}`));
   assert.equal(rows.filter(row => row === 'prisma migrate deploy').length, 1, 'a refusal is not retried in the same boot');
   assert.equal(run.calls.find(row => row[0].startsWith('prisma migrate resolve'))[1], owner);
-  assert.equal(run.calls.at(-1)[0], 'tsx src/index.ts');
+  assert.equal(run.calls.at(-1)[0], 'node --import tsx src/index.ts');
   assert.equal(run.calls.at(-1)[3], refusedName, 'the server is told which migration was refused');
   assert.equal(run.stderr.match(/^db\.migration\.refused_preflight migration=\S+/gm).length, 1);
   assert.match(run.stderr, new RegExp(`db\\.migration\\.refused_preflight migration=${refusedName} `));
@@ -101,20 +109,20 @@ test('#3770: a clean boot passes no refusal to the server, whatever the outside 
 test('#3770: a failure other than P3018/P3009 stops boot even if the ledger names a refused migration', t => {
   const run = boot(t, { fail: 'prisma migrate deploy', failCode: 'P1001', helperOut: refusedName });
   assert.notEqual(run.status, 0);
-  assert(!run.calls.some(row => row[0].startsWith('prisma migrate resolve') || row[0] === 'tsx src/index.ts'));
+  assert(!run.calls.some(row => row[0].startsWith('prisma migrate resolve') || row[0] === 'node --import tsx src/index.ts'));
   noSecrets(run);
 });
 test('#3770: a P3018 the ledger does not classify as a refusal (helper prints nothing) stops boot', t => {
   const run = boot(t, { fail: 'prisma migrate deploy', failCode: 'P3018' });
   assert.notEqual(run.status, 0);
-  assert(!run.calls.some(row => row[0].startsWith('prisma migrate resolve') || row[0] === 'tsx src/index.ts'));
+  assert(!run.calls.some(row => row[0].startsWith('prisma migrate resolve') || row[0] === 'node --import tsx src/index.ts'));
   noSecrets(run);
 });
 for (const bad of ['x; rm -rf /', '$(id)', '2026_short', '20261027193000_ok\n../../etc']) {
   test(`#3770: a helper line that is not a migration name stops boot (${JSON.stringify(bad)})`, t => {
     const run = boot(t, { fail: 'prisma migrate deploy', failCode: 'P3018', helperOut: bad });
     assert.notEqual(run.status, 0);
-    assert(!run.calls.some(row => row[0].startsWith('prisma migrate resolve') || row[0] === 'tsx src/index.ts'));
+    assert(!run.calls.some(row => row[0].startsWith('prisma migrate resolve') || row[0] === 'node --import tsx src/index.ts'));
     noSecrets(run);
   });
 }
@@ -122,7 +130,7 @@ test('verification is warn-only and follows revoke', t => {
   const run = boot(t, { fail: 'tsx scripts/db/verify-runtime-role.ts' });
   assert.equal(run.status, 0, run.stderr);
   assert.match(run.stderr, /db\.runtime_role\.verify_failed/);
-  assert.equal(run.calls.at(-1)[0], 'tsx src/index.ts');
+  assert.equal(run.calls.at(-1)[0], 'node --import tsx src/index.ts');
   noSecrets(run);
 });
 test('successful setup command output cannot disclose URLs either', t => {
