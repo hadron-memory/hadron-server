@@ -1,4 +1,5 @@
 // agentMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { endHeldGrants } from '../../../lib/grants/departure.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
 import { refuseLegacyBaseUrl, requireEndpointFor, requireKeyFor, validateApiStyle, validateEndpoint } from '../../../lib/aiEndpoint.js';
 import { testAiServiceConfig, type AiConfigTestOverride } from '../../../controller/operations/testAiServiceConfig.js';
@@ -1163,6 +1164,9 @@ export const agentMutations = {
         }
         const deletedAt = new Date();
         await tx.agent.update({ where: { id }, data: { deletedAt } });
+        // #3690 / ruling 0259: any agent delete, soft delete included, is a departure. No FK action fires on a soft delete, so the grants
+        // the agent HOLDS end here, after the `agents FOR UPDATE` lock (afterLock below): the grant row lock is the last one.
+        await endHeldGrants(tx, 'agent', id);
         if (agent.systemMemoryId) {
           await tx.memory.updateMany({ where: { id: agent.systemMemoryId }, data: { deletedAt } });
         }

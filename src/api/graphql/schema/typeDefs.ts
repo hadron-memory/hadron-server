@@ -7152,6 +7152,49 @@ export const typeDefs = `#graphql
     total: Int!
   }
 
+  "Which kind of party holds a grant (#3789): exactly one of the four, as stored."
+  enum GrantHolderKind { USER AGENT WORKER APP }
+
+  """
+  A grant (#3789, hrn:node:hadronmemory.com:specs:cor:acl:140:05): ids and scalars only, so no other entity's field resolvers are reachable
+  through it. Its stored facts as stored, and allows, which is computed. There is deliberately NO state label: nothing names the
+  cases hrn:node:hadronmemory.com:specs:cor:acl:140:03 leaves open (withdrawn, past expiry while pending, signed before its start, a departed holder).
+  """
+  type Grant {
+    id: ID!
+    appId: ID!
+    "The registered action this grant allows."
+    action: String!
+    "The values it allows (a single value, a list or a wildcard); never a secret."
+    values: JSON
+    holderKind: GrantHolderKind!
+    holderId: ID!
+    issuerUserId: ID
+    requestedByUserId: ID
+    requestedByWorkerId: ID
+    requestedBySessionId: ID
+    startsAt: DateTime
+    expiresAt: DateTime
+    maxUses: Int
+    useCount: Int!
+    reason: String!
+    createdAt: DateTime!
+    "Null while the grant is pending (a pending grant allows nothing)."
+    activatedAt: DateTime
+    "How the activation was verified, as stored; null while pending."
+    verificationKind: String
+    verifiedBy: ID
+    signatureId: ID
+    revokedAt: DateTime
+    "Whether the grant allows its action right now, judged on the database clock by the one live function (activated, not revoked, holder not gone, App not deleted, started, not expired, not spent). A fact about this instant, never a lifecycle name."
+    allows: Boolean!
+  }
+
+  type GrantsPage {
+    items: [Grant!]!
+    total: Int!
+  }
+
   "Webhook trigger (D-2026-05-02). The secret is NEVER exposed here — the URL is returned once at create/rotate."
   type AgentWebhook {
     "Optional per-run token limit (#2479): positive, no greater than the platform default at save; narrowed again at launch. Null uses the default."
@@ -10788,6 +10831,13 @@ export const typeDefs = `#graphql
     connectionGrant(ref: ID!): ConnectionGrant
     "The caller's own connection grants; connectionRef narrows to one connection."
     connectionGrants(connectionRef: String, limit: Int, offset: Int): ConnectionGrantsPage!
+    """
+    One grant by id (#3789). Read only by a BOUND WORKER SESSION, in its own App, for a grant naming that worker directly or a pending one it requested itself.
+    Every other caller, a soft-deleted App and a missing id all answer null: no error and no existence oracle.
+    """
+    grant(ref: ID!): Grant
+    "The bound worker's own grants (#3789): the rows naming it directly as holder, plus the pending ones it requested. Any other caller gets an empty page, never an error. limit 0 returns the count only."
+    grants(limit: Int, offset: Int): GrantsPage!
     "One action grant by ID - visible to the grantee or an admin of its org; null otherwise (no existence oracle)."
     principalGrant(ref: ID!): PrincipalGrant
     "Action grants. Default: the caller's own (self-audit is never gated). An org admin passing orgRef sees that org's grants, optionally narrowed by userRef."

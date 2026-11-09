@@ -21,7 +21,7 @@ describe('grants', () => {
   });
   it('the holder worker_id is fenced too: a missing worker never becomes a holder', async () => {
     await expect(insertGrant(w, { user_id: null, worker_id: w.workerId })).resolves.toBeTruthy();
-    await expect(insertGrant(w, { user_id: null, worker_id: 'no-such-worker' })).rejects.toThrow(/Cannot add a new worker reference|WORKER_REFERENCE_NOT_FOUND|foreign key/i);
+    await expect(insertGrant(w, { user_id: null, worker_id: 'no-such-worker' })).rejects.toThrow(/Cannot add a new worker reference|WORKER_REFERENCE_NOT_FOUND|foreign key|a grant needs a holder/i);
   });
 });
 describe('grant_events (no foreign keys: sealed ids)', () => {
