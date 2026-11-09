@@ -72,13 +72,14 @@ export async function revisionSignatureCounts(
   revision: number,
   requirement: SignatureRequirement,
 ): Promise<boolean> {
-  switch (requirement) {
-    case 'compiled-boot-prompt':
-      // The stamp's manager grade must name the CURRENT memory's Agent or App (the fence below); the writer grade
-      // alone never satisfies this requirement. There is still no present-day eligibility re-derivation — the owner
-      // resolution below asks WHERE the node serves, never WHO the signer now is.
-      break;
-  }
+  // The requirement type has exactly one member today; this line stops compiling the moment a second joins, so the
+  // grade rules are decided per member instead of silently inheriting this branch (Bob old-8, delta review of
+  // 77c9fda85b: a one-case switch read like runtime dispatch but was only documentation). For
+  // 'compiled-boot-prompt': the stamp's manager grade must name the CURRENT memory's Agent or App (the fence below);
+  // the writer grade alone never satisfies it. There is still no present-day eligibility re-derivation — the owner
+  // resolution below asks WHERE the node serves, never WHO the signer now is.
+  const exhaustiveRequirement: 'compiled-boot-prompt' = requirement;
+  void exhaustiveRequirement;
   const node = await db.node.findUnique({
     where: { id: nodeId },
     select: { revSeq: true, name: true, abstract: true, content: true, memoryId: true, memory: { select: { isEncrypted: true } } },
@@ -105,7 +106,10 @@ export async function revisionSignatureCounts(
   // HASH is compared against a hash already in the serve's own data, so a snapshot captured in another memory is an
   // honest witness here without any text crossing memories (and, per the fence ruling above, without its capture
   // memory ever counting against the signature).
-  const lowestSigned = Math.min(...signatures.map((s) => s.revision));
+  // A loop, not Math.min(...spread): a node with more signatures than the engine's argument cap must not
+  // RangeError the serve (Bob old-7, delta review of 77c9fda85b).
+  let lowestSigned = Number.MAX_SAFE_INTEGER;
+  for (const s of signatures) if (s.revision < lowestSigned) lowestSigned = s.revision;
   const snapshots = await db.nodeRevision.findMany({
     where: { nodeId, revNo: { gt: lowestSigned, lte: revision } },
     orderBy: { id: 'desc' },

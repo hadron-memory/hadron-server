@@ -171,9 +171,11 @@ async function resolveFrom(db: Db, t: ServeTarget, skipWorker: boolean): Promise
   await db.$queryRaw`SELECT id FROM nodes WHERE id = ${resolved.nodeId} FOR SHARE`;
 
   // #2973 (cor:agt:040:10, G2): where the serving organisation has switched signing on AND the deployment ships
-  // signing, the selection below demands a signed revision too — judged here, inside the revision walk and under the
-  // share lock above, so the in-transaction resolves (a bind, a run) decide it under their existing locks. Either
-  // conjunct false keeps today's approval-only serving: the walk is the unchanged #2041 one.
+  // signing, the selection below demands a signed revision too — judged here, inside the revision walk. The ONLY row
+  // held is the NODE row's share lock above: what the walk then reads (the org switch, the signatures, the passkeys)
+  // is NOT locked — a change there races this read and is picked up by the next resolve, exactly as the approval
+  // walk's reads already race (Bob Q2, delta review of 77c9fda85b: the comment used to claim more than the lock
+  // gives). Either conjunct false keeps today's approval-only serving: the walk is the unchanged #2041 one.
   const requiresSignature = t.appId != null && (await servingAppRequiresSignature(db, t.appId));
 
   // Selection and retrieval are two reads, so a recompile between them could pair an old revision number with newer,

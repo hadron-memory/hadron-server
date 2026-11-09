@@ -22,7 +22,7 @@ import { cleanDb } from '../../test/helpers.js';
 import { decryptBytesAad, encryptBytesAad, encryptToken } from '../tokenCrypto.js';
 import {
   canonicalStampInput, computeStampTag, mintStampSigningKey, rewrapStampSigningKeys,
-  stampKeyAad, stampTagMatches, stampVerificationKey, type StampInput,
+  StampRegistryUnavailableError, stampKeyAad, stampTagMatches, stampVerificationKey, type StampInput,
 } from './stampKeys.js';
 
 const ROOT_A = '0'.repeat(64); // what vitest.config.ts pins as HADRON_ENCRYPTION_KEY
@@ -87,7 +87,7 @@ describe('#2973 the key registry (purpose binding, one row per generation)', () 
     expect(second.id).toBe(1);
     expect(await db.stampSigningKey.count()).toBe(1);
     expect(first.key.length).toBe(32);
-    expect(stampVerificationKey(db, 1)).resolves.toBeDefined();
+    await expect(stampVerificationKey(db, 1)).resolves.not.toBeNull();
     // The stored material is NOT the raw key: it is wrapped under the env root with the row's AAD.
     const row = await db.stampSigningKey.findUniqueOrThrow({ where: { id: 1 } });
     expect(row.keyMaterial).not.toContain(first.key.toString('base64'));
@@ -135,7 +135,8 @@ describe('#2973 root rotation (recovery evidence — re-wrap, never invalidate)'
     const tag = computeStampTag(key, i);
     const before = (await db.stampSigningKey.findUniqueOrThrow({ where: { id } })).keyMaterial;
 
-    expect(await rewrapStampSigningKeys(db, ROOT_A, ROOT_B)).toBe(1);
+    const out = await rewrapStampSigningKeys(db, ROOT_A, ROOT_B);
+    expect(out).toEqual({ rows: 1, rewrapped: 1 });
     const after = (await db.stampSigningKey.findUniqueOrThrow({ where: { id } })).keyMaterial;
     expect(after).not.toBe(before); // genuinely re-wrapped...
     expect(() => decryptBytesAad(after, stampKeyAad(id))).toThrow(); // ...not under the OLD root anymore (sync throw)
@@ -146,12 +147,84 @@ describe('#2973 root rotation (recovery evidence — re-wrap, never invalidate)'
       expect(rotated).not.toBeNull();
       expect(stampTagMatches(rotated!, i, tag)).toBe(true); // the stamp still verifies: keys are retained, not rotated away
 
-      expect(await rewrapStampSigningKeys(db, ROOT_B, ROOT_A)).toBe(1); // the rollback
+      expect(await rewrapStampSigningKeys(db, ROOT_B, ROOT_A)).toEqual({ rows: 1, rewrapped: 1 }); // the rollback
     } finally {
       process.env.HADRON_ENCRYPTION_KEY = ROOT_A;
     }
     const back = await stampVerificationKey(db, id);
     expect(back).not.toBeNull();
     expect(stampTagMatches(back!, i, tag)).toBe(true);
+  });
+
+  it('a re-run after success is a no-op (try-to-first idempotency: nothing re-wrapped, bytes unchanged)', async () => {
+    await mint();
+    await rewrapStampSigningKeys(db, ROOT_A, ROOT_B);
+    const settled = (await db.stampSigningKey.findUniqueOrThrow({ where: { id: 1 } })).keyMaterial;
+    expect(await rewrapStampSigningKeys(db, ROOT_A, ROOT_B)).toEqual({ rows: 1, rewrapped: 0 });
+    expect((await db.stampSigningKey.findUniqueOrThrow({ where: { id: 1 } })).keyMaterial).toBe(settled);
+  });
+
+  it('D1 malformed-later-row: the call aborts BEFORE any write, every row still under the old root; repair, retry, all under the new root', async () => {
+    // Three generations: 1 and 3 honest, 2 shape-valid but not 32 bytes (Anne's probe shape).
+    const g1 = await mint();
+    await db.$executeRaw`UPDATE stamp_signing_keys SET retired_at = public.hadron_signing_now() WHERE id = 1`;
+    await mint(); // id 2, then corrupt it
+    await db.$executeRaw`UPDATE stamp_signing_keys SET key_material = ${encryptBytesAad(Buffer.alloc(31, 5), stampKeyAad(2), Buffer.from(ROOT_A, 'hex'))} WHERE id = 2`;
+    await db.$executeRaw`UPDATE stamp_signing_keys SET retired_at = public.hadron_signing_now() WHERE id = 2`;
+    const g3 = await mint();
+    expect(g3.id).toBe(3);
+    const at1 = (await db.stampSigningKey.findUniqueOrThrow({ where: { id: 1 } })).keyMaterial;
+
+    await expect(rewrapStampSigningKeys(db, ROOT_A, ROOT_B)).rejects.toBeInstanceOf(StampRegistryUnavailableError);
+    // Rollback proven by the rows: 1 and 3 are byte-identical and STILL decrypt under the old root.
+    expect((await db.stampSigningKey.findUniqueOrThrow({ where: { id: 1 } })).keyMaterial).toBe(at1);
+    expect(decryptBytesAad(at1, stampKeyAad(1), Buffer.from(ROOT_A, 'hex')).equals(g1.key)).toBe(true);
+    expect(decryptBytesAad((await db.stampSigningKey.findUniqueOrThrow({ where: { id: 3 } })).keyMaterial, stampKeyAad(3), Buffer.from(ROOT_A, 'hex')).equals(g3.key)).toBe(true);
+
+    // Repair row 2 with honest material under the old root; the retry converts the WHOLE registry.
+    const g2key = Buffer.alloc(32, 2);
+    await db.$executeRaw`UPDATE stamp_signing_keys SET key_material = ${encryptBytesAad(g2key, stampKeyAad(2), Buffer.from(ROOT_A, 'hex'))} WHERE id = 2`;
+    expect(await rewrapStampSigningKeys(db, ROOT_A, ROOT_B)).toEqual({ rows: 3, rewrapped: 3 });
+    for (const [id, key] of [[1, g1.key], [2, g2key], [3, g3.key]] as const) {
+      const material = (await db.stampSigningKey.findUniqueOrThrow({ where: { id } })).keyMaterial;
+      expect(decryptBytesAad(material, stampKeyAad(id), Buffer.from(ROOT_B, 'hex')).equals(key)).toBe(true);
+    }
+  });
+
+  it('D1 later-write-failure: a DB update that fails mid-loop rolls every earlier write back; the retry succeeds', async () => {
+    await mint();
+    await db.$executeRaw`UPDATE stamp_signing_keys SET retired_at = public.hadron_signing_now() WHERE id = 1`;
+    await mint(); // id 2 — registry of two rows, both to be re-wrapped
+    const at1 = (await db.stampSigningKey.findUniqueOrThrow({ where: { id: 1 } })).keyMaterial;
+
+    // A client whose SECOND update throws: row 1's write succeeds inside the transaction, row 2's fails.
+    let updates = 0;
+    const failing = db.$extends({
+      query: {
+        stampSigningKey: {
+          async update({ args, query }) {
+            if (++updates === 2) throw new Error('injected write failure');
+            return query(args);
+          },
+        },
+      },
+    });
+    await expect(rewrapStampSigningKeys(failing as unknown as typeof db, ROOT_A, ROOT_B)).rejects.toThrow('injected write failure');
+    // Rollback proven: row 1 is byte-identical and still under the old root — the earlier write did not survive.
+    expect((await db.stampSigningKey.findUniqueOrThrow({ where: { id: 1 } })).keyMaterial).toBe(at1);
+    expect(() => decryptBytesAad(at1, stampKeyAad(1), Buffer.from(ROOT_A, 'hex'))).not.toThrow();
+
+    // The retry (healthy client) converts both rows.
+    expect(await rewrapStampSigningKeys(db, ROOT_A, ROOT_B)).toEqual({ rows: 2, rewrapped: 2 });
+    for (const id of [1, 2]) {
+      const material = (await db.stampSigningKey.findUniqueOrThrow({ where: { id } })).keyMaterial;
+      expect(() => decryptBytesAad(material, stampKeyAad(id), Buffer.from(ROOT_B, 'hex'))).not.toThrow();
+    }
+  });
+
+  it('a row under neither root aborts the whole call with the typed error naming it (planted material is never carried)', async () => {
+    await mint();
+    await db.$executeRaw`UPDATE stamp_signing_keys SET key_material = ${encryptToken('planted')} WHERE id = 1`;
+    await expect(rewrapStampSigningKeys(db, ROOT_A, ROOT_B)).rejects.toThrow(/stamp key 1/);
   });
 });

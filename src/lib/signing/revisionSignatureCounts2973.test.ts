@@ -182,10 +182,14 @@ const counts = (revision: number, memoryNode: string = nodeId) => revisionSignat
  * facts. The one thing the forger can never supply is a tag minted by the ceremony over the CLAIMED facts; the tag
  * copied along is the original's, binding the ORIGINAL facts. The guard is honored the same way {@link seedDirect}
  * honors it: the row is INSERTed while its request is open, then the request ends 'completed' once.
+ *
+ * `assertingCredentialId` is not a claim but honesty plumbing: which of the signer's GENUINE credentials the fresh
+ * assertion is made with and the row names. Without it the row names the first credential by id — an arbitrary pick
+ * once the signer holds several (ids are random), which would fail the validity leg for a reason that is not the pin.
  */
 async function seedStampForgery(node: string, orig: { ceremonyStamp: Uint8Array | null; stampKeyId: number | null; stampMemoryId: string | null; stampOwnerKind: string | null; stampOwnerId: string | null },
   passkey: SoftPasskey,
-  claimed: { stampMemoryId?: string; stampOwnerKind?: string; stampOwnerId?: string } = {}) {
+  claimed: { stampMemoryId?: string; stampOwnerKind?: string; stampOwnerId?: string; stampKeyId?: number; assertingCredentialId?: string } = {}) {
   const n = await db.node.findUniqueOrThrow({ where: { id: node } });
   const approvalHash = computeApprovalHash({ title: n.name, abstract: n.abstract, content: n.content });
   const requestId = newSigningRequestId();
@@ -193,7 +197,9 @@ async function seedStampForgery(node: string, orig: { ceremonyStamp: Uint8Array 
     id: requestId, nodeId: node, revision: n.revSeq, approvalHash, payloadVersion: SIGNATURE_PAYLOAD_V3,
     requesterUserId: signerId, expiresAt: new Date(Date.now() + 3600_000), state: 'open',
   } });
-  const credential = await db.passkeyCredential.findFirstOrThrow({ where: { owner: { id: signerId } }, orderBy: { id: 'asc' } });
+  const credential = claimed.assertingCredentialId != null
+    ? await db.passkeyCredential.findUniqueOrThrow({ where: { id: claimed.assertingCredentialId } })
+    : await db.passkeyCredential.findFirstOrThrow({ where: { owner: { id: signerId } }, orderBy: { id: 'asc' } });
   const assertion = passkey.assert({
     payload: signaturePayloadBytes(SIGNATURE_PAYLOAD_V3, { nodeId: node, approvalHash, requestId }),
     origin: ORIGIN, rpId: RP,
@@ -204,7 +210,7 @@ async function seedStampForgery(node: string, orig: { ceremonyStamp: Uint8Array 
     authenticatorData: new Uint8Array(assertion.authenticatorData), clientDataJson: new Uint8Array(assertion.clientDataJson),
     signature: new Uint8Array(assertion.signature),
     ceremonyStamp: orig.ceremonyStamp != null ? new Uint8Array(orig.ceremonyStamp) : null,
-    stampKeyId: orig.stampKeyId,
+    stampKeyId: claimed.stampKeyId ?? orig.stampKeyId,
     stampMemoryId: claimed.stampMemoryId ?? orig.stampMemoryId,
     stampOwnerKind: claimed.stampOwnerKind ?? orig.stampOwnerKind,
     stampOwnerId: claimed.stampOwnerId ?? orig.stampOwnerId,
@@ -303,6 +309,32 @@ describe('#2973 coverage (cor:dmo:130:09 — from the revision history, never th
       data: { nodeId, memoryId: m1, loc: n.loc, name: n.name, content: 'v1', revNo: 2, tags: [] } as never,
     })).rejects.toThrow(/Unique constraint/);
     expect(await counts(3)).toBe(false);
+  });
+
+  it('should the constraint ever be bypassed, the walk arbitrates duplicate witnesses NEWEST-by-id, fail closed (Rico §10 P3-2 / M20)', async () => {
+    await signLive(); // revision 1 holds 'v1'
+    await editMetaOnly(); // revision 2; snapshot@1 = 'v1', none at 2 — the live row witnesses 2 for now
+    expect(await counts(2)).toBe(true);
+    const n = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
+    // Two witnesses at revNo 2, planted the only way they can exist (the unique constraint dropped for the
+    // planting, this clone's schema to bend, then restored): an HONEST one over the signed text, then — 3ms
+    // apart, so the UUIDv7 id order is strict — a DISAGREEING newer one. The walk's newest-by-id resolution
+    // (the convention every revision read uses) must take the NEWER: a later planted witness fails closed, and
+    // ordering oldest-first would silently count on the stale one (the surviving M20 mutant).
+    await db.$executeRawUnsafe(`DROP INDEX node_revisions_node_rev_no_uniq`);
+    const plant = (content: string) => db.nodeRevision.create({
+      data: { nodeId, memoryId: m1, loc: n.loc, name: n.name, abstract: n.abstract, content, revNo: 2, tags: [] } as never,
+    });
+    try {
+      await plant(n.content!); // honest: identical fields → hashes to the signed approval hash
+      expect(await counts(2)).toBe(true); // the honest duplicate carries coverage, exactly as the live row did
+      await new Promise((r) => setTimeout(r, 3));
+      await plant('planted later duplicate'); // newer id, disagreeing content
+      expect(await counts(2)).toBe(false); // newest-by-id wins → the span witness no longer hashes to the signed text
+    } finally {
+      await db.nodeRevision.deleteMany({ where: { nodeId, revNo: 2 } });
+      await db.$executeRawUnsafe(`CREATE UNIQUE INDEX node_revisions_node_rev_no_uniq ON node_revisions (node_id, rev_no)`);
+    }
   });
 });
 
@@ -417,6 +449,7 @@ describe('#2973 the stamp (the durable at-signing verdict — Rico §10 conditio
 
   it('a stamp naming a different key than the one that made it never verifies', async () => {
     await signLive(); // stamps under key 1
+    const olderKey = key; // the gen-1 passkey, captured before the next signLive reassigns the module binding
     await db.$executeRaw`UPDATE stamp_signing_keys SET retired_at = public.hadron_signing_now() WHERE retired_at IS NULL`;
     await signLive(); // the next generation: key 2
     const keys = await db.stampSigningKey.findMany({ orderBy: { id: 'asc' } });
@@ -438,6 +471,13 @@ describe('#2973 the stamp (the durable at-signing verdict — Rico §10 conditio
     expect(stampTagMatches(k2!, tagInputOf(older, keys[1]!.id), olderTag)).toBe(false); // key 2 over key 1's tag
     expect(stampTagMatches(k1!, tagInputOf(older, keys[1]!.id), olderTag)).toBe(false); // key 1, mismatched keyId input
     expect(stampTagMatches(k2!, tagInputOf(newer, keys[1]!.id), Buffer.from(newer.ceremonyStamp!))).toBe(true); // control
+    // And the row-level leg the name promises (Bob N6): a seeded row — honest request, honest fresh assertion by the
+    // signer's own gen-1 credential — whose stamp column NAMES key 2 while carrying key 1's tag. The rows are
+    // append-only, so a mis-keyed stamp can only ever exist as a seed like this; the predicate verifies under the key
+    // the row NAMES, so the forgery fails closed through counts, not just under the unit helper above.
+    const twinId = (await createDbNode(db, { loc: 'r2973:twin3', memoryId: m1, name: 'Prompt', content: 'v1' })).id;
+    await seedStampForgery(twinId, older, olderKey, { stampKeyId: keys[1]!.id, assertingCredentialId: older.passkeyCredentialId });
+    expect(await revisionSignatureCounts(db, twinId, 1, REQ)).toBe(false); // the mis-keyed stamp never counts
     // And both honest rows still count end to end.
     expect(await counts(1)).toBe(true);
   });
@@ -466,6 +506,37 @@ describe('#2973 the stamp (the durable at-signing verdict — Rico §10 conditio
     await seedStampForgery(twinId, orig, key, { stampOwnerId: agentBId });
     expect(await revisionSignatureCounts(db, twinId, 1, REQ)).toBe(false);
     expect(await counts(1)).toBe(true);
+  });
+
+  it('the half owner pair (kind NULL, id named) is a shape the database refuses: no NULL CHECK verdict passes (Anne D2)', async () => {
+    // The truth-table hole, red at 77c9fda8: with stamp_owner_kind NULL and stamp_owner_id non-NULL, the CHECK's
+    // owner disjunction evaluated SQL NULL, and a CHECK accepts NULL — so the manager-pair shape inserted. The
+    // predicate would never count it (the fence compares kind), but the row shape is a lie the table now rejects:
+    // the whole CHECK expression is required to BE true (IS TRUE), closing every NULL-verdict shape at once.
+    const { passkeyId } = await signLive(nodeId, { as: 'contributor' }); // writer grade: stamp trio set, kind/id both NULL
+    const orig = await db.nodeSignature.findFirstOrThrow({ where: { nodeId } });
+    expect(orig.stampOwnerKind).toBeNull();
+    expect(orig.stampOwnerId).toBeNull();
+    const n = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
+    const approvalHash = computeApprovalHash({ title: n.name, abstract: n.abstract, content: n.content });
+    const requestId = newSigningRequestId();
+    await db.signingRequest.create({ data: {
+      id: requestId, nodeId, revision: n.revSeq, approvalHash, payloadVersion: SIGNATURE_PAYLOAD_V3,
+      requesterUserId: signerId, expiresAt: new Date(Date.now() + 3600_000), state: 'open',
+    } });
+    const assertion = key.assert({
+      payload: signaturePayloadBytes(SIGNATURE_PAYLOAD_V3, { nodeId, approvalHash, requestId }),
+      origin: ORIGIN, rpId: RP,
+    });
+    // The insert satisfies the append-only guard honestly (an open request, the pinned payload, the writer's own
+    // passkey) and is refused by the CHECK alone: kind NULL, id named — the half owner pair.
+    await expect(db.$executeRaw`INSERT INTO node_signatures
+      (id, node_id, signing_request_id, signer_id, passkey_credential_id, revision, approval_hash, payload_version, rp_id,
+       authenticator_data, client_data_json, signature, ceremony_stamp, stamp_key_id, stamp_memory_id, stamp_owner_kind, stamp_owner_id)
+      VALUES (${generateId()}, ${nodeId}, ${requestId}, ${writerId}, ${passkeyId}, ${n.revSeq}, ${approvalHash}, ${SIGNATURE_PAYLOAD_V3}, ${RP},
+       ${Buffer.from(assertion.authenticatorData)}, ${Buffer.from(assertion.clientDataJson)}, ${Buffer.from(assertion.signature)},
+       ${Buffer.from(orig.ceremonyStamp!)}, ${orig.stampKeyId}, ${orig.stampMemoryId}, NULL, 'someone')`)
+      .rejects.toMatchObject({ code: 'P2010', meta: { code: '23514' } });
   });
 
   it('rotating the encryption root re-wraps the registry and stamps keep counting; the rollback does too', async () => {
@@ -529,5 +600,59 @@ describe('#2973 the memory fence (Xylon 6750288978 — exact counting parity)', 
     const after = (await loadSignatureStatuses(db, [nodeId])).get(nodeId)!;
     expect(after.state).toBe('CURRENT'); // the fence changes counting, never the record's own state or visibility
     expect(after.signatures.length).toBe(1);
+  });
+});
+
+describe('#2973 the same-owner move (two install memories of one App — Rico §10 P3-3)', () => {
+  // Two install memories of ONE App share the stamp's judged owner (APP, X), so a move between them leaves the
+  // memory fence (stampMemoryId vs the node's current memory) as the ONLY guard — the place a same-owner move
+  // could slip through if the fence or the tag's memory binding were dropped. The four pins fold Rico's executed
+  // probes (receipt 6753263603): the fence alone refuses the moved signature (kills mutant R1, fence `continue`
+  // removed), the tag's own memory binding refuses the rewritten row (kills K1, memoryId dropped from the
+  // canonical stamp input), and the in-place upgrade of a writer-grade stamp is the escalation the stamp exists
+  // to stop. P3 by Rico's ruling: the managers of both installs are the same set, so PR1 gains no authority.
+  async function twoInstalls() {
+    const app = await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'X', urn: 'r2973-org:appx' } });
+    const i1 = (await db.memory.create({ data: { id: generateId(), class: 'system', name: 'i1', urn: 'r2973-org:i1', organizationId: orgId, appId: app.id, installOfAgentId: agentAId, isInstallMemory: true } })).id;
+    const i2 = (await db.memory.create({ data: { id: generateId(), class: 'system', name: 'i2', urn: 'r2973-org:i2', organizationId: orgId, appId: app.id, installOfAgentId: agentBId, isInstallMemory: true } })).id;
+    await db.node.update({ where: { id: nodeId }, data: { memoryId: i1 } });
+    return { app, i1, i2 };
+  }
+  it('signed in I1 (manager of App X) counts in I1', async () => {
+    const { app } = await twoInstalls();
+    await signLive();
+    const row = await db.nodeSignature.findFirstOrThrow({ where: { nodeId } });
+    expect(row.stampOwnerKind).toBe('APP');
+    expect(row.stampOwnerId).toBe(app.id);
+    expect(await revisionSignatureCounts(db, nodeId, row.revision, REQ)).toBe(true);
+  });
+  it('moved I1 → I2 (same App owner) does not count — the fence alone refuses it', async () => {
+    const { i2 } = await twoInstalls();
+    await signLive();
+    const row = await db.nodeSignature.findFirstOrThrow({ where: { nodeId } });
+    await db.node.update({ where: { id: nodeId }, data: { memoryId: i2 } });
+    expect(await revisionSignatureCounts(db, nodeId, row.revision, REQ)).toBe(false);
+  });
+  it('moved I1 → I2 and stamp_memory_id rewritten to I2 (triggers off) does not count — the tag binds the memory', async () => {
+    const { i2 } = await twoInstalls();
+    await signLive();
+    const row = await db.nodeSignature.findFirstOrThrow({ where: { nodeId } });
+    await db.node.update({ where: { id: nodeId }, data: { memoryId: i2 } });
+    await db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(`SET LOCAL session_replication_role = replica`);
+      await tx.$executeRaw`UPDATE node_signatures SET stamp_memory_id = ${i2} WHERE id = ${row.id}`;
+    });
+    expect((await db.nodeSignature.findUniqueOrThrow({ where: { id: row.id } })).stampMemoryId).toBe(i2);
+    expect(await revisionSignatureCounts(db, nodeId, row.revision, REQ)).toBe(false);
+  });
+  it('a writer-only stamp upgraded in place to the current owner (triggers off) does not count', async () => {
+    const { req } = await signLive(nodeId, { as: 'contributor' });
+    const row = await db.nodeSignature.findFirstOrThrow({ where: { signingRequestId: req.id } });
+    expect(row.stampOwnerKind).toBeNull();
+    await db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(`SET LOCAL session_replication_role = replica`);
+      await tx.$executeRaw`UPDATE node_signatures SET stamp_owner_kind = 'AGENT', stamp_owner_id = ${agentAId} WHERE id = ${row.id}`;
+    });
+    expect(await revisionSignatureCounts(db, nodeId, row.revision, REQ)).toBe(false);
   });
 });

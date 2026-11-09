@@ -34,10 +34,11 @@ export function encryptToken(plaintext: string): string {
 export function decryptToken(ciphertext: string): string {
   const key = getEncryptionKey();
   const buf = Buffer.from(ciphertext, 'base64');
+  if (buf.length < 28) throw new Error('ciphertext shorter than iv(12)+tag(16)');
   const iv = buf.subarray(0, 12);
   const tag = buf.subarray(12, 28);
   const data = buf.subarray(28);
-  const decipher = createDecipheriv('aes-256-gcm', key, iv);
+  const decipher = createDecipheriv('aes-256-gcm', key, iv, { authTagLength: 16 });
   decipher.setAuthTag(tag);
   return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
 }
@@ -60,13 +61,20 @@ export function encryptBytesAad(plaintext: Buffer, aad: string, key: Buffer = ge
   return Buffer.concat([iv, tag, encrypted]).toString('base64');
 }
 
-/** {@link encryptBytesAad}'s inverse: throws on a wrong AAD, a wrong key, or tampering. */
+/**
+ * {@link encryptBytesAad}'s inverse: throws on a wrong AAD, a wrong key, or tampering.
+ * The GCM tag length is PINNED (16) and inputs shorter than iv(12)+tag(16) are
+ * rejected up front — without the pin Node accepts a short tag subarray, so a
+ * truncated ciphertext would surface as a wrong-key failure instead of malformed
+ * input (Bob N3, delta review of 77c9fda85b).
+ */
 export function decryptBytesAad(ciphertext: string, aad: string, key: Buffer = getEncryptionKey()): Buffer {
   const buf = Buffer.from(ciphertext, 'base64');
+  if (buf.length < 28) throw new Error('ciphertext shorter than iv(12)+tag(16)');
   const iv = buf.subarray(0, 12);
   const tag = buf.subarray(12, 28);
   const data = buf.subarray(28);
-  const decipher = createDecipheriv('aes-256-gcm', key, iv);
+  const decipher = createDecipheriv('aes-256-gcm', key, iv, { authTagLength: 16 });
   decipher.setAAD(Buffer.from(aad, 'utf8'));
   decipher.setAuthTag(tag);
   return Buffer.concat([decipher.update(data), decipher.final()]);

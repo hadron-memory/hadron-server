@@ -92,7 +92,7 @@ afterEach(() => {
 describe('#2973 run surface', () => {
   it('an approved but unsigned prompt refuses the launch BOOT_PROMPT_NOT_SIGNED and no run is created', async () => {
     await db.organization.update({ where: { id: orgId }, data: { bootPromptSigningRequired: true } });
-    const node = await compiledPointer('v1');
+    await compiledPointer('v1');
     const runs = await db.appRun.count();
     expect(await code(mint({ userId, agentId }))).toBe('BOOT_PROMPT_NOT_SIGNED');
     expect(await db.appRun.count()).toBe(runs);
@@ -109,7 +109,7 @@ describe('#2973 run surface', () => {
   });
 
   it('the in-transaction resolve refuses too: the switch flipped on between the preflight and the transaction rolls the launch back', async () => {
-    const node = await compiledPointer('v1'); // switch still OFF at the refusal preflight
+    await compiledPointer('v1'); // switch still OFF at the refusal preflight
     const racing = new Proxy(db, {
       get(target, prop, recv) {
         const v = Reflect.get(target, prop, recv);

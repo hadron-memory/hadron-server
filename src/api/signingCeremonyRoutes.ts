@@ -26,6 +26,7 @@ import { passkeyRpId, signingCeremonyOrigins, SigningNotConfiguredError } from '
 import { SIGNING_CEREMONY_PATH } from '../lib/signing/ceremonyUrl.js';
 import { signingSurfacePolicy } from '../lib/signing/surface.js';
 import { SigningRefusal } from '../lib/signing/requests.js';
+import { StampRegistryUnavailableError } from '../lib/signing/stampKeys.js';
 import { ceremonyShell } from './ceremonyShell.js';
 import {
   CeremonyRefused, completeSigning, currentSigningChallenge, declineSigning, openProofCeremony, proveForSigning,
@@ -314,6 +315,11 @@ function refusal(res: Response, e: unknown): void {
     if (e.code === 'SIGNATURE_NOT_VERIFIED') return void json(res, 403, { error: 'SIGNATURE_NOT_VERIFIED' });
     if (e.code === 'ENCRYPTED_MEMORY_NOT_APPLICABLE') return void json(res, 409, { error: 'ENCRYPTED_MEMORY_NOT_APPLICABLE' });
   }
+  // #2973: a registry the server cannot serve (wrong-root rotation, planted row) is an OPERATOR
+  // problem a signer cannot retry past — typed 503, never a uniform refusal that hides it and
+  // never a generic 500 (Bob P2-3, delta review of 77c9fda85b). Fail closed either way: the
+  // transaction rolled back, no signature was written.
+  if (e instanceof StampRegistryUnavailableError) return void json(res, 503, { error: 'SIGNING_UNAVAILABLE', reason: 'stamp_key_registry' });
   if (e instanceof CeremonyRefused || e instanceof SigningRefusal || e instanceof SigningNotConfiguredError) return void refuse(res);
   refuse(res);
 }

@@ -240,16 +240,22 @@ ALTER TABLE node_signatures
   ADD COLUMN IF NOT EXISTS stamp_owner_kind text NULL,
   ADD COLUMN IF NOT EXISTS stamp_owner_id text NULL;
 ALTER TABLE node_signatures DROP CONSTRAINT IF EXISTS chk_node_signature_stamp;
+-- The whole expression is required to BE true (IS TRUE): a NULL verdict rejects, it does
+-- not pass. Without the pin, the half owner pair (kind NULL, id named) made the owner
+-- disjunction evaluate SQL NULL and the CHECK accepted the manager-pair shape — a
+-- truth-table hole, no counting bypass (Anne D2, delta review of 77c9fda8).
 ALTER TABLE node_signatures ADD CONSTRAINT chk_node_signature_stamp CHECK (
-  (ceremony_stamp IS NULL AND stamp_key_id IS NULL AND stamp_memory_id IS NULL
-   AND stamp_owner_kind IS NULL AND stamp_owner_id IS NULL)
-  OR (ceremony_stamp IS NOT NULL
-      AND stamp_key_id IS NOT NULL AND stamp_key_id >= 1
-      AND stamp_memory_id IS NOT NULL AND stamp_memory_id <> ''
-      AND octet_length(ceremony_stamp) = 32
-      AND ((stamp_owner_kind IS NULL AND stamp_owner_id IS NULL)
-           OR (stamp_owner_kind IN ('AGENT','APP')
-               AND stamp_owner_id IS NOT NULL AND stamp_owner_id <> '')))
+  (
+    (ceremony_stamp IS NULL AND stamp_key_id IS NULL AND stamp_memory_id IS NULL
+     AND stamp_owner_kind IS NULL AND stamp_owner_id IS NULL)
+    OR (ceremony_stamp IS NOT NULL
+        AND stamp_key_id IS NOT NULL AND stamp_key_id >= 1
+        AND stamp_memory_id IS NOT NULL AND stamp_memory_id <> ''
+        AND octet_length(ceremony_stamp) = 32
+        AND ((stamp_owner_kind IS NULL AND stamp_owner_id IS NULL)
+             OR (stamp_owner_kind IN ('AGENT','APP')
+                 AND stamp_owner_id IS NOT NULL AND stamp_owner_id <> '')))
+  ) IS TRUE
 );
 
 -- The retained versioned registry of stamp HMAC keys. Random purpose-scoped 32-byte

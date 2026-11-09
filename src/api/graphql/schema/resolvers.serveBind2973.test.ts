@@ -111,16 +111,21 @@ describe('#2973 bind surface', () => {
     expect(rec).toMatchObject({ kind: 'BIND', sessionId: session.id, appId: app.id, agentId: agent.id, pointerLevel: 'AGENT', compiledNodeId: node, servedRevSeq: 1 });
   });
 
-  it('the in-transaction resolve refuses with the same typed refusal, so the bind transaction rolls back', async () => {
+  it('the in-transaction resolve refuses with the same typed refusal, so the bind transaction rolls back whole', async () => {
     await db.organization.update({ where: { id: org.id }, data: { bootPromptSigningRequired: true } });
     const node = await compiled('unsigned');
     await pointAgent(node);
-    // serveBindInTransaction is the leg that runs INSIDE the bind's transaction, after the session row exists
-    // (resolvers.worker.ts): its refusal must roll the whole bind back, leaving no record behind.
-    const session = await db.session.create({ data: { id: generateId(), appId: app.id, userId: admin.id, agentId: agent.id } });
+    // The real bind shape: the session row is created INSIDE the same transaction whose
+    // serveBindInTransaction leg then refuses (resolvers.worker.ts) — the rollback must take the
+    // session row with it, not only the record (Bob old-12, delta review of 77c9fda85b: the session
+    // used to be made outside the transaction, so the refusal proved nothing about the row that
+    // matters, and the row leaked).
+    const sessions = await db.session.count();
     await expect(db.$transaction(async (tx) => {
+      const session = await tx.session.create({ data: { id: generateId(), appId: app.id, userId: admin.id, agentId: agent.id } });
       await serveBindInTransaction(tx as never, ctx(), { sessionId: session.id, workerId: worker.id, appId: app.id, agentId: agent.id, llmModel: 'm-1' });
     })).rejects.toMatchObject({ extensions: { code: 'BOOT_PROMPT_NOT_SIGNED' } });
     expect(await records()).toEqual([]);
+    expect(await db.session.count()).toBe(sessions); // the in-transaction session row rolled back too
   });
 });
