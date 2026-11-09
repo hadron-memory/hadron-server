@@ -11,8 +11,10 @@
  * Statement-level keywords are looked for OUTSIDE dollar-quoted bodies (a DO block's own BEGIN/END is not a
  * transaction statement); CONCURRENTLY is looked for everywhere outside comments and strings.
  */
-const TAG = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/;
-const IDENT_CHAR = /[A-Za-z0-9_$]/;
+// PostgreSQL's lexer accepts any byte >= 0x80 in an identifier, so a dollar tag may be non-ASCII ($é$, $日本$, $😀$).
+// Without the u flag the range below also covers surrogate halves, i.e. astral characters.
+const TAG = /^\$([A-Za-z_\u0080-\uffff][A-Za-z0-9_\u0080-\uffff]*)?\$/;
+const IDENT_CHAR = /[A-Za-z0-9_$\u0080-\uffff]/;
 
 interface Scanned { top: string; code: string }
 

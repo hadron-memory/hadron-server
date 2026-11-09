@@ -203,12 +203,14 @@ describe('#3770 a refusal leaves no partial schema', () => {
       'CREATE INDEX CONCURRENTLY i ON t(c);',
       // a comment marker inside a string must not hide the real COMMIT after it (blind/local delta 2)
       "SELECT '--'; COMMIT;", "SELECT '/*'; COMMIT; SELECT '*/';", "SELECT E'\\'--'; COMMIT;", 'SELECT "--"; COMMIT;',
-      '/* a /* nested */ still comment */ COMMIT;', "DO $a$ BEGIN NULL; END $a$; COMMIT;", "SELECT $$--$$; COMMIT;"]) {
+      '/* a /* nested */ still comment */ COMMIT;', "DO $a$ BEGIN NULL; END $a$; COMMIT;", "SELECT $$--$$; COMMIT;",
+      // non-ASCII dollar tags (blind delta 3): two quoted apostrophes must not swallow the COMMIT between them
+      "SELECT $é$'$é$; COMMIT; SELECT $é$'$é$;", "SELECT $日本$'$日本$; COMMIT; SELECT $日本$'$日本$;", "SELECT $😀$'$😀$; COMMIT; SELECT $😀$'$😀$;"]) {
       expect(endsImplicitTransaction(bad), bad).toBe(true);
     }
     for (const ok of ["DO $$ BEGIN RAISE EXCEPTION 'x'; END $$;", "DO $$\nBEGIN\n  RAISE EXCEPTION 'x';\nEND $$;",
       "DO $$ BEGIN RAISE EXCEPTION 'will commit later'; END $$; -- COMMIT", '/* COMMIT */ SELECT 1;', "SELECT 'COMMIT; END;';",
-      "DO $f$ BEGIN IF true THEN NULL; END IF; END $f$;", 'CREATE TABLE "commit" (i int);', 'SELECT 1 -- BEGIN; END;']) {
+      "DO $f$ BEGIN IF true THEN NULL; END IF; END $f$;", "DO $é$ BEGIN NULL; END $é$;", "SELECT $日本$ COMMIT; $日本$;", 'CREATE TABLE "commit" (i int);', 'SELECT 1 -- BEGIN; END;']) {
       expect(endsImplicitTransaction(ok), ok).toBe(false);
     }
   });
