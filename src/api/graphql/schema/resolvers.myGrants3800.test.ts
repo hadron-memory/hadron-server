@@ -161,7 +161,7 @@ describe('every other caller gets an empty page', () => {
       { db, userId: w.userId, roles: [], impersonation: { sessionId: generateId(), actorUserId: w.user2Id, orgId: w.orgId, expiresAt: new Date(Date.now() + 60_000) } } as Context,
     ];
     for (const contextValue of ctxs) {
-      const a = await runAsActor({ userId: w.userId }, () => direct.executeOperation({ query: LIST, variables: {} }, { contextValue }));
+      const a = await runAsActor({ workerId: null, agentId: null, userId: w.userId }, () => direct.executeOperation({ query: LIST, variables: {} }, { contextValue }));
       if (a.body.kind !== 'single') throw new Error('incremental');
       const out = JSON.parse(JSON.stringify(a.body.singleResult));
       expect(out.errors).toBeUndefined();

@@ -1603,7 +1603,7 @@
     },
     "GrantsPage.items": {
       "class": "parent-implies-child",
-      "audience": "a bound worker session reading its own App's grants that name it directly (plus its own pending requests); any other caller gets an empty page (#3789)",
+      "audience": "a bound worker session reading its own App's grants that name it directly (plus its own pending requests) (#3789), or a signed-in person reading only the grants naming them as holder (#3800 myGrants); any other caller gets an empty page",
       "resolver": "src/api/graphql/schema/resolvers.grant.ts::resolveGrantReader",
       "target": "Grant"
     },

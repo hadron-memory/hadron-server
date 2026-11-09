@@ -1,12 +1,12 @@
 /**
- * #3789 (Grants S2a-read): `grant(ref:)` and `grants`. Read only, and only by a BOUND WORKER SESSION in its own App. The row
+ * #3789 (Grants S2a-read): `grant(ref:)` and `grants`. Read only, and only by a BOUND WORKER SESSION in its own App. #3800 adds `myGrants`: a signed-in PERSON's own grants across Apps. The row
  * scope lives in src/lib/grants/read.ts (to be shared with the run tool of #3710, which does not exist yet); this file is the CALLER gate, and a failed gate is an
  * empty page / null, never an error, so it discloses nothing and answers exactly as a missing row does.
  * No MCP tool: Holger's rule (2026-10-31), "Agents: yes, Workers: no". No writer exists on any surface.
  */
 import { appKeyCaller } from '../../../lib/appKeyScopes/scopes.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
-import { getGrantForWorker, listGrantsForWorker, type GrantReader } from '../../../lib/grants/read.js';
+import { getGrantForWorker, listGrantsForPerson, listGrantsForWorker, type GrantReader } from '../../../lib/grants/read.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { clampListTake, type Context } from './resolvers.helpers.js';
 import { loadApp, resolveTaskActor } from './resolvers.agentTask.js';
@@ -29,6 +29,18 @@ export async function resolveGrantReader(ctx: Context): Promise<GrantReader | nu
   return { appId: app.id, workerId: bound.workerId };
 }
 
+/**
+ * #3800: the person this request is, for their OWN grants across Apps, or null. A signed-in person (`ctx.userId`) acting as
+ * themselves: not an App key, not a run, not an impersonated session, and not a worker session (a worker reads its own App's
+ * grants through `grants`; a stand-in is not the person). The caller gate only; the row scope is `listGrantsForPerson`.
+ */
+export function resolveGrantPerson(ctx: Context): string | null {
+  if (!ctx.userId) return null;
+  // An App key carries no userId (appKeyCaller), so the first line already answers it.
+  if (ctx.impersonation || isRunPrincipal(ctx) || currentActor().workerId) return null;
+  return ctx.userId;
+}
+
 export const grantQueries = {
   grant: async (_p: unknown, { ref }: { ref: string }, ctx: Context) => {
     const reader = await resolveGrantReader(ctx);
@@ -38,5 +50,10 @@ export const grantQueries = {
     const reader = await resolveGrantReader(ctx);
     if (!reader) return { items: [], total: 0 };
     return listGrantsForWorker(ctx.db, reader, { take: clampListTake(limit), skip: Math.max(0, offset ?? 0) });
+  },
+  myGrants: async (_p: unknown, { limit, offset }: { limit?: number | null; offset?: number | null }, ctx: Context) => {
+    const userId = resolveGrantPerson(ctx);
+    if (!userId) return { items: [], total: 0 };
+    return listGrantsForPerson(ctx.db, userId, { take: clampListTake(limit), skip: Math.max(0, offset ?? 0) });
   },
 };
