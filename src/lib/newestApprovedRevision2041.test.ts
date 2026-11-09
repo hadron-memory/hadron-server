@@ -217,12 +217,32 @@ describe('the unmetered walk pre-filters by approval hash (#3801)', () => {
       approvedAt: new Date(), approvedByInfo: 't', approvalHash: `h${i}`.padEnd(64, '0'),
     })) as never });
     await db.node.update({ where: { id: n.id }, data: { revSeq: 400, content: 'changed head' } });
-    const spy = vi.spyOn(db.nodeRevision, 'findMany');
+    const spy = vi.spyOn(db.nodeRevision, 'groupBy');
     await newestApprovedRevisionOf(db, n.id, 1);
-    const carrierReads = spy.mock.calls.map((c) => c[0] as { where?: { approvalHash?: { in?: string[] } } }).filter((a) => a?.where?.approvalHash?.in);
+    const carrierReads = spy.mock.calls.map((c) => c[0] as unknown as { where?: { approvalHash?: { in?: string[] } } }).filter((a) => a?.where?.approvalHash?.in);
     spy.mockRestore();
     for (const a of carrierReads) expect(a.where!.approvalHash!.in!.length).toBeLessThanOrEqual(1);
     expect(carrierReads.length).toBeGreaterThan(0);
+  });
+
+  it('repeated matching hashes cost one grouped row, not one fetched row per duplicate', async () => {
+    const n = await mk('d:9'); await approve(n.id);
+    const live = await db.node.findUniqueOrThrow({ where: { id: n.id } });
+    const hash = live.approvalHash!;
+    // 120 snapshots carrying the SAME approval hash (as metadata-only revisions after one approval do); live text differs
+    await db.nodeRevision.createMany({ data: Array.from({ length: 120 }, (_, i) => ({
+      id: generateId(), nodeId: n.id, memoryId: memory.id, loc: n.loc, name: n.name, content: `dup ${i}`, tags: [], revNo: 100 + i,
+      approvedAt: new Date(), approvedByInfo: 't', approvalHash: hash,
+    })) as never });
+    await db.node.update({ where: { id: n.id }, data: { revSeq: 400, content: 'changed head', approvalHash: null } });
+    const find = vi.spyOn(db.nodeRevision, 'findMany');
+    const group = vi.spyOn(db.nodeRevision, 'groupBy');
+    await newestApprovedRevisionOf(db, n.id, 1);
+    const unboundedCarrierRead = find.mock.calls.some((c) => (c[0] as { where?: { approvalHash?: unknown } })?.where?.approvalHash != null);
+    const grouped = group.mock.calls.length;
+    find.mockRestore(); group.mockRestore();
+    expect(unboundedCarrierRead).toBe(false);
+    expect(grouped).toBeGreaterThan(0);
   });
 
   it('a metered walk does not read the live text outside its charged verdicts', async () => {

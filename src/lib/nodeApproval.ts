@@ -662,9 +662,9 @@ async function revisionsWithNoApprovalHash(
   const recorded = new Set<string>(wanted.filter((h) => h === liveText.approvalHash));
   const unresolved = wanted.filter((h) => !recorded.has(h));
   if (unresolved.length > 0) {
-    const carriers = await db.nodeRevision.findMany({
-      where: { nodeId, approvalHash: { in: unresolved } }, select: { approvalHash: true }, distinct: ['approvalHash'], take: unresolved.length,
-    });
+    // GROUP BY runs in the database (Prisma applies `distinct` client-side, which would fetch every duplicate row), so the
+    // rows returned never exceed the batch's own hashes however many revisions repeat one.
+    const carriers = await db.nodeRevision.groupBy({ by: ['approvalHash'], where: { nodeId, approvalHash: { in: unresolved } } });
     for (const c of carriers) recorded.add(c.approvalHash!);
   }
   for (const [revNo, h] of hashes) if (!recorded.has(h)) skip.add(revNo);
