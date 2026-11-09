@@ -203,7 +203,8 @@ describe('allows', () => {
       const row = await db.grant.findUniqueOrThrow({ where: { id: item.id } });
       // Fixed JS instants cannot judge a DB-clock row; the stored facts decide the same way at the DB's own instant.
       const [{ now }] = await db.$queryRaw<Array<{ now: Date }>>`SELECT (clock_timestamp() AT TIME ZONE 'UTC') AS now`;
-      expect(isGrantLive(row, now), `isGrantLive ${name}`).toBe(allows);
+      // The App is live in this fixture, so appDeletedAt (a column of apps, not grants) is null.
+      expect(isGrantLive({ ...row, appDeletedAt: null }, now), `isGrantLive ${name}`).toBe(allows);
     }
   });
 

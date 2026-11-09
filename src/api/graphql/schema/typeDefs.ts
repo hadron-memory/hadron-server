@@ -7186,7 +7186,7 @@ export const typeDefs = `#graphql
     verifiedBy: ID
     signatureId: ID
     revokedAt: DateTime
-    "Whether the grant allows its action right now, judged on the database clock by the one live function (activated, not revoked, started, not expired, not spent). A fact about this instant, never a lifecycle name."
+    "Whether the grant allows its action right now, judged on the database clock by the one live function (activated, not revoked, holder not gone, App not deleted, started, not expired, not spent). A fact about this instant, never a lifecycle name."
     allows: Boolean!
   }
 
