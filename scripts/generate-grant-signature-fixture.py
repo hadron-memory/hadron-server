@@ -2,7 +2,7 @@
 """#3649 slice A: generate src/lib/grantSignature.fixture.json from cor:acl:140:09's grammar alone.
 
 Independent of the TypeScript builder under test (src/lib/grants/terms.ts, src/lib/signing/grantPayload.ts): Python
-hashlib plus a hand-written RFC 8785 subset (string-valued objects and lists, keys in UTF-16 code-unit order). Run with
+hashlib plus a hand-written RFC 8785 subset (string-valued objects and lists, visible-ASCII keys). Run with
 `python3 -I scripts/generate-grant-signature-fixture.py > src/lib/grantSignature.fixture.json`; the test pins the
 output, so a change here that moves a byte fails it.
 """
@@ -41,7 +41,10 @@ def jvalue(v):
 
 
 def jobject(d):
-    keys = sorted(d, key=lambda k: k.encode('utf-16-be'))  # RFC 8785 sorts by UTF-16 code units
+    # Keys are visible ASCII without a quote or backslash (the section 10 byte review, P4a), where RFC 8785's
+    # UTF-16 code-unit order and Python's code-point order agree.
+    assert all(k and all(0x21 <= ord(c) <= 0x7e and c not in '"' + chr(92) for c in k) for k in d), d
+    keys = sorted(d)
     return '{' + ','.join(jstr(k) + ':' + jvalue(d[k]) for k in keys) + '}'
 
 
@@ -86,17 +89,18 @@ CASES = [
     ('holder-user', 'a user holder', with_(holder={'kind': 'user', 'id': 'cm3k9x2c00003ab12cd34ef58'}), 1, REQ),
     ('holder-worker', 'a worker holder', with_(holder={'kind': 'worker', 'id': '01a13b5ea46e747da745acb088c5cf76'}), 1, REQ),
     ('holder-app', 'an App holder', with_(holder={'kind': 'app', 'id': 'cm3k9x2d00004ab12cd34ef59'}), 1, REQ),
-    ('time-frame-and-count', 'a start, an expiry and a use count', with_(startsAt='2026-11-10T08:00:00.000Z', expiresAt='2027-01-01T00:00:00.000Z', maxUses=10), 1, REQ),
+    ('time-frame-and-count', 'a start, an expiry and a use count', with_(startsAt='2026-11-10T08:00:00.000Z', expiresAt='2027-01-01T00:00:00.000Z', maxUses=3), 1, REQ),
     ('no-time-frame', 'no start and no expiry', with_(expiresAt=None), 1, REQ),
-    ('wildcard', 'a wildcard value: the JSON string "*"', with_(values={'entryNode': '*'}), 1, REQ),
-    ('list-stored-order', 'a list value, written in stored order', with_(values={'entryNode': ['b1', 'a1']}), 1, REQ),
+    ('wildcard', 'a wildcard value: the JSON string "*" as the whole value', with_(values={'entryNode': '*'}), 1, REQ),
+    ('list-stored-order', 'a two-element list, written in stored order', with_(values={'entryNode': ['b1', 'a1']}), 1, REQ),
     ('list-other-order', 'the same list in the other order: a different terms hash', with_(values={'entryNode': ['a1', 'b1']}), 1, REQ),
-    ('keys-utf16-order', 'keys sorted by UTF-16 code units: "Z" < "a" < "\\u00e9" < "\\ud835\\udc9c" < "\\uff21"',
-     with_(values={'Ａ': 'v5', '\U0001d49c': 'v4', 'é': 'v3', 'a': 'v2', 'Z': 'v1'}), 1, REQ),
-    ('reason-escapes', 'quote, backslash, tab, U+0001 and U+001F escaped; U+007F, U+2028, slash and emoji literal',
-     with_(reason='say "hi" \\ tab\there \u0001\u001f \u007f   a/b \U0001f600'), 1, REQ),
-    ('reason-nfc', 'the reason in NFC', with_(reason='Grüße'), 1, REQ),
-    ('reason-nfd', 'the same reason in NFD: never normalized, so a different terms hash', with_(reason='Grüße'), 1, REQ),
+    ('keys-sorted', 'visible-ASCII keys written sorted whatever the stored order: Z < _ < a < entryNode < ~',
+     with_(values={'~': 'v5', 'entryNode': NODE, 'a': 'v3', '_': 'v2', 'Z': 'v1'}), 1, REQ),
+    ('empty-values', 'an action with no parameters: values {}', with_(values={}), 1, REQ),
+    ('reason-escapes', 'quote, backslash, tab, U+0001 and U+001F escaped; U+007F, U+2028, U+2029, <>&, slash and an emoji literal',
+     with_(reason='say "hi" \\ tab\there \u0001\u001f \u007f \u2028\u2029 <a&b> a/b \U0001f600'), 1, REQ),
+    ('reason-nfc', 'the reason in NFC', with_(reason='Gr\u00fc\u00dfe'), 1, REQ),
+    ('reason-nfd', 'the same reason in NFD: never normalized, so a different terms hash', with_(reason='Gru\u0308\u00dfe'), 1, REQ),
     ('reason-surrounding-space', 'leading and trailing spaces kept as stored', with_(reason='  padded  '), 1, REQ),
 ]
 

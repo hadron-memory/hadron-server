@@ -218,15 +218,15 @@
         },
         "startsAt": "2026-11-10T08:00:00.000Z",
         "expiresAt": "2027-01-01T00:00:00.000Z",
-        "maxUses": 10,
+        "maxUses": 3,
         "reason": "Run the nightly digest."
       },
-      "termsUtf8": "hadron-grant-terms-v1\napp cm3k9x2a00001ab12cd34ef56\nholder agent 01a05c157fe171208eef57f6ddb9b701\naction schedule.create\nvalues {\"entryNode\":\"01a10408afb6716c80d6944e8845467b\"}\nstarts 2026-11-10T08:00:00.000Z\nexpires 2027-01-01T00:00:00.000Z\nmax-uses 10\nreason \"Run the nightly digest.\"\n",
-      "termsHash": "a92a52ab87b2fcfc136bde3b0f3e445a2933c093512a0421ff4f856f5ecd79bd",
-      "payloadUtf8": "hadron-grant-signature-v1\ngrant cm3k9x2b00002ab12cd34ef57\nversion 1\nterms-hash a92a52ab87b2fcfc136bde3b0f3e445a2933c093512a0421ff4f856f5ecd79bd\nrequest Q2hhbGxlbmdlUmVxdWVzdA\n",
-      "canonical": "aGFkcm9uLWdyYW50LXNpZ25hdHVyZS12MQpncmFudCBjbTNrOXgyYjAwMDAyYWIxMmNkMzRlZjU3CnZlcnNpb24gMQp0ZXJtcy1oYXNoIGE5MmE1MmFiODdiMmZjZmMxMzZiZGUzYjBmM2U0NDVhMjkzM2MwOTM1MTJhMDQyMWZmNGY4NTZmNWVjZDc5YmQKcmVxdWVzdCBRMmhoYkd4bGJtZGxVbVZ4ZFdWemRBCg==",
-      "challengeHex": "c0f744409886dfd3a6f7f9bc4e7757c9c1877309c300f244f55c5760656892b2",
-      "challengeBase64url": "wPdEQJiG39Om9_m8TndXycGHcwnDAPJE9VxXYGVokrI"
+      "termsUtf8": "hadron-grant-terms-v1\napp cm3k9x2a00001ab12cd34ef56\nholder agent 01a05c157fe171208eef57f6ddb9b701\naction schedule.create\nvalues {\"entryNode\":\"01a10408afb6716c80d6944e8845467b\"}\nstarts 2026-11-10T08:00:00.000Z\nexpires 2027-01-01T00:00:00.000Z\nmax-uses 3\nreason \"Run the nightly digest.\"\n",
+      "termsHash": "083eba05911af116d9e66cace7232abffeea3dabba5faeaf4a7d5981ab1de9aa",
+      "payloadUtf8": "hadron-grant-signature-v1\ngrant cm3k9x2b00002ab12cd34ef57\nversion 1\nterms-hash 083eba05911af116d9e66cace7232abffeea3dabba5faeaf4a7d5981ab1de9aa\nrequest Q2hhbGxlbmdlUmVxdWVzdA\n",
+      "canonical": "aGFkcm9uLWdyYW50LXNpZ25hdHVyZS12MQpncmFudCBjbTNrOXgyYjAwMDAyYWIxMmNkMzRlZjU3CnZlcnNpb24gMQp0ZXJtcy1oYXNoIDA4M2ViYTA1OTExYWYxMTZkOWU2NmNhY2U3MjMyYWJmZmVlYTNkYWJiYTVmYWVhZjRhN2Q1OTgxYWIxZGU5YWEKcmVxdWVzdCBRMmhoYkd4bGJtZGxVbVZ4ZFdWemRBCg==",
+      "challengeHex": "cb01e5dfc35fd35c011bcfc4fe28654ea42b7b0ad6c1b5dc9b4853a894215cee",
+      "challengeBase64url": "ywHl38Nf01wBG8_E_ihlTqQrewrWwbXcm0hTqJQhXO4"
     },
     {
       "name": "no-time-frame",
@@ -258,7 +258,7 @@
     },
     {
       "name": "wildcard",
-      "note": "a wildcard value: the JSON string \"*\"",
+      "note": "a wildcard value: the JSON string \"*\" as the whole value",
       "grantId": "cm3k9x2b00002ab12cd34ef57",
       "recordVersion": 1,
       "requestId": "Q2hhbGxlbmdlUmVxdWVzdA",
@@ -286,7 +286,7 @@
     },
     {
       "name": "list-stored-order",
-      "note": "a list value, written in stored order",
+      "note": "a two-element list, written in stored order",
       "grantId": "cm3k9x2b00002ab12cd34ef57",
       "recordVersion": 1,
       "requestId": "Q2hhbGxlbmdlUmVxdWVzdA",
@@ -347,8 +347,8 @@
       "challengeBase64url": "ceUf7I2kNS6YgsT9wAAA4oluIN85P8NcgcFGgUVDPq8"
     },
     {
-      "name": "keys-utf16-order",
-      "note": "keys sorted by UTF-16 code units: \"Z\" < \"a\" < \"\\u00e9\" < \"\\ud835\\udc9c\" < \"\\uff21\"",
+      "name": "keys-sorted",
+      "note": "visible-ASCII keys written sorted whatever the stored order: Z < _ < a < entryNode < ~",
       "grantId": "cm3k9x2b00002ab12cd34ef57",
       "recordVersion": 1,
       "requestId": "Q2hhbGxlbmdlUmVxdWVzdA",
@@ -360,10 +360,10 @@
         },
         "action": "schedule.create",
         "values": {
-          "Ａ": "v5",
-          "𝒜": "v4",
-          "é": "v3",
-          "a": "v2",
+          "~": "v5",
+          "entryNode": "01a10408afb6716c80d6944e8845467b",
+          "a": "v3",
+          "_": "v2",
           "Z": "v1"
         },
         "startsAt": null,
@@ -371,16 +371,42 @@
         "maxUses": null,
         "reason": "Run the nightly digest."
       },
-      "termsUtf8": "hadron-grant-terms-v1\napp cm3k9x2a00001ab12cd34ef56\nholder agent 01a05c157fe171208eef57f6ddb9b701\naction schedule.create\nvalues {\"Z\":\"v1\",\"a\":\"v2\",\"é\":\"v3\",\"𝒜\":\"v4\",\"Ａ\":\"v5\"}\nstarts none\nexpires 2026-12-31T23:59:59.000Z\nmax-uses none\nreason \"Run the nightly digest.\"\n",
-      "termsHash": "83c8086be60e96c7da5369a813d8dba9433d3d26fab51a56eb3ff9810e27a9e8",
-      "payloadUtf8": "hadron-grant-signature-v1\ngrant cm3k9x2b00002ab12cd34ef57\nversion 1\nterms-hash 83c8086be60e96c7da5369a813d8dba9433d3d26fab51a56eb3ff9810e27a9e8\nrequest Q2hhbGxlbmdlUmVxdWVzdA\n",
-      "canonical": "aGFkcm9uLWdyYW50LXNpZ25hdHVyZS12MQpncmFudCBjbTNrOXgyYjAwMDAyYWIxMmNkMzRlZjU3CnZlcnNpb24gMQp0ZXJtcy1oYXNoIDgzYzgwODZiZTYwZTk2YzdkYTUzNjlhODEzZDhkYmE5NDMzZDNkMjZmYWI1MWE1NmViM2ZmOTgxMGUyN2E5ZTgKcmVxdWVzdCBRMmhoYkd4bGJtZGxVbVZ4ZFdWemRBCg==",
-      "challengeHex": "c85c9dea943e87787245df7d33460af4568db97ef973233dff7b3ddd0bef1fe7",
-      "challengeBase64url": "yFyd6pQ-h3hyRd99M0YK9FaNuX75cyM9_3s93QvvH-c"
+      "termsUtf8": "hadron-grant-terms-v1\napp cm3k9x2a00001ab12cd34ef56\nholder agent 01a05c157fe171208eef57f6ddb9b701\naction schedule.create\nvalues {\"Z\":\"v1\",\"_\":\"v2\",\"a\":\"v3\",\"entryNode\":\"01a10408afb6716c80d6944e8845467b\",\"~\":\"v5\"}\nstarts none\nexpires 2026-12-31T23:59:59.000Z\nmax-uses none\nreason \"Run the nightly digest.\"\n",
+      "termsHash": "2a1dc33fb6aab1c70cb68f2cae4e44dcc42314771a196a8e4adf8a8b7187defb",
+      "payloadUtf8": "hadron-grant-signature-v1\ngrant cm3k9x2b00002ab12cd34ef57\nversion 1\nterms-hash 2a1dc33fb6aab1c70cb68f2cae4e44dcc42314771a196a8e4adf8a8b7187defb\nrequest Q2hhbGxlbmdlUmVxdWVzdA\n",
+      "canonical": "aGFkcm9uLWdyYW50LXNpZ25hdHVyZS12MQpncmFudCBjbTNrOXgyYjAwMDAyYWIxMmNkMzRlZjU3CnZlcnNpb24gMQp0ZXJtcy1oYXNoIDJhMWRjMzNmYjZhYWIxYzcwY2I2OGYyY2FlNGU0NGRjYzQyMzE0NzcxYTE5NmE4ZTRhZGY4YThiNzE4N2RlZmIKcmVxdWVzdCBRMmhoYkd4bGJtZGxVbVZ4ZFdWemRBCg==",
+      "challengeHex": "1cd7e47592cf08b3a8ae66018fe40495acd36799322a9b561170f994ba4e96d0",
+      "challengeBase64url": "HNfkdZLPCLOormYBj-QElazTZ5kyKptWEXD5lLpOltA"
+    },
+    {
+      "name": "empty-values",
+      "note": "an action with no parameters: values {}",
+      "grantId": "cm3k9x2b00002ab12cd34ef57",
+      "recordVersion": 1,
+      "requestId": "Q2hhbGxlbmdlUmVxdWVzdA",
+      "terms": {
+        "appId": "cm3k9x2a00001ab12cd34ef56",
+        "holder": {
+          "kind": "agent",
+          "id": "01a05c157fe171208eef57f6ddb9b701"
+        },
+        "action": "schedule.create",
+        "values": {},
+        "startsAt": null,
+        "expiresAt": "2026-12-31T23:59:59.000Z",
+        "maxUses": null,
+        "reason": "Run the nightly digest."
+      },
+      "termsUtf8": "hadron-grant-terms-v1\napp cm3k9x2a00001ab12cd34ef56\nholder agent 01a05c157fe171208eef57f6ddb9b701\naction schedule.create\nvalues {}\nstarts none\nexpires 2026-12-31T23:59:59.000Z\nmax-uses none\nreason \"Run the nightly digest.\"\n",
+      "termsHash": "b73111c1fdce50f93fc7bd72a9f37be2185b5fb26e138a9a2d20c7a5b849baac",
+      "payloadUtf8": "hadron-grant-signature-v1\ngrant cm3k9x2b00002ab12cd34ef57\nversion 1\nterms-hash b73111c1fdce50f93fc7bd72a9f37be2185b5fb26e138a9a2d20c7a5b849baac\nrequest Q2hhbGxlbmdlUmVxdWVzdA\n",
+      "canonical": "aGFkcm9uLWdyYW50LXNpZ25hdHVyZS12MQpncmFudCBjbTNrOXgyYjAwMDAyYWIxMmNkMzRlZjU3CnZlcnNpb24gMQp0ZXJtcy1oYXNoIGI3MzExMWMxZmRjZTUwZjkzZmM3YmQ3MmE5ZjM3YmUyMTg1YjVmYjI2ZTEzOGE5YTJkMjBjN2E1Yjg0OWJhYWMKcmVxdWVzdCBRMmhoYkd4bGJtZGxVbVZ4ZFdWemRBCg==",
+      "challengeHex": "4aaf0523d60904f1b00baedc39b61a766e2a948c26304ff3a096c6e24c826296",
+      "challengeBase64url": "Sq8FI9YJBPGwC67cObYadm4qlIwmME_zoJbG4kyCYpY"
     },
     {
       "name": "reason-escapes",
-      "note": "quote, backslash, tab, U+0001 and U+001F escaped; U+007F, U+2028, slash and emoji literal",
+      "note": "quote, backslash, tab, U+0001 and U+001F escaped; U+007F, U+2028, U+2029, <>&, slash and an emoji literal",
       "grantId": "cm3k9x2b00002ab12cd34ef57",
       "recordVersion": 1,
       "requestId": "Q2hhbGxlbmdlUmVxdWVzdA",
@@ -397,14 +423,14 @@
         "startsAt": null,
         "expiresAt": "2026-12-31T23:59:59.000Z",
         "maxUses": null,
-        "reason": "say \"hi\" \\ tab\there \u0001\u001f    a/b 😀"
+        "reason": "say \"hi\" \\ tab\there \u0001\u001f     <a&b> a/b 😀"
       },
-      "termsUtf8": "hadron-grant-terms-v1\napp cm3k9x2a00001ab12cd34ef56\nholder agent 01a05c157fe171208eef57f6ddb9b701\naction schedule.create\nvalues {\"entryNode\":\"01a10408afb6716c80d6944e8845467b\"}\nstarts none\nexpires 2026-12-31T23:59:59.000Z\nmax-uses none\nreason \"say \\\"hi\\\" \\\\ tab\\there \\u0001\\u001f    a/b 😀\"\n",
-      "termsHash": "2a797d67be9447f7769c63274572aad97f6c6dd4fb2466e086f60c64c658abe8",
-      "payloadUtf8": "hadron-grant-signature-v1\ngrant cm3k9x2b00002ab12cd34ef57\nversion 1\nterms-hash 2a797d67be9447f7769c63274572aad97f6c6dd4fb2466e086f60c64c658abe8\nrequest Q2hhbGxlbmdlUmVxdWVzdA\n",
-      "canonical": "aGFkcm9uLWdyYW50LXNpZ25hdHVyZS12MQpncmFudCBjbTNrOXgyYjAwMDAyYWIxMmNkMzRlZjU3CnZlcnNpb24gMQp0ZXJtcy1oYXNoIDJhNzk3ZDY3YmU5NDQ3Zjc3NjljNjMyNzQ1NzJhYWQ5N2Y2YzZkZDRmYjI0NjZlMDg2ZjYwYzY0YzY1OGFiZTgKcmVxdWVzdCBRMmhoYkd4bGJtZGxVbVZ4ZFdWemRBCg==",
-      "challengeHex": "7addd1a56bcfd7addd24fbbb2740a011e23836079cadf015ff8b0e72681f34f7",
-      "challengeBase64url": "et3RpWvP163dJPu7J0CgEeI4NgecrfAV_4sOcmgfNPc"
+      "termsUtf8": "hadron-grant-terms-v1\napp cm3k9x2a00001ab12cd34ef56\nholder agent 01a05c157fe171208eef57f6ddb9b701\naction schedule.create\nvalues {\"entryNode\":\"01a10408afb6716c80d6944e8845467b\"}\nstarts none\nexpires 2026-12-31T23:59:59.000Z\nmax-uses none\nreason \"say \\\"hi\\\" \\\\ tab\\there \\u0001\\u001f     <a&b> a/b 😀\"\n",
+      "termsHash": "26b04cf42e7d95452a325fc8e6d28c9234bbe97f5bb00bec71f7c7c607ce182d",
+      "payloadUtf8": "hadron-grant-signature-v1\ngrant cm3k9x2b00002ab12cd34ef57\nversion 1\nterms-hash 26b04cf42e7d95452a325fc8e6d28c9234bbe97f5bb00bec71f7c7c607ce182d\nrequest Q2hhbGxlbmdlUmVxdWVzdA\n",
+      "canonical": "aGFkcm9uLWdyYW50LXNpZ25hdHVyZS12MQpncmFudCBjbTNrOXgyYjAwMDAyYWIxMmNkMzRlZjU3CnZlcnNpb24gMQp0ZXJtcy1oYXNoIDI2YjA0Y2Y0MmU3ZDk1NDUyYTMyNWZjOGU2ZDI4YzkyMzRiYmU5N2Y1YmIwMGJlYzcxZjdjN2M2MDdjZTE4MmQKcmVxdWVzdCBRMmhoYkd4bGJtZGxVbVZ4ZFdWemRBCg==",
+      "challengeHex": "5c290dd404c0402db7cc298a96a59f9ead8a312e632807a7cbb93508615d9252",
+      "challengeBase64url": "XCkN1ATAQC23zCmKlqWfnq2KMS5jKAeny7k1CGFdklI"
     },
     {
       "name": "reason-nfc",

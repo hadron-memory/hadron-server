@@ -40,10 +40,10 @@ describe('G1: the fixture is the reference, and it matches cor:acl:140:09', () =
     expect(fixture.cases.map((c) => c.name)).toEqual([
       'spec-example', 'spec-reason-line-break', 'spec-version-2', 'other-request', 'holder-user', 'holder-worker',
       'holder-app', 'time-frame-and-count', 'no-time-frame', 'wildcard', 'list-stored-order', 'list-other-order',
-      'keys-utf16-order', 'reason-escapes', 'reason-nfc', 'reason-nfd', 'reason-surrounding-space',
+      'keys-sorted', 'empty-values', 'reason-escapes', 'reason-nfc', 'reason-nfd', 'reason-surrounding-space',
     ]);
     // Independent Python hashlib pin of the compact UTF-8 JSON: a regenerated fixture that moves any byte moves this hash.
-    expect(sha256hex(JSON.stringify(fixture.cases))).toBe('b5ecc29640b1b53663fa4820b85693c03e38305bf7c72fcc76499118445a1e70');
+    expect(sha256hex(JSON.stringify(fixture.cases))).toBe('a2b5a21431a9b2f487cc7083b6e94e3fc339a1fd324d26d52b5a7119470d8674');
   });
 
   it('carries the spec worked example literally: terms hash, both challenges, base64url', () => {
@@ -95,6 +95,7 @@ describe('G1: the fixture is the reference, and it matches cor:acl:140:09', () =
     ['grant id with a space', { grantId: 'cm3k9x2b0000 2ab12cd34ef57' }],
     ['grant id with LF (a forged second line)', { grantId: 'cm3k9x2b00002ab12cd34ef57\nversion 9' }],
     ['grant id with CR', { grantId: 'cm3k9x2b00002ab12cd34ef57\r' }],
+    ['grant id outside visible ASCII', { grantId: 'cm3k9x2b00002ab12cd34ef5\u00e9' }],
     ['empty grant id', { grantId: '' }],
     ['request id of 21 characters', { requestId: 'Q2hhbGxlbmdlUmVxdWVzd' }],
     ['request id with padding', { requestId: 'Q2hhbGxlbmdlUmVxdWVzdA==' }],
@@ -160,6 +161,8 @@ describe('G2: the terms hash binds every term, and only as stored', () => {
     ['a holder id with U+00A0', { holder: { kind: 'agent', id: 'a\u00a0b' } }, 'BAD_TOKEN'],
     ['a holder id with U+200B', { holder: { kind: 'agent', id: 'a\u200bb' } }, 'BAD_TOKEN'],
     ['a holder id with U+007F', { holder: { kind: 'agent', id: 'a\u007fb' } }, 'BAD_TOKEN'],
+    ['a holder id outside visible ASCII (U+00E9)', { holder: { kind: 'agent', id: 'caf\u00e9' } }, 'BAD_TOKEN'],
+    ['an action outside visible ASCII (U+FF0E)', { action: 'schedule\uff0ecreate' }, 'BAD_TOKEN'],
     ['a holder id with a lone surrogate', { holder: { kind: 'agent', id: 'a\ud800' } }, 'BAD_TOKEN'],
     ['an unknown holder kind', { holder: { kind: 'org', id: 'o1' } }, 'BAD_HOLDER'],
     ['an action with a space', { action: 'schedule create' }, 'BAD_TOKEN'],
@@ -177,6 +180,13 @@ describe('G2: the terms hash binds every term, and only as stored', () => {
     ['a list holding a number', { values: { entryNode: ['a', 1] } }, 'BAD_VALUES'],
     ['a value with a lone surrogate', { values: { entryNode: 'x\udc00' } }, 'BAD_VALUES'],
     ['an empty key', { values: { '': 'x' } }, 'BAD_VALUES'],
+    ['a key outside visible ASCII (U+00E9)', { values: { ['entry\u00e9']: 'x' } }, 'BAD_VALUES'],
+    ['a key with a space', { values: { 'entry node': 'x' } }, 'BAD_VALUES'],
+    ['a key with a quote', { values: { 'entry"node': 'x' } }, 'BAD_VALUES'],
+    ['a key with a backslash', { values: { ['entry\\node']: 'x' } }, 'BAD_VALUES'],
+    ['a key with a tab', { values: { ['entry\tnode']: 'x' } }, 'BAD_VALUES'],
+    ['a list holding a nested list', { values: { entryNode: ['a', ['b']] } }, 'BAD_VALUES'],
+    ['a list holding an empty string', { values: { entryNode: ['a', ''] } }, 'BAD_VALUES'],
     ['a key with a lone surrogate', { values: { ['k\ud800']: 'x' } }, 'BAD_VALUES'],
     ['an invalid start', { startsAt: new Date(Number.NaN) }, 'BAD_TIME'],
     ['an expiry past year 9999', { expiresAt: new Date('+010000-01-01T00:00:00.000Z') }, 'BAD_TIME'],
@@ -195,6 +205,11 @@ describe('G2: the terms hash binds every term, and only as stored', () => {
     expect((err as GrantTermsError).reason).toBe(reason);
     expect((err as GrantTermsError).code).toBe('GRANT_TERMS_UNREPRESENTABLE');
     expect((err as Error).message).not.toMatch(/cm3k9x2a|forged|surrogate|\\u/);
+  });
+
+  it('accepts values {} (an action with no parameters) and a non-ASCII value string, which stays inside its JSON string', () => {
+    expect(grantTermsBytes({ ...SPEC, values: {} }).toString()).toContain('values {}\n');
+    expect(grantTermsHash({ ...SPEC, values: { entryNode: 'caf\u00e9' } })).not.toBe(grantTermsHash(SPEC));
   });
 
   it('keeps a reason the DB can store: a tab-only reason is not refused (btrim trims spaces only)', () => {
