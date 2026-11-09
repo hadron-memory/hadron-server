@@ -1,3 +1,4 @@
+import { endHeldGrants } from '../../../lib/grants/departure.js';
 import { personalOrgAgentServeAllowed } from '../../../lib/auth/personalOrgAgentInstall.js';
 import { requireWorkerReadAccess, locateTeamAgent, forbidden, type AppRow } from '../../../lib/auth/workerRead.js';
 export { requireWorkerReadAccess, locateTeamAgent, ROLES_BRANCH_PREFIX } from '../../../lib/auth/workerRead.js';
@@ -1212,6 +1213,9 @@ export const workerMutations = {
         // keep their value; the roster flags them (`reportsToRetired`) rather
         // than the platform silently clearing a structure someone set.
         if (retired.count > 0) {
+          // #3690 / ruling 0259 ("Retire ends grants too"): the grants this worker HOLDS end with it, in this transaction, after the
+          // worker row lock (lockStaffingAct, step 5): the grant row lock is the last one taken. Only when THIS call retired it.
+          await endHeldGrants(tx, 'worker', worker.id);
           await appendWorkerRetiredEvent(tx, { appId: worker.appId, actor: staffingActActor(admission), instruction: staffingInstruction(admission), workerId: worker.id });
           await writeReportsTo(tx, { workerId: worker.id, appId: worker.appId, to: null, actor: staffingActActor(admission), setBy: 'retirement' });
           // #1747 / cor:agt:080:02: a retired worker's ticker subscriptions end

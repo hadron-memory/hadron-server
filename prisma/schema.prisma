@@ -396,7 +396,6 @@ model User {
   deletedBy        String?           @map("deleted_by")
 
   memberships                   OrgMember[]
-  heldGrants                    Grant[]                     @relation("GrantHolderUser")
   issuedGrants                  Grant[]                     @relation("GrantIssuer")
   sentInvitations               UserInvitation[]            @relation("SentInvitations")
   invitationActivations         UserInvitationActivation[]
@@ -2192,7 +2191,6 @@ model Agent {
   readStates         ChannelReadState[]  @relation("ReadStateAgent")
   /// #974 — the named castings of this agent into Apps (cor:dmo:050:11).
   workers            Worker[]
-  heldGrants         Grant[]             @relation("GrantHolderAgent")
   /// #1885 (cor:dmo:050:14) — the base this Agent extends, and the Agents
   /// that extend it. Never called a parent: that word belongs to imports.
   extendsAgent       Agent?              @relation("AgentBase", fields: [extendsAgentId], references: [id], onDelete: Restrict)
@@ -3499,7 +3497,6 @@ model App {
   automationTeamSnapshotGrantEvents AppAutomationTeamSnapshotGrantEvent[]
   /// #3668 — grants issued in this App, the grants THIS App holds, and the grant events.
   grants                  Grant[]      @relation("GrantApp")
-  heldGrants              Grant[]      @relation("GrantHolderApp")
   grantEvents             GrantEvent[]
   /// #1706 — model-family availability (cor:agt:060:03) and the stall schedule.
   modelFamilyAvailability ModelFamilyAvailability[]
@@ -4061,7 +4058,6 @@ model Worker {
   wakeAcks             WorkerWakeAck[]
   wakeReservation      AppWakeReservation?
   appGrants            AppGrant[]
-  heldGrants           Grant[]  @relation("GrantHolderWorker")
   launchableVia        HostRegistrationWorker[]
   hostOperations       HostOperation[]
   /// #2162 — this worker's context resets (cor:agt:050:27).
@@ -7455,13 +7451,15 @@ model ChatRootEngineState {
 /// REGISTERED action (`actions`), the values it allows, its time frame and count, and why. Whether it is live is WORKED OUT
 /// (src/lib/grants/live.ts and the matching SQL fragment), never stored. Nothing in the server writes a row yet; the
 /// database guards (prisma/grant-invariants.sql) fix what any later writer may do: a row arrives pending, ends once by
-/// revocation, loses an erased issuer, and follows a user merge. Holder foreign keys are RESTRICT as INTERIM referential
-/// integrity on empty, producer-free tables (gate 6712456240); what an erased holder's grant becomes is UNSELECTED
-/// (cor:acl:140:08 Open, every holder kind), and no persistent producer may ship before it is ruled and re-gated.
+/// revocation or by its holder going (#3690 S2a-h: ruling 0255 item 3, 0259; the holder ids are sealed, with no foreign key),
+/// loses an erased issuer, and follows a user merge.
 model Grant {
   id                    String    @id @default(cuid())
   appId                 String    @map("app_id")
-  /// The holder: exactly one of these four (chk_grants_exactly_one_holder).
+  /// The holder: exactly one of these four (chk_grants_exactly_one_holder). SEALED ids, no foreign key (#3690 S2a-h): when the
+  /// holder goes the grant ends and the record stays (cor:acl:140:03, ruling 0255 item 3), so the id must survive the row it
+  /// names, and the CHECK forbids the SET NULL a foreign key would need. The kind is the column that is set. Integrity at
+  /// insert is the guard trigger's (the holder must exist and not be gone); the ending is `holderDepartedAt`.
   userId                String?   @map("user_id")
   agentId               String?   @map("agent_id")
   workerId              String?   @map("worker_id")
@@ -7489,14 +7487,14 @@ model Grant {
   signatureId           String?   @map("signature_id")
   revokedAt             DateTime? @map("revoked_at")
   revokedBy             String?   @map("revoked_by")
+  /// #3690 (S2a-h, cor:acl:140:03): when the HOLDER went (a person erased, a worker retired or deleted, an agent or an App
+  /// deleted). A FACT, like `revokedAt`, never a state label: the live check reads it, and nothing names the ended state.
+  /// Stamped once, and only on a grant not already ended (prisma/grant-invariants.sql); the holder id above stays.
+  holderDepartedAt      DateTime? @map("holder_departed_at")
   createdAt             DateTime  @default(now()) @map("created_at")
   updatedAt             DateTime  @updatedAt @map("updated_at")
 
   app         App     @relation("GrantApp", fields: [appId], references: [id], onDelete: Cascade)
-  user        User?   @relation("GrantHolderUser", fields: [userId], references: [id], onDelete: Restrict)
-  agent       Agent?  @relation("GrantHolderAgent", fields: [agentId], references: [id], onDelete: Restrict)
-  worker      Worker? @relation("GrantHolderWorker", fields: [workerId], references: [id], onDelete: Restrict)
-  granteeApp  App?    @relation("GrantHolderApp", fields: [granteeAppId], references: [id], onDelete: Restrict)
   issuer      User?   @relation("GrantIssuer", fields: [issuerUserId], references: [id], onDelete: SetNull)
   actionDef   Action  @relation(fields: [action], references: [name], onDelete: Restrict, onUpdate: Restrict)
 

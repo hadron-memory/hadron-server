@@ -1,3 +1,4 @@
+import { endHeldGrants } from '../../../lib/grants/departure.js';
 import { markNewInstallPayload } from './installationPayload.js';
 import { requireInstructedAct, sameActPrincipal, type StaffActAdmission, type ActInstruction, type ActAdmission } from '../../../lib/auth/instructedAct.js';
 import { readActInstruction } from './resolvers.instruction.js';
@@ -1131,10 +1132,15 @@ export const appMutations = {
           }
           await requireOwnerOrOrgRole(txCtx, current, 'ADMIN');
         },
-        (tx) => tx.app.updateMany({
-          where: { id: resolvedId, deletedAt: null },
-          data: { deletedAt: new Date() },
-        }).then(() => undefined),
+        async (tx) => {
+          const deleted = await tx.app.updateMany({
+            where: { id: resolvedId, deletedAt: null },
+            data: { deletedAt: new Date() },
+          });
+          // #3690: an App that HOLDS a grant (another App's grantee) is a holder that went: those grants end here, after the apps FOR
+          // UPDATE lock. Its OWN grants allow nothing already (the live check reads `apps.deleted_at`) and cascade at the reclaim.
+          if (deleted.count > 0) await endHeldGrants(tx, 'app', resolvedId);
+        },
         { lockMode: 'exclusive', afterLock: async (tx) => {
           await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedId} FOR UPDATE`;
         } },
