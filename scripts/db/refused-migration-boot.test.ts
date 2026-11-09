@@ -195,16 +195,23 @@ describe('refusedMigrationNames', () => {
 // Blind review P2 (Dorian, #3772): the HDPRF code alone does not prove nothing was applied before the raise. What
 // does is that Prisma runs a migration file as ONE implicit transaction, so a raise rolls back every statement above
 // it. Pin both halves: the mechanism, and a guard that no HDPRF migration opts out of it.
-// A statement that is alone on its line (a DO block's own BEGIN has no semicolon) or CONCURRENTLY.
-const ENDS_TRANSACTION = /^\s*(BEGIN|COMMIT|ROLLBACK|END|START\s+TRANSACTION)\s*;|\bCONCURRENTLY\b/im;
+// Anything that ends the implicit transaction: COMMIT/ROLLBACK/ABORT (any form, incl. COMMIT AND CHAIN, on any line),
+// START TRANSACTION, a standalone BEGIN [TRANSACTION|WORK|ISOLATION|READ] (a DO block's own BEGIN is none of these), and
+// CONCURRENTLY. Comments and string literals are stripped first so a message that says "commit" cannot trip it.
+const ENDS_TRANSACTION = /\b(COMMIT|ROLLBACK|ABORT|CONCURRENTLY)\b|\bSTART\s+TRANSACTION\b|\bBEGIN\s*(;|TRANSACTION\b|WORK\b|ISOLATION\b|READ\b)/i;
+const stripNonCode = (sql: string) => sql.replace(/--.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '').replace(/'(?:[^']|'')*'/g, "''");
 describe('#3770 a refusal leaves no partial schema', () => {
   it('the opt-out detector sees what it must and ignores a DO block', () => {
-    expect('CREATE TABLE a(i int);\nCOMMIT;\n').toMatch(ENDS_TRANSACTION);
-    expect('BEGIN;\nCREATE TABLE a(i int);').toMatch(ENDS_TRANSACTION);
-    expect('CREATE INDEX CONCURRENTLY i ON t(c);').toMatch(ENDS_TRANSACTION);
-    expect("DO $$ BEGIN RAISE EXCEPTION 'x'; END $$;").not.toMatch(ENDS_TRANSACTION);
-    expect("DO $$\nBEGIN\n  RAISE EXCEPTION 'x';\nEND $$;").not.toMatch(ENDS_TRANSACTION);
+    for (const bad of ['CREATE TABLE a(i int);\nCOMMIT;\n', 'CREATE TABLE a(i int); COMMIT;', 'COMMIT AND CHAIN;', 'x; commit and no chain;',
+      'ROLLBACK;', 'ABORT;', 'BEGIN;\nCREATE TABLE a(i int);', 'begin transaction;', 'START TRANSACTION;', 'CREATE INDEX CONCURRENTLY i ON t(c);']) {
+      expect(stripNonCode(bad), bad).toMatch(ENDS_TRANSACTION);
+    }
+    for (const ok of ["DO $$ BEGIN RAISE EXCEPTION 'x'; END $$;", "DO $$\nBEGIN\n  RAISE EXCEPTION 'x';\nEND $$;",
+      "DO $$ BEGIN RAISE EXCEPTION 'will commit later'; END $$; -- COMMIT", '/* COMMIT */ SELECT 1;']) {
+      expect(stripNonCode(ok), ok).not.toMatch(ENDS_TRANSACTION);
+    }
   });
+
   it('statements before the raise are rolled back with it (one implicit transaction per migration file)', async () => {
     const pdb = `${DB}_partial`;
     const pdir = mkdtempSync(join(tmpdir(), 'refused-partial-'));
@@ -243,7 +250,7 @@ export default defineConfig({ schema: "prisma/schema.prisma", migrations: { path
       if (!existsSync(file)) continue;
       const body = readFileSync(file, 'utf8');
       if (!body.includes(REFUSAL_SQLSTATE)) continue;
-      const code = body.replace(/--.*$/gm, '');
+      const code = stripNonCode(body);
       expect(code, `${name} raises ${REFUSAL_SQLSTATE} but ends the implicit transaction`).not.toMatch(ENDS_TRANSACTION);
     }
   });
