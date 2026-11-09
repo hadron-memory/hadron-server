@@ -28,10 +28,17 @@
 -- choosing a repair. The count-then-create race is closed by the
 -- CREATE UNIQUE INDEX below: a row that lands between the two statements
 -- fails the create, so installation still refuses safely.
+--
+-- REPORTING (Joshua BLIND P2, #2622 follow-up): `prisma migrate deploy` does
+-- not reliably surface server WARNING/NOTICE lines, so the samples also ride
+-- the EXCEPTION itself (USING DETAIL) — the refusal carries its own evidence
+-- wherever the error text goes. The WARNINGs stay for contexts that do
+-- surface notices.
 DO $$
 DECLARE
   collision record;
   groups bigint;
+  collision_samples text;
 BEGIN
   FOR collision IN
     SELECT memory_id,
@@ -56,8 +63,20 @@ BEGIN
     HAVING count(*) > 1
   ) colliding;
   IF groups > 0 THEN
+    SELECT string_agg(format('%s / chat %s / seq %s: %s rows (e.g. %s)',
+      memory_id, chat_root, seq, rows, sample_ids), '; ')
+    INTO collision_samples FROM (
+      SELECT memory_id, split_part(loc, ':messages:', 1) AS chat_root, seq,
+             count(*) AS rows, (array_agg(id ORDER BY created_at))[1:5] AS sample_ids
+      FROM nodes
+      WHERE node_type = 'chat-message' AND seq IS NOT NULL AND loc LIKE '%:messages:%'
+      GROUP BY memory_id, split_part(loc, ':messages:', 1), seq
+      HAVING count(*) > 1
+      LIMIT 10
+    ) s;
     RAISE EXCEPTION 'chat seq uniqueness preflight: % colliding (chat, seq) group(s) remain — apply the approved repair first; refusing to create the unique index', groups
-      USING HINT = 'The warnings above list up to 10 colliding groups (memory, chat root, seq, sample ids). This migration never renumbers, deletes, exempts or chooses a repair.';
+      USING DETAIL = collision_samples,
+      HINT = 'The DETAIL (and the warnings above, where surfaced) list up to 10 colliding groups (memory, chat root, seq, sample ids). This migration never renumbers, deletes, exempts or chooses a repair.';
   END IF;
 END $$;
 
@@ -75,6 +94,7 @@ DO $$
 DECLARE
   offender record;
   total bigint;
+  offender_samples text;
 BEGIN
   FOR offender IN
     SELECT 'channel' AS kind, memory_id, loc AS chat_root, 1::bigint AS rows
@@ -95,8 +115,21 @@ BEGIN
        + (SELECT count(*) FROM nodes WHERE node_type = 'chat-message' AND seq IS NOT NULL AND loc ~ ':messages:(.*:)?messages:')
     INTO total;
   IF total > 0 THEN
+    SELECT string_agg(format('%s in memory %s at %s', kind, memory_id, chat_root), '; ')
+    INTO offender_samples FROM (
+      SELECT 'channel' AS kind, memory_id, loc AS chat_root
+      FROM channels
+      WHERE 'messages' = ANY (string_to_array(loc, ':'))
+      UNION ALL
+      SELECT 'nested-transcript', memory_id, split_part(loc, ':messages:', 1)
+      FROM nodes
+      WHERE node_type = 'chat-message' AND seq IS NOT NULL AND loc ~ ':messages:(.*:)?messages:'
+      GROUP BY memory_id, split_part(loc, ':messages:', 1)
+      LIMIT 10
+    ) s;
     RAISE EXCEPTION 'chat seq uniqueness preflight: % Channel/transcript row(s) use the reserved "messages" loc segment — relocate them under an approved repair first; refusing to create the unique index', total
-      USING HINT = 'The warnings above list up to 10 offenders. This migration never renames, deletes, exempts or chooses a repair.';
+      USING DETAIL = offender_samples,
+      HINT = 'The DETAIL (and the warnings above, where surfaced) list up to 10 offenders. This migration never renames, deletes, exempts or chooses a repair.';
   END IF;
 END $$;
 
