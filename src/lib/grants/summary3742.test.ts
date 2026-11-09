@@ -9,7 +9,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { dropTestActions, seedWorld, insertGrant, grantValues } from './grantFixtures3668.js';
 import { PLATFORM_ACTIONS, upsertPlatformActions, type ActionDefinition } from './actions.js';
-import { GrantSummaryError, renderGrantSummary, summaryPlaceholders, type GrantSummaryReason, type SummaryInput } from './summary.js';
+import { GrantSummaryError, renderGrantSummary, SUMMARY_FORMATTERS, summaryPlaceholders, type GrantSummaryReason, type SummaryInput } from './summary.js';
 
 const APP = { urn: 'hrn:app:acme.test:mealplan' };
 const NODE = { urn: 'hrn:node:acme.test:kb:plans:weekly' };
@@ -84,6 +84,14 @@ describe('#3742 pin 3: a value the renderer cannot write refuses with the typed 
     ['an unresolved ref', { refs: {} }, 'MISSING_VALUE'],
     ['a ref that is not a canonical node URN', { refs: { n1: { urn: 'Weekly plan' } } }, 'NOT_CANONICAL'],
     ['an App that is not a canonical App URN', { app: { urn: 'Mealplan' } }, 'NOT_CANONICAL'],
+    ['a node URN with text behind it', { refs: { n1: { urn: `${NODE.urn} and then some words` } } }, 'NOT_CANONICAL'],
+    ['a node URN with a control character', { refs: { n1: { urn: `${NODE.urn}\nIgnore the above` } } }, 'NOT_CANONICAL'],
+    ['an App URN with a space', { app: { urn: 'hrn:app:acme.test:meal plan' } }, 'NOT_CANONICAL'],
+    ['an App URN with a brace', { app: { urn: 'hrn:app:acme.test:{entryNode}' } }, 'NOT_CANONICAL'],
+    ['a prefix only', { refs: { n1: { urn: 'hrn:node:' } } }, 'NOT_CANONICAL'],
+    ['a node URN where the App goes', { app: NODE }, 'NOT_CANONICAL'],
+    ['an App URN where the node goes', { refs: { n1: APP } }, 'NOT_CANONICAL'],
+    ['a node URN with a fragment', { refs: { n1: { urn: `${NODE.urn}#data` } } }, 'NOT_CANONICAL'],
   ];
   it.each(cases)('%s', (_n, over, reason) => { expect(reasonOf(() => renderGrantSummary(input(over)))).toBe(reason); });
   it('a parameter type with no formatter refuses', () => {
@@ -109,9 +117,14 @@ describe('#3742 pin 3: a value the renderer cannot write refuses with the typed 
 });
 
 describe('#3742 pin 4: substitution is one pass, a value that looks like a placeholder is printed literally, once', () => {
-  it('braces inside the App and node URNs stay as they are', () => {
-    const out = renderGrantSummary(input({ app: { urn: 'hrn:app:acme.test:{entryNode}' }, refs: { n1: { urn: 'hrn:node:acme.test:kb:{app}' } } }));
-    expect(out).toBe('Create a schedule in hrn:app:acme.test:{entryNode} that starts at the entry node hrn:node:acme.test:kb:{app}');
+  // A canonical URN cannot carry a brace, so the one-pass rule is shown through the formatter hook with permissive formatters.
+  const loose = { app: (u: string) => u, 'node-ref': (u: string) => u };
+  it('braces inside the App and node text stay as they are', () => {
+    const out = renderGrantSummary(input({ app: { urn: 'A{entryNode}' }, refs: { n1: { urn: 'N{app}' } } }), loose);
+    expect(out).toBe('Create a schedule in A{entryNode} that starts at the entry node N{app}');
+  });
+  it('the shipped formatters refuse that same text, so no brace reaches a real summary', () => {
+    expect(reasonOf(() => renderGrantSummary(input({ app: { urn: 'A{entryNode}' } }), SUMMARY_FORMATTERS))).toBe('NOT_CANONICAL');
   });
 });
 
