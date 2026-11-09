@@ -74,7 +74,7 @@ it('retention does not mistake the serving scan budget for no approved revision'
     content: `not approved ${i}`, tags: [], revNo: i + 10,
   })) });
   await db.node.update({ where: { id: n.id }, data: { revSeq: 120 } });
-  expect(await newestApprovedRevisionOf(db, n.id)).toEqual({ found: null, truncated: true });
+  expect(await newestApprovedRevisionOf(db, n.id)).toMatchObject({ found: null, truncated: true });
   expect([...await revisionsExemptFromPruning(db, n.id, memoryId)]).toContain(2);
 });
 it('encrypted qualification is not revived by the new exemption', async () => {

@@ -14,7 +14,7 @@ import { readInstallBootPrompt } from '../appInstallations.js';
  * knows (a bind knows its worker, a chat only its Agent) and records the values it used.
  */
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
-import { newestApprovedRevisionOf } from '../nodeApproval.js';
+import { newestApprovedRevisionForServe } from '../nodeApproval.js';
 import { resolveBootPromptPointer, type StoredBootPromptPointer } from '../bootPromptPointer.js';
 import { readCompiledRevision, sha256Hex } from '../bootCompile/provenance.js';
 import { generateId } from '../id.js';
@@ -168,10 +168,10 @@ async function resolveFrom(db: Db, t: ServeTarget, skipWorker: boolean): Promise
   // Selection and retrieval are two reads, so a recompile between them could pair an old revision number with newer,
   // unapproved text. The content is therefore read ONLY at the selected revision number (live row if it is still that
   // revision, else its retained snapshot); when neither can be pinned the selection moved, so select again.
-  let found: NonNullable<Awaited<ReturnType<typeof newestApprovedRevisionOf>>['found']> | null = null;
+  let found: NonNullable<Awaited<ReturnType<typeof newestApprovedRevisionForServe>>['found']> | null = null;
   let content: string | null = null;
   for (let attempt = 0; attempt < APPROVED_READ_ATTEMPTS && content === null; attempt++) {
-    ({ found } = await newestApprovedRevisionOf(db, resolved.nodeId));
+    ({ found } = await newestApprovedRevisionForServe(db, resolved.nodeId));
     if (!found) throw bootPromptRefusal('BOOT_PROMPT_NOT_APPROVED', where);
     content = await approvedContent(db, resolved.nodeId, found.revNo);
   }
