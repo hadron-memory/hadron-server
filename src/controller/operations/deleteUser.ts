@@ -11,6 +11,7 @@ import { assertIssuerInvitationSnapshotFresh, revokeOrgInvitationsByIssuer } fro
 import { AuthoritySnapshotStale, lockAuthorityAnchors } from '../../lib/auth/authorityAnchors.js';
 import { retryOnSerializationFailure } from '../../lib/serializableRetry.js';
 import { assertNoMintedCorpusCascade } from '../../lib/mintedSpecPermanence.js';
+import { endHeldGrants } from '../../lib/grants/departure.js';
 import {
   collectAssetKeysForMemories,
   purgeCollectedAssetObjects,
@@ -69,6 +70,7 @@ async function assertUserGrantSnapshotFresh(
       UNION ALL SELECT 'agent-sub:' || agent_id FROM agent_subscriptions WHERE user_id = ${userId}
       UNION ALL SELECT 'connection:' || id FROM exchange_connections WHERE user_id = ${userId}
       UNION ALL SELECT 'connection-grant:' || id FROM connection_grants WHERE granted_by_user_id = ${userId}
+      UNION ALL SELECT 'grant:' || id FROM grants WHERE user_id = ${userId}
     ) AS user_grants ORDER BY grant_key`;
   const snapshot = await tx.$queryRaw<Array<{ grant_key: string }>>(grants);
   const fresh = await db.$queryRaw<Array<{ grant_key: string }>>(grants);
@@ -402,12 +404,6 @@ async function runDeletionTxn(
       // Grants the target issued on connections that survive elsewhere
       // (defensive — connections are owner-keyed, so normally swept above).
       await tx.connectionGrant.deleteMany({ where: { grantedByUserId: targetUserId } });
-      // #3668 (S1a, cor:acl:140:08): erasing the ISSUER of a grant removes the link and keeps the row and its reason.
-      // BOUNDARY, deliberately NOT decided here: what becomes of a grant whose HOLDER is erased (cor:acl:140:08 Open, every
-      // holder kind: this person, or an Agent, worker or App erased with them below). Until it is ruled, the holder foreign keys
-      // are RESTRICT as INTERIM referential integrity on empty, producer-free tables (#3668 S1a, gate 6712456240): an erasure
-      // that would hard-delete a holder fails whole. No persistent grant producer may ship before that ruling and a re-gate.
-      await tx.$executeRaw`UPDATE grants SET issuer_user_id = NULL WHERE issuer_user_id = ${targetUserId}`;
       await tx.principalGrant.deleteMany({ where: { principalId: targetUserId } });
       // Shares RECEIVED and shares GRANTED (grantor-of) by the target on
       // memories that survive (shares on erased memories already cascaded).
@@ -480,6 +476,15 @@ async function runDeletionTxn(
           updatedBy: actorUserId,
         },
       });
+
+      // #3690 (S2a-h, cor:acl:140:03 and :08, ruling 0255 item 3), AFTER the soft delete above: the database lets an issuer link go only
+      // for an erased person (a users row that is soft-deleted or gone), and that is true only from here.
+      //  - Grants this person HOLDS end (the grant allows nothing and the record stays, holder id sealed). The soft delete fires no
+      //    foreign-key action, so this is explicit; the Agents, Workers and Apps erased above ended theirs by the delete triggers.
+      //  - Grants this person ISSUED stay as they were, with the issuer link gone and the reason kept (`:08`); one row can be both.
+      // Last among the writes that lock grant rows, so the grant row lock is the last lock this transaction takes.
+      await endHeldGrants(tx, 'user', targetUserId);
+      await tx.$executeRaw`UPDATE grants SET issuer_user_id = NULL WHERE issuer_user_id = ${targetUserId}`;
 
       // ── 5. #1631 PR3 / cor:aut:040:05 (#10404): passkey records ────────
       // Each record stays as a verification record (public key, credential id, times, window outcome); its
