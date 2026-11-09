@@ -17,7 +17,7 @@
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { Client } from 'pg';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { baseTestDbUrl, maintenanceUrl, quoteDbIdent, withDbName } from './dbWorkers.js';
 import { buildTestSchema } from './schemaTemplate.js';
 
@@ -105,6 +105,12 @@ async function diffInRolledBackTx(client: Client, base: Snapshot, fn: () => Prom
   }
 }
 
+async function closeScratch(client: Client | undefined, admin: Client | undefined, database: string): Promise<void> {
+  await client?.end().catch(() => {});
+  await admin?.query(`DROP DATABASE IF EXISTS ${quoteDbIdent(database)} WITH (FORCE)`).catch(() => {});
+  await admin?.end().catch(() => {});
+}
+
 const scratch = `hadron_test_parity434_${process.pid}_${randomBytes(4).toString('hex')}`;
 let admin: Client;
 let client: Client;
@@ -123,9 +129,7 @@ describe('#434 the template catalog comparator (fresh template, rolled-back cont
   }, 300_000);
 
   afterAll(async () => {
-    await client?.end().catch(() => {});
-    await admin?.query(`DROP DATABASE IF EXISTS ${quoteDbIdent(scratch)} WITH (FORCE)`).catch(() => {});
-    await admin?.end().catch(() => {});
+    await closeScratch(client, admin, scratch);
     // DROP DATABASE of a full schema can take well past the 10s default hook
     // timeout when the whole suite is loading the server (seen at 8c8b3149).
   }, 120_000);
@@ -156,6 +160,20 @@ describe('#434 the template catalog comparator (fresh template, rolled-back cont
     expect(changes[0]).toMatch(/^changed con:memories\.chk_memory_chunk_tokens_positive\n/);
   });
 
+  it('#2964 control: a real SQL literal whitespace change is changed', async () => {
+    await client.query('BEGIN');
+    try {
+      await client.query("CREATE FUNCTION public.literal2964() RETURNS text LANGUAGE sql AS $$ SELECT 'a  b'::text $$");
+      const before = await snapshot(client);
+      await client.query("CREATE OR REPLACE FUNCTION public.literal2964() RETURNS text LANGUAGE sql AS $$ SELECT 'a b'::text $$");
+      const changes = diff(before, await snapshot(client));
+      expect(changes).toHaveLength(1);
+      expect(changes[0]).toMatch(/^changed fn:literal2964/);
+    } finally {
+      await client.query('ROLLBACK');
+    }
+  });
+
   it('control: a function body that differs only in whitespace is reported as reformatted, not changed', async () => {
     const body = fresh.get('fn:hadron_nodes_tsv(p_name text, p_alias text, p_loc text, p_tags text[], p_description text, p_abstract text, p_content text, p_properties text, p_data text)')!;
     const changes = await diffInRolledBackTx(client, fresh, async () => {
@@ -181,5 +199,35 @@ describe('#434 the vitest global setup applies no DDL of its own', () => {
 
   it('reads no prisma/*.sql file (a string literal naming one; prose may still cite post-push.sql)', () => {
     expect(source.match(/prisma\/[\w.-]+\.sql['"`]/g) ?? []).toEqual([]);
+  });
+});
+
+/** #2964: the comparator must distinguish literal changes and surface a failed scratch drop. */
+describe('#2964 comparator safety controls', () => {
+  it('surfaces a failed scratch drop while still ending both clients', async () => {
+    const failure = new Error('forced scratch DROP failure');
+    const endClient = vi.fn().mockRejectedValue(new Error('client already closed'));
+    const endAdmin = vi.fn().mockRejectedValue(new Error('admin already closed'));
+    const query = vi.fn().mockRejectedValue(failure);
+    await expect(closeScratch({ end: endClient } as unknown as Client, { query, end: endAdmin } as unknown as Client, 'hadron_test_parity434_forced')).rejects.toBe(failure);
+    expect(query).toHaveBeenCalledWith('DROP DATABASE IF EXISTS "hadron_test_parity434_forced" WITH (FORCE)');
+    expect(endClient).toHaveBeenCalledOnce();
+    expect(endAdmin).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["SELECT 'a  b';", "SELECT 'a b';"],
+    ["SELECT 'a\n  b';", "SELECT 'a\n b';"],
+    ['SELECT $text$a  b$text$;', 'SELECT $text$a b$text$;'],
+    ['SELECT "a  b";', 'SELECT "a b";'],
+    [String.raw`SELECT E'a\'  b';`, String.raw`SELECT E'a\' b';`],
+  ])('classes a quoted-content whitespace change as changed: %s', (before, after) => {
+    const wrap = (body: string) => `CREATE OR REPLACE FUNCTION public.literal2964() RETURNS text LANGUAGE sql AS $function$\n${body}\n$function$;`;
+    expect(diff(new Map([['fn:literal2964()', wrap(before)]]), new Map([['fn:literal2964()', wrap(after)]]))[0]).toMatch(/^changed fn:literal2964/);
+  });
+
+  it('still classes ordinary re-indentation outside literals as reformatted', () => {
+    const body = "CREATE FUNCTION x() RETURNS text LANGUAGE sql AS $function$\nSELECT 'a  b';\n$function$;";
+    expect(diff(new Map([['fn:x()', body]]), new Map([['fn:x()', body.replace(/\n/g, '\n    ')]]))[0]).toMatch(/^reformatted fn:x/);
   });
 });
