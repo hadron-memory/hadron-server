@@ -12015,7 +12015,14 @@ export async function closeMcpTransportsForShutdown(): Promise<number> {
     }
   }
   await Promise.all(entries.map(async ([sid, active]) => {
-    while (active.inFlight > 0) await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    while (active.inFlight > 0) {
+      // A GET still authenticating when the first pass ran registers its stream afterwards and pins `inFlight`
+      // until the client leaves; end whatever has registered since, every tick.
+      for (const res of [...active.streams]) {
+        if (!res.writableEnded) res.end();
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
     if (transports.get(sid) === active) {
       unregisterMcpTransport(sid, active.transport);
       mcpLog('info', 'mcp_transport_evicted', { mcpSessionId: sid, reason: 'shutdown', principalKey: active.principalKey });

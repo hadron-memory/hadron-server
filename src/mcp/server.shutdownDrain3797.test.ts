@@ -18,11 +18,18 @@ import { closeHttpListenerForShutdown } from '../lib/httpShutdown.js';
 import { mcpTransportStateForTests } from './server.js';
 
 /** Lets a test hold a POST /mcp suspended inside the role refresh (in flight on its transport). */
-const gate = vi.hoisted(() => ({ hold: null as Promise<void> | null, entered: 0 }));
+const gate = vi.hoisted(() => ({ hold: null as Promise<void> | null, entered: 0, authHold: null as Promise<void> | null, authEntered: 0 }));
 vi.mock('../middleware/auth.js', async (orig) => {
   const real = await orig<typeof import('../middleware/auth.js')>();
   return {
     ...real,
+    resolveAuthContext: async (...args: Parameters<typeof real.resolveAuthContext>) => {
+      if (gate.authHold && args[0].method === 'GET') {
+        gate.authEntered += 1;
+        await gate.authHold;
+      }
+      return real.resolveAuthContext(...args);
+    },
     getCurrentUserRoles: async (...args: Parameters<typeof real.getCurrentUserRoles>) => {
       if (gate.hold) {
         gate.entered += 1;
@@ -55,6 +62,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   gate.hold = null;
+  gate.authHold = null;
   server.closeAllConnections?.();
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
@@ -194,6 +202,26 @@ describe('#3797 in-flight work still drains', () => {
     expect(r.status).toBe(200);
     const text = await r.text();
     expect(text).toContain('"tools"');
+    expect(await drained).toBe(true);
+    expect(mcpTransportStateForTests().sessionIds).toEqual([]);
+  });
+
+  it('a GET still authenticating when the drain starts is ended once it registers its stream', async () => {
+    const { token } = await makeUser();
+    const id = await open(token);
+    let release!: () => void;
+    gate.authHold = new Promise<void>((r) => (release = r));
+    const before = gate.authEntered;
+    const late = holdStream(token, id);
+    await until(() => gate.authEntered > before);
+
+    const drained = drain(4000);
+    await sleep(100); // the shutdown pass has run; this GET has no stream registered yet
+    gate.authHold = null;
+    release();
+    const stream = await late;
+    expect(stream.status).toBe(200);
+    await stream.ended;
     expect(await drained).toBe(true);
     expect(mcpTransportStateForTests().sessionIds).toEqual([]);
   });
