@@ -19,6 +19,7 @@ import { runAsActor } from '../../../lib/requestActor.js';
 import { DB_NOW, dropTestActions, insertGrant, insertGrantUnguarded, raw, seedWorld, type World } from '../../../lib/grants/grantFixtures3668.js';
 import { grantTermsFromRow, grantTermsHash } from '../../../lib/grants/terms.js';
 import { resolvers, type Context } from './resolvers.js';
+import { grantSigningFieldResolvers } from './resolvers.grantSigning.js';
 import { deploymentSchema } from './deploymentSchema.js';
 import { formatGraphQLError } from '../formatError.js';
 
@@ -219,6 +220,44 @@ describe('R4p: withdraw is the requester account\'s alone, once', () => {
     expect(JSON.stringify(unknown).replaceAll(id, 'X'))
       .toBe(JSON.stringify(await post(personKey, null, WITHDRAW, { id: 'AAAAAAAAAAAAAAAAAAAAAA' })).replaceAll('AAAAAAAAAAAAAAAAAAAAAA', 'X'));
     expect((await asWorker(READ, { id })).data.grantSigningRequest.state).toBe('OPEN');
+  });
+});
+
+describe('R5p: a request past its deadline reads EXPIRED, at its deadline, judged at one instant per row (#3802 BLIND P3)', () => {
+  const F = grantSigningFieldResolvers.GrantSigningRequest;
+  const row = (expiresAt: Date) => ({
+    id: 'r', grantId: 'g', version: 1, termsHash: 'a'.repeat(64), payloadVersion: 'hadron-grant-signature-v1', state: 'open',
+    requesterUserId: 'u', requesterAppId: null, requesterWorkerId: null, requesterSessionId: null,
+    createdAt: new Date(expiresAt.getTime() - 60_000), expiresAt, endedAt: null,
+  });
+
+  it('a stored-open request past its deadline reads EXPIRED with endedAt = expiresAt, over GraphQL', async () => {
+    const g = await held();
+    const made = (await asWorker(REQUEST, { g })).data.requestGrantSignature;
+    expect(made.state).toBe('OPEN');
+    expect(made.endedAt).toBeNull();
+    vi.useFakeTimers({ toFake: ['Date'], now: new Date(made.expiresAt).getTime() + 1000 });
+    try {
+      const r = await asWorker('query($id:ID!){grantSigningRequest(id:$id){state expiresAt endedAt}}', { id: made.id });
+      expect(r.data.grantSigningRequest.state).toBe('EXPIRED');
+      expect(r.data.grantSigningRequest.endedAt).toBe(r.data.grantSigningRequest.expiresAt);
+    } finally { vi.useRealTimers(); }
+    expect((await db.grantSigningRequest.findUniqueOrThrow({ where: { id: made.id } })).state).toBe('open');
+  });
+
+  it('state and endedAt never straddle the deadline: the clock moving between the two fields changes neither', () => {
+    const deadline = new Date('2030-01-01T00:00:00.000Z');
+    vi.useFakeTimers({ toFake: ['Date'], now: deadline.getTime() - 1 });
+    try {
+      const r = row(deadline);
+      expect(F.state(r)).toBe('OPEN');
+      vi.setSystemTime(deadline.getTime() + 1);
+      expect(F.endedAt(r)).toBeNull();
+      const late = row(deadline);
+      expect(F.endedAt(late)).toEqual(deadline);
+      vi.setSystemTime(deadline.getTime() - 1);
+      expect(F.state(late)).toBe('EXPIRED');
+    } finally { vi.useRealTimers(); }
   });
 });
 

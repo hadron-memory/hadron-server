@@ -327,6 +327,17 @@ describe('D4: the #1162 fence covers the requester worker and session', () => {
     await refused(insertRequest(g, { requester_session_id: 'no-such-session' }), /reference to an identity that no longer exists/);
     expect(await insertRequest(g, { requester_worker_id: w.workerId, requester_session_id: w.sessionId })).toBeTruthy();
   });
+
+  it('a retained requester stamp is not re-checked: the request still ends after its worker and session are gone (#3802 BLIND)', async () => {
+    const g = await insertGrant(w);
+    const r = await insertRequest(g, { requester_worker_id: w.workerId, requester_session_id: w.sessionId });
+    await exec('DELETE FROM sessions WHERE worker_id = $1', w.workerId);
+    await exec('DELETE FROM workers WHERE id = $1', w.workerId);
+    await exec(`UPDATE grant_signing_requests SET state = 'withdrawn' WHERE id = $1`, r);
+    expect((await stateOf(r)).state).toBe('withdrawn');
+    // The fence still refuses a NEW dangling stamp.
+    await refused(insertRequest(g, { requester_worker_id: w.workerId }), /worker reference to an identity that no longer exists/);
+  });
 });
 
 describe('the request module: typed refusals before any write, the pins it records, withdrawal', () => {

@@ -125,11 +125,21 @@ export const grantSigningQueries = {
   grantSigningRequest: (_: unknown, { id }: { id: string }, ctx: Context) => readableRequest(ctx, id),
 };
 
+/**
+ * One instant per row: `state` and `endedAt` are separate field resolvers, and two clock reads could fall either side of the
+ * deadline (OPEN with an end time, or EXPIRED without one). The first field read fixes the instant for the row object.
+ */
+const observedAt = new WeakMap<GrantSigningRequestRow, Date>();
+function effectiveState(r: GrantSigningRequestRow) {
+  let at = observedAt.get(r);
+  if (!at) { at = new Date(); observedAt.set(r, at); }
+  return effectiveRequestState(r, at);
+}
+
 export const grantSigningFieldResolvers = {
   GrantSigningRequest: {
-    state: (r: GrantSigningRequestRow) => effectiveRequestState(r, new Date()).toUpperCase(),
-    endedAt: (r: GrantSigningRequestRow) =>
-      effectiveRequestState(r, new Date()) === 'expired' && r.state === 'open' ? r.expiresAt : r.endedAt,
+    state: (r: GrantSigningRequestRow) => effectiveState(r).toUpperCase(),
+    endedAt: (r: GrantSigningRequestRow) => (effectiveState(r) === 'expired' && r.state === 'open' ? r.expiresAt : r.endedAt),
     requestedBy: (r: GrantSigningRequestRow) => ({
       userId: r.requesterUserId, appId: r.requesterAppId, workerId: r.requesterWorkerId, sessionId: r.requesterSessionId,
     }),
