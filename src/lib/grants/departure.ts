@@ -27,6 +27,13 @@ const HOLDER_COLUMN: Record<GrantHolderKind, string> = { user: 'user_id', agent:
  */
 export async function endHeldGrants(tx: Prisma.TransactionClient, kind: GrantHolderKind, holderId: string): Promise<number> {
   const column = Prisma.raw(`grants."${HOLDER_COLUMN[kind]}"`);
+  // Lock FIRST, judge SECOND, in two statements (the pattern live.ts documents): one UPDATE judges "has it expired" before it
+  // waits for the row lock, so a grant that expired while the departure waited behind another transaction would still be stamped.
+  // The second statement reads the database clock after the locks are held. Locked in id order, so two departures cannot deadlock.
+  await tx.$queryRaw(Prisma.sql`
+    SELECT id FROM grants WHERE ${column} = ${holderId} AND holder_departed_at IS NULL AND revoked_at IS NULL
+      AND EXISTS (SELECT 1 FROM apps a WHERE a.id = grants.app_id)
+    ORDER BY id FOR UPDATE`);
   return tx.$executeRaw(Prisma.sql`
     UPDATE grants SET holder_departed_at = ${GRANT_DB_NOW}, updated_at = ${GRANT_DB_NOW}
     WHERE ${column} = ${holderId} AND holder_departed_at IS NULL AND revoked_at IS NULL

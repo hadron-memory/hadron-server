@@ -141,6 +141,11 @@ FOR EACH ROW EXECUTE FUNCTION hadron_guard_grant();
 CREATE OR REPLACE FUNCTION hadron_grant_holder_gone() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
+  -- Lock first, judge second (two statements, as endHeldGrants): a grant that expired while this delete waited for the row lock
+  -- must be judged on the clock AFTER the lock, so it keeps its first end instead of being stamped.
+  EXECUTE format(
+    'SELECT 1 FROM grants WHERE %I = $1 AND holder_departed_at IS NULL AND revoked_at IS NULL
+        AND EXISTS (SELECT 1 FROM apps a WHERE a.id = grants.app_id) ORDER BY id FOR UPDATE', TG_ARGV[0]) USING OLD.id;
   EXECUTE format(
     'UPDATE grants SET holder_departed_at = (clock_timestamp() AT TIME ZONE ''UTC''), updated_at = (clock_timestamp() AT TIME ZONE ''UTC'')
       WHERE %I = $1 AND holder_departed_at IS NULL AND revoked_at IS NULL

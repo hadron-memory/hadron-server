@@ -101,6 +101,28 @@ describe('retireWorker ends the grants the worker holds (ruling 0259), in the re
     await expect(retiring).resolves.toBeTruthy();
     expect((await read(id)).live).toBe(false);
     expect((await db.worker.findUniqueOrThrow({ where: { id: f.target.id } })).retiredAt).not.toBeNull();
+    // ...and it keeps its first end: expiry was judged AFTER the row lock, so the departure does not stamp it (second-review P2, bff639cf)
+    expect((await read(id)).holder_departed_at).toBeNull();
+  });
+  it('the same for a HARD delete (the AFTER DELETE trigger): a grant that expires while deleteWorker waits is not stamped, and the delete commits', async () => {
+    const id = await active({ user_id: null, worker_id: f.target.id, starts_at: raw(`${DB_NOW} - interval '2 hours'`), expires_at: raw(`${DB_NOW} + interval '2 seconds'`) });
+    const open = await active({ user_id: null, worker_id: f.target.id });
+    let release!: () => void; let locked!: () => void;
+    const lockedP = new Promise<void>((r) => { locked = r; });
+    const releaseP = new Promise<void>((r) => { release = r; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM grants WHERE id = ${id} FOR UPDATE`;
+      locked();
+      await releaseP;
+    }, { timeout: 20_000 });
+    await lockedP;
+    const deleting = remove();
+    try { await waitForLockWaiters(db as any); await new Promise((r) => setTimeout(r, 2600)); } finally { release(); }
+    await holder;
+    await expect(deleting).resolves.toBe(true);
+    expect(await db.worker.findUnique({ where: { id: f.target.id } })).toBeNull();
+    expect((await read(id)).holder_departed_at).toBeNull();
+    expect((await read(open)).holder_departed_at).not.toBeNull();
   });
   it('lock order: a transaction holding the grant row makes the retirement wait, and the end lands when it releases', async () => {
     const id = await active({ user_id: null, worker_id: f.target.id });
