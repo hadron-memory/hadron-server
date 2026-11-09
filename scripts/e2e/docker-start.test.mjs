@@ -15,7 +15,7 @@ function boot(t, { migrate = owner, fail = '', noise = false, serving = serve, s
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const log = join(dir, 'calls');
   writeFileSync(join(dir, 'pnpm'), `#!/bin/sh
-printf '%s|%s|%s\\n' "$*" "$DATABASE_URL" "\${MIGRATE_DATABASE_URL-unset}" >> "$CALL_LOG"
+printf '%s|%s|%s|%s\\n' "$*" "$DATABASE_URL" "\${MIGRATE_DATABASE_URL-unset}" "\${HADRON_MIGRATIONS_REFUSED-unset}" >> "$CALL_LOG"
 if [ "$*" = "tsx scripts/db/resolve-refused-migrations.ts" ] && [ -n "$HELPER_OUT" ]; then printf '%s\\n' "$HELPER_OUT"; exit 0; fi
 if [ "$*" = "$FAIL_STEP" ]; then
   printf '%s\\n' "$DATABASE_URL" >&2
@@ -84,9 +84,16 @@ test('#3770: a refused preflight (P3018) is rolled back as owner, alarmed once, 
   assert.equal(rows.filter(row => row === 'prisma migrate deploy').length, 1, 'a refusal is not retried in the same boot');
   assert.equal(run.calls.find(row => row[0].startsWith('prisma migrate resolve'))[1], owner);
   assert.equal(run.calls.at(-1)[0], 'tsx src/index.ts');
+  assert.equal(run.calls.at(-1)[3], refusedName, 'the server is told which migration was refused');
   assert.equal(run.stderr.match(/^db\.migration\.refused_preflight migration=\S+/gm).length, 1);
   assert.match(run.stderr, new RegExp(`db\\.migration\\.refused_preflight migration=${refusedName} `));
   noSecrets(run);
+});
+test('#3770: a clean boot passes no refusal to the server, whatever the outside environment says', t => {
+  process.env.HADRON_MIGRATIONS_REFUSED = '20260101000000_outside';
+  t.after(() => { delete process.env.HADRON_MIGRATIONS_REFUSED; });
+  const run = boot(t);
+  assert.equal(run.calls.at(-1)[3], 'unset');
 });
 test('#3770: a failure other than P3018/P3009 stops boot even if the ledger names a refused migration', t => {
   const run = boot(t, { fail: 'prisma migrate deploy', failCode: 'P1001', helperOut: refusedName });

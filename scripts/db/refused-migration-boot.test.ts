@@ -62,7 +62,7 @@ export default defineConfig({ schema: "prisma/schema.prisma", migrations: { path
   writeFileSync(join(shim, 'pnpm'), `#!/bin/sh
 case "$*" in
   "prisma generate"|tsx\\ scripts/db/revoke-runtime-migrations.ts|tsx\\ scripts/db/upsert-actions.ts|tsx\\ scripts/db/verify-runtime-role.ts) exit 0 ;;
-  "tsx src/index.ts") echo started >> "${serverLog}"; exit 0 ;;
+  "tsx src/index.ts") echo "started $HADRON_MIGRATIONS_REFUSED" >> "${serverLog}"; exit 0 ;;
   "prisma migrate"*) shift && cd "${dir}" && exec "${PRISMA}" "$@" --config "${dir}/prisma.config.ts" ;;
   "tsx scripts/db/resolve-refused-migrations.ts") cd "${ROOT}" && exec "${ROOT}node_modules/.bin/tsx" scripts/db/resolve-refused-migrations.ts ;;
 esac
@@ -113,6 +113,7 @@ describe('#3770 refusing preflight through the real migrate-deploy + boot path',
     const alarms = run.stderr.split('\n').filter(l => l.startsWith('db.migration.refused_preflight'));
     expect(alarms).toHaveLength(1);
     expect(alarms[0]).toContain(`migration=${REFUSED}`);
+    expect(readFileSync(serverLog, 'utf8').trim()).toBe(`started ${REFUSED}`); // the serving process is told
     expect(await indexExists()).toBe(false);
     expect(await tables()).not.toContain('later_table');
     expect(run.stderr).not.toContain(URL_UNDER_TEST);

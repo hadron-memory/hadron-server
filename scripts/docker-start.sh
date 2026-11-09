@@ -45,6 +45,8 @@ run_setup db.runtime_role.generate_failed "$DATABASE_URL" pnpm prisma generate |
 # migration is re-tried into P3009 on every restart. Mark each refused migration
 # rolled back, say so once, and serve the schema that exists; the next boot tries
 # it again. Any other failure, or one we cannot classify, still stops boot.
+# Never inherit a refusal list from outside: only this boot's own refusals reach the server.
+unset HADRON_MIGRATIONS_REFUSED
 migrate_attempts=0
 while ! run_setup db.runtime_role.migrate_failed "$migration_url" pnpm prisma migrate deploy; do
   migrate_attempts=$((migrate_attempts + 1))
@@ -66,6 +68,8 @@ while ! run_setup db.runtime_role.migrate_failed "$migration_url" pnpm prisma mi
     # P3018: the refusal just happened in THIS deploy, so say so (once per migration per boot).
     # P3009 is a failure an earlier boot left: clear it silently and try the migration again below.
     if [ "$failed_code" = P3018 ]; then
+      HADRON_MIGRATIONS_REFUSED="${HADRON_MIGRATIONS_REFUSED:+$HADRON_MIGRATIONS_REFUSED }$refused_name"
+      export HADRON_MIGRATIONS_REFUSED
       echo "db.migration.refused_preflight migration=$refused_name action=rolled_back_and_serving_existing_schema: later migrations were not applied; fix the data it reported, the next boot retries" >&2
     fi
   done
