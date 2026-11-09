@@ -556,7 +556,7 @@ export async function newestApprovedRevisionOf(
 ): Promise<NewestApprovedRevision> {
   const none: NewestApprovedRevision = { found: null, truncated: false };
   meter?.chargeLookup();
-  const live = await db.node.findUnique({ where: { id: nodeId }, select: { memoryId: true, revSeq: true, name: true, abstract: true, content: true, approvalHash: true } });
+  const live = await db.node.findUnique({ where: { id: nodeId }, select: { memoryId: true, revSeq: true } });
   if (!live) return none;
   // Snapshots servable from the node's CURRENT memory only (a foreign-memory capture is never selected).
   meter?.chargeLookup();
@@ -628,35 +628,46 @@ export async function newestApprovedRevisionForServe(
  * #3801 — the revisions of `revNos` that `revisionApprovalOf` cannot read APPROVED, found set-wise instead of one verdict
  * each. Every route to APPROVED there needs a record whose hash equals the hash of THAT revision's text (its own snapshot's
  * copied approval, the node's current approval, or an earlier covering snapshot), so a revision whose text hashes to none of
- * the node's recorded approval hashes is not approved, whatever else is true. Three queries per batch instead of ~3 per
+ * the node's recorded approval hashes is not approved, whatever else is true. Three reads and one bounded carrier lookup per batch instead of ~3 per
  * revision. It only ever ADDS skips for revisions it positively hashed: a number held by more than one row, or one it
  * cannot read, is left to the verdict, and an encrypted memory skips nothing (the verdict answers NOT_APPLICABLE).
  */
 async function revisionsWithNoApprovalHash(
   db: Pick<PrismaClient, 'node' | 'nodeRevision' | 'memory'> | Prisma.TransactionClient,
   nodeId: string,
-  live: { memoryId: string; revSeq: number; name: string; abstract: string | null; content: string | null; approvalHash: string | null },
+  live: { memoryId: string; revSeq: number },
   revNos: number[],
 ): Promise<Set<number>> {
   const skip = new Set<number>();
   if (revNos.length === 0) return skip;
-  const [memory, carriers, rows] = await Promise.all([
+  const [memory, liveText, rows] = await Promise.all([
     db.memory.findUnique({ where: { id: live.memoryId }, select: { isEncrypted: true } }),
-    db.nodeRevision.findMany({ where: { nodeId, approvalHash: { not: null } }, select: { approvalHash: true }, distinct: ['approvalHash'] }),
+    db.node.findUnique({ where: { id: nodeId }, select: { revSeq: true, name: true, abstract: true, content: true, approvalHash: true } }),
     db.nodeRevision.findMany({ where: { nodeId, revNo: { in: revNos } }, select: { revNo: true, name: true, abstract: true, content: true } }),
   ]);
-  if (!memory || memory.isEncrypted) return skip;
-  const recorded = new Set<string>(carriers.map((c) => c.approvalHash!));
-  if (live.approvalHash) recorded.add(live.approvalHash);
+  if (!memory || memory.isEncrypted || !liveText) return skip;
   const hashOf = (f: { name: string; abstract: string | null; content: string | null }) =>
     computeApprovalHash({ title: f.name, abstract: f.abstract, content: f.content });
   const byNo = new Map<number, typeof rows>();
   for (const r of rows) byNo.set(r.revNo!, [...(byNo.get(r.revNo!) ?? []), r]);
+  const hashes = new Map<number, string>();
   for (const revNo of revNos) {
     const held = byNo.get(revNo) ?? [];
-    const text = held.length === 1 ? held[0] : held.length === 0 && revNo === live.revSeq ? live : null;
-    if (text && !recorded.has(hashOf(text))) skip.add(revNo);
+    const text = held.length === 1 ? held[0] : held.length === 0 && revNo === live.revSeq && liveText.revSeq === live.revSeq ? liveText : null;
+    if (text) hashes.set(revNo, hashOf(text));
   }
+  // Only the batch's own hashes can matter, so ask which of THOSE are recorded: the read is bounded by the batch, never by
+  // the length of the node's approval history.
+  const wanted = [...new Set(hashes.values())];
+  const recorded = new Set<string>(wanted.filter((h) => h === liveText.approvalHash));
+  const unresolved = wanted.filter((h) => !recorded.has(h));
+  if (unresolved.length > 0) {
+    const carriers = await db.nodeRevision.findMany({
+      where: { nodeId, approvalHash: { in: unresolved } }, select: { approvalHash: true }, distinct: ['approvalHash'], take: unresolved.length,
+    });
+    for (const c of carriers) recorded.add(c.approvalHash!);
+  }
+  for (const [revNo, h] of hashes) if (!recorded.has(h)) skip.add(revNo);
   return skip;
 }
 

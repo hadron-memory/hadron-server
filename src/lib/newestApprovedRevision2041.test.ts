@@ -210,13 +210,37 @@ describe('the unmetered walk pre-filters by approval hash (#3801)', () => {
     expect(await same(n.id, 1)).toEqual({ found: null, truncated: false });
   });
 
+  it('the carrier lookup is bounded by the batch, not by the node\'s whole approval history', async () => {
+    const n = await mk('d:7'); await approve(n.id);
+    await db.nodeRevision.createMany({ data: Array.from({ length: 60 }, (_, i) => ({
+      id: generateId(), nodeId: n.id, memoryId: memory.id, loc: n.loc, name: n.name, content: `old ${i}`, tags: [], revNo: 100 + i,
+      approvedAt: new Date(), approvedByInfo: 't', approvalHash: `h${i}`.padEnd(64, '0'),
+    })) as never });
+    await db.node.update({ where: { id: n.id }, data: { revSeq: 400, content: 'changed head' } });
+    const spy = vi.spyOn(db.nodeRevision, 'findMany');
+    await newestApprovedRevisionOf(db, n.id, 1);
+    const carrierReads = spy.mock.calls.map((c) => c[0] as { where?: { approvalHash?: { in?: string[] } } }).filter((a) => a?.where?.approvalHash?.in);
+    spy.mockRestore();
+    for (const a of carrierReads) expect(a.where!.approvalHash!.in!.length).toBeLessThanOrEqual(1);
+    expect(carrierReads.length).toBeGreaterThan(0);
+  });
+
+  it('a metered walk does not read the live text outside its charged verdicts', async () => {
+    const n = await mk('d:8'); await edit(n.id, 'm2');
+    const spy = vi.spyOn(db.node, 'findUnique');
+    await newestApprovedRevisionOf(db, n.id, 1, meter);
+    const first = spy.mock.calls[0][0] as { select?: Record<string, boolean> };
+    spy.mockRestore();
+    expect(first.select).not.toHaveProperty('content');
+  });
+
   it('a revision whose text matches no recorded approval hash costs no verdict query', async () => {
     const n = await mk('d:5'); await approve(n.id);
     for (let i = 0; i < 4; i++) await edit(n.id, `w${i}`);
     const spy = vi.spyOn(db.node, 'findUnique');
     await newestApprovedRevisionOf(db, n.id);
-    // one for the walk's own live read; a per-verdict walk would add one per examined revision
-    expect(spy.mock.calls.length).toBeLessThanOrEqual(2);
+    // the walk's live read, the pre-filter's, and ONE verdict (the approved revision); a per-verdict walk adds one per revision
+    expect(spy.mock.calls.length).toBeLessThanOrEqual(3);
     spy.mockRestore();
   });
 });
