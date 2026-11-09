@@ -204,7 +204,7 @@ describe('#2973 serve matrix — switch on and signing shipped (the conjunction 
     const node = await compiled('v1');
     await sign(node); // revision 1: approved + signed
     await recompile(node, 'v2');
-    await sign(node, { firstWindow: true }); // revision 2: approved, only a PENDING signature
+    await sign(node, { firstWindow: true }); // the newer revision: approved, only a PENDING signature
     await pointAgent(node);
     expect(await serve()).toMatchObject({ servedRevSeq: 1, content: 'v1' });
   });

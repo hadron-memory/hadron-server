@@ -27,7 +27,7 @@ import { generateId } from '../id.js';
 import { computeApprovalHash } from '../approvalHash.js';
 import { signaturePayloadBytes, SIGNATURE_PAYLOAD_V3 } from './payload.js';
 import { clearSignatureVerifyCache } from './verify.js';
-import { completeSigningRequestInTransaction, createSigningRequestInTransaction } from './requests.js';
+import { completeSigningRequestInTransaction, createSigningRequestInTransaction, newSigningRequestId } from './requests.js';
 import { revisionSignatureCounts, type SignatureRequirement } from './revisionSignatureCounts.js';
 
 const ORIGIN = 'https://sign.example.test';
@@ -124,7 +124,7 @@ async function signLive(node: string = nodeId, opts: { closingMs?: number } = {}
 async function seedDirect(node: string, signer: string, signerKey: SoftPasskey, opts: { end?: 'withdrawn' | 'completed'; corrupt?: boolean } = {}) {
   const n = await db.node.findUniqueOrThrow({ where: { id: node } });
   const approvalHash = computeApprovalHash({ title: n.name, abstract: n.abstract, content: n.content });
-  const requestId = generateId();
+  const requestId = newSigningRequestId(); // the payload builder refuses any other id shape
   const passkeyId = await insertSoftPasskey(db, signer, signerKey, { label: 'Seeded key', rpId: RP });
   await db.signingRequest.create({ data: {
     id: requestId, nodeId: node, revision: n.revSeq, approvalHash, payloadVersion: SIGNATURE_PAYLOAD_V3,
