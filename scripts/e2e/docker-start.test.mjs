@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 const entrypoint = fileURLToPath(new URL('../docker-start.sh', import.meta.url));
 const serve = 'postgresql://hadron_app:serve-fixture-password@db/app';
 const owner = 'postgresql://hadron:migrate-fixture-password@db/app';
-function boot(t, { migrate = owner, fail = '', noise = false, serving = serve, shell = 'sh', failLine = '', failCode = 'P1001', helperOut = '' } = {}) {
+function boot(t, { migrate = owner, fail = '', noise = false, serving = serve, shell = 'sh', failLine = '', failCode = 'P1001', helperOut = '', helperFailed = '' } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'docker-start-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const log = join(dir, 'calls');
@@ -19,6 +19,9 @@ printf '%s|%s|%s|%s\\n' "$*" "$DATABASE_URL" "\${MIGRATE_DATABASE_URL-unset}" "\
 if [ "$*" = "tsx scripts/db/resolve-refused-migrations.ts" ] && [ -n "$HELPER_OUT" ]; then
   printf 'Already up to date\\nDone in 215ms using pnpm v11.5.2\\n'  # pnpm's own stdout banner, as the real one prints it
   printf '%s\\n' "$HELPER_OUT" > "$REFUSED_MIGRATIONS_FILE"; exit 0
+fi
+if [ "$*" = "tsx scripts/db/resolve-refused-migrations.ts" ] && [ -n "$HELPER_FAILED" ]; then
+  printf '%s\\n' "$HELPER_FAILED" > "$FAILED_MIGRATIONS_FILE"; exit 1
 fi
 if [ "$*" = "$FAIL_STEP" ]; then
   printf '%s\\n' "$DATABASE_URL" >&2
@@ -36,12 +39,12 @@ fi
 exec ${process.execPath} "$@"
 `, { mode: 0o700 });
   const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, DATABASE_URL: serving,
-    TMPDIR: dir, CALL_LOG: log, FAIL_STEP: fail, FAIL_LINE: failLine, FAIL_CODE: failCode, HELPER_OUT: helperOut, NOISE: noise ? 'yes' : 'no' };
+    TMPDIR: dir, CALL_LOG: log, FAIL_STEP: fail, FAIL_LINE: failLine, FAIL_CODE: failCode, HELPER_OUT: helperOut, HELPER_FAILED: helperFailed, NOISE: noise ? 'yes' : 'no' };
   delete env.MIGRATE_DATABASE_URL;
   if (serving === null) delete env.DATABASE_URL;
   if (migrate !== undefined && migrate !== null) env.MIGRATE_DATABASE_URL = migrate;
   const run = spawnSync(shell, [entrypoint], { encoding: 'utf8', env });
-  assert(!readdirSync(dir).some(name => name.startsWith('hadron-start.')), 'private startup output was not cleaned up');
+  assert(!readdirSync(dir).some(name => name.startsWith('hadron-start.') || name.startsWith('hadron-failed.') || name.startsWith('hadron-refused.')), 'private startup output was not cleaned up');
   const calls = (() => { try { return readFileSync(log, 'utf8').trim().split('\n').map(row => row.split('|')); } catch { return []; } })();
   return { ...run, calls };
 }
@@ -117,6 +120,37 @@ test('#3770: a P3018 the ledger does not classify as a refusal (helper prints no
   assert.notEqual(run.status, 0);
   assert(!run.calls.some(row => row[0].startsWith('prisma migrate resolve') || row[0] === 'node --import tsx src/index.ts'));
   noSecrets(run);
+});
+// #3794: a non-refusal ledger failure still stops boot, and now names the migration (name + Prisma code only).
+for (const code of ['P3018', 'P3009']) {
+  test(`#3794: a ${code} that is not a refusal prints the failed migration's name, stops boot and discloses nothing`, t => {
+    const run = boot(t, { fail: 'prisma migrate deploy', failCode: code, helperFailed: refusedName, failLine: 'secret ledger text DROP TABLE x' });
+    assert.equal(run.status, 1);
+    assert(!run.calls.some(row => row[0].startsWith('prisma migrate resolve') || row[0] === 'node --import tsx src/index.ts'));
+    assert.equal(run.stderr.match(/^db\.migration\.failed .*$/gm).join('\n'), `db.migration.failed migration=${refusedName} prisma=${code}`);
+    assert(!run.stderr.includes('DROP TABLE'));
+    noSecrets(run);
+  });
+}
+test('#3794: every failed migration is named, once each', t => {
+  const two = '20261027193000_a\n20261028000000_b';
+  const run = boot(t, { fail: 'prisma migrate deploy', failCode: 'P3018', helperFailed: two });
+  assert.equal(run.status, 1);
+  assert.deepEqual(run.stderr.match(/^db\.migration\.failed .*$/gm), ['db.migration.failed migration=20261027193000_a prisma=P3018', 'db.migration.failed migration=20261028000000_b prisma=P3018']);
+});
+for (const bad of ['x; rm -rf /', '$(id)', '2026_short', '20261027193000_ok/../etc', 'postgresql://u:p@h/db']) {
+  test(`#3794: a failed-name line that is not a migration name is never printed (${JSON.stringify(bad)})`, t => {
+    const run = boot(t, { fail: 'prisma migrate deploy', failCode: 'P3018', helperFailed: bad });
+    assert.equal(run.status, 1);
+    assert.equal(run.stderr.match(/^db\.migration\.failed/gm), null);
+    assert(!run.stderr.includes(bad));
+    noSecrets(run);
+  });
+}
+test('#3794: a clean boot prints no failure line', t => {
+  const run = boot(t);
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.stderr.match(/db\.migration\.failed/g), null);
 });
 for (const bad of ['x; rm -rf /', '$(id)', '2026_short', '20261027193000_ok\n../../etc']) {
   test(`#3770: a helper line that is not a migration name stops boot (${JSON.stringify(bad)})`, t => {
