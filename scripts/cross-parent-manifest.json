@@ -180,6 +180,7 @@
     "AgentSchedulesPage": "envelope",
     "ConnectionGrantsPage": "envelope",
     "PrincipalGrantsPage": "envelope",
+    "GrantsPage": "envelope",
     "AgentWebhooksPage": "envelope",
     "AgentWebhookCredentials": "value",
     "PolicyLayerVerdict": "value",
@@ -1599,6 +1600,12 @@
       "audience": "platform ADMIN/OWNER or live org members (resolveOrgScope); Query.organization admits exactly members or platform admins",
       "resolver": "src/api/graphql/schema/resolvers.query.org.ts::organizations",
       "target": "Organization"
+    },
+    "GrantsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "a bound worker session reading its own App's grants that name it directly (plus its own pending requests); any other caller gets an empty page (#3789)",
+      "resolver": "src/api/graphql/schema/resolvers.grant.ts::resolveGrantReader",
+      "target": "Grant"
     },
     "PrincipalGrantsPage.items": {
       "class": "parent-implies-child",

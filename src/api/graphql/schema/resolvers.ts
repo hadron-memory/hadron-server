@@ -57,6 +57,7 @@ import { appRunMutations, appRunQueries } from './resolvers.appRun.js';
 import { meteringMutations, meteringQueries } from './resolvers.metering.js';
 import { connectionGrantMutations, connectionGrantQueries } from './resolvers.connectionGrant.js';
 import { principalGrantMutations, principalGrantQueries } from './resolvers.principalGrant.js';
+import { grantQueries } from './resolvers.grant.js';
 import { importNodeMutations } from './resolvers.mutation.importNode.js';
 import { assetMutations } from './resolvers.mutation.asset.js';
 import { memoryMutations } from './resolvers.mutation.memory.js';
@@ -243,6 +244,7 @@ export const resolvers = {
     ...runTeamSnapshotQueries,
     ...connectionGrantQueries,
     ...principalGrantQueries,
+    ...grantQueries,
     ...meteringQueries,
     ...rateLimitQueries,
     ...impersonationQueries,
