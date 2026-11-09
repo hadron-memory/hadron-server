@@ -12,14 +12,17 @@ import express from 'express';
 import type { Server } from 'node:http';
 import { PrismaClient } from '../generated/prisma/index.js';
 import { db } from '../integrations/db/client.js';
-import { mountHealthRoutes, type HealthDb } from './health.js';
+import { mountHealthRoutes, refusedMigrationsFromEnv, type HealthDb } from './health.js';
 
 const servers: Server[] = [];
 const clients: PrismaClient[] = [];
 
-async function serve(healthDb: HealthDb, timeoutMs?: number): Promise<string> {
+async function serve(healthDb: HealthDb, timeoutMs?: number, refusedMigrations?: string[]): Promise<string> {
   const app = express();
-  mountHealthRoutes(app, healthDb, timeoutMs === undefined ? {} : { timeoutMs });
+  mountHealthRoutes(app, healthDb, {
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    ...(refusedMigrations === undefined ? {} : { refusedMigrations }),
+  });
   const server = await new Promise<Server>((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
@@ -44,6 +47,26 @@ function singleConnectionClient(): PrismaClient {
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((s) => new Promise((r) => s.close(r))));
   await Promise.all(clients.splice(0).map((c) => c.$disconnect()));
+});
+
+describe('GET /health after a refused migration (#3770)', () => {
+  it('stays 200 and names the refused migration; /ready keeps its fixed body', async () => {
+    const base = await serve(db, undefined, ['20261027193000_team_chat_seq_unique']);
+    const res = await fetch(`${base}/health`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, migration_refused: ['20261027193000_team_chat_seq_unique'] });
+  });
+
+  it('a clean boot answers the byte-identical { ok: true }', async () => {
+    const base = await serve(db, undefined, []);
+    expect(await (await fetch(`${base}/health`)).json()).toEqual({ ok: true });
+  });
+
+  it('only well-formed migration names reach the body from the environment', () => {
+    expect(refusedMigrationsFromEnv({ HADRON_MIGRATIONS_REFUSED: '20261027193000_a x;y <b>' } as NodeJS.ProcessEnv))
+      .toEqual(['20261027193000_a']);
+    expect(refusedMigrationsFromEnv({} as NodeJS.ProcessEnv)).toEqual([]);
+  });
 });
 
 describe('GET /health (#1906)', () => {
