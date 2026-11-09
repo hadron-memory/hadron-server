@@ -104,6 +104,28 @@ describe('5: the end happens once, and nothing re-points the holder', () => {
   });
 });
 
+describe('a departure stamp needs its cause: the sealed holder has actually gone', () => {
+  const stamp = (id: string) => exec(`UPDATE grants SET holder_departed_at = ${DB_NOW} WHERE id = $1`, id);
+  it('a bare stamp on a grant whose holder is still there is refused, for every holder kind', async () => {
+    for (const k of KINDS) {
+      const id = await activeGrant({ user_id: null, [k.col]: k.id() });
+      await refused(stamp(id), /grants are append-only/);
+      expect((await read(id))!.holder_departed_at).toBeNull();
+    }
+  });
+  it('the same stamp is accepted once the holder is soft-deleted (or retired), the cause the doors have', async () => {
+    const worker = await activeGrant({ user_id: null, worker_id: w.workerId });
+    await refused(stamp(worker), /grants are append-only/);
+    await db.worker.update({ where: { id: w.workerId }, data: { retiredAt: new Date() } });
+    await stamp(worker);
+    const app = await activeGrant({ user_id: null, grantee_app_id: w.app2Id });
+    await db.app.update({ where: { id: w.app2Id }, data: { deletedAt: new Date() } });
+    await stamp(app);
+    expect((await read(worker))!.live).toBe(false);
+    expect((await read(app))!.holder_departed_at).not.toBeNull();
+  });
+});
+
 describe('2/10: person erasure ends what the person HOLDS and leaves what the person ISSUED', () => {
   it('held by the erased person: ended (not live, stamped). Issued by them: still live, issuer link gone', async () => {
     const held = await activeGrant({ user_id: w.user2Id, issuer_user_id: w.userId });

@@ -78,9 +78,18 @@ describe('reach: a grant to a role agent reaches that agent\'s live workers in t
     expect(await reached(g)).toEqual([w.workerId]);
     expect(await grantReachesWorker(db, g, sibling.id)).toBe(false);
   });
-  it('a worker holder reaches nothing once retired, once its App is deleted, or in another App than the grant\'s', async () => {
+  it('a worker holder reaches nothing once retired', async () => {
     const g = await insertGrant(w, { user_id: null, worker_id: w.workerId });
+    expect(await reached(g)).toEqual([w.workerId]);
     await db.worker.update({ where: { id: w.workerId }, data: { retiredAt: new Date() } });
+    expect(await reached(g)).toEqual([]);
+  });
+  it('a worker holder reaches nothing in a different App than the grant\'s, or once the grant\'s App is deleted', async () => {
+    const elsewhere = await insertGrant(w, { user_id: null, worker_id: w.workerId, app_id: w.app2Id });
+    expect(await reached(elsewhere)).toEqual([]);
+    const g = await insertGrant(w, { user_id: null, worker_id: w.workerId });
+    expect(await reached(g)).toEqual([w.workerId]);
+    await db.app.update({ where: { id: w.appId }, data: { deletedAt: new Date() } });
     expect(await reached(g)).toEqual([]);
   });
 });
@@ -92,7 +101,12 @@ describe('reach: what a grant never reaches by itself', () => {
   });
   it('a grant whose holder departed reaches nothing, and a missing grant reaches nothing', async () => {
     const g = await agentGrant();
-    await db.$executeRawUnsafe(`UPDATE grants SET holder_departed_at = (clock_timestamp() AT TIME ZONE 'UTC') WHERE id = $1`, g);
+    // (the stamp itself is refused for a live holder, so this fixture sets it with the guard off, to judge reach's own predicate)
+    await db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER grants_guard');
+      await tx.$executeRawUnsafe(`UPDATE grants SET holder_departed_at = (clock_timestamp() AT TIME ZONE 'UTC') WHERE id = $1`, g);
+      await tx.$executeRawUnsafe('ALTER TABLE grants ENABLE TRIGGER grants_guard');
+    });
     expect(await reached(g)).toEqual([]);
     expect(await reached('no-such-grant')).toEqual([]);
   });

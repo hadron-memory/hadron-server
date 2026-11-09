@@ -111,6 +111,16 @@ BEGIN
      AND (OLD.holder_departed_at IS NOT NULL OR NEW.holder_departed_at IS NULL OR OLD.revoked_at IS NOT NULL) THEN
     RAISE EXCEPTION 'grants are append-only' USING ERRCODE = '23514';
   END IF;
+  -- The stamp is a FACT, so it needs its cause: the sealed holder has actually gone (the row is gone, soft-deleted, or the worker
+  -- retired). A bare stamp on a live holder would end a grant by hand; the issuer link below has the same proof. (A hard delete
+  -- stamps from the AFTER DELETE trigger, when the row is already gone.)
+  IF NEW.holder_departed_at IS DISTINCT FROM OLD.holder_departed_at AND (
+       EXISTS (SELECT 1 FROM users u WHERE u.id = OLD.user_id AND u.deleted_at IS NULL)
+    OR EXISTS (SELECT 1 FROM agents a WHERE a.id = OLD.agent_id AND a.deleted_at IS NULL)
+    OR EXISTS (SELECT 1 FROM workers k WHERE k.id = OLD.worker_id AND k.retired_at IS NULL)
+    OR EXISTS (SELECT 1 FROM apps p WHERE p.id = OLD.grantee_app_id AND p.deleted_at IS NULL)) THEN
+    RAISE EXCEPTION 'grants are append-only' USING ERRCODE = '23514';
+  END IF;
   IF OLD.holder_departed_at IS NOT NULL AND NEW.user_id IS DISTINCT FROM OLD.user_id THEN
     RAISE EXCEPTION 'grants are append-only' USING ERRCODE = '23514';
   END IF;
