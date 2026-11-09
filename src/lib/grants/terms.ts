@@ -14,7 +14,9 @@
  *   max-uses <decimal, no sign, no leading zero | none>
  *   reason <RFC 8785 JSON string>
  *
- * UTF-8, LF after every line including the last. The bytes are pinned by the conformance fixture
+ * UTF-8, LF after every line including the last. Ids, the action name and values keys are visible ASCII; the value
+ * domain is strings, the wildcard `*` and lists of strings (the section 10 byte review, #3649 comment 6746226903). The
+ * bytes are pinned by the conformance fixture
  * (`grantSignature.fixture.json`, generated independently with Python). A different terms document is a new first line
  * and a new fixture, never a change to this one.
  */
@@ -68,14 +70,22 @@ export interface GrantTermsRow {
 }
 
 /**
- * A token (an id or the action name): one or more characters, none of them white space, a control character or a
- * format character, so no token can end, split or visually forge a line. Written exactly as stored.
+ * A token (an id or the action name): one or more characters of U+0021..U+007E, written exactly as stored. An
+ * allowlist, not Unicode property sets, because those differ between runtimes' Unicode versions; it also rules out
+ * every way to end, split or visually forge a line (the section 10 byte review, P8, #3649 comment 6746226903). Every
+ * id the platform mints fits: cuids, 32-hex ids, base64url request ids and dotted action names.
  */
-const NOT_TOKEN = /[\p{White_Space}\p{Cc}\p{Cf}]/u;
+const TOKEN_RE = /^[\x21-\x7e]+$/;
 /** One token of `hadron-grant-terms-v1` and `hadron-grant-signature-v1` (the same rule in both documents). */
 export function isGrantToken(value: unknown): value is string {
-  return typeof value === 'string' && value !== '' && !NOT_TOKEN.test(value) && wellFormed(value);
+  return typeof value === 'string' && TOKEN_RE.test(value);
 }
+
+/**
+ * A values key: a token without `"` or `\` (P4a). RFC 8785 sorts keys by UTF-16 code unit and some implementations by
+ * code point; the two orders agree on ASCII, so every verifier writes the same line.
+ */
+const KEY_RE = /^[\x21\x23-\x5b\x5d-\x7e]+$/;
 function token(term: string, value: unknown): string {
   if (!isGrantToken(value)) {
     throw new GrantTermsError('BAD_TOKEN', `grant terms: ${term} must be one token`);
@@ -110,12 +120,14 @@ export function grantTermsFromRow(row: GrantTermsRow): GrantTerms {
 }
 
 /**
- * One parameter's value: a non-empty string (an id, a node-ref as its stored node id, or the wildcard `*`), or a
- * non-empty list of distinct non-empty strings with no wildcard, in stored order. Anything else is refused: numbers
- * (whose RFC 8785 form implementations disagree on), booleans, null, nested objects and the empty string.
+ * One parameter's value (P1-P4): a non-empty string (an id, a node-ref as its stored node id, never a URN, or the
+ * wildcard `*` as the whole value), or a non-empty list of distinct elements in stored order, each element a non-empty
+ * string that is not `*`. In v1 `*` always means the wildcard; an action needing a literal `*` needs terms v2. Anything
+ * else is refused: numbers (whose RFC 8785 form implementations disagree on), booleans, null, nested objects or lists,
+ * the empty string and a lone surrogate.
  */
 function checkValue(value: unknown): void {
-  const str = (v: unknown) => typeof v === 'string' && v !== '' && wellFormed(v);
+  const str = (v: unknown): v is string => typeof v === 'string' && v !== '' && wellFormed(v);
   if (str(value)) return;
   if (Array.isArray(value) && value.length > 0 && value.every((v) => str(v) && v !== GRANT_WILDCARD)
     && new Set(value).size === value.length) return;
@@ -128,7 +140,7 @@ function valuesLine(values: unknown): string {
     throw new GrantTermsError('BAD_VALUES', 'grant terms: values must be a JSON object');
   }
   for (const key of Object.keys(values)) {
-    if (key === '' || !wellFormed(key)) throw new GrantTermsError('BAD_VALUES', 'grant terms: a value key must be a non-empty string');
+    if (!KEY_RE.test(key)) throw new GrantTermsError('BAD_VALUES', 'grant terms: a value key must be visible ASCII without a quote or backslash');
     const d = Object.getOwnPropertyDescriptor(values, key)!;
     if (!('value' in d)) throw new GrantTermsError('BAD_VALUES', 'grant terms: values must be plain data');
     checkValue(d.value);
