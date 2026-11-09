@@ -25,7 +25,11 @@ export class GrantSigningRefusal extends Error {
       | 'GRANT_TERMS_UNREPRESENTABLE'
       | 'SIGNING_REQUEST_NOT_FOUND'
       | 'SIGNING_REQUEST_NOT_REQUESTER'
-      | 'SIGNING_REQUEST_ENDED',
+      | 'SIGNING_REQUEST_ENDED'
+      // #3649 slice C: refused at the ceremony's completion (src/lib/signing/grantCeremony.ts).
+      | 'SIGNATURE_NOT_VERIFIED'
+      | 'SIGNER_NOT_ELIGIBLE'
+      | 'PASSKEY_COOLING_OFF',
     message: string,
     readonly details: Record<string, unknown> = {},
   ) {

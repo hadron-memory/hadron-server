@@ -134,7 +134,8 @@ async function prove(id: string, who: { key: SoftPasskey }): Promise<Proved> {
   return { cookie, status: r.status, json, text };
 }
 
-function signingBody(p: Proved, key: SoftPasskey, counter = 2) {
+function signingBody(p: Proved, who: { key: SoftPasskey }, counter = 2) {
+  const key = who.key;
   const s = p.json.signing as { ceremonyId: string; challenge: string };
   const a = key.assert({ payload: Buffer.alloc(0), rawChallenge: Buffer.from(s.challenge, 'base64url'), origin: ORIGIN, rpId: RP, counter });
   return assertionBody(s.ceremonyId, key, a);
@@ -316,7 +317,7 @@ describe('refusals at completion are judged before any write', () => {
     });
     const r = await post(req.id, 'complete', signingBody(p, admin), p.cookie);
     expect(r.status).toBe(409);
-    expect((await r.json()).error).toBe('SIGNING_REQUEST_ENDED');
+    expect(((await r.json()) as { error: string }).error).toBe('SIGNING_REQUEST_ENDED');
     expect((await grantRow(g)).activated_at).toBeNull();
   });
 });
