@@ -99,11 +99,6 @@ describe('the first end stands: an already expired or spent grant is not stamped
       expect((await read(open))!.holder_departed_at).not.toBeNull();
       expect((await read(ended))!.holder_departed_at).toBeNull();
     });
-    it(`${name}: the stamp itself is refused by the guard once the holder has gone`, async () => {
-      const ended = await activeGrant({ user_id: null, worker_id: w.workerId, ...over });
-      await db.worker.update({ where: { id: w.workerId }, data: { retiredAt: new Date() } });
-      await refused(exec(`UPDATE grants SET holder_departed_at = ${DB_NOW} WHERE id = $1`, ended), /grants are append-only/);
-    });
   }
 });
 

@@ -95,8 +95,7 @@ BEGIN
   -- The departure of the holder: stamped once (NULL to a time), only on a grant not already ended, never cleared or moved.
   -- A row the holder left cannot be re-pointed (the person link below also refuses it).
   IF NEW.holder_departed_at IS DISTINCT FROM OLD.holder_departed_at
-     AND (OLD.holder_departed_at IS NOT NULL OR NEW.holder_departed_at IS NULL OR OLD.revoked_at IS NOT NULL
-          OR (OLD.activated_at IS NOT NULL AND ((OLD.expires_at IS NOT NULL AND OLD.expires_at <= (clock_timestamp() AT TIME ZONE 'UTC')) OR (OLD.max_uses IS NOT NULL AND OLD.use_count >= OLD.max_uses)))) THEN
+     AND (OLD.holder_departed_at IS NOT NULL OR NEW.holder_departed_at IS NULL OR OLD.revoked_at IS NOT NULL) THEN
     RAISE EXCEPTION 'grants are append-only' USING ERRCODE = '23514';
   END IF;
   -- The stamp is a FACT, so it needs its cause: the sealed holder has actually gone (the row is gone, soft-deleted, or the worker

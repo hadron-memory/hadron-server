@@ -84,6 +84,24 @@ describe('retireWorker ends the grants the worker holds (ruling 0259), in the re
     expect((await read(expired)).holder_departed_at).toBeNull();
     expect((await read(spent)).holder_departed_at).toBeNull();
   });
+  it('a grant that EXPIRES while the retirement waits on its row does not abort the retirement (the stamp predicates, not the guard, judge time)', async () => {
+    const id = await active({ user_id: null, worker_id: f.target.id, starts_at: raw(`${DB_NOW} - interval '2 hours'`), expires_at: raw(`${DB_NOW} + interval '2 seconds'`) });
+    let release!: () => void; let locked!: () => void;
+    const lockedP = new Promise<void>((r) => { locked = r; });
+    const releaseP = new Promise<void>((r) => { release = r; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM grants WHERE id = ${id} FOR UPDATE`;
+      locked();
+      await releaseP;
+    }, { timeout: 20_000 });
+    await lockedP;
+    const retiring = retire();
+    try { await waitForLockWaiters(db as any); await new Promise((r) => setTimeout(r, 2600)); } finally { release(); }
+    await holder;
+    await expect(retiring).resolves.toBeTruthy();
+    expect((await read(id)).live).toBe(false);
+    expect((await db.worker.findUniqueOrThrow({ where: { id: f.target.id } })).retiredAt).not.toBeNull();
+  });
   it('lock order: a transaction holding the grant row makes the retirement wait, and the end lands when it releases', async () => {
     const id = await active({ user_id: null, worker_id: f.target.id });
     let release!: () => void; let locked!: () => void;
