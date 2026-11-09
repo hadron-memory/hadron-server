@@ -85,6 +85,28 @@ describe('1/8: a holder that goes ends its grant; the record stays and keeps the
   });
 });
 
+describe('the first end stands: an already expired or spent grant is not stamped (LOCAL/second-review P2, ae23ac1d)', () => {
+  const ENDED: Array<[string, Record<string, unknown>]> = [
+    ['expired a minute ago', { expires_at: raw(`${DB_NOW} - interval '1 minute'`), starts_at: raw(`${DB_NOW} - interval '2 hours'`) }],
+    ['spent (use_count at max_uses)', { max_uses: 1, use_count: 1 }],
+  ];
+  for (const [name, over] of ENDED) {
+    it(`${name}: a hard worker delete leaves holder_departed_at NULL, while an open grant of the same worker is stamped`, async () => {
+      const ended = await activeGrant({ user_id: null, worker_id: w.workerId, ...over });
+      const open = await activeGrant({ user_id: null, worker_id: w.workerId });
+      expect((await read(ended))!.live).toBe(false);
+      await db.worker.delete({ where: { id: w.workerId } });
+      expect((await read(open))!.holder_departed_at).not.toBeNull();
+      expect((await read(ended))!.holder_departed_at).toBeNull();
+    });
+    it(`${name}: the stamp itself is refused by the guard once the holder has gone`, async () => {
+      const ended = await activeGrant({ user_id: null, worker_id: w.workerId, ...over });
+      await db.worker.update({ where: { id: w.workerId }, data: { retiredAt: new Date() } });
+      await refused(exec(`UPDATE grants SET holder_departed_at = ${DB_NOW} WHERE id = $1`, ended), /grants are append-only/);
+    });
+  }
+});
+
 describe('5: the end happens once, and nothing re-points the holder', () => {
   it('the departure stamp is set once: it cannot be cleared, re-stamped, or set on a revoked row', async () => {
     const id = await activeGrant({ user_id: null, worker_id: w.workerId });

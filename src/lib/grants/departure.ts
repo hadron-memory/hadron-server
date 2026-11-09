@@ -22,7 +22,7 @@ const HOLDER_COLUMN: Record<GrantHolderKind, string> = { user: 'user_id', agent:
 
 /**
  * End every grant `holderId` holds that has not already ended, in the caller's transaction. Returns how many it ended.
- * A grant already revoked or already departed keeps its first end; a grant whose own App is gone is skipped (its row is
+ * A grant already revoked, departed, EXPIRED or SPENT (an activated grant past its expiry or at its count) keeps its first end; a grant whose own App is gone is skipped (its row is
  * deleted with the App). Never throws for "no grants".
  */
 export async function endHeldGrants(tx: Prisma.TransactionClient, kind: GrantHolderKind, holderId: string): Promise<number> {
@@ -30,5 +30,7 @@ export async function endHeldGrants(tx: Prisma.TransactionClient, kind: GrantHol
   return tx.$executeRaw(Prisma.sql`
     UPDATE grants SET holder_departed_at = ${GRANT_DB_NOW}, updated_at = ${GRANT_DB_NOW}
     WHERE ${column} = ${holderId} AND holder_departed_at IS NULL AND revoked_at IS NULL
-      AND EXISTS (SELECT 1 FROM apps a WHERE a.id = grants.app_id)`);
+      AND EXISTS (SELECT 1 FROM apps a WHERE a.id = grants.app_id)
+      AND NOT (activated_at IS NOT NULL AND ((expires_at IS NOT NULL AND expires_at <= ${GRANT_DB_NOW})
+        OR (max_uses IS NOT NULL AND use_count >= max_uses)))`);
 }

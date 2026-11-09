@@ -24,7 +24,7 @@ ALTER TABLE "grants" DROP CONSTRAINT IF EXISTS "grants_grantee_app_id_fkey";
 --   * it ends ONCE, by revoked_at stamped together with revoked_by, or by its HOLDER going: holder_departed_at is stamped
 --     (NULL to a time, never back) by the AFTER DELETE triggers below on every hard delete of a holder row, and by the
 --     deleting code on the soft deletes (an erased person, a retired worker, a deleted agent or App). The first end stands:
---     a row already revoked or departed is not stamped again (ruling 0259);
+--     a row already revoked, departed, expired or spent (an ACTIVATED row past its expiry or at its count) is not stamped (ruling 0259);
 --   * an erased issuer's link goes: issuer_user_id becomes NULL and the reason stays (cor:acl:140:08), and only when that
 --     person is ERASED (the users row is soft-deleted, or gone), never for a live person;
 --   * along a user merge ALREADY recorded in user_merges (mergeUsers writes that row before it rewrites links; the
@@ -108,7 +108,8 @@ BEGIN
   -- The departure of the holder: stamped once (NULL to a time), only on a grant not already ended, never cleared or moved.
   -- A row the holder left cannot be re-pointed (the person link below also refuses it).
   IF NEW.holder_departed_at IS DISTINCT FROM OLD.holder_departed_at
-     AND (OLD.holder_departed_at IS NOT NULL OR NEW.holder_departed_at IS NULL OR OLD.revoked_at IS NOT NULL) THEN
+     AND (OLD.holder_departed_at IS NOT NULL OR NEW.holder_departed_at IS NULL OR OLD.revoked_at IS NOT NULL
+          OR (OLD.activated_at IS NOT NULL AND ((OLD.expires_at IS NOT NULL AND OLD.expires_at <= (clock_timestamp() AT TIME ZONE 'UTC')) OR (OLD.max_uses IS NOT NULL AND OLD.use_count >= OLD.max_uses)))) THEN
     RAISE EXCEPTION 'grants are append-only' USING ERRCODE = '23514';
   END IF;
   -- The stamp is a FACT, so it needs its cause: the sealed holder has actually gone (the row is gone, soft-deleted, or the worker
@@ -149,7 +150,7 @@ FOR EACH ROW EXECUTE FUNCTION hadron_guard_grant();
 -- HOLDER DEPARTURE on a HARD delete of a holder row, whichever path deletes it (an erasure's cascade, deleteWorker, a tombstone
 -- reclaim, the owner rename's raw SQL): the grants it held end, in the deleting transaction. The soft deletes (an erased
 -- person, a retired worker, a deleted agent, a deleted App) fire no delete, so those doors stamp the departure in code
--- (src/lib/grants/departure.ts). Only a grant not already ended (the first end stands), and only one whose own App still
+-- (src/lib/grants/departure.ts). Only a grant not already ended (revoked, departed, expired or spent: the first end stands), and only one whose own App still
 -- exists (a scope App's hard delete takes its grants with it, so there is nothing to stamp).
 CREATE OR REPLACE FUNCTION hadron_grant_holder_gone() RETURNS trigger
 LANGUAGE plpgsql AS $$
@@ -157,7 +158,9 @@ BEGIN
   EXECUTE format(
     'UPDATE grants SET holder_departed_at = (clock_timestamp() AT TIME ZONE ''UTC''), updated_at = (clock_timestamp() AT TIME ZONE ''UTC'')
       WHERE %I = $1 AND holder_departed_at IS NULL AND revoked_at IS NULL
-        AND EXISTS (SELECT 1 FROM apps a WHERE a.id = grants.app_id)', TG_ARGV[0]) USING OLD.id;
+        AND EXISTS (SELECT 1 FROM apps a WHERE a.id = grants.app_id)
+        AND NOT (activated_at IS NOT NULL AND ((expires_at IS NOT NULL AND expires_at <= (clock_timestamp() AT TIME ZONE ''UTC''))
+          OR (max_uses IS NOT NULL AND use_count >= max_uses)))', TG_ARGV[0]) USING OLD.id;
   RETURN NULL;
 END $$;
 DROP TRIGGER IF EXISTS users_grant_holder_gone ON users;

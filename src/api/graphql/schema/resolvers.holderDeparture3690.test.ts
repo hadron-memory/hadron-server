@@ -75,6 +75,15 @@ describe('retireWorker ends the grants the worker holds (ruling 0259), in the re
     expect((await read(open)).holder_departed_at).not.toBeNull(); // the same retirement ended the open grant...
     expect((await read(id)).holder_departed_at).toBeNull(); // ...and left the already-revoked one with its first end
   });
+  it('an already expired or spent grant keeps its first end: retiring the holder stamps the open one only', async () => {
+    const expired = await active({ user_id: null, worker_id: f.target.id, starts_at: raw(`${DB_NOW} - interval '2 hours'`), expires_at: raw(`${DB_NOW} - interval '1 minute'`) });
+    const spent = await active({ user_id: null, worker_id: f.target.id, max_uses: 1, use_count: 1 });
+    const open = await active({ user_id: null, worker_id: f.target.id });
+    await retire();
+    expect((await read(open)).holder_departed_at).not.toBeNull();
+    expect((await read(expired)).holder_departed_at).toBeNull();
+    expect((await read(spent)).holder_departed_at).toBeNull();
+  });
   it('lock order: a transaction holding the grant row makes the retirement wait, and the end lands when it releases', async () => {
     const id = await active({ user_id: null, worker_id: f.target.id });
     let release!: () => void; let locked!: () => void;
