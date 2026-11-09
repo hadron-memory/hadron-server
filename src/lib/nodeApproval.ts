@@ -517,8 +517,8 @@ function chargeTexts(meter: ApprovalReadMeter | undefined, f: { name: string; ab
 /** How many revisions `newestApprovedRevisionOf` examines before it gives up (newest first). */
 export const NEWEST_APPROVED_REVISION_SCAN_CAP = 100;
 
-/** #3801: how many `cap`-sized batches a SERVE walk examines before it stops (a hard ceiling on the work one serve read may do). */
-export const NEWEST_APPROVED_REVISION_SCAN_BATCHES = 10;
+/** #3801: how many `cap`-sized batches a SERVE walk examines before it stops (a hard ceiling on the work one serve read may do; a 10-batch walk measured ~2.7 s on a local database, so 5 keeps the worst case near 1.4 s). */
+export const NEWEST_APPROVED_REVISION_SCAN_BATCHES = 5;
 
 export interface NewestApprovedRevision {
   /** Null when no examined revision is approved (or the node/memory yields nothing to read). */
@@ -600,6 +600,11 @@ export async function newestApprovedRevisionForServe(
   let result = await newestApprovedRevisionOf(db, nodeId, cap);
   for (let batch = 1; batch < NEWEST_APPROVED_REVISION_SCAN_BATCHES && !result.found && result.truncated && result.resumeBelow != null; batch++) {
     result = await newestApprovedRevisionOf(db, nodeId, cap, undefined, result.resumeBelow);
+  }
+  // The ceiling stopped the walk with older revisions unexamined: the serve will refuse as not approved, so leave the one
+  // signal an operator needs to tell this from genuine absence.
+  if (!result.found && result.truncated) {
+    console.warn(`[boot-prompt-serve] scan ceiling reached for node ${nodeId}: ${cap * NEWEST_APPROVED_REVISION_SCAN_BATCHES} revisions examined, older ones unexamined (refusing as not approved)`);
   }
   return result;
 }

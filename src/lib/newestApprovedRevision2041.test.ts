@@ -166,6 +166,15 @@ describe('newestApprovedRevisionForServe (#3801)', () => {
     expect(await newestApprovedRevisionForServe(db, outside.id, 2)).toMatchObject({ found: null, truncated: true });
   }, 60_000);
 
+  it('`below` excludes the live revision and every number at or above it', async () => {
+    const n = await mk('n:15');
+    await edit(n.id, 'v2');
+    await approve(n.id); // approved LIVE revision
+    const live = await db.node.findUniqueOrThrow({ where: { id: n.id } });
+    expect((await newestApprovedRevisionOf(db, n.id)).found).toMatchObject({ revNo: live.revSeq, source: 'live' });
+    expect((await newestApprovedRevisionOf(db, n.id, undefined, undefined, live.revSeq)).found).toBeNull();
+  });
+
   it('a node never approved is not truncated once every revision is examined', async () => {
     const n = await mk('n:14');
     for (let i = 0; i < 5; i++) await edit(n.id, `v${i + 2}`);
