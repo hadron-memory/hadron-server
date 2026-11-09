@@ -1,6 +1,7 @@
 -- #3649 slice B (cor:acl:140:07, :09; the node-signing mirror cor:dmo:130:03): grant signing requests and append-only grant
 -- signature records. One source of SQL (conventions:append-only-table-trigger): included by post-push.sql and appended
--- byte-identical to migration 20261109200000_grant_signing (pinned by src/lib/signing/grantSigning3649.test.ts). Every timestamp
+-- byte-identical to the newest migration that carries it, 20261110010200_grant_signing_rebase (slice C; slice B's
+-- 20261109200000_grant_signing carried it first; pinned by src/lib/signing/grantSigning3649.test.ts). Every timestamp
 -- is the DB clock (hadron_signing_now(), prisma/signing-invariants.sql), so a write queued behind a lock gets a later time than
 -- the one it waited for.
 --
@@ -57,7 +58,9 @@ END $$;
 -- their grant (the FK cascade fires after the grant row is gone).
 CREATE OR REPLACE FUNCTION hadron_guard_grant_signing_request() RETURNS trigger
 LANGUAGE plpgsql AS $$
-DECLARE platform_now timestamp(3) := hadron_signing_now();
+DECLARE
+  platform_now timestamp(3) := hadron_signing_now();
+  lifetime interval;
 BEGIN
   IF TG_OP = 'DELETE' THEN
     IF EXISTS (SELECT 1 FROM grants WHERE id = OLD.grant_id) THEN
@@ -78,9 +81,13 @@ BEGIN
     IF NOT FOUND THEN
       RAISE EXCEPTION 'A grant signing request needs a pending grant at its current version' USING ERRCODE = '23514';
     END IF;
-    -- Re-read after the lock: an insert that waited behind a grant writer begins when it actually could.
+    -- Re-read after the lock: an insert that waited behind a grant writer begins when it actually could, and keeps the
+    -- lifetime its inserter asked for (#3649 slice C, NP-2): the deadline moves with the start. The inserter states both times
+    -- from ONE clock read (or leaves created_at to its default); the lifetime is their difference, taken before the wait.
+    lifetime := NEW.expires_at - NEW.created_at;
     platform_now := hadron_signing_now();
     NEW.created_at := platform_now;
+    NEW.expires_at := platform_now + lifetime;
     RETURN NEW;
   END IF;
   -- UPDATE
@@ -181,21 +188,22 @@ CREATE TRIGGER grant_signature_guard BEFORE INSERT OR UPDATE OR DELETE ON grant_
 FOR EACH ROW EXECUTE FUNCTION hadron_guard_grant_signature();
 
 -- Staleness: a grant that is revoked, whose holder goes, or whose version or terms move (a user merge moving the holder link
--- among them) ends its open requests, so no request can complete over terms the person was not shown. Column-scoped, so the
--- issuer-erasure move and slice C's activation columns never pay for it.
+-- among them) ends its open requests, so no request can complete over terms the person was not shown. Activation ends them
+-- too (#3649 slice C, slice B design choice 6): the completion marks its OWN request completed before it activates, so only
+-- the others are still open. Column-scoped, so the issuer-erasure move never pays for it.
 CREATE OR REPLACE FUNCTION hadron_grant_signing_stale() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
-  IF ROW(NEW.version, NEW.revoked_at, NEW.holder_departed_at, NEW.app_id, NEW.user_id, NEW.agent_id, NEW.worker_id,
+  IF ROW(NEW.version, NEW.revoked_at, NEW.holder_departed_at, NEW.activated_at, NEW.app_id, NEW.user_id, NEW.agent_id, NEW.worker_id,
          NEW.grantee_app_id, NEW.action, NEW.action_values, NEW.starts_at, NEW.expires_at, NEW.max_uses, NEW.reason)
      IS DISTINCT FROM
-     ROW(OLD.version, OLD.revoked_at, OLD.holder_departed_at, OLD.app_id, OLD.user_id, OLD.agent_id, OLD.worker_id,
+     ROW(OLD.version, OLD.revoked_at, OLD.holder_departed_at, OLD.activated_at, OLD.app_id, OLD.user_id, OLD.agent_id, OLD.worker_id,
          OLD.grantee_app_id, OLD.action, OLD.action_values, OLD.starts_at, OLD.expires_at, OLD.max_uses, OLD.reason) THEN
     PERFORM hadron_end_open_grant_signing_requests(NEW.id);
   END IF;
   RETURN NULL;
 END $$;
 DROP TRIGGER IF EXISTS grant_signing_stale ON grants;
-CREATE TRIGGER grant_signing_stale AFTER UPDATE OF version, revoked_at, holder_departed_at, app_id, user_id, agent_id, worker_id,
+CREATE TRIGGER grant_signing_stale AFTER UPDATE OF version, revoked_at, holder_departed_at, activated_at, app_id, user_id, agent_id, worker_id,
   grantee_app_id, action, action_values, starts_at, expires_at, max_uses, reason ON grants
 FOR EACH ROW EXECUTE FUNCTION hadron_grant_signing_stale();
