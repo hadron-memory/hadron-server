@@ -48,7 +48,8 @@ run_setup db.runtime_role.generate_failed "$DATABASE_URL" pnpm prisma generate |
 # Never inherit a refusal list from outside: only this boot's own refusals reach the server.
 unset HADRON_MIGRATIONS_REFUSED
 refused_file=$(mktemp "${TMPDIR:-/tmp}/hadron-refused.XXXXXX")
-trap 'rm -f "$startup_log" "$refused_file"' EXIT
+failed_file=$(mktemp "${TMPDIR:-/tmp}/hadron-failed.XXXXXX")
+trap 'rm -f "$startup_log" "$refused_file" "$failed_file"' EXIT
 migrate_attempts=0
 while ! run_setup db.runtime_role.migrate_failed "$migration_url" pnpm prisma migrate deploy; do
   migrate_attempts=$((migrate_attempts + 1))
@@ -57,7 +58,18 @@ while ! run_setup db.runtime_role.migrate_failed "$migration_url" pnpm prisma mi
   failed_code=$setup_prisma
   # The helper writes its answer to a private file: pnpm prints banner lines on stdout that a capture cannot tell apart.
   : >"$refused_file"
-  DATABASE_URL="$migration_url" REFUSED_MIGRATIONS_FILE="$refused_file" pnpm tsx scripts/db/resolve-refused-migrations.ts >/dev/null 2>&1 || exit 1
+  : >"$failed_file"
+  if ! DATABASE_URL="$migration_url" REFUSED_MIGRATIONS_FILE="$refused_file" FAILED_MIGRATIONS_FILE="$failed_file" pnpm tsx scripts/db/resolve-refused-migrations.ts >/dev/null 2>&1; then
+    # #3794: not a refusal, so boot still stops, but say WHICH migration failed (name and Prisma code only,
+    # never SQL text, the ledger's logs or a URL). Names are re-checked here before they are printed.
+    for failed_name in $(cat "$failed_file"); do
+      case $failed_name in
+        *[!A-Za-z0-9_]*) ;;
+        [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_?*) echo "db.migration.failed migration=$failed_name prisma=$failed_code" >&2 ;;
+      esac
+    done
+    exit 1
+  fi
   refused=$(cat "$refused_file")
   [ -n "$refused" ] || exit 1
   # Only well-formed migration names are acted on or printed (command output may carry URLs).
@@ -90,9 +102,9 @@ run_setup db.actions_upsert_failed "$migration_url" pnpm tsx scripts/db/upsert-a
 if ! run_setup db.runtime_role.verify_failed "$migration_url" pnpm tsx scripts/db/verify-runtime-role.ts; then
   echo 'db.runtime_role.verify_warning: phase-1 warning; continuing' >&2
 fi
-rm -f "$startup_log" "$refused_file"
+rm -f "$startup_log" "$refused_file" "$failed_file"
 trap - EXIT INT TERM HUP QUIT
-unset migration_url setup_url startup_log startup_umask refused_file
+unset migration_url setup_url startup_log startup_umask refused_file failed_file
 # #3021: exec node itself, not `pnpm tsx`. Under the pnpm and tsx CLI wrappers a SIGTERM ended the whole
 # container in about 0.36 s (exit 143) and src/index.ts's graceful path (stopping drain window, request drain,
 # disconnect) never ran; `node --import tsx` leaves node as PID 1 to handle the signal itself.

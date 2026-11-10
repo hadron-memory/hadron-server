@@ -44,8 +44,17 @@ export function refusedMigrationNames(rows: UnfinishedMigration[]): string[] | n
   return names;
 }
 
+/**
+ * #3794: the unfinished migrations that are NOT all refusals, by name only. A malformed name is dropped, never
+ * printed (the ledger is data, and command output may carry URLs); the `logs` blob (SQL text, driver errors) is
+ * never read into the answer.
+ */
+export function failedMigrationNames(rows: UnfinishedMigration[]): string[] {
+  return rows.map(row => row.migration_name).filter(name => MIGRATION_NAME.test(name));
+}
+
 export async function main(env: NodeJS.ProcessEnv, out: (names: string[]) => void, log: (line: string) => void,
-  connectionTimeoutMillis = CONNECT_TIMEOUT_MS): Promise<number> {
+  connectionTimeoutMillis = CONNECT_TIMEOUT_MS, outFailed: (names: string[]) => void = () => undefined): Promise<number> {
   const connectionString = env.MIGRATE_DATABASE_URL || env.DATABASE_URL;
   if (!connectionString) {
     log('db.migration.resolve_database_url_missing');
@@ -58,7 +67,10 @@ export async function main(env: NodeJS.ProcessEnv, out: (names: string[]) => voi
       `SELECT migration_name, logs FROM public._prisma_migrations
        WHERE finished_at IS NULL AND rolled_back_at IS NULL ORDER BY started_at`);
     const names = refusedMigrationNames(found.rows);
-    if (!names) return 1;
+    if (!names) {
+      outFailed(failedMigrationNames(found.rows));
+      return 1;
+    }
     out(names);
     return 0;
   } catch {
@@ -74,7 +86,10 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   // The names go to a FILE when the entrypoint names one: `pnpm tsx ...` prints its own banner lines
   // ("Already up to date", "Done in ...") on stdout, which a captured stdout cannot tell from an answer (#3770 QA).
   const file = process.env.REFUSED_MIGRATIONS_FILE;
+  // #3794: a non-refusal failure names its migrations in a second private file, for the entrypoint's one failure line.
+  const failedFile = process.env.FAILED_MIGRATIONS_FILE;
   process.exitCode = await main(process.env,
     names => (file ? writeFileSync(file, `${names.join('\n')}\n`) : console.log(names.join('\n'))),
-    line => console.error(line));
+    line => console.error(line), CONNECT_TIMEOUT_MS,
+    names => { if (failedFile && names.length) writeFileSync(failedFile, `${names.join('\n')}\n`); });
 }

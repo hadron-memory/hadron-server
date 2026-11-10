@@ -187,6 +187,10 @@ describe('G2: the terms hash binds every term, and only as stored', () => {
     ['a key with a tab', { values: { ['entry\tnode']: 'x' } }, 'BAD_VALUES'],
     ['a list holding a nested list', { values: { entryNode: ['a', ['b']] } }, 'BAD_VALUES'],
     ['a list holding an empty string', { values: { entryNode: ['a', ''] } }, 'BAD_VALUES'],
+    // #3649 slice B (carried from A): every index is judged, so a hole is refused, never skipped.
+    ['a list that is one hole (Array(1))', { values: { entryNode: Array(1) } }, 'BAD_VALUES'],
+    // eslint-disable-next-line no-sparse-arrays
+    ['a list with a hole between two strings', { values: { entryNode: ['a', , 'b'] } }, 'BAD_VALUES'],
     ['a key with a lone surrogate', { values: { ['k\ud800']: 'x' } }, 'BAD_VALUES'],
     ['an invalid start', { startsAt: new Date(Number.NaN) }, 'BAD_TIME'],
     ['an expiry past year 9999', { expiresAt: new Date('+010000-01-01T00:00:00.000Z') }, 'BAD_TIME'],
@@ -207,6 +211,10 @@ describe('G2: the terms hash binds every term, and only as stored', () => {
     expect((err as Error).message).not.toMatch(/cm3k9x2a|forged|surrogate|\\u/);
   });
 
+  it('accepts the dense list control beside the sparse refusals, in stored order', () => {
+    expect(grantTermsBytes({ ...SPEC, values: { entryNode: ['a', 'b'] } }).toString()).toContain('values {"entryNode":["a","b"]}\n');
+  });
+
   it('accepts values {} (an action with no parameters) and a non-ASCII value string, which stays inside its JSON string', () => {
     expect(grantTermsBytes({ ...SPEC, values: {} }).toString()).toContain('values {}\n');
     expect(grantTermsHash({ ...SPEC, values: { entryNode: 'caf\u00e9' } })).not.toBe(grantTermsHash(SPEC));
@@ -224,7 +232,7 @@ describe('G2: the terms hash binds every term, and only as stored', () => {
   });
 });
 
-describe('G3: a grant payload and a node payload never verify for each other', () => {
+describe('G3: a grant payload and a node payload are separate bytes and separate challenges', () => {
   it('the node v3 builder is untouched by the grant prefix, and the two challenges for the same ids differ', () => {
     const c = byName('spec-example');
     const node = signaturePayloadBytes(SIGNATURE_PAYLOAD_V3, { nodeId: c.grantId, approvalHash: c.termsHash, requestId: c.requestId });

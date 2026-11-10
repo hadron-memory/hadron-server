@@ -21,7 +21,7 @@ vi.mock('./instrument.js', () => ({}));
 vi.mock('./lib/automation/config.js', () => ({}));
 vi.mock('./server.js', () => ({ createServer: async (opts: { readiness: { stopping(): boolean } }) => {
   state.readiness = opts.readiness;
-  return { listen: () => ({ close: state.close }), locals: { stopEmbeddingWorker: state.stop } };
+  return { listen: () => ({ close: state.close, closeIdleConnections: () => undefined }), locals: { stopEmbeddingWorker: state.stop } };
 } }));
 vi.mock('./controller/controller.js', () => ({ controller: { startup: vi.fn() } }));
 vi.mock('./integrations/db/client.js', () => ({ db: { $disconnect: state.disconnect } }));

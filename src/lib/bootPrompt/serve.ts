@@ -14,7 +14,7 @@ import { readInstallBootPrompt } from '../appInstallations.js';
  * knows (a bind knows its worker, a chat only its Agent) and records the values it used.
  */
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
-import { newestApprovedAndSignedRevisionOf, newestApprovedRevisionOf } from '../nodeApproval.js';
+import { newestApprovedAndSignedRevisionForServe, newestApprovedRevisionForServe } from '../nodeApproval.js';
 import { resolveBootPromptPointer, type StoredBootPromptPointer } from '../bootPromptPointer.js';
 import { readCompiledRevision, sha256Hex } from '../bootCompile/provenance.js';
 import { generateId } from '../id.js';
@@ -187,14 +187,16 @@ async function resolveFrom(db: Db, t: ServeTarget, skipWorker: boolean): Promise
     if (requiresSignature) {
       // R35: the newest revision that is BOTH approved and signed — a newer approved-but-unsigned revision neither
       // serves nor refuses. R36: with none, an approved revision existing (a pending-only signature included) is
-      // NOT_SIGNED; nothing approved at all is NOT_APPROVED.
-      const walk = await newestApprovedAndSignedRevisionOf(
+      // NOT_SIGNED; nothing approved at all is NOT_APPROVED. The walk continues past its scan cap in bounded batches
+      // (#3801 adoption, Bob P2-1: an older SIGNED revision buried under more than `cap` approved-but-unsigned ones
+      // still serves; past the batch ceiling the serve fails closed with the R36 refusal, never wrong text).
+      const walk = await newestApprovedAndSignedRevisionForServe(
         db, resolved.nodeId, (revNo) => revisionSignatureCounts(db, resolved.nodeId, revNo, 'compiled-boot-prompt'),
       );
       if (!walk.found) throw bootPromptRefusal(walk.approvedUnsigned ? 'BOOT_PROMPT_NOT_SIGNED' : 'BOOT_PROMPT_NOT_APPROVED', where);
       selectedRevNo = walk.found.revNo;
     } else {
-      const { found } = await newestApprovedRevisionOf(db, resolved.nodeId);
+      const { found } = await newestApprovedRevisionForServe(db, resolved.nodeId);
       if (!found) throw bootPromptRefusal('BOOT_PROMPT_NOT_APPROVED', where);
       selectedRevNo = found.revNo;
     }
