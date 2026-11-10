@@ -69,6 +69,13 @@ describe('V13 INSUFFICIENT_DATA and V12 UNKNOWN', () => {
   });
 });
 
+describe('a reset after the newest snapshot but before asOf', () => {
+  it('is UNKNOWN RESET_PASSED, never an expired cycle projected', () => {
+    const h = series({ fromMin: 150, lastMin: 30, stepMin: 30, pctAt: (m) => 40 - m / 60, resetsInHours: -10 / 60 });
+    expect(projectWindow(h, SEVEN_DAY_MINUTES, NOW).projection).toMatchObject({ status: 'UNKNOWN', reason: 'RESET_PASSED' });
+  });
+});
+
 describe('the range and V14 runsOutAt', () => {
   /** 1.5 %/h for a day, ending 70% two minutes ago, 24 hours to the reset. */
   const steady = () => series({ fromMin: 24 * 60, lastMin: 0, stepMin: 30, pctAt: (m) => 70 - (m / 60) * 1.5, resetsInHours: 24 });
@@ -140,6 +147,14 @@ describe('the weekly shape', () => {
     expect(w.shape).toBe('WEEKLY');
     const dayOnly = week().filter((s) => s.observedAt.getTime() > NOW.getTime() - 20 * HOUR);
     expect(projectWindow(dayOnly, SEVEN_DAY_MINUTES, NOW).projection.shape).toBe('FLAT');
+  });
+  it('runsOutAt integrates the hourly shape: it lands in an active hour, not an idle stretch the average would pick', () => {
+    const basis = projectWindow(week(), SEVEN_DAY_MINUTES, NOW);
+    const hot = withWorkerCount(basis, 12).projection;
+    expect(hot.runsOutAt).not.toBeNull();
+    const hr = hot.runsOutAt!.getUTCHours() + hot.runsOutAt!.getUTCMinutes() / 60;
+    // Idle hours add nothing, so the run-out instant is inside 08:00-20:00 UTC (or exactly at its edge).
+    expect(hr >= 8 && hr <= 20).toBe(true);
   });
 });
 

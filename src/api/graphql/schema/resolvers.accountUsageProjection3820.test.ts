@@ -210,6 +210,23 @@ describe('what-ifs', () => {
   });
 });
 
+describe('self-moves judged on the resolved identity, and the per-account history bound', () => {
+  it('a move naming the source own host and family is refused; the same label on another host is a valid move', async () => {
+    await burn('src', 30, 1);
+    await expect(proj('src', { moveWorker: { worker: 'Anne', toAccount: 'src', toHost: 'h', toFamily: 'claude' } })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    const ok = await proj('src', { moveWorker: { worker: 'Anne', toAccount: 'src', toHost: 'other-host' } });
+    expect(ok.whatIf.target.account).toBe('src');
+  });
+  it('unrelated accounts newer than the row cap cannot crowd the requested account out', async () => {
+    const { loadAccountUsageHistory } = await import('../../../lib/accountUsage/load.js');
+    await burn('mine', 40, 1);
+    for (let m = 0; m < 40; m += 1) await snapshot({ label: 'noise', minutesAgo: m / 10, sevenPct: 10 });
+    const got = await loadAccountUsageHistory(db as any, app.id, new Date(), ['mine'], 5);
+    expect([...got.keys()]).toEqual(['mine']);
+    expect(got.get('mine')!.length).toBe(5);
+  });
+});
+
 describe('an account is its label, host and family (cor:agt:140:01)', () => {
   it('a label two hosts wrote is refused as ambiguous unless the caller names the host; naming it answers from that host only', async () => {
     await burn('team-a', 40, 1, { extra: { host: 'h1' } });

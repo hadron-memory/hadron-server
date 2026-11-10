@@ -49,6 +49,8 @@ export type ProjectionReason =
   | 'LOW_USE' | 'TOO_FEW_SNAPSHOTS' | 'NO_WORKERS_CONFIGURED' | 'WHATIF_SOURCE_UNKNOWN';
 export type Confidence = 'LOW' | 'MEDIUM' | 'HIGH';
 export type Shape = 'FLAT' | 'WEEKLY';
+/** The cumulative share of the remaining use reached by the end of each hour-of-week step: `hours` from the newest snapshot, `frac` 0..1. */
+export type ShapeProfile = { hours: number; frac: number }[];
 
 export interface WindowReading { pct: number; resetsAt: Date | null }
 export interface UsageSnapshot {
@@ -84,7 +86,7 @@ export interface WindowProjection {
 export interface WindowBasis {
   projection: WindowProjection;
   /** Present only when `projection.status` is PROJECTED. */
-  calc: { used: number; observedAt: Date; hoursToReset: number; shapeScale: number; rateLow: number; rateHigh: number; workers: number } | null;
+  calc: { used: number; observedAt: Date; hoursToReset: number; shapeScale: number; rateLow: number; rateHigh: number; workers: number; profile: ShapeProfile | null } | null;
 }
 
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
@@ -158,10 +160,21 @@ function applyRates(
   // V14: a run-out time only when even the LOW end reaches 100% before the reset.
   let runsOutAt: Date | null = null;
   if (lowRaw >= 100) {
-    const effPerHour = addLow / base.hoursToReset;
-    runsOutAt = base.used >= 100 || effPerHour <= 0
-      ? base.observedAt
-      : new Date(base.observedAt.getTime() + ((100 - base.used) / effPerHour) * HOUR_MS);
+    if (base.used >= 100 || addLow <= 0) runsOutAt = base.observedAt;
+    else {
+      // Integrate the hourly shape: the instant the LOW end's cumulative use reaches 100%.
+      const target = (100 - base.used) / addLow;
+      let hoursIn: number;
+      if (!base.profile) hoursIn = target * base.hoursToReset;
+      else {
+        let prevH = 0; let prevF = 0; hoursIn = base.hoursToReset;
+        for (const seg of base.profile) {
+          if (seg.frac >= target) { hoursIn = seg.frac > prevF ? prevH + ((target - prevF) / (seg.frac - prevF)) * (seg.hours - prevH) : prevH; break; }
+          prevH = seg.hours; prevF = seg.frac;
+        }
+      }
+      runsOutAt = new Date(base.observedAt.getTime() + hoursIn * HOUR_MS);
+    }
   }
   const perWorker = workers > 0 ? { lowPctPerHour: round(rateLow / workers), highPctPerHour: round(rateHigh / workers) } : null;
   return {
@@ -189,7 +202,8 @@ export function projectWindow(history: readonly UsageSnapshot[], window: WindowK
   }
   const resetsAt = reading.resetsAt;
   if (!resetsAt) return empty(window, 'UNKNOWN', 'NO_RESET', { usedPct: reading.pct, observedAt: newest.observedAt });
-  if (resetsAt.getTime() <= newest.observedAt.getTime()) {
+  // A reset between the newest snapshot and `asOf` has already expired the cycle the snapshot describes.
+  if (resetsAt.getTime() <= Math.max(newest.observedAt.getTime(), asOf.getTime())) {
     return empty(window, 'UNKNOWN', 'RESET_PASSED', { usedPct: reading.pct, resetsAt, observedAt: newest.observedAt });
   }
   const sameCycle = (s: UsageSnapshot): boolean => {
@@ -221,19 +235,20 @@ export function projectWindow(history: readonly UsageSnapshot[], window: WindowK
 
   let shape: Shape = 'FLAT';
   let shapeScale = 1;
+  let profile: ShapeProfile | null = null;
   if (window === SEVEN_DAY_MINUTES) {
     const weekly = weeklyAdditional(withWindow, newest, resetsAt, hoursToReset);
     const flatMid = ((rateLow + rateHigh) / 2) * hoursToReset;
-    if (weekly !== null && flatMid > 0 && weekly > 0) { shape = 'WEEKLY'; shapeScale = weekly / flatMid; }
+    if (weekly !== null && flatMid > 0 && weekly.additional > 0) { shape = 'WEEKLY'; shapeScale = weekly.additional / flatMid; profile = weekly.profile; }
   }
-  return applyRates(window, { used: reading.pct, observedAt: newest.observedAt, hoursToReset, shapeScale, rateLow, rateHigh, workers }, rateLow, rateHigh, { confidence, shape }, resetsAt);
+  return applyRates(window, { used: reading.pct, observedAt: newest.observedAt, hoursToReset, shapeScale, rateLow, rateHigh, workers, profile }, rateLow, rateHigh, { confidence, shape }, resetsAt);
 }
 
 /**
  * The 7-day window's use over the hours left to the reset, from the hour-of-week burn seen in the history, or null when
  * the history does not span a week or some remaining hour of the week was never observed (the caller then stays FLAT).
  */
-function weeklyAdditional(series: readonly UsageSnapshot[], newest: UsageSnapshot, resetsAt: Date, hoursToReset: number): number | null {
+function weeklyAdditional(series: readonly UsageSnapshot[], newest: UsageSnapshot, resetsAt: Date, hoursToReset: number): { additional: number; profile: ShapeProfile } | null {
   const first = series[0]!;
   if (newest.observedAt.getTime() - first.observedAt.getTime() < WEEKLY_MIN_HISTORY_MS) return null;
   const sums = new Map<number, { total: number; n: number }>();
@@ -250,16 +265,20 @@ function weeklyAdditional(series: readonly UsageSnapshot[], newest: UsageSnapsho
     sums.set(key, { total: cur.total + rate, n: cur.n + 1 });
   }
   let additional = 0;
+  const steps: { hours: number; cum: number }[] = [];
   let t = newest.observedAt.getTime();
+  const startT = t;
   const end = resetsAt.getTime();
   while (t < end) {
     const next = Math.min(end, (Math.floor(t / HOUR_MS) + 1) * HOUR_MS);
     const cell = sums.get(bucketOf(t));
     if (!cell) return null;
     additional += (cell.total / cell.n) * ((next - t) / HOUR_MS);
+    steps.push({ hours: (next - startT) / HOUR_MS, cum: additional });
     t = next;
   }
-  return hoursToReset > 0 ? additional : null;
+  if (!(hoursToReset > 0) || !(additional > 0)) return null;
+  return { additional, profile: steps.map((x) => ({ hours: x.hours, frac: x.cum / additional })) };
 }
 
 /**

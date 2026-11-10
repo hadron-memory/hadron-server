@@ -77,7 +77,7 @@ export const accountUsageQueries = {
       if (account.length === 0 || account.length > MAX_LABEL) throw badInput('account must be an account label of 1 to 64 characters.');
       const what = parseWhatIf(whatIf, account);
       const asOf = new Date();
-      const history = await loadAccountUsageHistory(c.db, app.id, asOf);
+      const history = await loadAccountUsageHistory(c.db, app.id, asOf, what?.moveWorker ? [account, what.moveWorker.toAccount] : [account]);
       const mine = selectHistory(history.get(account) ?? [], host, family);
       const base = projectAccount(mine, asOf);
       const latest = newest(mine);
@@ -106,6 +106,13 @@ export const accountUsageQueries = {
         throw badInput('The worker is not configured on that account.');
       }
       const to = selectHistory(history.get(move.toAccount) ?? [], move.toHost, move.toFamily);
+      // Same account = same label, host and family (cor:agt:140:01), judged on the resolved identities, qualified or not.
+      const toLatest = newest(to);
+      if (move.toAccount === account
+        && (toLatest ? toLatest.host : move.toHost ?? null) === latest.host
+        && (toLatest ? toLatest.family : move.toFamily ?? null) === latest.family) {
+        throw badInput('moveWorker must name a different account than the one projected.');
+      }
       const toBase = projectAccount(to, asOf);
       const sourceBurn = new Map(base.map((b) => [b.projection.window, b.projection.perWorkerBurn]));
       result.whatIf = {
