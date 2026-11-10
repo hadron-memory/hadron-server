@@ -547,6 +547,29 @@ describe('Beckett (294693a9): hard session expiry during the wait, and a soft-de
     expect(await events(id)).toHaveLength(0);
   });
 
+  it('Dorian P2 (9cd8772f): a session that expires while the withdrawal waits on the GRANT ROW lock cannot stamp: judged again before the stamp', async () => {
+    const id = await pending({ worker_id: w.workerId, requested_by_user_id: memberId, requested_by_worker_id: w.workerId });
+    await db.$executeRaw`UPDATE sessions SET expires_at = (clock_timestamp() AT TIME ZONE 'UTC') + interval '2500 milliseconds' WHERE id = ${workerSession}`;
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const taken = new Promise<void>((r) => { locked = r; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM grants WHERE id = ${id} FOR UPDATE`;
+      locked();
+      await held;
+    });
+    await taken;
+    const call = post(memberKey, workerSession, WITHDRAW, { r: id });
+    await waitUntilBlocked(); // blocked on the grant row, after the session checks passed
+    await new Promise((r) => setTimeout(r, 2800)); // the session expires while the call waits
+    release();
+    await holder;
+    expect(code(await call)).toBe('GRANT_NOT_FOUND');
+    expect((await grantRows())[0].revoked_at).toBeNull();
+    expect(await events(id)).toHaveLength(0);
+  });
+
   it('D2: a manager naming a soft-deleted agent gets the holder refusal, not GRANT_NOT_MANAGER', async () => {
     await db.agent.update({ where: { id: w.agentId }, data: { deletedAt: new Date() } });
     const r = await post(managerKey, null, CREATE, { i: mgrInput({ holderKind: 'AGENT', holderRef: w.agentId }) });

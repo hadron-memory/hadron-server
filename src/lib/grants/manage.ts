@@ -56,6 +56,8 @@ export interface EndGrantOptions {
   authorize: (row: LockedGrant) => void | Promise<void>;
   /** Withdrawal: an ACTIVATED row is refused GRANT_NOT_PENDING (after the already-ended check, so a first end stands). */
   pendingOnly?: boolean;
+  /** Runs after the row lock and every judgement, immediately before the stamp: a decision that depends on time (a session's hard expiry) is re-made here, on the post-lock database clock, and throws to refuse (Dorian P2 on 9cd8772f). */
+  beforeStamp?: (tx: Prisma.TransactionClient) => Promise<void>;
 }
 
 /**
@@ -76,6 +78,7 @@ export async function endGrant(tx: Prisma.TransactionClient, id: string, ender: 
   await opts.authorize(row);
   if (row.revokedAt !== null || row.holderDepartedAt !== null) return { changed: false };
   if (opts.pendingOnly && row.activatedAt !== null) throw new GrantManageRefusal('GRANT_NOT_PENDING');
+  await opts.beforeStamp?.(tx);
   const ended = await tx.$executeRaw`
     UPDATE grants SET revoked_at = (clock_timestamp() AT TIME ZONE 'UTC'), revoked_by = ${ender.userId}, updated_at = (clock_timestamp() AT TIME ZONE 'UTC')
     WHERE id = ${id} AND revoked_at IS NULL AND holder_departed_at IS NULL`;

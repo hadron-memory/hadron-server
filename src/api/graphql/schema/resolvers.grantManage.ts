@@ -15,6 +15,7 @@
  * door does not widen it.
  */
 import { GraphQLError } from 'graphql';
+import type { Prisma } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
 import { clampListTake } from './resolvers.helpers.js';
 import { withAuthorizedTx } from './authorizedTx.js';
@@ -73,6 +74,14 @@ async function issuerStillMember(ctx: Context, app: TaskApp, userId: string): Pr
   return member !== null;
 }
 
+/** Whether the caller's session is open NOW: not ended and not past its hard expiry (R5), on the database clock. Read after the locks it depends on. */
+async function sessionOpen(tx: Prisma.TransactionClient, sessionId: string | null | undefined): Promise<boolean> {
+  if (!sessionId) return false;
+  const rows = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM sessions WHERE id = ${sessionId} AND ended_at IS NULL
+    AND (expires_at IS NULL OR expires_at > (clock_timestamp() AT TIME ZONE 'UTC'))`;
+  return rows.length > 0;
+}
+
 export const grantManageQueries = {
   appGrants: async (_p: unknown, { appRef, limit, offset }: { appRef: string; limit?: number | null; offset?: number | null }, ctx: Context) => {
     const manager = await resolveGrantManager(ctx, appRef);
@@ -114,7 +123,10 @@ export const grantManageMutations = {
           if (manager) return;
           if (row.issuerUserId === null || row.issuerUserId !== txCtx.userId || !(await issuerStillMember(txCtx, fresh, txCtx.userId!))) throw notManager();
         };
-        const { changed } = await endGrant(tx, ref, ender, { authorize });
+        const { changed } = await endGrant(tx, ref, ender, {
+          authorize,
+          beforeStamp: async (t) => { if (admission.kind === 'instructed-worker' && !(await sessionOpen(t, txCtx.sessionId))) throw notManager(); },
+        });
         if (changed) await appendCredentialInstructionEvent(tx, { appId: fresh.id, admission, act: 'grant.revoke' });
         const view = await getGrantForManager(tx, fresh.id, ref, manager);
         if (!view) throw notManager();
@@ -162,7 +174,10 @@ export const grantManageMutations = {
             const mine = reader ? row.requestedByWorkerId === reader.workerId : row.requestedByWorkerId === null && row.requestedByUserId === person;
             if (!mine) throw new GrantManageRefusal('GRANT_NOT_REQUESTER');
           };
-          await endGrant(tx, ref, ender, { authorize, pendingOnly: true });
+          await endGrant(tx, ref, ender, {
+            authorize, pendingOnly: true,
+            beforeStamp: async (t) => { if (reader && !(await sessionOpen(t, txCtx.sessionId))) throw notFound(); },
+          });
           // A manager sees the audit facts; a requester who does not manage reads the plain record.
           const manager = !reader && (await managesApp(txCtx, app));
           const view = await getGrantForManager(tx, found.appId, ref, manager);
@@ -179,13 +194,12 @@ export const grantManageMutations = {
             if (reader) {
               await tx.$queryRaw`SELECT 1 FROM workers WHERE id = ${reader.workerId} FOR SHARE`;
               await lockCallerSession(tx, ctx.sessionId);
-              // Open means not ended AND not past its hard expiry, on the database clock after the lock (R5: now >= expiresAt is expired;
-              // Beckett D1 on 294693a9: an expiry that passed during the anchor wait must not stamp).
-              const open = ctx.sessionId
-                ? await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM sessions WHERE id = ${ctx.sessionId} AND ended_at IS NULL
-                    AND (expires_at IS NULL OR expires_at > (clock_timestamp() AT TIME ZONE 'UTC'))`
-                : [];
-              if (open.length === 0) throw notFound();
+              // Open means not ended AND not past its hard expiry, on the database clock after the lock (Beckett D1); judged AGAIN just before the
+              // stamp (beforeStamp below), since the grant row lock can wait past it (Dorian P2 on 9cd8772f).
+              if (!(await sessionOpen(tx, ctx.sessionId))) throw notFound();
+            } else {
+              // The person arm fences its own session too, as the revoke door does (Belinda N1).
+              await lockCallerSession(tx, ctx.sessionId);
             }
           },
         },
