@@ -16,6 +16,8 @@ import { signJwt } from '../../../auth/jwt.js';
 import { handleMcpRequest, createTestableMcpServer } from '../../../mcp/server.js';
 import { ensureChannelWithRoot } from '../../../lib/channels.js';
 import type { Request } from 'express';
+import { GraphQLError } from 'graphql';
+import { internalFaultErrorHandler } from '../../../lib/internalFault.js';
 import { refuseSupersededSession } from '../../../lib/sessionSuperseded.js';
 import { resolveAuthContext, validateSessionBinding } from '../../../middleware/auth.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -99,11 +101,11 @@ it('independently gates a stored successor behind strict personal-memory ownersh
   expect(r.body.singleResult.data).toEqual({ session: { id: a.id, supersededBySessionId: null } });
 });
 
-it('keeps immediate successor evidence while refusing with the latest current open session', async () => {
+it('follows the superseding chain rather than a newer other-driver open session', async () => {
   const { a, b } = await displaced();
   const c = await bind(true);
-  // Other drivers' old open rows are not superseded by this person's bind (#1617 C).
-  await db.session.create({ data: { id: generateId(), userId: stranger.id, appId: app.id, workerId: worker.id, startedAt: new Date(Date.now() - 86400000) } });
+  // A newer readable row from another driver must never replace this driver's chain (#3818 Bruce94870).
+  await db.session.create({ data: { id: generateId(), userId: stranger.id, appId: app.id, workerId: worker.id, startedAt: new Date(Date.now() + 86400000) } });
   expect((await db.session.findUniqueOrThrow({ where: { id: a.id } })) as any).toMatchObject({ supersededBySessionId: b.id });
   await expect(validateSessionBinding(db, ctx(), a.id)).rejects.toMatchObject({ extensions: { code: 'SESSION_SUPERSEDED', sessionId: c.id, startedAt: c.startedAt.toISOString() } });
 });
@@ -321,4 +323,28 @@ it('preserves the immediate successor chain when two forced binds are launched c
   expect(rows.find(row => row.id === a.id)).toMatchObject({ endReason: 'superseded', supersededBySessionId: first.id });
   expect(first).toMatchObject({ endReason: 'superseded', prevSessionId: a.id, supersededBySessionId: open[0]!.id });
   expect(open[0]).toMatchObject({ prevSessionId: first.id, supersededBySessionId: null });
+});
+
+
+it.each(['missing-pointer', 'cycle', 'deleted-hop', 'non-superseded-hop'] as const)('discloses no unrelated open session for a %s chain', async kind => {
+  const { a, b } = await displaced();
+  const c = await bind(true);
+  if (kind === 'missing-pointer') await db.session.update({ where: { id: a.id }, data: { supersededBySessionId: null } });
+  if (kind === 'cycle') await db.session.update({ where: { id: b.id }, data: { supersededBySessionId: a.id } });
+  if (kind === 'deleted-hop') await db.session.update({ where: { id: b.id }, data: { deletedAt: new Date() } });
+  if (kind === 'non-superseded-hop') await db.session.update({ where: { id: b.id }, data: { endReason: 'ended' } });
+  expect(c.endedAt).toBeNull();
+  await expect(validateSessionBinding(db, ctx(), a.id)).rejects.toMatchObject({ extensions: { code: 'SESSION_SUPERSEDED' } });
+  try { await validateSessionBinding(db, ctx(), a.id); expect.fail('must refuse'); }
+  catch (error) { expect((error as GraphQLError).extensions).toEqual({ code: 'SESSION_SUPERSEDED' }); }
+});
+
+it('delegates a superseded error after headers were sent so Express closes the response', () => {
+  const error = new GraphQLError('Session superseded.', { extensions: { code: 'SESSION_SUPERSEDED' } });
+  const next = vi.fn();
+  const res = { headersSent: true, status: vi.fn(), json: vi.fn() };
+  internalFaultErrorHandler(error, {} as Request, res as any, next);
+  expect(next).toHaveBeenCalledExactlyOnceWith(error);
+  expect(res.status).not.toHaveBeenCalled();
+  expect(res.json).not.toHaveBeenCalled();
 });
