@@ -60,8 +60,9 @@ export async function decisionClock(db: Db): Promise<DbInstant> {
 
 /**
  * Record one decided outcome for `appId` against each combination `req` names. One statement, so a decision lands
- * whole. An older decision never overwrites a newer one (`decided_at` guard): a failure judged before a success that
- * landed first is dropped, because it is stamped with when it was decided, not when it was written (George P2-4).
+ * whole. An older decision never overwrites a newer one as the LATEST outcome: a failure judged before a success that
+ * landed first does not replace it, because it is stamped with when it was decided, not when it was written (George
+ * P2-4). It still reconciles the failing streak by decision time (see the statement).
  */
 export async function recordMatchOutcome(
   db: Db, appId: string, req: Requirements, outcome: MatchOutcomeKind, reason: string | null = null,
@@ -82,21 +83,40 @@ export async function recordMatchOutcome(
   const tiers = combos.map(c => c.tier ?? '');
   const roles = combos.map(c => c.role ?? '');
   const failing = outcome === 'NO_WORKER';
+  // A LATE write (decided before the row's latest, written after it) never moves the latest outcome, but it is not dropped:
+  // the streak is judged by decision time, so it still reconciles `failing_since` (#3825 follow-up 6773996134):
+  //  - a late MATCHED ends a streak that began before it: the streak restarts after it, at the latest failure we know of
+  //    (an upper bound: an earlier failure between the two was already folded into the row and cannot be recovered);
+  //  - a late NO_WORKER after the last known match moves the streak start back to it.
+  // `last_matched_at` is the newest MATCHED decision ever seen, late or not, so a late failure older than it is ignored.
+  // The upsert row-locks the row, so concurrent writers apply one after another; only their ARRIVAL order varies.
   await db.$executeRaw(Prisma.sql`
-    INSERT INTO agent_match_outcomes (app_id, family, tier, role, outcome, reason, decided_at, failing_since)
-    SELECT ${appId}, f, t, r, ${outcome}, ${failing ? reason : null}::text, c.ts, ${failing ? Prisma.sql`c.ts` : Prisma.sql`NULL::timestamp`}
+    INSERT INTO agent_match_outcomes (app_id, family, tier, role, outcome, reason, decided_at, failing_since, last_matched_at)
+    SELECT ${appId}, f, t, r, ${outcome}, ${failing ? reason : null}::text, c.ts, ${failing ? Prisma.sql`c.ts` : Prisma.sql`NULL::timestamp`},
+      ${failing ? Prisma.sql`NULL::timestamp` : Prisma.sql`c.ts`}
     FROM unnest(${families}::text[], ${tiers}::text[], ${roles}::text[]) AS u(f, t, r)
     CROSS JOIN (SELECT COALESCE(${decidedAt}::timestamp, (clock_timestamp() AT TIME ZONE 'UTC')) AS ts) c
     ON CONFLICT (app_id, family, tier, role) DO UPDATE SET
-      outcome = EXCLUDED.outcome,
-      reason = EXCLUDED.reason,
-      decided_at = EXCLUDED.decided_at,
+      -- Stamps carry microseconds, so a tie is practically a same-instant double write: the later writer wins it (not late).
+      outcome = CASE WHEN agent_match_outcomes.decided_at > EXCLUDED.decided_at THEN agent_match_outcomes.outcome ELSE EXCLUDED.outcome END,
+      reason = CASE WHEN agent_match_outcomes.decided_at > EXCLUDED.decided_at THEN agent_match_outcomes.reason ELSE EXCLUDED.reason END,
+      decided_at = GREATEST(agent_match_outcomes.decided_at, EXCLUDED.decided_at),
+      last_matched_at = CASE WHEN EXCLUDED.outcome = 'MATCHED'
+        THEN GREATEST(agent_match_outcomes.last_matched_at, EXCLUDED.decided_at) ELSE agent_match_outcomes.last_matched_at END,
       failing_since = CASE
-        WHEN EXCLUDED.outcome = 'MATCHED' THEN NULL
-        WHEN agent_match_outcomes.outcome = 'NO_WORKER' AND agent_match_outcomes.failing_since IS NOT NULL THEN agent_match_outcomes.failing_since
-        ELSE EXCLUDED.decided_at END
-    -- Stamps carry microseconds, so a tie is practically a same-instant double write: the later writer wins it.
-    WHERE agent_match_outcomes.decided_at <= EXCLUDED.decided_at`);
+        -- In order (the usual case): unchanged from before.
+        WHEN agent_match_outcomes.decided_at <= EXCLUDED.decided_at THEN CASE
+          WHEN EXCLUDED.outcome = 'MATCHED' THEN NULL
+          WHEN agent_match_outcomes.outcome = 'NO_WORKER' AND agent_match_outcomes.failing_since IS NOT NULL THEN agent_match_outcomes.failing_since
+          ELSE EXCLUDED.decided_at END
+        -- Late MATCHED inside the current streak: the streak restarts after it.
+        WHEN EXCLUDED.outcome = 'MATCHED' AND agent_match_outcomes.outcome = 'NO_WORKER'
+          AND agent_match_outcomes.failing_since <= EXCLUDED.decided_at THEN agent_match_outcomes.decided_at
+        -- Late NO_WORKER after the last known match: an earlier start of the same streak.
+        WHEN EXCLUDED.outcome = 'NO_WORKER' AND agent_match_outcomes.outcome = 'NO_WORKER'
+          AND (agent_match_outcomes.last_matched_at IS NULL OR agent_match_outcomes.last_matched_at < EXCLUDED.decided_at)
+          THEN LEAST(agent_match_outcomes.failing_since, EXCLUDED.decided_at)
+        ELSE agent_match_outcomes.failing_since END`);
 }
 
 export type LatestMatchOutcome = {
