@@ -114,7 +114,7 @@ export async function latestMatchOutcomes(
     SELECT family, tier, role, outcome, reason, decided_at AS "decidedAt", failing_since AS "failingSince"
     FROM agent_match_outcomes
     WHERE app_id = ${appId} AND decided_at >= (clock_timestamp() AT TIME ZONE 'UTC') - make_interval(secs => ${hours * 3600}::float8)
-    ${narrow('family', opts.family)} ${narrow('tier', opts.tier)} ${narrow('role', opts.role?.toLowerCase())}
+    ${narrow('family', opts.family)} ${narrow('tier', opts.tier)} ${narrow('role', opts.role === undefined ? undefined : opts.role === null ? null : opts.role.toLowerCase())}
     ORDER BY family, tier, role`);
   return rows.map(r => ({
     family: r.family || null, tier: r.tier || null, role: r.role || null,

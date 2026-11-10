@@ -288,3 +288,11 @@ it('Anne: roles are keyed case-insensitively and a write orders its rows globall
   expect(rows[0]).toMatchObject({ role: 'reviewer', outcome: 'MATCHED', failingSince: null });
   expect(combinationsOf({ roles: ['B', 'a', 'A'], familyIn: ['codex', 'claude'] }).map(c => [c.family, c.role])).toEqual([['claude', 'a'], ['claude', 'b'], ['codex', 'a'], ['codex', 'b']]);
 });
+
+it('Anne: role null selects the open-role row, undefined does not narrow, a role is matched case-insensitively', async () => {
+  await create({ match: true, requirements: { role: 'engineer' } });
+  await create({ match: true, requirements: {} });
+  expect((await latest({ windowHours: 24 })).map(r => r.role)).toEqual([null, 'engineer']);
+  expect((await latest({ windowHours: 24, role: null })).map(r => r.role)).toEqual([null]);
+  expect((await latest({ windowHours: 24, role: 'ENGINEER' })).map(r => r.role)).toEqual(['engineer']);
+});
