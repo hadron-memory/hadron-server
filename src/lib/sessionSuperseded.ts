@@ -11,7 +11,7 @@ async function readableSession(ctx: Context, id: string) {
   });
 }
 
-/** Stored immediate successor is historical evidence, not a capability to read another session. */
+/** #3818 V25 (hrn:node:hadronmemory.com:specs:cor:dmo:070:05): the immediate successor is read-gated historical evidence. */
 export async function readableSupersedingSessionId(
   parent: { id: string }, _: unknown, ctx: Context,
 ): Promise<string | null> {
@@ -20,8 +20,10 @@ export async function readableSupersedingSessionId(
   return (await readableSession(ctx, old.supersededBySessionId))?.id ?? null;
 }
 
-/** Refuse an execution binding to a superseded session; current open session details require their own read gate. */
+/** #3818 V24 (hrn:node:hadronmemory.com:specs:cor:agt:020:03): refuse an eligible execution principal; current-open details have their own read gate. */
 export async function refuseSupersededSession(ctx: Context, sessionId: string): Promise<void> {
+  // #3818 review P2: classify an execution binding only for its accepted principal shapes, never a credential failure.
+  if (!(ctx.appId && !ctx.userId) && !(ctx.userId && !ctx.impersonation)) return;
   const old = await ctx.db.session.findUnique({
     where: { id: sessionId }, select: { endedAt: true, endReason: true, workerId: true },
   });

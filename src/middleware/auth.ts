@@ -325,6 +325,7 @@ export async function validateSessionBinding(
 ): Promise<{ sessionId: string; actor: { workerId: string | null; agentId: string | null } } | null> {
   const isPureAppKey = !!principal.appId && !principal.userId;
   const isUserPrincipal = !!principal.userId && !principal.impersonation;
+  if (!isPureAppKey && !isUserPrincipal) return null;
   const session = await db.session.findUnique({
     where: { id: sessionId },
     select: {
@@ -336,7 +337,6 @@ export async function validateSessionBinding(
   if (session?.endedAt) {
     await refuseSupersededSession({ ...principal, db }, sessionId);
   }
-  if (!isPureAppKey && !isUserPrincipal) return null;
   if (!session || session.endedAt) return null;
   const now = new Date();
   if (session.expiresAt && session.expiresAt <= now) return null;

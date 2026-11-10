@@ -8,8 +8,9 @@
  *
  * The feature is open to every ordinary user principal; what bounds it is
  * the caller's own live Worker session and current App participation. This
- * matters for `maybeAdvanceOwnChannelRead`: without a matching session an
- * ordinary transcript read is byte-for-byte the old read-only act.
+ * matters for `maybeAdvanceOwnChannelRead`: without a presented execution
+ * session, an ordinary transcript read remains the old read-only act. #3818
+ * deliberately refuses an accepted principal presenting a superseded session.
  */
 
 import { refuseSupersededSession } from './sessionSuperseded.js';

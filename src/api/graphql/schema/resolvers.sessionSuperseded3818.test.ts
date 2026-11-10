@@ -309,3 +309,16 @@ it.each([{}, { clientId: 'machine' }, { userId: 'actor', impersonation: {} as an
   try { await expect(refuseSupersededSession({ db, ...principal }, generateId())).resolves.toBeUndefined(); }
   finally { lookup.mockRestore(); }
 });
+
+it('preserves the immediate successor chain when two forced binds are launched concurrently', async () => {
+  const a = await bind();
+  const [b, c] = await Promise.all([bind(true), bind(true)]);
+  const rows = await db.session.findMany({ where: { workerId: worker.id, id: { in: [a.id, b.id, c.id] } } });
+  expect(rows).toHaveLength(3);
+  const open = rows.filter(row => row.endedAt === null);
+  expect(open).toHaveLength(1);
+  const first = rows.find(row => row.id !== a.id && row.id !== open[0]!.id)!;
+  expect(rows.find(row => row.id === a.id)).toMatchObject({ endReason: 'superseded', supersededBySessionId: first.id });
+  expect(first).toMatchObject({ endReason: 'superseded', prevSessionId: a.id, supersededBySessionId: open[0]!.id });
+  expect(open[0]).toMatchObject({ prevSessionId: first.id, supersededBySessionId: null });
+});
