@@ -83,6 +83,20 @@ describe('the newest observation decides (V28, V29)', () => {
   });
 });
 
+describe('an out-of-range reset is untrusted input', () => {
+  it('a reset further ahead than the window is long reads as no reset, and answers at once', () => {
+    const rec = { schemaVersion: 1, label: 'a', host: 'h', family: 'claude', observedAt: NOW.toISOString(), fiveHourPct: 30, fiveHourResetsAt: new Date(NOW.getTime() + 6 * 3_600_000).toISOString(), sevenDayPct: 30, sevenDayResetsAt: '9999-01-01T00:00:00.000Z' };
+    const snap = parseUsageSnapshot(rec, NOW)!;
+    expect(snap.windows[FIVE_HOUR_MINUTES]!.resetsAt).toBeNull();
+    expect(snap.windows[SEVEN_DAY_MINUTES]!.resetsAt).toBeNull();
+    const t0 = Date.now();
+    expect(projectWindow([snap], SEVEN_DAY_MINUTES, NOW).projection).toMatchObject({ status: 'UNKNOWN', reason: 'NO_RESET' });
+    expect(Date.now() - t0).toBeLessThan(500);
+    const ok = parseUsageSnapshot({ ...rec, fiveHourResetsAt: new Date(NOW.getTime() + 4 * 3_600_000).toISOString() }, NOW)!;
+    expect(ok.windows[FIVE_HOUR_MINUTES]!.resetsAt).not.toBeNull();
+  });
+});
+
 describe('a reset after the newest snapshot but before asOf', () => {
   it('is UNKNOWN RESET_PASSED, never an expired cycle projected', () => {
     const h = series({ fromMin: 150, lastMin: 30, stepMin: 30, pctAt: (m) => 40 - m / 60, resetsInHours: -10 / 60 });

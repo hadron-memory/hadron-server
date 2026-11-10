@@ -261,11 +261,11 @@ describe('windows of another length (V29)', () => {
   it('a family whose newest snapshot reports a window of another length gets that window, with its length, beside the two standard ones', async () => {
     const reset = new Date(Date.now() + 1 * HOUR).toISOString();
     for (let m = 240; m >= 0; m -= 30) {
-      await snapshot({ label: 'odd', minutesAgo: m, sevenPct: 0, extra: { sevenDayPct: undefined, sevenDayResetsAt: undefined, primaryPct: 30 - m / 60, primaryMinutes: 90, primaryResetsAt: reset } });
+      await snapshot({ label: 'odd', minutesAgo: m, sevenPct: 0, extra: { sevenDayPct: undefined, sevenDayResetsAt: undefined, primaryPct: 30 - m / 60, primaryMinutes: 1440, primaryResetsAt: reset } });
     }
     const r = await proj('odd');
     expect(r.windows.map((w: any) => [w.window, w.lengthMinutes, w.status])).toEqual([
-      ['OTHER', 90, 'PROJECTED'], ['FIVE_HOUR', 300, 'UNKNOWN'], ['SEVEN_DAY', 10080, 'UNKNOWN'],
+      ['FIVE_HOUR', 300, 'UNKNOWN'], ['OTHER', 1440, 'PROJECTED'], ['SEVEN_DAY', 10080, 'UNKNOWN'],
     ]);
   });
 });

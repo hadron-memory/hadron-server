@@ -115,7 +115,12 @@ export function parseUsageSnapshot(properties: unknown, now: Date): UsageSnapsho
   const windows: UsageSnapshot['windows'] = {};
   const put = (kind: WindowKind, pct: unknown, resetsAt: unknown): void => {
     const v = pctOf(pct);
-    if (v !== null && windows[kind] === undefined) windows[kind] = { pct: v, resetsAt: dateOf(resetsAt) };
+    if (v === null || windows[kind] !== undefined) return;
+    // The reset of a window of `kind` minutes lies at most that far ahead of the observation: a reset beyond it is untrusted
+    // input (it would drive an hour-by-hour loop), so it is read as no reset at all.
+    const r = dateOf(resetsAt);
+    const ok = r !== null && r.getTime() - observedAt.getTime() <= kind * 60_000 + SAME_RESET_TOLERANCE_MS;
+    windows[kind] = { pct: v, resetsAt: ok ? r : null };
   };
   put(FIVE_HOUR_MINUTES, p.fiveHourPct, p.fiveHourResetsAt);
   put(SEVEN_DAY_MINUTES, p.sevenDayPct, p.sevenDayResetsAt);
@@ -276,7 +281,7 @@ function weeklyAdditional(series: readonly UsageSnapshot[], newest: UsageSnapsho
   let t = newest.observedAt.getTime();
   const startT = t;
   const end = resetsAt.getTime();
-  while (t < end) {
+  for (let guard = 0; t < end && guard <= 24 * 8; guard += 1) {
     const next = Math.min(end, (Math.floor(t / HOUR_MS) + 1) * HOUR_MS);
     const cell = sums.get(bucketOf(t));
     if (!cell) return null;
