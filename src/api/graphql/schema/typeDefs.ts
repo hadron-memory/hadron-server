@@ -15930,7 +15930,7 @@ export const typeDefs = `#graphql
 
   """
   Why a failed match skipped a candidate (#3816, V21). Closed and additive: values are added, never renamed.
-  NOT_LIVE (a bound worker whose session is quiet; goes with hadron-server#3815) and STOP_SIGNAL name matcher conditions V21 lacked.
+  STOP_SIGNAL names a matcher condition V21 lacked. There is no value for a bound, quiet worker: hadron-server#3815 removes that exclusion.
   """
   enum AgentTaskMatchSkipReason {
     RETIRED
@@ -15947,7 +15947,6 @@ export const typeDefs = `#graphql
     TIER_BELOW_MINIMUM
     TIER_UNKNOWN
     MODEL_GROUP_MISMATCH
-    NOT_LIVE
     STOP_SIGNAL
   }
 

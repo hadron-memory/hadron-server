@@ -52,6 +52,12 @@ it('a worker excluded for two reasons carries both, in the enum order (V23)', as
   await unavailable(w.id);
   expect(byName(await create())).toEqual({ Both: ['HOLDS_TASK', 'UNAVAILABLE'] });
 });
+it('own and family unavailability are both listed, in the enum order (V23)', async () => {
+  const w = await worker('Both2', 'reviewer', { family: 'codex', model: 'gpt-6.1-sol' });
+  await unavailable(w.id);
+  await db.modelFamilyAvailability.create({ data: { appId: app.id, family: 'codex', state: 'unavailable', reason: 'out-of-tokens', until: new Date(Date.now() + 3600_000), setAt: new Date(), setByUserId: owner.id } });
+  expect(byName(await create()).Both2).toEqual(['UNAVAILABLE', 'FAMILY_UNAVAILABLE']);
+});
 it('a stall mark reads STALLED, not UNAVAILABLE', async () => {
   const w = await worker('Stalled');
   await unavailable(w.id, 'stalled');
@@ -126,14 +132,14 @@ it('an agent that uses no tasks reads USES_NO_TASKS', async () => {
   await worker('NoTasks'); await db.agent.update({ where: { id: agent.id }, data: { usesTasks: false } });
   expect(byName(await create()).NoTasks).toContain('USES_NO_TASKS');
 });
-it('NO_FAMILY for an unbound worker no host can launch; NOT_LIVE for a bound worker gone quiet', async () => {
+it('NO_FAMILY for an unbound worker no host can launch; a bound worker gone quiet has no value (V21, #3815)', async () => {
   await worker('Unbound', 'reviewer', { session: false });
   const quiet = await worker('Quiet');
   const old = new Date(Date.now() - 3 * 86_400_000);
   await db.session.updateMany({ where: { workerId: quiet.id }, data: { startedAt: old, updatedAt: old } });
   const r = byName(await create());
   expect(r.Unbound).toEqual(['NO_FAMILY']);
-  expect(r.Quiet).toEqual(['NOT_LIVE']);
+  expect(r.Quiet).toBeUndefined();
 });
 it('a worker under a stop signal reads STOP_SIGNAL', async () => {
   const w = await worker('Paused');

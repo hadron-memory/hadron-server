@@ -720,13 +720,14 @@ export type MatchFailureReason = 'NO_ROLE' | 'REQUIREMENTS_EXCLUDED' | 'NOBODY_F
 /**
  * #3816 (V21, hrn:node:hadronmemory.com:hadron-dev-team-shared:decisions:2026-11-10-vera-rulings-matching-reach): the closed,
  * ADDITIVE set of reasons a candidate was skipped, one value per exclusion condition the matcher applies, in the declared
- * order that V23 makes the order of a candidate's reasons. Values are added, never renamed. `NOT_LIVE` and `STOP_SIGNAL` name
- * matcher conditions V21's list lacks (V21 says to add them in the PR): a BOUND worker whose session is quiet is not matched
- * until #3815 removes that exclusion (then NOT_LIVE goes with it), and a worker covered by a stop signal is not assigned.
+ * order that V23 makes the order of a candidate's reasons. Values are added, never renamed. `STOP_SIGNAL` names
+ * a matcher condition V21's list lacks: a worker covered by a stop signal is not assigned. There is deliberately NO value for
+ * "bound and quiet" (V21: #3815 removes that exclusion, the #3816 gate says to omit it), so until #3815 lands such a worker,
+ * which the matcher still skips, is not listed.
  */
 export const MATCH_SKIP_REASONS = [
   'RETIRED', 'USES_NO_TASKS', 'ENDING_SESSION', 'HOLDS_TASK', 'UNAVAILABLE', 'FAMILY_UNAVAILABLE', 'STALLED', 'NO_FAMILY', 'NOT_HELD',
-  'FAMILY_EXCLUDED', 'NAME_EXCLUDED', 'TIER_BELOW_MINIMUM', 'TIER_UNKNOWN', 'MODEL_GROUP_MISMATCH', 'NOT_LIVE', 'STOP_SIGNAL',
+  'FAMILY_EXCLUDED', 'NAME_EXCLUDED', 'TIER_BELOW_MINIMUM', 'TIER_UNKNOWN', 'MODEL_GROUP_MISMATCH', 'STOP_SIGNAL',
 ] as const;
 export type MatchSkipReason = typeof MATCH_SKIP_REASONS[number];
 /** One candidate a failed match skipped and every reason, in {@link MATCH_SKIP_REASONS} order. Returned in the match answer, never stored (V22). */
@@ -741,7 +742,8 @@ export function skipReasonsOf(
   if (w.endingSession) out.add('ENDING_SESSION');
   if (w.openTaskCount > 0) out.add('HOLDS_TASK');
   if (w.availability.ownInEffect) out.add(w.availability.own?.reason === 'stalled' ? 'STALLED' : 'UNAVAILABLE');
-  else if (w.families.length > 0 && w.families.every((f) => w.availability.familyAvailable.get(f) !== true)) out.add('FAMILY_UNAVAILABLE');
+  // Independent of the own record: a worker with both carries both (V23).
+  if (w.families.length > 0 && w.families.every((f) => w.availability.familyAvailable.get(f) !== true)) out.add('FAMILY_UNAVAILABLE');
   if (w.families.length === 0) out.add('NO_FAMILY');
   if (!w.bound && !w.live && !MATCH_UNBOUND_LAUNCHABLE) out.add('NOT_HELD');
   if (w.families.length > 0 && !w.families.map(normalizeFamily).some((f) => f !== null && familyAllowed(req, f)) && !req.invalid) out.add('FAMILY_EXCLUDED');
@@ -749,7 +751,6 @@ export function skipReasonsOf(
   const tier = workerTier(w);
   if (!tierAllowed(req, tier)) out.add(tier === null ? 'TIER_UNKNOWN' : 'TIER_BELOW_MINIMUM');
   if (!modelGroupsAllowed(req, w.bound ? w.bindingModel : null, groups)) out.add('MODEL_GROUP_MISMATCH');
-  if (w.bound && !w.live) out.add('NOT_LIVE');
   if (stopCovered) out.add('STOP_SIGNAL');
   return MATCH_SKIP_REASONS.filter((r) => out.has(r));
 }
