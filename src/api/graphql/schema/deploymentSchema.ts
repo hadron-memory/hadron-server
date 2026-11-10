@@ -8,6 +8,8 @@ const signingTypes = new Set([
   'SigningRequest', 'NodeSignature', 'NodeSignatureStatus',
   // #3649 slice B: grant signing rides the same switch (ruling 0255, item 17).
   'GrantSigningRequestState', 'GrantSigningRequest',
+  // #3649 slice D: Grant.signatureStatus goes with them (its type is in this set).
+  'GrantSignatureState', 'GrantSignature', 'GrantSignatureStatus',
 ]);
 
 /** #1631 PR3: the owner's passkey records, a registration-switch read (#1895). */

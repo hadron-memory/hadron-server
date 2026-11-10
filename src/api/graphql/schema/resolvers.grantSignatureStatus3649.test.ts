@@ -42,6 +42,8 @@ const exec = (sql: string, ...params: unknown[]) => db.$executeRawUnsafe(sql, ..
 let http: Server;
 let base: string;
 beforeAll(async () => {
+  // The schema is built once at boot from the signing switch (deploymentSchema, #1895): on for these reads.
+  vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'true');
   http = httpServer(await createServer());
   await new Promise<void>((r) => http.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
@@ -123,6 +125,15 @@ async function signGrant(opts: { activate?: boolean; firstWindow?: boolean; pinH
   return { g, r, s, passkeyId, termsHash };
 }
 
+/**
+ * Revoke a passkey now, on the same millisecond rounding its registration was stored with. A revocation inside an open
+ * first-passkey window cancels the window in the same write, as every revoke path does (chk_passkey_shape).
+ */
+const revoke = (passkeyId: string) => exec(`UPDATE passkey_credentials SET revoked_at = t.now,
+    window_outcome = CASE WHEN window_ends_at > t.now AND window_ended_at IS NULL THEN 'cancelled' ELSE window_outcome END,
+    window_ended_at = CASE WHEN window_ends_at > t.now AND window_ended_at IS NULL THEN t.now ELSE window_ended_at END
+  FROM (SELECT (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3) AS now) t WHERE id = $1`, passkeyId);
+
 /** Alter a stored record the way only someone outside the platform could: the append-only guard is off for this one statement. */
 async function forge(signatureId: string, set: string, ...params: unknown[]): Promise<void> {
   await db.$transaction(async (tx) => {
@@ -196,7 +207,7 @@ describe('S1: every grant read shows its signature state, re-verified on read', 
   it('a first passkey still in its window reads PENDING; revoked inside the window, CANCELLED', async () => {
     const { g, passkeyId } = await signGrant({ activate: false, firstWindow: true });
     expect((await statusOf(g)).state).toBe('PENDING');
-    await exec(`UPDATE passkey_credentials SET revoked_at = ${DB_NOW} WHERE id = $1`, passkeyId);
+    await revoke(passkeyId);
     const st = await statusOf(g);
     expect(st.state).toBe('CANCELLED');
     expect(st.signatures[0].passkeyRevokedAt).not.toBeNull();
@@ -204,7 +215,7 @@ describe('S1: every grant read shows its signature state, re-verified on read', 
 
   it('a passkey revoked after its signature, outside any window, keeps the signature CURRENT with the revocation shown', async () => {
     const { g, passkeyId } = await signGrant();
-    await exec(`UPDATE passkey_credentials SET revoked_at = ${DB_NOW} WHERE id = $1`, passkeyId);
+    await revoke(passkeyId);
     const st = await statusOf(g);
     expect(st.state).toBe('CURRENT');
     expect(st.signatures[0].passkeyRevokedAt).not.toBeNull();
@@ -260,7 +271,7 @@ describe('C10 extended: the signing switch takes the read field with it', () => 
     expect(grant!.getFields()).not.toHaveProperty('signatureStatus');
     const sdl = printSchema(schema);
     for (const name of NEW_TYPES) expect(sdl).not.toMatch(new RegExp(`\\b${name}\\b`));
-    expect((surface.resolvers as Record<string, Record<string, unknown> | undefined>).Grant ?? {}).not.toHaveProperty('signatureStatus');
+    expect((surface.resolvers as unknown as Record<string, Record<string, unknown> | undefined>).Grant ?? {}).not.toHaveProperty('signatureStatus');
     for (const name of NEW_TYPES) expect(surface.resolvers).not.toHaveProperty(name);
   });
 
@@ -270,6 +281,6 @@ describe('C10 extended: the signing switch takes the read field with it', () => 
     const schema = buildSchema(surface.typeDefs);
     expect((schema.getType('Grant') as { getFields(): Record<string, unknown> }).getFields()).toHaveProperty('signatureStatus');
     for (const name of NEW_TYPES) expect(schema.getType(name), name).toBeDefined();
-    expect((surface.resolvers as Record<string, Record<string, unknown>>).Grant).toHaveProperty('signatureStatus');
+    expect((surface.resolvers as unknown as Record<string, Record<string, unknown>>).Grant).toHaveProperty('signatureStatus');
   });
 });
