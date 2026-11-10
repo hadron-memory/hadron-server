@@ -5126,8 +5126,8 @@ export const typeDefs = `#graphql
   }
 
   """
-  036-ai-service-config: privileged resolution result. Carries the
-  DECRYPTED key — only returned by resolveAIConfig. A resolved platform
+  036-ai-service-config: configuration resolution result. A credential is
+  returned only when the caller may manage its source. A resolved platform
   credential is decrypted only for platform ADMIN/OWNER; org ADMIN may
   decrypt an authorized tenant-owned config. Successor to agentAIConfig /
   appAIConfig.
@@ -5140,10 +5140,11 @@ export const typeDefs = `#graphql
     provider: String!
     model: String!
     """
-    Decrypted key. For provider 'bedrock' this is the JSON-encoded
-    accessKeyId/secretAccessKey/region triple the portal stores.
+    Decrypted key when authorized for the selected source; null for an
+    identity-only result. For provider 'bedrock' a disclosed value is the
+    JSON-encoded accessKeyId/secretAccessKey/region triple the portal stores.
     """
-    apiKey: String!
+    apiKey: String
     params: JSON
     "#1373: where requests for this config go (see AiServiceConfig.effectiveEndpoint)."
     effectiveEndpoint: String
@@ -10348,8 +10349,8 @@ export const typeDefs = `#graphql
 
     """
     036-ai-service-config: resolve a config name for an execution context
-    and return the DECRYPTED credentials (privileged; successor to
-    agentAIConfig/appAIConfig).
+    and return its identity, with decrypted credentials only for a caller
+    authorized to manage the selected source (successor to agentAIConfig/appAIConfig).
 
     Walk: App -> Agent -> Org (of the App, else of the Agent) ->
     HadronServer; disabled configs are skipped. When name is omitted,
@@ -10361,7 +10362,7 @@ export const typeDefs = `#graphql
 
     Auth: a named App uses its own owner/org ADMIN gate, including strict
     owner-only access for a user-owned App. A named Agent must be installed
-    in that App. Without an App, an org Agent requires org ADMIN; a host-only
+    and live-licensed in that App. Without an App, an org Agent requires org ADMIN; a host-only
     context requires platform ADMIN/OWNER. A user-owned Agent is strictly
     owner-only, including when an App is also named. With no effective org,
     its owner can decrypt that Agent's own config or a user-owned App's
@@ -10369,8 +10370,9 @@ export const typeDefs = `#graphql
     App's owner needs the outer source's own authority to decrypt an installed
     Agent or org config; its App ownership alone grants only its App config.
     A HADRON_SERVER fallback can back a server-side call, but only a platform
-    ADMIN/OWNER may receive its plaintext key. Other callers get a typed
-    refusal naming the resolved config and HADRON_SERVER level.
+    ADMIN/OWNER may receive its plaintext key. An otherwise authorized
+    context without the selected source's credential authority receives the
+    config identity with apiKey and params null, without decrypting a key.
 
     appRef/agentRef accept the entity's ID or URN.
     """
@@ -10397,12 +10399,13 @@ export const typeDefs = `#graphql
     masked listing does not grant permission to decrypt it. Only
     the Agent named here contributes — sibling Agents installed in the same
     App are not consulted. Disabled configs are skipped. Never returns key
-    material (hasApiKey + apiKeyPreview only).
+    material. hasApiKey remains visible; params and apiKeyPreview are null
+    unless the caller manages the selected source.
 
     Auth: scoped to one App's chat context. A non-admin caller MUST pass an
     appRef, be a member of that App, and (when an agentRef is given) the Agent
-    must be installed in that App. Because the result is masked (no key
-    material), App membership — not org admin — is the bar, unlike
+    must be installed and live-licensed in that App. Because the result is
+    masked (no key material), App membership — not org admin — is the bar, unlike
     resolveAIConfig and the aiServiceConfigs management list. Platform
     ADMIN/OWNER are always allowed and may omit appRef.
 
