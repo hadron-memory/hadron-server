@@ -104,6 +104,8 @@ async function countingSignatureSpans(
   nodeId: string,
   requirement: SignatureRequirement,
   askCeiling: number | null,
+  /** #2973 PR2: when given, a signature that would count but for its first-key window (state PENDING) is recorded here. */
+  pendingOut?: CountingSpan[],
 ): Promise<CountingSpan[]> {
   // The requirement type has exactly one member today; this line stops compiling the moment a second joins, so the
   // grade rules are decided per member instead of silently inheriting this branch (Bob old-8, delta review of
@@ -255,6 +257,7 @@ async function countingSignatureSpans(
       verifiedAt: sig.verifiedAt, valid, passkey: sig.passkey, contentChangedAt: null, memoryEncrypted: false, now,
     });
     if (state === 'CURRENT') spans.push({ revision: sig.revision, coveredThrough });
+    else if (state === 'PENDING' && pendingOut) pendingOut.push({ revision: sig.revision, coveredThrough });
   }
   return spans;
 }
@@ -309,5 +312,29 @@ export function lazyRevisionSignatureCounts(
       spans = loading;
     }
     return spanCovers(await spans, revision);
+  };
+}
+
+/**
+ * #2973 PR2 (cor:agt:040:09, "signature pending") — the lazy predicate's companion for the switch PREVIEW: for a revision,
+ * does a signature COUNT there, and if not, is one PENDING there (made with a first passkey still in its cooling-off
+ * window, so it will count when the window ends normally; cor:dmo:130:04). One set of reads answers every ask, captured once,
+ * exactly as `lazyRevisionSignatureCounts` does; the `counts` verdict equals it.
+ */
+export function lazyRevisionSignatureStatus(
+  db: Db,
+  nodeId: string,
+  requirement: SignatureRequirement,
+): (revision: number) => Promise<{ counts: boolean; pending: boolean }> {
+  let loaded: Promise<{ spans: CountingSpan[]; pending: CountingSpan[] }> | null = null;
+  return async (revision: number) => {
+    if (loaded == null) {
+      const pending: CountingSpan[] = [];
+      const loading = countingSignatureSpans(db, nodeId, requirement, null, pending).then((spans) => ({ spans, pending }));
+      loading.catch(() => { if (loaded === loading) loaded = null; });
+      loaded = loading;
+    }
+    const { spans, pending } = await loaded;
+    return { counts: spanCovers(spans, revision), pending: spanCovers(pending, revision) };
   };
 }
