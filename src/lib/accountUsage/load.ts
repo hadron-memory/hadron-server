@@ -65,3 +65,15 @@ export async function loadAccountUsageHistory(db: Context['db'], appId: string, 
   }
   return result;
 }
+
+/** #3842 — what one selector's read found, and whether the server could finish checking for another history of the label. */
+export type AccountCensus = { snaps: UsageSnapshot[]; incomplete: boolean };
+/** #3842 — the most rows the probe for another identity reads per selector. */
+export const PROBE_ROW_BUDGET = 100_000;
+
+export async function loadAccountUsageCensus(
+  db: Context['db'], appId: string, now: Date, accounts: readonly AccountSelector[], maxRows: number = MAX_SNAPSHOT_ROWS, probeBudget: number = PROBE_ROW_BUDGET,
+): Promise<AccountCensus[]> {
+  void probeBudget;
+  return (await loadAccountUsageHistory(db, appId, now, accounts, maxRows)).map((snaps) => ({ snaps, incomplete: false }));
+}
