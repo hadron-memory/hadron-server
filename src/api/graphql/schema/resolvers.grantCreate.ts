@@ -64,6 +64,7 @@ export const grantCreateMutations = {
             appId: reader.appId,
             requester: { userId, workerId: reader.workerId, sessionId: ctx.sessionId ?? null },
             holder: { kind, id: input.holderRef },
+            heldAgentAnchor: anchors.find((a) => a.kind === 'agent')?.id ?? null,
             action: input.action, values: input.values, startsAt, expiresAt, maxUses: input.maxUses ?? null, reason: input.reason,
           });
           const view = await getGrantForWorker(tx, reader, id);

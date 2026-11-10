@@ -171,7 +171,7 @@ describe('typed refusals, each judged before any write: no refused call leaves a
     expect(await rowCount()).toBe(0);
   });
 
-  it('a caller with no bound worker session is refused: a person with no session, a person naming another App\'s worker, and an App key', async () => {
+  it('a caller with no bound worker session is refused: a person with no session, an App-less raw key with no session, and a session id that names nothing', async () => {
     for (const [key, session] of [[personKey, null], [rawKey, null], [rawKey, 'not-a-session']] as const) {
       const r = await post(key, session, CREATE, { i: selfInput() });
       expect(r.data?.createGrant ?? null, `${key.slice(-4)} ${session}`).toBeNull();
@@ -206,6 +206,8 @@ describe('typed refusals, each judged before any write: no refused call leaves a
       { entryNode: 5 }, { entryNode: true }, { entryNode: null }, { entryNode: { id: 'x' } }, { entryNode: [] }, { entryNode: [[ 'a' ]] },
       { entryNode: '' }, { entryNode: [generateId(), '*'] },
       { entryNode: '*' },                              // the parameter refuses a wildcard (cor:acl:140:02)
+      { entryNode: 'hrn:node:reviewer.test:kb:entry' }, // a node-ref is a stored node id, never a URN (#3814 Gene F1)
+      { entryNode: 'line one\nline two' }, { entryNode: 'has space' }, { entryNode: 'a:b' }, { entryNode: [generateId(), 'hrn:node:x:y:z'] },
       'a string', ['a'], 7,
     ];
     for (const values of bad) {
@@ -245,11 +247,11 @@ describe('the locking carries from the section 10 review of #3792', () => {
   // The creator is also called below the resolver, so its own requester and holder judgments are pinned directly (the resolver
   // pre-validates, which would otherwise hide a removed guard). The worker-holder same-App/retired re-check is the carry-1 pin
   // above for a foreign holder; for holder === requester it is subsumed by the requester's own App/retired check (equivalent).
-  const direct = async (over: { userId?: string; workerId?: string; holder: { kind: 'worker' | 'agent'; id: string } }) => {
+  const direct = async (over: { userId?: string; workerId?: string; anchored?: string | null; holder: { kind: 'worker' | 'agent'; id: string } }) => {
     const { createPendingGrant } = await import('../../../lib/grants/create.js');
     return db.$transaction((tx) => createPendingGrant(tx, {
       appId: w.appId, requester: { userId: over.userId ?? w.userId, workerId: over.workerId ?? w.workerId, sessionId },
-      holder: over.holder, action: 'schedule.create', values: entry(), reason: 'x',
+      holder: over.holder, heldAgentAnchor: over.holder.kind === 'agent' ? ('anchored' in over ? over.anchored : over.holder.id) : null, action: 'schedule.create', values: entry(), reason: 'x',
     }));
   };
 
@@ -267,6 +269,20 @@ describe('the locking carries from the section 10 review of #3792', () => {
     await db.appAgent.create({ data: { appId: w.appId, agentId: other.id } });
     await expect(direct({ holder: { kind: 'agent', id: other.id } })).rejects.toMatchObject({ code: 'GRANT_HOLDER_NOT_ALLOWED' });
     expect(await rowCount()).toBe(0);
+  });
+
+  it('role-agent drift: an agent holder is accepted only if the caller holds exactly that agent\'s anchor and it is still the worker\'s role agent (#3814 Gene F2)', async () => {
+    const org = await db.organization.findUniqueOrThrow({ where: { id: w.orgId } });
+    const b = await db.agent.create({ data: { organizationId: org.id, name: 'drift-b', urn: `${org.urn}:drift-b` } });
+    await db.appAgent.create({ data: { appId: w.appId, agentId: b.id } });
+    // the worker's role changed A to B after the caller anchored A: B is current but unanchored, A is anchored but not current
+    await db.worker.update({ where: { id: w.workerId }, data: { agentId: b.id } });
+    await expect(direct({ holder: { kind: 'agent', id: b.id }, anchored: w.agentId })).rejects.toMatchObject({ code: 'GRANT_HOLDER_NOT_ALLOWED' });
+    await expect(direct({ holder: { kind: 'agent', id: b.id }, anchored: null })).rejects.toMatchObject({ code: 'GRANT_HOLDER_NOT_ALLOWED' });
+    await expect(direct({ holder: { kind: 'agent', id: w.agentId }, anchored: w.agentId })).rejects.toMatchObject({ code: 'GRANT_HOLDER_NOT_ALLOWED' });
+    expect(await rowCount()).toBe(0);
+    // anchored and current: accepted
+    await expect(direct({ holder: { kind: 'agent', id: b.id }, anchored: b.id })).resolves.toEqual(expect.any(String));
   });
 
   it('a holder that retires while the create waits for it: the create judges the committed state and writes nothing', async () => {

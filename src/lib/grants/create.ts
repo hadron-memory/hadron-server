@@ -62,18 +62,29 @@ export interface CreateGrantArgs {
   expiresAt?: Date | null;
   maxUses?: number | null;
   reason: string;
+  /** The agent whose authority anchor the caller holds (null: none). An agent holder is accepted only if it is exactly this agent. */
+  heldAgentAnchor?: string | null;
+}
+
+/** A stored node id: a token with no scheme, colon, dot, space or newline (cuids, 32-hex ids), never a URN or free text. */
+const NODE_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
+/** Judge a value by its parameter's declared type. An unknown type is refused (fail closed), so a new type needs its rule here. */
+function valueMatchesType(type: string, value: unknown): boolean {
+  if (type !== 'node-ref') return false;
+  const one = (v: unknown) => v === '*' || (typeof v === 'string' && NODE_ID_RE.test(v));
+  return Array.isArray(value) ? value.every(one) : one(value);
 }
 
 interface ActionRow { name: string; parameters: unknown }
 interface WorkerRow { id: string; app_id: string; agent_id: string; retired_at: Date | null }
 
 /** The declared parameter names of an action row (the closed list S1b seeds), or null if the row is malformed. */
-function declaredParameters(parameters: unknown): Array<{ name: string; refusesWildcard: boolean }> | null {
+function declaredParameters(parameters: unknown): Array<{ name: string; type: string; refusesWildcard: boolean }> | null {
   if (!Array.isArray(parameters)) return null;
-  const out: Array<{ name: string; refusesWildcard: boolean }> = [];
+  const out: Array<{ name: string; type: string; refusesWildcard: boolean }> = [];
   for (const p of parameters) {
     if (!p || typeof p !== 'object' || typeof (p as { name?: unknown }).name !== 'string') return null;
-    out.push({ name: (p as { name: string }).name, refusesWildcard: (p as { refusesWildcard?: unknown }).refusesWildcard === true });
+    out.push({ name: (p as { name: string }).name, type: String((p as { type?: unknown }).type ?? ''), refusesWildcard: (p as { refusesWildcard?: unknown }).refusesWildcard === true });
   }
   return out;
 }
@@ -100,7 +111,9 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
     const held = await tx.$queryRaw<WorkerRow[]>`SELECT id, app_id, agent_id, retired_at FROM workers WHERE id = ${holder.id} FOR SHARE`;
     if (!held[0] || held[0].app_id !== appId || held[0].retired_at !== null) throw new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED');
   } else if (holder.kind === 'agent') {
-    if (holder.id !== me.agent_id) throw new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED');
+    // The locked worker row names the role agent NOW; the caller anchored the agent it saw before locking. A role change between
+    // the two (A to B) would otherwise accept an agent no anchor protects, so the holder must be both: refuse on drift.
+    if (holder.id !== me.agent_id || args.heldAgentAnchor !== holder.id) throw new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED');
     // Held by the agent in this App: installed, licensed and not deleted here, judged on the locked state.
     const agents = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM agents WHERE id = ${holder.id} AND deleted_at IS NULL FOR SHARE`;
     if (agents.length === 0 || !(await isAgentInstalledAndLicensed(tx, appId, holder.id))) throw new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED');
@@ -122,7 +135,9 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
     throw new GrantCreateRefusal('GRANT_VALUES_INVALID', 'keys differ from the declared parameters');
   }
   for (const p of declared) {
-    if (p.refusesWildcard && (values as Record<string, unknown>)[p.name] === '*') throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} refuses a wildcard`);
+    const v = (values as Record<string, unknown>)[p.name];
+    if (!valueMatchesType(p.type, v)) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
+    if (p.refusesWildcard && v === '*') throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} refuses a wildcard`);
   }
 
   // Every term is written exactly as the signature will cover it, so a row that cannot be written as `hadron-grant-terms-v1`
