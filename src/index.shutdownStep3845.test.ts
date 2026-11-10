@@ -30,6 +30,7 @@ async function stopWith(opts: { close?: (cb: (e?: Error) => void) => void; stop?
 
 beforeEach(() => {
   vi.resetModules();
+  vi.useFakeTimers(); // the 10 s hard deadline must not be a real timer that outlives its test
   process.env.STOPPING_DRAIN_WINDOW_MS = '0';
   state.events.length = 0;
   logged = [];
@@ -44,13 +45,14 @@ beforeEach(() => {
   }) as typeof process.once);
   vi.spyOn(process, 'exit').mockImplementation(((code: number) => { state.events.push(`exit:${code}`); }) as never);
 });
-afterEach(() => { delete process.env.STOPPING_DRAIN_WINDOW_MS; vi.restoreAllMocks(); vi.clearAllMocks(); });
+afterEach(() => { delete process.env.STOPPING_DRAIN_WINDOW_MS; vi.useRealTimers(); vi.restoreAllMocks(); vi.clearAllMocks(); });
 
 describe('#3845 shutdown.step_failed', { timeout: 30_000 }, () => {
-  it('a clean stop logs no step_failed line and exits 0', async () => {
+  it('a clean stop logs no step_failed line, exits 0 and leaves no timer behind', async () => {
     await stopWith({});
     expect(stepLines()).toEqual([]);
     expect(state.events).toEqual(['exit:0']);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('listener close error: exit 1, names the step and the error code, not its message', async () => {
@@ -76,6 +78,20 @@ describe('#3845 shutdown.step_failed', { timeout: 30_000 }, () => {
     expect(stepLines()).toEqual(['shutdown.step_failed step=embedding_worker outcome=rejected:TypeError']);
     expect(logged.join('\n')).not.toContain('secret');
     expect(state.events).toEqual(['exit:1']);
+  });
+
+  it('a missing stop hook still exits 1, now named', async () => {
+    await stopWith({ stop: async () => undefined });
+    expect(stepLines()).toEqual(['shutdown.step_failed step=embedding_worker outcome=not_registered']);
+    expect(state.events).toEqual(['exit:1']);
+  });
+
+  it('a hook result of the wrong shape is reported, not silently folded', async () => {
+    await stopWith({ stop: async () => true });
+    expect(stepLines()).toEqual([
+      'shutdown.step_failed step=embedding_worker outcome=unreported',
+      'shutdown.step_failed step=embedding_publisher outcome=unreported',
+    ]);
   });
 
   it('several failing steps log one line each', async () => {

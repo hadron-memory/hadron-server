@@ -105,7 +105,7 @@ import { startSessionReaperLoop } from './jobs/reapSessions.js';
 import { startPendingEdgePromotionSweepLoop } from './jobs/promotePendingEdges.js';
 import { startEmbeddingWorkerLoop, startEmbeddingBusListener, stopEmbeddingWorkerOutcome, assertEmbeddingObligationsReconciled } from './jobs/embedNodes.js';
 import { stopEmbeddingPublisherOutcome } from './services/embedding/enqueue.js';
-import type { EmbeddingStopOutcomes } from './lib/shutdownSteps.js';
+import { settleStep, type EmbeddingStopOutcomes } from './lib/shutdownSteps.js';
 import { startGitMirrorSubscriber } from './integrations/github/nodeWrittenSubscriber.js';
 import { GraphQLError, buildSchema, printSchema } from 'graphql';
 import {
@@ -2098,7 +2098,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
 
   // #3845: per-part outcomes (not one folded boolean), so the stop in src/index.ts can name a failing step.
   app.locals.stopEmbeddingWorker = (): Promise<EmbeddingStopOutcomes> => Promise.all([
-    stopEmbeddingWorkerOutcome(db), stopEmbeddingPublisherOutcome(),
+    settleStep(stopEmbeddingWorkerOutcome(db)), settleStep(stopEmbeddingPublisherOutcome()),
   ]).then(([worker, publisher]) => ({ worker, publisher }));
   return app;
 }

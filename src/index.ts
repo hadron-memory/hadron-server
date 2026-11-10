@@ -55,7 +55,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) process.once(signal, () => 
     const steps: Array<[string, StepOutcome]> = [['http_listener', listener.status === 'fulfilled' ? listener.value : rejected(listener)]];
     // (A missing hook folded to exit 1 before, since `undefined` is not truthy; the code stays, now with a name.)
     if (embedding.status === 'fulfilled' && embedding.value === undefined) steps.push(['embedding_worker', 'not_registered']);
-    else if (embedding.status === 'fulfilled') steps.push(['embedding_worker', embedding.value?.worker ?? 'false'], ['embedding_publisher', embedding.value?.publisher ?? 'false']);
+    else if (embedding.status === 'fulfilled') steps.push(['embedding_worker', embedding.value?.worker ?? 'unreported'], ['embedding_publisher', embedding.value?.publisher ?? 'unreported']);
     else steps.push(['embedding_worker', rejected(embedding)]);
     const exitCode = logFailedShutdownSteps(steps) === 0 ? 0 : 1;
     try {

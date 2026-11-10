@@ -24,6 +24,11 @@ export function errorToken(error: unknown): string {
   return 'unknown';
 }
 
+/** A step's outcome, never a rejection: a throw or rejection becomes `rejected:<error code or name>`, so one part cannot hide another's. */
+export function settleStep(step: Promise<StepOutcome>): Promise<StepOutcome> {
+  return step.then(outcome => outcome, error => `rejected:${errorToken(error)}`);
+}
+
 /** Log one `shutdown.step_failed` line per step whose outcome is not `ok`; returns how many failed. */
 export function logFailedShutdownSteps(steps: ReadonlyArray<readonly [step: string, outcome: StepOutcome]>): number {
   let failed = 0;
