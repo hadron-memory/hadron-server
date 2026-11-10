@@ -8,7 +8,8 @@
  * - INVALID (counted in integrityProblems, never listed) when its stored assertion does not verify against its passkey's
  *   stored public key over the payload rebuilt from the record's OWN pins, or when the record is inconsistent with its
  *   row: its pins match the row's version and terms hash but it names another holder (the terms hash covers the holder,
- *   so only an altered record can do that).
+ *   so only an altered record can do that), or when its signer is not its passkey's owner (#3827: writes bind the two
+ *   and an owner never changes, so only an altered record can differ).
  * - otherwise the node rules (`deriveSignatureState`): PENDING / CANCELLED by the first passkey's window, and EARLIER
  *   (not current) instead of CURRENT when the record's version or terms hash no longer matches the row.
  *
@@ -73,7 +74,7 @@ export async function loadGrantSignatureStatuses(db: Db, grantIds: string[]): Pr
   if (ids.length === 0) return out;
   const records = await db.grantSignature.findMany({
     where: { grantId: { in: ids } },
-    include: { passkey: { select: { credentialId: true, publicKey: true, label: true, revokedAt: true, windowEndsAt: true, windowEndedAt: true, windowOutcome: true } } },
+    include: { passkey: { select: { ownerId: true, credentialId: true, publicKey: true, label: true, revokedAt: true, windowEndsAt: true, windowEndedAt: true, windowOutcome: true } } },
   });
   if (records.length === 0) return out;
   const rows = await db.grant.findMany({
@@ -96,10 +97,14 @@ export async function loadGrantSignatureStatuses(db: Db, grantIds: string[]): Pr
       // The record's own RP ID, never the current config (#10470 mirror).
       r.rpId,
     );
+    // #3827 (cor:aut:040:05): the record's signer must be its passkey's owner. Writes bind the two and a passkey's owner
+    // never changes (merge refuses a live one and rewrites neither id; erasure keeps it), so a mismatch can only be a
+    // record changed in storage. Checked on every read, outside the cached assertion verdict.
+    const bound = r.signerId === r.passkey.ownerId;
     const current = r.version === row.version && row.termsHash !== null && r.termsHash === row.termsHash;
     const consistent = !current || (row.holder !== null && r.holderKind === row.holder.kind && r.holderId === row.holder.id);
     const state = deriveSignatureState({
-      verifiedAt: r.verifiedAt, valid: verifies && consistent, passkey: r.passkey,
+      verifiedAt: r.verifiedAt, valid: verifies && consistent && bound, passkey: r.passkey,
       // A record no longer matching the row reads as a content change at its own time: EARLIER, never CURRENT.
       contentChangedAt: current ? null : r.verifiedAt,
       memoryEncrypted: false, now,

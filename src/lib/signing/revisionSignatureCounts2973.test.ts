@@ -742,3 +742,76 @@ describe('#2973 owner-resolution determinism (Bob P3-3; the M2 pin, Rico delta r
     expect(await counts(1, node2)).toBe(true); // the manager-grade stamp counts: the fence resolves the same owner
   });
 });
+
+/**
+ * #3826 (child B of #3824; cor:dmo:130:09, cor:agt:040:10, cor:dmo:130:04): eligibility is judged BEFORE any witness
+ * is read. A signature the ceremony never made eligible (here the pre-watermark unstamped shape) must cost no snapshot
+ * read at all, and the witness read must start at the lowest ELIGIBLE signature, not the lowest candidate. Counts are
+ * unchanged everywhere: only read order and breadth move.
+ */
+describe('#3826 eligibility before witness reads', () => {
+  /** `db` with every `nodeRevision.findMany` counted, and its `where.revNo.gte` recorded. */
+  function spied() {
+    const reads = { calls: 0, rows: 0, gte: [] as Array<number | undefined> };
+    const nodeRevision = new Proxy(db.nodeRevision, {
+      get(target, prop) {
+        if (prop !== 'findMany') return Reflect.get(target, prop);
+        return async (args: { where?: { revNo?: { gte?: number } } }) => {
+          reads.calls++;
+          reads.gte.push(args.where?.revNo?.gte);
+          const rows = await target.findMany(args as never);
+          reads.rows += rows.length;
+          return rows;
+        };
+      },
+    });
+    const wrapped = new Proxy(db, {
+      get(target, prop) {
+        if (prop === 'nodeRevision') return nodeRevision;
+        const value = Reflect.get(target, prop);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as typeof db;
+    return { wrapped, reads };
+  }
+  async function growTo(revision: number) {
+    for (let n = (await db.node.findUniqueOrThrow({ where: { id: nodeId } })).revSeq; n < revision; n++) await editMetaOnly();
+  }
+
+  it('one ineligible unstamped legacy signature over a long history: no snapshot read at all (walk and single ask)', async () => {
+    await seedDirect(nodeId, signerId, softPasskey(), { end: 'completed' }); // rev 1, no stamp
+    await growTo(40);
+    const walk = spied();
+    expect(await lazyRevisionSignatureCounts(walk.wrapped, nodeId, REQ)(40)).toBe(false);
+    expect(walk.reads.calls).toBe(0);
+    const ask = spied();
+    expect(await revisionSignatureCounts(ask.wrapped, nodeId, 40, REQ)).toBe(false);
+    expect(ask.reads.calls).toBe(0);
+  });
+
+  it('no signature at all reads no snapshots (the control stays zero)', async () => {
+    await growTo(40);
+    const walk = spied();
+    expect(await lazyRevisionSignatureCounts(walk.wrapped, nodeId, REQ)(40)).toBe(false);
+    expect(walk.reads.calls).toBe(0);
+  });
+
+  it('the witness read starts at the lowest ELIGIBLE signature, not at an ineligible one beneath it', async () => {
+    await seedDirect(nodeId, signerId, softPasskey(), { end: 'completed' }); // the earliest revision, ineligible
+    await growTo(30);
+    await signLive(); // eligible, 29 revisions above the ineligible one
+    const eligibleAt = (await db.nodeSignature.findFirstOrThrow({ where: { nodeId, stampKeyId: { not: null } } })).revision;
+    await growTo(eligibleAt + 10);
+    const head = (await db.node.findUniqueOrThrow({ where: { id: nodeId } })).revSeq;
+    const walk = spied();
+    const lazy = lazyRevisionSignatureCounts(walk.wrapped, nodeId, REQ);
+    const answers: boolean[] = [];
+    for (let r = 1; r <= head; r++) answers.push(await lazy(r));
+    expect(walk.reads.calls).toBe(1);
+    expect(walk.reads.gte).toEqual([eligibleAt]);
+    expect(walk.reads.rows).toBe(head - eligibleAt); // snapshots eligibleAt..head-1; the live head is its own witness
+    // counts unchanged: the eligible signature covers [eligibleAt, head] (metadata-only edits left the text alone)
+    expect(answers).toEqual(Array.from({ length: head }, (_, i) => i + 1 >= eligibleAt));
+    for (const r of [1, eligibleAt - 1, eligibleAt, head]) expect(await revisionSignatureCounts(db, nodeId, r, REQ)).toBe(answers[r - 1]);
+  });
+});

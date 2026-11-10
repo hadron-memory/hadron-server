@@ -2136,12 +2136,13 @@ export const agentTaskMutations = {
     }, { lockWorkerIds: [p.lockedAssignee], taskGraph: input.blockedBy?.length ? 'exclusive' : 'shared' });
     // #1707 (cor:agt:060:06): a queued task is matched now, after its create
     // committed; the returned task shows the assignee when one was free.
-    if (input.match) await matchTaskNow(ctx.db, made.id, new Date());
-    else if (made.queued) await matchAfterChange(ctx.db, p.app.id);
+    // #3816 (V22): a failed match's candidates ride this answer only; they are never stored.
+    const skipped = input.match ? await matchTaskNow(ctx.db, made.id, new Date()) : null;
+    if (!input.match && made.queued) await matchAfterChange(ctx.db, p.app.id);
     const created = await afterTaskCreate(ctx, info, made.id, p.warn);
     // #2694 (cor:agt:020:11 r3): creating a task is the one task write outside `mutateTask`; same rule as there.
     if (p.actor.kind === 'worker' && ctx.sessionId) await touchSessionIfLive(ctx.db as never, ctx.sessionId, p.actor.workerId);
-    return created;
+    return skipped ? Object.assign(created, { matchSkipped: skipped }) : created;
   },
 
   /**
@@ -3261,6 +3262,8 @@ export const agentTaskFieldResolvers = {
     },
   },
   AgentTask: {
+    /** #3816 (V22): present only on the create answer that ran the match; a later read has none. */
+    matchSkipped: (t: TaskRow & { matchSkipped?: unknown }) => t.matchSkipped ?? null,
     matchFailure: (t: TaskRow) => t.matchFailedAt && t.matchFailedReason ? { reason: t.matchFailedReason, failedAt: t.matchFailedAt } : null,
     /** #2663: current dispositions, in immutable finding order, separate from the finished result. */
     findingDispositions: (t: TaskRow, args: { limit?: number | null; offset?: number | null }) => {

@@ -7281,6 +7281,28 @@ export const typeDefs = `#graphql
     total: Int!
   }
 
+  """
+  #3690 PR 2 (hrn:node:hadronmemory.com:specs:cor:acl:140:05): what a bound worker asks for. There is deliberately no field for activation, a verifier, a signature, a use count, a version or an issuer: a grant is born pending and only signing (#3649) can make it live.
+  """
+  input CreateGrantInput {
+    "A registered action's dotted name, such as schedule.create."
+    action: String!
+    "Exactly the action's declared parameters, each a string or a list of distinct strings (an id, never a URN); any other key or shape is refused. Never put a secret here."
+    values: JSON!
+    "WORKER (the calling worker itself) or AGENT (its role agent, installed in this App). Any other holder is refused."
+    holderKind: GrantHolderKind!
+    "The holder's id (not a URN)."
+    holderRef: String!
+    "The grant is not usable before this time once it is signed."
+    startsAt: DateTime
+    "Not usable after this time; must follow startsAt when both are given."
+    expiresAt: DateTime
+    "At most this many uses once signed; a positive integer."
+    maxUses: Int
+    "Why the grant is asked for: shown to the signer as the requester's words, labelled as theirs."
+    reason: String!
+  }
+
   "Webhook trigger (D-2026-05-02). The secret is NEVER exposed here — the URL is returned once at create/rotate."
   type AgentWebhook {
     "Optional per-run token limit (#2479): positive, no greater than the platform default at save; narrowed again at launch. Null uses the default."
@@ -8624,6 +8646,25 @@ export const typeDefs = `#graphql
   "#3448 — readiness ignores opaque properties (hrn:node:hadronmemory.com:specs:cor:agt:050:28)."
   type PullRequestReadiness { ready: Boolean! head: String! slots: [ReviewSlotReadiness!]! }
 
+  "Advisory current eligible workers and task-held utilization, grouped and ranked; no matching or authority effect."
+  type TeamUtilization {
+    appId: ID!
+    computedAt: DateTime!
+    windowHours: Int!
+    combinations: [WorkerUtilization!]!
+  }
+  "One current family/tier/role combination. Unknown tier has its own null row; retired workers are excluded."
+  type WorkerUtilization {
+    family: String!
+    tier: String
+    role: String
+    eligibleWorkers: Int!
+    busyWorkers: Int!
+    utilization: Float!
+    "Slice 1: true only for zero eligible workers (then utilization=1). Failure-only saturation reads false until the deferred match-outcome integration; no alarm is emitted by this read."
+    saturated: Boolean!
+  }
+
   type Query {
     "#3448 — task readers, including the App's own live key (hrn:node:hadronmemory.com:specs:cor:agt:050:21 / hrn:node:hadronmemory.com:specs:cor:agt:050:23). Null for an unreadable task. PR_HEAD_NOT_FROZEN or REVIEW_SCHEDULE_MISSING for absent event facts."
     pullRequestReadiness(taskRef: ID!, head: String!): PullRequestReadiness
@@ -8860,6 +8901,20 @@ export const typeDefs = `#graphql
     the App's task audience (hrn:node:hadronmemory.com:specs:cor:agt:050:21). Retired workers are left out.
     """
     teamRoster(appRef: ID!): TeamRoster!
+    "#3819 slice 1: advisory utilization in the roster audience (hrn:node:hadronmemory.com:specs:cor:agt:050:21). Window defaults to 24h, range 1–168; tier is high/mid/low. Failed-match saturation and alarms await their historical provider."
+    teamUtilization(appRef: ID!, family: String, tier: String, role: String, windowHours: Int = 24): TeamUtilization!
+
+    """
+    #3820 — the token-burn projection of one subscription account in an App: the 5-hour and 7-day windows' use at their
+    reset as a range, from the burn over the last 1h, 6h and 24h of history, with an optional what-if (add workers, or move
+    one to another account). The history is the account-usage objects in the App's own team-space memory. Readers: as the
+    team's tasks and events are read (hrn:node:hadronmemory.com:specs:cor:agt:140:03, which rests on
+    hrn:node:hadronmemory.com:specs:cor:agt:050:21 and hrn:node:hadronmemory.com:specs:cor:agt:050:23): the App's
+    participants and its own key; anyone else is refused APP_NOT_FOUND. ADVISORY ONLY: the answer
+    never authorizes, refuses or moves anything. An account with no history, or only history older than 60 minutes, is
+    UNKNOWN; under 5% used, or fewer than 3 snapshots spanning an hour, is INSUFFICIENT_DATA and gives no run-out time.
+    """
+    accountUsageProjection(appRef: ID!, account: String!, host: String, family: String, whatIf: AccountUsageWhatIfInput): AccountUsageProjection!
     """
     #2061 — direct-report lanes from the same roster projection and read gate as teamRoster.
     One bounded RepeatableRead snapshot per call; no hierarchy rollups or role exclusions.
@@ -12008,6 +12063,10 @@ export const typeDefs = `#graphql
     #3649 slice B (hrn:node:hadronmemory.com:specs:cor:acl:140:07) — ask for one pending grant to be signed. Whoever may read the grant may ask (as grant(ref:) reads it), a bound worker included; workers never sign. No signer is named: whoever signs must be able to issue it. The request pins the grant's version and terms hash. Refusals: FORBIDDEN while impersonating; GRANT_NOT_FOUND (unknown and unreadable alike); GRANT_NOT_PENDING (activated, revoked, or its holder gone; no state is named); GRANT_EXPIRED (past its expiry, so it can never be signed); GRANT_TERMS_UNREPRESENTABLE (extensions.reason). No call takes an assertion: the signer signs on the server-hosted ceremony page.
     """
     requestGrantSignature(grantRef: ID!): GrantSigningRequest!
+    """
+    #3690 PR 2 (hrn:node:hadronmemory.com:specs:cor:acl:140:05) — ask for a grant. Only a bound worker session may call it, in its own App, for itself or its role agent (installed in the App); the row is born pending and allows nothing until it is signed (#3649). Returns the grant as grant(ref:) reads it. Refusals, each before any write and none naming a submitted value: GRANT_REQUESTER_NOT_WORKER, GRANT_HOLDER_NOT_ALLOWED (any other holder, or an agent not installed here), GRANT_ACTION_UNKNOWN, GRANT_VALUES_INVALID (a value that does not match the action's declared parameters, or an undeclared key), GRANT_TERMS_INVALID. No MCP tool. Present only where signing is switched on (PASSKEY_SIGNING_ENABLED).
+    """
+    createGrant(input: CreateGrantInput!): Grant!
     "#3649 slice B (hrn:node:hadronmemory.com:specs:cor:acl:140:07) — withdraw an open grant signing request. Only the requester account, from any of its sessions or workers. Refusals: FORBIDDEN while impersonating, SIGNING_REQUEST_NOT_FOUND, SIGNING_REQUEST_NOT_REQUESTER, SIGNING_REQUEST_ENDED (extensions.state)."
     withdrawGrantSigningRequest(id: ID!): GrantSigningRequest!
     "#1591 — approve the current revision of every live node of a memory (ID or fully-qualified URN) in the mint scope (unminted, or minted and changed since or with no recorded minted revision, #1612) that isn't approved yet, in one transaction. Placeholders are skipped and reported."
@@ -15862,6 +15921,35 @@ export const typeDefs = `#graphql
 
   type AgentTaskDependencyPage { items: [AgentTask!]!, total: Int!, hasMore: Boolean! }
 
+  "One candidate a failed match skipped (#3816): the worker and every reason, in AgentTaskMatchSkipReason order."
+  type AgentTaskSkippedCandidate {
+    workerId: ID!
+    name: String!
+    reasons: [AgentTaskMatchSkipReason!]!
+  }
+
+  """
+  Why a failed match skipped a candidate (#3816, V21). Closed and additive: values are added, never renamed.
+  STOP_SIGNAL names a matcher condition V21 lacked. There is no value for a bound, quiet worker: hadron-server#3815 removes that exclusion.
+  """
+  enum AgentTaskMatchSkipReason {
+    RETIRED
+    USES_NO_TASKS
+    ENDING_SESSION
+    HOLDS_TASK
+    UNAVAILABLE
+    FAMILY_UNAVAILABLE
+    STALLED
+    NO_FAMILY
+    NOT_HELD
+    FAMILY_EXCLUDED
+    NAME_EXCLUDED
+    TIER_BELOW_MINIMUM
+    TIER_UNKNOWN
+    MODEL_GROUP_MISMATCH
+    STOP_SIGNAL
+  }
+
   "Single-shot failure (hrn:node:hadronmemory.com:specs:cor:agt:050:01): assigning clears it; cancellation clears it."
   type AgentTaskMatchFailure {
     reason: String!
@@ -15875,6 +15963,12 @@ export const typeDefs = `#graphql
   workers acting through their sessions included (hrn:node:hadronmemory.com:specs:cor:agt:050:21).
   """
   type AgentTask {
+    """
+    #3816 (V21-V23, hrn:node:hadronmemory.com:specs:cor:agt:050:01): the candidates a failed match skipped, each with EVERY reason it
+    was skipped, in the enum's declared order. Returned only in the createAgentTask(match: true) answer; never stored, so any
+    later read is null (as is a match that assigned, and a create without match: true).
+    """
+    matchSkipped: [AgentTaskSkippedCandidate!]
     "Null unless an opt-in single-shot match failed. No assignment-unassignable alarm is raised for it."
     matchFailure: AgentTaskMatchFailure
     "#2644 (hrn:node:hadronmemory.com:specs:cor:agt:050:01) — priority1 is highest; range1..5, default1. Matching only, never authority."
@@ -16818,6 +16912,99 @@ export const typeDefs = `#graphql
     appId: ID!
     asOf: DateTime!
     workers: [TeamRosterEntry!]!
+  }
+
+  "#3820 — a subscription account's rate-limit windows: the 5-hour and 7-day ones, or OTHER for a family's window of another length (see lengthMinutes)."
+  enum AccountUsageWindow { FIVE_HOUR SEVEN_DAY OTHER }
+  "#3820 — PROJECTED has a range; INSUFFICIENT_DATA has none (never a run-out time); UNKNOWN has no trustworthy data."
+  enum AccountUsageStatus { PROJECTED INSUFFICIENT_DATA UNKNOWN }
+  """
+  #3820 — why a window is not PROJECTED. UNKNOWN: NO_HISTORY, NO_WINDOW (no snapshot reports this window), STALE (newest
+  snapshot over 60 minutes old), NO_RESET, RESET_PASSED, NO_WORKERS_CONFIGURED (a what-if needs the account's workers),
+  WHATIF_SOURCE_UNKNOWN (the moved worker's burn is not known). INSUFFICIENT_DATA: LOW_USE (under 5% used),
+  TOO_FEW_SNAPSHOTS (fewer than 3, or spanning under an hour).
+  """
+  enum AccountUsageReason {
+    NO_HISTORY NO_WINDOW STALE NO_RESET RESET_PASSED NO_WORKERS_CONFIGURED WHATIF_SOURCE_UNKNOWN LOW_USE TOO_FEW_SNAPSHOTS
+  }
+  "#3820 — how many of the 1h, 6h and 24h lookbacks had data: one is LOW, two MEDIUM, three HIGH."
+  enum AccountUsageConfidence { LOW MEDIUM HIGH }
+  "#3820 — FLAT is a constant burn rate; WEEKLY follows the hour-of-week shape of at least a week of history."
+  enum AccountUsageShape { FLAT WEEKLY }
+
+  "#3820 — percentage points of a window used per hour."
+  type AccountUsageBurnRange {
+    lowPctPerHour: Float!
+    highPctPerHour: Float!
+  }
+
+  "#3820 — one window of one account."
+  type AccountUsageWindowProjection {
+    window: AccountUsageWindow!
+    "The window's length in minutes."
+    lengthMinutes: Int!
+    status: AccountUsageStatus!
+    reason: AccountUsageReason
+    "Used share at the newest snapshot, 0 to 100."
+    usedPct: Float
+    resetsAt: DateTime
+    "When the newest snapshot of this window was observed."
+    observedAt: DateTime
+    "Projected use at the reset, lower and upper end of the range, each capped at 100."
+    lowPctAtReset: Float
+    highPctAtReset: Float
+    "The account's burn range over the lookbacks."
+    burn: AccountUsageBurnRange
+    "The account's burn divided by the workers configured on it; null when none are."
+    perWorkerBurn: AccountUsageBurnRange
+    confidence: AccountUsageConfidence
+    shape: AccountUsageShape
+    "Only when even the lower end of the range reaches 100% before the reset."
+    runsOutAt: DateTime
+    "The token ceiling (85) that canAddWorker's token constraint compares the projected use to."
+    ceilingPct: Float!
+  }
+
+  "#3820 — the other account of a moved worker, before and after."
+  type AccountUsageMoveTarget {
+    account: String!
+    baseline: [AccountUsageWindowProjection!]!
+    adjusted: [AccountUsageWindowProjection!]!
+  }
+
+  "#3820 — the what-if: the asked account's windows after the change, and, for a move, the target account's."
+  type AccountUsageWhatIf {
+    adjusted: [AccountUsageWindowProjection!]!
+    target: AccountUsageMoveTarget
+  }
+
+  "#3820 — one account's projection. workers are the names the collector configured on the account."
+  type AccountUsageProjection {
+    account: String!
+    family: String
+    host: String
+    asOf: DateTime!
+    newestSnapshotAt: DateTime
+    workers: [String!]!
+    workersConfigured: Boolean!
+    windows: [AccountUsageWindowProjection!]!
+    whatIf: AccountUsageWhatIf
+  }
+
+  "#3820 — exactly one of the two."
+  input AccountUsageWhatIfInput {
+    "Add this many workers (1 to 50) to the account, each burning the account's per-worker estimate."
+    addWorkers: Int
+    "Move one worker from the projected account to another; it takes the source's per-worker estimate with it."
+    moveWorker: AccountUsageMoveWorkerInput
+  }
+
+  input AccountUsageMoveWorkerInput {
+    worker: String!
+    toAccount: String!
+    "Needed only when the target label has history from more than one host or family."
+    toHost: String
+    toFamily: String
   }
 
   "#1706 — every availability record in one App."

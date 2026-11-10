@@ -255,7 +255,7 @@ it('Anne: an attempt that waited on the worker lock and then re-read nobody free
   const w = await worker('reviewer');
   const t = await create({ requirements: { role: 'reviewer' } });
   await db.agentTask.update({ where: { id: t.id }, data: { matchPending: true } });
-  let attempt: Promise<void> | null = null;
+  let attempt: Promise<unknown> | null = null;
   await db.$transaction(async (tx) => {
     await lockWorkersForAssignment(tx, [w.id]);
     attempt = matchTaskNow(db, t.id, new Date()); // judges the snapshot (worker free), then waits on the lock
