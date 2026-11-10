@@ -13,6 +13,8 @@ export async function endpointTypeContracts(db: Parameters<typeof resolveInherit
   identity[0]!.endpoint.name;
   // @ts-expect-error Identity projection does not select content.
   identity[0]!.endpoint.content;
+  // @ts-expect-error Identity-only hydration requires the bounded page path.
+  await resolveInheritedEdges(db, { ...args, identityOnly: true });
   const full = await resolveInheritedEdges(db, args);
   full[0]!.endpoint.content satisfies string | null;
 }
