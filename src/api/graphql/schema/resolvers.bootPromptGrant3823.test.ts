@@ -10,7 +10,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { runAsActor } from '../../../lib/requestActor.js';
-import { isGrantableEdit, spendEditGrant } from '../../../lib/grants/bootPromptGrant.js';
+import { hasUsableEditGrant, isGrantableEdit, spendEditGrant } from '../../../lib/grants/bootPromptGrant.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { upsertPlatformActions } from '../../../lib/grants/actions.js';
@@ -406,5 +406,19 @@ describe('isGrantableEdit, directly (each condition alone defeats the lift)', ()
     expect(isGrantableEdit({ ...prior, nodeType: 'compiled-boot-prompt' }, ok)).toBe(false);
     expect(isGrantableEdit({ ...prior, role: 'notes' }, ok)).toBe(false);
     expect(isGrantableEdit(null, ok)).toBe(false);
+  });
+});
+
+describe('spendEditGrant re-judges the signer itself (Riana F6)', () => {
+  it('a signer demoted after the pre-check but before the spend admits nothing and writes no USE', async () => {
+    const second = await db.user.create({ data: { githubId: 382304, githubUsername: 'g-third', handle: 'g-third', roles: [] } });
+    await db.orgMember.create({ data: { organizationId: orgId, userId: second.id, role: 'ADMIN' } });
+    const s = await src(installMemoryId, `boot:workers:${workerId}:source`);
+    const g = await grant(s.id, { verified_by: second.id, issuer_user_id: second.id });
+    const facts = { id: s.id, memoryId: installMemoryId, loc: s.loc };
+    expect(await db.$transaction((tx) => hasUsableEditGrant(tx, workerId, facts))).toBe(true);   // the pre-check passes
+    await db.orgMember.updateMany({ where: { organizationId: orgId, userId: second.id }, data: { role: 'CONTRIBUTOR' } });
+    expect(await db.$transaction((tx) => spendEditGrant(tx, workerId, facts))).toBe(false);       // the spend judges the signer again
+    expect(await uses(g)).toBe(0);
   });
 });
