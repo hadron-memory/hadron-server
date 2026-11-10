@@ -7309,7 +7309,7 @@ export const typeDefs = `#graphql
     appRef: String
     "A registered action's dotted name, such as schedule.create."
     action: String!
-    "Exactly the action's declared parameters, each a string or a list of distinct strings (an id, never a URN); any other key or shape is refused. Never put a secret here."
+    "Exactly the action's declared parameters, each a string or a list of at most 100 distinct strings per parameter (an id, never a URN; hrn:node:hadronmemory.com:specs:cor:acl:140:01). Any other key or shape is refused. Never put a secret here."
     values: JSON!
     "WORKER (the calling worker itself) or AGENT (its role agent, installed in this App). Any other holder is refused."
     holderKind: GrantHolderKind!
@@ -7321,7 +7321,7 @@ export const typeDefs = `#graphql
     expiresAt: DateTime
     "At most this many uses once signed; a positive integer."
     maxUses: Int
-    "Why the grant is asked for: shown to the signer as the requester's words, labelled as theirs."
+    "Why the grant is asked for: at most 2,000 Unicode characters (code points; hrn:node:hadronmemory.com:specs:cor:acl:140:01). Shown to the signer as the requester's words, labelled as theirs."
     reason: String!
   }
 
@@ -12105,7 +12105,7 @@ export const typeDefs = `#graphql
     """
     requestGrantSignature(grantRef: ID!): GrantSigningRequest!
     """
-    #3690 PR 2 (hrn:node:hadronmemory.com:specs:cor:acl:140:05) — ask for a grant. A bound worker session may call it, in its own App, for itself or its role agent (installed in the App). #3711: a PERSON who manages the App may call it too, naming the App in input.appRef, for a worker of the App or an agent installed in it; the row records that person, never a worker. Either way the row is born pending and allows nothing until it is signed (#3649). Returns the grant as grant(ref:) reads it (a manager reads it as appGrants does). Refusals, each before any write and none naming a submitted value: GRANT_REQUESTER_NOT_WORKER, GRANT_NOT_MANAGER (a person arm caller who does not manage the App, and an unknown App: the same answer), GRANT_HOLDER_NOT_ALLOWED (any other holder, or an agent not installed here), GRANT_ACTION_UNKNOWN, GRANT_VALUES_INVALID (a value that does not match the action's declared parameters, or an undeclared key), GRANT_TERMS_INVALID. Over MCP only the person arm exists (hadron_create_grant, ruling 0255 item 21). Present only where signing is switched on (PASSKEY_SIGNING_ENABLED).
+    #3690 PR 2 (hrn:node:hadronmemory.com:specs:cor:acl:140:05) — ask for a grant. A bound worker session may call it, in its own App, for itself or its role agent (installed in the App). #3711: a PERSON who manages the App may call it too, naming the App in input.appRef, for a worker of the App or an agent installed in it; the row records that person, never a worker. Either way the row is born pending and allows nothing until it is signed (#3649). Returns the grant as grant(ref:) reads it (a manager reads it as appGrants does). Refusals, each before any write and none naming a submitted value: GRANT_REQUESTER_NOT_WORKER, GRANT_NOT_MANAGER (a person arm caller who does not manage the App, and an unknown App: the same answer), GRANT_HOLDER_NOT_ALLOWED (any other holder, or an agent not installed here), GRANT_ACTION_UNKNOWN, GRANT_VALUES_INVALID (a value that does not match the action's declared parameters, or an undeclared key, or a list above 100 entries per parameter), GRANT_TERMS_INVALID (including a reason above 2,000 Unicode code points; hrn:node:hadronmemory.com:specs:cor:acl:140:01). These write-path limits never prevent rebuilding an existing grant's signature terms. Over MCP only the person arm exists (hadron_create_grant, ruling 0255 item 21). Present only where signing is switched on (PASSKEY_SIGNING_ENABLED).
     """
     createGrant(input: CreateGrantInput!): Grant!
     """
@@ -15980,6 +15980,7 @@ export const typeDefs = `#graphql
   """
   Why a failed match skipped a candidate (#3816, V21). Closed and additive: values are added, never renamed.
   STOP_SIGNAL names a matcher condition V21 lacked. There is no value for a bound, quiet worker: hadron-server#3815 removes that exclusion.
+  NO_LONGER_FREE (#3855, V59) is a candidate the snapshot found free that the final assignment check refused; it carries no other value.
   """
   enum AgentTaskMatchSkipReason {
     RETIRED
@@ -15997,6 +15998,7 @@ export const typeDefs = `#graphql
     TIER_UNKNOWN
     MODEL_GROUP_MISMATCH
     STOP_SIGNAL
+    NO_LONGER_FREE
   }
 
   "Single-shot failure (hrn:node:hadronmemory.com:specs:cor:agt:050:01): assigning clears it; cancellation clears it."

@@ -43,10 +43,15 @@ const MESSAGES: Record<GrantCreateCode, string> = {
   GRANT_TERMS_INVALID: 'The grant\'s terms cannot be recorded.',
 };
 
-/** A refusal of a create. The text is fixed per code: it never carries a submitted value or an id. */
+/** A refusal of a create. The text is fixed for each refusal case: it never carries a submitted value or an id. */
 export class GrantCreateRefusal extends Error {
   constructor(readonly code: GrantCreateCode, readonly detail?: string) {
-    super(MESSAGES[code]);
+    // Fixed bound messages name only the ruled limit, never a submitted value.
+    super(code === 'GRANT_TERMS_INVALID' && detail === 'REASON_TOO_LONG'
+      ? 'A grant reason must contain at most 2,000 characters.'
+      : code === 'GRANT_VALUES_INVALID' && detail === 'LIST_TOO_LONG'
+        ? 'Each grant value list must contain at most 100 entries.'
+        : MESSAGES[code]);
     this.name = 'GrantCreateRefusal';
   }
 }
@@ -67,6 +72,10 @@ export interface CreateGrantArgs {
   /** The agent whose authority anchor the caller holds (null: none). An agent holder is accepted only if it is exactly this agent. */
   heldAgentAnchor?: string | null;
 }
+
+// #3834 / ruling0266, cor:acl:140:01: admission only; stored terms remain rebuildable under :09.
+const MAX_REASON_CHARACTERS = 2000;
+const MAX_LIST_ENTRIES = 100;
 
 /** A stored node id: a token with no scheme, colon, dot, space or newline (cuids, 32-hex ids), never a URN or free text. */
 const NODE_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
@@ -143,8 +152,15 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
   }
   for (const p of declared) {
     const v = (values as Record<string, unknown>)[p.name];
+    if (Array.isArray(v) && v.length > MAX_LIST_ENTRIES) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', 'LIST_TOO_LONG');
     if (!valueMatchesType(p.type, v)) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
     if (p.refusesWildcard && v === '*') throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} refuses a wildcard`);
+  }
+
+  // Count Unicode code points like task findings, with a UTF-16 fast bound so counting work is bounded.
+  // Do NOT put this admission rule in grantTermsBytes: pre-existing larger rows must stay signable/verifiable.
+  if (typeof args.reason === 'string' && (args.reason.length > MAX_REASON_CHARACTERS * 2 || Array.from(args.reason).length > MAX_REASON_CHARACTERS)) {
+    throw new GrantCreateRefusal('GRANT_TERMS_INVALID', 'REASON_TOO_LONG');
   }
 
   // Every term is written exactly as the signature will cover it, so a row that cannot be written as `hadron-grant-terms-v1`
