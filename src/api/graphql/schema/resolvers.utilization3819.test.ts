@@ -67,7 +67,7 @@ describe('#3819 utilization count/ranked slice', () => {
       // Attribution names the request actor, not necessarily the assignee on a directed act.
       {appId,taskId:handed.id,type:'task.handed-back',actorWorkerId:b,createdAt:ago(1),payload:{code:'missing_input'}},
     ]});
-    expect((await read()).combinations[0]).toMatchObject({eligibleWorkers:3,busyWorkers:3,utilization:1});
+    expect((await read()).combinations[0]).toMatchObject({eligibleWorkers:3,busyWorkers:3,utilization:1,saturated:false});
   });
   it('retired and effective unavailable workers do not enter either count; lapsed marks do', async () => {
     const [a,b,c,d] = await Promise.all([worker(),worker(),worker(),worker()]);
@@ -98,7 +98,10 @@ describe('#3819 utilization count/ranked slice', () => {
     await worker({role:'server-engineer'});
     const r=await read();
     expect(r.combinations.map((x:any)=>[x.family,x.role])).toEqual([['codex','server-engineer'],['claude','server-engineer'],['claude','qa-engineer']]);
-    expect((await read({family:'claude',tier:'mid',role:'qa-engineer'})).combinations).toHaveLength(1);
+    await worker({model:'claude-opus-5-5',role:'qa-engineer'});
+    const filtered = (await read({family:'claude',tier:'mid',role:'qa-engineer'})).combinations;
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0]).toMatchObject({tier:'mid',role:'qa-engineer',eligibleWorkers:2});
     expect((await read({family:'glm'})).combinations).toEqual([]);
   });
   it.each([0,169])('refuses windowHours %s after roster admission',async windowHours=>{

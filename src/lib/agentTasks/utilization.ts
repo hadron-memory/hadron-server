@@ -1,5 +1,5 @@
 /**
- * #3819 slice 1, Vera V1–V5/V8 and Xabat6762777653: current eligible workers grouped by binding family/tier/role,
+ * #3819 slice 1 (cor:agt:060:01/:02/:04, cor:agt:050:21), Vera V1–V5/V8 and Xabat6762777653: current eligible workers grouped by binding family/tier/role,
  * and whether each held work during the window. Advisory only; never a matching or authorization input.
  * Failure-driven saturation, match-outcome history and alarm episodes await their separate provider/integration.
  */
