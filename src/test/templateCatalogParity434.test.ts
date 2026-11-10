@@ -81,7 +81,8 @@ function squash(d: string, functionDefinition = true): string {
     const start = i;
     if (/\s/.test(d[i])) {
       while (i < d.length && /\s/.test(d[i])) i++;
-      out += ' ';
+      // A line comment already emitted its significant newline; indentation after it adds no token.
+      out += out.endsWith('\n') ? '' : ' ';
     } else if (d[i] === "'" || d[i] === '"') {
       const quote = d[i++];
       const escaped = quote === "'" && /(?:^|[^A-Za-z_0-9$])E$/i.test(d.slice(0, start));
@@ -126,7 +127,8 @@ function squash(d: string, functionDefinition = true): string {
 
 /**
  * Objects added, removed or redefined between two snapshots, one line each. A function whose body differs
- * ONLY in whitespace outside literals/comments is `reformatted`, not `changed`: Postgres stores an SQL function's body as written
+ * ONLY in whitespace outside literals/comments is `reformatted`, not `changed`: Postgres stores
+ * an SQL function's body as written
  * (constraints, indexes and triggers are deparsed canonically, so they cannot differ that way), and a
  * copy indented inside a JS template literal differs from post-push.sql in nothing else. It is still
  * reported, never dropped.
@@ -219,12 +221,14 @@ describe('#434 the template catalog comparator (fresh template, rolled-back cont
     await failingAdmin.connect();
     try {
       await failingAdmin.query('BEGIN');
-      await expect(closeScratch(undefined, failingAdmin, scratch)).rejects.toMatchObject({ code: '25001' });
-    } finally {
+    } catch (error) {
       await failingAdmin.end().catch(() => {});
+      throw error;
     }
-    // The refused DROP leaves the scratch intact; the suite's afterAll still cleans it normally.
-    expect(await snapshot(client)).toEqual(fresh);
+    // Never target the live suite database, even if BEGIN were accidentally removed.
+    // PostgreSQL checks active_sql_transaction (25001) before looking up this nonexistent database.
+    // closeScratch owns failingAdmin from here and ends it exactly once, including on the refused DROP.
+    await expect(closeScratch(undefined, failingAdmin, `${scratch}_never_created`)).rejects.toMatchObject({ code: '25001' });
   });
 
   it('#2964 control: a real SQL literal whitespace change is changed', async () => {
@@ -290,11 +294,24 @@ describe('#2964 comparator safety controls', () => {
     ["SELECT 'a''  b';", "SELECT 'a'' b';"],
     ['SELECT "a  b";', 'SELECT "a b";'],
     [String.raw`SELECT E'a\'  b';`, String.raw`SELECT E'a\' b';`],
+    [String.raw`SELECT 'a\'  b';`, String.raw`SELECT 'a\' b';`], // valid escapes with standard_conforming_strings=off
+    ["SELECT E'a''  b';", "SELECT E'a'' b';"],
+    [String.raw`SELECT U&'a\0020  b';`, String.raw`SELECT U&'a\0020 b';`],
+    ['AS $nested$a  b$nested$;', 'AS $nested$a b$nested$;'],
+    ["EXECUTE $query$SELECT 'a  b'$query$;", "EXECUTE $query$SELECT 'a b'$query$;"],
     [String.raw`SELECT "a\" || "b  c";`, String.raw`SELECT "a\" || "b c";`],
     [String.raw`SELECT 'a\' || 'b  c';`, String.raw`SELECT 'a\' || 'b c';`],
-  ])('classes a quoted-content whitespace change as changed: %s', (before, after) => {
+  ])('classifies a quoted-content whitespace change as changed: %s', (before, after) => {
     const wrap = (body: string) => `CREATE OR REPLACE FUNCTION public.literal2964() RETURNS text LANGUAGE sql AS $function$\n${body}\n$function$;`;
     expect(diff(new Map([['fn:literal2964()', wrap(before)]]), new Map([['fn:literal2964()', wrap(after)]]))[0]).toMatch(/^changed fn:literal2964/);
+  });
+
+  it.each([
+    ['-- comment  text\nSELECT 1;', '-- comment text\nSELECT 1;'],
+    ['/* outer /* inner  text */ end */ SELECT 1;', '/* outer /* inner text */ end */ SELECT 1;'],
+  ])('keeps comment contents exact, including nested block comments: %s', (before, after) => {
+    const wrap = (body: string) => `CREATE FUNCTION x() RETURNS int LANGUAGE sql AS $function$\n${body}\n$function$;`;
+    expect(diff(new Map([['fn:x()', wrap(before)]]), new Map([['fn:x()', wrap(after)]]))[0]).toMatch(/^changed fn:x/);
   });
 
   it('re-indents SQL following a line comment without changing the comment terminator', () => {
@@ -302,7 +319,7 @@ describe('#2964 comparator safety controls', () => {
     expect(diff(new Map([['fn:x()', body]]), new Map([['fn:x()', body.replace(/\n/g, '\n    ')]]))[0]).toMatch(/^reformatted fn:x/);
   });
 
-  it('still classes ordinary re-indentation outside literals as reformatted', () => {
+  it('still classifies ordinary re-indentation outside literals as reformatted', () => {
     const body = "CREATE FUNCTION x() RETURNS text LANGUAGE sql AS $function$\nSELECT 'a  b';\n$function$;";
     expect(diff(new Map([['fn:x()', body]]), new Map([['fn:x()', body.replace(/\n/g, '\n    ')]]))[0]).toMatch(/^reformatted fn:x/);
   });
