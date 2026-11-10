@@ -148,3 +148,18 @@ it('a worker under a stop signal reads STOP_SIGNAL', async () => {
   expect(t.matchFailedReason).toBe('STOP_SIGNAL');
   expect(byName(t)).toEqual({ Paused: ['STOP_SIGNAL'] });
 });
+it('#3855 (V59): a candidate the snapshot found free and the final check refused is listed with NO_LONGER_FREE alone', async () => {
+  const racer = await worker('Racer'); const busy = await worker('Busy');
+  await hold(busy.id);
+  const real = db.$transaction.bind(db);
+  let armed = true;
+  // Armed on the first transaction after the create committed (its reservation exists), i.e. the assignment attempt, after the snapshot.
+  const spy = vi.spyOn(db, '$transaction').mockImplementation((async (...a: any[]) => {
+    if (armed && await db.agentTask.findFirst({ where: { title: 'Match', matchPending: true } })) { armed = false; spy.mockRestore(); await hold(racer.id); }
+    return (real as any)(...a);
+  }) as any);
+  const t = await create();
+  spy.mockRestore();
+  expect(t.matchFailedReason).toBe('NOBODY_FREE');
+  expect(byName(t)).toEqual({ Busy: ['HOLDS_TASK'], Racer: ['NO_LONGER_FREE'] });
+});
