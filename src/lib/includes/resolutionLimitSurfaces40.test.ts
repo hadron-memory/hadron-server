@@ -41,9 +41,9 @@ const Q = resolvers.Query as unknown as Record<string, (p: unknown, a: unknown, 
 const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<any>>;
 const readEvents = () => db.usageEvent.count({ where: { memoryId } });
 
-// #3839: keep the existing boundary here while the delayed-writer pin demonstrates its weakness.
+// #3839: resolver return does not imply completion of the deferred usage insert.
 async function settleExportUsage() {
-  await new Promise((r) => setTimeout(r, 50));
+  await drainNodeUsage(db);
 }
 
 async function bounded<T>(promise: Promise<T>): Promise<T> {
@@ -213,6 +213,8 @@ describe('#40 external artefacts refuse before the external call', () => {
     expect(vi.mocked(renderMarkdownToPdf)).not.toHaveBeenCalled();
     await expect(Q.nodeExport({}, { id: p.id, full: false }, ctx()))
       .rejects.toMatchObject({ extensions: { code: CONTENT_RESOLUTION_LIMIT_EXCEEDED } });
+    await settleExportUsage();
+    expect(await readEvents()).toBe(0);
     // The restore export reads with resolution off and is unaffected.
     expect((await Q.nodeExport({}, { id: p.id }, ctx())).data).toContain('{{> t}}');
     await settleExportUsage();
