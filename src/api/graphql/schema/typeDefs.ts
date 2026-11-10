@@ -1938,6 +1938,8 @@ export const typeDefs = `#graphql
     endedAt: DateTime
     "#1156 — hrn:node:hadronmemory.com:specs:cor:dmo:070:05: null while open; stamped cause after end, unknown for legacy ends. Readable wherever this Session is; no ending actor."
     endReason: SessionEndReason
+    "#3818 V25 — hrn:node:hadronmemory.com:specs:cor:dmo:070:05: immediate superseding session id; null unless that successor is currently readable under hrn:node:hadronmemory.com:specs:cor:agt:020:03. No historical backfill."
+    supersededBySessionId: String
     autoExpiredAt: DateTime
     """
     hadron-cli#791 / hrn:node:hadronmemory.com:specs:cor:agt:020:11:
@@ -13823,6 +13825,7 @@ export const typeDefs = `#graphql
     advanceChannelReadState(attendeeRef: ID!, appRef: ID, channelRef: ID!, seq: Int!): ChannelReadState!
 
     """
+    #3818 / hrn:node:hadronmemory.com:specs:cor:agt:020:03: an acting superseded sessionRef refuses SESSION_SUPERSEDED.
     #1353: explicitly advance the cursor owned by one exact,
     caller-owned live Worker session on one readable registered Channel.
     Shares the MCP mark-read helper; unlike advanceChannelReadState this door
@@ -14448,6 +14451,8 @@ export const typeDefs = `#graphql
     token, an expired or unverifiable one; checked before the App is resolved,
     so it answers identically whether or not the App exists).
 
+    #3818: an acting superseded sessionRef refuses SESSION_SUPERSEDED; current open sessionId/startedAt
+    are included only under hrn:node:hadronmemory.com:specs:cor:agt:020:03 session read access.
     appRef accepts the entity's ID or URN; sessionRef is the session id.
     """
     createTeamChatMessage(
