@@ -296,3 +296,15 @@ it('Anne: role null selects the open-role row, undefined does not narrow, a role
   expect((await latest({ windowHours: 24, role: null })).map(r => r.role)).toEqual([null]);
   expect((await latest({ windowHours: 24, role: 'ENGINEER' })).map(r => r.role)).toEqual(['engineer']);
 });
+
+it('Anne: a queued-sweep failure is stamped when it was judged, so a success that landed before its write stands', async () => {
+  await worker('reviewer'); // a free candidate that fits no requirement: the loop path, no assignment
+  await create({ requirements: { role: 'engineer' } });
+  const original = db.$executeRaw.bind(db);
+  const spy = vi.spyOn(db, '$executeRaw').mockImplementationOnce(((...args: any[]) =>
+    // the sweep's failure write is delayed past another attempt's success for the same combination
+    recordMatchOutcome(db, app.id, { role: 'engineer' }, 'MATCHED').then(() => (original as any)(...args))) as any);
+  await matchQueuedTasks(db, new Date(), { appId: app.id });
+  spy.mockRestore();
+  expect((await latest({ windowHours: 24, role: 'engineer' }))[0]).toMatchObject({ outcome: 'MATCHED', failingSince: null });
+});
