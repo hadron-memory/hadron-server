@@ -183,6 +183,12 @@ describe('approval under a batch grant', () => {
     for (const id of [s.id, theirs.id, mine.id]) expect(await codeOf(approve(id))).toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
   });
 
+  it('a plain boot-prompt node squatting a :compiled loc is not a compiled prompt: a grant naming it admits nothing', async () => {
+    const squat = await source(installId, `boot:workers:${workerId}:compiled`);
+    await grant(squat.id);
+    expect(await codeOf(approve(squat.id))).toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+  });
+
   it('a person approving as themselves is unaffected', async () => {
     const c = await compiled(installId, `boot:workers:${workerId}:compiled`);
     expect(await codeOf(M.approveNode(null, { nodeRef: c.id }, ctx()))).toBe('NO_ERROR');

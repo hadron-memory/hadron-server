@@ -10,6 +10,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { runAsActor } from '../../../lib/requestActor.js';
+import { spendEditGrant } from '../../../lib/grants/bootPromptGrant.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { upsertPlatformActions } from '../../../lib/grants/actions.js';
@@ -104,6 +105,14 @@ describe('a worker edits its own source under a grant (#3823 acceptance 1, 6)', 
     await edit(s.id, 'first');
     expect(await codeOf(edit(s.id, 'second'))).toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
     expect((await db.node.findUniqueOrThrow({ where: { id: s.id } })).content).toBe('first');
+  });
+
+  it('two racing edits on one grant: exactly one is admitted and one USE is written (lock, then judge)', async () => {
+    const s = await src(installMemoryId, `boot:workers:${workerId}:source`);
+    const g = await grant(s.id);
+    const codes = await Promise.all([edit(s.id, 'a'), edit(s.id, 'b'), edit(s.id, 'c')].map(codeOf));
+    expect(codes.filter((c) => c === 'NO_ERROR')).toHaveLength(1);
+    expect(await uses(g)).toBe(1);
   });
 
   it('the role Agent\'s own boot:source (system memory) is in scope when the signer manages the Agent', async () => {
@@ -247,6 +256,30 @@ describe('over MCP (hadron_update_node), the same grant and the same boundary (#
     const t = await src(otherMem.id, 'boot:source');
     const g = await grant(t.id);
     expect(await mcpEdit('hrn:node:g3823.example:other-sys:boot:source')).toContain('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+    expect(await uses(g)).toBe(0);
+  });
+});
+
+describe('spendEditGrant locks the grant row, THEN judges it (#3823)', () => {
+  it('a revocation that commits while the spend waits for the lock is seen: nothing is spent', async () => {
+    const s = await src(installMemoryId, `boot:workers:${workerId}:source`);
+    const g = await grant(s.id);
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const lockedP = new Promise<void>((r) => { locked = r; });
+    const revoker = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM grants WHERE id = ${g} FOR UPDATE`;
+      locked();
+      await held;
+      await tx.$executeRaw`UPDATE grants SET revoked_at = (clock_timestamp() AT TIME ZONE 'UTC'), revoked_by = ${admin.id} WHERE id = ${g}`;
+    });
+    await lockedP;
+    const spender = db.$transaction((tx) => spendEditGrant(tx, workerId, { id: s.id, memoryId: installMemoryId, loc: s.loc }));
+    await new Promise((r) => setTimeout(r, 300));
+    release();
+    await revoker;
+    expect(await spender).toBe(false);
     expect(await uses(g)).toBe(0);
   });
 });
