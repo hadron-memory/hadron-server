@@ -1,3 +1,4 @@
+import { createCipheriv } from 'node:crypto';
 import { WORKER_SIGNATURE_DEFAULTS } from './workerSignature.js';
 /**
  * #1384/#1421 — the paged (v2) attention regression matrix (contract #2977,
@@ -15,7 +16,7 @@ import { generateId } from './id.js';
 import { ensureChannelWithRoot } from './channels.js';
 import { appendChatMessage } from './chatRoot.js';
 import { encryptNodeFields, getMemoryEncryptionInfo } from './nodeCrypto.js';
-import { generateDataKey } from './crypto.js';
+import { decryptJson, decryptString, markCiphertext, stripCiphertextPrefix, generateDataKey } from './crypto.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import {
@@ -233,6 +234,33 @@ describe('family 1b — #1365: a mention-only nudge beyond the scan bound', () =
     );
   }
 
+  // #3854: one assertion shared by the real backlog and deterministic controls.
+  function assertEncryptedRouting(row: { data: unknown; content: string | null }, _key: ReturnType<typeof generateDataKey>) {
+    expect(JSON.stringify(row.data)).not.toContain('dara');
+    expect(row.content ?? '').not.toContain('dara');
+  }
+
+  it('#3854 accepts authenticated ciphertext containing the worker slug, rejects plaintext routing', () => {
+    const key = { raw: Buffer.alloc(32, 7) };
+    // v1 | 12-byte IV | GCM tag | ciphertext. Offset 3 aligns a base64 quartet;
+    // these IV bytes deterministically encode "dara", without sampling/retries.
+    const iv = Buffer.alloc(12);
+    Buffer.from('dara', 'base64').copy(iv, 2);
+    const encode = (text: string) => {
+      const cipher = createCipheriv('aes-256-gcm', key.raw, iv);
+      const body = Buffer.concat([cipher.update(text, 'utf8'), cipher.final()]);
+      return Buffer.concat([Buffer.from([1]), iv, cipher.getAuthTag(), body]).toString('base64');
+    };
+    const data = { __enc: encode(JSON.stringify({ mentions: ['dara'] })) };
+    const content = markCiphertext(encode('@dara'));
+    expect(data.__enc).toContain('dara');
+    expect(content).toContain('dara');
+    expect(decryptJson(data.__enc, key)).toEqual({ mentions: ['dara'] });
+    expect(decryptString(stripCiphertextPrefix(content), key)).toBe('@dara');
+    expect(() => assertEncryptedRouting({ data: { ...data, mentions: ['dara'] }, content }, key)).toThrow();
+    assertEncryptedRouting({ data, content }, key);
+  });
+
   /** Seven messages; Dara's own self-mention at seq 6, the only other mention of Dara at seq 7. */
   async function postLateMentionBacklog() {
     for (let i = 0; i < 5; i++) await postEncrypted(`filler ${i}`);
@@ -242,8 +270,9 @@ describe('family 1b — #1365: a mention-only nudge beyond the scan bound', () =
     const rows = await db.node.findMany({ where: { messageChannelId: channel.id }, select: { data: true, content: true } });
     expect(rows).toHaveLength(7);
     for (const row of rows) {
-      expect(JSON.stringify(row.data)).not.toContain('dara');
-      expect(row.content ?? '').not.toContain('dara');
+      const key = sessionKeyCache.getByMemoryId(channel.memoryId);
+      if (!key) throw new Error('encrypted fixture requires its memory key');
+      assertEncryptedRouting(row, key);
     }
   }
 
