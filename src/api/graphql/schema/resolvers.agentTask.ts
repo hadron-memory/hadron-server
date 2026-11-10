@@ -1957,13 +1957,14 @@ async function applyTaskCreateBlockers(
 
 /** What a committed create does next: start the assignee it names (#1709) and file its warnings (#2198). */
 async function afterTaskCreate(
-  ctx: Context, info: Pick<GraphQLResolveInfo, 'path'> | undefined, taskId: string, warn: TaskWarningCode[], madeWithAssignee: boolean, family?: string,
+  ctx: Context, info: Pick<GraphQLResolveInfo, 'path'> | undefined, taskId: string, warn: TaskWarningCode[], startItsAssignee: boolean, family?: string,
 ) {
   const created = await ctx.db.agentTask.findUniqueOrThrow({ where: { id: taskId } });
-  // #1709 (cor:agt:070:08): created straight onto a worker, it may start that worker. #3815 (ruling 0265 V16-V19): an
-  // assignee the MATCHER chose after the create is started (or not) by the matcher's own rule, a host start only for a
-  // worker with no open session, so it is never launched again here through the live-only launch check.
-  if (madeWithAssignee) await launchAssignee(ctx.db, created, family);
+  // #1709 (cor:agt:070:08): `startItsAssignee` is true when the create NAMED its assignee, or a distinct-batch match chose a
+  // worker with no open session (`needsHostStart`). #3815 (ruling 0265 V16-V19): any other matcher-chosen assignee is started
+  // by the matcher's own rule (a host start only for a worker with no open session), so this live-only launch check must not
+  // run for it. `matchTaskNow` runs after the create transaction commits, so `created` below already carries its assignee.
+  if (startItsAssignee) await launchAssignee(ctx.db, created, family);
   await emitTaskWarnings(ctx, info, created.appId, { codes: warn, taskId: created.id });
   return created;
 }
