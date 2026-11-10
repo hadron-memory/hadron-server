@@ -101,13 +101,19 @@ it('independently gates a stored successor behind strict personal-memory ownersh
   expect(r.body.singleResult.data).toEqual({ session: { id: a.id, supersededBySessionId: null } });
 });
 
-it('follows the superseding chain rather than a newer other-driver open session', async () => {
+it.each([true, false])('V66 names the current worker session after its successor ended, only if readable (%s)', async readable => {
   const { a, b } = await displaced();
-  const c = await bind(true);
-  // A newer readable row from another driver must never replace this driver's chain (#3818 Bruce94870).
-  await db.session.create({ data: { id: generateId(), userId: stranger.id, appId: app.id, workerId: worker.id, startedAt: new Date(Date.now() + 86400000) } });
-  expect((await db.session.findUniqueOrThrow({ where: { id: a.id } })) as any).toMatchObject({ supersededBySessionId: b.id });
-  await expect(validateSessionBinding(db, ctx(), a.id)).rejects.toMatchObject({ extensions: { code: 'SESSION_SUPERSEDED', sessionId: c.id, startedAt: c.startedAt.toISOString() } });
+  await M.endSession({}, { id: b.id }, ctx());
+  const memory = readable ? null : await db.memory.create({ data: {
+    ownerUserId: stranger.id, userId: stranger.id, class: 'personal', name: 'Private current', urn: `test:v66-${generateId()}`,
+  } });
+  const current = await db.session.create({ data: { id: generateId(), userId: stranger.id, appId: app.id,
+    workerId: worker.id, memoryId: memory?.id, startedAt: new Date(Date.now() + 86400000) } });
+  expect((await db.session.findUniqueOrThrow({ where: { id: a.id } })).supersededBySessionId).toBe(b.id);
+  try { await validateSessionBinding(db, ctx(), a.id); expect.fail('must refuse'); }
+  catch (error) { expect((error as GraphQLError).extensions).toEqual({ code: 'SESSION_SUPERSEDED',
+    ...(readable ? { sessionId: current.id, startedAt: current.startedAt.toISOString() } : {}),
+  }); }
 });
 
 it('refuses an acting chat sessionRef before appending any message', async () => {
@@ -326,17 +332,12 @@ it('preserves the immediate successor chain when two forced binds are launched c
 });
 
 
-it.each(['missing-pointer', 'cycle', 'deleted-hop', 'non-superseded-hop'] as const)('discloses no unrelated open session for a %s chain', async kind => {
+it('V66 can name the current worker session for a historical supersession without a pointer', async () => {
   const { a, b } = await displaced();
-  const c = await bind(true);
-  if (kind === 'missing-pointer') await db.session.update({ where: { id: a.id }, data: { supersededBySessionId: null } });
-  if (kind === 'cycle') await db.session.update({ where: { id: b.id }, data: { supersededBySessionId: a.id } });
-  if (kind === 'deleted-hop') await db.session.update({ where: { id: b.id }, data: { deletedAt: new Date() } });
-  if (kind === 'non-superseded-hop') await db.session.update({ where: { id: b.id }, data: { endReason: 'ended' } });
-  expect(c.endedAt).toBeNull();
-  await expect(validateSessionBinding(db, ctx(), a.id)).rejects.toMatchObject({ extensions: { code: 'SESSION_SUPERSEDED' } });
-  try { await validateSessionBinding(db, ctx(), a.id); expect.fail('must refuse'); }
-  catch (error) { expect((error as GraphQLError).extensions).toEqual({ code: 'SESSION_SUPERSEDED' }); }
+  await db.session.update({ where: { id: a.id }, data: { supersededBySessionId: null } });
+  await expect(validateSessionBinding(db, ctx(), a.id)).rejects.toMatchObject({ extensions: {
+    code: 'SESSION_SUPERSEDED', sessionId: b.id, startedAt: b.startedAt.toISOString(),
+  } });
 });
 
 it('delegates a superseded error after headers were sent so Express closes the response', () => {
@@ -349,15 +350,3 @@ it('delegates a superseded error after headers were sent so Express closes the r
   expect(res.json).not.toHaveBeenCalled();
 });
 
-
-it('bounds traversal of a long superseding chain and refuses with code alone', async () => {
-  let reads = 0;
-  const lookup = vi.spyOn(db.session, 'findUnique').mockImplementation((async () => {
-    if (++reads > 65) throw new Error('superseding chain exceeded the lookup budget');
-    return { id: `chain-${reads}`, workerId: worker.id, endedAt: new Date(), endReason: 'superseded',
-      deletedAt: null, supersededBySessionId: `chain-${reads + 1}` } as any;
-  }) as unknown as typeof db.session.findUnique);
-  try {
-    await expect(refuseSupersededSession(ctx(), 'chain-1')).rejects.toMatchObject({ extensions: { code: 'SESSION_SUPERSEDED' } });
-  } finally { lookup.mockRestore(); }
-});
