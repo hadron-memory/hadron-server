@@ -79,8 +79,6 @@ case "$action" in
     printf '%s\n' "$backend" > "$state_dir/backend"
     printf '%s\n' "$E2E_PORT" > "$state_dir/api-port"
     printf '%s\n' "$E2E_PORTAL_PORT" > "$state_dir/portal-port"
-    # Recorded before the file is pushed, so a failed push still cleans up on down.
-    if (( private_env_active )); then : > "$state_dir/private-env"; fi
     if [[ "$backend" == incus ]]; then
       # Ownership metadata exists even if creation succeeds but boot fails.
       incus launch qa-docker "$project" -c security.nesting=true -c "user.hadron-e2e=$project"
@@ -97,6 +95,10 @@ case "$action" in
       incus exec "$project" -- sh -c 'mkdir -p /opt/hadron && tar -xf /opt/hadron-source.tar -C /opt/hadron && rm -f /opt/hadron-source.tar'
       for i in {1..30}; do incus exec "$project" -- docker info >/dev/null 2>&1 && break; sleep 1; done
       if (( private_env_active )); then
+        # Recorded before the push, so a failed push still cleans up on down. Placed
+        # here, not beside the other state files: scripts/diagnose/ownership.patch
+        # (#2619) patches that block and needs it contiguous.
+        : > "$state_dir/private-env"
         incus exec "$project" -- install -d -m 700 "$(dirname "$private_env_file")"
         incus file push --mode 600 --uid 0 --gid 0 "$E2E_PRIVATE_ENV_FILE" "$project$private_env_file"
         # Never show Compose's resolved configuration or its errors: both can carry values.
