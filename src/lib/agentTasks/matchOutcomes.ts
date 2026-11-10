@@ -60,8 +60,14 @@ export async function recordMatchOutcome(
   db: Db, appId: string, req: Requirements, outcome: MatchOutcomeKind, reason: string | null = null,
   /** When the decision was made (`decisionClock`), for a record written after a gap; default: now (DB clock). */
   decidedAt: Date | null = null,
+  /** Combinations counted IN ADDITION to the ones `req` names (the chosen worker's own, V37/V44), deduplicated. */
+  extra: Combination[] = [],
 ): Promise<void> {
-  const combos = combinationsOf(req);
+  const seen = new Set<string>();
+  const combos = [...combinationsOf(req), ...extra].filter(c => {
+    const k = JSON.stringify([c.family, c.tier, c.role]);
+    return !seen.has(k) && !!seen.add(k);
+  });
   if (combos.length === 0) return;
   const families = combos.map(c => c.family ?? '');
   const tiers = combos.map(c => c.tier ?? '');
@@ -80,7 +86,9 @@ export async function recordMatchOutcome(
         WHEN EXCLUDED.outcome = 'MATCHED' THEN NULL
         WHEN agent_match_outcomes.outcome = 'NO_WORKER' AND agent_match_outcomes.failing_since IS NOT NULL THEN agent_match_outcomes.failing_since
         ELSE EXCLUDED.decided_at END
-    WHERE agent_match_outcomes.decided_at <= EXCLUDED.decided_at`);
+    -- Ties (the column keeps milliseconds): a success is never overwritten by a failure stamped the same instant.
+    WHERE agent_match_outcomes.decided_at < EXCLUDED.decided_at
+       OR (agent_match_outcomes.decided_at = EXCLUDED.decided_at AND NOT (agent_match_outcomes.outcome = 'MATCHED' AND EXCLUDED.outcome = 'NO_WORKER'))`);
 }
 
 export type LatestMatchOutcome = {

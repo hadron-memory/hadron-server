@@ -50,7 +50,7 @@ it('a later success clears the streak: the latest is MATCHED against each named 
   const t = await create({ match: true, requirements: { role: 'reviewer', familyIn: ['claude', 'codex'] } });
   expect(t.assigneeWorkerId).not.toBeNull();
   const rows = await latest();
-  expect(rows.map(r => [r.family, r.role, r.outcome, r.failingSince])).toEqual([['claude', 'reviewer', 'MATCHED', null], ['codex', 'reviewer', 'MATCHED', null]]);
+  expect(rows.map(r => [r.family, r.role, r.outcome, r.failingSince])).toEqual([['claude', 'reviewer', 'MATCHED', null], ['claude', 'reviewer', 'MATCHED', null], ['codex', 'reviewer', 'MATCHED', null]]); // the middle one is the chosen worker's own (claude, mid, reviewer), V37
 });
 
 it('the open-tier case: a failing open-tier task, then a same-shape match: the tier-null row is MATCHED, streak cleared', async () => {
@@ -71,7 +71,7 @@ it('combinations do not shadow each other, and an App never reads another App\'s
   await create({ match: true, requirements: { role: 'engineer' } });
   await worker('reviewer');
   await create({ match: true, requirements: { role: 'reviewer' } });
-  expect((await latest()).map(r => [r.role, r.outcome])).toEqual([['engineer', 'NO_WORKER'], ['reviewer', 'MATCHED']]);
+  expect((await latest()).map(r => [r.role, r.outcome])).toEqual([['engineer', 'NO_WORKER'], ['reviewer', 'MATCHED'], ['reviewer', 'MATCHED']]); // the second reviewer row is the chosen worker's own combination
   expect(await latest({ windowHours: 24 }, other.id)).toEqual([]);
   expect(await latest({ windowHours: 24, role: 'engineer' })).toHaveLength(1);
 });
@@ -216,4 +216,15 @@ it('P3-6: unusable requirements name no combination and record nothing', async (
   await db.agentTask.update({ where: { id: t.id }, data: { matchPending: true, requirements: { maxTier: 'x' } } });
   await matchTaskNow(db, t.id, new Date());
   expect(await latest()).toEqual([]);
+});
+
+it('V37/V44: a match also counts against the chosen worker\'s own combination, clearing its saturated row', async () => {
+  const w = await worker('reviewer', 'claude');
+  // a real (claude, mid, reviewer) row saturated by an earlier no-worker answer
+  await recordMatchOutcome(db, app.id, { role: 'reviewer', familyIn: ['claude'], minTier: 'mid' }, 'NO_WORKER', 'NOBODY_FREE');
+  expect((await latest({ windowHours: 24, family: 'claude' }))[0]).toMatchObject({ tier: 'mid', outcome: 'NO_WORKER' });
+  const t = await create({ match: true }); // unconstrained: names no combination
+  expect(t.assigneeWorkerId).toBe(w.id);
+  expect(await latest({ windowHours: 24, family: 'claude' })).toEqual([expect.objectContaining({ family: 'claude', tier: 'mid', role: 'reviewer', outcome: 'MATCHED', failingSince: null })]);
+  expect(await latest({ windowHours: 24, family: null })).toEqual([expect.objectContaining({ family: null, tier: null, role: null, outcome: 'MATCHED' })]);
 });
