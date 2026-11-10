@@ -10014,7 +10014,7 @@ export const typeDefs = `#graphql
     orgBootPromptSigning(org: ID!): OrgBootPromptSigning!
     """
     #2973 PR2 / hrn:node:hadronmemory.com:specs:cor:agt:040:09: what switching the organisation's boot-prompt signing on
-    would change, paged (first 1-200, default 50; after is the previous page's endCursor). The audience and refusals are
+    would change, paged (first at least 1, default 20, served at 200 when more is asked, hrn:node:hadronmemory.com:specs:cor:api:120:04; after is the previous page's endCursor). The audience and refusals are
     orgBootPromptSigning's.
     """
     orgBootPromptSigningPreview(org: ID!, first: Int, after: String): BootPromptSigningPreview!

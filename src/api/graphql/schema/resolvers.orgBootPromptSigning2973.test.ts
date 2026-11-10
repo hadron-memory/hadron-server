@@ -236,10 +236,20 @@ describe('the preview', () => {
     expect(new Set(seen).size).toBe(5);
     // The token binds the digest of the FULL preview: a token from page one switches on after the last page's rows are known.
     expect(tokens.size).toBeGreaterThanOrEqual(1);
-    for (const bad of [0, 201, 1.5]) {
+    for (const bad of [0, -1, 1.5]) {
       expect(await caught(preview(ctxOf(admin), { first: bad }))).toMatchObject({ ok: false, code: 'BAD_USER_INPUT' });
     }
     expect(await caught(preview(ctxOf(admin), { first: 1, after: 'not-a-cursor' }))).toMatchObject({ ok: false, code: 'BAD_USER_INPUT' });
+  });
+
+  it('defaults to a page of 20 and serves a request over the cap at the cap (cor:api:120:04)', async () => {
+    for (let i = 0; i < 22; i++) await installed(`D${i}`, 'v1');
+    const d: any = await preview();
+    expect(d.rows).toHaveLength(20);
+    expect(d).toMatchObject({ total: 22, hasMore: true });
+    const big: any = await preview(ctxOf(admin), { first: 100000 });
+    expect(big.rows).toHaveLength(22);
+    expect(big.hasMore).toBe(false);
   });
 
   it('is empty once the switch is enforced (nothing would change)', async () => {

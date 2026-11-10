@@ -33,7 +33,7 @@ type Db = PrismaClient | Prisma.TransactionClient;
 export const SIGNING_PREVIEW_STALE_CODE = 'BOOT_PROMPT_SIGNING_PREVIEW_STALE';
 /** Adopted at the #2973 gate (6745905876): ten minutes, judged on the database clock. */
 export const SIGNING_PREVIEW_TOKEN_TTL_MS = 10 * 60 * 1000;
-export const SIGNING_PREVIEW_DEFAULT_PAGE = 50;
+export const SIGNING_PREVIEW_DEFAULT_PAGE = 20;
 export const SIGNING_PREVIEW_MAX_PAGE = 200;
 
 export type SigningPreviewState = 'SIGNATURE_PENDING' | 'REVISION_CHANGES' | 'UNSIGNED_STOPS';
@@ -159,9 +159,11 @@ export function pageSigningPreview(
   after: string | null | undefined,
 ): { rows: SigningPreviewRow[]; hasMore: boolean; endCursor: string | null } {
   const size = first == null ? SIGNING_PREVIEW_DEFAULT_PAGE : first;
-  if (!Number.isInteger(size) || size < 1 || size > SIGNING_PREVIEW_MAX_PAGE) {
-    throw new GraphQLError(`first must be an integer from 1 to ${SIGNING_PREVIEW_MAX_PAGE}.`, { extensions: { code: 'BAD_USER_INPUT' } });
+  if (!Number.isInteger(size) || size < 1) {
+    throw new GraphQLError('first must be a positive integer.', { extensions: { code: 'BAD_USER_INPUT' } });
   }
+  // cor:api:120:04: a request over the cap is served at the cap, never refused.
+  const pageSize = Math.min(size, SIGNING_PREVIEW_MAX_PAGE);
   let start = 0;
   if (after != null) {
     let key: string;
@@ -170,9 +172,9 @@ export function pageSigningPreview(
     start = rows.findIndex((r) => keyOf(r) > key);
     if (start < 0) start = rows.length;
   }
-  const slice = rows.slice(start, start + size);
+  const slice = rows.slice(start, start + pageSize);
   const last = slice[slice.length - 1];
-  return { rows: slice, hasMore: start + size < rows.length, endCursor: last ? Buffer.from(keyOf(last)).toString('base64url') : null };
+  return { rows: slice, hasMore: start + pageSize < rows.length, endCursor: last ? Buffer.from(keyOf(last)).toString('base64url') : null };
 }
 
 // ---- the acknowledgement token ------------------------------------------------------------------------------------
