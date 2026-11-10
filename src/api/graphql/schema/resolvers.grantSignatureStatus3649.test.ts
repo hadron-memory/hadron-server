@@ -72,7 +72,7 @@ async function read(grantId: string): Promise<any> {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${rawKey}`, 'x-hadron-session': sessionId },
     body: JSON.stringify({
-      query: `query($r:ID!){grant(ref:$r){id allows issuerUserId signatureId signatureStatus{state integrityProblems
+      query: `query($r:ID!){grant(ref:$r){id allows issuerUserId verifiedBy signatureId signatureStatus{state integrityProblems
         signatures{id state signer{handle urn} passkeyLabel passkeyRevokedAt version termsHash verifiedAt signingRequestId payloadVersion}}}}`,
       variables: { r: grantId },
     }),
@@ -153,7 +153,7 @@ describe('S1: every grant read shows its signature state, re-verified on read', 
     const { g, r, s, termsHash } = await signGrant();
     const res = await read(g);
     expect(res.errors).toBeUndefined();
-    expect(res.data.grant).toMatchObject({ allows: true, issuerUserId: w.user2Id, signatureId: s });
+    expect(res.data.grant).toMatchObject({ allows: true, issuerUserId: w.user2Id, verifiedBy: w.user2Id, signatureId: s });
     const handle = (await db.user.findUniqueOrThrow({ where: { id: w.user2Id } })).handle;
     const st = res.data.grant.signatureStatus;
     expect(st.state).toBe('CURRENT');
@@ -246,7 +246,8 @@ describe('S2 (cor:acl:140:08): erasing the signer', () => {
     clearSignatureVerifyCache();
     const res = await read(g);
     expect(res.errors).toBeUndefined();
-    expect(res.data.grant).toMatchObject({ allows: true, issuerUserId: null, signatureId: s });
+    // Anne LOCAL P2-F1 (#3811): verifiedBy is the signer's id too; erased, it reads null like issuerUserId.
+    expect(res.data.grant).toMatchObject({ allows: true, issuerUserId: null, verifiedBy: null, signatureId: s });
     const st = res.data.grant.signatureStatus;
     expect(st.state).toBe('CURRENT');
     expect(st.integrityProblems).toBe(0);

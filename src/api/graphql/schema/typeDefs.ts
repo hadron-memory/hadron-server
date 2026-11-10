@@ -7225,6 +7225,7 @@ export const typeDefs = `#graphql
     activatedAt: DateTime
     "How the activation was verified, as stored; null while pending."
     verificationKind: String
+    "The person whose signature activated it; null while pending, and null once their account is erased (a deleted user, hrn:node:hadronmemory.com:specs:cor:acl:140:08)."
     verifiedBy: ID
     signatureId: ID
     revokedAt: DateTime
