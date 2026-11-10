@@ -27,43 +27,38 @@ export async function loadAccountUsageHistory(db: Context['db'], appId: string, 
       ...(sel.host != null ? [{ properties: { path: ['host'], equals: sel.host } }] : []),
       ...(sel.family != null ? [{ properties: { path: ['family'], equals: sel.family } }] : []),
     ];
-    const rows = await db.node.findMany({
-      where: {
-        memoryId: { in: memoryIds },
-        objectType: ACCOUNT_USAGE_COLLECTION,
-        deletedAt: null,
-        AND: [{ properties: { path: ['label'], equals: wanted } }, ...identity],
-        createdAt: { gte: new Date(now.getTime() - HISTORY_DAYS * 24 * 3_600_000) },
-      },
-      select: { properties: true },
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      take: maxRows,
-    });
+    const where = {
+      memoryId: { in: memoryIds },
+      objectType: ACCOUNT_USAGE_COLLECTION,
+      deletedAt: null,
+      AND: [{ properties: { path: ['label'], equals: wanted } }, ...identity],
+      createdAt: { gte: new Date(now.getTime() - HISTORY_DAYS * 24 * 3_600_000) },
+    };
+    const orderBy = [{ createdAt: 'desc' as const }, { id: 'desc' as const }];
+    const usable = (properties: unknown): UsageSnapshot | null => {
+      const snap = parseUsageSnapshot(properties, now);
+      return snap && snap.label === wanted
+        && (sel.host == null || snap.host === sel.host) && (sel.family == null || snap.family === sel.family) ? snap : null;
+    };
+    const rows = await db.node.findMany({ where, select: { properties: true }, orderBy, take: maxRows });
+    const snaps = rows.map((r) => usable(r.properties)).filter((x): x is UsageSnapshot => x !== null);
     // The cap can hide another identity of an under-qualified selector (same label, other host or family) behind a busy one,
-    // and with it the ambiguity refusal. When the cap was hit, probe once for a row of any other identity and keep it.
+    // and with it the ambiguity refusal. When the cap was hit, read once more, bounded the same way, from every row NOT of the
+    // first valid identity seen (a malformed row neither seeds nor consumes the probe: only a valid snapshot counts).
     if (rows.length >= maxRows && (sel.host == null || sel.family == null)) {
-      const seen = parseUsageSnapshot(rows[0]!.properties, now);
-      if (seen) {
-        const other = await db.node.findFirst({
-          where: {
-            memoryId: { in: memoryIds },
-            objectType: ACCOUNT_USAGE_COLLECTION,
-            deletedAt: null,
-            AND: [{ properties: { path: ['label'], equals: wanted } }, ...identity],
-            NOT: [{ AND: [{ properties: { path: ['host'], equals: seen.host ?? '' } }, { properties: { path: ['family'], equals: seen.family ?? '' } }] }],
-            createdAt: { gte: new Date(now.getTime() - HISTORY_DAYS * 24 * 3_600_000) },
-          },
-          select: { properties: true },
-        });
-        if (other) rows.push(other);
+      const seen = snaps[0];
+      const more = await db.node.findMany({
+        where: seen
+          ? { ...where, NOT: [{ AND: [{ properties: { path: ['host'], equals: seen.host ?? '' } }, { properties: { path: ['family'], equals: seen.family ?? '' } }] }] }
+          : where,
+        select: { properties: true }, orderBy, take: maxRows,
+      });
+      for (const r of more) {
+        const snap = usable(r.properties);
+        if (snap && (!seen || snap.host !== seen.host || snap.family !== seen.family)) snaps.push(snap);
       }
     }
-    for (const row of rows) {
-      const snap = parseUsageSnapshot(row.properties, now);
-      if (!snap || snap.label !== wanted
-        || (sel.host != null && snap.host !== sel.host) || (sel.family != null && snap.family !== sel.family)) continue;
-      result[i]!.push(snap);
-    }
+    result[i] = snaps;
   }
   return result;
 }

@@ -244,6 +244,14 @@ describe('self-moves judged on the resolved identity, and the per-account histor
     const [got] = await loadAccountUsageHistory(db as any, app.id, new Date(), [{ label: 'amb' }], 5);
     expect(new Set(got!.map((x) => x.host))).toEqual(new Set(['h1', 'h2']));
   });
+  it('malformed rows cannot mask the probe: an invalid newest row and invalid one-shot alternates still reveal the valid other host', async () => {
+    const { loadAccountUsageHistory } = await import('../../../lib/accountUsage/load.js');
+    await snapshot({ label: 'amb2', minutesAgo: 200, sevenPct: 5, extra: { host: 'h2' } });
+    for (let m = 1; m < 10; m += 1) await snapshot({ label: 'amb2', minutesAgo: m, sevenPct: 10, extra: { host: 'h1' } });
+    for (let m = 0; m < 3; m += 1) await snapshot({ label: 'amb2', minutesAgo: m / 10, sevenPct: 10, extra: { host: 'h3', schemaVersion: 2 } });
+    const [got] = await loadAccountUsageHistory(db as any, app.id, new Date(), [{ label: 'amb2' }], 5);
+    expect(new Set(got!.map((x) => x.host))).toEqual(new Set(['h1', 'h2']));
+  });
   it('a same-label move to another host reads that host own history, apart from the source', async () => {
     await burn('src', 30, 1, { extra: { host: 'h1' } });
     await burn('src', 20, 2, { extra: { host: 'h2' } });
