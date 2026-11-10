@@ -1,3 +1,5 @@
+import { readFileSync, readdirSync } from 'node:fs';
+import { Client } from 'pg';
 import { randomBytes } from 'node:crypto';
 import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -164,4 +166,33 @@ describe('#3813 non-target and guard controls', () => {
     await exec('UPDATE grants SET requested_by_user_id = NULL WHERE id = $1', g);
     expect(await db.grant.findUniqueOrThrow({where:{id:g}})).toMatchObject({requestedByUserId:null, reason:'because'});
   });
+});
+
+// Exercise the PR migration sequence on rows left by an old image: marking the
+// user erased here deliberately bypasses the new forward deleteUser clear.
+it('#3813 migrations clear historical erased requesters without touching live links or signed state', async () => {
+  const requester = await db.user.create({data: {handle: `historical-${generateId()}`}});
+  const historical = await signGrant({requester: requester.id});
+  const live = await signGrant({requester: w.userId});
+  const before = await db.grant.findUniqueOrThrow({where:{id:historical.g}});
+  const liveBefore = await db.grant.findUniqueOrThrow({where:{id:live.g}});
+  const signatures = await db.grantSignature.findMany({where:{grantId:historical.g}});
+  await db.user.update({where:{id:requester.id}, data:{deletedAt:new Date()}});
+  expect((await readBoth(historical.g))[0].requestedByUserId).toBe(requester.id);
+  const migrations = new URL('../../../../prisma/migrations/', import.meta.url);
+  const names = readdirSync(migrations).filter(n => n.startsWith('20261110010300_') || n.startsWith('20261110010400_')).sort();
+  expect(names).toContain('20261110010300_grant_requester_erasure');
+  const client = new Client({connectionString:process.env.DATABASE_URL});
+  await client.connect();
+  try {
+    for (const name of names) await client.query(readFileSync(new URL(`${name}/migration.sql`, migrations), 'utf8'));
+  } finally { await client.end(); }
+  const after = await db.grant.findUniqueOrThrow({where:{id:historical.g}});
+  expect(after.requestedByUserId).toBeNull();
+  expect({...after, requestedByUserId: before.requestedByUserId}).toEqual(before);
+  expect(await db.grant.findUniqueOrThrow({where:{id:live.g}})).toEqual(liveBefore);
+  expect(await db.grantSignature.findMany({where:{grantId:historical.g}})).toEqual(signatures);
+  clearSignatureVerifyCache();
+  for (const row of await readBoth(historical.g)) expect(row).toMatchObject({requestedByUserId:null, allows:true, reason:'because', signatureStatus:{state:'CURRENT',integrityProblems:0}});
+  for (const row of await readBoth(live.g)) expect(row.requestedByUserId).toBe(w.userId);
 });
