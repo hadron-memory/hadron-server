@@ -226,13 +226,25 @@ describe('the projection', () => {
   };
   const leaf = (t: any): { kind: string; name: string } => (t.ofType ? leaf(t.ofType) : t);
 
-  it('Grant has ids and scalars only: no state label and no nested object', async () => {
+  it('Grant has ids and scalars only: no state label and no nested object but its own signature projection', async () => {
     const grant = await type('Grant');
     expect(grant).not.toBeNull();
     const names = grant!.fields.map((f) => f.name);
     expect(names).toContain('allows');
     expect(names).not.toContain('state');
-    for (const f of grant!.fields) expect(['SCALAR', 'ENUM'], `${f.name}`).toContain(leaf(f.type).kind);
+    // #3649 slice D: the ONE object field is signatureStatus, the grant's own signature records as a sanitized projection
+    // (#552): ids, scalars, enums and the signer as handle and URN only. No other entity's object is reachable from a Grant.
+    const objects = grant!.fields.filter((f) => !['SCALAR', 'ENUM'].includes(leaf(f.type).kind));
+    expect(objects.map((f) => `${f.name}:${leaf(f.type).name}`)).toEqual(['signatureStatus:GrantSignatureStatus']);
+    const allowed: Record<string, string[]> = {
+      GrantSignatureStatus: ['signatures:GrantSignature'], GrantSignature: ['signer:NodeRevisionEditor'], NodeRevisionEditor: [],
+    };
+    for (const [name, nested] of Object.entries(allowed)) {
+      const t = await type(name);
+      const found = t!.fields.filter((f) => !['SCALAR', 'ENUM'].includes(leaf(f.type).kind)).map((f) => `${f.name}:${leaf(f.type).name}`);
+      expect(found, name).toEqual(nested);
+    }
+    expect((await type('NodeRevisionEditor'))!.fields.map((f) => f.name).sort()).toEqual(['handle', 'urn']);
     for (const banned of ['app', 'user', 'organization', 'worker', 'agent', 'issuer']) expect(names).not.toContain(banned);
   });
 

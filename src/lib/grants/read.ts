@@ -87,7 +87,11 @@ function scope(reader: GrantReader): Prisma.Sql {
 
 const COLUMNS = Prisma.sql`g.id, g.app_id, g.user_id, g.agent_id, g.worker_id, g.grantee_app_id, g.issuer_user_id, g.requested_by_user_id,
   g.requested_by_worker_id, g.requested_by_session_id, g.action, g.action_values, g.starts_at, g.expires_at, g.max_uses, g.use_count,
-  g.reason, g.created_at, g.activated_at, g.verification_kind, g.verified_by, g.signature_id, g.revoked_at, ${grantLiveSql('g')} AS allows`;
+  g.reason, g.created_at, g.activated_at, g.verification_kind,
+  -- #3649 slice D (cor:acl:140:08; Anne LOCAL P2-F1 on #3811): verified_by is the signer, a person; once their account is erased
+  -- it reads null, as issuer_user_id does, so the sealed id is never echoed. A read-side mapping: the column is not written.
+  (SELECT u.id FROM users u WHERE u.id = g.verified_by AND u.deleted_at IS NULL) AS verified_by,
+  g.signature_id, g.revoked_at, ${grantLiveSql('g')} AS allows`;
 
 /** The reader's grants, newest first. `take` 0 is count-only. The caller clamps `take` and `skip`. */
 export async function listGrantsForWorker(db: Db, reader: GrantReader, page: { take?: number; skip?: number }): Promise<{ items: GrantView[]; total: number }> {
