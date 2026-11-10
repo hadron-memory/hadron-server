@@ -3482,6 +3482,8 @@ model App {
   workers                 Worker[]
   /// #1705 — the App's agent tasks and their append-only event stream.
   agentTasks              AgentTask[]
+  /// #3825 — latest decided match outcome per combination.
+  matchOutcomes           AgentMatchOutcome[]
   agentTaskCounters       AgentTaskCounter[]
   /// #1747 — tickers (cor:agt:080) and the grants held by this App's workers.
   tickers                 Ticker[]
@@ -7088,6 +7090,30 @@ model TeamStopCoverage {
 /// worker that would otherwise match it was covered, or its creator was under a `pause` or `halt` (R71). The
 /// couldn't-be-assigned clock (cor:agt:050:17) doesn't count it. Opened and closed by the matcher's pass; one open
 /// hold per task (partial unique index).
+/// #3825 (cor:agt:060:13, V37/V44): the latest DECIDED match outcome per App and combination (family, tier, role; an
+/// open dimension is the empty string, V41). One upserted row, no append log; `failingSince` is the first no-worker
+/// outcome of the current streak and is cleared by a MATCHED. Rows older than 168 h are purged by the matcher sweep.
+/// Read only through `latestMatchOutcomes`; never returned on its own, never a per-candidate record (V22).
+model AgentMatchOutcome {
+  appId        String    @map("app_id")
+  family       String    @default("")
+  tier         String    @default("")
+  role         String    @default("")
+  /// 'MATCHED' | 'NO_WORKER'.
+  outcome      String
+  /// The coarse MatchFailureReason of a NO_WORKER outcome; null for MATCHED.
+  reason       String?
+  /// Database clock, microseconds (a stamp is never truncated to a millisecond, so two decisions rarely tie).
+  decidedAt    DateTime  @map("decided_at") @db.Timestamp(6)
+  failingSince DateTime? @map("failing_since") @db.Timestamp(6)
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@id([appId, family, tier, role])
+  @@index([decidedAt])
+  @@map("agent_match_outcomes")
+}
+
 model AgentTaskStopHold {
   id        String    @id
   appId     String    @map("app_id")
