@@ -109,8 +109,8 @@ async function createAsManager(ctx: Context, input: CreateGrantInput) {
   const kind = input.holderKind.toLowerCase() as 'user' | 'agent' | 'worker' | 'app';
   const startsAt = asDate(input.startsAt);
   const expiresAt = asDate(input.expiresAt);
-  // Anchor the named agent only if it exists: an unknown id would make the anchor's row lock refuse, and a manager must get the holder refusal.
-  const agentAnchor = kind === 'agent' && typeof input.holderRef === 'string' && (await ctx.db.agent.findUnique({ where: { id: input.holderRef }, select: { id: true } })) ? input.holderRef : null;
+  // Anchor the named agent only if it exists and is not deleted (Beckett D2 on 294693a9): an unknown id would make the anchor's row lock refuse, and a manager must get the holder refusal.
+  const agentAnchor = kind === 'agent' && typeof input.holderRef === 'string' && (await ctx.db.agent.findFirst({ where: { id: input.holderRef, deletedAt: null }, select: { id: true } })) ? input.holderRef : null;
   const anchors: AuthorityAnchor[] = [
     { kind: 'app', id: app.id },
     ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),

@@ -523,6 +523,38 @@ describe('Belinda (blind, 91002379): the worker arm of withdrawGrant is fenced l
   });
 });
 
+describe('Beckett (294693a9): hard session expiry during the wait, and a soft-deleted agent holder', () => {
+  it('D1: a session whose hard expiry passes while the withdrawal waits cannot complete it: refused, grant untouched, no event', async () => {
+    const id = await pending({ worker_id: w.workerId, requested_by_user_id: memberId, requested_by_worker_id: w.workerId });
+    await db.$executeRaw`UPDATE sessions SET expires_at = (clock_timestamp() AT TIME ZONE 'UTC') + interval '1500 milliseconds' WHERE id = ${workerSession}`;
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const taken = new Promise<void>((r) => { locked = r; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM sessions WHERE id = ${workerSession} FOR UPDATE`;
+      locked();
+      await held;
+    });
+    await taken;
+    const call = post(memberKey, workerSession, WITHDRAW, { r: id });
+    await waitUntilBlocked();
+    await new Promise((r) => setTimeout(r, 1800)); // the expiry passes while the call waits
+    release();
+    await holder;
+    expect(code(await call)).toBe('GRANT_NOT_FOUND');
+    expect((await grantRows())[0].revoked_at).toBeNull();
+    expect(await events(id)).toHaveLength(0);
+  });
+
+  it('D2: a manager naming a soft-deleted agent gets the holder refusal, not GRANT_NOT_MANAGER', async () => {
+    await db.agent.update({ where: { id: w.agentId }, data: { deletedAt: new Date() } });
+    const r = await post(managerKey, null, CREATE, { i: mgrInput({ holderKind: 'AGENT', holderRef: w.agentId }) });
+    expect(code(r)).toBe('GRANT_HOLDER_NOT_ALLOWED');
+    expect(await grantRows()).toHaveLength(0);
+  });
+});
+
 describe('Belinda: the holder kinds a manager may NOT name, the list page, and the instructed-act record', () => {
   it('a USER or an APP holder is the typed holder refusal on the manager arm, and no row is written', async () => {
     expect(code(await post(managerKey, null, CREATE, { i: mgrInput({ holderKind: 'USER', holderRef: memberId }) }))).toBe('GRANT_HOLDER_NOT_ALLOWED');

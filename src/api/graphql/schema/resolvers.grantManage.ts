@@ -179,8 +179,13 @@ export const grantManageMutations = {
             if (reader) {
               await tx.$queryRaw`SELECT 1 FROM workers WHERE id = ${reader.workerId} FOR SHARE`;
               await lockCallerSession(tx, ctx.sessionId);
-              const session = ctx.sessionId ? await tx.session.findUnique({ where: { id: ctx.sessionId }, select: { endedAt: true } }) : null;
-              if (!session || session.endedAt) throw notFound();
+              // Open means not ended AND not past its hard expiry, on the database clock after the lock (R5: now >= expiresAt is expired;
+              // Beckett D1 on 294693a9: an expiry that passed during the anchor wait must not stamp).
+              const open = ctx.sessionId
+                ? await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM sessions WHERE id = ${ctx.sessionId} AND ended_at IS NULL
+                    AND (expires_at IS NULL OR expires_at > (clock_timestamp() AT TIME ZONE 'UTC'))`
+                : [];
+              if (open.length === 0) throw notFound();
             }
           },
         },
