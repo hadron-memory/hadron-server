@@ -38,7 +38,8 @@ const PURGE_BATCH = 1000;
 export function combinationsOf(req: Requirements): Combination[] {
   if (req.invalid) return [];
   const families: (string | null)[] = req.familyIn?.length ? [...new Set(req.familyIn)].sort() : [null];
-  const roles: (string | null)[] = req.roles?.length ? [...new Set(req.roles)].sort() : req.role ? [req.role] : [null];
+  // Roles match case-insensitively (`roleAllowed`), so the key is the lower-case role: one row per role, whatever its spelling.
+  const roles: (string | null)[] = req.roles?.length ? [...new Set(req.roles.map(r => r.toLowerCase()))].sort() : req.role ? [req.role.toLowerCase()] : [null];
   const tier = req.minTier ?? null;
   const out: Combination[] = [];
   for (const family of families) for (const role of roles) out.push({ family, tier, role });
@@ -64,10 +65,12 @@ export async function recordMatchOutcome(
   extra: Combination[] = [],
 ): Promise<void> {
   const seen = new Set<string>();
-  const combos = [...combinationsOf(req), ...extra].filter(c => {
+  // One global order over the final union (a worker's role is folded to lower case like the requirements'), so two
+  // writers that touch overlapping rows take their row locks in the same order and cannot deadlock (Anne's static delta).
+  const combos = [...combinationsOf(req), ...extra.map(c => ({ ...c, role: c.role?.toLowerCase() ?? null }))].filter(c => {
     const k = JSON.stringify([c.family, c.tier, c.role]);
     return !seen.has(k) && !!seen.add(k);
-  });
+  }).sort((a, b) => (a.family ?? '').localeCompare(b.family ?? '') || (a.tier ?? '').localeCompare(b.tier ?? '') || (a.role ?? '').localeCompare(b.role ?? ''));
   if (combos.length === 0) return;
   const families = combos.map(c => c.family ?? '');
   const tiers = combos.map(c => c.tier ?? '');
@@ -111,7 +114,7 @@ export async function latestMatchOutcomes(
     SELECT family, tier, role, outcome, reason, decided_at AS "decidedAt", failing_since AS "failingSince"
     FROM agent_match_outcomes
     WHERE app_id = ${appId} AND decided_at >= (clock_timestamp() AT TIME ZONE 'UTC') - make_interval(secs => ${hours * 3600}::float8)
-    ${narrow('family', opts.family)} ${narrow('tier', opts.tier)} ${narrow('role', opts.role)}
+    ${narrow('family', opts.family)} ${narrow('tier', opts.tier)} ${narrow('role', opts.role?.toLowerCase())}
     ORDER BY family, tier, role`);
   return rows.map(r => ({
     family: r.family || null, tier: r.tier || null, role: r.role || null,

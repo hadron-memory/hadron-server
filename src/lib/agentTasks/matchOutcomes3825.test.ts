@@ -277,3 +277,14 @@ it('George post-attempt gap: the stamp of a not-free re-read is taken inside the
   expect(readAt.at!.getTime()).toBeGreaterThanOrEqual(before.getTime());
   expect(readAt.at!.getTime()).toBeLessThanOrEqual(after.getTime());
 });
+
+it('Anne: roles are keyed case-insensitively and a write orders its rows globally', async () => {
+  const w = await worker('REVIEWER', 'claude');
+  await recordMatchOutcome(db, app.id, { role: 'reviewer', familyIn: ['claude'], minTier: 'mid' }, 'NO_WORKER', 'NOBODY_FREE');
+  const t = await create({ match: true }); // the worker's role is spelled REVIEWER
+  expect(t.assigneeWorkerId).toBe(w.id);
+  const rows = await latest({ windowHours: 24, family: 'claude' });
+  expect(rows).toHaveLength(1); // one row, not a reviewer and a REVIEWER
+  expect(rows[0]).toMatchObject({ role: 'reviewer', outcome: 'MATCHED', failingSince: null });
+  expect(combinationsOf({ roles: ['B', 'a', 'A'], familyIn: ['codex', 'claude'] }).map(c => [c.family, c.role])).toEqual([['claude', 'a'], ['claude', 'b'], ['codex', 'a'], ['codex', 'b']]);
+});
