@@ -200,7 +200,7 @@ import { getMemberOrgIds } from '../lib/auth/memberOrgIds.js';
 import { lockAgentDefinitionAuthority } from '../lib/auth/managedSystemMemory.js';
 import { publishNodeWritten } from '../lib/events/nodeWritten.js';
 import { computeContentHash, isAbstractUnverified } from '../lib/contentHash.js';
-import { validateMemoryNodes, formatFindingLine } from '../lib/memoryValidation.js';
+import { validateMemoryNodes, formatFindingLine, formatValidationProse } from '../lib/memoryValidation.js';
 import { assertRootAllocationAllowed, lockRootSiblings, nextSiblingSeq } from '../lib/nodeSeq.js';
 import { BATCH_READ_MAX_NODES, BATCH_READ_MAX_BYTES } from '../lib/batchRead.js';
 import { isCiphertext } from '../lib/crypto.js';
@@ -11868,21 +11868,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         const lines = f.kind === 'INDEX_TRUNCATED' ? informational : issues;
         lines.push(formatFindingLine(f, await nodeUrn(f.nodeLoc, memory.id, memoryUrnOf)));
       }
-      const informationalNote = report.totalInformational
-        ? `\n\nInformational findings (${report.totalInformational}):\n${informational.join('\n')}`
-        : '';
-      // A skipped check is stated rather than silently omitted — a clean bill
-      // of health that quietly skipped a check is worse than no report.
-      const skippedNote = report.skippedChecks.length
-        ? `\n\nSkipped checks:\n${report.skippedChecks.map((c) => `- ${c.check}: ${c.reason}`).join('\n')}`
-        : '';
-
-      if (report.totalFindings === 0) {
-        return textResult(`Validated ${report.nodesChecked} nodes. No issues found.${informationalNote}${skippedNote}`);
-      }
-      return textResult(
-        `Found ${report.totalFindings} issue(s) in ${report.nodesChecked} nodes:\n\n${issues.join('\n')}${informationalNote}${skippedNote}`,
-      );
+      return textResult(formatValidationProse(report, issues, informational));
     },
   );
 
