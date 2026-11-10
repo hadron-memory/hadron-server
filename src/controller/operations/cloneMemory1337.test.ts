@@ -3,8 +3,10 @@
  * rows (with `sourceTemplateId` and `locked`) into the clone, remapping the
  * three node references through the clone's old→new id map. A reference to a
  * node the clone excluded becomes null (a required task then fails closed,
- * D-2026-09-25-E); a reference into ANOTHER memory is kept on a same-org clone
- * and dropped on a cross-org one (the same isolation rule as edges, #604).
+ * D-2026-09-25-E); a reference into ANOTHER memory is kept when the cloning
+ * actor can read it, in any org, and nulled when not. `sourceTemplateId` is
+ * kept within an org and dropped across orgs (§10: a template is not readable
+ * by the target org).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
@@ -106,12 +108,21 @@ describe('#1337 clone carries the rulebook', () => {
     expect(review.authorTaskRequired).toBe(true);
   });
 
-  it('a reference into another memory is kept on a same-org clone and dropped on a cross-org clone', async () => {
+  it('a reference into another memory is kept on both same-org and cross-org clones when the copier can read it', async () => {
     await seedConfig();
     const same = await clone();
     expect((await rulesOf(same.memoryId))!.rules.find((r) => r.role === 'review')!.validationTaskId).toBe(n.foreign);
     const cross = await clone({ target: otherOrgId, newUrn: 'c1-b:copy' });
-    expect((await rulesOf(cross.memoryId))!.rules.find((r) => r.role === 'review')!.validationTaskId).toBeNull();
+    expect((await rulesOf(cross.memoryId))!.rules.find((r) => r.role === 'review')!.validationTaskId).toBe(n.foreign);
+  });
+
+  it('sourceTemplateId is kept within an org and dropped on a cross-org clone, locked kept either way', async () => {
+    await seedConfig();
+    const same = (await rulesOf((await clone()).memoryId))!.rules.find((r) => r.role === 'spec')!;
+    expect(same).toMatchObject({ sourceTemplateId: 'tmpl-1', locked: true });
+    const cross = (await rulesOf((await clone({ target: otherOrgId, newUrn: 'c1-b:copy-t' })).memoryId))!.rules.find((r) => r.role === 'spec')!;
+    expect(cross.sourceTemplateId).toBeNull();
+    expect(cross.locked).toBe(true);
   });
 
   it('a source with no config produces no config row', async () => {
@@ -153,9 +164,8 @@ describe('#1337 clone carries the rulebook', () => {
     expect(await db.memoryConfig.count()).toBe(before);
   });
 
-  it('an external reference survives only into the clone\'s org and only when the copier can read it', async () => {
+  it('an external reference survives only when the copier can read its memory, in any org', async () => {
     await seedConfig();
-    // A node in a THIRD org's memory, and one in a same-org memory the copier cannot read.
     const thirdMem = generateId();
     await db.memory.create({ data: { id: thirdMem, organizationId: otherOrgId, name: 'third', urn: 'c1-b:third', class: 'knowledge' } as never });
     const thirdNode = generateId();
@@ -174,16 +184,19 @@ describe('#1337 clone carries the rulebook', () => {
       },
     });
     const ext = async (r: { memoryId: string }) => (await rulesOf(r.memoryId))!.rules.find((x) => x.role === 'ext')!;
-    // Copier may read the foreign memory only: third-org and unreadable refs drop, the readable one stays.
+    // The copier reads only the foreign memory: the third-org and unreadable refs drop (flags stay), the readable one stays.
     const some = await ext(await clone({ readable: [foreignMemId], newUrn: 'c1-a:copy-r' }));
-    expect(some.authorTaskId, 'third org').toBeNull();
+    expect(some.authorTaskId, 'third org, unreadable').toBeNull();
     expect(some.validationTaskId, 'unreadable').toBeNull();
-    expect(some.descriptionNodeId, 'readable same-org').toBe(n.foreign);
-    // Unrestricted copier: the third org's node still drops (org rule), the same-org ones stay.
+    expect(some.descriptionNodeId, 'readable').toBe(n.foreign);
+    expect(some).toMatchObject({ authorTaskRequired: true, validationTaskRequired: true });
+    // A copier who reads the third org's memory keeps that reference even though it is in another org.
+    const third = await ext(await clone({ readable: [thirdMem], newUrn: 'c1-a:copy-3' }));
+    expect(third.authorTaskId, 'readable, third org').toBe(thirdNode);
+    expect(third.validationTaskId).toBeNull();
+    // An unrestricted copier keeps all three.
     const all = await ext(await clone({ readable: null, newUrn: 'c1-a:copy-u' }));
-    expect(all.authorTaskId, 'third org, unrestricted copier').toBeNull();
-    expect(all.validationTaskId).toBe(unreadNode);
-    expect(all.descriptionNodeId).toBe(n.foreign);
+    expect([all.authorTaskId, all.validationTaskId, all.descriptionNodeId]).toEqual([thirdNode, unreadNode, n.foreign]);
   });
 
   it('external author/description refs and a deleted external target behave like the validation ref', async () => {
@@ -217,5 +230,17 @@ describe('#1337 clone carries the rulebook', () => {
     const cfg = await rulesOf(empty.memoryId);
     expect(cfg, 'empty config carried').not.toBeNull();
     expect(cfg!.rules).toEqual([]);
+  });
+
+  it('a reference into a soft-deleted memory becomes null', async () => {
+    const deadMem = generateId();
+    await db.memory.create({ data: { id: deadMem, organizationId: orgId, name: 'dead', urn: 'c1-a:dead', class: 'knowledge', deletedAt: new Date() } as never });
+    const deadNode = generateId();
+    await node(deadNode, deadMem, 'tasks:dead');
+    const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: srcId } });
+    await db.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, role: 'ext', authorTaskId: deadNode, authorTaskRequired: true } });
+    const rule = (await rulesOf((await clone()).memoryId))!.rules[0];
+    expect(rule.authorTaskId).toBeNull();
+    expect(rule.authorTaskRequired).toBe(true);
   });
 });

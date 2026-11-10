@@ -391,8 +391,8 @@ export async function cloneMemoryGraphInTx(
   // References: the three node ids remap through the clone's id map; a node the
   // clone excluded (soft-deleted, a comment) becomes null, which leaves the
   // rule's `*Required` flag set and so fails closed (D-2026-09-25-E); a node in
-  // ANOTHER memory is kept on a same-org clone and dropped on a cross-org one,
-  // the same isolation rule as edges below (#604). No org default templates
+  // ANOTHER memory is kept when the cloning actor can read it; `sourceTemplateId` is
+  // dropped on a cross-org clone (a template is not readable by the target org). No org default templates
   // apply to a clone (#1334 ruling), so nothing else writes config here.
   const sourceConfig = await tx.memoryConfig.findUnique({
     where: { memoryId: source.id },
@@ -408,13 +408,14 @@ export async function cloneMemoryGraphInTx(
     }
     // Of the unmapped ids, only a live node of ANOTHER memory is an external
     // reference; one in the source memory was excluded from this clone. A
-    // retained reference must be one the cloning actor could have SAVED into a
-    // rule (the saver must read the node, resolvers.memoryConfigRefs.ts), so it
-    // is kept only when its memory belongs to the clone's org and the copier may
-    // read it (`null` = unrestricted). Anything else becomes null: a third org's
-    // node, or one the actor cannot read, is never carried into a new rulebook.
+    // retained reference must be one the cloning actor can READ (the saver of a
+    // rule must read the node, resolvers.memoryConfigRefs.ts; `null` = unrestricted),
+    // whichever org it is in: every projection re-checks the viewer's own access,
+    // so a kept reference discloses nothing to a viewer who cannot read it. A
+    // reference the actor cannot read becomes null and the rule's `*Required`
+    // flag is kept, so it fails closed.
     const foreignIds = new Set(
-      externalIds.size > 0 && !crossOrgClone
+      externalIds.size > 0
         ? (
             await tx.node.findMany({
               where: {
@@ -422,8 +423,8 @@ export async function cloneMemoryGraphInTx(
                 memoryId: args.copierReadableMemoryIds === null
                   ? { not: source.id }
                   : { not: source.id, in: [...args.copierReadableMemoryIds] },
+                memory: { deletedAt: null },
                 deletedAt: null,
-                memory: { organizationId: args.targetOrganizationId, deletedAt: null },
               },
               select: { id: true },
             })
@@ -453,7 +454,10 @@ export async function cloneMemoryGraphInTx(
           writers: r.writers,
           validateBy: r.validateBy,
           enabled: r.enabled,
-          sourceTemplateId: r.sourceTemplateId,
+          // A template is visible only to its owner's managers, and `NodeRoleRule.sourceTemplate`
+          // reads it for any stored id: across orgs the id would hand the target org the source
+          // org's template name (§10, #3893). Provenance is kept within an org, dropped across.
+          sourceTemplateId: crossOrgClone ? null : r.sourceTemplateId,
           locked: r.locked,
           revision: 1,
           createdBy: args.actorId,
