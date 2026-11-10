@@ -43,15 +43,22 @@ it('does not materialize large distinct/repeated endpoint bodies for id-only rea
   await db.edge.createMany({ data: targets.flatMap(t => [0, 1].map(j => ({ id: generateId(), memoryId, loc: `edge:${t.loc}:${j}`, sourceId: parent.id, targetId: t.id }))) });
   const original = db.node.findUnique.bind(db.node);
   let bytes = 0;
+  const observedEndpointIds = new Set<string>();
   const reads: Promise<unknown>[] = [];
   vi.spyOn(db.node, 'findUnique').mockImplementation(((args: any) => {
-    const pending = original(args).then(row => { bytes += Buffer.byteLength(JSON.stringify(row)); return row; });
+    const pending = original(args).then(row => {
+      bytes += Buffer.byteLength(JSON.stringify(row));
+      if (row && targets.some(t => t.id === row.id)) observedEndpointIds.add(row.id);
+      return row;
+    });
     reads.push(pending);
     return pending;
   }) as typeof db.node.findUnique);
   const nodes = await run('id', [parent.id]);
   const responseBytes = bytes;
   await Promise.all(reads);
+  // A different loader must not make this materialization probe silently vacuous.
+  expect([...observedEndpointIds].sort()).toEqual(targets.map(t => t.id).sort());
   expect(nodes[0].outgoingEdges).toHaveLength(24);
   expect(nodes[0].outgoingEdges.map((e: any) => e.target.id).sort()).toEqual(targets.flatMap(t => [t.id, t.id]).sort());
   // Measured returned row bytes, not an RSS/heap ceiling. Check both at response and after all started reads.
@@ -66,7 +73,7 @@ it.each(['id', 'id loc name', 'id content'])('preserves exact source/target outp
   expect(nodes).toEqual([{ id: a.id, outgoingEdges: [{ source: project(a), target: project(b) }] }]);
 });
 
-it('keeps identity and body aliases distinct even when endpoint IDs repeat', async () => {
+it('keeps identity fields and a body alias intact on one endpoint', async () => {
   const { a, b } = await pair();
   const nodes = await run('identity:id ...Identity body:content', [a.id], 'fragment Identity on Node { loc name }');
   expect(nodes[0].outgoingEdges[0].target).toEqual({ identity: b.id, loc: 'b', name: 'B', body: 'bravo' });
@@ -120,4 +127,44 @@ it.each(['id loc name', 'id content'])('keeps child-effective inherited endpoint
   const result = await execute(`query($memory:ID!){nodeBatch(memory:$memory,locPrefix:"a"){nodes{outgoingEdges{target{${selection}}}}}}`, { memory: childMemory });
   const expected = Object.fromEntries(selection.split(' ').map(k => [k, (override as any)[k]]));
   expect(result.nodeBatch.nodes[0].outgoingEdges).toEqual([{ target: expected }]);
+});
+
+it.each(['urn', 'actionUrn'])('preserves a non-null computed %s through identity and body aliases', async field => {
+  const home = await db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { organizationId: true } });
+  const agent = await (resolvers.Mutation as any).createAgent({}, { orgId: home.organizationId, name: 'Address2793' }, context());
+  const stored = await db.agent.findUniqueOrThrow({ where: { id: agent.id } });
+  const memory = await db.memory.findUniqueOrThrow({ where: { id: stored.systemMemoryId! } });
+  const parent = await createDbNode(db, { memoryId: memory.id, loc: 'parent' });
+  const entry = await createDbNode(db, { memoryId: memory.id, loc: 'register:task.run', content: 'entry' });
+  await db.edge.create({ data: { memoryId: memory.id, loc: 'entry', sourceId: parent.id, targetId: entry.id } });
+  const expected = { id: entry.id, [field]: field === 'urn' ? `hrn:node:${memory.urn}:register:task.run` : `hrn:action:${stored.urn}:task.run` };
+  const result = await execute(`query($refs:[ID!]){nodeBatch(refs:$refs){nodes{outgoingEdges{small:target{id ${field}} body:target{id ${field} content}}}}}`, { refs: [parent.id] });
+  expect(result.nodeBatch.nodes[0].outgoingEdges).toEqual([{ small: expected, body: { ...expected, content: 'entry' } }]);
+});
+
+it.each(['id loc name', 'id content'])('rejects a stale inherited endpoint when a child override arrives before hydration: %s', async selection => {
+  const home = await db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { organizationId: true } });
+  const create = (resolvers.Mutation as any).createAgent;
+  const base = await create({}, { orgId: home.organizationId, name: 'StaleBase2793' }, context());
+  const child = await create({}, { orgId: home.organizationId, name: 'StaleChild2793' }, context());
+  await db.agent.update({ where: { id: child.id }, data: { extendsAgentId: base.id } });
+  const baseMemory = (await db.agent.findUniqueOrThrow({ where: { id: base.id } })).systemMemoryId!;
+  const childMemory = (await db.agent.findUniqueOrThrow({ where: { id: child.id } })).systemMemoryId!;
+  const a = await createDbNode(db, { memoryId: baseMemory, loc: 'a' });
+  const b = await createDbNode(db, { memoryId: baseMemory, loc: 'b', name: 'STALE', content: 'STALE BODY' });
+  await db.edge.create({ data: { memoryId: baseMemory, loc: 'a-b', sourceId: a.id, targetId: b.id } });
+  const original = db.node.findUnique.bind(db.node);
+  let changed = false;
+  vi.spyOn(db.node, 'findUnique').mockImplementation((async (args: any) => {
+    if (!changed && args.where?.id === b.id && (!args.select || args.select.name)) {
+      changed = true;
+      await createDbNode(db, { memoryId: childMemory, loc: 'b', content: 'CHILD OVERRIDE' });
+    }
+    return original(args);
+  }) as typeof db.node.findUnique);
+  const query = `query($memory:ID!){nodeBatch(memory:$memory,locPrefix:"a"){nodes{outgoingEdges{target{${selection}}}}}}`;
+  const result = await execute(query, { memory: childMemory });
+  expect(changed).toBe(true); // guard against a harness that never stages the interleaving
+  expect(result.nodeBatch.nodes[0].outgoingEdges).toEqual([{ target: null }]);
+  expect(JSON.stringify(result)).not.toContain('STALE');
 });
