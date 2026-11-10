@@ -21,6 +21,7 @@ import { withAuthorizedTx } from './authorizedTx.js';
 import { inTaskWriteTx, loadApp, requireWritable, resolveTaskActor, type TaskApp } from './resolvers.agentTask.js';
 import { lockCallerSession, readActInstruction, requireInstructedActKeepingRuns } from './resolvers.instruction.js';
 import { resolveGrantPerson, resolveGrantReader } from './resolvers.grant.js';
+import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
 import { lockAppManagerMemberships, managesApp } from '../../../lib/auth/appManagement.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import type { ActAdmission, ActInstruction } from '../../../lib/auth/instructedAct.js';
@@ -93,11 +94,11 @@ export const grantManageMutations = {
         await lockAppManagerMemberships(tx, txCtx.userId, fresh);
         // The holder's right: whoever manages the App, or the grant's issuer while still an Org member (issuer read unlocked here;
         // the locked row is re-judged below, since a merge can move an issuer link).
-        const guess = (await tx.grant.findUnique({ where: { id: ref }, select: { issuerUserId: true } }))?.issuerUserId ?? null;
+        const issuerHint = (await tx.grant.findUnique({ where: { id: ref }, select: { issuerUserId: true } }))?.issuerUserId ?? null;
         let manager = false;
         const admission: ActAdmission = await requireInstructedActKeepingRuns(txCtx, fresh.id, instruction, async () => {
           manager = await managesApp(txCtx, fresh);
-          return manager || (guess !== null && guess === txCtx.userId && await issuerStillMember(txCtx, fresh, txCtx.userId));
+          return manager || (issuerHint !== null && issuerHint === txCtx.userId && await issuerStillMember(txCtx, fresh, txCtx.userId));
         }, readActInstruction, notManager);
         const ender: GrantEnder = {
           userId: txCtx.userId!,
@@ -127,7 +128,7 @@ export const grantManageMutations = {
     // WHO is asking: a bound worker session, or a person as themselves (no key, run, impersonation).
     const reader = await resolveGrantReader(ctx);
     const person = reader ? null : await resolveGrantPerson(ctx);
-    if (!found || (!reader && !person)) throw notFound();
+    if (!found || (!reader && !person) || !ctx.userId) throw notFound();
     const app = await loadApp(ctx, found.appId);
     if (!app || app.deletedAt) throw notFound();
     // A grant the caller cannot read answers as a missing one: a worker reads what grant(ref:) reads; a person, a grant they manage, hold, asked for or issued.
@@ -136,7 +137,7 @@ export const grantManageMutations = {
       : (await managesApp(ctx, app)) || found.userId === person || found.requestedByUserId === person || found.issuerUserId === person;
     if (!readable) throw notFound();
     requireWritable(ctx, app);
-    const callerUserId = ctx.userId!;
+    const callerUserId = ctx.userId;
     try {
       return await withAuthorizedTx(
         ctx, [{ kind: 'app', id: found.appId }],
@@ -162,7 +163,21 @@ export const grantManageMutations = {
           if (!view) throw notFound();
           return view;
         },
-        { afterLock: (tx) => lockAppManagerMemberships(tx, callerUserId, app) },
+        {
+          // Same order as every worker write (inTaskWriteTx): the worker's assignment lock, the caller's memberships, the worker row; the
+          // caller's session row is fenced next, then judged OPEN on the locked state, so a session that ended or a worker retired
+          // before this commits cannot complete its one lasting write (Belinda P2-1 on 91002379).
+          afterLock: async (tx) => {
+            if (reader) await lockWorkersForAssignment(tx, [reader.workerId]);
+            await lockAppManagerMemberships(tx, callerUserId, app);
+            if (reader) {
+              await tx.$queryRaw`SELECT 1 FROM workers WHERE id = ${reader.workerId} FOR SHARE`;
+              await lockCallerSession(tx, ctx.sessionId);
+              const session = ctx.sessionId ? await tx.session.findUnique({ where: { id: ctx.sessionId }, select: { endedAt: true } }) : null;
+              if (!session || session.endedAt) throw notFound();
+            }
+          },
+        },
       );
     } catch (e) {
       if (e instanceof GrantManageRefusal) throw manageRefusal(e);

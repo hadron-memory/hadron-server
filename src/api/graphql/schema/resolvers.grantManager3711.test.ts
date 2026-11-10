@@ -52,6 +52,15 @@ async function post(key: string, session: string | null, query: string, variable
   });
   return res.json();
 }
+/** Wait until some statement in THIS database is blocked on a lock, so a held-lock pin never passes vacuously on a slow runner. */
+async function waitUntilBlocked(): Promise<void> {
+  for (let i = 0; i < 200; i += 1) {
+    const [{ n }] = await db.$queryRawUnsafe<Array<{ n: number }>>("SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'");
+    if (n > 0) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error('the call never blocked on a lock');
+}
 const code = (r: any): string | undefined => r.errors?.[0]?.extensions?.code;
 const GRANT = 'id appId holderKind holderId issuerUserId requestedByUserId requestedByWorkerId revokedAt revokedByUserId holderDepartedAt allows activatedAt';
 const CREATE = `mutation($i:CreateGrantInput!){createGrant(input:$i){${GRANT}}}`;
@@ -330,7 +339,7 @@ describe('acceptance 2/3/9: revoke', () => {
     });
     await lockTaken;
     const waiting = post(managerKey, null, REVOKE, { r: id });
-    await new Promise((r) => setTimeout(r, 400));
+    await waitUntilBlocked();
     release();
     await holder;
     const r = await waiting;
@@ -406,7 +415,7 @@ describe('acceptance 6-9 (V57): requester withdrawal of a PENDING grant', () => 
     });
     await lockTaken;
     const waiting = post(managerKey, null, WITHDRAW, { r: id });
-    await new Promise((r) => setTimeout(r, 400));
+    await waitUntilBlocked();
     release();
     await activation;
     const r = await waiting;
@@ -450,7 +459,7 @@ describe('the manager predicate is re-judged under the held anchor (a demotion t
     });
     await taken;
     const call = start();
-    await new Promise((r) => setTimeout(r, 400));
+    await waitUntilBlocked();
     release();
     await demoter;
     return call;
@@ -468,5 +477,80 @@ describe('the manager predicate is re-judged under the held anchor (a demotion t
     expect(code(r)).toBe('GRANT_NOT_MANAGER');
     expect((await grantRows())[0].revoked_at).toBeNull();
     expect(await events(id)).toHaveLength(0);
+  });
+});
+
+describe('Belinda (blind, 91002379): the worker arm of withdrawGrant is fenced like the revoke door', () => {
+  async function holdAndRun(lock: string, change: (tx: any) => Promise<unknown>, start: () => Promise<any>): Promise<any> {
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const taken = new Promise<void>((r) => { locked = r; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.$queryRawUnsafe(lock);
+      locked();
+      await held;
+      await change(tx);
+    });
+    await taken;
+    const call = start();
+    await waitUntilBlocked();
+    release();
+    await holder;
+    return call;
+  }
+  const mine = () => pending({ worker_id: w.workerId, requested_by_user_id: memberId, requested_by_worker_id: w.workerId });
+
+  it('P2-1: a session that ends while the withdrawal waits cannot complete it: refused, grant untouched, no event', async () => {
+    const id = await mine();
+    const r = await holdAndRun(`SELECT id FROM sessions WHERE id = '${workerSession}' FOR UPDATE`,
+      (tx) => tx.$executeRaw`UPDATE sessions SET ended_at = clock_timestamp() AT TIME ZONE 'UTC' WHERE id = ${workerSession}`,
+      () => post(memberKey, workerSession, WITHDRAW, { r: id }));
+    expect(code(r)).toBe('GRANT_NOT_FOUND');
+    expect((await grantRows())[0].revoked_at).toBeNull();
+    expect(await events(id)).toHaveLength(0);
+  });
+
+  it('P2-1: a worker retired while the withdrawal waits cannot complete it either', async () => {
+    const id = await mine();
+    const r = await holdAndRun(`SELECT id FROM workers WHERE id = '${w.workerId}' FOR UPDATE`,
+      (tx) => tx.$executeRaw`UPDATE workers SET retired_at = clock_timestamp() AT TIME ZONE 'UTC' WHERE id = ${w.workerId}`,
+      () => post(memberKey, workerSession, WITHDRAW, { r: id }));
+    expect(code(r)).toBe('GRANT_NOT_FOUND');
+    expect((await grantRows())[0].revoked_at).toBeNull();
+    expect(await events(id)).toHaveLength(0);
+  });
+});
+
+describe('Belinda: the holder kinds a manager may NOT name, the list page, and the instructed-act record', () => {
+  it('a USER or an APP holder is the typed holder refusal on the manager arm, and no row is written', async () => {
+    expect(code(await post(managerKey, null, CREATE, { i: mgrInput({ holderKind: 'USER', holderRef: memberId }) }))).toBe('GRANT_HOLDER_NOT_ALLOWED');
+    expect(code(await post(managerKey, null, CREATE, { i: mgrInput({ holderKind: 'APP', holderRef: w.app2Id }) }))).toBe('GRANT_HOLDER_NOT_ALLOWED');
+    expect(await grantRows()).toHaveLength(0);
+  });
+
+  it('appGrants pages: limit 0 counts only, limit and offset slice newest first, a huge limit is clamped', async () => {
+    const ids: string[] = [];
+    for (let i = 0; i < 3; i += 1) { ids.push(await pending()); await new Promise((r) => setTimeout(r, 5)); }
+    const q = `query($a:String!,$l:Int,$o:Int){appGrants(appRef:$a,limit:$l,offset:$o){total items{id}}}`;
+    expect((await post(managerKey, null, q, { a: w.appId, l: 0 })).data.appGrants).toEqual({ total: 3, items: [] });
+    const first = (await post(managerKey, null, q, { a: w.appId, l: 2, o: 0 })).data.appGrants;
+    const rest = (await post(managerKey, null, q, { a: w.appId, l: 2, o: 2 })).data.appGrants;
+    expect(first.total).toBe(3);
+    expect([...first.items, ...rest.items].map((g: any) => g.id)).toEqual([...ids].reverse());
+    expect((await post(managerKey, null, q, { a: w.appId, l: 100000 })).data.appGrants.items).toHaveLength(3);
+  });
+
+  it('a worker session of a person who DOES manage the App still gets an empty page from appGrants', async () => {
+    await db.orgMember.update({ where: { organizationId_userId: { organizationId: w.orgId, userId: memberId } }, data: { role: 'ADMIN' } });
+    await pending();
+    const res = await post(memberKey, workerSession, LIST, { a: w.appId });
+    expect(res.data.appGrants).toEqual({ items: [], total: 0 });
+  });
+
+  it('a plain person revoke writes no instructed-act record (only a held worker on an instruction does)', async () => {
+    const id = await active();
+    expect((await post(managerKey, null, REVOKE, { r: id })).errors).toBeUndefined();
+    expect(await db.agentTeamEvent.count({ where: { type: 'app.credential-act' } })).toBe(0);
   });
 });

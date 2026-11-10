@@ -131,7 +131,7 @@ async function createAsManager(ctx: Context, input: CreateGrantInput) {
           heldAgentAnchor: kind === 'agent' ? input.holderRef : null,
           action: input.action, values: input.values, startsAt, expiresAt, maxUses: input.maxUses ?? null, reason: input.reason,
         });
-        const view = await getGrantForManager(tx, app.id, id);
+        const view = await getGrantForManager(tx, app.id, id, true);
         if (!view) throw notManager();
         return view;
       },

@@ -81,6 +81,12 @@ describe('hadron_create_grant', () => {
     expect(await rows()).toHaveLength(0);
   });
 
+  it('a refused session binding is refused, as on GraphQL', async () => {
+    const text = await server({ sessionBindingRefused: true } as never).callToolText('hadron_create_grant', input());
+    expect(text).toMatch(/^\[grant_not_manager\]/);
+    expect(await rows()).toHaveLength(0);
+  });
+
   it('an impersonated session is refused', async () => {
     const text = await server({ impersonation: { sessionId: generateId(), adminUserId: memberId } } as never).callToolText('hadron_create_grant', input());
     expect(text).toMatch(/^\[grant_not_manager\]/);

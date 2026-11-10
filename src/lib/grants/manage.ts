@@ -67,9 +67,10 @@ export async function endGrant(tx: Prisma.TransactionClient, id: string, ender: 
   if (!locked || locked.row.appDeletedAt !== null) throw new GrantManageRefusal('GRANT_NOT_FOUND');
   const [extra] = await tx.$queryRaw<Array<{ issuer_user_id: string | null; requested_by_user_id: string | null; requested_by_worker_id: string | null }>>`
     SELECT issuer_user_id, requested_by_user_id, requested_by_worker_id FROM grants WHERE id = ${id}`;
+  if (!extra) throw new GrantManageRefusal('GRANT_NOT_FOUND'); // unreachable under the row lock; explicit rather than asserted
   const row: LockedGrant = {
-    id, appId: locked.row.appId, issuerUserId: extra!.issuer_user_id, requestedByUserId: extra!.requested_by_user_id,
-    requestedByWorkerId: extra!.requested_by_worker_id, activatedAt: locked.row.activatedAt, revokedAt: locked.row.revokedAt,
+    id, appId: locked.row.appId, issuerUserId: extra.issuer_user_id, requestedByUserId: extra.requested_by_user_id,
+    requestedByWorkerId: extra.requested_by_worker_id, activatedAt: locked.row.activatedAt, revokedAt: locked.row.revokedAt,
     holderDepartedAt: locked.row.holderDepartedAt,
   };
   await opts.authorize(row);

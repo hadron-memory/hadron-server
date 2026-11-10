@@ -11012,11 +11012,11 @@ export const typeDefs = `#graphql
     "The caller's own connection grants; connectionRef narrows to one connection."
     connectionGrants(connectionRef: String, limit: Int, offset: Int): ConnectionGrantsPage!
     """
-    One grant by id (#3789). Read only by a BOUND WORKER SESSION, in its own App, for a grant naming that worker directly or a pending one it requested itself.
+    One grant by id (#3789). Read only by a BOUND WORKER SESSION, in its own App, for a grant naming that worker directly, a pending one it requested itself, or (#3711) one held by its role agent in this App while the agent is installed and licensed here.
     Every other caller, a soft-deleted App and a missing id all answer null: no error and no existence oracle.
     """
     grant(ref: ID!): Grant
-    "The bound worker's own grants (#3789): the rows naming it directly as holder, plus the pending ones it requested. Any other caller gets an empty page, never an error. limit 0 returns the count only."
+    "The bound worker's own grants (#3789): the rows naming it directly as holder, the pending ones it requested, and (#3711) every row, in every state, held by its role agent in this App while that agent is installed and licensed here (never another App's, never a base agent's). Any other caller gets an empty page, never an error. limit 0 returns the count only."
     grants(limit: Int, offset: Int): GrantsPage!
     """
     The caller's own grants across every App (#3800, hrn:node:hadronmemory.com:specs:cor:acl:140:05, ruling 0255 item 8): the rows naming the signed-in person directly as holder, in every state, newest first.
