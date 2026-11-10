@@ -348,3 +348,16 @@ it('delegates a superseded error after headers were sent so Express closes the r
   expect(res.status).not.toHaveBeenCalled();
   expect(res.json).not.toHaveBeenCalled();
 });
+
+
+it('bounds traversal of a long superseding chain and refuses with code alone', async () => {
+  let reads = 0;
+  const lookup = vi.spyOn(db.session, 'findUnique').mockImplementation((async () => {
+    if (++reads > 65) throw new Error('superseding chain exceeded the lookup budget');
+    return { id: `chain-${reads}`, workerId: worker.id, endedAt: new Date(), endReason: 'superseded',
+      deletedAt: null, supersededBySessionId: `chain-${reads + 1}` } as any;
+  }) as unknown as typeof db.session.findUnique);
+  try {
+    await expect(refuseSupersededSession(ctx(), 'chain-1')).rejects.toMatchObject({ extensions: { code: 'SESSION_SUPERSEDED' } });
+  } finally { lookup.mockRestore(); }
+});
