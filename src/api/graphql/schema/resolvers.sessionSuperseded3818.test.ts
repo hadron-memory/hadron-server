@@ -265,6 +265,6 @@ it('keeps the schema endpoint superseded refusal typed through Express error mid
 });
 it('fences a newly stamped successor reference and rolls back a missing target', async () => {
   const a = await bind();
-  await expect(db.session.update({ where: { id: a.id }, data: { supersededBySessionId: generateId() } })).rejects.toThrow(/WORKER_REFERENCE_NOT_FOUND/);
+  await expect(db.session.update({ where: { id: a.id }, data: { supersededBySessionId: generateId() } })).rejects.toMatchObject({ extensions: { code: 'WORKER_REFERENCE_NOT_FOUND', referenceKind: 'session', writer: 'sessions' } });
   expect((await db.session.findUniqueOrThrow({ where: { id: a.id } })).supersededBySessionId).toBeNull();
 });
