@@ -29,12 +29,17 @@ async function worker(name: string, role = 'reviewer', opts: { family?: string; 
   return w;
 }
 const create = (input: any = {}) => M.createAgentTask({}, { input: { appRef: app.id, title: 'Match', match: true, requirements: { role: 'reviewer' }, ...input } }, ctx);
-const hold = (workerId: string) => db.agentTask.create({ data: { id: generateId(), appId: app.id, title: 'busy', status: 'pending', assigneeWorkerId: workerId, createdByUserId: owner.id } as any });
+const hold = async (workerId: string) => {
+  const t = await M.createAgentTask({}, { input: { appRef: app.id, title: 'busy' } }, ctx);
+  await M.assignAgentTask({}, { taskId: t.id, assignee: { worker: workerId } }, ctx);
+};
+const unavailable = (workerId: string, reason = 'out-of-tokens') => db.workerAvailability.create({
+  data: { workerId, state: 'unavailable', reason, until: reason === 'stalled' ? null : new Date(Date.now() + 3600_000), setAt: new Date(), setBy: reason === 'stalled' ? 'stall-rule' : 'holder', setByUserId: reason === 'stalled' ? null : owner.id } });
 const byName = (t: any) => Object.fromEntries((t.matchSkipped ?? []).map((c: any) => [c.name, c.reasons]));
 
 it('lists each skipped candidate with its ruled reason, and leaves a non-candidate role out', async () => {
   const unav = await worker('Unav'); await worker('Holder'); await worker('Gone'); await worker('Other', 'engineer');
-  await db.workerAvailability.create({ data: { workerId: unav.id, state: 'unavailable', reason: 'other', setAt: new Date(), setBy: 'test' } });
+  await unavailable(unav.id);
   await hold((await db.worker.findFirstOrThrow({ where: { name: 'Holder' } })).id);
   await db.worker.updateMany({ where: { appId: app.id, name: 'Gone' }, data: { retiredAt: new Date() } });
   const t = await create();
@@ -44,12 +49,12 @@ it('lists each skipped candidate with its ruled reason, and leaves a non-candida
 it('a worker excluded for two reasons carries both, in the enum order (V23)', async () => {
   const w = await worker('Both');
   await hold(w.id);
-  await db.workerAvailability.create({ data: { workerId: w.id, state: 'unavailable', reason: 'other', setAt: new Date(), setBy: 'test' } });
+  await unavailable(w.id);
   expect(byName(await create())).toEqual({ Both: ['HOLDS_TASK', 'UNAVAILABLE'] });
 });
 it('a stall mark reads STALLED, not UNAVAILABLE', async () => {
   const w = await worker('Stalled');
-  await db.workerAvailability.create({ data: { workerId: w.id, state: 'unavailable', reason: 'stalled', setAt: new Date(), setBy: 'stall-rule' } });
+  await unavailable(w.id, 'stalled');
   expect(byName(await create())).toEqual({ Stalled: ['STALLED'] });
 });
 it('requirement exclusions: family, name and tier each get their own value', async () => {
