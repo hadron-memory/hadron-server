@@ -1,7 +1,12 @@
 /** #3818 V24/V25: supersession evidence is explicit; successor disclosure uses the current read gate. */
+import { createServer as createHttpServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { createServer } from '../../../server.js';
+import { randomBytes } from 'node:crypto';
+import { USER_API_KEY_PREFIX, hashUserApiKey } from '../../../middleware/auth.js';
 import { ApolloServer, HeaderMap } from '@apollo/server';
 import { formatGraphQLError } from '../formatError.js';
-import { beforeEach, expect, it, vi } from 'vitest';
+import { beforeAll, afterAll, beforeEach, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -184,4 +189,53 @@ it.each([true, false])('returns a typed MCP header refusal before initializing a
   expect(body.code).toBe('SESSION_SUPERSEDED');
   if (reader) expect(body).toMatchObject({ sessionId: b.id, startedAt: b.startedAt.toISOString() });
   else { expect(body.sessionId).toBeUndefined(); expect(body.startedAt).toBeUndefined(); expect(JSON.stringify(body)).not.toContain(b.id); }
+});
+
+let httpServer: Server, baseUrl: string;
+beforeAll(async () => {
+  httpServer = createHttpServer(await createServer());
+  await new Promise<void>(resolve => httpServer.listen(0, '127.0.0.1', resolve));
+  baseUrl = `http://127.0.0.1:${(httpServer.address() as AddressInfo).port}`;
+});
+afterAll(async () => { await new Promise<void>(resolve => httpServer.close(() => resolve())); });
+async function wire(path: string, token: string, body?: unknown, headers = {}, method = 'POST') {
+  return fetch(baseUrl + path, { method, headers: {
+    accept: 'application/json, text/event-stream', authorization: `Bearer ${token}`,
+    ...(body ? { 'content-type': 'application/json' } : {}), ...headers,
+  }, ...(body ? { body: JSON.stringify(body) } : {}) });
+}
+const init3818 = { jsonrpc: '2.0', id: 1, method: 'initialize', params: {
+  protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: '3818-wire', version: '1' },
+} };
+it('checks MCP transport ownership before disclosing a presented stale-session refusal', async () => {
+  const token = await signJwt({ sub: owner.id, roles: ['READER'] });
+  const other = await signJwt({ sub: stranger.id, roles: ['READER'] });
+  const { a } = await displaced();
+  const opened = await wire('/mcp', token, init3818);
+  expect(opened.status).toBe(200); await opened.text();
+  const id = opened.headers.get('mcp-session-id')!;
+  try {
+    const headers = { 'mcp-session-id': id, 'x-hadron-session': a.id };
+    const body = { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} };
+    const foreign = await wire('/mcp', other, body, headers);
+    expect(foreign.status).toBe(404); expect(await foreign.text()).not.toContain('SESSION_SUPERSEDED');
+    const own = await wire('/mcp', token, body, headers);
+    expect(own.status).toBe(409); expect(await own.json()).toMatchObject({ code: 'SESSION_SUPERSEDED' });
+  } finally { expect((await wire('/mcp', token, undefined, { 'mcp-session-id': id }, 'DELETE')).status).toBe(200); }
+});
+it('keeps OAuth surface refusal ahead of stale header disclosure on GraphQL and MCP', async () => {
+  const { a } = await displaced();
+  for (const [scope, path, body] of [['mcp', '/graphql', { query: '{ __typename }' }], ['unsupported3818', '/mcp', init3818]] as const) {
+    const raw = USER_API_KEY_PREFIX + randomBytes(32).toString('hex');
+    await db.userApiKey.create({ data: { userId: owner.id, keyHash: hashUserApiKey(raw), keyPreview: raw.slice(-4), createdBy: owner.id, issuedVia: 'portal', oauthScopes: [scope] } });
+    const reply = await wire(path, raw, body, { 'x-hadron-session': a.id });
+    expect(reply.status).toBe(403); const text = await reply.text();
+    expect(text).toContain('FORBIDDEN'); expect(text).not.toContain('SESSION_SUPERSEDED');
+  }
+});
+it.each(['/reload', '/sessions/target/outcome'])('keeps superseded execution headers typed on REST %s', async path => {
+  const { a } = await displaced();
+  const token = await signJwt({ sub: owner.id, roles: ['READER'] });
+  const reply = await wire(path, token, { outcome: 1 }, { 'x-hadron-session': a.id });
+  expect(reply.status).toBe(409); expect(await reply.json()).toMatchObject({ code: 'SESSION_SUPERSEDED' });
 });
