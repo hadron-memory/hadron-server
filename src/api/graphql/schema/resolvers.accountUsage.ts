@@ -9,8 +9,9 @@ import type { GraphQLError } from 'graphql';
 import { type Context } from './resolvers.helpers.js';
 import { taskError, withReadableApp } from './resolvers.agentTask.js';
 import { loadAccountUsageHistory } from '../../../lib/accountUsage/load.js';
+import { listUsageAccounts } from '../../../lib/accountUsage/list.js';
 import {
-  addBurn, projectAccount, withWorkerCount, FIVE_HOUR_MINUTES, SEVEN_DAY_MINUTES,
+  addBurn, newestSnapshot, projectAccount, withWorkerCount, FIVE_HOUR_MINUTES, SEVEN_DAY_MINUTES,
   type UsageSnapshot, type WindowBasis, type WindowProjection,
 } from '../../../lib/accountUsage/projection.js';
 
@@ -24,8 +25,7 @@ const MAX_ADD_WORKERS = 50;
 type MoveInput = { worker: string; toAccount: string; toHost?: string | null; toFamily?: string | null };
 type WhatIfInput = { addWorkers?: number | null; moveWorker?: MoveInput | null };
 
-const newest = (history: readonly UsageSnapshot[]): UsageSnapshot | null =>
-  history.reduce<UsageSnapshot | null>((best, s) => (best === null || s.observedAt > best.observedAt ? s : best), null);
+const newest = newestSnapshot;
 
 /** The GraphQL view of a window: the enum names the two standard lengths, OTHER any other, and `lengthMinutes` always. */
 const view = (p: WindowProjection) => ({
@@ -67,6 +67,11 @@ function parseWhatIf(raw: WhatIfInput | null | undefined, account: string): What
 }
 
 export const accountUsageQueries = {
+  // #3853 (cor:agt:140:05): the accounts the projection would find history for. Same gate as the projection (no allowRun), no
+  // arguments to judge, `c.db` so the key arm's read transaction is the one read.
+  accountUsageAccounts: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) =>
+    withReadableApp(ctx, appRef, async (c, app) => listUsageAccounts(c.db, app.id, new Date())),
+
   accountUsageProjection: async (
     _: unknown,
     { appRef, account, host, family, whatIf }: { appRef: string; account: string; host?: string | null; family?: string | null; whatIf?: WhatIfInput | null },

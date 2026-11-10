@@ -7303,7 +7303,7 @@ export const typeDefs = `#graphql
   input CreateGrantInput {
     "A registered action's dotted name, such as schedule.create."
     action: String!
-    "Exactly the action's declared parameters, each a string or a list of distinct strings (an id, never a URN); any other key or shape is refused. Never put a secret here."
+    "Exactly the action's declared parameters, each a string or a list of at most 100 distinct strings per parameter (an id, never a URN; hrn:node:hadronmemory.com:specs:cor:acl:140:01). Any other key or shape is refused. Never put a secret here."
     values: JSON!
     "WORKER (the calling worker itself) or AGENT (its role agent, installed in this App). Any other holder is refused."
     holderKind: GrantHolderKind!
@@ -7315,7 +7315,7 @@ export const typeDefs = `#graphql
     expiresAt: DateTime
     "At most this many uses once signed; a positive integer."
     maxUses: Int
-    "Why the grant is asked for: shown to the signer as the requester's words, labelled as theirs."
+    "Why the grant is asked for: at most 2,000 Unicode characters (code points; hrn:node:hadronmemory.com:specs:cor:acl:140:01). Shown to the signer as the requester's words, labelled as theirs."
     reason: String!
   }
 
@@ -8895,6 +8895,18 @@ export const typeDefs = `#graphql
       taskId: ID
       limit: Int
     ): [AgentTeamEvent!]!
+
+    """
+    #3853 — the usage accounts an App has history for: one entry per label, host and family
+    (hrn:node:hadronmemory.com:specs:cor:agt:140:01) with a valid account-usage snapshot in the App's own team-space memory in
+    the last 14 days, the same history and horizon accountUsageProjection reads
+    (hrn:node:hadronmemory.com:specs:cor:agt:140:05). Readers: as accountUsageProjection
+    (hrn:node:hadronmemory.com:specs:cor:agt:140:03, resting on hrn:node:hadronmemory.com:specs:cor:agt:050:21 and
+    hrn:node:hadronmemory.com:specs:cor:agt:050:23); anyone else is refused APP_NOT_FOUND. At most 50 accounts, the most
+    recently written kept, ordered by label, host and family; complete is false when more exist, or when the bounded search for
+    accounts with valid history stopped short. An App with no history gets an empty list.
+    """
+    accountUsageAccounts(appRef: ID!): AccountUsageAccounts!
 
     """
     #1706 — an App's effective stall windows (hrn:node:hadronmemory.com:specs:cor:agt:050:14–:17), and (#1763) its
@@ -12095,7 +12107,7 @@ export const typeDefs = `#graphql
     """
     requestGrantSignature(grantRef: ID!): GrantSigningRequest!
     """
-    #3690 PR 2 (hrn:node:hadronmemory.com:specs:cor:acl:140:05) — ask for a grant. Only a bound worker session may call it, in its own App, for itself or its role agent (installed in the App); the row is born pending and allows nothing until it is signed (#3649). Returns the grant as grant(ref:) reads it. Refusals, each before any write and none naming a submitted value: GRANT_REQUESTER_NOT_WORKER, GRANT_HOLDER_NOT_ALLOWED (any other holder, or an agent not installed here), GRANT_ACTION_UNKNOWN, GRANT_VALUES_INVALID (a value that does not match the action's declared parameters, or an undeclared key), GRANT_TERMS_INVALID. No MCP tool. Present only where signing is switched on (PASSKEY_SIGNING_ENABLED).
+    #3690 PR 2 (hrn:node:hadronmemory.com:specs:cor:acl:140:05) — ask for a grant. Only a bound worker session may call it, in its own App, for itself or its role agent (installed in the App); the row is born pending and allows nothing until it is signed (#3649). Returns the grant as grant(ref:) reads it. Refusals, each before any write and none naming a submitted value: GRANT_REQUESTER_NOT_WORKER, GRANT_HOLDER_NOT_ALLOWED (any other holder, or an agent not installed here), GRANT_ACTION_UNKNOWN, GRANT_VALUES_INVALID (a value that does not match the action's declared parameters, an undeclared key, or a list above 100 entries per parameter), GRANT_TERMS_INVALID (including a reason above 2,000 Unicode code points; hrn:node:hadronmemory.com:specs:cor:acl:140:01). These write-path limits never prevent rebuilding an existing grant's signature terms. No MCP tool. Present only where signing is switched on (PASSKEY_SIGNING_ENABLED).
     """
     createGrant(input: CreateGrantInput!): Grant!
     "#3649 slice B (hrn:node:hadronmemory.com:specs:cor:acl:140:07) — withdraw an open grant signing request. Only the requester account, from any of its sessions or workers. Refusals: FORBIDDEN while impersonating, SIGNING_REQUEST_NOT_FOUND, SIGNING_REQUEST_NOT_REQUESTER, SIGNING_REQUEST_ENDED (extensions.state)."
@@ -17009,6 +17021,30 @@ export const typeDefs = `#graphql
   type AccountUsageWhatIf {
     adjusted: [AccountUsageWindowProjection!]!
     target: AccountUsageMoveTarget
+  }
+
+  """
+  #3853 — one usage account an App has history for (hrn:node:hadronmemory.com:specs:cor:agt:140:05): the label, host and family
+  that together are an account (hrn:node:hadronmemory.com:specs:cor:agt:140:01). Passed back to accountUsageProjection as account,
+  host and family, every entry is accepted. workers and workersConfigured are the newest snapshot's.
+  """
+  type AccountUsageAccount {
+    account: String!
+    host: String!
+    family: String!
+    newestSnapshotAt: DateTime!
+    workers: [String!]!
+    workersConfigured: Boolean!
+  }
+
+  """
+  #3853 — the accounts an App has usage history for. complete is false when more exist than the bound
+  (hrn:node:hadronmemory.com:specs:cor:agt:140:05); a cut list is not a refusal.
+  """
+  type AccountUsageAccounts {
+    asOf: DateTime!
+    accounts: [AccountUsageAccount!]!
+    complete: Boolean!
   }
 
   "#3820 — one account's projection. workers are the names the collector configured on the account."
