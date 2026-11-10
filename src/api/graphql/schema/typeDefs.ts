@@ -5314,8 +5314,8 @@ export const typeDefs = `#graphql
 
   """
   #2973 PR2 / hrn:node:hadronmemory.com:specs:cor:agt:040:09: the preview shown BEFORE an organisation's switch goes on,
-  one page of it. Every page of one response carries the same previewToken, computed over the FULL preview (every row,
-  every page) at one consistent snapshot. setOrgBootPromptSigning(required: true) must present it. The token grants no
+  one page of it. Each request mints its own previewToken over the FULL preview (every row, every page) at one consistent
+  snapshot; any page's token is accepted within its own ten minutes. setOrgBootPromptSigning(required: true) must present it. The token grants no
   authority and holds no prompt text; it expires after ten minutes. While the deployment does not ship signing the rows
   still say what WOULD change, and enforced says false.
   """
