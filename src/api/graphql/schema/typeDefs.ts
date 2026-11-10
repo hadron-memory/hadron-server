@@ -15921,6 +15921,35 @@ export const typeDefs = `#graphql
 
   type AgentTaskDependencyPage { items: [AgentTask!]!, total: Int!, hasMore: Boolean! }
 
+  "One candidate a failed match skipped (#3816): the worker and every reason, in AgentTaskMatchSkipReason order."
+  type AgentTaskSkippedCandidate {
+    workerId: ID!
+    name: String!
+    reasons: [AgentTaskMatchSkipReason!]!
+  }
+
+  """
+  Why a failed match skipped a candidate (#3816, V21). Closed and additive: values are added, never renamed.
+  STOP_SIGNAL names a matcher condition V21 lacked. There is no value for a bound, quiet worker: hadron-server#3815 removes that exclusion.
+  """
+  enum AgentTaskMatchSkipReason {
+    RETIRED
+    USES_NO_TASKS
+    ENDING_SESSION
+    HOLDS_TASK
+    UNAVAILABLE
+    FAMILY_UNAVAILABLE
+    STALLED
+    NO_FAMILY
+    NOT_HELD
+    FAMILY_EXCLUDED
+    NAME_EXCLUDED
+    TIER_BELOW_MINIMUM
+    TIER_UNKNOWN
+    MODEL_GROUP_MISMATCH
+    STOP_SIGNAL
+  }
+
   "Single-shot failure (hrn:node:hadronmemory.com:specs:cor:agt:050:01): assigning clears it; cancellation clears it."
   type AgentTaskMatchFailure {
     reason: String!
@@ -15934,6 +15963,12 @@ export const typeDefs = `#graphql
   workers acting through their sessions included (hrn:node:hadronmemory.com:specs:cor:agt:050:21).
   """
   type AgentTask {
+    """
+    #3816 (V21-V23, hrn:node:hadronmemory.com:specs:cor:agt:050:01): the candidates a failed match skipped, each with EVERY reason it
+    was skipped, in the enum's declared order. Returned only in the createAgentTask(match: true) answer; never stored, so any
+    later read is null (as is a match that assigned, and a create without match: true).
+    """
+    matchSkipped: [AgentTaskSkippedCandidate!]
     "Null unless an opt-in single-shot match failed. No assignment-unassignable alarm is raised for it."
     matchFailure: AgentTaskMatchFailure
     "#2644 (hrn:node:hadronmemory.com:specs:cor:agt:050:01) — priority1 is highest; range1..5, default1. Matching only, never authority."
