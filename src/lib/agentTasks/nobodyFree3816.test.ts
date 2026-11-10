@@ -82,7 +82,40 @@ it('a successful match and a plain create carry no list; a non-participant gets 
   const outsider = await db.user.create({ data: { handle: `out-${generateId()}` } });
   await expect(M.createAgentTask({}, { input: { appRef: app.id, title: 'x', match: true } }, { db, userId: outsider.id, roles: ['READER'] }))
     .rejects.toMatchObject({ extensions: { code: 'APP_NOT_FOUND' } });
-  expect(Q).toBeTruthy();
+});
+it('GraphQL: a failed match-now create answers matchSkipped on the AgentTask; a plain create and a later read carry none (V22)', async () => {
+  const w = await worker('Holder'); await hold(w.id);
+  const plain = await create({ match: false });
+  expect(plain.matchFailedReason ?? null).toBeNull();
+  expect(plain.matchSkipped ?? null).toBeNull();
+  expect((resolvers as any).AgentTask.matchSkipped(plain)).toBeNull();
+  const failed = await create();
+  expect(failed.matchSkipped).toEqual([{ workerId: w.id, name: 'Holder', reasons: ['HOLDS_TASK'] }]);
+  const sdl = (await import('../../api/graphql/schema/typeDefs.js')) as any;
+  expect(JSON.stringify(sdl)).toContain('matchSkipped: [AgentTaskSkippedCandidate!]');
+});
+it('a concurrent claim change that wins the guarded failure write leaves no matchSkipped on the answer', async () => {
+  const w = await worker('Holder'); await hold(w.id);
+  const real = db.agentTask.updateMany.bind(db.agentTask);
+  const spy = vi.spyOn(db.agentTask, 'updateMany').mockImplementation((async (args: any) => {
+    if (args?.data?.matchFailedReason) {
+      spy.mockRestore();
+      await db.agentTask.updateMany({ where: { id: args.where.id }, data: { matchClaimedAt: new Date() } });
+    }
+    return real(args);
+  }) as any);
+  const t = await create();
+  spy.mockRestore();
+  expect(t.matchSkipped ?? null).toBeNull();
+  const fresh = await db.agentTask.findUniqueOrThrow({ where: { id: t.id } });
+  expect(fresh.matchFailedReason).toBeNull();
+  expect(fresh.matchPending).toBe(true);
+});
+it('a retired worker of the role carries RETIRED and every other reason that applies to it (V23)', async () => {
+  const named = await worker('RetiredNamed');
+  await db.worker.update({ where: { id: named.id }, data: { retiredAt: new Date() } });
+  const r = byName(await create({ requirements: { role: 'reviewer', excludeWorkers: [named.id] } }));
+  expect(r.RetiredNamed).toEqual(['RETIRED', 'NAME_EXCLUDED']);
 });
 it('a retired worker of another role is not a candidate; a retired one of the role is (RETIRED)', async () => {
   const other = await worker('RetiredEng', 'engineer'); const mine = await worker('RetiredRev');

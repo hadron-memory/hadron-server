@@ -371,9 +371,10 @@ async function loadOpenSessionPlacements(db: Db, workerIds: string[]): Promise<M
  * The work state of every worker of one App that is not retired, at `now`.
  * One query per kind of input, never one per worker.
  */
-export async function loadWorkerWorkStates(db: Db, appId: string, now: Date, opts?: { bySession?: boolean }): Promise<WorkerWorkState[]> {
+export async function loadWorkerWorkStates(db: Db, appId: string, now: Date, opts?: { bySession?: boolean; retiredOnly?: boolean }): Promise<WorkerWorkState[]> {
   const workers = await db.worker.findMany({
-    where: { appId, retiredAt: null },
+    // #3816: `retiredOnly` loads the RETIRED workers instead, only so a failed match can name every reason they were skipped.
+    where: { appId, retiredAt: opts?.retiredOnly ? { not: null } : null },
     select: { id: true, appId: true, name: true, slug: true, role: true, agent: { select: { usesTasks: true } } },
     orderBy: { id: 'asc' },
   });
@@ -774,9 +775,11 @@ export async function matchTaskNow(db: PrismaClient, taskId: string, now: Date, 
     return null;
   }
   const { reason, skipped } = outcome;
-  await db.agentTask.updateMany({ where: { id: taskId, matchPending: true, status: 'pending', assigneeWorkerId: null, assigneeUserId: null,
+  const marked = await db.agentTask.updateMany({ where: { id: taskId, matchPending: true, status: 'pending', assigneeWorkerId: null, assigneeUserId: null,
     matchClaimedAt: claim ?? null },
     data: { matchPending: false, matchFailedAt: new Date(), matchFailedReason: reason } });
+  // A concurrent assignment, cancel or claim change won the guarded write: this attempt recorded no failure, so it describes none.
+  if (marked.count !== 1) return null;
   // #3816 (V22): the candidates go back in the answer only; the stored mark keeps its coarse reason.
   return skipped ?? [];
 }
@@ -841,12 +844,15 @@ async function chooseMatchNow(
     const eligible = team.filter(w => eligibleFor(req, { ...w, freeFamilies: w.families }, groups) !== null);
     const covering = await coveringSignals(db, task.appId, null, now);
     // #3816: the candidates are the workers of the asked role (and team pool); each is listed with every reason it was not taken.
-    const retired = pool ? [] : (await db.worker.findMany({ where: { appId: task.appId, retiredAt: { not: null } }, select: { id: true, name: true, role: true } }))
-      .filter(w => roleAllowed(req, w.role));
-    const explain = (): SkippedCandidate[] => [
-      ...retired.map(w => ({ workerId: w.id, name: w.name, reasons: ['RETIRED' as MatchSkipReason] })),
+    // A retired worker is listed with RETIRED plus every other reason that applies to it (V23), so its state is loaded; only a
+    // failed match that asked for the answer pays for that read.
+    const explain = async (): Promise<SkippedCandidate[]> => {
+      const retired = pool ? [] : (await loadWorkerWorkStates(db, task.appId, now, { bySession: true, retiredOnly: true })).filter(w => roleAllowed(req, w.role));
+      return [
+      ...retired.map(w => ({ workerId: w.id, name: w.name, reasons: MATCH_SKIP_REASONS.filter(r => r === 'RETIRED' || skipReasonsOf(req, w, groups, covering.has(w.id)).includes(r)) })),
       ...team.map(w => ({ workerId: w.id, name: w.name, reasons: skipReasonsOf(req, w, groups, covering.has(w.id)) })),
     ].filter(c => c.reasons.length > 0).sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()) || a.workerId.localeCompare(b.workerId));
+    };
     const stoppedCreator = task.createdByWorkerId && timeStoppedWorkers(covering).has(task.createdByWorkerId);
     if (stoppedCreator) reason = 'STOP_SIGNAL';
     else if (roles.length === 0) reason = 'NO_ROLE';
@@ -864,7 +870,8 @@ async function chooseMatchNow(
         if (outcome === 'task-gone') break;
       }
     }
-    if (wantSkipped) skipped = explain();
+    // A worker the snapshot called free but that a final assignment gate then refused (a lost race) has no snapshot reason and is not listed.
+    if (wantSkipped) skipped = await explain();
   }
   return skipped ? { reason, skipped } : { reason };
 }
