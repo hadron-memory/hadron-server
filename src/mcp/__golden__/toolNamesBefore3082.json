@@ -145,6 +145,8 @@
   "hadron_update_task",
   "hadron_update_worker",
   "hadron_validate",
+  "hadron_web_poll_cancel",
+  "hadron_web_poll_list",
   "hadron_whoami",
   "hadron_worker_availability_set",
   "hadron_worker_wake_settings"
@@ -295,6 +297,8 @@
   "hadron_update_task",
   "hadron_update_worker",
   "hadron_validate",
+  "hadron_web_poll_cancel",
+  "hadron_web_poll_list",
   "hadron_whoami",
   "hadron_worker_availability_set",
   "hadron_worker_wake_settings"
@@ -441,6 +445,8 @@
   "hadron_update_task",
   "hadron_update_worker",
   "hadron_validate",
+  "hadron_web_poll_cancel",
+  "hadron_web_poll_list",
   "hadron_whoami",
   "hadron_worker_availability_set",
   "hadron_worker_wake_settings"
@@ -587,6 +593,8 @@
   "hadron_update_task",
   "hadron_update_worker",
   "hadron_validate",
+  "hadron_web_poll_cancel",
+  "hadron_web_poll_list",
   "hadron_whoami",
   "hadron_worker_availability_set",
   "hadron_worker_wake_settings"
