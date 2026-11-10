@@ -11,6 +11,7 @@ import { generateId } from '../id.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from '../../mcp/server.js';
 import { CONTENT_RESOLUTION_LIMIT_EXCEEDED, setResolutionLimits } from './resolutionBudget.js';
+import { drainNodeUsage } from '../usageRecorder.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -39,6 +40,43 @@ const mcp = () => createTestableMcpServer({ userId: reader.id, roles: [], client
 const Q = resolvers.Query as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<any>>;
 const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<any>>;
 const readEvents = () => db.usageEvent.count({ where: { memoryId } });
+
+// #3839: keep the existing boundary here while the delayed-writer pin demonstrates its weakness.
+async function settleExportUsage() {
+  await new Promise((r) => setTimeout(r, 50));
+}
+
+async function bounded<T>(promise: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([promise, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('#3839 controlled writer did not reach its boundary')), 5_000);
+    })]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/** Hold the real insert, not the recorder: release and drain before restoring the spy on every path. */
+async function heldExportWriter(run: (entered: Promise<void>, release: () => void) => Promise<void>) {
+  await drainNodeUsage(db);
+  let release!: () => void;
+  let entered!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const seen = new Promise<void>((resolve) => { entered = resolve; });
+  const insert = db.usageEvent.createMany.bind(db.usageEvent);
+  const spy = vi.spyOn(db.usageEvent, 'createMany').mockImplementation((args) => {
+    entered();
+    return gate.then(() => insert(args)) as ReturnType<typeof insert>;
+  });
+  try {
+    await run(seen, release);
+  } finally {
+    vi.useRealTimers();
+    release();
+    try { await drainNodeUsage(db); } finally { spy.mockRestore(); }
+  }
+}
 
 /** `p` is over a 10-byte limit; `ok` is under it. */
 async function fixtures() {
@@ -133,6 +171,40 @@ describe('#40 skill export: the refused node is left out and named; the others e
 });
 
 describe('#40 external artefacts refuse before the external call', () => {
+  it('#3839: the export usage boundary waits for a controlled delayed insert, not 50ms', async () => {
+    await fixtures();
+    const p = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'p' } });
+    await heldExportWriter(async (entered, release) => {
+      expect((await Q.nodeExport({}, { id: p.id }, ctx())).data).toContain('{{> t}}');
+      await bounded(entered); // The resolver returned although the real usage insert is still held.
+      expect(await readEvents()).toBe(0);
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      let settled = false;
+      const draining = settleExportUsage().then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(50); // Deterministically exhaust the old wait without a wall-clock sleep.
+      try {
+        expect(settled).toBe(false);
+      } finally {
+        vi.useRealTimers();
+        release();
+        await bounded(draining);
+      }
+      expect(await readEvents()).toBe(1);
+    });
+  }, 15_000);
+
+  it('#3839: a writer that stays pending fails the bounded drain, and cleanup releases it', async () => {
+    await fixtures();
+    const p = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'p' } });
+    await heldExportWriter(async (entered) => {
+      await Q.nodeExport({}, { id: p.id }, ctx());
+      await bounded(entered);
+      await expect(drainNodeUsage(db, { timeoutMs: 25 })).rejects.toThrow('Timed out draining asynchronous usage-event writes');
+      expect(await readEvents()).toBe(0);
+    });
+    expect(await readEvents()).toBe(1);
+  }, 15_000);
+
   it('nodeExport PDF calls no PDF service', async () => {
     await fixtures();
     const p = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'p' } });
@@ -143,7 +215,7 @@ describe('#40 external artefacts refuse before the external call', () => {
       .rejects.toMatchObject({ extensions: { code: CONTENT_RESOLUTION_LIMIT_EXCEEDED } });
     // The restore export reads with resolution off and is unaffected.
     expect((await Q.nodeExport({}, { id: p.id }, ctx())).data).toContain('{{> t}}');
-    await new Promise((r) => setTimeout(r, 50));
+    await settleExportUsage();
     expect(await readEvents()).toBe(1);
   });
 
