@@ -83,10 +83,6 @@ async function restoreChatSeqUniqueness(): Promise<void> {
 }
 
 /**
- * Delete all rows from every table in FK-safe order.
- * Call in beforeEach for DB tests.
- */
-/**
  * #3835: wait until no other backend of THIS database is mid-statement or
  * holding an open transaction. cleanDb's TRUNCATEs take AccessExclusive one
  * table at a time while a leftover writer (the previous test's git-sync node
@@ -96,7 +92,7 @@ async function restoreChatSeqUniqueness(): Promise<void> {
  * this worker's own leftover. Bounded and non-fatal: a backend still busy
  * after the bound is left to the old behavior, with its statement logged.
  */
-export async function awaitQuiescentBackends(boundMs = 10_000): Promise<void> {
+export async function truncateAfterQuiescence(truncateSql: string, boundMs = 10_000): Promise<void> {
   // A raw pg connection, not the Prisma client: some tests spy on the client to
   // pin that a path issues no raw queries (see restoreChatSeqUniqueness).
   const client = new Client({ connectionString: process.env.DATABASE_URL });
@@ -107,33 +103,53 @@ export async function awaitQuiescentBackends(boundMs = 10_000): Promise<void> {
       const { rows } = await client.query(
         `SELECT state, left(query, 120) AS query FROM pg_stat_activity
          WHERE datname = current_database() AND pid <> pg_backend_pid()
+           AND backend_type = 'client backend'
            AND state IN ('active', 'idle in transaction', 'idle in transaction (aborted)')`,
       );
-      if (rows.length === 0) return;
+      if (rows.length === 0) break;
       if (Date.now() > deadline) {
         console.warn(`cleanDb: ${rows.length} backend(s) still busy after ${boundMs}ms: ${JSON.stringify(rows)}`);
-        return;
+        break;
       }
       await new Promise((r) => setTimeout(r, 20));
+    }
+    // A writer scheduled before this cleanup may still start after the check
+    // above (the snapshot cannot see it). Its node DELETE takes `nodes` first and
+    // then its FK cascades take their tables in FK order, while the TRUNCATE takes
+    // node_signatures first: a cycle if both are mid-flight. Take `nodes` FIRST and
+    // alone. SHARE ROW EXCLUSIVE conflicts with every writer (RowExclusive); while
+    // we wait for it we hold nothing, so a writer already inside is waited for and
+    // a later one queues behind us on its first node write.
+    await client.query('BEGIN');
+    try {
+      await client.query('LOCK TABLE nodes IN SHARE ROW EXCLUSIVE MODE');
+      await client.query(truncateSql);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw err;
     }
   } finally {
     await client.end();
   }
 }
 
+/**
+ * Delete all rows from every table in FK-safe order.
+ * Call in beforeEach for DB tests.
+ */
 export async function cleanDb(db: PrismaClient): Promise<void> {
   // #1189: a late batched usage INSERT takes FK locks on these parents and
   // can deadlock with their DELETE/SetNull cascades. Finish all recorder chunks
   // before deleting any fixture; deleting usage rows last alone is not enough.
   await drainNodeUsage(db);
-  // #3835: no leftover writer may overlap the TRUNCATE below.
-  await awaitQuiescentBackends();
   // #1631: test-only cleanup bypasses row-delete guards, before deleting owners.
   // #1632: signature records reference passkeys and requests; both refuse a row
   // DELETE while their node exists, so they are truncated with them.
   // #2973: stamp_signing_keys is FK-free itself (node_signatures references IT), so
   // nothing cascades it away — key generations would leak between tests otherwise.
-  await db.$executeRawUnsafe('TRUNCATE TABLE node_signatures, stamp_signing_keys, signing_requests, passkey_credentials, worker_reference_fences, user_deletion_audits, agent_clone_audits, user_api_key_deletions CASCADE');
+  // #3835: no leftover writer may overlap this TRUNCATE (quiesce, then lock `nodes` first).
+  await truncateAfterQuiescence('TRUNCATE TABLE node_signatures, stamp_signing_keys, signing_requests, passkey_credentials, worker_reference_fences, user_deletion_audits, agent_clone_audits, user_api_key_deletions CASCADE');
   // Pending first-party login states (FK-free; keyed on the OAuth state).
   await db.pendingLoginState.deleteMany();
   // #1079 — the URN alias map. Deliberately FK-FREE: it must outlive the row it
