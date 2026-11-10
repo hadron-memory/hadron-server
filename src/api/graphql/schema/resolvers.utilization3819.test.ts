@@ -1,5 +1,10 @@
 /** #3819 count/ranked slice: V1–V5, optimistic availability and roster admission. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createServer as httpServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { randomBytes } from 'node:crypto';
+import { createServer } from '../../../server.js';
+import { USER_API_KEY_PREFIX, hashUserApiKey } from '../../../middleware/auth.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -26,7 +31,7 @@ beforeEach(async () => {
 });
 async function worker(opts: { family?: string; model?: string | null; role?: string; unbound?: boolean } = {}) {
   const id = generateId();
-  await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id, appId, agentId, name: `Worker-${id}`, slug: `worker-${id}`, role: opts.role ?? 'server-engineer' } });
+  await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id, appId, agentId, name: `Worker-${id}`, slug: `worker-${id}`, role: opts.role ?? 'server-engineer', heldByUserId: memberId } });
   if (!opts.unbound) await db.session.create({ data: { id: generateId(), appId, agentId, workerId: id, family: opts.family ?? 'claude', llmModel: opts.model === undefined ? 'claude-sonnet-5-5' : opts.model, startedAt: ago(48), updatedAt: ago(48) } });
   return id;
 }
@@ -55,9 +60,12 @@ describe('#3819 utilization count/ranked slice', () => {
   });
   it('assignment, reassignment-away and hand-back in the window retain former task holders', async () => {
     const [a,b,c] = await Promise.all([worker(),worker(),worker()]);
+    const handed = await db.agentTask.create({data:{appId,title:'Returned task',ownerUserId:memberId,createdAt:ago(48)}});
     await db.agentTeamEvent.createMany({ data:[
       {appId,type:'task.reassigned',subjectWorkerId:b,createdAt:ago(1),payload:{from:{workerId:a},to:{workerId:b}}},
-      {appId,type:'task.handed-back',actorWorkerId:c,createdAt:ago(1),payload:{code:'missing_input'}},
+      {appId,taskId:handed.id,type:'task.assigned',subjectWorkerId:c,createdAt:ago(30),payload:{assignee:{workerId:c}}},
+      // Attribution names the request actor, not necessarily the assignee on a directed act.
+      {appId,taskId:handed.id,type:'task.handed-back',actorWorkerId:b,createdAt:ago(1),payload:{code:'missing_input'}},
     ]});
     expect((await read()).combinations[0]).toMatchObject({eligibleWorkers:3,busyWorkers:3,utilization:1});
   });
@@ -100,7 +108,9 @@ describe('#3819 utilization count/ranked slice', () => {
     for (const c of [ctx(outsiderId),ctx()]) {
       const args={appRef:c.userId===outsiderId?appId:generateId()};
       const capture=async(f:()=>Promise<unknown>)=>f().then(()=>null,(e:any)=>({message:e.message,extensions:e.extensions}));
-      expect(await capture(()=>read(args,c))).toEqual(await capture(()=>Q.teamRoster({},args,c)));
+      const refused = await capture(()=>Q.teamRoster({},args,c));
+      expect(refused).toMatchObject({extensions:{code:'APP_NOT_FOUND'}});
+      expect(await capture(()=>read(args,c))).toEqual(refused);
     }
   });
   it('a foreign-App assignment event cannot make a local worker busy',async()=>{
@@ -108,5 +118,34 @@ describe('#3819 utilization count/ranked slice', () => {
     const other=await db.app.create({data:{name:'Other',urn:`util-${generateId()}.test:other`,ownerUserId:memberId}});
     await db.agentTeamEvent.create({data:{appId:other.id,type:'task.assigned',subjectWorkerId:id,payload:{assignee:{workerId:id}}}});
     expect((await read()).combinations[0].busyWorkers).toBe(0);
+  });
+});
+
+describe('#3819 transport and window boundaries', () => {
+  it('the real GraphQL field returns only scalar counts with a server computed instant', async () => {
+    await worker({model:null});
+    const key = `${USER_API_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
+    await db.userApiKey.create({data:{userId:memberId,oauthScopes:[],keyHash:hashUserApiKey(key),keyPreview:key.slice(-4)}});
+    const server = httpServer(await createServer());
+    await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
+    try {
+      const r = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/graphql`,{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${key}`},body:JSON.stringify({query:'query($app:ID!){teamUtilization(appRef:$app){appId computedAt windowHours combinations{family tier role eligibleWorkers busyWorkers utilization saturated}}}',variables:{app:appId}})}).then(r=>r.json()) as any;
+      expect(r.errors).toBeUndefined();
+      expect(r.data.teamUtilization).toMatchObject({appId,windowHours:24,combinations:[{family:'claude',tier:null,eligibleWorkers:1,busyWorkers:0,utilization:0,saturated:false}]});
+      expect(Number.isFinite(Date.parse(r.data.teamUtilization.computedAt))).toBe(true);
+    } finally {await new Promise<void>(resolve=>server.close(()=>resolve()));}
+  });
+  it('duplicates never inflate a worker and future history is not busy yet', async () => {
+    const a=await worker(); const b=await worker();
+    await task(a); await task(a);
+    await db.agentTeamEvent.createMany({data:[
+      {appId,type:'task.assigned',subjectWorkerId:a,createdAt:ago(1),payload:{assignee:{workerId:a}}},
+      {appId,type:'task.assigned',subjectWorkerId:b,createdAt:ago(-1),payload:{assignee:{workerId:b}}},
+    ]});
+    expect((await read()).combinations[0]).toMatchObject({eligibleWorkers:2,busyWorkers:1,utilization:0.5});
+  });
+  it('bad window input does not replace the roster refusal for an unauthorized caller', async () => {
+    const capture=async(f:()=>Promise<unknown>)=>f().then(()=>null,(e:any)=>({message:e.message,extensions:e.extensions}));
+    expect(await capture(()=>read({windowHours:0},ctx(outsiderId)))).toEqual(await capture(()=>Q.teamRoster({},{appRef:appId},ctx(outsiderId))));
   });
 });
