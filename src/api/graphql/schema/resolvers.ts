@@ -1,3 +1,4 @@
+import { utilizationQueries } from './resolvers.utilization.js';
 import { runTeamSnapshotMutations, runTeamSnapshotQueries } from './resolvers.runTeamSnapshot.js';
 import { rateLimitQueries, rateLimitMutations } from './resolvers.rateLimit.js';
 import { registerRolePickQueries } from './resolvers.registerRolePick.js';
@@ -225,6 +226,7 @@ export const resolvers = {
     ...agentTaskAlarmQueries,
     ...agentTaskMatchingQueries,
     ...accountUsageQueries,
+    ...utilizationQueries,
     ...registerRoleCandidateQueries,
     ...registerRolePickQueries,
     ...actionRegisterIndexQueries,

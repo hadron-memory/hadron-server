@@ -130,27 +130,6 @@ async function countingSignatureSpans(
   });
   const requestOf = new Map(requests.map((r) => [r.id, r]));
 
-  // The span evidence, read once for every revision any candidate signature must be judged over: the newest snapshot
-  // at each number (by id, as every other revision read resolves duplicates), whichever memory captured it — only a
-  // HASH is compared against a hash already in the serve's own data, so a snapshot captured in another memory is an
-  // honest witness here without any text crossing memories (and, per the fence ruling above, without its capture
-  // memory ever counting against the signature).
-  // A loop, not Math.min(...spread): a node with more signatures than the engine's argument cap must not
-  // RangeError the serve (Bob old-7, delta review of 77c9fda85b).
-  let lowestSigned = Number.MAX_SAFE_INTEGER;
-  for (const s of signatures) if (s.revision < lowestSigned) lowestSigned = s.revision;
-  const snapshots = await db.nodeRevision.findMany({
-    where: askCeiling == null
-      ? { nodeId, revNo: { gte: lowestSigned } }
-      : { nodeId, revNo: { gte: lowestSigned, lte: askCeiling } },
-    orderBy: { id: 'desc' },
-    select: { revNo: true, name: true, abstract: true, content: true },
-  });
-  const spanFields = new Map<number, WitnessFields>();
-  for (const s of snapshots) {
-    if (s.revNo != null && !spanFields.has(s.revNo)) spanFields.set(s.revNo, { name: s.name, abstract: s.abstract, content: s.content });
-  }
-
   // The requirement's owner ask, resolved once: the Agent or App the node's CURRENT memory serves (null in a memory
   // that is no Agent's system memory and no App's install memory — nothing can match, so nothing counts there).
   const currentOwner = requirement === 'compiled-boot-prompt' ? await bootPromptOwnerOfMemory(db, node.memoryId) : null;
@@ -167,7 +146,11 @@ async function countingSignatureSpans(
     return stampKeys.get(keyId) ?? null;
   };
 
-  const spans: CountingSpan[] = [];
+  // Phase 1 — ELIGIBILITY, judged before any witness is read (#3826): no input of these legs consumes a snapshot field,
+  // so a signature the ceremony never made eligible costs no history read at all, and the witness read below starts at
+  // the lowest signature that survives, not the lowest candidate. Same legs, same order, each fail-closed `continue`
+  // unchanged: only WHEN the snapshots are read moved, never what counts.
+  const eligible: typeof signatures = [];
   for (const sig of signatures) {
     // Eligibility (C1 / Q-E): the ceremony's durable verdict only, never a present-day re-derivation.
     const req = requestOf.get(sig.signingRequestId);
@@ -203,6 +186,34 @@ async function countingSignatureSpans(
       if (currentOwner == null || sig.stampOwnerKind !== currentOwner.kind || sig.stampOwnerId !== currentOwner.id) continue;
     }
 
+    eligible.push(sig);
+  }
+  if (eligible.length === 0) return [];
+
+  // The span evidence, read once for every revision any ELIGIBLE signature must be judged over: the newest snapshot
+  // at each number (by id, as every other revision read resolves duplicates), whichever memory captured it — only a
+  // HASH is compared against a hash already in the serve's own data, so a snapshot captured in another memory is an
+  // honest witness here without any text crossing memories (and, per the fence ruling above, without its capture
+  // memory ever counting against the signature).
+  // A loop, not Math.min(...spread): a node with more signatures than the engine's argument cap must not
+  // RangeError the serve (Bob old-7, delta review of 77c9fda85b).
+  let lowestSigned = Number.MAX_SAFE_INTEGER;
+  for (const s of eligible) if (s.revision < lowestSigned) lowestSigned = s.revision;
+  const snapshots = await db.nodeRevision.findMany({
+    where: askCeiling == null
+      ? { nodeId, revNo: { gte: lowestSigned } }
+      : { nodeId, revNo: { gte: lowestSigned, lte: askCeiling } },
+    orderBy: { id: 'desc' },
+    select: { revNo: true, name: true, abstract: true, content: true },
+  });
+  const spanFields = new Map<number, WitnessFields>();
+  for (const s of snapshots) {
+    if (s.revNo != null && !spanFields.has(s.revNo)) spanFields.set(s.revNo, { name: s.name, abstract: s.abstract, content: s.content });
+  }
+
+  // Phase 2 — coverage and state, per eligible signature.
+  const spans: CountingSpan[] = [];
+  for (const sig of eligible) {
     // Coverage (cor:dmo:130:09), as the INTERVAL it is: walk the witness run upward from the signature's own revision
     // while every revision still hashes to the signed hash — a missing or differing witness ends the run — and record
     // where it ends. The signature's OWN revision is judged like the rest, NOT trusted on the ceremony's at-signing

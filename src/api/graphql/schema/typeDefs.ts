@@ -8646,6 +8646,25 @@ export const typeDefs = `#graphql
   "#3448 — readiness ignores opaque properties (hrn:node:hadronmemory.com:specs:cor:agt:050:28)."
   type PullRequestReadiness { ready: Boolean! head: String! slots: [ReviewSlotReadiness!]! }
 
+  "Advisory current eligible workers and task-held utilization, grouped and ranked; no matching or authority effect."
+  type TeamUtilization {
+    appId: ID!
+    computedAt: DateTime!
+    windowHours: Int!
+    combinations: [WorkerUtilization!]!
+  }
+  "One current family/tier/role combination. Unknown tier has its own null row; retired workers are excluded."
+  type WorkerUtilization {
+    family: String!
+    tier: String
+    role: String
+    eligibleWorkers: Int!
+    busyWorkers: Int!
+    utilization: Float!
+    "Slice 1: true only for zero eligible workers (then utilization=1). Failure-only saturation reads false until the deferred match-outcome integration; no alarm is emitted by this read."
+    saturated: Boolean!
+  }
+
   type Query {
     "#3448 — task readers, including the App's own live key (hrn:node:hadronmemory.com:specs:cor:agt:050:21 / hrn:node:hadronmemory.com:specs:cor:agt:050:23). Null for an unreadable task. PR_HEAD_NOT_FROZEN or REVIEW_SCHEDULE_MISSING for absent event facts."
     pullRequestReadiness(taskRef: ID!, head: String!): PullRequestReadiness
@@ -8882,6 +8901,9 @@ export const typeDefs = `#graphql
     the App's task audience (hrn:node:hadronmemory.com:specs:cor:agt:050:21). Retired workers are left out.
     """
     teamRoster(appRef: ID!): TeamRoster!
+    "#3819 slice 1: advisory utilization in the roster audience (hrn:node:hadronmemory.com:specs:cor:agt:050:21). Window defaults to 24h, range 1–168; tier is high/mid/low. Failed-match saturation and alarms await their historical provider."
+    teamUtilization(appRef: ID!, family: String, tier: String, role: String, windowHours: Int = 24): TeamUtilization!
+
     """
     #3820 — the token-burn projection of one subscription account in an App: the 5-hour and 7-day windows' use at their
     reset as a range, from the burn over the last 1h, 6h and 24h of history, with an optional what-if (add workers, or move
