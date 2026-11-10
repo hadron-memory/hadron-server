@@ -47,7 +47,7 @@ import {
 import { compileTemplate } from '../../../lib/template.js';
 import { chargeRequestServed } from '../../../lib/includes/resolveNodeContent.js';
 import { applyPlatformVariables } from '../../../lib/personaDescription.js';
-import { agentPlatformValues } from '../../../lib/bootPrompt/variables.js';
+import { noWorkerVariables } from '../../../lib/bootPrompt/variables.js';
 import { recordServedPrompt, resolveServedBootPrompt, type ServedBootPrompt } from '../../../lib/bootPrompt/serve.js';
 import {
   evaluateEdgeCondition,
@@ -157,7 +157,7 @@ export async function serveChatPrompt(
     }
   }
   const served = await resolveServedBootPrompt(db, { surface: 'chat', appId, agent: { id: agent.id, name: agent.name } });
-  const variables = { ...agentPlatformValues(agent), 'session.llmModel': llmModel ?? '' };
+  const variables = noWorkerVariables(agent, llmModel);
   // #3096 / cor:dmo:150:08: provenance label is record metadata, never another prompt variable.
   return { text: applyPlatformVariables(served.content, variables), served, variables: {
     ...variables, 'session.llmModel.source': llmModel === null ? 'unspecified' : 'client-reported',
