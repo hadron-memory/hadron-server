@@ -152,13 +152,25 @@ export async function mintStampSigningKey(tx: Prisma.TransactionClient): Promise
  * The verification key a stamp names, or null — unknown id, missing row, a planted
  * ciphertext (wrong AAD fails the GCM tag), a wrong root, anything but exactly 32
  * bytes of recoverable material. Null NEVER counts (Rico #92969 §4).
+ *
+ * Fail-closed is right, but a null with no trace reads to an operator as a plain
+ * NOT_SIGNED (Bob P3-2, delta review of deef730133): an unreadable key is an
+ * operator-actionable registry fault. So the failure is logged — the key id and the
+ * unwrap reason, never material — once per process per key id, enough to diagnose
+ * without flooding a serve path that hits the same dead row per request.
  */
+const unreadableKeyLogged = new Set<number>();
+
 export async function stampVerificationKey(db: Db, keyId: number): Promise<Buffer | null> {
   const row = await db.stampSigningKey.findUnique({ where: { id: keyId }, select: { keyMaterial: true } });
   if (!row) return null;
   try {
     return unwrapStampKey(keyId, row.keyMaterial);
-  } catch {
+  } catch (e) {
+    if (!unreadableKeyLogged.has(keyId)) {
+      unreadableKeyLogged.add(keyId);
+      console.warn(`[stamp-keys] stamp key ${keyId} does not unwrap under the configured root (wrong-root rotation or a planted row): ${e instanceof Error ? e.message : String(e)}`);
+    }
     return null;
   }
 }
@@ -198,6 +210,10 @@ export async function rewrapStampSigningKeys(
   const from = encryptionKeyFromHex(fromRootHex);
   const to = encryptionKeyFromHex(toRootHex);
   return db.$transaction(async (tx) => {
+    // Serialize against mint's creation leg (the registry's only other writer), which takes the same
+    // transaction-scoped lock (Rico #92969 §3 / #93374): the findMany snapshot below can then never miss a
+    // committed creation, so a first mint racing the rewrap cannot strand a key under the retired root.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('hadron:stamp-signing-key-mint'))`;
     const rows = await tx.stampSigningKey.findMany({ select: { id: true, keyMaterial: true }, orderBy: { id: 'asc' } });
     const writes: Array<{ id: number; keyMaterial: string }> = [];
     for (const row of rows) {

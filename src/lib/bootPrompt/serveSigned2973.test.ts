@@ -15,6 +15,7 @@ import { cleanDb } from '../../test/helpers.js';
 import { insertSoftPasskey, softPasskey } from '../../test/softPasskey.js';
 import { generateId } from '../id.js';
 import { computeApprovalHash } from '../approvalHash.js';
+import { NEWEST_APPROVED_REVISION_SCAN_BATCHES, NEWEST_APPROVED_REVISION_SCAN_CAP } from '../nodeApproval.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../bootPrompt.js';
 import { sha256Hex, type CompiledProvenance } from '../bootCompile/provenance.js';
 import { signaturePayloadBytes, SIGNATURE_PAYLOAD_V3 } from '../signing/payload.js';
@@ -262,4 +263,57 @@ describe('#2973 G2 — the deployment policy AND the organisation switch', () =>
     expect(await resolveServedBootPrompt(db, { surface: 'chat', appId: personalApp, agent: { id: personalAgent, name: 'Solo' } }))
       .toMatchObject({ servedRevSeq: 1, content: 'personal text' });
   });
+});
+
+describe('#2973 × #3801 — the approved-and-signed walk past the scan cap (Bob P2-1, delta review of deef730133)', () => {
+  /**
+   * n APPROVED-but-unsigned revisions above the signed rev 1, seeded directly (a real recompile plus a real ceremony
+   * per revision would be slow): each snapshot carries its OWN approval record (`approvedAt` plus a hash of its own
+   * text), so every one reads APPROVED and fails only the signature leg — exactly the shape that buries an older
+   * SIGNED revision. The live head stays unapproved, like #3801's seed.
+   */
+  const burySignedRevOne = async (nodeId: string, n: number) => {
+    const node = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
+    // rev 1 keeps its approval as a snapshot (the recompile idiom); the buried rows each carry their own approval.
+    await db.nodeRevision.create({ data: {
+      nodeId, memoryId, loc: node.loc, name: node.name, content: node.content, revNo: node.revSeq, tags: [],
+      approvedAt: node.approvedAt, approvedByInfo: node.approvedByInfo, approvalHash: node.approvalHash,
+    } as never });
+    const rows = Array.from({ length: n - 1 }, (_, i) => {
+      const content = `approved unsigned ${i}`;
+      return {
+        nodeId, memoryId, loc: node.loc, name: node.name, content, revNo: node.revSeq + 1 + i, tags: [],
+        approvedAt: new Date(), approvedByInfo: 'test', approvalHash: computeApprovalHash({ title: node.name, abstract: null, content }),
+      };
+    });
+    await db.nodeRevision.createMany({ data: rows as never });
+    await withCompileWrite(() => db.node.update({ where: { id: nodeId }, data: { content: 'unapproved head', revSeq: node.revSeq + n, contentRevSeq: node.revSeq + n } }));
+    await db.compiledPromptRevision.create({ data: { compiledNodeId: nodeId, compiledRevNo: node.revSeq + n, contentHash: sha256Hex('unapproved head'), targetKind: 'AGENT', targetAgentId: agentId, provenance: prov(sha256Hex('src2')) as never, occurrenceCount: 1 } });
+  };
+
+  it('an older revision that is BOTH approved and signed, buried under more than the cap of approved-but-unsigned ones, still serves (R35 survives the cap)', async () => {
+    await switchOn();
+    signingShips(true);
+    const node = await compiled('signed text');
+    await sign(node); // revision 1: approved + signed, now buried
+    await burySignedRevOne(node, NEWEST_APPROVED_REVISION_SCAN_CAP + 5);
+    await pointAgent(node);
+    for (const s of ['bind', 'chat', 'run'] as const) {
+      expect(await serve(s)).toMatchObject({ content: 'signed text', servedRevSeq: 1, compiledNodeId: node });
+    }
+  }, 120_000);
+
+  it('past the hard ceiling it fails closed NOT_SIGNED, never NOT_APPROVED — approved-but-unsigned was passed (R36, bounded work)', async () => {
+    await switchOn();
+    signingShips(true);
+    const node = await compiled('signed text');
+    await sign(node); // revision 1: approved + signed, buried past the ceiling
+    await burySignedRevOne(node, NEWEST_APPROVED_REVISION_SCAN_CAP * NEWEST_APPROVED_REVISION_SCAN_BATCHES + 5);
+    await pointAgent(node);
+    // The walk examined cap × batches approved-but-unsigned revisions without reaching the signed one: the refusal is
+    // R36's fork (an approved revision exists, none of them counted as signed), never "not approved", and never wrong text.
+    // Every examined revision is APPROVED (the walk's worst case — #3801's ceiling seed skips unapproved candidates
+    // pre-filter, this one pays a verdict AND a signature predicate per candidate), so the bound proof needs the room.
+    expect(await code(serve())).toBe('BOOT_PROMPT_NOT_SIGNED');
+  }, 120_000);
 });

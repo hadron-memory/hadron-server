@@ -2,8 +2,10 @@
  * #2973 PR1 (cor:agt:040:10) — the RUN surface of the signed serve: where the serving organisation has switched signing
  * on and the deployment ships signing, a headless run whose boot prompt has no signed revision is refused
  * BOOT_PROMPT_NOT_SIGNED at launch (no run, no record); a signed one records with the run. The in-transaction resolve
- * (appRuns.ts `createAndRecord`) judges the check under the launch transaction's own locks, pinned by flipping the
- * switch between the refusal preflight and the transaction.
+ * (appRuns.ts `createAndRecord`) runs inside the launch transaction; the only row IT locks is the compiled node
+ * (serve.ts's FOR SHARE) — the switch, signature and passkey reads race exactly as every approval-walk read does
+ * (Bob item 2, delta review of deef730133), pinned by flipping the switch between the refusal preflight and the
+ * transaction.
  */
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';

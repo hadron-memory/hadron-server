@@ -72,8 +72,14 @@ export async function bootPromptOwnerOfMemory(
     });
     return app ? { kind: 'APP', ...app } : null;
   }
+  // `agents.system_memory_id` is not UNIQUE in the schema: provisioning holds one Agent per system
+  // memory, but nothing in the DB forbids two rows naming it. The stamp (at signing) and the counting
+  // fence each resolve the owner independently, so an unordered findFirst could resolve DIFFERENT
+  // Agents for one memory across those two reads and silently stop a signature counting (Bob P3-3,
+  // delta review of deef730133). Deterministic lowest-id wins in both reads instead.
   const agent = await db.agent.findFirst({
     where: { systemMemoryId: memoryId },
+    orderBy: { id: 'asc' },
     select: { id: true, organizationId: true, ownerUserId: true },
   });
   return agent ? { kind: 'AGENT', ...agent } : null;

@@ -126,6 +126,16 @@ export async function revisionSignatureCounts(
 
   const [{ now }] = await db.$queryRaw<Array<{ now: Date }>>`SELECT hadron_signing_now() AS now`;
 
+  // One registry read (a query plus an AES-GCM unwrap) per DISTINCT key id this node's signatures
+  // name, not one per signature (Bob item 6, delta review of deef730133): a node signed across a
+  // generation change names two ids however many signatures it carries. The cache lives for this
+  // call only — the registry is small and a rotation between calls must be seen afresh.
+  const stampKeys = new Map<number, Buffer | null>();
+  const stampKeyOf = async (keyId: number): Promise<Buffer | null> => {
+    if (!stampKeys.has(keyId)) stampKeys.set(keyId, await stampVerificationKey(db, keyId));
+    return stampKeys.get(keyId) ?? null;
+  };
+
   for (const sig of signatures) {
     // Eligibility (C1 / Q-E): the ceremony's durable verdict only, never a present-day re-derivation.
     const req = requestOf.get(sig.signingRequestId);
@@ -135,7 +145,7 @@ export async function revisionSignatureCounts(
     // attested columns beside it (a tampered column breaks the tag; the rows are append-only, so this catches seeds).
     // Unknown or undecryptable key ids fail closed. Pre-watermark rows (all stamp columns NULL) fail closed here.
     if (sig.ceremonyStamp == null || sig.stampKeyId == null || sig.stampMemoryId == null) continue;
-    const stampKey = await stampVerificationKey(db, sig.stampKeyId);
+    const stampKey = await stampKeyOf(sig.stampKeyId);
     if (stampKey == null) continue;
     const stampInputOk = stampTagMatches(stampKey, {
       keyId: sig.stampKeyId,
@@ -162,7 +172,10 @@ export async function revisionSignatureCounts(
     }
 
     // Coverage (cor:dmo:130:09): every revision in (sig.revision, revision] must still be witnessed by a snapshot that
-    // hashes to the signed hash — a missing or differing witness fails this signature closed.
+    // hashes to the signed hash — a missing or differing witness fails this signature closed. The signature's OWN
+    // revision is trusted without span evidence, deliberately: the request eligibility check above already pinned
+    // req.revision === sig.revision AND req.approvalHash === sig.approvalHash — the completed ceremony itself attested
+    // that this revision's text hashed to the signed hash (the "its own revision needs no span evidence" pin).
     let covered = true;
     for (let r = sig.revision + 1; r <= revision; r++) {
       // The live row is revision `revSeq`'s own witness while no snapshot holds its number (a snapshot at the number,

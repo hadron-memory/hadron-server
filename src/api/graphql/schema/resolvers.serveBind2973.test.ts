@@ -2,7 +2,9 @@
  * #2973 PR1 (cor:agt:040:10) — the BIND surface of the signed serve: where the serving organisation has switched
  * signing on and the deployment ships signing, a bind whose boot prompt has no signed revision is refused
  * BOOT_PROMPT_NOT_SIGNED and rolls back whole (no session, no record); a signed one binds and records. The in-transaction
- * resolve (`serveBindInTransaction`, resolvers.worker.ts) judges the check under the bind's own locks, pinned directly.
+ * resolve (`serveBindInTransaction`, resolvers.worker.ts) runs inside the bind transaction; the only row IT locks is the
+ * compiled node (serve.ts's FOR SHARE) — the switch, signature and passkey reads race exactly as every approval-walk
+ * read does, and a change there is picked up by the next resolve (Bob item 2, delta review of deef730133).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';

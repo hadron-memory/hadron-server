@@ -321,6 +321,11 @@ describe('#2973 coverage (cor:dmo:130:09 — from the revision history, never th
     // apart, so the UUIDv7 id order is strict — a DISAGREEING newer one. The walk's newest-by-id resolution
     // (the convention every revision read uses) must take the NEWER: a later planted witness fails closed, and
     // ordering oldest-first would silently count on the stale one (the surviving M20 mutant).
+    // Index handling (Bob P3-4, delta review of deef730133): the DROP/CREATE pair brackets ONLY this test's
+    // planting inside try/finally, the restored DDL is byte-equivalent to the constraint's original definition
+    // (20260716123000_noderevision_rev_no: CREATE UNIQUE INDEX node_revisions_node_rev_no_uniq ON node_revisions
+    // (node_id, rev_no) — non-partial, same columns, same order), and no concurrent test file shares this
+    // database: parallel mode gives every vitest worker its own clone and runs one file at a time within it.
     await db.$executeRawUnsafe(`DROP INDEX node_revisions_node_rev_no_uniq`);
     const plant = (content: string) => db.nodeRevision.create({
       data: { nodeId, memoryId: m1, loc: n.loc, name: n.name, abstract: n.abstract, content, revNo: 2, tags: [] } as never,
@@ -449,7 +454,6 @@ describe('#2973 the stamp (the durable at-signing verdict — Rico §10 conditio
 
   it('a stamp naming a different key than the one that made it never verifies', async () => {
     await signLive(); // stamps under key 1
-    const olderKey = key; // the gen-1 passkey, captured before the next signLive reassigns the module binding
     await db.$executeRaw`UPDATE stamp_signing_keys SET retired_at = public.hadron_signing_now() WHERE retired_at IS NULL`;
     await signLive(); // the next generation: key 2
     const keys = await db.stampSigningKey.findMany({ orderBy: { id: 'asc' } });
@@ -471,15 +475,18 @@ describe('#2973 the stamp (the durable at-signing verdict — Rico §10 conditio
     expect(stampTagMatches(k2!, tagInputOf(older, keys[1]!.id), olderTag)).toBe(false); // key 2 over key 1's tag
     expect(stampTagMatches(k1!, tagInputOf(older, keys[1]!.id), olderTag)).toBe(false); // key 1, mismatched keyId input
     expect(stampTagMatches(k2!, tagInputOf(newer, keys[1]!.id), Buffer.from(newer.ceremonyStamp!))).toBe(true); // control
-    // And the row-level leg the name promises (Bob N6): a seeded row — honest request, honest fresh assertion by the
-    // signer's own gen-1 credential — whose stamp column NAMES key 2 while carrying key 1's tag. The rows are
-    // append-only, so a mis-keyed stamp can only ever exist as a seed like this; the predicate verifies under the key
-    // the row NAMES, so the forgery fails closed through counts, not just under the unit helper above.
-    const twinId = (await createDbNode(db, { loc: 'r2973:twin3', memoryId: m1, name: 'Prompt', content: 'v1' })).id;
-    await seedStampForgery(twinId, older, olderKey, { stampKeyId: keys[1]!.id, assertingCredentialId: older.passkeyCredentialId });
-    expect(await revisionSignatureCounts(db, twinId, 1, REQ)).toBe(false); // the mis-keyed stamp never counts
-    // And both honest rows still count end to end.
-    expect(await counts(1)).toBe(true);
+    // The row-level leg the name promises (Bob N6, delta review of deef730133): tamper the ORIGINAL rows'
+    // stamp_key_id in place — the I1→I2 method, triggers off under session_replication_role = replica — so node,
+    // request, signer, credential, revision, hash, memory and owner stay exactly what the ceremony wrote and the
+    // tag attests; only the named key lies (each tag was minted under the OTHER generation). A twin-node seed
+    // could never isolate this: its fresh request and node id fail the tag for the transplant reason first.
+    expect(await counts(1)).toBe(true); // control: both honest rows count before the tamper
+    await db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(`SET LOCAL session_replication_role = replica`);
+      await tx.$executeRaw`UPDATE node_signatures SET stamp_key_id = ${keys[1]!.id} WHERE id = ${older.id}`;
+      await tx.$executeRaw`UPDATE node_signatures SET stamp_key_id = ${keys[0]!.id} WHERE id = ${newer.id}`;
+    });
+    expect(await counts(1)).toBe(false); // the swapped names never count: the tag binds the key that made it
   });
 
   it('a stamp transplanted to another node never counts: the tag binds the row it was made for', async () => {
@@ -497,15 +504,32 @@ describe('#2973 the stamp (the durable at-signing verdict — Rico §10 conditio
 
   it('a tampered stamp column never counts: the tag binds the attested facts to the row', async () => {
     await signLive();
-    const orig = await db.nodeSignature.findFirstOrThrow({ where: { nodeId } });
+    const orig = await db.nodeSignature.findFirstOrThrow({ where: { nodeId }, include: { passkey: true } });
     expect(orig.stampOwnerId).toBe(agentAId); // the ceremony judged agent A (M1's agent)
-    // The transplant pin above covers a wrong nodeId; here the tamper is a wrong judged OWNER — the same honest
-    // forgery with only stampOwnerId claimed as agent B. The tag still binds the columns the ceremony attested
-    // (agent A), so the predicate's stamp leg rejects the altered facts (a seed cannot mint a tag for them).
-    const twinId = (await createDbNode(db, { loc: 'r2973:twin2', memoryId: m1, name: 'Prompt', content: 'v1' })).id;
-    await seedStampForgery(twinId, orig, key, { stampOwnerId: agentBId });
-    expect(await revisionSignatureCounts(db, twinId, 1, REQ)).toBe(false);
-    expect(await counts(1)).toBe(true);
+    // UNIT leg, isolated (Bob N6: a twin-node seed never reaches the owner binding — it fails for the transplant
+    // reason first): the same physical key and every input field except the owner, over the row's real tag. The
+    // tag was minted over the judged owner (agent A), so a canonical input naming agent B cannot reproduce it —
+    // this is the pin that dies if the owner fields ever leave the canonical stamp input.
+    const { stampTagMatches, stampVerificationKey } = await import('./stampKeys.js');
+    const k = await stampVerificationKey(db, orig.stampKeyId!);
+    const ownerInput = (ownerId: string | null) => ({
+      keyId: orig.stampKeyId!, nodeId: orig.nodeId, signingRequestId: orig.signingRequestId, signerId: orig.signerId,
+      credentialId: Buffer.from(orig.passkey?.credentialId ?? new Uint8Array(0)),
+      revision: orig.revision, approvalHash: orig.approvalHash, memoryId: orig.stampMemoryId!,
+      ownerKind: orig.stampOwnerKind as 'AGENT' | 'APP' | null, ownerId,
+    });
+    expect(stampTagMatches(k!, ownerInput(agentAId), Buffer.from(orig.ceremonyStamp!))).toBe(true); // control
+    expect(stampTagMatches(k!, ownerInput(agentBId), Buffer.from(orig.ceremonyStamp!))).toBe(false); // wrong judged owner
+    // ROW-LEVEL leg, in place on the original row (triggers off): only stamp_owner_id is rewritten, so request
+    // eligibility, validity and state all stay honest. Both guards refuse it independently — the fence (the
+    // judged owner no longer matches the memory's current owner) AND the stamp tag — and the refusal is what is
+    // pinned; the unit leg above is the one that isolates the tag's own binding.
+    expect(await counts(1)).toBe(true); // control: the honest row counts before the tamper
+    await db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(`SET LOCAL session_replication_role = replica`);
+      await tx.$executeRaw`UPDATE node_signatures SET stamp_owner_id = ${agentBId} WHERE id = ${orig.id}`;
+    });
+    expect(await revisionSignatureCounts(db, nodeId, 1, REQ)).toBe(false);
   });
 
   it('the half owner pair (kind NULL, id named) is a shape the database refuses: no NULL CHECK verdict passes (Anne D2)', async () => {
