@@ -371,9 +371,10 @@ async function loadOpenSessionPlacements(db: Db, workerIds: string[]): Promise<M
  * The work state of every worker of one App that is not retired, at `now`.
  * One query per kind of input, never one per worker.
  */
-export async function loadWorkerWorkStates(db: Db, appId: string, now: Date, opts?: { bySession?: boolean }): Promise<WorkerWorkState[]> {
+export async function loadWorkerWorkStates(db: Db, appId: string, now: Date, opts?: { bySession?: boolean; retiredOnly?: boolean }): Promise<WorkerWorkState[]> {
   const workers = await db.worker.findMany({
-    where: { appId, retiredAt: null },
+    // #3816: `retiredOnly` loads the RETIRED workers instead, only so a failed match can name every reason they were skipped.
+    where: { appId, retiredAt: opts?.retiredOnly ? { not: null } : null },
     select: { id: true, appId: true, name: true, slug: true, role: true, agent: { select: { usesTasks: true } } },
     orderBy: { id: 'asc' },
   });
@@ -717,29 +718,71 @@ export const __matcherTesting = { tryAssign };
 export type MatchFailureReason = 'NO_ROLE' | 'REQUIREMENTS_EXCLUDED' | 'NOBODY_FREE' | 'STOP_SIGNAL' | 'TEAM_POOL_EMPTY';
 
 /**
+ * #3816 (V21, hrn:node:hadronmemory.com:hadron-dev-team-shared:decisions:2026-11-10-vera-rulings-matching-reach): the closed,
+ * ADDITIVE set of reasons a candidate was skipped, one value per exclusion condition the matcher applies, in the declared
+ * order that V23 makes the order of a candidate's reasons. Values are added, never renamed. `STOP_SIGNAL` names
+ * a matcher condition V21's list lacks: a worker covered by a stop signal is not assigned. There is deliberately NO value for
+ * "bound and quiet" (V21: #3815 removes that exclusion, the #3816 gate says to omit it), so until #3815 lands such a worker,
+ * which the matcher still skips, is not listed.
+ */
+export const MATCH_SKIP_REASONS = [
+  'RETIRED', 'USES_NO_TASKS', 'ENDING_SESSION', 'HOLDS_TASK', 'UNAVAILABLE', 'FAMILY_UNAVAILABLE', 'STALLED', 'NO_FAMILY', 'NOT_HELD',
+  'FAMILY_EXCLUDED', 'NAME_EXCLUDED', 'TIER_BELOW_MINIMUM', 'TIER_UNKNOWN', 'MODEL_GROUP_MISMATCH', 'STOP_SIGNAL',
+] as const;
+export type MatchSkipReason = typeof MATCH_SKIP_REASONS[number];
+/** One candidate a failed match skipped and every reason, in {@link MATCH_SKIP_REASONS} order. Returned in the match answer, never stored (V22). */
+export type SkippedCandidate = { workerId: string; name: string; reasons: MatchSkipReason[] };
+
+/** Pure: every reason one worker was not taken for these requirements (V23). Empty = nothing excluded it. */
+export function skipReasonsOf(
+  req: Requirements, w: WorkerWorkState, groups: EffectiveModelGroup[], stopCovered: boolean,
+): MatchSkipReason[] {
+  const out = new Set<MatchSkipReason>();
+  if (!w.usesTasks) out.add('USES_NO_TASKS');
+  if (w.endingSession) out.add('ENDING_SESSION');
+  if (w.openTaskCount > 0) out.add('HOLDS_TASK');
+  if (w.availability.ownInEffect) out.add(w.availability.own?.reason === 'stalled' ? 'STALLED' : 'UNAVAILABLE');
+  // Independent of the own record: a worker with both carries both (V23).
+  if (w.families.length > 0 && w.families.every((f) => w.availability.familyAvailable.get(f) !== true)) out.add('FAMILY_UNAVAILABLE');
+  if (w.families.length === 0) out.add('NO_FAMILY');
+  if (!w.bound && !w.live && !MATCH_UNBOUND_LAUNCHABLE) out.add('NOT_HELD');
+  if (w.families.length > 0 && !w.families.map(normalizeFamily).some((f) => f !== null && familyAllowed(req, f)) && !req.invalid) out.add('FAMILY_EXCLUDED');
+  if (req.excludeWorkerIds?.includes(w.id)) out.add('NAME_EXCLUDED');
+  const tier = workerTier(w);
+  if (!tierAllowed(req, tier)) out.add(tier === null ? 'TIER_UNKNOWN' : 'TIER_BELOW_MINIMUM');
+  if (!modelGroupsAllowed(req, w.bound ? w.bindingModel : null, groups)) out.add('MODEL_GROUP_MISMATCH');
+  if (stopCovered) out.add('STOP_SIGNAL');
+  return MATCH_SKIP_REASONS.filter((r) => out.has(r));
+}
+
+/**
  * One reserved task only. Reservation is inserted with create, before commit: automatic event/sweep runs cannot
  * take it between create and this attempt or between a failed attempt and recording the failure. Assignment uses
  * the same worker lock and final gates as the automatic matcher. A manual assignment/cancel racing the attempt
  * wins its guarded write; a failure is recorded only while the task is still reserved, pending and unassigned.
  */
-export async function matchTaskNow(db: PrismaClient, taskId: string, now: Date, claim?: Date): Promise<void> {
+export async function matchTaskNow(db: PrismaClient, taskId: string, now: Date, claim?: Date): Promise<SkippedCandidate[] | null> {
   const anchor = anchorNow();
   const task = await db.agentTask.findUniqueOrThrow({ where: { id: taskId } });
-  if (!task.matchPending || task.status !== 'pending' || task.assigneeWorkerId || task.assigneeUserId) return;
+  if (!task.matchPending || task.status !== 'pending' || task.assigneeWorkerId || task.assigneeUserId) return null;
   // #3246: the recovery sweep passes the claim it wrote; the create-time attempt passes none and so holds the
   // UNCLAIMED state. An attempt whose claim state moved (a sweep took the task from the create-time attempt, or a later
   // sweep reclaimed it from a slow or dead one) neither starts nor writes: the current claimant is the one attempt.
-  if ((task.matchClaimedAt?.getTime() ?? null) !== (claim?.getTime() ?? null)) return;
+  if ((task.matchClaimedAt?.getTime() ?? null) !== (claim?.getTime() ?? null)) return null;
   const outcome = await chooseMatchNow(db, task, now, async (workerId, family) =>
-    tryAssign(db, task, workerId, family, now, {}, anchor, true, claim));
+    tryAssign(db, task, workerId, family, now, {}, anchor, true, claim), undefined, undefined, true);
   if ('workerId' in outcome) {
     if (!outcome.live) await launchForAssignment(db, { appId: task.appId, taskId, workerId: outcome.workerId, family: outcome.family }, now, anchor);
-    return;
+    return null;
   }
-  const { reason } = outcome;
-  await db.agentTask.updateMany({ where: { id: taskId, matchPending: true, status: 'pending', assigneeWorkerId: null, assigneeUserId: null,
+  const { reason, skipped } = outcome;
+  const marked = await db.agentTask.updateMany({ where: { id: taskId, matchPending: true, status: 'pending', assigneeWorkerId: null, assigneeUserId: null,
     matchClaimedAt: claim ?? null },
     data: { matchPending: false, matchFailedAt: new Date(), matchFailedReason: reason } });
+  // A concurrent assignment, cancel or claim change won the guarded write: this attempt recorded no failure, so it describes none.
+  if (marked.count !== 1) return null;
+  // #3816 (V22): the candidates go back in the answer only; the stored mark keeps its coarse reason.
+  return skipped ?? [];
 }
 
 /**
@@ -786,10 +829,11 @@ export async function recoverInterruptedMatches(db: PrismaClient, now: Date, lim
 async function chooseMatchNow(
   db: Db, task: Awaited<ReturnType<Prisma.TransactionClient['agentTask']['findUniqueOrThrow']>>, now: Date,
   assign: (workerId: string, family: string) => Promise<AttemptOutcome>,
-  excluded: ReadonlySet<string> = new Set(), poolIds?: ReadonlySet<string>,
-): Promise<{workerId: string; family: string; live: boolean} | {reason: MatchFailureReason}> {
+  excluded: ReadonlySet<string> = new Set(), poolIds?: ReadonlySet<string>, wantSkipped = false,
+): Promise<{workerId: string; family: string; live: boolean} | {reason: MatchFailureReason; skipped?: SkippedCandidate[]}> {
   const req = parseRequirements(task.requirements);
   let reason: MatchFailureReason = 'NOBODY_FREE';
+  let skipped: SkippedCandidate[] | undefined;
   if (task.blocked) reason = 'NOBODY_FREE';
   else if (req.invalid) reason = 'REQUIREMENTS_EXCLUDED';
   else {
@@ -800,6 +844,16 @@ async function chooseMatchNow(
     const groups = await loadAppModelGroups(db, task.appId);
     const eligible = team.filter(w => eligibleFor(req, { ...w, freeFamilies: w.families }, groups) !== null);
     const covering = await coveringSignals(db, task.appId, null, now);
+    // #3816: the candidates are the workers of the asked role (and team pool); each is listed with every reason it was not taken.
+    // A retired worker is listed with RETIRED plus every other reason that applies to it (V23), so its state is loaded; only a
+    // failed match that asked for the answer pays for that read.
+    const explain = async (): Promise<SkippedCandidate[]> => {
+      const retired = pool ? [] : (await loadWorkerWorkStates(db, task.appId, now, { bySession: true, retiredOnly: true })).filter(w => roleAllowed(req, w.role));
+      return [
+      ...retired.map(w => ({ workerId: w.id, name: w.name, reasons: MATCH_SKIP_REASONS.filter(r => r === 'RETIRED' || skipReasonsOf(req, w, groups, covering.has(w.id)).includes(r)) })),
+      ...team.map(w => ({ workerId: w.id, name: w.name, reasons: skipReasonsOf(req, w, groups, covering.has(w.id)) })),
+    ].filter(c => c.reasons.length > 0).sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()) || a.workerId.localeCompare(b.workerId));
+    };
     const stoppedCreator = task.createdByWorkerId && timeStoppedWorkers(covering).has(task.createdByWorkerId);
     if (stoppedCreator) reason = 'STOP_SIGNAL';
     else if (roles.length === 0) reason = 'NO_ROLE';
@@ -817,8 +871,10 @@ async function chooseMatchNow(
         if (outcome === 'task-gone') break;
       }
     }
+    // A worker the snapshot called free but that a final assignment gate then refused (a lost race) has no snapshot reason and is not listed.
+    if (wantSkipped) skipped = await explain();
   }
-  return { reason };
+  return skipped ? { reason, skipped } : { reason };
 }
 
 /** #3243: caller supplies fresh pending, unassigned match rows and holds the stop,
