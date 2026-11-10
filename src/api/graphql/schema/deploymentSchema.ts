@@ -8,6 +8,8 @@ const signingTypes = new Set([
   'SigningRequest', 'NodeSignature', 'NodeSignatureStatus',
   // #3649 slice B: grant signing rides the same switch (ruling 0255, item 17).
   'GrantSigningRequestState', 'GrantSigningRequest',
+  // #3690 PR 2: creating a grant rides the same switch, so none can be made where it could not be signed.
+  'CreateGrantInput',
   // #3649 slice D: Grant.signatureStatus goes with them (its type is in this set).
   'GrantSignatureState', 'GrantSignature', 'GrantSignatureStatus',
 ]);
@@ -18,6 +20,7 @@ const registrationTypes = new Set(['PasskeyCredential', 'PasskeyWindow', 'Passke
 /** #1918: public-reference generators consume the same per-flag field data. */
 export const capabilityFields: Readonly<Record<string, Readonly<Record<string, 'signing' | 'registration'>>>> = {
   ServerInfo: { signing: 'signing', passkeyRegistration: 'registration' },
+  Mutation: { createGrant: 'signing' },
 };
 
 /** #1895: Apollo execution, introspection and SDL discovery share this schema.

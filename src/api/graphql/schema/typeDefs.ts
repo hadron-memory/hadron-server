@@ -7281,6 +7281,28 @@ export const typeDefs = `#graphql
     total: Int!
   }
 
+  """
+  #3690 PR 2 (hrn:node:hadronmemory.com:specs:cor:acl:140:05): what a bound worker asks for. There is deliberately no field for activation, a verifier, a signature, a use count, a version or an issuer: a grant is born pending and only signing (#3649) can make it live.
+  """
+  input CreateGrantInput {
+    "A registered action's dotted name, such as schedule.create."
+    action: String!
+    "Exactly the action's declared parameters, each a string or a list of distinct strings (an id, never a URN); any other key or shape is refused. Never put a secret here."
+    values: JSON!
+    "WORKER (the calling worker itself) or AGENT (its role agent, installed in this App). Any other holder is refused."
+    holderKind: GrantHolderKind!
+    "The holder's id (not a URN)."
+    holderRef: String!
+    "The grant is not usable before this time once it is signed."
+    startsAt: DateTime
+    "Not usable after this time; must follow startsAt when both are given."
+    expiresAt: DateTime
+    "At most this many uses once signed; a positive integer."
+    maxUses: Int
+    "Why the grant is asked for: shown to the signer as the requester's words, labelled as theirs."
+    reason: String!
+  }
+
   "Webhook trigger (D-2026-05-02). The secret is NEVER exposed here — the URL is returned once at create/rotate."
   type AgentWebhook {
     "Optional per-run token limit (#2479): positive, no greater than the platform default at save; narrowed again at launch. Null uses the default."
@@ -12019,6 +12041,10 @@ export const typeDefs = `#graphql
     #3649 slice B (hrn:node:hadronmemory.com:specs:cor:acl:140:07) — ask for one pending grant to be signed. Whoever may read the grant may ask (as grant(ref:) reads it), a bound worker included; workers never sign. No signer is named: whoever signs must be able to issue it. The request pins the grant's version and terms hash. Refusals: FORBIDDEN while impersonating; GRANT_NOT_FOUND (unknown and unreadable alike); GRANT_NOT_PENDING (activated, revoked, or its holder gone; no state is named); GRANT_EXPIRED (past its expiry, so it can never be signed); GRANT_TERMS_UNREPRESENTABLE (extensions.reason). No call takes an assertion: the signer signs on the server-hosted ceremony page.
     """
     requestGrantSignature(grantRef: ID!): GrantSigningRequest!
+    """
+    #3690 PR 2 (hrn:node:hadronmemory.com:specs:cor:acl:140:05) — ask for a grant. Only a bound worker session may call it, in its own App, for itself or its role agent (installed in the App); the row is born pending and allows nothing until it is signed (#3649). Returns the grant as grant(ref:) reads it. Refusals, each before any write and none naming a submitted value: GRANT_REQUESTER_NOT_WORKER, GRANT_HOLDER_NOT_ALLOWED (any other holder, or an agent not installed here), GRANT_ACTION_UNKNOWN, GRANT_VALUES_INVALID (a value that does not match the action's declared parameters, or an undeclared key), GRANT_TERMS_INVALID. No MCP tool. Present only where signing is switched on (PASSKEY_SIGNING_ENABLED).
+    """
+    createGrant(input: CreateGrantInput!): Grant!
     "#3649 slice B (hrn:node:hadronmemory.com:specs:cor:acl:140:07) — withdraw an open grant signing request. Only the requester account, from any of its sessions or workers. Refusals: FORBIDDEN while impersonating, SIGNING_REQUEST_NOT_FOUND, SIGNING_REQUEST_NOT_REQUESTER, SIGNING_REQUEST_ENDED (extensions.state)."
     withdrawGrantSigningRequest(id: ID!): GrantSigningRequest!
     "#1591 — approve the current revision of every live node of a memory (ID or fully-qualified URN) in the mint scope (unminted, or minted and changed since or with no recorded minted revision, #1612) that isn't approved yet, in one transaction. Placeholders are skipped and reported."
