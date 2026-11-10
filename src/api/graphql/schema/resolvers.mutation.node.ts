@@ -2479,7 +2479,9 @@ async function createNodeInInstallMemory(input: CreateNodeArgs, ctx: Context) {
     writeNodeCore({ ...rest, memoryId: memory.id } as CreateNodeInput, txCtx, 'create', {
       authoring: authoringFromRequest(ctx, input.authoredWith),
       governedContext: 'node-write',
-      transaction: { tx, pooledDb: ctx.db, afterCommit: (effect) => effects.push(effect) },
+      // #3651: response-only state (the include-pin warnings) is keyed by the exact request Context, and `txCtx`
+      // is a copy. Hand the outer one through, as the install update does, so the warning reaches the request.
+      transaction: { tx, pooledDb: ctx.db, requestContext: ctx, afterCommit: (effect) => effects.push(effect) },
     }));
   for (const effect of effects) effect();
   return written;
