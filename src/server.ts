@@ -104,8 +104,9 @@ import { startAssetBytesSweepLoop } from './jobs/sweepAssetBytes.js';
 import { startSessionKeySweepLoop } from './lib/sessionKeyCache.js';
 import { startSessionReaperLoop } from './jobs/reapSessions.js';
 import { startPendingEdgePromotionSweepLoop } from './jobs/promotePendingEdges.js';
-import { startEmbeddingWorkerLoop, startEmbeddingBusListener, stopEmbeddingWorker, assertEmbeddingObligationsReconciled } from './jobs/embedNodes.js';
-import { stopEmbeddingPublisher } from './services/embedding/enqueue.js';
+import { startEmbeddingWorkerLoop, startEmbeddingBusListener, stopEmbeddingWorkerOutcome, assertEmbeddingObligationsReconciled } from './jobs/embedNodes.js';
+import { stopEmbeddingPublisherOutcome } from './services/embedding/enqueue.js';
+import { settleStep, type EmbeddingStopOutcomes } from './lib/shutdownSteps.js';
 import { startGitMirrorSubscriber } from './integrations/github/nodeWrittenSubscriber.js';
 import { GraphQLError, buildSchema, printSchema } from 'graphql';
 import {
@@ -2115,8 +2116,9 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // #1789: a fault that reaches Express shows the caller the generic envelope, not Express's default stack page.
   app.use(internalFaultErrorHandler);
 
-  app.locals.stopEmbeddingWorker = () => Promise.all([
-    stopEmbeddingWorker(db), stopEmbeddingPublisher(),
-  ]).then(results => results.every(Boolean));
+  // #3845: per-part outcomes (not one folded boolean), so the stop in src/index.ts can name a failing step.
+  app.locals.stopEmbeddingWorker = (): Promise<EmbeddingStopOutcomes> => Promise.all([
+    settleStep(stopEmbeddingWorkerOutcome(db)), settleStep(stopEmbeddingPublisherOutcome()),
+  ]).then(([worker, publisher]) => ({ worker, publisher }));
   return app;
 }
