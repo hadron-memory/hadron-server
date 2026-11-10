@@ -1,3 +1,4 @@
+import { respondSessionSuperseded } from '../lib/sessionSuperseded.js';
 import { SYNC_NOT_ATTEMPTED, syncNotAttemptedMessage } from '../integrations/github/syncNotAttempted.js';
 import { MCP_WORKER_BINDING_UNSUPPORTED, offTeamTool } from './disabledTools.js';
 import { registerAutomationTeamSnapshotGrantTools } from './automationTeamSnapshotGrantTools.js';
@@ -139,7 +140,8 @@ import {
   oauthSurfaceRefusal,
   oauthSurfaceRefusalMessage,
   getCurrentUserRoles,
-  resolveAuthContext,
+  resolveCredentialContextWithStatus,
+  bindPresentedSession,
   validateSessionBinding,
   type AuthContext,
 } from '../middleware/auth.js';
@@ -2441,6 +2443,15 @@ export function createMcpServerInstance(
     onBound?: (id: string) => void,
   ): Promise<{ isError: true; content: Array<{ type: 'text'; text: string }> } | null> => {
     if (typeof named === 'string' && named.length > 0) {
+      // #3818 / Xenophon6764807646: end's id is a historical target, not presentation of an execution binding.
+      // Preserve its existing late-metrics path. A presented header/retained binding is validated independently.
+      if (toolName === 'hadron_end_session' && toolOwnsArgument) {
+        const target = await db.session.findUnique({ where: { id: named }, select: { endedAt: true } });
+        if (target?.endedAt) {
+          publishActor({ workerId: null, agentId: null });
+          return null; // The handler still applies the ordinary session-write gate before changing anything.
+        }
+      }
       const valid = await validateSessionBinding(db, auth, named);
       if (valid) {
         onBound?.(valid.sessionId);
@@ -12418,7 +12429,7 @@ async function authenticateBoundMcpSession(
 ): Promise<AuthContext | null> {
   let presented: AuthContext;
   try {
-    presented = await resolveAuthContext(req, db);
+    presented = (await resolveCredentialContextWithStatus(req, db)).auth;
   } catch {
     res.status(503).json({ error: 'Authentication temporarily unavailable' });
     return null;
@@ -12444,6 +12455,12 @@ async function authenticateBoundMcpSession(
   if (!sameMcpPrincipal(active.auth, presented)) {
     // A foreign principal's session ID is indistinguishable from a missing one.
     respondMcpSessionNotFound(res);
+    return null;
+  }
+  try {
+    await bindPresentedSession(req, db, presented);
+  } catch (error) {
+    if (!respondSessionSuperseded(res, error)) res.status(503).json({ error: 'Authentication temporarily unavailable' });
     return null;
   }
   return presented;
@@ -12474,6 +12491,11 @@ function unregisterMcpTransport(
  * Authenticates via Bearer token, creates or reuses transport sessions.
  */
 export async function handleMcpRequest(req: Request, res: Response): Promise<void> {
+  try { await dispatchMcpRequest(req, res); }
+  catch (error) { if (!respondSessionSuperseded(res, error)) throw error; }
+}
+
+async function dispatchMcpRequest(req: Request, res: Response): Promise<void> {
   // Recheck the presented credential for each request on an existing transport.
   // Its principal was captured at initialization, while platform roles must
   // still be refreshed before every tool-dispatch POST (#1251).
@@ -12641,7 +12663,7 @@ async function openOrRejectMcpSession(
   // canonical way for hadron-client / Claude Code MCP / Cursor / etc. to
   // authenticate; user-credential MCP arrives via OAuth or portal-minted
   // hdr_user_<…> bearer tokens.
-  const auth = await resolveAuthContext(req, db);
+  const { auth } = await resolveCredentialContextWithStatus(req, db);
   // Admin impersonation: impersonation tokens are not accepted on /mcp (v1).
   // MCP binds credential identity at session init. Ordinary-user roles are
   // refreshed per request below, but the impersonation SESSION row's full
@@ -12676,6 +12698,8 @@ async function openOrRejectMcpSession(
     respondMcpAuthenticationRequired(req, res);
     return;
   }
+
+  await bindPresentedSession(req, db, auth);
 
   // #2261: reserve capacity NOW, before the first await below, so concurrent initializes cannot jointly exceed
   // the per-principal cap. The key is read before `auth.appId` is filled in from a default or a restored selection.

@@ -211,3 +211,7 @@ CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "grant_even
 DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "grant_signing_requests";
 CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "grant_signing_requests"
   FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.requester_worker_id', 's:$.requester_session_id');
+-- #3818: the typed successor reference joins the existing closed #1162 inventory.
+DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "sessions";
+CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "sessions"
+  FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.worker_id', 's:$.parent_session_id', 's:$.prev_session_id', 's:$.superseded_by_session_id');
