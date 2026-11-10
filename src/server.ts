@@ -1,3 +1,4 @@
+import { isSessionSupersededError, respondSessionSuperseded } from './lib/sessionSuperseded.js';
 import { assertRateReadiness, checkRateConfiguration, cleanupRateBuckets } from './lib/rateLimit/index.js';
 import { deliveryPendingPlugin } from './api/graphql/deliveryPendingPlugin.js';
 import { verifiedLoginEvidence } from './auth/loginEvidence.js';
@@ -63,8 +64,8 @@ import {
   oauthSurfaceRefusal,
   oauthSurfaceRefusalMessage,
   hasCurrentPlatformAdminRole,
-  resolveAuthContext,
-  resolveAuthContextWithStatus,
+  resolveCredentialContextWithStatus,
+  bindPresentedSession,
   portalHumanUserId,
 } from './middleware/auth.js';
 import { initCloudflareIps } from './auth/cloudflare-ips.js';
@@ -1262,7 +1263,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     // (e.g. resolveAuthContext hitting a DB failure) would hang the request —
     // forward it to the error middleware instead.
     try {
-      const auth = await resolveAuthContext(req, db);
+      const { auth } = await resolveCredentialContextWithStatus(req, db);
       if (!auth.userId && !auth.appId) {
         res.status(401).json({ error: 'Authentication required to read the GraphQL schema.' });
         return;
@@ -1273,6 +1274,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
         res.status(403).json({ error: oauthSurfaceRefusalMessage(surfaceRefusal, 'This OAuth credential is limited to the MCP surface.'), code: 'FORBIDDEN', ...surfaceRefusal });
         return;
       }
+      await bindPresentedSession(req, db, auth);
       res.type('text/plain; charset=utf-8').send(graphqlSdl());
     } catch (err) {
       next(err);
@@ -1296,7 +1298,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     (_req, _res, next) => requestActorStorage.run(emptyActor(), next),
     expressMiddleware(apollo, {
       context: async ({ req }) => {
-        const { auth, credentialStatus } = await resolveAuthContextWithStatus(req, db);
+        const { auth, credentialStatus } = await resolveCredentialContextWithStatus(req, db);
         const surfaceRefusal = oauthSurfaceRefusal(auth, 'account');
         if (surfaceRefusal) {
           // #1303: `code` and prose unchanged; `reason` & co. are additive.
@@ -1306,6 +1308,15 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
           throw new GraphQLError(oauthSurfaceRefusalMessage(surfaceRefusal, 'This OAuth credential is limited to the MCP surface.'), {
             extensions: { code: 'FORBIDDEN', ...surfaceRefusal, http: { status: 403 } },
           });
+        }
+        try {
+          await bindPresentedSession(req, db, auth);
+        } catch (error) {
+          // #3818: a pre-work refusal is not an ambiguous gateway/internal 5xx to clients.
+          if (isSessionSupersededError(error)) throw new GraphQLError(error.message, {
+            extensions: { ...error.extensions, http: { status: 409 } },
+          });
+          throw error;
         }
         stageRequestOperationKey(req.headers[OPERATION_KEY_HEADER], auth);
         // Stage caller-held unlock keys from the request header. Every
@@ -1394,7 +1405,12 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
       // with the GraphQL `recordSessionOutcome`; this route only maps each answer onto its status and body.
       // `resolveAuthContext` does DB lookups, and in Express 4 a rejection above the try is an unhandled rejection
       // rather than a response (the #555 class), so the whole call stays inside it.
-      const result = await recordSessionOutcome(db, async () => ({ db, ...(await resolveAuthContext(req, db)) }) as Context, {
+      const result = await recordSessionOutcome(db, async () => {
+        const { auth } = await resolveCredentialContextWithStatus(req, db);
+        // Keep the shared operation's credential/surface refusals ahead of execution metadata disclosure.
+        if (!oauthSurfaceRefusal(auth, 'account') && (auth.userId || auth.appId)) await bindPresentedSession(req, db, auth);
+        return { db, ...auth } as Context;
+      }, {
         sessionId: id,
         outcome,
         outcomeRef,
@@ -1425,6 +1441,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     } catch (err) {
       // A database fault is a 500, never "Session not found": reporting a connection-pool blip as a missing session
       // would send the caller chasing a session id that is perfectly fine.
+      if (respondSessionSuperseded(res, err)) return;
       Sentry.captureException(err);
       respondInternalFault(res, 'sessions/outcome', err);
     }
@@ -1483,13 +1500,15 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     // raises an unhandled rejection. That is the #555 class of defect, fixed
     // this week, reintroduced by putting an await above the try.
     try {
-      const auth = await resolveAuthContext(req, db);
+      const { auth } = await resolveCredentialContextWithStatus(req, db);
       const surfaceRefusal = oauthSurfaceRefusal(auth, 'account');
       if (surfaceRefusal) {
         // #1303: the prose is unchanged; `code` + `reason` make it matchable.
         res.status(403).json({ error: oauthSurfaceRefusalMessage(surfaceRefusal, 'This OAuth credential is limited to the MCP surface.'), code: 'FORBIDDEN', ...surfaceRefusal });
         return;
       }
+
+      await bindPresentedSession(req, db, auth);
 
       // Roles come from the CURRENT user row, not from a token or transport
       // snapshot (@copilot, PR #1250; #1251). Re-reading costs one indexed
@@ -1527,6 +1546,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
       }
       res.json({ ok: true });
     } catch (err) {
+      if (respondSessionSuperseded(res, err)) return;
       Sentry.captureException(err);
       respondInternalFault(res, 'reload', err);
     }
