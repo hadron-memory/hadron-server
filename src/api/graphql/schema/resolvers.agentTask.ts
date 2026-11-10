@@ -3065,18 +3065,55 @@ export const agentTaskQueries = {
 
 export type PartyView = { kind: 'WORKER' | 'USER'; id: string; name: string | null; urn: string | null };
 
-/** A sanitized party projection — never the User object (#552: no other tenant's identity fields). */
+/**
+ * #3867: one request's field-resolver lookups raised in the current tick, served together. Keyed by the Context OBJECT
+ * (a WeakMap, like {@link relationQueues}): a copy made for another caller or transaction never inherits the queue, the
+ * queue is removed before its flush starts, and no result is kept, so a later read always reaches the database. A wide
+ * `agentTasks` page selects four parties and the open-children test per row; each was one statement per row, which
+ * took the whole-App `--team` read to minutes.
+ */
+function tickBatch<K, V>(flush: (ctx: Context, keys: K[]) => Promise<Map<K, V>>, missing: V): (ctx: Context, key: K) => Promise<V> {
+  type Request = { key: K; settle: (v: V) => void; fail: (e: unknown) => void };
+  const queues = new WeakMap<Context, Request[]>();
+  return (ctx, key) =>
+    new Promise<V>((settle, fail) => {
+      let queue = queues.get(ctx);
+      if (!queue) {
+        const fresh: Request[] = (queue = []);
+        queues.set(ctx, fresh);
+        queueMicrotask(() => {
+          queues.delete(ctx);
+          flush(ctx, [...new Set(fresh.map((r) => r.key))]).then(
+            (found) => { for (const r of fresh) r.settle(found.has(r.key) ? (found.get(r.key) as V) : missing); },
+            (e) => { for (const r of fresh) r.fail(e); },
+          );
+        });
+      }
+      queue.push({ key, settle, fail });
+    });
+}
+
+const workerPartyOf = tickBatch<string, PartyView>(async (ctx, ids) => {
+  const rows = await ctx.db.worker.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, slug: true, app: { select: { urn: true } } } });
+  return new Map(rows.map((w) => [w.id, { kind: 'WORKER' as const, id: w.id, name: w.name, urn: composeWorkerUrn(w.app.urn, w.slug) }]));
+}, null as unknown as PartyView);
+const userPartyOf = tickBatch<string, { id: string; handle: string | null } | null>(async (ctx, ids) => {
+  const rows = await ctx.db.user.findMany({ where: { id: { in: ids } }, select: { id: true, handle: true } });
+  return new Map(rows.map((u) => [u.id, u]));
+}, null);
+const hasOpenChild = tickBatch<string, boolean>(async (ctx, ids) => {
+  const rows = await ctx.db.agentTask.findMany({ where: { parentTaskId: { in: ids }, status: { in: OPEN } }, select: { parentTaskId: true }, distinct: ['parentTaskId'] });
+  return new Map(rows.map((r) => [r.parentTaskId as string, true]));
+}, false);
+
+/** A sanitized party projection — never the User object (#552: no other tenant's identity fields). Batched per request (#3867). */
 export async function partyView(ctx: Context, workerId: string | null, userId: string | null): Promise<PartyView | null> {
   if (workerId) {
-    const w = await ctx.db.worker.findUnique({
-      where: { id: workerId },
-      select: { id: true, name: true, slug: true, app: { select: { urn: true } } },
-    });
-    if (!w) return { kind: 'WORKER', id: workerId, name: null, urn: null };
-    return { kind: 'WORKER', id: w.id, name: w.name, urn: composeWorkerUrn(w.app.urn, w.slug) };
+    const party = await workerPartyOf(ctx, workerId);
+    return party ?? { kind: 'WORKER', id: workerId, name: null, urn: null };
   }
   if (userId) {
-    const u = await ctx.db.user.findUnique({ where: { id: userId }, select: { id: true, handle: true } });
+    const u = await userPartyOf(ctx, userId);
     return { kind: 'USER', id: userId, name: u?.handle ?? null, urn: null };
   }
   return null;
@@ -3255,8 +3292,13 @@ async function relationPages(
 export const agentTaskFieldResolvers = {
   AgentTaskResult: {
     /** Result is reachable only through the existing task read gate; no separate finding read surface. */
-    findings: (result: { findings?: unknown }, args: { limit?: number | null; offset?: number | null }) => {
-      const items = (result.findings ?? []) as TaskFinding[];
+    findings: async (result: { findings?: unknown; __findingsOfTask?: string }, args: { limit?: number | null; offset?: number | null }, ctx: Context) => {
+      let stored = result.findings;
+      // #3867: a wide row's result did not carry them; read them now, as the task's own read answers.
+      if (stored === undefined && result.__findingsOfTask) {
+        stored = await withReadableTask(ctx, result.__findingsOfTask, async (_c, { task }) => task.resultFindings, true);
+      }
+      const items = (stored ?? []) as TaskFinding[];
       const { take, skip } = pageArgs(args);
       return pageEnvelope(items.slice(skip, skip + take), items.length, skip);
     },
@@ -3307,9 +3349,11 @@ export const agentTaskFieldResolvers = {
         ? { outcome: row.resultOutcome, summary: row.resultSummary, evidence: row.resultEvidence, ...(row.resultFindings != null ? { findings: row.resultFindings } : {}) }
         : null;
       if (t.status !== 'finished' || !t.resultOutcome || Object.hasOwn(t, 'resultFindings')) return view(t);
-      // #2662: wide list/tree/relation rows omit the large payload. Only a selected result loads it, under the
-      // SAME task read gate (including the App-key arm), rechecked at this read rather than trusting an old row.
-      return withReadableTask(ctx, t.id, async (_c, { task }) => view(task), true);
+      // #2662 / #3867: wide list/tree/relation rows omit the large payload. The outcome, summary and evidence are on
+      // the row the caller's read already returned, like every other field of it, so they are served without a
+      // second read per row. The findings load only when selected (AgentTaskResult.findings), under the SAME task
+      // read gate (including the App-key arm), rechecked at that read rather than trusting an old row.
+      return { ...view({ ...t, resultFindings: null }), __findingsOfTask: t.id };
     },
     /** #2651 (cor:agt:050:29, :01): the latest hand-back, readable as the task is; null when never handed back. */
     handBack: (t: TaskRow) =>
@@ -3343,11 +3387,7 @@ export const agentTaskFieldResolvers = {
     /** cor:agt:050:04 — started with at least one open child. Derived, never stored. */
     waitingOnChildren: async (t: TaskRow, _: unknown, ctx: Context) => {
       if (t.status !== 'started') return false;
-      const open = await ctx.db.agentTask.findFirst({
-        where: { parentTaskId: t.id, status: { in: OPEN } },
-        select: { id: true },
-      });
-      return open !== null;
+      return hasOpenChild(ctx, t.id);
     },
     createdBy: (t: TaskRow, _: unknown, ctx: Context) => partyView(ctx, t.createdByWorkerId, t.createdByWorkerId ? null : t.createdBy),
     assignedBy: (t: TaskRow, _: unknown, ctx: Context) =>
