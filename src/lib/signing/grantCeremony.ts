@@ -108,14 +108,13 @@ async function mayIssue(ctx: Context, action: string, appId: string): Promise<bo
 interface GrantRow {
   id: string; app_id: string; user_id: string | null; agent_id: string | null; worker_id: string | null; grantee_app_id: string | null;
   action: string; action_values: unknown; starts_at: Date | null; expires_at: Date | null; max_uses: number | null; reason: string;
-  version: number; activated_at: Date | null; revoked_at: Date | null; holder_departed_at: Date | null; expired: boolean;
+  version: number; activated_at: Date | null; revoked_at: Date | null; holder_departed_at: Date | null;
 }
 
 async function readGrant(tx: Prisma.TransactionClient, grantId: string, appId: string): Promise<GrantRow | null> {
   const [row] = await tx.$queryRaw<GrantRow[]>`
     SELECT id, app_id, user_id, agent_id, worker_id, grantee_app_id, action, action_values, starts_at, expires_at, max_uses, reason,
-           version, activated_at, revoked_at, holder_departed_at,
-           (expires_at IS NOT NULL AND expires_at <= hadron_signing_now()) AS expired
+           version, activated_at, revoked_at, holder_departed_at
       FROM grants WHERE id = ${grantId} AND app_id = ${appId}`;
   return row ?? null;
 }
@@ -132,11 +131,15 @@ function termsHashOf(g: GrantRow): string | null {
   }
 }
 
-/** Why a grant can no longer be signed through this request, or null while it still can. */
-function grantEnded(g: GrantRow, req: RequestPins): 'STALE' | 'EXPIRED' | null {
+/**
+ * Why a grant can no longer be signed through this request, or null while it still can. Expiry is judged on the caller's
+ * ONE clock read (`now`, taken after the completion's last lock), never on a clock sampled earlier: a lock wait that crosses
+ * the deadline must read EXPIRED here, not reach the activation guard and fail as a raw refusal (Anne P2, #3805).
+ */
+function grantEnded(g: GrantRow, req: RequestPins, now: Date): 'STALE' | 'EXPIRED' | null {
   if (g.activated_at || g.revoked_at || g.holder_departed_at) return 'STALE';
   // A grant past its expiry can never be signed (ruling 0255 item 16).
-  if (g.expired) return 'EXPIRED';
+  if (g.expires_at !== null && g.expires_at.getTime() <= now.getTime()) return 'EXPIRED';
   if (g.version !== req.version || termsHashOf(g) !== req.termsHash) return 'STALE';
   return null;
 }
@@ -251,7 +254,7 @@ export async function proveForGrantSigning(db: PrismaClient, a: {
     if (state !== 'open') return { outcome: 'ended' as const, state: state.toUpperCase() };
     const g = await readGrant(tx, row.grantId, grantApp.appId);
     if (!g) throw new CeremonyRefused();
-    const ended = grantEnded(g, row);
+    const ended = grantEnded(g, row, now);
     if (ended) return { outcome: 'ended' as const, state: ended };
 
     const app = await tx.app.findUnique({ where: { id: g.app_id }, select: { urn: true } });
@@ -374,7 +377,7 @@ async function lockAndJudge(tx: Prisma.TransactionClient, txCtx: Context, loc: L
   // The request, then the grant.
   const state = effectiveRequestState({ state: request.state, expiresAt: request.expires_at }, now);
   if (state !== 'open') throw new GrantSigningRefusal('SIGNING_REQUEST_ENDED', 'This signing request has ended.', { state: state.toUpperCase() });
-  const ended = grantEnded(g, pins);
+  const ended = grantEnded(g, pins, now);
   if (ended) throw new GrantSigningRefusal('SIGNING_REQUEST_ENDED', 'This grant can no longer be signed.', { state: ended });
   // The signer must still be able to ISSUE the grant (cor:acl:140:04), judged under the locks on the transaction's context.
   if (!(await mayIssue(txCtx, g.action, g.app_id))) throw new GrantSigningRefusal('SIGNER_NOT_ELIGIBLE', 'You can no longer issue this grant.');

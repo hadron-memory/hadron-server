@@ -320,6 +320,33 @@ describe('refusals at completion are judged before any write', () => {
     expect((await grantRow(id)).activated_at).toBeNull();
   });
 
+  it('Anne P2 (#3805): a grant that expires while the completion waits on the credential lock is EXPIRED, judged after the last lock', async () => {
+    const id = generateId();
+    await db.$executeRawUnsafe(`INSERT INTO grants (id, app_id, worker_id, action, action_values, reason, max_uses, expires_at, created_at, updated_at)
+      VALUES ($1, $2, $3, 'schedule.create', $4::jsonb, $5, 3, (clock_timestamp() AT TIME ZONE 'UTC') + interval '1500 milliseconds',
+              (clock_timestamp() AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC'))`,
+    id, appId, workerId, JSON.stringify({ entryNode: entryNodeId }), REASON);
+    const req = await openRequest(id);
+    const p = await prove(req.id, admin);
+    expect(p.json.canSign).toBe(true);
+    const b = await blocker();
+    try {
+      // The last lock the completion takes: the signer's credential. The grant is still live when the completion reaches it.
+      await b.c.query('SELECT id FROM passkey_credentials WHERE owner_id = $1 FOR UPDATE', [admin.id]);
+      const done = post(req.id, 'complete', signingBody(p, admin), p.cookie);
+      expect(await waitingOn(b.pid)).toBe(true);
+      await new Promise((res) => setTimeout(res, 1700));
+      await b.c.query('ROLLBACK');
+      const r = await done;
+      expect(r.status).toBe(409);
+      expect(await r.json()).toEqual({ error: 'SIGNING_REQUEST_ENDED', state: 'EXPIRED' });
+    } finally { await b.c.query('ROLLBACK').catch(() => undefined); await b.c.end(); }
+    const row = await grantRow(id);
+    expect(row.activated_at).toBeNull();
+    const [{ n }] = await db.$queryRawUnsafe<Array<{ n: bigint }>>('SELECT count(*) AS n FROM grant_signatures WHERE grant_id = $1', id);
+    expect(Number(n)).toBe(0);
+  });
+
   it('the completion judges the grant itself, not only its request: a revoked grant whose request stayed open is STALE', async () => {
     const g = await insertGrant();
     const req = await openRequest(g);
