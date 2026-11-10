@@ -41,7 +41,7 @@ beforeEach(() => {
   state.events.length = 0;
   signals = new Map();
   state.close.mockImplementation((cb: (e?: Error) => void) => { state.events.push('close'); cb(); });
-  state.stop.mockImplementation(async () => true);
+  state.stop.mockImplementation(async () => ({ worker: 'ok', publisher: 'ok' }));
   state.disconnect.mockImplementation(async () => { state.events.push('disconnect'); });
   const once = process.once.bind(process);
   vi.spyOn(process, 'once').mockImplementation(((event: string, listener: () => void) => {

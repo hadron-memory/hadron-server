@@ -15974,6 +15974,7 @@ export const typeDefs = `#graphql
   """
   Why a failed match skipped a candidate (#3816, V21). Closed and additive: values are added, never renamed.
   STOP_SIGNAL names a matcher condition V21 lacked. There is no value for a bound, quiet worker: hadron-server#3815 removes that exclusion.
+  NO_LONGER_FREE (#3855, V59) is a candidate the snapshot found free that the final assignment check refused; it carries no other value.
   """
   enum AgentTaskMatchSkipReason {
     RETIRED
@@ -15991,6 +15992,7 @@ export const typeDefs = `#graphql
     TIER_UNKNOWN
     MODEL_GROUP_MISMATCH
     STOP_SIGNAL
+    NO_LONGER_FREE
   }
 
   "Single-shot failure (hrn:node:hadronmemory.com:specs:cor:agt:050:01): assigning clears it; cancellation clears it."
