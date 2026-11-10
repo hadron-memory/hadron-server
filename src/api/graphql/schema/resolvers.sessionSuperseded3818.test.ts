@@ -107,6 +107,9 @@ it.each([true, false])('V66 names the current worker session after its successor
   const memory = readable ? null : await db.memory.create({ data: {
     ownerUserId: stranger.id, userId: stranger.id, class: 'personal', name: 'Private current', urn: `test:v66-${generateId()}`,
   } });
+  // Readability does not choose a fallback: the latest current row alone is judged.
+  await db.session.create({ data: { id: generateId(), userId: owner.id, appId: app.id,
+    workerId: worker.id, startedAt: new Date(Date.now() - 86400000) } });
   const current = await db.session.create({ data: { id: generateId(), userId: stranger.id, appId: app.id,
     workerId: worker.id, memoryId: memory?.id, startedAt: new Date(Date.now() + 86400000) } });
   expect((await db.session.findUniqueOrThrow({ where: { id: a.id } })).supersededBySessionId).toBe(b.id);

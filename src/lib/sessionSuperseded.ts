@@ -24,25 +24,15 @@ export async function readableSupersedingSessionId(
 export async function refuseSupersededSession(ctx: Context, sessionId: string): Promise<void> {
   // #3818 review P2: classify an execution binding only for its accepted principal shapes, never a credential failure.
   if (!(ctx.appId && !ctx.userId) && !(ctx.userId && !ctx.impersonation)) return;
-  const select = { id: true, endedAt: true, endReason: true, workerId: true,
-    deletedAt: true, supersededBySessionId: true } as const;
-  const old = await ctx.db.session.findUnique({ where: { id: sessionId }, select });
+  // V66: V24 names the worker's current open session, independently of V25's immediate successor.
+  const old = await ctx.db.session.findUnique({
+    where: { id: sessionId }, select: { endedAt: true, endReason: true, workerId: true },
+  });
   if (!old?.endedAt || old.endReason !== 'superseded') return;
-  // Bruce94870: V24 follows V25 evidence, never an unrelated driver's newer open worker row.
-  // Historical/malformed/over-budget chains fail closed to the code alone; never infer missing links.
-  const seen = new Set([sessionId]);
-  let hop = old;
-  let current: { id: string } | null = null;
-  for (let count = 0; !old.deletedAt && count < 64; count++) {
-    const nextId = hop.supersededBySessionId;
-    if (!nextId || seen.has(nextId)) break;
-    seen.add(nextId);
-    const next = await ctx.db.session.findUnique({ where: { id: nextId }, select });
-    if (!next || next.deletedAt || next.workerId !== old.workerId) break;
-    if (!next.endedAt) { current = next; break; }
-    if (next.endReason !== 'superseded') break;
-    hop = next;
-  }
+  const current = old.workerId ? await ctx.db.session.findFirst({
+    where: { workerId: old.workerId, endedAt: null, deletedAt: null },
+    orderBy: [{ startedAt: 'desc' }, { id: 'desc' }], select: { id: true },
+  }) : null;
   const readable = current ? await readableSession(ctx, current.id) : null;
   throw new GraphQLError('Session superseded.', { extensions: {
     code: 'SESSION_SUPERSEDED',
