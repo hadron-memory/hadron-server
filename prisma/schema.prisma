@@ -7103,9 +7103,9 @@ model AgentMatchOutcome {
   outcome      String
   /// The coarse MatchFailureReason of a NO_WORKER outcome; null for MATCHED.
   reason       String?
-  /// Database clock.
-  decidedAt    DateTime  @map("decided_at")
-  failingSince DateTime? @map("failing_since")
+  /// Database clock, microseconds (a stamp is never truncated to a millisecond, so two decisions rarely tie).
+  decidedAt    DateTime  @map("decided_at") @db.Timestamp(6)
+  failingSince DateTime? @map("failing_since") @db.Timestamp(6)
 
   app App @relation(fields: [appId], references: [id], onDelete: Cascade)
 

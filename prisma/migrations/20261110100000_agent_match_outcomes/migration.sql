@@ -6,8 +6,8 @@ CREATE TABLE "agent_match_outcomes" (
     "role" TEXT NOT NULL DEFAULT '',
     "outcome" TEXT NOT NULL,
     "reason" TEXT,
-    "decided_at" TIMESTAMP(3) NOT NULL,
-    "failing_since" TIMESTAMP(3),
+    "decided_at" TIMESTAMP(6) NOT NULL,
+    "failing_since" TIMESTAMP(6),
 
     CONSTRAINT "agent_match_outcomes_pkey" PRIMARY KEY ("app_id","family","tier","role")
 );

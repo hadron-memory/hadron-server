@@ -73,7 +73,7 @@ import { launchForAssignment } from '../hostOperations/launch.js';
 import { PENDING_SESSION_END_SQL } from '../hostOperations/sessionEnd.js';
 import { normalizeFamily, tierOf, type ModelTier } from './family.js';
 import { effectiveModelGroups, modelGroupsAllowed, normalizeModelGroupName, type EffectiveModelGroup } from './modelGroups.js';
-import { combinationsOf, decisionClock, recordMatchOutcome, type Combination } from './matchOutcomes.js';
+import { combinationsOf, decisionClock, recordMatchOutcome, type Combination, type DbInstant } from './matchOutcomes.js';
 import { locateTeamAgent } from '../../api/graphql/schema/resolvers.worker.js';
 
 /** On since T6 (#1709): a host can start an unbound worker, so the matcher assigns to one (see the file header). */
@@ -493,7 +493,7 @@ async function tryAssign(
    *  claim state is the one this attempt began with (the sweep's claim, or still unclaimed). */
   claim?: Date,
   /** #3825: set to the database time of the re-read that found the worker not free, taken inside the transaction. */
-  readAt?: { at?: Date },
+  readAt?: { at?: DbInstant },
 ): Promise<AttemptOutcome> {
   return db.$transaction(tx => tryAssignInTx(tx, task, workerId, family, now, hooks, anchor, matchNow, claim, readAt));
 }
@@ -501,7 +501,7 @@ async function tryAssign(
 /** Shared deciding write. A batch caller already holds every candidate worker lock before its task rows. */
 async function tryAssignInTx(
   tx: Prisma.TransactionClient, task: QueuedTask, workerId: string, family: string, now: Date,
-  hooks: MatcherHooks, anchor: number, matchNow: boolean, claim?: Date, readAt?: { at?: Date },
+  hooks: MatcherHooks, anchor: number, matchNow: boolean, claim?: Date, readAt?: { at?: DbInstant },
 ): Promise<AttemptOutcome> {
   await lockAuthorityAnchors(tx, [{ kind: 'app', id: task.appId }], 'shared');
   const app = await tx.app.findUnique({ where: { id: task.appId }, select: { deletedAt: true, uninstalledAt: true } });
@@ -573,8 +573,8 @@ async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: Match
   const failedKeys = new Set<string>();
   // #3825: when the pass's judgments were made: the candidate snapshot, moved forward by each assignment of this pass (a
   // later task is judged on the state after it). A failure carries this, or the in-transaction time of its own re-read.
-  let basis: Date | null = null;
-  const recordSweepFailure = async (task: QueuedTask, readAt?: Date) => {
+  let basis: DbInstant | null = null;
+  const recordSweepFailure = async (task: QueuedTask, readAt?: DbInstant) => {
     const req = parseRequirements(task.requirements);
     const key = JSON.stringify(combinationsOf(req));
     if (failedKeys.has(key)) return;
@@ -618,7 +618,7 @@ async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: Match
       const req = parseRequirements(task.requirements);
       const team = req.teamWorkerId ? await matchingTeamPool(db, appId, req.teamWorkerId) : null;
       let decided = false;
-      const lastRead: { at?: Date } = {};
+      const lastRead: { at?: DbInstant } = {};
       for (const w of candidates) {
         if (spent.has(w.id) || (team && !team.has(w.id))) continue;
         const family = eligibleFor(req, w, groups);
@@ -776,7 +776,7 @@ export async function matchTaskNow(db: PrismaClient, taskId: string, now: Date, 
   // moment right after that re-read (under the worker lock). A success another attempt committed in between is then ordered by the record's own guard.
   let decidedAt = await decisionClock(db);
   const outcome = await chooseMatchNow(db, task, now, async (workerId, family) => {
-    const readAt: { at?: Date } = {};
+    const readAt: { at?: DbInstant } = {};
     const attempt = await tryAssign(db, task, workerId, family, now, {}, anchor, true, claim, readAt);
     if (readAt.at) decidedAt = readAt.at;
     return attempt;
@@ -794,7 +794,7 @@ export async function matchTaskNow(db: PrismaClient, taskId: string, now: Date, 
 }
 
 /** #3825: record a no-worker outcome; a failure to record never fails or retries the match (logged). */
-async function recordFailure(db: Db, appId: string, requirements: Prisma.JsonValue | null, reason: MatchFailureReason, decidedAt: Date | null = null): Promise<void> {
+async function recordFailure(db: Db, appId: string, requirements: Prisma.JsonValue | null, reason: MatchFailureReason, decidedAt: DbInstant | null = null): Promise<void> {
   try {
     await recordMatchOutcome(db, appId, parseRequirements(requirements), 'NO_WORKER', reason, decidedAt);
   } catch (err) {

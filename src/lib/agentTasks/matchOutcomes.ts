@@ -46,9 +46,15 @@ export function combinationsOf(req: Requirements): Combination[] {
   return out;
 }
 
-/** The database clock now, as a naive-UTC Date: take it BEFORE judging a match, to stamp a failure recorded after a gap. */
-export async function decisionClock(db: Db): Promise<Date> {
-  const [{ ts }] = await db.$queryRaw<{ ts: Date }[]>(Prisma.sql`SELECT (clock_timestamp() AT TIME ZONE 'UTC') AS ts`);
+/**
+ * A database instant at microsecond precision, as a naive-UTC `YYYY-MM-DD HH24:MI:SS.US` string (a JS Date would cut it to
+ * a millisecond, and two decisions in one pass land within one). Strings of this shape order like the instants.
+ */
+export type DbInstant = string;
+
+/** The database clock now: take it where a judgment is made, to stamp an outcome recorded after a gap. */
+export async function decisionClock(db: Db): Promise<DbInstant> {
+  const [{ ts }] = await db.$queryRaw<{ ts: string }[]>(Prisma.sql`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US') AS ts`);
   return ts;
 }
 
@@ -60,7 +66,7 @@ export async function decisionClock(db: Db): Promise<Date> {
 export async function recordMatchOutcome(
   db: Db, appId: string, req: Requirements, outcome: MatchOutcomeKind, reason: string | null = null,
   /** When the decision was made (`decisionClock`), for a record written after a gap; default: now (DB clock). */
-  decidedAt: Date | null = null,
+  decidedAt: DbInstant | null = null,
   /** Combinations counted IN ADDITION to the ones `req` names (the chosen worker's own, V37/V44), deduplicated. */
   extra: Combination[] = [],
 ): Promise<void> {
@@ -80,7 +86,7 @@ export async function recordMatchOutcome(
     INSERT INTO agent_match_outcomes (app_id, family, tier, role, outcome, reason, decided_at, failing_since)
     SELECT ${appId}, f, t, r, ${outcome}, ${failing ? reason : null}::text, c.ts, ${failing ? Prisma.sql`c.ts` : Prisma.sql`NULL::timestamp`}
     FROM unnest(${families}::text[], ${tiers}::text[], ${roles}::text[]) AS u(f, t, r)
-    CROSS JOIN (SELECT COALESCE((${decidedAt}::timestamptz AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC')) AS ts) c
+    CROSS JOIN (SELECT COALESCE(${decidedAt}::timestamp, (clock_timestamp() AT TIME ZONE 'UTC')) AS ts) c
     ON CONFLICT (app_id, family, tier, role) DO UPDATE SET
       outcome = EXCLUDED.outcome,
       reason = EXCLUDED.reason,
@@ -89,8 +95,7 @@ export async function recordMatchOutcome(
         WHEN EXCLUDED.outcome = 'MATCHED' THEN NULL
         WHEN agent_match_outcomes.outcome = 'NO_WORKER' AND agent_match_outcomes.failing_since IS NOT NULL THEN agent_match_outcomes.failing_since
         ELSE EXCLUDED.decided_at END
-    -- Ties (the column keeps milliseconds): the later WRITER wins. A pass that assigned a worker and then judged the next
-    -- task stamps both within one millisecond, and that later failure is the true latest decision.
+    -- Stamps carry microseconds, so a tie is practically a same-instant double write: the later writer wins it.
     WHERE agent_match_outcomes.decided_at <= EXCLUDED.decided_at`);
 }
 

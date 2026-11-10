@@ -272,13 +272,13 @@ it('George post-attempt gap: the stamp of a not-free re-read is taken inside the
   const w = await worker('reviewer');
   const t = await create({ requirements: { role: 'reviewer' } });
   await db.$executeRaw`UPDATE sessions SET ended_at = now() WHERE worker_id = ${w.id}`; // not free any more
-  const readAt: { at?: Date } = {};
+  const readAt: { at?: string } = {};
   const before = await decisionClock(db);
   const out = await __matcherTesting.tryAssign(db, { id: t.id, appId: app.id, requirements: { role: 'reviewer' }, closeSessionWhenDone: false } as any, w.id, 'claude', new Date(), {}, undefined, false, undefined, readAt);
   const after = await decisionClock(db);
   expect(out).toBe('worker-not-free');
-  expect(readAt.at!.getTime()).toBeGreaterThanOrEqual(before.getTime());
-  expect(readAt.at!.getTime()).toBeLessThanOrEqual(after.getTime());
+  expect(readAt.at! >= before).toBe(true);
+  expect(readAt.at! <= after).toBe(true);
 });
 
 it('Anne: roles are keyed case-insensitively and a write orders its rows globally', async () => {
@@ -315,13 +315,13 @@ it('Anne: a queued-sweep failure is stamped when it was judged, so a success tha
 it('George/Anne: an assignment reports its in-transaction time too, so the sweep basis never uses a post-return clock', async () => {
   const w = await worker('reviewer');
   const t = await create({ requirements: { role: 'reviewer' } });
-  const readAt: { at?: Date } = {};
+  const readAt: { at?: string } = {};
   const before = await decisionClock(db);
   const out = await __matcherTesting.tryAssign(db, { id: t.id, appId: app.id, requirements: { role: 'reviewer' }, closeSessionWhenDone: false } as any, w.id, 'claude', new Date(), {}, undefined, false, undefined, readAt);
   const after = await decisionClock(db);
   expect(out).toBe('assigned');
-  expect(readAt.at!.getTime()).toBeGreaterThanOrEqual(before.getTime());
-  expect(readAt.at!.getTime()).toBeLessThanOrEqual(after.getTime());
+  expect(readAt.at! >= before).toBe(true);
+  expect(readAt.at! <= after).toBe(true);
 });
 
 it('George/Anne: after the pass assigned one worker, an exhausted later task\'s failure still lands after that assignment\'s MATCHED', async () => {
@@ -331,4 +331,17 @@ it('George/Anne: after the pass assigned one worker, an exhausted later task\'s 
   await matchQueuedTasks(db, new Date(), { appId: app.id });
   const [r] = await latest({ windowHours: 24, role: 'reviewer', family: null });
   expect(r).toMatchObject({ outcome: 'NO_WORKER', reason: 'NOBODY_FREE' }); // the second task was judged after the first took the worker
+});
+
+it('George P2 (same ms): stamps carry microseconds, so equal-millisecond decisions are still ordered, both directions', async () => {
+  const base = (await decisionClock(db)).slice(0, -1);
+  const [t1, t2] = [`${base}1`, `${base}2`]; // one millisecond, two microseconds
+  await recordMatchOutcome(db, app.id, { role: 'x' }, 'MATCHED', null, t2);
+  await recordMatchOutcome(db, app.id, { role: 'x' }, 'NO_WORKER', 'NOBODY_FREE', t1); // older decision, written later
+  expect((await latest())[0]).toMatchObject({ role: 'x', outcome: 'MATCHED' });
+  await recordMatchOutcome(db, app.id, { role: 'y' }, 'NO_WORKER', 'NOBODY_FREE', t2);
+  await recordMatchOutcome(db, app.id, { role: 'y' }, 'MATCHED', null, t1);
+  expect((await latest({ windowHours: 24, role: 'y' }))[0]).toMatchObject({ role: 'y', outcome: 'NO_WORKER' });
+  const [row] = await db.$queryRaw<{ s: string }[]>`SELECT to_char(decided_at, 'US') AS s FROM agent_match_outcomes WHERE role = 'x'`;
+  expect(row.s).toBe(t2.slice(-6)); // stored to the microsecond
 });
