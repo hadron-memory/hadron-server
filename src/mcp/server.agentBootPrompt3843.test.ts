@@ -380,6 +380,16 @@ describe('4, 5: masking, judged before anything is resolved', () => {
     await db.orgMember.update({ where: { organizationId_userId: { organizationId: orgId, userId: holderId } }, data: { deletedAt: new Date() } });
     await expectMasked(tokens.member, { a: agentId, p: personalAppId });
   });
+
+  it('5 (Gabriel BLIND P2-F1): a lapsed licence masks a pure App key of the personal App too (control: served while it holds)', async () => {
+    const personalKey = await appKey(personalAppId);
+    const live = await both(personalKey, { a: agentId, p: personalAppId });
+    expect(live.g.errors).toBeUndefined();
+    expect(live.g.data!.agentServedBootPrompt!.text).toBe(rendered());
+    expect(bodyOf(live.t)).toBe(rendered());
+    await db.orgMember.update({ where: { organizationId_userId: { organizationId: orgId, userId: holderId } }, data: { deletedAt: new Date() } });
+    await expectMasked(personalKey, { a: agentId, p: personalAppId });
+  });
 });
 
 describe('6: precedence', () => {
