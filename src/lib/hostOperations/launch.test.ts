@@ -576,6 +576,14 @@ describe('the platform starts an assigned worker with no live session (cor:agt:0
     expect(await db.hostOperation.count()).toBe(0);
   });
 
+  it('#3815 (V16-V19): a create that MATCHES onto a quiet open session issues no worker.start; the matcher owns that start', async () => {
+    const quiet = new Date(Date.now() - 60 * 86_400_000);
+    await db.session.create({ data: { id: generateId(), appId: app.id, workerId: kit.id, userId: holder.id, startedAt: quiet, updatedAt: quiet, family: 'claude' } });
+    const made = await M.createAgentTask({}, { input: { appRef: app.id, title: 'Matched', match: true, closeSessionWhenDone: false } }, ctx(manager.id));
+    expect((await db.agentTask.findUniqueOrThrow({ where: { id: made.id } })).assigneeWorkerId).toBe(kit.id);
+    expect(await db.hostOperation.count({ where: { type: 'worker.start' } })).toBe(0);
+  });
+
   it('#10773 (5): a worker whose every session is dormant is started on a new session', async () => {
     const quiet = new Date(Date.now() - 60 * 86_400_000);
     await db.session.create({ data: { id: generateId(), appId: app.id, workerId: kit.id, userId: holder.id, startedAt: quiet, updatedAt: quiet } });
