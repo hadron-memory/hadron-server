@@ -15,7 +15,7 @@ import { cleanDb, suspendChatSeqUniqueness } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { ensureChannelWithRoot } from './channels.js';
 import { appendChatMessage } from './chatRoot.js';
-import { encryptNodeFields, getMemoryEncryptionInfo } from './nodeCrypto.js';
+import { encryptNodeFields, getMemoryEncryptionInfo, isAuthenticatedDataEnvelope, isAuthenticatedStringEnvelope } from './nodeCrypto.js';
 import { decryptJson, decryptString, markCiphertext, stripCiphertextPrefix, generateDataKey } from './crypto.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
@@ -235,9 +235,11 @@ describe('family 1b — #1365: a mention-only nudge beyond the scan bound', () =
   }
 
   // #3854: one assertion shared by the real backlog and deterministic controls.
-  function assertEncryptedRouting(row: { data: unknown; content: string | null }, _key: ReturnType<typeof generateDataKey>) {
-    expect(JSON.stringify(row.data)).not.toContain('dara');
-    expect(row.content ?? '').not.toContain('dara');
+  function assertEncryptedRouting(row: { data: unknown; content: string | null }, key: ReturnType<typeof generateDataKey>) {
+    // Exact one-key __enc shape excludes plaintext routing siblings; both
+    // fields must authenticate under the fixture's actual memory key.
+    expect(isAuthenticatedDataEnvelope(row.data, key)).toBe(true);
+    expect(isAuthenticatedStringEnvelope(row.content, key)).toBe(true);
   }
 
   it('#3854 accepts authenticated ciphertext containing the worker slug, rejects plaintext routing', () => {
@@ -246,7 +248,10 @@ describe('family 1b — #1365: a mention-only nudge beyond the scan bound', () =
     // these IV bytes deterministically encode "dara", without sampling/retries.
     const iv = Buffer.alloc(12);
     Buffer.from('dara', 'base64').copy(iv, 2);
+    // Fixed key/IV are test vectors only, never used for persisted messages.
+    let vector = 0;
     const encode = (text: string) => {
+      iv[11] = vector++; // Distinct deterministic IVs for the two test vectors.
       const cipher = createCipheriv('aes-256-gcm', key.raw, iv);
       const body = Buffer.concat([cipher.update(text, 'utf8'), cipher.final()]);
       return Buffer.concat([Buffer.from([1]), iv, cipher.getAuthTag(), body]).toString('base64');
@@ -258,6 +263,8 @@ describe('family 1b — #1365: a mention-only nudge beyond the scan bound', () =
     expect(decryptJson(data.__enc, key)).toEqual({ mentions: ['dara'] });
     expect(decryptString(stripCiphertextPrefix(content), key)).toBe('@dara');
     expect(() => assertEncryptedRouting({ data: { ...data, mentions: ['dara'] }, content }, key)).toThrow();
+    expect(() => assertEncryptedRouting({ data, content: '@dara' }, key)).toThrow();
+    expect(() => assertEncryptedRouting({ data: { __enc: 'invalid' }, content }, key)).toThrow();
     assertEncryptedRouting({ data, content }, key);
   });
 
