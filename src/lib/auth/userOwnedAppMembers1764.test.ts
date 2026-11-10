@@ -19,6 +19,7 @@ import { participantAppIds } from './appParticipation.js';
 import { computeEffectiveAccess } from './effectiveAccess.js';
 import { ensureChannelWithRoot } from '../channels.js';
 import type { AuthContext } from '../../middleware/auth.js';
+import { serveAgentBootPrompt } from '../../test/servedBootPrompt.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -270,6 +271,7 @@ describe('taking a worker\'s name on a user-owned App (Rook P2, #8886; interim (
     M.startSession({}, { input: { id: generateId(), workerRef: workerId, appRef: app.id } }, ctx(userId));
   beforeEach(async () => {
     const agent = await db.agent.create({ data: { id: generateId(), ownerUserId: owner.id, name: 'Mine3', urn: `own${generateId().toLowerCase()}:mine3`, visibility: 'ORGANIZATION' } as never });
+    await serveAgentBootPrompt(db, agent.id, 'Test boot prompt.');
     await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
     workerId = (await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' }, select: { id: true } })).id;
   });
@@ -301,6 +303,7 @@ describe('taking a worker\'s name on a user-owned App (Rook P2, #8886; interim (
     const org = await db.organization.create({ data: { id: generateId(), name: 'o', urn: `o-${generateId().toLowerCase()}` } });
     const orgApp = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Org', urn: `${org.urn}:org` } });
     const agent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, name: 'OA', urn: `${org.urn}:oa`, visibility: 'ORGANIZATION' } });
+    await serveAgentBootPrompt(db, agent.id, 'Test boot prompt.');
     await db.appAgent.create({ data: { appId: orgApp.id, agentId: agent.id } });
     await db.appMember.create({ data: { appId: orgApp.id, userId: member.id, role: 'member' } });
     const w = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: orgApp.id, agentId: agent.id, name: 'Orgy', slug: 'orgy' }, select: { id: true } });
@@ -310,8 +313,10 @@ describe('taking a worker\'s name on a user-owned App (Rook P2, #8886; interim (
 });
 
 describe('nested content behind the widened Worker gate (Riana P1, #1786)', () => {
+  // #2712: the owner's template is the Agent's served boot prompt.
   async function fixture() {
-    const agent = await db.agent.create({ data: { id: generateId(), ownerUserId: owner.id, name: 'Secret role', urn: `own${generateId().toLowerCase()}:secret-role`, visibility: 'ORGANIZATION', systemPrompt: 'synthetic-agent-secret' } as never });
+    const agent = await db.agent.create({ data: { id: generateId(), ownerUserId: owner.id, name: 'Secret role', urn: `own${generateId().toLowerCase()}:secret-role`, visibility: 'ORGANIZATION' } as never });
+    await serveAgentBootPrompt(db, agent.id, 'synthetic-agent-secret');
     await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
     const mem = await db.memory.create({ data: { id: generateId(), class: 'app', appId: app.id, ownerUserId: owner.id, name: 'Strict worker state', urn: `own${generateId().toLowerCase()}:worker-state` } });
     const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'SecretWorker', slug: 'secretworker', memoryId: mem.id, heldByUserId: owner.id, heldAt: new Date() } });
@@ -324,7 +329,7 @@ describe('nested content behind the widened Worker gate (Riana P1, #1786)', () =
     const server = new ApolloServer({ typeDefs, resolvers });
     try {
       const result = await server.executeOperation(
-        { query: 'query($ref: ID!) { worker(ref: $ref) { id agent { id systemPrompt } prompt continuity { handoff { id content data } } } }', variables: { ref: workerId } },
+        { query: 'query($ref: ID!) { worker(ref: $ref) { id agent { id description } prompt continuity { handoff { id content data } } } }', variables: { ref: workerId } },
         { contextValue: ctx(as) },
       );
       const body = (result.body as any).singleResult;

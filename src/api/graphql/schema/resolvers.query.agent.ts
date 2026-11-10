@@ -1,5 +1,6 @@
 // agentQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
 import { GraphQLError } from 'graphql';
+import { Prisma } from '../../../generated/prisma/index.js';
 import { decryptToken } from '../../../lib/tokenCrypto.js';
 import { AI_PROVIDER_ENDPOINTS, effectiveApiStyle, effectiveEndpoint } from '../../../lib/aiEndpoint.js';
 import {
@@ -32,7 +33,10 @@ import {
   requireAiConfigPickerAccess,
   rethrowAiConfigTyped,
   AGENT_INCLUDE,
+  pageArgs,
+  pageEnvelope,
 } from './resolvers.helpers.js';
+import { forbiddenError, unauthenticatedError } from '../../../lib/refusals.js';
 
 /**
  * #1892 — the full Node rows behind a list's entries, in list order, each
@@ -58,6 +62,39 @@ async function listedEntries<E extends { node: ListedNode }>(ctx: Context, agent
   });
 }
 
+/**
+ * #2213 S2 — the row scope of `myAgentSubscriptions`, shared with
+ * `myAgentSubscriptionsPage` (hrn:node:hadronmemory.com:specs:cor:api:120:04).
+ * Null means the caller has no inventory to read: no user, or an impersonated
+ * request (#876 class sweep: identity-scoped and org-unconstrained, it would
+ * list the target's subscriptions across every org). The old field answers [],
+ * the page the empty page. `AgentSubscription` has the composite key
+ * (userId, agentId) and no id, so the tiebreak is the key's other half.
+ */
+export function myAgentSubscriptionScope(ctx: Context) {
+  if (!ctx.userId || ctx.impersonation) return null;
+  return {
+    where: { userId: ctx.userId } satisfies Prisma.AgentSubscriptionWhereInput,
+    orderBy: [{ createdAt: 'desc' as const }, { agentId: 'asc' as const }],
+  };
+}
+
+/**
+ * #2213 S2 — the admission and row scope of `agentSubscriptions`, shared with
+ * `agentSubscriptionsPage`. An Agent the caller cannot read answers as absent
+ * (#1944); a readable one needs ADMIN of its owning org (005 FR-022). Refuses
+ * before returning a scope, so no count or page is read for a refused caller.
+ */
+export async function agentSubscriptionScope(ctx: Context, agentRef: string) {
+  // 007-entity-id-or-urn: agentRef may be ID, bare URN, or prefixed URN.
+  const agent = await resolveReadableAgentRef(ctx, agentRef);
+  await requireAgentAccess(ctx, agent, 'ADMIN');
+  return {
+    where: { agentId: agent.id } satisfies Prisma.AgentSubscriptionWhereInput,
+    orderBy: [{ createdAt: 'desc' as const }, { userId: 'asc' as const }],
+  };
+}
+
 export const agentQueries = {
     /**
      * #1892 (cor:dmo:050:15) — an Agent's tasks across its base chain: every
@@ -65,9 +102,9 @@ export const agentQueries = {
      * index lists, each once, with the listing edge's trigger where one exists.
      * hadron_agent_tasks returns the same list (src/lib/agentDefinitionLists.ts).
      */
-    agentTaskList: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+    agentTaskList: async (_: unknown, { ref, symptom, limit }: { ref: string; symptom?: string | null; limit?: number | null }, ctx: Context) => {
       const { id } = await resolveAgentRef(ctx.db, ref);
-      return listedEntries(ctx, id, await listAgentTasks(ctx.db, ctx, id, ref));
+      return listedEntries(ctx, id, await listAgentTasks(ctx.db, ctx, id, ref, { symptom, limit }));
     },
 
     /**
@@ -86,7 +123,7 @@ export const agentQueries = {
     // nesting). Gate mirrors resolveUrn's agent branch: a PUBLIC agent
     // resolves for any caller (#551 — marketplace discovery / share links),
     // otherwise member of the Agent's org or platform ADMIN/OWNER. A PUBLIC
-    // agent publishes its OWN definition (systemPrompt / memoryItems /
+    // agent publishes its OWN definition (systemMemoryId / memoryItems /
     // imports); the fields that surface OTHER tenants (apps / appAgents /
     // appCount / orgGrants / importedBy) are scoped to the caller's own access
     // and come back empty for an outsider (#552, #757).
@@ -120,7 +157,7 @@ export const agentQueries = {
     // member-scoped agents() list so the cross-org widening is an explicit,
     // bounded surface — never a side effect of a filter value on the default
     // list (contrast memories(filter: { visibility: PUBLIC })). Field-level
-    // exposure is slim for non-members (Agent.systemPrompt / systemMemoryId /
+    // exposure is slim for non-members (Agent.systemMemoryId /
     // memoryItems / imports gates). filter.type narrows; filter.visibility is
     // ignored (the slice is PUBLIC by definition).
     publicAgents: async (
@@ -200,7 +237,7 @@ export const agentQueries = {
         // #876: user-owned agents are identity-scoped, so an impersonated
         // session sees none — matching callerReadableAgentFilter, which drops
         // its ownerUserId clause the same way. Without this the list returned
-        // the target's private agents (definitions AND systemPrompt) while
+        // the target's private agents (their definitions) while
         // Query.agent(ref:) correctly refused them via requireOwnerOrOrgRole.
         if (!ctx.userId || ctx.impersonation) return { items: [], total: 0 };
         where = { ...filters, organizationId: null, ownerUserId: ctx.userId };
@@ -255,7 +292,7 @@ export const agentQueries = {
     },
 
     agentAIConfig: async (_: unknown, { agentRef }: { agentRef: string }, ctx: Context) => {
-      if (!ctx.userId) throw new Error('Unauthenticated');
+      if (!ctx.userId) throw unauthenticatedError();
       // 007-entity-id-or-urn: agentRef may be ID, bare URN, or prefixed URN.
       // #1944: through the read gate first, so an unreadable Agent answers as
       // absent; the key read itself stays owner/org-ADMIN only, below.
@@ -284,7 +321,7 @@ export const agentQueries = {
     // platform ADMIN/OWNER for HADRON_SERVER-owned rows, org ADMIN of the
     // owning org otherwise.
     aiServiceConfig: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
-      if (!ctx.userId && !isPlatformAdmin(ctx)) throw new Error('Unauthenticated');
+      if (!ctx.userId && !isPlatformAdmin(ctx)) throw unauthenticatedError();
       const config = await ctx.db.aiServiceConfig.findUnique({ where: { id: ref } });
       if (!config) return null;
       try {
@@ -311,14 +348,14 @@ export const agentQueries = {
       },
       ctx: Context,
     ) => {
-      if (!ctx.userId && !isPlatformAdmin(ctx)) throw new Error('Unauthenticated');
+      if (!ctx.userId && !isPlatformAdmin(ctx)) throw unauthenticatedError();
       try {
         let ownerWhere: Record<string, string> = {};
         if (filter) {
           ({ ownerWhere } = await requireAiConfigOwnerAdmin(ctx, filter.ownerType, filter.ownerId));
         } else if (!isPlatformAdmin(ctx)) {
           // No owner filter = the cross-owner ops view — platform staff only.
-          throw new Error('Forbidden');
+          throw forbiddenError();
         }
         const take = clampListTake(limit);
         const skip = Math.max(0, offset ?? 0);
@@ -405,7 +442,7 @@ export const agentQueries = {
         // same owner as the named personal Agent. Otherwise naming another
         // user's App would turn the Agent-owner gate into a cross-user decrypt.
         if (userOwnedAgent && resolvedAppId && !effectiveOrgId && appOwnerUserId !== personalAgentOwnerId) {
-          throw new Error('Forbidden');
+          throw forbiddenError();
         }
         // Privileged surface (decrypted key): org ADMIN of the effective
         // org — same gate as the legacy agentAIConfig/appAIConfig queries
@@ -414,7 +451,7 @@ export const agentQueries = {
           if (effectiveOrgId) {
             await requireOrgRole(ctx, effectiveOrgId, 'ADMIN');
           } else if (!userOwnedAgent && !isPlatformAdmin(ctx)) {
-            throw new Error('Forbidden');
+            throw forbiddenError();
           }
         }
         const resolved = await resolveAiConfigWithFallback(ctx.db, name ?? null, {
@@ -512,13 +549,26 @@ export const agentQueries = {
     },
 
     myAgentSubscriptions: async (_: unknown, __: unknown, ctx: Context) => {
-      // #876 class sweep: identity-scoped and org-unconstrained — this listed
-      // the target's subscriptions across every org.
-      if (!ctx.userId || ctx.impersonation) return [];
-      return ctx.db.agentSubscription.findMany({
-        where: { userId: ctx.userId },
-        orderBy: { createdAt: 'desc' },
-      });
+      const scope = myAgentSubscriptionScope(ctx);
+      if (!scope) return [];
+      return ctx.db.agentSubscription.findMany(scope);
+    },
+
+    // #2213 S2: `myAgentSubscriptions` as a page — the same rows and order, with the real total.
+    myAgentSubscriptionsPage: async (
+      _: unknown,
+      args: { limit?: number | null; offset?: number | null },
+      ctx: Context,
+    ) => {
+      const scope = myAgentSubscriptionScope(ctx);
+      if (!scope) return { items: [], total: 0, hasMore: false };
+      const { where, orderBy } = scope;
+      const { take, skip } = pageArgs(args);
+      const [total, items] = await ctx.db.$transaction([
+        ctx.db.agentSubscription.count({ where }),
+        ctx.db.agentSubscription.findMany({ where, orderBy, take, skip }),
+      ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+      return pageEnvelope(items, total, skip);
     },
 
     // 005-agent-subscription FR-022: list all AgentSubscriptions to an Agent.
@@ -528,15 +578,22 @@ export const agentQueries = {
       { agentRef }: { agentRef: string },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: agentRef may be ID, bare URN, or prefixed URN.
-      // #1944: an Agent the caller can't read answers as absent.
-      const agent = await resolveReadableAgentRef(ctx, agentRef);
-      const resolvedAgentId = agent.id;
-      await requireAgentAccess(ctx, agent, 'ADMIN');
-      return ctx.db.agentSubscription.findMany({
-        where: { agentId: resolvedAgentId },
-        orderBy: { createdAt: 'desc' },
-      });
+      return ctx.db.agentSubscription.findMany(await agentSubscriptionScope(ctx, agentRef));
+    },
+
+    // #2213 S2: `agentSubscriptions` as a page — the same gate, rows and order, with the real total.
+    agentSubscriptionsPage: async (
+      _: unknown,
+      args: { agentRef: string; limit?: number | null; offset?: number | null },
+      ctx: Context,
+    ) => {
+      const { where, orderBy } = await agentSubscriptionScope(ctx, args.agentRef);
+      const { take, skip } = pageArgs(args);
+      const [total, items] = await ctx.db.$transaction([
+        ctx.db.agentSubscription.count({ where }),
+        ctx.db.agentSubscription.findMany({ where, orderBy, take, skip }),
+      ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+      return pageEnvelope(items, total, skip);
     },
 
 };

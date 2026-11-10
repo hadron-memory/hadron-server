@@ -48,8 +48,12 @@ beforeEach(async () => {
 describe('the invariants file', () => {
   it('the migration carries a byte-identical copy, and post-push includes it after the file whose token function it uses', () => {
     const source = readFileSync(new URL('../../../prisma/host-operation-invariants.sql', import.meta.url), 'utf8');
-    const migration = readFileSync(new URL('../../../prisma/migrations/20261020030100_host_key_use_stop_action/migration.sql', import.meta.url), 'utf8');
-    expect(migration.endsWith(`\n${source}`)).toBe(true);
+    const migration = readFileSync(new URL('../../../prisma/migrations/20261029200000_worker_terminal/migration.sql', import.meta.url), 'utf8');
+    // The new migration widens only the CHECK; all other canonical DDL still matches the old migration.
+    expect(migration.endsWith(`\n${source.replaceAll(", 'checkpoint'", '')}`)).toBe(true);
+    const checkpoint = readFileSync(new URL('../../../prisma/migrations/20261103014500_host_checkpoint_use_action/migration.sql', import.meta.url),'utf8');
+    const check = source.slice(source.indexOf('ALTER TABLE host_key_uses DROP CONSTRAINT'),source.indexOf('CREATE OR REPLACE FUNCTION host_key_use_append_only')).trim();
+    expect(checkpoint.trim().endsWith(check)).toBe(true);
     const post = readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8');
     const at = post.indexOf('\\ir host-operation-invariants.sql');
     expect(at).toBeGreaterThan(post.indexOf('\\ir agent-task-matching-invariants.sql'));
@@ -58,7 +62,7 @@ describe('the invariants file', () => {
 });
 
 describe('cor:agt:070:03 — the closed set, with exactly its typed arguments', () => {
-  it('each of the five types with its own arguments is accepted', async () => {
+  it('each of the six types with its own arguments is accepted', async () => {
     await expect(op()).resolves.toBeTruthy();
     // #1883: a start records the hold that authorized it (prisma/host-launch-invariants.sql).
     await expect(op({ type: 'worker.start', args: { workerId: kit.id, worktree: 'hadron-server/kit', family: 'claude', taskId: 't1' }, holdUserId: user.id })).resolves.toBeTruthy();
@@ -66,7 +70,11 @@ describe('cor:agt:070:03 — the closed set, with exactly its typed arguments', 
     await expect(op({ type: 'worker.deliver', args: { workerId: kit.id, sessionId: 's1', eventId: 'e1' } })).resolves.toBeTruthy();
     await expect(op({ type: 'worker.end', args: { workerId: kit.id, sessionId: 's1' } })).resolves.toBeTruthy();
     await expect(op({ type: 'worktree.remove', args: { workerId: kit.id, worktree: 'hadron-server/kit' } })).resolves.toBeTruthy();
-    expect(HOST_OPERATION_TYPES).toHaveLength(5);
+    // #2162 (cor:agt:050:27): the reset, with exactly its ids.
+    await expect(op({ type: 'worker.reset-context', args: { workerId: kit.id, sessionId: 's1', taskId: 't1', resetId: 'r1' } })).resolves.toBeTruthy();
+    await expectCheck(op({ type: 'worker.reset-context', args: { workerId: kit.id, sessionId: 's1', taskId: 't1' } }));
+    await expectCheck(op({ type: 'worker.reset-context', args: { workerId: kit.id, sessionId: 's1', taskId: 't1', resetId: 'r1', command: 'kill' } }));
+    expect(HOST_OPERATION_TYPES).toHaveLength(6);
   });
 
   it('a shell type, an extra or missing argument, a non-string, a bad token or another worker\'s id is refused', async () => {

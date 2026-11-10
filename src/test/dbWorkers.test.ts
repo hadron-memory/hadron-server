@@ -402,7 +402,7 @@ describe.skipIf(!PARALLEL_DBS)('createDatabaseFromTemplate (live pg)', () => {
     for (const d of made)
       await admin.query(`DROP DATABASE IF EXISTS ${quoteDbIdent(d)} WITH (FORCE)`).catch(() => {});
     await admin.end();
-  });
+  }, 60_000);
 
   it('clones a free template, and reports a second call as EXISTS rather than created', async () => {
     const name = `hadron_test_probe_${process.pid}`;

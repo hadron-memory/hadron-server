@@ -81,7 +81,7 @@ export type ReportsToChange = { workerId: string; appId: string; from: string | 
 
 /**
  * Set, hand over or clear `workerId`'s reportsTo inside the caller's
- * transaction, and record it. A no-op (the value already) writes nothing and
+ * transaction, and record it. A no-op (the pointer AND recorded choice already match) writes nothing and
  * returns `changed: false`. Refusals:
  *
  * - `WORKER_NOT_FOUND`: the worker, or the target, does not exist;
@@ -118,8 +118,8 @@ export async function writeReportsTo(
   await lockAppReportsTo(tx, appId);
 
   const ids = [...new Set([args.workerId, ...(args.to ? [args.to] : [])])].sort();
-  const rows = await tx.$queryRaw<Array<{ id: string; app_id: string; retired_at: Date | null; reports_to_worker_id: string | null }>>`
-    SELECT id, app_id, retired_at, reports_to_worker_id FROM workers WHERE id = ANY(${ids}::text[]) ORDER BY id FOR UPDATE`;
+  const rows = await tx.$queryRaw<Array<{ id: string; app_id: string; retired_at: Date | null; reports_to_worker_id: string | null; explicit_no_team: boolean }>>`
+    SELECT id, app_id, retired_at, explicit_no_team, reports_to_worker_id FROM workers WHERE id = ANY(${ids}::text[]) ORDER BY id FOR UPDATE`;
   const worker = rows.find((r) => r.id === args.workerId);
   if (!worker || worker.app_id !== appId) throw refusal('WORKER_NOT_FOUND', `Worker not found: "${args.workerId}"`);
   const from = worker.reports_to_worker_id;
@@ -134,9 +134,11 @@ export async function writeReportsTo(
   // Authority BEFORE the target's checks, so a target refusal (another App,
   // retired, a cycle) only ever answers a caller allowed to make the change
   // (#1737 QA, Chip's P2). A no-op still returns first: the current value is
-  // readable by everyone who can reach this.
+  // readable by everyone who can reach this. Marker-only changes still need authority.
+  const explicitNoTeam = args.to === null && args.setBy !== 'retirement';
+  const markerChanged = worker.explicit_no_team !== explicitNoTeam;
   let setBy = args.setBy;
-  if (from !== args.to && args.authorize) setBy = await args.authorize(from);
+  if ((from !== args.to || markerChanged) && args.authorize) setBy = await args.authorize(from);
 
   if (args.to !== null) {
     if (args.to === args.workerId) throw refusal('WORKER_REPORTS_TO_SELF', 'A worker cannot report to itself.');
@@ -154,8 +156,8 @@ export async function writeReportsTo(
     }
   }
 
-  if (from === args.to) return { workerId: args.workerId, appId, from, to: args.to, changed: false };
-  await tx.worker.update({ where: { id: args.workerId }, data: { reportsToWorkerId: args.to } });
-  await appendReportsToEvent(tx, { appId, actor: args.actor, workerId: args.workerId, from, to: args.to, setBy });
+  if (from === args.to && !markerChanged) return { workerId: args.workerId, appId, from, to: args.to, changed: false };
+  await tx.worker.update({ where: { id: args.workerId }, data: { reportsToWorkerId: args.to, explicitNoTeam } });
+  await appendReportsToEvent(tx, { appId, actor: args.actor, workerId: args.workerId, from, to: args.to, setBy, ...(markerChanged ? { oldExplicitNoTeam: worker.explicit_no_team, newExplicitNoTeam: explicitNoTeam } : {}) });
   return { workerId: args.workerId, appId, from, to: args.to, changed: true };
 }

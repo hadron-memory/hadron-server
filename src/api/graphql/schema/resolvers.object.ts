@@ -166,6 +166,7 @@ export const objectQueries = {
       _,
       {
         filter: { memoryIds: [memoryRef], objectType: t, ...(combinedWhere ? { where: combinedWhere } : {}) },
+        includeTotal: true,
         ...(sortProperty ? { sortProperty } : {}),
         limit: limit ?? undefined,
         offset: offset ?? undefined,

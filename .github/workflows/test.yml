@@ -28,13 +28,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # These regressions use node:test and are deliberately excluded from Vitest.
+  # Their fixtures stub stack commands; no Docker, database or install is needed.
+  node-regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run disposable-stack Node regressions
+        run: node --test scripts/e2e/*.test.mjs
+
   test-shard:
     runs-on: ubuntu-latest
     # GH default job timeout is 6 hours — a hung vitest worker or
     # deadlocked postgres connection would consume it before failing.
-    # A shard runs a quarter of the suite; 20 minutes is generous cover
-    # for CI cold starts (install + prisma generate + db setup).
-    timeout-minutes: 20
+    # A shard runs a quarter of the suite. #2776: 20 minutes cancelled slow
+    # but healthy runs (15-23 min per shard on the private mirror's hosted
+    # runners), so the cap was 40; hadron-internal#40's suite ran past it
+    # on the hosted runners, so it is 60: room for a slow run, still a
+    # hard stop for a real hang long before the 6-hour default.
+    timeout-minutes: 60
     strategy:
       # Don't cancel the other shards when one fails — surface every shard's
       # results so a failure isn't masked by a sibling shard's early exit.
@@ -92,14 +108,16 @@ jobs:
         run: pnpm test --shard=${{ matrix.shard }}/${{ strategy.job-total }}
 
   # Aggregation gate: a single stable check named `test` that passes iff every
-  # shard passed. Keep THIS as the required status check on `main` (matrix jobs
-  # report as `test-shard (1..4)` and don't need to be individually required).
+  # shard and the Node regressions passed. Keep THIS as the required status check
+  # on `main` (individual jobs don't need to be separately required).
   test:
-    needs: [test-shard]
+    needs: [test-shard, node-regressions]
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Require all shards to pass
+      - name: Require all test jobs to pass
         run: |
           echo "test-shard aggregate result: ${{ needs.test-shard.result }}"
           test "${{ needs.test-shard.result }}" = "success"
+          echo "node-regressions result: ${{ needs.node-regressions.result }}"
+          test "${{ needs.node-regressions.result }}" = "success"

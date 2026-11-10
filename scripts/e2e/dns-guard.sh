@@ -26,7 +26,11 @@ e2e_dns_guard() {
     dns_ok && return 0
     if ((seeded == 0 && i >= seed_after)); then
       echo "$project: resolver not answering after $i probes; seeding 1.1.1.1 (dnsmasq race, #12129)" >&2
-      incus exec "$project" -- sh -c 'grep -q "^nameserver 1.1.1.1$" /etc/resolv.conf 2>/dev/null || echo "nameserver 1.1.1.1" >> /etc/resolv.conf' || true
+      # REPLACE the file rather than append (#1963): through a still-dangling
+      # symlink an append cannot create its target. Only the instance's own
+      # resolv.conf is touched, and a nameserver already seeded is left alone.
+      incus exec "$project" -- sh -c 'grep -q "^nameserver 1.1.1.1$" /etc/resolv.conf 2>/dev/null || { rm -f /etc/resolv.conf && echo "nameserver 1.1.1.1" > /etc/resolv.conf; }' ||
+        echo "$project: could not write the fallback resolver (/etc/resolv.conf); the final probe decides" >&2
       seeded=1
     fi
     sleep "$poll"

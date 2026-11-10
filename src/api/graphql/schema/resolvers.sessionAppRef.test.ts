@@ -27,6 +27,7 @@ import type { Request } from 'express';
 import { db } from '../../../integrations/db/client.js';
 import { hashAppKey, resolveAuthContext } from '../../../middleware/auth.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
@@ -102,7 +103,7 @@ beforeEach(async () => {
 
   // The Team Agent — through the real mutation, with the roles: branch marker
   // the worker bootstraps locate it by (mirrors resolvers.teamChat.test.ts).
-  const created = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id));
+  const created = await M.createAgent({}, { orgId: org.id, name: 'Team Agent', personaRole: 'test-worker' }, ctx(admin.id));
   teamAgent = { id: created.id, urn: created.urn, systemMemoryId: created.systemMemoryId };
   await db.node.create({
     data: {
@@ -110,7 +111,7 @@ beforeEach(async () => {
       memoryId: teamAgent.systemMemoryId,
       loc: 'roles:backend-engineer',
       name: 'backend-engineer',
-      content: 'You are {{name}}, a {{role}}.',
+      content: 'You are {{worker.name}}, a {{worker.role}}.',
       data: { names: ['Ada', 'Henry'] },
     },
   });
@@ -135,6 +136,7 @@ beforeEach(async () => {
       urn: `${outsider.handle}:solo`,
     },
   });
+  await serveEveryAgent(db); // #2712: binds are served the Agent's boot prompt
 });
 
 describe('#943 acceptance — a user-started session can author in the team chat', () => {
@@ -530,14 +532,12 @@ describe('SessionInput.workerRef (#974) — binding the named identity', () => {
     );
   });
 
-  it('a NAME-shaped ref with no App context → SESSION_WORKER_NAME_NEEDS_APP (#990)', async () => {
-    // Changed deliberately by #990: a bare string is now a worker NAME, and a
-    // name is only unique within an App. Answering WORKER_NOT_FOUND here would
-    // claim a lookup that never happened — this says which input is missing.
-    // The id and URN shapes above keep the original refusal.
+  it('an absent NAME-shaped ref without App context → WORKER_NOT_FOUND (#1597)', async () => {
+    // Unscoped names now search the caller’s bindable Apps. This name has no
+    // candidate; ID and URN shapes retain their existing refusal above.
     await expectCode(
       startSession(ctx(contrib.id), { workerRef: 'no-such-worker' }),
-      'SESSION_WORKER_NAME_NEEDS_APP',
+      'WORKER_NOT_FOUND',
     );
   });
 

@@ -76,7 +76,7 @@ async function seed(n: number) {
 describe('findNodes content scope (cor:dmo:110:08)', () => {
   it('keyword, regex and filter-only: content by default; COMMENTS finds every comment beyond the first 500 general hits', async () => {
     const { comments } = await seed(520);
-    const byDefault = await findNodes({ query: 'retention', filter: { memoryIds: [memory.id] }, limit: 600 });
+    const byDefault = await findNodes({ query: 'retention', filter: { memoryIds: [memory.id] }, limit: 200 });
     expect(types(byDefault)).not.toContain('comment');
 
     for (const args of [
@@ -92,14 +92,22 @@ describe('findNodes content scope (cor:dmo:110:08)', () => {
     const byType = await findNodes({ query: 'retention', filter: { memoryIds: [memory.id], nodeType: 'comment' }, limit: 10 });
     expect(byType.hits).toHaveLength(3);
     // Paging happens AFTER the scope: two pages of the three comments.
-    const page1 = await findNodes({ query: 'retention', filter: { memoryIds: [memory.id], contentScope: 'COMMENTS' }, limit: 2 });
-    const page2 = await findNodes({ query: 'retention', filter: { memoryIds: [memory.id], contentScope: 'COMMENTS' }, limit: 2, offset: 2 });
+    // #2986: keyword, not the hybrid default. createMemory turns the vector
+    // index on and each comment's embedding lands after its write returns, so
+    // a hybrid page 2 can rank against vectors page 1 did not see.
+    const page1 = await findNodes({ query: 'retention', mode: 'keyword', filter: { memoryIds: [memory.id], contentScope: 'COMMENTS' }, limit: 2 });
+    const page2 = await findNodes({ query: 'retention', mode: 'keyword', filter: { memoryIds: [memory.id], contentScope: 'COMMENTS' }, limit: 2, offset: 2 });
     expect([...page1.hits, ...page2.hits].map((h: any) => h.node.id).sort()).toEqual([...comments].sort());
     // ALL returns both kinds.
     const all = await findNodes({ query: 'feedback', filter: { memoryIds: [memory.id], contentScope: 'ALL' }, limit: 10 });
     expect(types(all)).toEqual(['comment']);
-    const allBoth = await findNodes({ filter: { memoryIds: [memory.id], contentScope: 'ALL' }, limit: 1000 });
-    expect(types(allBoth).sort()).toContain('comment');
+    // The 200-row cap requires paging through the 520 content rows as well.
+    const allTypes: string[] = [];
+    for (let offset = 0; offset < 600; offset += 200) {
+      const page = await findNodes({ filter: { memoryIds: [memory.id], contentScope: 'ALL' }, sort: 'loc', limit: 200, offset });
+      allTypes.push(...types(page));
+    }
+    expect(allTypes).toContain('comment');
   });
 
   it('vector and hybrid: COMMENTS ranks comment vectors exactly, past an ANN window full of content', async () => {

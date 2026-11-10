@@ -215,11 +215,8 @@ const MEMORY_REF: Probe[] = [
   { name: 'hadron_set_active_memory', tool: 'hadron_set_active_memory', args: (m) => ({ memoryUrn: memUrn(m) }) },
   { name: 'hadron_validate', tool: 'hadron_validate', args: (m) => ({ memoryUrn: memUrn(m) }) },
   { name: 'hadron_sync_graph', tool: 'hadron_sync_graph', args: (m) => ({ memoryUrn: memUrn(m) }) },
-  {
-    name: 'hadron_create_channel',
-    tool: 'hadron_create_channel',
-    args: (m) => ({ memory: memUrn(m), loc: 'chats:oracle', name: 'oracle' }),
-  },
+  // #3082: hadron_create_channel is off over MCP; its probe (unreadable ≡ missing, reader keeps the denial, no side
+  // effect) runs on the GraphQL createChannel entry of GQL_PROBES below, unchanged.
   {
     name: 'hadron_replace_text(memoryUrns)',
     tool: 'hadron_replace_text',
@@ -415,7 +412,9 @@ describe('#1316 GraphQL: the delegated resolvers conceal too', () => {
       const result = await gql('outsider', UPDATE_DATA.query, UPDATE_DATA.vars(victimSlug, PROBE));
       expect(fault).toHaveBeenCalled();
       expect(gqlCode(result)).toBe('INTERNAL_SERVER_ERROR');
-      expect(result.errors![0]!.message).toContain('injected classification db failure');
+      // #1789: a fault is the generic envelope (detail goes to the log), and never NOT_FOUND/FORBIDDEN (Pin 1).
+      expect(result.errors![0]!.message).toBe('Internal server error.');
+      expect(result.errors![0]!.extensions).toMatchObject({ code: 'INTERNAL_SERVER_ERROR', requestId: expect.any(String) });
       expect(await sideEffects()).toEqual(before);
     } finally {
       fault.mockRestore();
@@ -430,7 +429,9 @@ describe('#1316 GraphQL: the delegated resolvers conceal too', () => {
       const result = await gql('outsider', UPDATE_DATA.query, UPDATE_DATA.vars(victimSlug, PROBE));
       expect(fault).toHaveBeenCalled();
       expect(gqlCode(result)).toBe('INTERNAL_SERVER_ERROR');
-      expect(result.errors![0]!.message).toContain('injected authorization db failure');
+      // #1789: a fault is the generic envelope (detail goes to the log), and never NOT_FOUND/FORBIDDEN (Pin 1).
+      expect(result.errors![0]!.message).toBe('Internal server error.');
+      expect(result.errors![0]!.extensions).toMatchObject({ code: 'INTERNAL_SERVER_ERROR', requestId: expect.any(String) });
     } finally {
       fault.mockRestore();
     }

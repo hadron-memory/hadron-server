@@ -65,7 +65,7 @@ async function importOf(parentId: string, importedId: string, position: number) 
 async function source(orgId: string, visibility: 'PUBLIC' | 'ORGANIZATION', extra: Record<string, unknown> = {}) {
   const memId = generateId();
   await db.memory.create({ data: { id: memId, organizationId: orgId, urn: `of-sys-${memId}`, name: 'sys', class: 'system', acceptsUploads: false } as never });
-  return agent(orgId, visibility, { systemMemoryId: memId, description: 'd', systemPrompt: 'hi', surfaces: ['mcp'], personaRole: 't', ...extra });
+  return agent(orgId, visibility, { systemMemoryId: memId, description: 'd', surfaces: ['mcp'], personaRole: 't', ...extra });
 }
 
 beforeEach(async () => {

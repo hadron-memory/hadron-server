@@ -64,3 +64,23 @@ export function reportAssetBytesMissing(found: AssetBytesMissing, now: Date = ne
   }
   return true;
 }
+
+/**
+ * One summary event for a sweep run that found more missing rows than it may
+ * report individually (#1140). A bucket loss would otherwise make a single run
+ * emit one event per row; past the per-run cap the remainder is counted here.
+ * Counts only, no ids. Never throws.
+ */
+export function reportAssetBytesMissingSummary(found: { total: number; unreported: number }): boolean {
+  try {
+    Sentry.captureMessage('Asset rows have no object in storage (sweep summary)', {
+      level: 'error',
+      tags: { [ASSET_BYTES_MISSING_TAG]: 'true', source: 'sweep' },
+      fingerprint: [ASSET_BYTES_MISSING_TAG, 'sweep-summary'],
+      extra: { total: found.total, unreported: found.unreported },
+    });
+  } catch {
+    return false;
+  }
+  return true;
+}

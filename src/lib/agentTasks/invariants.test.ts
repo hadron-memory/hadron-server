@@ -36,14 +36,20 @@ const event = (data: Record<string, unknown> = {}) =>
 
 describe('agent-task-invariants.sql', () => {
   // #1754 moved the pin to the latest agent-tasks migration: the file is the
-  // source of truth, and the newest migration carries its current copy.
-  it('the latest agent-tasks migration carries a byte-identical copy of the invariants file', () => {
+  // source of truth. #3449 splits the event CHECK into its own migration.
+  // A future task/append-only change must retarget its block below to the migration
+  // carrying that change; this pin does not discover the latest migration automatically.
+  it('migrations retain task/append-only invariants and the latest event CHECK matches bootstrap', () => {
     const source = readFileSync(new URL('../../../prisma/agent-task-invariants.sql', import.meta.url), 'utf8');
-    const migration = readFileSync(
-      new URL('../../../prisma/migrations/20261012020000_agent_task_backlog_status/migration.sql', import.meta.url),
-      'utf8',
-    );
-    expect(migration.endsWith(source)).toBe(true);
+    const original = readFileSync(new URL('../../../prisma/migrations/20261012020000_agent_task_backlog_status/migration.sql', import.meta.url), 'utf8');
+    const latest = readFileSync(new URL('../../../prisma/migrations/20261104180000_app_action_event_codes/migration.sql', import.meta.url), 'utf8');
+    const start = source.indexOf('ALTER TABLE agent_team_events DROP CONSTRAINT');
+    const end = source.indexOf('-- Append-only');
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    expect(original).toContain(source.slice(source.indexOf('ALTER TABLE agent_tasks'), start).trim());
+    expect(original.endsWith(source.slice(end))).toBe(true);
+    expect(latest.trimEnd().endsWith(source.slice(start, end).trim())).toBe(true);
   });
 });
 
@@ -187,7 +193,7 @@ describe('agent-task-stall-invariants.sql (#1706)', () => {
   it('the latest stall-invariants migration carries a byte-identical copy of the invariants file', () => {
     const source = readFileSync(new URL('../../../prisma/agent-task-stall-invariants.sql', import.meta.url), 'utf8');
     const migration = readFileSync(
-      new URL('../../../prisma/migrations/20261023130000_alarm_schedule_ended_at/migration.sql', import.meta.url),
+      new URL('../../../prisma/migrations/20261024100200_context_reset_availability/migration.sql', import.meta.url),
       'utf8',
     );
     // #2200: the constraints are the migration's copy; the partial index below the marker is built by its own
@@ -359,5 +365,71 @@ describe('agent-task-matching-invariants.sql (#1707)', () => {
       db.hostRegistrationWorker.update({ where: { registrationId_workerId: { registrationId: r.id, workerId: mine.id } }, data: { workerId: theirs.id } }),
       /chk_host_registration_workers_same_app|not in the registration's App/,
     );
+  });
+});
+
+// #2666: the forward-only migration and push path enforce the same AT0 rule.
+describe('task-number SQL parity (#2666)', () => {
+  it('the new migration carries the exact AT0 preflight and CHECK from current invariants', () => {
+    const source = readFileSync(new URL('../../../prisma/agent-task-number-invariants.sql', import.meta.url), 'utf8');
+    const zero = '-- #2666:' + source.split('-- #2666:')[1];
+    const migration = readFileSync(new URL('../../../prisma/migrations/20261029010000_agent_task_zero_backlog/migration.sql', import.meta.url), 'utf8');
+    expect(migration).toBe(zero);
+  });
+  it('post-push reuses the original numbering backfill before applying NOT NULL', () => {
+    const original = readFileSync(new URL('../../../prisma/migrations/20261027100000_agent_task_number/migration.sql', import.meta.url), 'utf8');
+    const start = original.indexOf('-- AT0,');
+    const end = original.indexOf('-- #2553 (Task Management T12): the hierarchical task handle AT<n>(.<n>)* —');
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const backfill = original.slice(start, end);
+    expect(backfill).toContain('CREATE TEMP TABLE _agent_task_walk');
+    expect(backfill).toContain('RAISE EXCEPTION');
+    const pushBackfill = readFileSync(new URL('../../../prisma/agent-task-number-backfill.sql', import.meta.url), 'utf8');
+    expect(pushBackfill).toContain(backfill);
+    const push = readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8');
+    expect(push.indexOf('\\ir agent-task-number-backfill.sql')).toBeLessThan(push.indexOf('\\ir agent-task-number-invariants.sql'));
+  });
+});
+
+// #2651: the hand-back columns' CHECK, one source shared with its migration.
+describe('task hand-back SQL parity (#2651)', () => {
+  it('the hand-back migration carries a byte-identical copy of the invariants file', () => {
+    const source = readFileSync(new URL('../../../prisma/agent-task-hand-back-invariants.sql', import.meta.url), 'utf8');
+    const migration = readFileSync(new URL('../../../prisma/migrations/20261101090000_agent_task_hand_back/migration.sql', import.meta.url), 'utf8');
+    expect(migration.endsWith(source)).toBe(true);
+  });
+
+  it('the CHECK refuses a code outside the set, text over 2,000 characters, empty text, and a partial row', async () => {
+    const org = await db.organization.create({ data: { name: 'hb-sql', urn: `hb-sql-${Date.now()}.example` } });
+    const app = await db.app.create({ data: { organizationId: org.id, name: 'A', urn: `${org.urn}:a` } });
+    const u = await db.user.create({ data: { githubId: 2_651_900 + Math.floor(Math.random() * 1000), githubUsername: `hb-sql-${Date.now()}`, roles: ['READER'] } });
+    const t = await db.agentTask.create({ data: { appId: app.id, title: 'T', ownerUserId: u.id } });
+    const set = (data: Record<string, unknown>) => db.agentTask.update({ where: { id: t.id }, data });
+    const now = new Date();
+    await expect(set({ handBackReasonCode: 'bored', handedBackAt: now })).rejects.toThrow(/chk_agent_tasks_hand_back/);
+    await expect(set({ handBackReasonCode: 'refused', handBackReasonText: 'x'.repeat(2001), handedBackAt: now })).rejects.toThrow(/chk_agent_tasks_hand_back/);
+    await expect(set({ handBackReasonCode: 'refused', handBackReasonText: '', handedBackAt: now })).rejects.toThrow(/chk_agent_tasks_hand_back/);
+    await expect(set({ handBackReasonCode: 'refused' })).rejects.toThrow(/chk_agent_tasks_hand_back/);
+    await expect(set({ handBackReasonText: 'why', handedBackAt: now })).rejects.toThrow(/chk_agent_tasks_hand_back/);
+    await set({ handBackReasonCode: 'refused', handBackReasonText: 'y'.repeat(2000), handedBackAt: now });
+  });
+});
+
+// #2649: the references column's CHECK, one source shared with its migration.
+describe('task references SQL parity (#2649)', () => {
+  it('the references migration carries a byte-identical copy of the invariants file', () => {
+    const source = readFileSync(new URL('../../../prisma/agent-task-references-invariants.sql', import.meta.url), 'utf8');
+    const migration = readFileSync(new URL('../../../prisma/migrations/20261101120000_agent_task_references/migration.sql', import.meta.url), 'utf8');
+    expect(migration.endsWith(source)).toBe(true);
+  });
+});
+
+// #3125 S2: the external id's CHECK and partial unique index, one source shared with its migration.
+describe('task external id SQL parity (#3125 S2)', () => {
+  it('the external id migration carries a byte-identical copy of the invariants file', () => {
+    const source = readFileSync(new URL('../../../prisma/agent-task-external-id-invariants.sql', import.meta.url), 'utf8');
+    const migration = readFileSync(new URL('../../../prisma/migrations/20261101160000_agent_task_external_id/migration.sql', import.meta.url), 'utf8');
+    expect(migration.endsWith(source)).toBe(true);
   });
 });

@@ -24,7 +24,7 @@ async function refExists(cwd: string, ref: string): Promise<boolean> {
  * Avoids the old hardcoded `origin/main`, which failed on repos whose default
  * branch is `master` / a custom name, or whose read branch isn't `main`.
  */
-async function resolveBaseRef(localPath: string, baseBranch?: string): Promise<string | null> {
+export async function resolveBaseRef(localPath: string, baseBranch?: string): Promise<string | null> {
   const candidates = [
     baseBranch ? `origin/${baseBranch}` : undefined,
     'origin/HEAD',
@@ -97,4 +97,39 @@ export async function prepareWriteBranch(
     const base = await resolveBaseRef(localPath, baseBranch);
     await execGit(['checkout', '-b', branch, ...(base ? [base] : [])], { cwd: localPath });
   }
+}
+
+/**
+ * #2308 — how many commits on the write branch `branch` are not yet published,
+ * so a retry after a failed push can tell "clean and synced" from "clean but
+ * the last commit never left". Counted against the SELECTED branch only:
+ *
+ *   - `origin/<branch>` exists: `origin/<branch>..<branch>`;
+ *   - it does not: against the base a brand-new write branch forks from, the
+ *     SAME {@link resolveBaseRef} chain `prepareWriteBranch` uses (one rule, not
+ *     a second one), so 0 means the branch carries nothing beyond its base.
+ *
+ * Throws when the answer is unknown (no origin twin and no resolvable base, a
+ * failed `rev-list`, unparsable output). Callers treat a throw as a failed
+ * mirror: an unknown ahead state must never read as "nothing to publish".
+ * Read-only; never resets, rebases or discards a local commit.
+ */
+export async function unpublishedCommitCount(
+  localPath: string,
+  branch: string,
+  baseBranch?: string,
+): Promise<number> {
+  validateGitBranch(branch, 'writeBranch');
+  if (baseBranch !== undefined) validateGitBranch(baseBranch, 'baseBranch');
+  const twin = `refs/remotes/origin/${branch}`;
+  const base = (await refExists(localPath, twin)) ? twin : await resolveBaseRef(localPath, baseBranch);
+  if (!base) throw new Error(`No fork point to compare ${branch} against`);
+  const { stdout } = await execGit(['rev-list', '--count', `${base}..refs/heads/${branch}`], { cwd: localPath });
+  // Strict: `parseInt` reads a numeric PREFIX, so '0 invalid' (or '1.5', '0x1')
+  // would parse as 0 and read as "nothing to publish". Only a bare run of
+  // digits is a count; anything else is an unknown state and fails closed.
+  const text = stdout.trim();
+  const count = /^\d+$/.test(text) ? Number(text) : NaN;
+  if (!Number.isSafeInteger(count)) throw new Error('Unparsable unpublished commit count');
+  return count;
 }

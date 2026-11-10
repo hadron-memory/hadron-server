@@ -25,6 +25,7 @@ COPY prisma.config.ts ./
 # Copy source
 COPY tsconfig.json ./
 COPY src ./src/
+COPY scripts ./scripts/
 
 ENV NODE_ENV=production
 EXPOSE 10300
@@ -35,4 +36,4 @@ EXPOSE 10300
 # haven't been recorded yet, is deterministic, and never prompts. Do NOT
 # replace this with `db push` — that's a dev-mode tool that compares the
 # live schema to schema.prisma and will block on any drift.
-CMD ["doppler", "run", "--", "sh", "-c", "pnpm prisma generate && pnpm prisma migrate deploy && pnpm tsx src/index.ts"]
+CMD ["doppler", "run", "--", "sh", "scripts/docker-start.sh"]

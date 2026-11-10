@@ -19,8 +19,17 @@ type Membership = { userId: string; organizationId: string; role: string };
 
 /** A fake PrismaClient honoring just the two orgMember queries the helper runs. */
 function fakeDb(memberships: Membership[]) {
-  const findMany = vi.fn(async ({ where }: { where: { userId: string } }) =>
-    memberships.filter((m) => m.userId === where.userId).map((m) => ({ organizationId: m.organizationId })),
+  // Two shapes: the viewer's own orgs (userId = id), and (#2223) the bulk co-membership read
+  // (userId IN targets, organizationId IN viewer orgs).
+  const findMany = vi.fn(
+    async ({ where }: { where: { userId: string | { in: string[] }; organizationId?: { in: string[] } } }) => {
+      if (typeof where.userId === 'string') {
+        const id = where.userId;
+        return memberships.filter((m) => m.userId === id).map((m) => ({ organizationId: m.organizationId }));
+      }
+      const { userId: ids, organizationId: orgs } = where as { userId: { in: string[] }; organizationId: { in: string[] } };
+      return memberships.filter((m) => ids.in.includes(m.userId) && orgs.in.includes(m.organizationId)).map((m) => ({ userId: m.userId }));
+    },
   );
   const findFirst = vi.fn(
     async ({
@@ -93,8 +102,8 @@ describe('canSeeUserPersonalFields (name / email)', () => {
     // name + email resolvers both ask about the same target — should collapse.
     await canSeeUserPersonalFields(c, 'target');
     await canSeeUserPersonalFields(c, 'target');
-    expect(findMany).toHaveBeenCalledTimes(1); // viewer's orgs fetched once
-    expect(findFirst).toHaveBeenCalledTimes(1); // target membership checked once
+    expect(findMany).toHaveBeenCalledTimes(2); // viewer's orgs once + the target's membership once (#2223: bulk read)
+    expect(findFirst).not.toHaveBeenCalled();
   });
 });
 

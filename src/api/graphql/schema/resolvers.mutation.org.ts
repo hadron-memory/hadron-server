@@ -1,3 +1,4 @@
+import { transportRateIdentity } from '../../../lib/rateLimit/identity.js';
 // orgMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { GraphQLError } from 'graphql';
 import { generateId } from '../../../lib/id.js';
@@ -41,9 +42,23 @@ import {
   ORG_INCLUDE,
 } from './resolvers.helpers.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
+import { isUniqueViolationOn, HANDLE_TARGETS } from '../../../auth/userProvision.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { AuthoritySnapshotStale } from '../../../lib/auth/authorityAnchors.js';
 import { assertIssuerInvitationSnapshotFresh, revokeOrgInvitationsByIssuer } from '../../../lib/auth/revokeOrgInvitations.js';
+import { unauthenticatedError } from '../../../lib/refusals.js';
+import { forbiddenError } from '../../../lib/refusals.js';
+import { assertInviteLimits, inviteExpiresAt, inviteMaxActivations } from '../../../lib/invitationLimits.js';
+
+/** #2871: expected org-member refusals are typed so the boundary does not mask them. */
+const orgMemberRefusal = (code: 'CONFLICT' | 'NOT_FOUND', message: string) =>
+  new GraphQLError(message, { extensions: { code } });
+
+/** #2867: acceptInvitation's typed refusals, so the boundary does not mask them. */
+const invitationNotFound = () =>
+  new GraphQLError('Invitation not found', { extensions: { code: 'NOT_FOUND' } });
+const invitationRevoked = () =>
+  new GraphQLError('Invitation has been revoked', { extensions: { code: 'BAD_USER_INPUT' } });
 
 /**
  * Map a `RootNameTakenError` from the #692 principal pool to a user-facing
@@ -64,7 +79,7 @@ export const orgMutations = {
       { name, handle, email }: { name?: string; handle?: string | null; email?: string | null },
       ctx: Context,
     ) => {
-      if (!ctx.userId) throw new Error('Unauthenticated');
+      if (!ctx.userId) throw unauthenticatedError();
       // A handle is the hrn:user:<handle> slug — normalize to lowercase-canonical
       // and validate (#325). `undefined` leaves it unchanged; an illegal handle
       // throws. spec 047: handle is NOT NULL, so it can no longer be cleared —
@@ -93,7 +108,7 @@ export const orgMutations = {
           const locked = await tx.$queryRaw<{ handle: string | null; principal_id: string | null; email: string | null }[]>`
             SELECT handle, principal_id, email FROM users WHERE id = ${userId} FOR UPDATE
           `;
-          if (locked.length === 0) throw new Error('Unauthenticated');
+          if (locked.length === 0) throw unauthenticatedError();
           const current = locked[0];
           // Identity addresses require proof of control. Profile edits cannot
           // establish or replace one; an unchanged form field is a no-op.
@@ -115,14 +130,27 @@ export const orgMutations = {
             if (current.principal_id) await releasePrincipal(tx, current.principal_id);
             principalData = { principalId: principal.id };
           }
-          const updated = await tx.user.update({
-            where: { id: userId },
-            data: {
-              ...(name !== undefined ? { name } : {}),
-              ...handleData,
-              ...principalData,
-            },
-          });
+          // #2868: the pool mint above only sees REGISTERED owners. A User whose
+          // `principal_id` is NULL still holds its handle through the
+          // `users_handle_lower_uniq` functional index, so that collision
+          // surfaces here as P2002 — translate it to the same RootNameTakenError
+          // (and so the same refusal text) a registered owner yields. The
+          // transaction rolls back whole: the mint and the release above leave
+          // no trace, and the unregistered owner's handle is not touched.
+          let updated;
+          try {
+            updated = await tx.user.update({
+              where: { id: userId },
+              data: {
+                ...(name !== undefined ? { name } : {}),
+                ...handleData,
+                ...principalData,
+              },
+            });
+          } catch (err) {
+            if (renaming && newHandle && isUniqueViolationOn(err, HANDLE_TARGETS)) throw new RootNameTakenError(newHandle);
+            throw err;
+          }
           // Propagate only when the handle actually changed — the rewrite is
           // FK-scoped + idempotent, so this guard is just churn avoidance.
           if (renaming) {
@@ -160,7 +188,7 @@ export const orgMutations = {
       requireRole(ctx, 'ADMIN');
       if (!ctx.userId || ctx.apiKeyId || ctx.sessionId || ctx.impersonation || ctx.appId) throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
       const [s, t] = await Promise.all([resolveUserRef(ctx.db, source), resolveUserRef(ctx.db, target)]);
-      return beginUserMergeConsent(ctx.db, s.id, t.id, ctx.userId);
+      return beginUserMergeConsent(ctx.db, s.id, t.id, ctx.userId, ctx.limiterIdentity ?? transportRateIdentity(ctx));
     },
 
     approveMergeUsersConsent: async (_: unknown, { proof, source, target }: { proof: string; source: string; target: string }, ctx: Context) =>
@@ -213,6 +241,17 @@ export const orgMutations = {
           extensions: { code: 'UNAUTHENTICATED' },
         });
       }
+      // #3016 (cor:aut:020:03): only an OMITTED (or null) userRef means "me".
+      // A supplied ref that is empty after JS trim ('', spaces, a stray U+FEFF
+      // BOM, an empty template variable) names nobody, so it is refused here,
+      // before the principal check and before any target resolution. The
+      // refusal does not depend on role or on any user row, so it reveals
+      // nothing, and it can never fall through to erasing the caller.
+      if (userRef != null && !userRef.trim()) {
+        throw new GraphQLError('userRef is blank; omit it to delete your own account.', {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
       const forbidden = () =>
         new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
       // NON-throwing boolean principal check FIRST: the owner-or-self shape
@@ -222,7 +261,7 @@ export const orgMutations = {
       // (conventions:crud-mutation-naming, the deleteMemoryShare trap).
       const platformAdmin = isPlatformAdmin(ctx);
       let targetUserId: string;
-      if (!userRef?.trim()) {
+      if (userRef == null) {
         // Omitted target = "me" (the self-service path; needs no role — a
         // platform admin's own admin bit never blocks their own deletion).
         targetUserId = ctx.userId;
@@ -496,29 +535,30 @@ export const orgMutations = {
       // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
       const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
       const slug = generateId().slice(0, 16);
-      const expiresAt = expiresInDays
-        ? new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000)
-        : null;
       const invite = await withAuthorizedTx(
         ctx,
         [{ kind: 'org', id: resolvedOrgId }],
         (txCtx) => requireOrgRole(txCtx, resolvedOrgId, 'ADMIN'),
-        (tx) => tx.userInvitation.create({
-          data: {
-            id: generateId(),
-            slug,
-            senderUserId: ctx.userId ?? null,
-            organizationId: resolvedOrgId,
-            memberRole: (memberRole as Role) ?? 'READER',
-            name: name ?? null,
-            email: email ?? null,
-            githubUsername: githubUsername ?? null,
-            maxActivations: maxActivations ?? 1,
-            expiresAt,
-            createdBy: ctx.userId ?? ctx.clientId ?? null,
-          },
-          include: { sender: true, organization: true, activations: true },
-        }),
+        (tx) => {
+          // #2984: judged after the role gate, so a refused caller gets the same answer whatever the values.
+          assertInviteLimits({ expiresInDays, maxActivations });
+          return tx.userInvitation.create({
+            data: {
+              id: generateId(),
+              slug,
+              senderUserId: ctx.userId ?? null,
+              organizationId: resolvedOrgId,
+              memberRole: (memberRole as Role) ?? 'READER',
+              name: name ?? null,
+              email: email ?? null,
+              githubUsername: githubUsername ?? null,
+              maxActivations: inviteMaxActivations(maxActivations),
+              expiresAt: inviteExpiresAt(expiresInDays),
+              createdBy: ctx.userId ?? ctx.clientId ?? null,
+            },
+            include: { sender: true, organization: true, activations: true },
+          });
+        },
       );
       return { ...invite, activationCount: invite.activations.length };
     },
@@ -531,11 +571,9 @@ export const orgMutations = {
       },
       ctx: Context,
     ) => {
-      if (!ctx.userId) throw new Error('Unauthenticated');
+      if (!ctx.userId) throw unauthenticatedError();
+      assertInviteLimits({ expiresInDays, maxActivations }); // #2984
       const slug = generateId().slice(0, 16);
-      const expiresAt = expiresInDays
-        ? new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000)
-        : null;
       const invite = await ctx.db.userInvitation.create({
         data: {
           id: generateId(),
@@ -546,8 +584,8 @@ export const orgMutations = {
           name: name ?? null,
           email: email ?? null,
           githubUsername: githubUsername ?? null,
-          maxActivations: maxActivations ?? 1,
-          expiresAt,
+          maxActivations: inviteMaxActivations(maxActivations),
+          expiresAt: inviteExpiresAt(expiresInDays),
           createdBy: ctx.userId,
         },
         include: { sender: true, organization: true, activations: true },
@@ -560,14 +598,18 @@ export const orgMutations = {
       { slug }: { slug: string },
       ctx: Context,
     ) => {
-      if (!ctx.userId) throw new Error('You must be signed in to accept an invitation');
+      if (!ctx.userId) {
+        throw new GraphQLError('You must be signed in to accept an invitation', {
+          extensions: { code: 'UNAUTHENTICATED' },
+        });
+      }
 
       // Resolve only the anchor shape outside the transaction. The invitation
       // and activation decisions are re-read after its row lock below.
       const candidate = await ctx.db.userInvitation.findUnique({
         where: { slug }, select: { id: true, organizationId: true, senderUserId: true },
       });
-      if (!candidate) throw new Error('Invitation not found');
+      if (!candidate) throw invitationNotFound();
       return withAuthorizedTx(
         ctx,
         [
@@ -581,20 +623,24 @@ export const orgMutations = {
           });
           if (!invite || invite.deletedAt || invite.organizationId !== candidate.organizationId ||
               invite.senderUserId !== candidate.senderUserId) {
-            throw new Error('Invitation not found');
+            throw invitationNotFound();
           }
-          if (invite.expiresAt && invite.expiresAt < new Date()) throw new Error('Invitation has expired');
+          if (invite.expiresAt && invite.expiresAt < new Date()) throw new GraphQLError('Invitation has expired', { extensions: { code: 'BAD_USER_INPUT' } });
           if (invite.maxActivations && invite.activations.length >= invite.maxActivations) {
-            throw new Error('Invitation has reached its maximum number of uses');
+            throw new GraphQLError('Invitation has reached its maximum number of uses', {
+              extensions: { code: 'CONFLICT' },
+            });
           }
           if (invite.activations.some((a) => a.userId === ctx.userId)) {
-            throw new Error('You have already accepted this invitation');
+            throw new GraphQLError('You have already accepted this invitation', {
+              extensions: { code: 'CONFLICT' },
+            });
           }
           if (invite.organizationId && invite.senderUserId) {
             const issuer = await tx.user.findFirst({
               where: { id: invite.senderUserId, deletedAt: null }, select: { roles: true },
             });
-            if (!issuer) throw new Error('Invitation has been revoked');
+            if (!issuer) throw invitationRevoked();
             try {
               await requireOrgRole({
                 ...txCtx, userId: invite.senderUserId, roles: issuer.roles,
@@ -603,7 +649,7 @@ export const orgMutations = {
               }, invite.organizationId, 'ADMIN');
             } catch (error) {
               if (error instanceof GraphQLError && error.extensions.code === 'FORBIDDEN') {
-                throw new Error('Invitation has been revoked');
+                throw invitationRevoked();
               }
               throw error;
             }
@@ -689,7 +735,7 @@ export const orgMutations = {
             where: { organizationId_userId: { organizationId: resolvedOrgId, userId: resolvedUserId } },
           });
           if (existing && !existing.deletedAt) {
-            throw new Error('User is already a member of this organization');
+            throw orgMemberRefusal('CONFLICT', 'User is already a member of this organization');
           }
           if (existing) {
             return tx.orgMember.update({
@@ -750,6 +796,10 @@ export const orgMutations = {
         [{ kind: 'org', id: resolvedOrgId }, { kind: 'user', id: resolvedUserId }],
         (txCtx) => requireOrgRole(txCtx, resolvedOrgId, 'ADMIN'),
         async (tx) => {
+        // The typed miss comes only after the in-transaction authorize that
+        // runs before this write: a caller revoked before or while queued must
+        // get FORBIDDEN (or 40001), never learn the target is absent (#2871).
+        if (!existingRole) throw orgMemberRefusal('NOT_FOUND', 'User is not a member of this organization');
         // Demoting the last LIVE owner would leave the org unmanageable — same
         // invariant removeOrgMember enforces (PR-480 Gemini review; the gap
         // predates the lifecycle change but this is its home).
@@ -758,7 +808,7 @@ export const orgMutations = {
             where: { organizationId: resolvedOrgId, role: 'OWNER', deletedAt: null },
           });
           if (owners <= 1) {
-            throw new Error('Cannot demote the last owner of an organization');
+            throw orgMemberRefusal('CONFLICT', 'Cannot demote the last owner of an organization');
           }
         }
         if ((existingRole === 'OWNER' || existingRole === 'ADMIN') &&
@@ -789,7 +839,6 @@ export const orgMutations = {
                 AND deleted_at IS NULL`;
             if (Boolean(rows[0]) !== Boolean(fresh[0])) throw new AuthoritySnapshotStale();
             existingRole = rows[0]?.role ?? null;
-            if (!existingRole) throw new Error('User is not a member of this organization');
             if (ctx.userId) {
               await tx.$queryRaw`
                 SELECT id FROM org_members
@@ -829,9 +878,12 @@ export const orgMutations = {
         [{ kind: 'org', id: resolvedOrgId }, { kind: 'user', id: resolvedUserId }],
         (txCtx) => requireOrgRole(txCtx, resolvedOrgId, 'ADMIN'),
         async (tx) => {
-        const member = await tx.orgMember.findUniqueOrThrow({
+        const member = await tx.orgMember.findUnique({
           where: { organizationId_userId: { organizationId: resolvedOrgId, userId: resolvedUserId } },
         });
+        // A user who never held a row is not a member (#2871); a revoked row is
+        // the idempotent case below.
+        if (!member) throw orgMemberRefusal('NOT_FOUND', 'User is not a member of this organization');
         // Already revoked → idempotent success. Checked BEFORE the last-owner
         // guard: a revoked ex-OWNER isn't in the live owners count, so the
         // guard would otherwise mis-fire "last owner" on a no-op re-removal.
@@ -844,7 +896,7 @@ export const orgMutations = {
             where: { organizationId: resolvedOrgId, role: 'OWNER', deletedAt: null },
           });
           if (owners <= 1) {
-            throw new Error('Cannot remove the last owner of an organization');
+            throw orgMemberRefusal('CONFLICT', 'Cannot remove the last owner of an organization');
           }
         }
         await assertIssuerInvitationSnapshotFresh(tx, ctx.db, resolvedOrgId, resolvedUserId);
@@ -928,10 +980,10 @@ export const orgMutations = {
       { externalId, handle, name, email }: { externalId: string; handle?: string; name?: string; email?: string },
       ctx: Context,
     ) => {
-      if (!ctx.appId) throw new Error('Forbidden: App Key required');
+      if (!ctx.appId) throw forbiddenError('Forbidden: App Key required');
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: ctx.appId } });
       if (app.createUserPermission === 'DENY') {
-        throw new Error('Forbidden: this app cannot create users');
+        throw forbiddenError('Forbidden: this app cannot create users');
       }
       // App-provided profile data cannot establish a verified identity.
       if (email?.trim()) {

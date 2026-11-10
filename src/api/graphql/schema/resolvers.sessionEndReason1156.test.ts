@@ -5,6 +5,7 @@ import { typeDefs } from './typeDefs.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { endSessionFirstWins } from './resolvers.mutation.session.js';
@@ -74,6 +75,7 @@ describe('session end reason #1156', () => {
     it(`stamps ${force ? 'forced live' : 'automatic lapsed'} supersession, keeping summaries and holds`, async () => {
       const app = await db.app.create({ data: { ownerUserId: owner.id, name: 'Team', urn: `hrn:app:test:team-${generateId()}` } });
       const agent = await db.agent.create({ data: { ownerUserId: owner.id, name: 'Engineer', urn: `hrn:agent:test:eng-${generateId()}` } });
+      await serveAgentBootPrompt(db, agent.id, 'Test boot prompt.'); // #2712: the bind is served
       await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
       const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Test', slug: 'test', heldByUserId: owner.id } });
       const at = new Date(Date.now() - (force ? 1000 : 7 * 86400000));

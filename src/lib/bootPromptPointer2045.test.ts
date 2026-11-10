@@ -362,24 +362,22 @@ describe('#2045 read exposure: one gate per owner, null in both fields when mask
     expect(await read('Worker', row, ctxOf(f.stranger.id))).toEqual([null, null]);
   });
 
-  it('MCP hadron_get_worker shows the pointer to a reader, through the same gate', async () => {
-    const f = await fixture();
-    const set = await write(ctxOf(f.admin.id), f.targets.WORKER, f.nodes.install1.id);
-    const mcp = createTestableMcpServer({ userId: f.admin.id, roles: [], clientId: `user:${f.admin.id}` });
-    expect(await mcp.callToolText('hadron_get_worker', { workerRef: f.worker.id })).toContain(`Boot prompt pointer: ${set!.urn}`);
-  });
+  // #3082: 'MCP hadron_get_worker shows the pointer to a reader' removed (the tool is disabled on MCP); the gate it exercised is the
+  // Worker field read pinned by the 'Worker: behind the worker read gate' test just above.
 });
 
 describe('#2045 surfaces and code inventory', () => {
   it('R24: no MCP tool writes a boot-prompt pointer', () => {
     const mcp = createTestableMcpServer({ userId: 'u', roles: [], clientId: 'user:u' });
-    expect(mcp.toolNames().filter((n) => /boot.?prompt/i.test(n))).toEqual([]);
+    // #3843 adds exactly one boot-prompt tool, and it is a read: hadron_agent_boot_prompt renders the served prompt and
+    // writes nothing (its own pins count every row it could write). Any other boot-prompt tool still fails here.
+    expect(mcp.toolNames().filter((n) => /boot.?prompt/i.test(n))).toEqual(['hadron_agent_boot_prompt']);
   });
 
   it('every BOOT_PROMPT_* code the server source can emit is on the agreed lists (6259928375 / 6259930578)', () => {
     // S6's three codes, as agreed in the #2043 attach (6247074854; hadron-cli#916 maps all three).
     const S6 = ['BOOT_PROMPT_COMPILED_WRITE', 'BOOT_PROMPT_WORKER_SESSION_REFUSED', 'BOOT_PROMPT_APPROVAL_FORBIDDEN'];
-    const SERVE = ['BOOT_PROMPT_NOT_SET', 'BOOT_PROMPT_TARGET_DELETED', 'BOOT_PROMPT_NOT_APPROVED', 'BOOT_PROMPT_NOT_SIGNED', 'BOOT_PROMPT_RECORDED_REVISION_DELETED'];
+    const SERVE = ['BOOT_PROMPT_INSTALL_LICENSE_INACTIVE', 'BOOT_PROMPT_NOT_SET', 'BOOT_PROMPT_TARGET_DELETED', 'BOOT_PROMPT_NOT_APPROVED', 'BOOT_PROMPT_NOT_SIGNED', 'BOOT_PROMPT_RECORDED_REVISION_DELETED'];
     expect([...BOOT_PROMPT_POINTER_CODES].sort()).toEqual([
       'BOOT_PROMPT_POINTER_NOT_COMPILED', 'BOOT_PROMPT_POINTER_NOT_FOUND', 'BOOT_PROMPT_POINTER_SESSION_REFUSED',
       'BOOT_PROMPT_POINTER_WRONG_MEMORY', 'BOOT_PROMPT_POINTER_WRONG_ROLE',

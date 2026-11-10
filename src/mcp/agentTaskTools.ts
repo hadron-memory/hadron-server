@@ -1,3 +1,5 @@
+import { taskListDateTime } from '../lib/agentTasks/listDateTime.js';
+import { mcpRequestSessionContext } from './requestSession.js';
 /**
  * #1705 — agent tasks on the MCP surface (cor:agt:050): create, assign,
  * reassign, start, record progress, finish and cancel a task, read one or a
@@ -19,19 +21,22 @@
  * refused here. Reads take an optional `session` for the same purpose: a
  * worker on an App key reads as itself through it.
  */
+import { rosterModelGroups } from '../api/graphql/schema/resolvers.agentTaskMatching.js';
 import { renderCheckStatusShort } from '../lib/workerCheckStatus.js';
 import { z } from 'zod';
 import { GraphQLError } from 'graphql';
 import { publicErrorExtensions } from '../lib/errorDiagnostics.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { offTeamTool } from './disabledTools.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { agentTaskFieldResolvers, taskError } from '../api/graphql/schema/resolvers.agentTask.js';
-import { renderTaskWarnings } from '../api/graphql/schema/resolvers.taskWarnings.js';
+import { flushTaskWarningHistory, renderTaskWarnings } from '../api/graphql/schema/resolvers.taskWarnings.js';
 import { agentTaskAlarmFieldResolvers } from '../api/graphql/schema/resolvers.agentTaskAlarms.js';
 import { type AuthContext, validateSessionBinding } from '../middleware/auth.js';
 import { runAsActor } from '../lib/requestActor.js';
 import { UrnNotQualifiedError } from '../lib/urn.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
+import { isTrustedRefusal } from '../api/graphql/formatError.js';
 
 type TaskRow = Record<string, any> & { id: string; status: string };
 type EventRow = Record<string, any> & { id: string; type: string; createdAt: Date };
@@ -57,10 +62,14 @@ const QA = resolvers.Query as unknown as {
   agentTaskStallSchedule: Resolver<{ appRef: string }, StallScheduleView>;
 };
 type StallScheduleView = Record<StallScheduleKey, number> & { updatedAt: Date | null };
-type RosterRow = import('../lib/agentTasks/roster.js').RosterEntry & {
+type RosterRow = Omit<import('../lib/agentTasks/roster.js').RosterEntry, 'teamPlacement'> & {
+  appId: string;
+  modelGroups?: string[] | null;
+  teamPlacement: import('../lib/agentTasks/roster.js').RosterEntry['teamPlacement'] | null;
   appUrn: string;
   currentTask?: import('../lib/agentTasks/rosterSummary.js').RosterTaskSummary | null;
   pausedUntil?: Date | null;
+  heldBy?: { id: string; handle: string | null; name: string | null } | null;
   checkStatus?: import('../lib/workerCheckStatus.js').WorkerCheckStatus | null;
 };
 /** The seven values of an App's stall schedule (cor:agt:050:14–:17, :10, 070:01, :02), in the order the tools render them. */
@@ -77,8 +86,9 @@ type AvailabilityRow = Record<string, any>;
 
 /** The write tools, for the caller-session gate's bookkeeping and tests. */
 export const AGENT_TASK_WRITE_TOOLS = [
-  'hadron_task_create', 'hadron_task_assign', 'hadron_task_reassign', 'hadron_task_start',
+  'hadron_task_update', 'hadron_task_create', 'hadron_task_assign', 'hadron_task_reassign', 'hadron_task_start',
   'hadron_task_progress', 'hadron_task_finish', 'hadron_task_cancel',
+  'hadron_task_blocker_add', 'hadron_task_blocker_remove', 'hadron_task_priority_set',
   // #1754 — the backlog moves (cor:agt:050:02)
   'hadron_task_park', 'hadron_task_make_ready',
   // #1706
@@ -101,7 +111,7 @@ function textResult(text: string, isError = false) {
 
 /** A resolver refusal as `[<code>] <message>` plus its extensions; anything else is a server fault. */
 function refusal(e: unknown) {
-  if (e instanceof GraphQLError) {
+  if (e instanceof GraphQLError && isTrustedRefusal(e)) {
     const { code, ...rest } = publicErrorExtensions(e.extensions ?? {});
     const extras = Object.entries(rest).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
     return textResult([`[${String(code ?? 'ERROR').toLowerCase()}] ${e.message}`, ...extras].join('\n'), true);
@@ -130,10 +140,14 @@ export function renderRosterEntry(r: RosterRow, asOf: Date): string {
     r.unreactedChildTaskId ? `child ${r.unreactedChildTaskId} ended (finished or cancelled)` : null,
     r.lastAssignedAt ? `last assigned ${r.lastAssignedAt.toISOString()}` : 'never assigned',
     // #1726: beside last activity, so a stale claim is easy to spot.
+    r.teamPlacement != null ? `team placement ${r.teamPlacement}` : null,
     r.reportsTo ? `reports to ${r.reportsTo.name}${r.reportsTo.retired ? ' (retired)' : ''}` : null,
     r.lastActiveAt ? `last active ${r.lastActiveAt.toISOString()}` : null,
     // #2138 §3.4
     r.checkStatus ? renderCheckStatusShort(r.checkStatus) : null,
+    // #2223: already behind the working-state and name gates by the time it reaches a row.
+    r.heldBy ? `held by ${r.heldBy.handle ? `@${r.heldBy.handle} (hrn:user:${r.heldBy.handle})` : `user ${r.heldBy.id}`}${r.heldBy.name ? ` ${r.heldBy.name}` : ''}` : null,
+    r.modelGroups === null ? 'model groups unavailable' : r.modelGroups ? `model groups ${r.modelGroups.length ? r.modelGroups.join('/') : 'none'}` : null,
   ].filter(Boolean);
   return `${r.name} — ${r.state}: ${facts.join('; ')}`;
 }
@@ -144,15 +158,21 @@ function partyLabel(p: Party): string {
 }
 
 /** One task as text, every derived field through the GraphQL field resolvers. */
-export async function renderTask(t: TaskRow, ctx: Context): Promise<string> {
+export async function renderTask(t: TaskRow, ctx: Context, dependencies: { limit?: number; offset?: number } = {}): Promise<string> {
   const [owner, assignee, waiting] = await Promise.all([
     T.owner(t as never, {}, ctx) as Promise<Party>,
     T.assignee(t as never, {}, ctx) as Promise<Party>,
     T.waitingOnChildren(t as never, {}, ctx),
   ]);
+  const [blockedBy, blocks] = await Promise.all([T.blockedBy(t as never, dependencies, ctx), T.blocks(t as never, dependencies, ctx)]);
   const flags = [T.queued(t as never) ? 'queued' : null, waiting ? 'waiting on child tasks' : null].filter(Boolean);
   const lines = [
-    `- ${t.title} (id: ${t.id})`,
+    // #2553: the handle first, then the id it is an alias for.
+    `- ${t.handle} ${t.title} (id: ${t.id})`,
+    `  priority: ${t.priority ?? 1}`,
+    `  blocked: ${t.blocked ?? false}`,
+    `  blocked by (${blockedBy.total} total${blockedBy.hasMore ? ', more pages' : ''}): ${blockedBy.items.map((b) => b.id).join(', ') || 'none on this page'}`,
+    `  blocks (${blocks.total} total${blocks.hasMore ? ', more pages' : ''}): ${blocks.items.map((b) => b.id).join(', ') || 'none on this page'}`,
     `  status: ${t.status}${flags.length ? ` (${flags.join(', ')})` : ''}`,
     `  owner: ${partyLabel(owner)} · assignee: ${partyLabel(assignee)}`,
   ];
@@ -160,6 +180,8 @@ export async function renderTask(t: TaskRow, ctx: Context): Promise<string> {
   if (t.source) lines.push(`  source: ${t.source}`);
   if (t.tags?.length) lines.push(`  tags: ${t.tags.join(', ')}`);
   if (t.requirements) lines.push(`  requirements: ${JSON.stringify(t.requirements)}`);
+  // #2420: the task's own properties (cor:agt:050:28); a reader of the task reads them, and nothing is inherited.
+  if (t.properties) lines.push(`  properties: ${JSON.stringify(t.properties)}`);
   const times = [
     t.startBy ? `start by ${t.startBy.toISOString()}` : null,
     t.assignedAt ? `assigned ${t.assignedAt.toISOString()}` : null,
@@ -188,9 +210,12 @@ export async function renderTask(t: TaskRow, ctx: Context): Promise<string> {
 export async function renderEvent(e: EventRow, ctx: Context): Promise<string> {
   const actor = (await E.actor(e as never, {}, ctx)) as Party;
   const subject = (await E.subjectWorker(e as never, {}, ctx)) as Party;
-  const payload = e.payload && Object.keys(e.payload).length ? ` ${JSON.stringify(e.payload)}` : '';
+  // #2553: the handle first, then the id (one read: the event row carries only the id).
+  const handle = e.taskId ? (await ctx.db.agentTask.findUnique({ where: { id: e.taskId }, select: { handle: true } }))?.handle ?? null : null;
+  const shown = (await E.payload(e as never, {}, ctx)) as Record<string, unknown> | null; // #2755: evidence only for a reader of the worker's internals
+  const payload = shown && Object.keys(shown).length ? ` ${JSON.stringify(shown)}` : '';
   const line = `- ${e.createdAt.toISOString()} ${e.type}${e.severity ? ' [ALARM]' : ''} (id: ${e.id})` +
-    `${e.taskId ? ` task ${e.taskId}` : ''}${e.severity ? '' : ` by ${partyLabel(actor)}`}` +
+    `${e.taskId ? ` task ${handle ? `${handle} ` : ''}${e.taskId}` : ''}${e.severity ? '' : ` by ${partyLabel(actor)}`}` +
     `${subject ? ` → ${partyLabel(subject)}` : ''}${payload}`;
   if (!e.severity) return line;
   // #1706 — an alarm: its episode, who it has woken, and its acknowledgement.
@@ -242,13 +267,17 @@ const party = z.object({
   worker: z.string().optional().describe('A worker of the App: its id, URN or name.'),
   user: z.string().optional().describe('A person who participates in the App: user id or handle.'),
 }).describe('Exactly one of worker or user.');
-const taskId = z.string().describe('The task id.');
+const taskId = z.string().describe(
+  'The task id, or its handle: AT3.405 (a project, then the number within each parent; AT0.<n> is a task with no project). ' +
+    'A person who belongs to several Apps qualifies it: hrn:agenttask:<app-urn>:AT3.405. The handle is not a GitHub issue number.',
+);
 
 /**
  * Register the agent-task tools on one MCP server instance. `auth` is the
  * connection's principal; each call builds the GraphQL Context from it.
  */
 export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClient; auth: AuthContext }): void {
+  const off = offTeamTool(server); // #3082: every tool in this module is disabled (R1)
   const { db, auth } = deps;
   const keyCaller = Boolean(auth.appKeyId && !auth.userId);
   const ctxOf = (): Context => ({
@@ -261,9 +290,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
     appId: auth.appId ?? undefined,
     appKeyId: auth.appKeyId ?? undefined,
-    // An App key's session state is the current request's; anyone else's is the connection's.
-    sessionId: (keyCaller && auth.requestSession ? auth.requestSession.sessionId : auth.sessionId) ?? undefined,
-    sessionBindingRefused: keyCaller && auth.requestSession ? auth.requestSession.refused : auth.sessionBindingRefused,
+    ...mcpRequestSessionContext(auth),
     roles: auth.roles as Context['roles'],
     organizationId: auth.organizationId ?? undefined,
     impersonation: auth.impersonation,
@@ -292,7 +319,9 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     const ctx = ctxOf();
     try {
       const t = await call(ctx);
-      return textResult(`${verb}.\n\n${await renderTask(t, ctx)}${renderTaskWarnings(ctx.taskWarnings)}`);
+      const result = textResult(`${verb}.\n\n${await renderTask(t, ctx)}${renderTaskWarnings(ctx.taskWarnings)}`);
+      await flushTaskWarningHistory(ctx);
+      return result;
     } catch (e) {
       return refusal(e);
     }
@@ -316,7 +345,10 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     }
     const ctx = ctxOf();
     try {
-      return textResult(await call(ctx));
+      // #2607: a write that files task warnings (hadron_alarm_ack) renders them where the task tools do.
+      const result = textResult(`${await call(ctx)}${renderTaskWarnings(ctx.taskWarnings)}`);
+      await flushTaskWarningHistory(ctx);
+      return result;
     } catch (e) {
       return refusal(e);
     }
@@ -340,7 +372,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     }
   }
 
-  server.tool(
+  off(
     'hadron_task_create',
     'Create an agent task in a team App (cor:agt:050). A ROOT task names appRef; any App participant may create one. ' +
       'It owns it unless it names another owner, which any participating worker or person may be (#1757, cor:agt:050:01). ' +
@@ -351,7 +383,31 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       write('hadron_task_create', session, 'Created', (ctx) => M.createAgentTask({}, { input }, ctx)),
   );
 
-  server.tool(
+  off('hadron_task_blocker_add',
+    'Add a same-App blocker to a pending/backlog task. Assigner authority; cycles refuse (cor:agt:050:01).',
+    SHAPE_HADRON_TASK_BLOCKER,
+    async ({ session, ...args }) => write('hadron_task_blocker_add', session, 'Blocker added', (ctx) => M.addAgentTaskBlocker({}, args, ctx)));
+  off('hadron_task_blocker_remove',
+    'Remove a blocker from a pending/backlog task. Last-blocker release restarts stall clocks; assigner authority (cor:agt:050:02).',
+    SHAPE_HADRON_TASK_BLOCKER,
+    async ({ session, ...args }) => write('hadron_task_blocker_remove', session, 'Blocker removed', (ctx) => M.removeAgentTaskBlocker({}, args, ctx)));
+  off('hadron_task_priority_set',
+    'Set task priority1..5 (1 highest). Assigner authority; priority never grants authority (cor:agt:050:01).',
+    SHAPE_HADRON_TASK_PRIORITY,
+    async ({ session, ...args }) => write('hadron_task_priority_set', session, 'Priority set', (ctx) => M.setAgentTaskPriority({}, args, ctx)));
+
+  off(
+    'hadron_task_update',
+    'Edit descriptive task fields using assignment authority (Proposed cor:agt:050:09 Editing). ' +
+      'Omitted fields stay unchanged; optional empty values clear; tags and requirements replace whole. ' +
+      'properties (#2420) is the task\'s own JSON object and replaces whole; the assignee may write it, and only it. ' +
+      'Source and lifecycle fields are fixed. Ended tasks refuse edits; edits are not progress and clear no wake.',
+    SHAPE_HADRON_TASK_UPDATE,
+    async ({ session, taskId, input }) =>
+      write('hadron_task_update', session, 'Updated', ctx => M.updateAgentTask({}, {taskId,input:input ?? {}}, ctx)),
+  );
+
+  off(
     'hadron_task_assign',
     'Assign a task with no assignee — a queued task (pending) or a BACKLOG task: the task\'s owner, a worker the owner ' +
       'reports to, or whoever manages the App (cor:agt:050:09). Assigning a BACKLOG task moves it to pending. A task that ' +
@@ -361,7 +417,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       write('hadron_task_assign', session, 'Assigned', (ctx) => M.assignAgentTask({}, args, ctx)),
   );
 
-  server.tool(
+  off(
     'hadron_task_reassign',
     'Move a task to another assignee: the task\'s owner, or whoever manages the App (cor:agt:050:09). A started task stays started; the former assignee can no longer move it.',
     SHAPE_HADRON_TASK_REASSIGN,
@@ -369,7 +425,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       write('hadron_task_reassign', session, 'Reassigned', (ctx) => M.reassignAgentTask({}, args, ctx)),
   );
 
-  server.tool(
+  off(
     'hadron_task_start',
     'Start a pending task: its assignee only (cor:agt:050:08).',
     SHAPE_HADRON_TASK_START,
@@ -377,7 +433,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       write('hadron_task_start', session, 'Started', (ctx) => M.startAgentTask({}, { taskId: id }, ctx)),
   );
 
-  server.tool(
+  off(
     'hadron_task_progress',
     'Record progress on a started task: its assignee only (cor:agt:050:08). Carries no text.',
     SHAPE_HADRON_TASK_PROGRESS,
@@ -385,7 +441,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       write('hadron_task_progress', session, 'Progress recorded', (ctx) => M.recordAgentTaskProgress({}, { taskId: id }, ctx)),
   );
 
-  server.tool(
+  off(
     'hadron_task_finish',
     'Finish a started task with its result: its assignee only (cor:agt:050:08). outcome is one word: succeeded, failed, or a word your team uses.',
     SHAPE_HADRON_TASK_FINISH,
@@ -394,7 +450,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
         M.finishAgentTask({}, { taskId: id, result: { outcome, summary, evidence } }, ctx)),
   );
 
-  server.tool(
+  off(
     'hadron_task_cancel',
     'Cancel a pending, started or backlog task: its owner, a worker the owner reports to, or whoever manages the App (cor:agt:050:09).',
     SHAPE_HADRON_TASK_CANCEL,
@@ -404,7 +460,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
 
   // ── #1754: the backlog moves (cor:agt:050:02) ─────────────────────────
 
-  server.tool(
+  off(
     'hadron_task_park',
     'Park a queued task (pending, no assignee) in the backlog (cor:agt:050:02): unassigned, never matched, never waited on, ' +
       'no alarms. Whoever may assign a task may park it: its owner, a worker the owner reports to, or whoever manages the App (cor:agt:050:09).',
@@ -413,7 +469,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       write('hadron_task_park', session, 'Parked', (ctx) => M.parkAgentTask({}, { taskId: id }, ctx)),
   );
 
-  server.tool(
+  off(
     'hadron_task_make_ready',
     'Make a backlog task ready to be worked (cor:agt:050:02): it becomes pending and enters the queue. Whoever may assign ' +
       'a task may make it ready: its owner, a worker the owner reports to, or whoever manages the App (cor:agt:050:09).',
@@ -422,24 +478,24 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       write('hadron_task_make_ready', session, 'Ready', (ctx) => M.makeAgentTaskReady({}, { taskId: id }, ctx)),
   );
 
-  server.tool(
+  off(
     'hadron_task_get',
     'Read one agent task, or with tree: true the task and every task below it. Readers: the App\'s participants (cor:agt:050:21). A task you cannot read reads as not found.',
     SHAPE_HADRON_TASK_GET,
-    async ({ taskId: id, tree, session }) =>
+    async ({ taskId: id, tree, session, dependencyLimit, dependencyOffset }) =>
       read(session, async (ctx) => {
         if (tree) {
           const rows = await Q.agentTaskTree({}, { root: id }, ctx);
           if (!rows) return textResult(`[task_not_found] Task not found.\ntaskId: ${id}`, true);
-          return textResult((await Promise.all(rows.map((t) => renderTask(t, ctx)))).join('\n'));
+          return textResult((await Promise.all(rows.map((t) => renderTask(t, ctx, { limit: dependencyLimit, offset: dependencyOffset })))).join('\n'));
         }
         const t = await Q.agentTask({}, { id }, ctx);
         if (!t) return textResult(`[task_not_found] Task not found.\ntaskId: ${id}`, true);
-        return textResult(await renderTask(t, ctx));
+        return textResult(await renderTask(t, ctx, { limit: dependencyLimit, offset: dependencyOffset }));
       }),
   );
 
-  server.tool(
+  off(
     'hadron_task_list',
     'List a team App\'s agent tasks, newest first. Filters combine with AND. Readers: the App\'s participants (cor:agt:050:21).',
     SHAPE_HADRON_TASK_LIST,
@@ -451,16 +507,16 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       }),
   );
 
-  server.tool(
+  off(
     'hadron_team_events',
-    'Read a team App\'s event stream (cor:agt:050:11), oldest first. To read the next page, pass after: the id of the last event you read (events sharing a timestamp are never skipped). Events carry ids, counts and outcome words, never message text.',
+    'Read a team App\'s event stream (cor:agt:050:11), oldest first. To read the next page, pass after: the id of the last event you read (events sharing a timestamp are never skipped). Events carry ids, counts and outcome words, never message text. task.warning, task.edited and task.properties-changed are passive history (never wake, suppress a wake or count as activity); payload is {code}, changed field names only, or (task.properties-changed) the size and SHA-256 of the canonical JSON of the old and new properties, never their content.',
     SHAPE_HADRON_TEAM_EVENTS,
     async ({ session, ...args }) =>
       read(session, async (ctx) => {
         const rows = await Q.agentTeamEvents({}, args, ctx);
         if (!rows.length) return textResult('No events match.');
         const lines = await Promise.all(rows.map((e) => renderEvent(e, ctx)));
-        const pageSize = args.limit ?? 50;
+        const pageSize = args.limit ?? 20;
         if (rows.length >= pageSize) lines.push(`\nMore may follow: pass after: "${rows[rows.length - 1].id}".`);
         return textResult(lines.join('\n'));
       }),
@@ -468,7 +524,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
 
   // ── #1706: alarms and availability ────────────────────────────────────
 
-  server.tool(
+  off(
     'hadron_alarm_ack',
     'Acknowledge a stall alarm (cor:agt:050:20): it stops waking owners further up the chain. It does not resolve the ' +
       'stall: the task moves only when it is reassigned, cancelled, or its assignee acts. Any owner in the alarm\'s ' +
@@ -481,7 +537,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
         `Acknowledged.\n\n${await renderEvent(await MA.acknowledgeAlarm({}, { eventId }, ctx), ctx)}`),
   );
 
-  server.tool(
+  off(
     'hadron_worker_availability_set',
     'Set a worker\'s availability for work (cor:agt:060:08). A worker, through its own session, may mark ITSELF ' +
       'unavailable (never available); the person holding the worker\'s name, or whoever manages the App, may set ' +
@@ -493,7 +549,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
         `Set.\n\n${await renderAvailability(await MA.setWorkerAvailability({}, { input }, ctx), 'worker', ctx)}`),
   );
 
-  server.tool(
+  off(
     'hadron_model_family_availability_set',
     'Set a model family\'s availability for work in a team App (cor:agt:060:09), e.g. pause every claude worker: ' +
       'whoever manages the App only.',
@@ -503,7 +559,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
         `Set.\n\n${await renderAvailability(await MA.setModelFamilyAvailability({}, { input }, ctx), 'family', ctx)}`),
   );
 
-  server.tool(
+  off(
     'hadron_team_availability',
     'Read a team App\'s availability records (cor:agt:060:02 / :03): each worker or model family marked, and whether ' +
       'the mark is in effect now. A worker or family with no record is available. Readers: the App\'s participants and the App\'s own key.',
@@ -522,7 +578,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
 
   // ── #1926: the App's stall schedule ───────────────────────────────────
 
-  server.tool(
+  off(
     'hadron_stall_schedule_get',
     'Read a team App\'s stall schedule: the effective value of each of its seven settings (cor:agt:050:14–:17 the four ' +
       'stall windows in minutes, 070:01 the host-lapse count in check-ins, 050:10 the session-end grace in minutes, 070:02 ' +
@@ -533,7 +589,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       read(session, async (ctx) => textResult(renderStallSchedule(await QA.agentTaskStallSchedule({}, { appRef }, ctx)))),
   );
 
-  server.tool(
+  off(
     'hadron_stall_schedule_set',
     'Set a team App\'s stall schedule: whoever manages the App only (a bound worker never does, even through a person who ' +
       'does). Pass only the settings to change: an omitted setting keeps its value; null returns that setting to the ' +
@@ -549,7 +605,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     },
   );
 
-  server.tool(
+  off(
     'hadron_team_roster',
     'Read a team App\'s roster (plan design:agent-tasks §7.4): each worker that is not retired, with one derived state ' +
       '(YOUR_MOVE, UNAVAILABLE, WAITING, WORKING, ASSIGNED_NOT_STARTED, AVAILABLE, NO_FAMILY, NOT_LAUNCHABLE) and the ' +
@@ -560,6 +616,11 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       read(session, async (ctx) => {
         const { workers, asOf } = await QA.teamRoster({}, { appRef }, ctx);
         if (!workers.length) return textResult('This App has no workers that are not retired.');
+        // read() supplies a fresh context per call, so recovered configuration is visible next time.
+        await Promise.all(workers.map(async (row) => {
+          try { row.modelGroups = await rosterModelGroups(row, ctx, true); }
+          catch { row.modelGroups = null; } // Explicit unavailable, never a fabricated empty membership.
+        }));
         return textResult([`Roster as of ${asOf.toISOString()}:`, ...workers.map((r) => renderRosterEntry(r, asOf))].join('\n'));
       }),
   );
@@ -577,9 +638,30 @@ const availabilityFields = {
   until: z.string().optional().describe('ISO date-time when an UNAVAILABLE record lapses; in the future.'),
 };
 
+/**
+ * #2420 (cor:agt:050:28): any JSON here, so a non-object reaches the resolver's typed PROPERTIES_NOT_AN_OBJECT
+ * instead of a generic schema error. An object replaces the whole value; null clears it; omit to leave it.
+ */
+const PROPERTIES_ARG = z.unknown().optional().describe(
+  'The task\'s own properties: a JSON object the team organises into namespaces (at most 16 KiB; validated against the ' +
+    'Team Agent\'s schema:task-properties when it has one). An object replaces the whole value, null clears it, omit leaves it. ' +
+    'Writable by the owner, whoever the owner reports to, App managers and the task\'s assignee (the assignee may name no other field).',
+);
+
+const SHAPE_HADRON_TASK_UPDATE = { taskId, input: z.object({
+      title: z.string().nullable().optional(), description: z.string().nullable().optional(),
+      tags: z.array(z.string()).nullable().optional(),
+      requirements: z.object({role:z.string().nullable().optional(),familyIn:z.array(z.string()).nullable().optional(),familyNotIn:z.array(z.string()).nullable().optional(),excludeWorkers:z.array(z.string()).nullable().optional(),minTier:z.enum(['low','mid','high']).nullable().optional(),modelGroupIn:z.array(z.string()).nullable().optional(),modelGroupNotIn:z.array(z.string()).nullable().optional()}).strict().nullable().optional(),
+      startBy: z.string().nullable().optional(), closeSessionWhenDone: z.boolean().nullable().optional(),
+      properties: PROPERTIES_ARG,
+    }).strict().optional(), session: SESSION_WRITE };
+
 const SHAPE_HADRON_TASK_CREATE = {
+  priority: z.number().int().optional().describe('Priority1..5 (1 highest), default1; assigner authority required when named.'),
+  blockedBy: z.array(z.string()).optional().describe('Same-App task refs that must end before start/matching; assigner authority required.'),
   appRef: z.string().optional().describe('The team App (id or URN). Required for a root task.'),
   parentTaskId: z.string().optional().describe('The parent task, for a child task.'),
+  project: z.boolean().optional().describe('Make a top-level PROJECT (AT1, AT2, ...) instead of a task under the reserved project AT0. Not with parentTaskId.'),
   title: z.string().describe('What is asked, in the team\'s own words.'),
   description: z.string().optional(),
   source: z.string().optional().describe('Where the work came from: an issue URL, a node URN.'),
@@ -590,15 +672,22 @@ const SHAPE_HADRON_TASK_CREATE = {
     familyIn: z.array(z.string()).optional(),
     familyNotIn: z.array(z.string()).optional(),
     excludeWorkers: z.array(z.string()).optional(),
-  }).optional().describe('For the platform\'s matcher.'),
+    minTier: z.enum(['low', 'mid', 'high']).optional().describe('#2252: the lowest model tier the assignee may run at (low < mid < high). A worker below it, or of unknown tier, is never matched; the lowest sufficient tier wins. There is no maximum.'),
+    modelGroupIn: z.array(z.string()).optional().describe('#2831: names of the App\'s model groups the assignee\'s model must be in at least one of. An unknown name is refused; a worker with no model never matches.'),
+    modelGroupNotIn: z.array(z.string()).optional().describe('#2831: names of the App\'s model groups the assignee\'s model must be in none of. An unknown name is refused; a worker with no model passes.'),
+  }).strict().optional().describe('For the platform\'s matcher.'),
   startBy: z.string().optional().describe('ISO date-time by which it should have started.'),
   tags: z.array(z.string()).optional(),
+  properties: PROPERTIES_ARG,
   closeSessionWhenDone: z.boolean().optional().describe('Default false: the assignee\'s session ends only when you ask (cor:agt:050:10).'),
   status: z.enum(['PENDING', 'BACKLOG']).optional().describe(
     '#1754 (cor:agt:050:02): PENDING (default) or BACKLOG — parked, unassigned, never queued. A BACKLOG task takes no assignee.',
   ),
   session: SESSION_WRITE,
 };
+
+const SHAPE_HADRON_TASK_BLOCKER = { taskRef: taskId, blockerTaskRef: z.string(), session: SESSION_WRITE };
+const SHAPE_HADRON_TASK_PRIORITY = { taskRef: taskId, priority: z.number().int(), session: SESSION_WRITE };
 
 const SHAPE_HADRON_TASK_ASSIGN = { taskId, assignee: party, closeSessionWhenDone: z.boolean().optional().describe('Omitted keeps the task\'s stored value (cor:agt:050:10).'), session: SESSION_WRITE };
 
@@ -622,18 +711,30 @@ const SHAPE_HADRON_TASK_PARK = { taskId, session: SESSION_WRITE };
 
 const SHAPE_HADRON_TASK_MAKE_READY = { taskId, session: SESSION_WRITE };
 
-const SHAPE_HADRON_TASK_GET = { taskId, tree: z.boolean().optional(), session: SESSION_READ };
+const SHAPE_HADRON_TASK_GET = { taskId, tree: z.boolean().optional(), dependencyLimit: z.number().int().optional().describe('Dependency page size, default20 cap200.'), dependencyOffset: z.number().int().optional().describe('Dependency offset, default0; applies to both blocks and blockedBy.'), session: SESSION_READ };
 
 const SHAPE_HADRON_TASK_LIST = {
   appRef: z.string().describe('The team App (id or URN).'),
   status: z.array(z.enum(['BACKLOG', 'PENDING', 'STARTED', 'FINISHED', 'CANCELLED'])).optional(),
   owner: party.optional(),
   assignee: party.optional(),
+  creator: party.optional().describe('Who created the task: a worker, or a person for a task they created themselves (not one their worker created).'),
   tag: z.string().optional(),
+  tagsAny: z.array(z.string()).optional().describe('Match at least one tag; empty does not narrow.'),
+  tagsAll: z.array(z.string()).optional().describe('Match every tag; empty does not narrow.'),
+  source: z.string().optional().describe('Exact opaque source, not a prefix.'),
+  text: z.string().optional().describe('Case-insensitive substring of the title or description, 1 to 200 characters after trimming. ANDed with the other filters.'),
+  overdue: z.boolean().optional().describe('True: start-by passed on the database clock, not started, not ended, not backlog. False: all other tasks; not an alarm.'),
+  createdAfter: taskListDateTime.optional().describe('Inclusive creation-time lower bound (ISO date-time).'),
+  createdBefore: taskListDateTime.optional().describe('Inclusive creation-time upper bound (ISO date-time).'),
+  startedAfter: taskListDateTime.optional().describe('Inclusive start-time lower bound; null dates excluded.'),
+  startedBefore: taskListDateTime.optional().describe('Inclusive start-time upper bound; null dates excluded.'),
+  finishedAfter: taskListDateTime.optional().describe('Inclusive finish-time lower bound; null dates excluded.'),
+  finishedBefore: taskListDateTime.optional().describe('Inclusive finish-time upper bound; null dates excluded.'),
   parentTaskId: z.string().optional(),
   rootsOnly: z.boolean().optional(),
   queued: z.boolean().optional().describe('Only pending tasks with no assignee.'),
-  limit: z.number().int().nonnegative().optional().describe('Default 50, cap 200.'),
+  limit: z.number().int().nonnegative().optional().describe('Default 20, cap 200.'),
   offset: z.number().int().nonnegative().optional(),
   session: SESSION_READ,
 };
@@ -645,7 +746,7 @@ const SHAPE_HADRON_TEAM_EVENTS = {
   types: z.array(z.string()).optional().describe('e.g. task.assigned, task.finished.'),
   alarmsOnly: z.boolean().optional(),
   taskId: z.string().optional(),
-  limit: z.number().int().nonnegative().optional().describe('Default 50, cap 200.'),
+  limit: z.number().int().nonnegative().optional().describe('Default 20, cap 200.'),
   session: SESSION_READ,
 };
 

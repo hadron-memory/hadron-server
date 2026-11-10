@@ -27,6 +27,7 @@ import type { Express, Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
 import { safeEqual } from '../lib/constantTime.js';
 import { runSlackOperation } from '../lib/slackClient.js';
+import { respondInternalFault } from '../lib/internalFault.js';
 
 /** The event kinds the tool sends (spec 043). */
 export type SlackEventKind = 'slack.command' | 'slack.interaction' | 'slack.message.received' | 'slack.gap';
@@ -230,8 +231,7 @@ export function mountSlackEventRoutes(app: Express): void {
       await dispatchSlackEvent(req.body);
       res.status(202).json({ ok: true });
     } catch (err) {
-      console.error('[slack-events] dispatch failed:', err);
-      res.status(500).json({ error: 'dispatch failed' });
+      respondInternalFault(res, 'slack-events', err);
     }
   });
 }

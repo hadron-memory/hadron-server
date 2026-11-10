@@ -57,3 +57,29 @@ describe('mentionReachSql', () => {
     }
   });
 });
+
+describe('S3 versioned reach history', () => {
+  it('preserves legacy team stamps but never grants ON-era bare team global reach across rollback', () => {
+    const legacy = reachEnvelopeOf({ mentions: ['team'], broadcastWakes: true });
+    const modern = reachEnvelopeOf({ mentions: ['team'], broadcastWakes: true, teamTagsVersion: 1, teamBroadcastWorkerIds: [] });
+    expect(reachesWorker(legacy, ['w'], ['liam'])).toBe(true);
+    expect(reachesWorker(modern, ['w'], ['liam'])).toBe(false);
+    const subtree = reachEnvelopeOf({ mentions: ['team.head.all', 'all'], broadcastWakes: false, teamTagsVersion: 1, teamBroadcastWorkerIds: ['w'] });
+    expect(reachesWorker(subtree, ['w'], ['liam'])).toBe(true);
+    expect(reachesWorker(subtree, ['outside'], ['rook'])).toBe(false);
+  });
+});
+
+it('S3 SQL filters subtree snapshots before sampling, with strict version/global stamps', async () => {
+  const rows = [
+    {mentions:['team'],broadcastWakes:true},
+    {mentions:['team'],broadcastWakes:true,teamTagsVersion:1,teamBroadcastWorkerIds:[]},
+    {mentions:['team.head.all','all'],broadcastWakes:false,teamTagsVersion:1,teamBroadcastWorkerIds:['w']},
+    {mentions:[],teamTagsVersion:1,teamBroadcastWorkerIds:['elsewhere']},
+    {mentions:['all'],broadcastWakes:true,teamTagsVersion:1,teamBroadcastWorkerIds:[]},
+    {mentions:['all'],broadcastWakes:'true',teamTagsVersion:1,teamBroadcastWorkerIds:['not-w']},
+  ];
+  const values = Prisma.join(rows.map((d,i)=>Prisma.sql`(${i}::int,${JSON.stringify(d)}::jsonb)`));
+  const result = await db.$queryRaw<Array<{i:number}>>(Prisma.sql`SELECT i FROM (VALUES ${values}) v(i,d) WHERE ${mentionReachSql(Prisma.sql`d`,Prisma.sql`ARRAY['liam']::text[]`,Prisma.sql`ARRAY['w']::text[]`)} ORDER BY i`);
+  expect(result.map(r=>r.i)).toEqual([0,2,4]);
+});

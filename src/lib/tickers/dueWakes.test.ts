@@ -70,7 +70,7 @@ async function say(ch: typeof channel, body: string, data: Record<string, unknow
 }
 const mention = (...mentions: string[]) => ({ mentions });
 const mkTicker = (over: Record<string, unknown> = {}) =>
-  db.ticker.create({ data: { id: generateId(), appId: app.id, ownerUserId: manager.id, name: 'Eng', slug: `eng-${generateId().slice(-5)}`, cadenceSeconds: 600, anchorAt: new Date(Date.now() - 3600_000), ...over } });
+  db.ticker.create({ data: { tickCode: 'tick.fixture', id: generateId(), appId: app.id, ownerUserId: manager.id, name: 'Eng', slug: `eng-${generateId().slice(-5)}`, cadenceSeconds: 600, anchorAt: new Date(Date.now() - 3600_000), ...over } });
 const subscribe = (tickerId: string, workerId: string) =>
   db.tickerSubscription.create({ data: { id: generateId(), tickerId, workerId, createdBy: manager.id } });
 const due = (c: Context, extra: Record<string, unknown> = {}) => Q.dueWakes({}, { appRef: app.id, ...extra }, c);
@@ -199,7 +199,7 @@ describe('ticks and relevance through the whole loader', () => {
     await say(channel, 'plain news');
     const page = await due(ctx(manager.id));
     expect(page.wakes).toHaveLength(1);
-    expect(page.wakes[0].reasons).toEqual([{ kind: 'TICK', ticker: expect.objectContaining({ id: t.id }), task: null }]);
+    expect(page.wakes[0].reasons).toEqual([{ kind: 'TICK', ticker: expect.objectContaining({ id: t.id }), task: null, tickDueAt: expect.any(Date), action: { code: 'tick.fixture', state: 'UNMAPPED' } }]);
     expect(page.wakes[0].channels[0]).toMatchObject({ fromSeq: 1, throughSeq: 1 });
     expect(page.wakes[0]).toMatchObject({ unread: 1, unreadMentions: 0 });
   });
@@ -382,7 +382,7 @@ describe('#2068 (R49/R54) — a ticker with reason every-tick, through the whole
     await db.ticker.update({ where: { id: quiet.id }, data: { reasons: ['every-tick'] } });
     const page = await due(ctx(manager.id));
     expect(ids(page)).toEqual([liam.id]);
-    expect(page.wakes[0].reasons).toEqual([{ kind: 'TICK', ticker: expect.objectContaining({ id: quiet.id }), task: null }]);
+    expect(page.wakes[0].reasons).toEqual([{ kind: 'TICK', ticker: expect.objectContaining({ id: quiet.id }), task: null, tickDueAt: expect.any(Date), action: { code: 'tick.fixture', state: 'UNMAPPED' } }]);
     expect(page.wakes[0].channels).toEqual([]);
     expect(page.wakes[0]).toMatchObject({ unread: 0, unreadMentions: 0 });
     const ack = await M.acknowledgeWakes({}, { proofs: [page.wakes[0].proof] }, ctx(manager.id));
@@ -498,8 +498,8 @@ describe('#2068 (R49/R54) — a ticker with reason every-tick, through the whole
 
   it('a ticker row created before the column existed reads as [read-team-channel] (the migration default), naming no ticker', async () => {
     const id = generateId();
-    await db.$executeRaw`INSERT INTO tickers (id, app_id, name, slug, cadence_seconds, anchor_at, channel_ids, relevance, enabled, owner_user_id, created_at)
-      VALUES (${id}, ${app.id}, 'Old', 'old', 600, now(), '{}', 'ALL', true, ${manager.id}, now())`;
+    await db.$executeRaw`INSERT INTO tickers (id, app_id, name, slug, tick_code, cadence_seconds, anchor_at, channel_ids, relevance, enabled, owner_user_id, created_at)
+      VALUES (${id}, ${app.id}, 'Old', 'old', 'tick.old', 600, now(), '{}', 'ALL', true, ${manager.id}, now())`;
     expect((await db.ticker.findUniqueOrThrow({ where: { id } })).reasons).toEqual(['read-team-channel']);
   });
 });
@@ -1374,7 +1374,24 @@ describe('#2138 §3.3 — the live-check reason through the whole loader', () =>
     expect(ids(await due(ctx(manager.id)))).toContain(liam.id);
   });
 
-  it('paused, isolated-by-pause and a TEAM pause are never due', async () => {
+  it('#3606: a TEAM pause offers its stop notice alone, holding ticks and mentions', async () => {
+    const t = await liveTicker();
+    await subscribe(t.id, liam.id);
+    await task(liam.id);
+    await say(channel, 'synthetic @liam', { mentions: ['liam'] });
+    expect((await due(ctx(manager.id))).wakes.flatMap((w: any) => w.reasons).length).toBeGreaterThan(0);
+    await db.app.update({ where: { id: app.id }, data: { teamPausedAt: new Date() } });
+    const notice = await db.agentTeamEvent.create({ data: { appId: app.id, type: 'stop.notice', subjectWorkerId: liam.id,
+      payload: { signalId: generateId(), level: 'pause', notice: 'stop', interrupt: false } } });
+    const page = await due(ctx(manager.id), { accepts: ['STOP'] });
+    expect(page.wakes).toHaveLength(1);
+    expect(page.wakes[0].worker.id).toBe(liam.id);
+    expect(page.wakes[0].reasons.map((r: any) => r.kind)).toEqual(['STOP']);
+    expect(page.wakes[0].reasons[0].stop.eventId).toBe(notice.id);
+    expect(page.wakes[0].channels).toEqual([]);
+  });
+
+  it('paused workers and a TEAM pause are never due', async () => {
     const t = await liveTicker();
     await subscribe(t.id, liam.id);
     await task(liam.id);
@@ -1418,5 +1435,25 @@ describe('#2138 §3.3 — the live-check reason through the whole loader', () =>
     expect(ids(await due(ctx(manager.id)))).toEqual([liam.id]);
     await stampCheck(liam.id, 30);
     expect(ids(await due(ctx(manager.id)))).toEqual([]);
+  });
+});
+
+describe('S3 immutable team reach before wake sampling', () => {
+  afterEach(() => vi.unstubAllEnvs());
+  it('finds a real ordinary-author team post beyond irrelevant rows, without extending global @all', async () => {
+    vi.stubEnv('TEAM_TAGS_ENABLED','true');
+    post.mockRestore();
+    const { writeReportsTo } = await import('../workerReportsTo.js');
+    await db.$transaction(tx=>writeReportsTo(tx,{appId:app.id,workerId:liam.id,to:rook.id,actor:{userId:manager.id,workerId:null,agentId:null},setBy:'app-manager'}));
+    const solo = await mkWorker('Solo',{heldByUserId:holderB.id,heldAt:new Date()});
+    await db.registerEntry.updateMany({where:{attendeeWorkerId:{in:[liam.id,rook.id,solo.id]}},data:{mentionOnly:true}});
+    for (let i=0;i<10;i++) await say(channel,`irrelevant ${i}`,{teamTagsVersion:1,teamBroadcastWorkerIds:[solo.id]});
+    const posted = await teamChatMutations.createTeamChatMessage({}, {appRef:app.id,body:'@team.rook.all @all',sessionRef:null,replyToSeq:null},ctx(holderA.id));
+    expect(posted.broadcastWakes).toBe(false);
+    await db.$transaction(tx=>writeReportsTo(tx,{appId:app.id,workerId:liam.id,to:null,actor:{userId:manager.id,workerId:null,agentId:null},setBy:'app-manager'}));
+    vi.stubEnv('TEAM_TAGS_ENABLED','false');
+    const page = await computeDueWakes({ctx:ctx(manager.id),app:{id:app.id,organizationId:org.id,ownerUserId:null},reader:{manager:true,userId:manager.id},requester:{userId:manager.id},workerIds:[liam.id,rook.id],scan:{pageRows:1,maxRows:2}});
+    expect(page.wakes.map(w=>w.workerId).sort()).toEqual([liam.id,rook.id].sort());
+    expect(page.wakes.every(w=>w.wake.channels[0]?.latestMentionSeq===posted.seq)).toBe(true);
   });
 });

@@ -1,0 +1,974 @@
+/** #2168 / cor:dmo:050:06,:11: one-hop installation without an AppAgent row. */
+import { beforeEach, expect, it, vi } from 'vitest';
+import { db } from '../../../integrations/db/client.js';
+import { cleanDb } from '../../../test/helpers.js';
+import { generateId } from '../../../lib/id.js';
+import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
+import { compileBootPrompt } from './compileBootPrompt.js';
+import { resolveServedBootPrompt } from '../../../lib/bootPrompt/serve.js';
+import { resolveRegister } from '../../../lib/resolveRegister.js';
+import { computeApprovalHash } from '../../../lib/approvalHash.js';
+import { loadOfferedMemberRoles } from '../../../lib/memberRoles.js';
+import { lockAppInstallation, listUnfilteredAppInstallations, readInstallBootPrompt } from '../../../lib/appInstallations.js';
+import { resolvers, type Context } from './resolvers.js';
+vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
+  writeNodeToGit: vi.fn().mockResolvedValue(undefined),
+}));
+const M = resolvers.Mutation as any;
+let user: { id: string },
+  org: { id: string },
+  app: { id: string },
+  parent: { id: string },
+  role: { id: string };
+const ctx = (): Context => ({ db, userId: user.id, roles: ['READER'] });
+async function agent(name: string, personaRole: string) {
+  const a = await M.createAgent(
+    {},
+    { orgId: org.id, name, personaRole },
+    ctx(),
+  );
+  await serveAgentBootPrompt(db, a.id, 'DERIVED {{worker.role}}');
+  return a;
+}
+async function edge(p = parent.id, child = role.id, required = true) {
+  await db.agentOrgGrant.upsert({
+    where: { orgId_agentId: { orgId: org.id, agentId: child } },
+    create: {
+      orgId: org.id,
+      agentId: child,
+      activatedAt: new Date(),
+      revokedAt: null,
+    },
+    update: { activatedAt: new Date(), revokedAt: null },
+  });
+  return db.agentImport.create({
+    data: {
+      parentAgentId: p,
+      importedAgentId: child,
+      position: 100,
+      required,
+      agentOrgGrantOrgId: org.id,
+      agentOrgGrantAgentId: child,
+    },
+  });
+}
+const cast = (extra: Record<string, unknown> = {}) =>
+  M.castWorker(
+    {},
+    { appRef: app.id, agentRef: role.id, name: 'Derived', ...extra },
+    ctx(),
+  );
+const refuse = async () => {
+  await expect(cast()).rejects.toMatchObject({
+    extensions: { code: 'WORKER_AGENT_NOT_INSTALLED', appId: app.id },
+  });
+  await expect(
+    (resolvers.Query as any).castWorkerPreview(
+      {},
+      { appRef: app.id, agentRef: role.id, name: 'Derived' },
+      ctx(),
+    ),
+  ).rejects.toMatchObject({
+    extensions: { code: 'WORKER_AGENT_NOT_INSTALLED', appId: app.id },
+  });
+  expect(await db.worker.count({ where: { appId: app.id } })).toBe(0);
+};
+beforeEach(async () => {
+  await cleanDb(db);
+  org = await db.organization.create({
+    data: {
+      name: 'Derived',
+      urn: `derived-${generateId().toLowerCase()}.example`,
+    },
+  });
+  user = await db.user.create({
+    data: { handle: `derived-${generateId()}`, roles: ['READER'] },
+  });
+  await db.orgMember.create({
+    data: { organizationId: org.id, userId: user.id, role: 'ADMIN' },
+  });
+  app = await db.app.create({
+    data: {
+      organizationId: org.id,
+      name: 'Derived',
+      urn: `derived-${generateId().toLowerCase()}.example:team`,
+    },
+  });
+  parent = await agent('Importer', 'suite');
+  role = await agent('Imported', 'engineer');
+  await db.appAgent.create({ data: { appId: app.id, agentId: parent.id } });
+  await edge();
+});
+it.each([true, false])(
+  'casts a direct import (required=%s), renders its own prompt, and writes no install row',
+  async (required) => {
+    await db.agentImport.update({
+      where: {
+        parentAgentId_importedAgentId: {
+          parentAgentId: parent.id,
+          importedAgentId: role.id,
+        },
+      },
+      data: { required },
+    });
+    const preview = await (resolvers.Query as any).castWorkerPreview(
+      {},
+      { appRef: app.id, agentRef: role.id, name: 'Derived' },
+      ctx(),
+    );
+    expect(preview.prompt).toContain('DERIVED engineer');
+    const w = await cast();
+    expect(await db.worker.findUnique({ where: { id: w.id } })).toMatchObject({
+      agentId: role.id,
+      role: 'engineer',
+    });
+    expect(
+      await db.appAgent.count({ where: { appId: app.id, agentId: role.id } }),
+    ).toBe(0);
+  },
+);
+it('casts by role from the derived tier', async () => {
+  const w = await cast({ agentRef: undefined, role: ' ENGINEER ' });
+  expect(await db.worker.findUnique({ where: { id: w.id } })).toMatchObject({
+    agentId: role.id,
+  });
+});
+it('prefers an installed role over its derived twin', async () => {
+  await db.agent.update({
+    where: { id: parent.id },
+    data: { personaRole: 'engineer' },
+  });
+  const w = await cast({ agentRef: undefined, role: 'engineer' });
+  expect(await db.worker.findUnique({ where: { id: w.id } })).toMatchObject({
+    agentId: parent.id,
+  });
+});
+it('refuses ambiguity within the derived tier', async () => {
+  const twin = await agent('Twin', 'engineer');
+  await db.agentOrgGrant.create({
+    data: {
+      orgId: org.id,
+      agentId: twin.id,
+      activatedAt: new Date(),
+      revokedAt: null,
+    },
+  });
+  await db.agentImport.create({
+    data: {
+      parentAgentId: parent.id,
+      importedAgentId: twin.id,
+      position: 200,
+      agentOrgGrantOrgId: org.id,
+      agentOrgGrantAgentId: twin.id,
+    },
+  });
+  await expect(
+    cast({ agentRef: undefined, role: 'engineer' }),
+  ).rejects.toMatchObject({ extensions: { code: 'WORKER_AGENT_AMBIGUOUS' } });
+});
+it('refuses a non-imported agent', async () => {
+  await db.agentImport.deleteMany({});
+  await refuse();
+});
+it('removal stops new casts but leaves the existing Worker unchanged', async () => {
+  const w = await cast();
+  const before = await db.worker.findUnique({ where: { id: w.id } });
+  await db.agentImport.deleteMany({});
+  await expect(cast({ name: 'Second' })).rejects.toMatchObject({
+    extensions: { code: 'WORKER_AGENT_NOT_INSTALLED' },
+  });
+  expect(await db.worker.findUnique({ where: { id: w.id } })).toEqual(before);
+});
+it('does not borrow an importer installed in another App', async () => {
+  const other = await db.app.create({
+    data: {
+      organizationId: org.id,
+      name: 'Other',
+      urn: `other-${generateId().toLowerCase()}.example:team`,
+    },
+  });
+  await db.appAgent.update({
+    where: { appId_agentId: { appId: app.id, agentId: parent.id } },
+    data: { appId: other.id },
+  });
+  await refuse();
+});
+it('does not derive through another derived import', async () => {
+  const next = await agent('Next', 'next');
+  await edge(role.id, next.id);
+  role = next;
+  await refuse();
+});
+it('refuses a deleted importer', async () => {
+  await db.agent.update({
+    where: { id: parent.id },
+    data: { deletedAt: new Date() },
+  });
+  await refuse();
+});
+it('uses the App org grant and never reactivates a revoked grant', async () => {
+  await db.agentOrgGrant.update({
+    where: { orgId_agentId: { orgId: org.id, agentId: role.id } },
+    data: { revokedAt: new Date() },
+  });
+  await expect(cast()).rejects.toMatchObject({
+    extensions: { code: 'AGENT_ORG_GRANT_INACTIVE' },
+  });
+  expect(await db.worker.count()).toBe(0);
+});
+it('offers the derived Agent member roles', async () => {
+  await db.agent.update({
+    where: { id: role.id },
+    data: { installationPolicy: { memberRoles: ['derived-member'] } },
+  });
+  expect((await loadOfferedMemberRoles(db, app.id)).roles).toContain(
+    'derived-member',
+  );
+});
+it('explicit install survives import removal', async () => {
+  await db.appAgent.create({ data: { appId: app.id, agentId: role.id } });
+  await db.agentImport.deleteMany({});
+  const w = await cast();
+  expect(w.id).toBeTruthy();
+});
+
+it('customises a derived install lazily without writing an AppAgent row', async () => {
+  expect(
+    await db.memory.count({
+      where: { appId: app.id, installOfAgentId: role.id },
+    }),
+  ).toBe(0);
+  const node = await M.createNode(
+    {},
+    {
+      input: {
+        install: { appRef: app.id, agentRef: role.id },
+        loc: 'prompts:derived',
+        name: 'Derived',
+        content: 'custom',
+      },
+    },
+    ctx(),
+  );
+  const memories = await db.memory.findMany({
+    where: { appId: app.id, installOfAgentId: role.id, isInstallMemory: true },
+  });
+  expect(memories).toHaveLength(1);
+  expect(node.memoryId).toBe(memories[0].id);
+  expect(
+    await db.appAgent.count({ where: { appId: app.id, agentId: role.id } }),
+  ).toBe(0);
+});
+it('exposes derived installations in the App roster with their kind', async () => {
+  const rows = await (resolvers.App as any).appAgents(app, {}, ctx());
+  expect(rows).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        agentId: role.id,
+        installationKind: 'DERIVED',
+      }),
+    ]),
+  );
+  expect(rows).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ agentId: parent.id, installationKind: 'ROW' }),
+    ]),
+  );
+});
+it('keeps installed-tier role ambiguity even when a derived role matches', async () => {
+  const twin = await agent('Installed twin', 'engineer');
+  await db.appAgent.create({ data: { appId: app.id, agentId: twin.id } });
+  await db.agent.update({
+    where: { id: parent.id },
+    data: { personaRole: 'engineer' },
+  });
+  await expect(
+    cast({ agentRef: undefined, role: 'engineer' }),
+  ).rejects.toMatchObject({ extensions: { code: 'WORKER_AGENT_AMBIGUOUS' } });
+});
+it('adds no derived installations to a user-owned App', async () => {
+  await db.app.update({
+    where: { id: app.id },
+    data: { organizationId: null, ownerUserId: user.id },
+  });
+  await refuse();
+});
+it.each(['ROW', 'DERIVED'])(
+  'keeps the staffing gate unchanged for %s installations',
+  async (kind) => {
+    if (kind === 'ROW')
+      await db.appAgent.create({ data: { appId: app.id, agentId: role.id } });
+    await db.orgMember.update({
+      where: {
+        organizationId_userId: { organizationId: org.id, userId: user.id },
+      },
+      data: { role: 'READER' },
+    });
+    await expect(cast()).rejects.toMatchObject({
+      extensions: { code: 'FORBIDDEN' },
+    });
+    expect(await db.worker.count()).toBe(0);
+  },
+);
+it('an explicit install later writes its row and survives removal', async () => {
+  await M.installAgentIntoApp({}, { appRef: app.id, agentRef: role.id }, ctx());
+  expect(
+    await db.appAgent.count({ where: { appId: app.id, agentId: role.id } }),
+  ).toBe(1);
+  await db.agentImport.deleteMany({});
+  const w = await cast();
+  expect(w.id).toBeTruthy();
+});
+
+it('compiles and serves an App-level prompt for a derived Agent, retaining it on explicit install', async () => {
+  const own = await db.agent.findUniqueOrThrow({ where: { id: role.id } });
+  await db.node.create({
+    data: {
+      memoryId: own.systemMemoryId!,
+      loc: 'boot:source',
+      name: 'Source',
+      content: 'App compiled text',
+      role: 'boot-prompt',
+    },
+  });
+  const compiled = await compileBootPrompt(ctx(), {
+    kind: 'APP_AGENT',
+    appId: app.id,
+    agentId: role.id,
+  });
+  const node = await db.node.findUniqueOrThrow({
+    where: { id: compiled.nodeId },
+  });
+  await db.node.update({
+    where: { id: node.id },
+    data: {
+      approvedRevNo: node.revSeq,
+      approvedAt: new Date(),
+      approvedByInfo: 'test',
+      approvalHash: computeApprovalHash({
+        title: node.name,
+        abstract: node.abstract,
+        content: node.content,
+      }),
+    },
+  });
+  const memory = await db.memory.findUniqueOrThrow({
+    where: { id: compiled.memoryId },
+  });
+  expect(
+    (
+      await db.appAgentCustomization.findUniqueOrThrow({
+        where: { appId_agentId: { appId: app.id, agentId: role.id } },
+      })
+    ).bootPromptNodeId,
+  ).toBe(node.id);
+  expect(
+    await db.appAgent.count({ where: { appId: app.id, agentId: role.id } }),
+  ).toBe(0);
+  const agentRow = await db.agent.findUniqueOrThrow({ where: { id: role.id } });
+  const before = await resolveServedBootPrompt(db, {
+    appId: app.id,
+    agent: agentRow,
+    surface: 'bind',
+  });
+  expect(before).toMatchObject({
+    pointerLevel: 'APP_AGENT',
+    compiledNodeId: node.id,
+  });
+  await M.installAgentIntoApp({}, { appRef: app.id, agentRef: role.id }, ctx());
+  await db.agentImport.deleteMany({});
+  const after = await resolveServedBootPrompt(db, {
+    appId: app.id,
+    agent: agentRow,
+    surface: 'bind',
+  });
+  expect(after).toMatchObject({
+    pointerLevel: 'APP_AGENT',
+    compiledNodeId: node.id,
+  });
+});
+
+for (const removal of ['import', 'importer-install'] as const) {
+ for (const operation of ['cast', 'change'] as const) {
+  it(`does not ${operation} from a stale witness when ${removal} removal wins the row-lock race`, async () => {
+    const existing = operation === 'change'
+      ? await M.castWorker({}, {appRef:app.id,agentRef:parent.id,name:'Before'},ctx()) : null;
+    const initialCount = existing ? 1 : 0;
+    let release!: () => void, ready!: () => void;
+    const wait = new Promise<void>((r) => {
+      release = r;
+    });
+    const started = new Promise<void>((r) => {
+      ready = r;
+    });
+    let blocker = 0;
+    const removing = db.$transaction(
+      async (tx) => {
+        blocker = (
+          await tx.$queryRaw<
+            Array<{ pid: number }>
+          >`SELECT pg_backend_pid() AS pid`
+        )[0].pid;
+        if (removal === 'import')
+          await tx.agentImport.deleteMany({
+            where: { parentAgentId: parent.id, importedAgentId: role.id },
+          });
+        else
+          await tx.appAgent.deleteMany({
+            where: { appId: app.id, agentId: parent.id },
+          });
+        ready();
+        await wait;
+      },
+      { timeout: 15000 },
+    );
+    await started;
+    const pending = (existing
+      ? M.changeWorkerAgent({}, {workerRef:existing.id,agentRef:role.id},ctx()) : cast()).then(
+      (value: unknown) => ({ value }),
+      (error: unknown) => ({ error }),
+    );
+    try {
+      await vi.waitFor(
+        async () => {
+          const rows = await db.$queryRaw<
+            Array<{ pid: number }>
+          >`SELECT pid FROM pg_stat_activity WHERE ${blocker} = ANY(pg_blocking_pids(pid))`;
+          expect(rows.length).toBeGreaterThan(0);
+        },
+        { timeout: 5000, interval: 10 },
+      );
+      expect(await db.worker.count({ where: { appId: app.id } })).toBe(initialCount);
+    } finally {
+      release();
+      await removing;
+    }
+    expect(await pending).toMatchObject({
+      error: { extensions: { code: 'WORKER_AGENT_NOT_INSTALLED' } },
+    });
+    expect(await db.worker.count({ where: { appId: app.id } })).toBe(initialCount);
+    if (existing) expect((await db.worker.findUniqueOrThrow({where:{id:existing.id}})).agentId).toBe(parent.id);
+  });
+ }
+}
+
+it('uses the App org license, never the importing org license', async () => {
+  const customer = await db.organization.create({
+    data: {
+      name: 'Customer',
+      urn: `customer-${generateId().toLowerCase()}.example`,
+    },
+  });
+  await db.orgMember.create({
+    data: { organizationId: customer.id, userId: user.id, role: 'ADMIN' },
+  });
+  await db.app.update({
+    where: { id: app.id },
+    data: { organizationId: customer.id },
+  });
+  await db.agent.update({
+    where: { id: role.id },
+    data: { visibility: 'PUBLIC' },
+  });
+  await expect(cast()).rejects.toMatchObject({
+    extensions: { code: 'AGENT_ORG_GRANT_REQUIRED' },
+  });
+  expect(await db.worker.count()).toBe(0);
+  await db.agentOrgGrant.create({
+    data: { orgId: customer.id, agentId: role.id, activatedAt: new Date() },
+  });
+  expect((await cast()).id).toBeTruthy();
+});
+it('a non-reader App member can cast a derived Agent without the explicit-install CONTRIBUTOR floor', async () => {
+  await db.orgMember.update({
+    where: {
+      organizationId_userId: { organizationId: org.id, userId: user.id },
+    },
+    data: { role: 'READER' },
+  });
+  await db.appMember.create({
+    data: { appId: app.id, userId: user.id, role: 'member' },
+  });
+  expect((await cast()).id).toBeTruthy();
+  await expect(
+    M.installAgentIntoApp({}, { appRef: app.id, agentRef: role.id }, ctx()),
+  ).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+  expect(
+    await db.appAgent.count({ where: { appId: app.id, agentId: role.id } }),
+  ).toBe(0);
+});
+
+it('recognises a derived Agent as a register attendee without an install row', async () => {
+  const register = await resolveRegister(db, {
+    attendee: { agentId: role.id, appId: app.id },
+    actor: ctx(),
+  });
+  expect(register).not.toBeNull();
+});
+it('reports a derived Worker live session through the existing activity gate', async () => {
+  const w = await cast();
+  expect(
+    await (resolvers.Worker as any).hasLiveSession(
+      { id: w.id, appId: app.id },
+      {},
+      ctx(),
+    ),
+  ).toBe(false);
+  await db.session.create({
+    data: {
+      id: generateId(),
+      type: 'DEVELOPER',
+      userId: user.id,
+      appId: app.id,
+      workerId: w.id,
+      agentId: role.id,
+    },
+  });
+  expect(
+    await (resolvers.Worker as any).hasLiveSession(
+      { id: w.id, appId: app.id },
+      {},
+      ctx(),
+    ),
+  ).toBe(true);
+});
+
+it.each(['node', 'memory'] as const)(
+  'never falls through when a derived App prompt target %s is deleted',
+  async (deleted) => {
+    const own = await db.agent.findUniqueOrThrow({ where: { id: role.id } });
+    await db.node.create({
+      data: {
+        memoryId: own.systemMemoryId!,
+        loc: 'boot:source',
+        name: 'Source',
+        content: 'Custom',
+        role: 'boot-prompt',
+      },
+    });
+    const compiled = await compileBootPrompt(ctx(), {
+      kind: 'APP_AGENT',
+      appId: app.id,
+      agentId: role.id,
+    });
+    if (deleted === 'node')
+      await db.node.delete({ where: { id: compiled.nodeId } });
+    else
+      await db.memory.update({
+        where: { id: compiled.memoryId },
+        data: { deletedAt: new Date() },
+      });
+    await expect(
+      resolveServedBootPrompt(db, {
+        appId: app.id,
+        agent: own,
+        surface: 'bind',
+      }),
+    ).rejects.toMatchObject({
+      extensions: { code: 'BOOT_PROMPT_TARGET_DELETED' },
+    });
+  },
+);
+
+it('changes an existing Worker to a derived Agent through the same castability source', async () => {
+  const w = await cast({ agentRef: parent.id });
+  await M.changeWorkerAgent({}, { workerRef: w.id, agentRef: role.id }, ctx());
+  expect(await db.worker.findUnique({ where: { id: w.id } })).toMatchObject({
+    agentId: role.id,
+    role: 'engineer',
+  });
+  expect(
+    await db.appAgent.count({ where: { appId: app.id, agentId: role.id } }),
+  ).toBe(0);
+});
+it('never treats saved customisation state as installation authority after import removal', async () => {
+  await M.createNode(
+    {},
+    {
+      input: {
+        install: { appRef: app.id, agentRef: role.id },
+        loc: 'boot:source',
+        name: 'Source',
+        content: 'Custom',
+        role: 'boot-prompt',
+      },
+    },
+    ctx(),
+  );
+  await compileBootPrompt(ctx(), {
+    kind: 'APP_AGENT',
+    appId: app.id,
+    agentId: role.id,
+  });
+  expect(
+    await db.appAgentCustomization.count({
+      where: { appId: app.id, agentId: role.id },
+    }),
+  ).toBe(1);
+  await db.agentImport.deleteMany({});
+  await refuse();
+});
+it('gives an absent Agent and an existing non-imported one the same refusal JSON', async () => {
+  await db.agentImport.deleteMany({});
+  const answer = async (agentRef: string) => {
+    try {
+      await cast({ agentRef });
+      throw new Error('unexpected success');
+    } catch (error) {
+      const e = error as { message: string; extensions: unknown };
+      return { message: e.message, extensions: e.extensions };
+    }
+  };
+  const known = await answer(role.id);
+  expect(await answer(generateId())).toEqual(known);
+  expect(known).toEqual({
+    message:
+      'agentRef must name an Agent installed in this App — casting requires the agent on the roster at cast time.',
+    extensions: { code: 'WORKER_AGENT_NOT_INSTALLED', appId: app.id },
+  });
+});
+
+it.each([
+  { bootPromptNodeId: 'missing-node', bootPromptUrn: null },
+  { bootPromptNodeId: null, bootPromptUrn: 'missing:node' },
+])(
+  'the database rejects a half-written derived prompt pointer: %j',
+  async (pair) => {
+    await expect(
+      db.appAgentCustomization.create({
+        data: { appId: app.id, agentId: role.id, ...pair },
+      }),
+    ).rejects.toThrow(/chk_app_agent_customizations_boot_prompt_pointer_pair/);
+  },
+);
+
+it.each(['org-member', 'platform-admin'] as const)(
+  'Agent-filtered App lists retain tenant/owner limits for %s',
+  async (kind) => {
+    const otherUser = await db.user.create({
+      data: { handle: `other-${generateId()}` },
+    });
+    const otherOrg = await db.organization.create({
+      data: {
+        name: 'Foreign',
+        urn: `foreign-${generateId().toLowerCase()}.example`,
+      },
+    });
+    const foreign = await db.app.create({
+      data: {
+        name: 'Foreign private App',
+        urn: `foreign-${generateId().toLowerCase()}.example:app`,
+        organizationId: kind === 'org-member' ? otherOrg.id : null,
+        ownerUserId: kind === 'platform-admin' ? otherUser.id : null,
+      },
+    });
+    await db.appAgent.create({ data: { appId: foreign.id, agentId: role.id } });
+    const context =
+      kind === 'platform-admin' ? { ...ctx(), roles: ['ADMIN'] } : ctx();
+    const result = await (resolvers.Query as any).apps(
+      {},
+      { filter: { agentId: role.id } },
+      context,
+    );
+    expect(result.items.map((row: { id: string }) => row.id)).not.toContain(
+      foreign.id,
+    );
+    expect(result.items.map((row: { id: string }) => row.id)).toContain(app.id);
+  },
+);
+
+it('serialises an explicit install with a concurrent clear of the derived App prompt', async () => {
+  const own = await db.agent.findUniqueOrThrow({ where: { id: role.id } });
+  await db.node.create({
+    data: {
+      memoryId: own.systemMemoryId!,
+      loc: 'boot:source',
+      name: 'Source',
+      content: 'Custom',
+      role: 'boot-prompt',
+    },
+  });
+  const compiled = await compileBootPrompt(ctx(), {
+    kind: 'APP_AGENT',
+    appId: app.id,
+    agentId: role.id,
+  });
+  let release!: () => void, ready!: () => void;
+  const held = new Promise<void>((r) => {
+    release = r;
+  });
+  const staged = new Promise<void>((r) => {
+    ready = r;
+  });
+  let installerPid = 0;
+  const hookedDb = new Proxy(db, {
+    get(target, key) {
+      if (key === '$transaction')
+        return (work: any, options: any) =>
+          db.$transaction(async (tx) => {
+            const wrapped = new Proxy(tx, {
+              get(transaction, model) {
+                if (model === 'appAgent')
+                  return new Proxy(tx.appAgent, {
+                    get(delegate, method) {
+                      if (method === 'create')
+                        return async (args: any) => {
+                          installerPid = (
+                            await tx.$queryRaw<
+                              Array<{ pid: number }>
+                            >`SELECT pg_backend_pid() AS pid`
+                          )[0].pid;
+                          ready();
+                          await held;
+                          return tx.appAgent.create(args);
+                        };
+                      const value = Reflect.get(delegate, method, delegate);
+                      return typeof value === 'function'
+                        ? value.bind(delegate)
+                        : value;
+                    },
+                  });
+                const value = Reflect.get(transaction, model, transaction);
+                return typeof value === 'function'
+                  ? value.bind(transaction)
+                  : value;
+              },
+            });
+            return work(wrapped);
+          }, options);
+      const value = Reflect.get(target, key, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  const installing = M.installAgentIntoApp(
+    {},
+    { appRef: app.id, agentRef: role.id },
+    { ...ctx(), db: hookedDb },
+  );
+  await Promise.race([
+    staged,
+    installing.then(() => {
+      throw new Error('install never reached the controlled insert');
+    }),
+  ]);
+  let settled = false;
+  const clearing = M.setAppAgentBootPrompt(
+    {},
+    { appRef: app.id, agentRef: role.id, nodeRef: null },
+    ctx(),
+  ).then(
+    (value: unknown) => {
+      settled = true;
+      return { value };
+    },
+    (error: unknown) => {
+      settled = true;
+      return { error };
+    },
+  );
+  try {
+    await vi.waitFor(
+      async () => {
+        const waiting = await db.$queryRaw<
+          Array<{ pid: number }>
+        >`SELECT pid FROM pg_stat_activity WHERE ${installerPid} = ANY(pg_blocking_pids(pid))`;
+        expect(settled || waiting.length > 0).toBe(true);
+      },
+      { timeout: 5000, interval: 10 },
+    );
+  } finally {
+    release();
+    await installing;
+  }
+  const cleared = await clearing;
+  if ('error' in cleared) throw cleared.error;
+  expect(
+    (
+      await db.appAgent.findUniqueOrThrow({
+        where: { appId_agentId: { appId: app.id, agentId: role.id } },
+      })
+    ).bootPromptNodeId,
+  ).toBeNull();
+  expect(
+    (
+      await db.appAgentCustomization.findUniqueOrThrow({
+        where: { appId_agentId: { appId: app.id, agentId: role.id } },
+      })
+    ).bootPromptNodeId,
+  ).toBeNull();
+  expect(compiled.nodeId).toBeTruthy();
+}, 20000);
+
+it('refuses cast when the old import disappears before the edge fence and a replacement commits after that fence', async () => {
+  const transaction = db.$transaction.bind(db) as any;
+  let removed = false, inserted = false;
+  const spy = vi.spyOn(db, '$transaction').mockImplementation((async (callback: any, options: any) => {
+    if (typeof callback !== 'function') return transaction(callback, options);
+    return transaction((tx: any) => callback(new Proxy(tx, {
+      get(target, property) {
+        if (property !== '$queryRaw') return Reflect.get(target, property);
+        return async (parts: TemplateStringsArray, ...values: unknown[]) => {
+          const result = await target.$queryRaw(parts, ...values);
+          const sql = Array.from(parts).join('?');
+          if (!removed && sql.includes('FROM app_agents aa WHERE')) {
+            await db.agentImport.deleteMany({where:{parentAgentId:parent.id,importedAgentId:role.id}});
+            removed = true;
+          } else if (removed && !inserted && sql.includes('SELECT parent_agent_id,imported_agent_id FROM agent_imports')) {
+            expect(result).toEqual([]);
+            // A separate committed transaction creates an otherwise valid
+            // same-Agent witness after the deciding edge set was captured.
+            await db.agentImport.create({data:{parentAgentId:parent.id,importedAgentId:role.id,
+              position:100,required:true,agentOrgGrantOrgId:org.id,agentOrgGrantAgentId:role.id}});
+            inserted = true;
+          }
+          return result;
+        };
+      },
+    })), options);
+  }) as any);
+  try {
+    await expect(cast()).rejects.toMatchObject({extensions:{code:'WORKER_AGENT_NOT_INSTALLED'}});
+    expect(removed).toBe(true);
+    expect(inserted).toBe(true);
+    expect(await db.agentImport.count({where:{parentAgentId:parent.id,importedAgentId:role.id}})).toBe(1);
+    expect(await db.worker.count({where:{appId:app.id}})).toBe(0);
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+for (const operation of ['cast','change'] as const) {
+ it(`holds the imported witness through the ${operation} write`,async()=>{
+  const existing = operation==='change'
+    ? await M.castWorker({}, {appRef:app.id,agentRef:parent.id,name:'BeforeWrite'},ctx()) : null;
+  const transaction = db.$transaction.bind(db) as any;
+  let removing:Promise<unknown>|undefined;
+  let checked=false;
+  const spy=vi.spyOn(db,'$transaction').mockImplementation((async(callback:any,options:any)=>{
+    if(typeof callback!=='function')return transaction(callback,options);
+    return transaction((tx:any)=>callback(new Proxy(tx,{
+      get(target,property){
+        if(property!=='worker')return Reflect.get(target,property);
+        return new Proxy(target.worker,{
+          get(delegate,method){
+            if(method!==(existing?'update':'create'))return Reflect.get(delegate,method);
+            return async(args:any)=>{
+              if(!checked && args.data?.agentId===role.id){
+                const writerPid=(await target.$queryRaw`SELECT pg_backend_pid() AS pid`)[0].pid;
+                let ready!:()=>void;
+                const started=new Promise<void>(resolve=>{ready=resolve;});
+                let removerPid=0;
+                removing=transaction(async(remover:any)=>{
+                  removerPid=(await remover.$queryRaw`SELECT pg_backend_pid() AS pid`)[0].pid;
+                  ready();
+                  await remover.agentImport.deleteMany({where:{parentAgentId:parent.id,importedAgentId:role.id}});
+                },{timeout:15000});
+                await started;
+                await vi.waitFor(async()=>{
+                  const rows=await db.$queryRaw<Array<{blocked:boolean}>>`
+                    SELECT ${writerPid}=ANY(pg_blocking_pids(${removerPid}::int)) AS blocked`;
+                  expect(rows[0].blocked).toBe(true);
+                },{timeout:2000,interval:10});
+                checked=true;
+              }
+              return Reflect.get(delegate,method)(args);
+            };
+          },
+        });
+      },
+    })),options);
+  }) as any);
+  try{
+    const call=existing?M.changeWorkerAgent({}, {workerRef:existing.id,agentRef:role.id},ctx()):cast();
+    await expect(call).resolves.toMatchObject({agentId:role.id});
+    expect(checked).toBe(true);
+  }finally{
+    spy.mockRestore();
+    if(removing)await removing;
+  }
+  expect(await db.agentImport.count({where:{parentAgentId:parent.id,importedAgentId:role.id}})).toBe(0);
+ },20000);
+}
+
+it.each(['deleted-app','uninstalled-app','deleted-org'] as const)('raw witnesses do not derive membership through a %s',async(state)=>{
+  expect((await listUnfilteredAppInstallations(db,app.id)).map(row=>row.agentId)).toContain(role.id);
+  if(state==='deleted-app')await db.app.update({where:{id:app.id},data:{deletedAt:new Date()}});
+  else if(state==='uninstalled-app')await db.app.update({where:{id:app.id},data:{uninstalledAt:new Date()}});
+  else await db.organization.update({where:{id:org.id},data:{deletedAt:new Date()}});
+  expect((await listUnfilteredAppInstallations(db,app.id)).map(row=>row.agentId)).not.toContain(role.id);
+});
+
+it('held installation witnesses fence App lifecycle writes until the deciding transaction ends',async()=>{
+  let release!:()=>void,held!:()=>void,started!:()=>void;
+  const wait=new Promise<void>(resolve=>{release=resolve;});
+  const ready=new Promise<void>(resolve=>{held=resolve;});
+  const updating=new Promise<void>(resolve=>{started=resolve;});
+  let holderPid=0,updaterPid=0;
+  const holding=db.$transaction(async(tx)=>{
+    holderPid=(await tx.$queryRaw<Array<{pid:number}>>`SELECT pg_backend_pid() AS pid`)[0].pid;
+    expect(await lockAppInstallation(tx,app.id,role.id)).not.toBeNull();
+    held();
+    await wait;
+  },{timeout:15000});
+  await ready;
+  const update=db.$transaction(async(tx)=>{
+    updaterPid=(await tx.$queryRaw<Array<{pid:number}>>`SELECT pg_backend_pid() AS pid`)[0].pid;
+    started();
+    await tx.app.update({where:{id:app.id},data:{deletedAt:new Date()}});
+  },{timeout:15000});
+  await updating;
+  try{
+    await vi.waitFor(async()=>{
+      const rows=await db.$queryRaw<Array<{blocked:boolean}>>`
+        SELECT ${holderPid}=ANY(pg_blocking_pids(${updaterPid}::int)) AS blocked`;
+      expect(rows[0].blocked).toBe(true);
+    },{timeout:2000,interval:10});
+  }finally{
+    release();
+    await holding;
+    await update;
+  }
+},20000);
+
+it('customisation of a non-installed Agent refuses before creating any memory or node',async()=>{
+ await db.agentImport.deleteMany({});
+ const before={memories:await db.memory.count(),nodes:await db.node.count(),pointers:await db.appAgentCustomization.count()};
+ await expect(M.createNode({}, {input:{install:{appRef:app.id,agentRef:role.id},loc:'custom:refused',name:'Refused',content:'no write'}},ctx()))
+  .rejects.toMatchObject({extensions:{code:'AGENT_NOT_INSTALLED'}});
+ expect({memories:await db.memory.count(),nodes:await db.node.count(),pointers:await db.appAgentCustomization.count()}).toEqual(before);
+});
+
+it.each(['ROW','DERIVED'] as const)('the same-App attach gate holds the %s installation witness until its grant commits',async(kind)=>{
+ const {requireAgentMemoryGrant}=await import('./resolvers.helpers.js');
+ if(kind==='ROW')await db.appAgent.create({data:{appId:app.id,agentId:role.id}});
+ const memory=await db.memory.create({data:{organizationId:org.id,appId:app.id,class:'knowledge',name:'Attach fence',urn:`attach-${generateId().toLowerCase()}.example:knowledge`}});
+ const agent=await db.agent.findUniqueOrThrow({where:{id:role.id}});
+ let removal='';
+ await db.$transaction(async(tx)=>{
+  expect(await requireAgentMemoryGrant({...ctx(),db:tx} as Context,agent,memory,'read',memory.id)).toBe('read');
+  removal=await db.$transaction(async(other)=>{
+   await other.$executeRaw`SET LOCAL lock_timeout = '150ms'`;
+   if(kind==='ROW')await other.appAgent.delete({where:{appId_agentId:{appId:app.id,agentId:role.id}}});
+   else await other.agentImport.deleteMany({where:{parentAgentId:parent.id,importedAgentId:role.id}});
+   return 'committed';
+  }).then(String,(e:Error)=>e.message);
+ },{timeout:15000});
+ expect(removal).toMatch(/lock timeout|canceling statement/i);
+});
+
+it('same-App attach refuses an Agent after its last installation witness is removed',async()=>{
+ const {requireAgentMemoryGrant}=await import('./resolvers.helpers.js');
+ const memory=await db.memory.create({data:{organizationId:org.id,appId:app.id,class:'knowledge',name:'Not installed',urn:`attach-${generateId().toLowerCase()}.example:knowledge`}});
+ const agent=await db.agent.findUniqueOrThrow({where:{id:role.id}});
+ await db.agentImport.deleteMany({});
+ await expect(db.$transaction(tx=>requireAgentMemoryGrant({...ctx(),db:tx} as Context,agent,memory,'read',memory.id)))
+  .rejects.toMatchObject({code:'MEMORY_NOT_FOUND'});
+});
+
+it('a saved derived pointer is unavailable once the Agent is no longer installed',async()=>{
+ await db.appAgentCustomization.create({data:{appId:app.id,agentId:role.id,bootPromptNodeId:null,bootPromptUrn:null}});
+ expect(await readInstallBootPrompt(db,app.id,role.id)).toEqual({bootPromptNodeId:null,bootPromptUrn:null});
+ await db.agentImport.deleteMany({});
+ expect(await readInstallBootPrompt(db,app.id,role.id)).toBeNull();
+ expect(await db.appAgentCustomization.count({where:{appId:app.id,agentId:role.id}})).toBe(1);
+});

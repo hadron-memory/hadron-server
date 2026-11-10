@@ -315,6 +315,41 @@ export async function touchLiveSession(
 }
 
 /**
+ * #2694 (cor:agt:020:11 r3): a worker acting through its OWN bound session drives it. Refresh the heartbeat
+ * (`touchLiveSession`, the same input the roster, `worker get` and the `WORKER_TAKEN` gate read) when, and only when,
+ * the session belongs to `workerId` and is LIVE right now. A lapsed session is never revived by a write that merely
+ * carries its id (cor:agt:020:05, #1543: another driver may have bound the worker since; resuming is the resume
+ * door's job), and a session bound to another worker is never touched.
+ *
+ * The CALLER has already established the act succeeded and that the actor may drive the worker (the task gates).
+ * Bookkeeping, never a failure: errors are swallowed, as in {@link touchLiveSession}.
+ */
+export async function touchSessionIfLive(
+  db: Parameters<typeof loadLastEventBySession>[0] & Parameters<typeof touchLiveSession>[0] & {
+    session: { findUnique: (args: { where: { id: string }; select: Record<string, true> }) => Promise<unknown> };
+  },
+  sessionId: string,
+  workerId: string,
+  now: Date = new Date(),
+): Promise<void> {
+  try {
+    const s = (await db.session.findUnique({
+      where: { id: sessionId },
+      select: { workerId: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, deletedAt: true, expiresAt: true },
+    })) as {
+      workerId: string | null; type: SessionType; startedAt: Date; updatedAt: Date | null;
+      autoExpiredAt: Date | null; endedAt: Date | null; deletedAt: Date | null; expiresAt: Date | null;
+    } | null;
+    if (!s || s.deletedAt || s.workerId !== workerId) return;
+    const lastEvent = (await loadLastEventBySession(db, [sessionId])).get(sessionId);
+    if (!isSessionLive(s, lastEvent, now)) return;
+    await touchLiveSession(db, sessionId);
+  } catch (err) {
+    console.warn('[touchSessionIfLive] heartbeat failed:', err);
+  }
+}
+
+/**
  * The `updatedAt` patch for a write to a Session row that must never REVIVE a
  * lapsed session (#1543). Prisma's `@updatedAt` advances the heartbeat column
  * on every `update`, so a display-only or late-attribution write (the kind:pr

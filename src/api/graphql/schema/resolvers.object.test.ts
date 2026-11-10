@@ -190,3 +190,40 @@ describe('findObjects', () => {
     expect(page.objects.map((o: any) => o.name)).toEqual(['Alpha']);
   });
 });
+
+it('object counting does not enable totals for ordinary findNodes browse (#2514)', async () => {
+  await createObject({ memoryRef: memId, type: 'competitor', fields: { name: 'A' } });
+  const ordinary = await Q().findNodes(null, { filter: { memoryIds: [memId], objectType: 'competitor' } }, admin());
+  expect(ordinary.total).toBeNull();
+  const objects = await findObjects({ memoryRef: memId, type: 'competitor' });
+  expect(objects.total).toBe(1);
+});
+
+
+it('conceals object totals from a caller outside the memory scope (#2514)', async () => {
+  await createObject({ memoryRef: memId, type: 'competitor', fields: { name: 'Hidden' } });
+  const outsider = await db.user.create({ data: { githubId: 7732, githubUsername: 'obj-outsider' } });
+  const result = await Q().findObjects(null, { memoryRef: memId, type: 'competitor' },
+    { db, roles: [], userId: outsider.id } as Context);
+  expect(result).toMatchObject({ objects: [], total: 0 });
+});
+
+it('counts the effective collection after inherited overrides and boot-prompt exclusions (#2514)', async () => {
+  const baseMemory = await db.memory.create({ data: { class: 'system', organizationId: orgId, name: 'base objects', urn: 'obj-count:base' } });
+  const childMemory = await db.memory.create({ data: { class: 'system', organizationId: orgId, name: 'child objects', urn: 'obj-count:child' } });
+  const base = await db.agent.create({ data: { organizationId: orgId, name: 'count-base', urn: 'obj-count:base-agent', systemMemoryId: baseMemory.id } });
+  await db.agent.create({ data: { organizationId: orgId, name: 'count-child', urn: 'obj-count:child-agent', systemMemoryId: childMemory.id, extendsAgentId: base.id } });
+  for (const [memoryId, loc, name, role] of [
+    [baseMemory.id, 'competitor:shared', 'Overridden', null],
+    [baseMemory.id, 'competitor:boot', 'Boot', 'boot-prompt'],
+    [baseMemory.id, 'competitor:visible', 'Inherited', null],
+    [childMemory.id, 'competitor:shared', 'Own', null],
+  ]) {
+    await db.node.create({ data: { memoryId: memoryId!, loc: loc!, name: name!, role, objectType: 'competitor', properties: { name } } });
+  }
+  for (const sort of [undefined, { name: 'asc' }]) {
+    const page = await findObjects({ memoryRef: childMemory.id, type: 'competitor', sort, limit: 100 });
+    expect(page.total).toBe(2);
+    expect(page.objects.map((object: any) => object.name).sort()).toEqual(['Inherited', 'Own']);
+  }
+});

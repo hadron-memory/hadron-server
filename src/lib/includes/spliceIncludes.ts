@@ -1,9 +1,13 @@
-import { splitNodeUrn } from '@hadron-memory/urn-lib-js';
+import { includeUrnTarget } from './includeUrnTarget.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { decryptNodeFields } from '../nodeCrypto.js';
 import { sessionKeyCache } from '../sessionKeyCache.js';
 import { revisionApprovalOf, newestApprovedRevisionOf } from '../nodeApproval.js';
-import { locateIncludeTags, IncludeSyntaxError, type IncludeTag } from './parseIncludeTags.js';
+import {
+  locateIncludeTags, locateLiteralIncludeTags, maskCode, IncludeSyntaxError, TooManyIncludeTags, type IncludeTag,
+} from './parseIncludeTags.js';
+import { LiteralGuardCollision } from './literalGuard.js';
+import { ContentResolutionLimitError, ResolutionBudget } from './resolutionBudget.js';
 
 /** Deepest include chain a read follows; past it a reader sees the notice (cor:dmo:150:06). Writes don't enforce it (#2134). */
 export const MAX_RESOLVE_DEPTH = 10;
@@ -28,7 +32,7 @@ type Target = IncludeTarget;
  * belongs to one request's principal; it is never shared across callers.
  */
 export class IncludeReadMemo {
-  readonly memoryByUrn = new Map<string, Promise<string | null>>();
+  readonly targetIdentityByUrn = new Map<string, ReturnType<typeof includeUrnTarget>>();
   readonly targetByAddress = new Map<string, Promise<Target | null>>();
   readonly revisionByKey = new Map<string, Promise<string | null>>();
 }
@@ -41,19 +45,29 @@ export interface SpliceOptions {
    */
   foreign?: boolean;
   memo?: IncludeReadMemo;
+  /**
+   * #2135 — when set, the `{{>` of every include tag written as code is replaced by this guard in the
+   * spliced text, so a later Mustache render cannot treat it as a partial; the caller restores it. Each
+   * source text is judged on its own, before assembly. Unset leaves literal tags as written.
+   */
+  literalGuard?: string;
+  /**
+   * Incremented once for each include that resolved to the notice (missing, unreadable, cyclic, too deep, no
+   * qualifying revision). The resolver's own verdict, so a caller never has to infer failure by searching the
+   * spliced text for the notice, which a successful target may legitimately contain.
+   */
+  broken?: { count: number };
+  /**
+   * hadron-internal#40 — this resolution's budget, shared across the whole traversal (and, in
+   * `compileTemplate`, with the render that follows). Omitted, `spliceIncludes` makes a fresh
+   * one with the default limits, so no caller resolves unbounded.
+   */
+  budget?: ResolutionBudget;
 }
 
-export type IncludeDb = Pick<PrismaClient, 'node' | 'memory' | 'nodeRevision'>;
+export type IncludeDb = Pick<PrismaClient, 'node' | 'memory' | 'nodeRevision' | 'urnAlias'>;
 type Db = IncludeDb;
 
-async function memoryIdOfUrn(db: Db, memo: IncludeReadMemo, urn: string): Promise<string | null> {
-  let hit = memo.memoryByUrn.get(urn);
-  if (!hit) {
-    hit = db.memory.findUnique({ where: { urn }, select: { id: true } }).then(m => m?.id ?? null);
-    memo.memoryByUrn.set(urn, hit);
-  }
-  return hit;
-}
 
 /**
  * Decrypt one sealed field with the memory's cached key. A failure (a key that
@@ -70,14 +84,20 @@ function openSealed(content: string | null, memory: { id: string; isEncrypted: b
 
 /** The stored text of a node the reader may read, or null for missing, deleted, unreadable and keyless-encrypted alike. */
 async function lookupTarget(
-  db: Db, access: Record<string, unknown>, memo: IncludeReadMemo, memoryId: string, loc: string,
+  db: Db, access: Record<string, unknown>, memo: IncludeReadMemo, memoryId: string, loc: string, targetId?: string,
+  budget?: ResolutionBudget,
+  /** The caller already charged this lookup (a URN tag pays for its identity query and its target together). */
+  prepaid = false,
 ): Promise<Target | null> {
-  const key = `${memoryId}\u0000${loc}`;
+  const key = targetId ?? `${memoryId}\u0000${loc}`;
   let hit = memo.targetByAddress.get(key);
+  // A miss costs one lookup whatever it finds: missing, unreadable and readable alike (no oracle).
+  const miss = !hit;
   if (!hit) {
+    if (!prepaid) budget?.chargeLookup();
     hit = (async () => {
       const node = await db.node.findFirst({
-        where: { memoryId, loc, deletedAt: null, AND: [access] },
+        where: { ...(targetId ? { id: targetId } : { loc }), memoryId, deletedAt: null, AND: [access, { memory: { deletedAt: null } }] },
         select: { id: true, memoryId: true, content: true, revSeq: true, memory: { select: { id: true, isEncrypted: true } } },
       });
       if (!node) return null;
@@ -90,14 +110,21 @@ async function lookupTarget(
     })();
     memo.targetByAddress.set(key, hit);
   }
-  return hit;
+  const target = await hit;
+  // Loaded text is charged only for a row the reader may read (the access filter loaded nothing else).
+  if (miss && target) budget?.chargeLoaded(target.content);
+  return target;
 }
 
 /** The stored text of one past revision of `target`, or null. History is never resolved against today's targets. */
-async function lookupRevision(db: Db, memo: IncludeReadMemo, target: Target, revNo: number): Promise<string | null> {
+async function lookupRevision(
+  db: Db, memo: IncludeReadMemo, target: Target, revNo: number, budget?: ResolutionBudget,
+): Promise<string | null> {
   const key = `${target.id}\u0000${revNo}`;
   let hit = memo.revisionByKey.get(key);
+  const miss = !hit;
   if (!hit) {
+    budget?.chargeLookup();
     hit = (async () => {
       const rev = await db.nodeRevision.findFirst({
         where: { nodeId: target.id, revNo },
@@ -118,7 +145,9 @@ async function lookupRevision(db: Db, memo: IncludeReadMemo, target: Target, rev
     })();
     memo.revisionByKey.set(key, hit);
   }
-  return hit;
+  const text = await hit;
+  if (miss) budget?.chargeLoaded(text);
+  return text;
 }
 
 /**
@@ -130,10 +159,15 @@ async function lookupRevision(db: Db, memo: IncludeReadMemo, target: Target, rev
  * null; neither is evidence about approval. A snapshot captured in another memory is not this target's to serve, and
  * an encrypted memory is NOT_APPLICABLE.
  */
-async function approvedText(db: Db, target: Target, pinned: number | undefined): Promise<{ revNo: number; text: string } | null> {
-  const revNo = pinned ?? (await newestApprovedRevisionOf(db, target.id)).found?.revNo;
+async function approvedText(
+  db: Db, target: Target, pinned: number | undefined, budget?: ResolutionBudget,
+): Promise<{ revNo: number; text: string } | null> {
+  // Not memoized, so every approved tag pays for its work. The approval helpers charge each query they run
+  // and each text they load (the search's verdicts and the chosen revision's alike), so a long approval
+  // history is bounded by the read's budget rather than a flat charge (#40).
+  const revNo = pinned ?? (await newestApprovedRevisionOf(db, target.id, undefined, budget)).found?.revNo;
   if (revNo === undefined) return null;
-  const verdict = await revisionApprovalOf(db, target.id, revNo);
+  const verdict = await revisionApprovalOf(db, target.id, revNo, budget, target.memoryId);
   if (verdict.state !== 'APPROVED' || !verdict.served) return null;
   if (verdict.served.memoryId !== target.memoryId) return null;
   return { revNo, text: verdict.served.content ?? '' };
@@ -149,13 +183,22 @@ async function approvedText(db: Db, target: Target, pinned: number | undefined):
  */
 export async function selectIncludeRevision(
   db: IncludeDb, memo: IncludeReadMemo, target: IncludeTarget, settings: IncludeTag['settings'],
+  /** A read's budget. The boot-prompt compile passes none: it has its own limits (cor:agt:040:12). */
+  budget?: ResolutionBudget,
 ): Promise<{ revNo: number; text: string } | null> {
-  if (settings.approved) return approvedText(db, target, settings.rev);
+  if (settings.approved) return approvedText(db, target, settings.rev, budget);
   if (settings.rev !== undefined) {
-    const text = await lookupRevision(db, memo, target, settings.rev);
+    const text = await lookupRevision(db, memo, target, settings.rev, budget);
     return text == null ? null : { revNo: settings.rev, text };
   }
   return { revNo: target.revSeq, text: target.content ?? '' };
+}
+
+function unresolved(opts: SpliceOptions): string {
+  if (opts.broken) opts.broken.count += 1;
+  // The notice is served text: the same bytes for every cause, so it reveals nothing about the target.
+  opts.budget?.chargeSpliced(BROKEN_INCLUDE_NOTICE);
+  return BROKEN_INCLUDE_NOTICE;
 }
 
 async function expandTag(
@@ -164,21 +207,35 @@ async function expandTag(
 ): Promise<string> {
   // `signed` is stored and ignored until the signing ceremony ships (cor:dmo:150:02,
   // Vera's D7): it serves as if absent, and `approved signed` as `approved`.
-  if (level > MAX_RESOLVE_DEPTH) return BROKEN_INCLUDE_NOTICE;
+  // #40: every expansion is charged first, before depth, cycle or any lookup, so an
+  // empty-leaf fan-out (which serves no bytes) is still bounded.
+  opts.budget?.chargeExpansion();
+  if (level > MAX_RESOLVE_DEPTH) return unresolved(opts);
   let memoryId = includerMemoryId;
   let loc = tag.target;
+  let targetId: string | undefined;
+  let prepaid = false;
   if (tag.kind === 'urn') {
-    let parts: { memoryUrn: string; loc: string };
-    try { parts = splitNodeUrn(tag.target); } catch { return BROKEN_INCLUDE_NOTICE; }
-    const id = await memoryIdOfUrn(db, memo, parts.memoryUrn);
-    if (!id || (id !== includerMemoryId && !opts.foreign)) return BROKEN_INCLUDE_NOTICE;
-    memoryId = id;
-    loc = parts.loc;
+    let identity = memo.targetIdentityByUrn.get(tag.target);
+    if (!identity) {
+      // #40: the identity query AND the target lookup are charged here, before
+      // anything depends on what the identity finds. A missing node, a foreign one this read may not follow, an
+      // unreadable one and a readable one then cost the same, so the lookup bound is no existence oracle.
+      opts.budget?.chargeLookup(2);
+      prepaid = true;
+      identity = includeUrnTarget(db, tag.target);
+      memo.targetIdentityByUrn.set(tag.target, identity);
+    }
+    const resolved = await identity;
+    if (!resolved || (resolved.memoryId !== includerMemoryId && !opts.foreign)) return unresolved(opts);
+    memoryId = resolved.memoryId;
+    loc = resolved.loc;
+    targetId = resolved.id;
   }
-  const target = await lookupTarget(db, access, memo, memoryId, loc);
-  if (!target || trail.has(target.id)) return BROKEN_INCLUDE_NOTICE;
-  const selected = await selectIncludeRevision(db, memo, target, tag.settings);
-  if (!selected) return BROKEN_INCLUDE_NOTICE;
+  const target = await lookupTarget(db, access, memo, memoryId, loc, targetId, opts.budget, prepaid);
+  if (!target || trail.has(target.id)) return unresolved(opts);
+  const selected = await selectIncludeRevision(db, memo, target, tag.settings, opts.budget);
+  if (!selected) return unresolved(opts);
   if (!tag.settings.approved && tag.settings.rev === undefined && target.content == null) return '';
   // Rendered per traversal: this node's ancestors and depth travel with it.
   return spliceWithin(db, access, memo, opts, selected.text, target.memoryId, new Set([...trail, target.id]), level + 1);
@@ -188,22 +245,60 @@ async function spliceWithin(
   db: Db, access: Record<string, unknown>, memo: IncludeReadMemo, opts: SpliceOptions,
   content: string, memoryId: string, trail: ReadonlySet<string>, level: number,
 ): Promise<string> {
-  if (!content.includes('{{>')) return content;
+  const guard = opts.literalGuard;
+  // The guard must be absent from every text it will be restored out of, whether or not that text has a tag.
+  if (guard && content.includes(guard)) throw new LiteralGuardCollision();
+  // #40: every piece of text that reaches the output is charged where it is appended, as UTF-8 and
+  // before anything is assembled or parsed. A nested result is made of its own charged pieces, so
+  // it is not charged again; each repetition of a target (a diamond) is charged once per tag.
+  if (!content.includes('{{>')) {
+    opts.budget?.chargeSpliced(content);
+    return content;
+  }
+  // #40: the text is masked once, and the bounded parse runs first, so a text with more tags than the
+  // expansions left refuses before anything else walks its tags. Literal tags are found after the parse.
+  const masked = maskCode(content);
+  let literal: Array<{ index: number; raw: string }> = [];
+  // Copy `content[from, to)`, guarding the opener of each literal tag inside it.
+  const copy = (from: number, to: number): string => {
+    let text = '';
+    let at = from;
+    for (const l of literal) {
+      if (l.index < from || l.index >= to) continue;
+      text += content.slice(at, l.index) + guard + content.slice(l.index + 3, l.index + l.raw.length);
+      at = l.index + l.raw.length;
+    }
+    return text + content.slice(at, to);
+  };
   let tags: Array<IncludeTag & { index: number }>;
   try {
-    tags = locateIncludeTags(content);
+    // #40: every tag located here is expanded, and each expansion is charged, so the
+    // parse builds no more tags than the expansions still allowed. One more refuses before it is built.
+    tags = locateIncludeTags(content, opts.budget?.remainingExpansions(), masked);
   } catch (e) {
-    if (e instanceof IncludeSyntaxError) return content; // a stored malformed tag renders as it always did
+    if (e instanceof TooManyIncludeTags) throw new ContentResolutionLimitError('expansions');
+    if (e instanceof IncludeSyntaxError) { // a stored malformed tag renders as it always did
+      if (guard) literal = locateLiteralIncludeTags(content, masked);
+      const text = copy(0, content.length);
+      opts.budget?.chargeSpliced(text);
+      return text;
+    }
     throw e;
   }
+  if (guard) literal = locateLiteralIncludeTags(content, masked);
+  const literalText = (from: number, to: number): string => {
+    const text = copy(from, to);
+    opts.budget?.chargeSpliced(text);
+    return text;
+  };
   let out = '';
   let cursor = 0;
   for (const tag of tags) {
-    out += content.slice(cursor, tag.index);
+    out += literalText(cursor, tag.index);
     out += await expandTag(db, access, memo, opts, tag, memoryId, trail, level);
     cursor = tag.index + tag.raw.length;
   }
-  return out + content.slice(cursor);
+  return out + literalText(cursor, content.length);
 }
 
 /**
@@ -218,8 +313,9 @@ export function spliceIncludes(
   db: Db, access: Record<string, unknown>, content: string, includer: { id?: string; memoryId: string },
   opts: SpliceOptions = {},
 ): Promise<string> {
+  const bounded = opts.budget ? opts : { ...opts, budget: new ResolutionBudget() };
   return spliceWithin(
-    db, access, opts.memo ?? new IncludeReadMemo(), opts, content, includer.memoryId,
+    db, access, opts.memo ?? new IncludeReadMemo(), bounded, content, includer.memoryId,
     new Set(includer.id ? [includer.id] : []), 1,
   );
 }

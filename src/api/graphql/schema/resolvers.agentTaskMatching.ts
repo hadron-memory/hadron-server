@@ -1,3 +1,4 @@
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 // #1707 — Task Management slice T3: the team roster (plan
 // design:agent-tasks §7.4). Matching itself has no public surface: the
 // platform assigns (src/lib/agentTasks/matcher.ts). Host registration is a
@@ -9,54 +10,137 @@
 // exactly like an absent one (APP_NOT_FOUND). Each worker is rendered through
 // the same sanitized party projection as tasks, never the Worker object.
 
+import { matchingModelGroupNames } from '../../../lib/agentTasks/modelGroups.js';
 import { type Context, withoutRequestCaches } from './resolvers.helpers.js';
-import { mayReadAppTasks, resolveParticipatedApp } from './resolvers.agentTask.js';
+import { mayReadAppTasks, resolveParticipatedApp, withReadableApp, type TaskApp } from './resolvers.agentTask.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { loadRosterTaskSummaries, type RosterTaskSummary } from '../../../lib/agentTasks/rosterSummary.js';
 import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
 import { loadTeamRoster, type RosterEntry } from '../../../lib/agentTasks/roster.js';
 import type { WorkerCheckStatus } from '../../../lib/workerCheckStatus.js';
-import { loadAppWorkerCheckStatuses } from './resolvers.worker.js';
+import { loadAppModelGroups, loadAppWorkerCheckStatuses, maySeeWorkerInternals } from './resolvers.worker.js';
+import { workerTerminalView, type StoredWorkerTerminal } from '../../../lib/workerTerminal.js';
+import { groupComposition } from '../../../lib/agentTasks/composition.js';
+import { canSeeUserPersonalFieldsMany } from '../../../lib/auth/userVisibility.js';
 
 const toGqlWord = (s: string): string => s.toUpperCase().replace(/-/g, '_');
 
-export const agentTaskMatchingQueries = {
-  /** #1707 — every worker's derived state in an App (plan §7.4), for its task audience. */
-  teamRoster: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
+/** Shared projected rows. Person and run reads use RepeatableRead; run reads also hold live authority anchors through projection. */
+export async function withRosterAppRead<T>(ctx: Context, appRef: string, project: (readCtx: Context, app: TaskApp) => Promise<T>): Promise<T> {
+    if (isRunPrincipal(ctx) && !ctx.userId) return withReadableApp(ctx, appRef, project, true);
     // Admission, status and assignment projections share one read snapshot, including MCP callers.
     return ctx.db.$transaction(async (tx) => {
       const readCtx = withoutRequestCaches(ctx, tx);
       const { app } = await resolveParticipatedApp(readCtx, appRef);
-      const asOf = new Date();
-      const [entries, checks] = await Promise.all([
-        loadTeamRoster(tx, app.id, asOf),
-        // #2138 §3.4 — the same derivation as Worker.checkStatus, at the roster's instant.
-        loadAppWorkerCheckStatuses(readCtx, app.id, { now: asOf }),
-      ]);
-      const workerIds = entries.map((e) => e.workerId);
-      const canReadTasks = await mayReadAppTasks(readCtx, app.id);
-      const [settings, tasks] = await Promise.all([
-        tx.workerWakeSettings.findMany({ where: { workerId: { in: workerIds } }, select: { workerId: true, pausedUntil: true } }),
-        canReadTasks ? loadRosterTaskSummaries(tx, app.id, workerIds) : new Map<string, RosterTaskSummary>(),
-      ]);
-      const pauses = new Map(settings.map((s) => [s.workerId, s.pausedUntil]));
-      return {
-        appId: app.id,
-        asOf,
-        workers: entries.map((e) => ({ ...e, appUrn: app.urn, checkStatus: checks.get(e.workerId) ?? null,
-          pausedUntil: pauses.get(e.workerId) ?? null, currentTask: tasks.get(e.workerId) ?? null })),
-      };
+      return project(readCtx, app);
     // An explicit, bounded read budget avoids imposing Prisma's implicit 5s interactive-transaction default
     // on the now-serialized bulk roster loaders. This does not change query/lock or test timeouts.
     }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 20_000 });
+}
+
+async function readTeamRoster(ctx: Context, appRef: string) {
+  return withRosterAppRead(ctx, appRef, projectTeamRoster);
+}
+
+async function projectTeamRoster(readCtx: Context, app: TaskApp) {
+  const tx = readCtx.db;
+  const asOf = new Date();
+  const [entries, checks] = await Promise.all([
+    loadTeamRoster(tx, app.id, asOf),
+    // #2138 §3.4 — the same derivation as Worker.checkStatus, at the roster's instant.
+    loadAppWorkerCheckStatuses(readCtx, app.id, { now: asOf }),
+  ]);
+  const workerIds = entries.map((e) => e.workerId);
+  const canReadTasks = await mayReadAppTasks(readCtx, app.id);
+  const [settings, tasks] = await Promise.all([
+    tx.workerWakeSettings.findMany({ where: { workerId: { in: workerIds } }, select: { workerId: true, pausedUntil: true } }),
+    canReadTasks ? loadRosterTaskSummaries(tx, app.id, workerIds) : new Map<string, RosterTaskSummary>(),
+  ]);
+  const pauses = new Map(settings.map((s) => [s.workerId, s.pausedUntil]));
+  const workingStateVisible = workerIds.length > 0 && await maySeeWorkerInternals(readCtx, app.id);
+  const { holders, terminals } = await loadRosterWorkingState(readCtx, tx, workerIds, workingStateVisible);
+  return {
+    appId: app.id,
+    asOf,
+    workers: entries.map((e) => ({ ...e, appId: app.id, teamPlacement: workingStateVisible ? e.teamPlacement : null, appUrn: app.urn, checkStatus: checks.get(e.workerId) ?? null,
+      pausedUntil: pauses.get(e.workerId) ?? null, currentTask: tasks.get(e.workerId) ?? null,
+      heldBy: holders.get(e.workerId)?.heldBy ?? null, heldAt: holders.get(e.workerId)?.heldAt ?? null,
+      terminal: terminals.get(e.workerId) ?? null })),
+  };
+}
+
+export const agentTaskMatchingQueries = {
+  teamRoster: (_: unknown, { appRef }: { appRef: string }, ctx: Context) => readTeamRoster(ctx, appRef),
+  teamComposition: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
+    const roster = await readTeamRoster(ctx, appRef);
+    return { appId: roster.appId, asOf: roster.asOf, lanes: groupComposition(roster.workers) };
   },
 };
 
-type RosterRow = RosterEntry & { appUrn: string; checkStatus: WorkerCheckStatus | null; pausedUntil: Date | null; currentTask: RosterTaskSummary | null };
+/** The sanitized holder a roster row carries: `name` is already behind the #384 gate, so the type's `name` field is a passthrough. */
+export type RosterHolder = { id: string; handle: string | null; name: string | null };
+
+/**
+ * #2223 — who holds each worker's name, for the roster leaf. #2771 — and each worker's stored terminal report, read in
+ * the SAME query so the roster's query count does not grow.
+ *
+ * `heldByUserId`/`heldAt` and `terminal` are WORKING-STATE fields (cor:agt:020:09, cor:dmo:050:11), narrower than the
+ * roster's audience, so the worker working-state gate decides, once per App, before any is read: a reader who fails it
+ * costs no query and every row answers null. A holder who is soft-deleted is null (fail closed; a live
+ * hold should never point at one). Each name goes through the shared #384 gate in bulk, so the number of
+ * queries is constant in the number of workers and distinct holders. The projection is selected, never the
+ * User row (findings:broadening-read-gate-leaks-nested-objects).
+ */
+async function loadRosterWorkingState(
+  readCtx: Context,
+  tx: Prisma.TransactionClient,
+  workerIds: string[],
+  workingStateVisible: boolean,
+): Promise<{ holders: Map<string, { heldBy: RosterHolder; heldAt: Date | null }>; terminals: Map<string, StoredWorkerTerminal> }> {
+  const holders = new Map<string, { heldBy: RosterHolder; heldAt: Date | null }>();
+  const terminals = new Map<string, StoredWorkerTerminal>();
+  if (workerIds.length === 0 || !workingStateVisible) return { holders, terminals };
+  const rows = await tx.worker.findMany({
+    where: { id: { in: workerIds } },
+    select: { id: true, heldByUserId: true, heldAt: true, terminal: true },
+  });
+  for (const r of rows) if (r.terminal) terminals.set(r.id, r.terminal as unknown as StoredWorkerTerminal);
+  const holds = rows.filter((r) => r.heldByUserId !== null);
+  const holderIds = [...new Set(holds.map((h) => h.heldByUserId!))];
+  if (holderIds.length === 0) return { holders, terminals };
+  const users = await tx.user.findMany({
+    where: { id: { in: holderIds }, deletedAt: null },
+    select: { id: true, handle: true, name: true },
+  });
+  const nameVisible = await canSeeUserPersonalFieldsMany(readCtx, users.map((u) => u.id));
+  const byId = new Map(users.map((u) => [u.id, u]));
+  for (const h of holds) {
+    const u = byId.get(h.heldByUserId!);
+    if (!u) continue;
+    holders.set(h.id, { heldBy: { id: u.id, handle: u.handle, name: nameVisible.has(u.id) ? (u.name || null) : null }, heldAt: h.heldAt });
+  }
+  return { holders, terminals };
+}
+
+type RosterRow = Omit<RosterEntry, 'teamPlacement'> & {
+  appId: string;
+  teamPlacement: RosterEntry['teamPlacement'] | null;
+  appUrn: string; checkStatus: WorkerCheckStatus | null; pausedUntil: Date | null; currentTask: RosterTaskSummary | null;
+  heldBy: RosterHolder | null; heldAt: Date | null; terminal: StoredWorkerTerminal | null;
+};
+
+/** Optional live metadata is outside the core roster transaction: a failed lookup must not
+ * abort its snapshot or prevent clients reading existing roster/composition fields. */
+export async function rosterModelGroups(row: { appId: string; model: string | null }, ctx: Context, memoize = false): Promise<string[]> {
+  if (!row.model?.trim()) return [];
+  return matchingModelGroupNames(await loadAppModelGroups(ctx, row.appId, memoize), row.model);
+}
 
 export const agentTaskMatchingFieldResolvers = {
   TeamRosterTaskSummary: { status: (r: RosterTaskSummary) => toGqlWord(r.status) },
   TeamRosterEntry: {
+    modelGroups: (r: RosterRow, _: unknown, ctx: Context, info?: { operation?: { operation?: string } }) =>
+      rosterModelGroups(r, ctx, info?.operation?.operation === 'query'),
     worker: (r: RosterRow) => ({ kind: 'WORKER', id: r.workerId, name: r.name, urn: composeWorkerUrn(r.appUrn, r.slug) }),
     freeForWork: (r: RosterRow) => r.free,
     unavailableReason: (r: RosterRow) => (r.unavailable?.reason ? toGqlWord(r.unavailable.reason) : null),
@@ -71,5 +155,6 @@ export const agentTaskMatchingFieldResolvers = {
       : null),
     reportsToRetired: (r: RosterRow) => r.reportsTo?.retired ?? false,
     checkStatus: (r: RosterRow) => r.checkStatus,
+    terminal: (r: RosterRow) => workerTerminalView(r.terminal),
   },
 };

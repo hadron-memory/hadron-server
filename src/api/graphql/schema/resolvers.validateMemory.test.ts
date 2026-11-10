@@ -15,7 +15,7 @@ import { cleanDb, createDbNode } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
 import { resolvers, type Context } from './resolvers.js';
-import { validateMemoryNodes } from '../../../lib/memoryValidation.js';
+import { validateMemoryNodes, formatValidationProse } from '../../../lib/memoryValidation.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -72,6 +72,38 @@ describe('validateMemory — the five checks (#819)', () => {
   it('SPARSE does NOT fire on a node carrying only an abstract (spec 031 FR-011)', async () => {
     const n = await createDbNode(db, { loc: 'abs', memoryId: mem.id, name: 'Abs' });
     await db.node.update({ where: { id: n.id }, data: { abstract: 'just an abstract' } });
+    const r = await validate();
+    expect(r.findings.map((f: { kind: string }) => f.kind)).not.toContain('SPARSE');
+  });
+
+  // #2516 (cor:api:020:03, Holger 2026-10-27): every object node is exempt —
+  // objects are data-only by design. The exemption keys on objectType alone.
+  it('SPARSE does NOT fire on a data-only object node (#2516)', async () => {
+    const n = await createDbNode(db, { loc: 'obj', memoryId: mem.id, name: 'Obj' });
+    await db.node.update({ where: { id: n.id }, data: { objectType: 'contact', properties: { email: 'a@b.c' } } });
+    const r = await validate();
+    expect(r.findings.map((f: { kind: string }) => f.kind)).not.toContain('SPARSE');
+  });
+
+  it('SPARSE still fires on a name-only node with no objectType (#2516)', async () => {
+    await createDbNode(db, { loc: 'plain', memoryId: mem.id, name: 'Plain' });
+    const n = await createDbNode(db, { loc: 'obj', memoryId: mem.id, name: 'Obj' });
+    await db.node.update({ where: { id: n.id }, data: { objectType: 'contact' } });
+    const r = await validate();
+    const sparse = r.findings.filter((f: { kind: string }) => f.kind === 'SPARSE');
+    expect(sparse.map((f: { nodeLoc: string }) => f.nodeLoc)).toEqual(['plain']);
+  });
+
+  it('a legacy blank objectType is no collection, so the node is still SPARSE (#2516, #725)', async () => {
+    const n = await createDbNode(db, { loc: 'blank', memoryId: mem.id, name: 'Blank' });
+    await db.node.update({ where: { id: n.id }, data: { objectType: '  ' } });
+    const r = await validate();
+    expect(r.findings.map((f: { kind: string }) => f.kind)).toContain('SPARSE');
+  });
+
+  it('an object node that also carries content is not SPARSE (#2516)', async () => {
+    const n = await createDbNode(db, { loc: 'objc', memoryId: mem.id, name: 'ObjC', content: 'body' });
+    await db.node.update({ where: { id: n.id }, data: { objectType: 'contact', description: 'd' } });
     const r = await validate();
     expect(r.findings.map((f: { kind: string }) => f.kind)).not.toContain('SPARSE');
   });
@@ -318,6 +350,24 @@ describe('validateMemory — findings are capped at the SOURCE (#859 review)', (
     const report = await validateMemoryNodes(db, mem.id, 3);
     expect(report.findings.length).toBe(3);
     expect(report.totalFindings).toBe(12);
+  });
+
+  it('#3010: mixed problems and informational findings past the cap stay bounded and the prose says so', async () => {
+    for (let i = 0; i < 4; i++) await createDbNode(db, { loc: `mp-${i}`, memoryId: mem.id, name: `P${i}` });
+    for (let i = 0; i < 3; i++) {
+      const n = await createDbNode(db, { loc: `mi-${i}`, memoryId: mem.id, name: `I${i}`, content: 'x' });
+      await db.node.update({ where: { id: n.id }, data: { embeddingTruncatedChunks: 2 } });
+    }
+    const report = await validateMemoryNodes(db, mem.id, 3);
+    // Retained results stay at the cap, problems first; the totals stay true.
+    expect(report.findings.length).toBe(3);
+    expect(report.findings.every((f) => f.kind !== 'INDEX_TRUNCATED')).toBe(true);
+    expect(report.totalFindings).toBe(4);
+    expect(report.totalInformational).toBe(3);
+    const lines = report.findings.map((f) => `[${f.kind}] ${f.nodeLoc}`);
+    const prose = formatValidationProse(report, lines, []);
+    expect(prose).toContain('Found 4 issue(s) in 7 nodes (showing the first 3):');
+    expect(prose).toContain('Informational findings (3): none shown');
   });
 
   it('BROKEN_REF ignores a soft-deleted EDGE row', async () => {

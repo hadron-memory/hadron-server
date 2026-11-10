@@ -1,0 +1,2174 @@
+{
+  "nonEntityTypes": {
+    "AgentTaskMatchFailure": "value",
+    "AgentTaskSkippedCandidate": "value",
+    "NodeVectorMeta": "value",
+    "NodeHit": "value",
+    "FindNodesResult": "envelope",
+    "SearchScopeInfo": "value",
+    "GraphNodesPage": "envelope",
+    "GraphEdgesPage": "envelope",
+    "MemoriesPage": "envelope",
+    "OrganizationsPage": "envelope",
+    "AppsPage": "envelope",
+    "AppScopedMemoryPage": "envelope",
+    "AppScopedMemory": "value",
+    "AppMemorySource": "value",
+    "AgentsPage": "envelope",
+    "EdgesPage": "envelope",
+    "UsersPage": "envelope",
+    "AiServiceConfigsPage": "envelope",
+    "ScopeMemoryEntry": "value",
+    "ScopesPage": "envelope",
+    "ScopeExplanation": "value",
+    "ChannelsPage": "envelope",
+    "RegisterEntriesPage": "envelope",
+    "SpecDocument": "envelope",
+    "SpecDocumentEntry": "value",
+    "RegisterViewRow": "value",
+    "ChannelReadState": "value",
+    "TeamAttentionChannel": "value",
+    "TeamAttentionWorker": "value",
+    "TeamAttentionResult": "envelope",
+    "TeamAttentionSwitchoverChannel": "value",
+    "TeamAttentionSwitchoverWorker": "value",
+    "TeamAttentionSwitchoverPreview": "envelope",
+    "TeamAttentionPageItem": "value",
+    "TeamAttentionPage": "envelope",
+    "TeamAttentionPreviewPage": "envelope",
+    "TeamAttentionSwitchoverResult": "envelope",
+    "OwnTeamChatReadState": "value",
+    "RegisterDefaults": "value",
+    "GlobalSearchHit": "value",
+    "GlobalSearchResult": "envelope",
+    "SkillFinding": "value",
+    "SkillExportReason": "value",
+    "SkillExportPlanEntry": "value",
+    "SkillPlanEntry": "value",
+    "SkillOrphan": "value",
+    "SkillSelectionResult": "envelope",
+    "SkillPlanScopeSelection": "value",
+    "SkillPlan": "value",
+    "SkillPlanUnrecognized": "value",
+    "NodeBatchResult": "envelope",
+    "Passage": "value",
+    "NodeMoveLinkWarning": "value",
+    "InheritedFrom": "value",
+    "AgentListedTask": "value",
+    "AgentListedProcess": "value",
+    "RecoveryNodesPage": "envelope",
+    "RecoveryEdgesPage": "envelope",
+    "CompiledBootPrompt": "value",
+    "BootPromptServeOutcome": "value",
+    "BootPromptServeDecision": "value",
+    "ResumeSessionResult": "envelope",
+    "ResumeClaimReceipt": "envelope",
+    "NodeContentValidationReport": "envelope",
+    "NodeContentValidationStatus": "value",
+    "NodeValidationTaskEntry": "value",
+    "NodeValidationTaskSet": "value",
+    "AiModelPriceList": "envelope",
+    "CreditLedgerEntryList": "envelope",
+    "CreditBalance": "value",
+    "NodeMintStatus": "value",
+    "NodeSignatureStatus": "value",
+    "NodeApprovalStatus": "value",
+    "NodeIntegrityCheck": "value",
+    "MemoryIntegrityReport": "envelope",
+    "NodeApprovalReceipt": "envelope",
+    "LintWarning": "value",
+    "LintWarningPage": "envelope",
+    "ApproveMemoryNodesResult": "envelope",
+    "DecisionOption": "value",
+    "DecisionRecommendation": "value",
+    "DecisionApprovalEvidence": "value",
+    "DecisionWithdrawal": "value",
+    "DecisionPage": "envelope",
+    "DecisionVerification": "value",
+    "CommentThreadPage": "envelope",
+    "CommentSummary": "value",
+    "RevisionApproval": "value",
+    "SharedOrganizationsPage": "envelope",
+    "InstallAgentIntoAppPayload": "envelope",
+    "UninstallAgentFromAppPayload": "envelope",
+    "JoinAppPayload": "envelope",
+    "CreateMemorySharePayload": "envelope",
+    "UpdateMemoryShareRolePayload": "envelope",
+    "DeleteMemorySharePayload": "envelope",
+    "AddMemoryMemberPayload": "envelope",
+    "UpdateMemoryMemberRolePayload": "envelope",
+    "RemoveMemoryMemberPayload": "envelope",
+    "LeaveAppPayload": "envelope",
+    "ReleaseWorkerPayload": "envelope",
+    "MemoryProvisioning": "value",
+    "InstallationPolicy": "value",
+    "AppKeyScope": "value",
+    "AppKeyCreated": "value",
+    "PasskeyWindow": "value",
+    "PasskeyCancelRecord": "value",
+    "UserApiKeyCreateResult": "envelope",
+    "ImpersonationSessionList": "envelope",
+    "StartImpersonationResult": "envelope",
+    "AppCreated": "value",
+    "AppAIConfig": "value",
+    "PublicResourceRefPage": "envelope",
+    "MemoryTransferDependent": "value",
+    "MemoryTransferBlocker": "value",
+    "MemoryOwnerTransferPreview": "envelope",
+    "MemoryConfigWarning": "value",
+    "MemoryConfigTemplateRule": "value",
+    "MemoryConfigTemplatesPage": "envelope",
+    "MemoryConfigTemplatePayload": "envelope",
+    "MemoryConfigApplyEntry": "value",
+    "MemoryConfigApplyResult": "envelope",
+    "NodeRoleRulePayload": "envelope",
+    "AgentExtensionPage": "envelope",
+    "LocSegmentsPage": "envelope",
+    "LocSegment": "value",
+    "AgentOfferSubject": "value",
+    "AgentOfferReason": "value",
+    "AgentOfferReadiness": "value",
+    "AgentAIConfig": "value",
+    "AiServiceConfigTestUsed": "value",
+    "AiServiceConfigTestError": "value",
+    "AiServiceConfigTestResult": "envelope",
+    "AiConfigTestKnob": "value",
+    "AiProviderEndpoint": "value",
+    "ResolvedAiConfig": "value",
+    "ServedPromptProvenanceEntry": "value",
+    "ServedPromptProvenancePage": "envelope",
+    "ServedPromptsPage": "envelope",
+    "TeamTagSnapshot": "value",
+    "TeamChatSearchMatch": "value",
+    "TeamChatSearchPage": "envelope",
+    "TeamChatMessagesPage": "envelope",
+    "TeamWorkItem": "value",
+    "TeamWorkItemsPage": "envelope",
+    "WorkersPage": "envelope",
+    "CastWorkerPreview": "envelope",
+    "DeleteWorkerPreview": "envelope",
+    "CastPreviewTicker": "value",
+    "TeamRolesPage": "envelope",
+    "DeleteTeamRolePayload": "envelope",
+    "TeamCollectionsPayload": "envelope",
+    "ConnectionStart": "value",
+    "ConnectionFlow": "value",
+    "SlackConnectionsPage": "envelope",
+    "McpServersPage": "envelope",
+    "McpServerTool": "value",
+    "SecretsPage": "envelope",
+    "HomeAssistantInstancesPage": "envelope",
+    "ResendSendersPage": "envelope",
+    "HomeAssistantOp": "value",
+    "EmailDraftInfo": "value",
+    "CalendarInfo": "value",
+    "CalendarEventTime": "value",
+    "CalendarAttendee": "value",
+    "CalendarPerson": "value",
+    "ScheduleBusyInterval": "value",
+    "DriveFilePage": "envelope",
+    "DriveFileExport": "value",
+    "PublicInvitationSender": "value",
+    "PublicInvitationOrganization": "value",
+    "ImportNodeResult": "envelope",
+    "AppRunFailureReason": "value",
+    "IndexTruncated": "value",
+    "MemoryValidationFinding": "value",
+    "MemoryValidationSkippedCheck": "value",
+    "MemoryValidationResult": "envelope",
+    "AppRunsPage": "envelope",
+    "AgentSchedule": "value",
+    "AgentSchedulesPage": "envelope",
+    "ConnectionGrantsPage": "envelope",
+    "PrincipalGrantsPage": "envelope",
+    "GrantsPage": "envelope",
+    "AgentWebhooksPage": "envelope",
+    "AgentWebhookCredentials": "value",
+    "PolicyLayerVerdict": "value",
+    "EffectiveActionPolicy": "value",
+    "ActionTicketsPage": "envelope",
+    "SearchReplaceFieldResult": "envelope",
+    "SearchReplaceNodeResult": "envelope",
+    "SearchReplaceSkipCounts": "value",
+    "SearchReplaceSkip": "value",
+    "SearchReplaceResult": "envelope",
+    "UserMergeConsentRequest": "value",
+    "UsageSummaryEntry": "value",
+    "UsageActivityBucket": "value",
+    "AssetPutHeader": "value",
+    "BeginAssetUploadResult": "envelope",
+    "AssetListResult": "envelope",
+    "AssetsPage": "envelope",
+    "AssetDownloadUrl": "value",
+    "NodeExportResult": "envelope",
+    "ObjectList": "envelope",
+    "DashboardWidgetData": "value",
+    "SpecReference": "value",
+    "SpecRenumberMove": "value",
+    "SpecRenumberRewrite": "value",
+    "SpecTextCitation": "value",
+    "SpecRenumberResult": "envelope",
+    "SpecMintFinding": "value",
+    "SpecOpenQuestion": "value",
+    "SpecOpenQuestionGroup": "value",
+    "SpecCorpusMintReport": "envelope",
+    "AutomationFlowSummary": "value",
+    "AutomationSummary": "value",
+    "AutomationApproval": "value",
+    "AutomationApprovalRow": "value",
+    "AutomationApprovalOmission": "value",
+    "AutomationApprovalPage": "envelope",
+    "CompiledPromptSelection": "value",
+    "CompiledPromptOccurrence": "value",
+    "CompiledPromptTagPosition": "value",
+    "CompiledPromptProvenancePage": "envelope",
+    "RateLimitPolicy": "value",
+    "ServerInfo": "value",
+    "ChatStartResult": "envelope",
+    "ChatPromptResult": "envelope",
+    "SummarizationRequest": "value",
+    "ChatResponseResult": "envelope",
+    "RevisionResult": "envelope",
+    "EditorLockResult": "envelope",
+    "UntrackedTaskItem": "value",
+    "UntrackedTaskItemPage": "envelope",
+    "ClaimUntrackedTaskItemsResult": "envelope",
+    "AgentTaskRequirements": "value",
+    "AgentTaskResult": "envelope",
+    "AgentTaskFinding": "value",
+    "AgentTaskFindingDisposition": "value",
+    "AgentTaskFindingDispositionPage": "envelope",
+    "AgentTaskFindingPage": "envelope",
+    "AgentTaskHandBack": "value",
+    "DueTaskReason": "value",
+    "DueWakePage": "envelope",
+    "DeliveryBatchPage": "envelope",
+    "DeliveryBatchRange": "value",
+    "DueWakePageInfo": "value",
+    "DueWakeAvailability": "value",
+    "DueChannel": "value",
+    "DormantWithheld": "value",
+    "WakeReason": "value",
+    "TickAction": "value",
+    "DueStopReason": "value",
+    "StopSignalPage": "envelope",
+    "LiftStopSignalResult": "envelope",
+    "AcknowledgeWakesResult": "envelope",
+    "TickerPage": "envelope",
+    "NodePage": "envelope",
+    "NodeRevisionPage": "envelope",
+    "SessionPage": "envelope",
+    "UsageEventPage": "envelope",
+    "ExchangeConnectionPage": "envelope",
+    "DashboardWidgetPresetPage": "envelope",
+    "AppKeyPage": "envelope",
+    "UserApiKeyPage": "envelope",
+    "AgentSubscriptionPage": "envelope",
+    "TickerSubscriptionPage": "envelope",
+    "AppliedTickerTemplateTicker": "value",
+    "ApplyAgentTickerTemplatesResult": "envelope",
+    "SubscribeResult": "envelope",
+    "WorkerWakeSettings": "value",
+    "TeamPause": "value",
+    "AppDeliverySettings": "value",
+    "AppTickerSettings": "value",
+    "AgentTaskDependencyPage": "envelope",
+    "AgentTaskSessionEndRequest": "value",
+    "AgentTaskReference": "value",
+    "AgentTeamAlarmSchedule": "value",
+    "HostRegistrationWorker": "value",
+    "HostOperationPage": "envelope",
+    "ContextResetStep": "value",
+    "WorkerTerminal": "value",
+    "WorkerTerminalRef": "value",
+    "WorkerTerminalRefusal": "value",
+    "SetHostWorkerTerminalsResult": "envelope",
+    "ModelGroup": "value",
+    "EffectiveModelGroup": "value",
+    "WorkerCheckStatus": "value",
+    "TeamRosterTaskSummary": "value",
+    "RegisterRoleCandidatePage": "envelope",
+    "ActionRegisterIndexPage": "envelope",
+    "ActionRegisterIndexEntry": "value",
+    "RegisterRolePick": "value",
+    "RegisterRoleCandidate": "value",
+    "TeamComposition": "value",
+    "TeamCompositionLane": "value",
+    "TeamCompositionWorker": "value",
+    "TeamRoleCount": "value",
+    "TeamRoleFamilyCount": "value",
+    "TeamAvailability": "value",
+    "AgentTaskStallSchedule": "value",
+    "AutomationTeamSnapshotGrantPage": "envelope",
+    "PrProtocolResult": "envelope",
+    "PrProtocolAction": "value",
+    "PullRequestReadiness": "envelope",
+    "ReviewSlotReadiness": "value",
+    "GrantSignatureStatus": "value",
+    "TeamUtilization": "value",
+    "WorkerUtilization": "value"
+  },
+  "entries": {
+    "ActionTicketsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "org ADMIN of the named org or platform admin (requireOrgRole ADMIN); org-scoped ledger, its only read path",
+      "resolver": "src/api/graphql/schema/resolvers.appRun.ts::requireOrgRole",
+      "target": "ActionTicket"
+    },
+    "AddMemoryMemberPayload.memoryMember": {
+      "class": "parent-implies-child",
+      "audience": "the memory's member-owner (requireMemoryMemberOwner, rechecked in the transaction); MemoryMember.memory re-gated; user is a User under cor:acl:070",
+      "resolver": "src/api/graphql/schema/resolvers.mutation.memory.ts::requireMemoryMemberOwner",
+      "target": "MemoryMember"
+    },
+    "Agent.appAgents": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::appAgents",
+      "gate": "filterReadableAppRows",
+      "target": "AppAgent"
+    },
+    "Agent.apps": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::apps",
+      "gate": "filterReadableAppRows",
+      "target": "App"
+    },
+    "Agent.importedBy": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::importedBy",
+      "gate": "callerReadableAgentFilter",
+      "target": "AgentImport"
+    },
+    "Agent.imports": {
+      "class": "parent-implies-child",
+      "audience": "every caller who can read the Agent; the import list is the Agent's own definition, which a PUBLIC Agent publishes; AgentImport.parentAgent/importedAgent re-gated by readableNestedAgent",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::AgentImport",
+      "target": "AgentImport"
+    },
+    "Agent.memoryItems": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::memoryItems",
+      "gate": "canReadMemoryRecord",
+      "target": "AgentMemoryItem"
+    },
+    "Agent.orgGrants": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::orgGrants",
+      "gate": "isOrgMemberOrAdmin",
+      "target": "AgentOrgGrant"
+    },
+    "Agent.tickerTemplates": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.agentTickerTemplate.ts::tickerTemplates",
+      "gate": "resolveReadableAgentRef",
+      "target": "AgentTickerTemplate"
+    },
+    "AgentExtensionPage.items": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.agentExtendedBy.ts::resolveExtendedBy",
+      "gate": "readableNestedAgent",
+      "target": "Agent"
+    },
+    "AgentImport.importedAgent": {
+      "target": "Agent",
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::readableNestedAgent",
+      "gate": "readableNestedAgent"
+    },
+    "AgentImport.parentAgent": {
+      "target": "Agent",
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::readableNestedAgent",
+      "gate": "readableNestedAgent"
+    },
+    "AgentListedProcess.node": {
+      "target": "Node",
+      "class": "child-gated",
+      "test": "src/api/graphql/schema/resolvers.agentDefinitionLists1892.test.ts::Q4: a process the reader may not read is not listed"
+    },
+    "AgentListedTask.node": {
+      "target": "Node",
+      "class": "child-gated",
+      "test": "src/api/graphql/schema/resolvers.agentDefinitionLists1892.test.ts::Q2: an index source outside the chain is listed iff its own memory is readable"
+    },
+    "AgentMemoryItem.memory": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::memoryItems",
+      "gate": "canReadMemoryRecord",
+      "target": "Memory"
+    },
+    "AgentOrgGrant.agent": {
+      "target": "Agent",
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::readableNestedAgent",
+      "gate": "readableNestedAgent"
+    },
+    "AgentOrgGrant.organization": {
+      "target": "Organization",
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::loadReadableNestedOrganization",
+      "gate": "loadReadableNestedOrganization"
+    },
+    "AgentSubscription.agent": {
+      "target": "Agent",
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::readableNestedAgent",
+      "gate": "readableNestedAgent"
+    },
+    "AgentSubscription.user": {
+      "target": "User",
+      "class": "parent-implies-child",
+      "audience": "Rows from myAgentSubscriptions (caller's own) or agentSubscriptions (org ADMIN); nested User keeps per-field visibility.",
+      "spec": "cor:acl:110:02",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::canSeeUserPersonalFields"
+    },
+    "AgentSubscriptionPage.items": {
+      "class": "parent-implies-child",
+      "audience": "myAgentSubscriptionsPage: the caller's own; agentSubscriptionsPage: callers passing resolveReadableAgentRef plus requireAgentAccess ADMIN; AgentSubscription.agent/.user re-gate",
+      "resolver": "src/api/graphql/schema/resolvers.query.agent.ts::agentSubscriptionScope",
+      "target": "AgentSubscription"
+    },
+    "AgentTask.assignedBy": {
+      "class": "closed-projection",
+      "projection": "AgentTaskParty",
+      "why": "AgentTaskParty(kind,id,name,urn via partyView; worker same-App or user handle only; audience App participants+App key)",
+      "target": "AgentTaskParty"
+    },
+    "AgentTask.assignee": {
+      "class": "closed-projection",
+      "projection": "AgentTaskParty",
+      "why": "AgentTaskParty(kind,id,name,urn via partyView; worker same-App or user handle only; audience App participants+App key)",
+      "target": "AgentTaskParty"
+    },
+    "AgentTask.createdBy": {
+      "class": "closed-projection",
+      "projection": "AgentTaskParty",
+      "why": "AgentTaskParty(kind,id,name,urn via partyView; worker same-App or user handle only; audience App participants+App key)",
+      "target": "AgentTaskParty"
+    },
+    "AgentTask.owner": {
+      "class": "closed-projection",
+      "projection": "AgentTaskParty",
+      "why": "AgentTaskParty(kind,id,name,urn via partyView; worker same-App or user handle only; audience App participants+App key)",
+      "target": "AgentTaskParty"
+    },
+    "AgentTaskDependencyPage.items": {
+      "class": "parent-implies-child",
+      "audience": "taskRelations returns blockers/dependents in the parent task's own App; task reads are App-wide for whoever reads one task",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::taskRelations",
+      "target": "AgentTask"
+    },
+    "AgentTeamAlarmSchedule.owner": {
+      "class": "closed-projection",
+      "projection": "AgentTaskParty",
+      "why": "AgentTaskParty(kind,id,name,urn via partyView; worker same-App or user handle only; audience App participants+App key)",
+      "target": "AgentTaskParty"
+    },
+    "AgentTeamEvent.acknowledgedBy": {
+      "class": "closed-projection",
+      "projection": "AgentTaskParty",
+      "why": "AgentTaskParty(kind,id,name,urn via partyView; worker same-App or user handle only; audience App participants+App key)",
+      "target": "AgentTaskParty"
+    },
+    "AgentTeamEvent.actor": {
+      "class": "closed-projection",
+      "projection": "AgentTaskParty",
+      "why": "AgentTaskParty(kind,id,name,urn via partyView; worker same-App or user handle only; audience App participants+App key)",
+      "target": "AgentTaskParty"
+    },
+    "AgentTeamEvent.subjectUser": {
+      "class": "closed-projection",
+      "projection": "AgentTaskParty",
+      "why": "AgentTaskParty(kind,id,name,urn via partyView; worker same-App or user handle only; audience App participants+App key)",
+      "target": "AgentTaskParty"
+    },
+    "AgentTeamEvent.subjectWorker": {
+      "class": "closed-projection",
+      "projection": "AgentTaskParty",
+      "why": "AgentTaskParty(kind,id,name,urn via partyView; worker same-App or user handle only; audience App participants+App key)",
+      "target": "AgentTaskParty"
+    },
+    "AgentTickerTemplate.agent": {
+      "class": "parent-implies-child",
+      "audience": "every path that produces a template first applies the Agent's own read gate (Agent.tickerTemplates, agentTickerTemplates, create/update/delete)",
+      "resolver": "src/api/graphql/schema/resolvers.agentTickerTemplate.ts::resolveReadableAgentRef",
+      "target": "Agent"
+    },
+    "AgentWebhookCredentials.webhook": {
+      "class": "parent-implies-child",
+      "audience": "returned only by createAgentWebhook (requireScheduleAdmin) and rotateAgentWebhook (requireOrgRole ADMIN); org ADMINs of the webhook's org, the audience agentWebhooks lists to",
+      "resolver": "src/api/graphql/schema/resolvers.appRun.ts::rotateAgentWebhook",
+      "target": "AgentWebhook"
+    },
+    "AgentWebhooksPage.items": {
+      "class": "parent-implies-child",
+      "audience": "App ADMIN (requireScheduleAdmin, org-owned Apps); the only read path; the secret is not in the GraphQL type",
+      "resolver": "src/api/graphql/schema/resolvers.appRun.ts::requireScheduleAdmin",
+      "target": "AgentWebhook"
+    },
+    "AgentsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "agents: members of scope.memberOrgIds, the user-owner, or platform admin; publicAgents: PUBLIC non-deleted agents only; the READER gate behind Query.agent",
+      "resolver": "src/api/graphql/schema/resolvers.query.agent.ts::agents",
+      "target": "Agent"
+    },
+    "AiModelPriceList.items": {
+      "class": "parent-implies-child",
+      "audience": "any authenticated user or App principal; aiModelPrice(ref) has the same gate; prices are documented as not secret",
+      "resolver": "src/api/graphql/schema/resolvers.metering.ts::aiModelPrices",
+      "target": "AiModelPrice"
+    },
+    "AiServiceConfigsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "owner admins of the filtered owner (requireAiConfigOwnerAdmin) or a platform admin; aiServiceConfig(ref) uses the same gate; carries hasApiKey/apiKeyPreview only",
+      "resolver": "src/api/graphql/schema/resolvers.query.agent.ts::requireAiConfigOwnerAdmin",
+      "target": "AiServiceConfig"
+    },
+    "App.agent": {
+      "target": "Agent",
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::readableNestedAgent",
+      "gate": "readableNestedAgent"
+    },
+    "App.agents": {
+      "target": "Agent",
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::readableNestedAgent",
+      "gate": "readableNestedAgent"
+    },
+    "App.appAgents": {
+      "target": "AppAgent",
+      "class": "parent-implies-child",
+      "audience": "The AppAgent join row is listed to every caller the App admits; the row's agent, app and bootPromptRef are each gated.",
+      "spec": "cor:acl:110:02",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::appAgents",
+      "maskingTest": "src/api/graphql/schema/resolvers.appAgentIdMask2640.test.ts::hidden primary + readable secondary: agentId, agent and installedAgentUrn are null; agents is partial; appAgents keeps both entries"
+    },
+    "App.defaultChannel": {
+      "target": "Channel",
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::defaultChannel",
+      "gate": "getAccessibleMemoryIds"
+    },
+    "App.keys": {
+      "target": "AppKey",
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::requireAppKeyManager",
+      "gate": "requireAppKeyManager"
+    },
+    "App.members": {
+      "target": "AppMember",
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::loadReadableNestedApp",
+      "gate": "loadReadableNestedApp"
+    },
+    "App.organization": {
+      "target": "Organization",
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::loadReadableNestedOrganization",
+      "gate": "loadReadableNestedOrganization"
+    },
+    "App.sharedMemory": {
+      "target": "Memory",
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::sharedMemory",
+      "gate": "canReadMemoryRecord"
+    },
+    "AppAgent.agent": {
+      "target": "Agent",
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::readableNestedAgent",
+      "gate": "readableNestedAgent"
+    },
+    "AppAgent.app": {
+      "target": "App",
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::loadReadableNestedApp",
+      "gate": "loadReadableNestedApp"
+    },
+    "AppAgent.importer": {
+      "target": "Agent",
+      "class": "child-gated",
+      "test": "src/api/graphql/schema/resolvers.appAgentInstall3435.test.ts::withheld (B readable, its only importer A unreadable): installMethod and importer are null on B AND on every ROW entry; agent: null for A"
+    },
+    "AppCreated.app": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "App"
+    },
+    "AppGrant.app": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "App"
+    },
+    "AppGrant.worker": {
+      "class": "parent-implies-child",
+      "audience": "only returned to an App manager who is an App participant; participants read that App's Worker",
+      "resolver": "src/api/graphql/schema/resolvers.worker.ts::requireWorkerProfileAccess",
+      "target": "Worker"
+    },
+    "AppKey.hostUses": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.hostOperation.ts::appKeyHostUses",
+      "gate": "managesApp",
+      "target": "HostKeyUse"
+    },
+    "AppKeyCreated.key": {
+      "target": "AppKey",
+      "class": "parent-implies-child",
+      "audience": "Only createAppKey returns AppKeyCreated, after requireAppKeyIssuer (a person who manages the App); those callers are exactly the managers who may list keys.",
+      "resolver": "src/api/graphql/schema/resolvers.mutation.app.ts::requireAppKeyIssuer"
+    },
+    "AppKeyPage.items": {
+      "class": "parent-implies-child",
+      "audience": "App key managers, as themselves or through a held worker on a validated instruction (appKeyInventoryScope, admitCredentialList); live keys only; AppKey exposes a preview, never the secret",
+      "resolver": "src/api/graphql/schema/resolvers.query.app.ts::appKeyInventoryScope",
+      "target": "AppKey"
+    },
+    "AppMember.app": {
+      "target": "App",
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::loadReadableNestedApp",
+      "gate": "loadReadableNestedApp"
+    },
+    "AppMember.user": {
+      "target": "User",
+      "class": "parent-implies-child",
+      "audience": "Every caller the App's member list admits receives the User; private fields gated per field.",
+      "spec": "cor:acl:110:02",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::canSeeUserPersonalFields",
+      "maskingTest": "src/api/graphql/schema/resolvers.crossEntityUser1522.test.ts::keeps a foreign App member identity readable without exposing private User fields"
+    },
+    "AppRun.agent": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::agent",
+      "gate": "loadReadableAgent",
+      "target": "Agent"
+    },
+    "AppRun.app": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::app",
+      "gate": "requireOwnerOrOrgRole",
+      "target": "App"
+    },
+    "AppRun.entryNode": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::entryNode",
+      "gate": "isMemoryReadableCached",
+      "target": "Node"
+    },
+    "AppRun.servedPrompt": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.servedPrompt.ts::runServedPrompt",
+      "gate": "canReadAppRun",
+      "target": "ServedPrompt"
+    },
+    "AppRun.user": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::user",
+      "gate": "canSeeUserPersonalFields",
+      "target": "User"
+    },
+    "AppRunsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "platform admin or org READER+ of the App's org (requireOrgRole READER); Query.appRun uses canReadAppRun, a superset",
+      "resolver": "src/api/graphql/schema/resolvers.appRun.ts::canReadAppRun",
+      "target": "AppRun"
+    },
+    "AppliedTickerTemplateTicker.template": {
+      "class": "closed-projection",
+      "projection": "AppliedTickerTemplate",
+      "why": "id and name only; deliberately not AgentTickerTemplate; the caller manages the App (actorManagesApp) and the ticker created in the same payload is named from the template",
+      "target": "AppliedTickerTemplate"
+    },
+    "AppliedTickerTemplateTicker.ticker": {
+      "class": "parent-implies-child",
+      "audience": "only returned by applyAgentTickerTemplates to a participant who manages the App; the ticker was just created in that App",
+      "resolver": "src/api/graphql/schema/resolvers.ticker.ts::applyAgentTickerTemplates",
+      "target": "Ticker"
+    },
+    "ApplyAgentTickerTemplatesResult.alreadyPresent": {
+      "class": "closed-projection",
+      "projection": "AppliedTickerTemplate",
+      "why": "id, name of a ticker the worker already has; callable only by whoever manages the App (actorManagesApp)",
+      "target": "AppliedTickerTemplate"
+    },
+    "ApproveMemoryNodesResult.unresolvedFeedback": {
+      "class": "closed-projection",
+      "projection": "UnresolvedFeedback",
+      "why": "nodeId, urn, loc, openThreads of nodes of the memory just approved in, after mayApproveNodesPreflight and the in-transaction mayApproveNodes",
+      "target": "UnresolvedFeedback"
+    },
+    "AppsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "platform admins, org members of scope.memberOrgIds, or the user-owner; Query.app requires requireOwnerOrOrgRole READER, which admits the same set",
+      "resolver": "src/api/graphql/schema/resolvers.query.app.ts::resolveOrgScope",
+      "target": "App"
+    },
+    "AssetListResult.assets": {
+      "class": "parent-implies-child",
+      "audience": "memoryAssets: callers passing canReadMemory; agentAssets: only assets the caller uploaded after the Agent read gate; impersonation and non-users refused",
+      "resolver": "src/controller/operations/listMemoryAssets.ts::canReadMemory",
+      "target": "Asset"
+    },
+    "AssetsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "assets bound to memories in the caller's getAccessibleMemoryIds; mintAssetDownloadUrl uses the same memory read gate per asset",
+      "resolver": "src/controller/operations/listAssets.ts::getAccessibleMemoryIds",
+      "target": "Asset"
+    },
+    "AuthContext.apiKey": {
+      "target": "UserApiKey",
+      "class": "parent-implies-child",
+      "audience": "Only the caller's own presented hdr_user_ key (ctx.apiKeyId); UserApiKey carries no secret. Agent did not trace an impersonation path to it.",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::AuthContext"
+    },
+    "AuthContext.impersonation": {
+      "class": "parent-implies-child",
+      "audience": "AuthContext exists only as Query.authContext, which describes the caller's own credential; built from ctx.impersonation",
+      "resolver": "src/api/graphql/schema/resolvers.query.org.ts::authContext",
+      "target": "ImpersonationInfo"
+    },
+    "AuthContext.user": {
+      "target": "User",
+      "class": "parent-implies-child",
+      "audience": "Only the caller's own User (ctx.userId); the User's own field gates still apply.",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::AuthContext"
+    },
+    "AutomationApproval.readGrants": {
+      "class": "closed-projection",
+      "projection": "AutomationReadGrant",
+      "target": "AutomationReadGrant",
+      "why": "liveReadGrants (resolvers.automationPin.ts) projects only the trigger's own live grant rows, shown to the adopter approving them; the target memory URN is named only when canReadMemory holds for the caller and is null otherwise, so the row carries nothing the memory's own read would withhold."
+    },
+    "Channel.memory": {
+      "target": "Memory",
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.channel.ts::channelFieldResolvers",
+      "gate": "loadReadableMemoryRecord"
+    },
+    "ChannelsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "callers whose accessible memory ids include the channel's host memory; Query.channel (readableChannel) applies the same check",
+      "resolver": "src/api/graphql/schema/resolvers.channel.ts::readableMemoryWhere",
+      "target": "Channel"
+    },
+    "ChatPage.items": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.query.chat.ts::myChatsScope",
+      "gate": "myChatsScope",
+      "target": "Chat"
+    },
+    "ClaimUntrackedTaskItemsResult.tasks": {
+      "class": "parent-implies-child",
+      "audience": "the claimer passed the App's task gate (participant or the App's live key via withReadableApp); task reads are App-wide for that audience",
+      "resolver": "src/api/graphql/schema/resolvers.untrackedTaskItems.ts::withReadableApp",
+      "target": "AgentTask"
+    },
+    "Comment.author": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "CommentAuthor"
+    },
+    "Comment.deletedBy": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "CommentActorRef"
+    },
+    "Comment.editedBy": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "CommentActorRef"
+    },
+    "Comment.provenanceUser": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "CommentActorRef"
+    },
+    "Comment.resolvedBy": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "CommentActorRef"
+    },
+    "Comment.target": {
+      "class": "parent-implies-child",
+      "audience": "A comment lives in its target's memory and follows it on a move, so every reader of the comment may read the target node directly; projection is id,urn,name,nodeType,revSeq",
+      "resolver": "src/api/graphql/schema/resolvers.comments.ts::loadCommentViews",
+      "target": "CommentTargetRef"
+    },
+    "CommentAuthor.agent": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "CommentActorRef"
+    },
+    "CommentAuthor.app": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "CommentActorRef"
+    },
+    "CommentAuthor.user": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "CommentActorRef"
+    },
+    "CommentAuthor.worker": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "CommentActorRef"
+    },
+    "CommentThread.replies": {
+      "target": "Comment",
+      "class": "parent-implies-child",
+      "audience": "Same as root: replies are comments of the same readable target node's memory.",
+      "resolver": "src/api/graphql/schema/resolvers.comments.ts::commentThreads"
+    },
+    "CommentThread.root": {
+      "target": "Comment",
+      "class": "parent-implies-child",
+      "audience": "commentThreads first resolves the target node through resolveReadableNode; comments live in the target's memory.",
+      "resolver": "src/api/graphql/schema/resolvers.comments.ts::commentThreads"
+    },
+    "CommentThreadPage.items": {
+      "class": "parent-implies-child",
+      "audience": "callers who can read the target node's memory (resolveReadableNode); comments are nodes of that memory",
+      "resolver": "src/api/graphql/schema/resolvers.comments.ts::resolveReadableNode",
+      "target": "CommentThread"
+    },
+    "CompiledBootPrompt.node": {
+      "target": "Node",
+      "class": "open",
+      "evidence": "Public #1734 known gap under cor:dmo:050:13: a platform admin compiling a user-owned Agent receives the node while the direct read refuses. Required manager/non-manager parity is pinned in src/api/graphql/schema/resolvers.compiledBootPrompt3238.test.ts; gap pin: src/api/graphql/schema/resolvers.compiledBootPrompt3238.test.ts::#1734 known gap: a platform admin receives the user-owned Agent compiled node while the direct read refuses. Keep open until #1734 lands and reclassifies this row."
+    },
+    "ConnectionGrantsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "only grants the caller made (grantedByUserId = ctx.userId), interactive user; another principal gets an empty page",
+      "resolver": "src/api/graphql/schema/resolvers.connectionGrant.ts::isInteractiveUser",
+      "target": "ConnectionGrant"
+    },
+    "ContextResetStep.reset": {
+      "class": "parent-implies-child",
+      "audience": "the step exists only in the claim/register/authorize/report mutations, resolved through asHost (that host's own key); another App's or host's reset is refused with CONTEXT_RESET_NOT_FOUND",
+      "resolver": "src/api/graphql/schema/resolvers.hostOperation.ts::resetStep",
+      "target": "ContextReset"
+    },
+    "CreateMemorySharePayload.memoryShare": {
+      "class": "parent-implies-child",
+      "audience": "the Memory's principal (requireMemorySharePrincipal, rechecked in the transaction); MemoryShare.memory re-gated; grantee/grantor are Users under cor:acl:070",
+      "resolver": "src/api/graphql/schema/resolvers.mutation.memory.ts::requireMemorySharePrincipal",
+      "target": "MemoryShare"
+    },
+    "CreditLedgerEntryList.items": {
+      "class": "parent-implies-child",
+      "audience": "org ADMIN of the named org or platform admin (requireOrgRole ADMIN); the org's own ledger; scalars only",
+      "resolver": "src/api/graphql/schema/resolvers.metering.ts::requireOrgRole",
+      "target": "CreditLedgerEntry"
+    },
+    "DashboardWidgetPresetPage.items": {
+      "class": "parent-implies-child",
+      "audience": "only the caller's own presets (userId = ctx.userId); non-users and impersonation get an empty page",
+      "resolver": "src/api/graphql/schema/resolvers.dashboard.ts::dashboardWidgetPresetsPage",
+      "target": "DashboardWidgetPreset"
+    },
+    "Decision.askedBy": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "DecisionActor"
+    },
+    "Decision.blocks": {
+      "class": "closed-projection",
+      "projection": "DecisionRef",
+      "why": "DecisionRef(ref,node,spec strings echoed from stored payload; already in rendered content)",
+      "target": "DecisionRef"
+    },
+    "Decision.deciders": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "CommentActorRef"
+    },
+    "Decision.evidence": {
+      "class": "parent-implies-child",
+      "audience": "the node's latest approval record, shown to every reader of the node; a Decision is only produced for readers of the log memory",
+      "spec": "cor:dmo:120:10",
+      "resolver": "src/api/graphql/schema/resolvers.decisions.ts::decisionFieldResolvers",
+      "maskingTest": "src/api/graphql/schema/resolvers.decisions1641.test.ts::decision by code or citation, decisions sorted and filtered after evaluation, awaitingMe; unreadable is null",
+      "target": "DecisionEvidence"
+    },
+    "Decision.followUps": {
+      "class": "closed-projection",
+      "projection": "DecisionRef",
+      "why": "DecisionRef(ref,node,spec strings echoed from stored payload; already in rendered content)",
+      "target": "DecisionRef"
+    },
+    "Decision.identityMerges": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "DecisionIdentityMerge"
+    },
+    "Decision.node": {
+      "target": "Node",
+      "class": "parent-implies-child",
+      "audience": "A Decision is a view of its backing node; decision and decisions are gated on that node's memory.",
+      "resolver": "src/api/graphql/schema/resolvers.decisions.ts::decisionFieldResolvers"
+    },
+    "Decision.parts": {
+      "class": "parent-implies-child",
+      "audience": "parts are the decision node's own data; every path that yields a Decision first passes the log memory's read or write gate",
+      "resolver": "src/api/graphql/schema/resolvers.decisions.ts::decisionFieldResolvers",
+      "maskingTest": "src/api/graphql/schema/resolvers.decisions1641.test.ts::decision by code or citation, decisions sorted and filtered after evaluation, awaitingMe; unreadable is null",
+      "target": "DecisionPart"
+    },
+    "Decision.sources": {
+      "class": "closed-projection",
+      "projection": "DecisionRef",
+      "why": "DecisionRef(ref,node,spec strings echoed from stored payload; already in rendered content)",
+      "target": "DecisionRef"
+    },
+    "DecisionActor.app": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "CommentActorRef"
+    },
+    "DecisionActor.user": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "CommentActorRef"
+    },
+    "DecisionActor.worker": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "CommentActorRef"
+    },
+    "DecisionAnswer.source": {
+      "class": "closed-projection",
+      "projection": "DecisionRef",
+      "why": "DecisionRef(ref,node,spec strings echoed from stored payload; already in rendered content)",
+      "target": "DecisionRef"
+    },
+    "DecisionApprovalEvidence.by": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "CommentActorRef"
+    },
+    "DecisionIdentityMerge.from": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "CommentActorRef"
+    },
+    "DecisionIdentityMerge.to": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "CommentActorRef"
+    },
+    "DecisionLog.defaultDeciders": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "CommentActorRef"
+    },
+    "DecisionLog.eligibleDeciders": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "CommentActorRef"
+    },
+    "DecisionLog.identityMerges": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "DecisionIdentityMerge"
+    },
+    "DecisionLog.purges": {
+      "class": "parent-implies-child",
+      "audience": "purge records live in the log node's data; a DecisionLog is produced only through loadLogView (resolveGovernedNode) or the create/set-deciders mutations",
+      "resolver": "src/api/graphql/schema/resolvers.decisions.ts::decisionFieldResolvers",
+      "maskingTest": "src/api/graphql/schema/resolvers.decisions1641.test.ts::decision by code or citation, decisions sorted and filtered after evaluation, awaitingMe; unreadable is null",
+      "target": "DecisionPurge"
+    },
+    "DecisionPage.items": {
+      "class": "parent-implies-child",
+      "audience": "callers who can read the log's memory (resolveGovernedNode requires isMemoryReadableCached); decisions are nodes of that memory",
+      "resolver": "src/api/graphql/schema/resolvers.decisions.ts::resolveGovernedNode",
+      "target": "Decision"
+    },
+    "DecisionPart.answer": {
+      "class": "parent-implies-child",
+      "audience": "a Decision is produced only after the decision log's memory read gate (resolveGovernedNode); answers are part of that node's data",
+      "resolver": "src/api/graphql/schema/resolvers.decisions.ts::answerOut",
+      "maskingTest": "src/api/graphql/schema/resolvers.decisions1641.test.ts::decision by code or citation, decisions sorted and filtered after evaluation, awaitingMe; unreadable is null",
+      "target": "DecisionAnswer"
+    },
+    "DecisionPart.answerHistory": {
+      "class": "parent-implies-child",
+      "audience": "same as DecisionPart.answer: the history is part of the decision node's data, reachable only through a Decision that passed the log memory's read gate",
+      "resolver": "src/api/graphql/schema/resolvers.decisions.ts::answerOut",
+      "maskingTest": "src/api/graphql/schema/resolvers.decisions1641.test.ts::decision by code or citation, decisions sorted and filtered after evaluation, awaitingMe; unreadable is null",
+      "target": "DecisionAnswer"
+    },
+    "DecisionPurge.by": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "CommentActorRef"
+    },
+    "DecisionRecommendation.by": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "DecisionActor"
+    },
+    "DecisionWithdrawal.by": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "DecisionActor"
+    },
+    "DeliveryBatch.worker": {
+      "class": "parent-implies-child",
+      "audience": "host App key reading its own App's batches or the worker's own live session; both admitted to Worker reads by requireWorkerProfileAccess",
+      "resolver": "src/api/graphql/schema/resolvers.worker.ts::requireWorkerProfileAccess",
+      "target": "Worker"
+    },
+    "DeliveryBatchPage.batches": {
+      "class": "parent-implies-child",
+      "audience": "an App key holding attention:deliver with a live host:operate scope bound to a host and no session (batchKeyEntry), or a live session reading its own worker",
+      "resolver": "src/api/graphql/schema/resolvers.deliveryBatch.ts::batchKeyEntry",
+      "target": "DeliveryBatch"
+    },
+    "DeliveryBatchRange.channel": {
+      "class": "child-gated",
+      "test": "src/lib/tickers/deliveryBatch.test.ts::omits a channel the caller cannot read, but its holder can read it",
+      "target": "Channel"
+    },
+    "DormantWithheld.worker": {
+      "class": "parent-implies-child",
+      "audience": "same callers as DueWake: App participants or the App's own host key",
+      "resolver": "src/api/graphql/schema/resolvers.worker.ts::requireWorkerProfileAccess",
+      "target": "Worker"
+    },
+    "DriveFileExport.file": {
+      "class": "parent-implies-child",
+      "audience": "comes only from Query.driveFileExport, which runs runOwnedEmailOperation (the connection's owner); DriveFile is provider metadata, not a Hadron-gated entity",
+      "resolver": "src/api/graphql/schema/resolvers.query.session.ts::driveFileExport",
+      "target": "DriveFile"
+    },
+    "DriveFilePage.files": {
+      "class": "parent-implies-child",
+      "audience": "the owner of the named drive connection (runOwnedEmailOperation owner-only gate; a denial is byte-identical to a missing connection); the provider's data for the caller's own connection",
+      "resolver": "src/api/graphql/schema/resolvers.helpers.ts::runOwnedEmailOperation",
+      "target": "DriveFile"
+    },
+    "DueChannel.channel": {
+      "class": "child-gated",
+      "test": "src/lib/tickers/dueWakes.test.ts::a worker whose only unread is in its holder\\'s personal memory: a wake for the holder, nothing \u2014 and no trace \u2014 for a manager",
+      "target": "Channel"
+    },
+    "DueWake.worker": {
+      "class": "parent-implies-child",
+      "audience": "App participants (resolveParticipatedApp) or the App's own host key; both read that App's Worker via requireWorkerProfileAccess",
+      "resolver": "src/api/graphql/schema/resolvers.worker.ts::requireWorkerProfileAccess",
+      "target": "Worker"
+    },
+    "DueWakePage.wakes": {
+      "class": "parent-implies-child",
+      "audience": "the worker's holder or whoever manages the App (readerFor), or an App key holding attention:deliver for its own host's workers",
+      "resolver": "src/api/graphql/schema/resolvers.wake.ts::readerFor",
+      "target": "DueWake"
+    },
+    "Edge.createdByUser": {
+      "class": "closed-projection",
+      "projection": "NodeRevisionEditor",
+      "why": "NodeRevisionEditor(handle,urn only; identity tier cor:acl:070:01)",
+      "target": "NodeRevisionEditor"
+    },
+    "Edge.source": {
+      "target": "Node",
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::resolveEdgeEndpoint",
+      "gate": "isMemoryReadableCached"
+    },
+    "Edge.target": {
+      "target": "Node",
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::resolveEdgeEndpoint",
+      "gate": "isMemoryReadableCached"
+    },
+    "Edge.updatedByUser": {
+      "class": "closed-projection",
+      "projection": "NodeRevisionEditor",
+      "why": "NodeRevisionEditor(handle,urn only; identity tier cor:acl:070:01)",
+      "target": "NodeRevisionEditor"
+    },
+    "EdgesPage.items": {
+      "class": "parent-implies-child",
+      "audience": "callers whose getAccessibleMemoryIds contains the edge's memoryId; Query.edge applies the same check; endpoints masked by resolveEdgeEndpoint",
+      "resolver": "src/api/graphql/schema/resolvers.query.edge.ts::getAccessibleMemoryIds",
+      "target": "Edge"
+    },
+    "EffectiveAccess.grants": {
+      "class": "parent-implies-child",
+      "audience": "EffectiveAccess is returned only by Query.effectiveAccess after the resource-open check and a self-audit or callerCanAudit; grants are the derivation of that same answer",
+      "resolver": "src/api/graphql/schema/resolvers.query.org.ts::effectiveAccess",
+      "maskingTest": "src/api/graphql/schema/resolvers.effectiveAccess.test.ts::a non-privileged caller gets FORBIDDEN, not an empty result",
+      "target": "AccessGrant"
+    },
+    "EffectiveAccess.user": {
+      "class": "parent-implies-child",
+      "audience": "caller audits self or passes callerCanAudit; nested User exception, fields masked",
+      "spec": "cor:acl:110:02",
+      "resolver": "src/api/graphql/schema/resolvers.query.org.ts::callerCanAudit",
+      "target": "User"
+    },
+    "ExchangeConnectionPage.items": {
+      "class": "parent-implies-child",
+      "audience": "org ADMIN of the org (orgExchangeConnectionScope); connection management is admin-only",
+      "resolver": "src/api/graphql/schema/resolvers.helpers.ts::orgExchangeConnectionScope",
+      "target": "ExchangeConnection"
+    },
+    "GraphEdgesPage.edges": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "GraphEdge"
+    },
+    "GraphNodesPage.nodes": {
+      "class": "parent-implies-child",
+      "audience": "callers passing resolveReadableMemoryId (the node-content gate) for the memory; memoryNodes is the only path; GraphNode is a slim projection with no body",
+      "resolver": "src/api/graphql/schema/resolvers.helpers.ts::resolveReadableMemoryId",
+      "target": "GraphNode"
+    },
+    "HomeAssistantInstancesPage.items": {
+      "class": "parent-implies-child",
+      "audience": "org members (memberOrgIds); homeAssistantInstance(ref) admits isOrgMemberOrAdmin of the owning org",
+      "resolver": "src/api/graphql/schema/resolvers.query.homeAssistant.ts::isOrgMemberOrAdmin",
+      "target": "HomeAssistantInstance"
+    },
+    "HostOperation.worker": {
+      "class": "parent-implies-child",
+      "audience": "hostOperations gated by withReadableApp; issueHostOperation needs resolveParticipatedApp",
+      "resolver": "src/api/graphql/schema/resolvers.hostOperation.ts::withReadableApp",
+      "target": "Worker"
+    },
+    "HostOperationPage.items": {
+      "class": "parent-implies-child",
+      "audience": "whoever reads the App's tasks and events (withReadableApp); a key that ever held host:operate is refused; rows limited to the App",
+      "resolver": "src/api/graphql/schema/resolvers.hostOperation.ts::withReadableApp",
+      "target": "HostOperation"
+    },
+    "HostRegistrationWorker.worker": {
+      "class": "parent-implies-child",
+      "audience": "hostRegistrations gated by withReadableApp: App participants plus the App's own key",
+      "resolver": "src/api/graphql/schema/resolvers.hostOperation.ts::withReadableApp",
+      "target": "Worker"
+    },
+    "ImpersonationInfo.actorUser": {
+      "class": "parent-implies-child",
+      "audience": "only the impersonated session's own authContext; nested User per cor:acl:110:02, personal fields gated",
+      "spec": "cor:acl:110:02",
+      "resolver": "src/api/graphql/schema/resolvers.impersonation.ts::actorUser",
+      "target": "User"
+    },
+    "ImpersonationSession.adminUser": {
+      "class": "parent-implies-child",
+      "audience": "admitted by canAdministerSession (actor, org ADMIN/OWNER, platform admin); nested User fields gated per cor:acl:070",
+      "spec": "cor:acl:110:02",
+      "resolver": "src/api/graphql/schema/resolvers.impersonation.ts::canAdministerSession",
+      "target": "User"
+    },
+    "ImpersonationSession.organization": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "Organization"
+    },
+    "ImpersonationSession.targetUser": {
+      "class": "parent-implies-child",
+      "audience": "same audience as adminUser (canAdministerSession); nested User fields gated per cor:acl:070",
+      "spec": "cor:acl:110:02",
+      "resolver": "src/api/graphql/schema/resolvers.impersonation.ts::canAdministerSession",
+      "target": "User"
+    },
+    "ImpersonationSessionList.items": {
+      "class": "parent-implies-child",
+      "audience": "platform admins or live org ADMIN/OWNER of the scoped org (no impersonation); impersonationSession(ref) admits the same via canAdministerSession",
+      "resolver": "src/api/graphql/schema/resolvers.impersonation.ts::canAdministerSession",
+      "target": "ImpersonationSession"
+    },
+    "ImportNodeResult.node": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "Node"
+    },
+    "InstallAgentIntoAppPayload.appAgent": {
+      "class": "parent-implies-child",
+      "audience": "callers who passed requireOwnerOrOrgRole CONTRIBUTOR on the App, a superset of the App readers; AppAgent.agent/app/bootPromptRef re-gate per caller",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::AppAgent",
+      "target": "AppAgent"
+    },
+    "JoinAppPayload.appMember": {
+      "class": "parent-implies-child",
+      "audience": "the caller's own membership row after joinApp's authorized transaction; AppMember.app is re-gated",
+      "resolver": "src/api/graphql/schema/resolvers.mutation.app.ts::joinApp",
+      "target": "AppMember"
+    },
+    "LiftStopSignalResult.signal": {
+      "class": "parent-implies-child",
+      "audience": "whoever manages the App (actorManagesApp) or a host key lifting its own host's halt; each is within the audience that may list the signal",
+      "resolver": "src/api/graphql/schema/resolvers.stopSignal.ts::actorManagesApp",
+      "target": "StopSignal"
+    },
+    "McpServersPage.items": {
+      "class": "parent-implies-child",
+      "audience": "org members (memberOrgIds); mcpServer(ref) admits isOrgMemberOrAdmin of the owning org",
+      "resolver": "src/api/graphql/schema/resolvers.query.mcp.ts::isOrgMemberOrAdmin",
+      "target": "McpServer"
+    },
+    "MemoriesPage.items": {
+      "class": "parent-implies-child",
+      "audience": "list built per caller and filtered by canReadMemoryRecord, the gate Query.memory applies; PUBLIC memories readable by any caller",
+      "resolver": "src/api/graphql/schema/resolvers.query.memory.ts::canReadMemoryRecord",
+      "target": "Memory"
+    },
+    "Memory.agent": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::agent",
+      "gate": "readableNestedAgent",
+      "target": "Agent"
+    },
+    "Memory.app": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::app",
+      "gate": "loadReadableNestedApp",
+      "target": "App"
+    },
+    "Memory.config": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.memoryConfig.ts::config",
+      "gate": "canManageMemoryConfig",
+      "target": "MemoryConfig"
+    },
+    "Memory.members": {
+      "class": "parent-implies-child",
+      "audience": "platform admins, members of the group memory, org ADMIN/OWNER of the owning org; check applied inline, others get []",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::members",
+      "target": "MemoryMember"
+    },
+    "Memory.myShare": {
+      "class": "parent-implies-child",
+      "audience": "only the grantee: lookup keyed on (memoryId, ctx.userId)",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::myShare",
+      "target": "MemoryShare"
+    },
+    "Memory.organization": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::organization",
+      "gate": "loadReadableNestedOrganization",
+      "target": "Organization"
+    },
+    "Memory.shares": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::shares",
+      "gate": "isStrictOwner",
+      "target": "MemoryShare"
+    },
+    "Memory.subscriptions": {
+      "class": "parent-implies-child",
+      "audience": "every caller who can read the Memory; rows come from the eager include of a readable parent; MemorySubscription.organization is re-gated; no spec read says who may list a memory's subscriptions",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::MemorySubscription",
+      "target": "MemorySubscription"
+    },
+    "MemoryConfig.defaultSkips": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.memoryConfig.ts::defaultSkips",
+      "gate": "canManageMemoryConfig",
+      "target": "MemoryConfigDefaultSkip"
+    },
+    "MemoryConfig.rules": {
+      "class": "parent-implies-child",
+      "audience": "MemoryConfig is produced only by Memory.config (canManageMemoryConfig) and Query.memoryConfig (managedMemory, same gate); rules belong to that config",
+      "resolver": "src/api/graphql/schema/resolvers.memoryConfig.ts::managedMemory",
+      "target": "NodeRoleRule"
+    },
+    "MemoryConfigApplyEntry.rule": {
+      "class": "parent-implies-child",
+      "audience": "the entry exists only in the applyMemoryConfigTemplate answer, which requires managedMemory and managedTemplate",
+      "resolver": "src/api/graphql/schema/resolvers.memoryConfigApply.ts::managedMemory",
+      "target": "NodeRoleRule"
+    },
+    "MemoryConfigDefaultSkip.sourceTemplate": {
+      "class": "parent-implies-child",
+      "audience": "a skip record is reachable only through MemoryConfig.defaultSkips, which re-asks canManageMemoryConfig itself; the template's id, name and deleted flag go to that memory's manager (the same projection as NodeRoleRule.sourceTemplate)",
+      "resolver": "src/api/graphql/schema/resolvers.memoryConfig.ts::defaultSkips",
+      "target": "NodeRoleRuleSourceTemplate"
+    },
+    "MemoryConfigBulkApplyEntry.error": {
+      "class": "parent-implies-child",
+      "audience": "the entry exists only in the applyMemoryConfigTemplateToMemories answer; its error is built from the caller's own input string and the generic fault envelope, never from a resolved row",
+      "resolver": "src/api/graphql/schema/resolvers.memoryConfigApply.ts::toEntryError",
+      "target": "MemoryConfigBulkApplyError"
+    },
+    "MemoryConfigBulkApplyResult.results": {
+      "class": "parent-implies-child",
+      "audience": "the report exists only in the applyMemoryConfigTemplateToMemories answer, which requires managedTemplate and, per entry, managedMemory",
+      "resolver": "src/api/graphql/schema/resolvers.memoryConfigApply.ts::managedMemory",
+      "target": "MemoryConfigBulkApplyEntry"
+    },
+    "MemoryConfigApplyResult.template": {
+      "class": "closed-projection",
+      "projection": "NodeRoleRuleSourceTemplate",
+      "why": "id, name, deleted; the caller passed managedTemplate on this template before applying",
+      "target": "NodeRoleRuleSourceTemplate"
+    },
+    "MemoryConfigTemplatePayload.template": {
+      "class": "parent-implies-child",
+      "audience": "the owner's manager: create re-asserts reassertManageOwner, update/delete go through managedTemplate; reading needs the same manage gate",
+      "resolver": "src/api/graphql/schema/resolvers.memoryConfigTemplate.ts::managedTemplate",
+      "target": "MemoryConfigTemplate"
+    },
+    "MemoryConfigTemplatesPage.items": {
+      "class": "parent-implies-child",
+      "audience": "managers of the template's owner (platform admin, org ADMIN, the user, App ADMIN); list applies manageableWhere, memoryConfigTemplate applies managedTemplate; the two match",
+      "resolver": "src/api/graphql/schema/resolvers.memoryConfigTemplate.ts::manageableWhere",
+      "target": "MemoryConfigTemplate"
+    },
+    "MemoryMember.memory": {
+      "target": "Memory",
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::loadReadableMemoryRecord",
+      "gate": "loadReadableMemoryRecord"
+    },
+    "MemoryMember.user": {
+      "target": "User",
+      "class": "parent-implies-child",
+      "audience": "Every caller the membership row admits; private User fields gated per field.",
+      "spec": "cor:acl:110:02",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::canSeeUserPersonalFields"
+    },
+    "MemoryShare.grantee": {
+      "target": "User",
+      "class": "parent-implies-child",
+      "audience": "Every caller the share admits receives the User; private fields gated per field by canSeeUserPersonalFields.",
+      "spec": "cor:acl:110:02",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::canSeeUserPersonalFields"
+    },
+    "MemoryShare.grantor": {
+      "target": "User",
+      "class": "parent-implies-child",
+      "audience": "Same as grantee: the nested User exception.",
+      "spec": "cor:acl:110:02",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::canSeeUserPersonalFields"
+    },
+    "MemoryShare.memory": {
+      "target": "Memory",
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::loadReadableMemoryRecord",
+      "gate": "loadReadableMemoryRecord"
+    },
+    "MemorySubscription.memory": {
+      "class": "child-gated",
+      "test": "src/api/graphql/schema/resolvers.nestedRead2557.test.ts::Organization.subscriptions filters by %s memory access without null bubbling",
+      "target": "Memory"
+    },
+    "MemorySubscription.organization": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::organization",
+      "gate": "loadReadableNestedOrganization",
+      "target": "Organization"
+    },
+    "ModelFamilyAvailability.setBy": {
+      "class": "closed-projection",
+      "projection": "AgentTaskParty",
+      "why": "AgentTaskParty(kind,id,name,urn via partyView; worker same-App or user handle only; audience App participants+App key)",
+      "target": "AgentTaskParty"
+    },
+    "Node.asComment": {
+      "target": "Comment",
+      "class": "parent-implies-child",
+      "audience": "A comment is a node of the same memory; asComment returns a view of the node the caller already reads; inherited and install-concealed nodes return null.",
+      "resolver": "src/api/graphql/schema/resolvers.comments.ts::asComment"
+    },
+    "Node.asset": {
+      "target": "Asset",
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::asset",
+      "gate": "canReadMemory"
+    },
+    "Node.authorship": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::authorship",
+      "gate": "getAccessibleMemoryIds",
+      "target": "NodeAuthorship"
+    },
+    "Node.createdByAgent": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "ActorRef"
+    },
+    "Node.createdByUser": {
+      "class": "closed-projection",
+      "projection": "NodeRevisionEditor",
+      "why": "NodeRevisionEditor(handle,urn only; identity tier cor:acl:070:01)",
+      "target": "NodeRevisionEditor"
+    },
+    "Node.createdByWorker": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "ActorRef"
+    },
+    "Node.incomingEdges": {
+      "target": "Edge",
+      "class": "parent-implies-child",
+      "audience": "Same as outgoingEdges; cross-memory incoming edges expose the edge record itself, only the far Node is gated.",
+      "resolver": "src/api/graphql/schema/resolvers.nodeBatchEdges.ts::batchReadEdges"
+    },
+    "Node.memory": {
+      "target": "Memory",
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::loadReadableMemoryRecord",
+      "gate": "loadReadableMemoryRecord"
+    },
+    "Node.outgoingEdges": {
+      "target": "Edge",
+      "class": "parent-implies-child",
+      "audience": "Edge reads follow the edge's memory through the accessible-memory gate; edges are preloaded only by node reads that apply that gate; endpoints re-gated by Edge.source/target. Agent did not enumerate every Node-returning path.",
+      "resolver": "src/api/graphql/schema/resolvers.nodeBatchEdges.ts::batchReadEdges"
+    },
+    "Node.signingRequests": {
+      "class": "parent-implies-child",
+      "audience": "every caller the Node read admits can read the node's memory; signing requests go to anyone who may read the node; inherited and install-concealed nodes return an empty list",
+      "spec": "cor:dmo:130:03",
+      "resolver": "src/api/graphql/schema/resolvers.signing.ts::signingRequests",
+      "target": "SigningRequest"
+    },
+    "Node.updatedByAgent": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "ActorRef"
+    },
+    "Node.updatedByUser": {
+      "class": "closed-projection",
+      "projection": "NodeRevisionEditor",
+      "why": "NodeRevisionEditor(handle,urn only; identity tier cor:acl:070:01)",
+      "target": "NodeRevisionEditor"
+    },
+    "Node.updatedByWorker": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "ActorRef"
+    },
+    "NodeApproval.approvedBy": {
+      "class": "closed-projection",
+      "projection": "NodeRevisionEditor",
+      "why": "NodeRevisionEditor(handle,urn only; identity tier cor:acl:070:01)",
+      "target": "NodeRevisionEditor"
+    },
+    "NodeApprovalReceipt.approval": {
+      "class": "parent-implies-child",
+      "audience": "receipts come only from approveNode and approveMemoryNodes, which require memory write access (mayApproveNodes); assumes write access implies read access",
+      "spec": "cor:dmo:120:10",
+      "resolver": "src/api/graphql/schema/resolvers.nodeApproval.ts::receiptOf",
+      "target": "NodeApproval"
+    },
+    "NodeApprovalStatus.approval": {
+      "class": "parent-implies-child",
+      "audience": "reached only through Node.approvalStatus, i.e. by callers who may read the node; the approval record is shown on every read surface that shows the node",
+      "spec": "cor:dmo:120:10",
+      "resolver": "src/api/graphql/schema/resolvers.nodeApproval.ts::approvalStatus",
+      "target": "NodeApproval"
+    },
+    "NodeAuthorship.human": {
+      "class": "closed-projection",
+      "projection": "NodeRevisionEditor",
+      "why": "NodeRevisionEditor(handle,urn only; identity tier cor:acl:070:01)",
+      "target": "NodeRevisionEditor"
+    },
+    "NodeBatchResult.nodes": {
+      "class": "parent-implies-child",
+      "audience": "each ref admitted only if its memory is in memoryAccessFilter; a denied ref lands in unavailable like a missing one",
+      "resolver": "src/api/graphql/schema/resolvers.query.node.ts::memoryAccessFilter",
+      "target": "Node"
+    },
+    "NodeHit.node": {
+      "target": "Node",
+      "class": "parent-implies-child",
+      "audience": "NodeHit exists only inside findNodes, which restricts every hit to getAccessibleMemoryIds intersected with the requested memories: the same content gate node(ref) applies.",
+      "resolver": "src/api/graphql/schema/resolvers.query.node.ts::findNodes"
+    },
+    "NodeMintStatus.mintedBy": {
+      "class": "closed-projection",
+      "projection": "NodeRevisionEditor",
+      "why": "NodeRevisionEditor(handle,urn only; identity tier cor:acl:070:01)",
+      "target": "NodeRevisionEditor"
+    },
+    "NodePage.items": {
+      "class": "parent-implies-child",
+      "audience": "callers admitted by resolveAppNodeScope (App participant, org READER+, platform admin) read only that scope's memory ids; includeDeleted limited to recoverable memories",
+      "resolver": "src/api/graphql/schema/resolvers.appMemoryScope.ts::resolveAppNodeScope",
+      "target": "Node"
+    },
+    "NodeRevision.approvedByUser": {
+      "class": "closed-projection",
+      "projection": "NodeRevisionEditor",
+      "why": "NodeRevisionEditor(handle,urn only; identity tier cor:acl:070:01)",
+      "target": "NodeRevisionEditor"
+    },
+    "NodeRevision.authorship": {
+      "class": "child-gated",
+      "test": "src/api/graphql/schema/resolvers.nodeContentProvenance.test.ts::preserves task authorship in an old snapshot, distinct from the editor",
+      "target": "NodeAuthorship"
+    },
+    "NodeRevision.editedByAgent": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "ActorRef"
+    },
+    "NodeRevision.editedByUser": {
+      "class": "closed-projection",
+      "projection": "NodeRevisionEditor",
+      "why": "NodeRevisionEditor(handle,urn only; identity tier cor:acl:070:01)",
+      "target": "NodeRevisionEditor"
+    },
+    "NodeRevision.editedByWorker": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "ActorRef"
+    },
+    "NodeRevisionPage.items": {
+      "class": "parent-implies-child",
+      "audience": "callers who can read the node's memory (nodeRevisionsScope); a revision whose own memoryId is unreadable is dropped",
+      "resolver": "src/api/graphql/schema/resolvers.query.node.ts::nodeRevisionsScope",
+      "target": "NodeRevision"
+    },
+    "NodeRoleRule.sourceTemplate": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "NodeRoleRuleSourceTemplate"
+    },
+    "NodeRoleRulePayload.rule": {
+      "class": "parent-implies-child",
+      "audience": "managers of the memory (canManageMemoryConfig, rechecked via reassertManage); reading a config needs the same MANAGE gate; task/description refs re-gated per caller",
+      "resolver": "src/api/graphql/schema/resolvers.memoryConfig.ts::canManageMemoryConfig",
+      "target": "NodeRoleRule"
+    },
+    "NodeSignature.signer": {
+      "class": "closed-projection",
+      "projection": "NodeRevisionEditor",
+      "why": "NodeRevisionEditor(handle,urn only; identity tier cor:acl:070:01)",
+      "target": "NodeRevisionEditor"
+    },
+    "NodeSignatureStatus.signatures": {
+      "class": "parent-implies-child",
+      "audience": "reached only through Node.signatureStatus, i.e. by callers who may read the node; an encrypted memory returns NOT_APPLICABLE with no signatures",
+      "spec": "cor:dmo:130:06",
+      "resolver": "src/api/graphql/schema/resolvers.signing.ts::loadSignatureStatus",
+      "target": "NodeSignature"
+    },
+    "OrgMember.user": {
+      "class": "parent-implies-child",
+      "audience": "reached via Organization.members; nested User exception, personal fields gated",
+      "spec": "cor:acl:110:02",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::canSeeUserPersonalFields",
+      "target": "User"
+    },
+    "Organization.agentOrgGrants": {
+      "class": "child-gated",
+      "test": "src/api/graphql/schema/resolvers.agentOrgGrants2186.test.ts::a user with no membership, and an anonymous caller, see none",
+      "target": "AgentOrgGrant"
+    },
+    "Organization.agents": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "Agent"
+    },
+    "Organization.apps": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::apps",
+      "gate": "filterReadableAppRows",
+      "target": "App"
+    },
+    "Organization.exchangeConnections": {
+      "class": "child-gated",
+      "test": "src/api/graphql/schema/resolvers.exchangeConnectionAudience.test.ts::a live member below ADMIN gets [] nested (the parent survives) and FORBIDDEN direct",
+      "target": "ExchangeConnection"
+    },
+    "Organization.members": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "OrgMember"
+    },
+    "Organization.memories": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::memories",
+      "gate": "filterReadableMemoryRecords",
+      "target": "Memory"
+    },
+    "Organization.subscriptions": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::subscriptions",
+      "gate": "filterReadableMemoryRecords",
+      "target": "MemorySubscription"
+    },
+    "OrganizationsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "platform ADMIN/OWNER or live org members (resolveOrgScope); Query.organization admits exactly members or platform admins",
+      "resolver": "src/api/graphql/schema/resolvers.query.org.ts::organizations",
+      "target": "Organization"
+    },
+    "AccountUsageAccounts.accounts": {
+      "class": "parent-implies-child",
+      "audience": "the readers of the team's tasks and events (cor:agt:140:05, :140:03, :050:21, :23; #3853): a participant of the App or the App's own key; everyone else is refused APP_NOT_FOUND. An entry holds an account label, host, family, a timestamp and worker names only, read from the App's own team-space memory: nothing another tenant owns is reachable",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
+      "target": "AccountUsageAccount"
+    },
+    "AccountUsageMoveTarget.adjusted": {
+      "class": "parent-implies-child",
+      "audience": "the readers of the team's tasks and events (cor:agt:140:03, :050:21, :23; #3820): a participant of the App or the App's own key; everyone else is refused APP_NOT_FOUND. A projection holds account labels, percentages, timestamps and worker names only: nothing another tenant owns is reachable",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
+      "target": "AccountUsageWindowProjection"
+    },
+    "AccountUsageMoveTarget.baseline": {
+      "class": "parent-implies-child",
+      "audience": "the readers of the team's tasks and events (cor:agt:140:03, :050:21, :23; #3820): a participant of the App or the App's own key; everyone else is refused APP_NOT_FOUND. A projection holds account labels, percentages, timestamps and worker names only: nothing another tenant owns is reachable",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
+      "target": "AccountUsageWindowProjection"
+    },
+    "AccountUsageProjection.whatIf": {
+      "class": "parent-implies-child",
+      "audience": "the readers of the team's tasks and events (cor:agt:140:03, :050:21, :23; #3820): a participant of the App or the App's own key; everyone else is refused APP_NOT_FOUND. A projection holds account labels, percentages, timestamps and worker names only: nothing another tenant owns is reachable",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
+      "target": "AccountUsageWhatIf"
+    },
+    "AccountUsageProjection.windows": {
+      "class": "parent-implies-child",
+      "audience": "the readers of the team's tasks and events (cor:agt:140:03, :050:21, :23; #3820): a participant of the App or the App's own key; everyone else is refused APP_NOT_FOUND. A projection holds account labels, percentages, timestamps and worker names only: nothing another tenant owns is reachable",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
+      "target": "AccountUsageWindowProjection"
+    },
+    "AccountUsageWhatIf.adjusted": {
+      "class": "parent-implies-child",
+      "audience": "the readers of the team's tasks and events (cor:agt:140:03, :050:21, :23; #3820): a participant of the App or the App's own key; everyone else is refused APP_NOT_FOUND. A projection holds account labels, percentages, timestamps and worker names only: nothing another tenant owns is reachable",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
+      "target": "AccountUsageWindowProjection"
+    },
+    "AccountUsageWhatIf.target": {
+      "class": "parent-implies-child",
+      "audience": "the readers of the team's tasks and events (cor:agt:140:03, :050:21, :23; #3820): a participant of the App or the App's own key; everyone else is refused APP_NOT_FOUND. A projection holds account labels, percentages, timestamps and worker names only: nothing another tenant owns is reachable",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
+      "target": "AccountUsageMoveTarget"
+    },
+    "AccountUsageWindowProjection.burn": {
+      "class": "parent-implies-child",
+      "audience": "the readers of the team's tasks and events (cor:agt:140:03, :050:21, :23; #3820): a participant of the App or the App's own key; everyone else is refused APP_NOT_FOUND. A projection holds account labels, percentages, timestamps and worker names only: nothing another tenant owns is reachable",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
+      "target": "AccountUsageBurnRange"
+    },
+    "AccountUsageWindowProjection.perWorkerBurn": {
+      "class": "parent-implies-child",
+      "audience": "the readers of the team's tasks and events (cor:agt:140:03, :050:21, :23; #3820): a participant of the App or the App's own key; everyone else is refused APP_NOT_FOUND. A projection holds account labels, percentages, timestamps and worker names only: nothing another tenant owns is reachable",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
+      "target": "AccountUsageBurnRange"
+    },
+    "GrantsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "a bound worker session reading its own App's grants that name it directly (plus its own pending requests) (#3789), or a signed-in person reading only the grants naming them as holder (#3800 myGrants); any other caller gets an empty page",
+      "resolver": "src/api/graphql/schema/resolvers.grant.ts::resolveGrantReader",
+      "target": "Grant"
+    },
+    "GrantSigningRequest.requestedBy": {
+      "class": "open",
+      "evidence": "#3649 slice B: the same SigningRequester shape as SigningRequest.requestedBy, shown to whoever may read the grant (#3789 read gate); the private follow-up (hadron-internal#30) covers both; details withheld",
+      "target": "SigningRequester"
+    },
+    "PrincipalGrantsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "the caller's own grants, or any principal's grants in an org where the caller is an org admin",
+      "resolver": "src/api/graphql/schema/resolvers.principalGrant.ts::isOrgAdmin",
+      "target": "PrincipalGrant"
+    },
+    "PublicOrganization.publicAgents": {
+      "class": "closed-projection",
+      "projection": "PublicResourceRef",
+      "why": "PublicResourceRef(id,name,urn,description; public-readable rows only)",
+      "target": "PublicResourceRef"
+    },
+    "PublicOrganization.publicMemories": {
+      "class": "closed-projection",
+      "projection": "PublicResourceRef",
+      "why": "PublicResourceRef(id,name,urn,description; public-readable rows only)",
+      "target": "PublicResourceRef"
+    },
+    "PublicResourceRefPage.items": {
+      "class": "closed-projection",
+      "projection": "PublicResourceRef",
+      "why": "PublicResourceRef(id,name,urn,description; public-readable rows only)",
+      "target": "PublicResourceRef"
+    },
+    "RecoveryEdgesPage.items": {
+      "class": "closed-projection",
+      "projection": "RecoveryGraphEdge",
+      "why": "id, name, source/target as RecoveryEndpoint; caller must pass recoveryMemory; a live endpoint kept only when its memory is readable; no content",
+      "target": "RecoveryGraphEdge"
+    },
+    "RecoveryGraphEdge.source": {
+      "class": "child-gated",
+      "test": "src/api/graphql/schema/resolvers.recovery2175.test.ts::keeps an unreadable or unrecoverable endpoint absent with and without edgeIds",
+      "target": "RecoveryEndpoint"
+    },
+    "RecoveryGraphEdge.target": {
+      "class": "child-gated",
+      "test": "src/api/graphql/schema/resolvers.recovery2175.test.ts::keeps an unreadable or unrecoverable endpoint absent with and without edgeIds",
+      "target": "RecoveryEndpoint"
+    },
+    "RecoveryNodesPage.items": {
+      "class": "closed-projection",
+      "projection": "RecoveryNodeSummary",
+      "why": "id, urn, memoryId, loc, name, nodeType, deletedAt; no content; recoveryMemory/canRecoverMemory runs before count and page, so only writers with recovery authority see them",
+      "target": "RecoveryNodeSummary"
+    },
+    "RegisterEntriesPage.items": {
+      "class": "parent-implies-child",
+      "audience": "rows restricted by readableRegisterWhere, the list form of the gate registerEntry uses",
+      "resolver": "src/api/graphql/schema/resolvers.register.ts::readableRegisterWhere",
+      "target": "RegisterEntry"
+    },
+    "RegisterEntry.channel": {
+      "target": "Channel",
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.register.ts::RegisterEntry",
+      "gate": "getAccessibleMemoryIds"
+    },
+    "RegisterRoleCandidate.worker": {
+      "class": "closed-projection",
+      "projection": "AgentTaskParty",
+      "why": "AgentTaskParty(kind,id,name,urn via partyView; worker same-App or user handle only; audience App participants+App key)",
+      "target": "AgentTaskParty"
+    },
+    "RegisterRolePick.entries": {
+      "class": "closed-projection",
+      "projection": "RegisterRouteEntry",
+      "why": "kind (WORKER or USER) and id only; admitted by resolveParticipatedApp like the roster; USER ids only when managesApp passes",
+      "target": "RegisterRouteEntry"
+    },
+    "RegisterViewRow.channel": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "RegisterViewChannel"
+    },
+    "RegisterViewRow.entry": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "RegisterEntry"
+    },
+    "ReleaseWorkerPayload.releasedFrom": {
+      "class": "closed-projection",
+      "projection": "ReleasedFromUser",
+      "why": "ReleasedFromUser(id,handle,urn,name; name behind canSeeUserPersonalFields)",
+      "target": "ReleasedFromUser"
+    },
+    "ReleaseWorkerPayload.worker": {
+      "class": "parent-implies-child",
+      "audience": "the caller resolved this worker through resolveReadableWorkerRef (requireWorkerReadAccess) before releasing; Worker working-state fields keep their own masks",
+      "resolver": "src/api/graphql/schema/resolvers.worker.ts::resolveReadableWorkerRef",
+      "target": "Worker"
+    },
+    "ResendSendersPage.items": {
+      "class": "parent-implies-child",
+      "audience": "org members (memberOrgIds); resendSender(ref) admits isOrgMemberOrAdmin of the owning org",
+      "resolver": "src/api/graphql/schema/resolvers.query.resendSender.ts::isOrgMemberOrAdmin",
+      "target": "ResendSender"
+    },
+    "ResumeSessionResult.candidates": {
+      "class": "closed-projection",
+      "projection": "ResumeCandidate",
+      "why": "sessionId, workerId, workerName, description, source, expiresAt; built only from the caller's own live claims or own live worker sessions",
+      "target": "ResumeCandidate"
+    },
+    "ResumeSessionResult.session": {
+      "class": "parent-implies-child",
+      "audience": "the caller's own resumable session (ctx.userId; impersonation and non-users refused); attributed user's own sessions per cor:acl:090:02",
+      "spec": "cor:acl:090:02",
+      "resolver": "src/api/graphql/schema/resolvers.mutation.session.ts::liveClaimsOf",
+      "target": "Session"
+    },
+    "ScopeExplanation.memories": {
+      "target": "Memory",
+      "class": "child-gated",
+      "test": "src/api/graphql/schema/resolvers.crossParentRows3238.test.ts::every Memory the lens returns is one the same principal reads directly (cor:acl:120:01)"
+    },
+    "ScopeExplanation.scope": {
+      "target": "Scope",
+      "class": "parent-implies-child",
+      "audience": "scopeExplain loads the scope through readableScope; a name resolves only through canReadScope; a caller who cannot read it gets null.",
+      "resolver": "src/api/graphql/schema/resolvers.scope.ts::readableScope"
+    },
+    "ScopeExplanation.shadowed": {
+      "target": "Scope",
+      "class": "parent-implies-child",
+      "audience": "The shadowed list is built only from candidates that pass canReadScope inside resolveScopeByNameInApp.",
+      "resolver": "src/lib/scopes.ts::canReadScope"
+    },
+    "ScopeExplanation.winner": {
+      "target": "Memory",
+      "class": "child-gated",
+      "test": "src/api/graphql/schema/resolvers.crossParentRows3238.test.ts::the winner skips an unreadable memory that holds the loc earlier in the order"
+    },
+    "ScopeMemoryEntry.memory": {
+      "target": "Memory",
+      "class": "child-gated",
+      "test": "src/api/graphql/schema/resolvers.crossParentRows3238.test.ts::for an ordinary member the lens is exactly the direct read, in scope order"
+    },
+    "ScopesPage.items": {
+      "class": "parent-implies-child",
+      "audience": "rows restricted by readableScopesWhere, the list form of canReadScope that Query.scope uses",
+      "resolver": "src/api/graphql/schema/resolvers.scope.ts::readableScopesWhere",
+      "target": "Scope"
+    },
+    "SecretsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "callers passing canSeeSecretOwner: the user themselves (not impersonating) or org members; metadata only, never the value",
+      "resolver": "src/api/graphql/schema/resolvers.secret.ts::canSeeSecretOwner",
+      "target": "Secret"
+    },
+    "ServedPromptsPage.items": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.servedPrompt.ts::chatServedPromptsById",
+      "gate": "mayManageApp",
+      "target": "ServedPrompt"
+    },
+    "Session.events": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::events",
+      "gate": "sessionScopeFilter",
+      "target": "UsageEvent"
+    },
+    "Session.worker": {
+      "target": "Worker",
+      "class": "parent-implies-child",
+      "audience": "Every caller the session gate admits gets the Worker's identity fields; every other Worker field keeps its own gate.",
+      "spec": "cor:acl:090:02",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::Session",
+      "maskingTest": "src/api/graphql/schema/resolvers.sessionWorker.test.ts::org READER (not an App participant): attribution renders, internals mask to null"
+    },
+    "SessionPage.items": {
+      "class": "parent-implies-child",
+      "audience": "the four branches of cor:acl:090:02 (platform admin, pure App key, attributed user, org members of the App's org); sessionScopeFilter shared with Query.session",
+      "spec": "cor:acl:090:02",
+      "resolver": "src/api/graphql/schema/resolvers.query.session.ts::sessionScopeFilter",
+      "target": "Session"
+    },
+    "SharedOrganizationsPage.items": {
+      "class": "closed-projection",
+      "projection": "SharedOrganization",
+      "why": "SharedOrganization(id,name,urn; viewer's own live memberships)",
+      "target": "SharedOrganization"
+    },
+    "SigningRequest.namedSigner": {
+      "class": "closed-projection",
+      "projection": "NodeRevisionEditor",
+      "why": "NodeRevisionEditor(handle,urn only; identity tier cor:acl:070:01)",
+      "target": "NodeRevisionEditor"
+    },
+    "SigningRequest.requestedBy": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "SigningRequester"
+    },
+    "SigningRequest.signature": {
+      "class": "parent-implies-child",
+      "audience": "a SigningRequest is produced only by Node.signingRequests, readableRequest (isMemoryReadableCached) and request/withdraw mutations needing node read; signatures are shown to exactly the node's readers",
+      "spec": "cor:dmo:130:06",
+      "resolver": "src/api/graphql/schema/resolvers.signing.ts::signature",
+      "target": "NodeSignature"
+    },
+    "SlackConnectionsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "live org members (resolveOrgScope memberOrgIds); slackConnection(ref) admits isOrgMemberOrAdmin of the owning org",
+      "resolver": "src/api/graphql/schema/resolvers.query.slack.ts::isOrgMemberOrAdmin",
+      "target": "SlackConnection"
+    },
+    "SpecCorpusMintReport.unresolvedFeedback": {
+      "class": "parent-implies-child",
+      "audience": "the report exists only in the mintMemoryNodes and mintSpecCorpus answers, after concealUnreadableDenial and mayMintNodes (memory write access); open-comment counts on nodes of that memory",
+      "resolver": "src/api/graphql/schema/resolvers.specCorpus.ts::mintMemoryNodes",
+      "target": "UnresolvedFeedback"
+    },
+    "StartImpersonationResult.session": {
+      "class": "parent-implies-child",
+      "audience": "the caller who just started it (platform admin or org ADMIN/OWNER) and its adminUserId; canAdministerSession admits both",
+      "resolver": "src/api/graphql/schema/resolvers.impersonation.ts::canAdministerSession",
+      "target": "ImpersonationSession"
+    },
+    "StopSignalPage.signals": {
+      "class": "parent-implies-child",
+      "audience": "App participants (all), a worker session (signals covering it), or a host key (its own host's); ids and timestamps of the App's own signals",
+      "resolver": "src/api/graphql/schema/resolvers.stopSignal.ts::listSignals",
+      "target": "StopSignal"
+    },
+    "SubscribeResult.subscription": {
+      "class": "parent-implies-child",
+      "audience": "callers who reached the ticker (loadReachableTicker, an App participant) and passed decideSubscribe for a worker of the same App",
+      "resolver": "src/api/graphql/schema/resolvers.ticker.ts::loadReachableTicker",
+      "target": "TickerSubscription"
+    },
+    "TeamAvailability.families": {
+      "class": "parent-implies-child",
+      "audience": "Query.teamAvailability runs withReadableApp: App participants and the App's own key, read-only; a model family's availability goes to exactly that audience",
+      "spec": "cor:agt:060:03",
+      "resolver": "src/api/graphql/schema/resolvers.agentTaskAlarms.ts::teamAvailability",
+      "target": "ModelFamilyAvailability"
+    },
+    "TeamAvailability.workers": {
+      "class": "parent-implies-child",
+      "audience": "Query.teamAvailability runs withReadableApp: App participants and the App's own key, read-only; a worker's availability goes to exactly that audience",
+      "spec": "cor:agt:060:02",
+      "resolver": "src/api/graphql/schema/resolvers.agentTaskAlarms.ts::teamAvailability",
+      "target": "WorkerAvailability"
+    },
+    "TeamChatMessagesPage.items": {
+      "class": "parent-implies-child",
+      "audience": "callers passing requireTeamChatAccess read: App participants, the App's own key, or in-org impersonation; channelMessages for App-hosted channels uses it too",
+      "resolver": "src/api/graphql/schema/resolvers.teamChat.ts::requireTeamChatAccess",
+      "target": "TeamChatMessage"
+    },
+    "TeamCompositionLane.coordinator": {
+      "class": "closed-projection",
+      "projection": "AgentTaskParty",
+      "why": "AgentTaskParty(kind,id,name,urn via partyView; worker same-App or user handle only; audience App participants+App key)",
+      "target": "AgentTaskParty"
+    },
+    "TeamCompositionWorker.worker": {
+      "class": "closed-projection",
+      "projection": "AgentTaskParty",
+      "why": "AgentTaskParty(kind,id,name,urn via partyView; worker same-App or user handle only; audience App participants+App key)",
+      "target": "AgentTaskParty"
+    },
+    "TeamRole.roleAgent": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.teamRole.ts::buildTeamRole",
+      "gate": "requireAgentAccess",
+      "target": "Agent"
+    },
+    "TeamRolesPage.items": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "TeamRole"
+    },
+    "TeamRoster.workers": {
+      "class": "closed-projection",
+      "projection": "TeamRosterEntry",
+      "why": "a sanitized roster row, never a Worker; admission is resolveParticipatedApp; teamPlacement, heldBy, heldAt and terminal nulled unless maySeeWorkerInternals passes, currentTask unless mayReadAppTasks passes",
+      "target": "TeamRosterEntry"
+    },
+    "TeamRosterEntry.heldBy": {
+      "class": "closed-projection",
+      "projection": "WorkerHolder",
+      "why": "WorkerHolder(id,handle,urn,name; internals gated by maySeeWorkerInternals; name by canSeeUserPersonalFieldsMany)",
+      "target": "WorkerHolder"
+    },
+    "TeamRosterEntry.reportsTo": {
+      "class": "closed-projection",
+      "projection": "AgentTaskParty",
+      "why": "AgentTaskParty(kind,id,name,urn via partyView; worker same-App or user handle only; audience App participants+App key)",
+      "target": "AgentTaskParty"
+    },
+    "TeamRosterEntry.worker": {
+      "class": "closed-projection",
+      "projection": "AgentTaskParty",
+      "why": "AgentTaskParty(kind,id,name,urn via partyView; worker same-App or user handle only; audience App participants+App key)",
+      "target": "AgentTaskParty"
+    },
+    "Ticker.app": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "App"
+    },
+    "Ticker.channels": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.ticker.ts::channels",
+      "gate": "getAccessibleMemoryIds",
+      "target": "Channel"
+    },
+    "Ticker.owner": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "ActorRef"
+    },
+    "TickerPage.items": {
+      "class": "parent-implies-child",
+      "audience": "App participants (resolveParticipatedApp), the gate of Query.ticker, or a host key limited to tickers its host's workers subscribe to",
+      "resolver": "src/api/graphql/schema/resolvers.ticker.ts::resolveParticipatedApp",
+      "target": "Ticker"
+    },
+    "TickerSubscription.createdBy": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "ActorRef"
+    },
+    "TickerSubscription.ticker": {
+      "class": "parent-implies-child",
+      "audience": "reached via Ticker.subscribers, workerWakeSettings (participants only) and subscribe mutations (participants); each caller may read that ticker",
+      "resolver": "src/api/graphql/schema/resolvers.ticker.ts::resolveParticipatedApp",
+      "target": "Ticker"
+    },
+    "TickerSubscription.worker": {
+      "class": "parent-implies-child",
+      "audience": "App participants or the App's host key; subscribers limited to the host's own workers for a key",
+      "resolver": "src/api/graphql/schema/resolvers.worker.ts::requireWorkerProfileAccess",
+      "target": "Worker"
+    },
+    "TickerSubscriptionPage.items": {
+      "class": "parent-implies-child",
+      "audience": "whoever reached the Ticker (participants, or a host key limited to its host's workers); subscriptions are the ticker's own rows in the same App",
+      "resolver": "src/api/graphql/schema/resolvers.ticker.ts::subscribers",
+      "target": "TickerSubscription"
+    },
+    "UpdateMemoryMemberRolePayload.memoryMember": {
+      "class": "parent-implies-child",
+      "audience": "the memory's member-owner (requireMemoryMemberOwner); same row and field gating as addMemoryMember",
+      "resolver": "src/api/graphql/schema/resolvers.mutation.memory.ts::requireMemoryMemberOwner",
+      "target": "MemoryMember"
+    },
+    "UpdateMemoryShareRolePayload.memoryShare": {
+      "class": "parent-implies-child",
+      "audience": "the Memory's principal (requireMemorySharePrincipal); same row family and field gating as createMemoryShare",
+      "resolver": "src/api/graphql/schema/resolvers.mutation.memory.ts::requireMemorySharePrincipal",
+      "target": "MemoryShare"
+    },
+    "UsageEventPage.items": {
+      "class": "parent-implies-child",
+      "audience": "callers who can read the event's memory: usageEventsWhere restricts to getAccessibleMemoryIds; an explicit memoryId/nodeId must be readable",
+      "resolver": "src/api/graphql/schema/resolvers.query.session.ts::usageEventsWhere",
+      "target": "UsageEvent"
+    },
+    "User.appMemberships": {
+      "target": "AppMember",
+      "class": "parent-implies-child",
+      "audience": "Rows only when the caller is the queried user and not impersonating, else []; AppMember.app gated separately.",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::appMemberships"
+    },
+    "UserApiKeyCreateResult.userApiKey": {
+      "class": "parent-implies-child",
+      "audience": "the key the caller just minted for themselves; createUserApiKey needs a user credential, not impersonation; inventory read is owner-only",
+      "resolver": "src/api/graphql/schema/resolvers.mutation.app.ts::createUserApiKey",
+      "target": "UserApiKey"
+    },
+    "UserApiKeyPage.items": {
+      "class": "parent-implies-child",
+      "audience": "the owner only (userApiKeyInventoryScope: userId = ctx.userId, impersonation refused)",
+      "resolver": "src/api/graphql/schema/resolvers.query.app.ts::userApiKeyInventoryScope",
+      "target": "UserApiKey"
+    },
+    "UserInvitation.organization": {
+      "class": "parent-implies-child",
+      "audience": "returned only to a caller who passed requireOrgRole ADMIN on that org; ADMIN implies READER",
+      "resolver": "src/api/graphql/schema/resolvers.mutation.org.ts::createUserInvitation",
+      "target": "Organization"
+    },
+    "UserInvitation.sender": {
+      "class": "parent-implies-child",
+      "audience": "returned only by createUserInvitation/inviteUser; sender is always the calling user; nested User exception",
+      "spec": "cor:acl:110:02",
+      "resolver": "src/api/graphql/schema/resolvers.mutation.org.ts::createUserInvitation",
+      "target": "User"
+    },
+    "UsersPage.items": {
+      "class": "parent-implies-child",
+      "audience": "platform admins list all; others get a search-only list; name/email/personal fields nulled by the User field resolvers",
+      "spec": "cor:acl:070:02",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::canSeeUserPersonalFields",
+      "target": "User"
+    },
+    "WakeReason.ticker": {
+      "class": "parent-implies-child",
+      "audience": "App participants read all the App's tickers, or the App's host key; a TICK reason names a ticker of one of the host's own workers",
+      "resolver": "src/api/graphql/schema/resolvers.wake.ts::dueWakesFor",
+      "target": "Ticker"
+    },
+    "Worker.agent": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.worker.ts::agent",
+      "gate": "requireReadableAgent",
+      "target": "Agent"
+    },
+    "Worker.app": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.worker.ts::app",
+      "gate": "requireAppRead",
+      "target": "App"
+    },
+    "Worker.continuity": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.worker.ts::continuity",
+      "gate": "maySeeWorkerInternals",
+      "target": "WorkerContinuity"
+    },
+    "Worker.servedPrompt": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.servedPrompt.ts::workerServedPrompt",
+      "gate": "maySeeWorkerInternals",
+      "target": "ServedPrompt"
+    },
+    "WorkerAvailability.setByParty": {
+      "class": "closed-projection",
+      "projection": "AgentTaskParty",
+      "why": "AgentTaskParty(kind,id,name,urn via partyView; worker same-App or user handle only; audience App participants+App key)",
+      "target": "AgentTaskParty"
+    },
+    "WorkerAvailability.worker": {
+      "class": "closed-projection",
+      "projection": "AgentTaskParty",
+      "why": "AgentTaskParty(kind,id,name,urn via partyView; worker same-App or user handle only; audience App participants+App key)",
+      "target": "AgentTaskParty"
+    },
+    "WorkerContinuity.handoff": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "Node"
+    },
+    "WorkerContinuity.previousSession": {
+      "class": "open",
+      "evidence": "private follow-up (hadron-internal#30); details withheld",
+      "target": "WorkerContinuitySession"
+    },
+    "WorkerTerminal.host": {
+      "class": "closed-projection",
+      "projection": "WorkerTerminalHost",
+      "why": "id and label only: the same hostId and label HostRegistration shows to every reader of the App's tasks and events; the parent WorkerTerminal is masked unless maySeeWorkerInternals passes",
+      "target": "WorkerTerminalHost"
+    },
+    "WorkerWakeSettings.subscriptions": {
+      "class": "parent-implies-child",
+      "audience": "WorkerWakeSettings is reached through workerForRead (App participants) or manager-only mutations; participants may also read the App's tickers",
+      "resolver": "src/api/graphql/schema/resolvers.ticker.ts::workerForRead",
+      "target": "TickerSubscription"
+    },
+    "WorkerWakeSettings.worker": {
+      "class": "parent-implies-child",
+      "audience": "reached via workerWakeSettings (App participant only) or the wake-settings mutations",
+      "resolver": "src/api/graphql/schema/resolvers.ticker.ts::workerForRead",
+      "target": "Worker"
+    },
+    "WorkersPage.items": {
+      "class": "parent-implies-child",
+      "audience": "workers: requireWorkerReadAccess on the App; heldWorkers: the workerReadableWhere form; the working-state tier, narrower than Query.worker's profile gate",
+      "resolver": "src/api/graphql/schema/resolvers.worker.ts::requireWorkerReadAccess",
+      "target": "Worker"
+    },
+    "AutomationTeamSnapshotGrantPage.items": {
+      "class": "closed-projection",
+      "projection": "AutomationTeamSnapshotGrant",
+      "target": "AutomationTeamSnapshotGrant",
+      "why": "The root automationTeamSnapshotGrants checks a live App and its manager under authority anchors before counting/paging. Items expose only that App grant audit scalars, no User/App/trigger object or private target; the same manager gate gives/revokes these rows. No independently readable entity is attached."
+    },
+    "PrProtocolResult.task": {
+      "class": "parent-implies-child",
+      "audience": "the command writer is re-gated as a participant in the task App; every participant reads all tasks of that App (cor:agt:050:21), and no App key writes these commands",
+      "resolver": "src/api/graphql/schema/resolvers.prProtocol.ts::prProtocolMutations",
+      "target": "AgentTask"
+    },
+    "GrantSignatureStatus.signatures": {
+      "class": "parent-implies-child",
+      "audience": "reached only through Grant.signatureStatus by a bound worker reading its own App's grants (grant(ref:)/grants, the #3789 gate). A person listing their own grants (myGrants, #3800) is given state and integrityProblems only: this list is empty for them, withheld in the field resolver on the parent row's audience mark (gate call, #3800 P2-2); a grant's own signature records, re-verified on read",
+      "spec": "cor:acl:140:07",
+      "resolver": "src/api/graphql/schema/resolvers.grant.ts::grantFieldResolvers",
+      "target": "GrantSignature"
+    },
+    "GrantSignature.signer": {
+      "class": "closed-projection",
+      "projection": "NodeRevisionEditor",
+      "why": "NodeRevisionEditor(handle,urn only; identity tier cor:acl:070:01); an erased signer resolves null (cor:acl:140:08)",
+      "target": "NodeRevisionEditor"
+    }
+  }
+}

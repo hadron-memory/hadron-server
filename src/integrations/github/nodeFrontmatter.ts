@@ -1,3 +1,4 @@
+import { mirroredAuthoredWith } from '../../lib/authoringAttestation.js';
 import { InvalidRootMemoryError, rootLocForMemory } from '../localFs/loadNodeFromFs.js';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
@@ -40,6 +41,10 @@ export interface FrontmatterNodeFields {
   isRunnable?: boolean | null;
   /** Server-set reserved-citation state; false is the ordinary-node default. */
   isPlaceholder?: boolean;
+  /** #1328 — the stored stamp. A verified TASK stamp exports as `authoredWith`. */
+  authorshipKind?: string | null;
+  authoredByTask?: string | null;
+  authoredByRevision?: number | null;
 }
 
 /**
@@ -141,6 +146,10 @@ export function buildNodeFrontmatter(
   // Free to ship: 25 live nodes carry `isRunnable: false` and NONE of them is
   // mirrored (measured), so no file on disk gains a key today.
   if (node.role != null) frontmatter.role = node.role;
+  // #1328 — a verified task stamp round-trips as `task@revision`, for the next
+  // hand edit to restate or bump. Never a person's stamp: it is not a claim.
+  const authoredWith = mirroredAuthoredWith(node);
+  if (authoredWith) frontmatter.authoredWith = authoredWith;
   if (node.isRunnable != null) frontmatter.runnable = node.isRunnable;
   // #1477 — only the positive server-owned reservation needs an on-disk key.
   // Older mirrors with no key leave a stored placeholder alone on re-sync.
@@ -221,9 +230,11 @@ export function buildEdgeFrontmatter(outgoingEdges: EdgeForGit[]): Array<Record<
 function locToSegments(loc: string): string[] {
   const parts = loc.split(':');
   for (const p of parts) {
-    if (p === '' || p === '.' || p === '..' || /[/\\]/.test(p)) {
+    // #3264: a `.git` segment (any case) would address repository metadata. No valid loc atom
+    // can start with a dot (validateLoc), so this only reaches corrupt or legacy stored data.
+    if (p === '' || p === '.' || p === '..' || /[/\\]/.test(p) || p.toLowerCase() === '.git') {
       throw new Error(
-        `Unsafe loc "${loc}": empty, '.', '..', or path-separator segments are not allowed`,
+        `Unsafe loc "${loc}": empty, '.', '..', '.git', or path-separator segments are not allowed`,
       );
     }
   }
@@ -272,8 +283,9 @@ export function nodeFilePath(localPath: string, loc: string, memoryUrn?: string)
  * edges. Callers pass only non-empty locs (the empty-loc root is handled
  * separately and must never be treated as orphaned).
  *
- * Throws on a malformed loc — `locToSegments` guards the `rmSync(recursive)`
- * the caller runs on `sidecar`, which would otherwise delete a parent dir.
+ * Throws on a malformed loc — `locToSegments` guards the sidecar path, which would
+ * otherwise collapse onto a parent dir. Callers clean `sidecar` only through
+ * `removeLegacySidecar` (#3264), never recursively.
  */
 export function orphanedLegacyPaths(
   localPath: string,

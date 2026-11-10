@@ -143,7 +143,7 @@ describe('#1493 — shared-gate denials are FORBIDDEN on the wire', () => {
       const r = await gql(key.reader, UPDATE_ORG, { id: orgId, n: 'fault' });
       expect(r.status).toBe(200);
       expect(r.errors).toHaveLength(1);
-      expect(r.errors![0]!.extensions).toEqual({ code: 'INTERNAL_SERVER_ERROR' });
+      expect(r.errors![0]!.extensions).toEqual({ code: 'INTERNAL_SERVER_ERROR', requestId: expect.any(String) });
       expect(fault).toHaveBeenCalled();
       expect((await db.organization.findUnique({ where: { id: orgId } }))!.name).toBe('org');
     } finally {

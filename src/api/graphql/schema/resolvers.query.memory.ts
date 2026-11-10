@@ -1,4 +1,6 @@
+import { listAppInstallations } from '../../../lib/appInstallations.js';
 // memoryQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
+import { graphViewDisabled } from '../../../lib/graphView.js';
 import { GraphQLError } from 'graphql';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import {
@@ -30,6 +32,7 @@ import { activeAgentInstallLicenseIds, isGrantedAgentMemoryRole } from '../../..
 import { findInstallMemory, resolveInstallTarget } from './installMemory.js';
 import { listableInstallMemoryIds } from '../../../lib/auth/installMemory.js';
 import { AgentNotFoundError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
+import { unauthenticatedError } from '../../../lib/refusals.js';
 
 /** Compose a node URN, tolerating a memory urn the flat v2 shape can't express. */
 function safeCanonicalNodeUrn(memoryUrn: string, loc: string): string | null {
@@ -43,7 +46,7 @@ function safeCanonicalNodeUrn(memoryUrn: string, loc: string): string | null {
 // Graph-view fetch (issue #466): default page size + hard cap for the slim
 // memoryNodes / memoryEdges lists. Large enough to fill the graph in a few
 // round trips, capped so a single page stays bounded.
-const GRAPH_PAGE_DEFAULT = 1000;
+export const GRAPH_PAGE_DEFAULT = 20;
 const GRAPH_PAGE_MAX = 2000;
 
 /**
@@ -52,7 +55,7 @@ const GRAPH_PAGE_MAX = 2000;
  * fetch only `total` — the cheap "how big is this memory?" node/edge count — or
  * suppress the payload during init, the standard limit-0 pattern.
  */
-function clampGraphTake(limit?: number | null): number {
+export function clampGraphTake(limit?: number | null): number {
   if (limit == null) return GRAPH_PAGE_DEFAULT;
   return Math.min(GRAPH_PAGE_MAX, Math.max(0, limit));
 }
@@ -208,11 +211,12 @@ export const memoryQueries = {
         nodesChecked: report.nodesChecked,
         findings,
         totalFindings: report.totalFindings,
-        truncated: report.totalFindings > findings.length,
+        totalInformational: report.totalInformational,
+        truncated: report.totalFindings + report.totalInformational > findings.length,
         skippedChecks: report.skippedChecks,
         // A skipped check makes `ok` false even with zero findings — you
         // cannot claim health for a check you did not run.
-        ok: report.totalFindings === 0 && report.skippedChecks.length === 0,
+        ok: report.totalProblems === 0 && report.skippedChecks.length === 0,
       };
     },
 
@@ -503,21 +507,16 @@ export const memoryQueries = {
             ownerUserId: true,
             deletedAt: true,
             uninstalledAt: true,
-            appAgents: {
-              select: {
-                agent: {
-                  include: {
-                    memoryItems: {
-                      where: { deletedAt: null, memory: { deletedAt: null } },
-                      include: { memory: { include: MEMORY_INCLUDE } },
-                    },
-                  },
-                },
-              },
-            },
+
           },
         });
-        if (!app || app.deletedAt || app.uninstalledAt || app.appAgents.length === 0) return empty;
+        if (!app || app.deletedAt || app.uninstalledAt) return empty;
+        const installs = await listAppInstallations(ctx.db,ctx.appId);
+        const installedAgents = await ctx.db.agent.findMany({where:{id:{in:installs.map(row=>row.agentId)}},include:{
+          memoryItems:{where:{deletedAt:null,memory:{deletedAt:null}},include:{memory:{include:MEMORY_INCLUDE}}},
+        }});
+        const installedRows = installedAgents.map(agent=>({agent}));
+        if (!installedRows.length) return empty;
         // #758 — the twin of the #676 blocker-2 fix, which landed only in the
         // MCP `getAppMemoryAccess`. spec 047: a USER-owned memory is strictly
         // owner-only, so one owned by someone other than this App's owner must
@@ -527,10 +526,10 @@ export const memoryQueries = {
           owner != null && owner !== app.ownerUserId;
         const licensedAgentIds = await activeAgentInstallLicenseIds(
           ctx.db, app,
-          app.appAgents.map((row) => row.agent).filter((agent) => agent.deletedAt === null),
+          installedRows.map((row) => row.agent).filter((agent) => agent.deletedAt === null),
         );
         const memoryMap = new Map<string, any>();
-        for (const aa of app.appAgents) {
+        for (const aa of installedRows) {
           if (!licensedAgentIds.has(aa.agent.id)) continue;
           for (const item of aa.agent.memoryItems) {
             if (!isGrantedAgentMemoryRole(item.role)) continue;
@@ -676,7 +675,7 @@ export const memoryQueries = {
           ],
         });
       }
-      throw new Error('Unauthenticated');
+      throw unauthenticatedError();
     },
 
     // #466: slim, paginated node list for the graph view. Phase one — the
@@ -688,6 +687,9 @@ export const memoryQueries = {
       { memoryRef, limit, offset }: { memoryRef: string; limit?: number | null; offset?: number | null },
       ctx: Context,
     ) => {
+      // #2990: graph view off (default). Before ANY read, so the cost is gone and readable, unreadable and missing
+      // memories answer the same page: the flag creates no existence oracle.
+      if (graphViewDisabled()) return { nodes: [], total: 0 };
       const resolvedId = await resolveReadableMemoryId(ctx, memoryRef);
       if (!resolvedId) return { nodes: [], total: 0 };
 
@@ -758,6 +760,8 @@ export const memoryQueries = {
       { memoryRef, limit, offset }: { memoryRef: string; limit?: number | null; offset?: number | null },
       ctx: Context,
     ) => {
+      // #2990: graph view off (default); see memoryNodes.
+      if (graphViewDisabled()) return { edges: [], total: 0 };
       const resolvedId = await resolveReadableMemoryId(ctx, memoryRef);
       if (!resolvedId) return { edges: [], total: 0 };
 

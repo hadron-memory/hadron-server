@@ -90,7 +90,7 @@ export async function batchKeyEntry(ctx: Context, appRef: string): Promise<{ app
 }
 
 /** R57: identity comes from the validated request binding, never a requested worker or an admin role. */
-async function ownBatchSession(ctx: Context, expectedAppId?: string, lock = false) {
+export async function ownBatchSession(ctx: Context, expectedAppId?: string, lock = false) {
   if (!ctx.sessionId || ctx.sessionBindingRefused || ctx.impersonation) throw taskError('SESSION_NOT_FOUND', 'Session not found.');
   const initial = await ctx.db.session.findUnique({ where: { id: ctx.sessionId } });
   if (!initial || initial.deletedAt || !ownsSession(ctx, initial)) throw taskError('SESSION_NOT_FOUND', 'Session not found.');

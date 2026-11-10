@@ -26,6 +26,7 @@ const DEFAULTS = { checkPeriodSeconds: 600, failedChecksToOverdue: 2 };
 const base = (over: Partial<WorkerCheckInputs> = {}): WorkerCheckInputs => ({
   liveSessionStartedAt: ago(60 * MIN),
   pendingReason: null,
+  tickerWakes: null,
   lastAssignedAt: ago(50 * MIN),
   lastCheckedAt: ago(1 * MIN),
   pausedUntil: null,
@@ -51,7 +52,9 @@ describe('NO_SESSION', () => {
     expect(derive({ liveSessionStartedAt: null, lastCheckedAt: ago(10 * 60 * MIN) })).toEqual({
       status: 'NO_SESSION',
       pendingReason: null,
+      noSessionReason: null, // #3077: the pure derivation passes through what the loader classified; none given here
       lastCheckedAt: ago(10 * 60 * MIN),
+      resumedAt: null,
     });
   });
 
@@ -61,8 +64,8 @@ describe('NO_SESSION', () => {
 });
 
 describe('PENDING, with its reason', () => {
-  it.each(['TEAM_PAUSED', 'PAUSED', 'ISOLATED', 'STANDBY', 'NO_TASK'] as const)('%s, even with a stale check', (reason) => {
-    expect(derive({ pendingReason: reason, lastCheckedAt: ago(5 * 60 * MIN) })).toEqual({
+  it.each(['TEAM_PAUSED', 'PAUSED', 'NO_TASK'] as const)('%s, even with a stale check', (reason) => {
+    expect(derive({ pendingReason: reason, lastCheckedAt: ago(5 * 60 * MIN) })).toMatchObject({
       status: 'PENDING',
       pendingReason: reason,
       lastCheckedAt: ago(5 * 60 * MIN),
@@ -124,5 +127,15 @@ describe('the OVERDUE clock: the latest of the last check, the assignment, the s
 
   it('a check in the future (clock skew) is not OVERDUE', () => {
     expect(derive({ lastCheckedAt: new Date(now.getTime() + MIN) }).status).toBe('OK');
+  });
+});
+
+describe('resumedAt (#2755): the end of exempt time', () => {
+  it('is the latest of the live session start and the ended pause, team pause and stop', () => {
+    const r = derive({ liveSessionStartedAt: ago(100 * MIN), pausedUntil: ago(40 * MIN), teamResumedAt: ago(30 * MIN), stopEndedAt: ago(50 * MIN) }).resumedAt;
+    expect(r).toEqual(ago(30 * MIN));
+  });
+  it('ignores a pause that has not ended yet', () => {
+    expect(derive({ liveSessionStartedAt: ago(100 * MIN), pausedUntil: new Date(now.getTime() + 10 * MIN) }).resumedAt).toEqual(ago(100 * MIN));
   });
 });

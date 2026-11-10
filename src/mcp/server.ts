@@ -1,7 +1,14 @@
+import { respondSessionSuperseded } from '../lib/sessionSuperseded.js';
+import { SYNC_NOT_ATTEMPTED, syncNotAttemptedMessage } from '../integrations/github/syncNotAttempted.js';
+import { MCP_WORKER_BINDING_UNSUPPORTED, offTeamTool } from './disabledTools.js';
+import { registerAutomationTeamSnapshotGrantTools } from './automationTeamSnapshotGrantTools.js';
+import { appendDeliveryPending } from '../lib/tickers/deliveryPending.js';
+import { isChatSeqUniqueViolation, CHAT_SEQ_CONFLICT_MESSAGE } from '../lib/prismaErrors.js';
+import { mcpRequestSessionContext } from './requestSession.js';
 import { liveTxContext, liveReadSnapshotContext } from '../api/graphql/schema/authorizedTx.js';
 import { withReconciledNodeRead } from '../lib/includes/reconciledNodeRead.js';
 import { stampEmbeddingObligation } from '../services/embedding/obligation.js';
-import { assertBootPromptWriteAllowed, assertNoBootPromptRows } from '../lib/bootPrompt.js';
+import { assertBootPromptWriteAllowed, assertNoBootPromptRows, isBootPromptRole } from '../lib/bootPrompt.js';
 import { sessionEndReason } from '../lib/sessionEndReason.js';
 import { governedKindAnnotation } from '../lib/edgeGovernedKind.js';
 import { GraphQLError } from 'graphql';
@@ -20,6 +27,7 @@ import { commentHitInfo, commentHitLabel } from '../lib/comments/hitLabel.js';
 import { commentIdsAmong, hardDeleteThreadsOfTargets, softDeleteThreadsOfTargets } from '../lib/comments/lifecycle.js';
 import { decisionContainedError, decisionFamilyAmong, isDecisionFamilyRole, refuseDecisionFamily } from '../lib/decisions/index.js';
 import { assertLocWritable, LocProtectedError } from '../lib/protectedLoc.js';
+import { assertNoGenericMessageSeqWrite, isLegacyMessageSeqError } from '../lib/legacyMessageSeq.js';
 import {
   assertGovernedWrite,
   assertRoleDeclaredForWrite,
@@ -41,6 +49,7 @@ import {
   recordNodeWrite,
   trackUsageWrite,
   toUsageNodeRefs,
+  usageAppKeyOf,
 } from '../lib/usageRecorder.js';
 import {
   buildNodeRevisionSnapshot,
@@ -50,7 +59,9 @@ import {
   editorFromAuth,
   diffNodeChanges,
 } from '../lib/nodeRevisionSnapshot.js';
-import { authoredContentChanged, clearNodeAuthorship } from '../lib/nodeAuthorship.js';
+import { assertAuthoring, assertRenameAuthoring, attestedAuthoring } from '../lib/authoringAttestation.js';
+import { mcpReadsTask } from './taskReadGate.js';
+import { authoredContentChanged, clearNodeAuthorship, type NodeAuthorshipStamp } from '../lib/nodeAuthorship.js';
 import {
   parseUrnInput,
   assertFullyQualifiedUrn,
@@ -58,6 +69,8 @@ import {
   validateUrnType,
   normalizeUrnForLookup,
   hasSchemePrefix,
+  parseUrnV2,
+  composeUrnV2,
   UrnNotQualifiedError,
 } from '../lib/urn.js';
 import { composeWorkerUrn } from '../lib/entityRef/workerRef.js';
@@ -65,6 +78,8 @@ import { currentActorAmbiguity, publishActor, publishAmbiguousActor, publishUser
 import {
   emitEntityUrnV2,
   emitNodeUrnV2,
+  emitActionUrnV2,
+  registerEntryCode,
   nodeUrnRoundTrips,
   safeNodeUrnV2,
   safeNodeUrnV2Result,
@@ -74,6 +89,8 @@ import {
 import { portalUrlForUrn } from '../lib/portalUrl.js';
 import { userUrn } from '../lib/userHandle.js';
 import { registerCommentTools } from './commentTools.js';
+import { registerAssetTools } from './assetTools.js';
+import { registerAutomationReadGrantTools } from './automationReadGrantTools.js';
 import { signingSurfacePolicy, switchCapabilities } from '../lib/signing/surface.js';
 import { registerSigningTools } from './signingTools.js';
 import { registerAgentTaskTools } from './agentTaskTools.js';
@@ -90,7 +107,7 @@ import { NodeSchemaViolation } from '../lib/validateNodeAgainstSchema.js';
 import { normalizeObjectType, normalizeRole, validateNodeSchemaOnWrite } from '../lib/enforceNodeSchema.js';
 import { validateLoc, InvalidLocError } from '../lib/validateLoc.js';
 import { deriveEdgeLoc } from '../lib/edgeLoc.js';
-import { archiveTombstone } from '../lib/tombstoneArchive.js';
+import { archiveTombstone, discoverArchivePlan, validateArchivePlan, withArchivePlanRetries, ArchivePlanExhaustedError } from '../lib/tombstoneArchive.js';
 import { deletePendingEdgesTargetingNodes, promotePendingEdgeForTarget, reconcilePendingEdgeCounts } from '../lib/pendingEdgePromotion.js';
 import {
   liveEdgeEndpointSet,
@@ -123,7 +140,8 @@ import {
   oauthSurfaceRefusal,
   oauthSurfaceRefusalMessage,
   getCurrentUserRoles,
-  resolveAuthContext,
+  resolveCredentialContextWithStatus,
+  bindPresentedSession,
   validateSessionBinding,
   type AuthContext,
 } from '../middleware/auth.js';
@@ -148,8 +166,10 @@ import {
   mcpPrincipalKey,
   releaseOnceOnResponseEnd,
 } from './transportBounds.js';
-import { toolErrorResult, withToolErrorBoundary } from './toolError.js';
+import { refusalResult, toolErrorResult, withToolErrorBoundary } from './toolError.js';
+import { refNamesNothing } from '../lib/entityRef/refNamesNothing.js';
 import { textResult } from './textResult.js';
+import { publicErrorExtensions } from '../lib/errorDiagnostics.js';
 import { tagsInputSchema } from './tagsInput.js';
 import { foreignIdentityScopedMemoryFilter } from '../lib/auth/memoryOwnership.js';
 
@@ -181,15 +201,14 @@ import {
 } from '../lib/global-search/index.js';
 import { getMemberOrgIds } from '../lib/auth/memberOrgIds.js';
 import { lockAgentDefinitionAuthority } from '../lib/auth/managedSystemMemory.js';
-import { sessionScopedMemoryIds } from '../lib/auth/sessionScopedMemoryIds.js';
 import { publishNodeWritten } from '../lib/events/nodeWritten.js';
 import { computeContentHash, isAbstractUnverified } from '../lib/contentHash.js';
-import { validateMemoryNodes, formatFindingLine } from '../lib/memoryValidation.js';
-import { nextSiblingSeq } from '../lib/nodeSeq.js';
+import { validateMemoryNodes, formatFindingLine, formatValidationProse } from '../lib/memoryValidation.js';
+import { assertRootAllocationAllowed, lockRootSiblings, nextSiblingSeq } from '../lib/nodeSeq.js';
 import { BATCH_READ_MAX_NODES, BATCH_READ_MAX_BYTES } from '../lib/batchRead.js';
 import { isCiphertext } from '../lib/crypto.js';
 import { enqueueNodeEmbedding, pendingAtForRevival } from '../services/embedding/enqueue.js';
-import { sessionKeyCache } from '../lib/sessionKeyCache.js';
+import { sessionKeyCache, SessionKeyConflictError } from '../lib/sessionKeyCache.js';
 import {
   isSessionLive,
   loadLastEventBySession,
@@ -215,6 +234,7 @@ import {
 import { isId } from '../lib/entityRef/shape.js';
 import { resolveLegacyAlias } from '../lib/entityRef/legacyAlias.js';
 import { resolveAppRef } from '../lib/entityRef/appRef.js';
+import { resolveAgentRef } from '../lib/entityRef/agentRef.js';
 import { resolveWorkerRef } from '../lib/entityRef/workerRef.js';
 import {
   AgentNotFoundError,
@@ -233,14 +253,26 @@ import {
 } from '../api/graphql/schema/resolvers.mutation.session.js';
 import { HADRON_SERVER_VERSION, MCP_SURFACE_CAPABILITIES, getDeploymentInfo } from './deploymentInfo.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+import { validationTaskSetsForNodes } from '../api/graphql/schema/resolvers.validationTaskSet.js';
+import type { ValidationTaskSet } from '../lib/contentValidationReport.js';
 import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.js';
 // #1005: the SHARED App-participation predicate (#943) — reused here so
 // reconnect recovery admits exactly whom startSession admitted, rather than a
 // narrower member-row copy that would drift from it.
 import { resolveNodeContent } from '../lib/includes/resolveNodeContent.js';
+import {
+  CONTENT_RESOLUTION_LIMIT_EXCEEDED, isContentResolutionLimitError, resolutionLimitPhrase,
+  type ResolutionLimit,
+} from '../lib/includes/resolutionBudget.js';
+import { checkNodeTypesFilter, NodeTypesFilterError } from '../lib/retrieval/nodeTypeList.js';
+import { lintWarningPageForNodeId, renderLintWarnings } from '../lib/bootPromptLint.js';
+
+/** Most changed nodes whose lint one hadron_replace_text result checks; the rest are disclosed, never silently dropped. */
+const REPLACE_LINT_MAX_NODES = 100;
+import { safePlainPinWarnings, renderIncludePinWarnings, includePinWarningsFor } from '../lib/includes/plainPinWarnings.js';
 import { assertIncludesWritable, includeRefusalText, syncDerivedIncludesEdges } from '../lib/includes/writeIncludes.js';
-import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds, safeCanonicalUrn } from '../api/graphql/schema/resolvers.helpers.js';
-import { composeWorkerPrompt, loadAppWorkerActivity, loadAppWorkerCheckStatuses } from '../api/graphql/schema/resolvers.worker.js';
+import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds, safeCanonicalUrn, isOwnerOrOrgMember } from '../api/graphql/schema/resolvers.helpers.js';
+import { composeWorkerPrompt, describeServedWorker, loadAppWorkerActivity, loadAppWorkerCheckStatuses, maySeeWorkerInternals } from '../api/graphql/schema/resolvers.worker.js';
 import { renderCheckStatusLong, renderCheckStatusShort, type WorkerCheckStatus } from '../lib/workerCheckStatus.js';
 import { splitNodeUrnTolerant, nodeFragmentRefusal } from '../lib/splitNodeUrnTolerant.js';
 import { safeEqual } from '../lib/constantTime.js';
@@ -293,6 +325,8 @@ import { resolveActiveOrg, type ActiveOrgResolution } from '../lib/auth/activeOr
 import { GraphQLError as ScopeGraphQLError } from 'graphql';
 // Spec 049 Phase 3 — the search ladder on MCP.
 import { resolveSearchScope, canReadScope, resolveScopeByNameInApp, type SearchScopeResolution } from '../lib/scopes.js';
+import { admitOperationRate } from '../lib/rateLimit/index.js';
+import { transportRateIdentity } from '../lib/rateLimit/identity.js';
 // Spec 049 Phase 6 — the register block on hadron_whoami's bound rows.
 import { resolveRegister, renderDerivedBlocks } from '../lib/resolveRegister.js';
 import { attendeeMentionTokens } from '../lib/channelReadState.js';
@@ -304,6 +338,7 @@ import {
   teamAttentionAvailable,
 } from '../lib/teamAttention.js';
 import { resolveOrgRef } from '../lib/entityRef/orgRef.js';
+import { edgeDisplayOrder, edgeRunOrder } from '../lib/edgeOrder.js';
 import { Prisma, type PrismaClient, type SessionType, type NodeContentValidationOutcome } from '../generated/prisma/index.js';
 import { memoryIsVectorIndexed } from '../lib/embedding/indexing.js';
 
@@ -993,6 +1028,8 @@ class EdgeLocConflictError extends Error {}
 class NodeMovedDuringWriteError extends Error {}
 class MemoryEncryptionChangedDuringWriteError extends Error {}
 class MemoryWriteAccessChangedDuringWriteError extends Error {}
+/** #3052: the move's source stopped being readable between the preflight and the deciding transaction. */
+class MoveSourceBeyondReadError extends Error {}
 
 async function assertLockedMemoryWriteAccess(
   tx: Prisma.TransactionClient,
@@ -1117,6 +1154,17 @@ async function replaceOutgoingEdgesInTransaction(
  * to the raw stored bare urn if a row can't compose to v2 — display strings must
  * never crash a tool (serve-and-fall-back).
  */
+/**
+ * #1332: a trusted resolver refusal as `[<code>] <message>`, then its public extensions as
+ * `key: value` lines (the comment tools' format). Only called for a trusted refusal.
+ */
+function codedRefusalText(e: unknown): string {
+  if (!(e instanceof GraphQLError)) return 'Error: refused';
+  const { code, ...rest } = publicErrorExtensions(e.extensions ?? {});
+  const extras = Object.entries(rest).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
+  return [`[${String(code ?? 'ERROR').toLowerCase()}] ${e.message}`, ...extras].join('\n');
+}
+
 function safeEmitEntityUrnV2(type: 'memory' | 'app' | 'agent' | 'org', bareUrn: string): string {
   try {
     return emitEntityUrnV2(type, bareUrn);
@@ -1214,6 +1262,56 @@ async function edgeUrn(loc: string, memoryId: string): Promise<string> {
 // Loc validation moved to src/lib/validateLoc.ts so the GraphQL
 // upsertNode resolver and the MCP tool surface share the same rule
 // and produce the same typed InvalidLocError.
+
+/**
+ * Resolve subtree selectors for both tree tools (#2512/#2526).
+ * Explicit references identify a memory independently of discovery, then pass
+ * the shared read gate (cor:acl:010:02). Missing/unreadable references share a
+ * result kind so each tool preserves its envelope (cor:api:140:03).
+ * Bare unscoped locs remain discovery; they never acquire explicit authority.
+ */
+async function resolveParentForRead(
+  parentRel: string,
+  memoryUrn: string | undefined,
+  accessibleMemoryIds: string[] | null,
+  auth: AuthContext,
+): Promise<
+  | { ok: true; loc: string; memoryId?: string }
+  | { ok: false; kind: 'invalid' | 'notFound'; message: string }
+> {
+  const missing = () => ({ ok: false as const, kind: 'notFound' as const, message: `Node "${parentRel}" not found.` });
+  const readable = async (id: string) =>
+    await canReadMemory(db, auth, id, EXPLICIT_REF);
+  try {
+    const qualified = parseUrnInput(parentRel).type === 'node';
+    if (hasSchemePrefix(parentRel) && !qualified) {
+      return { ok: false, kind: 'invalid', message: 'parentRel must be a node URN or a bare loc.' };
+    }
+    if (memoryUrn) assertFullyQualifiedUrn(memoryUrn, 'memory');
+    let resolved: { loc: string; memoryId?: string };
+    if (qualified || memoryUrn) {
+      const parent = qualified ? splitNodeUrn(parentRel) : { memoryUrn: memoryUrn!, loc: parentRel };
+      const mem = await resolveMemoryByUrn(parent.memoryUrn);
+      if (!mem) return missing();
+      resolved = { loc: parent.loc, memoryId: mem.id };
+    } else {
+      resolved = await resolveLocFromUrn(parentRel, accessibleMemoryIds);
+    }
+    if (resolved.memoryId && !await readable(resolved.memoryId)) return missing();
+    // Both references authorize before mismatch diagnostics can reveal identity.
+    if (qualified && memoryUrn) {
+      const scoped = await resolveMemoryByUrn(memoryUrn);
+      if (!scoped || !await readable(scoped.id)) return missing();
+      if (scoped.id !== resolved.memoryId) {
+        return { ok: false, kind: 'invalid', message: 'parentRel and memoryUrn must name the same memory.' };
+      }
+    }
+    return { ok: true, ...resolved };
+  } catch (e) {
+    if (e instanceof UrnNotQualifiedError) return { ok: false, kind: 'invalid', message: e.message };
+    throw e;
+  }
+}
 
 /**
  * If the user passes a full URN (e.g. "hadronmemory.com:dev:architecture"),
@@ -1483,6 +1581,8 @@ type ReadProjectionNode = {
   properties: unknown;
   data: unknown;
   content: string | null;
+  /** Only plaintext, raw abstract reads without an origin fingerprint use this. */
+  contentPresent?: boolean;
   abstract: string | null;
   abstractOriginHash: string | null;
   memory: { isEncrypted: boolean };
@@ -1491,17 +1591,18 @@ type ReadProjectionNode = {
 };
 
 const readProjectionInclude = {
-  outgoingEdges: { include: { target: true }, where: { target: { deletedAt: null } } },
-  incomingEdges: { include: { source: true }, where: { source: { deletedAt: null } } },
+  outgoingEdges: { include: { target: { select: { id: true, loc: true, memoryId: true, name: true } } }, where: { target: { deletedAt: null } }, orderBy: edgeDisplayOrder() },
+  incomingEdges: { include: { source: { select: { id: true, loc: true, memoryId: true, name: true } } }, where: { source: { deletedAt: null } }, orderBy: edgeDisplayOrder() },
   memory: { select: { isEncrypted: true } },
 } as const;
 
-/** Reconcile and fetch the complete projection while the node row stays locked. */
+/** Fetch one authorized projection snapshot; unchanged reads use read-only REPEATABLE READ, drift alone takes the exclusive history fence. */
 async function loadCurrentReadProjection(
   nodeId: string,
   authorizedMemoryId: string,
   auth: AuthContext,
   readViaMemoryId: string = authorizedMemoryId,
+  mode: 'body' | 'metadata' | 'abstract-raw' | 'abstract-expanded' = 'body',
 ): Promise<ReadProjectionNode | null> {
   return withReconciledNodeRead(db, nodeId, authorizedMemoryId, async (tx, mayReconcile) => {
     let fresh: Context;
@@ -1515,10 +1616,25 @@ async function loadCurrentReadProjection(
     }
     return canReadMemory(tx as unknown as typeof db, { ...auth, roles: fresh.roles }, readViaMemoryId, EXPLICIT_REF);
   }, async (tx) => {
-    return tx.node.findFirst({
-      where: { id: nodeId, deletedAt: null },
-      include: readProjectionInclude,
-    }) as Promise<ReadProjectionNode | null>;
+    const args = { where: { id: nodeId, deletedAt: null }, include: readProjectionInclude };
+    // The batch provenance pass retains only metadata. Its render pass reads
+    // one current body under the same reconciliation and authorization gate.
+    if (mode === 'body') return tx.node.findFirst(args) as Promise<ReadProjectionNode | null>;
+    const row = await tx.node.findFirst({ ...args, omit: { content: true } });
+    if (!row) return null;
+    if (mode === 'metadata' || !row.abstract) return { ...row, content: null };
+    if (mode === 'abstract-raw' && !row.memory.isEncrypted && row.abstractOriginHash == null) {
+      // Presence is enough for the existing missing-fingerprint marker. Read
+      // it in this authorized snapshot, never from earlier metadata. Unchanged
+      // reads are read-only REPEATABLE READ; only drift takes the exclusive history fence.
+      const presence = await tx.$queryRaw<Array<{ present: boolean }>>`
+        SELECT (content IS NOT NULL AND octet_length(content) > 0) AS present
+        FROM nodes WHERE id = ${nodeId} AND memory_id = ${authorizedMemoryId} AND deleted_at IS NULL`;
+      return presence[0] ? { ...row, content: null, contentPresent: presence[0].present } : null;
+    }
+    // Fingerprinted, encrypted and expanded abstracts retain their exact
+    // plaintext predicate. Only one such body survives to the next render.
+    return tx.node.findFirst(args) as Promise<ReadProjectionNode | null>;
   }, { timeoutMs: 5_000, maxWaitMs: 2_000 });
 }
 
@@ -1736,6 +1852,79 @@ async function concealUnreadableEdgeEnds<N extends {
   };
 }
 
+/**
+ * #2610 — the register entry's action address (`hrn:action:<root>:<agent-slug>:<code>`)
+ * for the read projection's `Action URN:` line. Non-null only for a `register:<code>`
+ * node in a LIVE Agent's system memory — the MCP spelling of Node.actionUrn
+ * (resolvers.types.ts), computed the same way so the two surfaces cannot drift:
+ * null, never a throw, on an unemittable stored code atom; a `register:` loc in a
+ * memory no live Agent holds names no entry.
+ *
+ * #2972 — entry-hood is `registerEntryCode`'s call: a NESTED `register:a:b` loc
+ * is a writable namespace loc, not an entry, and nulls QUIETLY (no repair warn);
+ * the null-and-log below is reachable only for a single-atom code the emitter
+ * refuses.
+ */
+async function actionUrnForRegisterLoc(loc: string, memoryId: string): Promise<string | null> {
+  const code = registerEntryCode(loc);
+  if (code === null) return null;
+  const agent = await db.agent.findFirst({
+    where: { systemMemoryId: memoryId, deletedAt: null },
+    select: { urn: true },
+  });
+  if (!agent) return null;
+  try {
+    return emitActionUrnV2(agent.urn, code);
+  } catch (err) {
+    console.warn(
+      `[Action URN:] register code ${JSON.stringify(code)} in memory ${memoryId} is not ` +
+        'emittable as an action URN; omitting the line. The STORED loc needs repair — this is ' +
+        'not a malformed caller request:',
+      err,
+    );
+    return null;
+  }
+}
+
+/**
+ * The batch's action addresses in ONE grouped agent lookup (the per-node
+ * `Action URN:` line needs the holding Agent's urn, and cor:api:040:01 makes the
+ * batch projection the same thing as the single read's). Absent from the map —
+ * like a null from the single-node path — means no line. #2972: only
+ * single-atom `register:` locs are entries (`registerEntryCode`); a nested
+ * `register:a:b` loc never reaches the emitter, so it can neither warn nor
+ * render a line.
+ */
+async function batchActionUrns(nodes: ReadProjectionNode[]): Promise<Map<string, string | null>> {
+  const out = new Map<string, string | null>();
+  const entries = nodes.filter((n) => registerEntryCode(n.loc) !== null);
+  if (!entries.length) return out;
+  const agents = await db.agent.findMany({
+    where: { systemMemoryId: { in: [...new Set(entries.map((n) => n.memoryId))] }, deletedAt: null },
+    select: { systemMemoryId: true, urn: true },
+  });
+  const urnByMemory = new Map(agents.map((a) => [a.systemMemoryId as string, a.urn]));
+  for (const n of entries) {
+    const agentUrn = urnByMemory.get(n.memoryId);
+    if (!agentUrn) continue; // no live Agent holds this memory — no line
+    const code = registerEntryCode(n.loc) as string; // non-null: the filter kept only entries
+    try {
+      out.set(n.id, emitActionUrnV2(agentUrn, code));
+    } catch {
+      out.set(n.id, null); // unemittable stored code — same posture as the single read
+    }
+  }
+  return out;
+}
+
+/** #3659: Node.validationTasks as a read line. No line when the set does not apply to this node. */
+function validationTasksLine(set: ValidationTaskSet | undefined): string {
+  if (!set) return '';
+  if (set.state === 'NOT_CONFIGURED') return 'Validation tasks: none configured';
+  if (set.state === 'READY') return `Validation tasks: ${set.tasks.map((t) => `${t.taskRef} @ revision ${t.revision}`).join(', ')}`;
+  return `Validation tasks: ${set.state.toLowerCase()}`;
+}
+
 async function renderNodeReadProjection(
   node: ReadProjectionNode,
   scope: 'content' | 'abstract' | 'all',
@@ -1751,8 +1940,12 @@ async function renderNodeReadProjection(
       feedback: ReadonlyMap<string, CommentCounts>;
       /** #1632 — signature status per node, one batched load. */
       signatures?: ReadonlyMap<string, NodeSignatureStatusView>;
+      /** #2610 — action addresses per node, one batched agent lookup; absent = no line. */
+      actionUrns?: ReadonlyMap<string, string | null>;
     };
     memoryUrnOf?: (memoryId: string) => Promise<string>;
+    /** #3659: this node's validation task set; absent means no line. Never set for an inherited read. */
+    validationTasks?: ValidationTaskSet;
   } = {},
 ): Promise<string> {
   // #1885 (cor:dmo:050:14) — a node read through a child's effective system
@@ -1767,7 +1960,7 @@ async function renderNodeReadProjection(
     const canRead = (memoryId: string) =>
       opts.auth ? canReadMemory(db, opts.auth, memoryId, EXPLICIT_REF) : Promise.resolve(false);
     const resolve = (direction: 'out' | 'in') => via
-      ? resolveInheritedEdges(db, { nodeId: node.id, via, direction, canReadMemory: canRead })
+      ? resolveInheritedEdges(db, { nodeId: node.id, via, direction, canReadMemory: canRead, endpointMetadataOnly: true })
       : Promise.resolve([]);
     const [outgoing, incoming] = await Promise.all([resolve('out'), resolve('in')]);
     node = {
@@ -1817,7 +2010,7 @@ async function renderNodeReadProjection(
   // properties of this call, not of the node.
   const shouldCheckStale = scope === 'abstract' || scope === 'all';
   const includeStaleMarker =
-    shouldCheckStale && !node.memory.isEncrypted && isAbstractUnverified(node);
+    shouldCheckStale && !node.memory.isEncrypted && isAbstractUnverified(node, node.contentPresent === undefined ? undefined : { contentPresent: node.contentPresent });
 
   // #881: the node's portal URL, ready to hand a human. Emitted so no agent
   // ever *constructs* one — constructing means guessing which URN spelling
@@ -1828,6 +2021,15 @@ async function renderNodeReadProjection(
   // structure (`/`, `?`, `#`) into the href. Same rule as a malformed base
   // URL: a link that points somewhere other than the node is worse than none.
   const portalUrl = urnFellBack ? null : portalUrlForUrn(urn);
+
+  // #2610 — the entry's action address (`hrn:action:<root>:<agent-slug>:<code>`),
+  // when this row IS one: a `register:<code>` node in a live Agent's system
+  // memory. Address-class like the URL line (#1885 pin: content, served on an
+  // inherited read too, keyed on the row's own — the holding base Agent's —
+  // memory). Batched callers hand it in one grouped lookup (cor:api:040:01).
+  const actionUrn = opts.batch
+    ? (opts.batch.actionUrns?.get(node.id) ?? null)
+    : await actionUrnForRegisterLoc(node.loc, node.memoryId);
 
   // #1326: a source node may be readable while its author/validator task
   // lives in another tenant's memory. Resolve task addresses only after that
@@ -1957,11 +2159,13 @@ async function renderNodeReadProjection(
     `ID: ${node.id}`,
     `Revision: ${revision}`,
     portalUrl ? `URL: ${portalUrl}` : '',
+    actionUrn ? `Action URN: ${actionUrn}` : '',
     inheritedFrom
       ? `Inherited from: ${emitEntityUrnV2('agent', inheritedFrom.agentUrn)} (a base of the Agent read; its edges and records are not shown)`
       : '',
     authorshipLine,
     validationLine,
+    validationTasksLine(opts.validationTasks),
     approvalLine,
     await signatureLine,
     mintLine,
@@ -2182,8 +2386,8 @@ export function createMcpServerInstance(
     // Reads and searches.
     'hadron_search', 'hadron_list_memories', 'hadron_server_info', 'hadron_list_apps', 'hadron_list_scopes',
     'hadron_scope_explain', 'hadron_list_channels', 'hadron_register_list', 'hadron_find_nodes', 'hadron_get_node',
-    'hadron_get_nodes', 'hadron_get_next_node', 'hadron_list_nodes', 'hadron_get_object', 'hadron_find_objects',
-    'hadron_get_run', 'hadron_whoami', 'hadron_channel_read', 'hadron_team_chat_read', 'hadron_team_attention',
+    'hadron_get_nodes', 'hadron_get_next_node', 'hadron_agent_boot_prompt', 'hadron_list_nodes', 'hadron_get_object', 'hadron_find_objects',
+    'hadron_get_run', 'hadron_whoami', 'hadron_channel_read', 'hadron_team_chat_read', 'hadron_team_chat_search', 'hadron_team_attention',
     'hadron_team_attention_page', 'hadron_list_workers', 'hadron_get_worker', 'hadron_team_work_items',
     'hadron_list_comments', 'hadron_get_comment', 'hadron_team_chat_mark_read',
     'hadron_list_recovery_nodes', 'hadron_list_recovery_edges', 'hadron_get_recovery_node',
@@ -2197,6 +2401,8 @@ export function createMcpServerInstance(
     'hadron_stall_schedule_get',
     // #1747 — ticker reads (each takes its own optional session; wake settings enforces the write rule itself).
     'hadron_ticker_list', 'hadron_worker_wake_settings', 'hadron_due_wakes', 'hadron_delivery_settings_get',
+    // #2024 — the Agent ticker-template list (a read through the Agent's own gate).
+    'hadron_agent_ticker_template_list',
     // #2022 — the stop-signal list (its own optional session).
     'hadron_stop_signal_list',
     // #1562 — the page-monitor watch list (acts as the connection's user; writes nothing).
@@ -2234,10 +2440,21 @@ export function createMcpServerInstance(
     toolName: string,
     named: unknown,
     toolOwnsArgument: boolean,
+    onBound?: (id: string) => void,
   ): Promise<{ isError: true; content: Array<{ type: 'text'; text: string }> } | null> => {
     if (typeof named === 'string' && named.length > 0) {
+      // #3818 / Xenophon6764807646: end's id is a historical target, not presentation of an execution binding.
+      // Preserve its existing late-metrics path. A presented header/retained binding is validated independently.
+      if (toolName === 'hadron_end_session' && toolOwnsArgument) {
+        const target = await db.session.findUnique({ where: { id: named }, select: { endedAt: true } });
+        if (target?.endedAt) {
+          publishActor({ workerId: null, agentId: null });
+          return null; // The handler still applies the ordinary session-write gate before changing anything.
+        }
+      }
       const valid = await validateSessionBinding(db, auth, named);
       if (valid) {
+        onBound?.(valid.sessionId);
         publishActor(valid.actor);
         return null;
       }
@@ -2284,7 +2501,21 @@ export function createMcpServerInstance(
     };
     (server as unknown as { tool: (...args: unknown[]) => unknown }).tool = (...args: unknown[]) => {
       const name = args[0] as string;
-      if (ACTOR_NEUTRAL_TOOLS.has(name)) return registerTool(...args);
+      if (ACTOR_NEUTRAL_TOOLS.has(name)) {
+        const index = args.length - 1;
+        const callback = args[index] as ToolCallback;
+        const shape = args.find((a, i) => i > 0 && i < index && typeof a === 'object' && a !== null) as Record<string, unknown> | undefined;
+        args[index] = async (input: unknown, extra: unknown) => {
+          // Preserve the neutral callback's original actor scope. Only the optional finalizer gets a child scope.
+          const result = await callback(input, extra);
+          const named = shape && 'session' in shape ? (input as Record<string, unknown> | undefined)?.session : undefined;
+          return runInChildActorScope(() => appendDeliveryPending(result, {
+            ...scopeCtx(), ...mcpRequestSessionContext(auth), appKeyId: auth.appKeyId ?? undefined,
+            impersonation: auth.impersonation ?? undefined,
+          }, typeof named === 'string' && named.length > 0 ? named : undefined));
+        };
+        return registerTool(...args);
+      }
       const cbIndex = args.length - 1;
       const callback = args[cbIndex] as ToolCallback;
       // The parameter shape is the first plain object after the name (a
@@ -2316,7 +2547,8 @@ export function createMcpServerInstance(
             publishActor({ workerId: null, agentId: null });
             return await callback(input, extra);
           }
-          const refusal = await settleCallerSession(name, named, toolOwnsArgument);
+          let footerSession = typeof named === 'string' && named.length ? undefined : mcpRequestSessionContext(auth).sessionId;
+          const refusal = await settleCallerSession(name, named, toolOwnsArgument, id => { footerSession = id; });
           if (refusal) return refusal;
           // #1769: the gate's own argument is spent once the actor is settled.
           // A tool that spreads its args into a write (the governed doors) would
@@ -2324,13 +2556,22 @@ export function createMcpServerInstance(
           // a tool that declares the argument itself still receives it.
           if (!toolOwnsArgument && input && typeof input === 'object') {
             const { [argumentName]: _settled, ...rest } = input as Record<string, unknown>;
-            return await callback(rest, extra);
+            return await appendDeliveryPending(await callback(rest, extra), {
+              ...scopeCtx(), ...mcpRequestSessionContext(auth), sessionId: footerSession ?? undefined, appKeyId: auth.appKeyId ?? undefined,
+              impersonation: auth.impersonation ?? undefined,
+            });
           }
-          return await callback(input, extra);
+          return await appendDeliveryPending(await callback(input, extra), {
+            ...scopeCtx(), ...mcpRequestSessionContext(auth), sessionId: footerSession ?? undefined, appKeyId: auth.appKeyId ?? undefined,
+            impersonation: auth.impersonation ?? undefined,
+          });
         });
       return registerTool(...args);
     };
   }
+
+  /** #3082: the 25 disabled team tools of this file register through `off` (see ./disabledTools.ts). */
+  const off = offTeamTool(server);
 
   // Per-session state — this server instance is built once per MCP session
   // (see the createMcpServerInstance call sites), so this closure variable is
@@ -2473,6 +2714,17 @@ export function createMcpServerInstance(
   // in logs / client traces see the migration trend.
   let engagedWithNewSurface = false;
 
+  /** Restore connection selection without auto-selecting or requiring one (#1597). */
+  function restoreSelectedApp(): void {
+    if (auth.appId || !auth.userId) return;
+    const sid = getSessionId();
+    const sel = sid ? activeAppByMcpSession.get(sid) : undefined;
+    if (sel) {
+      auth.appId = sel.appId;
+      auth.organizationId = sel.organizationId ?? undefined;
+    }
+  }
+
   /**
    * Spec 026 — resolve the active App for an App-scoped tool call.
    * Returns `null` when the caller can proceed (auth.appId set, possibly
@@ -2484,18 +2736,10 @@ export function createMcpServerInstance(
    * checks downstream pass without per-tool plumbing.
    */
   function requireAppScope(): AppSelectionErrorEnvelope | null {
+    restoreSelectedApp();
     if (auth.appId) return null;
     if (!auth.userId) return null; // truly unauth — let existing checks handle it
-
     const sid = getSessionId();
-    if (sid) {
-      const sel = activeAppByMcpSession.get(sid);
-      if (sel) {
-        auth.appId = sel.appId;
-        auth.organizationId = sel.organizationId ?? undefined;
-        return null;
-      }
-    }
 
     if (cachedAppResolution?.kind === 'multi-app') {
       // TODO(US3 — revocation cascade): cachedAppResolution is captured at
@@ -2730,6 +2974,28 @@ export function createMcpServerInstance(
   }
 
   /**
+   * #2493 (cor:dmo:050:11): the explicit `session` argument of a recovery read, as the session the caller is acting as.
+   * A reconnecting principal carries no `auth.sessionId`, yet its open session finishes under the agent and role it was
+   * bound with, so the argument selects that placement. It is never trusted as a bare id: it must pass
+   * `validateSessionBinding` (the one check behind X-Hadron-Session and the connection binding) and, as a user, the
+   * caller must still be entitled to drive it, as the heartbeat above requires. Anything else is no session.
+   */
+  async function explicitActingSessionId(sessionRef?: string | null): Promise<string | undefined> {
+    const id = typeof sessionRef === 'string' ? sessionRef.trim() : '';
+    if (!id) return undefined;
+    try {
+      // The ONE binding check (#934): open, not hard-expired, not dormant, the caller's own, never under impersonation.
+      const bound = await validateSessionBinding(db, auth, id);
+      if (!bound) return undefined;
+      if (auth.userId && !(await callerStillDrives(id))) return undefined;
+      return bound.sessionId;
+    } catch {
+      // Unrecoverable here: serve the live row, the same answer as no session.
+      return undefined;
+    }
+  }
+
+  /**
    * Is this user-principal caller STILL entitled to drive this session?
    *
    * Shares its predicate with `adoptAppFromSession` deliberately: that function
@@ -2895,7 +3161,7 @@ export function createMcpServerInstance(
     "Global cross-entity search across organizations, memories, nodes, agents, apps, AI service configs, and users — returns one ranked, flat list. By default the query shape is smart-sniffed: a PK-shaped input does an exact id lookup, a URN-shaped input matches URNs, free text matches name + URN. Pass `fields` to force which fields to match (overrides the sniff) and `entityTypes` to restrict the kinds. `pk` is exact-match; the rest are case-insensitive substring — including `content` (node bodies), which is a LITERAL substring match (NOT stemmed): 'report abuse' won't match 'reports abusive behavior'. `content` is opt-in and skips encrypted memories. For a stemmed, ranked, concept/multi-word search over node text — and the cross-memory 'does anyone know about X?' probe — use hadron_find_nodes (keyword mode, allMemories: true) instead; this tool is best for locating a known entity by name/URN/id across kinds.",
     SHAPE_HADRON_SEARCH,
     async ({ query, entityTypes, fields, limit, scope }) => {
-      if (!auth.clientId && !auth.appId && !auth.userId) return textResult('Not authenticated.');
+      if (!auth.clientId && !auth.appId && !auth.userId) return refusalResult('Not authenticated.');
 
       // createTestableMcpServer bypasses zod — normalize args defensively.
       const q = typeof query === 'string' ? query : '';
@@ -2917,7 +3183,7 @@ export function createMcpServerInstance(
       try {
         scopeRes = await mcpSearchScope(scope, false);
       } catch (e) {
-        if (e instanceof ScopeGraphQLError) return textResult(`[${String(e.extensions?.code ?? 'error').toLowerCase()}] ${e.message}`);
+        if (e instanceof ScopeGraphQLError) return refusalResult(`[${String(e.extensions?.code ?? 'error').toLowerCase()}] ${e.message}`);
         throw e;
       }
       const principal: SearchPrincipal = {
@@ -2965,7 +3231,7 @@ export function createMcpServerInstance(
       // auth.userId is set (multi-App OAuth caller without selection),
       // getMemoryAccess unions memory access across the user's
       // accessible Apps. No requireAppScope() gate on purpose.
-      if (!auth.clientId && !auth.appId && !auth.userId) return textResult('Not authenticated.');
+      if (!auth.clientId && !auth.appId && !auth.userId) return refusalResult('Not authenticated.');
 
       // Effective access level per memory. The App/org access map is
       // personal-free by design (it also backs getAccessibleMemoryIds, which
@@ -3106,7 +3372,7 @@ export function createMcpServerInstance(
       // #1316: an unreadable memory takes the missing branch, not "Access denied".
       const mem = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'read');
       if (!mem) {
-        return textResult(`Memory not found: '${memoryUrn}'. Use hadron_list_memories to see what's available.`);
+        return refusalResult(`Memory not found: '${memoryUrn}'. Use hadron_list_memories to see what's available.`);
       }
 
       // Store the bare URN from the DB row (the canonical form for downstream
@@ -3130,6 +3396,115 @@ export function createMcpServerInstance(
         `Active memory set to: ${safeEmitEntityUrnV2('memory', mem.urn)} ` +
           `(server: ${dep.baseUrl}, version: ${dep.version}).`,
       );
+    },
+  );
+
+  // ── hadron_create_memory (#2511) ──────────────────────────────────────────────
+  //
+  // A thin door onto the createMemory mutation: it calls the resolver, so the
+  // class allowlist, the memory.create grant, the live-org-membership rule for
+  // org-anchored personal/private, the owner/visibility invariants and the
+  // group-owner bootstrap have ONE implementation and MCP can never do what the
+  // API refuses. It takes no owner, App or agent argument, selects nothing and
+  // is not createMemoryInApp: an App-key caller has no user to own a personal
+  // memory, so the mutation refuses it exactly as it does over GraphQL.
+
+  server.tool(
+    'hadron_create_memory',
+    "Create a memory. `memoryClass` is 'knowledge' (default), 'group', 'personal' or 'private'. knowledge and group are shared with an organization, so they need `org` and the organization's memory.create permission (a group's creator becomes its first owner). personal and private are owner-only: omit `org` to create one in your own namespace, or pass `org` to create it in an organization you belong to. Exactly the same rules as the createMemory GraphQL mutation. System and App memories are not created here. This does not select the new memory: pass its URN to hadron_set_active_memory.",
+    SHAPE_HADRON_CREATE_MEMORY,
+    async ({ name, memoryClass, org, shortDescription, description, tags, visibility }) => {
+      const ctx: Context = {
+        db,
+        clientId: auth.clientId ?? undefined,
+        userId: auth.userId ?? undefined,
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
+        appId: auth.appId ?? undefined,
+        sessionId: auth.sessionId ?? undefined,
+        roles: auth.roles as Context['roles'],
+        organizationId: auth.organizationId ?? undefined,
+      };
+      try {
+        const created = await resolvers.Mutation.createMemory(
+          {},
+          { name, memoryClass, orgId: org, shortDescription, description, tags, visibility },
+          ctx,
+        );
+        return textResult(
+          `Memory created: ${safeEmitEntityUrnV2('memory', created.urn)} (class: ${created.class}, id: ${created.id}). ` +
+            'Use hadron_set_active_memory to work in it.',
+        );
+      } catch (e) {
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'create failed'}`, 'hadron_create_memory:resolver');
+      }
+    },
+  );
+
+  // #2661: one creation policy, delegated to the GraphQL resolver.
+  server.tool(
+    'hadron_create_app_memory',
+    'Create a NEW app-class memory in an App with an installed Agent. Requires the owning org ADMIN/OWNER or the actual owner of a user-owned App acting as themselves, outside a worker session. App keys, runs and impersonation are refused. No existing-memory attachment. App participants read and write it; the Agent owner gains no access. Does not select the new memory.',
+    SHAPE_HADRON_CREATE_APP_MEMORY,
+    async ({ app, name, shortDescription, description, tags }) => {
+      const ctx: Context = {
+        db, userId: auth.userId, clientId: auth.clientId,
+        appId: auth.appId, appKeyId: auth.appKeyId,
+        ...mcpRequestSessionContext(auth),
+        apiKeyId: auth.apiKeyId, signInId: auth.signInId,
+        roles: auth.roles, organizationId: auth.organizationId,
+        impersonation: auth.impersonation,
+      };
+      try {
+        const created = await resolvers.Mutation.createAppMemory({}, { appRef: app, name, shortDescription, description, tags }, ctx);
+        return textResult(`Memory created: ${safeEmitEntityUrnV2('memory', created.urn)} (class: app, id: ${created.id}).`);
+      } catch (e) {
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'create failed'}`, 'hadron_create_app_memory:resolver');
+      }
+    },
+  );
+
+  // #1332 (cor:dmo:160:01): one write path for content-validation reports, delegated to the
+  // GraphQL resolver, so the gates, the ordered refusals and the server-derived reporter are
+  // computed once. The reporter is never an argument: a bound worker session reports as that
+  // worker, otherwise the caller's own user or App key does.
+  server.tool(
+    'hadron_record_content_validation',
+    'Record the result of running a node\'s validation task on one revision of the node (cor:dmo:160:01). Advisory: it never edits the node or blocks a write. '
+      + 'validationTaskRef is a task the node\'s rules name now (the "Validation tasks" line of hadron_get_node lists them), and validationTaskRevision the task revision that ran. Any writer of the memory may report except the author of that node revision; '
+      + 'if you started a worker session with hadron_start_session, the report is recorded as that worker. runId makes a retry idempotent (same runId, same reporter, same revisions returns the first report); '
+      + 'any other reuse is refused [content_validation_run_id_conflict]. A [conflict] means the node changed during the call: nothing was written, re-read it and decide whether to report again.',
+    SHAPE_HADRON_RECORD_CONTENT_VALIDATION,
+    async ({ nodeRef, nodeRevision, validationTaskRef, validationTaskRevision, outcome, runId, session }) => {
+      // The #1701 gate already published the named session's actor, or cleared it when the
+      // session did not validate. A refused argument is carried to the resolver, which refuses
+      // SESSION_NOT_BOUND only after the not-found and writer gates; it never falls back to
+      // recording the report as the caller's own principal.
+      const requestSession = mcpRequestSessionContext(auth);
+      const argumentRefused = typeof session === 'string' && session.length > 0
+        && !(await validateSessionBinding(db, auth, session));
+      const ctx: Context = {
+        db, userId: auth.userId, clientId: auth.clientId,
+        appId: auth.appId, appKeyId: auth.appKeyId,
+        ...requestSession,
+        sessionBindingRefused: requestSession.sessionBindingRefused || argumentRefused,
+        apiKeyId: auth.apiKeyId, signInId: auth.signInId,
+        roles: auth.roles, organizationId: auth.organizationId,
+        impersonation: auth.impersonation,
+      };
+      try {
+        const receipt = await resolvers.Mutation.recordNodeContentValidationReport(
+          {}, { nodeRef, nodeRevision, validationTaskRef, validationTaskRevision, outcome, runId }, ctx,
+        );
+        const r = receipt.report;
+        return textResult(
+          `${receipt.replayed ? 'Replayed (nothing written)' : 'Recorded'}: ${r.outcome} for revision ${r.nodeRevision} of node ${receipt.nodeId}`
+            + ` (task ${r.validationTaskRef ?? 'unreadable'}${r.validationTaskRevision ? ` revision ${r.validationTaskRevision}` : ''}; author check ${r.authorCheck}).`
+            + ` Current revision state: ${receipt.state}.`,
+        );
+      } catch (e) {
+        if (e instanceof UrnNotQualifiedError) return refusalResult(`[bad_user_input] ${e.message}`);
+        return toolErrorResult(e, () => codedRefusalText(e), 'hadron_record_content_validation:resolver');
+      }
     },
   );
 
@@ -3175,11 +3550,7 @@ export function createMcpServerInstance(
           ...MCP_SURFACE_CAPABILITIES,
           // #1925: the same function GET /capabilities answers from, so the two cannot disagree.
           ...switchCapabilities(),
-          // Probed exactly as the tools will admit the call: allowlists, a
-          // live App and current participation (#1362 review).
-          ...(auth.appId && (await teamAttentionAvailable(chatCtx(), auth.appId))
-            ? ['team-attention', 'team-attention-paged']
-            : []),
+          // #3082: `team-attention` and `team-attention-paged` are gone with the tools they described.
         ].join(', ')}`,
       ];
       // Spec 049 Phase 1: the resolved active organization and which rung of
@@ -3241,7 +3612,7 @@ export function createMcpServerInstance(
       // unauthenticated call can't flip the flag and influence a later
       // re-authed request.
       if (!auth.userId && !auth.clientId && !auth.appId) {
-        return textResult('Not authenticated.');
+        return refusalResult('Not authenticated.');
       }
       engagedWithNewSurface = true;
       // AppKey callers (appId set, no userId) — list returns the single App
@@ -3303,7 +3674,7 @@ export function createMcpServerInstance(
         );
       }
       if (!auth.userId) {
-        return textResult('Not authenticated.');
+        return refusalResult('Not authenticated.');
       }
       engagedWithNewSurface = true;
 
@@ -3376,11 +3747,11 @@ export function createMcpServerInstance(
           'AppKey callers carry their organization in the credential; hadron_set_active_org is not applicable.',
         );
       }
-      if (!auth.userId) return textResult('Not authenticated.');
+      if (!auth.userId) return refusalResult('Not authenticated.');
       // A support view sees into ONE org already and must not re-point itself
       // (belt and braces — /mcp rejects impersonation at session init).
       if (auth.impersonation) {
-        return textResult('Not available in an impersonation session.');
+        return refusalResult('Not available in an impersonation session.');
       }
       const sid = getSessionId();
 
@@ -3457,6 +3828,9 @@ export function createMcpServerInstance(
 
   // ── #1609 — comment nodes (cor:dmo:110): thin over the GraphQL comment resolvers ──
   registerCommentTools(server, { db, auth });
+  registerAssetTools(server, { db, auth });
+  registerAutomationReadGrantTools(server, { db, auth });
+  registerAutomationTeamSnapshotGrantTools(server, { db, auth });
 
   // ── #1632 — signing requests (cor:dmo:130): request and read, never sign ──
   registerSigningTools(server, { db, auth });
@@ -3479,6 +3853,7 @@ export function createMcpServerInstance(
   /** GraphQL Context for the scope tools — appId + sessionId are load-bearing (#206). */
   const scopeCtx = (): Context => ({
     db,
+    readsAuthorTask: mcpReadsTask(auth), // #1329: every direct writer's reader comes from here, through recoveryCtx()
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
     apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
@@ -3487,6 +3862,13 @@ export function createMcpServerInstance(
     roles: auth.roles as Context['roles'],
     organizationId: auth.organizationId ?? undefined,
   });
+
+  /**
+   * #3659: Node.validationTasks reads as the recorder does, so it needs what the recorder's context
+   * carries and scopeCtx() does not: an impersonator would otherwise read as a writer.
+   */
+  const validationReadCtx = (): Context => ({ ...scopeCtx(), appKeyId: auth.appKeyId ?? undefined,
+    ...mcpRequestSessionContext(auth), impersonation: auth.impersonation ?? undefined });
 
   // #2175: explicit recovery twins delegate to the same writer-plus-reader resolver gate.
   const recoveryCtx = (): Context => ({ ...scopeCtx(), appKeyId: auth.appKeyId ?? undefined,
@@ -3505,7 +3887,7 @@ export function createMcpServerInstance(
   server.tool('hadron_list_recovery_nodes', 'List retained deleted nodes in one live memory that you can read and write. Ordinary reads return live nodes only.',
     recoveryPageArgs, async (args) => recoveryCall(async () => textResult(JSON.stringify(await resolvers.Query.recoveryNodes({}, args, recoveryCtx())))));
   server.tool('hadron_list_recovery_edges', 'Inspect live edges and accessible deleted endpoints in one memory that you can read and write. Unavailable endpoints are excluded from the page and total.',
-    recoveryPageArgs, async (args) => recoveryCall(async () => textResult(JSON.stringify(await resolvers.Query.recoveryEdges({}, args, recoveryCtx())))));
+    recoveryEdgesArgs, async (args) => recoveryCall(async () => textResult(JSON.stringify(await resolvers.Query.recoveryEdges({}, args, recoveryCtx())))));
   server.tool('hadron_get_recovery_node', 'Read retained deleted-node content in a live memory that you can read and write. Returns the stored body without expanding templates or includes.',
     SHAPE_HADRON_GET_RECOVERY_NODE, async (args) => recoveryCall(async () => {
       const ctx = recoveryCtx();
@@ -3524,10 +3906,7 @@ export function createMcpServerInstance(
   /** A resolver refusal as `[<code>] <message>` text, the app-selection envelope convention. */
   const scopeErrorText = (e: unknown) => {
     if (e instanceof ScopeGraphQLError) {
-      return textResult(`[${String(e.extensions?.code ?? 'ERROR').toLowerCase()}] ${e.message}`);
-    }
-    if (e instanceof Error && (e.message === 'Forbidden' || e.message === 'Unauthenticated')) {
-      return textResult(`[${e.message.toLowerCase()}] ${e.message}.`);
+      return refusalResult(`[${String(e.extensions?.code ?? 'ERROR').toLowerCase()}] ${e.message}`);
     }
     // A ref that names nothing is the caller's input, not a server fault
     // (Copilot on PR #1160): keep it inside the `[code]` envelope.
@@ -3537,9 +3916,9 @@ export function createMcpServerInstance(
       e instanceof OrganizationNotFoundError ||
       e instanceof MemoryNotFoundError
     ) {
-      return textResult(`[not_found] No match for "${(e as { ref?: string }).ref ?? ''}".`);
+      return refusalResult(`[not_found] No match for "${(e as { ref?: string }).ref ?? ''}".`);
     }
-    if (e instanceof UrnNotQualifiedError) return textResult(`[bad_user_input] ${e.message}`);
+    if (e instanceof UrnNotQualifiedError) return refusalResult(`[bad_user_input] ${e.message}`);
     throw e;
   };
 
@@ -3595,7 +3974,7 @@ export function createMcpServerInstance(
     'List the named search scopes ("lenses", spec 049) you may read — an ORDERED memory list with exactly one owner (organization | Agent | App). With no filter, lists the active App\'s resolution CONTEXT: the App\'s own scopes, its installed Agents\', and its organization\'s — what a bare scope name resolves against there (App › Agent › organization, never unioned). A scope never grants: each shows only the memories YOU may read, plus a count of the rest. Names `global` and `app` are the ladder\'s built-in views, not scopes.',
     SHAPE_HADRON_LIST_SCOPES,
     async ({ app, ownerType, ownerRef, name, limit, offset }) => {
-      if (!auth.userId && !auth.appId) return textResult('Not authenticated.');
+      if (!auth.userId && !auth.appId) return refusalResult('Not authenticated.');
       const ctx = scopeCtx();
       const appRef = app ?? (ownerRef ? undefined : auth.appId);
       try {
@@ -3620,11 +3999,11 @@ export function createMcpServerInstance(
     'Create a named search scope (spec 049): an ORDERED list of memories owned by exactly one of an organization, an Agent, or an App. Pass one owner ref, or none to own it by the active App. Every memory must be one you can read (an unreadable one reads as "no match"). Names: 1–64 of [a-z0-9_-], unique per owner; `global` and `app` are reserved. Auth: organization CONTRIBUTOR+; App / Agent ADMIN of the owning org or the owner of a user-owned one.',
     SHAPE_HADRON_CREATE_SCOPE,
     async ({ name, memoryUrns, description, organizationRef, agentRef, appRef }) => {
-      if (!auth.userId) return textResult('Not authenticated — scopes are created by a user, not an App key.');
+      if (!auth.userId) return refusalResult('Not authenticated — scopes are created by a user, not an App key.');
       const ctx = scopeCtx();
       const owner = { organizationRef, agentRef, appRef: appRef ?? (organizationRef || agentRef ? undefined : auth.appId) };
       if (!owner.organizationRef && !owner.agentRef && !owner.appRef) {
-        return textResult('[bad_user_input] No owner: pass organizationRef, agentRef or appRef, or select an App with hadron_set_active_app first.');
+        return refusalResult('[bad_user_input] No owner: pass organizationRef, agentRef or appRef, or select an App with hadron_set_active_app first.');
       }
       try {
         const scope = await resolvers.Mutation.createScope({}, { input: { name, description, ...owner, memoryRefs: memoryUrns } }, ctx);
@@ -3640,7 +4019,7 @@ export function createMcpServerInstance(
     'Update a scope you may write (auth as hadron_create_scope): rename, re-describe, or REPLACE its ordered memory list.',
     SHAPE_HADRON_UPDATE_SCOPE,
     async ({ scope, name, description, memoryUrns }) => {
-      if (!auth.userId) return textResult('Not authenticated.');
+      if (!auth.userId) return refusalResult('Not authenticated.');
       const ctx = scopeCtx();
       try {
         const updated = await resolvers.Mutation.updateScope({}, { ref: scope, input: { name, description, memoryRefs: memoryUrns } }, ctx);
@@ -3656,7 +4035,7 @@ export function createMcpServerInstance(
     'Soft-delete a scope you may write; its name is free again at once. Deleting a scope attaches or detaches nothing — it was only ever a lens.',
     SHAPE_HADRON_DELETE_SCOPE,
     async ({ scope }) => {
-      if (!auth.userId) return textResult('Not authenticated.');
+      if (!auth.userId) return refusalResult('Not authenticated.');
       try {
         await resolvers.Mutation.deleteScope({}, { ref: scope }, scopeCtx());
         return textResult(`Scope ${scope} deleted.`);
@@ -3671,7 +4050,7 @@ export function createMcpServerInstance(
     'Explain what a scope resolves to FOR YOU (spec 049): the readable memories in scope order, how many were dropped for access (a count — a lens never grants and never names what you cannot read), which owner tier won when resolved by NAME in an App\'s context (App › Agent › organization, never unioned; two installed Agents each owning the name is ambiguous and you choose by id), the scopes it shadowed, and — with `loc` — which memory would win for that address.',
     SHAPE_HADRON_SCOPE_EXPLAIN,
     async ({ scope, name, app, loc }) => {
-      if (!auth.userId && !auth.appId) return textResult('Not authenticated.');
+      if (!auth.userId && !auth.appId) return refusalResult('Not authenticated.');
       const ctx = scopeCtx();
       try {
         const ex = await resolvers.Query.scopeExplain({}, { scopeRef: scope, name, appRef: app ?? auth.appId, loc }, ctx);
@@ -3723,15 +4102,15 @@ export function createMcpServerInstance(
     );
   };
 
-  server.tool(
+  off(
     'hadron_list_channels',
     'List the Channels (spec 049 — durable, server-ordered message streams; each hosted at ONE reserved address in ONE memory) whose host memory you may read. Default: the active App\'s. Every App has a default Channel `team` at chats:team — what hadron_team_chat_post writes to. A Channel\'s address is PROTECTED: generic node writes under it are refused ([loc_protected]).',
     SHAPE_HADRON_LIST_CHANNELS,
     async ({ app, memory, limit, offset }) => {
-      if (!auth.userId && !auth.appId) return textResult('Not authenticated.');
+      if (!auth.userId && !auth.appId) return refusalResult('Not authenticated.');
       const ctx = scopeCtx();
       const appRef = memory ? undefined : (app ?? auth.appId ?? undefined);
-      if (!appRef && !memory) return textResult('[bad_user_input] Pass app or memory, or select an App with hadron_set_active_app first.');
+      if (!appRef && !memory) return refusalResult('[bad_user_input] Pass app or memory, or select an App with hadron_set_active_app first.');
       try {
         const page = await resolvers.Query.channels({}, { filter: { appRef, memoryRef: memory }, limit, offset }, ctx);
         if (page.total === 0) return textResult('No channels you may read there.');
@@ -3743,12 +4122,12 @@ export function createMcpServerInstance(
     },
   );
 
-  server.tool(
+  off(
     'hadron_create_channel',
     'Create a named Channel WITH its chat root (spec 049), in ANY memory class you may write — the host memory\'s own audience decides who reads and posts (cor:acl:030:01), so a Channel in a private memory is private. `loc` is the reserved address (e.g. chats:release) — it must not overlap an existing Channel\'s. Every App already has `team` at chats:team. Creating at a DELETED Channel\'s address reuses it and starts CLEAN: the old transcript is tombstoned, the empty Channel watermarks reset, and its first new message resumes above the old seq maximum so old read cursors cannot hide it (#1226).',
     SHAPE_HADRON_CREATE_CHANNEL,
     async ({ memory, loc, name, description }) => {
-      if (!auth.userId) return textResult('Not authenticated — Channels are created by a user, not an App key.');
+      if (!auth.userId) return refusalResult('Not authenticated — Channels are created by a user, not an App key.');
       const ctx = scopeCtx();
       try {
         const row = await resolvers.Mutation.createChannel({}, { input: { memoryRef: memory, loc, name, description } }, ctx);
@@ -3808,15 +4187,15 @@ export function createMcpServerInstance(
     });
   };
 
-  server.tool(
+  off(
     'hadron_register_list',
     'List the chat REGISTER (spec 049): which attendee (a Worker, or an Agent in an App — or everyone in the owner\'s context) takes part in which Channel, as declared by the App or its organization. Intent, never permission: what an attendee may actually read or post is the Channel\'s host memory\'s decision. Default: the active App\'s rows. Every install carries a materialised default row for the App\'s `team` Channel.',
     SHAPE_HADRON_REGISTER_LIST,
     async ({ owner, channel, attendee, limit, offset }) => {
-      if (!auth.userId && !auth.appId) return textResult('Not authenticated.');
+      if (!auth.userId && !auth.appId) return refusalResult('Not authenticated.');
       const ctx = scopeCtx();
       const ownerRef = owner ?? (channel || attendee ? undefined : (auth.appId ?? undefined));
-      if (!ownerRef && !channel && !attendee) return textResult('[bad_user_input] Pass owner, channel or attendee, or select an App with hadron_set_active_app first.');
+      if (!ownerRef && !channel && !attendee) return refusalResult('[bad_user_input] Pass owner, channel or attendee, or select an App with hadron_set_active_app first.');
       try {
         const page = await resolvers.Query.registerEntries({}, { filter: { ownerRef, channelRef: channel, attendeeRef: attendee }, limit, offset }, ctx);
         if (page.total === 0) return textResult('No register entries you may read there.');
@@ -3828,15 +4207,15 @@ export function createMcpServerInstance(
     },
   );
 
-  server.tool(
+  off(
     'hadron_register_add',
     'Declare that an attendee takes part in a Channel (spec 049 register). Owner: an App (org ADMIN, or the owner of a user-owned App) or an organization (CONTRIBUTOR+); defaults to the active App. attendee: a Worker or an Agent in the owner\'s context; omit it for every attendee there. Intent, never permission — the row grants nothing.',
     SHAPE_HADRON_REGISTER_ADD,
     async ({ channel, attendee, owner, role, mentionOnly, description }) => {
-      if (!auth.userId) return textResult('Not authenticated — register rows are written by a user, not an App key.');
+      if (!auth.userId) return refusalResult('Not authenticated — register rows are written by a user, not an App key.');
       const ctx = scopeCtx();
       const ownerRef = owner ?? auth.appId;
-      if (!ownerRef) return textResult('[bad_user_input] No owner: pass owner, or select an App with hadron_set_active_app first.');
+      if (!ownerRef) return refusalResult('[bad_user_input] No owner: pass owner, or select an App with hadron_set_active_app first.');
       try {
         const row = await resolvers.Mutation.createRegisterEntry(
           {},
@@ -3851,12 +4230,12 @@ export function createMcpServerInstance(
     },
   );
 
-  server.tool(
+  off(
     'hadron_register_remove',
     'Remove a register entry you own (spec 049): each owner removes its own rows — an App may remove its install-created default, never an organization\'s row.',
     SHAPE_HADRON_REGISTER_REMOVE,
     async ({ entry }) => {
-      if (!auth.userId) return textResult('Not authenticated — register rows are written by a user, not an App key.');
+      if (!auth.userId) return refusalResult('Not authenticated — register rows are written by a user, not an App key.');
       try {
         await resolvers.Mutation.deleteRegisterEntry({}, { ref: entry }, scopeCtx());
         return textResult('Removed.');
@@ -3873,11 +4252,11 @@ export function createMcpServerInstance(
     'Set — or with clear:true, drop — the ACTIVE SCOPE for this client (spec 049): the named search scope hadron_find_nodes / hadron_search run under when the call names no scope and no memory. Rung 2 of the ladder: a scope named in the call › this › the active App (`app`, its attached memories) › the active organization (`global`) › your user-owned memories. Persisted per client instance like hadron_set_active_app and re-authorized on restore. A scope never grants: results are its memories ∩ what you may read, and every result says which scope it ran under.',
     SHAPE_HADRON_SET_ACTIVE_SCOPE,
     async ({ scope, clear }) => {
-      if (!auth.userId) return textResult('Not authenticated — an App key\'s scope is its App.');
-      if (auth.impersonation) return textResult('Not available in an impersonation session.');
+      if (!auth.userId) return refusalResult('Not authenticated — an App key\'s scope is its App.');
+      if (auth.impersonation) return refusalResult('Not available in an impersonation session.');
       const ctx = scopeCtx();
       if (!scope) {
-        if (!clear) return textResult('[bad_user_input] Pass scope (an id or a name), or clear: true.');
+        if (!clear) return refusalResult('[bad_user_input] Pass scope (an id or a name), or clear: true.');
         activeScopeId = undefined;
         await saveActiveScope(db, auth, clientKey, null);
         const now = await mcpSearchScope(undefined, false).catch(() => null);
@@ -3887,12 +4266,12 @@ export function createMcpServerInstance(
       if (!row && auth.appId) {
         const r = await resolveScopeByNameInApp(ctx, scope.trim(), auth.appId);
         if (r.ambiguousAmong.length) {
-          return textResult(`[scope_name_ambiguous] "${scope}" is owned by ${r.ambiguousAmong.length} Agents installed in this App; pass an id: ${r.ambiguousAmong.map((s) => s.id).join(', ')}.`);
+          return refusalResult(`[scope_name_ambiguous] "${scope}" is owned by ${r.ambiguousAmong.length} Agents installed in this App; pass an id: ${r.ambiguousAmong.map((s) => s.id).join(', ')}.`);
         }
         row = r.winner;
       }
       if (!row || !(await canReadScope(ctx, row))) {
-        return textResult(`[not_found] No readable scope matches "${scope}"${auth.appId ? '' : ' — a bare name needs an active App; pass the scope id or select an App first'}. See hadron_list_scopes.`);
+        return refusalResult(`[not_found] No readable scope matches "${scope}"${auth.appId ? '' : ' — a bare name needs an active App; pass the scope id or select an App first'}. See hadron_list_scopes.`);
       }
       activeScopeId = row.id;
       await saveActiveScope(db, auth, clientKey, row.id);
@@ -3908,22 +4287,22 @@ export function createMcpServerInstance(
     'hadron_create_parent_node',
     'Create a parent (section/category) node in the memory graph. Lightweight container for organizing nodes. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>).',
     SHAPE_HADRON_CREATE_PARENT_NODE,
-    async ({ urn: rawUrn, name: rawName, description, tags }) => {
+    async ({ urn: rawUrn, name: rawName, description, tags, authoredWith }) => {
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
         throw e;
       }
 
       const { memoryUrn, loc, fragment } = splitNodeUrn(rawUrn);
       const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
-      if (fragRefusal) return textResult(fragRefusal);
+      if (fragRefusal) return refusalResult(fragRefusal);
       // #1316: hidden from this caller ⇒ the missing branch; a reader keeps the denial.
       const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
       if (!memory) {
-        return textResult(`Memory not found: "${memoryUrn}".`);
+        return refusalResult(`Memory not found: "${memoryUrn}".`);
       }
       const memoryId = memory.id;
       // Default name to the last loc atom (e.g. `services:db-helpers` → `db-helpers`).
@@ -3933,11 +4312,11 @@ export function createMcpServerInstance(
       try {
         validateLoc(loc);
       } catch (e) {
-        return toolErrorResult(e, () => (e as Error).message, 'hadron_create_parent_node:validateLoc');
+        return e instanceof InvalidLocError ? refusalResult(e.message) : toolErrorResult(e, () => (e as Error).message, 'hadron_create_parent_node:validateLoc');
       }
 
       if (!(await canWriteToMemory(db, auth, memoryId, EXPLICIT_REF))) {
-        return textResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memoryId)}`);
+        return refusalResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memoryId)}`);
       }
 
       const parentMemoryState = await db.memory.findUniqueOrThrow({
@@ -3979,7 +4358,7 @@ export function createMcpServerInstance(
           // door performs.
         );
       } catch (e) {
-        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return textResult(`[role_governed] ${(e as Error).message}`);
+        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return refusalResult(`[role_governed] ${(e as Error).message}`);
         throw e;
       }
 
@@ -4013,6 +4392,8 @@ export function createMcpServerInstance(
       // spec 049 S4 protected-loc gate, and a root-level Channel address
       // was otherwise overwritable here (Codex P1 on PR #1165).
       let sectionId: string;
+      let sectionContentSaved = false;
+      let sectionPinStoredContent: string | null = null;
       try {
         sectionId = await db.$transaction(async (tx) => {
           // #2206 (Xan's parity ruling on #2233): an Agent definition's authority before any memory/node/loc lock.
@@ -4030,6 +4411,7 @@ export function createMcpServerInstance(
             select: { id: true, deletedAt: true, role: true, isRunnable: true },
           });
           let sectionChanged = false;
+          let sectionStamp: NodeAuthorshipStamp | null = null;
           // #1331 — an existing section keeps its role through this write, so the
           // role's writer level applies to the edit (and to reviving a tombstone).
           if (prior) {
@@ -4080,6 +4462,12 @@ export function createMcpServerInstance(
             });
             if (changes.length === 0) return current.id;
             sectionChanged = authoredContentChanged(changes);
+            // #1328 — a re-save is an update whatever the tool is called
+            // (`findings:parent-node-upsert-is-authoring`).
+            sectionStamp = await assertAuthoring(tx, memoryId, {
+              priorRole: current.role, priorRunnable: current.isRunnable,
+              role: current.role, runnable: current.isRunnable, mintHuman: true, authoredChange: sectionChanged,
+            }, attestedAuthoring(recoveryCtx(), authoredWith));
             await createNodeRevision(tx, {
               id: generateId(),
               ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), { changes }),
@@ -4095,23 +4483,25 @@ export function createMcpServerInstance(
           }
           const row = await tx.node.upsert({
             ...upsertArgs,
-            update: { ...upsertArgs.update, ...(sectionChanged ? clearNodeAuthorship() : {}), revisionContentHash: revisionStateHashRefreshMarker() },
+            update: { ...upsertArgs.update, ...(sectionChanged ? (sectionStamp ?? clearNodeAuthorship()) : {}), revisionContentHash: revisionStateHashRefreshMarker() },
           });
           await applyIncludesInTransaction(tx, row, content, auth, storedForIncludes);
+          sectionContentSaved = true;
+          sectionPinStoredContent = storedForIncludes;
           return row.id;
         });
       } catch (e) {
-        if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
-        if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
-        if (e instanceof MemoryEncryptionChangedDuringWriteError) return textResult(e.message);
-        if (e instanceof MemoryWriteAccessChangedDuringWriteError) return textResult(e.message);
-        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return textResult(`[role_governed] ${(e as Error).message}`);
+        if (e instanceof LocProtectedError) return refusalResult(`[loc_protected] ${e.message}`);
+        if (e instanceof NodeMovedDuringWriteError) return refusalResult(e.message);
+        if (e instanceof MemoryEncryptionChangedDuringWriteError) return refusalResult(e.message);
+        if (e instanceof MemoryWriteAccessChangedDuringWriteError) return refusalResult(e.message);
+        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return refusalResult(`[role_governed] ${(e as Error).message}`);
         const includeText = includeRefusalText(e);
-        if (includeText) return textResult(includeText);
+        if (includeText) return refusalResult(includeText);
         const writerRefusal = roleWriterRefusalText(e);
-        if (writerRefusal) return textResult(writerRefusal);
+        if (writerRefusal) return refusalResult(writerRefusal);
         if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
-          return textResult(`[spec_minted_permanent] ${e.message}`);
+          return refusalResult(`[spec_minted_permanent] ${e.message}`);
         }
         throw e;
       }
@@ -4121,7 +4511,7 @@ export function createMcpServerInstance(
       recordNodeWrite(db, { id: sectionId, loc, memoryId }, auth);
 
       const urn = await nodeUrn(loc, memoryId);
-      return textResult(`Node saved: ${urn}`);
+      return textResult(`Node saved: ${urn}${sectionContentSaved ? renderIncludePinWarnings(await safePlainPinWarnings(scopeCtx(), { memoryId }, content, sectionPinStoredContent)) : ''}`);
     },
   );
 
@@ -4131,11 +4521,19 @@ export function createMcpServerInstance(
     'hadron_find_nodes',
     'Relevance-ranked full-text search across nodes. Keyword mode (default) runs Postgres full-text search: terms are STEMMED (so "running" matches "run"), results are RANKED by field-weighted relevance (name/alias > loc/tags > description/abstract > body/data), and BODY + abstract ARE indexed. Boolean operators are supported — `(banana OR apple) AND shake`, quoted phrases, and `-term` / `NOT term` — operator words are UPPERCASE-ONLY (lowercase and/or/not are plain terms, so natural phrases search literally), and malformed boolean syntax degrades to a literal phrase search instead of erroring. A plain multi-word query ANDs its terms; if that matches nothing, the search auto-relaxes to OR (any term) and flags [degraded:and_relaxed_to_or] — so a single off-corpus word doesn\'t dead-end the query. Pass `query: "*"` (or `""`) to list every node (survey mode) — useful as a first pass before adding to a memory. mode:vector / mode:hybrid run semantic search over the memory\'s vector index; mode:regex matches a POSIX regular expression against node text. To browse the tree structure, use `hadron_list_nodes` instead. Scope with `parentRel` (a subtree), `memoryUrn` (one memory), or `memoryUrns` (a set); pass `allMemories: true` to search EVERY memory you can read — the stemmed, ranked org-wide "does anyone know about X?" probe (this is the right tool for cross-memory concept/content questions; hadron_search matches literal substrings only). Each scored hit shows its score as a percentage of the top hit; when many hits sit in a narrow band the result carries a [weak_results] note, meaning the ranking found nothing clearly relevant — treat that as "the answer is probably not here" rather than reading the whole list. Use `minScore` to drop weak hits and `limit` to widen the default 10-hit page. Soft-deleted nodes are excluded. Each hit in the default view carries a `URL:` line — the node\'s portal link; copy it verbatim when citing a source to a human rather than building a link from the URN (`brief: true` omits it, as it omits the abstract).',
     SHAPE_HADRON_FIND_NODES,
-    async ({ query, mode, parentRel, memoryUrn, memoryUrns, allMemories, isRunnable, role, objectType, nodeKind, brief, limit, minScore, expand, granularity, where, scope }) => {
+    async ({ query, mode, parentRel, memoryUrn, memoryUrns, allMemories, isRunnable, hasOpenThreads, role, objectType, nodeType, nodeTypes, nodeKind, childrenOf, brief, limit, minScore, expand, granularity, where, scope }) => {
+      // #3113 — the shape of `nodeTypes` is judged first, before any scope work or
+      // early return below, with the one validator the resolver also runs.
+      try {
+        checkNodeTypesFilter({ nodeType, nodeTypes }, 'hadron_find_nodes');
+      } catch (e) {
+        if (e instanceof NodeTypesFilterError) return refusalResult(e.message);
+        throw e;
+      }
       try {
         validateParentRel(parentRel);
       } catch (e) {
-        if (e instanceof InvalidParentRelError) return textResult(e.message);
+        if (e instanceof InvalidParentRelError) return refusalResult(e.message);
         throw e;
       }
 
@@ -4176,26 +4574,9 @@ export function createMcpServerInstance(
       const trimmedParentRel = parentRel?.trim();
       const accessibleMemoryIds = await getAccessibleMemoryIds(db, auth);
 
-      // App Key + active session hard-isolates reads to the session's memory
-      // (+ the agent's system memory) — findNodes enforces this downstream
-      // (getAccessibleMemoryIds, checked first, ahead of any role). The
-      // pre-scope memoryUrn / parentRel gates enforce the SAME boundary and
-      // preserve the contract's not-found envelope for a denied selector.
-      // The MCP point-read map also applies the session scope (#324); this
-      // explicit check keeps the envelope stable even if that map changes.
-      let sessionMemoryIds: Set<string> | null = null;
-      // #934: pure App-key shape only (`!auth.userId`) — mirrors the resolver
-      // branch's guard: a user-credential caller's session binding is
-      // heartbeat attribution, never a scope change.
-      if (auth.appId && auth.sessionId && !auth.userId) {
-        // #945: was a hand-copied duplicate of the resolver branch, so the
-        // admissibility fix would have landed on one surface only. Both now
-        // share `sessionScopedMemoryIds` — a foreign PUBLIC agent bound to the
-        // session no longer drags its system memory into scope here either.
-        sessionMemoryIds = new Set<string>(
-          await sessionScopedMemoryIds(db, auth.appId, auth.sessionId),
-        );
-      }
+      // The canonical point gate confines session-bound keys and admits the sole
+      // 0114 B exception (named PUBLIC knowledge). Do not intersect a second,
+      // narrower session-only map here: it would undo that shared read rule.
 
       // Resolved scope handed to findNodes. When neither memoryUrn nor a
       // memory-resolvable parentRel is supplied, both stay undefined and
@@ -4230,14 +4611,13 @@ export function createMcpServerInstance(
         try {
           assertFullyQualifiedUrn(memoryUrn, 'memory');
         } catch (e) {
-          if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+          if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
           throw e;
         }
         const mem = await resolveMemoryByUrn(memoryUrn);
         if (
           !mem ||
-          !(await canReadMemory(db, auth, mem.id, EXPLICIT_REF)) ||
-          (sessionMemoryIds && !sessionMemoryIds.has(mem.id))
+          !(await canReadMemory(db, auth, mem.id, EXPLICIT_REF))
         ) {
           return textResult(
             `Memory not found or invalid: '${memoryUrn}'. Use hadron_list_memories to see what is available.`,
@@ -4263,8 +4643,7 @@ export function createMcpServerInstance(
             const mem = await resolveMemoryByUrn(urn);
             if (
               !mem ||
-              !(await canReadMemory(db, auth, mem.id, EXPLICIT_REF)) ||
-              (sessionMemoryIds && !sessionMemoryIds.has(mem.id))
+              !(await canReadMemory(db, auth, mem.id, EXPLICIT_REF))
             ) {
               return {
                 error: `Memory not found or invalid: '${urn}'. Use hadron_list_memories to see what is available.`,
@@ -4274,7 +4653,7 @@ export function createMcpServerInstance(
           }),
         );
         const bad = resolved.find((r): r is { error: string } => 'error' in r);
-        if (bad) return textResult(bad.error);
+        if (bad) return refusalResult(bad.error);
         filterMemoryIds = resolved.map((r) => (r as { id: string }).id);
       }
 
@@ -4294,29 +4673,17 @@ export function createMcpServerInstance(
           ).map((m) => m.id);
       }
 
-      // Scope to subtree if parentRel provided. #188: same BOLA shape as the
-      // memoryUrn branch — resolveLocFromUrn already gates the URN-typed path on
-      // the accessible set, but ADMIN/OWNER pass null there, so canReadMemory
-      // enforces the personal/private gate uniformly.
+      // #2526: the explicit-parent gate is shared with list_nodes; discovery
+      // cannot hide a directly readable owner memory before authorization.
       if (trimmedParentRel) {
-        const resolvedParent = await resolveLocFromUrn(trimmedParentRel, accessibleMemoryIds);
-        // A qualified parent hidden by the session scope resolves no memory
-        // id. Give it the same not-found envelope as a resolved-but-denied
-        // parent, rather than an empty search response that distinguishes the
-        // two cases.
-        if (!resolvedParent.memoryId && /^(?:hrn|urn):node:/.test(trimmedParentRel)) {
-          return textResult(`No nodes found matching "${safeQuery}".`);
+        const parent = await resolveParentForRead(trimmedParentRel, memoryUrn, accessibleMemoryIds, auth);
+        if (!parent.ok) {
+          return parent.kind === 'notFound'
+            ? textResult(`No nodes found matching "${safeQuery}".`)
+            : refusalResult(parent.message);
         }
-        filterLocPrefix = resolvedParent.loc;
-        if (resolvedParent.memoryId) {
-          if (
-            !(await canReadMemory(db, auth, resolvedParent.memoryId, EXPLICIT_REF)) ||
-            (sessionMemoryIds && !sessionMemoryIds.has(resolvedParent.memoryId))
-          ) {
-            return textResult(`No nodes found matching "${safeQuery}".`);
-          }
-          filterMemoryIds = [resolvedParent.memoryId];
-        }
+        filterLocPrefix = parent.loc;
+        if (parent.memoryId) filterMemoryIds = [parent.memoryId];
       }
 
       // Build a GraphQL Context from the MCP auth, including appId + sessionId so
@@ -4328,6 +4695,7 @@ export function createMcpServerInstance(
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
+        limiterIdentity: auth.limiterIdentity,
         apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
@@ -4342,18 +4710,27 @@ export function createMcpServerInstance(
       try {
         scopeRes = await mcpSearchScope(scope, memSelectors.length > 0 || !!trimmedParentRel);
       } catch (e) {
-        if (e instanceof ScopeGraphQLError) return textResult(`[${String(e.extensions?.code ?? 'error').toLowerCase()}] ${e.message}`);
+        if (e instanceof ScopeGraphQLError) return refusalResult(`[${String(e.extensions?.code ?? 'error').toLowerCase()}] ${e.message}`);
         throw e;
       }
       if (scopeRes?.memoryIds) {
         const inScope = new Set(scopeRes.memoryIds);
         filterMemoryIds = filterMemoryIds ? filterMemoryIds.filter((id) => inScope.has(id)) : scopeRes.memoryIds;
         if (filterMemoryIds.length === 0) {
+          // This valid empty result returns before the resolver. Charge it
+          // here once through the same admission engine, without turning an
+          // empty filter into an unscoped core retrieval.
+          try {
+            await admitOperationRate(ctx,db,'FAN_OUT_READS',auth.limiterIdentity ?? transportRateIdentity(auth));
+          } catch(error) {
+            return toolErrorResult(error,()=>error instanceof Error ? error.message : 'Search failed.','hadron_find_nodes');
+          }
           return textResult(`${scopeNoteLine(scopeRes)}\n\nFound 0 node(s) — ${memSelectors.length ? 'the memories you named are outside this scope' : 'this scope lists no memory you can read'}.`);
         }
-      } else if (scopeRes?.kind === 'global') {
-        scopeOrgId = scopeRes.orgScopeId ?? undefined;
       }
+      // #1987: as in the resolver, the global view's materialised list still
+      // takes the org narrowing (App-memory exclusion of the runnable catalogue).
+      if (scopeRes?.kind === 'global') scopeOrgId = scopeRes.orgScopeId ?? undefined;
       // Every scoped return below — passages, the vector diagnostics, the node
       // list — starts with the disclosure (Codex + Copilot on PR #1161).
       const scopePrefix = scopeRes ? `${scopeNoteLine(scopeRes)}\n\n` : '';
@@ -4371,10 +4748,14 @@ export function createMcpServerInstance(
             filter: {
               memoryIds: filterMemoryIds,
               isRunnable: isRunnable ?? undefined,
+              hasOpenThreads: hasOpenThreads ?? undefined,
               role: role ?? undefined,
               contentScope: nodeKind ?? undefined, // #1678: MCP nodeKind → GraphQL contentScope
               objectType: objectType ?? undefined,
+              nodeType: nodeType ?? undefined, // #331: exact-match pass-through to NodeFilter.nodeType
+              nodeTypes: nodeTypes ?? undefined, // #3113: the explicit list, through the same resolver
               locPrefix: filterLocPrefix,
+              childrenOf: childrenOf ?? undefined, // #2832: direct children only; '' is the top level
               // #719 — structured JSONB predicate; findNodes validates it and
               // throws BAD_USER_INPUT on a malformed/oversized tree (surfaced as
               // tool-error text by the catch below).
@@ -4383,10 +4764,10 @@ export function createMcpServerInstance(
             expand: expand ?? undefined,
             granularity: granularity ?? undefined,
             // #497 — a query defaults to a tight page (10); an agent iterating
-            // search shouldn't pay 50 full abstracts of context per call. Survey
-            // mode ("*"/"") is a deliberate full listing, so it keeps 50. The
+            // search shouldn't pay 20 full abstracts of context per call. Survey
+            // mode ("*"/"") is a deliberate full listing, so it gets a wider page (20). The
             // minScore floor never applies to survey (those hits are unscored).
-            limit: limit ?? (isSurvey ? 50 : 10),
+            limit: limit ?? (isSurvey ? 20 : 10),
             minScore: isSurvey ? undefined : minScore,
           },
           ctx,
@@ -4394,7 +4775,7 @@ export function createMcpServerInstance(
       } catch (e) {
         // findNodes throws BAD_USER_INPUT for a malformed boolean query, an
         // invalid regex, etc. The MCP contract surfaces tool errors as text.
-        if (e instanceof ScopeGraphQLError && e.extensions?.code === 'BAD_USER_INPUT') return textResult(e.message);
+        if (e instanceof ScopeGraphQLError && e.extensions?.code === 'BAD_USER_INPUT') return refusalResult(e.message);
         // #415: anything else, such as a regex statement the database
         // cancelled at its budget, goes through the #1695 boundary, so a
         // Prisma message (driver internals, the SQL shape) never reaches the
@@ -4635,16 +5016,236 @@ export function createMcpServerInstance(
 
   // ── hadron_get_node ──────────────────────────────────────────────────────────
 
+  /** An action URN — a register entry's second address (#2610, cor:urn:010:01). */
+  const ACTION_REF_RE = /^(?:hrn|urn):action:/;
+
+  /**
+   * #2610 — resolve `hrn:action:<root>:<agent-slug>:<code>` to its register
+   * entry: the SAME steps as resolveUrn's action arm (resolvers.query.node.ts),
+   * with this surface's gate spellings. The root + slug name the ONE Agent whose
+   * system memory holds the entry at `register:<code>` — no nearest-first chain
+   * fallthrough (a child's override entry addresses under its own slug). The
+   * `agent` arm's gate verbatim (PUBLIC resolves for anyone, #551; otherwise
+   * owner-or-org-member), then the system memory's read gate, then the entry
+   * through resolveNodeRefForAuth so the live lookup, the rename alias heal
+   * (cor:urn:030:01) and ambiguity concealment are the SAME implementation the
+   * node form below uses. Returns null for EVERY refusal — other tenant,
+   * unreadable memory, unknown agent, missing or malformed code — the arm's
+   * uniform-refusal rule, worn here as the same single not-found message the
+   * node form serves. A globally-ambiguous historical entry address stays a
+   * LOUD refusal (AmbiguousLegacyUrnError escapes), exactly as in the arm.
+   * An operational fault in either lookup is not a refusal and propagates to
+   * the tool's error boundary as the generic internal-fault envelope (#2975,
+   * cor:api:260:01); an ambiguous AGENT alias stays the uniform refusal.
+   *
+   * `agentGate: false` (#2718, Vera's ruling (a), cor:agt:110:04) drops the
+   * `agent` arm's gate and keeps only the memory gates: the RUN surface applies
+   * the node-URN spelling's gate (`loadNodeForRun` -> `canReadMemory`), so a
+   * participant who reads the entry's memory runs it under either address. The
+   * default (true) is the READ surface's, unchanged.
+   */
+  const resolveActionEntryRef = async (
+    rawUrn: string,
+    opts: { agentGate?: boolean } = {},
+  ): Promise<{ id: string; memoryId: string; loc: string } | null> => {
+    let agentId: string;
+    let code: string;
+    try {
+      const parsed = parseUrnV2(rawUrn); // fixed 'action' arity: [agent-slug, code]
+      [code] = parsed.segments.slice(1);
+      ({ id: agentId } = await resolveAgentRef(
+        db,
+        composeUrnV2('agent', parsed.root, parsed.segments[0]!),
+      ));
+    } catch (error) {
+      // Malformed leaf (charset/length/arity) or an unknown/renamed-away agent
+      // — both name nothing (the arm's uniform refusal). A fault is not an
+      // absence and propagates (#2975, cor:api:260:01); an ambiguous agent
+      // alias stays concealed here, as in resolveUrn's arm (gate ruling (a)).
+      if (!refNamesNothing(error, { ambiguousNamesNothing: true })) throw error;
+      return null;
+    }
+    const agent = await db.agent.findUnique({
+      where: { id: agentId },
+      select: { organizationId: true, visibility: true, ownerUserId: true, systemMemoryId: true },
+    });
+    if (!agent?.systemMemoryId) return null;
+    // D-1 (Rico §10 delta): carry impersonation into the gate — scopeCtx()
+    // alone omits it, so an impersonated session's org-membership check would
+    // admit what the GraphQL arm (ctx.impersonation-aware) refuses.
+    // recoveryCtx() is the established shape for this.
+    if (
+      opts.agentGate !== false &&
+      agent.visibility !== 'PUBLIC' &&
+      !(await isOwnerOrOrgMember({ ...scopeCtx(), impersonation: auth.impersonation ?? undefined }, agent))
+    ) {
+      return null;
+    }
+    if (!(await canReadMemory(db, auth, agent.systemMemoryId, EXPLICIT_REF))) return null;
+    // The DB read sits outside the catch below: a database fault is not an
+    // absence and must surface as a fault (cor:api:140:03), on the read and run
+    // surfaces alike (#2718 review).
+    const systemMemoryUrn = await loadMemoryUrn(agent.systemMemoryId);
+    let entryId: string;
+    try {
+      ({ id: entryId } = await resolveNodeRefForAuth(
+        emitNodeUrnV2(systemMemoryUrn, `register:${code}`),
+        auth,
+      ));
+    } catch (error) {
+      if (error instanceof AmbiguousLegacyUrnError) throw error;
+      // #2975: a fault in the entry lookup is not an absence (cor:api:260:01).
+      if (!refNamesNothing(error)) throw error;
+      return null;
+    }
+    const entry = await db.node.findFirst({
+      where: { id: entryId, deletedAt: null },
+      select: { id: true, memoryId: true, loc: true },
+    });
+    if (!entry) return null;
+    // The content gate on the memory the entry ACTUALLY lives in — an alias
+    // heal can cross memories (PR #2711 §10, P3-2): the caller reads where it
+    // lives, not the system memory the ref started from.
+    if (!(await canReadMemory(db, auth, entry.memoryId, EXPLICIT_REF))) return null;
+    return entry;
+  };
+
+  /**
+   * The read tail shared by hadron_get_node's two address forms — the node URN
+   * path and the #2610 action-URN path — so one projection, one reconcile, one
+   * usage event and one lint pass serve both of a node's addresses and cannot
+   * drift (the same rule cor:api:040:01 holds the batch to).
+   */
+  const serveNodeReadProjection = async (
+    node: { id: string; memoryId: string; loc: string },
+    o: {
+      rawUrn: string;
+      contentScope?: 'content' | 'abstract' | 'all';
+      raw?: boolean;
+      inheritedFrom?: InheritedFrom | null;
+      fragment?: string;
+      matchedLiteral?: boolean;
+    },
+  ) => {
+      // Spec 031 — contentScope-driven response shape. Default 'content'
+      // preserves pre-spec output byte-for-byte. Defensive enum check: zod
+      // validates the same set at the MCP transport boundary, but direct-
+      // handler callers (createTestableMcpServer's _registeredTools shortcut)
+      // bypass that parsing, so re-validate here. InvalidContentScopeError is
+      // the single source of truth for the message (and any future GraphQL
+      // `extensions.code` mapping). MCP convention: return error text, not throw.
+      if (
+        o.contentScope !== undefined &&
+        o.contentScope !== 'content' &&
+        o.contentScope !== 'abstract' &&
+        o.contentScope !== 'all'
+      ) {
+        const err = new InvalidContentScopeError(String(o.contentScope));
+        return refusalResult(err.message);
+      }
+      const scope = o.contentScope ?? 'content';
+      // Reconcile + fetch under one row lock. The first lookup selects the
+      // address and authorizes its memory; it must not supply the body after a
+      // reconciliation advanced the counter.
+      const current = await loadCurrentReadProjection(node.id, node.memoryId, auth, o.inheritedFrom?.via ?? node.memoryId);
+      if (
+        !current ||
+        current.memoryId !== node.memoryId ||
+        current.loc !== node.loc ||
+        // An inherited node was admitted through the child's memory above.
+        (!o.inheritedFrom && !(await canReadMemory(db, auth, current.memoryId, EXPLICIT_REF)))
+      ) {
+        return refusalResult(`Node "${o.rawUrn}" not found.`);
+      }
+      // The version actually served must still be the child's to show
+      // (Diego, #1891 P2-1): not turned boot prompt, not overridden since.
+      if (o.inheritedFrom && !(await stillInherited(db, o.inheritedFrom, current))) {
+        return refusalResult(`Node "${o.rawUrn}" not found.`);
+      }
+      if (o.inheritedFrom) markInherited([current], new Map([[current.memoryId, o.inheritedFrom]]));
+      // Spec 041: decrypt when this session holds the key; mark locked
+      // otherwise (blanked fields + Locked meta line, never raw ciphertext).
+      const lockState = mcpDecryptOrMark(current);
+      // Shared with hadron_get_nodes (batch) so the per-node projection can never
+      // drift between the single-read and batch-read surfaces (cor:api:040:01).
+      // #2041 — include tags resolve with the caller's own read access; `raw` skips it.
+      const served = lockState === 'locked' || o.raw
+        ? current
+        : { ...current, content: await resolveNodeContent(scopeCtx(), current, { raw: o.raw }) };
+      const projection = await renderNodeReadProjection(served, scope, {
+        locked: lockState === 'locked',
+        encryptedMemory: lockState !== 'plaintext',
+        auth,
+        // The rules are the base memory's, and a report is recorded against the base node.
+        validationTasks: o.inheritedFrom ? undefined : (await validationTaskSetsForNodes(validationReadCtx(), [current.id])).get(current.id),
+      });
+
+      // Record usage event (fire-and-forget), AFTER the projection is in hand:
+      // the defensive contentScope check above returns an error for a direct
+      // handler call with a bad scope, and recording first would count a read
+      // for content never returned (PR #1062 review — Copilot).
+      //
+      // #796: `memoryId` is attributed directly so the event stays counted for
+      // this memory after the node is deleted (nodeId is SetNull).
+      //
+      // #930 (PR-933 Codex P1): the shared recorder attributes the event to the
+      // bound session. `auth.sessionId` is a validated Session.id — an App-key
+      // caller's X-Hadron-Session, checked in resolveAppKey for existence, App
+      // ownership, not-ended and not-past-expiry — so this is a real FK, not the
+      // MCP transport session id. It was hardcoded null in all five MCP usage
+      // writers, which meant MCP work produced no session heartbeat at all: the
+      // #930 reaper counts the latest attributed UsageEvent as liveness, so a
+      // The residual this comment used to describe — "user-credential MCP
+      // callers cannot bind a session today" — was CLOSED by #934 four days
+      // after it was written: `bindSession` takes both principal shapes, and a
+      // user principal binds a session attributed to them. The real gap was
+      // narrower and outlived it: a desktop caller's session is created
+      // mid-conversation by `hadron_start_session`, so it can never reach an
+      // `X-Hadron-Session` header on a connection that already exists, leaving
+      // `auth.sessionId` null and every event here unattributed. #1081 gives
+      // that caller an explicit heartbeat instead (`heartbeatSession`).
+      //
+      // A LOCKED node still records: the projection is what crossed the
+      // boundary, and the caller did read this node's addressable state.
+      // An alias read names the node at its CURRENT address; never pair the
+      // historical input loc with the target memory in the usage event.
+      recordNodeRead(db, { id: current.id, loc: current.loc, memoryId: current.memoryId }, auth);
+
+      // #696: `#data` addresses the node's DATA, not the node — and before the
+      // urn-lib-js 0.0.15 bump the fragment stayed glued to the loc, so such a
+      // read simply missed. Now it decomposes, and returning the parent's
+      // projection with no word said would answer a question the caller did not
+      // ask — the hadron-server#994 harm (resolving to the parent) arriving on
+      // a read surface. This tool has no data view, so it serves the node and
+      // SAYS which resource that is; `resolveUrn` tags its result the same way.
+      // No notice when the LITERAL row matched: nothing was resolved away, the
+      // caller got exactly the loc they named.
+      // #2048 (cor:agt:040:13 R19): the warnings that hold for this boot-prompt source now, recomputed on every read.
+      const lint = lockState === 'locked' || !isBootPromptRole(current.role) ? '' : renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), current.id));
+      return textResult(noteFragment(projection, o.matchedLiteral ? undefined : o.fragment) + lint);
+  };
+
   server.tool(
     'hadron_get_node',
-    "Read a node by its fully-qualified URN. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Optional `contentScope` selects what the response includes: 'content' (default) — meta block + body, with the abstract substituted into the body slot when content is null/empty (a `Source: abstract-fallback` line then appears in the meta block); 'abstract' — meta block + abstract, no body; 'all' — meta block + abstract + body. When the abstract is in the response and its origin hash disagrees with the current content's hash, the meta block also carries a `Source: abstract-stale` line — treat the abstract as a possibly-outdated preview (spec 032 FR-010; on encrypted memories only while unlocked — spec 041). It means the content changed after the abstract was written, NOT that the abstract is known to be wrong. To clear it: read both, then either rewrite the abstract, or — if it still describes the node — re-save the identical text via hadron_update_node (or assert `abstractStillAccurate`). Rewriting an abstract you have not first found inaccurate is the wrong move; the marker is a prompt to check, not a verdict. Spec 031 + 032. The meta block also carries a `URL:` line — the node's portal link. To refer a human to this node, COPY that URL verbatim; never build a link yourself and never put a bare `hrn:` URN in a markdown href (it renders as a link and resolves to nothing). When the line is absent this deployment has no portal configured, so there is no link to give.",
+    "Read a node by its fully-qualified URN. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). An action URN (hrn:action:<root>:<agent-slug>:<code>) is also accepted — the register entry's SECOND address, resolved to that entry and served as the same projection. Optional `contentScope` selects what the response includes: 'content' (default) — meta block + body, with the abstract substituted into the body slot when content is null/empty (a `Source: abstract-fallback` line then appears in the meta block); 'abstract' — meta block + abstract, no body; 'all' — meta block + abstract + body. When the abstract is in the response and its origin hash disagrees with the current content's hash, the meta block also carries a `Source: abstract-stale` line — treat the abstract as a possibly-outdated preview (spec 032 FR-010; on encrypted memories only while unlocked — spec 041). It means the content changed after the abstract was written, NOT that the abstract is known to be wrong. To clear it: read both, then either rewrite the abstract, or — if it still describes the node — re-save the identical text via hadron_update_node (or assert `abstractStillAccurate`). Rewriting an abstract you have not first found inaccurate is the wrong move; the marker is a prompt to check, not a verdict. Spec 031 + 032. The meta block also carries a `URL:` line — the node's portal link. To refer a human to this node, COPY that URL verbatim; never build a link yourself and never put a bare `hrn:` URN in a markdown href (it renders as a link and resolves to nothing). When the line is absent this deployment has no portal configured, so there is no link to give. A node that is an action's register entry also carries an `Action URN:` line — its action address; cite THAT (not the node URN) when naming the action.",
     SHAPE_HADRON_GET_NODE,
     async ({ urn: rawUrn, contentScope, raw }) => {
+      // #2610 — an action URN is a register entry's SECOND address, not a node
+      // URN: the node-qualification gate below would refuse it as a wrong-kind
+      // prefix. Resolve it through the action arm's steps and serve the ENTRY's
+      // projection — one projection for both of a node's addresses, so the
+      // surfaces cannot drift.
+      if (ACTION_REF_RE.test(rawUrn)) {
+        const entry = await resolveActionEntryRef(rawUrn);
+        if (!entry) return refusalResult(`Node "${rawUrn}" not found.`);
+        return serveNodeReadProjection(entry, { rawUrn, contentScope, raw });
+      }
+
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
         throw e;
       }
 
@@ -4662,30 +5263,13 @@ export function createMcpServerInstance(
         throw error;
       });
       const sourceReadable = !!memory && await canReadMemory(db, auth, memory.id, EXPLICIT_REF);
-      const missing = () => textResult(sourceReadable
+      const missing = () => refusalResult(sourceReadable
         ? `Node "${rawUrn}" not found.`
         : `Memory not found: "${memoryUrn}".`);
 
       // The projection's include, named so the two candidate lookups below
       // cannot drift apart.
-      const nodeReadInclude = {
-        // Filter edges whose other-end node is soft-deleted; dangling
-        // tombstones in the Related / Referenced-by section are no
-        // more useful than the deleted node itself.
-        outgoingEdges: {
-          include: { target: true },
-          where: { target: { deletedAt: null } },
-        },
-        incomingEdges: {
-          include: { source: true },
-          where: { source: { deletedAt: null } },
-        },
-        // Spec 032 — encryption gate for the abstract-stale predicate
-        // (FR-010). Riding the node fetch avoids a second round-trip
-        // (PR-210 review). resolveMemoryByUrn above doesn't carry
-        // `isEncrypted` and changing it has a wider blast radius.
-        memory: { select: { isEncrypted: true } },
-      } as const;
+      const nodeReadInclude = readProjectionInclude;
 
       // A LITERAL match wins over the fragment reading. `#data` decomposes to
       // parent + fragment, but a row's stored loc can BE `foo#data` (it
@@ -4761,98 +5345,7 @@ export function createMcpServerInstance(
       }
       if (!node) return missing();
 
-      // Spec 031 — contentScope-driven response shape. Default 'content'
-      // preserves pre-spec output byte-for-byte. Defensive enum check: zod
-      // validates the same set at the MCP transport boundary, but direct-
-      // handler callers (createTestableMcpServer's _registeredTools shortcut)
-      // bypass that parsing, so re-validate here. InvalidContentScopeError is
-      // the single source of truth for the message (and any future GraphQL
-      // `extensions.code` mapping). MCP convention: return error text, not throw.
-      if (
-        contentScope !== undefined &&
-        contentScope !== 'content' &&
-        contentScope !== 'abstract' &&
-        contentScope !== 'all'
-      ) {
-        const err = new InvalidContentScopeError(String(contentScope));
-        return textResult(err.message);
-      }
-      const scope = contentScope ?? 'content';
-      // Reconcile + fetch under one row lock. The first lookup selects the
-      // address and authorizes its memory; it must not supply the body after a
-      // reconciliation advanced the counter.
-      const current = await loadCurrentReadProjection(node.id, node.memoryId, auth, inheritedFrom?.via ?? node.memoryId);
-      if (
-        !current ||
-        current.memoryId !== node.memoryId ||
-        current.loc !== node.loc ||
-        // An inherited node was admitted through the child's memory above.
-        (!inheritedFrom && !(await canReadMemory(db, auth, current.memoryId, EXPLICIT_REF)))
-      ) {
-        return textResult(`Node "${rawUrn}" not found.`);
-      }
-      // The version actually served must still be the child's to show
-      // (Diego, #1891 P2-1): not turned boot prompt, not overridden since.
-      if (inheritedFrom && !(await stillInherited(db, inheritedFrom, current))) {
-        return textResult(`Node "${rawUrn}" not found.`);
-      }
-      if (inheritedFrom) markInherited([current], new Map([[current.memoryId, inheritedFrom]]));
-      // Spec 041: decrypt when this session holds the key; mark locked
-      // otherwise (blanked fields + Locked meta line, never raw ciphertext).
-      const lockState = mcpDecryptOrMark(current);
-      // Shared with hadron_get_nodes (batch) so the per-node projection can never
-      // drift between the single-read and batch-read surfaces (cor:api:040:01).
-      // #2041 — include tags resolve with the caller's own read access; `raw` skips it.
-      const served = lockState === 'locked' || raw
-        ? current
-        : { ...current, content: await resolveNodeContent(scopeCtx(), current, { raw }) };
-      const projection = await renderNodeReadProjection(served, scope, {
-        locked: lockState === 'locked',
-        encryptedMemory: lockState !== 'plaintext',
-        auth,
-      });
-
-      // Record usage event (fire-and-forget), AFTER the projection is in hand:
-      // the defensive contentScope check above returns an error for a direct
-      // handler call with a bad scope, and recording first would count a read
-      // for content never returned (PR #1062 review — Copilot).
-      //
-      // #796: `memoryId` is attributed directly so the event stays counted for
-      // this memory after the node is deleted (nodeId is SetNull).
-      //
-      // #930 (PR-933 Codex P1): the shared recorder attributes the event to the
-      // bound session. `auth.sessionId` is a validated Session.id — an App-key
-      // caller's X-Hadron-Session, checked in resolveAppKey for existence, App
-      // ownership, not-ended and not-past-expiry — so this is a real FK, not the
-      // MCP transport session id. It was hardcoded null in all five MCP usage
-      // writers, which meant MCP work produced no session heartbeat at all: the
-      // #930 reaper counts the latest attributed UsageEvent as liveness, so a
-      // The residual this comment used to describe — "user-credential MCP
-      // callers cannot bind a session today" — was CLOSED by #934 four days
-      // after it was written: `bindSession` takes both principal shapes, and a
-      // user principal binds a session attributed to them. The real gap was
-      // narrower and outlived it: a desktop caller's session is created
-      // mid-conversation by `hadron_start_session`, so it can never reach an
-      // `X-Hadron-Session` header on a connection that already exists, leaving
-      // `auth.sessionId` null and every event here unattributed. #1081 gives
-      // that caller an explicit heartbeat instead (`heartbeatSession`).
-      //
-      // A LOCKED node still records: the projection is what crossed the
-      // boundary, and the caller did read this node's addressable state.
-      // An alias read names the node at its CURRENT address; never pair the
-      // historical input loc with the target memory in the usage event.
-      recordNodeRead(db, { id: current.id, loc: current.loc, memoryId: current.memoryId }, auth);
-
-      // #696: `#data` addresses the node's DATA, not the node — and before the
-      // urn-lib-js 0.0.15 bump the fragment stayed glued to the loc, so such a
-      // read simply missed. Now it decomposes, and returning the parent's
-      // projection with no word said would answer a question the caller did not
-      // ask — the hadron-server#994 harm (resolving to the parent) arriving on
-      // a read surface. This tool has no data view, so it serves the node and
-      // SAYS which resource that is; `resolveUrn` tags its result the same way.
-      // No notice when the LITERAL row matched: nothing was resolved away, the
-      // caller got exactly the loc they named.
-      return textResult(noteFragment(projection, matchedLiteral ? undefined : fragment));
+      return serveNodeReadProjection(node, { rawUrn, contentScope, raw, inheritedFrom, fragment, matchedLiteral });
     },
   );
 
@@ -4871,7 +5364,7 @@ export function createMcpServerInstance(
         contentScope !== 'abstract' &&
         contentScope !== 'all'
       ) {
-        return textResult(new InvalidContentScopeError(String(contentScope)).message);
+        return refusalResult(new InvalidContentScopeError(String(contentScope)).message);
       }
       const scope = contentScope ?? 'content';
 
@@ -4903,7 +5396,7 @@ export function createMcpServerInstance(
         const mem = await resolveMemoryByUrn(memoryUrn!);
         if (!mem || !(await canReadMemory(db, auth, mem.id, EXPLICIT_REF))) {
           // Don't leak existence — mirror the single read's phrasing.
-          return textResult(`Memory not found: "${memoryUrn}".`);
+          return refusalResult(`Memory not found: "${memoryUrn}".`);
         }
         prefixReadMemoryId = mem.id;
         // Count cap (cor:api:040:02): take MAX+1 to detect overflow, then fail
@@ -4922,6 +5415,7 @@ export function createMcpServerInstance(
           orderBy: { loc: 'asc' },
           take: BATCH_READ_MAX_NODES + 1,
           include: readProjectionInclude,
+          omit: { content: true },
         });
         markInherited(rows, inheritance.inheritedFrom);
         if (rows.length > BATCH_READ_MAX_NODES) {
@@ -5028,7 +5522,7 @@ export function createMcpServerInstance(
           }
           const rows = await db.node.findMany({
             where: { memoryId: mem.id, loc: { in: [...wanted] }, deletedAt: null },
-            include: projectionInclude,
+            include: projectionInclude, omit: { content: true },
           });
           const rowByLoc = new Map(rows.map((r) => [r.loc, r]));
           for (const r of group) {
@@ -5094,7 +5588,7 @@ export function createMcpServerInstance(
         const movedRows = allowedProbes.length
           ? await db.node.findMany({
               where: { OR: allowedProbes.map((n) => ({ id: n.id, memoryId: n.memoryId })), deletedAt: null },
-              include: projectionInclude,
+              include: projectionInclude, omit: { content: true },
             })
           : [];
         const movedRowById = new Map(movedRows.map((n) => [n.id, n]));
@@ -5116,7 +5610,7 @@ export function createMcpServerInstance(
           const childId = childReadable.get(r.memoryUrn);
           const effective = childId ? await findEffectiveNodeIdByLoc(db, childId, r.literalLoc ?? r.loc) : null;
           const inherited = effective?.inheritedFrom
-            ? await db.node.findFirst({ where: { id: effective.id, deletedAt: null }, include: projectionInclude })
+            ? await db.node.findFirst({ where: { id: effective.id, deletedAt: null }, include: projectionInclude, omit: { content: true } })
             : null;
           if (inherited && effective?.inheritedFrom) {
             markInherited([inherited], new Map([[inherited.memoryId, effective.inheritedFrom]]));
@@ -5152,7 +5646,7 @@ export function createMcpServerInstance(
             (allowedIds.length > 0
               ? await db.node.findMany({
                   where: { id: { in: allowedIds } },
-                  include: projectionInclude,
+                  include: projectionInclude, omit: { content: true },
                 })
               : []
             ).map((r) => [r.id, r]),
@@ -5194,6 +5688,8 @@ export function createMcpServerInstance(
       // per-node parity with hadron_get_node).
       const blocks: string[] = [];
       const omitted: string[] = [];
+      // hadron-internal#40: nodes whose resolved read is over a resolution limit, with the limit (never partial text).
+      const refused: Array<{ urn: string; limit: ResolutionLimit }> = [];
       const readEvents: UsageNodeRef[] = [];
       let bytes = 0;
       let truncated = false;
@@ -5201,7 +5697,7 @@ export function createMcpServerInstance(
       for (const selected of ordered) {
         // #1885 — recheck the child through which the inherited row was admitted.
         const inheritedFrom = (selected as { inheritedFrom?: InheritedFrom }).inheritedFrom;
-        const n = await loadCurrentReadProjection(selected.id, selected.memoryId, auth, inheritedFrom?.via ?? prefixReadMemoryId ?? selected.memoryId);
+        const n = await loadCurrentReadProjection(selected.id, selected.memoryId, auth, inheritedFrom?.via ?? prefixReadMemoryId ?? selected.memoryId, 'metadata');
         if (
           !n ||
           n.memoryId !== selected.memoryId ||
@@ -5241,28 +5737,59 @@ export function createMcpServerInstance(
           .map((n) => n.id))
         : new Map<string, NodeSignatureStatusView>();
       const signerIds = [...signatures.values()].flatMap((st) => st.signatures.map((sig) => sig.signerId));
-      const [taskRefs, humanNames, feedback] = await Promise.all([
+      const [taskRefs, humanNames, feedback, actionUrns] = await Promise.all([
         batchReadableTaskRefs(visible, reports, auth, memoryUrnOf),
         batchHumanNames(visible, signerIds),
         openThreadCounts(db, visible.map((n) => n.id)),
+        batchActionUrns(visible),
       ]);
-      const batchProvenance = { reports, taskRefs, humanNames, feedback, signatures };
+      const batchProvenance = { reports, taskRefs, humanNames, feedback, signatures, actionUrns };
       const batchReadCtx = scopeCtx(); // one memo for the whole call (#2041)
-      for (const n of visible) {
+      const validationTaskSets = await validationTaskSetsForNodes(validationReadCtx(),
+        visible.filter((n) => !(n as { inheritedFrom?: InheritedFrom }).inheritedFrom).map((n) => n.id));
+      for (const metadata of visible) {
         if (truncated) {
-          omitted.push(await nodeUrn(n.loc, n.memoryId, memoryUrnOf));
+          omitted.push(await nodeUrn(metadata.loc, metadata.memoryId, memoryUrnOf));
           continue;
         }
+        const inheritedFrom = (metadata as { inheritedFrom?: InheritedFrom }).inheritedFrom;
+        const via = inheritedFrom?.via ?? prefixReadMemoryId ?? metadata.memoryId;
+        const mode = scope === 'abstract' ? (raw ? 'abstract-raw' : 'abstract-expanded') : 'body';
+        const n = await loadCurrentReadProjection(metadata.id, metadata.memoryId, auth, via, mode);
+        if (!n || n.memoryId !== metadata.memoryId || n.loc !== metadata.loc
+          || (!inheritedFrom && !(await canReadMemory(db, auth, n.memoryId, EXPLICIT_REF)))
+          || (inheritedFrom && !(inheritedFrom.via
+            ? await stillInherited(db, inheritedFrom, n)
+            : prefixInheritance !== null && (await retainEffective(db, [n], prefixInheritance)).length === 1))) {
+          unavailable.push(echoByNodeId.get(metadata.id) ?? metadata.id);
+          continue;
+        }
+        if (inheritedFrom) markInherited([n], new Map([[n.memoryId, inheritedFrom]]));
+        // A concurrent revision after metadata prefetch must not pair the new
+        // body with provenance selected for an older revision. Only raced rows
+        // fall back to the single renderer's current provenance reads.
+        const provenance = n.revSeq === metadata.revSeq ? batchProvenance : undefined;
         const lockState = mcpDecryptOrMark(n); // spec 041 — same posture as hadron_get_node
-        const served = lockState === 'locked' || raw
-          ? n
-          : { ...n, content: await resolveNodeContent(batchReadCtx, n, { raw }) };
+        let served = n;
+        if (lockState !== 'locked' && !raw) {
+          try {
+            served = { ...n, content: await resolveNodeContent(batchReadCtx, n, { raw }) };
+          } catch (e) {
+            // A per-node, loud reason (cor:api:040:02); the other nodes still return.
+            if (!isContentResolutionLimitError(e)) throw e;
+            refused.push({ urn: await nodeUrn(n.loc, n.memoryId, memoryUrnOf), limit: e.limit });
+            continue;
+          }
+        }
         const projection = await renderNodeReadProjection(served, scope, {
           locked: lockState === 'locked',
           encryptedMemory: lockState !== 'plaintext',
           auth,
-          batch: batchProvenance,
+          batch: provenance,
           memoryUrnOf,
+          // Gated on this copy, as the single read is: the map is keyed by node id, and an inherited
+          // copy carries the base node's id (BLIND 6704825426).
+          validationTasks: inheritedFrom ? undefined : validationTaskSets.get(n.id),
         });
         // Measured on the ANNOTATED block, which is what actually ships: sizing
         // the bare projection and pushing the annotated one lets a block cross
@@ -5289,6 +5816,7 @@ export function createMcpServerInstance(
 
       const headerParts = [`returned ${blocks.length} node(s)`];
       if (unavailable.length) headerParts.push(`${unavailable.length} unavailable`);
+      if (refused.length) headerParts.push(`${refused.length} refused`);
       if (truncated) headerParts.push(`truncated: response-size cap reached, ${omitted.length} omitted`);
       const parts: string[] = [`Batch read — ${headerParts.join('; ')}.`];
       if (blocks.length) {
@@ -5297,6 +5825,13 @@ export function createMcpServerInstance(
       if (unavailable.length) {
         parts.push(
           `Unavailable (denied or not found):\n${unavailable.map((u) => `  - ${u}`).join('\n')}`,
+        );
+      }
+      if (refused.length) {
+        parts.push(
+          `Refused (${CONTENT_RESOLUTION_LIMIT_EXCEEDED}: over a content resolution limit; nothing partial returned — read it with raw: true for the stored text):\n${refused
+            .map((r) => `  - ${r.urn} (over ${resolutionLimitPhrase(r.limit)}; limit: ${r.limit})`)
+            .join('\n')}`,
         );
       }
       if (truncated) {
@@ -5321,14 +5856,14 @@ export function createMcpServerInstance(
       try {
         assertFullyQualifiedUrn(rawParent, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(`Parent: ${e.message}`);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(`Parent: ${e.message}`);
         throw e;
       }
       if (rawCurrent) {
         try {
           assertFullyQualifiedUrn(rawCurrent, 'node');
         } catch (e) {
-          if (e instanceof UrnNotQualifiedError) return textResult(`Current: ${e.message}`);
+          if (e instanceof UrnNotQualifiedError) return refusalResult(`Current: ${e.message}`);
           throw e;
         }
       }
@@ -5336,10 +5871,10 @@ export function createMcpServerInstance(
       const { memoryUrn, loc: parentLoc } = splitNodeUrn(rawParent);
       const memory = await resolveMemoryByUrn(memoryUrn);
       if (!memory) {
-        return textResult(`Memory not found: "${memoryUrn}".`);
+        return refusalResult(`Memory not found: "${memoryUrn}".`);
       }
       if (!(await canReadMemory(db, auth, memory.id, EXPLICIT_REF))) {
-        return textResult(`Memory not found: "${memoryUrn}".`);
+        return refusalResult(`Memory not found: "${memoryUrn}".`);
       }
       const prefix = parentLoc + ':';
 
@@ -5373,7 +5908,7 @@ export function createMcpServerInstance(
         }
         const idx = children.findIndex((n) => n.loc === currentLoc);
         if (idx === -1) {
-          return textResult(`Current node "${currentLoc}" not found among children of "${parentLoc}".`);
+          return refusalResult(`Current node "${currentLoc}" not found among children of "${parentLoc}".`);
         }
         if (idx + 1 >= children.length) {
           return textResult(`No more nodes after "${currentLoc}".`);
@@ -5388,14 +5923,16 @@ export function createMcpServerInstance(
           outgoingEdges: {
             include: { target: true },
             where: { target: { deletedAt: null } },
+            orderBy: edgeDisplayOrder(),
           },
           incomingEdges: {
             include: { source: true },
             where: { source: { deletedAt: null } },
+            orderBy: edgeDisplayOrder(),
           },
         },
       });
-      if (!nextRow) return textResult('Node not found.');
+      if (!nextRow) return refusalResult('Node not found.');
       const node = await concealUnreadableEdgeEnds(auth, nextRow); // #1647
 
       // #1061 — this tool returns the node's full content, exactly as
@@ -5444,7 +5981,7 @@ export function createMcpServerInstance(
       try {
         validateParentRel(parentRel);
       } catch (e) {
-        if (e instanceof InvalidParentRelError) return textResult(e.message);
+        if (e instanceof InvalidParentRelError) return refusalResult(e.message);
         throw e;
       }
 
@@ -5464,16 +6001,10 @@ export function createMcpServerInstance(
       let prefix: string;
       let memoryId: string | undefined;
       if (trimmedParentRel) {
-        const resolved = await resolveLocFromUrn(trimmedParentRel, memoryIds);
-        prefix = resolved.loc;
-        memoryId = resolved.memoryId;
-        // #188 (Gemini): canReadMemory gate matches hadron_find_nodes.
-        // resolveLocFromUrn's accessibleMemoryIds filter handles non-
-        // admin scope, but ADMIN/OWNER pass null and would otherwise
-        // be able to browse another user's personal/private memory.
-        if (memoryId && !(await canReadMemory(db, auth, memoryId, EXPLICIT_REF))) {
-          return textResult(`Node "${trimmedParentRel}" not found.`);
-        }
+        const parent = await resolveParentForRead(trimmedParentRel, memoryUrn, memoryIds, auth);
+        if (!parent.ok) return refusalResult(parent.message);
+        prefix = parent.loc;
+        memoryId = parent.memoryId;
       } else {
         prefix = '';
         // Find memory by URN. #100 #3: route through resolveMemoryByUrn so
@@ -5483,7 +6014,7 @@ export function createMcpServerInstance(
           try {
             assertFullyQualifiedUrn(memoryUrn, 'memory');
           } catch (e) {
-            if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+            if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
             throw e;
           }
           const mem = await resolveMemoryByUrn(memoryUrn);
@@ -5703,7 +6234,7 @@ export function createMcpServerInstance(
         const nUrn = await nodeUrn(row.loc, real?.realMemoryId ?? row.memoryId, memoryUrnOf);
         if (row.node) {
           const inherited = real?.inheritedFrom ? ` (inherited from ${emitEntityUrnV2('agent', real.inheritedFrom.agentUrn)})` : '';
-          return `${indent}├── ${nUrn} — ${row.node.name}${inherited}${childInfo}`;
+          return `${indent}├── ${nUrn} — ${row.node.name} [${(row.node as { nodeType?: string }).nodeType ?? 'info'}]${inherited}${childInfo}`;
         }
         // Synthesized intermediate. Surface the gap explicitly rather
         // than silently rendering it as a real row.
@@ -5745,11 +6276,15 @@ export function createMcpServerInstance(
       // private memories are owner-only by class; an App-key session has no
       // business unlocking them, and unowned refs get a uniform not-found.
       if (!auth.userId) {
-        return textResult('hadron_unlock_memory requires a user-authenticated MCP connection.');
+        return refusalResult('hadron_unlock_memory requires a user-authenticated MCP connection.');
       }
       const sid = getSessionId();
       if (!sid) return textResult('No active MCP session.');
-      const mem = await resolveMemoryByUrn(memoryUrn);
+      // #2122: these two tools accept IDs per Vera's disposition (cor:api:010:01);
+      // keep other tools on their existing URN-only resolver and preserve the owner gate below.
+      const mem = isId(memoryUrn)
+        ? await db.memory.findFirst({ where: { id: memoryUrn, deletedAt: null }, select: { id: true, urn: true } })
+        : await resolveMemoryByUrn(memoryUrn);
       const row = mem
         ? await db.memory.findUnique({
             where: { id: mem.id },
@@ -5760,7 +6295,7 @@ export function createMcpServerInstance(
           })
         : null;
       if (!row || row.userId !== auth.userId) {
-        return textResult(`Memory "${memoryUrn}" not found.`);
+        return refusalResult(`Memory "${memoryUrn}" not found.`);
       }
       if (!row.isEncrypted) {
         return textResult(`Memory "${row.urn}" is not encrypted.`);
@@ -5769,10 +6304,9 @@ export function createMcpServerInstance(
         const key = await resolveSuppliedKey(row, { passphrase, dataKey });
         sessionKeyCache.set(`mcp:${sid}`, row.id, key);
       } catch (err) {
-        if (err instanceof MemoryUnlockError) return textResult(err.message);
-        // Key conflict (another live session holds a DIFFERENT key) or
-        // unexpected — surface the message, never the stack.
-        return textResult(String((err as Error).message));
+        if (err instanceof MemoryUnlockError || err instanceof SessionKeyConflictError) return refusalResult(err.message);
+        // Anything not typed is a fault (#1789).
+        return toolErrorResult(err, () => String((err as Error).message), 'hadron_unlock_memory');
       }
       return textResult(
         `Memory unlocked for this session: ${row.urn}. Reads now return plaintext; writes encrypt. ` +
@@ -5792,14 +6326,18 @@ export function createMcpServerInstance(
       // (PR-517 review, Codex P2): without it, the existing-vs-missing
       // response split makes lock an existence oracle for private URNs.
       if (!auth.userId) {
-        return textResult('hadron_lock_memory requires a user-authenticated MCP connection.');
+        return refusalResult('hadron_lock_memory requires a user-authenticated MCP connection.');
       }
-      const mem = await resolveMemoryByUrn(memoryUrn);
+      // #2122: these two tools accept IDs per Vera's disposition (cor:api:010:01);
+      // keep other tools on their existing URN-only resolver and preserve the owner gate below.
+      const mem = isId(memoryUrn)
+        ? await db.memory.findFirst({ where: { id: memoryUrn, deletedAt: null }, select: { id: true, urn: true } })
+        : await resolveMemoryByUrn(memoryUrn);
       const row = mem
         ? await db.memory.findUnique({ where: { id: mem.id }, select: { id: true, userId: true } })
         : null;
       if (!row || row.userId !== auth.userId) {
-        return textResult(`Memory "${memoryUrn}" not found.`);
+        return refusalResult(`Memory "${memoryUrn}" not found.`);
       }
       sessionKeyCache.release(`mcp:${sid}`, row.id);
       return textResult(`Memory locked for this session: ${memoryUrn}.`);
@@ -5814,25 +6352,14 @@ export function createMcpServerInstance(
     install: { app: string; agent: string },
     fields: Record<string, unknown>,
   ) => {
-    const ctx: Context = {
-      db,
-      transport: 'mcp',
-      governedCanReplay: () => true,
-      clientId: auth.clientId ?? undefined,
-      userId: auth.userId ?? undefined,
-      apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
-      appId: auth.appId ?? undefined,
-      sessionId: auth.sessionId ?? undefined,
-      roles: auth.roles as Context['roles'],
-      organizationId: auth.organizationId ?? undefined,
-    };
+    const ctx = doorCtx(() => true);
     const input = { ...Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined)), install: { appRef: install.app, agentRef: install.agent } };
     try {
       const node = op === 'create'
         ? await resolvers.Mutation.createNode({}, { input: input as never }, ctx)
         : await resolvers.Mutation.updateNode({}, { input: input as never }, ctx);
       const urn = await nodeUrn(node.loc, node.memoryId);
-      return textResult(`${op === 'create' ? 'Node created' : 'Node updated'} in the App's install memory: ${urn} (id: ${node.id})`);
+      return textResult(`${op === 'create' ? 'Node created' : 'Node updated'} in the App's install memory: ${urn} (id: ${node.id})${renderIncludePinWarnings(await includePinWarningsFor(ctx, node))}`);
     } catch (e) {
       return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : `${op} failed`}`, `hadron_${op}_node:install`);
     }
@@ -5844,12 +6371,13 @@ export function createMcpServerInstance(
     'hadron_create_node',
     'Add a NEW node to the memory graph. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Requires write access to the memory. CREATE-ONLY: a loc that already holds a live node is REFUSED, not overwritten — use hadron_update_node to edit an existing node (#1181; same contract as the GraphQL createNode mutation). A loc holding a SOFT-DELETED node is the one exception: that row is resurrected and rewritten, so an omitted `description`, `abstract`, `content` or `tags` is CLEARED rather than carried over from the tombstone (the other fields — nodeType, objectType, isRunnable, seq, properties, data, llmModel, aiAgent — are kept when omitted). Resurrection snapshots the prior state to revision history first (#976), and encryption is honored.',
     SHAPE_HADRON_CREATE_NODE,
-    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, install }) => {
+    async ({ urn: rawUrn, authoredWith, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, install }) => {
       // #2044: an App's install memory is written through the GraphQL operation (one write path
       // for the first-customisation create), not this inline parity writer.
       if (install) {
         if (edges || isRunnable) return textResult('`install` does not support `edges` or `isRunnable`; write those with a plain memory node.');
         return writeInstallNodeViaGraphql('create', install, {
+          authoredWith,
           loc: rawUrn, name, nodeType, objectType, role: rawRole, description, abstract, content, seq, tags: tags as never,
           properties, data: nodeData, llmModel, aiAgent,
         });
@@ -5864,29 +6392,29 @@ export function createMcpServerInstance(
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
         throw e;
       }
 
       // Split into memory URN + loc and resolve the memory.
       const { memoryUrn, loc, fragment } = splitNodeUrn(rawUrn);
       const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
-      if (fragRefusal) return textResult(fragRefusal);
+      if (fragRefusal) return refusalResult(fragRefusal);
       // #1316: hidden from this caller ⇒ the missing branch; a reader keeps the denial.
       const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
       if (!memory) {
-        return textResult(`Memory not found: "${memoryUrn}".`);
+        return refusalResult(`Memory not found: "${memoryUrn}".`);
       }
       const memoryId = memory.id;
 
       try {
         validateLoc(loc);
       } catch (e) {
-        return toolErrorResult(e, () => (e as Error).message, 'hadron_create_node:validateLoc');
+        return e instanceof InvalidLocError ? refusalResult(e.message) : toolErrorResult(e, () => (e as Error).message, 'hadron_create_node:validateLoc');
       }
 
       if (!(await canWriteToMemory(db, auth, memoryId, EXPLICIT_REF))) {
-        return textResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memoryId)}`);
+        return refusalResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memoryId)}`);
       }
 
       // #1201 — the GOVERNED-KIND gate, on the state this create would PRODUCE.
@@ -5916,6 +6444,9 @@ export function createMcpServerInstance(
       try {
         // #1606 (cor:dmo:110:04) — no generic create makes or resurrects a comment.
         assertNotCommentWrite(governedProbe?.nodeType, nodeType, 'create');
+        // #2987 (V13): the seq gate for a create runs UNDER the lock, on the full locked row. It cannot run here:
+        // this probe selects no seq (a same-seq tombstone recreation would read as a change), and it would answer
+        // before the Channel gate, which lives in the lock helper (Beckett LOCAL review).
         assertBootPromptWriteAllowed(governedProbe, { nodeType, role: normalizeRole(role) }, 'create');
         assertGovernedWrite(
           governedProbe,
@@ -5940,7 +6471,8 @@ export function createMcpServerInstance(
               },
         );
       } catch (e) {
-        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return textResult(`[role_governed] ${(e as Error).message}`);
+        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return refusalResult(`[role_governed] ${(e as Error).message}`);
+        if (isLegacyMessageSeqError(e)) return refusalResult(`[seq_protected] ${e.message}`);
         throw e;
       }
 
@@ -5977,7 +6509,7 @@ export function createMcpServerInstance(
           memoryId,
           auth,
         );
-        if ('error' in r) return textResult(r.error);
+        if ('error' in r) return refusalResult(r.error);
         resolvedEdges = r.resolved;
       }
 
@@ -6028,7 +6560,7 @@ export function createMcpServerInstance(
       try {
         normalizedAbstract = normalizeAbstract(abstract) ?? null;
       } catch (e) {
-        if (e instanceof NodeAbstractTooLongError) return textResult(e.message);
+        if (e instanceof NodeAbstractTooLongError) return refusalResult(e.message);
         throw e;
       }
 
@@ -6048,12 +6580,8 @@ export function createMcpServerInstance(
       // Auto-assign `seq` for a NEW node joining an already-ordered sibling
       // list (parity with the GraphQL upsertNode resolver). Create-only; an
       // explicit `seq` arg wins; an unordered / empty list leaves it null.
-      const createSeq =
-        seq !== undefined
-          ? seq
-          : existing == null && !loc.includes(':')
-            ? await nextSiblingSeq(db, memoryId, loc)
-            : null;
+      // #443: root and nested allocation both read inside the write transaction (root under K).
+      const createSeq = seq !== undefined ? seq : null;
 
       // Spec 041 (PR-2, closes #206 write-side): on an encrypted memory,
       // encrypt with this session's key — or REJECT when locked. Pre-041 the
@@ -6237,8 +6765,8 @@ export function createMcpServerInstance(
       // pre-transaction `existing` probe lost a revision under concurrency: two
       // calls both saw no row, one created it, the other overwrote it on the
       // create branch (PR #977 review, both bots). lockLocForWrite takes the
-      // same key as an ancestor-create and as lockNodeForDelete, acquired after
-      // the ancestors so the root→leaf order stays deadlock-free.
+      // same key as an ancestor-create and as lockNodeForDelete. This path
+      // declares ancestors plus own-loc together, then re-enters only subsets (#2054).
       // #1181 — thrown from INSIDE the transaction by the authoritative gate
       // below and mapped to a refusal outside it. A sentinel rather than a
       // string match: throwing aborts the transaction, which is exactly what we
@@ -6249,12 +6777,15 @@ export function createMcpServerInstance(
       let upserted;
       try {
         upserted = await db.$transaction(async (tx) => {
+          // #443: a second root allocation in one transaction is refused before ANY lock of its own is taken.
+          if (seq === undefined && !loc.includes(':')) await assertRootAllocationAllowed(tx, memoryId);
           // #2206 (Xan's parity ruling on #2233): an Agent definition's authority before any memory/node/loc lock.
           await lockAgentDefinitionAuthority(tx, auth.userId ?? null, memoryId);
           if (resolvedEdges !== null) {
             await lockOutgoingEdgeMemories(tx, memoryId, resolvedEdges);
           }
-          await lockAncestorsForCreate(tx, memoryId, loc); // no-op at a root-level loc
+          await acquireLockSet(tx, [...ancestorLocs(loc), loc].map(loc => ({ memoryId, loc })));
+          await lockAncestorsForCreate(tx, memoryId, loc); // subset; no-op at a root-level loc
           await lockLocForWrite(tx, memoryId, loc);
 
           // #1181 — THE AUTHORITATIVE live-collision gate, and the ONLY one.
@@ -6284,6 +6815,8 @@ export function createMcpServerInstance(
           await assertMemoryEncryptionStateForWrite(tx, memoryId, memEncRow?.isEncrypted ?? false, auth);
 
           const pre = await snapshotOverwrittenNode(tx);
+          // #2987 — re-judged on the locked tombstone, before anything is written.
+          assertNoGenericMessageSeqWrite(pre, nodeType, seq, 'create');
 
           // #1330 — H1 strict sub-roles, as writeNodeCore judges them (this
           // handler is its parity implementation, so the gate is repeated here).
@@ -6304,10 +6837,19 @@ export function createMcpServerInstance(
             priorRunnable: pre?.isRunnable ?? null,
             nextRunnable: mergedGovernedState(pre, { role, isRunnable }).isRunnable,
           });
+          // #1328 — parity with writeNodeCore: a new row or a revived tombstone
+          // is authored, with the tombstone's role judged on the locked row.
+          const authoredStamp = await assertAuthoring(tx, memoryId, {
+            priorRole: pre?.role ?? null, priorRunnable: pre?.isRunnable ?? null,
+            role: role === undefined ? (pre?.role ?? null) : role,
+            runnable: mergedGovernedState(pre, { role, isRunnable }).isRunnable,
+            mintHuman: true, authoredChange: true,
+          }, attestedAuthoring(recoveryCtx(), authoredWith));
           // #1460 — the locked tombstone can retain vectors from its old
           // plaintext. Purge both kinds before the upsert makes it searchable.
           if (pre?.deletedAt) {
             await tx.nodeEmbedding.deleteMany({ where: { nodeId: pre.id } });
+            await tx.node.updateMany({ where: { id: pre.id }, data: { embeddingTruncatedChunks: null } });
           }
           // Invalidate an old in-flight embed before the asynchronous enqueue
           // restamps the marker after commit.
@@ -6319,17 +6861,21 @@ export function createMcpServerInstance(
             : undefined;
           // #443: nested siblings already share the held immediate-parent key.
           // Allocate on this writing transaction only after that wait.
-          const nestedSeq = seq === undefined && existing == null && loc.includes(':')
-            ? await nextSiblingSeq(tx, memoryId, loc) : null;
+          // A ROOT has no parent key: it takes K (held to commit) before the read.
+          // Keyed on the AUTHORITATIVE read under the locks, not the stale pre-transaction probe: a row that appeared after
+          // the probe must not make this root take K after its FOR UPDATE and revision writes.
+          const autoSeq = seq === undefined && pre == null;
+          if (autoSeq && !loc.includes(':')) await lockRootSiblings(tx, memoryId);
+          const nestedSeq = autoSeq ? await nextSiblingSeq(tx, memoryId, loc) : null;
           const written = await tx.node.upsert({
             ...upsertArgs,
-            create: { ...upsertArgs.create, ...(nestedSeq != null ? { seq: nestedSeq } : {}) },
+            create: { ...upsertArgs.create, ...(authoredStamp ?? {}), ...(nestedSeq != null ? { seq: nestedSeq } : {}) },
             // Resurrect (#543) on the authoritative row, not the stale probe: a
             // tombstone that appeared after it would otherwise stay flagged
             // deleted while taking the new content.
             update: {
               ...upsertArgs.update,
-              ...(pre ? clearNodeAuthorship() : {}),
+              ...(pre ? (authoredStamp ?? clearNodeAuthorship()) : {}),
               ...(pre?.deletedAt ? { deletedAt: null, deletedBy: null, embeddingPendingAt: revivedPendingAt } : {}),
             } as any,
           });
@@ -6348,21 +6894,28 @@ export function createMcpServerInstance(
           return written;
         });
       } catch (e) {
-        if (e instanceof NodeSchemaViolation) return textResult(`Schema violation: ${e.message}`);
-        if (e === LIVE_LOC_CONFLICT) {
-          return textResult(`Node already exists at "${rawUrn}" — use hadron_update_node.`);
+        // #2622: this tool writes through its own inline Prisma calls (not
+        // writeNodeCore), so the #992 per-chat seq conflict must be typed HERE
+        // or the caller sees a raw internal error instead of the named refusal.
+        if (isChatSeqUniqueViolation(e)) {
+          return refusalResult(`[chat_message_seq_conflict] ${CHAT_SEQ_CONFLICT_MESSAGE}`);
         }
-        if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
+        if (e instanceof NodeSchemaViolation) return refusalResult(`Schema violation: ${e.message}`);
+        if (e === LIVE_LOC_CONFLICT) {
+          return refusalResult(`Node already exists at "${rawUrn}" — use hadron_update_node.`);
+        }
+        if (e instanceof RoleNotDeclaredError) return refusalResult(`[role_not_declared] ${e.message}`);
+        if (isLegacyMessageSeqError(e)) return refusalResult(`[seq_protected] ${e.message}`);
         const includeText = includeRefusalText(e);
-        if (includeText) return textResult(includeText);
+        if (includeText) return refusalResult(includeText);
         const writerRefusal = roleWriterRefusalText(e);
-        if (writerRefusal) return textResult(writerRefusal);
-        if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
-        if (e instanceof EdgeLocConflictError) return textResult(e.message);
-        if (e instanceof MemoryEncryptionChangedDuringWriteError) return textResult(e.message);
-        if (e instanceof MemoryWriteAccessChangedDuringWriteError) return textResult(e.message);
+        if (writerRefusal) return refusalResult(writerRefusal);
+        if (e instanceof InlineEdgeEndpointError) return refusalResult(e.message);
+        if (e instanceof EdgeLocConflictError) return refusalResult(e.message);
+        if (e instanceof MemoryEncryptionChangedDuringWriteError) return refusalResult(e.message);
+        if (e instanceof MemoryWriteAccessChangedDuringWriteError) return refusalResult(e.message);
         if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
-          return textResult(`[spec_minted_permanent] ${e.message}`);
+          return refusalResult(`[spec_minted_permanent] ${e.message}`);
         }
         throw e;
       }
@@ -6407,7 +6960,8 @@ export function createMcpServerInstance(
       const savedUrn = await nodeUrn(loc, memoryId);
       // #322: return the stable PK too — edges/replies created against the URN
       // break if the node is later moved/renamed; the id never changes.
-      return textResult(`Node saved: ${savedUrn} (id: ${upserted.id})`);
+      // #2048 (cor:agt:040:13): a boot-prompt source's link-lint warnings ride on the result; they never block the write.
+      return textResult(`Node saved: ${savedUrn} (id: ${upserted.id})${renderIncludePinWarnings(await safePlainPinWarnings(scopeCtx(), { memoryId }, content))}${renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), upserted.id))}`);
     },
   );
 
@@ -6417,10 +6971,11 @@ export function createMcpServerInstance(
     'hadron_update_node',
     'Partially update an existing node. Only the fields you provide are changed — everything else is preserved. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Pass expectedRevision from hadron_get_node to refuse atomically if the node changed since you read it.',
     SHAPE_HADRON_UPDATE_NODE,
-    async ({ urn: rawUrn, expectedRevision, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason, install }) => {
+    async ({ urn: rawUrn, authoredWith, expectedRevision, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason, install }) => {
       if (install) {
         if (edges || isRunnable || abstractStillAccurate) return textResult('`install` does not support `edges`, `isRunnable` or `abstractStillAccurate`.');
         return writeInstallNodeViaGraphql('update', install, {
+          authoredWith,
           loc: rawUrn, expectedRevision, name, nodeType, objectType, role: rawRole, description, abstract, content, seq, tags: tags as never,
           properties, data: nodeData, llmModel, aiAgent, reason,
         });
@@ -6432,17 +6987,17 @@ export function createMcpServerInstance(
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
         throw e;
       }
 
       const { memoryUrn, loc, fragment } = splitNodeUrn(rawUrn);
       const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
-      if (fragRefusal) return textResult(fragRefusal);
+      if (fragRefusal) return refusalResult(fragRefusal);
       // #1316: hidden from this caller ⇒ the missing branch; a reader keeps the denial.
       const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
       if (!memory) {
-        return textResult(`Memory not found: "${memoryUrn}".`);
+        return refusalResult(`Memory not found: "${memoryUrn}".`);
       }
 
       // Auth BEFORE any node-existence probe: returning "not found" for an
@@ -6450,14 +7005,14 @@ export function createMcpServerInstance(
       // a membership oracle (Gemini review). Gate on the resolved memory.id
       // first — matches hadron_create_node's auth-first ordering.
       if (!(await canWriteToMemory(db, auth, memory.id, EXPLICIT_REF))) {
-        return textResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memory.id)}`);
+        return refusalResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memory.id)}`);
       }
       // Spec 049 S4: an in-place update takes no lock, so the gate is explicit.
       try {
         await assertLocWritable(db, memory.id, loc, 'update');
       } catch (e) {
-        if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
-        if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
+        if (e instanceof LocProtectedError) return refusalResult(`[loc_protected] ${e.message}`);
+        if (e instanceof NodeMovedDuringWriteError) return refusalResult(e.message);
         throw e;
       }
 
@@ -6474,6 +7029,8 @@ export function createMcpServerInstance(
       try {
         // #1606 (cor:dmo:110:04) — no generic update edits, makes or unmakes a comment.
         assertNotCommentWrite(existing?.nodeType, nodeType, 'update');
+        // #2987 (V13) — see hadron_create_node; judged only for a live row, a missing one is NODE_NOT_FOUND below.
+        if (existing && !existing.deletedAt) assertNoGenericMessageSeqWrite(existing, nodeType, seq, 'update');
         assertBootPromptWriteAllowed(existing, { nodeType, role: normalizeRole(role) }, 'update');
         assertGovernedWrite(
           existing,
@@ -6492,7 +7049,8 @@ export function createMcpServerInstance(
             : {},
         );
       } catch (e) {
-        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return textResult(`[role_governed] ${(e as Error).message}`);
+        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return refusalResult(`[role_governed] ${(e as Error).message}`);
+        if (isLegacyMessageSeqError(e)) return refusalResult(`[seq_protected] ${e.message}`);
         throw e;
       }
 
@@ -6502,7 +7060,7 @@ export function createMcpServerInstance(
       // a partial update, not a resurrect — a caller who wants a deleted loc
       // back must recreate it via hadron_create_node (which resurrects).
       if (!existing || existing.deletedAt) {
-        return textResult(`Node not found: "${rawUrn}"`);
+        return refusalResult(`Node not found: "${rawUrn}"`);
       }
 
       // Resolve edge targets BEFORE the revision snapshot + node update
@@ -6535,7 +7093,7 @@ export function createMcpServerInstance(
           existing.memoryId,
           auth,
         );
-        if ('error' in r) return textResult(r.error);
+        if ('error' in r) return refusalResult(r.error);
         resolvedEdges = r.resolved;
       }
 
@@ -6546,7 +7104,7 @@ export function createMcpServerInstance(
       try {
         normalizedAbstract = normalizeAbstract(abstract);
       } catch (e) {
-        if (e instanceof NodeAbstractTooLongError) return textResult(e.message);
+        if (e instanceof NodeAbstractTooLongError) return refusalResult(e.message);
         throw e;
       }
 
@@ -6660,6 +7218,12 @@ export function createMcpServerInstance(
         if (data.data !== undefined) data.data = (enc.data ?? null) as never;
       }
 
+      // #277: normalize the persistence value only after preserving plaintextUpdates.
+      // Omitted data stays omitted; explicit null clears rather than storing JSON null.
+      if (nodeData === null) data.data = Prisma.DbNull;
+
+      let includePinContentSaved = false;
+      let includePinPriorContent: string | null = null;
       if (Object.keys(data).length > 0 || resolvedEdges !== null || expectedRevision !== undefined) {
         // Spec 049 S4: the write holds the address lock and the gate runs
         // under it — the check above is the fast refusal, this the
@@ -6698,6 +7262,8 @@ export function createMcpServerInstance(
                 `[write_conflict] ${rawUrn} moved, was deleted or changed memory while this update waited — re-read it and retry.`,
               );
             }
+            // #2987 — re-judged on the locked row, before any write.
+            assertNoGenericMessageSeqWrite(current, nodeType, seq, 'update');
             // #1186 / cor:dmo:020:05 — omitted fields come from the locked
             // row, not the probe, and a refusal leaves no reconciliation.
             await validateNodeSchemaOnWrite(
@@ -6744,14 +7310,27 @@ export function createMcpServerInstance(
               : current;
             const changedFields = diffNodeChanges(currentForDiff, plaintextUpdates);
             if (changedFields.length === 0 && resolvedEdges === null) return;
-            await createNodeRevision(tx, {
-              id: generateId(),
-              ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), {
-                revLabel: reason,
-                changes: changedFields,
-              }),
-            });
-            if (authoredContentChanged(changedFields)) Object.assign(data, clearNodeAuthorship());
+            // #1328 — parity with writeNodeCore, before the snapshot.
+            const authoredChange = authoredContentChanged(changedFields);
+            const authoredStamp = await assertAuthoring(tx, memory.id, {
+              priorRole: current.role, priorRunnable: current.isRunnable,
+              role: role === undefined ? current.role : role,
+              runnable: mergedGovernedState(current, { role, isRunnable }).isRunnable,
+              mintHuman: true, authoredChange,
+            }, attestedAuthoring(recoveryCtx(), authoredWith));
+            // #3497 / rulings0149+0198: the token was checked above; an
+            // edge-only replacement applies below without consuming it.
+            // Mixed writes retain exactly one pre-edit snapshot.
+            if (changedFields.length > 0) {
+              await createNodeRevision(tx, {
+                id: generateId(),
+                ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), {
+                  revLabel: reason,
+                  changes: changedFields,
+                }),
+              });
+            }
+            if (authoredChange) Object.assign(data, authoredStamp ?? clearNodeAuthorship());
             data.revisionContentHash = revisionStateHashRefreshMarker();
             const updated = Object.keys(data).length > 0
               ? await tx.node.update({ where: { id: existing.id }, data })
@@ -6766,30 +7345,40 @@ export function createMcpServerInstance(
               });
               if (edgeError) throw new InlineEdgeEndpointError(edgeError);
             }
-            if (content !== undefined) await applyIncludesInTransaction(tx, updated, content, auth, (currentForDiff.content as string | null) ?? null);
+            if (content !== undefined) {
+              await applyIncludesInTransaction(tx, updated, content, auth, (currentForDiff.content as string | null) ?? null);
+              includePinContentSaved = true;
+              includePinPriorContent = (currentForDiff.content as string | null) ?? null;
+            }
             existing.embeddingWorkToken = await stampEmbeddingObligation(tx, updated.id, updated.memoryId);
             const embeddedPlaintext = updKey ? decryptNodeFieldsWithKey({ ...updated }, updKey) : updated;
             existing.content = embeddedPlaintext.content;
             existing.abstract = embeddedPlaintext.abstract;
           });
         } catch (e) {
-          if (e instanceof NodeSchemaViolation) return textResult(`Schema violation: ${e.message}`);
-          if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
-          if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
-          if (e instanceof MemoryEncryptionChangedDuringWriteError) return textResult(e.message);
-          if (e instanceof MemoryWriteAccessChangedDuringWriteError) return textResult(e.message);
-          if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
-          if (e instanceof EdgeLocConflictError) return textResult(e.message);
-          if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
+          // #2622: same as hadron_create_node — an inline writer needs its own
+          // typed branch for the #992 per-chat seq conflict.
+          if (isChatSeqUniqueViolation(e)) {
+            return refusalResult(`[chat_message_seq_conflict] ${CHAT_SEQ_CONFLICT_MESSAGE}`);
+          }
+          if (e instanceof NodeSchemaViolation) return refusalResult(`Schema violation: ${e.message}`);
+          if (e instanceof LocProtectedError) return refusalResult(`[loc_protected] ${e.message}`);
+          if (isLegacyMessageSeqError(e)) return refusalResult(`[seq_protected] ${e.message}`);
+          if (e instanceof NodeMovedDuringWriteError) return refusalResult(e.message);
+          if (e instanceof MemoryEncryptionChangedDuringWriteError) return refusalResult(e.message);
+          if (e instanceof MemoryWriteAccessChangedDuringWriteError) return refusalResult(e.message);
+          if (e instanceof InlineEdgeEndpointError) return refusalResult(e.message);
+          if (e instanceof EdgeLocConflictError) return refusalResult(e.message);
+          if (e instanceof RoleNotDeclaredError) return refusalResult(`[role_not_declared] ${e.message}`);
           const includeText = includeRefusalText(e);
-        if (includeText) return textResult(includeText);
+        if (includeText) return refusalResult(includeText);
         const writerRefusal = roleWriterRefusalText(e);
-          if (writerRefusal) return textResult(writerRefusal);
+          if (writerRefusal) return refusalResult(writerRefusal);
           if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
-            return textResult(`[spec_minted_permanent] ${e.message}`);
+            return refusalResult(`[spec_minted_permanent] ${e.message}`);
           }
           if (e instanceof ScopeGraphQLError && e.extensions?.code === 'NODE_WRITE_CONFLICT') {
-            return textResult(`[node_write_conflict] ${e.message}`);
+            return refusalResult(`[node_write_conflict] ${e.message}`);
           }
           throw e;
         }
@@ -6824,7 +7413,7 @@ export function createMcpServerInstance(
 
       const updatedUrn = await nodeUrn(loc, existing.memoryId);
       // #322: surface the stable PK (immutable across move/rename).
-      return textResult(`Node updated: ${updatedUrn} (id: ${existing.id})`);
+      return textResult(`Node updated: ${updatedUrn} (id: ${existing.id})${includePinContentSaved ? renderIncludePinWarnings(await safePlainPinWarnings(scopeCtx(), { memoryId: existing.memoryId }, content, includePinPriorContent)) : ''}${renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), existing.id))}`);
     },
   );
 
@@ -6863,6 +7452,7 @@ export function createMcpServerInstance(
   /** The GraphQL context for a delegated door call — same shape as chatCtx below. */
   const doorCtx = (canReplay?: Context['governedCanReplay']): Context => ({
     db,
+    readsAuthorTask: mcpReadsTask(auth), // #1329
     // #1301: a refusal from the delegated door addresses an MCP caller, and
     // names an MCP door only if this call could be replayed through it.
     transport: 'mcp',
@@ -6906,16 +7496,16 @@ export function createMcpServerInstance(
       return toolErrorResult(e, () => (e as Error).message, `hadron_${mode}_${kind}:parseUrn`);
     }
     const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
-    if (fragRefusal) return textResult(fragRefusal);
+    if (fragRefusal) return refusalResult(fragRefusal);
     // #1316: hidden from this caller ⇒ the missing branch. Before this the door's
     // own concealment answered instead, echoing the RESOLVED id it was handed —
     // the victim memory's internal id, to a caller who cannot read it.
     const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
-    if (!memory) return textResult(`Memory not found: "${memoryUrn}".`);
+    if (!memory) return refusalResult(`Memory not found: "${memoryUrn}".`);
     try {
       validateLoc(loc);
     } catch (e) {
-      return toolErrorResult(e, () => (e as Error).message, `hadron_${mode}_${kind}:validateLoc`);
+      return e instanceof InvalidLocError ? refusalResult(e.message) : toolErrorResult(e, () => (e as Error).message, `hadron_${mode}_${kind}:validateLoc`);
     }
 
     // `name` is optional in the shared arg set because an UPDATE preserves it,
@@ -6958,14 +7548,15 @@ export function createMcpServerInstance(
     }
 
     try {
+      const ctx = doorCtx((k) => mcpDoorCanReplay(fields, k, mode));
       const node = await (
         resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => Promise<{ id: string }>>
       )[doorName](
         {},
         { input: { memoryId: memory.id, loc, ...fields, ...signal } },
-        doorCtx((k) => mcpDoorCanReplay(fields, k, mode)),
+        ctx,
       );
-      return textResult(`${kind} node ${mode === 'create' ? 'created' : 'updated'}: ${rawUrn} (id: ${node.id})`);
+      return textResult(`${kind} node ${mode === 'create' ? 'created' : 'updated'}: ${rawUrn} (id: ${node.id})${renderIncludePinWarnings(await includePinWarningsFor(ctx, node))}`);
     } catch (e) {
       return toolErrorResult(e, () => {
         const code = (e as { extensions?: { code?: string } }).extensions?.code;
@@ -7016,7 +7607,7 @@ export function createMcpServerInstance(
     'hadron_update_node_data',
     "Merge a JSON object into a node's `data` bag, preserving keys you don't mention. The patch's top-level keys are written over the node's existing data (the patch wins on collision); other keys stay as they were; a node with no data yet takes the patch as-is. The merge is SHALLOW — a nested object value is replaced wholesale, not deep-merged. Use this for partial data edits; to REPLACE the whole `data` bag instead, use hadron_update_node's `data` argument. Honors write permissions, revision history, and encryption.",
     SHAPE_HADRON_UPDATE_NODE_DATA,
-    async ({ nodeUrn: rawNodeUrn, data }) => {
+    async ({ nodeUrn: rawNodeUrn, data, authoredWith }) => {
       // Build a GraphQL Context from the MCP auth, including appId + sessionId
       // so app-keyed write authorization resolves the same way it does for
       // hadron_update_node. Both fields are load-bearing and were once omitted
@@ -7024,6 +7615,7 @@ export function createMcpServerInstance(
       // the chatbot tools, #1141; the requirement it got wrong is not.)
       const ctx: Context = {
         db,
+        readsAuthorTask: mcpReadsTask(auth), // #1329
         // #1301: a refusal from the delegated resolver addresses an MCP caller;
         // a door takes a whole `data` object, so the replace it names replays.
         transport: 'mcp',
@@ -7040,11 +7632,11 @@ export function createMcpServerInstance(
       try {
         const node = await resolvers.Mutation.updateNodeData(
           {},
-          { nodeRef: rawNodeUrn, data },
+          { nodeRef: rawNodeUrn, data, authoredWith },
           ctx,
         );
         const urn = await nodeUrn(node.loc, node.memoryId);
-        return textResult(`Node data merged: ${urn} (id: ${node.id})`);
+        return textResult(`Node data merged: ${urn} (id: ${node.id})${renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), node.id))}`);
       } catch (e) {
         return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'update failed'}`, 'hadron_update_node_data:resolver');
       }
@@ -7063,6 +7655,7 @@ export function createMcpServerInstance(
 
   const objectCtx = (): Context => ({
     db,
+    readsAuthorTask: mcpReadsTask(auth), // #1329
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
     apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
@@ -7097,7 +7690,7 @@ export function createMcpServerInstance(
     async ({ ref }) => {
       try {
         const obj = await resolvers.Query.object({}, { ref }, objectCtx());
-        return obj ? textResult(JSON.stringify(obj, null, 2)) : textResult('Object not found.');
+        return obj ? textResult(JSON.stringify(obj, null, 2)) : refusalResult('Object not found.');
       } catch (e) {
         return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'read failed'}`, 'hadron_get_object:resolver');
       }
@@ -7164,12 +7757,13 @@ export function createMcpServerInstance(
     'hadron_replace_text',
     "Search-and-replace a piece of text across MANY nodes in one call. Selection is the union of explicit node URNs and whole memories (memoryUrns), optionally narrowed to a subtree by 'prefix' (a parent loc — matches that node plus its descendants on ':' path boundaries, so 'auth' matches 'auth' and 'auth:tokens' but not 'authoring'; requires memoryUrns). Searches the chosen text fields (content, name, alias, description, abstract, tags); JSON fields are not touched. Literal substring match by default; set regex:true to treat oldText as a regular expression and newText as a replacement pattern (supports $1/$& backrefs). ALWAYS run with dryRun:true first to preview match counts before writing — this tool can rewrite a lot of nodes at once. Governed nodes and Channel addresses are protected and reported as skipped rather than searched. Multi-node runs are all-or-nothing: a node whose edited field would violate a field cap (e.g. the 2000-character abstract cap, whose refusal reports the edit's delta and remaining headroom) refuses the WHOLE batch before any write — nothing is partially applied; fix the edit and re-run. Honors write permissions, revision history (each change is undoable), and re-embeds changed nodes.",
     SHAPE_HADRON_REPLACE_TEXT,
-    async ({ oldText, newText, nodeUrns, memoryUrns, prefix, fields, caseInsensitive, regex, dryRun }) => {
+    async ({ oldText, newText, nodeUrns, memoryUrns, prefix, fields, caseInsensitive, regex, dryRun, authoredWith }) => {
       // Build a GraphQL Context from the MCP auth. Include appId + sessionId so
       // app-keyed write authorization (requireMemoryWriteAccess) resolves the
       // same way it does for hadron_create_node / hadron_update_node.
       const ctx: Context = {
         db,
+        readsAuthorTask: mcpReadsTask(auth), // #1329
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
         apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
@@ -7186,6 +7780,7 @@ export function createMcpServerInstance(
           {},
           {
             input: {
+              authoredWith,
               oldText,
               newText,
               nodeIds: nodeUrns,
@@ -7231,7 +7826,23 @@ export function createMcpServerInstance(
         if (result.skipCounts.governed > 0) {
           guidance.push('Governed nodes require their own update door: tasks use hadron_update_task; reviews use hadron_update_review; specs use the CLI hadron spec commands (no MCP spec door). Other governed kinds require their owning operation. Generic full-content node updates are not a workaround.');
         }
-        return textResult([header, coverage, ...guidance, ...lines].join('\n'));
+        // #2048: lint warnings of each boot-prompt source this call changed (a dry run changed nothing).
+        const lintLines: string[] = [];
+        for (const item of result.results) {
+          const warning = renderIncludePinWarnings(await includePinWarningsFor(ctx, item));
+          if (warning) lintLines.push(warning);
+        }
+        if (!result.dryRun) {
+          const changed = result.results.filter((x: { replacements: number }) => x.replacements > 0);
+          for (const r of changed.slice(0, REPLACE_LINT_MAX_NODES)) {
+            const text = renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), { memoryId: r.memoryId, loc: r.loc }));
+            if (text) lintLines.push(`${await nodeUrn(r.loc, r.memoryId, memoryUrnOf)}:${text}`);
+          }
+          if (changed.length > REPLACE_LINT_MAX_NODES) {
+            lintLines.push(`Lint warnings not checked for ${changed.length - REPLACE_LINT_MAX_NODES} of ${changed.length} changed node(s); read a boot-prompt node with hadron_get_node to see its lint warnings.`);
+          }
+        }
+        return textResult([header, coverage, ...guidance, ...lines, ...lintLines].join('\n'));
       } catch (e) {
         return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'search-and-replace failed'}`, 'hadron_replace_text:resolver');
       }
@@ -7252,7 +7863,7 @@ export function createMcpServerInstance(
     SHAPE_HADRON_CREATE_EDGE,
     async ({ sourceUrn, targetUrn, name, loc, description, isRunnable }) => {
       const result = await addEdge({ sourceUrn, targetUrn, name, loc, description, isRunnable, auth });
-      if ('error' in result) return textResult(result.error);
+      if ('error' in result) return refusalResult(result.error);
       return textResult(
         `Edge saved: ${result.edgeUrn}${result.name ? ` (${result.name})` : ''}\n  ${result.sourceUrn} → ${result.targetUrn}`,
       );
@@ -7297,7 +7908,7 @@ export function createMcpServerInstance(
           )}`,
         );
       } catch (err) {
-        return textResult(roleWriterRefusalText(err) ?? String((err as Error)?.message ?? err));
+        return roleWriterRefusalText(err) !== null ? refusalResult(roleWriterRefusalText(err) as string) : toolErrorResult(err, () => String((err as Error)?.message ?? err), 'hadron_update_edge');
       }
     },
   );
@@ -7311,7 +7922,7 @@ export function createMcpServerInstance(
         await resolvers.Mutation.deleteEdge({}, { edgeRef }, objectCtx());
         return textResult(`Edge deleted: ${edgeRef}`);
       } catch (err) {
-        return textResult(roleWriterRefusalText(err) ?? String((err as Error)?.message ?? err));
+        return roleWriterRefusalText(err) !== null ? refusalResult(roleWriterRefusalText(err) as string) : toolErrorResult(err, () => String((err as Error)?.message ?? err), 'hadron_delete_edge');
       }
     },
   );
@@ -7366,21 +7977,21 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
         throw e;
       }
 
       const { memoryUrn, loc, fragment } = splitNodeUrn(rawUrn);
       const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
-      if (fragRefusal) return textResult(fragRefusal);
+      if (fragRefusal) return refusalResult(fragRefusal);
       const memory = await resolveMemoryByUrn(memoryUrn);
       if (!memory) {
-        return textResult(`Node "${rawUrn}" not found.`);
+        return refusalResult(`Node "${rawUrn}" not found.`);
       }
       if (!(await canWriteToMemory(db, auth, memory.id, EXPLICIT_REF))) {
         // Match the "not found" phrasing used elsewhere on access denial
         // so the response doesn't distinguish absence from denial.
-        return textResult(`Node "${rawUrn}" not found.`);
+        return refusalResult(`Node "${rawUrn}" not found.`);
       }
 
       // Find the node by (loc, memoryId). Already-tombstoned nodes are
@@ -7389,7 +8000,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
       const existing = await db.node.findUnique({
         where: { loc_memoryId: { loc, memoryId: memory.id } },
       });
-      if (!existing) return textResult(`Node "${rawUrn}" not found.`);
+      if (!existing) return refusalResult(`Node "${rawUrn}" not found.`);
       if (existing.deletedAt && !hard) {
         return textResult(
           `Node "${rawUrn}" is already soft-deleted. Pass hard: true to remove the row entirely.`,
@@ -7565,7 +8176,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
 
       if ('refused' in result) {
         if (result.refused === 'access') {
-          return textResult(`Node "${rawUrn}" not found.`);
+          return refusalResult(`Node "${rawUrn}" not found.`);
         }
         if (result.refused === 'crossMemAccess') {
           return textResult(
@@ -7576,16 +8187,16 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
           return textResult(`Node "${rawUrn}" moved while this delete waited; re-read it and retry.`);
         }
         if (result.refused === 'mintedSpec') {
-          return textResult(`[spec_minted_permanent] ${result.message}`);
+          return refusalResult(`[spec_minted_permanent] ${result.message}`);
         }
         if (result.refused === 'comment') {
-          return textResult(`[role_governed] ${result.message}`);
+          return refusalResult(`[role_governed] ${result.message}`);
         }
         if (result.refused === 'decision') {
-          return textResult(`[decision_contained] ${result.message}`);
+          return refusalResult(`[decision_contained] ${result.message}`);
         }
         if (result.refused === 'governed') {
-          return textResult(`[role_governed] ${result.message}`);
+          return refusalResult(`[role_governed] ${result.message}`);
         }
         if (result.refused === 'writerLevel') {
           return textResult(result.message);
@@ -7644,18 +8255,18 @@ Atomicity: collision-evict → per-node NodeRevision snapshot → subtree move a
 
 On success returns the moved node's record: new URN, name, type, tags, edge counts, and immediate-child count (empty sections omitted). A cross-memory move also reports raw relative content links that now miss or point to a different node; content is not rewritten.`,
     SHAPE_HADRON_MOVE_NODE,
-    async ({ urn: rawFrom, targetUrn: rawTo, overwrite, renameToLeaf }) => {
+    async ({ urn: rawFrom, targetUrn: rawTo, overwrite, renameToLeaf, authoredWith }) => {
       // Spec 022: qualification at the API boundary for both source and target.
       try {
         assertFullyQualifiedUrn(rawFrom, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(`Source: ${e.message}`);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(`Source: ${e.message}`);
         throw e;
       }
       try {
         assertFullyQualifiedUrn(rawTo, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(`Target: ${e.message}`);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(`Target: ${e.message}`);
         throw e;
       }
 
@@ -7666,7 +8277,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // parent's loc and silently drop the "#data" the caller wrote.
       const moveRefusal =
         nodeFragmentRefusal(rawFrom, fromFrag) ?? nodeFragmentRefusal(rawTo, toFrag);
-      if (moveRefusal) return textResult(moveRefusal);
+      if (moveRefusal) return refusalResult(moveRefusal);
 
       // #1316: BOTH ends conceal at the point their missing branch answers —
       // a later refusal would leak through the loc validation and the source
@@ -7675,29 +8286,29 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // #2206 (B): a move carries the node's content (and its render, below) to the caller, so a source memory the
       // caller may write but not read answers as one it cannot see.
       if (!fromMemory || (await isWriteBeyondRead(db, auth, fromMemory.id))) {
-        return textResult(`Source memory not found: "${fromMemoryUrn}".`);
+        return refusalResult(`Source memory not found: "${fromMemoryUrn}".`);
       }
       const toMemory = await resolveVisibleMemoryByUrn(auth, toMemoryUrn, 'write');
       if (!toMemory) {
-        return textResult(`Target memory not found: "${toMemoryUrn}".`);
+        return refusalResult(`Target memory not found: "${toMemoryUrn}".`);
       }
 
       try {
         validateLoc(toLoc);
       } catch (e) {
-        return textResult((e as Error).message);
+        return e instanceof InvalidLocError ? refusalResult(e.message) : toolErrorResult(e, () => (e as Error).message, 'hadron_move_node:validateLoc');
       }
 
       const existing = await db.node.findUnique({
         where: { loc_memoryId: { loc: fromLoc, memoryId: fromMemory.id } },
       });
-      if (!existing) return textResult(`Node "${rawFrom}" not found.`);
+      if (!existing) return refusalResult(`Node "${rawFrom}" not found.`);
 
       if (!(await canWriteToMemory(db, auth, fromMemory.id, EXPLICIT_REF))) {
-        return textResult(`Write access denied for source memory.${await explainWriteRefusal(db, auth, fromMemory.id)}`);
+        return refusalResult(`Write access denied for source memory.${await explainWriteRefusal(db, auth, fromMemory.id)}`);
       }
       if (toMemory.id !== fromMemory.id && !(await canWriteToMemory(db, auth, toMemory.id, EXPLICIT_REF))) {
-        return textResult(`Write access denied for target memory.${await explainWriteRefusal(db, auth, toMemory.id)}`);
+        return refusalResult(`Write access denied for target memory.${await explainWriteRefusal(db, auth, toMemory.id)}`);
       }
 
       const isSameSlot = toLoc === fromLoc && toMemory.id === fromMemory.id;
@@ -7729,215 +8340,257 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       let relocated: MoveNodeSubtreeResult['moved'] = [];
       let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
       try {
-        result = await db.$transaction(async (tx) => {
-          // #2206 (#2233): an Agent definition's authority, at either end, before any loc or row lock.
-          await lockAgentDefinitionAuthority(tx, auth.userId ?? null, [fromMemory.id, toMemory.id]);
-          // #664/#752: moving a node INTO a subtree is the same orphan vector as
-          // creating there — lock the destination's ancestor path first (matching
-          // the GraphQL moveNode resolver and hadron_delete_node's own-loc lock),
-          // so a concurrent non-recursive delete of a destination ancestor can't
-          // count zero descendants and then let this move land under it. Taken
-          // before any row-locking statement to keep advisory-before-row ordering
-          // consistent with the delete path (no lock-order inversion).
-          // #1187 (@codex + @copilot on PR #1211) — DECLARE the complete key
-          // set first, in the one global order, exactly as the GraphQL
-          // `moveNode` resolver does. This surface was missed when that
-          // protocol landed: it took the destination ancestors here and reached
-          // the source path only later, inside `moveNodeSubtree`
-          // (`lockSourceForMove`). For source `a` and destination `z:child`
-          // that is `z` then `a`, while the GraphQL path takes `a` then `z` —
-          // so the two SURFACES could deadlock against each other, and two MCP
-          // moves with opposing paths against themselves.
-          //
-          // Enumerating the multi-key callers from the GraphQL resolvers alone
-          // is how this was missed; the writers are enumerated by STATE (who
-          // takes two keys), never by the call sites one happens to know.
-          // #1466: an edge writer holds this memory key across endpoint
-          // validation and insertion. Take it before any loc lock so an edge
-          // cannot land after archiveTombstone enumerates the target's edges.
-          await lockEdgeEndpointMemories(tx, [toMemory.id]);
-          await acquireLockSet(tx, [
-            ...ancestorLocs(toLoc).map((loc) => ({ memoryId: toMemory.id, loc })),
-            ...ancestorLocs(fromLoc).map((loc) => ({ memoryId: fromMemory.id, loc })),
-            { memoryId: fromMemory.id, loc: fromLoc },
-            { memoryId: toMemory.id, loc: toLoc },
-          ]);
-          await lockAncestorsForCreate(tx, toMemory.id, toLoc);
-
-          if (isSameSlot) {
-            // Same-slot "move": source and target address are identical, so the
-            // ONLY thing left to do is the opt-in leaf rename (#1017). Without
-            // it this is a literal no-op — writing a NodeRevision for it would
-            // record a change that did not happen, and on a memory with a
-            // maxRevCount cap it would evict real history to store nothing.
-            //
-            // The rename is itself skipped when the name ALREADY equals the
-            // leaf (PR #1018 review, Copilot): re-stamping an identical value
-            // is the same no-op-history problem one line up, and a same-slot
-            // call is exactly where it is most likely — a caller normalizing a
-            // name that is already normalized.
-            const newName = toLoc.split(':').pop()!;
-            if (renameToLeaf === true && existing.name !== newName) {
-              // Row lock + drift reconciled as its own revision, then the
-              // authoritative re-read the snapshot is built from — the rule on
-              // every single-row revisioned writer (PR #1339 review).
-              // Re-validate BEFORE reconciling (@copilot, PR #1339): the row
-              // must still be the live node at the authorized (memory, loc),
-              // or this would reconcile — and then rename — a row that moved.
-              await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${existing.id} FOR UPDATE`;
-              // This direct same-slot rename bypasses moveNodeSubtree but still
-              // snapshots history. Hold the source encryption flag before it.
-              await tx.$queryRaw`SELECT "id" FROM "memories" WHERE "id" = ${fromMemory.id} FOR SHARE`;
-              await assertLockedMemoryWriteAccess(tx, auth, fromMemory.id);
-              const still = await tx.node.findUnique({
-                where: { id: existing.id },
-                select: { memoryId: true, loc: true, deletedAt: true },
-              });
-              if (!still || still.deletedAt || still.memoryId !== fromMemory.id || still.loc !== fromLoc) {
-                throw new SubtreeMoveSourceChangedError(existing.id);
+        const completed = await withArchivePlanRetries(async (timeout) => {
+          let relocated: MoveNodeSubtreeResult['moved'] = [];
+          let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
+          const attemptResult = await db.$transaction<MoveResult>(async (tx) => {
+            let attemptAuth = auth;
+            const authorizeAttempt = async () => {
+              if (auth.userId) {
+                const user = await tx.user.findUnique({ where: { id: auth.userId }, select: { roles: true, deletedAt: true } });
+                if (!user || user.deletedAt) throw new MemoryWriteAccessChangedDuringWriteError('[node_write_conflict] Memory write access changed while this write waited — re-read and retry.');
+                attemptAuth = { ...auth, roles: auth.impersonation ? [] : user.roles };
               }
-              await ensureCurrentNodeRevisionInTransaction(tx, existing.id, { expectedMemoryId: fromMemory.id });
-              const locked = await tx.node.findUniqueOrThrow({ where: { id: existing.id } });
-              // #1641 — a decision's name is its rendered `<code>: <title>`,
-              // which its approval covers; only the decision doors change it.
-              if (isDecisionFamilyRole(locked.role)) throw decisionContainedError('Renaming this node', [locked.loc]);
-              await createNodeRevision(tx, {
-                id: generateId(),
-                ...buildNodeRevisionSnapshot(locked, editorFromAuth(auth), {
-                  changes: diffNodeChanges(locked, { loc: toLoc, name: newName, memoryId: toMemory.id }),
-                }),
-              });
-              await tx.node.update({
-                where: { id: existing.id },
-                data: {
-                  loc: toLoc,
-                  name: newName,
-                  memoryId: toMemory.id,
-                  ...clearNodeAuthorship(),
-                  revisionContentHash: revisionStateHashRefreshMarker(),
-                },
-              });
-            }
-          } else {
-            const crossMemory = toMemory.id !== fromMemory.id;
+              await assertLockedMemoryWriteAccess(tx, attemptAuth, fromMemory.id);
+              await assertLockedMemoryWriteAccess(tx, attemptAuth, toMemory.id);
+              // #3052 (MCP twin of #3039/#3031): a move carries the source's content, so the preflight's content-read
+              // refusal is repeated here on the transaction client with the refreshed roles, after the authority wait
+              // and on every attempt. Same refusal as the preflight, byte for byte; install audiences stay in their own gate.
+              if (await isWriteBeyondRead(tx as never, attemptAuth, fromMemory.id)) throw new MoveSourceBeyondReadError();
+            };
+            // #2206 (#2233): an Agent definition's authority, at either end, before any loc or row lock.
+            await lockAgentDefinitionAuthority(tx, auth.userId ?? null, [fromMemory.id, toMemory.id]);
+            await authorizeAttempt();
+            // #664/#752: moving a node INTO a subtree is the same orphan vector as
+            // creating there — lock the destination's ancestor path first (matching
+            // the GraphQL moveNode resolver and hadron_delete_node's own-loc lock),
+            // so a concurrent non-recursive delete of a destination ancestor can't
+            // count zero descendants and then let this move land under it. Taken
+            // before any row-locking statement to keep advisory-before-row ordering
+            // consistent with the delete path (no lock-order inversion).
+            // #1187 (@codex + @copilot on PR #1211) — DECLARE the complete key
+            // set first, in the one global order, exactly as the GraphQL
+            // `moveNode` resolver does. This surface was missed when that
+            // protocol landed: it took the destination ancestors here and reached
+            // the source path only later, inside `moveNodeSubtree`
+            // (`lockSourceForMove`). For source `a` and destination `z:child`
+            // that is `z` then `a`, while the GraphQL path takes `a` then `z` —
+            // so the two SURFACES could deadlock against each other, and two MCP
+            // moves with opposing paths against themselves.
+            //
+            // Enumerating the multi-key callers from the GraphQL resolvers alone
+            // is how this was missed; the writers are enumerated by STATE (who
+            // takes two keys), never by the call sites one happens to know.
+            // #1466: an edge writer holds this memory key across endpoint
+            // validation and insertion. Take it before any loc lock so an edge
+            // cannot land after archiveTombstone enumerates the target's edges.
+            await lockEdgeEndpointMemories(tx, [toMemory.id]);
+            const archivePlan = await discoverArchivePlan(tx, toMemory.id, toLoc);
+            await acquireLockSet(tx, [
+              ...archivePlan.descendantLocs.map(loc => ({ memoryId: toMemory.id, loc })),
+              ...ancestorLocs(toLoc).map((loc) => ({ memoryId: toMemory.id, loc })),
+              ...ancestorLocs(fromLoc).map((loc) => ({ memoryId: fromMemory.id, loc })),
+              { memoryId: fromMemory.id, loc: fromLoc },
+              { memoryId: toMemory.id, loc: toLoc },
+            ]);
+            await lockAncestorsForCreate(tx, toMemory.id, toLoc);
+            await authorizeAttempt();
+            await validateArchivePlan(tx, archivePlan);
 
-            // Collision policy for the EXPLICITLY-named target loc: a live
-            // occupant refuses unless overwrite:true, which soft-deletes it and
-            // re-stamps its loc out of the way so the (loc, memoryId) unique
-            // doesn't block. Use the FULL id in the archived loc — UUIDv7's first
-            // 6 bytes are the ms timestamp, so an 8-char slice was timestamp-only
-            // entropy (PR-189). Descendant-slot collisions are always refused —
-            // moveNodeSubtree throws SubtreeMoveCollisionError (caught below).
-            const existingTarget = await tx.node.findUnique({
-              where: { loc_memoryId: { loc: toLoc, memoryId: toMemory.id } },
-            });
-            if (existingTarget && !existingTarget.deletedAt && !overwrite) {
-              const targetUrn = await nodeUrn(toLoc, toMemory.id);
-              return { refused: 'urn-exists', targetUrn };
-            }
-            // #1331 — overwriting evicts the occupant: its role's writer level applies.
-            if (existingTarget && !existingTarget.deletedAt) {
-              await assertRoleWritersForNodes(tx, auth, [existingTarget], { from: toMemory.id });
-            }
-            if (existingTarget) {
-              if (!existingTarget.deletedAt) {
+            if (isSameSlot) {
+              // Same-slot "move": source and target address are identical, so the
+              // ONLY thing left to do is the opt-in leaf rename (#1017). Without
+              // it this is a literal no-op — writing a NodeRevision for it would
+              // record a change that did not happen, and on a memory with a
+              // maxRevCount cap it would evict real history to store nothing.
+              //
+              // The rename is itself skipped when the name ALREADY equals the
+              // leaf (PR #1018 review, Copilot): re-stamping an identical value
+              // is the same no-op-history problem one line up, and a same-slot
+              // call is exactly where it is most likely — a caller normalizing a
+              // name that is already normalized.
+              const newName = toLoc.split(':').pop()!;
+              if (renameToLeaf === true && existing.name !== newName) {
+                // Row lock + drift reconciled as its own revision, then the
+                // authoritative re-read the snapshot is built from — the rule on
+                // every single-row revisioned writer (PR #1339 review).
+                // Re-validate BEFORE reconciling (@copilot, PR #1339): the row
+                // must still be the live node at the authorized (memory, loc),
+                // or this would reconcile — and then rename — a row that moved.
+                await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${existing.id} FOR UPDATE`;
+                // This direct same-slot rename bypasses moveNodeSubtree but still
+                // snapshots history. Hold the source encryption flag before it.
+                await tx.$queryRaw`SELECT "id" FROM "memories" WHERE "id" = ${fromMemory.id} FOR SHARE`;
+                await assertLockedMemoryWriteAccess(tx, attemptAuth, fromMemory.id);
+                const still = await tx.node.findUnique({
+                  where: { id: existing.id },
+                  select: { memoryId: true, loc: true, deletedAt: true },
+                });
+                if (!still || still.deletedAt || still.memoryId !== fromMemory.id || still.loc !== fromLoc) {
+                  throw new SubtreeMoveSourceChangedError(existing.id);
+                }
+                await ensureCurrentNodeRevisionInTransaction(tx, existing.id, { expectedMemoryId: fromMemory.id });
+                const locked = await tx.node.findUniqueOrThrow({ where: { id: existing.id } });
+                // #1641 — a decision's name is its rendered `<code>: <title>`,
+                // which its approval covers; only the decision doors change it.
+                if (isDecisionFamilyRole(locked.role)) throw decisionContainedError('Renaming this node', [locked.loc]);
+                // #1328 — the name is authored; the address is not.
+                const renameStamp = await assertRenameAuthoring(tx, fromMemory.id, toMemory.id, {
+                  priorRole: locked.role, priorRunnable: locked.isRunnable,
+                  role: locked.role, runnable: locked.isRunnable, mintHuman: true, authoredChange: true,
+                }, attestedAuthoring(recoveryCtx(), authoredWith));
+                await createNodeRevision(tx, {
+                  id: generateId(),
+                  ...buildNodeRevisionSnapshot(locked, editorFromAuth(auth), {
+                    changes: diffNodeChanges(locked, { loc: toLoc, name: newName, memoryId: toMemory.id }),
+                  }),
+                });
                 await tx.node.update({
-                  where: { id: existingTarget.id },
-                  data: { deletedAt: new Date(), deletedBy: auth.userId ?? auth.clientId ?? null },
+                  where: { id: existing.id },
+                  data: {
+                    loc: toLoc,
+                    name: newName,
+                    memoryId: toMemory.id,
+                    ...(renameStamp ?? clearNodeAuthorship()),
+                    revisionContentHash: revisionStateHashRefreshMarker(),
+                  },
                 });
               }
-              // #1466: the old node's edges keep locs derived from this address.
-              // Rekey them with the tombstone inside the same move transaction,
-              // before the mover takes the address and can create its own edges.
-              await archiveTombstone(tx, existingTarget);
-            }
+            } else {
+              const crossMemory = toMemory.id !== fromMemory.id;
 
-            // #768/#781: rebase the whole loc-subtree via the shared helper (the
-            // ONE implementation the GraphQL moveNode resolver also uses) — SAME-
-            // memory or CROSS-memory (destMemoryId carries nodes + embeddings +
-            // outgoing edges across). It locks + revalidates the source and
-            // writes a NodeRevision per moved node.
-            //
-            // #1017: renameSourceLeaf is now the CALLER's choice, defaulting off.
-            // It used to be hardcoded true, which silently overwrote the moved
-            // node's human-authored `name` with the target loc's terminal atom —
-            // unconditional, undocumented, and the opposite of what the GraphQL
-            // `moveNode` resolver does with the same helper. Two surfaces of one
-            // operation disagreeing is bad enough; the tool's own description
-            // enumerated what survives a move (id, edges, descendants) and never
-            // mentioned `name`, so the contract actively taught the wrong thing.
-            // The damage was quiet, too — loc and name are usually similar
-            // enough that a clobbered title still reads plausibly.
-            const subtreeResult = await moveNodeSubtree(tx, {
-              source: existing,
-              destLoc: toLoc,
-              destMemoryId: crossMemory ? toMemory.id : undefined,
-              editor: editorFromAuth(auth),
-              renameSourceLeaf: renameToLeaf === true,
-              authorizeLockedMemory: (memoryId) => assertLockedMemoryWriteAccess(tx, auth, memoryId),
-              principal: auth,
-            });
-            relocated = subtreeResult.moved;
-            linkWarnings = subtreeResult.linkWarnings;
-            // #1468 — evicting the destination occupant removes it from its
-            // corpus and hands its citation to another node: refused for a
-            // minted spec. Checked AFTER the helper on purpose: it already holds
-            // the occupant row (the eviction update) and the destination memory
-            // FOR NO KEY UPDATE, so the guard takes nothing new; checking first
-            // would take that memory FOR SHARE and then upgrade it inside the
-            // helper, the deadlock its header warns about. A refusal rolls the
-            // whole transaction back.
-            if (existingTarget) {
-              await assertNoMintedSpecRemoval(tx, toMemory.id, [existingTarget.id], 'overwrite');
-              // #1641 §3.2 — evicting a decision would delete it.
-              await refuseDecisionFamily(tx, [existingTarget.id], 'Overwriting this node');
-              // Evicting a live occupant is a removal: a governed occupant is
-              // replaced only after its marker is cleared through the kind's
-              // door. Judged on the locked row; the eviction update above already
-              // holds it, so this takes nothing new. A tombstoned occupant is
-              // only re-keyed, which removes nothing.
-              if (!existingTarget.deletedAt) {
-                const governedOccupant = await lockGovernedRowsIn(tx, toMemory.id, [existingTarget.id]);
-                if (governedOccupant.length > 0) throw governedRemovalError(governedOccupant, 'mcp', 'overwrite');
+              // Collision policy for the EXPLICITLY-named target loc: a live
+              // occupant refuses unless overwrite:true, which soft-deletes it and
+              // re-stamps its loc out of the way so the (loc, memoryId) unique
+              // doesn't block. Use the FULL id in the archived loc — UUIDv7's first
+              // 6 bytes are the ms timestamp, so an 8-char slice was timestamp-only
+              // entropy (PR-189). Descendant-slot collisions are always refused —
+              // moveNodeSubtree throws SubtreeMoveCollisionError (caught below).
+              const existingTarget = await tx.node.findUnique({
+                where: { loc_memoryId: { loc: toLoc, memoryId: toMemory.id } },
+              });
+              if (existingTarget && !existingTarget.deletedAt && !overwrite) {
+                const targetUrn = await nodeUrn(toLoc, toMemory.id);
+                return { refused: 'urn-exists', targetUrn };
+              }
+              // #1331 — overwriting evicts the occupant: its role's writer level applies.
+              if (existingTarget && !existingTarget.deletedAt) {
+                await assertRoleWritersForNodes(tx, attemptAuth, [existingTarget], { from: toMemory.id });
+              }
+              if (existingTarget) {
+                if (!existingTarget.deletedAt) {
+                  await tx.node.update({
+                    where: { id: existingTarget.id },
+                    data: { deletedAt: new Date(), deletedBy: auth.userId ?? auth.clientId ?? null },
+                  });
+                }
+                // #1466: the old node's edges keep locs derived from this address.
+                // Rekey them with the tombstone inside the same move transaction,
+                // before the mover takes the address and can create its own edges.
+                await archiveTombstone(tx, existingTarget, archivePlan);
+              }
+
+              // #768/#781: rebase the whole loc-subtree via the shared helper (the
+              // ONE implementation the GraphQL moveNode resolver also uses) — SAME-
+              // memory or CROSS-memory (destMemoryId carries nodes + embeddings +
+              // outgoing edges across). It locks + revalidates the source and
+              // writes a NodeRevision per moved node.
+              //
+              // #1017: renameSourceLeaf is now the CALLER's choice, defaulting off.
+              // It used to be hardcoded true, which silently overwrote the moved
+              // node's human-authored `name` with the target loc's terminal atom —
+              // unconditional, undocumented, and the opposite of what the GraphQL
+              // `moveNode` resolver does with the same helper. Two surfaces of one
+              // operation disagreeing is bad enough; the tool's own description
+              // enumerated what survives a move (id, edges, descendants) and never
+              // mentioned `name`, so the contract actively taught the wrong thing.
+              // The damage was quiet, too — loc and name are usually similar
+              // enough that a clobbered title still reads plausibly.
+              const subtreeResult = await moveNodeSubtree(tx, {
+                source: existing,
+                destLoc: toLoc,
+                destMemoryId: crossMemory ? toMemory.id : undefined,
+                editor: editorFromAuth(auth),
+                renameSourceLeaf: renameToLeaf === true,
+                renameAuthoring: attestedAuthoring(recoveryCtx(), authoredWith),
+                authorizeLockedMemory: (memoryId) => assertLockedMemoryWriteAccess(tx, attemptAuth, memoryId),
+                principal: attemptAuth,
+              });
+              relocated = subtreeResult.moved;
+              linkWarnings = subtreeResult.linkWarnings;
+              // #1468 — evicting the destination occupant removes it from its
+              // corpus and hands its citation to another node: refused for a
+              // minted spec. Checked AFTER the helper on purpose: it already holds
+              // the occupant row (the eviction update) and the destination memory
+              // FOR NO KEY UPDATE, so the guard takes nothing new; checking first
+              // would take that memory FOR SHARE and then upgrade it inside the
+              // helper, the deadlock its header warns about. A refusal rolls the
+              // whole transaction back.
+              if (existingTarget) {
+                await assertNoMintedSpecRemoval(tx, toMemory.id, [existingTarget.id], 'overwrite');
+                // #1641 §3.2 — evicting a decision would delete it.
+                await refuseDecisionFamily(tx, [existingTarget.id], 'Overwriting this node');
+                // Evicting a live occupant is a removal: a governed occupant is
+                // replaced only after its marker is cleared through the kind's
+                // door. A tombstoned occupant is only re-keyed.
+                if (!existingTarget.deletedAt) {
+                  const governedOccupant = await lockGovernedRowsIn(tx, toMemory.id, [existingTarget.id]);
+                  if (governedOccupant.length > 0) throw governedRemovalError(governedOccupant, 'mcp', 'overwrite');
+                }
               }
             }
-          }
 
-          // Move BY ID — id is stable across moves, so this refetch can't race a
-          // concurrent move into the same slot.
-          const moved = await tx.node.findUniqueOrThrow({
-            where: { id: existing.id },
-            include: {
-              outgoingEdges: {
-                where: { target: { deletedAt: null } },
-                select: { id: true },
+            // Move BY ID — id is stable across moves, so this refetch can't race a
+            // concurrent move into the same slot.
+            const moved = await tx.node.findUniqueOrThrow({
+              where: { id: existing.id },
+              include: {
+                outgoingEdges: {
+                  where: { target: { deletedAt: null } },
+                  select: { id: true },
+                },
+                incomingEdges: {
+                  where: { source: { deletedAt: null } },
+                  select: { id: true },
+                },
               },
-              incomingEdges: {
-                where: { source: { deletedAt: null } },
-                select: { id: true },
+            });
+
+            // Immediate children now living under the destination loc (the moved
+            // descendants plus any that were pre-staged there).
+            const childCount = await tx.node.count({
+              where: {
+                memoryId: toMemory.id,
+                loc: { startsWith: toLoc + ':' },
+                deletedAt: null,
               },
-            },
-          });
+            });
 
-          // Immediate children now living under the destination loc (the moved
-          // descendants plus any that were pre-staged there).
-          const childCount = await tx.node.count({
-            where: {
-              memoryId: toMemory.id,
-              loc: { startsWith: toLoc + ':' },
-              deletedAt: null,
-            },
-          });
-
-          return { ok: true, moved, childCount };
-        },
-        // A large same-memory subtree touches many rows (two updates + a revision
-        // per node); the default 5s interactive-txn timeout is too tight — match
-        // the GraphQL moveNode path so inputs that succeed there don't time out
-        // here (mirrors extractParentNodeGraph / cloneMemory).
-        { timeout: 120_000 });
+            return { ok: true, moved, childCount };
+          },
+          // A large same-memory subtree touches many rows (two updates + a revision
+          // per node); the default 5s interactive-txn timeout is too tight — match
+          // the GraphQL moveNode path so inputs that succeed there don't time out
+          // here (mirrors extractParentNodeGraph / cloneMemory).
+          { timeout });
+          return { result: attemptResult, relocated, linkWarnings };
+        });
+        result = completed.result;
+        relocated = completed.relocated;
+        linkWarnings = completed.linkWarnings;
       } catch (e) {
-        if (e instanceof MemoryWriteAccessChangedDuringWriteError) return textResult(e.message);
+        // #3786 (Charles QA F1, from #3776's stamped QA matrix): the move is
+        // the third inline writer that can drive the #992 per-chat seq
+        // constraint — a rebase of a seq-bearing chat-message into a taken
+        // (chat, seq). Without this branch the caller saw the raw P2002 as an
+        // internal error while the GraphQL moveNode answered the typed
+        // refusal; the refused move itself was already atomic.
+        if (isChatSeqUniqueViolation(e)) {
+          return refusalResult(`[chat_message_seq_conflict] ${CHAT_SEQ_CONFLICT_MESSAGE}`);
+        }
+        if (e instanceof ArchivePlanExhaustedError) return refusalResult('The node was moved concurrently; re-read it and retry.');
+        if (e instanceof MoveSourceBeyondReadError) return refusalResult(`Source memory not found: "${fromMemoryUrn}".`);
+        if (e instanceof MemoryWriteAccessChangedDuringWriteError) return refusalResult(e.message);
         // A descendant-slot collision (or a move-into-own-subtree) aborts the
         // whole transaction — including any overwrite eviction — and surfaces as
         // a refusal, not a partial move.
@@ -7948,21 +8601,21 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           );
         }
         if (e instanceof SubtreeMoveIntoSelfError) {
-          return textResult('Cannot move a node into its own subtree.');
+          return refusalResult('Cannot move a node into its own subtree.');
         }
         if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
-          return textResult(`[spec_minted_permanent] ${e.message}`);
+          return refusalResult(`[spec_minted_permanent] ${e.message}`);
         }
         if (e instanceof ScopeGraphQLError && e.extensions?.code === 'ROLE_GOVERNED' && e.extensions?.op === 'overwrite') {
-          return textResult(`[role_governed] ${e.message}`);
+          return refusalResult(`[role_governed] ${e.message}`);
         }
         if (e instanceof SubtreeMoveSourceChangedError) {
           return textResult('The node was moved concurrently; re-read it and retry.');
         }
         const includeText = includeRefusalText(e);
-        if (includeText) return textResult(includeText);
+        if (includeText) return refusalResult(includeText);
         const writerRefusal = roleWriterRefusalText(e);
-        if (writerRefusal) return textResult(writerRefusal);
+        if (writerRefusal) return refusalResult(writerRefusal);
         if (
           e instanceof CrossMemoryMoveUnsupportedError ||
           e instanceof SubtreeMoveSchemaViolationError
@@ -8044,13 +8697,32 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_run_action',
-    'Load an action node and resolve its dependencies. Returns the action instructions with all referenced node content. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>).',
+    'Load an action node and resolve its dependencies. Returns the action instructions with all referenced node content. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). An action URN (hrn:action:<root>:<agent-slug>:<code>) is also accepted: it is a register entry\'s second address, resolved to that entry and run exactly as by its node URN, under the same memory read gate (the action address additionally needs the Agent\'s system memory to be readable, so a refusal reads as not found).',
     SHAPE_HADRON_RUN_ACTION,
     async ({ urn: rawUrn, args }) => {
+      // #2718 — an action URN is a register entry's SECOND address. Resolve it
+      // with the memory gates only (no `agent` arm gate: ruling (a)), then run
+      // the entry through the SAME loader the node spelling uses, so the final
+      // gate and the rendered bundle are one implementation. Every refusal is
+      // ONE message naming nothing (cor:api:140:03): other tenant, unreadable
+      // memory, unknown Agent, missing or malformed code all read alike.
+      if (ACTION_REF_RE.test(rawUrn)) {
+        const unreadable = () => refusalResult(`Node "${rawUrn}" not found.`);
+        const entry = await resolveActionEntryRef(rawUrn, { agentGate: false });
+        if (!entry) return unreadable();
+        // Carry the RESOLVED entry's id, never a re-emitted node URN: the emitted
+        // v2 URN is lossy (a compound memory and its prefix twin emit the same
+        // string), so re-parsing it can run a different node. Operational faults
+        // (the DB reads inside) are not caught: they surface as faults, not as
+        // not-found (cor:api:140:03).
+        const viaEntry = await loadRunNodeById(entry);
+        if ('error' in viaEntry) return unreadable();
+        return textResult(await renderRunNode(viaEntry.node, viaEntry.loc, args));
+      }
       // Spec 022 qualification + loading + rendering are shared with hadron_run_task
       // (cor:api:060) via loadNodeForRun / renderRunNode below.
       const loaded = await loadNodeForRun(rawUrn);
-      if ('error' in loaded) return textResult(loaded.error);
+      if ('error' in loaded) return refusalResult(loaded.error);
       return textResult(await renderRunNode(loaded.node, loaded.loc, args));
     },
   );
@@ -8085,8 +8757,33 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     if (!memory || !(await canReadMemory(db, auth, memory.id))) {
       return { error: `Memory not found: "${memoryUrn}".` };
     }
-    const node = await db.node.findUnique({
-      where: { loc_memoryId: { loc, memoryId: memory.id } },
+    const node = await findRunNode({ loc_memoryId: { loc, memoryId: memory.id } });
+    if (!node) return { error: `Node "${rawUrn}" not found.` };
+    return { node, loc };
+  }
+
+  // #2718 — the action spelling's loader: the entry is already RESOLVED (by id),
+  // so it is gated and fetched by that id through the SAME memory gate and the
+  // SAME node fetch the URN spelling uses, with no URN round trip.
+  async function loadRunNodeById(
+    entry: { id: string; memoryId: string },
+  ): Promise<{ node: RunNode; loc: string } | { error: string }> {
+    if (!(await canReadMemory(db, auth, entry.memoryId))) return { error: 'Node not readable.' };
+    // Pin the fetch to the GATED memory and the live row: an id-only fetch
+    // after the gate would serve a node moved away or soft-deleted in between.
+    const node = await findRunNode({
+      id: entry.id,
+      memoryId: entry.memoryId,
+      deletedAt: null,
+    });
+    if (!node) return { error: 'Node not found.' };
+    return { node, loc: node.loc };
+  }
+
+  // The run node with its live dependency edges, by either unique key.
+  async function findRunNode(where: Prisma.NodeWhereUniqueInput): Promise<RunNode | null> {
+    return db.node.findUnique({
+      where,
       // #1063 — the same edge filter the GraphQL `renderRunNode` query uses.
       // Without it a soft-deleted edge kept carrying its target, and a
       // soft-deleted NODE kept being served through any edge pointing at it —
@@ -8097,11 +8794,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         outgoingEdges: {
           where: { deletedAt: null, target: { deletedAt: null } },
           include: { target: true },
+          // #2967 — run resolution order (cor:dmo:060:03): priority, loc, id.
+          orderBy: edgeRunOrder(),
         },
       },
     });
-    if (!node) return { error: `Node "${rawUrn}" not found.` };
-    return { node, loc };
   }
 
   // {{arg}} substitution + inlined edge-linked node content + one action-run
@@ -8163,6 +8860,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           nodeId: node.id,
           memoryId: node.memoryId, // #796 (as in hadron_get_node's event)
           appId: auth.appId ?? null,
+          appKeyId: usageAppKeyOf(auth), // #2944
           // 046-usage-metering FR-001 (as in hadron_get_node's event).
           userId: auth.userId ?? null,
           createdBy: auth.clientId ?? null,
@@ -8525,7 +9223,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     "Read an app run you started (or may read): its status, where it is or stopped (curNodeUrn), why it failed (failure), what it extracted (data, the run envelope) and the path it walked (hops: one entry per completed hop, with the edge it took). Pass the run id or hrn:apprun URN that hadron_run_task printed. Gated like appRun: you may read a run if you are a READER in its organization; if it runs on your behalf or you started it manually, while you keep a live relationship with its App (App member or active subscriber); or if you hold that App's own key. A run you cannot read answers 'not found', the same as one that does not exist. Read-only.",
     SHAPE_HADRON_GET_RUN,
     async ({ ref }) => {
-      if (!auth.userId && !auth.appId) return textResult('Not authenticated.');
+      if (!auth.userId && !auth.appId) return refusalResult('Not authenticated.');
       const runRef = typeof ref === 'string' ? ref.trim() : '';
       if (!runRef) return textResult('Pass the run id or hrn:apprun URN that hadron_run_task printed.');
       let run: Record<string, unknown> | null;
@@ -8536,14 +9234,14 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         if (/^(Forbidden|Unauthenticated)/.test((e as Error)?.message ?? '')) run = null;
         else throw e;
       }
-      if (!run) return textResult(`Run "${runRef}" not found.`);
+      if (!run) return refusalResult(`Run "${runRef}" not found.`);
       return textResult(renderAppRun(run));
     },
   );
 
   server.tool(
     'hadron_run_task',
-    "Run a task — a runnable node (isRunnable=true) — by loose name, without a fully-qualified URN. Give `task` (and optionally `memory`); the server resolves both against what you can read and runs the match. When a name is ambiguous or omitted you get a list to choose from (an interactive picker where the client supports it, otherwise a numbered list to re-invoke with `urn`). Pass a fully-qualified `urn` to skip resolution and run directly. By DEFAULT this RENDERS the task — returns the assembled instructions ({{arg}} substitution + inlined dependencies) for YOU to execute. Pass `appRef` to EXECUTE server-side instead (#529): the server mints a MANUAL app run and returns the run id to poll. Spec cor:api:060.",
+    "Render or execute a node. By-name task discovery, resolution and listing require isRunnable=true (hrn:node:hadronmemory.com:specs:cor:api:060:01); an explicit fully-qualified `urn` skips resolution and does not require that flag. Give `task` (and optionally `memory`); the server resolves both against what you can read and runs the match. When a name is ambiguous or omitted you get a list to choose from (an interactive picker where the client supports it, otherwise a numbered list to re-invoke with `urn`). Pass a fully-qualified `urn` to skip resolution and run directly. By DEFAULT this RENDERS the task — returns the assembled instructions ({{arg}} substitution + inlined dependencies) for YOU to execute. Pass `appRef` to EXECUTE server-side instead (#529): the server mints a MANUAL app run and returns the run id to poll. Spec cor:api:060.",
     SHAPE_HADRON_RUN_TASK,
     async (rawArgs) => {
       // createTestableMcpServer bypasses zod — normalize args defensively.
@@ -8553,6 +9251,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         urn?: unknown;
         args?: unknown;
         appRef?: unknown;
+        agentRef?: unknown;
         runAsSelf?: unknown;
       };
       const taskHint = typeof a.task === 'string' ? a.task.trim() : '';
@@ -8563,6 +9262,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           ? (a.args as Record<string, string>)
           : undefined;
       const appRef = typeof a.appRef === 'string' && a.appRef.trim() ? a.appRef.trim() : undefined;
+      const agentRef = typeof a.agentRef === 'string' && a.agentRef.trim() ? a.agentRef.trim() : undefined;
       const runAsSelf = a.runAsSelf === true;
 
       // Single run chokepoint: MCP resolves the task to a concrete node URN via
@@ -8573,7 +9273,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // RENDER the assembled prompt like hadron_run_action. Both modes now share
       // MCP's resolution UX — execute mode gets the picker too.
       const runOrRender = async (nodeUrn: string): Promise<ToolText> => {
-        if (!auth.clientId && !auth.appId && !auth.userId) return textResult('Not authenticated.');
+        if (!auth.clientId && !auth.appId && !auth.userId) return refusalResult('Not authenticated.');
         if (appRef) {
           const ctx: Context = {
             db,
@@ -8588,18 +9288,20 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           try {
             const runId = await resolvers.Mutation.runTask(
               {},
-              { nodeRef: nodeUrn, args, appRef, runAsSelf },
+              { nodeRef: nodeUrn, args, appRef, agentRef, runAsSelf },
               ctx,
             );
             return textResult(
               `Run started: ${runId}\nRead its status, output and path with hadron_get_run(ref: "${runId}").`,
             );
           } catch (err) {
-            return textResult(`Could not start run: ${(err as Error).message}`);
+            // #2735: the one typed refusal an agent must be able to act on by name.
+            const typed = (err as { extensions?: { code?: unknown } }).extensions?.code === 'RUN_AGENT_REQUIRED' ? '[RUN_AGENT_REQUIRED] ' : '';
+            return toolErrorResult(err, () => `Could not start run: ${typed}${(err as Error).message}`, 'hadron_run_task');
           }
         }
         const loaded = await loadNodeForRun(nodeUrn);
-        if ('error' in loaded) return textResult(loaded.error);
+        if ('error' in loaded) return refusalResult(loaded.error);
         return textResult(await renderRunNode(loaded.node, loaded.loc, args));
       };
 
@@ -8608,7 +9310,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         return runOrRender(directUrn);
       }
 
-      if (!auth.clientId && !auth.appId && !auth.userId) return textResult('Not authenticated.');
+      if (!auth.clientId && !auth.appId && !auth.userId) return refusalResult('Not authenticated.');
 
       const mem = await resolveRunTaskMemory(memoryHint);
       if ('done' in mem) return mem.done;
@@ -8756,9 +9458,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     // to go looking for the prompt afterwards, and nothing routes it to one
     // (hadron_server_info returns deployment identity only). Returning it
     // live also removes the reason to publish briefing NODES into the Team
-    // Agent's memory (hadron-cli#443): those are copies of
-    // Agent.systemPrompt + Worker.promptOverride that nothing recomputes,
-    // so they go stale silently the moment a role agent's prompt changes.
+    // Agent's memory (hadron-cli#443): those are copies of the briefing
+    // that nothing recomputes, so they go stale silently the moment a role
+    // agent's prompt changes.
     //
     // Resolved through the SAME field resolver GraphQL serves
     // (Worker.prompt), so the two surfaces cannot drift — and that resolver
@@ -8780,7 +9482,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // the stamps describe the text printed below (one agent read — no
         // parallel lookup that could race a template edit).
         const briefing = worker
-          ? await composeWorkerPrompt(mcpCtx, worker, { llmModel: session.llmModel })
+          ? await composeWorkerPrompt({ ...mcpCtx, sessionId: session.id }, worker, { llmModel: session.llmModel }) // the session being returned, so its record (not the current approval) is read
           : { text: null as string | null, renderedAt: null as Date | null, roleAgentUpdatedAt: null as Date | null };
         const prompt = briefing.text;
         // #1029: the previous stint's handoff, delivered with the briefing
@@ -8808,14 +9510,14 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           `\nWorking as ${worker?.name ?? 'worker'} (worker id: ${session.workerId}).` +
           (boundUrn ? `\n${boundUrn}` : '') +
           (boundUrl ? `\nURL: ${boundUrl}` : '') +
-          // A worker whose agent carries no template and who has no override
-          // has no briefing — say so, rather than emitting a bare heading.
+          // A worker with no servable prompt has no briefing — say so, rather
+          // than emitting a bare heading.
           (prompt
             ? `\n\nBoot briefing — adopt this for the rest of the session:` +
               `\nrendered at: ${briefing.renderedAt!.toISOString()}` +
-              `\nrole Agent updated at: ${briefing.roleAgentUpdatedAt ? briefing.roleAgentUpdatedAt.toISOString() : 'not recorded'} (generic Agent row update — no per-override mtime is tracked)` +
+              `\nrole Agent updated at: ${briefing.roleAgentUpdatedAt ? briefing.roleAgentUpdatedAt.toISOString() : 'not recorded'} (generic Agent row update)` +
               `\n\n${prompt}`
-            : '\n\n(No boot briefing: the role agent carries no systemPrompt template and this worker has no promptOverride.)') +
+            : '\n\n(No boot briefing: no boot prompt is served to this worker.)') +
           renderWorkerContinuity(continuity as RenderableContinuity | null);
       } catch {
         workerLine =
@@ -8825,16 +9527,29 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     }
     // #1599: the session argument is never the adjacent worker identity.
     const sessionLabel = session.workerId ? 'Worker session id' : 'Session id';
-    return `${sharedConnectionNote}\n${sessionLabel}: ${session.id} (pass as \`session\` to team tools)${workerLine}`;
+    return `${sharedConnectionNote}\n${sessionLabel}: ${session.id} (pass as \`session\` on a write to attribute it)${workerLine}`;
   }
 
   // ── hadron_start_session ──────────────────────────────────────────────────────
 
   server.tool(
     'hadron_start_session',
-    'Start a session — and when workerRef is passed, a WORKER SESSION: the binding that makes work attributable to that named teammate. Two different things are called a session: the WORKER SESSION is this binding, held server-side; your CHAT SESSION is the conversation you are in — the Claude Desktop window, the Claude Code session, the IDE chat. ENDING YOUR CHAT SESSION DOES NOT END A WORKER SESSION (#1034): closing, archiving or losing the conversation leaves this binding open until hadron_end_session. Since #1114 the reaper no longer ends a session for inactivity — silence is not evidence of abandonment. What DOES change while it sits idle is how it is DESCRIBED: liveness is derived from recent driving, so a session that remains untouched past its idle window reads as not-live and stops blocking a bind, WITHOUT being ended and with its handoff still unwritten rather than lost. That changes no HOLD: a human-held name stays held until explicit release, so only its holder can bind it again. All subsequent tool calls can reference this session ID for attribution. A worker or agent session also BINDS THIS MCP CONNECTION (DAC): every later node write on it records that Worker / Agent as its author beside you (Node.createdByWorker / updatedByWorker), checked afresh on each call, so ending the session stops it at once; a reconnect starts unbound until you start or name a session again. A host may carry SEVERAL chat sessions over one connection (#1701): binding a second worker there (or starting a plain session) does not displace the first, and once more than one worker has been bound on the connection (a plain session counting as a binding to no worker), even one after another, the server cannot tell which chat session is calling, so every writing tool takes an optional `session` argument — pass the id this call returned on each write, or the write is refused SESSION_AMBIGUOUS rather than credited to the wrong worker. The receipt warns you when this bind made the connection shared. Starting a session PINS its App as this session\'s active App, so no hadron_set_active_app is needed afterwards; if the MCP connection is later re-established (which happens transparently), pass the session id back to the team tools to restore that App context. Pass workerRef — the worker\'s NAME ("Iris", resolved within the active App), its id, or its URN (hrn:worker:<root>:<app-slug>:<slug>) — to work AS that named casting, which is required for worker-attributed team chat posts and worklog records. An id or URN workerRef names its own App, so it needs no App selected first; a bare NAME does, since a name is unique only within an App. On success the worker\'s resolved BOOT BRIEFING comes back with the session: adopt it for the rest of this stint, and never cache or copy it — it is rendered live from the role agent\'s prompt template, so a copy goes stale silently. Binding a worker someone is actively DRIVING refuses WORKER_TAKEN (#1114: an OPEN session is not necessarily a live one — a session whose most recent activity is outside its idle window is not being driven, so that session does not refuse) with who last drove it and when (informed takeover, cor:agt:020:03) — note an open worker session does not by itself mean someone is at the keyboard, since it outlives the chat session that started it; retry with force: true ONLY after surfacing that to the user and getting an explicit override. Binding a worker ENDS your own other open sessions on that same worker (#1617), the lapsed ones and any a force displaces: they are marked "superseded by session <new id>" and end WITHOUT a handoff, so write the handoff with hadron_end_session first if one is owed. Do not bind a second session to recover from a context compaction; recover the existing one with hadron_whoami. A LAPSED session of yours does not need a rebind at all: if you hold the name and nobody else is driving the worker, your next team-chat post, read or mark-read through it resumes it.',
+    'Start a plain session: a record of this stint that later tool calls can name for attribution. Your CHAT SESSION (the Claude Desktop window, the Claude Code session, the IDE chat) is not this session; ending the chat does not end it, so end it with hadron_end_session. Starting a session PINS its App as the active App for this session, so no hadron_set_active_app is needed afterwards. A WORKER SESSION (a named teammate casting) is NOT started here: MCP does not bind workers (#3082, cor:agt:020:03). Passing workerRef or launchGrant is refused with MCP_WORKER_BINDING_UNSUPPORTED before anything is read or written; start the worker with the CLI (`hadron team session start --as <name> --tool <tool>`). A worker session the CLI started may still attribute your core tool calls here: pass its id as `session` on a write, or send it in the X-Hadron-Session header.',
     SHAPE_HADRON_START_SESSION,
-    async ({ description, type, repo, branch, prNumber, customerId, language, llmModel, family, parentSessionId, prevSessionId, workerRef, reportsTo, force, launchGrant }) => {
+    async ({ description, type, repo, branch, prNumber, customerId, language, llmModel, family, parentSessionId, prevSessionId, workerRef: givenWorkerRef, reportsTo, force, launchGrant }) => {
+      // #3082 (V7 R2, cor:agt:020:03): MCP does not bind workers. This is the FIRST statement: judged before the App
+      // selection is restored, before any worker or grant lookup and before startSession, so it is identical whether the
+      // worker or the grant exists (no oracle) and writes no session, hold, supersede, claim or consumed grant. It covers
+      // every principal. A launch grant counts even when empty, because the resolver keys on `!= null`.
+      if ((givenWorkerRef != null && givenWorkerRef.trim() !== '') || launchGrant != null) {
+        return {
+          ...refusalResult(
+            `[${MCP_WORKER_BINDING_UNSUPPORTED}] MCP does not start worker sessions. Start the worker with the CLI: ` +
+              '`hadron team session start --as <worker> --tool <tool>`. Nothing was changed.',
+          ),
+          structuredContent: { error: { code: MCP_WORKER_BINDING_UNSUPPORTED, message: 'MCP does not start worker sessions.' } },
+        };
+      }
       // Spec 026 / D-2026-05-21-003 strict tool: session-start needs App
       // context to attribute the session. Errors with typed [no_active_app]
       // envelope for multi-App OAuth callers without selection.
@@ -8848,18 +9563,15 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // predicate the appRef path runs, so this widens nothing: it lets the
       // resolver's existing branch be reached instead of erroring above it.
       //
-      // A bare NAME still requires App scope — a name is unique only WITHIN an
-      // App (#990), so without one there is nothing to resolve it against, and
-      // guessing across the caller's Apps would resolve one name to several
-      // workers. That caller gets the normal, actionable envelope.
-      const workerRefTrimmed = workerRef?.trim();
-      const workerRefNamesItsApp =
-        !!workerRefTrimmed && (isId(workerRefTrimmed) || hasSchemePrefix(workerRefTrimmed));
-      // #1709: a launch grant names its own worker, and so its App.
-      if (!workerRefNamesItsApp && !launchGrant) {
-        const appScopeError = requireAppScope();
-        if (appScopeError) return appScopeError;
-      }
+      // #1597: any nonblank worker ref delegates to the shared resolver. A
+      // bare name without an App is resolved there across bind-authorized Apps;
+      // id/URN forms retain their own shape dispatch. Plain sessions still need
+      // the existing App-selection behavior.
+      restoreSelectedApp();
+      // #3082: every session started here is plain, so the App must be selected (the self-describing workerRef
+      // exemption of #1005 and #1597 went with the worker binding).
+      const appScopeError = requireAppScope();
+      if (appScopeError) return appScopeError;
 
       // #940: delegate to the GraphQL resolver (findings:node-write-surface-
       // invariants — MCP tools delegate, never re-implement), so the worker
@@ -8899,10 +9611,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               family: family ?? undefined,
               parentSessionId: parentSessionId ?? undefined,
               prevSessionId: prevSessionId ?? undefined,
-              workerRef: workerRef ?? undefined,
               reportsTo: reportsTo ?? undefined,
               force: force ?? undefined,
-              launchGrant: launchGrant ?? undefined,
             },
           },
           mcpCtx,
@@ -8911,14 +9621,14 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         const receipt = await bindReceipt(session, mcpCtx);
         return textResult(`Session started: ${session.id}\n> ${description}${receipt}`);
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'session start failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'session start failed'}`, 'hadron_start_session');
       }
     },
   );
 
   // ── #1956: resume claims ──────────────────────────────────────────────────────
 
-  server.tool(
+  off(
     'hadron_create_resume_claim',
     '#1956 (cor:agt:020:03): before a deliberate context reset that KEEPS your worker session open (a shed, a /clear), write a resume claim so the fresh context recovers this worker with hadron_resume_session and no arguments — no binding file, no worker name to remember. The claim is single use, lives 60 seconds from this call, and is redeemable only by you (judged by your credential; it has no id to copy). Write it as the LAST step before the reset, after your handoff or shed note. For a rotation that ENDS the session, pass resumeClaim: true to hadron_end_session instead.',
     SHAPE_HADRON_CREATE_RESUME_CLAIM,
@@ -8942,12 +9652,12 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         );
       } catch (e) {
         const code = e instanceof ScopeGraphQLError ? String(e.extensions?.code ?? '') : '';
-        return textResult(`Error${code ? ` [${code}]` : ''}: ${e instanceof Error ? e.message : 'the claim could not be written'}`);
+        return toolErrorResult(e, () => `Error${code ? ` [${code}]` : ''}: ${e instanceof Error ? e.message : 'the claim could not be written'}`, 'hadron_create_resume_claim');
       }
     },
   );
 
-  server.tool(
+  off(
     'hadron_resume_session',
     '#1956 (cor:agt:020:03): recover your worker binding after a context reset — call this FIRST, with no arguments, when you do not know which worker session you are. One unused resume claim of yours binds it and returns the boot briefing and handoff, exactly as hadron_start_session would: the same open session after a shed, or the worker\'s next session after a rotation that ended the last one. Several claims are LISTED (worker name, description, session id) and nothing is bound: ask the human which, then call again with session. With no claim, if exactly one of your worker sessions is live it is resumed; several are listed, never guessed. Nothing to resume refuses NOTHING_TO_RESUME and binds nothing — then ask the human which worker you are and use hadron_start_session. A claim never overrides the worker\'s current state: if the name moved, you lost the App, or another session of the worker is live, it refuses RESUME_REFUSED. This never posts or records anything as you or anyone else.',
     SHAPE_HADRON_RESUME_SESSION,
@@ -8972,7 +9682,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         );
       } catch (e) {
         const code = e instanceof ScopeGraphQLError ? String(e.extensions?.code ?? '') : '';
-        return textResult(`Error${code ? ` [${code}]` : ''}: ${e instanceof Error ? e.message : 'resume failed'}`);
+        return toolErrorResult(e, () => `Error${code ? ` [${code}]` : ''}: ${e instanceof Error ? e.message : 'resume failed'}`, 'hadron_resume_session');
       }
       if (r.outcome === 'CHOOSE') {
         const lines = (r.candidates as ResumeCandidate[]).map(
@@ -9014,7 +9724,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       if (appScopeError) return appScopeError;
 
       const session = await db.session.findUnique({ where: { id } });
-      if (!session) return textResult(`Session "${id}" not found.`);
+      if (!session) return refusalResult(`Session "${id}" not found.`);
       // #931: same write gate as the GraphQL endSession — previously this raw
       // update was ungated, so any App-scoped caller holding a session id
       // could end another App's (or user's) session. Allowed: a PURE App-key
@@ -9031,7 +9741,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         ? session.userId === auth.userId
         : await appPrincipalSessionWriteAllowed(db, auth, session); // #1969: a host key's refusal is recorded
       if (!mayEnd) {
-        return textResult(`Forbidden: session "${id}" belongs to a different App or user.`);
+        return refusalResult(`Forbidden: session "${id}" belongs to a different App or user.`);
       }
 
       // #1956: a resume claim needs the caller's own open worker session. Judged BEFORE the handoff is written, so a
@@ -9077,10 +9787,14 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         try {
           await writeSessionHandoff(mcpCtx, session.id, session.workerId, handoffBody);
         } catch (e) {
-          return textResult(
-            `The handoff could not be written, so the session is STILL OPEN and was not ended — retry, or end without a handoff. ` +
-              `Cause: ${e instanceof Error ? e.message : 'unknown'}`,
-          );
+          // The session-still-open guidance stays; the Cause is shown only for a typed refusal, never a fault's detail (#1789).
+          const failure = toolErrorResult(e, () => e instanceof Error ? e.message : 'unknown', 'hadron_end_session:handoff');
+          return {
+            ...failure,
+            content: [{ type: 'text' as const, text:
+              `The handoff could not be written, so the session is STILL OPEN and was not ended — retry, or end without a handoff. ` +
+              `Cause: ${failure.content[0].text}` }],
+          };
         }
       }
 
@@ -9089,7 +9803,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       let claimNote = '';
       if (resumeClaim && auth.userId && session.workerId && session.appId) {
         const { expiresAt } = await writeResumeClaim(db, { sessionId: id, appId: session.appId, workerId: session.workerId, holderUserId: auth.userId });
-        claimNote = `\nResume claim written: the next context recovers this worker with hadron_resume_session (no arguments) until ${expiresAt.toISOString()} (60 seconds, once).`;
+        claimNote = `\nResume claim written: the next context recovers this worker with the CLI (\`hadron team session start\`, no --as) until ${expiresAt.toISOString()} (60 seconds, once).`;
       }
 
       // FIRST END WINS, through the SHARED writer the GraphQL resolver uses
@@ -9163,7 +9877,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_whoami',
-    'Answer "what am I driving right now?" — your own OPEN sessions. Optional app and workerRef filters narrow the complete authorized set before paging; omit both for the existing view. Each session shows its App, when it started, and the worker it is bound to IF it is bound (#1016). Not every row is a worker session: a session started without workerRef is listed too and says "working as: nobody", which is the shape in which work goes unattributed, so it is shown rather than hidden. This is also the tool that tells you a WORKER SESSION outlived the CHAT SESSION it was started from: the two are independent, and ending a chat session never ends a worker session (#1034), so a bound row here may well be one whose Desktop window or Claude Code session is long gone. For a BOUND row, its session id is the only handle that makes that work attributable, and nothing on the wire carries it: there is no worktree file to read it back from, so a host that loses it to a context compaction loses attribution with it. The chat tools no longer hide the loss: since #1967, hadron_team_chat_post (like hadron_channel_post) refuses a post that names no session on a connection with no bound worker [authorship_required] instead of recording it under the human\'s name, so a lost id surfaces as that refusal — come here for the id. Do NOT read a successful call as evidence your binding is alive: hadron_record_work accepts an ended session on purpose (late attribution, cor:agt:020:05) and hadron_end_session is idempotent, so neither refuses one — both now SAY so in their receipt instead. The team chat is the only surface that refuses outright, because authoring as a worker needs a live session. This tool is the direct answer, and the one to trust. Call this whenever you are unsure which session you are driving, or after any context loss, and pass back a row that is BOUND and still OPEN — with includeEnded this list also returns bound rows marked [ENDED], and team chat refuses an unbound row (SESSION_NOT_WORKER_BOUND) and an ended one (SESSION_ENDED) rather than silently attributing either. Read-only, and scoped to sessions you started — it is not a presence board for the team (use hadron_list_workers to see who is taken).',
+    'Answer "what am I driving right now?" — your own OPEN sessions. Optional app and workerRef filters narrow the complete authorized set before paging; omit both for the existing view. Every successful answer opens with an `active memory:` line naming the memory selected on this connection, or `none` when none is set or it is no longer readable (#2515); it describes the connection, not any session row, and is not a guarantee of where a write lands. Each session shows its App, when it started, and the worker it is bound to IF it is bound (#1016). Not every row is a worker session: a plain session says "working as: nobody". MCP does not start worker sessions (#3082); a bound row was started by the CLI, and its id passed as `session` on a core write (or sent in the X-Hadron-Session header) attributes that write to the worker. For a BOUND row, its session id is the only handle that makes the work attributable, and nothing on the wire carries it, so a host that loses it to a context compaction loses attribution with it: come here for the id. Do NOT read a successful call as evidence your binding is alive: hadron_end_session is idempotent, so neither a live nor a dead binding makes this call fail. Call this whenever you are unsure which session you are driving, or after any context loss. With includeEnded this list also returns bound rows marked [ENDED]. Read-only, and scoped to sessions you started.',
     SHAPE_HADRON_WHOAMI,
     async ({ limit, includeEnded, app, workerRef }) => {
       // Scoped by IDENTITY, deliberately narrower than the GraphQL `sessions`
@@ -9201,7 +9915,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         : auth.appId
           ? { appId: auth.appId, userId: null }
           : null;
-      if (!scope) return textResult('Not authenticated — no sessions to report.');
+      if (!scope) return refusalResult('Not authenticated — no sessions to report.');
 
       // createTestableMcpServer bypasses zod — normalize defensively (a NaN
       // would reach Prisma's `take` as a raw driver error rather than a clamp).
@@ -9250,14 +9964,25 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       if (selectionProblem === 'ambiguous') {
         return { ...textResult('[ambiguous_ref] More than one match among your sessions. Specify an App or use an exact App/Worker ID or URN.'), isError: true as const };
       }
+      // #2515 — this connection's active-memory selection, re-authorized now
+      // through the same read gate hadron_set_active_memory uses. Read-only: a
+      // gone or unreadable selection answers `none` and is neither cleared nor
+      // replaced. A genuine infrastructure error propagates as a tool failure.
+      const activeMemoryLine = await (async () => {
+        const mem = activeMemoryUrn ? await resolveVisibleMemoryByUrn(auth, activeMemoryUrn, 'read') : null;
+        if (!mem) return 'active memory: none\n';
+        const named = await db.memory.findUnique({ where: { id: mem.id }, select: { name: true } });
+        return `active memory: ${safeEmitEntityUrnV2('memory', mem.urn)}${named?.name ? ` (${named.name})` : ''}\n`;
+      })();
       if (sessions.length === 0 && (app !== undefined || workerRef !== undefined)) {
-        return textResult('No matching session.');
+        return textResult(`${activeMemoryLine}No matching session.`);
       }
       if (sessions.length === 0) {
         return textResult(
-          includeEnded
-            ? 'You have no sessions. Start one with hadron_start_session(description: "<task>", workerRef: "<name>") to work as a teammate.'
-            : 'You have no open sessions. Start one with hadron_start_session(description: "<task>", workerRef: "<name>"); pass includeEnded to see recent ended ones.',
+          activeMemoryLine +
+          (includeEnded
+            ? 'You have no sessions. Start a plain session with hadron_start_session(description: "<task>"). A worker session starts only from the CLI (hadron team session start), never over MCP.'
+            : 'You have no open sessions. Start a plain session with hadron_start_session(description: "<task>"); pass includeEnded to see recent ended ones. A worker session starts only from the CLI (hadron team session start), never over MCP.'),
         );
       }
 
@@ -9319,7 +10044,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // identifier cannot disagree.
         const url = workerPortalUrl(urn);
         return (
-          `- session ${s.id}${s.endedAt ? ' [ENDED]' : ''}${s.workerId ? ' (worker session id; pass as `session` to team tools)' : ' (session id)'}\n` +
+          `- session ${s.id}${s.endedAt ? ' [ENDED]' : ''}${s.workerId ? ' (worker session id; pass as `session` on a write to attribute it)' : ' (session id)'}\n` +
           (s.endedAt ? `    ended: ${s.endedAt.toISOString()} · end reason: ${sessionEndReason(s)}\n` : '') +
           // The un-bound case is the one worth calling out: it is the shape in
           // which a team-chat post silently lands under the human's name.
@@ -9350,7 +10075,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         : `${sessions.length} session(s):\n`;
 
       return textResult(
-        `${header}${lines.join('\n')}\n\n` +
+        `${activeMemoryLine}${header}${lines.join('\n')}\n\n` +
           // #1034: "session id" stays GENERAL here, because this list includes
           // unbound sessions whose own row says "working as: nobody" — calling
           // every id a worker session id would contradict the line above it and
@@ -9361,10 +10086,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           // one (SESSION_NOT_WORKER_BOUND) — so unconditional "post as the
           // worker" advice contradicts the "working as: nobody" row directly
           // above it, and promises a call that cannot succeed.
-          'Pass a row that is BOUND and still OPEN to hadron_team_chat_post to post AS that worker — an ' +
-          'unbound row is refused SESSION_NOT_WORKER_BOUND and an [ENDED] one SESSION_ENDED, neither ' +
-          'silently posted as you. Any session id works for ' +
-          'hadron_record_work and hadron_end_session. Re-fetch a worker\'s boot briefing with hadron_get_worker. ' +
+          'Pass a row that is BOUND and still OPEN as `session` on a core write to attribute it to that worker; ' +
+          'an unbound row attributes nothing and an [ENDED] one is refused when passed as the `session` argument ' +
+          '(an ended id in the X-Hadron-Session header is not refused: the write succeeds and is attributed to nobody). Any session id works for ' +
+          'hadron_end_session. Re-fetch a worker\'s boot briefing with `hadron team worker get <name>`. ' +
           'A bound row is a worker session. One created by hadron_start_session has no hard expiry and ' +
           'stays open until hadron_end_session, no matter what happened to the chat session that started ' +
           'it. A session created elsewhere with a non-null hard expiry can also be ended by the reaper ' +
@@ -9377,11 +10102,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   // ── hadron_cast_worker ────────────────────────────────────────────────────────
 
-  server.tool(
+  off(
     'hadron_cast_worker',
-    'Cast a Worker (#974, spec cor:agt:020 / cor:dmo:050:11): create a named AI team member — the casting of an agent already installed in the team App under a name ("Iris"). The agent carries the persona dressing (personaRole + the systemPrompt template with {{name}}/{{role}} placeholders); the Worker is the local named identity that does attributable work. Pass agent to cast a specific installed agent, or role to pick the single installed agent with that personaRole. The name is REQUIRED (#1050): a worker\'s name is permanent within the App, so it is chosen, never derived — a nameless cast refuses WORKER_NAME_REQUIRED rather than inventing a permanent identifier nobody picked. Names are unique per App, case-insensitively, FOREVER (two Apps may each have an Iris; a name already taken here — including a retired worker\'s — refuses with WORKER_NAME_TAKEN). NFKC-normalized Unicode 16 UTS #39 skeletons (original-case and caseless) must also be distinct here, retired workers included: WORKER_NAME_CONFUSABLE names the colliding worker; display spelling is preserved. Returns the worker\'s id, name, URN (hrn:worker:<root>:<app-slug>:<slug>, #991) and resolved prompt — print the prompt as the worker\'s boot briefing, and pass the URN (or the id) as workerRef when starting sessions. Casting is a one-time mint, so record the URN: it is the ref that gets you back to this worker later.',
+    'Cast a Worker (#974, spec cor:agt:020 / cor:dmo:050:11): create a named AI team member — the casting of an agent already installed in the team App under a name ("Iris"). The agent carries the persona dressing (personaRole, and the compiled boot prompt every casting of it is served); the Worker is the local named identity that does attributable work. Pass agent to cast a specific installed agent, or role to pick the single installed agent with that personaRole. The name is REQUIRED (#1050): a worker\'s name is permanent within the App, so it is chosen, never derived — a nameless cast refuses WORKER_NAME_REQUIRED rather than inventing a permanent identifier nobody picked. Names are unique per App, case-insensitively, FOREVER (two Apps may each have an Iris; a name already taken here — including a retired worker\'s — refuses with WORKER_NAME_TAKEN). NFKC-normalized Unicode 16 UTS #39 skeletons (original-case and caseless) must also be distinct here, retired workers included: WORKER_NAME_CONFUSABLE names the colliding worker; display spelling is preserved. Returns the worker\'s id, name, URN (hrn:worker:<root>:<app-slug>:<slug>, #991) and resolved prompt — print the prompt as the worker\'s boot briefing, and pass the URN (or the id) as workerRef when starting sessions. Casting is a one-time mint, so record the URN: it is the ref that gets you back to this worker later. MCP accepts no instruction argument: a worker session is headless here and needs its own live workers.staff grant, with no wider right than its holder (#3308).',
     SHAPE_HADRON_CAST_WORKER,
-    async ({ role, name, agent, app, promptOverride, session }) => {
+    async ({ role, name, agent, app, reportsTo, noTeam, session }) => {
       // #1081 — the caller just drove this session, so it is alive. The
       // touch is explicit here rather than a side effect of whichever tool
       // happens to write the Session row (see heartbeatSession).
@@ -9418,7 +10143,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         };
         const worker = await resolvers.Mutation.castWorker(
           {},
-          { appRef, role: role ?? null, agentRef: agent ?? null, name: name ?? null, promptOverride: promptOverride ?? null },
+          { appRef, role: role ?? null, agentRef: agent ?? null, name: name ?? null,
+            ...(reportsTo !== undefined ? { reportsTo } : {}), ...(noTeam !== undefined ? { noTeam } : {}),
+          },
           ctx,
         );
         const prompt = await resolvers.Worker.prompt(worker, {}, ctx);
@@ -9430,16 +10157,20 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // #1026: the cast is a one-time mint whose receipt is the record a
         // human keeps, so the link ships with the URN it is built from.
         const workerUrl = workerPortalUrl(workerUrn);
+        const placement = await resolvers.Worker.teamPlacement(worker, {}, ctx);
+        const reportingHeadId = await resolvers.Worker.reportsToWorkerId(worker, {}, ctx);
         return textResult(
           `Worker cast: **${worker.name}**${worker.role ? ` (${worker.role})` : ''}\n` +
             `Worker id: ${worker.id}\n` +
+            (placement !== null ? `Team placement: ${placement}\n` : '') +
+            (reportingHeadId ? `Reports to worker: ${reportingHeadId}\n` : '') +
             (workerUrn ? `Worker URN: ${workerUrn}\n` : '') +
             (workerUrl ? `URL: ${workerUrl}\n` : '') +
             `\nBoot briefing:\n\n${prompt ?? ''}`,
         );
       } catch (e) {
-        if (e instanceof ScopeGraphQLError) return textResult(`Error: [${String(e.extensions?.code ?? 'ERROR')}] ${e.message}`);
-        return textResult(`Error: ${e instanceof Error ? e.message : 'worker casting failed'}`);
+        if (e instanceof ScopeGraphQLError) return refusalResult(`Error: [${String(e.extensions?.code ?? 'ERROR')}] ${e.message}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'worker casting failed'}`, 'hadron_cast_worker');
       }
     },
   );
@@ -9477,15 +10208,15 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         `Posted message #${msg.seq} in Channel ${ch ? `${ch.name} (${ch.loc})` : channelRef} as ${msg.authorName ?? 'unknown'}${extras.length ? ` (${extras.join('; ')})` : ''}.`,
       );
     } catch (e) {
-      if (e instanceof ScopeGraphQLError) return textResult(`[${String(e.extensions?.code ?? 'ERROR').toLowerCase()}] ${e.message}`);
-      return textResult(`Error: ${e instanceof Error ? e.message : 'channel post failed'}`);
+      if (e instanceof ScopeGraphQLError) return refusalResult(`[${String(e.extensions?.code ?? 'ERROR').toLowerCase()}] ${e.message}`);
+      return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'channel post failed'}`, 'hadron_channel_post');
     }
   };
 
   /** Read a Channel by id or address — the team-chat read's Channel-addressed twin. */
   const readChannel = async (
     channelRef: string,
-    args: { sinceSeq?: number; beforeSeq?: number; mentions?: string; limit?: number; offset?: number; session?: string; expectedIncarnation?: number },
+    args: { replyToSeq?: number; sinceSeq?: number; beforeSeq?: number; mentions?: string; teamHeadRef?: string; untagged?: boolean; limit?: number; offset?: number; session?: string; expectedIncarnation?: number },
   ) => {
     try {
       // #1353: capture applies to any user-principal session read — the pilot
@@ -9507,7 +10238,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         : chatCtx();
       const page = await resolvers.Query.channelMessages(
         {},
-        { channelRef, sinceSeq: args.sinceSeq ?? null, beforeSeq: args.beforeSeq ?? null, mentionsRef: args.mentions ?? null, limit: args.limit ?? null, offset: args.offset ?? null, expectedIncarnation: args.expectedIncarnation ?? null },
+        { channelRef, replyToSeq: args.replyToSeq ?? null, sinceSeq: args.sinceSeq ?? null, beforeSeq: args.beforeSeq ?? null, mentionsRef: args.mentions ?? null, teamHeadRef: args.teamHeadRef ?? null, untagged: args.untagged ?? null, limit: args.limit ?? null, offset: args.offset ?? null, expectedIncarnation: args.expectedIncarnation ?? null },
         resolverCtx,
       );
       if (captured && args.session) {
@@ -9516,9 +10247,12 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             channelId: captured.id,
             capturedHead: captured.lastSeq,
             sessionRef: args.session,
+            replyToSeq: args.replyToSeq,
             sinceSeq: args.sinceSeq,
             beforeSeq: args.beforeSeq,
             mentionsRef: args.mentions,
+            teamHeadRef: args.teamHeadRef,
+            untagged: args.untagged,
             limit: args.limit,
             offset: args.offset,
             expectedIncarnation: args.expectedIncarnation,
@@ -9539,12 +10273,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       const lines = page.items.map((m) => {
         const reply = m.replyToSeq != null ? ` (reply to #${m.replyToSeq})` : '';
         const cross = m.authorAppId ? ' [cross-App]' : '';
-        return `#${m.seq} ${chatByline(m)}${cross} ${m.at.toISOString()}${reply}:\n${m.body}`;
+        const tags = m.teamTags?.length ? ` [${m.teamTags.map(t => `${t.label} (headId: ${t.headId})`).join(', ')}]` : '';
+        return `#${m.seq} ${chatByline(m)}${cross}${tags} ${m.at.toISOString()}${reply}:\n${m.body}`;
       });
       return textResult(`${page.total} message(s) total, showing ${page.items.length}:\n\n${lines.join('\n\n')}${envelope}`);
     } catch (e) {
-      if (e instanceof ScopeGraphQLError) return textResult(`[${String(e.extensions?.code ?? 'ERROR').toLowerCase()}] ${e.message}`);
-      return textResult(`Error: ${e instanceof Error ? e.message : 'channel read failed'}`);
+      if (e instanceof ScopeGraphQLError) return refusalResult(`[${String(e.extensions?.code ?? 'ERROR').toLowerCase()}] ${e.message}`);
+      return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'channel read failed'}`, 'hadron_channel_read');
     }
   };
 
@@ -9563,7 +10298,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     limit?: number;
   }) => {
     if (!auth.userId || auth.impersonation) {
-      return textResult('[forbidden] Team-chat monitoring is available only to an ordinary user driving their own live Worker sessions.');
+      return refusalResult('[forbidden] Team-chat monitoring is available only to an ordinary user driving their own live Worker sessions.');
     }
 
     try {
@@ -9572,7 +10307,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         where: { id: appId, deletedAt: null, uninstalledAt: null },
         select: { id: true, organizationId: true, ownerUserId: true, defaultChannelId: true },
       });
-      if (!app) return textResult('[app_not_found] App not found.');
+      if (!app) return refusalResult('[app_not_found] App not found.');
 
       const ctx: Context = {
         ...chatCtx(),
@@ -9582,7 +10317,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // create a UsageEvent that makes the transport-bound session live.
         sessionId: undefined,
       };
-      if (!(await isAppParticipant(ctx, app))) return textResult('[forbidden] You do not participate in that App.');
+      if (!(await isAppParticipant(ctx, app))) return refusalResult('[forbidden] You do not participate in that App.');
 
       const resolveWorkerInApp = async (ref: string) => {
         try {
@@ -9590,8 +10325,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           return worker.appId === app.id ? worker : null;
         } catch (e) {
           if (
-            (e instanceof ScopeGraphQLError && ['WORKER_NOT_FOUND', 'FORBIDDEN'].includes(String(e.extensions?.code))) ||
-            (e instanceof Error && e.message === 'Forbidden')
+            e instanceof ScopeGraphQLError && ['WORKER_NOT_FOUND', 'FORBIDDEN'].includes(String(e.extensions?.code))
           ) return null;
           throw e;
         }
@@ -9600,7 +10334,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         ? await resolveWorkerInApp(args.monitorFor)
         : null;
       if (args.monitorFor !== undefined && !requestedWorker) {
-        return textResult('[monitor_target_not_live] That Worker is not in one of your live sessions in this App.');
+        return refusalResult('[monitor_target_not_live] That Worker is not in one of your live sessions in this App.');
       }
 
       // A monitor is an operator-owned relay, not a presence board. Enumerate
@@ -9621,7 +10355,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         take: requestedWorker ? OPEN_SESSION_SCAN_CAP : OPEN_SESSION_SCAN_CAP + 1,
       });
       if (!requestedWorker && open.length > OPEN_SESSION_SCAN_CAP) {
-        return textResult(`[monitor_scope_too_large] More than ${OPEN_SESSION_SCAN_CAP} recent Worker sessions match. Pass monitorFor to narrow the monitor.`);
+        return refusalResult(`[monitor_scope_too_large] More than ${OPEN_SESSION_SCAN_CAP} recent Worker sessions match. Pass monitorFor to narrow the monitor.`);
       }
       const lastEvents = await loadLastEventBySession(db as never, open.map((s) => s.id));
       const liveWorkerIds = [...new Set(
@@ -9651,7 +10385,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       let targetWorkerIds = liveWorkerIds;
       if (requestedWorker) {
         if (!liveWorkerSet.has(requestedWorker.id)) {
-          return textResult('[monitor_target_not_live] That Worker is not in one of your live sessions in this App.');
+          return refusalResult('[monitor_target_not_live] That Worker is not in one of your live sessions in this App.');
         }
         targetWorkerIds = [requestedWorker.id];
       }
@@ -9662,15 +10396,15 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       const channelId = args.channel !== undefined
         ? await resolveChannelRefId(db, args.channel)
         : app.defaultChannelId;
-      if (!channelId) return textResult('[channel_not_found] No matching Channel.');
+      if (!channelId) return refusalResult('[channel_not_found] No matching Channel.');
       const selectedChannel = await db.channel.findFirst({
         where: { id: channelId, deletedAt: null },
         select: { id: true, name: true, loc: true, lastSeq: true },
       });
-      if (!selectedChannel) return textResult('[channel_not_found] No matching Channel.');
+      if (!selectedChannel) return refusalResult('[channel_not_found] No matching Channel.');
 
       if ((args.acknowledge?.length ?? 0) > TEAM_CHAT_MONITOR_MAX_TARGETS) {
-        return textResult(`[bad_user_input] acknowledge accepts at most ${TEAM_CHAT_MONITOR_MAX_TARGETS} checkpoints.`);
+        return refusalResult(`[bad_user_input] acknowledge accepts at most ${TEAM_CHAT_MONITOR_MAX_TARGETS} checkpoints.`);
       }
       const ackByWorker = new Map<string, { workerId: string; seq: number }>();
       const targetWorkerSet = new Set(targetWorkerIds);
@@ -9684,10 +10418,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           checkpoint.channelId !== ack.channel ||
           checkpoint.seq !== ack.seq
         ) {
-          return textResult('[invalid_checkpoint] The acknowledgement was not issued for this Worker, Channel and sequence. Poll again.');
+          return refusalResult('[invalid_checkpoint] The acknowledgement was not issued for this Worker, Channel and sequence. Poll again.');
         }
         if (!liveWorkerSet.has(checkpoint.workerId) || !targetWorkerSet.has(checkpoint.workerId)) {
-          return textResult('[monitor_target_not_live] An acknowledgement named a Worker outside this monitor\'s live targets.');
+          return refusalResult('[monitor_target_not_live] An acknowledgement named a Worker outside this monitor\'s live targets.');
         }
         const held = ackByWorker.get(checkpoint.workerId);
         if (!held || checkpoint.seq > held.seq) {
@@ -9698,9 +10432,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       for (const ack of resolvedAcks) {
         const ackView = await resolveRegister(db, { attendee: { workerId: ack.workerId }, actor: ctx });
         const ackRow = ackView?.rows.find((candidate) => candidate.channel.id === selectedChannel.id);
-        if (!ackRow) return textResult('[channel_not_found] No matching Channel.');
+        if (!ackRow) return refusalResult('[channel_not_found] No matching Channel.');
         if (!ackRow.canRead || ackRow.entry.role === 'POST') {
-          return textResult('[forbidden] An acknowledgement named a Channel this Worker cannot watch.');
+          return refusalResult('[forbidden] An acknowledgement named a Channel this Worker cannot watch.');
         }
       }
       // One checkpoint is one act. If any entry is invalid or a write fails,
@@ -9769,7 +10503,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // No applicable register row means the monitor has no legitimate route
       // to this Channel. Collapse that with absence, matching every other
       // Channel read surface instead of becoming an id-existence oracle.
-      if (registeredTargets === 0) return textResult('[channel_not_found] No matching Channel.');
+      if (registeredTargets === 0) return refusalResult('[channel_not_found] No matching Channel.');
 
       const ackLine = acknowledged.length ? `Acknowledged ${acknowledged.join('; ')}.\n` : '';
       const pollStateLine = acknowledged.length
@@ -9807,7 +10541,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           if (message.authorWorkerId === watcher.workerId) return false;
           if (!watcher.mentionOnly) return true;
           // #2020: its names, or a broadcast stamped at post time.
-          return mentionReach(message, [...watcher.mentionTokens]) !== null;
+          return mentionReach(message, [...watcher.mentionTokens], [watcher.workerId]) !== null;
         });
         if (routes.length === 0) continue;
         const reply = message.replyToSeq != null ? ` (reply to #${message.replyToSeq})` : '';
@@ -9865,7 +10599,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     return bound.actor.workerId ? bound.sessionId : null;
   };
 
-  server.tool(
+  off(
     'hadron_channel_post',
     'Post a message into a Channel by id or ADDRESS — the chat-root URN hadron_list_channels prints (spec 049 — Channels are the durable, server-ordered streams hadron_list_channels shows; every App\'s default `team` Channel is what hadron_team_chat_post writes). Same contract as hadron_team_chat_post: mentions extracted server-side, replyToSeq wires a reply, session posts AS that session\'s Worker. AUTHORSHIP IS EXPLICIT (#1697, parity with the CLI\'s `channel post --session | --as-me`): with no session, a connection bound to one worker session (hadron_start_session) posts as that Worker; otherwise pass asMe: true to post as yourself, or the post is refused [authorship_required] — never silently recorded under your name. Item J: a Worker of ANOTHER App authors here only when you (its driver) may write the Channel\'s host memory — the post is then marked cross-App. A Channel you may not read is [channel_not_found].',
     SHAPE_HADRON_CHANNEL_POST,
@@ -9900,21 +10634,21 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  server.tool(
+  off(
     'hadron_channel_read',
     'Read a Channel by id or ADDRESS (the chat-root URN hadron_list_channels prints; spec 049). With no cursor or offset, returns the newest page, ascending by seq; sinceSeq reads forward and beforeSeq pages backward. A Channel you may not read is [channel_not_found].',
     SHAPE_HADRON_CHANNEL_READ,
-    async ({ channel, sinceSeq, beforeSeq, mentions, limit, offset, session: rawSession, expectedIncarnation }) => {
+    async ({ channel, replyToSeq, sinceSeq, beforeSeq, mentions, teamHeadRef, untagged, limit, offset, session: rawSession, expectedIncarnation }) => {
       // A blank session is no session, for every consumer below (#1362 review).
       const session = typeof rawSession === 'string' ? rawSession.trim() || undefined : rawSession;
       await heartbeatSession(session);
-      return readChannel(channel, { sinceSeq, beforeSeq, mentions, limit, offset, session, expectedIncarnation });
+      return readChannel(channel, { replyToSeq, sinceSeq, beforeSeq, mentions, teamHeadRef, untagged, limit, offset, session, expectedIncarnation });
     },
   );
 
   // ── hadron_team_chat_post / hadron_team_chat_read ─────────────────────────────
 
-  server.tool(
+  off(
     'hadron_team_chat_post',
     'Post a message into the team App\'s chat (#939). The team chat is one well-known chat per team App (loc chats:team in the Team Agent\'s shared app memory), bootstrapped on first post. Mention teammates as @worker-name or @handle — mentions are extracted server-side into the message envelope. Pass session to post AS the Worker bound to that session (the driving session is recorded; the worker must not be retired). AUTHORSHIP IS EXPLICIT (#1967, the same contract as hadron_channel_post and the CLI\'s `team chat post --session | --as-me`): with no session, a connection bound to one worker session (hadron_start_session) posts as that Worker; otherwise pass asMe: true to post as yourself, or the post is refused [authorship_required] — never silently recorded under your name. A Worker of ANOTHER App authors here only when you (its driver) may write the chat\'s host memory — the post is then marked cross-App (spec 049 item J). Pass replyToSeq to reply to an earlier message. Returns the posted message\'s seq.',
     SHAPE_HADRON_TEAM_CHAT_POST,
@@ -10013,28 +10747,28 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           `Posted team-chat message #${msg.seq}${where} as ${msg.authorName ?? 'unknown'}${extras.length ? ` (${extras.join('; ')})` : ''}.`,
         );
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'team-chat post failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'team-chat post failed'}`, 'hadron_team_chat_post');
       }
     },
   );
 
-  server.tool(
+  off(
     'hadron_team_chat_read',
     'Read the team App\'s chat (#939), newest page by default, ascending within the page. sinceSeq (including 0) reads forward; beforeSeq pages backward; explicit offset retains oldest-first paging. For unattended routing (#1265), pass monitor:true: the tool derives each of your LIVE Worker sessions\' cursor from ChannelReadState and its WATCH/BOTH + mentionOnly policy from the register, returns each message once with the Workers it concerns, and never routes a message back to its Worker author. It NEVER advances state merely by reading. After routing/action succeeds, call again with monitor:true and the returned acknowledge checkpoint. This makes a restart duplicate work rather than skip it. monitorFor narrows to one of your live Workers; monitoring never wakes sessions or observes another operator\'s sessions.',
     SHAPE_HADRON_TEAM_CHAT_READ,
-    async ({ sinceSeq, beforeSeq, mentions, limit, offset, session: rawSession, app, channel, expectedIncarnation, monitor, monitorFor, acknowledge }) => {
+    async ({ replyToSeq, sinceSeq, beforeSeq, mentions, teamHeadRef, untagged, limit, offset, session: rawSession, app, channel, expectedIncarnation, monitor, monitorFor, acknowledge }) => {
       // A blank session is no session, for every consumer below (#1362 review):
       // otherwise the MCP layer drops the bound session as "explicit" while
       // maybeAdvanceOwnChannelRead's trim falls back to it.
       const session = typeof rawSession === 'string' ? rawSession.trim() || undefined : rawSession;
       if (!monitor && (monitorFor !== undefined || acknowledge !== undefined)) {
-        return textResult('[bad_user_input] monitorFor and acknowledge require monitor:true.');
+        return refusalResult('[bad_user_input] monitorFor and acknowledge require monitor:true.');
       }
-      if (monitor && (sinceSeq !== undefined || beforeSeq !== undefined || mentions !== undefined || offset !== undefined)) {
-        return textResult('[bad_user_input] monitor:true owns the cursor and mention routing; do not pass sinceSeq, beforeSeq, mentions or offset.');
+      if (monitor && (replyToSeq !== undefined || teamHeadRef !== undefined || untagged !== undefined || sinceSeq !== undefined || beforeSeq !== undefined || mentions !== undefined || offset !== undefined)) {
+        return refusalResult('[bad_user_input] monitor:true owns the cursor and mention routing; do not pass replyToSeq, sinceSeq, beforeSeq, mentions or offset.');
       }
       if (monitor && limit !== undefined && limit < 1) {
-        return textResult('[bad_user_input] monitor:true requires a positive limit.');
+        return refusalResult('[bad_user_input] monitor:true requires a positive limit.');
       }
       // Monitoring observes liveness; it never creates it. Ordinary reads keep
       // the long-standing #1081 heartbeat contract when a session is passed.
@@ -10043,7 +10777,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // contract: it needs no active App. Monitor mode still needs an App to
       // decide which of this operator's live Worker sessions participate.
       if (!monitor && channel !== undefined) {
-        return readChannel(channel, { sinceSeq, beforeSeq, mentions, limit, offset, session, expectedIncarnation });
+        return readChannel(channel, { replyToSeq, sinceSeq, beforeSeq, mentions, teamHeadRef, untagged, limit, offset, session, expectedIncarnation });
       }
 
       let appRef = app;
@@ -10079,9 +10813,12 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           {},
           {
             appRef,
+            replyToSeq: replyToSeq ?? null,
             sinceSeq: sinceSeq ?? null,
             beforeSeq: beforeSeq ?? null,
             mentionsRef: mentions ?? null,
+            teamHeadRef: teamHeadRef ?? null,
+            untagged: untagged ?? null,
             limit: limit ?? null,
             offset: offset ?? null,
           },
@@ -10099,9 +10836,12 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               channelId: captured.channelId,
               capturedHead: captured.lastSeq,
               sessionRef: session,
+              replyToSeq,
               sinceSeq,
               beforeSeq,
               mentionsRef: mentions,
+              teamHeadRef,
+              untagged,
               limit,
               offset,
               page,
@@ -10114,13 +10854,54 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         if (page.total === 0) return textResult(`The team chat has no matching messages.${envelope}`);
         const lines = page.items.map((m) => {
           const reply = m.replyToSeq != null ? ` (reply to #${m.replyToSeq})` : '';
-          return `#${m.seq} ${chatByline(m)} ${m.at.toISOString()}${reply}:\n${m.body}`;
+          const tags = m.teamTags?.length ? ` [${m.teamTags.map(t => `${t.label} (headId: ${t.headId})`).join(', ')}]` : '';
+          return `#${m.seq} ${chatByline(m)}${tags} ${m.at.toISOString()}${reply}:\n${m.body}`;
         });
         return textResult(
           `${page.total} message(s) total, showing ${page.items.length}:\n\n${lines.join('\n\n')}${envelope}`,
         );
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'team-chat read failed'}`);
+        return toolErrorResult(
+          e,
+          () => e instanceof ScopeGraphQLError
+            ? `[${String(e.extensions?.code ?? 'ERROR').toLowerCase()}] ${e.message}`
+            : `Error: ${e instanceof Error ? e.message : 'team-chat read failed'}`,
+          'hadron_team_chat_read',
+        );
+      }
+    },
+  );
+
+  // ── #2299 hadron_team_chat_search ────────────────────────────────────────────
+
+  off(
+    'hadron_team_chat_search',
+    'Search ONE chat\'s history (#2299, cor:agt:020:04): the team App\'s chat, or the Channel named by channel. A literal, case-insensitive substring of the message text (% _ and the backslash are ordinary characters); query is 2 to 200 characters, counted as typed. Newest first; limit defaults to 20 and is clamped to 50. Each call scans at most 1,000 messages: the result says whether the search reached the start of the history (complete) or stopped, and gives the cursor to continue with. An empty page that is not complete may continue; "no matches" is only ever a complete search. Returns message references only (seq and URN, no text): read the message with hadron_team_chat_read / hadron_channel_read to see it. It matches what a read shows, goes through the same access as a read, and NEVER moves your read position or counts as attention. A chat in an encrypted memory is refused [team_chat_search_encrypted].',
+    SHAPE_HADRON_TEAM_CHAT_SEARCH,
+    async ({ query, limit, cursor, app, channel }) => {
+      try {
+        let page;
+        if (channel !== undefined) {
+          page = await resolvers.Query.channelMessageSearch({}, { channelRef: channel, query, limit: limit ?? null, cursor: cursor ?? null }, chatCtx());
+        } else {
+          let appRef = app;
+          if (!appRef) {
+            const appScopeError = requireAppScope();
+            if (appScopeError) return appScopeError;
+            appRef = auth.appId ?? undefined;
+            if (!appRef) return textResult('No App context — pass the app parameter or select one with hadron_set_active_app.');
+          }
+          page = await resolvers.Query.teamChatSearch({}, { appRef, query, limit: limit ?? null, cursor: cursor ?? null }, chatCtx());
+        }
+        const envelope = page.channelId != null && page.channelIncarnation != null ? `\nchannel ${page.channelId} incarnation ${page.channelIncarnation}` : '';
+        const state = page.complete
+          ? (page.items.length === 0 ? 'No matches (the search reached the start of the history).' : 'The search reached the start of the history.')
+          : `The search stopped before the start of the history${page.items.length === 0 ? ' with no match yet' : ''}; continue with cursor: ${page.cursor}`;
+        const lines = page.items.map((m: { seq: number; urn: string | null; nodeId: string }) => `#${m.seq} ${m.urn ?? `node ${m.nodeId}`}`);
+        return textResult(`${page.items.length} match(es):\n${lines.join('\n')}${lines.length ? '\n' : ''}\n${state}${envelope}`);
+      } catch (e) {
+        if (e instanceof ScopeGraphQLError) return refusalResult(`[${String(e.extensions?.code ?? 'ERROR').toLowerCase()}] ${e.message}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'team-chat search failed'}`, 'hadron_team_chat_search');
       }
     },
   );
@@ -10134,7 +10915,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
   // session/consent guards; the capability probe in server_info reports
   // team-attention only for a caller who could actually use it.
   if (auth.userId && !auth.impersonation) {
-    server.tool(
+    off(
       'hadron_team_attention',
       'RETIRED (#1384): the v1 one-shot poll scanned an encrypted Channel\'s whole unread backlog inside one request and now answers UPGRADE_REQUIRED. Use hadron_team_attention_page — the bounded paged successor; your existing since token is accepted there and carries your watermark forward.',
       SHAPE_HADRON_TEAM_ATTENTION,
@@ -10155,7 +10936,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       },
     );
 
-    server.tool(
+    off(
       'hadron_team_attention_page',
       'PAGED ATTENTION (#1384 v2): one bounded slice of the compact unread scan for this operator\'s LIVE Workers — at most scanLimit decrypted rows and limit emitted Worker/Channel pairs per call. Continue with the returned nextPage while scanComplete is false. Items carry no message bodies; counts are exact for the captured range of the issuing scan. The FINAL page alone returns adoptableSince — adopt it only after every listed nudge was accepted; on any partial failure retain your prior watermark and restart the scan (duplicates, never loss). An existing v1 since token starts a scan and carries the watermark forward. Never changes ChannelReadState.',
       SHAPE_HADRON_TEAM_ATTENTION_PAGE,
@@ -10180,7 +10961,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       },
     );
 
-    server.tool(
+    off(
       'hadron_team_attention_switchover',
       'PAGED (#1384 v2): explicitly baseline every current live Worker through captured Channel heads. preview is read-only, pages like the poll tool (continue with its returned nextPage), and yields the short-lived proof ONLY on its final completed page. apply requires that proof and atomically refuses if the operator, App, live-Worker scope, effective register or cursor changed. Messages arriving after the preview freeze remain unread. This is the only supported way to discard the pre-router backlog.',
       SHAPE_HADRON_TEAM_ATTENTION_SWITCHOVER,
@@ -10192,9 +10973,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           appRef = auth.appId;
         }
         if (!appRef) return textResult('No App context — pass app or select one with hadron_set_active_app.');
-        if (action === 'apply' && !proof) return textResult('[bad_user_input] action:"apply" requires the proof returned by the final preview page.');
-        if (action === 'preview' && proof !== undefined) return textResult('[bad_user_input] preview does not accept a proof.');
-        if (action === 'apply' && page !== undefined) return textResult('[bad_user_input] apply does not accept a page continuation.');
+        if (action === 'apply' && !proof) return refusalResult('[bad_user_input] action:"apply" requires the proof returned by the final preview page.');
+        if (action === 'preview' && proof !== undefined) return refusalResult('[bad_user_input] preview does not accept a proof.');
+        if (action === 'apply' && page !== undefined) return refusalResult('[bad_user_input] apply does not accept a page continuation.');
         try {
           const result = action === 'preview'
             ? await resolvers.Query.teamAttentionPreviewPage({}, { appRef, page: page ?? null, limit: limit ?? null, scanLimit: null }, chatCtx())
@@ -10206,7 +10987,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       },
     );
 
-    server.tool(
+    off(
       'hadron_team_chat_mark_read',
       'Explicitly advance the Worker bound to your live session on one registered Channel. Use after filtered reads, which intentionally never auto-advance. Monotonic; a lower seq is a no-op and a seq beyond the Channel head is refused.',
       SHAPE_HADRON_TEAM_CHAT_MARK_READ,
@@ -10256,7 +11037,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
-  server.tool(
+  off(
     'hadron_list_workers',
     'List the team App\'s workers — its named staff (#997). THE roster read: use it when you need to work as a teammate but do not know the names, since hadron_start_session\'s workerRef takes a name. Returns each worker\'s name, URN, role, WHO HOLDS IT, whether a session is live, and whether it is retired. #1050: a name is HELD by a person until released — a held name is not yours to take however idle it looks, and the remedy is to cast your own worker, never to end someone\'s session. An UNHELD worker is held by whoever binds it next. "session live" is a separate fact and only ever a question about your own worker. Retired workers are excluded unless includeRetired — their names stay reserved forever, so they explain a WORKER_NAME_TAKEN refusal.',
     SHAPE_HADRON_LIST_WORKERS,
@@ -10398,7 +11179,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
           page.items.map(async (w: {
             id: string; name: string; slug: string; role: string | null;
             agentId: string; retiredAt: Date | null;
-            heldByUserId: string | null;
+            heldByUserId: string | null; appId: string; reportsToWorkerId: string | null; explicitNoTeam: boolean;
           }) => {
             const urn = workerUrn(w.slug);
             const agentName = await agentNameFor(w.agentId);
@@ -10415,6 +11196,8 @@ function ageOf(at: Date, now: Date = new Date()): string {
             // reads as unavailable regardless of liveness — that is the point:
             // an idle held worker is not up for adjudication.
             const flags: string[] = [];
+            const placement = await resolvers.Worker.teamPlacement(w, {}, ctx);
+            if (placement !== null) flags.push(`team placement ${placement}`);
             if (w.retiredAt) flags.push('RETIRED');
             if (w.heldByUserId && w.heldByUserId !== auth.userId) {
               flags.push(`held by ${holderName(w.heldByUserId)}`);
@@ -10459,14 +11242,14 @@ function ageOf(at: Date, now: Date = new Date()): string {
             'Work as one with hadron_start_session(description: "<task>", workerRef: "<name>") — it returns that worker\'s boot briefing.',
         );
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'listing workers failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'listing workers failed'}`, 'hadron_list_workers');
       }
     },
   );
 
   // ── hadron_get_worker ─────────────────────────────────────────────────────────
 
-  server.tool(
+  off(
     'hadron_get_worker',
     'Read ONE worker, including its resolved BOOT BRIEFING (#1015). THE recovery read: hadron_start_session returns the briefing once, at bind time, and the briefing must never be cached — so an agent whose context was compacted has no copy and no legitimate way back to it. This is that way. It reserves nothing and mints nothing, so recovering costs neither a second session nor a force-takeover of yourself (both of which corrupt the provenance record the Worker model exists to produce). workerRef takes the same three forms as hadron_start_session — the worker\'s NAME ("Iris"), its URN (hrn:worker:<root>:<app-slug>:<slug>), or its id; an id or URN names its own App, a bare NAME needs one selected (or passed as app/session). Re-read this whenever you are unsure you are still working as the worker you bound.',
     SHAPE_HADRON_GET_WORKER,
@@ -10510,7 +11293,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         userId: auth.userId ?? undefined,
         apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
-        sessionId: auth.sessionId ?? undefined,
+        sessionId: auth.sessionId ?? (await explicitActingSessionId(session)),
         roles: auth.roles as Context['roles'],
         organizationId: auth.organizationId ?? undefined,
       };
@@ -10524,7 +11307,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
           { ref: trimmed, appRef: refNamesItsApp ? null : appRef },
           ctx,
         );
-        if (!worker) return textResult(`Worker not found: ${workerRef}`);
+        if (!worker) return refusalResult(`Worker not found: ${workerRef}`);
 
         // Resolved through the SAME field resolvers GraphQL serves, so this
         // surface and the briefing hadron_start_session prints cannot drift —
@@ -10534,18 +11317,10 @@ function ageOf(at: Date, now: Date = new Date()): string {
         // template changes, which is why the contract forbids caching it.
         // #1090: one composition supplies the text AND its freshness facts —
         // the stamps below describe exactly this rendering.
-        const [briefing, workerUrn, agent, override, continuity, signature, trailer, checkStatus] = await Promise.all([
+        const [briefing, workerUrn, agent, continuity, signature, trailer, renderedSignature, renderedTrailer, checkStatus] = await Promise.all([
           composeWorkerPrompt(ctx, worker),
           resolvers.Worker.urn(worker, {}, ctx),
           resolvers.Worker.agent(worker, {}, ctx),
-          // The RAW override, separate from the composed briefing (PR #1019
-          // review, Codex P2). hadron_update_worker REPLACES the override, so a
-          // caller extending one needs the override alone; handing back only
-          // the composed text would have it paste template+override into the
-          // override field, after which rendering prepends the template again —
-          // and every subsequent edit compounds the duplication. Same gated
-          // field resolver GraphQL serves, so it masks to null on deny.
-          resolvers.Worker.promptOverride(worker, {}, ctx),
           // #1029: this tool IS the post-compaction recovery read, so it must
           // carry the handoff for the same reason the bind does — an agent that
           // lost its context lost the handoff with it, and is the least likely
@@ -10553,6 +11328,9 @@ function ageOf(at: Date, now: Date = new Date()): string {
           resolvers.Worker.continuity(worker, {}, ctx),
           resolvers.Worker.signature(worker, {}, ctx),
           resolvers.Worker.trailer(worker, {}, ctx),
+          // #2969: the filled lines, through the same field resolvers GraphQL serves.
+          resolvers.Worker.renderedSignature(worker, {}, ctx),
+          resolvers.Worker.renderedTrailer(worker, {}, ctx),
           // #2138 §3.4 — gated like hasLiveSession; null on deny.
           resolvers.Worker.checkStatus(worker, {}, ctx) as Promise<WorkerCheckStatus | null>,
         ]);
@@ -10566,6 +11344,8 @@ function ageOf(at: Date, now: Date = new Date()): string {
         const prompt = briefing.text;
         const agentName = (agent as { name?: string } | null)?.name ?? null;
         const readUrl = workerPortalUrl(workerUrn as string | null);
+        const placement = await resolvers.Worker.teamPlacement(worker, {}, ctx);
+        const reportingHeadId = await resolvers.Worker.reportsToWorkerId(worker, {}, ctx);
 
         // Liveness is derived from real rows, never a lease (cor:agt:020:03) —
         // the same predicate hadron_start_session refuses WORKER_TAKEN on, and
@@ -10578,8 +11358,14 @@ function ageOf(at: Date, now: Date = new Date()): string {
         // "driving" here while the roster said idle and a bind succeeded —
         // three surfaces, two answers, which is precisely what cor:agt:020:11
         // exists to forbid. The predicate is the shared one now.
+        //
+        // #1149: whether someone is driving the worker is WORKING STATE
+        // (`hasLiveSession`, cor:dmo:050:11). `Query.worker` now admits a
+        // signed-in caller who may see only the profile, so the taken/free flag
+        // is computed for a participant alone; everyone else gets no flag.
         const nowHere0 = new Date();
-        const openHere = await db.session.findMany({
+        const seesWorkingState = await maySeeWorkerInternals(ctx, worker.appId);
+        const openHere = !seesWorkingState ? [] : await db.session.findMany({
           // The SAME bound as the bind path, filter AND cap (#1120 review,
           // Codex P2 — second round). The first fix here took the cap without
           // the filter, which is the mistake the filter exists to prevent:
@@ -10621,7 +11407,10 @@ function ageOf(at: Date, now: Date = new Date()): string {
         // actually makes the guarantee independent — and it is naturally
         // bounded, since it is one person's sessions on one worker.
         const driving = liveHere[0] ?? null;
-        const myRows = auth.userId
+        // #1149: the caller's own session is working state too. A departed
+        // participant keeps an open row until it ends, and must not be handed
+        // its id through the profile read.
+        const myRows = auth.userId && seesWorkingState
           ? await db.session.findMany({
               where: {
                 workerId: worker.id, endedAt: null, deletedAt: null,
@@ -10644,16 +11433,18 @@ function ageOf(at: Date, now: Date = new Date()): string {
 
         const flags: string[] = [];
         if (worker.retiredAt) flags.push('RETIRED');
-        flags.push(driving ? 'taken' : 'free');
+        if (seesWorkingState) flags.push(driving ? 'taken' : 'free');
 
         return textResult(
-          `**${worker.name}**${worker.role ? ` (${worker.role})` : ''} — ${flags.join(', ')}\n` +
+          `**${worker.name}**${worker.role ? ` (${worker.role})` : ''}${flags.length ? ` — ${flags.join(', ')}` : ''}\n` +
             `Worker id: ${worker.id}\n` +
             (workerUrn ? `Worker URN: ${workerUrn}\n` : '') +
             // #1026: THE recovery read is also the read a worker comes to for
             // its own identity line, so the link ships beside the URN rather
             // than being assembled from it.
             (readUrl ? `URL: ${readUrl}\n` : '') +
+            (placement !== null ? `Team placement: ${placement}\n` : '') +
+            (reportingHeadId ? `Reports to worker: ${reportingHeadId}\n` : '') +
             (agentName ? `Role agent: ${agentName}\n` : '') +
             (checkStatus ? `${renderCheckStatusLong(checkStatus)}\n` : '') +
             // Only the caller's OWN driving session is named. Whose session it
@@ -10670,27 +11461,31 @@ function ageOf(at: Date, now: Date = new Date()): string {
             // correct to be given back.
             (signature != null ? `\nSignature template:\n${signature}\n` : '') +
             (trailer != null ? `\nTrailer template:\n${trailer}\n` : '') +
-            (override
-              ? `\nPrompt override (the editable part — pass THIS text, amended, to hadron_update_worker; the briefing below is it composed with the shared template):\n\n${override}\n`
-              : '') +
+            (renderedSignature != null ? `\nRendered signature:\n${renderedSignature}\n` : '') +
+            (renderedTrailer != null ? `\nRendered trailer:\n${renderedTrailer}\n` : '') +
             (prompt
               ? `\nBoot briefing — adopt this for the rest of the session:` +
                 `\nrendered at: ${briefing.renderedAt.toISOString()}` +
-                `\nrole Agent updated at: ${briefing.roleAgentUpdatedAt ? briefing.roleAgentUpdatedAt.toISOString() : 'not recorded'} (generic Agent row update — no per-override mtime is tracked)` +
+                `\nrole Agent updated at: ${briefing.roleAgentUpdatedAt ? briefing.roleAgentUpdatedAt.toISOString() : 'not recorded'} (generic Agent row update)` +
                 `\n\n${prompt}`
-              : '\n(No boot briefing: the role agent carries no systemPrompt template and this worker has no promptOverride.)') +
+              : briefing.refusal
+                ? `\n(No boot briefing: the boot prompt cannot be served — ${briefing.refusal}.)`
+                : seesWorkingState
+                  ? '\n(No boot briefing: no boot prompt is served to this worker.)'
+                  : '') +
+            (await describeServedWorker(ctx, worker)) +
             renderWorkerContinuity(continuity as RenderableContinuity | null),
         );
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'reading the worker failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'reading the worker failed'}`, 'hadron_get_worker');
       }
     },
   );
 
   // #1162: one eligibility implementation across transports.
-  server.tool(
+  off(
     'hadron_delete_worker',
-    'Remove a never-used miscast only. Empty ended and released stints alone do not count as work. Any persisted reference blocks deletion; retire workers with history. You must first verify no signed commit, trailer, PR, comment, review or published artifact attributes work to this identity and explicitly confirm. Database checks cannot establish external absence; known or uncertain history means retire. This does not scan external hosts.',
+    'Remove a never-used miscast only. Empty ended and released stints alone do not count as work. Any persisted reference blocks deletion; retire workers with history. You must first verify no signed commit, trailer, PR, comment, review or published artifact attributes work to this identity and explicitly confirm. Database checks cannot establish external absence; known or uncertain history means retire. This does not scan external hosts. MCP accepts no instruction argument: a worker session is headless here and needs its own live workers.staff grant, with no wider right than its holder (#3308).',
     SHAPE_HADRON_DELETE_WORKER,
     async ({ workerRef, confirmNoExternalAttribution }) => {
       const ctx: Context = {
@@ -10711,11 +11506,11 @@ function ageOf(at: Date, now: Date = new Date()): string {
 
   // ── hadron_update_worker ──────────────────────────────────────────────────────
 
-  server.tool(
+  off(
     'hadron_update_worker',
-    "Amend a worker's promptOverride — the per-worker individuality layered over the role agent's shared template (#1010). Use it to record what a worker has become: authorship of a body of work, a standing specialisation, anything true of THIS casting and not of every casting of the same role. It reaches the worker at its next bind, live, with nothing to republish. The override was previously fixed at casting time, which sealed a worker's individuality before the work that defines it. promptOverride REPLACES the whole override (it is not appended) — to extend one, read the worker with hadron_get_worker and amend the text under 'Prompt override', NOT the composed boot briefing below it (pasting the briefing back would fold the shared template into the override, and it would then be prepended again on every render). Omit it to change nothing; pass an empty string to clear it. signature and trailer edit the per-worker signing templates (App managers only; worker-session edits provisionally refused under H26). Omit to preserve; null is refused; blank stores empty text. Everything else about a casting is immutable: the name is permanent, and a different role is a different casting. Refuses for a retired worker, which takes no new bindings and so could never receive it.",
+    "Amend a worker's signature and trailer templates (#1010). A worker's boot prompt is not edited here: it is the worker's own compiled boot source, changed by compile and approve (#2712). signature and trailer edit the per-worker signing templates (App managers only. This tool takes no instruction claim, so worker-session edits remain headless and refused; instructed signature edits use GraphQL updateWorker). Omit to preserve; null is refused; blank stores empty text. The name is permanent; to change the worker's agent (and with it its role) use hadron_change_worker_agent. Refuses for a retired worker.",
     SHAPE_HADRON_UPDATE_WORKER,
-    async ({ workerRef, promptOverride, signature, trailer, app, session }) => {
+    async ({ workerRef, signature, trailer, app, session }) => {
       // This tool owns `session`, so the common actor gate leaves invalid names to us.
       // Refuse before heartbeat or edits instead of falling back to the human principal.
       if (session !== undefined && !(await validateSessionBinding(db, auth, session))) {
@@ -10753,8 +11548,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         userId: auth.userId ?? undefined,
         apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
-        sessionId: auth.sessionId ?? undefined,
-        sessionBindingRefused: auth.sessionBindingRefused,
+        ...mcpRequestSessionContext(auth),
         roles: auth.roles as Context['roles'],
         organizationId: auth.organizationId ?? undefined,
       };
@@ -10764,36 +11558,22 @@ function ageOf(at: Date, now: Date = new Date()): string {
           { ref: trimmed, appRef: refNamesItsApp ? null : appRef },
           ctx,
         );
-        if (!target) return textResult(`Worker not found: ${workerRef}`);
+        if (!target) return refusalResult(`Worker not found: ${workerRef}`);
 
-        // Forward the key ONLY when the caller supplied it (PR #1019 review,
-        // Copilot): the resolver distinguishes omitted-preserves from
-        // null-clears by PRESENCE, so passing `promptOverride: undefined`
-        // unconditionally would land in the clear branch and silently wipe the
-        // override of every caller who omitted it. Making the zod arg optional
-        // without this would have converted a loud validation error into a
-        // silent data loss — strictly worse.
-        const mutationArgs: { workerRef: string; promptOverride?: string; signature?: string | null; trailer?: string | null } = {
+        // Forward a key ONLY when the caller supplied it (PR #1019 review,
+        // Copilot): the resolver distinguishes omitted-preserves by PRESENCE.
+        const mutationArgs: { workerRef: string; signature?: string | null; trailer?: string | null } = {
           workerRef: target.id,
         };
-        const overrideChanged = promptOverride !== undefined;
-        const changing = overrideChanged || signature !== undefined || trailer !== undefined;
-        if (promptOverride !== undefined) mutationArgs.promptOverride = promptOverride;
+        const changing = signature !== undefined || trailer !== undefined;
         if (signature !== undefined) mutationArgs.signature = signature;
         if (trailer !== undefined) mutationArgs.trailer = trailer;
 
         const worker = await resolvers.Mutation.updateWorker({}, mutationArgs, ctx);
-        // Echo the RESOLVED prompt, not the override alone: what the caller
-        // actually cares about is what the worker will be told at its next
-        // bind, and that is the template plus the override, composed.
+        // Echo the RESOLVED prompt: what the worker will be told at its next bind.
         const prompt = await resolvers.Worker.prompt(worker, {}, ctx);
         return textResult(
           (changing ? `Updated **${worker.name}**.\n` : `**${worker.name}** — no change requested (editable fields omitted).\n`) +
-            (worker.promptOverride
-              ? `\nPrompt override${overrideChanged ? ' now' : ''}:\n\n${worker.promptOverride}\n`
-              : overrideChanged
-                ? '\nPrompt override cleared.\n'
-                : '\nThis worker has no prompt override.\n') +
             (signature !== undefined ? `\nSignature template now:\n\n${worker.signature}\n` : '') +
             (trailer !== undefined ? `\nTrailer template now:\n\n${worker.trailer}\n` : '') +
             (prompt
@@ -10801,7 +11581,61 @@ function ageOf(at: Date, now: Date = new Date()): string {
               : ''),
         );
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'updating the worker failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'updating the worker failed'}`, 'hadron_update_worker');
+      }
+    },
+  );
+
+
+  // ── hadron_change_worker_agent ────────────────────────────────────────────────
+
+  off(
+    'hadron_change_worker_agent',
+    "Change the agent a worker casts (#2458, cor:dmo:050:11). The worker's role follows the new agent; it is never typed in. Name, slug, URN, signature, trailer, reporting line and all past records stay, and past sessions keep the agent and role they ran under. App managers only, acting as themselves. This tool takes no instruction claim, so a worker session stays headless and refused; instructed changes use GraphQL changeWorkerAgent. The new agent must be installed in the App, and the App must hold the grants for it and for every Agent its boot prompt includes from. A complete change: the worker's own boot-prompt pointer is cleared, the old agent's generated tickers end and the new agent's are made, and one worker.casting event is written. It takes effect at the worker's next bind: an open session finishes under the agent and role it was bound with. A refused change changes nothing.",
+    SHAPE_HADRON_CHANGE_WORKER_AGENT,
+    async ({ workerRef, agent, app, session }) => {
+      if (session !== undefined && !(await validateSessionBinding(db, auth, session))) {
+        return { ...textResult('[session_not_bound] The named session cannot bind. Nothing was written.'), isError: true };
+      }
+      await heartbeatSession(session);
+      // Name-vs-self-describing ref handling, identical to hadron_update_worker: a NAME resolves through the read
+      // surface first; the resolver then decides the manager gate on the resolved row.
+      const trimmed = typeof workerRef === 'string' ? workerRef.trim() : '';
+      if (trimmed === '') return textResult('Pass workerRef — a worker name, URN, or id.');
+      const refNamesItsApp = isId(trimmed) || hasSchemePrefix(trimmed);
+      let appRef = app;
+      if (!refNamesItsApp && !appRef) {
+        await adoptAppFromSession(session);
+        const appScopeError = requireAppScope();
+        if (appScopeError) return appScopeError;
+        appRef = auth.appId;
+        if (!appRef) {
+          return textResult(
+            `"${trimmed}" is a worker name, which is only unique within an App — pass app, pass your session, or select one with hadron_set_active_app.`,
+          );
+        }
+      }
+      const ctx: Context = {
+        db,
+        clientId: auth.clientId ?? undefined,
+        userId: auth.userId ?? undefined,
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
+        appId: auth.appId ?? undefined,
+        ...mcpRequestSessionContext(auth),
+        roles: auth.roles as Context['roles'],
+        organizationId: auth.organizationId ?? undefined,
+      };
+      try {
+        const target = await resolvers.Query.worker({}, { ref: trimmed, appRef: refNamesItsApp ? null : appRef }, ctx);
+        if (!target) return textResult(`Worker not found: ${workerRef}`);
+        const worker = await resolvers.Mutation.changeWorkerAgent({}, { workerRef: target.id, agentRef: agent }, ctx);
+        return textResult(
+          `**${worker.name}** now casts agent ${worker.agentId}${worker.role ? ` (role ${worker.role})` : ''}. ` +
+            'It takes effect at the next bind.',
+        );
+      } catch (e) {
+        // #1789: a typed refusal keeps its [code] text; anything else is a fault and gets the generic envelope.
+        return toolErrorResult(e, () => `[${String((e as GraphQLError).extensions?.code ?? 'ERROR')}] ${(e as Error).message}`, 'hadron_change_worker_agent');
       }
     },
   );
@@ -10809,7 +11643,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
 
   // ── hadron_set_worker_reports_to ───────────────────────────────────────────
 
-  server.tool(
+  off(
     'hadron_set_worker_reports_to',
     "#1726 — set, hand over or clear who a worker reports to: one other, non-retired worker of the same App (never itself, never a cycle). It belongs to the casting, not to a session, so it outlasts session rotation and a dormant team; every change is a `worker.reports-to` team event. Who may change it: whoever manages the App; the worker it reports to now (handing it over or clearing it is its agreement); for a worker that reports to nobody, also a worker claiming it for itself when one person holds both, or its own holder (interim rule, pending a ruling). A worker acts through its bound session, so pass `session`. Informational: nothing is refused on the strength of it except the task authority cor:agt:050:09 gives a worker over the tasks of workers that report to it.",
     SHAPE_HADRON_SET_WORKER_REPORTS_TO,
@@ -10844,15 +11678,15 @@ function ageOf(at: Date, now: Date = new Date()): string {
         const toId = target ? await resolveRef(target) : null;
         const worker = await resolvers.Mutation.setWorkerReportsTo({}, { workerRef: workerId, reportsTo: toId }, ctx);
         const to = worker.reportsToWorkerId ? await db.worker.findUnique({ where: { id: worker.reportsToWorkerId }, select: { name: true } }) : null;
-        return textResult(to ? `**${worker.name}** now reports to **${to.name}**.` : `**${worker.name}** now reports to nobody.`);
+        return textResult(to ? `**${worker.name}** now reports to **${to.name}**.` : `**${worker.name}** now has explicit no team.`);
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'changing who the worker reports to failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'changing who the worker reports to failed'}`, 'hadron_set_worker_reports_to');
       }
     },
   );
   // ── hadron_record_work / hadron_team_work_items ───────────────────────────────
 
-  server.tool(
+  off(
     'hadron_record_work',
     'Record an externally visible work milestone (a PR opened, a branch pushed, an issue closed) into the team App\'s worklog (#947) — the append-only, authoritative PR-session join. Pass the session doing the work; ref accepts a github URL or short form (owner/repo#N, owner/repo@sha, owner/repo:branch, owner/repo) and is stored in ONE canonical spelling. A bare number is refused — include the repo. kind: pr also updates the session\'s displayed PR number. Correct a wrong record by recording a newer one (records are never edited). Capability note (#1398): the optional `model` argument is honored when hadron_server_info advertises the `worklog-model` capability — an older build silently DROPS the argument and records the session\'s model instead, so test for the token before relying on an explicit model report.',
     SHAPE_HADRON_RECORD_WORK,
@@ -10885,6 +11719,10 @@ function ageOf(at: Date, now: Date = new Date()): string {
             db,
             clientId: auth.clientId ?? undefined,
             userId: auth.userId ?? undefined,
+            // #3078: carry impersonation into the resolver, whose record gate refuses it and whose heartbeat (since #3078)
+            // would otherwise drive the impersonated user's session. /mcp rejects an impersonation JWT at init, so this
+            // is defence in depth, as in the other delegations that pass it.
+            impersonation: auth.impersonation ?? undefined,
             apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
             appId: auth.appId ?? undefined,
             sessionId: auth.sessionId ?? undefined,
@@ -10938,12 +11776,12 @@ function ageOf(at: Date, now: Date = new Date()): string {
             endedNote,
         );
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'work record failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'work record failed'}`, 'hadron_record_work');
       }
     },
   );
 
-  server.tool(
+  off(
     'hadron_team_work_items',
     'Read the team App\'s worklog (#947) — the provenance query. Two directions: which sessions produced this PR/artifact (pass ref as a github URL or owner/repo#N, owner/repo@sha, owner/repo:branch, owner/repo; an ownerless cli#793 matches every readable repo whose name ends in cli, never guesses an owner), and what has one WORKER done (pass worker, by name, id or URN — #1035; a retired worker still resolves, because retirement ends the casting, not the history). Newest first. Filter further by session, tool, or kind, and combine filters freely. Each item carries the sessionId; read the session for its transcript path.',
     SHAPE_HADRON_TEAM_WORK_ITEMS,
@@ -11006,7 +11844,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
           `${page.total} record(s) total, showing ${page.items.length}:\n\n${lines.join('\n')}`,
         );
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'worklog read failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'worklog read failed'}`, 'hadron_team_work_items');
       }
     },
   );
@@ -11015,21 +11853,21 @@ function ageOf(at: Date, now: Date = new Date()): string {
 
   server.tool(
     'hadron_validate',
-    'Check a memory for broken edge references, sparse nodes, stale-abstract warnings (spec 032 FR-011 — abstract no longer reflects current content), embedding-failure flags (spec 033 — nodes with `embedding_failed_at` set; covers BOTH in-flight transient failures awaiting retry AND terminal failures, including the #206 encrypted-no-plaintext perma-fail class), and property-schema conformance (#725 — a node whose objectType/properties violate the memory\'s declared schema; catches records written before the schema was defined/tightened, a non-destructive audit). The memory URN MUST be fully qualified. On encrypted memories the stale-abstract check is skipped in v1 (hadron_validate does not decrypt; tracked by #206).',
+    'Check a memory for broken edge references, sparse nodes (non-object nodes with no description, content or abstract; object nodes are exempt, #2516), stale-abstract warnings (spec 032 FR-011 — abstract no longer reflects current content), embedding-failure flags (spec 033 — nodes with `embedding_failed_at` set; covers BOTH in-flight transient failures awaiting retry AND terminal failures, including the #206 encrypted-no-plaintext perma-fail class), and property-schema conformance (#725 — a node whose objectType/properties violate the memory\'s declared schema; catches records written before the schema was defined/tightened, a non-destructive audit). The memory URN MUST be fully qualified. On encrypted memories the stale-abstract check is skipped in v1 (hadron_validate does not decrypt; tracked by #206).',
     SHAPE_HADRON_VALIDATE,
     async ({ memoryUrn }) => {
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(memoryUrn, 'memory');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
         throw e;
       }
 
       // #1316: an unreadable memory takes the missing branch.
       const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'read');
       if (!memory) {
-        return textResult(`Memory not found: "${memoryUrn}".`);
+        return refusalResult(`Memory not found: "${memoryUrn}".`);
       }
 
       // #819 — the checks themselves now live in src/lib/memoryValidation.ts,
@@ -11039,22 +11877,13 @@ function ageOf(at: Date, now: Date = new Date()): string {
       // findings typed.
       const report = await validateMemoryNodes(db, memory.id);
       const issues: string[] = [];
+      const informational: string[] = [];
       const memoryUrnOf = memoizedMemoryUrnLookup();
       for (const f of report.findings) {
-        issues.push(formatFindingLine(f, await nodeUrn(f.nodeLoc, memory.id, memoryUrnOf)));
+        const lines = f.kind === 'INDEX_TRUNCATED' ? informational : issues;
+        lines.push(formatFindingLine(f, await nodeUrn(f.nodeLoc, memory.id, memoryUrnOf)));
       }
-      // A skipped check is stated rather than silently omitted — a clean bill
-      // of health that quietly skipped a check is worse than no report.
-      const skippedNote = report.skippedChecks.length
-        ? `\n\nSkipped checks:\n${report.skippedChecks.map((c) => `- ${c.check}: ${c.reason}`).join('\n')}`
-        : '';
-
-      if (issues.length === 0) {
-        return textResult(`Validated ${report.nodesChecked} nodes. No issues found.${skippedNote}`);
-      }
-      return textResult(
-        `Found ${issues.length} issue(s) in ${report.nodesChecked} nodes:\n\n${issues.join('\n')}${skippedNote}`,
-      );
+      return textResult(formatValidationProse(report, issues, informational));
     },
   );
 
@@ -11069,29 +11898,29 @@ function ageOf(at: Date, now: Date = new Date()): string {
       try {
         assertFullyQualifiedUrn(memoryUrn, 'memory');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
         throw e;
       }
 
       // #1316: hidden from this caller ⇒ the missing branch; a reader keeps the denial.
       const memoryRef = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
-      if (!memoryRef) return textResult(`Memory not found: "${memoryUrn}".`);
+      if (!memoryRef) return refusalResult(`Memory not found: "${memoryUrn}".`);
       if (!(await canWriteToMemory(db, auth, memoryRef.id, EXPLICIT_REF))) {
-        return textResult('Access denied.');
+        return refusalResult('Access denied.');
       }
 
       const memory = await db.memory.findUnique({
         where: { id: memoryRef.id },
         include: { organization: true },
       });
-      if (!memory) return textResult('Memory not found.');
-      if (!memory.source) return textResult('Memory has no source repository configured.');
-
+      if (!memory) return refusalResult('Memory not found.');
       // Import and call syncGraphFromGithub
       const { syncGraphFromGithub, describeSyncOutcome } = await import('../integrations/github/syncGraphFromGithub.js');
       const result = await syncGraphFromGithub(memory as Parameters<typeof syncGraphFromGithub>[0]);
+      if (result.notAttemptedReason) return refusalResult(`[${SYNC_NOT_ATTEMPTED}] ${syncNotAttemptedMessage(result.notAttemptedReason)}`);
 
-      if (result.error) return textResult(`Sync failed: ${result.error}`);
+      if (result.fault) throw new Error(result.error ?? 'sync fault');
+      if (result.error) return refusalResult(`Sync failed${result.errorCode ? ` [${result.errorCode}]` : ''}: ${result.error}`);
       // #1061 — one write per node the sync actually wrote. This tool is the
       // ONE entry point to a git sync that has a principal to attribute to; the
       // webhook and startup batch-loop callers deliberately drop `writtenNodes`
@@ -11127,6 +11956,12 @@ type ActiveMcpTransport = {
    * so a GET/SSE stream, a POST queued behind `requestTail` and a still-open response all pin it.
    */
   inFlight: number;
+  /**
+   * #3797: the held `GET /mcp` SSE responses on this transport (added when the stream opens, dropped when it
+   * ends). A held stream pins `inFlight` for its whole life, so shutdown must end these first and only then wait
+   * for the POSTs that are genuinely in flight.
+   */
+  streams: Set<Response>;
   /** #2261: arrival or completion time of the latest request (epoch ms). */
   lastActivityAt: number;
 };
@@ -11161,6 +11996,42 @@ function evictMcpTransport(sessionId: string, active: ActiveMcpTransport, reason
   unregisterMcpTransport(sessionId, active.transport);
   mcpLog('info', 'mcp_transport_evicted', { mcpSessionId: sessionId, reason, principalKey: active.principalKey });
   void active.transport.close().catch(() => undefined);
+}
+
+/**
+ * #3797: at the end of the stopping drain window, close every registered MCP transport so a held `GET /mcp` stream
+ * cannot keep `httpServer.close()` (and so the process) open to the hard deadline.
+ *
+ * Order matters. A held GET stream pins `inFlight` for its whole life, so waiting for `inFlight` to reach 0 first
+ * would never finish: the held GET streams are ended FIRST, then each transport waits for the requests genuinely in
+ * flight on it (a POST is never cut, bounded by the caller's hard deadline), and only then is it unregistered and
+ * closed (`transport.close()` ends every response on it). Connection-local state only, the same cleanup as
+ * `evictMcpTransport`: the durable worker Session and its hold are never touched (cor:agt:020:03; clients re-attribute
+ * through `X-Hadron-Session`). The synchronous part (ending the streams) runs before the first await.
+ */
+export async function closeMcpTransportsForShutdown(): Promise<number> {
+  const entries = [...transports];
+  for (const [, active] of entries) {
+    for (const res of [...active.streams]) {
+      if (!res.writableEnded) res.end();
+    }
+  }
+  await Promise.all(entries.map(async ([sid, active]) => {
+    while (active.inFlight > 0) {
+      // A GET still authenticating when the first pass ran registers its stream afterwards and pins `inFlight`
+      // until the client leaves; end whatever has registered since, every tick.
+      for (const res of [...active.streams]) {
+        if (!res.writableEnded) res.end();
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
+    if (transports.get(sid) === active) {
+      unregisterMcpTransport(sid, active.transport);
+      mcpLog('info', 'mcp_transport_evicted', { mcpSessionId: sid, reason: 'shutdown', principalKey: active.principalKey });
+    }
+    await active.transport.close().catch(() => undefined);
+  }));
+  return entries.length;
 }
 
 /**
@@ -11557,7 +12428,7 @@ async function authenticateBoundMcpSession(
 ): Promise<AuthContext | null> {
   let presented: AuthContext;
   try {
-    presented = await resolveAuthContext(req, db);
+    presented = (await resolveCredentialContextWithStatus(req, db)).auth;
   } catch {
     res.status(503).json({ error: 'Authentication temporarily unavailable' });
     return null;
@@ -11583,6 +12454,12 @@ async function authenticateBoundMcpSession(
   if (!sameMcpPrincipal(active.auth, presented)) {
     // A foreign principal's session ID is indistinguishable from a missing one.
     respondMcpSessionNotFound(res);
+    return null;
+  }
+  try {
+    await bindPresentedSession(req, db, presented);
+  } catch (error) {
+    if (!respondSessionSuperseded(res, error)) res.status(503).json({ error: 'Authentication temporarily unavailable' });
     return null;
   }
   return presented;
@@ -11613,6 +12490,11 @@ function unregisterMcpTransport(
  * Authenticates via Bearer token, creates or reuses transport sessions.
  */
 export async function handleMcpRequest(req: Request, res: Response): Promise<void> {
+  try { await dispatchMcpRequest(req, res); }
+  catch (error) { if (!respondSessionSuperseded(res, error)) throw error; }
+}
+
+async function dispatchMcpRequest(req: Request, res: Response): Promise<void> {
   // Recheck the presented credential for each request on an existing transport.
   // Its principal was captured at initialization, while platform roles must
   // still be refreshed before every tool-dispatch POST (#1251).
@@ -11647,6 +12529,9 @@ async function handleKnownMcpSession(
   // therefore does not mutate the shared authorization snapshot.
   if (req.method === 'GET') {
     if (!(await authenticateBoundMcpSession(req, res, sessionId, active))) return;
+    // #3797: tracked so the end of the stopping drain window can end it (closeMcpTransportsForShutdown).
+    active.streams.add(res);
+    releaseOnceOnResponseEnd(res, () => active.streams.delete(res));
     await active.transport.handleRequest(req, res, req.body);
     return;
   }
@@ -11705,11 +12590,11 @@ async function handleKnownMcpSession(
     // Credential resolution re-reads the live user after the liveness check
     // above. A demotion between those reads must win before tool dispatch.
     active.auth.roles = presented.roles ?? [];
-    // An App key carries no session of its own across requests: THIS request's header (valid, or named and refused)
-    // is what the wake tools' session-bound refusal reads, not the one the transport opened with (#1749, N5).
-    if (active.auth.appKeyId) {
-      active.auth.requestSession = { sessionId: presented.sessionId, refused: presented.sessionBindingRefused === true };
-    }
+    active.auth.limiterIdentity = presented.limiterIdentity;
+    // #2123: every principal's session-sensitive consumers receive THIS
+    // request's binding result, under the same credential/request lock through
+    // dispatch. Keep initialization refusal and retained actor state intact.
+    active.auth.requestSession = { sessionId: presented.sessionId, refused: presented.sessionBindingRefused === true };
     await publishConnectionActor(sessionId, presented, req.headers['x-hadron-session'] !== undefined);
     await active.transport.handleRequest(req, res, req.body);
   } finally {
@@ -11777,7 +12662,7 @@ async function openOrRejectMcpSession(
   // canonical way for hadron-client / Claude Code MCP / Cursor / etc. to
   // authenticate; user-credential MCP arrives via OAuth or portal-minted
   // hdr_user_<…> bearer tokens.
-  const auth = await resolveAuthContext(req, db);
+  const { auth } = await resolveCredentialContextWithStatus(req, db);
   // Admin impersonation: impersonation tokens are not accepted on /mcp (v1).
   // MCP binds credential identity at session init. Ordinary-user roles are
   // refreshed per request below, but the impersonation SESSION row's full
@@ -11812,6 +12697,8 @@ async function openOrRejectMcpSession(
     respondMcpAuthenticationRequired(req, res);
     return;
   }
+
+  await bindPresentedSession(req, db, auth);
 
   // #2261: reserve capacity NOW, before the first await below, so concurrent initializes cannot jointly exceed
   // the per-principal cap. The key is read before `auth.appId` is filled in from a default or a restored selection.
@@ -11952,7 +12839,7 @@ async function openOrRejectMcpSession(
     // ended while this handler was suspended, the reservation is already cancelled and its slot freed: do not
     // register, or a burst of aborted initializes would exceed the cap (#2261 review, Dara/Colin P2).
     if (reservation.convert()) {
-      transports.set(sid, { transport, auth, requestTail: Promise.resolve(), principalKey, inFlight: 0, lastActivityAt: Date.now() });
+      transports.set(sid, { transport, auth, requestTail: Promise.resolve(), principalKey, inFlight: 0, streams: new Set(), lastActivityAt: Date.now() });
     } else {
       unregisterMcpTransport(sid, transport);
       await transport.close().catch(() => undefined);
@@ -12020,7 +12907,19 @@ const recoveryPageArgs = {
   offset: z.number().int().nullable().optional().describe('Page offset, default 0.'),
 };
 
+const recoveryEdgesArgs = {
+  ...recoveryPageArgs,
+  edgeIds: z.array(z.string()).nullable().optional().describe('Restrict the result, total included, to these edge ids (1 to 200). An id that is not a visible edge of this memory is absent.'),
+};
+
+/** #1328 — the claim, as every MCP node writer takes it. */
+const AUTHORED_WITH_ARG = z.object({
+  task: z.string().describe('The author task: its node id or canonical URN.'),
+  revision: z.number().int().positive().describe('The current revision of that task.'),
+}).optional().describe('The author task this write worked from, required when the node\'s role rule names one. The server compares it and records it; it does not prove the task was followed.');
+
 const governedDoorArgs = {
+  authoredWith: AUTHORED_WITH_ARG,
   urn: z.string().describe('Fully-qualified node URN (hrn:node:<root>:<memory>:<loc>).'),
   name: z.string().optional().describe('Node name. Required when creating.'),
   description: z.string().optional().describe('Short description'),
@@ -12090,12 +12989,53 @@ const SHAPE_HADRON_SEARCH = {
     .array(z.enum(['urn', 'name', 'description', 'pk', 'content']))
     .optional()
     .describe('Force these fields (overrides the smart-sniff). Omit to auto-detect.'),
-  limit: z.number().optional().describe('Max results (default 50, max 200).'),
+  limit: z.number().optional().describe('Max results (default 20, max 200).'),
   scope: z.string().optional().describe('Spec 049: run the memory + node slices under a named scope (a scope id / name, "app", or "global"). Omitted: the ladder applies (active scope › active App › active organization) and the result says which.'),
 };
 
 const SHAPE_HADRON_SET_ACTIVE_MEMORY = {
   memoryUrn: z.string().describe('Memory URN, e.g. hrn:mem:hadronmemory.com:dev (bare hadronmemory.com:dev also accepted). Legacy hrn:memory: and :: forms still resolve.'),
+};
+
+// #2661 / #2260: immutable, principal-independent parameter schemas are shared.
+const SHAPE_HADRON_RECORD_CONTENT_VALIDATION = {
+  nodeRef: z.string().min(1).describe('The node reported on: its id or fully-qualified node URN.'),
+  nodeRevision: z.number().int().min(1).describe('The node revision the validation task ran on.'),
+  validationTaskRef: z.string().min(1).describe("The validation task the node's role rule names now: its id or node URN."),
+  validationTaskRevision: z.number().int().min(1).describe('The task revision that ran.'),
+  outcome: z.enum(['PASS', 'FAIL', 'ERROR']).describe('PASS, FAIL, or ERROR when the task could not be run to a verdict.'),
+  runId: z.string().min(1).max(200).optional().describe('Your own label for this run (1-200 characters); makes a retry idempotent. Never an identity.'),
+  // #1332 (Xanthos FIT 6670593797, Xavier #81384): the recorder owns its session argument, so a
+  // refused session is judged after the not-found and writer refusals (cor:dmo:160:01), not by
+  // the #1701 gate before them.
+  session: z.string().optional().describe('Your worker session id, to record the report as that worker. A session that is not one of your open sessions is refused [session_not_bound] after the read and write checks; nothing is written.'),
+};
+
+const SHAPE_HADRON_CREATE_APP_MEMORY = {
+  app: z.string().describe('App ID or URN.'),
+  name: z.string().min(1).describe('Memory name; determines its slug.'),
+  shortDescription: z.string().optional(),
+  description: z.string().optional(),
+  tags: z.array(z.string()).optional(),
+};
+
+const SHAPE_HADRON_CREATE_MEMORY = {
+  name: z.string().min(1).describe('Memory name; its slug becomes the URN tail (e.g. "My Notes" -> my-notes).'),
+  memoryClass: z
+    .enum(['knowledge', 'group', 'personal', 'private'])
+    .optional()
+    .describe("Memory class (default 'knowledge'). personal/private are owner-only; knowledge/group are organization-shared and need `org`."),
+  org: z
+    .string()
+    .optional()
+    .describe('Organization URN or id to create it in. Omit for a user-owned personal/private memory in your own namespace.'),
+  shortDescription: z.string().optional().describe('One-line description.'),
+  description: z.string().optional().describe('Longer description.'),
+  tags: z.array(z.string()).optional().describe('Tags.'),
+  visibility: z
+    .enum(['PUBLIC', 'ORGANIZATION', 'GROUP'])
+    .optional()
+    .describe("Knowledge memories: PUBLIC or ORGANIZATION (default). A group memory is always GROUP. personal/private take none."),
 };
 
 const SHAPE_HADRON_SET_ACTIVE_APP = {
@@ -12126,7 +13066,7 @@ const SHAPE_HADRON_LIST_SCOPES = {
   ownerType: z.enum(['ORGANIZATION', 'AGENT', 'APP']).optional().describe('With ownerRef: list one owner\'s scopes instead of an App context.'),
   ownerRef: z.string().optional().describe('URN or id of the owner (with ownerType).'),
   name: z.string().optional().describe('Only scopes with exactly this name.'),
-  limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
+  limit: z.number().int().optional().describe('Page size (default 20, cap 200).'),
   offset: z.number().int().optional().describe('Page offset.'),
 };
 
@@ -12158,7 +13098,7 @@ const SHAPE_HADRON_SCOPE_EXPLAIN = {
 const SHAPE_HADRON_LIST_CHANNELS = {
   app: z.string().optional().describe('App URN or id. Defaults to the active App.'),
   memory: z.string().optional().describe('Or: one host memory (URN or id).'),
-  limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
+  limit: z.number().int().optional().describe('Page size (default 20, cap 200).'),
   offset: z.number().int().optional().describe('Page offset.'),
 };
 
@@ -12173,7 +13113,7 @@ const SHAPE_HADRON_REGISTER_LIST = {
   owner: z.string().optional().describe('An App or organization (URN or id). Defaults to the active App.'),
   channel: z.string().optional().describe('Only rows for this Channel (its id or address).'),
   attendee: z.string().optional().describe('Only rows naming this Worker or Agent (URN or id).'),
-  limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
+  limit: z.number().int().optional().describe('Page size (default 20, cap 200).'),
   offset: z.number().int().optional().describe('Page offset.'),
 };
 
@@ -12194,6 +13134,7 @@ const SHAPE_HADRON_SET_ACTIVE_SCOPE = {
 };
 
 const SHAPE_HADRON_CREATE_PARENT_NODE = {
+  authoredWith: AUTHORED_WITH_ARG,
   urn: z.string().describe('Fully-qualified node URN for the new section, e.g. "hrn:node:acme.com:mmdata:services" or "hrn:node:acme.com:mmdata:services:db-helpers"'),
   name: z.string().optional().describe('Display name (defaults to the last loc atom)'),
   description: z.string().optional().describe('What this section contains'),
@@ -12207,13 +13148,17 @@ const SHAPE_HADRON_FIND_NODES = {
   memoryUrn: z.string().optional().describe('Scope search to a single memory (fully-qualified URN). Omit to search all memories you can read — see allMemories.'),
   memoryUrns: z.array(z.string()).min(1).optional().describe('Scope search to this SET of memories (each a fully-qualified memory URN, hrn:mem:<root>:<slug>) — a targeted multi-memory search. Must be non-empty (for "everything", use allMemories). Mutually exclusive with memoryUrn and allMemories.'),
   allMemories: z.boolean().optional().describe('Search across ALL memories you can read — the org-wide "does anyone know about X?" probe (stemmed + relevance-ranked in keyword mode). The explicit, self-documenting form of omitting a memory scope. Mutually exclusive with memoryUrn / memoryUrns.'),
+  hasOpenThreads: z.boolean().optional().describe('#3494 — NodeFilter.hasOpenThreads: true selects nodes with live open root comments, false selects nodes with none, omitted leaves the filter off. Applies before ranking/paging in every mode, with existing access and content scope. Deleted stubs do not count. Inherited projections have zero summary. Timestamp is GraphQL-only; hit output is unchanged.'),
   isRunnable: z.boolean().optional().describe('Filter by runnable status (applies in every mode). true = only task nodes (Node.isRunnable=true) — the canonical "tasks I can run" predicate hadron_run_task gates on. false = only nodes explicitly marked non-runnable (most nodes leave it NULL, so false does NOT include them). Omit to ignore runnable status. Spec cor:api:060.'),
   role: z.string().optional().describe('Filter by Node.role family in every mode. Segment-boundary prefix semantics: "spec" matches "spec" and dotted descendants such as "spec.rule", but never "special" or "specification" (#1322). Node.role remains an open string; this is a query filter, not role validation.'),
+  nodeType: z.string().optional().describe('#331 — exact-match node-type facet (free-form, e.g. "task" / "parent" / "info"): only nodes whose nodeType equals this. Applies in every mode; with query "*" it lists all nodes of one type. Orthogonal to objectType. Without it, system and chat-message nodes stay excluded (name "chat-message" to search chat messages; record nodes are never excluded); "comment" searches comments as the engine documents. Negation and multi-value are not supported here; use nodeTypes for a list of types.'),
   objectType: z.string().optional().describe('#725 — collection facet: only nodes whose objectType equals this (the domain-object discriminator, e.g. "competitor" / "insight"). Orthogonal to nodeType. Composes with query/mode + where.'),
+  nodeTypes: z.array(z.string()).nullish().describe('#3113 — an explicit LIST of node types (GraphQL: NodeFilter.nodeTypes; null is the same as omitted), a union: only nodes whose nodeType is one of them. Applies in every mode. It narrows, ANDs the other filters and, being explicit, replaces the default that leaves out system and chat-message nodes; it never lifts the memory-class default, access, deleted rows or inheritance. Values are exact and case-sensitive; an unknown value matches nothing. Refused: an empty list, nodeType together with nodeTypes, more than 20 entries (counted before duplicates are dropped), and a list containing "comment" (search comments with nodeType or nodeKind). Vector and hybrid keep their bounded, widening candidate window.'),
   nodeKind: z.enum(['CONTENT', 'COMMENTS', 'ALL']).optional().describe('#1608/#1678 — which KIND of node to search (GraphQL: NodeFilter.contentScope). CONTENT (default): content nodes only. COMMENTS: comment nodes only (feedback about other nodes), found exhaustively in every mode before ranking and limits. ALL: both. A comment hit is labelled COMMENT and is never content of, or verified fact about, its target. Not hadron_get_node\'s contentScope, which picks the parts of one node to return.'),
+  childrenOf: z.string().optional().describe('#2832 — list only the DIRECT children of this loc (GraphQL: NodeFilter.childrenOf). A direct child is a node whose loc is exactly this loc plus one more segment (no further colon); "" means the top-level nodes. It reads loc strings only (not edges, not parentRel), so a loc whose parent has no node of its own is still listed. Applies in every mode, with the same access and default exclusions as the rest of the search, and pairs with memoryUrn (loc is per memory). With no query and no sort the order is the sibling order (positioned nodes first, then by loc). Unlike parentRel, which scopes the WHOLE subtree.'),
   scope: z.string().optional().describe('Spec 049: search under a named scope — a scope id, a scope NAME (resolved in the active App\'s context), "app" (the active App\'s attached memories), or "global" (your active organization\'s view). Omitted with no memory selector: the ladder applies (active scope › active App › active organization), and the result says which. An explicit memoryUrn / memoryUrns / allMemories outranks the ambient scope but still intersects with one named here.'),
   brief: z.boolean().optional().describe('Return index info only: name, description, edges'),
-  limit: z.number().optional().describe('Max results (default 10 for a query; 50 for survey mode "*"/""). Raise it if the top hits do not cover what you need.'),
+  limit: z.number().int().optional().describe('Max primary results: integer clamped to 1–200 (default 10 for a query; 20 for survey mode "*"/""). Expansion neighbors are additional.'),
   minScore: z.number().optional().describe('Absolute relevance floor: drop hits scoring below this. Scores are NOT comparable across modes — keyword ranks run roughly 0..a-few, vector cosine similarity is 0..1, hybrid is a small RRF fraction — so read the (score …) values in a first unfiltered call, then set a floor for the mode in use. Prefer this (or a narrower query) over reading a long tail of weak hits. Returns fewer hits, never weaker ones; does not apply to survey mode.'),
   expand: z.number().int().min(0).max(3).optional().describe('Append undirected graph neighbors (all edge types) within depth N AFTER the ranked hits, unscored. Default 0 (no expansion). Max 3. Useful for context-stuffing — the ranked nodes plus their immediate graph context in one tool call. Spec 033 FR-020.'),
   granularity: z.enum(['node', 'chunk']).optional().describe('node (default): one entry per matching node, ranked by best-chunk similarity for content-chunk indexes. chunk: return matching passages (span text + character offsets + chunk index + parent node URN), useful for RAG context-stuffing. **chunk requires mode:vector** — hybrid + chunk is out of v1 (the design call for how RRF fuses with passage-level results was deferred). Spec 033 US2 FR-022.'),
@@ -12221,7 +13166,7 @@ const SHAPE_HADRON_FIND_NODES = {
 };
 
 const SHAPE_HADRON_GET_NODE = {
-  urn: z.string().describe('Fully-qualified node URN, e.g. "hrn:node:acme.com:mmdata:architecture" (legacy :: forms still accepted)'),
+  urn: z.string().describe('Fully-qualified node URN, e.g. "hrn:node:acme.com:mmdata:architecture" (legacy :: forms still accepted), or an action URN "hrn:action:<root>:<agent-slug>:<code>" — the register entry\'s second address'),
   contentScope: z
     .enum(['content', 'abstract', 'all'])
     .optional()
@@ -12265,8 +13210,8 @@ const SHAPE_HADRON_GET_NEXT_NODE = {
 };
 
 const SHAPE_HADRON_LIST_NODES = {
-  parentRel: z.string().optional().describe('Parent node rel path; omit to list from memory root'),
-  memoryUrn: z.string().optional().describe('Memory URN; uses active memory if not provided'),
+  parentRel: z.string().optional().describe('Parent loc (for example notes:ideas) with memoryUrn, or a fully qualified hrn:node: parent URN. If both references are provided, they must name the same memory. A bare loc without memoryUrn searches discovery scope only; use an explicit reference for your personal/private memories. Omit to list from memory root.'),
+  memoryUrn: z.string().optional().describe('Fully qualified Memory URN. Scopes a bare parentRel; required when parentRel is omitted. No active-memory fallback.'),
   depth: z.number().optional().describe('Max depth to traverse (default: 1)'),
   isRunnable: z.boolean().optional().describe('Filter the tree to runnable status. true = only task nodes (Node.isRunnable=true) — the canonical "tasks I can run" predicate hadron_run_task gates on. false = only nodes explicitly marked non-runnable (most nodes leave it NULL, so false does NOT include them). Omit to list every node. Spec cor:api:060.'),
 };
@@ -12280,6 +13225,7 @@ const SHAPE_HADRON_UNLOCK_MEMORY = {
 const SHAPE_HADRON_LOCK_MEMORY = { memoryUrn: z.string().describe('Memory URN or id') };
 
 const SHAPE_HADRON_CREATE_NODE = {
+  authoredWith: AUTHORED_WITH_ARG,
   urn: z.string().describe('Fully-qualified node URN, e.g. "hrn:node:acme.com:mmdata:review:sort-imports". Both bare and prefixed forms accepted, in either URN grammar. Relative-form URNs (no memory) are rejected.'),
   name: z.string().describe('Node name'),
   nodeType: z.string().optional().describe('Node classification (free-form; canonical values: abstract, chat, data, info (default), prompt, record, reference, system). Running is gated by isRunnable, independent of nodeType.'),
@@ -12309,6 +13255,7 @@ const SHAPE_HADRON_CREATE_NODE = {
 };
 
 const SHAPE_HADRON_UPDATE_NODE = {
+  authoredWith: AUTHORED_WITH_ARG,
   urn: z.string().describe('Fully-qualified node URN, e.g. "hrn:node:acme.com:mmdata:review:sort-imports"'),
   expectedRevision: z.number().int().positive().max(2_147_483_647).optional().describe('Optional positive Revision value from hadron_get_node. A mismatch refuses with [node_write_conflict]; omit for backward-compatible last-write-wins behavior.'),
   name: z.string().optional().describe('New node name'),
@@ -12323,7 +13270,7 @@ const SHAPE_HADRON_UPDATE_NODE = {
   seq: z.number().optional().describe('New sort order among siblings'),
   tags: tagsInputSchema.optional().describe('Replace tags'),
   properties: z.record(z.string(), z.unknown()).optional().describe('Structured key-value properties'),
-  data: z.record(z.string(), z.unknown()).optional().describe('Runtime data (e.g. stageOrder, promptRef, extractionSpec for chat config). REPLACES the whole data bag — to merge in a few keys while preserving the rest, use hadron_update_node_data instead.'),
+  data: z.record(z.string(), z.unknown()).nullable().optional().describe('Runtime data (e.g. stageOrder, promptRef, extractionSpec for chat config). REPLACES the whole data bag; null clears it and omission preserves it. To merge in a few keys while preserving the rest, use hadron_update_node_data instead.'),
   llmModel: z.string().optional().describe('LLM model used'),
   aiAgent: z.string().optional().describe('AI agent tool used'),
   edges: z.array(z.object({
@@ -12341,6 +13288,7 @@ const SHAPE_HADRON_UPDATE_NODE = {
 };
 
 const SHAPE_HADRON_UPDATE_NODE_DATA = {
+  authoredWith: AUTHORED_WITH_ARG,
   nodeUrn: z.string().describe('Node to update — a fully-qualified node URN (hrn:node:<root>:<memory>:<loc>) or an ID-shape PK.'),
   data: z.record(z.string(), z.unknown()).describe('JSON object to merge into the node\'s `data`. Must be an object (not an array or scalar). Its top-level keys overwrite existing ones; unmentioned keys are preserved.'),
 };
@@ -12379,6 +13327,7 @@ const SHAPE_HADRON_FIND_OBJECTS = {
 };
 
 const SHAPE_HADRON_REPLACE_TEXT = {
+  authoredWith: AUTHORED_WITH_ARG,
   oldText: z.string().describe('Text to find (literal substring), or a regular-expression source when regex:true. Must be non-empty.'),
   newText: z.string().describe('Replacement text. May be empty to delete the matched text. In regex mode, $1/$<name>/$& are honored.'),
   nodeUrns: z.array(z.string()).optional().describe('Explicit nodes to edit — fully-qualified node URNs (hrn:node:<root>:<memory>:<loc>) or ID-shape values.'),
@@ -12423,6 +13372,7 @@ const SHAPE_HADRON_DELETE_NODE = {
 };
 
 const SHAPE_HADRON_MOVE_NODE = {
+  authoredWith: AUTHORED_WITH_ARG,
   urn: z.string().describe('Current node fully-qualified URN, e.g. "hrn:node:acme.com:mmdata:services:db-helper"'),
   targetUrn: z.string().describe('Destination node fully-qualified URN. Different memory in the target URN performs a cross-memory move.'),
   overwrite: z.boolean().optional().describe('Default false (refuses on collision). Pass true to soft-delete an existing live target node before moving; the move then proceeds into the freed URN slot.'),
@@ -12467,6 +13417,12 @@ const SHAPE_HADRON_RUN_TASK = {
     .boolean()
     .optional()
     .describe('Attribute the executed run to the calling user (only with appRef).'),
+  agentRef: z
+    .string()
+    .optional()
+    .describe(
+      "Agent (PK or URN) the executed run is served as (#2735). Only with appRef. Omit to use the App's single installed Agent; an App with several installed Agents refuses with RUN_AGENT_REQUIRED.",
+    ),
 };
 
 const SHAPE_HADRON_START_SESSION = {
@@ -12519,7 +13475,7 @@ const SHAPE_HADRON_END_SESSION = {
     .boolean()
     .optional()
     .describe(
-      '#1956: also write a RESUME CLAIM, with the handoff and before the end, so the fresh context after this rotation recovers the worker with hadron_resume_session and no arguments. Single use, 60 seconds, redeemable only by you. Your own worker session only.',
+      '#1956: also write a RESUME CLAIM, with the handoff and before the end, so the fresh context after this rotation recovers the worker with the CLI (`hadron team session start`, no --as). Single use, 60 seconds, redeemable only by you. Your own worker session only.',
     ),
   inputTokens: z.number().optional().describe('Total input tokens used'),
   outputTokens: z.number().optional().describe('Total output tokens used'),
@@ -12535,11 +13491,12 @@ const SHAPE_HADRON_WHOAMI = {
 };
 
 const SHAPE_HADRON_CAST_WORKER = {
+  reportsTo: z.string().nullable().optional().describe('Same-App reporting head reference; supply this or noTeam:true, never both. Only omission is compatible while choice enforcement is OFF.'),
+  noTeam: z.boolean().nullable().optional().describe('true explicitly records No team; false and null are invalid. Omit reportsTo entirely when choosing this arm.'),
   role: z.string().optional().describe('The role ("backend-engineer") — picks the installed agent by its personaRole when agent is omitted, and becomes the casting\'s role label. Not validated against defined roles: cast lists are ergonomics, never a gate (cor:agt:020:00).'),
   name: z.string().optional().describe('The worker\'s name — REQUIRED in effect (#1050): omitting it refuses WORKER_NAME_REQUIRED rather than deriving one, because a name is permanent within the App. Optional in the schema only so that refusal carries its reason instead of arriving as a bare validation error.'),
   agent: z.string().optional().describe('The agent to cast (Agent URN or ID) — must be installed in the App. Omit to resolve it from role.'),
   app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
-  promptOverride: z.string().optional().describe('Per-worker individuality layered over the agent\'s template prompt — appended to the bound template in the worker\'s resolved prompt.'),
   session: z.string().optional().describe('Your session id — used to resolve which App to cast in when app is omitted. Passing it also keeps that session alive — driving a session through any team tool counts as activity (#1081).'),
 };
 
@@ -12552,11 +13509,14 @@ const SHAPE_HADRON_CHANNEL_POST = {
 };
 
 const SHAPE_HADRON_CHANNEL_READ = {
+  replyToSeq: z.number().int().optional().describe('Only direct replies to this seq, excluding the target. Missing or deleted target refuses TEAM_CHAT_REPLY_NOT_FOUND. AND-composes with other filters; not combinable with monitor:true.'),
   channel: z.string().describe('The Channel — its id, or its address (the chat root node URN hadron_list_channels prints). Copy one of those; a ref naming nothing reads as a Channel you may not see.'),
   sinceSeq: z.number().int().optional().describe('Only messages with seq strictly greater than this watermark.'),
   beforeSeq: z.number().int().optional().describe('Page BACKWARD: only messages with seq strictly less than this, newest page of those. Ignores offset.'),
-  mentions: z.string().optional().describe('Filter to messages mentioning this worker (name or id) or user (handle/id) of the host App. For a worker this includes @all/@team broadcasts from an author who could wake everyone (decided at post time), and never its own posts.'),
-  limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
+  teamHeadRef: z.string().optional().describe('Filter by an authorized stable team-head ID; mutually exclusive with untagged.'),
+  untagged: z.boolean().optional().describe('Filter for no stored head identity, including historical absent snapshots. Requires team metadata access.'),
+  mentions: z.string().optional().describe('Filter to messages mentioning this worker (name or id) or user (handle/id) of the host App. For a worker this includes its stored team-broadcast recipients and qualifying global broadcasts (including legacy @team), decided at post time; never its own posts.'),
+  limit: z.number().int().optional().describe('Page size (default 20, cap 200).'),
   offset: z.number().int().optional().describe('Legacy oldest-first page offset. Prefer sinceSeq or beforeSeq for stable paging.'),
   session: z.string().optional().describe('Your session id — passing it keeps that session alive (#1081).'),
   expectedIncarnation: z.number().int().optional().describe('#2181: pin the read to the Channel incarnation you read (the "incarnation" on the final line of a read). A different one is [channel_incarnation_changed] with no page and no cursor, check or resume applied; omitted, the read is unfenced.'),
@@ -12572,10 +13532,13 @@ const SHAPE_HADRON_TEAM_CHAT_POST = {
 };
 
 const SHAPE_HADRON_TEAM_CHAT_READ = {
+  replyToSeq: z.number().int().optional().describe('Only direct replies to this seq, excluding the target. Missing or deleted target refuses TEAM_CHAT_REPLY_NOT_FOUND. AND-composes with other filters; not combinable with monitor:true.'),
   sinceSeq: z.number().int().optional().describe('Only messages with seq strictly greater than this watermark.'),
   beforeSeq: z.number().int().optional().describe('Page BACKWARD (#1116): only messages with seq strictly LESS than this, returning the NEWEST such page — pass the oldest seq you have seen. Stable under concurrent posting where offset is not. Ignores offset.'),
-  mentions: z.string().optional().describe('Filter to messages mentioning this worker (name or id) or user (handle/id). For a worker this includes @all/@team broadcasts from an author who could wake everyone (decided at post time), and never its own posts.'),
-  limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
+  teamHeadRef: z.string().optional().describe('Filter by an authorized stable team-head ID; mutually exclusive with untagged.'),
+  untagged: z.boolean().optional().describe('Filter for no stored head identity, including historical absent snapshots. Requires team metadata access.'),
+  mentions: z.string().optional().describe('Filter to messages mentioning this worker (name or id) or user (handle/id). For a worker this includes its stored team-broadcast recipients and qualifying global broadcasts (including legacy @team), decided at post time; never its own posts.'),
+  limit: z.number().int().optional().describe('Page size (default 20, cap 200).'),
   offset: z.number().int().optional().describe('Legacy oldest-first page offset. Prefer sinceSeq or beforeSeq for stable paging.'),
   session: z.string().optional().describe('Your session id — used to resolve which team App to read when app is omitted. On an ordinary read, passing it keeps that session alive (#1081). Monitor mode uses it only as an App hint and does not heartbeat or wake the session.'),
   app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
@@ -12591,6 +13554,14 @@ const SHAPE_HADRON_TEAM_CHAT_READ = {
   })).max(TEAM_CHAT_MONITOR_MAX_TARGETS).optional().describe('With monitor:true, deliberately advance these server-issued checkpoints after routing/action succeeded.'),
 };
 
+const SHAPE_HADRON_TEAM_CHAT_SEARCH = {
+  query: z.string().describe('The text to find: a literal, case-insensitive substring, 2 to 200 characters counted as typed (no trimming). % _ and the backslash have no special meaning.'),
+  limit: z.number().int().optional().describe('Matches per page (default 20; a larger value is clamped to 50; below 1 is refused).'),
+  cursor: z.string().optional().describe('The continuation from the previous page of THIS search (same query, chat and caller); any other use is [team_chat_search_cursor_invalid].'),
+  app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the active App. Ignored when channel is given.'),
+  channel: z.string().optional().describe('Search THIS Channel (its id or address, from hadron_list_channels) instead of the App\'s default team chat.'),
+};
+
 const SHAPE_HADRON_TEAM_ATTENTION = {
   app: z.string().optional().describe('The App — an App URN or ID. Omit to use the selected App.'),
   since: z.string().optional().describe('Opaque token returned by the preceding successful poll. Do not pass "now".'),
@@ -12600,7 +13571,7 @@ const SHAPE_HADRON_TEAM_ATTENTION_PAGE = {
   app: z.string().optional().describe('The App — an App URN or ID. Omit to use the selected App.'),
   since: z.string().optional().describe('v1-shaped watermark token to start a scan from. Do not pass with page. Do not pass "now".'),
   page: z.string().optional().describe('Opaque continuation returned by the preceding page. Do not pass with since.'),
-  limit: z.number().int().optional().describe('Max Worker/Channel pairs to emit this call (default 50, cap 100).'),
+  limit: z.number().int().optional().describe('Max Worker/Channel pairs to emit this call (default 20, cap 100).'),
   scanLimit: z.number().int().optional().describe('Max encrypted rows to decrypt or aggregate this call (default 50, cap 100).'),
 };
 
@@ -12608,7 +13579,7 @@ const SHAPE_HADRON_TEAM_ATTENTION_SWITCHOVER = {
   app: z.string().optional().describe('The App — an App URN or ID. Omit to use the selected App.'),
   action: z.enum(['preview', 'apply']).describe('preview makes no writes and pages; apply requires the exact final-page proof.'),
   page: z.string().optional().describe('preview continuation from the preceding preview page.'),
-  limit: z.number().int().optional().describe('Max Worker/Channel pairs to emit per preview call (default 50, cap 100).'),
+  limit: z.number().int().optional().describe('Max Worker/Channel pairs to emit per preview call (default 20, cap 100).'),
   proof: z.string().optional().describe('Required for action:"apply"; returned by the final preview page.'),
 };
 
@@ -12622,7 +13593,7 @@ const SHAPE_HADRON_TEAM_CHAT_MARK_READ = {
 
 const SHAPE_HADRON_LIST_WORKERS = {
   includeRetired: z.boolean().optional().describe('Include retired castings — historical staff whose names stay reserved.'),
-  limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
+  limit: z.number().int().optional().describe('Page size (default 20, cap 200).'),
   offset: z.number().int().optional().describe('Page offset.'),
   session: z.string().optional().describe('Your session id — used to resolve which team App to list when app is omitted. Passing it also keeps that session alive — driving a session through any team tool counts as activity (#1081).'),
   app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
@@ -12641,17 +13612,17 @@ const SHAPE_HADRON_DELETE_WORKER = {
 
 const SHAPE_HADRON_UPDATE_WORKER = {
   workerRef: z.string().describe('The worker: its NAME ("Iris", within the App), its URN, or its id.'),
-  // Optional, matching the description's "omit it to change nothing" and
-  // the GraphQL mutation's omitted-preserves convention (PR #1019 review,
-  // Copilot). It was REQUIRED while the description promised omission
-  // worked, so a model that read the contract and followed it hit a hard
-  // schema-validation error — the one failure mode worse than the tool not
-  // offering the option at all.
-  promptOverride: z.string().optional().describe("The worker's new individuality text, REPLACING any current override. Pass an empty string to clear it; omit it to leave the override untouched."),
   signature: z.string().nullable().optional().describe('Per-worker signature template. Omit preserves; null refuses; blank delivers nothing. App managers only.'),
   trailer: z.string().nullable().optional().describe('Per-worker trailer template, same manager and omission rules as signature.'),
   app: z.string().optional().describe('The team App — an App URN or ID. Only needed for the NAME form; omit to use the session\'s active App.'),
   session: z.string().optional().describe('Your session id. Used to resolve which App a bare NAME belongs to when app is omitted, and — whenever you pass it — to keep that session alive: driving a session through any team tool counts as activity, so its DERIVED liveness stays current while you are working (#1081; #1114 — inactivity no longer reaps anything, it only decides whether a session reads as live).'),
+};
+
+const SHAPE_HADRON_CHANGE_WORKER_AGENT = {
+  workerRef: z.string().describe('The worker: its NAME ("Iris", within the App), its URN, or its id.'),
+  agent: z.string().describe('The agent the worker will cast: an Agent URN or id, installed in the App. The role is that agent\'s own.'),
+  app: z.string().optional().describe('The team App — an App URN or ID. Only needed for the NAME form; omit to use the session\'s active App.'),
+  session: z.string().optional().describe('Your session id: resolves which App a bare NAME belongs to, and keeps that session alive (#1081). Passing a WORKER session does not authorize the change: a worker session is refused.'),
 };
 
 const SHAPE_HADRON_SET_WORKER_REPORTS_TO = {
@@ -12677,7 +13648,7 @@ const SHAPE_HADRON_TEAM_WORK_ITEMS = {
   worker: z.string().optional().describe('Filter to ONE worker\'s records — its name ("Iris"), id, or URN. Everything that worker has done, across all of their sessions. A retired worker still resolves.'),
   tool: z.string().optional().describe('Filter by tool (e.g. "github").'),
   kind: z.string().optional().describe('Filter by kind: pr | issue | commit | branch | repo.'),
-  limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
+  limit: z.number().int().optional().describe('Page size (default 20, cap 200).'),
   offset: z.number().int().optional().describe('Page offset.'),
   app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
 };

@@ -1,0 +1,1300 @@
+/**
+ * #1632 S2b-2 (cor:dmo:130:08, :02, :03; cor:aut:040:06) — the server-hosted signing ceremony, over the real HTTP
+ * transport against a real database and a software passkey.
+ *
+ *   GET  /signing/:id                a static shell, the same for every id; nothing about any node
+ *   POST /signing/:id/proof/challenge opens a SIGN_PROOF ceremony for this browser; the same answer for every id
+ *   POST /signing/:id/proof          a passkey assertion over it: read access + named-signer match, THEN the content;
+ *                                    mints the ONE signing ceremony for a proven writer
+ *   POST /signing/:id/challenge      reads that ceremony's bound challenge (SHA-256 of the v3 payload); mints nothing
+ *   POST /signing/:id/complete       the signing assertion; one transaction (ceremony, counter, record, end)
+ *   POST /signing/:id/decline        the proven signer turns the request down
+ *
+ * Mounted only through signingSurfacePolicy(); off is an ordinary 404.
+ */
+import { lineDiff } from '../lib/signing/lineDiff.js';
+import { createHash } from 'node:crypto';
+import { runInNewContext } from 'node:vm';
+import * as urnEmit from '../lib/urnEmit.js';
+import { createServer as httpServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createServer } from '../server.js';
+import { db } from '../integrations/db/client.js';
+import { cleanDb, createDbNode, createDbOrgAndGraph } from '../test/helpers.js';
+import { insertSoftPasskey, softPasskey, type SoftPasskey } from '../test/softPasskey.js';
+import { createSigningRequestInTransaction, withdrawSigningRequestInTransaction } from '../lib/signing/requests.js';
+import { loadSignatureStatuses } from '../lib/signing/status.js';
+import { signatureChallenge, signaturePayloadBytes } from '../lib/signing/payload.js';
+import { clearSignatureVerifyCache } from '../lib/signing/verify.js';
+import { resolvers } from './graphql/schema/resolvers.js';
+
+const ORIGIN = 'https://sign.example.test';
+const RP = 'example.test';
+const TITLE = 'Retention policy';
+const ABSTRACT = 'How long we keep records.';
+const CONTENT = 'Records are kept 30 days.\n\nSee {{> policies:conduct}} for conduct.\n';
+
+let server: Server | undefined;
+let base: string;
+let memoryId: string;
+let nodeId: string;
+let requester: { id: string };
+let signer: { id: string; key: SoftPasskey };
+let reader: { id: string; key: SoftPasskey };
+let outsider: { id: string; key: SoftPasskey };
+let otherWriter: { id: string; key: SoftPasskey };
+
+async function person(handle: string, role: 'CONTRIBUTOR' | 'READER' | null, orgId: string) {
+  const u = await db.user.create({ data: { handle, roles: [] } });
+  if (role) await db.orgMember.create({ data: { organizationId: orgId, userId: u.id, role } });
+  const key = softPasskey();
+  await insertSoftPasskey(db, u.id, key, { label: `${handle} key` });
+  return { id: u.id, key };
+}
+
+beforeEach(async () => {
+  await cleanDb(db);
+  clearSignatureVerifyCache();
+  vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'true');
+  vi.stubEnv('PASSKEY_RP_ID', RP);
+  vi.stubEnv('SIGNING_CEREMONY_ORIGINS', ORIGIN);
+  const { org, graph } = await createDbOrgAndGraph(db, { orgName: 'cer-org', graphName: 'cer' });
+  memoryId = graph.id;
+  requester = await db.user.create({ data: { handle: 'ceremony-requester', roles: [] } });
+  await db.orgMember.create({ data: { organizationId: org.id, userId: requester.id, role: 'CONTRIBUTOR' } });
+  signer = await person('cer-signer', 'CONTRIBUTOR', org.id);
+  reader = await person('cer-reader', 'READER', org.id);
+  otherWriter = await person('cer-other-writer', 'CONTRIBUTOR', org.id);
+  outsider = await person('cer-outsider', null, org.id);
+  nodeId = (await createDbNode(db, { loc: 'policies:retention', memoryId, name: TITLE, content: CONTENT })).id;
+  await db.node.update({ where: { id: nodeId }, data: { abstract: ABSTRACT } });
+  server = httpServer(await createServer());
+  await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
+  base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+});
+
+afterEach(async () => {
+  if (server) await new Promise<void>((resolve, reject) => server!.close((e) => (e ? reject(e) : resolve())));
+  server = undefined;
+  vi.unstubAllEnvs();
+});
+
+const mayWrite = async () => true;
+const openRequest = (opts: { namedSignerId?: string } = {}) => db.$transaction((tx) => createSigningRequestInTransaction(tx, nodeId, {
+  memoryId, requester: { userId: requester.id, appId: null, workerId: null, sessionId: null }, mayWrite, ...opts,
+}));
+type Req = Awaited<ReturnType<typeof openRequest>>;
+
+const sha256 = (b: Buffer | string) => createHash('sha256').update(b).digest();
+const post = (id: string, path: string, body: unknown, cookie?: string, origin: string | null = ORIGIN) =>
+  fetch(`${base}/signing/${id}/${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...(origin ? { origin } : {}), ...(cookie ? { cookie } : {}) },
+    body: JSON.stringify(body ?? {}),
+  });
+
+interface Proved { cookie: string; preCookie: string; ceremonyId: string; json: any; status: number }
+
+/** Open a proof ceremony and answer it with `who`'s passkey (counter 1). */
+async function prove(id: string, who: { key: SoftPasskey }, over: { uv?: boolean; origin?: string; counter?: number } = {}): Promise<Proved> {
+  const c = await post(id, 'proof/challenge', {});
+  expect(c.status).toBe(200);
+  const preCookie = (c.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
+  const { ceremonyId, challenge } = await c.json() as { ceremonyId: string; challenge: string };
+  const a = who.key.assert({
+    payload: Buffer.alloc(0), rawChallenge: Buffer.from(challenge, 'base64url'),
+    origin: over.origin ?? ORIGIN, rpId: RP, counter: over.counter ?? 1, uv: over.uv,
+  });
+  const r = await post(id, 'proof', assertionBody(ceremonyId, who.key, a), preCookie);
+  // A proof that opened a signing ceremony rotates the browser value (fixation); later calls carry the new cookie.
+  const cookie = (r.headers.get('set-cookie') ?? '').split(';')[0] || preCookie;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const json = (await r.json().catch(() => null)) as any;
+  // After a proof that opened a signing ceremony, `/challenge` hands over its bound challenge (it mints nothing).
+  if (json?.outcome === 'open') {
+    const s = await post(id, 'challenge', {}, cookie);
+    json.signing = s.status === 200 ? await s.json() : null;
+  }
+  return { cookie, preCookie, ceremonyId, status: r.status, json };
+}
+
+function assertionBody(ceremonyId: string, key: SoftPasskey, a: ReturnType<SoftPasskey['assert']>) {
+  return {
+    ceremonyId, credentialId: key.credentialId.toString('base64url'),
+    authenticatorData: a.authenticatorData.toString('base64url'),
+    clientDataJson: a.clientDataJson.toString('base64url'), signature: a.signature.toString('base64url'),
+  };
+}
+
+/** The signing assertion over the challenge the server handed over with the content. */
+function signingBody(p: Proved, key: SoftPasskey, over: { uv?: boolean; origin?: string; counter?: number } = {}) {
+  const s = p.json.signing as { ceremonyId: string; challenge: string };
+  const a = key.assert({
+    payload: Buffer.alloc(0), rawChallenge: Buffer.from(s.challenge, 'base64url'),
+    origin: over.origin ?? ORIGIN, rpId: RP, counter: over.counter ?? 2, uv: over.uv,
+  });
+  return assertionBody(s.ceremonyId, key, a);
+}
+
+const FORBIDDEN = '{"error":"forbidden"}';
+
+/**
+ * A minimal modelled DOM for the served ceremony script (#3563). It is VM state-machine evidence, not native DOM or
+ * assistive-technology evidence: it models only what the focus cells need. Shell roots are attached to a rooted
+ * document; a created element is connected only once appended under a connected ancestor, and `focus()` is a no-op
+ * for a disabled, hidden-ancestry or detached control, as in a browser.
+ */
+interface FakeElement {
+  tag: string; textContent: string; children: FakeElement[]; parent: FakeElement | null; hidden: boolean; disabled: boolean; className?: string; readonly parentNode: FakeElement | null;
+  listeners: Record<string, () => Promise<void>>; appendChild: (child: FakeElement) => void;
+  replaceChildren: (...children: FakeElement[]) => void; addEventListener: (event: string, fn: () => Promise<void>) => void; focus: () => void;
+}
+function createFakeDom(shellIds: Array<{ id: string; hidden?: boolean }>) {
+  let active: FakeElement | null = null;
+  const accepted: FakeElement[] = [];
+  const contains = (ancestor: FakeElement, node: FakeElement | null): boolean => { for (let n = node; n; n = n.parent) if (n === ancestor) return true; return false; };
+  const detach = (child: FakeElement) => {
+    if (child.parent) child.parent.children = child.parent.children.filter(c => c !== child);
+    child.parent = null;
+    if (contains(child, active)) active = null; // a removed active element leaves focus on the body
+  };
+  const make = (tag: string): FakeElement => {
+    const e: FakeElement = { tag, textContent: '', children: [], parent: null, hidden: false, disabled: false, listeners: {},
+      appendChild: child => { detach(child); e.children.push(child); child.parent = e; },
+      replaceChildren: (...children) => { [...e.children].forEach(detach); children.forEach(c => e.appendChild(c)); },
+      get parentNode() { return e.parent; },
+      addEventListener: (event, fn) => { e.listeners[event] = fn; },
+      focus: () => {
+        const hiddenAncestry = (() => { for (let n: FakeElement | null = e; n; n = n.parent) if (n.hidden) return true; return false; })();
+        if (!contains(root, e) || e.disabled || hiddenAncestry) return;
+        active = e; accepted.push(e);
+      } };
+    return e;
+  };
+  const root = make('#document');
+  const ids: Record<string, FakeElement> = {};
+  for (const shell of shellIds) { const e = make(shell.id); e.hidden = shell.hidden ?? false; root.appendChild(e); ids[shell.id] = e; }
+  const document = { getElementById: (id: string) => ids[id], createElement: make,
+    createTextNode: (text: string) => Object.assign(make('#text'), { textContent: text }), title: '',
+    get activeElement() { return active; } };
+  return { document, ids, root, make, accepted, isConnected: (e: FakeElement) => contains(root, e) };
+}
+
+/**
+ * Independent request accounting for the served script's fetch. The expected sequence is test data, not derived from
+ * what the script sends. Every call is recorded BEFORE any exception can reach the script's own catch, and a wrong
+ * or extra call lands in a side channel the script cannot swallow.
+ */
+function createRequestLedger(requestId: string, expected: Array<{ path: string; status: number; body: unknown }>) {
+  const observed: Array<{ method: string; path: string; body: any; rawBody: unknown; credentials: unknown; contentType: unknown }> = [];
+  const unexpected: string[] = [];
+  let consumed = 0;
+  const fetchFake = async (url: string, init: { method?: string; body?: string; credentials?: unknown; headers?: Record<string, string> } = {}) => {
+    // Record the raw metadata FIRST: a URL or body that fails to parse must still land in the side channel, never
+    // throw before the call is on record where the script's catch could swallow it.
+    const call: (typeof observed)[number] = { method: init.method ?? 'GET', path: String(url), body: undefined, rawBody: init.body,
+      credentials: init.credentials, contentType: init.headers?.['content-type'] };
+    observed.push(call);
+    try { call.path = new URL(String(url), 'https://ledger.invalid').pathname; }
+    catch { unexpected.push(`unparseable URL ${String(url)}`); throw new Error('Unexpected renderer request'); }
+    if (init.body !== undefined) {
+      try { call.body = JSON.parse(init.body); }
+      catch { unexpected.push(`malformed JSON body on ${call.method} ${call.path}`); throw new Error('Unexpected renderer request'); }
+    }
+    const want = expected[consumed];
+    if (!want) { unexpected.push(`extra ${call.method} ${call.path}`); throw new Error('Unexpected renderer request'); }
+    const wantPath = `/signing/${requestId}/${want.path}`;
+    if (call.method !== 'POST' || call.path !== wantPath) {
+      unexpected.push(`wanted POST ${wantPath}, got ${call.method} ${call.path}`); throw new Error('Unexpected renderer request');
+    }
+    consumed++;
+    return { ok: want.status >= 200 && want.status < 300, status: want.status, json: async () => want.body };
+  };
+  /** Assert, outside the script's catch: the exact sequence, no wrong or extra call, every response consumed. */
+  const verify = () => {
+    expect(unexpected, 'unexpected renderer requests').toEqual([]);
+    expect(observed.map(c => `${c.method} /${c.path.split('/').slice(3).join('/')}`)).toEqual(expected.map(e => `POST /${e.path}`));
+    expect(consumed, 'unconsumed responses').toBe(expected.length);
+    for (const c of observed) { expect(c.credentials).toBe('same-origin'); expect(c.contentType).toBe('application/json'); }
+  };
+  return { fetchFake, observed, unexpected, verify };
+}
+
+/** Execute the served renderer with the proven HTTP response; transport/auth are exercised above it. */
+async function renderedProof(requestId: string, proof: unknown, extraResponses: Array<{ path: 'challenge' | 'complete' | 'decline'; status: number; body: unknown }> = []) {
+  const dom = createFakeDom([{ id: 'title' }, { id: 'msg' }, { id: 'view', hidden: true }, { id: 'start' }, { id: 'go' }]);
+  const { ids, document } = dom;
+  const ledger = createRequestLedger(requestId, [
+    { path: 'proof/challenge', status: 200, body: { ceremonyId: 'proof', challenge: 'AA', rpId: RP } },
+    { path: 'proof', status: 200, body: proof }, ...extraResponses]);
+  const script = await (await fetch(`${base}/signing/ceremony.js`)).text();
+  runInNewContext(script, { document, location: { pathname: `/signing/${requestId}` }, fetch: ledger.fetchFake,
+    navigator: { credentials: { get: async () => ({ rawId: new Uint8Array([1]), response: {
+      authenticatorData: new Uint8Array([1]), clientDataJSON: new Uint8Array([1]), signature: new Uint8Array([1]) } }) } },
+    window: { PublicKeyCredential: function () {} }, btoa, atob, Uint8Array, JSON, Date, Error });
+  await ids.go.listeners.click();
+  const texts = (e: FakeElement): string[] => [e.textContent, ...e.children.flatMap(texts)];
+  const find = (label: string): FakeElement | undefined => {
+    const walk = (e: FakeElement): FakeElement | undefined => e.tag === 'button' && e.textContent === label ? e : e.children.map(walk).find(Boolean);
+    return walk(ids.view);
+  };
+  const button = (label: string): FakeElement => {
+    const found = find(label);
+    if (!found) throw new Error('Missing renderer button: ' + label);
+    return found;
+  };
+  /** The button is attached, enabled and the one holding modelled focus. */
+  const expectFocused = (el: FakeElement) => {
+    expect(dom.isConnected(el), 'focused control attached').toBe(true);
+    expect(el.disabled, 'focused control enabled').toBe(false);
+    expect(document.activeElement).toBe(el);
+  };
+  return { ids, texts, document, button, find, dom, ledger, expectFocused, verify: ledger.verify };
+}
+
+describe('the surface is mounted only through signingSurfacePolicy()', () => {
+  it('is an ordinary 404 while the switch is off, byte-identical to a path that never existed', async () => {
+    const req = await openRequest();
+    await new Promise<void>((resolve, reject) => server!.close((e) => (e ? reject(e) : resolve())));
+    vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'false');
+    server = httpServer(await createServer());
+    await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const never = await fetch(`${base}/nothing-here/${req.id}`);
+    const neverPost = await fetch(`${base}/nothing-here/${req.id}/proof`, { method: 'POST' });
+    for (const [method, path, ref] of [['GET', '', never], ['POST', '/proof/challenge', neverPost], ['POST', '/proof', neverPost],
+      ['POST', '/challenge', neverPost], ['POST', '/complete', neverPost], ['POST', '/decline', neverPost]] as const) {
+      const r = await fetch(`${base}/signing/${req.id}${path}`, { method, headers: { origin: ORIGIN } });
+      expect(r.status, `${method} ${path}`).toBe(ref.status);
+      // Express's default 404 names the path it was asked for: compare with each request's own path masked.
+      expect((await r.text()).replaceAll(`/signing/${req.id}${path}`, '<path>'), `${method} ${path}`)
+        .toBe((await ref.clone().text()).replaceAll(ref === never ? `/nothing-here/${req.id}` : `/nothing-here/${req.id}/proof`, '<path>'));
+    }
+    expect((await fetch(`${base}/signing/ceremony.js`)).status).toBe(404);
+  });
+});
+
+describe('a link alone reveals nothing (cor:dmo:130:08)', () => {
+  it('the page is the same shell for a real request and an unknown one, with no node text, and cannot be framed or cached', async () => {
+    const req = await openRequest();
+    const real = await fetch(`${base}/signing/${req.id}`);
+    const unknown = await fetch(`${base}/signing/${'A'.repeat(22)}`);
+    expect(real.status).toBe(200);
+    expect(unknown.status).toBe(200);
+    const body = await real.text();
+    expect(body).toBe(await unknown.text());
+    for (const secret of [TITLE, ABSTRACT, 'Records are kept', 'ceremony-requester', 'policies:retention', nodeId]) expect(body).not.toContain(secret);
+    expect(real.headers.get('cache-control')).toBe('no-store');
+    expect(real.headers.get('x-frame-options')).toBe('DENY');
+    expect(real.headers.get('content-security-policy')).toMatch(/frame-ancestors 'none'/);
+    expect(real.headers.get('content-security-policy')).toMatch(/script-src 'self'/);
+    expect(real.headers.get('content-security-policy')).not.toMatch(/unsafe-inline'?[^;]*script|script-src[^;]*unsafe-inline/);
+    expect(real.headers.get('referrer-policy')).toBe('same-origin');
+  });
+
+  it('serves its script from the same origin', async () => {
+    const js = await fetch(`${base}/signing/ceremony.js`);
+    expect(js.status).toBe(200);
+    expect(js.headers.get('content-type')).toMatch(/javascript/);
+    const text = await js.text();
+    expect(text).toContain('navigator.credentials.get');
+    // The script never builds a link or touches an assertion it was not handed by this server.
+    expect(text).not.toMatch(/innerHTML|document\.write|eval\(/);
+  });
+
+  it('the challenge answer is the same shape for a real request and an unknown one, and needs an allowed Origin', async () => {
+    const req = await openRequest();
+    const a = await post(req.id, 'proof/challenge', {});
+    const b = await post('B'.repeat(22), 'proof/challenge', {});
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
+    expect(Object.keys((await a.json()) as object).sort()).toEqual(Object.keys((await b.json()) as object).sort());
+    for (const origin of ['https://evil.example', null]) {
+      const r = await post(req.id, 'proof/challenge', {}, undefined, origin);
+      expect(r.status).toBe(403);
+      expect(await r.text()).toBe(FORBIDDEN);
+    }
+  });
+
+  it('sets a strict HttpOnly browser cookie scoped to the ceremony path', async () => {
+    const req = await openRequest();
+    const c = await post(req.id, 'proof/challenge', {});
+    const cookie = c.headers.get('set-cookie') ?? '';
+    expect(cookie).toMatch(/HttpOnly/i);
+    expect(cookie).toMatch(/SameSite=Strict/i);
+    expect(cookie).toMatch(/Path=\/signing/i);
+  });
+});
+
+describe('#3563 harness self-controls (the oracle is not validated only by the handler it judges)', () => {
+  const shell = () => createFakeDom([{ id: 'a' }, { id: 'hid', hidden: true }]);
+
+  it('an attached, enabled control accepts focus', () => {
+    const d = shell();
+    const b = d.make('button'); d.ids.a.appendChild(b);
+    expect(d.isConnected(b)).toBe(true);
+    b.focus();
+    expect(d.document.activeElement).toBe(b);
+    expect(d.accepted).toEqual([b]);
+  });
+
+  it('a disabled control ignores focus, and focus works again once it is enabled', () => {
+    const d = shell();
+    const b = d.make('button'); d.ids.a.appendChild(b);
+    b.disabled = true; b.focus();
+    expect(d.document.activeElement).toBeNull();
+    b.disabled = false; b.focus();
+    expect(d.document.activeElement).toBe(b);
+  });
+
+  it('a created element is not connected, and ignores focus, until it is appended under a connected ancestor', () => {
+    const d = shell();
+    const b = d.make('button'), wrap = d.make('div');
+    wrap.appendChild(b);
+    expect(d.isConnected(b)).toBe(false);
+    b.focus();
+    expect(d.document.activeElement).toBeNull();
+    d.ids.a.appendChild(wrap);
+    expect(d.isConnected(b)).toBe(true);
+    b.focus();
+    expect(d.document.activeElement).toBe(b);
+  });
+
+  it('a control removed by replaceChildren is detached, ignores focus, and drops focus it held to the body', () => {
+    const d = shell();
+    const old = d.make('button'); d.ids.a.appendChild(old); old.focus();
+    expect(d.document.activeElement).toBe(old);
+    d.ids.a.replaceChildren(d.make('button'));
+    expect(d.isConnected(old)).toBe(false);
+    expect(d.document.activeElement).toBeNull();
+    old.focus();
+    expect(d.document.activeElement).toBeNull();
+  });
+
+  it('a control under a hidden ancestor ignores focus', () => {
+    const d = shell();
+    const b = d.make('button'); d.ids.hid.appendChild(b); b.focus();
+    expect(d.document.activeElement).toBeNull();
+    d.ids.hid.hidden = false; b.focus();
+    expect(d.document.activeElement).toBe(b);
+  });
+
+  const ledgerCall = (l: ReturnType<typeof createRequestLedger>, path: string, method = 'POST') =>
+    l.fetchFake('/signing/REQ/' + path, { method, body: '{}', credentials: 'same-origin', headers: { 'content-type': 'application/json' } });
+
+  it('the ledger accepts the exact sequence and verify() passes', async () => {
+    const l = createRequestLedger('REQ', [{ path: 'challenge', status: 200, body: {} }, { path: 'complete', status: 400, body: { error: 'x' } }]);
+    expect((await ledgerCall(l, 'challenge')).status).toBe(200);
+    expect((await ledgerCall(l, 'complete')).status).toBe(400);
+    expect(() => l.verify()).not.toThrow();
+  });
+
+  it('the ledger records a wrong endpoint in the side channel even though the script would swallow the throw', async () => {
+    const l = createRequestLedger('REQ', [{ path: 'complete', status: 200, body: {} }]);
+    await expect(ledgerCall(l, 'decline')).rejects.toThrow('Unexpected renderer request');
+    expect(l.unexpected).toEqual(['wanted POST /signing/REQ/complete, got POST /signing/REQ/decline']);
+    expect(() => l.verify()).toThrow();
+  });
+
+  it('the ledger rejects a substring-matching path and a wrong method', async () => {
+    const l = createRequestLedger('REQ', [{ path: 'proof', status: 200, body: {} }, { path: 'complete', status: 200, body: {} }]);
+    await expect(ledgerCall(l, 'proof/challenge')).rejects.toThrow();
+    await expect(ledgerCall(l, 'proof', 'GET')).rejects.toThrow();
+    expect(l.unexpected).toHaveLength(2);
+  });
+
+  it('the ledger records an extra request after every response is consumed, and verify() fails', async () => {
+    const l = createRequestLedger('REQ', [{ path: 'challenge', status: 200, body: {} }]);
+    await ledgerCall(l, 'challenge');
+    await expect(ledgerCall(l, 'challenge')).rejects.toThrow();
+    expect(l.unexpected).toEqual(['extra POST /signing/REQ/challenge']);
+    expect(() => l.verify()).toThrow();
+  });
+
+  it('the ledger records a malformed-JSON extra POST in the side channel even though the script would swallow the throw', async () => {
+    const l = createRequestLedger('REQ', [{ path: 'challenge', status: 200, body: {} }]);
+    await ledgerCall(l, 'challenge');
+    await expect(l.fetchFake('/signing/REQ/unexpected', { method: 'POST', body: '{not json', credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' } })).rejects.toThrow('Unexpected renderer request');
+    expect(l.observed).toHaveLength(2);
+    expect(l.observed[1]).toMatchObject({ method: 'POST', rawBody: '{not json' });
+    expect(l.unexpected).toEqual(['malformed JSON body on POST /signing/REQ/unexpected']);
+    expect(() => l.verify()).toThrow();
+  });
+
+  it('the ledger records an unparseable URL in the side channel and verify() fails', async () => {
+    const l = createRequestLedger('REQ', [{ path: 'challenge', status: 200, body: {} }]);
+    await ledgerCall(l, 'challenge');
+    await expect(l.fetchFake('http://', { method: 'POST', body: '{}' })).rejects.toThrow('Unexpected renderer request');
+    expect(l.unexpected).toEqual(['unparseable URL http://']);
+    expect(() => l.verify()).toThrow();
+  });
+
+  it('the ledger fails verify() when an intended request is never sent', async () => {
+    const l = createRequestLedger('REQ', [{ path: 'challenge', status: 200, body: {} }, { path: 'complete', status: 200, body: {} }]);
+    await ledgerCall(l, 'challenge');
+    expect(l.unexpected).toEqual([]);
+    expect(() => l.verify()).toThrow();
+  });
+});
+
+describe('#3482/#3563 served-script focus, with modelled focus and independent request accounting', () => {
+  // Modelled focus is VM state-machine evidence, not native DOM or assistive-technology evidence.
+  const challenge = { path: 'challenge', status: 200, body: { ceremonyId: 'action', challenge: 'AA', rpId: RP, allowCredentials: [] } } as const;
+
+  it('focuses the title on an ordinary writable proof, with Sign and Decline present', async () => {
+    const req = await openRequest(), proof = await prove(req.id, signer);
+    expect(proof.json.canSign).toBe(true);
+    const page = await renderedProof(req.id, proof.json);
+    page.expectFocused(page.ids.title);
+    expect(page.find('Sign with passkey')).toBeDefined();
+    expect(page.find('Decline')).toBeDefined();
+    page.verify();
+  });
+
+  // cor:dmo:130:02 S3 (only someone who may write the memory may sign) and cor:dmo:130:08 S6 (a reader sees the node
+  // but can't complete the ceremony): the real synthetic reader proof, not a relabelled writer.
+  it('a real reader proof: title focus, no Sign or Decline, and no action request (cor:dmo:130:02 S3, cor:dmo:130:08 S6)', async () => {
+    const req = await openRequest(), proof = await prove(req.id, reader);
+    expect(proof.json.outcome).toBe('open');
+    expect(proof.json.canSign).toBe(false);
+    const page = await renderedProof(req.id, proof.json);
+    page.expectFocused(page.ids.title);
+    expect(page.find('Sign with passkey')).toBeUndefined();
+    expect(page.find('Decline')).toBeUndefined();
+    expect(page.texts(page.ids.view)).toContain('You can read this, but you are not allowed to sign it.');
+    page.verify();
+  });
+
+  it('failed sign → Decline → Cancel: Sign is re-enabled and focused, Cancel sends nothing, the NEW Decline is focused', async () => {
+    const req = await openRequest(), proof = await prove(req.id, signer);
+    const page = await renderedProof(req.id, proof.json, [challenge,
+      { path: 'complete', status: 400, body: { error: 'SIGNATURE_NOT_VERIFIED' } }]);
+    const sign = page.button('Sign with passkey'), oldDecline = page.button('Decline');
+    await sign.listeners.click();
+    expect(sign.disabled).toBe(false);
+    expect(oldDecline.disabled).toBe(false);
+    page.expectFocused(sign);
+    expect(page.ids.msg.textContent).toBe('That did not verify. Nothing was recorded. You can try again.');
+    // The request stays open after a recoverable failure (pins current behaviour; no spec governs it).
+    const callsBefore = page.ledger.observed.length;
+    await oldDecline.listeners.click();
+    page.expectFocused(page.button('Cancel'));
+    await page.button('Cancel').listeners.click();
+    const newDecline = page.button('Decline');
+    expect(newDecline).not.toBe(oldDecline);
+    page.expectFocused(newDecline);
+    expect(page.dom.isConnected(oldDecline)).toBe(false);
+    expect(page.document.activeElement).not.toBe(oldDecline);
+    expect(page.ledger.observed.length, 'opening the confirmation and pressing Cancel send nothing').toBe(callsBefore);
+    expect(page.ledger.observed.some(c => c.path.endsWith('/decline'))).toBe(false);
+    page.verify();
+  });
+
+  it('only Confirm Decline calls /decline: challenge then decline, then the Declined title takes focus', async () => {
+    const req = await openRequest(), proof = await prove(req.id, signer);
+    const page = await renderedProof(req.id, proof.json, [challenge, { path: 'decline', status: 200, body: {} }]);
+    await page.button('Decline').listeners.click();
+    expect(page.ledger.observed.filter(c => c.path.endsWith('/decline'))).toHaveLength(0);
+    await page.button('Yes, decline').listeners.click();
+    expect(page.ledger.observed.at(-1)!.body).toEqual({ ceremonyId: 'action' });
+    expect(page.ids.title.textContent).toBe('Declined');
+    page.expectFocused(page.ids.title);
+    page.verify();
+  });
+
+  it('Sign: challenge then complete with a full assertion body, then the Signed title takes focus', async () => {
+    const req = await openRequest(), proof = await prove(req.id, signer);
+    const page = await renderedProof(req.id, proof.json, [challenge, { path: 'complete', status: 200, body: {} }]);
+    await page.button('Sign with passkey').listeners.click();
+    expect(Object.keys(page.ledger.observed.at(-1)!.body).sort())
+      .toEqual(['authenticatorData', 'ceremonyId', 'clientDataJson', 'credentialId', 'signature']);
+    expect(page.ledger.observed.at(-1)!.body.ceremonyId).toBe('action');
+    expect(page.ids.title.textContent).toBe('Signed');
+    page.expectFocused(page.ids.title);
+    page.verify();
+  });
+
+  it('returns focus to the NEW Decline control after Cancel, with no request sent', async () => {
+    const req = await openRequest(), proof = await prove(req.id, signer);
+    const page = await renderedProof(req.id, proof.json);
+    page.expectFocused(page.ids.title);
+    const oldDecline = page.button('Decline');
+    await oldDecline.listeners.click();
+    page.expectFocused(page.button('Cancel'));
+    await page.button('Cancel').listeners.click();
+    page.expectFocused(page.button('Decline'));
+    expect(page.button('Decline')).not.toBe(oldDecline);
+    page.verify();
+  });
+
+  for (const [action, status, body, expected] of [
+    ['Sign with passkey', 400, { error: 'SIGNATURE_NOT_VERIFIED' }, 'Sign with passkey'],
+    ['Sign with passkey', 502, {}, 'Reload this page'],
+    ['Yes, decline', 400, { error: 'refused' }, 'Yes, decline'],
+    ['Yes, decline', 502, {}, 'Reload this page'],
+  ] as const) it('preserves ' + action + '/' + status + ' focus on ' + expected, async () => {
+    const req = await openRequest(), proof = await prove(req.id, signer);
+    const last = action === 'Yes, decline' ? 'decline' : 'complete';
+    const page = await renderedProof(req.id, proof.json, [challenge, { path: last, status, body }]);
+    if (action === 'Yes, decline') await page.button('Decline').listeners.click();
+    await page.button(action).listeners.click();
+    page.expectFocused(page.button(expected));
+    page.verify();
+  });
+});
+
+describe('#3699 signing page slice 2: summary first, sticky bar, status in the bar, recap, copy (cor:dmo:130:08, ruling 0250)', () => {
+  const challenge = { path: 'challenge', status: 200, body: { ceremonyId: 'action', challenge: 'AA', rpId: RP, allowCredentials: [] } } as const;
+  const all = (e: FakeElement): FakeElement[] => [e, ...e.children.flatMap(all)];
+  const order = (root: FakeElement, el: FakeElement) => all(root).indexOf(el);
+  const textOrder = (page: { texts: (e: FakeElement) => string[]; ids: Record<string, FakeElement> }, t: string | RegExp) =>
+    page.texts(page.ids.view).findIndex((x) => (typeof t === 'string' ? x === t : t.test(x)));
+  const bar = (page: { ids: Record<string, FakeElement> }) => all(page.ids.view).find((e) => e.className === 'bar');
+  const open = async (over: (v: any) => any = (v) => v) => {
+    const req = await openRequest(), proof = await prove(req.id, signer);
+    return { req, proof, json: { ...proof.json, view: over(proof.json.view) } };
+  };
+
+  it('opens with the summary sentence, the change line and the covers sentence, then the open text: no <details> anywhere (ruling 0250)', async () => {
+    const { req, json } = await open();
+    const page = await renderedProof(req.id, json);
+    const first = page.texts(page.ids.view).filter((x) => x !== '');
+    expect(first.slice(0, 3)).toEqual([`ceremony-requester asks you to sign "${TITLE}".`, 'No earlier signature.', 'Signing records your approval of exactly this text.']);
+    const urn = textOrder(page, json.view.node.urn);
+    const rev = textOrder(page, `Revision ${json.view.revision}`);
+    const abs = textOrder(page, ABSTRACT);
+    expect(urn).toBeGreaterThan(2);
+    expect(rev, 'revision visible next to the identity, before signing').toBeGreaterThan(urn);
+    expect(abs).toBeGreaterThan(rev);
+    expect(all(page.ids.view).filter((e) => e.tag === 'details')).toHaveLength(0);
+    expect(all(page.ids.view).filter((e) => e.tag === 'pre').length).toBeGreaterThan(0);
+    expect(all(page.ids.view).some((e) => e.hidden)).toBe(false);
+    expect(page.ids.view.hidden).toBe(false);
+    expect(page.texts(page.ids.view)).toContain(' [not covered by this signature]');
+    page.verify();
+  });
+
+  it('the change line names what differs since the last signed revision, and says when the earlier text is gone', async () => {
+    const first = await openRequest();
+    const p1 = await prove(first.id, signer);
+    expect((await post(first.id, 'complete', signingBody(p1, signer.key), p1.cookie)).status).toBe(200);
+    await resolvers.Mutation.updateNode(null, { input: { id: nodeId, content: 'Records are kept 90 days.\n' } }, { db, userId: requester.id, roles: [] } as never);
+    const second = await openRequest();
+    const p2 = await prove(second.id, signer, { counter: 3 });
+    const changed = await renderedProof(second.id, p2.json);
+    expect(changed.texts(changed.ids.view)).toContain(`Changed since revision ${first.revision}: text.`);
+    expect(all(changed.ids.view).filter((e) => e.tag === 'h3').map((e) => e.textContent)).toContain('Text');
+    expect(all(changed.ids.view).filter((e) => e.tag === 'h3').map((e) => e.textContent)).not.toContain('Content');
+    await db.nodeRevision.deleteMany({ where: { nodeId, revNo: first.revision } });
+    const p3 = await prove(second.id, signer, { counter: 4 });
+    const gone = await renderedProof(second.id, p3.json);
+    expect(gone.texts(gone.ids.view)).toContain('Earlier text no longer kept.');
+  });
+
+  it('Sign and Decline sit in one sticky bottom bar, with the status message and Reload ahead of them', async () => {
+    const { req, json } = await open();
+    const page = await renderedProof(req.id, json, [challenge, { path: 'complete', status: 502, body: {} }]);
+    const b = bar(page)!;
+    expect(b, 'a bar element').toBeDefined();
+    const shell = await (await fetch(`${base}/signing/${req.id}`)).text();
+    expect(shell).toMatch(/\.bar\{[^}]*position:sticky[^}]*bottom:0/);
+    expect(shell).toMatch(/\.bar\{[^}]*env\(safe-area-inset-bottom\)/);
+    const sign = page.button('Sign with passkey'), dec = page.button('Decline');
+    for (const e of [sign, dec, page.ids.msg]) expect(all(b)).toContain(e);
+    expect(order(b, page.ids.msg)).toBeLessThan(order(b, sign));
+    expect(order(b, page.ids.msg)).toBeLessThan(order(b, dec));
+    expect(page.ids.view.children.at(-1), 'the bar is last in the view, so it can stick to the bottom').toBe(b);
+    await sign.listeners.click();
+    const reload = page.button('Reload this page');
+    expect(all(b)).toContain(reload);
+    expect(order(b, reload)).toBeLessThan(order(b, sign));
+    expect(page.ids.msg.textContent).toContain('could not confirm');
+    page.verify();
+  });
+
+  it('a reader has no bar, and the status message stays where the shell put it', async () => {
+    const req = await openRequest(), proof = await prove(req.id, reader);
+    const page = await renderedProof(req.id, proof.json);
+    expect(bar(page)).toBeUndefined();
+    expect(page.ids.msg.parent).toBe(page.dom.root);
+    page.verify();
+  });
+
+  it('after sign the recap shows the node title and the time of the action, and the status message goes back to its shell place', async () => {
+    const { req, json } = await open();
+    const page = await renderedProof(req.id, json, [challenge, { path: 'complete', status: 200, body: {} }]);
+    await page.button('Sign with passkey').listeners.click();
+    const t = page.texts(page.ids.view);
+    expect(t).toContain(TITLE);
+    const when = t.find((x) => x.startsWith('Signed '))!;
+    expect(when).toContain(String(new Date().getFullYear()));
+    expect(when).not.toMatch(/\d:\d\d:\d\d/);
+    expect(t).toContain('Your signature was recorded. You can close this page.');
+    expect(page.ids.msg.parent).toBe(page.dom.root);
+    expect(page.dom.isConnected(page.ids.msg)).toBe(true);
+    page.verify();
+  });
+
+  it('after decline the recap shows the title and "Declined" with the time', async () => {
+    const { req, json } = await open();
+    const page = await renderedProof(req.id, json, [challenge, { path: 'decline', status: 200, body: {} }]);
+    await page.button('Decline').listeners.click();
+    await page.button('Yes, decline').listeners.click();
+    const t = page.texts(page.ids.view);
+    expect(t).toContain(TITLE);
+    expect(t.find((x) => x.startsWith('Declined '))).toMatch(/^Declined .*\d{4}.*\(device time\)$/);
+    expect(t).toContain('You declined this request. You can close this page.');
+    expect(page.ids.msg.parent).toBe(page.dom.root);
+    page.verify();
+  });
+
+  for (const state of ['COMPLETED', 'DECLINED', 'EXPIRED', 'STALE', 'WITHDRAWN']) it(`an ended state reached after the proof (${state}) shows the title and no action time`, async () => {
+    const { req, json } = await open();
+    const page = await renderedProof(req.id, json, [challenge, { path: 'complete', status: 409, body: { error: 'SIGNING_REQUEST_ENDED', state } }]);
+    await page.button('Sign with passkey').listeners.click();
+    const t = page.texts(page.ids.view);
+    expect(t).toContain(TITLE);
+    expect(t.some((x) => /^(Signed|Declined) /.test(x))).toBe(false);
+    expect(page.ids.msg.parent).toBe(page.dom.root);
+    page.verify();
+  });
+
+  it('an ended state reached before any proof shows no title (a link alone still reveals nothing)', async () => {
+    const req = await openRequest();
+    await db.$transaction((tx) => withdrawSigningRequestInTransaction(tx, req.id, { memoryId, caller: { userId: requester.id, appId: null } }));
+    const proof = await prove(req.id, signer);
+    const page = await renderedProof(req.id, proof.json);
+    expect(page.texts(page.ids.view).join('\n')).not.toContain(TITLE);
+    page.verify();
+  });
+
+  it('copy: with no intermediary the requester line is just the name', async () => {
+    const { req, json } = await open();
+    const page = await renderedProof(req.id, json);
+    expect(page.texts(page.ids.view)).toContain('Requested by ceremony-requester.');
+  });
+
+  it('copy: requester line, expiry without seconds and with a zone, field labels, includes note', async () => {
+    const { req, json } = await open((v) => ({ ...v, requester: { name: 'Pat', via: 'Juno' } }));
+    const page = await renderedProof(req.id, json);
+    const t = page.texts(page.ids.view);
+    expect(t).toContain('Requested by Pat via Juno.');
+    const exp = t.find((x) => x.startsWith('Expires '))!;
+    expect(exp).toBeDefined();
+    expect(exp).not.toMatch(/\d:\d\d:\d\d/);
+    expect(exp).toMatch(/(UTC|GMT[+-]?\d*|[A-Z]{2,5})\.?$/);
+    expect(t.join('\n')).not.toContain('(through');
+    const h3 = all(page.ids.view).filter((e) => e.tag === 'h3').map((e) => e.textContent);
+    expect(h3).toEqual(['Document', 'Title', 'Summary', 'Text']);
+    expect(t).toContain('Each include is shown as its tag, which you do sign. The text it pulls in from elsewhere is not shown here and is not part of what you sign.');
+    expect(t).not.toContain('Includes are shown as written. The text they pull in is not part of what you sign.');
+    const shell = await (await fetch(`${base}/signing/${req.id}`)).text();
+    expect(shell).toContain('.diff-del{background:rgba(220,0,0,.18)}');
+    expect(shell).not.toContain('line-through');
+  });
+});
+
+describe('#3121 canonical node identity is post-proof only', () => {
+  const expectedUrn = async () => urnEmit.emitNodeUrnV2((await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).urn, 'policies:retention');
+
+  it('shows the canonical URN in Exactly what you are signing after a real proof', async () => {
+    const req = await openRequest();
+    const p = await prove(req.id, signer);
+    expect(p.status).toBe(200);
+    expect(p.json.view.node.urn).toBe(await expectedUrn());
+    const { ids, texts } = await renderedProof(req.id, p.json);
+    const what = ids.view.children.find(section => texts(section).includes('Exactly what you are signing'));
+    expect(what).toBeDefined();
+    expect(texts(what!)).toContain(await expectedUrn());
+  });
+
+  for (const loc of ['', 'legacy::leaf']) it('keeps a stored root/legacy loc signable after proof: ' + JSON.stringify(loc), async () => {
+    await db.node.update({ where: { id: nodeId }, data: { loc } });
+    const req = await openRequest();
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+    const expected = urnEmit.safeNodeUrnV2(memory.urn, loc);
+    expect((await fetch(base + '/signing/' + req.id)).status).toBe(200);
+    const p = await prove(req.id, signer);
+    expect(p.status).toBe(200);
+    expect(p.json.outcome).toBe('open');
+    expect(p.json.view.node.urn).toBe(expected);
+    const { ids, texts } = await renderedProof(req.id, p.json);
+    expect(texts(ids.view)).toContain(expected);
+    const signed = await post(req.id, 'complete', signingBody(p, signer.key), p.cookie);
+    expect(signed.status).toBe(200);
+  });
+
+  it('uses the shared safe node emitter for displayed identity, not hand-built URN text', async () => {
+    const req = await openRequest();
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+    const original = urnEmit.safeNodeUrnV2;
+    const emitted = original(memory.urn, 'emitter:sentinel');
+    const spy = vi.spyOn(urnEmit, 'safeNodeUrnV2').mockImplementation((mem, loc) =>
+      mem === memory.urn && loc === 'policies:retention' ? emitted : original(mem, loc));
+    try {
+      const p = await prove(req.id, signer);
+      expect(spy).toHaveBeenCalledWith(memory.urn, 'policies:retention');
+      expect(p.json.view.node.urn).toBe(emitted);
+      const { ids, texts } = await renderedProof(req.id, p.json);
+      expect(texts(ids.view)).toContain(emitted);
+    } finally { spy.mockRestore(); }
+  });
+
+  it('no response to an unproved caller carries the node URN', async () => {
+    const req = await openRequest();
+    const urn = await expectedUrn();
+    for (const path of [`/signing/${req.id}`, '/signing/ceremony.js']) {
+      expect(await (await fetch(base + path)).text()).not.toContain(urn);
+    }
+    const challenge = await post(req.id, 'proof/challenge', {});
+    expect(challenge.status).toBe(200);
+    const cookie = (challenge.headers.get('set-cookie') ?? '').split(';')[0];
+    expect(await challenge.text()).not.toContain(urn);
+    for (const path of ['proof', 'challenge', 'complete', 'decline']) {
+      const response = await post(req.id, path, {}, cookie);
+      expect(response.status, path).toBe(403);
+      expect(await response.text(), path).toBe(FORBIDDEN);
+    }
+    const denied = await prove(req.id, outsider);
+    expect(denied.json).toEqual({ error: 'forbidden' });
+    expect(JSON.stringify(denied.json)).not.toContain(urn);
+  });
+});
+
+describe('passkey-proven read access and the named-signer match come BEFORE any content (S5, S6, 130:02 S4)', () => {
+  it('a proven writer sees exactly what is signed, the revision, who asked, and the includes marked not covered', async () => {
+    const req = await openRequest();
+    const p = await prove(req.id, signer);
+    expect(p.status).toBe(200);
+    expect(p.json.outcome).toBe('open');
+    expect(p.json.canSign).toBe(true);
+    const v = p.json.view;
+    expect(v.node.title).toBe(TITLE);
+    expect(v.node.abstract).toBe(ABSTRACT);
+    // The content exactly as stored/hashed, reassembled from its segments; the include tag stays a literal tag.
+    expect(v.node.contentSegments.map((s: { text: string }) => s.text).join('')).toBe(CONTENT);
+    expect(v.node.contentSegments.filter((s: { include: boolean }) => s.include).map((s: { text: string }) => s.text)).toEqual(['{{> policies:conduct}}']);
+    expect(v.revision).toBe(req.revision);
+    expect(v.requester.name).toBe('ceremony-requester');
+    expect(v.previous).toBeNull(); // no earlier signature on this node
+    expect(JSON.stringify(p.json)).not.toContain('Included text'); // never expanded
+  });
+
+  it('the signing challenge is SHA-256 of the v3 payload bytes, bound to this request', async () => {
+    const req = await openRequest();
+    const p = await prove(req.id, signer);
+    const bytes = Buffer.from(`hadron-signature-v3\nnode ${nodeId}\napproval-hash ${req.approvalHash}\nrequest ${req.id}\n`, 'utf8');
+    expect(p.json.signing.challenge).toBe(sha256(bytes).toString('base64url'));
+    expect(p.json.signing.challenge).toBe(signatureChallenge(signaturePayloadBytes('hadron-signature-v3', { nodeId, approvalHash: req.approvalHash, requestId: req.id })).toString('base64url'));
+    expect(p.json.signing.rpId).toBe(RP);
+    expect(p.json.signing.allowCredentials).toEqual([signer.key.credentialId.toString('base64url')]);
+  });
+
+  it('a reader who may not write sees the node but can never complete it', async () => {
+    const req = await openRequest();
+    const p = await prove(req.id, reader);
+    expect(p.status).toBe(200);
+    expect(p.json.view.node.title).toBe(TITLE);
+    expect(p.json.canSign).toBe(false);
+    expect(p.json.signing).toBeNull();
+    const r = await post(req.id, 'complete', { ...signingBody({ ...p, json: { signing: { ceremonyId: p.ceremonyId, challenge: signatureChallenge(signaturePayloadBytes('hadron-signature-v3', { nodeId, approvalHash: req.approvalHash, requestId: req.id })).toString('base64url') } } }, reader.key) }, p.cookie);
+    expect(r.status).toBe(403);
+    expect(await db.nodeSignature.count()).toBe(0);
+  });
+
+  it('someone who cannot read the node gets the uniform refusal, byte-identical to an unknown request, with no content', async () => {
+    const req = await openRequest();
+    const denied = await prove(req.id, outsider);
+    const unknown = await prove('C'.repeat(22), signer);
+    expect(denied.status).toBe(403);
+    expect(unknown.status).toBe(403);
+    expect(denied.json).toEqual({ error: 'forbidden' });
+    expect(unknown.json).toEqual(denied.json);
+  });
+
+  it('a request that names someone is shown only to them: another writer gets the uniform refusal and the request stays open', async () => {
+    const req = await openRequest({ namedSignerId: signer.id });
+    const other = await prove(req.id, otherWriter);
+    expect(other.status).toBe(403);
+    expect(other.json).toEqual({ error: 'forbidden' });
+    expect((await prove(req.id, signer)).status).toBe(200);
+    expect((await db.signingRequest.findUniqueOrThrow({ where: { id: req.id } })).state).toBe('open');
+  });
+
+  it('refuses a proof by another browser, a forged cookie, an unlisted Origin, no user verification, and a replay', async () => {
+    const req = await openRequest();
+    const c = await post(req.id, 'proof/challenge', {});
+    const cookie = (c.headers.get('set-cookie') ?? '').split(';')[0]!;
+    const { ceremonyId, challenge } = await c.json() as { ceremonyId: string; challenge: string };
+    const answer = (over: { uv?: boolean; origin?: string } = {}) => assertionBody(ceremonyId, signer.key, signer.key.assert({
+      payload: Buffer.alloc(0), rawChallenge: Buffer.from(challenge, 'base64url'), origin: over.origin ?? ORIGIN, rpId: RP, counter: 1, uv: over.uv,
+    }));
+    for (const [what, ck, origin, body] of [
+      ['no cookie', undefined, ORIGIN, answer()],
+      ['a forged cookie', 'hadron_signing=forged', ORIGIN, answer()],
+      ['an unlisted Origin', cookie, 'https://evil.example', answer()],
+      ['no user verification', cookie, ORIGIN, answer({ uv: false })],
+      ['a wrong assertion origin', cookie, ORIGIN, answer({ origin: 'https://evil.example' })],
+    ] as const) {
+      const r = await post(req.id, 'proof', body, ck, origin);
+      expect(r.status, what).toBe(403);
+      expect(await r.text(), what).toBe(FORBIDDEN);
+    }
+    expect((await post(req.id, 'proof', answer(), cookie)).status).toBe(200);
+    // Consumed: the same proof, replayed, is refused, and so is any later one on that ceremony.
+    expect((await post(req.id, 'proof', answer(), cookie)).status).toBe(403);
+  });
+
+  it('a proof ceremony is bound to its request: one opened for request A proves nothing at request B', async () => {
+    const a = await openRequest();
+    const b = await openRequest();
+    const c = await post(a.id, 'proof/challenge', {});
+    const cookie = (c.headers.get('set-cookie') ?? '').split(';')[0]!;
+    const { ceremonyId, challenge } = await c.json() as { ceremonyId: string; challenge: string };
+    const assertion = signer.key.assert({ payload: Buffer.alloc(0), rawChallenge: Buffer.from(challenge, 'base64url'), origin: ORIGIN, rpId: RP, counter: 1 });
+    const atB = await post(b.id, 'proof', assertionBody(ceremonyId, signer.key, assertion), cookie);
+    expect(atB.status).toBe(403);
+    expect(await atB.text()).toBe(FORBIDDEN);
+    // Refusal did not spend it: it still proves at its own request.
+    expect((await post(a.id, 'proof', assertionBody(ceremonyId, signer.key, assertion), cookie)).status).toBe(200);
+  });
+
+  it('only /proof mints a signing ceremony: /proof/challenge opens one that can never sign, /challenge only reads the minted one back, and a new proof retires the old', async () => {
+    const req = await openRequest();
+    const c = await post(req.id, 'proof/challenge', {});
+    const proofOpen = await c.json() as Record<string, unknown>;
+    expect(Object.keys(proofOpen).sort()).toEqual(['ceremonyId', 'challenge', 'rpId']);
+    expect(await db.passkeyCeremony.count({ where: { purpose: 'SIGN' } })).toBe(0);
+    const cookie = (c.headers.get('set-cookie') ?? '').split(';')[0]!;
+    // Before a proof there is nothing to read back, and a proof ceremony's own challenge, answered at /complete, signs nothing.
+    expect((await post(req.id, 'challenge', {}, cookie)).status).toBe(403);
+    const a = signer.key.assert({ payload: Buffer.alloc(0), rawChallenge: Buffer.from(String(proofOpen.challenge), 'base64url'), origin: ORIGIN, rpId: RP, counter: 1 });
+    expect((await post(req.id, 'complete', assertionBody(String(proofOpen.ceremonyId), signer.key, a), cookie)).status).toBe(403);
+    expect(await db.nodeSignature.count()).toBe(0);
+    // /proof mints exactly one; /challenge, called twice, returns that same one and mints no other.
+    const first = await prove(req.id, signer);
+    expect(await db.passkeyCeremony.count({ where: { purpose: 'SIGN' } })).toBe(1);
+    const again = await (await post(req.id, 'challenge', {}, first.cookie)).json() as { ceremonyId: string };
+    expect(again.ceremonyId).toBe(first.json.signing.ceremonyId);
+    expect(await db.passkeyCeremony.count({ where: { purpose: 'SIGN' } })).toBe(1);
+    // Another browser holds no signing ceremony: /challenge refuses it uniformly.
+    const other = await post(req.id, 'proof/challenge', {});
+    expect((await post(req.id, 'challenge', {}, (other.headers.get('set-cookie') ?? '').split(';')[0]!)).status).toBe(403);
+    // A newer proof in the SAME browser retires the earlier signing ceremony; only the newest is live.
+    const c2 = await post(req.id, 'proof/challenge', {}, first.cookie);
+    const ck2 = (c2.headers.get('set-cookie') ?? '').split(';')[0] || first.cookie;
+    const { ceremonyId: id2, challenge: ch2 } = await c2.json() as { ceremonyId: string; challenge: string };
+    const proof2 = await post(req.id, 'proof', assertionBody(id2, signer.key, signer.key.assert({ payload: Buffer.alloc(0), rawChallenge: Buffer.from(ch2, 'base64url'), origin: ORIGIN, rpId: RP, counter: 2 })), ck2);
+    expect(proof2.status).toBe(200);
+    expect(await db.passkeyCeremony.count({ where: { purpose: 'SIGN', consumedAt: null } })).toBe(1);
+    const staleTry = await post(req.id, 'complete', signingBody(first, signer.key, { counter: 3 }), ck2);
+    expect(staleTry.status).toBe(403);
+    expect(await db.nodeSignature.count()).toBe(0);
+  });
+
+  it('an ended request is shown only to a proven eligible person, as ended, with no sign option', async () => {
+    const req = await openRequest();
+    await db.$transaction((tx) => withdrawSigningRequestInTransaction(tx, req.id, { memoryId, caller: { userId: requester.id, appId: null } }));
+    const p = await prove(req.id, signer);
+    expect(p.status).toBe(200);
+    expect(p.json.outcome).toBe('ended');
+    expect(p.json.state).toBe('WITHDRAWN');
+    expect(p.json.signing).toBeUndefined();
+    expect(p.json.view).toBeUndefined();
+    expect((await prove(req.id, outsider)).json).toEqual({ error: 'forbidden' });
+  });
+
+  it('the diff is against the last signed revision, and says so when that earlier text is no longer kept', async () => {
+    const first = await openRequest();
+    const p1 = await prove(first.id, signer);
+    expect((await post(first.id, 'complete', signingBody(p1, signer.key), p1.cookie)).status).toBe(200);
+    // A real edit (it snapshots the signed text and bumps the revision), not a raw column write.
+    await resolvers.Mutation.updateNode(null, { input: { id: nodeId, content: 'Records are kept 90 days.\n' } }, { db, userId: requester.id, roles: [] } as never);
+    const second = await openRequest();
+    const p2 = await prove(second.id, signer, { counter: 3 });
+    const prev = p2.json.view.previous;
+    expect(prev.revision).toBe(first.revision);
+    expect(prev.kept).toBe(true);
+    const lines = prev.diff.content as Array<{ kind: string; text: string }>;
+    expect(lines.filter((l) => l.kind === 'del').map((l) => l.text)).toContain('Records are kept 30 days.');
+    expect(lines.filter((l) => l.kind === 'add').map((l) => l.text)).toContain('Records are kept 90 days.');
+    // The earlier revision's text deleted (history cleared): the diff says it is no longer kept.
+    await db.nodeRevision.deleteMany({ where: { nodeId, revNo: first.revision } });
+    const p3 = await prove(second.id, signer, { counter: 4 });
+    expect(p3.json.view.previous).toEqual({ revision: first.revision, kept: false });
+  });
+});
+
+describe('#3120 fix head: fixation, concurrent proofs, the verified baseline, a large history', () => {
+  const forge = async (reqId: string, revision: number, base: { authenticatorData: Uint8Array; clientDataJson: Uint8Array }) => {
+    const credential = await db.passkeyCredential.findFirstOrThrow({ where: { ownerId: signer.id } });
+    const row = await db.signingRequest.findUniqueOrThrow({ where: { id: reqId } });
+    await db.$executeRaw`INSERT INTO node_signatures
+      (id, node_id, signing_request_id, signer_id, passkey_credential_id, revision, approval_hash, payload_version,
+       rp_id, authenticator_data, client_data_json, signature)
+      VALUES (${`forged-${reqId}`}, ${nodeId}, ${reqId}, ${signer.id}, ${credential.id}, ${revision}, ${row.approvalHash}, ${row.payloadVersion},
+        ${RP}, ${Buffer.from(base.authenticatorData)}, ${Buffer.from(base.clientDataJson)}, ${Buffer.from('not-a-signature')})`;
+  };
+
+  it('a browser value planted before the proof proves nothing after it: it cannot read /challenge or decline', async () => {
+    const req = await openRequest();
+    const planted = `hadron_signing=${'A'.repeat(43)}`;
+    const c = await post(req.id, 'proof/challenge', {}, planted);
+    expect(c.status).toBe(200);
+    // The pre-proof value is kept for the proof ceremony only; the proof rotates it.
+    const { ceremonyId, challenge } = await c.json() as { ceremonyId: string; challenge: string };
+    const a = signer.key.assert({ payload: Buffer.alloc(0), rawChallenge: Buffer.from(challenge, 'base64url'), origin: ORIGIN, rpId: RP, counter: 1 });
+    const r = await post(req.id, 'proof', assertionBody(ceremonyId, signer.key, a), planted);
+    expect(r.status).toBe(200);
+    const rotated = (r.headers.get('set-cookie') ?? '').split(';')[0];
+    expect(rotated).toMatch(/^hadron_signing=/);
+    expect(rotated).not.toBe(planted);
+    expect(JSON.stringify(await r.json())).not.toContain('sessionNonce');
+    // Whoever chose the planted value: no ceremony readable, no decline.
+    expect((await post(req.id, 'challenge', {}, planted)).status).toBe(403);
+    const mine = await post(req.id, 'challenge', {}, rotated);
+    expect(mine.status).toBe(200);
+    const { ceremonyId: signCeremony } = await mine.json() as { ceremonyId: string };
+    expect((await post(req.id, 'decline', { ceremonyId: signCeremony }, planted)).status).toBe(403);
+    expect((await db.signingRequest.findUniqueOrThrow({ where: { id: req.id } })).state).toBe('open');
+    expect(await db.$queryRaw`SELECT 1 FROM passkey_ceremonies WHERE id = ${signCeremony} AND consumed_at IS NULL`).toHaveLength(1);
+    expect((await post(req.id, 'decline', { ceremonyId: signCeremony }, rotated)).status).toBe(200);
+    expect((await db.signingRequest.findUniqueOrThrow({ where: { id: req.id } })).state).toBe('declined');
+  });
+
+  it('two different people proving at once with one shared pre-proof cookie each get their own signing cookie', async () => {
+    const req = await openRequest();
+    const shared = `hadron_signing=${'B'.repeat(43)}`;
+    const open = async () => {
+      const c = await post(req.id, 'proof/challenge', {}, shared);
+      return await c.json() as { ceremonyId: string; challenge: string };
+    };
+    const [o1, o2] = [await open(), await open()];
+    const go = async (o: { ceremonyId: string; challenge: string }, who: { key: SoftPasskey }) => {
+      const a = who.key.assert({ payload: Buffer.alloc(0), rawChallenge: Buffer.from(o.challenge, 'base64url'), origin: ORIGIN, rpId: RP, counter: 1 });
+      const r = await post(req.id, 'proof', assertionBody(o.ceremonyId, who.key, a), shared);
+      return { status: r.status, cookie: (r.headers.get('set-cookie') ?? '').split(';')[0] };
+    };
+    const [r1, r2] = await Promise.all([go(o1, signer), go(o2, otherWriter)]);
+    expect([r1.status, r2.status]).toEqual([200, 200]);
+    expect(r1.cookie).not.toBe(r2.cookie);
+    // The shared pre-proof value reaches neither ceremony; each cookie reaches only its own person's.
+    expect((await post(req.id, 'challenge', {}, shared)).status).toBe(403);
+    const c1 = await (await post(req.id, 'challenge', {}, r1.cookie)).json() as { allowCredentials: string[] };
+    const c2 = await (await post(req.id, 'challenge', {}, r2.cookie)).json() as { allowCredentials: string[] };
+    expect(c1.allowCredentials).toEqual([signer.key.credentialId.toString('base64url')]);
+    expect(c2.allowCredentials).toEqual([otherWriter.key.credentialId.toString('base64url')]);
+  });
+
+  it('a signature record that does not verify is never the baseline; only invalid records mean no earlier signature', async () => {
+    const first = await openRequest();
+    const p1 = await prove(first.id, signer);
+    expect((await post(first.id, 'complete', signingBody(p1, signer.key), p1.cookie)).status).toBe(200);
+    const real = await db.nodeSignature.findFirstOrThrow({ where: { nodeId } });
+    await resolvers.Mutation.updateNode(null, { input: { id: nodeId, content: 'Records are kept 90 days.\n' } }, { db, userId: requester.id, roles: [] } as never);
+    // A NEWER record beneath the API that fails verification, for another request.
+    const other = await openRequest();
+    await forge(other.id, other.revision, real);
+    const second = await openRequest();
+    const p2 = await prove(second.id, signer, { counter: 3 });
+    expect(p2.json.view.previous.revision).toBe(first.revision);
+    // Only an invalid record left: no earlier signature at all.
+    await db.$executeRaw`ALTER TABLE node_signatures DISABLE TRIGGER USER`;
+    await db.nodeSignature.deleteMany({ where: { id: real.id } });
+    await db.$executeRaw`ALTER TABLE node_signatures ENABLE TRIGGER USER`;
+    const p3 = await prove(second.id, signer, { counter: 4 });
+    expect(p3.json.view.previous).toBeNull();
+  });
+
+  it('a very large changed history still opens: the diff fallback does not overflow the argument limit', async () => {
+    const big = (word: string) => Array.from({ length: 150_000 }, () => word).join('\n');
+    const lines = lineDiff(big('old'), big('new'));
+    expect(lines.filter((l) => l.kind === 'del')).toHaveLength(150_000);
+    expect(lines.filter((l) => l.kind === 'add')).toHaveLength(150_000);
+    const tail = lineDiff(`${big('old')}\nkeep`, `${big('new')}\nkeep`);
+    expect(tail.at(-1)).toEqual({ kind: 'same', text: 'keep' });
+    const shared = lineDiff(`${big('same')}\nold`, `${big('same')}\nnew`);
+    expect(shared.filter((l) => l.kind === 'same')).toHaveLength(150_000);
+  });
+});
+
+
+/** Put a request the database already staled back to open, beneath the guard, so the proof-time belts are what answer. */
+async function reopenBeneathTheGuard(id: string) {
+  await db.$transaction(async (tx) => {
+    await tx.$executeRaw`ALTER TABLE signing_requests DISABLE TRIGGER signing_request_guard`;
+    await tx.$executeRaw`UPDATE signing_requests SET state = 'open', ended_at = NULL WHERE id = ${id}`;
+    await tx.$executeRaw`ALTER TABLE signing_requests ENABLE TRIGGER signing_request_guard`;
+  });
+}
+
+describe('#3120 fix head: isolated guards behind the proof and the signing ceremony', () => {
+  it('a signing ceremony opened for request A never completes request B, even in its own browser with a genuine assertion over B', async () => {
+    const a = await openRequest();
+    const b = await openRequest();
+    const pa = await prove(a.id, signer);
+    const rowB = await db.signingRequest.findUniqueOrThrow({ where: { id: b.id } });
+    const challengeB = signatureChallenge(signaturePayloadBytes(rowB.payloadVersion, { nodeId: rowB.nodeId, approvalHash: rowB.approvalHash, requestId: rowB.id }));
+    const asserted = signer.key.assert({ payload: Buffer.alloc(0), rawChallenge: challengeB, origin: ORIGIN, rpId: RP, counter: 5 });
+    const r = await post(b.id, 'complete', assertionBody(pa.json.signing.ceremonyId, signer.key, asserted), pa.cookie);
+    expect(r.status).toBe(403);
+    expect(await db.nodeSignature.count()).toBe(0);
+    expect((await db.signingRequest.findUniqueOrThrow({ where: { id: b.id } })).state).toBe('open');
+  });
+
+  it('a proof by an account deleted after the challenge opened is the uniform refusal', async () => {
+    const req = await openRequest();
+    const c = await post(req.id, 'proof/challenge', {});
+    const cookie = (c.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
+    const { ceremonyId, challenge } = await c.json() as { ceremonyId: string; challenge: string };
+    await db.user.update({ where: { id: signer.id }, data: { deletedAt: new Date() } });
+    const a = signer.key.assert({ payload: Buffer.alloc(0), rawChallenge: Buffer.from(challenge, 'base64url'), origin: ORIGIN, rpId: RP, counter: 1 });
+    const r = await post(req.id, 'proof', assertionBody(ceremonyId, signer.key, a), cookie);
+    expect(r.status).toBe(403);
+    expect(await r.text()).toBe(FORBIDDEN);
+  });
+
+  it('a memory encrypted after the request was made answers ended STALE at the proof, with no content', async () => {
+    const req = await openRequest();
+    await db.memory.update({ where: { id: memoryId }, data: { isEncrypted: true } });
+    await reopenBeneathTheGuard(req.id); // the database already stales it; the proof-time check must hold on its own
+    const p = await prove(req.id, signer);
+    expect(p.status).toBe(200);
+    expect(p.json).toEqual({ outcome: 'ended', state: 'STALE' });
+  });
+
+  it('text that no longer matches the approval hash answers ended STALE at the proof, with no content', async () => {
+    const req = await openRequest();
+    // A raw write beneath the API: the request is still open, so only the proof-time belt can catch the change.
+    await db.node.update({ where: { id: nodeId }, data: { content: 'Changed beneath the API.\n' } });
+    await reopenBeneathTheGuard(req.id);
+    const p = await prove(req.id, signer);
+    expect(p.status).toBe(200);
+    expect(p.json).toEqual({ outcome: 'ended', state: 'STALE' });
+  });
+
+  it('transport boundary: a body that is not JSON never reaches the handler (the framework answers 400, not the uniform 403)', async () => {
+    const req = await openRequest();
+    const r = await fetch(`${base}/signing/${req.id}/proof`, { method: 'POST', headers: { 'content-type': 'application/json', origin: ORIGIN, cookie: 'hadron_signing=x' }, body: '{' });
+    expect(r.status).toBe(400);
+  });
+});
+
+describe('#3120 fix head: the page states what it cannot know', () => {
+  it('keeps included text readable in both themes, and treats a 5xx or unreadable answer as an UNCERTAIN outcome', async () => {
+    const shell = await (await fetch(`${base}/signing/${'a'.repeat(26)}`)).text();
+    expect(shell).toMatch(/mark\{[^}]*color:inherit/);
+    expect(shell).toContain('<noscript>');
+    const script = await (await fetch(`${base}/signing/ceremony.js`)).text();
+    // complete and decline: a 5xx or a body that is not JSON is "could not confirm", never "nothing was recorded".
+    expect(script.match(/if\(r\.status>=500\)throw new Error\('uncertain'\)/g)).toHaveLength(2);
+    expect(script.match(/if\(j===null\)throw new Error\('uncertain'\)/g)).toHaveLength(2);
+    expect(script).toContain('could not confirm whether your signature was recorded');
+    expect(script).toContain('could not confirm whether the request was declined');
+    expect(script).not.toContain('The person who asked is told');
+  });
+});
+
+describe('completing: one transaction, every refusal rolls back all of it', () => {
+  it('records the signature, completes the request, advances the counter, and spends the ceremony', async () => {
+    const req = await openRequest();
+    const p = await prove(req.id, signer);
+    const done = await post(req.id, 'complete', signingBody(p, signer.key), p.cookie);
+    expect(done.status).toBe(200);
+    expect(await done.json()).toEqual(expect.objectContaining({ ok: true }));
+    const row = await db.signingRequest.findUniqueOrThrow({ where: { id: req.id } });
+    expect(row.state).toBe('completed');
+    const sigs = await db.nodeSignature.findMany();
+    expect(sigs).toHaveLength(1);
+    expect(sigs[0]).toEqual(expect.objectContaining({ signerId: signer.id, signingRequestId: req.id, payloadVersion: 'hadron-signature-v3', rpId: RP }));
+    expect((await db.passkeyCredential.findFirstOrThrow({ where: { ownerId: signer.id } })).counter).toBe(2n);
+    const status = (await loadSignatureStatuses(db, [nodeId])).get(nodeId)!;
+    expect(status.state).toBe('CURRENT');
+    expect(status.integrityProblems).toBe(0);
+    // Spent: completing again, or re-using the signing ceremony, is refused and records nothing more.
+    const again = await post(req.id, 'complete', signingBody(p, signer.key, { counter: 3 }), p.cookie);
+    expect(again.status).not.toBe(200);
+    expect(await db.nodeSignature.count()).toBe(1);
+  });
+
+  it('a bad assertion records nothing, leaves the request open and the ceremony usable for the real one', async () => {
+    const req = await openRequest();
+    const p = await prove(req.id, signer);
+    for (const over of [{ uv: false }, { origin: 'https://evil.example' }]) {
+      const r = await post(req.id, 'complete', signingBody(p, signer.key, over), p.cookie);
+      expect(r.status).toBe(403);
+      expect(await r.json()).toEqual({ error: 'SIGNATURE_NOT_VERIFIED' });
+    }
+    expect(await db.nodeSignature.count()).toBe(0);
+    expect((await db.signingRequest.findUniqueOrThrow({ where: { id: req.id } })).state).toBe('open');
+    expect((await db.passkeyCredential.findFirstOrThrow({ where: { ownerId: signer.id } })).counter).toBe(1n);
+    expect((await post(req.id, 'complete', signingBody(p, signer.key), p.cookie)).status).toBe(200);
+  });
+
+  it('refuses an assertion over ANOTHER request\'s payload (no cross-request replay), recording nothing', async () => {
+    const a = await openRequest();
+    const b = await openRequest();
+    const p = await prove(a.id, signer);
+    const foreign = signer.key.assert({
+      payload: signaturePayloadBytes('hadron-signature-v3', { nodeId, approvalHash: b.approvalHash, requestId: b.id }),
+      origin: ORIGIN, rpId: RP, counter: 2,
+    });
+    const r = await post(a.id, 'complete', assertionBody(p.json.signing.ceremonyId, signer.key, foreign), p.cookie);
+    expect(r.status).toBe(403);
+    expect(await db.nodeSignature.count()).toBe(0);
+  });
+
+  it('a signing ceremony opened for one request never completes another', async () => {
+    const a = await openRequest();
+    const b = await openRequest();
+    const pa = await prove(a.id, signer);
+    const pb = await prove(b.id, signer, { counter: 3 });
+    // A's ceremony and A's challenge, replayed at B's endpoint.
+    const r = await post(b.id, 'complete', signingBody(pa, signer.key), pb.cookie);
+    expect(r.status).toBe(403);
+    expect(await db.nodeSignature.count()).toBe(0);
+    expect((await db.signingRequest.findUniqueOrThrow({ where: { id: b.id } })).state).toBe('open');
+  });
+
+  it('refuses a complete with another browser\'s cookie, and one with no Origin', async () => {
+    const req = await openRequest();
+    const p = await prove(req.id, signer);
+    const other = await post(req.id, 'proof/challenge', {});
+    const otherCookie = (other.headers.get('set-cookie') ?? '').split(';')[0]!;
+    expect((await post(req.id, 'complete', signingBody(p, signer.key), otherCookie)).status).toBe(403);
+    expect((await post(req.id, 'complete', signingBody(p, signer.key), p.cookie, null)).status).toBe(403);
+    expect(await db.nodeSignature.count()).toBe(0);
+  });
+
+  it('a different person\'s passkey cannot complete the proven person\'s ceremony', async () => {
+    const req = await openRequest();
+    const p = await prove(req.id, signer);
+    const r = await post(req.id, 'complete', signingBody(p, otherWriter.key), p.cookie);
+    expect(r.status).toBe(403);
+    expect(await db.nodeSignature.count()).toBe(0);
+  });
+
+  describe('between display and completion', () => {
+    const attempt = async (mutate: (req: Req) => Promise<void>) => {
+      const req = await openRequest();
+      const p = await prove(req.id, signer);
+      await mutate(req);
+      const r = await post(req.id, 'complete', signingBody(p, signer.key), p.cookie);
+      return { r, body: await r.json() as { error?: string; state?: string }, req };
+    };
+    const expectNothing = async () => {
+      expect(await db.nodeSignature.count()).toBe(0);
+      expect((await db.passkeyCredential.findFirstOrThrow({ where: { ownerId: signer.id } })).counter).toBe(1n);
+    };
+
+    it('a content change ends it stale: refused, nothing recorded', async () => {
+      const { r, body } = await attempt(async () => { await db.node.update({ where: { id: nodeId }, data: { content: 'Changed.' } }); });
+      expect(r.status).toBe(409);
+      expect(body).toEqual({ error: 'SIGNING_REQUEST_ENDED', state: 'STALE' });
+      await expectNothing();
+    });
+
+    it('a withdrawal: refused, nothing recorded', async () => {
+      const { r, body } = await attempt(async (req) => {
+        await db.$transaction((tx) => withdrawSigningRequestInTransaction(tx, req.id, { memoryId, caller: { userId: requester.id, appId: null } }));
+      });
+      expect(r.status).toBe(409);
+      expect(body).toEqual({ error: 'SIGNING_REQUEST_ENDED', state: 'WITHDRAWN' });
+      await expectNothing();
+    });
+
+    it('expiry: refused, nothing recorded', async () => {
+      const { r, body } = await attempt(async (req) => {
+        await db.$transaction(async (tx) => {
+          await tx.$executeRaw`ALTER TABLE signing_requests DISABLE TRIGGER signing_request_guard`;
+          await tx.$executeRaw`UPDATE signing_requests SET created_at = (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3) - interval '2 hours', expires_at = (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3) - interval '1 second' WHERE id = ${req.id}`;
+          await tx.$executeRaw`ALTER TABLE signing_requests ENABLE TRIGGER signing_request_guard`;
+        });
+      });
+      expect(r.status).toBe(409);
+      expect(body.error).toBe('SIGNING_REQUEST_ENDED');
+      expect(body.state).toBe('EXPIRED');
+      await expectNothing();
+    });
+
+    it('the passkey revoked: refused, nothing recorded', async () => {
+      const { r, body } = await attempt(async () => {
+        await db.$executeRaw`UPDATE passkey_credentials SET revoked_at = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3) WHERE owner_id = ${signer.id}`;
+      });
+      expect(r.status).toBe(403);
+      expect(body).toEqual({ error: 'SIGNATURE_NOT_VERIFIED' });
+      expect(await db.nodeSignature.count()).toBe(0);
+    });
+
+    it('writer eligibility lost: refused, nothing recorded', async () => {
+      const { r } = await attempt(async () => {
+        await db.orgMember.deleteMany({ where: { userId: signer.id } });
+      });
+      expect(r.status).toBe(403);
+      await expectNothing();
+    });
+
+    it('the memory encrypted: refused with ENCRYPTED_MEMORY_NOT_APPLICABLE, nothing recorded', async () => {
+      const { r, body } = await attempt(async () => { await db.memory.update({ where: { id: memoryId }, data: { isEncrypted: true } }); });
+      expect([403, 409]).toContain(r.status);
+      expect(['ENCRYPTED_MEMORY_NOT_APPLICABLE', 'SIGNING_REQUEST_ENDED']).toContain(body.error);
+      await expectNothing();
+    });
+  });
+
+  it('two completes racing on one request: exactly one wins', async () => {
+    const req = await openRequest();
+    const p = await prove(req.id, signer);
+    const q = await prove(req.id, signer, { counter: 2 });
+    const results = await Promise.all([
+      post(req.id, 'complete', signingBody(p, signer.key, { counter: 3 }), p.cookie),
+      post(req.id, 'complete', signingBody(q, signer.key, { counter: 4 }), q.cookie),
+    ]);
+    expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
+    expect(await db.nodeSignature.count()).toBe(1);
+    expect((await db.signingRequest.findUniqueOrThrow({ where: { id: req.id } })).state).toBe('completed');
+  });
+});
+
+describe('declining', () => {
+  it('the proven signer declines: the request ends declined, once', async () => {
+    const req = await openRequest();
+    const p = await prove(req.id, signer);
+    const r = await post(req.id, 'decline', { ceremonyId: p.json.signing.ceremonyId }, p.cookie);
+    expect(r.status).toBe(200);
+    expect((await db.signingRequest.findUniqueOrThrow({ where: { id: req.id } })).state).toBe('declined');
+    expect(await db.nodeSignature.count()).toBe(0);
+    const again = await post(req.id, 'decline', { ceremonyId: p.json.signing.ceremonyId }, p.cookie);
+    expect(again.status).not.toBe(200);
+  });
+
+  it('refuses a decline with no proof: another browser, no ceremony, a ceremony of another request', async () => {
+    const a = await openRequest();
+    const b = await openRequest();
+    const pa = await prove(a.id, signer);
+    const stranger = await post(a.id, 'proof/challenge', {});
+    const strangerCookie = (stranger.headers.get('set-cookie') ?? '').split(';')[0]!;
+    expect((await post(a.id, 'decline', { ceremonyId: pa.json.signing.ceremonyId }, strangerCookie)).status).toBe(403);
+    expect((await post(a.id, 'decline', {}, pa.cookie)).status).toBe(403);
+    expect((await post(b.id, 'decline', { ceremonyId: pa.json.signing.ceremonyId }, pa.cookie)).status).toBe(403);
+    expect((await db.signingRequest.findUniqueOrThrow({ where: { id: a.id } })).state).toBe('open');
+    expect((await db.signingRequest.findUniqueOrThrow({ where: { id: b.id } })).state).toBe('open');
+  });
+});
+
+describe('the signing ceremony binding (database)', () => {
+  it('a SIGN ceremony binds a user once and carries no other registration field', async () => {
+    const insert = (purpose: string, extra = '') => db.$executeRawUnsafe(
+      `INSERT INTO passkey_ceremonies (id, purpose, browser_nonce_hash, challenge_hash, expires_at, user_id, kind ${extra ? ', ' + extra.split('=')[0] : ''})
+       VALUES ($1, $2, $3, $4, now() + interval '5 minutes', $5, $6 ${extra ? ', ' + extra.split('=')[1] : ''})`,
+      `ceremony-${purpose}-${extra.length}-${Math.random().toString(36).slice(2, 10)}`.padEnd(24, 'x'), purpose, 'a'.repeat(64), 'b'.repeat(64), signer.id, 'sign');
+    await expect(insert('SIGN')).resolves.toBeDefined();
+    // Not a SIGN ceremony: user_id with kind 'sign' is still refused for every other purpose.
+    await expect(insert('SIGN_IN')).rejects.toThrow();
+    await expect(insert('SIGN_PROOF')).rejects.toThrow();
+    // A SIGN ceremony with a WebAuthn user handle (a registration field) is refused.
+    await expect(insert('SIGN', `user_handle='\\x${'00'.repeat(32)}'::bytea`)).rejects.toThrow();
+  });
+});

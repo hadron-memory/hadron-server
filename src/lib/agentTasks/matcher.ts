@@ -1,3 +1,5 @@
+import { lockAppReportsTo } from '../workerReportsTo.js';
+import { lockTaskGraph } from './blockers.js';
 /**
  * #1707 — the matcher (cor:agt:060:05, :06; plan design:agent-tasks §5).
  *
@@ -27,6 +29,13 @@
  * platform is about to end. Also the matcher's restriction, Proposed: free for
  * work (060:05) is unchanged, and the roster still shows such a worker free.
  *
+ * TIER (#2252 D1, cor:agt:060:06): a task may name `minTier` (low < mid < high). Eligible = the filters above AND tier >=
+ * minTier, where a worker's tier is its binding model's (`tierOf`) and unknown (an unbound worker included) is never
+ * eligible under a minimum. Among the eligible, the lowest sufficient tier wins, then least recently assigned; with no
+ * minimum the cheapest KNOWN tier goes first and an unknown one last. A tier never admits a worker the role, family,
+ * exclusion or name rule keeps out. The hard bound is re-read on the deciding row in `stillFreeAs`; the preference
+ * order is the pass's snapshot. No `maxTier`, no downshift, no launch change.
+ *
  * INTERIM until Holger rules (060:06 open questions, #1707): a never-assigned
  * worker ranks as least recent; ties break by name, then id; the oldest
  * queued task is served first (Proposed). A family is a MATCHING input, never
@@ -48,11 +57,12 @@
  *      can never both assign one task — the loser's update matches no row.
  */
 
+import { lockWorkersForAssignment } from './workerLock.js';
 import { afterWaits, anchorNow, coveringSignals, liveSql, lockStopFence, timeStoppedWorkers, type StopSignal } from '../stopSignals/state.js';
 import { generateId } from '../id.js';
 import { toNaiveUtc } from '../sessionActivity.js';
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
-import { s7Available } from '../tickers/s7Availability.js';
+import { OPEN_SESSION_PLACEMENT_JOIN } from '../sessionPlacement.js';
 import { type Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { loadAppWorkerActivity, loadWorkersActivity } from '../../api/graphql/schema/resolvers.worker.js';
 import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
@@ -61,12 +71,15 @@ import { appendTaskEvent, ASSIGNED_EVENT_TYPES, PLATFORM_ACTOR } from './events.
 import { loadLaunchableFamilies } from './hosts.js';
 import { launchForAssignment } from '../hostOperations/launch.js';
 import { PENDING_SESSION_END_SQL } from '../hostOperations/sessionEnd.js';
-import { normalizeFamily } from './family.js';
+import { normalizeFamily, tierOf, type ModelTier } from './family.js';
+import { effectiveModelGroups, modelGroupsAllowed, normalizeModelGroupName, type EffectiveModelGroup } from './modelGroups.js';
+import { combinationsOf, decisionClock, recordMatchOutcome, type Combination, type DbInstant } from './matchOutcomes.js';
+import { locateTeamAgent } from '../../api/graphql/schema/resolvers.worker.js';
 
 /** On since T6 (#1709): a host can start an unbound worker, so the matcher assigns to one (see the file header). */
 export const MATCH_UNBOUND_LAUNCHABLE = true;
 /** Queued tasks considered per App per run, oldest first. */
-const QUEUE_PAGE = 500;
+let QUEUE_PAGE = 500;
 const OPEN_STATUSES = ['pending', 'started'];
 
 type Db = PrismaClient | Prisma.TransactionClient;
@@ -78,10 +91,23 @@ export type Requirements = {
   /** Malformed legacy metadata is never interpreted as unconstrained work. */
   invalid?: boolean;
   role?: string;
+  roles?: string[];
+  teamWorkerId?: string;
   familyIn?: string[];
   familyNotIn?: string[];
   excludeWorkerIds?: string[];
+  /**
+   * #2252 D1 (cor:agt:060:06): the lowest tier the assignee may run at. A hard lower bound only: there is no `maxTier`
+   * (a stored `maxTier` key makes the requirements `invalid`).
+   */
+  minTier?: ModelTier;
+  /** #2831 S2 (cor:agt:060:12): group names (lowercase) the assignee's model must be in at least one of / in none of. */
+  modelGroupIn?: string[];
+  modelGroupNotIn?: string[];
 };
+
+const TIER_RANK: Readonly<Record<ModelTier, number>> = { low: 0, mid: 1, high: 2 };
+const isTier = (v: unknown): v is ModelTier => v === 'low' || v === 'mid' || v === 'high';
 
 export function parseRequirements(json: Prisma.JsonValue | null): Requirements {
   if (json == null) return {};
@@ -96,16 +122,89 @@ export function parseRequirements(json: Prisma.JsonValue | null): Requirements {
     }
     return v.map((x: string) => family ? normalizeFamily(x)! : x);
   };
+  const roles = list(r.roles);
+  if (roles && (roles.length === 0 || r.role != null)) invalid = true;
+  if (r.teamWorkerId != null && (typeof r.teamWorkerId !== 'string' || !r.teamWorkerId.trim())) invalid = true;
   const familyIn = list(r.familyIn, true);
   const familyNotIn = list(r.familyNotIn, true);
   const excludeWorkerIds = list(r.excludeWorkerIds);
+  const groupList = (v: unknown): string[] | undefined => {
+    if (v == null) return undefined;
+    const names = Array.isArray(v) ? v.map(normalizeModelGroupName) : null;
+    if (!names || names.some((n) => n === null)) {
+      invalid = true;
+      return undefined;
+    }
+    return names as string[];
+  };
+  const modelGroupIn = groupList(r.modelGroupIn);
+  const modelGroupNotIn = groupList(r.modelGroupNotIn);
   if (r.role != null && (typeof r.role !== 'string' || !r.role.trim())) invalid = true;
   if (familyIn && familyNotIn) invalid = true;
+  // #2252 D1: a tier names a hard minimum or the requirements are unusable; never "no bound". `maxTier` is not a field,
+  // so a stored one (any value, null included) is refused rather than ignored.
+  if (r.minTier != null && !isTier(r.minTier)) invalid = true;
+  if ('maxTier' in r) invalid = true;
   if (invalid) return { invalid: true };
   return {
     role: typeof r.role === 'string' ? r.role.trim() : undefined,
     familyIn, familyNotIn, excludeWorkerIds,
+    ...(roles ? { roles: roles.map(r => r.trim()) } : {}),
+    ...(typeof r.teamWorkerId === 'string' ? { teamWorkerId: r.teamWorkerId } : {}),
+    ...(isTier(r.minTier) ? { minTier: r.minTier } : {}),
+    ...(modelGroupIn ? { modelGroupIn } : {}),
+    ...(modelGroupNotIn ? { modelGroupNotIn } : {}),
   };
+}
+
+/**
+ * The App's effective model groups, live (cor:agt:060:12). `strict` refuses two Team Agents (the writers' typed
+ * refusal); the matcher is not strict: with two candidates it reads the App's own groups only, so the pass still runs.
+ */
+export async function loadAppModelGroups(db: Db, appId: string, opts: { strict?: boolean } = {}): Promise<EffectiveModelGroup[]> {
+  let teamAgentId: string | null = null;
+  try {
+    teamAgentId = (await locateTeamAgent({ db } as unknown as Context, appId, undefined)).id;
+  } catch (e) {
+    const code = (e as { extensions?: { code?: string } }).extensions?.code;
+    if (code === 'TEAM_AGENT_NOT_FOUND' || (code === 'TEAM_AGENT_AMBIGUOUS' && !opts.strict)) teamAgentId = null;
+    else throw e;
+  }
+  return effectiveModelGroups(db as Pick<Prisma.TransactionClient, 'modelGroup'>, appId, teamAgentId);
+}
+
+/**
+ * #2252 D1 — the ONE tier rule, shared by the matcher, the assignment re-check and `recordStopHolds`.
+ * The tier a worker runs at: its binding's model's, and unknown (null) when it is unbound or the model isn't mapped
+ * (`tierOf` returns null for what it can't place; nothing here guesses).
+ */
+export function workerTier(w: { bound: boolean; bindingModel: string | null }): ModelTier | null {
+  return w.bound ? tierOf(w.bindingModel) : null;
+}
+
+/** May a worker of `tier` take a task with these requirements? No minimum admits all; under a minimum, unknown never. */
+export function tierAllowed(req: Requirements, tier: ModelTier | null): boolean {
+  if (!req.minTier) return true;
+  return tier !== null && TIER_RANK[tier] >= TIER_RANK[req.minTier];
+}
+
+/** Cheapest known tier first, unknown last (cor:agt:060:06, R191). Lower sorts first. */
+export function tierPreference(tier: ModelTier | null): number {
+  return tier === null ? Object.keys(TIER_RANK).length : TIER_RANK[tier];
+}
+
+/**
+ * The family a free worker would take this task as, or null: `eligibleFamily` (role, family, exclusion, name) AND the
+ * tier rule. A tier never admits a worker the other rules keep out.
+ */
+export function eligibleFor(
+  req: Requirements,
+  w: { id: string; role: string | null; freeFamilies: string[]; bound: boolean; bindingModel: string | null },
+  groups: EffectiveModelGroup[] = [],
+): string | null {
+  // #2831 S2: an unbound worker has no model, so it is in no group (fails every In, passes every NotIn).
+  if (!modelGroupsAllowed(req, w.bound ? w.bindingModel : null, groups)) return null;
+  return tierAllowed(req, workerTier(w)) ? eligibleFamily(req, w) : null;
 }
 
 function familyAllowed(req: Requirements, family: string): boolean {
@@ -122,8 +221,33 @@ function familyAllowed(req: Requirements, family: string): boolean {
 export function eligibleFamily(req: Requirements, w: { id: string; role: string | null; freeFamilies: string[] }): string | null {
   if (req.invalid || (req.familyIn && req.familyNotIn)) return null;
   if (req.excludeWorkerIds?.includes(w.id)) return null;
-  if (req.role && (w.role ?? '').toLowerCase() !== req.role.toLowerCase()) return null;
+  if (!roleAllowed(req, w.role)) return null;
   return w.freeFamilies.map(normalizeFamily).find((f): f is string => f !== null && familyAllowed(req, f)) ?? null;
+}
+
+/** Any one role; the old one-role path uses the identical comparison. */
+function roleAllowed(req: Requirements, role: string | null): boolean {
+  return req.roles ? req.roles.some(r => r.toLowerCase() === (role ?? '').toLowerCase())
+    : !req.role || (role ?? '').toLowerCase() === req.role.toLowerCase();
+}
+
+/** #2830: one bounded snapshot of the App's graph; null reportsTo joins every pool (V11). */
+export async function matchingTeamPool(db: Db, appId: string, leadId: string): Promise<Set<string>> {
+  const rows = await db.worker.findMany({ where: { appId }, select: { id: true, reportsToWorkerId: true, retiredAt: true } });
+  if (!rows.some(w => w.id === leadId && !w.retiredAt)) return new Set();
+  const graph = new Map(rows.map(w => [w.id, w.reportsToWorkerId]));
+  const pool = new Set<string>();
+  for (const w of rows) {
+    if (w.retiredAt) continue;
+    if (w.id === leadId || w.reportsToWorkerId === null) { pool.add(w.id); continue; }
+    const seen = new Set<string>();
+    let next: string | null | undefined = w.reportsToWorkerId;
+    for (let depth = 0; next && depth < 1000 && !seen.has(next); depth++) {
+      if (next === leadId) { pool.add(w.id); break; }
+      seen.add(next); next = graph.get(next);
+    }
+  }
+  return pool;
 }
 
 /**
@@ -218,10 +342,8 @@ export function freeFamiliesOf(w: {
   openTaskCount: number;
   families: string[];
   availability: WorkerAvailabilityView;
-  /** S7 (R87): a live isolation. An assignment an isolated worker cannot receive would only stall. */
-  isolated?: boolean;
 }): string[] {
-  if (w.retired || w.isolated || w.openTaskCount > 0 || w.availability.ownInEffect) return [];
+  if (w.retired || w.openTaskCount > 0 || w.availability.ownInEffect) return [];
   return w.families.filter((f) => w.availability.familyAvailable.get(f) === true);
 }
 
@@ -236,18 +358,32 @@ async function loadLastAssignedAt(db: Db, appId: string, workerIds: string[]): P
   return new Map(rows.filter((r) => r.subjectWorkerId && r._max.createdAt).map((r) => [r.subjectWorkerId as string, r._max.createdAt as Date]));
 }
 
+/** The role and `usesTasks` of the agent each worker's newest open session was bound under (#2458). */
+async function loadOpenSessionPlacements(db: Db, workerIds: string[]): Promise<Map<string, { role: string; usesTasks: boolean }>> {
+  const rows = await db.$queryRaw<{ id: string; role: string; usesTasks: boolean }[]>`
+    SELECT w.id, os.role AS role, a.uses_tasks AS "usesTasks" FROM workers w
+    ${OPEN_SESSION_PLACEMENT_JOIN}
+    JOIN agents a ON a.id = os.agent_id
+    WHERE w.id = ANY(${workerIds}::text[]) AND os.agent_id IS NOT NULL`;
+  return new Map(rows.map((r) => [r.id, { role: r.role, usesTasks: r.usesTasks }]));
+}
+
 /**
  * The work state of every worker of one App that is not retired, at `now`.
  * One query per kind of input, never one per worker.
  */
-export async function loadWorkerWorkStates(db: Db, appId: string, now: Date): Promise<WorkerWorkState[]> {
+export async function loadWorkerWorkStates(db: Db, appId: string, now: Date, opts?: { bySession?: boolean; retiredOnly?: boolean }): Promise<WorkerWorkState[]> {
   const workers = await db.worker.findMany({
-    where: { appId, retiredAt: null },
+    // #3816: `retiredOnly` loads the RETIRED workers instead, only so a failed match can name every reason they were skipped.
+    where: { appId, retiredAt: opts?.retiredOnly ? { not: null } : null },
     select: { id: true, appId: true, name: true, slug: true, role: true, agent: { select: { usesTasks: true } } },
     orderBy: { id: 'asc' },
   });
   if (workers.length === 0) return [];
   const ids = workers.map((w) => w.id);
+  // #2458: a worker with an open session is matched on that session's agent and role, not the live worker row.
+  // Only the matcher asks (`bySession`): a manager-facing read, the roster, shows the live row (cor:dmo:050:11).
+  const placed = opts?.bySession ? await loadOpenSessionPlacements(db, ids) : new Map<string, { role: string; usesTasks: boolean }>();
   const [activity, launchable, open, lastAssigned, ending] = await Promise.all([
     loadAppWorkerActivity({ db } as unknown as Context, appId, { now }),
     loadLaunchableFamilies(db, { appId }, now),
@@ -267,20 +403,18 @@ export async function loadWorkerWorkStates(db: Db, appId: string, now: Date): Pr
     const bindingFamily = bound ? a?.bindingFamily ?? null : null;
     const launchableFamilies = launchable.get(w.id) ?? [];
     return {
-      ...w, usesTasks: w.agent.usesTasks, bound, live, bindingFamily,
+      ...w, role: placed.get(w.id)?.role ?? w.role, usesTasks: placed.get(w.id)?.usesTasks ?? w.agent.usesTasks, bound, live, bindingFamily,
       bindingModel: bound ? a?.bindingModel ?? null : null,
       modelReportedAt: bound ? a?.modelReportedAt ?? null : null,
       launchableFamilies, lastActiveAt: a?.lastActiveAt ?? null, endingSession: ending.has(w.id),
       families: familiesOf({ bound, bindingFamily, launchableFamilies }),
     };
   });
-  const isolatedRows = s7Available() ? await db.workerWakeSettings.findMany({ where: { workerId: { in: ids }, isolatedUntil: { gt: now } }, select: { workerId: true } }) : [];
-  const isolatedIds = new Set(isolatedRows.map((r) => r.workerId));
   const avail = await loadAvailabilityByFamily(db, partial.map((w) => ({ id: w.id, appId, families: w.families })), now);
   return partial.map((w) => {
     const availability = avail.get(w.id) as WorkerAvailabilityView;
     const openTaskCount = openBy.get(w.id) ?? 0;
-    const freeFamilies = freeFamiliesOf({ retired: false, isolated: isolatedIds.has(w.id), openTaskCount, families: w.families, availability });
+    const freeFamilies = freeFamiliesOf({ retired: false, openTaskCount, families: w.families, availability });
     return {
       ...w, availability, openTaskCount, freeFamilies, free: freeFamilies.length > 0,
       lastAssignedAt: lastAssigned.get(w.id) ?? null,
@@ -293,17 +427,22 @@ export async function loadWorkerWorkStates(db: Db, appId: string, now: Date): Pr
  * still free for work as `family`? Re-reads every input on the transaction
  * client, so a run that waited on the lock sees what the first run committed.
  */
-async function stillFreeAs(tx: Prisma.TransactionClient, appId: string, workerId: string, family: string, now: Date, req: Requirements, anchor: number): Promise<boolean> {
+async function stillFreeAs(tx: Prisma.TransactionClient, appId: string, workerId: string, family: string, now: Date, req: Requirements, anchor: number): Promise<Combination | null> {
   // The owning Agent row fences usesTasks against updateAgent, before the
   // Worker row. No session/worker lock upgrades and no inherited setting.
-  const [owner] = await tx.$queryRaw<{ id: string; usesTasks: boolean }[]>`
-    SELECT a.id, a.uses_tasks AS "usesTasks" FROM agents a
-    JOIN workers w ON w.agent_id = a.id WHERE w.id = ${workerId} FOR SHARE OF a`;
-  if (!owner?.usesTasks) return false;
-  const [w] = await tx.$queryRaw<{ appId: string; retiredAt: Date | null; role: string | null; agentId: string }[]>`
-    SELECT app_id AS "appId", retired_at AS "retiredAt", role, agent_id AS "agentId" FROM workers WHERE id = ${workerId} FOR SHARE`;
-  if (!w || w.appId !== appId || w.retiredAt) return false;
-  if (w.agentId !== owner.id || eligibleFamily(req, { id: workerId, role: w.role, freeFamilies: [family] }) === null) return false;
+  // #2458: a worker with an open session is matched on that session's agent and role (it finishes under them); the
+  // placement is stable here because a bind and changeWorkerAgent both take this assignment lock.
+  const [owner] = await tx.$queryRaw<{ id: string; usesTasks: boolean; role: string | null; liveAgentId: string }[]>`
+    SELECT a.id, a.uses_tasks AS "usesTasks", COALESCE(os.role, w.role) AS role, w.agent_id AS "liveAgentId" FROM workers w
+    ${OPEN_SESSION_PLACEMENT_JOIN}
+    JOIN agents a ON a.id = COALESCE(os.agent_id, w.agent_id)
+    WHERE w.id = ${workerId} FOR SHARE OF a`;
+  if (!owner?.usesTasks) return null;
+  if (req.teamWorkerId && !(await matchingTeamPool(tx, appId, req.teamWorkerId)).has(workerId)) return null;
+  const [w] = await tx.$queryRaw<{ appId: string; retiredAt: Date | null; agentId: string }[]>`
+    SELECT app_id AS "appId", retired_at AS "retiredAt", agent_id AS "agentId" FROM workers WHERE id = ${workerId} FOR SHARE`;
+  if (!w || w.appId !== appId || w.retiredAt) return null;
+  if (w.agentId !== owner.liveAgentId || eligibleFamily(req, { id: workerId, role: owner.role, freeFamilies: [family] }) === null) return null;
   // Bind/backfill take Worker before Session; end/refresh only need Session. Holding
   // existing session rows prevents a family refresh after the deciding read;
   // a new bind needs the held Worker row first.
@@ -311,18 +450,24 @@ async function stillFreeAs(tx: Prisma.TransactionClient, appId: string, workerId
   const openTaskCount = await tx.agentTask.count({
     where: { assigneeWorkerId: workerId, status: { in: OPEN_STATUSES } },
   });
-  if (openTaskCount > 0) return false;
+  if (openTaskCount > 0) return null;
   const decidedAt = afterWaits(now, anchor);
   const activity = (await loadWorkersActivity({ db: tx } as unknown as Context, [workerId], decidedAt)).get(workerId);
   const bound = activity?.bound ?? false;
   const endingSession = (await loadEndingSession(tx, [workerId])).has(workerId);
-  if (!matchable({ bound, live: activity?.hasLiveSession ?? false, endingSession })) return false;
+  if (!matchable({ bound, live: activity?.hasLiveSession ?? false, endingSession })) return null;
+  // #2252 D1: the hard bound, judged on the model read AFTER the session-row locks above, so a refresh that held a
+  // session row while this waited is seen (an unbound worker is unknown). The preference order is the pass's snapshot.
+  if (!tierAllowed(req, workerTier({ bound, bindingModel: activity?.bindingModel ?? null }))) return null;
+  // #2831 S2: groups are live, so they are read here, after the same locks, never from the pass's snapshot.
+  if ((req.modelGroupIn || req.modelGroupNotIn) && !modelGroupsAllowed(req, bound ? activity?.bindingModel ?? null : null, await loadAppModelGroups(tx, appId))) return null;
   const launchable = bound ? [] : (await loadLaunchableFamilies(tx, { workerIds: [workerId] }, decidedAt)).get(workerId) ?? [];
   const families = familiesOf({ bound, bindingFamily: activity?.bindingFamily ?? null, launchableFamilies: launchable });
-  if (!families.includes(family)) return false;
+  if (!families.includes(family)) return null;
   const availability = (await loadAvailabilityByFamily(tx, [{ id: workerId, appId, families: [family] }], decidedAt)).get(workerId) as WorkerAvailabilityView;
-  const isolated = s7Available() && (await tx.workerWakeSettings.count({ where: { workerId, isolatedUntil: { gt: decidedAt } } })) > 0;
-  return freeFamiliesOf({ retired: false, isolated, openTaskCount, families: [family], availability }).length > 0;
+  if (freeFamiliesOf({ retired: false, openTaskCount, families: [family], availability }).length === 0) return null;
+  // #3825 (V44): the chosen worker's own combination, judged on the same rows as the decision above.
+  return { family, tier: workerTier({ bound, bindingModel: activity?.bindingModel ?? null }), role: owner.role };
 }
 
 // ── Assigning ─────────────────────────────────────────────────────────────
@@ -344,43 +489,67 @@ async function tryAssign(
   hooks: MatcherHooks,
   /** The monotonic half of `now`'s sample (`anchorNow`), from the pass; by default taken here, beside a fresh `now`. */
   anchor: number = anchorNow(),
+  matchNow = false,
+  /** #3246: the recovery sweep's claim, or none for the create-time attempt; a match-now write lands only while its
+   *  claim state is the one this attempt began with (the sweep's claim, or still unclaimed). */
+  claim?: Date,
+  /** #3825: set to the database time of the re-read that found the worker not free, taken inside the transaction. */
+  readAt?: { at?: DbInstant },
 ): Promise<AttemptOutcome> {
-  return db.$transaction(async (tx) => {
-    await lockAuthorityAnchors(tx, [{ kind: 'app', id: task.appId }], 'shared');
-    const app = await tx.app.findUnique({ where: { id: task.appId }, select: { deletedAt: true, uninstalledAt: true } });
-    if (!app || app.deletedAt || app.uninstalledAt) return 'task-gone';
-    // The per-worker lock. $executeRaw: pg_advisory_xact_lock returns void,
-    // which $queryRaw cannot deserialize.
-    // #2022: the App's stop fence, shared, then the authoritative stop check: a signal set after the candidates were
-    // loaded is seen here, or waits for this assignment (src/lib/stopSignals/state.ts, the lock order).
-    await lockStopFence(tx, task.appId, 'shared');
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('agent-task-matcher:worker'), hashtext(${workerId}))`;
-    const currentTask = await tx.agentTask.findUnique({ where: { id: task.id }, select: { requirements: true } });
-    if (!currentTask) return 'task-gone';
-    if (!(await stillFreeAs(tx, task.appId, workerId, family, now, parseRequirements(currentTask.requirements), anchor))) return 'worker-not-free';
-    const creator = task.createdByWorkerId ?? null;
-    // Decided at the moment after the waits (Xan #2166 LOCAL-1), not the pass's start.
-    const covering = await coveringSignals(tx, task.appId, creator && creator !== workerId ? [workerId, creator] : [workerId], afterWaits(now, anchor));
-    if (covering.has(workerId)) return 'worker-not-free';
-    // R71: a task its creator made under a pause or halt waits while that still covers the creator.
-    if (creator && timeStoppedWorkers(covering).has(creator)) return 'task-gone';
-    await hooks.afterWorkerCheck?.({ taskId: task.id, workerId });
-    const n = await tx.agentTask.updateMany({
-      where: { id: task.id, appId: task.appId, status: 'pending', assigneeWorkerId: null, assigneeUserId: null,
-        requirements: { equals: currentTask.requirements ?? Prisma.AnyNull } },
-      data: {
-        assigneeWorkerId: workerId,
-        assignedAt: now, assignedBy: null, assignedByWorkerId: null, assignedByAgentId: null,
-        updatedBy: null, updatedByWorkerId: null, updatedByAgentId: null,
-      },
-    });
-    if (n.count === 0) return 'task-gone';
-    await appendTaskEvent(tx, {
-      appId: task.appId, taskId: task.id, actor: PLATFORM_ACTOR, createdAt: now,
-      event: { type: 'assignment.matched', assignee: { workerId }, family, closeSessionWhenDone: task.closeSessionWhenDone },
-    });
-    return 'assigned';
+  return db.$transaction(tx => tryAssignInTx(tx, task, workerId, family, now, hooks, anchor, matchNow, claim, readAt));
+}
+
+/** Shared deciding write. A batch caller already holds every candidate worker lock before its task rows. */
+async function tryAssignInTx(
+  tx: Prisma.TransactionClient, task: QueuedTask, workerId: string, family: string, now: Date,
+  hooks: MatcherHooks, anchor: number, matchNow: boolean, claim?: Date, readAt?: { at?: DbInstant },
+): Promise<AttemptOutcome> {
+  await lockAuthorityAnchors(tx, [{ kind: 'app', id: task.appId }], 'shared');
+  const app = await tx.app.findUnique({ where: { id: task.appId }, select: { deletedAt: true, uninstalledAt: true } });
+  if (!app || app.deletedAt || app.uninstalledAt) return 'task-gone';
+  // #2022: the App's stop fence, shared, then the authoritative stop check: a signal set after the candidates were
+  // loaded is seen here, or waits for this assignment (src/lib/stopSignals/state.ts, the lock order).
+  await lockStopFence(tx, task.appId, 'shared');
+  // Same graph-before-worker order as requirement writers; team membership cannot move under the deciding read.
+  await lockTaskGraph(tx, task.appId, 'shared');
+  await lockAppReportsTo(tx, task.appId, 'shared');
+  // The per-worker lock (src/lib/agentTasks/workerLock.ts).
+  await lockWorkersForAssignment(tx, [workerId]);
+  const currentTask = await tx.agentTask.findUnique({ where: { id: task.id }, select: { requirements: true } });
+  if (!currentTask) return 'task-gone';
+  const chosen = await stillFreeAs(tx, task.appId, workerId, family, now, parseRequirements(currentTask.requirements), anchor);
+  // #3825: the failure's stamp is taken HERE, under the worker lock right after the re-read that found nobody free, so no
+  // success for this worker can commit between that read and the stamp (George's post-attempt gap).
+  if (!chosen) { if (readAt) readAt.at = await decisionClock(tx); return 'worker-not-free'; }
+  const creator = task.createdByWorkerId ?? null;
+  // Decided at the moment after the waits (Xan #2166 LOCAL-1), not the pass's start.
+  const covering = await coveringSignals(tx, task.appId, creator && creator !== workerId ? [workerId, creator] : [workerId], afterWaits(now, anchor));
+  if (covering.has(workerId)) { if (readAt) readAt.at = await decisionClock(tx); return 'worker-not-free'; }
+  // R71: a task its creator made under a pause or halt waits while that still covers the creator.
+  if (creator && timeStoppedWorkers(covering).has(creator)) return 'task-gone';
+  await hooks.afterWorkerCheck?.({ taskId: task.id, workerId });
+  const n = await tx.agentTask.updateMany({
+    where: { id: task.id, appId: task.appId, status: 'pending', blocked: false, assigneeWorkerId: null, assigneeUserId: null,
+      matchPending: matchNow, matchFailedAt: null, ...(matchNow ? { matchClaimedAt: claim ?? null } : {}),
+      requirements: { equals: currentTask.requirements ?? Prisma.AnyNull } },
+    data: {
+      assigneeWorkerId: workerId,
+      matchPending: false, matchFailedAt: null, matchFailedReason: null,
+      assignedAt: now, assignedBy: null, assignedByWorkerId: null, assignedByAgentId: null,
+      updatedBy: null, updatedByWorkerId: null, updatedByAgentId: null,
+    },
   });
+  if (n.count === 0) return 'task-gone';
+  // #3825 (cor:agt:060:13, V37/V44): a decided match counts against the chosen worker's combination AND each one the requirements named, recorded with the assignment it belongs to: a lost claim (count 0, above)
+  // records nothing, and a rollback takes the record with it.
+  await recordMatchOutcome(tx, task.appId, parseRequirements(currentTask.requirements), 'MATCHED', null, null, [chosen]);
+  // #3825: an assignment moves the pass's state too; its time is read here, in the transaction, under the worker lock.
+  if (readAt) readAt.at = await decisionClock(tx);
+  await appendTaskEvent(tx, {
+    appId: task.appId, taskId: task.id, actor: PLATFORM_ACTOR, createdAt: now,
+    event: { type: 'assignment.matched', assignee: { workerId }, family, closeSessionWhenDone: task.closeSessionWhenDone },
+  });
+  return 'assigned';
 }
 
 export type MatchResult = { taskId: string; workerId: string; family: string };
@@ -397,39 +566,75 @@ export type MatchResult = { taskId: string; workerId: string; family: string };
 async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: MatcherHooks, anchor: number): Promise<MatchResult[]> {
   const out: MatchResult[] = [];
   let candidates: WorkerWorkState[] | null = null;
+  let groups: EffectiveModelGroup[] = [];
   let covering: Map<string, StopSignal[]> | null = null;
   const spent = new Set<string>();
-  let after: { createdAt: Date; id: string } | null = null;
+  // #3825: combinations already recorded as failing in this pass (cleared by an assignment), so a long queue of one shape
+  // writes its row once, not once per task. The sweep has no per-candidate reason: nobody free is the coarse one.
+  const failedKeys = new Set<string>();
+  // #3825: when a failure was DECIDED. The candidate snapshot is when the pass looked; a candidate this pass spent (an
+  // assignment, or a re-read that found it taken) changed that state at its in-transaction time (`spentAt`). A task's
+  // failure is stamped with the latest of the snapshot, its own attempts' re-read, and the spent time of the candidates
+  // ELIGIBLE for it: state it never depended on (another role's worker) does not make its judgment newer (Anne, 94656).
+  let snapshotAt: DbInstant | null = null;
+  const spentAt = new Map<string, DbInstant>();
+  const recordSweepFailure = async (task: QueuedTask, req: Requirements, team: Set<string> | null, own?: DbInstant) => {
+    const key = JSON.stringify(combinationsOf(req));
+    if (failedKeys.has(key)) return;
+    failedKeys.add(key);
+    let at: DbInstant | null = own ?? snapshotAt;
+    for (const w of candidates ?? []) {
+      const t = spentAt.get(w.id);
+      if (t && (!at || t > at) && !(team && !team.has(w.id)) && eligibleFor(req, w, groups)) at = t;
+    }
+    await recordFailure(db, appId, task.requirements, req.invalid ? 'REQUIREMENTS_EXCLUDED' : 'NOBODY_FREE', at);
+  };
+  let after: { priority: number; createdAt: Date; id: string } | null = null;
   for (;;) {
-    const page: (QueuedTask & { createdAt: Date })[] = await db.agentTask.findMany({
+    const page: (QueuedTask & { priority: number; createdAt: Date })[] = await db.agentTask.findMany({
       where: {
-        appId, status: 'pending', assigneeWorkerId: null, assigneeUserId: null,
+        appId, status: 'pending', blocked: false, assigneeWorkerId: null, assigneeUserId: null, matchPending: false, matchFailedAt: null,
         ...(after
-          ? { OR: [{ createdAt: { gt: after.createdAt } }, { createdAt: after.createdAt, id: { gt: after.id } }] }
+          ? { OR: [{ priority: { gt: after.priority } }, { priority: after.priority, createdAt: { gt: after.createdAt } }, { priority: after.priority, createdAt: after.createdAt, id: { gt: after.id } }] }
           : {}),
       },
-      select: { id: true, appId: true, requirements: true, closeSessionWhenDone: true, createdAt: true, createdByWorkerId: true },
-      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      select: { id: true, appId: true, requirements: true, closeSessionWhenDone: true, priority: true, createdAt: true, createdByWorkerId: true },
+      orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
       take: QUEUE_PAGE,
     });
     if (page.length === 0) break;
     const last = page[page.length - 1];
-    after = { createdAt: last.createdAt, id: last.id };
+    after = { priority: last.priority, createdAt: last.createdAt, id: last.id };
     if (candidates === null) {
       // #2022 (cor:agt:090:03): a worker a live stop signal covers is skipped, at every level; tryAssign re-checks.
+      snapshotAt = await decisionClock(db);
       covering = await coveringSignals(db, appId, null, now);
-      candidates = (await loadWorkerWorkStates(db, appId, now)).filter((w) => w.free && matchable(w) && !covering!.has(w.id)).sort(compareRank);
+      groups = await loadAppModelGroups(db, appId);
+      // #2252 D1: cheapest known tier first, unknown last, then least recently assigned (a snapshot, see `stillFreeAs`).
+      candidates = (await loadWorkerWorkStates(db, appId, now, { bySession: true })).filter((w) => w.free && matchable(w) && !covering!.has(w.id))
+        .sort((a, b) => tierPreference(workerTier(a)) - tierPreference(workerTier(b)) || compareRank(a, b));
     }
     for (const task of page) {
-      if (spent.size === candidates.length) return out;
-      // R71: not matched while its creator is under a pause or halt.
+      // R71: not matched while its creator is under a pause or halt (and so no decision, no outcome: George P2-1).
       if (task.createdByWorkerId && timeStoppedWorkers(covering!).has(task.createdByWorkerId)) continue;
       const req = parseRequirements(task.requirements);
+      const team = req.teamWorkerId ? await matchingTeamPool(db, appId, req.teamWorkerId) : null;
+      if (spent.size === candidates.length) {
+        // #3825: nobody is left free: a decided no-worker outcome for this task, and for every later one on every
+        // later page (the loop keeps paging; no attempt is made), so a combination only a later page names is recorded.
+        await recordSweepFailure(task, req, team);
+        continue;
+      }
+      let decided = false;
+      const lastRead: { at?: DbInstant } = {};
       for (const w of candidates) {
-        if (spent.has(w.id)) continue;
-        const family = eligibleFamily(req, w);
+        if (spent.has(w.id) || (team && !team.has(w.id))) continue;
+        const family = eligibleFor(req, w, groups);
         if (!family) continue;
-        const outcome = await tryAssign(db, task, w.id, family, now, hooks, anchor);
+        const outcome = await tryAssign(db, task, w.id, family, now, hooks, anchor, false, undefined, lastRead);
+        // The candidate's state changed at the in-transaction time its attempt reported, never at a clock read after it.
+        if (outcome !== 'task-gone' && lastRead.at) spentAt.set(w.id, lastRead.at);
+        if (outcome === 'assigned') { decided = true; failedKeys.clear(); }
         // Assigned, or no longer free: either way this worker is spent for this run.
         if (outcome !== 'task-gone') spent.add(w.id);
         if (outcome === 'assigned') {
@@ -437,8 +642,11 @@ async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: Match
           // #1709 (cor:agt:070:08): a matched worker with no live session is started through its host.
           if (!w.live) await launchForAssignment(db, { appId, taskId: task.id, workerId: w.id, family }, now, anchor);
         }
-        if (outcome !== 'worker-not-free') break;
+        if (outcome !== 'worker-not-free') { decided = true; break; }
       }
+      // #3825: every free candidate was tried or skipped and none took it: a decided no-worker outcome. A task that
+      // left the queue under the attempt ('task-gone') is no decision.
+      if (!decided) await recordSweepFailure(task, req, team, lastRead.at);
     }
     if (page.length < QUEUE_PAGE) break;
   }
@@ -459,7 +667,7 @@ export async function matchQueuedTasks(
     ? [opts.appId]
     : (await db.agentTask.findMany({
         where: {
-          status: 'pending', assigneeWorkerId: null, assigneeUserId: null,
+          status: 'pending', blocked: false, assigneeWorkerId: null, assigneeUserId: null, matchPending: false, matchFailedAt: null,
           app: { deletedAt: null, uninstalledAt: null },
         },
         select: { appId: true },
@@ -493,28 +701,30 @@ export async function recordStopHolds(db: PrismaClient, appId: string, now: Date
   if (Number(n) === 0) return;
   const covering = await coveringSignals(db, appId, null, now);
   const timeStopped = timeStoppedWorkers(covering);
-  const free = (await loadWorkerWorkStates(db, appId, now)).filter((w) => w.free && matchable(w));
+  const free = (await loadWorkerWorkStates(db, appId, now, { bySession: true })).filter((w) => w.free && matchable(w));
+  const groups = await loadAppModelGroups(db, appId);
   const decisive = new Set<string>();
-  let after: { createdAt: Date; id: string } | null = null;
+  let after: { priority: number; createdAt: Date; id: string } | null = null;
   for (;;) {
-    const page: { id: string; createdAt: Date; requirements: Prisma.JsonValue | null; createdByWorkerId: string | null }[] = await db.agentTask.findMany({
+    const page: { id: string; priority: number; createdAt: Date; requirements: Prisma.JsonValue | null; createdByWorkerId: string | null }[] = await db.agentTask.findMany({
       where: {
-        appId, status: 'pending', assigneeWorkerId: null, assigneeUserId: null,
-        ...(after ? { OR: [{ createdAt: { gt: after.createdAt } }, { createdAt: after.createdAt, id: { gt: after.id } }] } : {}),
+        appId, status: 'pending', blocked: false, assigneeWorkerId: null, assigneeUserId: null, matchPending: false, matchFailedAt: null,
+        ...(after ? { OR: [{ priority: { gt: after.priority } }, { priority: after.priority, createdAt: { gt: after.createdAt } }, { priority: after.priority, createdAt: after.createdAt, id: { gt: after.id } }] } : {}),
       },
-      select: { id: true, createdAt: true, requirements: true, createdByWorkerId: true },
-      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      select: { id: true, priority: true, createdAt: true, requirements: true, createdByWorkerId: true },
+      orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
       take: QUEUE_PAGE,
     });
     for (const t of page) {
       if (t.createdByWorkerId && timeStopped.has(t.createdByWorkerId)) { decisive.add(t.id); continue; }
       const req = parseRequirements(t.requirements);
-      const eligible = free.filter((w) => eligibleFamily(req, w) !== null);
+      const team = req.teamWorkerId ? await matchingTeamPool(db, appId, req.teamWorkerId) : null;
+      const eligible = free.filter((w) => (!team || team.has(w.id)) && eligibleFor(req, w, groups) !== null);
       if (eligible.length > 0 && eligible.every((w) => covering.has(w.id))) decisive.add(t.id);
     }
     if (page.length < QUEUE_PAGE) break;
     const last = page[page.length - 1];
-    after = { createdAt: last.createdAt, id: last.id };
+    after = { priority: last.priority, createdAt: last.createdAt, id: last.id };
   }
   const nowNaive = toNaiveUtc(now);
   const open = await db.agentTaskStopHold.findMany({ where: { appId, endedAt: null }, select: { id: true, taskId: true } });
@@ -549,4 +759,209 @@ export async function matchAfterChange(db: PrismaClient, appId: string): Promise
 }
 
 /** Test seam only: one assignment attempt, so a test can hold two against each other. */
-export const __matcherTesting = { tryAssign };
+export const __matcherTesting = { tryAssign, setQueuePage: (n: number) => { QUEUE_PAGE = n; } };
+
+/** Closed spellings proposed in #2829; matching metadata, never authority. */
+export type MatchFailureReason = 'NO_ROLE' | 'REQUIREMENTS_EXCLUDED' | 'NOBODY_FREE' | 'STOP_SIGNAL' | 'TEAM_POOL_EMPTY';
+
+/**
+ * #3816 (V21, hrn:node:hadronmemory.com:hadron-dev-team-shared:decisions:2026-11-10-vera-rulings-matching-reach): the closed,
+ * ADDITIVE set of reasons a candidate was skipped, one value per exclusion condition the matcher applies, in the declared
+ * order that V23 makes the order of a candidate's reasons. Values are added, never renamed. `STOP_SIGNAL` names
+ * a matcher condition V21's list lacks: a worker covered by a stop signal is not assigned. There is deliberately NO value for
+ * "bound and quiet" (V21: #3815 removes that exclusion, the #3816 gate says to omit it), so until #3815 lands such a worker,
+ * which the matcher still skips, is not listed. `NO_LONGER_FREE` (#3855, V59) is the one value `skipReasonsOf` never returns: a candidate the
+ * snapshot found free that the final assignment check then refused (a lost race) carries it alone, captured at the assign outcome in
+ * `chooseMatchNow`. It names no underlying condition: the final check answers only free or not free.
+ */
+export const MATCH_SKIP_REASONS = [
+  'RETIRED', 'USES_NO_TASKS', 'ENDING_SESSION', 'HOLDS_TASK', 'UNAVAILABLE', 'FAMILY_UNAVAILABLE', 'STALLED', 'NO_FAMILY', 'NOT_HELD',
+  'FAMILY_EXCLUDED', 'NAME_EXCLUDED', 'TIER_BELOW_MINIMUM', 'TIER_UNKNOWN', 'MODEL_GROUP_MISMATCH', 'STOP_SIGNAL', 'NO_LONGER_FREE',
+] as const;
+export type MatchSkipReason = typeof MATCH_SKIP_REASONS[number];
+/** One candidate a failed match skipped and every reason, in {@link MATCH_SKIP_REASONS} order. Returned in the match answer, never stored (V22). */
+export type SkippedCandidate = { workerId: string; name: string; reasons: MatchSkipReason[] };
+
+/** Pure: every reason one worker was not taken for these requirements (V23). Empty = nothing excluded it. */
+export function skipReasonsOf(
+  req: Requirements, w: WorkerWorkState, groups: EffectiveModelGroup[], stopCovered: boolean,
+): MatchSkipReason[] {
+  const out = new Set<MatchSkipReason>();
+  if (!w.usesTasks) out.add('USES_NO_TASKS');
+  if (w.endingSession) out.add('ENDING_SESSION');
+  if (w.openTaskCount > 0) out.add('HOLDS_TASK');
+  if (w.availability.ownInEffect) out.add(w.availability.own?.reason === 'stalled' ? 'STALLED' : 'UNAVAILABLE');
+  // Independent of the own record: a worker with both carries both (V23).
+  if (w.families.length > 0 && w.families.every((f) => w.availability.familyAvailable.get(f) !== true)) out.add('FAMILY_UNAVAILABLE');
+  if (w.families.length === 0) out.add('NO_FAMILY');
+  if (!w.bound && !w.live && !MATCH_UNBOUND_LAUNCHABLE) out.add('NOT_HELD');
+  if (w.families.length > 0 && !w.families.map(normalizeFamily).some((f) => f !== null && familyAllowed(req, f)) && !req.invalid) out.add('FAMILY_EXCLUDED');
+  if (req.excludeWorkerIds?.includes(w.id)) out.add('NAME_EXCLUDED');
+  const tier = workerTier(w);
+  if (!tierAllowed(req, tier)) out.add(tier === null ? 'TIER_UNKNOWN' : 'TIER_BELOW_MINIMUM');
+  if (!modelGroupsAllowed(req, w.bound ? w.bindingModel : null, groups)) out.add('MODEL_GROUP_MISMATCH');
+  if (stopCovered) out.add('STOP_SIGNAL');
+  return MATCH_SKIP_REASONS.filter((r) => out.has(r));
+}
+
+/**
+ * One reserved task only. Reservation is inserted with create, before commit: automatic event/sweep runs cannot
+ * take it between create and this attempt or between a failed attempt and recording the failure. Assignment uses
+ * the same worker lock and final gates as the automatic matcher. A manual assignment/cancel racing the attempt
+ * wins its guarded write; a failure is recorded only while the task is still reserved, pending and unassigned.
+ */
+export async function matchTaskNow(db: PrismaClient, taskId: string, now: Date, claim?: Date): Promise<SkippedCandidate[] | null> {
+  const anchor = anchorNow();
+  const task = await db.agentTask.findUniqueOrThrow({ where: { id: taskId } });
+  if (!task.matchPending || task.status !== 'pending' || task.assigneeWorkerId || task.assigneeUserId) return null;
+  // #3246: the recovery sweep passes the claim it wrote; the create-time attempt passes none and so holds the
+  // UNCLAIMED state. An attempt whose claim state moved (a sweep took the task from the create-time attempt, or a later
+  // sweep reclaimed it from a slow or dead one) neither starts nor writes: the current claimant is the one attempt.
+  if ((task.matchClaimedAt?.getTime() ?? null) !== (claim?.getTime() ?? null)) return null;
+  // #3825: a failure is stamped with when it was DECIDED, i.e. the last read that informed it: the start (the snapshot
+  // judgment), or, once an assignment attempt ran (it re-reads under the worker lock, after any wait), the in-transaction
+  // moment right after that re-read (under the worker lock). A success another attempt committed in between is then ordered by the record's own guard.
+  let decidedAt = await decisionClock(db);
+  const outcome = await chooseMatchNow(db, task, now, async (workerId, family) => {
+    const readAt: { at?: DbInstant } = {};
+    const attempt = await tryAssign(db, task, workerId, family, now, {}, anchor, true, claim, readAt);
+    if (readAt.at) decidedAt = readAt.at;
+    return attempt;
+  }, undefined, undefined, true);
+  if ('workerId' in outcome) {
+    if (!outcome.live) await launchForAssignment(db, { appId: task.appId, taskId, workerId: outcome.workerId, family: outcome.family }, now, anchor);
+    return null;
+  }
+  const { reason, skipped } = outcome;
+  const marked = await db.agentTask.updateMany({ where: { id: taskId, matchPending: true, status: 'pending', assigneeWorkerId: null, assigneeUserId: null,
+    matchClaimedAt: claim ?? null },
+    data: { matchPending: false, matchFailedAt: new Date(), matchFailedReason: reason } });
+  // A concurrent assignment, cancel or claim change won the guarded write: this attempt recorded no failure, so it describes none.
+  if (marked.count !== 1) return null;
+  // #3825: the failure is a decided outcome only while this attempt still owned the reservation (the guarded write above).
+  await recordFailure(db, task.appId, task.requirements, reason, decidedAt);
+  // #3816 (V22): the candidates go back in the answer only; the stored mark keeps its coarse reason.
+  return skipped ?? [];
+}
+
+/** #3825: record a no-worker outcome; a failure to record never fails or retries the match (logged). */
+async function recordFailure(db: Db, appId: string, requirements: Prisma.JsonValue | null, reason: MatchFailureReason, decidedAt: DbInstant | null = null): Promise<void> {
+  try {
+    await recordMatchOutcome(db, appId, parseRequirements(requirements), 'NO_WORKER', reason, decidedAt);
+  } catch (err) {
+    console.error('[task-matcher] recording a match outcome failed:', err);
+  }
+}
+
+/**
+ * #3246 (cor:agt:060:10, "A crash before the one attempt", ruling 0085 A): the fixed time after which the sweep releases a
+ * match-now reservation whose attempt never ran. `MATCH_AT_CREATE_RECOVERY_SECONDS`, read at each call; an integer from 60 to
+ * 86400, anything else (unset, empty, fractional, out of range) is the 300-second default, so a typo cannot switch it off.
+ */
+export function matchRecoverySeconds(): number {
+  const raw = process.env.MATCH_AT_CREATE_RECOVERY_SECONDS;
+  if (raw === undefined || !/^\d+$/.test(raw.trim())) return 300;
+  const n = Number(raw.trim());
+  return Number.isSafeInteger(n) && n >= 60 && n <= 86_400 ? n : 300;
+}
+
+/**
+ * Recover the match-now tasks whose one attempt never ran (the process died between the create commit and the attempt):
+ * a reservation older than the bound is claimed with ONE guarded write (`match_claimed_at`, so two sweeps or instances make
+ * the attempt once between them) and then gets exactly the usual single-shot attempt, `matchTaskNow`, which carries the claim
+ * as a token (an attempt superseded by a later reclaim neither starts nor writes): assigned, or marked
+ * match-failed with one of the five reasons, never retried. A claim whose own attempt died is reclaimable only after the
+ * bound again. A task that is not pending, is assigned, or has no reservation (never reserved, assigned, cancelled,
+ * parked then made ready) is never selected. Returns the attempts this call made.
+ */
+export async function recoverInterruptedMatches(db: PrismaClient, now: Date, limit = 100): Promise<number> {
+  const cutoff = new Date(now.getTime() - matchRecoverySeconds() * 1000);
+  const stale: Prisma.AgentTaskWhereInput = { matchPending: true, status: 'pending', assigneeWorkerId: null, assigneeUserId: null, createdAt: { lte: cutoff },
+    OR: [{ matchClaimedAt: null }, { matchClaimedAt: { lte: cutoff } }] };
+  const due = await db.agentTask.findMany({ where: stale, select: { id: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], take: limit });
+  let attempts = 0;
+  for (const { id } of due) {
+    try {
+      const claimed = await db.agentTask.updateMany({ where: { AND: [{ id }, stale] }, data: { matchClaimedAt: now } });
+      if (claimed.count !== 1) continue; // another sweep took it
+      attempts += 1;
+      await matchTaskNow(db, id, now, now);
+    } catch (err) {
+      console.error('[task-matcher] recovering an interrupted match failed:', err);
+    }
+  }
+  return attempts;
+}
+
+/** Same eligibility and reason ordering for single-shot and atomic batch matching. */
+async function chooseMatchNow(
+  db: Db, task: Awaited<ReturnType<Prisma.TransactionClient['agentTask']['findUniqueOrThrow']>>, now: Date,
+  assign: (workerId: string, family: string) => Promise<AttemptOutcome>,
+  excluded: ReadonlySet<string> = new Set(), poolIds?: ReadonlySet<string>, wantSkipped = false,
+): Promise<{workerId: string; family: string; live: boolean} | {reason: MatchFailureReason; skipped?: SkippedCandidate[]}> {
+  const req = parseRequirements(task.requirements);
+  let reason: MatchFailureReason = 'NOBODY_FREE';
+  let skipped: SkippedCandidate[] | undefined;
+  if (task.blocked) reason = 'NOBODY_FREE';
+  else if (req.invalid) reason = 'REQUIREMENTS_EXCLUDED';
+  else {
+    const states = (await loadWorkerWorkStates(db, task.appId, now, { bySession: true })).filter(w => !poolIds || poolIds.has(w.id));
+    const roles = states.filter(w => roleAllowed(req, w.role));
+    const pool = req.teamWorkerId ? await matchingTeamPool(db, task.appId, req.teamWorkerId) : null;
+    const team = roles.filter(w => !pool || pool.has(w.id));
+    const groups = await loadAppModelGroups(db, task.appId);
+    const eligible = team.filter(w => eligibleFor(req, { ...w, freeFamilies: w.families }, groups) !== null);
+    const covering = await coveringSignals(db, task.appId, null, now);
+    // #3816: the candidates are the workers of the asked role (and team pool); each is listed with every reason it was not taken.
+    // A retired worker is listed with RETIRED plus every other reason that applies to it (V23), so its state is loaded; only a
+    // failed match that asked for the answer pays for that read.
+    // #3855 (V59): candidates the snapshot called free that the final assignment check refused. The captured outcome is authoritative:
+    // such a worker is never also listed from the fresh retired read (a worker that retired mid-race carries NO_LONGER_FREE alone).
+    const lostRace = new Set<string>();
+    const explain = async (): Promise<SkippedCandidate[]> => {
+      const retired = pool ? [] : (await loadWorkerWorkStates(db, task.appId, now, { bySession: true, retiredOnly: true })).filter(w => roleAllowed(req, w.role) && !lostRace.has(w.id));
+      return [
+      ...retired.map(w => ({ workerId: w.id, name: w.name, reasons: MATCH_SKIP_REASONS.filter(r => r === 'RETIRED' || skipReasonsOf(req, w, groups, covering.has(w.id)).includes(r)) })),
+      ...team.map(w => {
+        const reasons = skipReasonsOf(req, w, groups, covering.has(w.id));
+        return { workerId: w.id, name: w.name, reasons: lostRace.has(w.id) ? ['NO_LONGER_FREE' as MatchSkipReason] : reasons };
+      }),
+    ].filter(c => c.reasons.length > 0).sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()) || a.workerId.localeCompare(b.workerId));
+    };
+    const stoppedCreator = task.createdByWorkerId && timeStoppedWorkers(covering).has(task.createdByWorkerId);
+    if (stoppedCreator) reason = 'STOP_SIGNAL';
+    else if (roles.length === 0) reason = 'NO_ROLE';
+    else if (pool && team.length === 0) reason = 'TEAM_POOL_EMPTY';
+    else if (eligible.length === 0) reason = 'REQUIREMENTS_EXCLUDED';
+    else {
+      const free = eligible.filter(w => !excluded.has(w.id) && w.free && matchable(w));
+      if (free.length && free.every(w => covering.has(w.id))) reason = 'STOP_SIGNAL';
+      for (const w of free.filter(w => !covering.has(w.id)).sort((a,b) => tierPreference(workerTier(a)) - tierPreference(workerTier(b)) || compareRank(a,b))) {
+        const family = eligibleFor(req, w, groups)!;
+        const outcome = await assign(w.id, family);
+        if (outcome === 'assigned') {
+          return { workerId: w.id, family, live: w.live };
+        }
+        if (outcome === 'worker-not-free') lostRace.add(w.id);
+        if (outcome === 'task-gone') break;
+      }
+    }
+    // #3855 (V59): a worker the snapshot called free but that the final assignment check then refused (a lost race) is listed with
+    // NO_LONGER_FREE alone. Reading again for the condition would race the same way, so none is named.
+    if (wantSkipped) skipped = await explain();
+  }
+  return skipped ? { reason, skipped } : { reason };
+}
+
+/** #3243: caller supplies fresh pending, unassigned match rows and holds the stop,
+ * graph, reportsTo and pool-worker locks before any task row write. Re-holds in
+ * tryAssignInTx are same-transaction, same-mode. No commit, failure mark or launch
+ * here; caller rolls back its entire batch on a reason. */
+export async function matchTaskNowInTx(
+  tx: Prisma.TransactionClient, taskId: string, now: Date, excluded: ReadonlySet<string>, poolIds: ReadonlySet<string>,
+): Promise<{workerId: string; family: string; live: boolean} | {reason: MatchFailureReason}> {
+  const task = await tx.agentTask.findUniqueOrThrow({ where: { id: taskId } });
+  const anchor = anchorNow();
+  return chooseMatchNow(tx, task, now, (workerId, family) =>
+    tryAssignInTx(tx, task, workerId, family, now, {}, anchor, true), excluded, poolIds);
+}

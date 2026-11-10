@@ -1,56 +1,26 @@
 import { poolDatasourceUrl } from './poolUrl.js';
 import { workerReferenceError } from '../../lib/workerReferenceError.js';
-import { PrismaClient } from '../../generated/prisma/index.js';
+import { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { generateId } from '../../lib/id.js';
 import { currentActor } from '../../lib/requestActor.js';
 import { ATTRIBUTED_NODE_FIELDS } from '../../lib/nodeRevisionSnapshot.js';
 
-// Models with no auto-gen `id` column. Mostly composite-PK joins;
-// 025-oauth-for-mcp's OAuthClient is single-PK (clientId) but
-// likewise has no separate `id` field, so it belongs here too.
-// 008-agent-installation: AppMember, AgentImport, AgentOrgGrant.
-// 023-app-shape: AppAgent (re-introduced N:M join — PR #130),
-// MemoryShare (US3 — PR #133), MemoryMember (US4 — this PR).
-// 025-oauth-for-mcp: OAuthClient (clientId is the PK).
-// 667-webfetch-polling: WebFetchPollBinding (jobId is the PK).
-// durable-login-state: PendingLoginState (the OAuth `state` is the PK).
-const MODELS_WITHOUT_ID = new Set<string>([
-  // #2046 — keyed by (compiled node, compiled revision).
-  'CompiledPromptRevision',
-  'AgentSubscription',
-  'WorkerReferenceFence',
-  'ManualAutomationPin',
-  'AppMember',
-  'AgentImport',
-  'AgentOrgGrant',
-  'AppAgent',
-  // #1647 — the notice is keyed by its audit row.
-  'UserDeletionNotice',
-  // Spec 049 Phase 2 — the ordered scope→memory join (composite PK).
-  'ScopeMemory',
-  'MemoryShare',
-  'MemoryMember',
-  'OAuthClient',
-  'WebFetchPollBinding',
-  'PendingLoginState',
-  // #1606 — keyed by its node (1:1 with a comment node).
-  'CommentMeta',
-  // #1706 — keyed by their owner (event + chain index, worker, App + family, App).
-  'AgentTeamAlarmSchedule',
-  'WorkerAvailability',
-  'ModelFamilyAvailability',
-  'AgentTaskStallSchedule',
-  // #1707 — keyed by its registration and worker.
-  'HostRegistrationWorker',
-  // #1715 — keyed by the merged-away account.
-  'UserMerge',
-  // #1747 — keyed by their worker (and channel / ticker).
-  'WorkerWakeSettings',
-  'WorkerDeliveryChannel',
-  'WorkerDeliveryTick', 'AppWakeDay', 'AppWakeReservation',
-  // #2072 — keyed by (worker, wake key).
-  'WorkerWakeAck',
-]);
+/**
+ * #455: the models the id hooks below must leave alone, because they have no
+ * field named `id` (composite keys such as AppMember, and single-column keys
+ * such as OAuthClient.clientId or UserMerge). Assigning `id` on one of these
+ * makes Prisma refuse the write.
+ *
+ * Derived from the generated client's schema, keyed on "no field named
+ * `id`" rather than on `@@id` (UserMerge and CommentMeta have neither), so a
+ * new model can never be missed. The hand-kept list it replaces had already
+ * missed WorkerDeliveryTaskEvent and StopConsumerDeclaration.
+ */
+export const MODELS_WITHOUT_ID: ReadonlySet<string> = new Set(
+  Prisma.dmmf.datamodel.models
+    .filter((model) => !model.fields.some((field) => field.name === 'id'))
+    .map((model) => model.name),
+);
 
 const datasourceUrl = poolDatasourceUrl(process.env.DATABASE_URL, process.env);
 const basePrisma = new PrismaClient(datasourceUrl === undefined ? undefined : { datasourceUrl });
@@ -79,6 +49,10 @@ function stampNodeCreate(data: NodeData): void {
 }
 
 function stampNodeUpdate(data: NodeData): void {
+  // #887: deleted nodes never carry a passage truncation declaration.
+  if (data.deletedAt != null && !(typeof data.deletedAt === 'object' && 'set' in data.deletedAt && data.deletedAt.set == null)) {
+    data.embeddingTruncatedChunks = null;
+  }
   if (!Object.keys(data).some((key) => ATTRIBUTED_NODE_FIELDS.has(key))) return;
   const actor = currentActor();
   if (!('updatedByWorkerId' in data)) data.updatedByWorkerId = actor.workerId;
@@ -101,6 +75,7 @@ const NODE_RELATIONS: Record<string, readonly string[]> = {
   PendingEdge: ['source'],
   NodeEmbedding: ['node'],
   NodeRevision: ['node'],
+  NodeEdgeRemoval: ['source'],
   NodeContentValidationReport: ['node'],
   Channel: ['chatRoot'],
   UsageEvent: ['node'],
@@ -122,14 +97,22 @@ export function assertNoNestedNodeWrite(model: string, data: unknown): void {
   }
 }
 
+/** A caller-supplied id is kept; only a missing (or empty) one is generated. */
+const injectId = (data: NodeData): void => {
+  if (!data.id) data.id = generateId();
+};
+
 const eachData = (data: unknown, stamp: (d: NodeData) => void): void => {
   if (Array.isArray(data)) for (const row of data) stamp(row as NodeData);
   else if (data && typeof data === 'object') stamp(data as NodeData);
 };
 
 /**
- * Extended Prisma client that auto-generates UUIDv7 IDs (no dashes) for all
- * create and upsert operations where `id` is not explicitly provided.
+ * Extended Prisma client that auto-generates UUIDv7 IDs (no dashes) for every
+ * create, createMany, createManyAndReturn and upsert where `id` is not
+ * explicitly provided. #455: the batch writes used to fall through to the
+ * schema's `@default(cuid())`, so a row's id domain depended on which insert
+ * path wrote it.
  */
 export const db = basePrisma.$extends({
   query: {
@@ -147,6 +130,16 @@ export const db = basePrisma.$extends({
         // hook rather than two whose order would matter.
         if (model === 'Node') stampNodeCreate(args.data as NodeData);
         assertNoNestedNodeWrite(model, args.data);
+        return query(args);
+      },
+      async createMany({ model, args, query }) {
+        if (!MODELS_WITHOUT_ID.has(model)) eachData(args.data, injectId);
+        if (model === 'Node') eachData(args.data, stampNodeCreate);
+        return query(args);
+      },
+      async createManyAndReturn({ model, args, query }) {
+        if (!MODELS_WITHOUT_ID.has(model)) eachData(args.data, injectId);
+        if (model === 'Node') eachData(args.data, stampNodeCreate);
         return query(args);
       },
       async update({ model, args, query }) {
@@ -170,14 +163,6 @@ export const db = basePrisma.$extends({
       },
     },
     node: {
-      async createMany({ args, query }) {
-        eachData(args.data, stampNodeCreate);
-        return query(args);
-      },
-      async createManyAndReturn({ args, query }) {
-        eachData(args.data, stampNodeCreate);
-        return query(args);
-      },
       async update({ args, query }) {
         stampNodeUpdate(args.data as NodeData);
         return query(args);

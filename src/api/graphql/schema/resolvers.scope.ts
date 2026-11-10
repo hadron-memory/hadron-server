@@ -44,6 +44,7 @@ import {
   scopeMemoryIds,
   type ScopeOwnerType,
 } from '../../../lib/scopes.js';
+import { forbiddenError, unauthenticatedError } from '../../../lib/refusals.js';
 
 export interface ScopeFilterInput {
   ownerType?: ScopeOwnerType | null;
@@ -84,8 +85,8 @@ async function readableScope(ctx: Context, ref: string): Promise<Scope | null> {
  * `createdBy: ctx.userId` below would otherwise stamp the TARGET as author.
  */
 function requireWriter(ctx: Context): string {
-  if (ctx.impersonation) throw new Error('Forbidden');
-  if (!ctx.userId) throw new Error('Unauthenticated');
+  if (ctx.impersonation) throw forbiddenError();
+  if (!ctx.userId) throw unauthenticatedError();
   return ctx.userId;
 }
 

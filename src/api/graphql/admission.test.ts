@@ -134,7 +134,7 @@ describe('L1 query source bytes (POST, real stack)', () => {
       variables: { i: { memoryId: 'x', loc: 'a', name: 'a', content: 'c'.repeat(5 * 1024 * 1024) } },
     });
     expect(res.status).toBe(200);
-    expect((await res.json()).errors[0].message).toContain('createNode reached');
+    expect((await res.json()).errors[0].message).toBe('Internal server error.'); // #1789: the spy's plain Error is a fault; reaching the resolver is asserted by the spy call below
     expect(createNodeSpy).toHaveBeenCalledTimes(1);
     createNodeSpy.mockClear(); // its recorded call holds the 5 MB variable
   });
@@ -288,6 +288,9 @@ describe('configuration', () => {
   });
 
   it('unset variables take the ruled defaults', () => {
-    expect(readGraphqlAdmissionConfig({})).toEqual({ maxQueryBytes: 32768, maxTokens: 4000, maxSelections: 1000 });
+    expect(readGraphqlAdmissionConfig({})).toEqual({
+      maxQueryBytes: 32768, maxTokens: 4000, maxSelections: 1000,
+      maxDepth: 12, maxCost: 200_000, listFactor: 10, complexityMode: 'enforce',
+    });
   });
 });

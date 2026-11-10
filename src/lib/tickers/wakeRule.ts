@@ -6,6 +6,7 @@
 // moves the read position (cor:agt:080:16), and counts only what is above BOTH
 // the read position and the delivered-through seq.
 
+import { mentionReach } from '../mentionReach.js';
 import { BROADCAST_MENTION_TOKENS } from '../mentionToken.js';
 import { currentTick, oldestUnackedTickAt, type TickerSchedule } from './ticks.js';
 
@@ -13,13 +14,13 @@ import { currentTick, oldestUnackedTickAt, type TickerSchedule } from './ticks.j
 export type RoutedMessage = {
   seq: number;
   authorWorkerId: string | null;
-  mentions: string[];
+  mentions: readonly string[];
   /** Server-written at post time (cor:agt:080:14, N3): the author could wake everyone. */
   broadcastWakes: boolean;
+  teamTagsVersion?: number;
+  teamBroadcastWorkerIds?: readonly string[];
   /** Server-written at post time: the author manages the App (cor:agt:080:15 budget exemption). */
   managerPost: boolean;
-  /** S7 (#2023): a person, not a worker or the system, wrote it. Read only for a worker on standby (standby.ts). */
-  humanAuthored?: boolean;
   /** R63: when the message was posted (ms since epoch); the anchor of a mention. Optional so pure-rule fixtures need not carry it. */
   postedAtMs?: number;
 };
@@ -54,8 +55,8 @@ export type TaskWakeReason = {
   chainIndex: number;
   event: 'ASSIGNED' | 'REASSIGNED' | 'MATCHED' | 'CHILD_FINISHED' | 'ALARM' | 'END_SESSION';
   title: string;
-  /** S7 (R90): messages held from a standby worker and passed at this assignment; rides the event, so returned once. */
-  standbyHeld?: number;
+  /** #2553: the task's handle, printed first in the nudge. */
+  handle: string;
 };
 
 /**
@@ -71,7 +72,7 @@ export type StopWakeReason = {
   interrupt: boolean;
 };
 
-export type WakeReason = { kind: 'MENTION' } | { kind: 'TICK'; tickerId: string; k: number } | TaskWakeReason | StopWakeReason;
+export type WakeReason = { kind: 'MENTION' } | { kind: 'TICK'; tickerId: string; k: number; action?: import('./tickActions.js').StoredTickAction | import('./tickActions.js').PublicTickAction } | TaskWakeReason | StopWakeReason;
 
 /** A task wake handed to the rule: already gated for the requester, oldest first. */
 export type TaskWakeInput = Omit<TaskWakeReason, 'kind'> & { /** R63: the task event's time (ms), the anchor of a task reason. */ atMs?: number };
@@ -103,15 +104,15 @@ function statsOf(ch: ChannelInput, workerId: string, workerTokens: readonly stri
   const immediate: RoutedMessage[] = [];
   for (const m of ch.messages) {
     if (m.authorWorkerId === workerId) continue;
-    const direct = m.mentions.some((t) => workerTokens.includes(t));
-    const broadcast = !direct && m.mentions.some((t) => (BROADCAST_MENTION_TOKENS as readonly string[]).includes(t));
-    const mentioned = direct || broadcast;
+    const direct = m.mentions.some(t => workerTokens.includes(t));
+    const legacyBroadcast = m.teamTagsVersion !== 1 && m.mentions.some(t => (BROADCAST_MENTION_TOKENS as readonly string[]).includes(t));
+    const mentioned = m.teamTagsVersion === 1 ? mentionReach(m, workerTokens, [workerId]) !== null : direct || legacyBroadcast;
     // In a mention-only channel only mentions count (#8088).
     if (ch.mentionOnly && !mentioned) continue;
     relevant.push(m);
     if (mentioned) {
       mentions.push(m);
-      if (direct || m.broadcastWakes) immediate.push(m);
+      if (m.teamTagsVersion === 1 || direct || m.broadcastWakes) immediate.push(m);
     }
   }
   return { relevant, mentions, immediate };
@@ -133,7 +134,7 @@ export function workerWake(args: {
   subscriptions: SubscriptionInput[];
   /** #1708 — task events the worker is due for. They wake at once, like a mention, whatever the mentions setting. */
   tasks?: TaskWakeInput[];
-  /** #2138 §3.3: the worker is PENDING (not expected to check: no task, standby, isolated, paused): `live-check` is never due. */
+  /** #2138 §3.3: the worker is PENDING (not expected to check: no task or paused): `live-check` is never due. */
   checkPending?: boolean;
   now: Date;
 }): WorkerWake | null {
@@ -159,7 +160,10 @@ export function workerWake(args: {
   }
 
   // cor:agt:080:10 — each live subscription whose current tick is newer than the last acknowledged.
-  for (const sub of subscriptions) {
+  // #2949: in ticker-id order, never the order the rows were read in (that read has no ORDER BY, and the plan may walk
+  // the heap), so an unchanged outstanding wake is re-handed with the same reasons in the same order: the same proof
+  // bytes and the same stored wake. A worker holds one live subscription per ticker, so the order is total.
+  for (const sub of [...subscriptions].sort((x, y) => (x.ticker.id < y.ticker.id ? -1 : x.ticker.id > y.ticker.id ? 1 : 0))) {
     const k = currentTick(sub.ticker, now);
     if (k === null || k <= sub.lastAckedTick) continue;
     const scope = sub.ticker.channelIds.length > 0 ? new Set(sub.ticker.channelIds) : null;
@@ -191,7 +195,7 @@ export function workerWake(args: {
   }
 
   for (const t of args.tasks ?? []) {
-    reasons.push({ kind: 'TASK', taskId: t.taskId, eventId: t.eventId, chainIndex: t.chainIndex, event: t.event, title: t.title, ...(t.standbyHeld ? { standbyHeld: t.standbyHeld } : {}) });
+    reasons.push({ kind: 'TASK', taskId: t.taskId, eventId: t.eventId, chainIndex: t.chainIndex, event: t.event, title: t.title, handle: t.handle });
     if (t.atMs !== undefined) anchors.push(t.atMs);
   }
 

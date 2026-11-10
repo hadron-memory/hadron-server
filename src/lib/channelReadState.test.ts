@@ -28,6 +28,7 @@ import { generateDataKey } from './crypto.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
 import { advanceReadState, readStatesFor, renderAttentionSection } from './channelReadState.js';
 import { renderDerivedBlocks, resolveRegister } from './resolveRegister.js';
+import { serveEveryAgent } from '../test/servedBootPrompt.js';
 
 vi.mock('./bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -119,6 +120,7 @@ beforeEach(async () => {
   channel = { id: made.channel.id, loc: 'chats:team', memoryId: appMem.id, chatRootNodeId: made.rootId };
   const node = await db.node.create({ data: { id: generateId(), memoryId: appMem.id, loc: 'tasks:go', name: 'go', nodeType: 'task', content: 'go', isRunnable: true } });
   entry = `hrn:node:${appMem.urn}:${node.loc}`;
+  await serveEveryAgent(db); // #2712: a run for an Agent needs a served prompt
 });
 
 describe('read-state', () => {
@@ -138,7 +140,7 @@ describe('read-state', () => {
     expect(renderDerivedBlocks(await resolveRegister(db, { attendee: { agentId: agent.id, appId: app.id }, actor: ctx(admin.id) }))).toContain('nothing new (at seq 2)');
   });
 
-  it('the kernel appends the attention section and advances the cursor with the checkpoint; a second run says nothing new; no Agent, no section', async () => {
+  it('the kernel appends the attention section and advances the cursor with the checkpoint; a second run says nothing new; no Agent, no run', async () => {
     await post('one'); await post('two');
     const mint = () => mintAppRun(db, { organizationId: org.id, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
     const first = deps();
@@ -153,11 +155,9 @@ describe('read-state', () => {
     const run2 = await mint();
     expect(await executeAppRun(db, run2.id, second)).toBe('completed');
     expect(((second.llm.mock.calls[0] as unknown[])[1] as { prompt: string }).prompt).toContain(`- team (${appMem.urn}:chats:team): nothing new`);
-    // A run with no Agent has no attendee: no section, and nothing advanced.
-    const third = deps();
-    const bare = await mintAppRun(db, { organizationId: org.id, appId: app.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
-    expect(await executeAppRun(db, bare.id, third)).toBe('completed');
-    expect(((third.llm.mock.calls[0] as unknown[])[1] as { prompt: string }).prompt).toBe('# Step');
+    // #2712 (R74): a run with no Agent has no attendee, and is refused before it exists.
+    await expect(mintAppRun(db, { organizationId: org.id, appId: app.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false }))
+      .rejects.toMatchObject({ extensions: { code: 'BOOT_PROMPT_NOT_SET' } });
   });
 
   it('mentionOnly rows count only new messages naming the attendee\'s Workers', async () => {

@@ -20,6 +20,9 @@ export interface RunToolContext {
   /** The run principal (D-2026-07-04-C): Context{appId, userId?} — class
    *  gates apply unchanged inside every handler. */
   principal: Context;
+  /** The flow node this hop executes (#2485). Set by the kernel; tools that
+   *  take their reach from the node (github_issue_snapshot) read it here. */
+  nodeUrn?: string;
 }
 
 export interface RunToolDef {

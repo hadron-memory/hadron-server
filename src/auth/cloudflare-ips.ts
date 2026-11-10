@@ -16,10 +16,11 @@
  *
  * Boot sequence:
  *   1. Fetch CIDR ranges from https://api.cloudflare.com/client/v4/ips
- *      with a 5s timeout (AbortController).
+ *      with up to three attempts, each with a 5s timeout (AbortController).
+ *      Retry delays are 250ms then 1000ms, plus 0–25% additive jitter.
  *   2. Persist to a disk cache at $CLOUDFLARE_IPS_CACHE_PATH (default:
  *      `<os.tmpdir()>/hadron-cloudflare-ips.json`).
- *   3. On fetch failure, fall back to the cached file if present.
+ *   3. After all attempts fail, fall back to the cached file if present.
  *   4. If both fail, throw — the caller's `createServer` will refuse
  *      to boot (fail-closed per Q-025-011 / FR-006).
  *   5. Schedule a daily background refresh (24h interval). Refresh
@@ -36,6 +37,7 @@ import { tmpdir } from 'os';
 
 const DEFAULT_API_URL = 'https://api.cloudflare.com/client/v4/ips';
 const DEFAULT_TIMEOUT_MS = 5_000;
+const BOOT_RETRY_DELAYS_MS = [250, 1_000] as const;
 const REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 export interface CloudflareIps {
@@ -50,7 +52,7 @@ export interface InitOptions {
   apiUrl?: string;
   /** Disk cache path. Defaults to `<tmpdir>/hadron-cloudflare-ips.json`. */
   cachePath?: string;
-  /** Fetch timeout in milliseconds. Defaults to 5000. */
+  /** Per-attempt fetch timeout in milliseconds. Defaults to 5000. */
   timeoutMs?: number;
   /** Skip the daily refresh interval (used by unit tests). */
   skipRefresh?: boolean;
@@ -163,7 +165,12 @@ async function writeCache(path: string, value: CloudflareIps): Promise<void> {
 
 /**
  * Boot-time initialization. Returns the loaded IP ranges and arms the
- * daily refresh interval. Throws if both the fetch AND the cache read
+ * daily refresh interval. Boot tries at most three times with a fresh
+ * per-attempt timeout, waiting 250ms then 1000ms plus 0–25% jitter between
+ * failures. With the default timeout the sequence takes at most about
+ * 16.563s (excluding scheduling and cache I/O); it completes before cache
+ * fallback. Daily refresh still makes one attempt.
+ * Throws if all boot attempts AND the cache read
  * fail — in that case `createServer` MUST refuse to boot in
  * `NODE_ENV=production` (the caller enforces this; see `src/server.ts`).
  */
@@ -195,7 +202,16 @@ export async function initCloudflareIps(opts: InitOptions = {}): Promise<Cloudfl
     );
   }
 
-  const fresh = await fetchFromApi(apiUrl, timeoutMs, fetchImpl);
+  let fresh: CloudflareIps | null = null;
+  for (let attempt = 0; attempt <= BOOT_RETRY_DELAYS_MS.length; attempt++) {
+    fresh = await fetchFromApi(apiUrl, timeoutMs, fetchImpl);
+    if (fresh) break;
+    const delay = BOOT_RETRY_DELAYS_MS[attempt];
+    if (delay !== undefined) {
+      const jitter = Math.floor(Math.random() * delay * 0.25);
+      await new Promise<void>((resolve) => setTimeout(resolve, delay + jitter));
+    }
+  }
   if (fresh) {
     cached = fresh;
     try {

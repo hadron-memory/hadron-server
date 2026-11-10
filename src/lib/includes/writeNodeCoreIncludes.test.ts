@@ -85,6 +85,32 @@ describe('include tags through createNode / updateNode (#2040)', () => {
     expect(await db.node.count({ where: { memoryId, loc: 'n' } })).toBe(0);
   });
 
+  it('refuses a v1 include on create or update without changing nodes, revisions or derived edges (#2251)', async () => {
+    await create('b', 'B');
+    await create('a', '{{> b}}');
+    // Embedding scheduling can update its own timestamps asynchronously; pin the authored state.
+    const select = { id: true, content: true, revSeq: true, contentRevSeq: true, revisionContentHash: true } as const;
+    const node = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'a' }, select });
+    const edges = await includeEdges('a');
+    const revisions = await db.nodeRevision.findMany({ where: { nodeId: node.id } });
+    const tag = `{{> hrn:node:${memoryUrn.replace(':', '::')}::b }}`;
+    await expect(create('legacy', tag)).rejects.toMatchObject({ extensions: { code: 'INVALID_INCLUDE', tag } });
+    expect(await db.node.count({ where: { memoryId, loc: 'legacy' } })).toBe(0);
+    await expect(update('a', tag)).rejects.toMatchObject({ extensions: { code: 'INVALID_INCLUDE', tag } });
+    expect(await db.node.findUniqueOrThrow({ where: { id: node.id }, select })).toEqual(node);
+    expect(await db.nodeRevision.findMany({ where: { nodeId: node.id } })).toEqual(revisions);
+    expect(await includeEdges('a')).toEqual(edges);
+  });
+
+  it('does not resolve a non-hrn:node: include through a legacy URN alias (#2251)', async () => {
+    await create('b', 'B');
+    const tag = `{{> urn:node:${memoryUrn.replace(':', '::')}::b }}`;
+    // The global parser could find b, but include grammar classifies this target as a literal same-memory loc.
+    await expect(create('alias', tag)).rejects.toMatchObject({ extensions: { code: 'INCLUDE_TARGET_UNAVAILABLE', tag } });
+    expect(await db.node.count({ where: { memoryId, loc: 'alias' } })).toBe(0);
+    expect(await includeEdges('alias')).toEqual([]);
+  });
+
   // #2134 — cor:dmo:150:06: over-depth is a broken include at read, never a
   // write refusal. Depth counts from the includer: its own tags are level 1.
   it('saves a chain deeper than the cap, on create and on update; the read shows the notice past level 10 only', async () => {

@@ -1,3 +1,4 @@
+import { lockTaskGraph } from './blockers.js';
 import { anchorNow } from '../stopSignals/state.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /**
@@ -231,7 +232,7 @@ describe('cor:agt:060:06 — a queued task goes to the matching worker free for 
     await lastAssigned(baloo, '09:00');
     await lastAssigned(liam, '10:00');
     const t = await queued('11:00', NOT_CLAUDE_REVIEWER);
-    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, expired: 0, matched: 1 });
+    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, expired: 0, recovered: 0, matched: 1 });
     expect(await assigneeOf(t.id)).toBe(baloo.id);
     const task = await db.agentTask.findUniqueOrThrow({ where: { id: t.id } });
     expect(task).toMatchObject({ status: 'pending', assignedAt: at('11:01'), assignedBy: null, assignedByWorkerId: null });
@@ -345,7 +346,7 @@ describe('cor:agt:060:06 — a queued task goes to the matching worker free for 
       })),
     });
     const last = await queued('10:00', { role: 'reviewer' });
-    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, expired: 0, matched: 1 });
+    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, expired: 0, recovered: 0, matched: 1 });
     expect(await assigneeOf(last.id)).toBe(baloo.id);
   });
 });
@@ -722,7 +723,7 @@ describe('#1754 — a backlog task is never matched (cor:agt:050:02)', () => {
       data: { appId: app.id, title: 'Parked', ownerUserId: mia.id, status: 'backlog', createdAt: at('11:00') },
       select: { id: true },
     });
-    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, expired: 0, matched: 0 });
+    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, expired: 0, recovered: 0, matched: 0 });
     expect(await db.agentTask.findUniqueOrThrow({ where: { id: t.id } }))
       .toMatchObject({ status: 'backlog', assigneeWorkerId: null, assigneeUserId: null });
     expect(await db.agentTeamEvent.findMany({ where: { taskId: t.id } })).toEqual([]);
@@ -731,7 +732,7 @@ describe('#1754 — a backlog task is never matched (cor:agt:050:02)', () => {
   it('a task parked FROM THE QUEUE (a real queue stint behind it) is not matched (#1790 Xylon P2-2)', async () => {
     await bind(baloo, 'codex', at('11:00'));
     const t = await queuedAt('10:00', { status: 'backlog' }); // queued at 10:00, parked since
-    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, expired: 0, matched: 0 });
+    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, expired: 0, recovered: 0, matched: 0 });
     expect(await db.agentTask.findUniqueOrThrow({ where: { id: t.id } }))
       .toMatchObject({ status: 'backlog', assigneeWorkerId: null, assigneeUserId: null });
   });
@@ -745,7 +746,7 @@ describe('#1754 — a backlog task is never matched (cor:agt:050:02)', () => {
     });
     await db.agentTask.update({ where: { id: older.id }, data: { status: 'pending' } });
     const younger = await queuedAt('11:00'); // queued continuously
-    expect(await taskMatcherTick(db, at('11:31'))).toEqual({ lost: 0, lapsed: 0, expired: 0, matched: 1 });
+    expect(await taskMatcherTick(db, at('11:31'))).toEqual({ lost: 0, lapsed: 0, expired: 0, recovered: 0, matched: 1 });
     expect(await assigneeOf(older.id)).toBe(baloo.id);
     expect(await assigneeOf(younger.id)).toBeNull();
   });
@@ -863,4 +864,64 @@ describe('#2191 deciding checks after real lock waits', () => {
       expect(await assigneeOf(task.id)).toBeNull();
     });
   }
+});
+
+// #2644: priority is a queue ordering input, never matching eligibility.
+describe('#2644 blocker and priority queue', () => {
+  it('the deciding update refuses a task blocked after discovery', async () => {
+    await bind(baloo, 'codex', at('11:00'));
+    const task = await queued('10:00');
+    const outcome = await __matcherTesting.tryAssign(db, { ...task, appId: app.id, requirements: null, closeSessionWhenDone: false }, baloo.id, 'codex', at('11:01'), {
+      // A separate connection changes the deciding row after the stale discovery.
+      // Adding a link here would wait on the graph lock held by this assignment.
+      afterWorkerCheck: async () => { await db.agentTask.update({ where: { id: task.id }, data: { blocked: true } }); },
+    });
+    expect(outcome).toBe('task-gone');
+    expect(await assigneeOf(task.id)).toBeNull();
+    expect(await db.agentTeamEvent.count({ where: { taskId: task.id, type: 'assignment.matched' } })).toBe(0);
+  });
+  it('assignment waits for an exclusive blocker writer and rechecks its committed link', async () => {
+    await bind(baloo, 'codex', at('11:00'));
+    const blocker = await queued('09:00', null, { status: 'backlog' });
+    const task = await queued('10:00');
+    const h = hold(async (tx) => {
+      await lockTaskGraph(tx, app.id);
+      await tx.agentTaskBlocker.create({ data: { taskId: task.id, blockerTaskId: blocker.id } });
+    });
+    const pid = await h.held;
+    let reachedWorkerCheck = false;
+    const pending = __matcherTesting.tryAssign(db, { ...task, appId: app.id, requirements: null, closeSessionWhenDone: false }, baloo.id, 'codex', at('11:01'), {
+      afterWorkerCheck: async () => { reachedWorkerCheck = true; },
+    });
+    try {
+      await blockedBy(pid);
+      // A row-lock wait is insufficient: the graph lock must fence the worker check too.
+      expect(reachedWorkerCheck).toBe(false);
+    } finally { h.release(); await h.done; await pending; }
+    expect(await pending).toBe('task-gone');
+    expect(await assigneeOf(task.id)).toBeNull();
+    expect(await db.agentTeamEvent.count({ where: { taskId: task.id, type: 'assignment.matched' } })).toBe(0);
+  });
+  it('skips an open blocker, chooses lowest priority then FIFO, and retains later pages', async () => {
+    await bind(baloo, 'codex', at('11:00'));
+    const blocker = await queued('09:00', null, { status: 'backlog' });
+    const blocked = await queued('09:01', null, { priority: 1 });
+    await db.agentTaskBlocker.create({ data: { taskId: blocked.id, blockerTaskId: blocker.id } });
+    const low = await queued('09:02', null, { priority: 5 });
+    const high = await queued('09:03', null, { priority: 2 });
+    const tie = await queued('09:04', null, { priority: 2 });
+    expect(await matchQueuedTasks(db, at('11:01'), { appId: app.id })).toMatchObject([{ taskId: high.id }]);
+    expect(await assigneeOf(blocked.id)).toBeNull();
+    expect(await assigneeOf(low.id)).toBeNull();
+    expect(await assigneeOf(tie.id)).toBeNull();
+  });
+  it('passes more than one page of mixed priorities and ties that nobody can take', async () => {
+    await bind(baloo, 'codex', at('11:00'));
+    await db.agentTask.createMany({ data: Array.from({ length: 501 }, (_, i) => ({
+      id: generateId(), appId: app.id, title: 'Synthetic ineligible', ownerUserId: mia.id,
+      priority: i < 250 ? 1 : 2, createdAt: at('10:00'), requirements: { role: 'unmatched-role' },
+    })) });
+    const target = await queued('09:00', { role: 'reviewer' }, { priority: 3 });
+    expect(await matchQueuedTasks(db, at('11:01'), { appId: app.id })).toMatchObject([{ taskId: target.id, workerId: baloo.id }]);
+  });
 });

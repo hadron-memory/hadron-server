@@ -18,6 +18,7 @@ import { db } from '../../../integrations/db/client.js';
 import {
   cleanDb,
   createDbAppWithKey,
+  createDbAppMember,
   createDbOrgAndGraph,
 } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -96,7 +97,7 @@ beforeEach(async () => {
 // ---------------------------------------------------------------------------
 
 describe('createApp accepts absorbed Station fields', () => {
-  it('persists appType, role, description, systemPrompt, agentTools, ai* fields', async () => {
+  it('persists appType, role, description, agentTools, ai* fields', async () => {
     const created = await resolvers.Mutation.createApp(
       {},
       {
@@ -106,7 +107,6 @@ describe('createApp accepts absorbed Station fields', () => {
         appType: 'CHATBOT',
         role: 'CONTRIBUTOR',
         description: 'a chatbot',
-        systemPrompt: 'you are helpful',
         agentTools: ['hadron_find_nodes', 'hadron_get_node'],
         aiProvider: 'anthropic',
         aiModel: 'claude-sonnet-4-20250514',
@@ -118,7 +118,6 @@ describe('createApp accepts absorbed Station fields', () => {
     expect(created.appType).toBe('CHATBOT');
     expect(created.role).toBe('CONTRIBUTOR');
     expect(created.description).toBe('a chatbot');
-    expect(created.systemPrompt).toBe('you are helpful');
     expect(created.agentTools).toEqual(['hadron_find_nodes', 'hadron_get_node']);
     // 036-ai-service-config: the legacy args land in the App's 'default'
     // registry config (columns dropped).
@@ -148,7 +147,7 @@ describe('createApp accepts absorbed Station fields', () => {
 });
 
 describe('updateApp updates absorbed Station fields', () => {
-  it('updates appType, role, description, systemPrompt, agentTools, ai*', async () => {
+  it('updates appType, role, description, agentTools, ai*', async () => {
     const created = await resolvers.Mutation.createApp(
       {},
       { orgRef: orgId, agentRef: agentId, name: 'To Update' },
@@ -161,7 +160,6 @@ describe('updateApp updates absorbed Station fields', () => {
         appType: 'AGENT',
         role: 'ADMIN',
         description: 'updated',
-        systemPrompt: 'updated prompt',
         agentTools: ['hadron_create_node'],
         aiProvider: 'openai',
         aiModel: 'gpt-4',
@@ -172,7 +170,6 @@ describe('updateApp updates absorbed Station fields', () => {
     expect(updated.appType).toBe('AGENT');
     expect(updated.role).toBe('ADMIN');
     expect(updated.description).toBe('updated');
-    expect(updated.systemPrompt).toBe('updated prompt');
     expect(updated.agentTools).toEqual(['hadron_create_node']);
     const config = await db.aiServiceConfig.findFirstOrThrow({
       where: { appId: created.id, name: 'default' },
@@ -348,7 +345,7 @@ describe('App field resolvers', () => {
       adminCtx(),
     );
     const members = await resolvers.App.members({ id: created.id }, {}, adminCtx());
-    expect(members.length).toBe(1);
+    expect(members!.length).toBe(1);
     expect((members as Array<{ userId: string; role: string }>)[0].userId).toBe(user.id);
     expect((members as Array<{ userId: string; role: string }>)[0].role).toBe('owner');
 
@@ -489,6 +486,10 @@ describe('memories — App-key orgId', () => {
       },
     });
     await db.agentMemoryItem.create({ data: { agentId, memoryId: invalid.id, role: 'bogus' } });
+    await db.memory.update({ where: { id: memoryId }, data: { visibility: 'PUBLIC' } });
+    await db.memory.update({ where: { id: invalid.id }, data: { visibility: 'PUBLIC' } });
+    // The unchanged bare-key PUBLIC fold must still reject malformed roles.
+    // A session's independent PUBLIC path would bypass that item filter.
     const page = await resolvers.Query.memories(
       {}, { filter: { memoryClasses: ['knowledge'] } }, ctx({ appId: app.id }),
     );
@@ -540,7 +541,7 @@ describe('memories — App-key orgId', () => {
       data: {
         id: generateId(), organizationId: orgId, appId: appA.id,
         urn: `${orgId}:memory-list-internal`, name: 'A internal',
-        class: 'knowledge', visibility: 'ORGANIZATION',
+        class: 'knowledge', visibility: 'PUBLIC', // #1376: PUBLIC is what a bare key keeps through an item
       },
     });
     await db.agentMemoryItem.create({ data: { agentId, memoryId: internal.id, role: 'read' } });
@@ -549,22 +550,43 @@ describe('memories — App-key orgId', () => {
     const b = await resolvers.Query.memories({}, {}, ctx({ appId: appB.id }));
     expect(a.items.map((m: { id: string }) => m.id)).toContain(internal.id);
     expect(b.items.map((m: { id: string }) => m.id)).not.toContain(internal.id);
-    expect(b.items.map((m: { id: string }) => m.id)).toContain(memoryId);
+    // Org authority is independent of App membership; an item does not admit a bare key or user.
+    expect(b.items.map((m: { id: string }) => m.id)).not.toContain(memoryId);
+    const member = await db.user.create({ data: { githubId: 7782, githubUsername: 'memory-list-member', roles: ['READER'] } });
+    await createDbAppMember(db, appB.id, member.id);
+    const bm = await resolvers.Query.memories({}, {}, ctx({ appId: appB.id, userId: member.id }));
+    expect(bm.items.map((m: { id: string }) => m.id)).not.toContain(internal.id);
+    expect(bm.items.map((m: { id: string }) => m.id)).not.toContain(memoryId);
   });
 
   it('scopes to the App own org: match → its memories, any other org → empty page', async () => {
     const { app } = await createDbAppWithKey(db, 'mm-appkey', orgId);
     await db.appAgent.create({ data: { appId: app.id, agentId } });
+    // A bare key and an App-only member gain no org knowledge from the item; what the key
+    // still reaches is its own App's scoped memory, so the org gate is proven against that one.
+    const own = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: orgId, appId: app.id,
+        urn: `${orgId}:mm-appkey-own`, name: 'own app memory',
+        class: 'knowledge', visibility: 'PUBLIC', // #1376: PUBLIC is what a bare key keeps through an item
+      },
+    });
+    await db.agentMemoryItem.create({ data: { agentId, memoryId: own.id, role: 'read' } });
+    const member = await db.user.create({ data: { githubId: 7783, githubUsername: 'mm-appkey-member', roles: ['READER'] } });
+    await createDbAppMember(db, app.id, member.id);
+    const memberAll = await resolvers.Query.memories({}, {}, ctx({ appId: app.id, userId: member.id }));
+    expect(memberAll.items.some((m: { id: string }) => m.id === memoryId)).toBe(false);
     const appCtx = ctx({ appId: app.id });
 
-    // No orgId → the App's memories (agent's memoryItem → the test memory).
+    // No orgId: own App-class memory remains visible; item-only org knowledge does not.
     const all = await resolvers.Query.memories({}, {}, appCtx);
-    expect(all.items.some((m: { id: string }) => m.id === memoryId)).toBe(true);
+    expect(all.items.some((m: { id: string }) => m.id === own.id)).toBe(true);
+    expect(all.items.some((m: { id: string }) => m.id === memoryId)).toBe(false);
 
     // orgId == the App's own org → same memories (a match-or-empty gate, NOT a
     // per-memory ownership filter — so subscribed-in memories would survive too).
     const scoped = await resolvers.Query.memories({}, { orgId }, appCtx);
-    expect(scoped.items.some((m: { id: string }) => m.id === memoryId)).toBe(true);
+    expect(scoped.items.some((m: { id: string }) => m.id === own.id)).toBe(true);
 
     // A different org → empty page (the App has no other active-org context).
     const other = await db.organization.create({
@@ -707,8 +729,8 @@ describe('appNodes', () => {
     const locs = (await resolvers.Query.appNodes({}, { appRef: app.id }, ctx)).map(
       (n: { loc: string }) => n.loc,
     );
-    // The installed agent's memories, as the MCP map already grants them...
-    expect(locs).toContain('org.test.node');
+    // #3305: the external member has no independent org knowledge authority...
+    expect(locs).not.toContain('org.test.node');
     // ...and the team space, because they ARE a participant.
     expect(locs).toContain('chats:team');
   });
@@ -789,11 +811,11 @@ describe('appNodes', () => {
       {}, { appRef: app.id }, { db, roles: ['READER'], userId: outsider.id } as Context,
     )).map((n: { loc: string }) => n.loc);
 
-    // What the platform grants them elsewhere: the primary agent's memory…
-    expect(locs).toContain('org.test.node');
+    // #3305: even the primary item grants no independent knowledge authority…
+    expect(locs).not.toContain('org.test.node');
     // …and the team space…
     expect(locs).toContain('chats:team');
-    // …but NOT the second installed agent, which the MCP fold never grants.
+    // The secondary Agent item also supplies no independent knowledge authority.
     expect(locs).not.toContain('secondary.node');
 
     // And an ORG member's scope is untouched — they still see everything the

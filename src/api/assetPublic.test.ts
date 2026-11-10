@@ -39,6 +39,7 @@ async function seedAsset(
     scanStatus: 'PENDING' | 'CLEAN' | 'BLOCKED';
     deletedAt: Date | null;
     memoryId: string | null;
+    publicLinkEnabled: boolean;
   }> = {},
 ) {
   const id = generateId();
@@ -52,6 +53,8 @@ async function seedAsset(
       storageKey: `pub-key-${id}`,
       scanStatus: over.scanStatus ?? 'CLEAN',
       deletedAt: over.deletedAt ?? null,
+      // #1667: these cases exercise the route's other gates, so the per-asset opt-in is ON unless a case says otherwise.
+      publicLinkEnabled: over.publicLinkEnabled ?? true,
     },
   });
   return id;

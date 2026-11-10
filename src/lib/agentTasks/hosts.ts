@@ -25,7 +25,7 @@ import { toNaiveUtc } from '../sessionActivity.js';
 import { appendHostEvent } from './events.js';
 import { FAMILY_PATTERN } from './availability.js';
 import { normalizeFamily } from './family.js';
-import { HOST_WORKTREES_MAX, isHostToken } from '../hostOperations/types.js';
+import { HOST_CAPABILITIES, HOST_WORKTREES_MAX, isHostCapability, isHostToken } from '../hostOperations/types.js';
 
 /**
  * cor:agt:070:01 (#1763; Holger, team chat #10405) — a registration lapses
@@ -79,6 +79,11 @@ export type HostRegistrationInput = {
   pollIntervalSeconds: number;
   /** #1709: `worktrees` are the worker's existing worktrees on this host (cor:agt:070:06, :08); none when omitted. */
   workers: { workerId: string; family: string; worktrees?: string[] }[];
+  /**
+   * #2162 (cor:agt:070:01, Proposed): the capability-gated operation types this host performs. Every refresh states
+   * them in full; omitted means none, so a host that stops declaring one is never issued it again.
+   */
+  capabilities?: string[];
 };
 
 /** #1709: hooks a key-authenticated caller runs inside the registration's transaction, after the App's anchor. */
@@ -117,6 +122,12 @@ export async function registerHost(
   }
   if (input.workers.length > HOST_WORKERS_MAX) {
     throw new HostRegistrationError('BAD_HOST_REGISTRATION', `A host registers at most ${HOST_WORKERS_MAX} workers.`);
+  }
+  const capabilities = [...new Set(input.capabilities ?? [])].sort();
+  for (const c of capabilities) {
+    if (!isHostCapability(c)) {
+      throw new HostRegistrationError('BAD_HOST_REGISTRATION', `A host declares only these capabilities: ${HOST_CAPABILITIES.join(', ')}.`);
+    }
   }
   const workers = new Map<string, { family: string; worktrees: string[] }>();
   for (const w of input.workers) {
@@ -162,10 +173,11 @@ export async function registerHost(
     }
     if (workers.size) {
       // FOR SHARE: a concurrent retire either committed first (and is refused
-      // here) or waits for this registration.
+      // here) or waits for this registration. ORDER BY id: lock in the same order as setHostWorkerTerminals
+      // (FOR UPDATE, id order), or the two deadlock (40P01, #2791 §10).
       const rows = await tx.$queryRaw<{ id: string; appId: string; retiredAt: Date | null }[]>`
         SELECT id, app_id AS "appId", retired_at AS "retiredAt" FROM workers
-        WHERE id IN (${Prisma.join([...workers.keys()])}) FOR SHARE`;
+        WHERE id IN (${Prisma.join([...workers.keys()])}) ORDER BY id FOR SHARE`;
       const ok = new Set(rows.filter((r) => r.appId === input.appId && !r.retiredAt).map((r) => r.id));
       const bad = [...workers.keys()].filter((id) => !ok.has(id));
       if (bad.length) {
@@ -189,7 +201,7 @@ export async function registerHost(
     const wasLapsed = !isNew && (cur.lostAt !== null || !isRegistrationLive(cur, now, checkIns));
     await tx.hostRegistration.update({
       where: { id: cur.id },
-      data: { label, pollIntervalSeconds: input.pollIntervalSeconds, refreshedAt: now, lostAt: null },
+      data: { label, pollIntervalSeconds: input.pollIntervalSeconds, refreshedAt: now, lostAt: null, capabilities },
     });
     await tx.hostRegistrationWorker.deleteMany({ where: { registrationId: cur.id } });
     if (workers.size) {

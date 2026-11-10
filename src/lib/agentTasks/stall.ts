@@ -9,6 +9,8 @@
  * | owner-unreactive  | a child finished or cancelled; no activity by the | 20 min  | 050:16 (r2) |
  * |                   | parent's assignee (the child's owner)              |         |             |
  * | unassignable      | queued: pending with no assignee                   | 30 min  | 050:17      |
+ * | finish-by         | a finish-by time passed, task neither finished nor | (none)  | 050:14      |
+ *                       cancelled; it replaces the four rules above while set (#2648)
  *
  * EPISODES (cor:agt:050:13, Proposed). An episode's key is (task, rule,
  * episode start), and the episode start is the instant of the MOVE that began
@@ -56,11 +58,11 @@ import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { type Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { loadWorkersActivity } from '../../api/graphql/schema/resolvers.worker.js';
 import { toNaiveUtc } from '../sessionActivity.js';
-import { appendAlarmEvent, type AlarmChain, type AlarmEventType, type TaskParty } from './events.js';
+import { PASSIVE_EVENT_TYPES, appendAlarmEvent, type AlarmChain, type AlarmEventType, type TaskParty } from './events.js';
 import { markStalled } from './availability.js';
 import { appManagerUserIds } from '../auth/appManagement.js';
 
-export const STALL_RULES = ['not-started', 'no-progress', 'owner-unreactive', 'unassignable'] as const;
+export const STALL_RULES = ['not-started', 'no-progress', 'owner-unreactive', 'unassignable', 'finish-by'] as const;
 export type StallRule = (typeof STALL_RULES)[number];
 
 /** Each rule's alarm type (cor:agt:050:11). */
@@ -69,6 +71,7 @@ export const STALL_EVENT_TYPE: Record<StallRule, AlarmEventType> = {
   'no-progress': 'stall.no-progress',
   'owner-unreactive': 'stall.owner-unreactive',
   unassignable: 'assignment.unassignable',
+  'finish-by': 'stall.finish-by',
 };
 
 /** The App's stall windows, in minutes. */
@@ -92,6 +95,10 @@ const RULE_WINDOW: Record<StallRule, keyof StallWindows> = {
   'no-progress': 'noProgressMinutes',
   'owner-unreactive': 'ownerReactionMinutes',
   unassignable: 'assignmentMinutes',
+  // #2648: the finish-by alarm has no window of its own (it fires at the deadline). Its windowMinutes is only the
+  // cor:agt:050:19 escalation step, which climbs "as the other stall alarms do"; the no-progress window is the one
+  // for work in flight. A reading, not a ruling: listed on the PR.
+  'finish-by': 'noProgressMinutes',
 };
 
 const MINUTE = 60_000;
@@ -122,11 +129,12 @@ import { afterWaits, anchorNow, lockStopFence } from '../stopSignals/state.js';
 type Db = PrismaClient | Prisma.TransactionClient;
 
 const TASK_SELECT = {
-  id: true, appId: true, status: true, parentTaskId: true,
+  id: true, appId: true, status: true, matchFailedAt: true, parentTaskId: true, blocked: true, releasedAt: true,
   ownerWorkerId: true, ownerUserId: true, assigneeWorkerId: true, assigneeUserId: true,
-  startBy: true, assignedAt: true, startedAt: true, createdAt: true,
+  startBy: true, finishBy: true, assignedAt: true, startedAt: true, createdAt: true,
 } as const;
-type TaskState = Prisma.AgentTaskGetPayload<{ select: typeof TASK_SELECT }>;
+type SelectedTaskState = Prisma.AgentTaskGetPayload<{ select: typeof TASK_SELECT }>;
+type TaskState = Omit<SelectedTaskState, 'blocked' | 'releasedAt' | 'finishBy' | 'matchFailedAt'> & Partial<Pick<SelectedTaskState, 'blocked' | 'releasedAt' | 'finishBy' | 'matchFailedAt'>>;
 
 /** Everything one task's rules read. */
 export type StallInputs = {
@@ -155,6 +163,20 @@ export type StallInputs = {
    * the pre-#1754 episode start.
    */
   queuedAt: Date | null;
+  /** #2645: changing startBy creates a new not-started episode, without changing assignment/progress clocks. */
+  startByEditedAt?: Date | null;
+  /**
+   * #2648: the latest edit that changed the finish-by time (set or cleared). While a finish-by time is set no ordinary
+   * stall clock runs, so once it is cleared the ordinary windows count from this edit (cor:agt:050:14).
+   */
+  finishByEditedAt?: Date | null;
+  /**
+   * #2648 (LOCAL P2-3 at 2c7474dc): the episode start of a finish-by alarm already raised for the CURRENT finish-by
+   * time, if any. The earliest stored start at or after the deadline: an edit can only set a deadline that has not
+   * passed, so every alarm of an earlier finish-by episode started before it. It keeps the running episode's key
+   * fixed when the task is blocked and released again after the alarm.
+   */
+  finishByAlarmStart?: Date | null;
   /**
    * #2022 (R68; the Proposed stop-signal exceptions to cor:agt:050:13-:17): when a `pause` or `halt` covered each
    * worker these rules read (the assignee, and each ended child's owner), from the coverage ledger. Time inside them
@@ -214,7 +236,8 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
     ...children.map((c) => c.ownerWorkerId),
   ].filter((w): w is string => !!w))];
   const ownerUserIds = [...new Set(children.map((c) => c.ownerUserId).filter((u): u is string => !!u))];
-  const [progress, queued, activity, userCalls] = await Promise.all([
+  const finishByTaskIds = tasks.filter((t) => t.finishBy).map((t) => t.id);
+  const [progress, queued, activity, userCalls, startByEdits, finishByEdits, finishByAlarms] = await Promise.all([
     db.agentTeamEvent.groupBy({
       by: ['taskId'],
       where: { taskId: { in: ids }, type: 'task.progress' },
@@ -235,8 +258,24 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
         by: ['appId', 'actorUserId'],
         // actorWorkerId null: a worker-bound call made under the person's credential
         // carries their user id too, but it is the WORKER's activity, not theirs.
-        where: { actorUserId: { in: ownerUserIds }, actorWorkerId: null, taskId: { not: null }, type: { startsWith: 'task.' } },
+        where: { actorUserId: { in: ownerUserIds }, actorWorkerId: null, taskId: { not: null }, type: { startsWith: 'task.', notIn: [...PASSIVE_EVENT_TYPES] } },
         _max: { createdAt: true },
+      })
+      : Promise.resolve([]),
+    db.agentTeamEvent.groupBy({
+      by: ['taskId'],
+      where: { taskId: { in: ids }, type: 'task.edited', payload: { path: ['fields'], array_contains: ['startBy'] } },
+      _max: { createdAt: true },
+    }),
+    db.agentTeamEvent.groupBy({
+      by: ['taskId'],
+      where: { taskId: { in: ids }, type: 'task.edited', payload: { path: ['fields'], array_contains: ['finishBy'] } },
+      _max: { createdAt: true },
+    }),
+    finishByTaskIds.length
+      ? db.agentTeamEvent.findMany({
+        where: { taskId: { in: finishByTaskIds }, type: STALL_EVENT_TYPE['finish-by'], episodeStart: { not: null } },
+        select: { taskId: true, episodeStart: true },
       })
       : Promise.resolve([]),
   ]);
@@ -244,6 +283,8 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
   const { intervals: stopIntervals, holds: stopHoldsBy } = await loadStopIntervals(db, workerIds, ids);
   const progressBy = new Map(progress.map((p) => [p.taskId, p._max.createdAt]));
   const queuedBy = new Map(queued.map((q) => [q.taskId, q._max.createdAt]));
+  const editedBy = new Map(startByEdits.map(e => [e.taskId, e._max.createdAt]));
+  const finishByEditedBy = new Map(finishByEdits.map(e => [e.taskId, e._max.createdAt]));
   const childrenBy = new Map<string, typeof children>();
   for (const c of children) {
     const list = childrenBy.get(c.parentTaskId as string) ?? [];
@@ -273,10 +314,23 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
       lastProgressAt: progressBy.get(task.id) ?? null,
       assigneeActivityAt: task.assigneeWorkerId ? activity.get(task.assigneeWorkerId)?.lastActiveAt ?? null : null,
       queuedAt: queuedBy.get(task.id) ?? null,
+      startByEditedAt: editedBy.get(task.id) ?? null,
+      finishByEditedAt: finishByEditedBy.get(task.id) ?? null,
+      finishByAlarmStart: task.finishBy ? currentFinishByAlarmStart(task.id, task.finishBy, finishByAlarms) : null,
       stopIntervals,
       stopHolds: stopHoldsBy.get(task.id) ?? [],
     };
   });
+}
+
+/** #2648 — the earliest finish-by alarm start for `taskId` at or after `finishBy` (see `finishByAlarmStart`). */
+function currentFinishByAlarmStart(taskId: string, finishBy: Date, alarms: { taskId: string | null; episodeStart: Date | null }[]): Date | null {
+  let best: Date | null = null;
+  for (const a of alarms) {
+    if (a.taskId !== taskId || !a.episodeStart || a.episodeStart.getTime() < finishBy.getTime()) continue;
+    if (!best || a.episodeStart.getTime() < best.getTime()) best = a.episodeStart;
+  }
+  return best;
 }
 
 /**
@@ -360,9 +414,14 @@ export function stallCandidates(
   options: { episodesRunning?: boolean } = {},
 ): StallCandidate[] {
   const { task } = inputs;
+  const running = options.episodesRunning === true;
+  // #2648: a blocked task RAISES nothing, but a finish-by episode is not ended by blocking (cor:agt:050:14: it ends
+  // only when the task ends or its finish-by time is edited), so the running question still names it.
+  if (task.blocked && !(running && task.finishBy)) return [];
+  // #2648: clearing a finish-by time brings the ordinary windows back from the edit, so it floors them like a release.
+  const floor = (d: Date) => latest(d, task.releasedAt, inputs.finishByEditedAt) as Date;
   const assignee = assigneeOf(task);
   const out: StallCandidate[] = [];
-  const running = options.episodesRunning === true;
   const add = (rule: StallRule, episodeStart: Date, dueAt: Date, extra: Partial<StallCandidate> = {}, stopped: readonly StopInterval[] = []) => {
     if (!running && dueAt.getTime() > now.getTime()) return;
     // #2022: while the stop exception holds, nothing is raised and nobody up the chain is woken (the Proposed
@@ -374,6 +433,20 @@ export function stallCandidates(
     });
   };
 
+  // cor:agt:050:14 (#2648) — a task with a finish-by time is exempt from every stall window: it raises only the
+  // finish-by alarm, once the deadline has passed and the task is neither finished nor cancelled (an open task; a
+  // backlog task is never loaded). The episode starts when the deadline passes, or at the release if the task was
+  // blocked then (LOCAL P2-3: the later of the deadline and the release). Once its alarm is raised, the stored start
+  // is the key, so the episode ends only when the task ends or its finish-by time is edited, never on an assignment,
+  // reassignment, start, or a later block and release. A blocked task raised nothing above. A stop signal never moves
+  // the deadline: a deadline that passed under one raises when it lifts.
+  if (task.finishBy) {
+    const stopped = task.assigneeWorkerId ? stopOf(inputs, task.assigneeWorkerId) : assignee ? [] : (inputs.stopHolds ?? []);
+    const episodeStart = inputs.finishByAlarmStart ?? (latest(task.finishBy, task.releasedAt) as Date);
+    add('finish-by', episodeStart, task.finishBy, {}, stopped);
+    return out;
+  }
+
   // cor:agt:050:17 — queued: pending with no assignee. The episode starts when
   // the task entered the queue — its latest `assignment.queued` event: #1754
   // made queue entry a move (make-ready re-queues a parked task), so `createdAt`
@@ -381,26 +454,29 @@ export function stallCandidates(
   // stint would share the first alarm's episode key and be silenced. Rows with
   // no queue event (seeded past the resolvers) fall back to creation, the
   // pre-#1754 start.
-  if (task.status === 'pending' && !assignee) {
-    const queuedAt = inputs.queuedAt ?? task.createdAt;
+  if (task.status === 'pending' && !assignee && !task.matchFailedAt) {
+    const queuedAt = floor(inputs.queuedAt ?? task.createdAt);
     add('unassignable', queuedAt, countedDueAt(queuedAt, windows.assignmentMinutes * MINUTE, inputs.stopHolds), {}, inputs.stopHolds);
   }
 
   // cor:agt:050:14 — assigned and still pending. A still-working note does not
   // stop it (S3): only starting, reassigning or cancelling the task does.
   if (task.status === 'pending' && assignee && task.assignedAt) {
-    const deadline = task.startBy && task.startBy.getTime() > task.assignedAt.getTime()
+    const assignedAt = floor(task.assignedAt);
+    const deadline = task.startBy && task.startBy.getTime() > assignedAt.getTime()
       ? task.startBy
-      : plus(task.assignedAt, windows.notStartedMinutes);
+      : plus(assignedAt, windows.notStartedMinutes);
     // #2022: a `pause` or `halt` on the assignee holds the clock, startBy's included (Vera's receipt §5).
     const stopped = stopOf(inputs, task.assigneeWorkerId);
-    add('not-started', task.assignedAt, countedDueAt(task.assignedAt, deadline.getTime() - task.assignedAt.getTime(), stopped), {}, stopped);
+    // A startBy edit (task.edited) opens a new episode; the deadline stays anchored at the floored assignment.
+    add('not-started', latest(assignedAt, inputs.startByEditedAt) as Date, countedDueAt(assignedAt, deadline.getTime() - assignedAt.getTime(), stopped), {}, stopped);
   }
 
   // cor:agt:050:15 — started, not waiting on children, no assignee activity.
   if (task.status === 'started' && inputs.openChildCount === 0 && task.startedAt) {
     const since = latest(
-      task.startedAt, task.assignedAt, inputs.lastChildEndedAt, inputs.lastProgressAt, inputs.assigneeActivityAt,
+      task.startedAt, task.assignedAt, inputs.lastChildEndedAt, inputs.lastProgressAt, inputs.assigneeActivityAt, task.releasedAt,
+      inputs.finishByEditedAt,
     ) as Date;
     const stopped = stopOf(inputs, task.assigneeWorkerId);
     add('no-progress', since, countedDueAt(since, windows.noProgressMinutes * MINUTE, stopped), {}, stopped);
@@ -411,7 +487,7 @@ export function stallCandidates(
   const first = assignee ? unreactedChild(inputs) : null;
   if (first) {
     const stopped = stopOf(inputs, first.ownerWorkerId);
-    add('owner-unreactive', first.endedAt, countedDueAt(first.endedAt, windows.ownerReactionMinutes * MINUTE, stopped), {
+    add('owner-unreactive', floor(first.endedAt), countedDueAt(floor(first.endedAt), windows.ownerReactionMinutes * MINUTE, stopped), {
       childTaskId: first.id,
     }, stopped);
   }
@@ -457,7 +533,9 @@ export async function ownerChain(db: Db, taskId: string): Promise<AlarmChain> {
       -- Same App only (#1720 review, Rook P3-4): T1 refuses a cross-App
       -- parent at create; this keeps another tenant's owners out of a chain
       -- even if a later move ever relinked one.
-      WHERE up.depth < 64 AND t.app_id = up.app_id
+      -- #2553: the walk stops below AT0, the reserved "No project" row: its owner is a bookkeeping fallback, not a
+      -- parent who owns the task.
+      WHERE up.depth < 64 AND t.app_id = up.app_id AND t.handle <> 'AT0'
     )
     SELECT owner_worker_id AS "ownerWorkerId", owner_user_id AS "ownerUserId" FROM up ORDER BY depth`;
   const chain: AlarmChain = [];
@@ -764,6 +842,19 @@ export async function wakeDueOwners(db: PrismaClient, now = new Date()): Promise
     const endedEvents = new Set(
       due.filter((d) => d.taskId && d.episodeStart && ended.has(alarmEpisodeKey(d.taskId, d.type, d.episodeStart))).map((d) => d.eventId),
     );
+    // #2755: a dark-worker alarm is task-less; its episode ended when `dark_worker_episodes` says so. (#2014: a post-limit
+    // alarm has no such condition: it escalates until acknowledged, and its episode only de-duplicates it.)
+    const darkIds = due.filter((d) => d.type === 'alarm.dark-worker').map((d) => d.eventId);
+    if (darkIds.length) {
+      const over = await tx.darkWorkerEpisode.findMany({ where: { eventId: { in: darkIds }, endedAt: { not: null } }, select: { eventId: true } });
+      for (const e of over) endedEvents.add(e.eventId);
+    }
+    // #2763: the same for a coordinator-cadence alarm, whose episode ends at the coordinator's next counted assignment.
+    const cadenceIds = due.filter((d) => d.type === 'alarm.coordinator-cadence').map((d) => d.eventId);
+    if (cadenceIds.length) {
+      const over = await tx.coordinatorCadenceEpisode.findMany({ where: { eventId: { in: cadenceIds }, endedAt: { not: null } }, select: { eventId: true } });
+      for (const e of over) endedEvents.add(e.eventId);
+    }
     if (endedEvents.size) {
       // The alarm's own episode is over: close EVERY row of it still unwoken (not only the due ones), so no later
       // owner up the chain is woken for a condition that is gone. Nothing else is written: the alarm, its chain and

@@ -441,9 +441,13 @@ describe('outer-fenced reconciliation read callers', () => {
     const authority = vi.spyOn(liveAuthority, phase === 'fast' ? 'liveReadSnapshotContext' : 'liveTxContext')
       .mockRejectedValue(fault);
     try {
-      // The in-process MCP helper exposes unknown handler faults as a
-      // rejection; the transport, not this adapter, owns wire sanitization.
-      await expect(mcp.callTool(tool, args)).rejects.toBe(fault);
+      // #1789: an unknown handler fault is the generic envelope, with the detail only in the log.
+      const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const result = await mcp.callTool(tool, args);
+      expect(result).toMatchObject({ isError: true, structuredContent: { error: { code: 'INTERNAL_SERVER_ERROR' } } });
+      expect(JSON.stringify(result)).not.toContain('synthetic private database fault');
+      expect(logged).toHaveBeenCalledWith('[mcp] internal_fault', expect.objectContaining({ error: fault }));
+      logged.mockRestore();
       expect(authority).toHaveBeenCalledOnce();
       expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
     } finally {

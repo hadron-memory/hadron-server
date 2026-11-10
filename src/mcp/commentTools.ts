@@ -34,6 +34,7 @@ import { UrnNotQualifiedError } from '../lib/urn.js';
 import { AmbiguousLegacyUrnError } from '../lib/entityRef/errors.js';
 import type { AuthContext } from '../middleware/auth.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
+import { isTrustedRefusal } from '../api/graphql/formatError.js';
 
 type ActorRef = { id: string; name: string | null; handle: string | null; urn: string | null };
 type Author = { kind: 'WORKER' | 'USER' | 'USER_AGENT' | 'APP'; worker: ActorRef | null; user: ActorRef | null; agent: ActorRef | null; app: ActorRef | null };
@@ -62,6 +63,11 @@ function textResult(text: string) {
   return { content: [{ type: 'text' as const, text }] };
 }
 
+/** A refusal is a failed call: isError is set (#1789). */
+function refused(text: string) {
+  return { isError: true as const, ...textResult(text) };
+}
+
 /**
  * A resolver refusal as `[<code>] <message>`, plus its extensions (threadId,
  * currentRevision, class, field/max) as `key: value` so an agent can act on
@@ -71,18 +77,15 @@ function textResult(text: string) {
  * server fault and is rethrown.
  */
 export function commentErrorText(e: unknown) {
-  if (e instanceof GraphQLError) {
+  if (e instanceof GraphQLError && isTrustedRefusal(e)) {
     const { code, ...rest } = publicErrorExtensions(e.extensions ?? {});
     const extras = Object.entries(rest).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
-    return textResult([`[${String(code ?? 'ERROR').toLowerCase()}] ${e.message}`, ...extras].join('\n'));
-  }
-  if (e instanceof Error && (e.message === 'Forbidden' || e.message === 'Unauthenticated')) {
-    return textResult(`[${e.message.toLowerCase()}] ${e.message}.`);
+    return refused([`[${String(code ?? 'ERROR').toLowerCase()}] ${e.message}`, ...extras].join('\n'));
   }
   // A ref that can't be resolved as written is the caller's input, not a
   // server fault (the scope tools' convention).
   if (e instanceof UrnNotQualifiedError || e instanceof AmbiguousLegacyUrnError) {
-    return textResult(`[bad_user_input] ${e.message}`);
+    return refused(`[bad_user_input] ${e.message}`);
   }
   throw e;
 }
@@ -330,7 +333,7 @@ export function registerCommentTools(server: McpServer, deps: { db: PrismaClient
 const SHAPE_HADRON_LIST_COMMENTS = {
   targetRef: z.string().describe('The node whose discussion to read: its URN or id.'),
   state: z.array(z.enum(['OPEN', 'RESOLVED'])).optional().describe('Only threads in these states. Default: all.'),
-  limit: z.number().int().nonnegative().optional().describe('Threads per page (default 50, cap 200). Each thread returns up to 200 replies.'),
+  limit: z.number().int().nonnegative().optional().describe('Threads per page (default 20, cap 200). Each thread returns up to 200 replies.'),
   offset: z.number().int().nonnegative().optional().describe('Page offset.'),
 };
 

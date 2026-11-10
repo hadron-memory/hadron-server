@@ -13,6 +13,7 @@ import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
+import { serveEveryAgent } from '../../test/servedBootPrompt.js';
 import { generateId } from '../id.js';
 import { runAsActor } from '../requestActor.js';
 import { APP_KEY_PREFIX, hashAppKey, validateSessionBinding, type AuthContext } from '../../middleware/auth.js';
@@ -93,6 +94,7 @@ beforeEach(async () => {
   await M.registerHost({}, {
     input: { appRef: app.id, label: 'Orca', pollIntervalSeconds: 600, workers: [{ worker: kit.id, family: 'claude', worktrees: ['hadron-server/kit'] }] },
   }, keyCtx(orca1));
+  await serveEveryAgent(db); // #2712: binds are served the Agent's boot prompt
 });
 
 describe('the invariants file', () => {

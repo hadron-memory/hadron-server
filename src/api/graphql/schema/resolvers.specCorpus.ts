@@ -1,13 +1,23 @@
 import { withIncludeHistoryTransaction, includeHistoryClient } from '../../../lib/includes/includeHistoryFence.js';
 import { liveTxContext } from './authorizedTx.js';
+import { liveCaller } from '../../../lib/tickers/liveCaller.js';
+import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
+// Draft spec corpora (#1447): the server-owned spec-corpus operations.
+//
+// #1450 — reserveSpecCitation. Contract:
+// https://github.com/hadron-memory/hadron-server/issues/1447#issuecomment-5895948862 §4.
 import { GraphQLError } from 'graphql';
+import { toNaiveUtc } from '../../../lib/sessionActivity.js';
 import { Prisma } from '../../../generated/prisma/index.js';
+import { inMintScope, inMintScopeSql } from '../../../lib/mintScope.js';
 import { mirrorNodeMoveToGit, type MovedNodeRef } from '../../../integrations/github/mirrorNodeMove.js';
 import type { Context } from './resolvers.js';
 import { nodeMoveOps, writeNodeCore } from './resolvers.mutation.node.js';
 import {
   concealUnreadableDenial,
   isMemoryReadableCached,
+  pageArgs,
+  pageEnvelope,
   requireMemoryWriteAccess,
   withoutRequestCaches,
 } from './resolvers.helpers.js';
@@ -19,12 +29,22 @@ import {
   parseOpenQuestions,
 } from '../../../lib/specMint.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
-import { legacyMemoryUrnToCanonical, normalizeUrnForLookup, parseUrnInput } from '../../../lib/urn.js';
-import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
-import { acquireLockSet, ancestorLocs } from '../../../lib/nodeSubtreeLock.js';
-import { archiveTombstone } from '../../../lib/tombstoneArchive.js';
+import { legacyMemoryUrnToCanonical, normalizeUrnForLookup, parseUrnInput, UrnNotQualifiedError, UrnParseError } from '../../../lib/urn.js';
+import { emitNodeUrnV2, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
+import {
+  childKindOf,
+  childNumberAt,
+  formatSpecNumber,
+  nextSpecNumber,
+  specLevel,
+} from '../../../lib/specAllocation.js';
+import { acquireLockSet, ancestorLocs, lockAncestorsForCreate, lockPathForCreateUnder } from '../../../lib/nodeSubtreeLock.js';
+import { reserveRootSeqLock } from '../../../lib/nodeSeq.js';
+import { archiveTombstone, discoverArchivePlan, validateArchivePlan, withArchivePlanRetries, ArchivePlanExhaustedError } from '../../../lib/tombstoneArchive.js';
 import { lockEdgeEndpointMemories } from '../../../lib/edgeEndpointLock.js';
 import { pendingEdgeStableTargetId } from '../../../lib/pendingEdgePromotion.js';
+import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
+import { AmbiguousLegacyUrnError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { editorFromAuth, reconcileNodeWithIncludeHistory } from '../../../lib/nodeRevisionSnapshot.js';
 import { mayMintNodes } from './resolvers.nodeApproval.js';
@@ -39,6 +59,7 @@ import {
   SCANNED_FIELDS,
   corpusReferencePattern,
   findCorpusReferences,
+  findNodeUrnTokens,
   findTextCitations,
   renumberedLoc,
   rewriteCorpusReferences,
@@ -78,78 +99,252 @@ export const specCorpusMutations = {
     // unauthorized caller must not contend for this tenant's locks, and no
     // archive-time error may reveal that a tombstone exists at the loc.
     await concealUnreadableDenial(ctx, memoryId, memoryRef, () => requireMemoryWriteAccess(ctx, memoryId));
+    let completed;
+    try {
+      completed = await withArchivePlanRetries(async (timeout) => {
+        const effects: Array<() => void> = [];
+        const reserved = await ctx.db.$transaction(async (tx) => {
+          let txCtx = withoutRequestCaches(ctx, tx);
+          const authorizeAttempt = async () => {
+            const current = await liveCaller(ctx, tx);
+            if (!current) throw authorizationDenied();
+            txCtx = current;
+            await concealUnreadableDenial(txCtx, memoryId, memoryRef, () => requireMemoryWriteAccess(txCtx, memoryId));
+          };
+          await authorizeAttempt();
+          // (@codex P1/P2s, PR #1452) Never REVIVE a deleted node as a placeholder.
+          // A revival keeps everything attached to the row (text, payload, edges,
+          // vectors, provenance, revision history), and each of those surfaced a
+          // leak in turn. Archive the tombstone at `<loc>__deleted-<id>` instead,
+          // the convention a move that overwrites a live target already uses, so
+          // the placeholder is a FRESH node and the deleted spec keeps its own
+          // identity and history on its still-deleted row.
+          // (@codex P2, PR #1452) Take the address locks FIRST, in the global
+          // order every create/move/overwrite at this loc uses (ancestors, then the
+          // loc itself), before touching the tombstone's row. Row-locking the
+          // tombstone first would invert against a concurrent writer that holds
+          // these advisory locks and waits on that row: a deadlock instead of a
+          // typed loc conflict. writeNodeCore's own acquisition below is then a
+          // re-entrant no-op.
+          // (Chip's QA, PR #1452) The edge-endpoint memory key first, as every edge
+          // writer takes it before its address locks: an in-flight edge naming the
+          // tombstone then commits before the archive lists edges, and a later one
+          // revalidates the endpoint under this key and finds it gone.
+          await lockEdgeEndpointMemories(tx, [memoryId]);
+          const archivePlan = await discoverArchivePlan(tx, memoryId, loc);
+          await acquireLockSet(tx, [
+            ...archivePlan.descendantLocs.map(loc => ({ memoryId, loc })),
+            ...ancestorLocs(loc).map((ancestor) => ({ memoryId, loc: ancestor })),
+            { memoryId, loc },
+          ]);
+          await lockAncestorsForCreate(tx, memoryId, loc, { op: 'create' });
+          await authorizeAttempt();
+          // #443: a ROOT reserve takes the root-allocation key K here, after every explicit lock
+          // above and BEFORE the archive's uncommitted edge writes (a K-holder's own suffix inserts
+          // edges, so a K-waiter must hold none). writeNodeCore's root allocation consumes this
+          // one-use reservation.
+          if (!loc.includes(':')) await reserveRootSeqLock(tx, memoryId);
+          await validateArchivePlan(tx, archivePlan);
+          const tombstone = await tx.node.findFirst({
+            where: { memoryId, loc, deletedAt: { not: null } },
+            select: { id: true },
+          });
+          // (@codex P2, PR #1452) The tombstone's edges go with it: their derived
+          // locs would otherwise collide with the placeholder's once it is filled.
+          if (tombstone) await archiveTombstone(tx, { id: tombstone.id, loc, memoryId }, archivePlan);
+          const node = await writeNodeCore(
+            {
+              memoryId, loc, name: name?.trim() || loc, role: 'spec', nodeType: 'info',
+              // Every authored field is stated, not omitted, so the placeholder is
+              // empty by construction rather than by relying on a fresh row. The
+              // test that pins this compares a reservation over a tombstone to a
+              // fresh one column by column.
+              content: null, abstract: null, description: null, contentType: null,
+              alias: null, tags: [], data: null, properties: null,
+              llmModel: null, aiAgent: null, isLink: false, objectType: null,
+              edges: [],
+            },
+            txCtx,
+            'create',
+            {
+              authoring: { kind: 'platform', record: 'spec-reservation' },
+              ownsKind: 'spec',
+              governedContext: 'node-write',
+              concealUnreadable: { entity: 'memory', ref: memoryRef },
+              transaction: { tx, pooledDb: ctx.db, afterCommit: (effect) => effects.push(effect) },
+            },
+          );
+          // Git provenance is not a node-input field, so it is reset here, in the
+          // same write that marks the placeholder (@codex P2, PR #1452): a revived
+          // git-synced tombstone would otherwise keep the deleted body's hash and
+          // stay owned by the old repo, where sync's cleanup could delete it.
+          await tx.node.update({
+            where: { id: node.id },
+            data: { isPlaceholder: true, contentHash: null, ownerRepo: null },
+            select: { id: true },
+          });
+          // (@codex P1, PR #1452) Soft deletion keeps a node's vectors, and vector
+          // search only checks the node's own deleted_at. A revived tombstone would
+          // therefore let the placeholder rank for, and chunk search return, the
+          // deleted spec's text. A placeholder has no content, so it has no vectors.
+          await tx.nodeEmbedding.deleteMany({ where: { nodeId: node.id } });
+          await tx.node.updateMany({ where: { id: node.id }, data: { embeddingTruncatedChunks: null } });
+          // The node as the create door built it (relations included), now marked.
+          // …with the values this transaction just reset, not the ones read
+          // before it (@codex P2, PR #1452): Node.ownerRepo is client-visible.
+          return { ...node, isPlaceholder: true, contentHash: null, ownerRepo: null };
+        }, { timeout });
+        return { reserved, effects };
+      });
+    } catch (error) {
+      if (error instanceof ArchivePlanExhaustedError) throw new GraphQLError(error.message, { extensions: { code: 'CONFLICT' } });
+      throw error;
+    }
+    for (const effect of completed.effects) effect();
+    return completed.reserved;
+  },
+
+  /**
+   * #1178 — allocate the next citation under `parentLoc` and reserve it, in ONE
+   * transaction: mint-or-refuse, server-side, so no client has to read sibling
+   * numbers and write the next one (a client cannot make that atomic, and
+   * `createNode` overwrites on a collision instead of refusing). The number
+   * grammar is `hadron spec new`'s: features in tens (010..990), rules and flows
+   * by one (01..99), rule `00` never allocated, `after` lands strictly above it.
+   *
+   * R216: a number that was ever minted is never handed out again. The floor
+   * sits above the highest ever-minted direct child, read from (i) Node rows of
+   * any state (live, soft-deleted, or archived `__deleted-<id>`) that carry
+   * `mintedAt`, and (ii) the aliases a minted node leaves when it is moved out.
+   * Every number whose loc holds a Node row of ANY state is also skipped, so a
+   * tombstone is never resurrected and a live draft is never overwritten.
+   * Slice 1: a minted node hard-deleted in place leaves no row and no alias, so
+   * R216 holds only while one remains (Holger R219 = C); a durable high-water
+   * record is a later slice.
+   *
+   * The write is `reserveSpecCitation`'s: a placeholder spec node through the
+   * spec door's create path, with its gates unchanged. Authorization comes
+   * first and unreadable memories are concealed as not found, before any lock.
+   * The parent-path locks are taken before any read, so concurrent allocators
+   * serialize on them instead of racing to a conflict. One attempt, no retry.
+   *
+   * @throws GraphQLError `SPEC_PARENT_NOT_FOUND`, `SPEC_PARENT_NOT_NUMBERED`,
+   * `SPEC_NUMBER_SPACE_EXHAUSTED`.
+   */
+  allocateSpecNode: async (
+    _: unknown,
+    { memoryRef, parentLoc, after, name }: { memoryRef: string; parentLoc: string; after?: number | null; name?: string | null },
+    ctx: Context,
+  ) => {
+    const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
+    await concealUnreadableDenial(ctx, memoryId, memoryRef, () => requireMemoryWriteAccess(ctx, memoryId));
+    const kind = childKindOf(parentLoc);
+    if (!kind) {
+      throw new GraphQLError(
+        `${parentLoc} cannot take numbered children: pass a module, feature or rule citation ([<product>:]<module>[:<feature>[:<rule>]])`,
+        { extensions: { code: 'SPEC_PARENT_NOT_NUMBERED', parentLoc } },
+      );
+    }
+    if (after != null && (!Number.isInteger(after) || after < 0)) {
+      throw new GraphQLError('after must be a non-negative integer', { extensions: { code: 'BAD_USER_INPUT' } });
+    }
+    const level = specLevel(kind);
     const effects: Array<() => void> = [];
     const reserved = await ctx.db.$transaction(async (tx) => {
-      // (@codex P1/P2s, PR #1452) Never REVIVE a deleted node as a placeholder.
-      // A revival keeps everything attached to the row (text, payload, edges,
-      // vectors, provenance, revision history), and each of those surfaced a
-      // leak in turn. Archive the tombstone at `<loc>__deleted-<id>` instead,
-      // the convention a move that overwrites a live target already uses, so
-      // the placeholder is a FRESH node and the deleted spec keeps its own
-      // identity and history on its still-deleted row.
-      // (@codex P2, PR #1452) Take the address locks FIRST, in the global
-      // order every create/move/overwrite at this loc uses (ancestors, then the
-      // loc itself), before touching the tombstone's row. Row-locking the
-      // tombstone first would invert against a concurrent writer that holds
-      // these advisory locks and waits on that row: a deadlock instead of a
-      // typed loc conflict. writeNodeCore's own acquisition below is then a
-      // re-entrant no-op.
-      // (Chip's QA, PR #1452) The edge-endpoint memory key first, as every edge
-      // writer takes it before its address locks: an in-flight edge naming the
-      // tombstone then commits before the archive lists edges, and a later one
-      // revalidates the endpoint under this key and finds it gone.
+      let txCtx = withoutRequestCaches(ctx, tx);
+      const authorizeAttempt = async () => {
+        const current = await liveCaller(ctx, tx);
+        if (!current) throw authorizationDenied();
+        txCtx = current;
+        await concealUnreadableDenial(txCtx, memoryId, memoryRef, () => requireMemoryWriteAccess(txCtx, memoryId));
+      };
+      await authorizeAttempt();
+      // Lock order as reserveSpecCitation: the edge-endpoint memory key, then
+      // the address locks (here the parent's path, since the child's loc is not
+      // known until the number is read under them).
       await lockEdgeEndpointMemories(tx, [memoryId]);
-      await acquireLockSet(tx, [
-        ...ancestorLocs(loc).map((ancestor) => ({ memoryId, loc: ancestor })),
-        { memoryId, loc },
-      ]);
-      const tombstone = await tx.node.findFirst({
-        where: { memoryId, loc, deletedAt: { not: null } },
+      await lockPathForCreateUnder(tx, memoryId, parentLoc, { op: 'create' });
+      await authorizeAttempt();
+      const parent = await tx.node.findFirst({
+        where: { memoryId, loc: parentLoc, deletedAt: null },
         select: { id: true },
       });
-      // (@codex P2, PR #1452) The tombstone's edges go with it: their derived
-      // locs would otherwise collide with the placeholder's once it is filled.
-      if (tombstone) await archiveTombstone(tx, { id: tombstone.id, loc, memoryId });
+      if (!parent) {
+        throw new GraphQLError(`No node at ${parentLoc} to allocate under`, {
+          extensions: { code: 'SPEC_PARENT_NOT_FOUND', parentLoc },
+        });
+      }
+      const prefix = `${parentLoc}:`;
+      // Every row of any state under the parent: live, soft-deleted, archived.
+      const rows = await tx.node.findMany({
+        where: { memoryId, loc: { startsWith: prefix } },
+        select: { loc: true, mintedAt: true },
+      });
+      // A one-segment alpha parent is a flat module only while it has numbered
+      // children; one holding alphabetic children is a product root, whose
+      // children are chosen module codes, not allocated numbers.
+      if (!parentLoc.includes(':') && rows.some((r) => /^[a-z]{3}(:|$|__deleted-)/.test(r.loc.slice(prefix.length)))) {
+        throw new GraphQLError(`${parentLoc} is a product root: its children are module codes, not allocated numbers`, {
+          extensions: { code: 'SPEC_PARENT_NOT_NUMBERED', parentLoc },
+        });
+      }
+      const taken = new Set<number>();
+      let everMinted = 0;
+      for (const row of rows) {
+        const n = childNumberAt(parentLoc, row.loc, level);
+        if (n === null) continue;
+        // Only the unarchived loc holds the address; an archived row sits at a
+        // different loc and counts toward the floor alone.
+        if (!row.loc.includes('__deleted-')) taken.add(n);
+        if (row.mintedAt) everMinted = Math.max(everMinted, n);
+      }
+      // (ii) A minted node moved out leaves an alias at its old address.
+      const memory = await tx.memory.findUnique({ where: { id: memoryId }, select: { urn: true } });
+      const memoryUrns = new Set<string>(memory?.urn ? [memory.urn] : []);
+      const formerMemoryUrns = await tx.urnAlias.findMany({
+        where: { entityType: 'MEMORY', entityId: memoryId },
+        select: { urn: true },
+      });
+      for (const alias of formerMemoryUrns) memoryUrns.add(alias.urn);
+      for (const memoryUrn of memoryUrns) {
+        const aliasPrefix = safeNodeUrnV2(memoryUrn, parentLoc).slice('hrn:node:'.length) + ':';
+        const aliases = await tx.urnAlias.findMany({
+          where: { entityType: 'NODE', urn: { startsWith: aliasPrefix } },
+          select: { urn: true },
+        });
+        for (const alias of aliases) {
+          const n = childNumberAt(parentLoc, `${prefix}${alias.urn.slice(aliasPrefix.length)}`, level);
+          if (n !== null) everMinted = Math.max(everMinted, n);
+        }
+      }
+      const n = nextSpecNumber(level, everMinted, taken, after ?? null);
+      if (n === null) {
+        throw new GraphQLError(`Number space exhausted under ${parentLoc}`, {
+          extensions: { code: 'SPEC_NUMBER_SPACE_EXHAUSTED', parentLoc },
+        });
+      }
+      const loc = `${prefix}${formatSpecNumber(level, n)}`;
       const node = await writeNodeCore(
         {
           memoryId, loc, name: name?.trim() || loc, role: 'spec', nodeType: 'info',
-          // Every authored field is stated, not omitted, so the placeholder is
-          // empty by construction rather than by relying on a fresh row. The
-          // test that pins this compares a reservation over a tombstone to a
-          // fresh one column by column.
           content: null, abstract: null, description: null, contentType: null,
           alias: null, tags: [], data: null, properties: null,
           llmModel: null, aiAgent: null, isLink: false, objectType: null,
           edges: [],
         },
-        withoutRequestCaches(ctx, tx),
+        txCtx,
         'create',
         {
+          authoring: { kind: 'platform', record: 'spec-reservation' },
           ownsKind: 'spec',
           governedContext: 'node-write',
           concealUnreadable: { entity: 'memory', ref: memoryRef },
           transaction: { tx, pooledDb: ctx.db, afterCommit: (effect) => effects.push(effect) },
         },
       );
-      // Git provenance is not a node-input field, so it is reset here, in the
-      // same write that marks the placeholder (@codex P2, PR #1452): a revived
-      // git-synced tombstone would otherwise keep the deleted body's hash and
-      // stay owned by the old repo, where sync's cleanup could delete it.
-      await tx.node.update({
-        where: { id: node.id },
-        data: { isPlaceholder: true, contentHash: null, ownerRepo: null },
-        select: { id: true },
-      });
-      // (@codex P1, PR #1452) Soft deletion keeps a node's vectors, and vector
-      // search only checks the node's own deleted_at. A revived tombstone would
-      // therefore let the placeholder rank for, and chunk search return, the
-      // deleted spec's text. A placeholder has no content, so it has no vectors.
-      await tx.nodeEmbedding.deleteMany({ where: { nodeId: node.id } });
-      // The node as the create door built it (relations included), now marked.
-      // …with the values this transaction just reset, not the ones read
-      // before it (@codex P2, PR #1452): Node.ownerRepo is client-visible.
-      return { ...node, isPlaceholder: true, contentHash: null, ownerRepo: null };
-    }, { timeout: 120_000 });
+      await tx.node.update({ where: { id: node.id }, data: { isPlaceholder: true }, select: { id: true } });
+      return { ...node, isPlaceholder: true };
+    });
     for (const effect of effects) effect();
     return reserved;
   },
@@ -649,26 +844,18 @@ export const specCorpusQueries = {
    * its descendants. The spec need not exist: a reference to a missing spec is
    * still a backlink.
    */
-  specBacklinks: async (_: unknown, { memoryRef, loc }: { memoryRef: string; loc: string }, ctx: Context): Promise<SpecReferenceOut[]> => {
-    const corpus = await loadScannableCorpus(ctx, memoryRef);
-    const nodes = await loadCorpusNodes(ctx.db, corpus.id);
-    const scanned = scanReferences(nodes, corpus.pattern);
-    const accept = await referenceAcceptor(ctx, corpus, scanned);
-    const text = scanned.filter((r) => accept(r) === loc).map(fromScan);
-    const target = nodes.find((n) => n.loc === loc)
-      ?? await ctx.db.node.findFirst({
-        where: { memoryId: corpus.id, loc, deletedAt: { not: null } }, select: { id: true },
-      });
-    // A live edge into a deleted spec still names its old citation. It is a
-    // backlink, even though the mint/unresolved scan calls it MISSING.
-    const edges = target ? await corpusEdgesTo(ctx.db, corpus.id, [target.id]) : [];
-    return [
-      ...text,
-      ...edges.map((e): SpecReferenceOut => ({
-        kind: 'EDGE', sourceNodeId: e.source.id, sourceLoc: e.source.loc, field: 'edge', targetLoc: e.target.loc, text: e.name,
-      })),
-    ];
-  },
+  specBacklinks: async (_: unknown, { memoryRef, loc }: { memoryRef: string; loc: string }, ctx: Context): Promise<SpecReferenceOut[]> =>
+    specBacklinksOf(ctx, memoryRef, loc),
+
+  /**
+   * #3222 (#2213 S3, cor:api:120:04) — `specBacklinks` one page at a time. The same
+   * list, gate and refusals (it calls `specBacklinksOf`); see `pageOfReferences`.
+   */
+  specBacklinksPage: async (
+    _: unknown,
+    args: { memoryRef: string; loc: string; limit?: number | null; offset?: number | null },
+    ctx: Context,
+  ) => pageOfReferences(await specBacklinksOf(ctx, args.memoryRef, args.loc), args),
 
   /**
    * #1449 — references in a draft corpus that do not reach a written spec: a
@@ -676,11 +863,72 @@ export const specCorpusQueries = {
    * real edges pointing at a placeholder (PLACEHOLDER). This is the mint
    * report's "unresolved" block.
    */
-  specUnresolvedReferences: async (_: unknown, { memoryRef }: { memoryRef: string }, ctx: Context): Promise<SpecReferenceOut[]> => {
-    const corpus = await loadScannableCorpus(ctx, memoryRef);
-    return unresolvedReferencesIn(ctx, corpus, await loadCorpusNodes(ctx.db, corpus.id));
-  },
+  specUnresolvedReferences: async (_: unknown, { memoryRef }: { memoryRef: string }, ctx: Context): Promise<SpecReferenceOut[]> =>
+    specUnresolvedReferencesOf(ctx, memoryRef),
+
+  /**
+   * #3222 (#2213 S3, cor:api:120:04) — `specUnresolvedReferences` one page at a time.
+   * The same list, gate and refusals (it calls `specUnresolvedReferencesOf`).
+   */
+  specUnresolvedReferencesPage: async (
+    _: unknown,
+    args: { memoryRef: string; limit?: number | null; offset?: number | null },
+    ctx: Context,
+  ) => pageOfReferences(await specUnresolvedReferencesOf(ctx, args.memoryRef), args),
 };
+
+/**
+ * #1449 — the specBacklinks list, shared by the field and its page (#3222). Gated
+ * by `loadScannableCorpus`, which refuses before anything is read.
+ */
+async function specBacklinksOf(ctx: Context, memoryRef: string, loc: string): Promise<SpecReferenceOut[]> {
+  const corpus = await loadScannableCorpus(ctx, memoryRef);
+  const nodes = await loadCorpusNodes(ctx.db, corpus.id);
+  const scanned = scanReferences(nodes, corpus.pattern);
+  const accept = await referenceAcceptor(ctx, corpus, scanned);
+  const text = scanned.filter((r) => accept(r) === loc).map(fromScan);
+  const target = nodes.find((n) => n.loc === loc)
+    ?? await ctx.db.node.findFirst({
+      where: { memoryId: corpus.id, loc, deletedAt: { not: null } }, select: { id: true },
+    });
+  // A live edge into a deleted spec still names its old citation. It is a
+  // backlink, even though the mint/unresolved scan calls it MISSING.
+  const edges = target ? await corpusEdgesTo(ctx.db, corpus.id, [target.id]) : [];
+  return [
+    ...text,
+    ...edges.map((e): SpecReferenceOut => ({
+      kind: 'EDGE', sourceNodeId: e.source.id, sourceLoc: e.source.loc, field: 'edge', targetLoc: e.target.loc, text: e.name,
+    })),
+  ];
+}
+
+/**
+ * #1449 — the specUnresolvedReferences list, shared by the field and its page
+ * (#3222). Gated by `loadScannableCorpus`, which refuses before anything is read.
+ */
+async function specUnresolvedReferencesOf(ctx: Context, memoryRef: string): Promise<SpecReferenceOut[]> {
+  const corpus = await loadScannableCorpus(ctx, memoryRef);
+  return unresolvedReferencesIn(ctx, corpus, await loadCorpusNodes(ctx.db, corpus.id));
+}
+
+/**
+ * #3222 (#2213 S3, cor:api:120:04) — one page of a reference list, sized by
+ * `pageArgs` (default 20, max 200, over the cap served as the cap).
+ *
+ * The list is the old field's own, in its own order, which is a deterministic
+ * total order by construction: text references walk the corpus nodes by id
+ * (`loadCorpusNodes`), then `SCANNED_FIELDS` in order, then position in the
+ * text; each edge section that follows is read `orderBy: { id: 'asc' }`. So the
+ * pages concatenate to exactly the old field's list, and rows identical in every
+ * output field (one URN cited twice in a field) keep their places.
+ *
+ * Paging bounds the RESPONSE, not the work: every page still scans the whole
+ * corpus, and `total` is the full count.
+ */
+function pageOfReferences(all: SpecReferenceOut[], args: { limit?: number | null; offset?: number | null }) {
+  const { take, skip } = pageArgs(args);
+  return pageEnvelope(all.slice(skip, skip + take), all.length, skip);
+}
 
 /**
  * The references in a corpus that do not reach a written spec (MISSING or
@@ -813,7 +1061,7 @@ async function unresolvedReferencesIn(
         kind: 'EDGE', sourceNodeId: p.source.id, sourceLoc: p.source.loc, field: 'pendingEdge',
         targetLoc: !target ? p.targetId
           : target.memoryId === corpus.id ? target.loc
-          : `hrn:node:${target.memory.urn.replace(/^(?:hrn|urn):mem(?:ory)?:/i, '')}:${target.loc}`,
+          : foreignNodeUrn(target.memory.urn, target.loc),
         text: p.name,
         reason: live ? 'PLACEHOLDER' : 'MISSING',
       });
@@ -1084,7 +1332,7 @@ async function rewriteWithRetry(
         { memoryId: corpus.id, loc: node.loc, ...plan.patch, reason: `renumber ${fromLoc} → ${toLoc}` },
         ctx,
         'update',
-        { targetNodeId: node.id, guardRevSeq: node.revSeq, ownsKind: 'spec', governedContext: 'node-write' },
+        { authoring: { kind: 'platform', record: 'spec-renumber' }, targetNodeId: node.id, guardRevSeq: node.revSeq, ownsKind: 'spec', governedContext: 'node-write' },
       );
       return { fields: Object.keys(plan.patch), count: plan.count, loc: node.loc };
     } catch (e) {
@@ -1130,6 +1378,10 @@ type MintReport = {
   mintedCount: number;
   /** #1591 — the locs this call minted, or would mint on a dry run, by loc. */
   mintLocs: string[];
+  /** #1612 — the minted nodes in scope again (edited since, or no recorded revision), by loc. */
+  remintLocs: string[];
+  /** #1612 — how many of the stamped nodes were re-mints; a subset of mintedCount. */
+  remintedCount: number;
   /** #1607 — nodes in scope with open discussion: a warning, never a blocker (cor:dmo:110:07). */
   unresolvedFeedback: UnresolvedFeedbackRow[];
 };
@@ -1173,25 +1425,30 @@ async function fenceCorpusForMint(tx: Prisma.TransactionClient, memoryId: string
 }
 
 /**
- * #1591 — mint every unminted live node of a memory, once, after its checks.
+ * #1591 — mint every live node of a memory in the mint scope, after its checks.
  * `mintMemoryNodes` and the older `mintSpecCorpus` are this one operation.
  *
- * Scope (Holger's #1447 round-3 ruling 2b): the memory's live nodes with no
- * `mintedAt`. Findings are reported only for those nodes; a node minted
+ * Scope (Holger's #1447 round-3 ruling 2b, widened by #1612, cor:dmo:120:06):
+ * the memory's live nodes with no `mintedAt`, plus minted nodes with no
+ * recorded revision or changed since ({@link inMintScope}); a re-mint keeps the
+ * first mint's time and minter and advances the revision and hash. Findings are reported only for those nodes; a node minted
  * earlier neither blocks nor is linted again, so an existing corpus's legacy
  * issues cannot block minting its new specs. The scans still read the whole
  * memory, because a new spec's citation of a minted one must resolve.
  *
  * Blocks (a real run refuses `SPEC_CORPUS_MINT_BLOCKED` while any hold):
  * a placeholder; a reference to a missing spec or a placeholder; one of the
- * four server lint rules over the citation-shaped nodes; a stale abstract once
- * STALE_ABSTRACT_BLOCKS_MINT is on (#1408); `NOT_APPROVED`, a node whose
+ * four server lint rules over the citation-shaped nodes; `NOT_APPROVED`, a node whose
  * current revision is not approved (ruling 2c); and `CITES_UNMINTED`, an edge
  * into another memory's node that is not minted yet ("a minted node may not
  * cite an unminted one"). A citation inside the memory cannot be unminted
  * after the mint, since every node in scope is minted together. A TEXT
  * citation of another memory's node is not resolved by the reference scan,
  * so it is not checked here (#1591 follow-up).
+ *
+ * Stale abstracts are reported, never blocking (cor:dmo:120:07), over every node
+ * in the mint scope (#3436, ruling 0215): a minted, unchanged node is outside it,
+ * and `spec validate` is the whole-memory audit.
  *
  * By any writer of the memory ({@link mayMintNodes}, ruling 2a). The check and
  * the stamp run inside {@link fenceCorpusForMint}, so no write lands between
@@ -1202,6 +1459,10 @@ async function fenceCorpusForMint(tx: Prisma.TransactionClient, memoryId: string
  * @throws GraphQLError `SPEC_CORPUS_BUSY` (retryable) when a node of the
  *   memory stays locked by an in-flight write.
  */
+/** The canonical node URN naming `loc` in the memory published as `memoryUrn`. */
+const foreignNodeUrn = (memoryUrn: string, loc: string) =>
+  `hrn:node:${memoryUrn.replace(/^(?:hrn|urn):mem(?:ory)?:/i, '')}:${loc}`;
+
 async function mintMemoryNodes(
   ctx: Context,
   memoryRef: string,
@@ -1229,10 +1490,10 @@ async function mintMemoryNodes(
       select: {
         id: true, loc: true, nodeType: true, tags: true, role: true, isPlaceholder: true, revSeq: true,
         name: true, description: true, abstract: true, content: true, abstractOriginHash: true,
-        mintedAt: true, approvedRevNo: true, contentRevSeq: true, approvalHash: true,
+        mintedAt: true, mintedRevNo: true, approvedRevNo: true, contentRevSeq: true, approvalHash: true,
       },
     });
-    const inScope = nodes.filter((n) => n.mintedAt === null);
+    const inScope = nodes.filter(inMintScope);
     const inScopeIds = new Set(inScope.map((n) => n.id));
     const inScopeLocs = new Set(inScope.map((n) => n.loc));
     // The lint scope is exactly the CLI's (`lintSelects`, hadron-cli #708;
@@ -1316,7 +1577,7 @@ async function mintMemoryNodes(
     const foreignTargets = await tx.edge.findMany({
       where: {
         deletedAt: null,
-        source: { memoryId: id, deletedAt: null, mintedAt: null },
+        source: { memoryId: id, deletedAt: null, id: { in: [...inScopeIds] } },
         target: { memoryId: { not: id }, deletedAt: null, isPlaceholder: false, mintedAt: null },
       },
       select: {
@@ -1327,13 +1588,80 @@ async function mintMemoryNodes(
     });
     for (const e of foreignTargets) {
       if (!(await isMemoryReadableCached(txCtx, e.target.memoryId))) continue;
-      const targetUrn = `hrn:node:${e.target.memory.urn.replace(/^(?:hrn|urn):mem(?:ory)?:/i, '')}:${e.target.loc}`;
+      const targetUrn = foreignNodeUrn(e.target.memory.urn, e.target.loc);
       blockers.push({
         kind: 'CITES_UNMINTED', loc: e.source.loc, rule: null, targetLoc: targetUrn,
         message: `edge points at ${targetUrn}, which is not minted yet`,
       });
     }
-    const staleAbstracts: MintFinding[] = citedInScope
+    // #1594 (cor:dmo:120:07, R205) — a text citation or a live pending edge
+    // with a stable `@node-id:` target counts like an edge. A target the
+    // caller cannot read is skipped with NO finding (not MISSING, unlike the
+    // edge above): the mint result must not reveal whether it exists
+    // (cor:api:140:03). Every resolver failure is dropped for the same reason.
+    const citing = new Map<string, Array<{ sourceLoc: string; what: string }>>();
+    const noteCiting = (targetId: string, sourceLoc: string, what: string) => {
+      const list = citing.get(targetId) ?? [];
+      list.push({ sourceLoc, what });
+      citing.set(targetId, list);
+    };
+    const resolvedByUrn = new Map<string, string | null>();
+    for (const n of inScope) {
+      for (const field of SCANNED_FIELDS) {
+        for (const urn of findNodeUrnTokens(n[field])) {
+          let targetId = resolvedByUrn.get(urn);
+          if (targetId === undefined) {
+            targetId = await resolveNodeRefForCaller(txCtx, urn).then((r) => r.id, (e: unknown) => {
+              // Only the resolver's documented "no such citation" refusals are
+              // dropped (they must look like nothing is there). Anything else
+              // is an infrastructure fault: abort, never mint past a citation
+              // we could not check.
+              if (e instanceof NodeNotFoundError || e instanceof AmbiguousLegacyUrnError
+                || e instanceof UrnNotQualifiedError || e instanceof UrnParseError) return null;
+              throw e;
+            });
+            resolvedByUrn.set(urn, targetId);
+          }
+          if (targetId !== null) noteCiting(targetId, n.loc, `${field} cites`);
+        }
+      }
+    }
+    const scopeLocById = new Map(inScope.map((n) => [n.id, n.loc]));
+    const pendingStable = await tx.pendingEdge.findMany({
+      where: { deletedAt: null, sourceId: { in: [...inScopeIds] } },
+      select: { sourceId: true, targetId: true },
+      orderBy: { id: 'asc' },
+    });
+    for (const p of pendingStable) {
+      const stableId = pendingEdgeStableTargetId(p.targetId);
+      if (stableId !== null) noteCiting(stableId, scopeLocById.get(p.sourceId) ?? '', 'pending edge points at');
+    }
+    if (citing.size > 0) {
+      const targets = await tx.node.findMany({
+        where: { id: { in: [...citing.keys()] }, memoryId: { not: id }, deletedAt: null, isPlaceholder: false, mintedAt: null },
+        select: { id: true, loc: true, memoryId: true, memory: { select: { urn: true } } },
+        orderBy: { id: 'asc' },
+      });
+      for (const t of targets) {
+        // The RESOLVED node's own memory decides, never the memory the
+        // address named: an alias can point anywhere.
+        if (!(await isMemoryReadableCached(txCtx, t.memoryId))) continue;
+        const targetUrn = foreignNodeUrn(t.memory.urn, t.loc);
+        const seen = new Set<string>();
+        for (const c of citing.get(t.id) ?? []) {
+          const key = `${c.sourceLoc} ${c.what}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          blockers.push({
+            kind: 'CITES_UNMINTED', loc: c.sourceLoc, rule: null, targetLoc: targetUrn,
+            message: `${c.what} ${targetUrn}, which is not minted yet`,
+          });
+        }
+      }
+    }
+    // #3436 (ruling 0215, cor:dmo:120:06/:07): every node in the mint's scope, not only the spec-shaped
+    // ones; a minted, unchanged node is outside the scope, and `spec validate` stays the whole-memory audit.
+    const staleAbstracts: MintFinding[] = inScope
       .filter((n) => isAbstractUnverified(n))
       .map((n) => ({
         kind: 'STALE_ABSTRACT' as const, loc: n.loc, rule: null, targetLoc: null,
@@ -1351,11 +1679,13 @@ async function mintMemoryNodes(
       .sort(([a], [b]) => (a === null ? 1 : b === null ? -1 : a.localeCompare(b)))
       .map(([decider, questions]) => ({ decider, questions }));
 
-    const mintLocs = inScope.map((n) => n.loc);
+    // New nodes and re-mints are reported apart; mintedCount counts both.
+    const mintLocs = inScope.filter((n) => n.mintedAt === null).map((n) => n.loc);
+    const remintLocs = inScope.filter((n) => n.mintedAt !== null).map((n) => n.loc);
     const report: MintReport = {
       memoryId: id, dryRun, minted: false, blockers,
       staleAbstracts, staleAbstractsBlock: STALE_ABSTRACT_BLOCKS_MINT, openQuestions,
-      mintedCount: 0, mintLocs,
+      mintedCount: 0, remintedCount: 0, mintLocs, remintLocs,
       unresolvedFeedback: (await unresolvedFeedbackOf(tx, inScope)).map((f) => ({ ...f, memoryId: id })),
     };
     if (dryRun) return report;
@@ -1382,12 +1712,12 @@ async function mintMemoryNodes(
     const ids = [...inScopeIds];
     const mintedCount = await tx.$executeRaw`
       UPDATE nodes SET
-        minted_at = ${now},
-        minted_by = ${minter.userId ?? null},
-        minted_by_info = ${minter.userId ? null : minter.info ?? 'unknown'},
+        minted_at = COALESCE(minted_at, ${toNaiveUtc(now)}::timestamp),
+        minted_by = CASE WHEN minted_at IS NULL THEN ${minter.userId ?? null}::text ELSE minted_by END,
+        minted_by_info = CASE WHEN minted_at IS NULL THEN ${minter.userId ? null : minter.info ?? 'unknown'}::text ELSE minted_by_info END,
         minted_rev_no = rev_seq,
         minted_hash = approval_hash
-      WHERE memory_id = ${id} AND deleted_at IS NULL AND minted_at IS NULL
+      WHERE memory_id = ${id} AND deleted_at IS NULL AND ${inMintScopeSql}
         AND id = ANY(${ids}::text[]) AND approved_rev_no >= content_rev_seq AND approval_hash IS NOT NULL`;
     if (mintedCount !== ids.length) {
       // Unreachable under the fence; refuse rather than mint a partial set.
@@ -1399,7 +1729,7 @@ async function mintMemoryNodes(
       where: { id },
       data: { corpusDraft: false, corpusMintedAt: now, corpusMintedBy: ctx.userId ?? ctx.clientId ?? null },
     });
-    return { ...report, minted: true, mintedCount };
+    return { ...report, minted: true, mintedCount, remintedCount: remintLocs.length };
   }, { timeout: 120_000 });
 }
 

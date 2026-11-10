@@ -97,3 +97,7 @@ pnpm vitest run scripts/orca-attention-router                             # no n
 ## Untested
 
 An agent sitting at an approval prompt. The probe agents used for testing auto-approved.
+
+## Open-task line (#2613)
+
+Every wake this script types ends with ` You have N open task(s) (as read when this was sent); run `hadron team task mine`.` when the delivered worker holds assigned PENDING or STARTED tasks in the wake App (the same set as `hadron team task mine`). The count comes from the existing `agentTasks` read under this script's credential, shared in `scripts/lib/openTaskLine.ts`. Zero adds nothing; a refused, malformed or over-budget read also adds nothing and never says "none", and logs ONE diagnostic per delivery attempt naming only the worker and a closed reason (`refused`, `malformed`, `timeout` or `page_cap`), never anything the read returned (#2630). The count is the read as of send: it is read before the final gates and is never revalidated after them. Existing wake text is unchanged ahead of the added line. Merging deploys nothing. Fresh/recovery briefs and the future in-poller delivery (hadron-cli#907) are out of scope; that delivery needs the same line.

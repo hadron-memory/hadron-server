@@ -55,6 +55,7 @@ import { assertModelBuildable, generateText, LlmInvocationError, type KnobReport
 import { recordLlmUsage } from '../../lib/metering/index.js';
 import { decryptToken, encryptToken } from '../../lib/tokenCrypto.js';
 import { defaultQuotaLimit, reserveQuota, settleReservation } from '../../jobs/appRuns.js';
+import { forbiddenError } from '../../lib/refusals.js';
 
 export interface AiConfigTestOverride {
   provider?: string | null;
@@ -361,7 +362,7 @@ export async function testAiServiceConfig(
     throw e;
   }
   // Impersonation is a read-only support view (#876), and a test spends.
-  if (ctx.impersonation || !ctx.userId) throw new Error('Forbidden');
+  if (ctx.impersonation || !ctx.userId) throw forbiddenError();
 
   // The config under test: saved values, overridden field by field, and
   // validated exactly as a write would validate them.

@@ -1,9 +1,11 @@
+import { isRawChatNode } from '../../../services/embedding/rawChat.js';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { BROKEN_INCLUDE_NOTICE as N } from '../../../lib/includes/spliceIncludes.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, chatNodeByLoc, chatNodeByLocOrThrow } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
+import { serveAgentBootPrompt, serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { withChatRootLock } from '../../../lib/chatRoot.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
@@ -115,6 +117,8 @@ beforeEach(async () => {
       },
     });
   }
+  // #2712: chats are served the Agent's boot prompt; an Agent without one is refused.
+  await serveEveryAgent(db);
 });
 
 // ---------------------------------------------------------------------------
@@ -657,6 +661,8 @@ describe('chatHistory', () => {
     const noAppSysMem = await db.memory.findUniqueOrThrow({
       where: { id: noAppAgent.systemMemoryId! },
     });
+    // #2712: created after beforeEach served the fixture, so serve it here.
+    await serveAgentBootPrompt(db, noAppAgent.id, 'Test boot prompt.');
     // Seed minimal conversation + stage so startChat can find a first stage.
     const seedNodes = [
       { loc: 'conversations', name: 'conversations', nodeType: 'system' },
@@ -968,18 +974,20 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     );
     // #1835: readable knowledge is a retrieval context, not a bare-loc
     // namespace. No foreign partial is borrowed before a local target exists.
-    expect(start.systemMessage).toBe(`${N} | ${N} | ${N} | ${N} | ${N} | ${N}`);
+    // #2712: the served boot prompt leads the system message.
+    const B = 'Test boot prompt.\n\n';
+    expect(start.systemMessage).toBe(`${B}${N} | ${N} | ${N} | ${N} | ${N} | ${N}`);
     const chatRoot = await chatNodeByLocOrThrow(db, start.chatId);
     await db.node.create({ data: { memoryId: chatRoot.memoryId, loc: 'y-secret', name: 'Local Y', content: 'LOCAL Y' } });
     await db.node.create({ data: { memoryId: chatRoot.memoryId, loc: 'global-note', name: 'Local global', content: 'LOCAL GLOBAL' } });
     const startedAgain = await resolvers.Mutation.startChat(
       {}, { agentId: agent.id, scope: 'shared' }, userCtx(adminUser.id),
     );
-    expect(startedAgain.systemMessage).toBe(`${N} | LOCAL Y | LOCAL GLOBAL | ${N} | ${N} | ${N}`);
+    expect(startedAgain.systemMessage).toBe(`${B}${N} | LOCAL Y | LOCAL GLOBAL | ${N} | ${N} | ${N}`);
     const sent = await resolvers.Mutation.sendChatMessage(
       {}, { chatId: start.chatId, userMessage: 'hello' }, userCtx(otherUser.id),
     );
-    expect(sent.systemMessage).toBe(`${N} | LOCAL Y | LOCAL GLOBAL | ${N} | ${N} | ${N}`);
+    expect(sent.systemMessage).toBe(`${B}${N} | LOCAL Y | LOCAL GLOBAL | ${N} | ${N} | ${N}`);
   });
 
   it('does not restore an uninstalled Agent when sending to its retained shared chat', async () => {
@@ -1170,6 +1178,7 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     });
     const userMsg = messages.find((m) => m.loc.endsWith('-user'));
     expect(userMsg).toBeDefined();
+    expect(isRawChatNode(userMsg!)).toBe(true);
 
     // The whole point: before the fix this was adminUser (the creator).
     expect(userMsg!.createdBy).toBe(otherUser.id);
@@ -1281,6 +1290,7 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     });
     const assistantMsg = messages.find((m) => m.loc.endsWith('-assistant'));
     expect(assistantMsg).toBeDefined();
+    expect(isRawChatNode(assistantMsg!)).toBe(true);
     expect(assistantMsg!.createdBy).toBeNull();
   });
 
@@ -1316,7 +1326,7 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     });
     return {
       rows,
-      messageCount: ((chatNode.data as Record<string, unknown>)?.messageCount as number) ?? 0,
+      messageCount: (await db.chatRootCounter.findUniqueOrThrow({where:{chatRootNodeId:chatNode.id}})).messageCount,
     };
   }
 
@@ -1406,10 +1416,11 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     let announceHeld: () => void = () => {};
     const gate = new Promise<void>((r) => { release = r; });
     const held = new Promise<void>((r) => { announceHeld = r; });
-    const turn = withChatRootLock(db, chatRef, memEnc, async ({ chatData }) => {
+    const turn = withChatRootLock(db, chatRef, memEnc, async ({ tx, chatData }) => {
+      await tx.chatRootCounter.update({where:{chatRootNodeId:chatRef.id},data:{messageCount:2}});
       announceHeld();
       await gate;
-      return { chatData: { ...chatData, messageCount: 2 }, value: null };
+      return { chatData, value: null };
     });
     await held;
 
@@ -1431,7 +1442,8 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     // The rename landed AND the turn's count survived it — applying to fresh
     // data is not the same as dropping the write.
     expect(data.title).toBe('Renamed mid-conversation');
-    expect(data.messageCount).toBe(2);
+    expect(data).not.toHaveProperty('messageCount');
+    expect((await db.chatRootCounter.findUniqueOrThrow({where:{chatRootNodeId:after.id}})).messageCount).toBe(2);
   });
 
   it('#919 — mixed sequential turns number 1..N with no gaps or repeats', async () => {
@@ -1956,5 +1968,74 @@ describe('#1717 — chat-by-loc writes', () => {
     await resolvers.Mutation.updateChatTitle({}, { chatId, title: 'mine' }, userCtx(otherUser.id));
     expect(((await db.node.findUniqueOrThrow({ where: { id: root.id } })).data as Record<string, unknown>).title).toBe('mine');
     await expect(resolvers.Mutation.deleteChat({}, { chatId }, userCtx(otherUser.id))).resolves.toBe(true);
+  });
+});
+
+it('3501: encrypted startChat stores ciphertext root and state at birth, with only name mirrors in root', async () => {
+  const { generateDataKey } = await import('../../../lib/crypto.js');
+  const { sessionKeyCache } = await import('../../../lib/sessionKeyCache.js');
+  const { decryptNodeFields } = await import('../../../lib/nodeCrypto.js');
+  await resolvers.Mutation.startChat({}, { agentId: agent.id }, userCtx(adminUser.id));
+  const memory = await db.memory.findFirstOrThrow({ where: { userMemoryOfAgentId: agent.id, createdBy: adminUser.id } });
+  const key = generateDataKey();
+  await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true } });
+  sessionKeyCache.set(generateId(), memory.id, key);
+  try {
+    const result = await resolvers.Mutation.startChat({}, { agentId: agent.id }, userCtx(adminUser.id));
+    const root = await db.node.findUniqueOrThrow({ where: { loc_memoryId: { memoryId: memory.id, loc: result.chatId } } });
+    const engine = await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } });
+    expect(root.data).toHaveProperty('__enc'); expect(engine.state).toHaveProperty('__enc');
+    const info = { id: memory.id, isEncrypted: true };
+    const data = decryptNodeFields({ data: root.data }, info).data as Record<string, unknown>;
+    const state = decryptNodeFields({ data: engine.state }, info).data;
+    expect(data).toMatchObject({ conversationName: 'research', stageName: 'scope' });
+    expect(data).not.toHaveProperty('goalStack'); expect(data).not.toHaveProperty('routeHistory');
+    expect(state).toMatchObject({ conversationName: 'research', stageName: 'scope', goalStack: expect.any(Array), routeHistory: expect.any(Array) });
+  } finally { sessionKeyCache.clear(); }
+});
+
+describe('3583: a keyless turn on an encrypted chat', () => {
+  async function encryptedKeylessChat() {
+    const { sessionKeyCache } = await import('../../../lib/sessionKeyCache.js');
+    const started = await resolvers.Mutation.startChat({}, { agentId: agent.id }, userCtx(adminUser.id));
+    await resolvers.Mutation.sendChatMessage({}, { chatId: started.chatId, userMessage: 'before' }, userCtx(adminUser.id));
+    const memory = await db.memory.findFirstOrThrow({ where: { userMemoryOfAgentId: agent.id, createdBy: adminUser.id } });
+    await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true } });
+    sessionKeyCache.clear(); // no session key is cached for this memory
+    const rootBefore = await db.node.findUniqueOrThrow({ where: { loc_memoryId: { memoryId: memory.id, loc: started.chatId } } });
+    const snapshot = async () => ({
+      nodes: await db.node.count({ where: { memoryId: memory.id } }),
+      revisions: await db.nodeRevision.count({ where: { nodeId: rootBefore.id } }),
+      root: await db.node.findUniqueOrThrow({ where: { id: rootBefore.id } }).then((r) => ({ data: r.data, updatedAt: r.updatedAt, revSeq: r.revSeq })),
+    });
+    return { chatId: started.chatId, snapshot };
+  }
+
+  it('sendChatMessage refuses with the typed SESSION_EXPIRED code and writes nothing', async () => {
+    const { chatId, snapshot } = await encryptedKeylessChat();
+    const before = await snapshot();
+    const refused = await resolvers.Mutation.sendChatMessage({}, { chatId, userMessage: 'hello' }, userCtx(adminUser.id)).then(() => null, (e: any) => e);
+    expect(refused?.extensions?.code).toBe('SESSION_EXPIRED');
+    expect(String(refused?.message)).toMatch(/^SESSION_EXPIRED: /);
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it('processChatResponse and updateChatTitle are the same typed refusal, writing nothing', async () => {
+    const { chatId, snapshot } = await encryptedKeylessChat();
+    const before = await snapshot();
+    for (const call of [
+      () => resolvers.Mutation.processChatResponse({}, { chatId, toolResponse: {} }, userCtx(adminUser.id)),
+      () => resolvers.Mutation.updateChatTitle({}, { chatId, title: 'renamed' }, userCtx(adminUser.id)),
+    ]) {
+      const refused = await call().then(() => null, (e: any) => e);
+      expect(refused?.extensions?.code).toBe('SESSION_EXPIRED');
+    }
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it('the transcript read is the same typed refusal', async () => {
+    const { chatId } = await encryptedKeylessChat();
+    const refused = await resolvers.Query.chatHistory({}, { chatId }, userCtx(adminUser.id)).then(() => null, (e: any) => e);
+    expect(refused?.extensions?.code).toBe('SESSION_EXPIRED');
   });
 });

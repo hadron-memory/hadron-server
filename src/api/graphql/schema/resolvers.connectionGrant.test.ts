@@ -28,7 +28,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
-import { requireEmailConnection } from './resolvers.helpers.js';
+import { ConnectionNotFoundError, requireEmailConnection } from './resolvers.helpers.js';
 import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 
 const server = new ApolloServer<Context>({ typeDefs, resolvers });
@@ -157,10 +157,10 @@ describe('#593 gate — requireEmailConnection(ctx, connId, operation)', () => {
     await expect(gate(appCtx(grantedApp), connId, 'list-messages')).resolves.toMatchObject({ id: connId, organizationId: orgA });
   });
 
-  it('a soft-deleted connection reports "not found", never a grant error', async () => {
+  it('a soft-deleted connection is judged absent before any grant (#2782: absence answers as the denial does)', async () => {
     await db.exchangeConnection.update({ where: { id: connId }, data: { deletedAt: new Date() } });
     await mkGrant({ connectionId: connId, granteeAppId: grantedApp, scopes: ['mail.read'] });
-    await expect(gate(appCtx(grantedApp), connId, 'list-messages')).rejects.toThrow('Connection not found');
+    await expect(gate(appCtx(grantedApp), connId, 'list-messages')).rejects.toBeInstanceOf(ConnectionNotFoundError);
   });
 
   it('a grant to an UNINSTALLED App no longer authorizes (uninstall drops delegation)', async () => {
@@ -279,7 +279,7 @@ describe('#1551 connection grant revocation fence', () => {
       await grant;
       await deletion;
       expect((await db.exchangeConnection.findUniqueOrThrow({ where: { id: connId } })).deletedAt).not.toBeNull();
-      await expect(gate(appCtx(grantedApp), connId, 'list-messages')).rejects.toThrow('Connection not found');
+      await expect(gate(appCtx(grantedApp), connId, 'list-messages')).rejects.toBeInstanceOf(ConnectionNotFoundError);
     } finally {
       release();
       await Promise.allSettled([holder, grant]);

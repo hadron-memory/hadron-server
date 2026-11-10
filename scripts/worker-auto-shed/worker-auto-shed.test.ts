@@ -9,7 +9,7 @@
  *    (`hadron` is never called), no snapshot, no prompt file, no stdin read, no signal.
  *  - The emitted prompt must hold every branch of the ladder (bound-open, unbound
  *    redemption, CHOOSE asks the human, exit 5 two meanings, transport error is not
- *    NOTHING_TO_RESUME, MCP branch, never --as, never a post as the human).
+ *    NOTHING_TO_RESUME, no MCP branch (#3082), never --as, never a post as the human).
  *  - The old hook's actually-emitted prompt (captured by running it in dry-run mode in a
  *    sandbox) fails those requirements.
  *  - The hook's normal mode writes exactly what `--print-prompt` prints.
@@ -81,7 +81,7 @@ function emittedByHook(hook: string): string {
 const REQUIREMENTS: Array<[string, (p: string) => boolean]> = [
   ['leads with whoami --check and keeps a bound-open binding (no rebind)', (p) => /whoami --check/.test(p) && /do NOT\s+start or rebind a session/.test(p)],
   ['unbound recovery is `session start` with NO --as', (p) => /session start\\?`? with NO --as/.test(p.replace(/\\`/g, '`'))],
-  ['names the MCP branch hadron_resume_session()', (p) => p.includes('hadron_resume_session()')],
+  ['names no MCP branch: MCP does not bind workers (#3082)', (p) => !/hadron_resume_session|MCP/.test(p)],
   ['CHOOSE (exit 2) asks the human and never selects automatically', (p) => /CHOOSE[\s\S]{0,160}ask the human/.test(p) && /Never select automatically/.test(p)],
   ['exit 5 has two meanings: still bound OR RESUME_REFUSED', (p) => /RESUME_REFUSED/.test(p) && /still bound/.test(p)],
   ['a transport error is not NOTHING_TO_RESUME', (p) => /transport[\s\S]{0,80}NOT an absent claim/.test(p)],
@@ -151,7 +151,6 @@ describe('the emitted recovery ladder (#1958)', () => {
       'CHOOSE (exit 2) asks the human and never selects automatically',
       'exit 5 has two meanings: still bound OR RESUME_REFUSED',
       'a transport error is not NOTHING_TO_RESUME',
-      'names the MCP branch hadron_resume_session()',
       'never posts or records anything as the human',
     ];
     for (const name of mustFailOnOld) {
@@ -188,9 +187,12 @@ interface Agent { pid: number; supervisor: ReturnType<typeof spawn>; gone: () =>
  * Start a supervised stand-in agent and wait until its pid is known. `onTerm` is shell run first
  * when it is stopped, as its own child (a PreCompact fire from the dying agent itself).
  */
-async function startAgent(root: string, tag = 'agent', onTerm = ''): Promise<Agent> {
+async function startAgent(root: string, tag = 'agent', onTerm = '', releaseFile = ''): Promise<Agent> {
   const pidFile = join(root, `${tag}.pid`);
-  const inner = `trap '${onTerm}sleep ${DIE_MS / 1000}; exit 0' TERM; while :; do sleep 0.1; done`;
+  // With `releaseFile`, the stopped stand-in exits only once that file exists (the test releases it), so "still exiting"
+  // is a state the test controls, not a wall-clock window (#3812). Without it, it exits DIE_MS after TERM.
+  const dying = releaseFile ? `while [ ! -e ${releaseFile} ]; do sleep 0.05; done` : `sleep ${DIE_MS / 1000}`;
+  const inner = `trap '${onTerm}${dying}; exit 0' TERM; while :; do sleep 0.1; done`;
   const supervisor = spawn('bash', ['-c', `(exec -a claude bash -c "${inner}") & echo $! > "${pidFile}"; wait`, 'worker-supervise'], { stdio: 'ignore' });
   for (let i = 0; i < 100 && !existsSync(pidFile); i++) await new Promise((r) => setTimeout(r, 50));
   const pid = Number(readFileSync(pidFile, 'utf8').trim());
@@ -312,11 +314,21 @@ describe('#2163 part 1: a stopped agent cannot compact on the way out', () => {
       expect(r.status).toBe(0);
     });
     it('old hook: a second fire while the stopped agent is still exiting exits 0', async () => {
-      const { s, wt, agent } = await stage();
-      fire(PRE2163_HOOK, s, wt, agent.pid);
-      await new Promise((r) => setTimeout(r, 1000));
-      expect(agent.gone()).toBe(false);
-      expect(fire(PRE2163_HOOK, s, wt, agent.pid).status).toBe(0);
+      const s = sandbox();
+      const wt = join(s.root, NAME); mkdirSync(wt);
+      // The stopped stand-in stays "still exiting" until released: no sleep, no race on how fast the box is.
+      const release = join(s.root, 'release-agent');
+      const agent = await startAgent(s.root, 'agent', '', release);
+      agents.push(agent);
+      try {
+        expect(fire(PRE2163_HOOK, s, wt, agent.pid).log).toMatch(/stopping claude pid/); // the stop really happened
+        expect(agent.gone(), 'the stand-in exited before the second fire').toBe(false);
+        expect(fire(PRE2163_HOOK, s, wt, agent.pid).status).toBe(0);
+      } finally {
+        writeFileSync(release, ''); // always release, so a failed assertion cannot leave the stand-in waiting
+      }
+      for (let i = 0; i < 50 && !agent.gone(); i++) await new Promise((r) => setTimeout(r, 100));
+      expect(agent.gone(), 'the released stand-in never exited').toBe(true);
     });
   });
 });

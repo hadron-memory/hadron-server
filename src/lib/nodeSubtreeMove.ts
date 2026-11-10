@@ -60,7 +60,7 @@ import { assertRoleWritersForNodes, type RoleWriterPrincipal } from './nodeRoleW
 import { COMMENT_NODE_TYPE, COMMENTABLE_CLASSES, commentError, commentGovernedError } from './comments/index.js';
 import { decisionContainedError, isDecisionFamilyRole, refuseUnderDecisionLog } from './decisions/index.js';
 import { deriveEdgeLoc } from './edgeLoc.js';
-import { lockAncestorsForCreate, lockNodeForDelete } from './nodeSubtreeLock.js';
+import { acquireLockSet, ancestorLocs, lockAncestorsForCreate, lockNodeForDelete } from './nodeSubtreeLock.js';
 import type { Prisma } from '../generated/prisma/index.js';
 import { normalizeObjectType } from './enforceNodeSchema.js';
 import { recordUrnRename } from './urnAlias.js';
@@ -72,6 +72,7 @@ import { AmbiguousLegacyUrnError, NodeNotFoundError } from './entityRef/errors.j
 import { isId } from './entityRef/shape.js';
 import { validateNodeAgainstSchema, NodeSchemaViolation } from './validateNodeAgainstSchema.js';
 import type { MemorySchema } from './memorySchema.js';
+import { assertRenameAuthoring, attestedAuthoring, type AuthoringContext } from './authoringAttestation.js';
 import { clearNodeAuthorship } from './nodeAuthorship.js';
 import { memoryIsVectorIndexed } from './embedding/indexing.js';
 import {
@@ -233,13 +234,14 @@ async function aliasTargetId(
  * ancestor. Then re-reads the row by id and throws
  * {@link SubtreeMoveSourceChangedError} if it was relocated/deleted meanwhile.
  * The caller must already hold the DESTINATION ancestor lock. Two moves that
- * relocate into each other's subtrees can still deadlock on these keys —
- * Postgres detects and aborts one (self-healing; moves are infrequent).
+ * relocate into each other's subtrees declare their full caller union first;
+ * these source-path acquisitions are then subsets of that initial set (#2054).
  */
 export async function lockSourceForMove(
   tx: Prisma.TransactionClient,
   source: { id: string; loc: string; memoryId: string },
 ): Promise<void> {
+  await acquireLockSet(tx, [...ancestorLocs(source.loc), source.loc].map(loc => ({ memoryId: source.memoryId, loc })));
   await lockAncestorsForCreate(tx, source.memoryId, source.loc);
   await lockNodeForDelete(tx, source.memoryId, source.loc);
   const fresh = await tx.node.findUnique({
@@ -296,6 +298,8 @@ export async function moveNodeSubtree(
      * opt-in `renameToLeaf` argument, and GraphQL `moveNode` still never sets it.
      */
     renameSourceLeaf?: boolean;
+    /** #1328 — what the rename is, in attestation terms. A rename without it is refused. */
+    renameAuthoring?: AuthoringContext;
     /** Refuse (SubtreeMoveMintedError) when any moved node is minted, read under this move's locks (#1591). */
     requireUnminted?: boolean;
     /** Recheck caller write authority after both Memory rows are locked. */
@@ -308,7 +312,7 @@ export async function moveNodeSubtree(
     principal?: RoleWriterPrincipal;
   },
 ): Promise<MoveNodeSubtreeResult> {
-  const { source, destLoc, editor, renameSourceLeaf } = opts;
+  const { source, destLoc, editor, renameSourceLeaf, renameAuthoring } = opts;
   const srcMemoryId = source.memoryId;
   const destMemoryId = opts.destMemoryId ?? srcMemoryId;
   const crossMemory = destMemoryId !== srcMemoryId;
@@ -597,11 +601,33 @@ export async function moveNodeSubtree(
   // make two specs moved through the same number resolve as ambiguous, and
   // keep draft-era numbers resolving after the mint. A minted node's address
   // was published, so it leaves an alias behind wherever it moves.
+  //
+  // #2610: a register:<code> entry in a live Agent's system memory ALSO leaves
+  // its old address behind, minted or not. #1448's premise ("nothing outside
+  // can cite an unminted node") is about spec draft numbers and fails for
+  // entries the moment action URNs exist: the address is emitted on every read
+  // (`Node.actionUrn`) as soon as the entry does, and cor:urn:010:01 (Proposed,
+  // #2610) rules the old code never stops resolving. Scoped so #1448's spec
+  // behavior is untouched: only `register:` locs in the SOURCE memory when that
+  // memory is some live Agent's system memory — exactly the nodes an action URN
+  // can key on.
   const sourceMemoryUrn = memoryUrns.get(srcMemoryId)!;
   const targetMemoryUrn = memoryUrns.get(destMemoryId)!;
   const aliasKey = (memoryUrn: string, loc: string) =>
     safeNodeUrnV2(memoryUrn, loc).slice('hrn:node:'.length);
-  for (const n of subtree.filter(isMintedRow)) {
+  const leavesAlias = new Set(subtree.filter(isMintedRow));
+  if (leavesAlias.size < subtree.length) {
+    const srcIsAgentSystemMemory = await tx.agent.findFirst({
+      where: { systemMemoryId: srcMemoryId, deletedAt: null },
+      select: { id: true },
+    });
+    if (srcIsAgentSystemMemory) {
+      for (const n of subtree) {
+        if (n.loc.startsWith('register:')) leavesAlias.add(n);
+      }
+    }
+  }
+  for (const n of leavesAlias) {
     await recordUrnRename(tx, {
       entityType: 'NODE',
       entityId: n.id,
@@ -628,10 +654,19 @@ export async function moveNodeSubtree(
     moved: subtree.map((n) => ({ id: n.id, previousLoc: n.loc, loc: newLocById.get(n.id)! })),
     linkWarnings: [],
   };
+  const leaf = destLoc.split(':').pop()!;
+  // #1328 — a rename is an authored name change. The rows are locked by now,
+  // and this refuses before the first write of the move.
+  const renamed = renameSourceLeaf === true ? subtree.find((n) => n.id === source.id && n.name !== leaf) : undefined;
+  const renameStamp = renamed
+    ? await assertRenameAuthoring(tx, srcMemoryId, destMemoryId, {
+        priorRole: renamed.role, priorRunnable: renamed.isRunnable,
+        role: renamed.role, runnable: renamed.isRunnable, mintHuman: true, authoredChange: true,
+      }, renameAuthoring ?? attestedAuthoring(null))
+    : null;
   for (const n of subtree) {
     await tx.node.update({ where: { id: n.id }, data: { loc: `__moving-${n.id}` } });
   }
-  const leaf = destLoc.split(':').pop()!;
   for (const n of subtree) {
     const newLoc = newLocById.get(n.id)!;
     const rename = renameSourceLeaf === true && n.id === source.id;
@@ -644,7 +679,7 @@ export async function moveNodeSubtree(
       where: { id: n.id },
       data: {
         ...changed,
-        ...(rename && n.name !== leaf ? clearNodeAuthorship() : {}),
+        ...(rename && n.name !== leaf ? (renameStamp ?? clearNodeAuthorship()) : {}),
         revisionContentHash: revisionStateHashRefreshMarker(),
       },
     });

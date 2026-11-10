@@ -246,6 +246,10 @@ class FakeCLIs {
   /** #1826 — the worker's cursor (channelReadState.lastSeenSeq); absent = 0 (never checkpointed). */
   cursors = new Map<string, number>();
   cursorQueries = new Map<string, number>();
+  /** #2613: agentTasks rows by worker id (the delivered worker's open-task read), the page reads seen, and a failure switch. */
+  openTasks = new Map<string, unknown[]>();
+  openTaskReads: string[][] = [];
+  openTasksFail = false;
   /** Served on the worker's SECOND+ cursor query (the recompute at send). */
   freshCursors = new Map<string, number>();
   /** channelReadState answers null (unreadable/unknown) for these workers. */
@@ -313,6 +317,12 @@ class FakeCLIs {
         adoptableSince: last && !this.dropFinalToken ? this.attention.token : null,
         items: last ? this.attention.workers : [],
       } } });
+    }
+    if (argv[1] === 'api' && argv[2].includes('agentTasks(')) {
+      const fa = (k: string) => argv.find((a, i) => argv[i - 1] === '-F' && a.startsWith(`${k}=`))?.slice(k.length + 1) as string;
+      this.openTaskReads.push([fa('a'), fa('w'), fa('o')]);
+      if (this.openTasksFail) return out({ errors: [{ message: 'tasks down' }] }, 1);
+      return out({ data: { agentTasks: (this.openTasks.get(fa('w')) ?? []).slice(Number(fa('o')), Number(fa('o')) + 200) } });
     }
     if (argv[1] === 'api') {
       this.sawWait = false; // a new target begins; its fresh scan (if any) follows its idle gate
@@ -1004,13 +1014,12 @@ describe('Orca attention router — untracked terminals: unknown is not busy (#7
 });
 
 describe('nudgeText read anchor (#1805 P2s, #1811 large-gap branch)', () => {
-  it('present anchor: names the first unread, BOTH forms, bounded — no --all', () => {
+  it('present anchor: names the first unread, the CLI form, bounded — no --all, no MCP form (#3082)', () => {
     const t = nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 5, first: 100, relevant: 110, head: 120 }));
     expect(t).toContain('START AT #100 (your first unread message of any kind)');
     expect(t).toContain('--since 99 --limit 200');
     expect(t).toContain('nextSince');
-    expect(t).toContain('hadron_team_chat_read');
-    expect(t).toContain('sinceSeq=99');
+    expect(t).not.toMatch(/hadron_[a-z_]+|MCP|sinceSeq/);
     expect(t).not.toContain('--all');
     expect(t).not.toContain('\n');
   });
@@ -1023,27 +1032,22 @@ describe('nudgeText read anchor (#1805 P2s, #1811 large-gap branch)', () => {
   it('first unread 1, SMALL span (cursor-0 worker near the head): since clamps to 0, still bounded', () => {
     const t = nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 349, first: 1, relevant: 110, head: 350 }));
     expect(t).toContain('--since 0 --limit 200');
-    expect(t).toContain('sinceSeq=0');
     expect(t).not.toContain('--all');
     expect(t).not.toContain('--mentions-me');
   });
   it('cursor-0 worker with a LARGE gap: the mentions walk starts at 0 too — clamped, filtered, bounded (#1811)', () => {
     const t = nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 9000, first: 1, relevant: 110, head: 9001 }));
     expect(t).toContain('--mentions-me --since 0 --before 9002 --limit 200');
-    expect(t).toContain('sinceSeq=0');
-    expect(t).toContain('beforeSeq=9002');
     expect(t).not.toContain('--all');
     expect(t).not.toContain('START AT');
   });
-  it('LARGE GAP (span > 400): mentions-only anchor — filter, both forms, own-session mark ceiling, failure discipline (#1811)', () => {
+  it('LARGE GAP (span > 400): mentions-only anchor — filter, CLI form, own-session mark ceiling, failure discipline (#1811, #3082)', () => {
     const t = nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 9841, first: 61, relevant: 9750, head: 9901 }));
     expect(t).toContain('LARGE GAP');
     expect(t).toContain('unread #61–#9901, latest mention #9750');
     expect(t).toContain('--mentions-me --since 60 --before 9902 --limit 200');
-    expect(t).toContain('sinceSeq=60');
-    expect(t).toContain('hadron_team_chat_read');
+    expect(t).not.toMatch(/hadron_[a-z_]+|MCP|sinceSeq/);
     expect(t).toContain('mark-read --through');
-    expect(t).toContain('hadron_team_chat_mark_read');
     expect(t).toContain('never auto-marks');
     expect(t).toContain('marks NOTHING');
     expect(t).toContain('your OWN session');
@@ -1058,7 +1062,6 @@ describe('nudgeText read anchor (#1805 P2s, #1811 large-gap branch)', () => {
     // never reach it. The walk's upper bound is the nudge's OWN head value.
     const t = nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 9841, first: 61, relevant: 9750, head: 9901 }));
     expect(t).toContain('--before 9902');
-    expect(t).toContain('beforeSeq=9902');
     expect(t).toContain('never above #9901');
     expect(t).toContain('actually delivered');
     expect(t).not.toContain('--before 9903');
@@ -1075,16 +1078,11 @@ describe('nudgeText read anchor (#1805 P2s, #1811 large-gap branch)', () => {
     expect(t).toContain('BACKWARD');
     expect(t).not.toContain('nextSince'); // the forward cursor is what lost the oldest mention
     expect(t).toContain('--mentions-me --since 60 --before 9902 --limit 200');
-    expect(t).toContain('sinceSeq=60');
-    expect(t).toContain('beforeSeq=9902');
     expect(t).toContain('never above #9901'); // the H+1 arrival stays outside sample and mark
     expect(t).not.toContain('--before 9903');
-    // The MCP tool returns numbered pages with NO prevBefore field (Anne and
-    // Colin, independently): its instruction must say to re-call with
-    // beforeSeq = the smallest seq on the last page, not "follow prevBefore".
-    expect(t).toContain('the smallest seq on your last page');
-    expect(t).toContain('no prevBefore field');
-    expect(t).toContain('limit 200'); // the MCP page limit spelled with its value
+    // The MCP forms left with the MCP team cut (#3082): the CLI pages carry prevBefore, so "follow prevBefore" is the one rule.
+    expect(t).toContain('follow each page\'s prevBefore BACKWARD');
+    expect(t).not.toContain('the smallest seq on your last page');
   });
   it('the boundary is deterministic: span 399 and exactly 400 keep the unfiltered anchor, 401 switches (#1811)', () => {
     for (const head of [499, 500]) {
@@ -1954,7 +1952,7 @@ describe('Orca attention router — coordinator/lifecycle liveness rule (#1826)'
     expect(text).toContain('#100'); // its cursor, named
     expect(text).toContain('#120'); // the head, named
     expect(text).toContain('--since 100');
-    expect(text).toContain('sinceSeq=100');
+    expect(text).not.toMatch(/hadron_[a-z_]+|MCP|sinceSeq/); // #3082: CLI form only
     expect(text).toContain('mark read');
     expect((text.match(/mark read/g) ?? []).length).toBe(1); // once, not twice (Taylor #9748)
     expect(text).toContain('as of send');
@@ -1974,6 +1972,24 @@ describe('Orca attention router — coordinator/lifecycle liveness rule (#1826)'
     const rec = readLiveness(c)['w-ada'];
     expect(rec.coveredFrontier).toBe(120);
     expect(rec.idleSince).toBeGreaterThan(Date.now() - 60_000);
+  });
+
+  it('the idle-watch wake reads the open-task count before the final gates and never after them (#2630)', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.attention.workers = [];
+    fake.cursors.set('w-ada', 100);
+    fake.openTasks.set('w-ada', [{ id: 't1', status: 'STARTED', assignee: { kind: 'WORKER', id: 'w-ada' } }]);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    poll(c);
+    expect(fake.sent[0][1]).toContain('You have 1 open task');
+    const verbs = fake.calls.map((a) => (a[1] === 'api' && a[2].includes('agentTasks(') ? 'count' : a.slice(1, 3).join(' ')));
+    const count = verbs.indexOf('count');
+    expect(count).toBeGreaterThan(-1);
+    expect(verbs.lastIndexOf('terminal wait')).toBeGreaterThan(count);
+    expect(verbs.lastIndexOf('terminal read')).toBeGreaterThan(count);
+    expect(verbs.indexOf('terminal send')).toBeGreaterThan(verbs.lastIndexOf('terminal read'));
+    expect(verbs.slice(count + 1, verbs.indexOf('terminal send')).includes('count')).toBe(false);
   });
 
   it('a NON-flagged worker with the same idle + unread backlog gets nothing: liveness is opt-in per roster flag', () => {
@@ -2679,3 +2695,135 @@ describe('nudge endings are satisfiable (#1533)', () => {
     expect((liveness.match(/mark read/gi) ?? []).length).toBe(1);
   });
 });
+
+describe('#2613 — the open-task line on every router wake', () => {
+  const open = (worker: string, n: number, status = 'STARTED') =>
+    Array.from({ length: n }, (_, i) => ({ id: `t${i}`, status, assignee: { kind: 'WORKER', id: worker } }));
+  const LINE = (n: number) => ` You have ${n} open task${n === 1 ? '' : 's'} (as read when this was sent); run \`hadron team task mine\`.`;
+
+  it('appends the line to a mention wake, after the existing instructions, read for the DELIVERED worker and the App', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 2, unread: 5 })];
+    fake.openTasks.set('w-eli', [...open('w-eli', 2), { id: 'p', status: 'PENDING', assignee: { kind: 'WORKER', id: 'w-eli' } }]);
+    poll(c);
+    expect(fake.sent).toHaveLength(1);
+    expect(fake.sent[0][1]).toBe(nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 5 })) + LINE(3));
+    expect(fake.sent[0][1].startsWith(nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 5 })))).toBe(true);
+    expect(fake.openTaskReads).toEqual([['hrn:app:x:team', 'w-eli', '0']]);
+  });
+
+  it('appends the line to the LARGE GAP wake', () => {
+    const w = worker('w-eli', 'Eli', { mentions: 2, unread: 9841, first: 61, relevant: 9750, head: 9901 });
+    expect(nudgeText(w, LINE(1))).toBe(nudgeText(w) + LINE(1));
+    expect(nudgeText(w, LINE(1))).toContain('LARGE GAP');
+  });
+
+  it('appends the line to the idle-watch wake', () => {
+    expect(livenessNudgeText(100, 120, LINE(2))).toBe(livenessNudgeText(100, 120) + LINE(2));
+  });
+
+  it('zero open tasks: the wake is byte-identical to today', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 2, unread: 5 })];
+    poll(c);
+    expect(fake.sent[0][1]).toBe(nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 5 })));
+  });
+
+  it('counts only this worker: another worker, FINISHED, CANCELLED, BACKLOG and unassigned never reach the count', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 2, unread: 5 })];
+    // The server filters; a row it should not have returned makes the count unknown, never a guess.
+    fake.openTasks.set('w-eli', [...open('w-eli', 1), { id: 'x', status: 'FINISHED', assignee: { kind: 'WORKER', id: 'w-eli' } }]);
+    poll(c);
+    expect(fake.sent[0][1]).not.toContain('open task');
+  });
+
+  it('a refused count read still delivers the wake, with no count claim and no "none"', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 2, unread: 5 })];
+    fake.openTasksFail = true;
+    const out = poll(c);
+    expect(out.nudged).toEqual(['Eli']);
+    expect(fake.sent[0][1]).toBe(nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 5 })));
+    expect(fake.sent[0][1]).not.toMatch(/open task|none|\b0 /);
+  });
+
+  it('a refused count read logs ONE closed-reason line with the worker name and nothing the read returned (#2630)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 2, unread: 5 })];
+    fake.openTasksFail = true;
+    poll(c);
+    const diag = logs.filter((l) => l.includes('open-task count unknown'));
+    expect(diag).toEqual(['orca-attention-router: Eli: open-task count unknown (refused); the wake goes without the line']);
+    expect(logs.join('\n')).not.toContain('tasks down');
+    expect(fake.sent).toHaveLength(1); // fail-open
+  });
+
+  it('a count or a zero logs no diagnostic (#2630)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 2, unread: 5 })];
+    fake.openTasks.set('w-eli', open('w-eli', 2));
+    poll(c);
+    expect(logs.filter((l) => l.includes('open-task count unknown'))).toEqual([]);
+  });
+
+  it('an empty result (the read answered, zero rows): no diagnostic, no open-task clause, the plain wake still delivers (#2641)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 2, unread: 5 })];
+    fake.openTasks.set('w-eli', []);
+    const out = poll(c);
+    expect(fake.openTaskReads).toEqual([['hrn:app:x:team', 'w-eli', '0']]); // the read ran and answered empty
+    expect(out.nudged).toEqual(['Eli']);
+    expect(fake.sent).toHaveLength(1);
+    expect(fake.sent[0][1]).toBe(nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 5 })));
+    expect(fake.sent[0][1]).not.toMatch(/open task|You have \d/);
+    expect(logs.filter((l) => l.includes('open-task count unknown'))).toEqual([]);
+  });
+
+  it('pages: 201 open tasks read as 201, through two page reads', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 2, unread: 5 })];
+    fake.openTasks.set('w-eli', open('w-eli', 201));
+    poll(c);
+    expect(fake.sent[0][1]).toContain('You have 201 open tasks');
+    expect(fake.openTaskReads.map((r) => r[2])).toEqual(['0', '200']);
+  });
+
+  it('a claude and a codex terminal receive the same text', () => {
+    const c = cfg(['w-eli', 'Eli'], ['w-gene', 'Gene']);
+    fake.terminal('eli');
+    fake.terminal('gene', 'codex');
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 2, unread: 5 }), worker('w-gene', 'Gene', { mentions: 2, unread: 5 })];
+    fake.openTasks.set('w-eli', open('w-eli', 2));
+    fake.openTasks.set('w-gene', open('w-gene', 2));
+    poll(c);
+    const tail = (h: string) => fake.sent.find(([x]) => x === h)![1].replace(/Eli|Gene/g, 'X');
+    expect(fake.sent).toHaveLength(2);
+    expect(tail('term_eli')).toBe(tail('term_gene'));
+    expect(tail('term_eli')).toContain('You have 2 open tasks');
+  });
+
+  it('reads the count BEFORE the final idle and composer rechecks, never between the last gate and the send (LOCAL P2-1)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 2, unread: 5 })];
+    fake.openTasks.set('w-eli', open('w-eli', 1));
+    poll(c);
+    const verbs = fake.calls.map((a) => (a[1] === 'api' && a[2].includes('agentTasks(') ? 'count' : a.slice(1, 3).join(' ')));
+    const count = verbs.indexOf('count');
+    expect(count).toBeGreaterThan(-1);
+    expect(verbs.lastIndexOf('terminal wait')).toBeGreaterThan(count); // the idle recheck follows the count
+    expect(verbs.lastIndexOf('terminal read')).toBeGreaterThan(count); // so does the composer recheck
+    expect(verbs.indexOf('terminal send')).toBeGreaterThan(verbs.lastIndexOf('terminal read'));
+    expect(verbs.slice(count + 1, verbs.indexOf('terminal send')).includes('count')).toBe(false);
+  });
+});
+

@@ -31,6 +31,7 @@
  * so a refusal never discloses a memory the caller cannot see.
  */
 
+import { includeUrnTarget } from '../includes/includeUrnTarget.js';
 import { splitNodeUrn } from '@hadron-memory/urn-lib-js';
 import { isLifecycleActive } from '@hadron-memory/access-control';
 import type { PrismaClient } from '../../generated/prisma/index.js';
@@ -102,7 +103,7 @@ export interface AssemblePlan {
   grants: AssembledGrant[];
 }
 
-type Db = Pick<PrismaClient, 'node' | 'memory' | 'nodeRevision' | 'agent' | 'agentOrgGrant' | 'agentSubscription' | '$queryRaw'>;
+type Db = Pick<PrismaClient, 'node' | 'memory' | 'nodeRevision' | 'agent' | 'agentOrgGrant' | 'agentSubscription' | '$queryRaw' | 'urnAlias'>;
 
 type MemoryKind =
   | { kind: 'encrypted' }
@@ -271,11 +272,14 @@ export async function assembleBootPrompt(
   async function findByUrn(urn: string, position: { line: number; column: number }): Promise<Found> {
     let parts: { memoryUrn: string; loc: string };
     try { parts = splitNodeUrn(urn); } catch { throw new BootCompileRefusal('BOOT_PROMPT_INCLUDE_MALFORMED', position); }
-    const memory = await db.memory.findUnique({ where: { urn: parts.memoryUrn }, select: { id: true } });
+    const resolved = await includeUrnTarget(db, urn);
+    // Preserve the compile's existing retired-node refusal on the direct path;
+    // aliases themselves resolve live identities only, never deleted claimants.
+    const memory = resolved ? { id: resolved.memoryId } : await db.memory.findUnique({ where: { urn: parts.memoryUrn }, select: { id: true } });
     if (!memory) throw new BootCompileRefusal('BOOT_PROMPT_INCLUDE_UNAVAILABLE', position);
     await admitSource(memory.id, position);
     const row = await db.node.findFirst({
-      where: { memoryId: memory.id, loc: parts.loc },
+      where: resolved ? { id: resolved.id, memoryId: resolved.memoryId, deletedAt: null, memory: { deletedAt: null } } : { memoryId: memory.id, loc: parts.loc, deletedAt: { not: null } },
       orderBy: { deletedAt: { sort: 'asc', nulls: 'first' } },
       select: { id: true, memoryId: true, content: true, revSeq: true, role: true, deletedAt: true },
     });
@@ -369,6 +373,12 @@ export async function assembleBootPrompt(
   });
   if (!root) throw new BootCompileRefusal('BOOT_PROMPT_INCLUDE_UNAVAILABLE');
   await admitSource(root.memoryId, null);
+  // The Agent being compiled for needs its own entitlement even when the source sits wholly in the install
+  // memory (admitted directly above) and traverses none of the Agent's content (cor:agt:040:12, missing grant).
+  if (!grantPlans.has(input.target.agentId)) {
+    grantPlans.set(input.target.agentId, planGrant(db, input.target.agentId, input.recipient, null));
+  }
+  await grantPlans.get(input.target.agentId);
   const rootText = root.content ?? '';
   occurrences.push({
     order: 0, depth: 0, parent: null, kind: 'source', nodeId: root.id, revNo: root.revSeq,

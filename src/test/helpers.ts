@@ -1,6 +1,8 @@
 import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 import { LIVE_ORG_MEMBERSHIP } from '../lib/auth/liveOrgMembership.js';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'fs';
+import { fileURLToPath } from 'url';
+import { Client } from 'pg';
 import { generateId } from '../lib/id.js';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -20,6 +22,118 @@ export function buildAppKey(suffix?: string): string {
 // Database helpers
 // ---------------------------------------------------------------------------
 
+const CHAT_SEQ_INDEX_NAME = 'nodes_chat_message_seq_unique_idx';
+const CHAT_SEQ_INVARIANTS_SQL = readFileSync(
+  fileURLToPath(new URL('../../prisma/chat-seq-invariants.sql', import.meta.url)),
+  'utf8',
+);
+
+/**
+ * #992 — per-worker state for the seq-unique index restore below. One vitest
+ * worker process owns exactly one database clone for its whole life
+ * (src/test/perWorkerDb.ts), so a process-local flag is per-database.
+ */
+let chatSeqIndexKnownPresent = false;
+
+/**
+ * #992 — suspend the per-chat message-seq uniqueness constraint on THIS test
+ * database, so a fixture can plant the legacy duplicate-seq shape. The
+ * constraint is the invariant cor:agt:020:04 always promised ("never
+ * duplicates"), so those rows are contract-impossible to WRITE now — but
+ * they can still EXIST: chats corrupted before the constraint (the #992
+ * report's migrated archive) keep their duplicates until each one's approved
+ * repair, and every paged reader must stay correct against them. Reader
+ * tests pin that with rows planted while the constraint is aside;
+ * cleanDb reinstalls it before the next test.
+ */
+export async function suspendChatSeqUniqueness(db: PrismaClient): Promise<void> {
+  await db.$executeRawUnsafe(`DROP INDEX IF EXISTS "${CHAT_SEQ_INDEX_NAME}"`);
+  chatSeqIndexKnownPresent = false;
+}
+
+/**
+ * #992 — make sure the per-chat seq unique index is present on this worker's
+ * clone. Called from cleanDb: a reader fixture may have dropped it
+ * (suspendChatSeqUniqueness), and vitest workers REUSE one clone across
+ * files, so the drop would leak into every later file on this worker and
+ * silently disable the constraint for them.
+ *
+ * Deliberately NO Prisma calls: some tests spy on the client to pin that a
+ * path issues no raw queries at all (sessionActivity.dy.test.ts), and a
+ * catalog probe through `db` would trip them. The probe and the reinstall
+ * both ride a raw pg connection — simple-query mode, since the invariant
+ * file is multi-statement and Prisma's prepared statements take exactly
+ * one. The process-local flag makes it one connect per worker except after
+ * an actual suspension.
+ */
+async function restoreChatSeqUniqueness(): Promise<void> {
+  if (chatSeqIndexKnownPresent) return;
+  const client = new Client({ connectionString: process.env.DATABASE_URL });
+  await client.connect();
+  try {
+    const probe = await client.query(
+      'SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = $1) AS present',
+      [CHAT_SEQ_INDEX_NAME],
+    );
+    if (!probe.rows[0]?.present) await client.query(CHAT_SEQ_INVARIANTS_SQL);
+    chatSeqIndexKnownPresent = true;
+  } finally {
+    await client.end();
+  }
+}
+
+/**
+ * #3835: wait until no other backend of THIS database is mid-statement or
+ * holding an open transaction. cleanDb's TRUNCATEs take AccessExclusive one
+ * table at a time while a leftover writer (the previous test's git-sync node
+ * delete, say) takes RowExclusive on the same tables through FK cascades in a
+ * different order, so overlapping them is a lock cycle (40P01), not a wait.
+ * Each vitest worker owns its database clone, so every other backend here is
+ * this worker's own leftover. Bounded and non-fatal: a backend still busy
+ * after the bound is left to the old behavior, with its statement logged.
+ */
+export async function truncateAfterQuiescence(truncateSql: string, boundMs = 10_000): Promise<void> {
+  // A raw pg connection, not the Prisma client: some tests spy on the client to
+  // pin that a path issues no raw queries (see restoreChatSeqUniqueness).
+  const client = new Client({ connectionString: process.env.DATABASE_URL });
+  await client.connect();
+  try {
+    const deadline = Date.now() + boundMs;
+    for (;;) {
+      const { rows } = await client.query(
+        `SELECT state, left(query, 120) AS query FROM pg_stat_activity
+         WHERE datname = current_database() AND pid <> pg_backend_pid()
+           AND backend_type = 'client backend'
+           AND state IN ('active', 'idle in transaction', 'idle in transaction (aborted)')`,
+      );
+      if (rows.length === 0) break;
+      if (Date.now() > deadline) {
+        console.warn(`cleanDb: ${rows.length} backend(s) still busy after ${boundMs}ms: ${JSON.stringify(rows)}`);
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    // A writer scheduled before this cleanup may still start after the check
+    // above (the snapshot cannot see it). Its node DELETE takes `nodes` first and
+    // then its FK cascades take their tables in FK order, while the TRUNCATE takes
+    // node_signatures first: a cycle if both are mid-flight. Take `nodes` FIRST and
+    // alone. SHARE ROW EXCLUSIVE conflicts with every writer (RowExclusive); while
+    // we wait for it we hold nothing, so a writer already inside is waited for and
+    // a later one queues behind us on its first node write.
+    await client.query('BEGIN');
+    try {
+      await client.query('LOCK TABLE nodes IN SHARE ROW EXCLUSIVE MODE');
+      await client.query(truncateSql);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw err;
+    }
+  } finally {
+    await client.end();
+  }
+}
+
 /**
  * Delete all rows from every table in FK-safe order.
  * Call in beforeEach for DB tests.
@@ -32,7 +146,10 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // #1631: test-only cleanup bypasses row-delete guards, before deleting owners.
   // #1632: signature records reference passkeys and requests; both refuse a row
   // DELETE while their node exists, so they are truncated with them.
-  await db.$executeRawUnsafe('TRUNCATE TABLE node_signatures, signing_requests, passkey_credentials, worker_reference_fences, user_deletion_audits, agent_clone_audits CASCADE');
+  // #2973: stamp_signing_keys is FK-free itself (node_signatures references IT), so
+  // nothing cascades it away — key generations would leak between tests otherwise.
+  // #3835: no leftover writer may overlap this TRUNCATE (quiesce, then lock `nodes` first).
+  await truncateAfterQuiescence('TRUNCATE TABLE node_signatures, stamp_signing_keys, signing_requests, passkey_credentials, worker_reference_fences, user_deletion_audits, agent_clone_audits, user_api_key_deletions CASCADE');
   // Pending first-party login states (FK-free; keyed on the OAuth state).
   await db.pendingLoginState.deleteMany();
   // #1079 — the URN alias map. Deliberately FK-FREE: it must outlive the row it
@@ -40,6 +157,8 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // afterwards. That also means nothing below cascades it away, so it has to be
   // cleared explicitly or aliases leak between tests.
   await db.urnAlias.deleteMany();
+  // #1667 — the public-link audit is FK-free (it outlives the asset), so nothing cascades it away.
+  await db.assetPublicLinkAudit.deleteMany();
   // 036-ai-service-config: configs FK every owner level (incl.
   // hadron_server, which nothing below deletes) — clear them first.
   await db.aiServiceConfig.deleteMany();
@@ -68,6 +187,10 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   await db.appRun.deleteMany();
   await db.agentSchedule.deleteMany();
   await db.agentWebhook.deleteMany();
+  await db.rateLimitBucket.deleteMany();
+  await db.rateLimitPolicyAudit.deleteMany();
+  await db.rateLimitPolicy.deleteMany();
+  await db.rateLimitManifest.deleteMany();
   await db.quotaCounter.deleteMany();
   await db.actionTicket.deleteMany();
   // #1606 — comment nodes first: their governed edges refuse a delete while
@@ -82,7 +205,7 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // fires no row triggers. #1706: agent_team_alarm_schedule references the events, so it is
   // truncated with them. #1708: so is worker_delivery_task_events, for the same reason.
   // #2022: a task's stop holds go with it.
-  await db.$executeRawUnsafe('TRUNCATE worker_delivery_task_events, agent_team_alarm_schedule, agent_team_events, agent_task_stop_holds, agent_tasks');
+  await db.$executeRawUnsafe('TRUNCATE dark_worker_episodes, coordinator_cadence_episodes, coordinator_cadence_clocks, post_limit_episodes, worker_delivery_task_events, agent_team_alarm_schedule, agent_team_events, automation_adoption_events, app_memory_write_grant_events, app_memory_write_grants, app_automation_read_grant_events, app_automation_read_grants, grant_events, grant_signatures, grant_signing_requests, grants, agent_task_stop_holds, agent_match_outcomes, agent_task_counters, agent_task_blockers, agent_tasks');
   // #974 Workers before agents: workers_agent_id_fkey is RESTRICT.
   await db.worker.deleteMany();
   await db.node.deleteMany();
@@ -101,6 +224,13 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // Admin impersonation audit rows cascade from both User and Organization;
   // cleared explicitly before their parents to keep cleanup order predictable.
   await db.impersonationSession.deleteMany();
+  // #2965: invitations reference sender and org with onDelete SetNull, so
+  // deleting those parents left every invitation row (soft-deleted ones too)
+  // behind with its unique slug taken, and a reused serial base failed on
+  // fixed fixture slugs. Activations (Cascade from invitation and user) first,
+  // then the invitations, before the users and orgs they point at.
+  await db.userInvitationActivation.deleteMany();
+  await db.userInvitation.deleteMany();
   await db.orgMember.deleteMany();
   // Assets mostly cascade from Memory below — but a STAGED asset has
   // `memoryId: null` (uploaded, not yet attached), so it has no parent to
@@ -150,6 +280,10 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // and `SetNull` — node, session, app, user, organization — and `memoryId` is a
   // denormalized column with no FK at all (#796).
   await db.usageEvent.deleteMany();
+  // #992 — reinstall the per-chat seq unique index if a reader fixture
+  // dropped it (see restoreChatSeqUniqueness): vitest workers reuse one
+  // clone across files, and rows are gone by here, so reinstalling is safe.
+  await restoreChatSeqUniqueness();
 }
 
 /**
@@ -465,6 +599,8 @@ export function makeTmpDir(): { dir: string; cleanup: () => void } {
 
 interface NodeMeta {
   id?: string;
+  /** #1328 — an untrusted `task@revision` claim, as a mirrored file carries it. */
+  authoredWith?: unknown;
   name: string;
   description?: string;
   summary?: string;
@@ -590,4 +726,16 @@ export async function createDbWorkerAttribution(db: PrismaClient, userId: string
  */
 export async function tombstoneNodes(db: PrismaClient, ids: readonly string[]): Promise<void> {
   await db.node.updateMany({ where: { id: { in: [...ids] }, deletedAt: null }, data: { deletedAt: new Date(), deletedBy: null } });
+}
+
+/**
+ * #1376: the principal a MANUAL run's setup consent is captured under. Production passes the caller's own context
+ * (`triggerAgentRun`); a bare `{ appId }` default is a credential-only shape, which no longer reads org memory through
+ * the Agent's items. A fixture that mints a run directly passes a real creator: an org reader acting through the App.
+ */
+export async function createDbRunConsentPrincipal(db: PrismaClient, organizationId: string, appId: string) {
+  const id = generateId();
+  const user = await db.user.create({ data: { id, handle: `consent-${id}`, githubUsername: `consent-${id}` } });
+  await db.orgMember.create({ data: { organizationId, userId: user.id, role: 'READER' } });
+  return { userId: user.id, appId, organizationId, roles: [] as Array<'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER'> };
 }

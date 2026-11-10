@@ -1,3 +1,5 @@
+import { legacyMessageCount } from '../lib/chatRootCounters.js';
+import { listAppInstallations } from '../lib/appInstallations.js';
 /**
  * Spec 049 Phase 4 — the one-shot Channel backfill (plan §8.7, closes the
  * data half of #1047).
@@ -13,8 +15,9 @@
  *
  * Roots in SOFT-DELETED memories are swept too (a restored memory must come
  * back protected), and tombstoned roots get TOMBSTONED rows: the address
- * stays reserved and a restore brings the row back with it. Apps that never
- * posted get their default Channel created (eager D-006) in their team-space
+ * stays occupied, and creating a Channel there adopts it and starts clean
+ * (no restore; #1257, #1226). Apps that never posted get their default
+ * Channel created (eager D-006) in their team-space
  * memory — resolved by the canonical team-space resolver, then the Team
  * Agent locator when several qualify; an App that stays ambiguous is
  * reported, not guessed.
@@ -65,11 +68,12 @@ export interface BackfillReport {
 /** The allocator's high-water mark for one root, computed the way it computes it. */
 async function highWater(
   db: PrismaClient | Prisma.TransactionClient,
-  root: { memoryId: string; loc: string; data: unknown },
+  root: { id: string; memoryId: string; loc: string; data: unknown },
 ): Promise<{ lastSeq: number; encrypted: boolean }> {
   const data = root.data && typeof root.data === 'object' && !Array.isArray(root.data) ? (root.data as Record<string, unknown>) : {};
   const encrypted = '__enc' in data;
-  const counter = !encrypted && typeof data.messageCount === 'number' ? data.messageCount : 0;
+  const row = await db.chatRootCounter.findUnique({where:{chatRootNodeId:root.id},select:{messageCount:true}});
+  const counter = row?.messageCount ?? (!encrypted ? legacyMessageCount(data) : 0);
   const top = await maxMessageSeqAtLiteralLocPrefix(db, root.memoryId, `${root.loc}:messages:`);
   return { lastSeq: Math.max(counter, top), encrypted };
 }
@@ -90,10 +94,7 @@ async function pickTeamSpace(
   try {
     agentId = (await locateTeamAgent(ctx, appId, null)).id;
   } catch {
-    const installed = await db.appAgent.findMany({
-      where: { appId },
-      select: { agent: { select: { id: true, deletedAt: true } } },
-    });
+    const installed = (await listAppInstallations(db,appId));
     const live = installed.map((r) => r.agent).filter((a) => a && !a.deletedAt);
     if (live.length === 1) agentId = live[0].id;
   }
@@ -249,6 +250,8 @@ export async function backfillChannels(db: PrismaClient, opts: { apply: boolean 
     }
     report.defaultsProvisioned += 1;
     if (opts.apply) {
+      // A refused provisioning (including DECISION_CONTAINED) aborts this run;
+      // prior items are committed separately. Fix the placement before retrying.
       await ensureChannelWithRoot(db, {
         memoryId,
         loc: TEAM_CHAT_LOC,
@@ -273,7 +276,7 @@ export async function backfillChannels(db: PrismaClient, opts: { apply: boolean 
     if (opts.apply) {
       report.registerRowsCreated += await ensureInstallRegisterRows(db, app.id, { createdBy: app.createdBy ?? null });
     } else {
-      const installs = await db.appAgent.count({ where: { appId: app.id, agent: { deletedAt: null } } });
+      const installs = (await listAppInstallations(db,app.id)).length;
       const rows = await db.registerEntry.count({ where: { appId: app.id, installDefault: true, deletedAt: null } });
       report.registerRowsCreated += Math.max(0, installs - rows);
     }

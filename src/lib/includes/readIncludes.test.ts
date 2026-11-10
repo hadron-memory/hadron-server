@@ -340,3 +340,124 @@ describe('pinned revisions: the live revision and sealed history (Atilla P2-1/P2
     expect(wrong.data).toEqual({ node: { content: `${BROKEN_INCLUDE_NOTICE}|${BROKEN_INCLUDE_NOTICE}` } });
   });
 });
+
+/**
+ * #2135 — R77 (cor:dmo:150:02): an include tag written as code is literal text on the
+ * SERVED path. The parser already leaves it unspliced; the renderer then handed it to
+ * Mustache, which dropped it as a partial with no definition. Written red-first on
+ * main b66708bf; each case reads through the owning GraphQL/MCP code, not the parser.
+ */
+describe('literal include examples in Markdown code (#2135)', () => {
+  const mcp = (u: { id: string }) => createTestableMcpServer({ userId: u.id, roles: [], clientId: `user:${u.id}` });
+  const bodyOf = (text: string) => text.split('\n\n---\n\n').slice(1).join('\n\n---\n\n');
+  const read = async (loc: string) =>
+    ((await run(NODE_Q, as(reader), { ref: urn(loc) })).data as { node: { content: string } }).node.content;
+
+  const LITERALS: Array<[string, string]> = [
+    ['an inline span', 'see `{{> b}}` for syntax'],
+    ['a multi-line inline span', 'see `{{> b}}\nand more` end'],
+    ['a double-backtick span', 'see ``{{> b}}`` for syntax'],
+    ['a backtick fence with an info string', 'before\n```md title\n{{> b}}\n```\nafter'],
+    ['a backtick fence closed by a longer fence', 'before\n```\n{{> b rev=1}}\n`````\nafter'],
+    ['a tilde fence', 'before\n~~~\n{{> b}}\n~~~\nafter'],
+    ['an indented block', 'before\n\n    {{> b}}\n\nafter'],
+    ['malformed include-looking text', 'see `{{> nope rev=x}}` and\n```\n{{> hrn:node:bad}}\n```'],
+  ];
+
+  it.each(LITERALS)('%s survives the served read byte for byte', async (_name, stored) => {
+    await mk('b', 'B');
+    await mk('a', stored);
+    expect(await read('a')).toBe(stored);
+    expect((await run(NODE_Q, as(reader), { ref: urn('a'), raw: true })).data).toEqual({ node: { content: stored } });
+  });
+
+  it('a literal example and an active include in one node: the example stays, the include splices', async () => {
+    await mk('b', 'B');
+    await mk('a', '`{{> b}}` real: {{> b}}');
+    expect(await read('a')).toBe('`{{> b}}` real: B');
+  });
+
+  it('variables still render across the node while the example survives', async () => {
+    await mk('b', 'B');
+    await mk('v', 'Hi {{name}} `{{> b}}`', { data: { name: 'Zed' } });
+    expect(await read('v')).toBe('Hi Zed `{{> b}}`');
+  });
+
+  it('a stored malformed ACTIVE tag no longer costs the node its literal examples', async () => {
+    await mk('b', 'B');
+    await mk('a', 'keep `{{> b}}` here {{> b rev=x}}');
+    expect(await read('a')).toBe('keep `{{> b}}` here ');
+  });
+
+  it('an example inside an included node survives, nested one level further down too', async () => {
+    await mk('c', 'syntax: `{{> b}}`');
+    await mk('b', 'B');
+    await mk('mid', 'mid {{> c}}');
+    await mk('a', 'top {{> mid}} {{> b}}');
+    expect(await read('a')).toBe('top mid syntax: `{{> b}}` B');
+  });
+
+  it('a revision-pinned include carries its example too', async () => {
+    await mk('b', 'B');
+    const c = await mk('c', 'v1 `{{> b}}`');
+    await db.nodeRevision.create({
+      data: { id: generateId(), nodeId: c.id, memoryId, revNo: 1, loc: 'c', name: 'c', content: 'old `{{> b}}`', tags: [] },
+    });
+    await mk('a', '{{> c rev=1}} | {{> c}}');
+    expect(await read('a')).toBe('old `{{> b}}` | v1 `{{> b}}`');
+  });
+
+  it('code is judged per source node: an included node that ends mid-fence does not turn the includer\'s next tag into code', async () => {
+    await mk('b', 'B');
+    await mk('open', 'start\n```\nunterminated');
+    await mk('a', '{{> open}}\n{{> b}}');
+    expect(await read('a')).toBe('start\n```\nunterminated\nB');
+    // and the includer's own literal example after such an include is still literal
+    await mk('a2', '{{> open}}\n`{{> b}}`');
+    expect(await read('a2')).toBe('start\n```\nunterminated\n`{{> b}}`');
+  });
+
+  it('text that merely looks like a protection marker is not corrupted', async () => {
+    await mk('b', 'B');
+    const looksLike = '\u0001hrn-lit-0000\u0001 `{{> b}}` \u0001';
+    await mk('a', looksLike);
+    expect(await read('a')).toBe(looksLike);
+  });
+
+  it('reads change nothing stored for a node holding examples', async () => {
+    await mk('b', 'B');
+    const a = await mk('a', 'x `{{> b}}` y');
+    const before = await db.node.findUniqueOrThrow({ where: { id: a.id } });
+    const revs = await db.nodeRevision.count({ where: { nodeId: a.id } });
+    for (let i = 0; i < 3; i++) await read('a');
+    const after = await db.node.findUniqueOrThrow({ where: { id: a.id } });
+    expect(after.content).toBe('x `{{> b}}` y');
+    expect(after.contentHash).toBe(before.contentHash);
+    expect(after.revSeq).toBe(before.revSeq);
+    expect(await db.nodeRevision.count({ where: { nodeId: a.id } })).toBe(revs);
+  });
+
+  it('MCP hadron_get_node, hadron_get_nodes and hadron_get_next_node serve the same text as GraphQL', async () => {
+    await mk('b', 'B');
+    await mk('p', null);
+    const stored = 'use `{{> b}}`\n```\n{{> b}}\n```\nthen {{> b}}';
+    await mk('p:1', stored);
+    const served = 'use `{{> b}}`\n```\n{{> b}}\n```\nthen B';
+    expect(await read('p:1')).toBe(served);
+    expect(bodyOf(await mcp(reader).callToolText('hadron_get_node', { urn: urn('p:1') }))).toBe(served);
+    expect(bodyOf(await mcp(reader).callToolText('hadron_get_node', { urn: urn('p:1'), raw: true }))).toBe(stored);
+    const batch = await mcp(reader).callToolText('hadron_get_nodes', { refs: [urn('p:1')] });
+    expect(batch).toContain(served);
+    expect(await mcp(reader).callToolText('hadron_get_nodes', { refs: [urn('p:1')], raw: true })).toContain(stored);
+    expect(bodyOf(await mcp(reader).callToolText('hadron_get_next_node', { parent: urn('p') }))).toBe(served);
+    expect(bodyOf(await mcp(reader).callToolText('hadron_get_next_node', { parent: urn('p'), raw: true }))).toBe(stored);
+  });
+
+  it('the include-only read (mode includes) is unchanged: literal stays, active splices, variables untouched', async () => {
+    await mk('b', 'B');
+    const stored = '`{{> b}}` {{> b}} {{name}}';
+    const a = await mk('a', stored, { data: { name: 'Zed' } });
+    const { resolveNodeContent } = await import('./resolveNodeContent.js');
+    expect(await resolveNodeContent(as(reader), a, { mode: 'includes' })).toBe('`{{> b}}` B {{name}}');
+  });
+});

@@ -17,6 +17,17 @@ export interface IncludeTag {
   raw: string;
 }
 
+/**
+ * More include tags than the caller allows (hadron-internal#40): thrown before the next tag is
+ * built, so a body with a huge number of tags never materializes them all.
+ */
+export class TooManyIncludeTags extends Error {
+  constructor() {
+    super('Too many include tags');
+    this.name = 'TooManyIncludeTags';
+  }
+}
+
 export class IncludeSyntaxError extends Error {
   constructor(public readonly raw: string, public readonly reason: string) {
     super(`Invalid include tag ${raw}: ${reason}`);
@@ -30,7 +41,7 @@ export class IncludeSyntaxError extends Error {
  * is text, not a partial. Mustache itself does not know markdown, so this is
  * the one place the "code is literal" rule lives (#2040).
  */
-function maskCode(content: string): string {
+export function maskCode(content: string): string {
   const lines = content.split('\n');
   let fence: string | null = null;
   let prevBlank = true;
@@ -85,10 +96,44 @@ export function parseIncludeTags(content: string): IncludeTag[] {
   return locateIncludeTags(content).map(({ index: _index, ...tag }) => tag);
 }
 
-/** `parseIncludeTags` with each tag's offset in `content`, for the reader that splices resolved text in (#2041). */
-export function locateIncludeTags(content: string): Array<IncludeTag & { index: number }> {
+/**
+ * The include-shaped text that `locateIncludeTags` skips because it is written
+ * as code, with each span's offset (#2135). Same `maskCode`, so the splice and
+ * the renderer cannot disagree about what is code. Never throws.
+ */
+export function locateLiteralIncludeTags(
+  content: string,
+  /** `maskCode(content)` when the caller already has it (#40: one mask per text, not one per pass). */
+  masked: string = content.includes('{{>') ? maskCode(content) : content,
+): Array<{ index: number; raw: string }> {
   if (!content.includes('{{>')) return [];
-  const masked = maskCode(content);
+  const literal: Array<{ index: number; raw: string }> = [];
+  // Both match streams ascend by offset, so one forward walk finds every overlap: linear, and the active
+  // tags are read one at a time as the walk reaches them, never collected into a list (#40).
+  const active = masked.matchAll(TAG);
+  let current = active.next();
+  for (const m of content.matchAll(TAG)) {
+    const start = m.index!;
+    const end = start + m[0].length;
+    while (!current.done && current.value.index! + current.value[0].length <= start) current = active.next();
+    if (!current.done && current.value.index! < end) continue;
+    literal.push({ index: start, raw: m[0] });
+  }
+  return literal;
+}
+
+/**
+ * `parseIncludeTags` with each tag's offset in `content`, for the reader that splices resolved text in (#2041).
+ * `maxTags` (#40) bounds what a read materializes: a well-formed tag past it throws `TooManyIncludeTags`
+ * instead of being kept. A malformed tag still throws `IncludeSyntaxError` wherever it is met, as it always did.
+ */
+export function locateIncludeTags(
+  content: string, maxTags = Infinity,
+  /** `maskCode(content)` when the caller already has it. */
+  masked?: string,
+): Array<IncludeTag & { index: number }> {
+  if (!content.includes('{{>')) return [];
+  masked ??= maskCode(content);
   const tags: Array<IncludeTag & { index: number }> = [];
   for (const m of masked.matchAll(TAG)) {
     const raw = content.slice(m.index!, m.index! + m[0].length);
@@ -103,14 +148,19 @@ export function locateIncludeTags(content: string): Array<IncludeTag & { index: 
       else if (p === 'signed' && !settings.signed) settings.signed = true;
       else throw new IncludeSyntaxError(raw, `unknown or repeated setting "${p}"`);
     }
-    if (target.startsWith('hrn:') || target.startsWith('urn:')) {
+    if (target.startsWith('hrn:node:')) {
+      // cor:dmo:150:02 / R78: include URNs use only flat v2, even though
+      // the general URN parser deliberately still accepts legacy aliases.
+      if (target.includes('::')) throw new IncludeSyntaxError(raw, 'target must be a flat v2 node URN');
       try {
         splitNodeUrn(target);
       } catch {
         throw new IncludeSyntaxError(raw, 'target is not a valid node URN');
       }
+      if (tags.length >= maxTags) throw new TooManyIncludeTags();
       tags.push({ kind: 'urn', target, settings, raw, index: m.index! });
     } else {
+      if (tags.length >= maxTags) throw new TooManyIncludeTags();
       tags.push({ kind: 'loc', target, settings, raw, index: m.index! });
     }
   }

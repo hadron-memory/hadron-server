@@ -215,3 +215,15 @@ describe('mergeUsers — owner-namespaced URN re-own (#695)', () => {
     expect((await db.agent.findUniqueOrThrow({ where: { id: pub.id } })).urn).toBe(`${org.urn}:pub`);
   });
 });
+
+it('reserves an Agent tombstone slug while a retained install memory names it', async () => {
+ const src=await resolvers.Mutation.createAgent({}, {name:'Held'},ctxFor(source.id));
+ const ghost=await resolvers.Mutation.createAgent({}, {name:'Held'},ctxFor(target.id));
+ await db.agent.update({where:{id:ghost.id},data:{deletedAt:new Date()}});
+ const app=await db.app.create({data:{id:generateId(),ownerUserId:target.id,name:'Retained',urn:'merge-retained-app'}});
+ const memory=await db.memory.create({data:{class:'system',appId:app.id,ownerUserId:target.id,isInstallMemory:true,installOfAgentId:ghost.id,name:'Retained',urn:'merge-retained-memory'}});
+ await mergeUsers(db,{sourceUserId:source.id,targetUserId:target.id});
+ expect((await db.agent.findUniqueOrThrow({where:{id:src.id}})).urn).not.toBe('merge-target:held');
+ expect(await db.agent.findUnique({where:{id:ghost.id}})).not.toBeNull();
+ expect((await db.memory.findUniqueOrThrow({where:{id:memory.id}})).installOfAgentId).toBe(ghost.id);
+});
