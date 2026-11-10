@@ -1,4 +1,4 @@
-import { respondSessionSuperseded } from './lib/sessionSuperseded.js';
+import { isSessionSupersededError, respondSessionSuperseded } from './lib/sessionSuperseded.js';
 import { assertRateReadiness, checkRateConfiguration, cleanupRateBuckets } from './lib/rateLimit/index.js';
 import { deliveryPendingPlugin } from './api/graphql/deliveryPendingPlugin.js';
 import { verifiedLoginEvidence } from './auth/loginEvidence.js';
@@ -1308,7 +1308,15 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
             extensions: { code: 'FORBIDDEN', ...surfaceRefusal, http: { status: 403 } },
           });
         }
-        await bindPresentedSession(req, db, auth);
+        try {
+          await bindPresentedSession(req, db, auth);
+        } catch (error) {
+          // #3818: a pre-work refusal is not an ambiguous gateway/internal 5xx to clients.
+          if (isSessionSupersededError(error)) throw new GraphQLError(error.message, {
+            extensions: { ...error.extensions, http: { status: 409 } },
+          });
+          throw error;
+        }
         stageRequestOperationKey(req.headers[OPERATION_KEY_HEADER], auth);
         // Stage caller-held unlock keys from the request header. Every
         // encrypt/decrypt call site consults sessionKeyCache.getByMemoryId,
