@@ -29,28 +29,40 @@ export type Combination = { family: string | null; tier: string | null; role: st
 export const MATCH_OUTCOME_RETENTION_HOURS = 168;
 /** Rows one purge deletes at most. */
 const PURGE_BATCH = 1000;
-/** A request that names more combinations than this records against the first of them in stable order. */
-const MAX_COMBINATIONS = 64;
 
-/** The combinations a task's requirements name; an open dimension is `null`; unusable requirements name none at all. */
+/**
+ * The combinations a task's requirements name, ALL of them (a MATCHED must clear every row a failure could have set);
+ * an open dimension is `null`. Unusable (invalid) requirements name none at all and record nothing: such a task can
+ * never be matched, so it must not start a streak on the fully open combination (George P3-6).
+ */
 export function combinationsOf(req: Requirements): Combination[] {
-  if (req.invalid) return [{ family: null, tier: null, role: null }];
+  if (req.invalid) return [];
   const families: (string | null)[] = req.familyIn?.length ? [...new Set(req.familyIn)].sort() : [null];
   const roles: (string | null)[] = req.roles?.length ? [...new Set(req.roles)].sort() : req.role ? [req.role] : [null];
   const tier = req.minTier ?? null;
   const out: Combination[] = [];
   for (const family of families) for (const role of roles) out.push({ family, tier, role });
-  return out.slice(0, MAX_COMBINATIONS);
+  return out;
+}
+
+/** The database clock now, as a naive-UTC Date: take it BEFORE judging a match, to stamp a failure recorded after a gap. */
+export async function decisionClock(db: Db): Promise<Date> {
+  const [{ ts }] = await db.$queryRaw<{ ts: Date }[]>(Prisma.sql`SELECT (clock_timestamp() AT TIME ZONE 'UTC') AS ts`);
+  return ts;
 }
 
 /**
  * Record one decided outcome for `appId` against each combination `req` names. One statement, so a decision lands
- * whole. An older decision never overwrites a newer one (`decided_at` guard).
+ * whole. An older decision never overwrites a newer one (`decided_at` guard): a failure judged before a success that
+ * landed first is dropped, because it is stamped with when it was decided, not when it was written (George P2-4).
  */
 export async function recordMatchOutcome(
   db: Db, appId: string, req: Requirements, outcome: MatchOutcomeKind, reason: string | null = null,
+  /** When the decision was made (`decisionClock`), for a record written after a gap; default: now (DB clock). */
+  decidedAt: Date | null = null,
 ): Promise<void> {
   const combos = combinationsOf(req);
+  if (combos.length === 0) return;
   const families = combos.map(c => c.family ?? '');
   const tiers = combos.map(c => c.tier ?? '');
   const roles = combos.map(c => c.role ?? '');
@@ -59,7 +71,7 @@ export async function recordMatchOutcome(
     INSERT INTO agent_match_outcomes (app_id, family, tier, role, outcome, reason, decided_at, failing_since)
     SELECT ${appId}, f, t, r, ${outcome}, ${failing ? reason : null}::text, c.ts, ${failing ? Prisma.sql`c.ts` : Prisma.sql`NULL::timestamp`}
     FROM unnest(${families}::text[], ${tiers}::text[], ${roles}::text[]) AS u(f, t, r)
-    CROSS JOIN (SELECT (clock_timestamp() AT TIME ZONE 'UTC') AS ts) c
+    CROSS JOIN (SELECT COALESCE((${decidedAt}::timestamptz AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC')) AS ts) c
     ON CONFLICT (app_id, family, tier, role) DO UPDATE SET
       outcome = EXCLUDED.outcome,
       reason = EXCLUDED.reason,
@@ -104,5 +116,7 @@ export async function purgeMatchOutcomes(db: Db): Promise<number> {
   return db.$executeRaw(Prisma.sql`
     DELETE FROM agent_match_outcomes WHERE (app_id, family, tier, role) IN (
       SELECT app_id, family, tier, role FROM agent_match_outcomes
-      WHERE decided_at < (clock_timestamp() AT TIME ZONE 'UTC') - make_interval(hours => ${MATCH_OUTCOME_RETENTION_HOURS}::int) LIMIT ${PURGE_BATCH})`);
+      WHERE decided_at < (clock_timestamp() AT TIME ZONE 'UTC') - make_interval(hours => ${MATCH_OUTCOME_RETENTION_HOURS}::int) LIMIT ${PURGE_BATCH})
+    -- Re-judged on the locked row: a row a matcher refreshed while this waited is no longer expired (George P2-3).
+    AND decided_at < (clock_timestamp() AT TIME ZONE 'UTC') - make_interval(hours => ${MATCH_OUTCOME_RETENTION_HOURS}::int)`);
 }
