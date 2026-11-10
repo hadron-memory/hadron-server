@@ -84,3 +84,28 @@ it('a successful match and a plain create carry no list; a non-participant gets 
     .rejects.toMatchObject({ extensions: { code: 'APP_NOT_FOUND' } });
   expect(Q).toBeTruthy();
 });
+it('a retired worker of another role is not a candidate; a retired one of the role is (RETIRED)', async () => {
+  const other = await worker('RetiredEng', 'engineer'); const mine = await worker('RetiredRev');
+  await db.worker.updateMany({ where: { id: { in: [other.id, mine.id] } }, data: { retiredAt: new Date() } });
+  expect(byName(await create())).toEqual({ RetiredRev: ['RETIRED'] });
+});
+it('an agent that uses no tasks reads USES_NO_TASKS', async () => {
+  await worker('NoTasks'); await db.agent.update({ where: { id: agent.id }, data: { usesTasks: false } });
+  expect(byName(await create()).NoTasks).toContain('USES_NO_TASKS');
+});
+it('NO_FAMILY for an unbound worker no host can launch; NOT_LIVE for a bound worker gone quiet', async () => {
+  await worker('Unbound', 'reviewer', { session: false });
+  const quiet = await worker('Quiet');
+  const old = new Date(Date.now() - 3 * 86_400_000);
+  await db.session.updateMany({ where: { workerId: quiet.id }, data: { startedAt: old, updatedAt: old } });
+  const r = byName(await create());
+  expect(r.Unbound).toEqual(['NO_FAMILY']);
+  expect(r.Quiet).toEqual(['NOT_LIVE']);
+});
+it('a worker under a stop signal reads STOP_SIGNAL', async () => {
+  const w = await worker('Paused');
+  await db.teamStopSignal.create({ data: { id: generateId(), appId: app.id, level: 'pause', scope: 'worker', targetWorkerId: w.id, setAt: new Date(), setByUserId: owner.id } });
+  const t = await create();
+  expect(t.matchFailedReason).toBe('STOP_SIGNAL');
+  expect(byName(t)).toEqual({ Paused: ['STOP_SIGNAL'] });
+});
