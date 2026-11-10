@@ -15,7 +15,7 @@ import { Client } from 'pg';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer } from '../server.js';
 import { db } from '../integrations/db/client.js';
-import { cleanDb, createDbNode, createDbOrgAndGraph } from '../test/helpers.js';
+import { cleanDb, createDbNode, createDbOrgAndGraph, createDbPersonalMemory } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { insertSoftPasskey, softPasskey, type SoftPasskey } from '../test/softPasskey.js';
 import { upsertPlatformActions } from '../lib/grants/actions.js';
@@ -116,12 +116,12 @@ function assertionBody(ceremonyId: string, key: SoftPasskey, a: ReturnType<SoftP
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 interface Proved { cookie: string; status: number; json: any; text: string }
 
-async function prove(id: string, who: { key: SoftPasskey }): Promise<Proved> {
-  const c = await post(id, 'proof/challenge', {});
+async function prove(id: string, who: { key: SoftPasskey }, opts: { cookie?: string; counter?: number } = {}): Promise<Proved> {
+  const c = await post(id, 'proof/challenge', {}, opts.cookie);
   expect(c.status).toBe(200);
-  const preCookie = (c.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
+  const preCookie = (c.headers.get('set-cookie') ?? '').split(';')[0] || (opts.cookie ?? '');
   const { ceremonyId, challenge } = await c.json() as { ceremonyId: string; challenge: string };
-  const a = who.key.assert({ payload: Buffer.alloc(0), rawChallenge: Buffer.from(challenge, 'base64url'), origin: ORIGIN, rpId: RP, counter: 1 });
+  const a = who.key.assert({ payload: Buffer.alloc(0), rawChallenge: Buffer.from(challenge, 'base64url'), origin: ORIGIN, rpId: RP, counter: opts.counter ?? 1 });
   const r = await post(id, 'proof', assertionBody(ceremonyId, who.key, a), preCookie);
   const cookie = (r.headers.get('set-cookie') ?? '').split(';')[0] || preCookie;
   const text = await r.text();
@@ -194,6 +194,50 @@ describe('C9 + C5: the proof shows the server-built terms only to someone who ma
     expect(p.json.view.app.urn).toBe(appUrn);
     expect(p.json.view.maxUses).toBe(3);
     expect(p.json.signing.challenge).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  });
+
+  // Rodolfo §10 P3-1 (#3805): the proof's data-exposure guards. A grant naming a node the prover cannot read shows no summary,
+  // offers no signing, names no URN of that node, and mints no GRANT_SIGN ceremony.
+  async function grantOnUnreadableNode(): Promise<{ grantId: string; nodeId: string; nodeUrnPart: string }> {
+    const agent = await db.agent.create({ data: { organizationId: orgId, name: 'gs-hidden-agent', urn: `${orgId}:gs-hidden-agent` } });
+    const mem = await createDbPersonalMemory(db, { userId: requester.id, organizationId: orgId, agentId: agent.id, appId, name: 'gs-hidden' });
+    const node = await createDbNode(db, { loc: 'flows:secret-flow', memoryId: mem.id, name: 'Secret', content: 'x' });
+    const grantId = generateId();
+    await db.$executeRawUnsafe(`INSERT INTO grants (id, app_id, worker_id, action, action_values, reason, max_uses, created_at, updated_at)
+      VALUES ($1, $2, $3, 'schedule.create', $4::jsonb, $5, 3, (clock_timestamp() AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC'))`,
+    grantId, appId, workerId, JSON.stringify({ entryNode: node.id }), REASON);
+    return { grantId, nodeId: node.id, nodeUrnPart: 'secret-flow' };
+  }
+
+  it('Rodolfo P3-1: a node the issuer cannot read: summary null, canSign false, no URN, no signing ceremony minted', async () => {
+    const { grantId, nodeId, nodeUrnPart } = await grantOnUnreadableNode();
+    const req = await openRequest(grantId);
+    const p = await prove(req.id, admin);
+    expect(p.status).toBe(200);
+    expect(p.json.outcome).toBe('open');
+    expect(p.json.view.summary).toBeNull();
+    expect(p.json.canSign).toBe(false);
+    expect(p.text).not.toContain(nodeUrnPart);
+    expect(p.text).not.toContain(nodeId);
+    expect(p.text).not.toContain('gs-hidden');
+    expect(await unconsumedGrantSign(admin.id)).toBe(0);
+  });
+
+  it('Rodolfo P3-2: a later proof that cannot sign retires this browser\'s earlier signing ceremony', async () => {
+    const g = await insertGrant();
+    const req = await openRequest(g);
+    const first = await prove(req.id, admin);
+    expect(first.json.canSign).toBe(true);
+    expect(await unconsumedGrantSign(admin.id)).toBe(1);
+    // The node the grant names is gone, so the next proof in the SAME browser cannot build the terms.
+    await db.node.update({ where: { id: entryNodeId }, data: { deletedAt: new Date() } });
+    const second = await prove(req.id, admin, { cookie: first.cookie, counter: 2 });
+    expect(second.json.canSign).toBe(false);
+    expect(await unconsumedGrantSign(admin.id)).toBe(0);
+    // The earlier ceremony can no longer complete.
+    const r = await post(req.id, 'complete', signingBody(first, admin, 3), first.cookie);
+    expect(r.status).toBe(403);
+    expect((await grantRow(g)).activated_at).toBeNull();
   });
 
   it('someone who may not issue it gets the one refusal: nothing about the grant', async () => {

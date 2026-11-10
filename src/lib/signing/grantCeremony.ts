@@ -279,15 +279,16 @@ export async function proveForGrantSigning(db: PrismaClient, a: {
       maxUses: g.max_uses,
       requestExpiresAt: row.expiresAt.toISOString(),
     };
-    if (summary === null) return { outcome: 'open' as const, view, canSign: false };
-
     // As node signing: the signing ceremony is bound to a FRESH server-chosen browser nonce (no fixation), and a newer proof
     // in this browser retires this person's earlier GRANT_SIGN ceremony. Only GRANT_SIGN rows of THIS prover: a node proof
-    // never touches a grant ceremony, and a grant proof never touches a node one or another person's.
+    // never touches a grant ceremony, and a grant proof never touches a node one or another person's. The retirement comes
+    // BEFORE the can't-sign answer (Rodolfo P3-2, #3805): a proof that finds the terms unreadable must not leave an earlier
+    // ceremony in this browser able to sign them.
     const sessionNonce = randomBytes(32).toString('base64url');
     await tx.$executeRaw`UPDATE passkey_ceremonies SET consumed_at = (clock_timestamp() AT TIME ZONE 'UTC')
       WHERE purpose = 'GRANT_SIGN' AND user_id = ${cred.owner_id}
         AND browser_nonce_hash IN (${a.browserNonceHash}, ${sha256Hex(sessionNonce)}) AND consumed_at IS NULL`;
+    if (summary === null) return { outcome: 'open' as const, view, canSign: false };
     let challenge: Buffer;
     try { challenge = grantSigningChallenge(row); } catch { return { outcome: 'ended' as const, state: 'STALE' }; }
     await tx.$executeRaw`INSERT INTO passkey_ceremonies (id, purpose, browser_nonce_hash, challenge_hash, expires_at, user_id, kind)
