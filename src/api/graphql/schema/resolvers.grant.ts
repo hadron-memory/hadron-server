@@ -7,7 +7,7 @@
 import { appKeyCaller } from '../../../lib/appKeyScopes/scopes.js';
 import { requirePersonAsThemselves } from '../../../lib/auth/personAsThemselves.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
-import { getGrantForWorker, listGrantsForPerson, listGrantsForWorker, type GrantReader } from '../../../lib/grants/read.js';
+import { getGrantForWorker, isPersonAudience, listGrantsForPerson, listGrantsForWorker, type GrantReader } from '../../../lib/grants/read.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { loadGrantSignatureStatuses, type GrantSignatureStatusView, type GrantSignatureView } from '../../../lib/signing/grantStatus.js';
 import { clampListTake, type Context } from './resolvers.helpers.js';
@@ -74,7 +74,8 @@ const statusBatches = new WeakMap<Context, StatusBatch>();
 /**
  * #3649 slice D — the signatureStatus of every grant resolved in one tick of a request shares ONE load (the
  * Node.signatureStatus batch pattern, #1632), so a `grants` page pays per page, not per row. The parent grant was already
- * authorized by `grant(ref:)` / `grants`, the only reads that return a Grant; this field adds no reach.
+ * authorized by `grant(ref:)` / `grants` (worker audience) or `myGrants` (person audience, which gets no signature list: see the
+ * field resolver below); this load is audience-blind and its value is never mutated.
  */
 function loadGrantSignatureStatus(ctx: Context, grantId: string): Promise<GrantSignatureStatusView> {
   let batch = statusBatches.get(ctx);
@@ -106,7 +107,13 @@ function loadGrantSignatureStatus(ctx: Context, grantId: string): Promise<GrantS
 export const grantFieldResolvers = {
   Grant: {
     /** #3649 slice D (cor:acl:140:07): the grant's signatures, re-verified on this read. */
-    signatureStatus: (g: { id: string }, _: unknown, ctx: Context) => loadGrantSignatureStatus(ctx, g.id),
+    signatureStatus: async (g: { id: string }, _: unknown, ctx: Context) => {
+      const status = await loadGrantSignatureStatus(ctx, g.id);
+      // #3800 P2-2: a person listing their OWN grants (myGrants) may be outside the App's Org; the signer's identity and
+      // device are another tenant's person. Withheld on the PARENT's mark, AFTER the shared load, into a fresh object, so the
+      // cached value and a worker's read of the same grant in the same request are untouched.
+      return isPersonAudience(g) ? { state: status.state, integrityProblems: status.integrityProblems, signatures: [] } : status;
+    },
   },
   GrantSignature: {
     /** cor:acl:140:08: a live person as handle and URN; an erased signer reads null (a deleted user). The sealed id is never echoed. */

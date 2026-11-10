@@ -2102,9 +2102,9 @@
     },
     "GrantSignatureStatus.signatures": {
       "class": "parent-implies-child",
-      "audience": "reached only through Grant.signatureStatus, i.e. by callers who may read the grant (grant(ref:)/grants, the #3789 worker read gate); a grant's own signature records, re-verified on read",
+      "audience": "reached only through Grant.signatureStatus by a bound worker reading its own App's grants (grant(ref:)/grants, the #3789 gate). A person listing their own grants (myGrants, #3800) is given state and integrityProblems only: this list is empty for them, withheld in the field resolver on the parent row's audience mark (gate call, #3800 P2-2); a grant's own signature records, re-verified on read",
       "spec": "cor:acl:140:07",
-      "resolver": "src/api/graphql/schema/resolvers.grant.ts::loadGrantSignatureStatus",
+      "resolver": "src/api/graphql/schema/resolvers.grant.ts::grantFieldResolvers",
       "target": "GrantSignature"
     },
     "GrantSignature.signer": {
