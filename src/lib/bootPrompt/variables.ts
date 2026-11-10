@@ -19,3 +19,15 @@ export function agentPlatformValues(agent: { name: string; urn: string; personaR
     'session.llmModel': '',
   };
 }
+
+/**
+ * #3843 (cor:dmo:150:08, rulings:0066): the values a surface that binds no worker fills, with the client-reported model
+ * (empty when none is reported). A chat serves with exactly these, and the served-prompt read (`agentServedBootPrompt`,
+ * `hadron_agent_boot_prompt`) renders with them, so the read and a chat can't fill one prompt differently.
+ */
+export function noWorkerVariables(
+  agent: { name: string; urn: string; personaRole: string | null },
+  llmModel: string | null,
+): PlatformVariableValues {
+  return { ...agentPlatformValues(agent), 'session.llmModel': llmModel ?? '' };
+}
