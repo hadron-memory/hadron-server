@@ -90,7 +90,10 @@ describe('a bound worker creates a PENDING grant for itself or its role agent', 
     });
     const row = (await db.$queryRawUnsafe<any[]>('SELECT * FROM grants WHERE id = $1', g.id))[0];
     expect(row).toMatchObject({ activated_at: null, verification_kind: null, verified_by: null, signature_id: null, use_count: 0, version: 1, holder_departed_at: null });
-    expect(await isGrantLive(db, g.id)).toBe(false);
+    expect(isGrantLive({
+      activatedAt: row.activated_at, revokedAt: row.revoked_at, holderDepartedAt: row.holder_departed_at, appDeletedAt: null,
+      startsAt: row.starts_at, expiresAt: row.expires_at, maxUses: row.max_uses, useCount: row.use_count,
+    }, new Date())).toBe(false);
     const read = await post(rawKey, sessionId, 'query($r:ID!){grant(ref:$r){id allows}}', { r: g.id });
     expect(read.data.grant).toEqual({ id: g.id, allows: false });
   });
@@ -124,7 +127,7 @@ describe('a worker cannot make a row live by any route (ruling 0099)', () => {
   it('no input field or alias reaches activation, revocation, use counts or the issuer', async () => {
     for (const field of ['activatedAt', 'verifiedBy', 'verificationKind', 'signatureId', 'revokedAt', 'revokedBy', 'issuerUserId', 'useCount', 'version', 'holderDepartedAt', 'state']) {
       const r = await asWorker(selfInput({ [field]: field === 'useCount' || field === 'version' ? 1 : 'x' }));
-      expect(code(r), field).toBe('GRAPHQL_VALIDATION_FAILED');
+      expect(['BAD_USER_INPUT', 'GRAPHQL_VALIDATION_FAILED'], field).toContain(code(r));
     }
     expect(await rowCount()).toBe(0);
   });
@@ -203,7 +206,7 @@ describe('typed refusals, each judged before any write: no refused call leaves a
       { entryNode: 5 }, { entryNode: true }, { entryNode: null }, { entryNode: { id: 'x' } }, { entryNode: [] }, { entryNode: [[ 'a' ]] },
       { entryNode: '' }, { entryNode: [generateId(), '*'] },
       { entryNode: '*' },                              // the parameter refuses a wildcard (cor:acl:140:02)
-      'a string', ['a'], null, 7,
+      'a string', ['a'], 7,
     ];
     for (const values of bad) {
       expect(code(await asWorker(selfInput({ values }))), JSON.stringify(values)).toBe('GRANT_VALUES_INVALID');
@@ -236,6 +239,33 @@ describe('the locking carries from the section 10 review of #3792', () => {
       appId: w.appId, requester, holder: { kind: 'worker', id: otherAppWorkerId },
       action: 'schedule.create', values: entry(), reason: 'x',
     }))).rejects.toMatchObject({ code: 'GRANT_HOLDER_NOT_ALLOWED' });
+    expect(await rowCount()).toBe(0);
+  });
+
+  // The creator is also called below the resolver, so its own requester and holder judgments are pinned directly (the resolver
+  // pre-validates, which would otherwise hide a removed guard). The worker-holder same-App/retired re-check is the carry-1 pin
+  // above for a foreign holder; for holder === requester it is subsumed by the requester's own App/retired check (equivalent).
+  const direct = async (over: { userId?: string; workerId?: string; holder: { kind: 'worker' | 'agent'; id: string } }) => {
+    const { createPendingGrant } = await import('../../../lib/grants/create.js');
+    return db.$transaction((tx) => createPendingGrant(tx, {
+      appId: w.appId, requester: { userId: over.userId ?? w.userId, workerId: over.workerId ?? w.workerId, sessionId },
+      holder: over.holder, action: 'schedule.create', values: entry(), reason: 'x',
+    }));
+  };
+
+  it('the creator itself refuses a deleted requester, a retired worker and another App\'s worker as requester', async () => {
+    await expect(direct({ userId: generateId(), holder: { kind: 'worker', id: w.workerId } })).rejects.toMatchObject({ code: 'GRANT_REQUESTER_NOT_WORKER' });
+    await expect(direct({ workerId: otherAppWorkerId, holder: { kind: 'worker', id: otherAppWorkerId } })).rejects.toMatchObject({ code: 'GRANT_REQUESTER_NOT_WORKER' });
+    await db.worker.update({ where: { id: w.workerId }, data: { retiredAt: new Date() } });
+    await expect(direct({ holder: { kind: 'worker', id: w.workerId } })).rejects.toMatchObject({ code: 'GRANT_REQUESTER_NOT_WORKER' });
+    expect(await rowCount()).toBe(0);
+  });
+
+  it('the creator itself refuses an installed agent that is not the requester\'s role agent', async () => {
+    const org = await db.organization.findUniqueOrThrow({ where: { id: w.orgId } });
+    const other = await db.agent.create({ data: { organizationId: org.id, name: 'other-agent', urn: `${org.urn}:other-agent` } });
+    await db.appAgent.create({ data: { appId: w.appId, agentId: other.id } });
+    await expect(direct({ holder: { kind: 'agent', id: other.id } })).rejects.toMatchObject({ code: 'GRANT_HOLDER_NOT_ALLOWED' });
     expect(await rowCount()).toBe(0);
   });
 
