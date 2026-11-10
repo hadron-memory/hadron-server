@@ -555,9 +555,42 @@ export async function newestApprovedRevisionOf(
   below?: number,
 ): Promise<NewestApprovedRevision> {
   const none: NewestApprovedRevision = { found: null, truncated: false };
+  const { live, snapshotNos, candidates } = await servableRevisionNumbers(db, nodeId, cap, meter, below);
+  if (!live) return none;
+  const examined = candidates.slice(0, cap);
+  // A metered walk (an include's resolved read) keeps its per-verdict charges, which #40 pins; only an unmetered one pre-filters.
+  const skippable = meter ? new Set<number>() : await revisionsWithNoApprovalHash(db, nodeId, live, examined);
+  for (const revNo of examined) {
+    if (skippable.has(revNo)) continue;
+    const verdict = await revisionApprovalOf(db, nodeId, revNo, meter);
+    if (verdict.state === 'NOT_APPLICABLE') return none;
+    if (verdict.state === 'APPROVED') {
+      return { found: { revNo, record: verdict.record!, source: snapshotNos.has(revNo) ? 'snapshot' : 'live' }, truncated: false };
+    }
+  }
+  const truncated = candidates.length > cap;
+  return truncated ? { found: null, truncated, resumeBelow: examined[examined.length - 1] } : { found: null, truncated };
+}
+
+/**
+ * The candidate revision numbers every newest-approved walk offers, newest first (#2041's enumeration, unchanged;
+ * #2973 extracted it so the approved-and-signed walk cannot drift from it): the live revision while NO snapshot at all
+ * holds its number, plus every snapshot servable from the node's CURRENT memory (a foreign-memory capture is never
+ * selected). `snapshotNos` marks which numbers a current-memory snapshot holds — the `source` an approval found there
+ * reports. Null `live` is a node that no longer exists: nothing to offer. `below` (#3801) continues a past-batch walk
+ * under that revision number only. `live` carries `memoryId` too: the unmetered pre-filter (`revisionsWithNoApprovalHash`)
+ * needs it.
+ */
+async function servableRevisionNumbers(
+  db: Pick<PrismaClient, 'node' | 'nodeRevision' | 'memory'> | Prisma.TransactionClient,
+  nodeId: string,
+  cap: number,
+  meter?: ApprovalReadMeter,
+  below?: number,
+): Promise<{ live: { memoryId: string; revSeq: number } | null; snapshotNos: Set<number>; candidates: number[] }> {
   meter?.chargeLookup();
   const live = await db.node.findUnique({ where: { id: nodeId }, select: { memoryId: true, revSeq: true } });
-  if (!live) return none;
+  if (!live) return { live: null, snapshotNos: new Set(), candidates: [] };
   // Snapshots servable from the node's CURRENT memory only (a foreign-memory capture is never selected).
   meter?.chargeLookup();
   const snapshots = await db.nodeRevision.findMany({
@@ -573,19 +606,66 @@ export async function newestApprovedRevisionOf(
   meter?.chargeLookup();
   const liveNumberHeld = (await db.nodeRevision.findFirst({ where: { nodeId, revNo: live.revSeq }, select: { id: true } })) != null;
   const candidates = [...(liveNumberHeld || (below != null && live.revSeq >= below) ? [] : [live.revSeq]), ...snapshotNos].sort((a, b) => b - a);
+  return { live, snapshotNos, candidates };
+}
+
+/** #2973 (cor:agt:040:10 R35) — the outcome of the approved-and-signed walk. */
+export interface NewestApprovedAndSignedRevision {
+  /** The newest revision that is both approved and signed; null when none was found. */
+  found: { revNo: number } | null;
+  /**
+   * True when some examined revision was APPROVED but did not carry a counting signature (R36's fork): the serve then
+   * refuses BOOT_PROMPT_NOT_SIGNED, never BOOT_PROMPT_NOT_APPROVED. A pending-only signature on an approved revision
+   * leaves it true — pending does not count.
+   */
+  approvedUnsigned: boolean;
+  /** True when the scan stopped at the cap with older revisions unexamined. */
+  truncated: boolean;
+  /** #3801: set only with `truncated`: the oldest revision number examined, so a caller can continue below it. */
+  resumeBelow?: number;
+}
+
+/**
+ * #2973 (cor:agt:040:10 R35) — the newest revision of the node that is BOTH approved (`revisionApprovalOf`, the same
+ * single definition of approved as every other walk) and signed: `signed(revNo)` decides the signature leg, injected so
+ * this module never imports the signing domain. An approved revision without a counting signature does not stop the
+ * walk — the serve falls back to the newest older revision that is both (R35) — it only marks `approvedUnsigned` so the
+ * caller can refuse NOT_SIGNED rather than NOT_APPROVED when nothing qualifies (R36).
+ *
+ * Same enumeration as `newestApprovedRevisionOf` (the extracted candidates walk): only revisions servable from the
+ * node's CURRENT memory, an encrypted memory yields nothing, a legacy unpinned snapshot is skipped. It carries the same
+ * `cap`/`meter`/`below` shape (#3801) and the same unmetered set-wise pre-filter, so the two walks cannot drift. Pure
+ * read; `db` may be a transaction client.
+ */
+export async function newestApprovedAndSignedRevisionOf(
+  db: Pick<PrismaClient, 'node' | 'nodeRevision' | 'memory'> | Prisma.TransactionClient,
+  nodeId: string,
+  /** The signature predicate (#2973 `revisionSignatureCounts`), judged per candidate revision. */
+  signed: (revNo: number) => Promise<boolean>,
+  cap: number = NEWEST_APPROVED_REVISION_SCAN_CAP,
+  /** #40: a resolved read's budget, charged for this walk's own queries and every verdict it asks for. */
+  meter?: ApprovalReadMeter,
+  /** #3801: examine only revisions numbered below this (a continuation past a truncated batch). */
+  below?: number,
+): Promise<NewestApprovedAndSignedRevision> {
+  const { live, candidates } = await servableRevisionNumbers(db, nodeId, cap, meter, below);
+  if (!live) return { found: null, approvedUnsigned: false, truncated: false };
+  let approvedUnsigned = false;
   const examined = candidates.slice(0, cap);
   // A metered walk (an include's resolved read) keeps its per-verdict charges, which #40 pins; only an unmetered one pre-filters.
   const skippable = meter ? new Set<number>() : await revisionsWithNoApprovalHash(db, nodeId, live, examined);
   for (const revNo of examined) {
     if (skippable.has(revNo)) continue;
     const verdict = await revisionApprovalOf(db, nodeId, revNo, meter);
-    if (verdict.state === 'NOT_APPLICABLE') return none;
-    if (verdict.state === 'APPROVED') {
-      return { found: { revNo, record: verdict.record!, source: snapshotNos.has(revNo) ? 'snapshot' : 'live' }, truncated: false };
-    }
+    if (verdict.state === 'NOT_APPLICABLE') return { found: null, approvedUnsigned, truncated: false };
+    if (verdict.state !== 'APPROVED') continue;
+    if (await signed(revNo)) return { found: { revNo }, approvedUnsigned, truncated: false };
+    approvedUnsigned = true;
   }
   const truncated = candidates.length > cap;
-  return truncated ? { found: null, truncated, resumeBelow: examined[examined.length - 1] } : { found: null, truncated };
+  return truncated
+    ? { found: null, approvedUnsigned, truncated, resumeBelow: examined[examined.length - 1] }
+    : { found: null, approvedUnsigned, truncated };
 }
 
 const CEILING_WARN_INTERVAL_MS = 60_000;
@@ -669,6 +749,36 @@ async function revisionsWithNoApprovalHash(
   }
   for (const [revNo, h] of hashes) if (!recorded.has(h)) skip.add(revNo);
   return skip;
+}
+
+/**
+ * #2973 (cor:agt:040:10 R35) + #3801 adoption (Bob P2-1, delta review of deef730133) — the approved-and-signed walk a
+ * SERVE uses: `newestApprovedAndSignedRevisionOf` continued past its scan cap in further `cap`-sized batches, exactly as
+ * `newestApprovedRevisionForServe` continues the approval walk, so an older SIGNED revision buried under more than `cap`
+ * newer approved-but-unsigned ones still serves (R35's fallback must not die at an implementation bound). The work is
+ * bounded by the same `NEWEST_APPROVED_REVISION_SCAN_BATCHES` ceiling; past it the serve fails closed — `found: null`
+ * with the `approvedUnsigned` the examined batches saw, so the refusal is NOT_SIGNED, never NOT_APPROVED, when an
+ * approved-but-unsigned revision was passed (R36).
+ */
+export async function newestApprovedAndSignedRevisionForServe(
+  db: Pick<PrismaClient, 'node' | 'nodeRevision' | 'memory'> | Prisma.TransactionClient,
+  nodeId: string,
+  /** The signature predicate (#2973 `revisionSignatureCounts`), judged per candidate revision. */
+  signed: (revNo: number) => Promise<boolean>,
+  cap: number = NEWEST_APPROVED_REVISION_SCAN_CAP,
+): Promise<NewestApprovedAndSignedRevision> {
+  let result = await newestApprovedAndSignedRevisionOf(db, nodeId, signed, cap);
+  let approvedUnsigned = result.approvedUnsigned;
+  for (let batch = 1; batch < NEWEST_APPROVED_REVISION_SCAN_BATCHES && !result.found && result.truncated && result.resumeBelow != null; batch++) {
+    result = await newestApprovedAndSignedRevisionOf(db, nodeId, signed, cap, undefined, result.resumeBelow);
+    approvedUnsigned = approvedUnsigned || result.approvedUnsigned;
+  }
+  // The ceiling stopped the walk with older revisions unexamined: the serve will refuse, so leave the one signal an
+  // operator needs to tell a signature gap from genuine absence.
+  if (!result.found && result.truncated && ceilingWarnDue(nodeId)) {
+    console.warn(`[boot-prompt-serve] scan ceiling reached for node ${nodeId}: ${cap * NEWEST_APPROVED_REVISION_SCAN_BATCHES} revisions examined, older ones unexamined (refusing as ${approvedUnsigned ? 'not signed' : 'not approved'})`);
+  }
+  return { ...result, approvedUnsigned };
 }
 
 /**

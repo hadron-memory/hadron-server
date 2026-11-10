@@ -619,6 +619,13 @@ model Organization {
   /// restriction (the layer is absent, not deny-all). Snapshotted into
   /// AppRun.policy at mint — edits apply to FUTURE runs only.
   policy          Json?
+  /// #2973 PR1 / cor:agt:040:09 — the organisation's boot-prompt signing
+  /// switch: when true, a compiled boot prompt served in this organisation's
+  /// Apps must be signed. DEFAULT false and NO control API in PR1, so no
+  /// organisation can be switched on and the serve check is inert through it;
+  /// PR2 adds the audience-gated switch (G1). The serve reads it only together
+  /// with the deployment's signing policy (G2, `signingSurfacePolicy().signing`).
+  bootPromptSigningRequired Boolean @default(false) @map("boot_prompt_signing_required")
 
   invitations            UserInvitation[]        @relation("OrgInvitations")
   exchangeConnections    ExchangeConnection[]
@@ -4659,12 +4666,68 @@ model NodeSignature {
   signature           Bytes
   verifiedAt          DateTime @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("verified_at")
 
+  // #2973 C1 (cor:dmo:130:09, gate hold 6749839869 / 6750325233) — the at-signing
+  // eligibility stamp: HMAC-SHA256 under a retained registry key
+  // (`stamp_signing_keys`), written once by the ceremony at completion, beside the
+  // signature, never part of the signed payload. The plain columns beside it are
+  // the stamp's INPUT (what was attested); the tag binds them to the row's own
+  // identity fields, so none can be altered without breaking the tag — and the
+  // rows are append-only (`hadron_guard_node_signature` refuses every UPDATE).
+  // All five columns are NULL together on rows written before the stamp existed
+  // (the watermark): such a row's at-signing authority is unverifiable by
+  // construction and never counts — cor:dmo:130:09 rev 9 (Holger's R11 ruling,
+  // 2026-11-09) makes that the LAW, not a migration fence: the row keeps its visible
+  // state but counts toward no requirement, whatever its signer's authority was then
+  // or is now, and the node is signed again. A pre-stamp binary against this schema
+  // (or a rollback to one) writes exactly these rows; the columns are nullable so
+  // those writes succeed, and the law disposes of them.
+  /// The stamp tag: HMAC-SHA256(key[stamp_key_id], canonical stamp input), 32 bytes.
+  ceremonyStamp  Bytes?  @map("ceremony_stamp")
+  /// Which retained registry key verifies the tag. Unknown ids never count.
+  stampKeyId     Int?    @map("stamp_key_id")
+  /// The node's memory AT SIGNING (the capture-memory binding of the #92963 fence).
+  stampMemoryId  String? @map("stamp_memory_id")
+  /// The Agent/App the completion judged the signer to manage, when they did
+  /// (the manager grade). NULL = writer grade only — a lawful signature that
+  /// does not count for `compiled-boot-prompt` (admission is never narrowed).
+  stampOwnerKind String? @map("stamp_owner_kind")
+  /// The judged Agent/App's id (see `stampOwnerKind`).
+  stampOwnerId   String? @map("stamp_owner_id")
+
   node           Node              @relation(fields: [nodeId], references: [id], onDelete: Cascade, onUpdate: Restrict)
   signingRequest SigningRequest    @relation(fields: [signingRequestId], references: [id], onDelete: Cascade, onUpdate: Restrict)
   passkey        PasskeyCredential @relation(fields: [passkeyCredentialId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  /// Restrict: a key with stamps is retained forever (verification never retires).
+  stampSigningKey StampSigningKey?  @relation(fields: [stampKeyId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   @@index([nodeId])
   @@map("node_signatures")
+}
+
+/// #2973 C1 — the retained versioned registry of stamp HMAC keys. Random
+/// 32-byte purpose-scoped keys (never derived from `HADRON_ENCRYPTION_KEY`:
+/// retaining an old root would retain a key that decrypts everything, while a
+/// stamp key retains only stamp power), stored wrapped via AES-256-GCM with
+/// AAD `hadron:stamp-key:v1:<id>` so a ciphertext planted from any other
+/// tokenCrypto use fails its tag and the row is unusable (Rico #92969 §1).
+/// Rotating the root RE-WRAPS rows (decrypt under the old, wrap under the
+/// new), never invalidates them: verification keys are retained forever
+/// (`retiredAt` retires minting only, and nothing in PR1 sets it — no ops
+/// surface). Minting always uses the newest unretired key; a stamp names the
+/// key that must verify it.
+model StampSigningKey {
+  id          Int       @id @default(autoincrement())
+  /// base64(iv[12] | gcm-tag[16] | ciphertext), AES-256-GCM under
+  /// `HADRON_ENCRYPTION_KEY` with the row's AAD; the plaintext must be exactly
+  /// 32 bytes or the row is unusable (fail closed).
+  keyMaterial String    @map("key_material")
+  createdAt   DateTime  @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("created_at")
+  /// Retires MINTING under this key only; verification never retires.
+  retiredAt   DateTime? @map("retired_at")
+
+  signatures NodeSignature[]
+
+  @@map("stamp_signing_keys")
 }
 
 /// Short-lived, single-use handoff codes that keep the session JWT out of

@@ -10,6 +10,8 @@ const signingTypes = new Set([
   'GrantSigningRequestState', 'GrantSigningRequest',
   // #3690 PR 2: creating a grant rides the same switch, so none can be made where it could not be signed.
   'CreateGrantInput',
+  // #3649 slice D: Grant.signatureStatus goes with them (its type is in this set).
+  'GrantSignatureState', 'GrantSignature', 'GrantSignatureStatus',
 ]);
 
 /** #1631 PR3: the owner's passkey records, a registration-switch read (#1895). */

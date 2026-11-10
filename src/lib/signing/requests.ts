@@ -9,7 +9,7 @@
  * locked first (the approval lock order), then the request row.
  */
 import { randomBytes } from 'node:crypto';
-import type { Prisma } from '../../generated/prisma/index.js';
+import type { Prisma, Role } from '../../generated/prisma/index.js';
 import { COMMENT_NODE_TYPE } from '../comments/index.js';
 import { computeApprovalHash } from '../approvalHash.js';
 import { approvalFieldsOf } from '../nodeApproval.js';
@@ -17,6 +17,9 @@ import { ensureCurrentNodeRevisionInTransaction } from '../nodeRevisionSnapshot.
 import { CURRENT_SIGNATURE_PAYLOAD_VERSION, signaturePayloadBytes } from './payload.js';
 import { passkeyRpId, signingCeremonyOrigins, signingRequestTtlSeconds, SigningNotConfiguredError } from './config.js';
 import { verifySigningAssertion, type AssertionParts } from './verify.js';
+import { bootPromptOwnerOfMemory } from '../bootPromptApproval.js';
+import { lockAppManagerMemberships, managesAgent, managesApp } from '../auth/appManagement.js';
+import { computeStampTag, mintStampSigningKey } from './stampKeys.js';
 
 export type SigningRequestState = 'open' | 'completed' | 'declined' | 'expired' | 'stale' | 'withdrawn';
 
@@ -148,7 +151,10 @@ export async function createSigningRequestInTransaction(
  * Lock the request's node, then the request, and store an expiry that has
  * already happened, so every transition below starts from the true state.
  * A request on a node outside `memoryId` (moved, or a mismatched caller) is
- * NOT_FOUND, the same as an unknown id.
+ * NOT_FOUND, the same as an unknown id. Returns the request row together with
+ * the node's memory id READ UNDER THE LOCK — callers that record or judge the
+ * memory (the #2973 stamp block) use that value, never the caller's copy
+ * (Bob P2-4 residue, delta review of 77c9fda85b).
  */
 async function lockRequest(tx: Prisma.TransactionClient, requestId: string, memoryId: string) {
   const peek = await tx.signingRequest.findUnique({ where: { id: requestId }, select: { nodeId: true } });
@@ -159,7 +165,8 @@ async function lockRequest(tx: Prisma.TransactionClient, requestId: string, memo
   await tx.$queryRaw`SELECT id FROM signing_requests WHERE id = ${requestId} FOR UPDATE`;
   await tx.$executeRaw`UPDATE signing_requests SET state = 'expired'
     WHERE id = ${requestId} AND state = 'open' AND expires_at <= hadron_signing_now()`;
-  return tx.signingRequest.findUniqueOrThrow({ where: { id: requestId } });
+  const row = await tx.signingRequest.findUniqueOrThrow({ where: { id: requestId } });
+  return { row, lockedMemoryId: node.memory_id };
 }
 
 function requireOpen(row: { state: string }) {
@@ -185,7 +192,7 @@ export async function withdrawSigningRequestInTransaction(
   requestId: string,
   opts: { memoryId: string; caller: { userId: string | null; appId: string | null } },
 ) {
-  const row = await lockRequest(tx, requestId, opts.memoryId);
+  const { row } = await lockRequest(tx, requestId, opts.memoryId);
   const mine = requesterAccount(opts.caller);
   const theirs = requesterAccount({ userId: row.requesterUserId, appId: row.requesterAppId });
   if (!mine || mine !== theirs) {
@@ -205,15 +212,15 @@ async function requireSigner(
   requestId: string,
   opts: { memoryId: string; signerId: string; mayWrite: (userId: string, memoryId: string) => Promise<boolean> },
 ) {
-  const row = await lockRequest(tx, requestId, opts.memoryId);
+  const { row, lockedMemoryId } = await lockRequest(tx, requestId, opts.memoryId);
   requireOpen(row);
   if (row.namedSignerId && row.namedSignerId !== opts.signerId) {
     throw new SigningRefusal('SIGNER_NOT_ELIGIBLE', 'Only the named signer may act on this request.');
   }
-  if (!(await opts.mayWrite(opts.signerId, opts.memoryId))) {
+  if (!(await opts.mayWrite(opts.signerId, lockedMemoryId))) {
     throw new SigningRefusal('SIGNER_NOT_ELIGIBLE', 'Only a writer of the node\'s memory may sign it.');
   }
-  return row;
+  return { row, lockedMemoryId };
 }
 
 /** Decline (cor:dmo:130:03, #9928 item 3): the eligible signer turns the request down. Reached by S2b-2's page. */
@@ -246,12 +253,12 @@ export async function completeSigningRequestInTransaction(
     mayWrite: (userId: string, memoryId: string) => Promise<boolean>;
   },
 ) {
-  const row = await requireSigner(tx, requestId, opts);
-  if (await lockedEncrypted(tx, opts.memoryId)) {
-    throw new SigningRefusal('ENCRYPTED_MEMORY_NOT_APPLICABLE', 'Signing is not applicable to encrypted memories.', { memoryId: opts.memoryId });
+  const { row, lockedMemoryId } = await requireSigner(tx, requestId, opts);
+  if (await lockedEncrypted(tx, lockedMemoryId)) {
+    throw new SigningRefusal('ENCRYPTED_MEMORY_NOT_APPLICABLE', 'Signing is not applicable to encrypted memories.', { memoryId: lockedMemoryId });
   }
   const node = await tx.node.findFirst({
-    where: { id: row.nodeId, memoryId: opts.memoryId },
+    where: { id: row.nodeId, memoryId: lockedMemoryId },
     select: { name: true, abstract: true, content: true },
   });
   if (!node || computeApprovalHash(approvalFieldsOf(node, null)) !== row.approvalHash) {
@@ -283,6 +290,57 @@ export async function completeSigningRequestInTransaction(
     if (e instanceof SigningNotConfiguredError) throw e;
     throw new SigningRefusal('SIGNATURE_NOT_VERIFIED', 'The signature did not verify.');
   }
+  // #2973 C1 (cor:dmo:130:09, gate holds 6749839869 / 6750325233) — the at-signing
+  // eligibility stamp, written atomically with the signature row (the watermark: no
+  // code path after this change produces an unstamped signature). DUAL GRADE, and
+  // admission is never narrowed (Xylon #92967): requireSigner's writer check above is
+  // the whole ceremony gate and stays so — a lawful writer who is not a manager signs
+  // fine; their stamp simply carries the writer grade alone and does not count for
+  // `compiled-boot-prompt`. The manager grade is judged HERE, under this transaction's
+  // locks, for the SIGNER explicitly (never the request context — under impersonation
+  // that is the target user; Rico #92969 §3) — the shared managesAgent/managesApp
+  // gates (cor:agt:040:18), platform roles re-read from the user row (the
+  // withAuthorizedTx discipline: a stale token's role grants nothing), and the
+  // memberships the verdict rests on held FOR SHARE through the commit so a demotion
+  // cannot land between the check and the write. Every memory value below is
+  // `lockedMemoryId` — the node's memory read under the FOR UPDATE lock in
+  // lockRequest, never the caller's copy (Bob P2-4 residue) — and the user row is
+  // held FOR SHARE before the roles read so a platform-role demotion cannot commit
+  // between the read and the signature write (Bob N4).
+  const stampOwner = await bootPromptOwnerOfMemory(tx, lockedMemoryId);
+  let stampOwnerKind: 'AGENT' | 'APP' | null = null;
+  let stampOwnerId: string | null = null;
+  if (stampOwner) {
+    if (stampOwner.kind === 'APP') {
+      await lockAppManagerMemberships(tx, opts.signerId, stampOwner);
+    } else if (stampOwner.organizationId) {
+      await tx.$queryRaw`SELECT user_id FROM org_members WHERE organization_id = ${stampOwner.organizationId} AND user_id = ${opts.signerId} FOR SHARE`;
+    }
+    const [lockedUser] = await tx.$queryRaw<Array<{ roles: Role[] }>>`
+      SELECT roles FROM users WHERE id = ${opts.signerId} FOR SHARE`;
+    const roles = lockedUser?.roles ?? [];
+    const managerCtx = { db: tx, userId: opts.signerId, roles };
+    const manages = stampOwner.kind === 'APP'
+      ? await managesApp(managerCtx, stampOwner)
+      : await managesAgent(managerCtx, stampOwner);
+    if (manages) {
+      stampOwnerKind = stampOwner.kind;
+      stampOwnerId = stampOwner.id;
+    }
+  }
+  const stampKey = await mintStampSigningKey(tx);
+  const ceremonyStamp = computeStampTag(stampKey.key, {
+    keyId: stampKey.id,
+    nodeId: row.nodeId,
+    signingRequestId: row.id,
+    signerId: opts.signerId,
+    credentialId: Buffer.from(opts.credentialId),
+    revision: row.revision,
+    approvalHash: row.approvalHash,
+    memoryId: lockedMemoryId,
+    ownerKind: stampOwnerKind,
+    ownerId: stampOwnerId,
+  });
   await tx.nodeSignature.create({
     data: {
       nodeId: row.nodeId,
@@ -296,6 +354,11 @@ export async function completeSigningRequestInTransaction(
       authenticatorData: new Uint8Array(opts.assertion.authenticatorData),
       clientDataJson: new Uint8Array(opts.assertion.clientDataJson),
       signature: new Uint8Array(opts.assertion.signature),
+      ceremonyStamp: new Uint8Array(ceremonyStamp),
+      stampKeyId: stampKey.id,
+      stampMemoryId: lockedMemoryId,
+      stampOwnerKind,
+      stampOwnerId,
     },
   });
   await tx.$executeRaw`UPDATE passkey_credentials

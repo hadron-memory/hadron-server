@@ -45,13 +45,13 @@ async function insertRequest(grantId: string, over: Record<string, unknown> = {}
 }
 
 /** A record for `requestId` by `signer`'s own soft passkey (the user holder is w.userId). */
-async function insertSignature(requestId: string, grantId: string, signer = w.user2Id): Promise<string> {
+async function insertSignature(requestId: string, grantId: string, signer = w.user2Id, holder: { kind: string; id: string } | null = null): Promise<string> {
   const key = softPasskey();
   const passkeyId = await insertSoftPasskey(db, signer, key, { rpId: RP });
   const a = key.assert({ payload: Buffer.from('x'), origin: 'http://localhost', rpId: RP });
   const v: Record<string, unknown> = {
     id: generateId(), grant_id: grantId, signing_request_id: requestId, signer_id: signer, passkey_credential_id: passkeyId,
-    version: 1, terms_hash: HASH, holder_kind: 'user', holder_id: w.userId, payload_version: V1, rp_id: RP,
+    version: 1, terms_hash: HASH, holder_kind: holder?.kind ?? 'user', holder_id: holder?.id ?? w.userId, payload_version: V1, rp_id: RP,
     authenticator_data: a.authenticatorData, client_data_json: a.clientDataJson, signature: a.signature,
   };
   const cols = Object.keys(v);
@@ -65,10 +65,10 @@ const activate = (grantId: string, signatureId: string | null, signer: string | 
     grantId, kind, signer, signatureId);
 
 /** A grant with one completed request and its record, ready to activate. */
-async function signed(over: Parameters<typeof insertGrant>[1] = {}): Promise<{ g: string; r: string; s: string }> {
+async function signed(over: Parameters<typeof insertGrant>[1] = {}, holder: { kind: string; id: string } | null = null): Promise<{ g: string; r: string; s: string }> {
   const g = await insertGrant(w, over);
   const r = await insertRequest(g);
-  const s = await insertSignature(r, g);
+  const s = await insertSignature(r, g, w.user2Id, holder);
   await complete(r);
   return { g, r, s };
 }
@@ -119,23 +119,36 @@ describe('the activation arm of the grant guard', () => {
 });
 
 // Rodolfo §10 P3-5 / Gizelle P3 (#3805): the activation arm's own backstops, by direct UPDATE (no completion in front of them).
+/**
+ * Wait until the DATABASE clock is past the grant's expiry (Gloria P3, #3805 delta): a margin wide enough for setup on a slow
+ * runner, then a wait measured against the clock the guard reads, never a fixed sleep that a slow setup could outrun.
+ */
+async function waitPastExpiry(grantId: string): Promise<void> {
+  for (let i = 0; i < 100; i++) {
+    const [{ left }] = await query<{ left: number }>(`SELECT (EXTRACT(EPOCH FROM (expires_at - ${DB_NOW})) * 1000)::float8 AS left FROM grants WHERE id = $1`, grantId);
+    if (Number(left) < 0) return;
+    await new Promise((res) => setTimeout(res, Math.min(Number(left) + 25, 1000)));
+  }
+  throw new Error('the grant never expired');
+}
+
 describe('the activation arm refuses on its own, whatever path writes', () => {
   it('a grant past its expiry by the DB clock', async () => {
-    const { g, s } = await signed({ expires_at: dbNowPlus('1500 milliseconds') });
-    await new Promise((res) => setTimeout(res, 1700));
+    const { g, s } = await signed({ expires_at: dbNowPlus('4 seconds') });
+    await waitPastExpiry(g);
     await refused(activate(g, s), /append-only|activat/);
     const [row] = await query<{ activated_at: Date | null }>('SELECT activated_at FROM grants WHERE id = $1', g);
     expect(row.activated_at).toBeNull();
   });
 
   it('a grant whose holder has departed', async () => {
-    const { g, s } = await signed();
-    // The departed state, made directly (the guard admits a departure only when the holder has really gone).
-    await db.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER grants_guard');
-      await tx.$executeRawUnsafe(`UPDATE grants SET holder_departed_at = ${DB_NOW} WHERE id = $1`, g);
-      await tx.$executeRawUnsafe('ALTER TABLE grants ENABLE TRIGGER grants_guard');
-    });
+    // A real departure (Gloria P3, #3805 delta: no DISABLE TRIGGER, which takes ACCESS EXCLUSIVE on grants): the worker holder
+    // is hard-deleted, and the departure trigger stamps holder_departed_at as it would for any path.
+    const { g, s } = await signed({ user_id: null, worker_id: w.workerId }, { kind: 'worker', id: w.workerId });
+    await exec('DELETE FROM sessions WHERE worker_id = $1', w.workerId);
+    await exec('DELETE FROM workers WHERE id = $1', w.workerId);
+    const [departed] = await query<{ holder_departed_at: Date | null }>('SELECT holder_departed_at FROM grants WHERE id = $1', g);
+    expect(departed.holder_departed_at).not.toBeNull();
     await refused(activate(g, s), /append-only|activat/);
   });
 
@@ -144,8 +157,12 @@ describe('the activation arm refuses on its own, whatever path writes', () => {
     const act = (extra: string) => exec(`UPDATE grants SET activated_at = ${DB_NOW}, verification_kind = 'passkey', verified_by = $2,
       signature_id = $3, ${extra} WHERE id = $1`, g, w.user2Id, s);
     // (issuer_user_id is movable on purpose: the arm overwrites it with the signer, pinned above.)
+    // The movable columns too (Rodolfo P3-5 remainder, #3805 delta): the generic append-only check lets these through, so only
+    // the activation arm's ROW clause refuses them moving in the same update.
+    const movable = [`user_id = '${w.user2Id}'`, `requested_by_user_id = '${w.user2Id}'`, `revoked_at = ${DB_NOW}`,
+      `revoked_by = 'someone'`, `holder_departed_at = ${DB_NOW}`];
     for (const extra of [`reason = 'rewritten'`, `max_uses = 99`, `action_values = '{"rewritten":true}'::jsonb`, `use_count = 1`,
-      `version = version + 1`, `expires_at = ${DB_NOW} + interval '1 day'`]) {
+      `version = version + 1`, `expires_at = ${DB_NOW} + interval '1 day'`, ...movable]) {
       const out = await act(extra).then(() => 'ACTIVATED', (e: Error) => e.message);
       expect([extra, out]).toEqual([extra, expect.stringMatching(/append-only|activat/)]);
     }
