@@ -22,19 +22,26 @@ import { ACCOUNT_USAGE_COLLECTION, newestSnapshot } from './projection.js';
 
 /** At most this many accounts per answer (V65; the bound is tunable, the flag is contract). */
 export const MAX_LISTED_ACCOUNTS = 50;
+/**
+ * At most this many candidate identities are examined looking for listable ones (LOCAL P2-F1, #3853): the bound of 50 counts
+ * accounts the projection would find history for, never candidates the validity step later drops, so a flood of invalid
+ * identities cannot hide a valid one. The search itself is bounded; running out of it reports the list incomplete.
+ */
+export const MAX_EXAMINED_IDENTITIES = 200;
+const VALIDATE_CHUNK = 50;
 
 export type ListedUsageAccount = {
   account: string; host: string; family: string; newestSnapshotAt: Date; workers: string[]; workersConfigured: boolean;
 };
 
 export async function listUsageAccounts(
-  db: Context['db'], appId: string, now: Date, maxAccounts: number = MAX_LISTED_ACCOUNTS,
+  db: Context['db'], appId: string, now: Date, maxAccounts: number = MAX_LISTED_ACCOUNTS, maxExamined: number = MAX_EXAMINED_IDENTITIES,
 ): Promise<{ asOf: Date; accounts: ListedUsageAccount[]; complete: boolean }> {
   const empty = { asOf: now, accounts: [] as ListedUsageAccount[], complete: true };
   const memoryIds = await resolveAppTeamSpaceMemoryIds(db, appId);
   if (memoryIds.length === 0) return empty;
   const horizon = new Date(now.getTime() - HISTORY_DAYS * 24 * 3_600_000);
-  // Most recently written identities first; one extra row says whether more exist.
+  // Most recently written identities first; one extra row says whether candidates remain beyond the search bound.
   const found = await db.$queryRaw<Array<{ label: string; host: string; family: string }>>(Prisma.sql`
     SELECT properties->>'label' AS label, properties->>'host' AS host, properties->>'family' AS family
     FROM nodes
@@ -48,22 +55,29 @@ export async function listUsageAccounts(
       AND jsonb_typeof(properties->'family') = 'string' AND properties->>'family' <> ''
     GROUP BY 1, 2, 3
     ORDER BY max(created_at) DESC, 1, 2, 3
-    LIMIT ${maxAccounts + 1}`);
-  const complete = found.length <= maxAccounts;
-  const candidates = found.slice(0, maxAccounts);
-  if (candidates.length === 0) return empty;
-  const histories = await loadAccountUsageHistory(db, appId, now, candidates);
-  const accounts: ListedUsageAccount[] = [];
-  for (const [i, c] of candidates.entries()) {
-    const latest = newestSnapshot(histories[i] ?? []);
-    // No valid snapshot left: the projection would answer NO_HISTORY, so the account is not listed.
-    if (!latest || latest.host === null || latest.family === null) continue;
-    accounts.push({
-      account: c.label, host: latest.host, family: latest.family, newestSnapshotAt: latest.observedAt,
-      workers: latest.workers, workersConfigured: latest.workersConfigured,
-    });
+    LIMIT ${maxExamined + 1}`);
+  const searchCut = found.length > maxExamined;
+  const candidates = found.slice(0, maxExamined);
+  // Validate in recency order, in chunks, until one more than the bound is listable (that one says "more exist") or the
+  // candidates run out. Validity and newest come from the projection's own definitions (`loadAccountUsageHistory`).
+  const listable: ListedUsageAccount[] = [];
+  for (let at = 0; at < candidates.length && listable.length <= maxAccounts; at += VALIDATE_CHUNK) {
+    const chunk = candidates.slice(at, at + VALIDATE_CHUNK);
+    const histories = await loadAccountUsageHistory(db, appId, now, chunk);
+    for (const [i, c] of chunk.entries()) {
+      const latest = newestSnapshot(histories[i] ?? []);
+      // No valid snapshot: the projection would answer NO_HISTORY, so the account is not listed and takes no slot.
+      if (!latest || latest.host === null || latest.family === null) continue;
+      listable.push({
+        account: c.label, host: latest.host, family: latest.family, newestSnapshotAt: latest.observedAt,
+        workers: latest.workers, workersConfigured: latest.workersConfigured,
+      });
+    }
   }
+  const kept = listable.slice(0, maxAccounts);
+  // Complete only if nothing listable was left out: no extra listable account, and the search did not stop short.
+  const complete = listable.length <= maxAccounts && !searchCut;
   const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
-  accounts.sort((a, b) => cmp(a.account, b.account) || cmp(a.host, b.host) || cmp(a.family, b.family));
-  return { asOf: now, accounts, complete };
+  kept.sort((a, b) => cmp(a.account, b.account) || cmp(a.host, b.host) || cmp(a.family, b.family));
+  return { asOf: now, accounts: kept, complete };
 }

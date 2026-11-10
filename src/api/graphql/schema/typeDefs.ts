@@ -8903,8 +8903,8 @@ export const typeDefs = `#graphql
     (hrn:node:hadronmemory.com:specs:cor:agt:140:05). Readers: as accountUsageProjection
     (hrn:node:hadronmemory.com:specs:cor:agt:140:03, resting on hrn:node:hadronmemory.com:specs:cor:agt:050:21 and
     hrn:node:hadronmemory.com:specs:cor:agt:050:23); anyone else is refused APP_NOT_FOUND. At most 50 accounts, the most
-    recently written kept, ordered by label, host and family; complete is false when more exist. An App with no history gets an
-    empty list.
+    recently written kept, ordered by label, host and family; complete is false when more exist, or when the bounded search for
+    accounts with valid history stopped short. An App with no history gets an empty list.
     """
     accountUsageAccounts(appRef: ID!): AccountUsageAccounts!
 

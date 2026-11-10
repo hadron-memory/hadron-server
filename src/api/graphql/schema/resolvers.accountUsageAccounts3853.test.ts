@@ -144,6 +144,15 @@ describe('what is listed (A1-A3, V9, V64)', () => {
     expect(r.complete).toBe(false);
   });
 
+  it('S6: 51 accounts at the real bound: the 50 most recently written are listed, by label, and the list says it is incomplete', async () => {
+    for (let i = 0; i < MAX_LISTED_ACCOUNTS + 1; i++) await snapshot({ label: `acct-${String(i).padStart(2, '0')}`, minutesAgo: 5 + i });
+    const r = await list();
+    expect(r.accounts).toHaveLength(MAX_LISTED_ACCOUNTS);
+    expect(r.complete).toBe(false);
+    expect(r.accounts.map((a: any) => a.account)).not.toContain(`acct-${MAX_LISTED_ACCOUNTS}`); // the oldest is the one cut
+    expect(r.accounts.map((a: any) => a.account)).toEqual([...r.accounts.map((a: any) => a.account)].sort());
+  });
+
   it('the work spent looking for valid accounts is bounded; hitting that bound says the list is incomplete', async () => {
     await snapshot({ label: 'valid', minutesAgo: 900 });
     for (let i = 0; i < 4; i++) await snapshot({ label: `bad-${i}`, minutesAgo: -30, createdMinutesAgo: 1 + i });
