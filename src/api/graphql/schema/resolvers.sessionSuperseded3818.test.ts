@@ -8,7 +8,7 @@ import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 import { signJwt } from '../../../auth/jwt.js';
-import { createTestableMcpServer } from '../../../mcp/server.js';
+import { handleMcpRequest, createTestableMcpServer } from '../../../mcp/server.js';
 import { ensureChannelWithRoot } from '../../../lib/channels.js';
 import type { Request } from 'express';
 import { resolveAuthContext, validateSessionBinding } from '../../../middleware/auth.js';
@@ -164,4 +164,24 @@ it('keeps MCP end id as an explicit historical target, without presenting it as 
   const text = await mcp.callToolText('hadron_end_session', { id: a.id, summary: 'late MCP attribution' });
   expect(text).toContain('ALREADY ended');
   expect(await db.session.findUniqueOrThrow({ where: { id: a.id } })).toMatchObject({ endReason: 'superseded', supersededBySessionId: b.id, summary: 'late MCP attribution' });
+});
+
+it('keeps SESSION_SUPERSEDED structured on an MCP core acting-session refusal', async () => {
+  const { a, b } = await displaced();
+  const mcp = createTestableMcpServer({ userId: owner.id, roles: ['READER'] });
+  const result = await mcp.callTool('hadron_update_node_data', { node: generateId(), data: {}, session: a.id }) as any;
+  expect(result.isError).toBe(true);
+  expect(result.structuredContent.error).toMatchObject({ code: 'SESSION_SUPERSEDED', sessionId: b.id, startedAt: b.startedAt.toISOString() });
+});
+it.each([true, false])('returns a typed MCP header refusal before initializing a transport (reader=%s)', async reader => {
+  const { a, b } = await displaced();
+  const token = await signJwt({ sub: reader ? owner.id : stranger.id, roles: ['READER'] });
+  const req = { headers: { authorization: `Bearer ${token}`, 'x-hadron-session': a.id }, method: 'POST', body: { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'synthetic3818', version: '1' } } } } as unknown as Request;
+  let status: number | undefined, body: any;
+  const res = { headersSent: false, status(n: number) { status = n; return this; }, json(value: unknown) { body = value; return this; } };
+  await handleMcpRequest(req, res as any);
+  expect(status).toBe(409);
+  expect(body.code).toBe('SESSION_SUPERSEDED');
+  if (reader) expect(body).toMatchObject({ sessionId: b.id, startedAt: b.startedAt.toISOString() });
+  else { expect(body.sessionId).toBeUndefined(); expect(body.startedAt).toBeUndefined(); expect(JSON.stringify(body)).not.toContain(b.id); }
 });
