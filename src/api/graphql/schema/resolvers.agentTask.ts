@@ -3106,6 +3106,41 @@ const hasOpenChild = tickBatch<string, boolean>(async (ctx, ids) => {
   return new Map(rows.map((r) => [r.parentTaskId as string, true]));
 }, false);
 
+/**
+ * #3867: the full rows of the tasks the caller may READ, in the arms of {@link withReadableTask} (a run principal in its
+ * own App, the App's own key inside one read transaction, or a participant, decided once per distinct App). An id that
+ * is missing or unreadable is absent from the map and its caller answers as a missing task does.
+ */
+async function readableTasks(ctx: Context, ids: string[]): Promise<Map<string, TaskRow>> {
+  const out = new Map<string, TaskRow>();
+  const fill = (rows: TaskRow[]) => { for (const r of rows) out.set(r.id, r); };
+  if (isRunPrincipal(ctx) && !ctx.userId) {
+    if (!ctx.appId) return out;
+    const rows = await inRunTeamReadTx<TaskRow[] | null>(ctx, ctx.appId, () => null, (c, app) => c.db.agentTask.findMany({ where: { id: { in: ids }, appId: app.id } }));
+    fill(rows ?? []);
+    return out;
+  }
+  const key = appKeyCaller(ctx);
+  const heads = await ctx.db.agentTask.findMany({ where: { id: { in: ids } }, select: { id: true, appId: true } });
+  if (key) {
+    const own = heads.filter((h) => h.appId === key.appId);
+    if (!own.length) return out;
+    const rows = await inKeyReadTx<TaskRow[] | null>(ctx, key.appId, () => null, (tx, app) =>
+      tx.db.agentTask.findMany({ where: { id: { in: own.map((h) => h.id) }, appId: app.id } }));
+    fill(rows ?? []);
+    return out;
+  }
+  const readableApps = new Set<string>();
+  await Promise.all([...new Set(heads.map((h) => h.appId))].map(async (appId) => {
+    const app = await loadApp(ctx, appId);
+    if (app && (await resolveTaskActor(ctx, app))) readableApps.add(appId);
+  }));
+  const readable = heads.filter((h) => readableApps.has(h.appId)).map((h) => h.id);
+  if (readable.length) fill(await ctx.db.agentTask.findMany({ where: { id: { in: readable } } }));
+  return out;
+}
+const readableTask = tickBatch<string, TaskRow | null>(readableTasks, null);
+
 /** A sanitized party projection — never the User object (#552: no other tenant's identity fields). Batched per request (#3867). */
 export async function partyView(ctx: Context, workerId: string | null, userId: string | null): Promise<PartyView | null> {
   if (workerId) {
@@ -3292,12 +3327,8 @@ async function relationPages(
 export const agentTaskFieldResolvers = {
   AgentTaskResult: {
     /** Result is reachable only through the existing task read gate; no separate finding read surface. */
-    findings: async (result: { findings?: unknown; __findingsOfTask?: string }, args: { limit?: number | null; offset?: number | null }, ctx: Context) => {
-      let stored = result.findings;
-      // #3867: a wide row's result did not carry them; read them now, as the task's own read answers.
-      if (stored === undefined && result.__findingsOfTask) {
-        stored = await withReadableTask(ctx, result.__findingsOfTask, async (_c, { task }) => task.resultFindings, true);
-      }
+    findings: (result: { findings?: unknown }, args: { limit?: number | null; offset?: number | null }) => {
+      const stored = result.findings;
       const items = (stored ?? []) as TaskFinding[];
       const { take, skip } = pageArgs(args);
       return pageEnvelope(items.slice(skip, skip + take), items.length, skip);
@@ -3349,11 +3380,10 @@ export const agentTaskFieldResolvers = {
         ? { outcome: row.resultOutcome, summary: row.resultSummary, evidence: row.resultEvidence, ...(row.resultFindings != null ? { findings: row.resultFindings } : {}) }
         : null;
       if (t.status !== 'finished' || !t.resultOutcome || Object.hasOwn(t, 'resultFindings')) return view(t);
-      // #2662 / #3867: wide list/tree/relation rows omit the large payload. The outcome, summary and evidence are on
-      // the row the caller's read already returned, like every other field of it, so they are served without a
-      // second read per row. The findings load only when selected (AgentTaskResult.findings), under the SAME task
-      // read gate (including the App-key arm), rechecked at that read rather than trusting an old row.
-      return { ...view({ ...t, resultFindings: null }), __findingsOfTask: t.id };
+      // #2662: wide list/tree/relation rows omit the large payload. Only a selected result loads it, under the
+      // SAME task read gate (including the App-key arm), rechecked at this read rather than trusting an old row.
+      // #3867: the recheck of one request's rows is decided together (readableTasks), not once per row.
+      return readableTask(ctx, t.id).then((task) => (task ? view(task) : null));
     },
     /** #2651 (cor:agt:050:29, :01): the latest hand-back, readable as the task is; null when never handed back. */
     handBack: (t: TaskRow) =>

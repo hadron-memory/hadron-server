@@ -90,7 +90,7 @@ describe('#3867 list cost', () => {
       expect(o.result.summary).toMatch(/^s\d$/);
     }
     const first = out.find((o) => o.id === rows[0].id)!;
-    const page = await F.AgentTaskResult.findings(first.result, { limit: 10 }, ctx);
+    const page = await F.AgentTaskResult.findings(first.result, { limit: 10 });
     expect(page.total).toBe(1);
     expect(page.items[0].text).toBe('finding');
   });
@@ -99,12 +99,11 @@ describe('#3867 list cost', () => {
     await finished(2);
     const { ctx } = counted(outsiderId);
     await expect(Q.agentTasks(null, { appRef: appId, limit: 200 }, ctx)).rejects.toThrow();
-    // A wide row handed to an unscoped caller by some other path still yields no findings: the lazy read re-judges the gate.
+    // A wide row handed to an unscoped caller by some other path reads as no result: the batched recheck keeps the gate.
     const row = await db.agentTask.findFirstOrThrow({ where: { appId }, omit: { resultFindings: true } });
-    const result = await F.AgentTask.result(row, {}, ctx);
-    expect(result).toMatchObject({ outcome: 'succeeded' });
-    expect(await F.AgentTaskResult.findings(result, { limit: 10 }, ctx)).toMatchObject({ items: [], total: 0 });
+    expect(await F.AgentTask.result(row, {}, ctx)).toBeNull();
     const owner = counted(ownerId).ctx;
-    expect((await F.AgentTaskResult.findings(await F.AgentTask.result(row, {}, owner), { limit: 10 }, owner)).total).toBe(1);
+    const result = await F.AgentTask.result(row, {}, owner);
+    expect((await F.AgentTaskResult.findings(result, { limit: 10 })).total).toBe(1);
   });
 });
