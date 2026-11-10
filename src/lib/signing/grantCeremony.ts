@@ -28,7 +28,8 @@ import { withAuthorizedTx } from '../../api/graphql/schema/authorizedTx.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../auth/authorityAnchors.js';
 import { consumeCeremony, decideCeremonyAssertion, verifyCeremonyAssertion } from '../passkeys/ceremony.js';
 import { PLATFORM_ACTIONS } from '../grants/actions.js';
-import { requireActionIssuer } from '../grants/issuers.js';
+import { GraphQLError } from 'graphql';
+import * as issuers from '../grants/issuers.js';
 import { GrantSummaryError, renderGrantSummary } from '../grants/summary.js';
 import { GrantTermsError, grantTermsFromRow, grantTermsHash } from '../grants/terms.js';
 import { emitEntityUrnV2, safeNodeUrnV2 } from '../urnEmit.js';
@@ -95,13 +96,18 @@ async function personContext(tx: Prisma.TransactionClient, userId: string): Prom
   return user ? ({ db: tx, userId: user.id, roles: user.roles } as unknown as Context) : null;
 }
 
-/** Whether `ctx` may issue a grant for `action` in `appId` (cor:acl:140:04). A refusal of any kind is "no". */
+/**
+ * Whether `ctx` may issue a grant for `action` in `appId` (cor:acl:140:04). Every refusal the issuer gates raise is a
+ * GraphQLError, and any of them is "no". Anything else (a database failure) is not an answer about eligibility and propagates
+ * (Gloria P3-2, #3805): it must not read as SIGNER_NOT_ELIGIBLE.
+ */
 async function mayIssue(ctx: Context, action: string, appId: string): Promise<boolean> {
   try {
-    await requireActionIssuer(ctx, action, appId);
+    await issuers.requireActionIssuer(ctx, action, appId);
     return true;
-  } catch {
-    return false;
+  } catch (e) {
+    if (e instanceof GraphQLError) return false;
+    throw e;
   }
 }
 

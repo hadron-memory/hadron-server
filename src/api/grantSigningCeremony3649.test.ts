@@ -24,6 +24,7 @@ import { createGrantSigningRequestInTransaction } from '../lib/signing/grantRequ
 import { createSigningRequestInTransaction } from '../lib/signing/requests.js';
 import { switchCapabilities } from '../lib/signing/surface.js';
 import * as grantLocks from '../lib/signing/grantActivationLocks.js';
+import * as issuers from '../lib/grants/issuers.js';
 
 const ORIGIN = 'https://sign.example.test';
 const RP = 'example.test';
@@ -272,6 +273,19 @@ describe('refusals at completion are judged before any write', () => {
     expect(await requestState(req.id)).toBe('open');
   });
 
+  it('Gloria P3-2 (#3805): a failure inside the issuer gate that is not a refusal is never SIGNER_NOT_ELIGIBLE', async () => {
+    const g = await insertGrant();
+    const req = await openRequest(g);
+    const p = await prove(req.id, admin);
+    const counter = await counterOf(admin.id);
+    vi.spyOn(issuers, 'requireActionIssuer').mockRejectedValueOnce(new Error('connection lost'));
+    const r = await post(req.id, 'complete', signingBody(p, admin), p.cookie);
+    expect(r.status).toBe(403);
+    expect(await r.json()).toEqual({ error: 'forbidden' });
+    await expectNothingWritten(g, req.id, admin.id, counter);
+    expect(await requestState(req.id)).toBe('open');
+  });
+
   it('C6 (ruling 0257): a first passkey in its cooling-off window is refused with nothing recorded; once the window ends it signs', async () => {
     const g = await insertGrant();
     const req = await openRequest(g);
@@ -446,13 +460,16 @@ async function blocker(): Promise<{ c: Client; pid: number }> {
 /** Pause the completion right after it locked the grant row; resolves `held` then waits for `release`. */
 function pauseAfterGrantLock() {
   let release!: () => void;
-  let held!: () => void;
+  let held!: (pid: number) => void;
   const gate = new Promise<void>((r) => { release = r; });
-  const heldP = new Promise<void>((r) => { held = r; });
+  // Resolves with the paused completion's OWN backend pid (Gloria P3-4, #3805): read on its transaction, so no other
+  // connection holding a lock on the same table can stand in for it.
+  const heldP = new Promise<number>((r) => { held = r; });
   const real = grantLocks.lockGrantForSigning;
   vi.spyOn(grantLocks, 'lockGrantForSigning').mockImplementation(async (tx, id, appIdArg) => {
     const out = await real(tx, id, appIdArg);
-    held();
+    const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+    held(pid);
     await gate;
     return out;
   });
@@ -489,9 +506,7 @@ describe('departure races (cor:acl:140:03, ruling 0259), both orders', () => {
     const p = await prove(req.id, admin);
     const pause = pauseAfterGrantLock();
     const done = post(req.id, 'complete', signingBody(p, admin), p.cookie);
-    await pause.held;
-    const [{ pid: completionPid }] = await db.$queryRawUnsafe<Array<{ pid: number }>>(
-      `SELECT pid FROM pg_locks l JOIN pg_class c ON c.oid = l.relation WHERE c.relname = 'grants' AND l.mode = 'RowShareLock' AND l.granted AND pid <> pg_backend_pid() LIMIT 1`);
+    const completionPid = await pause.held;
     const b = await blocker();
     try {
       await b.c.query(retireSql, [workerId]);
@@ -531,12 +546,12 @@ describe('revocation and demotion races, both orders', () => {
     const p = await prove(req.id, admin);
     const pause = pauseAfterGrantLock();
     const done = post(req.id, 'complete', signingBody(p, admin), p.cookie);
-    await pause.held;
+    const completionPid = await pause.held;
     const b = await blocker();
     try {
       const revoked = b.c.query(`UPDATE grants SET revoked_at = (clock_timestamp() AT TIME ZONE 'UTC'), revoked_by = $2 WHERE id = $1`, [g, admin.id]);
       revoked.catch(() => undefined);
-      await new Promise((res) => setTimeout(res, 200));
+      expect(await waitingOn(completionPid)).toBe(true);
       pause.release();
       expect((await done).status).toBe(200);
       await revoked;
@@ -570,13 +585,11 @@ describe('revocation and demotion races, both orders', () => {
     const p = await prove(req.id, admin);
     const pause = pauseAfterGrantLock();
     const done = post(req.id, 'complete', signingBody(p, admin), p.cookie);
-    await pause.held;
+    const completionPid = await pause.held;
     const b = await blocker();
     try {
       const demoted = b.c.query(`UPDATE org_members SET role = 'CONTRIBUTOR' WHERE organization_id = $1 AND user_id = $2`, [orgId, admin.id]);
       demoted.catch(() => undefined);
-      const [{ pid: completionPid }] = await db.$queryRawUnsafe<Array<{ pid: number }>>(
-        `SELECT l.pid FROM pg_locks l JOIN pg_class c ON c.oid = l.relation WHERE c.relname = 'org_members' AND l.mode = 'RowShareLock' AND l.granted AND l.pid <> $1 LIMIT 1`, b.pid);
       expect(await waitingOn(completionPid)).toBe(true);
       pause.release();
       expect((await done).status).toBe(200);
