@@ -1602,6 +1602,54 @@
       "resolver": "src/api/graphql/schema/resolvers.query.org.ts::organizations",
       "target": "Organization"
     },
+    "AccountUsageMoveTarget.adjusted": {
+      "class": "parent-implies-child",
+      "audience": "the same readers as teamRoster (cor:agt:050:21): a participant of the App or a run principal of it; everyone else is refused with the roster's refusal (#3820). A projection holds account labels, percentages, timestamps and worker names only: nothing another tenant owns is reachable",
+      "resolver": "src/api/graphql/schema/resolvers.agentTaskMatching.ts::withRosterReadGate",
+      "target": "AccountUsageWindowProjection"
+    },
+    "AccountUsageMoveTarget.baseline": {
+      "class": "parent-implies-child",
+      "audience": "the same readers as teamRoster (cor:agt:050:21): a participant of the App or a run principal of it; everyone else is refused with the roster's refusal (#3820). A projection holds account labels, percentages, timestamps and worker names only: nothing another tenant owns is reachable",
+      "resolver": "src/api/graphql/schema/resolvers.agentTaskMatching.ts::withRosterReadGate",
+      "target": "AccountUsageWindowProjection"
+    },
+    "AccountUsageProjection.whatIf": {
+      "class": "parent-implies-child",
+      "audience": "the same readers as teamRoster (cor:agt:050:21): a participant of the App or a run principal of it; everyone else is refused with the roster's refusal (#3820). A projection holds account labels, percentages, timestamps and worker names only: nothing another tenant owns is reachable",
+      "resolver": "src/api/graphql/schema/resolvers.agentTaskMatching.ts::withRosterReadGate",
+      "target": "AccountUsageWhatIf"
+    },
+    "AccountUsageProjection.windows": {
+      "class": "parent-implies-child",
+      "audience": "the same readers as teamRoster (cor:agt:050:21): a participant of the App or a run principal of it; everyone else is refused with the roster's refusal (#3820). A projection holds account labels, percentages, timestamps and worker names only: nothing another tenant owns is reachable",
+      "resolver": "src/api/graphql/schema/resolvers.agentTaskMatching.ts::withRosterReadGate",
+      "target": "AccountUsageWindowProjection"
+    },
+    "AccountUsageWhatIf.adjusted": {
+      "class": "parent-implies-child",
+      "audience": "the same readers as teamRoster (cor:agt:050:21): a participant of the App or a run principal of it; everyone else is refused with the roster's refusal (#3820). A projection holds account labels, percentages, timestamps and worker names only: nothing another tenant owns is reachable",
+      "resolver": "src/api/graphql/schema/resolvers.agentTaskMatching.ts::withRosterReadGate",
+      "target": "AccountUsageWindowProjection"
+    },
+    "AccountUsageWhatIf.target": {
+      "class": "parent-implies-child",
+      "audience": "the same readers as teamRoster (cor:agt:050:21): a participant of the App or a run principal of it; everyone else is refused with the roster's refusal (#3820). A projection holds account labels, percentages, timestamps and worker names only: nothing another tenant owns is reachable",
+      "resolver": "src/api/graphql/schema/resolvers.agentTaskMatching.ts::withRosterReadGate",
+      "target": "AccountUsageMoveTarget"
+    },
+    "AccountUsageWindowProjection.burn": {
+      "class": "parent-implies-child",
+      "audience": "the same readers as teamRoster (cor:agt:050:21): a participant of the App or a run principal of it; everyone else is refused with the roster's refusal (#3820). A projection holds account labels, percentages, timestamps and worker names only: nothing another tenant owns is reachable",
+      "resolver": "src/api/graphql/schema/resolvers.agentTaskMatching.ts::withRosterReadGate",
+      "target": "AccountUsageBurnRange"
+    },
+    "AccountUsageWindowProjection.perWorkerBurn": {
+      "class": "parent-implies-child",
+      "audience": "the same readers as teamRoster (cor:agt:050:21): a participant of the App or a run principal of it; everyone else is refused with the roster's refusal (#3820). A projection holds account labels, percentages, timestamps and worker names only: nothing another tenant owns is reachable",
+      "resolver": "src/api/graphql/schema/resolvers.agentTaskMatching.ts::withRosterReadGate",
+      "target": "AccountUsageBurnRange"
+    },
     "GrantsPage.items": {
       "class": "parent-implies-child",
       "audience": "a bound worker session reading its own App's grants that name it directly (plus its own pending requests) (#3789), or a signed-in person reading only the grants naming them as holder (#3800 myGrants); any other caller gets an empty page",
