@@ -2125,7 +2125,7 @@ export const typeDefs = `#graphql
     "True when an earlier report with the same runId, from the same reporter, for the same node revision and task revision, was returned and nothing was written."
     replayed: Boolean!
     report: NodeContentValidationReport!
-    "The validation state of the node's current revision after this call. A report for an older revision leaves it UNVALIDATED or STALE."
+    "The validation state of the node's current revision after this call. A report for an older revision is stored as history without changing the current revision's state, including an existing PASS."
     state: NodeContentValidationState!
   }
   type NodeContentValidationStatus {
@@ -8654,9 +8654,11 @@ export const typeDefs = `#graphql
   type ReviewSlotReadiness {
     slot: String!
     currentTaskId: ID
+    "The current unsuperseded seat task's AgentTask status, uppercased, or MISSING when no current seat task exists. This is task lifecycle state, not the review verdict."
     state: String!
     verdict: ReviewVerdict
     head: String
+    "True only when the current seat task is FINISHED, its assignment and verdict both name the frozen head, and its verdict names this slot and is APPROVE, PASS or CARRY. The verdict actor must be neither the build assignee nor a freezer of this head in the App, and no blocking negative verdict may exist at this head."
     counts: Boolean!
   }
   "#3448 — readiness ignores opaque properties (hrn:node:hadronmemory.com:specs:cor:agt:050:28)."
