@@ -7,7 +7,7 @@
  * real filesystem for the root files (the `RewrapToolIo` seam exists for stdin and env, which a vitest worker
  * cannot offer honestly).
  */
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -25,13 +25,22 @@ const mint = () => db.$transaction((tx) => mintStampSigningKey(tx));
 let lines: string[] = [];
 let paths: string[] = [];
 
-/** The real fs (mode and content) for root files; only stdin and env are faked, which a worker cannot own. */
+/** The real fs for root files (one open + fstat + read on the same fd, as the CLI wrapper wires it); only stdin and env are faked, which a worker cannot own. */
 const io = (over: Partial<RewrapToolIo> = {}): RewrapToolIo => ({
   env: process.env,
   log: (line) => lines.push(line),
+  stdinIsTty: () => false,
   readStdin: async () => '',
-  statMode: async (path) => (await stat(path)).mode,
-  readFileText: async (path) => await readFile(path, 'utf8'),
+  openRootFile: async (path) => {
+    const fh = await open(path, 'r');
+    try {
+      const { mode } = await fh.stat();
+      const text = await readFile(fh, 'utf8');
+      return { mode, text };
+    } finally {
+      await fh.close();
+    }
+  },
   ...over,
 });
 
@@ -86,6 +95,11 @@ describe('#2973 rewrap tool — root input (Bob P2-C: never argv)', () => {
 
   it('stdin with fewer than two lines is usage', async () => {
     expect(await main([], io({ readStdin: async () => `${ROOT_A}\n` }))).toBe(2);
+  });
+
+  it('stdin that is a terminal is refused before a byte is read (the roots would echo)', async () => {
+    expect(await main([], io({ stdinIsTty: () => true, readStdin: async () => `${ROOT_A}\n${ROOT_B}\n` }))).toBe(2);
+    expect(lines.some((l) => l.includes('terminal'))).toBe(true);
   });
 
   it('no DATABASE_URL is usage, before any client is built', async () => {

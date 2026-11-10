@@ -19,7 +19,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
-import { decryptBytesAad, encryptBytesAad, encryptToken } from '../tokenCrypto.js';
+import { decryptBytesAad, encryptBytesAad, encryptToken, encryptionKeyFromHex } from '../tokenCrypto.js';
 import {
   canonicalStampInput, computeStampTag, mintStampSigningKey, rewrapStampSigningKeys,
   StampRegistryUnavailableError, stampKeyAad, stampTagMatches, stampVerificationKey, type StampInput,
@@ -227,4 +227,31 @@ describe('#2973 root rotation (recovery evidence — re-wrap, never invalidate)'
     await db.$executeRaw`UPDATE stamp_signing_keys SET key_material = ${encryptToken('planted')} WHERE id = 1`;
     await expect(rewrapStampSigningKeys(db, ROOT_A, ROOT_B)).rejects.toThrow(/stamp key 1/);
   });
+});
+
+describe('rewrap serializes against a first mint holding the mint lock (Rico, delta review of f44e2c6a)', () => {
+  // The concurrent-first-mint pin the gate required (Xylon #93367): M1 (drop the rewrap's advisory lock) is RED
+  // here — without the lock the rewrap's snapshot can miss the creation that commits while it would have waited,
+  // leaving the new row stranded under the retired root (rewrapped=0 instead of 1).
+  it('a creation committed while the rewrap waits is rewrapped, never stranded under the old root', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let locked!: () => void;
+    const haveLock = new Promise<void>((r) => (locked = r));
+    // The mint's creation leg, held open: lock, insert under the OLD root, wait, commit.
+    const mintTx = db.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('hadron:stamp-signing-key-mint'))`;
+      await tx.stampSigningKey.create({ data: { id: 1, keyMaterial: encryptBytesAad(Buffer.alloc(32, 7), stampKeyAad(1)) } });
+      locked();
+      await gate;
+    }, { timeout: 20_000 });
+    await haveLock;
+    const rewrap = rewrapStampSigningKeys(db, ROOT_A, ROOT_B);
+    await new Promise((r) => setTimeout(r, 300)); // the rewrap is now waiting on the lock (or, mutated, already read)
+    release();
+    await mintTx;
+    expect(await rewrap).toEqual({ rows: 1, rewrapped: 1 });
+    const row = await db.stampSigningKey.findUniqueOrThrow({ where: { id: 1 } });
+    expect(decryptBytesAad(row.keyMaterial, stampKeyAad(1), encryptionKeyFromHex(ROOT_B)).equals(Buffer.alloc(32, 7))).toBe(true);
+  }, 30_000);
 });

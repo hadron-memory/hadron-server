@@ -11,14 +11,17 @@
  * The roots NEVER appear on the command line (Bob P2-C: argv is world-readable through ps and
  * /proc/<pid>/cmdline, and it lands in shell history — and this root decrypts every token the
  * platform stores). They are read from mode-0600 files (a looser mode is refused) or protected
- * stdin, validated as 64 hex characters, and never logged or echoed. See docs/runbooks/ for the
- * whole-root boundary: this tool rewraps ONLY the stamp registry — every other encrypted column is
- * untouched, by design and by scope.
+ * stdin, validated as 64 hex characters, and never logged or echoed. The runbook — the stopped-
+ * writer sequence, the verification event, the rollback, and the WHOLE-ROOT boundary (this tool
+ * rewraps ONLY the stamp registry; every other encrypted column is untouched, and the secret-store
+ * switch must not run in production outside a whole-root rotation plan, none of which exists yet) —
+ * lives in the ops node hrn:node:hadronmemory.com:dev:ops:alpha:stamp-key-registry-rotation.
  *
  * The whole rewrap is one transaction inside {@link rewrapStampSigningKeys} — atomic, idempotent,
- * and serialized against the registry's only other writer (mint's creation leg) by the same
- * advisory lock, so a first mint racing the tool cannot strand a key under the retired root. The
- * inverse argument order is the rollback.
+ * and serialized against an in-flight creation (mint's leg) by the same advisory lock; a mint by a
+ * still-running old-root instance AFTER the rewrap can still strand a row, so writers are stopped
+ * and the post-switch re-run is the proof (Rico, delta review of f44e2c6a). The inverse argument
+ * order is the rollback.
  *
  * Verification is real, not self-referential (Bob P3-1): BEFORE the rewrap every row is unwrapped
  * (under the old root, or the new one for an idempotent re-run) and SHA-256-committed; AFTER it
@@ -30,7 +33,7 @@
  * Exit codes: 0 ok, 1 failed (rewrap or verify), 2 usage (bad input, open file mode, no DATABASE_URL).
  */
 import { createHash } from 'crypto';
-import { readFile, stat } from 'node:fs/promises';
+import { open, readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { PrismaClient } from '../../src/generated/prisma/index.js';
 import { rewrapStampSigningKeys, StampRegistryUnavailableError, stampKeyAad } from '../../src/lib/signing/stampKeys.js';
@@ -46,8 +49,14 @@ export interface RewrapToolIo {
   env: NodeJS.ProcessEnv;
   log: (line: string) => void;
   readStdin: () => Promise<string>;
-  statMode: (path: string) => Promise<number>;
-  readFileText: (path: string) => Promise<string>;
+  /** True when stdin is an interactive terminal (Rico, delta review of f44e2c6a): reading roots from a TTY echoes them. */
+  stdinIsTty: () => boolean;
+  /**
+   * One `open` + `fstat` + read on the SAME file descriptor, so the mode checked is the mode of the file actually
+   * read (Rico, delta review of f44e2c6a) — a separate stat-then-read is a time-of-check/time-of-use gap a swap
+   * of the path's target between the two calls would slip through.
+   */
+  openRootFile: (path: string) => Promise<{ mode: number; text: string }>;
 }
 
 const usage = (io: Pick<RewrapToolIo, 'log'>, line: string): number => {
@@ -109,8 +118,7 @@ export async function main(argv: readonly string[], io: RewrapToolIo): Promise<n
       let mode: number;
       let text: string;
       try {
-        mode = await io.statMode(path);
-        text = await io.readFileText(path);
+        ({ mode, text } = await io.openRootFile(path));
       } catch {
         io.log(`db.stamp_key_rewrap.refused_file_read: cannot read the ${label} root file`);
         return null;
@@ -133,6 +141,7 @@ export async function main(argv: readonly string[], io: RewrapToolIo): Promise<n
     fromHex = from;
     toHex = to;
   } else {
+    if (io.stdinIsTty()) return usage(io, 'stdin is a terminal — the roots would echo; pipe them or use --from-root-file/--to-root-file');
     const lines = (await io.readStdin()).split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
     if (lines.length < 2) return usage(io, 'stdin needs two root lines (from, then to)');
     [fromHex, toHex] = lines;
@@ -180,6 +189,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   process.exitCode = await main(process.argv.slice(2), {
     env: process.env,
     log: (line) => console.error(line),
+    stdinIsTty: () => process.stdin.isTTY === true,
     readStdin: () =>
       new Promise((resolve, reject) => {
         let data = '';
@@ -188,7 +198,15 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
         process.stdin.on('end', () => resolve(data));
         process.stdin.on('error', reject);
       }),
-    statMode: async (path) => (await stat(path)).mode,
-    readFileText: async (path) => await readFile(path, 'utf8'),
+    openRootFile: async (path) => {
+      const fh = await open(path, 'r');
+      try {
+        const { mode } = await fh.stat();
+        const text = await readFile(fh, 'utf8');
+        return { mode, text };
+      } finally {
+        await fh.close();
+      }
+    },
   });
 }

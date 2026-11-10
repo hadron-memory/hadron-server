@@ -211,8 +211,11 @@ export async function rewrapStampSigningKeys(
   const to = encryptionKeyFromHex(toRootHex);
   return db.$transaction(async (tx) => {
     // Serialize against mint's creation leg (the registry's only other writer), which takes the same
-    // transaction-scoped lock (Rico #92969 §3 / #93374): the findMany snapshot below can then never miss a
-    // committed creation, so a first mint racing the rewrap cannot strand a key under the retired root.
+    // transaction-scoped lock (Rico #92969 §3 / #93374): an in-flight creation either commits before this
+    // transaction's snapshot (and is rewrapped below) or waits for it. The lock does NOT cover a mint by a
+    // still-running old-root instance AFTER the rewrap commits — on an empty registry that mint re-reads no
+    // rows under the lock and creates key 1 under the OLD root, a stranded row; stopping all writers first and
+    // re-running the tool after the switch are what cover that (the runbook's proof, not this lock).
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('hadron:stamp-signing-key-mint'))`;
     const rows = await tx.stampSigningKey.findMany({ select: { id: true, keyMaterial: true }, orderBy: { id: 'asc' } });
     const writes: Array<{ id: number; keyMaterial: string }> = [];

@@ -680,3 +680,30 @@ describe('#2973 the same-owner move (two install memories of one App — Rico §
     expect(await revisionSignatureCounts(db, nodeId, row.revision, REQ)).toBe(false);
   });
 });
+
+describe('#2973 owner-resolution determinism (Bob P3-3; the M2 pin, Rico delta review of f44e2c6a)', () => {
+  it('two Agents naming one system memory resolve to the LOWEST id in both the stamp and the fence, so the signature stays counting', async () => {
+    // Nothing in the schema makes agents.system_memory_id unique. Seed the shape that makes an unordered findFirst
+    // disagree with the deterministic rule: the HIGHER-id Agent inserted FIRST (the physically-first row an
+    // unordered read returns), and it sits in an org the signer does NOT manage — so a resolver that returns it
+    // judges the org-ADMIN signer a non-manager (writer grade, never counts), while the deterministic lowest-id
+    // rule returns the signer's own agent. Red under M2 (drop bootPromptOwnerOfMemory's orderBy) twice over: the
+    // stamp's owner column and the counting verdict.
+    // Assign the roles by ACTUAL comparison, not mint order: two UUIDv7s minted in the same millisecond
+    // order by their random suffix, so "captured first" is not "sorts lower" (a 50/50, not a promise).
+    const [lowId, highId] = (() => {
+      const a = generateId();
+      const b = generateId();
+      return a < b ? [a, b] : [b, a];
+    })();
+    const m3 = (await db.memory.create({ data: { id: generateId(), class: 'system', name: 'sysC', urn: 'r2973-org:sysc', organizationId: orgId } })).id;
+    const org2 = (await db.organization.create({ data: { id: generateId(), name: 'r2973-org2', urn: 'r2973-org2' } })).id;
+    await db.agent.create({ data: { id: highId, name: 'Zeta', urn: 'r2973-org:zeta', organizationId: org2, systemMemoryId: m3 } }); // inserted FIRST
+    await db.agent.create({ data: { id: lowId, name: 'Alow', urn: 'r2973-org:alow', organizationId: orgId, systemMemoryId: m3 } });
+    const node2 = (await createDbNode(db, { loc: 'r2973:prompt-c', memoryId: m3, name: 'Prompt', content: 'v1' })).id;
+    await signLive(node2); // the org ADMIN manages Alow's org, not Zeta's
+    const stamp = await db.nodeSignature.findFirstOrThrow({ where: { nodeId: node2 } });
+    expect(stamp.stampOwnerId).toBe(lowId); // the judged owner is the deterministic lowest id, never the physically-first row
+    expect(await counts(1, node2)).toBe(true); // the manager-grade stamp counts: the fence resolves the same owner
+  });
+});
