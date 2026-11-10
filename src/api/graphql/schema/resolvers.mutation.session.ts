@@ -1553,7 +1553,7 @@ export const sessionMutations = {
           });
           await tx.session.updateMany({
             where: { id: { in: ids }, endedAt: null },
-            data: { endedAt, endReason: 'superseded' },
+            data: { endedAt, endReason: 'superseded', supersededBySessionId: created.id },
           });
           supersededIds = ids;
         }

@@ -1867,6 +1867,8 @@ model Session {
   endedAt           DateTime?         @map("ended_at")
   /// First end wins. NULL on legacy ended rows is exposed as unknown, never backfilled.
   endReason         SessionEndReason? @map("end_reason")
+  /// #3818 V25: immediate successor stamped by the same bind transaction; disclosure is independently gated on read.
+  supersededBySessionId String?       @map("superseded_by_session_id")
   /// Set by the reaper (#930) when the session was auto-expired — meaning
   /// past `expiresAt`, and since #1114 nothing else. It no longer records an
   /// idle-window expiry, because there is no longer such a thing: inactivity

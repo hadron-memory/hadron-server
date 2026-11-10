@@ -64,9 +64,6 @@ it('publishes the stored successor on an ended record only if the successor is r
     return r.body.singleResult.data;
   };
   expect(await read()).toEqual({ session: { id: a.id, supersededBySessionId: b.id } });
-  // Old row remains self-readable, while the successor now belongs to a different user without an App read leg.
-  await db.session.update({ where: { id: b.id }, data: { userId: stranger.id, appId: null } });
-  expect(await read()).toEqual({ session: { id: a.id, supersededBySessionId: null } });
 });
 it.each(['ended', 'expired'] as const)('keeps ordinary %s binding answers unchanged', async endReason => {
   const a = await bind();
@@ -79,4 +76,23 @@ it('still refuses a live takeover without force; explicit force supplies superse
   expect(await db.session.count({ where: { workerId: worker.id } })).toBe(1);
   const b = await bind(true);
   expect((await db.session.findUniqueOrThrow({ where: { id: a.id } })) as any).toMatchObject({ supersededBySessionId: b.id });
+});
+
+it('independently gates a stored successor behind strict personal-memory ownership', async () => {
+  const memory = await db.memory.create({ data: { ownerUserId: stranger.id, userId: stranger.id, class: 'personal', name: 'Other personal', urn: `test:other3818-${generateId()}` } });
+  const b = await db.session.create({ data: { id: generateId(), userId: owner.id, memoryId: memory.id } });
+  const a = await db.session.create({ data: { id: generateId(), userId: owner.id, endedAt: new Date(), endReason: 'superseded', supersededBySessionId: b.id } as never });
+  const r = await server.executeOperation({ query: 'query($id:ID!){ session(id:$id){ id supersededBySessionId } }', variables: { id: a.id } }, { contextValue: ctx() });
+  if (r.body.kind !== 'single') throw new Error('incremental response');
+  expect(r.body.singleResult.errors).toBeUndefined();
+  expect(r.body.singleResult.data).toEqual({ session: { id: a.id, supersededBySessionId: null } });
+});
+
+it('keeps immediate successor evidence while refusing with the latest current open session', async () => {
+  const { a, b } = await displaced();
+  const c = await bind(true);
+  // Other drivers' old open rows are not superseded by this person's bind (#1617 C).
+  await db.session.create({ data: { id: generateId(), userId: stranger.id, appId: app.id, workerId: worker.id, startedAt: new Date(Date.now() - 86400000) } });
+  expect((await db.session.findUniqueOrThrow({ where: { id: a.id } })) as any).toMatchObject({ supersededBySessionId: b.id });
+  await expect(validateSessionBinding(db, ctx(), a.id)).rejects.toMatchObject({ extensions: { code: 'SESSION_SUPERSEDED', sessionId: c.id, startedAt: c.startedAt.toISOString() } });
 });

@@ -1938,6 +1938,8 @@ export const typeDefs = `#graphql
     endedAt: DateTime
     "#1156 — hrn:node:hadronmemory.com:specs:cor:dmo:070:05: null while open; stamped cause after end, unknown for legacy ends. Readable wherever this Session is; no ending actor."
     endReason: SessionEndReason
+    "#3818 V25 — hrn:node:hadronmemory.com:specs:cor:dmo:070:05: immediate superseding session id; null unless that successor is currently readable under hrn:node:hadronmemory.com:specs:cor:agt:020:03. No historical backfill."
+    supersededBySessionId: String
     autoExpiredAt: DateTime
     """
     hadron-cli#791 / hrn:node:hadronmemory.com:specs:cor:agt:020:11:
