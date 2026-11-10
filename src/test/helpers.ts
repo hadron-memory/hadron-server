@@ -94,7 +94,9 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // #1631: test-only cleanup bypasses row-delete guards, before deleting owners.
   // #1632: signature records reference passkeys and requests; both refuse a row
   // DELETE while their node exists, so they are truncated with them.
-  await db.$executeRawUnsafe('TRUNCATE TABLE node_signatures, signing_requests, passkey_credentials, worker_reference_fences, user_deletion_audits, agent_clone_audits, user_api_key_deletions CASCADE');
+  // #2973: stamp_signing_keys is FK-free itself (node_signatures references IT), so
+  // nothing cascades it away — key generations would leak between tests otherwise.
+  await db.$executeRawUnsafe('TRUNCATE TABLE node_signatures, stamp_signing_keys, signing_requests, passkey_credentials, worker_reference_fences, user_deletion_audits, agent_clone_audits, user_api_key_deletions CASCADE');
   // Pending first-party login states (FK-free; keyed on the OAuth state).
   await db.pendingLoginState.deleteMany();
   // #1079 — the URN alias map. Deliberately FK-FREE: it must outlive the row it

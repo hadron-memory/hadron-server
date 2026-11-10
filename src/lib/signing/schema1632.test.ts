@@ -268,7 +268,9 @@ describe('content-change marker and staleness (#1632, #10015, #10017)', () => {
 describe('one source of signing SQL', () => {
   it('the migration and both schema-push paths carry the same guard', () => {
     const source = readFileSync('prisma/signing-invariants.sql', 'utf8');
-    expect(readFileSync('prisma/migrations/20261013160000_signing_requests/migration.sql', 'utf8').endsWith(source)).toBe(true);
+    // The newest migration that touches the guard carries it verbatim (#2973 re-applies it;
+    // older carriers keep the text they shipped with, as the passkey guard's migrations do).
+    expect(readFileSync('prisma/migrations/20261109213000_signature_ceremony_stamp/migration.sql', 'utf8').endsWith(source)).toBe(true);
     expect(readFileSync('prisma/post-push.sql', 'utf8')).toContain('\\ir signing-invariants.sql');
     // #434: post-push.sql (above) is the test template's only path; the vitest global setup no longer re-applies it.
     expect(readFileSync('src/test/globalSetup.ts', 'utf8')).not.toContain('signing-invariants.sql');
