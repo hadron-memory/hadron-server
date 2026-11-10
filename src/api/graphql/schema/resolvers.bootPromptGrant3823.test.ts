@@ -320,3 +320,63 @@ describe('spendEditGrant locks the grant row, THEN judges it (#3823)', () => {
     expect(await uses(g)).toBe(0);
   });
 });
+
+describe('the lift is the update door only, in place, signer re-judged (#3823 Riana F1/F3, Andi P2-1)', () => {
+  it('Riana F1: updateNodeProperties and updateNodeData are not edit doors: refused, grant unspent', async () => {
+    const s = await src(installMemoryId, `boot:workers:${workerId}:source`);
+    const g = await grant(s.id);
+    expect(await codeOf(asWorker(() => resolvers.Mutation.updateNodeProperties(null, { nodeRef: s.id, properties: { injected: true } }, ctx())))).toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+    expect(await codeOf(asWorker(() => (resolvers.Mutation as any).updateNodeData(null, { nodeRef: s.id, data: { x: 1 } }, ctx())))).toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+    expect(await uses(g)).toBe(0);
+    expect(await codeOf(edit(s.id))).toBe('NO_ERROR');
+  });
+
+  it('Andi P2-1: a text edit that names another loc or memory is not in place: refused, unspent', async () => {
+    const s = await src(installMemoryId, `boot:workers:${workerId}:source`);
+    const g = await grant(s.id);
+    for (const extra of [{ loc: `boot:workers:${workerId}:moved` }, { memoryId: agentMemoryId }]) {
+      const out = await codeOf(asWorker(() => resolvers.Mutation.updateNode(null, { input: { id: s.id, content: 'x', ...extra } as never }, ctx())));
+      expect(out).not.toBe('NO_ERROR');
+    }
+    expect(await uses(g)).toBe(0);
+    const row = await db.node.findUniqueOrThrow({ where: { id: s.id } });
+    expect([row.loc, row.memoryId, row.content]).toEqual([`boot:workers:${workerId}:source`, installMemoryId, 'original']);
+  });
+
+  it('Riana F3: a source in an install memory of ANOTHER App, or of the same App for ANOTHER Agent, is not own', async () => {
+    const app2 = await db.app.create({ data: { id: generateId(), name: 'App2', urn: 'g3823.example:app2', organizationId: orgId } });
+    await db.appAgent.create({ data: { appId: app2.id, agentId } });
+    const other = await db.memory.create({ data: { id: generateId(), class: 'system', name: 'i2', urn: 'g3823.example:i2', organizationId: orgId, appId: app2.id, installOfAgentId: agentId, isInstallMemory: true } });
+    const a2 = await db.agent.create({ data: { id: generateId(), name: 'A2', urn: 'g3823.example:a2', organizationId: orgId } });
+    await db.appAgent.create({ data: { appId, agentId: a2.id } });
+    const sameAppOtherAgent = await db.memory.create({ data: { id: generateId(), class: 'system', name: 'i3', urn: 'g3823.example:i3', organizationId: orgId, appId, installOfAgentId: a2.id, isInstallMemory: true } });
+    for (const memoryId of [other.id, sameAppOtherAgent.id]) {
+      const s = await src(memoryId, 'boot:source');
+      const g = await grant(s.id);
+      expect(await codeOf(edit(s.id))).toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+      expect(await uses(g)).toBe(0);
+    }
+  });
+
+  it('Riana F3 (V54): the Agent system-memory source needs a signer who manages the AGENT, not only the App', async () => {
+    const s = await src(agentMemoryId, 'boot:source');
+    await db.appMember.create({ data: { appId, userId: stranger.id, role: 'owner' } });
+    const g = await grant(s.id, { verified_by: stranger.id, issuer_user_id: stranger.id });
+    expect(await codeOf(edit(s.id))).toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+    expect(await uses(g)).toBe(0);
+    // control: the same signer IS enough for the App's own install-memory source.
+    const t = await src(installMemoryId, `boot:workers:${workerId}:source`);
+    await grant(t.id, { verified_by: stranger.id, issuer_user_id: stranger.id });
+    expect(await codeOf(edit(t.id))).toBe('NO_ERROR');
+  });
+
+  it('Andi gap: the signer is re-judged at spend time: one who has since lost the App is refused', async () => {
+    const second = await db.user.create({ data: { githubId: 382303, githubUsername: 'g-second', handle: 'g-second', roles: [] } });
+    const m = await db.orgMember.create({ data: { organizationId: orgId, userId: second.id, role: 'ADMIN' } });
+    const s = await src(installMemoryId, `boot:workers:${workerId}:source`);
+    const g = await grant(s.id, { verified_by: second.id, issuer_user_id: second.id });
+    await db.orgMember.update({ where: { organizationId_userId: { organizationId: orgId, userId: second.id } }, data: { role: 'CONTRIBUTOR' } }).catch(() => db.orgMember.delete({ where: { id: (m as any).id } } as never));
+    expect(await codeOf(edit(s.id))).toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+    expect(await uses(g)).toBe(0);
+  });
+});

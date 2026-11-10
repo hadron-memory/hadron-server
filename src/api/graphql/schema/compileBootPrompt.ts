@@ -173,6 +173,29 @@ function isBudgetFault(e: unknown): boolean {
   return x?.code === 'P2028' || x?.code === 'P2024' || x?.meta?.code === '55P03' || /lock timeout|lock_timeout|transaction expired|Transaction already closed|Include-history transaction expired/i.test(String(x?.message ?? ''));
 }
 
+/**
+ * #3823 (Riana F2, Andi P2-2): the worker session's LOCK-FREE, non-authoritative gate. Like the manager gate it replaces for a worker,
+ * it runs before anything is held, so a session with no batch grant never takes the tenant's exclusive anchors, never queues on the
+ * platform-wide fence, and learns nothing but the one refusal. The authoritative judgement (FOR SHARE, fresh clock) stays in the
+ * transaction. Reads only the compiled node the compile would write, and the grants that name it.
+ */
+async function batchPrecheck(ctx: Context, target: CompileTargetInput, before: CompileOwner): Promise<void> {
+  const workerId = boundWorkerId();
+  if (!workerId || !ctx.userId || ctx.appKeyId) throw compileNotPermitted();
+  const memoryId = target.kind === 'AGENT'
+    ? before.agent.systemMemoryId
+    : (await ctx.db.memory.findFirst({
+      where: { class: 'system', isInstallMemory: true, appId: before.appId, installOfAgentId: before.agent.id, deletedAt: null },
+      select: { id: true },
+    }))?.id ?? null;
+  const loc = target.kind === 'WORKER' ? workerCompiledLoc(target.workerId) : AGENT_COMPILED_LOC;
+  const node = memoryId ? await ctx.db.node.findFirst({ where: { memoryId, loc, deletedAt: null }, select: { id: true, nodeType: true } }) : null;
+  if (!memoryId || !node || node.nodeType !== COMPILED_BOOT_PROMPT_NODE_TYPE
+    || !(await hasBatchGrant(ctx.db as unknown as Prisma.TransactionClient, workerId, { id: node.id, memoryId, loc }))) {
+    throw compileNotPermitted();
+  }
+}
+
 /** Race a probe against the operation deadline: an unbounded read must not outlive the budget. */
 async function withinBudget<T>(deadline: number, work: Promise<T>): Promise<T> {
   const left = deadline - performance.now();
@@ -245,6 +268,7 @@ export async function compileBootPrompt(
       // #3823: a worker session compiles only under a batch grant, which is judged on the locked compiled node in the transaction;
       // the manager gate is the person's and does not apply to it (a session with no grant is refused there, as before).
       if (!boundWorkerId()) await withinBudget(deadline, assertMayWriteBootPromptPointer(ctx, before.owner));
+      else await withinBudget(deadline, batchPrecheck(ctx, target, before));
     } catch (e) {
       if (e instanceof GraphQLError && e.extensions?.code !== 'CONFLICT') throw compileNotPermitted();
       if (e instanceof GraphQLError) throw e;
@@ -339,6 +363,8 @@ async function decide(
       installMemoryId = (await ensureInstallMemory(tx, txCtx, live.appId, live.agent.id)).id;
     }
     const agentMemoryId = live.agent.systemMemoryId;
+    // #3823 (Andi): a batch compile never creates an install memory, so a missing one is the one refusal, not a source error.
+    if (batchWorkerId && target.kind !== 'AGENT' && !installMemoryId) throw compileNotPermitted();
     const noSource = () => compileError('BOOT_PROMPT_NO_SOURCE', 'the target has no source boot prompt to compile from.');
     if (!agentMemoryId) throw noSource();
     if (target.kind !== 'AGENT' && !installMemoryId) throw noSource();

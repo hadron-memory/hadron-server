@@ -18,6 +18,7 @@
  * able to make the edit (manage the App; for the Agent's system-memory source, manage the Agent too, V54). A signer who has
  * since lost that standing admits nothing.
  */
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { GraphQLError } from 'graphql';
 import type { Prisma } from '../../generated/prisma/index.js';
 import { Prisma as P } from '../../generated/prisma/index.js';
@@ -37,6 +38,8 @@ export interface BootPromptNodeFacts { id: string; memoryId: string; loc: string
 /** Where an own node sits; it decides what the signer must manage. */
 export type OwnScope = 'WORKER' | 'APP_ROLE' | 'AGENT_SYSTEM';
 export interface OwnNode { scope: OwnScope; appId: string; agentId: string }
+/** Where a batch-named compiled prompt sits (see {@link batchTargetScope}); the same shape, but NOT limited to the worker's own prompts. */
+export type TargetScope = OwnNode;
 
 /**
  * Whether `node` is the worker's OWN boot prompt of `kind` (see the module comment), and where it sits. Null for anything else,
@@ -72,7 +75,7 @@ export async function ownBootPromptNode(q: Q, workerId: string, node: BootPrompt
  * of the grant's own App), or the worker's own role Agent's `boot:compiled` in its system memory. Another App's, another Agent's system
  * memory, and a source are never in scope, whatever the grant names.
  */
-export async function batchTargetScope(q: Q, workerId: string, node: BootPromptNodeFacts): Promise<OwnNode | null> {
+export async function batchTargetScope(q: Q, workerId: string, node: BootPromptNodeFacts): Promise<TargetScope | null> {
   const worker = await q.worker.findFirst({
     where: { id: workerId, retiredAt: null, app: { deletedAt: null } },
     select: { appId: true, agentId: true, agent: { select: { systemMemoryId: true, deletedAt: true } } },
@@ -114,7 +117,7 @@ interface Candidate { id: string; issuer: string | null }
  * The live grants of `action` held by `workerId` in `appId` that name `nodeId` and are inside their hour. `single`: the value must be
  * exactly one node id (an edit grant names ONE source; a list or wildcard names none), and a grant with a USE event is spent.
  */
-async function candidates(q: Q, workerId: string, appId: string, action: string, nodeId: string, single: boolean, onlyId?: string, shareLock = false): Promise<Candidate[]> {
+async function candidates(q: Q, workerId: string, appId: string, action: string, nodeId: string, single: boolean, onlyId?: string): Promise<Candidate[]> {
   const param = single ? 'sourceNode' : 'compiledNode';
   const names = single
     ? P.sql`(jsonb_typeof(g.action_values->${param}) = 'string' AND g.action_values->>${param} = ${nodeId})`
@@ -125,9 +128,10 @@ async function candidates(q: Q, workerId: string, appId: string, action: string,
        AND ${onlyId === undefined ? P.sql`TRUE` : P.sql`g.id = ${onlyId}`}
        AND ${names}
        AND ${grantLiveSql('g')}
+       AND g.activated_at <= ${GRANT_DB_NOW}
        AND g.activated_at + interval '1 hour' > ${GRANT_DB_NOW}
        AND ${single ? P.sql`NOT EXISTS (SELECT 1 FROM grant_events e WHERE e.grant_id = g.id AND e.action = 'USE')` : P.sql`TRUE`}
-     ORDER BY g.activated_at, g.id ${shareLock ? P.sql`FOR SHARE OF g` : P.empty}`);
+     ORDER BY g.activated_at, g.id`);
   return rows.map((r) => ({ id: r.id, issuer: r.issuer_user_id }));
 }
 
@@ -160,22 +164,50 @@ export async function spendEditGrant(tx: Q, workerId: string, node: BootPromptNo
 }
 
 /**
- * Whether the worker holds a live batch grant naming this compiled node. The grant has no use count, so nothing is spent; with
- * `lock` the rows read are held FOR SHARE until the transaction ends, so a revocation either committed first (and is seen) or
- * waits for the act. Take it LAST among the act's locks.
+ * The id of a live batch grant the worker holds that names this compiled node, or null. The grant has no use count, so nothing is
+ * spent. With `lock` each candidate row is held FOR SHARE in its own statement and then JUDGED AGAIN on the database clock: a grant
+ * that was revoked or expired while this waited behind another transaction's lock reads dead (the query that selects can be
+ * evaluated before the lock is granted). A revocation then either committed first or waits for the act. Take it LAST among the
+ * act's locks.
  */
-export async function hasBatchGrant(q: Q, workerId: string, node: BootPromptNodeFacts, lock = false): Promise<boolean> {
+export async function findBatchGrant(q: Q, workerId: string, node: BootPromptNodeFacts, lock = false): Promise<string | null> {
   const own = await batchTargetScope(q, workerId, node);
-  if (!own) return false;
-  for (const c of await candidates(q, workerId, own.appId, BOOT_PROMPT_BATCH_ACTION, node.id, false, undefined, lock)) {
-    if (await signerStillEligible(q, c.issuer, own)) return true;
+  if (!own) return null;
+  for (const c of await candidates(q, workerId, own.appId, BOOT_PROMPT_BATCH_ACTION, node.id, false)) {
+    let live = c;
+    if (lock) {
+      await q.$queryRaw`SELECT g.id FROM grants g WHERE g.id = ${c.id} FOR SHARE`;
+      const [again] = await candidates(q, workerId, own.appId, BOOT_PROMPT_BATCH_ACTION, node.id, false, c.id);
+      if (!again) continue;
+      live = again;
+    }
+    if (await signerStillEligible(q, live.issuer, own)) return c.id;
   }
-  return false;
+  return null;
+}
+
+export async function hasBatchGrant(q: Q, workerId: string, node: BootPromptNodeFacts, lock = false): Promise<boolean> {
+  return (await findBatchGrant(q, workerId, node, lock)) !== null;
 }
 
 type Prior = { id: string; memoryId: string; loc: string; nodeType?: string | null; role?: string | null };
 /** `otherFields`: the names of the fields the write SUPPLIES besides its text (and the identifiers that locate the node). */
-type Next = { nodeType?: string | null; role?: string | null; otherFields: readonly string[] };
+type Next = {
+  nodeType?: string | null; role?: string | null; otherFields: readonly string[];
+  /** Whether the write arrived through a door that may carry the lift: `updateNode` or `hadron_update_node`, and no other (Riana F1). */
+  door: boolean;
+  /** Where the write says the node is: it must be where it already is (an edit in place never relocates, V46). */
+  memoryId?: string; loc?: string;
+};
+
+const updateNodeDoor = new AsyncLocalStorage<true>();
+/** Run `fn` as the `updateNode` mutation: the only GraphQL door whose update writes may spend an edit grant. */
+export function withUpdateNodeDoor<T>(fn: () => Promise<T>): Promise<T> { return updateNodeDoor.run(true, fn); }
+
+/** What a GraphQL write core tells the grant predicate about itself: its door, its location and what it supplies besides text. */
+export function graphqlEditFacts(input: Record<string, unknown> & { memoryId?: string; loc?: string }): Pick<Next, 'otherFields' | 'door' | 'memoryId' | 'loc'> {
+  return { otherFields: suppliedNonTextFields(input), door: updateNodeDoor.getStore() === true, memoryId: input.memoryId, loc: input.loc };
+}
 
 /** The identifiers and the text itself: the only supplied fields an in-place TEXT edit may carry (V46). `role` and `nodeType` are compared with the prior row's by {@link isGrantableEdit}, not listed here. */
 const TEXT_EDIT_KEYS: ReadonlySet<string> = new Set(['id', 'memoryId', 'loc', 'urn', 'content', 'authoredWith', 'expectedRevision', 'expectedRevSeq', 'reason', 'role', 'nodeType']);
@@ -194,6 +226,8 @@ export function isGrantableEdit(prior: Prior | null | undefined, next: Next): bo
   if (next.role !== undefined && next.role !== prior.role) return false;
   if (next.nodeType !== undefined && next.nodeType !== prior.nodeType) return false;
   // Text in place only (V46): a name, properties, tags, data, edges or any other field supplied alongside is a different edit.
+  if (!next.door) return false;
+  if ((next.memoryId !== undefined && next.memoryId !== prior.memoryId) || (next.loc !== undefined && next.loc !== prior.loc)) return false;
   return next.otherFields.length === 0;
 }
 

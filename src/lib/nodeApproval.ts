@@ -6,7 +6,7 @@ import type { EncryptionKey } from './crypto.js';
 import { decryptNodeFieldsWithKey } from './nodeCrypto.js';
 import { ensureCurrentNodeRevisionInTransaction, RECONCILE_EDITOR_INFO, type SnapshotEditor } from './nodeRevisionSnapshot.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, boundWorkerId, isBootPromptRole } from './bootPrompt.js';
-import { hasBatchGrant } from './grants/bootPromptGrant.js';
+import { findBatchGrant } from './grants/bootPromptGrant.js';
 import { BOOT_PROMPT_APPROVAL_MESSAGES, type BootPromptApprovalGate, type BootPromptApprovalRefusalCode } from './bootPromptApproval.js';
 
 /**
@@ -180,10 +180,12 @@ export async function approveNodeInTransaction(
       // #3823 (ruling 0267, cor:agt:040:18 r9, R30's one exception): a worker session approves a COMPILED prompt only under a live
       // batch grant that names it. The approval is recorded as the worker's, never as its holder's, and it never signs.
       const workerId = boundWorkerId();
-      const batch = gate.refusal === 'BOOT_PROMPT_WORKER_SESSION_REFUSED' && workerId && row.node_type === COMPILED_BOOT_PROMPT_NODE_TYPE
-        && (await hasBatchGrant(tx, workerId, { id: row.id, memoryId: row.memory_id, loc: row.loc }, true));
-      if (!batch) throw new NodeApprovalRefusal(gate.refusal, BOOT_PROMPT_APPROVAL_MESSAGES[gate.refusal], { op: 'approve' });
-      approver = { userId: null, info: `worker:${workerId} (batch grant)` } as typeof opts.approver;
+      const batchGrantId = gate.refusal === 'BOOT_PROMPT_WORKER_SESSION_REFUSED' && workerId && row.node_type === COMPILED_BOOT_PROMPT_NODE_TYPE
+        ? await findBatchGrant(tx, workerId, { id: row.id, memoryId: row.memory_id, loc: row.loc }, true)
+        : null;
+      if (!batchGrantId) throw new NodeApprovalRefusal(gate.refusal, BOOT_PROMPT_APPROVAL_MESSAGES[gate.refusal], { op: 'approve' });
+      // The record names the grant that admitted it (no USE event: a batch grant has no use count).
+      approver = { userId: null, info: `worker:${workerId} (batch grant ${batchGrantId})` } as typeof opts.approver;
     }
   }
   const revision = await ensureCurrentNodeRevisionInTransaction(tx, nodeId, { expectedMemoryId: opts.memoryId });

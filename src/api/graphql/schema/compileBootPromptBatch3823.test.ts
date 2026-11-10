@@ -11,6 +11,8 @@ import { runAsActor } from '../../../lib/requestActor.js';
 import { upsertPlatformActions } from '../../../lib/grants/actions.js';
 import { DB_NOW, insertGrantUnguarded, raw, type World } from '../../../lib/grants/grantFixtures3668.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
+import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
+import { hasBatchGrant } from '../../../lib/grants/bootPromptGrant.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
 import type { Context } from './resolvers.helpers.js';
@@ -45,9 +47,9 @@ const grant = (nodes: string | string[], over: Record<string, unknown> = {}) => 
 } as never);
 const snapshot = async () => ({
   nodes: await db.node.count(), revisions: await db.compiledPromptRevision.count(),
-  pointers: (await db.agent.findMany({ select: { bootPromptNodeId: true } })).map((a) => a.bootPromptNodeId),
-  appAgent: (await db.appAgent.findMany({ select: { bootPromptNodeId: true } })).map((a) => a.bootPromptNodeId),
-  workers: (await db.worker.findMany({ select: { bootPromptNodeId: true } })).map((a) => a.bootPromptNodeId),
+  pointers: (await db.agent.findMany({ select: { bootPromptNodeId: true }, orderBy: { id: 'asc' } })).map((a) => a.bootPromptNodeId),
+  appAgent: (await db.appAgent.findMany({ select: { bootPromptNodeId: true }, orderBy: { appId: 'asc' } })).map((a) => a.bootPromptNodeId),
+  workers: (await db.worker.findMany({ select: { bootPromptNodeId: true }, orderBy: { id: 'asc' } })).map((a) => a.bootPromptNodeId),
   agentOrgGrants: await db.agentOrgGrant.count(),
 });
 
@@ -185,6 +187,71 @@ describe('a batch compile provisions nothing (V53)', () => {
     // the same compile by a person (no session) still provisions it, as before
     await M.compileWorkerBootPrompt(null, { workerRef: workerId }, ctx());
     expect(await db.agentOrgGrant.count()).toBeGreaterThan(0);
+  });
+});
+
+describe('the batch gate before and inside the transaction (Riana F2/F4, Anne F4, Andi)', () => {
+  it('Riana F2: a worker with NO grant is refused at once even while a person holds the tenant\'s exclusive anchors (no queueing, no CONFLICT)', async () => {
+    await source(installId, `boot:workers:${workerId}:source`);
+    await compiled(installId, `boot:workers:${workerId}:compiled`);
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const lockedP = new Promise<void>((r) => { locked = r; });
+    const holder = db.$transaction(async (tx) => { await lockAuthorityAnchors(tx, [{ kind: 'app', id: appId }, { kind: 'agent', id: agentId }], 'exclusive'); locked(); await held; }, { timeout: 20000 });
+    await lockedP;
+    const t0 = Date.now();
+    const code = await codeOf(asWorker(() => M.compileWorkerBootPrompt(null, { workerRef: workerId }, ctx())));
+    const took = Date.now() - t0;
+    release(); await holder;
+    expect(code).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');
+    expect(took).toBeLessThan(3000);
+  });
+
+  it('Riana F4: a worker session with no user is refused', async () => {
+    await source(installId, `boot:workers:${workerId}:source`);
+    const c = await compiled(installId, `boot:workers:${workerId}:compiled`);
+    await grant(c.id);
+    const noUser = { db, roles: [] } as unknown as Context;
+    expect(await codeOf(asWorker(() => M.compileWorkerBootPrompt(null, { workerRef: workerId }, noUser)))).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');
+  });
+
+  it('Riana F4: a batch compile never creates the install memory', async () => {
+    await db.node.deleteMany({ where: { memoryId: installId } });
+    await db.memory.delete({ where: { id: installId } });
+    const before = await db.memory.count();
+    expect(await codeOf(asWorker(() => M.compileAppAgentBootPrompt(null, { appRef: appId, agentRef: agentId }, ctx())))).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');
+    expect(await db.memory.count()).toBe(before);
+  });
+
+  it('Anne F4: a grant that expires while the check waits for its lock reads dead (lock, THEN judge on the clock)', async () => {
+    await source(installId, `boot:workers:${workerId}:source`);
+    const c = await compiled(installId, `boot:workers:${workerId}:compiled`);
+    const g = await grant(c.id, { expires_at: raw(`${DB_NOW} + interval '1500 milliseconds'`) });
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const lockedP = new Promise<void>((r) => { locked = r; });
+    const blocker = db.$transaction(async (tx) => { await tx.$queryRaw`SELECT id FROM grants WHERE id = ${g} FOR UPDATE`; locked(); await held; }, { timeout: 20000 });
+    await lockedP;
+    const checker = db.$transaction((tx) => hasBatchGrant(tx, workerId, { id: c.id, memoryId: installId, loc: c.loc }, true), { timeout: 20000 });
+    await new Promise((r) => setTimeout(r, 2300));
+    release(); await blocker;
+    expect(await checker).toBe(false);
+  });
+
+  it('a wildcard value names no prompt', async () => {
+    await source(installId, `boot:workers:${workerId}:source`);
+    await compiled(installId, `boot:workers:${workerId}:compiled`);
+    await grant('*');
+    expect(await codeOf(asWorker(() => M.compileWorkerBootPrompt(null, { workerRef: workerId }, ctx())))).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');
+  });
+
+  it('Andi: the approval records the admitting grant', async () => {
+    const c = await compiled(installId, `boot:workers:${workerId}:compiled`);
+    const g = await grant(c.id);
+    await asWorker(() => M.approveNode(null, { nodeRef: c.id }, ctx()));
+    expect((await db.node.findUniqueOrThrow({ where: { id: c.id } })).approvedByInfo).toContain(g);
   });
 });
 
