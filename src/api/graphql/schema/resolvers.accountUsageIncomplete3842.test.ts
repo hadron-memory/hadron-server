@@ -1,13 +1,10 @@
 /**
- * #3820 — Query.accountUsageProjection over the real schema. The projection arithmetic is pinned in
- * `src/lib/accountUsage/projection3820.test.ts`; this file pins what only the resolver decides:
- *  - the read gate is the one the team's tasks and events are read through (cor:agt:140:03, V27, V36): participants and the App's
- *    own key, and anyone else is refused APP_NOT_FOUND exactly as for an App that does not exist;
- *  - the history comes ONLY from `account-usage` objects in the App's own team-space memory (V9): not another App's, not a
- *    free-standing memory's, not a deleted object, not another collection;
- *  - a what-if is validated after the gate, exactly one of its two forms, and the answer is advisory (it writes nothing).
- */
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+ * #3842 — `accountUsageProjection` when the history census cannot be finished (V55; cor:agt:140:02/:03, scenario S8b). The
+ * loader's cap and probe budget are shrunk through a mock of `load.js` so a handful of rows exhaust them. Pinned here: the
+ * UNKNOWN / HISTORY_INCOMPLETE answer, the ambiguity refusal when the probe does find a second host, qualified reads that are
+ * never incomplete, the what-if and move shapes on an incomplete source or target, and the unchanged complete-census answers.
+ * The gate, memory scope and what-if validation are pinned in `resolvers.accountUsageProjection3820.test.ts`.
+ */import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -38,14 +35,12 @@ let org: { id: string; urn: string };
 let app: { id: string };
 let teamMemoryId: string;
 let member: { id: string };
-let outsider: { id: string };
 let agentId: string;
 
 async function seedApp() {
   const n = Math.floor(Math.random() * 1_000_000_000);
   org = await db.organization.create({ data: { id: generateId(), name: 'AU', urn: `au-${n}.example` } });
   member = await db.user.create({ data: { id: generateId(), githubId: 700_000 + n, githubUsername: `au-m-${n}`, roles: ['READER'] } });
-  outsider = await db.user.create({ data: { id: generateId(), githubId: 800_000 + n, githubUsername: `au-o-${n}`, roles: ['READER'] } });
   agentId = (await db.agent.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.urn}:team`, visibility: 'ORGANIZATION' } })).id;
   app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.urn}:team` }, select: { id: true } });
   await db.appAgent.create({ data: { appId: app.id, agentId } });
@@ -74,8 +69,6 @@ async function snapshot(opts: { memoryId?: string; label: string; minutesAgo: nu
 async function burn(label: string, endPct: number, ratePerHour: number, over: Partial<Parameters<typeof snapshot>[0]> = {}) {
   for (let m = 6 * 60; m >= 0; m -= 30) await snapshot({ label, minutesAgo: m, sevenPct: endPct - (m / 60) * ratePerHour, ...over });
 }
-const proj = (account: string, whatIf?: unknown, who = member.id, appRef = app.id) => Q.accountUsageProjection({}, { appRef, account, whatIf }, ctx(who));
-const seven = (r: any) => r.windows.find((w: any) => w.window === 'SEVEN_DAY');
 
 
 const proj2 = (args: Record<string, unknown>) => Q.accountUsageProjection({}, { appRef: app.id, ...args }, ctx(member.id));
@@ -146,6 +139,29 @@ describe('#3842 history census exhausted is UNKNOWN / HISTORY_INCOMPLETE (V55, c
     await seedCensus('dst-amb', 5, true);
     const mv = await proj2({ account: 'src2', host: 'hs', family: 'claude', whatIf: { moveWorker: { worker: 'Anne', toAccount: 'dst-amb' } } });
     for (const w of [...mv.whatIf.target.baseline, ...mv.whatIf.target.adjusted]) expect(w).toMatchObject({ status: 'UNKNOWN', reason: 'HISTORY_INCOMPLETE' });
+  });
+  it('a tied createdAt cannot make the probe skip a row: rows written in the same instant are all read, the second host is found', async () => {
+    LIM.rows = 2; LIM.budget = 20;
+    await burn('tie', 40, 1, { extra: { host: 'h1' } });
+    const at = new Date(Date.now() - 400 * MIN);
+    for (let k = 0; k < 7; k += 1) {
+      const id = generateId();
+      await db.node.create({ data: { id, memoryId: teamMemoryId, name: `t-${k}`, loc: `account-usage:${id}`, nodeType: 'info', objectType: 'account-usage', createdAt: at,
+        properties: { schemaVersion: 1, label: 'tie', family: 'claude', host: k === 3 ? 'h2' : 'h3', observedAt: at.toISOString(), sevenDayPct: 5, workers: [], workersConfigured: false, ...(k === 3 ? {} : { schemaVersion: 2 }) } } });
+    }
+    await expect(proj2({ account: 'tie' })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+  });
+  it('a move FROM an incomplete source: no V33 or self-move refusal (no census to judge them on), source and target windows UNKNOWN', async () => {
+    LIM.rows = 5; LIM.budget = 4;
+    await seedCensus('srcinc', 5, true);
+    await burn('tgt', 20, 1, { extra: { host: 'ht' } });
+    const unknownWorker = await proj2({ account: 'srcinc', whatIf: { moveWorker: { worker: 'Nobody', toAccount: 'tgt' } } });
+    for (const w of unknownWorker.whatIf.adjusted) expect(w).toMatchObject({ status: 'UNKNOWN', reason: 'HISTORY_INCOMPLETE' });
+    expect(unknownWorker.whatIf.target.baseline.find((w: any) => w.window === 'SEVEN_DAY')).toMatchObject({ status: 'PROJECTED', usedPct: 20 });
+    for (const w of unknownWorker.whatIf.target.adjusted) expect(w).toMatchObject({ status: 'UNKNOWN', reason: 'HISTORY_INCOMPLETE' });
+    // Same label, a named host: the source identity is unresolved, so the self-move judgement is skipped, not refused.
+    const self = await proj2({ account: 'srcinc', whatIf: { moveWorker: { worker: 'Anne', toAccount: 'srcinc', toHost: 'h1', toFamily: 'claude' } } });
+    for (const w of self.whatIf.adjusted) expect(w).toMatchObject({ status: 'UNKNOWN', reason: 'HISTORY_INCOMPLETE' });
   });
   it('the other reasons are unchanged: no history stays NO_HISTORY, and a thin history keeps its reason', async () => {
     LIM.rows = 5; LIM.budget = 4;

@@ -16968,7 +16968,8 @@ export const typeDefs = `#graphql
   snapshot over 60 minutes old), NO_RESET, RESET_PASSED, NO_WORKERS_CONFIGURED (a what-if needs the account's workers),
   WHATIF_SOURCE_UNKNOWN (the moved worker's burn is not known), HISTORY_INCOMPLETE (#3842: the account was named without both
   host and family and the server could not finish checking whether another history shares the label; every window of it
-  carries this reason and no range. hrn:node:hadronmemory.com:specs:cor:agt:140:03). INSUFFICIENT_DATA: LOW_USE (under 5% used),
+  carries this reason and no range; so do the what-if windows of such an account, and the adjusted target windows of a
+  move from one. hrn:node:hadronmemory.com:specs:cor:agt:140:03). INSUFFICIENT_DATA: LOW_USE (under 5% used),
   TOO_FEW_SNAPSHOTS (fewer than 3, or spanning under an hour).
   """
   enum AccountUsageReason {

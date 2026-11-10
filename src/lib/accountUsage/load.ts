@@ -23,7 +23,10 @@ export type AccountCensus = { snaps: UsageSnapshot[]; incomplete: boolean };
  */
 export const PROBE_ROW_BUDGET = 100_000;
 
-/** The snapshots per selector, as before; use {@link loadAccountUsageCensus} when the caller must know the census was cut short. */
+/**
+ * The snapshots per selector, as before. It DROPS `incomplete`: the only caller is the account list (`list.ts`), which reads
+ * fully qualified selectors that have nothing to probe and so are never incomplete. A projection MUST use
+ * {@link loadAccountUsageCensus}. Use {@link loadAccountUsageCensus} when the caller must know the census was cut short. */
 export async function loadAccountUsageHistory(db: Context['db'], appId: string, now: Date, accounts: readonly AccountSelector[], maxRows: number = MAX_SNAPSHOT_ROWS, probeBudget: number = PROBE_ROW_BUDGET): Promise<UsageSnapshot[][]> {
   return (await loadAccountUsageCensus(db, appId, now, accounts, maxRows, probeBudget)).map((c) => c.snaps);
 }
@@ -49,6 +52,7 @@ export async function loadAccountUsageCensus(
       AND: [{ properties: { path: ['label'], equals: wanted } }, ...identity],
       createdAt: { gte: new Date(now.getTime() - HISTORY_DAYS * 24 * 3_600_000) },
     };
+    // `id` is the unique tiebreaker the cursor paging below relies on: rows written in one instant still have one total order.
     const orderBy = [{ createdAt: 'desc' as const }, { id: 'desc' as const }];
     const usable = (properties: unknown): UsageSnapshot | null => {
       const snap = parseUsageSnapshot(properties, now);
@@ -78,7 +82,8 @@ export async function loadAccountUsageCensus(
       for (;;) {
         const take = Math.min(maxRows, probeBudget - read);
         if (take <= 0) { incomplete = true; break; }
-        // One row of lookahead says whether anything is left once this page is judged.
+        // One row of lookahead says whether anything is left once this page is judged (its properties are fetched and unused: an
+        // advisory read, bounded by the budget, accepted over a second query).
         const page: { id: string; properties: unknown }[] = await db.node.findMany({
           where: scan, select: { id: true, properties: true }, orderBy, take: take + 1,
           ...(cursor ? { cursor: { id: cursor }, skip: 1 } : seen ? {} : { cursor: { id: rows.at(-1)!.id }, skip: 1 }),
@@ -101,4 +106,3 @@ export async function loadAccountUsageCensus(
   }
   return result;
 }
-
