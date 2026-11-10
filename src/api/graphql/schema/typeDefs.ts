@@ -10948,6 +10948,12 @@ export const typeDefs = `#graphql
     grant(ref: ID!): Grant
     "The bound worker's own grants (#3789): the rows naming it directly as holder, plus the pending ones it requested. Any other caller gets an empty page, never an error. limit 0 returns the count only."
     grants(limit: Int, offset: Int): GrantsPage!
+    """
+    The caller's own grants across every App (#3800, hrn:node:hadronmemory.com:specs:cor:acl:140:05, ruling 0255 item 8): the rows naming the signed-in person directly as holder, in every state, newest first.
+    Never another holder's, and never a row the person only issued or requested for someone else. Leaving an Org does not hide a grant. A soft-deleted App conceals its grants. There is no state label; allows is the one live function.
+    An App key, a run, an impersonated session and a worker session get an empty page, never an error. limit 0 returns the count only.
+    """
+    myGrants(limit: Int, offset: Int): GrantsPage!
     "One action grant by ID - visible to the grantee or an admin of its org; null otherwise (no existence oracle)."
     principalGrant(ref: ID!): PrincipalGrant
     "Action grants. Default: the caller's own (self-audit is never gated). An org admin passing orgRef sees that org's grants, optionally narrowed by userRef."

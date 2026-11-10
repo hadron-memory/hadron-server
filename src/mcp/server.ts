@@ -1593,7 +1593,7 @@ const readProjectionInclude = {
   memory: { select: { isEncrypted: true } },
 } as const;
 
-/** Reconcile and fetch the complete projection while the node row stays locked. */
+/** Fetch one authorized projection snapshot; unchanged reads use read-only REPEATABLE READ, drift alone takes the exclusive history fence. */
 async function loadCurrentReadProjection(
   nodeId: string,
   authorizedMemoryId: string,
@@ -1622,7 +1622,8 @@ async function loadCurrentReadProjection(
     if (mode === 'metadata' || !row.abstract) return { ...row, content: null };
     if (mode === 'abstract-raw' && !row.memory.isEncrypted && row.abstractOriginHash == null) {
       // Presence is enough for the existing missing-fingerprint marker. Read
-      // it under this node's lock; never trust the earlier metadata snapshot.
+      // it in this authorized snapshot, never from earlier metadata. Unchanged
+      // reads are read-only REPEATABLE READ; only drift takes the exclusive history fence.
       const presence = await tx.$queryRaw<Array<{ present: boolean }>>`
         SELECT (content IS NOT NULL AND octet_length(content) > 0) AS present
         FROM nodes WHERE id = ${nodeId} AND memory_id = ${authorizedMemoryId} AND deleted_at IS NULL`;
@@ -2006,7 +2007,7 @@ async function renderNodeReadProjection(
   // properties of this call, not of the node.
   const shouldCheckStale = scope === 'abstract' || scope === 'all';
   const includeStaleMarker =
-    shouldCheckStale && !node.memory.isEncrypted && isAbstractUnverified(node, node.contentPresent);
+    shouldCheckStale && !node.memory.isEncrypted && isAbstractUnverified(node, node.contentPresent === undefined ? undefined : { contentPresent: node.contentPresent });
 
   // #881: the node's portal URL, ready to hand a human. Emitted so no agent
   // ever *constructs* one — constructing means guessing which URN spelling
