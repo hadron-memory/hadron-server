@@ -5,7 +5,7 @@ import { withRosterAppRead } from './resolvers.agentTaskMatching.js';
 import { normalizeFamily, type ModelTier } from '../../../lib/agentTasks/family.js';
 import { loadTeamUtilization } from '../../../lib/agentTasks/utilization.js';
 
-interface UtilizationArgs { appRef: string; family?: string | null; tier?: string | null; role?: string | null; windowHours?: number | null }
+export interface UtilizationArgs { appRef: string; family?: string | null; tier?: string | null; role?: string | null; windowHours?: number | null }
 export const utilizationQueries = {
   teamUtilization: (_: unknown, args: UtilizationArgs, ctx: Context) => withRosterAppRead(ctx, args.appRef, async (readCtx, app) => {
     // Admission comes first: invalid filters never reveal whether a concealed App exists.
