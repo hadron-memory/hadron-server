@@ -14,10 +14,12 @@ import { readInstallBootPrompt } from '../appInstallations.js';
  * knows (a bind knows its worker, a chat only its Agent) and records the values it used.
  */
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
-import { newestApprovedRevisionOf } from '../nodeApproval.js';
+import { newestApprovedAndSignedRevisionForServe, newestApprovedRevisionForServe } from '../nodeApproval.js';
 import { resolveBootPromptPointer, type StoredBootPromptPointer } from '../bootPromptPointer.js';
 import { readCompiledRevision, sha256Hex } from '../bootCompile/provenance.js';
 import { generateId } from '../id.js';
+import { lazyRevisionSignatureCounts } from '../signing/revisionSignatureCounts.js';
+import { signingSurfacePolicy } from '../signing/surface.js';
 import { BOOT_PROMPT_REFUSAL_CODES, bootPromptRefusal, type BootPromptRefusalCode, type BootPromptSurface } from './refusal.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
@@ -48,12 +50,20 @@ export interface ServeTarget {
 }
 
 /**
- * The seam for the organisation's signing switch (#1614, ruled a seam in v3 Gap 5). Until that switch exists no App's
- * organisation can require a signed prompt, so nothing is refused as unsigned; when it ships this is the one place that
- * reads the SERVING App's organisation and `BOOT_PROMPT_NOT_SIGNED` follows.
+ * #2973 (cor:agt:040:10, G2) — does the SERVING App require a signed prompt? The organisation's switch AND the
+ * deployment's signing policy, both read per call: `signingSurfacePolicy().signing` (PASSKEY_SIGNING_ENABLED) first,
+ * then the App's organisation column (PR2 adds the audience-gated control API; PR1 tests set it directly, and the
+ * column's DEFAULT false keeps the check inert everywhere). An App with no organisation has no switch and serves on
+ * approval alone — today's behaviour, resting on cor:agt:040:09's open question "does a user-owned App ever require
+ * signing"; a chat with no App is the same by construction (no App to ask about).
  */
-async function servingAppRequiresSignature(_db: Db, _appId: string): Promise<boolean> {
-  return false;
+async function servingAppRequiresSignature(db: Db, appId: string): Promise<boolean> {
+  if (!signingSurfacePolicy().signing) return false;
+  const app = await db.app.findUnique({
+    where: { id: appId },
+    select: { organization: { select: { bootPromptSigningRequired: true } } },
+  });
+  return app?.organization?.bootPromptSigningRequired === true;
 }
 
 /** The pointer that decides, highest level first, or null when none is set anywhere. `skipWorker`: the worker level was already judged. */
@@ -160,31 +170,51 @@ async function resolveFrom(db: Db, t: ServeTarget, skipWorker: boolean): Promise
   // at once, which is harmless: those retain nothing.
   await db.$queryRaw`SELECT id FROM nodes WHERE id = ${resolved.nodeId} FOR SHARE`;
 
-  if (t.appId && (await servingAppRequiresSignature(db, t.appId))) {
-    // Unreachable until #1614 supplies the signature check; fail closed rather than serve unsigned text.
-    throw bootPromptRefusal('BOOT_PROMPT_NOT_SIGNED', where);
-  }
+  // #2973 (cor:agt:040:10, G2): where the serving organisation has switched signing on AND the deployment ships
+  // signing, the selection below demands a signed revision too — judged here, inside the revision walk. The ONLY row
+  // held is the NODE row's share lock above: what the walk then reads (the org switch, the signatures, the passkeys)
+  // is NOT locked — a change there races this read and is picked up by the next resolve, exactly as the approval
+  // walk's reads already race (Bob Q2, delta review of 77c9fda85b: the comment used to claim more than the lock
+  // gives). Either conjunct false keeps today's approval-only serving: the walk is the unchanged #2041 one.
+  const requiresSignature = t.appId != null && (await servingAppRequiresSignature(db, t.appId));
 
   // Selection and retrieval are two reads, so a recompile between them could pair an old revision number with newer,
   // unapproved text. The content is therefore read ONLY at the selected revision number (live row if it is still that
   // revision, else its retained snapshot); when neither can be pinned the selection moved, so select again.
-  let found: NonNullable<Awaited<ReturnType<typeof newestApprovedRevisionOf>>['found']> | null = null;
+  let selectedRevNo: number | null = null;
   let content: string | null = null;
   for (let attempt = 0; attempt < APPROVED_READ_ATTEMPTS && content === null; attempt++) {
-    ({ found } = await newestApprovedRevisionOf(db, resolved.nodeId));
-    if (!found) throw bootPromptRefusal('BOOT_PROMPT_NOT_APPROVED', where);
-    content = await approvedContent(db, resolved.nodeId, found.revNo);
+    if (requiresSignature) {
+      // R35: the newest revision that is BOTH approved and signed — a newer approved-but-unsigned revision neither
+      // serves nor refuses. R36: with none, an approved revision existing (a pending-only signature included) is
+      // NOT_SIGNED; nothing approved at all is NOT_APPROVED. The walk continues past its scan cap in bounded batches
+      // (#3801 adoption, Bob P2-1: an older SIGNED revision buried under more than `cap` approved-but-unsigned ones
+      // still serves; past the batch ceiling the serve fails closed with the R36 refusal, never wrong text). The
+      // signed predicate is the LAZY one — one set of reads answers every candidate the walk asks (the interval law,
+      // revisionSignatureCounts.ts): judging per candidate re-read the span per ask, and a node pushed past the scan
+      // ceiling then cost more than the bind transaction's default timeout, surfacing the typed refusal as a raw
+      // INTERNAL_SERVER_ERROR (Clark's F1, QA of 8f8d48c1).
+      const signed = lazyRevisionSignatureCounts(db, resolved.nodeId, 'compiled-boot-prompt');
+      const walk = await newestApprovedAndSignedRevisionForServe(db, resolved.nodeId, signed);
+      if (!walk.found) throw bootPromptRefusal(walk.approvedUnsigned ? 'BOOT_PROMPT_NOT_SIGNED' : 'BOOT_PROMPT_NOT_APPROVED', where);
+      selectedRevNo = walk.found.revNo;
+    } else {
+      const { found } = await newestApprovedRevisionForServe(db, resolved.nodeId);
+      if (!found) throw bootPromptRefusal('BOOT_PROMPT_NOT_APPROVED', where);
+      selectedRevNo = found.revNo;
+    }
+    content = await approvedContent(db, resolved.nodeId, selectedRevNo);
   }
-  if (!found || content === null) throw bootPromptRefusal('BOOT_PROMPT_NOT_APPROVED', where);
+  if (selectedRevNo === null || content === null) throw bootPromptRefusal('BOOT_PROMPT_NOT_APPROVED', where);
 
-  const provenanceRevSeq = await provenanceRevisionAtOrBelow(db, resolved.nodeId, found.revNo);
+  const provenanceRevSeq = await provenanceRevisionAtOrBelow(db, resolved.nodeId, selectedRevNo);
   if (provenanceRevSeq === null) throw bootPromptRefusal('BOOT_PROMPT_NOT_APPROVED', where);
   const revision = await readCompiledRevision(db, resolved.nodeId, provenanceRevSeq);
   if (!revision) throw bootPromptRefusal('BOOT_PROMPT_NOT_APPROVED', where);
   return {
     pointerLevel: pointer.level,
     compiledNodeId: resolved.nodeId,
-    servedRevSeq: found.revNo,
+    servedRevSeq: selectedRevNo,
     provenanceRevSeq,
     compiledContentHash: sha256Hex(content),
     provenance: revision.provenance.occurrences.map((o) => ({ nodeId: o.nodeId, revSeq: o.revNo, hash: o.hash })),

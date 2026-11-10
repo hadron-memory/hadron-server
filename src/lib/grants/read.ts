@@ -87,7 +87,11 @@ function scope(reader: GrantReader): Prisma.Sql {
 
 const COLUMNS = Prisma.sql`g.id, g.app_id, g.user_id, g.agent_id, g.worker_id, g.grantee_app_id, g.issuer_user_id, g.requested_by_user_id,
   g.requested_by_worker_id, g.requested_by_session_id, g.action, g.action_values, g.starts_at, g.expires_at, g.max_uses, g.use_count,
-  g.reason, g.created_at, g.activated_at, g.verification_kind, g.verified_by, g.signature_id, g.revoked_at, ${grantLiveSql('g')} AS allows`;
+  g.reason, g.created_at, g.activated_at, g.verification_kind,
+  -- #3649 slice D (cor:acl:140:08; Anne LOCAL P2-F1 on #3811): verified_by is the signer, a person; once their account is erased
+  -- it reads null, as issuer_user_id does, so the sealed id is never echoed. A read-side mapping: the column is not written.
+  (SELECT u.id FROM users u WHERE u.id = g.verified_by AND u.deleted_at IS NULL) AS verified_by,
+  g.signature_id, g.revoked_at, ${grantLiveSql('g')} AS allows`;
 
 /** The reader's grants, newest first. `take` 0 is count-only. The caller clamps `take` and `skip`. */
 export async function listGrantsForWorker(db: Db, reader: GrantReader, page: { take?: number; skip?: number }): Promise<{ items: GrantView[]; total: number }> {
@@ -100,8 +104,33 @@ export async function listGrantsForWorker(db: Db, reader: GrantReader, page: { t
   return { items: rows.map(view), total };
 }
 
+const personAudience = new WeakSet<object>();
+/** Mark a row as one a PERSON listed through `myGrants`. A mark on the parent object, so aliases and fragments cannot bypass it and the shared per-request status load never carries it. */
+export function markPersonAudience<T extends object>(row: T): T { personAudience.add(row); return row; }
+export function isPersonAudience(row: object): boolean { return personAudience.has(row); }
+
 /** One grant by id, null when it is absent or out of scope (the same answer for both). */
 export async function getGrantForWorker(db: Db, reader: GrantReader, id: string): Promise<GrantView | null> {
   const rows = await db.$queryRaw<Row[]>(Prisma.sql`SELECT ${COLUMNS} ${scope(reader)} AND g.id = ${id}`);
   return rows[0] ? view(rows[0]) : null;
+}
+
+/**
+ * #3800 (cor:acl:140:05 List, ruling 0255 item 8): a PERSON's own grants. The rows naming the person DIRECTLY as holder
+ * (`user_id`), in every App and Org and every state (pending, active, revoked, expired, spent), newest first. Never a row the
+ * person only issued or requested for someone else, never another holder's. Membership of the App's Org is NOT a condition
+ * (leaving an Org is not a departure under cor:acl:140:03). The row is ids and scalars, and each item is marked
+ * ({@link markPersonAudience}) so the one nested field that reaches another tenant's person, `Grant.signatureStatus`'s
+ * signature list (signer handle/URN, passkey label), is withheld from this audience (gate call, #3800 P2-2). A soft-deleted App
+ * conceals its grants. No state label, as above.
+ */
+export async function listGrantsForPerson(db: Db, userId: string, page: { take?: number; skip?: number }): Promise<{ items: GrantView[]; total: number }> {
+  const take = page.take ?? 20;
+  const skip = page.skip ?? 0;
+  const from = Prisma.sql`FROM grants g JOIN apps a ON a.id = g.app_id AND a.deleted_at IS NULL WHERE g.user_id = ${userId}`;
+  const [{ n }] = await db.$queryRaw<Array<{ n: bigint }>>(Prisma.sql`SELECT count(*) AS n ${from}`);
+  const total = Number(n);
+  if (take === 0 || total === 0) return { items: [], total };
+  const rows = await db.$queryRaw<Row[]>(Prisma.sql`SELECT ${COLUMNS} ${from} ORDER BY g.created_at DESC, g.id DESC LIMIT ${take} OFFSET ${skip}`);
+  return { items: rows.map((r) => markPersonAudience(view(r))), total };
 }

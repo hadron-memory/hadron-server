@@ -1075,6 +1075,29 @@ function lastEventAtBatched(ctx: Context, sessionId: string): Promise<Date | nul
   return batch.result.then((byId) => byId.get(sessionId));
 }
 
+/**
+ * #3006 — `Node.indexTruncated` for a parent whose projection omits `embeddingTruncatedChunks`, batched per
+ * request: every such parent resolved in the same tick shares ONE `findMany`, instead of one `findUnique` each
+ * (same shape as `lastEventAtBatched`). A parent that carries the column never reaches this, and the read is by
+ * the parent's own id, so the node read gate that produced the parent is unchanged.
+ */
+const truncatedChunkBatches = new WeakMap<object, { ids: Set<string>; result: Promise<Map<string, number | null>> }>();
+function truncatedChunksBatched(ctx: Context, nodeId: string): Promise<number | null | undefined> {
+  let batch = truncatedChunkBatches.get(ctx);
+  if (!batch) {
+    const ids = new Set<string>();
+    const result = Promise.resolve().then(async () => {
+      truncatedChunkBatches.delete(ctx);
+      const rows = await ctx.db.node.findMany({ where: { id: { in: [...ids] } }, select: { id: true, embeddingTruncatedChunks: true } });
+      return new Map(rows.map((row) => [row.id, row.embeddingTruncatedChunks]));
+    });
+    batch = { ids, result };
+    truncatedChunkBatches.set(ctx, batch);
+  }
+  batch.ids.add(nodeId);
+  return batch.result.then((byId) => byId.get(nodeId));
+}
+
 export const typeResolvers = {
   ...servedPromptTypeResolvers,
   Chat: {
@@ -1105,7 +1128,7 @@ export const typeResolvers = {
   Node: {
     indexTruncated: async (n: { id: string; embeddingTruncatedChunks?: number | null }, _: unknown, ctx: Context) => {
       const count = n.embeddingTruncatedChunks !== undefined ? n.embeddingTruncatedChunks
-        : (await ctx.db.node.findUnique({ where: { id: n.id }, select: { embeddingTruncatedChunks: true } }))?.embeddingTruncatedChunks;
+        : await truncatedChunksBatched(ctx, n.id);
       return count != null && count > 0 ? { omittedChunks: count } : null;
     },
     outgoingEdges: (n: { id: string; memoryId: string }, _: unknown, ctx: Context) => batchReadEdges(n, ctx, 'out'),

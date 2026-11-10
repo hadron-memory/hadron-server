@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import type { ProjectionFieldHashes } from '../test/projectionHash2801.js';
+import { projectionHashDiagnostic } from '../test/projectionHash2801.js';
 /**
  * #2774 — initial/current MCP projection allocation with byte-identical output.
  * Drives the production closure on real Postgres fixtures: PK/URN/prefix,
@@ -15,6 +18,8 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { generateId } from '../lib/id.js';
+
+const projectionBaseline: { scopes: Record<'abstract' | 'all', { fields: ProjectionFieldHashes }> } = JSON.parse(readFileSync(new URL('../test/fixtures/mcpProjection2801.json', import.meta.url), 'utf8'));
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -153,7 +158,7 @@ it.each((['forward', 'reverse'] as const).flatMap(order => ([['abstract', 'pk'],
   // #3659: every node now prints a Validation tasks line, where the #2967 values were c74221db… and
   // 2ba30066…. Removing those lines from the new output reproduces those hashes exactly.
   const baseline = { abstract: '2687cd290c2cb3b35c0422ba885adb12ad3c8ce7753b27d90b194070fab01049', all: 'd2a649b69b145f31087e165618def2179ef76f3dd6eab9078453fcec51ab30a5' };
-  expect(result.hash).toBe(baseline[scope]);
+  expect(result.hash, projectionHashDiagnostic(result.text, projectionBaseline.scopes[scope].fields)).toBe(baseline[scope]);
   expect.soft(result.loads.reduce((n, l) => n + l.endpointBodyBytes, 0)).toBe(0);
   if (scope === 'abstract') {
     expect.soft(result.loads.filter(l => l.phase === 'current').reduce((n, l) => n + l.rootBodyBytes, 0)).toBe(0);

@@ -302,7 +302,8 @@
     "PrProtocolResult": "envelope",
     "PrProtocolAction": "value",
     "PullRequestReadiness": "envelope",
-    "ReviewSlotReadiness": "value"
+    "ReviewSlotReadiness": "value",
+    "GrantSignatureStatus": "value"
   },
   "entries": {
     "ActionTicketsPage.items": {
@@ -1603,7 +1604,7 @@
     },
     "GrantsPage.items": {
       "class": "parent-implies-child",
-      "audience": "a bound worker session reading its own App's grants that name it directly (plus its own pending requests); any other caller gets an empty page (#3789)",
+      "audience": "a bound worker session reading its own App's grants that name it directly (plus its own pending requests) (#3789), or a signed-in person reading only the grants naming them as holder (#3800 myGrants); any other caller gets an empty page",
       "resolver": "src/api/graphql/schema/resolvers.grant.ts::resolveGrantReader",
       "target": "Grant"
     },
@@ -2098,6 +2099,19 @@
       "audience": "the command writer is re-gated as a participant in the task App; every participant reads all tasks of that App (cor:agt:050:21), and no App key writes these commands",
       "resolver": "src/api/graphql/schema/resolvers.prProtocol.ts::prProtocolMutations",
       "target": "AgentTask"
+    },
+    "GrantSignatureStatus.signatures": {
+      "class": "parent-implies-child",
+      "audience": "reached only through Grant.signatureStatus by a bound worker reading its own App's grants (grant(ref:)/grants, the #3789 gate). A person listing their own grants (myGrants, #3800) is given state and integrityProblems only: this list is empty for them, withheld in the field resolver on the parent row's audience mark (gate call, #3800 P2-2); a grant's own signature records, re-verified on read",
+      "spec": "cor:acl:140:07",
+      "resolver": "src/api/graphql/schema/resolvers.grant.ts::grantFieldResolvers",
+      "target": "GrantSignature"
+    },
+    "GrantSignature.signer": {
+      "class": "closed-projection",
+      "projection": "NodeRevisionEditor",
+      "why": "NodeRevisionEditor(handle,urn only; identity tier cor:acl:070:01); an erased signer resolves null (cor:acl:140:08)",
+      "target": "NodeRevisionEditor"
     }
   }
 }

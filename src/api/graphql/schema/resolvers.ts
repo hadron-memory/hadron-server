@@ -57,7 +57,7 @@ import { appRunMutations, appRunQueries } from './resolvers.appRun.js';
 import { meteringMutations, meteringQueries } from './resolvers.metering.js';
 import { connectionGrantMutations, connectionGrantQueries } from './resolvers.connectionGrant.js';
 import { principalGrantMutations, principalGrantQueries } from './resolvers.principalGrant.js';
-import { grantQueries } from './resolvers.grant.js';
+import { grantFieldResolvers, grantQueries } from './resolvers.grant.js';
 import { grantSigningFieldResolvers, grantSigningMutations, grantSigningQueries } from './resolvers.grantSigning.js';
 import { importNodeMutations } from './resolvers.mutation.importNode.js';
 import { assetMutations } from './resolvers.mutation.asset.js';
@@ -170,6 +170,8 @@ export const resolvers = {
   SigningRequest: signingFieldResolvers.SigningRequest,
   NodeSignature: signingFieldResolvers.NodeSignature,
   GrantSigningRequest: grantSigningFieldResolvers.GrantSigningRequest,
+  Grant: grantFieldResolvers.Grant,
+  GrantSignature: grantFieldResolvers.GrantSignature,
   Comment: commentFieldResolvers.Comment,
   Decision: decisionFieldResolvers.Decision,
   DecisionLog: decisionFieldResolvers.DecisionLog,

@@ -23,6 +23,7 @@ import {
   createGrantSigningRequestInTransaction, GrantSigningRefusal, withdrawGrantSigningRequestInTransaction,
 } from '../../../lib/signing/grantRequests.js';
 import { effectiveRequestState, type SigningRequester } from '../../../lib/signing/requests.js';
+import { grantSigningCeremonyUrl } from '../../../lib/signing/ceremonyUrl.js';
 
 type GrantSigningRequestRow = {
   id: string; grantId: string; version: number; termsHash: string; payloadVersion: string; state: string;
@@ -143,5 +144,6 @@ export const grantSigningFieldResolvers = {
     requestedBy: (r: GrantSigningRequestRow) => ({
       userId: r.requesterUserId, appId: r.requesterAppId, workerId: r.requesterWorkerId, sessionId: r.requesterSessionId,
     }),
+    ceremonyUrl: (r: GrantSigningRequestRow) => grantSigningCeremonyUrl(r.id),
   },
 };
