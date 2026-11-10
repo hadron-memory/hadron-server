@@ -12,18 +12,27 @@ export const HISTORY_DAYS = 14;
 /** A bound on one read of one account: 14 days at the collector's 15-minute interval is 1344 records per account. */
 export const MAX_SNAPSHOT_ROWS = 20_000;
 
-export async function loadAccountUsageHistory(db: Context['db'], appId: string, now: Date, labels: readonly string[], maxRows: number = MAX_SNAPSHOT_ROWS): Promise<Map<string, UsageSnapshot[]>> {
+/** An account to read: its label, and the host and family when the caller names them (an account is all three, cor:agt:140:01). */
+export type AccountSelector = { label: string; host?: string | null; family?: string | null };
+
+export async function loadAccountUsageHistory(db: Context['db'], appId: string, now: Date, accounts: readonly AccountSelector[], maxRows: number = MAX_SNAPSHOT_ROWS): Promise<UsageSnapshot[][]> {
   const memoryIds = await resolveAppTeamSpaceMemoryIds(db, appId);
-  const byLabel = new Map<string, UsageSnapshot[]>();
-  if (memoryIds.length === 0) return byLabel;
-  // One bounded read per requested account, so unrelated accounts can never crowd its history out of the cap.
-  for (const wanted of new Set(labels)) {
+  // One list per selector, in order: two selectors with one label but different identities stay apart.
+  const result: UsageSnapshot[][] = accounts.map(() => []);
+  if (memoryIds.length === 0) return result;
+  // One bounded read per requested account (label, plus host and family when named), so unrelated accounts and other identities can never crowd its history out of the cap.
+  for (const [i, sel] of accounts.entries()) {
+    const wanted = sel.label;
+    const identity = [
+      ...(sel.host != null ? [{ properties: { path: ['host'], equals: sel.host } }] : []),
+      ...(sel.family != null ? [{ properties: { path: ['family'], equals: sel.family } }] : []),
+    ];
     const rows = await db.node.findMany({
       where: {
         memoryId: { in: memoryIds },
         objectType: ACCOUNT_USAGE_COLLECTION,
         deletedAt: null,
-        properties: { path: ['label'], equals: wanted },
+        AND: [{ properties: { path: ['label'], equals: wanted } }, ...identity],
         createdAt: { gte: new Date(now.getTime() - HISTORY_DAYS * 24 * 3_600_000) },
       },
       select: { properties: true },
@@ -32,10 +41,10 @@ export async function loadAccountUsageHistory(db: Context['db'], appId: string, 
     });
     for (const row of rows) {
       const snap = parseUsageSnapshot(row.properties, now);
-      if (!snap || snap.label !== wanted) continue;
-      const list = byLabel.get(snap.label);
-      if (list) list.push(snap); else byLabel.set(snap.label, [snap]);
+      if (!snap || snap.label !== wanted
+        || (sel.host != null && snap.host !== sel.host) || (sel.family != null && snap.family !== sel.family)) continue;
+      result[i]!.push(snap);
     }
   }
-  return byLabel;
+  return result;
 }

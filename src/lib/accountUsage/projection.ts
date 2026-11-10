@@ -143,6 +143,22 @@ const empty = (window: WindowKind, status: ProjectionStatus, reason: ProjectionR
 
 const round = (n: number): number => Math.round(n * 1000) / 1000;
 
+/**
+ * Hours after the newest snapshot at which the LOW end's cumulative use reaches 100%, integrating the hourly shape
+ * (`profile`, null = flat). `addLow` is the low end's whole use to the reset. Exported for the exact-timestamp pin.
+ */
+export function runOutHours(used: number, addLow: number, hoursToReset: number, profile: ShapeProfile | null): number {
+  if (used >= 100 || addLow <= 0) return 0;
+  const target = (100 - used) / addLow;
+  if (!profile) return target * hoursToReset;
+  let prevH = 0; let prevF = 0;
+  for (const seg of profile) {
+    if (seg.frac >= target) return seg.frac > prevF ? prevH + ((target - prevF) / (seg.frac - prevF)) * (seg.hours - prevH) : prevH;
+    prevH = seg.hours; prevF = seg.frac;
+  }
+  return hoursToReset;
+}
+
 /** The projected range at the reset for burn rates `[rateLow, rateHigh]` (percent per hour) under the basis's shape. */
 function applyRates(
   window: WindowKind,
@@ -160,21 +176,7 @@ function applyRates(
   // V14: a run-out time only when even the LOW end reaches 100% before the reset.
   let runsOutAt: Date | null = null;
   if (lowRaw >= 100) {
-    if (base.used >= 100 || addLow <= 0) runsOutAt = base.observedAt;
-    else {
-      // Integrate the hourly shape: the instant the LOW end's cumulative use reaches 100%.
-      const target = (100 - base.used) / addLow;
-      let hoursIn: number;
-      if (!base.profile) hoursIn = target * base.hoursToReset;
-      else {
-        let prevH = 0; let prevF = 0; hoursIn = base.hoursToReset;
-        for (const seg of base.profile) {
-          if (seg.frac >= target) { hoursIn = seg.frac > prevF ? prevH + ((target - prevF) / (seg.frac - prevF)) * (seg.hours - prevH) : prevH; break; }
-          prevH = seg.hours; prevF = seg.frac;
-        }
-      }
-      runsOutAt = new Date(base.observedAt.getTime() + hoursIn * HOUR_MS);
-    }
+    runsOutAt = new Date(base.observedAt.getTime() + runOutHours(base.used, addLow, base.hoursToReset, base.profile) * HOUR_MS);
   }
   const perWorker = workers > 0 ? { lowPctPerHour: round(rateLow / workers), highPctPerHour: round(rateHigh / workers) } : null;
   return {

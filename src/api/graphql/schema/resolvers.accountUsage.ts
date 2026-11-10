@@ -77,8 +77,8 @@ export const accountUsageQueries = {
       if (account.length === 0 || account.length > MAX_LABEL) throw badInput('account must be an account label of 1 to 64 characters.');
       const what = parseWhatIf(whatIf, account);
       const asOf = new Date();
-      const history = await loadAccountUsageHistory(c.db, app.id, asOf, what?.moveWorker ? [account, what.moveWorker.toAccount] : [account]);
-      const mine = selectHistory(history.get(account) ?? [], host, family);
+      const [sourceRows, targetRows] = await loadAccountUsageHistory(c.db, app.id, asOf, [{ label: account, host, family }, ...(what?.moveWorker ? [{ label: what.moveWorker.toAccount, host: what.moveWorker.toHost, family: what.moveWorker.toFamily }] : [])]);
+      const mine = selectHistory(sourceRows ?? [], host, family);
       const base = projectAccount(mine, asOf);
       const latest = newest(mine);
       const result: Record<string, unknown> = {
@@ -105,7 +105,7 @@ export const accountUsageQueries = {
       if (!latest || !latest.workersConfigured || !latest.workers.includes(move.worker)) {
         throw badInput('The worker is not configured on that account.');
       }
-      const to = selectHistory(history.get(move.toAccount) ?? [], move.toHost, move.toFamily);
+      const to = selectHistory(targetRows ?? [], move.toHost, move.toFamily);
       // Same account = same label, host and family (cor:agt:140:01), judged on the resolved identities, qualified or not.
       const toLatest = newest(to);
       if (move.toAccount === account

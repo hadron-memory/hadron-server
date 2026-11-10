@@ -217,13 +217,21 @@ describe('self-moves judged on the resolved identity, and the per-account histor
     const ok = await proj('src', { moveWorker: { worker: 'Anne', toAccount: 'src', toHost: 'other-host' } });
     expect(ok.whatIf.target.account).toBe('src');
   });
-  it('unrelated accounts newer than the row cap cannot crowd the requested account out', async () => {
+  it('unrelated accounts and other hosts of the same label, all newer than the row cap, cannot crowd the selected identity out', async () => {
     const { loadAccountUsageHistory } = await import('../../../lib/accountUsage/load.js');
-    await burn('mine', 40, 1);
+    await burn('mine', 40, 1, { extra: { host: 'h1' } });
     for (let m = 0; m < 40; m += 1) await snapshot({ label: 'noise', minutesAgo: m / 10, sevenPct: 10 });
-    const got = await loadAccountUsageHistory(db as any, app.id, new Date(), ['mine'], 5);
-    expect([...got.keys()]).toEqual(['mine']);
-    expect(got.get('mine')!.length).toBe(5);
+    for (let m = 0; m < 40; m += 1) await snapshot({ label: 'mine', minutesAgo: m / 10, sevenPct: 10, extra: { host: 'h2' } });
+    const [got] = await loadAccountUsageHistory(db as any, app.id, new Date(), [{ label: 'mine', host: 'h1' }], 5);
+    expect(got!.length).toBe(5);
+    expect(new Set(got!.map((x) => x.host))).toEqual(new Set(['h1']));
+  });
+  it('a same-label move to another host reads that host own history, apart from the source', async () => {
+    await burn('src', 30, 1, { extra: { host: 'h1' } });
+    await burn('src', 20, 2, { extra: { host: 'h2' } });
+    const r = await Q.accountUsageProjection({}, { appRef: app.id, account: 'src', host: 'h1', whatIf: { moveWorker: { worker: 'Anne', toAccount: 'src', toHost: 'h2' } } }, ctx(member.id));
+    expect(seven(r)).toMatchObject({ usedPct: 30 });
+    expect(r.whatIf.target.baseline.find((w: any) => w.window === 'SEVEN_DAY')).toMatchObject({ status: 'PROJECTED', usedPct: 20 });
   });
 });
 

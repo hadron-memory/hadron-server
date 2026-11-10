@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
-  addBurn, parseUsageSnapshot, projectAccount, projectWindow, withWorkerCount, TOKEN_CEILING_PCT,
+  addBurn, runOutHours, parseUsageSnapshot, projectAccount, projectWindow, withWorkerCount, TOKEN_CEILING_PCT,
   FIVE_HOUR_MINUTES, SEVEN_DAY_MINUTES, type UsageSnapshot, type WindowKind,
 } from './projection.js';
 
@@ -147,6 +147,12 @@ describe('the weekly shape', () => {
     expect(w.shape).toBe('WEEKLY');
     const dayOnly = week().filter((s) => s.observedAt.getTime() > NOW.getTime() - 20 * HOUR);
     expect(projectWindow(dayOnly, SEVEN_DAY_MINUTES, NOW).projection.shape).toBe('FLAT');
+  });
+  it('runOutHours is exact across idle then active hours (flat would say 10h)', () => {
+    const profile = [{ hours: 10, frac: 0 }, { hours: 20, frac: 1 }];
+    expect(runOutHours(50, 100, 20, profile)).toBe(15);
+    expect(runOutHours(50, 100, 20, null)).toBe(10);
+    expect(runOutHours(100, 100, 20, profile)).toBe(0);
   });
   it('runsOutAt integrates the hourly shape: it lands in an active hour, not an idle stretch the average would pick', () => {
     const basis = projectWindow(week(), SEVEN_DAY_MINUTES, NOW);
