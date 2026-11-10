@@ -43,7 +43,7 @@ export async function loadSignatureStatuses(db: Db, nodeIds: string[]): Promise<
   for (const id of ids) out.set(id, EMPTY);
   const records = await db.nodeSignature.findMany({
     where: { nodeId: { in: ids } },
-    include: { passkey: { select: { credentialId: true, publicKey: true, label: true, revokedAt: true, windowEndsAt: true, windowEndedAt: true, windowOutcome: true } } },
+    include: { passkey: { select: { ownerId: true, credentialId: true, publicKey: true, label: true, revokedAt: true, windowEndsAt: true, windowEndedAt: true, windowOutcome: true } } },
   });
   if (records.length === 0) {
     // An encrypted node with no records still reads not applicable.
@@ -58,7 +58,10 @@ export async function loadSignatureStatuses(db: Db, nodeIds: string[]): Promise<
     const encrypted = node.memory.isEncrypted;
     // An encrypted node's records are not verified or returned (cor:dmo:120:00
     // mirror; #1632 contract note gap 3a): no hash-dependent work on them.
-    const valid = encrypted ? true : await signatureRecordVerifies(
+    // #3827 (cor:aut:040:05): the record's signer must be its passkey's owner. Writes bind the two and a passkey's owner
+    // never changes (merge refuses a live one and rewrites neither id; erasure keeps it), so a mismatch can only be a
+    // record changed in storage. Checked on every read, outside the cached assertion verdict.
+    const valid = encrypted ? true : r.signerId === r.passkey.ownerId && await signatureRecordVerifies(
       { id: r.id, nodeId: r.nodeId, approvalHash: r.approvalHash, payloadVersion: r.payloadVersion, requestId: r.signingRequestId,
         authenticatorData: Buffer.from(r.authenticatorData), clientDataJson: Buffer.from(r.clientDataJson), signature: Buffer.from(r.signature) },
       { credentialId: Buffer.from(r.passkey.credentialId), publicKey: Buffer.from(r.passkey.publicKey), counter: 0n },
