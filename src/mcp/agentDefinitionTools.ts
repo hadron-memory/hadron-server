@@ -58,6 +58,10 @@ function refusalResult(e: unknown) {
 
 type AgentRow = { id: string; urn: string; extendsAgentId: string | null; tasksIndexRef: string | null; processesIndexRef: string | null };
 type Resolver<A> = (parent: unknown, args: A, ctx: Context) => Promise<AgentRow>;
+type ServedRead = { decision: { pointerLevel: string; compiledNodeId: string; servedRevSeq: number }; text: string };
+const Q = resolvers.Query as unknown as {
+  agentServedBootPrompt: (parent: unknown, args: { agentRef: string; appRef?: string | null; llmModel?: string | null }, ctx: Context) => Promise<ServedRead>;
+};
 const M = resolvers.Mutation as unknown as {
   setAgentBase: Resolver<{ ref: string; baseRef: string | null }>;
   setAgentIndexRefs: Resolver<{ ref: string; tasksIndexRef?: string | null; processesIndexRef?: string | null }>;
@@ -72,6 +76,7 @@ function contextOf(db: PrismaClient, auth: AuthContext): Context {
     userId: auth.userId ?? undefined,
     apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
     appId: auth.appId ?? undefined,
+    appKeyId: auth.appKeyId ?? undefined,
     sessionId: auth.sessionId ?? undefined,
     roles: auth.roles as Context['roles'],
     organizationId: auth.organizationId ?? undefined,
@@ -170,6 +175,26 @@ export function registerAgentDefinitionTools(server: McpServer, deps: { db: Pris
   };
 
   server.tool(
+    'hadron_agent_boot_prompt',
+    "Read the compiled boot prompt an Agent would be served now, rendered, without binding a worker (cor:agt:040:05, :10): for an MCP-only agent reading its own prompt. Without appRef, the Agent's own prompt (for whoever may read the Agent's system memory); with appRef, what a chat in that App would be given (the install's prompt, then the Agent's), for a participant of that App where the Agent is installed and you may chat with it (an App key only for its own App). Platform variables are filled as a chat fills them: worker.name is the Agent's name, worker.role its persona role, reports-to, signature and trailer are empty, and session.llmModel is the llmModel you pass (empty if you omit it). No derived blocks are appended. A pure read: nothing is bound, no session is started or ended, nothing is recorded, and the answer is the current serve, not what your session was given. Refusals: AGENT_NOT_FOUND for an Agent that doesn't exist or that you can't see, and for an App you don't participate in, one the Agent isn't installed in, or whose licence lapsed; then the serve's own BOOT_PROMPT_NOT_SET, BOOT_PROMPT_TARGET_DELETED, BOOT_PROMPT_NOT_APPROVED or BOOT_PROMPT_NOT_SIGNED. The output is three header lines, a blank line, then the text exactly as GraphQL agentServedBootPrompt returns it.",
+    SHAPE_HADRON_AGENT_BOOT_PROMPT,
+    async ({ agentRef: ref, appRef, llmModel }) => {
+      try {
+        const read = await Q.agentServedBootPrompt({}, { agentRef: ref, appRef: appRef ?? null, llmModel: llmModel ?? null }, contextOf(db, auth));
+        return textResult([
+          `Served boot prompt for Agent ${ref}${appRef ? ` in App ${appRef}` : ''}: ${read.decision.pointerLevel} pointer, revision ${read.decision.servedRevSeq}.`,
+          `Compiled node: ${await pointer(read.decision.compiledNodeId)}`,
+          `Rendered as a chat or run would be given it: no worker, no derived blocks; session.llmModel = ${llmModel ?? ''}.`,
+          '',
+          read.text,
+        ].join('\n'));
+      } catch (e) {
+        return refusalResult(e);
+      }
+    },
+  );
+
+  server.tool(
     'hadron_agent_set_base',
     "Set, change or clear an Agent's base (cor:dmo:050:14): the one Agent it extends and inherits from (Agent.extendsAgentId). Pass the base's ID or URN to set or change it, or null to clear it. Only whoever manages the Agent may change its base; managing the base is not enough. Refusals, in this order: for the Agent you're changing, AGENT_NOT_FOUND when it doesn't exist, is retired, or is one you can't read (an Agent you can't read is never confirmed to exist), and FORBIDDEN when you can read it but don't manage it; for the base, AGENT_NOT_FOUND when it doesn't exist, is retired, or is one you hold no licence to; then AGENT_ORG_GRANT_REQUIRED, AGENT_ORG_GRANT_INACTIVE or AGENT_SUBSCRIPTION_REQUIRED (extending another organisation's Agent needs the grant a cross-organisation include needs); then AGENT_BASE_CYCLE (an Agent can't extend itself or an Agent that extends it) and AGENT_BASE_CHAIN_TOO_LONG (at most 4 Agents in a chain, counting every Agent that already extends this one). The same mutation as GraphQL setAgentBase. Read what it now inherits with hadron_agent_tasks / hadron_agent_processes.",
     SHAPE_HADRON_AGENT_SET_BASE,
@@ -229,6 +254,12 @@ const indexRef = (which: 'tasks' | 'processes', spec: string) => z.string().min(
 const SHAPE_HADRON_AGENT_TASKS = { agentRef, symptom: z.string().optional().describe('Situation to match against runnable effective-chain task abstracts; omit for the unchanged full list.'), limit: z.number().int().positive().optional().describe('Symptom candidates to return (default 3, values above 3 clamp to 3); ignored without symptom.') };
 
 const SHAPE_HADRON_AGENT_PROCESSES = { agentRef };
+
+const SHAPE_HADRON_AGENT_BOOT_PROMPT = {
+  agentRef,
+  appRef: z.string().min(1).optional().describe('The App to read the install for: its ID or fully-qualified URN (hrn:app:<root>:<slug>). Omit it to read the Agent\'s own prompt.'),
+  llmModel: z.string().optional().describe('The model you are running on, as you report it; filled into session.llmModel. Rendering text only, never an identity claim. Omit it to leave the variable empty.'),
+};
 
 const SHAPE_HADRON_AGENT_SET_BASE = {
   agentRef: agentRef.describe('The Agent whose base to change (the child): its ID or fully-qualified URN (hrn:agent:<root>:<slug>).'),

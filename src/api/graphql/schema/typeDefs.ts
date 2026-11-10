@@ -5241,6 +5241,22 @@ export const typeDefs = `#graphql
   }
 
   """
+  #3843 / hrn:node:hadronmemory.com:specs:cor:agt:040:05, hrn:node:hadronmemory.com:specs:cor:agt:040:10: the compiled
+  boot prompt a chat or run with an Agent (in an App) would be given now, rendered, for a caller that binds no worker.
+  """
+  type AgentServedBootPrompt {
+    "The revision served: the same identity fields as bootPromptServe and a ServedPrompt record."
+    decision: BootPromptServeDecision!
+    """
+    The served revision's text with its platform variables filled as a chat or run fills them
+    (hrn:node:hadronmemory.com:specs:cor:dmo:150:08): worker.name is the Agent's name, worker.role its persona role,
+    reports-to, signature and trailer are empty, and session.llmModel is the client-reported model or empty. No
+    derived blocks are appended: they belong to a worker's briefing (Worker.prompt).
+    """
+    text: String!
+  }
+
+  """
   #2708 / hrn:node:hadronmemory.com:specs:cor:agt:040:10: what a serve would decide now, from the resolver the serve
   itself uses, so the same resolution rules apply. A preview of the current state: a later serve gives the same answer
   only while that state is unchanged (a pointer edit or an approval in between can change it). Exactly one of served
@@ -7287,7 +7303,7 @@ export const typeDefs = `#graphql
   input CreateGrantInput {
     "A registered action's dotted name, such as schedule.create."
     action: String!
-    "Exactly the action's declared parameters, each a string or a list of distinct strings (an id, never a URN); any other key or shape is refused. Never put a secret here."
+    "Exactly the action's declared parameters, each a string or a list of at most 100 distinct strings per parameter (an id, never a URN; hrn:node:hadronmemory.com:specs:cor:acl:140:01). Any other key or shape is refused. Never put a secret here."
     values: JSON!
     "WORKER (the calling worker itself) or AGENT (its role agent, installed in this App). Any other holder is refused."
     holderKind: GrantHolderKind!
@@ -7299,7 +7315,7 @@ export const typeDefs = `#graphql
     expiresAt: DateTime
     "At most this many uses once signed; a positive integer."
     maxUses: Int
-    "Why the grant is asked for: shown to the signer as the requester's words, labelled as theirs."
+    "Why the grant is asked for: at most 2,000 Unicode characters (code points; hrn:node:hadronmemory.com:specs:cor:acl:140:01). Shown to the signer as the requester's words, labelled as theirs."
     reason: String!
   }
 
@@ -9900,6 +9916,21 @@ export const typeDefs = `#graphql
     hadron_agent_processes returns the same list. Accepts the Agent's ID or URN.
     """
     agentProcessList(ref: ID!): [AgentListedProcess!]!
+    """
+    #3843 (hrn:node:hadronmemory.com:specs:cor:agt:040:05, hrn:node:hadronmemory.com:specs:cor:agt:040:10) - the
+    boot prompt an Agent would be served now, rendered, for a caller that binds no worker (an MCP-only agent; the MCP
+    tool hadron_agent_boot_prompt returns the same text). A pure read: it binds nothing, starts or ends no session and
+    records no ServedPrompt; the answer is the current serve, never what a session was given, so an approval between
+    two calls can change it. Without appRef it reads the Agent's own pointer, visible to a caller who may read the
+    Agent's system memory. With appRef it reads what a chat in that App would be given (the install's pointer, then
+    the Agent's), for a participant of that App (an App key only for its own App) where the Agent is installed and
+    the caller may chat with it. Every caller who fails a gate, a missing or not-installed App and a lapsed App
+    licence get the same AGENT_NOT_FOUND as a nonexistent Agent. Past the gate, a serve refusal is thrown as its typed
+    BOOT_PROMPT_* error (NOT_SET, TARGET_DELETED, NOT_APPROVED, NOT_SIGNED) with surface 'chat'. llmModel is the
+    model the client reports, filled into session.llmModel (empty when omitted); it is rendering text, never an
+    identity or authority claim.
+    """
+    agentServedBootPrompt(agentRef: String!, appRef: String, llmModel: String): AgentServedBootPrompt!
 
     """
     Uniform paginated agent list (#473). Scope: Agents owned by the caller's
@@ -12064,7 +12095,7 @@ export const typeDefs = `#graphql
     """
     requestGrantSignature(grantRef: ID!): GrantSigningRequest!
     """
-    #3690 PR 2 (hrn:node:hadronmemory.com:specs:cor:acl:140:05) — ask for a grant. Only a bound worker session may call it, in its own App, for itself or its role agent (installed in the App); the row is born pending and allows nothing until it is signed (#3649). Returns the grant as grant(ref:) reads it. Refusals, each before any write and none naming a submitted value: GRANT_REQUESTER_NOT_WORKER, GRANT_HOLDER_NOT_ALLOWED (any other holder, or an agent not installed here), GRANT_ACTION_UNKNOWN, GRANT_VALUES_INVALID (a value that does not match the action's declared parameters, or an undeclared key), GRANT_TERMS_INVALID. No MCP tool. Present only where signing is switched on (PASSKEY_SIGNING_ENABLED).
+    #3690 PR 2 (hrn:node:hadronmemory.com:specs:cor:acl:140:05) — ask for a grant. Only a bound worker session may call it, in its own App, for itself or its role agent (installed in the App); the row is born pending and allows nothing until it is signed (#3649). Returns the grant as grant(ref:) reads it. Refusals, each before any write and none naming a submitted value: GRANT_REQUESTER_NOT_WORKER, GRANT_HOLDER_NOT_ALLOWED (any other holder, or an agent not installed here), GRANT_ACTION_UNKNOWN, GRANT_VALUES_INVALID (a value that does not match the action's declared parameters, an undeclared key, or a list above 100 entries per parameter), GRANT_TERMS_INVALID (including a reason above 2,000 Unicode code points; hrn:node:hadronmemory.com:specs:cor:acl:140:01). These write-path limits never prevent rebuilding an existing grant's signature terms. No MCP tool. Present only where signing is switched on (PASSKEY_SIGNING_ENABLED).
     """
     createGrant(input: CreateGrantInput!): Grant!
     "#3649 slice B (hrn:node:hadronmemory.com:specs:cor:acl:140:07) — withdraw an open grant signing request. Only the requester account, from any of its sessions or workers. Refusals: FORBIDDEN while impersonating, SIGNING_REQUEST_NOT_FOUND, SIGNING_REQUEST_NOT_REQUESTER, SIGNING_REQUEST_ENDED (extensions.state)."
@@ -15931,6 +15962,7 @@ export const typeDefs = `#graphql
   """
   Why a failed match skipped a candidate (#3816, V21). Closed and additive: values are added, never renamed.
   STOP_SIGNAL names a matcher condition V21 lacked. There is no value for a bound, quiet worker: hadron-server#3815 removes that exclusion.
+  NO_LONGER_FREE (#3855, V59) is a candidate the snapshot found free that the final assignment check refused; it carries no other value.
   """
   enum AgentTaskMatchSkipReason {
     RETIRED
@@ -15948,6 +15980,7 @@ export const typeDefs = `#graphql
     TIER_UNKNOWN
     MODEL_GROUP_MISMATCH
     STOP_SIGNAL
+    NO_LONGER_FREE
   }
 
   "Single-shot failure (hrn:node:hadronmemory.com:specs:cor:agt:050:01): assigning clears it; cancellation clears it."
