@@ -406,13 +406,25 @@ export async function cloneMemoryGraphInTx(
         if (ref && !idMap.has(ref)) externalIds.add(ref);
       }
     }
-    // Of the unmapped ids, only a node of ANOTHER memory is an external
-    // reference; one in the source memory was excluded from this clone.
+    // Of the unmapped ids, only a live node of ANOTHER memory is an external
+    // reference; one in the source memory was excluded from this clone. A
+    // retained reference must be one the cloning actor could have SAVED into a
+    // rule (the saver must read the node, resolvers.memoryConfigRefs.ts), so it
+    // is kept only when its memory belongs to the clone's org and the copier may
+    // read it (`null` = unrestricted). Anything else becomes null: a third org's
+    // node, or one the actor cannot read, is never carried into a new rulebook.
     const foreignIds = new Set(
       externalIds.size > 0 && !crossOrgClone
         ? (
             await tx.node.findMany({
-              where: { id: { in: [...externalIds] }, memoryId: { not: source.id }, deletedAt: null },
+              where: {
+                id: { in: [...externalIds] },
+                memoryId: args.copierReadableMemoryIds === null
+                  ? { not: source.id }
+                  : { not: source.id, in: [...args.copierReadableMemoryIds] },
+                deletedAt: null,
+                memory: { organizationId: args.targetOrganizationId, deletedAt: null },
+              },
               select: { id: true },
             })
           ).map((n) => n.id)

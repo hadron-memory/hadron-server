@@ -55,11 +55,11 @@ async function seedConfig() {
   return config;
 }
 
-function clone(opts: { target?: string; newUrn?: string } = {}) {
+function clone(opts: { target?: string; newUrn?: string; readable?: string[] | null } = {}) {
   return db.$transaction((tx) =>
     cloneMemoryGraphInTx(tx, {
       sourceMemoryId: srcId, name: 'copy', newUrn: opts.newUrn ?? 'c1-a:copy', targetOrganizationId: opts.target ?? orgId,
-      ownerUserId: null, groupOwnerUserId: null, actorId: 'cloner', copierReadableMemoryIds: null,
+      ownerUserId: null, groupOwnerUserId: null, actorId: 'cloner', copierReadableMemoryIds: opts.readable === undefined ? null : opts.readable,
     }),
   );
 }
@@ -151,5 +151,71 @@ describe('#1337 clone carries the rulebook', () => {
       .rejects.toThrow(/Forbidden/);
     expect(await db.memory.count({ where: { urn: 'c1-b:denied' } })).toBe(0);
     expect(await db.memoryConfig.count()).toBe(before);
+  });
+
+  it('an external reference survives only into the clone\'s org and only when the copier can read it', async () => {
+    await seedConfig();
+    // A node in a THIRD org's memory, and one in a same-org memory the copier cannot read.
+    const thirdMem = generateId();
+    await db.memory.create({ data: { id: thirdMem, organizationId: otherOrgId, name: 'third', urn: 'c1-b:third', class: 'knowledge' } as never });
+    const thirdNode = generateId();
+    await node(thirdNode, thirdMem, 'tasks:third');
+    const unreadMem = generateId();
+    await db.memory.create({ data: { id: unreadMem, organizationId: orgId, name: 'unread', urn: 'c1-a:unread', class: 'knowledge' } as never });
+    const unreadNode = generateId();
+    await node(unreadNode, unreadMem, 'tasks:unread');
+    const config = await db.memoryConfig.findUniqueOrThrow({ where: { memoryId: srcId } });
+    await db.nodeRoleRule.create({
+      data: {
+        id: generateId(), configId: config.id, role: 'ext',
+        authorTaskId: thirdNode, authorTaskRequired: true,
+        validationTaskId: unreadNode, validationTaskRequired: true,
+        descriptionNodeId: n.foreign,
+      },
+    });
+    const ext = async (r: { memoryId: string }) => (await rulesOf(r.memoryId))!.rules.find((x) => x.role === 'ext')!;
+    // Copier may read the foreign memory only: third-org and unreadable refs drop, the readable one stays.
+    const some = await ext(await clone({ readable: [foreignMemId], newUrn: 'c1-a:copy-r' }));
+    expect(some.authorTaskId, 'third org').toBeNull();
+    expect(some.validationTaskId, 'unreadable').toBeNull();
+    expect(some.descriptionNodeId, 'readable same-org').toBe(n.foreign);
+    // Unrestricted copier: the third org's node still drops (org rule), the same-org ones stay.
+    const all = await ext(await clone({ readable: null, newUrn: 'c1-a:copy-u' }));
+    expect(all.authorTaskId, 'third org, unrestricted copier').toBeNull();
+    expect(all.validationTaskId).toBe(unreadNode);
+    expect(all.descriptionNodeId).toBe(n.foreign);
+  });
+
+  it('external author/description refs and a deleted external target behave like the validation ref', async () => {
+    const deletedForeign = generateId();
+    await node(deletedForeign, foreignMemId, 'tasks:deleted', new Date());
+    const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: srcId } });
+    await db.nodeRoleRule.create({
+      data: {
+        id: generateId(), configId: config.id, role: 'ext',
+        authorTaskId: n.foreign, authorTaskRequired: true,
+        validationTaskId: deletedForeign, validationTaskRequired: true,
+        descriptionNodeId: n.foreign,
+      },
+    });
+    const rule = (await rulesOf((await clone()).memoryId))!.rules[0];
+    expect(rule.authorTaskId).toBe(n.foreign);
+    expect(rule.descriptionNodeId).toBe(n.foreign);
+    expect(rule.validationTaskId, 'deleted external').toBeNull();
+    expect(rule.validationTaskRequired).toBe(true);
+  });
+
+  it('a node type the clone does not copy becomes null, and an existing but empty config is carried as an empty config', async () => {
+    const comment = generateId();
+    await db.node.create({ data: { id: comment, memoryId: srcId, loc: 'boot:compiled', name: 'compiled', nodeType: 'compiled-boot-prompt', role: 'boot-prompt' } as never });
+    const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: srcId } });
+    await db.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, role: 'ext', authorTaskId: comment, authorTaskRequired: true } });
+    const res = await clone();
+    expect((await rulesOf(res.memoryId))!.rules[0].authorTaskId, 'an uncopied node type is not carried').toBeNull();
+    await db.nodeRoleRule.deleteMany({ where: { configId: config.id } });
+    const empty = await clone({ newUrn: 'c1-a:copy-e' });
+    const cfg = await rulesOf(empty.memoryId);
+    expect(cfg, 'empty config carried').not.toBeNull();
+    expect(cfg!.rules).toEqual([]);
   });
 });
