@@ -95,3 +95,12 @@ describe('MCP database-fault boundary', () => {
     expect(JSON.stringify(result)).not.toContain('private detail');
   });
 });
+
+it.each([false, true])('keeps superseded tool errors structured without the outer SDK boundary (details=%s)', details => {
+  const disclosure = details ? { sessionId: 'readable-session', startedAt: '2026-11-10T12:00:00.000Z' } : {};
+  const error = new GraphQLError('Session superseded.', { extensions: { code: 'SESSION_SUPERSEDED', ...disclosure, privateDebug: detail } });
+  const result = toolErrorResult(error, () => 'fallback must not replace the typed envelope');
+  expect(result).toMatchObject({ isError: true, structuredContent: { error: { code: 'SESSION_SUPERSEDED', message: 'Session superseded.', ...disclosure } } });
+  expect((result as any).structuredContent.error).toEqual({ code: 'SESSION_SUPERSEDED', message: 'Session superseded.', ...disclosure });
+  expect(JSON.stringify(result)).not.toContain(detail);
+});

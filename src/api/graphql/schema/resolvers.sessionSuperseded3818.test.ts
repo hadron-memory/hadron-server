@@ -16,6 +16,7 @@ import { signJwt } from '../../../auth/jwt.js';
 import { handleMcpRequest, createTestableMcpServer } from '../../../mcp/server.js';
 import { ensureChannelWithRoot } from '../../../lib/channels.js';
 import type { Request } from 'express';
+import { refuseSupersededSession } from '../../../lib/sessionSuperseded.js';
 import { resolveAuthContext, validateSessionBinding } from '../../../middleware/auth.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
@@ -198,9 +199,9 @@ beforeAll(async () => {
   baseUrl = `http://127.0.0.1:${(httpServer.address() as AddressInfo).port}`;
 });
 afterAll(async () => { await new Promise<void>(resolve => httpServer.close(() => resolve())); });
-async function wire(path: string, token: string, body?: unknown, headers = {}, method = 'POST') {
+async function wire(path: string, token: string | undefined, body?: unknown, headers = {}, method = 'POST') {
   return fetch(baseUrl + path, { method, headers: {
-    accept: 'application/json, text/event-stream', authorization: `Bearer ${token}`,
+    accept: 'application/json, text/event-stream', ...(token ? { authorization: `Bearer ${token}` } : {}),
     ...(body ? { 'content-type': 'application/json' } : {}), ...headers,
   }, ...(body ? { body: JSON.stringify(body) } : {}) });
 }
@@ -278,4 +279,33 @@ it.each([true, false])('uses a non-5xx GraphQL context refusal with read-gated d
   expect(result.errors[0].extensions).toEqual(reader
     ? { code: 'SESSION_SUPERSEDED', sessionId: b.id, startedAt: b.startedAt.toISOString() }
     : { code: 'SESSION_SUPERSEDED' });
+});
+
+it.each([undefined, 'invalid-credential'])('keeps anonymous/refused credentials ahead of supersession state (%s)', async token => {
+  const { a, b } = await displaced();
+  for (const [path, body, status, method] of [
+    ['/graphql', { query: '{ __typename }' }, 200, 'POST'],
+    ['/reload', {}, 403, 'POST'],
+    ['/mcp', init3818, 401, 'POST'],
+    ['/graphql/schema', undefined, 401, 'GET'],
+    [`/sessions/${a.id}/outcome`, { outcome: 1 }, 401, 'POST'],
+  ] as const) {
+    const baseline = await wire(path, token, body, {}, method);
+    expect(baseline.status).toBe(status); await baseline.text();
+    const presented = await wire(path, token, body, { 'x-hadron-session': a.id }, method);
+    expect(presented.status).toBe(status);
+    const text = await presented.text();
+    expect(text).not.toContain('SESSION_SUPERSEDED');
+    expect(text).not.toContain(b.id); expect(text).not.toContain(b.startedAt.toISOString());
+  }
+});
+it.each([{}, { clientId: 'machine' }, { userId: 'actor', impersonation: {} as any }])('does not look up a binding for an ineligible principal (%j)', async principal => {
+  const lookup = vi.spyOn(db.session, 'findUnique').mockRejectedValue(new Error('synthetic session-store fault'));
+  try { await expect(validateSessionBinding(db, principal, generateId())).resolves.toBeNull(); }
+  finally { lookup.mockRestore(); }
+});
+it.each([{}, { clientId: 'machine' }, { userId: 'actor', impersonation: {} as any }])('does not classify supersession state for an ineligible acting principal (%j)', async principal => {
+  const lookup = vi.spyOn(db.session, 'findUnique').mockRejectedValue(new Error('synthetic session-store fault'));
+  try { await expect(refuseSupersededSession({ db, ...principal }, generateId())).resolves.toBeUndefined(); }
+  finally { lookup.mockRestore(); }
 });
