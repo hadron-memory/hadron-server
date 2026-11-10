@@ -1,5 +1,5 @@
--- #1631 PR2 / cor:aut:040:07-08: passkey registration lifecycle invariants. One source, shared verbatim with migration
--- 20261022030000_passkey_revoke (pinned by src/lib/passkeys/cancel1631.test.ts).
+-- #1631 PR2 / cor:aut:040:07-08: passkey registration lifecycle invariants. One source; the newest migration to carry it
+-- (20261110010000_grant_sign_ceremony) ends with it verbatim (pinned by src/lib/passkeys/cancel1631.test.ts).
 
 -- A first passkey's cancel link: one token per first passkey, stored as SHA-256, spent once, never deleted (the
 -- cancel itself is recorded on the credential: cancelled_at, cancel_ip, cancel_user_agent).
@@ -54,7 +54,8 @@ ALTER TABLE "passkey_ceremonies" ADD CONSTRAINT "chk_passkey_ceremony_registrati
         AND "sign_in_browser_hash" IS NOT NULL AND "sign_in_browser_hash" ~ '^[0-9a-f]{64}$')))
   -- #1632 S2b-2 (cor:dmo:130:08): a SIGN ceremony is bound to the person the proof ceremony proved, set once. It
   -- carries no registration field. The proof ceremony itself (SIGN_PROOF) is never bound: it is spent proving.
-  OR ("purpose" = 'SIGN' AND "user_id" IS NOT NULL AND "kind" IS NOT NULL AND "kind" = 'sign' AND "registration_method" IS NULL
+  -- #3649 slice C (cor:acl:140:07): a grant's signing ceremony (GRANT_SIGN) is bound the same way; GRANT_SIGN_PROOF never is.
+  OR ("purpose" IN ('SIGN', 'GRANT_SIGN') AND "user_id" IS NOT NULL AND "kind" IS NOT NULL AND "kind" = 'sign' AND "registration_method" IS NULL
     AND "sign_in_browser_hash" IS NULL AND "vouch_passkey_id" IS NULL AND "user_handle" IS NULL)
 );
 CREATE OR REPLACE FUNCTION hadron_guard_passkey_ceremony_binding() RETURNS trigger

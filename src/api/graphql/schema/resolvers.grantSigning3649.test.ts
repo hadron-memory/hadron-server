@@ -272,3 +272,22 @@ describe('the switch: grant signing rides PASSKEY_SIGNING_ENABLED', () => {
     }
   });
 });
+
+describe('#3649 slice C: GrantSigningRequest.ceremonyUrl (B design choice 3)', () => {
+  it('is the server origin plus /grant-signing/<id>, nothing else, and the SDL cites the rule', async () => {
+    const prev = process.env.BASE_URL;
+    vi.stubEnv('BASE_URL', 'https://hadron.example.test');
+    try {
+      const g = await held();
+      const r = await asWorker('mutation($g:ID!){requestGrantSignature(grantRef:$g){id ceremonyUrl}}', { g });
+      expect(r.errors).toBeUndefined();
+      const { id, ceremonyUrl } = r.data.requestGrantSignature as { id: string; ceremonyUrl: string };
+      expect(ceremonyUrl).toBe(`https://hadron.example.test/grant-signing/${id}`);
+      const u = new URL(ceremonyUrl);
+      expect(u.search + u.hash + u.username + u.password).toBe('');
+      expect(deploymentSchema().typeDefs).toMatch(/cor:acl:140:07\)[^"]*"\s+ceremonyUrl: String!/);
+    } finally {
+      vi.stubEnv('BASE_URL', prev);
+    }
+  });
+});

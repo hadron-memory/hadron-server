@@ -6,6 +6,7 @@ import { controller } from './controller/controller.js';
 import { db } from './integrations/db/client.js';
 import { createReadiness } from './api/health.js';
 import { stoppingDrainWindowMs } from './lib/stoppingDrainWindow.js';
+import { closeHttpListenerForShutdown } from './lib/httpShutdown.js';
 
 const port = Number(process.env.PORT ?? 4000);
 
@@ -40,7 +41,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) process.once(signal, () => 
   const windowMs = stoppingDrainWindowMs();
   const deadline = setTimeout(() => process.exit(1), windowMs + 10_000);
   const requestsDrained = new Promise<boolean>(resolve => {
-    const closeListener = () => httpServer.close(error => resolve(!error));
+    const closeListener = () => void closeHttpListenerForShutdown(httpServer).then(resolve);
     // 0 closes synchronously, exactly as before the window existed.
     if (windowMs > 0) setTimeout(closeListener, windowMs); else closeListener();
   });

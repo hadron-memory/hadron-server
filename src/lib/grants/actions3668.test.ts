@@ -139,6 +139,8 @@ describe('no surface writes an action, or a grant (S1a has no writer)', () => {
 // #3789 (S2a-read, gated T3 Hardened) added the read-only Query.grant/grants (#3800 adds Query.myGrants) and their types. Still no writer.
 // #3649 slice B added grant signing requests: requestGrantSignature / withdrawGrantSigningRequest write a REQUEST row,
 // never a grant or an action, and grantSigningRequest reads one. Still no grant writer.
+// #3649 slice D added the READ projection of a grant's signatures: GrantSignature, GrantSignatureState, GrantSignatureStatus
+// (Grant.signatureStatus). Types only, no query or mutation; still no grant writer.
 const BASELINE = [
   'Mutation.createAgentOrgGrant', 'Mutation.createConnectionGrant', 'Mutation.createPrincipalGrant', 'Mutation.grantApp', 'Mutation.grantAppKeyScope',
   'Mutation.grantCredits', 'Mutation.mintActionTickets', 'Mutation.recordAppAction', 'Mutation.requestGrantSignature', 'Mutation.revokeAgentOrgGrant', 'Mutation.revokeAppGrant',
@@ -149,6 +151,6 @@ const BASELINE = [
   'TYPE AccessGrant', 'TYPE ActionRegisterIndexEntry', 'TYPE ActionRegisterIndexPage', 'TYPE ActionRegisterIndexState', 'TYPE ActionTicket', 'TYPE ActionTicketsPage',
   'TYPE AgentOrgGrant', 'TYPE AppGrant', 'TYPE AppGrantName', 'TYPE AppMemoryWriteGrant', 'TYPE AutomationReadGrant', 'TYPE AutomationTeamSnapshotGrant',
   'TYPE AutomationTeamSnapshotGrantPage', 'TYPE ConnectionGrant', 'TYPE ConnectionGrantsPage', 'TYPE EffectiveActionPolicy', 'TYPE Grant', 'TYPE GrantAnnouncement',
-  'TYPE GrantCreditsInput', 'TYPE GrantHolderKind', 'TYPE GrantSigningRequest', 'TYPE GrantSigningRequestState', 'TYPE GrantsPage', 'TYPE MintActionTicketsInput', 'TYPE PrProtocolAction', 'TYPE PrincipalGrant', 'TYPE PrincipalGrantsPage', 'TYPE RecordAppActionResult',
+  'TYPE GrantCreditsInput', 'TYPE GrantHolderKind', 'TYPE GrantSignature', 'TYPE GrantSignatureState', 'TYPE GrantSignatureStatus', 'TYPE GrantSigningRequest', 'TYPE GrantSigningRequestState', 'TYPE GrantsPage', 'TYPE MintActionTicketsInput', 'TYPE PrProtocolAction', 'TYPE PrincipalGrant', 'TYPE PrincipalGrantsPage', 'TYPE RecordAppActionResult',
   'TYPE SkillExportAction', 'TYPE TickAction', 'TYPE TickActionState',
 ];

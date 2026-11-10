@@ -45,9 +45,9 @@ const STATES: Array<[string | undefined, string | undefined, string[]]> = [
   ['false', 'true', []],
   ['malformed', 'true', []],
   ['TRUE', 'true', []],
-  ['true', undefined, ['node-signing']],
-  ['true', 'false', ['node-signing']],
-  ['true', 'true', ['node-signing', 'passkey-registration']],
+  ['true', undefined, ['node-signing', 'grant-signing']],
+  ['true', 'false', ['node-signing', 'grant-signing']],
+  ['true', 'true', ['node-signing', 'grant-signing', 'passkey-registration']],
 ];
 
 describe('GET /capabilities on the real server', () => {
@@ -80,7 +80,7 @@ describe('GET /capabilities on the real server', () => {
       const info = await client.callTool({ name: 'hadron_server_info', arguments: {} });
       const text = (info.content as Array<{ text: string }>).map((c) => c.text).join('\n');
       const tokens = /^capabilities: (.*)$/m.exec(text)![1].split(', ');
-      expect(tokens.filter((t) => t === 'node-signing' || t === 'passkey-registration')).toEqual(expected);
+      expect(tokens.filter((t) => t === 'node-signing' || t === 'grant-signing' || t === 'passkey-registration')).toEqual(expected);
     } finally {
       await client.close();
     }
@@ -200,7 +200,7 @@ describe('the rate limit', () => {
 describe('switchCapabilities, the one source', () => {
   it('maps the policy in order, registration never without signing', () => {
     expect(switchCapabilities({ signing: false, registration: false })).toEqual([]);
-    expect(switchCapabilities({ signing: true, registration: false })).toEqual(['node-signing']);
-    expect(switchCapabilities({ signing: true, registration: true })).toEqual(['node-signing', 'passkey-registration']);
+    expect(switchCapabilities({ signing: true, registration: false })).toEqual(['node-signing', 'grant-signing']);
+    expect(switchCapabilities({ signing: true, registration: true })).toEqual(['node-signing', 'grant-signing', 'passkey-registration']);
   });
 });

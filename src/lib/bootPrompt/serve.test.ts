@@ -11,6 +11,7 @@ import { computeApprovalHash } from '../approvalHash.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../bootPrompt.js';
 import { sha256Hex, type CompiledProvenance } from '../bootCompile/provenance.js';
 import { resolveServedBootPrompt } from './serve.js';
+import { NEWEST_APPROVED_REVISION_SCAN_CAP, NEWEST_APPROVED_REVISION_SCAN_BATCHES } from '../nodeApproval.js';
 
 let orgId: string;
 let memoryId: string;
@@ -238,5 +239,41 @@ describe('#2047 PR-C: selection and cap-pruning serialize on the compiled node (
     await pruner;
     await serving;
     expect(served).not.toMatchObject({ servedRevSeq: 1 });
+  });
+});
+
+describe('#3801 serve past the scan cap (cor:dmo:150:05, cor:agt:040:12)', () => {
+  /** n unapproved revisions above the approved rev 1, seeded directly (a real recompile per revision is slow). */
+  const recompiles = async (nodeId: string, n: number) => {
+    const node = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
+    const rows = Array.from({ length: n }, (_, i) => ({ nodeId, memoryId, loc: node.loc, name: node.name, content: `unapproved ${i}`, tags: [], revNo: node.revSeq + i }));
+    // rev 1 keeps its approval as a snapshot; the live row moves to the new head.
+    await db.nodeRevision.create({ data: { nodeId, memoryId, loc: node.loc, name: node.name, content: node.content, revNo: node.revSeq, tags: [], approvedAt: node.approvedAt, approvedByInfo: node.approvedByInfo, approvalHash: node.approvalHash } as never });
+    await db.nodeRevision.createMany({ data: rows.slice(1) as never });
+    await withCompileWrite(() => db.node.update({ where: { id: nodeId }, data: { content: 'unapproved head', revSeq: node.revSeq + n, contentRevSeq: node.revSeq + n } }));
+    await db.compiledPromptRevision.create({ data: { compiledNodeId: nodeId, compiledRevNo: node.revSeq + n, contentHash: sha256Hex('unapproved head'), targetKind: 'AGENT', targetAgentId: agentId, provenance: prov(sha256Hex('src2')) as never, occurrenceCount: 1 } });
+  };
+
+  it('an approved revision more than the cap below head still serves, on every surface', async () => {
+    const id = await compiled('deep', 'APPROVED text');
+    await recompiles(id, NEWEST_APPROVED_REVISION_SCAN_CAP + 5);
+    await point.agent(id);
+    for (const s of ['bind', 'chat', 'run'] as const) {
+      expect(await serve(s)).toMatchObject({ content: 'APPROVED text', servedRevSeq: 1, compiledNodeId: id });
+    }
+  });
+
+  it('genuine absence past the cap still refuses NOT_APPROVED', async () => {
+    const id = await compiled('never', 'x', false);
+    await recompiles(id, NEWEST_APPROVED_REVISION_SCAN_CAP + 5);
+    await point.agent(id);
+    expect(await code(serve())).toBe('BOOT_PROMPT_NOT_APPROVED');
+  });
+
+  it('past the hard ceiling it still refuses (bounded work), never serves wrong text', async () => {
+    const id = await compiled('toodeep', 'APPROVED text');
+    await recompiles(id, NEWEST_APPROVED_REVISION_SCAN_CAP * NEWEST_APPROVED_REVISION_SCAN_BATCHES + 5);
+    await point.agent(id);
+    expect(await code(serve())).toBe('BOOT_PROMPT_NOT_APPROVED');
   });
 });
