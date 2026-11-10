@@ -25,7 +25,11 @@ export class GrantSigningRefusal extends Error {
       | 'GRANT_TERMS_UNREPRESENTABLE'
       | 'SIGNING_REQUEST_NOT_FOUND'
       | 'SIGNING_REQUEST_NOT_REQUESTER'
-      | 'SIGNING_REQUEST_ENDED',
+      | 'SIGNING_REQUEST_ENDED'
+      // #3649 slice C: refused at the ceremony's completion (src/lib/signing/grantCeremony.ts).
+      | 'SIGNATURE_NOT_VERIFIED'
+      | 'SIGNER_NOT_ELIGIBLE'
+      | 'PASSKEY_COOLING_OFF',
     message: string,
     readonly details: Record<string, unknown> = {},
   ) {
@@ -84,13 +88,15 @@ export async function createGrantSigningRequestInTransaction(
   }
   const id = newSigningRequestId();
   const ttl = signingRequestTtlSeconds();
-  await tx.$executeRaw`INSERT INTO grant_signing_requests
+  // Both times from ONE clock read: the guard keeps their difference as the lifetime (NP-2) when it re-bases them after its lock.
+  await tx.$executeRaw`WITH n AS (SELECT hadron_signing_now() AS t)
+    INSERT INTO grant_signing_requests
     (id, grant_id, version, terms_hash, payload_version,
-     requester_user_id, requester_app_id, requester_worker_id, requester_session_id, expires_at)
-    VALUES (${id}, ${g.id}, ${g.version}, ${termsHash}, ${CURRENT_GRANT_SIGNATURE_PAYLOAD_VERSION},
+     requester_user_id, requester_app_id, requester_worker_id, requester_session_id, created_at, expires_at)
+    SELECT ${id}, ${g.id}, ${g.version}, ${termsHash}, ${CURRENT_GRANT_SIGNATURE_PAYLOAD_VERSION},
       ${opts.requester.userId}, ${opts.requester.userId ? null : opts.requester.appId},
       ${opts.requester.workerId}, ${opts.requester.sessionId},
-      hadron_signing_now() + make_interval(secs => ${ttl}))`;
+      n.t, n.t + make_interval(secs => ${ttl}) FROM n`;
   return tx.grantSigningRequest.findUniqueOrThrow({ where: { id } });
 }
 

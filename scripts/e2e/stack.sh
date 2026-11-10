@@ -38,6 +38,9 @@ compose() {
     E2E_BIND=127.0.0.1 docker compose --project-name "$project" --file "$ROOT/scripts/e2e/compose.yaml" "$@"
   else
     incus exec "$project" -- env E2E_PORT="$E2E_PORT" E2E_PORTAL_PORT="$E2E_PORTAL_PORT" E2E_BIND=0.0.0.0 \
+      E2E_PASSKEY_SIGNING_ENABLED="${E2E_PASSKEY_SIGNING_ENABLED:-}" \
+      E2E_SIGNING_CEREMONY_ORIGINS="${E2E_SIGNING_CEREMONY_ORIGINS:-}" \
+      E2E_PASSKEY_RP_ID="${E2E_PASSKEY_RP_ID:-}" \
       docker compose --project-name "$project" --file /opt/hadron/scripts/e2e/compose.yaml "$@"
   fi
 }

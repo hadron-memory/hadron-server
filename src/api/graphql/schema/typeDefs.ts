@@ -2362,6 +2362,8 @@ export const typeDefs = `#graphql
     expiresAt: DateTime!
     "Null while OPEN. EXPIRED ends at expiresAt; every other end at the moment it happened (DB clock)."
     endedAt: DateTime
+    "The server-hosted ceremony page where someone who may issue the grant signs it (hrn:node:hadronmemory.com:specs:cor:acl:140:07): the server origin plus /grant-signing/<id>, with no token. Copy it verbatim; never compose it. Signing there with a passkey activates the grant; no GraphQL or MCP call takes an assertion. An ended request's link only explains that it ended."
+    ceremonyUrl: String!
   }
 
   "#1632 (hrn:node:hadronmemory.com:specs:cor:dmo:130:03) — a request for a person to sign one node's content, pinned at creation."
@@ -7208,6 +7210,7 @@ export const typeDefs = `#graphql
     values: JSON
     holderKind: GrantHolderKind!
     holderId: ID!
+    "The person who issued it: its signer (hrn:node:hadronmemory.com:specs:cor:acl:140:04). Null while it is pending. Null on an activated grant means the issuer's account was erased: it reads as issued by a deleted user, and stays as it was (hrn:node:hadronmemory.com:specs:cor:acl:140:08)."
     issuerUserId: ID
     requestedByUserId: ID
     requestedByWorkerId: ID
@@ -7222,11 +7225,55 @@ export const typeDefs = `#graphql
     activatedAt: DateTime
     "How the activation was verified, as stored; null while pending."
     verificationKind: String
+    "The person whose signature activated it; null while pending, and null once their account is erased (a deleted user, hrn:node:hadronmemory.com:specs:cor:acl:140:08)."
     verifiedBy: ID
     signatureId: ID
     revokedAt: DateTime
     "Whether the grant allows its action right now, judged on the database clock by the one live function (activated, not revoked, holder not gone, App not deleted, started, not expired, not spent). A fact about this instant, never a lifecycle name."
     allows: Boolean!
+    "#3649 slice D (hrn:node:hadronmemory.com:specs:cor:acl:140:07) — its signatures, each re-verified on this read from the stored assertion. Readable by exactly those who may read the grant; it adds no reach."
+    signatureStatus: GrantSignatureStatus!
+  }
+
+  "#3649 slice D (hrn:node:hadronmemory.com:specs:cor:acl:140:07; hrn:node:hadronmemory.com:specs:cor:dmo:130:04 mirrored) — a grant signature's state, derived on every read and never stored. A record that does not verify is never a signature: it is counted in GrantSignatureStatus.integrityProblems instead. This is the signature's state, not the grant's: whether the grant allows anything is Grant.allows."
+  enum GrantSignatureState {
+    "Verifies, and was made over the grant's present record version and terms."
+    CURRENT
+    "Verifies, but the grant's record version or terms no longer match what was signed."
+    EARLIER
+    "Made by a first passkey still in its cooling-off window (hrn:node:hadronmemory.com:specs:cor:aut:040:07); never counts until the window ends normally."
+    PENDING
+    "Made by a first passkey revoked inside its window; never counts."
+    CANCELLED
+  }
+
+  "#3649 slice D — one signature on a grant. Only the passkey's label is ever shown."
+  type GrantSignature {
+    id: ID!
+    "The person who signed, as handle and URN only. Null when their account was erased: a deleted user (hrn:node:hadronmemory.com:specs:cor:acl:140:08); the stored id is never echoed."
+    signer: NodeRevisionEditor
+    "The passkey's label; an erased person's reads 'Erased passkey'."
+    passkeyLabel: String!
+    "When the signer's passkey was revoked, if it was; the signature keeps its state."
+    passkeyRevokedAt: DateTime
+    "The grant record version it was made on."
+    version: Int!
+    "The terms hash it was made over (64 lowercase hex, hrn:node:hadronmemory.com:specs:cor:acl:140:09)."
+    termsHash: String!
+    verifiedAt: DateTime!
+    signingRequestId: ID!
+    payloadVersion: String!
+    state: GrantSignatureState!
+  }
+
+  "#3649 slice D — a grant's signatures. No grant state label is derived here."
+  type GrantSignatureStatus {
+    "CURRENT if any signature is current, else the best of PENDING, EARLIER, CANCELLED; null with no signatures."
+    state: GrantSignatureState
+    "Current signers first, then newest first."
+    signatures: [GrantSignature!]!
+    "Records that fail re-verification or are inconsistent with the grant: reported, never listed as signatures."
+    integrityProblems: Int!
   }
 
   type GrantsPage {
