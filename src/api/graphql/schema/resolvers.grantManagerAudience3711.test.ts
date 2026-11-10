@@ -57,8 +57,8 @@ beforeEach(async () => {
 });
 
 /** A grant held by the PERSON `w.userId`, activated by the signer's verifying signature. */
-async function signedPersonGrant(): Promise<string> {
-  const g = await insertGrant(w, { user_id: w.userId, worker_id: null });
+async function signedPersonGrant(over: Record<string, any> = {}): Promise<string> {
+  const g = await insertGrant(w, { user_id: w.userId, worker_id: null, ...over });
   const row = await db.grant.findUniqueOrThrow({ where: { id: g } });
   const termsHash = grantTermsHash(grantTermsFromRow({
     appId: row.appId, userId: row.userId, agentId: row.agentId, workerId: row.workerId, granteeAppId: row.granteeAppId,
@@ -129,8 +129,7 @@ describe('one request, one grant, two audiences', () => {
 
 describe('Dorian F1 / Riana P2-2: a requester who no longer manages the App is not shown the signer list when it withdraws an ended signed grant', () => {
   it('signed, activated, revoked by the (then) manager; the manager demoted; the same person withdraws (first end stands): signatures withheld', async () => {
-    const g = await signedPersonGrant();
-    await db.$executeRaw`UPDATE grants SET requested_by_user_id = ${w.userId} WHERE id = ${g}`;
+    const g = await signedPersonGrant({ requested_by_user_id: w.userId });
     const revoke = await gql(`mutation($r:ID!){revokeGrant(ref:$r){id revokedAt}}`, { r: g });
     expect(revoke.errors, JSON.stringify(revoke.errors)).toBeUndefined();
     await db.orgMember.update({ where: { organizationId_userId: { organizationId: w.orgId, userId: w.userId } }, data: { role: 'CONTRIBUTOR' } });
