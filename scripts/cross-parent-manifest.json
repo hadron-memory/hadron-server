@@ -1605,6 +1605,12 @@
       "resolver": "src/api/graphql/schema/resolvers.query.org.ts::organizations",
       "target": "Organization"
     },
+    "AccountUsageAccounts.accounts": {
+      "class": "parent-implies-child",
+      "audience": "the readers of the team's tasks and events (cor:agt:140:05, :140:03, :050:21, :23; #3853): a participant of the App or the App's own key; everyone else is refused APP_NOT_FOUND. An entry holds an account label, host, family, a timestamp and worker names only, read from the App's own team-space memory: nothing another tenant owns is reachable",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
+      "target": "AccountUsageAccount"
+    },
     "AccountUsageMoveTarget.adjusted": {
       "class": "parent-implies-child",
       "audience": "the readers of the team's tasks and events (cor:agt:140:03, :050:21, :23; #3820): a participant of the App or the App's own key; everyone else is refused APP_NOT_FOUND. A projection holds account labels, percentages, timestamps and worker names only: nothing another tenant owns is reachable",

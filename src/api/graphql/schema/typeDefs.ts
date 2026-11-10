@@ -8899,6 +8899,18 @@ export const typeDefs = `#graphql
     ): [AgentTeamEvent!]!
 
     """
+    #3853 — the usage accounts an App has history for: one entry per label, host and family
+    (hrn:node:hadronmemory.com:specs:cor:agt:140:01) with a valid account-usage snapshot in the App's own team-space memory in
+    the last 14 days, the same history and horizon accountUsageProjection reads
+    (hrn:node:hadronmemory.com:specs:cor:agt:140:05). Readers: as accountUsageProjection
+    (hrn:node:hadronmemory.com:specs:cor:agt:140:03, resting on hrn:node:hadronmemory.com:specs:cor:agt:050:21 and
+    hrn:node:hadronmemory.com:specs:cor:agt:050:23); anyone else is refused APP_NOT_FOUND. At most 50 accounts, the most
+    recently written kept, ordered by label, host and family; complete is false when more exist, or when the bounded search for
+    accounts with valid history stopped short. An App with no history gets an empty list.
+    """
+    accountUsageAccounts(appRef: ID!): AccountUsageAccounts!
+
+    """
     #1706 — an App's effective stall windows (hrn:node:hadronmemory.com:specs:cor:agt:050:14–:17), and (#1763) its
     host-registration lapse (hrn:node:hadronmemory.com:specs:cor:agt:070:01). Readers:
     the App's task audience (hrn:node:hadronmemory.com:specs:cor:agt:050:21).
@@ -17014,6 +17026,30 @@ export const typeDefs = `#graphql
   type AccountUsageWhatIf {
     adjusted: [AccountUsageWindowProjection!]!
     target: AccountUsageMoveTarget
+  }
+
+  """
+  #3853 — one usage account an App has history for (hrn:node:hadronmemory.com:specs:cor:agt:140:05): the label, host and family
+  that together are an account (hrn:node:hadronmemory.com:specs:cor:agt:140:01). Passed back to accountUsageProjection as account,
+  host and family, every entry is accepted. workers and workersConfigured are the newest snapshot's.
+  """
+  type AccountUsageAccount {
+    account: String!
+    host: String!
+    family: String!
+    newestSnapshotAt: DateTime!
+    workers: [String!]!
+    workersConfigured: Boolean!
+  }
+
+  """
+  #3853 — the accounts an App has usage history for. complete is false when more exist than the bound
+  (hrn:node:hadronmemory.com:specs:cor:agt:140:05); a cut list is not a refusal.
+  """
+  type AccountUsageAccounts {
+    asOf: DateTime!
+    accounts: [AccountUsageAccount!]!
+    complete: Boolean!
   }
 
   "#3820 — one account's projection. workers are the names the collector configured on the account."
