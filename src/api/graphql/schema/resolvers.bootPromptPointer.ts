@@ -183,7 +183,7 @@ export const bootPromptPointerFieldResolvers = {
  * Every gate is judged BEFORE anything is resolved, and every failure answers exactly as a nonexistent `agentRef`
  * (`AgentNotFoundError(agentRef)`), so a masked caller learns nothing, not even NOT_SET:
  *  - Agent only: `maySeeAgentPointer` (the caller may read the Agent's system memory), as `Agent.bootPromptServe`.
- *  - Agent + App: the App exists and is live and the caller participates in THAT App (`mayReadAsAppParticipant`: a
+ *  - Agent + App: the App exists and is live (neither deleted nor uninstalled, whichever ref form named it) and the caller participates in THAT App (`mayReadAsAppParticipant`: a
  *    person by `isAppParticipant`, an App key for its own App only); the Agent is installed there; the serve licence
  *    and text audience hold (`personalOrgAgentServeAllowed`, #3653, so a lapsed licence is masked as a chat masks it,
  *    never the typed INSTALL_LICENSE_INACTIVE); and the caller may chat with the Agent (`canChatWithAgent`).
@@ -217,7 +217,8 @@ export async function readAgentServedBootPrompt(
       throw err;
     }
     const app = await loadApp(ctx, appId);
-    if (!app || app.deletedAt || !(await mayReadAsAppParticipant(ctx, app))) throw masked();
+    // Live means not deleted AND not uninstalled: resolveAppRef drops uninstalled rows on a URN only, not on an id.
+    if (!app || app.deletedAt || app.uninstalledAt || !(await mayReadAsAppParticipant(ctx, app))) throw masked();
     if (!(await resolveAppInstallation(ctx.db, appId, agent.id))) throw masked();
     if (!(await personalOrgAgentServeAllowed(ctx.db, app, agent.id, ctx.userId))) throw masked();
     if (!(await canChatWithAgent(ctx, agent))) throw masked();
