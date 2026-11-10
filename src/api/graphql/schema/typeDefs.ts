@@ -8863,12 +8863,14 @@ export const typeDefs = `#graphql
     """
     #3820 — the token-burn projection of one subscription account in an App: the 5-hour and 7-day windows' use at their
     reset as a range, from the burn over the last 1h, 6h and 24h of history, with an optional what-if (add workers, or move
-    one to another account). The history is the account-usage objects in the App's own team-space memory. Readers: the
-    roster's (hrn:node:hadronmemory.com:specs:cor:agt:050:21), with its refusal byte for byte. ADVISORY ONLY: the answer
+    one to another account). The history is the account-usage objects in the App's own team-space memory. Readers: as the
+    team's tasks and events are read (hrn:node:hadronmemory.com:specs:cor:agt:140:03, which rests on
+    hrn:node:hadronmemory.com:specs:cor:agt:050:21 and hrn:node:hadronmemory.com:specs:cor:agt:050:23): the App's
+    participants and its own key; anyone else is refused APP_NOT_FOUND. ADVISORY ONLY: the answer
     never authorizes, refuses or moves anything. An account with no history, or only history older than 60 minutes, is
     UNKNOWN; under 5% used, or fewer than 3 snapshots spanning an hour, is INSUFFICIENT_DATA and gives no run-out time.
     """
-    accountUsageProjection(appRef: ID!, account: String!, whatIf: AccountUsageWhatIfInput): AccountUsageProjection!
+    accountUsageProjection(appRef: ID!, account: String!, host: String, family: String, whatIf: AccountUsageWhatIfInput): AccountUsageProjection!
     """
     #2061 — direct-report lanes from the same roster projection and read gate as teamRoster.
     One bounded RepeatableRead snapshot per call; no hierarchy rollups or role exclusions.
@@ -16829,8 +16831,8 @@ export const typeDefs = `#graphql
     workers: [TeamRosterEntry!]!
   }
 
-  "#3820 — a subscription account's two rate-limit windows."
-  enum AccountUsageWindow { FIVE_HOUR SEVEN_DAY }
+  "#3820 — a subscription account's rate-limit windows: the 5-hour and 7-day ones, or OTHER for a family's window of another length (see lengthMinutes)."
+  enum AccountUsageWindow { FIVE_HOUR SEVEN_DAY OTHER }
   "#3820 — PROJECTED has a range; INSUFFICIENT_DATA has none (never a run-out time); UNKNOWN has no trustworthy data."
   enum AccountUsageStatus { PROJECTED INSUFFICIENT_DATA UNKNOWN }
   """
@@ -16856,6 +16858,8 @@ export const typeDefs = `#graphql
   "#3820 — one window of one account."
   type AccountUsageWindowProjection {
     window: AccountUsageWindow!
+    "The window's length in minutes."
+    lengthMinutes: Int!
     status: AccountUsageStatus!
     reason: AccountUsageReason
     "Used share at the newest snapshot, 0 to 100."
@@ -16895,6 +16899,7 @@ export const typeDefs = `#graphql
   type AccountUsageProjection {
     account: String!
     family: String
+    host: String
     asOf: DateTime!
     newestSnapshotAt: DateTime
     workers: [String!]!
@@ -16914,6 +16919,9 @@ export const typeDefs = `#graphql
   input AccountUsageMoveWorkerInput {
     worker: String!
     toAccount: String!
+    "Needed only when the target label has history from more than one host or family."
+    toHost: String
+    toFamily: String
   }
 
   "#1706 — every availability record in one App."

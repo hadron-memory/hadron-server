@@ -1,7 +1,8 @@
 /**
  * #3820 — Query.accountUsageProjection over the real schema. The projection arithmetic is pinned in
  * `src/lib/accountUsage/projection3820.test.ts`; this file pins what only the resolver decides:
- *  - the read gate is the ROSTER's, byte for byte (cor:agt:050:21): a caller who cannot read the roster is refused the same way;
+ *  - the read gate is the one the team's tasks and events are read through (cor:agt:140:03, V27, V36): participants and the App's
+ *    own key, and anyone else is refused APP_NOT_FOUND exactly as for an App that does not exist;
  *  - the history comes ONLY from `account-usage` objects in the App's own team-space memory (V9): not another App's, not a
  *    free-standing memory's, not a deleted object, not another collection;
  *  - a what-if is validated after the gate, exactly one of its two forms, and the answer is advisory (it writes nothing).
@@ -112,33 +113,49 @@ describe('the history source (V9)', () => {
   });
 });
 
-describe('the read gate is the roster\'s', () => {
+describe('the read gate is the team reads\' (V27, V36)', () => {
   const refusal = async (p: Promise<unknown>) => p.then(() => null, (e: any) => ({ message: e.message, code: e.extensions?.code, ext: e.extensions }));
 
-  it('a person outside the App is refused exactly as teamRoster refuses them', async () => {
+  it('a person outside the App is refused exactly as the team reads refuse them', async () => {
     await burn('team-a', 40, 1);
-    const roster = await refusal(Q.teamRoster({}, { appRef: app.id }, ctx(outsider.id)));
+    const roster = await refusal(Q.teamAvailability({}, { appRef: app.id }, ctx(outsider.id)));
     const usage = await refusal(proj('team-a', undefined, outsider.id));
     expect(roster).not.toBeNull();
     expect(usage).toEqual(roster);
   });
 
   it('an unknown App, and an unauthenticated caller, are refused as the roster refuses them', async () => {
-    const roster = await refusal(Q.teamRoster({}, { appRef: 'no-such-app' }, ctx(member.id)));
+    const roster = await refusal(Q.teamAvailability({}, { appRef: 'no-such-app' }, ctx(member.id)));
     expect(await refusal(proj('team-a', undefined, member.id, 'no-such-app'))).toEqual(roster);
-    const rosterAnon = await refusal(Q.teamRoster({}, { appRef: app.id }, ctx(undefined)));
+    const rosterAnon = await refusal(Q.teamAvailability({}, { appRef: app.id }, ctx(undefined)));
     expect(rosterAnon).not.toBeNull();
     expect(await refusal(Q.accountUsageProjection({}, { appRef: app.id, account: 'team-a' }, ctx(undefined)))).toEqual(rosterAnon);
   });
 
   it('a malformed what-if from a caller outside the App is still the roster refusal, not a bad-input answer', async () => {
-    const roster = await refusal(Q.teamRoster({}, { appRef: app.id }, ctx(outsider.id)));
+    const roster = await refusal(Q.teamAvailability({}, { appRef: app.id }, ctx(outsider.id)));
     expect(await refusal(proj('team-a', { addWorkers: 1, moveWorker: { worker: 'x', toAccount: 'y' } }, outsider.id))).toEqual(roster);
   });
 
-  it('a participant reads it: a worker bound to the App is judged as the roster judges it', async () => {
+  it('a participant reads it', async () => {
     await burn('team-a', 40, 1);
     expect(seven(await proj('team-a', undefined, member.id)).status).toBe('PROJECTED');
+  });
+
+  it('the App\'s own key reads its own App; another App\'s key, a revoked key and no credential are refused as an absent App (V36)', async () => {
+    await burn('team-a', 40, 1);
+    const key = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: `h-${generateId()}`, keyPreview: 'abcd' }, select: { id: true } });
+    const keyCtx = (over: Partial<Context> = {}): Context => ({ db, appId: app.id, appKeyId: key.id, roles: [], ...over });
+    const r = await Q.accountUsageProjection({}, { appRef: app.id, account: 'team-a' }, keyCtx());
+    expect(seven(r).status).toBe('PROJECTED');
+    const other = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'O2', urn: `${org.urn}:o2` }, select: { id: true } });
+    const absent = await refusal(Q.teamAvailability({}, { appRef: other.id }, keyCtx()));
+    expect(absent).not.toBeNull();
+    expect(await refusal(Q.accountUsageProjection({}, { appRef: other.id, account: 'team-a' }, keyCtx()))).toEqual(absent);
+    await db.appKey.update({ where: { id: key.id }, data: { revokedAt: new Date() } });
+    expect(await refusal(Q.accountUsageProjection({}, { appRef: app.id, account: 'team-a' }, keyCtx()))).toEqual(
+      await refusal(Q.teamAvailability({}, { appRef: app.id }, keyCtx())),
+    );
   });
 });
 
@@ -170,11 +187,19 @@ describe('what-ifs', () => {
     expect(tAdj.burn).toEqual({ lowPctPerHour: 2.5, highPctPerHour: 2.5 });
   });
 
-  it('a what-if on an account with no history is UNKNOWN, not an error, and moving a worker an account does not list is refused', async () => {
+  it('an add on an account with no history is UNKNOWN, not an error; moving a worker an account does not list is refused (V33)', async () => {
     const none = await proj('nobody', { addWorkers: 1 });
     expect(none.whatIf.adjusted[1]).toMatchObject({ status: 'UNKNOWN', reason: 'NO_HISTORY' });
     await burn('src', 30, 1);
     await expect(proj('src', { moveWorker: { worker: 'Nobody', toAccount: 'tgt' } })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    await expect(proj('nobody', { moveWorker: { worker: 'Anne', toAccount: 'tgt' } })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+  });
+
+  it('an account with no workers configured has no per-worker estimate and a what-if on it is UNKNOWN (V28)', async () => {
+    await burn('bare', 30, 1, { workers: [], extra: { workersConfigured: false } });
+    const r = await proj('bare', { addWorkers: 1 });
+    expect(seven(r).perWorkerBurn).toBeNull();
+    expect(r.whatIf.adjusted[1]).toMatchObject({ status: 'UNKNOWN', reason: 'NO_WORKERS_CONFIGURED' });
   });
 
   it('refuses both forms, neither form given, a count outside 1 to 50, and a move onto itself', async () => {
@@ -182,6 +207,30 @@ describe('what-ifs', () => {
     for (const bad of [{}, { addWorkers: 1, moveWorker: { worker: 'Anne', toAccount: 'tgt' } }, { addWorkers: 0 }, { addWorkers: 51 }, { moveWorker: { worker: 'Anne', toAccount: 'src' } }]) {
       await expect(proj('src', bad)).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
     }
+  });
+});
+
+describe('an account is its label, host and family (cor:agt:140:01)', () => {
+  it('a label two hosts wrote is refused as ambiguous unless the caller names the host; naming it answers from that host only', async () => {
+    await burn('team-a', 40, 1, { extra: { host: 'h1' } });
+    await burn('team-a', 20, 2, { extra: { host: 'h2' } });
+    await expect(proj('team-a')).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    const one = await Q.accountUsageProjection({}, { appRef: app.id, account: 'team-a', host: 'h2' }, ctx(member.id));
+    expect(seven(one)).toMatchObject({ usedPct: 20, burn: { lowPctPerHour: 2, highPctPerHour: 2 } });
+    expect(one.host).toBe('h2');
+  });
+});
+
+describe('windows of another length (V29)', () => {
+  it('a family whose newest snapshot reports a window of another length gets that window, with its length, beside the two standard ones', async () => {
+    const reset = new Date(Date.now() + 1 * HOUR).toISOString();
+    for (let m = 240; m >= 0; m -= 30) {
+      await snapshot({ label: 'odd', minutesAgo: m, sevenPct: 0, extra: { sevenDayPct: undefined, sevenDayResetsAt: undefined, primaryPct: 30 - m / 60, primaryMinutes: 90, primaryResetsAt: reset } });
+    }
+    const r = await proj('odd');
+    expect(r.windows.map((w: any) => [w.window, w.lengthMinutes, w.status])).toEqual([
+      ['OTHER', 90, 'PROJECTED'], ['FIVE_HOUR', 300, 'UNKNOWN'], ['SEVEN_DAY', 10080, 'UNKNOWN'],
+    ]);
   });
 });
 

@@ -25,26 +25,17 @@ import { canSeeUserPersonalFieldsMany } from '../../../lib/auth/userVisibility.j
 
 const toGqlWord = (s: string): string => s.toUpperCase().replace(/-/g, '_');
 
-/**
- * The roster's read gate (cor:agt:050:21), run once: a run principal reads its own App; anyone else is judged as a
- * participant inside one RepeatableRead snapshot, so a non-participant gets the App-not-found refusal byte for byte.
- * #3820 reads account usage through the same function, so the two cannot drift.
- */
-export async function withRosterReadGate<T>(ctx: Context, appRef: string, body: (readCtx: Context, app: TaskApp) => Promise<T>): Promise<T> {
-    if (isRunPrincipal(ctx) && !ctx.userId) return withReadableApp(ctx, appRef, body, true);
+/** Shared projected rows. Person and run reads use RepeatableRead; run reads also hold live authority anchors through projection. */
+async function readTeamRoster(ctx: Context, appRef: string) {
+    if (isRunPrincipal(ctx) && !ctx.userId) return withReadableApp(ctx, appRef, projectTeamRoster, true);
     // Admission, status and assignment projections share one read snapshot, including MCP callers.
     return ctx.db.$transaction(async (tx) => {
       const readCtx = withoutRequestCaches(ctx, tx);
       const { app } = await resolveParticipatedApp(readCtx, appRef);
-      return body(readCtx, app);
+      return projectTeamRoster(readCtx, app);
     // An explicit, bounded read budget avoids imposing Prisma's implicit 5s interactive-transaction default
     // on the now-serialized bulk roster loaders. This does not change query/lock or test timeouts.
     }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 20_000 });
-}
-
-/** Shared projected rows. Person and run reads use RepeatableRead; run reads also hold live authority anchors through projection. */
-async function readTeamRoster(ctx: Context, appRef: string) {
-  return withRosterReadGate(ctx, appRef, projectTeamRoster);
 }
 
 async function projectTeamRoster(readCtx: Context, app: TaskApp) {

@@ -36,8 +36,13 @@ const WEEKLY_MIN_HISTORY_MS = 7 * 24 * 3_600_000;
 const MAX_FUTURE_SKEW_MS = 5 * 60_000;
 const HOUR_MS = 3_600_000;
 
-export type WindowKind = 'FIVE_HOUR' | 'SEVEN_DAY';
-export const WINDOW_KINDS: readonly WindowKind[] = ['FIVE_HOUR', 'SEVEN_DAY'];
+/** A window is named by its length in minutes (V29): a family's windows of another length are projected the same way. */
+export type WindowKind = number;
+export const FIVE_HOUR_MINUTES = 300;
+export const SEVEN_DAY_MINUTES = 10080;
+/** Always reported, UNKNOWN when no snapshot has a reading for them (V29). Other lengths appear when the newest snapshot reports them. */
+export const STANDARD_WINDOWS: readonly WindowKind[] = [FIVE_HOUR_MINUTES, SEVEN_DAY_MINUTES];
+const MAX_WINDOW_MINUTES = 100_000;
 export type ProjectionStatus = 'PROJECTED' | 'INSUFFICIENT_DATA' | 'UNKNOWN';
 export type ProjectionReason =
   | 'NO_HISTORY' | 'STALE' | 'NO_WINDOW' | 'NO_RESET' | 'RESET_PASSED'
@@ -49,14 +54,16 @@ export interface WindowReading { pct: number; resetsAt: Date | null }
 export interface UsageSnapshot {
   label: string;
   family: string | null;
+  host: string | null;
   observedAt: Date;
-  windows: Partial<Record<WindowKind, WindowReading>>;
+  windows: Record<number, WindowReading>;
   workers: string[];
   workersConfigured: boolean;
 }
 
 export interface BurnRange { lowPctPerHour: number; highPctPerHour: number }
 export interface WindowProjection {
+  /** The window's length in minutes. */
   window: WindowKind;
   status: ProjectionStatus;
   reason: ProjectionReason | null;
@@ -106,16 +113,17 @@ export function parseUsageSnapshot(properties: unknown, now: Date): UsageSnapsho
     const v = pctOf(pct);
     if (v !== null && windows[kind] === undefined) windows[kind] = { pct: v, resetsAt: dateOf(resetsAt) };
   };
-  put('FIVE_HOUR', p.fiveHourPct, p.fiveHourResetsAt);
-  put('SEVEN_DAY', p.sevenDayPct, p.sevenDayResetsAt);
+  put(FIVE_HOUR_MINUTES, p.fiveHourPct, p.fiveHourResetsAt);
+  put(SEVEN_DAY_MINUTES, p.sevenDayPct, p.sevenDayResetsAt);
+  // A family whose windows have another length reports them as primary/secondary with their length in minutes (cor:agt:140:01).
   for (const [pct, minutes, resets] of [[p.primaryPct, p.primaryMinutes, p.primaryResetsAt], [p.secondaryPct, p.secondaryMinutes, p.secondaryResetsAt]] as const) {
-    if (minutes === 300) put('FIVE_HOUR', pct, resets);
-    else if (minutes === 10080) put('SEVEN_DAY', pct, resets);
+    if (typeof minutes === 'number' && Number.isInteger(minutes) && minutes > 0 && minutes <= MAX_WINDOW_MINUTES) put(minutes, pct, resets);
   }
   const workers = Array.isArray(p.workers) ? p.workers.filter((w): w is string => typeof w === 'string' && w !== '') : [];
   return {
     label: p.label,
     family: typeof p.family === 'string' ? p.family : null,
+    host: typeof p.host === 'string' ? p.host : null,
     observedAt,
     windows,
     workers,
@@ -213,7 +221,7 @@ export function projectWindow(history: readonly UsageSnapshot[], window: WindowK
 
   let shape: Shape = 'FLAT';
   let shapeScale = 1;
-  if (window === 'SEVEN_DAY') {
+  if (window === SEVEN_DAY_MINUTES) {
     const weekly = weeklyAdditional(withWindow, newest, resetsAt, hoursToReset);
     const flatMid = ((rateLow + rateHigh) / 2) * hoursToReset;
     if (weekly !== null && flatMid > 0 && weekly > 0) { shape = 'WEEKLY'; shapeScale = weekly / flatMid; }
@@ -232,11 +240,11 @@ function weeklyAdditional(series: readonly UsageSnapshot[], newest: UsageSnapsho
   const bucketOf = (t: number): number => Math.floor(t / HOUR_MS) % 168;
   for (let i = 1; i < series.length; i += 1) {
     const a = series[i - 1]!; const b = series[i]!;
-    const ra = a.windows.SEVEN_DAY!.resetsAt; const rb = b.windows.SEVEN_DAY!.resetsAt;
+    const ra = a.windows[SEVEN_DAY_MINUTES]!.resetsAt; const rb = b.windows[SEVEN_DAY_MINUTES]!.resetsAt;
     if (!ra || !rb || Math.abs(ra.getTime() - rb.getTime()) > SAME_RESET_TOLERANCE_MS) continue;
     const dt = b.observedAt.getTime() - a.observedAt.getTime();
     if (dt < 5 * 60_000 || dt > 6 * HOUR_MS) continue;
-    const rate = Math.max(0, b.windows.SEVEN_DAY!.pct - a.windows.SEVEN_DAY!.pct) / (dt / HOUR_MS);
+    const rate = Math.max(0, b.windows[SEVEN_DAY_MINUTES]!.pct - a.windows[SEVEN_DAY_MINUTES]!.pct) / (dt / HOUR_MS);
     const key = bucketOf(a.observedAt.getTime() + dt / 2);
     const cur = sums.get(key) ?? { total: 0, n: 0 };
     sums.set(key, { total: cur.total + rate, n: cur.n + 1 });
@@ -254,9 +262,15 @@ function weeklyAdditional(series: readonly UsageSnapshot[], newest: UsageSnapsho
   return hoursToReset > 0 ? additional : null;
 }
 
-/** Both windows' baselines for one account. */
-export function projectAccount(history: readonly UsageSnapshot[], asOf: Date): Record<WindowKind, WindowBasis> {
-  return { FIVE_HOUR: projectWindow(history, 'FIVE_HOUR', asOf), SEVEN_DAY: projectWindow(history, 'SEVEN_DAY', asOf) };
+/**
+ * Every window of one account, shortest first: the two standard windows always (UNKNOWN when nothing reports them), plus
+ * each other-length window the NEWEST snapshot reports (V29).
+ */
+export function projectAccount(history: readonly UsageSnapshot[], asOf: Date): WindowBasis[] {
+  const latest = history.reduce<UsageSnapshot | null>((best, s) => (best === null || s.observedAt > best.observedAt ? s : best), null);
+  const lengths = new Set<number>(STANDARD_WINDOWS);
+  if (latest) for (const k of Object.keys(latest.windows)) lengths.add(Number(k));
+  return [...lengths].sort((a, b) => a - b).map((w) => projectWindow(history, w, asOf));
 }
 
 /** The same window with `workers` workers on the account instead of its current count: the burn scales with the count. */
