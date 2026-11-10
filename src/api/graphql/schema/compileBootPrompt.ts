@@ -23,7 +23,8 @@ import { lockAppInstallation } from '../../../lib/appInstallations.js';
 import { GraphQLError } from 'graphql';
 import type { Node as NodeRow, Prisma } from '../../../generated/prisma/index.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, BOOT_PROMPT_ROLE, withCompileWrite } from '../../../lib/bootPrompt.js';
+import { COMPILED_BOOT_PROMPT_NODE_TYPE, BOOT_PROMPT_ROLE, boundWorkerId, withCompileWrite } from '../../../lib/bootPrompt.js';
+import { bootPromptGrantRequiredError, hasBatchGrant } from '../../../lib/grants/bootPromptGrant.js';
 import {
   loadBootPromptPointerOwner,
   setBootPromptPointer,
@@ -241,7 +242,9 @@ export async function compileBootPrompt(
     // on the platform-wide fence or take the tenant's anchors, which would be a cheap lock-DoS and an existence
     // oracle (Rook P2-1 on #2258). The in-transaction gate below stays the authoritative one.
     try {
-      await withinBudget(deadline, assertMayWriteBootPromptPointer(ctx, before.owner));
+      // #3823: a worker session compiles only under a batch grant, which is judged on the locked compiled node in the transaction;
+      // the manager gate is the person's and does not apply to it (a session with no grant is refused there, as before).
+      if (!boundWorkerId()) await withinBudget(deadline, assertMayWriteBootPromptPointer(ctx, before.owner));
     } catch (e) {
       if (e instanceof GraphQLError && e.extensions?.code !== 'CONFLICT') throw compileNotPermitted();
       if (e instanceof GraphQLError) throw e;
@@ -306,8 +309,12 @@ async function decide(
     const live = await loadCompileOwner(tx, target);
     if (!live) throw compileNotPermitted();
     const txCtx = await liveTxContext(ctx, tx);
+    // #3823: under a worker session the manager gate is replaced by the batch grant on the compiled node (checked below, once the node
+    // is known). Without a person-user the session has no standing at all.
+    const batchWorkerId = boundWorkerId();
+    if (batchWorkerId && (!ctx.userId || ctx.appKeyId)) throw compileNotPermitted();
     // The fresh gate comes BEFORE the drift check, so a caller denied on the live owner is refused, never retried.
-    await assertMayWriteBootPromptPointer(txCtx, live.owner);
+    if (!batchWorkerId) await assertMayWriteBootPromptPointer(txCtx, live.owner);
     const tenant = tenantOf(live.owner);
     if (tenant.organizationId !== expected.organizationId || tenant.ownerUserId !== expected.ownerUserId) {
       throw new OwnerTenantChanged();
@@ -328,7 +335,7 @@ async function decide(
     // An App's first compile IS its first customisation: the install memory is made lazily (S7), inside this
     // transaction, so a later refusal rolls it back. A worker's source lives in that memory, so with none there is
     // genuinely no source (Dara P2-2).
-    if (target.kind === 'APP_AGENT' && !installMemoryId && live.appId) {
+    if (target.kind === 'APP_AGENT' && !installMemoryId && live.appId && !batchWorkerId) {
       installMemoryId = (await ensureInstallMemory(tx, txCtx, live.appId, live.agent.id)).id;
     }
     const agentMemoryId = live.agent.systemMemoryId;
@@ -338,6 +345,18 @@ async function decide(
     const out = target.kind === 'AGENT'
       ? { memoryId: agentMemoryId, loc: AGENT_COMPILED_LOC }
       : { memoryId: installMemoryId!, loc: target.kind === 'APP_AGENT' ? APP_COMPILED_LOC : workerCompiledLoc(target.workerId) };
+
+    if (batchWorkerId) {
+      // #3823 (V49, V52, V53): a batch compile writes a NEW REVISION of a compiled node the grant names. It never creates one, and only
+      // a live batch grant held by this worker for this very node admits it. Judged BEFORE anything is assembled or provisioned, so a
+      // session without one learns nothing else about the target, and everything rolls back on a refusal. The grant row is the last
+      // lock taken before the writes (FOR SHARE: a revocation either committed first or waits).
+      const node = await tx.node.findFirst({ where: { memoryId: out.memoryId, loc: out.loc, deletedAt: null }, select: { id: true, nodeType: true } });
+      if (!node || node.nodeType !== COMPILED_BOOT_PROMPT_NODE_TYPE
+        || !(await hasBatchGrant(tx, batchWorkerId, { id: node.id, memoryId: out.memoryId, loc: out.loc }, true))) {
+        throw compileNotPermitted();
+      }
+    }
 
     const sourceTarget: CompileSourceTarget = target.kind === 'AGENT'
       ? { kind: 'AGENT', agentMemoryId }
@@ -378,6 +397,8 @@ async function decide(
     if (recipient.kind === 'org') {
       for (const grant of plan.grants) {
         if (!grant.provision) continue;
+        // #3823: a batch compile never provisions an AgentOrgGrant (V53).
+        if (batchWorkerId) throw bootPromptGrantRequiredError();
         // The included Agent is not one of the held anchors: lock its row and re-read it, so a retirement or a
         // transfer that committed since the plan is seen and no grant is minted for it (Rook P3-1).
         const still = await tx.$queryRaw<Array<{ id: string }>>`
@@ -390,7 +411,7 @@ async function decide(
     // #2047 PR-C (§10 #2698): the pointer owner's locks come BEFORE the compiled node is written. A bind takes the worker
     // assignment lock and the worker row, then share-locks the compiled node (resolveServedBootPrompt); taking them in the
     // other order here, node first, is a lock-order cycle. One order everywhere: assignment lock, worker row, node.
-    const setPointer = target.kind === 'APP_AGENT' || options.setPointer !== false;
+    const setPointer = !batchWorkerId && (target.kind === 'APP_AGENT' || options.setPointer !== false);
     const pointerOwner = setPointer ? await loadBootPromptPointerOwner(tx, ptr(target), { lockForWrite: true }) : null;
     if (setPointer && !pointerOwner) throw compileNotPermitted();
 

@@ -87,7 +87,7 @@ interface Candidate { id: string; issuer: string | null }
  * The live grants of `action` held by `workerId` in `appId` that name `nodeId` and are inside their hour. `single`: the value must be
  * exactly one node id (an edit grant names ONE source; a list or wildcard names none), and a grant with a USE event is spent.
  */
-async function candidates(q: Q, workerId: string, appId: string, action: string, nodeId: string, single: boolean, onlyId?: string): Promise<Candidate[]> {
+async function candidates(q: Q, workerId: string, appId: string, action: string, nodeId: string, single: boolean, onlyId?: string, shareLock = false): Promise<Candidate[]> {
   const param = single ? 'sourceNode' : 'compiledNode';
   const names = single
     ? P.sql`(jsonb_typeof(g.action_values->${param}) = 'string' AND g.action_values->>${param} = ${nodeId})`
@@ -100,7 +100,7 @@ async function candidates(q: Q, workerId: string, appId: string, action: string,
        AND ${grantLiveSql('g')}
        AND g.activated_at + interval '1 hour' > ${GRANT_DB_NOW}
        AND ${single ? P.sql`NOT EXISTS (SELECT 1 FROM grant_events e WHERE e.grant_id = g.id AND e.action = 'USE')` : P.sql`TRUE`}
-     ORDER BY g.activated_at, g.id`);
+     ORDER BY g.activated_at, g.id ${shareLock ? P.sql`FOR SHARE OF g` : P.empty}`);
   return rows.map((r) => ({ id: r.id, issuer: r.issuer_user_id }));
 }
 
@@ -132,11 +132,15 @@ export async function spendEditGrant(tx: Q, workerId: string, node: BootPromptNo
   return false;
 }
 
-/** Whether the worker holds a live batch grant naming this compiled node (a read; no spend, the grant has no use count). */
-export async function hasBatchGrant(q: Q, workerId: string, node: BootPromptNodeFacts): Promise<boolean> {
+/**
+ * Whether the worker holds a live batch grant naming this compiled node. The grant has no use count, so nothing is spent; with
+ * `lock` the rows read are held FOR SHARE until the transaction ends, so a revocation either committed first (and is seen) or
+ * waits for the act. Take it LAST among the act's locks.
+ */
+export async function hasBatchGrant(q: Q, workerId: string, node: BootPromptNodeFacts, lock = false): Promise<boolean> {
   const own = await ownBootPromptNode(q, workerId, node, 'compiled');
   if (!own) return false;
-  for (const c of await candidates(q, workerId, own.appId, BOOT_PROMPT_BATCH_ACTION, node.id, false)) {
+  for (const c of await candidates(q, workerId, own.appId, BOOT_PROMPT_BATCH_ACTION, node.id, false, undefined, lock)) {
     if (await signerStillEligible(q, c.issuer, own)) return true;
   }
   return false;
