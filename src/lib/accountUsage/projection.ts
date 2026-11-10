@@ -107,7 +107,9 @@ export function parseUsageSnapshot(properties: unknown, now: Date): UsageSnapsho
   if (properties === null || typeof properties !== 'object' || Array.isArray(properties)) return null;
   const p = properties as Record<string, unknown>;
   if (p.schemaVersion !== 1) return null;
-  if (typeof p.label !== 'string' || p.label === '') return null;
+  if (typeof p.label !== 'string' || p.label === '' || p.label.length > 64) return null;
+  // An account is its label, host and family (cor:agt:140:01): a record lacking either is malformed, not a null identity.
+  if (typeof p.host !== 'string' || p.host === '' || typeof p.family !== 'string' || p.family === '') return null;
   const observedAt = dateOf(p.observedAt);
   if (!observedAt || observedAt.getTime() > now.getTime() + MAX_FUTURE_SKEW_MS) return null;
   const windows: UsageSnapshot['windows'] = {};
@@ -196,8 +198,11 @@ function applyRates(
  */
 export function projectWindow(history: readonly UsageSnapshot[], window: WindowKind, asOf: Date): WindowBasis {
   const withWindow = history.filter((s) => s.windows[window] !== undefined).sort((a, b) => a.observedAt.getTime() - b.observedAt.getTime());
-  const newest = withWindow[withWindow.length - 1];
-  if (!newest) return empty(window, 'UNKNOWN', history.length === 0 ? 'NO_HISTORY' : 'NO_WINDOW');
+  if (history.length === 0) return empty(window, 'UNKNOWN', 'NO_HISTORY');
+  // The account's NEWEST observation decides: if it reports no reading for this window the answer is UNKNOWN, and an older
+  // reading is never revived (nor an older worker list used) once the newest one says the window is absent (V28, V29).
+  const newest = history.reduce((best, s) => (s.observedAt > best.observedAt ? s : best));
+  if (newest.windows[window] === undefined) return empty(window, 'UNKNOWN', 'NO_WINDOW');
   const reading = newest.windows[window]!;
   if (asOf.getTime() - newest.observedAt.getTime() > MAX_SNAPSHOT_AGE_MS) {
     return empty(window, 'UNKNOWN', 'STALE', { usedPct: reading.pct, resetsAt: reading.resetsAt, observedAt: newest.observedAt });

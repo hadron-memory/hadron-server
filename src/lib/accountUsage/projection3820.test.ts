@@ -69,6 +69,20 @@ describe('V13 INSUFFICIENT_DATA and V12 UNKNOWN', () => {
   });
 });
 
+describe('the newest observation decides (V28, V29)', () => {
+  it('a newest snapshot with no reading for the window is UNKNOWN; an older reading is not revived', () => {
+    const h = series({ fromMin: 360, lastMin: 5, stepMin: 30, pctAt: (m) => 40 - m / 60, resetsInHours: 40 });
+    h.push({ label: 'acct', family: 'claude', host: 'h', observedAt: at(0), windows: {}, workers: [], workersConfigured: true });
+    expect(projectWindow(h, SEVEN_DAY_MINUTES, NOW).projection).toMatchObject({ status: 'UNKNOWN', reason: 'NO_WINDOW' });
+  });
+  it('a record without host or family is malformed, not a null identity', () => {
+    const rec = { schemaVersion: 1, label: 'a', observedAt: NOW.toISOString(), sevenDayPct: 10 };
+    expect(parseUsageSnapshot({ ...rec, host: 'h', family: 'claude' }, NOW)).not.toBeNull();
+    expect(parseUsageSnapshot(rec, NOW)).toBeNull();
+    expect(parseUsageSnapshot({ ...rec, host: 'h' }, NOW)).toBeNull();
+  });
+});
+
 describe('a reset after the newest snapshot but before asOf', () => {
   it('is UNKNOWN RESET_PASSED, never an expired cycle projected', () => {
     const h = series({ fromMin: 150, lastMin: 30, stepMin: 30, pctAt: (m) => 40 - m / 60, resetsInHours: -10 / 60 });

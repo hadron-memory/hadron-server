@@ -210,6 +210,17 @@ describe('what-ifs', () => {
   });
 });
 
+describe('a newer observation with no window reading and no workers', () => {
+  it('makes the baseline and the add-worker what-if UNKNOWN, never a revived older answer', async () => {
+    await burn('acct', 40, 1);
+    await snapshot({ label: 'acct', minutesAgo: 0, sevenPct: 0, workers: [], extra: { sevenDayPct: null, sevenDayResetsAt: null } });
+    const r = await proj('acct', { addWorkers: 1 });
+    expect(seven(r)).toMatchObject({ status: 'UNKNOWN', reason: 'NO_WINDOW' });
+    expect(r.workers).toEqual([]);
+    expect(r.whatIf.adjusted.find((w: any) => w.window === 'SEVEN_DAY')).toMatchObject({ status: 'UNKNOWN' });
+  });
+});
+
 describe('self-moves judged on the resolved identity, and the per-account history bound', () => {
   it('a move naming the source own host and family is refused; the same label on another host is a valid move', async () => {
     await burn('src', 30, 1);
