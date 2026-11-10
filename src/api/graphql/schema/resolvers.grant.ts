@@ -38,10 +38,14 @@ export async function resolveGrantReader(ctx: Context): Promise<GrantReader | nu
 export async function resolveGrantPerson(ctx: Context): Promise<string | null> {
   // The shared person gate (a bespoke one drifted, #3800 §10): a worker-bound session row, an ambiguous actor and a refused
   // binding are worker shapes too. An App key carries no userId (appKeyCaller), so it is refused as having no user.
+  // Only the gate's OWN refusal (the sentinel below) is the empty page; an unexpected failure (a lookup outage) propagates,
+  // so it never reads as "this person has no grants".
+  const refusal = new Error('not a person');
   try {
-    return await requirePersonAsThemselves(ctx, () => new Error('not a person'));
-  } catch {
-    return null;
+    return await requirePersonAsThemselves(ctx, () => refusal);
+  } catch (e) {
+    if (e === refusal) return null;
+    throw e;
   }
 }
 

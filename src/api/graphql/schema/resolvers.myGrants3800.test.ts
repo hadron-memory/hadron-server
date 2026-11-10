@@ -192,6 +192,20 @@ describe('every other caller gets an empty page', () => {
     expect((ok.body.singleResult.data as any).myGrants.total).toBe(1);
   });
 
+  it('an unexpected failure inside the person gate propagates; only the gate\'s own refusal is the empty page (Gene §delta P2)', async () => {
+    await mine();
+    const row = await db.session.create({ data: { id: generateId(), appId: w.appId, userId: w.userId } });
+    // The session-row lookup is the gate's only DB read; make it fail like an outage. A swallowed failure would answer a
+    // successful empty list, indistinguishable from "this person has no grants".
+    const failing = { ...db, session: { findFirst: async () => { throw new Error('lookup outage'); } } };
+    const contextValue = { db: failing, userId: w.userId, roles: [], sessionId: row.id } as unknown as Context;
+    const a = await runAsActor({ workerId: null, agentId: null, userId: w.userId }, () => direct.executeOperation({ query: LIST, variables: {} }, { contextValue }));
+    if (a.body.kind !== 'single') throw new Error('incremental');
+    const out = JSON.parse(JSON.stringify(a.body.singleResult));
+    expect(out.errors?.length ?? 0).toBeGreaterThan(0);
+    expect(out.data?.myGrants ?? null).toBeNull();
+  });
+
   it('a person with a real list still gets it (the control for the empties above)', async () => {
     await mine();
     expect((await asMe()).data.myGrants.total).toBe(1);
