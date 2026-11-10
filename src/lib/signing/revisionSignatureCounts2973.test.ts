@@ -42,7 +42,7 @@ import { signaturePayloadBytes, SIGNATURE_PAYLOAD_V3 } from './payload.js';
 import { clearSignatureVerifyCache } from './verify.js';
 import { loadSignatureStatuses } from './status.js';
 import { completeSigningRequestInTransaction, createSigningRequestInTransaction, newSigningRequestId } from './requests.js';
-import { revisionSignatureCounts, type SignatureRequirement } from './revisionSignatureCounts.js';
+import { revisionSignatureCounts, lazyRevisionSignatureCounts, type SignatureRequirement } from './revisionSignatureCounts.js';
 
 const ORIGIN = 'https://sign.example.test';
 const RP = 'example.test';
@@ -275,6 +275,24 @@ describe('#2973 coverage (cor:dmo:130:09 — from the revision history, never th
     await signLive(); // signs revision 3, whose text equals revision 1's
     expect(await counts(3)).toBe(true);
     expect(await counts(1)).toBe(false);
+  });
+
+  it('the walk predicate answers every revision the single ask answers — the interval law, pinned across its edges', async () => {
+    // Clark's F1 (QA of 8f8d48c1, 6757293402): the serve walks `lazyRevisionSignatureCounts` over up to
+    // cap × batches candidates, and its verdict must equal the single-revision ask at EVERY one of them. The
+    // history below crosses each interval edge: the signed own revision (1), a covered metadata-only revision (2),
+    // the revision that breaks coverage (3), a restore that must not revive it (4), and numbers outside the
+    // history (0, 5).
+    await signLive(); // revision 1 holds 'v1'
+    await editMetaOnly(); // revision 2: covered
+    await editContent('v3'); // revision 3: breaks coverage
+    await editContent('v1'); // revision 4: restores the signed text (no revival)
+    const walk = lazyRevisionSignatureCounts(db, nodeId, REQ);
+    for (const rev of [0, 1, 2, 3, 4, 5]) {
+      const eager = await counts(rev);
+      expect(eager, `eager@${rev}`).toBe(rev === 1 || rev === 2);
+      expect(await walk(rev), `walk@${rev}`).toBe(eager);
+    }
   });
 
   it('judges change per revision, not from the live content_changed_at marker', async () => {

@@ -18,7 +18,7 @@ import { newestApprovedAndSignedRevisionForServe, newestApprovedRevisionForServe
 import { resolveBootPromptPointer, type StoredBootPromptPointer } from '../bootPromptPointer.js';
 import { readCompiledRevision, sha256Hex } from '../bootCompile/provenance.js';
 import { generateId } from '../id.js';
-import { revisionSignatureCounts } from '../signing/revisionSignatureCounts.js';
+import { lazyRevisionSignatureCounts } from '../signing/revisionSignatureCounts.js';
 import { signingSurfacePolicy } from '../signing/surface.js';
 import { BOOT_PROMPT_REFUSAL_CODES, bootPromptRefusal, type BootPromptRefusalCode, type BootPromptSurface } from './refusal.js';
 
@@ -189,10 +189,13 @@ async function resolveFrom(db: Db, t: ServeTarget, skipWorker: boolean): Promise
       // serves nor refuses. R36: with none, an approved revision existing (a pending-only signature included) is
       // NOT_SIGNED; nothing approved at all is NOT_APPROVED. The walk continues past its scan cap in bounded batches
       // (#3801 adoption, Bob P2-1: an older SIGNED revision buried under more than `cap` approved-but-unsigned ones
-      // still serves; past the batch ceiling the serve fails closed with the R36 refusal, never wrong text).
-      const walk = await newestApprovedAndSignedRevisionForServe(
-        db, resolved.nodeId, (revNo) => revisionSignatureCounts(db, resolved.nodeId, revNo, 'compiled-boot-prompt'),
-      );
+      // still serves; past the batch ceiling the serve fails closed with the R36 refusal, never wrong text). The
+      // signed predicate is the LAZY one — one set of reads answers every candidate the walk asks (the interval law,
+      // revisionSignatureCounts.ts): judging per candidate re-read the span per ask, and a node pushed past the scan
+      // ceiling then cost more than the bind transaction's default timeout, surfacing the typed refusal as a raw
+      // INTERNAL_SERVER_ERROR (Clark's F1, QA of 8f8d48c1).
+      const signed = lazyRevisionSignatureCounts(db, resolved.nodeId, 'compiled-boot-prompt');
+      const walk = await newestApprovedAndSignedRevisionForServe(db, resolved.nodeId, signed);
       if (!walk.found) throw bootPromptRefusal(walk.approvedUnsigned ? 'BOOT_PROMPT_NOT_SIGNED' : 'BOOT_PROMPT_NOT_APPROVED', where);
       selectedRevNo = walk.found.revNo;
     } else {

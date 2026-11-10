@@ -316,4 +316,28 @@ describe('#2973 × #3801 — the approved-and-signed walk past the scan cap (Bob
     // pre-filter, this one pays a verdict AND a signature predicate per candidate), so the bound proof needs the room.
     expect(await code(serve())).toBe('BOOT_PROMPT_NOT_SIGNED');
   }, 120_000);
+
+  it('the ceiling refusal arrives TYPED inside the bind-shaped default-timeout transaction (Clark F1, QA of 8f8d48c1)', async () => {
+    await switchOn();
+    signingShips(true);
+    const node = await compiled('signed text');
+    await sign(node);
+    await burySignedRevOne(node, NEWEST_APPROVED_REVISION_SCAN_CAP * NEWEST_APPROVED_REVISION_SCAN_BATCHES + 5);
+    await pointAgent(node);
+    // A bind serves INSIDE ctx.db.$transaction(...) with DEFAULT options (resolvers.mutation.session.ts), so the walk
+    // has Prisma's 5000 ms interactive-transaction budget. Judging the signed predicate per candidate re-read the node,
+    // the requests, the owner, the clock and a candidate-sized span slice PER ASK — O(candidates × span) ≈ 500 K rows
+    // on this very fixture — and blew that budget, so the typed refusal surfaced as a raw P2028 → INTERNAL_SERVER_ERROR
+    // on the live stack. The interval law (revisionSignatureCounts.ts: one set of reads, every candidate an in-memory
+    // interval test) must keep the typed refusal arriving inside the very budget a bind gives it.
+    const inside = await db.$transaction(async (tx) => {
+      try {
+        await resolveServedBootPrompt(tx, { surface: 'bind', appId, agent: { id: agentId, name: 'Ada' }, workerId });
+        return 'SERVED';
+      } catch (e) {
+        return (e as { extensions?: { code?: string } }).extensions?.code ?? `RAW:${(e as Error).message.slice(0, 120)}`;
+      }
+    });
+    expect(inside).toBe('BOOT_PROMPT_NOT_SIGNED');
+  }, 120_000);
 });

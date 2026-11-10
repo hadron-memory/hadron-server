@@ -38,6 +38,20 @@
  *   who is not a manager) does not count for this requirement; PR3's include `signed` setting will ask for exactly
  *   that grade of the same stamp.
  *
+ * **The interval law (why a WALK must not re-judge every candidate from scratch).** Of the four legs only COVERAGE
+ * mentions the asked revision N, and coverage is an interval: per signature, the revisions it covers are exactly
+ * [its own revision, `coveredThrough`] — every leg below coverage (request eligibility, stamp, fence) and the state
+ * verdict are facts about the signature row and the node, the same for every N. So the whole predicate for every
+ * revision of one node is ONE bounded set of reads (node, signatures, their requests, the span snapshots from the
+ * lowest signed revision up, the owner, the clock, the stamp keys), after which each candidate costs an in-memory
+ * interval test. Judging candidates one at a time instead — the shape this module had before #3801's serve adoption
+ * made it a walk input — re-ran that whole set (the span read growing with the candidate's number) per candidate:
+ * a node pushed past the serve's scan ceiling, a thousand approved-but-unsigned candidates over one pre-watermark
+ * signature row, cost ~7 s on dev hardware — past the bind transaction's default interactive timeout, so the typed
+ * NOT_SIGNED refusal surfaced as a raw P2028 → INTERNAL_SERVER_ERROR (Clark's F1, QA of 8f8d48c1, 6757293402). The
+ * walk therefore takes `lazyRevisionSignatureCounts`; `revisionSignatureCounts` stays for the single-revision ask
+ * (PR3's include) and answers from the same loader.
+ *
  * The predicate NEVER reads the deployment's surface policy: `PASSKEY_SIGNING_ENABLED` is G2's term and belongs to the
  * serve (`servingAppRequiresSignature`), which composes it with the organisation's switch. It reads nothing but the
  * node, its memory, its revision history, its signature records with their passkeys, their signing requests, and the
@@ -61,18 +75,30 @@ interface WitnessFields {
   content: string | null;
 }
 
+/** One counting signature's reach: it counts at exactly the revisions in `[revision, coveredThrough]`. */
+interface CountingSpan {
+  revision: number;
+  coveredThrough: number;
+}
+
 /**
- * True only when some signature on the node covers `revision`, re-verifies to a counting state now, was made
- * through a request the ceremony completed AND carries that ceremony's stamp for `requirement` — the durable
- * at-signing verdict. Pure read; `db` may be a transaction client. A node that no longer exists, or an encrypted
- * memory, counts nothing (cor:dmo:120:00 mirror: no hash-dependent work is done on an encrypted node's records at all).
+ * Every counting signature of the node, as intervals — the one evaluation both exported predicates answer from. The
+ * legs run in the order the per-candidate form ran them (request eligibility, stamp, fence, coverage, state), each
+ * fail-closed `continue` unchanged; only coverage's shape moved: instead of a yes/no at one asked revision it walks
+ * the witness run upward ONCE and records where it ends. `askCeiling` bounds both the signatures considered (one
+ * above the asked revision cannot count there — today's `revision: { lte: revision }` filter) and the coverage walk
+ * (the single-revision ask must not read beyond its own ask); `null` — a walk's factory — lets the interval run to
+ * its natural end (a missing or differing witness, the live row's own number passed), which is never more history
+ * than one per-candidate call at the newest candidate already read. Pure read; `db` may be a transaction client. A
+ * node that no longer exists, or an encrypted memory, counts nothing (cor:dmo:120:00 mirror: no hash-dependent work
+ * is done on an encrypted node's records at all).
  */
-export async function revisionSignatureCounts(
+async function countingSignatureSpans(
   db: Db,
   nodeId: string,
-  revision: number,
   requirement: SignatureRequirement,
-): Promise<boolean> {
+  askCeiling: number | null,
+): Promise<CountingSpan[]> {
   // The requirement type has exactly one member today; this line stops compiling the moment a second joins, so the
   // grade rules are decided per member instead of silently inheriting this branch (Bob old-8, delta review of
   // 77c9fda85b: a one-case switch read like runtime dispatch but was only documentation). For
@@ -85,13 +111,15 @@ export async function revisionSignatureCounts(
     where: { id: nodeId },
     select: { revSeq: true, name: true, abstract: true, content: true, memoryId: true, memory: { select: { isEncrypted: true } } },
   });
-  if (!node || node.memory.isEncrypted) return false;
+  if (!node || node.memory.isEncrypted) return [];
 
-  const signatures = await db.nodeSignature.findMany({
-    where: { nodeId, revision: { lte: revision } },
+  const all = await db.nodeSignature.findMany({
+    where: { nodeId },
     include: { passkey: { select: { credentialId: true, publicKey: true, revokedAt: true, windowEndsAt: true, windowEndedAt: true, windowOutcome: true } } },
   });
-  if (signatures.length === 0) return false;
+  if (all.length === 0) return [];
+  const signatures = askCeiling == null ? all : all.filter((s) => s.revision <= askCeiling);
+  if (signatures.length === 0) return [];
 
   // The ceremony's verdict for each signature's request, read once: a request the ceremony completed, pinning this
   // node at this revision and this hash. A request still open, or ended any other way (withdrawn, declined, expired,
@@ -112,7 +140,9 @@ export async function revisionSignatureCounts(
   let lowestSigned = Number.MAX_SAFE_INTEGER;
   for (const s of signatures) if (s.revision < lowestSigned) lowestSigned = s.revision;
   const snapshots = await db.nodeRevision.findMany({
-    where: { nodeId, revNo: { gte: lowestSigned, lte: revision } },
+    where: askCeiling == null
+      ? { nodeId, revNo: { gte: lowestSigned } }
+      : { nodeId, revNo: { gte: lowestSigned, lte: askCeiling } },
     orderBy: { id: 'desc' },
     select: { revNo: true, name: true, abstract: true, content: true },
   });
@@ -137,6 +167,7 @@ export async function revisionSignatureCounts(
     return stampKeys.get(keyId) ?? null;
   };
 
+  const spans: CountingSpan[] = [];
   for (const sig of signatures) {
     // Eligibility (C1 / Q-E): the ceremony's durable verdict only, never a present-day re-derivation.
     const req = requestOf.get(sig.signingRequestId);
@@ -172,25 +203,24 @@ export async function revisionSignatureCounts(
       if (currentOwner == null || sig.stampOwnerKind !== currentOwner.kind || sig.stampOwnerId !== currentOwner.id) continue;
     }
 
-    // Coverage (cor:dmo:130:09): every revision in [sig.revision, revision] must still be witnessed by a snapshot that
-    // hashes to the signed hash — a missing or differing witness fails this signature closed. The signature's OWN
-    // revision is judged like the rest, NOT trusted on the ceremony's at-signing attestation alone: that attested the
-    // text AS IT WAS THEN, while the witness row can be rewritten after the fact. Under this PR's own tampering model
-    // (replica-mode writes) an attacker who rewrites snapshot N's content together with the approval leg's hash would
-    // serve unsigned text as signed if the own revision's text were never re-compared (Bob P2-D, BLIND delta at
-    // 804d44cc). The request eligibility check above (req.approvalHash === sig.approvalHash, stamp-HMAC-bound) still
-    // pins WHICH hash the ceremony attested; this loop re-proves the text NOW matches it.
-    let covered = true;
-    for (let r = sig.revision; r <= revision; r++) {
-      // The live row is revision `revSeq`'s own witness while no snapshot holds its number (a snapshot at the number,
-      // whichever memory captured it, is the pinned witness instead — the same resolution every revision read uses).
+    // Coverage (cor:dmo:130:09), as the INTERVAL it is: walk the witness run upward from the signature's own revision
+    // while every revision still hashes to the signed hash — a missing or differing witness ends the run — and record
+    // where it ends. The signature's OWN revision is judged like the rest, NOT trusted on the ceremony's at-signing
+    // attestation alone: that attested the text AS IT WAS THEN, while the witness row can be rewritten after the
+    // fact. Under this PR's own tampering model (replica-mode writes) an attacker who rewrites snapshot N's content
+    // together with the approval leg's hash would serve unsigned text as signed if the own revision's text were never
+    // re-compared (Bob P2-D, BLIND delta at 804d44cc). The request eligibility check above (req.approvalHash ===
+    // sig.approvalHash, stamp-HMAC-bound) still pins WHICH hash the ceremony attested; this loop re-proves the text
+    // NOW matches it. The live row is revision `revSeq`'s own witness while no snapshot holds its number (a snapshot
+    // at the number, whichever memory captured it, is the pinned witness instead — the same resolution every revision
+    // read uses). `askCeiling` caps the walk only for the single-revision ask, so it never reads past its question.
+    let coveredThrough = sig.revision - 1;
+    for (let r = sig.revision; askCeiling == null || r <= askCeiling; r++) {
       const fields = spanFields.get(r) ?? (r === node.revSeq ? { name: node.name, abstract: node.abstract, content: node.content } : null);
-      if (!fields || computeApprovalHash({ title: fields.name, abstract: fields.abstract, content: fields.content }) !== sig.approvalHash) {
-        covered = false;
-        break;
-      }
+      if (!fields || computeApprovalHash({ title: fields.name, abstract: fields.abstract, content: fields.content }) !== sig.approvalHash) break;
+      coveredThrough = r;
     }
-    if (!covered) continue;
+    if (coveredThrough < sig.revision) continue;
 
     // State (C2): re-verified on the signing clock. `contentChangedAt` is deliberately null — change is judged per
     // revision above, never from the live marker.
@@ -207,7 +237,55 @@ export async function revisionSignatureCounts(
     const state = deriveSignatureState({
       verifiedAt: sig.verifiedAt, valid, passkey: sig.passkey, contentChangedAt: null, memoryEncrypted: false, now,
     });
-    if (state === 'CURRENT') return true;
+    if (state === 'CURRENT') spans.push({ revision: sig.revision, coveredThrough });
   }
+  return spans;
+}
+
+function spanCovers(spans: CountingSpan[], revision: number): boolean {
+  for (const s of spans) if (s.revision <= revision && revision <= s.coveredThrough) return true;
   return false;
+}
+
+/**
+ * True only when some signature on the node covers `revision`, re-verifies to a counting state now, was made
+ * through a request the ceremony completed AND carries that ceremony's stamp for `requirement` — the durable
+ * at-signing verdict. The single-revision ask (PR3's include `signed` setting); a walk over many candidates of one
+ * node takes `lazyRevisionSignatureCounts` instead, which answers every candidate from one set of reads. Pure read;
+ * `db` may be a transaction client. A node that no longer exists, or an encrypted memory, counts nothing
+ * (cor:dmo:120:00 mirror: no hash-dependent work is done on an encrypted node's records at all).
+ */
+export async function revisionSignatureCounts(
+  db: Db,
+  nodeId: string,
+  revision: number,
+  requirement: SignatureRequirement,
+): Promise<boolean> {
+  const spans = await countingSignatureSpans(db, nodeId, requirement, revision);
+  return spanCovers(spans, revision);
+}
+
+/**
+ * The same predicate for a WALK that will ask about MANY revisions of one node (the signed serve selection, #3801's
+ * continued batches): one lazy evaluation — the reads happen on the first ask, never when no candidate turns out
+ * approved enough to ask — and every candidate after that is an in-memory interval test, so a node pushed past the
+ * serve's scan ceiling costs one span read, not one per candidate (the interval law in the module doc). The lazy
+ * value lives for this ONE predicate: nothing is cached across serves, and a failed load is not kept (the next ask
+ * retries, exactly as per-candidate reads would have). The verdict equals `revisionSignatureCounts` at every
+ * revision at or below the node's head, where the walk's candidates live.
+ */
+export function lazyRevisionSignatureCounts(
+  db: Db,
+  nodeId: string,
+  requirement: SignatureRequirement,
+): (revision: number) => Promise<boolean> {
+  let spans: Promise<CountingSpan[]> | null = null;
+  return async (revision: number) => {
+    if (spans == null) {
+      const loading = countingSignatureSpans(db, nodeId, requirement, null);
+      loading.catch(() => { if (spans === loading) spans = null; });
+      spans = loading;
+    }
+    return spanCovers(await spans, revision);
+  };
 }
