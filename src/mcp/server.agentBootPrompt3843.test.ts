@@ -212,6 +212,17 @@ describe('1, 8, 11: served text, parity, no derived blocks, the model', () => {
     expect(l2).toBe(`Compiled node: hrn:node:bp3843.test:system:${(await db.node.findUniqueOrThrow({ where: { id: agentCompiledId } })).loc}`);
     expect(l3).toBe('Rendered as a chat or run would be given it: no worker, no derived blocks; session.llmModel = .');
     expect(blank).toBe('');
+    // Gabriel BLIND F6: the two decision fields the main selection leaves out.
+    const full = (await fetch(`${base}/graphql`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${tokens.admin}` },
+      body: JSON.stringify({ query: `query($a: String!) { agentServedBootPrompt(agentRef: $a) { decision { provenanceRevSeq compiledContentHash } } }`, variables: { a: agentId } }) })
+      .then((r) => r.json())) as { data?: { agentServedBootPrompt: { decision: unknown } } };
+    expect(full.data!.agentServedBootPrompt.decision).toEqual({ provenanceRevSeq: 1, compiledContentHash: sha256Hex(PROMPT) });
+  });
+
+  it('5 (Gabriel BLIND F6): an anonymous caller on the Agent-only arm gets the not-found a nonexistent Agent gets', async () => {
+    const anon = async (a: string) => (await fetch(`${base}/graphql`, { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ query: QUERY, variables: { a } }) }).then((r) => r.json())) as Gql;
+    expect(wireRefusal(await anon(agentId))).toBe(wireRefusal(await anon(GHOST)).split(GHOST).join(agentId));
   });
 
   it('11: a client-reported model fills session.llmModel on both surfaces; without one it is empty', async () => {
