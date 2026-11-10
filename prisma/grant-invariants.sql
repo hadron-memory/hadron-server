@@ -1,5 +1,5 @@
 -- #3668 (S1a): the database half of the grant row, its events and the actions table. One source; the newest migration to
--- carry it (20261110010100_grant_activation) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
+-- carry it (20261110010300_grant_requester_erasure) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
 -- post-push.sql applies it.
 --
 -- GRANTS. Exactly one holder (a user, an agent, a worker or an App); the CHECK cannot pass on NULL, because
@@ -17,7 +17,7 @@
 --     (NULL to a time, never back) by the AFTER DELETE triggers below on every hard delete of a holder row, and by the
 --     deleting code on the soft deletes (an erased person, a retired worker, a deleted agent or App). The first end stands:
 --     a row already revoked, departed, expired or spent (an ACTIVATED row past its expiry or at its count) is not stamped (ruling 0259);
---   * an erased issuer's link goes: issuer_user_id becomes NULL and the reason stays (cor:acl:140:08), and only when that
+--   * an erased issuer's or requester's link goes: issuer_user_id or requested_by_user_id becomes NULL and the reason stays (cor:acl:140:08), and only when that
 --     person is ERASED (the users row is soft-deleted, or gone), never for a live person;
 --   * along a user merge ALREADY recorded in user_merges (mergeUsers writes that row before it rewrites links; the
 --     #1332 report trigger uses the same proof), a person link moves from the merged-away user to the survivor, and only
@@ -149,7 +149,11 @@ BEGIN
      AND NOT hadron_grant_link_merged(OLD.issuer_user_id, NEW.issuer_user_id) THEN
     RAISE EXCEPTION 'grants are append-only' USING ERRCODE = '23514';
   END IF;
+  -- #3813 / cor:acl:140:08, ruling 0265: only the erased requester's link may be cleared; no live-person
+  -- clear or arbitrary reassignment. As for issuer erasure, all other append-only checks still apply.
   IF (NEW.requested_by_user_id IS DISTINCT FROM OLD.requested_by_user_id
+      AND NOT (NEW.requested_by_user_id IS NULL AND OLD.requested_by_user_id IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM users u WHERE u.id = OLD.requested_by_user_id AND u.deleted_at IS NULL))
       AND NOT hadron_grant_link_merged(OLD.requested_by_user_id, NEW.requested_by_user_id))
      OR (NEW.verified_by IS DISTINCT FROM OLD.verified_by
       AND NOT hadron_grant_link_merged(OLD.verified_by, NEW.verified_by))

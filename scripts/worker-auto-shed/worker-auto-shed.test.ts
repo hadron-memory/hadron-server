@@ -187,9 +187,12 @@ interface Agent { pid: number; supervisor: ReturnType<typeof spawn>; gone: () =>
  * Start a supervised stand-in agent and wait until its pid is known. `onTerm` is shell run first
  * when it is stopped, as its own child (a PreCompact fire from the dying agent itself).
  */
-async function startAgent(root: string, tag = 'agent', onTerm = ''): Promise<Agent> {
+async function startAgent(root: string, tag = 'agent', onTerm = '', releaseFile = ''): Promise<Agent> {
   const pidFile = join(root, `${tag}.pid`);
-  const inner = `trap '${onTerm}sleep ${DIE_MS / 1000}; exit 0' TERM; while :; do sleep 0.1; done`;
+  // With `releaseFile`, the stopped stand-in exits only once that file exists (the test releases it), so "still exiting"
+  // is a state the test controls, not a wall-clock window (#3812). Without it, it exits DIE_MS after TERM.
+  const dying = releaseFile ? `while [ ! -e ${releaseFile} ]; do sleep 0.05; done` : `sleep ${DIE_MS / 1000}`;
+  const inner = `trap '${onTerm}${dying}; exit 0' TERM; while :; do sleep 0.1; done`;
   const supervisor = spawn('bash', ['-c', `(exec -a claude bash -c "${inner}") & echo $! > "${pidFile}"; wait`, 'worker-supervise'], { stdio: 'ignore' });
   for (let i = 0; i < 100 && !existsSync(pidFile); i++) await new Promise((r) => setTimeout(r, 50));
   const pid = Number(readFileSync(pidFile, 'utf8').trim());
@@ -311,11 +314,21 @@ describe('#2163 part 1: a stopped agent cannot compact on the way out', () => {
       expect(r.status).toBe(0);
     });
     it('old hook: a second fire while the stopped agent is still exiting exits 0', async () => {
-      const { s, wt, agent } = await stage();
-      fire(PRE2163_HOOK, s, wt, agent.pid);
-      await new Promise((r) => setTimeout(r, 1000));
-      expect(agent.gone()).toBe(false);
-      expect(fire(PRE2163_HOOK, s, wt, agent.pid).status).toBe(0);
+      const s = sandbox();
+      const wt = join(s.root, NAME); mkdirSync(wt);
+      // The stopped stand-in stays "still exiting" until released: no sleep, no race on how fast the box is.
+      const release = join(s.root, 'release-agent');
+      const agent = await startAgent(s.root, 'agent', '', release);
+      agents.push(agent);
+      try {
+        expect(fire(PRE2163_HOOK, s, wt, agent.pid).log).toMatch(/stopping claude pid/); // the stop really happened
+        expect(agent.gone(), 'the stand-in exited before the second fire').toBe(false);
+        expect(fire(PRE2163_HOOK, s, wt, agent.pid).status).toBe(0);
+      } finally {
+        writeFileSync(release, ''); // always release, so a failed assertion cannot leave the stand-in waiting
+      }
+      for (let i = 0; i < 50 && !agent.gone(); i++) await new Promise((r) => setTimeout(r, 100));
+      expect(agent.gone(), 'the released stand-in never exited').toBe(true);
     });
   });
 });
