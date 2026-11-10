@@ -7,7 +7,7 @@
 import { appKeyCaller } from '../../../lib/appKeyScopes/scopes.js';
 import { requirePersonAsThemselves } from '../../../lib/auth/personAsThemselves.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
-import { getGrantForWorker, isPersonAudience, listGrantsForPerson, listGrantsForWorker, type GrantReader } from '../../../lib/grants/read.js';
+import { getGrantForWorker, isManagerAudience, isPersonAudience, listGrantsForPerson, listGrantsForWorker, type GrantReader } from '../../../lib/grants/read.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { loadGrantSignatureStatuses, type GrantSignatureStatusView, type GrantSignatureView } from '../../../lib/signing/grantStatus.js';
 import { clampListTake, type Context } from './resolvers.helpers.js';
@@ -106,6 +106,9 @@ function loadGrantSignatureStatus(ctx: Context, grantId: string): Promise<GrantS
 
 export const grantFieldResolvers = {
   Grant: {
+    /** #3711 (V56): the revoker and the holder's departure are the MANAGER's. Read off the parent's own mark, so a worker's or a person's read of the same grant never carries them. */
+    revokedByUserId: (g: { revokedBy?: string | null }) => (isManagerAudience(g) ? g.revokedBy ?? null : null),
+    holderDepartedAt: (g: { holderDepartedAt?: Date | null }) => (isManagerAudience(g) ? g.holderDepartedAt ?? null : null),
     /** #3649 slice D (cor:acl:140:07): the grant's signatures, re-verified on this read. */
     signatureStatus: async (g: { id: string }, _: unknown, ctx: Context) => {
       const status = await loadGrantSignatureStatus(ctx, g.id);

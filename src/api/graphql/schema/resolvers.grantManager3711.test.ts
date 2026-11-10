@@ -14,6 +14,8 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { USER_API_KEY_PREFIX, hashUserApiKey } from '../../../middleware/auth.js';
+import { endHeldGrants } from '../../../lib/grants/departure.js';
+import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { upsertPlatformActions } from '../../../lib/grants/actions.js';
 import { DB_NOW, dropTestActions, insertGrant, insertGrantUnguarded, raw, seedWorld, type World } from '../../../lib/grants/grantFixtures3668.js';
 
@@ -267,6 +269,25 @@ describe('acceptance 2/3/9: revoke', () => {
     expect((await grantRows())[0].revoked_at).toBeNull();
   });
 
+  it('a held worker revokes on a validated instruction from a holder who manages the App: the person is the revoker, the worker is in the event, and one instructed-act record is written', async () => {
+    await db.orgMember.update({ where: { organizationId_userId: { organizationId: w.orgId, userId: memberId } }, data: { role: 'ADMIN' } });
+    const id = await active();
+    const r = await post(memberKey, workerSession, REVOKE, { r: id, ins: { kind: 'LIVE_CHAT', ref: 'live-chat-1' } });
+    expect(r.errors).toBeUndefined();
+    expect(r.data.revokeGrant).toMatchObject({ id, allows: false, revokedByUserId: memberId });
+    expect((await events(id))[0]).toMatchObject({ actor_user_id: memberId, worker_id: w.workerId });
+    const acts = await db.agentTeamEvent.findMany({ where: { appId: w.appId, type: 'app.credential-act' } });
+    expect(acts.map((e) => (e.payload as any).act)).toEqual(['grant.revoke']);
+  });
+
+  it('an instruction does not lift a holder who does not manage: refused, and nothing recorded', async () => {
+    const id = await active();
+    const r = await post(memberKey, workerSession, REVOKE, { r: id, ins: { kind: 'LIVE_CHAT', ref: 'live-chat-1' } });
+    expect(code(r)).toBe('GRANT_NOT_MANAGER');
+    expect((await grantRows())[0].revoked_at).toBeNull();
+    expect(await db.agentTeamEvent.count({ where: { type: 'app.credential-act' } })).toBe(0);
+  });
+
   it('acceptance 9: the first end stands. Revoking again, or a grant whose holder departed, changes nothing and records no second event', async () => {
     const id = await active();
     const first = await post(managerKey, null, REVOKE, { r: id });
@@ -395,10 +416,47 @@ describe('acceptance 6-9 (V57): requester withdrawal of a PENDING grant', () => 
     expect(await events(id)).toHaveLength(1);
 
     const departed = await pending({ requested_by_user_id: managerId });
-    await db.$executeRaw`UPDATE grants SET holder_departed_at = clock_timestamp() AT TIME ZONE 'UTC' WHERE id = ${departed}`;
+    await db.worker.update({ where: { id: otherWorkerId }, data: { retiredAt: new Date() } }); // a departure needs the holder to have gone
+    await db.$transaction((tx) => endHeldGrants(tx, 'worker', otherWorkerId));
     const r = await post(managerKey, null, WITHDRAW, { r: departed });
     expect(r.errors).toBeUndefined();
     expect((await grantRows()).find((g) => g.id === departed).revoked_at).toBeNull();
     expect(await events(departed)).toHaveLength(0);
+  });
+});
+
+describe('the manager predicate is re-judged under the held anchor (a demotion that commits while the call waits)', () => {
+  /** Hold the org anchor exclusively, soft-delete the manager's membership, and commit only after `start` has begun waiting. */
+  async function demoteWhileCallWaits(start: () => Promise<any>): Promise<any> {
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const taken = new Promise<void>((r) => { locked = r; });
+    const demoter = db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'org', id: w.orgId }], 'exclusive');
+      locked();
+      await held;
+      await tx.orgMember.update({ where: { organizationId_userId: { organizationId: w.orgId, userId: managerId } }, data: { deletedAt: new Date() } });
+    });
+    await taken;
+    const call = start();
+    await new Promise((r) => setTimeout(r, 400));
+    release();
+    await demoter;
+    return call;
+  }
+
+  it('create: a manager removed while the call waits is refused, and no row is written', async () => {
+    const r = await demoteWhileCallWaits(() => post(managerKey, null, CREATE, { i: mgrInput() }));
+    expect(code(r)).toBe('GRANT_NOT_MANAGER');
+    expect(await grantRows()).toHaveLength(0);
+  });
+
+  it('revoke: a manager removed while the call waits is refused, and the grant is untouched', async () => {
+    const id = await active();
+    const r = await demoteWhileCallWaits(() => post(managerKey, null, REVOKE, { r: id }));
+    expect(code(r)).toBe('GRANT_NOT_MANAGER');
+    expect((await grantRows())[0].revoked_at).toBeNull();
+    expect(await events(id)).toHaveLength(0);
   });
 });

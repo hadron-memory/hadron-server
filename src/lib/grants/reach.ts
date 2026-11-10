@@ -43,3 +43,15 @@ export async function workersReachedByGrant(db: Db, grantId: string): Promise<st
 export async function grantReachesWorker(db: Db, grantId: string, workerId: string): Promise<boolean> {
   return (await workersReachedByGrant(db, grantId)).includes(workerId);
 }
+
+/**
+ * #3711 (cor:acl:140:05 List, ruling 0255 items 7, 20, 20a, 20b): the ROLE AGENT whose grants a worker may list, or null. The
+ * worker's own agent (`Worker.agentId`) in the worker's own App, only while the worker is live there and the agent is installed
+ * and licensed there (the same test {@link workersReachedByGrant} applies, now). Never a base agent of that agent (item 20a),
+ * never another App's installation of it (item 20b).
+ */
+export async function roleAgentReachedBy(db: Db, appId: string, workerId: string): Promise<string | null> {
+  const worker = await db.worker.findFirst({ where: { id: workerId, appId, retiredAt: null }, select: { agentId: true } });
+  if (!worker) return null;
+  return (await isAgentInstalledAndLicensed(db, appId, worker.agentId)) ? worker.agentId : null;
+}

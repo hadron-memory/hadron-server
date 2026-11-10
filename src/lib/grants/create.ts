@@ -3,10 +3,11 @@
  * writer of a grant row. It makes a PENDING grant and nothing else: there is no input for activation, a verifier, a signature,
  * a use count or a version, and the insert guard (prisma/grant-invariants.sql) refuses any row that arrives otherwise.
  *
- * WHO. A bound worker, in its own App, for ITSELF or its ROLE AGENT (`Worker.agentId`), and no one else (item 6: this refusal is
- * the rule). The caller's gate (resolvers.grantCreate.ts) decides who is a bound worker; this module re-judges every fact the
- * insert depends on, under the locks the caller took, BEFORE the first write. The other callers rulings 0253 and 0255 allow (an
- * installed agent's headless run or session, a manager) are later slices; their absence here is an omission, not the rule.
+ * WHO. Two callers, both judged by the caller's gate (resolvers.grantCreate.ts) and re-judged here under the locks it took, BEFORE
+ * the first write. A bound worker, in its own App, for ITSELF or its ROLE AGENT (`Worker.agentId`), and no one else (item 6: this
+ * refusal is the rule). And (#3711) a PERSON who manages the App, for any live worker of it or an agent installed in it; the row
+ * records that person as requester and no worker or session. The other callers rulings 0253 and 0255 allow (an installed
+ * agent's headless run or session) are a later slice; their absence here is an omission, not the rule.
  *
  * HOLDER. A grant for an agent is held by that agent IN THIS APP, so the agent must be installed and licensed here (item 20:
  * "it makes no sense to issue a grant to an agent that isn't installed"). A worker holder must belong to the grant's own App and
@@ -36,7 +37,7 @@ export type GrantCreateCode =
 
 const MESSAGES: Record<GrantCreateCode, string> = {
   GRANT_REQUESTER_NOT_WORKER: 'A grant can be requested only from a bound worker session in its own App.',
-  GRANT_HOLDER_NOT_ALLOWED: 'A worker can ask for a grant only for itself or its role agent, and only in its own App.',
+  GRANT_HOLDER_NOT_ALLOWED: 'A grant can be asked for only for a worker of the App or an agent installed in it (a worker session: only itself or its role agent).',
   GRANT_ACTION_UNKNOWN: 'That action is not registered.',
   GRANT_VALUES_INVALID: 'The values do not match the action\'s declared parameters.',
   GRANT_TERMS_INVALID: 'The grant\'s terms cannot be recorded.',
@@ -50,7 +51,8 @@ export class GrantCreateRefusal extends Error {
   }
 }
 
-export interface GrantRequester { userId: string; workerId: string; sessionId: string | null }
+/** The asker. `workerId` null is a PERSON who manages the App (#3711, the caller's gate has judged `managesApp` under the same locks); a worker id is a bound worker session. */
+export interface GrantRequester { userId: string; workerId: string | null; sessionId: string | null }
 
 export interface CreateGrantArgs {
   appId: string;
@@ -96,24 +98,29 @@ function declaredParameters(parameters: unknown): Array<{ name: string; type: st
 export async function createPendingGrant(tx: Prisma.TransactionClient, args: CreateGrantArgs): Promise<string> {
   const { appId, requester, holder } = args;
 
-  // The requester: a live person and a live worker of THIS App, locked so a retirement either committed (seen here) or waits.
+  // The requester: a live person (and, for a worker session, a live worker of THIS App), locked so a retirement either committed (seen here) or waits.
   const users = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM users WHERE id = ${requester.userId} AND deleted_at IS NULL FOR SHARE`;
   if (users.length === 0) throw new GrantCreateRefusal('GRANT_REQUESTER_NOT_WORKER');
-  const workers = await tx.$queryRaw<WorkerRow[]>`
-    SELECT id, app_id, agent_id, retired_at FROM workers WHERE id = ${requester.workerId} FOR SHARE`;
-  const me = workers[0];
-  if (!me || me.retired_at !== null || me.app_id !== appId) throw new GrantCreateRefusal('GRANT_REQUESTER_NOT_WORKER');
+  let me: WorkerRow | null = null;
+  if (requester.workerId !== null) {
+    const workers = await tx.$queryRaw<WorkerRow[]>`
+      SELECT id, app_id, agent_id, retired_at FROM workers WHERE id = ${requester.workerId} FOR SHARE`;
+    me = workers[0] ?? null;
+    if (!me || me.retired_at !== null || me.app_id !== appId) throw new GrantCreateRefusal('GRANT_REQUESTER_NOT_WORKER');
+  }
 
-  // The holder: the worker itself or its role agent. Anything else, and anything outside this App, is the one refusal.
+  // The holder. A worker session: itself or its role agent. A manager (no `me`): any live worker of this App, or an agent installed
+  // and licensed in it (#3711, cor:acl:140:05; ruling 0253 item 4). Anything else, and anything outside this App, is the one refusal.
   if (holder.kind === 'worker') {
-    if (holder.id !== me.id) throw new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED');
+    if (me && holder.id !== me.id) throw new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED');
     // Carry 1 (#3792, Ralion): the insert guard checks that a worker holder EXISTS, not that it belongs to this App.
     const held = await tx.$queryRaw<WorkerRow[]>`SELECT id, app_id, agent_id, retired_at FROM workers WHERE id = ${holder.id} FOR SHARE`;
     if (!held[0] || held[0].app_id !== appId || held[0].retired_at !== null) throw new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED');
   } else if (holder.kind === 'agent') {
     // The locked worker row names the role agent NOW; the caller anchored the agent it saw before locking. A role change between
-    // the two (A to B) would otherwise accept an agent no anchor protects, so the holder must be both: refuse on drift.
-    if (holder.id !== me.agent_id || args.heldAgentAnchor !== holder.id) throw new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED');
+    // the two (A to B) would otherwise accept an agent no anchor protects, so the holder must be both: refuse on drift. A manager
+    // has no role agent: the caller anchored the named agent itself, so the holder must be exactly the anchored one.
+    if ((me && holder.id !== me.agent_id) || args.heldAgentAnchor !== holder.id) throw new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED');
     // Held by the agent in this App: installed, licensed and not deleted here, judged on the locked state.
     const agents = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM agents WHERE id = ${holder.id} AND deleted_at IS NULL FOR SHARE`;
     if (agents.length === 0 || !(await isAgentInstalledAndLicensed(tx, appId, holder.id))) throw new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED');
