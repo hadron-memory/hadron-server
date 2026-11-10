@@ -297,6 +297,11 @@ describe('#2964 comparator safety controls', () => {
     expect(diff(new Map([['fn:literal2964()', wrap(before)]]), new Map([['fn:literal2964()', wrap(after)]]))[0]).toMatch(/^changed fn:literal2964/);
   });
 
+  it('re-indents SQL following a line comment without changing the comment terminator', () => {
+    const body = "CREATE FUNCTION x() RETURNS int LANGUAGE sql AS $function$\n-- comment\nSELECT 1;\n$function$;";
+    expect(diff(new Map([['fn:x()', body]]), new Map([['fn:x()', body.replace(/\n/g, '\n    ')]]))[0]).toMatch(/^reformatted fn:x/);
+  });
+
   it('still classes ordinary re-indentation outside literals as reformatted', () => {
     const body = "CREATE FUNCTION x() RETURNS text LANGUAGE sql AS $function$\nSELECT 'a  b';\n$function$;";
     expect(diff(new Map([['fn:x()', body]]), new Map([['fn:x()', body.replace(/\n/g, '\n    ')]]))[0]).toMatch(/^reformatted fn:x/);
