@@ -120,6 +120,38 @@ describe('what is listed (A1-A3, V9, V64)', () => {
     expect(r.accounts.map((a) => a.account)).toEqual(['busy', 'quiet']);
   });
 
+  // Rows that pass the SQL preconditions but fail the projection's parse: observedAt is 30 minutes in the future, written recently.
+  it('the bound counts LISTABLE accounts: 51 more recent invalid identities do not hide the one valid account (LOCAL P2-F1)', async () => {
+    await snapshot({ label: 'valid', minutesAgo: 900 });
+    for (let i = 0; i < MAX_LISTED_ACCOUNTS + 1; i++) await snapshot({ label: `bad-${i}`, minutesAgo: -30, createdMinutesAgo: 1 + i });
+    const r = await list();
+    expect(names(r)).toEqual(['valid@h1/claude']);
+    expect(r.complete).toBe(true);
+  });
+
+  it('an App whose every identity is invalid gets an empty COMPLETE list, however many there are (LOCAL P2-F1)', async () => {
+    for (let i = 0; i < MAX_LISTED_ACCOUNTS + 1; i++) await snapshot({ label: `bad-${i}`, minutesAgo: -30, createdMinutesAgo: 1 + i });
+    expect(await list()).toMatchObject({ accounts: [], complete: true });
+  });
+
+  it('with invalid identities interleaved, the most recently written VALID accounts survive and a cut is reported', async () => {
+    await snapshot({ label: 'v1', minutesAgo: 10 });
+    await snapshot({ label: 'bad', minutesAgo: -30, createdMinutesAgo: 20 });
+    await snapshot({ label: 'v2', minutesAgo: 30 });
+    await snapshot({ label: 'v3', minutesAgo: 40 });
+    const r = await listUsageAccounts(db, app.id, new Date(), 2);
+    expect(r.accounts.map((a) => a.account)).toEqual(['v1', 'v2']);
+    expect(r.complete).toBe(false);
+  });
+
+  it('the work spent looking for valid accounts is bounded; hitting that bound says the list is incomplete', async () => {
+    await snapshot({ label: 'valid', minutesAgo: 900 });
+    for (let i = 0; i < 4; i++) await snapshot({ label: `bad-${i}`, minutesAgo: -30, createdMinutesAgo: 1 + i });
+    const r = await listUsageAccounts(db, app.id, new Date(), 2, 3);
+    expect(r.accounts).toEqual([]);
+    expect(r.complete).toBe(false);
+  });
+
   it('identities that are not listable never take a slot of the bound: foreign, deleted, other-collection and stale rows written more recently', async () => {
     const other = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Other', urn: `${org.urn}:other` }, select: { id: true } });
     const otherMemory = await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:other-shared`, name: 'oshared', class: 'app', appId: other.id, sharedMemoryOfAgentId: agentId } });
