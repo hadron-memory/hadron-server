@@ -343,6 +343,8 @@ describe('4, 5: masking, judged before anything is resolved', () => {
     const adminId = (await db.user.findFirstOrThrow({ where: { handle: 'bp3843-admin' } })).id;
     await masked({ db, ...runAuthContext({ id: generateId(), appId, userId: adminId, organizationId: orgId }) } as unknown as Context);
     await masked({ db, ...runAuthContext({ id: generateId(), appId, userId: adminId, organizationId: orgId }), appKeyId: keyRow.id } as unknown as Context);
+    // Anne's F1 supplement: a run of ANOTHER App carrying the same participant, naming App P.
+    await masked({ db, ...runAuthContext({ id: generateId(), appId: otherAppId, userId: adminId, organizationId: orgId }) } as unknown as Context);
     // Control: the same person, not as a run (a hybrid with App P selected), reads.
     expect(await read({ db, userId: adminId, appId, roles: ['READER'] } as unknown as Context, agentId)).toBe('SERVED');
     // A hybrid: a person with App P SELECTED but no participation of their own is judged on the person. `member` is an
@@ -361,6 +363,14 @@ describe('4, 5: masking, judged before anything is resolved', () => {
     expect((await gql(tokens.admin, { a: agentId, p: appId })).data!.agentServedBootPrompt!.text).toBe(rendered());
     await db.app.update({ where: { id: appId }, data: { deletedAt: new Date() } });
     await expectMasked(tokens.admin, { a: agentId, p: appId });
+  });
+
+  it('5 (Anne LOCAL P2-F2): an uninstalled App is masked by id and by URN (control: served while installed)', async () => {
+    expect((await gql(tokens.admin, { a: agentId, p: appId })).data!.agentServedBootPrompt!.text).toBe(rendered());
+    expect((await gql(tokens.admin, { a: agentId, p: 'hrn:app:bp3843.test:team' })).data!.agentServedBootPrompt!.text).toBe(rendered());
+    await db.app.update({ where: { id: appId }, data: { uninstalledAt: new Date() } });
+    await expectMasked(tokens.admin, { a: agentId, p: appId });
+    await expectMasked(tokens.admin, { a: agentId, p: 'hrn:app:bp3843.test:team' });
   });
 
   it('5: a lapsed App licence is masked as not-found, never the typed INSTALL_LICENSE_INACTIVE (control: served while it holds)', async () => {
