@@ -60,6 +60,7 @@ import { connectionGrantMutations, connectionGrantQueries } from './resolvers.co
 import { principalGrantMutations, principalGrantQueries } from './resolvers.principalGrant.js';
 import { grantFieldResolvers, grantQueries } from './resolvers.grant.js';
 import { grantCreateMutations } from './resolvers.grantCreate.js';
+import { grantManageMutations, grantManageQueries } from './resolvers.grantManage.js';
 import { grantSigningFieldResolvers, grantSigningMutations, grantSigningQueries } from './resolvers.grantSigning.js';
 import { importNodeMutations } from './resolvers.mutation.importNode.js';
 import { assetMutations } from './resolvers.mutation.asset.js';
@@ -255,6 +256,7 @@ export const resolvers = {
     ...connectionGrantQueries,
     ...principalGrantQueries,
     ...grantQueries,
+    ...grantManageQueries,
     ...grantSigningQueries,
     ...meteringQueries,
     ...rateLimitQueries,
@@ -314,6 +316,7 @@ export const resolvers = {
     ...signingMutations,
     ...grantSigningMutations,
     ...grantCreateMutations,
+    ...grantManageMutations,
     ...commentMutations,
     ...decisionMutations,
     ...scopeMutations,
