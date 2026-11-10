@@ -11,6 +11,8 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+import { runContext } from '../../../jobs/appRunDeps.js';
+import { withReadableApp } from './resolvers.agentTask.js';
 import { listUsageAccounts, MAX_LISTED_ACCOUNTS } from '../../../lib/accountUsage/list.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -63,7 +65,8 @@ async function snapshot(o: Snap) {
     },
   });
 }
-const list = (who: string | undefined = member.id, appRef = app.id) => Q.accountUsageAccounts({}, { appRef }, ctx(who));
+const listAs = (who: string | undefined, appRef: string) => Q.accountUsageAccounts({}, { appRef }, ctx(who));
+const list = (who: string = member.id, appRef: string = app.id) => listAs(who, appRef);
 const names = (r: any) => r.accounts.map((a: any) => `${a.account}@${a.host}/${a.family}`);
 const refusal = async (p: Promise<unknown>) => p.then(() => null, (e: any) => ({ message: e.message, code: e.extensions?.code, ext: e.extensions }));
 
@@ -117,6 +120,19 @@ describe('what is listed (A1-A3, V9, V64)', () => {
     expect(r.accounts.map((a) => a.account)).toEqual(['busy', 'quiet']);
   });
 
+  it('identities that are not listable never take a slot of the bound: foreign, deleted, other-collection and stale rows written more recently', async () => {
+    const other = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Other', urn: `${org.urn}:other` }, select: { id: true } });
+    const otherMemory = await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:other-shared`, name: 'oshared', class: 'app', appId: other.id, sharedMemoryOfAgentId: agentId } });
+    await snapshot({ label: 'real', minutesAgo: 600 });
+    await snapshot({ label: 'z-foreign', minutesAgo: 1, memoryId: otherMemory.id });
+    await snapshot({ label: 'z-deleted', minutesAgo: 2, deleted: true });
+    await snapshot({ label: 'z-worklog', minutesAgo: 3, objectType: 'worklog' });
+    await snapshot({ label: 'z-stale', minutesAgo: 1, createdMinutesAgo: 15 * 24 * 60 });
+    const r = await listUsageAccounts(db, app.id, new Date(), 1);
+    expect(r.accounts.map((a) => a.account)).toEqual(['real']);
+    expect(r.complete).toBe(true);
+  });
+
   it('newest comes from observedAt as the projection computes it, not from write time', async () => {
     await snapshot({ label: 'skew', minutesAgo: 10, createdMinutesAgo: 100, workers: ['Newer'] });
     await snapshot({ label: 'skew', minutesAgo: 50, createdMinutesAgo: 5, workers: ['Older'] });
@@ -128,14 +144,14 @@ describe('what is listed (A1-A3, V9, V64)', () => {
 
 describe('bound, completeness, order (A5, V65)', () => {
   it('the bound is on identities: 3 of 4 returned incomplete; exactly 3 is complete; the most recently written survive; output is by label', async () => {
-    await snapshot({ label: 'd', minutesAgo: 400 });
-    await snapshot({ label: 'c', minutesAgo: 30 });
-    await snapshot({ label: 'b', minutesAgo: 20 });
-    await snapshot({ label: 'a', minutesAgo: 10 });
+    await snapshot({ label: 'a', minutesAgo: 400 });
+    await snapshot({ label: 'b', minutesAgo: 30 });
+    await snapshot({ label: 'c', minutesAgo: 20 });
+    await snapshot({ label: 'd', minutesAgo: 10 });
     const cut = await listUsageAccounts(db, app.id, new Date(), 3);
     expect(cut.complete).toBe(false);
-    expect(cut.accounts.map((a) => a.account)).toEqual(['a', 'b', 'c']);
-    await db.node.deleteMany({ where: { memoryId: teamMemoryId, properties: { path: ['label'], equals: 'd' } } });
+    expect(cut.accounts.map((a) => a.account)).toEqual(['b', 'c', 'd']);
+    await db.node.deleteMany({ where: { memoryId: teamMemoryId, properties: { path: ['label'], equals: 'a' } } });
     const all = await listUsageAccounts(db, app.id, new Date(), 3);
     expect(all.complete).toBe(true);
     expect(all.accounts).toHaveLength(3);
@@ -171,7 +187,7 @@ describe('the read gate is the projection\'s (A4, V27, V36, V58)', () => {
       const roster = await refusal(Q.teamAvailability({}, { appRef }, ctx(who)));
       expect(roster).not.toBeNull();
       expect(await refusal(Q.accountUsageProjection({}, { appRef, account: 'team-a' }, ctx(who)))).toEqual(roster);
-      expect(await refusal(list(who, appRef))).toEqual(roster);
+      expect(await refusal(listAs(who, appRef))).toEqual(roster);
     }
   });
 
@@ -188,12 +204,17 @@ describe('the read gate is the projection\'s (A4, V27, V36, V58)', () => {
     expect(await refusal(Q.accountUsageAccounts({}, { appRef: app.id }, keyCtx()))).toEqual(await refusal(Q.teamAvailability({}, { appRef: app.id }, keyCtx())));
   });
 
-  it('a userless run context gets exactly the projection\'s answer', async () => {
+  it('a headless run that holds a live team snapshot grant is still refused, exactly as the projection refuses it', async () => {
     await snapshot({ label: 'team-a', minutesAgo: 5 });
-    const runCtx: Context = { db, roles: [], runId: generateId() } as any;
+    const schedule = await db.agentSchedule.create({ data: { id: generateId(), organizationId: org.id, appId: app.id, name: 'Snap', cron: '* * * * *', entryNodeUrn: 'hrn:node:al.example:flows:report' } });
+    await db.appAutomationTeamSnapshotGrant.create({ data: { id: generateId(), appId: app.id, triggerKind: 'SCHEDULE', triggerId: schedule.id, grantedBy: member.id } });
+    const run = await db.appRun.create({ data: { id: generateId(), organizationId: org.id, appId: app.id, userId: null, triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: 'hrn:node:al.example:flows:report', status: 'RUNNING' } });
+    const runCtx = runContext(db, run);
+    // the fixture is real: a read that opts in to run principals answers this run
+    expect(await withReadableApp(runCtx, app.id, async () => 'ok', true)).toBe('ok');
     const proj = await refusal(Q.accountUsageProjection({}, { appRef: app.id, account: 'team-a' }, runCtx));
-    const lst = await refusal(Q.accountUsageAccounts({}, { appRef: app.id }, runCtx));
-    expect(lst).toEqual(proj);
+    expect(proj).not.toBeNull();
+    expect(await refusal(Q.accountUsageAccounts({}, { appRef: app.id }, runCtx))).toEqual(proj);
   });
 });
 

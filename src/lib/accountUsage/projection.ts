@@ -97,6 +97,10 @@ const dateOf = (v: unknown): Date | null => {
   return Number.isNaN(d.getTime()) ? null : d;
 };
 
+/** The newest snapshot of a history, by observedAt (#3853: one definition for the projection and the account list). */
+export const newestSnapshot = (history: readonly UsageSnapshot[]): UsageSnapshot | null =>
+  history.reduce<UsageSnapshot | null>((best, s) => (best === null || s.observedAt > best.observedAt ? s : best), null);
+
 /**
  * One stored `account-usage` object's properties (the collector's record, schemaVersion 1) as a snapshot, or null when it
  * is not usable. A claude/glm record carries `fiveHourPct`/`sevenDayPct`; a codex record carries `primaryPct` with
