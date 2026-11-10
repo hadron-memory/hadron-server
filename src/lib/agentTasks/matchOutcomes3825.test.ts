@@ -191,6 +191,7 @@ it('P2-4: a failure decided before a success that landed first does not overwrit
   const t = await create({ requirements: { role: 'engineer' } });
   await db.agentTask.update({ where: { id: t.id }, data: { matchPending: true } });
   const spy = vi.spyOn(db.agentTask, 'updateMany').mockImplementationOnce((async () => {
+    await new Promise(r => setTimeout(r, 10));
     await recordMatchOutcome(db, app.id, { role: 'engineer' }, 'MATCHED'); // another attempt succeeds meanwhile
     return { count: 1 };
   }) as any);
@@ -201,6 +202,7 @@ it('P2-4: a failure decided before a success that landed first does not overwrit
 
 it('P2-4: the decision clock is what a late record carries', async () => {
   const t0 = await decisionClock(db);
+  await new Promise(r => setTimeout(r, 10)); // distinct milliseconds: the column keeps ms and the later writer wins a tie
   await recordMatchOutcome(db, app.id, { role: 'x' }, 'MATCHED');
   await recordMatchOutcome(db, app.id, { role: 'x' }, 'NO_WORKER', 'NOBODY_FREE', t0);
   expect((await latest())[0]).toMatchObject({ role: 'x', outcome: 'MATCHED' });
@@ -243,6 +245,7 @@ it('Rico P2-1: a MATCHED is not recorded when the guarded assignment lost the ta
 
 it('Rico P3-1: an older MATCHED never overwrites a newer outcome', async () => {
   const t0 = await decisionClock(db);
+  await new Promise(r => setTimeout(r, 10));
   await recordMatchOutcome(db, app.id, { role: 'x' }, 'NO_WORKER', 'NOBODY_FREE');
   await recordMatchOutcome(db, app.id, { role: 'x' }, 'MATCHED', null, t0);
   expect((await latest())[0]).toMatchObject({ role: 'x', outcome: 'NO_WORKER' });
@@ -303,8 +306,29 @@ it('Anne: a queued-sweep failure is stamped when it was judged, so a success tha
   const original = db.$executeRaw.bind(db);
   const spy = vi.spyOn(db, '$executeRaw').mockImplementationOnce(((...args: any[]) =>
     // the sweep's failure write is delayed past another attempt's success for the same combination
-    recordMatchOutcome(db, app.id, { role: 'engineer' }, 'MATCHED').then(() => (original as any)(...args))) as any);
+    new Promise(r => setTimeout(r, 10)).then(() => recordMatchOutcome(db, app.id, { role: 'engineer' }, 'MATCHED')).then(() => (original as any)(...args))) as any);
   await matchQueuedTasks(db, new Date(), { appId: app.id });
   spy.mockRestore();
   expect((await latest({ windowHours: 24, role: 'engineer' }))[0]).toMatchObject({ outcome: 'MATCHED', failingSince: null });
+});
+
+it('George/Anne: an assignment reports its in-transaction time too, so the sweep basis never uses a post-return clock', async () => {
+  const w = await worker('reviewer');
+  const t = await create({ requirements: { role: 'reviewer' } });
+  const readAt: { at?: Date } = {};
+  const before = await decisionClock(db);
+  const out = await __matcherTesting.tryAssign(db, { id: t.id, appId: app.id, requirements: { role: 'reviewer' }, closeSessionWhenDone: false } as any, w.id, 'claude', new Date(), {}, undefined, false, undefined, readAt);
+  const after = await decisionClock(db);
+  expect(out).toBe('assigned');
+  expect(readAt.at!.getTime()).toBeGreaterThanOrEqual(before.getTime());
+  expect(readAt.at!.getTime()).toBeLessThanOrEqual(after.getTime());
+});
+
+it('George/Anne: after the pass assigned one worker, an exhausted later task\'s failure still lands after that assignment\'s MATCHED', async () => {
+  await worker('reviewer');
+  await create({ requirements: { role: 'reviewer' } });
+  await create({ requirements: { role: 'reviewer' } });
+  await matchQueuedTasks(db, new Date(), { appId: app.id });
+  const [r] = await latest({ windowHours: 24, role: 'reviewer', family: null });
+  expect(r).toMatchObject({ outcome: 'NO_WORKER', reason: 'NOBODY_FREE' }); // the second task was judged after the first took the worker
 });

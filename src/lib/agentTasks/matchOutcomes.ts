@@ -89,9 +89,9 @@ export async function recordMatchOutcome(
         WHEN EXCLUDED.outcome = 'MATCHED' THEN NULL
         WHEN agent_match_outcomes.outcome = 'NO_WORKER' AND agent_match_outcomes.failing_since IS NOT NULL THEN agent_match_outcomes.failing_since
         ELSE EXCLUDED.decided_at END
-    -- Ties (the column keeps milliseconds): a success is never overwritten by a failure stamped the same instant.
-    WHERE agent_match_outcomes.decided_at < EXCLUDED.decided_at
-       OR (agent_match_outcomes.decided_at = EXCLUDED.decided_at AND NOT (agent_match_outcomes.outcome = 'MATCHED' AND EXCLUDED.outcome = 'NO_WORKER'))`);
+    -- Ties (the column keeps milliseconds): the later WRITER wins. A pass that assigned a worker and then judged the next
+    -- task stamps both within one millisecond, and that later failure is the true latest decision.
+    WHERE agent_match_outcomes.decided_at <= EXCLUDED.decided_at`);
 }
 
 export type LatestMatchOutcome = {

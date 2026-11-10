@@ -542,6 +542,8 @@ async function tryAssignInTx(
   // #3825 (cor:agt:060:13, V37/V44): a decided match counts against the chosen worker's combination AND each one the requirements named, recorded with the assignment it belongs to: a lost claim (count 0, above)
   // records nothing, and a rollback takes the record with it.
   await recordMatchOutcome(tx, task.appId, parseRequirements(currentTask.requirements), 'MATCHED', null, null, [chosen]);
+  // #3825: an assignment moves the pass's state too; its time is read here, in the transaction, under the worker lock.
+  if (readAt) readAt.at = await decisionClock(tx);
   await appendTaskEvent(tx, {
     appId: task.appId, taskId: task.id, actor: PLATFORM_ACTOR, createdAt: now,
     event: { type: 'assignment.matched', assignee: { workerId }, family, closeSessionWhenDone: task.closeSessionWhenDone },
@@ -622,7 +624,10 @@ async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: Match
         const family = eligibleFor(req, w, groups);
         if (!family) continue;
         const outcome = await tryAssign(db, task, w.id, family, now, hooks, anchor, false, undefined, lastRead);
-        if (outcome === 'assigned') { decided = true; failedKeys.clear(); basis = await decisionClock(db); }
+        // The pass's judgment basis moves to the in-transaction time of every state change it made or learned of (an
+        // assignment, or a re-read that found the worker taken), never to a clock read after the attempt returned.
+        if ((outcome === 'assigned' || outcome === 'worker-not-free') && lastRead.at && (!basis || lastRead.at > basis)) basis = lastRead.at;
+        if (outcome === 'assigned') { decided = true; failedKeys.clear(); }
         // Assigned, or no longer free: either way this worker is spent for this run.
         if (outcome !== 'task-gone') spent.add(w.id);
         if (outcome === 'assigned') {
