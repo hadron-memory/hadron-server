@@ -535,6 +535,8 @@ type ResumeSessionInput = {
   llmModel?: string | null;
   family?: string | null;
   transcriptPath?: string | null;
+  /** #3822: the worker the caller expects to recover (the CLI worktree's last-bound worker). */
+  expectedWorkerId?: string | null;
 };
 
 /**
@@ -571,6 +573,40 @@ const resumeRefused = (dormant: boolean) =>
         'its hard expiry or has ended, or another session of the worker is live. Nothing was bound.',
     { extensions: { code: 'RESUME_REFUSED', dormant } },
   );
+
+/**
+ * #3822 (cor:agt:020:03; Vera's FIT and ruling on the issue) — the caller named the worker it expects to recover, nothing
+ * of that worker's waits, and a claim or live session of another of the caller's workers does. Refused before any
+ * write, so that claim or session stays exactly as it was (a following resume naming its worker still binds it).
+ *
+ * Disclosure: the found worker is the caller's own (its claim or live session), so naming it tells nothing new. The
+ * expected worker is caller-supplied, so its NAME is given only when it sits in the found worker's App, a roster the
+ * caller drives a session in; otherwise only the id it sent is echoed, so this is no id-to-name oracle.
+ */
+const workerMismatch = (
+  expected: { id: string; name: string | null },
+  found: { id: string; name: string; source: 'CLAIM' | 'LIVE_SESSION' },
+) => {
+  const what = found.source === 'CLAIM' ? 'resume claim' : 'live session';
+  const label = expected.name ?? `worker ${expected.id}`;
+  return new GraphQLError(
+    `Nothing of ${label}'s waits to resume: the ${what} waiting for you is ${found.name}'s. Nothing was bound, ` +
+      `consumed or ended, and ${found.name}'s ${what} is untouched. To recover ${found.name}, resume from its own ` +
+      'worktree or name it (startSession with workerRef).',
+    {
+      extensions: {
+        code: 'RESUME_REFUSED',
+        reason: 'WORKER_MISMATCH',
+        dormant: false,
+        expectedWorkerId: expected.id,
+        expectedWorkerName: expected.name,
+        foundWorkerId: found.id,
+        foundWorkerName: found.name,
+        foundSource: found.source,
+      },
+    },
+  );
+};
 
 const sessionEndedForClaim = (sessionId: string) =>
   new GraphQLError(
@@ -1730,8 +1766,47 @@ export const sessionMutations = {
       // #2086: a bad family refuses BEFORE any claim is read or spent. It sits after the NOTHING_TO_RESUME line
       // above, so an App key or an impersonation learns nothing about the value either way.
       const explicitFamily = explicitFamilyOrThrow(given.family);
+      // #3822: likewise a blank expected worker refuses before any read. Null or omitted means no narrowing.
+      const expectedWorkerId = given.expectedWorkerId == null ? null : given.expectedWorkerId.trim();
+      if (expectedWorkerId === '') {
+        throw new GraphQLError('expectedWorkerId must not be blank: omit it to resume without naming a worker.', { extensions: { code: 'BAD_USER_INPUT' } });
+      }
       const now = new Date();
-      const claims = await liveClaimsOf(ctx.db, userId, now);
+      const allClaims = await liveClaimsOf(ctx.db, userId, now);
+      // #3822: with an expected worker the call is the no-argument resume restricted to that worker; everything
+      // below decides on its claims and live sessions only. Another worker's items are read only to refuse.
+      const claims = expectedWorkerId ? allClaims.filter((c) => c.workerId === expectedWorkerId) : allClaims;
+      const liveOfExpected = async () => {
+        const live = await liveWorkerSessionsOf(ctx.db, userId, now);
+        return { all: live, mine: expectedWorkerId ? live.filter((l) => l.workerId === expectedWorkerId) : live };
+      };
+      /**
+       * #3822: nothing of the expected worker's waits. Refuse WORKER_MISMATCH when something of another worker of
+       * the caller's does (a claim first, as the no-argument resume decides claims first; else a live session),
+       * before any write. Otherwise today's NOTHING_TO_RESUME, so a caller with nothing learns nothing.
+       */
+      type Found = { workerId: string; appId: string | null; source: 'CLAIM' | 'LIVE_SESSION' };
+      const mismatchOrNothing = async (claimPool: typeof allClaims, livePool: { workerId: string | null; appId: string | null }[]) => {
+        if (!expectedWorkerId) return nothingToResume();
+        const other = claimPool.find((c) => c.workerId !== expectedWorkerId);
+        const otherLive = livePool.find((l) => l.workerId && l.workerId !== expectedWorkerId);
+        const found: Found | null = other
+          ? { workerId: other.workerId, appId: other.appId, source: 'CLAIM' }
+          : otherLive
+            ? { workerId: otherLive.workerId!, appId: otherLive.appId, source: 'LIVE_SESSION' }
+            : null;
+        if (!found) return nothingToResume();
+        const [foundWorker, expectedWorker] = await Promise.all([
+          ctx.db.worker.findUnique({ where: { id: found.workerId }, select: { name: true } }),
+          found.appId
+            ? ctx.db.worker.findFirst({ where: { id: expectedWorkerId, appId: found.appId }, select: { name: true } })
+            : null,
+        ]);
+        return workerMismatch(
+          { id: expectedWorkerId, name: expectedWorker?.name ?? null },
+          { id: found.workerId, name: foundWorker?.name ?? found.workerId, source: found.source },
+        );
+      };
 
       const resumed = async (sessionId: string, outcome: 'RESUMED' | 'STARTED') => ({
         outcome,
@@ -1802,9 +1877,13 @@ export const sessionMutations = {
       if (given.session) {
         const picked = claims.find((c) => c.sessionId === given.session);
         if (picked) return redeem(picked);
-        const live = await liveWorkerSessionsOf(ctx.db, userId, now);
-        if (live.some((l) => l.id === given.session)) return resumeLive(given.session);
-        throw nothingToResume();
+        const live = await liveOfExpected();
+        if (live.mine.some((l) => l.id === given.session)) return resumeLive(given.session);
+        // #3822: a pick of another worker's claim or live session is the mismatch, never a bind.
+        throw await mismatchOrNothing(
+          allClaims.filter((c) => c.sessionId === given.session),
+          live.all.filter((l) => l.id === given.session),
+        );
       }
       if (claims.length === 1) return redeem(claims[0]);
       if (claims.length > 1) {
@@ -1814,7 +1893,7 @@ export const sessionMutations = {
           candidates: await toCandidates(ctx.db, claims.map((c) => ({ sessionId: c.sessionId, workerId: c.workerId, source: 'CLAIM' as const, expiresAt: c.expiresAt }))),
         };
       }
-      const live = await liveWorkerSessionsOf(ctx.db, userId, now);
+      const { all: liveAll, mine: live } = await liveOfExpected();
       if (live.length === 1) return resumeLive(live[0].id);
       if (live.length > 1) {
         return {
@@ -1823,7 +1902,7 @@ export const sessionMutations = {
           candidates: await toCandidates(ctx.db, live.map((l) => ({ sessionId: l.id, workerId: l.workerId!, source: 'LIVE_SESSION' as const, expiresAt: null }))),
         };
       }
-      throw nothingToResume();
+      throw await mismatchOrNothing(allClaims, liveAll);
     },
 
     recordUsage: async (_: unknown, { event }: { event: UsageEventInput }, ctx: Context) => {
