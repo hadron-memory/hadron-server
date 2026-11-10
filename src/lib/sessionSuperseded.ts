@@ -36,3 +36,23 @@ export async function refuseSupersededSession(ctx: Context, sessionId: string): 
     ...(readable ? { sessionId: readable.id, startedAt: readable.startedAt.toISOString() } : {}),
   } });
 }
+
+/** Only this typed refusal may bypass generic transport-fault handling. */
+export function isSessionSupersededError(error: unknown): error is GraphQLError {
+  return error instanceof GraphQLError && error.extensions.code === 'SESSION_SUPERSEDED';
+}
+
+export function sessionSupersededEnvelope(error: GraphQLError) {
+  const { sessionId, startedAt } = error.extensions;
+  return { code: 'SESSION_SUPERSEDED' as const, message: 'Session superseded.',
+    ...(typeof sessionId === 'string' && typeof startedAt === 'string' ? { sessionId, startedAt } : {}) };
+}
+
+export function respondSessionSuperseded(res: import('express').Response, error: unknown): boolean {
+  if (!isSessionSupersededError(error)) return false;
+  if (!res.headersSent) {
+    const { message, ...details } = sessionSupersededEnvelope(error);
+    res.status(409).json({ error: message, ...details });
+  }
+  return true;
+}

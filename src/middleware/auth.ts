@@ -207,6 +207,13 @@ export async function resolveAuthContextWithStatus(
   req: Request,
   db: PrismaClient,
 ): Promise<{ auth: AuthContext; credentialStatus: CredentialStatus }> {
+  const result = await resolveCredentialContextWithStatus(req, db);
+  await bindPresentedSession(req, db, result.auth);
+  return result;
+}
+
+/** Resolve identity before transport-specific scope/ownership checks; no execution binding yet. */
+export async function resolveCredentialContextWithStatus(req: Request, db: PrismaClient) {
   const { auth, credentialStatus } = await resolveAuthContextInner(req, db);
   const identity = transportRateIdentity(auth, req.ip);
   return { auth: identity.principal || identity.ip ? { ...auth, limiterIdentity: identity } : auth, credentialStatus };
@@ -229,8 +236,6 @@ async function resolveAuthContextInner(
   if (!authHeader?.startsWith('Bearer ')) return { auth: {}, credentialStatus: 'anonymous' };
 
   const token = authHeader.slice(7);
-  const sessionIdHeader = req.headers['x-hadron-session'];
-  const sessionId = Array.isArray(sessionIdHeader) ? sessionIdHeader[0] : sessionIdHeader;
 
   let ctx: AuthContext;
   if (token.startsWith(APP_KEY_PREFIX)) {
@@ -248,11 +253,17 @@ async function resolveAuthContextInner(
   const credentialStatus: CredentialStatus = ctx.userId || ctx.appId
     ? 'authenticated'
     : incompleteChecks.has(ctx) ? 'unavailable' : 'refused';
+  return { auth: ctx, credentialStatus };
+}
+
+/** Apply the execution header only after a transport has accepted the credential. */
+export async function bindPresentedSession(req: Request, db: PrismaClient, ctx: AuthContext): Promise<void> {
+  const header = req.headers['x-hadron-session'];
+  const sessionId = Array.isArray(header) ? header[0] : header;
   if (sessionId) await bindSession(db, ctx, sessionId);
   // #2176: the validated user behind this request's writes, from the SAME resolved context
   // `editorFromAuth` reads for the revision, never from anything the client asserts.
   publishUser(ctx.userId ?? null);
-  return { auth: ctx, credentialStatus };
 }
 
 /**

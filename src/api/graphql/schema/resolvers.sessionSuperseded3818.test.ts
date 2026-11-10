@@ -225,7 +225,7 @@ it('checks MCP transport ownership before disclosing a presented stale-session r
 });
 it('keeps OAuth surface refusal ahead of stale header disclosure on GraphQL and MCP', async () => {
   const { a } = await displaced();
-  for (const [scope, path, body] of [['mcp', '/graphql', { query: '{ __typename }' }], ['unsupported3818', '/mcp', init3818]] as const) {
+  for (const [scope, path, body] of [['mcp', '/graphql', { query: '{ __typename }' }], ['mcp', '/sessions/target/outcome', { outcome: 1 }], ['unsupported3818', '/mcp', init3818]] as const) {
     const raw = USER_API_KEY_PREFIX + randomBytes(32).toString('hex');
     await db.userApiKey.create({ data: { userId: owner.id, keyHash: hashUserApiKey(raw), keyPreview: raw.slice(-4), createdBy: owner.id, issuedVia: 'portal', oauthScopes: [scope] } });
     const reply = await wire(path, raw, body, { 'x-hadron-session': a.id });
@@ -237,5 +237,27 @@ it.each(['/reload', '/sessions/target/outcome'])('keeps superseded execution hea
   const { a } = await displaced();
   const token = await signJwt({ sub: owner.id, roles: ['READER'] });
   const reply = await wire(path, token, { outcome: 1 }, { 'x-hadron-session': a.id });
+  expect(reply.status).toBe(409); expect(await reply.json()).toMatchObject({ code: 'SESSION_SUPERSEDED' });
+});
+it('refuses the retained MCP execution binding after supersession, without silently rebinding', async () => {
+  const a = await bind();
+  const token = await signJwt({ sub: owner.id, roles: ['READER'] });
+  const opened = await wire('/mcp', token, init3818, { 'x-hadron-session': a.id });
+  expect(opened.status).toBe(200); await opened.text();
+  const id = opened.headers.get('mcp-session-id')!;
+  try {
+    const old = new Date(Date.now() - 72 * 3600000);
+    await db.session.update({ where: { id: a.id }, data: { startedAt: old, updatedAt: old } });
+    const b = await bind();
+    const reply = await wire('/mcp', token, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }, { 'mcp-session-id': id });
+    expect(reply.status).toBe(409);
+    expect(await reply.json()).toMatchObject({ code: 'SESSION_SUPERSEDED', sessionId: b.id });
+    expect(await db.session.count({ where: { workerId: worker.id } })).toBe(2);
+  } finally { expect((await wire('/mcp', token, undefined, { 'mcp-session-id': id }, 'DELETE')).status).toBe(200); }
+});
+it('keeps the schema endpoint superseded refusal typed through Express error middleware', async () => {
+  const { a } = await displaced();
+  const token = await signJwt({ sub: owner.id, roles: ['READER'] });
+  const reply = await wire('/graphql/schema', token, undefined, { 'x-hadron-session': a.id }, 'GET');
   expect(reply.status).toBe(409); expect(await reply.json()).toMatchObject({ code: 'SESSION_SUPERSEDED' });
 });
