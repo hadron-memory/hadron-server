@@ -915,10 +915,11 @@ async function chooseMatchNow(
     // #3816: the candidates are the workers of the asked role (and team pool); each is listed with every reason it was not taken.
     // A retired worker is listed with RETIRED plus every other reason that applies to it (V23), so its state is loaded; only a
     // failed match that asked for the answer pays for that read.
-    // #3855 (V59): candidates the snapshot called free that the final assignment check refused.
+    // #3855 (V59): candidates the snapshot called free that the final assignment check refused. The captured outcome is authoritative:
+    // such a worker is never also listed from the fresh retired read (a worker that retired mid-race carries NO_LONGER_FREE alone).
     const lostRace = new Set<string>();
     const explain = async (): Promise<SkippedCandidate[]> => {
-      const retired = pool ? [] : (await loadWorkerWorkStates(db, task.appId, now, { bySession: true, retiredOnly: true })).filter(w => roleAllowed(req, w.role));
+      const retired = pool ? [] : (await loadWorkerWorkStates(db, task.appId, now, { bySession: true, retiredOnly: true })).filter(w => roleAllowed(req, w.role) && !lostRace.has(w.id));
       return [
       ...retired.map(w => ({ workerId: w.id, name: w.name, reasons: MATCH_SKIP_REASONS.filter(r => r === 'RETIRED' || skipReasonsOf(req, w, groups, covering.has(w.id)).includes(r)) })),
       ...team.map(w => {
