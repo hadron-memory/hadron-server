@@ -185,6 +185,31 @@ describe('the grant is the boundary (#3823 refusals that must hold)', () => {
     expect(await codeOf(edit(s.id))).toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
   });
 
+  it('text in place only (F1): a name, properties, tags or data supplied alongside - or instead of - the text is refused and spends nothing', async () => {
+    const s = await src(installMemoryId, `boot:workers:${workerId}:source`);
+    const g = await grant(s.id);
+    const inputs: Array<Record<string, unknown>> = [
+      { name: 'changed name' }, { properties: { injected: true } }, { name: 'n', properties: { injected: true } },
+      { content: 'new', name: 'renamed' }, { content: 'new', tags: ['x'] }, { content: 'new', description: 'd' },
+    ];
+    for (const [i, extra] of inputs.entries()) {
+      expect([i, await codeOf(asWorker(() => resolvers.Mutation.updateNode(null, { input: { id: s.id, ...extra } }, ctx())))]).toEqual([i, 'BOOT_PROMPT_WORKER_SESSION_REFUSED']);
+    }
+    expect(await uses(g)).toBe(0);
+    const row = await db.node.findUniqueOrThrow({ where: { id: s.id } });
+    expect(row.content).toBe('original');
+    expect(row.name).toBe('Source');
+    // control: the same grant admits the content-only edit.
+    expect(await codeOf(edit(s.id, 'only text'))).toBe('NO_ERROR');
+    expect(await uses(g)).toBe(1);
+  });
+
+  it('text in place only (F1): resending the same role and node type with the text is still a text edit', async () => {
+    const s = await src(installMemoryId, `boot:workers:${workerId}:source`);
+    await grant(s.id);
+    expect(await codeOf(asWorker(() => resolvers.Mutation.updateNode(null, { input: { id: s.id, content: 'same role', role: 'boot-prompt' } }, ctx())))).toBe('NO_ERROR');
+  });
+
   it('text in place only: delete, role strip, node-type change, move and merge stay refused, and spend nothing', async () => {
     const s = await src(installMemoryId, `boot:workers:${workerId}:source`);
     const t = await src(installMemoryId, 'boot:other');
@@ -249,6 +274,18 @@ describe('over MCP (hadron_update_node), the same grant and the same boundary (#
     expect((await db.node.findUniqueOrThrow({ where: { id: s.id } })).content).toBe('via mcp');
     expect((await db.nodeRevision.findMany({ where: { nodeId: s.id } })).some((r) => r.editedByWorkerId === workerId)).toBe(true);
     expect(await mcpEdit(urn, 'again')).toContain('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+  });
+  it('F1 over MCP: a name or properties supplied with the text is refused and spends nothing', async () => {
+    const s = await src(agentMemoryId, 'boot:source');
+    const g = await grant(s.id);
+    const mcp = createTestableMcpServer({ userId: admin.id, roles: [], clientId: `user:${admin.id}` });
+    const urn = 'hrn:node:g3823.example:agent-sys:boot:source';
+    for (const extra of [{ name: 'renamed' }, { properties: { injected: true } }]) {
+      const out = await asWorker(() => mcp.callToolText('hadron_update_node', { urn, content: 'x', ...extra }).then((t) => String(t), (e: Error) => e.message));
+      expect(out).toContain('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+    }
+    expect(await uses(g)).toBe(0);
+    expect((await db.node.findUniqueOrThrow({ where: { id: s.id } })).content).toBe('original');
   });
   it('another Agent\'s system-memory source is refused under a grant that names it', async () => {
     const otherMem = await db.memory.create({ data: { id: generateId(), class: 'system', name: 'other-sys', urn: 'g3823.example:other-sys', organizationId: orgId } });

@@ -356,6 +356,12 @@ async function decide(
         || !(await hasBatchGrant(tx, batchWorkerId, { id: node.id, memoryId: out.memoryId, loc: out.loc }, true))) {
         throw compileNotPermitted();
       }
+      // V53 (cor:agt:040:12): an App-level compile under a batch grant only refreshes what the App already serves, so the App's
+      // pointer must ALREADY name this compiled node. Read under the App and Agent anchors held above; it is never written.
+      if (target.kind === 'APP_AGENT') {
+        const pointed = await tx.appAgent.findUnique({ where: { appId_agentId: { appId: live.appId!, agentId: live.agent.id } }, select: { bootPromptNodeId: true } });
+        if (!pointed || pointed.bootPromptNodeId !== node.id) throw compileNotPermitted();
+      }
     }
 
     const sourceTarget: CompileSourceTarget = target.kind === 'AGENT'

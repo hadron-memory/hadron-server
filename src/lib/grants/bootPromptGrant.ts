@@ -66,6 +66,33 @@ export async function ownBootPromptNode(q: Q, workerId: string, node: BootPrompt
 }
 
 /**
+ * Where a compiled prompt a BATCH grant may name sits (cor:agt:040:12 S7a, cor:agt:040:18 S8). Unlike a source edit, a batch grant is
+ * not limited to the worker's own prompt: a person signed it for the prompts it NAMES (Ada's session may compile Ben's). What stays
+ * bounded is the App: the compiled prompt must be one of THIS App's (`boot:compiled` or `boot:workers:<id>:compiled` in an install memory
+ * of the grant's own App), or the worker's own role Agent's `boot:compiled` in its system memory. Another App's, another Agent's system
+ * memory, and a source are never in scope, whatever the grant names.
+ */
+export async function batchTargetScope(q: Q, workerId: string, node: BootPromptNodeFacts): Promise<OwnNode | null> {
+  const worker = await q.worker.findFirst({
+    where: { id: workerId, retiredAt: null, app: { deletedAt: null } },
+    select: { appId: true, agentId: true, agent: { select: { systemMemoryId: true, deletedAt: true } } },
+  });
+  if (!worker || worker.agent.deletedAt !== null) return null;
+  const memory = await q.memory.findFirst({
+    where: { id: node.memoryId, deletedAt: null },
+    select: { id: true, class: true, isInstallMemory: true, appId: true, installOfAgentId: true },
+  });
+  if (!memory) return null;
+  if (memory.class === 'system' && memory.isInstallMemory && memory.appId === worker.appId && memory.installOfAgentId) {
+    if (node.loc === 'boot:compiled') return { scope: 'APP_ROLE', appId: worker.appId, agentId: memory.installOfAgentId };
+    if (/^boot:workers:[^:]+:compiled$/.test(node.loc)) return { scope: 'WORKER', appId: worker.appId, agentId: memory.installOfAgentId };
+    return null;
+  }
+  if (node.loc === 'boot:compiled' && worker.agent.systemMemoryId === memory.id) return { scope: 'AGENT_SYSTEM', appId: worker.appId, agentId: worker.agentId };
+  return null;
+}
+
+/**
  * Whether the person who signed the grant could make the edit themselves NOW: a live user who manages the App, and for the Agent's
  * system-memory source the Agent as well (V54). Judged on the spending transaction.
  */
@@ -138,7 +165,7 @@ export async function spendEditGrant(tx: Q, workerId: string, node: BootPromptNo
  * waits for the act. Take it LAST among the act's locks.
  */
 export async function hasBatchGrant(q: Q, workerId: string, node: BootPromptNodeFacts, lock = false): Promise<boolean> {
-  const own = await ownBootPromptNode(q, workerId, node, 'compiled');
+  const own = await batchTargetScope(q, workerId, node);
   if (!own) return false;
   for (const c of await candidates(q, workerId, own.appId, BOOT_PROMPT_BATCH_ACTION, node.id, false, undefined, lock)) {
     if (await signerStillEligible(q, c.issuer, own)) return true;
@@ -147,7 +174,16 @@ export async function hasBatchGrant(q: Q, workerId: string, node: BootPromptNode
 }
 
 type Prior = { id: string; memoryId: string; loc: string; nodeType?: string | null; role?: string | null };
-type Next = { nodeType?: string | null; role?: string | null };
+/** `otherFields`: the names of the fields the write SUPPLIES besides its text (and the identifiers that locate the node). */
+type Next = { nodeType?: string | null; role?: string | null; otherFields: readonly string[] };
+
+/** The identifiers and the text itself: the only supplied fields an in-place TEXT edit may carry (V46). `role` and `nodeType` are compared with the prior row's by {@link isGrantableEdit}, not listed here. */
+const TEXT_EDIT_KEYS: ReadonlySet<string> = new Set(['id', 'memoryId', 'loc', 'urn', 'content', 'authoredWith', 'expectedRevision', 'expectedRevSeq', 'reason', 'role', 'nodeType']);
+
+/** The supplied fields of a write that are not its text: every key with a defined value outside {@link TEXT_EDIT_KEYS}. */
+export function suppliedNonTextFields(input: Record<string, unknown>): string[] {
+  return Object.entries(input).filter(([k, v]) => v !== undefined && !TEXT_EDIT_KEYS.has(k)).map(([k]) => k);
+}
 
 /**
  * A grantable edit changes the text of an existing boot-prompt SOURCE in place (V46): the prior row is a source (in the family,
@@ -157,7 +193,8 @@ export function isGrantableEdit(prior: Prior | null | undefined, next: Next): bo
   if (!prior || !isBootPromptRole(prior.role) || prior.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE) return false;
   if (next.role !== undefined && next.role !== prior.role) return false;
   if (next.nodeType !== undefined && next.nodeType !== prior.nodeType) return false;
-  return true;
+  // Text in place only (V46): a name, properties, tags, data, edges or any other field supplied alongside is a different edit.
+  return next.otherFields.length === 0;
 }
 
 /**

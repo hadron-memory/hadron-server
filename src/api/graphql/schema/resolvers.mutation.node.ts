@@ -4,7 +4,7 @@ import { stampEmbeddingObligation } from '../../../services/embedding/obligation
 import { currentActor } from '../../../lib/requestActor.js';
 import { edgeDisplayOrder } from '../../../lib/edgeOrder.js';
 import { foreignEdgeMemoryIds } from '../../../lib/foreignEdgeMemories.js';
-import { assertBootPromptWriteAllowedOrGranted, spendEditGrantFor } from '../../../lib/grants/bootPromptGrant.js';
+import { assertBootPromptWriteAllowedOrGranted, spendEditGrantFor, suppliedNonTextFields } from '../../../lib/grants/bootPromptGrant.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertBootPromptWriteAllowed, assertNoBootPromptRows, inCompileScope, isBootPromptRole } from '../../../lib/bootPrompt.js';
 import { COMMENT_NODE_TYPE, assertNotCommentWrite, commentError, commentGovernedError } from '../../../lib/comments/index.js';
 import { commentIdsAmong, hardDeleteThreadsOfTargets, restoreThreadsOfTargets, softDeleteThreadsOfTargets } from '../../../lib/comments/lifecycle.js';
@@ -650,7 +650,7 @@ async function writeNodeCoreRaw(
       if (!opts?.copiesSeq || existing) assertNoGenericMessageSeqWrite(existing, input.nodeType, input.seq, mode === 'update' ? 'update' : 'create');
       // #2043 — the compiled-node and worker-session boot-prompt guards (cor:agt:040:11).
       // #3823 — the one lift: a worker session's in-place text edit of its own source, under an edit grant (a read here; spent below).
-      await assertBootPromptWriteAllowedOrGranted(ctx.db as unknown as Prisma.TransactionClient, existing, { nodeType: input.nodeType, role: normalizeRole(input.role) }, mode === 'update' ? 'update' : 'create');
+      await assertBootPromptWriteAllowedOrGranted(ctx.db as unknown as Prisma.TransactionClient, existing, { nodeType: input.nodeType, role: normalizeRole(input.role), otherFields: suppliedNonTextFields(input) }, mode === 'update' ? 'update' : 'create');
       // #1641 — a log's child locs are its decision codes: only the decision
       // doors write there, so a squatter can never block a code.
       if (!existing && opts?.ownsKind !== 'decision') {
@@ -1241,7 +1241,7 @@ async function writeNodeCoreRaw(
         assertNotCommentWrite(current.nodeType, input.nodeType, 'update');
         // #2987 — re-checked under the lock with the row it guards, like the comment gate.
         if (!opts?.copiesSeq) assertNoGenericMessageSeqWrite(current, input.nodeType, input.seq, 'update');
-        await assertBootPromptWriteAllowedOrGranted(tx, current, { nodeType: input.nodeType, role: normalizeRole(input.role) }, 'update');
+        await assertBootPromptWriteAllowedOrGranted(tx, current, { nodeType: input.nodeType, role: normalizeRole(input.role), otherFields: suppliedNonTextFields(input) }, 'update');
         assertGovernedWrite(
           current,
           mergedGovernedState(current, { role: input.role, isRunnable: input.isRunnable }),
@@ -1355,7 +1355,7 @@ async function writeNodeCoreRaw(
 
             // #3823 — spend the worker session's edit grant ONCE, on the final locked row and in this transaction, so any later
             // refusal rolls the spend back. The last lock the act takes is the grant row.
-            await spendEditGrantFor(tx, current, { nodeType: input.nodeType, role: normalizeRole(input.role) });
+            await spendEditGrantFor(tx, current, { nodeType: input.nodeType, role: normalizeRole(input.role), otherFields: suppliedNonTextFields(input) });
 
             // #1330 — H1 strict sub-roles, judged on the locked row: a role the
             // write assigns must be declared under a strict parent.

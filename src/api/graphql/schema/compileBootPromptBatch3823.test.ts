@@ -107,11 +107,30 @@ describe('compile under a batch grant', () => {
     expect(await snapshot()).toEqual(before);
   });
 
-  it('another worker\'s compile target is refused even under a grant that names its node', async () => {
-    await source(installId, `boot:workers:${otherWorkerId}:source`);
-    const c = await compiled(installId, `boot:workers:${otherWorkerId}:compiled`);
+  it('F2: a grant may name another worker\'s compiled prompt of the same App (S7a): admitted; an unnamed one is refused', async () => {
+    await source(installId, `boot:workers:${otherWorkerId}:source`, 'otto text');
+    const theirs = await compiled(installId, `boot:workers:${otherWorkerId}:compiled`);
+    const third = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId, agentId, name: 'Cy', slug: 'cy' } });
+    await source(installId, `boot:workers:${third.id}:source`, 'cy text');
+    await compiled(installId, `boot:workers:${third.id}:compiled`);
+    await grant(theirs.id);
+    expect(await codeOf(asWorker(() => M.compileWorkerBootPrompt(null, { workerRef: otherWorkerId }, ctx())))).toBe('NO_ERROR');
+    expect((await db.node.findUniqueOrThrow({ where: { id: theirs.id } })).content).toBe('otto text');
+    expect(await codeOf(asWorker(() => M.compileWorkerBootPrompt(null, { workerRef: third.id }, ctx())))).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');
+  });
+
+  it('F2: a compiled prompt of ANOTHER App is refused even when the grant names it', async () => {
+    const { app: app2 } = await createDbAppWithKey(db, 'b-app2', orgId);
+    await createDbAppAgent(db, app2.id, agentId);
+    const install2 = await db.memory.create({
+      data: { id: generateId(), class: 'system', name: 'install2', urn: 'b3823:install2', organizationId: orgId, appId: app2.id, installOfAgentId: agentId, isInstallMemory: true },
+    });
+    const w2 = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app2.id, agentId, name: 'Zed', slug: 'zed' } });
+    await source(install2.id, `boot:workers:${w2.id}:source`);
+    const c = await compiled(install2.id, `boot:workers:${w2.id}:compiled`);
     await grant(c.id);
-    expect(await codeOf(asWorker(() => M.compileWorkerBootPrompt(null, { workerRef: otherWorkerId }, ctx())))).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');
+    expect(await codeOf(asWorker(() => M.compileWorkerBootPrompt(null, { workerRef: w2.id }, ctx())))).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');
+    expect(await codeOf(asWorker(() => M.approveNode(null, { nodeRef: c.id }, ctx())))).toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
   });
 
   it('a grant for a different node, an hour-old grant, a revoked one, a stranger-signed one: each refused', async () => {
@@ -134,14 +153,23 @@ describe('compile under a batch grant', () => {
     expect((await db.node.findUniqueOrThrow({ where: { id: c.id } })).content).toBe('agent text');
   });
 
-  it('the App-Agent compile never sets a pointer under a batch grant', async () => {
+  it('F3 (V53): the App-Agent compile needs the App\'s pointer to ALREADY name the node, and never moves it', async () => {
     await source(installId, 'boot:source', 'app text');
     const c = await compiled(installId, 'boot:compiled');
+    const other = await compiled(installId, 'boot:other-compiled');
     await grant(c.id);
+    const run = () => asWorker(() => M.compileAppAgentBootPrompt(null, { appRef: appId, agentRef: agentId }, ctx()));
     const before = await snapshot();
-    const r = await asWorker(() => M.compileAppAgentBootPrompt(null, { appRef: appId, agentRef: agentId }, ctx()));
+    expect(await codeOf(run())).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');          // NULL pointer
+    await db.appAgent.update({ where: { appId_agentId: { appId, agentId } }, data: { bootPromptNodeId: other.id, bootPromptUrn: 'hrn:node:b3823:install:boot:other-compiled' } });
+    expect(await codeOf(run())).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');          // a different pointer
+    expect((await db.node.findUniqueOrThrow({ where: { id: c.id } })).content).toBe('old');
+    await db.appAgent.update({ where: { appId_agentId: { appId, agentId } }, data: { bootPromptNodeId: c.id, bootPromptUrn: 'hrn:node:b3823:install:boot:compiled' } });
+    const r = await run();                                                          // equal pointer
     expect(r.pointerSet).toBe(false);
-    expect(await snapshot()).toMatchObject({ pointers: before.pointers, appAgent: before.appAgent });
+    expect((await db.node.findUniqueOrThrow({ where: { id: c.id } })).content).toBe('app text');
+    expect((await db.appAgent.findUniqueOrThrow({ where: { appId_agentId: { appId, agentId } } })).bootPromptNodeId).toBe(c.id);
+    expect((await snapshot()).nodes).toBe(before.nodes);                            // a batch compile creates no node
   });
 });
 
@@ -175,12 +203,13 @@ describe('approval under a batch grant', () => {
     expect(await db.nodeSignature.count({ where: { nodeId: c.id } } as never)).toBe(0);
   });
 
-  it('a grant never lets a worker approve a SOURCE, another worker\'s compiled node, or a node it does not name', async () => {
+  it('F2 (S8): a grant naming another worker\'s compiled node admits its approval; a SOURCE or an unnamed node is refused', async () => {
     const s = await source(installId, `boot:workers:${workerId}:source`);
     const theirs = await compiled(installId, `boot:workers:${otherWorkerId}:compiled`);
     const mine = await compiled(installId, `boot:workers:${workerId}:compiled`);
     await grant([s.id, theirs.id]);
-    for (const id of [s.id, theirs.id, mine.id]) expect(await codeOf(approve(id))).toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+    for (const id of [s.id, mine.id]) expect(await codeOf(approve(id))).toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+    expect(await codeOf(approve(theirs.id))).toBe('NO_ERROR');
   });
 
   it('a plain boot-prompt node squatting a :compiled loc is not a compiled prompt: a grant naming it admits nothing', async () => {
