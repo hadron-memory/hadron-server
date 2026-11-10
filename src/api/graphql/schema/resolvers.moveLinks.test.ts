@@ -42,9 +42,16 @@ for (const operation of ['moveNode', 'mcp'] as const) {
         const status = text.includes('ambiguous in destination') ? 'AMBIGUOUS'
           : text.includes('missing in destination') ? 'MISSING'
           : text.includes('points to a different node in destination') ? 'RETARGETED' : 'UNKNOWN';
+        const phrase = status === 'AMBIGUOUS' ? 'ambiguous in destination' : status === 'MISSING' ? 'missing in destination' : 'points to a different node in destination';
+        expect(text.split('\n').filter(line => line.startsWith('moving: '))).toEqual([`moving: [[${target}]] — ${phrase}`]);
+        const hidden = await db.node.findMany({ where: { memoryId: hiddenMemoryId }, select: { id: true } });
+        for (const node of hidden) expect(text).not.toContain(node.id);
         return [{ target, status }];
       }
       const result = await M[operation](null, { sourceRef: source.id, targetMemoryRef: destinationId }, ctx);
+      expect(result.moveLinkWarnings).toHaveLength(1);
+      expect(result.moveLinkWarnings).toEqual([{ nodeId: source.id, nodeLoc: 'moving', raw: `[[${target}]]`, target, status: result.moveLinkWarnings[0].status }]);
+      expect(Object.keys(result.moveLinkWarnings[0]).sort()).toEqual(['nodeId', 'nodeLoc', 'raw', 'status', 'target']);
       return result.moveLinkWarnings;
     }
     it('treats unavailable ambiguous candidates like a missing reference', async () => {
@@ -85,9 +92,10 @@ for (const operation of ['moveNode', 'mcp'] as const) {
       expect(await warnings(target)).toMatchObject([{ target, status: 'MISSING' }]);
       expect(changed).toBe(true);
     });
-    it('does not retarget a single unrelated candidate', async () => {
-      await createDbNode(db, { memoryId: hiddenMemoryId, loc: 'single' });
-      const target = 'links-other:hidden:single';
+    it('does not retarget a single hidden alias candidate', async () => {
+      const hidden = await createDbNode(db, { memoryId: hiddenMemoryId, loc: 'single' });
+      const target = 'links-other:hidden:single-alias';
+      await db.urnAlias.create({ data: { entityType: 'NODE', entityId: hidden.id, urn: target, reason: 'RENAME' } });
       expect(await warnings(target)).toMatchObject([{ target, status: 'MISSING' }]);
     });
     it('treats an unavailable historical holder like a missing reference', async () => {
