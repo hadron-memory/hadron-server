@@ -126,3 +126,19 @@ describe('one request, one grant, two audiences', () => {
     }
   });
 });
+
+describe('Dorian F1 / Riana P2-2: a requester who no longer manages the App is not shown the signer list when it withdraws an ended signed grant', () => {
+  it('signed, activated, revoked by the (then) manager; the manager demoted; the same person withdraws (first end stands): signatures withheld', async () => {
+    const g = await signedPersonGrant();
+    await db.$executeRaw`UPDATE grants SET requested_by_user_id = ${w.userId} WHERE id = ${g}`;
+    const revoke = await gql(`mutation($r:ID!){revokeGrant(ref:$r){id revokedAt}}`, { r: g });
+    expect(revoke.errors, JSON.stringify(revoke.errors)).toBeUndefined();
+    await db.orgMember.update({ where: { organizationId_userId: { organizationId: w.orgId, userId: w.userId } }, data: { role: 'CONTRIBUTOR' } });
+    const r = await gql(`mutation($r:ID!){withdrawGrant(ref:$r){id revokedByUserId signatureStatus{ ${FULL} }}}`, { r: g });
+    expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
+    expect(r.data.withdrawGrant.revokedByUserId).toBeNull();
+    expect(r.data.withdrawGrant.signatureStatus).toEqual(WITHHELD);
+    expect(JSON.stringify(r)).not.toContain(signerHandle);
+    expect(JSON.stringify(r)).not.toContain('YubiKey');
+  });
+});

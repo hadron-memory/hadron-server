@@ -176,11 +176,13 @@ export async function listGrantsForManager(db: Db, appId: string, page: { take?:
 
 /**
  * One grant of the App by id, null when absent or in another App. `asManager` (required, so a caller must choose) true is a manager's read (the audit facts and the
- * manager audience mark); false is the plain record with neither, for an issuer or requester who does not manage the App.
+ * manager audience mark); false is the plain record with neither and with the signature list withheld (the person mark), for an issuer or requester who does not manage the App.
  */
 export async function getGrantForManager(db: Db, appId: string, id: string, asManager: boolean): Promise<GrantView | null> {
   const rows = await db.$queryRaw<Row[]>(Prisma.sql`SELECT ${COLUMNS} FROM grants g JOIN apps a ON a.id = g.app_id AND a.deleted_at IS NULL
     WHERE g.app_id = ${appId} AND g.id = ${id}`);
   if (!rows[0]) return null;
-  return asManager ? markManagerAudience(view(rows[0], true)) : view(rows[0]);
+  // A non-manager (the issuer, a requester who no longer manages the App) reads the PERSON projection: the signature list stays withheld, as
+  // myGrants withholds it (V56; Dorian F1 and Riana P2-2 on 91002379).
+  return asManager ? markManagerAudience(view(rows[0], true)) : markPersonAudience(view(rows[0]));
 }

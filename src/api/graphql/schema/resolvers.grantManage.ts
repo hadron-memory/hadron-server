@@ -19,7 +19,9 @@ import type { Context } from './resolvers.helpers.js';
 import { clampListTake } from './resolvers.helpers.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { inTaskWriteTx, loadApp, requireWritable, resolveTaskActor, type TaskApp } from './resolvers.agentTask.js';
-import { lockCallerSession, readActInstruction, requireInstructedActKeepingRuns } from './resolvers.instruction.js';
+import { lockCallerSession, readActInstruction } from './resolvers.instruction.js';
+import { requireInstructedAct } from '../../../lib/auth/instructedAct.js';
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { resolveGrantPerson, resolveGrantReader } from './resolvers.grant.js';
 import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
 import { lockAppManagerMemberships, managesApp } from '../../../lib/auth/appManagement.js';
@@ -85,8 +87,10 @@ export const grantManageMutations = {
     const found = typeof ref === 'string' ? await ctx.db.grant.findUnique({ where: { id: ref }, select: { appId: true } }) : null;
     const app = found ? await loadApp(ctx, found.appId) : null;
     const actor = app ? await resolveTaskActor(ctx, app) : null;
-    if (!app || app.deletedAt || !actor) throw notManager();
-    requireWritable(ctx, app);
+    // A NEW door: no headless run is admitted (the gate: no headless or impersonation bypass; Xanthos' keep-runs carve-out is for main's
+    // older doors). A run, and every write precondition (uninstalled App, impersonation, refused binding), answers as a non-manager does.
+    if (!app || app.deletedAt || !actor || isRunPrincipal(ctx)) throw notManager();
+    try { requireWritable(ctx, app); } catch (e) { if (e instanceof GraphQLError) throw notManager(); throw e; }
     try {
       return await inTaskWriteTx(ctx, app, actor, notManager, async (tx, txCtx, fresh) => {
         // The caller's session row is fenced before the judgement, so a session end cannot commit between it and the write.
@@ -96,7 +100,7 @@ export const grantManageMutations = {
         // the locked row is re-judged below, since a merge can move an issuer link).
         const issuerHint = (await tx.grant.findUnique({ where: { id: ref }, select: { issuerUserId: true } }))?.issuerUserId ?? null;
         let manager = false;
-        const admission: ActAdmission = await requireInstructedActKeepingRuns(txCtx, fresh.id, instruction, async () => {
+        const admission: ActAdmission = await requireInstructedAct(txCtx, fresh.id, instruction, async () => {
           manager = await managesApp(txCtx, fresh);
           return manager || (issuerHint !== null && issuerHint === txCtx.userId && await issuerStillMember(txCtx, fresh, txCtx.userId));
         }, readActInstruction, notManager);
@@ -118,6 +122,8 @@ export const grantManageMutations = {
       }, { ...(actor.kind === 'worker' ? { lockWorkerIds: [actor.workerId] } : {}) });
     } catch (e) {
       if (e instanceof GrantManageRefusal) throw manageRefusal(e.code === 'GRANT_NOT_FOUND' ? new GrantManageRefusal('GRANT_NOT_MANAGER') : e);
+      // An App uninstalled between the read and the lock reads as the same refusal (the task door's own code would tell a non-manager).
+      if (e instanceof GraphQLError && e.extensions?.code === 'APP_UNINSTALLED') throw notManager();
       throw e;
     }
   },
@@ -136,7 +142,7 @@ export const grantManageMutations = {
       ? reader.appId === found.appId && (await getGrantForWorker(ctx.db, reader, ref)) !== null
       : (await managesApp(ctx, app)) || found.userId === person || found.requestedByUserId === person || found.issuerUserId === person;
     if (!readable) throw notFound();
-    requireWritable(ctx, app);
+    try { requireWritable(ctx, app); } catch (e) { if (e instanceof GraphQLError) throw notFound(); throw e; }
     const callerUserId = ctx.userId;
     try {
       return await withAuthorizedTx(

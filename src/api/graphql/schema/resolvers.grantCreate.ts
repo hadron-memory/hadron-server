@@ -109,11 +109,13 @@ async function createAsManager(ctx: Context, input: CreateGrantInput) {
   const kind = input.holderKind.toLowerCase() as 'user' | 'agent' | 'worker' | 'app';
   const startsAt = asDate(input.startsAt);
   const expiresAt = asDate(input.expiresAt);
+  // Anchor the named agent only if it exists: an unknown id would make the anchor's row lock refuse, and a manager must get the holder refusal.
+  const agentAnchor = kind === 'agent' && typeof input.holderRef === 'string' && (await ctx.db.agent.findUnique({ where: { id: input.holderRef }, select: { id: true } })) ? input.holderRef : null;
   const anchors: AuthorityAnchor[] = [
     { kind: 'app', id: app.id },
     ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
     ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
-    ...(kind === 'agent' ? [{ kind: 'agent' as const, id: input.holderRef }] : []),
+    ...(agentAnchor ? [{ kind: 'agent' as const, id: agentAnchor }] : []),
   ];
   try {
     return await withAuthorizedTx(
@@ -128,7 +130,7 @@ async function createAsManager(ctx: Context, input: CreateGrantInput) {
           appId: app.id,
           requester: { userId, workerId: null, sessionId: null },
           holder: { kind, id: input.holderRef },
-          heldAgentAnchor: kind === 'agent' ? input.holderRef : null,
+          heldAgentAnchor: agentAnchor,
           action: input.action, values: input.values, startsAt, expiresAt, maxUses: input.maxUses ?? null, reason: input.reason,
         });
         const view = await getGrantForManager(tx, app.id, id, true);

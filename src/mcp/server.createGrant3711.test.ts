@@ -12,6 +12,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 import { upsertPlatformActions } from '../lib/grants/actions.js';
 import { dropTestActions, seedWorld, type World } from '../lib/grants/grantFixtures3668.js';
 import { createTestableMcpServer } from './server.js';
+import { runAsActor } from '../lib/requestActor.js';
 import type { AuthContext } from '../middleware/auth.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -60,6 +61,16 @@ describe('hadron_create_grant', () => {
     await db.worker.update({ where: { id: w.workerId }, data: { heldByUserId: managerId } });
     const sessionId = (await db.session.create({ data: { id: generateId(), appId: w.appId, userId: managerId, workerId: w.workerId, agentId: w.agentId } })).id;
     const text = await server({ sessionId }).callToolText('hadron_create_grant', input());
+    expect(JSON.parse(text)).toMatchObject({ requestedByUserId: managerId, requestedByWorkerId: null, requestedBySessionId: null });
+    const [row] = await rows();
+    expect(row).toMatchObject({ requested_by_worker_id: null, requested_by_session_id: null });
+  });
+
+  it('Riana P2-3: with the worker ACTUALLY PUBLISHED as the connection\'s actor (as the transport does for a bound connection) the row still records the person', async () => {
+    await db.worker.update({ where: { id: w.workerId }, data: { heldByUserId: managerId } });
+    const sessionId = (await db.session.create({ data: { id: generateId(), appId: w.appId, userId: managerId, workerId: w.workerId, agentId: w.agentId } })).id;
+    const srv = server({ sessionId });
+    const text = await runAsActor({ workerId: w.workerId, agentId: w.agentId, userId: managerId }, () => srv.callToolText('hadron_create_grant', input()));
     expect(JSON.parse(text)).toMatchObject({ requestedByUserId: managerId, requestedByWorkerId: null, requestedBySessionId: null });
     const [row] = await rows();
     expect(row).toMatchObject({ requested_by_worker_id: null, requested_by_session_id: null });

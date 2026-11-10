@@ -15,6 +15,7 @@ import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { USER_API_KEY_PREFIX, hashUserApiKey } from '../../../middleware/auth.js';
 import { endHeldGrants } from '../../../lib/grants/departure.js';
+import { grantManageMutations } from './resolvers.grantManage.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { upsertPlatformActions } from '../../../lib/grants/actions.js';
 import { DB_NOW, dropTestActions, insertGrant, insertGrantUnguarded, raw, seedWorld, type World } from '../../../lib/grants/grantFixtures3668.js';
@@ -552,5 +553,51 @@ describe('Belinda: the holder kinds a manager may NOT name, the list page, and t
     const id = await active();
     expect((await post(managerKey, null, REVOKE, { r: id })).errors).toBeUndefined();
     expect(await db.agentTeamEvent.count({ where: { type: 'app.credential-act' } })).toBe(0);
+  });
+});
+
+describe('Riana, Beckett, Dorian (91002379): the second fix batch', () => {
+  it('Riana P2-1: a headless run carrying the manager is refused revokeGrant like create and the list, with no stamp and no event', async () => {
+    const id = await active();
+    const runCtx = { db, userId: managerId, appId: w.appId, organizationId: w.orgId, clientId: 'run:some-run', roles: [] } as never;
+    await expect(grantManageMutations.revokeGrant(null, { ref: id }, runCtx)).rejects.toMatchObject({ extensions: { code: 'GRANT_NOT_MANAGER' } });
+    expect((await grantRows())[0].revoked_at).toBeNull();
+    expect(await events(id)).toHaveLength(0);
+  });
+
+  it('Dorian F1 / Riana P2-2: a requester who no longer manages the App withdraws an already-ended signed grant and is NOT shown the signer list', async () => {
+    // Needs a signed grant: the shared fixture lives in the audience test file; here the response projection is pinned at the field.
+    const id = await active({ requested_by_user_id: managerId, revoked_at: raw(DB_NOW), revoked_by: managerId });
+    await db.orgMember.update({ where: { organizationId_userId: { organizationId: w.orgId, userId: managerId } }, data: { role: 'CONTRIBUTOR' } });
+    const r = await post(managerKey, null, `mutation($r:ID!){withdrawGrant(ref:$r){id revokedByUserId signatureStatus{state signatures{passkeyLabel}}}}`, { r: id });
+    expect(r.errors).toBeUndefined();
+    expect(r.data.withdrawGrant.revokedByUserId).toBeNull();
+    expect(r.data.withdrawGrant.signatureStatus.signatures).toEqual([]);
+  });
+
+  it('Beckett: a non-manager revoke on an uninstalled App answers GRANT_NOT_MANAGER, as a missing grant does', async () => {
+    const id = await active();
+    await db.app.update({ where: { id: w.appId }, data: { uninstalledAt: new Date() } });
+    expect(code(await post(memberKey, null, REVOKE, { r: id }))).toBe('GRANT_NOT_MANAGER');
+    expect(code(await post(managerKey, null, REVOKE, { r: id }))).toBe('GRANT_NOT_MANAGER');
+    expect((await grantRows())[0].revoked_at).toBeNull();
+  });
+
+  it('Beckett: a manager naming an agent that does not exist gets the holder refusal, not GRANT_NOT_MANAGER', async () => {
+    const r = await post(managerKey, null, CREATE, { i: mgrInput({ holderKind: 'AGENT', holderRef: generateId() }) });
+    expect(code(r)).toBe('GRANT_HOLDER_NOT_ALLOWED');
+    expect(await grantRows()).toHaveLength(0);
+  });
+
+  it('Riana P3: the driving person of a worker requester cannot withdraw it AS the person (only the worker session may)', async () => {
+    const id = await pending({ worker_id: w.workerId, requested_by_user_id: memberId, requested_by_worker_id: w.workerId });
+    expect(code(await post(memberKey, null, WITHDRAW, { r: id }))).toBe('GRANT_NOT_REQUESTER');
+    expect((await grantRows())[0].revoked_at).toBeNull();
+  });
+
+  it('Riana P3: a worker session naming another App in appRef is refused on createGrant', async () => {
+    const r = await post(memberKey, workerSession, CREATE, { i: { appRef: w.app2Id, action: 'schedule.create', values: entry(), holderKind: 'WORKER', holderRef: w.workerId, reason: 'mine' } });
+    expect(code(r)).toBe('GRANT_REQUESTER_NOT_WORKER');
+    expect(await grantRows()).toHaveLength(0);
   });
 });
