@@ -47,10 +47,14 @@
  * interval test. Judging candidates one at a time instead — the shape this module had before #3801's serve adoption
  * made it a walk input — re-ran that whole set (the span read growing with the candidate's number) per candidate:
  * a node pushed past the serve's scan ceiling, a thousand approved-but-unsigned candidates over one pre-watermark
- * signature row, cost ~7 s on dev hardware — past the bind transaction's default interactive timeout, so the typed
- * NOT_SIGNED refusal surfaced as a raw P2028 → INTERNAL_SERVER_ERROR (Clark's F1, QA of 8f8d48c1, 6757293402). The
- * walk therefore takes `lazyRevisionSignatureCounts`; `revisionSignatureCounts` stays for the single-revision ask
- * (PR3's include) and answers from the same loader.
+ * signature row, cost ~7 s on dev hardware in the author's local reproduction (reproven as a P2028 there — the live
+ * requests' own cause stays unclassified in the QA record, which retained no server diagnostics; either way the
+ * budget dependency is what the interval law removes). The walk therefore takes `lazyRevisionSignatureCounts`;
+ * `revisionSignatureCounts` stays for the single-revision ask (PR3's include) and answers from the same loader.
+ * No leg of the load can THROW on a malformed or planted row — the stamp key answers null, the tag check and the
+ * record verification answer false, everything else is a fail-closed `continue` — so evaluating a signature that
+ * sits above every candidate the walk will ask about cannot reject the walk: the lazy verdict equals the single
+ * ask's at every revision at or below the node's head.
  *
  * The predicate NEVER reads the deployment's surface policy: `PASSKEY_SIGNING_ENABLED` is G2's term and belongs to the
  * serve (`servingAppRequiresSignature`), which composes it with the organisation's switch. It reads nothing but the
@@ -88,10 +92,12 @@ interface CountingSpan {
  * the witness run upward ONCE and records where it ends. `askCeiling` bounds both the signatures considered (one
  * above the asked revision cannot count there — today's `revision: { lte: revision }` filter) and the coverage walk
  * (the single-revision ask must not read beyond its own ask); `null` — a walk's factory — lets the interval run to
- * its natural end (a missing or differing witness, the live row's own number passed), which is never more history
- * than one per-candidate call at the newest candidate already read. Pure read; `db` may be a transaction client. A
- * node that no longer exists, or an encrypted memory, counts nothing (cor:dmo:120:00 mirror: no hash-dependent work
- * is done on an encrypted node's records at all).
+ * its natural end (a missing or differing witness, the live row's own number passed), reading the span to the
+ * node's HEAD. That can exceed one per-candidate call read at the newest CANDIDATE when unapproved draft revisions
+ * sit above it (their rows come along, content columns included) — but it is ONE read where the per-candidate form
+ * paid one PER CANDIDATE, each as large, so the total stays far below it (Bob P3-1, BLIND delta at f22b3340). Pure
+ * read; `db` may be a transaction client. A node that no longer exists, or an encrypted memory, counts nothing
+ * (cor:dmo:120:00 mirror: no hash-dependent work is done on an encrypted node's records at all).
  */
 async function countingSignatureSpans(
   db: Db,
@@ -282,8 +288,13 @@ export async function revisionSignatureCounts(
  * approved enough to ask — and every candidate after that is an in-memory interval test, so a node pushed past the
  * serve's scan ceiling costs one span read, not one per candidate (the interval law in the module doc). The lazy
  * value lives for this ONE predicate: nothing is cached across serves, and a failed load is not kept (the next ask
- * retries, exactly as per-candidate reads would have). The verdict equals `revisionSignatureCounts` at every
- * revision at or below the node's head, where the walk's candidates live.
+ * retries — which is meaningful OUTSIDE a transaction; inside one a failed query has already aborted it and the
+ * error simply propagates, Bob P3-5, BLIND delta at f22b3340). The spans and the signing clock are captured ONCE,
+ * at the first ask: a signature row, a passkey or the registry changing between the walk's batches is seen by the
+ * NEXT resolve, not the one in flight — the same race class the per-candidate form had between one candidate and
+ * the next, and the only lock the serve holds is the node row's share lock (Bob Q2, delta review of 77c9fda85b);
+ * no new window is opened, the old one is widened by at most one request. The verdict equals
+ * `revisionSignatureCounts` at every revision at or below the node's head, where the walk's candidates live.
  */
 export function lazyRevisionSignatureCounts(
   db: Db,
