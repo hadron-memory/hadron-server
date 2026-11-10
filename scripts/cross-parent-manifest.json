@@ -60,6 +60,8 @@
     "RecoveryEdgesPage": "envelope",
     "CompiledBootPrompt": "value",
     "BootPromptServeOutcome": "value",
+    "BootPromptSigningPreview": "envelope",
+    "BootPromptSigningPreviewRow": "value",
     "BootPromptServeDecision": "value",
     "ResumeSessionResult": "envelope",
     "ResumeClaimReceipt": "envelope",

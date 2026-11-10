@@ -99,6 +99,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.nodeRevisions",
   "Query.nodeRevisionsPage",
   "Query.nodeUsage",
+  "Query.orgBootPromptSigningPreview", // #2973 PR2: default 50, cap 200; the common omitted bound 100 is conservative.
   "Query.organizations",
   "Query.principalGrants",
   "Query.publicAgents",
