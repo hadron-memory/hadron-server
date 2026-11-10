@@ -168,3 +168,12 @@ it.each(['id loc name', 'id content'])('rejects a stale inherited endpoint when 
   expect(result.nodeBatch.nodes[0].outgoingEdges).toEqual([{ target: null }]);
   expect(JSON.stringify(result)).not.toContain('STALE');
 });
+
+it.each([
+  ['id ...Body', 'fragment Body on Node { content }'],
+  ['id ... on Node { content }', ''],
+])('loads body fields inside endpoint fragments: %s', async (selection, fragment) => {
+  const { a, b } = await pair();
+  const nodes = await run(selection, [a.id], fragment);
+  expect(nodes).toEqual([{ id: a.id, outgoingEdges: [{ source: { id: a.id, content: 'alpha' }, target: { id: b.id, content: 'bravo' } }] }]);
+});
