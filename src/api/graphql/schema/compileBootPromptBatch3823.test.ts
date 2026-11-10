@@ -218,6 +218,15 @@ describe('approval under a batch grant', () => {
     expect(await codeOf(approve(squat.id))).toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
   });
 
+  it('F2: a compiled-type node at some other loc of the install memory, or in another Agent\'s system memory, is outside the batch scope', async () => {
+    const stray = await compiled(installId, 'notes:stray-compiled');
+    const otherMem = await db.memory.create({ data: { id: generateId(), class: 'system', name: 'other-sys', urn: 'b3823:other-sys', organizationId: orgId } });
+    await db.agent.create({ data: { id: generateId(), name: 'Other', urn: 'b3823:other', organizationId: orgId, systemMemoryId: otherMem.id } });
+    const foreign = await compiled(otherMem.id, 'boot:compiled');
+    await grant([stray.id, foreign.id]);
+    for (const id of [stray.id, foreign.id]) expect(await codeOf(approve(id))).toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+  });
+
   it('a person approving as themselves is unaffected', async () => {
     const c = await compiled(installId, `boot:workers:${workerId}:compiled`);
     expect(await codeOf(M.approveNode(null, { nodeRef: c.id }, ctx()))).toBe('NO_ERROR');
