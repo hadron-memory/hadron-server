@@ -14,8 +14,12 @@
  * (the section 10 carry of #3792, Ralion P3 on 916a9eb1).
  *
  * VALUES. The action's declared parameters are the whole boundary: exactly the declared keys, each a value
- * `grantTermsBytes` can write (a string, the wildcard where the parameter allows it, or a list of distinct strings). Nothing
- * else can be stored, so no free-text secret can ride in `values` (cor:acl:140:01, :02). A refusal names the term, never the value.
+ * `grantTermsBytes` can write (a string, the wildcard where the parameter allows it, or a list of distinct strings), judged
+ * by its parameter's declared type (cor:acl:140:01, :02). What that guarantees is a SHAPE, not secrecy: no undeclared key is
+ * stored, and the one type today, `node-ref`, admits only an id-shaped token (`NODE_ID_RE`), never free text. An id-shaped
+ * token is not checked to name a node, so a caller can still put a secret that happens to fit that shape in a declared
+ * parameter; nothing here detects it. A new parameter type brings its own rule (an unknown type is refused) and must say what
+ * it admits. A refusal names the term, never the value. (#3829 G, George on #3814.)
  *
  * LOCKS. The caller holds the App, requester-user and (for an agent holder) agent authority anchors. This module then locks the
  * requester's worker row FOR SHARE, so a `retireWorker` that committed first is seen, and one that comes next waits for this

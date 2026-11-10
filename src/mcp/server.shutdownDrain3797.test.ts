@@ -23,12 +23,12 @@ vi.mock('../middleware/auth.js', async (orig) => {
   const real = await orig<typeof import('../middleware/auth.js')>();
   return {
     ...real,
-    resolveAuthContext: async (...args: Parameters<typeof real.resolveAuthContext>) => {
+    resolveCredentialContextWithStatus: async (...args: Parameters<typeof real.resolveCredentialContextWithStatus>) => {
       if (gate.authHold && args[0].method === 'GET') {
         gate.authEntered += 1;
         await gate.authHold;
       }
-      return real.resolveAuthContext(...args);
+      return real.resolveCredentialContextWithStatus(...args);
     },
     getCurrentUserRoles: async (...args: Parameters<typeof real.getCurrentUserRoles>) => {
       if (gate.hold) {

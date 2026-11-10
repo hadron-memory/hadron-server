@@ -8,6 +8,7 @@ import { randomBytes } from 'node:crypto';
 import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Prisma } from '../../../generated/prisma/index.js';
 import { createServer } from '../../../server.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -62,6 +63,43 @@ const selfInput = (over: Record<string, unknown> = {}) => ({
   action: 'schedule.create', values: entry(), holderKind: 'WORKER', holderRef: w.workerId, reason: 'nightly digest', ...over,
 });
 const code = (r: any): string | undefined => r.errors?.[0]?.extensions?.code;
+
+/**
+ * #3829 F (George on #3814): a race is real only when the second operation is observed WAITING on the first, not after a fixed
+ * sleep (which passes just as well when the second starts after the first commits). Runs `block` in its own transaction, starts
+ * `start` once it holds, waits until some statement is blocked by that transaction's backend, then commits it. The blocker is
+ * released in `finally`, so a failed assertion never strands a transaction.
+ */
+async function whileBlocking<T>(block: (tx: Prisma.TransactionClient) => Promise<void>, start: () => Promise<T>): Promise<T> {
+  let release!: () => void;
+  const held = new Promise<void>((r) => { release = r; });
+  let holding!: (pid: number) => void;
+  const holdingP = new Promise<number>((r) => { holding = r; });
+  const blocker = db.$transaction(async (tx) => {
+    await block(tx);
+    holding((await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`)[0].pid);
+    await held;
+  }, { timeout: 30_000 });
+  try {
+    const pid = await Promise.race([holdingP, blocker.then(() => { throw new Error('the blocker ended before it held'); })]);
+    const pending = start();
+    pending.catch(() => undefined);
+    let waited = false;
+    for (let i = 0; i < 400 && !waited; i++) {
+      await new Promise((r) => setTimeout(r, 25));
+      const [{ n }] = await db.$queryRawUnsafe<Array<{ n: bigint }>>(
+        `SELECT count(*) AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND $1 = ANY(pg_blocking_pids(pid))`, pid);
+      waited = Number(n) > 0;
+    }
+    expect(waited, 'the operation under test waited on the blocker').toBe(true);
+    release();
+    await blocker;
+    return await pending;
+  } finally {
+    release();
+    await blocker.catch(() => undefined);
+  }
+}
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -286,24 +324,12 @@ describe('the locking carries from the section 10 review of #3792', () => {
   });
 
   it('a holder that retires while the create waits for it: the create judges the committed state and writes nothing', async () => {
-    let release!: () => void;
-    const held = new Promise<void>((r) => { release = r; });
-    let locked!: () => void;
-    const lockedP = new Promise<void>((r) => { locked = r; });
-    const retire = db.$transaction(async (tx) => {
+    const r = await whileBlocking(async (tx) => {
       await tx.$queryRaw`SELECT id FROM workers WHERE id = ${w.workerId} FOR UPDATE`;
       await tx.$executeRaw`UPDATE workers SET retired_at = (clock_timestamp() AT TIME ZONE 'UTC') WHERE id = ${w.workerId}`;
-      locked();
-      await held;
-    });
-    await lockedP;
-    const creating = asWorker(selfInput());
-    await new Promise((r) => setTimeout(r, 300));
-    release();
-    await retire;
-    const r = await creating;
+    }, () => asWorker(selfInput()));
     expect(r.data?.createGrant ?? null).toBeNull();
-    expect(r.errors).toBeDefined();
+    expect(code(r)).toBe('GRANT_REQUESTER_NOT_WORKER');
     expect(await rowCount()).toBe(0);
   });
 
@@ -311,26 +337,86 @@ describe('the locking carries from the section 10 review of #3792', () => {
     // A create holds the person\'s authority anchor shared, writes, and commits while the merge waits at its anchor with a
     // snapshot taken before that commit (findings:serializable-advisory-wait-keeps-old-snapshot). The merge must notice.
     const gid = generateId();
-    let release!: () => void;
-    const held = new Promise<void>((r) => { release = r; });
-    let locked!: () => void;
-    const lockedP = new Promise<void>((r) => { locked = r; });
-    const creator = db.$transaction(async (tx) => {
+    await whileBlocking(async (tx) => {
       await lockAuthorityAnchors(tx, [{ kind: 'user', id: w.userId }], 'shared');
-      locked();
-      await held;
       await tx.$executeRawUnsafe(
         `INSERT INTO grants (id, app_id, worker_id, action, action_values, reason, requested_by_user_id, requested_by_worker_id, created_at, updated_at)
          VALUES ($1, $2, $3, 'schedule.create', '{"entryNode":"n"}'::jsonb, 'r', $4, $3, now(), now())`, gid, w.appId, w.workerId, w.userId);
-    });
-    await lockedP;
-    const merging = mergeUsers(db, { sourceUserId: w.userId, targetUserId: w.user2Id });
-    await new Promise((r) => setTimeout(r, 400));
-    release();
-    await creator;
-    await merging;
+    }, () => mergeUsers(db, { sourceUserId: w.userId, targetUserId: w.user2Id }));
     const row = (await db.$queryRawUnsafe<Array<{ requested_by_user_id: string }>>('SELECT requested_by_user_id FROM grants WHERE id = $1', gid))[0];
     expect(row.requested_by_user_id).toBe(w.user2Id);
+  });
+});
+
+describe('#3829: the post-wait judgments, each pinned where it alone catches the case (Ralion P3-1, -2, -3, -5, -6 on #3814)', () => {
+  const appAnchorRevoker = (change: (tx: Prisma.TransactionClient) => Promise<unknown>) => async (tx: Prisma.TransactionClient) => {
+    // A revoker takes the App anchor exclusively and changes the caller\'s standing; the create (anchor shared) waits for it.
+    await lockAuthorityAnchors(tx, [{ kind: 'app', id: w.appId }], 'exclusive');
+    await change(tx);
+  };
+
+  it('A: the person leaves the Org while the create waits: only the in-transaction re-check sees it, and nothing is written', async () => {
+    const r = await whileBlocking(
+      appAnchorRevoker((tx) => tx.orgMember.updateMany({ where: { organizationId: w.orgId, userId: w.userId }, data: { deletedAt: new Date() } })),
+      () => asWorker(selfInput()),
+    );
+    expect(r.data?.createGrant ?? null).toBeNull();
+    expect(code(r)).toBe('GRANT_REQUESTER_NOT_WORKER');
+    expect(await rowCount()).toBe(0);
+  });
+
+  it('C: the App is deleted while the create waits: the post-wait FORBIDDEN answers as GRANT_REQUESTER_NOT_WORKER, nothing written', async () => {
+    const r = await whileBlocking(
+      appAnchorRevoker((tx) => tx.app.update({ where: { id: w.appId }, data: { deletedAt: new Date() } })),
+      () => asWorker(selfInput()),
+    );
+    expect(r.data?.createGrant ?? null).toBeNull();
+    expect(r.errors).toHaveLength(1);
+    expect(code(r)).toBe('GRANT_REQUESTER_NOT_WORKER');
+    expect(r.errors[0].message).toBe('A grant can be requested only from a bound worker session in its own App.');
+    expect(await rowCount()).toBe(0);
+  });
+
+  it('D: the role changes A to B while the create waits: the resolver passes only the anchor it took, so neither agent is accepted', async () => {
+    const org = await db.organization.findUniqueOrThrow({ where: { id: w.orgId } });
+    const b = await db.agent.create({ data: { organizationId: org.id, name: 'race-b', urn: `${org.urn}:race-b` } });
+    await db.appAgent.create({ data: { appId: w.appId, agentId: b.id } });
+    const toB = async (tx: Prisma.TransactionClient) => {
+      await tx.$queryRaw`SELECT id FROM workers WHERE id = ${w.workerId} FOR UPDATE`;
+      await tx.$executeRaw`UPDATE workers SET agent_id = ${b.id} WHERE id = ${w.workerId}`;
+    };
+    // B: current after the wait, but the resolver saw A before it, so it took no anchor for B and must not claim one.
+    const forB = await whileBlocking(toB, () => asWorker(selfInput({ holderKind: 'AGENT', holderRef: b.id })));
+    expect(code(forB)).toBe('GRANT_HOLDER_NOT_ALLOWED');
+    expect(await rowCount()).toBe(0);
+    // A: anchored before the wait, but no longer the role agent once the change commits.
+    await db.worker.update({ where: { id: w.workerId }, data: { agentId: w.agentId } });
+    const forA = await whileBlocking(toB, () => asWorker(selfInput({ holderKind: 'AGENT', holderRef: w.agentId })));
+    expect(code(forA)).toBe('GRANT_HOLDER_NOT_ALLOWED');
+    expect(await rowCount()).toBe(0);
+    // control: with no race, B (now the role agent, so anchored by the resolver) is accepted
+    expect((await asWorker(selfInput({ holderKind: 'AGENT', holderRef: b.id }))).errors).toBeUndefined();
+  });
+
+  it('B: the creator itself refuses a TOMBSTONED requester (a real person row with deleted_at set, not a missing id)', async () => {
+    const { createPendingGrant } = await import('../../../lib/grants/create.js');
+    await db.user.update({ where: { id: w.userId }, data: { deletedAt: new Date() } });
+    expect(await db.user.count({ where: { id: w.userId } })).toBe(1);
+    await expect(db.$transaction((tx) => createPendingGrant(tx, {
+      appId: w.appId, requester: { userId: w.userId, workerId: w.workerId, sessionId },
+      holder: { kind: 'worker', id: w.workerId }, action: 'schedule.create', values: entry(), reason: 'x',
+    }))).rejects.toMatchObject({ code: 'GRANT_REQUESTER_NOT_WORKER' });
+    expect(await rowCount()).toBe(0);
+  });
+
+  it('E: a parameter of a type the creator has no rule for is refused, even for an id-shaped value (fail closed)', async () => {
+    const action = 'test.s1a.untyped3829';
+    await db.$executeRawUnsafe(
+      `INSERT INTO actions (name, source, parameters, enforcement, issuer_rule, summary_template, created_at, updated_at)
+       VALUES ($1, 'PLATFORM', '[{"name":"note","type":"string"}]'::jsonb, 'RECORDED_ONLY', 'TEST_ONLY', 'test', now(), now())`, action);
+    const r = await asWorker(selfInput({ action, values: { note: generateId() } }));
+    expect(code(r)).toBe('GRANT_VALUES_INVALID');
+    expect(await rowCount()).toBe(0);
   });
 });
 
