@@ -102,11 +102,14 @@ import {
   getAccessibleMemoryIds,
   sessionScopeFilter,
   CONTENT_RAW_DEFAULT,
+  PAGE_ARGS_DEFAULT,
+  pageArgs,
+  pageEnvelope,
 } from './resolvers.helpers.js';
 import { loadValidationTaskSet } from './resolvers.validationTaskSet.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { publicReadableMemoryWhere } from '../../../lib/orgDiscoverability.js';
-import { memoryRowToRef, agentRowToRef } from './publicRefs.js';
+import { memoryRowToRef, agentRowToRef, publicOrgMemoryScope, publicOrgAgentScope } from './publicRefs.js';
 import { WORKLOG_LOC } from './resolvers.teamWork.js';
 import { corpusMintStateOf } from '../../../lib/specCorpus.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
@@ -2494,21 +2497,35 @@ export const typeResolvers = {
       if (!o.urn) throw new Error('Organization URN is required but not found (partial query?)');
       return safeCanonicalUrn('org', o.urn);
     },
+    // #3873 (cor:api:120:04): the plain fields are bounded to the default page, superseded by the `...Page` siblings
+    // below. Both read through ONE scope per kind, so a page, its total and the plain field cannot disagree about which
+    // rows the public gate admits. Order is (name, id): the id tiebreak keeps rows with equal names from skipping or
+    // repeating across pages.
     publicMemories: async (o: { id: string }, _: unknown, ctx: Context) => {
-      const rows = await ctx.db.memory.findMany({
-        where: { organizationId: o.id, ...publicReadableMemoryWhere() },
-        select: { id: true, name: true, urn: true, shortDescription: true },
-        orderBy: { name: 'asc' },
-      });
+      const rows = await ctx.db.memory.findMany({ ...publicOrgMemoryScope(o.id), take: PAGE_ARGS_DEFAULT });
       return rows.map(memoryRowToRef);
     },
     publicAgents: async (o: { id: string }, _: unknown, ctx: Context) => {
-      const rows = await ctx.db.agent.findMany({
-        where: { organizationId: o.id, deletedAt: null, visibility: 'PUBLIC' },
-        select: { id: true, name: true, urn: true, description: true },
-        orderBy: { name: 'asc' },
-      });
+      const rows = await ctx.db.agent.findMany({ ...publicOrgAgentScope(o.id), take: PAGE_ARGS_DEFAULT });
       return rows.map(agentRowToRef);
+    },
+    publicMemoriesPage: async (o: { id: string }, args: { limit?: number | null; offset?: number | null }, ctx: Context) => {
+      const { take, skip } = pageArgs(args);
+      const scope = publicOrgMemoryScope(o.id);
+      const [total, rows] = await ctx.db.$transaction([
+        ctx.db.memory.count({ where: scope.where }),
+        ctx.db.memory.findMany({ ...scope, take, skip }),
+      ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+      return pageEnvelope(rows.map(memoryRowToRef), total, skip);
+    },
+    publicAgentsPage: async (o: { id: string }, args: { limit?: number | null; offset?: number | null }, ctx: Context) => {
+      const { take, skip } = pageArgs(args);
+      const scope = publicOrgAgentScope(o.id);
+      const [total, rows] = await ctx.db.$transaction([
+        ctx.db.agent.count({ where: scope.where }),
+        ctx.db.agent.findMany({ ...scope, take, skip }),
+      ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+      return pageEnvelope(rows.map(agentRowToRef), total, skip);
     },
   },
   // ExchangeConnection / SlackConnection have no entry: their only resolvers

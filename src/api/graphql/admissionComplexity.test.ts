@@ -33,6 +33,8 @@ const REVIEWED_PAGED_FIELDS = [
   "Node.lintWarnings",
   "Node.signingRequests",
   "NodeApprovalReceipt.lintWarnings",
+  "PublicOrganization.publicAgentsPage", // #3873: pageArgs, default 20, cap 200.
+  "PublicOrganization.publicMemoriesPage", // #3873: pageArgs, default 20, cap 200.
   "Query.actionRegisterIndex", // #3287: pageArgs, default 20, cap 200; below the common 100, so omission overestimates.
   "Query.actionTickets",
   "Query.agentAssets",
