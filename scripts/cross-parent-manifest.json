@@ -303,7 +303,9 @@
     "PrProtocolAction": "value",
     "PullRequestReadiness": "envelope",
     "ReviewSlotReadiness": "value",
-    "GrantSignatureStatus": "value"
+    "GrantSignatureStatus": "value",
+    "TeamUtilization": "value",
+    "WorkerUtilization": "value"
   },
   "entries": {
     "ActionTicketsPage.items": {
