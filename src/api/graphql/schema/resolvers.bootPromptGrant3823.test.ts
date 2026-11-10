@@ -10,7 +10,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { runAsActor } from '../../../lib/requestActor.js';
-import { spendEditGrant } from '../../../lib/grants/bootPromptGrant.js';
+import { isGrantableEdit, spendEditGrant } from '../../../lib/grants/bootPromptGrant.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { upsertPlatformActions } from '../../../lib/grants/actions.js';
@@ -331,6 +331,17 @@ describe('the lift is the update door only, in place, signer re-judged (#3823 Ri
     expect(await codeOf(edit(s.id))).toBe('NO_ERROR');
   });
 
+  it('Riana F1: importNode into an existing own source (content only) is not an edit door either', async () => {
+    const s = await src(installMemoryId, `boot:workers:${workerId}:source`);
+    const g = await grant(s.id);
+    const out = await codeOf(asWorker(() => (resolvers.Mutation as any).importNode(null, {
+      input: { memoryId: installMemoryId, loc: s.loc, content: 'imported text', contentType: 'text/markdown' },
+    }, ctx())));
+    expect(out).toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+    expect(await uses(g)).toBe(0);
+    expect((await db.node.findUniqueOrThrow({ where: { id: s.id } })).content).toBe('original');
+  });
+
   it('Andi P2-1: a text edit that names another loc or memory is not in place: refused, unspent', async () => {
     const s = await src(installMemoryId, `boot:workers:${workerId}:source`);
     const g = await grant(s.id);
@@ -378,5 +389,22 @@ describe('the lift is the update door only, in place, signer re-judged (#3823 Ri
     await db.orgMember.update({ where: { organizationId_userId: { organizationId: orgId, userId: second.id } }, data: { role: 'CONTRIBUTOR' } }).catch(() => db.orgMember.delete({ where: { id: (m as any).id } } as never));
     expect(await codeOf(edit(s.id))).toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
     expect(await uses(g)).toBe(0);
+  });
+});
+
+describe('isGrantableEdit, directly (each condition alone defeats the lift)', () => {
+  const prior = { id: 'n1', memoryId: 'm1', loc: 'boot:source', role: 'boot-prompt', nodeType: 'info' };
+  const ok = { otherFields: [] as string[], door: true, memoryId: 'm1', loc: 'boot:source' };
+  it('admits only the content-only, in-place, same-role, update-door shape', () => {
+    expect(isGrantableEdit(prior, ok)).toBe(true);
+    expect(isGrantableEdit(prior, { ...ok, door: false })).toBe(false);               // not the update door (Riana F1)
+    expect(isGrantableEdit(prior, { ...ok, otherFields: ['name'] })).toBe(false);      // not only text (V46)
+    expect(isGrantableEdit(prior, { ...ok, loc: 'boot:elsewhere' })).toBe(false);      // not in place (Andi P2-1)
+    expect(isGrantableEdit(prior, { ...ok, memoryId: 'm2' })).toBe(false);
+    expect(isGrantableEdit(prior, { ...ok, role: 'notes' })).toBe(false);
+    expect(isGrantableEdit(prior, { ...ok, nodeType: 'task' })).toBe(false);
+    expect(isGrantableEdit({ ...prior, nodeType: 'compiled-boot-prompt' }, ok)).toBe(false);
+    expect(isGrantableEdit({ ...prior, role: 'notes' }, ok)).toBe(false);
+    expect(isGrantableEdit(null, ok)).toBe(false);
   });
 });
