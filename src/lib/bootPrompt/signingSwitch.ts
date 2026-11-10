@@ -74,7 +74,12 @@ export function requireSelfActingUser(ctx: {
  * Deliberately no platform-role bypass (cor:agt:040:09: a non-member is refused) and `findFirst` with the live-membership
  * filter, so a revoked membership never authorizes.
  */
-export async function requireSigningSwitchAudience(db: Db, userId: string, orgId: string): Promise<void> {
+export async function requireSigningSwitchAudience(db: Db, userId: string, orgId: string, opts: { lock?: boolean } = {}): Promise<void> {
+  // A WRITER passes `lock` on its transaction client: the transaction's REPEATABLE READ snapshot was taken before the
+  // authority-anchor wait, so a plain read can still see a membership a revoker committed while this one waited
+  // (Dorian, local review of 295fb658). A locking read of a row changed since the snapshot fails 40001 and the
+  // caller's retry re-runs on a fresh snapshot, where the revocation is seen and the audience refuses.
+  if (opts.lock) await db.$queryRaw`SELECT user_id FROM org_members WHERE organization_id = ${orgId} AND user_id = ${userId} FOR SHARE`;
   const member = await db.orgMember.findFirst({
     where: { organizationId: orgId, userId, ...LIVE_ORG_MEMBERSHIP },
     select: { role: true },

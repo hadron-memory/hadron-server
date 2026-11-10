@@ -393,6 +393,29 @@ describe('switch-on: the preview token (C4)', () => {
     expect(await status()).toBe(true);
   });
 
+  it('a revoker that commits while the switch waits on the authority anchor is seen: the audience is re-read on a fresh snapshot (Dorian P2)', async () => {
+    const token = (await preview()).previewToken as string;
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const lockedP = new Promise<void>((r) => { locked = r; });
+    const revoker = db.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('authorization:org'), hashtext(${org.id}))`;
+      locked();
+      await held;
+      await tx.orgMember.updateMany({ where: { organizationId: org.id, userId: admin.id }, data: { deletedAt: new Date() } });
+    });
+    await lockedP;
+    const on = caught(turnOn(token));
+    const off = caught(turnOff());
+    await new Promise((r) => setTimeout(r, 700)); // both are parked on the anchor with a snapshot that predates the revocation
+    release();
+    await revoker;
+    expect(await on).toMatchObject({ ok: false, code: 'FORBIDDEN' });
+    expect(await off).toMatchObject({ ok: false, code: 'FORBIDDEN' });
+    expect(await status()).toBe(false);
+  });
+
   it('refuses when the caller is revoked between the preview and the switch-on (the audience is judged live)', async () => {
     const token = (await preview()).previewToken as string;
     await db.orgMember.updateMany({ where: { organizationId: org.id, userId: admin.id }, data: { deletedAt: new Date() } });

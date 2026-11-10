@@ -110,7 +110,7 @@ export const orgBootPromptSigningMutations = {
       async (txCtx) => {
         // The audience again, on the transaction: the request-time answer is not evidence once the anchor is held.
         requireSelfActingUser(txCtx);
-        await requireSigningSwitchAudience(txCtx.db, userId, orgId);
+        await requireSigningSwitchAudience(txCtx.db, userId, orgId, { lock: true });
       },
       async (tx) => {
         // Lock, then judge (the lock is the last one this act takes): the exclusive authority anchor serialized the
