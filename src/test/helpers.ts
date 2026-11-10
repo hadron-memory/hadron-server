@@ -86,11 +86,48 @@ async function restoreChatSeqUniqueness(): Promise<void> {
  * Delete all rows from every table in FK-safe order.
  * Call in beforeEach for DB tests.
  */
+/**
+ * #3835: wait until no other backend of THIS database is mid-statement or
+ * holding an open transaction. cleanDb's TRUNCATEs take AccessExclusive one
+ * table at a time while a leftover writer (the previous test's git-sync node
+ * delete, say) takes RowExclusive on the same tables through FK cascades in a
+ * different order, so overlapping them is a lock cycle (40P01), not a wait.
+ * Each vitest worker owns its database clone, so every other backend here is
+ * this worker's own leftover. Bounded and non-fatal: a backend still busy
+ * after the bound is left to the old behavior, with its statement logged.
+ */
+export async function awaitQuiescentBackends(boundMs = 10_000): Promise<void> {
+  // A raw pg connection, not the Prisma client: some tests spy on the client to
+  // pin that a path issues no raw queries (see restoreChatSeqUniqueness).
+  const client = new Client({ connectionString: process.env.DATABASE_URL });
+  await client.connect();
+  try {
+    const deadline = Date.now() + boundMs;
+    for (;;) {
+      const { rows } = await client.query(
+        `SELECT state, left(query, 120) AS query FROM pg_stat_activity
+         WHERE datname = current_database() AND pid <> pg_backend_pid()
+           AND state IN ('active', 'idle in transaction', 'idle in transaction (aborted)')`,
+      );
+      if (rows.length === 0) return;
+      if (Date.now() > deadline) {
+        console.warn(`cleanDb: ${rows.length} backend(s) still busy after ${boundMs}ms: ${JSON.stringify(rows)}`);
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  } finally {
+    await client.end();
+  }
+}
+
 export async function cleanDb(db: PrismaClient): Promise<void> {
   // #1189: a late batched usage INSERT takes FK locks on these parents and
   // can deadlock with their DELETE/SetNull cascades. Finish all recorder chunks
   // before deleting any fixture; deleting usage rows last alone is not enough.
   await drainNodeUsage(db);
+  // #3835: no leftover writer may overlap the TRUNCATE below.
+  await awaitQuiescentBackends();
   // #1631: test-only cleanup bypasses row-delete guards, before deleting owners.
   // #1632: signature records reference passkeys and requests; both refuse a row
   // DELETE while their node exists, so they are truncated with them.
