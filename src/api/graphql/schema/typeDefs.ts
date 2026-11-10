@@ -5243,6 +5243,22 @@ export const typeDefs = `#graphql
   }
 
   """
+  #3843 / hrn:node:hadronmemory.com:specs:cor:agt:040:05, hrn:node:hadronmemory.com:specs:cor:agt:040:10: the compiled
+  boot prompt a chat or run with an Agent (in an App) would be given now, rendered, for a caller that binds no worker.
+  """
+  type AgentServedBootPrompt {
+    "The revision served: the same identity fields as bootPromptServe and a ServedPrompt record."
+    decision: BootPromptServeDecision!
+    """
+    The served revision's text with its platform variables filled as a chat or run fills them
+    (hrn:node:hadronmemory.com:specs:cor:dmo:150:08): worker.name is the Agent's name, worker.role its persona role,
+    reports-to, signature and trailer are empty, and session.llmModel is the client-reported model or empty. No
+    derived blocks are appended: they belong to a worker's briefing (Worker.prompt).
+    """
+    text: String!
+  }
+
+  """
   #2708 / hrn:node:hadronmemory.com:specs:cor:agt:040:10: what a serve would decide now, from the resolver the serve
   itself uses, so the same resolution rules apply. A preview of the current state: a later serve gives the same answer
   only while that state is unchanged (a pointer edit or an approval in between can change it). Exactly one of served
@@ -9902,6 +9918,21 @@ export const typeDefs = `#graphql
     hadron_agent_processes returns the same list. Accepts the Agent's ID or URN.
     """
     agentProcessList(ref: ID!): [AgentListedProcess!]!
+    """
+    #3843 (hrn:node:hadronmemory.com:specs:cor:agt:040:05, hrn:node:hadronmemory.com:specs:cor:agt:040:10) - the
+    boot prompt an Agent would be served now, rendered, for a caller that binds no worker (an MCP-only agent; the MCP
+    tool hadron_agent_boot_prompt returns the same text). A pure read: it binds nothing, starts or ends no session and
+    records no ServedPrompt; the answer is the current serve, never what a session was given, so an approval between
+    two calls can change it. Without appRef it reads the Agent's own pointer, visible to a caller who may read the
+    Agent's system memory. With appRef it reads what a chat in that App would be given (the install's pointer, then
+    the Agent's), for a participant of that App (an App key only for its own App) where the Agent is installed and
+    the caller may chat with it. Every caller who fails a gate, a missing or not-installed App and a lapsed App
+    licence get the same AGENT_NOT_FOUND as a nonexistent Agent. Past the gate, a serve refusal is thrown as its typed
+    BOOT_PROMPT_* error (NOT_SET, TARGET_DELETED, NOT_APPROVED, NOT_SIGNED) with surface 'chat'. llmModel is the
+    model the client reports, filled into session.llmModel (empty when omitted); it is rendering text, never an
+    identity or authority claim.
+    """
+    agentServedBootPrompt(agentRef: String!, appRef: String, llmModel: String): AgentServedBootPrompt!
 
     """
     Uniform paginated agent list (#473). Scope: Agents owned by the caller's

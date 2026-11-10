@@ -369,7 +369,9 @@ describe('#2045 read exposure: one gate per owner, null in both fields when mask
 describe('#2045 surfaces and code inventory', () => {
   it('R24: no MCP tool writes a boot-prompt pointer', () => {
     const mcp = createTestableMcpServer({ userId: 'u', roles: [], clientId: 'user:u' });
-    expect(mcp.toolNames().filter((n) => /boot.?prompt/i.test(n))).toEqual([]);
+    // #3843 adds exactly one boot-prompt tool, and it is a read: hadron_agent_boot_prompt renders the served prompt and
+    // writes nothing (its own pins count every row it could write). Any other boot-prompt tool still fails here.
+    expect(mcp.toolNames().filter((n) => /boot.?prompt/i.test(n))).toEqual(['hadron_agent_boot_prompt']);
   });
 
   it('every BOOT_PROMPT_* code the server source can emit is on the agreed lists (6259928375 / 6259930578)', () => {
