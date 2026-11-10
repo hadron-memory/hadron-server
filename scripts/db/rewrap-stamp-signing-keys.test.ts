@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../src/integrations/db/client.js';
 import { cleanDb } from '../../src/test/helpers.js';
-import { encryptBytesAad } from '../../src/lib/tokenCrypto.js';
+import { decryptBytesAad, encryptBytesAad, encryptionKeyFromHex } from '../../src/lib/tokenCrypto.js';
 import { mintStampSigningKey, stampKeyAad, stampVerificationKey } from '../../src/lib/signing/stampKeys.js';
 import { main, type RewrapToolIo } from './rewrap-stamp-signing-keys.js';
 
@@ -120,6 +120,11 @@ describe('#2973 rewrap tool — the run (atomic, idempotent, verified; Bob P3-1)
     expect(lines.some((l) => l.includes('ok rows=1 rewrapped=1 verified=1'))).toBe(true);
     const materialAfter = (await db.stampSigningKey.findFirstOrThrow()).keyMaterial;
     expect(materialAfter).not.toBe(materialBefore);
+    // Rows must now unwrap under the NEW root ONLY (Bob P3, BLIND delta at 804d44cc): the tool's AFTER check
+    // reads `to`-alone and this pins the same fact from outside it — a rewrap that wrote nothing survives
+    // neither leg. Red under the no-op-update mutant (the tool exits 1 there instead of reaching here).
+    expect(() => decryptBytesAad(materialAfter, stampKeyAad(id), encryptionKeyFromHex(ROOT_A))).toThrow();
+    expect(decryptBytesAad(materialAfter, stampKeyAad(id), encryptionKeyFromHex(ROOT_B)).equals(origKey!)).toBe(true);
 
     // Idempotent: rows already under the new root are skipped, same exit 0.
     lines = [];

@@ -3,8 +3,9 @@
  * signed serve selection and (PR3) the include `signed` setting share.
  *
  * Coverage is judged from the REVISION HISTORY, never from the live `content_changed_at` marker: every revision in
- * (the signature's revision, N] must still be witnessed by its snapshot and hash to the signed approval hash, so a
- * pruned or deliberately deleted snapshot inside the span fails CLOSED (a missing "no change" is not a "no change" —
+ * [the signature's revision, N] — the signature's own revision included (Bob P2-D, BLIND delta at 804d44cc) — must
+ * still be witnessed by its snapshot and hash to the signed approval hash, so a pruned, deliberately deleted or
+ * replica-rewritten snapshot anywhere in the span fails CLOSED (a missing "no change" is not a "no change" —
  * deleting the A→B step of an A→B→A history must not revive coverage of the restored text).
  *
  * State (C2) re-verifies and reuses `deriveSignatureState`'s window logic with the DB signing clock
@@ -284,7 +285,7 @@ describe('#2973 coverage (cor:dmo:130:09 — from the revision history, never th
     expect(await counts(2)).toBe(true);
   });
 
-  it('fails closed when a revision in the span has no snapshot left, while the span-free revisions stay signed', async () => {
+  it('fails closed when a revision in the span has no snapshot left, while its own revision stays signed after its witness', async () => {
     await signLive(); // revision 1
     await editMetaOnly(); // revision 2
     await editContent('v3'); // revision 3
@@ -294,7 +295,23 @@ describe('#2973 coverage (cor:dmo:130:09 — from the revision history, never th
     // unchanged, so trusting its absence would let deleting the A→B step of an A→B→A history revive coverage.
     expect(await counts(3)).toBe(false);
     expect(await counts(2)).toBe(false);
-    expect(await counts(1)).toBe(true); // its own revision needs no span evidence at all
+    // Its own revision is judged too (Bob P2-D, BLIND delta at 804d44cc) — it counts because its witness (snapshot@1,
+    // still present) still hashes to the signed hash, not because own revisions are exempt from span evidence.
+    expect(await counts(1)).toBe(true);
+  });
+
+  it("the signature's OWN revision's text must hash to the signed approval hash (replica-mode tamper — Bob P2-D, BLIND delta at 804d44cc)", async () => {
+    // The tampering model this PR defends against is replica-mode DB writes: rewrite snapshot 1's content AND the
+    // approval leg's hash together and the approval side passes — the signature leg is the backstop, so it must
+    // compare the OWN revision's text like any span revision. The old loop started at sig.revision + 1 and trusted
+    // the ceremony's at-signing attestation, which attested the text THEN, not the text NOW in the witness row.
+    await signLive(); // revision 1 holds 'v1'
+    await editMetaOnly(); // revision 2; snapshot@1 = 'v1' — the pinned witness at the signature's own revision
+    expect(await counts(1)).toBe(true); // honest baseline: the witness hashes to the signed hash
+    expect(await counts(2)).toBe(true); // and the meta-only revision above it stays covered
+    await db.nodeRevision.updateMany({ where: { nodeId, revNo: 1 }, data: { content: 'tampered replica write' } });
+    expect(await counts(1)).toBe(false); // the OWN revision's text no longer hashes to the signed hash — never counts
+    expect(await counts(2)).toBe(false); // and no revision above it can count on the tampered signature either
   });
 
   it('a snapshot number has ONE witness — duplicates cannot exist, so the pinned witness is unique by construction (M20)', async () => {

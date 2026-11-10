@@ -5,8 +5,9 @@
  *
  * Four legs, all of which must hold for SOME one `NodeSignature` row on the node:
  *
- * - **Coverage** (cor:dmo:130:09): the signature's revision ≤ N, and no revision in (its revision, N] changed the
- *   title, abstract or content. This is judged from the REVISION HISTORY — each span revision's snapshot must still
+ * - **Coverage** (cor:dmo:130:09): the signature's revision ≤ N, and no revision in [its revision, N] changed the
+ *   title, abstract or content — the signature's OWN revision included. This is judged from the REVISION HISTORY —
+ *   each covered revision's snapshot (the live row while it is still the live revision's own witness) must still
  *   exist and hash to the signature's own approval hash — never from the live `content_changed_at` marker
  *   (`loadSignatureStatuses` judges that; a later edit must not turn an earlier signature into EARLIER for every
  *   revision). A missing witness fails CLOSED: a deleted snapshot is not evidence of "no change", so deleting the
@@ -111,7 +112,7 @@ export async function revisionSignatureCounts(
   let lowestSigned = Number.MAX_SAFE_INTEGER;
   for (const s of signatures) if (s.revision < lowestSigned) lowestSigned = s.revision;
   const snapshots = await db.nodeRevision.findMany({
-    where: { nodeId, revNo: { gt: lowestSigned, lte: revision } },
+    where: { nodeId, revNo: { gte: lowestSigned, lte: revision } },
     orderBy: { id: 'desc' },
     select: { revNo: true, name: true, abstract: true, content: true },
   });
@@ -171,13 +172,16 @@ export async function revisionSignatureCounts(
       if (currentOwner == null || sig.stampOwnerKind !== currentOwner.kind || sig.stampOwnerId !== currentOwner.id) continue;
     }
 
-    // Coverage (cor:dmo:130:09): every revision in (sig.revision, revision] must still be witnessed by a snapshot that
+    // Coverage (cor:dmo:130:09): every revision in [sig.revision, revision] must still be witnessed by a snapshot that
     // hashes to the signed hash — a missing or differing witness fails this signature closed. The signature's OWN
-    // revision is trusted without span evidence, deliberately: the request eligibility check above already pinned
-    // req.revision === sig.revision AND req.approvalHash === sig.approvalHash — the completed ceremony itself attested
-    // that this revision's text hashed to the signed hash (the "its own revision needs no span evidence" pin).
+    // revision is judged like the rest, NOT trusted on the ceremony's at-signing attestation alone: that attested the
+    // text AS IT WAS THEN, while the witness row can be rewritten after the fact. Under this PR's own tampering model
+    // (replica-mode writes) an attacker who rewrites snapshot N's content together with the approval leg's hash would
+    // serve unsigned text as signed if the own revision's text were never re-compared (Bob P2-D, BLIND delta at
+    // 804d44cc). The request eligibility check above (req.approvalHash === sig.approvalHash, stamp-HMAC-bound) still
+    // pins WHICH hash the ceremony attested; this loop re-proves the text NOW matches it.
     let covered = true;
-    for (let r = sig.revision + 1; r <= revision; r++) {
+    for (let r = sig.revision; r <= revision; r++) {
       // The live row is revision `revSeq`'s own witness while no snapshot holds its number (a snapshot at the number,
       // whichever memory captured it, is the pinned witness instead — the same resolution every revision read uses).
       const fields = spanFields.get(r) ?? (r === node.revSeq ? { name: node.name, abstract: node.abstract, content: node.content } : null);

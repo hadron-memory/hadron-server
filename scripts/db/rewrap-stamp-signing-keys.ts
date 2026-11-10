@@ -25,10 +25,12 @@
  *
  * Verification is real, not self-referential (Bob P3-1): BEFORE the rewrap every row is unwrapped
  * (under the old root, or the new one for an idempotent re-run) and SHA-256-committed; AFTER it
- * every row is unwrapped again and the commitments compared — same rows, same key bytes, so stamps
- * really do verify identically before and after. The digests are compared in memory and never
- * printed. A row that appears or vanishes between the two reads (a first mint racing the tool)
- * fails verification safely: exit 1, and the idempotent re-run settles it.
+ * every row is unwrapped again — under the NEW root ONLY (Bob P3, BLIND delta at 804d44cc), so a
+ * rewrap that wrote nothing fails with exit 1 instead of passing on an old-root fallback — and the
+ * commitments compared: same rows, same key bytes, so stamps really do verify identically before
+ * and after. The digests are compared in memory and never printed. A row that appears or vanishes
+ * between the two reads (a first mint racing the tool) fails verification safely: exit 1, and the
+ * idempotent re-run settles it.
  *
  * Exit codes: 0 ok, 1 failed (rewrap or verify), 2 usage (bad input, open file mode, no DATABASE_URL).
  */
@@ -68,6 +70,7 @@ const usage = (io: Pick<RewrapToolIo, 'log'>, line: string): number => {
 async function unwrapDigests(
   db: PrismaClient,
   roots: readonly Buffer[],
+  phase: 'before' | 'after',
   log: (line: string) => void,
 ): Promise<Map<number, string> | null> {
   const rows = await db.stampSigningKey.findMany({ select: { id: true, keyMaterial: true }, orderBy: { id: 'asc' } });
@@ -84,7 +87,9 @@ async function unwrapDigests(
       }
     }
     if (key === null || key.length !== 32) {
-      log(`db.stamp_key_rewrap.verify_failed: key ${row.id} unwraps under neither root (planted or corrupt row)`);
+      log(phase === 'before'
+        ? `db.stamp_key_rewrap.verify_failed: key ${row.id} unwraps under neither root (planted or corrupt row)`
+        : `db.stamp_key_rewrap.verify_failed: key ${row.id} does not unwrap under the NEW root (rows still under the old root — a rewrap that wrote nothing); stop writers and re-run`);
       return null;
     }
     out.set(row.id, createHash('sha256').update(key).digest('hex'));
@@ -153,11 +158,11 @@ export async function main(argv: readonly string[], io: RewrapToolIo): Promise<n
     return 2;
   }
 
-  const db = new PrismaClient();
+  const db = new PrismaClient({ datasourceUrl: io.env.DATABASE_URL });
   try {
     // BEFORE: commit every row's key bytes (under either explicit root — an idempotent re-run
     // starts with rows already under `to`).
-    let before = await unwrapDigests(db, [encryptionKeyFromHex(fromHex), encryptionKeyFromHex(toHex)], io.log);
+    const before = await unwrapDigests(db, [encryptionKeyFromHex(fromHex), encryptionKeyFromHex(toHex)], 'before', io.log);
     if (before === null) return 1;
 
     let out: { rows: number; rewrapped: number };
@@ -170,14 +175,15 @@ export async function main(argv: readonly string[], io: RewrapToolIo): Promise<n
       return 1;
     }
 
-    // AFTER: same rows, same bytes, now read `to`-first. A changed set (a first mint racing the
-    // tool) or a changed digest fails closed — the idempotent re-run settles it.
-    const after = await unwrapDigests(db, [encryptionKeyFromHex(toHex), encryptionKeyFromHex(fromHex)], io.log);
+    // AFTER: same rows, same bytes — unwrapped under the NEW root ONLY (Bob P3, BLIND delta at 804d44cc): a
+    // rewrap that wrote nothing (rows still under `from`) must FAIL verification, not pass on a from-root
+    // fallback. A changed set (a first mint racing the tool) or a changed digest fails closed — the idempotent
+    // re-run settles it.
+    const after = await unwrapDigests(db, [encryptionKeyFromHex(toHex)], 'after', io.log);
     if (after === null || before.size !== after.size || [...before].some(([id, digest]) => after.get(id) !== digest)) {
       io.log(`db.stamp_key_rewrap.verify_failed: rows or material changed across the rewrap (before=${before.size} after=${after?.size ?? 'unreadable'})`);
       return 1;
     }
-    before = new Map(); // digests are for the comparison only; drop them before success
     io.log(`db.stamp_key_rewrap ok rows=${out.rows} rewrapped=${out.rewrapped} verified=${after.size}`);
     return 0;
   } finally {
