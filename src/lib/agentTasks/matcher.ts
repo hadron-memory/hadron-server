@@ -757,9 +757,15 @@ export async function matchTaskNow(db: PrismaClient, taskId: string, now: Date, 
   // UNCLAIMED state. An attempt whose claim state moved (a sweep took the task from the create-time attempt, or a later
   // sweep reclaimed it from a slow or dead one) neither starts nor writes: the current claimant is the one attempt.
   if ((task.matchClaimedAt?.getTime() ?? null) !== (claim?.getTime() ?? null)) return;
-  const decidedAt = await decisionClock(db); // #3825: when the failure is DECIDED, not when it is written
-  const outcome = await chooseMatchNow(db, task, now, async (workerId, family) =>
-    tryAssign(db, task, workerId, family, now, {}, anchor, true, claim));
+  // #3825: a failure is stamped with when it was DECIDED, i.e. the last read that informed it: the start (the snapshot
+  // judgment), or, once an assignment attempt ran (it re-reads under the worker lock, after any wait), the moment that
+  // attempt returned. A success another attempt committed in between is then ordered by the record's own guard.
+  let decidedAt = await decisionClock(db);
+  const outcome = await chooseMatchNow(db, task, now, async (workerId, family) => {
+    const attempt = await tryAssign(db, task, workerId, family, now, {}, anchor, true, claim);
+    decidedAt = await decisionClock(db);
+    return attempt;
+  });
   if ('workerId' in outcome) {
     if (!outcome.live) await launchForAssignment(db, { appId: task.appId, taskId, workerId: outcome.workerId, family: outcome.family }, now, anchor);
     return;

@@ -6,6 +6,7 @@ import { generateId } from '../id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { resolvers } from '../../api/graphql/schema/resolvers.js';
 import { __matcherTesting, matchQueuedTasks, matchTaskNow } from './matcher.js';
+import { lockWorkersForAssignment } from './workerLock.js';
 import { declareAllStopLanes } from '../../test/stopLanes.js';
 import { combinationsOf, decisionClock, latestMatchOutcomes, purgeMatchOutcomes, recordMatchOutcome } from './matchOutcomes.js';
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -227,4 +228,39 @@ it('V37/V44: a match also counts against the chosen worker\'s own combination, c
   expect(t.assigneeWorkerId).toBe(w.id);
   expect(await latest({ windowHours: 24, family: 'claude' })).toEqual([expect.objectContaining({ family: 'claude', tier: 'mid', role: 'reviewer', outcome: 'MATCHED', failingSince: null })]);
   expect(await latest({ windowHours: 24, family: null })).toEqual([expect.objectContaining({ family: null, tier: null, role: null, outcome: 'MATCHED' })]);
+});
+
+it('Rico P2-1: a MATCHED is not recorded when the guarded assignment lost the task', async () => {
+  const w = await worker('reviewer');
+  const t = await create({ requirements: { role: 'reviewer' } });
+  const out = await __matcherTesting.tryAssign(db, { id: t.id, appId: app.id, requirements: { role: 'reviewer' }, closeSessionWhenDone: false } as any, w.id, 'claude', new Date(), {
+    // the guarded update's own predicate (matchFailedAt: null) no longer holds when it runs
+    afterWorkerCheck: async () => { await db.agentTask.update({ where: { id: t.id }, data: { matchFailedAt: new Date(), matchFailedReason: 'NOBODY_FREE' } }); },
+  });
+  expect(out).toBe('task-gone');
+  expect(await latest()).toEqual([]);
+});
+
+it('Rico P3-1: an older MATCHED never overwrites a newer outcome', async () => {
+  const t0 = await decisionClock(db);
+  await recordMatchOutcome(db, app.id, { role: 'x' }, 'NO_WORKER', 'NOBODY_FREE');
+  await recordMatchOutcome(db, app.id, { role: 'x' }, 'MATCHED', null, t0);
+  expect((await latest())[0]).toMatchObject({ role: 'x', outcome: 'NO_WORKER' });
+});
+
+it('Anne: an attempt that waited on the worker lock and then re-read nobody free is stamped AFTER the success that committed meanwhile', async () => {
+  const w = await worker('reviewer');
+  const t = await create({ requirements: { role: 'reviewer' } });
+  await db.agentTask.update({ where: { id: t.id }, data: { matchPending: true } });
+  let attempt: Promise<void> | null = null;
+  await db.$transaction(async (tx) => {
+    await lockWorkersForAssignment(tx, [w.id]);
+    attempt = matchTaskNow(db, t.id, new Date()); // judges the snapshot (worker free), then waits on the lock
+    await new Promise(r => setTimeout(r, 500));
+    // meanwhile another attempt took the worker's place: its session ended and a MATCHED was recorded
+    await tx.$executeRaw`UPDATE sessions SET ended_at = now() WHERE worker_id = ${w.id}`;
+    await recordMatchOutcome(tx, app.id, { role: 'reviewer' }, 'MATCHED');
+  });
+  await attempt;
+  expect((await latest({ windowHours: 24, family: null, role: 'reviewer' }))[0]).toMatchObject({ outcome: 'NO_WORKER', reason: 'NOBODY_FREE' });
 });
