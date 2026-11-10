@@ -43,6 +43,19 @@ async function finished(n: number) {
   }
 }
 
+/** n started parents; the first `open` have an open child, the rest only a finished one. */
+async function parents(n: number, open: number) {
+  const now = new Date();
+  for (let i = 0; i < n; i++) {
+    const base = { appId, ownerUserId: ownerId, assigneeWorkerId: workerId, assignedAt: now, createdByWorkerId: workerId, startedAt: now };
+    const parent = await db.agentTask.create({ data: { ...base, title: `p${i}`, status: 'started' } });
+    const child = i < open
+      ? { ...base, title: `c${i}`, status: 'started', parentTaskId: parent.id }
+      : { ...base, title: `c${i}`, status: 'finished', finishedAt: now, resultOutcome: 'succeeded', resultSummary: 's', resultEvidence: 'e', parentTaskId: parent.id };
+    await db.agentTask.create({ data: child as any });
+  }
+}
+
 /** The list page and every per-row field resolver the CLI's task fragment selects, started in one pass like GraphQL does. */
 async function wide(ctx: Context) {
   const rows: any[] = await Q.agentTasks(null, { appRef: appId, limit: 200 }, ctx);
@@ -106,4 +119,19 @@ describe('#3867 list cost', () => {
     const result = await F.AgentTask.result(row, {}, owner);
     expect((await F.AgentTaskResult.findings(result, { limit: 10 })).total).toBe(1);
   });
+
+  it('answers waitingOnChildren from one batched open-child query, whatever the page size', async () => {
+    await parents(2, 1);
+    const a = counted(ownerId);
+    const small = await wide(a.ctx);
+    const nSmall = a.count();
+    const waiting = (r: { rows: any[]; out: any[] }) => new Map(r.rows.map((row, i) => [row.title, r.out[i].waiting]));
+    expect(waiting(small).get('p0')).toBe(true);
+    expect(waiting(small).get('p1')).toBe(false);
+    await parents(10, 4); // adds 4 more open-child parents and 6 with only a finished child
+    const b = counted(ownerId);
+    const large = await wide(b.ctx);
+    expect(large.out.filter((o) => o.waiting)).toHaveLength(5);
+    expect(b.count()).toBe(nSmall);
+  }, 60000);
 });

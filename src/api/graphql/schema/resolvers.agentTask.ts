@@ -3093,10 +3093,10 @@ function tickBatch<K, V>(flush: (ctx: Context, keys: K[]) => Promise<Map<K, V>>,
     });
 }
 
-const workerPartyOf = tickBatch<string, PartyView>(async (ctx, ids) => {
+const workerPartyOf = tickBatch<string, PartyView | null>(async (ctx, ids) => {
   const rows = await ctx.db.worker.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, slug: true, app: { select: { urn: true } } } });
   return new Map(rows.map((w) => [w.id, { kind: 'WORKER' as const, id: w.id, name: w.name, urn: composeWorkerUrn(w.app.urn, w.slug) }]));
-}, null as unknown as PartyView);
+}, null);
 const userPartyOf = tickBatch<string, { id: string; handle: string | null } | null>(async (ctx, ids) => {
   const rows = await ctx.db.user.findMany({ where: { id: { in: ids } }, select: { id: true, handle: true } });
   return new Map(rows.map((u) => [u.id, u]));
