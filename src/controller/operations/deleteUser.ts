@@ -485,6 +485,9 @@ async function runDeletionTxn(
       // Last among the writes that lock grant rows, so the grant row lock is the last lock this transaction takes.
       await endHeldGrants(tx, 'user', targetUserId);
       await tx.$executeRaw`UPDATE grants SET issuer_user_id = NULL WHERE issuer_user_id = ${targetUserId}`;
+      // #3813 / cor:acl:140:08, ruling 0265: a requester's link dies in this same erasure transaction.
+      // This is not a signed term; grant state, reason and signature bytes stay unchanged.
+      await tx.$executeRaw`UPDATE grants SET requested_by_user_id = NULL WHERE requested_by_user_id = ${targetUserId}`;
 
       // ── 5. #1631 PR3 / cor:aut:040:05 (#10404): passkey records ────────
       // Each record stays as a verification record (public key, credential id, times, window outcome); its
