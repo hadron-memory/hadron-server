@@ -39,6 +39,25 @@ export async function loadAccountUsageHistory(db: Context['db'], appId: string, 
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: maxRows,
     });
+    // The cap can hide another identity of an under-qualified selector (same label, other host or family) behind a busy one,
+    // and with it the ambiguity refusal. When the cap was hit, probe once for a row of any other identity and keep it.
+    if (rows.length >= maxRows && (sel.host == null || sel.family == null)) {
+      const seen = parseUsageSnapshot(rows[0]!.properties, now);
+      if (seen) {
+        const other = await db.node.findFirst({
+          where: {
+            memoryId: { in: memoryIds },
+            objectType: ACCOUNT_USAGE_COLLECTION,
+            deletedAt: null,
+            AND: [{ properties: { path: ['label'], equals: wanted } }, ...identity],
+            NOT: [{ AND: [{ properties: { path: ['host'], equals: seen.host ?? '' } }, { properties: { path: ['family'], equals: seen.family ?? '' } }] }],
+            createdAt: { gte: new Date(now.getTime() - HISTORY_DAYS * 24 * 3_600_000) },
+          },
+          select: { properties: true },
+        });
+        if (other) rows.push(other);
+      }
+    }
     for (const row of rows) {
       const snap = parseUsageSnapshot(row.properties, now);
       if (!snap || snap.label !== wanted

@@ -237,6 +237,13 @@ describe('self-moves judged on the resolved identity, and the per-account histor
     expect(got!.length).toBe(5);
     expect(new Set(got!.map((x) => x.host))).toEqual(new Set(['h1']));
   });
+  it('an unqualified read whose cap a busy host fills still sees the other host, so the ambiguity is refused, not masked', async () => {
+    const { loadAccountUsageHistory } = await import('../../../lib/accountUsage/load.js');
+    await snapshot({ label: 'amb', minutesAgo: 200, sevenPct: 5, extra: { host: 'h2' } });
+    for (let m = 0; m < 10; m += 1) await snapshot({ label: 'amb', minutesAgo: m, sevenPct: 10, extra: { host: 'h1' } });
+    const [got] = await loadAccountUsageHistory(db as any, app.id, new Date(), [{ label: 'amb' }], 5);
+    expect(new Set(got!.map((x) => x.host))).toEqual(new Set(['h1', 'h2']));
+  });
   it('a same-label move to another host reads that host own history, apart from the source', async () => {
     await burn('src', 30, 1, { extra: { host: 'h1' } });
     await burn('src', 20, 2, { extra: { host: 'h2' } });
