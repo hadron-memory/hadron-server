@@ -73,6 +73,7 @@ import { launchForAssignment } from '../hostOperations/launch.js';
 import { PENDING_SESSION_END_SQL } from '../hostOperations/sessionEnd.js';
 import { normalizeFamily, tierOf, type ModelTier } from './family.js';
 import { effectiveModelGroups, modelGroupsAllowed, normalizeModelGroupName, type EffectiveModelGroup } from './modelGroups.js';
+import { combinationsOf, recordMatchOutcome } from './matchOutcomes.js';
 import { locateTeamAgent } from '../../api/graphql/schema/resolvers.worker.js';
 
 /** On since T6 (#1709): a host can start an unbound worker, so the matcher assigns to one (see the file header). */
@@ -531,6 +532,9 @@ async function tryAssignInTx(
     },
   });
   if (n.count === 0) return 'task-gone';
+  // #3825 (cor:agt:060:13, V44): a decided match, recorded with the assignment it belongs to: a lost claim (count 0, above)
+  // records nothing, and a rollback takes the record with it.
+  await recordMatchOutcome(tx, task.appId, parseRequirements(currentTask.requirements), 'MATCHED');
   await appendTaskEvent(tx, {
     appId: task.appId, taskId: task.id, actor: PLATFORM_ACTOR, createdAt: now,
     event: { type: 'assignment.matched', assignee: { workerId }, family, closeSessionWhenDone: task.closeSessionWhenDone },
@@ -555,6 +559,16 @@ async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: Match
   let groups: EffectiveModelGroup[] = [];
   let covering: Map<string, StopSignal[]> | null = null;
   const spent = new Set<string>();
+  // #3825: combinations already recorded as failing in this pass (cleared by an assignment), so a long queue of one shape
+  // writes its row once, not once per task. The sweep has no per-candidate reason: nobody free is the coarse one.
+  const failedKeys = new Set<string>();
+  const recordSweepFailure = async (task: QueuedTask) => {
+    const req = parseRequirements(task.requirements);
+    const key = JSON.stringify(combinationsOf(req));
+    if (failedKeys.has(key)) return;
+    failedKeys.add(key);
+    await recordFailure(db, appId, task.requirements, req.invalid ? 'REQUIREMENTS_EXCLUDED' : 'NOBODY_FREE');
+  };
   let after: { priority: number; createdAt: Date; id: string } | null = null;
   for (;;) {
     const page: (QueuedTask & { priority: number; createdAt: Date })[] = await db.agentTask.findMany({
@@ -580,16 +594,22 @@ async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: Match
         .sort((a, b) => tierPreference(workerTier(a)) - tierPreference(workerTier(b)) || compareRank(a, b));
     }
     for (const task of page) {
-      if (spent.size === candidates.length) return out;
+      if (spent.size === candidates.length) {
+        // #3825: nobody is left free for the rest of this page: a decided no-worker outcome for each.
+        for (const rest of page.slice(page.indexOf(task))) await recordSweepFailure(rest);
+        return out;
+      }
       // R71: not matched while its creator is under a pause or halt.
       if (task.createdByWorkerId && timeStoppedWorkers(covering!).has(task.createdByWorkerId)) continue;
       const req = parseRequirements(task.requirements);
       const team = req.teamWorkerId ? await matchingTeamPool(db, appId, req.teamWorkerId) : null;
+      let decided = false;
       for (const w of candidates) {
         if (spent.has(w.id) || (team && !team.has(w.id))) continue;
         const family = eligibleFor(req, w, groups);
         if (!family) continue;
         const outcome = await tryAssign(db, task, w.id, family, now, hooks, anchor);
+        if (outcome === 'assigned') { decided = true; failedKeys.clear(); }
         // Assigned, or no longer free: either way this worker is spent for this run.
         if (outcome !== 'task-gone') spent.add(w.id);
         if (outcome === 'assigned') {
@@ -597,8 +617,11 @@ async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: Match
           // #1709 (cor:agt:070:08): a matched worker with no live session is started through its host.
           if (!w.live) await launchForAssignment(db, { appId, taskId: task.id, workerId: w.id, family }, now, anchor);
         }
-        if (outcome !== 'worker-not-free') break;
+        if (outcome !== 'worker-not-free') { decided = true; break; }
       }
+      // #3825: every free candidate was tried or skipped and none took it: a decided no-worker outcome. A task that
+      // left the queue under the attempt ('task-gone') is no decision.
+      if (!decided) await recordSweepFailure(task);
     }
     if (page.length < QUEUE_PAGE) break;
   }
@@ -737,9 +760,20 @@ export async function matchTaskNow(db: PrismaClient, taskId: string, now: Date, 
     return;
   }
   const { reason } = outcome;
-  await db.agentTask.updateMany({ where: { id: taskId, matchPending: true, status: 'pending', assigneeWorkerId: null, assigneeUserId: null,
+  const marked = await db.agentTask.updateMany({ where: { id: taskId, matchPending: true, status: 'pending', assigneeWorkerId: null, assigneeUserId: null,
     matchClaimedAt: claim ?? null },
     data: { matchPending: false, matchFailedAt: new Date(), matchFailedReason: reason } });
+  // #3825: the failure is a decided outcome only while this attempt still owned the reservation (the guarded write above).
+  if (marked.count === 1) await recordFailure(db, task.appId, task.requirements, reason);
+}
+
+/** #3825: record a no-worker outcome; a failure to record never fails or retries the match (logged). */
+async function recordFailure(db: Db, appId: string, requirements: Prisma.JsonValue | null, reason: MatchFailureReason): Promise<void> {
+  try {
+    await recordMatchOutcome(db, appId, parseRequirements(requirements), 'NO_WORKER', reason);
+  } catch (err) {
+    console.error('[task-matcher] recording a match outcome failed:', err);
+  }
 }
 
 /**
