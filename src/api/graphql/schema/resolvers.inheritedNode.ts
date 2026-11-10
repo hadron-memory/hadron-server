@@ -43,12 +43,14 @@ async function inheritedEdges(parent: { id: string; inheritedFrom?: InheritedFro
   const via = parent.inheritedFrom?.via;
   if (!via) return [];
   const load = async (remaining?: number) => {
-    const resolved = await resolveInheritedEdges(ctx.db, {
+    const args = {
       nodeId: parent.id, via, direction,
-      canReadMemory: (memoryId) => isMemoryReadableCached(ctx, memoryId),
-      maxResults: remaining, identityOnly: remaining !== undefined,
+      canReadMemory: (memoryId: string) => isMemoryReadableCached(ctx, memoryId),
       onLimit: batchReadEdgeOverflow,
-    });
+    };
+    const resolved = remaining === undefined
+      ? await resolveInheritedEdges(ctx.db, args)
+      : await resolveInheritedEdges(ctx.db, { ...args, maxResults: remaining, identityOnly: true });
     return resolved.map(({ edge, endpoint }) => {
       if (remaining === undefined) return direction === 'out'
         ? { ...edge, sourceId: parent.id, source: parent, targetId: endpoint.id, target: endpoint }

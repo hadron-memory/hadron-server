@@ -405,14 +405,16 @@ type InheritedEdgeArgs = {
   via: string;
   direction: 'out' | 'in';
   canReadMemory: (memoryId: string) => Promise<boolean>;
-  /** Batch reads bound retained authorized results and page raw edge metadata, not endpoint bodies. */
-  maxResults?: number;
   /** MCP projections render endpoint identity/name, never endpoint bodies. */
   endpointMetadataOnly?: boolean;
-  /** GraphQL batch edge objects hydrate a selected endpoint lazily, after the shared edge budget. */
-  identityOnly?: boolean;
+  /** Called when admitted results exceed the shared edge budget. */
   onLimit?: () => never;
-};
+} & (
+  // Only the bounded hydration path selects identity-only endpoint rows;
+  // maxResults bounds retained authorized results and pages raw edge metadata.
+  | { identityOnly: true; maxResults: number }
+  | { identityOnly?: false; maxResults?: number }
+);
 /**
  * #1893 (cor:dmo:050:14; Holger, team chat #10968 item 2) — an inherited
  * node's edges, read through the child it came through, resolved the way
