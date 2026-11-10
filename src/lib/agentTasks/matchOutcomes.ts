@@ -88,7 +88,8 @@ export async function recordMatchOutcome(
   //  - a late MATCHED ends a streak that began before it: the streak restarts after it, at the latest failure we know of
   //    (an upper bound: an earlier failure between the two was already folded into the row and cannot be recovered);
   //  - a late NO_WORKER after the last known match moves the streak start back to it.
-  // `last_matched_at` is the newest MATCHED decision ever seen, late or not, so a late failure older than it is ignored.
+  // `last_matched_at` is the newest MATCHED decision ever seen, late or not, so a late failure older than it is ignored
+  // (on a row that predates the column, the migration's floor: its latest failure then, #3883).
   // The upsert row-locks the row, so concurrent writers apply one after another; only their ARRIVAL order varies.
   await db.$executeRaw(Prisma.sql`
     INSERT INTO agent_match_outcomes (app_id, family, tier, role, outcome, reason, decided_at, failing_since, last_matched_at)

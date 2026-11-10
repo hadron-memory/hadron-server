@@ -7107,7 +7107,8 @@ model AgentMatchOutcome {
   decidedAt     DateTime  @map("decided_at") @db.Timestamp(6)
   failingSince  DateTime? @map("failing_since") @db.Timestamp(6)
   /// The newest MATCHED decision seen, including one that arrived after a newer outcome; it orders late writes against
-  /// the streak (#3825 follow-up). Never read outside `recordMatchOutcome`.
+  /// the streak (#3825 follow-up). The migration seeds a pre-existing NO_WORKER row with its latest failure instead: the
+  /// floor no older late failure joins (#3883). Never read outside `recordMatchOutcome`.
   lastMatchedAt DateTime? @map("last_matched_at") @db.Timestamp(6)
 
   app App @relation(fields: [appId], references: [id], onDelete: Cascade)
