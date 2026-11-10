@@ -152,3 +152,54 @@ describe('#3819 transport and window boundaries', () => {
     expect(await capture(()=>read({windowHours:0},ctx(outsiderId)))).toEqual(await capture(()=>Q.teamRoster({},{appRef:appId},ctx(outsiderId))));
   });
 });
+
+// Independent LOCAL findings: isolate every history guard from current task ownership.
+describe('#3819 LOCAL history discriminators', () => {
+  it('an assignment older than the window does not make a worker with no current task busy', async () => {
+    const id=await worker();
+    await db.agentTeamEvent.create({data:{appId,type:'task.assigned',subjectWorkerId:id,createdAt:ago(30),payload:{assignee:{workerId:id}}}});
+    expect((await read()).combinations[0].busyWorkers).toBe(0);
+  });
+  it('an automatic assignment.matched event counts its former holder without a current task', async () => {
+    const id=await worker();
+    await db.agentTeamEvent.create({data:{appId,type:'assignment.matched',subjectWorkerId:id,createdAt:ago(1),payload:{assignee:{workerId:id},family:'claude'}}});
+    expect((await read()).combinations[0].busyWorkers).toBe(1);
+  });
+  it('a hand-back uses the newest assignment BEFORE it, not the oldest or a future assignment', async () => {
+    const [a,b,c]=await Promise.all([worker({role:'first'}),worker({role:'returned'}),worker({role:'future'})]);
+    const t=await db.agentTask.create({data:{appId,title:'History chain',ownerUserId:memberId,createdAt:ago(60)}});
+    await db.agentTeamEvent.createMany({data:[
+      {appId,taskId:t.id,type:'task.assigned',subjectWorkerId:a,createdAt:ago(48),payload:{assignee:{workerId:a}}},
+      {appId,taskId:t.id,type:'task.reassigned',subjectWorkerId:b,createdAt:ago(30),payload:{from:{workerId:a},to:{workerId:b}}},
+      {appId,taskId:t.id,type:'task.handed-back',actorWorkerId:a,createdAt:ago(1),payload:{code:'missing_input'}},
+      {appId,taskId:t.id,type:'task.assigned',subjectWorkerId:c,createdAt:ago(-1),payload:{assignee:{workerId:c}}},
+    ]});
+    const rows=(await read()).combinations;
+    expect(Object.fromEntries(rows.map((r:any)=>[r.role,r.busyWorkers]))).toEqual({first:0,returned:1,future:0});
+  });
+  it('a hand-back recognizes a prior automatic assignment.matched as its last assignment', async () => {
+    const id=await worker();
+    const t=await db.agentTask.create({data:{appId,title:'Matched then returned',ownerUserId:memberId,createdAt:ago(60)}});
+    await db.agentTeamEvent.createMany({data:[
+      {appId,taskId:t.id,type:'assignment.matched',subjectWorkerId:id,createdAt:ago(30),payload:{assignee:{workerId:id},family:'claude'}},
+      {appId,taskId:t.id,type:'task.handed-back',createdAt:ago(1),payload:{code:'missing_input'}},
+    ]});
+    expect((await read()).combinations[0].busyWorkers).toBe(1);
+  });
+  it.each([{family:'not a token'}, {tier:'ultra'}])('refuses invalid combination filters %j after admission', async args=>{
+    await expect(read(args)).rejects.toMatchObject({extensions:{code:'BAD_USER_INPUT'}});
+  });
+  it('a cancelled task held inside the window counts, an earlier cancellation does not', async()=>{
+    const [a,b]=await Promise.all([worker({role:'recent'}),worker({role:'old'})]);
+    await task(a,{status:'cancelled',cancelledAt:ago(1)});
+    await task(b,{status:'cancelled',cancelledAt:ago(30)});
+    expect(Object.fromEntries((await read()).combinations.map((r:any)=>[r.role,r.busyWorkers]))).toEqual({recent:1,old:0});
+  });
+  it('equal counts and utilization break ties by family and tier names',async()=>{
+    await worker({family:'glm',model:null});
+    await worker({family:'codex',model:null});
+    await worker({family:'claude',model:'claude-sonnet-5-5'});
+    await worker({family:'claude',model:'claude-opus-5-5'});
+    expect((await read()).combinations.map((r:any)=>[r.family,r.tier])).toEqual([['claude','high'],['claude','mid'],['codex',null],['glm',null]]);
+  });
+});
