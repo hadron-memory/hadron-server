@@ -69,10 +69,10 @@ describe('grant read path (Grant.signatureStatus, grantStatus.ts)', () => {
   beforeEach(async () => { w = await seedWorld(); });
 
   /** A worker-held grant with one completed request and its record, made by user2's own soft passkey over the real payload. */
-  async function signGrant(): Promise<{ g: string; s: string; passkeyId: string }> {
+  async function signGrant(opts: { pinHash?: string; signerId?: string } = {}): Promise<{ g: string; s: string; passkeyId: string }> {
     const g = await insertGrant(w, { user_id: null, worker_id: w.workerId });
     const row = await db.grant.findUniqueOrThrow({ where: { id: g } });
-    const termsHash = grantTermsHash(grantTermsFromRow({
+    const termsHash = opts.pinHash ?? grantTermsHash(grantTermsFromRow({
       appId: row.appId, userId: row.userId, agentId: row.agentId, workerId: row.workerId, granteeAppId: row.granteeAppId,
       action: row.action, values: row.values, startsAt: row.startsAt, expiresAt: row.expiresAt, maxUses: row.maxUses, reason: row.reason,
     }));
@@ -89,7 +89,7 @@ describe('grant read path (Grant.signatureStatus, grantStatus.ts)', () => {
     await exec(`INSERT INTO grant_signatures (id, grant_id, signing_request_id, signer_id, passkey_credential_id, version, terms_hash,
         holder_kind, holder_id, payload_version, rp_id, authenticator_data, client_data_json, signature)
       VALUES ($1, $2, $3, $4, $5, 1, $6, 'worker', $7, $8, $9, $10, $11, $12)`,
-    s, g, r, w.user2Id, passkeyId, termsHash, w.workerId, GRANT_SIGNATURE_PAYLOAD_V1, RP, a.authenticatorData, a.clientDataJson, a.signature);
+    s, g, r, opts.signerId ?? w.user2Id, passkeyId, termsHash, w.workerId, GRANT_SIGNATURE_PAYLOAD_V1, RP, a.authenticatorData, a.clientDataJson, a.signature);
     await exec(`UPDATE grant_signing_requests SET state = 'completed' WHERE id = $1`, r);
     return { g, s, passkeyId };
   }
@@ -115,10 +115,30 @@ describe('grant read path (Grant.signatureStatus, grantStatus.ts)', () => {
     expect(await status(g)).toEqual({ state: null, signatures: [], integrityProblems: 1 });
   });
 
+  /** A superseded record: it verifies over terms other than the row's (grants are append-only), so it reads EARLIER, not CURRENT. */
+  const signSuperseded = () => signGrant({ pinHash: 'd'.repeat(64) });
+
+  it('control: a superseded record that is otherwise intact reads EARLIER, credited to its signer', async () => {
+    const { g, s } = await signSuperseded();
+    const st = await status(g);
+    expect(st).toMatchObject({ state: 'EARLIER', integrityProblems: 0 });
+    expect(st.signatures.map((x) => [x.id, x.signerId])).toEqual([[s, w.user2Id]]);
+  });
+
+  it('a superseded record whose signer_id alone was changed is an integrity problem, never listed as EARLIER', async () => {
+    const { g, s } = await signSuperseded();
+    await forge('grant_signatures', s, 'signer_id = $2', w.userId);
+    expect(await status(g)).toEqual({ state: null, signatures: [], integrityProblems: 1 });
+  });
+
   it('control: a corrupt assertion is still an integrity problem', async () => {
     const { g, s } = await signGrant();
     await corrupt('grant_signatures', s);
     expect(await status(g)).toEqual({ state: null, signatures: [], integrityProblems: 1 });
+  });
+
+  it('control: an INSERT naming a signer who does not own the passkey is refused by the write guard', async () => {
+    await expect(signGrant({ signerId: w.userId })).rejects.toThrow(/signer's own unrevoked passkey/);
   });
 
   it('control: an ordinary UPDATE of signer_id is refused by the append-only guard', async () => {
@@ -165,7 +185,7 @@ describe('node read path (Node.signatureStatus, status.ts)', () => {
   });
 
   /** One completed request and its record, through the real completion path. */
-  async function signNode(): Promise<string> {
+  async function signNode(as: string = signerId): Promise<string> {
     const req = await db.$transaction((tx) => createSigningRequestInTransaction(tx, nodeId, {
       memoryId, requester: { userId: otherId, appId: null, workerId: null, sessionId: null }, mayWrite: async () => true,
     }));
@@ -174,7 +194,7 @@ describe('node read path (Node.signatureStatus, status.ts)', () => {
       origin: ORIGIN, rpId: RP,
     });
     await db.$transaction((tx) => completeSigningRequestInTransaction(tx, req.id, {
-      memoryId, signerId, credentialId: key.credentialId, assertion, mayWrite: async () => true,
+      memoryId, signerId: as, credentialId: key.credentialId, assertion, mayWrite: async () => true,
     }));
     return (await db.nodeSignature.findFirstOrThrow({ where: { signingRequestId: req.id } })).id;
   }
@@ -200,10 +220,33 @@ describe('node read path (Node.signatureStatus, status.ts)', () => {
     expect(await status()).toEqual({ state: null, signatures: [], integrityProblems: 1 });
   });
 
+  /** Supersede the record: the node's content changes after it was signed (EARLIER, not CURRENT). */
+  const supersede = () => db.node.update({ where: { id: nodeId }, data: { content: 'Retention is 90 days.' } });
+
+  it('control: a superseded record that is otherwise intact reads EARLIER, credited to its signer', async () => {
+    const s = await signNode();
+    await supersede();
+    const st = await status();
+    expect(st).toMatchObject({ state: 'EARLIER', integrityProblems: 0 });
+    expect(st.signatures.map((x) => [x.id, x.signerId])).toEqual([[s, signerId]]);
+  });
+
+  it('a superseded record whose signer_id alone was changed is an integrity problem, never listed as EARLIER', async () => {
+    const s = await signNode();
+    await supersede();
+    await forge('node_signatures', s, 'signer_id = $2', otherId);
+    expect(await status()).toEqual({ state: null, signatures: [], integrityProblems: 1 });
+  });
+
   it('control: a corrupt assertion is still an integrity problem', async () => {
     const s = await signNode();
     await corrupt('node_signatures', s);
     expect(await status()).toEqual({ state: null, signatures: [], integrityProblems: 1 });
+  });
+
+  it('control: completing through the real write path as a user who does not own the passkey is refused, and no record is written', async () => {
+    await expect(signNode(otherId)).rejects.toThrow(/did not verify/);
+    expect(await db.nodeSignature.count({ where: { nodeId } })).toBe(0);
   });
 
   it('control: an ordinary UPDATE of signer_id is refused by the append-only guard', async () => {
