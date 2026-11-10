@@ -33,6 +33,9 @@ import { withCompileWrite } from '../lib/bootPrompt.js';
 import { sha256Hex } from '../lib/bootCompile/provenance.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 import { ensureChannelWithRoot } from '../lib/channels.js';
+import { readAgentServedBootPrompt } from '../api/graphql/schema/resolvers.bootPromptPointer.js';
+import { runAuthContext } from '../lib/auth/runPrincipal.js';
+import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -192,7 +195,7 @@ async function expectRefused(token: string, v: { a: string; p?: string | null },
 
 async function compiledNode(content: string, approved: boolean): Promise<string> {
   const id = await serveAgentBootPrompt(db, agentId, content);
-  if (!approved) await db.node.update({ where: { id }, data: { approvedRevNo: null, approvedAt: null, approvalHash: null } });
+  if (!approved) await db.node.update({ where: { id }, data: { approvedRevNo: null, approvedAt: null, approvedByInfo: null, approvalHash: null } });
   return id;
 }
 const pointer = (id: string | null) => ({ bootPromptNodeId: id, bootPromptUrn: id ? `u:${id}` : null });
@@ -290,6 +293,69 @@ describe('4, 5: masking, judged before anything is resolved', () => {
     await expectMasked(tokens.admin, { a: agentId, p: otherAppId });
   });
 
+  it('5: each App-arm gate masks on its own (participation, the own-App key rule, the chat audience)', async () => {
+    // Participation alone: an org reader may chat with the Agent and read its system memory, but is not a participant
+    // of App P (an org App admits CONTRIBUTOR+ or an AppMember). The Agent-only arm stays readable to them.
+    await expectMasked(tokens.member, { a: agentId, p: appId });
+    expect((await gql(tokens.member, { a: agentId })).data!.agentServedBootPrompt!.text).toBe(rendered());
+
+    // The own-App key rule alone: a key for App Z, which ALSO installs the Agent (so the chat gate admits that key),
+    // names App P. Control: the same key reads its own App.
+    const z = await db.app.create({ data: { organizationId: orgId, name: 'Zed', urn: 'bp3843.test:zed' } });
+    await db.appAgent.create({ data: { appId: z.id, agentId } });
+    const zKey = await appKey(z.id);
+    expect((await gql(zKey, { a: agentId, p: z.id })).data!.agentServedBootPrompt!.text).toBe(rendered());
+    await expectMasked(zKey, { a: agentId, p: appId });
+
+    // The chat audience alone: App P installs another organisation's Agent. A CONTRIBUTOR of P's org participates in P,
+    // the Agent is installed and P is an org App (licence rule n/a), but the caller can't chat with an Agent of an org
+    // they are not in and through no App they are a member of.
+    const org2 = await db.organization.create({ data: { name: 'Publisher3843', urn: 'pub3843.test' } });
+    const sys2 = await db.memory.create({ data: { class: 'system', organizationId: org2.id, name: 'System', urn: 'pub3843.test:system' } });
+    const foreign = await db.agent.create({ data: { organizationId: org2.id, name: 'Foreign', urn: 'pub3843.test:foreign', visibility: 'ORGANIZATION', systemMemoryId: sys2.id } });
+    await serveAgentBootPrompt(db, foreign.id, 'Foreign text.');
+    await db.appAgent.create({ data: { appId, agentId: foreign.id } });
+    const contributor = await db.user.create({ data: { handle: 'bp3843-contrib', roles: ['READER'] } });
+    await db.orgMember.create({ data: { organizationId: orgId, userId: contributor.id, role: 'CONTRIBUTOR' } });
+    await expectMasked(await userKey(contributor.id), { a: foreign.id, p: appId });
+  });
+
+  it('5 (amendment 6766414749): principal shape — own key reads, anonymous, run-shaped and hybrid-selection callers do not', async () => {
+    // Own-App key positive, on both surfaces.
+    const own = await both(tokens.appKey, { a: agentId, p: appId });
+    expect(own.g.data!.agentServedBootPrompt!.text).toBe(rendered());
+    expect(bodyOf(own.t)).toBe(rendered());
+    // Anonymous over real GraphQL: the not-found a nonexistent Agent gets.
+    const anon = async (a: string) => (await fetch(`${base}/graphql`, { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ query: QUERY, variables: { a, p: appId } }) }).then((r) => r.json())) as Gql;
+    expect(wireRefusal(await anon(agentId))).toBe(wireRefusal(await anon(GHOST)).split(GHOST).join(agentId));
+    // The resolver itself, for principals HTTP can't mint: answers compared with a nonexistent Agent's.
+    const read = async (ctx: Context, a: string) => { try { await readAgentServedBootPrompt(ctx, { agentRef: a, appRef: appId }); return 'SERVED'; }
+      catch (e) { return `${(e as { code?: string }).code ?? (e as Error).name}: ${(e as Error).message.split(a).join('<A>')}`; } };
+    const masked = async (ctx: Context) => { const want = await read(ctx, GHOST); expect(want).toMatch(/AGENT_NOT_FOUND|AgentNotFound/); expect(await read(ctx, agentId)).toBe(want); };
+    // A headless run of App P with no person: its appId is not an App key.
+    await masked({ db, ...runAuthContext({ id: generateId(), appId, userId: null, organizationId: orgId }) } as unknown as Context);
+    // Even with an appKeyId copied in, a run-shaped principal is not an App key.
+    const keyRow = await db.appKey.findFirstOrThrow({ where: { appId } });
+    await masked({ db, ...runAuthContext({ id: generateId(), appId, userId: null, organizationId: orgId }), appKeyId: keyRow.id } as unknown as Context);
+    // A hybrid: a person with App P SELECTED but no participation of their own is judged on the person. `member` is an
+    // org reader (the chat gate admits them), so only the person-first rule masks this.
+    await masked({ db, userId: (await db.user.findFirstOrThrow({ where: { handle: 'bp3843-member' } })).id, appId, roles: ['READER'] } as unknown as Context);
+    // An App id with no person and no App key behind it (not a run either) is not an App key.
+    await masked({ db, appId, roles: [], clientId: 'client:x' } as unknown as Context);
+    // Control: the real own-App key principal on the resolver reads.
+    expect(await read({ db, appId, appKeyId: keyRow.id, roles: [] } as unknown as Context, agentId)).toBe('SERVED');
+  });
+
+  it('5: revoked participation and a deleted App are masked', async () => {
+    expect((await gql(tokens.member, { a: agentId, p: personalAppId })).data!.agentServedBootPrompt!.text).toBe(rendered());
+    await db.appMember.delete({ where: { appId_userId: { appId: personalAppId, userId: (await db.user.findFirstOrThrow({ where: { handle: 'bp3843-member' } })).id } } });
+    await expectMasked(tokens.member, { a: agentId, p: personalAppId });
+    expect((await gql(tokens.admin, { a: agentId, p: appId })).data!.agentServedBootPrompt!.text).toBe(rendered());
+    await db.app.update({ where: { id: appId }, data: { deletedAt: new Date() } });
+    await expectMasked(tokens.admin, { a: agentId, p: appId });
+  });
+
   it('5: a lapsed App licence is masked as not-found, never the typed INSTALL_LICENSE_INACTIVE (control: served while it holds)', async () => {
     const live = await both(tokens.member, { a: agentId, p: personalAppId });
     expect(live.g.errors).toBeUndefined();
@@ -350,12 +416,17 @@ describe('7: no binding, no record, for every credential', () => {
   });
 
   it('a session that was served an older revision does not change the answer: it is the current serve', async () => {
-    const newer = await compiledNode('Newer approved text.', true);
+    // A worker session that was served the Agent's first revision; then a newer one is approved.
+    const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId, agentId, name: 'Iris', slug: 'iris', heldByUserId: adminId } });
+    const served = (await db.session.create({ data: { id: generateId(), appId, userId: adminId, workerId: worker.id, agentId, type: 'DEVELOPER', startedAt: new Date() } })).id;
     await db.servedPrompt.create({ data: {
-      id: generateId(), kind: 'BIND', sessionId, appId, agentId, pointerLevel: 'AGENT', compiledNodeId: agentCompiledId,
+      id: generateId(), kind: 'BIND', sessionId: served, workerId: worker.id, appId, agentId, pointerLevel: 'AGENT', compiledNodeId: agentCompiledId,
       servedRevSeq: 1, provenanceRevSeq: 1, compiledContentHash: sha256Hex(PROMPT),
     } });
-    const { g, t } = await both(tokens.signIn, { a: agentId, p: appId }, sessionId);
+    const newer = await compiledNode('Newer approved text.', true);
+    const records = await db.servedPrompt.count();
+    const { g, t } = await both(tokens.signIn, { a: agentId, p: appId }, served);
+    expect(await db.servedPrompt.count()).toBe(records);
     expect(g.data!.agentServedBootPrompt).toMatchObject({ text: 'Newer approved text.', decision: { compiledNodeId: newer } });
     expect(bodyOf(t)).toBe('Newer approved text.');
   });

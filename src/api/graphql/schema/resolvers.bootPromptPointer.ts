@@ -26,7 +26,17 @@ import {
   type ResolvedBootPromptPointer,
   type StoredBootPromptPointer,
 } from '../../../lib/bootPromptPointer.js';
-import { previewServedBootPrompt, type BootPromptServeOutcome } from '../../../lib/bootPrompt/serve.js';
+import { previewServedBootPrompt, resolveServedBootPrompt, type BootPromptServeOutcome } from '../../../lib/bootPrompt/serve.js';
+import { resolveAppInstallation } from '../../../lib/appInstallations.js';
+import { mayReadAsAppParticipant } from '../../../lib/auth/appParticipantRead.js';
+import { personalOrgAgentServeAllowed } from '../../../lib/auth/personalOrgAgentInstall.js';
+import { noWorkerVariables } from '../../../lib/bootPrompt/variables.js';
+import { clientReportedChatModel } from '../../../lib/bootPrompt/chatModel.js';
+import { applyPlatformVariables } from '../../../lib/personaDescription.js';
+import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
+import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { AgentNotFoundError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
+import { canChatWithAgent } from './agentChatAccess.js';
 
 type Pointer = Partial<StoredBootPromptPointer>;
 
@@ -157,4 +167,71 @@ export const bootPromptPointerFieldResolvers = {
   Agent: fields(agentPointer, bootPromptServeResolvers.Agent),
   AppAgent: fields(appAgentPointer, bootPromptServeResolvers.AppAgent),
   Worker: fields(workerPointer, bootPromptServeResolvers.Worker),
+};
+
+/**
+ * #3843 (cor:agt:040:05, :10; cor:dmo:150:08) — `Query.agentServedBootPrompt`, and through it MCP
+ * `hadron_agent_boot_prompt`: the compiled boot prompt a chat or run with this Agent (in this App) would be given NOW,
+ * rendered, for a caller that binds no worker (an MCP-only agent; cor:agt:020:03 is untouched because nothing binds).
+ *
+ * A pure read. It calls the serve resolver every surface uses (`resolveServedBootPrompt`, #2047) with no worker, fills
+ * the platform variables exactly as a chat does (`noWorkerVariables`: the Agent's values, the client-reported model or
+ * empty) and appends no derived blocks (those are composed on worker paths only). It records nothing: no ServedPrompt,
+ * no session, no run, and it never reads the caller's session, so the answer is the current serve, not what a session
+ * was given. A concurrent approval can change the answer between two calls.
+ *
+ * Every gate is judged BEFORE anything is resolved, and every failure answers exactly as a nonexistent `agentRef`
+ * (`AgentNotFoundError(agentRef)`), so a masked caller learns nothing, not even NOT_SET:
+ *  - Agent only: `maySeeAgentPointer` (the caller may read the Agent's system memory), as `Agent.bootPromptServe`.
+ *  - Agent + App: the App exists and is live and the caller participates in THAT App (`mayReadAsAppParticipant`: a
+ *    person by `isAppParticipant`, an App key for its own App only); the Agent is installed there; the serve licence
+ *    and text audience hold (`personalOrgAgentServeAllowed`, #3653, so a lapsed licence is masked as a chat masks it,
+ *    never the typed INSTALL_LICENSE_INACTIVE); and the caller may chat with the Agent (`canChatWithAgent`).
+ * Past the gate, a refusal is the serve's own typed BOOT_PROMPT_* error with `surface: 'chat'`, thrown, never an empty
+ * string. There is no worker argument: a worker's text is `Worker.prompt`, and a worker read over MCP was cut (#3208).
+ */
+export async function readAgentServedBootPrompt(
+  ctx: Context,
+  args: { agentRef: string; appRef?: string | null; llmModel?: string | null },
+): Promise<{
+  decision: { pointerLevel: string; compiledNodeId: string; servedRevSeq: number; provenanceRevSeq: number; compiledContentHash: string };
+  text: string;
+}> {
+  const llmModel = clientReportedChatModel(args.llmModel);
+  const masked = () => new AgentNotFoundError(args.agentRef);
+  const { id } = await resolveAgentRef(ctx.db, args.agentRef);
+  const agent = await ctx.db.agent.findUnique({
+    where: { id },
+    select: { id: true, name: true, urn: true, personaRole: true, systemMemoryId: true, organizationId: true, ownerUserId: true, visibility: true, deletedAt: true },
+  });
+  if (!agent || agent.deletedAt) throw masked();
+
+  let appId: string | null = null;
+  if (args.appRef == null) {
+    if (!(await maySeeAgentPointer(agent, ctx))) throw masked();
+  } else {
+    try {
+      appId = (await resolveAppRef(ctx.db, args.appRef)).id;
+    } catch (err) {
+      if (err instanceof AppNotFoundError) throw masked();
+      throw err;
+    }
+    const app = await loadApp(ctx, appId);
+    if (!app || app.deletedAt || !(await mayReadAsAppParticipant(ctx, app))) throw masked();
+    if (!(await resolveAppInstallation(ctx.db, appId, agent.id))) throw masked();
+    if (!(await personalOrgAgentServeAllowed(ctx.db, app, agent.id, ctx.userId))) throw masked();
+    if (!(await canChatWithAgent(ctx, agent))) throw masked();
+  }
+
+  const served = await resolveServedBootPrompt(ctx.db, { surface: 'chat', appId, agent: { id: agent.id, name: agent.name }, workerId: null });
+  const { pointerLevel, compiledNodeId, servedRevSeq, provenanceRevSeq, compiledContentHash } = served;
+  return {
+    decision: { pointerLevel, compiledNodeId, servedRevSeq, provenanceRevSeq, compiledContentHash },
+    text: applyPlatformVariables(served.content, noWorkerVariables(agent, llmModel)),
+  };
+}
+
+export const agentServedBootPromptQueries = {
+  agentServedBootPrompt: (_: unknown, args: { agentRef: string; appRef?: string | null; llmModel?: string | null }, ctx: Context) =>
+    readAgentServedBootPrompt(ctx, args),
 };
