@@ -104,8 +104,33 @@ export async function listGrantsForWorker(db: Db, reader: GrantReader, page: { t
   return { items: rows.map(view), total };
 }
 
+const personAudience = new WeakSet<object>();
+/** Mark a row as one a PERSON listed through `myGrants`. A mark on the parent object, so aliases and fragments cannot bypass it and the shared per-request status load never carries it. */
+export function markPersonAudience<T extends object>(row: T): T { personAudience.add(row); return row; }
+export function isPersonAudience(row: object): boolean { return personAudience.has(row); }
+
 /** One grant by id, null when it is absent or out of scope (the same answer for both). */
 export async function getGrantForWorker(db: Db, reader: GrantReader, id: string): Promise<GrantView | null> {
   const rows = await db.$queryRaw<Row[]>(Prisma.sql`SELECT ${COLUMNS} ${scope(reader)} AND g.id = ${id}`);
   return rows[0] ? view(rows[0]) : null;
+}
+
+/**
+ * #3800 (cor:acl:140:05 List, ruling 0255 item 8): a PERSON's own grants. The rows naming the person DIRECTLY as holder
+ * (`user_id`), in every App and Org and every state (pending, active, revoked, expired, spent), newest first. Never a row the
+ * person only issued or requested for someone else, never another holder's. Membership of the App's Org is NOT a condition
+ * (leaving an Org is not a departure under cor:acl:140:03). The row is ids and scalars, and each item is marked
+ * ({@link markPersonAudience}) so the one nested field that reaches another tenant's person, `Grant.signatureStatus`'s
+ * signature list (signer handle/URN, passkey label), is withheld from this audience (gate call, #3800 P2-2). A soft-deleted App
+ * conceals its grants. No state label, as above.
+ */
+export async function listGrantsForPerson(db: Db, userId: string, page: { take?: number; skip?: number }): Promise<{ items: GrantView[]; total: number }> {
+  const take = page.take ?? 20;
+  const skip = page.skip ?? 0;
+  const from = Prisma.sql`FROM grants g JOIN apps a ON a.id = g.app_id AND a.deleted_at IS NULL WHERE g.user_id = ${userId}`;
+  const [{ n }] = await db.$queryRaw<Array<{ n: bigint }>>(Prisma.sql`SELECT count(*) AS n ${from}`);
+  const total = Number(n);
+  if (take === 0 || total === 0) return { items: [], total };
+  const rows = await db.$queryRaw<Row[]>(Prisma.sql`SELECT ${COLUMNS} ${from} ORDER BY g.created_at DESC, g.id DESC LIMIT ${take} OFFSET ${skip}`);
+  return { items: rows.map((r) => markPersonAudience(view(r))), total };
 }
