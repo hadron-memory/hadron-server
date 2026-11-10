@@ -338,6 +338,13 @@ describe('4, 5: masking, judged before anything is resolved', () => {
     // Even with an appKeyId copied in, a run-shaped principal is not an App key.
     const keyRow = await db.appKey.findFirstOrThrow({ where: { appId } });
     await masked({ db, ...runAuthContext({ id: generateId(), appId, userId: null, organizationId: orgId }), appKeyId: keyRow.id } as unknown as Context);
+    // An on-behalf-of run carries its person's userId (amendment 6766414749: "run clientId can carry userId too"). The
+    // person here is the App's participating admin, so only the run exclusion masks it, with or without an appKeyId.
+    const adminId = (await db.user.findFirstOrThrow({ where: { handle: 'bp3843-admin' } })).id;
+    await masked({ db, ...runAuthContext({ id: generateId(), appId, userId: adminId, organizationId: orgId }) } as unknown as Context);
+    await masked({ db, ...runAuthContext({ id: generateId(), appId, userId: adminId, organizationId: orgId }), appKeyId: keyRow.id } as unknown as Context);
+    // Control: the same person, not as a run (a hybrid with App P selected), reads.
+    expect(await read({ db, userId: adminId, appId, roles: ['READER'] } as unknown as Context, agentId)).toBe('SERVED');
     // A hybrid: a person with App P SELECTED but no participation of their own is judged on the person. `member` is an
     // org reader (the chat gate admits them), so only the person-first rule masks this.
     await masked({ db, userId: (await db.user.findFirstOrThrow({ where: { handle: 'bp3843-member' } })).id, appId, roles: ['READER'] } as unknown as Context);
