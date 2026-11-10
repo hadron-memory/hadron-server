@@ -7,6 +7,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { NextFunction, Request, Response } from 'express';
+import { respondSessionSuperseded } from './sessionSuperseded.js';
 import { currentRequestId } from './requestContext.js';
 
 export const INTERNAL_ERROR_CODE = 'INTERNAL_SERVER_ERROR';
@@ -66,6 +67,7 @@ export function respondOAuthServerError(res: Response, description: string, erro
  * today's handling until it is ruled on; only a fault is genericized.
  */
 export function internalFaultErrorHandler(err: unknown, _req: Request, res: Response, next: NextFunction): void {
+  if (respondSessionSuperseded(res, err)) return;
   const e = err as { status?: unknown; statusCode?: unknown } | null;
   const status = e?.status ?? e?.statusCode;
   if (res.headersSent || (typeof status === 'number' && status >= 400 && status < 500)) {

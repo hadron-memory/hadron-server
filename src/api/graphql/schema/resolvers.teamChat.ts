@@ -1,3 +1,4 @@
+import { refuseSupersededSession } from '../../../lib/sessionSuperseded.js';
 import { listAppInstallations } from '../../../lib/appInstallations.js';
 import { NodeNotFoundError, AmbiguousLegacyUrnError, UrnNotQualifiedError } from '../../../lib/entityRef/errors.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
@@ -464,6 +465,7 @@ async function resolveSessionAuthor(
   hostMemoryId: string,
   sessionRef: string,
 ): Promise<{ workerId: string; agentId: string | null; name: string; sessionId: string; workerAppId: string; crossApp: boolean; resume: boolean }> {
+  await refuseSupersededSession(ctx, sessionRef);
   const session = await ctx.db.session.findUnique({
     where: { id: sessionRef },
     select: { id: true, appId: true, userId: true, workerId: true, agentId: true, endedAt: true, expiresAt: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, launchOperationId: true, memoryId: true },
