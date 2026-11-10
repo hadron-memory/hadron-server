@@ -73,7 +73,7 @@ async function parkInFallback(chatId: string, data: Record<string, unknown>) {
   await db.node.create({ data: { id: generateId(), memoryId: systemMemoryId, loc: 'conversations:fallback', name: 'fallback', nodeType: 'system', data: { isFallback: true, stageOrder: ['hold'] } } });
   await db.node.updateMany({ where: { memoryId: systemMemoryId, loc: 'conversations:research' }, data: { data: { stageOrder: ['scope'], isSetup: false, goalSignals: ['research'] } } });
   const chat = await chatNodeByLocOrThrow(db, chatId);
-  await db.node.update({ where: { id: chat.id }, data: { data: { ...(chat.data as object), ...data } } });
+  await db.node.update({ where: { id: chat.id }, data: { data: { ...(chat.data as object), ...data } as never } });
   await db.chatRootEngineState.update({ where: { chatRootNodeId: chat.id }, data: { state: { conversationName: 'fallback', stageName: 'hold' } } });
   return chat;
 }
