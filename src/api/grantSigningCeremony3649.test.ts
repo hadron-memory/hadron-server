@@ -40,7 +40,7 @@ let entryNodeId: string;
 let entryNodeUrn: string;
 let workerId: string;
 let requester: { id: string };
-let admin: { id: string; key: SoftPasskey };
+let admin: { id: string; key: SoftPasskey; passkeyId: string };
 let member: { id: string; key: SoftPasskey };
 let fresh: { id: string; key: SoftPasskey; passkeyId: string };
 
@@ -148,9 +148,23 @@ const grantRow = (id: string) => db.$queryRawUnsafe<Array<{
   revoked_at: Date | null; holder_departed_at: Date | null;
 }>>('SELECT activated_at, verification_kind, verified_by, issuer_user_id, signature_id, revoked_at, holder_departed_at FROM grants WHERE id = $1', id).then((r) => r[0]);
 const requestState = (id: string) => db.grantSigningRequest.findUniqueOrThrow({ where: { id }, select: { state: true } }).then((r) => r.state);
-const counterOf = (userId: string) => db.$queryRawUnsafe<Array<{ counter: bigint }>>('SELECT counter FROM passkey_credentials WHERE owner_id = $1', userId).then((r) => Number(r[0].counter));
+// The highest counter over the person's passkeys: one key reads as before, and with two (the RP ID pin) a write to either shows.
+const counterOf = (userId: string) => db.$queryRawUnsafe<Array<{ counter: bigint }>>('SELECT max(counter) AS counter FROM passkey_credentials WHERE owner_id = $1', userId).then((r) => Number(r[0].counter));
 const records = (grantId: string) => db.grantSignature.count({ where: { grantId } });
 const activateEvents = (grantId: string) => db.grantEvent.count({ where: { grantId, action: 'ACTIVATE' } });
+/**
+ * Wait until the DATABASE clock is past the grant's expiry (Gloria P3, #3805 delta): the expiry tests give setup a wide margin
+ * and then wait on the clock the completion reads, instead of a fixed 1.7 s sleep a slow runner could outrun.
+ */
+async function waitPastExpiry(grantId: string): Promise<void> {
+  for (let i = 0; i < 100; i++) {
+    const [{ left }] = await db.$queryRawUnsafe<Array<{ left: number }>>(
+      `SELECT (EXTRACT(EPOCH FROM (expires_at - (clock_timestamp() AT TIME ZONE 'UTC'))) * 1000)::float8 AS left FROM grants WHERE id = $1`, grantId);
+    if (Number(left) < 0) return;
+    await new Promise((res) => setTimeout(res, Math.min(Number(left) + 25, 1000)));
+  }
+  throw new Error('the grant never expired');
+}
 const unconsumedGrantSign = (userId: string) => db.$queryRawUnsafe<Array<{ n: bigint }>>(
   `SELECT count(*) AS n FROM passkey_ceremonies WHERE purpose = 'GRANT_SIGN' AND user_id = $1 AND consumed_at IS NULL`, userId).then((r) => Number(r[0].n));
 
@@ -365,13 +379,13 @@ describe('refusals at completion are judged before any write', () => {
   it('a grant past its expiry can no longer be signed (ruling 0255 item 16): judged on the clock, terms unchanged', async () => {
     const id = generateId();
     await db.$executeRawUnsafe(`INSERT INTO grants (id, app_id, worker_id, action, action_values, reason, max_uses, expires_at, created_at, updated_at)
-      VALUES ($1, $2, $3, 'schedule.create', $4::jsonb, $5, 3, (clock_timestamp() AT TIME ZONE 'UTC') + interval '1500 milliseconds',
+      VALUES ($1, $2, $3, 'schedule.create', $4::jsonb, $5, 3, (clock_timestamp() AT TIME ZONE 'UTC') + interval '4 seconds',
               (clock_timestamp() AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC'))`,
     id, appId, workerId, JSON.stringify({ entryNode: entryNodeId }), REASON);
     const req = await openRequest(id);
     const p = await prove(req.id, admin);
     expect(p.json.canSign).toBe(true);
-    await new Promise((res) => setTimeout(res, 1700));
+    await waitPastExpiry(id);
     const r = await post(req.id, 'complete', signingBody(p, admin), p.cookie);
     expect(r.status).toBe(409);
     expect(await r.json()).toEqual({ error: 'SIGNING_REQUEST_ENDED', state: 'EXPIRED' });
@@ -381,7 +395,7 @@ describe('refusals at completion are judged before any write', () => {
   it('Anne P2 (#3805): a grant that expires while the completion waits on the credential lock is EXPIRED, judged after the last lock', async () => {
     const id = generateId();
     await db.$executeRawUnsafe(`INSERT INTO grants (id, app_id, worker_id, action, action_values, reason, max_uses, expires_at, created_at, updated_at)
-      VALUES ($1, $2, $3, 'schedule.create', $4::jsonb, $5, 3, (clock_timestamp() AT TIME ZONE 'UTC') + interval '1500 milliseconds',
+      VALUES ($1, $2, $3, 'schedule.create', $4::jsonb, $5, 3, (clock_timestamp() AT TIME ZONE 'UTC') + interval '4 seconds',
               (clock_timestamp() AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC'))`,
     id, appId, workerId, JSON.stringify({ entryNode: entryNodeId }), REASON);
     const req = await openRequest(id);
@@ -393,7 +407,7 @@ describe('refusals at completion are judged before any write', () => {
       await b.c.query('SELECT id FROM passkey_credentials WHERE owner_id = $1 FOR UPDATE', [admin.id]);
       const done = post(req.id, 'complete', signingBody(p, admin), p.cookie);
       expect(await waitingOn(b.pid)).toBe(true);
-      await new Promise((res) => setTimeout(res, 1700));
+      await waitPastExpiry(id);
       await b.c.query('ROLLBACK');
       const r = await done;
       expect(r.status).toBe(409);
@@ -641,5 +655,146 @@ describe('revocation and demotion races, both orders', () => {
       await b.c.query('COMMIT');
     } finally { pause.release(); await b.c.query('ROLLBACK').catch(() => undefined); await b.c.end(); }
     expect((await grantRow(g)).activated_at).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Carried from #3805 to slice D (Rodolfo §10 P3-3, P3-4): pins over guards that exist, each with a mutant.
+
+describe('decline: its own guards (Rodolfo P3-3, #3805)', () => {
+  it('a signer demoted after the proof may not decline: SIGNER_NOT_ELIGIBLE, the request stays open, the ceremony unspent', async () => {
+    const g = await insertGrant();
+    const req = await openRequest(g);
+    const p = await prove(req.id, admin);
+    await db.orgMember.updateMany({ where: { organizationId: orgId, userId: admin.id }, data: { role: 'CONTRIBUTOR' } });
+    const r = await post(req.id, 'decline', { ceremonyId: p.json.signing.ceremonyId }, p.cookie);
+    expect(r.status).toBe(403);
+    expect(await r.json()).toEqual({ error: 'SIGNER_NOT_ELIGIBLE' });
+    expect(await requestState(req.id)).toBe('open');
+    expect(await unconsumedGrantSign(admin.id)).toBe(1);
+  });
+
+  it('a ceremony minted for request A never declines request B (the challenge binds the request)', async () => {
+    const a = await openRequest(await insertGrant());
+    const b = await openRequest(await insertGrant());
+    const p = await prove(a.id, admin);
+    const r = await post(b.id, 'decline', { ceremonyId: p.json.signing.ceremonyId }, p.cookie);
+    expect(r.status).toBe(403);
+    expect(await r.text()).toBe(FORBIDDEN);
+    expect(await requestState(b.id)).toBe('open');
+    expect(await requestState(a.id)).toBe('open');
+    expect(await unconsumedGrantSign(admin.id)).toBe(1);
+  });
+
+  it('a request past its deadline cannot be declined: SIGNING_REQUEST_ENDED / EXPIRED, the ceremony unspent', async () => {
+    const g = await insertGrant();
+    const req = await openRequest(g);
+    const p = await prove(req.id, admin);
+    // The deadline moved into the past directly (the request guard keeps expires_at pinned); the same move the completion's
+    // deadline pin above makes.
+    await db.$executeRawUnsafe('ALTER TABLE grant_signing_requests DISABLE TRIGGER grant_signing_request_guard');
+    try {
+      await db.$executeRawUnsafe(`UPDATE grant_signing_requests SET expires_at = (clock_timestamp() AT TIME ZONE 'UTC') - interval '1 second', created_at = (clock_timestamp() AT TIME ZONE 'UTC') - interval '1 minute' WHERE id = $1`, req.id);
+    } finally {
+      await db.$executeRawUnsafe('ALTER TABLE grant_signing_requests ENABLE TRIGGER grant_signing_request_guard');
+    }
+    const r = await post(req.id, 'decline', { ceremonyId: p.json.signing.ceremonyId }, p.cookie);
+    expect(r.status).toBe(409);
+    expect(await r.json()).toEqual({ error: 'SIGNING_REQUEST_ENDED', state: 'EXPIRED' });
+    expect(await unconsumedGrantSign(admin.id)).toBe(1);
+  });
+});
+
+describe('completion: the credential, App and context arms; the proof\'s grant check (Rodolfo P3-4, #3805)', () => {
+  async function refusedWithNothing(g: string, reqId: string, body: unknown, cookie: string, expected: { status: number; body: string }) {
+    const counter = await counterOf(admin.id);
+    const r = await post(reqId, 'complete', body, cookie);
+    expect(r.status).toBe(expected.status);
+    expect(await r.text()).toBe(expected.body);
+    expect((await grantRow(g)).activated_at).toBeNull();
+    expect(await records(g)).toBe(0);
+    expect(await activateEvents(g)).toBe(0);
+    expect(await counterOf(admin.id)).toBe(counter);
+    expect(await unconsumedGrantSign(admin.id)).toBe(1);
+    expect(await requestState(reqId)).toBe('open');
+  }
+  const NOT_VERIFIED = { status: 403, body: '{"error":"SIGNATURE_NOT_VERIFIED"}' };
+
+  it('the signer\'s passkey revoked after the proof: SIGNATURE_NOT_VERIFIED, nothing written', async () => {
+    const g = await insertGrant();
+    const req = await openRequest(g);
+    const p = await prove(req.id, admin);
+    await db.$executeRawUnsafe(`UPDATE passkey_credentials SET revoked_at = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3) WHERE id = $1`, admin.passkeyId);
+    await refusedWithNothing(g, req.id, signingBody(p, admin), p.cookie, NOT_VERIFIED);
+  });
+
+  it('another person\'s passkey on the signer\'s ceremony: SIGNATURE_NOT_VERIFIED, nothing written', async () => {
+    const g = await insertGrant();
+    const req = await openRequest(g);
+    const p = await prove(req.id, admin);
+    await refusedWithNothing(g, req.id, signingBody(p, member), p.cookie, NOT_VERIFIED);
+  });
+
+  it('a passkey enrolled under another RP ID: SIGNATURE_NOT_VERIFIED, nothing written', async () => {
+    const g = await insertGrant();
+    const req = await openRequest(g);
+    const p = await prove(req.id, admin);
+    // The signer's own second passkey, enrolled under another RP ID (the column is immutable, so it is enrolled that way), whose
+    // assertion is made under THIS RP ID: verification alone would accept it, so only the enrollment check refuses it.
+    const other = softPasskey();
+    await insertSoftPasskey(db, admin.id, other, { label: 'gs-admin elsewhere', rpId: 'elsewhere.test' });
+    await refusedWithNothing(g, req.id, signingBody(p, { key: other }), p.cookie, NOT_VERIFIED);
+  });
+
+  it('the App moved to another org while the completion waited on its anchor: the one refusal, nothing written', async () => {
+    const g = await insertGrant();
+    const req = await openRequest(g);
+    const p = await prove(req.id, admin);
+    const other = await db.organization.create({ data: { name: 'gs-org2', urn: `gs-org2-${generateId().slice(0, 6)}.test` } });
+    const counter = await counterOf(admin.id);
+    const b = await blocker();
+    try {
+      await b.c.query(`SELECT pg_advisory_xact_lock(hashtext('authorization:app'), hashtext($1))`, [appId]);
+      const done = post(req.id, 'complete', signingBody(p, admin), p.cookie);
+      expect(await waitingOn(b.pid)).toBe(true);
+      await b.c.query('UPDATE apps SET organization_id = $2 WHERE id = $1', [appId, other.id]);
+      await b.c.query('COMMIT');
+      const r = await done;
+      expect(r.status).toBe(403);
+      expect(await r.text()).toBe(FORBIDDEN);
+    } finally { await b.c.query('ROLLBACK').catch(() => undefined); await b.c.end(); }
+    expect((await grantRow(g)).activated_at).toBeNull();
+    expect(await records(g)).toBe(0);
+    expect(await counterOf(admin.id)).toBe(counter);
+  });
+
+  it('the issuer gate runs on the transaction\'s context: a platform admin outside the org may issue, and signs', async () => {
+    const u = await db.user.create({ data: { handle: 'gs-platform', roles: ['ADMIN'] } });
+    const key = softPasskey();
+    await insertSoftPasskey(db, u.id, key, { label: 'gs-platform key' });
+    const g = await insertGrant();
+    const req = await openRequest(g);
+    const p = await prove(req.id, { key });
+    expect(p.json.canSign).toBe(true);
+    const r = await post(req.id, 'complete', signingBody(p, { key }), p.cookie);
+    expect(r.status).toBe(200);
+    expect(await grantRow(g)).toMatchObject({ verified_by: u.id, issuer_user_id: u.id });
+  });
+
+  it('the proof judges the grant itself: a revoked grant whose request stayed open reads ended STALE and mints nothing', async () => {
+    const g = await insertGrant();
+    const req = await openRequest(g);
+    // Keep the request open across the revocation (as the completion's own grant-check pin above does), so only the proof's
+    // grant check can answer.
+    await db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER grant_signing_stale');
+      await tx.$executeRawUnsafe(`UPDATE grants SET revoked_at = (clock_timestamp() AT TIME ZONE 'UTC'), revoked_by = $2 WHERE id = $1`, g, admin.id);
+      await tx.$executeRawUnsafe('ALTER TABLE grants ENABLE TRIGGER grant_signing_stale');
+    });
+    expect(await requestState(req.id)).toBe('open');
+    const p = await prove(req.id, admin);
+    expect(p.status).toBe(200);
+    expect(p.json).toEqual({ outcome: 'ended', state: 'STALE' });
+    expect(await unconsumedGrantSign(admin.id)).toBe(0);
   });
 });
