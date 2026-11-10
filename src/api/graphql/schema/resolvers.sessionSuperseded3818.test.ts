@@ -1,5 +1,6 @@
 /** #3818 V24/V25: supersession evidence is explicit; successor disclosure uses the current read gate. */
-import { ApolloServer } from '@apollo/server';
+import { ApolloServer, HeaderMap } from '@apollo/server';
+import { formatGraphQLError } from '../formatError.js';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -122,6 +123,36 @@ it('keeps explicit-target late provenance and end/outcome writes available witho
 it('refuses a superseded header at the real credential-context boundary', async () => {
   const { a, b } = await displaced();
   const token = await signJwt({ sub: owner.id, roles: ['READER'] });
-  const req = { headers: { authorization: `Bearer ${token}`, 'x-hadron-session': a.id } } as Request;
+  const req = { headers: { authorization: `Bearer ${token}`, 'x-hadron-session': a.id } } as unknown as Request;
   await expect(resolveAuthContext(req, db)).rejects.toMatchObject({ extensions: { code: 'SESSION_SUPERSEDED', sessionId: b.id } });
+});
+
+it.each(['ended', 'deleted'] as const)('names no current session once the successor is %s', async state => {
+  const { a, b } = await displaced();
+  if (state === 'ended') await M.endSession({}, { id: b.id }, ctx());
+  else await db.session.update({ where: { id: b.id }, data: { deletedAt: new Date() } });
+  try { await validateSessionBinding(db, ctx(), a.id); expect.fail('must refuse'); }
+  catch (e) { expect((e as any).extensions).toEqual({ code: 'SESSION_SUPERSEDED' }); }
+});
+it.each([true, false])('keeps the typed refusal and gated details on the Apollo HTTP envelope (reader=%s)', async reader => {
+  const { a, b } = await displaced();
+  const token = await signJwt({ sub: reader ? owner.id : stranger.id, roles: ['READER'] });
+  const req = { headers: { authorization: `Bearer ${token}`, 'x-hadron-session': a.id } } as unknown as Request;
+  const wire = new ApolloServer<Context>({ typeDefs, resolvers, formatError: formatGraphQLError });
+  await wire.start();
+  try {
+    const headers = new HeaderMap(); headers.set('content-type', 'application/json');
+    const result = await wire.executeHTTPGraphQLRequest({
+      httpGraphQLRequest: { method: 'POST', headers, search: '', body: { query: '{ __typename }' } },
+      context: async () => ({ db, ...await resolveAuthContext(req, db) }),
+    });
+    if (result.body.kind !== 'complete') throw new Error('incremental response');
+    const envelope = JSON.parse(result.body.string);
+    expect(envelope.data).toBeUndefined();
+    expect(envelope.errors[0].extensions).toEqual(reader
+      ? { code: 'SESSION_SUPERSEDED', sessionId: b.id, startedAt: b.startedAt.toISOString() }
+      : { code: 'SESSION_SUPERSEDED' });
+    expect(envelope.errors[0].message).toContain('Session superseded.');
+    if (!reader) expect(result.body.string).not.toContain(b.id);
+  } finally { await wire.stop(); }
 });

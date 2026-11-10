@@ -12,6 +12,7 @@
  * ordinary transcript read is byte-for-byte the old read-only act.
  */
 
+import { refuseSupersededSession } from './sessionSuperseded.js';
 import { sessionKeyReleasedHint } from './sessionKeyCache.js';
 import { createHmac } from 'node:crypto';
 import { GraphQLError } from 'graphql';
@@ -1647,6 +1648,7 @@ async function ownLiveSessionWorker(
   expectedAppId?: string,
   opts: { readOnly?: boolean } = {},
 ): Promise<{ workerId: string; appId: string; sessionId: string; lapsed: boolean } | null> {
+  await refuseSupersededSession(ctx, sessionRef.trim());
   if (!ctx.userId || ctx.impersonation) return null;
   const session = await ctx.db.session.findFirst({
     where: {

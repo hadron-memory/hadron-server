@@ -32,7 +32,7 @@ export interface AuthContext {
   /**
    * #1705 — the request NAMED a session (X-Hadron-Session) that did not
    * validate, so `sessionId` is unset and the request proceeds unbound (the
-   * pre-existing silent-drop behaviour, unchanged). A surface whose actor is
+   * silent-drop behaviour except supersession, which refuses typed (#3818)). A surface whose actor is
    * the session's worker reads this to refuse rather than act as the bare
    * credential: a worker whose session ended must not silently become its
    * human driver (agent tasks, cor:agt:050:08).
@@ -280,8 +280,8 @@ async function resolveAuthContextInner(
  * memory reach exactly their user reach (the #967 narrow-never-grant posture,
  * mirrored for user principals).
  *
- * An invalid binding is silently dropped (the request proceeds unbound) —
- * the pre-existing App-key behavior, kept identical for both shapes.
+ * A superseded execution binding is refused typed (#3818 V24). Other invalid
+ * bindings retain the existing silent-drop behavior for both principal shapes.
  */
 async function bindSession(
   db: PrismaClient,
