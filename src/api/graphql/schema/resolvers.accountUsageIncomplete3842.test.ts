@@ -117,6 +117,19 @@ describe('#3842 history census exhausted is UNKNOWN / HISTORY_INCOMPLETE (V55, c
     expect(sevenOf(open).status).not.toBe('UNKNOWN');
     expect(sevenOf(open)).toEqual(sevenOf(named));
   });
+  it('rows that run out exactly at the budget are a complete census (the lookahead row decides), not incomplete', async () => {
+    LIM.rows = 5; LIM.budget = 5;
+    await seedCensus('edge', 5, false);
+    const r = await proj2({ account: 'edge' });
+    expect(r.windows.some((w: any) => w.reason === 'HISTORY_INCOMPLETE')).toBe(false);
+  });
+  it('finding the second host stops the probe: a budget that reaches it but not the rows after it still refuses the ambiguity', async () => {
+    LIM.rows = 5; LIM.budget = 3;
+    await burn('stop', 40, 1, { extra: { host: 'h1' } });
+    await snapshot({ label: 'stop', minutesAgo: 361, sevenPct: 5, extra: { host: 'h2' } });
+    for (let k = 0; k < 5; k += 1) await snapshot({ label: 'stop', minutesAgo: 362 + k / 10, sevenPct: 10, extra: { host: 'h3', schemaVersion: 2 } });
+    await expect(proj2({ account: 'stop' })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+  });
   it('a census that fits under the cap needs no probe and answers as today, whatever the budget', async () => {
     LIM.rows = 50; LIM.budget = 1;
     await burn('fits', 40, 1);

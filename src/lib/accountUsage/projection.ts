@@ -46,7 +46,9 @@ const MAX_WINDOW_MINUTES = 100_000;
 export type ProjectionStatus = 'PROJECTED' | 'INSUFFICIENT_DATA' | 'UNKNOWN';
 export type ProjectionReason =
   | 'NO_HISTORY' | 'STALE' | 'NO_WINDOW' | 'NO_RESET' | 'RESET_PASSED'
-  | 'LOW_USE' | 'TOO_FEW_SNAPSHOTS' | 'NO_WORKERS_CONFIGURED' | 'WHATIF_SOURCE_UNKNOWN';
+  | 'LOW_USE' | 'TOO_FEW_SNAPSHOTS' | 'NO_WORKERS_CONFIGURED' | 'WHATIF_SOURCE_UNKNOWN'
+  /** #3842 (V55): the server could not finish checking whether another history shares the label. */
+  | 'HISTORY_INCOMPLETE';
 export type Confidence = 'LOW' | 'MEDIUM' | 'HIGH';
 export type Shape = 'FLAT' | 'WEEKLY';
 /** The cumulative share of the remaining use reached by the end of each hour-of-week step: `hours` from the newest snapshot, `frac` 0..1. */
@@ -306,6 +308,14 @@ export function projectAccount(history: readonly UsageSnapshot[], asOf: Date): W
   const lengths = new Set<number>(STANDARD_WINDOWS);
   if (latest) for (const k of Object.keys(latest.windows)) lengths.add(Number(k));
   return [...lengths].sort((a, b) => a - b).map((w) => projectWindow(history, w, asOf));
+}
+
+/**
+ * #3842 (V55): every window of an account whose history census could not be finished: UNKNOWN / HISTORY_INCOMPLETE, no range,
+ * confidence, method or run-out time, and no basis to recompute, so any what-if on it answers UNKNOWN as well.
+ */
+export function incompleteAccount(): WindowBasis[] {
+  return STANDARD_WINDOWS.map((w) => empty(w, 'UNKNOWN', 'HISTORY_INCOMPLETE'));
 }
 
 /** The same window with `workers` workers on the account instead of its current count: the burn scales with the count. */

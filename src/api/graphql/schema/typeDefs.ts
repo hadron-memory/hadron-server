@@ -16966,11 +16966,13 @@ export const typeDefs = `#graphql
   """
   #3820 — why a window is not PROJECTED. UNKNOWN: NO_HISTORY, NO_WINDOW (no snapshot reports this window), STALE (newest
   snapshot over 60 minutes old), NO_RESET, RESET_PASSED, NO_WORKERS_CONFIGURED (a what-if needs the account's workers),
-  WHATIF_SOURCE_UNKNOWN (the moved worker's burn is not known). INSUFFICIENT_DATA: LOW_USE (under 5% used),
+  WHATIF_SOURCE_UNKNOWN (the moved worker's burn is not known), HISTORY_INCOMPLETE (#3842: the account was named without both
+  host and family and the server could not finish checking whether another history shares the label; every window of it
+  carries this reason and no range. hrn:node:hadronmemory.com:specs:cor:agt:140:03). INSUFFICIENT_DATA: LOW_USE (under 5% used),
   TOO_FEW_SNAPSHOTS (fewer than 3, or spanning under an hour).
   """
   enum AccountUsageReason {
-    NO_HISTORY NO_WINDOW STALE NO_RESET RESET_PASSED NO_WORKERS_CONFIGURED WHATIF_SOURCE_UNKNOWN LOW_USE TOO_FEW_SNAPSHOTS
+    NO_HISTORY NO_WINDOW STALE NO_RESET RESET_PASSED NO_WORKERS_CONFIGURED WHATIF_SOURCE_UNKNOWN HISTORY_INCOMPLETE LOW_USE TOO_FEW_SNAPSHOTS
   }
   "#3820 — how many of the 1h, 6h and 24h lookbacks had data: one is LOW, two MEDIUM, three HIGH."
   enum AccountUsageConfidence { LOW MEDIUM HIGH }

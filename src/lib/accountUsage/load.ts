@@ -15,10 +15,25 @@ export const MAX_SNAPSHOT_ROWS = 20_000;
 /** An account to read: its label, and the host and family when the caller names them (an account is all three, cor:agt:140:01). */
 export type AccountSelector = { label: string; host?: string | null; family?: string | null };
 
-export async function loadAccountUsageHistory(db: Context['db'], appId: string, now: Date, accounts: readonly AccountSelector[], maxRows: number = MAX_SNAPSHOT_ROWS): Promise<UsageSnapshot[][]> {
+/** #3842 — what one selector's read found, and whether the server could finish checking for another history of the label. */
+export type AccountCensus = { snaps: UsageSnapshot[]; incomplete: boolean };
+/**
+ * #3842 — the most rows the probe for another identity reads per selector (V55: rows, not pages; the number may change, the
+ * answer may not). A probe that reaches it with rows still unread cannot finish, and the read is `incomplete`.
+ */
+export const PROBE_ROW_BUDGET = 100_000;
+
+/** The snapshots per selector, as before; use {@link loadAccountUsageCensus} when the caller must know the census was cut short. */
+export async function loadAccountUsageHistory(db: Context['db'], appId: string, now: Date, accounts: readonly AccountSelector[], maxRows: number = MAX_SNAPSHOT_ROWS, probeBudget: number = PROBE_ROW_BUDGET): Promise<UsageSnapshot[][]> {
+  return (await loadAccountUsageCensus(db, appId, now, accounts, maxRows, probeBudget)).map((c) => c.snaps);
+}
+
+export async function loadAccountUsageCensus(
+  db: Context['db'], appId: string, now: Date, accounts: readonly AccountSelector[], maxRows: number = MAX_SNAPSHOT_ROWS, probeBudget: number = PROBE_ROW_BUDGET,
+): Promise<AccountCensus[]> {
   const memoryIds = await resolveAppTeamSpaceMemoryIds(db, appId);
-  // One list per selector, in order: two selectors with one label but different identities stay apart.
-  const result: UsageSnapshot[][] = accounts.map(() => []);
+  // One result per selector, in order: two selectors with one label but different identities stay apart.
+  const result: AccountCensus[] = accounts.map(() => ({ snaps: [], incomplete: false }));
   if (memoryIds.length === 0) return result;
   // One bounded read per requested account (label, plus host and family when named), so unrelated accounts and other identities can never crowd its history out of the cap.
   for (const [i, sel] of accounts.entries()) {
@@ -40,40 +55,50 @@ export async function loadAccountUsageHistory(db: Context['db'], appId: string, 
       return snap && snap.label === wanted
         && (sel.host == null || snap.host === sel.host) && (sel.family == null || snap.family === sel.family) ? snap : null;
     };
-    const rows = await db.node.findMany({ where, select: { properties: true }, orderBy, take: maxRows });
+    const rows = await db.node.findMany({ where, select: { id: true, properties: true }, orderBy, take: maxRows });
     const snaps = rows.map((r) => usable(r.properties)).filter((x): x is UsageSnapshot => x !== null);
     // The cap can hide another identity of an under-qualified selector (same label, other host or family) behind a busy one,
-    // and with it the ambiguity refusal. When the cap was hit, read once more, bounded the same way, from every row NOT of the
-    // first valid identity seen (a malformed row neither seeds nor consumes the probe: only a valid snapshot counts).
-    // KNOWN LIMIT (gate ruling on #3836, hadron-server#3842): the census is bounded by the read cap. A probe page that is ALL
-    // malformed rows (>= cap) can still hide a valid older second identity; the answer stays definitive within the census.
-    // V15 accepts this skew (anyone who can write the usage memory can skew an advisory number; nothing here authorizes).
+    // and with it the ambiguity refusal. When the cap was hit, continue the scan, cursor-paged and bounded by `probeBudget`
+    // rows, over every row NOT of the first valid identity seen (a malformed row neither seeds nor consumes the probe: only a
+    // valid snapshot counts, so the scan continues past invalid rows). Three ends (#3842, V55): a second valid identity is found
+    // (the ambiguity refusal then applies), the rows are exhausted (complete), or the budget is spent with rows unread, which is
+    // `incomplete`: the server could not finish checking, so the caller answers UNKNOWN / HISTORY_INCOMPLETE, never a definitive
+    // answer from one identity. A qualified selector (host and family named) has nothing to probe and is never incomplete.
+    // V15: nothing here authorizes; anyone who can write the usage memory can skew an advisory number.
+    let incomplete = false;
     if (rows.length >= maxRows && (sel.host == null || sel.family == null)) {
       const seen = snaps[0];
-      const more = await db.node.findMany({
-        where: seen
-          ? { ...where, NOT: [{ AND: [{ properties: { path: ['host'], equals: seen.host ?? '' } }, { properties: { path: ['family'], equals: seen.family ?? '' } }] }] }
-          : where,
-        select: { properties: true }, orderBy, take: maxRows,
-      });
-      for (const r of more) {
-        const snap = usable(r.properties);
-        if (snap && (!seen || snap.host !== seen.host || snap.family !== seen.family)) snaps.push(snap);
+      const scan = seen
+        ? { ...where, NOT: [{ AND: [{ properties: { path: ['host'], equals: seen.host ?? '' } }, { properties: { path: ['family'], equals: seen.family ?? '' } }] }] }
+        : where;
+      // With no valid row yet the first page was all malformed: the scan continues after it, so those rows are not read twice.
+      let cursor: string | null = null;
+      let read = 0;
+      let found = false;
+      for (;;) {
+        const take = Math.min(maxRows, probeBudget - read);
+        if (take <= 0) { incomplete = true; break; }
+        // One row of lookahead says whether anything is left once this page is judged.
+        const page: { id: string; properties: unknown }[] = await db.node.findMany({
+          where: scan, select: { id: true, properties: true }, orderBy, take: take + 1,
+          ...(cursor ? { cursor: { id: cursor }, skip: 1 } : seen ? {} : { cursor: { id: rows.at(-1)!.id }, skip: 1 }),
+        });
+        const judged = page.slice(0, take);
+        read += judged.length;
+        for (const r of judged) {
+          const snap = usable(r.properties);
+          if (!snap) continue;
+          snaps.push(snap);
+          const first = snaps[0]!;
+          if (snap.host !== first.host || snap.family !== first.family) found = true;
+        }
+        if (found) break;
+        if (page.length <= take) break; // rows exhausted: complete
+        cursor = judged.at(-1)!.id;
       }
     }
-    result[i] = snaps;
+    result[i] = { snaps, incomplete };
   }
   return result;
 }
 
-/** #3842 — what one selector's read found, and whether the server could finish checking for another history of the label. */
-export type AccountCensus = { snaps: UsageSnapshot[]; incomplete: boolean };
-/** #3842 — the most rows the probe for another identity reads per selector. */
-export const PROBE_ROW_BUDGET = 100_000;
-
-export async function loadAccountUsageCensus(
-  db: Context['db'], appId: string, now: Date, accounts: readonly AccountSelector[], maxRows: number = MAX_SNAPSHOT_ROWS, probeBudget: number = PROBE_ROW_BUDGET,
-): Promise<AccountCensus[]> {
-  void probeBudget;
-  return (await loadAccountUsageHistory(db, appId, now, accounts, maxRows)).map((snaps) => ({ snaps, incomplete: false }));
-}
