@@ -2,7 +2,7 @@
  * #3789 (Grants S2a-read): `grant(ref:)` and `grants`. Read only, and only by a BOUND WORKER SESSION in its own App. #3800 adds `myGrants`: a signed-in PERSON's own grants across Apps. The row
  * scope lives in src/lib/grants/read.ts (to be shared with the run tool of #3710, which does not exist yet); this file is the CALLER gate, and a failed gate is an
  * empty page / null, never an error, so it discloses nothing and answers exactly as a missing row does.
- * No MCP tool: Holger's rule (2026-10-31), "Agents: yes, Workers: no". No writer exists on any surface.
+ * Read only. The writers are `createGrant` (resolvers.grantCreate.ts) and the manager's surface (resolvers.grantManage.ts: `appGrants`, `revokeGrant`, `withdrawGrant`, #3711).
  */
 import { appKeyCaller } from '../../../lib/appKeyScopes/scopes.js';
 import { requirePersonAsThemselves } from '../../../lib/auth/personAsThemselves.js';

@@ -244,6 +244,16 @@ describe('acceptance 2/3/9: revoke', () => {
     expect((await grantRows()).find((g) => g.id === id2).revoked_at).toBeNull();
   });
 
+  it('the issuer arm needs a LIVE Org membership even for someone who still participates in the App (an AppMember who left the Org)', async () => {
+    await db.orgMember.update({ where: { organizationId_userId: { organizationId: w.orgId, userId: managerId } }, data: { role: 'CONTRIBUTOR' } });
+    const id = await active({ issuer_user_id: managerId });
+    await db.appMember.create({ data: { appId: w.appId, userId: managerId, role: 'member' } });
+    await db.orgMember.update({ where: { organizationId_userId: { organizationId: w.orgId, userId: managerId } }, data: { deletedAt: new Date() } });
+    const r = await post(managerKey, null, REVOKE, { r: id });
+    expect(code(r)).toBe('GRANT_NOT_MANAGER');
+    expect((await grantRows())[0].revoked_at).toBeNull();
+  });
+
   it('a revoked membership never authorizes (a manager whose Org membership was soft-deleted is refused)', async () => {
     const id = await active();
     await db.orgMember.update({ where: { organizationId_userId: { organizationId: w.orgId, userId: managerId } }, data: { deletedAt: new Date() } });
