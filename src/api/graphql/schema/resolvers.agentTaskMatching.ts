@@ -26,16 +26,20 @@ import { canSeeUserPersonalFieldsMany } from '../../../lib/auth/userVisibility.j
 const toGqlWord = (s: string): string => s.toUpperCase().replace(/-/g, '_');
 
 /** Shared projected rows. Person and run reads use RepeatableRead; run reads also hold live authority anchors through projection. */
-async function readTeamRoster(ctx: Context, appRef: string) {
-    if (isRunPrincipal(ctx) && !ctx.userId) return withReadableApp(ctx, appRef, projectTeamRoster, true);
+export async function withRosterAppRead<T>(ctx: Context, appRef: string, project: (readCtx: Context, app: TaskApp) => Promise<T>): Promise<T> {
+    if (isRunPrincipal(ctx) && !ctx.userId) return withReadableApp(ctx, appRef, project, true);
     // Admission, status and assignment projections share one read snapshot, including MCP callers.
     return ctx.db.$transaction(async (tx) => {
       const readCtx = withoutRequestCaches(ctx, tx);
       const { app } = await resolveParticipatedApp(readCtx, appRef);
-      return projectTeamRoster(readCtx, app);
+      return project(readCtx, app);
     // An explicit, bounded read budget avoids imposing Prisma's implicit 5s interactive-transaction default
     // on the now-serialized bulk roster loaders. This does not change query/lock or test timeouts.
     }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 20_000 });
+}
+
+async function readTeamRoster(ctx: Context, appRef: string) {
+  return withRosterAppRead(ctx, appRef, projectTeamRoster);
 }
 
 async function projectTeamRoster(readCtx: Context, app: TaskApp) {
