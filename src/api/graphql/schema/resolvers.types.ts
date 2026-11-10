@@ -1,3 +1,4 @@
+import { readableSupersedingSessionId } from '../../../lib/sessionSuperseded.js';
 import { isNewInstallPayload } from './installationPayload.js';
 import { listAppInstallations, appInstallationWhere } from '../../../lib/appInstallations.js';
 import { liveTxContext, liveReadSnapshotContext } from './authorizedTx.js';
@@ -2299,6 +2300,7 @@ export const typeResolvers = {
     },
   },
   Session: {
+    supersededBySessionId: readableSupersedingSessionId,
     /** #2047: a bind's record, self-authorized (worker internals). */
     servedPrompts: servedPromptOwnerFields.sessionServedPrompts,
     /** #1156 / cor:dmo:070:05: no new read gate; the parent Session is authorized. */

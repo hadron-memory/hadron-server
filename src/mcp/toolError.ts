@@ -1,3 +1,4 @@
+import { isSessionSupersededError, sessionSupersededEnvelope } from '../lib/sessionSuperseded.js';
 import { RateLimited } from '../lib/rateLimit/index.js';
 import { isPrismaClientError } from '../lib/prismaErrors.js';
 import { isTrustedRefusal } from '../api/graphql/formatError.js';
@@ -75,6 +76,10 @@ export function resolutionLimitResult(error: ContentResolutionLimitError) {
   } } };
 }
 
+function supersededResult(error: import('graphql').GraphQLError) {
+  return { ...refusalResult('Session superseded.'), structuredContent: { error: sessionSupersededEnvelope(error) } };
+}
+
 /**
  * The MCP fallback boundary (#1695, #1789). Classify before reading a message/code: a Prisma error may contain
  * arguments, paths and internal ids. A typed domain refusal keeps its wording (and is flagged isError); everything else,
@@ -86,6 +91,7 @@ export function toolErrorResult(
   site = 'mcp_tool',
 ): ReturnType<typeof refusalResult> | ReturnType<typeof toolFaultResult> | ReturnType<typeof rateLimitedResult>
   | ReturnType<typeof resolutionLimitResult> | NonNullable<ReturnType<typeof attestationRefusalResult>> {
+  if (isSessionSupersededError(error)) return supersededResult(error);
   if (error instanceof RateLimited) return rateLimitedResult(error);
   if (isContentResolutionLimitError(error)) return resolutionLimitResult(error);
   const attestation = attestationRefusalResult(error);
@@ -103,6 +109,7 @@ export function withToolErrorBoundary(
     try {
       return await callback(args, extra);
     } catch (error) {
+      if (isSessionSupersededError(error)) return supersededResult(error);
       if (error instanceof RateLimited) return rateLimitedResult(error);
       if (isContentResolutionLimitError(error)) return resolutionLimitResult(error);
       const attestation = attestationRefusalResult(error);
