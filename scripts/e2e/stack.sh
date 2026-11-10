@@ -29,11 +29,24 @@ else
   export E2E_PORT E2E_PORTAL_PORT
   [[ "${3:-$E2E_PORT}" == "$E2E_PORT" && "${4:-$E2E_PORTAL_PORT}" == "$E2E_PORTAL_PORT" ]] || { echo 'Ports differ from recorded stack' >&2; exit 1; }
 fi
+# #2923: an explicit, opt-in private env file (Incus only). Inside the owned
+# instance it lives at a fixed path; the host path is only ever read by `up`.
+private_env_file=/opt/hadron-private/env
+private_env_active=0
+if [[ "$action" == up && -n "${E2E_PRIVATE_ENV_FILE:-}" ]]; then
+  [[ "$backend" == incus ]] || { echo 'E2E_PRIVATE_ENV_FILE is supported only on the Incus backend' >&2; exit 2; }
+  [[ -f "$E2E_PRIVATE_ENV_FILE" && -r "$E2E_PRIVATE_ENV_FILE" ]] || { echo 'E2E_PRIVATE_ENV_FILE must name a readable regular file' >&2; exit 2; }
+  private_env_active=1
+elif [[ "$action" != up && -e "$state_dir/private-env" ]]; then
+  private_env_active=1
+fi
 for port in "$E2E_PORT" "$E2E_PORTAL_PORT"; do
   [[ "$port" =~ ^[1-9][0-9]{3,4}$ && "$port" -ge 1024 && "$port" -le 65535 ]] || { echo 'Ports must be 1024..65535' >&2; exit 2; }
 done
 [[ "$E2E_PORT" != "$E2E_PORTAL_PORT" ]] || { echo 'API and portal ports must differ' >&2; exit 2; }
 compose() {
+  local env_args=()
+  (( private_env_active )) && env_args=(--env-file "$private_env_file")
   if [[ "$backend" == docker ]]; then
     E2E_BIND=127.0.0.1 docker compose --project-name "$project" --file "$ROOT/scripts/e2e/compose.yaml" "$@"
   else
@@ -41,7 +54,7 @@ compose() {
       E2E_PASSKEY_SIGNING_ENABLED="${E2E_PASSKEY_SIGNING_ENABLED:-}" \
       E2E_SIGNING_CEREMONY_ORIGINS="${E2E_SIGNING_CEREMONY_ORIGINS:-}" \
       E2E_PASSKEY_RP_ID="${E2E_PASSKEY_RP_ID:-}" \
-      docker compose --project-name "$project" --file /opt/hadron/scripts/e2e/compose.yaml "$@"
+      docker compose ${env_args[@]+"${env_args[@]}"} --project-name "$project" --file /opt/hadron/scripts/e2e/compose.yaml "$@"
   fi
 }
 check_published() {
@@ -81,6 +94,16 @@ case "$action" in
       incus file push "$archive" "$project/opt/hadron-source.tar"
       incus exec "$project" -- sh -c 'mkdir -p /opt/hadron && tar -xf /opt/hadron-source.tar -C /opt/hadron && rm -f /opt/hadron-source.tar'
       for i in {1..30}; do incus exec "$project" -- docker info >/dev/null 2>&1 && break; sleep 1; done
+      if (( private_env_active )); then
+        # Recorded before the push, so a failed push still cleans up on down. Placed
+        # here, not beside the other state files: scripts/diagnose/ownership.patch
+        # (#2619) patches that block and needs it contiguous.
+        : > "$state_dir/private-env"
+        incus exec "$project" -- install -d -m 700 "$(dirname "$private_env_file")"
+        incus file push --mode 600 --uid 0 --gid 0 "$E2E_PRIVATE_ENV_FILE" "$project$private_env_file"
+        # Never show Compose's resolved configuration or its errors: both can carry values.
+        compose config --quiet >/dev/null 2>&1 || { echo 'The private env file failed Compose validation (values are not shown)' >&2; exit 1; }
+      fi
     fi
     compose up --build -d --wait --wait-timeout 300
     if [[ "$backend" == incus ]]; then
@@ -131,7 +154,7 @@ case "$action" in
       compose down --volumes --remove-orphans --rmi local
     fi
     # Only these known files belong to the lifecycle script.
-    for file in backend api-port portal-port proxy.pid proxy-script proxy-address proxy.log; do
+    for file in backend api-port portal-port private-env proxy.pid proxy-script proxy-address proxy.log; do
       [[ ! -e "$state_dir/$file" ]] || rm -- "$state_dir/$file"
     done
     rmdir "$state_dir"
