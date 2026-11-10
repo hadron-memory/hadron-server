@@ -1,6 +1,6 @@
--- #3668 (S1a): the database half of the grant row, its events and the actions table. One source, shared verbatim with the
--- end of migration 20261107010000_grants (pinned by src/lib/grants/grantRow3668.test.ts) and applied by post-push.sql
--- and the test globalSetup.
+-- #3668 (S1a): the database half of the grant row, its events and the actions table. One source; the newest migration to
+-- carry it (20261110010100_grant_activation) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
+-- post-push.sql applies it.
 --
 -- GRANTS. Exactly one holder (a user, an agent, a worker or an App); the CHECK cannot pass on NULL, because
 -- num_nonnulls() is never NULL. The holder ids are SEALED (no foreign key, #3690 S2a-h): a holder that goes ENDS its grant and
@@ -8,6 +8,11 @@
 -- The kind of holder is the column that is set; `holder_departed_at` is the end. An INSERT must name a holder that exists and
 -- has not gone (a FOR SHARE read, the lock a foreign key took), so a new row cannot race a holder's departure. A row ARRIVES PENDING: no activation, verification, signature, revocation or use, so no
 -- path can mint a live row (ruling 0099, the database half). After that a row is never edited. The only moves are:
+--   * it ACTIVATES once (#3649 slice C, cor:acl:140:07, :04): activated_at goes from NULL to the database clock, together with
+--     verification_kind 'passkey', verified_by (the signer) and signature_id, which must name a signature record of THIS
+--     grant at its current version, by that signer, whose signing request has completed. The signer becomes the issuer
+--     (issuer_user_id := verified_by). Only a grant not revoked, not left by its holder and not past its expiry activates, and
+--     nothing else moves in the same update. After that the three activation columns never move again;
 --   * it ends ONCE, by revoked_at stamped together with revoked_by, or by its HOLDER going: holder_departed_at is stamped
 --     (NULL to a time, never back) by the AFTER DELETE triggers below on every hard delete of a holder row, and by the
 --     deleting code on the soft deletes (an erased person, a retired worker, a deleted agent or App). The first end stands:
@@ -44,7 +49,9 @@ CREATE OR REPLACE FUNCTION hadron_guard_grant() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
   -- Columns that may differ between OLD and NEW; each is judged by its own rule below.
-  movable text[] := ARRAY['updated_at', 'user_id', 'issuer_user_id', 'requested_by_user_id', 'verified_by', 'revoked_at', 'revoked_by', 'holder_departed_at'];
+  movable text[] := ARRAY['updated_at', 'user_id', 'issuer_user_id', 'requested_by_user_id', 'verified_by', 'revoked_at', 'revoked_by',
+                          'holder_departed_at', 'activated_at', 'verification_kind', 'signature_id'];
+  db_now timestamp(3) := (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3);
 BEGIN
   IF TG_OP = 'DELETE' THEN
     IF EXISTS (SELECT 1 FROM apps WHERE id = OLD.app_id) THEN
@@ -79,6 +86,29 @@ BEGIN
   END IF;
   -- UPDATE: nothing but the movable columns may differ.
   IF (to_jsonb(NEW) - movable) <> (to_jsonb(OLD) - movable) THEN
+    RAISE EXCEPTION 'grants are append-only' USING ERRCODE = '23514';
+  END IF;
+  -- The one activation (#3649 slice C): a pending grant, by its own completed signature, and nothing else in the same update.
+  -- The signer becomes the issuer; the time is the database's. The caller holds the grant row (FOR UPDATE) when it writes this,
+  -- so the revocation, departure and expiry read here are the row's newest.
+  IF OLD.activated_at IS NULL AND NEW.activated_at IS NOT NULL THEN
+    IF OLD.revoked_at IS NOT NULL OR OLD.holder_departed_at IS NOT NULL
+       OR (OLD.expires_at IS NOT NULL AND OLD.expires_at <= db_now)
+       OR OLD.verification_kind IS NOT NULL OR OLD.signature_id IS NOT NULL OR OLD.verified_by IS NOT NULL
+       OR NEW.verification_kind IS DISTINCT FROM 'passkey' OR NEW.verified_by IS NULL OR NEW.signature_id IS NULL
+       OR ROW(NEW.user_id, NEW.requested_by_user_id, NEW.revoked_at, NEW.revoked_by, NEW.holder_departed_at)
+          IS DISTINCT FROM ROW(OLD.user_id, OLD.requested_by_user_id, OLD.revoked_at, OLD.revoked_by, OLD.holder_departed_at)
+       OR NOT EXISTS (SELECT 1 FROM grant_signatures s JOIN grant_signing_requests r ON r.id = s.signing_request_id
+                       WHERE s.id = NEW.signature_id AND s.grant_id = OLD.id AND r.grant_id = OLD.id
+                         AND s.version = OLD.version AND r.version = OLD.version
+                         AND s.signer_id = NEW.verified_by AND r.state = 'completed') THEN
+      RAISE EXCEPTION 'grants are append-only: a grant activates once, by its own completed signature' USING ERRCODE = '23514';
+    END IF;
+    NEW.issuer_user_id := NEW.verified_by;
+    NEW.activated_at := db_now;
+    RETURN NEW;
+  END IF;
+  IF ROW(NEW.activated_at, NEW.verification_kind, NEW.signature_id) IS DISTINCT FROM ROW(OLD.activated_at, OLD.verification_kind, OLD.signature_id) THEN
     RAISE EXCEPTION 'grants are append-only' USING ERRCODE = '23514';
   END IF;
   -- The one revoke: stamped once, together with its revoker (the shape CHECK pairs the two).

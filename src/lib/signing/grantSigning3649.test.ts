@@ -65,9 +65,9 @@ async function insertSignature(requestId: string, grantId: string, over: Record<
 }
 
 describe('prisma/grant-signing-invariants.sql parity', () => {
-  it('migration 20261109200000_grant_signing ends with a byte-identical copy, and post-push includes the file after the grant guard', () => {
+  it('the newest migration to carry it (20261110010200_grant_signing_rebase) ends with a byte-identical copy, and post-push includes the file after the grant guard', () => {
     const sql = readFileSync(new URL('../../../prisma/grant-signing-invariants.sql', import.meta.url), 'utf8');
-    const migration = readFileSync(new URL('../../../prisma/migrations/20261109200000_grant_signing/migration.sql', import.meta.url), 'utf8');
+    const migration = readFileSync(new URL('../../../prisma/migrations/20261110010200_grant_signing_rebase/migration.sql', import.meta.url), 'utf8');
     expect(migration.endsWith(sql)).toBe(true);
     const postPush = readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8');
     expect(postPush.indexOf('\\ir grant-signing-invariants.sql')).toBeGreaterThan(postPush.indexOf('\\ir grant-invariants.sql'));

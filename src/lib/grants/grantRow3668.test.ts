@@ -19,8 +19,8 @@ const query = <T>(sql: string, ...params: unknown[]) => db.$queryRawUnsafe<T[]>(
 describe('prisma/grant-invariants.sql parity', () => {
   it('the newest migration to carry it ends with a byte-identical copy, and post-push includes the file', () => {
     const sql = readFileSync(new URL('../../../prisma/grant-invariants.sql', import.meta.url), 'utf8');
-    // #3690: the newest migration to carry the guard is the holder-departure one (the S1a migration carried it first).
-    const dir = readdirSync(new URL('../../../prisma/migrations', import.meta.url)).find((d) => d === '20261109170000_grant_holder_departure');
+    // #3649 slice C: the newest migration to carry the guard is the activation one (S1a, then #3690's holder departure, carried it first).
+    const dir = readdirSync(new URL('../../../prisma/migrations', import.meta.url)).find((d) => d === '20261110010100_grant_activation');
     expect(dir).toBeTruthy();
     expect(readFileSync(new URL(`../../../prisma/migrations/${dir}/migration.sql`, import.meta.url), 'utf8').endsWith(sql)).toBe(true);
     expect(readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8')).toContain('\\ir grant-invariants.sql');
