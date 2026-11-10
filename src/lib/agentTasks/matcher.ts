@@ -492,14 +492,16 @@ async function tryAssign(
   /** #3246: the recovery sweep's claim, or none for the create-time attempt; a match-now write lands only while its
    *  claim state is the one this attempt began with (the sweep's claim, or still unclaimed). */
   claim?: Date,
+  /** #3825: set to the database time of the re-read that found the worker not free, taken inside the transaction. */
+  readAt?: { at?: Date },
 ): Promise<AttemptOutcome> {
-  return db.$transaction(tx => tryAssignInTx(tx, task, workerId, family, now, hooks, anchor, matchNow, claim));
+  return db.$transaction(tx => tryAssignInTx(tx, task, workerId, family, now, hooks, anchor, matchNow, claim, readAt));
 }
 
 /** Shared deciding write. A batch caller already holds every candidate worker lock before its task rows. */
 async function tryAssignInTx(
   tx: Prisma.TransactionClient, task: QueuedTask, workerId: string, family: string, now: Date,
-  hooks: MatcherHooks, anchor: number, matchNow: boolean, claim?: Date,
+  hooks: MatcherHooks, anchor: number, matchNow: boolean, claim?: Date, readAt?: { at?: Date },
 ): Promise<AttemptOutcome> {
   await lockAuthorityAnchors(tx, [{ kind: 'app', id: task.appId }], 'shared');
   const app = await tx.app.findUnique({ where: { id: task.appId }, select: { deletedAt: true, uninstalledAt: true } });
@@ -515,11 +517,13 @@ async function tryAssignInTx(
   const currentTask = await tx.agentTask.findUnique({ where: { id: task.id }, select: { requirements: true } });
   if (!currentTask) return 'task-gone';
   const chosen = await stillFreeAs(tx, task.appId, workerId, family, now, parseRequirements(currentTask.requirements), anchor);
-  if (!chosen) return 'worker-not-free';
+  // #3825: the failure's stamp is taken HERE, under the worker lock right after the re-read that found nobody free, so no
+  // success for this worker can commit between that read and the stamp (George's post-attempt gap).
+  if (!chosen) { if (readAt) readAt.at = await decisionClock(tx); return 'worker-not-free'; }
   const creator = task.createdByWorkerId ?? null;
   // Decided at the moment after the waits (Xan #2166 LOCAL-1), not the pass's start.
   const covering = await coveringSignals(tx, task.appId, creator && creator !== workerId ? [workerId, creator] : [workerId], afterWaits(now, anchor));
-  if (covering.has(workerId)) return 'worker-not-free';
+  if (covering.has(workerId)) { if (readAt) readAt.at = await decisionClock(tx); return 'worker-not-free'; }
   // R71: a task its creator made under a pause or halt waits while that still covers the creator.
   if (creator && timeStoppedWorkers(covering).has(creator)) return 'task-gone';
   await hooks.afterWorkerCheck?.({ taskId: task.id, workerId });
@@ -758,12 +762,13 @@ export async function matchTaskNow(db: PrismaClient, taskId: string, now: Date, 
   // sweep reclaimed it from a slow or dead one) neither starts nor writes: the current claimant is the one attempt.
   if ((task.matchClaimedAt?.getTime() ?? null) !== (claim?.getTime() ?? null)) return;
   // #3825: a failure is stamped with when it was DECIDED, i.e. the last read that informed it: the start (the snapshot
-  // judgment), or, once an assignment attempt ran (it re-reads under the worker lock, after any wait), the moment that
-  // attempt returned. A success another attempt committed in between is then ordered by the record's own guard.
+  // judgment), or, once an assignment attempt ran (it re-reads under the worker lock, after any wait), the in-transaction
+  // moment right after that re-read (under the worker lock). A success another attempt committed in between is then ordered by the record's own guard.
   let decidedAt = await decisionClock(db);
   const outcome = await chooseMatchNow(db, task, now, async (workerId, family) => {
-    const attempt = await tryAssign(db, task, workerId, family, now, {}, anchor, true, claim);
-    decidedAt = await decisionClock(db);
+    const readAt: { at?: Date } = {};
+    const attempt = await tryAssign(db, task, workerId, family, now, {}, anchor, true, claim, readAt);
+    if (readAt.at) decidedAt = readAt.at;
     return attempt;
   });
   if ('workerId' in outcome) {

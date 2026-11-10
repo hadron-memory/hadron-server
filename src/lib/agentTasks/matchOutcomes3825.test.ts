@@ -264,3 +264,16 @@ it('Anne: an attempt that waited on the worker lock and then re-read nobody free
   await attempt;
   expect((await latest({ windowHours: 24, family: null, role: 'reviewer' }))[0]).toMatchObject({ outcome: 'NO_WORKER', reason: 'NOBODY_FREE' });
 });
+
+it('George post-attempt gap: the stamp of a not-free re-read is taken inside the attempt, under the worker lock', async () => {
+  const w = await worker('reviewer');
+  const t = await create({ requirements: { role: 'reviewer' } });
+  await db.$executeRaw`UPDATE sessions SET ended_at = now() WHERE worker_id = ${w.id}`; // not free any more
+  const readAt: { at?: Date } = {};
+  const before = await decisionClock(db);
+  const out = await __matcherTesting.tryAssign(db, { id: t.id, appId: app.id, requirements: { role: 'reviewer' }, closeSessionWhenDone: false } as any, w.id, 'claude', new Date(), {}, undefined, false, undefined, readAt);
+  const after = await decisionClock(db);
+  expect(out).toBe('worker-not-free');
+  expect(readAt.at!.getTime()).toBeGreaterThanOrEqual(before.getTime());
+  expect(readAt.at!.getTime()).toBeLessThanOrEqual(after.getTime());
+});
