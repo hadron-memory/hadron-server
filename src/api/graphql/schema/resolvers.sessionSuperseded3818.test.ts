@@ -239,17 +239,19 @@ it.each(['/reload', '/sessions/target/outcome'])('keeps superseded execution hea
   const reply = await wire(path, token, { outcome: 1 }, { 'x-hadron-session': a.id });
   expect(reply.status).toBe(409); expect(await reply.json()).toMatchObject({ code: 'SESSION_SUPERSEDED' });
 });
-it('refuses the retained MCP execution binding after supersession, without silently rebinding', async () => {
-  const a = await bind();
+it('refuses a superseded retained MCP execution binding without silently rebinding', async () => {
   const token = await signJwt({ sub: owner.id, roles: ['READER'] });
-  const opened = await wire('/mcp', token, init3818, { 'x-hadron-session': a.id });
+  const opened = await wire('/mcp', token, init3818);
   expect(opened.status).toBe(200); await opened.text();
   const id = opened.headers.get('mcp-session-id')!;
   try {
-    const old = new Date(Date.now() - 72 * 3600000);
-    await db.session.update({ where: { id: a.id }, data: { startedAt: old, updatedAt: old } });
+    const started = await wire('/mcp', token, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'hadron_start_session', arguments: { description: '3818 retained synthetic' } } }, { 'mcp-session-id': id });
+    expect(started.status).toBe(200); await started.text();
+    const a = await db.session.findFirstOrThrow({ where: { userId: owner.id } });
     const b = await bind();
-    const reply = await wire('/mcp', token, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }, { 'mcp-session-id': id });
+    // MCP cannot bind workers. Seed the historical superseded state after the real tool retained its plain binding.
+    await db.session.update({ where: { id: a.id }, data: { workerId: worker.id, endedAt: new Date(), endReason: 'superseded', supersededBySessionId: b.id } });
+    const reply = await wire('/mcp', token, { jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} }, { 'mcp-session-id': id });
     expect(reply.status).toBe(409);
     expect(await reply.json()).toMatchObject({ code: 'SESSION_SUPERSEDED', sessionId: b.id });
     expect(await db.session.count({ where: { workerId: worker.id } })).toBe(2);
