@@ -382,6 +382,14 @@ describe('4, 5: masking, judged before anything is resolved', () => {
     await db.app.update({ where: { id: appId }, data: { uninstalledAt: new Date() } });
     await expectMasked(tokens.admin, { a: agentId, p: appId });
     await expectMasked(tokens.admin, { a: agentId, p: 'hrn:app:bp3843.test:team' });
+    // Rico §10 revision: the App's own key too, by id and URN.
+    await expectMasked(tokens.appKey, { a: agentId, p: appId });
+    await expectMasked(tokens.appKey, { a: agentId, p: 'hrn:app:bp3843.test:team' });
+    // Xavier 94762: restored live, it is served again (user and key, both ref forms).
+    await db.app.update({ where: { id: appId }, data: { uninstalledAt: null } });
+    for (const tok of [tokens.admin, tokens.appKey]) for (const p of [appId, 'hrn:app:bp3843.test:team']) {
+      expect((await gql(tok, { a: agentId, p })).data!.agentServedBootPrompt!.text).toBe(rendered());
+    }
   });
 
   it('5: a lapsed App licence is masked as not-found, never the typed INSTALL_LICENSE_INACTIVE (control: served while it holds)', async () => {
