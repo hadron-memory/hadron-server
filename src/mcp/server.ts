@@ -6968,7 +6968,8 @@ export function createMcpServerInstance(
     'hadron_update_node',
     'Partially update an existing node. Only the fields you provide are changed — everything else is preserved. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Pass expectedRevision from hadron_get_node to refuse atomically if the node changed since you read it.',
     SHAPE_HADRON_UPDATE_NODE,
-    async ({ urn: rawUrn, authoredWith, expectedRevision, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason, install }) => {
+    async (mcpArgs) => {
+      const { urn: rawUrn, authoredWith, expectedRevision, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason, install } = mcpArgs;
       if (install) {
         if (edges || isRunnable || abstractStillAccurate) return textResult('`install` does not support `edges`, `isRunnable` or `abstractStillAccurate`.');
         return writeInstallNodeViaGraphql('update', install, {
@@ -6981,7 +6982,7 @@ export function createMcpServerInstance(
       // normalize before mergedGovernedState, the door replay and the payload.
       const role = normalizeRole(rawRole);
       // #3823: what this call supplies besides its text; an edit grant admits none of it (V46).
-      const mcpNonTextFields = suppliedNonTextFields({ name, objectType, isRunnable, description, abstract, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, install });
+      const mcpNonTextFields = suppliedNonTextFields(mcpArgs as Record<string, unknown>);
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
@@ -7030,7 +7031,7 @@ export function createMcpServerInstance(
         assertNotCommentWrite(existing?.nodeType, nodeType, 'update');
         // #2987 (V13) — see hadron_create_node; judged only for a live row, a missing one is NODE_NOT_FOUND below.
         if (existing && !existing.deletedAt) assertNoGenericMessageSeqWrite(existing, nodeType, seq, 'update');
-        await assertBootPromptWriteAllowedOrGranted(db as unknown as Prisma.TransactionClient, existing, { nodeType, role: normalizeRole(role), otherFields: mcpNonTextFields, door: true, memoryId: memory.id, loc }, 'update');
+        await assertBootPromptWriteAllowedOrGranted(db as unknown as Prisma.TransactionClient, existing, { nodeType, role: normalizeRole(role), otherFields: mcpNonTextFields, hasContent: content !== undefined, door: true, memoryId: memory.id, loc }, 'update');
         assertGovernedWrite(
           existing,
           mergedGovernedState(existing, { role, isRunnable }),
@@ -7265,7 +7266,7 @@ export function createMcpServerInstance(
             assertNoGenericMessageSeqWrite(current, nodeType, seq, 'update');
             // #3823 — a worker session's in-place edit of its own boot-prompt source spends its edit grant here, on the locked row, in
             // this transaction (the GraphQL update path's twin). Any later refusal rolls the spend back.
-            await spendEditGrantFor(tx, current, { nodeType, role: normalizeRole(role), otherFields: mcpNonTextFields, door: true, memoryId: memory.id, loc });
+            await spendEditGrantFor(tx, current, { nodeType, role: normalizeRole(role), otherFields: mcpNonTextFields, hasContent: content !== undefined, door: true, memoryId: memory.id, loc });
             // #1186 / cor:dmo:020:05 — omitted fields come from the locked
             // row, not the probe, and a refusal leaves no reconciliation.
             await validateNodeSchemaOnWrite(

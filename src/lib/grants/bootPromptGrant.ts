@@ -111,6 +111,11 @@ async function signerStillEligible(q: Q, issuerUserId: string | null, own: OwnNo
   return !!agent && (await managesAgent(ctx, agent));
 }
 
+/**
+ * `issuer`: the person recorded as the grant's issuer. The database's activation guard (prisma/grant-invariants.sql) sets
+ * `issuer_user_id := verified_by` in the one statement that activates a grant, and nothing else may set either afterwards except a
+ * recorded account merge or an erasure, so the signer judged here IS the person whose ceremony activated it (Andi P2).
+ */
 interface Candidate { id: string; issuer: string | null }
 
 /**
@@ -194,6 +199,8 @@ type Prior = { id: string; memoryId: string; loc: string; nodeType?: string | nu
 /** `otherFields`: the names of the fields the write SUPPLIES besides its text (and the identifiers that locate the node). */
 type Next = {
   nodeType?: string | null; role?: string | null; otherFields: readonly string[];
+  /** Whether the write supplies text at all: an edit without any would spend the one-use grant on a no-op. */
+  hasContent: boolean;
   /** Whether the write arrived through a door that may carry the lift: `updateNode` or `hadron_update_node`, and no other (Riana F1). */
   door: boolean;
   /** Where the write says the node is: it must be where it already is (an edit in place never relocates, V46). */
@@ -205,8 +212,8 @@ const updateNodeDoor = new AsyncLocalStorage<true>();
 export function withUpdateNodeDoor<T>(fn: () => Promise<T>): Promise<T> { return updateNodeDoor.run(true, fn); }
 
 /** What a GraphQL write core tells the grant predicate about itself: its door, its location and what it supplies besides text. */
-export function graphqlEditFacts(input: Record<string, unknown> & { memoryId?: string; loc?: string }): Pick<Next, 'otherFields' | 'door' | 'memoryId' | 'loc'> {
-  return { otherFields: suppliedNonTextFields(input), door: updateNodeDoor.getStore() === true, memoryId: input.memoryId, loc: input.loc };
+export function graphqlEditFacts(input: Record<string, unknown> & { memoryId?: string; loc?: string }): Pick<Next, 'otherFields' | 'hasContent' | 'door' | 'memoryId' | 'loc'> {
+  return { otherFields: suppliedNonTextFields(input), hasContent: input.content !== undefined, door: updateNodeDoor.getStore() === true, memoryId: input.memoryId, loc: input.loc };
 }
 
 /** The identifiers and the text itself: the only supplied fields an in-place TEXT edit may carry (V46). `role` and `nodeType` are compared with the prior row's by {@link isGrantableEdit}, not listed here. */
@@ -226,7 +233,7 @@ export function isGrantableEdit(prior: Prior | null | undefined, next: Next): bo
   if (next.role !== undefined && next.role !== prior.role) return false;
   if (next.nodeType !== undefined && next.nodeType !== prior.nodeType) return false;
   // Text in place only (V46): a name, properties, tags, data, edges or any other field supplied alongside is a different edit.
-  if (!next.door) return false;
+  if (!next.door || !next.hasContent) return false;
   if ((next.memoryId !== undefined && next.memoryId !== prior.memoryId) || (next.loc !== undefined && next.loc !== prior.loc)) return false;
   return next.otherFields.length === 0;
 }

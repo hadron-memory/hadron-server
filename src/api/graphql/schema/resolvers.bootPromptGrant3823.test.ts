@@ -10,6 +10,8 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { runAsActor } from '../../../lib/requestActor.js';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { hasUsableEditGrant, isGrantableEdit, spendEditGrant } from '../../../lib/grants/bootPromptGrant.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
@@ -394,10 +396,11 @@ describe('the lift is the update door only, in place, signer re-judged (#3823 Ri
 
 describe('isGrantableEdit, directly (each condition alone defeats the lift)', () => {
   const prior = { id: 'n1', memoryId: 'm1', loc: 'boot:source', role: 'boot-prompt', nodeType: 'info' };
-  const ok = { otherFields: [] as string[], door: true, memoryId: 'm1', loc: 'boot:source' };
+  const ok = { otherFields: [] as string[], hasContent: true, door: true, memoryId: 'm1', loc: 'boot:source' };
   it('admits only the content-only, in-place, same-role, update-door shape', () => {
     expect(isGrantableEdit(prior, ok)).toBe(true);
     expect(isGrantableEdit(prior, { ...ok, door: false })).toBe(false);               // not the update door (Riana F1)
+    expect(isGrantableEdit(prior, { ...ok, hasContent: false })).toBe(false);          // no text: a no-op must not spend the grant (Andi)
     expect(isGrantableEdit(prior, { ...ok, otherFields: ['name'] })).toBe(false);      // not only text (V46)
     expect(isGrantableEdit(prior, { ...ok, loc: 'boot:elsewhere' })).toBe(false);      // not in place (Andi P2-1)
     expect(isGrantableEdit(prior, { ...ok, memoryId: 'm2' })).toBe(false);
@@ -420,5 +423,15 @@ describe('spendEditGrant re-judges the signer itself (Riana F6)', () => {
     await db.orgMember.updateMany({ where: { organizationId: orgId, userId: second.id }, data: { role: 'CONTRIBUTOR' } });
     expect(await db.$transaction((tx) => spendEditGrant(tx, workerId, facts))).toBe(false);       // the spend judges the signer again
     expect(await uses(g)).toBe(0);
+  });
+});
+
+describe('the MCP door judges the call\'s REAL arguments, so a parameter added later fails closed (Andi P2)', () => {
+  it('hadron_update_node derives its non-text fields from the parsed args object, never a hand-kept list', () => {
+    const src = readFileSync(fileURLToPath(new URL('../../../mcp/server.ts', import.meta.url)), 'utf8');
+    const at = src.indexOf("'hadron_update_node',");
+    const body = src.slice(at, at + 20000);
+    expect(body).toContain('suppliedNonTextFields(mcpArgs as Record<string, unknown>)');
+    expect(body).not.toMatch(/suppliedNonTextFields\(\{/);
   });
 });

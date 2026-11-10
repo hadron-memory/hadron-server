@@ -188,7 +188,7 @@ async function batchPrecheck(ctx: Context, target: CompileTargetInput, before: C
       where: { class: 'system', isInstallMemory: true, appId: before.appId, installOfAgentId: before.agent.id, deletedAt: null },
       select: { id: true },
     }))?.id ?? null;
-  const loc = target.kind === 'WORKER' ? workerCompiledLoc(target.workerId) : AGENT_COMPILED_LOC;
+  const loc = target.kind === 'WORKER' ? workerCompiledLoc(target.workerId) : target.kind === 'APP_AGENT' ? APP_COMPILED_LOC : AGENT_COMPILED_LOC;
   const node = memoryId ? await ctx.db.node.findFirst({ where: { memoryId, loc, deletedAt: null }, select: { id: true, nodeType: true } }) : null;
   if (!memoryId || !node || node.nodeType !== COMPILED_BOOT_PROMPT_NODE_TYPE
     || !(await hasBatchGrant(ctx.db as unknown as Prisma.TransactionClient, workerId, { id: node.id, memoryId, loc }))) {
