@@ -60,7 +60,7 @@ beforeEach(async () => {
 async function setStage(chat: { id: string; data: unknown }, conversationName: string, stageName: string) {
   await db.node.update({ where: { id: chat.id }, data: { data: { ...(chat.data as object), conversationName, stageName } } });
   const row = await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: chat.id } });
-  await db.chatRootEngineState.update({ where: { chatRootNodeId: chat.id }, data: { state: { ...(row.state as object), conversationName, stageName } } });
+  await db.chatRootEngineState.update({ where: { chatRootNodeId: chat.id }, data: { state: { ...(row.state as object), conversationName, ...(stageName ? { stageName } : {}) } } });
 }
 // loc-scope-ok: counts the messages of the one chat under test, by its own prefix
 const messageNodes = (chatId: string) => db.node.count({ where: { loc: { startsWith: `${chatId}:messages:` } } });
