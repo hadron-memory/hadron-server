@@ -10,6 +10,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { runAsActor } from '../../../lib/requestActor.js';
+import { createTestableMcpServer } from '../../../mcp/server.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { upsertPlatformActions } from '../../../lib/grants/actions.js';
 import { DB_NOW, insertGrantUnguarded, raw, type World } from '../../../lib/grants/grantFixtures3668.js';
@@ -182,11 +183,11 @@ describe('the grant is the boundary (#3823 refusals that must hold)', () => {
     const ops = [
       () => asWorker(() => resolvers.Mutation.deleteNode(null, { nodeRef: s.id }, ctx())),
       () => asWorker(() => resolvers.Mutation.updateNode(null, { input: { id: s.id, role: 'notes' } }, ctx())),
-      () => asWorker(() => resolvers.Mutation.updateNode(null, { input: { id: s.id, nodeType: 'info' } }, ctx())),
+      () => asWorker(() => resolvers.Mutation.updateNode(null, { input: { id: s.id, nodeType: 'report' } }, ctx())),
       () => asWorker(() => resolvers.Mutation.moveNode(null, { sourceRef: s.id, targetUrn: 'hrn:node:g3823.example:install:elsewhere' }, ctx())),
       () => asWorker(() => resolvers.Mutation.mergeNodes(null, { input: { source: s.id, target: t.id } }, ctx())),
     ];
-    for (const op of ops) expect(await codeOf(op())).toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+    for (const [i, op] of ops.entries()) expect([i, await codeOf(op())]).toEqual([i, 'BOOT_PROMPT_WORKER_SESSION_REFUSED']);
     expect(await uses(g)).toBe(0);
     expect((await db.node.findUniqueOrThrow({ where: { id: s.id } })).content).toBe('original');
   });
@@ -219,5 +220,33 @@ describe('the grant is the boundary (#3823 refusals that must hold)', () => {
     expect(stale).not.toBe('NO_ERROR');
     expect(await uses(g)).toBe(0);
     expect(await codeOf(edit(s.id))).toBe('NO_ERROR');
+  });
+});
+
+describe('over MCP (hadron_update_node), the same grant and the same boundary (#3823)', () => {
+  // An install memory is writable only through the GraphQL door (access-control.ts canWriteToMemory), so MCP reaches the role
+  // Agent's own system-memory source.
+  const mcpEdit = (urn: string, content = 'via mcp') => {
+    const mcp = createTestableMcpServer({ userId: admin.id, roles: [], clientId: `user:${admin.id}` });
+    return asWorker(() => mcp.callToolText('hadron_update_node', { urn, content }).then((t) => String(t), (e: Error) => e.message));
+  };
+  it('refused without a grant; admitted once with one, recording the worker', async () => {
+    const s = await src(agentMemoryId, 'boot:source');
+    const urn = 'hrn:node:g3823.example:agent-sys:boot:source';
+    expect(await mcpEdit(urn)).toContain('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+    const g = await grant(s.id);
+    expect(await mcpEdit(urn)).not.toContain('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+    expect(await uses(g)).toBe(1);
+    expect((await db.node.findUniqueOrThrow({ where: { id: s.id } })).content).toBe('via mcp');
+    expect((await db.nodeRevision.findMany({ where: { nodeId: s.id } })).some((r) => r.editedByWorkerId === workerId)).toBe(true);
+    expect(await mcpEdit(urn, 'again')).toContain('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+  });
+  it('another Agent\'s system-memory source is refused under a grant that names it', async () => {
+    const otherMem = await db.memory.create({ data: { id: generateId(), class: 'system', name: 'other-sys', urn: 'g3823.example:other-sys', organizationId: orgId } });
+    await db.agent.create({ data: { id: generateId(), name: 'Other', urn: 'g3823.example:other', organizationId: orgId, systemMemoryId: otherMem.id } });
+    const t = await src(otherMem.id, 'boot:source');
+    const g = await grant(t.id);
+    expect(await mcpEdit('hrn:node:g3823.example:other-sys:boot:source')).toContain('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+    expect(await uses(g)).toBe(0);
   });
 });

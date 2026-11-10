@@ -8,6 +8,7 @@ import { liveTxContext, liveReadSnapshotContext } from '../api/graphql/schema/au
 import { withReconciledNodeRead } from '../lib/includes/reconciledNodeRead.js';
 import { stampEmbeddingObligation } from '../services/embedding/obligation.js';
 import { assertBootPromptWriteAllowed, assertNoBootPromptRows, isBootPromptRole } from '../lib/bootPrompt.js';
+import { assertBootPromptWriteAllowedOrGranted, spendEditGrantFor } from '../lib/grants/bootPromptGrant.js';
 import { sessionEndReason } from '../lib/sessionEndReason.js';
 import { governedKindAnnotation } from '../lib/edgeGovernedKind.js';
 import { GraphQLError } from 'graphql';
@@ -7016,7 +7017,7 @@ export function createMcpServerInstance(
         assertNotCommentWrite(existing?.nodeType, nodeType, 'update');
         // #2987 (V13) — see hadron_create_node; judged only for a live row, a missing one is NODE_NOT_FOUND below.
         if (existing && !existing.deletedAt) assertNoGenericMessageSeqWrite(existing, nodeType, seq, 'update');
-        assertBootPromptWriteAllowed(existing, { nodeType, role: normalizeRole(role) }, 'update');
+        await assertBootPromptWriteAllowedOrGranted(db as unknown as Prisma.TransactionClient, existing, { nodeType, role: normalizeRole(role) }, 'update');
         assertGovernedWrite(
           existing,
           mergedGovernedState(existing, { role, isRunnable }),
@@ -7249,6 +7250,9 @@ export function createMcpServerInstance(
             }
             // #2987 — re-judged on the locked row, before any write.
             assertNoGenericMessageSeqWrite(current, nodeType, seq, 'update');
+            // #3823 — a worker session's in-place edit of its own boot-prompt source spends its edit grant here, on the locked row, in
+            // this transaction (the GraphQL update path's twin). Any later refusal rolls the spend back.
+            await spendEditGrantFor(tx, current, { nodeType, role: normalizeRole(role) });
             // #1186 / cor:dmo:020:05 — omitted fields come from the locked
             // row, not the probe, and a refusal leaves no reconciliation.
             await validateNodeSchemaOnWrite(
