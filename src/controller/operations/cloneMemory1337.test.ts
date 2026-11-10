@@ -11,6 +11,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../../lib/id.js';
 import { cloneMemoryGraphInTx } from './cloneMemory.js';
+import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 
 let orgId: string;
 let otherOrgId: string;
@@ -137,5 +138,18 @@ describe('#1337 clone carries the rulebook', () => {
     })).rejects.toThrow('abort');
     expect(await db.memory.count({ where: { urn: 'c1-a:copy' } })).toBe(0);
     expect(await db.memoryConfig.count()).toBe(1);
+  });
+
+  it('a denied clone (reader in the target org) writes no memory and no config', async () => {
+    await seedConfig();
+    const user = await db.user.create({ data: { id: generateId(), name: 'c1-user' } });
+    await db.orgMember.create({ data: { organizationId: orgId, userId: user.id, role: 'ADMIN' } });
+    await db.orgMember.create({ data: { organizationId: otherOrgId, userId: user.id, role: 'READER' } });
+    const ctx = { db, userId: user.id, roles: [], clientId: `user:${user.id}` } as unknown as Context;
+    const before = await db.memoryConfig.count();
+    await expect((resolvers.Mutation as any).cloneMemory({}, { ref: srcId, targetUrn: 'hrn:mem:c1-b:denied' }, ctx))
+      .rejects.toThrow(/Forbidden/);
+    expect(await db.memory.count({ where: { urn: 'c1-b:denied' } })).toBe(0);
+    expect(await db.memoryConfig.count()).toBe(before);
   });
 });
