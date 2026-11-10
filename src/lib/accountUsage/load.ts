@@ -45,6 +45,9 @@ export async function loadAccountUsageHistory(db: Context['db'], appId: string, 
     // The cap can hide another identity of an under-qualified selector (same label, other host or family) behind a busy one,
     // and with it the ambiguity refusal. When the cap was hit, read once more, bounded the same way, from every row NOT of the
     // first valid identity seen (a malformed row neither seeds nor consumes the probe: only a valid snapshot counts).
+    // KNOWN LIMIT (gate ruling on #3836, hadron-server#3842): the census is bounded by the read cap. A probe page that is ALL
+    // malformed rows (>= cap) can still hide a valid older second identity; the answer stays definitive within the census.
+    // V15 accepts this skew (anyone who can write the usage memory can skew an advisory number; nothing here authorizes).
     if (rows.length >= maxRows && (sel.host == null || sel.family == null)) {
       const seen = snaps[0];
       const more = await db.node.findMany({

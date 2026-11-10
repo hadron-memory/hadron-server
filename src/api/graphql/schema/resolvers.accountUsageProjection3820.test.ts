@@ -252,6 +252,15 @@ describe('self-moves judged on the resolved identity, and the per-account histor
     const [got] = await loadAccountUsageHistory(db as any, app.id, new Date(), [{ label: 'amb2' }], 5);
     expect(new Set(got!.map((x) => x.host))).toEqual(new Set(['h1', 'h2']));
   });
+  it('KNOWN LIMIT (#3842, V15 accepted): an all-malformed alternate page at >= cap still hides an older valid host; the answer is definitive within the census', async () => {
+    const { loadAccountUsageHistory } = await import('../../../lib/accountUsage/load.js');
+    await snapshot({ label: 'lim', minutesAgo: 300, sevenPct: 5, extra: { host: 'h2' } });
+    for (let m = 1; m <= 10; m += 1) await snapshot({ label: 'lim', minutesAgo: m, sevenPct: 10, extra: { host: 'h1' } });
+    for (let m = 0; m < 5; m += 1) await snapshot({ label: 'lim', minutesAgo: 20 + m, sevenPct: 10, extra: { host: 'h3', schemaVersion: 2 } });
+    const [got] = await loadAccountUsageHistory(db as any, app.id, new Date(), [{ label: 'lim' }], 5);
+    // Documented behavior: only h1 is seen. When #3842 lands, this pin flips to the inconclusive signal.
+    expect(new Set(got!.map((x) => x.host))).toEqual(new Set(['h1']));
+  });
   it('a same-label move to another host reads that host own history, apart from the source', async () => {
     await burn('src', 30, 1, { extra: { host: 'h1' } });
     await burn('src', 20, 2, { extra: { host: 'h2' } });
