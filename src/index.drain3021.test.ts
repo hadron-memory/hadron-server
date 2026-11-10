@@ -56,7 +56,11 @@ afterEach(() => {
   vi.useRealTimers(); vi.restoreAllMocks(); vi.clearAllMocks();
 });
 
-describe('#3021 stopping drain window', () => {
+// #3849: every case here awaits a cold `import('./index.js')` (vi.resetModules() discards the module graph each time), a
+// wall-clock cost that fake timers cannot shorten. Under a loaded shared host it passed 5 s. The bound is scoped to
+// this describe, not the config's testTimeout: a hung case still fails, only after 30 s instead of 5 s (the same bound
+// index.shutdownStep3845.test.ts uses for the same boot).
+describe('#3021 stopping drain window', { timeout: 30_000 }, () => {
   it('holds the listener open for the default 6000 ms while /ready already says stopping', async () => {
     await boot();
     signals.get('SIGTERM')!();
