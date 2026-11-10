@@ -268,3 +268,14 @@ it('fences a newly stamped successor reference and rolls back a missing target',
   await expect(db.session.update({ where: { id: a.id }, data: { supersededBySessionId: generateId() } })).rejects.toMatchObject({ extensions: { code: 'WORKER_REFERENCE_NOT_FOUND', referenceKind: 'session', writer: 'sessions' } });
   expect((await db.session.findUniqueOrThrow({ where: { id: a.id } })).supersededBySessionId).toBeNull();
 });
+it.each([true, false])('uses a non-5xx GraphQL context refusal with read-gated details (reader=%s)', async reader => {
+  const { a, b } = await displaced();
+  const token = await signJwt({ sub: reader ? owner.id : stranger.id, roles: ['READER'] });
+  const reply = await wire('/graphql', token, { query: '{ __typename }' }, { 'x-hadron-session': a.id });
+  expect(reply.status).toBe(409);
+  const result = await reply.json() as any;
+  expect(result.data).toBeUndefined();
+  expect(result.errors[0].extensions).toEqual(reader
+    ? { code: 'SESSION_SUPERSEDED', sessionId: b.id, startedAt: b.startedAt.toISOString() }
+    : { code: 'SESSION_SUPERSEDED' });
+});
