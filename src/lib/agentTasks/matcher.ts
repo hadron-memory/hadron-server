@@ -770,11 +770,13 @@ export type MatchFailureReason = 'NO_ROLE' | 'REQUIREMENTS_EXCLUDED' | 'NOBODY_F
  * order that V23 makes the order of a candidate's reasons. Values are added, never renamed. `STOP_SIGNAL` names
  * a matcher condition V21's list lacks: a worker covered by a stop signal is not assigned. There is deliberately NO value for
  * "bound and quiet" (V21: #3815 removes that exclusion, the #3816 gate says to omit it), so until #3815 lands such a worker,
- * which the matcher still skips, is not listed.
+ * which the matcher still skips, is not listed. `NO_LONGER_FREE` (#3855, V59) is the one value `skipReasonsOf` never returns: a candidate the
+ * snapshot found free that the final assignment check then refused (a lost race) carries it alone, captured at the assign outcome in
+ * `chooseMatchNow`. It names no underlying condition: the final check answers only free or not free.
  */
 export const MATCH_SKIP_REASONS = [
   'RETIRED', 'USES_NO_TASKS', 'ENDING_SESSION', 'HOLDS_TASK', 'UNAVAILABLE', 'FAMILY_UNAVAILABLE', 'STALLED', 'NO_FAMILY', 'NOT_HELD',
-  'FAMILY_EXCLUDED', 'NAME_EXCLUDED', 'TIER_BELOW_MINIMUM', 'TIER_UNKNOWN', 'MODEL_GROUP_MISMATCH', 'STOP_SIGNAL',
+  'FAMILY_EXCLUDED', 'NAME_EXCLUDED', 'TIER_BELOW_MINIMUM', 'TIER_UNKNOWN', 'MODEL_GROUP_MISMATCH', 'STOP_SIGNAL', 'NO_LONGER_FREE',
 ] as const;
 export type MatchSkipReason = typeof MATCH_SKIP_REASONS[number];
 /** One candidate a failed match skipped and every reason, in {@link MATCH_SKIP_REASONS} order. Returned in the match answer, never stored (V22). */
@@ -913,11 +915,17 @@ async function chooseMatchNow(
     // #3816: the candidates are the workers of the asked role (and team pool); each is listed with every reason it was not taken.
     // A retired worker is listed with RETIRED plus every other reason that applies to it (V23), so its state is loaded; only a
     // failed match that asked for the answer pays for that read.
+    // #3855 (V59): candidates the snapshot called free that the final assignment check refused. The captured outcome is authoritative:
+    // such a worker is never also listed from the fresh retired read (a worker that retired mid-race carries NO_LONGER_FREE alone).
+    const lostRace = new Set<string>();
     const explain = async (): Promise<SkippedCandidate[]> => {
-      const retired = pool ? [] : (await loadWorkerWorkStates(db, task.appId, now, { bySession: true, retiredOnly: true })).filter(w => roleAllowed(req, w.role));
+      const retired = pool ? [] : (await loadWorkerWorkStates(db, task.appId, now, { bySession: true, retiredOnly: true })).filter(w => roleAllowed(req, w.role) && !lostRace.has(w.id));
       return [
       ...retired.map(w => ({ workerId: w.id, name: w.name, reasons: MATCH_SKIP_REASONS.filter(r => r === 'RETIRED' || skipReasonsOf(req, w, groups, covering.has(w.id)).includes(r)) })),
-      ...team.map(w => ({ workerId: w.id, name: w.name, reasons: skipReasonsOf(req, w, groups, covering.has(w.id)) })),
+      ...team.map(w => {
+        const reasons = skipReasonsOf(req, w, groups, covering.has(w.id));
+        return { workerId: w.id, name: w.name, reasons: lostRace.has(w.id) ? ['NO_LONGER_FREE' as MatchSkipReason] : reasons };
+      }),
     ].filter(c => c.reasons.length > 0).sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()) || a.workerId.localeCompare(b.workerId));
     };
     const stoppedCreator = task.createdByWorkerId && timeStoppedWorkers(covering).has(task.createdByWorkerId);
@@ -934,10 +942,12 @@ async function chooseMatchNow(
         if (outcome === 'assigned') {
           return { workerId: w.id, family, live: w.live };
         }
+        if (outcome === 'worker-not-free') lostRace.add(w.id);
         if (outcome === 'task-gone') break;
       }
     }
-    // A worker the snapshot called free but that a final assignment gate then refused (a lost race) has no snapshot reason and is not listed.
+    // #3855 (V59): a worker the snapshot called free but that the final assignment check then refused (a lost race) is listed with
+    // NO_LONGER_FREE alone. Reading again for the condition would race the same way, so none is named.
     if (wantSkipped) skipped = await explain();
   }
   return skipped ? { reason, skipped } : { reason };
