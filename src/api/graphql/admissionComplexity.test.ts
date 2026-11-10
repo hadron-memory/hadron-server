@@ -45,6 +45,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.agents",
   "Query.aiModelPrices",
   "Query.aiServiceConfigs",
+  "Query.appGrants", // #3711: clampListTake, default 20, cap 200; the common omitted bound 100 is conservative.
   "Query.appKeysPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.appMemoryScope",
   "Query.appNodes",
@@ -94,7 +95,6 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.myChats",
   "Query.myChatsPage", // #2212 A3: pageArgs, default 20, cap 200.
   "Query.myGrants", // #3800: clampListTake, default 20, cap 200; the common omitted bound 100 is conservative.
-  "Query.appGrants", // #3711: clampListTake, default 20, cap 200; the common omitted bound 100 is conservative.
   "Query.myUserApiKeysPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.nodeEdgeRemovals",
   "Query.nodeRevisions",

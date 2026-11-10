@@ -100,6 +100,9 @@ export const grantCreateMutations = {
  * one GRANT_HOLDER_NOT_ALLOWED refusal inside the transaction. The manager predicate is re-judged under the locks.
  */
 async function createAsManager(ctx: Context, input: CreateGrantInput) {
+  // No App named: this is the worker door's caller (a person with no bound worker session, a retired worker, a bad session) and it keeps
+  // its #3690 answer; only a call that names an App is judged as a manager's.
+  if (!input.appRef) throw notWorker();
   const manager = await resolveGrantManager(ctx, input.appRef);
   if (!manager) throw notManager();
   const { userId, app } = manager;
