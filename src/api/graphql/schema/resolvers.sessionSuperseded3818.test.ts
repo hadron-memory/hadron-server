@@ -6,7 +6,10 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
-import { validateSessionBinding } from '../../../middleware/auth.js';
+import { signJwt } from '../../../auth/jwt.js';
+import { ensureChannelWithRoot } from '../../../lib/channels.js';
+import type { Request } from 'express';
+import { resolveAuthContext, validateSessionBinding } from '../../../middleware/auth.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 
@@ -95,4 +98,30 @@ it('keeps immediate successor evidence while refusing with the latest current op
   await db.session.create({ data: { id: generateId(), userId: stranger.id, appId: app.id, workerId: worker.id, startedAt: new Date(Date.now() - 86400000) } });
   expect((await db.session.findUniqueOrThrow({ where: { id: a.id } })) as any).toMatchObject({ supersededBySessionId: b.id });
   await expect(validateSessionBinding(db, ctx(), a.id)).rejects.toMatchObject({ extensions: { code: 'SESSION_SUPERSEDED', sessionId: c.id, startedAt: c.startedAt.toISOString() } });
+});
+
+it('refuses an acting chat sessionRef before appending any message', async () => {
+  const { a, b } = await displaced();
+  const memory = await db.memory.create({ data: { ownerUserId: owner.id, userId: owner.id, class: 'personal', urn: `test:chat3818-${generateId()}`, name: 'Chat' } });
+  const { channel } = await ensureChannelWithRoot(db, { memoryId: memory.id, loc: 'chats:supersede', name: 'Chat', createdBy: owner.id });
+  await expect(M.createChannelMessage({}, { channelRef: channel.id, body: 'must not land', sessionRef: a.id }, ctx())).rejects.toMatchObject({ extensions: { code: 'SESSION_SUPERSEDED', sessionId: b.id } });
+  expect((await db.channel.findUniqueOrThrow({ where: { id: channel.id } })).lastSeq).toBe(0);
+});
+it('refuses an acting mark-read sessionRef before any cursor write', async () => {
+  const { a, b } = await displaced();
+  await expect(M.markOwnTeamChatRead({}, { appRef: app.id, sessionRef: a.id, channelRef: generateId(), seq: 0 }, ctx())).rejects.toMatchObject({ extensions: { code: 'SESSION_SUPERSEDED', sessionId: b.id } });
+  expect(await db.channelReadState.count()).toBe(0);
+});
+it('keeps explicit-target late provenance and end/outcome writes available without presenting the old binding', async () => {
+  const { a, b } = await displaced();
+  expect((await M.updateSession({}, { id: a.id, branch: 'late-merge' }, ctx())).branch).toBe('late-merge');
+  await M.endSession({}, { id: a.id, summary: 'late attribution' }, ctx());
+  await M.recordSessionOutcome({}, { sessionId: a.id, outcome: 1 }, ctx());
+  expect(await db.session.findUniqueOrThrow({ where: { id: a.id } })).toMatchObject({ endReason: 'superseded', supersededBySessionId: b.id, outcome: 1 });
+});
+it('refuses a superseded header at the real credential-context boundary', async () => {
+  const { a, b } = await displaced();
+  const token = await signJwt({ sub: owner.id, roles: ['READER'] });
+  const req = { headers: { authorization: `Bearer ${token}`, 'x-hadron-session': a.id } } as Request;
+  await expect(resolveAuthContext(req, db)).rejects.toMatchObject({ extensions: { code: 'SESSION_SUPERSEDED', sessionId: b.id } });
 });
