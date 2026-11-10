@@ -8,6 +8,7 @@ import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 import { signJwt } from '../../../auth/jwt.js';
+import { createTestableMcpServer } from '../../../mcp/server.js';
 import { ensureChannelWithRoot } from '../../../lib/channels.js';
 import type { Request } from 'express';
 import { resolveAuthContext, validateSessionBinding } from '../../../middleware/auth.js';
@@ -155,4 +156,12 @@ it.each([true, false])('keeps the typed refusal and gated details on the Apollo 
     expect(envelope.errors[0].message).toContain('Session superseded.');
     if (!reader) expect(result.body.string).not.toContain(b.id);
   } finally { await wire.stop(); }
+});
+
+it('keeps MCP end id as an explicit historical target, without presenting it as an execution binding', async () => {
+  const { a, b } = await displaced();
+  const mcp = createTestableMcpServer({ userId: owner.id, roles: ['READER'] });
+  const text = await mcp.callToolText('hadron_end_session', { id: a.id, summary: 'late MCP attribution' });
+  expect(text).toContain('ALREADY ended');
+  expect(await db.session.findUniqueOrThrow({ where: { id: a.id } })).toMatchObject({ endReason: 'superseded', supersededBySessionId: b.id, summary: 'late MCP attribution' });
 });
