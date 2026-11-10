@@ -571,15 +571,22 @@ async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: Match
   // #3825: combinations already recorded as failing in this pass (cleared by an assignment), so a long queue of one shape
   // writes its row once, not once per task. The sweep has no per-candidate reason: nobody free is the coarse one.
   const failedKeys = new Set<string>();
-  // #3825: when the pass's judgments were made: the candidate snapshot, moved forward by each assignment of this pass (a
-  // later task is judged on the state after it). A failure carries this, or the in-transaction time of its own re-read.
-  let basis: DbInstant | null = null;
-  const recordSweepFailure = async (task: QueuedTask, readAt?: DbInstant) => {
-    const req = parseRequirements(task.requirements);
+  // #3825: when a failure was DECIDED. The candidate snapshot is when the pass looked; a candidate this pass spent (an
+  // assignment, or a re-read that found it taken) changed that state at its in-transaction time (`spentAt`). A task's
+  // failure is stamped with the latest of the snapshot, its own attempts' re-read, and the spent time of the candidates
+  // ELIGIBLE for it: state it never depended on (another role's worker) does not make its judgment newer (Anne, 94656).
+  let snapshotAt: DbInstant | null = null;
+  const spentAt = new Map<string, DbInstant>();
+  const recordSweepFailure = async (task: QueuedTask, req: Requirements, team: Set<string> | null, own?: DbInstant) => {
     const key = JSON.stringify(combinationsOf(req));
     if (failedKeys.has(key)) return;
     failedKeys.add(key);
-    await recordFailure(db, appId, task.requirements, req.invalid ? 'REQUIREMENTS_EXCLUDED' : 'NOBODY_FREE', readAt ?? basis);
+    let at: DbInstant | null = own ?? snapshotAt;
+    for (const w of candidates ?? []) {
+      const t = spentAt.get(w.id);
+      if (t && (!at || t > at) && !(team && !team.has(w.id)) && eligibleFor(req, w, groups)) at = t;
+    }
+    await recordFailure(db, appId, task.requirements, req.invalid ? 'REQUIREMENTS_EXCLUDED' : 'NOBODY_FREE', at);
   };
   let after: { priority: number; createdAt: Date; id: string } | null = null;
   for (;;) {
@@ -599,7 +606,7 @@ async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: Match
     after = { priority: last.priority, createdAt: last.createdAt, id: last.id };
     if (candidates === null) {
       // #2022 (cor:agt:090:03): a worker a live stop signal covers is skipped, at every level; tryAssign re-checks.
-      basis = await decisionClock(db);
+      snapshotAt = await decisionClock(db);
       covering = await coveringSignals(db, appId, null, now);
       groups = await loadAppModelGroups(db, appId);
       // #2252 D1: cheapest known tier first, unknown last, then least recently assigned (a snapshot, see `stillFreeAs`).
@@ -609,14 +616,14 @@ async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: Match
     for (const task of page) {
       // R71: not matched while its creator is under a pause or halt (and so no decision, no outcome: George P2-1).
       if (task.createdByWorkerId && timeStoppedWorkers(covering!).has(task.createdByWorkerId)) continue;
+      const req = parseRequirements(task.requirements);
+      const team = req.teamWorkerId ? await matchingTeamPool(db, appId, req.teamWorkerId) : null;
       if (spent.size === candidates.length) {
         // #3825: nobody is left free: a decided no-worker outcome for this task, and for every later one on every
         // later page (the loop keeps paging; no attempt is made), so a combination only a later page names is recorded.
-        await recordSweepFailure(task);
+        await recordSweepFailure(task, req, team);
         continue;
       }
-      const req = parseRequirements(task.requirements);
-      const team = req.teamWorkerId ? await matchingTeamPool(db, appId, req.teamWorkerId) : null;
       let decided = false;
       const lastRead: { at?: DbInstant } = {};
       for (const w of candidates) {
@@ -624,9 +631,8 @@ async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: Match
         const family = eligibleFor(req, w, groups);
         if (!family) continue;
         const outcome = await tryAssign(db, task, w.id, family, now, hooks, anchor, false, undefined, lastRead);
-        // The pass's judgment basis moves to the in-transaction time of every state change it made or learned of (an
-        // assignment, or a re-read that found the worker taken), never to a clock read after the attempt returned.
-        if ((outcome === 'assigned' || outcome === 'worker-not-free') && lastRead.at && (!basis || lastRead.at > basis)) basis = lastRead.at;
+        // The candidate's state changed at the in-transaction time its attempt reported, never at a clock read after it.
+        if (outcome !== 'task-gone' && lastRead.at) spentAt.set(w.id, lastRead.at);
         if (outcome === 'assigned') { decided = true; failedKeys.clear(); }
         // Assigned, or no longer free: either way this worker is spent for this run.
         if (outcome !== 'task-gone') spent.add(w.id);
@@ -639,7 +645,7 @@ async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: Match
       }
       // #3825: every free candidate was tried or skipped and none took it: a decided no-worker outcome. A task that
       // left the queue under the attempt ('task-gone') is no decision.
-      if (!decided) await recordSweepFailure(task, lastRead.at);
+      if (!decided) await recordSweepFailure(task, req, team, lastRead.at);
     }
     if (page.length < QUEUE_PAGE) break;
   }

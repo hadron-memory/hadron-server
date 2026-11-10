@@ -345,3 +345,16 @@ it('George P2 (same ms): stamps carry microseconds, so equal-millisecond decisio
   const [row] = await db.$queryRaw<{ s: string }[]>`SELECT to_char(decided_at, 'US') AS s FROM agent_match_outcomes WHERE role = 'x'`;
   expect(row.s).toBe(t2.slice(-6)); // stored to the microsecond
 });
+
+it('Anne 94656: another role\'s assignment in the pass does not make an engineer failure newer than a success that landed meanwhile', async () => {
+  await worker('reviewer');
+  await create({ requirements: { role: 'reviewer' } }); // first in the queue: takes the only worker
+  await create({ requirements: { role: 'engineer' } }); // then judged: nobody free for engineer, on the pass's snapshot
+  await matchQueuedTasks(db, new Date(), {
+    appId: app.id,
+    hooks: { // while the reviewer assignment is paused before its in-transaction stamp, an engineer success commits elsewhere
+      afterWorkerCheck: async () => { await new Promise(r => setTimeout(r, 5)); await recordMatchOutcome(db, app.id, { role: 'engineer' }, 'MATCHED'); },
+    },
+  });
+  expect((await latest({ windowHours: 24, role: 'engineer' }))[0]).toMatchObject({ role: 'engineer', outcome: 'MATCHED', failingSince: null });
+});
