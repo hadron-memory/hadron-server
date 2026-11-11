@@ -53,6 +53,20 @@ beforeEach(async () => {
   await baseDb.node.createMany({ data: [0, 1, 2].flatMap((i) => [snap('acct-a', i), snap('acct-b', i)]) });
 });
 
+/** The move's answer for this fixture: acct-a's latest used 12 %, three snapshots per account is too few to project, no 5 h window reported. */
+const SEVEN_DAY = { window: 'SEVEN_DAY', status: 'INSUFFICIENT_DATA', reason: 'TOO_FEW_SNAPSHOTS', usedPct: 12 };
+const FIVE_HOUR = { window: 'FIVE_HOUR', status: 'UNKNOWN', reason: 'NO_WINDOW', usedPct: null };
+function expectMoveAnswer(r: any): void {
+  expect(r.account).toBe('acct-a');
+  expect(r.workers).toEqual(['Anne']);
+  expect(r.whatIf.target.account).toBe('acct-b');
+  for (const w of [r.whatIf.adjusted, r.whatIf.target.baseline, r.whatIf.target.adjusted]) {
+    expect(w).toHaveLength(2);
+    expect(w[0]).toMatchObject(FIVE_HOUR);
+    expect(w[1]).toMatchObject(SEVEN_DAY);
+  }
+}
+
 describe('the App-key arm of accountUsageProjection survives a slow read (#3907)', () => {
   it('answers the key like a participant when a two-selector move outlasts the default 5 s transaction cap', async () => {
     const vars = { account: 'acct-a', whatIf: { moveWorker: { worker: 'Anne', toAccount: 'acct-b' } } };
@@ -62,11 +76,11 @@ describe('the App-key arm of accountUsageProjection survives a slow read (#3907)
     const asMember = await Q.accountUsageProjection({}, { ...vars, appRef: appId }, memberCtx);
     // the fixture is real: both selector reads ran (~6 s, past the 5 s default) and the move produced its answer
     expect(reads).toBeGreaterThanOrEqual(2);
-    expect(asMember.whatIf).not.toBeNull();
+    expectMoveAnswer(asMember);
     reads = 0;
     const asKey = await Q.accountUsageProjection({}, { ...vars, appRef: appId }, keyCtx);
     expect(reads).toBeGreaterThanOrEqual(2);
-    expect(asKey.whatIf).not.toBeNull();
+    expectMoveAnswer(asKey);
     expect({ ...asKey, asOf: null }).toEqual({ ...asMember, asOf: null });
   }, 60_000);
 });
