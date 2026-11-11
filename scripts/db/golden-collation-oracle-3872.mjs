@@ -22,8 +22,6 @@ const OPAQUE = /response hash mismatch|expected '[0-9a-f]{16,}/i;
 const TARGET = 'server.batchAllocation2774.test.ts';
 const PREREQ = /#3872 the test database has the en_US\.UTF-8 collation/;
 const GOLDEN = /byte-identical (abstract|all)\/(pk|urn|prefix) output \(edge insertion (forward|reverse)\)/;
-/** 2 scopes x 3 forms x 2 insertion orders. */
-export const GOLDEN_CASES = 12;
 
 /** Flatten a vitest JSON report to `{ file, name, status, message }` rows. */
 export function flatten(report) {
@@ -36,11 +34,41 @@ export function flatten(report) {
   return rows;
 }
 
-/** Files that failed to load or run (no assertion results): a collection or setup error is never a pass. */
+/**
+ * Suite and report errors, judged independently of how many assertions a file recorded: a file whose reporter
+ * message is non-empty (a collection, hook or teardown error), a failed file with no failed assertion, and a
+ * report that counts a runtime-error suite. Only failed ASSERTIONS are judged elsewhere, so a suite that records
+ * the expected assertions and then fails in teardown is still refused.
+ */
 function suiteErrors(report) {
-  return (report.testResults ?? [])
-    .filter(f => f.status === 'failed' && !(f.assertionResults ?? []).length)
-    .map(f => `suite error in ${f.name ?? '?'}: ${String(f.message ?? '').slice(0, 160) || 'no message'}`);
+  const errors = (report.testResults ?? []).flatMap(f => {
+    const asserts = f.assertionResults ?? [];
+    const out = [];
+    if (String(f.message ?? '').trim()) out.push(`suite error in ${f.name ?? '?'}: ${String(f.message).trim().slice(0, 160)}`);
+    else if (f.status === 'failed' && !asserts.some(t => t.status === 'failed')) out.push(`suite error in ${f.name ?? '?'}: failed with no failed assertion`);
+    return out;
+  });
+  if (Number(report.numRuntimeErrorTestSuites ?? 0) > 0) errors.push(`the report counts ${report.numRuntimeErrorTestSuites} runtime-error suite(s)`);
+  return errors;
+}
+
+/** The 12 golden identities, each required exactly once. */
+const EXPECTED_GOLDEN = ['abstract', 'all'].flatMap(sc => ['pk', 'urn', 'prefix'].flatMap(f => ['forward', 'reverse'].map(o => `${sc}/${f}/${o}`)));
+function goldenIdentityViolations(golden) {
+  const seen = new Map();
+  for (const r of golden) {
+    const m = GOLDEN.exec(r.name);
+    const key = m ? `${m[1]}/${m[2]}/${m[3]}` : r.name;
+    seen.set(key, (seen.get(key) ?? 0) + 1);
+  }
+  const out = [];
+  const missing = EXPECTED_GOLDEN.filter(k => !seen.has(k));
+  const repeated = [...seen].filter(([, n]) => n > 1).map(([k, n]) => `${k} x${n}`);
+  const unexpected = [...seen.keys()].filter(k => !EXPECTED_GOLDEN.includes(k));
+  if (missing.length) out.push(`golden cases missing: ${missing.join(', ')}`);
+  if (repeated.length) out.push(`golden cases repeated: ${repeated.join(', ')}`);
+  if (unexpected.length) out.push(`unexpected golden cases: ${unexpected.join(', ')}`);
+  return out;
 }
 
 /**
@@ -58,7 +86,7 @@ export function evaluateOracle(report, { mode, actual, required, minPassed = 0 }
   const prereq = target.filter(r => PREREQ.test(r.name));
   const golden = target.filter(r => GOLDEN.test(r.name));
   if (prereq.length !== 1) violations.push(`expected exactly 1 prerequisite test, found ${prereq.length}`);
-  if (golden.length !== GOLDEN_CASES) violations.push(`expected ${GOLDEN_CASES} golden cases, found ${golden.length}`);
+  violations.push(...goldenIdentityViolations(golden));
   const failed = rows.filter(r => r.status === 'failed');
   const passed = rows.filter(r => r.status === 'passed');
   if (mode === 'green') {

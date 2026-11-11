@@ -116,7 +116,25 @@ describe('#3872 oracle', () => {
     const ran = { success: false, testResults: [file([row(PREREQ, 'failed', named), ...goldens('passed')], { status: 'failed' })] };
     expect(evaluateOracle(ran, prereqOpts).join('\n')).toMatch(/12 golden case\(s\) were not skipped/);
     const missing = { success: false, testResults: [file([row(PREREQ, 'failed', named), ...goldens('skipped').slice(0, 11)], { status: 'failed' })] };
-    expect(evaluateOracle(missing, prereqOpts).join('\n')).toMatch(/expected 12 golden cases, found 11/);
+    expect(evaluateOracle(missing, prereqOpts).join('\n')).toMatch(/golden cases missing: abstract\/pk\/reverse|golden cases missing/);
+  });
+  it('rejects twelve copies of one golden identity, and one repeated beside a missing one', () => {
+    const copies = { success: false, testResults: [file([row(PREREQ, 'failed', named), ...Array.from({ length: 12 }, () => row(goldenName(0), 'skipped'))], { status: 'failed' })] };
+    const v = evaluateOracle(copies, prereqOpts).join('\n');
+    expect(v).toMatch(/golden cases missing/);
+    expect(v).toMatch(/golden cases repeated: abstract\/pk\/forward x12/);
+    const swapped = [...goldens('skipped').slice(0, 11), row(goldenName(0), 'skipped')];
+    const w = evaluateOracle({ success: false, testResults: [file([row(PREREQ, 'failed', named), ...swapped], { status: 'failed' })] }, prereqOpts).join('\n');
+    expect(w).toMatch(/missing/);
+    expect(w).toMatch(/repeated/);
+  });
+  it('rejects a suite or report error that sits beside the expected assertions', () => {
+    const teardown = { success: false, testResults: [file([row(PREREQ, 'failed', named), ...goldens('skipped')], { status: 'failed', message: 'afterAll hook failed: connection terminated' })] };
+    expect(evaluateOracle(teardown, prereqOpts).join('\n')).toMatch(/suite error.*afterAll hook failed/);
+    const green2 = { ...green(), testResults: [file([row(PREREQ, 'passed'), ...goldens('passed')], { message: 'teardown timed out' })] };
+    expect(evaluateOracle(green2, greenOpts).join('\n')).toMatch(/suite error/);
+    expect(evaluateOracle({ ...mismatch(), numRuntimeErrorTestSuites: 1 }, prereqOpts).join('\n')).toMatch(/runtime-error suite/);
+    expect(evaluateOracle({ ...green(), numRuntimeErrorTestSuites: 1 }, greenOpts).join('\n')).toMatch(/runtime-error suite/);
   });
   it('green mode accepts only a successful report whose guarded tests all passed', () => {
     expect(evaluateOracle(green(), greenOpts)).toEqual([]);
