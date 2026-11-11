@@ -238,3 +238,52 @@ describe('#3680 a check racing the acknowledgement on an existing delivery row',
     expect(await status(new Date(Date.now() + 6 * MIN))).toBe('OK');
   });
 });
+
+// Belinda's BLIND P2s on #3946 at f21d0920: the "no channels named" coverage arm.
+describe('#3680 coverage of a ticker that names no channels', () => {
+  it('a read of a non-team channel since the issue stamps no check, so it answers no ticker', async () => {
+    const t = await ticker(); // names no channels: covers the team channel only
+    const issued = Date.now() - 1000;
+    await sleep(20);
+    expect(await stampChannelCheck(db, worker.id, other.id)).toBe(false);
+    const stamped = await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: other.id }, select: { lastCheckedAt: true } });
+    expect(stamped?.lastCheckedAt ?? null).toBeNull();
+    await sleep(20);
+    await ack(proof(t.id, 1, issued));
+    expect(await responded(t.id)).toBeNull();
+  });
+
+  it('a NULL channel_ids reads as none named: a check since the issue answers the ack', async () => {
+    const t = await ticker();
+    await db.$executeRaw`UPDATE tickers SET channel_ids = NULL WHERE id = ${t.id}`;
+    const issued = Date.now() - 1000;
+    await sleep(20);
+    await stampChannelCheck(db, worker.id, team.id);
+    await sleep(20);
+    await ack(proof(t.id, 1, issued));
+    expect(await responded(t.id)).not.toBeNull();
+  });
+
+  it('a NULL channel_ids reads as none named: a check after the ack answers it', async () => {
+    const t = await ticker();
+    await db.$executeRaw`UPDATE tickers SET channel_ids = NULL WHERE id = ${t.id}`;
+    await ack(proof(t.id, 1, Date.now() - 1000));
+    expect(await responded(t.id)).toBeNull();
+    await sleep(20);
+    await stampChannelCheck(db, worker.id, team.id);
+    expect(await responded(t.id)).not.toBeNull();
+  });
+
+  it('an older tick acknowledged late moves neither the tick nor the response', async () => {
+    const t = await ticker();
+    await ack(proof(t.id, 2, Date.now() - 60_000));
+    await sleep(20);
+    await stampChannelCheck(db, worker.id, team.id);
+    const first = await responded(t.id);
+    expect(first).not.toBeNull();
+    await ack(proof(t.id, 1, Date.now() - 500));
+    expect(await responded(t.id)).toEqual(first);
+    const [row] = await db.$queryRaw<Array<{ k: number }>>`SELECT last_acked_tick AS k FROM worker_delivery_ticks WHERE worker_id = ${worker.id} AND ticker_id = ${t.id}`;
+    expect(Number(row!.k)).toBe(2);
+  });
+});
