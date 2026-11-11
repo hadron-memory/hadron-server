@@ -10,6 +10,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
+import { taskSearchLimits } from '../../../lib/global-search/entities.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -23,6 +24,7 @@ const Q = resolvers.Query as any;
 
 let orgId: string;
 let participant: { id: string };
+let orgAdminRef: { id: string };
 let orgOnly: { id: string }; // org member, not an App participant
 let stranger: { id: string };
 let appX: { id: string; urn: string };
@@ -55,6 +57,7 @@ beforeEach(async () => {
   stranger = await mkUser(3, 'stranger');
   await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: participant.id, role: 'READER' } });
   const orgAdmin = await mkUser(5, 'admin');
+  orgAdminRef = orgAdmin;
   await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: orgAdmin.id, role: 'ADMIN' } });
   await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: orgOnly.id, role: 'READER' } });
   appX = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'X', urn: `${org.urn}:x` } });
@@ -117,9 +120,9 @@ describe('agentTask global search (#3945)', () => {
   it('a live worker session bound to the App sees its tasks; another App\'s session sees none', async () => {
     const ok = await runAsActor({ workerId: workerX.id, agentId }, () => search(userCtx(participant), 'zebra'));
     expect(ok.hits.map((h: any) => h.id)).toEqual([taskX.id]);
-    // Y's worker, driven by someone who is not a participant of X: no hit for X's task.
-    const other = await runAsActor({ workerId: workerY.id, agentId }, () => search(userCtx(participant), taskX.handle));
-    expect(agentTaskHits(other).map((h: any) => h.id)).not.toContain(taskX.id);
+    // Y's worker driven by the org admin (who WOULD read X as a person): bound to Y, so X's task is not readable.
+    const other = await runAsActor({ workerId: workerY.id, agentId }, () => search(userCtx(orgAdminRef), 'zebra'));
+    expect(agentTaskHits(other).map((h: any) => h.id)).toEqual([taskY.id]);
     const retired = await db.worker.update({ where: { id: workerX.id }, data: { retiredAt: new Date() } });
     expect(retired.retiredAt).not.toBeNull();
     const gone = await runAsActor({ workerId: workerX.id, agentId }, () => search(userCtx(participant), 'zebra'));
@@ -144,6 +147,25 @@ describe('agentTask global search (#3945)', () => {
       const r = await search(runCtx, 'zebra');
       expect(r.hits).toEqual([]);
       expect(r.total).toBe(0);
+    }
+  });
+
+  it('denied Apps never crowd out admitted ones, however many match first (#3964 BLIND P2)', async () => {
+    const saved = { ...taskSearchLimits };
+    Object.assign(taskSearchLimits, { page: 2, admittedApps: 1 });
+    try {
+      // Many outsider Apps whose ids sort BEFORE the participant's App and whose tasks match.
+      const org = await db.organization.findFirstOrThrow({ where: { id: orgId } });
+      for (let i = 0; i < 6; i++) {
+        const a = await db.app.create({ data: { id: `0000000${i}${generateId()}`.slice(0, 32), organizationId: org.id, name: `o${i}`, urn: `${org.urn}:o${i}` } });
+        await db.appMember.create({ data: { appId: a.id, userId: orgOnly.id, role: 'member' } });
+        await mkTask(orgOnly, a.id, 'zebra outsider');
+      }
+      const r = await search(userCtx(participant), 'zebra');
+      expect(r.hits.map((h: any) => h.id)).toEqual([taskX.id]);
+      expect(r.total).toBe(1);
+    } finally {
+      Object.assign(taskSearchLimits, saved);
     }
   });
 

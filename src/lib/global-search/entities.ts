@@ -18,6 +18,7 @@
  * Spec: cor:api:050:02
  */
 
+import { GraphQLError } from 'graphql';
 import { COMMENT_NODE_TYPE } from '../comments/index.js';
 import { searchContains } from '../../integrations/db/provider.js';
 import type { PrismaClient, Prisma } from '../../generated/prisma/index.js';
@@ -600,9 +601,14 @@ async function searchUsers(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
   return hits;
 }
 
-/** Distinct Apps examined per page, and pages walked, when finding the Apps whose tasks match (bounds the gate calls). */
-const TASK_APP_PAGE = 100;
-const TASK_APP_MAX_PAGES = 10;
+export const taskSearchLimits = {
+  /** Distinct Apps examined per page. */
+  page: 100,
+  /** Stop once this many Apps are admitted: the per-entity candidate cap bounds what they can contribute. */
+  admittedApps: 200,
+  /** Hard safety bound on Apps examined (denied ones included), so a broad query by a stranger stays bounded. */
+  maxScanned: 10_000,
+};
 
 /** The next page of distinct App ids (ascending, after `after`) holding a task that matches. */
 async function taskAppPage(db: PrismaClient, match: AnyWhere, after: string | null): Promise<{ appId: string }[]> {
@@ -611,7 +617,7 @@ async function taskAppPage(db: PrismaClient, match: AnyWhere, after: string | nu
     distinct: ['appId'],
     select: { appId: true },
     orderBy: { appId: 'asc' },
-    take: TASK_APP_PAGE,
+    take: taskSearchLimits.page,
   });
 }
 
@@ -631,19 +637,24 @@ async function searchAgentTasks(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
 
   const admitted: string[] = [];
   let after: string | null = null;
-  for (let page = 0; page < TASK_APP_MAX_PAGES; page++) {
+  let scanned = 0;
+  // Denied Apps never count against the admitted bound: only the hard scan bound stops a walk that keeps finding denied Apps.
+  while (admitted.length < taskSearchLimits.admittedApps && scanned < taskSearchLimits.maxScanned) {
     const groups = await taskAppPage(ctx.db, match, after);
     const ok = await Promise.all(
       groups.map(async (g) => {
         try {
           return await gate(g.appId);
-        } catch {
-          return false; // a refusal is never a signal
+        } catch (e) {
+          // A typed refusal reads as denied (never a signal); a database or programming failure must not read as "not allowed".
+          if (e instanceof GraphQLError) return false;
+          throw e;
         }
       }),
     );
     groups.forEach((g, i) => ok[i] && admitted.push(g.appId));
-    if (groups.length < TASK_APP_PAGE) break;
+    scanned += groups.length;
+    if (groups.length < taskSearchLimits.page) break;
     after = groups[groups.length - 1]!.appId;
   }
   if (admitted.length === 0) return [];
