@@ -130,7 +130,7 @@ it('the stored per-task mark is unchanged and nothing per candidate is kept', as
   const t = await create({ match: true, requirements: { role: 'engineer' } });
   expect(await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).toMatchObject({ matchFailedReason: 'NO_ROLE' });
   const cols = await db.$queryRaw<{ column_name: string }[]>`SELECT column_name FROM information_schema.columns WHERE table_name = 'agent_match_outcomes'`;
-  expect(cols.map(c => c.column_name).sort()).toEqual(['app_id', 'decided_at', 'failing_since', 'family', 'outcome', 'reason', 'role', 'tier']);
+  expect(cols.map(c => c.column_name).sort()).toEqual(['app_id', 'decided_at', 'failing_since', 'family', 'last_matched_at', 'outcome', 'reason', 'role', 'tier']); // last_matched_at: one per-combination instant, still nothing per candidate (V22)
 });
 
 it('rows past 168 h are purged; a 24 h window ignores older rows', async () => {

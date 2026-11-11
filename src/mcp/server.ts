@@ -8516,6 +8516,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
                 renameAuthoring: attestedAuthoring(recoveryCtx(), authoredWith),
                 authorizeLockedMemory: (memoryId) => assertLockedMemoryWriteAccess(tx, attemptAuth, memoryId),
                 principal: attemptAuth,
+                canReadMemoryId: memoryId => canReadMemory(tx as typeof db, attemptAuth, memoryId, EXPLICIT_REF),
               });
               relocated = subtreeResult.moved;
               linkWarnings = subtreeResult.linkWarnings;
