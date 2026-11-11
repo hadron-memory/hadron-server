@@ -3242,6 +3242,10 @@ export const typeDefs = `#graphql
     properties: JSON
     "#3125 S1: the revision setAppProperties checks expectedRevision against. 0 until the first changing write; each changing write adds 1. Null for a caller who may not read properties."
     propertiesRevision: Int
+    """
+    #3957 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10): one of this App's OWN AI configs, used for its chats unless a chat stored its own choice. An id, never a key. Readable by an App member and by whoever manages the App; null for anyone else, and null when unset. A deleted config clears it. Set and cleared with setAppChatbotAiConfig.
+    """
+    chatbotAiConfigId: ID
     "Spec 049 Phase 4: the App's default Channel — the row its team chat became (null until provisioned)."
     defaultChannel: Channel
     """
@@ -5391,8 +5395,27 @@ export const typeDefs = `#graphql
   memory; shared chats live in the App's app-class memory and are
   readable by every AppMember of that App.
   """
+  """
+  #3957 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10): one entry of the list a chat chooses its AI config from. No key material.
+  """
+  type ChatAiConfigChoice {
+    "\`default\` for the walk entry, else the config id: the value to send back as aiConfigChoice."
+    value: String!
+    name: String!
+    "Null for the \`default\` entry, which names no single config."
+    provider: String
+    model: String
+    isDefault: Boolean!
+    "True for the App's own chatbot config (App.chatbotAiConfigId)."
+    isAppChatbotConfig: Boolean!
+  }
+
   type Chat {
     id: ID!
+    """
+    #3957 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10): the AI config choice stored with this chat — \`default\` or one of the App's config ids — or null when the chat stored none (it then follows the App's chatbot config, else \`default\`).
+    """
+    aiConfigChoice: String
     loc: String!
     title: String!
     conversationName: String
@@ -10587,7 +10610,7 @@ export const typeDefs = `#graphql
 
     appRef/agentRef accept the entity's ID or URN.
     """
-    resolveAIConfig(name: String, appRef: ID, agentRef: ID): ResolvedAiConfig!
+    resolveAIConfig(name: String, appRef: ID, agentRef: ID, "#3957 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10): a chat of appRef. With it, the chat's stored aiConfigChoice wins, else the App's chatbot config, else the \`default\` walk above; a choice counts only while its config exists, belongs to appRef and is enabled. A chat that is not one of appRef's chats answers as a missing chat." chatId: ID): ResolvedAiConfig!
 
     """
     #1373: the known endpoints for a provider — the server's single suggestion
@@ -10623,6 +10646,15 @@ export const typeDefs = `#graphql
     appRef/agentRef accept the entity's ID or URN.
     """
     resolveAiServiceConfigs(appRef: ID, agentRef: ID): [AiServiceConfig!]!
+
+    """
+    #3957 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10): what a chat of this App may choose from — the App's OWN enabled AI configs plus one
+    \`default\` entry, which resolves through the App -> Agent -> Org -> Host walk at turn time. Send an entry's
+    \`value\` back as the chat's aiConfigChoice. Never a key, key preview, params or endpoint. Any App member may
+    call it (a platform admin too); anyone else, a missing App and a request that is not a signed-in person get
+    the same APP_NOT_FOUND answer.
+    """
+    chatAiConfigChoices(appRef: ID!): [ChatAiConfigChoice!]!
 
     """
     #2862 / hrn:node:hadronmemory.com:specs:cor:agt:040:03: a chatbot chat's served-prompt records, by chat id, and nothing
@@ -11523,6 +11555,15 @@ export const typeDefs = `#graphql
     #3323: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.
     """
     setAppProperties(appRef: String!, properties: JSON, expectedRevision: Int, instruction: ActInstructionInput): App!
+
+    """
+    #3957 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10, hrn:node:hadronmemory.com:specs:cor:dmo:050:12): set (configId) or clear (null) the App's chatbot
+    AI config. Whoever manages the App, a platform admin included even on a user-owned App: choosing a config reads,
+    sets and tests no key. A person acting as themselves. configId must be one of THIS App's own configs; another
+    App's, a deleted one and an unknown id all get the same AiServiceConfigNotFoundError. A disabled own config is
+    accepted and skipped at turn time until it is enabled again.
+    """
+    setAppChatbotAiConfig(appRef: ID!, configId: ID): App!
     """
     #2022 (hrn:node:hadronmemory.com:specs:cor:agt:090:01, :06) — set a stop signal. Whoever manages the App: any level and
     scope. A host key: a HALT on its own host only. Never replaces another signal. Refusals: APP_MANAGER_REQUIRED,
@@ -13742,14 +13783,14 @@ export const typeDefs = `#graphql
     # session, and chats only with its session's Agent. Anything else reads as an unknown user
     # or Agent. A signed-in user acts as themselves. The
     # subscription is provisioned in the transaction that creates the chat.
-    startChat(agentId: ID!, userId: String, conversationName: String, scope: ChatScope = private, isTestRun: Boolean = false, "#3096 / hrn:node:hadronmemory.com:specs:cor:dmo:150:08: optional client-reported model id, at most 256 UTF-16 code units, no control/format/line-separator characters or unpaired surrogates. Omitted or null fills empty for this call. Used only for prompt text and its immutable record, labelled client-reported; never billing, quotas or authorization. Invalid input refuses BAD_USER_INPUT without echoing it." llmModel: String): ChatStartResult!
+    startChat(agentId: ID!, userId: String, conversationName: String, scope: ChatScope = private, isTestRun: Boolean = false, "#3096 / hrn:node:hadronmemory.com:specs:cor:dmo:150:08: optional client-reported model id, at most 256 UTF-16 code units, no control/format/line-separator characters or unpaired surrogates. Omitted or null fills empty for this call. Used only for prompt text and its immutable record, labelled client-reported; never billing, quotas or authorization. Invalid input refuses BAD_USER_INPUT without echoing it." llmModel: String, "#3957 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10): optional AI config choice for this chat, stored with it: \`default\` or one of the chat App's own config ids from chatAiConfigChoices. Omitted keeps what the chat has. Any other id is refused as a missing config, revealing nothing about it." aiConfigChoice: String): ChatStartResult!
     """
     Process a user message (saves message, builds context, returns next prompt).
     #3501: CHAT_STATE_INVALID refuses unusable conversational state before the turn writes or builds a model prompt.
     CHAT_AUTHORITY_SCOPE_CHANGED refuses a write when the memory encryption flag changed before its lock; obtain
     fresh context, never automatically resubmit a model call or a turn after an uncertain commit.
     """
-    sendChatMessage(chatId: String!, userMessage: String!, "#3096 / hrn:node:hadronmemory.com:specs:cor:dmo:150:08: optional client-reported model id, at most 256 UTF-16 code units, no control/format/line-separator characters or unpaired surrogates. Omitted or null fills empty for this call. Used only for prompt text and its immutable record, labelled client-reported; never billing, quotas or authorization. Invalid input refuses BAD_USER_INPUT without echoing it." llmModel: String): ChatPromptResult!
+    sendChatMessage(chatId: String!, userMessage: String!, "#3096 / hrn:node:hadronmemory.com:specs:cor:dmo:150:08: optional client-reported model id, at most 256 UTF-16 code units, no control/format/line-separator characters or unpaired surrogates. Omitted or null fills empty for this call. Used only for prompt text and its immutable record, labelled client-reported; never billing, quotas or authorization. Invalid input refuses BAD_USER_INPUT without echoing it." llmModel: String, "#3957 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10): optional AI config choice for this chat, stored with it: \`default\` or one of the chat App's own config ids from chatAiConfigChoices. Omitted keeps what the chat has. Any other id is refused as a missing config, revealing nothing about it." aiConfigChoice: String): ChatPromptResult!
     """
     Process the LLM's tool response (extract data, transition stage, save assistant message)
 
