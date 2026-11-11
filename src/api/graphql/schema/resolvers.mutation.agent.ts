@@ -54,6 +54,7 @@ import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { deriveSlugFromName } from '../../../lib/urn.js';
 import { normalizeHandleOrNull } from '../../../lib/userHandle.js';
 import { generateId } from '../../../lib/id.js';
+import { seedAgentSkeleton } from '../../../lib/agentSkeleton.js';
 import { isLifecycleActive } from '@hadron-memory/access-control';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
@@ -454,7 +455,7 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
       resolvedSystemMemoryId = systemMemory.id;
     }
 
-    return tx.agent.create({
+    const agent = await tx.agent.create({
       data: {
         // #2171 (R211): a NEW Agent offers owner and member unless told otherwise.
         // The column default stays owner-only so no existing row changes meaning.
@@ -471,6 +472,9 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
       },
       include: AGENT_INCLUDE,
     });
+    // #3833: the skeleton parents (boot, boot:rules, processes, tasks), only the locs the effective memory lacks.
+    await seedAgentSkeleton(tx, resolvedSystemMemoryId, ctx.userId ?? ctx.clientId ?? null);
+    return agent;
   }).catch((e: unknown) => {
     // #935: under CONCURRENT creates the pre-check above races — the loser
     // surfaces as P2002 on the agent (or derived system-memory) urn unique
@@ -489,7 +493,8 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
   // #2199 (cor:rag:010:01 r17): a memory promoted to class='system' is always summary-indexed. Its existing nodes were
   // written while it was an ordinary memory, so stamp them for the drain (post-commit; a fresh auto-provisioned memory
   // is empty and every later write enqueues itself). Never fails the create.
-  if (systemMemoryId && createdAgent.systemMemoryId) {
+  // #3833: a fresh memory now holds the seeded skeleton too, so stamp on every create.
+  if (createdAgent.systemMemoryId) {
     await backfillMemoryEmbeddings(ctx.db, createdAgent.systemMemoryId).catch((err) => {
       console.warn('[createAgent] system memory embedding backfill failed:', err);
     });
