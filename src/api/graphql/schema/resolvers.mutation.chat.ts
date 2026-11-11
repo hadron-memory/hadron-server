@@ -1147,6 +1147,10 @@ export const chatMutations = {
       // Everything downstream reads the copy the allocation committed, not the
       // pre-lock one — a turn that raced us has already been folded in.
       chatData = allocatedChatData;
+      // #3965 (documented disposition; cor:dmo:050:10 needs only that a turn uses the chat's STORED config): this is a second
+      // write, after the user message has committed and before the stage loads or any model call. If it throws, the message is
+      // kept, no turn runs, and the chat's previous choice stands. A caller resends the choice, not the message. It is not moved
+      // into the allocation transaction: nothing in the law asks for that, and a turn never runs under a choice that was not stored.
       if (sendAiConfigChoice !== null && chatData.aiConfigChoice !== sendAiConfigChoice) {
         // A fresh read under the chat lock (#919): contribute this one key, never replay a stale blob.
         chatData = await updateChatRootData(ctx.db, chatRef, memEncInfo, (fresh) => ({ ...fresh, aiConfigChoice: sendAiConfigChoice }), { inTx });

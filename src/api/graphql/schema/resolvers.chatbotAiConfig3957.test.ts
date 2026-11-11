@@ -6,6 +6,10 @@ import { cleanDb, createDbAgentOrgGrant, chatNodeByLocOrThrow } from '../../../t
 import { generateId } from '../../../lib/id.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
 import { runAsActor } from '../../../lib/requestActor.js';
+import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
+import { encryptNodeFields } from '../../../lib/nodeCrypto.js';
+import { generateDataKey } from '../../../lib/crypto.js';
+import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
@@ -111,6 +115,49 @@ describe('App.chatbotAiConfigId and setAppChatbotAiConfig', () => {
     expect(raced).toBe('FORBIDDEN');
     expect((await db.app.findUniqueOrThrow({ where: { id: app.id } })).chatbotAiConfigId).toBeNull();
     expect(await code(M.setAppChatbotAiConfig(null, { appRef: app.id, configId: glm.id }, ctx(admin)))).toBe('FORBIDDEN');
+  });
+
+  // #3965 (cor:dmo:050:12: "never an App key, and never a session acting as someone else"): the setter pins are above;
+  // the field and the list refuse the same principals. For the list the audience ("any App member") is built behaviour, not law.
+  it('an App key and an impersonated session read the field as null and the list as a missing App', async () => {
+    await M.setAppChatbotAiConfig(null, { appRef: app.id, configId: glm.id }, ctx(admin));
+    const appKey = { db, appId: app.id, roles: [] } as unknown as Context;
+    const impersonated = { ...ctx(admin), impersonation: { actorId: platform.id } } as unknown as Context;
+    const field = (c: Context) => (resolvers as any).App.chatbotAiConfigId({ id: app.id }, {}, c);
+    const missing = await Q.chatAiConfigChoices(null, { appRef: generateId() }, ctx(admin)).catch((e: any) => e.name);
+    for (const c of [appKey, impersonated]) {
+      expect(await field(c)).toBeNull();
+      expect(await Q.chatAiConfigChoices(null, { appRef: app.id }, c).catch((e: any) => e.name)).toBe(missing);
+    }
+  });
+
+  it('a demotion that overlaps the write is serialized: the setter waits for the revoker, then refuses (Atilla P3 on #3960)', async () => {
+    // `admin` manages this App only through the org ADMIN arm. The revoker below takes the org authority anchor
+    // exclusively (the protocol every revoker follows), demotes, and commits only when released.
+    await db.appMember.update({ where: { appId_userId: { appId: app.id, userId: admin.id } }, data: { role: 'admin' } });
+    let release!: () => void;
+    const released = new Promise<void>(r => { release = r; });
+    let locked!: () => void;
+    const holding = new Promise<void>(r => { locked = r; });
+    const revoker = db.$transaction(async tx => {
+      await lockAuthorityAnchors(tx, [{ kind: 'org', id: org.id }], 'exclusive');
+      await tx.orgMember.update({ where: { organizationId_userId: { organizationId: org.id, userId: admin.id } }, data: { role: 'READER' } });
+      locked();
+      await released;
+    }, { timeout: 30_000 });
+    await holding;
+    let settled = false;
+    const setter = M.setAppChatbotAiConfig(null, { appRef: app.id, configId: glm.id }, ctx(admin)).then(
+      (v: unknown) => { settled = true; return v; }, (e: unknown) => { settled = true; throw e; });
+    try {
+      await new Promise(r => setTimeout(r, 500));
+      expect(settled).toBe(false); // waiting on the revoker's anchor, not yet decided
+    } finally {
+      release(); // never leave the revoker holding its lock, whatever the assertion said
+      await revoker;
+    }
+    expect(await code(setter)).toBe('FORBIDDEN');
+    expect((await db.app.findUniqueOrThrow({ where: { id: app.id } })).chatbotAiConfigId).toBeNull();
   });
 
   it('the field reads null for a run and a worker, and the list answers them as a missing App', async () => {
@@ -224,6 +271,8 @@ describe('the chat path', () => {
   it('a refused cold shared start provisions nothing: no memory, subscription or node (Andi F1 on #3960)', async () => {
     // loc-scope-ok: whole-table counts, compared before and after one refused call.
     const counts = async () => [await db.memory.count(), await db.node.count(), await db.memorySubscription.count()];
+    // Atilla's P3: the guard is only exercised on a COLD start, so state the precondition.
+    expect(await db.memory.count({ where: { appId: app.id, class: 'app' } })).toBe(0);
     const before = await counts();
     expect(await code(start({ aiConfigChoice: foreign.id }))).toBe('AiServiceConfigNotFoundError');
     expect(await counts()).toEqual(before);
@@ -238,6 +287,9 @@ describe('the chat path', () => {
     const asAdmin = (): Context => ({ db, userId: admin.id, roles: ['READER'] } as Context);
     // `admin` is an org member, so the lazy per-user memory belongs to the App; `member` is not, so it belongs to none.
     for (const [who, bad] of [[asAdmin, foreign.id], [asMember, foreign.id], [asMember, claude.id]] as const) {
+      // Atilla's P3: this person has no per-user memory for the Agent yet, so the lazy-create branch is the one tested.
+      const asUser = who().userId!;
+      expect(await db.memory.count({ where: { userMemoryOfAgentId: chatAgent.id, createdBy: asUser } })).toBe(0);
       const before = await counts();
       expect(await code(start({ scope: 'private', aiConfigChoice: bad }, who()))).toBe('AiServiceConfigNotFoundError');
       expect(await counts()).toEqual(before);
@@ -245,6 +297,56 @@ describe('the chat path', () => {
     // the App's own config is accepted for the person it belongs to, and does provision
     const ok = await start({ scope: 'private', aiConfigChoice: claude.id }, asAdmin());
     expect(await stored(ok.chatId)).toBe(claude.id);
+  });
+
+  it('a warm PRIVATE start with a bad choice is refused and creates nothing (Rodolfo P3-3 on #3960)', async () => {
+    // loc-scope-ok: whole-table counts, compared before and after one refused call.
+    const counts = async () => [await db.memory.count(), await db.node.count(), await db.memorySubscription.count()];
+    const asAdmin = { db, userId: admin.id, roles: ['READER'] } as Context;
+    await start({ scope: 'private' }, asAdmin); // cold: provisions the per-user memory
+    expect(await db.memory.count({ where: { userMemoryOfAgentId: chatAgent.id, createdBy: admin.id } })).toBe(1); // now warm
+    const before = await counts();
+    expect(await code(start({ scope: 'private', aiConfigChoice: foreign.id }, asAdmin))).toBe('AiServiceConfigNotFoundError');
+    expect(await counts()).toEqual(before);
+  });
+
+  // Rodolfo P3-2 (cor:dmo:050:10: a pin naming another App's config, a deleted one or an id that doesn't exist is refused
+  // like a missing id, with nothing revealing that the config exists): a chat with no App, and a REAL org config's id.
+  it('a choice on a chat with no App is refused byte-identically to a nonexistent id', async () => {
+    const orgConfig = await db.aiServiceConfig.create({ data: { organizationId: org.id, name: 'org-wide', provider: 'openai', model: 'gpt-org', apiKeyEncrypted: encryptToken(KEY), apiKeyPreview: '…3957' } });
+    // `member` is not an org member, so the lazy per-user memory belongs to no App.
+    const refusal = (id: string, run: () => Promise<unknown>) => run().then(() => null, (e: any) => `${e.extensions?.code}|${e.message.split(id).join('<id>')}`);
+    const absent = generateId();
+    const starts = [orgConfig.id, absent].map(id => refusal(id, () => start({ scope: 'private', aiConfigChoice: id })));
+    const [realStart, absentStart] = await Promise.all(starts);
+    expect(realStart).toBe(absentStart);
+    expect(realStart).toMatch(/^AiServiceConfigNotFoundError\|/);
+    const { chatId } = await start({ scope: 'private' });
+    expect((await db.memory.findUniqueOrThrow({ where: { id: (await chatNodeByLocOrThrow(db, chatId)).memoryId } })).appId).toBeNull();
+    const sends = await Promise.all([orgConfig.id, absent].map(id => refusal(id, () => M.sendChatMessage(null, { chatId, userMessage: 'x', aiConfigChoice: id }, asMember()))));
+    expect(sends[0]).toBe(sends[1]);
+    expect(sends[0]).toMatch(/^AiServiceConfigNotFoundError\|/);
+    expect(await stored(chatId)).toBeUndefined();
+  });
+
+  it('an encrypted chat\'s stored choice resolves; a caller who cannot read the chat gets no key and no config detail', async () => {
+    const { chatId } = await start({ aiConfigChoice: claude.id });
+    const node = await chatNodeByLocOrThrow(db, chatId);
+    const key = generateDataKey();
+    sessionKeyCache.set(generateId(), node.memoryId, key);
+    await db.memory.update({ where: { id: node.memoryId }, data: { isEncrypted: true } });
+    await db.node.update({ where: { id: node.id }, data: { data: encryptNodeFields({ data: node.data }, { id: node.memoryId, isEncrypted: true }).data! as never } });
+    expect(JSON.stringify((await chatNodeByLocOrThrow(db, chatId)).data)).not.toContain(claude.id); // really ciphertext at rest
+    const mine = await resolve(chatId); // the privileged surface: an org admin who is also an App member
+    expect(mine.configId).toBe(claude.id);
+    expect(mine.model).toBe('claude-sonnet');
+    // Someone who cannot read this chat: same answer as an unknown chat, and nothing of the config in it.
+    const denied = await Q.resolveAIConfig(null, { name: 'default', appRef: app.id, chatId }, ctx(outsider)).catch((e: any) => e);
+    const unknown = await Q.resolveAIConfig(null, { name: 'default', appRef: app.id, chatId: 'chats:nope' }, ctx(outsider)).catch((e: any) => e);
+    expect(denied).toBeInstanceOf(Error);
+    expect(denied.message.split(chatId).join('<c>')).toBe(unknown.message.split('chats:nope').join('<c>'));
+    const text = JSON.stringify({ m: denied.message, x: denied.extensions });
+    for (const secret of [KEY, claude.id, 'claude-sonnet', 'anthropic', '…3957']) expect(text).not.toContain(secret);
   });
 
   it('a disabled own config is accepted as a choice (skipped at turn time)', async () => {
