@@ -53,6 +53,8 @@
     "NodeBatchResult": "envelope",
     "Passage": "value",
     "NodeMoveLinkWarning": "value",
+    "NodeMovePlan": "envelope",
+    "NodeMovePlanEntry": "value",
     "InheritedFrom": "value",
     "AgentListedTask": "value",
     "AgentListedProcess": "value",
