@@ -600,6 +600,100 @@ async function searchUsers(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
   return hits;
 }
 
+/** Distinct Apps examined per page, and pages walked, when finding the Apps whose tasks match (bounds the gate calls). */
+const TASK_APP_PAGE = 100;
+const TASK_APP_MAX_PAGES = 10;
+
+/** The next page of distinct App ids (ascending, after `after`) holding a task that matches. */
+async function taskAppPage(db: PrismaClient, match: AnyWhere, after: string | null): Promise<{ appId: string }[]> {
+  return db.agentTask.findMany({
+    where: { AND: [match, after ? { appId: { gt: after } } : {}] } as Prisma.AgentTaskWhereInput,
+    distinct: ['appId'],
+    select: { appId: true },
+    orderBy: { appId: 'asc' },
+    take: TASK_APP_PAGE,
+  });
+}
+
+/**
+ * #3945 (cor:api:050:02): tasks match on title and handle, both under `name` (case-insensitive substring), an exact
+ * handle ranking first. The per-App read gate runs on every App BEFORE a task becomes a candidate, so an unreadable
+ * task is indistinguishable from a missing one in hits, ranking and `total`. No gate (MCP) or no `name` field ⇒ nothing.
+ */
+async function searchAgentTasks(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
+  const { fields, q, principal } = ctx;
+  const gate = principal.taskReadGate;
+  if (!gate || !fields.has('name')) return [];
+  const match: AnyWhere = {
+    OR: [textPred('title', q), textPred('handle', q)],
+    ...(principal.orgScopeId ? { app: { organizationId: principal.orgScopeId } } : {}),
+  };
+
+  const admitted: string[] = [];
+  let after: string | null = null;
+  for (let page = 0; page < TASK_APP_MAX_PAGES; page++) {
+    const groups = await taskAppPage(ctx.db, match, after);
+    const ok = await Promise.all(
+      groups.map(async (g) => {
+        try {
+          return await gate(g.appId);
+        } catch {
+          return false; // a refusal is never a signal
+        }
+      }),
+    );
+    groups.forEach((g, i) => ok[i] && admitted.push(g.appId));
+    if (groups.length < TASK_APP_PAGE) break;
+    after = groups[groups.length - 1]!.appId;
+  }
+  if (admitted.length === 0) return [];
+
+  const select = { id: true, handle: true, title: true, appId: true, app: { select: { organizationId: true } } } as const;
+  const [exact, rows] = await Promise.all([
+    ctx.db.agentTask.findMany({
+      where: { AND: [{ appId: { in: admitted } }, { handle: { equals: q, mode: 'insensitive' } }] } as Prisma.AgentTaskWhereInput,
+      select,
+      orderBy: { id: 'asc' },
+      take: ctx.cap,
+    }),
+    ctx.db.agentTask.findMany({
+      where: { AND: [{ appId: { in: admitted } }, match] } as Prisma.AgentTaskWhereInput,
+      select,
+      orderBy: { id: 'asc' },
+      take: ctx.cap,
+    }),
+  ]);
+  const seen = new Set<string>();
+  const hits: GlobalSearchHit[] = [];
+  for (const r of [...exact, ...rows]) {
+    if (seen.has(r.id)) continue;
+    seen.add(r.id);
+    const m = bestMatch(
+      [
+        { field: 'name', value: r.title },
+        { field: 'name', value: r.handle },
+      ],
+      q,
+      fields,
+    );
+    if (!m) continue;
+    hits.push({
+      entityType: 'agentTask',
+      id: r.id,
+      urn: null, // until #3878 serves task URNs (#3950)
+      name: r.title,
+      description: null, // pinned for this slice
+      matchedField: m.field,
+      score: m.score,
+      memoryId: null,
+      organizationId: r.app.organizationId,
+      handle: r.handle,
+    });
+    if (hits.length >= ctx.cap) break;
+  }
+  return hits;
+}
+
 export const ADAPTERS: Record<SearchEntityType, (ctx: AdapterCtx) => Promise<GlobalSearchHit[]>> = {
   organization: searchOrganizations,
   memory: searchMemories,
@@ -608,4 +702,5 @@ export const ADAPTERS: Record<SearchEntityType, (ctx: AdapterCtx) => Promise<Glo
   app: searchApps,
   aiServiceConfig: searchAiServiceConfigs,
   user: searchUsers,
+  agentTask: searchAgentTasks,
 };

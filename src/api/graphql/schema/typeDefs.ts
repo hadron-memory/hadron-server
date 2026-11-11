@@ -1137,6 +1137,8 @@ export const typeDefs = `#graphql
     app
     aiServiceConfig
     user
+    "GraphQL only (hrn:node:hadronmemory.com:specs:cor:api:050): MCP hadron_search stays at seven types. Hits only for a person or worker session the task read gate admits."
+    agentTask
   }
 
   """
@@ -1170,6 +1172,8 @@ export const typeDefs = `#graphql
     score: Float!
     memoryId: ID
     organizationId: ID
+    "The entity's short handle when its kind has one (an agentTask's bare AT0.6508), else null. Render as given; never compose or parse."
+    handle: String
   }
 
   type GlobalSearchResult {

@@ -16,6 +16,8 @@ export const ALL_ENTITY_TYPES = [
   'app',
   'aiServiceConfig',
   'user',
+  // #3945 (cor:api:050): GraphQL only. MCP hadron_search keeps its seven-value enum and never sets `taskReadGate`.
+  'agentTask',
 ] as const;
 export type SearchEntityType = (typeof ALL_ENTITY_TYPES)[number];
 
@@ -39,6 +41,8 @@ export interface GlobalSearchHit {
   score: number;
   memoryId: string | null;
   organizationId: string | null;
+  /** #3945: the entity's short handle when its kind has one (an agent task's bare `AT0.6508`); null/absent otherwise. Render as given, never compose or parse. */
+  handle?: string | null;
 }
 
 export interface GlobalSearchParams {
@@ -108,6 +112,12 @@ export interface SearchPrincipal {
    * orgIds/accessibleMemoryIds are already narrowed upstream. Unset ⇒ normal.
    */
   impersonationOrgId?: string | null;
+  /**
+   * #3945: may this caller read the App's tasks (a closure over the live request context: `mayReadAppTasks` reused as-is,
+   * minus the userless carve-out). Set ONLY by the GraphQL surface. Unset ⇒ the agentTask slice returns nothing, which is
+   * how MCP stays at seven types. Applied to every candidate before ranking, offset slicing and `total`.
+   */
+  taskReadGate?: (appId: string) => Promise<boolean>;
 }
 
 /** Keep only valid `SearchEntityType` values (defensive: MCP bypasses zod). */

@@ -26,6 +26,9 @@ import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { discoverableOrgWhere, publicReadableMemoryWhere } from '../../../lib/orgDiscoverability.js';
 import { orgRowToRef, agentRowToRef, memoryRowToRef } from './publicRefs.js';
 import { GraphQLError } from 'graphql';
+import { mayReadAppTasks } from './resolvers.agentTask.js';
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { appKeyCaller } from '../../../lib/appKeyScopes/scopes.js';
 import { searchContains } from '../../../integrations/db/provider.js';
 import {
   type Context,
@@ -400,6 +403,10 @@ export const orgQueries = {
         viewerOrgIds: callerOrgIds,
         orgScopeId,
         impersonationOrgId: ctx.impersonation?.orgId ?? null,
+        // #3945: the per-kind task read gate, reused as-is, minus the ruled userless carve-out: an App key or a userless run
+        // gets no task hits even where the direct read would admit it (every admitting arm of resolveTaskActor needs a user).
+        taskReadGate: async (appId) =>
+          (isRunPrincipal(ctx) && !ctx.userId) || appKeyCaller(ctx) ? false : mayReadAppTasks(ctx, appId),
       };
       const res = await runGlobalSearch(ctx.db, { query, entityTypes, fields, limit, offset }, principal);
       if (!scopeRes) return res;
