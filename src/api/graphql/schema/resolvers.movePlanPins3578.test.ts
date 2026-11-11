@@ -16,7 +16,7 @@ let orgId: string; let memoryId: string; let memoryUrn: string; let destId: stri
 let admin: { id: string }; let contrib: { id: string };
 const as = (u: { id: string }): Context => ({ db, userId: u.id, roles: [], clientId: `user:${u.id}` });
 const urn = (loc: string) => `hrn:node:${memoryUrn.replace(/^hrn:mem:/, '')}:${loc}`;
-async function rule(memory: string, role: string, writers: string) {
+async function rule(memory: string, role: string, writers: 'ALL' | 'ADMIN') {
   const config = (await db.memoryConfig.findUnique({ where: { memoryId: memory } }))
     ?? await db.memoryConfig.create({ data: { id: generateId(), memoryId: memory } });
   return db.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, role, writers } });
