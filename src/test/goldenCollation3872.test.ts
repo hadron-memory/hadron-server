@@ -58,8 +58,11 @@ describe('#3872 assertGoldenCollation inspects the connected database', () => {
     // punctuation and case at the first level; C/POSIX collations compare bytes.
     const [{ sorted }] = await db.$queryRaw<Array<{ sorted: string[] }>>`
       SELECT array_agg(x ORDER BY x) AS sorted FROM unnest(ARRAY['a', 'B', '_a']) AS x`;
-    const bytewise = ['B', '_a', 'a'];
-    expect(sorted).toEqual(/^(C|POSIX)(\.|$)/.test(observed?.collate ?? '') ? bytewise : ['_a', 'a', 'B']);
+    // Assert only the two configurations whose behavior is established; any other locale is left to the
+    // explicit mismatch diagnostic rather than adding a second failure here.
+    const collate = observed?.collate ?? '';
+    if (/^(C|POSIX)(\.|$)/.test(collate)) expect(sorted).toEqual(['B', '_a', 'a']);
+    else if (collate === 'en_US.UTF-8' || collate === 'en_US.utf8') expect(sorted).toEqual(['_a', 'a', 'B']);
   });
   it('throws a named mismatch error carrying the observed collation', async () => {
     const err = await assertGoldenCollation(fake(async () => [{ collate: 'C.UTF-8', provider: 'c' }])).catch(e => e);
@@ -85,26 +88,55 @@ describe('#3872 assertGoldenCollation inspects the connected database', () => {
 });
 
 describe('#3872 oracle', () => {
-  const t = (status: string, message = '') => ({ fullName: 'x', status, failureMessages: message ? [message] : [] });
-  const report = (...rows: ReturnType<typeof t>[]) => ({ testResults: [{ assertionResults: rows }] });
-  const named = 'LOCALE_PREREQUISITE: golden hashes need en_US.UTF-8, database is C.UTF-8; initdb --locale=en_US.UTF-8';
-  const opts = { mode: 'prerequisite-failure', actual: 'C.UTF-8', required: 'en_US.UTF-8' };
-  it('accepts one named failure and no opaque mismatch', () => {
-    expect(evaluateOracle(report(t('failed', named), t('passed'), t('skipped')), opts)).toEqual([]);
+  const FILE = '/w/src/mcp/server.batchAllocation2774.test.ts';
+  const PREREQ = '#2774 golden projection (requires the en_US.UTF-8 database collation, #3872) #3872 the test database has the en_US.UTF-8 collation the golden hashes assume';
+  const goldenName = (i: number) => `#2774 golden projection (requires the en_US.UTF-8 database collation, #3872) #2774 bounds endpoint/root payloads with byte-identical ${i % 2 ? 'all' : 'abstract'}/${['pk', 'urn', 'prefix'][i % 3]} output (edge insertion ${i < 6 ? 'forward' : 'reverse'})`;
+  const named = 'GoldenCollationError: LOCALE_PREREQUISITE: golden hashes need en_US.UTF-8, database is C.UTF-8; initdb --locale=en_US.UTF-8';
+  const row = (fullName: string, status: string, message = '') => ({ fullName, status, failureMessages: message ? [message] : [] });
+  const goldens = (status: string, message = '') => Array.from({ length: 12 }, (_, i) => row(goldenName(i), status, message));
+  const file = (rows: unknown[], extra: object = {}) => ({ name: FILE, status: 'passed', assertionResults: rows, ...extra });
+  const prereqOpts = { mode: 'prerequisite-failure', actual: 'C.UTF-8', required: 'en_US.UTF-8' };
+  const greenOpts = { mode: 'green', minPassed: 13 };
+  const green = () => ({ success: true, testResults: [file([row(PREREQ, 'passed'), ...goldens('passed')])] });
+  const mismatch = () => ({ success: false, testResults: [file([row(PREREQ, 'failed', named), ...goldens('skipped')], { status: 'failed' })] });
+
+  it('accepts one named failure with the 12 golden cases skipped behind it', () => {
+    expect(evaluateOracle(mismatch(), prereqOpts)).toEqual([]);
   });
   it('rejects the pre-fix state: twelve opaque hash mismatches and no named failure', () => {
-    const opaque = t('failed', "AssertionError: response hash mismatch: node n, field Referenced by: expected '4beced6f140838116be795a5d4b0c23b0affb8e4830f89249e8dba03dc216f5f'");
-    const v = evaluateOracle(report(...Array.from({ length: 12 }, () => opaque), t('passed')), opts);
-    expect(v.join('\n')).toMatch(/12 opaque/);
-    expect(v.join('\n')).toMatch(/exactly 1 named/);
+    const opaque = "AssertionError: response hash mismatch: node n, field Referenced by: expected '4beced6f140838116be795a5d4b0c23b0affb8e4830f89249e8dba03dc216f5f'";
+    const report = { success: false, testResults: [file([...goldens('failed', opaque)], { status: 'failed' })] };
+    const v = evaluateOracle(report, prereqOpts).join('\n');
+    expect(v).toMatch(/12 opaque/);
+    expect(v).toMatch(/exactly 1 named/);
   });
-  it('rejects a repeated named failure and a named failure beside an opaque one', () => {
-    expect(evaluateOracle(report(t('failed', named), t('failed', named)), opts).join('\n')).toMatch(/found 2/);
-    expect(evaluateOracle(report(t('failed', named), t('failed', 'response hash mismatch: x')), opts).join('\n')).toMatch(/opaque/);
+  it('rejects a repeated named failure, golden cases that ran, and missing or extra golden cases', () => {
+    const twice = { success: false, testResults: [file([row(PREREQ, 'failed', named), ...goldens('failed', named)], { status: 'failed' })] };
+    expect(evaluateOracle(twice, prereqOpts).join('\n')).toMatch(/found 13|exactly 1 failed/);
+    const ran = { success: false, testResults: [file([row(PREREQ, 'failed', named), ...goldens('passed')], { status: 'failed' })] };
+    expect(evaluateOracle(ran, prereqOpts).join('\n')).toMatch(/12 golden case\(s\) were not skipped/);
+    const missing = { success: false, testResults: [file([row(PREREQ, 'failed', named), ...goldens('skipped').slice(0, 11)], { status: 'failed' })] };
+    expect(evaluateOracle(missing, prereqOpts).join('\n')).toMatch(/expected 12 golden cases, found 11/);
   });
-  it('green mode needs zero failures and the stated pass count', () => {
-    expect(evaluateOracle(report(t('passed'), t('passed')), { mode: 'green', minPassed: 2 })).toEqual([]);
-    expect(evaluateOracle(report(t('passed'), t('failed', 'x')), { mode: 'green', minPassed: 1 })).not.toEqual([]);
-    expect(evaluateOracle(report(t('passed')), { mode: 'green', minPassed: 2 })).not.toEqual([]);
+  it('green mode accepts only a successful report whose guarded tests all passed', () => {
+    expect(evaluateOracle(green(), greenOpts)).toEqual([]);
+  });
+  it.each([
+    ['an empty report', {}],
+    ['a report with no results', { success: true, testResults: [] }],
+    ['a collection error and no assertion results', { success: false, testResults: [{ name: FILE, status: 'failed', message: 'Cannot find module', assertionResults: [] }] }],
+    ['only unrelated passing files', { success: true, testResults: [{ name: '/w/src/other.test.ts', status: 'passed', assertionResults: Array.from({ length: 40 }, () => row('other', 'passed')) }] }],
+    ['success not true', { ...green(), success: false }],
+    ['a skipped golden case', { success: true, testResults: [file([row(PREREQ, 'passed'), ...goldens('passed').slice(0, 11), row(goldenName(11), 'skipped')])] }],
+    ['a failed prerequisite test', { success: true, testResults: [file([row(PREREQ, 'failed', 'x'), ...goldens('passed')])] }],
+  ])('green mode rejects %s', (_label, report) => {
+    expect(evaluateOracle(report, greenOpts)).not.toEqual([]);
+  });
+  it('green mode needs the stated pass count', () => {
+    expect(evaluateOracle(green(), { mode: 'green', minPassed: 14 })).not.toEqual([]);
+  });
+  it('prerequisite mode also rejects an empty report and a load error', () => {
+    expect(evaluateOracle({}, prereqOpts)).not.toEqual([]);
+    expect(evaluateOracle({ success: false, testResults: [{ name: FILE, status: 'failed', message: 'boom', assertionResults: [] }] }, prereqOpts)).not.toEqual([]);
   });
 });
