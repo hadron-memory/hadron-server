@@ -13,7 +13,7 @@
 import { GraphQLError } from 'graphql';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
-import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
+import { AmbiguousLegacyUrnError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { normalizeUrnForLookup, parseUrnInput } from '../../../lib/urn.js';
@@ -102,3 +102,21 @@ const urnInUse = (appId: string, urn: string | null): GraphQLError =>
 
 export const uninstallApp = (ctx: Context, ref: string) => setInstalled(ctx, ref, false);
 export const reinstallApp = (ctx: Context, ref: string) => setInstalled(ctx, ref, true);
+
+/**
+ * #3975 — the App `deleteApp` is naming, for the gate to judge; null when none. By id: that row in ANY state (so the gate,
+ * not the lookup, answers a refused caller, and the state refusal follows the gate). By URN: the INSTALLED, undeleted
+ * App that holds it (what `resolveAppRef` reaches); a URN with no installed holder, or one that is ambiguous across Apps,
+ * is null, so it reads as the same denial as a missing App. (An uninstalled App is reached by id only, #3974's FIT; an
+ * ambiguity refusal that named the Apps would be a state refusal, and this lookup has no gate to put it behind yet.)
+ */
+export async function locateForDelete(ctx: Context, ref: string) {
+  if (isId(ref)) return ctx.db.app.findUnique({ where: { id: ref } });
+  try {
+    const { id } = await resolveAppRef(ctx.db, ref);
+    return await ctx.db.app.findUnique({ where: { id } });
+  } catch (e) {
+    if (e instanceof AppNotFoundError || e instanceof AmbiguousLegacyUrnError) return null;
+    throw e;
+  }
+}

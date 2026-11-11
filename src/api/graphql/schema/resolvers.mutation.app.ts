@@ -55,7 +55,7 @@ import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { deriveSlugFromName } from '../../../lib/urn.js';
 import { parsePolicyLink } from '@hadron-memory/access-control';
 import { GraphQLError } from 'graphql';
-import { uninstallApp, reinstallApp } from './appInstallState.js';
+import { uninstallApp, reinstallApp, locateForDelete } from './appInstallState.js';
 import {
   type AppType,
   type AppMembershipRole,
@@ -932,9 +932,15 @@ export const appMutations = {
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: ref may be ID, bare URN, or prefixed URN.
-      const { id: resolvedId } = await resolveAppRef(ctx.db, ref);
-      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
+      // #3975 (cor:dmo:050:21, cor:api:140:02): a missing App and a caller the gate refuses get the one `authorizationDenied()`
+      // (uninstallApp's refusal), by id and by URN. The gate runs on whatever row the ref names, in any state; the state refusal
+      // (deleted) comes only after it, so a refused caller never learns the App's state.
+      const found = await locateForDelete(ctx, ref);
+      if (!found) throw authorizationDenied();
+      const resolvedId = found.id;
+      const app = found;
       await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+      if (app.deletedAt) throw new GraphQLError('This App is deleted.', { extensions: { code: 'APP_DELETED', appId: resolvedId } });
       // #510: the app-layer action-policy link (cor:acl:040:02) — validate
       // shape before storing; explicit null clears (= no restriction).
       assertAppPolicyShape(policy);
@@ -1113,9 +1119,15 @@ export const appMutations = {
 
     deleteApp: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
       // 007-entity-id-or-urn: ref may be ID, bare URN, or prefixed URN.
-      const { id: resolvedId } = await resolveAppRef(ctx.db, ref);
-      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
+      // #3975 (cor:dmo:050:21, cor:api:140:02): a missing App and a caller the gate refuses get the one `authorizationDenied()`
+      // (uninstallApp's refusal), by id and by URN. The gate runs on whatever row the ref names, in any state; the state refusal
+      // (deleted) comes only after it, so a refused caller never learns the App's state.
+      const found = await locateForDelete(ctx, ref);
+      if (!found) throw authorizationDenied();
+      const resolvedId = found.id;
+      const app = found;
       await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+      if (app.deletedAt) throw new GraphQLError('This App is deleted.', { extensions: { code: 'APP_DELETED', appId: resolvedId } });
       // Soft-delete the App. Secrets are org/user-owned only (#696), so there
       // are no app-owned secrets to sweep here anymore. The deletedAt-null guard
       // keeps the original deletedAt under a concurrent double-delete.

@@ -92,6 +92,15 @@ describe('#3975 deleteApp existence oracle', () => {
     expect(await refusal(M.deleteApp({}, { ref: urn }, ctx(stranger.id)))).toEqual(reference);
   });
 
+  it('a legacy URN carried by two installed Apps is ambiguous to the resolver, and a refused caller still gets the uniform refusal', async () => {
+    const legacy = `${org.urn}:legacy`;
+    await db.app.update({ where: { id: app.id }, data: { legacyUrn: legacy } });
+    await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'L2', urn: `${org.urn}:l2`, legacyUrn: legacy } });
+    const reference = await refusal(M.uninstallApp({}, { ref: generateId() }, ctx(stranger.id)));
+    for (const who of outsiders()) expect(await refusal(M.deleteApp({}, { ref: legacy }, ctx(who)))).toEqual(reference);
+    expect((await row()).deletedAt).toBeNull();
+  });
+
   it('a deleted App: a refused caller gets the uniform refusal, an admitted caller learns APP_DELETED, after the gate', async () => {
     await M.deleteApp({}, { ref: app.id }, ctx(admin.id));
     const reference = await refusal(M.uninstallApp({}, { ref: generateId() }, ctx(stranger.id)));
