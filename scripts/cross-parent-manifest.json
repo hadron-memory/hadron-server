@@ -116,6 +116,7 @@
     "AppCreated": "value",
     "AppAIConfig": "value",
     "PublicResourceRefPage": "envelope",
+    "PublicResourceRefsPage": "envelope",
     "MemoryTransferDependent": "value",
     "MemoryTransferBlocker": "value",
     "MemoryOwnerTransferPreview": "envelope",
@@ -1693,6 +1694,12 @@
       "target": "PublicResourceRef"
     },
     "PublicResourceRefPage.items": {
+      "class": "closed-projection",
+      "projection": "PublicResourceRef",
+      "why": "PublicResourceRef(id,name,urn,description; public-readable rows only)",
+      "target": "PublicResourceRef"
+    },
+    "PublicResourceRefsPage.items": {
       "class": "closed-projection",
       "projection": "PublicResourceRef",
       "why": "PublicResourceRef(id,name,urn,description; public-readable rows only)",
