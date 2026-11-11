@@ -88,6 +88,28 @@ describe('#3483 rows 2, 3, 6: a worker needs a live single-use grant, spent with
     expect(await useCount(g)).toBe(0);
     expect(await useEvents(g)).toHaveLength(0);
   });
+
+  // Blind finding on 8f098618 (P3): the case above fails before admission. Here the act's own write fails AFTER the grant was
+  // spent (a test trigger refuses the insert), and the spend and its USE event roll back with it.
+  it.each([
+    ['schedule', 'agent_schedules', 'schedule.create' as const, (ctx: any) => createSchedule(ctx)],
+    ['webhook', 'agent_webhooks', 'webhook.create' as const, (ctx: any) => createWebhook(ctx)],
+  ])('a %s write that fails after the spend rolls the spend back', async (_label, table, action, act) => {
+    const g = await triggerGrant(w, { action });
+    await db.$executeRawUnsafe(`CREATE FUNCTION fail_insert_3483() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'test: the write fails'; END $$`);
+    await db.$executeRawUnsafe(`CREATE TRIGGER fail_insert_3483 BEFORE INSERT ON ${table} FOR EACH ROW EXECUTE FUNCTION fail_insert_3483()`);
+    try {
+      await expect(asWorker(act)).rejects.toThrow(/the write fails/);
+    } finally {
+      await db.$executeRawUnsafe(`DROP TRIGGER fail_insert_3483 ON ${table}`);
+      await db.$executeRawUnsafe('DROP FUNCTION fail_insert_3483()');
+    }
+    expect(await useCount(g)).toBe(0);
+    expect(await useEvents(g)).toHaveLength(0);
+    // The grant is intact: the same act now succeeds and spends it.
+    await asWorker(act);
+    expect(await useCount(g)).toBe(1);
+  });
 });
 
 describe('#3483 rows 4, 7 and the gate\'s additions: a grant that does not admit gets the no-grant refusal, byte for byte', () => {

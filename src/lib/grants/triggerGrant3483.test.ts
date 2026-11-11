@@ -84,6 +84,39 @@ describe('spendTriggerGrant', () => {
     expect(await useEvents(g)).toHaveLength(0);
     expect(await useEvents(h)).toHaveLength(0);
   });
+
+  // Blind finding on 8f098618 (P2): the UPDATE's live predicate and the guard read the clock separately (and the guard rounds it
+  // to timestamp(3)), so a grant can pass the predicate and be expired when the guard judges it. A trigger that fires before the
+  // guard (triggers fire in name order) sleeps past the expiry, which makes that window deterministic.
+  it('a grant that expires between the predicate and the guard gets the one refusal, not the guard\'s 23514, and spends nothing', async () => {
+    const g = await triggerGrant(w, { over: { expires_at: dbNowPlus('1 second') } });
+    await exec(`CREATE FUNCTION aaa_sleep_3483() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(1.5); RETURN NEW; END $$`);
+    await exec('CREATE TRIGGER aaa_sleep_3483 BEFORE UPDATE OF use_count ON grants FOR EACH ROW EXECUTE FUNCTION aaa_sleep_3483()');
+    try {
+      await expect(db.$transaction((tx) => spendTriggerGrant(tx, g, { appId: w.appId, workerId: w.workerId, sessionId: null })))
+        .rejects.toMatchObject({ extensions: { code: 'TRIGGER_GRANT_REQUIRED' } });
+    } finally {
+      await exec('DROP TRIGGER aaa_sleep_3483 ON grants');
+      await exec('DROP FUNCTION aaa_sleep_3483()');
+    }
+    expect(await useCount(g)).toBe(0);
+    expect(await useEvents(g)).toHaveLength(0);
+  });
+
+  it('any other database failure of the spend is not dressed as the refusal', async () => {
+    const g = await triggerGrant(w, { over: { max_uses: null } });
+    await exec(`CREATE FUNCTION aaa_fail_3483() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'some other check' USING ERRCODE = '23514'; END $$`);
+    await exec('CREATE TRIGGER aaa_fail_3483 BEFORE UPDATE OF use_count ON grants FOR EACH ROW EXECUTE FUNCTION aaa_fail_3483()');
+    try {
+      const e = await db.$transaction((tx) => spendTriggerGrant(tx, g, { appId: w.appId, workerId: w.workerId, sessionId: null })).then(() => null, (err) => err);
+      expect(e).not.toBeNull();
+      expect(e.extensions?.code).not.toBe('TRIGGER_GRANT_REQUIRED');
+    } finally {
+      await exec('DROP TRIGGER aaa_fail_3483 ON grants');
+      await exec('DROP FUNCTION aaa_fail_3483()');
+    }
+    expect(await useCount(g)).toBe(0);
+  });
 });
 
 describe('findAdmittingGrant: lock, then judge', () => {
