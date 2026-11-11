@@ -7228,6 +7228,8 @@ export const typeDefs = `#graphql
     ADOPTABLE
     "Create would store this schedule UNADOPTED: summary and hash are null and reason says which kind."
     CANNOT_BE_ADOPTED
+    "#3483: the caller is a worker-bound session and create would be refused with TRIGGER_GRANT_REQUIRED: it holds no live, signed schedule.create grant for this entry node in this App (hrn:node:hadronmemory.com:specs:cor:agt:010:01). Summary, hash and reason are null. Only while the grant check is on."
+    GRANT_REQUIRED
   }
 
   enum AgentSchedulePreviewReason {

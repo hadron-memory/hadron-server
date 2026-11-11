@@ -1,5 +1,5 @@
 -- #3668 (S1a): the database half of the grant row, its events and the actions table. One source; the newest migration to
--- carry it (20261110010300_grant_requester_erasure) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
+-- carry it (20261111040000_grant_use_spend) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
 -- post-push.sql applies it.
 --
 -- GRANTS. Exactly one holder (a user, an agent, a worker or an App); the CHECK cannot pass on NULL, because
@@ -13,6 +13,9 @@
 --     grant at its current version, by that signer, whose signing request has completed. The signer becomes the issuer
 --     (issuer_user_id := verified_by). Only a grant not revoked, not left by its holder and not past its expiry activates, and
 --     nothing else moves in the same update. After that the three activation columns never move again;
+--   * it is USED (#3483, cor:acl:140:03 single-use and repeating grants): use_count goes up by exactly one, and only while the
+--     row is live on the database clock (activated, not revoked, holder not gone, App not deleted, started, not expired, below
+--     its max_uses), with nothing else moving but updated_at. The caller holds the row FOR UPDATE and writes the USE event;
 --   * it ends ONCE, by revoked_at stamped together with revoked_by, or by its HOLDER going: holder_departed_at is stamped
 --     (NULL to a time, never back) by the AFTER DELETE triggers below on every hard delete of a holder row, and by the
 --     deleting code on the soft deletes (an erased person, a retired worker, a deleted agent or App). The first end stands:
@@ -49,7 +52,7 @@ CREATE OR REPLACE FUNCTION hadron_guard_grant() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
   -- Columns that may differ between OLD and NEW; each is judged by its own rule below.
-  movable text[] := ARRAY['updated_at', 'user_id', 'issuer_user_id', 'requested_by_user_id', 'verified_by', 'revoked_at', 'revoked_by',
+  movable text[] := ARRAY['updated_at', 'use_count', 'user_id', 'issuer_user_id', 'requested_by_user_id', 'verified_by', 'revoked_at', 'revoked_by',
                           'holder_departed_at', 'activated_at', 'verification_kind', 'signature_id'];
   db_now timestamp(3) := (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3);
 BEGIN
@@ -87,6 +90,20 @@ BEGIN
   -- UPDATE: nothing but the movable columns may differ.
   IF (to_jsonb(NEW) - movable) <> (to_jsonb(OLD) - movable) THEN
     RAISE EXCEPTION 'grants are append-only' USING ERRCODE = '23514';
+  END IF;
+  -- A use (#3483): +1 on a row live at this instant, and nothing else in the same update. The caller holds the row FOR UPDATE,
+  -- so the revocation, departure, expiry and count read here are the row's newest.
+  IF NEW.use_count IS DISTINCT FROM OLD.use_count THEN
+    IF NEW.use_count IS DISTINCT FROM OLD.use_count + 1
+       OR OLD.activated_at IS NULL OR OLD.revoked_at IS NOT NULL OR OLD.holder_departed_at IS NOT NULL
+       OR (OLD.starts_at IS NOT NULL AND OLD.starts_at > db_now)
+       OR (OLD.expires_at IS NOT NULL AND OLD.expires_at <= db_now)
+       OR (OLD.max_uses IS NOT NULL AND OLD.use_count >= OLD.max_uses)
+       OR EXISTS (SELECT 1 FROM apps p WHERE p.id = OLD.app_id AND p.deleted_at IS NOT NULL)
+       OR (to_jsonb(NEW) - ARRAY['updated_at', 'use_count']) <> (to_jsonb(OLD) - ARRAY['updated_at', 'use_count']) THEN
+      RAISE EXCEPTION 'grants are append-only: a use adds one to a live grant and moves nothing else' USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
   END IF;
   -- The one activation (#3649 slice C): a pending grant, by its own completed signature, and nothing else in the same update.
   -- The signer becomes the issuer; the time is the database's. The caller holds the grant row (FOR UPDATE) when it writes this,

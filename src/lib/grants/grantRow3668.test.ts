@@ -19,8 +19,8 @@ const query = <T>(sql: string, ...params: unknown[]) => db.$queryRawUnsafe<T[]>(
 describe('prisma/grant-invariants.sql parity', () => {
   it('the newest migration to carry it ends with a byte-identical copy, and post-push includes the file', () => {
     const sql = readFileSync(new URL('../../../prisma/grant-invariants.sql', import.meta.url), 'utf8');
-    // #3813: the requester-erasure migration carries the full canonical guard, after activation.
-    const dir = readdirSync(new URL('../../../prisma/migrations', import.meta.url)).find((d) => d === '20261110010300_grant_requester_erasure');
+    // #3483: the grant-use migration carries the full canonical guard (the USE arm), after #3813's.
+    const dir = readdirSync(new URL('../../../prisma/migrations', import.meta.url)).find((d) => d === '20261111040000_grant_use_spend');
     expect(dir).toBeTruthy();
     expect(readFileSync(new URL(`../../../prisma/migrations/${dir}/migration.sql`, import.meta.url), 'utf8').endsWith(sql)).toBe(true);
     expect(readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8')).toContain('\\ir grant-invariants.sql');
