@@ -18,7 +18,8 @@ import { generateId } from '../../../lib/id.js';
 import { taskStallTick } from '../../../jobs/taskStallEvaluator.js';
 import { recordEndedEscalations } from '../../../lib/agentTasks/stall.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
-import { appendTaskEvent } from '../../../lib/agentTasks/events.js';
+import { appendTaskEvent, ASSIGNEE_CLEARED_EVENT_TYPES } from '../../../lib/agentTasks/events.js';
+import { runAsActor } from '../../../lib/requestActor.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 
@@ -442,33 +443,24 @@ describe('#3934 — escalationEndedAt and alarmsInEffect on a task alarm', () =>
     expect((await events('', null)).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: iso('11:10') });
   });
 
-  it('a park clears the holder: activity in the gap before the task is matched again never counts', async () => {
+  it('a hand-back clears the holder: activity in the gap before the task is assigned again never counts (real hand-back and real assign)', async () => {
     const t = await task({ ownerWorkerId: ada.id, assigneeWorkerId: anne.id, assignedAt: at('09:30'), status: 'started', startedAt: at('10:00') });
-    const by = { userId: admin.id, workerId: null, agentId: null };
-    await appendTaskEvent(db, { appId: app.id, taskId: t.id, actor: by, event: { type: 'task.assigned', assignee: { workerId: anne.id }, closeSessionWhenDone: false }, createdAt: at('09:30') });
+    await appendTaskEvent(db, { appId: app.id, taskId: t.id, actor: { userId: admin.id, workerId: null, agentId: null }, event: { type: 'task.assigned', assignee: { workerId: anne.id }, closeSessionWhenDone: false }, createdAt: at('09:30') });
     const session = await db.session.create({ data: { id: generateId(), appId: app.id, workerId: anne.id, agentId, startedAt: at('10:00'), updatedAt: at('10:00') } });
     await tick('11:05');
     const alarm = (await alarms('stall.no-progress')).find((a) => a.taskId === t.id)!;
-    await appendTaskEvent(db, { appId: app.id, taskId: t.id, actor: by, event: { type: 'task.parked' }, createdAt: at('11:10') });
-    await db.session.update({ where: { id: session.id }, data: { updatedAt: at('11:20') } }); // Anne is active, but the task is parked: she does not hold it
-    await appendTaskEvent(db, { appId: app.id, taskId: t.id, actor: by, event: { type: 'assignment.matched', assignee: { workerId: anne.id }, family: 'claude', closeSessionWhenDone: false }, createdAt: at('11:40') });
-    // The row keeps its old assignment stamp on purpose: the re-match's own event, not the row, must open the new stint.
-    await record('11:50');
-    expect((await events('', null)).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: iso('11:40') });
-  });
-
-  it('a hand-back clears the holder too: activity in the gap before the task is matched again never counts', async () => {
-    const t = await task({ ownerWorkerId: ada.id, assigneeWorkerId: anne.id, assignedAt: at('09:30'), status: 'started', startedAt: at('10:00') });
-    const by = { userId: admin.id, workerId: null, agentId: null };
-    await appendTaskEvent(db, { appId: app.id, taskId: t.id, actor: by, event: { type: 'task.assigned', assignee: { workerId: anne.id }, closeSessionWhenDone: false }, createdAt: at('09:30') });
-    const session = await db.session.create({ data: { id: generateId(), appId: app.id, workerId: anne.id, agentId, startedAt: at('10:00'), updatedAt: at('10:00') } });
-    await tick('11:05');
-    const alarm = (await alarms('stall.no-progress')).find((a) => a.taskId === t.id)!;
-    await appendTaskEvent(db, { appId: app.id, taskId: t.id, actor: by, event: { type: 'task.handed-back', code: 'cannot_do' }, createdAt: at('11:10') });
-    await db.session.update({ where: { id: session.id }, data: { updatedAt: at('11:20') } }); // Anne is active, but she handed the task back
-    await appendTaskEvent(db, { appId: app.id, taskId: t.id, actor: by, event: { type: 'assignment.matched', assignee: { workerId: anne.id }, family: 'claude', closeSessionWhenDone: false }, createdAt: at('11:40') });
-    await record('11:50');
-    expect((await events('', null)).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: iso('11:40') });
+    const pause = () => new Promise((r) => setTimeout(r, 25));
+    // Real mutations (the clock's real now): Anne hands it back, is active while it is queued, then it is assigned to her again.
+    await runAsActor({ workerId: anne.id, agentId }, () => M.handBackAgentTask({}, { taskRef: t.id, reason: { code: 'CANNOT_DO' } }, ctx(admin.id)));
+    await pause();
+    await db.session.update({ where: { id: session.id }, data: { updatedAt: new Date() } });
+    await pause();
+    await M.assignAgentTask({}, { taskId: t.id, assignee: { worker: anne.id } }, ctx(admin.id));
+    const types = (await db.agentTeamEvent.findMany({ where: { taskId: t.id }, select: { type: true } })).map((e) => e.type);
+    expect(types).toEqual(expect.arrayContaining([...ASSIGNEE_CLEARED_EVENT_TYPES, 'task.assigned']));
+    const reassign = await db.agentTeamEvent.findFirstOrThrow({ where: { taskId: t.id, type: 'task.assigned', createdAt: { gt: at('23:00') } } });
+    await record('23:59');
+    expect((await events('', null)).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: reassign.createdAt.toISOString() });
   });
 
   it('the same answer as the wake schedule: the wake pass closes exactly the alarms the read calls ended', async () => {

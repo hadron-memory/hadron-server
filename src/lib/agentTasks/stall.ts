@@ -58,7 +58,7 @@ import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { type Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { loadWorkersActivity } from '../../api/graphql/schema/resolvers.worker.js';
 import { toNaiveUtc } from '../sessionActivity.js';
-import { PASSIVE_EVENT_TYPES, appendAlarmEvent, type AlarmChain, type AlarmEventType, type TaskParty } from './events.js';
+import { ASSIGNED_EVENT_TYPES, ASSIGNEE_CLEARED_EVENT_TYPES, PASSIVE_EVENT_TYPES, appendAlarmEvent, type AlarmChain, type AlarmEventType, type TaskParty } from './events.js';
 import { markStalled } from './availability.js';
 import { appManagerUserIds } from '../auth/appManagement.js';
 
@@ -853,7 +853,7 @@ export async function endedAlarmEpisodeInstants(
   // (not an auto-expiry's maintenance write) and an attributed usage event, as the roster counts it, never after the
   // session ended. A latest-only value cannot say when it FIRST happened; this can.
   const assignments = await db.agentTeamEvent.findMany({
-    where: { taskId: { in: [...new Set(pairs.map((a) => a.taskId))] }, type: { in: ['task.assigned', 'task.reassigned', 'assignment.matched', 'task.parked', 'task.handed-back'] } },
+    where: { taskId: { in: [...new Set(pairs.map((a) => a.taskId))] }, type: { in: [...ASSIGNED_EVENT_TYPES, ...ASSIGNEE_CLEARED_EVENT_TYPES] } },
     select: { taskId: true, type: true, createdAt: true, payload: true },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   });
@@ -869,8 +869,8 @@ export async function endedAlarmEpisodeInstants(
     for (const e of assignments) {
       if (e.taskId !== a.taskId) continue;
       const pl = e.payload as { assignee?: unknown; from?: unknown; to?: unknown } | null;
-      if (e.type === 'task.parked' || e.type === 'task.handed-back') {
-        // Parking to backlog and a hand-back to the queue both clear the assignee (cor:agt:050:02): every open stint ends here, and a later assignment opens a new
+      if ((ASSIGNEE_CLEARED_EVENT_TYPES as readonly string[]).includes(e.type)) {
+        // A hand-back to the queue clears the assignee (cor:agt:050:02): every open stint ends here, and a later assignment opens a new
         // one, so activity in the gap is nobody's. (A release of the last blocker is not this: the holder still holds the task.)
         for (const [worker, enter] of open) stints.push({ worker, enter, exit: e.createdAt });
         open.clear();
