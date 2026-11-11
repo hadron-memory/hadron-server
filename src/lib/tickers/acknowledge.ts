@@ -136,8 +136,10 @@ export async function acknowledgeWakes(args: {
         // ticker covers made at or after the wake was ISSUED, the issue time taken as no later than the server clock
         // now. The deliverer acknowledges only after the terminal confirms the submit (about 30s), and a worker that
         // read the channel inside that gap stamped the previous tick's row; that check answers this wake, so the ack
-        // carries it over instead of erasing it. Coverage matches `respondedTicks` (none named = the team channel, the
-        // only channel a check is stamped on). A check before the issue never counts.
+        // carries it over instead of erasing it. Coverage matches `respondedTicks` (none named, or NULL, = the team channel).
+        // `last_checked_at` is written only by `stampChannelCheck` / `stampTeamChannelChecks`, and both stamp only the
+        // worker's own App's team channel, so "any channel with a check" is that channel (Belinda, BLIND P2 on #3946;
+        // pinned below by a read of another channel). A check before the issue never counts.
         //
         // The subquery reads this statement's snapshot, so a check still uncommitted when the statement starts is not
         // in it (Andi, LOCAL P2 on #3946). On an existing row that check stamps `responded_at` on the row itself, and
@@ -151,7 +153,7 @@ export async function acknowledgeWakes(args: {
           JOIN tickers ct ON ct.id = ${t.tickerId}
           WHERE rs.worker_id = ${p.workerId}
             AND rs.last_checked_at >= ${sinceIssue}
-            AND (cardinality(ct.channel_ids) = 0 OR rs.channel_id = ANY (ct.channel_ids)))`;
+            AND (coalesce(cardinality(ct.channel_ids), 0) = 0 OR rs.channel_id = ANY (ct.channel_ids)))`;
         await tx.$executeRaw`
           INSERT INTO worker_delivery_ticks
             (worker_id, ticker_id, last_acked_tick, acked_at, acked_by_user_id, acked_by_worker_id, acked_by_app_key_id, responded_at)
