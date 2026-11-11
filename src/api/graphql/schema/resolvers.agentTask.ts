@@ -3053,7 +3053,7 @@ export const agentTaskQueries = {
    */
   agentTeamEvents: async (
     _: unknown,
-    args: { appRef: string; since?: unknown; after?: string | null; types?: string[] | null; codePrefix?: string | null; alarmsOnly?: boolean | null; taskId?: string | null; limit?: number | null },
+    args: { appRef: string; since?: unknown; after?: string | null; types?: string[] | null; codePrefix?: string | null; alarmsOnly?: boolean | null; alarmsInEffect?: boolean | null; taskId?: string | null; limit?: number | null },
     ctx: Context,
   ) => withReadableApp(ctx, args.appRef, async (c, app) => {
     const since = args.since == null ? null : parseStartBy(args.since);
@@ -3074,18 +3074,40 @@ export const agentTaskQueries = {
         ],
       };
     }
-    return c.db.agentTeamEvent.findMany({
-      where: {
-        appId: app.id,
-        ...afterWhere,
-        ...(since ? { createdAt: { gt: since } } : {}),
-        ...((args.types?.length || args.codePrefix != null) ? { type: { ...(args.types?.length ? { in: args.types } : {}), ...(args.codePrefix != null ? { startsWith: escapePrismaLikePattern(args.codePrefix) } : {}) } } : {}),
-        ...(args.alarmsOnly ? { severity: 'alarm' } : {}),
-        ...(args.taskId ? { taskId: (await resolveTaskRef(c, args.taskId, app.id)) ?? args.taskId } : {}),
-      },
-      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      take: clampListTake(args.limit),
-    });
+    const take = clampListTake(args.limit);
+    const where: Prisma.AgentTeamEventWhereInput = {
+      appId: app.id,
+      ...(since ? { createdAt: { gt: since } } : {}),
+      ...((args.types?.length || args.codePrefix != null) ? { type: { ...(args.types?.length ? { in: args.types } : {}), ...(args.codePrefix != null ? { startsWith: escapePrismaLikePattern(args.codePrefix) } : {}) } } : {}),
+      // #3934: alarms in effect are alarms, and an acknowledged alarm is out of effect by definition (cor:agt:050:20).
+      ...(args.alarmsOnly || args.alarmsInEffect ? { severity: 'alarm' } : {}),
+      ...(args.alarmsInEffect ? { acknowledgedAt: null } : {}),
+      ...(args.taskId ? { taskId: (await resolveTaskRef(c, args.taskId, app.id)) ?? args.taskId } : {}),
+    };
+    const page = (cursor: Prisma.AgentTeamEventWhereInput, n: number) =>
+      c.db.agentTeamEvent.findMany({ where: { ...where, ...cursor }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], take: n });
+    if (!args.alarmsInEffect) return page(afterWhere, take);
+    // #3934: in effect = unacknowledged and the escalation not stopped. The second half is the live answer the wake
+    // schedule uses (`alarmEpisodeEnds`), judged here per batch, so a batch is read, the ended alarms are dropped, and
+    // the read continues from the last row seen until `take` in-effect alarms are found or the stream ends. The page
+    // is then exactly what the same read without the filter would hold, minus the alarms whose escalation ended.
+    const { alarmEscalationEnds } = await import('../../../lib/agentTasks/stall.js');
+    const out: Awaited<ReturnType<typeof page>> = [];
+    let cursor = afterWhere;
+    while (out.length < take) {
+      const batch = await page(cursor, Math.max(take, ALARM_SCAN_BATCH));
+      if (batch.length === 0) break;
+      const ended = await alarmEscalationEnds(c.db, batch, new Date());
+      for (const e of batch) {
+        if (ended.has(e.id)) continue;
+        out.push(e);
+        if (out.length === take) return out;
+      }
+      const last = batch[batch.length - 1];
+      cursor = { OR: [{ createdAt: { gt: last.createdAt } }, { createdAt: last.createdAt, id: { gt: last.id } }] };
+      if (batch.length < Math.max(take, ALARM_SCAN_BATCH)) break;
+    }
+    return out;
   }),
 };
 
@@ -3128,6 +3150,15 @@ const workerPartyOf = tickBatch<string, PartyView | null>(async (ctx, ids) => {
 const userPartyOf = tickBatch<string, { id: string; handle: string | null } | null>(async (ctx, ids) => {
   const rows = await ctx.db.user.findMany({ where: { id: { in: ids } }, select: { id: true, handle: true } });
   return new Map(rows.map((u) => [u.id, u]));
+}, null);
+/** #3934: the fields of an event row {@link alarmEscalationEnds} reads. */
+type AlarmEndRow = { id: string; severity: string | null; taskId: string | null; type: string; episodeStart: Date | null; acknowledgedAt: Date | null };
+/** #3934: the batch size of the `alarmsInEffect` scan, so a page of ended alarms costs a few queries, not one per alarm. */
+const ALARM_SCAN_BATCH = 200;
+const alarmEndOf = tickBatch<AlarmEndRow, Date | null>(async (ctx, rows) => {
+  const { alarmEscalationEnds } = await import('../../../lib/agentTasks/stall.js');
+  const ends = await alarmEscalationEnds(ctx.db, rows, new Date());
+  return new Map(rows.map((r) => [r, ends.get(r.id) ?? null]));
 }, null);
 const hasOpenChild = tickBatch<string, boolean>(async (ctx, ids) => {
   const rows = await ctx.db.agentTask.findMany({ where: { parentTaskId: { in: ids }, status: { in: OPEN } }, select: { parentTaskId: true }, distinct: ['parentTaskId'] });
@@ -3458,6 +3489,9 @@ export const agentTaskFieldResolvers = {
       return eventPayloadFor(e, ctx);
     },
     severity: (e: { severity: string | null }) => (e.severity === 'alarm' ? 'ALARM' : null),
+    // #3934 (V77): when this alarm's escalation ended, from the same answer the wake schedule uses; null while in effect and on any
+    // ordinary event. Batched per request, so a page of events costs one evaluation, not one per row.
+    escalationEndedAt: (e: AlarmEndRow, _: unknown, ctx: Context) => (e.severity === 'alarm' ? alarmEndOf(ctx, e) : null),
     actor: (e: { actorWorkerId: string | null; actorUserId: string | null }, _: unknown, ctx: Context) =>
       partyView(ctx, e.actorWorkerId, e.actorWorkerId ? null : e.actorUserId),
     subjectWorker: (e: { subjectWorkerId: string | null }, _: unknown, ctx: Context) =>

@@ -9045,6 +9045,12 @@ export const typeDefs = `#graphql
       "#3449: literal prefix, intersects nonempty types; app. includes legacy platform events. An empty prefix matches all types; omitted or empty types adds no type filter."
       codePrefix: String
       alarmsOnly: Boolean
+      """
+      #3934 — only alarms in effect (hrn:node:hadronmemory.com:specs:cor:agt:050:20): unacknowledged, and escalation not
+      stopped, so escalationEndedAt is null. Implies alarmsOnly. A page holds up to limit such alarms; an alarm out of effect
+      is skipped, not hidden: read without this filter to see it. false or omitted adds no filter.
+      """
+      alarmsInEffect: Boolean
       taskId: ID
       limit: Int
     ): [AgentTeamEvent!]!
@@ -16440,6 +16446,14 @@ export const typeDefs = `#graphql
     chain: JSON
     acknowledgedBy: AgentTaskParty
     acknowledgedAt: DateTime
+    """
+    #3934 — alarms only: when this alarm's escalation ended, the earlier of its acknowledgement and the end of its episode
+    (hrn:node:hadronmemory.com:specs:cor:agt:050:20); null while the alarm is in effect, and on any ordinary event. The
+    same answer the wake schedule uses, for every kind of alarm. A task alarm's episode end is the first move the task's record shows
+    after the episode began (its start, finish, cancellation, reassignment, progress note, or the like). Ending
+    changes nothing on the alarm: it is not acknowledged, deleted or hidden, and an owner may still acknowledge it.
+    """
+    escalationEndedAt: DateTime
     "A dark-worker alarm's payload carries its reason (overdue, wake-unacked) and window for every reader; its evidence (lastCheckedAt, oldestWakeAgeSeconds) only for a reader of the worker's internals."
     payload: JSON!
     createdAt: DateTime!

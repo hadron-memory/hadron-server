@@ -772,20 +772,37 @@ export async function endedAlarmEpisodes(
   alarms: { taskId: string | null; type: string; episodeStart: Date | null }[],
   now: Date,
 ): Promise<Set<string>> {
-  const out = new Set<string>();
+  return new Set((await endedAlarmEpisodeInstants(db, alarms, now)).keys());
+}
+
+/**
+ * #3934 — {@link endedAlarmEpisodes} with the instant each episode ended, keyed the same way. The classification is
+ * the one above, unchanged; the instant is the first move the task's own record shows after the episode began:
+ *   - a finished or cancelled task: when it finished or was cancelled; a task parked to backlog: its last row change;
+ *   - an open task whose episode moved on: the earliest of its start, (re)assignment, release, progress note, queue
+ *     entry, start-by or finish-by edit and assignee or child activity that falls after the episode began.
+ * Where the record shows none of those, the row's last change, then `now`: never null, because the classification
+ * already says it ended. History is never read for a different answer than the classification gave.
+ */
+export async function endedAlarmEpisodeInstants(
+  db: Db,
+  alarms: { taskId: string | null; type: string; episodeStart: Date | null }[],
+  now: Date,
+): Promise<Map<string, Date>> {
+  const out = new Map<string, Date>();
   const subject = alarms.filter((a): a is { taskId: string; type: string; episodeStart: Date } =>
     !!a.taskId && !!a.episodeStart && STALL_ALARM_TYPES.has(a.type));
   const taskIds = [...new Set(subject.map((a) => a.taskId))];
   if (taskIds.length === 0) return out;
   const tasks = await db.agentTask.findMany({
     where: { id: { in: taskIds }, app: { deletedAt: null, uninstalledAt: null } },
-    select: { id: true, status: true },
+    select: { id: true, status: true, finishedAt: true, cancelledAt: true, updatedAt: true, startedAt: true, assignedAt: true, releasedAt: true },
   });
-  const statusOf = new Map(tasks.map((t) => [t.id, t.status]));
+  const rowOf = new Map(tasks.map((t) => [t.id, t]));
   const openIds = tasks.filter((t) => OPEN_STATUSES.includes(t.status)).map((t) => t.id);
   const inputs = openIds.length ? await loadStallInputs(db, { id: { in: openIds } }, now) : [];
   const windows = await loadWindows(db, [...new Set(inputs.map((i) => i.task.appId))]);
-  const loaded = new Set(inputs.map((i) => i.task.id));
+  const inputsOf = new Map(inputs.map((i) => [i.task.id, i]));
   const running = new Set<string>();
   for (const i of inputs) {
     for (const c of stallCandidates(i, windows.get(i.task.appId) as StallWindows, now, { episodesRunning: true })) {
@@ -793,11 +810,77 @@ export async function endedAlarmEpisodes(
     }
   }
   for (const a of subject) {
-    const status = statusOf.get(a.taskId);
-    if (status === undefined) continue; // unknown: not found among live, installed Apps' tasks
+    const row = rowOf.get(a.taskId);
+    if (row === undefined) continue; // unknown: not found among live, installed Apps' tasks
     const key = alarmEpisodeKey(a.taskId, a.type, a.episodeStart);
-    if (TERMINAL_STATUSES.has(status)) out.add(key);
-    else if (loaded.has(a.taskId) && !running.has(key)) out.add(key);
+    const after = (d: Date | null | undefined): d is Date => !!d && d.getTime() > a.episodeStart.getTime();
+    if (TERMINAL_STATUSES.has(row.status)) {
+      const at = row.status === 'finished' ? row.finishedAt : row.status === 'cancelled' ? row.cancelledAt : null;
+      out.set(key, after(at) ? at : after(row.updatedAt) ? row.updatedAt : now);
+    } else if (inputsOf.has(a.taskId) && !running.has(key)) {
+      const i = inputsOf.get(a.taskId) as StallInputs;
+      const moves = [
+        row.startedAt, row.assignedAt, row.releasedAt, i.lastProgressAt, i.queuedAt, i.startByEditedAt, i.finishByEditedAt,
+        i.assigneeActivityAt, i.lastChildEndedAt,
+      ].filter(after);
+      out.set(key, moves.length ? new Date(Math.min(...moves.map((d) => d.getTime()))) : after(row.updatedAt) ? row.updatedAt : now);
+    }
+  }
+  return out;
+}
+
+/**
+ * #3934 (cor:agt:050:20, V77) — the instant each of these alarms' OWN episode ended, by event id: the one answer the
+ * wake schedule and the event reads share, for every kind of alarm.
+ *   - a task alarm: {@link endedAlarmEpisodeInstants};
+ *   - a dark-worker or coordinator-cadence alarm (task-less): the `ended_at` of its own episode row (#2755, #2763);
+ *   - any other alarm (a post-limit alarm, #2014): no episode condition, so never.
+ * An alarm absent from the map has not had its episode end. Acknowledgement is not here: it is the reader's to
+ * combine ({@link alarmEscalationEnds}), and the wake pass has already excluded acknowledged alarms.
+ */
+export async function alarmEpisodeEnds(
+  db: Db,
+  alarms: { id: string; taskId: string | null; type: string; episodeStart: Date | null }[],
+  now: Date,
+): Promise<Map<string, Date>> {
+  const out = new Map<string, Date>();
+  const byKey = await endedAlarmEpisodeInstants(db, alarms, now);
+  for (const a of alarms) {
+    if (!a.taskId || !a.episodeStart) continue;
+    const at = byKey.get(alarmEpisodeKey(a.taskId, a.type, a.episodeStart));
+    if (at) out.set(a.id, at);
+  }
+  // #2755: a dark-worker alarm is task-less; its episode ended when `dark_worker_episodes` says so. (#2014: a post-limit
+  // alarm has no such condition: it escalates until acknowledged, and its episode only de-duplicates it.)
+  const darkIds = alarms.filter((a) => a.type === 'alarm.dark-worker').map((a) => a.id);
+  if (darkIds.length) {
+    const over = await db.darkWorkerEpisode.findMany({ where: { eventId: { in: darkIds }, endedAt: { not: null } }, select: { eventId: true, endedAt: true } });
+    for (const e of over) out.set(e.eventId, e.endedAt as Date);
+  }
+  // #2763: the same for a coordinator-cadence alarm, whose episode ends at the coordinator's next counted assignment.
+  const cadenceIds = alarms.filter((a) => a.type === 'alarm.coordinator-cadence').map((a) => a.id);
+  if (cadenceIds.length) {
+    const over = await db.coordinatorCadenceEpisode.findMany({ where: { eventId: { in: cadenceIds }, endedAt: { not: null } }, select: { eventId: true, endedAt: true } });
+    for (const e of over) out.set(e.eventId, e.endedAt as Date);
+  }
+  return out;
+}
+
+/**
+ * #3934 (V77) — when each of these alarms' escalation ended, by event id: the earlier of its acknowledgement and the
+ * end of its episode ({@link alarmEpisodeEnds}). An alarm absent from the map is in effect (cor:agt:050:20). Judged at
+ * `now`, like the roster: nothing waits for a wake pass.
+ */
+export async function alarmEscalationEnds(
+  db: Db,
+  alarms: { id: string; taskId: string | null; type: string; episodeStart: Date | null; acknowledgedAt: Date | null }[],
+  now: Date,
+): Promise<Map<string, Date>> {
+  const out = await alarmEpisodeEnds(db, alarms, now);
+  for (const a of alarms) {
+    if (!a.acknowledgedAt) continue;
+    const end = out.get(a.id);
+    if (!end || a.acknowledgedAt.getTime() < end.getTime()) out.set(a.id, a.acknowledgedAt);
   }
   return out;
 }
@@ -838,23 +921,9 @@ export async function wakeDueOwners(db: PrismaClient, now = new Date()): Promise
     // or waits until the batch is stamped. No stray stamp lands after a committed move.
     const taskIds = [...new Set(due.map((d) => d.taskId).filter((t): t is string => !!t))].sort();
     if (taskIds.length) await tx.$queryRaw`SELECT id FROM agent_tasks WHERE id IN (${Prisma.join(taskIds)}) ORDER BY id FOR SHARE`;
-    const ended = await endedAlarmEpisodes(tx, due, now);
-    const endedEvents = new Set(
-      due.filter((d) => d.taskId && d.episodeStart && ended.has(alarmEpisodeKey(d.taskId, d.type, d.episodeStart))).map((d) => d.eventId),
-    );
-    // #2755: a dark-worker alarm is task-less; its episode ended when `dark_worker_episodes` says so. (#2014: a post-limit
-    // alarm has no such condition: it escalates until acknowledged, and its episode only de-duplicates it.)
-    const darkIds = due.filter((d) => d.type === 'alarm.dark-worker').map((d) => d.eventId);
-    if (darkIds.length) {
-      const over = await tx.darkWorkerEpisode.findMany({ where: { eventId: { in: darkIds }, endedAt: { not: null } }, select: { eventId: true } });
-      for (const e of over) endedEvents.add(e.eventId);
-    }
-    // #2763: the same for a coordinator-cadence alarm, whose episode ends at the coordinator's next counted assignment.
-    const cadenceIds = due.filter((d) => d.type === 'alarm.coordinator-cadence').map((d) => d.eventId);
-    if (cadenceIds.length) {
-      const over = await tx.coordinatorCadenceEpisode.findMany({ where: { eventId: { in: cadenceIds }, endedAt: { not: null } }, select: { eventId: true } });
-      for (const e of over) endedEvents.add(e.eventId);
-    }
+    // #3934: the one answer the event reads share (`alarmEpisodeEnds`), for every kind of alarm: a task alarm by its
+    // task's record (#2200), a dark-worker (#2755) or coordinator-cadence (#2763) alarm by its own episode row.
+    const endedEvents = new Set((await alarmEpisodeEnds(tx, due.map((d) => ({ id: d.eventId, taskId: d.taskId, type: d.type, episodeStart: d.episodeStart })), now)).keys());
     if (endedEvents.size) {
       // The alarm's own episode is over: close EVERY row of it still unwoken (not only the due ones), so no later
       // owner up the chain is woken for a condition that is gone. Nothing else is written: the alarm, its chain and

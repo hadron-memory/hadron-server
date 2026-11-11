@@ -745,6 +745,7 @@ const SHAPE_HADRON_TEAM_EVENTS = {
   after: z.string().optional().describe('The id of the last event you read; the page continues strictly after it.'),
   types: z.array(z.string()).optional().describe('e.g. task.assigned, task.finished.'),
   alarmsOnly: z.boolean().optional(),
+  alarmsInEffect: z.boolean().optional().describe('Only alarms in effect (cor:agt:050:20): unacknowledged and still escalating. Implies alarmsOnly.'),
   taskId: z.string().optional(),
   limit: z.number().int().nonnegative().optional().describe('Default 20, cap 200.'),
   session: SESSION_READ,

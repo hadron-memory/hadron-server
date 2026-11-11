@@ -208,4 +208,19 @@ describe('#3934 — the surface changes nothing and pages whole', () => {
     expect(await events(`alarmsInEffect: true limit: 1 after: "${second[0].id}"`)).toEqual([]);
     void ids;
   });
+
+  it('more ended alarms than one scan batch precede the first in-effect alarm: it is still found', async () => {
+    const ended = Array.from({ length: 205 }, (_, i) => ({
+      id: generateId(), appId: app.id, type: 'alarm.dark-worker', severity: 'alarm', chain: [], payload: {}, subjectWorkerId: rook.id,
+      createdAt: new Date(at('08:00').getTime() + i * 1000),
+    }));
+    await db.agentTeamEvent.createMany({ data: ended });
+    await db.darkWorkerEpisode.createMany({
+      data: ended.map((e, i) => ({ appId: app.id, workerId: rook.id, eventId: e.id, reason: 'overdue', openedAt: e.createdAt, endedAt: at('09:00'), id: `ep-${i}-${generateId()}` })),
+    });
+    const live = await db.agentTeamEvent.create({
+      data: { appId: app.id, type: 'alarm.post-limit', severity: 'alarm', chain: [], payload: {}, createdAt: at('09:30') },
+    });
+    expect((await events('alarmsInEffect: true limit: 1')).map((e) => e.id)).toEqual([live.id]);
+  });
 });
