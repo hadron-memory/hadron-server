@@ -381,6 +381,91 @@ export async function cloneMemoryGraphInTx(
   const engineCopies = engines.filter(row => idMap.has(row.chatRootNodeId)).map(row => ({ chatRootNodeId: idMap.get(row.chatRootNodeId)!, state: row.state as Prisma.InputJsonValue }));
   if (engineCopies.length) await tx.chatRootEngineState.createMany({ data: engineCopies });
 
+  // ── MemoryConfig + NodeRoleRule (#1337) ────────────────────────────
+  // The source's rulebook is part of what the clone is: copy the config and
+  // each rule, with `sourceTemplateId` and `locked` intact (a locked rule
+  // arrives locked; nothing here goes through updateNodeRoleRule, so the
+  // caller gains no edit right over it). New rows are independent of the
+  // source: fresh ids, `revision` 1, the cloning actor as creator. A source
+  // with no config row (an absent row reads as the empty config) gets none.
+  // References: the three node ids remap through the clone's id map; a node the
+  // clone excluded (soft-deleted, a comment) becomes null, which leaves the
+  // rule's `*Required` flag set and so fails closed (D-2026-09-25-E); a node in
+  // ANOTHER memory is kept when the cloning actor can read it; `sourceTemplateId` is
+  // dropped on a cross-org clone (a template is not readable by the target org). No org default templates
+  // apply to a clone (#1334 ruling), so nothing else writes config here.
+  const sourceConfig = await tx.memoryConfig.findUnique({
+    where: { memoryId: source.id },
+    include: { rules: true },
+  });
+  if (sourceConfig) {
+    const crossOrgClone = args.targetOrganizationId !== source.organizationId;
+    const externalIds = new Set<string>();
+    for (const r of sourceConfig.rules) {
+      for (const ref of [r.authorTaskId, r.validationTaskId, r.descriptionNodeId]) {
+        if (ref && !idMap.has(ref)) externalIds.add(ref);
+      }
+    }
+    // Of the unmapped ids, only a live node of ANOTHER memory is an external
+    // reference; one in the source memory was excluded from this clone. A
+    // retained reference must be one the cloning actor can READ (the saver of a
+    // rule must read the node, resolvers.memoryConfigRefs.ts; `null` = unrestricted),
+    // whichever org it is in: every projection re-checks the viewer's own access,
+    // so a kept reference discloses nothing to a viewer who cannot read it. A
+    // reference the actor cannot read becomes null and the rule's `*Required`
+    // flag is kept, so it fails closed.
+    const foreignIds = new Set(
+      externalIds.size > 0
+        ? (
+            await tx.node.findMany({
+              where: {
+                id: { in: [...externalIds] },
+                memoryId: args.copierReadableMemoryIds === null
+                  ? { not: source.id }
+                  : { not: source.id, in: [...args.copierReadableMemoryIds] },
+                memory: { deletedAt: null },
+                deletedAt: null,
+              },
+              select: { id: true },
+            })
+          ).map((n) => n.id)
+        : [],
+    );
+    const carryRef = (ref: string | null): string | null => {
+      if (!ref) return null;
+      return idMap.get(ref) ?? (foreignIds.has(ref) ? ref : null);
+    };
+    const newConfigId = generateId();
+    await tx.memoryConfig.create({
+      data: { id: newConfigId, memoryId, createdBy: args.actorId },
+    });
+    if (sourceConfig.rules.length > 0) {
+      await tx.nodeRoleRule.createMany({
+        data: sourceConfig.rules.map((r) => ({
+          id: generateId(),
+          configId: newConfigId,
+          role: r.role,
+          authorTaskId: carryRef(r.authorTaskId),
+          authorTaskRequired: r.authorTaskRequired,
+          validationTaskId: carryRef(r.validationTaskId),
+          validationTaskRequired: r.validationTaskRequired,
+          descriptionNodeId: carryRef(r.descriptionNodeId),
+          strictSubRoles: r.strictSubRoles,
+          writers: r.writers,
+          validateBy: r.validateBy,
+          enabled: r.enabled,
+          // A template is visible only to its owner's managers, and `NodeRoleRule.sourceTemplate`
+          // reads it for any stored id: across orgs the id would hand the target org the source
+          // org's template name (§10, #3893). Provenance is kept within an org, dropped across.
+          sourceTemplateId: crossOrgClone ? null : r.sourceTemplateId,
+          locked: r.locked,
+          revision: 1,
+          createdBy: args.actorId,
+        })),
+      });
+    }
+  }
+
   // ── Edges ──────────────────────────────────────────────────────────
   // Clone every live edge whose SOURCE lives in this memory. Targets:
   //   - live internal node → remapped to its clone

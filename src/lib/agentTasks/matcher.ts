@@ -281,8 +281,10 @@ export type WorkerWorkState = {
   role: string | null;
   /** Bound: has an OPEN session — live or quiet (cor:agt:060:04 follows the binding). */
   bound: boolean;
-  /** Has a LIVE session (cor:agt:020:11): what matching requires of a BOUND worker. */
+  /** Has a LIVE session (cor:agt:020:11): decides whether a start is issued, never whether the worker is matched. */
   live: boolean;
+  /** #3815: an open session inside any hard expiry, quiet or not: what matching asks of a BOUND worker. */
+  openSession: boolean;
   /** The binding's family (its newest open session's); null when unbound or it reported none. */
   bindingFamily: string | null;
   /** Advisory model metadata from that same binding; never a matching input. */
@@ -316,16 +318,23 @@ export function familiesOf(w: { bound: boolean; bindingFamily: string | null; la
 }
 
 /**
- * May the matcher assign to this worker at all? A bound worker only while its
- * session is LIVE (#1707: a quiet one has nobody driving it, so a match would
- * only park the task); an unbound worker always here, since free for work then
- * requires a family a live host can launch it as (#1709, T6). Never one waiting
- * on a session end. This is the matcher's restriction, kept apart from free for
- * work.
+ * May the matcher assign to this worker at all? #3815 (cor:agt:060:05/:06, ruling 0265 V16-V19): a bound worker
+ * whose session is open and inside any hard expiry, however quiet: silence is not abandonment (#1114), and
+ * liveness neither gates nor orders matching. A bound worker whose only session is past its hard expiry is not
+ * matched (that promise ended it; the reaper has not yet written it down). An unbound worker always here, since
+ * free for work then requires a family a live host can launch it as (#1709, T6). Never one waiting on a session
+ * end. The assignment reaches a bound worker through its open session by the ordinary assignment notice; a host
+ * start is issued only for a worker with no open session (`needsHostStart`).
  */
-export function matchable(w: { bound: boolean; live: boolean; endingSession?: boolean; usesTasks?: boolean }): boolean {
+export function matchable(w: { bound: boolean; live: boolean; openSession?: boolean; endingSession?: boolean; usesTasks?: boolean }): boolean {
   if (w.usesTasks === false || w.endingSession) return false;
-  return w.live || (MATCH_UNBOUND_LAUNCHABLE && !w.bound);
+  if (w.bound) return w.live || (w.openSession ?? false);
+  return MATCH_UNBOUND_LAUNCHABLE;
+}
+
+/** #3815 V16: a host start (cor:agt:070:08) only for a matched worker with NO open session; never over a quiet one (#3818). */
+export function needsHostStart(w: { bound: boolean; live: boolean }): boolean {
+  return !w.bound && !w.live;
 }
 
 /** #1709: the workers of `ids` waiting on a session end (see the file header). */
@@ -400,10 +409,11 @@ export async function loadWorkerWorkStates(db: Db, appId: string, now: Date, opt
     const a = activity.get(w.id);
     const bound = a?.bound ?? false;
     const live = a?.hasLiveSession ?? false;
+    const openSession = a?.holdsOpenSession ?? false;
     const bindingFamily = bound ? a?.bindingFamily ?? null : null;
     const launchableFamilies = launchable.get(w.id) ?? [];
     return {
-      ...w, role: placed.get(w.id)?.role ?? w.role, usesTasks: placed.get(w.id)?.usesTasks ?? w.agent.usesTasks, bound, live, bindingFamily,
+      ...w, role: placed.get(w.id)?.role ?? w.role, usesTasks: placed.get(w.id)?.usesTasks ?? w.agent.usesTasks, bound, live, openSession, bindingFamily,
       bindingModel: bound ? a?.bindingModel ?? null : null,
       modelReportedAt: bound ? a?.modelReportedAt ?? null : null,
       launchableFamilies, lastActiveAt: a?.lastActiveAt ?? null, endingSession: ending.has(w.id),
@@ -455,7 +465,7 @@ async function stillFreeAs(tx: Prisma.TransactionClient, appId: string, workerId
   const activity = (await loadWorkersActivity({ db: tx } as unknown as Context, [workerId], decidedAt)).get(workerId);
   const bound = activity?.bound ?? false;
   const endingSession = (await loadEndingSession(tx, [workerId])).has(workerId);
-  if (!matchable({ bound, live: activity?.hasLiveSession ?? false, endingSession })) return null;
+  if (!matchable({ bound, live: activity?.hasLiveSession ?? false, openSession: activity?.holdsOpenSession ?? false, endingSession })) return null;
   // #2252 D1: the hard bound, judged on the model read AFTER the session-row locks above, so a refresh that held a
   // session row while this waited is seen (an unbound worker is unknown). The preference order is the pass's snapshot.
   if (!tierAllowed(req, workerTier({ bound, bindingModel: activity?.bindingModel ?? null }))) return null;
@@ -639,8 +649,9 @@ async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: Match
         if (outcome !== 'task-gone') spent.add(w.id);
         if (outcome === 'assigned') {
           out.push({ taskId: task.id, workerId: w.id, family });
-          // #1709 (cor:agt:070:08): a matched worker with no live session is started through its host.
-          if (!w.live) await launchForAssignment(db, { appId, taskId: task.id, workerId: w.id, family }, now, anchor);
+          // #1709 (cor:agt:070:08): a matched worker with no open session is started through its host; #3815 V16:
+          // one with an open session, quiet or live, is reached through it by the assignment notice, never launched over.
+          if (needsHostStart(w)) await launchForAssignment(db, { appId, taskId: task.id, workerId: w.id, family }, now, anchor);
         }
         if (outcome !== 'worker-not-free') { decided = true; break; }
       }
@@ -829,7 +840,7 @@ export async function matchTaskNow(db: PrismaClient, taskId: string, now: Date, 
     return attempt;
   }, undefined, undefined, true);
   if ('workerId' in outcome) {
-    if (!outcome.live) await launchForAssignment(db, { appId: task.appId, taskId, workerId: outcome.workerId, family: outcome.family }, now, anchor);
+    if (outcome.needsHostStart) await launchForAssignment(db, { appId: task.appId, taskId, workerId: outcome.workerId, family: outcome.family }, now, anchor);
     return null;
   }
   const { reason, skipped } = outcome;
@@ -898,7 +909,7 @@ async function chooseMatchNow(
   db: Db, task: Awaited<ReturnType<Prisma.TransactionClient['agentTask']['findUniqueOrThrow']>>, now: Date,
   assign: (workerId: string, family: string) => Promise<AttemptOutcome>,
   excluded: ReadonlySet<string> = new Set(), poolIds?: ReadonlySet<string>, wantSkipped = false,
-): Promise<{workerId: string; family: string; live: boolean} | {reason: MatchFailureReason; skipped?: SkippedCandidate[]}> {
+): Promise<{workerId: string; family: string; live: boolean; needsHostStart: boolean} | {reason: MatchFailureReason; skipped?: SkippedCandidate[]}> {
   const req = parseRequirements(task.requirements);
   let reason: MatchFailureReason = 'NOBODY_FREE';
   let skipped: SkippedCandidate[] | undefined;
@@ -940,7 +951,7 @@ async function chooseMatchNow(
         const family = eligibleFor(req, w, groups)!;
         const outcome = await assign(w.id, family);
         if (outcome === 'assigned') {
-          return { workerId: w.id, family, live: w.live };
+          return { workerId: w.id, family, live: w.live, needsHostStart: needsHostStart(w) };
         }
         if (outcome === 'worker-not-free') lostRace.add(w.id);
         if (outcome === 'task-gone') break;
@@ -959,7 +970,7 @@ async function chooseMatchNow(
  * here; caller rolls back its entire batch on a reason. */
 export async function matchTaskNowInTx(
   tx: Prisma.TransactionClient, taskId: string, now: Date, excluded: ReadonlySet<string>, poolIds: ReadonlySet<string>,
-): Promise<{workerId: string; family: string; live: boolean} | {reason: MatchFailureReason}> {
+): Promise<{workerId: string; family: string; live: boolean; needsHostStart: boolean} | {reason: MatchFailureReason}> {
   const task = await tx.agentTask.findUniqueOrThrow({ where: { id: taskId } });
   const anchor = anchorNow();
   return chooseMatchNow(tx, task, now, (workerId, family) =>

@@ -67,7 +67,7 @@ import { recordUrnRename } from './urnAlias.js';
 import { assertNoMintedSpecRemoval } from './mintedSpecPermanence.js';
 import { safeNodeUrnV2 } from './urnEmit.js';
 import { UrnNotQualifiedError, UrnParseError } from './urn.js';
-import { resolveNodeRef } from './entityRef/nodeRef.js';
+import { resolveNodeRef, isConcealedNodeRefAmbiguity } from './entityRef/nodeRef.js';
 import { AmbiguousLegacyUrnError, NodeNotFoundError } from './entityRef/errors.js';
 import { isId } from './entityRef/shape.js';
 import { validateNodeAgainstSchema, NodeSchemaViolation } from './validateNodeAgainstSchema.js';
@@ -201,6 +201,7 @@ async function aliasTargetId(
   tx: Prisma.TransactionClient,
   target: string,
   memoryId: string,
+  canReadMemoryId: (id: string) => Promise<boolean> = async id => id === memoryId,
 ): Promise<string | 'AMBIGUOUS' | null> {
   try {
     const { id } = await resolveNodeRef(tx, target, memoryId);
@@ -214,7 +215,9 @@ async function aliasTargetId(
       error instanceof UrnNotQualifiedError ||
       error instanceof UrnParseError
     ) return null;
-    if (error instanceof AmbiguousLegacyUrnError) return 'AMBIGUOUS';
+    if (error instanceof AmbiguousLegacyUrnError) {
+      return await isConcealedNodeRefAmbiguity(tx, error, canReadMemoryId) ? null : 'AMBIGUOUS';
+    }
     throw error;
   }
 }
@@ -283,6 +286,8 @@ export async function moveNodeSubtree(
   tx: Prisma.TransactionClient,
   opts: {
     source: SnapshotSourceNode;
+    /** Node-content read predicate for classifying reference failures. */
+    canReadMemoryId?: (memoryId: string) => Promise<boolean>;
     destLoc: string;
     /** Destination memory. Omit / equal to source.memoryId for a same-memory move. */
     destMemoryId?: string;
@@ -425,7 +430,7 @@ export async function moveNodeSubtree(
   const sourceIdByLoc = new Map(sourceTargets.map((n) => [n.loc, n.id]));
   for (const target of targets) {
     if (sourceIdByLoc.has(target)) continue;
-    const id = await aliasTargetId(tx, target, srcMemoryId);
+    const id = await aliasTargetId(tx, target, srcMemoryId, opts.canReadMemoryId);
     if (id && id !== 'AMBIGUOUS') sourceIdByLoc.set(target, id);
   }
 
@@ -716,7 +721,7 @@ export async function moveNodeSubtree(
   const destinationIdByLoc = new Map<string, string>(destinationTargets.map((n) => [n.loc, n.id]));
   for (const target of targets) {
     if (destinationIdByLoc.has(target)) continue;
-    const id = await aliasTargetId(tx, target, destMemoryId);
+    const id = await aliasTargetId(tx, target, destMemoryId, opts.canReadMemoryId);
     if (id) destinationIdByLoc.set(target, id);
   }
   result.linkWarnings = contentLinks.flatMap((link) => {

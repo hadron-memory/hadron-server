@@ -364,8 +364,9 @@ async function inKeyReadTx<T>(
   appId: string,
   onGone: () => T,
   body: (txCtx: Context, app: TaskApp) => Promise<T>,
+  timeoutMs?: number,
 ): Promise<T> {
-  return inAnchoredAppTx(ctx, appId, onGone, async (txCtx, app) => ((await keyMayReadApp(txCtx, app)) ? body(txCtx, app) : onGone()));
+  return inAnchoredAppTx(ctx, appId, onGone, async (txCtx, app) => ((await keyMayReadApp(txCtx, app)) ? body(txCtx, app) : onGone()), false, timeoutMs);
 }
 
 /** One transaction holding the App's authority anchors SHARED, with the App re-read after the lock (see `inKeyReadTx`). */
@@ -375,6 +376,7 @@ async function inAnchoredAppTx<T>(
   onGone: () => T,
   body: (txCtx: Context, app: TaskApp) => Promise<T>,
   coherentRunRead = false,
+  timeoutMs?: number,
 ): Promise<T> {
   const head = await loadApp(ctx, appId);
   if (!head) return onGone();
@@ -396,7 +398,9 @@ async function inAnchoredAppTx<T>(
     // Ownership moved while we waited for the anchors: the locks we hold are the wrong ones, so answer as missing.
     if (!app || app.organizationId !== head.organizationId || app.ownerUserId !== head.ownerUserId) return onGone();
     return body(txCtx, app);
-  }, coherentRunRead ? { timeout: 20_000, isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead } : undefined);
+  }, coherentRunRead
+    ? { timeout: 20_000, isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead }
+    : timeoutMs !== undefined ? { timeout: timeoutMs } : undefined);
 }
 
 /**
@@ -463,7 +467,11 @@ export async function withHostKeyTickerApp<T>(
  * Shared participant/key read. Only roster/task callers opt into the separate USERLESS run arm (#2925).
  * Xanthos #70403: a user-backed run keeps its existing person arm, actor and non-task management behavior.
  */
-export async function withReadableApp<T>(ctx: Context, appRef: string, body: (c: Context, app: TaskApp) => Promise<T>, allowRun = false): Promise<T> {
+export async function withReadableApp<T>(
+  ctx: Context, appRef: string, body: (c: Context, app: TaskApp) => Promise<T>, allowRun = false,
+  /** #3884 — the key arm's transaction cap in ms, for a read whose bounded work can outlast Prisma's 5 s default. Unset keeps the default. */
+  keyTxTimeoutMs?: number,
+): Promise<T> {
   if (isRunPrincipal(ctx) && !ctx.userId && allowRun) {
     let id: string;
     try { ({ id } = await resolveAppRef(ctx.db, appRef)); } catch (e) { if (e instanceof AppNotFoundError) throw appNotFound(appRef); throw e; }
@@ -483,7 +491,7 @@ export async function withReadableApp<T>(ctx: Context, appRef: string, body: (c:
     throw e;
   }
   if (appId !== key.appId) throw appNotFound(appRef);
-  return inKeyReadTx(ctx, appId, () => { throw appNotFound(appRef); }, body);
+  return inKeyReadTx(ctx, appId, () => { throw appNotFound(appRef); }, body, keyTxTimeoutMs);
 }
 
 /**
@@ -1956,10 +1964,15 @@ async function applyTaskCreateBlockers(
 }
 
 /** What a committed create does next: start the assignee it names (#1709) and file its warnings (#2198). */
-async function afterTaskCreate(ctx: Context, info: Pick<GraphQLResolveInfo, 'path'> | undefined, taskId: string, warn: TaskWarningCode[], family?: string) {
+async function afterTaskCreate(
+  ctx: Context, info: Pick<GraphQLResolveInfo, 'path'> | undefined, taskId: string, warn: TaskWarningCode[], startItsAssignee: boolean, family?: string,
+) {
   const created = await ctx.db.agentTask.findUniqueOrThrow({ where: { id: taskId } });
-  // #1709 (cor:agt:070:08): created straight onto a worker, it may start that worker.
-  await launchAssignee(ctx.db, created, family);
+  // #1709 (cor:agt:070:08): `startItsAssignee` is true when the create NAMED its assignee, or a distinct-batch match chose a
+  // worker with no open session (`needsHostStart`). #3815 (ruling 0265 V16-V19): any other matcher-chosen assignee is started
+  // by the matcher's own rule (a host start only for a worker with no open session), so this live-only launch check must not
+  // run for it. `matchTaskNow` runs after the create transaction commits, so `created` below already carries its assignee.
+  if (startItsAssignee) await launchAssignee(ctx.db, created, family);
   await emitTaskWarnings(ctx, info, created.appId, { codes: warn, taskId: created.id });
   return created;
 }
@@ -2139,7 +2152,7 @@ export const agentTaskMutations = {
     // #3816 (V22): a failed match's candidates ride this answer only; they are never stored.
     const skipped = input.match ? await matchTaskNow(ctx.db, made.id, new Date()) : null;
     if (!input.match && made.queued) await matchAfterChange(ctx.db, p.app.id);
-    const created = await afterTaskCreate(ctx, info, made.id, p.warn);
+    const created = await afterTaskCreate(ctx, info, made.id, p.warn, made.row.assigneeWorkerId != null);
     // #2694 (cor:agt:020:11 r3): creating a task is the one task write outside `mutateTask`; same rule as there.
     if (p.actor.kind === 'worker' && ctx.sessionId) await touchSessionIfLive(ctx.db as never, ctx.sessionId, p.actor.workerId);
     return skipped ? Object.assign(created, { matchSkipped: skipped }) : created;
@@ -2201,6 +2214,8 @@ export const agentTaskMutations = {
     const distinct = distinctAssignees === true;
     const workerPool = new Set<string>();
     const matchedFamilies = new Map<string, string>();
+    /** #3815: the distinct-batch matches whose worker has NO open session, the only ones the post-commit launch starts. */
+    const matchedNeedStart = new Set<string>();
     const parents = [...new Set(prepared.map(p => p.parentTaskId).filter((id): id is string => id !== null))].sort();
     const made = await inTaskWriteTx(ctx, inApp.app, inApp.actor, () => appNotFound(appRef), async (tx, txCtx, app) => {
       for (const id of parents) await tx.$queryRaw`SELECT id FROM agent_tasks WHERE id = ${id} FOR UPDATE`;
@@ -2249,6 +2264,7 @@ export const agentTaskMutations = {
           if ('reason' in outcome) throw taskError('TASK_MATCH_FAILED', 'A task of this distinct batch could not be matched.', { position: i + 1, reason: outcome.reason });
           excluded.add(outcome.workerId);
           matchedFamilies.set(out[i]!.id, outcome.family);
+          if (outcome.needsHostStart) matchedNeedStart.add(out[i]!.id);
         }
       }
       return out;
@@ -2272,7 +2288,7 @@ export const agentTaskMutations = {
     const created = [];
     for (const [i, m] of made.entries()) {
       const at = typeof key === 'string' ? { path: { key: `${key}.${i + 1}`, prev: undefined, typename: undefined } } : undefined;
-      created.push(await afterTaskCreate(ctx, at, m.id, prepared[i]!.warn, matchedFamilies.get(m.id)));
+      created.push(await afterTaskCreate(ctx, at, m.id, prepared[i]!.warn, m.row.assigneeWorkerId != null || matchedNeedStart.has(m.id), matchedFamilies.get(m.id)));
     }
     if (inApp.actor.kind === 'worker' && ctx.sessionId) await touchSessionIfLive(ctx.db as never, ctx.sessionId, inApp.actor.workerId);
     return created;
@@ -2337,7 +2353,7 @@ export const agentTaskMutations = {
     const made = await inTaskWriteTx(ctx, p.app, p.actor, p.refused, (tx, txCtx, app) => applyTaskCreate(tx, txCtx, app, p),
       { lockWorkerIds: [p.lockedAssignee], taskGraph: 'shared' });
     if (made.queued) await matchAfterChange(ctx.db, p.app.id);
-    const created = await afterTaskCreate(ctx, info, made.id, p.warn);
+    const created = await afterTaskCreate(ctx, info, made.id, p.warn, made.row.assigneeWorkerId != null);
     if (p.actor.kind === 'worker' && ctx.sessionId) await touchSessionIfLive(ctx.db as never, ctx.sessionId, p.actor.workerId);
     return created;
   },
