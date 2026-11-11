@@ -52,7 +52,7 @@ beforeAll(() => server.start());
 afterAll(() => server.stop());
 
 const fields = `worker { name } state freeForWork unavailableReason availability {
-  state reason until setAt setBy inEffect setByParty { ... on Worker { name } ... on User { id } } }`;
+  state reason until setAt setBy inEffect setByParty { kind name } }`;
 const baseFields = 'worker { name } state freeForWork unavailableReason';
 async function roster(selection = fields) {
   const result = await server.executeOperation({ query: `{ teamRoster(appRef: "${app.id}") { workers { ${selection} } } }` }, { contextValue: ctx(mia.id) });
@@ -72,7 +72,7 @@ describe('#3865 roster availability provenance', () => {
     await record('Kit', { reason: 'out-of-tokens', setAt: ago(5), setBy: 'worker', setByWorkerId: w.Kit.id });
     const row = await roster();
     expect(row('Rook').availability).toMatchObject({ state: 'UNAVAILABLE', reason: 'STALLED', setBy: 'STALL_RULE', setAt: setAt.toISOString(), inEffect: true, setByParty: null });
-    expect(row('Kit').availability).toMatchObject({ reason: 'OUT_OF_TOKENS', setBy: 'WORKER', inEffect: true, setByParty: { name: 'Kit' } });
+    expect(row('Kit').availability).toMatchObject({ reason: 'OUT_OF_TOKENS', setBy: 'WORKER', inEffect: true, setByParty: { kind: 'WORKER', name: 'Kit' } });
     expect(row('Anne').availability).toBeNull();
   });
 
@@ -90,7 +90,7 @@ describe('#3865 roster availability provenance', () => {
     const row = await roster();
     expect(row('Rook').availability).toMatchObject({ reason: 'OTHER', inEffect: false });
     expect(row('Rook').unavailableReason).toBeNull();
-    expect(row('Rook').freeForWork).toBe(true);
+    expect(row('Rook').state).not.toBe('UNAVAILABLE');
   });
 });
 

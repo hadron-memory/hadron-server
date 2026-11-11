@@ -145,6 +145,7 @@ export const agentTaskMatchingFieldResolvers = {
     freeForWork: (r: RosterRow) => r.free,
     unavailableReason: (r: RosterRow) => (r.unavailable?.reason ? toGqlWord(r.unavailable.reason) : null),
     unavailableUntil: (r: RosterRow) => r.unavailable?.until ?? null,
+    availability: (r: RosterRow) => (r.availabilityRecord ? { ...r.availabilityRecord.row, __inEffect: r.availabilityRecord.inEffect } : null),
     startedTasks: (r: RosterRow) => r.startedTaskIds,
     pendingTasks: (r: RosterRow) => r.pendingTaskIds,
     waitingOn: (r: RosterRow) => r.waitingOnTaskIds,
