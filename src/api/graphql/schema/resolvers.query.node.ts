@@ -100,8 +100,8 @@ import {
   loadMemoryUrn,
   CONTENT_RAW_DEFAULT,
   readAiServiceConfigByUrn,
+  aiConfigOwnerOf,
 } from './resolvers.helpers.js';
-import { aiConfigOwnerOf } from './resolvers.helpers.js';
 import { loadAiConfigOwners, aiConfigOwnerKey } from '../../../lib/aiConfigOwner.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
@@ -1077,9 +1077,12 @@ export const nodeQueries = {
           // exactly as a missing one. Identity only: the key never rides along.
           const config = await readAiServiceConfigByUrn(ctx, baseUrn);
           if (!config) return null;
-          const ref = aiConfigOwnerOf(config);
-          const owner = (await loadAiConfigOwners(ctx.db, [ref])).get(aiConfigOwnerKey(ref));
-          const organizationId = config.organizationId ?? owner?.organizationId ?? null;
+          // #3958: an org-owned config already carries its organization; the owner is read only when it does not.
+          let organizationId: string | null = config.organizationId;
+          if (organizationId == null) {
+            const ref = aiConfigOwnerOf(config);
+            organizationId = (await loadAiConfigOwners(ctx.db, [ref])).get(aiConfigOwnerKey(ref))?.organizationId ?? null;
+          }
           return { kind: 'aiconf', id: config.id, organizationId };
         }
         case 'noderev': {

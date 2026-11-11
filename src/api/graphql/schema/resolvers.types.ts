@@ -42,7 +42,7 @@ import {
 import { portalUrlForUrn } from '../../../lib/portalUrl.js';
 import { emitEntityUrnV2 } from '../../../lib/urnEmit.js';
 import { composeAiConfigUrn, type AiConfigUrnOwner } from '../../../lib/entityRef/aiConfigRef.js';
-import { loadAiConfigOwners, aiConfigOwnerKey, type AiConfigOwnerInfo, type AiConfigOwnerRef, type AiConfigOwnerType } from '../../../lib/aiConfigOwner.js';
+import { loadAiConfigOwners, aiConfigOwnerKey, type AiConfigOwnerInfo, type AiConfigOwnerRef } from '../../../lib/aiConfigOwner.js';
 import { tickBatch } from './tickBatch.js';
 import { currentHadronServerId } from '../../../lib/hadronServer.js';
 import { servedEndpointInEffect, type InheritedFrom } from '../../../lib/effectiveSystemMemory.js';
@@ -1109,13 +1109,23 @@ function truncatedChunksBatched(ctx: Context, nodeId: string): Promise<number | 
 
 /**
  * #3932: `AiServiceConfig.urn` owner lookups raised in the same tick share one query per owner kind
- * ({@link loadAiConfigOwners}); keyed by the request Context, so nothing is kept past the tick.
+ * ({@link loadAiConfigOwners}); keyed by the request Context, so nothing is kept past the tick. The batch is keyed by
+ * the string {@link aiConfigOwnerKey}; the ref behind each key is kept beside it, so the key is never parsed back (#3958).
  */
-const aiConfigOwnerOf3932 = tickBatch<string, AiConfigOwnerInfo | null>(async (ctx, keys) => {
-  const refs = keys.map((k) => ({ ownerType: k.slice(0, k.indexOf(':')) as AiConfigOwnerType, ownerId: k.slice(k.indexOf(':') + 1) }));
+const aiConfigOwnerRefs = new WeakMap<Context, Map<string, AiConfigOwnerRef>>();
+const aiConfigOwnerBatch = tickBatch<string, AiConfigOwnerInfo | null>(async (ctx, keys) => {
+  const known = aiConfigOwnerRefs.get(ctx);
+  aiConfigOwnerRefs.delete(ctx); // before any await: a lookup raised after this point starts the next tick's map
+  const refs = keys.flatMap((k) => { const r = known?.get(k); return r ? [r] : []; });
   return loadAiConfigOwners(ctx.db, refs);
 }, null);
-const aiConfigOwnerLookup = (ctx: Context, ref: AiConfigOwnerRef) => aiConfigOwnerOf3932(ctx, aiConfigOwnerKey(ref));
+const aiConfigOwnerLookup = (ctx: Context, ref: AiConfigOwnerRef) => {
+  const key = aiConfigOwnerKey(ref);
+  let known = aiConfigOwnerRefs.get(ctx);
+  if (!known) aiConfigOwnerRefs.set(ctx, (known = new Map()));
+  known.set(key, ref);
+  return aiConfigOwnerBatch(ctx, key);
+};
 
 const aiConfigWarned = new WeakSet<object>();
 /** A warn that speaks once per request: the first call logs, the rest of that request stay quiet. */
@@ -1159,14 +1169,18 @@ export const typeResolvers = {
           }
           break;
         case 'ORGANIZATION':
-          owner = info?.urn != null ? { kind: 'org', urn: info.urn } : null;
-          break;
         case 'APP':
-          owner = info?.urn != null ? { kind: 'app', urn: info.urn } : null;
+        case 'AGENT': {
+          // #3958: an owner row that is missing, or has a NULL urn, has no URN to compose from. The answer stays null
+          // (cor:urn:010:01); the data fault is logged once per request like the other null cases.
+          if (info?.urn != null) {
+            owner = { kind: config.ownerType === 'ORGANIZATION' ? 'org' : config.ownerType === 'APP' ? 'app' : 'agent', urn: info.urn };
+          } else {
+            warn(`[aiconf-urn] no URN for a config of ${config.ownerType.toLowerCase()} ${config.ownerId}: ${info ? 'the owner has a NULL urn' : 'the owner row is missing'}`);
+            owner = null;
+          }
           break;
-        case 'AGENT':
-          owner = info?.urn != null ? { kind: 'agent', urn: info.urn } : null;
-          break;
+        }
         default:
           // Every emitter projects through toGqlAiServiceConfig, which always
           // carries the owner; a row without it must not read as "no URN" quietly.
