@@ -60,6 +60,7 @@ import { connectionGrantMutations, connectionGrantQueries } from './resolvers.co
 import { principalGrantMutations, principalGrantQueries } from './resolvers.principalGrant.js';
 import { grantFieldResolvers, grantQueries } from './resolvers.grant.js';
 import { grantCreateMutations } from './resolvers.grantCreate.js';
+import { grantManageMutations, grantManageQueries } from './resolvers.grantManage.js';
 import { grantSigningFieldResolvers, grantSigningMutations, grantSigningQueries } from './resolvers.grantSigning.js';
 import { importNodeMutations } from './resolvers.mutation.importNode.js';
 import { assetMutations } from './resolvers.mutation.asset.js';
@@ -72,6 +73,7 @@ import { agentCloneMutations } from './resolvers.mutation.agentClone.js';
 import { workerMutations, workerQueries, workerFieldResolvers } from './resolvers.worker.js';
 import { agentServedBootPromptQueries, bootPromptPointerFieldResolvers } from './resolvers.bootPromptPointer.js';
 import { bootPromptPointerMutations } from './resolvers.mutation.bootPromptPointer.js';
+import { orgBootPromptSigningMutations, orgBootPromptSigningQueries } from './resolvers.orgBootPromptSigning.js';
 import { compileBootPromptMutations } from './resolvers.mutation.compileBootPrompt.js';
 import { teamRoleMutations, teamRoleQueries } from './resolvers.teamRole.js';
 import { teamSpecQueries } from './resolvers.teamSpec.js';
@@ -208,6 +210,7 @@ export const resolvers = {
     ...orgQueries,
     ...agentQueries,
     ...agentServedBootPromptQueries,
+    ...orgBootPromptSigningQueries,
     ...appQueries,
     ...chatQueries,
     ...teamChatQueries,
@@ -255,6 +258,7 @@ export const resolvers = {
     ...connectionGrantQueries,
     ...principalGrantQueries,
     ...grantQueries,
+    ...grantManageQueries,
     ...grantSigningQueries,
     ...meteringQueries,
     ...rateLimitQueries,
@@ -283,6 +287,7 @@ export const resolvers = {
     ...agentCloneMutations,
     ...workerMutations,
     ...bootPromptPointerMutations,
+    ...orgBootPromptSigningMutations,
     ...compileBootPromptMutations,
     ...teamRoleMutations,
     ...teamChatMutations,
@@ -314,6 +319,7 @@ export const resolvers = {
     ...signingMutations,
     ...grantSigningMutations,
     ...grantCreateMutations,
+    ...grantManageMutations,
     ...commentMutations,
     ...decisionMutations,
     ...scopeMutations,

@@ -92,6 +92,13 @@ export async function readChatEngineStates(db: PrismaClient, roots: readonly { i
   }
   return result;
 }
+/** #3557 R1: the pre-lock names a turn routes on. The row wins (decrypted with the already-authorized key); the root's
+ * own data is a fallback ONLY for a root with no row. Pure read: it neither seeds nor scrubs. */
+export async function readTurnNames(db: PrismaClient, root: { id: string }, info: MemoryEncryptionInfo, legacyData: unknown): Promise<{ conversationName?: string; stageName?: string }> {
+  const row = await db.chatRootEngineState.findUnique({ where: { chatRootNodeId: root.id } });
+  const source = row ? plaintext(row.state, info) : chatDataObject(legacyData);
+  return { conversationName: source.conversationName as string | undefined, stageName: source.stageName as string | undefined };
+}
 /** Seed-if-absent, row wins, and scrub ONLY valid inert legacy keys. */
 export async function lockedChatEngineState(tx: Prisma.TransactionClient, rootId: string, info: MemoryEncryptionInfo, data: Record<string, unknown>): Promise<Record<string, unknown>> {
   let row = await tx.chatRootEngineState.findUnique({ where: { chatRootNodeId: rootId } });

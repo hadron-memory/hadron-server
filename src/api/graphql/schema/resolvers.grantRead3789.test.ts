@@ -248,12 +248,12 @@ describe('the projection', () => {
     for (const banned of ['app', 'user', 'organization', 'worker', 'agent', 'issuer']) expect(names).not.toContain(banned);
   });
 
-  it('reads exist and the only grant writer is createGrant (#3690 PR 2: PENDING only; nothing activates, revokes or signs)', async () => {
+  it('reads exist and the grant writers are createGrant and revokeGrant (#3690 PR 2: PENDING only; #3711 adds the managers revoke; nothing activates or signs)', async () => {
     const q = await type('Query');
     const names = q!.fields.map((f) => f.name);
     expect(names).toEqual(expect.arrayContaining(['grant', 'grants']));
     const m = await type('Mutation');
-    expect(m!.fields.map((f) => f.name).filter((n) => /grant/i.test(n) && /^(create|request|revoke|activate|sign)Grant$/.test(n))).toEqual(['createGrant']);
+    expect(m!.fields.map((f) => f.name).filter((n) => /grant/i.test(n) && /^(create|request|revoke|activate|sign)Grant$/.test(n))).toEqual(['createGrant', 'revokeGrant']); // #3711 adds the manager's revokeGrant (an end, never an activation or signature)
   });
 
   it('returns the stored facts', async () => {

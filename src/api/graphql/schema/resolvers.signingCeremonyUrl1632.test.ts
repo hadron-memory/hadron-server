@@ -110,7 +110,7 @@ describe('no GraphQL or MCP call takes an assertion or a signature record (cor:d
     }
     // And nothing in the whole mutation surface is named for completing or storing a signature.
     const writes = Object.keys(mutation).filter((n) => /signature|signing/i.test(n));
-    expect(writes.sort()).toEqual(['requestGrantSignature', 'requestNodeSignature', 'withdrawGrantSigningRequest', 'withdrawSigningRequest']);
+    expect(writes.sort()).toEqual(['requestGrantSignature', 'requestNodeSignature', 'setOrgBootPromptSigning', 'withdrawGrantSigningRequest', 'withdrawSigningRequest']);
     const objs = Object.values(schema.getTypeMap()).filter((t) => isObjectType(t) && /^Signing/.test(t.name));
     expect(objs.length).toBeGreaterThan(0);
   });

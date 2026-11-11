@@ -7097,17 +7097,21 @@ model TeamStopCoverage {
 /// outcome of the current streak and is cleared by a MATCHED. Rows older than 168 h are purged by the matcher sweep.
 /// Read only through `latestMatchOutcomes`; never returned on its own, never a per-candidate record (V22).
 model AgentMatchOutcome {
-  appId        String    @map("app_id")
-  family       String    @default("")
-  tier         String    @default("")
-  role         String    @default("")
+  appId         String    @map("app_id")
+  family        String    @default("")
+  tier          String    @default("")
+  role          String    @default("")
   /// 'MATCHED' | 'NO_WORKER'.
-  outcome      String
+  outcome       String
   /// The coarse MatchFailureReason of a NO_WORKER outcome; null for MATCHED.
-  reason       String?
+  reason        String?
   /// Database clock, microseconds (a stamp is never truncated to a millisecond, so two decisions rarely tie).
-  decidedAt    DateTime  @map("decided_at") @db.Timestamp(6)
-  failingSince DateTime? @map("failing_since") @db.Timestamp(6)
+  decidedAt     DateTime  @map("decided_at") @db.Timestamp(6)
+  failingSince  DateTime? @map("failing_since") @db.Timestamp(6)
+  /// The newest MATCHED decision seen, including one that arrived after a newer outcome; it orders late writes against
+  /// the streak (#3825 follow-up). The migration seeds a pre-existing NO_WORKER row with its latest failure instead: the
+  /// floor no older late failure joins (#3883). Never read outside `recordMatchOutcome`.
+  lastMatchedAt DateTime? @map("last_matched_at") @db.Timestamp(6)
 
   app App @relation(fields: [appId], references: [id], onDelete: Cascade)
 
