@@ -853,7 +853,7 @@ export async function endedAlarmEpisodeInstants(
   // (not an auto-expiry's maintenance write) and an attributed usage event, as the roster counts it, never after the
   // session ended. A latest-only value cannot say when it FIRST happened; this can.
   const assignments = await db.agentTeamEvent.findMany({
-    where: { taskId: { in: [...new Set(pairs.map((a) => a.taskId))] }, type: { in: ['task.assigned', 'task.reassigned', 'assignment.matched', 'task.parked'] } },
+    where: { taskId: { in: [...new Set(pairs.map((a) => a.taskId))] }, type: { in: ['task.assigned', 'task.reassigned', 'assignment.matched', 'task.parked', 'task.handed-back'] } },
     select: { taskId: true, type: true, createdAt: true, payload: true },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   });
@@ -869,8 +869,8 @@ export async function endedAlarmEpisodeInstants(
     for (const e of assignments) {
       if (e.taskId !== a.taskId) continue;
       const pl = e.payload as { assignee?: unknown; from?: unknown; to?: unknown } | null;
-      if (e.type === 'task.parked') {
-        // Parking to backlog clears the assignee (cor:agt:050:02): every open stint ends here, and a later assignment opens a new
+      if (e.type === 'task.parked' || e.type === 'task.handed-back') {
+        // Parking to backlog and a hand-back to the queue both clear the assignee (cor:agt:050:02): every open stint ends here, and a later assignment opens a new
         // one, so activity in the gap is nobody's. (A release of the last blocker is not this: the holder still holds the task.)
         for (const [worker, enter] of open) stints.push({ worker, enter, exit: e.createdAt });
         open.clear();
