@@ -81,7 +81,9 @@ export async function workerBoundActor(ctx: Pick<Context, 'db' | 'sessionId' | '
   return {
     workerId: ambiguous ? null : bound ?? sessionWorker,
     sessionId: session ? ctx.sessionId ?? null : null,
-    hostLaunched: !!session?.launchOperationId,
+    // No session row (a bound actor the request did not tie to a session; on /graphql the binding sets both together, so this
+    // is not reached today): the session's kind is unknown, so it is judged as the narrower one, a host-launched session.
+    hostLaunched: session ? !!session.launchOperationId : true,
   };
 }
 
@@ -128,6 +130,14 @@ export async function findAdmittingGrant(
   return null;
 }
 
+/** The grant guard's USE-arm rejection (prisma/grant-invariants.sql), as Prisma reports a raw statement's error. */
+const GUARD_USE_REJECTION = 'grants are append-only: a use adds one to a live grant';
+function isGuardUseRejection(e: unknown): boolean {
+  if (!(e instanceof Prisma.PrismaClientKnownRequestError) || e.code !== 'P2010') return false;
+  const meta = e.meta as { code?: unknown; message?: unknown } | undefined;
+  return meta?.code === '23514' && typeof meta.message === 'string' && meta.message.includes(GUARD_USE_REJECTION);
+}
+
 /**
  * Charge one use of `grantId`, which the caller holds FOR UPDATE: a guarded `use_count + 1` that must change exactly one row
  * while the grant is still live, then the USE event. Throws {@link triggerGrantRequired} when the row no longer qualifies, so
@@ -138,9 +148,18 @@ export async function spendTriggerGrant(
   grantId: string,
   record: { appId: string; workerId: string; sessionId: string | null },
 ): Promise<void> {
-  const changed = await tx.$executeRaw(Prisma.sql`
-    UPDATE grants SET use_count = use_count + 1, updated_at = ${GRANT_DB_NOW}
-    WHERE id = ${grantId} AND app_id = ${record.appId} AND ${grantLiveSql('grants')}`);
+  let changed: number;
+  try {
+    changed = await tx.$executeRaw(Prisma.sql`
+      UPDATE grants SET use_count = use_count + 1, updated_at = ${GRANT_DB_NOW}
+      WHERE id = ${grantId} AND app_id = ${record.appId} AND ${grantLiveSql('grants')}`);
+  } catch (e) {
+    // The predicate and the guard read the clock separately (and the guard rounds it to timestamp(3)), so a grant can pass the
+    // predicate and have expired when the guard judges it. That is a miss like any other: the ONE refusal. Only the guard's own
+    // use-arm rejection is translated; the transaction is aborted either way, so the caller's act rolls back with nothing spent.
+    if (isGuardUseRejection(e)) throw triggerGrantRequired();
+    throw e;
+  }
   if (changed !== 1) throw triggerGrantRequired();
   await tx.grantEvent.create({
     data: { id: generateId(), grantId, appId: record.appId, action: 'USE', workerId: record.workerId, sessionId: record.sessionId },

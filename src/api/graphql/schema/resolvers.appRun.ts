@@ -535,13 +535,11 @@ export const appRunMutations = {
     // Spec 049 Phase 3b: the trigger's scope — readable by the caller and owned
     // by this App's context; snapshotted onto each run at mint.
     const scopeId = input.scopeRef?.trim() ? await resolveScopeForTrigger(ctx, app.id, input.scopeRef) : null;
-    const automationPin = await captureSetupConsent(ctx.db, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId, ctx, configSelection({ ...input, agentId }));
-    // #2438: the setup pin already resolved the entry — its entryId is the
-    // stable key. The unadopted marker carries none (⇒ null: an unresolvable
-    // entry keeps the URN path; D20 records the setup failure).
-    const entryNodeId = automationPin != null && typeof automationPin === 'object' && 'entryId' in automationPin
-      ? (automationPin as { entryId: string }).entryId : null;
-    const create = (db: Pick<Context['db'], 'agentSchedule'>) => db.agentSchedule.create({
+    // #2438: the setup pin resolves the entry — its entryId is the stable key. The unadopted marker carries none (⇒ null: an
+    // unresolvable entry keeps the URN path; D20 records the setup failure).
+    const entryIdOf = (pin: unknown): string | null => pin != null && typeof pin === 'object' && 'entryId' in pin
+      ? (pin as { entryId: string }).entryId : null;
+    const create = (db: Pick<Context['db'], 'agentSchedule'>, automationPin: unknown, entryNodeId: string | null) => db.agentSchedule.create({
       data: {
         id: generateId(),
         organizationId: app.organizationId,
@@ -570,13 +568,32 @@ export const appRunMutations = {
     });
     // #3483 (cor:agt:010:01 rev 46): a worker-bound caller needs a live, signed `schedule.create` grant for this entry node,
     // spent in the same transaction as the create. Off (the default), or for a person, this is main's single write.
+    // The caller's own authority is re-judged inside the spend's transaction behind the shared authority anchors (gate
+    // 6756824828 item 5, as the webhook door does), so an ADMIN membership revoked before the spend commits refuses and spends
+    // nothing; then the consent is captured, the grant admitted and spent (the last lock), and the row written.
     if (workerTriggerGrantEnforced() && await workerBoundActor(ctx)) {
-      return ctx.db.$transaction(async (tx) => {
-        await admitWorkerTrigger(tx, ctx, { appId: app.id, action: 'schedule.create', entryNodeId });
-        return create(tx);
-      });
+      return withAuthorizedTx(
+        ctx,
+        [{ kind: 'org', id: app.organizationId }, { kind: 'app', id: app.id },
+          ...(agentId ? [{ kind: 'agent' as const, id: agentId }] : [])],
+        async (txCtx) => {
+          const currentApp = await requireScheduleAdmin(txCtx, input.appRef);
+          if (currentApp.id !== app.id || currentApp.organizationId !== app.organizationId) {
+            throw new Error('App scope changed; retry schedule creation');
+          }
+          if (agentId) await resolveInstalledAgent(txCtx, app.id, input.agentRef);
+          if (input.scopeRef?.trim()) await resolveScopeForTrigger(txCtx, app.id, input.scopeRef);
+        },
+        async (tx, txCtx) => {
+          const automationPin = await captureSetupConsent(tx as never, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId, txCtx, configSelection({ ...input, agentId }));
+          const entryNodeId = entryIdOf(automationPin);
+          await admitWorkerTrigger(tx, txCtx, { appId: app.id, action: 'schedule.create', entryNodeId });
+          return create(tx, automationPin, entryNodeId);
+        },
+      );
     }
-    return create(ctx.db);
+    const automationPin = await captureSetupConsent(ctx.db, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId, ctx, configSelection({ ...input, agentId }));
+    return create(ctx.db, automationPin, entryIdOf(automationPin));
   },
 
   /** Org-ADMIN update; stored run-as authority requires its owner except for an exact stop-only edit (#1643). */
