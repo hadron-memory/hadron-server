@@ -183,7 +183,8 @@ describe('the switch, the worker test and the open host-launch question', () => 
   it('the worker test: a person is not worker-bound; a session naming a worker, a bound actor and a refused binding are', async () => {
     expect(await workerBoundActor({ db, sessionId: undefined } as never)).toBeNull();
     expect(await workerBoundActor({ db, sessionId: w.sessionId } as never)).toMatchObject({ workerId: w.workerId, sessionId: w.sessionId, hostLaunched: false });
-    expect(await runAsActor({ workerId: w.workerId, agentId: w.agentId }, () => workerBoundActor({ db } as never))).toMatchObject({ workerId: w.workerId });
+    // A bound actor with no session row: its kind is unknown, so it is judged host-launched (blind finding on 8f098618).
+    expect(await runAsActor({ workerId: w.workerId, agentId: w.agentId }, () => workerBoundActor({ db } as never))).toMatchObject({ workerId: w.workerId, sessionId: null, hostLaunched: true });
     expect(await workerBoundActor({ db, sessionBindingRefused: true } as never)).toMatchObject({ workerId: null });
     const launched = await sessionOf(w, w.workerId, w.agentId, true);
     expect(await workerBoundActor({ db, sessionId: launched } as never)).toMatchObject({ hostLaunched: true });

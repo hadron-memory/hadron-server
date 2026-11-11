@@ -89,6 +89,34 @@ describe('#3483 rows 2, 3, 6: a worker needs a live single-use grant, spent with
     expect(await useEvents(g)).toHaveLength(0);
   });
 
+  // LOCAL finding F1 on 8f098618 (P2): the caller's own authority is re-judged inside the spend's transaction. The caller's org
+  // ADMIN membership is revoked, and committed, at the instant the door opens its transaction (after the outer gate passed).
+  it.each([
+    ['schedule', 'schedule.create' as const, (ctx: any) => createSchedule(ctx)],
+    ['webhook', 'webhook.create' as const, (ctx: any) => createWebhook(ctx)],
+  ])('a %s create whose ADMIN is revoked before the spend is refused and spends nothing', async (_label, action, act) => {
+    const g = await triggerGrant(w, { action });
+    let revoked = false;
+    const racingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop !== '$transaction') return Reflect.get(target, prop, receiver);
+        return async (...args: unknown[]) => {
+          if (!revoked) {
+            revoked = true;
+            await db.orgMember.updateMany({ where: { userId: w.userId, organizationId: w.orgId }, data: { deletedAt: new Date() } });
+          }
+          return (target.$transaction as (...a: unknown[]) => unknown)(...args);
+        };
+      },
+    });
+    // The caller's own authority refusal, judged before any Worker or grant lock (not the grant's refusal).
+    await expect(asWorker((ctx) => act({ ...ctx, db: racingDb }))).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    expect(revoked).toBe(true);
+    expect(await useCount(g)).toBe(0);
+    expect(await useEvents(g)).toHaveLength(0);
+    expect(await schedules() + await db.agentWebhook.count({ where: { appId: w.appId } })).toBe(0);
+  });
+
   // Blind finding on 8f098618 (P3): the case above fails before admission. Here the act's own write fails AFTER the grant was
   // spent (a test trigger refuses the insert), and the spend and its USE event roll back with it.
   it.each([
