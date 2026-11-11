@@ -197,6 +197,27 @@ describe('agentTask global search (#3945)', () => {
     }
   });
 
+  it('a bound worker held by an org admin (or platform admin) is not crowded by Apps the gate denies it (#3964 delta3 P2)', async () => {
+    const saved = { ...taskSearchLimits };
+    Object.assign(taskSearchLimits, { page: 2, admittedApps: 1, maxScanned: 4 });
+    try {
+      const org = await db.organization.findFirstOrThrow({ where: { id: orgId } });
+      // Same-org Apps that sort before X: the HOLDER (org ADMIN) could read them, the bound worker may not.
+      for (let i = 0; i < 8; i++) {
+        const a = await db.app.create({ data: { id: `0000000${i}${generateId()}`.slice(0, 32), organizationId: org.id, name: `h${i}`, urn: `${org.urn}:h${i}` } });
+        await mkTask(orgAdminRef, a.id, 'zebra holder-only');
+      }
+      const asWorker = (ctx: Context) => runAsActor({ workerId: workerX.id, agentId }, () => search(ctx, 'zebra'));
+      for (const ctx of [userCtx(orgAdminRef), { ...userCtx(orgAdminRef), roles: ['ADMIN'] } as Context]) {
+        const r = await asWorker(ctx);
+        expect(r.hits.map((h: any) => h.id)).toEqual([taskX.id]);
+        expect(r.total).toBe(1);
+      }
+    } finally {
+      Object.assign(taskSearchLimits, saved);
+    }
+  });
+
   it('an org admin (CONTRIBUTOR+) still finds every App of the org (the narrowing never drops a readable App)', async () => {
     const r = await search(userCtx((await db.user.findFirstOrThrow({ where: { githubUsername: { startsWith: 'admin-' } } }))), 'zebra');
     expect(new Set(r.hits.map((h: any) => h.id))).toEqual(new Set([taskX.id, taskY.id]));

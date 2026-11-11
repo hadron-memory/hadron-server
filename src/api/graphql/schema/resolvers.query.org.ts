@@ -94,11 +94,22 @@ async function callerCanOpenResource(ctx: Context, resolved: ResolvedResource): 
 /**
  * #3945: the Apps a caller's task read could ever admit, as an App `where` (a superset that tracks `isAppParticipant`
  * closely; `mayReadAppTasks` still decides): live Apps it owns, is an AppMember of (any role), or whose org it holds
- * CONTRIBUTOR+ in (a READER is a member but not a task actor), and the App its bound worker session drives. Under
+ * CONTRIBUTOR+ in (a READER is a member but not a task actor); a bound worker session instead gets only the App it drives (the gate judges it nowhere else). Under
  * impersonation only the shared org's Apps. A platform admin may read through the org gate anywhere, so it gets no
  * narrowing; a caller with no user gets nothing.
  */
 async function taskAppScopeFor(ctx: Context, isPlatformAdmin: boolean): Promise<Record<string, unknown> | undefined> {
+  // A bound worker is judged by `resolveTaskActor` for its OWN App only, before any person or platform-admin arm, so
+  // its candidate set is that one App however much the holding person could otherwise read.
+  const workerId = currentActor().workerId;
+  if (workerId) {
+    if (!ctx.userId) return { id: { in: [] } };
+    const w = await ctx.db.worker.findUnique({ where: { id: workerId }, select: { appId: true } });
+    if (!w) return { id: { in: [] } };
+    const and: Record<string, unknown>[] = [{ deletedAt: null }, { id: w.appId }];
+    if (ctx.impersonation) and.push({ organizationId: ctx.impersonation.orgId });
+    return { AND: and };
+  }
   if (isPlatformAdmin) return undefined;
   if (!ctx.userId) return { id: { in: [] } };
   const actorOrgs = await ctx.db.orgMember.findMany({
@@ -110,11 +121,6 @@ async function taskAppScopeFor(ctx: Context, isPlatformAdmin: boolean): Promise<
     { members: { some: { userId: ctx.userId } } },
     { organizationId: { in: actorOrgs.map((m) => m.organizationId) } },
   ];
-  const workerId = currentActor().workerId;
-  if (workerId) {
-    const w = await ctx.db.worker.findUnique({ where: { id: workerId }, select: { appId: true } });
-    if (w) or.push({ id: w.appId });
-  }
   const and: Record<string, unknown>[] = [{ deletedAt: null }, { OR: or }];
   if (ctx.impersonation) and.push({ organizationId: ctx.impersonation.orgId });
   return { AND: and };
