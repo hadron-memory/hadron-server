@@ -138,11 +138,19 @@ export async function acknowledgeWakes(args: {
         // read the channel inside that gap stamped the previous tick's row; that check answers this wake, so the ack
         // carries it over instead of erasing it. Coverage matches `respondedTicks` (none named = the team channel, the
         // only channel a check is stamped on). A check before the issue never counts.
+        //
+        // The subquery reads this statement's snapshot, so a check still uncommitted when the statement starts is not
+        // in it (Andi, LOCAL P2 on #3946). On an existing row that check stamps `responded_at` on the row itself, and
+        // ON CONFLICT DO UPDATE sees the row's LATEST version once it holds the row lock: so an advance keeps the
+        // row's own response too when it falls inside this wake's window. A check that takes the row lock after this
+        // ack re-reads the advanced row and stamps it. Only a first delivery racing an uncommitted check can still
+        // miss it (no row for the check to stamp).
+        const sinceIssue = Prisma.sql`LEAST(${issuedNaive}::timestamp, (now() AT TIME ZONE 'UTC'))`;
         const checkedSinceIssue = Prisma.sql`(
           SELECT max(rs.last_checked_at) FROM channel_read_states rs
           JOIN tickers ct ON ct.id = ${t.tickerId}
           WHERE rs.worker_id = ${p.workerId}
-            AND rs.last_checked_at >= LEAST(${issuedNaive}::timestamp, (now() AT TIME ZONE 'UTC'))
+            AND rs.last_checked_at >= ${sinceIssue}
             AND (cardinality(ct.channel_ids) = 0 OR rs.channel_id = ANY (ct.channel_ids)))`;
         await tx.$executeRaw`
           INSERT INTO worker_delivery_ticks
@@ -157,7 +165,10 @@ export async function acknowledgeWakes(args: {
             acked_by_app_key_id = CASE WHEN EXCLUDED.last_acked_tick > worker_delivery_ticks.last_acked_tick THEN EXCLUDED.acked_by_app_key_id ELSE worker_delivery_ticks.acked_by_app_key_id END,
             -- #3509: the response belongs to the latest delivered wake only; a newer delivery starts a new wait (a repeat
             -- does not). #3680: that wait starts at the wake's issue, so a check made since then is its response.
-            responded_at = CASE WHEN EXCLUDED.last_acked_tick > worker_delivery_ticks.last_acked_tick THEN EXCLUDED.responded_at ELSE worker_delivery_ticks.responded_at END`;
+            responded_at = CASE WHEN EXCLUDED.last_acked_tick > worker_delivery_ticks.last_acked_tick
+              THEN GREATEST(EXCLUDED.responded_at,
+                            CASE WHEN worker_delivery_ticks.responded_at >= ${sinceIssue} THEN worker_delivery_ticks.responded_at END)
+              ELSE worker_delivery_ticks.responded_at END`;
       }
       for (const t of p.tasks) {
         const ev = await tx.agentTeamEvent.findUnique({ where: { id: t.eventId }, select: { appId: true } });
