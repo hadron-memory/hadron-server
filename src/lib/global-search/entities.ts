@@ -635,7 +635,16 @@ async function searchAgentTasks(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
   if (!gate || !fields.has('name')) return [];
   const match: AnyWhere = {
     OR: [textPred('title', q), textPred('handle', q)],
-    ...(principal.orgScopeId ? { app: { organizationId: principal.orgScopeId } } : {}),
+    ...(principal.orgScopeId || principal.taskAppScope
+      ? {
+          app: {
+            AND: [
+              ...(principal.orgScopeId ? [{ organizationId: principal.orgScopeId }] : []),
+              ...(principal.taskAppScope ? [principal.taskAppScope] : []),
+            ],
+          },
+        }
+      : {}),
   };
 
   const admitted: string[] = [];

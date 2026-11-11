@@ -118,6 +118,12 @@ export interface SearchPrincipal {
    * how MCP stays at seven types. Applied to every candidate before ranking, offset slicing and `total`.
    */
   taskReadGate?: (appId: string) => Promise<boolean>;
+  /**
+   * #3945: a SUPERSET of the Apps `taskReadGate` could admit (the caller's own, member and member-org Apps, and the
+   * bound worker's App); the gate still decides each. Narrows which Apps the walk examines so unreadable tenants never
+   * enter it, whatever their number. Unset ⇒ no narrowing (a platform admin); `{ id: { in: [] } }` ⇒ nothing.
+   */
+  taskAppScope?: Record<string, unknown>;
 }
 
 /** Keep only valid `SearchEntityType` values (defensive: MCP bypasses zod). */

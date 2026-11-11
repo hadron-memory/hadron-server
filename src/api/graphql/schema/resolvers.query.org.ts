@@ -26,6 +26,7 @@ import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { discoverableOrgWhere, publicReadableMemoryWhere } from '../../../lib/orgDiscoverability.js';
 import { orgRowToRef, agentRowToRef, memoryRowToRef } from './publicRefs.js';
 import { GraphQLError } from 'graphql';
+import { currentActor } from '../../../lib/requestActor.js';
 import { mayReadAppTasks } from './resolvers.agentTask.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { appKeyCaller } from '../../../lib/appKeyScopes/scopes.js';
@@ -88,6 +89,27 @@ async function callerCanOpenResource(ctx: Context, resolved: ResolvedResource): 
     if (isAuthorizationDenial(error)) return false;
     throw error;
   }
+}
+
+/**
+ * #3945: the Apps a caller's task read could ever admit, as an App `where` (a superset; `mayReadAppTasks` still decides):
+ * its own, ones it is a member of, Apps of orgs it belongs to, and the App its bound worker session drives. A platform
+ * admin may read through the org gate anywhere, so it gets no narrowing. A caller with no user gets nothing.
+ */
+async function taskAppScopeFor(ctx: Context, isPlatformAdmin: boolean, memberOrgIds: string[]): Promise<Record<string, unknown> | undefined> {
+  if (isPlatformAdmin) return undefined;
+  if (!ctx.userId) return { id: { in: [] } };
+  const or: Record<string, unknown>[] = [
+    { ownerUserId: ctx.userId },
+    { members: { some: { userId: ctx.userId } } },
+    { organizationId: { in: memberOrgIds } },
+  ];
+  const workerId = currentActor().workerId;
+  if (workerId) {
+    const w = await ctx.db.worker.findUnique({ where: { id: workerId }, select: { appId: true } });
+    if (w) or.push({ id: w.appId });
+  }
+  return { OR: or };
 }
 
 export const orgQueries = {
@@ -405,6 +427,7 @@ export const orgQueries = {
         impersonationOrgId: ctx.impersonation?.orgId ?? null,
         // #3945: the per-kind task read gate, reused as-is, minus the ruled userless carve-out: an App key or a userless run
         // gets no task hits even where the direct read would admit it (every admitting arm of resolveTaskActor needs a user).
+        taskAppScope: await taskAppScopeFor(ctx, isPlatformAdmin, callerOrgIds),
         taskReadGate: async (appId) =>
           (isRunPrincipal(ctx) && !ctx.userId) || appKeyCaller(ctx) ? false : mayReadAppTasks(ctx, appId),
       };

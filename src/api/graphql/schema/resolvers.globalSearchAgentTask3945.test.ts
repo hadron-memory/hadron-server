@@ -159,14 +159,14 @@ describe('agentTask global search (#3945)', () => {
     }
   });
 
-  it('denied Apps never crowd out admitted ones, however many match first (#3964 BLIND P2)', async () => {
+  it('unreadable Apps never enter the walk, so they cannot crowd out a readable hit however many match first (#3964 P2)', async () => {
     const saved = { ...taskSearchLimits };
-    Object.assign(taskSearchLimits, { page: 2, admittedApps: 1 });
+    // A scan bound far below the number of outsider Apps: only the caller's own candidate Apps may be examined.
+    Object.assign(taskSearchLimits, { page: 2, admittedApps: 1, maxScanned: 4 });
     try {
-      // Many outsider Apps whose ids sort BEFORE the participant's App and whose tasks match.
-      const org = await db.organization.findFirstOrThrow({ where: { id: orgId } });
-      for (let i = 0; i < 6; i++) {
-        const a = await db.app.create({ data: { id: `0000000${i}${generateId()}`.slice(0, 32), organizationId: org.id, name: `o${i}`, urn: `${org.urn}:o${i}` } });
+      const other = await db.organization.create({ data: { id: generateId(), name: 'o3', urn: `o3-${generateId()}.com` } });
+      for (let i = 0; i < 8; i++) {
+        const a = await db.app.create({ data: { id: `0000000${i}${generateId()}`.slice(0, 32), organizationId: other.id, name: `o${i}`, urn: `${other.urn}:o${i}` } });
         await db.appMember.create({ data: { appId: a.id, userId: orgOnly.id, role: 'member' } });
         await mkTask(orgOnly, a.id, 'zebra outsider');
       }
