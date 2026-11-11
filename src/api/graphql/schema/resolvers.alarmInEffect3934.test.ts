@@ -399,6 +399,49 @@ describe('#3934 — escalationEndedAt and alarmsInEffect on a task alarm', () =>
     expect((await events('', null)).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: iso('11:10') });
   });
 
+  it('a repeated open for the worker who already holds the task keeps the earlier stint start: the activity between still counts', async () => {
+    const t = await task({ ownerWorkerId: ada.id, assigneeWorkerId: rook.id, assignedAt: at('09:30'), status: 'started', startedAt: at('10:00') });
+    const by = { userId: admin.id, workerId: null, agentId: null };
+    // The real writers, so the payload shapes the reader depends on are the production ones.
+    await appendTaskEvent(db, { appId: app.id, taskId: t.id, actor: by, event: { type: 'task.assigned', assignee: { workerId: rook.id }, closeSessionWhenDone: false }, createdAt: at('09:30') });
+    const session = await db.session.create({ data: { id: generateId(), appId: app.id, workerId: rook.id, agentId, startedAt: at('10:00'), updatedAt: at('10:00') } });
+    await tick('11:05');
+    const alarm = (await alarms('stall.no-progress')).find((a) => a.taskId === t.id)!;
+    await db.session.update({ where: { id: session.id }, data: { updatedAt: at('11:10') } }); // legitimate activity while he holds it
+    await appendTaskEvent(db, { appId: app.id, taskId: t.id, actor: by, event: { type: 'assignment.matched', assignee: { workerId: rook.id }, family: 'claude', closeSessionWhenDone: false }, createdAt: at('11:15') });
+    const stored = await db.agentTeamEvent.findMany({ where: { taskId: t.id, type: { in: ['task.assigned', 'assignment.matched'] } }, orderBy: { createdAt: 'asc' } });
+    expect(stored.map((e) => (e.payload as { assignee?: { workerId?: string } }).assignee?.workerId)).toEqual([rook.id, rook.id]);
+    await record('11:30');
+    expect((await events('', null)).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: iso('11:10') });
+  });
+
+  it('the CURRENT holder\'s activity before they held the task never counts either (Anne to Rook at 11:20, Rook stays)', async () => {
+    const t = await task({ ownerWorkerId: ada.id, assigneeWorkerId: anne.id, assignedAt: at('09:30'), status: 'started', startedAt: at('10:00') });
+    await db.session.create({ data: { id: generateId(), appId: app.id, workerId: anne.id, agentId, startedAt: at('10:00'), updatedAt: at('10:00') } });
+    await tick('11:00');
+    const alarm = (await alarms('stall.no-progress')).find((a) => a.taskId === t.id)!;
+    await db.session.create({ data: { id: generateId(), appId: app.id, workerId: rook.id, agentId, startedAt: at('11:05'), updatedAt: at('11:05') } });
+    await appendTaskEvent(db, { appId: app.id, taskId: t.id, actor: { userId: admin.id, workerId: null, agentId: null }, event: { type: 'task.reassigned', from: { workerId: anne.id }, to: { workerId: rook.id }, closeSessionWhenDone: false }, createdAt: at('11:20') });
+    await db.agentTask.update({ where: { id: t.id }, data: { assigneeWorkerId: rook.id, assignedAt: at('11:20') } });
+    await record('11:30');
+    expect((await events('', null)).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: iso('11:20') });
+  });
+
+  it('one child ended before the episode and one after: the recorded end is the one after, 11:10', async () => {
+    const parent = await task({ ownerWorkerId: ada.id, assigneeWorkerId: anne.id, assignedAt: at('09:30'), status: 'started', startedAt: at('10:00') });
+    await db.session.create({ data: { id: generateId(), appId: app.id, workerId: anne.id, agentId, startedAt: at('10:00'), updatedAt: at('10:00') } });
+    await tick('11:00');
+    const alarm = (await alarms('stall.no-progress')).find((a) => a.taskId === parent.id)!;
+    const child = (finishedAt: string) => task({
+      parentTaskId: parent.id, ownerWorkerId: anne.id, assigneeWorkerId: rook.id, assignedAt: at('09:35'),
+      status: 'finished', startedAt: at('09:40'), finishedAt: at(finishedAt), resultOutcome: 'succeeded',
+    });
+    await child('09:50');
+    await child('11:10');
+    await record('11:30');
+    expect((await events('', null)).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: iso('11:10') });
+  });
+
   it('the same answer as the wake schedule: the wake pass closes exactly the alarms the read calls ended', async () => {
     const { t: ended } = await notStartedAlarm();
     const running = await assignedToAnne('10:05'); // its own alarm at 10:20, still running

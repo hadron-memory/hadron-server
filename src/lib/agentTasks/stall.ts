@@ -873,10 +873,11 @@ export async function endedAlarmEpisodeInstants(
         const from = workerOf(pl?.from);
         if (from) { stints.push({ worker: from, enter: open.get(from) ?? null, exit: e.createdAt }); open.delete(from); }
         const to = workerOf(pl?.to);
-        if (to) open.set(to, e.createdAt);
+        if (to && !open.has(to)) open.set(to, e.createdAt);
       } else {
+        // A repeated open for a worker who already holds the task keeps the EARLIER start: the stint did not restart.
         const to = workerOf(pl?.assignee);
-        if (to) open.set(to, e.createdAt);
+        if (to && !open.has(to)) open.set(to, e.createdAt);
       }
     }
     if (row?.assigneeWorkerId) stints.push({ worker: row.assigneeWorkerId, enter: open.get(row.assigneeWorkerId) ?? row.assignedAt ?? null, exit: null });
