@@ -128,7 +128,7 @@ export async function stampChannelCheck(db: Db, workerId: string, channelId: str
 
 /**
  * #3509 (cor:agt:100:03, cor:agt:080:04) — the response to a delivered wake: a check of a channel a ticker covers
- * (none named = the team channel, the only channel a check counts on) fills `responded_at` on that worker's delivery
+ * (none named, or a NULL channel_ids, = the team channel, the only channel a check counts on) fills `responded_at` on that worker's delivery
  * row for the ticker, in the SAME statement as the check, so a check can never be recorded without its response.
  * `channels` is a subquery naming the channel ids just stamped.
  */
@@ -137,7 +137,7 @@ function respondedTicks(channels: Prisma.Sql, workerId: string): Prisma.Sql {
       UPDATE worker_delivery_ticks d SET responded_at = (clock_timestamp() AT TIME ZONE 'UTC')
       FROM tickers t
       WHERE d.worker_id = ${workerId} AND t.id = d.ticker_id
-        AND EXISTS (SELECT 1 FROM (${channels}) s WHERE cardinality(t.channel_ids) = 0 OR s.channel_id = ANY (t.channel_ids))
+        AND EXISTS (SELECT 1 FROM (${channels}) s WHERE coalesce(cardinality(t.channel_ids), 0) = 0 OR s.channel_id = ANY (t.channel_ids))
       RETURNING 1`;
 }
 
