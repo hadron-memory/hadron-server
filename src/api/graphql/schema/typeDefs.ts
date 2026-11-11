@@ -5044,7 +5044,9 @@ export const typeDefs = `#graphql
     (hrn:node:hadronmemory.com:specs:cor:urn:010:01, V60-V63): hrn:aiconf:<org>:org:<name>,
     hrn:aiconf:<root>:app:<app-slug>:<name>, hrn:aiconf:<author-root>:agent:<agent-slug>:<name>,
     or hrn:aiconf:server:<name> for a HadronServer owner. Null for a name that cannot be a
-    URN atom (a trailing '-' or '_'). Renaming the config re-addresses it, with no alias.
+    URN atom (a trailing '-' or '_'), for a stored name that is not lower-case canonical, and for a
+    validly named config of a HadronServer that is not the current one (the oldest live row).
+    Renaming the config re-addresses it, with no alias.
     """
     urn: String
     ownerType: AiConfigOwnerType!

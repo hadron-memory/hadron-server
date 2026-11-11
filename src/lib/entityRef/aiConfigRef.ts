@@ -50,7 +50,7 @@ export type AiConfigUrnOwner =
  * a URN atom, or an owner whose stored urn is not the `<root>[:<slug>]` shape),
  * logging the reason. Never throws: it runs on a read path.
  */
-export function composeAiConfigUrn(owner: AiConfigUrnOwner, name: string): string | null {
+export function composeAiConfigUrn(owner: AiConfigUrnOwner, name: string, warn: (msg: string) => void = console.warn): string | null {
   try {
     // Names are lower-case canonical (`validateAiConfigName`); parse looks the
     // name up EXACTLY, so a stored name that is not canonical must not emit a
@@ -65,7 +65,7 @@ export function composeAiConfigUrn(owner: AiConfigUrnOwner, name: string): strin
     if (parsed.segments.length !== 1) throw new Error(`${owner.kind} urn is not <root>:<slug>`);
     return composeUrnV2('aiconf', parsed.root, owner.kind, parsed.segments[0]!, name);
   } catch (err) {
-    console.warn(
+    warn(
       `[aiconf-urn] no URN for a ${owner.kind}-owned config named "${name}": ${err instanceof Error ? err.message : String(err)}`,
     );
     return null;
