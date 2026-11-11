@@ -146,6 +146,25 @@ describe('#3833 retrofit', () => {
       .toEqual(dry.map((r) => [r.agentUrn, r.created.slice().sort()]));
   });
 
+  it('N1: a dry run takes no row lock on the memories, an apply does', async () => {
+    await bareAgent('lockwatch');
+    const seen = async (dryRun: boolean) => {
+      const sqls: string[] = [];
+      const realTx = db.$transaction.bind(db);
+      const spy = vi.spyOn(db, '$transaction').mockImplementation(((fn: (tx: unknown) => Promise<unknown>, o: never) =>
+        realTx((tx) => fn(new Proxy(tx, { get(t, k) {
+          const v = Reflect.get(t, k, t);
+          if (k !== '$queryRaw') return typeof v === 'function' ? v.bind(t) : v;
+          return (q: readonly string[], ...r: unknown[]) => { sqls.push(Array.from(q).join('?')); return (v as (...a: unknown[]) => unknown).call(t, q, ...r); };
+        } })), o)) as never);
+      await retrofitAgentSkeletons(db, { dryRun });
+      spy.mockRestore();
+      return sqls.some((x) => /FOR UPDATE/.test(x));
+    };
+    expect(await seen(true)).toBe(false);
+    expect(await seen(false)).toBe(true);
+  });
+
   it('dry run writes nothing but reports what it would create', async () => {
     const a = await bareAgent('dry');
     const rows = await retrofitAgentSkeletons(db, { dryRun: true });

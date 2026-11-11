@@ -74,12 +74,20 @@ class DryRunRollback extends Error {}
  * The selection ran earlier, so the memory may have changed since (promoted away from `system`, turned into an
  * install memory, retired, or detached from the Agent); a stale selection must write nothing (#3833 review F1).
  */
-async function retrofitOne(tx: Prisma.TransactionClient, agentId: string, memoryId: string, actor: string | null): Promise<string[]> {
-  const rows = await tx.$queryRaw<Array<{ id: string }>>`
-    SELECT m.id FROM memories m
-    WHERE m.id = ${memoryId} AND m.deleted_at IS NULL AND m.class = 'system' AND m.is_install_memory = false
-      AND EXISTS (SELECT 1 FROM agents a WHERE a.id = ${agentId} AND a.deleted_at IS NULL AND a.system_memory_id = m.id)
-    FOR UPDATE OF m`;
+async function retrofitOne(tx: Prisma.TransactionClient, agentId: string, memoryId: string, actor: string | null, lock: boolean): Promise<string[]> {
+  // Apply locks the memory row so the re-judgement and the inserts see one state. A dry run takes NO row lock: it
+  // writes nothing that survives, and one long transaction holding FOR UPDATE on every system memory would block
+  // their writers (#3833 blind delta N1).
+  const rows = lock
+    ? await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT m.id FROM memories m
+        WHERE m.id = ${memoryId} AND m.deleted_at IS NULL AND m.class = 'system' AND m.is_install_memory = false
+          AND EXISTS (SELECT 1 FROM agents a WHERE a.id = ${agentId} AND a.deleted_at IS NULL AND a.system_memory_id = m.id)
+        FOR UPDATE OF m`
+    : await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT m.id FROM memories m
+        WHERE m.id = ${memoryId} AND m.deleted_at IS NULL AND m.class = 'system' AND m.is_install_memory = false
+          AND EXISTS (SELECT 1 FROM agents a WHERE a.id = ${agentId} AND a.deleted_at IS NULL AND a.system_memory_id = m.id)`;
   if (!rows.length) return [];
   return seedAgentSkeleton(tx, memoryId, actor);
 }
@@ -114,7 +122,7 @@ export async function retrofitAgentSkeletons(db: PrismaClient, opts: { dryRun?: 
   if (opts.dryRun) {
     try {
       await db.$transaction(async (tx) => {
-        for (const a of agents) out.push({ agentUrn: a.urn, memoryId: a.memory_id, created: await retrofitOne(tx, a.id, a.memory_id, actor) });
+        for (const a of agents) out.push({ agentUrn: a.urn, memoryId: a.memory_id, created: await retrofitOne(tx, a.id, a.memory_id, actor, false) });
         throw new DryRunRollback();
       }, { timeout: 600_000, maxWait: 30_000 });
     } catch (e) {
@@ -123,7 +131,7 @@ export async function retrofitAgentSkeletons(db: PrismaClient, opts: { dryRun?: 
     return out;
   }
   for (const a of agents) {
-    const created = await db.$transaction((tx) => retrofitOne(tx, a.id, a.memory_id, actor));
+    const created = await db.$transaction((tx) => retrofitOne(tx, a.id, a.memory_id, actor, true));
     out.push({ agentUrn: a.urn, memoryId: a.memory_id, created });
   }
   return out;
