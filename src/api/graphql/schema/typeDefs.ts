@@ -13800,7 +13800,7 @@ export const typeDefs = `#graphql
     CHAT_AUTHORITY_SCOPE_CHANGED refuses a write when the memory encryption flag changed before its lock; obtain
     fresh context, never automatically resubmit a model call or a turn after an uncertain commit.
     """
-    sendChatMessage(chatId: String!, userMessage: String!, "#3096 / hrn:node:hadronmemory.com:specs:cor:dmo:150:08: optional client-reported model id, at most 256 UTF-16 code units, no control/format/line-separator characters or unpaired surrogates. Omitted or null fills empty for this call. Used only for prompt text and its immutable record, labelled client-reported; never billing, quotas or authorization. Invalid input refuses BAD_USER_INPUT without echoing it." llmModel: String, "#3957 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10): optional AI config choice for this chat, stored with it: \`default\` or one of the chat App's own config ids from chatAiConfigChoices. Omitted keeps what the chat has. Any other id is refused as a missing config, revealing nothing about it." aiConfigChoice: String): ChatPromptResult!
+    sendChatMessage(chatId: String!, userMessage: String!, "#3096 / hrn:node:hadronmemory.com:specs:cor:dmo:150:08: optional client-reported model id, at most 256 UTF-16 code units, no control/format/line-separator characters or unpaired surrogates. Omitted or null fills empty for this call. Used only for prompt text and its immutable record, labelled client-reported; never billing, quotas or authorization. Invalid input refuses BAD_USER_INPUT without echoing it." llmModel: String, "#3957 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10): optional AI config choice for this chat, stored with it: \`default\` or one of the chat App's own config ids from chatAiConfigChoices. Omitted keeps what the chat has. Any other id is refused as a missing config, revealing nothing about it. The choice is stored in a second write, after the user message commits and before any model call: if that write fails, the message is kept, no turn runs, and the chat's previous choice stands. A caller resends the choice, not the message: the message is already stored, so do not send it again; send the choice again with your next message." aiConfigChoice: String): ChatPromptResult!
     """
     Process the LLM's tool response (extract data, transition stage, save assistant message)
 
@@ -14251,7 +14251,9 @@ export const typeDefs = `#graphql
     """
     Update an App.
 
-    Accepts the entity's ID or URN.
+    Accepts the entity's ID or URN. An uninstalled App is kept read-only
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:21): this refuses it with
+    APP_UNINSTALLED, for every field, after the access gate, writing nothing.
     """
     updateApp(
       ref: ID!
