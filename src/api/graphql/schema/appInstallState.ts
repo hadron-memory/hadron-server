@@ -22,22 +22,18 @@ import { requireOwnerOrOrgRole, type Context } from './resolvers.helpers.js';
 
 type AppRow = { id: string; organizationId: string | null; ownerUserId: string | null };
 
-/** The App a ref names, whatever its state; null when none. A URN names the installed App, or the one uninstalled App if none is installed. */
-async function locate(ctx: Context, ref: string, wantUninstalled: boolean): Promise<AppRow | null> {
+/**
+ * The App a ref names, whatever its state; null when none. An ID names that row. A URN names the INSTALLED App that holds it
+ * and, when none does, the one uninstalled, undeleted App with it (two or more: ambiguous, name one by id). Both calls share
+ * this rule, so a repeat by URN reaches the same App as the first call did (the installed holder, once reinstalled) and a
+ * historical uninstalled App with the same handle is never retargeted while an installed holder exists.
+ */
+async function locate(ctx: Context, ref: string): Promise<AppRow | null> {
   const select = { id: true, organizationId: true, ownerUserId: true } as const;
   if (isId(ref)) return ctx.db.app.findUnique({ where: { id: ref }, select });
-  if (!wantUninstalled) {
-    try {
-      const { id } = await resolveAppRef(ctx.db, ref);
-      return ctx.db.app.findUnique({ where: { id }, select });
-    } catch (e) {
-      if (e instanceof AppNotFoundError) return null;
-      throw e;
-    }
-  }
-  // A reinstall names an uninstalled App: only an unambiguous one is reachable by handle (several share it; name one by id).
   try {
-    await resolveAppRef(ctx.db, ref); // validates the shape (a malformed URN is an input error, as everywhere)
+    const { id } = await resolveAppRef(ctx.db, ref);
+    return await ctx.db.app.findUnique({ where: { id }, select });
   } catch (e) {
     if (!(e instanceof AppNotFoundError)) throw e;
   }
@@ -47,7 +43,7 @@ async function locate(ctx: Context, ref: string, wantUninstalled: boolean): Prom
 }
 
 async function setInstalled(ctx: Context, ref: string, install: boolean): Promise<true> {
-  const found = await locate(ctx, ref, install);
+  const found = await locate(ctx, ref);
   if (!found) throw authorizationDenied();
   const app = await ctx.db.app.findUniqueOrThrow({ where: { id: found.id } });
   await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
@@ -75,7 +71,7 @@ async function setInstalled(ctx: Context, ref: string, install: boolean): Promis
         if (install) {
           if (!current.uninstalledAt) return; // already installed: a no-op
           const holder = await tx.app.findFirst({ where: { urn: current.urn, uninstalledAt: null, NOT: { id: current.id } }, select: { id: true } });
-          if (holder) throw urnInUse(current.urn);
+          if (holder) throw urnInUse(current.id, current.urn);
           await tx.app.update({ where: { id: current.id }, data: { uninstalledAt: null, updatedBy: ctx.userId ?? null } });
           return;
         }
@@ -92,14 +88,17 @@ async function setInstalled(ctx: Context, ref: string, install: boolean): Promis
     );
   } catch (e) {
     // A create that took the handle between the check and the write trips the partial unique index.
-    if (install && e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') throw urnInUse(app.id);
+    if (install && e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002' && String(e.meta?.target ?? '').includes('urn')) {
+      const urn = (await ctx.db.app.findUnique({ where: { id: app.id }, select: { urn: true } }))?.urn ?? null;
+      throw urnInUse(app.id, urn);
+    }
     throw e;
   }
   return true;
 }
 
-const urnInUse = (what: string): GraphQLError =>
-  new GraphQLError('Another installed App holds this App\'s handle; reinstall refused.', { extensions: { code: 'APP_URN_IN_USE', app: what } });
+const urnInUse = (appId: string, urn: string | null): GraphQLError =>
+  new GraphQLError('Another installed App holds this App\'s handle; reinstall refused.', { extensions: { code: 'APP_URN_IN_USE', appId, urn } });
 
 export const uninstallApp = (ctx: Context, ref: string) => setInstalled(ctx, ref, false);
 export const reinstallApp = (ctx: Context, ref: string) => setInstalled(ctx, ref, true);

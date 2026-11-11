@@ -156,6 +156,31 @@ describe('#3774 reinstallApp', () => {
     expect(after.id).toBe(before.id);
     expect(await db.appMember.count({ where: { appId: app.id } })).toBe(1);
     expect(await db.app.count({ where: { urn: app.urn } })).toBe(1);
+    // the write the uninstall refused succeeds again
+    const again = await M.installAgentIntoApp({}, { appRef: app.id, agentRef: agentId }, ctx(admin.id));
+    expect(again.appAgent.appId).toBe(app.id);
+  });
+
+  it('a repeat by URN reaches the same App (no-op), and never retargets a historical uninstalled App with the handle', async () => {
+    const historical = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Old', urn: app.urn, uninstalledAt: new Date('2026-01-01T00:00:00Z') } });
+    // two uninstalled holders: a URN is ambiguous, one identical refusal
+    expect((await code(M.reinstallApp({}, { ref: app.urn }, ctx(admin.id)))).code).toBe('FORBIDDEN');
+    expect(await M.reinstallApp({}, { ref: app.id }, ctx(admin.id))).toBe(true);
+    expect(await M.reinstallApp({}, { ref: app.urn }, ctx(admin.id))).toBe(true); // names the installed holder: no-op
+    expect(await M.uninstallApp({}, { ref: app.urn }, ctx(admin.id))).toBe(true);
+    expect((await row()).uninstalledAt).not.toBeNull(); // uninstalled the holder, not the historical row
+    expect(await M.uninstallApp({}, { ref: app.id }, ctx(admin.id))).toBe(true);
+    // the historical row is untouched by any of it, and by-id reinstall of it is refused while the handle is held
+    await M.reinstallApp({}, { ref: app.id }, ctx(admin.id));
+    expect((await code(M.reinstallApp({}, { ref: historical.id }, ctx(admin.id)))).code).toBe('APP_URN_IN_USE');
+    expect((await db.app.findUniqueOrThrow({ where: { id: historical.id } })).uninstalledAt!.toISOString()).toBe('2026-01-01T00:00:00.000Z');
+  });
+
+  it('the handle-taken refusal carries appId and urn', async () => {
+    await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Taker', urn: app.urn } });
+    try { await M.reinstallApp({}, { ref: app.id }, ctx(admin.id)); expect.unreachable(); } catch (e) {
+      expect((e as GraphQLError).extensions).toMatchObject({ code: 'APP_URN_IN_USE', appId: app.id, urn: app.urn });
+    }
   });
 
   it('A4: refused APP_URN_IN_USE while another installed App holds the handle; both unchanged', async () => {
@@ -181,13 +206,19 @@ describe('#3774 reinstallApp', () => {
     expect((await row()).uninstalledAt).toBeNull();
   });
 
-  it('A5: concurrent uninstall and reinstall serialize to one coherent state', async () => {
-    const results = await Promise.allSettled([
-      M.reinstallApp({}, { ref: app.id }, ctx(admin.id)),
-      M.uninstallApp({}, { ref: app.id }, ctx(admin.id)),
-    ]);
-    expect(results.every((r) => r.status === 'fulfilled')).toBe(true);
-    expect(await db.app.count({ where: { urn: app.urn, uninstalledAt: null } })).toBeLessThanOrEqual(1);
+  it('A5: concurrent uninstall and reinstall leave the stamp and the episode closure coherent', async () => {
+    await M.reinstallApp({}, { ref: app.id }, ctx(admin.id));
+    for (let i = 0; i < 4; i++) {
+      const w = await worker(app.id, `W${i}`);
+      const ep = await openEpisode(app.id, w.id);
+      await Promise.all([M.uninstallApp({}, { ref: app.id }, ctx(admin.id)), M.reinstallApp({}, { ref: app.id }, ctx(admin.id))]);
+      const r = await row();
+      const e = await db.darkWorkerEpisode.findUniqueOrThrow({ where: { id: ep.id } });
+      // uninstall ran after the reinstall <=> the App is uninstalled AND the episode was ended; otherwise the episode was ended
+      // by the uninstall that ran first or is still open with the App installed. Never: uninstalled with an open episode.
+      if (r.uninstalledAt) expect(e.endedAt).not.toBeNull();
+      await M.reinstallApp({}, { ref: app.id }, ctx(admin.id));
+    }
   });
 
   it('A6: deleted-while-uninstalled refuses reinstall (no undelete)', async () => {
@@ -209,5 +240,47 @@ describe('#3774 reinstallApp', () => {
     // any episode open now is a different row from the one the uninstall ended
     const openNow = await db.darkWorkerEpisode.findMany({ where: { workerId: w.id, endedAt: null } });
     expect(openNow.every((e) => e.id !== old.id)).toBe(true);
+  });
+});
+
+describe('#3774 the in-transaction gate re-check (revocation race)', () => {
+  /** A db whose FIRST orgMember.findFirst (the outer gate) reads truthfully, then revokes the caller's membership. */
+  function revokedAfterOuterGate(userId: string): Context['db'] {
+    let fired = false;
+    return new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === 'orgMember') {
+          return new Proxy(target.orgMember, {
+            get(t, p) {
+              if (p === 'findFirst') {
+                return async (...a: unknown[]) => {
+                  const r = await (t as any).findFirst(...a);
+                  if (!fired) { fired = true; await db.orgMember.updateMany({ where: { userId }, data: { deletedAt: new Date() } }); }
+                  return r;
+                };
+              }
+              const v = Reflect.get(t, p); return typeof v === 'function' ? v.bind(t) : v;
+            },
+          });
+        }
+        const v = Reflect.get(target, prop, receiver);
+        return typeof v === 'function' ? v.bind(target) : v;
+      },
+    }) as Context['db'];
+  }
+
+  it('uninstall: an admin revoked after the outer gate is refused and nothing is stamped', async () => {
+    const racer = await mkUser('race');
+    await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: racer.id, role: 'ADMIN' } });
+    await code(M.uninstallApp({}, { ref: app.id }, { db: revokedAfterOuterGate(racer.id), userId: racer.id, roles: ['READER'] }));
+    expect((await row()).uninstalledAt).toBeNull();
+  });
+
+  it('reinstall: the same race', async () => {
+    await M.uninstallApp({}, { ref: app.id }, ctx(admin.id));
+    const racer = await mkUser('race2');
+    await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: racer.id, role: 'ADMIN' } });
+    await code(M.reinstallApp({}, { ref: app.id }, { db: revokedAfterOuterGate(racer.id), userId: racer.id, roles: ['READER'] }));
+    expect((await row()).uninstalledAt).not.toBeNull();
   });
 });

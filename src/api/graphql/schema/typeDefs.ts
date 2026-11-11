@@ -14031,7 +14031,8 @@ export const typeDefs = `#graphql
     same transaction (hrn:node:hadronmemory.com:specs:cor:dmo:050:21, Holger R1-R3, 2026-11-09).
 
     Whoever may deleteApp may call this (the same gate); anyone else, and an App that does not exist, gets one identical
-    refusal. A repeat on an uninstalled App changes nothing. A deleted App is refused (APP_DELETED). Accepts the ID or URN.
+    refusal. A repeat on an uninstalled App changes nothing. A deleted App is refused (APP_DELETED). Accepts the ID, or a URN: it
+    names the installed App holding it, else the one uninstalled App with it.
     """
     uninstallApp(ref: ID!): Boolean!
 
@@ -14040,8 +14041,9 @@ export const typeDefs = `#graphql
     (hrn:node:hadronmemory.com:specs:cor:dmo:050:21, R2). Same gate as uninstallApp.
 
     Refused APP_URN_IN_USE while another installed App holds the handle, and APP_DELETED for a deleted App (there is no
-    undelete). A repeat on an installed App changes nothing. Accepts the ID, or the URN when exactly one uninstalled App
-    holds it. A worker that is still dark opens a NEW episode on the next sweep.
+    undelete). A repeat on an installed App changes nothing. Accepts the ID, or a URN: it names the installed App holding
+    it (so a repeat by URN is a no-op), else the one uninstalled App with it (two or more: name one by id). The refusal's
+    extensions carry appId and urn. A worker that is still dark opens a NEW episode on the next sweep.
     """
     reinstallApp(ref: ID!): Boolean!
 
