@@ -2067,6 +2067,18 @@ export const typeDefs = `#graphql
     family: String
     "Recorded on a session the redemption starts only."
     transcriptPath: String
+    """
+    #3822 (hrn:node:hadronmemory.com:specs:cor:agt:020:03) — the worker the caller expects to recover, e.g. the
+    worker a CLI worktree was last bound to. Narrows the resume to that worker: its claim or live session binds
+    even when another worker's waits too, and a CHOOSE lists only its candidates. When nothing of that worker's
+    waits but a claim or live session of another worker of the caller's does, the call refuses RESUME_REFUSED
+    with extensions reason WORKER_MISMATCH, picked (true when \`session\` chose that other worker's item),
+    expectedWorkerId, expectedWorkerName (null unless the caller may read that worker), foundWorkerId,
+    foundWorkerName and foundSource (CLAIM or LIVE_SESSION), before any write: no claim is consumed and no
+    session is started, ended or touched. With nothing of the caller's waiting the answer stays
+    NOTHING_TO_RESUME. Omitted or null: unchanged. Blank: BAD_USER_INPUT.
+    """
+    expectedWorkerId: ID
   }
 
   type UsageEvent {
