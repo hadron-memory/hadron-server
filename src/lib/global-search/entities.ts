@@ -601,6 +601,9 @@ async function searchUsers(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
   return hits;
 }
 
+/** Added to a task's score on an exact handle match: above a tie with an exact title (tier 3 x name weight). */
+const EXACT_HANDLE_BOOST = 0.5;
+
 export const taskSearchLimits = {
   /** Distinct Apps examined per page. */
   page: 100,
@@ -695,7 +698,8 @@ async function searchAgentTasks(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
       name: r.title,
       description: null, // pinned for this slice
       matchedField: m.field,
-      score: m.score,
+      // An exact handle (ignoring case) outranks every other match, an exact title included (cor:api:050:02).
+      score: r.handle !== null && r.handle.toLowerCase() === q.toLowerCase() ? m.score + EXACT_HANDLE_BOOST : m.score,
       memoryId: null,
       organizationId: r.app.organizationId,
       handle: r.handle,

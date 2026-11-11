@@ -98,6 +98,15 @@ describe('agentTask global search (#3945)', () => {
     expect(r.total).toBeGreaterThanOrEqual(2);
   });
 
+  it('an exact handle outranks a task whose exact title is the same text (#3964 LOCAL P2)', async () => {
+    const decoy = await mkTask(participant, appX.id, taskX.handle.toLowerCase());
+    for (let i = 0; i < 2; i++) {
+      const r = await search(userCtx(participant), taskX.handle);
+      expect(r.hits[0].id).toBe(taskX.id);
+      expect(r.hits.map((h: any) => h.id)).toContain(decoy.id);
+    }
+  });
+
   it('a participant sees hits for their App only; hits and total agree', async () => {
     const r = await search(userCtx(participant), 'zebra');
     expect(r.hits.map((h: any) => h.id)).toEqual([taskX.id]);
