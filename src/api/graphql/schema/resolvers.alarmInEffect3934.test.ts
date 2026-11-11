@@ -443,7 +443,7 @@ describe('#3934 — escalationEndedAt and alarmsInEffect on a task alarm', () =>
     expect((await events('', null)).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: iso('11:10') });
   });
 
-  it('a hand-back clears the holder: activity in the gap before the task is assigned again never counts (real hand-back and real assign)', async () => {
+  it('a hand-back ends the stall episode AT the hand-back: not at the later assignment, and not at activity in the gap (real hand-back and real assign)', async () => {
     const t = await task({ ownerWorkerId: ada.id, assigneeWorkerId: anne.id, assignedAt: at('09:30'), status: 'started', startedAt: at('10:00') });
     await appendTaskEvent(db, { appId: app.id, taskId: t.id, actor: { userId: admin.id, workerId: null, agentId: null }, event: { type: 'task.assigned', assignee: { workerId: anne.id }, closeSessionWhenDone: false }, createdAt: at('09:30') });
     const session = await db.session.create({ data: { id: generateId(), appId: app.id, workerId: anne.id, agentId, startedAt: at('10:00'), updatedAt: at('10:00') } });
@@ -458,9 +458,10 @@ describe('#3934 — escalationEndedAt and alarmsInEffect on a task alarm', () =>
     await M.assignAgentTask({}, { taskId: t.id, assignee: { worker: anne.id } }, ctx(admin.id));
     const types = (await db.agentTeamEvent.findMany({ where: { taskId: t.id }, select: { type: true } })).map((e) => e.type);
     expect(types).toEqual(expect.arrayContaining([...ASSIGNEE_CLEARED_EVENT_TYPES, 'task.assigned']));
-    const reassign = await db.agentTeamEvent.findFirstOrThrow({ where: { taskId: t.id, type: 'task.assigned', createdAt: { gt: at('23:00') } } });
+    const handBack = await db.agentTeamEvent.findFirstOrThrow({ where: { taskId: t.id, type: 'task.handed-back' } });
     await record('23:59');
-    expect((await events('', null)).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: reassign.createdAt.toISOString() });
+    // The hand-back leaves `started`, which ends the no-progress episode right there; the later assignment (and the gap activity) are not the end.
+    expect((await events('', null)).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: handBack.createdAt.toISOString() });
   });
 
   it('the same answer as the wake schedule: the wake pass closes exactly the alarms the read calls ended', async () => {

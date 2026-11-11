@@ -825,16 +825,17 @@ export async function endedAlarmEpisodeInstants(
   // carries `payload.fields` (the changed field names), assignment is `task.assigned`, `task.reassigned` or
   // `assignment.matched`, a release is `task.released`, a note is `task.progress`.
   const pairs = [...new Map(endedSubject.map((a) => [`${a.taskId}|${a.episodeStart.getTime()}`, a])).values()];
-  const firsts = await db.$queryRaw<{ taskId: string; start: Date; note: Date | null; startByEdit: Date | null; finishByEdit: Date | null; assigned: Date | null; released: Date | null }[]>`
+  const firsts = await db.$queryRaw<{ taskId: string; start: Date; note: Date | null; startByEdit: Date | null; finishByEdit: Date | null; assigned: Date | null; released: Date | null; handedBack: Date | null }[]>`
     SELECT p.task_id AS "taskId", p.start AS "start",
       min(e.created_at) FILTER (WHERE e.type = 'task.progress') AS "note",
       min(e.created_at) FILTER (WHERE e.type = 'task.edited' AND jsonb_exists(e.payload -> 'fields', 'startBy')) AS "startByEdit",
       min(e.created_at) FILTER (WHERE e.type = 'task.edited' AND jsonb_exists(e.payload -> 'fields', 'finishBy')) AS "finishByEdit",
       min(e.created_at) FILTER (WHERE e.type IN ('task.assigned', 'task.reassigned', 'assignment.matched')) AS "assigned",
-      min(e.created_at) FILTER (WHERE e.type = 'task.released') AS "released"
+      min(e.created_at) FILTER (WHERE e.type = 'task.released') AS "released",
+      min(e.created_at) FILTER (WHERE e.type = 'task.handed-back') AS "handedBack"
     FROM unnest(${pairs.map((a) => a.taskId)}::text[], ${pairs.map((a) => toNaiveUtc(a.episodeStart))}::timestamp[]) AS p(task_id, start)
     JOIN agent_team_events e ON e.task_id = p.task_id AND e.created_at > p.start
-      AND e.type IN ('task.progress', 'task.edited', 'task.assigned', 'task.reassigned', 'assignment.matched', 'task.released')
+      AND e.type IN ('task.progress', 'task.edited', 'task.assigned', 'task.reassigned', 'assignment.matched', 'task.released', 'task.handed-back')
     GROUP BY p.task_id, p.start`;
   const firstOf = new Map(firsts.map((f) => [`${f.taskId}|${new Date(f.start).getTime()}`, f]));
   // The first child to end after each episode began (a finish or a cancellation), from the children's own stamps.
@@ -925,9 +926,10 @@ export async function endedAlarmEpisodeInstants(
     const released = f?.released ?? row.releasedAt;
     const byRule: Record<string, (Date | null | undefined)[]> = {
       'stall.not-started': [row.startedAt, assigned, released, f?.startByEdit, f?.finishByEdit],
-      'stall.no-progress': [assigned, released, f?.note, f?.finishByEdit, firstActivity, firstChildEnd],
+      // A hand-back leaves `started`, which ends every ordinary stall episode of the task (cor:agt:050:13); a finish-by one is kept.
+      'stall.no-progress': [assigned, released, f?.note, f?.finishByEdit, firstActivity, firstChildEnd, f?.handedBack],
       'assignment.unassignable': [assigned, released, f?.finishByEdit],
-      'stall.owner-unreactive': [assigned, firstActivity],
+      'stall.owner-unreactive': [assigned, firstActivity, f?.handedBack],
       'stall.finish-by': [f?.finishByEdit],
     };
     const moves = [...(byRule[a.type] ?? []), row.finishedAt, row.cancelledAt]
