@@ -4857,10 +4857,13 @@ model AppRun {
   id                   String               @id
   organizationId       String               @map("organization_id")
   appId                String               @map("app_id")
-  /// #3689 (cor:agt:010:01 rev 45): every run names an existing Agent. NOT NULL with a foreign key; an Agent hard
-  /// delete removes its runs (gate R4). Mint refuses an agentless launch first, as BOOT_PROMPT_NOT_SET (cor:agt:040:07).
-  agentId              String               @map("agent_id")
-  agent                Agent                @relation("AppRunAgent", fields: [agentId], references: [id], onDelete: Cascade)
+  /// #3689 (cor:agt:010:01 rev 45): every run names an existing Agent. The DATABASE guarantees it: NOT NULL with a
+  /// foreign key; an Agent hard delete removes its runs (gate R4). Mint refuses an agentless launch first, as
+  /// BOOT_PROMPT_NOT_SET (cor:agt:040:07). The Prisma field stays OPTIONAL on purpose: a migration refused with HDPRF
+  /// (#3770) is rolled back and this build then serves the old nullable column, whose retained agentless runs a
+  /// required field cannot read (P2032). Tighten it only once the migration has applied everywhere (#3910 F1).
+  agentId              String?              @map("agent_id")
+  agent                Agent?               @relation("AppRunAgent", fields: [agentId], references: [id], onDelete: Cascade)
   /// On-behalf-of user (cor:agt:010:01, D-2026-07-04-C). NULL ⇒ pure App
   /// service identity — no personal/private reach.
   userId               String?              @map("user_id")
