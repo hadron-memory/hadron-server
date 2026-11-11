@@ -44,6 +44,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.agentTaskList", // #2421: limit applies only when symptom is present; default 3, cap 3.
   "Query.agentTasks",
   "Query.agentTeamEvents",
+  "Query.agentTeamEventsPage", // #3933: clampListTake, default 20, cap 200; the common omitted bound 100 is conservative.
   "Query.agentWebhooks",
   "Query.agents",
   "Query.aiModelPrices",

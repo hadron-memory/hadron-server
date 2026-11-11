@@ -9034,6 +9034,8 @@ export const typeDefs = `#graphql
     read; the cursor is the (createdAt, id) pair, so events sharing a
     timestamp are never skipped. since is a coarse time filter (strictly
     after), not a continuation. limit defaults to 20 (cap 200).
+    #3933 (hrn:node:hadronmemory.com:specs:cor:agt:050:11): newestFirst reads from the newest end instead, the exact mirror
+    order with the same gate, filters and paging, continued with before (the id of the oldest event read).
     task.warning, task.edited and task.properties-changed are passive history (never wake, suppress a wake or count as activity); payload is {code}, changed field names only, or (task.properties-changed) the size and SHA-256 of the canonical JSON of the old and new properties, never their content.
     """
     agentTeamEvents(
@@ -9041,6 +9043,10 @@ export const typeDefs = `#graphql
       since: DateTime
       "The id of the last event read: the page continues strictly after it. An id that is not an event of this App is refused BAD_USER_INPUT."
       after: ID
+      "#3933: with newestFirst, the id of the last (oldest) event read; the page continues strictly older than it, by the same (createdAt, id) pair. An id that is not an event of this App is refused BAD_USER_INPUT. Refused without newestFirst."
+      before: ID
+      "#3933: true reads from the NEWEST end, the exact mirror of the default order, with the same gate, filters and paging (default 20, cap 200); continue with before, not after (refused with after). Omitted or false: the oldest-first read, unchanged."
+      newestFirst: Boolean
       types: [String!]
       "#3449: literal prefix, intersects nonempty types; app. includes legacy platform events. An empty prefix matches all types; omitted or empty types adds no type filter."
       codePrefix: String
@@ -9048,6 +9054,25 @@ export const typeDefs = `#graphql
       taskId: ID
       limit: Int
     ): [AgentTeamEvent!]!
+
+    """
+    #3933 (hrn:node:hadronmemory.com:specs:cor:api:120:04) — agentTeamEvents with the page's end told: the same arguments, gate,
+    filters, order and paging, returning hasMore and nextCursor so a reader knows whether older (or newer) events remain without
+    another read. nextCursor is the id of the last event served when more remain, to pass as after (oldest-first) or, with
+    newestFirst, as before; null on the last page.
+    """
+    agentTeamEventsPage(
+      appRef: ID!
+      since: DateTime
+      after: ID
+      before: ID
+      newestFirst: Boolean
+      types: [String!]
+      codePrefix: String
+      alarmsOnly: Boolean
+      taskId: ID
+      limit: Int
+    ): AgentTeamEventsPage!
 
     """
     #3853 — the usage accounts an App has history for: one entry per label, host and family
@@ -16451,6 +16476,15 @@ export const typeDefs = `#graphql
     episodeStart: DateTime
     "#1706 — alarms only: who the alarm wakes and when, nearest owner first (hrn:node:hadronmemory.com:specs:cor:agt:050:19). Null for an ordinary event."
     wakes: [AgentTeamAlarmSchedule!]
+  }
+
+  "#3933: one page of an App's team events and whether more remain (hrn:node:hadronmemory.com:specs:cor:api:120:04)."
+  type AgentTeamEventsPage {
+    events: [AgentTeamEvent!]!
+    "True when events beyond this page match the same read."
+    hasMore: Boolean!
+    "The id of the last event served when hasMore, to pass as after (or with newestFirst as before); null on the last page."
+    nextCursor: ID
   }
 
   enum AgentTeamEventSeverity {
