@@ -232,6 +232,21 @@ describe('the chat path', () => {
     expect((await counts())[0]).toBeGreaterThan(before[0] as number);
   });
 
+  it('a refused cold PRIVATE start provisions nothing, with or without a matching App (Andi F1 on #3960, Rodolfo P3-3)', async () => {
+    // loc-scope-ok: whole-table counts, compared before and after one refused call.
+    const counts = async () => [await db.memory.count(), await db.node.count(), await db.memorySubscription.count()];
+    const asAdmin = (): Context => ({ db, userId: admin.id, roles: ['READER'] } as Context);
+    // `admin` is an org member, so the lazy per-user memory belongs to the App; `member` is not, so it belongs to none.
+    for (const [who, bad] of [[asAdmin, foreign.id], [asMember, foreign.id], [asMember, claude.id]] as const) {
+      const before = await counts();
+      expect(await code(start({ scope: 'private', aiConfigChoice: bad }, who()))).toBe('AiServiceConfigNotFoundError');
+      expect(await counts()).toEqual(before);
+    }
+    // the App's own config is accepted for the person it belongs to, and does provision
+    const ok = await start({ scope: 'private', aiConfigChoice: claude.id }, asAdmin());
+    expect(await stored(ok.chatId)).toBe(claude.id);
+  });
+
   it('a disabled own config is accepted as a choice (skipped at turn time)', async () => {
     await db.aiServiceConfig.update({ where: { id: glm.id }, data: { enabled: false } });
     const { chatId } = await start({ aiConfigChoice: glm.id });

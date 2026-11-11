@@ -454,7 +454,7 @@ export const chatMutations = {
         }
         sharedAppId = selectedApp.id;
         // Andi's F1 on #3960: a choice the App does not own is refused HERE, before the first chat provisions the
-        // App-class memory, so a refused start leaves nothing behind. (Later branches provision nothing.)
+        // App-class memory, so a refused start leaves nothing behind. (The lazy per-user branch below judges it the same way before its own create.)
         if (aiConfigChoice != null) {
           await normalizeChatAiConfigChoice(ctx.db, selectedApp.id, aiConfigChoice).catch(rethrowAiConfigTyped);
         }
@@ -553,6 +553,11 @@ export const chatMutations = {
                 })
               : null;
 
+          // Andi's F1 on #3960, the private arm: the memory below would belong to `matchingApp` (else to no App), so a
+          // choice that App does not own is refused before the memory exists. Same refusal as the later common check.
+          if (aiConfigChoice != null) {
+            await normalizeChatAiConfigChoice(ctx.db, matchingApp?.id ?? null, aiConfigChoice).catch(rethrowAiConfigTyped);
+          }
           const memoryClass: 'personal' | 'knowledge' = matchingApp
             ? 'personal'
             : 'knowledge';
