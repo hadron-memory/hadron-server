@@ -907,8 +907,9 @@ export async function endedAlarmEpisodeInstants(
     const i = inputsOf.get(a.taskId);
     const pairKey = `${a.taskId}|${a.episodeStart.getTime()}`;
     const f = firstOf.get(pairKey);
-    const firstActivity = activityOf.get(pairKey) ?? i?.assigneeActivityAt;
-    const firstChildEnd = childEndOf.get(pairKey) ?? i?.lastChildEndedAt;
+    // The windowed reads only: a latest-only value would count activity from before the assignee held the task.
+    const firstActivity = activityOf.get(pairKey);
+    const firstChildEnd = childEndOf.get(pairKey);
     // The first transition that ends THIS rule's episode (cor:agt:050:14–:17), never a move another rule would count:
     // assignment is not what ends a finish-by alarm, and a start is not what ends a no-progress one. A finish or a
     // cancellation ends every rule. Where no event of a kind exists (a row seeded past the resolvers), the row's own

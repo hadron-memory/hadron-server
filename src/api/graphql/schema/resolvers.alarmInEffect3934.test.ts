@@ -134,6 +134,7 @@ describe('#3934 — escalationEndedAt and alarmsInEffect on a task alarm', () =>
     expect(await db.alarmEscalationEnd.count({ where: { eventId: alarm.id } })).toBe(0);
     const [e] = await events('', null);
     expect(e.escalationEndedAt).toBe(e.acknowledgedAt);
+    expect(await events('alarmsInEffect: true', null)).toEqual([]); // acknowledged while running: out of effect at once, no pass needed
   });
 
   it('acknowledged after the pass recorded the end: the earlier instant, the recorded end', async () => {
@@ -382,6 +383,20 @@ describe('#3934 — escalationEndedAt and alarmsInEffect on a task alarm', () =>
       await task({ parentTaskId: parentId, ownerWorkerId: anne.id, assigneeWorkerId: rook.id, assignedAt: at('09:35'), status: 'finished', startedAt: at('09:40'), finishedAt: at('09:50'), resultOutcome: 'succeeded' });
     });
     expect(e).toMatchObject({ escalationEndedAt: iso('12:00') });
+  });
+
+  it('the real reassignment mutation\'s event is what the stints are read from: the previous assignee\'s activity is found through its payload', async () => {
+    const t = await task({ ownerWorkerId: ada.id, assigneeWorkerId: anne.id, assignedAt: at('09:30'), status: 'started', startedAt: at('10:00') });
+    const session = await db.session.create({ data: { id: generateId(), appId: app.id, workerId: anne.id, agentId, startedAt: at('10:00'), updatedAt: at('10:00') } });
+    await tick('11:00');
+    const alarm = (await alarms('stall.no-progress')).find((a) => a.taskId === t.id)!;
+    await db.session.update({ where: { id: session.id }, data: { updatedAt: at('11:10') } });
+    await M.reassignAgentTask({}, { taskId: t.id, assignee: { worker: rook.id } }, ctx(admin.id)); // production payload, the clock's real now
+    const ev = await db.agentTeamEvent.findFirstOrThrow({ where: { taskId: t.id, type: 'task.reassigned' } });
+    expect(ev.payload).toMatchObject({ from: { workerId: anne.id }, to: { workerId: rook.id } });
+    await record('12:30');
+    // Anne acted at 11:10 while she held it; the reassignment (real now) is later, so the end is her activity.
+    expect((await events('', null)).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: iso('11:10') });
   });
 
   it('the same answer as the wake schedule: the wake pass closes exactly the alarms the read calls ended', async () => {

@@ -75,7 +75,9 @@ export async function taskStallTick(db: PrismaClient, now = new Date()): Promise
   }
   try {
     // #3934 (V77): after the episode passes above, record the end of every alarm whose escalation has stopped (once).
-    await recordEndedEscalations(db, now);
+    const recorded = await recordEndedEscalations(db, now);
+    // The first pass after deploy drains the existing unacknowledged history once; say so, so the drain is visible.
+    if (recorded > 0) console.log(`[task-stall] recorded ${recorded} escalation end(s)`);
   } catch (err) {
     console.error('[task-stall] recording escalation ends failed:', err);
   }
