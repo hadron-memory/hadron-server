@@ -47,9 +47,13 @@ describe('#3872 judgeCollation', () => {
 describe('#3872 assertGoldenCollation inspects the connected database', () => {
   it('reads the live database metadata, not an environment variable', async () => {
     const observed = await readDatabaseCollation(db);
-    const [{ lc_collate }] = await db.$queryRaw<Array<{ lc_collate: string }>>`SHOW lc_collate`;
-    expect(observed?.collate).toBe(lc_collate);
     expect(observed?.provider).toMatch(/^[cib]$/);
+    // Independent of the metadata under test: how this database actually sorts. libc en_US.UTF-8 ignores
+    // punctuation and case at the first level; C/POSIX collations compare bytes.
+    const [{ sorted }] = await db.$queryRaw<Array<{ sorted: string[] }>>`
+      SELECT array_agg(x ORDER BY x) AS sorted FROM unnest(ARRAY['a', 'B', '_a']) AS x`;
+    const bytewise = ['B', '_a', 'a'];
+    expect(sorted).toEqual(/^(C|POSIX)(\.|$)/.test(observed?.collate ?? '') ? bytewise : ['_a', 'a', 'B']);
   });
   it('throws a named mismatch error carrying the observed collation', async () => {
     const err = await assertGoldenCollation(fake(async () => [{ collate: 'C.UTF-8', provider: 'c' }])).catch(e => e);

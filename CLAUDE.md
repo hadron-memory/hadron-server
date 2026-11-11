@@ -117,6 +117,20 @@ that drift is what the deprecated `hadron_dev` row above warns about).
 > stamps the fingerprint, and a serial run refuses a base stamped for another
 > schema. Never push into a test template by hand.
 
+**Test-database collation prerequisite (#3872).** The byte-exact golden hashes in
+`src/mcp/server.batchAllocation2774.test.ts` (the `Referenced by` order) hold only where the
+connected test database's collation is `en_US.UTF-8` on the libc provider, which is what the
+shared host's databases use. On any other database (for example a private cluster made with
+`C.UTF-8`) that test group fails ONCE with a named `LOCALE_PREREQUISITE` error carrying the
+observed and required collation, and its 12 golden comparisons skip behind it; it never
+rebaselines or canonicalises the hashes. The guard (`src/test/goldenCollation3872.ts`) reads the
+actual connected database, not `LANG`/`LC_*` or an assumed template, and admits no other
+spelling or provider without evidence. For a private cluster use
+`initdb -E UTF8 --locale=en_US.UTF-8`; never change the locale of a shared or canonical
+database. This is a test-environment constraint, not a product-wide locale rule.
+`scripts/db/golden-collation-oracle-3872.mjs` judges a `vitest --reporter=json` report from a
+non-matching cluster (one named failure, zero opaque mismatches) or a matching one (all green).
+
 ## Disposable E2E stacks
 
 For isolated QA on a fresh seeded DB, see [`scripts/e2e/README.md`](scripts/e2e/README.md).
