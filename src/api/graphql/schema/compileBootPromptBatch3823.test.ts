@@ -317,6 +317,16 @@ describe('approval under a batch grant', () => {
     expect((await db.node.findUniqueOrThrow({ where: { id: c.id } })).approvedRevNo).toBeNull();
   });
 
+  it('Riana P3-6: approveMemoryNodes (the bulk door) keeps the same shape: an App key refuses, a person\'s session lifts', async () => {
+    const c = await compiled(installId, `boot:workers:${workerId}:compiled`);
+    await grant(c.id);
+    const keyed = { ...ctx(), appKeyId: generateId() } as Context;
+    await asWorker(() => M.approveMemoryNodes(null, { memoryRef: installId }, keyed)).catch(() => undefined);
+    expect((await db.node.findUniqueOrThrow({ where: { id: c.id } })).approvedRevNo).toBeNull();
+    await asWorker(() => M.approveMemoryNodes(null, { memoryRef: installId }, ctx()));
+    expect((await db.node.findUniqueOrThrow({ where: { id: c.id } })).approvedRevNo).not.toBeNull();
+  });
+
   it('a person approving as themselves is unaffected', async () => {
     const c = await compiled(installId, `boot:workers:${workerId}:compiled`);
     expect(await codeOf(M.approveNode(null, { nodeRef: c.id }, ctx()))).toBe('NO_ERROR');
