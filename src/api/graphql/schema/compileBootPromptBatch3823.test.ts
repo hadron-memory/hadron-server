@@ -294,6 +294,14 @@ describe('approval under a batch grant', () => {
     for (const id of [stray.id, foreign.id]) expect(await codeOf(approve(id))).toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
   });
 
+  it('Andi P2: a worker session under an App key keeps the refusal: the lift needs a person\'s user and no App key', async () => {
+    const c = await compiled(installId, `boot:workers:${workerId}:compiled`);
+    await grant(c.id);
+    const keyed = { ...ctx(), appKeyId: generateId() } as Context;
+    expect(await codeOf(asWorker(() => M.approveNode(null, { nodeRef: c.id }, keyed)))).not.toBe('NO_ERROR');
+    expect((await db.node.findUniqueOrThrow({ where: { id: c.id } })).approvedRevNo).toBeNull();
+  });
+
   it('a person approving as themselves is unaffected', async () => {
     const c = await compiled(installId, `boot:workers:${workerId}:compiled`);
     expect(await codeOf(M.approveNode(null, { nodeRef: c.id }, ctx()))).toBe('NO_ERROR');

@@ -344,6 +344,13 @@ describe('the lift is the update door only, in place, signer re-judged (#3823 Ri
     expect((await db.node.findUniqueOrThrow({ where: { id: s.id } })).content).toBe('original');
   });
 
+  it('Andi P3: an edit grant minted with max_uses above 1 is not honoured as multi-use: it admits nothing', async () => {
+    const s = await src(installMemoryId, `boot:workers:${workerId}:source`);
+    const g = await grant(s.id, { max_uses: 2 });
+    expect(await codeOf(edit(s.id))).toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+    expect(await uses(g)).toBe(0);
+  });
+
   it('Andi P2-1: a text edit that names another loc or memory is not in place: refused, unspent', async () => {
     const s = await src(installMemoryId, `boot:workers:${workerId}:source`);
     const g = await grant(s.id);

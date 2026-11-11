@@ -135,7 +135,7 @@ async function candidates(q: Q, workerId: string, appId: string, action: string,
        AND ${grantLiveSql('g')}
        AND g.activated_at <= ${GRANT_DB_NOW}
        AND g.activated_at + interval '1 hour' > ${GRANT_DB_NOW}
-       AND ${single ? P.sql`NOT EXISTS (SELECT 1 FROM grant_events e WHERE e.grant_id = g.id AND e.action = 'USE')` : P.sql`TRUE`}
+       AND ${single ? P.sql`(g.max_uses IS NULL OR g.max_uses = 1) AND NOT EXISTS (SELECT 1 FROM grant_events e WHERE e.grant_id = g.id AND e.action = 'USE')` : P.sql`TRUE`}
      ORDER BY g.activated_at, g.id`);
   return rows.map((r) => ({ id: r.id, issuer: r.issuer_user_id }));
 }

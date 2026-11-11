@@ -167,6 +167,11 @@ export async function approveNodeInTransaction(
     now?: Date;
     /** #2043 — the caller's boot-prompt approval decision for this memory (bootPromptApprovalGate). Required: no caller skips it. */
     bootPromptGate: BootPromptApprovalGate;
+    /**
+     * #3823 (Andi P2): whether the session behind this call has the standing a batch grant presupposes: a person's user behind it
+     * and no App key, the same shape the batch COMPILE requires. Absent means false, so a caller that does not say never lifts.
+     */
+    workerSessionMayUseBatch?: boolean;
   },
 ): Promise<{ node: NodeApprovalRow; approvedNow: boolean }> {
   // #2043 (R30, cor:agt:040:18) — judged on the LOCKED row, before the revision
@@ -180,7 +185,7 @@ export async function approveNodeInTransaction(
       // #3823 (ruling 0267, cor:agt:040:18 r9, R30's one exception): a worker session approves a COMPILED prompt only under a live
       // batch grant that names it. The approval is recorded as the worker's, never as its holder's, and it never signs.
       const workerId = boundWorkerId();
-      const batchGrantId = gate.refusal === 'BOOT_PROMPT_WORKER_SESSION_REFUSED' && workerId && row.node_type === COMPILED_BOOT_PROMPT_NODE_TYPE
+      const batchGrantId = gate.refusal === 'BOOT_PROMPT_WORKER_SESSION_REFUSED' && workerId && opts.workerSessionMayUseBatch === true && row.node_type === COMPILED_BOOT_PROMPT_NODE_TYPE
         ? await findBatchGrant(tx, workerId, { id: row.id, memoryId: row.memory_id, loc: row.loc }, true)
         : null;
       if (!batchGrantId) throw new NodeApprovalRefusal(gate.refusal, BOOT_PROMPT_APPROVAL_MESSAGES[gate.refusal], { op: 'approve' });

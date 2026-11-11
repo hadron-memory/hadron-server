@@ -372,16 +372,20 @@ async function decide(
       ? { memoryId: agentMemoryId, loc: AGENT_COMPILED_LOC }
       : { memoryId: installMemoryId!, loc: target.kind === 'APP_AGENT' ? APP_COMPILED_LOC : workerCompiledLoc(target.workerId) };
 
+    let batchNodeId: string | null = null;
     if (batchWorkerId) {
       // #3823 (V49, V52, V53): a batch compile writes a NEW REVISION of a compiled node the grant names. It never creates one, and only
       // a live batch grant held by this worker for this very node admits it. Judged BEFORE anything is assembled or provisioned, so a
       // session without one learns nothing else about the target, and everything rolls back on a refusal. The grant row is the last
       // lock taken before the writes (FOR SHARE: a revocation either committed first or waits).
       const node = await tx.node.findFirst({ where: { memoryId: out.memoryId, loc: out.loc, deletedAt: null }, select: { id: true, nodeType: true } });
+      batchNodeId = node?.id ?? null;
       if (!node || node.nodeType !== COMPILED_BOOT_PROMPT_NODE_TYPE
         || !(await hasBatchGrant(tx, batchWorkerId, { id: node.id, memoryId: out.memoryId, loc: out.loc }, true))) {
         throw compileNotPermitted();
       }
+      // V53 (cor:agt:040:12) states this for the App-level compile only: an Agent or worker compile has no pointer requirement, so a
+      // batch worker may refresh a compiled prompt nothing serves yet. That is the ruling, not an omission.
       // V53 (cor:agt:040:12): an App-level compile under a batch grant only refreshes what the App already serves, so the App's
       // pointer must ALREADY name this compiled node. Read under the App and Agent anchors held above; it is never written.
       if (target.kind === 'APP_AGENT') {
@@ -452,6 +456,8 @@ async function decide(
       where: { memoryId: out.memoryId, loc: out.loc, deletedAt: null },
       select: { id: true, nodeType: true },
     });
+    // The grant was judged for ONE node id; a delete and re-create at the same address in between is a node it never named (Andi).
+    if (batchWorkerId && existing?.id !== batchNodeId) throw compileNotPermitted();
     if (existing && options.createOnly) {
       throw new GraphQLError('The compiled boot prompt address is occupied.', { extensions: { code: 'ADDRESS_OCCUPIED' } });
     }

@@ -225,6 +225,7 @@ export const nodeApprovalMutations = {
         async (tx, txCtx) => approveNodeInTransaction(tx, id, {
           memoryId, approver: editorFromAuth(ctx), key, expectedRevision: revision,
           bootPromptGate: await bootPromptApprovalGate(txCtx, memoryId),
+          workerSessionMayUseBatch: !!ctx.userId && !ctx.appKeyId,
         }),
       );
       return receiptOf(ctx, node);
@@ -283,7 +284,7 @@ export const nodeApprovalMutations = {
         for (const { id } of ids) {
           try {
             const result = await approveNodeInTransaction(tx, id, {
-              memoryId, approver: editorFromAuth(ctx), key, now, bootPromptGate,
+              memoryId, approver: editorFromAuth(ctx), key, now, bootPromptGate, workerSessionMayUseBatch: !!ctx.userId && !ctx.appKeyId,
             });
             if (result.approvedNow) approved.push(result.node);
             else alreadyApprovedCount += 1;
