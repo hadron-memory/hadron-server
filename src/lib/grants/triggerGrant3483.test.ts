@@ -142,6 +142,31 @@ describe('findAdmittingGrant: lock, then judge', () => {
     expect(await findAdmittingGrant(db, { appId: w.appId, action: 'schedule.create', entryNodeId: w.entryNodeId, actor: { ...actor, workerId: w.workerId }, lock: false })).toBeNull();
   });
 
+  // Security P3-1 on 8f098618: the worker row FOR SHARE fence. A retirement in flight when the spend starts is waited for and seen;
+  // without the fence the spend reads the old row, reaches the worker through its agent's grant, and commits first.
+  it('a worker retirement that commits while the spender waits on the worker row is seen: an agent-held grant admits nothing', async () => {
+    vi.stubEnv('WORKER_TRIGGER_GRANT_ENFORCED', 'true');
+    const k = await workerOf(w);
+    const s = await sessionOf(w, k);
+    const g = await triggerGrant(w, { holder: { kind: 'agent', id: w.agentId }, over: { max_uses: null } });
+    const blocker = new Client({ connectionString: process.env.DATABASE_URL });
+    await blocker.connect();
+    try {
+      await blocker.query('BEGIN');
+      await blocker.query(`UPDATE workers SET retired_at = ${NOW} WHERE id = $1`, [k]);
+      const spend = runAsActor({ workerId: k, agentId: w.agentId }, () =>
+        db.$transaction((tx) => admitWorkerTrigger(tx, { ...w.workerCtx, sessionId: s } as never, { appId: w.appId, action: 'schedule.create', entryNodeId: w.entryNodeId })));
+      const settled = spend.then(() => 'admitted', (e: { extensions?: { code?: string } }) => e.extensions?.code ?? String(e));
+      await new Promise((r) => setTimeout(r, 300));
+      await blocker.query('COMMIT');
+      expect(await settled).toBe('TRIGGER_GRANT_REQUIRED');
+    } finally {
+      await blocker.end();
+    }
+    expect(await useCount(g)).toBe(0);
+    expect(await useEvents(g)).toHaveLength(0);
+  });
+
   it('a revoke that commits while the spender waits on the grant row lock is seen: the spend refuses and charges nothing', async () => {
     vi.stubEnv('WORKER_TRIGGER_GRANT_ENFORCED', 'true');
     const g = await triggerGrant(w);
@@ -186,6 +211,9 @@ describe('the switch, the worker test and the open host-launch question', () => 
     // A bound actor with no session row: its kind is unknown, so it is judged host-launched (blind finding on 8f098618).
     expect(await runAsActor({ workerId: w.workerId, agentId: w.agentId }, () => workerBoundActor({ db } as never))).toMatchObject({ workerId: w.workerId, sessionId: null, hostLaunched: true });
     expect(await workerBoundActor({ db, sessionBindingRefused: true } as never)).toMatchObject({ workerId: null });
+    // Security P3-2 on 8f098618: a published actor and a session row that name different workers act as nobody.
+    const other = await workerOf(w);
+    expect(await runAsActor({ workerId: other, agentId: w.agentId }, () => workerBoundActor({ db, sessionId: w.sessionId } as never))).toMatchObject({ workerId: null });
     const launched = await sessionOf(w, w.workerId, w.agentId, true);
     expect(await workerBoundActor({ db, sessionId: launched } as never)).toMatchObject({ hostLaunched: true });
   });
