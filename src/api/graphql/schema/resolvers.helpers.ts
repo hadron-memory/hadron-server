@@ -9,7 +9,6 @@ import { PAGE_ARGS_DEFAULT, PAGE_ARGS_MAX, pageTake } from '../pageBounds.js';
 import { LINK_CAP_MEMORY_SELECT, linkWriteTargetAdmits } from '../../../lib/auth/agentMemoryLinkCap.js';
 import { createSystemMemoryGrantBatch, systemMemoryReadGrants, type SystemMemoryGrantBatch } from '../../../lib/auth/systemMemoryRead.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
-import { carryOperatorMark, isOperatorConversionContext } from '../../../lib/auth/operatorConversion.js';
 // Helpers extracted from resolvers.ts (Step 1 of the resolver split).
 // Pure mechanical move: shared auth/include/AI-config/chat/asset helpers used
 // by the GraphQL resolver map. No behavior change. The `Context` interface
@@ -481,7 +480,7 @@ export function isMemoryReadableCached(ctx: Context, memoryId: string): Promise<
  */
 export function withoutRequestCaches(ctx: Context, db?: Prisma.TransactionClient): Context {
   const fresh = Object.fromEntries(Object.entries(ctx).filter(([k]) => !k.endsWith('Cache'))) as Context;
-  return carryOperatorMark(ctx, db ? { ...fresh, db: db as PrismaClient } : fresh);
+  return db ? { ...fresh, db: db as PrismaClient } : fresh;
 }
 
 /**
@@ -2303,10 +2302,6 @@ export async function getAccessibleMemoryIds(
   // is correct and the default keeps it.
   options?: { excludeAppDerived?: boolean; publicTargetIds?: readonly string[] },
 ): Promise<string[] | null> {
-  // #2676 (P9): the conversion's operator principal reads what it converts: an install memory's text is otherwise
-  // read only by its App's participants, which no operator is. Writes stay limited to system memories (see
-  // requireMemoryWriteAccess), and this principal exists only inside src/admin (lib/auth/operatorConversion.ts).
-  if (isOperatorConversionContext(ctx)) return null;
   const scope = onlyMemoryId ? { id: onlyMemoryId } : {};
   // App Key with an active session — hard-isolate to the session's memory
   // plus the agent's system memory, with only the named PUBLIC-knowledge
@@ -2745,12 +2740,6 @@ export function safeCanonicalUrn(type: CanonicalUrnType, raw: string): string {
  * userless runs is judged against, and no other caller passes it.
  */
 export async function requireMemoryWriteAccess(ctx: Context, memoryId: string, destination?: WriteDestination): Promise<void> {
-  // #2676 (P9): the boot-prompt conversion's operator principal writes SYSTEM memories only (an Agent's own or an
-  // install memory); any other class falls through to the ordinary gate, which refuses it (it has no user).
-  if (isOperatorConversionContext(ctx)) {
-    const target = await ctx.db.memory.findFirst({ where: { id: memoryId, deletedAt: null }, select: { class: true } });
-    if (target?.class === 'system') return;
-  }
   // App-keyed callers: delegate to the class-aware MCP gate. The ADMIN/OWNER
   // shortcut applies only to non-strict org memories. A platform-admin USER
   // with an active App still cannot write another user's personal/private
