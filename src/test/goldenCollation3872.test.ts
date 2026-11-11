@@ -18,9 +18,15 @@ describe('#3872 judgeCollation', () => {
     expect(REQUIRED_GOLDEN_COLLATION).toBe('en_US.UTF-8');
     expect(judgeCollation({ collate: 'en_US.UTF-8', provider: 'c' }).kind).toBe('match');
   });
+  it('admits the one other spelling with evidence: the CI cluster reports en_US.utf8 (libc)', () => {
+    expect(judgeCollation({ collate: 'en_US.utf8', provider: 'c' }).kind).toBe('match');
+  });
   it.each([
     ['C.UTF-8 libc', { collate: 'C.UTF-8', provider: 'c' }],
-    ['unadmitted spelling en_US.utf8', { collate: 'en_US.utf8', provider: 'c' }],
+    ['unadmitted spelling EN_US.UTF-8', { collate: 'EN_US.UTF-8', provider: 'c' }],
+    ['unadmitted spelling en_US.UTF8', { collate: 'en_US.UTF8', provider: 'c' }],
+    ['another English locale', { collate: 'en_GB.UTF-8', provider: 'c' }],
+    ['en_US.utf8 on the ICU provider', { collate: 'en_US.utf8', provider: 'i' }],
     ['right name, ICU provider', { collate: 'en_US.UTF-8', provider: 'i' }],
     ['right name, builtin provider', { collate: 'en_US.UTF-8', provider: 'b' }],
   ])('refuses %s as a known mismatch, never as equivalent', (_label, observed) => {

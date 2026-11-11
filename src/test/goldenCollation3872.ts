@@ -9,8 +9,15 @@
  * and no product SQL or ordering is touched.
  */
 
-/** The collation the golden baselines were captured under. Alternate spellings need evidence before admission. */
+/** The collation the golden baselines were captured under; the name every refusal reports as required. */
 export const REQUIRED_GOLDEN_COLLATION = 'en_US.UTF-8';
+/**
+ * The spellings of that collation admitted, each with evidence (anything else is a mismatch, never an assumed
+ * equivalent). `en_US.UTF-8` is what the shared host's databases report. `en_US.utf8` is what the CI
+ * PostgreSQL cluster reports for the same glibc locale: the golden hashes pass on it (main's Unit Tests run
+ * 42984575047 at 0a6a226f is green) and #3940's first CI run printed that name for the connected database.
+ */
+const ADMITTED_COLLATIONS: ReadonlySet<string> = new Set([REQUIRED_GOLDEN_COLLATION, 'en_US.utf8']);
 /** The only provider admitted with it: libc (`pg_database.datlocprovider = 'c'`). */
 const REQUIRED_PROVIDER = 'c';
 const PROVIDER_NAMES: Record<string, string> = { c: 'libc', i: 'icu', b: 'builtin' };
@@ -35,7 +42,7 @@ export function judgeCollation(observed: ObservedCollation | null): CollationVer
   const { collate, provider } = observed;
   if (!collate) return { kind: 'unknown', reason: 'the database reports no collation' };
   if (!provider) return { kind: 'unknown', reason: 'the database reports no collation provider' };
-  if (collate === REQUIRED_GOLDEN_COLLATION && provider === REQUIRED_PROVIDER) return { kind: 'match' };
+  if (ADMITTED_COLLATIONS.has(collate) && provider === REQUIRED_PROVIDER) return { kind: 'match' };
   return { kind: 'mismatch', collate, provider };
 }
 
