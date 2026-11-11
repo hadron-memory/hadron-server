@@ -331,4 +331,24 @@ describe('#3934 — the surface changes nothing and pages whole', () => {
     // The open-task read of the cut, plus at most the one judged alarm's reads: judging 450 finished-task alarms would read tasks in several batches.
     expect(taskReads).toBeLessThanOrEqual(3);
   });
+
+  it('newestFirst and the Page sibling take the filter too: newest in-effect alarms first, hasMore and a cursor that continues', async () => {
+    const made = [];
+    for (let i = 0; i < 4; i++) made.push(await db.agentTeamEvent.create({ data: { appId: app.id, type: 'alarm.post-limit', severity: 'alarm', chain: [], payload: {}, createdAt: new Date(at('10:00').getTime() + i * 60_000) } }));
+    await db.agentTeamEvent.update({ where: { id: made[2].id }, data: { acknowledgedAt: at('11:00'), acknowledgedByWorkerId: ada.id } });
+    const read = async (args: string) => {
+      const r = await server.executeOperation(
+        { query: `{ agentTeamEventsPage(appRef: "${app.id}", alarmsInEffect: true, newestFirst: true, ${args}) { hasMore nextCursor events { id } } }` },
+        { contextValue: ctx(admin.id) },
+      );
+      if (r.body.kind !== 'single' || r.body.singleResult.errors) throw new Error(JSON.stringify(r.body));
+      return (r.body.singleResult.data as any).agentTeamEventsPage as { hasMore: boolean; nextCursor: string | null; events: { id: string }[] };
+    };
+    const first = await read('limit: 2');
+    expect(first.events.map((e) => e.id)).toEqual([made[3].id, made[1].id]); // made[2] is acknowledged
+    expect(first.hasMore).toBe(true);
+    const second = await read(`limit: 2, before: "${first.nextCursor}"`);
+    expect(second.events.map((e) => e.id)).toEqual([made[0].id]);
+    expect(second.hasMore).toBe(false);
+  });
 });

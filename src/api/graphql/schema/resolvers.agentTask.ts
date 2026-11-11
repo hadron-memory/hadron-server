@@ -3051,67 +3051,99 @@ export const agentTaskQueries = {
    * equal-time group — are never skipped (#1713 review, Diego P2-B). `since`
    * stays a coarse time filter, not a continuation.
    */
-  agentTeamEvents: async (
-    _: unknown,
-    args: { appRef: string; since?: unknown; after?: string | null; types?: string[] | null; codePrefix?: string | null; alarmsOnly?: boolean | null; alarmsInEffect?: boolean | null; taskId?: string | null; limit?: number | null },
-    ctx: Context,
-  ) => withReadableApp(ctx, args.appRef, async (c, app) => {
-    const since = args.since == null ? null : parseStartBy(args.since);
-    let afterWhere: Prisma.AgentTeamEventWhereInput = {};
-    if (args.after) {
-      // Scoped to this App: another App's event id is just an unknown cursor.
-      const cursor = isId(args.after)
-        ? await c.db.agentTeamEvent.findFirst({
-            where: { id: args.after, appId: app.id },
-            select: { id: true, createdAt: true },
-          })
-        : null;
-      if (!cursor) throw badInput('after is not an event of this App. Pass the id of the last event you read.');
-      afterWhere = {
-        OR: [
-          { createdAt: { gt: cursor.createdAt } },
-          { createdAt: cursor.createdAt, id: { gt: cursor.id } },
-        ],
-      };
-    }
-    const take = clampListTake(args.limit);
-    const where: Prisma.AgentTeamEventWhereInput = {
-      appId: app.id,
-      ...(since ? { createdAt: { gt: since } } : {}),
-      ...((args.types?.length || args.codePrefix != null) ? { type: { ...(args.types?.length ? { in: args.types } : {}), ...(args.codePrefix != null ? { startsWith: escapePrismaLikePattern(args.codePrefix) } : {}) } } : {}),
-      // #3934: alarms in effect are alarms, and an acknowledged alarm is out of effect by definition (cor:agt:050:20).
-      ...(args.alarmsOnly || args.alarmsInEffect ? { severity: 'alarm' } : {}),
-      ...(args.alarmsInEffect ? { acknowledgedAt: null } : {}),
-      ...(args.taskId ? { taskId: (await resolveTaskRef(c, args.taskId, app.id)) ?? args.taskId } : {}),
-    };
-    const page = (cursor: Prisma.AgentTeamEventWhereInput, n: number, cut: Prisma.AgentTeamEventWhereInput = {}) =>
-      c.db.agentTeamEvent.findMany({ where: { AND: [where, cursor, cut] }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], take: n });
-    if (!args.alarmsInEffect) return page(afterWhere, take);
-    // #3934: in effect = unacknowledged and the escalation not stopped. The second half is the live answer the wake
-    // schedule uses (`alarmEpisodeEnds`), judged here per batch, so a batch is read, the ended alarms are dropped, and
-    // the read continues from the last row seen until `take` in-effect alarms are found or the stream ends. The page
-    // is then exactly what the same read without the filter would hold, minus the alarms whose escalation ended.
-    const { alarmEscalationEnds, inEffectCandidateFilter } = await import('../../../lib/agentTasks/stall.js');
-    // #3934 (BLIND P2): alarms certain to be ended are cut in the database, so the scan follows the alarms that could still be in effect.
-    const candidates = await inEffectCandidateFilter(c.db, app.id);
-    const out: Awaited<ReturnType<typeof page>> = [];
-    let cursor = afterWhere;
-    while (out.length < take) {
-      const batch = await page(cursor, Math.max(take, ALARM_SCAN_BATCH), candidates);
-      if (batch.length === 0) break;
-      const ended = await alarmEscalationEnds(c.db, batch, new Date());
-      for (const e of batch) {
-        if (ended.has(e.id)) continue;
-        out.push(e);
-        if (out.length === take) return out;
-      }
-      const last = batch[batch.length - 1];
-      cursor = { OR: [{ createdAt: { gt: last.createdAt } }, { createdAt: last.createdAt, id: { gt: last.id } }] };
-      if (batch.length < Math.max(take, ALARM_SCAN_BATCH)) break;
-    }
-    return out;
-  }),
+  agentTeamEvents: async (_: unknown, args: TeamEventsArgs, ctx: Context) =>
+    withReadableApp(ctx, args.appRef, (c, app) => readTeamEvents(c, app, args, clampListTake(args.limit))),
+
+  /**
+   * #3933 (cor:api:120:04, cor:agt:050:11 FIT condition (c)): the same read as agentTeamEvents, the `<field>Page` sibling, so a
+   * page tells the reader whether more remain. One row beyond the page is read to know; `nextCursor` is the id of the last event
+   * served when more remain (pass it as `after`, or with newestFirst as `before`) and null on the last page.
+   */
+  agentTeamEventsPage: async (_: unknown, args: TeamEventsArgs, ctx: Context) =>
+    withReadableApp(ctx, args.appRef, async (c, app) => {
+      const take = clampListTake(args.limit);
+      const rows = await readTeamEvents(c, app, args, take + 1);
+      const events = rows.slice(0, take);
+      const hasMore = rows.length > take;
+      return { events, hasMore, nextCursor: hasMore && events.length > 0 ? events[events.length - 1]!.id : null };
+    }),
 };
+
+type TeamEventsArgs = { appRef: string; since?: unknown; after?: string | null; before?: string | null; newestFirst?: boolean | null; types?: string[] | null; codePrefix?: string | null; alarmsOnly?: boolean | null; alarmsInEffect?: boolean | null; taskId?: string | null; limit?: number | null };
+
+async function readTeamEvents(c: Context, app: { id: string }, args: TeamEventsArgs, take: number) {
+  const since = args.since == null ? null : parseStartBy(args.since);
+  // #3933 (cor:agt:050:11 FIT): the newest-end read. `after` continues forward and `before` backward, so each belongs to one
+  // direction; a cursor in the wrong one is refused rather than read as something else.
+  const newestFirst = args.newestFirst === true;
+  if (newestFirst && args.after) throw badInput('after continues the oldest-first read; with newestFirst pass before.');
+  if (!newestFirst && args.before) throw badInput('before continues the newestFirst read; pass newestFirst: true with it.');
+  let afterWhere: Prisma.AgentTeamEventWhereInput = {};
+  if (args.before) {
+    // Scoped to this App, like after: another App's event id is just an unknown cursor.
+    const cursor = isId(args.before)
+      ? await c.db.agentTeamEvent.findFirst({ where: { id: args.before, appId: app.id }, select: { id: true, createdAt: true } })
+      : null;
+    if (!cursor) throw badInput('before is not an event of this App. Pass the id of the last (oldest) event you read.');
+    afterWhere = { OR: [{ createdAt: { lt: cursor.createdAt } }, { createdAt: cursor.createdAt, id: { lt: cursor.id } }] };
+  }
+  if (args.after) {
+    // Scoped to this App: another App's event id is just an unknown cursor.
+    const cursor = isId(args.after)
+      ? await c.db.agentTeamEvent.findFirst({
+          where: { id: args.after, appId: app.id },
+          select: { id: true, createdAt: true },
+        })
+      : null;
+    if (!cursor) throw badInput('after is not an event of this App. Pass the id of the last event you read.');
+    afterWhere = {
+      OR: [
+        { createdAt: { gt: cursor.createdAt } },
+        { createdAt: cursor.createdAt, id: { gt: cursor.id } },
+      ],
+    };
+  }
+  const where: Prisma.AgentTeamEventWhereInput = {
+    appId: app.id,
+    ...(since ? { createdAt: { gt: since } } : {}),
+    ...((args.types?.length || args.codePrefix != null) ? { type: { ...(args.types?.length ? { in: args.types } : {}), ...(args.codePrefix != null ? { startsWith: escapePrismaLikePattern(args.codePrefix) } : {}) } } : {}),
+    // #3934: alarms in effect are alarms, and an acknowledged alarm is out of effect by definition (cor:agt:050:20).
+    ...(args.alarmsOnly || args.alarmsInEffect ? { severity: 'alarm' } : {}),
+    ...(args.alarmsInEffect ? { acknowledgedAt: null } : {}),
+    ...(args.taskId ? { taskId: (await resolveTaskRef(c, args.taskId, app.id)) ?? args.taskId } : {}),
+  };
+  // newestFirst is the exact mirror of the default (createdAt, id) order, so a page boundary inside equal timestamps never repeats or skips.
+  const orderBy: Prisma.AgentTeamEventOrderByWithRelationInput[] = newestFirst ? [{ createdAt: 'desc' }, { id: 'desc' }] : [{ createdAt: 'asc' }, { id: 'asc' }];
+  const page = (cursor: Prisma.AgentTeamEventWhereInput, n: number, cut: Prisma.AgentTeamEventWhereInput = {}) =>
+    c.db.agentTeamEvent.findMany({ where: { AND: [where, cursor, cut] }, orderBy, take: n });
+  if (!args.alarmsInEffect) return page(afterWhere, take);
+  // #3934: in effect = unacknowledged and the escalation not stopped. The second half is the live answer the wake
+  // schedule uses (`alarmEpisodeEnds`), judged here per batch, so a batch is read, the ended alarms are dropped, and
+  // the read continues from the last row seen, in the read's own direction, until `take` in-effect alarms are found or
+  // the stream ends. The page is then what the same read without the filter would hold, minus the alarms whose
+  // escalation ended.
+  const { alarmEscalationEnds, inEffectCandidateFilter } = await import('../../../lib/agentTasks/stall.js');
+  // #3934 (BLIND P2): alarms certain to be ended are cut in the database, so the scan follows the alarms that could still be in effect.
+  const candidates = await inEffectCandidateFilter(c.db, app.id);
+  const out: Awaited<ReturnType<typeof page>> = [];
+  const size = Math.max(take, ALARM_SCAN_BATCH);
+  let cursor = afterWhere;
+  while (out.length < take) {
+    const batch = await page(cursor, size, candidates);
+    if (batch.length === 0) break;
+    const ended = await alarmEscalationEnds(c.db, batch, new Date());
+    for (const e of batch) {
+      if (ended.has(e.id)) continue;
+      out.push(e);
+      if (out.length === take) return out;
+    }
+    const last = batch[batch.length - 1];
+    const [beyond, tie] = newestFirst ? ['lt', 'lt'] as const : ['gt', 'gt'] as const;
+    cursor = { OR: [{ createdAt: { [beyond]: last.createdAt } }, { createdAt: last.createdAt, id: { [tie]: last.id } }] };
+    if (batch.length < size) break;
+  }
+  return out;
+}
 
 // ── Field resolvers ───────────────────────────────────────────────────────
 
