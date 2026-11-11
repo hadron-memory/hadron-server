@@ -1142,7 +1142,8 @@ export const appMutations = {
           // UPDATE lock. Its OWN grants allow nothing already (the live check reads `apps.deleted_at`) and cascade at the reclaim.
           if (deleted.count > 0) await endHeldGrants(tx, 'app', resolvedId);
         },
-        { lockMode: 'exclusive', afterLock: async (tx) => {
+        // #3974: Uninstalled → Deleted while uninstalled (cor:dmo:050:21), by id only — resolveAppRef never reaches an uninstalled row by URN.
+        { lockMode: 'exclusive', allowUninstalledApp: true, afterLock: async (tx) => {
           await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedId} FOR UPDATE`;
         } },
       );

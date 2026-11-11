@@ -30,6 +30,11 @@ export async function withAuthorizedTx<T>(
     allowDeletedOrg?: boolean;
     /** #3774: the App anchor admits a deleted or uninstalled App — only for the operations that judge that state themselves (uninstallApp / reinstallApp). */
     allowInactiveApp?: boolean;
+    /**
+     * #3974: the App anchor admits an UNINSTALLED (not deleted) App — only `deleteApp`, whose move Uninstalled → Deleted is stated in
+     * cor:dmo:050:21 (hrn:node:hadronmemory.com:specs:cor:dmo:050:21). A deleted row is still refused. Every other door keeps the liveness check.
+     */
+    allowUninstalledApp?: boolean;
   } = {},
 ): Promise<T> {
   return ctx.db.$transaction(async (tx) => {
@@ -94,7 +99,11 @@ export async function withAuthorizedTx<T>(
         }
         case 'app': {
           const row = await tx.app.findUnique({ where: { id: anchor.id }, select: { deletedAt: true, uninstalledAt: true } });
-          if (!row || ((row.deletedAt || row.uninstalledAt) && !options.allowInactiveApp)) throw authorizationDenied();
+          if (
+            !row
+            || ((row.deletedAt || row.uninstalledAt) && !options.allowInactiveApp
+              && !(options.allowUninstalledApp && !row.deletedAt))
+          ) throw authorizationDenied();
           break;
         }
         case 'user': {
