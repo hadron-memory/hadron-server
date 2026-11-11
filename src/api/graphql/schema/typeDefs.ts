@@ -1535,6 +1535,24 @@ export const typeDefs = `#graphql
     approvalIssued: Boolean!
   }
 
+  "A node's stable identity and planned addresses (hrn:node:hadronmemory.com:specs:cor:api:190:03)."
+  type NodeMovePlanEntry {
+    id: ID!
+    currentUrn: String!
+    newUrn: String!
+  }
+
+  "Point-in-time node-only move plan. Reserves nothing; a later move can raise CONFLICT (hrn:node:hadronmemory.com:specs:cor:api:190:03)."
+  type NodeMovePlan {
+    nodes: [NodeMovePlanEntry!]!
+    totalCount: Int!
+    truncated: Boolean!
+    "Null when withheld because the destination is unreadable (ruling 0211)."
+    linkWarnings: [NodeMoveLinkWarning!]
+    linkWarningsWithheld: Boolean!
+    pointInTime: Boolean!
+  }
+
   type Node {
     "Deletion marker. Ordinary reads still omit tombstones; explicit recovery is writer-only."
     deletedAt: DateTime
@@ -12287,6 +12305,9 @@ export const typeDefs = `#graphql
     raw relative content links that now miss or resolve to another node.
     """
     moveNode(sourceRef: ID!, targetUrn: String, targetMemoryRef: ID): Node!
+    "Plan with the real move's gates and raised refusals, without locks, reconciliation, writes or mirror effects. Nodes in loc order; limit clamps to 1–1000 (default 100), with total and truncation disclosed. No edges. A point-in-time answer, not a reservation. hrn:node:hadronmemory.com:specs:cor:api:190:03."
+    planNodeMove(sourceRef: ID!, targetUrn: String, targetMemoryRef: ID, limit: Int = 100): NodeMovePlan!
+
 
     """
     Clone a node to a new location, returning the NEW node with a fresh id

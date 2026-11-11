@@ -30,6 +30,7 @@ const REVIEWED_PAGED_FIELDS = [
   "CompiledBootPrompt.lintWarnings", // #2048: default 50, cap 100; shared pageLintWarnings.
   "Mutation.claimUntrackedTaskItems", // #3125 S3: limit default 1, cap 10; common omitted bound 100 is conservative.
   "Mutation.collectHostOperations",
+  "Mutation.planNodeMove", // #3424: limit default100/cap1000; common omitted bound100 matches.
   "Node.lintWarnings",
   "Node.signingRequests",
   "NodeApprovalReceipt.lintWarnings",
