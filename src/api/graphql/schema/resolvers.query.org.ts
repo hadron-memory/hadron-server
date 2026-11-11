@@ -95,8 +95,8 @@ async function callerCanOpenResource(ctx: Context, resolved: ResolvedResource): 
  * #3945: the Apps a caller's task read could ever admit, as an App `where` (a superset that tracks `isAppParticipant`
  * closely; `mayReadAppTasks` still decides): live Apps it owns, is an AppMember of (any role), or whose org it holds
  * CONTRIBUTOR+ in (a READER is a member but not a task actor); a bound worker session instead gets only the App it drives (the gate judges it nowhere else). Under
- * impersonation only the shared org's Apps. A platform admin may read through the org gate anywhere, so it gets no
- * narrowing; a caller with no user gets nothing.
+ * impersonation only the shared org's Apps. A platform admin may read any ORG App through the org gate, so its scope is every org App plus the
+ * user-owned Apps it owns or is a member of (a user-owned App has no admin arm); a caller with no user gets nothing.
  */
 async function taskAppScopeFor(ctx: Context, isPlatformAdmin: boolean): Promise<Record<string, unknown> | undefined> {
   // A bound worker is judged by `resolveTaskActor` for its OWN App only, before any person or platform-admin arm, so
@@ -110,16 +110,19 @@ async function taskAppScopeFor(ctx: Context, isPlatformAdmin: boolean): Promise<
     if (ctx.impersonation) and.push({ organizationId: ctx.impersonation.orgId });
     return { AND: and };
   }
-  if (isPlatformAdmin) return undefined;
   if (!ctx.userId) return { id: { in: [] } };
-  const actorOrgs = await ctx.db.orgMember.findMany({
-    where: { userId: ctx.userId, role: { in: ['CONTRIBUTOR', 'ADMIN', 'OWNER'] }, ...LIVE_ORG_MEMBERSHIP },
-    select: { organizationId: true },
-  });
+  // A platform admin may read every ORG-owned App through the org gate, but a user-owned App admits only its owner
+  // and AppMembers (no platform-admin arm; `isAppParticipant`), so the admin's scope is every org App plus its own.
+  const actorOrgs = isPlatformAdmin
+    ? []
+    : await ctx.db.orgMember.findMany({
+        where: { userId: ctx.userId, role: { in: ['CONTRIBUTOR', 'ADMIN', 'OWNER'] }, ...LIVE_ORG_MEMBERSHIP },
+        select: { organizationId: true },
+      });
   const or: Record<string, unknown>[] = [
     { ownerUserId: ctx.userId },
     { members: { some: { userId: ctx.userId } } },
-    { organizationId: { in: actorOrgs.map((m) => m.organizationId) } },
+    isPlatformAdmin ? { organizationId: { not: null } } : { organizationId: { in: actorOrgs.map((m) => m.organizationId) } },
   ];
   const and: Record<string, unknown>[] = [{ deletedAt: null }, { OR: or }];
   if (ctx.impersonation) and.push({ organizationId: ctx.impersonation.orgId });

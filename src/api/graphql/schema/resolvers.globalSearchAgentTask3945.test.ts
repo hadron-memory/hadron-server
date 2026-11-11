@@ -218,6 +218,23 @@ describe('agentTask global search (#3945)', () => {
     }
   });
 
+  it('a platform admin is not crowded by other persons\' user-owned Apps, which no admin arm admits (#3964 delta4 P2)', async () => {
+    const saved = { ...taskSearchLimits };
+    Object.assign(taskSearchLimits, { page: 2, admittedApps: 2, maxScanned: 4 });
+    try {
+      for (let i = 0; i < 8; i++) {
+        const a = await db.app.create({ data: { id: `0000000${i}${generateId()}`.slice(0, 32), ownerUserId: stranger.id, name: `u${i}`, urn: `u-${i}-${generateId()}:own` } as any });
+        await mkTask(stranger, a.id, 'zebra user-owned');
+      }
+      const outsider = await db.user.create({ data: { id: generateId(), githubId: 99_397, githubUsername: `padm-${generateId()}`, roles: ['READER'] }, select: { id: true } });
+      const r2 = await search({ db, userId: outsider.id, roles: ['ADMIN'] } as Context, 'zebra');
+      expect(r2.hits.map((h: any) => h.id).sort()).toEqual([taskX.id, taskY.id].sort());
+      expect(r2.total).toBe(2);
+    } finally {
+      Object.assign(taskSearchLimits, saved);
+    }
+  });
+
   it('an org admin (CONTRIBUTOR+) still finds every App of the org (the narrowing never drops a readable App)', async () => {
     const r = await search(userCtx((await db.user.findFirstOrThrow({ where: { githubUsername: { startsWith: 'admin-' } } }))), 'zebra');
     expect(new Set(r.hits.map((h: any) => h.id))).toEqual(new Set([taskX.id, taskY.id]));
