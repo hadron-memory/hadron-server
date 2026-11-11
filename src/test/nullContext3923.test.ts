@@ -126,8 +126,51 @@ describe('#3923 CLI handling of --root', () => {
     expect(ok.status).toBe(0);
   });
 
-  it('gives the same answer from another working directory', () => {
+  it('gives the same answer from another working directory, on a fixture with an absolute root', () => {
+    const root = mkdtempSync(join(tmpdir(), 'null-context3923-'));
+    try {
+      writeFileSync(join(root, 'bad.ts'), 'const c = ({ userId: null }) as Context;');
+      const bad = run(['--root', root], tmpdir());
+      expect(bad.status).toBe(1);
+      expect(bad.stderr).toContain('bad.ts:1:');
+      rmSync(join(root, 'bad.ts'));
+      writeFileSync(join(root, 'ok.ts'), 'const c = 1;');
+      expect(run(['--root', root], tmpdir()).status).toBe(0);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('scans the production tree from another working directory (separate from the fixture check above)', () => {
     const result = run(['--root', productionRoot], tmpdir());
+    expect(result.stderr).toBe('');
+    expect(result.status).toBe(0);
+  });
+});
+
+describe('#3923 BLIND P2s: parenthesized types and lexical scope', () => {
+  it.each([
+    ['parenthesized alias', `type Ctx = (Context);\nconst c = ({ userId: null }) as Ctx;`, 2],
+    ['doubly parenthesized alias', `type Ctx = ((Context));\nconst c = ({ userId: null }) as Ctx;`, 2],
+    ['parenthesized direct cast type', `const c = ({ userId: null }) as (Context);`, 1],
+    ['parenthesized import type', `const c = ({ userId: null }) as (import('./h.js').Context);`, 1],
+    ['alias declared in a block', `function f() {\n  type Ctx = Context;\n  return ({ userId: null }) as Ctx;\n}`, 3],
+    ['alias declared in a namespace, cast inside it', `namespace A {\n  type Ctx = Context;\n  export const c = ({ userId: null }) as Ctx;\n}`, 3],
+    ['top-level alias seen from a nested function', `type Ctx = Context;\nfunction f() {\n  return ({ userId: null }) as Ctx;\n}`, 3],
+    ['renamed import seen from a nested block', `import { Context as Ctx } from './h.js';\nfunction f() {\n  return ({ userId: null }) as Ctx;\n}`, 3],
+  ])('rejects %s', (_name, text, line) => {
+    const result = scan({ 'production.ts': text });
+    expect(result.stderr).toContain(`production.ts:${line}: null userId cast to Context`);
+    expect(result.status).toBe(1);
+  });
+
+  it.each([
+    ['sibling namespaces', `namespace A { export type Ctx = Context; }\nnamespace B {\n  type Ctx = Row;\n  export const c = ({ userId: null }) as Ctx;\n}`],
+    ['an alias in a sibling function', `function a() { type Ctx = Context; return 1; }\nfunction b() {\n  type Ctx = Row;\n  return ({ userId: null }) as Ctx;\n}`],
+    ['an alias in another scope entirely', `function a() { type Ctx = Context; return 1; }\nconst c = ({ userId: null }) as Ctx;`],
+    ['an inner type shadowing an outer Context alias', `type Ctx = Context;\nfunction f() {\n  type Ctx = Row;\n  return ({ userId: null }) as Ctx;\n}`],
+    ['an inner interface shadowing an outer Context alias', `type Ctx = Context;\nfunction f() {\n  interface Ctx { a: 1 }\n  return ({ userId: null }) as Ctx;\n}`],
+    ['an inner parenthesized unrelated alias shadowing an outer one', `type Ctx = Context;\nfunction f() {\n  type Ctx = (Row);\n  return ({ userId: null }) as Ctx;\n}`],
+  ])('does not flag %s', (_name, text) => {
+    const result = scan({ 'production.ts': text });
     expect(result.stderr).toBe('');
     expect(result.status).toBe(0);
   });
