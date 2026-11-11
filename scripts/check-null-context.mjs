@@ -2,10 +2,10 @@
  * #3705: production Context casts must not hide a literal null userId.
  *
  * A syntactic tripwire, not dataflow. #3923 widened what counts as a `Context` type to the final name `Context`
- * (direct or qualified, as before), a renamed import of it (`import { Context as Ctx }`), a same-file type alias of
- * any of those (`type Ctx = Context`, `type A = H.Context`, `type B = A`) and an import type
- * (`import('./h.js').Context`). The match is still the exact final name: `RequestContext` and `SessionContext` never
- * match, and an alias of an unrelated type is not followed. Documented limits stay: an indirect value, `as any`,
+ * (direct or qualified, as before), a renamed import of it (`import { Context as Ctx }`), a type alias of any of
+ * those visible from the cast through its lexical scopes (`type Ctx = Context`, `type A = H.Context`, `type B = A`,
+ * parentheses ignored) and an import type (`import('./h.js').Context`). The match is still the exact final name:
+ * `RequestContext` and `SessionContext` never match, and an alias of an unrelated type is not followed. Documented limits stay: an indirect value, `as any`,
  * Object.assign, and an alias declared in another file are not seen.
  */
 import ts from 'typescript';
@@ -43,24 +43,51 @@ function* files(dir) {
   }
 }
 const finalName = (name, source) => name.getText(source).split('.').at(-1);
-/** The type names in this file that mean Context: a renamed import and every type alias that resolves to one. */
-function contextNames(source) {
-  const names = new Set(['Context']);
-  const isContext = type => {
+/**
+ * Does this type node mean Context? `Context` itself (any qualification) always does. A bare name is looked up in the
+ * lexical scopes that enclose it, innermost first: the first declaration of that name decides, so an alias in a
+ * sibling scope never applies and an inner unrelated declaration shadows an outer alias. A qualified reference to an
+ * alias (`ns.Ctx`) is not followed.
+ */
+function contextResolver(source) {
+  const resolving = new Set();
+  function isContext(type) {
+    while (ts.isParenthesizedTypeNode(type)) type = type.type;
     if (ts.isTypeReferenceNode(type)) {
-      return ts.isIdentifier(type.typeName) ? names.has(type.typeName.text) : finalName(type.typeName, source) === 'Context';
+      if (!ts.isIdentifier(type.typeName)) return finalName(type.typeName, source) === 'Context';
+      return type.typeName.text === 'Context' || nameIsContext(type.typeName.text, type);
     }
     return ts.isImportTypeNode(type) && !type.isTypeOf && type.qualifier !== undefined && finalName(type.qualifier, source) === 'Context';
-  };
-  let grew = true;
-  while (grew) {
-    grew = false;
-    const add = name => { if (!names.has(name)) { names.add(name); grew = true; } };
-    (function walk(node) {
-      if (ts.isImportSpecifier(node) && node.propertyName?.text === 'Context') add(node.name.text);
-      else if (ts.isTypeAliasDeclaration(node) && isContext(node.type)) add(node.name.text);
-      ts.forEachChild(node, walk);
-    })(source);
+  }
+  function declaredIn(statements, name) {
+    for (const statement of statements) {
+      if (ts.isTypeAliasDeclaration(statement) && statement.name.text === name) return statement;
+      if (ts.isInterfaceDeclaration(statement) && statement.name.text === name) return false;
+      if (ts.isClassDeclaration(statement) && statement.name?.text === name) return false;
+      if (ts.isEnumDeclaration(statement) && statement.name.text === name) return false;
+      if (ts.isImportDeclaration(statement)) {
+        const bindings = statement.importClause?.namedBindings;
+        if (bindings && ts.isNamedImports(bindings)) {
+          for (const element of bindings.elements) {
+            if (element.name.text === name) return element.propertyName?.text === 'Context';
+          }
+        }
+        if (statement.importClause?.name?.text === name) return false;
+      }
+    }
+    return undefined;
+  }
+  function nameIsContext(name, from) {
+    for (let scope = from.parent; scope; scope = scope.parent) {
+      if (!scope.statements) continue;
+      const found = declaredIn(scope.statements, name);
+      if (found === undefined) continue;
+      if (typeof found === 'boolean') return found;
+      if (resolving.has(found)) return false;
+      resolving.add(found);
+      try { return isContext(found.type); } finally { resolving.delete(found); }
+    }
+    return false;
   }
   return isContext;
 }
@@ -70,7 +97,7 @@ function scan() {
     const text = readFileSync(file, 'utf8');
     if (!/\bContext\b/.test(text) || !/\bnull\b/.test(text)) continue;
     const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
-    const isContext = contextNames(source);
+    const isContext = contextResolver(source);
     function visit(node) {
       if ((ts.isAsExpression(node) || ts.isTypeAssertionExpression(node)) && isContext(node.type)) {
         const value = unwrap(node.expression);

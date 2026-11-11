@@ -162,6 +162,12 @@ describe('#3923 BLIND P2s: parenthesized types and lexical scope', () => {
     expect(result.status).toBe(1);
   });
 
+  it('terminates on an alias cycle and flags nothing for it', () => {
+    const result = scan({ 'production.ts': `type Z = Context;\ntype A = B;\ntype B = A;\nconst c = ({ userId: null }) as A;` });
+    expect(result.stderr).toBe('');
+    expect(result.status).toBe(0);
+  });
+
   it.each([
     ['sibling namespaces', `namespace A { export type Ctx = Context; }\nnamespace B {\n  type Ctx = Row;\n  export const c = ({ userId: null }) as Ctx;\n}`],
     ['an alias in a sibling function', `function a() { type Ctx = Context; return 1; }\nfunction b() {\n  type Ctx = Row;\n  return ({ userId: null }) as Ctx;\n}`],
