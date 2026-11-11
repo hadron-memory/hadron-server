@@ -178,6 +178,31 @@ describe('agentTask global search (#3945)', () => {
     }
   });
 
+  it('denied Apps of the caller\'s OWN org (an org READER) never enter the walk either (#3964 delta P2)', async () => {
+    const saved = { ...taskSearchLimits };
+    Object.assign(taskSearchLimits, { page: 2, admittedApps: 1, maxScanned: 4 });
+    try {
+      const org = await db.organization.findFirstOrThrow({ where: { id: orgId } });
+      for (let i = 0; i < 8; i++) {
+        const a = await db.app.create({ data: { id: `0000000${i}${generateId()}`.slice(0, 32), organizationId: org.id, name: `s${i}`, urn: `${org.urn}:s${i}` } });
+        await db.appMember.create({ data: { appId: a.id, userId: orgOnly.id, role: 'member' } });
+        await mkTask(orgOnly, a.id, 'zebra same-org outsider');
+      }
+      // `participant` is an org READER of this org and an AppMember of X only.
+      const r = await search(userCtx(participant), 'zebra');
+      expect(r.hits.map((h: any) => h.id)).toEqual([taskX.id]);
+      expect(r.total).toBe(1);
+    } finally {
+      Object.assign(taskSearchLimits, saved);
+    }
+  });
+
+  it('an org admin (CONTRIBUTOR+) still finds every App of the org (the narrowing never drops a readable App)', async () => {
+    const r = await search(userCtx((await db.user.findFirstOrThrow({ where: { githubUsername: { startsWith: 'admin-' } } }))), 'zebra');
+    expect(new Set(r.hits.map((h: any) => h.id))).toEqual(new Set([taskX.id, taskY.id]));
+    expect(r.total).toBe(2);
+  });
+
   it('a deleted App yields no hits', async () => {
     await db.app.update({ where: { id: appX.id }, data: { deletedAt: new Date() } });
     const r = await search(userCtx(participant), 'zebra');

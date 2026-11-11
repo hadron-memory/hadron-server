@@ -92,24 +92,32 @@ async function callerCanOpenResource(ctx: Context, resolved: ResolvedResource): 
 }
 
 /**
- * #3945: the Apps a caller's task read could ever admit, as an App `where` (a superset; `mayReadAppTasks` still decides):
- * its own, ones it is a member of, Apps of orgs it belongs to, and the App its bound worker session drives. A platform
- * admin may read through the org gate anywhere, so it gets no narrowing. A caller with no user gets nothing.
+ * #3945: the Apps a caller's task read could ever admit, as an App `where` (a superset that tracks `isAppParticipant`
+ * closely; `mayReadAppTasks` still decides): live Apps it owns, is an AppMember of (any role), or whose org it holds
+ * CONTRIBUTOR+ in (a READER is a member but not a task actor), and the App its bound worker session drives. Under
+ * impersonation only the shared org's Apps. A platform admin may read through the org gate anywhere, so it gets no
+ * narrowing; a caller with no user gets nothing.
  */
-async function taskAppScopeFor(ctx: Context, isPlatformAdmin: boolean, memberOrgIds: string[]): Promise<Record<string, unknown> | undefined> {
+async function taskAppScopeFor(ctx: Context, isPlatformAdmin: boolean): Promise<Record<string, unknown> | undefined> {
   if (isPlatformAdmin) return undefined;
   if (!ctx.userId) return { id: { in: [] } };
+  const actorOrgs = await ctx.db.orgMember.findMany({
+    where: { userId: ctx.userId, role: { in: ['CONTRIBUTOR', 'ADMIN', 'OWNER'] }, ...LIVE_ORG_MEMBERSHIP },
+    select: { organizationId: true },
+  });
   const or: Record<string, unknown>[] = [
     { ownerUserId: ctx.userId },
     { members: { some: { userId: ctx.userId } } },
-    { organizationId: { in: memberOrgIds } },
+    { organizationId: { in: actorOrgs.map((m) => m.organizationId) } },
   ];
   const workerId = currentActor().workerId;
   if (workerId) {
     const w = await ctx.db.worker.findUnique({ where: { id: workerId }, select: { appId: true } });
     if (w) or.push({ id: w.appId });
   }
-  return { OR: or };
+  const and: Record<string, unknown>[] = [{ deletedAt: null }, { OR: or }];
+  if (ctx.impersonation) and.push({ organizationId: ctx.impersonation.orgId });
+  return { AND: and };
 }
 
 export const orgQueries = {
@@ -427,7 +435,7 @@ export const orgQueries = {
         impersonationOrgId: ctx.impersonation?.orgId ?? null,
         // #3945: the per-kind task read gate, reused as-is, minus the ruled userless carve-out: an App key or a userless run
         // gets no task hits even where the direct read would admit it (every admitting arm of resolveTaskActor needs a user).
-        taskAppScope: await taskAppScopeFor(ctx, isPlatformAdmin, callerOrgIds),
+        taskAppScope: await taskAppScopeFor(ctx, isPlatformAdmin),
         taskReadGate: async (appId) =>
           (isRunPrincipal(ctx) && !ctx.userId) || appKeyCaller(ctx) ? false : mayReadAppTasks(ctx, appId),
       };
