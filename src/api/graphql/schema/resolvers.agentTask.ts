@@ -178,6 +178,18 @@ function normalizeCreateStatus(value: string | null | undefined): 'backlog' | 'p
 export function taskError(code: string, message: string, ext: Record<string, unknown> = {}): GraphQLError {
   return new GraphQLError(message, { extensions: { code, ...ext } });
 }
+/**
+ * #3863: TASK_NOT_ASSIGNEE for one request shape that looks identical from outside — a request that carried no worker
+ * session (it acted as the person) versus one that acted as a worker who is not the assignee. The refusal now says which
+ * the SERVER saw (`extensions.actor`: 'person' | 'worker'), which is the caller's own request and reveals nothing about
+ * the task or its assignee. The code, the gate and the refuse-before-write order are unchanged (cor:agt:050:08).
+ */
+export function notAssignee(actor: TaskActor, message: string, ext: Record<string, unknown> = {}): GraphQLError {
+  const note = actor.kind === 'worker'
+    ? ' This request acted as a worker session.'
+    : ' This request acted as a person: it carried no worker session, and a worker\'s task is acted on only with that worker\'s session.';
+  return taskError('TASK_NOT_ASSIGNEE', message + note, { ...ext, actor: actor.kind === 'worker' ? 'worker' : 'person' });
+}
 const notFound = (taskId: string): GraphQLError =>
   taskError('TASK_NOT_FOUND', 'Task not found.', { taskId });
 /** #2664: the longest `text` filter, after trimming. */
@@ -1911,7 +1923,7 @@ async function applyTaskCreate(
     const parent = await lockTask(tx, parentTaskId!);
     if (!parent || parent.appId !== app.id) throw notFound(parentRef);
     if (!isAssignee(actor, parent)) {
-      throw taskError('TASK_NOT_ASSIGNEE', "Only the parent task's assignee creates its child tasks.", { taskId: parentRef });
+      throw notAssignee(actor, "Only the parent task's assignee creates its child tasks.", { taskId: parentRef });
     }
     refuseEnded(parent);
   }
@@ -2560,7 +2572,7 @@ export const agentTaskMutations = {
     const warn: TaskWarningCode[] = [];
     const started = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!isAssignee(actor, task)) {
-        throw taskError('TASK_NOT_ASSIGNEE', "Only the task's assignee starts it.", { taskId });
+        throw notAssignee(actor, "Only the task's assignee starts it.", { taskId });
       }
       refuseEnded(task);
       if (task.status !== 'pending') {
@@ -2593,7 +2605,7 @@ export const agentTaskMutations = {
     const warn: TaskWarningCode[] = [];
     const recorded = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!isAssignee(actor, task)) {
-        throw taskError('TASK_NOT_ASSIGNEE', "Only the task's assignee records progress on it.", { taskId });
+        throw notAssignee(actor, "Only the task's assignee records progress on it.", { taskId });
       }
       refuseEnded(task);
       if (task.status !== 'started') {
@@ -2665,7 +2677,7 @@ export const agentTaskMutations = {
     const warn: TaskWarningCode[] = [];
     const finished = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!isAssignee(actor, task)) {
-        throw taskError('TASK_NOT_ASSIGNEE', "Only the task's assignee finishes it and sets its result.", { taskId });
+        throw notAssignee(actor, "Only the task's assignee finishes it and sets its result.", { taskId });
       }
       refuseEnded(task);
       if (task.status !== 'started') {
@@ -2763,7 +2775,7 @@ export const agentTaskMutations = {
     const text = optionalText(reason?.text, TASK_HAND_BACK_TEXT_MAX, 'reason.text');
     const handedBack = await mutateTask(ctx, taskRef, async (tx, task, actor, app) => {
       if (!isAssignee(actor, task)) {
-        throw taskError('TASK_NOT_ASSIGNEE', "Only the task's assignee hands it back.", { taskId: taskRef });
+        throw notAssignee(actor, "Only the task's assignee hands it back.", { taskId: taskRef });
       }
       refuseEnded(task);
       if (task.status !== 'started') {
