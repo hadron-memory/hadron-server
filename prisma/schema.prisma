@@ -2445,8 +2445,10 @@ model AiServiceConfig {
 
   hadronServer HadronServer? @relation(fields: [hadronServerId], references: [id], onDelete: Cascade)
   organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  app          App?          @relation(fields: [appId], references: [id], onDelete: Cascade)
+  app          App?          @relation("AppAiServiceConfigs", fields: [appId], references: [id], onDelete: Cascade)
   agent        Agent?        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  /// #3957: the Apps that name this config as their chatbot config (`App.chatbotAiConfigId`).
+  chatbotOfApps App[]        @relation("AppChatbotAiConfig")
 
   @@index([hadronServerId])
   @@index([organizationId])
@@ -3544,7 +3546,12 @@ model App {
   logEntries              AppLogEntry[]
   usageEvents             UsageEvent[]
   pendingSetups           PendingSetup[]
-  aiServiceConfigs        AiServiceConfig[]
+  aiServiceConfigs        AiServiceConfig[] @relation("AppAiServiceConfigs")
+  /// #3957 (cor:dmo:050:10): one of THIS App's own configs, used for its chats unless a chat stored its own
+  /// choice. Same-App ownership and `enabled` are judged where it is read and written (a DB FK cannot say
+  /// "owned by this App"); a deleted config clears it (`SetNull`).
+  chatbotAiConfigId       String?           @map("chatbot_ai_config_id")
+  chatbotAiConfig         AiServiceConfig?  @relation("AppChatbotAiConfig", fields: [chatbotAiConfigId], references: [id], onDelete: SetNull)
   modelGroups             ModelGroup[]
   automationVersions      AutomationVersion[]
   connectionGrants        ConnectionGrant[]         @relation("AppConnectionGrants")
@@ -3560,6 +3567,7 @@ model App {
   @@index([urn])
   @@index([ownerUserId])
   @@index([legacyUrn])
+  @@index([chatbotAiConfigId])
   @@map("apps")
 }
 

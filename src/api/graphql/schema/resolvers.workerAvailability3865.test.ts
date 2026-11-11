@@ -5,7 +5,7 @@
 
 import { ApolloServer } from '@apollo/server';
 import { typeDefs } from './typeDefs.js';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -54,6 +54,8 @@ beforeAll(() => server.start());
 afterAll(() => server.stop());
 
 let outsider: { id: string };
+afterEach(() => { vi.restoreAllMocks(); });
+
 beforeEach(async () => {
   const n = Math.floor(Math.random() * 1_000_000);
   outsider = await db.user.create({ data: { githubId: 740_000 + n, githubUsername: `av-out-${n}`, roles: ['READER'], handle: `av-out-${n}` } });
@@ -106,6 +108,7 @@ describe('#3865 Worker.availability (worker get JSON)', () => {
     await record('Kit', { reason: 'stalled', setAt: ago(60) }); // no session: the stall mark stands
     await record('Rook', { reason: 'stalled', setAt: ago(60) }); // acted since the mark: it no longer stands
     await db.session.create({ data: { id: generateId(), appId: app.id, workerId: w.Rook.id, agentId, userId: mia.id, family: 'claude', startedAt: ago(10), updatedAt: ago(10) } });
+    // Restored in afterEach (vi.restoreAllMocks), so a failing assertion below cannot leak the spies into later tests (#3958).
     const spy = vi.spyOn(db, '$queryRaw');
     const find = vi.spyOn((db as any).workerAvailability, 'findMany');
     const result = await server.executeOperation(
@@ -118,7 +121,5 @@ describe('#3865 Worker.availability (worker get JSON)', () => {
     expect(byName).toEqual({ Anne: true, Kit: true, Rook: false });
     expect(find).toHaveBeenCalledTimes(1);
     expect(spy).toHaveBeenCalledTimes(1);
-    spy.mockRestore();
-    find.mockRestore();
   });
 });

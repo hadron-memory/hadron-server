@@ -381,7 +381,8 @@ describe('#3932 — the urn field batches its owner lookups per request', () => 
     const { c, reads } = countingCtx();
     const batched = await Promise.all(rows.map((r) => T.urn(asParent(r), {}, c)));
     expect(batched).toEqual(alone);
-    expect(rows.length).toBeGreaterThanOrEqual(19);
+    // #3958: the fixture must cover every owner kind (a row count says nothing about which kinds are present).
+    expect(new Set(rows.map((r) => asParent(r).ownerType))).toEqual(new Set(['ORGANIZATION', 'APP', 'AGENT', 'HADRON_SERVER']));
     expect(reads).toEqual({ organization: 1, app: 1, agent: 1, hadronServer: 1 });
   });
 

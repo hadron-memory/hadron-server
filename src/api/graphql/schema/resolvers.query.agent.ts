@@ -39,6 +39,8 @@ import {
   pageEnvelope,
 } from './resolvers.helpers.js';
 import { forbiddenError, unauthenticatedError } from '../../../lib/refusals.js';
+import { pinnedConfigFor } from '../../../lib/chatbotAiConfig.js';
+import { storedChatAiConfigChoice } from './resolvers.chatbotAiConfig.js';
 
 /** Credential cargo follows the selected source's management gate on both projections. */
 async function canManageResolvedConfig(ctx: Context, config: AiServiceConfigRow, agentRef?: string | null): Promise<boolean> {
@@ -408,7 +410,7 @@ export const agentQueries = {
 
     resolveAIConfig: async (
       _: unknown,
-      { name, appRef, agentRef }: { name?: string | null; appRef?: string | null; agentRef?: string | null },
+      { name, appRef, agentRef, chatId }: { name?: string | null; appRef?: string | null; agentRef?: string | null; chatId?: string | null },
       ctx: Context,
     ) => {
       try {
@@ -482,11 +484,19 @@ export const agentQueries = {
             throw forbiddenError();
           }
         }
-        const resolved = await resolveAiConfigWithFallback(ctx.db, name ?? null, {
-          appId: resolvedAppId,
-          agentId: resolvedAgentId,
-          organizationId: effectiveOrgId,
-        });
+        // #3957 (cor:dmo:050:10): with a chat of this App, its stored choice, else the App's chatbot config, else
+        // the walk below, unchanged. A pin that is gone, foreign or disabled is skipped as if unset.
+        const pinned = chatId
+          ? await pinnedConfigFor(ctx.db, resolvedAppId, await storedChatAiConfigChoice(ctx, chatId, resolvedAppId))
+          : null;
+        const resolved: { config: typeof pinned & object; ownerType: 'APP' | 'AGENT' | 'ORGANIZATION' | 'HADRON_SERVER' } = pinned
+          ? { config: pinned, ownerType: 'APP' }
+          // With a chat, the fallback is the well-known `default` walk whatever name the caller sent (cor:dmo:050:10).
+          : await resolveAiConfigWithFallback(ctx.db, chatId ? DEFAULT_AI_CONFIG_NAME : name ?? null, {
+              appId: resolvedAppId,
+              agentId: resolvedAgentId,
+              organizationId: effectiveOrgId,
+            });
         const { config, ownerType } = resolved;
         // Decide credential access from the selected source, not the install's
         // manager. An authorized installation can still resolve its identity.
