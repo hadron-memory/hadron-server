@@ -50,7 +50,7 @@ const row = () => db.app.findUniqueOrThrow({ where: { id: app.id } });
 const outsiders = () => [orgMember.id, otherAdmin.id, stranger.id, undefined];
 
 describe('#3975 deleteApp existence oracle', () => {
-  it('by id: a missing App and an App the caller is refused on get the uninstallApp refusal, byte for byte', async () => {
+  it('by id: a missing App and an App the caller is refused on get the uninstallApp refusal, code and message', async () => {
     const reference = await refusal(M.uninstallApp({}, { ref: generateId() }, ctx(stranger.id)));
     for (const who of outsiders()) {
       expect(await refusal(M.deleteApp({}, { ref: generateId() }, ctx(who)))).toEqual(reference);
@@ -99,6 +99,18 @@ describe('#3975 deleteApp existence oracle', () => {
     const reference = await refusal(M.uninstallApp({}, { ref: generateId() }, ctx(stranger.id)));
     for (const who of outsiders()) expect(await refusal(M.deleteApp({}, { ref: legacy }, ctx(who)))).toEqual(reference);
     expect((await row()).deletedAt).toBeNull();
+  });
+
+  it('the ambiguous-URN limit: an admitted caller also gets the uniform refusal (no candidate ids to gate on), and nothing is deleted', async () => {
+    const legacy = `${org.urn}:legacy2`;
+    const a = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'A1', urn: `${org.urn}:a1`, legacyUrn: legacy } });
+    await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'A2', urn: `${org.urn}:a2`, legacyUrn: legacy } });
+    expect((await refusal(M.deleteApp({}, { ref: legacy }, ctx(admin.id)))).code).toBe('FORBIDDEN');
+    expect((await db.app.findUniqueOrThrow({ where: { id: a.id } })).deletedAt).toBeNull();
+  });
+
+  it('updateApp is not part of this change: a missing ref still answers APP_NOT_FOUND', async () => {
+    expect((await refusal(M.updateApp({}, { ref: generateId(), name: 'x' }, ctx(admin.id)))).code).toBe('APP_NOT_FOUND');
   });
 
   it('a deleted App: a refused caller gets the uniform refusal, an admitted caller learns APP_DELETED, after the gate', async () => {
