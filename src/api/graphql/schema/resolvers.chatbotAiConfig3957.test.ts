@@ -138,6 +138,7 @@ describe('the chat path', () => {
   });
   const start = (args: Record<string, unknown>, c: Context = asMember()) => M.startChat(null, { agentId: chatAgent.id, scope: 'shared', ...args }, c);
 
+  // loc-scope-ok: a count over every memory, to prove that a refused start left no chat anywhere.
   const chatCount = () => db.node.count({ where: { loc: { startsWith: 'chats:' }, nodeType: { not: 'message' }, name: { not: 'messages' } } });
   const stored = async (chatId: string) => ((await chatNodeByLocOrThrow(db, chatId)).data as Record<string, unknown>).aiConfigChoice;
   const resolve = (chatId: string | null, c: Context = ctx(admin)) =>
@@ -174,6 +175,7 @@ describe('the chat path', () => {
     expect(new Set(starts.map(a => a.text)).size).toBe(1);
     expect(await chatCount()).toBe(before);
     const { chatId } = await start({ aiConfigChoice: claude.id });
+    // loc-scope-ok: the chat id is unique in this fixture, and the count only compares before and after.
     const messages = () => db.node.count({ where: { loc: { startsWith: `${chatId}:messages:` } } });
     const m0 = await messages();
     const sends = await Promise.all(ids.map(id => M.sendChatMessage(null, { chatId, userMessage: 'x', aiConfigChoice: id }, asMember()).catch((e: any) => ({ code: e.extensions.code, text: e.message.split(id).join('<id>') }))));

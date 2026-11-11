@@ -5395,21 +5395,6 @@ export const typeDefs = `#graphql
   memory; shared chats live in the App's app-class memory and are
   readable by every AppMember of that App.
   """
-  """
-  #3957 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10): one entry of the list a chat chooses its AI config from. No key material.
-  """
-  type ChatAiConfigChoice {
-    "\`default\` for the walk entry, else the config id: the value to send back as aiConfigChoice."
-    value: String!
-    name: String!
-    "Null for the \`default\` entry, which names no single config."
-    provider: String
-    model: String
-    isDefault: Boolean!
-    "True for the App's own chatbot config (App.chatbotAiConfigId)."
-    isAppChatbotConfig: Boolean!
-  }
-
   type Chat {
     id: ID!
     """
@@ -5440,6 +5425,21 @@ export const typeDefs = `#graphql
     gets an empty page.
     """
     servedPrompts(limit: Int, offset: Int): ServedPromptsPage!
+  }
+
+  """
+  #3957 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10): one entry of the list a chat chooses its AI config from. No key material.
+  """
+  type ChatAiConfigChoice {
+    "\`default\` for the walk entry, else the config id: the value to send back as aiConfigChoice."
+    value: String!
+    name: String!
+    "Null for the \`default\` entry, which names no single config."
+    provider: String
+    model: String
+    isDefault: Boolean!
+    "True for the App's own chatbot config (App.chatbotAiConfigId)."
+    isAppChatbotConfig: Boolean!
   }
 
   """
