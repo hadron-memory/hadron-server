@@ -215,6 +215,33 @@ describe('#3689 the data transition (migration + pre-push)', () => {
     });
   });
 
+  it('after an HDPRF refusal, the server reading the old schema can still read the retained agentless runs', async () => {
+    // Boot (#3770) marks a refused migration rolled back and serves the schema that exists, under THIS build's generated
+    // client. So the client must read a NULL-agent run: the Prisma field stays optional until the migration has applied
+    // everywhere (the database column is what guarantees the Agent once it has).
+    const two = await app('refused-read', [{ live: true }, { live: true }]);
+    const one = await app('refused-read-one', [{ live: true }]);
+    const ids = await withPg(async (c) => {
+      await c.query(RELAX);
+      const retained = await insertRun(c, two.id, null);
+      const control = await insertRun(c, one.id, one.agentIds[0]);
+      await c.query(`INSERT INTO manual_automation_pins (run_id, pin) VALUES ($1, '{}'::jsonb)`, [retained]);
+      // The migration's own transaction: a child refuses, HDPRF, and boot rolls the whole migration back.
+      await c.query('BEGIN');
+      try {
+        await c.query(`CREATE FUNCTION pg_temp.ra_refuse() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'append-only'; END $$`);
+        await c.query(`CREATE TRIGGER ra_refuse BEFORE DELETE ON manual_automation_pins FOR EACH ROW EXECUTE FUNCTION pg_temp.ra_refuse()`);
+        expect((await sqlError(c, read(MIGRATION_FILE)))?.code).toBe('HDPRF');
+      } finally {
+        await c.query('ROLLBACK');
+      }
+      return { retained, control };
+    });
+    expect(await db.appRun.findUnique({ where: { id: ids.control } })).toMatchObject({ agentId: one.agentIds[0] });
+    expect(await db.appRun.findUnique({ where: { id: ids.retained } })).toMatchObject({ id: ids.retained, agentId: null });
+    expect((await db.appRun.findMany({ where: { appId: { in: [two.id, one.id] } } })).map(r => r.id).sort()).toEqual([ids.retained, ids.control].sort());
+  });
+
   afterEach(async () => {
     // A failed assertion above can leave the schema relaxed; put the PR's shape back for the next file in this worker.
     await withPg(c => c.query(`DELETE FROM app_runs WHERE agent_id IS NULL OR NOT EXISTS (SELECT 1 FROM agents a WHERE a.id = app_runs.agent_id)`).then(() => c.query(RESTORE))).catch(() => undefined);
