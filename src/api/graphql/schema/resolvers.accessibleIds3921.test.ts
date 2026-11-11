@@ -16,6 +16,8 @@ import { generateId } from '../../../lib/id.js';
 import { narrowToAccessible } from '../../../lib/auth/narrowToAccessible.js';
 import { getAccessibleMemoryIds as mcpAccessibleMemoryIds } from '../../../mcp/access-control.js';
 import type { AuthContext } from '../../../middleware/auth.js';
+import { ensureChannelWithRoot } from '../../../lib/channels.js';
+import { resolvers } from './resolvers.js';
 import { getAccessibleMemoryIds, type Context } from './resolvers.helpers.js';
 
 const HELPERS = resolve('src/api/graphql/schema/resolvers.helpers.ts');
@@ -28,6 +30,13 @@ function declaration(): ts.FunctionDeclaration {
     !!s.modifiers?.some(m => m.kind === ts.SyntaxKind.ExportKeyword));
   if (!found) throw new Error('getAccessibleMemoryIds export not found');
   return found;
+}
+
+/** The value a return statement yields once casts, parentheses and non-null assertions are peeled off. */
+function peel(e: ts.Expression): ts.Expression {
+  while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isTypeAssertionExpression(e) ||
+    ts.isNonNullExpression(e) || ts.isSatisfiesExpression(e)) e = e.expression;
+  return e;
 }
 
 /** `return` statements of the function itself, not of closures declared inside it. */
@@ -48,7 +57,7 @@ describe('#3921 the declared contract', () => {
 
   it('has no return path that yields null or undefined', () => {
     const bad = ownReturns(declaration()).filter(r => {
-      const e = r.expression;
+      const e = r.expression && peel(r.expression);
       return !e || e.kind === ts.SyntaxKind.NullKeyword || (ts.isIdentifier(e) && e.text === 'undefined');
     });
     expect(bad.map(r => r.getText())).toEqual([]);
@@ -99,6 +108,38 @@ describe('#3921 a materialised set for every caller class', () => {
     const { kept, droppedIds } = narrowToAccessible([othersPersonal, publicMemory], new Set(ids));
     expect(droppedIds).toContain(othersPersonal);
     expect(kept).not.toContain(othersPersonal);
+  });
+});
+
+describe('#3921 callers keep filtering by the materialised list', () => {
+  let orgId: string; let a: { id: string }; let b: { id: string }; let chA: string; let chB: string;
+  const ctx = (userId: string): Context => ({ db, userId, roles: ['READER'] }) as Context;
+
+  beforeEach(async () => {
+    await cleanDb(db);
+    const t = generateId().slice(-8);
+    orgId = (await db.organization.create({ data: { id: generateId(), name: `ids3921-${t}`, urn: `ids3921-${t}` } })).id;
+    const user = (tag: string) => db.user.create({ data: { id: generateId(), handle: `ids3921${tag}${t}` } });
+    a = await user('a'); b = await user('b');
+    for (const u of [a, b]) await db.orgMember.create({ data: { id: generateId(), organizationId: orgId, userId: u.id, role: 'CONTRIBUTOR' } });
+    const personal = (u: { id: string }, tag: string) => db.memory.create({ data: {
+      id: generateId(), organizationId: orgId, urn: `ids3921-${t}:${tag}`, name: tag, class: 'personal', userId: u.id, visibility: null,
+    } });
+    const [ma, mb] = [await personal(a, 'notes-a'), await personal(b, 'notes-b')];
+    chA = (await ensureChannelWithRoot(db, { memoryId: ma.id, loc: 'chats:a', name: 'a', createdBy: a.id })).channel.id;
+    chB = (await ensureChannelWithRoot(db, { memoryId: mb.id, loc: 'chats:b', name: 'b', createdBy: b.id })).channel.id;
+  });
+
+  it('Query.channels lists only the channels whose host memory the caller can read', async () => {
+    const page = await (resolvers.Query as any).channels({}, { orgId }, ctx(b.id));
+    const ids = page.items.map((c: { id: string }) => c.id);
+    expect(ids).toContain(chB);
+    expect(ids).not.toContain(chA);
+  });
+
+  it('Ticker.channels shows only the channels the reader can read, not the stored list', async () => {
+    const shown = await (resolvers as any).Ticker.channels({ channelIds: [chA, chB] }, {}, ctx(b.id));
+    expect(shown.map((c: { id: string }) => c.id)).toEqual([chB]);
   });
 });
 
