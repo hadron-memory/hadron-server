@@ -4,7 +4,6 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { buildNodeRevisionSnapshot } from '../nodeRevisionSnapshot.js';
-import { createOperatorConversionContext } from '../auth/operatorConversion.js';
 import { getAccessibleMemoryIds, type Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import * as history from '../../api/graphql/schema/resolvers.query.node.js';
 import { plainPinWarnings } from './plainPinWarnings.js';
@@ -56,25 +55,6 @@ async function movedCapture(captureMemoryId: string | null) {
   return { target, snapshot };
 }
 
-// The internal mark is the only current producer of accessible=null. Its factory
-// supplies no reader role, so that unmodified principal cannot read history.
-// Add READER only in this fixture to exercise a scope that genuinely admits both
-// the warning and nodeRevisions; this changes no request/production authority.
-function unrestrictedReader(): Context {
-  return { ...createOperatorConversionContext(db), roles: ['READER'] };
-}
-
-it('warns an unrestricted history reader about a readable plain foreign capture (red on main)', async () => {
-  const { target, snapshot } = await movedCapture(foreignId);
-  const principal = unrestrictedReader();
-  const scope = await history.nodeRevisionsScope(principal, target.id);
-  expect(scope?.accessible).toBeNull();
-  expect(scope?.canRead(foreignId)).toBe(true);
-  const revisions = await history.nodeQueries.nodeRevisions(null, { nodeRef: target.id }, principal);
-  expect(revisions).toEqual([expect.objectContaining({ id: snapshot.id, content: 'Captured body' })]);
-  expect(await plainPinWarnings(principal, { memoryId }, '{{> target rev=1}}')).toEqual(EXPECTED);
-});
-
 it.each(['current', 'readable foreign', 'null'] as const)(
   'warns a restricted history reader about a plain %s-memory capture', async kind => {
     const captureId = kind === 'current' ? memoryId : kind === 'readable foreign' ? readableForeignId : null;
@@ -84,19 +64,19 @@ it.each(['current', 'readable foreign', 'null'] as const)(
     expect(scope?.canRead(captureId ?? memoryId)).toBe(true);
     if (captureId) expect(scope?.accessible).toContain(captureId);
     const revisions = await history.nodeQueries.nodeRevisions(null, { nodeRef: target.id }, reader);
-    expect(revisions).toEqual([expect.objectContaining({ id: snapshot.id, memoryId: captureId })]);
+    expect(revisions).toEqual([expect.objectContaining({ id: snapshot.id, memoryId: captureId, content: 'Captured body' })]);
     expect(await plainPinWarnings(reader, { memoryId }, '{{> target rev=1}}')).toEqual(EXPECTED);
   },
 );
 
-it('the ordinary operator has no reader role and cannot use unrestricted history advice', async () => {
+it('a userless principal has bounded scope and cannot use history advice', async () => {
   const { target } = await movedCapture(foreignId);
-  const operator = createOperatorConversionContext(db);
-  expect(await getAccessibleMemoryIds(operator)).toBeNull();
-  await expect(history.nodeQueries.nodeRevisions(null, { nodeRef: target.id }, operator)).rejects.toMatchObject({
+  const principal: Context = { db, roles: [] };
+  expect(await getAccessibleMemoryIds(principal)).not.toBeNull();
+  await expect(history.nodeQueries.nodeRevisions(null, { nodeRef: target.id }, principal)).rejects.toMatchObject({
     extensions: { code: 'FORBIDDEN' },
   });
-  expect(await plainPinWarnings(operator, { memoryId }, '{{> target rev=1}}')).toEqual([]);
+  expect(await plainPinWarnings(principal, { memoryId }, '{{> target rev=1}}')).toEqual([]);
 });
 
 it.each([
@@ -117,18 +97,17 @@ describe('one moved-snapshot defense at a time, with real PostgreSQL row lookups
   // canRead and accessible are coherent in today's shared scope, making either
   // defense mask removal of the other. Override just ONE scope projection to
   // make the other defense permissive; the actual revision lookup is never mocked.
-  it.each(['restricted', 'unrestricted'] as const)('canRead alone conceals a capture in a %s scope', async kind => {
-    const captureId = kind === 'restricted' ? readableForeignId : foreignId;
+  it.each(['explicit-list', 'no-filter'] as const)('canRead alone conceals a capture in a %s scope', async kind => {
+    const captureId = readableForeignId;
     const { target, snapshot } = await movedCapture(captureId);
-    const principal = kind === 'restricted' ? reader : unrestrictedReader();
+    const principal = reader;
     const realScope = await history.nodeRevisionsScope(principal, target.id);
     expect(realScope).not.toBeNull();
     expect(realScope!.canRead(captureId)).toBe(true);
-    if (kind === 'restricted') expect(realScope!.accessible).toContain(captureId);
-    else expect(realScope!.accessible).toBeNull();
+    expect(realScope!.accessible).toContain(captureId);
     expect(await db.nodeRevision.findUniqueOrThrow({ where: { id: snapshot.id } })).toMatchObject({ approvalHash: null });
     const canRead = vi.fn((id: string) => id !== captureId);
-    const scope = vi.spyOn(history, 'nodeRevisionsScope').mockResolvedValue({ ...realScope!, canRead });
+    const scope = vi.spyOn(history, 'nodeRevisionsScope').mockResolvedValue({ ...realScope!, accessible: kind === 'no-filter' ? null : realScope!.accessible, canRead });
     expect(await plainPinWarnings(principal, { memoryId }, '{{> target rev=1}}')).toEqual([]);
     expect(scope).toHaveBeenCalledWith(expect.anything(), target.id);
     expect(canRead).toHaveBeenCalledWith(captureId);
