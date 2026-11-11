@@ -100,7 +100,7 @@ export async function bootPromptApprovalGate(
 
 export const BOOT_PROMPT_APPROVAL_MESSAGES: Record<BootPromptApprovalRefusalCode, string> = {
   BOOT_PROMPT_WORKER_SESSION_REFUSED:
-    'BOOT_PROMPT_WORKER_SESSION_REFUSED: a worker session never approves a boot prompt; its manager does it as themselves.',
+    'BOOT_PROMPT_WORKER_SESSION_REFUSED: a worker session approves a boot prompt only under a signed batch grant naming that compiled node; otherwise its manager does it as themselves.',
   BOOT_PROMPT_APPROVAL_FORBIDDEN:
     'BOOT_PROMPT_APPROVAL_FORBIDDEN: a boot prompt here is approved only by whoever manages its Agent or App, as themselves.',
 };

@@ -5,7 +5,8 @@ import { computeApprovalHash, type ApprovalHashFields } from './approvalHash.js'
 import type { EncryptionKey } from './crypto.js';
 import { decryptNodeFieldsWithKey } from './nodeCrypto.js';
 import { ensureCurrentNodeRevisionInTransaction, RECONCILE_EDITOR_INFO, type SnapshotEditor } from './nodeRevisionSnapshot.js';
-import { isBootPromptRole } from './bootPrompt.js';
+import { COMPILED_BOOT_PROMPT_NODE_TYPE, boundWorkerId, isBootPromptRole } from './bootPrompt.js';
+import { findBatchGrant } from './grants/bootPromptGrant.js';
 import { BOOT_PROMPT_APPROVAL_MESSAGES, type BootPromptApprovalGate, type BootPromptApprovalRefusalCode } from './bootPromptApproval.js';
 
 /**
@@ -166,16 +167,30 @@ export async function approveNodeInTransaction(
     now?: Date;
     /** #2043 — the caller's boot-prompt approval decision for this memory (bootPromptApprovalGate). Required: no caller skips it. */
     bootPromptGate: BootPromptApprovalGate;
+    /**
+     * #3823 (Andi P2): whether the session behind this call has the standing a batch grant presupposes: a person's user behind it
+     * and no App key, the same shape the batch COMPILE requires. Absent means false, so a caller that does not say never lifts.
+     */
+    workerSessionMayUseBatch?: boolean;
   },
 ): Promise<{ node: NodeApprovalRow; approvedNow: boolean }> {
   // #2043 (R30, cor:agt:040:18) — judged on the LOCKED row, before the revision
   // reconcile below can write anything: a refusal changes nothing.
   const gate = opts.bootPromptGate;
+  let approver = opts.approver;
   if (gate.placed && gate.refusal) {
-    const [row] = await tx.$queryRaw<Array<{ role: string | null }>>`
-      SELECT role FROM nodes WHERE id = ${nodeId} AND memory_id = ${opts.memoryId} AND deleted_at IS NULL FOR UPDATE`;
+    const [row] = await tx.$queryRaw<Array<{ id: string; memory_id: string; loc: string; role: string | null; node_type: string | null }>>`
+      SELECT id, memory_id, loc, role, node_type FROM nodes WHERE id = ${nodeId} AND memory_id = ${opts.memoryId} AND deleted_at IS NULL FOR UPDATE`;
     if (row && isBootPromptRole(row.role)) {
-      throw new NodeApprovalRefusal(gate.refusal, BOOT_PROMPT_APPROVAL_MESSAGES[gate.refusal], { op: 'approve' });
+      // #3823 (ruling 0267, cor:agt:040:18 r9, R30's one exception): a worker session approves a COMPILED prompt only under a live
+      // batch grant that names it. The approval is recorded as the worker's, never as its holder's, and it never signs.
+      const workerId = boundWorkerId();
+      const batchGrantId = gate.refusal === 'BOOT_PROMPT_WORKER_SESSION_REFUSED' && workerId && opts.workerSessionMayUseBatch === true && row.node_type === COMPILED_BOOT_PROMPT_NODE_TYPE
+        ? await findBatchGrant(tx, workerId, { id: row.id, memoryId: row.memory_id, loc: row.loc }, true)
+        : null;
+      if (!batchGrantId) throw new NodeApprovalRefusal(gate.refusal, BOOT_PROMPT_APPROVAL_MESSAGES[gate.refusal], { op: 'approve' });
+      // The record names the grant that admitted it (no USE event: a batch grant has no use count).
+      approver = { userId: null, info: `worker:${workerId} (batch grant ${batchGrantId})` } as typeof opts.approver;
     }
   }
   const revision = await ensureCurrentNodeRevisionInTransaction(tx, nodeId, { expectedMemoryId: opts.memoryId });
@@ -222,8 +237,8 @@ export async function approveNodeInTransaction(
     where: { id: nodeId },
     data: {
       approvedRevNo: node.revSeq,
-      approvedBy: opts.approver.userId ?? null,
-      approvedByInfo: opts.approver.userId ? null : opts.approver.info ?? 'unknown',
+      approvedBy: approver.userId ?? null,
+      approvedByInfo: approver.userId ? null : approver.info ?? 'unknown',
       approvedAt: opts.now ?? new Date(),
       approvalHash: computeApprovalHash(approvalFieldsOf(node, opts.key)),
       // An approval is not an authoring change: it must not move the
