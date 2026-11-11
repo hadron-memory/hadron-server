@@ -387,7 +387,9 @@ describe('#2045 surfaces and code inventory', () => {
       'BOOT_PROMPT_INCLUDE_UNAVAILABLE', 'BOOT_PROMPT_INCLUDE_RETIRED', 'BOOT_PROMPT_INCLUDE_REVISION_UNAVAILABLE', 'BOOT_PROMPT_INCLUDE_CYCLE',
       'BOOT_PROMPT_INCLUDE_TOO_DEEP', 'BOOT_PROMPT_INCLUDE_SOURCE_DISALLOWED', 'BOOT_PROMPT_GRANT_REQUIRED', 'BOOT_PROMPT_INCLUDE_MALFORMED',
       'BOOT_PROMPT_COMPILE_LIMIT_EXCEEDED'];
-    const allowed = new Set([...S6, ...S9, ...SERVE, ...BOOT_PROMPT_POINTER_CODES]);
+    // #2973 PR2: the organisation signing switch's own codes (not serve refusals): a stale preview token, and an unset token signer.
+    const SWITCH = ['BOOT_PROMPT_SIGNING_PREVIEW_STALE', 'BOOT_PROMPT_SIGNING_NOT_CONFIGURED'];
+    const allowed = new Set([...S6, ...S9, ...SERVE, ...SWITCH, ...BOOT_PROMPT_POINTER_CODES]);
     const src = fileURLToPath(new URL('..', import.meta.url));
     const found = new Set<string>();
     const walk = (dir: string) => {

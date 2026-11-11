@@ -9,6 +9,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
+import * as launchModule from '../hostOperations/launch.js';
 import { resolvers } from '../../api/graphql/schema/resolvers.js';
 import { recoverInterruptedMatches, matchRecoverySeconds, matchQueuedTasks, matchTaskNow } from './matcher.js';
 import { taskMatcherTick } from '../../jobs/taskMatcher.js';
@@ -223,4 +224,15 @@ it('an attempt that throws leaves its claim; nothing retries it inside the bound
   expect(await recoverInterruptedMatches(db, at(BOUND * 2))).toBe(1); // after it: exactly one reclaim, which completes
   expect((await row(t.id)).assigneeWorkerId).toBe(w.id);
   expect(await recoverInterruptedMatches(db, at(BOUND * 3))).toBe(0);
+});
+
+it('#3815 (F1): the recovery attempt assigns a worker holding an open session and asks for no host start; the open session receives the task', async () => {
+  const w = await worker();
+  const t = await interrupted({ requirements: { role: 'reviewer' } });
+  const spy = vi.spyOn(launchModule, 'launchForAssignment');
+  try {
+    expect(await recoverInterruptedMatches(db, at(BOUND * 100))).toBe(1); // the session is long quiet by now
+    expect(await row(t.id)).toMatchObject({ assigneeWorkerId: w.id, matchPending: false });
+    expect(spy.mock.calls.filter((c) => c[1].taskId === t.id)).toEqual([]);
+  } finally { spy.mockRestore(); }
 });

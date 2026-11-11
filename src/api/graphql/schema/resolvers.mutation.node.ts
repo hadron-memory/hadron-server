@@ -1,3 +1,4 @@
+import { safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { assertNoGenericMessageSeqWrite } from '../../../lib/legacyMessageSeq.js';
 import { stampEmbeddingObligation } from '../../../services/embedding/obligation.js';
 // nodeMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
@@ -162,7 +163,7 @@ import {
 } from './resolvers.helpers.js';
 import { type ToolDriveFile } from '../../../lib/emailClient.js';
 import { concealWriteBeyondRead, findInstallMemory, lockInstallAuthoritiesFirst, lockInstallAuthorityFirst, resolveInstallTarget, withInstallMemory, type InstallTarget } from './installMemory.js';
-import { liveTxContext } from './authorizedTx.js';
+import { liveReadSnapshotContext, liveTxContext } from './authorizedTx.js';
 import { searchReplaceInSpecNodes } from './resolvers.searchReplaceSpec.js';
 import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
 import { attachIncludePinWarnings, carryIncludePinWarnings, captureIncludePinWarningLifetime } from '../../../lib/includes/plainPinWarnings.js';
@@ -2249,12 +2250,15 @@ function shallowMergeProperties(existing: unknown, patch: Record<string, unknown
  * and roles after its authority wait. Keep the existing ordinary-memory
  * context contract; this cut does not change those doors' principal model.
  */
-async function nodeDoorTxContext(ctx: Context, tx: Prisma.TransactionClient, memoryIds: readonly string[]): Promise<Context> {
-  // The complete install authority set has already been acquired by the door.
-  // Any install gate will independently refresh again under those same locks.
-  return (await tx.memory.findFirst({ where: { isInstallMemory: true, class: 'system',
-    id: { in: [...memoryIds] } }, select: { id: true } }))
-    ? liveTxContext(ctx, tx) : withoutRequestCaches(ctx, tx);
+async function nodeDoorTxContext(ctx: Context, tx: Prisma.TransactionClient, memoryIds: readonly string[], preview = false): Promise<Context> {
+  // Writes refresh under authority/credential locks. A plan validates the same
+  // live credential facts in its read-only repeatable-read snapshot (#3424).
+  const install = await tx.memory.findFirst({ where: { isInstallMemory: true, class: 'system',
+    id: { in: [...memoryIds] } }, select: { id: true } });
+  const fresh = install
+    ? await (preview ? liveReadSnapshotContext(ctx, tx) : liveTxContext(ctx, tx))
+    : withoutRequestCaches(ctx, tx);
+  return preview ? { ...fresh, installWritePreview: true } : fresh;
 }
 
 /** #2734: conceal an install-memory preflight denial without changing the
@@ -2299,8 +2303,10 @@ async function withNodeHistoryWrite<T>(ctx: Context, nodeId: string, memoryId: s
 export const nodeMoveOps = {
   async moveWithResult(
     ctx: Context,
-    { sourceRef, targetUrn, targetMemoryRef, requireUnminted, expectedSource, mirrorAfterMove = true }: {
+    { sourceRef, targetUrn, targetMemoryRef, requireUnminted, expectedSource, mirrorAfterMove = true, planOnly = false, limit = 100 }: {
       sourceRef: string; targetUrn?: string | null; targetMemoryRef?: string | null;
+      /** cor:api:190:03: shared validation, no mutation effects. */
+      planOnly?: boolean; limit?: number;
       /** A compound operation may mirror once after its follow-on edits. */
       mirrorAfterMove?: boolean;
       /** #1449/#1591: refuse (NODE_MINTED) when any moved node is minted, under the move's locks (renumber). */
@@ -2346,14 +2352,16 @@ export const nodeMoveOps = {
       try {
         let relocated: MoveNodeSubtreeResult['moved'] = [];
         let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
+        let warningsWithheld = false;
         // #2622: a move rebases whole loc subtrees, so it is a chat-message
         // writer like any other — the #992 conflict surfaces typed here, once,
         // for every move caller (moveNode + the spec-corpus relocation).
         const moved = await mapChatSeqConflict(() => ctx.db.$transaction(
           async (tx) => {
+            if (planOnly) await tx.$executeRaw`SET TRANSACTION READ ONLY`;
             // #2206 (#2233): an Agent definition's authority, at either end, before any loc or row lock.
-            await lockInstallAuthoritiesFirst(tx, ctx, [source.memoryId, destMemoryId]);
-            const txCtx = await nodeDoorTxContext(ctx, tx, [source.memoryId, destMemoryId]);
+            if (!planOnly) await lockInstallAuthoritiesFirst(tx, ctx, [source.memoryId, destMemoryId]);
+            const txCtx = await nodeDoorTxContext(ctx, tx, [source.memoryId, destMemoryId], planOnly);
             for (const memoryId of new Set([source.memoryId, destMemoryId])) {
               await concealUnreadableNodeDenial(txCtx, memoryId, () => nodeNotFoundError(sourceRef), () => requireMemoryWriteAccess(txCtx, memoryId));
             }
@@ -2367,26 +2375,42 @@ export const nodeMoveOps = {
             // which is one of the three pairwise inversions #1187 catalogues.
             // Both helpers below still run for their gates and the source
             // revalidation; their re-acquisitions are re-entrant no-ops.
-            await acquireLockSet(tx, [
-              ...ancestorLocs(destLoc).map((loc) => ({ memoryId: destMemoryId, loc })),
-              ...ancestorLocs(source.loc).map((loc) => ({ memoryId: source.memoryId, loc })),
-              { memoryId: source.memoryId, loc: source.loc },
-            ]);
-            // #664/#752: moving a node INTO a subtree is the same orphan vector as
-            // a create there — a concurrent non-recursive delete of a destination
-            // ancestor could count zero descendants, then this move lands the row
-            // under it. Lock the destination ancestor path. Root-level → no-op.
-            await lockAncestorsForCreate(tx, destMemoryId, destLoc);
+            if (planOnly) {
+              await assertLocWritable(tx, destMemoryId, [destLoc], 'create under');
+            } else {
+              await acquireLockSet(tx, [
+                ...ancestorLocs(destLoc).map((loc) => ({ memoryId: destMemoryId, loc })),
+                ...ancestorLocs(source.loc).map((loc) => ({ memoryId: source.memoryId, loc })),
+                { memoryId: source.memoryId, loc: source.loc },
+              ]);
+              // #664/#752: moving a node INTO a subtree is the same orphan vector as
+              // a create there — a concurrent non-recursive delete of a destination
+              // ancestor could count zero descendants, then this move lands the row
+              // under it. Lock the destination ancestor path. Root-level → no-op.
+              await lockAncestorsForCreate(tx, destMemoryId, destLoc);
+            }
 
             if (isSameSlot) {
-              return tx.node.findUniqueOrThrow({ where: { id: source.id }, include: withEdges });
+              if (planOnly) {
+                const subtree = await tx.node.findMany({ where: { memoryId: source.memoryId, deletedAt: null,
+                  OR: [{ id: source.id }, { loc: { startsWith: `${source.loc}:` } }] } });
+                relocated = subtree.map(n => ({ id: n.id, previousLoc: n.loc, loc: n.loc }));
+              }
+              return tx.node.findUniqueOrThrow({ where: { id: source.id }, include: planOnly ? undefined : withEdges });
             }
 
             // Rebase the whole loc-subtree via the shared helper (it locks +
             // revalidates the source, carries embeddings/edges cross-memory, and
             // fails loud on a destination collision).
+            if (planOnly) {
+              const readable = await getAccessibleMemoryIds(txCtx, destMemoryId);
+              warningsWithheld = readable !== null && !readable.includes(destMemoryId);
+            }
             const result = await moveNodeSubtree(tx, {
               source,
+              planOnly,
+              withholdLinkWarnings: warningsWithheld,
+              canReadMemoryId: memoryId => isMemoryReadableCached(txCtx, memoryId),
               destLoc,
               destMemoryId: crossMemory ? destMemoryId : undefined,
               editor: editorFromAuth(ctx),
@@ -2397,12 +2421,27 @@ export const nodeMoveOps = {
             });
             relocated = result.moved;
             linkWarnings = result.linkWarnings;
-            return tx.node.findUniqueOrThrow({ where: { id: source.id }, include: withEdges });
+            return tx.node.findUniqueOrThrow({ where: { id: source.id }, include: planOnly ? undefined : withEdges });
           },
           // A large subtree touches many rows; the default 5s interactive-txn
           // timeout is too tight (mirrors extractParentNodeGraph / cloneMemory).
-          { timeout: 120_000 },
+          { timeout: 120_000, ...(planOnly ? { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead } : {}) },
         ));
+        if (planOnly) {
+          const memories = await ctx.db.memory.findMany({ where: { id: { in: [source.memoryId, destMemoryId] } }, select: { id: true, urn: true } });
+          const urns = new Map(memories.map(m => [m.id, m.urn]));
+          const ordered = relocated.sort((a, b) => a.previousLoc < b.previousLoc ? -1 : a.previousLoc > b.previousLoc ? 1 : 0);
+          const bound = Math.max(1, Math.min(1000, Math.trunc(limit)));
+          return { node: { ...moved, moveLinkWarnings: linkWarnings }, relocated,
+            plan: {
+              nodes: ordered.slice(0, bound).map(n => ({ id: n.id,
+                currentUrn: safeNodeUrnV2(urns.get(source.memoryId)!, n.previousLoc),
+                newUrn: safeNodeUrnV2(urns.get(destMemoryId)!, n.loc) })),
+              totalCount: ordered.length, truncated: ordered.length > bound,
+              linkWarnings: warningsWithheld ? null : linkWarnings,
+              linkWarningsWithheld: warningsWithheld, pointInTime: true,
+            } };
+        }
         // #1061 — a move is a write, recorded against the node's POST-move
         // address (the loc and, on a cross-memory move, the memory it now
         // lives in): that is where a reader of the usage series will look for
@@ -2479,7 +2518,9 @@ async function createNodeInInstallMemory(input: CreateNodeArgs, ctx: Context) {
     writeNodeCore({ ...rest, memoryId: memory.id } as CreateNodeInput, txCtx, 'create', {
       authoring: authoringFromRequest(ctx, input.authoredWith),
       governedContext: 'node-write',
-      transaction: { tx, pooledDb: ctx.db, afterCommit: (effect) => effects.push(effect) },
+      // #3651: response-only state (the include-pin warnings) is keyed by the exact request Context, and `txCtx`
+      // is a copy. Hand the outer one through, as the install update does, so the warning reaches the request.
+      transaction: { tx, pooledDb: ctx.db, requestContext: ctx, afterCommit: (effect) => effects.push(effect) },
     }));
   for (const effect of effects) effect();
   return written;
@@ -3996,6 +4037,12 @@ export const nodeMutations = {
     // descendant. #781: a move may ALSO relocate the subtree ACROSS memories
     // (nodes + embeddings + outgoing edges follow; boundary edges become
     // cross-memory edges gated by #783) — moveNodeSubtree handles both.
+    /** cor:api:190:03: the real move's resolution, gates and checks, without writes. */
+    planNodeMove: async (_: unknown,
+      args: { sourceRef: string; targetUrn?: string | null; targetMemoryRef?: string | null; limit?: number },
+      ctx: Context,
+    ) => (await nodeMoveOps.moveWithResult(ctx, { ...args, planOnly: true })).plan,
+
     moveNode: async (
       _: unknown,
       args: { sourceRef: string; targetUrn?: string | null; targetMemoryRef?: string | null },

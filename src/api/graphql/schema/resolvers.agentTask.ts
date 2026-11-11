@@ -178,6 +178,18 @@ function normalizeCreateStatus(value: string | null | undefined): 'backlog' | 'p
 export function taskError(code: string, message: string, ext: Record<string, unknown> = {}): GraphQLError {
   return new GraphQLError(message, { extensions: { code, ...ext } });
 }
+/**
+ * #3863: TASK_NOT_ASSIGNEE for one request shape that looks identical from outside — a request that carried no worker
+ * session (it acted as the person) versus one that acted as a worker who is not the assignee. The refusal now says which
+ * the SERVER saw (`extensions.actor`: 'person' | 'worker'), which is the caller's own request and reveals nothing about
+ * the task or its assignee. The code, the gate and the refuse-before-write order are unchanged (cor:agt:050:08).
+ */
+export function notAssignee(actor: TaskActor, message: string, ext: Record<string, unknown> = {}): GraphQLError {
+  const note = actor.kind === 'worker'
+    ? ' This request acted as a worker session.'
+    : ' This request acted as a person: it carried no worker session, and a worker\'s task is acted on only with that worker\'s session.';
+  return taskError('TASK_NOT_ASSIGNEE', message + note, { ...ext, actor: actor.kind === 'worker' ? 'worker' : 'person' });
+}
 const notFound = (taskId: string): GraphQLError =>
   taskError('TASK_NOT_FOUND', 'Task not found.', { taskId });
 /** #2664: the longest `text` filter, after trimming. */
@@ -1911,7 +1923,7 @@ async function applyTaskCreate(
     const parent = await lockTask(tx, parentTaskId!);
     if (!parent || parent.appId !== app.id) throw notFound(parentRef);
     if (!isAssignee(actor, parent)) {
-      throw taskError('TASK_NOT_ASSIGNEE', "Only the parent task's assignee creates its child tasks.", { taskId: parentRef });
+      throw notAssignee(actor, "Only the parent task's assignee creates its child tasks.", { taskId: parentRef });
     }
     refuseEnded(parent);
   }
@@ -1964,10 +1976,15 @@ async function applyTaskCreateBlockers(
 }
 
 /** What a committed create does next: start the assignee it names (#1709) and file its warnings (#2198). */
-async function afterTaskCreate(ctx: Context, info: Pick<GraphQLResolveInfo, 'path'> | undefined, taskId: string, warn: TaskWarningCode[], family?: string) {
+async function afterTaskCreate(
+  ctx: Context, info: Pick<GraphQLResolveInfo, 'path'> | undefined, taskId: string, warn: TaskWarningCode[], startItsAssignee: boolean, family?: string,
+) {
   const created = await ctx.db.agentTask.findUniqueOrThrow({ where: { id: taskId } });
-  // #1709 (cor:agt:070:08): created straight onto a worker, it may start that worker.
-  await launchAssignee(ctx.db, created, family);
+  // #1709 (cor:agt:070:08): `startItsAssignee` is true when the create NAMED its assignee, or a distinct-batch match chose a
+  // worker with no open session (`needsHostStart`). #3815 (ruling 0265 V16-V19): any other matcher-chosen assignee is started
+  // by the matcher's own rule (a host start only for a worker with no open session), so this live-only launch check must not
+  // run for it. `matchTaskNow` runs after the create transaction commits, so `created` below already carries its assignee.
+  if (startItsAssignee) await launchAssignee(ctx.db, created, family);
   await emitTaskWarnings(ctx, info, created.appId, { codes: warn, taskId: created.id });
   return created;
 }
@@ -2147,7 +2164,7 @@ export const agentTaskMutations = {
     // #3816 (V22): a failed match's candidates ride this answer only; they are never stored.
     const skipped = input.match ? await matchTaskNow(ctx.db, made.id, new Date()) : null;
     if (!input.match && made.queued) await matchAfterChange(ctx.db, p.app.id);
-    const created = await afterTaskCreate(ctx, info, made.id, p.warn);
+    const created = await afterTaskCreate(ctx, info, made.id, p.warn, made.row.assigneeWorkerId != null);
     // #2694 (cor:agt:020:11 r3): creating a task is the one task write outside `mutateTask`; same rule as there.
     if (p.actor.kind === 'worker' && ctx.sessionId) await touchSessionIfLive(ctx.db as never, ctx.sessionId, p.actor.workerId);
     return skipped ? Object.assign(created, { matchSkipped: skipped }) : created;
@@ -2209,6 +2226,8 @@ export const agentTaskMutations = {
     const distinct = distinctAssignees === true;
     const workerPool = new Set<string>();
     const matchedFamilies = new Map<string, string>();
+    /** #3815: the distinct-batch matches whose worker has NO open session, the only ones the post-commit launch starts. */
+    const matchedNeedStart = new Set<string>();
     const parents = [...new Set(prepared.map(p => p.parentTaskId).filter((id): id is string => id !== null))].sort();
     const made = await inTaskWriteTx(ctx, inApp.app, inApp.actor, () => appNotFound(appRef), async (tx, txCtx, app) => {
       for (const id of parents) await tx.$queryRaw`SELECT id FROM agent_tasks WHERE id = ${id} FOR UPDATE`;
@@ -2257,6 +2276,7 @@ export const agentTaskMutations = {
           if ('reason' in outcome) throw taskError('TASK_MATCH_FAILED', 'A task of this distinct batch could not be matched.', { position: i + 1, reason: outcome.reason });
           excluded.add(outcome.workerId);
           matchedFamilies.set(out[i]!.id, outcome.family);
+          if (outcome.needsHostStart) matchedNeedStart.add(out[i]!.id);
         }
       }
       return out;
@@ -2280,7 +2300,7 @@ export const agentTaskMutations = {
     const created = [];
     for (const [i, m] of made.entries()) {
       const at = typeof key === 'string' ? { path: { key: `${key}.${i + 1}`, prev: undefined, typename: undefined } } : undefined;
-      created.push(await afterTaskCreate(ctx, at, m.id, prepared[i]!.warn, matchedFamilies.get(m.id)));
+      created.push(await afterTaskCreate(ctx, at, m.id, prepared[i]!.warn, m.row.assigneeWorkerId != null || matchedNeedStart.has(m.id), matchedFamilies.get(m.id)));
     }
     if (inApp.actor.kind === 'worker' && ctx.sessionId) await touchSessionIfLive(ctx.db as never, ctx.sessionId, inApp.actor.workerId);
     return created;
@@ -2345,7 +2365,7 @@ export const agentTaskMutations = {
     const made = await inTaskWriteTx(ctx, p.app, p.actor, p.refused, (tx, txCtx, app) => applyTaskCreate(tx, txCtx, app, p),
       { lockWorkerIds: [p.lockedAssignee], taskGraph: 'shared' });
     if (made.queued) await matchAfterChange(ctx.db, p.app.id);
-    const created = await afterTaskCreate(ctx, info, made.id, p.warn);
+    const created = await afterTaskCreate(ctx, info, made.id, p.warn, made.row.assigneeWorkerId != null);
     if (p.actor.kind === 'worker' && ctx.sessionId) await touchSessionIfLive(ctx.db as never, ctx.sessionId, p.actor.workerId);
     return created;
   },
@@ -2552,7 +2572,7 @@ export const agentTaskMutations = {
     const warn: TaskWarningCode[] = [];
     const started = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!isAssignee(actor, task)) {
-        throw taskError('TASK_NOT_ASSIGNEE', "Only the task's assignee starts it.", { taskId });
+        throw notAssignee(actor, "Only the task's assignee starts it.", { taskId });
       }
       refuseEnded(task);
       if (task.status !== 'pending') {
@@ -2585,7 +2605,7 @@ export const agentTaskMutations = {
     const warn: TaskWarningCode[] = [];
     const recorded = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!isAssignee(actor, task)) {
-        throw taskError('TASK_NOT_ASSIGNEE', "Only the task's assignee records progress on it.", { taskId });
+        throw notAssignee(actor, "Only the task's assignee records progress on it.", { taskId });
       }
       refuseEnded(task);
       if (task.status !== 'started') {
@@ -2657,7 +2677,7 @@ export const agentTaskMutations = {
     const warn: TaskWarningCode[] = [];
     const finished = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!isAssignee(actor, task)) {
-        throw taskError('TASK_NOT_ASSIGNEE', "Only the task's assignee finishes it and sets its result.", { taskId });
+        throw notAssignee(actor, "Only the task's assignee finishes it and sets its result.", { taskId });
       }
       refuseEnded(task);
       if (task.status !== 'started') {
@@ -2755,7 +2775,7 @@ export const agentTaskMutations = {
     const text = optionalText(reason?.text, TASK_HAND_BACK_TEXT_MAX, 'reason.text');
     const handedBack = await mutateTask(ctx, taskRef, async (tx, task, actor, app) => {
       if (!isAssignee(actor, task)) {
-        throw taskError('TASK_NOT_ASSIGNEE', "Only the task's assignee hands it back.", { taskId: taskRef });
+        throw notAssignee(actor, "Only the task's assignee hands it back.", { taskId: taskRef });
       }
       refuseEnded(task);
       if (task.status !== 'started') {

@@ -280,19 +280,33 @@ describe('#2973 coverage (cor:dmo:130:09 — from the revision history, never th
   it('the walk predicate answers every revision the single ask answers — the interval law, pinned across its edges', async () => {
     // Clark's F1 (QA of 8f8d48c1, 6757293402): the serve walks `lazyRevisionSignatureCounts` over up to
     // cap × batches candidates, and its verdict must equal the single-revision ask at EVERY one of them. The
-    // history below crosses each interval edge: the signed own revision (1), a covered metadata-only revision (2),
-    // the revision that breaks coverage (3), a restore that must not revive it (4), and numbers outside the
-    // history (0, 5).
+    // history below crosses each interval edge AND the paths where lazy and eager could diverge (Bob P3-4, BLIND
+    // delta at f22b3340). Note the fixture numbering, driven by `ensureCurrentNodeRevisionInTransaction` at request
+    // creation: the request pins the revision the live row's state hash still agrees with (`revisionContentHash`) — a
+    // NEW reconciled revision when a helper edit left the fingerprint stale, the CURRENT one when it did not. The
+    // meta-only edit changes `description`, which the state hash covers, so the second signLive below pins the
+    // ceremony-reconciled revision 3 (not 2); the v3→v1 restore returns the live row to the fingerprinted state, so
+    // the contributor's signLive signs revision 5 IN PLACE. The history: 1 'v1' signed by the admin (interval [1,3] —
+    // witnesses 1, 2 and 3 all hold 'v1'), 2 metadata-only, 3 the reconciled revision signed again by the admin
+    // (overlapping interval [3,3]), 4 'v3' breaking both coverages, 5 the restore (no revival) signed by the
+    // CONTRIBUTOR (writer grade: legs run, counts nowhere — and for asks below 5 the eager ask filters it out
+    // pre-leg while the lazy load evaluates it), 6 metadata-only (the live head).
     await signLive(); // revision 1 holds 'v1'
     await editMetaOnly(); // revision 2: covered
-    await editContent('v3'); // revision 3: breaks coverage
-    await editContent('v1'); // revision 4: restores the signed text (no revival)
+    await signLive(); // pins the ceremony-reconciled revision 3, signed again: overlapping interval [3,3]
+    await editContent('v3'); // revision 4: breaks both coverages
+    await editContent('v1'); // revision 5: restores the signed text (no revival)
+    await signLive(nodeId, { as: 'contributor' }); // the restore matched the fingerprint: signs revision 5 IN PLACE, writer grade
+    await editMetaOnly(); // revision 6: metadata-only
     const walk = lazyRevisionSignatureCounts(db, nodeId, REQ);
-    for (const rev of [0, 1, 2, 3, 4, 5]) {
+    for (const rev of [0, 1, 2, 3, 4, 5, 6]) {
       const eager = await counts(rev);
-      expect(eager, `eager@${rev}`).toBe(rev === 1 || rev === 2);
+      expect(eager, `eager@${rev}`).toBe(rev === 1 || rev === 2 || rev === 3);
       expect(await walk(rev), `walk@${rev}`).toBe(eager);
     }
+    // The lazy load evaluated the contributor's row (above the asks at 1–3) without it rejecting anything: the
+    // no-throw guarantee is what makes the unbounded signature read safe (module doc, Bob P3-2).
+    expect((await db.nodeSignature.count({ where: { nodeId } })), 'three signature rows evaluated').toBe(3);
   });
 
   it('judges change per revision, not from the live content_changed_at marker', async () => {

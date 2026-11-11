@@ -44,7 +44,7 @@ import { planOrgAgentInstallGrant } from '../../../lib/auth/orgAgentInstallLicen
 import { withAuthorizedTx } from './authorizedTx.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
 import {
-  isAgentInstalled,
+  isAgentInstalledAndLicensed,
 } from '../../../lib/appAgent.js';
 import { getOrgReadableMemoryIds } from '../../../lib/auth/orgReadableMemory.js';
 import { subscribedAgentMemoryAdmitted } from '../../../lib/auth/memorySubscriptionAccess.js';
@@ -127,6 +127,8 @@ export interface Context {
    * cannot hold the fence, so it fails closed.
    */
   installWritePreflight?: boolean;
+  /** cor:api:190:03: judge install-write audience without fences, only in a READ ONLY plan transaction. */
+  installWritePreview?: boolean;
   /**
    * #1301 — set by an MCP handler that DELEGATES to a GraphQL resolver (e.g.
    * `hadron_update_node_data` → `updateNodeData`), so a refusal addresses the
@@ -2023,11 +2025,11 @@ export async function requireAiConfigOwnerAdmin(
  * these are required:
  *   1. an `appId` (the picker is meaningless without an installation),
  *   2. membership of that App, and
- *   3. the named Agent (if any) must be installed in that App.
+ *   3. the named Agent (if any) must be installed and licensed in that App.
  *
  * All three matter because the walk returns the App's configs AND the named
  * Agent's configs AND the org's, deriving the org from the App. Tying the
- * Agent to the App (isAgentInstalled) stops a member from pointing the walk at
+ * Agent to the App with a live license stops a member from pointing the walk at
  * an unrelated Agent's configs; requiring the App (instead of resolving an
  * Agent's home org when no appId is given) stops a member of an installing org
  * from reading the Agent author org's configs. The output is masked (no key
@@ -2048,7 +2050,7 @@ export async function requireAiConfigPickerAccess(
   if (!member) throw authorizationDenied();
   // The named Agent must be installed in this App, or the walk could be
   // pointed at an unrelated Agent's (masked) configs.
-  if (agentId && !(await isAgentInstalled(ctx.db, appId, agentId))) {
+  if (agentId && !(await isAgentInstalledAndLicensed(ctx.db, appId, agentId))) {
     throw authorizationDenied();
   }
 }

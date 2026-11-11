@@ -82,6 +82,7 @@ import {
   loadAppUrn,
   loadApp,
   requireOrgRole,
+  requireOwnerOrOrgRole,
   isPlatformAdmin,
   requireAgentAccess,
   defaultAiConfigOf,
@@ -2533,15 +2534,32 @@ export const typeResolvers = {
   Agent: {
     // 036-ai-service-config: registry-backed reads of the Agent's
     // 'default' config (legacy ai_* columns dropped). Never return the
-    // encrypted key itself — only whether one exists + the preview.
+    // encrypted key itself. Identity fields remain public; the preview follows
+    // the selected source's credential-management gate, not Agent readability.
     aiProvider: async (a: { id: string }, _: unknown, ctx: Context) =>
       (await defaultAiConfigOf(a, 'agentId', ctx))?.provider ?? null,
     aiModel: async (a: { id: string }, _: unknown, ctx: Context) =>
       (await defaultAiConfigOf(a, 'agentId', ctx))?.model ?? null,
     hasAiApiKey: async (a: { id: string }, _: unknown, ctx: Context) =>
       !!(await defaultAiConfigOf(a, 'agentId', ctx))?.apiKeyEncrypted,
-    aiApiKeyPreview: async (a: { id: string }, _: unknown, ctx: Context) =>
-      (await defaultAiConfigOf(a, 'agentId', ctx))?.apiKeyPreview ?? null,
+    aiApiKeyPreview: async (a: { id: string }, _: unknown, ctx: Context) => {
+      const config = await defaultAiConfigOf(a, 'agentId', ctx);
+      if (!config) return null;
+      const source = await ctx.db.agent.findFirst({
+        where: { id: config.agentId!, deletedAt: null },
+        select: { organizationId: true, ownerUserId: true },
+      });
+      if (!source) return null;
+      try {
+        // Personal credentials stay owner-only even when platform management
+        // can read the Agent. Only an ordinary denial becomes a masked value.
+        await requireOwnerOrOrgRole(ctx, source, 'ADMIN');
+      } catch (error) {
+        if (!(error instanceof GraphQLError) || error.extensions.code !== 'FORBIDDEN') throw error;
+        return null;
+      }
+      return config.apiKeyPreview ?? null;
+    },
     // 008-agent-installation: declarative knobs come back from Prisma as
     // JSON columns. Pass through with sensible defaults (the column has a
     // schema-level DEFAULT, so this is belt-and-braces against partial

@@ -2072,6 +2072,7 @@ export const workerQueries = {
         ...row,
         __heldWorkerActivity: activity.get(row.id) ?? {
           hasLiveSession: false,
+          holdsOpenSession: false,
           lastActiveAt: null,
           bound: false,
           bindingFamily: null,
@@ -2255,6 +2256,8 @@ async function bindingModelOf(
 
 export type WorkerActivity = {
   hasLiveSession: boolean;
+  /** #3815: an open session not past its hard expiry, however quiet: the matcher's reach (a quiet session is not gone, #1114). */
+  holdsOpenSession: boolean;
   lastActiveAt: Date | null;
   bound: boolean;
   bindingFamily: string | null;
@@ -2280,13 +2283,14 @@ async function queryWorkerActivity(
   now: Date,
 ): Promise<Map<string, WorkerActivity>> {
   const rows = await ctx.db.$queryRaw<
-    { workerId: string; live: boolean; lastActiveAt: Date | null; bound: boolean; bindingFamily: string | null; bindingModel: string | null; modelReportedAt: Date | null }[]
+    { workerId: string; live: boolean; holdsOpen: boolean; lastActiveAt: Date | null; bound: boolean; bindingFamily: string | null; bindingModel: string | null; modelReportedAt: Date | null }[]
   >(workerActivitySql(scope, now));
   return new Map<string, WorkerActivity>(
     rows.map((row) => [
       row.workerId,
       {
         hasLiveSession: row.live,
+        holdsOpenSession: row.holdsOpen,
         lastActiveAt: row.lastActiveAt,
         bound: row.bound,
         bindingFamily: normalizeFamily(row.bindingFamily),
@@ -2344,6 +2348,8 @@ export function workerActivitySql(scope: Prisma.Sql, now: Date): Prisma.Sql {
   return Prisma.sql`
     SELECT s.worker_id AS "workerId",
            bool_or(${sessionLive}) AS "live",
+           -- #3815: open and inside any hard expiry; the idle window plays no part (silence is not abandonment, #1114).
+           COALESCE(bool_or(s.ended_at IS NULL AND (s.expires_at IS NULL OR s.expires_at > ${toNaiveUtc(now)}::timestamp)), false) AS "holdsOpen",
            -- #1707: the BINDING is any open session, live or quiet; its family
            -- is the newest open session's (the latest bind), null included —
            -- a newer bind that reported none does not inherit an older one's.

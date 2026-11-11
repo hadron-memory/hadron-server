@@ -317,7 +317,7 @@ describe('#2973 × #3801 — the approved-and-signed walk past the scan cap (Bob
     expect(await code(serve())).toBe('BOOT_PROMPT_NOT_SIGNED');
   }, 120_000);
 
-  it('the ceiling refusal arrives TYPED inside the bind-shaped default-timeout transaction (Clark F1, QA of 8f8d48c1)', async () => {
+  it('the ceiling refusal arrives TYPED inside the bind-shaped default-timeout transaction, on ONE predicate read set (Clark F1, QA of 8f8d48c1)', async () => {
     await switchOn();
     signingShips(true);
     const node = await compiled('signed text');
@@ -327,17 +327,35 @@ describe('#2973 × #3801 — the approved-and-signed walk past the scan cap (Bob
     // A bind serves INSIDE ctx.db.$transaction(...) with DEFAULT options (resolvers.mutation.session.ts), so the walk
     // has Prisma's 5000 ms interactive-transaction budget. Judging the signed predicate per candidate re-read the node,
     // the requests, the owner, the clock and a candidate-sized span slice PER ASK — O(candidates × span) ≈ 500 K rows
-    // on this very fixture — and blew that budget, so the typed refusal surfaced as a raw P2028 → INTERNAL_SERVER_ERROR
-    // on the live stack. The interval law (revisionSignatureCounts.ts: one set of reads, every candidate an in-memory
-    // interval test) must keep the typed refusal arriving inside the very budget a bind gives it.
-    const inside = await db.$transaction(async (tx) => {
+    // on this very fixture — and blew that budget: the author's local reproduction hit it as a P2028 (the live
+    // requests' own cause stays unclassified in the QA record, which retained no server diagnostics).
+    //
+    // The DETERMINISTIC assertion is the read count (Bob P2, BLIND delta at f22b3340; Rico P3, §10 delta): only the
+    // signed predicate issues `nodeSignature.findMany` on this path, once per evaluation — the per-candidate form
+    // issued ~one per APPROVED candidate (≈ 1000 on this fixture), the interval law issues exactly ONE. Wall time is
+    // not asserted: a wall-clock ceiling would false-green on a fast box and false-red on a loaded one, while the
+    // count is the shape of the defect itself. The transaction wrapper stays because the typed refusal arriving
+    // within the bind's own default budget is the behaviour F1 was filed against.
+    let signatureReads = 0;
+    const counting = db.$extends({
+      query: {
+        nodeSignature: {
+          async findMany({ args, query }) {
+            signatureReads += 1;
+            return query(args);
+          },
+        },
+      },
+    });
+    const inside = await counting.$transaction(async (tx) => {
       try {
-        await resolveServedBootPrompt(tx, { surface: 'bind', appId, agent: { id: agentId, name: 'Ada' }, workerId });
+        await resolveServedBootPrompt(tx as never, { surface: 'bind', appId, agent: { id: agentId, name: 'Ada' }, workerId });
         return 'SERVED';
       } catch (e) {
         return (e as { extensions?: { code?: string } }).extensions?.code ?? `RAW:${(e as Error).message.slice(0, 120)}`;
       }
     });
     expect(inside).toBe('BOOT_PROMPT_NOT_SIGNED');
+    expect(signatureReads).toBe(1);
   }, 120_000);
 });

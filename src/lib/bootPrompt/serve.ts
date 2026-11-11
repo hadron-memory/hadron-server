@@ -192,8 +192,9 @@ async function resolveFrom(db: Db, t: ServeTarget, skipWorker: boolean): Promise
       // still serves; past the batch ceiling the serve fails closed with the R36 refusal, never wrong text). The
       // signed predicate is the LAZY one — one set of reads answers every candidate the walk asks (the interval law,
       // revisionSignatureCounts.ts): judging per candidate re-read the span per ask, and a node pushed past the scan
-      // ceiling then cost more than the bind transaction's default timeout, surfacing the typed refusal as a raw
-      // INTERNAL_SERVER_ERROR (Clark's F1, QA of 8f8d48c1).
+      // ceiling then cost more than the bind transaction's default timeout (the author's local reproduction hit it as
+      // a P2028; the live requests' own cause stays unclassified in the QA record, which retained no server
+      // diagnostics — Clark's F1, QA of 8f8d48c1, 6757293402).
       const signed = lazyRevisionSignatureCounts(db, resolved.nodeId, 'compiled-boot-prompt');
       const walk = await newestApprovedAndSignedRevisionForServe(db, resolved.nodeId, signed);
       if (!walk.found) throw bootPromptRefusal(walk.approvedUnsigned ? 'BOOT_PROMPT_NOT_SIGNED' : 'BOOT_PROMPT_NOT_APPROVED', where);
