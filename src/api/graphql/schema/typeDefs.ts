@@ -2076,7 +2076,7 @@ export const typeDefs = `#graphql
     expectedWorkerId, expectedWorkerName (null unless the caller may read that worker), foundWorkerId,
     foundWorkerName and foundSource (CLAIM or LIVE_SESSION), before any write: no claim is consumed and no
     session is started, ended or touched. With nothing of the caller's waiting the answer stays
-    NOTHING_TO_RESUME. Omitted or null: unchanged. Blank: BAD_USER_INPUT.
+    NOTHING_TO_RESUME. Omitted or null: unchanged. Blank or not an id (a URN or a name): BAD_USER_INPUT, before any read.
     """
     expectedWorkerId: ID
   }
