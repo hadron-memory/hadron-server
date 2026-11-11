@@ -17,7 +17,7 @@
  *   - an owner rename keeps the URN resolving; a config rename leaves no alias;
  *   - `platform` / `server` cannot be minted as a root.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -336,6 +336,66 @@ describe('#3857 review — each URN resolves to ITS owner\'s config, not any con
       expect(await Q.resolveUrn(null, { urn: first }, admin)).toMatchObject({ id: cfg[k].id });
       expect(await Q.resolveUrn(null, { urn: other }, admin)).toMatchObject({ id: second[k].id });
       expect(await Q.aiServiceConfig(null, { ref: other }, admin)).toMatchObject({ id: second[k].id });
+    }
+  });
+});
+
+describe('#3932 — the urn field batches its owner lookups per request', () => {
+  /** A ctx whose db counts reads per owner model, so a pin can name the statements a page costs. */
+  function countingCtx(): { c: Context; reads: Record<string, number> } {
+    const reads: Record<string, number> = {};
+    const wrap = (model: string, delegate: any) =>
+      new Proxy(delegate, {
+        get(t, p, r) {
+          const v = Reflect.get(t, p, r);
+          return typeof v === 'function' && String(p).startsWith('find')
+            ? (...a: unknown[]) => { reads[model] = (reads[model] ?? 0) + 1; return v.apply(t, a); }
+            : v;
+        },
+      });
+    const proxied = new Proxy(db as any, {
+      get(t, p, r) {
+        const v = Reflect.get(t, p, r);
+        return ['organization', 'app', 'agent', 'hadronServer'].includes(String(p)) ? wrap(String(p), v) : v;
+      },
+    });
+    return { c: { db: proxied, userId: platformAdmin.id, roles: ['ADMIN'] }, reads };
+  }
+
+  it('N configs over the four owner kinds cost at most one owner read per kind, with the same URNs as one at a time', async () => {
+    const mk = (name: string, owner: Record<string, string>) =>
+      db.aiServiceConfig.create({ data: { id: generateId(), name, provider: 'openai', model: 'm', ...owner } });
+    const extra = [];
+    for (let i = 0; i < 5; i++) {
+      extra.push(await mk(`x${i}`, { organizationId: org.id }), await mk(`x${i}`, { appId: app.id }), await mk(`x${i}`, { agentId: agent.id }));
+    }
+    const rows = await db.aiServiceConfig.findMany({});
+    const asParent = (r: (typeof rows)[number]) => ({
+      name: r.name,
+      ownerType: r.appId ? 'APP' : r.agentId ? 'AGENT' : r.organizationId ? 'ORGANIZATION' : 'HADRON_SERVER',
+      ownerId: (r.appId ?? r.agentId ?? r.organizationId ?? r.hadronServerId)!,
+    });
+    const alone: (string | null)[] = [];
+    for (const r of rows) alone.push(await T.urn(asParent(r), {}, ctx(platformAdmin.id, ['ADMIN'])));
+
+    const { c, reads } = countingCtx();
+    const batched = await Promise.all(rows.map((r) => T.urn(asParent(r), {}, c)));
+    expect(batched).toEqual(alone);
+    expect(rows.length).toBeGreaterThanOrEqual(19);
+    expect(reads).toEqual({ organization: 1, app: 1, agent: 1, hadronServer: 1 });
+  });
+
+  it('logs a config with no URN once per request, not once per row', async () => {
+    const bad = [];
+    for (let i = 0; i < 4; i++) bad.push(await db.aiServiceConfig.create({ data: { id: generateId(), name: `bad${i}-`, provider: 'openai', model: 'm', organizationId: org.id } }));
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const one = ctx(platformAdmin.id, ['ADMIN']);
+      const out = await Promise.all(bad.map((b) => T.urn({ name: b.name, ownerType: 'ORGANIZATION', ownerId: org.id }, {}, one)));
+      expect(out).toEqual([null, null, null, null]);
+      expect(spy.mock.calls.filter((a) => String(a[0]).includes('[aiconf-urn]')).length).toBe(1);
+    } finally {
+      spy.mockRestore();
     }
   });
 });
