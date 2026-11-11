@@ -316,7 +316,7 @@ describe('#3774 A1/A4 the gate-named write families: refused while uninstalled, 
     for (const [family, attempt] of Object.entries(attempts)) {
       if (family === 'session' || family === 'install') {
         // Session needs a boot prompt and install is now a duplicate in this fixture; the pin is that the UNINSTALL cause is gone.
-        const r = await attempt().then(() => null, (e) => (e as GraphQLError).extensions?.code);
+        const r = await attempt().then(() => null, (e: unknown) => (e as GraphQLError).extensions?.code);
         expect(r, family).not.toBe('APP_UNINSTALLED');
         continue;
       }
