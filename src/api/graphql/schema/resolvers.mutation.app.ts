@@ -72,6 +72,7 @@ import {
   uninstallAgentFromAppCore,
   requireReadableAgent,
   requirePersonalAppAgentInstall,
+  assertAppNotUninstalled,
 } from './resolvers.helpers.js';
 import { findOrCreateAppClassMemory } from './chat-scope.js';
 // Spec 049 Phase 4 — the App's default Channel, created with the App.
@@ -935,6 +936,10 @@ export const appMutations = {
       const { id: resolvedId } = await resolveAppRef(ctx.db, ref);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
       await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+      // #3976 (cor:dmo:050:21): an uninstalled App is kept read-only, its own
+      // fields included. Refused AFTER the gate, so only a caller the gate admits
+      // learns the install state; re-judged under the row lock below.
+      assertAppNotUninstalled(app);
       // #510: the app-layer action-policy link (cor:acl:040:02) — validate
       // shape before storing; explicit null clears (= no restriction).
       assertAppPolicyShape(policy);
@@ -964,12 +969,13 @@ export const appMutations = {
       // maintain the App's 'default' registry config. Explicit null
       // aiProvider clears the whole config (legacy column-null semantics);
       // aiApiKey '' clears just the key.
+      const applyAiConfig = async (db: Prisma.TransactionClient): Promise<void> => {
       if (aiProvider !== undefined || aiModel !== undefined || aiApiKey !== undefined) {
-        const existing = await ctx.db.aiServiceConfig.findFirst({
+        const existing = await db.aiServiceConfig.findFirst({
           where: { appId: resolvedId, name: DEFAULT_AI_CONFIG_NAME },
         });
         if (aiProvider === null) {
-          if (existing) await ctx.db.aiServiceConfig.delete({ where: { id: existing.id } });
+          if (existing) await db.aiServiceConfig.delete({ where: { id: existing.id } });
         } else {
           const provider = aiProvider ?? existing?.provider;
           const model = aiModel ?? existing?.model;
@@ -1005,7 +1011,8 @@ export const appMutations = {
               // Re-judged on the LOCKED row (#1380 / #1389 review): a concurrent edit
               // after the read above must not let this write keep a provider
               // whose endpoint or key was cleared in between.
-              await ctx.db.$transaction(async (tx) => {
+              {
+                const tx = db;
                 const cur = await lockAiServiceConfig(tx, existing.id);
                 if (!cur) throw new AiServiceConfigNotFoundError(existing.id);
                 // Omitted args keep what the row holds NOW, not what the read
@@ -1036,9 +1043,9 @@ export const appMutations = {
                     updatedBy: ctx.userId ?? null,
                   },
                 });
-              });
+              }
             } else {
-              await ctx.db.aiServiceConfig.create({
+              await db.aiServiceConfig.create({
                 data: {
                   appId: resolvedId,
                   name: DEFAULT_AI_CONFIG_NAME,
@@ -1052,6 +1059,8 @@ export const appMutations = {
           }
         }
       }
+      };
+
       // #1079 — a rename and its alias record commit TOGETHER. Separately, the
       // window between them is exactly the failure the alias map exists to
       // prevent: the old URN has stopped resolving and nothing remembers it.
@@ -1070,9 +1079,14 @@ export const appMutations = {
         // FOR UPDATE serializes the renames and makes each one record the urn it
         // actually superseded. `updateOrganization` already did this; the three
         // single-entity paths did not.
-        const [lockedRow] = await tx.$queryRaw<{ urn: string }[]>`
-          SELECT urn FROM apps WHERE id = ${resolvedId} FOR UPDATE
+        const [lockedRow] = await tx.$queryRaw<{ urn: string; uninstalled_at: Date | null }[]>`
+          SELECT urn, uninstalled_at FROM apps WHERE id = ${resolvedId} FOR UPDATE
         `;
+        // #3976: re-judged on the LOCKED row — an uninstall that committed after the
+        // read above must not let any write through. Throwing rolls the transaction
+        // back, including the AI-config change applied below.
+        assertAppNotUninstalled({ id: resolvedId, uninstalledAt: lockedRow?.uninstalled_at ?? null });
+        await applyAiConfig(tx);
         if (newUrn !== undefined) {
           await recordUrnRename(tx, {
             entityType: 'APP',

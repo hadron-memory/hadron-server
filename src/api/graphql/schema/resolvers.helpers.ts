@@ -2021,6 +2021,46 @@ export async function requireAiConfigOwnerAdmin(
 }
 
 /**
+ * #3976 (cor:dmo:050:21): an uninstalled App is kept read-only. Refuses with the
+ * `APP_UNINSTALLED` code the other App doors use; call it AFTER the access gate.
+ */
+export function assertAppNotUninstalled(app: { id: string; uninstalledAt: Date | null }): void {
+  if (app.uninstalledAt) {
+    throw new GraphQLError('Cannot update an uninstalled App.', {
+      extensions: { code: 'APP_UNINSTALLED', appId: app.id },
+    });
+  }
+}
+
+/**
+ * #3976: the AI-config registry writes (create/update/delete) on an APP-owned
+ * config refuse on an uninstalled App. Judged twice, like `updateApp`: early on
+ * the row (after the owner gate, so a refused caller learns nothing) and again on
+ * the `apps FOR UPDATE` row inside the write's transaction, which `uninstallApp`
+ * also locks. A non-APP owner is not touched. Not in `requireAiConfigOwnerAdmin`,
+ * which also gates reads.
+ */
+export async function assertAiConfigAppOwnerInstalled(
+  db: { app: { findUnique: (a: any) => Promise<{ id: string; uninstalledAt: Date | null } | null> } },
+  appId: string | null | undefined,
+): Promise<void> {
+  if (!appId) return;
+  const app = await db.app.findUnique({ where: { id: appId }, select: { id: true, uninstalledAt: true } });
+  if (app) assertAppNotUninstalled(app);
+}
+
+export async function lockAiConfigAppOwnerInstalled(
+  tx: { $queryRaw: (q: TemplateStringsArray, ...v: unknown[]) => Promise<unknown> },
+  appId: string | null | undefined,
+): Promise<void> {
+  if (!appId) return;
+  const rows = (await tx.$queryRaw`SELECT uninstalled_at FROM apps WHERE id = ${appId} FOR UPDATE`) as {
+    uninstalled_at: Date | null;
+  }[];
+  assertAppNotUninstalled({ id: appId, uninstalledAt: rows[0]?.uninstalled_at ?? null });
+}
+
+/**
  * #3857 (V63): read a config by its `hrn:aiconf:` URN behind the SAME gate as
  * the id read (`aiServiceConfig(ref:)`: org ADMIN of the owning org, platform
  * ADMIN/OWNER for a server-owned one), through `requireAiConfigOwnerAdmin`
