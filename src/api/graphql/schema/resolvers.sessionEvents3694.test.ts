@@ -125,9 +125,9 @@ describe('#3694 — the caller\'s own session is own activity and stays whole (r
       { id: row, type: 'read', nodeLoc: 'shared', memoryId: null, sessionId: userless, userId: other.id, organizationId: orgId, appId, actionArgs: { q: 'userless' }, tokensIn: 19 },
       { id: appRow, type: 'read', nodeLoc: 'shared', memoryId: null, sessionId: userless, userId: null, organizationId: orgId, appId, actionArgs: { q: 'userless-app' }, tokensIn: 23 },
     ] });
-    // A null userId is a real runtime context (src/lib/auth/operatorConversion.ts builds one), though the type says
-    // string | undefined. null === null must make neither the userless session nor an App-recorded row (userId
-    // null) "own": the session rule and the per-row rule each need a positive caller id.
+    // Synthetic invalid Context: production has no null-user factory. Keep this
+    // defense-in-depth pin so null === null cannot make a userless session or
+    // an App-recorded row "own"; both rules require a positive caller id.
     const rows = (await events(userless, { db, appId, appKeyId, userId: null } as unknown as Context))!;
     expect(byId(rows, row)).toEqual({ ...volumeOnly(row, userless, 19, appId), memoryId: null });
     expect(byId(rows, appRow)).toEqual({ ...volumeOnly(appRow, userless, 23, appId), memoryId: null });
