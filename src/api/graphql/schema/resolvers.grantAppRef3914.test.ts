@@ -104,4 +104,31 @@ describe('#3914 worker own-App references use the shared resolver', () => {
     for (const r of responses) expect(r).toEqual(responses[0]);
     expect(await grantCount()).toBe(0);
   });
+  it('foreign ambiguous rename history is the same concealed refusal, not an existence oracle', async () => {
+    const other = await refs(w.app2Id);
+    const third = await db.app.create({ data: { organizationId: w.orgId, name: 'third', urn: `third-${generateId()}.test:app` } });
+    await db.urnAlias.create({ data: { urn: other.renamed.replace(/^hrn:app:/, ''), entityType: 'APP', entityId: third.id, reason: 'RENAME' } });
+    const a = await workerCall(other.renamed);
+    const b = await workerCall(`hrn:app:missing-${generateId()}.test:app`);
+    expect(a.errors[0].extensions.code).toBe('GRANT_REQUESTER_NOT_WORKER');
+    expect(a.errors).toEqual(b.errors);
+    expect(await grantCount()).toBe(0);
+  });
+  it('an operational App lookup fault propagates instead of becoming a requester denial', async () => {
+    const own = await refs(w.appId);
+    const original = db.app.findFirst.bind(db.app);
+    let injected = false;
+    const spy = vi.spyOn(db.app, 'findFirst').mockImplementation((args) => {
+      if (args?.where?.AND) { injected = true; throw new Error('3914 synthetic database fault'); }
+      return original(args);
+    });
+    try {
+      const r = await workerCall(own.canonical);
+      expect(injected).toBe(true);
+      expect(r.errors).toHaveLength(1);
+      expect(r.errors[0].extensions.code).toBe('INTERNAL_SERVER_ERROR');
+      expect(await grantCount()).toBe(0);
+    } finally { spy.mockRestore(); }
+  });
+
 });
