@@ -234,3 +234,36 @@ describe('agentTask global search (#3945)', () => {
     expect(agentTaskHits(await search(userCtx(participant), 'zebra', { orgId })).map((h: any) => h.id)).toEqual([taskX.id]); // own org: still only the gated task
   });
 });
+
+const imp = (u: { id: string }, org: string): Context =>
+  ({ db, userId: u.id, roles: ['READER'], impersonation: { sessionId: 's', actorUserId: 'adm', orgId: org, expiresAt: new Date(Date.now() + 3600e3) } }) as any;
+
+describe('the candidate-App scope keeps every arm the gate admits (#3964 §10 F4)', () => {
+  it('impersonation narrows to the session org; an AppMember of another org\'s App and the owner of a user-owned App read it as themselves', async () => {
+    const orgB = await db.organization.create({ data: { id: generateId(), name: 'b', urn: `b-${generateId()}.com` } });
+    const appZ = await db.app.create({ data: { id: generateId(), organizationId: orgB.id, name: 'Z', urn: `${orgB.urn}:z` } });
+    await db.appMember.create({ data: { appId: appZ.id, userId: participant.id, role: 'member' } });
+    const taskZ = await mkTask(participant, appZ.id, 'Zebra in B');
+    const own = await db.app.create({ data: { id: generateId(), ownerUserId: participant.id, name: 'Own', urn: `u-${generateId()}:own` } as any });
+    const taskO = await mkTask(participant, own.id, 'Zebra personal');
+    const plain = await search(userCtx(participant), 'zebra');
+    expect(agentTaskHits(plain).map((h: any) => h.id).sort()).toEqual([taskX.id, taskZ.id, taskO.id].sort());
+    const r = await search(imp(participant, orgId), 'zebra');
+    expect(agentTaskHits(r).map((h: any) => h.id)).toEqual([taskX.id]);
+    expect(r.total).toBe(1);
+  });
+
+  it('a platform admin reads wherever the direct read admits it', async () => {
+    const actx = { db, userId: stranger.id, roles: ['ADMIN'] } as Context;
+    expect((await Q.agentTask({}, { id: taskX.id }, actx))?.id).toBe(taskX.id);
+    const r = await search(actx, 'zebra');
+    expect(agentTaskHits(r).map((h: any) => h.id).sort()).toEqual([taskX.id, taskY.id].sort());
+  });
+
+  it('an org CONTRIBUTOR who is no AppMember reads through the org arm', async () => {
+    const contrib = await db.user.create({ data: { id: generateId(), githubId: 99_398, githubUsername: `contrib-${generateId()}`, roles: ['READER'] }, select: { id: true } });
+    await db.orgMember.create({ data: { id: generateId(), organizationId: orgId, userId: contrib.id, role: 'CONTRIBUTOR' } });
+    const r = await search(userCtx(contrib), 'zebra');
+    expect(agentTaskHits(r).map((h: any) => h.id).sort()).toEqual([taskX.id, taskY.id].sort());
+  });
+});
