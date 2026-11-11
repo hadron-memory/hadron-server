@@ -72,6 +72,7 @@ import {
   uninstallAgentFromAppCore,
   requireReadableAgent,
   requirePersonalAppAgentInstall,
+  assertAppNotUninstalled,
 } from './resolvers.helpers.js';
 import { findOrCreateAppClassMemory } from './chat-scope.js';
 // Spec 049 Phase 4 — the App's default Channel, created with the App.
@@ -90,18 +91,6 @@ import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { requirePersonAsThemselves } from '../../../lib/auth/personAsThemselves.js';
 import { forbiddenError } from '../../../lib/refusals.js';
 import { ensureProjectZero } from '../../../lib/agentTasks/projectZero.js';
-
-/**
- * #3976 (cor:dmo:050:21): an uninstalled App is kept read-only. Refuses with the
- * `APP_UNINSTALLED` code the other App doors use; call it AFTER the access gate.
- */
-function assertAppNotUninstalled(app: { id: string; uninstalledAt: Date | null }): void {
-  if (app.uninstalledAt) {
-    throw new GraphQLError('Cannot update an uninstalled App.', {
-      extensions: { code: 'APP_UNINSTALLED', appId: app.id },
-    });
-  }
-}
 
 /**
  * #3474 (cor:acl:040:07 S7): an App's policy link is exactly `{ allow: string[] }`, or null, or left out. `parsePolicyLink`

@@ -78,6 +78,8 @@ import {
   getAccessibleMemoryIds,
   requireMemoryWriteAccess,
   AGENT_INCLUDE,
+  assertAiConfigAppOwnerInstalled,
+  lockAiConfigAppOwnerInstalled,
 } from './resolvers.helpers.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
@@ -1769,6 +1771,7 @@ export const agentMutations = {
     ) => {
       try {
         const { ownerWhere } = await requireAiConfigOwnerAdmin(ctx, args.ownerType, args.ownerId);
+        await assertAiConfigAppOwnerInstalled(ctx.db, ownerWhere.appId);
         const name = validateAiConfigName(args.name);
         validateProviderAndParams(args.provider, args.params ?? null);
         validateParamRanges(args.provider, args.params ?? null);
@@ -1780,7 +1783,9 @@ export const agentMutations = {
         // No upsert: a P2002 from the partial unique (owner, name) index is
         // the duplicate-name typed error, not a retry (upsert is not
         // race-safe on the cold path).
-        const config = await ctx.db.aiServiceConfig.create({
+        const config = await ctx.db.$transaction(async (tx) => {
+          await lockAiConfigAppOwnerInstalled(tx, ownerWhere.appId);
+          return tx.aiServiceConfig.create({
           data: {
             ...ownerWhere,
             name,
@@ -1801,6 +1806,7 @@ export const agentMutations = {
             enabled: args.enabled ?? true,
             createdBy: ctx.userId ?? null,
           },
+          });
         });
         return toGqlAiServiceConfig(config);
       } catch (e: unknown) {
@@ -1831,7 +1837,8 @@ export const agentMutations = {
         const existing = await ctx.db.aiServiceConfig.findUnique({ where: { id: args.id } });
         if (!existing) throw new AiServiceConfigNotFoundError(args.id);
         const owner = aiConfigOwnerOf(existing);
-        await requireAiConfigOwnerAdmin(ctx, owner.ownerType, owner.ownerId);
+        const { ownerWhere: updateOwnerWhere } = await requireAiConfigOwnerAdmin(ctx, owner.ownerType, owner.ownerId);
+        await assertAiConfigAppOwnerInstalled(ctx.db, updateOwnerWhere.appId);
         if (args.params !== undefined) refuseLegacyBaseUrl(args.params);
         // Omitted = unchanged; null or '' = clear back to the provider default.
         const endpoint =
@@ -1862,6 +1869,7 @@ export const agentMutations = {
         // write can't leave a config the write-time rules refuse, including a
         // provider/style pair neither of two racing updates judged.
         const config = await ctx.db.$transaction(async (tx) => {
+          await lockAiConfigAppOwnerInstalled(tx, updateOwnerWhere.appId);
           const cur = await lockAiServiceConfig(tx, existing.id);
           if (!cur) throw new AiServiceConfigNotFoundError(args.id);
           const provider = judge(cur);
@@ -1910,8 +1918,11 @@ export const agentMutations = {
         const existing = await ctx.db.aiServiceConfig.findUnique({ where: { id } });
         if (!existing) throw new AiServiceConfigNotFoundError(id);
         const owner = aiConfigOwnerOf(existing);
-        await requireAiConfigOwnerAdmin(ctx, owner.ownerType, owner.ownerId);
-        await ctx.db.aiServiceConfig.delete({ where: { id: existing.id } });
+        const { ownerWhere } = await requireAiConfigOwnerAdmin(ctx, owner.ownerType, owner.ownerId);
+        await ctx.db.$transaction(async (tx) => {
+          await lockAiConfigAppOwnerInstalled(tx, ownerWhere.appId);
+          await tx.aiServiceConfig.delete({ where: { id: existing.id } });
+        });
         return true;
       } catch (e) {
         rethrowAiConfigTyped(e);

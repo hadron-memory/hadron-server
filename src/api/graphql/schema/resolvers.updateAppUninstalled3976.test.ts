@@ -137,3 +137,84 @@ describe('#3976 updateApp on an uninstalled App', () => {
     expect(out.description).toBe('after');
   });
 });
+
+/**
+ * §10 finding on #3980 (Ralion, P2): the App-owned AI-config registry writes are App-management writes too.
+ * create/update/delete with ownerType APP refuse on an uninstalled App, after the owner gate, in the write's transaction.
+ */
+describe('#3976 App-owned AI-config writes on an uninstalled App', () => {
+  const base = { ownerType: 'APP', provider: 'anthropic', model: 'claude-sonnet-5-5', apiKey: 'sk-test-key' };
+  const mkConfig = async () => (await M.createAiServiceConfig({}, { ...base, ownerId: app.id, name: 'default' }, ctx(admin.id))).id as string;
+  const cfg = (id: string) => db.aiServiceConfig.findUniqueOrThrow({ where: { id } });
+
+  it('createAiServiceConfig refuses APP_UNINSTALLED and creates nothing', async () => {
+    await uninstall();
+    const r = await refusal(M.createAiServiceConfig({}, { ...base, ownerId: app.id, name: 'default' }, ctx(admin.id)));
+    expect(r.code).toBe('APP_UNINSTALLED');
+    expect(await db.aiServiceConfig.count({ where: { appId: app.id } })).toBe(0);
+  });
+
+  it('updateAiServiceConfig refuses APP_UNINSTALLED and changes nothing', async () => {
+    const id = await mkConfig();
+    await uninstall();
+    const r = await refusal(M.updateAiServiceConfig({}, { id, model: 'changed' }, ctx(admin.id)));
+    expect(r.code).toBe('APP_UNINSTALLED');
+    expect((await cfg(id)).model).toBe('claude-sonnet-5-5');
+  });
+
+  it('deleteAiServiceConfig refuses APP_UNINSTALLED and deletes nothing', async () => {
+    const id = await mkConfig();
+    await uninstall();
+    const r = await refusal(M.deleteAiServiceConfig({}, { id }, ctx(admin.id)));
+    expect(r.code).toBe('APP_UNINSTALLED');
+    expect(await db.aiServiceConfig.count({ where: { id } })).toBe(1);
+  });
+
+  it('refuses before judging the input: an invalid argument on an uninstalled App is APP_UNINSTALLED', async () => {
+    const id = await mkConfig();
+    await uninstall();
+    expect((await refusal(M.createAiServiceConfig({}, { ...base, ownerId: app.id, name: 'x', provider: 'no-such-provider' }, ctx(admin.id)))).code).toBe('APP_UNINSTALLED');
+    expect((await refusal(M.updateAiServiceConfig({}, { id, provider: 'no-such-provider' }, ctx(admin.id)))).code).toBe('APP_UNINSTALLED');
+  });
+
+  it('refuses AFTER the gate: a caller the gate refuses does not learn the install state', async () => {
+    const id = await mkConfig();
+    await uninstall();
+    for (const run of [
+      () => M.createAiServiceConfig({}, { ...base, ownerId: app.id, name: 'x' }, ctx(stranger.id)),
+      () => M.updateAiServiceConfig({}, { id, model: 'changed' }, ctx(stranger.id)),
+      () => M.deleteAiServiceConfig({}, { id }, ctx(stranger.id)),
+    ]) {
+      expect((await refusal(run())).code).not.toBe('APP_UNINSTALLED');
+    }
+  });
+
+  it('re-judges on the locked row: an uninstall landing after the early read still writes nothing', async () => {
+    const id = await mkConfig();
+    const live = await db.app.findUniqueOrThrow({ where: { id: app.id } });
+    await uninstall();
+    for (const run of [
+      () => M.createAiServiceConfig({}, { ...base, ownerId: app.id, name: 'raced' }, ctx(admin.id)),
+      () => M.updateAiServiceConfig({}, { id, model: 'raced' }, ctx(admin.id)),
+      () => M.deleteAiServiceConfig({}, { id }, ctx(admin.id)),
+    ]) {
+      // The early (unlocked) read sees the App as still installed; the locked re-read must refuse.
+      const spy = vi.spyOn(db.app, 'findUnique').mockResolvedValueOnce(live as never);
+      try {
+        expect((await refusal(run())).code).toBe('APP_UNINSTALLED');
+      } finally {
+        spy.mockRestore();
+      }
+    }
+    expect((await cfg(id)).model).toBe('claude-sonnet-5-5');
+    expect(await db.aiServiceConfig.count({ where: { appId: app.id } })).toBe(1);
+  });
+
+  it('control: installed App, and after reinstallApp, the registry is writable', async () => {
+    const id = await mkConfig();
+    await uninstall();
+    await M.reinstallApp({}, { ref: app.id }, ctx(admin.id));
+    expect((await M.updateAiServiceConfig({}, { id, model: 'after' }, ctx(admin.id))).model).toBe('after');
+    expect(await M.deleteAiServiceConfig({}, { id }, ctx(admin.id))).toBe(true);
+  });
+});
