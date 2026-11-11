@@ -182,7 +182,7 @@ export async function holderAccess(
     // The holder must still be an eligible driver of this App's workers (the register's attendee rule).
     if (await isAppParticipant(actor, app)) {
       const ids = await getAccessibleMemoryIds(actor);
-      result = ids === null ? 'all' : new Set(ids);
+      result = new Set(ids);
     }
   }
   cache.set(holderId, result);

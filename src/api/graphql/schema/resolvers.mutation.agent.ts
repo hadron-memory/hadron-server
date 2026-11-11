@@ -194,7 +194,7 @@ async function assertPromotableSystemMemory(ctx: Context, target: PromotionTarge
   const notFound = promotionTargetNotFound;
   if (!target || target.deletedAt) throw notFound();
   const readable = await getAccessibleMemoryIds(ctx, target.id);
-  if (readable !== null && !readable.includes(target.id)) throw notFound();
+  if (!readable.includes(target.id)) throw notFound();
   // The refusals below reach only a reader, so their order discloses nothing;
   // the specific ones come before the write gate so a reader learns why.
   if (target.class === 'group') {

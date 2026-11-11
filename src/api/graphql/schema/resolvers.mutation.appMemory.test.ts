@@ -349,7 +349,7 @@ describe('#653 — app-scoped knowledge is App-internal (no org-wide leak)', () 
 
   it("is NOT in a non-App org member's accessible set (portal node gate)", async () => {
     const ids = await getAccessibleMemoryIds(asUser(orgContributor.id));
-    expect(ids ?? []).not.toContain(knowledgeId);
+    expect(ids).not.toContain(knowledgeId);
   });
 
   it('is an App candidate, but a userless caller gains no item-derived authority (#3292)', async () => {
@@ -390,7 +390,7 @@ describe('#653 — app-scoped knowledge is App-internal (no org-wide leak)', () 
     // Unauthenticated context → the public-only branch, which now excludes
     // app-scoped rows.
     const ids = await getAccessibleMemoryIds({ db, roles: [] } as Context);
-    expect(ids ?? []).not.toContain(knowledgeId);
+    expect(ids).not.toContain(knowledgeId);
   });
 });
 

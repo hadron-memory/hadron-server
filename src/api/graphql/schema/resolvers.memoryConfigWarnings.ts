@@ -163,7 +163,7 @@ function coverageOnce(db: PrismaClient, scope: WarningScope, targetId: string, t
 /** The anonymous gate's answer. Like `userReadsMemory`, a null id list means "no restriction", i.e. readable. */
 async function anonymousReads(db: PrismaClient, memoryId: string): Promise<boolean> {
   const ids = await getAccessibleMemoryIds({ db, roles: [] } as Context, memoryId);
-  return ids === null || ids.includes(memoryId);
+  return ids.includes(memoryId);
 }
 
 /** Can `userId` read `memoryId` under the shared node-content gate? Asked as that user, with no platform role. */
@@ -172,7 +172,7 @@ async function userReadsMemory(db: PrismaClient, scope: WarningScope, userId: st
   let pending = scope.memo.get(key);
   if (!pending) {
     pending = scope.budget.left-- > 0
-      ? getAccessibleMemoryIds({ db, userId, roles: [] } as Context, memoryId).then((ids) => ids === null || ids.includes(memoryId))
+      ? getAccessibleMemoryIds({ db, userId, roles: [] } as Context, memoryId).then((ids) => ids.includes(memoryId))
       : Promise.resolve(false);
     scope.memo.set(key, pending);
   }

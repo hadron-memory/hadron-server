@@ -170,11 +170,11 @@ export const recoveryQueries = {
       // per-request memo must not carry promises created inside this tx beyond its end.
       const txCtx = withoutRequestCaches(ctx, tx);
       const accessible = await getAccessibleMemoryIds(txCtx);
-      const accessibleSet = accessible === null ? null : new Set(accessible);
+      const accessibleSet = new Set(accessible);
       const readable: string[] = [], recoverable: string[] = [];
       for (const id of endpointMemories) {
         const row = rowById.get(id);
-        if (!row || row.deletedAt || (accessibleSet !== null && !accessibleSet.has(id))) continue;
+        if (!row || row.deletedAt || !accessibleSet.has(id)) continue;
         readable.push(id);
       }
       // #2810 slice 2: the write half of the fan-out verdicts is only ever READ for memories

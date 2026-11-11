@@ -316,7 +316,7 @@ export async function renderAttentionSection(
       where: {
         id: { in: channelIds },
         deletedAt: null,
-        ...(accessible === null ? {} : { memoryId: { in: accessible } }),
+        memoryId: { in: accessible },
       },
       select: { id: true, name: true, loc: true, lastSeq: true, memoryId: true, memory: { select: { urn: true, isEncrypted: true } } },
       orderBy: [{ loc: 'asc' }, { id: 'asc' }],
