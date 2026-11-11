@@ -58,7 +58,7 @@ describe('#3483 rows 2, 3, 6: a worker needs a live single-use grant, spent with
 
   it('admits with a single-use grant for this worker and entry node: adopted, the grant spent, one USE event', async () => {
     const g = await triggerGrant(w);
-    const s = await asWorker((ctx) => createSchedule(ctx));
+    const s: any = await asWorker((ctx) => createSchedule(ctx));
     expect(s.automationPin).toMatchObject({ entryId: w.entryNodeId });
     expect(await useCount(g)).toBe(1);
     expect(await useEvents(g)).toEqual([expect.objectContaining({ workerId: w.workerId, sessionId: w.sessionId, appId: w.appId })]);
