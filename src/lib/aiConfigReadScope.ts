@@ -73,14 +73,14 @@ export async function aiConfigReadScope(
     // A deleted organization is absent to the id read (resolveOrgRef), so its configs are absent here too.
     const live = { organization: { deletedAt: null } };
     arms.push({ organizationId: orgFilter, ...live });
-    arms.push({ app: { ownerUserId: null, organizationId: orgFilter, ...live } });
+    arms.push({ app: { ownerUserId: null, deletedAt: null, organizationId: orgFilter, ...live } });
     arms.push({ agent: { ownerUserId: null, deletedAt: null, organizationId: orgFilter, ...live } });
   }
   // A HadronServer-owned config: platform ADMIN/OWNER, and never inside an org-confined search.
   if (platform && p.orgIds === null && !confined) arms.push({ hadronServerId: { not: null } });
   // A user-owned App or Agent is its owner's alone: no platform bypass, no impersonation, no org confinement.
   if (p.viewerUserId && !confined) {
-    arms.push({ app: { ownerUserId: p.viewerUserId } });
+    arms.push({ app: { ownerUserId: p.viewerUserId, deletedAt: null } });
     arms.push({ agent: { ownerUserId: p.viewerUserId, deletedAt: null } });
   }
   return arms.length > 0 ? { OR: arms } : null;

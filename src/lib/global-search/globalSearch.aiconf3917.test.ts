@@ -247,12 +247,12 @@ describe('#3917 — the URN scan is bounded and says so', () => {
 describe('#3917 — the filter is in the candidate query', () => {
   it('unreadable matches do not crowd a readable one out of the cap, or count toward total', async () => {
     // Many unreadable configs match the same name; the one readable config must still be found.
-    const rows = Array.from({ length: 150 }, (_, i) => ({
-      id: generateId(), name: `gscrowd-${i}`, provider: 'anthropic', model: 'm', organizationId: otherOrg.id,
+    const rows = Array.from({ length: 260 }, (_, i) => ({
+      id: generateId(), name: `gscrowd-${i}`, provider: 'anthropic', model: 'm', organizationId: org.id,
     }));
     await db.aiServiceConfig.createMany({ data: rows });
-    await db.aiServiceConfig.create({ data: { id: generateId(), name: 'gscrowd-mine', provider: 'anthropic', model: 'm', organizationId: org.id } });
-    const r = await search('orgAdmin', 'gscrowd', { fields: ['name'], limit: 50 });
+    await db.aiServiceConfig.create({ data: { id: generateId(), name: 'gscrowd-mine', provider: 'anthropic', model: 'm', organizationId: otherOrg.id } });
+    const r = await search('otherAdmin', 'gscrowd', { fields: ['name'], limit: 50 });
     expect(r.hits.map((h) => h.name)).toEqual(['gscrowd-mine']);
     expect(r.total).toBe(1);
   });
@@ -326,6 +326,18 @@ describe('#3917 — MCP hadron_search equals the id read under impersonation', (
   });
   it('the un-impersonated owner still finds their own App\'s config', async () => {
     expect(await mcp('appOwner', 'gsdefault')).toContain(cfg.userApp!.urn!);
+  });
+});
+
+describe('#3917 — a soft-deleted App is absent, as to the id read (Dorian F1)', () => {
+  it('neither an org App\'s nor a user-owned App\'s config is found once the App is deleted', async () => {
+    const apps = await db.app.findMany({ where: { id: { in: (await db.aiServiceConfig.findMany({ where: { id: { in: [cfg.orgApp!.id, cfg.userApp!.id] } }, select: { appId: true } })).map((r) => r.appId!) } } });
+    await db.app.updateMany({ where: { id: { in: apps.map((a) => a.id) } }, data: { deletedAt: new Date() } });
+    for (const [who, k] of [['orgAdmin', 'orgApp'], ['appOwner', 'userApp']] as const) {
+      expect(await canReadById(who, cfg[k]!.id), `${who} id read ${k}`).toBe(false);
+      expect(idsOf(await search(who, 'gsdefault', { fields: ['name'] })).has(cfg[k]!.id), `${who} search ${k}`).toBe(false);
+    }
+    expect(idsOf(await search('orgAdmin', 'gsdefault', { fields: ['name'] })).has(cfg.org!.id)).toBe(true);
   });
 });
 
