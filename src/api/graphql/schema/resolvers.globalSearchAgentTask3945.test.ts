@@ -235,6 +235,38 @@ describe('agentTask global search (#3945)', () => {
     }
   });
 
+  it('Apps of a soft-deleted org never enter the walk, for an org admin or a platform admin (#3964 delta5 P2)', async () => {
+    const saved = { ...taskSearchLimits };
+    Object.assign(taskSearchLimits, { page: 2, admittedApps: 2, maxScanned: 4 });
+    try {
+      const dead = await db.organization.create({ data: { id: generateId(), name: 'dead', urn: `dead-${generateId()}.com`, deletedAt: new Date() } as any });
+      await db.orgMember.create({ data: { id: generateId(), organizationId: dead.id, userId: orgAdminRef.id, role: 'ADMIN' } });
+      for (let i = 0; i < 8; i++) {
+        const a = await db.app.create({ data: { id: `0000000${i}${generateId()}`.slice(0, 32), organizationId: dead.id, name: `d${i}`, urn: `${dead.urn}:d${i}` } });
+        await db.agentTask.create({ data: { id: generateId(), appId: a.id, title: 'zebra dead org', ownerUserId: stranger.id } as any });
+      }
+      const outsider = await db.user.create({ data: { id: generateId(), githubId: 99_396, githubUsername: `dadm-${generateId()}`, roles: ['READER'] }, select: { id: true } });
+      for (const ctx of [userCtx(orgAdminRef), { db, userId: outsider.id, roles: ['ADMIN'] } as Context]) {
+        const r = await search(ctx, 'zebra');
+        expect(r.hits.map((h: any) => h.id).sort()).toEqual([taskX.id, taskY.id].sort());
+        expect(r.total).toBe(2);
+      }
+    } finally {
+      Object.assign(taskSearchLimits, saved);
+    }
+  });
+
+  it('a platform admin still finds the user-owned Apps it owns or belongs to (#3964 F5)', async () => {
+    const padm = await db.user.create({ data: { id: generateId(), githubId: 99_395, githubUsername: `padm2-${generateId()}`, roles: ['READER'] }, select: { id: true } });
+    const own = await db.app.create({ data: { id: generateId(), ownerUserId: padm.id, name: 'Own', urn: `u-${generateId()}:own` } as any });
+    const tOwn = await mkTask(padm, own.id, 'zebra own');
+    const theirs = await db.app.create({ data: { id: generateId(), ownerUserId: stranger.id, name: 'Mem', urn: `u-${generateId()}:mem` } as any });
+    await db.appMember.create({ data: { appId: theirs.id, userId: padm.id, role: 'member' } });
+    const tMem = await mkTask(stranger, theirs.id, 'zebra member');
+    const r = await search({ db, userId: padm.id, roles: ['ADMIN'] } as Context, 'zebra');
+    expect(r.hits.map((h: any) => h.id).sort()).toEqual([taskX.id, taskY.id, tOwn.id, tMem.id].sort());
+  });
+
   it('an org admin (CONTRIBUTOR+) still finds every App of the org (the narrowing never drops a readable App)', async () => {
     const r = await search(userCtx((await db.user.findFirstOrThrow({ where: { githubUsername: { startsWith: 'admin-' } } }))), 'zebra');
     expect(new Set(r.hits.map((h: any) => h.id))).toEqual(new Set([taskX.id, taskY.id]));

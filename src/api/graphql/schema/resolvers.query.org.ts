@@ -124,7 +124,13 @@ async function taskAppScopeFor(ctx: Context, isPlatformAdmin: boolean): Promise<
     { members: { some: { userId: ctx.userId } } },
     isPlatformAdmin ? { organizationId: { not: null } } : { organizationId: { in: actorOrgs.map((m) => m.organizationId) } },
   ];
-  const and: Record<string, unknown>[] = [{ deletedAt: null }, { OR: or }];
+  // `isAppParticipant` refuses an org App whose org is soft-deleted (the Apps keep `deletedAt` NULL), so those never
+  // enter the walk either.
+  const and: Record<string, unknown>[] = [
+    { deletedAt: null },
+    { OR: [{ organizationId: null }, { organization: { deletedAt: null } }] },
+    { OR: or },
+  ];
   if (ctx.impersonation) and.push({ organizationId: ctx.impersonation.orgId });
   return { AND: and };
 }
