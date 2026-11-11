@@ -155,7 +155,7 @@ export async function withChatRootLock<T>(
 
     const isEngineRoot = row.nodeType === 'record' && /^chats:[^:]+$/.test(row.loc);
     const engine = isEngineRoot ? await lockedChatEngineState(tx, chat.id, memEncInfo, chatData) : null;
-    const retainedLegacy = engine ? Object.fromEntries(ENGINE_KEYS.filter(key => key !== 'conversationName' && key !== 'stageName' && Object.hasOwn(chatData, key) && (!Object.hasOwn(engine, key) || !validEngineValue(key, chatData[key]))).map(key => [key, chatData[key]])) : {};
+    const retainedLegacy = engine ? Object.fromEntries(ENGINE_KEYS.filter(key => Object.hasOwn(chatData, key) && (!Object.hasOwn(engine, key) || !validEngineValue(key, chatData[key]))).map(key => [key, chatData[key]])) : {};
     const baseline = structuredClone(chatData);
     const engineBaseline = structuredClone(engine);
     // Row wins over legacy/restored fields, but unknown revisioned fields stay put.
@@ -170,8 +170,10 @@ export async function withChatRootLock<T>(
       if (engine) {
         const next = Object.fromEntries(ENGINE_KEYS.filter(key => Object.hasOwn(clean, key)).map(key => [key, clean[key]]));
         if (!isDeepStrictEqual(next, engineBaseline)) await writeChatEngineState(tx, chat.id, memEncInfo, next);
-        // 0209: mirror names on EVERY locked write, including a post-restore resync.
-        for (const key of ENGINE_KEYS) if (key !== 'conversationName' && key !== 'stageName') delete clean[key];
+        // #3557 (0209 contract step): the row is the only home of every engine key, the two names included.
+        // A valid root copy is dropped here, which is the lazy scrub of an encrypted root (this is inside the
+        // keyed, locked write). A malformed copy, or one the row does not hold, is retained below.
+        for (const key of ENGINE_KEYS) delete clean[key];
         Object.assign(clean, retainedLegacy);
       }
       if (Object.hasOwn(clean, 'lastMessageAt')) {

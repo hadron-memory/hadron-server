@@ -2,7 +2,7 @@ import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { personalOrgAgentLicenseHolds, personalOrgAgentServeAllowed } from '../../../lib/auth/personalOrgAgentInstall.js';
 import { bootPromptRefusal } from '../../../lib/bootPrompt/refusal.js';
 import { chatNotFoundError } from '../../../lib/chatNotFound.js';
-import { ENGINE_KEYS, engineState } from '../../../lib/chatRootEngineState.js';
+import { ENGINE_KEYS, engineState, readTurnNames } from '../../../lib/chatRootEngineState.js';
 import { appInstallationWhere } from '../../../lib/appInstallations.js';
 // chatMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { assertAuthoring, attestedAuthoring, authoringFromRequest } from '../../../lib/authoringAttestation.js';
@@ -792,7 +792,8 @@ export const chatMutations = {
             const stateInfo = await tx.memory.findUniqueOrThrow({ where: { id: targetMemoryId }, select: { id: true, isEncrypted: true } });
             const initialState = engineState(JSON.parse(JSON.stringify(initialChatData)), false);
             const initialData = { ...initialChatData };
-            for (const key of ENGINE_KEYS) if (key !== 'conversationName' && key !== 'stageName') delete initialData[key];
+            // #3557: the state row is the only home of every engine key, the two names included (no rollback mirror).
+            for (const key of ENGINE_KEYS) delete initialData[key];
             const storedRoot = encryptNodeFields({ data: initialData }, stateInfo);
             const storedState = encryptNodeFields({ data: initialState }, stateInfo);
             await lockAncestorsForCreateMany(tx, targetMemoryId, [chatLoc, `${chatLoc}:messages`]);
@@ -880,14 +881,13 @@ export const chatMutations = {
       await requireMemoryWriteAccess(ctx, chatNode.memoryId);
       const inTx = await chatWriteTx(ctx, chatNode.memoryId);
 
-      // Decrypt the chat node's metadata (it holds conversationName, stageName,
-      // messageCount in `data`) if the memory is encrypted.
+      // Decrypt the chat node's metadata (`data`; the engine names live in the state row, #3557) if the memory is encrypted.
       const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
       if (memEncInfo.isEncrypted) translateSessionExpired(memEncInfo.id, () => decryptNodeFields(chatNode, memEncInfo));
 
-      // #919: rebound below to the copy read under the chat lock. Everything
-      // before that point reads only `scope`, which is immutable for a chat's
-      // life, so a pre-lock read is safe there.
+      // #919: rebound below to the copy read under the chat lock. Before that point this copy supplies only the
+      // immutable `scope` and `startedWithRevision`, plus (#3557) the legacy names for a root with NO state row; the
+      // routing names themselves come from the state row (`readTurnNames`), and the locked re-check below judges them again.
       let chatData = (chatNode.data as Record<string, unknown>) ?? {};
 
       // Spec 017 — chat-scope invariant gate (data-model.md §I-1):
@@ -955,8 +955,8 @@ export const chatMutations = {
 
       // #3654: choose the fallback re-route target BEFORE any write, so the gate below sees the stage this turn will serve.
       // Pure reads; the chat root is updated only after the user message lands (see below).
-      const preConvName = chatData.conversationName as string;
-      const preStageName = chatData.stageName as string;
+      // #3557 R1: from the state row (the names are no longer mirrored into the root's data); legacy data only without a row.
+      const { conversationName: preConvName, stageName: preStageName } = await readTurnNames(ctx.db, chatNode, memEncInfo, chatData);
       let rerouteTarget: { convName: string; firstStage: string } | null = null;
       if (systemMemoryId) {
         const currentConv = await findSystemNode(`conversations:${preConvName}`);
