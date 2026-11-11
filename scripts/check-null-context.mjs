@@ -79,6 +79,9 @@ function contextResolver(source) {
   }
   function nameIsContext(name, from) {
     for (let scope = from.parent; scope; scope = scope.parent) {
+      // A generic type parameter is a declaration of the name for everything inside it: function, arrow, method,
+      // class and the like. It is not Context, and it shadows an outer alias.
+      if (scope.typeParameters?.some(parameter => parameter.name.text === name)) return false;
       if (!scope.statements) continue;
       const found = declaredIn(scope.statements, name);
       if (found === undefined) continue;
