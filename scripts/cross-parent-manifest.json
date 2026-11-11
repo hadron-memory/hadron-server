@@ -2112,6 +2112,12 @@
       "gate": "requireAppRead",
       "target": "App"
     },
+    "Worker.availability": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.worker.ts::availability",
+      "gate": "maySeeWorkerInternals",
+      "target": "WorkerAvailability"
+    },
     "Worker.continuity": {
       "class": "self-gated",
       "resolver": "src/api/graphql/schema/resolvers.worker.ts::continuity",
