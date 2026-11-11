@@ -31,6 +31,7 @@ describe('#3923 alias and import-type references to Context', () => {
     ['local alias', `type Ctx = Context;\nconst c = ({ userId: null }) as Ctx;`, 2],
     ['exported local alias', `export type Ctx = Context;\nconst c = ({ userId: null }) as Ctx;`, 2],
     ['alias of an alias', `type A = Context;\ntype B = A;\nconst c = ({ userId: null }) as B;`, 3],
+    ['alias declared after its use as a base', `type B = A;\ntype A = Context;\nconst c = ({ userId: null }) as B;`, 3],
     ['alias of a qualified name', `type A = H.Context;\nconst c = ({ userId: null }) as A;`, 2],
     ['import type', `const c = ({ userId: null }) as import('./h.js').Context;`, 1],
     ['import type alias', `type A = import('./h.js').Context;\nconst c = ({ userId: null }) as A;`, 2],
