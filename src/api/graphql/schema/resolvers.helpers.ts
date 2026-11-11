@@ -68,6 +68,8 @@ import {
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
+import { resolveAiConfigByUrn } from '../../../lib/entityRef/aiConfigRef.js';
+import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { resolveUserRefOrEmail } from '../../../lib/entityRef/userRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import {
@@ -2015,6 +2017,32 @@ export async function requireAiConfigOwnerAdmin(
       await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
       return { ownerWhere: { agentId: id }, resolvedOwnerId: id };
     }
+  }
+}
+
+/**
+ * #3857 (V63): read a config by its `hrn:aiconf:` URN behind the SAME gate as
+ * the id read (`aiServiceConfig(ref:)`: org ADMIN of the owning org, platform
+ * ADMIN/OWNER for a server-owned one), through `requireAiConfigOwnerAdmin`
+ * rather than a copy of it.
+ *
+ * Differs from the id path in one way, on purpose: the names in a URN are
+ * guessable (`default`), so a config the caller may not read answers exactly as
+ * one that does not exist, null. Only an authorization denial and a
+ * name-resolution outcome collapse to null; a fault propagates (cor:api:260:01).
+ * Never returns the key: callers project the row through `toGqlAiServiceConfig`
+ * or an id.
+ */
+export async function readAiServiceConfigByUrn(ctx: Context, ref: string) {
+  const config = await resolveAiConfigByUrn(ctx.db, ref);
+  if (!config) return null;
+  try {
+    const owner = aiConfigOwnerOf(config);
+    await requireAiConfigOwnerAdmin(ctx, owner.ownerType, owner.ownerId);
+    return config;
+  } catch (e) {
+    if (isAuthorizationDenial(e) || refNamesNothing(e, { ambiguousNamesNothing: true })) return null;
+    throw e;
   }
 }
 

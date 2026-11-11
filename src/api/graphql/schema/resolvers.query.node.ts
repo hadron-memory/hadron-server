@@ -99,6 +99,7 @@ import {
   isMemoryReadableCached,
   loadMemoryUrn,
   CONTENT_RAW_DEFAULT,
+  readAiServiceConfigByUrn,
 } from './resolvers.helpers.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
@@ -1074,6 +1075,22 @@ export const nodeQueries = {
           // slug (cor:agt:020:02), and history — PR trailers, chat archives —
           // must keep resolving.
           return { kind: 'worker', id, organizationId: app.organizationId };
+        }
+        case 'aiconf': {
+          // #3857 (V63): hrn:aiconf:... behind the config's own read gate, the
+          // one `aiServiceConfig(ref:)` applies; an unreadable config answers
+          // exactly as a missing one. Identity only: the key never rides along.
+          const config = await readAiServiceConfigByUrn(ctx, baseUrn);
+          if (!config) return null;
+          const organizationId =
+            config.organizationId ??
+            (config.appId
+              ? (await ctx.db.app.findUnique({ where: { id: config.appId }, select: { organizationId: true } }))?.organizationId
+              : config.agentId
+                ? (await ctx.db.agent.findUnique({ where: { id: config.agentId }, select: { organizationId: true } }))?.organizationId
+                : null) ??
+            null;
+          return { kind: 'aiconf', id: config.id, organizationId };
         }
         case 'noderev': {
           // #696: hrn:noderev:<root>:<mem>:<loc...>:<rev> (end-anchored).

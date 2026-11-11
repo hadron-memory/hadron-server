@@ -29,7 +29,7 @@ const Q = resolvers.Query as any;
 const M = resolvers.Mutation as any;
 const T = (resolvers as any).AiServiceConfig as { urn: (c: unknown, a: unknown, ctx: Context) => Promise<string | null> };
 
-function ctx(userId?: string, roles: string[] = ['READER']): Context {
+function ctx(userId?: string, roles: Context['roles'] = ['READER']): Context {
   return { db, userId, roles };
 }
 
@@ -78,8 +78,11 @@ beforeEach(async () => {
   };
 });
 
-const urnOf = (c: { id: string }, who: Context) =>
-  db.aiServiceConfig.findUniqueOrThrow({ where: { id: c.id } }).then((row) => T.urn(row, {}, who));
+/** The field resolver runs on the row the id read returned, so read it the way a client does. */
+const urnOf = async (c: { id: string }, who: Context) => {
+  const row = await Q.aiServiceConfig(null, { ref: c.id }, ctx(platformAdmin.id, ['ADMIN']));
+  return T.urn(row, {}, who);
+};
 
 describe('#3857 — AiServiceConfig.urn is computed for all four owner kinds', () => {
   it('emits the shape per owner kind', async () => {
@@ -151,6 +154,7 @@ describe('#3857 — resolveUrn and aiServiceConfig(ref:) accept the URN behind t
       `hrn:aiconf:${org.urn}:default`, // no owner kind
       `hrn:aiconf:server:org:default`, // a reserved root takes no kind
       `hrn:aiconf:${org.urn}:bogus:default`,
+      `hrn:aiconf:${org.urn}:org:default#data`, // only node/apprun take a fragment
     ]) {
       expect(await Q.resolveUrn(null, { urn }, who)).toBeNull();
       expect(await Q.aiServiceConfig(null, { ref: urn }, who)).toBeNull();

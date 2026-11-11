@@ -5028,6 +5028,14 @@ export const typeDefs = `#graphql
   type AiServiceConfig {
     id: ID!
     name: String!
+    """
+    The config's URN, computed from its owner's current URN plus its name
+    (hrn:node:hadronmemory.com:specs:cor:urn:010:01, V60-V63): hrn:aiconf:<org>:org:<name>,
+    hrn:aiconf:<root>:app:<app-slug>:<name>, hrn:aiconf:<author-root>:agent:<agent-slug>:<name>,
+    or hrn:aiconf:server:<name> for a HadronServer owner. Null for a name that cannot be a
+    URN atom (a trailing '-' or '_'). Renaming the config re-addresses it, with no alias.
+    """
+    urn: String
     ownerType: AiConfigOwnerType!
     "ID of the owning HadronServer / Organization / App / Agent."
     ownerId: ID!
@@ -8228,7 +8236,9 @@ export const typeDefs = `#graphql
   route (hadron-portal#262).
 
   \`kind\` is the URN's type segment: memory | node | agent | org | app | user |
-  apprun | worker | noderev.
+  apprun | worker | noderev | aiconf (#3857: an AI service config, behind the same
+  gate as aiServiceConfig(ref:); an unreadable config answers null, as a missing
+  one does, hrn:node:hadronmemory.com:specs:cor:urn:010:01).
   \`id\` is the resolved entity's primary id. \`memoryId\` is set only for
   nodes (their owning memory), \`organizationId\` for apps, app runs, and
   workers (their owning org) — both are the extra ids those resources'
@@ -10336,7 +10346,12 @@ export const typeDefs = `#graphql
     agentAIConfig(agentRef: ID!): AgentAIConfig
 
     """
-    The uniform single-config read. 'ref' is the config's ID (not a URN).
+    The uniform single-config read. 'ref' is the config's ID or its hrn:aiconf: URN
+    (#3857, hrn:node:hadronmemory.com:specs:cor:urn:010:01; see AiServiceConfig.urn).
+    On the URN path a config the caller may not read answers null, exactly as a
+    missing one does, because names such as 'default' are guessable
+    (hrn:node:hadronmemory.com:specs:cor:api:120:01); the ID path keeps the
+    posture below.
     Masked: never returns key material, only hasApiKey + apiKeyPreview
     (resolveAIConfig is the privileged decrypted read). Auth mirrors the list:
     platform ADMIN/OWNER for HADRON_SERVER; org ADMIN for ORGANIZATION;
