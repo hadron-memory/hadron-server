@@ -464,6 +464,50 @@ describe('#3934 — escalationEndedAt and alarmsInEffect on a task alarm', () =>
     expect((await events('', null)).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: handBack.createdAt.toISOString() });
   });
 
+  it('a not-started alarm ends at the real start even after a hand-back cleared the row\'s startedAt (real start then real hand-back)', async () => {
+    const { t, alarm } = await notStartedAlarm();
+    const pause = () => new Promise((r) => setTimeout(r, 25));
+    await runAsActor({ workerId: anne.id, agentId }, () => M.startAgentTask({}, { taskId: t.id }, ctx(admin.id))); // the real clock's now
+    await pause();
+    await runAsActor({ workerId: anne.id, agentId }, () => M.handBackAgentTask({}, { taskRef: t.id, reason: { code: 'CANNOT_DO' } }, ctx(admin.id)));
+    expect((await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).startedAt).toBeNull(); // the row forgot the start
+    const started = await db.agentTeamEvent.findFirstOrThrow({ where: { taskId: t.id, type: 'task.started' } });
+    await record('23:59');
+    expect((await events('', null)).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: started.createdAt.toISOString() });
+  });
+
+  it('the same through the acknowledgement\'s freeze: real start, real hand-back, then the real acknowledgement records the start', async () => {
+    const { t, alarm } = await notStartedAlarm();
+    const pause = () => new Promise((r) => setTimeout(r, 25));
+    await runAsActor({ workerId: anne.id, agentId }, () => M.startAgentTask({}, { taskId: t.id }, ctx(admin.id)));
+    await pause();
+    await runAsActor({ workerId: anne.id, agentId }, () => M.handBackAgentTask({}, { taskRef: t.id, reason: { code: 'CANNOT_DO' } }, ctx(admin.id)));
+    await M.acknowledgeAlarm({}, { eventId: alarm.id }, ctx(admin.id));
+    const started = await db.agentTeamEvent.findFirstOrThrow({ where: { taskId: t.id, type: 'task.started' } });
+    expect((await db.alarmEscalationEnd.findUniqueOrThrow({ where: { eventId: alarm.id } })).endedAt).toEqual(started.createdAt);
+  });
+
+  it('a finish-by episode is KEPT across a hand-back: the alarm is not ended by it (cor:agt:050:13, V26)', async () => {
+    const t = await task({ ownerWorkerId: ada.id, assigneeWorkerId: anne.id, assignedAt: at('09:30'), status: 'started', startedAt: at('09:40'), finishBy: at('10:00') });
+    await tick('10:15');
+    const alarm = (await alarms('stall.finish-by')).find((a) => a.taskId === t.id)!;
+    await runAsActor({ workerId: anne.id, agentId }, () => M.handBackAgentTask({}, { taskRef: t.id, reason: { code: 'CANNOT_DO' } }, ctx(admin.id)));
+    await record('23:59');
+    expect((await events('', null)).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: null });
+    expect((await events('alarmsInEffect: true', null)).map((e) => e.id)).toContain(alarm.id);
+  });
+
+  it('an owner-unreactive alarm ends at the hand-back too', async () => {
+    const parent = await task({ ownerWorkerId: ada.id, assigneeWorkerId: anne.id, assignedAt: at('09:00'), status: 'started', startedAt: at('09:10') });
+    await task({ parentTaskId: parent.id, ownerWorkerId: anne.id, assigneeWorkerId: rook.id, assignedAt: at('09:20'), status: 'finished', startedAt: at('09:30'), finishedAt: at('10:00'), resultOutcome: 'succeeded' });
+    await tick('10:30');
+    const alarm = (await alarms('stall.owner-unreactive')).find((a) => a.taskId === parent.id)!;
+    await runAsActor({ workerId: anne.id, agentId }, () => M.handBackAgentTask({}, { taskRef: parent.id, reason: { code: 'CANNOT_DO' } }, ctx(admin.id)));
+    const handBack = await db.agentTeamEvent.findFirstOrThrow({ where: { taskId: parent.id, type: 'task.handed-back' } });
+    await record('23:59');
+    expect((await events('', null)).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: handBack.createdAt.toISOString() });
+  });
+
   it('the same answer as the wake schedule: the wake pass closes exactly the alarms the read calls ended', async () => {
     const { t: ended } = await notStartedAlarm();
     const running = await assignedToAnne('10:05'); // its own alarm at 10:20, still running
