@@ -93,6 +93,9 @@ export const PAGE_ARGS_FIELDS: ReadonlySet<string> = new Set([
   'Query.exchangeConnectionsPage',
   'Query.dashboardWidgetPresetsPage',
   'Query.tickersPage',
+  // #3873: pageArgs on the PublicOrganization footprint pages (pinned in resolvers.publicOrgPage3873.test.ts).
+  'PublicOrganization.publicMemoriesPage',
+  'PublicOrganization.publicAgentsPage',
   // Helper-backed fields use pageArgs too, despite not ending in Page.
   'Query.actionRegisterIndex',
   'Query.compiledPromptProvenance',

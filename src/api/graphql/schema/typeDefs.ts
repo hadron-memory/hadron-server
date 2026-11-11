@@ -4194,10 +4194,21 @@ export const typeDefs = `#graphql
     name: String!
     urn: String!
     listedOnMarketplace: Boolean!
-    "The org's PUBLIC, non-app-scoped memories (sanitized refs)."
+    "SUPERSEDED by publicMemoriesPage (#3873, hrn:node:hadronmemory.com:specs:cor:api:120:04): the org's PUBLIC, non-app-scoped memories (sanitized refs), now only the first page of 20 in (name, id) order. Use publicMemoriesPage to reach the rest."
     publicMemories: [PublicResourceRef!]!
-    "The org's PUBLIC agents (sanitized refs)."
+    "SUPERSEDED by publicAgentsPage (#3873, hrn:node:hadronmemory.com:specs:cor:api:120:04): the org's PUBLIC agents (sanitized refs), now only the first page of 20 in (name, id) order. Use publicAgentsPage to reach the rest."
     publicAgents: [PublicResourceRef!]!
+    "The org's PUBLIC, non-app-scoped memories (sanitized refs), one page in (name, id) order. limit omitted is 20, 0 is count-only, a negative limit is 0, a limit over 200 is served as 200 (never a refusal); a negative offset is 0. total counts exactly the rows the public gate admits (hrn:node:hadronmemory.com:specs:cor:acl:080:02, hrn:node:hadronmemory.com:specs:cor:api:120:04)."
+    publicMemoriesPage(limit: Int, offset: Int): PublicResourceRefsPage!
+    "The org's PUBLIC agents (sanitized refs), one page in (name, id) order; same paging rules as publicMemoriesPage."
+    publicAgentsPage(limit: Int, offset: Int): PublicResourceRefsPage!
+  }
+
+  "A page of sanitized public resource refs that says whether more rows follow (#3873, hrn:node:hadronmemory.com:specs:cor:api:120:04). The marketplace catalogue keeps PublicResourceRefPage."
+  type PublicResourceRefsPage {
+    items: [PublicResourceRef!]!
+    total: Int!
+    hasMore: Boolean!
   }
 
   "A minimal, safe reference to a public resource (marketplace / discovery)."
