@@ -55,6 +55,7 @@ import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { deriveSlugFromName } from '../../../lib/urn.js';
 import { parsePolicyLink } from '@hadron-memory/access-control';
 import { GraphQLError } from 'graphql';
+import { uninstallApp, reinstallApp } from './appInstallState.js';
 import {
   type AppType,
   type AppMembershipRole,
@@ -1147,6 +1148,10 @@ export const appMutations = {
       );
       return true;
     },
+
+    // #3774 — App-level uninstall / reinstall (cor:dmo:050:21). deleteApp's gate and lock; see appInstallState.ts.
+    uninstallApp: async (_: unknown, { ref }: { ref: string }, ctx: Context) => uninstallApp(ctx, ref),
+    reinstallApp: async (_: unknown, { ref }: { ref: string }, ctx: Context) => reinstallApp(ctx, ref),
 
     installAgentIntoApp: async (
       _: unknown,

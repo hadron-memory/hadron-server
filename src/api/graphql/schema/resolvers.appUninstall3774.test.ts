@@ -14,7 +14,7 @@ import { resolvers, type Context } from './resolvers.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
 const M = resolvers.Mutation as any;
-const ctx = (userId?: string, roles: string[] = ['READER']): Context => ({ db, userId, roles });
+const ctx = (userId?: string, roles: Context['roles'] = ['READER']): Context => ({ db, userId, roles });
 
 async function code(p: Promise<unknown>): Promise<{ code: unknown; message: string }> {
   try {
@@ -130,6 +130,14 @@ describe('#3774 uninstallApp', () => {
     expect((await row()).uninstalledAt!.getTime()).toBe(first.getTime());
   });
 
+  it('A5: a repeat uninstall ends no episode (it does nothing at all)', async () => {
+    await M.uninstallApp({}, { ref: app.id }, ctx(admin.id));
+    const w = await worker(app.id, 'Ada');
+    const ep = await openEpisode(app.id, w.id);
+    await M.uninstallApp({}, { ref: app.id }, ctx(admin.id));
+    expect((await db.darkWorkerEpisode.findUniqueOrThrow({ where: { id: ep.id } })).endedAt).toBeNull();
+  });
+
   it('A6: a deleted App refuses uninstall', async () => {
     await db.app.update({ where: { id: app.id }, data: { deletedAt: new Date() } });
     await code(M.uninstallApp({}, { ref: app.id }, ctx(admin.id)));
@@ -188,14 +196,18 @@ describe('#3774 reinstallApp', () => {
     expect((await row()).uninstalledAt).not.toBeNull();
   });
 
-  it('A7: after a reinstall a dark worker opens a NEW episode, not the ended one', async () => {
-    // Fresh App whose worker is OVERDUE: seed through an episode that the uninstall ended.
+  it('A7: an episode the uninstall ended stays ended after a reinstall; the sweep sees the App again and never reopens it', async () => {
+    // (the beforeEach uninstalled before any episode existed, so seed one, end it as an uninstall would, then reinstall)
     const w = await worker(app.id, 'Ada');
-    const old = await db.darkWorkerEpisode.findFirst({ where: { workerId: w.id } });
-    expect(old).toBeNull();
+    const old = await openEpisode(app.id, w.id);
     await M.reinstallApp({}, { ref: app.id }, ctx(admin.id));
-    const raised = await evaluateDarkWorkers(db, new Date());
-    // The sweep sees the App again (it skipped it while uninstalled); no stale open episode is resurrected.
-    expect(await db.darkWorkerEpisode.count({ where: { workerId: w.id, endedAt: null } })).toBe(raised.length);
+    await M.uninstallApp({}, { ref: app.id }, ctx(admin.id));
+    expect((await db.darkWorkerEpisode.findUniqueOrThrow({ where: { id: old.id } })).endedAt).not.toBeNull();
+    await M.reinstallApp({}, { ref: app.id }, ctx(admin.id));
+    await evaluateDarkWorkers(db, new Date());
+    expect((await db.darkWorkerEpisode.findUniqueOrThrow({ where: { id: old.id } })).endedAt).not.toBeNull();
+    // any episode open now is a different row from the one the uninstall ended
+    const openNow = await db.darkWorkerEpisode.findMany({ where: { workerId: w.id, endedAt: null } });
+    expect(openNow.every((e) => e.id !== old.id)).toBe(true);
   });
 });

@@ -14026,6 +14026,26 @@ export const typeDefs = `#graphql
     deleteApp(ref: ID!): Boolean!
 
     """
+    #3774 — Uninstall an App: it is kept, read-only (every write through it is refused, usually APP_UNINSTALLED), and its
+    handle is free for a new App. Ends every open dark-worker episode of the App's workers at the uninstall time, in the
+    same transaction (hrn:node:hadronmemory.com:specs:cor:dmo:050:21, Holger R1-R3, 2026-11-09).
+
+    Whoever may deleteApp may call this (the same gate); anyone else, and an App that does not exist, gets one identical
+    refusal. A repeat on an uninstalled App changes nothing. A deleted App is refused (APP_DELETED). Accepts the ID or URN.
+    """
+    uninstallApp(ref: ID!): Boolean!
+
+    """
+    #3774 — Reinstall an uninstalled App: the SAME App (id, keys, members, memories) is installed again; no row is created
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:21, R2). Same gate as uninstallApp.
+
+    Refused APP_URN_IN_USE while another installed App holds the handle, and APP_DELETED for a deleted App (there is no
+    undelete). A repeat on an installed App changes nothing. Accepts the ID, or the URN when exactly one uninstalled App
+    holds it. A worker that is still dark opens a NEW episode on the next sweep.
+    """
+    reinstallApp(ref: ID!): Boolean!
+
+    """
     Install an Agent into an App (023-app-shape US1). Creates an AppAgent
     row joining the two. An App can have multiple Agents installed; one
     credential addresses all of them.
