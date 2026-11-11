@@ -19,6 +19,9 @@ type Db = Pick<PrismaClient, 'hadronServer' | 'organization' | 'app' | 'agent'>;
 export async function loadAiConfigOwners(db: Db, refs: AiConfigOwnerRef[]): Promise<Map<string, AiConfigOwnerInfo>> {
   const ids = (t: AiConfigOwnerType) => [...new Set(refs.filter((r) => r.ownerType === t).map((r) => r.ownerId))];
   const out = new Map<string, AiConfigOwnerInfo>();
+  // #3958 (decided, F5): the four kind queries run together and fail together. One failing kind rejects the whole
+  // load, so every row's `urn` in the tick errors rather than reading as a quiet null that a consumer cannot tell
+  // apart from "this config has no URN" (cor:urn:010:01 point 6).
   const [servers, orgs, apps, agents] = await Promise.all([
     ids('HADRON_SERVER').length ? currentHadronServerId(db) : Promise.resolve(null),
     ids('ORGANIZATION').length ? db.organization.findMany({ where: { id: { in: ids('ORGANIZATION') } }, select: { id: true, urn: true } }) : [],
