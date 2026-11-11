@@ -18,6 +18,8 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
+import { globalSearch } from './index.js';
+import type { SearchPrincipal } from './types.js';
 
 const Q = resolvers.Query as any;
 const sfx = () => `${Date.now()}-${Math.floor(Math.random() * 100_000)}`;
@@ -29,8 +31,16 @@ let cfg: Record<string, { id: string; urn: string | null }>;
 
 const mkUser = (n: number, roles: string[] = ['READER']) =>
   db.user.create({ data: { id: generateId(), githubId: 391700 + n, githubUsername: `gs3917-${n}-${sfx()}`, roles: roles as never } });
+const imp = (adminOf: string, orgId: string) =>
+  ({ sessionId: 's', actorUserId: u.padmin!.id, orgId, expiresAt: new Date(Date.now() + 60_000) }) as NonNullable<Context['impersonation']>;
 const ctxOf = (who: string): Context =>
-  who === 'padmin' ? { db, userId: u.padmin!.id, roles: ['ADMIN'] } : who === 'anon' ? { db, roles: [] } : { db, userId: u[who]!.id, roles: ['READER'] };
+  who === 'padmin' ? { db, userId: u.padmin!.id, roles: ['ADMIN'] }
+  : who === 'anon' ? { db, roles: [] }
+  // An impersonated session sees into its ONE shared org and never a user-owned row (identity-scoped).
+  : who === 'impOrgAdmin' ? { db, userId: u.orgAdmin!.id, roles: [], impersonation: imp('orgAdmin', org.id) }
+  : who === 'impOtherOrg' ? { db, userId: u.orgAdmin!.id, roles: [], impersonation: imp('orgAdmin', otherOrg.id) }
+  : who === 'impAppOwner' ? { db, userId: u.appOwner!.id, roles: [], impersonation: imp('appOwner', org.id) }
+  : { db, userId: u[who]!.id, roles: ['READER'] };
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -46,6 +56,7 @@ beforeEach(async () => {
   u.agentOwner = await mkUser(7);
   u.outsider = await mkUser(8);
   u.otherAdmin = await mkUser(9);
+  u.revoked = await mkUser(10);
   const member = (userId: string, organizationId: string, role: string) =>
     db.orgMember.create({ data: { id: generateId(), organizationId, userId, role: role as never } });
   await member(u.orgAdmin!.id, org.id, 'ADMIN');
@@ -53,6 +64,8 @@ beforeEach(async () => {
   await member(u.contrib!.id, org.id, 'CONTRIBUTOR');
   await member(u.reader!.id, org.id, 'READER');
   await member(u.otherAdmin!.id, otherOrg.id, 'ADMIN');
+  // A REVOKED admin membership must not authorize (PR #475).
+  await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: u.revoked!.id, role: 'ADMIN', deletedAt: new Date() } });
 
   const orgApp = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Meal Plan', urn: `${org.urn}:mealplan` } });
   const userApp = await db.app.create({
@@ -61,8 +74,14 @@ beforeEach(async () => {
   const orgAgent = await db.agent.create({
     data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:juno`, name: 'Juno', visibility: 'ORGANIZATION' },
   });
+  const retiredAgent = await db.agent.create({
+    data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:gone`, name: 'Gone', visibility: 'ORGANIZATION', deletedAt: new Date() },
+  });
   const userAgent = await db.agent.create({
     data: { id: generateId(), organizationId: null, ownerUserId: u.agentOwner!.id, urn: `@gs3917ag${s.replace(/\D/g, '')}:mine`, name: 'Mine', visibility: 'PERSONAL', createdBy: u.agentOwner!.id },
+  });
+  const retiredUserAgent = await db.agent.create({
+    data: { id: generateId(), organizationId: null, ownerUserId: u.agentOwner!.id, urn: `@gs3917rt${s.replace(/\D/g, '')}:gone`, name: 'Gone', visibility: 'PERSONAL', createdBy: u.agentOwner!.id, deletedAt: new Date() },
   });
   const server = await db.hadronServer.create({ data: { id: generateId(), url: 'https://gs3917.test' } });
 
@@ -76,6 +95,8 @@ beforeEach(async () => {
     userApp: await mk('gsdefault', { appId: userApp.id }),
     orgAgent: await mk('gsdefault', { agentId: orgAgent.id }),
     userAgent: await mk('gsdefault', { agentId: userAgent.id }),
+    retiredAgent: await mk('gsdefault', { agentId: retiredAgent.id }),
+    retiredUserAgent: await mk('gsdefault', { agentId: retiredUserAgent.id }),
     server: await mk('gsdefault', { hadronServerId: server.id }),
     other: await mk('gsdefault', { organizationId: otherOrg.id }),
   };
@@ -151,7 +172,7 @@ describe('#3917 — a caller below ADMIN finds nothing, on urn, name and pk', ()
 });
 
 describe('#3917 — search visibility equals the id read, for every owner and caller shape', () => {
-  const callers = ['padmin', 'orgAdmin', 'orgOwner', 'contrib', 'reader', 'appOwner', 'agentOwner', 'outsider', 'otherAdmin', 'anon'];
+  const callers = ['padmin', 'orgAdmin', 'orgOwner', 'contrib', 'reader', 'appOwner', 'agentOwner', 'outsider', 'otherAdmin', 'revoked', 'impOrgAdmin', 'impOtherOrg', 'impAppOwner', 'anon'];
   for (const who of callers) {
     it(`${who}: the name search returns exactly what the id read allows`, async () => {
       const found = idsOf(await search(who, 'gsdefault', { fields: ['name'] }));
@@ -169,6 +190,21 @@ describe('#3917 — search visibility equals the id read, for every owner and ca
   }
 });
 
+describe('#3917 — an org-confined search narrows, never widens', () => {
+  it('orgId confines a platform admin to that org\'s configs (no server-owned, no user-owned)', async () => {
+    // orgId is member-only (no platform bypass), so the admin joins the org first.
+    await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: u.padmin!.id, role: 'READER' } });
+    const r = await search('padmin', 'gsdefault', { fields: ['name'], orgId: org.id });
+    expect(idsOf(r)).toEqual(new Set([cfg.org!.id, cfg.orgApp!.id, cfg.orgAgent!.id]));
+    expect(r.total).toBe(3);
+  });
+  it('orgId drops a user-owned App\'s config even for its owner', async () => {
+    await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: u.appOwner!.id, role: 'READER' } });
+    expect((await search('appOwner', 'gsdefault', { fields: ['name'], orgId: org.id })).hits).toEqual([]);
+    expect(idsOf(await search('appOwner', 'gsdefault', { fields: ['name'] }))).toEqual(new Set([cfg.userApp!.id]));
+  });
+});
+
 describe('#3917 — the filter is in the candidate query', () => {
   it('unreadable matches do not crowd a readable one out of the cap, or count toward total', async () => {
     // Many unreadable configs match the same name; the one readable config must still be found.
@@ -180,5 +216,37 @@ describe('#3917 — the filter is in the candidate query', () => {
     const r = await search('orgAdmin', 'gscrowd', { fields: ['name'], limit: 50 });
     expect(r.hits.map((h) => h.name)).toEqual(['gscrowd-mine']);
     expect(r.total).toBe(1);
+  });
+});
+
+// The surfaces narrow `orgIds` themselves (member orgs, the impersonation org), so the engine's own guards are
+// pinned here with principals those surfaces would never build: the filter must hold on its own.
+describe('#3917 — the engine holds without the surface\'s narrowing', () => {
+  const engine = async (p: Partial<SearchPrincipal>) =>
+    idsOf(
+      await globalSearch(
+        db,
+        { query: 'gsdefault', entityTypes: ['aiServiceConfig'], fields: ['name'] },
+        { viewerUserId: null, isPlatformAdmin: false, accessibleMemoryIds: [], orgIds: [], viewerOrgIds: [], ...p },
+      ),
+    );
+
+  it('a revoked admin membership does not authorize, whatever orgIds says', async () => {
+    expect(await engine({ viewerUserId: u.revoked!.id, orgIds: [org.id] })).toEqual(new Set());
+  });
+  it('orgIds narrows an admin of several orgs to the listed ones', async () => {
+    await db.orgMember.create({ data: { id: generateId(), organizationId: otherOrg.id, userId: u.orgAdmin!.id, role: 'ADMIN' } });
+    expect(await engine({ viewerUserId: u.orgAdmin!.id, orgIds: [otherOrg.id] })).toEqual(new Set([cfg.other!.id]));
+    expect(await engine({ viewerUserId: u.orgAdmin!.id, orgIds: [org.id] })).toEqual(
+      new Set([cfg.org!.id, cfg.orgApp!.id, cfg.orgAgent!.id]),
+    );
+  });
+  it('an impersonated session sees only its one org, and the platform bypass is inert', async () => {
+    await db.orgMember.create({ data: { id: generateId(), organizationId: otherOrg.id, userId: u.orgAdmin!.id, role: 'ADMIN' } });
+    expect(await engine({ viewerUserId: u.orgAdmin!.id, orgIds: null, impersonationOrgId: org.id })).toEqual(
+      new Set([cfg.org!.id, cfg.orgApp!.id, cfg.orgAgent!.id]),
+    );
+    // A platform admin flag under impersonation grants nothing beyond the one org the admin belongs to.
+    expect(await engine({ viewerUserId: u.padmin!.id, isPlatformAdmin: true, orgIds: null, impersonationOrgId: org.id })).toEqual(new Set());
   });
 });

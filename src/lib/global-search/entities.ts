@@ -7,7 +7,7 @@
  *   - Organization:    id ∈ orgIds
  *   - Memory / Node:   memoryId ∈ accessibleMemoryIds (admin: owner-only carve-out)
  *   - Agent / App:     organizationId ∈ orgIds  (App also: uninstalledAt = null)
- *   - AiServiceConfig: owner org ∈ orgIds  (org-, app-, or agent-owned)
+ *   - AiServiceConfig: the id read's gate (#3917, aiConfigReadScope): org ADMIN+, a user-owned App/Agent's owner, platform admin for server-owned
  *   - User:            authenticated viewer only (parity with `searchUsers`)
  *
  * Encryption: only Node `content` is ciphertext on encrypted memories
@@ -33,6 +33,9 @@ import { userUrn } from '../userHandle.js';
 import { canSeeUserPersonalFields, type UserVisibilityCtx } from '../auth/userVisibility.js';
 import { foreignIdentityScopedMemoryFilter } from '../auth/memoryOwnership.js';
 import { discoverableOrgWhere } from '../orgDiscoverability.js';
+import { aiConfigReadScope } from '../aiConfigReadScope.js';
+import { aiConfigOwnerKey, loadAiConfigOwners, type AiConfigOwnerRef } from '../aiConfigOwner.js';
+import { composeAiConfigUrn } from '../entityRef/aiConfigRef.js';
 
 type AnyWhere = Record<string, unknown>;
 
@@ -465,42 +468,106 @@ async function searchApps(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
   return hits;
 }
 
+/** The most gated configs the URN leg reads per search; a URN is computed, so it is matched here, not in SQL. */
+const AICONF_URN_SCAN_MAX = 2000;
+const AICONF_URN_PREFIX = 'hrn:aiconf:';
+
+/**
+ * #3917: AiServiceConfig search. Every leg (urn, name, pk) sits behind the id
+ * read's gate (`aiConfigReadScope`, the filter form of `requireAiConfigOwnerAdmin`),
+ * applied in the candidate query so an unreadable config neither ranks, counts
+ * toward `total`, nor takes a cap slot (cor:api:050:02/03; cor:urn:010:01 V63).
+ * The URN is computed (cor:urn:010:01 point 3), so the urn leg composes it for
+ * the gated rows and matches that.
+ */
 async function searchAiServiceConfigs(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
-  const { fields, q, principal } = ctx;
+  const { fields, q, urnTerm, principal } = ctx;
+  const wantUrn = fields.has('urn');
   const preds: AnyWhere[] = [];
   if (fields.has('pk')) preds.push(pkPred(q));
   if (fields.has('name')) preds.push(textPred('name', q));
-  if (preds.length === 0) return [];
-  if (principal.orgIds !== null && principal.orgIds.length === 0) return [];
+  if (preds.length === 0 && !wantUrn) return [];
 
-  // Owner-org scope: directly org-owned, or owned by an app/agent in the org.
-  // AiServiceConfig has NO deletedAt (hard-deleted) — no soft-delete filter.
-  const ownerScope: AnyWhere =
-    principal.orgIds !== null
-      ? {
-          OR: [
-            { organizationId: { in: principal.orgIds } },
-            { app: { organizationId: { in: principal.orgIds } } },
-            { agent: { organizationId: { in: principal.orgIds } } },
-          ],
-        }
-      : {};
-
-  const rows = await ctx.db.aiServiceConfig.findMany({
-    where: { AND: [ownerScope, { OR: preds }] } as Prisma.AiServiceConfigWhereInput,
-    select: {
-      id: true,
-      name: true,
-      organizationId: true,
-      app: { select: { organizationId: true } },
-      agent: { select: { organizationId: true } },
-    },
-    take: ctx.cap,
+  const readable = await aiConfigReadScope(ctx.db, {
+    viewerUserId: principal.viewerUserId,
+    isPlatformAdmin: principal.isPlatformAdmin,
+    orgIds: principal.orgIds,
+    orgScopeId: principal.orgScopeId,
+    impersonationOrgId: principal.impersonationOrgId,
   });
+  if (!readable) return [];
+
+  // AiServiceConfig has NO deletedAt (hard-deleted) — no soft-delete filter.
+  const select = {
+    id: true,
+    name: true,
+    organizationId: true,
+    appId: true,
+    agentId: true,
+    hadronServerId: true,
+    app: { select: { organizationId: true } },
+    agent: { select: { organizationId: true } },
+  } satisfies Prisma.AiServiceConfigSelect;
+  type Row = Prisma.AiServiceConfigGetPayload<{ select: typeof select }>;
+
+  const byId = new Map<string, Row>();
+  if (preds.length > 0) {
+    const rows = await ctx.db.aiServiceConfig.findMany({
+      where: { AND: [readable, { OR: preds }] } as Prisma.AiServiceConfigWhereInput,
+      select,
+      take: ctx.cap,
+    });
+    for (const r of rows) byId.set(r.id, r);
+  }
+  if (wantUrn) {
+    const rows = await ctx.db.aiServiceConfig.findMany({
+      where: readable,
+      select,
+      orderBy: { id: 'asc' },
+      take: AICONF_URN_SCAN_MAX + 1,
+    });
+    if (rows.length > AICONF_URN_SCAN_MAX) {
+      rows.length = AICONF_URN_SCAN_MAX;
+      ctx.degraded.push(`aiServiceConfig URN search read the first ${AICONF_URN_SCAN_MAX} readable configs only`);
+    }
+    for (const r of rows) byId.set(r.id, r);
+  }
+  const rows = [...byId.values()];
+
+  const owners = await loadAiConfigOwners(
+    ctx.db,
+    rows.flatMap((r): AiConfigOwnerRef[] =>
+      r.organizationId ? [{ ownerType: 'ORGANIZATION', ownerId: r.organizationId }]
+      : r.appId ? [{ ownerType: 'APP', ownerId: r.appId }]
+      : r.agentId ? [{ ownerType: 'AGENT', ownerId: r.agentId }]
+      : r.hadronServerId ? [{ ownerType: 'HADRON_SERVER', ownerId: r.hadronServerId }]
+      : [],
+    ),
+  );
+  const urnOf = (r: Row): string | null => {
+    const ref: AiConfigOwnerRef | null = r.organizationId ? { ownerType: 'ORGANIZATION', ownerId: r.organizationId }
+      : r.appId ? { ownerType: 'APP', ownerId: r.appId }
+      : r.agentId ? { ownerType: 'AGENT', ownerId: r.agentId }
+      : r.hadronServerId ? { ownerType: 'HADRON_SERVER', ownerId: r.hadronServerId }
+      : null;
+    const info = ref ? owners.get(aiConfigOwnerKey(ref)) : undefined;
+    if (!ref || !info) return null;
+    // The reserved `server` root names THE SERVER ANSWERING: another server's config has no URN here.
+    if (ref.ownerType === 'HADRON_SERVER') return info.current ? composeAiConfigUrn({ kind: 'server' }, r.name) : null;
+    if (info.urn == null) return null;
+    const kind = ref.ownerType === 'ORGANIZATION' ? 'org' : ref.ownerType === 'APP' ? 'app' : 'agent';
+    return composeAiConfigUrn({ kind, urn: info.urn }, r.name);
+  };
 
   const hits: GlobalSearchHit[] = [];
   for (const r of rows) {
+    const urn = urnOf(r);
     const candidates: FieldCandidate[] = [
+      {
+        field: 'urn',
+        value: urn,
+        tier: wantUrn && urn ? Math.max(urnMatchTier(urn.slice(AICONF_URN_PREFIX.length), urnTerm), urnMatchTier(urn, urnTerm)) as 0 | 1 | 2 | 3 : 0,
+      },
       { field: 'name', value: r.name },
       { field: 'pk', value: r.id, tier: r.id === q ? 3 : 0 },
     ];
@@ -509,7 +576,7 @@ async function searchAiServiceConfigs(ctx: AdapterCtx): Promise<GlobalSearchHit[
     hits.push({
       entityType: 'aiServiceConfig',
       id: r.id,
-      urn: null,
+      urn,
       name: r.name,
       description: null,
       matchedField: m.field,
