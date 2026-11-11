@@ -47,7 +47,7 @@ import {
   SelfJoinNotAllowedError,
   AppUninstalledError,
 } from '../../../controller/operations/joinApp.js';
-import { AgentNotFoundError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
+import { AgentNotFoundError, AmbiguousLegacyUrnError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { leaveApp } from '../../../controller/operations/leaveApp.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
@@ -55,7 +55,7 @@ import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { deriveSlugFromName } from '../../../lib/urn.js';
 import { parsePolicyLink } from '@hadron-memory/access-control';
 import { GraphQLError } from 'graphql';
-import { uninstallApp, reinstallApp } from './appInstallState.js';
+import { uninstallApp, reinstallApp, locateForDelete } from './appInstallState.js';
 import {
   type AppType,
   type AppMembershipRole,
@@ -1114,9 +1114,20 @@ export const appMutations = {
 
     deleteApp: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
       // 007-entity-id-or-urn: ref may be ID, bare URN, or prefixed URN.
-      const { id: resolvedId } = await resolveAppRef(ctx.db, ref);
-      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
+      // #3975 (cor:dmo:050:21, cor:api:140:02): a missing App and a refused caller get the one `authorizationDenied()`, by id and URN;
+      // the state refusals (deleted, ambiguous URN) come only after the gate. See locateForDelete.
+      const target = await locateForDelete(ctx, ref);
+      if (target.kind === 'none') throw authorizationDenied();
+      if (target.kind === 'ambiguous') {
+        // The ambiguity is shown only to a caller the gate admits on every claimant; anyone else gets the uniform refusal.
+        if (target.candidates.length === 0) throw authorizationDenied();
+        for (const c of target.candidates) await requireOwnerOrOrgRole(ctx, c, 'ADMIN');
+        throw new AmbiguousLegacyUrnError(target.ref);
+      }
+      const app = target.app;
+      const resolvedId = app.id;
       await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+      if (app.deletedAt) throw new GraphQLError('This App is deleted.', { extensions: { code: 'APP_DELETED', appId: resolvedId } });
       // Soft-delete the App. Secrets are org/user-owned only (#696), so there
       // are no app-owned secrets to sweep here anymore. The deletedAt-null guard
       // keeps the original deletedAt under a concurrent double-delete.

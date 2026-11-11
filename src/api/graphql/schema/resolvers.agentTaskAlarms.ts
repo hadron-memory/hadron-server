@@ -223,8 +223,9 @@ export const agentTaskAlarmMutations = {
     requireWritable(ctx, app);
     const warn: TaskWarningCode[] = [];
     await inTaskWriteTx(ctx, app, actor, () => alarmNotFound(id), async (tx, txCtx, freshApp) => {
-      const [row] = await tx.$queryRaw<{ appId: string; severity: string | null; chain: unknown; acknowledgedAt: Date | null }[]>`
-        SELECT app_id AS "appId", severity, chain, acknowledged_at AS "acknowledgedAt"
+      const [row] = await tx.$queryRaw<{ appId: string; severity: string | null; chain: unknown; acknowledgedAt: Date | null; taskId: string | null; type: string; episodeStart: Date | null }[]>`
+        SELECT app_id AS "appId", severity, chain, acknowledged_at AS "acknowledgedAt",
+               task_id AS "taskId", type, episode_start AS "episodeStart"
         FROM agent_team_events WHERE id = ${id} FOR UPDATE`;
       if (!row || row.appId !== freshApp.id) throw alarmNotFound(id);
       if (row.severity !== 'alarm') {
@@ -244,6 +245,10 @@ export const agentTaskAlarmMutations = {
         throw taskError('ALARM_ALREADY_ACKNOWLEDGED', 'This alarm is already acknowledged; the first acknowledgement stands.', { eventId: id });
       }
       if (!ownerInChain) warn.push('alarm.ack.outside-chain');
+      // #3934 (V77): an episode that had already ended but was not yet recorded is recorded now, before the acknowledgement
+      // is written, so the end the field reports is the episode's, not the acknowledgement's.
+      const { freezeEndedEscalation } = await import('../../../lib/agentTasks/stall.js');
+      await freezeEndedEscalation(tx, { id, taskId: row.taskId, type: row.type, episodeStart: row.episodeStart }, new Date());
       // The server's clock, never a client value (Rook P3-2).
       await tx.agentTeamEvent.update({
         where: { id },

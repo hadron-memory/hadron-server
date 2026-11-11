@@ -6220,6 +6220,8 @@ model AgentTeamEvent {
   darkEpisode DarkWorkerEpisode?
   cadenceEpisode CoordinatorCadenceEpisode?
   postLimitEpisode PostLimitEpisode?
+  /// #3934 (V77): the recorded end of this alarm's escalation, written once by the evaluator pass or the acknowledgement.
+  escalationEnd AlarmEscalationEnd?
 
   @@unique([taskId, type, episodeStart], map: "agent_team_events_episode_uniq")
   @@index([appId, createdAt])
@@ -6255,6 +6257,21 @@ model AgentTeamAlarmSchedule {
   @@id([eventId, chainIndex])
   @@index([wokenAt, dueAt])
   @@map("agent_team_alarm_schedule")
+}
+
+/// #3934 (cor:agt:050:20, V77; gate disposition on hadron-server#3939): the RECORDED end of an alarm's escalation. The
+/// alarm event stream is append-only, so the end lives here: one row per alarm, written once (a trigger refuses any
+/// UPDATE), by the evaluator pass (every unacknowledged alarm it finds ended) or by the acknowledgement that froze an
+/// ended-but-unrecorded episode. `endedAt` is the earliest end the available history supports at the moment of writing;
+/// it is at most one evaluator tick late and never moves. Reads take the earlier of this and the acknowledgement.
+model AlarmEscalationEnd {
+  eventId    String   @id @map("event_id")
+  endedAt    DateTime @map("ended_at")
+  recordedAt DateTime @default(now()) @map("recorded_at")
+
+  event AgentTeamEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@map("alarm_escalation_ends")
 }
 
 /// #2755 — one dark-worker episode (a worker that went OVERDUE or left a due wake unacknowledged past the App's

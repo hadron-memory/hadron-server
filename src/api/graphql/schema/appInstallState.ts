@@ -13,10 +13,11 @@
 import { GraphQLError } from 'graphql';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
-import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
+import { AmbiguousLegacyUrnError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { normalizeUrnForLookup, parseUrnInput } from '../../../lib/urn.js';
+import { findLiveUrnAliasTargets } from '../../../lib/urnAlias.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { requireOwnerOrOrgRole, type Context } from './resolvers.helpers.js';
 
@@ -102,3 +103,39 @@ const urnInUse = (appId: string, urn: string | null): GraphQLError =>
 
 export const uninstallApp = (ctx: Context, ref: string) => setInstalled(ctx, ref, false);
 export const reinstallApp = (ctx: Context, ref: string) => setInstalled(ctx, ref, true);
+
+/**
+ * #3975 — what `deleteApp`'s ref names, for the gate to judge. By id: that row in ANY state (so the gate, not the lookup,
+ * answers a refused caller, and the state refusal follows it). By URN: the INSTALLED, undeleted App that holds it (what
+ * `resolveAppRef` reaches). `none` when nothing does; a URN with no installed holder reads as `none`, so an uninstalled App
+ * is reached by id only (#3974's FIT). `ambiguous` carries EVERY live claimant of a legacy URN: the caller learns of the
+ * ambiguity only when the gate admits them on all of them (never one, which would show another tenant's App exists).
+ */
+export type DeleteTarget =
+  | { kind: 'none' }
+  | { kind: 'app'; app: AppFull }
+  | { kind: 'ambiguous'; ref: string; candidates: AppFull[] };
+type AppFull = NonNullable<Awaited<ReturnType<Context['db']['app']['findUnique']>>>;
+
+export async function locateForDelete(ctx: Context, ref: string): Promise<DeleteTarget> {
+  const byId = async (id: string): Promise<DeleteTarget> => {
+    const app = await ctx.db.app.findUnique({ where: { id } });
+    return app ? { kind: 'app', app } : { kind: 'none' };
+  };
+  if (isId(ref)) return byId(ref);
+  try {
+    return await byId((await resolveAppRef(ctx.db, ref)).id);
+  } catch (e) {
+    if (e instanceof AppNotFoundError) return { kind: 'none' };
+    if (!(e instanceof AmbiguousLegacyUrnError)) throw e;
+  }
+  // Every live claimant, read the way resolveAppRef reads them (the legacy column and the rename map), uncapped by its take: 2.
+  const urn = normalizeUrnForLookup(parseUrnInput(ref).value);
+  const live = (ids: string[]) => ctx.db.app.findMany({ where: { id: { in: ids }, uninstalledAt: null, deletedAt: null } });
+  const [legacy, aliased] = await Promise.all([
+    ctx.db.app.findMany({ where: { legacyUrn: urn, uninstalledAt: null, deletedAt: null } }),
+    findLiveUrnAliasTargets(ctx.db, 'APP', urn, live, { all: true }),
+  ]);
+  const byKey = new Map([...legacy, ...aliased].map((a) => [a.id, a]));
+  return { kind: 'ambiguous', ref, candidates: [...byKey.values()] };
+}
