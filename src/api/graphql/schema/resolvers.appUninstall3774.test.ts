@@ -10,6 +10,7 @@ import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { evaluateDarkWorkers } from '../../../lib/agentTasks/darkWorker.js';
 import { resolvers, type Context } from './resolvers.js';
+import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
@@ -20,8 +21,9 @@ async function code(p: Promise<unknown>): Promise<{ code: unknown; message: stri
   try {
     await p;
   } catch (e) {
-    expect(e).toBeInstanceOf(GraphQLError);
-    return { code: (e as GraphQLError).extensions?.code, message: (e as GraphQLError).message };
+    // MemoryNotFoundError (a memory write) is not a GraphQLError: it carries its code on the error itself.
+    const err = e as GraphQLError & { code?: string };
+    return { code: err.extensions?.code ?? err.code, message: err.message };
   }
   throw new Error('expected a rejection');
 }
@@ -289,19 +291,21 @@ describe('#3774 A1/A4 the gate-named write families: refused while uninstalled, 
   it('task create, app-memory create, session start and agent install', async () => {
     const w = await worker(app.id, 'Kit');
     await db.appAgent.create({ data: { appId: app.id, agentId } });
-    const key = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: `h-${generateId()}`, keyPrefix: 'hdr_app_x', name: 'k' } as any }).catch(() => null);
+    await serveEveryAgent(db); // binds are served the Agent's boot prompt
+    const key = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: `h-${generateId()}`, keyPreview: 'hdr_app_x…', label: 'k' } });
     const mem = await db.memory.create({ data: { id: generateId(), organizationId: org.id, appId: app.id, urn: `${org.urn}:keep`, name: 'keep', class: 'app' } });
     const attempts = {
       task: () => M.createAgentTask({}, { input: { appRef: app.id, title: 'T3774' } }, ctx(admin.id)),
       appMemory: () => M.createAppMemory({}, { appRef: app.id, name: 'am3774' }, ctx(admin.id)),
       session: () => M.startSession({}, { input: { id: generateId(), tool: 'vitest', appRef: app.id, workerRef: w.id, description: 's' } }, ctx(admin.id)),
+      memoryWrite: () => M.createNode(null, { input: { memoryId: mem.id, loc: `n${generateId().slice(-6).toLowerCase()}`, name: 'n', content: 'c' } }, ctx(admin.id)),
       install: () => M.installAgentIntoApp({}, { appRef: app.id, agentRef: agentId }, ctx(admin.id)),
     };
     await M.uninstallApp({}, { ref: app.id }, ctx(admin.id));
     // Every family refuses.
     for (const [family, attempt] of Object.entries(attempts)) {
       const r = await code(attempt());
-      expect([family, ['APP_UNINSTALLED', 'FORBIDDEN'].includes(String(r.code))]).toEqual([family, true]);
+      expect([family, ['APP_UNINSTALLED', 'FORBIDDEN', 'MEMORY_NOT_FOUND'].includes(String(r.code))]).toEqual([family, true]);
     }
     expect(await db.agentTask.count({ where: { appId: app.id } })).toBe(0);
     expect(await db.session.count({ where: { appId: app.id } })).toBe(0);
@@ -312,10 +316,10 @@ describe('#3774 A1/A4 the gate-named write families: refused while uninstalled, 
     expect(after.id).toBe(before.id);
     expect(await db.appMember.count({ where: { appId: app.id, userId: appOwnerRole.id } })).toBe(1);
     expect((await db.memory.findUniqueOrThrow({ where: { id: mem.id } })).appId).toBe(app.id);
-    if (key) expect((await db.appKey.findUniqueOrThrow({ where: { id: key.id } })).appId).toBe(app.id);
+    expect((await db.appKey.findUniqueOrThrow({ where: { id: key.id } })).appId).toBe(app.id);
     for (const [family, attempt] of Object.entries(attempts)) {
-      if (family === 'session' || family === 'install') {
-        // Session needs a boot prompt and install is now a duplicate in this fixture; the pin is that the UNINSTALL cause is gone.
+      if (family === 'install') {
+        // The Agent is already installed in this fixture (DUPLICATE_APP_AGENT); the pin is that the UNINSTALL cause is gone.
         const r = await attempt().then(() => null, (e: unknown) => (e as GraphQLError).extensions?.code);
         expect(r, family).not.toBe('APP_UNINSTALLED');
         continue;
