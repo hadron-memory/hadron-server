@@ -90,6 +90,7 @@ import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { requirePersonAsThemselves } from '../../../lib/auth/personAsThemselves.js';
 import { forbiddenError } from '../../../lib/refusals.js';
 import { ensureProjectZero } from '../../../lib/agentTasks/projectZero.js';
+import { isId as isEntityId } from '../../../lib/entityRef/shape.js';
 
 /**
  * #3474 (cor:acl:040:07 S7): an App's policy link is exactly `{ allow: string[] }`, or null, or left out. `parsePolicyLink`
@@ -1142,8 +1143,8 @@ export const appMutations = {
           // UPDATE lock. Its OWN grants allow nothing already (the live check reads `apps.deleted_at`) and cascade at the reclaim.
           if (deleted.count > 0) await endHeldGrants(tx, 'app', resolvedId);
         },
-        // #3974: Uninstalled → Deleted while uninstalled (cor:dmo:050:21), by id only — resolveAppRef never reaches an uninstalled row by URN.
-        { lockMode: 'exclusive', allowUninstalledApp: true, afterLock: async (tx) => {
+        // #3974: Uninstalled → Deleted while uninstalled (cor:dmo:050:21), by id only. resolveAppRef never reaches an uninstalled row by URN, but one uninstalled between the resolve and the lock must not be admitted for a URN either (§10 F1).
+        { lockMode: 'exclusive', allowUninstalledApp: isEntityId(ref), afterLock: async (tx) => {
           await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedId} FOR UPDATE`;
         } },
       );

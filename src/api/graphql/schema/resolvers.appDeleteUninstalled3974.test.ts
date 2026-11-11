@@ -95,7 +95,7 @@ describe('#3974 deleteApp on an uninstalled App, by id', () => {
     expect((await row()).uninstalledAt).not.toBeNull();
   });
 
-  it('every other write through an uninstalled App stays refused APP_UNINSTALLED (the liveness check is not weakened)', async () => {
+  it('installAgentIntoApp stays refused APP_UNINSTALLED (one door; the shared anchor check for the others is pinned by createAppMemory2729/2843)', async () => {
     const agentId = (await M.createAgent({}, { orgId: org.id, name: 'Du Agent' }, ctx(admin.id))).id;
     expect((await code(M.installAgentIntoApp({}, { appRef: app.id, agentRef: agentId }, ctx(admin.id)))).code).toBe('APP_UNINSTALLED');
   });
@@ -136,7 +136,56 @@ describe('#3974 deleteApp on an uninstalled App, by id', () => {
       },
     }) as Context['db'];
     await code(M.deleteApp({}, { ref: app.id }, { db: racing, userId: racer.id, roles: ['READER'] }));
+    expect(fired).toBe(true);
     expect((await row()).deletedAt).toBeNull();
+  });
+
+  /** A db whose FIRST app.findUniqueOrThrow (deleteApp's pre-gate read, after the ref resolved) returns truthfully, then runs `interleave`. */
+  function afterAppRead(interleave: () => Promise<unknown>): Context['db'] {
+    let fired = false;
+    return new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === 'app') {
+          return new Proxy(target.app, {
+            get(t, p) {
+              if (p === 'findUniqueOrThrow') {
+                return async (...a: unknown[]) => {
+                  const r = await (t as any).findUniqueOrThrow(...a);
+                  if (!fired) { fired = true; await interleave(); }
+                  return r;
+                };
+              }
+              const v = Reflect.get(t, p); return typeof v === 'function' ? v.bind(t) : v;
+            },
+          });
+        }
+        const v = Reflect.get(target, prop, receiver);
+        return typeof v === 'function' ? v.bind(target) : v;
+      },
+    }) as Context['db'];
+  }
+
+  it('§10 F1: a URN-named installed App uninstalled between the resolve and the lock is NOT deleted (by id only)', async () => {
+    await M.reinstallApp({}, { ref: app.id }, ctx(admin.id));
+    const racing = afterAppRead(() => db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } }));
+    await code(M.deleteApp({}, { ref: app.urn }, { db: racing, userId: admin.id, roles: ['READER'] }));
+    const r = await row();
+    expect(r.deletedAt).toBeNull();
+    expect(r.uninstalledAt).not.toBeNull();
+  });
+
+  it('control: the same interleave by id deletes it (the uninstalled leg is admitted by id)', async () => {
+    await M.reinstallApp({}, { ref: app.id }, ctx(admin.id));
+    const racing = afterAppRead(() => db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } }));
+    expect(await M.deleteApp({}, { ref: app.id }, { db: racing, userId: admin.id, roles: ['READER'] })).toBe(true);
+    expect((await row()).deletedAt).not.toBeNull();
+  });
+
+  it('§10 F2: a competing delete committed after the first request loaded the App is refused, and its stamp is kept (the deleted leg)', async () => {
+    const stamp = new Date('2026-11-01T00:00:00Z');
+    const racing = afterAppRead(() => db.app.update({ where: { id: app.id }, data: { deletedAt: stamp } }));
+    await code(M.deleteApp({}, { ref: app.id }, { db: racing, userId: admin.id, roles: ['READER'] }));
+    expect((await row()).deletedAt).toEqual(stamp);
   });
 
   it('an installed App still deletes as before (control)', async () => {
