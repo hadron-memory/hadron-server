@@ -341,6 +341,19 @@ describe('#3917 — a soft-deleted App is absent, as to the id read (Dorian F1)'
   });
 });
 
+describe('#3917 — a live App/Agent of a deleted organization stays as the id read has it (Dorian D1)', () => {
+  it('a platform admin finds exactly what the id read admits after the org is deleted', async () => {
+    await db.organization.update({ where: { id: org.id }, data: { deletedAt: new Date() } });
+    for (const who of ['padmin', 'orgAdmin']) {
+      const found = idsOf(await search(who, 'gsdefault', { fields: ['name'] }));
+      for (const k of ['org', 'orgApp', 'orgAgent'] as const) {
+        expect(found.has(cfg[k]!.id), `${who} / ${k}`).toBe(await canReadById(who, cfg[k]!.id));
+      }
+    }
+    expect(idsOf(await search('padmin', 'gsdefault', { fields: ['name'] })).has(cfg.orgApp!.id)).toBe(await canReadById('padmin', cfg.orgApp!.id));
+  });
+});
+
 describe('#3917 — a deleted organization and another server', () => {
   it('a platform admin does not find a soft-deleted org\'s configs (the id read refuses them)', async () => {
     await db.organization.update({ where: { id: otherOrg.id }, data: { deletedAt: new Date() } });

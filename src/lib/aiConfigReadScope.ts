@@ -70,11 +70,13 @@ export async function aiConfigReadScope(
 
   const arms: Prisma.AiServiceConfigWhereInput[] = [];
   if (orgFilter) {
-    // A deleted organization is absent to the id read (resolveOrgRef), so its configs are absent here too.
-    const live = { organization: { deletedAt: null } };
-    arms.push({ organizationId: orgFilter, ...live });
-    arms.push({ app: { ownerUserId: null, deletedAt: null, organizationId: orgFilter, ...live } });
-    arms.push({ agent: { ownerUserId: null, deletedAt: null, organizationId: orgFilter, ...live } });
+    // A deleted organization is absent to the id read (resolveOrgRef), so ITS OWN configs are absent here too. An
+    // App's or Agent's config is judged by the App/Agent (live) and the caller's role: the id read still admits a
+    // platform admin for a live App of a deleted org, and a non-platform admin's live-membership filter already
+    // drops a deleted org.
+    arms.push({ organizationId: orgFilter, organization: { deletedAt: null } });
+    arms.push({ app: { ownerUserId: null, deletedAt: null, organizationId: orgFilter } });
+    arms.push({ agent: { ownerUserId: null, deletedAt: null, organizationId: orgFilter } });
   }
   // A HadronServer-owned config: platform ADMIN/OWNER, and never inside an org-confined search.
   if (platform && p.orgIds === null && !confined) arms.push({ hadronServerId: { not: null } });
