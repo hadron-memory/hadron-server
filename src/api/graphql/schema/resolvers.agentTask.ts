@@ -3053,11 +3053,24 @@ export const agentTaskQueries = {
    */
   agentTeamEvents: async (
     _: unknown,
-    args: { appRef: string; since?: unknown; after?: string | null; types?: string[] | null; codePrefix?: string | null; alarmsOnly?: boolean | null; taskId?: string | null; limit?: number | null },
+    args: { appRef: string; since?: unknown; after?: string | null; before?: string | null; newestFirst?: boolean | null; types?: string[] | null; codePrefix?: string | null; alarmsOnly?: boolean | null; taskId?: string | null; limit?: number | null },
     ctx: Context,
   ) => withReadableApp(ctx, args.appRef, async (c, app) => {
     const since = args.since == null ? null : parseStartBy(args.since);
+    // #3933 (cor:agt:050:11 FIT): the newest-end read. `after` continues forward and `before` backward, so each belongs to one
+    // direction; a cursor in the wrong one is refused rather than read as something else.
+    const newestFirst = args.newestFirst === true;
+    if (newestFirst && args.after) throw badInput('after continues the oldest-first read; with newestFirst pass before.');
+    if (!newestFirst && args.before) throw badInput('before continues the newestFirst read; pass newestFirst: true with it.');
     let afterWhere: Prisma.AgentTeamEventWhereInput = {};
+    if (args.before) {
+      // Scoped to this App, like after: another App's event id is just an unknown cursor.
+      const cursor = isId(args.before)
+        ? await c.db.agentTeamEvent.findFirst({ where: { id: args.before, appId: app.id }, select: { id: true, createdAt: true } })
+        : null;
+      if (!cursor) throw badInput('before is not an event of this App. Pass the id of the last (oldest) event you read.');
+      afterWhere = { OR: [{ createdAt: { lt: cursor.createdAt } }, { createdAt: cursor.createdAt, id: { lt: cursor.id } }] };
+    }
     if (args.after) {
       // Scoped to this App: another App's event id is just an unknown cursor.
       const cursor = isId(args.after)
@@ -3083,7 +3096,8 @@ export const agentTaskQueries = {
         ...(args.alarmsOnly ? { severity: 'alarm' } : {}),
         ...(args.taskId ? { taskId: (await resolveTaskRef(c, args.taskId, app.id)) ?? args.taskId } : {}),
       },
-      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      // newestFirst is the exact mirror of the default (createdAt, id) order, so a page boundary inside equal timestamps never repeats or skips.
+      orderBy: newestFirst ? [{ createdAt: 'desc' }, { id: 'desc' }] : [{ createdAt: 'asc' }, { id: 'asc' }],
       take: clampListTake(args.limit),
     });
   }),

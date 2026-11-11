@@ -48,14 +48,15 @@ beforeEach(async () => {
 /** `n` events, one every second, except that every third pair SHARES a timestamp, so (createdAt, id) is the only total order. */
 async function seed(appId: string, n: number, extra: Partial<{ type: string; severity: string | null }> = {}): Promise<Row[]> {
   const rows = Array.from({ length: n }, (_, i) => ({
-    id: `ev${String(i).padStart(4, '0')}${generateId().slice(-6)}`,
+    id: generateId(),
     appId,
     type: extra.type ?? 'task.created',
     severity: extra.severity ?? null,
     createdAt: new Date(T0 + Math.floor(i / 2) * 1000),
   }));
   await db.agentTeamEvent.createMany({ data: rows });
-  return rows.map(({ id, createdAt }) => ({ id, createdAt }));
+  // the default read's order, (createdAt, id): ids are random, so ties sort by id, not by creation index
+  return rows.map(({ id, createdAt }) => ({ id, createdAt })).sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || (a.id < b.id ? -1 : 1));
 }
 
 describe('agentTeamEvents newest-first (#3933)', () => {
@@ -95,7 +96,7 @@ describe('agentTeamEvents newest-first (#3933)', () => {
   it('(b) the same filters apply in both directions', async () => {
     const plain = await seed(app.id, 6);
     const alarms = await db.agentTeamEvent.createManyAndReturn({
-      data: [3, 4].map((i) => ({ id: `al${i}${generateId().slice(-6)}`, appId: app.id, type: 'stall.no-progress', severity: 'alarm', createdAt: new Date(T0 + i * 1000 + 500) })),
+      data: [3, 4].map((i) => ({ id: generateId(), appId: app.id, type: 'stall.no-progress', severity: 'alarm', createdAt: new Date(T0 + i * 1000 + 500) })),
       select: { id: true, createdAt: true },
     });
     const fwd = await Q.agentTeamEvents({}, { appRef: app.id, alarmsOnly: true }, user());
