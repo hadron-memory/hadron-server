@@ -140,7 +140,7 @@ describe('#3974 deleteApp on an uninstalled App, by id', () => {
     expect((await row()).deletedAt).toBeNull();
   });
 
-  /** A db whose FIRST app.findUniqueOrThrow (deleteApp's pre-gate read, after the ref resolved) returns truthfully, then runs `interleave`. */
+  /** A db whose FIRST app.findUnique (deleteApp's pre-gate read via locateForDelete, #3978) returns truthfully, then runs `interleave`. */
   function afterAppRead(interleave: () => Promise<unknown>): Context['db'] {
     let fired = false;
     return new Proxy(db, {
@@ -148,9 +148,9 @@ describe('#3974 deleteApp on an uninstalled App, by id', () => {
         if (prop === 'app') {
           return new Proxy(target.app, {
             get(t, p) {
-              if (p === 'findUniqueOrThrow') {
+              if (p === 'findUnique') {
                 return async (...a: unknown[]) => {
-                  const r = await (t as any).findUniqueOrThrow(...a);
+                  const r = await (t as any).findUnique(...a);
                   if (!fired) { fired = true; await interleave(); }
                   return r;
                 };
