@@ -123,4 +123,55 @@ describe('agentTeamEvents newest-first (#3933)', () => {
     expect(await code(Q.agentTeamEvents({}, { appRef: app.id, before: mine[2]!.id }, user()))).toBe('BAD_USER_INPUT');
     expect(await code(Q.agentTeamEvents({}, { appRef: app.id, newestFirst: true, after: mine[0]!.id }, user()))).toBe('BAD_USER_INPUT');
   });
+
+  it('a foreign before and an unknown before refuse byte-identically (§10 P3)', async () => {
+    await seed(app.id, 2);
+    const theirs = await seed(otherApp.id, 1);
+    const msg = async (before: string) => { try { await Q.agentTeamEvents({}, { appRef: app.id, newestFirst: true, before }, user()); } catch (e) { return (e as GraphQLError).message; } return undefined; };
+    const foreign = await msg(theirs[0]!.id);
+    expect(foreign).toBeDefined();
+    expect(await msg(generateId())).toBe(foreign);
+  });
+
+  it('(c) agentTeamEventsPage tells whether more remain: an exact-full last page and a truncated page differ', async () => {
+    const all = await seed(app.id, 20);
+    const full = await Q.agentTeamEventsPage({}, { appRef: app.id, newestFirst: true }, user());
+    expect(ids(full.events)).toEqual(ids(all).slice().reverse());
+    expect(full.hasMore).toBe(false);
+    expect(full.nextCursor).toBeNull();
+    await seed(app.id, 1); // one more event: the same 20 rows, but now older ones remain
+    const more = await Q.agentTeamEventsPage({}, { appRef: app.id, newestFirst: true }, user());
+    expect(more.events.length).toBe(20);
+    expect(more.hasMore).toBe(true);
+    expect(more.nextCursor).toBe(more.events[19].id);
+  });
+
+  it('(c)(d) agentTeamEventsPage walks every event once by nextCursor in both directions, and matches agentTeamEvents', async () => {
+    const all = await seed(app.id, 23);
+    for (const newestFirst of [false, true]) {
+      const seen: string[] = [];
+      let cursor: string | null = null;
+      for (let i = 0; i < 10; i++) {
+        const page: { events: Row[]; hasMore: boolean; nextCursor: string | null } = await Q.agentTeamEventsPage({}, { appRef: app.id, newestFirst, limit: 5, ...(cursor ? (newestFirst ? { before: cursor } : { after: cursor }) : {}) }, user());
+        seen.push(...ids(page.events));
+        expect(page.hasMore).toBe(page.nextCursor !== null);
+        if (!page.hasMore) break;
+        cursor = page.nextCursor;
+      }
+      expect(seen).toEqual(newestFirst ? ids(all).slice().reverse() : ids(all));
+      const bare = await Q.agentTeamEvents({}, { appRef: app.id, newestFirst, limit: 5 }, user());
+      const first = await Q.agentTeamEventsPage({}, { appRef: app.id, newestFirst, limit: 5 }, user());
+      expect(ids(first.events)).toEqual(ids(bare));
+    }
+  });
+
+  it('(b) agentTeamEventsPage has the same gate, the cap serves a capped page, and the cursor rules hold', async () => {
+    const all = await seed(app.id, 205);
+    expect(await code(Q.agentTeamEventsPage({}, { appRef: app.id }, { db, userId: outsider.id, roles: ['READER'] }))).toBe('APP_NOT_FOUND');
+    expect(await code(Q.agentTeamEventsPage({}, { appRef: otherApp.id }, key()))).toBe('APP_NOT_FOUND');
+    const page = await Q.agentTeamEventsPage({}, { appRef: app.id, limit: 5000 }, key());
+    expect(page.events.length).toBe(200);
+    expect(page.hasMore).toBe(true);
+    expect(await code(Q.agentTeamEventsPage({}, { appRef: app.id, before: all[0]!.id }, user()))).toBe('BAD_USER_INPUT');
+  });
 });

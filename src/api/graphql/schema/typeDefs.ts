@@ -9056,6 +9056,25 @@ export const typeDefs = `#graphql
     ): [AgentTeamEvent!]!
 
     """
+    #3933 (hrn:node:hadronmemory.com:specs:cor:api:120:04) — agentTeamEvents with the page's end told: the same arguments, gate,
+    filters, order and paging, returning hasMore and nextCursor so a reader knows whether older (or newer) events remain without
+    another read. nextCursor is the id of the last event served when more remain, to pass as after (oldest-first) or, with
+    newestFirst, as before; null on the last page.
+    """
+    agentTeamEventsPage(
+      appRef: ID!
+      since: DateTime
+      after: ID
+      before: ID
+      newestFirst: Boolean
+      types: [String!]
+      codePrefix: String
+      alarmsOnly: Boolean
+      taskId: ID
+      limit: Int
+    ): AgentTeamEventsPage!
+
+    """
     #3853 — the usage accounts an App has history for: one entry per label, host and family
     (hrn:node:hadronmemory.com:specs:cor:agt:140:01) with a valid account-usage snapshot in the App's own team-space memory in
     the last 14 days, the same history and horizon accountUsageProjection reads
@@ -16457,6 +16476,15 @@ export const typeDefs = `#graphql
     episodeStart: DateTime
     "#1706 — alarms only: who the alarm wakes and when, nearest owner first (hrn:node:hadronmemory.com:specs:cor:agt:050:19). Null for an ordinary event."
     wakes: [AgentTeamAlarmSchedule!]
+  }
+
+  "#3933: one page of an App's team events and whether more remain (cor:api:120:04)."
+  type AgentTeamEventsPage {
+    events: [AgentTeamEvent!]!
+    "True when events beyond this page match the same read."
+    hasMore: Boolean!
+    "The id of the last event served when hasMore, to pass as after (or with newestFirst as before); null on the last page."
+    nextCursor: ID
   }
 
   enum AgentTeamEventSeverity {
