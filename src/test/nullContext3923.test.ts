@@ -162,6 +162,24 @@ describe('#3923 BLIND P2s: parenthesized types and lexical scope', () => {
     expect(result.status).toBe(1);
   });
 
+  it.each([
+    ['a function type parameter', `type Ctx = Context;\nfunction f<Ctx>() {\n  return ({ userId: null }) as Ctx;\n}`],
+    ['an arrow function type parameter', `type Ctx = Context;\nconst f = <Ctx,>() => ({ userId: null }) as Ctx;`],
+    ['a class type parameter', `type Ctx = Context;\nclass K<Ctx> {\n  m() { return ({ userId: null }) as Ctx; }\n}`],
+    ['a method type parameter', `type Ctx = Context;\nclass K {\n  m<Ctx>() { return ({ userId: null }) as Ctx; }\n}`],
+    ['an object method type parameter', `type Ctx = Context;\nconst o = {\n  m<Ctx>() { return ({ userId: null }) as Ctx; },\n};`],
+  ])('does not flag a cast whose name is %s shadowing an outer alias', (_name, text) => {
+    const result = scan({ 'production.ts': text });
+    expect(result.stderr).toBe('');
+    expect(result.status).toBe(0);
+  });
+
+  it('still flags an outer alias used where no type parameter shadows it', () => {
+    const result = scan({ 'production.ts': `type Ctx = Context;\nfunction f<T>() {\n  return ({ userId: null }) as Ctx;\n}` });
+    expect(result.stderr).toContain('production.ts:3: null userId cast to Context');
+    expect(result.status).toBe(1);
+  });
+
   it('terminates on an alias cycle and flags nothing for it', () => {
     const result = scan({ 'production.ts': `type Z = Context;\ntype A = B;\ntype B = A;\nconst c = ({ userId: null }) as A;` });
     expect(result.stderr).toBe('');
