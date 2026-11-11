@@ -125,25 +125,39 @@ export async function acknowledgeWakes(args: {
         if (!cur || cur.incarnation !== c.incarnation) refuse('WAKE_PROOF_STALE', 'A channel of this wake was recreated since it was issued.');
       }
 
+      const issuedNaive = toNaiveUtc(new Date(p.issuedAt));
       let advanced = false;
       for (const t of p.ticks) {
         const row = await tx.workerDeliveryTick.findUnique({ where: { workerId_tickerId: { workerId: p.workerId, tickerId: t.tickerId } } });
         if (!row || t.k > row.lastAckedTick) advanced = true;
         const ticker = await tx.ticker.findUnique({ where: { id: t.tickerId }, select: { appId: true } });
         if (!ticker || ticker.appId !== p.appId) continue; // a deleted ticker's tick records nothing
+        // #3680 (cor:agt:100:03 rev 12, V78 under ruling 0265): the response to this wake is a check of a channel the
+        // ticker covers made at or after the wake was ISSUED, the issue time taken as no later than the server clock
+        // now. The deliverer acknowledges only after the terminal confirms the submit (about 30s), and a worker that
+        // read the channel inside that gap stamped the previous tick's row; that check answers this wake, so the ack
+        // carries it over instead of erasing it. Coverage matches `respondedTicks` (none named = the team channel, the
+        // only channel a check is stamped on). A check before the issue never counts.
+        const checkedSinceIssue = Prisma.sql`(
+          SELECT max(rs.last_checked_at) FROM channel_read_states rs
+          JOIN tickers ct ON ct.id = ${t.tickerId}
+          WHERE rs.worker_id = ${p.workerId}
+            AND rs.last_checked_at >= LEAST(${issuedNaive}::timestamp, (now() AT TIME ZONE 'UTC'))
+            AND (cardinality(ct.channel_ids) = 0 OR rs.channel_id = ANY (ct.channel_ids)))`;
         await tx.$executeRaw`
           INSERT INTO worker_delivery_ticks
-            (worker_id, ticker_id, last_acked_tick, acked_at, acked_by_user_id, acked_by_worker_id, acked_by_app_key_id)
+            (worker_id, ticker_id, last_acked_tick, acked_at, acked_by_user_id, acked_by_worker_id, acked_by_app_key_id, responded_at)
           VALUES (${p.workerId}, ${t.tickerId}, ${t.k}, ${nowNaive}::timestamp,
-                  ${ackedBy.ackedByUserId}, ${ackedBy.ackedByWorkerId}, ${ackedBy.ackedByAppKeyId})
+                  ${ackedBy.ackedByUserId}, ${ackedBy.ackedByWorkerId}, ${ackedBy.ackedByAppKeyId}, ${checkedSinceIssue})
           ON CONFLICT (worker_id, ticker_id) DO UPDATE SET
             last_acked_tick = GREATEST(worker_delivery_ticks.last_acked_tick, EXCLUDED.last_acked_tick),
             acked_at = CASE WHEN EXCLUDED.last_acked_tick > worker_delivery_ticks.last_acked_tick THEN EXCLUDED.acked_at ELSE worker_delivery_ticks.acked_at END,
             acked_by_user_id = CASE WHEN EXCLUDED.last_acked_tick > worker_delivery_ticks.last_acked_tick THEN EXCLUDED.acked_by_user_id ELSE worker_delivery_ticks.acked_by_user_id END,
             acked_by_worker_id = CASE WHEN EXCLUDED.last_acked_tick > worker_delivery_ticks.last_acked_tick THEN EXCLUDED.acked_by_worker_id ELSE worker_delivery_ticks.acked_by_worker_id END,
             acked_by_app_key_id = CASE WHEN EXCLUDED.last_acked_tick > worker_delivery_ticks.last_acked_tick THEN EXCLUDED.acked_by_app_key_id ELSE worker_delivery_ticks.acked_by_app_key_id END,
-            -- #3509: the response belongs to the latest delivered wake only; a newer delivery starts a new wait (a repeat does not).
-            responded_at = CASE WHEN EXCLUDED.last_acked_tick > worker_delivery_ticks.last_acked_tick THEN NULL ELSE worker_delivery_ticks.responded_at END`;
+            -- #3509: the response belongs to the latest delivered wake only; a newer delivery starts a new wait (a repeat
+            -- does not). #3680: that wait starts at the wake's issue, so a check made since then is its response.
+            responded_at = CASE WHEN EXCLUDED.last_acked_tick > worker_delivery_ticks.last_acked_tick THEN EXCLUDED.responded_at ELSE worker_delivery_ticks.responded_at END`;
       }
       for (const t of p.tasks) {
         const ev = await tx.agentTeamEvent.findUnique({ where: { id: t.eventId }, select: { appId: true } });
@@ -168,7 +182,6 @@ export async function acknowledgeWakes(args: {
       // old writers fall back to acked_at; neither a repeat nor an older proof refreshes the actual floor clock.
       // The receipt advances only for an issue after BOTH clocks. Its timestamp and acker stay paired on clock rollback.
       // The same wake offered again after the floor (a fresh issue) is a new delivery, floored and charged again (Vera, #2072).
-      const issuedNaive = toNaiveUtc(new Date(p.issuedAt));
       const delivered = (await tx.$executeRaw`
         INSERT INTO worker_wake_acks (worker_id, wake_key, acked_at, issued_at, acked_by_user_id, acked_by_worker_id, acked_by_app_key_id)
         VALUES (${p.workerId}, ${proofWakeKey(p)}, ${nowNaive}::timestamp, ${issuedNaive}::timestamp,
