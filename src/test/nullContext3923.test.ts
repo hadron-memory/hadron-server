@@ -167,6 +167,7 @@ describe('#3923 BLIND P2s: parenthesized types and lexical scope', () => {
     ['an arrow function type parameter', `type Ctx = Context;\nconst f = <Ctx,>() => ({ userId: null }) as Ctx;`],
     ['a class type parameter', `type Ctx = Context;\nclass K<Ctx> {\n  m() { return ({ userId: null }) as Ctx; }\n}`],
     ['a method type parameter', `type Ctx = Context;\nclass K {\n  m<Ctx>() { return ({ userId: null }) as Ctx; }\n}`],
+    ['a generic alias whose own parameter is the name', `type Ctx = Context;\ntype Identity<Ctx> = Ctx;\nconst c = ({ userId: null }) as Identity<{ userId: null }>;`],
     ['an object method type parameter', `type Ctx = Context;\nconst o = {\n  m<Ctx>() { return ({ userId: null }) as Ctx; },\n};`],
   ])('does not flag a cast whose name is %s shadowing an outer alias', (_name, text) => {
     const result = scan({ 'production.ts': text });
