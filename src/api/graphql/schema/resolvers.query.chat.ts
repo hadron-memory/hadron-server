@@ -202,6 +202,8 @@ async function toChatRows(ctx: Context, tops: ChatRootRow[]) {
       lastMessageAt: counters.get(node.id)?.lastMessageAt ?? null,
       scope,
       createdBy: node.createdBy ?? null,
+      // #3957: the AI config choice stored with the chat, or null.
+      aiConfigChoice: typeof data.aiConfigChoice === 'string' ? data.aiConfigChoice : null,
     };
   });
 }
