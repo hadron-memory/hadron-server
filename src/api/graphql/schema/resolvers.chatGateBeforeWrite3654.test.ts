@@ -60,7 +60,9 @@ beforeEach(async () => {
 async function setStage(chat: { id: string; data: unknown }, conversationName: string, stageName: string) {
   await db.node.update({ where: { id: chat.id }, data: { data: { ...(chat.data as object), conversationName, stageName } } });
   const row = await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: chat.id } });
-  await db.chatRootEngineState.update({ where: { chatRootNodeId: chat.id }, data: { state: { ...(row.state as object), conversationName, ...(stageName ? { stageName } : {}) } } });
+  // #3557: an empty stage must be CLEARED from the row (the spread would otherwise keep the old stageName, so a "stage-less" fixture was not).
+  const { stageName: _old, ...rest } = row.state as Record<string, unknown>;
+  await db.chatRootEngineState.update({ where: { chatRootNodeId: chat.id }, data: { state: { ...rest, conversationName, ...(stageName ? { stageName } : {}) } } });
 }
 // loc-scope-ok: counts the messages of the one chat under test, by its own prefix
 const messageNodes = (chatId: string) => db.node.count({ where: { loc: { startsWith: `${chatId}:messages:` } } });
@@ -114,9 +116,11 @@ describe('#3654 a refused sendChatMessage turn persists nothing', () => {
     const before = await snapshot(start.chatId);
     await db.node.update({ where: { id: node }, data: { deletedAt: new Date() } });
     // A concurrent turn gives the chat its stage after this turn read the root, before it takes the chat lock.
-    const original = db.memory.findUniqueOrThrow.bind(db.memory);
-    const spy = vi.spyOn(db.memory, 'findUniqueOrThrow').mockImplementationOnce(((args: any) => {
-      return setStage(chat, 'research', 'scope').then(() => original(args));
+    // #3557: injected AFTER the early R1 read of the state row (readTurnNames, on db) and BEFORE the locked read (on the tx), so
+    // the early read sees no stage and only the in-transaction gate can refuse.
+    const original = db.chatRootEngineState.findUnique.bind(db.chatRootEngineState);
+    const spy = vi.spyOn(db.chatRootEngineState, 'findUnique').mockImplementationOnce(((args: any) => {
+      return (original(args) as Promise<unknown>).then(async (row) => { await setStage(chat, 'research', 'scope'); return row; });
     }) as any);
     try {
       expect(await code(M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'racing turn' }, ctx()))).toBe('BOOT_PROMPT_TARGET_DELETED');
