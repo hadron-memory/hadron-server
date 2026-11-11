@@ -104,6 +104,27 @@ describe('#3976 updateApp on an uninstalled App', () => {
     });
   }
 
+  it('refuses before judging the input: an invalid argument on an uninstalled App is APP_UNINSTALLED', async () => {
+    await uninstall();
+    const r = await refusal(M.updateApp({}, { ref: app.id, sessionTimeoutSeconds: 0 }, ctx(admin.id)));
+    expect(r.code).toBe('APP_UNINSTALLED');
+  });
+
+  it('re-judges on the locked row: an uninstall landing after the first read still writes nothing (AI config included)', async () => {
+    const live = await row();
+    await uninstall();
+    // The resolver's first read sees the App as still installed (the race); the locked re-read must refuse.
+    const spy = vi.spyOn(db.app, 'findUniqueOrThrow').mockResolvedValueOnce(live as never);
+    try {
+      const r = await refusal(M.updateApp({}, { ref: app.id, description: 'raced', aiProvider: 'anthropic', aiModel: 'claude-sonnet-5-5', aiApiKey: 'sk-test-key' }, ctx(admin.id)));
+      expect(r.code).toBe('APP_UNINSTALLED');
+    } finally {
+      spy.mockRestore();
+    }
+    expect((await row()).description).toBe('before');
+    expect(await db.aiServiceConfig.count({ where: { appId: app.id } })).toBe(0);
+  });
+
   it('control: an installed App still updates', async () => {
     const out = await M.updateApp({}, { ref: app.id, description: 'after' }, ctx(admin.id));
     expect(out.description).toBe('after');

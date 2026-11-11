@@ -14243,7 +14243,9 @@ export const typeDefs = `#graphql
     """
     Update an App.
 
-    Accepts the entity's ID or URN.
+    Accepts the entity's ID or URN. An uninstalled App is kept read-only
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:21): this refuses it with
+    APP_UNINSTALLED, for every field, after the access gate, writing nothing.
     """
     updateApp(
       ref: ID!
