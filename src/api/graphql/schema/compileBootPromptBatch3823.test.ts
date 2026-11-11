@@ -16,6 +16,7 @@ import { hasBatchGrant } from '../../../lib/grants/bootPromptGrant.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
 import type { Context } from './resolvers.helpers.js';
+import { compileBootPrompt } from './compileBootPrompt.js';
 import { resolvers } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -238,6 +239,20 @@ describe('the batch gate before and inside the transaction (Riana F2/F4, Anne F4
     await new Promise((r) => setTimeout(r, 2300));
     release(); await blocker;
     expect(await checker).toBe(false);
+  });
+
+  it('Andi: the compiled node is replaced between the grant check and the write: the new node was never named, so the compile is refused', async () => {
+    await source(installId, `boot:workers:${workerId}:source`);
+    const c = await compiled(installId, `boot:workers:${workerId}:compiled`);
+    await grant(c.id);
+    const loc = `boot:workers:${workerId}:compiled`;
+    const swap = async (tx: any) => {
+      await tx.node.delete({ where: { id: c.id } });
+      await withCompileWrite(() => tx.node.create({ data: { id: generateId(), memoryId: installId, loc, name: 'Compiled', content: 'swapped', role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE } }));
+    };
+    const code = await codeOf(asWorker(() => compileBootPrompt(ctx(), { kind: 'WORKER', workerId }, { seams: { beforeAssemble: swap } } as never)));
+    expect(code).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');
+    expect((await db.node.findFirst({ where: { memoryId: installId, loc } }))?.content).toBe('old');
   });
 
   it('a wildcard value names no prompt', async () => {
