@@ -160,3 +160,81 @@ describe('#3680 the acknowledgement keeps a response made since the wake was iss
     expect(await responded(t.id)).toEqual(first);
   });
 });
+
+// Andi's LOCAL P2 on #3946 at f21d0920 (findings:ack-subquery-snapshot-can-erase-queued-check): the ack's response
+// subquery reads its statement's snapshot, so a check still uncommitted when the ack statement starts is invisible to
+// it. On an EXISTING delivery row the two then meet on that row's lock, and whichever order they take it in, the
+// check made since the issue must survive. A third transaction holds the row so both queue deterministically; the
+// queue is observed in pg_stat_activity, not guessed with sleeps.
+describe('#3680 a check racing the acknowledgement on an existing delivery row', () => {
+  /** Hold the delivery row FOR UPDATE until `release` is called. */
+  async function holdRow(tickerId: string) {
+    let held!: () => void;
+    let release!: () => void;
+    const locked = new Promise<void>((r) => { held = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    const done = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT worker_id FROM worker_delivery_ticks WHERE worker_id = ${worker.id} AND ticker_id = ${tickerId} FOR UPDATE`;
+      held();
+      await gate;
+    }, { timeout: 20_000 });
+    await locked;
+    return { release, done };
+  }
+  /** Wait until a statement containing `fragment` is waiting on a lock. */
+  async function queued(fragment: string) {
+    const end = Date.now() + 8000;
+    while (Date.now() < end) {
+      const [{ n }] = await db.$queryRaw<Array<{ n: bigint }>>`
+        SELECT count(*)::bigint AS n FROM pg_stat_activity
+        WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE ${'%' + fragment + '%'}`;
+      if (Number(n) > 0) return;
+      await sleep(20);
+    }
+    throw new Error(`never saw a statement queued: ${fragment}`);
+  }
+
+  it('the check queues on the row BEFORE the ack: the ack must not overwrite it with its stale snapshot', async () => {
+    const t = await ticker();
+    await ack(proof(t.id, 1, Date.now() - 60_000));
+    const issued = Date.now() - 1000;
+    const hold = await holdRow(t.id);
+    let check: Promise<boolean> | undefined;
+    let delivery: ReturnType<typeof ack> | undefined;
+    try {
+      check = stampChannelCheck(db, worker.id, team.id);
+      await queued('WITH stamped AS'); // its read-state write is done but uncommitted
+      delivery = ack(proof(t.id, 2, issued));
+      await queued('INSERT INTO worker_delivery_ticks');
+    } finally {
+      hold.release();
+    }
+    await hold.done;
+    expect(await check).toBe(true);
+    await delivery;
+    expect(await responded(t.id)).not.toBeNull();
+    expect(await status(new Date(Date.now() + 6 * MIN))).toBe('OK');
+  });
+
+  it('the ack queues on the row BEFORE the check: the check still answers the newer wake', async () => {
+    const t = await ticker();
+    await ack(proof(t.id, 1, Date.now() - 60_000));
+    const issued = Date.now() - 1000;
+    const hold = await holdRow(t.id);
+    let check: Promise<boolean> | undefined;
+    let delivery: ReturnType<typeof ack> | undefined;
+    try {
+      delivery = ack(proof(t.id, 2, issued));
+      await queued('INSERT INTO worker_delivery_ticks');
+      check = stampChannelCheck(db, worker.id, team.id);
+      await queued('WITH stamped AS');
+    } finally {
+      hold.release();
+    }
+    await hold.done;
+    await delivery;
+    expect(await check).toBe(true);
+    expect(await responded(t.id)).not.toBeNull();
+    expect(await status(new Date(Date.now() + 6 * MIN))).toBe('OK');
+  });
+});
