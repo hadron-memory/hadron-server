@@ -16478,7 +16478,7 @@ export const typeDefs = `#graphql
     wakes: [AgentTeamAlarmSchedule!]
   }
 
-  "#3933: one page of an App's team events and whether more remain (cor:api:120:04)."
+  "#3933: one page of an App's team events and whether more remain (hrn:node:hadronmemory.com:specs:cor:api:120:04)."
   type AgentTeamEventsPage {
     events: [AgentTeamEvent!]!
     "True when events beyond this page match the same read."
