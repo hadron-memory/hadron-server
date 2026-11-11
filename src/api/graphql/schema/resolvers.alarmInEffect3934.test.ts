@@ -230,6 +230,34 @@ describe('#3934 — escalationEndedAt and alarmsInEffect on a task alarm', () =>
     await expect(db.alarmEscalationEnd.update({ where: { eventId: alarm.id }, data: { endedAt: at('12:00') } })).rejects.toThrow();
   });
 
+  it('the old assignee acted at 11:10 and the task was reassigned at 11:20: the recorded end is the activity, 11:10', async () => {
+    const t = await task({ ownerWorkerId: ada.id, assigneeWorkerId: anne.id, assignedAt: at('09:30'), status: 'started', startedAt: at('10:00') });
+    const session = await db.session.create({ data: { id: generateId(), appId: app.id, workerId: anne.id, agentId, startedAt: at('10:00'), updatedAt: at('10:00') } });
+    await tick('11:00');
+    const alarm = (await alarms('stall.no-progress')).find((a) => a.taskId === t.id)!;
+    await db.session.update({ where: { id: session.id }, data: { updatedAt: at('11:10') } });
+    const by = { userId: admin.id, workerId: null, agentId: null };
+    await appendTaskEvent(db, { appId: app.id, taskId: t.id, actor: by, event: { type: 'task.reassigned', from: { workerId: anne.id }, to: { workerId: rook.id }, closeSessionWhenDone: false }, createdAt: at('11:20') });
+    await db.agentTask.update({ where: { id: t.id }, data: { assigneeWorkerId: rook.id, assignedAt: at('11:20') } });
+    await record('11:30');
+    expect((await events('', null)).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: iso('11:10') });
+  });
+
+  it('two children end after the alarm began: the recorded end is the FIRST child end, 11:10, not the latest', async () => {
+    const parent = await task({ ownerWorkerId: ada.id, assigneeWorkerId: anne.id, assignedAt: at('09:30'), status: 'started', startedAt: at('10:00') });
+    await db.session.create({ data: { id: generateId(), appId: app.id, workerId: anne.id, agentId, startedAt: at('10:00'), updatedAt: at('10:00') } });
+    await tick('11:00');
+    const alarm = (await alarms('stall.no-progress')).find((a) => a.taskId === parent.id)!;
+    const child = (finishedAt: string) => task({
+      parentTaskId: parent.id, ownerWorkerId: anne.id, assigneeWorkerId: rook.id, assignedAt: at('09:40'),
+      status: 'finished', startedAt: at('09:50'), finishedAt: at(finishedAt), resultOutcome: 'succeeded',
+    });
+    await child('11:10');
+    await child('11:20');
+    await record('11:30');
+    expect((await events('', null)).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: iso('11:10') });
+  });
+
   it('the same answer as the wake schedule: the wake pass closes exactly the alarms the read calls ended', async () => {
     const { t: ended } = await notStartedAlarm();
     const running = await assignedToAnne('10:05'); // its own alarm at 10:20, still running

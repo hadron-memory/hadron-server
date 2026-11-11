@@ -783,7 +783,8 @@ export async function endedAlarmEpisodes(
  * progress note, a reassignment or assignee activity; and so on. A finish or cancellation ends every rule, but a later
  * one does not move an end already reached. A task parked to backlog has no stamp: its last row change. Where the
  * record shows none, the row's last change, then `now`: never null, because the classification already says it ended.
- * Assignee and child activity are inputs only an open task has, so they count only while it is open.
+ * Assignee activity is read from the sessions and usage events of whoever held the task while they held it, and a child's
+ * end from the children's own stamps, so both are the FIRST such instant, not the latest.
  */
 export async function endedAlarmEpisodeInstants(
   db: Db,
@@ -797,7 +798,7 @@ export async function endedAlarmEpisodeInstants(
   if (taskIds.length === 0) return out;
   const tasks = await db.agentTask.findMany({
     where: { id: { in: taskIds }, app: { deletedAt: null, uninstalledAt: null } },
-    select: { id: true, status: true, finishedAt: true, cancelledAt: true, updatedAt: true, startedAt: true, assignedAt: true, releasedAt: true },
+    select: { id: true, status: true, finishedAt: true, cancelledAt: true, updatedAt: true, startedAt: true, assignedAt: true, releasedAt: true, assigneeWorkerId: true },
   });
   const rowOf = new Map(tasks.map((t) => [t.id, t]));
   const openIds = tasks.filter((t) => OPEN_STATUSES.includes(t.status)).map((t) => t.id);
@@ -836,11 +837,62 @@ export async function endedAlarmEpisodeInstants(
       AND e.type IN ('task.progress', 'task.edited', 'task.assigned', 'task.reassigned', 'assignment.matched', 'task.released')
     GROUP BY p.task_id, p.start`;
   const firstOf = new Map(firsts.map((f) => [`${f.taskId}|${new Date(f.start).getTime()}`, f]));
+  // The first child to end after each episode began (a finish or a cancellation), from the children's own stamps.
+  const childEnds = await db.$queryRaw<{ taskId: string; start: Date; at: Date }[]>`
+    SELECT p.task_id AS "taskId", p.start AS "start", min(COALESCE(c.finished_at, c.cancelled_at)) AS "at"
+    FROM unnest(${pairs.map((a) => a.taskId)}::text[], ${pairs.map((a) => toNaiveUtc(a.episodeStart))}::timestamp[]) AS p(task_id, start)
+    JOIN agent_tasks c ON c.parent_task_id = p.task_id AND COALESCE(c.finished_at, c.cancelled_at) > p.start
+    GROUP BY p.task_id, p.start`;
+  const childEndOf = new Map(childEnds.map((c) => [`${c.taskId}|${new Date(c.start).getTime()}`, c.at]));
+  // The first activity of whoever held the task, while they held it: the current assignee from their assignment on, and
+  // each assignee it was reassigned away FROM until that reassignment. Activity is the session's start, its heartbeat
+  // (not an auto-expiry's maintenance write) and an attributed usage event, as the roster counts it, and never after
+  // the session ended. A latest-only value cannot say when it FIRST happened; this can.
+  const reassigned = await db.agentTeamEvent.findMany({
+    where: { taskId: { in: [...new Set(pairs.map((a) => a.taskId))] }, type: 'task.reassigned' },
+    select: { taskId: true, createdAt: true, payload: true },
+    orderBy: { createdAt: 'asc' },
+  });
+  type Window = { k: string; worker: string; lo: Date; hi: string };
+  const FOREVER = '9999-12-31T00:00:00.000';
+  const windows2: Window[] = [];
+  for (const a of pairs) {
+    const k = `${a.taskId}|${a.episodeStart.getTime()}`;
+    const row = rowOf.get(a.taskId);
+    if (row?.assigneeWorkerId) {
+      const lo = row.assignedAt && row.assignedAt.getTime() > a.episodeStart.getTime() ? row.assignedAt : a.episodeStart;
+      windows2.push({ k, worker: row.assigneeWorkerId, lo, hi: FOREVER });
+    }
+    for (const e of reassigned) {
+      const from = (e.payload as { from?: { workerId?: string } } | null)?.from?.workerId;
+      if (e.taskId === a.taskId && from && e.createdAt.getTime() > a.episodeStart.getTime()) {
+        windows2.push({ k, worker: from, lo: a.episodeStart, hi: toNaiveUtc(e.createdAt) });
+      }
+    }
+  }
+  const activity = windows2.length
+    ? await db.$queryRaw<{ k: string; t: Date }[]>`
+        SELECT p.k AS "k", min(x.t) AS "t"
+        FROM unnest(${windows2.map((w) => w.k)}::text[], ${windows2.map((w) => w.worker)}::text[],
+                    ${windows2.map((w) => toNaiveUtc(w.lo))}::timestamp[], ${windows2.map((w) => w.hi)}::timestamp[]) AS p(k, worker_id, lo, hi)
+        JOIN sessions s ON s.worker_id = p.worker_id AND s.deleted_at IS NULL
+        CROSS JOIN LATERAL (
+          SELECT s.started_at AS t
+          UNION ALL SELECT s.updated_at WHERE s.auto_expired_at IS NULL
+          UNION ALL SELECT e.created_at FROM usage_events e WHERE e.session_id = s.id AND e.counts_as_activity
+        ) x
+        WHERE x.t > p.lo AND x.t <= p.hi AND (s.ended_at IS NULL OR x.t <= s.ended_at)
+        GROUP BY p.k`
+    : [];
+  const activityOf = new Map(activity.map((r) => [r.k, r.t]));
   for (const a of endedSubject) {
     const row = rowOf.get(a.taskId) as NonNullable<ReturnType<typeof rowOf.get>>;
     const key = alarmEpisodeKey(a.taskId, a.type, a.episodeStart);
     const i = inputsOf.get(a.taskId);
-    const f = firstOf.get(`${a.taskId}|${a.episodeStart.getTime()}`);
+    const pairKey = `${a.taskId}|${a.episodeStart.getTime()}`;
+    const f = firstOf.get(pairKey);
+    const firstActivity = activityOf.get(pairKey) ?? i?.assigneeActivityAt;
+    const firstChildEnd = childEndOf.get(pairKey) ?? i?.lastChildEndedAt;
     // The first transition that ends THIS rule's episode (cor:agt:050:14–:17), never a move another rule would count:
     // assignment is not what ends a finish-by alarm, and a start is not what ends a no-progress one. A finish or a
     // cancellation ends every rule. Where no event of a kind exists (a row seeded past the resolvers), the row's own
@@ -850,9 +902,9 @@ export async function endedAlarmEpisodeInstants(
     const released = f?.released ?? row.releasedAt;
     const byRule: Record<string, (Date | null | undefined)[]> = {
       'stall.not-started': [row.startedAt, assigned, released, f?.startByEdit, f?.finishByEdit],
-      'stall.no-progress': [assigned, released, f?.note, f?.finishByEdit, i?.assigneeActivityAt, i?.lastChildEndedAt],
+      'stall.no-progress': [assigned, released, f?.note, f?.finishByEdit, firstActivity, firstChildEnd],
       'assignment.unassignable': [assigned, released, f?.finishByEdit],
-      'stall.owner-unreactive': [assigned, i?.assigneeActivityAt],
+      'stall.owner-unreactive': [assigned, firstActivity],
       'stall.finish-by': [f?.finishByEdit],
     };
     const moves = [...(byRule[a.type] ?? []), row.finishedAt, row.cancelledAt]
