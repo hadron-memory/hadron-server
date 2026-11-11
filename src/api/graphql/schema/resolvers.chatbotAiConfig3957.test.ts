@@ -5,6 +5,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAgentOrgGrant, chatNodeByLocOrThrow } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
+import { runAsActor } from '../../../lib/requestActor.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
@@ -86,6 +87,26 @@ describe('App.chatbotAiConfigId and setAppChatbotAiConfig', () => {
   it('an App key, an impersonation and a headless call cannot set it', async () => {
     expect(await code(M.setAppChatbotAiConfig(null, { appRef: app.id, configId: glm.id }, { db, appId: app.id, roles: [] } as Context))).toBe('FORBIDDEN');
     expect(await code(M.setAppChatbotAiConfig(null, { appRef: app.id, configId: glm.id }, { ...ctx(admin), impersonation: { actorId: platform.id } } as unknown as Context))).toBe('FORBIDDEN');
+  });
+
+  // Atilla's P3 on #3960: a run carrying a real userId and an authenticated worker, on the mutation, the field and the list.
+  const run = () => ({ ...ctx(admin), appId: app.id, clientId: 'run:fixture' }) as unknown as Context;
+  const asWorker = <T>(fn: () => Promise<T>) => runAsActor({ workerId: generateId(), agentId: null }, fn);
+  it('a run carrying a real userId and a bound worker cannot set it', async () => {
+    expect(await code(M.setAppChatbotAiConfig(null, { appRef: app.id, configId: glm.id }, run()))).toBe('FORBIDDEN');
+    expect(await code(asWorker(() => M.setAppChatbotAiConfig(null, { appRef: app.id, configId: glm.id }, ctx(admin))))).toBe('FORBIDDEN');
+    expect((await db.app.findUniqueOrThrow({ where: { id: app.id } })).chatbotAiConfigId).toBeNull();
+  });
+
+  it('the field reads null for a run and a worker, and the list answers them as a missing App', async () => {
+    await M.setAppChatbotAiConfig(null, { appRef: app.id, configId: glm.id }, ctx(admin));
+    const field = (c: Context) => (resolvers as any).App.chatbotAiConfigId({ id: app.id }, {}, c);
+    expect(await field(ctx(admin))).toBe(glm.id);
+    expect(await field(run())).toBeNull();
+    expect(await asWorker(() => field(ctx(admin)))).toBeNull();
+    const missing = await Q.chatAiConfigChoices(null, { appRef: generateId() }, ctx(admin)).catch((e: any) => e.name);
+    expect(await Q.chatAiConfigChoices(null, { appRef: app.id }, run()).catch((e: any) => e.name)).toBe(missing);
+    expect(await asWorker(() => Q.chatAiConfigChoices(null, { appRef: app.id }, ctx(admin))).catch((e: any) => e.name)).toBe(missing);
   });
 });
 
@@ -221,6 +242,23 @@ describe('the chat path', () => {
       await M.setAppChatbotAiConfig(null, { appRef: app.id, configId: glm.id }, ctx(admin));
       const { chatId } = await start({ aiConfigChoice: 'default' });
       expect((await resolve(chatId)).configId).toBe(dflt.id);
+    });
+
+    it('with a chat the fallback is the `default` walk whatever name the caller sends (Atilla P2 on #3960)', async () => {
+      await db.aiServiceConfig.create({ data: { appId: app.id, name: 'other-name', provider: 'glm', model: 'o', apiKeyEncrypted: encryptToken(KEY) } });
+      const resolveNamed = (chatId: string) => Q.resolveAIConfig(null, { name: 'other-name', appRef: app.id, chatId }, ctx(admin));
+      // a chat storing `default`
+      const stored = await start({ aiConfigChoice: 'default' });
+      expect((await resolveNamed(stored.chatId)).configId).toBe(dflt.id);
+      // a chat with no usable pin (the pin is disabled)
+      const pinned = await start({ aiConfigChoice: claude.id });
+      await db.aiServiceConfig.update({ where: { id: claude.id }, data: { enabled: false } });
+      expect((await resolveNamed(pinned.chatId)).configId).toBe(dflt.id);
+      // a chat with no choice at all
+      const none = await start({});
+      expect((await resolveNamed(none.chatId)).configId).toBe(dflt.id);
+      // without a chat the caller's name still counts, unchanged
+      expect((await Q.resolveAIConfig(null, { name: 'other-name', appRef: app.id }, ctx(admin))).name).toBe('other-name');
     });
 
     it('a disabled or deleted pin is skipped as if unset, never winning', async () => {

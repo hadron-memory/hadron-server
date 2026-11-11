@@ -491,7 +491,8 @@ export const agentQueries = {
           : null;
         const resolved: { config: typeof pinned & object; ownerType: 'APP' | 'AGENT' | 'ORGANIZATION' | 'HADRON_SERVER' } = pinned
           ? { config: pinned, ownerType: 'APP' }
-          : await resolveAiConfigWithFallback(ctx.db, name ?? null, {
+          // With a chat, the fallback is the well-known `default` walk whatever name the caller sent (cor:dmo:050:10).
+          : await resolveAiConfigWithFallback(ctx.db, chatId ? DEFAULT_AI_CONFIG_NAME : name ?? null, {
               appId: resolvedAppId,
               agentId: resolvedAgentId,
               organizationId: effectiveOrgId,
