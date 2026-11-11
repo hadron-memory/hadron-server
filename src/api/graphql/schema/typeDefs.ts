@@ -9088,9 +9088,11 @@ export const typeDefs = `#graphql
 
     """
     #3933 (hrn:node:hadronmemory.com:specs:cor:api:120:04) — agentTeamEvents with the page's end told: the same arguments, gate,
-    filters, order and paging, returning hasMore and nextCursor so a reader knows whether older (or newer) events remain without
+    filters, order and paging (except the page-size floor below), returning hasMore and nextCursor so a reader knows whether older (or newer) events remain without
     another read. nextCursor is the id of the last event served when more remain, to pass as after (oldest-first) or, with
-    newestFirst, as before; null on the last page.
+    newestFirst, as before; null on the last page, and non-null whenever hasMore is true. The page size has a floor of 1:
+    limit is at least 1 (0 or less reads one event, never an empty page), default 20, cap 200 served and never refused
+    (hrn:node:hadronmemory.com:specs:cor:api:120:04). The legacy agentTeamEvents keeps limit 0 as an empty list.
     """
     agentTeamEventsPage(
       appRef: ID!
