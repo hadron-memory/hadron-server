@@ -101,8 +101,11 @@ describe('#3865 Worker.availability (worker get JSON)', () => {
     expect((r.data as any).worker).toMatchObject({ name: 'Rook', availability: null });
   });
 
-  it('a worker list costs one availability read and one activity aggregate, selecting inEffect', async () => {
-    for (const n of ['Anne', 'Rook', 'Kit']) await record(n, { reason: 'other' });
+  it('a worker list costs one availability read and one activity aggregate, and inEffect follows each worker\'s own activity', async () => {
+    await record('Anne', { reason: 'other' });
+    await record('Kit', { reason: 'stalled', setAt: ago(60) }); // no session: the stall mark stands
+    await record('Rook', { reason: 'stalled', setAt: ago(60) }); // acted since the mark: it no longer stands
+    await db.session.create({ data: { id: generateId(), appId: app.id, workerId: w.Rook.id, agentId, userId: mia.id, family: 'claude', startedAt: ago(10), updatedAt: ago(10) } });
     const spy = vi.spyOn(db, '$queryRaw');
     const find = vi.spyOn((db as any).workerAvailability, 'findMany');
     const result = await server.executeOperation(
@@ -111,10 +114,10 @@ describe('#3865 Worker.availability (worker get JSON)', () => {
     );
     if (result.body.kind !== 'single') throw new Error('unexpected incremental result');
     expect(result.body.singleResult.errors).toBeUndefined();
-    const items = (result.body.singleResult.data as any).workers.items;
-    expect(items.map((i: any) => i.availability?.inEffect)).toEqual([true, true, true]);
+    const byName = Object.fromEntries((result.body.singleResult.data as any).workers.items.map((i: any) => [i.name, i.availability?.inEffect]));
+    expect(byName).toEqual({ Anne: true, Kit: true, Rook: false });
     expect(find).toHaveBeenCalledTimes(1);
-    expect(spy.mock.calls.length).toBeLessThanOrEqual(1);
+    expect(spy).toHaveBeenCalledTimes(1);
     spy.mockRestore();
     find.mockRestore();
   });
