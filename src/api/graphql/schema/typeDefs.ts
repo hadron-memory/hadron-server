@@ -16804,7 +16804,7 @@ export const typeDefs = `#graphql
     WORKING
     "The assignee of a pending task."
     ASSIGNED_NOT_STARTED
-    "Free for work (hrn:node:hadronmemory.com:specs:cor:agt:060:05), including an unbound worker a live host can launch, which the matcher assigns to, and a bound worker whose session is quiet, which the matcher leaves alone until its session is live again (see liveSession)."
+    "Free for work (hrn:node:hadronmemory.com:specs:cor:agt:060:05), including an unbound worker a live host can launch, which the matcher assigns to, and a bound worker whose session is open but quiet, which the matcher also assigns to, reaching it through that session (see liveSession)."
     AVAILABLE
     "Bound, but its session reported no model family, so it can't be matched until one is given (hrn:node:hadronmemory.com:specs:cor:agt:060:04)."
     NO_FAMILY
@@ -16980,7 +16980,7 @@ export const typeDefs = `#graphql
     state: TeamRosterState!
     "Bound: has an open session, live or quiet. Going quiet never unbinds; ending the session does."
     bound: Boolean!
-    "Has a live session (hrn:node:hadronmemory.com:specs:cor:agt:020:11). The matcher assigns to a BOUND worker only while it has one and has reported a family; an unbound worker is matched when a live host can launch it."
+    "Has a live session (hrn:node:hadronmemory.com:specs:cor:agt:020:11). Matching does not need one: a BOUND worker with an open session (quiet or live) that has reported a family is matched, and a host start is issued only for a worker with no open session; an unbound worker is matched when a live host can launch it."
     liveSession: Boolean!
     "The binding's model family: its newest open session's (hrn:node:hadronmemory.com:specs:cor:agt:060:04), kept while the session is quiet. Null when unbound or none was reported."
     family: String
