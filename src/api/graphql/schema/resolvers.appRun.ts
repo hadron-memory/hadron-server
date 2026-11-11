@@ -434,7 +434,9 @@ export async function mintManualRun(
       publish: options.publish,
       organizationId: app.organizationId,
       appId: app.id,
-      agentId: app.agentId ?? null,
+      // #3689: passed through as resolved (no `?? null` default). None reaches mint's one typed refusal,
+      // BOOT_PROMPT_NOT_SET (cor:agt:040:07); a stored run always names its Agent (cor:agt:010:01 rev 45).
+      agentId: app.agentId,
       userId: resolveRunAsSelf(ctx, input.runAsSelf),
       triggerKind: 'MANUAL',
       consentPrincipal: ctx,

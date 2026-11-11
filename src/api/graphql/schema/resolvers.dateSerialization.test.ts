@@ -40,6 +40,7 @@ import { generateId } from '../../../lib/id.js';
 import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
 import { dateTimeScalar } from './dateTimeScalar.js';
+import { testRunAgentId } from '../../../test/runAgent.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -247,7 +248,7 @@ describe('#205 e2e — spec-040 headless types return ISO dates', () => {
       data: {
         id: generateId(),
         organizationId: org.id,
-        appId: app.id,
+        appId: app.id, agentId: await testRunAgentId(db, org.id, app.id),
         triggerKind: 'MANUAL',
         entryNodeUrn: 'dt-org::mem::tasks:go',
         status: 'COMPLETED' as const,

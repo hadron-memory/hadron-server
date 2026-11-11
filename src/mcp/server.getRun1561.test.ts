@@ -12,6 +12,7 @@ import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { createTestableMcpServer } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
+import { testRunAgentId } from '../test/runAgent.js';
 
 let org: { id: string; urn: string };
 let reader: { id: string };
@@ -37,7 +38,7 @@ beforeEach(async () => {
 async function run(extra: Record<string, unknown> = {}) {
   return db.appRun.create({
     data: {
-      id: generateId(), organizationId: org.id, appId: app.id, triggerKind: 'MANUAL',
+      id: generateId(), organizationId: org.id, appId: app.id, agentId: await testRunAgentId(db, org.id, app.id), triggerKind: 'MANUAL',
       entryNodeUrn: `hrn:node:${org.urn}:flows:check`, status: 'COMPLETED', ...extra,
     } as never,
   });

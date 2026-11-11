@@ -19,6 +19,7 @@ import { typeDefs } from '../../../api/graphql/schema/typeDefs.js';
 import { lockAuthorityAnchors } from '../../auth/authorityAnchors.js';
 import type { AppRun } from '../../../generated/prisma/index.js';
 import type { RunToolContext } from './types.js';
+import { testRunAgentId } from '../../../test/runAgent.js';
 
 let orgId: string;
 let appId: string;
@@ -35,7 +36,7 @@ async function mkUser(n: number) {
 async function mintRun(extra: Record<string, unknown> = {}, forApp = appId): Promise<AppRun> {
   return db.appRun.create({
     data: {
-      id: generateId(), organizationId: orgId, appId: forApp, triggerKind: 'MANUAL',
+      id: generateId(), organizationId: orgId, appId: forApp, agentId: await testRunAgentId(db, orgId, forApp), triggerKind: 'MANUAL',
       entryNodeUrn: 'rt-org::mem::flow:entry', status: 'RUNNING', ...extra,
     },
   });

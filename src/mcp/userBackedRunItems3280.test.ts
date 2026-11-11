@@ -16,6 +16,7 @@ import { getAccessibleMemoryIds, requireMemoryWriteAccess } from '../api/graphql
 import { getSubscribedWritableMemoryIds } from '../lib/auth/orgWritableMemory.js';
 import { independentUserItemAccess } from '../lib/auth/independentUserItemAccess.js';
 import type { RunToolContext } from '../lib/runner/tools/types.js';
+import { testRunAgentId } from '../test/runAgent.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../integrations/r2/client.js', () => ({ putObject: vi.fn(), deleteObject: vi.fn() }));
@@ -51,7 +52,7 @@ async function fixture() {
   }
   const team = await db.memory.create({ data: { name: 'team', urn: `${root}:team`, class: 'app', appId: app.id, organizationId: org.id } });
   const schedule = await db.agentSchedule.create({ data: { id: generateId(), organizationId: org.id, appId: app.id, name: 'S', cron: '* * * * *', entryNodeUrn: `hrn:node:${publicMemory.urn}:${LOC}` } });
-  const run = await db.appRun.create({ data: { id: generateId(), organizationId: org.id, appId: app.id, userId: null, triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: schedule.entryNodeUrn } });
+  const run = await db.appRun.create({ data: { id: generateId(), organizationId: org.id, appId: app.id, agentId: await testRunAgentId(db, org.id, app.id), userId: null, triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: schedule.entryNodeUrn } });
   const principal = { db, ...runAuthContext(run) } as Context;
   const tool: RunToolContext = { db, run, principal, log: () => undefined };
   return { org, app, agent, second, admin, user, read, write, publicMemory, granted, team, schedule, run, principal, tool };
@@ -64,7 +65,7 @@ async function rejection(p: Promise<unknown>) {
 }
 beforeEach(async () => {
   await cleanDb(db); f = await fixture();
-  const run = await db.appRun.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, userId: f.user.id, triggerKind: 'MANUAL', entryNodeUrn: f.run.entryNodeUrn } });
+  const run = await db.appRun.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, agentId: await testRunAgentId(db, f.org.id, f.app.id), userId: f.user.id, triggerKind: 'MANUAL', entryNodeUrn: f.run.entryNodeUrn } });
   backed = { db, run, principal: { db, ...runAuthContext(run) } as Context, log: () => undefined };
 });
 
@@ -209,7 +210,7 @@ describe('#3280 independent user ceiling on item-folded run reach', () => {
   it('automation node-read grant is unchanged for an independently admitted user', async () => {
     await db.orgMember.create({ data: { userId: f.user.id, organizationId: f.org.id, role: 'READER' } });
     await M.setAutomationReadGrant({}, { appRef: f.app.id, triggerKind: 'SCHEDULE', triggerId: f.schedule.id, memoryRef: f.granted.id, prefix: 'docs' }, ctx(f.admin.id));
-    const run = await db.appRun.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, userId: f.user.id, triggerKind: 'SCHEDULE', triggerId: f.schedule.id, entryNodeUrn: f.run.entryNodeUrn } });
+    const run = await db.appRun.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, agentId: await testRunAgentId(db, f.org.id, f.app.id), userId: f.user.id, triggerKind: 'SCHEDULE', triggerId: f.schedule.id, entryNodeUrn: f.run.entryNodeUrn } });
     const tool = { ...backed, run, principal: { db, ...runAuthContext(run) } as Context };
     expect(await hadronReadNode.execute(tool, { urn: urn(f.granted) })).toMatchObject({ content: 'secret granted' });
   });

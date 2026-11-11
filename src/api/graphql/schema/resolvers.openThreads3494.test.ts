@@ -10,6 +10,7 @@ import { setEmbeddingClientForTests, resetEmbeddingClientForTests } from '../../
 import { embedNode } from '../../../jobs/embedNodes.js';
 import { runContext } from '../../../jobs/appRunDeps.js';
 import { openThreadCounts } from '../../../lib/comments/summary.js';
+import { testRunAgentId } from '../../../test/runAgent.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const Q = resolvers.Query as any, M = resolvers.Mutation as any;
 let userId: string, otherId: string, memoryId: string;
@@ -119,7 +120,7 @@ it('outsider, App key and a real persisted run never discover or count another t
   const ownMemory=await db.memory.create({data:{class:'app',appId:app.id,organizationId:org.id,name:'own',urn:`own-${generateId()}.test`}});
   const ownNode=await db.node.create({data:{memoryId:ownMemory.id,loc:'own:thread',name:'own'}});
   await M.createComment(null,{targetRef:ownNode.id,body:'own open thread'},ctx(out.id));
-  const run=await db.appRun.create({data:{id:generateId(),organizationId:org.id,appId:app.id,triggerKind:'SCHEDULE',triggerId:generateId(),entryNodeUrn:'hrn:node:elsewhere.test:missing:entry',status:'RUNNING'}});
+  const run=await db.appRun.create({data:{id:generateId(),organizationId:org.id,appId:app.id, agentId: await testRunAgentId(db, org.id, app.id),triggerKind:'SCHEDULE',triggerId:generateId(),entryNodeUrn:'hrn:node:elsewhere.test:missing:entry',status:'RUNNING'}});
   for(const principal of [ctx(out.id),{db,appId:app.id,appKeyId:appKey.id,roles:[],organizationId:org.id}, {...runContext(db,run),db}]) {
     const own=await Q.findNodes(null,{filter:{memoryIds:[ownMemory.id],hasOpenThreads:true},includeTotal:true},principal);
     expect(own.hits.map((h:any)=>h.node.id)).toEqual([ownNode.id]);expect(own.total).toBe(1);

@@ -21,6 +21,7 @@ import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { resolvers, type Context } from './resolvers.js';
 import { MEMORY_INCLUDE } from './resolvers.helpers.js';
+import { testRunAgentId } from '../../../test/runAgent.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
@@ -262,7 +263,7 @@ describe('#2193 — other Node parents: Node.memory still answers as Query.memor
     const admin = await keyFor('admin');
     const urn = (await post(admin, 'query($r: ID!) { node(ref: $r) { urn } }', { r: node.know })).data.node.urn as string;
     const run = await db.appRun.create({
-      data: { id: generateId(), organizationId: org.id, appId, triggerKind: 'MANUAL', entryNodeUrn: urn, status: 'RUNNING' },
+      data: { id: generateId(), organizationId: org.id, appId, agentId: await testRunAgentId(db, org.id, appId), triggerKind: 'MANUAL', entryNodeUrn: urn, status: 'RUNNING' },
     });
     for (const [who, bearer] of await allBearers()) {
       const r = await post(bearer, 'query($r: ID!) { appRun(ref: $r) { entryNode { id memoryId memory { id } } } }', { r: run.id });
@@ -510,7 +511,7 @@ describe('#2193 — run principal', () => {
     const Q = (resolvers as any).Query;
     for (const who of ['admin', 'member']) {
       const run = await db.appRun.create({
-        data: { id: generateId(), organizationId: org.id, appId, userId: user[who], triggerKind: 'MANUAL', entryNodeUrn: 'hrn:node:x:y:z', status: 'RUNNING' },
+        data: { id: generateId(), organizationId: org.id, appId, agentId: await testRunAgentId(db, org.id, appId), userId: user[who], triggerKind: 'MANUAL', entryNodeUrn: 'hrn:node:x:y:z', status: 'RUNNING' },
       });
       const c: Context = { db, ...runAuthContext(run) };
       for (const [key, memoryId] of [['know', mem.know], ['handoff', mem.work]] as const) {

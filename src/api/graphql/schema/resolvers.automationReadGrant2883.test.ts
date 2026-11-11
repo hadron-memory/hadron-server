@@ -28,6 +28,7 @@ import { judgeAuthoring } from '../../../lib/authoringAttestation.js';
 import { runAuthoring, runReadsNode } from '../../../lib/runner/runAuthoring.js';
 import { isMemoryReadableFresh } from './resolvers.helpers.js';
 import { resolvers, type Context } from './resolvers.js';
+import { testRunAgentId } from '../../../test/runAgent.js';
 
 const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<any>>;
 const Q = resolvers.Query as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<any>>;
@@ -45,8 +46,8 @@ let f: F;
 
 const uctx = (userId: string) => ({ db, userId, roles: ['READER'] }) as unknown as Context;
 const schedule = (appId: string, orgId: string) => db.agentSchedule.create({ data: { id: generateId(), organizationId: orgId, appId, name: 'S', cron: '* * * * *', entryNodeUrn: ENTRY } });
-const run = (kind: 'SCHEDULE' | 'WEBHOOK' | 'MANUAL' | 'SPAWN', triggerId: string | null, parentRunId: string | null = null, userId: string | null = null) =>
-  db.appRun.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, triggerKind: kind, triggerId, parentRunId, userId, entryNodeUrn: ENTRY } });
+const run = async (kind: 'SCHEDULE' | 'WEBHOOK' | 'MANUAL' | 'SPAWN', triggerId: string | null, parentRunId: string | null = null, userId: string | null = null) =>
+  db.appRun.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, agentId: await testRunAgentId(db, f.org.id, f.app.id), triggerKind: kind, triggerId, parentRunId, userId, entryNodeUrn: ENTRY } });
 const node = (memoryId: string, loc: string) => db.node.create({ data: { id: generateId(), memoryId, loc, name: loc, content: `body of ${loc}`, nodeType: 'record' } as never });
 
 /** The run's `hadron_read_node`, exactly as the kernel calls it. */

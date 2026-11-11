@@ -7,6 +7,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { mintUserApiKey } from '../../../middleware/auth.js';
+import { testRunAgentId } from '../../../test/runAgent.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null, writtenNodes: [] }) }));
@@ -43,7 +44,7 @@ beforeAll(async () => {
   appUrn = app.urn;
   absentRunUrn = `hrn:apprun:${appUrn}:${generateId()}`;
   runId = generateId();
-  await db.appRun.create({ data: { id: runId, organizationId: org.id, appId: app.id, triggerKind: 'MANUAL', entryNodeUrn: `hrn:node:${org.urn}:f:e`, status: 'COMPLETED' } });
+  await db.appRun.create({ data: { id: runId, organizationId: org.id, appId: app.id, agentId: await testRunAgentId(db, org.id, app.id), triggerKind: 'MANUAL', entryNodeUrn: `hrn:node:${org.urn}:f:e`, status: 'COMPLETED' } });
   runUrn = `hrn:apprun:${appUrn}:${runId}`;
   const outsider = await db.user.create({ data: { handle: `outsider3138-${suffix}`, roles: ['READER'] } });
   outsiderKey = (await mintUserApiKey(db, { userId: outsider.id, label: '3138 outsider', createdBy: outsider.id, issuedVia: 'test', oauthScopes: ['account'] })).rawKey;

@@ -10,6 +10,7 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { getAccessibleMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
 import { independentUserItemAccess } from '../lib/auth/independentUserItemAccess.js';
 import type { RunToolContext } from '../lib/runner/tools/types.js';
+import { testRunAgentId } from '../test/runAgent.js';
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const mutationResolvers = resolvers.Mutation as any;
 const queryResolvers = resolvers.Query as any;
@@ -41,7 +42,7 @@ async function fixture() {
   }
   const team = await db.memory.create({ data: { name: 'team', urn: `${root}:team`, class: 'app', appId: app.id, organizationId: org.id } });
   const schedule = await db.agentSchedule.create({ data: { id: generateId(), organizationId: org.id, appId: app.id, name: 'S', cron: '* * * * *', entryNodeUrn: `hrn:node:${publicMemory.urn}:${LOC}` } });
-  const run = await db.appRun.create({ data: { id: generateId(), organizationId: org.id, appId: app.id, userId: null, triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: schedule.entryNodeUrn } });
+  const run = await db.appRun.create({ data: { id: generateId(), organizationId: org.id, appId: app.id, agentId: await testRunAgentId(db, org.id, app.id), userId: null, triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: schedule.entryNodeUrn } });
   const principal = { db, ...runAuthContext(run) } as Context;
   const tool: RunToolContext = { db, run, principal, log: () => undefined };
   return { org, app, agent, second, admin, user, read, write, publicMemory, granted, team, schedule, run, principal, tool };
@@ -100,7 +101,7 @@ describe.each([false, true])('#3305 session selected=%s', selected => {
   it.each(['READER', 'CONTRIBUTOR'] as const)('independent org %s keeps its own level and the item ceiling agrees with runs', async role => {
     await db.orgMember.create({ data: { organizationId: fixtureState.org.id, userId: fixtureState.user.id, role } });
     const user = session(selected);
-    const run = await db.appRun.create({ data: { id: generateId(), organizationId: fixtureState.org.id, appId: fixtureState.app.id, userId: fixtureState.user.id, triggerKind: 'MANUAL', entryNodeUrn: fixtureState.run.entryNodeUrn } });
+    const run = await db.appRun.create({ data: { id: generateId(), organizationId: fixtureState.org.id, appId: fixtureState.app.id, agentId: await testRunAgentId(db, fixtureState.org.id, fixtureState.app.id), userId: fixtureState.user.id, triggerKind: 'MANUAL', entryNodeUrn: fixtureState.run.entryNodeUrn } });
     const runPrincipal = runAuthContext(run);
     const sessionItems = await getPrincipalAppMemoryAccess(db, user);
     const runItems = await getPrincipalAppMemoryAccess(db, runPrincipal);
