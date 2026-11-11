@@ -11,7 +11,6 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { resolvers, type Context } from './resolvers.js';
-import { agentTaskMatchingFieldResolvers } from './resolvers.agentTaskMatching.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -85,11 +84,38 @@ describe('#3865 Worker.availability (worker get JSON)', () => {
     await record('Kit', { reason: 'other', until: ago(1), setBy: 'worker', setByWorkerId: w.Kit.id });
     const viaWorker = ((await workerGet('Kit', mia.id)).data as any).worker.availability;
     expect(viaWorker).toMatchObject({ reason: 'OTHER', inEffect: false, setByParty: { kind: 'WORKER', name: 'Kit' } });
+    const roster = await server.executeOperation(
+      { query: `{ teamRoster(appRef: "${app.id}") { workers { worker { name } availability { state reason setAt setBy inEffect setByParty { kind name } } } } }` },
+      { contextValue: ctx(mia.id) },
+    );
+    if (roster.body.kind !== 'single') throw new Error('unexpected incremental result');
+    expect(roster.body.singleResult.errors).toBeUndefined();
+    const row = (roster.body.singleResult.data as any).teamRoster.workers.find((e: any) => e.worker.name === 'Kit');
+    expect(row.availability).toEqual(viaWorker);
   });
 
   it('is null for a signed-in reader who is not an App participant (the profile stays readable, the record does not)', async () => {
     await record('Rook', { reason: 'stalled' });
     const r = await workerGet('Rook', outsider.id);
-    expect(((r.data as any)?.worker?.availability ?? null)).toBeNull();
+    expect(r.errors).toBeUndefined();
+    expect((r.data as any).worker).toMatchObject({ name: 'Rook', availability: null });
+  });
+
+  it('a worker list costs one availability read and one activity aggregate, selecting inEffect', async () => {
+    for (const n of ['Anne', 'Rook', 'Kit']) await record(n, { reason: 'other' });
+    const spy = vi.spyOn(db, '$queryRaw');
+    const find = vi.spyOn((db as any).workerAvailability, 'findMany');
+    const result = await server.executeOperation(
+      { query: `{ workers(appRef: "${app.id}") { items { name availability { state inEffect } } } }` },
+      { contextValue: ctx(mia.id) },
+    );
+    if (result.body.kind !== 'single') throw new Error('unexpected incremental result');
+    expect(result.body.singleResult.errors).toBeUndefined();
+    const items = (result.body.singleResult.data as any).workers.items;
+    expect(items.map((i: any) => i.availability?.inEffect)).toEqual([true, true, true]);
+    expect(find).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls.length).toBeLessThanOrEqual(1);
+    spy.mockRestore();
+    find.mockRestore();
   });
 });

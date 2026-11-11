@@ -89,6 +89,7 @@ import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { runMayReadTeam } from '../../../lib/auth/runTeamRead.js';
 import { managesApp, lockAppManagerMemberships } from '../../../lib/auth/appManagement.js';
 import { withAuthorizedTx, liveTxContext } from './authorizedTx.js';
+import { recordInEffect } from '../../../lib/agentTasks/availability.js';
 import { resolveTaskActor, tickBatch, type TaskApp } from './resolvers.agentTask.js';
 import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { appendWorkerCastEvent, appendWorkerCastingEvent, appendWorkerDeletedEvent, appendWorkerRetiredEvent, eventActor } from '../../../lib/agentTasks/events.js';
@@ -2956,7 +2957,16 @@ async function resolveWorkerUrnField(
 
 const workerAvailabilityOf = tickBatch<string, Record<string, unknown> | null>(async (ctx, ids) => {
   const rows = await ctx.db.workerAvailability.findMany({ where: { workerId: { in: ids } } });
-  return new Map(rows.map((r) => [r.workerId, r as Record<string, unknown>]));
+  // inEffect needs session activity; read it once for the whole batch (the roster does the same) and carry the
+  // answer on the row so WorkerAvailability.inEffect issues no per-worker aggregate.
+  const now = new Date();
+  const activity = await loadWorkersActivity(ctx, rows.map((r) => r.workerId), now);
+  return new Map(
+    rows.map((r) => [
+      r.workerId,
+      { ...r, __inEffect: recordInEffect(r, now, activity.get(r.workerId)?.lastActiveAt ?? null) } as Record<string, unknown>,
+    ]),
+  );
 }, null);
 
 export const workerFieldResolvers = {
