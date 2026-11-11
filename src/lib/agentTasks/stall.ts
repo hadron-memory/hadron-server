@@ -810,36 +810,50 @@ export async function endedAlarmEpisodeInstants(
       running.add(alarmEpisodeKey(c.taskId, STALL_EVENT_TYPE[c.rule], c.episodeStart));
     }
   }
-  // The notes and edits that can end an episode, from the task's own events: the FIRST one after an episode began is
-  // what ended it, and a task's `lastProgressAt` / `finishByEditedAt` are the latest, so they cannot answer this.
-  const floor = new Date(Math.min(...subject.map((a) => a.episodeStart.getTime())));
-  const history = await db.agentTeamEvent.findMany({
-    where: { taskId: { in: taskIds }, createdAt: { gt: floor }, type: { in: ['task.progress', 'task.edited'] } },
-    select: { taskId: true, type: true, createdAt: true, payload: true },
-    orderBy: { createdAt: 'asc' },
-  });
-  const firstAfter = (taskId: string, start: Date, pick: (e: (typeof history)[number]) => boolean): Date | null =>
-    history.find((e) => e.taskId === taskId && e.createdAt.getTime() > start.getTime() && pick(e))?.createdAt ?? null;
-  const edits = (field: string) => (e: (typeof history)[number]) =>
-    e.type === 'task.edited' && Array.isArray((e.payload as { fields?: unknown } | null)?.fields) && ((e.payload as { fields: string[] }).fields).includes(field);
-  for (const a of subject) {
+  // Which of the alarms ended (the classification above), before any history is read.
+  const endedSubject = subject.filter((a) => {
     const row = rowOf.get(a.taskId);
-    if (row === undefined) continue; // unknown: not found among live, installed Apps' tasks
-    const key = alarmEpisodeKey(a.taskId, a.type, a.episodeStart);
-    const terminal = TERMINAL_STATUSES.has(row.status);
+    if (row === undefined) return false; // unknown: not found among live, installed Apps' tasks
     const i = inputsOf.get(a.taskId);
-    if (!terminal && !(i && !running.has(key))) continue; // not ended
+    return TERMINAL_STATUSES.has(row.status) || !!(i && !running.has(alarmEpisodeKey(a.taskId, a.type, a.episodeStart)));
+  });
+  if (endedSubject.length === 0) return out;
+  // The FIRST transition after each ended episode began that could end its rule, from the task's own events, in ONE
+  // statement bounded by the ended alarms (never a scan of the task's history): a task's latest-note, latest-assignment
+  // or latest-edit fields answer a different question. The shapes are the write path's (events.ts): `task.edited`
+  // carries `payload.fields` (the changed field names), assignment is `task.assigned`, `task.reassigned` or
+  // `assignment.matched`, a release is `task.released`, a note is `task.progress`.
+  const pairs = [...new Map(endedSubject.map((a) => [`${a.taskId}|${a.episodeStart.getTime()}`, a])).values()];
+  const firsts = await db.$queryRaw<{ taskId: string; start: Date; note: Date | null; startByEdit: Date | null; finishByEdit: Date | null; assigned: Date | null; released: Date | null }[]>`
+    SELECT p.task_id AS "taskId", p.start AS "start",
+      min(e.created_at) FILTER (WHERE e.type = 'task.progress') AS "note",
+      min(e.created_at) FILTER (WHERE e.type = 'task.edited' AND jsonb_exists(e.payload -> 'fields', 'startBy')) AS "startByEdit",
+      min(e.created_at) FILTER (WHERE e.type = 'task.edited' AND jsonb_exists(e.payload -> 'fields', 'finishBy')) AS "finishByEdit",
+      min(e.created_at) FILTER (WHERE e.type IN ('task.assigned', 'task.reassigned', 'assignment.matched')) AS "assigned",
+      min(e.created_at) FILTER (WHERE e.type = 'task.released') AS "released"
+    FROM unnest(${pairs.map((a) => a.taskId)}::text[], ${pairs.map((a) => toNaiveUtc(a.episodeStart))}::timestamp[]) AS p(task_id, start)
+    JOIN agent_team_events e ON e.task_id = p.task_id AND e.created_at > p.start
+      AND e.type IN ('task.progress', 'task.edited', 'task.assigned', 'task.reassigned', 'assignment.matched', 'task.released')
+    GROUP BY p.task_id, p.start`;
+  const firstOf = new Map(firsts.map((f) => [`${f.taskId}|${new Date(f.start).getTime()}`, f]));
+  for (const a of endedSubject) {
+    const row = rowOf.get(a.taskId) as NonNullable<ReturnType<typeof rowOf.get>>;
+    const key = alarmEpisodeKey(a.taskId, a.type, a.episodeStart);
+    const i = inputsOf.get(a.taskId);
+    const f = firstOf.get(`${a.taskId}|${a.episodeStart.getTime()}`);
     // The first transition that ends THIS rule's episode (cor:agt:050:14–:17), never a move another rule would count:
     // assignment is not what ends a finish-by alarm, and a start is not what ends a no-progress one. A finish or a
-    // cancellation ends every rule. A task parked to backlog has no stamp of its own: its last row change.
-    const edit = (f: string) => firstAfter(a.taskId, a.episodeStart, edits(f));
-    const note = firstAfter(a.taskId, a.episodeStart, (e) => e.type === 'task.progress');
+    // cancellation ends every rule. Where no event of a kind exists (a row seeded past the resolvers), the row's own
+    // stamp stands in; assignee and child activity have no event to read, so their latest known value bounds the end
+    // from above. A task parked to backlog has no stamp of its own: its last row change.
+    const assigned = f?.assigned ?? row.assignedAt;
+    const released = f?.released ?? row.releasedAt;
     const byRule: Record<string, (Date | null | undefined)[]> = {
-      'stall.not-started': [row.startedAt, row.assignedAt, row.releasedAt, edit('startBy'), edit('finishBy')],
-      'stall.no-progress': [row.assignedAt, row.releasedAt, note, edit('finishBy'), i?.assigneeActivityAt, i?.lastChildEndedAt],
-      'assignment.unassignable': [row.assignedAt, row.releasedAt, edit('finishBy')],
-      'stall.owner-unreactive': [row.assignedAt, i?.assigneeActivityAt],
-      'stall.finish-by': [edit('finishBy')],
+      'stall.not-started': [row.startedAt, assigned, released, f?.startByEdit, f?.finishByEdit],
+      'stall.no-progress': [assigned, released, f?.note, f?.finishByEdit, i?.assigneeActivityAt, i?.lastChildEndedAt],
+      'assignment.unassignable': [assigned, released, f?.finishByEdit],
+      'stall.owner-unreactive': [assigned, i?.assigneeActivityAt],
+      'stall.finish-by': [f?.finishByEdit],
     };
     const moves = [...(byRule[a.type] ?? []), row.finishedAt, row.cancelledAt]
       .filter((d): d is Date => !!d && d.getTime() > a.episodeStart.getTime());

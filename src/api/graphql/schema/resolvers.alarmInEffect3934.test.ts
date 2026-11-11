@@ -17,6 +17,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { taskStallTick } from '../../../jobs/taskStallEvaluator.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
+import { appendTaskEvent } from '../../../lib/agentTasks/events.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 
@@ -139,7 +140,8 @@ describe('#3934 — escalationEndedAt and alarmsInEffect on a task alarm', () =>
     await db.agentTask.update({ where: { id: t.id }, data: { assigneeWorkerId: rook.id, assignedAt: at('10:05') } });
     expect(await events()).toMatchObject([{ id: alarm.id, escalationEndedAt: null }]);
     await db.agentTask.update({ where: { id: t.id }, data: { finishBy: at('18:00') } });
-    await db.agentTeamEvent.create({ data: { appId: app.id, taskId: t.id, type: 'task.edited', payload: { fields: ['finishBy'] }, createdAt: at('10:30') } });
+    // Written by the real event writer, so the payload shape is the production one (`fields`).
+    await appendTaskEvent(db, { appId: app.id, taskId: t.id, actor: { userId: admin.id, workerId: null, agentId: null }, event: { type: 'task.edited', fields: ['finishBy'] }, createdAt: at('10:30') });
     expect(await events()).toMatchObject([{ id: alarm.id, escalationEndedAt: iso('10:30') }]);
   });
 
@@ -163,6 +165,16 @@ describe('#3934 — escalationEndedAt and alarmsInEffect on a task alarm', () =>
     await db.agentTeamEvent.create({ data: { appId: app.id, taskId: other.id, type: 'task.progress', actorWorkerId: rook.id, createdAt: at('11:30') } });
     await db.agentTask.update({ where: { id: t.id }, data: { status: 'finished', finishedAt: at('12:00'), resultOutcome: 'succeeded' } });
     expect((await events()).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: iso('12:00') });
+  });
+
+  it('a not-started alarm ends at the FIRST reassignment, not the latest one the row now shows', async () => {
+    const { t, alarm } = await notStartedAlarm();
+    const party = (w: { id: string }) => ({ workerId: w.id });
+    const by = { userId: admin.id, workerId: null, agentId: null };
+    await appendTaskEvent(db, { appId: app.id, taskId: t.id, actor: by, event: { type: 'task.reassigned', from: party(anne), to: party(rook), closeSessionWhenDone: false }, createdAt: at('10:20') });
+    await appendTaskEvent(db, { appId: app.id, taskId: t.id, actor: by, event: { type: 'task.reassigned', from: party(rook), to: party(anne), closeSessionWhenDone: false }, createdAt: at('10:35') });
+    await db.agentTask.update({ where: { id: t.id }, data: { assigneeWorkerId: anne.id, assignedAt: at('10:35') } });
+    expect((await events()).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: iso('10:20') });
   });
 
   it('the same answer as the wake schedule: the wake pass closes exactly the alarms the read calls ended', async () => {
