@@ -87,6 +87,7 @@ import { taskListDateTime } from '../../../lib/agentTasks/listDateTime.js';
 import { normalizeFamily } from '../../../lib/agentTasks/family.js';
 import { GraphQLError } from 'graphql';
 import { Prisma, type PrismaClient } from '../../../generated/prisma/index.js';
+import { tickBatch } from './tickBatch.js';
 import { type Context, isAppParticipant, clampListTake, withoutRequestCaches, pageArgs, pageEnvelope } from './resolvers.helpers.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AppNotFoundError, WorkerNotFoundError } from '../../../lib/entityRef/errors.js';
@@ -3121,34 +3122,6 @@ async function readTeamEvents(c: Context, app: { id: string }, args: TeamEventsA
 // ── Field resolvers ───────────────────────────────────────────────────────
 
 export type PartyView = { kind: 'WORKER' | 'USER'; id: string; name: string | null; urn: string | null };
-
-/**
- * #3867: one request's field-resolver lookups raised in the current tick, served together. Keyed by the Context OBJECT
- * (a WeakMap, like {@link relationQueues}): a copy made for another caller or transaction never inherits the queue, the
- * queue is removed before its flush starts, and no result is kept, so a later read always reaches the database. A wide
- * `agentTasks` page selects four parties and the open-children test per row; each was one statement per row, which
- * took the whole-App `--team` read to minutes.
- */
-function tickBatch<K, V>(flush: (ctx: Context, keys: K[]) => Promise<Map<K, V>>, missing: V): (ctx: Context, key: K) => Promise<V> {
-  type Request = { key: K; settle: (v: V) => void; fail: (e: unknown) => void };
-  const queues = new WeakMap<Context, Request[]>();
-  return (ctx, key) =>
-    new Promise<V>((settle, fail) => {
-      let queue = queues.get(ctx);
-      if (!queue) {
-        const fresh: Request[] = (queue = []);
-        queues.set(ctx, fresh);
-        queueMicrotask(() => {
-          queues.delete(ctx);
-          flush(ctx, [...new Set(fresh.map((r) => r.key))]).then(
-            (found) => { for (const r of fresh) r.settle(found.has(r.key) ? (found.get(r.key) as V) : missing); },
-            (e) => { for (const r of fresh) r.fail(e); },
-          );
-        });
-      }
-      queue.push({ key, settle, fail });
-    });
-}
 
 const workerPartyOf = tickBatch<string, PartyView | null>(async (ctx, ids) => {
   const rows = await ctx.db.worker.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, slug: true, app: { select: { urn: true } } } });

@@ -42,6 +42,8 @@ import {
 import { portalUrlForUrn } from '../../../lib/portalUrl.js';
 import { emitEntityUrnV2 } from '../../../lib/urnEmit.js';
 import { composeAiConfigUrn, type AiConfigUrnOwner } from '../../../lib/entityRef/aiConfigRef.js';
+import { loadAiConfigOwners, aiConfigOwnerKey, type AiConfigOwnerInfo, type AiConfigOwnerRef, type AiConfigOwnerType } from '../../../lib/aiConfigOwner.js';
+import { tickBatch } from './tickBatch.js';
 import { currentHadronServerId } from '../../../lib/hadronServer.js';
 import { servedEndpointInEffect, type InheritedFrom } from '../../../lib/effectiveSystemMemory.js';
 import { nodeContentValidationState } from '../../../lib/nodeContentValidation.js';
@@ -1105,6 +1107,26 @@ function truncatedChunksBatched(ctx: Context, nodeId: string): Promise<number | 
   return batch.result.then((byId) => byId.get(nodeId));
 }
 
+/**
+ * #3932: `AiServiceConfig.urn` owner lookups raised in the same tick share one query per owner kind
+ * ({@link loadAiConfigOwners}); keyed by the request Context, so nothing is kept past the tick.
+ */
+const aiConfigOwnerOf3932 = tickBatch<string, AiConfigOwnerInfo | null>(async (ctx, keys) => {
+  const refs = keys.map((k) => ({ ownerType: k.slice(0, k.indexOf(':')) as AiConfigOwnerType, ownerId: k.slice(k.indexOf(':') + 1) }));
+  return loadAiConfigOwners(ctx.db, refs);
+}, null);
+const aiConfigOwnerLookup = (ctx: Context, ref: AiConfigOwnerRef) => aiConfigOwnerOf3932(ctx, aiConfigOwnerKey(ref));
+
+const aiConfigWarned = new WeakSet<object>();
+/** A warn that speaks once per request: the first call logs, the rest of that request stay quiet. */
+function aiConfigWarnOnce(ctx: Context): (msg: string) => void {
+  return (msg) => {
+    if (aiConfigWarned.has(ctx)) return;
+    aiConfigWarned.add(ctx);
+    console.warn(`${msg} (further aiconf URN misses in this request are not logged)`);
+  };
+}
+
 export const typeResolvers = {
   ...servedPromptTypeResolvers,
   AiServiceConfig: {
@@ -1120,40 +1142,38 @@ export const typeResolvers = {
       _: unknown,
       ctx: Context,
     ): Promise<string | null> => {
+      // #3932: the owner is loaded per request tick, one query per owner kind; a config that cannot have a URN is
+      // logged once per request (the first one), not once per row.
+      const warn = aiConfigWarnOnce(ctx);
       let owner: AiConfigUrnOwner | null;
+      const info = await aiConfigOwnerLookup(ctx, { ownerType: config.ownerType, ownerId: config.ownerId });
       switch (config.ownerType) {
         case 'HADRON_SERVER':
           // `server` is the server answering (R3): only the CURRENT server's
           // configs have the URN; another hadron_server row's would collide.
-          if ((await currentHadronServerId(ctx.db)) === config.ownerId) {
+          if (info?.current) {
             owner = { kind: 'server' };
           } else {
-            console.warn(`[aiconf-urn] no URN for a config of hadron_server ${config.ownerId}: it is not the current server`);
+            warn(`[aiconf-urn] no URN for a config of hadron_server ${config.ownerId}: it is not the current server`);
             owner = null;
           }
           break;
-        case 'ORGANIZATION': {
-          const row = await ctx.db.organization.findUnique({ where: { id: config.ownerId }, select: { urn: true } });
-          owner = row ? { kind: 'org', urn: row.urn } : null;
+        case 'ORGANIZATION':
+          owner = info?.urn != null ? { kind: 'org', urn: info.urn } : null;
           break;
-        }
-        case 'APP': {
-          const row = await ctx.db.app.findUnique({ where: { id: config.ownerId }, select: { urn: true } });
-          owner = row ? { kind: 'app', urn: row.urn } : null;
+        case 'APP':
+          owner = info?.urn != null ? { kind: 'app', urn: info.urn } : null;
           break;
-        }
-        case 'AGENT': {
-          const row = await ctx.db.agent.findUnique({ where: { id: config.ownerId }, select: { urn: true } });
-          owner = row ? { kind: 'agent', urn: row.urn } : null;
+        case 'AGENT':
+          owner = info?.urn != null ? { kind: 'agent', urn: info.urn } : null;
           break;
-        }
         default:
           // Every emitter projects through toGqlAiServiceConfig, which always
           // carries the owner; a row without it must not read as "no URN" quietly.
-          console.warn('[aiconf-urn] AiServiceConfig parent without a known ownerType; urn is null');
+          warn('[aiconf-urn] AiServiceConfig parent without a known ownerType; urn is null');
           owner = null;
       }
-      return owner ? composeAiConfigUrn(owner, config.name) : null;
+      return owner ? composeAiConfigUrn(owner, config.name, warn) : null;
     },
   },
   Chat: {
