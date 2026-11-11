@@ -102,8 +102,10 @@ beforeEach(async () => {
   };
   // The URN each config carries, as the platform emits it (the AiServiceConfig.urn field).
   for (const k of Object.keys(cfg)) {
-    const row = await Q.aiServiceConfig(null, { ref: cfg[k]!.id }, ctxOf('padmin')).catch(() => null);
-    cfg[k]!.urn = row ? await (resolvers as any).AiServiceConfig.urn(row, {}, ctxOf('padmin')) : null;
+    // Fetched as a caller the gate admits (user-owned shapes are their owner's alone; the platform admin is denied them).
+    const reader = k === 'userApp' ? 'appOwner' : k === 'userAgent' || k === 'retiredUserAgent' ? 'agentOwner' : 'padmin';
+    const row = await Q.aiServiceConfig(null, { ref: cfg[k]!.id }, ctxOf(reader)).catch(() => null);
+    cfg[k]!.urn = row ? await (resolvers as any).AiServiceConfig.urn(row, {}, ctxOf(reader)) : null;
   }
 });
 
@@ -141,6 +143,18 @@ describe('#3917 — the URN leg', () => {
     const urn = cfg.org!.urn!;
     expect(idsOf(await search('orgAdmin', urn.toUpperCase()))).toEqual(new Set([cfg.org!.id]));
     expect(idsOf(await search('orgAdmin', urn.slice('hrn:aiconf:'.length)))).toEqual(new Set([cfg.org!.id]));
+  });
+});
+
+describe('#3917 — personal-owner URNs are real and gated', () => {
+  it('a user-owned App and Agent config carry a URN, found by their owner and nobody else', async () => {
+    for (const [k, owner, other] of [['userApp', 'appOwner', 'agentOwner'], ['userAgent', 'agentOwner', 'appOwner']] as const) {
+      expect(cfg[k]!.urn, k).toMatch(/^hrn:aiconf:/);
+      expect(idsOf(await search(owner, cfg[k]!.urn!, { fields: ['urn'] }))).toEqual(new Set([cfg[k]!.id]));
+      for (const who of [other, 'padmin', 'orgAdmin', 'outsider']) {
+        expect((await search(who, cfg[k]!.urn!, { fields: ['urn'] })).hits, `${who} / ${k}`).toEqual([]);
+      }
+    }
   });
 });
 
@@ -205,6 +219,30 @@ describe('#3917 — an org-confined search narrows, never widens', () => {
   });
 });
 
+describe('#3917 — the URN scan is bounded and says so', () => {
+  it('past 2000 readable configs the URN leg reads the first 2000 and reports the degradation', async () => {
+    const rows = Array.from({ length: 2001 }, (_, i) => ({
+      id: generateId(), name: `gsbulk-${i}`, provider: 'anthropic', model: 'm', organizationId: otherOrg.id,
+    }));
+    await db.aiServiceConfig.createMany({ data: rows });
+    const run = (viewerUserId: string) =>
+      globalSearch(
+        db,
+        { query: 'hrn:aiconf:', entityTypes: ['aiServiceConfig'], fields: ['urn'], limit: 5 },
+        { viewerUserId, isPlatformAdmin: false, accessibleMemoryIds: [], orgIds: [otherOrg.id], viewerOrgIds: [otherOrg.id] },
+      );
+    const big = await run(u.otherAdmin!.id);
+    expect(big.degraded.some((d) => d.includes('2000'))).toBe(true);
+    // Under the bound nothing is reported.
+    const small = await globalSearch(
+      db,
+      { query: 'hrn:aiconf:', entityTypes: ['aiServiceConfig'], fields: ['urn'], limit: 5 },
+      { viewerUserId: u.orgAdmin!.id, isPlatformAdmin: false, accessibleMemoryIds: [], orgIds: [org.id], viewerOrgIds: [org.id] },
+    );
+    expect(small.degraded).toEqual([]);
+  });
+});
+
 describe('#3917 — the filter is in the candidate query', () => {
   it('unreadable matches do not crowd a readable one out of the cap, or count toward total', async () => {
     // Many unreadable configs match the same name; the one readable config must still be found.
@@ -248,5 +286,22 @@ describe('#3917 — the engine holds without the surface\'s narrowing', () => {
     );
     // A platform admin flag under impersonation grants nothing beyond the one org the admin belongs to.
     expect(await engine({ viewerUserId: u.padmin!.id, isPlatformAdmin: true, orgIds: null, impersonationOrgId: org.id })).toEqual(new Set());
+  });
+
+  // Atilla's BLIND P2: orgScopeId must confine org results by itself, not only drop the user-owned arms.
+  it('orgScopeId with orgIds:null confines an org admin of several orgs to the scoped one', async () => {
+    await db.orgMember.create({ data: { id: generateId(), organizationId: otherOrg.id, userId: u.orgAdmin!.id, role: 'ADMIN' } });
+    expect(await engine({ viewerUserId: u.orgAdmin!.id, orgIds: null, orgScopeId: org.id })).toEqual(
+      new Set([cfg.org!.id, cfg.orgApp!.id, cfg.orgAgent!.id]),
+    );
+    expect(await engine({ viewerUserId: u.orgAdmin!.id, orgIds: null, orgScopeId: otherOrg.id })).toEqual(new Set([cfg.other!.id]));
+  });
+  it('orgScopeId with orgIds:null confines a platform admin to that org: no other org, no server-owned config', async () => {
+    expect(await engine({ viewerUserId: u.padmin!.id, isPlatformAdmin: true, orgIds: null, orgScopeId: org.id })).toEqual(
+      new Set([cfg.org!.id, cfg.orgApp!.id, cfg.orgAgent!.id]),
+    );
+  });
+  it('orgScopeId outside the listed orgIds finds nothing', async () => {
+    expect(await engine({ viewerUserId: u.padmin!.id, isPlatformAdmin: true, orgIds: [org.id], orgScopeId: otherOrg.id })).toEqual(new Set());
   });
 });

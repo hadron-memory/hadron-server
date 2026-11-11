@@ -53,13 +53,17 @@ export async function aiConfigReadScope(
   const platform = p.isPlatformAdmin && !impersonated;
   const confined = p.orgScopeId != null || impersonated;
 
+  // The org allow-list the search may reach: the surface's list intersected with the one scoped org.
+  let allowed: string[] | null = p.orgIds;
+  if (p.orgScopeId != null) allowed = allowed === null ? [p.orgScopeId] : allowed.filter((id) => id === p.orgScopeId);
+
   let orgFilter: Prisma.StringFilter | null;
   if (platform) {
-    orgFilter = p.orgIds === null ? { not: null as never } : { in: p.orgIds };
+    orgFilter = allowed === null ? { not: null as never } : { in: allowed };
   } else {
     if (!p.viewerUserId) return null;
     let admin = await adminOrgIdsOf(db, p.viewerUserId);
-    if (p.orgIds !== null) admin = admin.filter((id) => p.orgIds!.includes(id));
+    if (allowed !== null) admin = admin.filter((id) => allowed!.includes(id));
     if (impersonated) admin = admin.filter((id) => id === p.impersonationOrgId);
     orgFilter = admin.length > 0 ? { in: admin } : null;
   }
@@ -71,7 +75,7 @@ export async function aiConfigReadScope(
     arms.push({ agent: { ownerUserId: null, deletedAt: null, organizationId: orgFilter } });
   }
   // A HadronServer-owned config: platform ADMIN/OWNER, and never inside an org-confined search.
-  if (platform && p.orgIds === null) arms.push({ hadronServerId: { not: null } });
+  if (platform && p.orgIds === null && !confined) arms.push({ hadronServerId: { not: null } });
   // A user-owned App or Agent is its owner's alone: no platform bypass, no impersonation, no org confinement.
   if (p.viewerUserId && !confined) {
     arms.push({ app: { ownerUserId: p.viewerUserId } });
