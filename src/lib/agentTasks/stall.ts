@@ -843,7 +843,7 @@ export async function endedAlarmEpisodeInstants(
     };
     const moves = [...(byRule[a.type] ?? []), row.finishedAt, row.cancelledAt]
       .filter((d): d is Date => !!d && d.getTime() > a.episodeStart.getTime());
-    out.set(key, moves.length ? new Date(Math.min(...moves.map((d) => d.getTime()))) : row.updatedAt.getTime() > a.episodeStart.getTime() ? row.updatedAt : now);
+    out.set(key, moves.length ? new Date(Math.min(...moves.map((d) => d.getTime()))) : row.updatedAt && row.updatedAt.getTime() > a.episodeStart.getTime() ? row.updatedAt : now);
   }
   return out;
 }
