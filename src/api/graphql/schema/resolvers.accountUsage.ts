@@ -75,6 +75,8 @@ function parseWhatIf(raw: WhatIfInput | null | undefined, account: string): What
  * read is the structural fix and stays the owner's call (R5).
  */
 export const ACCOUNT_LIST_KEY_TX_TIMEOUT_MS = 30_000;
+/** #3907: the projection's key arm shares the listing's value (one number, one revoker wait). */
+export const ACCOUNT_USAGE_KEY_TX_TIMEOUT_MS = ACCOUNT_LIST_KEY_TX_TIMEOUT_MS;
 
 export const accountUsageQueries = {
   // #3853 (cor:agt:140:05): the accounts the projection would find history for. Same gate as the projection (no allowRun), no
@@ -146,5 +148,5 @@ export const accountUsageQueries = {
         },
       };
       return result;
-    }),
+    }, false, ACCOUNT_USAGE_KEY_TX_TIMEOUT_MS),
 };
