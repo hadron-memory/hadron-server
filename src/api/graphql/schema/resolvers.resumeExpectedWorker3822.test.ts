@@ -14,12 +14,14 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { GraphQLError } from 'graphql';
+import { GraphQLError, buildSchema, defaultFieldResolver, graphql } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { typeDefs } from './typeDefs.js';
+import { OPEN_SESSION_SCAN_CAP } from '../../../lib/sessionActivity.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -250,5 +252,109 @@ describe('#3822 unchanged answers', () => {
     expect((await refusal(resume(ctx(holder), { expectedWorkerId: '  ' }))).extensions.code).toBe('BAD_USER_INPUT');
     expect(await envelope(resume({ db, appId: app.id, roles: [] } as unknown as Context, { expectedWorkerId: '' }))).toBe(none);
     expect(await footprint()).toEqual(before);
+  });
+});
+
+describe('#3901 BLIND fix head (Glen)', () => {
+  /** `count` open sessions of `workerId` that read live now (recently touched), written directly. */
+  async function liveRows(workerId: string, count: number) {
+    const ids = Array.from({ length: count }, () => generateId());
+    await db.session.createMany({ data: ids.map((id) => ({ id, userId: holder, appId: app.id, workerId, type: 'DEVELOPER' as const })) });
+    return ids;
+  }
+
+  it('P2: other workers\' sessions past the scan cap never block resuming the expected worker\'s one live session', async () => {
+    const a = await start(holder, ada);
+    await liveRows(bea, OPEN_SESSION_SCAN_CAP + 1);
+    // Without the narrowing the whole pool is over the cap: today's no-argument answer refuses RESUME_AMBIGUOUS.
+    expect((await refusal(resume(ctx(holder)))).extensions.code).toBe('RESUME_AMBIGUOUS');
+    expect(await resume(ctx(holder), { expectedWorkerId: ada })).toMatchObject({ outcome: 'RESUMED', session: { id: a.id } });
+  });
+
+  it('P2: nothing of A, other workers\' live sessions past the cap: still the mismatch, nothing touched', async () => {
+    await liveRows(bea, OPEN_SESSION_SCAN_CAP + 1);
+    const before = await footprint();
+    const g = await refusal(resume(ctx(holder), { expectedWorkerId: ada }));
+    expect(g.extensions).toMatchObject({ code: 'RESUME_REFUSED', reason: 'WORKER_MISMATCH', foundWorkerId: bea, foundSource: 'LIVE_SESSION' });
+    expect(await footprint()).toEqual(before);
+  });
+
+  it('LOCAL P2 (Gene): an older A claim behind 50 newer B claims still binds A; B\'s claims all stay', async () => {
+    // A rotation: A's session ended with its claim, so only the claim (never the live pool) can bind A.
+    const a = await start(holder, ada);
+    await M.endSession({}, { id: a.id, handoff: 'h', resumeClaim: true }, ctx(holder));
+    const t = Date.now();
+    const sids = Array.from({ length: 50 }, () => generateId());
+    await db.session.createMany({ data: sids.map((id) => ({ id, userId: holder, appId: app.id, workerId: bea, type: 'DEVELOPER' as const, endedAt: new Date() })) });
+    await db.resumeClaim.createMany({
+      data: sids.map((sessionId, i) => ({
+        id: generateId(), appId: app.id, sessionId, workerId: bea, holderUserId: holder,
+        issuedAt: new Date(t + 1000 + i), expiresAt: new Date(t + 60_000),
+      })),
+    });
+    expect(await resume(ctx(holder), { expectedWorkerId: ada })).toMatchObject({ outcome: 'STARTED', session: { workerId: ada } });
+    expect(await db.resumeClaim.count({ where: { workerId: bea, consumedAt: null, revokedAt: null } })).toBe(50);
+  });
+
+  it('P3-1: a pick of B\'s claim while A\'s claim waits says the pick is B\'s, not that nothing of A\'s waits; A\'s claim stays', async () => {
+    const a = await start(holder, ada);
+    await claim(holder, a.id);
+    const b = await beaClaimOnly();
+    const before = await footprint();
+    const g = await refusal(resume(ctx(holder), { expectedWorkerId: ada, session: b.id }));
+    expect(g.extensions).toMatchObject({ code: 'RESUME_REFUSED', reason: 'WORKER_MISMATCH', picked: true, foundWorkerId: bea, foundSource: 'CLAIM' });
+    expect(g.message).toContain('The session you picked is Bea');
+    expect(g.message).not.toContain('Nothing of Ada');
+    expect(await footprint()).toEqual(before);
+    // A's claim still binds A.
+    expect(await resume(ctx(holder), { expectedWorkerId: ada })).toMatchObject({ outcome: 'RESUMED', session: { id: a.id } });
+  });
+
+  it('P3-1: a pick that is nothing of the caller\'s answers NOTHING_TO_RESUME even while B is live (the pick, not the pool, decides)', async () => {
+    const none = await nothingEnvelope();
+    const b = await start(holder, bea);
+    const before = await footprint();
+    expect(await envelope(resume(ctx(holder), { expectedWorkerId: ada, session: generateId() }))).toBe(none);
+    expect(await footprint()).toEqual(before);
+    // Picking B's live session itself is the mismatch.
+    const g = await refusal(resume(ctx(holder), { expectedWorkerId: ada, session: b.id }));
+    expect(g.extensions).toMatchObject({ reason: 'WORKER_MISMATCH', picked: true, foundSource: 'LIVE_SESSION' });
+  });
+
+  it('P3-1: the unpicked mismatch carries picked: false', async () => {
+    await beaClaimOnly();
+    expect((await refusal(resume(ctx(holder), { expectedWorkerId: ada }))).extensions).toMatchObject({ picked: false });
+  });
+
+  it('limit: the expected worker is named only through the worker read gate — a holder who left the App gets the id only', async () => {
+    await beaClaimOnly();
+    await db.appMember.deleteMany({ where: { appId: app.id, userId: holder } });
+    const g = await refusal(resume(ctx(holder), { expectedWorkerId: ada }));
+    expect(g.extensions).toMatchObject({ code: 'RESUME_REFUSED', reason: 'WORKER_MISMATCH', expectedWorkerId: ada, expectedWorkerName: null });
+    expect(g.message).not.toContain('Ada');
+  });
+
+  it('P3-2: through the published schema, resumeSession accepts expectedWorkerId and the refusal carries its extensions', async () => {
+    const a = await start(holder, ada);
+    await claim(holder, a.id);
+    await beaClaimOnly();
+    const run = (expected: string) =>
+      graphql({
+        schema: buildSchema(typeDefs),
+        source: `mutation($e: ID) { resumeSession(input: { expectedWorkerId: $e }) { outcome session { id workerId } candidates { workerName } } }`,
+        variableValues: { e: expected },
+        contextValue: ctx(holder),
+        fieldResolver(parent, args, context, info) {
+          const fn = (resolvers as any)[info.parentType.name]?.[info.fieldName];
+          return typeof fn === 'function' ? fn(parent, args, context, info) : defaultFieldResolver(parent, args, context, info);
+        },
+      });
+    const ok = await run(ada);
+    expect(ok.errors).toBeUndefined();
+    expect(ok.data?.resumeSession).toMatchObject({ outcome: 'RESUMED', session: { id: a.id, workerId: ada }, candidates: [] });
+    // Ada's claim is spent; Bea's waits. A second resume naming Ada refuses through the schema with the typed reason.
+    await M.endSession({}, { id: a.id }, ctx(holder));
+    const refused = await run(ada);
+    expect(refused.errors?.[0].extensions).toMatchObject({ code: 'RESUME_REFUSED', reason: 'WORKER_MISMATCH', foundWorkerId: bea });
   });
 });
