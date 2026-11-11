@@ -29,6 +29,7 @@ import {
   resolveOrgScope,
   isPlatformAdmin,
   toGqlAiServiceConfig,
+  readAiServiceConfigByUrn,
   toGqlAiServiceConfigForPicker,
   requireAiConfigOwnerAdmin,
   requireAiConfigPickerAccess,
@@ -345,6 +346,12 @@ export const agentQueries = {
     // owning org otherwise.
     aiServiceConfig: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
       if (!ctx.userId && !isPlatformAdmin(ctx)) throw unauthenticatedError();
+      // #3857: an `hrn:aiconf:` URN takes the concealing path (V63); a bare id
+      // keeps the posture below.
+      if (/^(?:hrn|urn):/i.test(ref.trim())) {
+        const found = await readAiServiceConfigByUrn(ctx, ref);
+        return found ? toGqlAiServiceConfig(found) : null;
+      }
       const config = await ctx.db.aiServiceConfig.findUnique({ where: { id: ref } });
       if (!config) return null;
       try {

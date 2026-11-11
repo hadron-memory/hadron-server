@@ -41,6 +41,8 @@ import {
 } from '../../../lib/urnEmit.js';
 import { portalUrlForUrn } from '../../../lib/portalUrl.js';
 import { emitEntityUrnV2 } from '../../../lib/urnEmit.js';
+import { composeAiConfigUrn, type AiConfigUrnOwner } from '../../../lib/entityRef/aiConfigRef.js';
+import { currentHadronServerId } from '../../../lib/hadronServer.js';
 import { servedEndpointInEffect, type InheritedFrom } from '../../../lib/effectiveSystemMemory.js';
 import { nodeContentValidationState } from '../../../lib/nodeContentValidation.js';
 // Spec 049 Phase 3b — AppRun.scope: the mint snapshot as the caller may read it.
@@ -1105,6 +1107,55 @@ function truncatedChunksBatched(ctx: Context, nodeId: string): Promise<number | 
 
 export const typeResolvers = {
   ...servedPromptTypeResolvers,
+  AiServiceConfig: {
+    /**
+     * #3857 (cor:urn:010:01, V60-V63): the config's URN, COMPUTED from its
+     * owner's current URN plus its name; null (logged) for a name that cannot be
+     * a URN atom. Identity only, so it sits on the row the caller already read
+     * through the config's own gate; it reads the owner's stored urn column and
+     * returns a string, never the owner object.
+     */
+    urn: async (
+      config: { name: string; ownerType: 'HADRON_SERVER' | 'ORGANIZATION' | 'APP' | 'AGENT'; ownerId: string },
+      _: unknown,
+      ctx: Context,
+    ): Promise<string | null> => {
+      let owner: AiConfigUrnOwner | null;
+      switch (config.ownerType) {
+        case 'HADRON_SERVER':
+          // `server` is the server answering (R3): only the CURRENT server's
+          // configs have the URN; another hadron_server row's would collide.
+          if ((await currentHadronServerId(ctx.db)) === config.ownerId) {
+            owner = { kind: 'server' };
+          } else {
+            console.warn(`[aiconf-urn] no URN for a config of hadron_server ${config.ownerId}: it is not the current server`);
+            owner = null;
+          }
+          break;
+        case 'ORGANIZATION': {
+          const row = await ctx.db.organization.findUnique({ where: { id: config.ownerId }, select: { urn: true } });
+          owner = row ? { kind: 'org', urn: row.urn } : null;
+          break;
+        }
+        case 'APP': {
+          const row = await ctx.db.app.findUnique({ where: { id: config.ownerId }, select: { urn: true } });
+          owner = row ? { kind: 'app', urn: row.urn } : null;
+          break;
+        }
+        case 'AGENT': {
+          const row = await ctx.db.agent.findUnique({ where: { id: config.ownerId }, select: { urn: true } });
+          owner = row ? { kind: 'agent', urn: row.urn } : null;
+          break;
+        }
+        default:
+          // Every emitter projects through toGqlAiServiceConfig, which always
+          // carries the owner; a row without it must not read as "no URN" quietly.
+          console.warn('[aiconf-urn] AiServiceConfig parent without a known ownerType; urn is null');
+          owner = null;
+      }
+      return owner ? composeAiConfigUrn(owner, config.name) : null;
+    },
+  },
   Chat: {
     servedPrompts: servedPromptOwnerFields.chatServedPrompts,
   },
