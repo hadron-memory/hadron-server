@@ -19,6 +19,7 @@ import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { globalSearch } from './index.js';
+import { createTestableMcpServer } from '../../mcp/server.js';
 import type { SearchPrincipal } from './types.js';
 
 const Q = resolvers.Query as any;
@@ -303,5 +304,43 @@ describe('#3917 — the engine holds without the surface\'s narrowing', () => {
   });
   it('orgScopeId outside the listed orgIds finds nothing', async () => {
     expect(await engine({ viewerUserId: u.padmin!.id, isPlatformAdmin: true, orgIds: [org.id], orgScopeId: otherOrg.id })).toEqual(new Set());
+  });
+});
+
+// Rodolfo's §10 findings: the MCP surface must bound an impersonated session like GraphQL; a deleted org's configs
+// are absent to the id read; another server's config has no URN here.
+describe('#3917 — MCP hadron_search equals the id read under impersonation', () => {
+  const mcp = (who: string, q: string) => {
+    const c = ctxOf(who);
+    const auth = { userId: c.userId, roles: c.roles, clientId: `user:${c.userId}`, impersonation: c.impersonation } as never;
+    return createTestableMcpServer(auth).callToolText('hadron_search', { query: q, entityTypes: ['aiServiceConfig'], fields: ['name'] });
+  };
+  it('an impersonated org admin sees its one org\'s configs and never a user-owned one or another org\'s', async () => {
+    const text = await mcp('impOrgAdmin', 'gsdefault');
+    for (const k of ['org', 'orgApp', 'orgAgent']) expect(text, k).toContain(cfg[k]!.urn!);
+    for (const k of ['userApp', 'userAgent', 'other', 'server']) expect(text, k).not.toContain(cfg[k]!.urn!);
+  });
+  it('an impersonated user-owned App owner finds nothing', async () => {
+    const text = await mcp('impAppOwner', 'gsdefault');
+    for (const k of Object.keys(cfg)) expect(text, k).not.toContain(cfg[k]!.urn!);
+  });
+  it('the un-impersonated owner still finds their own App\'s config', async () => {
+    expect(await mcp('appOwner', 'gsdefault')).toContain(cfg.userApp!.urn!);
+  });
+});
+
+describe('#3917 — a deleted organization and another server', () => {
+  it('a platform admin does not find a soft-deleted org\'s configs (the id read refuses them)', async () => {
+    await db.organization.update({ where: { id: otherOrg.id }, data: { deletedAt: new Date() } });
+    expect(await canReadById('padmin', cfg.other!.id)).toBe(false);
+    expect(idsOf(await search('padmin', 'gsdefault', { fields: ['name'] })).has(cfg.other!.id)).toBe(false);
+    expect(idsOf(await search('padmin', 'gsdefault', { fields: ['name'] })).has(cfg.org!.id)).toBe(true);
+  });
+  it('a config of a server that is not the one answering has no URN, so the URN leg never finds it', async () => {
+    await db.hadronServer.create({ data: { id: generateId(), url: 'https://other-server.test', createdAt: new Date(Date.now() + 60_000) } });
+    const other = await db.hadronServer.findFirstOrThrow({ where: { url: 'https://other-server.test' } });
+    await db.aiServiceConfig.create({ data: { id: generateId(), name: 'gsforeign', provider: 'anthropic', model: 'm', hadronServerId: other.id } });
+    expect((await search('padmin', 'hrn:aiconf:server:gsforeign', { fields: ['urn'] })).hits).toEqual([]);
+    expect(idsOf(await search('padmin', 'hrn:aiconf:server:gsdefault', { fields: ['urn'] }))).toContain(cfg.server!.id);
   });
 });
