@@ -3059,14 +3059,19 @@ export const agentTaskQueries = {
    * #3933 (cor:api:120:04, cor:agt:050:11 FIT condition (c)): the same read as agentTeamEvents, the `<field>Page` sibling, so a
    * page tells the reader whether more remain. One row beyond the page is read to know; `nextCursor` is the id of the last event
    * served when more remain (pass it as `after`, or with newestFirst as `before`) and null on the last page.
+   *
+   * #3949 (cor:api:120:04, cor:agt:050:11): the page size has a FLOOR of 1. This envelope carries no `total`, so a zero page
+   * could only say "is there anything", and `limit: 0` used to read the lookahead row yet serve none: events [], hasMore true,
+   * nextCursor null, a continuation nobody could follow. `limit` <= 0 now reads one event (clamped, never refused, like
+   * cor:api:090:04); hasMore true always carries a non-null nextCursor. The legacy agentTeamEvents list keeps `limit: 0` = [].
    */
   agentTeamEventsPage: async (_: unknown, args: TeamEventsArgs, ctx: Context) =>
     withReadableApp(ctx, args.appRef, async (c, app) => {
-      const take = clampListTake(args.limit);
+      const take = Math.max(1, clampListTake(args.limit));
       const rows = await readTeamEvents(c, app, args, take + 1);
       const events = rows.slice(0, take);
       const hasMore = rows.length > take;
-      return { events, hasMore, nextCursor: hasMore && events.length > 0 ? events[events.length - 1]!.id : null };
+      return { events, hasMore, nextCursor: hasMore ? events[events.length - 1]!.id : null };
     }),
 };
 

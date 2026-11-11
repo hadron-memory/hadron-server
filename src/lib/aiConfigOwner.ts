@@ -15,7 +15,14 @@ export const aiConfigOwnerKey = (r: AiConfigOwnerRef) => `${r.ownerType}:${r.own
 
 type Db = Pick<PrismaClient, 'hadronServer' | 'organization' | 'app' | 'agent'>;
 
-/** Owner info for a set of refs: at most one query per owner kind. A missing owner is absent from the map. */
+/**
+ * Owner info for a set of refs: at most one query per owner kind.
+ *
+ * For the organization, App and Agent kinds, a missing owner is absent from the map. A HADRON_SERVER id is ALWAYS
+ * present, with no existence check: `current` says whether it is the server answering (the oldest live
+ * `hadron_servers` row). An id with no row can never be that server, so it reads `current: false`, exactly like
+ * another live row; both give the config a null `urn` (cor:urn:010:01, the aiconf clause; #3947, Victor's FIT).
+ */
 export async function loadAiConfigOwners(db: Db, refs: AiConfigOwnerRef[]): Promise<Map<string, AiConfigOwnerInfo>> {
   const ids = (t: AiConfigOwnerType) => [...new Set(refs.filter((r) => r.ownerType === t).map((r) => r.ownerId))];
   const out = new Map<string, AiConfigOwnerInfo>();
