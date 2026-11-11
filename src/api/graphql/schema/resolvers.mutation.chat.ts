@@ -453,6 +453,11 @@ export const chatMutations = {
           );
         }
         sharedAppId = selectedApp.id;
+        // Andi's F1 on #3960: a choice the App does not own is refused HERE, before the first chat provisions the
+        // App-class memory, so a refused start leaves nothing behind. (Later branches provision nothing.)
+        if (aiConfigChoice != null) {
+          await normalizeChatAiConfigChoice(ctx.db, selectedApp.id, aiConfigChoice).catch(rethrowAiConfigTyped);
+        }
         // Idempotent: first shared chat under the (App, Agent) pair
         // provisions the app-class memory; subsequent calls reuse it.
         // Keyed per-agent (not per-app) so multi-Agent Apps — the model

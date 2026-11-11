@@ -98,6 +98,21 @@ describe('App.chatbotAiConfigId and setAppChatbotAiConfig', () => {
     expect((await db.app.findUniqueOrThrow({ where: { id: app.id } })).chatbotAiConfigId).toBeNull();
   });
 
+  it('a demotion that commits between the check and the write is seen: the setter refuses (Andi F2 on #3960)', async () => {
+    // `admin` manages this App only through the org ADMIN arm; the App role below is not an owner role.
+    await db.appMember.upsert({ where: { appId_userId: { appId: app.id, userId: admin.id } }, update: { role: 'admin' }, create: { appId: app.id, userId: admin.id, role: 'admin' } });
+    const real = db.$transaction.bind(db) as (...a: unknown[]) => Promise<unknown>;
+    const spy = vi.spyOn(db as unknown as { $transaction: (...a: unknown[]) => Promise<unknown> }, '$transaction').mockImplementationOnce((async (...a: unknown[]) => {
+      await db.orgMember.update({ where: { organizationId_userId: { organizationId: org.id, userId: admin.id } }, data: { role: 'READER' } });
+      return real(...a);
+    }) as never);
+    const raced = await code(M.setAppChatbotAiConfig(null, { appRef: app.id, configId: glm.id }, ctx(admin)));
+    spy.mockRestore();
+    expect(raced).toBe('FORBIDDEN');
+    expect((await db.app.findUniqueOrThrow({ where: { id: app.id } })).chatbotAiConfigId).toBeNull();
+    expect(await code(M.setAppChatbotAiConfig(null, { appRef: app.id, configId: glm.id }, ctx(admin)))).toBe('FORBIDDEN');
+  });
+
   it('the field reads null for a run and a worker, and the list answers them as a missing App', async () => {
     await M.setAppChatbotAiConfig(null, { appRef: app.id, configId: glm.id }, ctx(admin));
     const field = (c: Context) => (resolvers as any).App.chatbotAiConfigId({ id: app.id }, {}, c);
@@ -204,6 +219,17 @@ describe('the chat path', () => {
     expect(new Set(sends.map(a => a.text)).size).toBe(1);
     expect(await messages()).toBe(m0);
     expect(await stored(chatId)).toBe(claude.id);
+  });
+
+  it('a refused cold shared start provisions nothing: no memory, subscription or node (Andi F1 on #3960)', async () => {
+    // loc-scope-ok: whole-table counts, compared before and after one refused call.
+    const counts = async () => [await db.memory.count(), await db.node.count(), await db.memorySubscription.count()];
+    const before = await counts();
+    expect(await code(start({ aiConfigChoice: foreign.id }))).toBe('AiServiceConfigNotFoundError');
+    expect(await counts()).toEqual(before);
+    // the same start without the bad choice does provision, so the count above is a real signal
+    await start({});
+    expect((await counts())[0]).toBeGreaterThan(before[0] as number);
   });
 
   it('a disabled own config is accepted as a choice (skipped at turn time)', async () => {

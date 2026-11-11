@@ -23,6 +23,7 @@ import { chatLocFilter, pickChatNode } from '../../../lib/chatLoc.js';
 import { chatNotFoundError } from '../../../lib/chatNotFound.js';
 import { translateSessionExpired } from '../../../lib/channels.js';
 import { decryptNodeFields, getMemoryEncryptionInfo } from '../../../lib/nodeCrypto.js';
+import { withAuthorizedTx } from './authorizedTx.js';
 import { isPlatformAdmin, rethrowAiConfigTyped, type Context } from './resolvers.helpers.js';
 
 type AppRow = { id: string; organizationId: string | null; ownerUserId: string | null };
@@ -87,12 +88,28 @@ export const chatbotAiConfigMutations = {
         if (await isMember(ctx, app)) throw forbiddenError();
         throw new AppNotFoundError(appRef);
       }
-      if (configId != null) {
-        const own = await ctx.db.aiServiceConfig.findFirst({ where: { id: configId, appId: app.id }, select: { id: true } });
-        if (!own) throw new AiServiceConfigNotFoundError(configId.slice(0, 128));
-      }
+      // Andi's F2 on #3960: the manager check and the write share one transaction holding the authority anchors, and the
+      // gate is judged on the transaction's live context, so a demotion that committed first is seen and refused.
+      const anchors = [
+        ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+        ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+        { kind: 'app' as const, id: app.id },
+      ];
       try {
-        await ctx.db.app.update({ where: { id: app.id }, data: { chatbotAiConfigId: configId ?? null } });
+        await withAuthorizedTx(
+          ctx,
+          anchors,
+          async (txCtx) => {
+            if (!(await mayChoose(txCtx, app))) throw forbiddenError();
+          },
+          async (tx) => {
+            if (configId != null) {
+              const own = await tx.aiServiceConfig.findFirst({ where: { id: configId, appId: app.id }, select: { id: true } });
+              if (!own) throw new AiServiceConfigNotFoundError(configId.slice(0, 128));
+            }
+            await tx.app.update({ where: { id: app.id }, data: { chatbotAiConfigId: configId ?? null } });
+          },
+        );
       } catch (e) {
         // The config was deleted between the check and the write: the same answer as a missing one.
         if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2003') {
