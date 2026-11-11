@@ -9082,6 +9082,12 @@ export const typeDefs = `#graphql
       "#3449: literal prefix, intersects nonempty types; app. includes legacy platform events. An empty prefix matches all types; omitted or empty types adds no type filter."
       codePrefix: String
       alarmsOnly: Boolean
+      """
+      #3934 — only alarms in effect (hrn:node:hadronmemory.com:specs:cor:agt:050:20): unacknowledged and with no recorded
+      escalation end, so escalationEndedAt is null. Implies alarmsOnly. An alarm out of effect is skipped, not hidden: read
+      without this filter to see it. false or omitted adds no filter.
+      """
+      alarmsInEffect: Boolean
       taskId: ID
       limit: Int
     ): [AgentTeamEvent!]!
@@ -9103,6 +9109,8 @@ export const typeDefs = `#graphql
       types: [String!]
       codePrefix: String
       alarmsOnly: Boolean
+      "#3934 — as on agentTeamEvents: only alarms in effect (unacknowledged, escalation not stopped); implies alarmsOnly."
+      alarmsInEffect: Boolean
       taskId: ID
       limit: Int
     ): AgentTeamEventsPage!
@@ -16516,6 +16524,15 @@ export const typeDefs = `#graphql
     chain: JSON
     acknowledgedBy: AgentTaskParty
     acknowledgedAt: DateTime
+    """
+    #3934 — alarms only: when this alarm's escalation ended, the earlier of its acknowledgement and its RECORDED end
+    (hrn:node:hadronmemory.com:specs:cor:agt:050:20); null while the alarm is in effect, and on any ordinary event. The
+    recorded end is written once, by the evaluator pass (every minute) or by the acknowledgement, from the earliest end the
+    available history supports for any kind of alarm: it is at most one pass late and never moves once written. Until it is
+    written the alarm reads as still in effect. Ending changes nothing on the alarm: it is not acknowledged, deleted or
+    hidden, and an owner may still acknowledge it.
+    """
+    escalationEndedAt: DateTime
     "A dark-worker alarm's payload carries its reason (overdue, wake-unacked) and window for every reader; its evidence (lastCheckedAt, oldestWakeAgeSeconds) only for a reader of the worker's internals."
     payload: JSON!
     createdAt: DateTime!
