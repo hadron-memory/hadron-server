@@ -161,7 +161,7 @@ describe('#2774 golden projection (requires the en_US.UTF-8 database collation, 
     if (prerequisiteFailure) throw prerequisiteFailure;
   });
 
-  it.for((['forward', 'reverse'] as const).flatMap(order => ([['abstract', 'pk'], ['abstract', 'urn'], ['abstract', 'prefix'], ['all', 'pk'], ['all', 'urn'], ['all', 'prefix']] as const).map(([scope, form]) => [scope, form, order] as const)))('#2774 bounds endpoint/root payloads with byte-identical %s/%s output (edge insertion %s)', async ([scope, form, order], ctx) => {
+  it.for((['forward', 'reverse'] as const).flatMap(order => ([['abstract', 'pk'], ['abstract', 'urn'], ['abstract', 'prefix'], ['all', 'pk'], ['all', 'urn'], ['all', 'prefix']] as const).map(([scope, form]) => [scope, form, order] as const)))('#2774 bounds endpoint/root payloads with byte-identical %s/%s output (edge insertion %s)', { timeout: 60_000 }, async ([scope, form, order], ctx) => {
     if (prerequisiteFailure) ctx.skip();
     const nodes = await denseFixture(order);
     const result = await measuredRead(scope, nodes.map(n => n.id), form);
@@ -185,7 +185,7 @@ describe('#2774 golden projection (requires the en_US.UTF-8 database collation, 
       expect.soft(result.loads.filter(l => l.phase === 'initial').reduce((n, l) => n + l.bytes, 0)).toBeLessThanOrEqual(1_310_720);
       expect(result.text).toContain('returned 12 node(s)');
     } else expect(result.text).toContain('truncated: response-size cap reached');
-  }, 60_000);
+  });
 });
 
 it.each(['abstract', 'all'] as const)('#2774 preserves PK/URN/prefix and single/batch %s projections', async (contentScope) => {
