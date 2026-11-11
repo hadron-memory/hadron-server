@@ -2359,6 +2359,8 @@ export const nodeMoveOps = {
         let relocated: MoveNodeSubtreeResult['moved'] = [];
         let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
         let warningsWithheld = false;
+        // #3868: the plan's memory URNs, read inside the plan's RepeatableRead snapshot (cor:api:190:03, "true when answered").
+        let planMemoryUrns = new Map<string, string>();
         // #2622: a move rebases whole loc subtrees, so it is a chat-message
         // writer like any other — the #992 conflict surfaces typed here, once,
         // for every move caller (moveNode + the spec-corpus relocation).
@@ -2382,6 +2384,8 @@ export const nodeMoveOps = {
             // Both helpers below still run for their gates and the source
             // revalidation; their re-acquisitions are re-entrant no-ops.
             if (planOnly) {
+              const memories = await tx.memory.findMany({ where: { id: { in: [source.memoryId, destMemoryId] } }, select: { id: true, urn: true } });
+              planMemoryUrns = new Map(memories.map(m => [m.id, m.urn]));
               await assertLocWritable(tx, destMemoryId, [destLoc], 'create under');
             } else {
               await acquireLockSet(tx, [
@@ -2434,8 +2438,7 @@ export const nodeMoveOps = {
           { timeout: 120_000, ...(planOnly ? { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead } : {}) },
         ));
         if (planOnly) {
-          const memories = await ctx.db.memory.findMany({ where: { id: { in: [source.memoryId, destMemoryId] } }, select: { id: true, urn: true } });
-          const urns = new Map(memories.map(m => [m.id, m.urn]));
+          const urns = planMemoryUrns;
           const ordered = relocated.sort((a, b) => a.previousLoc < b.previousLoc ? -1 : a.previousLoc > b.previousLoc ? 1 : 0);
           // #3579: omitted and explicit null both mean the SDL default of 100; the response is clamped to 1..1000.
           const bound = Math.max(1, Math.min(1000, Math.trunc(limit ?? 100)));

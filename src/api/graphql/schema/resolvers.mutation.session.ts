@@ -1780,6 +1780,12 @@ export const sessionMutations = {
       if (expectedWorkerId === '') {
         throw new GraphQLError('expectedWorkerId must not be blank: omit it to resume without naming a worker.', { extensions: { code: 'BAD_USER_INPUT' } });
       }
+      // #3912: a URN or a name is not an id. Refuse it here, before any read, so it never reaches the read gate that
+      // would name it back ("Bea's, not Bea's"). After the NOTHING_TO_RESUME line above, so a caller who may not resume
+      // learns nothing about the value; a valid id takes the path it always did.
+      if (expectedWorkerId !== null && !isId(expectedWorkerId)) {
+        throw new GraphQLError('expectedWorkerId must be a worker id, not a URN or a name: pass the id the worker was bound with.', { extensions: { code: 'BAD_USER_INPUT' } });
+      }
       const now = new Date();
       // #3901 LOCAL (Gene P2): the expected worker's claims are filtered in the query, before the candidate cap.
       const claims = await liveClaimsOf(ctx.db, userId, now, expectedWorkerId ? { workerId: expectedWorkerId } : {});
