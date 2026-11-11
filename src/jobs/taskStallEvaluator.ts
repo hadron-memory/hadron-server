@@ -33,7 +33,7 @@
  */
 
 import type { PrismaClient } from '../generated/prisma/index.js';
-import { evaluateStalls, wakeDueOwners } from '../lib/agentTasks/stall.js';
+import { evaluateStalls, recordEndedEscalations, wakeDueOwners } from '../lib/agentTasks/stall.js';
 import { clearStalledMarks } from '../lib/agentTasks/availability.js';
 import { recordUndeliverableTaskWakes } from '../lib/agentTasks/taskWakes.js';
 import { sweepSessionEndRequests } from '../lib/hostOperations/sessionEnd.js';
@@ -72,6 +72,12 @@ export async function taskStallTick(db: PrismaClient, now = new Date()): Promise
     result.woken = await wakeDueOwners(db, now);
   } catch (err) {
     console.error('[task-stall] escalation failed:', err);
+  }
+  try {
+    // #3934 (V77): after the episode passes above, record the end of every alarm whose escalation has stopped (once).
+    await recordEndedEscalations(db, now);
+  } catch (err) {
+    console.error('[task-stall] recording escalation ends failed:', err);
   }
   try {
     result.cleared = await clearStalledMarks(db, now);

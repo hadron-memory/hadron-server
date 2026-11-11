@@ -3114,35 +3114,16 @@ async function readTeamEvents(c: Context, app: { id: string }, args: TeamEventsA
   };
   // newestFirst is the exact mirror of the default (createdAt, id) order, so a page boundary inside equal timestamps never repeats or skips.
   const orderBy: Prisma.AgentTeamEventOrderByWithRelationInput[] = newestFirst ? [{ createdAt: 'desc' }, { id: 'desc' }] : [{ createdAt: 'asc' }, { id: 'asc' }];
-  const page = (cursor: Prisma.AgentTeamEventWhereInput, n: number, cut: Prisma.AgentTeamEventWhereInput = {}) =>
-    c.db.agentTeamEvent.findMany({ where: { AND: [where, cursor, cut] }, orderBy, take: n });
-  if (!args.alarmsInEffect) return page(afterWhere, take);
-  // #3934: in effect = unacknowledged and the escalation not stopped. The second half is the live answer the wake
-  // schedule uses (`alarmEpisodeEnds`), judged here per batch, so a batch is read, the ended alarms are dropped, and
-  // the read continues from the last row seen, in the read's own direction, until `take` in-effect alarms are found or
-  // the stream ends. The page is then what the same read without the filter would hold, minus the alarms whose
-  // escalation ended.
-  const { alarmEscalationEnds, inEffectCandidateFilter } = await import('../../../lib/agentTasks/stall.js');
-  // #3934 (BLIND P2): alarms certain to be ended are cut in the database, so the scan follows the alarms that could still be in effect.
-  const candidates = await inEffectCandidateFilter(c.db, app.id);
-  const out: Awaited<ReturnType<typeof page>> = [];
-  const size = Math.max(take, ALARM_SCAN_BATCH);
-  let cursor = afterWhere;
-  while (out.length < take) {
-    const batch = await page(cursor, size, candidates);
-    if (batch.length === 0) break;
-    const ended = await alarmEscalationEnds(c.db, batch, new Date());
-    for (const e of batch) {
-      if (ended.has(e.id)) continue;
-      out.push(e);
-      if (out.length === take) return out;
-    }
-    const last = batch[batch.length - 1];
-    const [beyond, tie] = newestFirst ? ['lt', 'lt'] as const : ['gt', 'gt'] as const;
-    cursor = { OR: [{ createdAt: { [beyond]: last.createdAt } }, { createdAt: last.createdAt, id: { [tie]: last.id } }] };
-    if (batch.length < size) break;
-  }
-  return out;
+  // #3934 (V77; gate disposition on hadron-server#3939): in effect = unacknowledged and no recorded end. Both are columns
+  // of rows already written, so this is an ordinary filtered page: the read works nothing out and its cost follows
+  // `limit`, not the App's alarm history. The end is written once, by the evaluator pass or the acknowledgement.
+  const inEffect: Prisma.AgentTeamEventWhereInput = args.alarmsInEffect ? { escalationEnd: { is: null } } : {};
+  return c.db.agentTeamEvent.findMany({
+    where: { AND: [where, afterWhere, inEffect] },
+    // newestFirst is the exact mirror of the default (createdAt, id) order, so a page boundary inside equal timestamps never repeats or skips.
+    orderBy: newestFirst ? [{ createdAt: 'desc' }, { id: 'desc' }] : [{ createdAt: 'asc' }, { id: 'asc' }],
+    take,
+  });
 }
 
 // ── Field resolvers ───────────────────────────────────────────────────────
@@ -3185,14 +3166,19 @@ const userPartyOf = tickBatch<string, { id: string; handle: string | null } | nu
   const rows = await ctx.db.user.findMany({ where: { id: { in: ids } }, select: { id: true, handle: true } });
   return new Map(rows.map((u) => [u.id, u]));
 }, null);
-/** #3934: the fields of an event row {@link alarmEscalationEnds} reads. */
-type AlarmEndRow = { id: string; severity: string | null; taskId: string | null; type: string; episodeStart: Date | null; acknowledgedAt: Date | null };
-/** #3934: the batch size of the `alarmsInEffect` scan, so a page of ended alarms costs a few queries, not one per alarm. */
-const ALARM_SCAN_BATCH = 200;
+/** #3934: the fields of an event row the escalation end is read from. */
+type AlarmEndRow = { id: string; severity: string | null; acknowledgedAt: Date | null };
+/**
+ * #3934 (V77): when this alarm's escalation ended: the earlier of its acknowledgement and its RECORDED end. Nothing is
+ * worked out here (the pass or the acknowledgement wrote the record once), so a read cannot move the value. Batched per
+ * request: one lookup serves a page.
+ */
 const alarmEndOf = tickBatch<AlarmEndRow, Date | null>(async (ctx, rows) => {
-  const { alarmEscalationEnds } = await import('../../../lib/agentTasks/stall.js');
-  const ends = await alarmEscalationEnds(ctx.db, rows, new Date());
-  return new Map(rows.map((r) => [r, ends.get(r.id) ?? null]));
+  const recorded = await ctx.db.alarmEscalationEnd.findMany({ where: { eventId: { in: rows.map((r) => r.id) } }, select: { eventId: true, endedAt: true } });
+  const at = new Map(recorded.map((r) => [r.eventId, r.endedAt]));
+  const earlier = (a: Date | null | undefined, b: Date | null | undefined): Date | null =>
+    a && b ? (a.getTime() <= b.getTime() ? a : b) : a ?? b ?? null;
+  return new Map(rows.map((r) => [r, earlier(r.acknowledgedAt, at.get(r.id))]));
 }, null);
 const hasOpenChild = tickBatch<string, boolean>(async (ctx, ids) => {
   const rows = await ctx.db.agentTask.findMany({ where: { parentTaskId: { in: ids }, status: { in: OPEN } }, select: { parentTaskId: true }, distinct: ['parentTaskId'] });

@@ -869,7 +869,7 @@ export async function endedAlarmEpisodeInstants(
  *   - a dark-worker or coordinator-cadence alarm (task-less): the `ended_at` of its own episode row (#2755, #2763);
  *   - any other alarm (a post-limit alarm, #2014): no episode condition, so never.
  * An alarm absent from the map has not had its episode end. Acknowledgement is not here: it is the reader's to
- * combine ({@link alarmEscalationEnds}), and the wake pass has already excluded acknowledged alarms.
+ * combine, and the wake pass has already excluded acknowledged alarms. Writers: {@link recordEndedEscalations} and {@link freezeEndedEscalation}.
  */
 export async function alarmEpisodeEnds(
   db: Db,
@@ -900,44 +900,54 @@ export async function alarmEpisodeEnds(
 }
 
 /**
- * #3934 (BLIND P2) — a database-side cut that bounds how many alarms an `alarmsInEffect` read has to judge. Alarms
- * the shared answer ({@link alarmEpisodeEnds}) is certain to call ended are left out here, without evaluating them:
- *   - a task alarm whose task is not open (finished, cancelled or parked: a terminal row ends every rule), and
- *   - a dark-worker or coordinator-cadence alarm whose own episode row has an end.
- * What is left (alarms on open tasks, task-less alarms with a running episode) is judged by `alarmEscalationEnds` as
- * before, so the cost follows the alarms that could still be in effect, never the App's whole alarm history. The
- * cut only ever removes alarms the answer also removes. It is skipped for an App that is deleted or uninstalled
- * (the answer treats those tasks as unknown, not ended). Returns a where clause for `agentTeamEvent`.
+ * #3934 (cor:agt:050:20, V77; gate disposition on hadron-server#3939) — record, once, the end of each alarm's escalation.
+ * A read never works an end out: it takes the recorded one (`alarm_escalation_ends`) and the acknowledgement. This pass
+ * is the writer: for every unacknowledged alarm with no record it asks the shared answer ({@link alarmEpisodeEnds}) and
+ * writes the end it gives, the earliest the available history supports, for any kind of alarm. An alarm still in effect
+ * is simply asked again next pass. The row is written once (`ON CONFLICT DO NOTHING`, and a trigger refuses any
+ * UPDATE), so concurrent passes and instances write it at most once and it never moves. Pages through the whole set by
+ * id, in small batches, so no pass holds a long statement.
  */
-export async function inEffectCandidateFilter(db: Db, appId: string): Promise<Prisma.AgentTeamEventWhereInput> {
-  const live = await db.app.count({ where: { id: appId, deletedAt: null, uninstalledAt: null } });
-  if (!live) return {};
-  const open = await db.agentTask.findMany({ where: { appId, status: { in: OPEN_STATUSES } }, select: { id: true } });
-  return {
-    AND: [
-      { OR: [{ taskId: null }, { taskId: { in: open.map((t) => t.id) } }] },
-      { NOT: [{ darkEpisode: { endedAt: { not: null } } }, { cadenceEpisode: { endedAt: { not: null } } }] },
-    ],
-  };
+export async function recordEndedEscalations(db: Db, now: Date): Promise<number> {
+  let recorded = 0;
+  let after = '';
+  for (;;) {
+    const batch = await db.agentTeamEvent.findMany({
+      where: { severity: 'alarm', acknowledgedAt: null, escalationEnd: { is: null }, id: { gt: after } },
+      select: { id: true, taskId: true, type: true, episodeStart: true },
+      orderBy: { id: 'asc' },
+      take: ESCALATION_RECORD_BATCH,
+    });
+    if (batch.length === 0) break;
+    after = batch[batch.length - 1].id;
+    const ends = await alarmEpisodeEnds(db, batch, now);
+    if (ends.size) {
+      const r = await db.alarmEscalationEnd.createMany({
+        data: [...ends].map(([eventId, endedAt]) => ({ eventId, endedAt })),
+        skipDuplicates: true,
+      });
+      recorded += r.count;
+    }
+    if (batch.length < ESCALATION_RECORD_BATCH) break;
+  }
+  return recorded;
 }
+const ESCALATION_RECORD_BATCH = 200;
 
 /**
- * #3934 (V77) — when each of these alarms' escalation ended, by event id: the earlier of its acknowledgement and the
- * end of its episode ({@link alarmEpisodeEnds}). An alarm absent from the map is in effect (cor:agt:050:20). Judged at
- * `now`, like the roster: nothing waits for a wake pass.
+ * #3934 — an acknowledgement freezes an episode that had already ended but was not yet recorded: inside the
+ * acknowledging transaction, before the acknowledgement is written, the end is recorded, so the field then reads the
+ * earlier of the two and the recorded end is the one the pass would have written. An episode still running records
+ * nothing (the acknowledgement is its end).
  */
-export async function alarmEscalationEnds(
+export async function freezeEndedEscalation(
   db: Db,
-  alarms: { id: string; taskId: string | null; type: string; episodeStart: Date | null; acknowledgedAt: Date | null }[],
+  alarm: { id: string; taskId: string | null; type: string; episodeStart: Date | null },
   now: Date,
-): Promise<Map<string, Date>> {
-  const out = await alarmEpisodeEnds(db, alarms, now);
-  for (const a of alarms) {
-    if (!a.acknowledgedAt) continue;
-    const end = out.get(a.id);
-    if (!end || a.acknowledgedAt.getTime() < end.getTime()) out.set(a.id, a.acknowledgedAt);
-  }
-  return out;
+): Promise<void> {
+  const ends = await alarmEpisodeEnds(db, [alarm], now);
+  const endedAt = ends.get(alarm.id);
+  if (endedAt) await db.alarmEscalationEnd.createMany({ data: [{ eventId: alarm.id, endedAt }], skipDuplicates: true });
 }
 
 // ── Escalation ────────────────────────────────────────────────────────────

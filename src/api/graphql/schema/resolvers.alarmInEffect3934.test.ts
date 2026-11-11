@@ -16,6 +16,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { taskStallTick } from '../../../jobs/taskStallEvaluator.js';
+import { recordEndedEscalations } from '../../../lib/agentTasks/stall.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { appendTaskEvent } from '../../../lib/agentTasks/events.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -52,7 +53,11 @@ beforeEach(async () => {
 });
 
 type Ev = { id: string; type: string; acknowledgedAt: string | null; escalationEndedAt: string | null };
-async function events(args = ''): Promise<Ev[]> {
+/** The evaluator pass that records an ended alarm's escalation end (once). */
+const record = (hhmm: string) => recordEndedEscalations(db, at(hhmm));
+/** Reads; unless `recordAt` is null, the pass has run first (at 12:30 by default), as it does every minute in production. */
+async function events(args = '', recordAt: string | null = '12:30'): Promise<Ev[]> {
+  if (recordAt) await record(recordAt);
   const r = await server.executeOperation(
     { query: `{ agentTeamEvents(appRef: "${app.id}", alarmsOnly: true ${args}) { id type acknowledgedAt escalationEndedAt } }` },
     { contextValue: ctx(admin.id) },
@@ -111,11 +116,32 @@ describe('#3934 — escalationEndedAt and alarmsInEffect on a task alarm', () =>
     expect(await events('alarmsInEffect: true')).toEqual([]);
   });
 
-  it('acknowledged after the episode ended: the earlier instant, the end of the episode', async () => {
+  it('acknowledged after the episode ended but before the pass recorded it: the acknowledgement freezes the episode end', async () => {
     const { t, alarm } = await notStartedAlarm();
     await db.agentTask.update({ where: { id: t.id }, data: { status: 'started', startedAt: at('10:20') } });
+    expect(await db.alarmEscalationEnd.count({ where: { eventId: alarm.id } })).toBe(0); // the pass has not run
+    await M.acknowledgeAlarm({}, { eventId: alarm.id }, ctx(admin.id));
+    const rec = await db.alarmEscalationEnd.findUniqueOrThrow({ where: { eventId: alarm.id } });
+    expect(rec.endedAt).toEqual(at('10:20'));
+    const [e] = await events('', null);
+    expect(e).toMatchObject({ id: alarm.id, escalationEndedAt: iso('10:20') });
+    expect(e.acknowledgedAt).not.toBeNull();
+  });
+
+  it('acknowledged while the episode still runs: nothing is recorded; the acknowledgement is the end', async () => {
+    const { alarm } = await notStartedAlarm();
+    await M.acknowledgeAlarm({}, { eventId: alarm.id }, ctx(admin.id));
+    expect(await db.alarmEscalationEnd.count({ where: { eventId: alarm.id } })).toBe(0);
+    const [e] = await events('', null);
+    expect(e.escalationEndedAt).toBe(e.acknowledgedAt);
+  });
+
+  it('acknowledged after the pass recorded the end: the earlier instant, the recorded end', async () => {
+    const { t, alarm } = await notStartedAlarm();
+    await db.agentTask.update({ where: { id: t.id }, data: { status: 'started', startedAt: at('10:20') } });
+    await record('10:25');
     await db.agentTeamEvent.update({ where: { id: alarm.id }, data: { acknowledgedAt: at('10:40'), acknowledgedByWorkerId: ada.id } });
-    expect(await events()).toMatchObject([{ id: alarm.id, escalationEndedAt: iso('10:20') }]);
+    expect(await events('', null)).toMatchObject([{ id: alarm.id, escalationEndedAt: iso('10:20') }]);
   });
 
   it('acknowledged before the episode ended: the earlier instant, the acknowledgement', async () => {
@@ -175,6 +201,33 @@ describe('#3934 — escalationEndedAt and alarmsInEffect on a task alarm', () =>
     await appendTaskEvent(db, { appId: app.id, taskId: t.id, actor: by, event: { type: 'task.reassigned', from: party(rook), to: party(anne), closeSessionWhenDone: false }, createdAt: at('10:35') });
     await db.agentTask.update({ where: { id: t.id }, data: { assigneeWorkerId: anne.id, assignedAt: at('10:35') } });
     expect((await events()).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: iso('10:20') });
+  });
+
+  it('before the pass has run an ended alarm still reads as in effect, with no end; after it, ended', async () => {
+    const { t, alarm } = await notStartedAlarm();
+    await db.agentTask.update({ where: { id: t.id }, data: { status: 'started', startedAt: at('10:20') } });
+    expect(await events('', null)).toMatchObject([{ id: alarm.id, escalationEndedAt: null }]);
+    expect((await events('alarmsInEffect: true', null)).map((e) => e.id)).toEqual([alarm.id]);
+    await record('10:21');
+    expect(await events('', null)).toMatchObject([{ id: alarm.id, escalationEndedAt: iso('10:20') }]);
+    expect(await events('alarmsInEffect: true', null)).toEqual([]);
+  });
+
+  it('the recorded end is written once: a second heartbeat and a later finish do not move it, and the database refuses an update', async () => {
+    const t = await task({ ownerWorkerId: ada.id, assigneeWorkerId: anne.id, assignedAt: at('09:30'), status: 'started', startedAt: at('10:00') });
+    const session = await db.session.create({ data: { id: generateId(), appId: app.id, workerId: anne.id, agentId, startedAt: at('10:00'), updatedAt: at('10:00') } });
+    await tick('11:00');
+    const alarm = (await alarms('stall.no-progress')).find((a) => a.taskId === t.id)!;
+    await db.session.update({ where: { id: session.id }, data: { updatedAt: at('11:10') } }); // the assignee acts: the episode ends
+    await record('11:10');
+    expect((await events('', null)).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: iso('11:10') });
+    await db.session.update({ where: { id: session.id }, data: { updatedAt: at('11:20') } }); // a second heartbeat
+    await record('11:21');
+    expect((await events('', null)).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: iso('11:10') });
+    await db.agentTask.update({ where: { id: t.id }, data: { status: 'finished', finishedAt: at('12:00'), resultOutcome: 'succeeded' } });
+    await record('12:01');
+    expect((await events('', null)).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: iso('11:10') });
+    await expect(db.alarmEscalationEnd.update({ where: { eventId: alarm.id }, data: { endedAt: at('12:00') } })).rejects.toThrow();
   });
 
   it('the same answer as the wake schedule: the wake pass closes exactly the alarms the read calls ended', async () => {
@@ -305,7 +358,7 @@ describe('#3934 — the surface changes nothing and pages whole', () => {
     for (const f of foreign) expect(got).not.toContain(f.id);
   });
 
-  it('the cost follows the alarms that could be in effect: a history of alarms on finished tasks is cut in the database, not judged', async () => {
+  it('a read works nothing out: with a history of ended alarms recorded, an in-effect read reads no task and costs one page', async () => {
     const done = await task({ ownerWorkerId: ada.id, assigneeWorkerId: anne.id, assignedAt: at('09:00'), status: 'finished', startedAt: at('09:10'), finishedAt: at('09:20'), resultOutcome: 'succeeded' });
     await db.agentTeamEvent.createMany({
       data: Array.from({ length: 450 }, (_, i) => ({
@@ -314,6 +367,8 @@ describe('#3934 — the surface changes nothing and pages whole', () => {
       })),
     });
     const live = await db.agentTeamEvent.create({ data: { appId: app.id, type: 'alarm.post-limit', severity: 'alarm', chain: [], payload: {}, createdAt: at('11:00') } });
+    expect(await record('12:00')).toBe(450); // the pass pages through all of them (more than one batch) and records each once
+    expect(await record('12:01')).toBe(0); // and a second pass writes nothing: write-once
     let taskReads = 0;
     const counting = new Proxy(db, {
       get(t, k, r) {
@@ -323,13 +378,12 @@ describe('#3934 — the surface changes nothing and pages whole', () => {
       },
     }) as typeof db;
     const r = await server.executeOperation(
-      { query: `{ agentTeamEvents(appRef: "${app.id}", alarmsInEffect: true, limit: 1) { id } }` },
+      { query: `{ agentTeamEvents(appRef: "${app.id}", alarmsInEffect: true, limit: 1) { id escalationEndedAt } }` },
       { contextValue: { db: counting, userId: admin.id, roles: ['READER'] } as Context },
     );
     if (r.body.kind !== 'single' || r.body.singleResult.errors) throw new Error(JSON.stringify(r.body));
-    expect((r.body.singleResult.data as any).agentTeamEvents.map((e: { id: string }) => e.id)).toEqual([live.id]);
-    // The open-task read of the cut, plus at most the one judged alarm's reads: judging 450 finished-task alarms would read tasks in several batches.
-    expect(taskReads).toBeLessThanOrEqual(3);
+    expect((r.body.singleResult.data as any).agentTeamEvents).toEqual([{ id: live.id, escalationEndedAt: null }]);
+    expect(taskReads).toBe(0);
   });
 
   it('newestFirst and the Page sibling take the filter too: newest in-effect alarms first, hasMore and a cursor that continues', async () => {
