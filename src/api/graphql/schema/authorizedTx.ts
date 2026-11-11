@@ -28,6 +28,8 @@ export async function withAuthorizedTx<T>(
     timeout?: number;
     allowDeletedMemory?: boolean;
     allowDeletedOrg?: boolean;
+    /** #3774: the App anchor admits a deleted or uninstalled App — only for the operations that judge that state themselves (uninstallApp / reinstallApp). */
+    allowInactiveApp?: boolean;
   } = {},
 ): Promise<T> {
   return ctx.db.$transaction(async (tx) => {
@@ -92,7 +94,7 @@ export async function withAuthorizedTx<T>(
         }
         case 'app': {
           const row = await tx.app.findUnique({ where: { id: anchor.id }, select: { deletedAt: true, uninstalledAt: true } });
-          if (!row || row.deletedAt || row.uninstalledAt) throw authorizationDenied();
+          if (!row || ((row.deletedAt || row.uninstalledAt) && !options.allowInactiveApp)) throw authorizationDenied();
           break;
         }
         case 'user': {
