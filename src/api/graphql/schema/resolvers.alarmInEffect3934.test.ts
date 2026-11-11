@@ -260,18 +260,36 @@ describe('#3934 — escalationEndedAt and alarmsInEffect on a task alarm', () =>
     expect((await events('', null)).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: iso('11:10') });
   });
 
-  it('the pass does not re-judge alarms that can never be recorded: a post-limit alarm and an uninstalled App\'s alarm', async () => {
+  it('the pass does not even select alarms that can never be recorded: a post-limit alarm and an uninstalled App\'s alarm', async () => {
     const done = await task({ ownerWorkerId: ada.id, assigneeWorkerId: anne.id, assignedAt: at('09:00'), status: 'finished', startedAt: at('09:10'), finishedAt: at('09:20'), resultOutcome: 'succeeded' });
     const stale = (appId: string, taskId: string | null, type: string, start: string) =>
       db.agentTeamEvent.create({ data: { appId, taskId, type, severity: 'alarm', chain: [], payload: {}, episodeStart: at(start), createdAt: at('09:30') } });
     const postLimit = await stale(app.id, done.id, 'alarm.post-limit', '09:05');
     const live = await stale(app.id, done.id, 'stall.not-started', '09:06');
-    expect(await record('12:00')).toBe(1);
+    // The rows the pass reads from the event stream, counted: the selection is the cost bound.
+    let selected = 0;
+    const counting = new Proxy(db, {
+      get(t, k, r) {
+        const v = Reflect.get(t, k, r);
+        if (k !== 'agentTeamEvent') return typeof v === 'function' ? v.bind(t) : v;
+        return new Proxy(v as object, {
+          get(m, f, rr) {
+            const x = Reflect.get(m, f, rr);
+            if (f !== 'findMany') return typeof x === 'function' ? x.bind(m) : x;
+            return async (...a: unknown[]) => { const rows = (await (x as (...b: unknown[]) => Promise<unknown[]>).apply(m, a)) as unknown[]; selected += rows.length; return rows; };
+          },
+        });
+      },
+    }) as typeof db;
+    expect(await recordEndedEscalations(counting, at('12:00'))).toBe(1);
+    expect(selected).toBe(1); // only the stall alarm; the post-limit alarm was never selected
     expect(await db.alarmEscalationEnd.count({ where: { eventId: postLimit.id } })).toBe(0);
     expect(await db.alarmEscalationEnd.count({ where: { eventId: live.id } })).toBe(1);
     await db.app.update({ where: { id: app.id }, data: { uninstalledAt: at('12:30') } });
     const after = await stale(app.id, done.id, 'stall.not-started', '09:07');
-    expect(await record('13:00')).toBe(0);
+    selected = 0;
+    expect(await recordEndedEscalations(counting, at('13:00'))).toBe(0);
+    expect(selected).toBe(0); // an uninstalled App's alarms are not selected either
     expect(await db.alarmEscalationEnd.count({ where: { eventId: after.id } })).toBe(0);
   });
 
@@ -284,6 +302,86 @@ describe('#3934 — escalationEndedAt and alarmsInEffect on a task alarm', () =>
     await db.agentTeamEvent.create({ data: { appId: app.id, taskId: t.id, type: 'task.progress', actorWorkerId: anne.id, createdAt: at('11:40') } });
     await record('11:45');
     expect((await events('', null)).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: iso('11:40') });
+  });
+
+  /** Anne's started task raises no-progress at 11:00; Rook has a session from 11:10 while the task is still Anne's; then Anne to Rook at 11:20 and Rook back to Anne at 11:40. */
+  async function interimAssignee() {
+    const t = await task({ ownerWorkerId: ada.id, assigneeWorkerId: anne.id, assignedAt: at('09:30'), status: 'started', startedAt: at('10:00') });
+    await db.session.create({ data: { id: generateId(), appId: app.id, workerId: anne.id, agentId, startedAt: at('10:00'), updatedAt: at('10:00') } });
+    await tick('11:00');
+    const alarm = (await alarms('stall.no-progress')).find((a) => a.taskId === t.id)!;
+    await db.session.create({ data: { id: generateId(), appId: app.id, workerId: rook.id, agentId, startedAt: at('11:10'), updatedAt: at('11:10') } });
+    const by = { userId: admin.id, workerId: null, agentId: null };
+    await appendTaskEvent(db, { appId: app.id, taskId: t.id, actor: by, event: { type: 'task.reassigned', from: { workerId: anne.id }, to: { workerId: rook.id }, closeSessionWhenDone: false }, createdAt: at('11:20') });
+    await appendTaskEvent(db, { appId: app.id, taskId: t.id, actor: by, event: { type: 'task.reassigned', from: { workerId: rook.id }, to: { workerId: anne.id }, closeSessionWhenDone: false }, createdAt: at('11:40') });
+    await db.agentTask.update({ where: { id: t.id }, data: { assigneeWorkerId: anne.id, assignedAt: at('11:40') } });
+    return alarm;
+  }
+
+  it('an intermediate assignee\'s activity BEFORE they held the task never counts: the pass records the first reassignment, 11:20, not 11:10', async () => {
+    const alarm = await interimAssignee();
+    await record('11:50');
+    expect((await events('', null)).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: iso('11:20') });
+  });
+
+  it('the same through the acknowledgement\'s freeze: it records 11:20 too', async () => {
+    const alarm = await interimAssignee();
+    await M.acknowledgeAlarm({}, { eventId: alarm.id }, ctx(admin.id));
+    expect((await db.alarmEscalationEnd.findUniqueOrThrow({ where: { eventId: alarm.id } })).endedAt).toEqual(at('11:20'));
+  });
+
+  /**
+   * A started task of Anne's with a no-progress alarm, and one "noise" row that must NOT count as her activity (a session
+   * ended before its last write, an auto-expiry's maintenance write, a deleted session, a usage event that is not
+   * activity, a child that ended before the episode): a note at 12:00 then ends it, so the recorded end is 12:00 unless
+   * the guard under test lets the noise in and records it as an earlier end.
+   */
+  async function noProgressWithNoise(noise: (taskId: string) => Promise<void>) {
+    const t = await task({ ownerWorkerId: ada.id, assigneeWorkerId: anne.id, assignedAt: at('09:30'), status: 'started', startedAt: at('10:00') });
+    await db.session.create({ data: { id: generateId(), appId: app.id, workerId: anne.id, agentId, startedAt: at('10:00'), updatedAt: at('10:00') } });
+    await noise(t.id);
+    await tick('11:05');
+    const alarm = (await alarms('stall.no-progress')).find((a) => a.taskId === t.id)!;
+    await db.agentTeamEvent.create({ data: { appId: app.id, taskId: t.id, type: 'task.progress', actorWorkerId: anne.id, createdAt: at('12:00') } });
+    await record('12:05');
+    return (await events('', null)).find((e) => e.id === alarm.id);
+  }
+
+  it('activity cannot postdate the end of its session: a heartbeat written after the session ended is not an end', async () => {
+    const e = await noProgressWithNoise(async () => {
+      await db.session.create({ data: { id: generateId(), appId: app.id, workerId: anne.id, agentId, startedAt: at('10:00'), updatedAt: at('11:10'), endedAt: at('10:00') } });
+    });
+    expect(e).toMatchObject({ escalationEndedAt: iso('12:00') });
+  });
+
+  it('an auto-expiry\'s maintenance write is not activity', async () => {
+    const e = await noProgressWithNoise(async () => {
+      await db.session.create({ data: { id: generateId(), appId: app.id, workerId: anne.id, agentId, startedAt: at('10:00'), updatedAt: at('11:10'), autoExpiredAt: at('11:10') } });
+    });
+    expect(e).toMatchObject({ escalationEndedAt: iso('12:00') });
+  });
+
+  it('a deleted session is not activity', async () => {
+    const e = await noProgressWithNoise(async () => {
+      await db.session.create({ data: { id: generateId(), appId: app.id, workerId: anne.id, agentId, startedAt: at('10:00'), updatedAt: at('11:10'), deletedAt: at('11:11') } });
+    });
+    expect(e).toMatchObject({ escalationEndedAt: iso('12:00') });
+  });
+
+  it('a usage event that does not count as activity is not activity', async () => {
+    const e = await noProgressWithNoise(async () => {
+      const sid = generateId();
+      await db.session.create({ data: { id: sid, appId: app.id, workerId: anne.id, agentId, startedAt: at('10:00'), updatedAt: at('10:00') } });
+      await db.usageEvent.create({ data: { type: 'test', sessionId: sid, appId: app.id, countsAsActivity: false, createdAt: at('11:10') } });
+    });
+    expect(e).toMatchObject({ escalationEndedAt: iso('12:00') });
+  });
+
+  it('a child that ended BEFORE the episode began is not the end of this episode', async () => {
+    const e = await noProgressWithNoise(async (parentId) => {
+      await task({ parentTaskId: parentId, ownerWorkerId: anne.id, assigneeWorkerId: rook.id, assignedAt: at('09:35'), status: 'finished', startedAt: at('09:40'), finishedAt: at('09:50'), resultOutcome: 'succeeded' });
+    });
+    expect(e).toMatchObject({ escalationEndedAt: iso('12:00') });
   });
 
   it('the same answer as the wake schedule: the wake pass closes exactly the alarms the read calls ended', async () => {

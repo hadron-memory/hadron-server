@@ -844,30 +844,46 @@ export async function endedAlarmEpisodeInstants(
     JOIN agent_tasks c ON c.parent_task_id = p.task_id AND COALESCE(c.finished_at, c.cancelled_at) > p.start
     GROUP BY p.task_id, p.start`;
   const childEndOf = new Map(childEnds.map((c) => [`${c.taskId}|${new Date(c.start).getTime()}`, c.at]));
-  // The first activity of whoever held the task, while they held it: the current assignee from their assignment on, and
-  // each assignee it was reassigned away FROM until that reassignment. Activity is the session's start, its heartbeat
-  // (not an auto-expiry's maintenance write) and an attributed usage event, as the roster counts it, and never after
-  // the session ended. A latest-only value cannot say when it FIRST happened; this can.
-  const reassigned = await db.agentTeamEvent.findMany({
-    where: { taskId: { in: [...new Set(pairs.map((a) => a.taskId))] }, type: 'task.reassigned' },
-    select: { taskId: true, createdAt: true, payload: true },
-    orderBy: { createdAt: 'asc' },
+  // The first activity of whoever held the task, while they held it. Holding is read from the task's own assignment
+  // events as disjoint STINTS (enter, exit): an assignment or a reassignment opens the new assignee's stint at the event,
+  // a reassignment closes the previous assignee's at the same instant, and the current assignee's runs to now. A stint
+  // whose start the record does not hold (a task seeded past the resolvers, or one assigned before the events) opens at
+  // the row's own assignment stamp, or the episode's start. Each stint is clamped to the episode: activity before the
+  // assignee held the task, or before the episode began, never counts. Activity is the session's start, its heartbeat
+  // (not an auto-expiry's maintenance write) and an attributed usage event, as the roster counts it, never after the
+  // session ended. A latest-only value cannot say when it FIRST happened; this can.
+  const assignments = await db.agentTeamEvent.findMany({
+    where: { taskId: { in: [...new Set(pairs.map((a) => a.taskId))] }, type: { in: ['task.assigned', 'task.reassigned', 'assignment.matched'] } },
+    select: { taskId: true, type: true, createdAt: true, payload: true },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   });
   type Window = { k: string; worker: string; lo: Date; hi: string };
   const FOREVER = '9999-12-31T00:00:00.000';
+  const workerOf = (party: unknown): string | null => (party as { workerId?: string } | null)?.workerId ?? null;
   const windows2: Window[] = [];
   for (const a of pairs) {
     const k = `${a.taskId}|${a.episodeStart.getTime()}`;
     const row = rowOf.get(a.taskId);
-    if (row?.assigneeWorkerId) {
-      const lo = row.assignedAt && row.assignedAt.getTime() > a.episodeStart.getTime() ? row.assignedAt : a.episodeStart;
-      windows2.push({ k, worker: row.assigneeWorkerId, lo, hi: FOREVER });
-    }
-    for (const e of reassigned) {
-      const from = (e.payload as { from?: { workerId?: string } } | null)?.from?.workerId;
-      if (e.taskId === a.taskId && from && e.createdAt.getTime() > a.episodeStart.getTime()) {
-        windows2.push({ k, worker: from, lo: a.episodeStart, hi: toNaiveUtc(e.createdAt) });
+    const open = new Map<string, Date | null>(); // worker -> the instant their current stint opened (null: not in the record)
+    const stints: { worker: string; enter: Date | null; exit: Date | null }[] = [];
+    for (const e of assignments) {
+      if (e.taskId !== a.taskId) continue;
+      const pl = e.payload as { assignee?: unknown; from?: unknown; to?: unknown } | null;
+      if (e.type === 'task.reassigned') {
+        const from = workerOf(pl?.from);
+        if (from) { stints.push({ worker: from, enter: open.get(from) ?? null, exit: e.createdAt }); open.delete(from); }
+        const to = workerOf(pl?.to);
+        if (to) open.set(to, e.createdAt);
+      } else {
+        const to = workerOf(pl?.assignee);
+        if (to) open.set(to, e.createdAt);
       }
+    }
+    if (row?.assigneeWorkerId) stints.push({ worker: row.assigneeWorkerId, enter: open.get(row.assigneeWorkerId) ?? row.assignedAt ?? null, exit: null });
+    for (const st of stints) {
+      const lo = st.enter && st.enter.getTime() > a.episodeStart.getTime() ? st.enter : a.episodeStart;
+      if (st.exit && st.exit.getTime() <= lo.getTime()) continue; // closed before it could count
+      windows2.push({ k, worker: st.worker, lo, hi: st.exit ? toNaiveUtc(st.exit) : FOREVER });
     }
   }
   const activity = windows2.length
