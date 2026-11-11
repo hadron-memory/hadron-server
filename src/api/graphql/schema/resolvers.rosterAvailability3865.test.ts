@@ -13,6 +13,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { resolvers, type Context } from './resolvers.js';
+import { agentTaskMatchingFieldResolvers } from './resolvers.agentTaskMatching.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -26,19 +27,23 @@ const ctx = (userId?: string): Context => ({ db, userId, roles: ['READER'] });
 let app: { id: string };
 let agentId: string;
 let mia: { id: string };
+let admin: { id: string };
+let ned: { id: string };
 const w: Record<string, { id: string }> = {};
 
 beforeEach(async () => {
   await cleanDb(db);
   const n = Math.floor(Math.random() * 1_000_000);
   const org = await db.organization.create({ data: { name: 'Avail', urn: `avail-${n}.example` } });
-  const admin = await db.user.create({ data: { githubId: 710_000 + n, githubUsername: `av-admin-${n}`, roles: ['READER'] } });
-  mia = await db.user.create({ data: { githubId: 720_000 + n, githubUsername: `av-mia-${n}`, roles: ['READER'] } });
+  admin = await db.user.create({ data: { githubId: 710_000 + n, githubUsername: `av-admin-${n}`, roles: ['READER'], handle: `av-admin-${n}` } });
+  mia = await db.user.create({ data: { githubId: 720_000 + n, githubUsername: `av-mia-${n}`, roles: ['READER'], handle: `av-mia-${n}` } });
+  ned = await db.user.create({ data: { githubId: 730_000 + n, githubUsername: `av-ned-${n}`, roles: ['READER'], handle: `av-ned-${n}` } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id));
   agentId = agent.id;
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `avail-${n}.example:team` }, select: { id: true } });
   await db.appMember.create({ data: { appId: app.id, userId: mia.id, role: 'member' } });
+  await db.appMember.create({ data: { appId: app.id, userId: ned.id, role: 'member' } });
   for (const name of ['Anne', 'Rook', 'Kit']) {
     w[name] = await db.worker.create({
       data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name, slug: name.toLowerCase(), role: 'engineer', heldByUserId: mia.id },
@@ -54,8 +59,8 @@ afterAll(() => server.stop());
 const fields = `worker { name } state freeForWork unavailableReason availability {
   state reason until setAt setBy inEffect setByParty { kind name } }`;
 const baseFields = 'worker { name } state freeForWork unavailableReason';
-async function roster(selection = fields) {
-  const result = await server.executeOperation({ query: `{ teamRoster(appRef: "${app.id}") { workers { ${selection} } } }` }, { contextValue: ctx(mia.id) });
+async function roster(selection = fields, as: () => string = () => mia.id) {
+  const result = await server.executeOperation({ query: `{ teamRoster(appRef: "${app.id}") { workers { ${selection} } } }` }, { contextValue: ctx(as()) });
   if (result.body.kind !== 'single') throw new Error('unexpected incremental result');
   expect(result.body.singleResult.errors).toBeUndefined();
   const rows = (result.body.singleResult.data as any).teamRoster.workers as any[];
@@ -91,6 +96,24 @@ describe('#3865 roster availability provenance', () => {
     expect(row('Rook').availability).toMatchObject({ reason: 'OTHER', inEffect: false });
     expect(row('Rook').unavailableReason).toBeNull();
     expect(row('Rook').state).not.toBe('UNAVAILABLE');
+  });
+});
+
+describe('#3865 a USER setter is withheld by the same switch as heldBy', () => {
+  it('every reader who can read the roster passes maySeeWorkerInternals: heldBy and the HOLDER setter are visible together', async () => {
+    await record('Rook', { reason: 'other', setBy: 'holder', setByUserId: mia.id });
+    for (const reader of [() => ned.id, () => admin.id]) {
+      const row = (await roster(`${fields} heldBy { handle }`, reader))('Rook');
+      expect(row.heldBy).toMatchObject({ handle: expect.any(String) });
+      expect(row.availability.setByParty).toMatchObject({ kind: 'USER', name: row.heldBy.handle });
+    }
+  });
+
+  it('when the read does not see worker internals the row drops the USER setter identity (setBy stays)', async () => {
+    const row = { availabilityRecord: { row: { setBy: 'holder', setByUserId: mia.id, setByWorkerId: null }, inEffect: true } };
+    const field = (agentTaskMatchingFieldResolvers.TeamRosterEntry as any).availability;
+    expect(field({ ...row, internalsVisible: false })).toMatchObject({ setBy: 'holder', setByUserId: null });
+    expect(field({ ...row, internalsVisible: true })).toMatchObject({ setByUserId: mia.id });
   });
 });
 
