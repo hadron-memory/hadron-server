@@ -21,7 +21,8 @@ async function refusal(p: Promise<unknown>): Promise<{ code: unknown; message: s
     await p;
   } catch (e) {
     const err = e as GraphQLError & { code?: string };
-    return { code: err.extensions?.code ?? err.code, message: err.message };
+    // formatError maps the typed ambiguity error to its wire code later; a direct resolver call carries its name.
+    return { code: err.extensions?.code ?? err.code ?? err.name, message: err.message };
   }
   throw new Error('expected a rejection');
 }
@@ -101,12 +102,18 @@ describe('#3975 deleteApp existence oracle', () => {
     expect((await row()).deletedAt).toBeNull();
   });
 
-  it('the ambiguous-URN limit: an admitted caller also gets the uniform refusal (no candidate ids to gate on), and nothing is deleted', async () => {
+  it('an ambiguous legacy URN: an admin of every claimant is told (and nothing is deleted); an admin of only one gets the uniform refusal', async () => {
     const legacy = `${org.urn}:legacy2`;
     const a = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'A1', urn: `${org.urn}:a1`, legacyUrn: legacy } });
     await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'A2', urn: `${org.urn}:a2`, legacyUrn: legacy } });
-    expect((await refusal(M.deleteApp({}, { ref: legacy }, ctx(admin.id)))).code).toBe('FORBIDDEN');
+    expect((await refusal(M.deleteApp({}, { ref: legacy }, ctx(admin.id)))).code).toBe('AmbiguousLegacyUrnError');
     expect((await db.app.findUniqueOrThrow({ where: { id: a.id } })).deletedAt).toBeNull();
+    // a claimant in another org: the first org's admin is admitted on one claimant only
+    const foreign = `${otherOrg.id}`;
+    await db.app.create({ data: { id: generateId(), organizationId: foreign, name: 'F', urn: `dx-f-${generateId().toLowerCase()}`, legacyUrn: legacy } });
+    const reference = await refusal(M.uninstallApp({}, { ref: generateId() }, ctx(stranger.id)));
+    expect(await refusal(M.deleteApp({}, { ref: legacy }, ctx(admin.id)))).toEqual(reference);
+    expect(await refusal(M.deleteApp({}, { ref: legacy }, ctx(otherAdmin.id)))).toEqual(reference);
   });
 
   it('updateApp is not part of this change: a missing ref still answers APP_NOT_FOUND', async () => {
