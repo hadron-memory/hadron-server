@@ -2387,6 +2387,7 @@ export const nodeMoveOps = {
             // fails loud on a destination collision).
             const result = await moveNodeSubtree(tx, {
               source,
+              canReadMemoryId: memoryId => isMemoryReadableCached(txCtx, memoryId),
               destLoc,
               destMemoryId: crossMemory ? destMemoryId : undefined,
               editor: editorFromAuth(ctx),
