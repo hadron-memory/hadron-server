@@ -33,6 +33,7 @@
  * in one transaction, so a partial template is never visible; the template's
  * `revision` covers its rules (cli#716 Q1).
  */
+import { currentHadronServerId } from '../../../lib/hadronServer.js';
 import { GraphQLError } from 'graphql';
 import { Prisma, type MemoryConfigTemplate, type MemoryConfigTemplateRule } from '../../../generated/prisma/index.js';
 import {
@@ -170,13 +171,13 @@ export async function reassertManageOwner(
  * The oldest LIVE row.
  */
 async function hadronServerId(ctx: Context): Promise<string> {
-  const row = await ctx.db.hadronServer.findFirst({ where: { deletedAt: null }, orderBy: { createdAt: 'asc' }, select: { id: true } });
-  if (!row) {
+  const id = await currentHadronServerId(ctx.db);
+  if (!id) {
     throw new GraphQLError('This server has no hadron_server row, so it cannot own a template.', {
       extensions: { code: 'HADRON_SERVER_NOT_CONFIGURED' },
     });
   }
-  return row.id;
+  return id;
 }
 
 function badInput(message: string, extensions: Record<string, unknown> = {}): GraphQLError {

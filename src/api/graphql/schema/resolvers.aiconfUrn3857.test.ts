@@ -22,7 +22,9 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
-import { mintPrincipal } from '../../../lib/principal/mintPrincipal.js';
+import { ApolloServer } from '@apollo/server';
+import { mintPrincipal, RootNameTakenError } from '../../../lib/principal/mintPrincipal.js';
+import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
 
 const Q = resolvers.Query as any;
@@ -201,7 +203,139 @@ describe('#3857 — renames (V61)', () => {
 
 describe('#3857 — the reserved roots', () => {
   it.each(['platform', 'server', 'Server', 'PLATFORM'])('%s cannot be minted as an org or handle root', async (name) => {
-    await expect(mintPrincipal(db, { kind: 'org', name })).rejects.toThrow();
-    await expect(mintPrincipal(db, { kind: 'user', name })).rejects.toThrow();
+    await expect(mintPrincipal(db, { kind: 'org', name })).rejects.toBeInstanceOf(RootNameTakenError);
+    await expect(mintPrincipal(db, { kind: 'user', name })).rejects.toBeInstanceOf(RootNameTakenError);
+  });
+});
+
+describe('#3857 review — `server` is the server answering, not any HadronServer row', () => {
+  it('only the current (oldest live) server\'s config has the URN; another row\'s is null and never resolves', async () => {
+    const admin = ctx(platformAdmin.id, ['ADMIN']);
+    const second = await db.hadronServer.create({ data: { id: generateId(), url: 'https://second.test', createdAt: new Date(Date.now() + 60_000) } });
+    const other = await db.aiServiceConfig.create({
+      data: { id: generateId(), name: 'default', provider: 'openai', model: 'm', hadronServerId: second.id },
+    });
+    expect(await urnOf(cfg.server, admin)).toBe('hrn:aiconf:server:default');
+    expect(await urnOf(other, admin)).toBeNull();
+    for (const out of [await Q.resolveUrn(null, { urn: 'hrn:aiconf:server:default' }, admin), await Q.aiServiceConfig(null, { ref: 'hrn:aiconf:server:default' }, admin)]) {
+      expect(out).toMatchObject({ id: cfg.server.id });
+    }
+  });
+
+  it('follows the current server: with the first row soft-deleted the second one is current', async () => {
+    const admin = ctx(platformAdmin.id, ['ADMIN']);
+    const second = await db.hadronServer.create({ data: { id: generateId(), url: 'https://second.test', createdAt: new Date(Date.now() + 60_000) } });
+    const other = await db.aiServiceConfig.create({
+      data: { id: generateId(), name: 'default', provider: 'openai', model: 'm', hadronServerId: second.id },
+    });
+    await db.hadronServer.updateMany({ where: { id: { not: second.id } }, data: { deletedAt: new Date() } });
+    expect(await urnOf(other, admin)).toBe('hrn:aiconf:server:default');
+    expect(await Q.resolveUrn(null, { urn: 'hrn:aiconf:server:default' }, admin)).toMatchObject({ id: other.id });
+    expect(await urnOf(cfg.server, admin)).toBeNull();
+  });
+
+  it('with no live server row the URN names nothing', async () => {
+    await db.hadronServer.updateMany({ data: { deletedAt: new Date() } });
+    const admin = ctx(platformAdmin.id, ['ADMIN']);
+    expect(await Q.resolveUrn(null, { urn: 'hrn:aiconf:server:default' }, admin)).toBeNull();
+    expect(await urnOf(cfg.server, admin)).toBeNull();
+  });
+});
+
+describe('#3857 review — canonical names, concealment of every owner kind, arity', () => {
+  it('a stored name that is not lower-case canonical has no URN, and a URN spelling it names nothing', async () => {
+    const admin = ctx(platformAdmin.id, ['ADMIN']);
+    const mixed = await db.aiServiceConfig.create({
+      data: { id: generateId(), name: 'Mixed', provider: 'openai', model: 'm', organizationId: org.id },
+    });
+    expect(await urnOf(mixed, admin)).toBeNull();
+    for (const n of ['Mixed', 'mixed']) {
+      expect(await Q.resolveUrn(null, { urn: `hrn:aiconf:${org.urn}:org:${n}` }, admin)).toBeNull();
+    }
+    expect(await Q.resolveUrn(null, { urn: `hrn:aiconf:${org.urn}:org:DEFAULT` }, admin)).toBeNull();
+  });
+
+  it('V63 holds for an AGENT-owned config too (the gate throws a not-found there), and for the server-owned one', async () => {
+    const agentUrn = (await urnOf(cfg.agent, ctx(platformAdmin.id, ['ADMIN'])))!;
+    const serverUrn = 'hrn:aiconf:server:default';
+    for (const who of [ctx(otherAdmin.id), ctx(member.id)]) {
+      for (const urn of [agentUrn, serverUrn]) {
+        expect(await Q.resolveUrn(null, { urn }, who)).toBeNull();
+        expect(await Q.aiServiceConfig(null, { ref: urn }, who)).toBeNull();
+      }
+    }
+    // The readable caller still gets the agent one: the null above is the gate, not a broken lookup.
+    expect(await Q.resolveUrn(null, { urn: agentUrn }, ctx(orgAdmin.id))).toMatchObject({ id: cfg.agent.id });
+  });
+
+  it('an unauthenticated caller gets null from resolveUrn', async () => {
+    const urn = (await urnOf(cfg.app, ctx(platformAdmin.id, ['ADMIN'])))!;
+    expect(await Q.resolveUrn(null, { urn }, ctx(undefined))).toBeNull();
+  });
+
+  it('App and Agent URNs with an extra segment, and a nonexistent owner root, name nothing', async () => {
+    const admin = ctx(platformAdmin.id, ['ADMIN']);
+    const slug = agent.urn.slice(agent.urn.indexOf(':') + 1);
+    const root = agent.urn.slice(0, agent.urn.indexOf(':'));
+    for (const urn of [
+      `hrn:aiconf:${org.urn}:app:mealplan:default:extra`,
+      `hrn:aiconf:${root}:agent:${slug}:default:extra`,
+      `hrn:aiconf:no-such-org.example:org:default`,
+      `hrn:aiconf:no-such-org.example:app:mealplan:default`,
+    ]) {
+      expect(await Q.resolveUrn(null, { urn }, admin)).toBeNull();
+      expect(await Q.aiServiceConfig(null, { ref: urn }, admin)).toBeNull();
+    }
+  });
+
+  it('resolveUrn carries the owning org per owner kind (null for a server-owned config)', async () => {
+    const admin = ctx(platformAdmin.id, ['ADMIN']);
+    for (const k of ['org', 'app', 'agent'] as const) {
+      const urn = (await urnOf(cfg[k], admin))!;
+      expect(await Q.resolveUrn(null, { urn }, admin)).toMatchObject({ kind: 'aiconf', id: cfg[k].id, organizationId: org.id });
+    }
+    expect((await Q.resolveUrn(null, { urn: 'hrn:aiconf:server:default' }, admin)).organizationId).toBeNull();
+  });
+});
+
+describe('#3857 review — through the real schema (SDL + resolvers), not resolver-direct', () => {
+  it('urn, aiServiceConfig(ref: urn) and resolveUrn execute against typeDefs', async () => {
+    const server = new ApolloServer<Context>({ typeDefs, resolvers });
+    const admin = ctx(platformAdmin.id, ['ADMIN']);
+    const run = (query: string, variables?: Record<string, unknown>) =>
+      server.executeOperation({ query, variables }, { contextValue: admin });
+    const urn = `hrn:aiconf:${org.urn}:app:mealplan:default`;
+
+    const one = await run('query($u:ID!,$s:String!){ aiServiceConfig(ref:$u){ id urn name } resolveUrn(urn:$s){ kind id organizationId } }', { u: urn, s: urn });
+    expect(one.body.kind).toBe('single');
+    const d = (one.body as any).singleResult;
+    expect(d.errors).toBeUndefined();
+    expect(d.data.aiServiceConfig).toMatchObject({ id: cfg.app.id, urn, name: 'default' });
+    expect(d.data.resolveUrn).toMatchObject({ kind: 'aiconf', id: cfg.app.id, organizationId: org.id });
+
+    const list = await run('{ aiServiceConfigs { items { id urn } } }');
+    const items = (list.body as any).singleResult.data.aiServiceConfigs.items as { id: string; urn: string | null }[];
+    expect(items.find((i) => i.id === cfg.server.id)?.urn).toBe('hrn:aiconf:server:default');
+    expect(items.filter((i) => i.urn === null)).toEqual([]);
+  });
+});
+
+describe('#3857 review — each URN resolves to ITS owner\'s config, not any config of that name', () => {
+  it('a second org, App and Agent each holding a `default` config keep their own addresses', async () => {
+    const admin = ctx(platformAdmin.id, ['ADMIN']);
+    const org2 = await db.organization.create({ data: { id: generateId(), name: 'aiconf-org2', urn: `aiconf-org2-${suffix}.com` } });
+    const app2 = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Other Plan', urn: `${org.urn}:otherplan` } });
+    const ag2 = await M.createAgent({}, { orgId: org.id, name: 'Other Coach' }, ctx(orgAdmin.id));
+    const mk = (owner: Record<string, string>) =>
+      db.aiServiceConfig.create({ data: { id: generateId(), name: 'default', provider: 'openai', model: 'm', ...owner } });
+    const second = { org: await mk({ organizationId: org2.id }), app: await mk({ appId: app2.id }), agent: await mk({ agentId: ag2.id }) };
+    for (const k of ['org', 'app', 'agent'] as const) {
+      const first = (await urnOf(cfg[k], admin))!;
+      const other = (await urnOf(second[k], admin))!;
+      expect(other).not.toBe(first);
+      expect(await Q.resolveUrn(null, { urn: first }, admin)).toMatchObject({ id: cfg[k].id });
+      expect(await Q.resolveUrn(null, { urn: other }, admin)).toMatchObject({ id: second[k].id });
+      expect(await Q.aiServiceConfig(null, { ref: other }, admin)).toMatchObject({ id: second[k].id });
+    }
   });
 });

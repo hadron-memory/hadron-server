@@ -33,6 +33,7 @@ import { resolveOrgRef } from './orgRef.js';
 import { resolveAppRef } from './appRef.js';
 import { resolveAgentRef } from './agentRef.js';
 import { refNamesNothing } from './refNamesNothing.js';
+import { currentHadronServerId } from '../hadronServer.js';
 
 /** The reserved root a HadronServer-owned config lives under (R3). */
 export const AICONF_SERVER_ROOT = 'server';
@@ -51,6 +52,10 @@ export type AiConfigUrnOwner =
  */
 export function composeAiConfigUrn(owner: AiConfigUrnOwner, name: string): string | null {
   try {
+    // Names are lower-case canonical (`validateAiConfigName`); parse looks the
+    // name up EXACTLY, so a stored name that is not canonical must not emit a
+    // URN that cannot resolve back to it.
+    if (name !== name.toLowerCase()) throw new Error('name is not lower-case canonical');
     if (owner.kind === 'server') return composeUrnV2('aiconf', AICONF_SERVER_ROOT, name);
     const parsed = parseUrnV2(emitEntityUrnV2(owner.kind, owner.urn));
     if (owner.kind === 'org') {
@@ -74,7 +79,8 @@ export type ParsedAiConfigUrn =
   | { kind: 'app' | 'agent'; root: string; slug: string; name: string };
 
 /**
- * Parse an `hrn:aiconf:` reference by its kind word. Null for anything that is
+ * Parse an `hrn:aiconf:` reference by its kind word. Roots and slugs go on to the
+ * owner resolvers, which normalize them; the name is compared exactly. Null for anything that is
  * not one of the four shapes (wrong type word, unknown or missing kind, a kind
  * after the reserved root, wrong arity; a `#fragment` is already refused by the parser): such a URN names nothing.
  */
@@ -87,18 +93,20 @@ export function parseAiConfigUrn(ref: string): ParsedAiConfigUrn | null {
   }
   if (p.type !== 'aiconf') return null;
   const seg = p.segments;
-  // Names are lower-case canonical (`validateAiConfigName`).
+  // The same rule as compose: a name is lower-case canonical or it is no URN atom,
+  // so a config the platform cannot address by URN is not reachable by one either.
+  if (seg.length === 0 || seg[seg.length - 1] !== seg[seg.length - 1]!.toLowerCase()) return null;
   if (p.root.toLowerCase() === AICONF_SERVER_ROOT) {
-    return seg.length === 1 ? { kind: 'server', name: seg[0]!.toLowerCase() } : null;
+    return seg.length === 1 ? { kind: 'server', name: seg[0]! } : null;
   }
-  if (seg[0] === 'org' && seg.length === 2) return { kind: 'org', root: p.root, name: seg[1]!.toLowerCase() };
+  if (seg[0] === 'org' && seg.length === 2) return { kind: 'org', root: p.root, name: seg[1]! };
   if ((seg[0] === 'app' || seg[0] === 'agent') && seg.length === 3) {
-    return { kind: seg[0], root: p.root, slug: seg[1]!, name: seg[2]!.toLowerCase() };
+    return { kind: seg[0], root: p.root, slug: seg[1]!, name: seg[2]! };
   }
   return null;
 }
 
-type AiConfigRefDb = Pick<PrismaClient, 'aiServiceConfig' | 'organization' | 'app' | 'agent' | 'urnAlias'>;
+type AiConfigRefDb = Pick<PrismaClient, 'aiServiceConfig' | 'organization' | 'app' | 'agent' | 'urnAlias' | 'hadronServer'>;
 
 /**
  * Resolve an `hrn:aiconf:` URN to the config row, or null. IDENTITY only: no
@@ -110,8 +118,13 @@ export async function resolveAiConfigByUrn(db: AiConfigRefDb, ref: string) {
   if (!parsed) return null;
   try {
     switch (parsed.kind) {
-      case 'server':
-        return await db.aiServiceConfig.findFirst({ where: { hadronServerId: { not: null }, name: parsed.name } });
+      case 'server': {
+        // `server` is THE SERVER ANSWERING (R3), not any HadronServer row: bind
+        // to the current one, or two servers' `default` configs would share one URN.
+        const serverId = await currentHadronServerId(db);
+        if (!serverId) return null;
+        return await db.aiServiceConfig.findFirst({ where: { hadronServerId: serverId, name: parsed.name } });
+      }
       case 'org': {
         const { id } = await resolveOrgRef(db, composeUrnV2('org', parsed.root));
         return await db.aiServiceConfig.findFirst({ where: { organizationId: id, name: parsed.name } });

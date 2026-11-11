@@ -8252,8 +8252,9 @@ export const typeDefs = `#graphql
   one does, hrn:node:hadronmemory.com:specs:cor:urn:010:01).
   \`id\` is the resolved entity's primary id. \`memoryId\` is set only for
   nodes (their owning memory), \`organizationId\` for apps, app runs, and
-  workers (their owning org) — both are the extra ids those resources'
-  canonical routes require.
+  workers (their owning org), and for an aiconf (#3857) the org that owns it or
+  its App or Agent (null for a server-owned config or a user-owned App or
+  Agent) — both are the extra ids those resources' canonical routes require.
   """
   type UrnResolution {
     kind:           String!
