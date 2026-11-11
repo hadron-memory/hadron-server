@@ -150,11 +150,18 @@ describe('App.chatbotAiConfigId and setAppChatbotAiConfig', () => {
     const setter = M.setAppChatbotAiConfig(null, { appRef: app.id, configId: glm.id }, ctx(admin)).then(
       (v: unknown) => { settled = true; return v; }, (e: unknown) => { settled = true; throw e; });
     try {
-      await new Promise(r => setTimeout(r, 500));
-      expect(settled).toBe(false); // waiting on the revoker's anchor, not yet decided
+      // Synchronize on the setter actually WAITING for the contested advisory lock, not on elapsed time.
+      let waiting = 0;
+      for (let i = 0; i < 100 && waiting === 0; i++) {
+        waiting = Number((await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`)[0]?.n ?? 0);
+        if (waiting === 0) await new Promise(r => setTimeout(r, 50));
+      }
+      expect(waiting).toBeGreaterThan(0);
+      expect(settled).toBe(false); // blocked behind the revoker's anchor, not yet decided
     } finally {
       release(); // never leave the revoker holding its lock, whatever the assertion said
       await revoker;
+      await setter.catch(() => undefined); // never leave the setter running after an assertion failure
     }
     expect(await code(setter)).toBe('FORBIDDEN');
     expect((await db.app.findUniqueOrThrow({ where: { id: app.id } })).chatbotAiConfigId).toBeNull();
@@ -315,17 +322,19 @@ describe('the chat path', () => {
   it('a choice on a chat with no App is refused byte-identically to a nonexistent id', async () => {
     const orgConfig = await db.aiServiceConfig.create({ data: { organizationId: org.id, name: 'org-wide', provider: 'openai', model: 'gpt-org', apiKeyEncrypted: encryptToken(KEY), apiKeyPreview: '…3957' } });
     // `member` is not an org member, so the lazy per-user memory belongs to no App.
-    const refusal = (id: string, run: () => Promise<unknown>) => run().then(() => null, (e: any) => `${e.extensions?.code}|${e.message.split(id).join('<id>')}`);
+    // The whole public error (message, path, locations, every extension), with only the supplied id normalized.
+    const refusal = (id: string, run: () => Promise<unknown>) => run().then(() => null, (e: any) =>
+      JSON.stringify({ name: e.name, ...(typeof e.toJSON === 'function' ? e.toJSON() : { message: e.message }) }).split(id).join('<id>'));
     const absent = generateId();
     const starts = [orgConfig.id, absent].map(id => refusal(id, () => start({ scope: 'private', aiConfigChoice: id })));
     const [realStart, absentStart] = await Promise.all(starts);
     expect(realStart).toBe(absentStart);
-    expect(realStart).toMatch(/^AiServiceConfigNotFoundError\|/);
+    expect(realStart).toContain('AiServiceConfigNotFoundError');
     const { chatId } = await start({ scope: 'private' });
     expect((await db.memory.findUniqueOrThrow({ where: { id: (await chatNodeByLocOrThrow(db, chatId)).memoryId } })).appId).toBeNull();
     const sends = await Promise.all([orgConfig.id, absent].map(id => refusal(id, () => M.sendChatMessage(null, { chatId, userMessage: 'x', aiConfigChoice: id }, asMember()))));
     expect(sends[0]).toBe(sends[1]);
-    expect(sends[0]).toMatch(/^AiServiceConfigNotFoundError\|/);
+    expect(sends[0]).toContain('AiServiceConfigNotFoundError');
     expect(await stored(chatId)).toBeUndefined();
   });
 
