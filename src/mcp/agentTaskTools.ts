@@ -224,12 +224,14 @@ export async function renderEvent(e: EventRow, ctx: Context): Promise<string> {
     const owner = (await agentTaskAlarmFieldResolvers.AgentTeamAlarmSchedule.owner(w as never, {}, ctx)) as Party;
     return `${partyLabel(owner)} (${w.wokenAt ? `woken ${w.wokenAt.toISOString()}` : `due ${w.dueAt.toISOString()}`})`;
   }));
+  // #3934: when this alarm's escalation ended (V77), from the same answer the GraphQL field gives; omitted while it is in effect.
+  const escalationEnded = (await E.escalationEndedAt(e as never, {}, ctx)) as Date | null;
   const ack = e.acknowledgedAt
     ? `acknowledged ${e.acknowledgedAt.toISOString()} by ${partyLabel((await E.acknowledgedBy(e as never, {}, ctx)) as Party)}`
     : 'not acknowledged';
   return [
     line,
-    `  episode since ${e.episodeStart ? e.episodeStart.toISOString() : '?'} · ${ack}`,
+    `  episode since ${e.episodeStart ? e.episodeStart.toISOString() : '?'} · ${ack}${escalationEnded ? ` · escalation ended ${escalationEnded.toISOString()}` : ''}`,
     `  chain: ${chain.join(' → ') || 'nobody'}`,
   ].join('\n');
 }

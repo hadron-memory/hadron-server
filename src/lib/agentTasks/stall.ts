@@ -886,6 +886,28 @@ export async function alarmEpisodeEnds(
 }
 
 /**
+ * #3934 (BLIND P2) — a database-side cut that bounds how many alarms an `alarmsInEffect` read has to judge. Alarms
+ * the shared answer ({@link alarmEpisodeEnds}) is certain to call ended are left out here, without evaluating them:
+ *   - a task alarm whose task is not open (finished, cancelled or parked: a terminal row ends every rule), and
+ *   - a dark-worker or coordinator-cadence alarm whose own episode row has an end.
+ * What is left (alarms on open tasks, task-less alarms with a running episode) is judged by `alarmEscalationEnds` as
+ * before, so the cost follows the alarms that could still be in effect, never the App's whole alarm history. The
+ * cut only ever removes alarms the answer also removes. It is skipped for an App that is deleted or uninstalled
+ * (the answer treats those tasks as unknown, not ended). Returns a where clause for `agentTeamEvent`.
+ */
+export async function inEffectCandidateFilter(db: Db, appId: string): Promise<Prisma.AgentTeamEventWhereInput> {
+  const live = await db.app.count({ where: { id: appId, deletedAt: null, uninstalledAt: null } });
+  if (!live) return {};
+  const open = await db.agentTask.findMany({ where: { appId, status: { in: OPEN_STATUSES } }, select: { id: true } });
+  return {
+    AND: [
+      { OR: [{ taskId: null }, { taskId: { in: open.map((t) => t.id) } }] },
+      { NOT: [{ darkEpisode: { endedAt: { not: null } } }, { cadenceEpisode: { endedAt: { not: null } } }] },
+    ],
+  };
+}
+
+/**
  * #3934 (V77) — when each of these alarms' escalation ended, by event id: the earlier of its acknowledgement and the
  * end of its episode ({@link alarmEpisodeEnds}). An alarm absent from the map is in effect (cor:agt:050:20). Judged at
  * `now`, like the roster: nothing waits for a wake pass.

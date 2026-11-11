@@ -3084,18 +3084,20 @@ export const agentTaskQueries = {
       ...(args.alarmsInEffect ? { acknowledgedAt: null } : {}),
       ...(args.taskId ? { taskId: (await resolveTaskRef(c, args.taskId, app.id)) ?? args.taskId } : {}),
     };
-    const page = (cursor: Prisma.AgentTeamEventWhereInput, n: number) =>
-      c.db.agentTeamEvent.findMany({ where: { ...where, ...cursor }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], take: n });
+    const page = (cursor: Prisma.AgentTeamEventWhereInput, n: number, cut: Prisma.AgentTeamEventWhereInput = {}) =>
+      c.db.agentTeamEvent.findMany({ where: { AND: [where, cursor, cut] }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], take: n });
     if (!args.alarmsInEffect) return page(afterWhere, take);
     // #3934: in effect = unacknowledged and the escalation not stopped. The second half is the live answer the wake
     // schedule uses (`alarmEpisodeEnds`), judged here per batch, so a batch is read, the ended alarms are dropped, and
     // the read continues from the last row seen until `take` in-effect alarms are found or the stream ends. The page
     // is then exactly what the same read without the filter would hold, minus the alarms whose escalation ended.
-    const { alarmEscalationEnds } = await import('../../../lib/agentTasks/stall.js');
+    const { alarmEscalationEnds, inEffectCandidateFilter } = await import('../../../lib/agentTasks/stall.js');
+    // #3934 (BLIND P2): alarms certain to be ended are cut in the database, so the scan follows the alarms that could still be in effect.
+    const candidates = await inEffectCandidateFilter(c.db, app.id);
     const out: Awaited<ReturnType<typeof page>> = [];
     let cursor = afterWhere;
     while (out.length < take) {
-      const batch = await page(cursor, Math.max(take, ALARM_SCAN_BATCH));
+      const batch = await page(cursor, Math.max(take, ALARM_SCAN_BATCH), candidates);
       if (batch.length === 0) break;
       const ended = await alarmEscalationEnds(c.db, batch, new Date());
       for (const e of batch) {

@@ -154,6 +154,17 @@ describe('#3934 — escalationEndedAt and alarmsInEffect on a task alarm', () =>
     expect((await events()).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: iso('11:30') });
   });
 
+  it('another task\'s notes never set this alarm\'s end: only its own task\'s record counts', async () => {
+    const t = await task({ ownerWorkerId: ada.id, assigneeWorkerId: anne.id, assignedAt: at('09:30'), status: 'started', startedAt: at('10:00') });
+    const other = await task({ ownerWorkerId: ada.id, assigneeWorkerId: rook.id, assignedAt: at('09:30'), status: 'started', startedAt: at('10:00') });
+    await db.session.create({ data: { id: generateId(), appId: app.id, workerId: anne.id, agentId, startedAt: at('10:00'), updatedAt: at('10:00') } });
+    await tick('11:00');
+    const alarm = (await alarms('stall.no-progress')).find((a) => a.taskId === t.id)!;
+    await db.agentTeamEvent.create({ data: { appId: app.id, taskId: other.id, type: 'task.progress', actorWorkerId: rook.id, createdAt: at('11:30') } });
+    await db.agentTask.update({ where: { id: t.id }, data: { status: 'finished', finishedAt: at('12:00'), resultOutcome: 'succeeded' } });
+    expect((await events()).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: iso('12:00') });
+  });
+
   it('the same answer as the wake schedule: the wake pass closes exactly the alarms the read calls ended', async () => {
     const { t: ended } = await notStartedAlarm();
     const running = await assignedToAnne('10:05'); // its own alarm at 10:20, still running
@@ -253,5 +264,59 @@ describe('#3934 — the surface changes nothing and pages whole', () => {
       data: { appId: app.id, type: 'alarm.post-limit', severity: 'alarm', chain: [], payload: {}, createdAt: at('09:30') },
     });
     expect((await events('alarmsInEffect: true limit: 1')).map((e) => e.id)).toEqual([live.id]);
+  });
+
+  it('without alarmsOnly the filter still lists only alarms (it implies alarmsOnly)', async () => {
+    const { alarm } = await notStartedAlarm();
+    await task({ ownerWorkerId: ada.id, createdAt: at('10:00') }); // ordinary task.* events exist beside the alarm? none seeded: add one
+    await db.agentTeamEvent.create({ data: { appId: app.id, type: 'task.created', createdAt: at('10:01') } });
+    const r = await server.executeOperation(
+      { query: `{ agentTeamEvents(appRef: "${app.id}", alarmsInEffect: true) { id type } }` },
+      { contextValue: ctx(admin.id) },
+    );
+    if (r.body.kind !== 'single' || r.body.singleResult.errors) throw new Error('read failed');
+    expect((r.body.singleResult.data as any).agentTeamEvents.map((e: { id: string }) => e.id)).toEqual([alarm.id]);
+  });
+
+  it('the scan is scoped to the App asked for: another App\'s in-effect alarm is never returned', async () => {
+    const { alarm } = await notStartedAlarm();
+    const other = await db.app.create({ data: { organizationId: (await db.app.findUniqueOrThrow({ where: { id: app.id } })).organizationId, name: 'Other', urn: `other-${generateId()}.example:team` }, select: { id: true } });
+    const w = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: other.id, agentId, name: 'Zed', slug: 'zed' }, select: { id: true } });
+    await db.agentTask.create({ data: { appId: other.id, title: 'Other', ownerWorkerId: w.id, assigneeWorkerId: w.id, assignedAt: at('10:00'), createdAt: at('10:00') } });
+    await tick('10:16');
+    // A task-less alarm needs no open task of this App to pass the cost cut, so only the App scope itself keeps it out.
+    await db.agentTeamEvent.create({ data: { appId: other.id, type: 'alarm.post-limit', severity: 'alarm', chain: [], payload: {}, createdAt: at('10:17') } });
+    const foreign = await db.agentTeamEvent.findMany({ where: { appId: other.id, severity: 'alarm' } });
+    expect(foreign.length).toBeGreaterThan(0);
+    const got = (await events('alarmsInEffect: true')).map((e) => e.id);
+    expect(got).toEqual([alarm.id]);
+    for (const f of foreign) expect(got).not.toContain(f.id);
+  });
+
+  it('the cost follows the alarms that could be in effect: a history of alarms on finished tasks is cut in the database, not judged', async () => {
+    const done = await task({ ownerWorkerId: ada.id, assigneeWorkerId: anne.id, assignedAt: at('09:00'), status: 'finished', startedAt: at('09:10'), finishedAt: at('09:20'), resultOutcome: 'succeeded' });
+    await db.agentTeamEvent.createMany({
+      data: Array.from({ length: 450 }, (_, i) => ({
+        id: generateId(), appId: app.id, taskId: done.id, type: 'stall.not-started', severity: 'alarm', chain: [], payload: {},
+        episodeStart: new Date(at('09:00').getTime() + (i + 1) * 1000), createdAt: new Date(at('09:30').getTime() + i * 1000),
+      })),
+    });
+    const live = await db.agentTeamEvent.create({ data: { appId: app.id, type: 'alarm.post-limit', severity: 'alarm', chain: [], payload: {}, createdAt: at('11:00') } });
+    let taskReads = 0;
+    const counting = new Proxy(db, {
+      get(t, k, r) {
+        const v = Reflect.get(t, k, r);
+        if (k !== 'agentTask') return typeof v === 'function' ? v.bind(t) : v;
+        return new Proxy(v as object, { get(m, f, rr) { const x = Reflect.get(m, f, rr); if (f === 'findMany') taskReads++; return typeof x === 'function' ? x.bind(m) : x; } });
+      },
+    }) as typeof db;
+    const r = await server.executeOperation(
+      { query: `{ agentTeamEvents(appRef: "${app.id}", alarmsInEffect: true, limit: 1) { id } }` },
+      { contextValue: { db: counting, userId: admin.id, roles: ['READER'] } as Context },
+    );
+    if (r.body.kind !== 'single' || r.body.singleResult.errors) throw new Error(JSON.stringify(r.body));
+    expect((r.body.singleResult.data as any).agentTeamEvents.map((e: { id: string }) => e.id)).toEqual([live.id]);
+    // The open-task read of the cut, plus at most the one judged alarm's reads: judging 450 finished-task alarms would read tasks in several batches.
+    expect(taskReads).toBeLessThanOrEqual(3);
   });
 });
