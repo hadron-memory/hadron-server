@@ -70,7 +70,7 @@ beforeEach(async () => {
   const root = await db.node.create({
     data: {
       id: generateId(), memoryId: memory.id, loc: CHAT_LOC, name: 'chat',
-      nodeType: 'record', data: { messageCount: 0, conversationName: 'research' },
+      nodeType: 'record', data: { messageCount: 0, conversationName: 'research', scope: 'private' },
     },
   });
   await db.node.create({
@@ -154,7 +154,9 @@ describe('appendChatMessage — the counter is allocated under the lock', () => 
   it('preserves the rest of the blob it did not touch', async () => {
     await appendChatMessage(db, chat, memEnc, insertMessage('user'));
     const data = await storedChatData();
-    expect(data.conversationName).toBe('research');
+    // #3557: the rest of the blob survives; the name mirror is gone (the row holds it).
+    expect(data.scope).toBe('private');
+    expect(data).not.toHaveProperty('conversationName');
     expect((await storedCounter()).lastMessageAt).toBeInstanceOf(Date);
   });
 });
@@ -173,7 +175,8 @@ describe('updateChatRootData — a late write applies to fresh data', () => {
     }));
 
     const data = await storedChatData();
-    expect(data.stageName).toBe('analysis');
+    expect(data).not.toHaveProperty('stageName');
+    expect((await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: chat.id } })).state).toMatchObject({ stageName: 'analysis' });
     // Pre-#919 the turn wrote back the blob it read at its start, silently
     // reverting the count to 1 — and the NEXT message would then reuse seq 2.
     expect((await storedCounter()).messageCount).toBe(2);
@@ -242,7 +245,8 @@ describe('#1141 — an ENCRYPTED chat root round-trips instead of being written 
     const state = decryptNodeFields({ data: engine.state }, encInfo).data as Record<string, unknown>;
     expect(state.goalStack).toEqual([{ description: 'encrypted goal', createdBy: 'ASSISTANT', status: 'ACTIVE', createdAt: '2026-11-06T00:00:00.000Z' }]);
     expect(after).not.toHaveProperty('goalStack');
-    expect(after.conversationName).toBe('research');
+    expect(after).not.toHaveProperty('conversationName');
+    expect(after.scope).toBe('private');
     expect(after).not.toHaveProperty('messageCount');
     expect((await storedCounter()).messageCount).toBe(0);
   });
@@ -256,7 +260,9 @@ describe('withChatRootLock', () => {
     }));
     expect(value).toBe('research');
     const {messageCount:_count,lastMessageAt:_time,...authored}=before;
-    expect(await storedChatData()).toEqual(authored);
+    // #3557: the name mirror is scrubbed by this locked write; only the authored `scope` stays.
+    const { conversationName: _name, ...kept } = authored;
+    expect(await storedChatData()).toEqual(kept);
   });
 
   it('throws when the chat root is gone', async () => {
