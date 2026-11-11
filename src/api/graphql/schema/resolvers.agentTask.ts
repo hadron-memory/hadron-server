@@ -3051,43 +3051,72 @@ export const agentTaskQueries = {
    * equal-time group — are never skipped (#1713 review, Diego P2-B). `since`
    * stays a coarse time filter, not a continuation.
    */
-  agentTeamEvents: async (
-    _: unknown,
-    args: { appRef: string; since?: unknown; after?: string | null; types?: string[] | null; codePrefix?: string | null; alarmsOnly?: boolean | null; taskId?: string | null; limit?: number | null },
-    ctx: Context,
-  ) => withReadableApp(ctx, args.appRef, async (c, app) => {
-    const since = args.since == null ? null : parseStartBy(args.since);
-    let afterWhere: Prisma.AgentTeamEventWhereInput = {};
-    if (args.after) {
-      // Scoped to this App: another App's event id is just an unknown cursor.
-      const cursor = isId(args.after)
-        ? await c.db.agentTeamEvent.findFirst({
-            where: { id: args.after, appId: app.id },
-            select: { id: true, createdAt: true },
-          })
-        : null;
-      if (!cursor) throw badInput('after is not an event of this App. Pass the id of the last event you read.');
-      afterWhere = {
-        OR: [
-          { createdAt: { gt: cursor.createdAt } },
-          { createdAt: cursor.createdAt, id: { gt: cursor.id } },
-        ],
-      };
-    }
-    return c.db.agentTeamEvent.findMany({
-      where: {
-        appId: app.id,
-        ...afterWhere,
-        ...(since ? { createdAt: { gt: since } } : {}),
-        ...((args.types?.length || args.codePrefix != null) ? { type: { ...(args.types?.length ? { in: args.types } : {}), ...(args.codePrefix != null ? { startsWith: escapePrismaLikePattern(args.codePrefix) } : {}) } } : {}),
-        ...(args.alarmsOnly ? { severity: 'alarm' } : {}),
-        ...(args.taskId ? { taskId: (await resolveTaskRef(c, args.taskId, app.id)) ?? args.taskId } : {}),
-      },
-      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      take: clampListTake(args.limit),
-    });
-  }),
+  agentTeamEvents: async (_: unknown, args: TeamEventsArgs, ctx: Context) =>
+    withReadableApp(ctx, args.appRef, (c, app) => readTeamEvents(c, app, args, clampListTake(args.limit))),
+
+  /**
+   * #3933 (cor:api:120:04, cor:agt:050:11 FIT condition (c)): the same read as agentTeamEvents, the `<field>Page` sibling, so a
+   * page tells the reader whether more remain. One row beyond the page is read to know; `nextCursor` is the id of the last event
+   * served when more remain (pass it as `after`, or with newestFirst as `before`) and null on the last page.
+   */
+  agentTeamEventsPage: async (_: unknown, args: TeamEventsArgs, ctx: Context) =>
+    withReadableApp(ctx, args.appRef, async (c, app) => {
+      const take = clampListTake(args.limit);
+      const rows = await readTeamEvents(c, app, args, take + 1);
+      const events = rows.slice(0, take);
+      const hasMore = rows.length > take;
+      return { events, hasMore, nextCursor: hasMore && events.length > 0 ? events[events.length - 1]!.id : null };
+    }),
 };
+
+type TeamEventsArgs = { appRef: string; since?: unknown; after?: string | null; before?: string | null; newestFirst?: boolean | null; types?: string[] | null; codePrefix?: string | null; alarmsOnly?: boolean | null; taskId?: string | null; limit?: number | null };
+
+async function readTeamEvents(c: Context, app: { id: string }, args: TeamEventsArgs, take: number) {
+  const since = args.since == null ? null : parseStartBy(args.since);
+  // #3933 (cor:agt:050:11 FIT): the newest-end read. `after` continues forward and `before` backward, so each belongs to one
+  // direction; a cursor in the wrong one is refused rather than read as something else.
+  const newestFirst = args.newestFirst === true;
+  if (newestFirst && args.after) throw badInput('after continues the oldest-first read; with newestFirst pass before.');
+  if (!newestFirst && args.before) throw badInput('before continues the newestFirst read; pass newestFirst: true with it.');
+  let afterWhere: Prisma.AgentTeamEventWhereInput = {};
+  if (args.before) {
+    // Scoped to this App, like after: another App's event id is just an unknown cursor.
+    const cursor = isId(args.before)
+      ? await c.db.agentTeamEvent.findFirst({ where: { id: args.before, appId: app.id }, select: { id: true, createdAt: true } })
+      : null;
+    if (!cursor) throw badInput('before is not an event of this App. Pass the id of the last (oldest) event you read.');
+    afterWhere = { OR: [{ createdAt: { lt: cursor.createdAt } }, { createdAt: cursor.createdAt, id: { lt: cursor.id } }] };
+  }
+  if (args.after) {
+    // Scoped to this App: another App's event id is just an unknown cursor.
+    const cursor = isId(args.after)
+      ? await c.db.agentTeamEvent.findFirst({
+          where: { id: args.after, appId: app.id },
+          select: { id: true, createdAt: true },
+        })
+      : null;
+    if (!cursor) throw badInput('after is not an event of this App. Pass the id of the last event you read.');
+    afterWhere = {
+      OR: [
+        { createdAt: { gt: cursor.createdAt } },
+        { createdAt: cursor.createdAt, id: { gt: cursor.id } },
+      ],
+    };
+  }
+  return c.db.agentTeamEvent.findMany({
+    where: {
+      appId: app.id,
+      ...afterWhere,
+      ...(since ? { createdAt: { gt: since } } : {}),
+      ...((args.types?.length || args.codePrefix != null) ? { type: { ...(args.types?.length ? { in: args.types } : {}), ...(args.codePrefix != null ? { startsWith: escapePrismaLikePattern(args.codePrefix) } : {}) } } : {}),
+      ...(args.alarmsOnly ? { severity: 'alarm' } : {}),
+      ...(args.taskId ? { taskId: (await resolveTaskRef(c, args.taskId, app.id)) ?? args.taskId } : {}),
+    },
+    // newestFirst is the exact mirror of the default (createdAt, id) order, so a page boundary inside equal timestamps never repeats or skips.
+    orderBy: newestFirst ? [{ createdAt: 'desc' }, { id: 'desc' }] : [{ createdAt: 'asc' }, { id: 'asc' }],
+    take,
+  });
+}
 
 // ── Field resolvers ───────────────────────────────────────────────────────
 
