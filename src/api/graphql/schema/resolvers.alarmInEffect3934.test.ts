@@ -95,10 +95,11 @@ describe('#3934 — escalationEndedAt and alarmsInEffect on a task alarm', () =>
     expect(await events('alarmsInEffect: true')).toEqual([]);
   });
 
-  it.each([['finished', 'finishedAt'], ['cancelled', 'cancelledAt']] as const)('%s: ended at the move', async (status, col) => {
+  // A not-started alarm ends at the FIRST transition that ends it: a task finished after being started ended at its start.
+  it.each([['finished', 'finishedAt', '10:16'], ['cancelled', 'cancelledAt', '10:25']] as const)('%s: ended at the first ending move', async (status, col, ended) => {
     const { t, alarm } = await notStartedAlarm();
     await db.agentTask.update({ where: { id: t.id }, data: { status, [col]: at('10:25'), ...(status === 'finished' ? { startedAt: at('10:16'), resultOutcome: 'succeeded' } : {}) } });
-    expect(await events()).toMatchObject([{ id: alarm.id, escalationEndedAt: iso('10:25') }]);
+    expect(await events()).toMatchObject([{ id: alarm.id, escalationEndedAt: iso(ended) }]);
     expect(await events('alarmsInEffect: true')).toEqual([]);
   });
 
@@ -121,6 +122,36 @@ describe('#3934 — escalationEndedAt and alarmsInEffect on a task alarm', () =>
     await db.agentTeamEvent.update({ where: { id: alarm.id }, data: { acknowledgedAt: at('10:18'), acknowledgedByWorkerId: ada.id } });
     await db.agentTask.update({ where: { id: t.id }, data: { status: 'started', startedAt: at('10:20') } });
     expect(await events()).toMatchObject([{ id: alarm.id, escalationEndedAt: iso('10:18') }]);
+  });
+
+  it('a later move does not move an end already reached: started 10:20, then finished 10:40, still ended at 10:20', async () => {
+    const { t, alarm } = await notStartedAlarm();
+    await db.agentTask.update({ where: { id: t.id }, data: { status: 'started', startedAt: at('10:20') } });
+    expect(await events()).toMatchObject([{ id: alarm.id, escalationEndedAt: iso('10:20') }]);
+    await db.agentTask.update({ where: { id: t.id }, data: { status: 'finished', finishedAt: at('10:40'), resultOutcome: 'succeeded' } });
+    expect(await events()).toMatchObject([{ id: alarm.id, escalationEndedAt: iso('10:20') }]);
+  });
+
+  it('a finish-by alarm is not ended by a reassignment, only by its deadline edit: the end is the edit, not the assignment', async () => {
+    const t = await task({ ownerWorkerId: ada.id, assigneeWorkerId: anne.id, assignedAt: at('09:30'), finishBy: at('10:00') });
+    await tick('10:15');
+    const [alarm] = await alarms('stall.finish-by');
+    await db.agentTask.update({ where: { id: t.id }, data: { assigneeWorkerId: rook.id, assignedAt: at('10:05') } });
+    expect(await events()).toMatchObject([{ id: alarm.id, escalationEndedAt: null }]);
+    await db.agentTask.update({ where: { id: t.id }, data: { finishBy: at('18:00') } });
+    await db.agentTeamEvent.create({ data: { appId: app.id, taskId: t.id, type: 'task.edited', payload: { fields: ['finishBy'] }, createdAt: at('10:30') } });
+    expect(await events()).toMatchObject([{ id: alarm.id, escalationEndedAt: iso('10:30') }]);
+  });
+
+  it('a no-progress alarm ends at the FIRST note after it began; a later finish does not move it', async () => {
+    const t = await task({ ownerWorkerId: ada.id, assigneeWorkerId: anne.id, assignedAt: at('09:30'), status: 'started', startedAt: at('10:00') });
+    await db.session.create({ data: { id: generateId(), appId: app.id, workerId: anne.id, agentId, startedAt: at('10:00'), updatedAt: at('10:00') } });
+    await tick('11:00');
+    const [alarm] = await alarms('stall.no-progress');
+    await db.agentTeamEvent.create({ data: { appId: app.id, taskId: t.id, type: 'task.progress', actorWorkerId: anne.id, createdAt: at('11:30') } });
+    await db.agentTeamEvent.create({ data: { appId: app.id, taskId: t.id, type: 'task.progress', actorWorkerId: anne.id, createdAt: at('11:45') } });
+    await db.agentTask.update({ where: { id: t.id }, data: { status: 'finished', finishedAt: at('12:00'), resultOutcome: 'succeeded' } });
+    expect((await events()).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: iso('11:30') });
   });
 
   it('the same answer as the wake schedule: the wake pass closes exactly the alarms the read calls ended', async () => {

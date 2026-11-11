@@ -777,12 +777,13 @@ export async function endedAlarmEpisodes(
 
 /**
  * #3934 — {@link endedAlarmEpisodes} with the instant each episode ended, keyed the same way. The classification is
- * the one above, unchanged; the instant is the first move the task's own record shows after the episode began:
- *   - a finished or cancelled task: when it finished or was cancelled; a task parked to backlog: its last row change;
- *   - an open task whose episode moved on: the earliest of its start, (re)assignment, release, progress note, queue
- *     entry, start-by or finish-by edit and assignee or child activity that falls after the episode began.
- * Where the record shows none of those, the row's last change, then `now`: never null, because the classification
- * already says it ended. History is never read for a different answer than the classification gave.
+ * the one above, unchanged; the instant is the FIRST transition after the episode began that ends THIS alarm's rule
+ * (cor:agt:050:14–:17): a finish-by alarm ends on a finish-by edit, a finish or a cancellation, never on an assignment;
+ * a not-started alarm on a start, a reassignment, a release or a start-by edit; a no-progress alarm on the first
+ * progress note, a reassignment or assignee activity; and so on. A finish or cancellation ends every rule, but a later
+ * one does not move an end already reached. A task parked to backlog has no stamp: its last row change. Where the
+ * record shows none, the row's last change, then `now`: never null, because the classification already says it ended.
+ * Assignee and child activity are inputs only an open task has, so they count only while it is open.
  */
 export async function endedAlarmEpisodeInstants(
   db: Db,
@@ -809,22 +810,40 @@ export async function endedAlarmEpisodeInstants(
       running.add(alarmEpisodeKey(c.taskId, STALL_EVENT_TYPE[c.rule], c.episodeStart));
     }
   }
+  // The notes and edits that can end an episode, from the task's own events: the FIRST one after an episode began is
+  // what ended it, and a task's `lastProgressAt` / `finishByEditedAt` are the latest, so they cannot answer this.
+  const floor = new Date(Math.min(...subject.map((a) => a.episodeStart.getTime())));
+  const history = await db.agentTeamEvent.findMany({
+    where: { taskId: { in: taskIds }, createdAt: { gt: floor }, type: { in: ['task.progress', 'task.edited'] } },
+    select: { taskId: true, type: true, createdAt: true, payload: true },
+    orderBy: { createdAt: 'asc' },
+  });
+  const firstAfter = (taskId: string, start: Date, pick: (e: (typeof history)[number]) => boolean): Date | null =>
+    history.find((e) => e.taskId === taskId && e.createdAt.getTime() > start.getTime() && pick(e))?.createdAt ?? null;
+  const edits = (field: string) => (e: (typeof history)[number]) =>
+    e.type === 'task.edited' && Array.isArray((e.payload as { fields?: unknown } | null)?.fields) && ((e.payload as { fields: string[] }).fields).includes(field);
   for (const a of subject) {
     const row = rowOf.get(a.taskId);
     if (row === undefined) continue; // unknown: not found among live, installed Apps' tasks
     const key = alarmEpisodeKey(a.taskId, a.type, a.episodeStart);
-    const after = (d: Date | null | undefined): d is Date => !!d && d.getTime() > a.episodeStart.getTime();
-    if (TERMINAL_STATUSES.has(row.status)) {
-      const at = row.status === 'finished' ? row.finishedAt : row.status === 'cancelled' ? row.cancelledAt : null;
-      out.set(key, after(at) ? at : after(row.updatedAt) ? row.updatedAt : now);
-    } else if (inputsOf.has(a.taskId) && !running.has(key)) {
-      const i = inputsOf.get(a.taskId) as StallInputs;
-      const moves = [
-        row.startedAt, row.assignedAt, row.releasedAt, i.lastProgressAt, i.queuedAt, i.startByEditedAt, i.finishByEditedAt,
-        i.assigneeActivityAt, i.lastChildEndedAt,
-      ].filter(after);
-      out.set(key, moves.length ? new Date(Math.min(...moves.map((d) => d.getTime()))) : after(row.updatedAt) ? row.updatedAt : now);
-    }
+    const terminal = TERMINAL_STATUSES.has(row.status);
+    const i = inputsOf.get(a.taskId);
+    if (!terminal && !(i && !running.has(key))) continue; // not ended
+    // The first transition that ends THIS rule's episode (cor:agt:050:14–:17), never a move another rule would count:
+    // assignment is not what ends a finish-by alarm, and a start is not what ends a no-progress one. A finish or a
+    // cancellation ends every rule. A task parked to backlog has no stamp of its own: its last row change.
+    const edit = (f: string) => firstAfter(a.taskId, a.episodeStart, edits(f));
+    const note = firstAfter(a.taskId, a.episodeStart, (e) => e.type === 'task.progress');
+    const byRule: Record<string, (Date | null | undefined)[]> = {
+      'stall.not-started': [row.startedAt, row.assignedAt, row.releasedAt, edit('startBy'), edit('finishBy')],
+      'stall.no-progress': [row.assignedAt, row.releasedAt, note, edit('finishBy'), i?.assigneeActivityAt, i?.lastChildEndedAt],
+      'assignment.unassignable': [row.assignedAt, row.releasedAt, edit('finishBy')],
+      'stall.owner-unreactive': [row.assignedAt, i?.assigneeActivityAt],
+      'stall.finish-by': [edit('finishBy')],
+    };
+    const moves = [...(byRule[a.type] ?? []), row.finishedAt, row.cancelledAt]
+      .filter((d): d is Date => !!d && d.getTime() > a.episodeStart.getTime());
+    out.set(key, moves.length ? new Date(Math.min(...moves.map((d) => d.getTime()))) : row.updatedAt.getTime() > a.episodeStart.getTime() ? row.updatedAt : now);
   }
   return out;
 }
