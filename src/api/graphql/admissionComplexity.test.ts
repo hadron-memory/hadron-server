@@ -60,7 +60,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.channelMessages",
   "Query.channels",
   "Query.chatHistory",
-  "Query.chatServedPrompts", // #2862: default 50, cap 200 (the field's own paging); under the shared 100 default.
+  "Query.chatServedPrompts", // #2862: default 20, cap 200 (the field's own paging); under the shared 100 default.
   "Query.commentThreads",
   "Query.compiledPromptProvenance",
   "Query.connectionGrants",
@@ -100,6 +100,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.nodeRevisions",
   "Query.nodeRevisionsPage",
   "Query.nodeUsage",
+  "Query.orgBootPromptSigningPreview", // #2973 PR2: default 50, cap 200; the common omitted bound 100 is conservative.
   "Query.organizations",
   "Query.principalGrants",
   "Query.publicAgents",

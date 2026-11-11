@@ -5219,7 +5219,7 @@ export const typeDefs = `#graphql
 
   """
   #2708 / hrn:node:hadronmemory.com:specs:cor:agt:040:10: why a serve would be refused now, the typed code the bind,
-  chat or run itself would get. BOOT_PROMPT_NOT_SIGNED cannot occur until an organisation can switch signing on (#1614).
+  chat or run itself would get. BOOT_PROMPT_NOT_SIGNED occurs only where the serving App's organisation has switched signing on (setOrgBootPromptSigning, #2973) AND the deployment ships signing.
   """
   enum BootPromptServeRefusal {
     BOOT_PROMPT_INSTALL_LICENSE_INACTIVE
@@ -5270,6 +5270,66 @@ export const typeDefs = `#graphql
     served: BootPromptServeDecision
     "The typed code the serve would be refused with; null exactly when served is set."
     refusal: BootPromptServeRefusal
+  }
+
+  """
+  #2973 PR2 / hrn:node:hadronmemory.com:specs:cor:agt:040:09: where an organisation stands on requiring a SIGNED compiled
+  boot prompt. required is the stored switch; enforced is what is true: the switch AND the deployment shipping signing
+  (PASSKEY_SIGNING_ENABLED), so an organisation never reads as protected on a deployment where it is not. deploymentSigns
+  is the second term alone. Readable by the organisation's current ADMINs and OWNERs, acting as themselves.
+  """
+  type OrgBootPromptSigning {
+    required: Boolean!
+    enforced: Boolean!
+    deploymentSigns: Boolean!
+  }
+
+  """
+  #2973 PR2 / hrn:node:hadronmemory.com:specs:cor:agt:040:09 and hrn:node:hadronmemory.com:specs:cor:agt:040:10: what
+  switching signing on would do to ONE served compiled boot prompt.
+  SIGNATURE_PENDING: the served revision's signature is pending (a first passkey's cooling-off window), so it would stop
+  being served until the window ends. REVISION_CHANGES: the serve would fall back to changesToRevSeq, the newest older
+  revision that is approved and signed (R35). UNSIGNED_STOPS: no approved revision is signed, so it would be refused.
+  """
+  enum BootPromptSigningPreviewState {
+    SIGNATURE_PENDING
+    REVISION_CHANGES
+    UNSIGNED_STOPS
+  }
+
+  "#2973 PR2: one served compiled boot prompt the switch would change. workerId is null on the install-level row (an uncustomised worker and a chat share it)."
+  type BootPromptSigningPreviewRow {
+    appId: ID!
+    appUrn: String!
+    agentId: ID!
+    agentName: String!
+    workerId: ID
+    workerName: String
+    compiledNodeId: ID!
+    compiledNodeUrn: String
+    "The revision served today."
+    servedRevSeq: Int!
+    state: BootPromptSigningPreviewState!
+    changesToRevSeq: Int
+  }
+
+  """
+  #2973 PR2 / hrn:node:hadronmemory.com:specs:cor:agt:040:09: the preview shown BEFORE an organisation's switch goes on,
+  one page of it. Each request mints its own previewToken over the FULL preview (every row, every page) at one consistent
+  snapshot; any page's token is accepted within its own ten minutes. setOrgBootPromptSigning(required: true) must present it. The token grants no
+  authority and holds no prompt text; it expires after ten minutes. While the deployment does not ship signing the rows
+  still say what WOULD change, and enforced says false.
+  """
+  type BootPromptSigningPreview {
+    enforced: Boolean!
+    deploymentSigns: Boolean!
+    "The number of rows across all pages."
+    total: Int!
+    rows: [BootPromptSigningPreviewRow!]!
+    hasMore: Boolean!
+    "Pass as after to read the next page; null on an empty page."
+    endCursor: String
+    previewToken: String!
   }
 
   """
@@ -9954,6 +10014,19 @@ export const typeDefs = `#graphql
     identity or authority claim.
     """
     agentServedBootPrompt(agentRef: String!, appRef: String, llmModel: String): AgentServedBootPrompt!
+    """
+    #2973 PR2 / hrn:node:hadronmemory.com:specs:cor:agt:040:09: the organisation's boot-prompt signing switch and whether
+    it is enforced. Only the organisation's current ADMINs and OWNERs, acting as themselves. A worker session (an admin's
+    included), an App key, an App run, impersonation, a non-member (a platform admin included), a revoked member, a member
+    below ADMIN, and an organisation that does not exist are all refused with the same FORBIDDEN.
+    """
+    orgBootPromptSigning(org: ID!): OrgBootPromptSigning!
+    """
+    #2973 PR2 / hrn:node:hadronmemory.com:specs:cor:agt:040:09: what switching the organisation's boot-prompt signing on
+    would change, paged (first at least 1, default 20, served at 200 when more is asked, hrn:node:hadronmemory.com:specs:cor:api:120:04; after is the previous page's endCursor). The audience and refusals are
+    orgBootPromptSigning's.
+    """
+    orgBootPromptSigningPreview(org: ID!, first: Int, after: String): BootPromptSigningPreview!
 
     """
     Uniform paginated agent list (#473). Scope: Agents owned by the caller's
@@ -14290,6 +14363,18 @@ export const typeDefs = `#graphql
     otherwise as setAgentBootPrompt.
     """
     setAppAgentBootPrompt(appRef: String!, agentRef: String!, nodeRef: String): AppAgent!
+    """
+    #2973 PR2 / hrn:node:hadronmemory.com:specs:cor:agt:040:09: switch an organisation's boot-prompt signing on or off.
+    The audience is orgBootPromptSigning's (current ADMIN or OWNER, as themselves; every other shape is FORBIDDEN, the same
+    for an organisation that does not exist), re-checked inside the transaction. No passkey or step-up either way.
+    Off needs nothing and is idempotent. On requires the previewToken of a preview fetched with
+    orgBootPromptSigningPreview by THIS caller for THIS organisation in the last ten minutes: the server locks the
+    organisation, recomputes the whole preview and refuses BOOT_PROMPT_SIGNING_PREVIEW_STALE, changing nothing, when the
+    token is missing, forged, another organisation's or caller's, expired, future-dated, or describes a preview that has
+    since changed. That refusal comes only after the audience check. On when already on, with a valid token, succeeds and
+    changes nothing. Turning the switch on does not turn on the deployment's signing: read enforced.
+    """
+    setOrgBootPromptSigning(org: ID!, required: Boolean!, previewToken: String): OrgBootPromptSigning!
     """
     #2045 — set or clear a worker's boot-prompt pointer (for customised workers). The node must be compiled and
     sit in the worker's App's install memory for the worker's Agent. Only the App's manager, as themselves;
