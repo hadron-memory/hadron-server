@@ -2410,7 +2410,7 @@ export const nodeMoveOps = {
             // fails loud on a destination collision).
             if (planOnly) {
               const readable = await getAccessibleMemoryIds(txCtx, destMemoryId);
-              warningsWithheld = readable !== null && !readable.includes(destMemoryId);
+              warningsWithheld = !readable.includes(destMemoryId);
             }
             const result = await moveNodeSubtree(tx, {
               source,
@@ -4805,7 +4805,7 @@ export const nodeMutations = {
       const node = await ctx.db.node.findUnique({ where: { id: revisionRef.nodeId } });
       if (!node || node.deletedAt) throw notFound();
       const accessible = await getAccessibleMemoryIds(ctx);
-      const canRead = (memoryId: string) => accessible === null || accessible.includes(memoryId);
+      const canRead = (memoryId: string) => accessible.includes(memoryId);
       if (!canRead(node.memoryId) || !canRead(revisionRef.memoryId ?? node.memoryId)) throw notFound();
       await requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, node.memoryId);
       const revision = await ctx.db.nodeRevision.findUnique({ where: { id: revisionId } });
@@ -5166,7 +5166,7 @@ export const nodeMutations = {
       });
       if (!node || node.deletedAt) throw notFound();
       const accessible = await getAccessibleMemoryIds(ctx);
-      const canRead = (memId: string) => accessible === null || accessible.includes(memId);
+      const canRead = (memId: string) => accessible.includes(memId);
       if (!canRead(node.memoryId) || !canRead(revision.memoryId ?? node.memoryId)) {
         throw notFound();
       }
@@ -5252,7 +5252,7 @@ export const nodeMutations = {
         throw new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND', nodeRef } });
       }
       const accessibleIds = await getAccessibleMemoryIds(ctx);
-      if (accessibleIds !== null && !accessibleIds.includes(node.memoryId)) {
+      if (!accessibleIds.includes(node.memoryId)) {
         // Denied and not-found are indistinguishable on purpose (nodeById parity).
         throw new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND', nodeRef } });
       }

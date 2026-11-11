@@ -457,7 +457,7 @@ export function isMemoryReadableCached(ctx: Context, memoryId: string): Promise<
   let pending = cache.get(memoryId);
   if (!pending) {
     pending = getAccessibleMemoryIds(ctx, memoryId).then(
-      (ids) => ids === null || ids.includes(memoryId),
+      (ids) => ids.includes(memoryId),
     );
     cache.set(memoryId, pending);
     // A rejection is not an answer: drop it so a one-shot fault is not replayed (#1327).
@@ -502,7 +502,7 @@ export function withoutRequestCaches(ctx: Context, db?: Prisma.TransactionClient
 export function isMemoryReadableFresh(ctx: Context, memoryId: string, tx?: Prisma.TransactionClient): Promise<boolean> {
   const uncached = withoutRequestCaches(ctx, tx);
   const cache = (ctx.memoryReadCache ??= new Map<string, Promise<boolean>>());
-  const pending = getAccessibleMemoryIds(uncached, memoryId).then((ids) => ids === null || ids.includes(memoryId));
+  const pending = getAccessibleMemoryIds(uncached, memoryId).then((ids) => ids.includes(memoryId));
   cache.set(memoryId, pending);
   pending.catch(() => { if (cache.get(memoryId) === pending) cache.delete(memoryId); });
   return pending;
@@ -547,7 +547,7 @@ export async function resolveReadableMemoryId(
     throw e;
   }
   const accessible = await getAccessibleMemoryIds(ctx, resolvedId);
-  if (accessible !== null && !accessible.includes(resolvedId)) return null;
+  if (!accessible.includes(resolvedId)) return null;
   return resolvedId;
 }
 
@@ -704,7 +704,7 @@ function userPrincipalOnly(ctx: Context): Context {
 function holdsContentReadIndependently(ctx: Context, memoryId: string): Promise<boolean> {
   const self = userPrincipalOnly(ctx);
   return getAccessibleMemoryIds(self, memoryId, { excludeAppDerived: true }).then(
-    (ids) => ids === null || ids.includes(memoryId),
+    (ids) => ids.includes(memoryId),
   );
 }
 
@@ -1119,7 +1119,7 @@ export function nodeNotFoundError(ref: string): GraphQLError {
 /** Per-list read snapshots; never shared with mutations or another request. */
 type MemoryRecordReadBatch = {
   memberOrgIds?: Promise<string[]>;
-  accessibleIds?: Promise<string[] | null>;
+  accessibleIds?: Promise<string[]>;
   /** #1813: the caller's system-record grant lookups, built from THIS list's ctx so it cannot span principals. */
   systemGrants?: SystemMemoryGrantBatch;
 };
@@ -1234,7 +1234,7 @@ export async function canReadMemoryRecord(
     }
     if (ctx.sessionId || ctx.impersonation || isRunPrincipal(ctx) || !ctx.userId) {
       const ids = await accessible();
-      return ids === null || ids.includes(memory.id);
+      return ids.includes(memory.id);
     }
     return (await systemMemoryReadGrants(ctx.db, ctx, memory.id, systemGrants())).length > 0;
   }
@@ -1257,11 +1257,11 @@ export async function canReadMemoryRecord(
     // The shared content gate checks the casting and excludes team/session rows.
     if (memory.class !== 'app') return false;
     const ids = await accessible();
-    return ids !== null && ids.includes(memory.id);
+    return ids.includes(memory.id);
   }
   if (ctx.appId && ctx.sessionId && !ctx.userId) {
     const ids = await accessible();
-    return ids === null || ids.includes(memory.id);
+    return ids.includes(memory.id);
   }
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return true;
   // All app-class shapes use their node-content audience. The historical
@@ -1269,7 +1269,7 @@ export async function canReadMemoryRecord(
   // a Worker/session memory record even when their nodes were concealed.
   if (memory.class === 'app') {
     const ids = await accessible();
-    return ids === null || ids.includes(memory.id);
+    return ids.includes(memory.id);
   }
   // findFirst (not findUnique) so a REVOKED (soft-deleted) membership no longer
   // grants access. A user-owned memory (org NULL) has no membership fast-path
@@ -1309,7 +1309,7 @@ export async function canReadMemoryRecord(
   }
   // Scope the shared gate to THIS memory so it stays an indexed point-read.
   const accessibleIds = await accessible();
-  return accessibleIds === null || accessibleIds.includes(memory.id);
+  return accessibleIds.includes(memory.id);
 }
 
 /**
@@ -2279,8 +2279,14 @@ async function appDerivedMemoryIds(ctx: Context, onlyMemoryId?: string): Promise
 }
 
 /**
- * Returns the memory IDs accessible to the current caller, or null if the
- * caller has unrestricted access (global ADMIN/OWNER).
+ * Returns the memory IDs accessible to the current caller: always a materialised list, never an "unrestricted"
+ * sentinel (hrn:node:hadronmemory.com:specs:cor:acl:120:01, "A lens never grants"). A platform ADMIN/OWNER gets a
+ * list too, which still leaves out another user's owner-owned memories. #3921 narrowed the type from
+ * `string[] | null` once #3916 retired the operator principal, the last `return null`. A caller must not treat an
+ * empty list or a missing value as read-all.
+ *
+ * This is NOT `getAccessibleMemoryIds` in `src/mcp/access-control.ts`: that same-named function keeps its live
+ * ADMIN/OWNER -> null contract and is not narrowed.
  *
  * - Clients: memories from agent subscriptions only
  * - Users: memories from org memberships + cross-org subscriptions + public memories
@@ -2301,7 +2307,7 @@ export async function getAccessibleMemoryIds(
   // one App be re-granted to another App's audience. Everywhere else the fold
   // is correct and the default keeps it.
   options?: { excludeAppDerived?: boolean; publicTargetIds?: readonly string[] },
-): Promise<string[] | null> {
+): Promise<string[]> {
   const scope = onlyMemoryId ? { id: onlyMemoryId } : {};
   // App Key with an active session — hard-isolate to the session's memory
   // plus the agent's system memory, with only the named PUBLIC-knowledge
@@ -2639,7 +2645,7 @@ async function sessionAudienceFilter(ctx: Context): Promise<Record<string, unkno
 /** Prisma `where` clause that restricts nodes to accessible memories. */
 export async function memoryAccessFilter(ctx: Context): Promise<Record<string, unknown>> {
   const ids = await getAccessibleMemoryIds(ctx);
-  return ids === null ? {} : { memoryId: { in: ids } };
+  return { memoryId: { in: ids } };
 }
 
 /**

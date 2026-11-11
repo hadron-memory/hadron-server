@@ -97,7 +97,7 @@ describe('one moved-snapshot defense at a time, with real PostgreSQL row lookups
   // canRead and accessible are coherent in today's shared scope, making either
   // defense mask removal of the other. Override just ONE scope projection to
   // make the other defense permissive; the actual revision lookup is never mocked.
-  it.each(['explicit-list', 'no-filter'] as const)('canRead alone conceals a capture in a %s scope', async kind => {
+  it('canRead alone conceals a capture in an explicit-list scope', async () => {
     const captureId = readableForeignId;
     const { target, snapshot } = await movedCapture(captureId);
     const principal = reader;
@@ -107,7 +107,7 @@ describe('one moved-snapshot defense at a time, with real PostgreSQL row lookups
     expect(realScope!.accessible).toContain(captureId);
     expect(await db.nodeRevision.findUniqueOrThrow({ where: { id: snapshot.id } })).toMatchObject({ approvalHash: null });
     const canRead = vi.fn((id: string) => id !== captureId);
-    const scope = vi.spyOn(history, 'nodeRevisionsScope').mockResolvedValue({ ...realScope!, accessible: kind === 'no-filter' ? null : realScope!.accessible, canRead });
+    const scope = vi.spyOn(history, 'nodeRevisionsScope').mockResolvedValue({ ...realScope!, canRead });
     expect(await plainPinWarnings(principal, { memoryId }, '{{> target rev=1}}')).toEqual([]);
     expect(scope).toHaveBeenCalledWith(expect.anything(), target.id);
     expect(canRead).toHaveBeenCalledWith(captureId);

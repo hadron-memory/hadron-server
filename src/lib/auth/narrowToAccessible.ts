@@ -9,13 +9,14 @@
  * D-004 rejected erroring because it "turns a legitimate App-wide scope into a
  * failure for every member lacking one memory".
  *
- * `accessible` is a fully MATERIALISED set, or the explicit token
- * `'unrestricted'` when the canonical gate itself declared no restriction. It
- * is never `null`: the gates return an explicit id list for platform admins
- * precisely so the owner-only carve-out flows through, and a helper that read a
- * missing value as "keep everything" would reintroduce those ids. The caller
- * materialises through the canonical gate (`getAccessibleMemoryIds` on GraphQL,
- * `getMemoryAccess` on MCP) and passes the result here.
+ * `accessible` is a fully MATERIALISED set, never an "unrestricted" sentinel
+ * (hrn:node:hadronmemory.com:specs:cor:acl:120:01): the gates return an explicit
+ * id list for platform admins precisely so the owner-only carve-out flows
+ * through, and a helper that read a missing value as "keep everything" would
+ * reintroduce those ids. #3921 removed the `'unrestricted'` arm once the GraphQL
+ * gate could no longer return null; it had no caller left. The caller
+ * materialises through the canonical gate (`getAccessibleMemoryIds` on GraphQL)
+ * and passes the result here.
  *
  * Order-preserving: a scope is an ORDERED list and its order is what the
  * task-customization operation will consume. The dropped half comes back as
@@ -31,9 +32,8 @@ export interface NarrowedMemoryIds {
 
 export function narrowToAccessible(
   requested: readonly string[],
-  accessible: ReadonlySet<string> | 'unrestricted',
+  accessible: ReadonlySet<string>,
 ): NarrowedMemoryIds {
-  if (accessible === 'unrestricted') return { kept: [...requested], droppedIds: [] };
   const kept: string[] = [];
   const droppedIds: string[] = [];
   for (const id of requested) (accessible.has(id) ? kept : droppedIds).push(id);

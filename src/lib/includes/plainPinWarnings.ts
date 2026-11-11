@@ -74,11 +74,9 @@ export async function plainPinWarnings(
     if (!live || (!snapshot && live.revSeq !== revision)) continue;
     const readableSnapshot = snapshot ? await ctx.db.nodeRevision.findFirst({
       where: { id: snapshot.id, nodeId: target.id,
-        // #2750 / cor:dmo:150:07: unrestricted history admits the capture
-        // above and applies no SQL memory filter. An empty OR arm is not TRUE.
-        ...(scope.accessible === null ? {} : {
-          OR: [{ memoryId: scope.memoryId }, { memoryId: null }, { memoryId: { in: scope.accessible } }],
-        }),
+        // #2750 / cor:dmo:150:07: the SQL memory filter is the second defense behind canRead. The accessible set is
+        // always a materialised list (#3921), so it is always applied. An empty OR arm is not TRUE.
+        OR: [{ memoryId: scope.memoryId }, { memoryId: null }, { memoryId: { in: scope.accessible } }],
       }, select: { approvalHash: true },
     }) : null;
     if (snapshot && !readableSnapshot) continue;

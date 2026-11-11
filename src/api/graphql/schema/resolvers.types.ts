@@ -136,7 +136,7 @@ function sessionEventMemoryIds(ctx: Context, parentSessionId: string): Promise<s
       const memories = await ctx.db.memory.findMany({
         where: { AND: [
           { OR: [strictSessionMemoryFilter(ctx), ...(bound?.memoryId ? [{ id: bound.memoryId }] : [])] },
-          ...(accessible === null ? [] : [{ id: { in: accessible } }]),
+          { id: { in: accessible } },
         ] },
         select: { id: true },
       });
@@ -687,10 +687,10 @@ async function flushAuthorshipTasks(ctx: Context, batch: { pending: Map<string, 
       select: { id: true, loc: true, memoryId: true },
     });
     const accessible = await getAccessibleMemoryIds(ctx);
-    const readable = accessible === null ? null : new Set(accessible);
+    const readable = new Set(accessible);
     const refs = new Map(await Promise.all(tasks.map(async (task) => [
       task.id,
-      readable === null || readable.has(task.memoryId) ? await resolveNodeUrnField(task, ctx) : null,
+      readable.has(task.memoryId) ? await resolveNodeUrnField(task, ctx) : null,
     ] as const)));
     for (const item of pending) item.resolve(refs.get(item.id) ?? null);
   } catch (error) {
@@ -927,10 +927,10 @@ async function flushValidationBatch(
     // Use the GraphQL node-content gate, including active-session isolation.
     // One access fold replaces a per-report task-memory check.
     const accessible = tasks.length === 0 ? [] : await getAccessibleMemoryIds(ctx);
-    const readable = accessible === null ? null : new Set(accessible);
+    const readable = new Set(accessible);
     const taskRefs = new Map(await Promise.all(tasks.map(async (task) => [
       task.id,
-      readable === null || readable.has(task.memoryId) ? await resolveNodeUrnField(task, ctx) : null,
+      readable.has(task.memoryId) ? await resolveNodeUrnField(task, ctx) : null,
     ] as const)));
     for (const item of pending) {
       const report = byKey.get(item.key) ?? null;
@@ -1846,7 +1846,7 @@ export const typeResolvers = {
       });
       if (!row) return null;
       const accessible = await getAccessibleMemoryIds(ctx);
-      return accessible === null || accessible.includes(row.memoryId) ? row : null;
+      return accessible.includes(row.memoryId) ? row : null;
     },
     // 036-ai-service-config: registry-backed reads of the App's
     // 'default' config (legacy ai_* columns dropped).

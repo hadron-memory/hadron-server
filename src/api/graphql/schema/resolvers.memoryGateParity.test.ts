@@ -167,7 +167,7 @@ async function recordGate(ctx: Context, memoryId: string): Promise<boolean> {
  */
 async function enumerateGate(ctx: Context, memoryId: string): Promise<boolean> {
   const ids = await getAccessibleMemoryIds(ctx, memoryId);
-  return ids === null || ids.includes(memoryId);
+  return ids.includes(memoryId);
 }
 
 /** MCP NODE point read — the same question as `enumerateGate`, other surface. */

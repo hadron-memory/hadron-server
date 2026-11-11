@@ -80,12 +80,10 @@ export const edgeQueries = {
       } catch {
         return empty;
       }
-      if (accessible !== null && !accessible.includes(resolvedMemoryId)) return empty;
+      if (!accessible.includes(resolvedMemoryId)) return empty;
       memoryWhere = { memoryId: resolvedMemoryId };
-    } else if (accessible !== null) {
-      memoryWhere = { memoryId: { in: accessible } };
     } else {
-      memoryWhere = {};
+      memoryWhere = { memoryId: { in: accessible } };
     }
     if (scope.scopedOrgId) {
       memoryWhere = { ...memoryWhere, memory: { organizationId: scope.scopedOrgId } };
