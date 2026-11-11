@@ -123,6 +123,29 @@ describe('#3833 retrofit', () => {
     expect(await locsOf(agent.memoryId)).toEqual(LOCS.slice().sort());
   });
 
+  it('F1: a memory that stopped being a system memory after selection is skipped under the lock', async () => {
+    const a = await bareAgent('stale');
+    // Change class inside the window between selection and the per-Agent transaction.
+    const realTx = db.$transaction.bind(db);
+    const spy = vi.spyOn(db, '$transaction').mockImplementationOnce(((fn: never, o: never) => {
+      return db.memory.update({ where: { id: a.memoryId }, data: { class: 'knowledge' } }).then(() => realTx(fn, o));
+    }) as never);
+    await retrofitAgentSkeletons(db);
+    spy.mockRestore();
+    expect(await locsOf(a.memoryId)).toEqual([]);
+  });
+
+  it('F2: a dry run reports exactly what apply then creates, children included', async () => {
+    const base = await bareAgent('dbase');
+    const child = await bareAgent('dchild', base.id);
+    const dry = await retrofitAgentSkeletons(db, { dryRun: true });
+    expect(dry.find((r) => r.memoryId === child.memoryId)!.created).toEqual([]);
+    expect(await locsOf(base.memoryId)).toEqual([]);
+    const applied = await retrofitAgentSkeletons(db);
+    expect(applied.map((r) => [r.agentUrn, r.created.slice().sort()]))
+      .toEqual(dry.map((r) => [r.agentUrn, r.created.slice().sort()]));
+  });
+
   it('dry run writes nothing but reports what it would create', async () => {
     const a = await bareAgent('dry');
     const rows = await retrofitAgentSkeletons(db, { dryRun: true });
