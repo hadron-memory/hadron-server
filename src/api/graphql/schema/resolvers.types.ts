@@ -1,3 +1,4 @@
+import { readableSupersedingSessionId } from '../../../lib/sessionSuperseded.js';
 import { isNewInstallPayload } from './installationPayload.js';
 import { listAppInstallations, appInstallationWhere } from '../../../lib/appInstallations.js';
 import { liveTxContext, liveReadSnapshotContext } from './authorizedTx.js';
@@ -23,7 +24,7 @@ import { sessionEndReason } from '../../../lib/sessionEndReason.js';
 // (split step 3). No behavior change.
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 import { isLifecycleActive } from '@hadron-memory/access-control';
-import { GraphQLError } from 'graphql';
+import { GraphQLError, type GraphQLResolveInfo, type SelectionSetNode } from 'graphql';
 import {
   getPrimaryAgent,
   isAgentInstalledAndLicensed,
@@ -484,6 +485,30 @@ function loadEntryNode(ctx: Context, entryNodeUrn: string): Promise<{ memoryId: 
   return pending;
 }
 
+/**
+ * #2793(a): only these identity fields need no body-dependent Node resolver.
+ * Unknown selections (and calls without GraphQL info) retain the full-row path.
+ * Inspect all merged field nodes and fragments; aliases do not rename the schema field.
+ * Conservatively include skipped selections too: they can only cause a full read.
+ */
+function identityOnlyEdgeEndpoint(info?: GraphQLResolveInfo): boolean {
+  if (!info) return false;
+  const seen = new Set<string>();
+  const identity = new Set(['id', 'loc', 'name', 'urn', 'actionUrn', '__typename']);
+  function walk(set: SelectionSetNode): boolean {
+    return set.selections.every(selection => {
+      if (selection.kind === 'Field') return identity.has(selection.name.value);
+      if (selection.kind === 'InlineFragment') return walk(selection.selectionSet);
+      const name = selection.name.value;
+      if (seen.has(name)) return true;
+      seen.add(name);
+      const fragment = info!.fragments[name];
+      return !!fragment && walk(fragment.selectionSet);
+    });
+  }
+  return info.fieldNodes.every(field => !!field.selectionSet && walk(field.selectionSet));
+}
+
 /** An edge endpoint's memoryId (preloaded relation, or a memoized FK load). */
 async function edgeEndpointMemoryId(
   ctx: Context,
@@ -492,7 +517,7 @@ async function edgeEndpointMemoryId(
 ): Promise<string | null> {
   const pre = preloaded as { memoryId?: string } | null | undefined;
   if (pre && typeof pre.memoryId === 'string') return pre.memoryId;
-  const node = (await loadEdgeEndpointNode(ctx, endpointId)) as { memoryId?: string } | null;
+  const node = (await loadEdgeEndpointNode(ctx, endpointId, true)) as { memoryId?: string } | null;
   return node && typeof node.memoryId === 'string' ? node.memoryId : null;
 }
 
@@ -520,13 +545,14 @@ async function resolveEdgeEndpoint(
   ctx: Context,
   e: { memoryId?: string; sourceId: string; targetId: string; source?: unknown; target?: unknown },
   side: 'source' | 'target',
+  identityOnly = false,
 ): Promise<unknown | null> {
   const inherited = batchInheritedEndpoint(e, side);
   if (inherited) {
     const { endpoint, via } = inherited;
     // Metadata admission is not a body grant: recheck the exact effective
     // node when the endpoint object is selected, preserving the child view.
-    const row = await loadEdgeEndpointNode(ctx, endpoint.id) as { id: string; memoryId: string; loc: string; role?: string | null; deletedAt: Date | null } | null;
+    const row = await loadEdgeEndpointNode(ctx, endpoint.id, identityOnly) as { id: string; memoryId: string; loc: string; role?: string | null; deletedAt: Date | null } | null;
     if (!row || row.deletedAt || row.memoryId !== endpoint.memoryId || row.loc !== endpoint.loc) return null;
     if ((endpoint.inheritedFrom || endpoint.memoryId === via) && !(await servedEndpointInEffect(ctx.db, via, endpoint.loc, { id: endpoint.id, memoryId: endpoint.memoryId, inheritedFrom: endpoint.inheritedFrom ?? null }, row))) return null;
     if (!endpoint.inheritedFrom && !(await isMemoryReadableCached(ctx, row.memoryId))) return null;
@@ -542,7 +568,7 @@ async function resolveEdgeEndpoint(
   const node =
     pre && typeof pre.memoryId === 'string' && pre.deletedAt !== undefined
       ? pre
-      : ((await loadEdgeEndpointNode(ctx, wantId)) as { memoryId?: string; deletedAt?: Date | null } | null);
+      : ((await loadEdgeEndpointNode(ctx, wantId, identityOnly)) as { memoryId?: string; deletedAt?: Date | null } | null);
   if (!node || node.deletedAt || typeof node.memoryId !== 'string') return null;
   // #1893 — an endpoint stamped inherited was admitted through the child it
   // was read through (resolveInheritedEdges); its own memory is the base's,
@@ -1050,6 +1076,29 @@ function lastEventAtBatched(ctx: Context, sessionId: string): Promise<Date | nul
   return batch.result.then((byId) => byId.get(sessionId));
 }
 
+/**
+ * #3006 — `Node.indexTruncated` for a parent whose projection omits `embeddingTruncatedChunks`, batched per
+ * request: every such parent resolved in the same tick shares ONE `findMany`, instead of one `findUnique` each
+ * (same shape as `lastEventAtBatched`). A parent that carries the column never reaches this, and the read is by
+ * the parent's own id, so the node read gate that produced the parent is unchanged.
+ */
+const truncatedChunkBatches = new WeakMap<object, { ids: Set<string>; result: Promise<Map<string, number | null>> }>();
+function truncatedChunksBatched(ctx: Context, nodeId: string): Promise<number | null | undefined> {
+  let batch = truncatedChunkBatches.get(ctx);
+  if (!batch) {
+    const ids = new Set<string>();
+    const result = Promise.resolve().then(async () => {
+      truncatedChunkBatches.delete(ctx);
+      const rows = await ctx.db.node.findMany({ where: { id: { in: [...ids] } }, select: { id: true, embeddingTruncatedChunks: true } });
+      return new Map(rows.map((row) => [row.id, row.embeddingTruncatedChunks]));
+    });
+    batch = { ids, result };
+    truncatedChunkBatches.set(ctx, batch);
+  }
+  batch.ids.add(nodeId);
+  return batch.result.then((byId) => byId.get(nodeId));
+}
+
 export const typeResolvers = {
   ...servedPromptTypeResolvers,
   Chat: {
@@ -1080,7 +1129,7 @@ export const typeResolvers = {
   Node: {
     indexTruncated: async (n: { id: string; embeddingTruncatedChunks?: number | null }, _: unknown, ctx: Context) => {
       const count = n.embeddingTruncatedChunks !== undefined ? n.embeddingTruncatedChunks
-        : (await ctx.db.node.findUnique({ where: { id: n.id }, select: { embeddingTruncatedChunks: true } }))?.embeddingTruncatedChunks;
+        : await truncatedChunksBatched(ctx, n.id);
       return count != null && count > 0 ? { omittedChunks: count } : null;
     },
     outgoingEdges: (n: { id: string; memoryId: string }, _: unknown, ctx: Context) => batchReadEdges(n, ctx, 'out'),
@@ -1289,10 +1338,10 @@ export const typeResolvers = {
     //       a SAME-memory edge's endpoints sit in the already-authorized memory
     //       (every surface that surfaced this edge authorized that memory), so
     //       they need no per-endpoint check. Denied ≡ null.
-    source: (e: { memoryId?: string; sourceId: string; targetId: string; source?: unknown; target?: unknown }, _: unknown, ctx: Context) =>
-      resolveEdgeEndpoint(ctx, e, 'source'),
-    target: (e: { memoryId?: string; sourceId: string; targetId: string; source?: unknown; target?: unknown }, _: unknown, ctx: Context) =>
-      resolveEdgeEndpoint(ctx, e, 'target'),
+    source: (e: { memoryId?: string; sourceId: string; targetId: string; source?: unknown; target?: unknown }, _: unknown, ctx: Context, info?: GraphQLResolveInfo) =>
+      resolveEdgeEndpoint(ctx, e, 'source', identityOnlyEdgeEndpoint(info)),
+    target: (e: { memoryId?: string; sourceId: string; targetId: string; source?: unknown; target?: unknown }, _: unknown, ctx: Context, info?: GraphQLResolveInfo) =>
+      resolveEdgeEndpoint(ctx, e, 'target', identityOnlyEdgeEndpoint(info)),
     // #481 parity — edges are loc-addressed peers of nodes (spec 037), so
     // they carry their fully-qualified URN the same way. Edge.memoryId is the
     // denormalized SOURCE-side memory, which is exactly the URN's memory.
@@ -2251,6 +2300,7 @@ export const typeResolvers = {
     },
   },
   Session: {
+    supersededBySessionId: readableSupersedingSessionId,
     /** #2047: a bind's record, self-authorized (worker internals). */
     servedPrompts: servedPromptOwnerFields.sessionServedPrompts,
     /** #1156 / cor:dmo:070:05: no new read gate; the parent Session is authorized. */

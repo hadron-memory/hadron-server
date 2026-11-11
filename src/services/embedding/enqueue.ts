@@ -17,6 +17,7 @@ import { isEmbeddingConfigured } from '../../lib/embedding/index.js';
 import { randomUUID } from 'node:crypto';
 import { embeddingDispatcher, embedNode, EMBED_WAKE_SUBJECT, type EmbedPlaintext } from '../../jobs/embedNodes.js';
 import { getBusClient } from '../../lib/bus/index.js';
+import type { StepOutcome } from '../../lib/shutdownSteps.js';
 import { SYSTEM_MEMORY_CLASS } from '../../lib/embedding/indexing.js';
 
 /**
@@ -50,14 +51,19 @@ export function publishEmbedWake(_payload: { nodeId?: string }): Promise<void> {
 
 /** Close synchronously, retain at most the already admitted publish, and wait boundedly. */
 export async function stopEmbeddingPublisher(graceMs = 5_000): Promise<boolean> {
+  return (await stopEmbeddingPublisherOutcome(graceMs)) === 'ok';
+}
+
+/** #3845: the same stop, saying how it failed: `ok` or `grace_timeout` (an admitted publish outlived the grace). */
+export async function stopEmbeddingPublisherOutcome(graceMs = 5_000): Promise<StepOutcome> {
   publishClosed = true;
   publishDirty = false;
-  if (!publishing) return true;
+  if (!publishing) return 'ok';
   let deadline: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
-      publishing.then(() => true),
-      new Promise<boolean>(resolve => { deadline = setTimeout(() => resolve(false), graceMs); }),
+      publishing.then((): StepOutcome => 'ok'),
+      new Promise<StepOutcome>(resolve => { deadline = setTimeout(() => resolve('grace_timeout'), graceMs); }),
     ]);
   } finally { if (deadline) clearTimeout(deadline); }
 }

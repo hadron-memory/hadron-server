@@ -1,3 +1,4 @@
+import { isSessionSupersededError, respondSessionSuperseded } from './lib/sessionSuperseded.js';
 import { assertRateReadiness, checkRateConfiguration, cleanupRateBuckets } from './lib/rateLimit/index.js';
 import { deliveryPendingPlugin } from './api/graphql/deliveryPendingPlugin.js';
 import { verifiedLoginEvidence } from './auth/loginEvidence.js';
@@ -54,6 +55,7 @@ import { failLoginCallback, type LoginFailureReason } from './auth/login-error.t
 import { mountDevLoginRoutes } from './auth/devLogin.js';
 import { mountPasskeyCeremonyRoutes } from './api/passkeyCeremonyRoutes.js';
 import { mountSigningCeremonyRoutes } from './api/signingCeremonyRoutes.js';
+import { mountGrantSigningCeremonyRoutes } from './api/grantSigningCeremonyRoutes.js';
 import { beginPasskeySignIn, mountPasskeySignInRoutes } from './api/passkeySignInRoutes.js';
 import { signingSurfacePolicy } from './lib/signing/surface.js';
 import { completeCeremonyLeg, mountFreshSignInRoutes } from './api/freshSignInRoutes.js';
@@ -62,8 +64,8 @@ import {
   oauthSurfaceRefusal,
   oauthSurfaceRefusalMessage,
   hasCurrentPlatformAdminRole,
-  resolveAuthContext,
-  resolveAuthContextWithStatus,
+  resolveCredentialContextWithStatus,
+  bindPresentedSession,
   portalHumanUserId,
 } from './middleware/auth.js';
 import { initCloudflareIps } from './auth/cloudflare-ips.js';
@@ -102,8 +104,9 @@ import { startAssetBytesSweepLoop } from './jobs/sweepAssetBytes.js';
 import { startSessionKeySweepLoop } from './lib/sessionKeyCache.js';
 import { startSessionReaperLoop } from './jobs/reapSessions.js';
 import { startPendingEdgePromotionSweepLoop } from './jobs/promotePendingEdges.js';
-import { startEmbeddingWorkerLoop, startEmbeddingBusListener, stopEmbeddingWorker, assertEmbeddingObligationsReconciled } from './jobs/embedNodes.js';
-import { stopEmbeddingPublisher } from './services/embedding/enqueue.js';
+import { startEmbeddingWorkerLoop, startEmbeddingBusListener, stopEmbeddingWorkerOutcome, assertEmbeddingObligationsReconciled } from './jobs/embedNodes.js';
+import { stopEmbeddingPublisherOutcome } from './services/embedding/enqueue.js';
+import { settleStep, type EmbeddingStopOutcomes } from './lib/shutdownSteps.js';
 import { startGitMirrorSubscriber } from './integrations/github/nodeWrittenSubscriber.js';
 import { GraphQLError, buildSchema, printSchema } from 'graphql';
 import {
@@ -1110,6 +1113,8 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   mountPasskeyCeremonyRoutes(app);
   // #1632 S2b-2 (cor:dmo:130:08): the signing ceremony page; mounted only when the signing switch is on (#1895).
   mountSigningCeremonyRoutes(app);
+  // #3649 slice C: the grant signing ceremony, on the same switch.
+  mountGrantSigningCeremonyRoutes(app);
   mountPasskeySignInRoutes(app);
   mountFreshSignInRoutes(app, { emailSendPerIpRateLimit, emailRecipientRateLimit });
 
@@ -1212,6 +1217,10 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     maxTokens: admission.maxTokens, maxSelections: admission.maxSelections,
   }));
   const apollo = new ApolloServer({
+    // #3021: shutdown belongs to src/index.ts. Apollo's default handler runs stop() and then re-raises the
+    // signal (ApolloServer.js signalHandler), which killed the process in ~0.3 s before the stopping drain
+    // window could run (Otto's rehearsal, real image under `doppler run`).
+    stopOnTerminationSignals: false,
     // #2087: concealed errors must not depend on the deployment's NODE_ENV.
     includeStacktraceInErrorResponses: false,
     typeDefs,
@@ -1254,7 +1263,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     // (e.g. resolveAuthContext hitting a DB failure) would hang the request —
     // forward it to the error middleware instead.
     try {
-      const auth = await resolveAuthContext(req, db);
+      const { auth } = await resolveCredentialContextWithStatus(req, db);
       if (!auth.userId && !auth.appId) {
         res.status(401).json({ error: 'Authentication required to read the GraphQL schema.' });
         return;
@@ -1265,6 +1274,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
         res.status(403).json({ error: oauthSurfaceRefusalMessage(surfaceRefusal, 'This OAuth credential is limited to the MCP surface.'), code: 'FORBIDDEN', ...surfaceRefusal });
         return;
       }
+      await bindPresentedSession(req, db, auth);
       res.type('text/plain; charset=utf-8').send(graphqlSdl());
     } catch (err) {
       next(err);
@@ -1288,7 +1298,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     (_req, _res, next) => requestActorStorage.run(emptyActor(), next),
     expressMiddleware(apollo, {
       context: async ({ req }) => {
-        const { auth, credentialStatus } = await resolveAuthContextWithStatus(req, db);
+        const { auth, credentialStatus } = await resolveCredentialContextWithStatus(req, db);
         const surfaceRefusal = oauthSurfaceRefusal(auth, 'account');
         if (surfaceRefusal) {
           // #1303: `code` and prose unchanged; `reason` & co. are additive.
@@ -1298,6 +1308,15 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
           throw new GraphQLError(oauthSurfaceRefusalMessage(surfaceRefusal, 'This OAuth credential is limited to the MCP surface.'), {
             extensions: { code: 'FORBIDDEN', ...surfaceRefusal, http: { status: 403 } },
           });
+        }
+        try {
+          await bindPresentedSession(req, db, auth);
+        } catch (error) {
+          // #3818: a pre-work refusal is not an ambiguous gateway/internal 5xx to clients.
+          if (isSessionSupersededError(error)) throw new GraphQLError(error.message, {
+            extensions: { ...error.extensions, http: { status: 409 } },
+          });
+          throw error;
         }
         stageRequestOperationKey(req.headers[OPERATION_KEY_HEADER], auth);
         // Stage caller-held unlock keys from the request header. Every
@@ -1386,7 +1405,12 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
       // with the GraphQL `recordSessionOutcome`; this route only maps each answer onto its status and body.
       // `resolveAuthContext` does DB lookups, and in Express 4 a rejection above the try is an unhandled rejection
       // rather than a response (the #555 class), so the whole call stays inside it.
-      const result = await recordSessionOutcome(db, async () => ({ db, ...(await resolveAuthContext(req, db)) }) as Context, {
+      const result = await recordSessionOutcome(db, async () => {
+        const { auth } = await resolveCredentialContextWithStatus(req, db);
+        // Keep the shared operation's credential/surface refusals ahead of execution metadata disclosure.
+        if (!oauthSurfaceRefusal(auth, 'account') && (auth.userId || auth.appId)) await bindPresentedSession(req, db, auth);
+        return { db, ...auth } as Context;
+      }, {
         sessionId: id,
         outcome,
         outcomeRef,
@@ -1417,6 +1441,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     } catch (err) {
       // A database fault is a 500, never "Session not found": reporting a connection-pool blip as a missing session
       // would send the caller chasing a session id that is perfectly fine.
+      if (respondSessionSuperseded(res, err)) return;
       Sentry.captureException(err);
       respondInternalFault(res, 'sessions/outcome', err);
     }
@@ -1475,13 +1500,15 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     // raises an unhandled rejection. That is the #555 class of defect, fixed
     // this week, reintroduced by putting an await above the try.
     try {
-      const auth = await resolveAuthContext(req, db);
+      const { auth } = await resolveCredentialContextWithStatus(req, db);
       const surfaceRefusal = oauthSurfaceRefusal(auth, 'account');
       if (surfaceRefusal) {
         // #1303: the prose is unchanged; `code` + `reason` make it matchable.
         res.status(403).json({ error: oauthSurfaceRefusalMessage(surfaceRefusal, 'This OAuth credential is limited to the MCP surface.'), code: 'FORBIDDEN', ...surfaceRefusal });
         return;
       }
+
+      await bindPresentedSession(req, db, auth);
 
       // Roles come from the CURRENT user row, not from a token or transport
       // snapshot (@copilot, PR #1250; #1251). Re-reading costs one indexed
@@ -1519,6 +1546,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
       }
       res.json({ ok: true });
     } catch (err) {
+      if (respondSessionSuperseded(res, err)) return;
       Sentry.captureException(err);
       respondInternalFault(res, 'reload', err);
     }
@@ -2088,8 +2116,9 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // #1789: a fault that reaches Express shows the caller the generic envelope, not Express's default stack page.
   app.use(internalFaultErrorHandler);
 
-  app.locals.stopEmbeddingWorker = () => Promise.all([
-    stopEmbeddingWorker(db), stopEmbeddingPublisher(),
-  ]).then(results => results.every(Boolean));
+  // #3845: per-part outcomes (not one folded boolean), so the stop in src/index.ts can name a failing step.
+  app.locals.stopEmbeddingWorker = (): Promise<EmbeddingStopOutcomes> => Promise.all([
+    settleStep(stopEmbeddingWorkerOutcome(db)), settleStep(stopEmbeddingPublisherOutcome()),
+  ]).then(([worker, publisher]) => ({ worker, publisher }));
   return app;
 }

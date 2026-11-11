@@ -5,6 +5,9 @@ import { createServer } from './server.js';
 import { controller } from './controller/controller.js';
 import { db } from './integrations/db/client.js';
 import { createReadiness } from './api/health.js';
+import { stoppingDrainWindowMs } from './lib/stoppingDrainWindow.js';
+import { closeHttpListenerOutcome } from './lib/httpShutdown.js';
+import { errorToken, logFailedShutdownSteps, type EmbeddingStopOutcomes, type StepOutcome } from './lib/shutdownSteps.js';
 
 const port = Number(process.env.PORT ?? 4000);
 
@@ -33,14 +36,28 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) process.once(signal, () => 
   shuttingDown = true;
   // #2998: probes still served while draining answer /ready 503 stopping.
   readiness.markStopping();
-  const requestsDrained = new Promise<boolean>(resolve => {
-    httpServer.close(error => resolve(!error));
+  // #3021: keep accepting connections for a bounded window so a proxy polling
+  // /ready sees 503 stopping before the listener closes. The hard deadline is
+  // the window plus the original 10 s, so a long window never eats the drain.
+  const windowMs = stoppingDrainWindowMs();
+  const deadline = setTimeout(() => process.exit(1), windowMs + 10_000);
+  const requestsDrained = new Promise<StepOutcome>(resolve => {
+    const closeListener = () => void closeHttpListenerOutcome(httpServer).then(resolve);
+    // 0 closes synchronously, exactly as before the window existed.
+    if (windowMs > 0) setTimeout(closeListener, windowMs); else closeListener();
   });
-  const deadline = setTimeout(() => process.exit(1), 10_000);
   // #446: disconnect only after HTTP and the worker have settled; keep the
   // same deadline active through disconnect, and preserve the drain exit code.
   void Promise.allSettled([requestsDrained, app.locals.stopEmbeddingWorker?.()]).then(async results => {
-    const exitCode = results.every(result => result.status === 'fulfilled' && result.value) ? 0 : 1;
+    // #3845: when the drain decides 1, say which step failed. The code itself is decided exactly as before.
+    const [listener, embedding] = results as [PromiseSettledResult<StepOutcome>, PromiseSettledResult<EmbeddingStopOutcomes | undefined>];
+    const rejected = (r: PromiseRejectedResult): StepOutcome => `rejected:${errorToken(r.reason)}`;
+    const steps: Array<[string, StepOutcome]> = [['http_listener', listener.status === 'fulfilled' ? listener.value : rejected(listener)]];
+    // (A missing hook folded to exit 1 before, since `undefined` is not truthy; the code stays, now with a name.)
+    if (embedding.status === 'fulfilled' && embedding.value === undefined) steps.push(['embedding_worker', 'not_registered']);
+    else if (embedding.status === 'fulfilled') steps.push(['embedding_worker', embedding.value?.worker ?? 'unreported'], ['embedding_publisher', embedding.value?.publisher ?? 'unreported']);
+    else steps.push(['embedding_worker', rejected(embedding)]);
+    const exitCode = logFailedShutdownSteps(steps) === 0 ? 0 : 1;
     try {
       await db.$disconnect();
     } catch {

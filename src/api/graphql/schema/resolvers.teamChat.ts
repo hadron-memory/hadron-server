@@ -1,3 +1,4 @@
+import { refuseSupersededSession } from '../../../lib/sessionSuperseded.js';
 import { listAppInstallations } from '../../../lib/appInstallations.js';
 import { NodeNotFoundError, AmbiguousLegacyUrnError, UrnNotQualifiedError } from '../../../lib/entityRef/errors.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
@@ -464,6 +465,7 @@ async function resolveSessionAuthor(
   hostMemoryId: string,
   sessionRef: string,
 ): Promise<{ workerId: string; agentId: string | null; name: string; sessionId: string; workerAppId: string; crossApp: boolean; resume: boolean }> {
+  await refuseSupersededSession(ctx, sessionRef);
   const session = await ctx.db.session.findUnique({
     where: { id: sessionRef },
     select: { id: true, appId: true, userId: true, workerId: true, agentId: true, endedAt: true, expiresAt: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, launchOperationId: true, memoryId: true },
@@ -1393,6 +1395,9 @@ async function channelHoldsHeadStamp(ctx: Context, root: ChatRootRow, headId: st
   }
 }
 
+/** #3759: the cap on `teamHeadRefs`, counted on the raw list so a duplicate takes a slot. */
+const MAX_TEAM_HEAD_REFS = 20;
+
 async function readChannelRoot(
   ctx: Context,
   // #1196: null when the host memory belongs to no App. Used ONLY to resolve a
@@ -1402,7 +1407,7 @@ async function readChannelRoot(
   // P1 on PR #941). Everything else this function does is memory-scoped.
   appId: string | null,
   root: ChatRootRow,
-  args: { replyToSeq?: number | null; sinceSeq?: number | null; beforeSeq?: number | null; mentionsRef?: string | null; teamHeadRef?: string | null; untagged?: boolean | null; limit?: number | null; offset?: number | null },
+  args: { replyToSeq?: number | null; sinceSeq?: number | null; beforeSeq?: number | null; mentionsRef?: string | null; teamHeadRef?: string | null; teamHeadRefs?: string[] | null; untagged?: boolean | null; limit?: number | null; offset?: number | null },
   /**
    * #2980 — `countAll: false` says the caller will not show `total` (a GraphQL selection without it, `selectsField`).
    * Only the in-memory filter branch uses it: it then scans in batches in the paging direction and stops once the
@@ -1415,6 +1420,8 @@ async function readChannelRoot(
   opts: { countAll?: boolean } = {},
 ): Promise<{ items: TeamChatMessageOut[]; total: number }> {
   const { replyToSeq, sinceSeq, beforeSeq, mentionsRef, teamHeadRef, untagged, limit, offset } = args;
+  // #3759: `[]` is no team filter at all, the same as omitting the argument.
+  const teamHeadRefs = args.teamHeadRefs != null && args.teamHeadRefs.length > 0 ? args.teamHeadRefs : null;
   // The outer resolver has already established read access. Validate independently of
   // cursor/mention filters: a missing target is a refusal, a valid empty thread is not.
   if (replyToSeq != null) {
@@ -1428,10 +1435,22 @@ async function readChannelRoot(
       { extensions: { code: 'TEAM_CHAT_REPLY_NOT_FOUND', replyToSeq } });
   }
   const metadataVisible = await canReadTeamMetadata(ctx, appId);
-  const teamFiltered = teamHeadRef != null || untagged != null;
+  const teamFiltered = teamHeadRef != null || untagged != null || teamHeadRefs != null;
+  // #3759 refusal order, so no ref leaks: metadata gate, mutual exclusion, cap, then per-ref validation.
   if (teamFiltered && !metadataVisible) throw new GraphQLError('Team metadata is unavailable in this Channel.', { extensions: { code: 'TEAM_CHAT_TEAM_METADATA_FORBIDDEN' } });
   if (teamHeadRef != null && untagged != null) throw new GraphQLError('teamHeadRef and untagged are mutually exclusive.', { extensions: { code: 'BAD_USER_INPUT' } });
-  let selectedHead: string | null = null;
+  if (teamHeadRefs != null && (teamHeadRef != null || untagged != null)) throw new GraphQLError('teamHeadRefs is mutually exclusive with teamHeadRef and untagged.', { extensions: { code: 'BAD_USER_INPUT' } });
+  if (teamHeadRefs != null && teamHeadRefs.length > MAX_TEAM_HEAD_REFS) throw new GraphQLError(`teamHeadRefs accepts at most ${MAX_TEAM_HEAD_REFS} entries.`, { extensions: { code: 'BAD_USER_INPUT' } });
+  let selectedHeads: string[] = [];
+  if (teamHeadRefs != null) {
+    // Each entry passes the single-head check; one bad entry refuses the whole call with the same text.
+    const workers = await ctx.db.worker.findMany({ where: { appId: appId! }, select: { id: true, name: true, reportsToWorkerId: true, retiredAt: true } });
+    for (const ref of new Set(teamHeadRefs)) {
+      if (!workers.some(w => w.id === ref)
+        || !(isReadableTeamHead(workers, ref) || await channelHoldsHeadStamp(ctx, root, ref))) throw teamHeadInvalid();
+      selectedHeads.push(ref);
+    }
+  }
   if (teamHeadRef != null) {
     // The wire accepts stable IDs only, including authorized retired identities.
     // A leaf or unknown id refuses the same way (byte-identical, App-scoped), through the write path's head predicate.
@@ -1439,7 +1458,7 @@ async function readChannelRoot(
     // Reparenting keeps no history, so a head whose reports are gone is still one when this Channel holds a message stamped with it.
     if (!workers.some(w => w.id === teamHeadRef)
       || !(isReadableTeamHead(workers, teamHeadRef) || await channelHoldsHeadStamp(ctx, root, teamHeadRef))) throw teamHeadInvalid();
-    selectedHead = teamHeadRef;
+    selectedHeads = [teamHeadRef];
   }
   const memEncInfo = await getMemoryEncryptionInfo(ctx.db, root.memoryId);
   const memBareUrn = await hostMemoryUrn(ctx, root.memoryId);
@@ -1515,8 +1534,8 @@ async function readChannelRoot(
     envelopeFilters.push({ data: { path: ['replyToSeq'], equals: replyToSeq } });
   }
   if (teamFiltered && !memEncInfo.isEncrypted) {
-    const predicate: Prisma.NodeWhereInput = selectedHead
-      ? { data: { path: ['teamHeadIds'], array_contains: [selectedHead] } }
+    const predicate: Prisma.NodeWhereInput = selectedHeads.length > 0
+      ? { OR: selectedHeads.map((head) => ({ data: { path: ['teamHeadIds'], array_contains: [head] } })) }
       : { OR: [{ data: { path: ['teamHeadIds'], equals: Prisma.DbNull } }, { data: { path: ['teamHeadIds'], equals: Prisma.AnyNull } }, { data: { path: ['teamHeadIds'], equals: [] } }] };
     const noHeads = predicate;
     envelopeFilters.push(untagged === false ? { NOT: noHeads } : predicate);
@@ -1529,7 +1548,7 @@ async function readChannelRoot(
     // #2020: a worker sees what reaches it (lib/mentionReach.ts); a user, its handle.
     const matches = (msg: TeamChatMessageOut): boolean =>
       (replyToSeq == null || msg.replyToSeq === replyToSeq) &&
-      (!mentionsRef || (workerId !== null ? reachesWorker(msg, [workerId], tokens) : msg.mentions.some((t) => tokens.includes(t)))) && (!teamFiltered || !memEncInfo.isEncrypted || (selectedHead ? !!msg.teamTags?.some(t => t.headId === selectedHead) : untagged === false ? !!msg.teamTags?.length : !msg.teamTags?.length));
+      (!mentionsRef || (workerId !== null ? reachesWorker(msg, [workerId], tokens) : msg.mentions.some((t) => tokens.includes(t)))) && (!teamFiltered || !memEncInfo.isEncrypted || (selectedHeads.length > 0 ? !!msg.teamTags?.some(t => selectedHeads.includes(t.headId)) : untagged === false ? !!msg.teamTags?.length : !msg.teamTags?.length));
     type Hit = { row: MessageRow; msg: TeamChatMessageOut };
     let page: Hit[];
     let total: number;
@@ -1820,7 +1839,7 @@ export const teamChatQueries = {
       replyToSeq?: number | null;
       sinceSeq?: number | null;
       beforeSeq?: number | null;
-      mentionsRef?: string | null; teamHeadRef?: string | null; untagged?: boolean | null;
+      mentionsRef?: string | null; teamHeadRef?: string | null; teamHeadRefs?: string[] | null; untagged?: boolean | null;
       limit?: number | null;
       offset?: number | null;
     },
@@ -1920,7 +1939,7 @@ export const teamChatQueries = {
       replyToSeq?: number | null;
       sinceSeq?: number | null;
       beforeSeq?: number | null;
-      mentionsRef?: string | null; teamHeadRef?: string | null; untagged?: boolean | null;
+      mentionsRef?: string | null; teamHeadRef?: string | null; teamHeadRefs?: string[] | null; untagged?: boolean | null;
       limit?: number | null;
       offset?: number | null;
       expectedIncarnation?: number | null;

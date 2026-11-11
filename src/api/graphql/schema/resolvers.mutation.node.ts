@@ -2410,6 +2410,7 @@ export const nodeMoveOps = {
               source,
               planOnly,
               withholdLinkWarnings: warningsWithheld,
+              canReadMemoryId: memoryId => isMemoryReadableCached(txCtx, memoryId),
               destLoc,
               destMemoryId: crossMemory ? destMemoryId : undefined,
               editor: editorFromAuth(ctx),

@@ -1,3 +1,4 @@
+import { utilizationQueries } from './resolvers.utilization.js';
 import { runTeamSnapshotMutations, runTeamSnapshotQueries } from './resolvers.runTeamSnapshot.js';
 import { rateLimitQueries, rateLimitMutations } from './resolvers.rateLimit.js';
 import { registerRolePickQueries } from './resolvers.registerRolePick.js';
@@ -57,6 +58,10 @@ import { appRunMutations, appRunQueries } from './resolvers.appRun.js';
 import { meteringMutations, meteringQueries } from './resolvers.metering.js';
 import { connectionGrantMutations, connectionGrantQueries } from './resolvers.connectionGrant.js';
 import { principalGrantMutations, principalGrantQueries } from './resolvers.principalGrant.js';
+import { grantFieldResolvers, grantQueries } from './resolvers.grant.js';
+import { grantCreateMutations } from './resolvers.grantCreate.js';
+import { grantManageMutations, grantManageQueries } from './resolvers.grantManage.js';
+import { grantSigningFieldResolvers, grantSigningMutations, grantSigningQueries } from './resolvers.grantSigning.js';
 import { importNodeMutations } from './resolvers.mutation.importNode.js';
 import { assetMutations } from './resolvers.mutation.asset.js';
 import { memoryMutations } from './resolvers.mutation.memory.js';
@@ -66,7 +71,7 @@ import { orgMutations } from './resolvers.mutation.org.js';
 import { agentMutations } from './resolvers.mutation.agent.js';
 import { agentCloneMutations } from './resolvers.mutation.agentClone.js';
 import { workerMutations, workerQueries, workerFieldResolvers } from './resolvers.worker.js';
-import { bootPromptPointerFieldResolvers } from './resolvers.bootPromptPointer.js';
+import { agentServedBootPromptQueries, bootPromptPointerFieldResolvers } from './resolvers.bootPromptPointer.js';
 import { bootPromptPointerMutations } from './resolvers.mutation.bootPromptPointer.js';
 import { compileBootPromptMutations } from './resolvers.mutation.compileBootPrompt.js';
 import { teamRoleMutations, teamRoleQueries } from './resolvers.teamRole.js';
@@ -92,6 +97,7 @@ import {
   agentTaskAlarmFieldResolvers,
 } from './resolvers.agentTaskAlarms.js';
 import { agentTaskMatchingQueries, agentTaskMatchingFieldResolvers } from './resolvers.agentTaskMatching.js';
+import { accountUsageQueries } from './resolvers.accountUsage.js';
 import { memoryConfigMutations, memoryConfigQueries, memoryConfigFieldResolvers } from './resolvers.memoryConfig.js';
 import { memoryConfigApplyMutations } from './resolvers.memoryConfigApply.js';
 import { nodeApprovalFieldResolvers, nodeApprovalMutations, nodeApprovalQueries } from './resolvers.nodeApproval.js';
@@ -167,6 +173,9 @@ export const resolvers = {
   // #1632: signing requests and signatures.
   SigningRequest: signingFieldResolvers.SigningRequest,
   NodeSignature: signingFieldResolvers.NodeSignature,
+  GrantSigningRequest: grantSigningFieldResolvers.GrantSigningRequest,
+  Grant: grantFieldResolvers.Grant,
+  GrantSignature: grantFieldResolvers.GrantSignature,
   Comment: commentFieldResolvers.Comment,
   Decision: decisionFieldResolvers.Decision,
   DecisionLog: decisionFieldResolvers.DecisionLog,
@@ -199,6 +208,7 @@ export const resolvers = {
     ...memoryQueries,
     ...orgQueries,
     ...agentQueries,
+    ...agentServedBootPromptQueries,
     ...appQueries,
     ...chatQueries,
     ...teamChatQueries,
@@ -217,6 +227,8 @@ export const resolvers = {
     ...hostOperationQueries,
     ...agentTaskAlarmQueries,
     ...agentTaskMatchingQueries,
+    ...accountUsageQueries,
+    ...utilizationQueries,
     ...registerRoleCandidateQueries,
     ...registerRolePickQueries,
     ...actionRegisterIndexQueries,
@@ -243,6 +255,9 @@ export const resolvers = {
     ...runTeamSnapshotQueries,
     ...connectionGrantQueries,
     ...principalGrantQueries,
+    ...grantQueries,
+    ...grantManageQueries,
+    ...grantSigningQueries,
     ...meteringQueries,
     ...rateLimitQueries,
     ...impersonationQueries,
@@ -299,6 +314,9 @@ export const resolvers = {
     ...nodeApprovalMutations,
     ...contentValidationReportMutations,
     ...signingMutations,
+    ...grantSigningMutations,
+    ...grantCreateMutations,
+    ...grantManageMutations,
     ...commentMutations,
     ...decisionMutations,
     ...scopeMutations,

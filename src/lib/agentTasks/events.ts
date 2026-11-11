@@ -650,6 +650,8 @@ export type CredentialAct =
   | 'app-key.list' | 'app-write-grant.list'
   | 'automation-read-grant.revoke' | 'automation-read-grant.list'
   | 'automation-team-snapshot-grant.revoke' | 'automation-team-snapshot-grant.list'
+  /** #3711: an instructed revoke of a grant (cor:acl:140:05). */
+  | 'grant.revoke'
   /** #3322: an instructed switch of an App memory asset's public link that changed the flag. */
   | 'asset.public-link';
 

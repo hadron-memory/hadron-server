@@ -52,6 +52,10 @@ const EXEMPT_AUDIT_COLUMNS = new Set([
   'signing_requests.requester_user_id',
   'signing_requests.named_signer_id',
   'node_signatures.signer_id',
+  // #3649 slice B — grant signing requests and grant signature records are the same guarded history: who asked and who
+  // signed a grant are sealed (a merged-away requester fails closed: it cannot withdraw).
+  'grant_signing_requests.requester_user_id',
+  'grant_signatures.signer_id',
 ]);
 
 function coveredPairs(registry: Readonly<Record<string, readonly string[]>>): Set<string> {
@@ -89,7 +93,9 @@ describe('mergeUsers audit actor registry', () => {
           OR (table_name = 'app_automation_team_snapshot_grant_events' AND column_name = 'actor_user_id')
           OR (table_name = 'grant_events' AND column_name = 'actor_user_id')
           OR (table_name = 'signing_requests' AND column_name IN ('requester_user_id', 'named_signer_id'))
-          OR (table_name = 'node_signatures' AND column_name = 'signer_id'))
+          OR (table_name = 'node_signatures' AND column_name = 'signer_id')
+          OR (table_name = 'grant_signing_requests' AND column_name = 'requester_user_id')
+          OR (table_name = 'grant_signatures' AND column_name = 'signer_id'))
     `;
     const schemaPairs = new Set(columns.map(({ table_name, column_name }) => `${table_name}.${column_name}`));
     const covered = coveredPairs(AUDIT_USER_COLUMNS);

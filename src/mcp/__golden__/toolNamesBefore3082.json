@@ -1,6 +1,7 @@
 {
  "user": [
   "hadron_ack_wakes",
+  "hadron_agent_boot_prompt",
   "hadron_agent_processes",
   "hadron_agent_set_base",
   "hadron_agent_set_index_refs",
@@ -150,6 +151,7 @@
  ],
  "userWithApp": [
   "hadron_ack_wakes",
+  "hadron_agent_boot_prompt",
   "hadron_agent_processes",
   "hadron_agent_set_base",
   "hadron_agent_set_index_refs",
@@ -299,6 +301,7 @@
  ],
  "appKeyOnly": [
   "hadron_ack_wakes",
+  "hadron_agent_boot_prompt",
   "hadron_agent_processes",
   "hadron_agent_set_base",
   "hadron_agent_set_index_refs",
@@ -444,6 +447,7 @@
  ],
  "impersonation": [
   "hadron_ack_wakes",
+  "hadron_agent_boot_prompt",
   "hadron_agent_processes",
   "hadron_agent_set_base",
   "hadron_agent_set_index_refs",

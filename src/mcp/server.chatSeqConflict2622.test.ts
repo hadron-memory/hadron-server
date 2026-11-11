@@ -87,7 +87,7 @@ describe('MCP node tools — the #992 typed refusal reaches the real writers (#2
     expect(await db.node.findFirst({ where: { memoryId: memory.id, loc: 'qa:messages:001-collide' } })).toBeNull();
   });
 
-  it('hadron_update_node refuses moving an existing message INTO collision, leaving the row untouched', async () => {
+  it('hadron_update_node refuses a seq-naming update of an existing message pre-write, leaving the row untouched', async () => {
     await seedChatMessage('qa:messages:001-first', 1);
     const victim = await seedChatMessage('qa:messages:002-second', 2);
     const srv = createTestableMcpServer(adminAuth());

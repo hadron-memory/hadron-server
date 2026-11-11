@@ -234,6 +234,18 @@ describe('worker-owned ordinary reads', () => {
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toMatchObject({ lastSeenSeq: 2 });
   });
 
+  it('#3759 a teamHeadRefs read is a partial window and never advances the read cursor; an empty list is not a filter', async () => {
+    for (let i = 1; i <= 3; i++) await post(`message ${i}`);
+    const head = worker.id;
+    await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Report', slug: 'report', reportsToWorkerId: head } });
+    const ctx = userCtx({ sessionId });
+    await Q.channelMessages({}, { channelRef: channel.id, sinceSeq: 0, limit: 50, teamHeadRefs: [head] }, ctx);
+    await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0, limit: 50, teamHeadRefs: [head] }, ctx);
+    expect(await seenSeq(worker.id, channel.id)).toBe(0);
+    await Q.channelMessages({}, { channelRef: channel.id, sinceSeq: 0, limit: 50, teamHeadRefs: [] }, ctx);
+    expect(await seenSeq(worker.id, channel.id)).toBe(3);
+  });
+
   it('does not mark a cursor-less tail even when the whole chat fits', async () => {
     await post('only message');
     const page = await Q.channelMessages({}, { channelRef: channel.id }, userCtx({ sessionId }));

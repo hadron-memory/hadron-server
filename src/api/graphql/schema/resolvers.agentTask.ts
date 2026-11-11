@@ -364,8 +364,9 @@ async function inKeyReadTx<T>(
   appId: string,
   onGone: () => T,
   body: (txCtx: Context, app: TaskApp) => Promise<T>,
+  timeoutMs?: number,
 ): Promise<T> {
-  return inAnchoredAppTx(ctx, appId, onGone, async (txCtx, app) => ((await keyMayReadApp(txCtx, app)) ? body(txCtx, app) : onGone()));
+  return inAnchoredAppTx(ctx, appId, onGone, async (txCtx, app) => ((await keyMayReadApp(txCtx, app)) ? body(txCtx, app) : onGone()), false, timeoutMs);
 }
 
 /** One transaction holding the App's authority anchors SHARED, with the App re-read after the lock (see `inKeyReadTx`). */
@@ -375,6 +376,7 @@ async function inAnchoredAppTx<T>(
   onGone: () => T,
   body: (txCtx: Context, app: TaskApp) => Promise<T>,
   coherentRunRead = false,
+  timeoutMs?: number,
 ): Promise<T> {
   const head = await loadApp(ctx, appId);
   if (!head) return onGone();
@@ -396,7 +398,9 @@ async function inAnchoredAppTx<T>(
     // Ownership moved while we waited for the anchors: the locks we hold are the wrong ones, so answer as missing.
     if (!app || app.organizationId !== head.organizationId || app.ownerUserId !== head.ownerUserId) return onGone();
     return body(txCtx, app);
-  }, coherentRunRead ? { timeout: 20_000, isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead } : undefined);
+  }, coherentRunRead
+    ? { timeout: 20_000, isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead }
+    : timeoutMs !== undefined ? { timeout: timeoutMs } : undefined);
 }
 
 /**
@@ -463,7 +467,11 @@ export async function withHostKeyTickerApp<T>(
  * Shared participant/key read. Only roster/task callers opt into the separate USERLESS run arm (#2925).
  * Xanthos #70403: a user-backed run keeps its existing person arm, actor and non-task management behavior.
  */
-export async function withReadableApp<T>(ctx: Context, appRef: string, body: (c: Context, app: TaskApp) => Promise<T>, allowRun = false): Promise<T> {
+export async function withReadableApp<T>(
+  ctx: Context, appRef: string, body: (c: Context, app: TaskApp) => Promise<T>, allowRun = false,
+  /** #3884 — the key arm's transaction cap in ms, for a read whose bounded work can outlast Prisma's 5 s default. Unset keeps the default. */
+  keyTxTimeoutMs?: number,
+): Promise<T> {
   if (isRunPrincipal(ctx) && !ctx.userId && allowRun) {
     let id: string;
     try { ({ id } = await resolveAppRef(ctx.db, appRef)); } catch (e) { if (e instanceof AppNotFoundError) throw appNotFound(appRef); throw e; }
@@ -483,7 +491,7 @@ export async function withReadableApp<T>(ctx: Context, appRef: string, body: (c:
     throw e;
   }
   if (appId !== key.appId) throw appNotFound(appRef);
-  return inKeyReadTx(ctx, appId, () => { throw appNotFound(appRef); }, body);
+  return inKeyReadTx(ctx, appId, () => { throw appNotFound(appRef); }, body, keyTxTimeoutMs);
 }
 
 /**
@@ -2136,12 +2144,13 @@ export const agentTaskMutations = {
     }, { lockWorkerIds: [p.lockedAssignee], taskGraph: input.blockedBy?.length ? 'exclusive' : 'shared' });
     // #1707 (cor:agt:060:06): a queued task is matched now, after its create
     // committed; the returned task shows the assignee when one was free.
-    if (input.match) await matchTaskNow(ctx.db, made.id, new Date());
-    else if (made.queued) await matchAfterChange(ctx.db, p.app.id);
+    // #3816 (V22): a failed match's candidates ride this answer only; they are never stored.
+    const skipped = input.match ? await matchTaskNow(ctx.db, made.id, new Date()) : null;
+    if (!input.match && made.queued) await matchAfterChange(ctx.db, p.app.id);
     const created = await afterTaskCreate(ctx, info, made.id, p.warn);
     // #2694 (cor:agt:020:11 r3): creating a task is the one task write outside `mutateTask`; same rule as there.
     if (p.actor.kind === 'worker' && ctx.sessionId) await touchSessionIfLive(ctx.db as never, ctx.sessionId, p.actor.workerId);
-    return created;
+    return skipped ? Object.assign(created, { matchSkipped: skipped }) : created;
   },
 
   /**
@@ -3064,18 +3073,90 @@ export const agentTaskQueries = {
 
 export type PartyView = { kind: 'WORKER' | 'USER'; id: string; name: string | null; urn: string | null };
 
-/** A sanitized party projection — never the User object (#552: no other tenant's identity fields). */
+/**
+ * #3867: one request's field-resolver lookups raised in the current tick, served together. Keyed by the Context OBJECT
+ * (a WeakMap, like {@link relationQueues}): a copy made for another caller or transaction never inherits the queue, the
+ * queue is removed before its flush starts, and no result is kept, so a later read always reaches the database. A wide
+ * `agentTasks` page selects four parties and the open-children test per row; each was one statement per row, which
+ * took the whole-App `--team` read to minutes.
+ */
+function tickBatch<K, V>(flush: (ctx: Context, keys: K[]) => Promise<Map<K, V>>, missing: V): (ctx: Context, key: K) => Promise<V> {
+  type Request = { key: K; settle: (v: V) => void; fail: (e: unknown) => void };
+  const queues = new WeakMap<Context, Request[]>();
+  return (ctx, key) =>
+    new Promise<V>((settle, fail) => {
+      let queue = queues.get(ctx);
+      if (!queue) {
+        const fresh: Request[] = (queue = []);
+        queues.set(ctx, fresh);
+        queueMicrotask(() => {
+          queues.delete(ctx);
+          flush(ctx, [...new Set(fresh.map((r) => r.key))]).then(
+            (found) => { for (const r of fresh) r.settle(found.has(r.key) ? (found.get(r.key) as V) : missing); },
+            (e) => { for (const r of fresh) r.fail(e); },
+          );
+        });
+      }
+      queue.push({ key, settle, fail });
+    });
+}
+
+const workerPartyOf = tickBatch<string, PartyView | null>(async (ctx, ids) => {
+  const rows = await ctx.db.worker.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, slug: true, app: { select: { urn: true } } } });
+  return new Map(rows.map((w) => [w.id, { kind: 'WORKER' as const, id: w.id, name: w.name, urn: composeWorkerUrn(w.app.urn, w.slug) }]));
+}, null);
+const userPartyOf = tickBatch<string, { id: string; handle: string | null } | null>(async (ctx, ids) => {
+  const rows = await ctx.db.user.findMany({ where: { id: { in: ids } }, select: { id: true, handle: true } });
+  return new Map(rows.map((u) => [u.id, u]));
+}, null);
+const hasOpenChild = tickBatch<string, boolean>(async (ctx, ids) => {
+  const rows = await ctx.db.agentTask.findMany({ where: { parentTaskId: { in: ids }, status: { in: OPEN } }, select: { parentTaskId: true }, distinct: ['parentTaskId'] });
+  return new Map(rows.map((r) => [r.parentTaskId as string, true]));
+}, false);
+
+/**
+ * #3867: the full rows of the tasks the caller may READ, in the arms of {@link withReadableTask} (a run principal in its
+ * own App, the App's own key inside one read transaction, or a participant, decided once per distinct App). An id that
+ * is missing or unreadable is absent from the map and its caller answers as a missing task does.
+ */
+async function readableTasks(ctx: Context, ids: string[]): Promise<Map<string, TaskRow>> {
+  const out = new Map<string, TaskRow>();
+  const fill = (rows: TaskRow[]) => { for (const r of rows) out.set(r.id, r); };
+  if (isRunPrincipal(ctx) && !ctx.userId) {
+    if (!ctx.appId) return out;
+    const rows = await inRunTeamReadTx<TaskRow[] | null>(ctx, ctx.appId, () => null, (c, app) => c.db.agentTask.findMany({ where: { id: { in: ids }, appId: app.id } }));
+    fill(rows ?? []);
+    return out;
+  }
+  const key = appKeyCaller(ctx);
+  const heads = await ctx.db.agentTask.findMany({ where: { id: { in: ids } }, select: { id: true, appId: true } });
+  if (key) {
+    const own = heads.filter((h) => h.appId === key.appId);
+    if (!own.length) return out;
+    const rows = await inKeyReadTx<TaskRow[] | null>(ctx, key.appId, () => null, (tx, app) =>
+      tx.db.agentTask.findMany({ where: { id: { in: own.map((h) => h.id) }, appId: app.id } }));
+    fill(rows ?? []);
+    return out;
+  }
+  const readableApps = new Set<string>();
+  await Promise.all([...new Set(heads.map((h) => h.appId))].map(async (appId) => {
+    const app = await loadApp(ctx, appId);
+    if (app && (await resolveTaskActor(ctx, app))) readableApps.add(appId);
+  }));
+  const readable = heads.filter((h) => readableApps.has(h.appId)).map((h) => h.id);
+  if (readable.length) fill(await ctx.db.agentTask.findMany({ where: { id: { in: readable } } }));
+  return out;
+}
+const readableTask = tickBatch<string, TaskRow | null>(readableTasks, null);
+
+/** A sanitized party projection — never the User object (#552: no other tenant's identity fields). Batched per request (#3867). */
 export async function partyView(ctx: Context, workerId: string | null, userId: string | null): Promise<PartyView | null> {
   if (workerId) {
-    const w = await ctx.db.worker.findUnique({
-      where: { id: workerId },
-      select: { id: true, name: true, slug: true, app: { select: { urn: true } } },
-    });
-    if (!w) return { kind: 'WORKER', id: workerId, name: null, urn: null };
-    return { kind: 'WORKER', id: w.id, name: w.name, urn: composeWorkerUrn(w.app.urn, w.slug) };
+    const party = await workerPartyOf(ctx, workerId);
+    return party ?? { kind: 'WORKER', id: workerId, name: null, urn: null };
   }
   if (userId) {
-    const u = await ctx.db.user.findUnique({ where: { id: userId }, select: { id: true, handle: true } });
+    const u = await userPartyOf(ctx, userId);
     return { kind: 'USER', id: userId, name: u?.handle ?? null, urn: null };
   }
   return null;
@@ -3255,12 +3336,15 @@ export const agentTaskFieldResolvers = {
   AgentTaskResult: {
     /** Result is reachable only through the existing task read gate; no separate finding read surface. */
     findings: (result: { findings?: unknown }, args: { limit?: number | null; offset?: number | null }) => {
-      const items = (result.findings ?? []) as TaskFinding[];
+      const stored = result.findings;
+      const items = (stored ?? []) as TaskFinding[];
       const { take, skip } = pageArgs(args);
       return pageEnvelope(items.slice(skip, skip + take), items.length, skip);
     },
   },
   AgentTask: {
+    /** #3816 (V22): present only on the create answer that ran the match; a later read has none. */
+    matchSkipped: (t: TaskRow & { matchSkipped?: unknown }) => t.matchSkipped ?? null,
     matchFailure: (t: TaskRow) => t.matchFailedAt && t.matchFailedReason ? { reason: t.matchFailedReason, failedAt: t.matchFailedAt } : null,
     /** #2663: current dispositions, in immutable finding order, separate from the finished result. */
     findingDispositions: (t: TaskRow, args: { limit?: number | null; offset?: number | null }) => {
@@ -3306,7 +3390,8 @@ export const agentTaskFieldResolvers = {
       if (t.status !== 'finished' || !t.resultOutcome || Object.hasOwn(t, 'resultFindings')) return view(t);
       // #2662: wide list/tree/relation rows omit the large payload. Only a selected result loads it, under the
       // SAME task read gate (including the App-key arm), rechecked at this read rather than trusting an old row.
-      return withReadableTask(ctx, t.id, async (_c, { task }) => view(task), true);
+      // #3867: the recheck of one request's rows is decided together (readableTasks), not once per row.
+      return readableTask(ctx, t.id).then((task) => (task ? view(task) : null));
     },
     /** #2651 (cor:agt:050:29, :01): the latest hand-back, readable as the task is; null when never handed back. */
     handBack: (t: TaskRow) =>
@@ -3340,11 +3425,7 @@ export const agentTaskFieldResolvers = {
     /** cor:agt:050:04 — started with at least one open child. Derived, never stored. */
     waitingOnChildren: async (t: TaskRow, _: unknown, ctx: Context) => {
       if (t.status !== 'started') return false;
-      const open = await ctx.db.agentTask.findFirst({
-        where: { parentTaskId: t.id, status: { in: OPEN } },
-        select: { id: true },
-      });
-      return open !== null;
+      return hasOpenChild(ctx, t.id);
     },
     createdBy: (t: TaskRow, _: unknown, ctx: Context) => partyView(ctx, t.createdByWorkerId, t.createdByWorkerId ? null : t.createdBy),
     assignedBy: (t: TaskRow, _: unknown, ctx: Context) =>

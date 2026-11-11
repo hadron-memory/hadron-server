@@ -67,7 +67,7 @@ import { recordUrnRename } from './urnAlias.js';
 import { assertNoMintedSpecRemoval } from './mintedSpecPermanence.js';
 import { safeNodeUrnV2 } from './urnEmit.js';
 import { UrnNotQualifiedError, UrnParseError, normalizeUrnForLookup } from './urn.js';
-import { resolveNodeRef, type NodeRefProjection } from './entityRef/nodeRef.js';
+import { resolveNodeRef, isConcealedNodeRefAmbiguity, type NodeRefProjection } from './entityRef/nodeRef.js';
 import { AmbiguousLegacyUrnError, NodeNotFoundError } from './entityRef/errors.js';
 import { isId } from './entityRef/shape.js';
 import { validateNodeAgainstSchema, NodeSchemaViolation } from './validateNodeAgainstSchema.js';
@@ -202,6 +202,7 @@ async function aliasTargetId(
   target: string,
   memoryId: string,
   projection?: NodeRefProjection,
+  canReadMemoryId: (id: string) => Promise<boolean> = async id => id === memoryId,
 ): Promise<string | 'AMBIGUOUS' | null> {
   try {
     const { id } = await resolveNodeRef(tx, target, memoryId, { projection });
@@ -215,7 +216,9 @@ async function aliasTargetId(
       error instanceof UrnNotQualifiedError ||
       error instanceof UrnParseError
     ) return null;
-    if (error instanceof AmbiguousLegacyUrnError) return 'AMBIGUOUS';
+    if (error instanceof AmbiguousLegacyUrnError) {
+      return await isConcealedNodeRefAmbiguity(tx, error, canReadMemoryId) ? null : 'AMBIGUOUS';
+    }
     throw error;
   }
 }
@@ -288,6 +291,8 @@ export async function moveNodeSubtree(
     planOnly?: boolean;
     /** Ruling 0211: do not resolve destination content links for an unreadable memory. */
     withholdLinkWarnings?: boolean;
+    /** Node-content read predicate for classifying reference failures. */
+    canReadMemoryId?: (memoryId: string) => Promise<boolean>;
     destLoc: string;
     /** Destination memory. Omit / equal to source.memoryId for a same-memory move. */
     destMemoryId?: string;
@@ -432,7 +437,7 @@ export async function moveNodeSubtree(
   const sourceIdByLoc = new Map(sourceTargets.map((n) => [n.loc, n.id]));
   for (const target of targets) {
     if (sourceIdByLoc.has(target)) continue;
-    const id = await aliasTargetId(tx, target, srcMemoryId);
+    const id = await aliasTargetId(tx, target, srcMemoryId, undefined, opts.canReadMemoryId);
     if (id && id !== 'AMBIGUOUS') sourceIdByLoc.set(target, id);
   }
 
@@ -642,7 +647,7 @@ export async function moveNodeSubtree(
     }
     for (const target of targets) {
       if (destinationIdByLoc.has(target)) continue;
-      const id = await aliasTargetId(tx, target, destMemoryId, virtual ? projection : undefined);
+      const id = await aliasTargetId(tx, target, destMemoryId, virtual ? projection : undefined, opts.canReadMemoryId);
       if (id) destinationIdByLoc.set(target, id);
     }
     return contentLinks.flatMap((link) => {
