@@ -42,6 +42,8 @@ export type AvailabilityRecord = {
   reason: string | null;
   until: Date | null;
   setAt: Date;
+  /** #3865: the full stored row carries who set it; the predicate does not read it. */
+  setBy?: string;
   /** #2162: a `resetting` mark's stop instant; activity after it ends the mark. Absent reads as null. */
   clearsOnActivityAfter?: Date | null;
 } | null;

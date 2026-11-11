@@ -2309,10 +2309,10 @@ async function withNodeHistoryWrite<T>(ctx: Context, nodeId: string, memoryId: s
 export const nodeMoveOps = {
   async moveWithResult(
     ctx: Context,
-    { sourceRef, targetUrn, targetMemoryRef, requireUnminted, expectedSource, mirrorAfterMove = true, planOnly = false, limit = 100 }: {
+    { sourceRef, targetUrn, targetMemoryRef, requireUnminted, expectedSource, mirrorAfterMove = true, planOnly = false, limit }: {
       sourceRef: string; targetUrn?: string | null; targetMemoryRef?: string | null;
       /** cor:api:190:03: shared validation, no mutation effects. */
-      planOnly?: boolean; limit?: number;
+      planOnly?: boolean; limit?: number | null;
       /** A compound operation may mirror once after its follow-on edits. */
       mirrorAfterMove?: boolean;
       /** #1449/#1591: refuse (NODE_MINTED) when any moved node is minted, under the move's locks (renumber). */
@@ -2437,7 +2437,8 @@ export const nodeMoveOps = {
           const memories = await ctx.db.memory.findMany({ where: { id: { in: [source.memoryId, destMemoryId] } }, select: { id: true, urn: true } });
           const urns = new Map(memories.map(m => [m.id, m.urn]));
           const ordered = relocated.sort((a, b) => a.previousLoc < b.previousLoc ? -1 : a.previousLoc > b.previousLoc ? 1 : 0);
-          const bound = Math.max(1, Math.min(1000, Math.trunc(limit)));
+          // #3579: omitted and explicit null both mean the SDL default of 100; the response is clamped to 1..1000.
+          const bound = Math.max(1, Math.min(1000, Math.trunc(limit ?? 100)));
           return { node: { ...moved, moveLinkWarnings: linkWarnings }, relocated,
             plan: {
               nodes: ordered.slice(0, bound).map(n => ({ id: n.id,
@@ -4046,7 +4047,7 @@ export const nodeMutations = {
     // cross-memory edges gated by #783) — moveNodeSubtree handles both.
     /** cor:api:190:03: the real move's resolution, gates and checks, without writes. */
     planNodeMove: async (_: unknown,
-      args: { sourceRef: string; targetUrn?: string | null; targetMemoryRef?: string | null; limit?: number },
+      args: { sourceRef: string; targetUrn?: string | null; targetMemoryRef?: string | null; limit?: number | null },
       ctx: Context,
     ) => (await nodeMoveOps.moveWithResult(ctx, { ...args, planOnly: true })).plan,
 
