@@ -1535,6 +1535,24 @@ export const typeDefs = `#graphql
     approvalIssued: Boolean!
   }
 
+  "A node's stable identity and planned addresses (hrn:node:hadronmemory.com:specs:cor:api:190:03)."
+  type NodeMovePlanEntry {
+    id: ID!
+    currentUrn: String!
+    newUrn: String!
+  }
+
+  "Point-in-time node-only move plan. Reserves nothing; a later move can raise CONFLICT (hrn:node:hadronmemory.com:specs:cor:api:190:03)."
+  type NodeMovePlan {
+    nodes: [NodeMovePlanEntry!]!
+    totalCount: Int!
+    truncated: Boolean!
+    "Null when withheld because the destination is unreadable (ruling 0211)."
+    linkWarnings: [NodeMoveLinkWarning!]
+    linkWarningsWithheld: Boolean!
+    pointInTime: Boolean!
+  }
+
   type Node {
     "Deletion marker. Ordinary reads still omit tombstones; explicit recovery is writer-only."
     deletedAt: DateTime
@@ -2049,6 +2067,18 @@ export const typeDefs = `#graphql
     family: String
     "Recorded on a session the redemption starts only."
     transcriptPath: String
+    """
+    #3822 (hrn:node:hadronmemory.com:specs:cor:agt:020:03) — the worker the caller expects to recover, e.g. the
+    worker a CLI worktree was last bound to. Narrows the resume to that worker: its claim or live session binds
+    even when another worker's waits too, and a CHOOSE lists only its candidates. When nothing of that worker's
+    waits but a claim or live session of another worker of the caller's does, the call refuses RESUME_REFUSED
+    with extensions reason WORKER_MISMATCH, picked (true when \`session\` chose that other worker's item),
+    expectedWorkerId, expectedWorkerName (null unless the caller may read that worker), foundWorkerId,
+    foundWorkerName and foundSource (CLAIM or LIVE_SESSION), before any write: no claim is consumed and no
+    session is started, ended or touched. With nothing of the caller's waiting the answer stays
+    NOTHING_TO_RESUME. Omitted or null: unchanged. Blank: BAD_USER_INPUT.
+    """
+    expectedWorkerId: ID
   }
 
   type UsageEvent {
@@ -5128,8 +5158,8 @@ export const typeDefs = `#graphql
   }
 
   """
-  036-ai-service-config: privileged resolution result. Carries the
-  DECRYPTED key — only returned by resolveAIConfig. A resolved platform
+  036-ai-service-config: configuration resolution result. A credential is
+  returned only when the caller may manage its source. A resolved platform
   credential is decrypted only for platform ADMIN/OWNER; org ADMIN may
   decrypt an authorized tenant-owned config. Successor to agentAIConfig /
   appAIConfig.
@@ -5142,10 +5172,11 @@ export const typeDefs = `#graphql
     provider: String!
     model: String!
     """
-    Decrypted key. For provider 'bedrock' this is the JSON-encoded
-    accessKeyId/secretAccessKey/region triple the portal stores.
+    Decrypted key when authorized for the selected source; null for an
+    identity-only result. For provider 'bedrock' a disclosed value is the
+    JSON-encoded accessKeyId/secretAccessKey/region triple the portal stores.
     """
-    apiKey: String!
+    apiKey: String
     params: JSON
     "#1373: where requests for this config go (see AiServiceConfig.effectiveEndpoint)."
     effectiveEndpoint: String
@@ -5218,7 +5249,7 @@ export const typeDefs = `#graphql
 
   """
   #2708 / hrn:node:hadronmemory.com:specs:cor:agt:040:10: why a serve would be refused now, the typed code the bind,
-  chat or run itself would get. BOOT_PROMPT_NOT_SIGNED cannot occur until an organisation can switch signing on (#1614).
+  chat or run itself would get. BOOT_PROMPT_NOT_SIGNED occurs only where the serving App's organisation has switched signing on (setOrgBootPromptSigning, #2973) AND the deployment ships signing.
   """
   enum BootPromptServeRefusal {
     BOOT_PROMPT_INSTALL_LICENSE_INACTIVE
@@ -5269,6 +5300,66 @@ export const typeDefs = `#graphql
     served: BootPromptServeDecision
     "The typed code the serve would be refused with; null exactly when served is set."
     refusal: BootPromptServeRefusal
+  }
+
+  """
+  #2973 PR2 / hrn:node:hadronmemory.com:specs:cor:agt:040:09: where an organisation stands on requiring a SIGNED compiled
+  boot prompt. required is the stored switch; enforced is what is true: the switch AND the deployment shipping signing
+  (PASSKEY_SIGNING_ENABLED), so an organisation never reads as protected on a deployment where it is not. deploymentSigns
+  is the second term alone. Readable by the organisation's current ADMINs and OWNERs, acting as themselves.
+  """
+  type OrgBootPromptSigning {
+    required: Boolean!
+    enforced: Boolean!
+    deploymentSigns: Boolean!
+  }
+
+  """
+  #2973 PR2 / hrn:node:hadronmemory.com:specs:cor:agt:040:09 and hrn:node:hadronmemory.com:specs:cor:agt:040:10: what
+  switching signing on would do to ONE served compiled boot prompt.
+  SIGNATURE_PENDING: the served revision's signature is pending (a first passkey's cooling-off window), so it would stop
+  being served until the window ends. REVISION_CHANGES: the serve would fall back to changesToRevSeq, the newest older
+  revision that is approved and signed (R35). UNSIGNED_STOPS: no approved revision is signed, so it would be refused.
+  """
+  enum BootPromptSigningPreviewState {
+    SIGNATURE_PENDING
+    REVISION_CHANGES
+    UNSIGNED_STOPS
+  }
+
+  "#2973 PR2: one served compiled boot prompt the switch would change. workerId is null on the install-level row (an uncustomised worker and a chat share it)."
+  type BootPromptSigningPreviewRow {
+    appId: ID!
+    appUrn: String!
+    agentId: ID!
+    agentName: String!
+    workerId: ID
+    workerName: String
+    compiledNodeId: ID!
+    compiledNodeUrn: String
+    "The revision served today."
+    servedRevSeq: Int!
+    state: BootPromptSigningPreviewState!
+    changesToRevSeq: Int
+  }
+
+  """
+  #2973 PR2 / hrn:node:hadronmemory.com:specs:cor:agt:040:09: the preview shown BEFORE an organisation's switch goes on,
+  one page of it. Each request mints its own previewToken over the FULL preview (every row, every page) at one consistent
+  snapshot; any page's token is accepted within its own ten minutes. setOrgBootPromptSigning(required: true) must present it. The token grants no
+  authority and holds no prompt text; it expires after ten minutes. While the deployment does not ship signing the rows
+  still say what WOULD change, and enforced says false.
+  """
+  type BootPromptSigningPreview {
+    enforced: Boolean!
+    deploymentSigns: Boolean!
+    "The number of rows across all pages."
+    total: Int!
+    rows: [BootPromptSigningPreviewRow!]!
+    hasMore: Boolean!
+    "Pass as after to read the next page; null on an empty page."
+    endCursor: String
+    previewToken: String!
   }
 
   """
@@ -9953,6 +10044,19 @@ export const typeDefs = `#graphql
     identity or authority claim.
     """
     agentServedBootPrompt(agentRef: String!, appRef: String, llmModel: String): AgentServedBootPrompt!
+    """
+    #2973 PR2 / hrn:node:hadronmemory.com:specs:cor:agt:040:09: the organisation's boot-prompt signing switch and whether
+    it is enforced. Only the organisation's current ADMINs and OWNERs, acting as themselves. A worker session (an admin's
+    included), an App key, an App run, impersonation, a non-member (a platform admin included), a revoked member, a member
+    below ADMIN, and an organisation that does not exist are all refused with the same FORBIDDEN.
+    """
+    orgBootPromptSigning(org: ID!): OrgBootPromptSigning!
+    """
+    #2973 PR2 / hrn:node:hadronmemory.com:specs:cor:agt:040:09: what switching the organisation's boot-prompt signing on
+    would change, paged (first at least 1, default 20, served at 200 when more is asked, hrn:node:hadronmemory.com:specs:cor:api:120:04; after is the previous page's endCursor). The audience and refusals are
+    orgBootPromptSigning's.
+    """
+    orgBootPromptSigningPreview(org: ID!, first: Int, after: String): BootPromptSigningPreview!
 
     """
     Uniform paginated agent list (#473). Scope: Agents owned by the caller's
@@ -10358,8 +10462,8 @@ export const typeDefs = `#graphql
 
     """
     036-ai-service-config: resolve a config name for an execution context
-    and return the DECRYPTED credentials (privileged; successor to
-    agentAIConfig/appAIConfig).
+    and return its identity, with decrypted credentials only for a caller
+    authorized to manage the selected source (successor to agentAIConfig/appAIConfig).
 
     Walk: App -> Agent -> Org (of the App, else of the Agent) ->
     HadronServer; disabled configs are skipped. When name is omitted,
@@ -10371,7 +10475,7 @@ export const typeDefs = `#graphql
 
     Auth: a named App uses its own owner/org ADMIN gate, including strict
     owner-only access for a user-owned App. A named Agent must be installed
-    in that App. Without an App, an org Agent requires org ADMIN; a host-only
+    and live-licensed in that App. Without an App, an org Agent requires org ADMIN; a host-only
     context requires platform ADMIN/OWNER. A user-owned Agent is strictly
     owner-only, including when an App is also named. With no effective org,
     its owner can decrypt that Agent's own config or a user-owned App's
@@ -10379,8 +10483,9 @@ export const typeDefs = `#graphql
     App's owner needs the outer source's own authority to decrypt an installed
     Agent or org config; its App ownership alone grants only its App config.
     A HADRON_SERVER fallback can back a server-side call, but only a platform
-    ADMIN/OWNER may receive its plaintext key. Other callers get a typed
-    refusal naming the resolved config and HADRON_SERVER level.
+    ADMIN/OWNER may receive its plaintext key. An otherwise authorized
+    context without the selected source's credential authority receives the
+    config identity with apiKey and params null, without decrypting a key.
 
     appRef/agentRef accept the entity's ID or URN.
     """
@@ -10407,12 +10512,13 @@ export const typeDefs = `#graphql
     masked listing does not grant permission to decrypt it. Only
     the Agent named here contributes — sibling Agents installed in the same
     App are not consulted. Disabled configs are skipped. Never returns key
-    material (hasApiKey + apiKeyPreview only).
+    material. hasApiKey remains visible; params and apiKeyPreview are null
+    unless the caller manages the selected source.
 
     Auth: scoped to one App's chat context. A non-admin caller MUST pass an
     appRef, be a member of that App, and (when an agentRef is given) the Agent
-    must be installed in that App. Because the result is masked (no key
-    material), App membership — not org admin — is the bar, unlike
+    must be installed and live-licensed in that App. Because the result is
+    masked (no key material), App membership — not org admin — is the bar, unlike
     resolveAIConfig and the aiServiceConfigs management list. Platform
     ADMIN/OWNER are always allowed and may omit appRef.
 
@@ -12211,6 +12317,9 @@ export const typeDefs = `#graphql
     raw relative content links that now miss or resolve to another node.
     """
     moveNode(sourceRef: ID!, targetUrn: String, targetMemoryRef: ID): Node!
+    "Plan with the real move's gates and raised refusals, without locks, reconciliation, writes or mirror effects. Nodes in loc order; limit clamps to 1–1000 (default 100), with total and truncation disclosed. No edges. A point-in-time answer, not a reservation. hrn:node:hadronmemory.com:specs:cor:api:190:03."
+    planNodeMove(sourceRef: ID!, targetUrn: String, targetMemoryRef: ID, limit: Int = 100): NodeMovePlan!
+
 
     """
     Clone a node to a new location, returning the NEW node with a fresh id
@@ -14309,6 +14418,18 @@ export const typeDefs = `#graphql
     otherwise as setAgentBootPrompt.
     """
     setAppAgentBootPrompt(appRef: String!, agentRef: String!, nodeRef: String): AppAgent!
+    """
+    #2973 PR2 / hrn:node:hadronmemory.com:specs:cor:agt:040:09: switch an organisation's boot-prompt signing on or off.
+    The audience is orgBootPromptSigning's (current ADMIN or OWNER, as themselves; every other shape is FORBIDDEN, the same
+    for an organisation that does not exist), re-checked inside the transaction. No passkey or step-up either way.
+    Off needs nothing and is idempotent. On requires the previewToken of a preview fetched with
+    orgBootPromptSigningPreview by THIS caller for THIS organisation in the last ten minutes: the server locks the
+    organisation, recomputes the whole preview and refuses BOOT_PROMPT_SIGNING_PREVIEW_STALE, changing nothing, when the
+    token is missing, forged, another organisation's or caller's, expired, future-dated, or describes a preview that has
+    since changed. That refusal comes only after the audience check. On when already on, with a valid token, succeeds and
+    changes nothing. Turning the switch on does not turn on the deployment's signing: read enforced.
+    """
+    setOrgBootPromptSigning(org: ID!, required: Boolean!, previewToken: String): OrgBootPromptSigning!
     """
     #2045 — set or clear a worker's boot-prompt pointer (for customised workers). The node must be compiled and
     sit in the worker's App's install memory for the worker's Agent. Only the App's manager, as themselves;
@@ -16738,7 +16859,7 @@ export const typeDefs = `#graphql
     WORKING
     "The assignee of a pending task."
     ASSIGNED_NOT_STARTED
-    "Free for work (hrn:node:hadronmemory.com:specs:cor:agt:060:05), including an unbound worker a live host can launch, which the matcher assigns to, and a bound worker whose session is quiet, which the matcher leaves alone until its session is live again (see liveSession)."
+    "Free for work (hrn:node:hadronmemory.com:specs:cor:agt:060:05), including an unbound worker a live host can launch, which the matcher assigns to, and a bound worker whose session is open but quiet, which the matcher also assigns to, reaching it through that session (see liveSession)."
     AVAILABLE
     "Bound, but its session reported no model family, so it can't be matched until one is given (hrn:node:hadronmemory.com:specs:cor:agt:060:04)."
     NO_FAMILY
@@ -16914,7 +17035,7 @@ export const typeDefs = `#graphql
     state: TeamRosterState!
     "Bound: has an open session, live or quiet. Going quiet never unbinds; ending the session does."
     bound: Boolean!
-    "Has a live session (hrn:node:hadronmemory.com:specs:cor:agt:020:11). The matcher assigns to a BOUND worker only while it has one and has reported a family; an unbound worker is matched when a live host can launch it."
+    "Has a live session (hrn:node:hadronmemory.com:specs:cor:agt:020:11). Matching does not need one: a BOUND worker with an open session (quiet or live) that has reported a family is matched, and a host start is issued only for a worker with no open session; an unbound worker is matched when a live host can launch it."
     liveSession: Boolean!
     "The binding's model family: its newest open session's (hrn:node:hadronmemory.com:specs:cor:agt:060:04), kept while the session is quiet. Null when unbound or none was reported."
     family: String

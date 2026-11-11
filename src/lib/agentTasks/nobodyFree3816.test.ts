@@ -132,14 +132,20 @@ it('an agent that uses no tasks reads USES_NO_TASKS', async () => {
   await worker('NoTasks'); await db.agent.update({ where: { id: agent.id }, data: { usesTasks: false } });
   expect(byName(await create()).NoTasks).toContain('USES_NO_TASKS');
 });
-it('NO_FAMILY for an unbound worker no host can launch; a bound worker gone quiet has no value (V21, #3815)', async () => {
+it('NO_FAMILY for an unbound worker no host can launch; a bound worker gone quiet is matched, not skipped (V21, #3815)', async () => {
   await worker('Unbound', 'reviewer', { session: false });
   const quiet = await worker('Quiet');
   const old = new Date(Date.now() - 3 * 86_400_000);
   await db.session.updateMany({ where: { workerId: quiet.id }, data: { startedAt: old, updatedAt: old } });
-  const r = byName(await create());
+  const t = await create();
+  // #3815: the quiet bound worker is the one candidate, so the task is assigned and there is no NOBODY_FREE.
+  expect(t.matchFailedReason ?? null).toBeNull();
+  expect(t.assigneeWorkerId).toBe(quiet.id);
+  const none = await create();
+  const r = byName(none);
+  expect(none.matchFailedReason).toBe('NOBODY_FREE');
   expect(r.Unbound).toEqual(['NO_FAMILY']);
-  expect(r.Quiet).toBeUndefined();
+  expect(r.Quiet).toEqual(['HOLDS_TASK']);
 });
 it('a worker under a stop signal reads STOP_SIGNAL', async () => {
   const w = await worker('Paused');

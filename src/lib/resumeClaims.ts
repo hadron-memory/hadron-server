@@ -86,10 +86,25 @@ export async function writeResumeClaim(
   return { expiresAt };
 }
 
-/** The caller's own redeemable claims, newest first. Keyed on the holder: never anyone else's. */
-export async function liveClaimsOf(db: Db, holderUserId: string, now: Date) {
+/**
+ * The caller's own redeemable claims, newest first. Keyed on the holder: never anyone else's.
+ *
+ * #3822: `scope` narrows IN THE QUERY, before the candidate cap (#3901 LOCAL, Gene P2): `workerId` to the expected
+ * worker, so 50 newer claims of other workers can never hide its one claim; `notWorkerId` and `sessionId` for the
+ * WORKER_MISMATCH existence check.
+ */
+export async function liveClaimsOf(
+  db: Db,
+  holderUserId: string,
+  now: Date,
+  scope: { workerId?: string; notWorkerId?: string; sessionId?: string } = {},
+) {
+  const worker = scope.workerId ? { workerId: scope.workerId } : scope.notWorkerId ? { workerId: { not: scope.notWorkerId } } : {};
   return db.resumeClaim.findMany({
-    where: { holderUserId, consumedAt: null, revokedAt: null, expiresAt: { gt: now } },
+    where: {
+      holderUserId, consumedAt: null, revokedAt: null, expiresAt: { gt: now }, ...worker,
+      ...(scope.sessionId ? { sessionId: scope.sessionId } : {}),
+    },
     orderBy: { issuedAt: 'desc' },
     take: CANDIDATE_CAP,
   });
@@ -138,16 +153,52 @@ export const tooManyToResume = () =>
  * deciding uniqueness on a page, the `resumeVerdict` discipline (#1625 review, P3). A page cap that ran BEFORE the
  * liveness filter let 50 quiet sessions hide a second live one, and the fast path then auto-bound a guess.
  */
-export async function liveWorkerSessionsOf(db: Db, userId: string, now: Date) {
+export async function liveWorkerSessionsOf(db: Db, userId: string, now: Date, scope: LiveScope = {}) {
   const open = await db.session.findMany({
-    where: { userId, endedAt: null, deletedAt: null, workerId: { not: null }, ...recentlyTouchedFilter(now) },
+    where: liveWhere(userId, now, scope),
     orderBy: { startedAt: 'desc' },
     take: OPEN_SESSION_SCAN_CAP + 1,
-    select: { id: true, workerId: true, plan: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, expiresAt: true },
+    select: { id: true, workerId: true, appId: true, plan: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, expiresAt: true },
   });
   if (open.length > OPEN_SESSION_SCAN_CAP) throw tooManyToResume();
   const lastEvents = await loadLastEventBySession(db as never, open.map((s) => s.id));
   return open.filter((s) => isSessionLive({ ...s, type: s.type as SessionType }, lastEvents.get(s.id), now));
+}
+
+/**
+ * #3822 — narrows the live pool IN THE QUERY: `workerId` to one worker (the expected worker, so the scan cap counts
+ * only its sessions; #3901 BLIND, Glen P2), `notWorkerId` to every other worker, `id` to one picked session.
+ */
+export type LiveScope = { workerId?: string; notWorkerId?: string; id?: string };
+
+function liveWhere(userId: string, now: Date, scope: LiveScope) {
+  const worker = scope.workerId
+    ? { workerId: scope.workerId }
+    : { workerId: scope.notWorkerId ? { not: scope.notWorkerId } : { not: null } };
+  return {
+    userId, endedAt: null, deletedAt: null, ...worker, ...(scope.id ? { id: scope.id } : {}), ...recentlyTouchedFilter(now),
+  };
+}
+
+/**
+ * #3822 — ONE live worker session of the caller's in `scope`, newest first, or null: an existence check for the
+ * WORKER_MISMATCH refusal, which needs some other worker's live session, never a unique one. It reads one scan page;
+ * a full page with nothing live in it cannot tell "none" from "beyond the page", so it refuses RESUME_AMBIGUOUS
+ * rather than answering NOTHING_TO_RESUME on a guess (the `liveWorkerSessionsOf` discipline). Writes nothing.
+ */
+export async function firstLiveWorkerSessionOf(db: Db, userId: string, now: Date, scope: LiveScope) {
+  const open = await db.session.findMany({
+    where: liveWhere(userId, now, scope),
+    orderBy: { startedAt: 'desc' },
+    take: OPEN_SESSION_SCAN_CAP + 1,
+    select: { id: true, workerId: true, appId: true, plan: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, expiresAt: true },
+  });
+  const page = open.slice(0, OPEN_SESSION_SCAN_CAP);
+  const lastEvents = await loadLastEventBySession(db as never, page.map((s) => s.id));
+  const live = page.find((s) => isSessionLive({ ...s, type: s.type as SessionType }, lastEvents.get(s.id), now));
+  if (live) return live;
+  if (open.length > OPEN_SESSION_SCAN_CAP) throw tooManyToResume();
+  return null;
 }
 
 /** Label each candidate with its worker's name. */
