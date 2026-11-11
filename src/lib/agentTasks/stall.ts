@@ -965,7 +965,14 @@ export async function recordEndedEscalations(db: Db, now: Date): Promise<number>
   let after = '';
   for (;;) {
     const batch = await db.agentTeamEvent.findMany({
-      where: { severity: 'alarm', acknowledgedAt: null, escalationEnd: { is: null }, id: { gt: after } },
+      // Only alarms whose episode can end, in Apps that are live: a post-limit alarm ends only on acknowledgement, and an
+      // alarm of a deleted or uninstalled App is never judged (the shared answer treats it as unknown), so neither is
+      // re-asked every pass for ever.
+      where: {
+        severity: 'alarm', acknowledgedAt: null, escalationEnd: { is: null }, id: { gt: after },
+        type: { in: [...STALL_ALARM_TYPES, 'alarm.dark-worker', 'alarm.coordinator-cadence'] },
+        app: { deletedAt: null, uninstalledAt: null },
+      },
       select: { id: true, taskId: true, type: true, episodeStart: true },
       orderBy: { id: 'asc' },
       take: ESCALATION_RECORD_BATCH,

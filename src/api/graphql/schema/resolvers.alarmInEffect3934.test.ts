@@ -140,7 +140,9 @@ describe('#3934 — escalationEndedAt and alarmsInEffect on a task alarm', () =>
     const { t, alarm } = await notStartedAlarm();
     await db.agentTask.update({ where: { id: t.id }, data: { status: 'started', startedAt: at('10:20') } });
     await record('10:25');
-    await db.agentTeamEvent.update({ where: { id: alarm.id }, data: { acknowledgedAt: at('10:40'), acknowledgedByWorkerId: ada.id } });
+    // Through the real mutation: the freeze finds the end already recorded and must leave it be (no duplicate insert).
+    await M.acknowledgeAlarm({}, { eventId: alarm.id }, ctx(admin.id));
+    expect(await db.alarmEscalationEnd.count({ where: { eventId: alarm.id } })).toBe(1);
     expect(await events('', null)).toMatchObject([{ id: alarm.id, escalationEndedAt: iso('10:20') }]);
   });
 
@@ -256,6 +258,32 @@ describe('#3934 — escalationEndedAt and alarmsInEffect on a task alarm', () =>
     await child('11:20');
     await record('11:30');
     expect((await events('', null)).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: iso('11:10') });
+  });
+
+  it('the pass does not re-judge alarms that can never be recorded: a post-limit alarm and an uninstalled App\'s alarm', async () => {
+    const done = await task({ ownerWorkerId: ada.id, assigneeWorkerId: anne.id, assignedAt: at('09:00'), status: 'finished', startedAt: at('09:10'), finishedAt: at('09:20'), resultOutcome: 'succeeded' });
+    const stale = (appId: string, taskId: string | null, type: string, start: string) =>
+      db.agentTeamEvent.create({ data: { appId, taskId, type, severity: 'alarm', chain: [], payload: {}, episodeStart: at(start), createdAt: at('09:30') } });
+    const postLimit = await stale(app.id, done.id, 'alarm.post-limit', '09:05');
+    const live = await stale(app.id, done.id, 'stall.not-started', '09:06');
+    expect(await record('12:00')).toBe(1);
+    expect(await db.alarmEscalationEnd.count({ where: { eventId: postLimit.id } })).toBe(0);
+    expect(await db.alarmEscalationEnd.count({ where: { eventId: live.id } })).toBe(1);
+    await db.app.update({ where: { id: app.id }, data: { uninstalledAt: at('12:30') } });
+    const after = await stale(app.id, done.id, 'stall.not-started', '09:07');
+    expect(await record('13:00')).toBe(0);
+    expect(await db.alarmEscalationEnd.count({ where: { eventId: after.id } })).toBe(0);
+  });
+
+  it('activity BEFORE the episode began never counts: it started the episode, and the recorded end is the later note', async () => {
+    const t = await task({ ownerWorkerId: ada.id, assigneeWorkerId: anne.id, assignedAt: at('09:30'), status: 'started', startedAt: at('10:00') });
+    await db.session.create({ data: { id: generateId(), appId: app.id, workerId: anne.id, agentId, startedAt: at('10:00'), updatedAt: at('10:30') } });
+    await tick('11:35'); // the episode began at the 10:30 activity; its window (60 min) has passed
+    const alarm = (await alarms('stall.no-progress')).find((a) => a.taskId === t.id)!;
+    expect(alarm.episodeStart).toEqual(at('10:30'));
+    await db.agentTeamEvent.create({ data: { appId: app.id, taskId: t.id, type: 'task.progress', actorWorkerId: anne.id, createdAt: at('11:40') } });
+    await record('11:45');
+    expect((await events('', null)).find((e) => e.id === alarm.id)).toMatchObject({ escalationEndedAt: iso('11:40') });
   });
 
   it('the same answer as the wake schedule: the wake pass closes exactly the alarms the read calls ended', async () => {

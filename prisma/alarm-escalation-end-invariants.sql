@@ -8,3 +8,7 @@ END $$;
 DROP TRIGGER IF EXISTS alarm_escalation_end_write_once ON alarm_escalation_ends;
 CREATE TRIGGER alarm_escalation_end_write_once BEFORE UPDATE ON alarm_escalation_ends
 FOR EACH ROW EXECUTE FUNCTION hadron_alarm_escalation_end_write_once();
+
+-- #3934 — the evaluator pass pages the unacknowledged alarms by id every tick; this partial index serves exactly that
+-- page (Prisma cannot model a partial index, so it lives here and in the migration).
+CREATE INDEX IF NOT EXISTS agent_team_events_unacked_alarms_idx ON agent_team_events (id) WHERE severity = 'alarm' AND acknowledged_at IS NULL;
