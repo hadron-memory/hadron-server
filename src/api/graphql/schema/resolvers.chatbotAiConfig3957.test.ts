@@ -137,23 +137,28 @@ describe('App.chatbotAiConfigId and setAppChatbotAiConfig', () => {
     await db.appMember.update({ where: { appId_userId: { appId: app.id, userId: admin.id } }, data: { role: 'admin' } });
     let release!: () => void;
     const released = new Promise<void>(r => { release = r; });
-    let locked!: () => void;
-    const holding = new Promise<void>(r => { locked = r; });
+    let locked!: (pid: number) => void;
+    const holding = new Promise<number>(r => { locked = r; });
     const revoker = db.$transaction(async tx => {
       await lockAuthorityAnchors(tx, [{ kind: 'org', id: org.id }], 'exclusive');
       await tx.orgMember.update({ where: { organizationId_userId: { organizationId: org.id, userId: admin.id } }, data: { role: 'READER' } });
-      locked();
+      locked(Number((await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`)[0]!.pid));
       await released;
     }, { timeout: 30_000 });
-    await holding;
+    const holderPid = await holding;
     let settled = false;
     const setter = M.setAppChatbotAiConfig(null, { appRef: app.id, configId: glm.id }, ctx(admin)).then(
       (v: unknown) => { settled = true; return v; }, (e: unknown) => { settled = true; throw e; });
     try {
-      // Synchronize on the setter actually WAITING for the contested advisory lock, not on elapsed time.
+      // Synchronize on a DIFFERENT backend WAITING for this org's authority anchor (the same two-key advisory lock the
+      // revoker holds), not on elapsed time and not on any advisory waiter in the cluster.
       let waiting = 0;
       for (let i = 0; i < 100 && waiting === 0; i++) {
-        waiting = Number((await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`)[0]?.n ?? 0);
+        waiting = Number((await db.$queryRaw<Array<{ n: bigint }>>`
+          SELECT count(*) AS n FROM pg_locks
+          WHERE locktype = 'advisory' AND NOT granted AND pid <> ${holderPid}
+            AND classid::bigint = (hashtext('authorization:org')::bigint & 4294967295)
+            AND objid::bigint = (hashtext(${org.id})::bigint & 4294967295)`)[0]?.n ?? 0);
         if (waiting === 0) await new Promise(r => setTimeout(r, 50));
       }
       expect(waiting).toBeGreaterThan(0);
@@ -165,7 +170,7 @@ describe('App.chatbotAiConfigId and setAppChatbotAiConfig', () => {
     }
     expect(await code(setter)).toBe('FORBIDDEN');
     expect((await db.app.findUniqueOrThrow({ where: { id: app.id } })).chatbotAiConfigId).toBeNull();
-  });
+  }, 20_000);
 
   it('the field reads null for a run and a worker, and the list answers them as a missing App', async () => {
     await M.setAppChatbotAiConfig(null, { appRef: app.id, configId: glm.id }, ctx(admin));
@@ -319,39 +324,50 @@ describe('the chat path', () => {
 
   // Rodolfo P3-2 (cor:dmo:050:10: a pin naming another App's config, a deleted one or an id that doesn't exist is refused
   // like a missing id, with nothing revealing that the config exists): a chat with no App, and a REAL org config's id.
-  it('a choice on a chat with no App is refused byte-identically to a nonexistent id', async () => {
+  it('a choice on a chat with no App is refused identically to a nonexistent id, after normalizing only the id the caller sent', async () => {
     const orgConfig = await db.aiServiceConfig.create({ data: { organizationId: org.id, name: 'org-wide', provider: 'openai', model: 'gpt-org', apiKeyEncrypted: encryptToken(KEY), apiKeyPreview: '…3957' } });
     // `member` is not an org member, so the lazy per-user memory belongs to no App.
-    // The whole public error (message, path, locations, every extension), with only the supplied id normalized.
-    const refusal = (id: string, run: () => Promise<unknown>) => run().then(() => null, (e: any) =>
-      JSON.stringify({ name: e.name, ...(typeof e.toJSON === 'function' ? e.toJSON() : { message: e.message }) }).split(id).join('<id>'));
+    // Victor's conditions: every occurrence of the caller's exact input becomes one shared placeholder on both sides and the WHOLE
+    // serialized error is compared; and the echo is the verbatim input, never anything config-derived.
+    const refusal = (id: string, run: () => Promise<unknown>) => run().then(() => null, (e: any) => {
+      const whole = JSON.stringify({ name: e.name, ...(typeof e.toJSON === 'function' ? e.toJSON() : { message: e.message }) });
+      expect(whole).toContain(id); // the caller's own input comes back verbatim
+      for (const derived of [orgConfig.name, orgConfig.model, orgConfig.provider, orgConfig.apiKeyPreview!, KEY]) expect(whole).not.toContain(derived);
+      return whole.split(id).join('<id>');
+    });
     const absent = generateId();
-    const starts = [orgConfig.id, absent].map(id => refusal(id, () => start({ scope: 'private', aiConfigChoice: id })));
-    const [realStart, absentStart] = await Promise.all(starts);
-    expect(realStart).toBe(absentStart);
-    expect(realStart).toContain('AiServiceConfigNotFoundError');
+    const spellings = [orgConfig.id, orgConfig.id.toUpperCase(), orgConfig.id.toLowerCase(), absent]; // a spelling only the caller supplied is echoed as sent
+    const starts = await Promise.all(spellings.map(id => refusal(id, () => start({ scope: 'private', aiConfigChoice: id }))));
+    expect(new Set(starts).size).toBe(1);
+    expect(starts[0]).toContain('AiServiceConfigNotFoundError');
     const { chatId } = await start({ scope: 'private' });
     expect((await db.memory.findUniqueOrThrow({ where: { id: (await chatNodeByLocOrThrow(db, chatId)).memoryId } })).appId).toBeNull();
-    const sends = await Promise.all([orgConfig.id, absent].map(id => refusal(id, () => M.sendChatMessage(null, { chatId, userMessage: 'x', aiConfigChoice: id }, asMember()))));
-    expect(sends[0]).toBe(sends[1]);
+    const sends = await Promise.all(spellings.map(id => refusal(id, () => M.sendChatMessage(null, { chatId, userMessage: 'x', aiConfigChoice: id }, asMember()))));
+    expect(new Set(sends).size).toBe(1);
     expect(sends[0]).toContain('AiServiceConfigNotFoundError');
     expect(await stored(chatId)).toBeUndefined();
   });
 
-  it('an encrypted chat\'s stored choice resolves; a caller who cannot read the chat gets no key and no config detail', async () => {
-    const { chatId } = await start({ aiConfigChoice: claude.id });
+  it('an encrypted chat\'s stored choice resolves; an org ADMIN who cannot read the chat gets the unknown-chat answer and no config detail', async () => {
+    // Anne F1: the denied caller must pass the OUTER org-admin gate, so it is the chat-read gate that refuses.
+    const asAdmin = { db, userId: admin.id, roles: ['READER'] } as Context;
+    const { chatId } = await start({ scope: 'private', aiConfigChoice: claude.id }, asAdmin);
     const node = await chatNodeByLocOrThrow(db, chatId);
+    expect((await db.memory.findUniqueOrThrow({ where: { id: node.memoryId } })).appId).toBe(app.id); // admin's own private chat of this App
     const key = generateDataKey();
     sessionKeyCache.set(generateId(), node.memoryId, key);
     await db.memory.update({ where: { id: node.memoryId }, data: { isEncrypted: true } });
     await db.node.update({ where: { id: node.id }, data: { data: encryptNodeFields({ data: node.data }, { id: node.memoryId, isEncrypted: true }).data! as never } });
     expect(JSON.stringify((await chatNodeByLocOrThrow(db, chatId)).data)).not.toContain(claude.id); // really ciphertext at rest
-    const mine = await resolve(chatId); // the privileged surface: an org admin who is also an App member
+    const mine = await resolve(chatId); // the owner: an org admin and App member
     expect(mine.configId).toBe(claude.id);
     expect(mine.model).toBe('claude-sonnet');
-    // Someone who cannot read this chat: same answer as an unknown chat, and nothing of the config in it.
-    const denied = await Q.resolveAIConfig(null, { name: 'default', appRef: app.id, chatId }, ctx(outsider)).catch((e: any) => e);
-    const unknown = await Q.resolveAIConfig(null, { name: 'default', appRef: app.id, chatId: 'chats:nope' }, ctx(outsider)).catch((e: any) => e);
+    const peer = await db.user.create({ data: { handle: `peer-${generateId()}`, roles: ['READER'] } });
+    await db.orgMember.create({ data: { organizationId: org.id, userId: peer.id, role: 'ADMIN' } });
+    const control = await Q.resolveAIConfig(null, { name: 'default', appRef: app.id }, ctx(peer)); // passes the outer gate: not a gate-order artefact
+    expect(control.configId).toBe(dflt.id);
+    const denied = await Q.resolveAIConfig(null, { name: 'default', appRef: app.id, chatId }, ctx(peer)).catch((e: any) => e);
+    const unknown = await Q.resolveAIConfig(null, { name: 'default', appRef: app.id, chatId: 'chats:nope' }, ctx(peer)).catch((e: any) => e);
     expect(denied).toBeInstanceOf(Error);
     expect(denied.message.split(chatId).join('<c>')).toBe(unknown.message.split('chats:nope').join('<c>'));
     const text = JSON.stringify({ m: denied.message, x: denied.extensions });
