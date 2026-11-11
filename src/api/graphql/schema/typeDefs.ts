@@ -17168,6 +17168,13 @@ export const typeDefs = `#graphql
     "Set when its own availability record makes it unavailable now."
     unavailableReason: AvailabilityReason
     unavailableUntil: DateTime
+    """
+    #3865 — the worker's stored availability record: its reason, who set it (setBy, setByParty) and when
+    (setAt), so a stale mark is told from a deliberate one without asking (hrn:node:hadronmemory.com:specs:cor:agt:060:02).
+    Present for any record, in effect or not (inEffect says which); null when the worker has none.
+    Reads nothing new: the record is the one setWorkerAvailability writes and teamAvailability returns.
+    """
+    availability: WorkerAvailability
     "Families it could run as that are unavailable in the App now (hrn:node:hadronmemory.com:specs:cor:agt:060:03)."
     unavailableFamilies: [String!]!
     "Started tasks it is the assignee of."
