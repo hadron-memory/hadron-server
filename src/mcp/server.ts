@@ -9,6 +9,7 @@ import { liveTxContext, liveReadSnapshotContext } from '../api/graphql/schema/au
 import { withReconciledNodeRead } from '../lib/includes/reconciledNodeRead.js';
 import { stampEmbeddingObligation } from '../services/embedding/obligation.js';
 import { assertBootPromptWriteAllowed, assertNoBootPromptRows, isBootPromptRole } from '../lib/bootPrompt.js';
+import { assertBootPromptWriteAllowedOrGranted, spendEditGrantFor, suppliedNonTextFields } from '../lib/grants/bootPromptGrant.js';
 import { sessionEndReason } from '../lib/sessionEndReason.js';
 import { governedKindAnnotation } from '../lib/edgeGovernedKind.js';
 import { GraphQLError } from 'graphql';
@@ -96,6 +97,7 @@ import { registerSigningTools } from './signingTools.js';
 import { registerAgentTaskTools } from './agentTaskTools.js';
 import { registerTickerTools } from './tickerTools.js';
 import { registerStopSignalTools } from './stopSignalTools.js';
+import { registerWebPollTools } from './webPollTools.js';
 import { registerGrantTools } from './grantTools.js';
 import { openThreadCounts, type CommentCounts } from '../lib/comments/summary.js';
 import { loadSignatureStatuses, type NodeSignatureStatusView } from '../lib/signing/status.js';
@@ -2405,6 +2407,8 @@ export function createMcpServerInstance(
     'hadron_agent_ticker_template_list',
     // #2022 — the stop-signal list (its own optional session).
     'hadron_stop_signal_list',
+    // #1562 — the page-monitor watch list (acts as the connection's user; writes nothing).
+    'hadron_web_poll_list',
     // #3711 — hadron_create_grant acts as the person and clears any worker binding itself (src/mcp/grantTools.ts); no session argument.
     'hadron_create_grant',
     // Per-connection selections and key handling: nothing authored.
@@ -3839,6 +3843,7 @@ export function createMcpServerInstance(
   registerAgentTaskTools(server, { db, auth });
   registerTickerTools(server, { db, auth });
   registerStopSignalTools(server, { db, auth });
+  registerWebPollTools(server, { db, auth });
   // #3711 — a person who manages an App asks for a grant (ruling 0255 item 21); never as a worker.
   registerGrantTools(server, { db, auth });
   registerAutomationPinTools(server, { db, auth });
@@ -6972,7 +6977,8 @@ export function createMcpServerInstance(
     'hadron_update_node',
     'Partially update an existing node. Only the fields you provide are changed — everything else is preserved. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Pass expectedRevision from hadron_get_node to refuse atomically if the node changed since you read it.',
     SHAPE_HADRON_UPDATE_NODE,
-    async ({ urn: rawUrn, authoredWith, expectedRevision, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason, install }) => {
+    async (mcpArgs) => {
+      const { urn: rawUrn, authoredWith, expectedRevision, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason, install } = mcpArgs;
       if (install) {
         if (edges || isRunnable || abstractStillAccurate) return textResult('`install` does not support `edges`, `isRunnable` or `abstractStillAccurate`.');
         return writeInstallNodeViaGraphql('update', install, {
@@ -6984,6 +6990,8 @@ export function createMcpServerInstance(
       // #1219 — inline parity writer, not a writeNodeCore delegate (#206):
       // normalize before mergedGovernedState, the door replay and the payload.
       const role = normalizeRole(rawRole);
+      // #3823: what this call supplies besides its text; an edit grant admits none of it (V46).
+      const mcpNonTextFields = suppliedNonTextFields(mcpArgs as Record<string, unknown>);
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
@@ -7032,7 +7040,7 @@ export function createMcpServerInstance(
         assertNotCommentWrite(existing?.nodeType, nodeType, 'update');
         // #2987 (V13) — see hadron_create_node; judged only for a live row, a missing one is NODE_NOT_FOUND below.
         if (existing && !existing.deletedAt) assertNoGenericMessageSeqWrite(existing, nodeType, seq, 'update');
-        assertBootPromptWriteAllowed(existing, { nodeType, role: normalizeRole(role) }, 'update');
+        await assertBootPromptWriteAllowedOrGranted(db as unknown as Prisma.TransactionClient, existing, { nodeType, role: normalizeRole(role), otherFields: mcpNonTextFields, hasContent: content !== undefined, door: true, memoryId: memory.id, loc }, 'update');
         assertGovernedWrite(
           existing,
           mergedGovernedState(existing, { role, isRunnable }),
@@ -7265,6 +7273,9 @@ export function createMcpServerInstance(
             }
             // #2987 — re-judged on the locked row, before any write.
             assertNoGenericMessageSeqWrite(current, nodeType, seq, 'update');
+            // #3823 — a worker session's in-place edit of its own boot-prompt source spends its edit grant here, on the locked row, in
+            // this transaction (the GraphQL update path's twin). Any later refusal rolls the spend back.
+            await spendEditGrantFor(tx, current, { nodeType, role: normalizeRole(role), otherFields: mcpNonTextFields, hasContent: content !== undefined, door: true, memoryId: memory.id, loc });
             // #1186 / cor:dmo:020:05 — omitted fields come from the locked
             // row, not the probe, and a refusal leaves no reconciliation.
             await validateNodeSchemaOnWrite(

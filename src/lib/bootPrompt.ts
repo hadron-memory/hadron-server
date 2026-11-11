@@ -87,7 +87,7 @@ export function assertNotCompiledBootPromptWrite(
 
 export function bootPromptWorkerSessionError(op: BootPromptOp): GraphQLError {
   return new GraphQLError(
-    `BOOT_PROMPT_WORKER_SESSION_REFUSED: a worker session never edits a boot prompt (${op}); its manager does it as themselves.`,
+    `BOOT_PROMPT_WORKER_SESSION_REFUSED: a worker session edits a boot prompt (${op}) only under a signed edit grant for its own source; otherwise its manager does it as themselves.`,
     { extensions: { code: 'BOOT_PROMPT_WORKER_SESSION_REFUSED', op } },
   );
 }

@@ -5,6 +5,7 @@ import { stampEmbeddingObligation } from '../../../services/embedding/obligation
 import { currentActor } from '../../../lib/requestActor.js';
 import { edgeDisplayOrder } from '../../../lib/edgeOrder.js';
 import { foreignEdgeMemoryIds } from '../../../lib/foreignEdgeMemories.js';
+import { assertBootPromptWriteAllowedOrGranted, spendEditGrantFor, graphqlEditFacts, withUpdateNodeDoor } from '../../../lib/grants/bootPromptGrant.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertBootPromptWriteAllowed, assertNoBootPromptRows, inCompileScope, isBootPromptRole } from '../../../lib/bootPrompt.js';
 import { COMMENT_NODE_TYPE, assertNotCommentWrite, commentError, commentGovernedError } from '../../../lib/comments/index.js';
 import { commentIdsAmong, hardDeleteThreadsOfTargets, restoreThreadsOfTargets, softDeleteThreadsOfTargets } from '../../../lib/comments/lifecycle.js';
@@ -649,7 +650,8 @@ async function writeNodeCoreRaw(
       // Channel) keeps its seq: no generic write sets or changes it. A clone copies the source's seq to a new row.
       if (!opts?.copiesSeq || existing) assertNoGenericMessageSeqWrite(existing, input.nodeType, input.seq, mode === 'update' ? 'update' : 'create');
       // #2043 — the compiled-node and worker-session boot-prompt guards (cor:agt:040:11).
-      assertBootPromptWriteAllowed(existing, { nodeType: input.nodeType, role: normalizeRole(input.role) }, mode === 'update' ? 'update' : 'create');
+      // #3823 — the one lift: a worker session's in-place text edit of its own source, under an edit grant (a read here; spent below).
+      await assertBootPromptWriteAllowedOrGranted(ctx.db as unknown as Prisma.TransactionClient, existing, { nodeType: input.nodeType, role: normalizeRole(input.role), ...graphqlEditFacts(input) }, mode === 'update' ? 'update' : 'create');
       // #1641 — a log's child locs are its decision codes: only the decision
       // doors write there, so a squatter can never block a code.
       if (!existing && opts?.ownsKind !== 'decision') {
@@ -1217,7 +1219,7 @@ async function writeNodeCoreRaw(
       }
 
       async function assertTargetStillWritable(
-        tx: Pick<Prisma.TransactionClient, 'node'>,
+        tx: Prisma.TransactionClient,
       ) {
         const current = await tx.node.findUnique({
           where: opts?.targetNodeId
@@ -1240,7 +1242,7 @@ async function writeNodeCoreRaw(
         assertNotCommentWrite(current.nodeType, input.nodeType, 'update');
         // #2987 — re-checked under the lock with the row it guards, like the comment gate.
         if (!opts?.copiesSeq) assertNoGenericMessageSeqWrite(current, input.nodeType, input.seq, 'update');
-        assertBootPromptWriteAllowed(current, { nodeType: input.nodeType, role: normalizeRole(input.role) }, 'update');
+        await assertBootPromptWriteAllowedOrGranted(tx, current, { nodeType: input.nodeType, role: normalizeRole(input.role), ...graphqlEditFacts(input) }, 'update');
         assertGovernedWrite(
           current,
           mergedGovernedState(current, { role: input.role, isRunnable: input.isRunnable }),
@@ -1351,6 +1353,10 @@ async function writeNodeCoreRaw(
                 return { conflict: true, node: null };
               }
             }
+
+            // #3823 — spend the worker session's edit grant ONCE, on the final locked row and in this transaction, so any later
+            // refusal rolls the spend back. The last lock the act takes is the grant row.
+            await spendEditGrantFor(tx, current, { nodeType: input.nodeType, role: normalizeRole(input.role), ...graphqlEditFacts(input) });
 
             // #1330 — H1 strict sub-roles, judged on the locked row: a role the
             // write assigns must be declared under a strict parent.
@@ -2606,7 +2612,8 @@ export const nodeMutations = {
     // Update an existing node (spec 039 Phase 0 D2–D4). Target = `id` (PK or
     // fully-qualified node URN) XOR (`memoryId` + `loc`); never creates,
     // never moves. All content fields preserve-on-omit.
-    updateNode: async (_: unknown, { input }: { input: UpdateNodeArgs }, ctx: Context) => {
+    // #3823: the one GraphQL door whose update writes may spend a worker session's boot-prompt edit grant.
+    updateNode: (_: unknown, { input }: { input: UpdateNodeArgs }, ctx: Context) => withUpdateNodeDoor(async () => {
       if (input.install) {
         // #3628 / ruling0234: shared participant/manager gates and live-install
         // refusals, with no lazy creation. The update uses the same held transaction.
@@ -2625,7 +2632,7 @@ export const nodeMutations = {
         return written;
       }
       return updateNodeCore(input as UpdateNodeInput, ctx, 'updateNode', { governedContext: 'node-write' });
-    },
+    }),
 
 
     // Shallow-merge a JSON patch into a node's `data` bag (issue #366).

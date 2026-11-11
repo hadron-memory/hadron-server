@@ -6219,6 +6219,36 @@ export const typeDefs = `#graphql
   }
 
   """
+  A page-monitor watch (#1562): the hadrontool-webfetch job behind a run's
+  web_poll_start, as the org's admins see it outside a run. \`url\` is the
+  query- and fragment-free ledger URL, never the one the sidecar fetches, and no
+  credential material is returned.
+  """
+  type WebPoll {
+    jobId: ID!
+    "The sidecar's job state, such as active or cancelled."
+    status: String!
+    url: String!
+    appId: ID!
+    "The run that started the watch."
+    sourceRunId: ID!
+    createdAt: DateTime!
+    nextRunAt: DateTime
+    expiresAt: DateTime!
+    lastCheckedAt: DateTime
+    lastTriggeredAt: DateTime
+    triggerCount: Int!
+    consecutiveFailures: Int!
+  }
+
+  "Result of cancelWebPoll. alreadyCancelled is true when the watch had been stopped before this call."
+  type CancelWebPollPayload {
+    jobId: ID!
+    cancelled: Boolean!
+    alreadyCancelled: Boolean!
+  }
+
+  """
   One tool an external MCP server advertises, as admitted by the
   registry row (allowlist + name grammar + length cap applied) — what
   this query returns IS what a run can declare in data.tools.
@@ -9838,6 +9868,14 @@ export const typeDefs = `#graphql
     mcpServers(orgId: ID, limit: Int, offset: Int): McpServersPage!
 
     """
+    The organization's active page-monitor watches (#1562): what web_poll_list
+    returns inside a run, for org ADMIN/OWNER outside one. Refused with
+    POLICY_DENIED when the org, user or App policy omits tool.web_poll. Jobs
+    with no routing binding in this org are not listed.
+    """
+    webPolls(orgRef: ID!): [WebPoll!]!
+
+    """
     Live tools/list passthrough for one registered server (org member) —
     what authors browse to pick data.tools entries. Applies the same
     admissibility filter as run-tool materialization, so what it returns
@@ -13426,6 +13464,13 @@ export const typeDefs = `#graphql
     deleteMcpServer(ref: ID!): Boolean!
 
     """
+    Stop one of the organization's page-monitor watches (#1562; org ADMIN/OWNER,
+    tool.web_poll policy). A job id from another organization, or none, answers
+    NOT_FOUND. Cancelling a stopped watch succeeds with alreadyCancelled.
+    """
+    cancelWebPoll(orgRef: ID!, jobId: ID!): CancelWebPollPayload!
+
+    """
     Create a named, owner-scoped secret (#677). Gate per owner scope:
     user -> that user (ownerRef optional, defaults to the caller); org ->
     org ADMIN; app -> app owner / org ADMIN; memory -> memory WRITE.
@@ -14144,6 +14189,28 @@ export const typeDefs = `#graphql
     Accepts the entity's ID or URN.
     """
     deleteApp(ref: ID!): Boolean!
+
+    """
+    #3774 — Uninstall an App: it is kept, read-only (every write through it is refused, usually APP_UNINSTALLED), and its
+    handle is free for a new App. Ends every open dark-worker episode of the App's workers at the uninstall time, in the
+    same transaction (hrn:node:hadronmemory.com:specs:cor:dmo:050:21, Holger R1-R3, 2026-11-09).
+
+    Whoever may deleteApp may call this (the same gate); anyone else, and an App that does not exist, gets one identical
+    refusal. A repeat on an uninstalled App changes nothing. A deleted App is refused (APP_DELETED). Accepts the ID, or a URN: it
+    names the installed App holding it, else the one uninstalled App with it.
+    """
+    uninstallApp(ref: ID!): Boolean!
+
+    """
+    #3774 — Reinstall an uninstalled App: the SAME App (id, keys, members, memories) is installed again; no row is created
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:21, R2). Same gate as uninstallApp.
+
+    Refused APP_URN_IN_USE while another installed App holds the handle, and APP_DELETED for a deleted App (there is no
+    undelete). A repeat on an installed App changes nothing. Accepts the ID, or a URN: it names the installed App holding
+    it (so a repeat by URN is a no-op), else the one uninstalled App with it (two or more: name one by id). The refusal's
+    extensions carry appId and urn. A worker that is still dark opens a NEW episode on the next sweep.
+    """
+    reinstallApp(ref: ID!): Boolean!
 
     """
     Install an Agent into an App (023-app-shape US1). Creates an AppAgent

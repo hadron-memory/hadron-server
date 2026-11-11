@@ -14,12 +14,22 @@ import { requirePersonOnlyAct } from '../auth/personAsThemselves.js';
 import type { Context } from '../../api/graphql/schema/resolvers.js';
 import { requireScheduleAdmin } from '../../api/graphql/schema/resolvers.appRun.js';
 import { PLATFORM_ACTIONS } from './actions.js';
+import { managesApp } from '../auth/appManagement.js';
+import { resolveAppRef } from '../entityRef/appRef.js';
+
+/** #3823: whoever manages the App (the gate the boot-prompt actions' signer faces; the node-specific part is judged where the grant is spent). */
+async function requireAppManager(ctx: Context, appRef: string): Promise<void> {
+  const { id } = await resolveAppRef(ctx.db, appRef);
+  const app = await ctx.db.app.findFirst({ where: { id, deletedAt: null }, select: { id: true, organizationId: true, ownerUserId: true } });
+  if (!app || !(await managesApp(ctx, app))) throw authorizationDenied();
+}
 
 type IssuerGate = (ctx: Context, appRef: string) => Promise<unknown>;
 
 export const ISSUER_RULES: Readonly<Record<string, IssuerGate>> = {
   APP_SCHEDULE_ADMIN: requireScheduleAdmin,
   APP_WEBHOOK_ADMIN: requireScheduleAdmin,
+  APP_MANAGER: requireAppManager,
 };
 
 /**
