@@ -5580,6 +5580,12 @@ export const typeDefs = `#graphql
   type Worker {
     "Current lint of the compiled revision recorded for the open session; null when unavailable."
     promptLintWarnings(first: Int = 50, after: String): LintWarningPage
+    """
+    #3865 — the worker's stored availability record: reason, who set it (setBy, setByParty) and when (setAt), the
+    same record \`TeamRosterEntry.availability\` and \`teamAvailability\` return (hrn:node:hadronmemory.com:specs:cor:agt:060:02).
+    Worker-internals field: null for a caller who may not see them, and null when the worker has no record.
+    """
+    availability: WorkerAvailability
     id: ID!
     appId: ID!
     """

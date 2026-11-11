@@ -89,7 +89,9 @@ import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { runMayReadTeam } from '../../../lib/auth/runTeamRead.js';
 import { managesApp, lockAppManagerMemberships } from '../../../lib/auth/appManagement.js';
 import { withAuthorizedTx, liveTxContext } from './authorizedTx.js';
+import { recordInEffect } from '../../../lib/agentTasks/availability.js';
 import { resolveTaskActor, type TaskApp } from './resolvers.agentTask.js';
+import { tickBatch } from './tickBatch.js';
 import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { appendWorkerCastEvent, appendWorkerCastingEvent, appendWorkerDeletedEvent, appendWorkerRetiredEvent, eventActor } from '../../../lib/agentTasks/events.js';
 import { assertCastable, provisionCastGrants, requireWorkerAgentRole, workerAgentNotInstalled } from '../../../lib/workerCasting.js';
@@ -2954,6 +2956,20 @@ async function resolveWorkerUrnField(
   }
 }
 
+const workerAvailabilityOf = tickBatch<string, Record<string, unknown> | null>(async (ctx, ids) => {
+  const rows = await ctx.db.workerAvailability.findMany({ where: { workerId: { in: ids } } });
+  // inEffect needs session activity; read it once for the whole batch (the roster does the same) and carry the
+  // answer on the row so WorkerAvailability.inEffect issues no per-worker aggregate.
+  const now = new Date();
+  const activity = await loadWorkersActivity(ctx, rows.map((r) => r.workerId), now);
+  return new Map(
+    rows.map((r) => [
+      r.workerId,
+      { ...r, __inEffect: recordInEffect(r, now, activity.get(r.workerId)?.lastActiveAt ?? null) } as Record<string, unknown>,
+    ]),
+  );
+}, null);
+
 export const workerFieldResolvers = {
   /**
    * #1073 — the release receipt's holder, resolved lazily as a SANITIZED
@@ -3019,6 +3035,13 @@ export const workerFieldResolvers = {
     urn: (u: { handle?: string | null }) => userUrn(u.handle),
   },
   Worker: {
+    /**
+     * #3865: the worker's stored availability record (reason, setter, set-at), the same record and type
+     * `TeamRosterEntry.availability` and `teamAvailability` return. Worker internals gate: null for a reader who
+     * may not see them, and null when the worker has no record. One batched read per request (no per-row query).
+     */
+    availability: async (w: { id: string; appId: string }, _: unknown, ctx: Context) =>
+      (await maySeeWorkerInternals(ctx, w.appId)) ? workerAvailabilityOf(ctx, w.id) : null,
     /** #2047: the record of the open session, self-authorized (worker internals). */
     servedPrompt: servedPromptOwnerFields.workerServedPrompt,
     promptLintWarnings: async (w: { id: string; appId: string }, args: { first?: number | null; after?: string | null }, ctx: Context) => {
