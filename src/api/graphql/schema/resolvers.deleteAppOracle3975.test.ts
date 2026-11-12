@@ -116,7 +116,7 @@ describe('#3975 deleteApp existence oracle', () => {
     expect(await refusal(M.deleteApp({}, { ref: legacy }, ctx(otherAdmin.id)))).toEqual(reference);
   });
 
-  it('updateApp is not part of this change: a missing ref still answers APP_NOT_FOUND', async () => {
+  it('updateApp missing refs still answer APP_NOT_FOUND under #3982 model A', async () => {
     expect((await refusal(M.updateApp({}, { ref: generateId(), name: 'x' }, ctx(admin.id)))).code).toBe('APP_NOT_FOUND');
   });
 
