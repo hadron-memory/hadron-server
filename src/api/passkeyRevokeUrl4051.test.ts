@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer as httpServer, request as httpRequest, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { buildSchema } from 'graphql';
@@ -17,10 +17,15 @@ import { deploymentSchema } from './graphql/schema/deploymentSchema.js';
 
 let server: Server | undefined;
 afterEach(async () => {
-  if (server) await new Promise<void>((resolve, reject) => server!.close(e => e ? reject(e) : resolve()));
+  if (server) {
+    const closing = new Promise<void>((resolve, reject) => server!.close(e => e ? reject(e) : resolve()));
+    server.closeIdleConnections();
+    await closing;
+  }
   server = undefined;
   vi.unstubAllEnvs();
 });
+afterAll(async () => { await cleanDb(db); });
 
 async function boot(signing: string | undefined, registration: string | undefined, baseUrl = 'https://hadron.example') {
   vi.stubEnv('PASSKEY_SIGNING_ENABLED', signing);
@@ -57,6 +62,8 @@ describe('#4051 passkeyRevokeUrl', () => {
       const headers = { authorization: `Bearer ${await signJwt({ sub: user.id, roles: [] })}` };
       const sdl = await (await fetch(`${base}/graphql/schema`, { headers })).text();
       expect(/\bpasskeyRevokeUrl: String!/.test(sdl)).toBe(on);
+      // #4068: the sibling registration token follows the same switch, so the two cannot split.
+      expect(/\bpasskeyRegistration: Boolean!/.test(sdl)).toBe(on);
       const r = await gql(base, REVOKE, headers);
       if (on) {
         expect(r.status).toBe(200);
@@ -80,7 +87,10 @@ describe('#4051 passkeyRevokeUrl', () => {
     expect(url.pathname).toBe('/passkeys/revoke');
     const viaAdvertised = await fetch(`${base}${url.pathname}`);
     expect(viaAdvertised.status).toBe(200);
-    expect(await viaAdvertised.text()).toBe(await (await fetch(`${base}/passkeys/revoke`)).text());
+    const page = await viaAdvertised.text();
+    expect(page).toBe(await (await fetch(`${base}/passkeys/revoke`)).text());
+    // the revoke page itself, not a generic 200 shell
+    expect(page.toLowerCase()).toContain('revoke');
   });
 
   // pin 5: old consumers
