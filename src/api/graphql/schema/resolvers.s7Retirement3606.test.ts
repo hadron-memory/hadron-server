@@ -5,6 +5,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { loadPendingReasons } from '../../../lib/tickers/checkPending.js';
+import { runAsActor } from '../../../lib/requestActor.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -254,51 +255,66 @@ it('executes released CLI get/pause/clear-pause and portal get/set documents wit
 
 // #4020 (tests only; basis cor:agt:050:11 + cor:dmo:050:12, built as, not ruled; cor:agt:080:29 is history only: it is
 // why standby false or omission is a no-op at all). An instructed worker manager's no-op records no manager act.
+// Every test starts from cleanDb (beforeEach above), so no case inherits state from another.
 describe('instructed worker manager on the delivery and clear doors (#4020)', () => {
  const instruction = { kind: 'LIVE_CHAT', ref: 'synthetic:instructed4020' };
+ let callerId: string;
  const asInstructedManager = async <T>(call: (c: Context) => Promise<T>): Promise<T> => {
   const worker = await db.worker.findUniqueOrThrow({ where: { id: targetId } });
-  const caller = await db.worker.create({ data: { appId, agentId: worker.agentId, name: 'Caller', slug: 'caller', signature: '', trailer: '', heldByUserId: adminId } });
+  const slug = `caller-${generateId()}`;
+  const caller = await db.worker.create({ data: { appId, agentId: worker.agentId, name: slug, slug, signature: '', trailer: '', heldByUserId: adminId } });
+  callerId = caller.id;
   const session = await db.session.create({ data: { id: generateId(), appId, workerId: caller.id, agentId: worker.agentId, userId: adminId } });
-  const { runAsActor } = await import('../../../lib/requestActor.js');
   return runAsActor({ workerId: caller.id, agentId: worker.agentId }, () => call(ctx(adminId, { sessionId: session.id })));
  };
  const acts = () => db.agentTeamEvent.findMany({ where: { appId, type: 'app.manager-act' } });
+ // The target worker's own row is in the snapshot, so a write to it (even an updated_at bump) is visible.
  const snapshot = async () => ({
   apps: await db.$queryRawUnsafe('SELECT to_jsonb(a) AS row FROM apps a ORDER BY id'),
   settings: await db.$queryRawUnsafe('SELECT to_jsonb(w) AS row FROM worker_wake_settings w ORDER BY worker_id'),
+  target: await db.$queryRawUnsafe(`SELECT to_jsonb(w) AS row FROM workers w WHERE w.id = '${targetId}'`),
   events: await db.agentTeamEvent.findMany({ where: { appId }, orderBy: { id: 'asc' } }),
  });
 
- it('B6 control: an instructed real change updates the App and records exactly one act', async () => {
-  const before = await snapshot();
+ it('B6 control: an instructed real delivery change updates the App and records one act, attributed to the caller', async () => {
+  const actsBefore = (await acts()).length;
   const out = await asInstructedManager(c => M.setAppDeliverySettings({}, { appRef: appId, input: { busyDelaySeconds: 601 }, instruction }, c));
   expect(out).toMatchObject({ busyDelaySeconds: 601 });
   expect((await db.app.findUniqueOrThrow({ where: { id: appId } })).deliveryBusyDelaySeconds).toBe(601);
-  expect(await acts()).toHaveLength(1);
-  expect((await snapshot()).events).not.toEqual(before.events);
+  const after = await acts();
+  expect(after).toHaveLength(actsBefore + 1);
+  expect(after[after.length - 1]).toMatchObject({ appId, type: 'app.manager-act', actorWorkerId: callerId, actorUserId: adminId });
  });
 
- it.each([[{ standbyEnabled: false }], [{}]])('B4: an instructed no-op %j writes nothing and records no act', async input => {
+ it.each([[{ standbyEnabled: false }], [{}]])('B4: an instructed delivery no-op %j writes nothing and records no act', async input => {
   const before = await snapshot();
+  const actsBefore = (await acts()).length;
   const out = await asInstructedManager(c => M.setAppDeliverySettings({}, { appRef: appId, input, instruction }, c));
   expect(out).toMatchObject({ standbyEnabled: false, standbyEffective: false });
-  expect(await snapshot()).toEqual(before);
-  expect(await acts()).toHaveLength(0);
+  const after = await snapshot();
+  // The caller's own worker and session rows are test setup: compare only what the door could touch.
+  expect({ ...after, events: after.events.filter(e => before.events.every(b => b.id !== e.id)) }).toEqual({ ...before, events: [] });
+  expect(await acts()).toHaveLength(actsBefore);
  });
 
  it('B5: an instructed standbyEnabled:true refuses before every write', async () => {
   const before = await snapshot();
   await expect(asInstructedManager(c => M.setAppDeliverySettings({}, { appRef: appId, input: { standbyEnabled: true }, instruction }, c)))
    .rejects.toMatchObject({ extensions: { code: 'DELIVERY_STANDBY_UNAVAILABLE' } });
-  expect(await snapshot()).toEqual(before);
+  const after = await snapshot();
+  expect({ ...after, events: after.events.filter(e => before.events.every(b => b.id !== e.id)) }).toEqual({ ...before, events: [] });
  });
 
- it('B2: an instructed clear door records no act and writes nothing', async () => {
+ it('B2: an instructed clear door leaves a stored pause and the worker row untouched and records no act', async () => {
+  // The door is inert by contract (#3606, #3695): even with a stored pause it writes nothing. Seeding one gives a
+  // swallowing or writing regression something to change.
+  await db.workerWakeSettings.create({ data: { workerId: targetId, mentions: 'OFF', pausedUntil: new Date('2099-01-01') } });
   const before = await snapshot();
+  const actsBefore = (await acts()).length;
   const out = await asInstructedManager(c => M.clearWorkerIsolation({}, { workerRef: targetId, instruction }, c));
-  expect(out).toMatchObject({ workerId: targetId, pausedUntil: null });
-  expect(await snapshot()).toEqual(before);
-  expect(await acts()).toHaveLength(0);
+  expect(out).toMatchObject({ workerId: targetId, mentions: 'OFF', pausedUntil: new Date('2099-01-01') });
+  const after = await snapshot();
+  expect({ ...after, events: after.events.filter(e => before.events.every(b => b.id !== e.id)) }).toEqual({ ...before, events: [] });
+  expect(await acts()).toHaveLength(actsBefore);
  });
 });
