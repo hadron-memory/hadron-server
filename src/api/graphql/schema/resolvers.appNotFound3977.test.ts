@@ -15,6 +15,8 @@ import { runAuthContext } from '../../../lib/auth/runPrincipal.js';
 import { formatGraphQLError as formatError } from '../formatError.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AmbiguousLegacyUrnError } from '../../../lib/entityRef/errors.js';
+import { ApolloServer } from '@apollo/server';
+import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -136,4 +138,29 @@ describe('#3977 review fixes (blind seat, ffcddde45)', () => {
       expect(await wire(call(ctx(outsider.id), legacy))).toEqual(await wire(call(ctx(outsider.id), ABSENT)));
     }
   });
+});
+
+describe('#3977 real GraphQL execution: absent and inaccessible Apps serialize to the same response', () => {
+  const server = new ApolloServer<Context>({ typeDefs, resolvers: resolvers as never, formatError: formatError as never });
+  const ops: Array<[string, string]> = [
+    ['teamChatMessages', 'query($r:ID!){ teamChatMessages(appRef:$r){ __typename } }'],
+    ['workers', 'query($r:ID!){ workers(appRef:$r){ __typename } }'],
+    ['createTeamChatMessage', 'mutation($r:ID!){ createTeamChatMessage(appRef:$r, body:"hi"){ __typename } }'],
+  ];
+  const exec = async (query: string, r: string, c: Context) => {
+    const res = await server.executeOperation({ query, variables: { r } }, { contextValue: c });
+    if (res.body.kind !== 'single') throw new Error('single expected');
+    const { errors } = res.body.singleResult;
+    return JSON.stringify((errors ?? []).map((e) => ({ message: e.message, path: e.path, locations: e.locations, code: e.extensions?.code, ext: Object.keys(e.extensions ?? {}).filter((k) => k !== 'stacktrace').sort() })));
+  };
+  for (const [name, q] of ops) {
+    it(`${name}: absent, inaccessible-by-urn, inaccessible-by-id and ambiguous refs answer identically`, async () => {
+      await db.app.update({ where: { id: app.id }, data: { legacyUrn: 'nf-org.com:dupe2' } });
+      await db.app.update({ where: { id: foreignApp.id }, data: { legacyUrn: 'nf-org.com:dupe2' } });
+      const c = ctx(outsider.id);
+      const absent = await exec(q, ABSENT, c);
+      expect(JSON.parse(absent)[0].code).toBe('APP_NOT_FOUND');
+      for (const r of [app.urn, app.id, 'nf-org.com:dupe2']) expect(await exec(q, r, c)).toBe(absent);
+    });
+  }
 });
