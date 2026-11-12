@@ -249,6 +249,33 @@ describe('ceilings: an App key, a run and an impersonated manager reach nothing'
     expect(imp.body.singleResult.errors?.[0]?.extensions?.code).toBe('FORBIDDEN');
     expect(await snapshot()).toBe(before);
   });
+
+  it('a headless run acting for a manager (clientId run:*) is the miss on all three, and writes nothing', async () => {
+    const g = await held();
+    const id = (await asWorker(REQUEST, { g })).data.requestGrantSignature.id;
+    const before = await snapshot();
+    const ctx = { db, userId: mgrId, appId: w.appId, clientId: 'run:r1', roles: [] } as Context;
+    for (const [query, variables, expected] of [[REQUEST, { g }, 'GRANT_NOT_FOUND'], [WITHDRAW, { id }, 'SIGNING_REQUEST_NOT_FOUND']] as const) {
+      const r = await direct.executeOperation({ query, variables }, { contextValue: ctx });
+      if (r.body.kind !== 'single') throw new Error('incremental');
+      expect(r.body.singleResult.errors?.[0]?.extensions?.code).toBe(expected);
+    }
+    const read = await direct.executeOperation({ query: READ, variables: { id } }, { contextValue: ctx });
+    if (read.body.kind !== 'single') throw new Error('incremental');
+    expect((read.body.singleResult.data as any).grantSigningRequest).toBeNull();
+    expect(await snapshot()).toBe(before);
+  });
+
+  it('a plain App member (not owner) who is only a CONTRIBUTOR of the org is the miss', async () => {
+    const g = await held();
+    const id = (await asWorker(REQUEST, { g })).data.requestGrantSignature.id;
+    await db.appMember.create({ data: { appId: w.appId, userId: w.user2Id, role: 'member' } });
+    const before = await snapshot();
+    expect(code(await post(memberKey, null, REQUEST, { g }))).toBe('GRANT_NOT_FOUND');
+    expect(code(await post(memberKey, null, WITHDRAW, { id }))).toBe('SIGNING_REQUEST_NOT_FOUND');
+    expect((await post(memberKey, null, READ, { id })).data.grantSigningRequest).toBeNull();
+    expect(await snapshot()).toBe(before);
+  });
 });
 
 describe('the demotion fence: the manager is judged under the membership lock, on the transaction', () => {
