@@ -195,8 +195,8 @@ export async function locateAppClassMemory(args: {
   });
   const agentRow = await db.agent.findUnique({ where: { id: agentId }, select: { urn: true, legacyUrn: true } });
   const agentSlugs = agentSlugCandidates(agentRow ?? { urn: agentUrn });
-  // The SAME row provisioning would adopt (oldest match, tombstones included). A tombstone is absent: never fall
-  // through to a younger live candidate, since provisioning would revive the older row as the home.
+  // The SAME row provisioning would adopt (oldest match, tombstones included). If that row is a tombstone the home is
+  // treated as absent; never fall through to a younger live candidate, because provisioning revives this older row.
   const chosen = candidates.find((m) => memoryCarriesLegacyKeyFor(m, agentSlugs));
   return chosen && !chosen.deletedAt ? chosen.id : null;
 }

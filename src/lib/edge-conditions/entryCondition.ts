@@ -25,6 +25,8 @@ export function entryConditionOf(loc: string, data: unknown): unknown {
 }
 
 const PATH_OPS = new Set(['var', 'missing', 'missing_some']);
+/** Marker for a computed variable path: refused, since its value is unknown until evaluation. */
+const COMPUTED_PATH = '<computed path>';
 const UNAVAILABLE_PREFIXES = ['chat.', 'message.data.'];
 
 function unavailablePath(node: unknown, depth = 0): string | null {
@@ -39,11 +41,13 @@ function unavailablePath(node: unknown, depth = 0): string | null {
   for (const [op, args] of Object.entries(node as Record<string, unknown>)) {
     if (PATH_OPS.has(op)) {
       const candidates: unknown[] = op === 'var'
-        ? [typeof args === 'string' ? args : Array.isArray(args) ? args[0] : null]
+        ? [Array.isArray(args) ? args[0] : args]
         : op === 'missing' ? (Array.isArray(args) ? args : [args])
-        : op === 'missing_some' && Array.isArray(args) && Array.isArray(args[1]) ? args[1] : [];
+        : op === 'missing_some' && Array.isArray(args) ? (Array.isArray(args[1]) ? args[1] : [args[1]]) : [];
       for (const c of candidates) {
         if (typeof c === 'string' && UNAVAILABLE_PREFIXES.some((p) => c.startsWith(p))) return c;
+        // A path that is computed (an expression, not a literal) cannot be checked against the start scope.
+        if (c !== null && c !== undefined && typeof c === 'object') return COMPUTED_PATH;
       }
     }
     const hit = unavailablePath(args, depth + 1);
@@ -57,6 +61,16 @@ export function validateEntryCondition(condition: unknown): { ok: true } | { ok:
   const base = validateEdgeCondition(condition);
   if (!base.ok) return base;
   const field = unavailablePath(condition);
+  if (field === COMPUTED_PATH) {
+    return {
+      ok: false,
+      error: {
+        code: 'UNKNOWN_SCOPE',
+        message: 'an entry condition may name a variable only by a literal memory.* or agent.* path, not a computed one',
+        detail: { field },
+      },
+    };
+  }
   if (field) {
     return {
       ok: false,
