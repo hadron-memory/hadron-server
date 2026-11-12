@@ -5393,8 +5393,12 @@ export const typeDefs = `#graphql
     appUrn: String!
     agentId: ID!
     agentName: String!
+    "Canonical URN of this row's Agent, rooted at its author rather than the serving App; null when it cannot be derived. hrn:node:hadronmemory.com:specs:cor:urn:010:01"
+    agentUrn: String
     workerId: ID
     workerName: String
+    "Canonical URN of this row's Worker, using its stored slug; null on an install-level row or when it cannot be derived. hrn:node:hadronmemory.com:specs:cor:dmo:050:11"
+    workerUrn: String
     compiledNodeId: ID!
     compiledNodeUrn: String
     "The revision served today."
