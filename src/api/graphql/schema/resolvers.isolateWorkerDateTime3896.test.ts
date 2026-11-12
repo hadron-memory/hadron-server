@@ -4,6 +4,8 @@
  * the resolver never parses `until`. On the wire a variable that does not coerce to DateTime is refused by GraphQL before the
  * resolver runs, so nothing is written. The valid-timestamp control reaches the resolver's WORKER_ISOLATION_UNAVAILABLE.
  * The corpus names no code for a scalar coercion failure; this pins the shape the server serves today, not a spec'd code.
+ * The server is built with the deployed error boundary (formatGraphQLError, server.ts), so the served message is the sanitized
+ * 'Invalid GraphQL variable input.' with no echo of the rejected value (#2087), not graphql-js's raw prose.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
@@ -12,6 +14,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+import { formatGraphQLError } from '../formatError.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
 const MUTATION = `mutation Isolate($workerRef: String!, $until: DateTime) {
@@ -32,7 +35,7 @@ beforeEach(async () => {
 });
 
 async function run(resolverMap: unknown, until: unknown) {
-  const server = new ApolloServer<Context>({ typeDefs, resolvers: resolverMap as never });
+  const server = new ApolloServer<Context>({ typeDefs, resolvers: resolverMap as never, formatError: formatGraphQLError });
   await server.start();
   try {
     const res = await server.executeOperation({ query: MUTATION, variables: { workerRef: targetId, until } }, { contextValue: ctx(adminId) });
@@ -43,6 +46,7 @@ async function run(resolverMap: unknown, until: unknown) {
 const writes = async () => ({
   settings: await db.workerWakeSettings.count({ where: { workerId: targetId } }),
   events: await db.agentTeamEvent.count({ where: { appId } }),
+  worker: await db.worker.findUniqueOrThrow({ where: { id: targetId } }),
 });
 
 describe('isolateWorker DateTime coercion over the real schema (#3896)', () => {
@@ -54,7 +58,8 @@ describe('isolateWorker DateTime coercion over the real schema (#3896)', () => {
       expect(result.data).toBeUndefined();
       expect(result.errors).toHaveLength(1);
       expect(result.errors![0]!.extensions?.code).toBe('BAD_USER_INPUT');
-      expect(result.errors![0]!.message).toMatch(/Variable "\$until" got invalid value "not-a-date"/);
+      expect(result.errors![0]!.message).toBe('Invalid GraphQL variable input.');
+      expect(JSON.stringify(result)).not.toContain('not-a-date');
       expect(result.errors![0]!.extensions?.code).not.toBe('WORKER_ISOLATION_UNAVAILABLE');
       expect(spy).not.toHaveBeenCalled();
     } finally { spy.mockRestore(); }
@@ -67,7 +72,8 @@ describe('isolateWorker DateTime coercion over the real schema (#3896)', () => {
     expect(result.data).toBeUndefined();
     expect(result.errors).toHaveLength(1);
     expect(result.errors![0]!.extensions?.code).toBe('BAD_USER_INPUT');
-    expect(result.errors![0]!.message).toMatch(/Variable "\$until" got invalid value 12345/);
+    expect(result.errors![0]!.message).toBe('Invalid GraphQL variable input.');
+    expect(JSON.stringify(result)).not.toContain('12345');
     expect(await writes()).toEqual(before);
   });
 
