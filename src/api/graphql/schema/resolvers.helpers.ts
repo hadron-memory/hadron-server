@@ -100,6 +100,7 @@ import { installWriteAllowed } from './installMemory.js';
 import { appPrincipalSessionWriteAllowed } from '../../../lib/sessionOwnership.js';
 import { unauthenticatedError } from '../../../lib/refusals.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
+import type { ChatScript } from '../../../lib/chatScript.js';
 
 /**
  * Marks a Node row whose `content` field answers with the STORED text unless a
@@ -3764,27 +3765,21 @@ export type ExtractionSpecEntry = { field: string; description?: string; shape?:
  * key and the schema property name in agreement.
  */
 export async function resolveExtractionSpec(
-  db: PrismaClient,
-  systemMemoryId: string,
+  script: ChatScript,
   convName: string | null,
   stageData: Record<string, unknown>,
 ): Promise<ExtractionSpecEntry[]> {
   const allSpecs: ExtractionSpecEntry[] = [];
 
   // 1. Agent-level: config node with agentExtractionSpec
-  const configNode = await db.node.findFirst({
-    where: { memoryId: systemMemoryId, loc: 'config', deletedAt: null },
-    select: { data: true },
-  });
+  // #4034: through the chat script reader, so a pinned chat reads the config and conversation of its revision.
+  const configNode = await script.node('config');
   const agentSpec = (configNode?.data as Record<string, unknown>)?.agentExtractionSpec as ExtractionSpecEntry[] | undefined;
   if (agentSpec?.length) allSpecs.push(...agentSpec);
 
   // 2. Conversation-level
   if (convName) {
-    const convNode = await db.node.findFirst({
-      where: { memoryId: systemMemoryId, loc: `conversations:${convName}`, deletedAt: null },
-      select: { data: true },
-    });
+    const convNode = await script.node(`conversations:${convName}`);
     const convSpec = (convNode?.data as Record<string, unknown>)?.extractionSpec as ExtractionSpecEntry[] | undefined;
     if (convSpec?.length) allSpecs.push(...convSpec);
   }
@@ -3815,12 +3810,11 @@ export async function resolveExtractionSpec(
  * see or answer with.
  */
 export async function buildRespondToolSchema(
-  db: PrismaClient,
-  systemMemoryId: string,
+  script: ChatScript,
   convName: string | null,
   stageData: Record<string, unknown>,
 ): Promise<Array<{ name: string; description: string; parameters: unknown }> | null> {
-  const deduped = await resolveExtractionSpec(db, systemMemoryId, convName, stageData);
+  const deduped = await resolveExtractionSpec(script, convName, stageData);
 
   const dataProps: Record<string, unknown> = {};
   for (const spec of deduped) {
@@ -4031,50 +4025,7 @@ export function assetUrn(memoryUrn: string, assetId: string): string {
   return `${memoryUrn}:assets:${assetId}`;
 }
 
-// ---------------------------------------------------------------------------
-// Snapshot reader: reads nodes from a published revision snapshot instead
-// of the live database. Used by startChat/sendChatMessage when the agent
-// has a publishedRevisionLoc set.
-// ---------------------------------------------------------------------------
-
-export interface SnapshotNode {
-  loc: string;
-  name: string;
-  nodeType?: string;
-  description?: string | null;
-  content?: string | null;
-  data?: unknown;
-}
-
-/**
- * Load a published revision's snapshot and return a lookup function
- * that mimics db.node.findFirst for the system memory. Returns null
- * if no published revision exists (caller should fall back to live DB).
- */
-export async function loadPublishedSnapshot(
-  db: PrismaClient,
-  systemMemoryId: string,
-  publishedRevisionLoc: string | null,
-): Promise<((loc: string) => SnapshotNode | null) | null> {
-  if (!publishedRevisionLoc) return null;
-
-  const revNode = await db.node.findFirst({
-    where: { memoryId: systemMemoryId, loc: publishedRevisionLoc, deletedAt: null },
-    select: { data: true },
-  });
-  if (!revNode) return null;
-
-  const revData = (revNode.data as Record<string, unknown>) ?? {};
-  const snapshot = revData.snapshot as { nodes: SnapshotNode[] } | undefined;
-  if (!snapshot?.nodes) return null;
-
-  const nodesByLoc = new Map<string, SnapshotNode>();
-  for (const n of snapshot.nodes) {
-    nodesByLoc.set(n.loc, n);
-  }
-
-  return (loc: string) => nodesByLoc.get(loc) ?? null;
-}
+// The published-revision reader that lived here is `loadChatScript` (src/lib/chatScript.ts, #4034).
 
 // Rank runnable candidates against a loose hint: case-insensitive, matching
 // name/alias/loc/description, exact > prefix > substring.

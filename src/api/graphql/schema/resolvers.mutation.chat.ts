@@ -76,14 +76,12 @@ import { reportPartialTurn } from '../../../lib/chatPartialTurn.js';
 import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
 import {
   type Context,
-  type SnapshotNode,
   requireRole,
   requireMemoryWriteAccess,
   memoryAccessFilter,
   buildRespondToolSchema,
   pushGoal,
   appendRouteEntry,
-  loadPublishedSnapshot,
   rethrowAiConfigTyped,
 } from './resolvers.helpers.js';
 import { normalizeChatAiConfigChoice } from '../../../lib/chatbotAiConfig.js';
@@ -95,6 +93,7 @@ import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
 import { unauthenticatedError } from '../../../lib/refusals.js';
 import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds.js';
 import { pickUnnamedStartConversation, topLevelConversations } from '../../../lib/chatConversationOrder.js';
+import { loadChatScript } from '../../../lib/chatScript.js';
 
 /**
  * How many of a chat's most recent messages `sendChatMessage` hands the model.
@@ -305,39 +304,12 @@ export const chatMutations = {
       const systemMemoryId = (agent as any).systemMemoryId as string | null;
       if (!systemMemoryId) throw new Error('Agent has no system memory configured');
 
-      // If the agent has a published revision, read conversation structure
-      // from the snapshot (pin-to-version). Otherwise read from live nodes.
+      // If the agent has a published revision, the whole script (conversation structure, rules, extraction
+      // spec) is read from that snapshot (pin-to-version, #4034); otherwise from the live nodes.
       const publishedLoc = (agent as any).publishedRevisionLoc as string | null;
-      const snapshotLookup = await loadPublishedSnapshot(ctx.db, systemMemoryId, publishedLoc);
-
-      // Helper: find a node either from snapshot or live DB
-      async function findSystemNode(loc: string): Promise<SnapshotNode | null> {
-        if (snapshotLookup) return snapshotLookup(loc);
-        const n = await ctx.db.node.findFirst({
-          where: { memoryId: systemMemoryId!, loc, deletedAt: null },
-          select: { loc: true, name: true, nodeType: true, description: true, content: true, data: true },
-        });
-        return n as SnapshotNode | null;
-      }
-
-      // Helper: find all nodes matching a prefix (for conversation selection)
-      async function findSystemNodesByPrefix(prefix: string): Promise<SnapshotNode[]> {
-        if (snapshotLookup) {
-          // Scan the snapshot — loadPublishedSnapshot builds a Map, but
-          // we need prefix matching. Re-load the snapshot nodes.
-          const revNode = await ctx.db.node.findFirst({
-            where: { memoryId: systemMemoryId!, loc: publishedLoc!, deletedAt: null },
-            select: { data: true },
-          });
-          const snap = ((revNode?.data as any)?.snapshot?.nodes as SnapshotNode[]) ?? [];
-          return snap.filter((n) => n.loc.startsWith(prefix));
-        }
-        const nodes = await ctx.db.node.findMany({
-          where: { memoryId: systemMemoryId!, loc: { startsWith: prefix }, deletedAt: null },
-          select: { loc: true, name: true, nodeType: true, description: true, content: true, data: true },
-        });
-        return nodes as SnapshotNode[];
-      }
+      const script = await loadChatScript(ctx.db, systemMemoryId, publishedLoc);
+      const findSystemNode = (loc: string) => script.node(loc);
+      const findSystemNodesByPrefix = (prefix: string) => script.nodesByPrefix(prefix);
 
       // ── Conversation selection ───────────────────────────────────────
       let convName: string;
@@ -664,7 +636,7 @@ export const chatMutations = {
 
       // Build tool schema from hierarchical extraction spec
       // (agent-level config node + conversation-level + stage-level)
-      const tools = await buildRespondToolSchema(ctx.db, systemMemoryId, convName, stageData);
+      const tools = await buildRespondToolSchema(script, convName, stageData);
 
       // Create chat node in the target memory. The loc needs a unique
       // suffix since two chats started in the same minute by the same user
@@ -964,18 +936,10 @@ export const chatMutations = {
       // read from that snapshot so mid-conversation publishes don't change
       // the prompts/stages under the user.
       const startedWithRevision = chatData.startedWithRevision as string | null;
-      const snapshotLookup = systemMemoryId
-        ? await loadPublishedSnapshot(ctx.db, systemMemoryId, startedWithRevision)
-        : null;
+      const script = systemMemoryId ? await loadChatScript(ctx.db, systemMemoryId, startedWithRevision) : null;
 
-      async function findSystemNode(loc: string): Promise<SnapshotNode | null> {
-        if (snapshotLookup) return snapshotLookup(loc);
-        if (!systemMemoryId) return null;
-        const n = await ctx.db.node.findFirst({
-          where: { memoryId: systemMemoryId, loc, deletedAt: null },
-          select: { loc: true, name: true, nodeType: true, description: true, content: true, data: true },
-        });
-        return n as SnapshotNode | null;
+      async function findSystemNode(loc: string) {
+        return script ? script.node(loc) : null;
       }
 
       // #3654: choose the fallback re-route target BEFORE any write, so the gate below sees the stage this turn will serve.
@@ -988,20 +952,7 @@ export const chatMutations = {
         const currentConvData = (currentConv?.data as Record<string, unknown>) ?? {};
         if (currentConvData.isFallback === true) {
           // Scan all conversations for a goal match
-          const allConvNodes = await (async () => {
-            if (snapshotLookup) {
-              const revNode = await ctx.db.node.findFirst({
-                where: { memoryId: systemMemoryId, loc: startedWithRevision!, deletedAt: null },
-                select: { data: true },
-              });
-              return ((revNode?.data as any)?.snapshot?.nodes as SnapshotNode[] ?? []);
-            }
-            const nodes = await ctx.db.node.findMany({
-              where: { memoryId: systemMemoryId, loc: { startsWith: 'conversations:' }, deletedAt: null },
-              select: { loc: true, name: true, data: true, nodeType: true, description: true, content: true },
-            });
-            return nodes as SnapshotNode[];
-          })().then((nodes) => topLevelConversations(nodes));
+          const allConvNodes = topLevelConversations(await script!.nodesByPrefix('conversations:'));
           // #3405: both scans below walk top-level conversations in code-unit `loc` order
           // (cor:cht:030:02 step 3), so the first match and the default are deterministic.
 
@@ -1258,7 +1209,7 @@ export const chatMutations = {
         }
 
         // Build tools from hierarchical extraction spec
-        tools = await buildRespondToolSchema(ctx.db, systemMemoryId, activeConvName, stageData);
+        tools = await buildRespondToolSchema(script!, activeConvName, stageData);
       }
 
       // Build message history — the most recent MODEL_HISTORY_LIMIT messages.
@@ -1621,25 +1572,15 @@ export const chatMutations = {
           const agent = await ctx.db.agent.findUnique({ where: { id: agentId } });
           const sysMemId = (agent as any)?.systemMemoryId as string | null;
           if (sysMemId) {
-            // Find the current stage node and look for outgoing edges
+            // #4034: the rules, the agent config and the condition defaults come from the revision the chat
+            // is pinned to (`startedWithRevision`), not from the live draft (cor:cht:020:01, cor:cht:030:02).
             const currentStageLoc = `conversations:${chatData.conversationName}:${chatData.stageName}`;
-            const stageNode = await ctx.db.node.findFirst({
-              where: { memoryId: sysMemId, loc: currentStageLoc, deletedAt: null },
-              select: { id: true },
-            });
+            const script = await loadChatScript(ctx.db, sysMemId, (chatData.startedWithRevision as string | null) ?? null);
+            const stageNode = await script.node(currentStageLoc);
             if (stageNode) {
-              const edges = await ctx.db.edge.findMany({
-                where: { sourceId: stageNode.id, deletedAt: null },
-                orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }],
-                include: { target: { select: { loc: true, data: true } } },
-              });
-              // Load agent config once for the agent.* scope.
-              const agentConfigNode = await ctx.db.node.findFirst({
-                where: { memoryId: sysMemId, loc: 'config', deletedAt: null },
-                select: { data: true },
-              });
+              const edges = await script.outgoingRules(currentStageLoc);
               const agentBag: Record<string, unknown> = {
-                config: (agentConfigNode?.data as Record<string, unknown> | null) ?? {},
+                config: await script.agentConfig(),
               };
               // Resolve the system memory's slug-path URN once so error-side
               // sourceNodeUrn composition stays canonical (urn:node:<mem>:<loc>)
@@ -1666,16 +1607,19 @@ export const chatMutations = {
               const memoryLayers: MemoryLayerHandle[] = [];
               // #910: conditions read the turn's own person's values only.
               const turnPersonId = ctx.userId ?? null;
-              memoryLayers.push(await buildPrismaMemoryLayer(
-                ctx.db, 'edge-memory', sysMemId, currentStageLoc, turnPersonId,
-              ));
-              if (chatNode.memoryId !== sysMemId) {
+              memoryLayers.push(await script.conditionLayerA('edge-memory', currentStageLoc, turnPersonId));
+              // #4034: when layer A is the pinned snapshot, the chat's own memory is ALWAYS added live, even when it
+              // is the system memory (single-memory chat): otherwise the facts the chat extracts would vanish from
+              // its conditions. Unpinned, layer A already is the live system memory, so the duplicate stays skipped.
+              // (Today the chat-scope invariant refuses a chat held by a system-class memory, so this branch is
+              // not reachable through the API and carries no pin; the guard keeps the plan's rule if that changes.)
+              if (chatNode.memoryId !== sysMemId || script.pinned) {
                 memoryLayers.push(await buildPrismaMemoryLayer(
                   ctx.db, 'user-memory', chatNode.memoryId, currentStageLoc, turnPersonId,
                 ));
               }
               for (const edge of edges) {
-                const edgeData = (edge.data as Record<string, unknown>) ?? {};
+                const edgeData = edge.data;
                 const timing = edgeData.timing as string ?? 'on_complete';
                 if (timing !== 'on_complete' && timing !== 'always') continue;
 
@@ -1725,7 +1669,7 @@ export const chatMutations = {
                 }
 
                 // Edge fires! Check behavior
-                const targetLoc = edge.target?.loc;
+                const targetLoc = edge.targetLoc;
                 if (!targetLoc) continue;
 
                 const behavior = edgeData.behavior as string ?? 'transition';
@@ -1746,10 +1690,7 @@ export const chatMutations = {
                   }
 
                   // Switch to the target conversation's first stage
-                  const targetConv = await ctx.db.node.findFirst({
-                    where: { memoryId: sysMemId, loc: targetLoc, deletedAt: null },
-                    select: { data: true },
-                  });
+                  const targetConv = await script.node(targetLoc);
                   const targetConvData = (targetConv?.data as Record<string, unknown>) ?? {};
                   const targetStages = (targetConvData.stageOrder as string[]) ?? [];
                   const targetFirstStage = targetStages[0];
