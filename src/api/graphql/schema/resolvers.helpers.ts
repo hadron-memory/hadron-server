@@ -101,6 +101,7 @@ import { appPrincipalSessionWriteAllowed } from '../../../lib/sessionOwnership.j
 import { unauthenticatedError } from '../../../lib/refusals.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import type { ChatScript } from '../../../lib/chatScript.js';
+import { conversationStageOrder } from '../../../lib/chatRouting/nextStage.js';
 
 /**
  * Marks a Node row whose `content` field answers with the STORED text unless a
@@ -3822,7 +3823,7 @@ export async function buildRespondToolSchema(
     dataProps[fieldName] = { type: spec.shape ?? 'string', description: spec.description ?? fieldName };
   }
 
-  return respondToolDefinition(dataProps);
+  return respondToolDefinition(dataProps, await conversationStageOrder(script, convName));
 }
 
 /**
@@ -3832,6 +3833,7 @@ export async function buildRespondToolSchema(
  */
 export function respondToolDefinition(
   dataProps: Record<string, unknown>,
+  stageNames?: readonly string[] | null,
 ): Array<{ name: string; description: string; parameters: unknown }> {
   return [{
     name: 'respond',
@@ -3841,7 +3843,14 @@ export function respondToolDefinition(
       properties: {
         message: { type: 'string', description: 'Your response to the user' },
         data: { type: 'object', properties: dataProps },
-        next_stage: { type: ['string', 'null'], description: 'Stage to transition to (null to stay in current stage)' },
+        next_stage: stageNames
+          ? {
+              // #4035: exactly this conversation's stages, plus null to stay. A name outside the list moves nothing.
+              type: ['string', 'null'],
+              enum: [...stageNames, null],
+              description: `Stage to transition to, one of: ${stageNames.join(', ')} (null to stay in current stage)`,
+            }
+          : { type: ['string', 'null'], description: 'Stage to transition to (null to stay in current stage)' },
         onTrack: { type: 'boolean', description: 'Is the current conversation/stage still the right fit for what the user is asking?' },
         offTrackReason: { type: 'string', description: 'If onTrack is false, explain why the conversation seems off-track' },
       },

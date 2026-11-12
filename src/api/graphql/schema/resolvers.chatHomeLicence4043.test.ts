@@ -125,6 +125,18 @@ for (const home of ['personal', 'knowledge'] as const) {
         expect(seen.systemReads).toEqual([]);
         expect(seen.edgeReads).toBe(0);
       });
+
+      it('a named-stage response reads no definition for stage validation after licence loss', async () => {
+        await foreignHome();
+        const started = await start();
+        const root = await chatNodeByLocOrThrow(db, started.chatId);
+        if (home === 'knowledge') await db.memory.update({ where: { id: root.memoryId }, data: { class: 'knowledge', userId: null, organizationId: null, ownerUserId: userId, visibility: 'ORGANIZATION' } });
+        await loseLicence(loss);
+        const seen = await observeDefinitionReads<any>(() => M.processChatResponse({}, { chatId: started.chatId, toolResponse: { message: 'done', next_stage: 'step' } }, ctx()));
+        expect(seen.value.conversationHandoff).toBeNull();
+        expect(seen.systemReads).toEqual([]);
+        expect(seen.edgeReads).toBe(0);
+      });
     });
   }
 }
@@ -178,7 +190,7 @@ describe('#4043 controls', () => {
     expect(sent.tools).toBeNull();
   });
 
-  it.each([true, false])('shared response preserves its non-evaluating on-complete path (installed=%s)', async (installed) => {
+  it.each([true, false])('shared response executes only a licensed Agent definition (installed=%s)', async (installed) => {
     const started = await start('shared');
     const root = await chatNodeByLocOrThrow(db, started.chatId);
     if (!installed) await loseLicence('uninstall');
@@ -190,9 +202,16 @@ describe('#4043 controls', () => {
     const before = await messages();
     const response = await observeDefinitionReads<any>(() => M.processChatResponse({}, { chatId: started.chatId, toolResponse: { message: 'done', next_stage: null } }, ctx()));
     expect(await messages()).toBe(before + 1); // A no-op/already-complete return cannot satisfy this control.
-    expect(response.value.conversationHandoff).toBeNull();
-    expect(response.systemReads).toEqual([]);
-    expect(response.edgeReads).toBe(0);
+    if (installed) {
+      // #4035 on main now resolves the shared chat's Agent for response routing.
+      expect(response.value.conversationHandoff).toBe('next');
+      expect(response.systemReads.length).toBeGreaterThan(0);
+      expect(response.edgeReads).toBeGreaterThan(0);
+    } else {
+      expect(response.value.conversationHandoff).toBeNull();
+      expect(response.systemReads).toEqual([]);
+      expect(response.edgeReads).toBe(0);
+    }
   });
 
   it('private start selects a licensed App rather than the earlier retained unlicensed install', async () => {

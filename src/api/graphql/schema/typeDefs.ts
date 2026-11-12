@@ -9639,7 +9639,7 @@ export const typeDefs = `#graphql
     verifyNode(nodeRef: ID!): NodeIntegrityCheck!
     "#1632 — one signing request; null when unknown or when its node is not readable to the caller."
     signingRequest(id: ID!): SigningRequest
-    "#3649 slice B (hrn:node:hadronmemory.com:specs:cor:acl:140:07) — one grant signing request; null when unknown or when its grant is not readable to the caller (as grant(ref:) reads it)."
+    "#3649 slice B (hrn:node:hadronmemory.com:specs:cor:acl:140:07) — one grant signing request; null when unknown or when its grant is not readable to the caller: a bound worker session in its own App, or a person acting as themselves who manages the grant's live, installed App (as appGrants reads it)."
     grantSigningRequest(id: ID!): GrantSigningRequest
     "#1591 — the tamper check over every live node of a memory (ID or fully-qualified URN)."
     verifyMemoryNodes(memoryRef: String!): MemoryIntegrityReport!
@@ -11362,6 +11362,10 @@ export const typeDefs = `#graphql
     "Present and true only when passkey registration is enabled separately from node signing."
     passkeyRegistration: Boolean!
     """
+    #4051: the fixed, parameterless URL of the passkey revoke page (the deployment's baseUrl in this same response plus /passkeys/revoke), for a client that hands the owner off to it (hrn:node:hadronmemory.com:specs:cor:aut:040:08). Present only while passkey registration is enabled, exactly like passkeyRegistration: while it is off the field is removed from the schema, never null (hrn:node:hadronmemory.com:specs:cor:api:020:01), so check the passkey-registration token on GET /capabilities before selecting it. It names no passkey, credential, user or session, and is the same for every caller. Revoking happens interactively on that page; the URL grants nothing.
+    """
+    passkeyRevokeUrl: String!
+    """
     HADRON_SERVER_VERSION — the MCP/API-surface contract version.
     """
     version: String!
@@ -12417,11 +12421,11 @@ export const typeDefs = `#graphql
     "#1632 — withdraw an open signing request. Only the requester account, from any of its sessions (#10397). Refusals (hrn:node:hadronmemory.com:specs:cor:dmo:130:03, Holger #10430): SIGNING_REQUEST_NOT_FOUND, SIGNING_REQUEST_NOT_REQUESTER, SIGNING_REQUEST_ENDED (extensions.state)."
     withdrawSigningRequest(id: ID!): SigningRequest!
     """
-    #3649 slice B (hrn:node:hadronmemory.com:specs:cor:acl:140:07) — ask for one pending grant to be signed. Whoever may read the grant may ask (as grant(ref:) reads it), a bound worker included; workers never sign. No signer is named: whoever signs must be able to issue it. The request pins the grant's version and terms hash. Refusals: FORBIDDEN while impersonating; GRANT_NOT_FOUND (unknown and unreadable alike); GRANT_NOT_PENDING (activated, revoked, or its holder gone; no state is named); GRANT_EXPIRED (past its expiry, so it can never be signed); GRANT_TERMS_UNREPRESENTABLE (extensions.reason). No call takes an assertion: the signer signs on the server-hosted ceremony page.
+    #3649 slice B (hrn:node:hadronmemory.com:specs:cor:acl:140:07) — ask for one pending grant to be signed. Two callers may ask: a bound worker session in its own App, or a person acting as themselves who manages the grant's live, installed App (as appGrants reads it); workers never sign. No signer is named: whoever signs must be able to issue it. The request pins the grant's version and terms hash. Refusals: FORBIDDEN while impersonating; GRANT_NOT_FOUND (unknown and unreadable alike); GRANT_NOT_PENDING (activated, revoked, or its holder gone; no state is named); GRANT_EXPIRED (past its expiry, so it can never be signed); GRANT_TERMS_UNREPRESENTABLE (extensions.reason). No call takes an assertion: the signer signs on the server-hosted ceremony page.
     """
     requestGrantSignature(grantRef: ID!): GrantSigningRequest!
     """
-    #3690 PR 2 (hrn:node:hadronmemory.com:specs:cor:acl:140:05) — ask for a grant. A bound worker session may call it, in its own App, for itself or its role agent (installed in the App). #3711: a PERSON who manages the App may call it too, naming the App in input.appRef, for a worker of the App or an agent installed in it; the row records that person, never a worker. Either way the row is born pending and allows nothing until it is signed (#3649). Returns the grant as grant(ref:) reads it (a manager reads it as appGrants does). Refusals, each before any write and none naming a submitted value: GRANT_REQUESTER_NOT_WORKER, GRANT_NOT_MANAGER (a person arm caller who does not manage the App, and an unknown App: the same answer), GRANT_HOLDER_NOT_ALLOWED (any other holder, or an agent not installed here), GRANT_ACTION_UNKNOWN, GRANT_VALUES_INVALID (a value that does not match the action's declared parameters, or an undeclared key, or a list above 100 entries per parameter), GRANT_TERMS_INVALID (including a reason above 2,000 Unicode code points; hrn:node:hadronmemory.com:specs:cor:acl:140:01). These write-path limits never prevent rebuilding an existing grant's signature terms. Over MCP only the person arm exists (hadron_create_grant, ruling 0255 item 21). Present only where signing is switched on (PASSKEY_SIGNING_ENABLED).
+    #3690 PR 2 (hrn:node:hadronmemory.com:specs:cor:acl:140:05) — ask for a grant. A bound worker session may call it, in its own App, for itself or its role agent (installed in the App). #3711: a PERSON who manages the App may call it too, naming the App in input.appRef, for a worker of the App or an agent installed in it; the row records that person, never a worker. Either way the row is born pending and allows nothing until it is signed (#3649). Returns the grant as grant(ref:) reads it (a manager reads it as appGrants does). Refusals, each before any write and none naming a submitted value: GRANT_REQUESTER_NOT_WORKER, GRANT_NOT_MANAGER (a person arm caller who does not manage the App, and an unknown App: the same answer), GRANT_HOLDER_NOT_ALLOWED (any other holder, or an agent not installed here), GRANT_ACTION_UNKNOWN, GRANT_VALUES_INVALID (a value that does not match the action's declared parameters, or an undeclared key, or a list above 100 entries per parameter, or a node-typed value that does not name a node the requester can read: a missing, deleted, unreadable and malformed id are the same answer, hrn:node:hadronmemory.com:specs:cor:acl:140:07), GRANT_TERMS_INVALID (including a reason above 2,000 Unicode code points; hrn:node:hadronmemory.com:specs:cor:acl:140:01). These write-path limits never prevent rebuilding an existing grant's signature terms. Over MCP only the person arm exists (hadron_create_grant, ruling 0255 item 21). Present only where signing is switched on (PASSKEY_SIGNING_ENABLED).
     """
     createGrant(input: CreateGrantInput!): Grant!
     """
@@ -12432,7 +12436,7 @@ export const typeDefs = `#graphql
     #3711 (hrn:node:hadronmemory.com:specs:cor:acl:140:05, V57) — withdraw a grant the caller asked for, while it is still pending. Only the recorded requester: a person, or the worker session that asked. It is the grant's one end (revoked_at, with the person as revoker) and one REVOKE event; no new state is named. A withdrawal that loses the race to the signature is refused. Refusals: GRANT_NOT_FOUND (unknown and unreadable alike), GRANT_NOT_REQUESTER, GRANT_NOT_PENDING (activated). A grant already ended is returned as it is.
     """
     withdrawGrant(ref: ID!): Grant!
-    "#3649 slice B (hrn:node:hadronmemory.com:specs:cor:acl:140:07) — withdraw an open grant signing request. Only the requester account, from any of its sessions or workers. Refusals: FORBIDDEN while impersonating, SIGNING_REQUEST_NOT_FOUND, SIGNING_REQUEST_NOT_REQUESTER, SIGNING_REQUEST_ENDED (extensions.state)."
+    "#3649 slice B (hrn:node:hadronmemory.com:specs:cor:acl:140:07) — withdraw an open grant signing request. Only the requester account, from any of its sessions or workers, among the two callers who may read the grant (a bound worker in its own App, or a person who manages the App); a manager who did not ask is refused SIGNING_REQUEST_NOT_REQUESTER. Refusals: FORBIDDEN while impersonating, SIGNING_REQUEST_NOT_FOUND, SIGNING_REQUEST_NOT_REQUESTER, SIGNING_REQUEST_ENDED (extensions.state)."
     withdrawGrantSigningRequest(id: ID!): GrantSigningRequest!
     "#1591 — approve the current revision of every live node of a memory (ID or fully-qualified URN) in the mint scope (unminted, or minted and changed since or with no recorded minted revision, #1612) that isn't approved yet, in one transaction. Placeholders are skipped and reported."
     approveMemoryNodes(memoryRef: String!): ApproveMemoryNodesResult!
@@ -15468,6 +15472,8 @@ export const typeDefs = `#graphql
     displayMessage: String!
     stageTransitioned: Boolean!
     newStageName: String
+    "The stage name the turn asked for that is not one of the conversation's stages (hrn:node:hadronmemory.com:specs:cor:cht:030:02). The chat did not move; the turn is recorded. Null when the name was accepted or none was given."
+    rejectedNextStage: String
     conversationHandoff: String
     chatEnded: Boolean!
     onTrack: Boolean!
@@ -16936,6 +16942,20 @@ export const typeDefs = `#graphql
     dark
   }
 
+  """
+  #4041 (V82, hrn:node:hadronmemory.com:hadron-dev-team-shared:decisions:2026-11-12-vera-rulings-host-repair-notice;
+  hrn:node:hadronmemory.com:specs:cor:agt:070:01) — what a host's sweep did about a dark worker. A closed set, never
+  free text. The PLATFORM posts the notice, never the host key.
+  """
+  enum WorkerTerminalRepair {
+    "The host relaunched the worker; carries attempt."
+    RELAUNCHED
+    "The worker has no launch snapshot, so the host could not relaunch it."
+    NO_SNAPSHOT
+    "The host's relaunch attempt cap was reached."
+    CAP_REACHED
+  }
+
   "#2771 — what the terminal's input prompt looked like."
   enum WorkerTerminalPrompt {
     empty
@@ -16995,6 +17015,13 @@ export const typeDefs = `#graphql
     lastTurnAt: DateTime
     "When the host classified the terminal, not more than two minutes ahead of the server."
     checkedAt: DateTime!
+    """
+    #4041 (V82) — the outcome of the host's repair of a dark worker. Valid only with status dark; on a busy, idle or
+    locked report that worker's report is refused (REPAIR_NOT_DARK) and the rest of the batch is stored.
+    """
+    repair: WorkerTerminalRepair
+    "The relaunch's attempt number, at least 1: required with RELAUNCHED, refused (REPAIR_ATTEMPT_INVALID) otherwise."
+    attempt: Int
   }
 
   input SetHostWorkerTerminalsInput {
@@ -17009,7 +17036,7 @@ export const typeDefs = `#graphql
     urn: String!
   }
 
-  "#2771 — a report not stored for one worker: WORKER_NOT_FOUND or TERMINAL_REPORT_STALE."
+  "#2771 — a report not stored for one worker: WORKER_NOT_FOUND, TERMINAL_REPORT_STALE, REPAIR_NOT_DARK or REPAIR_ATTEMPT_INVALID."
   type WorkerTerminalRefusal {
     "The worker as the host named it."
     worker: String!
