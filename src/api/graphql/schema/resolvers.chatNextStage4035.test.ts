@@ -206,10 +206,14 @@ describe('next_stage check (#4035)', () => {
     // loc-scope-ok: the chat id is unique to this test's one chat
     const assistantTurns = () => db.node.count({ where: { loc: { startsWith: `${chat.chatId}:messages:` }, name: { endsWith: '-assistant' } } });
     const turnsBefore = await assistantTurns();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     const result = await resolvers.Mutation.processChatResponse(
       {}, { chatId: chat.chatId, toolResponse: { message: 'Hm', next_stage: 'nope', onTrack: true } }, userCtx(adminUser.id),
     );
+    const logged = warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('chat_stage_list_unreadable'));
+    warn.mockRestore();
+    expect(logged).toHaveLength(1);
     expect(result.stageTransitioned).toBe(false);
     expect(result.rejectedNextStage).toBe('nope');
     const after = await engineState(chat.chatId);

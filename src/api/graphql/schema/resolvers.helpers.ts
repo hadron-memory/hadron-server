@@ -3843,7 +3843,8 @@ export function respondToolDefinition(
       properties: {
         message: { type: 'string', description: 'Your response to the user' },
         data: { type: 'object', properties: dataProps },
-        next_stage: stageNames
+        // #4077: an empty or unreadable list offers no enum; an empty one would tell the model the conversation has no stages.
+        next_stage: stageNames && stageNames.length > 0
           ? {
               // #4035: exactly this conversation's stages, plus null to stay. A name outside the list moves nothing.
               type: ['string', 'null'],
