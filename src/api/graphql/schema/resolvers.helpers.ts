@@ -65,6 +65,7 @@ import {
   validateNodeDataExtractionSpecs,
   type EvaluationError,
 } from '../../../lib/edge-conditions/index.js';
+import { entryConditionOf, validateEntryCondition } from '../../../lib/edge-conditions/entryCondition.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
@@ -1367,6 +1368,30 @@ export function throwOnInvalidCondition(condition: unknown): void {
       code: 'INVALID_EDGE_CONDITION',
       reason: err.code,
       detail: err.detail,
+    },
+  });
+}
+
+/**
+ * #4039 (cor:cht:020:02, plan D7/D9): refuse a conversation node whose `data.entryCondition` is invalid or reads a
+ * variable that has no value at chat start. Judged from the loc and the data alone (any memory, depth-2
+ * `conversations:<name>`), so every writer that calls it answers the same. The detail carries only the variable path or
+ * operator the validator names: no edge id, no memory URN, no value. No `messageId`, like `INVALID_EDGE_CONDITION`.
+ */
+export function throwOnInvalidEntryCondition(loc: string, data: unknown): void {
+  const condition = entryConditionOf(loc, data);
+  if (condition === undefined) return;
+  const result = validateEntryCondition(condition);
+  if (result.ok) return;
+  const { code, message, detail } = result.error;
+  throw new GraphQLError(message, {
+    extensions: {
+      code: 'INVALID_ENTRY_CONDITION',
+      reason: code,
+      detail: {
+        ...(detail.field !== undefined ? { field: detail.field } : {}),
+        ...(detail.operator !== undefined ? { operator: detail.operator } : {}),
+      },
     },
   });
 }

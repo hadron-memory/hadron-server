@@ -171,6 +171,34 @@ export function allowedReadSet(
 }
 
 /**
+ * #4039 (D8, B2): the shared (App, Agent) memory a chat would use, found WITHOUT a write: no create, no revive of a
+ * tombstone, no adoption of a pre-#723 unkeyed row. A soft-deleted row counts as absent and its data is never read.
+ * A live pre-#723 unkeyed row is returned (provisioning would adopt it). Mirrors the lookups of
+ * {@link findOrCreateAppClassMemory} steps 1 and 2; the start evaluates entry conditions on this, then provisions.
+ */
+export async function locateAppClassMemory(args: {
+  appId: string;
+  agentId: string;
+  agentUrn: string;
+  db: PrismaClient;
+}): Promise<string | null> {
+  const { appId, agentId, agentUrn, db } = args;
+  const keyed = await db.memory.findUnique({
+    where: { appId_sharedMemoryOfAgentId: { appId, sharedMemoryOfAgentId: agentId } },
+    select: { id: true, deletedAt: true },
+  });
+  if (keyed) return keyed.deletedAt ? null : keyed.id;
+  const candidates = await db.memory.findMany({
+    where: { appId, class: 'app', sharedMemoryOfAgentId: null, deletedAt: null },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    select: { id: true, urn: true, legacyUrn: true },
+  });
+  const agentRow = await db.agent.findUnique({ where: { id: agentId }, select: { urn: true, legacyUrn: true } });
+  const agentSlugs = agentSlugCandidates(agentRow ?? { urn: agentUrn });
+  return candidates.find((m) => memoryCarriesLegacyKeyFor(m, agentSlugs))?.id ?? null;
+}
+
+/**
  * Provision the app-class memory for an `(App, Agent)` pair. On first call
  * creates a `class='app'` memory carrying `sharedMemoryOfAgentId = agentId`;
  * subsequent calls for the same pair return the existing memory's id.
