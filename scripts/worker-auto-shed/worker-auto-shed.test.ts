@@ -490,6 +490,16 @@ describe('#3954: no kill while a human is in the conversation', () => {
     expect(agent.gone()).toBe(false);
   });
 
+  it('an unreadable presence warns once too, so a worker stuck unreadable is not silently never shed', async () => {
+    const { s, wt, agent, terminal } = await stage();
+    terminal('FAIL');
+    expect(fire(NEW_HOOK, s, wt, agent.pid).log).toMatch(/skip: human presence unreadable/);
+    fire(NEW_HOOK, s, wt, agent.pid);
+    expect(warnings(s), 'one warning for the whole unreadable episode').toHaveLength(1);
+    expect(warnings(s)[0]).toMatch(/could not tell whether a human is in the conversation/);
+    expect(warnings(s)[0], 'must not claim a human is present').not.toMatch(/in the middle of a conversation/);
+  });
+
   it('warns once per skip episode, in both skip cases, not on every attempt', async () => {
     const { s, wt, agent, terminal } = await stage();
     terminal('{"terminal":{"prompt":"not_empty"}}');
