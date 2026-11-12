@@ -102,6 +102,7 @@ import { startAssetScanSweepLoop } from './jobs/scanPendingAssets.js';
 import { startOrphanObjectReaperLoop } from './jobs/reapOrphanAssetObjects.js';
 import { startAssetBytesSweepLoop } from './jobs/sweepAssetBytes.js';
 import { startSessionKeySweepLoop } from './lib/sessionKeyCache.js';
+import { startAppKeyCacheSweepLoop } from './lib/secrets/appKeys.js';
 import { startSessionReaperLoop } from './jobs/reapSessions.js';
 import { startPendingEdgePromotionSweepLoop } from './jobs/promotePendingEdges.js';
 import { startEmbeddingWorkerLoop, startEmbeddingBusListener, stopEmbeddingWorkerOutcome, assertEmbeddingObligationsReconciled } from './jobs/embedNodes.js';
@@ -2030,6 +2031,12 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // subsystem's off switch (#1120 review, Codex P2).
   if (process.env.NODE_ENV !== 'test') {
     startSessionKeySweepLoop();
+  }
+
+  // #3996 — the App secret key cache's sweep, on its OWN timer for the same reason: it is never behind
+  // DISABLE_SECRET_SWEEP (or any sibling flag), so unwrapped App keys cannot outlive SECRET_APP_KEY_CACHE_TTL_MS.
+  if (process.env.NODE_ENV !== 'test') {
+    startAppKeyCacheSweepLoop();
   }
 
   // 033 — embedding worker sweep (retries / restarts / backfill). Skipped in
