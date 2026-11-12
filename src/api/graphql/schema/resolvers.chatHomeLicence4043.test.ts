@@ -74,16 +74,29 @@ async function start(scope: 'private' | 'shared' = 'private') {
   return started;
 }
 
-/** Observe actual definition reads without replacing their results. */
+/** Observe directly memory-scoped Node reads and edge reads without replacing results.
+ * The licensed control verifies this observer against both actual retrieval paths;
+ * it is not a universal raw-SQL or transaction-client query recorder.
+ */
 async function observeDefinitionReads<T>(run: () => Promise<T>) {
   const first = vi.spyOn(db.node, 'findFirst');
   const many = vi.spyOn(db.node, 'findMany');
+  const unique = vi.spyOn(db.node, 'findUnique');
+  const uniqueOrThrow = vi.spyOn(db.node, 'findUniqueOrThrow');
+  const firstOrThrow = vi.spyOn(db.node, 'findFirstOrThrow');
   const edges = vi.spyOn(db.edge, 'findMany');
   try {
     const value = await run();
-    const systemReads = [...first.mock.calls, ...many.mock.calls].filter(([args]) => (args as any)?.where?.memoryId === systemId);
+    const systemReads = [...first.mock.calls, ...many.mock.calls, ...unique.mock.calls,
+      ...uniqueOrThrow.mock.calls, ...firstOrThrow.mock.calls].filter(([args]) => {
+      const where = (args as any)?.where;
+      const memory = where?.memoryId ?? where?.loc_memoryId?.memoryId;
+      return memory === systemId || memory?.equals === systemId || memory?.in?.includes(systemId);
+    });
     return { value, systemReads, edgeReads: edges.mock.calls.length };
-  } finally { first.mockRestore(); many.mockRestore(); edges.mockRestore(); }
+  } finally {
+    for (const spy of [first, many, unique, uniqueOrThrow, firstOrThrow, edges]) spy.mockRestore();
+  }
 }
 
 for (const home of ['personal', 'knowledge'] as const) {
@@ -120,11 +133,21 @@ describe('#4043 controls', () => {
   it('the licensed personal home still serves prompts/tools and fires its on-complete edge', async () => {
     await foreignHome();
     const started = await start();
-    const sent = await M.sendChatMessage({}, { chatId: started.chatId, userMessage: 'licensed' }, ctx());
-    expect(sent.systemMessage).toContain('LICENSED STAGE');
-    expect(sent.tools).not.toBeNull();
-    const response = await M.processChatResponse({}, { chatId: started.chatId, toolResponse: { message: 'done', next_stage: null } }, ctx());
-    expect(response.conversationHandoff).toBe('next');
+    const sent = await observeDefinitionReads<any>(() => M.sendChatMessage({}, { chatId: started.chatId, userMessage: 'licensed' }, ctx()));
+    expect(sent.value.systemMessage).toContain('LICENSED STAGE');
+    expect(sent.value.tools).not.toBeNull();
+    expect(sent.systemReads.length).toBeGreaterThan(0);
+    const response = await observeDefinitionReads<any>(() => M.processChatResponse({}, { chatId: started.chatId, toolResponse: { message: 'done', next_stage: null } }, ctx()));
+    expect(response.value.conversationHandoff).toBe('next');
+    expect(response.systemReads.length).toBeGreaterThan(0);
+    expect(response.edgeReads).toBeGreaterThan(0);
+  });
+
+  it('the database refuses an app-class chat home without appId', async () => {
+    const started = await start('shared');
+    const root = await chatNodeByLocOrThrow(db, started.chatId);
+    await expect(db.memory.update({ where: { id: root.memoryId }, data: { appId: null } })).rejects.toThrow('chk_memory_class_app_id');
+    expect((await db.memory.findUniqueOrThrow({ where: { id: root.memoryId } })).appId).toBe(appId);
   });
 
   it('an App-less personal home remains unchanged after its old App loses the install', async () => {
@@ -153,6 +176,17 @@ describe('#4043 controls', () => {
     const sent = await M.sendChatMessage({}, { chatId: started.chatId, userMessage: 'shared history' }, ctx());
     expect(sent.systemMessage).toBe('');
     expect(sent.tools).toBeNull();
+  });
+
+  it('shared response preserves its non-evaluating on-complete path before and after uninstall', async () => {
+    const started = await start('shared');
+    for (const installed of [true, false]) {
+      if (!installed) await loseLicence('uninstall');
+      const response = await observeDefinitionReads<any>(() => M.processChatResponse({}, { chatId: started.chatId, toolResponse: { message: 'done', next_stage: null } }, ctx()));
+      expect(response.value.conversationHandoff).toBeNull();
+      expect(response.systemReads).toEqual([]);
+      expect(response.edgeReads).toBe(0);
+    }
   });
 
   it('private start selects a licensed App rather than the earlier retained unlicensed install', async () => {
