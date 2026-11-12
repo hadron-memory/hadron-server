@@ -69,7 +69,10 @@ async function state(chatId: string) {
   // #3496: the operational counter moved out of revisioned root data; stage remains there.
   const counter = await db.chatRootCounter.findUniqueOrThrow({ where: { chatRootNodeId: chat.id }, select: { messageCount: true } });
   expect(root).not.toHaveProperty('messageCount');
-  return { memoryId: chat.memoryId, assistants, count: counter.messageCount, stage: root.stageName, data: data?.data ?? null, revisions };
+  // #3992 (Juliet F1): the AUTHORITATIVE engine state (incl. routeHistory) lives in chat_root_engine_states, not in the
+  // legacy root mirror, so a pre-write refusal must leave it byte-identical too.
+  const engine = await db.chatRootEngineState.findUnique({ where: { chatRootNodeId: chat.id }, select: { state: true } });
+  return { memoryId: chat.memoryId, assistants, count: counter.messageCount, stage: root.stageName, data: data?.data ?? null, revisions, engineState: engine?.state ?? null };
 }
 
 
@@ -109,4 +112,12 @@ describe('#3992 — respond `message` must be a JSON string, refused before any 
       expect(msg.content ?? '').toBe(message);
     });
   }
+
+  it('control: the snapshot sees the authoritative engine state move on a valid stage change (oracle is reachable)', async () => {
+    const { chatId } = await startChat();
+    const before = await state(chatId);
+    await respond(chatId, { message: 'moving on', onTrack: true, next_stage: 'wrap' });
+    const after = await state(chatId);
+    expect(after.engineState).not.toEqual(before.engineState);
+  });
 });
