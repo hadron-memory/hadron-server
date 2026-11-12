@@ -165,7 +165,20 @@ export async function computeSigningPreviewRows(db: Db, orgId: string): Promise<
       else rows.push({ ...base, state: (await status(servedRevSeq)).pending ? 'SIGNATURE_PENDING' : 'UNSIGNED_STOPS', changesToRevSeq: null });
     }
   }
+  warnAddressCompositionFailures(rows);
   return rows.sort((a, b) => (keyOf(a) < keyOf(b) ? -1 : keyOf(a) > keyOf(b) ? 1 : 0));
+}
+
+/**
+ * #4054: one aggregate, redacted warning per computation when a RETURNED row's display address could not be composed
+ * (the row still carries null). Counts displayed nulls per row, not distinct entities; an install-level row's absent
+ * Worker is not a failure. The payload is four fixed keys and carries no identifier, name, address or exception text.
+ */
+function warnAddressCompositionFailures(rows: readonly SigningPreviewRow[]): void {
+  const agentFailures = rows.filter((r) => r.agentUrn === null).length;
+  const workerFailures = rows.filter((r) => r.workerId !== null && r.workerUrn === null).length;
+  if (agentFailures + workerFailures === 0) return;
+  console.warn('signing.preview.address_composition_failed', { schemaVersion: 1, reason: 'COMPOSITION_FAILED', agentFailures, workerFailures });
 }
 
 /** The digest of the FULL preview: every row's target, served revision and state, across all pages. */
