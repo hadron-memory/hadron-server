@@ -41,6 +41,7 @@ import {
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
+import { isAppGateRefusal } from '../../../lib/auth/workerRead.js';
 import { serveBindInTransaction, resolveReadableWorkerRef, resolveWorkerIdByNameGated, resolveWorkerBindCandidatesByName, provisionWorkerMemory, requireWorkerReadAccess, resolveReportsToTarget } from './resolvers.worker.js';
 import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
 import { eventActor } from '../../../lib/agentTasks/events.js';
@@ -240,7 +241,7 @@ async function requireWorkerVisibleOrNotFound(ctx: Context, appId: string, worke
   try {
     await requireWorkerReadAccess(ctx, app);
   } catch (e) {
-    if (!(e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN')) throw e;
+    if (!isAppGateRefusal(e)) throw e;
     throw workerRefNotFound(workerRef);
   }
 }

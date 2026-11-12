@@ -111,7 +111,7 @@ it.each(['member', 'own-key', 'run', 'worker', 'impersonation'] as const)('%s ca
 });
 // #3360 (cor:agt:050:23): the legacy default-off own-App worker list is gone; an ungranted run is refused.
 it('refuses the own-App worker list to a run whose automation holds no grant (#3360)', async () => {
-  await denied(Q.workers({}, { appRef: appId }, runContext(db, await mintRun())), 'FORBIDDEN');
+  await denied(Q.workers({}, { appRef: appId }, runContext(db, await mintRun())), 'APP_NOT_FOUND');
   await enable();
   const page = await Q.workers({}, { appRef: appId }, runContext(db, await mintRun()));
   expect(page.items.map((worker: { id: string }) => worker.id)).toContain(workerId);
@@ -136,7 +136,7 @@ it('an opted-in foreign App remains concealed on every run team read', async () 
   const principal = runContext(db, await mintRun());
   await denied(Q.agentTasks({}, { appRef: otherAppId }, principal), 'APP_NOT_FOUND');
   await denied(Q.teamRoster({}, { appRef: otherAppId }, principal), 'APP_NOT_FOUND');
-  await denied(Q.workers({}, { appRef: otherAppId }, principal), 'FORBIDDEN');
+  await denied(Q.workers({}, { appRef: otherAppId }, principal), 'APP_NOT_FOUND');
   expect(await Q.agentTask({}, { id: foreign.id }, principal)).toBeNull();
   expect(await Q.agentTask({}, { id: `hrn:agenttask:${foreignApp.urn}:${foreign.handle}` }, principal)).toBeNull();
 });
@@ -391,7 +391,7 @@ it('own-App worker list, by-ref, held-worker and chat metadata reads follow the 
     if (enabled) await enable(); else if (await db.appAutomationTeamSnapshotGrant.count({ where: { appId, revokedAt: null } })) expect((await setting(false)).errors).toBeUndefined();
     if (!enabled) {
       await denied(Q.worker({}, { ref: workerId }, principal), 'WORKER_NOT_FOUND');
-      await denied(Q.workers({}, { appRef: appId }, principal), 'FORBIDDEN');
+      await denied(Q.workers({}, { appRef: appId }, principal), 'APP_NOT_FOUND');
       expect(await Q.heldWorkers({}, { userRef: manager }, principal)).toEqual({ items: [], total: 0 });
       await denied(Q.teamChatMessages({}, { appRef: appId, untagged: true, advanceReadState: false }, principal), 'TEAM_CHAT_TEAM_METADATA_FORBIDDEN');
       continue;

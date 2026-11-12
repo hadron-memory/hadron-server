@@ -221,7 +221,7 @@ describe('#964 — castWorkerPreview', () => {
   });
 
   it('takes the MINT gate, not a read gate: outsiders and pure App-key principals are refused', async () => {
-    await expectCode(preview(ctx(outsider.id), { role: 'backend-engineer', name: 'Gwen' }), 'FORBIDDEN');
+    await expectCode(preview(ctx(outsider.id), { role: 'backend-engineer', name: 'Gwen' }), 'APP_NOT_FOUND');
     // Staffing is a human act — the pure App-key principal is denied for the
     // cast, so the preview matches.
     await expectCode(preview(ctx(undefined, app.id), { role: 'backend-engineer', name: 'Gwen' }), 'FORBIDDEN');

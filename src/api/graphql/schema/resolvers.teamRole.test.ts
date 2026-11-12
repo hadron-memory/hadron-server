@@ -192,7 +192,7 @@ describe('#960 — teamRoles read', () => {
   it('read gate: AppMember and the App\'s own key read; an outsider is refused', async () => {
     expect((await teamRoles(ctx(appMember.id))).total).toBe(2);
     expect((await teamRoles(ctx(undefined, app.id))).total).toBe(2);
-    await expectCode(teamRoles(ctx(outsider.id)), 'FORBIDDEN');
+    await expectCode(teamRoles(ctx(outsider.id)), 'APP_NOT_FOUND');
   });
 });
 
@@ -313,7 +313,7 @@ describe('#960 — createTeamRole', () => {
     // …an outsider gets FORBIDDEN, never the candidate list.
     await expectCode(
       M.createTeamRole({}, { appRef: app.id, role: 'ops' }, ctx(outsider.id)),
-      'FORBIDDEN',
+      'APP_NOT_FOUND',
     );
   });
 

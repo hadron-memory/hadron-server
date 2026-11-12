@@ -78,13 +78,15 @@ describe('#3977 a non-participant gets the absent-App answer', () => {
       });
     }
     it(`${surface}: byte-identical to a random absent App, an uninstalled App and a soft-deleted App`, async () => {
+      // By URN an uninstalled or deleted App is already unresolvable; by ID it resolves, so the gate must decide.
       const absent = await wire(call(ctx(outsider.id), ABSENT));
       expect(absent).toEqual(NOT_FOUND);
+      expect(await wire(call(ctx(outsider.id), generateId()))).toEqual(NOT_FOUND);
       const real = await wire(call(ctx(outsider.id), app.urn));
       await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
-      const uninstalled = await wire(call(ctx(outsider.id), app.urn));
+      const uninstalled = await wire(call(ctx(outsider.id), app.id));
       await db.app.update({ where: { id: app.id }, data: { uninstalledAt: null, deletedAt: new Date() } });
-      const deleted = await wire(call(ctx(outsider.id), app.urn));
+      const deleted = await wire(call(ctx(outsider.id), app.id));
       expect([real, uninstalled, deleted]).toEqual([absent, absent, absent]);
     });
   }
