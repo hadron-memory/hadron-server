@@ -179,13 +179,14 @@ describe('concealment: one miss, byte for byte, and nothing written', () => {
     const tag = generateId().slice(0, 8);
     const org2 = await db.organization.create({ data: { name: `o3-${tag}`, urn: `o3-${tag}.test` } });
     const app2 = await db.app.create({ data: { organizationId: org2.id, name: 'foreign', urn: `${org2.urn}:app` } });
-    const foreign = await insertGrant({ ...w, appId: app2.id }, { user_id: null, worker_id: null, agent_id: w.agentId } as never).catch(() => null);
+    const foreignWorker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app2.id, agentId: w.agentId, name: 'f', slug: `f-${tag}` } });
+    const foreign = await insertGrant({ ...w, appId: app2.id }, { app_id: app2.id, user_id: null, worker_id: foreignWorker.id } as never);
     const g = await held();
     const id = (await asWorker(REQUEST, { g })).data.requestGrantSignature.id;
     const before = await snapshot();
     expect(code(await asManager(REQUEST, { g: 'no-such-grant' }))).toBe('GRANT_NOT_FOUND');
     expect(code(await asManager(REQUEST, { g: '' }))).toBe('GRANT_NOT_FOUND');
-    if (foreign) expect(code(await asManager(REQUEST, { g: foreign }))).toBe('GRANT_NOT_FOUND');
+    expect(code(await asManager(REQUEST, { g: foreign }))).toBe('GRANT_NOT_FOUND');
     expect((await asManager(READ, { id: 'x'.repeat(3000) })).data.grantSigningRequest).toBeNull();
     expect(await snapshot()).toBe(before);
     expect(id).toBeTruthy();
@@ -252,12 +253,12 @@ describe('ceilings: an App key, a run and an impersonated manager reach nothing'
 
 describe('the demotion fence: the manager is judged under the membership lock, on the transaction', () => {
   /** Demote the manager on a second connection and hold it uncommitted; commit once the request is waiting on that row. */
-  async function demoteWhileRequestWaits<T>(run: () => Promise<T>): Promise<T> {
+  async function demoteWhileRequestWaits<T>(run: () => Promise<T>, demotion = `UPDATE org_members SET role = 'CONTRIBUTOR' WHERE organization_id = $1 AND user_id = $2`, params: string[] = [w.orgId, mgrId]): Promise<T> {
     const blocker = new Client({ connectionString: process.env.DATABASE_URL });
     await blocker.connect();
     try {
       await blocker.query('BEGIN');
-      await blocker.query(`UPDATE org_members SET role = 'CONTRIBUTOR' WHERE organization_id = $1 AND user_id = $2`, [w.orgId, mgrId]);
+      await blocker.query(demotion, params);
       const { rows: [{ pid }] } = await blocker.query('SELECT pg_backend_pid() AS pid');
       const pending = run();
       let waited = false;
@@ -289,6 +290,36 @@ describe('the demotion fence: the manager is judged under the membership lock, o
     const r = await demoteWhileRequestWaits(() => asManager(WITHDRAW, { id }));
     expect(code(r)).toBe('SIGNING_REQUEST_NOT_FOUND');
     expect((await db.grantSigningRequest.findUniqueOrThrow({ where: { id } })).state).toBe('open');
+  });
+});
+
+describe('the demotion fence covers the app-owner arm too (app_members), not only the org role', () => {
+  it('an App-owner member whose ownership is revoked while the request waits is the miss, and writes nothing', async () => {
+    const tag = generateId().slice(0, 8);
+    const u = await db.user.create({ data: { handle: `ow-${tag}` } });
+    await db.orgMember.create({ data: { organizationId: w.orgId, userId: u.id, role: 'CONTRIBUTOR' } });
+    await db.appMember.create({ data: { appId: w.appId, userId: u.id, role: 'owner' } });
+    const key = await keyFor(u.id);
+    const g = await held();
+    const before = await snapshot();
+    const blocker = new Client({ connectionString: process.env.DATABASE_URL });
+    await blocker.connect();
+    try {
+      await blocker.query('BEGIN');
+      await blocker.query(`UPDATE app_members SET role = 'member' WHERE app_id = $1 AND user_id = $2`, [w.appId, u.id]);
+      const { rows: [{ pid }] } = await blocker.query('SELECT pg_backend_pid() AS pid');
+      const pending = post(key, null, REQUEST, { g });
+      let waited = false;
+      for (let i = 0; i < 200 && !waited; i++) {
+        await new Promise((res) => setTimeout(res, 25));
+        const { rows: [{ n }] } = await blocker.query(`SELECT count(*) AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND $1 = ANY(pg_blocking_pids(pid))`, [pid]);
+        waited = Number(n) > 0;
+      }
+      expect(waited, 'the request waited on the owner membership row').toBe(true);
+      await blocker.query('COMMIT');
+      expect(code(await pending)).toBe('GRANT_NOT_FOUND');
+    } finally { await blocker.query('ROLLBACK').catch(() => undefined); await blocker.end(); }
+    expect(await snapshot()).toBe(before);
   });
 });
 

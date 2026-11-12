@@ -85,9 +85,8 @@ async function readableGrantReach(ctx: Context, grantId: string, locks?: Prisma.
   return { appId: app.id, audience: { kind: 'manager', userId } };
 }
 
-const sameReach = (a: Reach | null, b: Reach): boolean => a !== null && a.appId === b.appId
-  && a.audience.kind === b.audience.kind
-  && (a.audience.kind === 'worker' ? a.audience.workerId === (b.audience as { workerId: string }).workerId : a.audience.userId === (b.audience as { userId: string }).userId);
+const reachKey = (r: Reach): string => `${r.appId}:${r.audience.kind}:${r.audience.kind === 'worker' ? r.audience.workerId : r.audience.userId}`;
+const sameReach = (a: Reach | null, b: Reach): boolean => a !== null && reachKey(a) === reachKey(b);
 
 async function readableRequest(ctx: Context, id: string): Promise<(GrantSigningRequestRow & { appId: string }) | null> {
   const row = await ctx.db.grantSigningRequest.findUnique({ where: { id } });
@@ -115,7 +114,7 @@ export const grantSigningMutations = {
     try {
       return await withAuthorizedTx(
         ctx, [{ kind: 'app', id: appId }],
-        async (txCtx) => { if (!sameReach(await readableGrantReach(txCtx, grantRef, txCtx.db as Prisma.TransactionClient), reach)) throw grantNotFound(grantRef); },
+        async (txCtx, tx) => { if (!sameReach(await readableGrantReach(txCtx, grantRef, tx), reach)) throw grantNotFound(grantRef); },
         (tx) => createGrantSigningRequestInTransaction(tx, grantRef, { appId, requester: requesterOf(ctx) }),
       );
     } catch (error) {
@@ -137,7 +136,7 @@ export const grantSigningMutations = {
     try {
       return await withAuthorizedTx(
         ctx, [{ kind: 'app', id: reach.appId }],
-        async (txCtx) => { if (!sameReach(await readableGrantReach(txCtx, row.grantId, txCtx.db as Prisma.TransactionClient), reach)) throw requestNotFound(id); },
+        async (txCtx, tx) => { if (!sameReach(await readableGrantReach(txCtx, row.grantId, tx), reach)) throw requestNotFound(id); },
         (tx) => withdrawGrantSigningRequestInTransaction(tx, id, { appId: reach.appId, caller }),
       );
     } catch (error) {
