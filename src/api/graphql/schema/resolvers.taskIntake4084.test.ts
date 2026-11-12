@@ -18,6 +18,8 @@ import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { formatGraphQLError } from '../formatError.js';
+import { DEFAULT_OMITTED_PAGE_SIZE, OMITTED_PAGE_SIZE } from '../admissionComplexity.js';
+import { TASK_EXTERNAL_IDS_MAX } from './resolvers.agentTask.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 
@@ -102,8 +104,14 @@ describe('#4084 (1): agentTasks(externalIds:) — a bounded batch lookup inside 
 
   it('an empty list and a list over the cap are refused', async () => {
     await expect(list({ externalIds: [] })).rejects.toMatchObject(code('BAD_USER_INPUT'));
-    const many = Array.from({ length: 201 }, (_, i) => `https://example.com/items/${i}`);
+    const many = Array.from({ length: 101 }, (_, i) => `https://example.com/items/${i}`);
     await expect(list({ externalIds: many })).rejects.toMatchObject(code('BAD_USER_INPUT'));
+    // 100 is accepted, and with limit omitted one page answers all of them.
+    expect(await list({ externalIds: many.slice(0, 100) })).toEqual([]);
+  });
+
+  it('the no-limit batch page never exceeds what admission charges an omitted agentTasks limit', () => {
+    expect(TASK_EXTERNAL_IDS_MAX).toBeLessThanOrEqual(OMITTED_PAGE_SIZE['Query.agentTasks'] ?? DEFAULT_OMITTED_PAGE_SIZE);
   });
 
   it('a caller who does not participate in the App gets APP_NOT_FOUND, as for any list', async () => {
@@ -157,6 +165,21 @@ describe('#4084 (2): agentTaskExternalIdChanges — what changed on tasks with a
     expect(page.changes.map((ch: any) => [ch.kind, ch.externalId, ch.task.id, ch.task.externalId])).toEqual([['RELEASED', X, t.id, null]]);
   });
 
+  it('a change after the release carries no id and is left out; the changes before it keep the released id', async () => {
+    const t = await create({ externalId: X });
+    await M.assignAgentTask({}, { taskId: t.id, assignee: { user: assignee.id } }, ctx());
+    // Read between the assignment and the release: the reader sees the assignment with X.
+    const early = await changes();
+    expect(early.changes.map((ch: any) => [ch.kind, ch.externalId])).toEqual([['ASSIGNED', X]]);
+    await release(t.id);
+    await M.reassignAgentTask({}, { taskId: t.id, assignee: { user: sibling.id } }, ctx());
+    // Read after both: the same assignment, then the release; the later reassignment concerns no outside item.
+    const late = await changes();
+    expect(late.changes.map((ch: any) => [ch.kind, ch.externalId])).toEqual([['ASSIGNED', X], ['RELEASED', X]]);
+    expect(late.changes[0].cursor).toBe(early.changes[0].cursor);
+    expect((await changes({ after: early.changes[0].cursor })).changes.map((ch: any) => ch.kind)).toEqual(['RELEASED']);
+  });
+
   it('pages by an opaque cursor with no repeat and no skip', async () => {
     const ids: string[] = [];
     for (const id of [X, Y, Z]) {
@@ -179,6 +202,11 @@ describe('#4084 (2): agentTaskExternalIdChanges — what changed on tasks with a
     const t = await create({ externalId: X }, owner.id, other.id);
     await M.cancelAgentTask({}, { taskId: t.id }, ctx());
     const foreign = (await changes({}, owner.id, other.id)).changes[0].cursor;
+    // Another App's change never appears in this App's answer, even for a reader of both Apps.
+    expect((await changes()).changes).toEqual([]);
+    const mine = await create({ externalId: X });
+    await M.cancelAgentTask({}, { taskId: mine.id }, ctx());
+    expect((await changes()).changes.map((ch: any) => ch.task.id)).toEqual([mine.id]);
     await expect(changes({ after: foreign })).rejects.toMatchObject(code('BAD_USER_INPUT'));
     await expect(changes({ after: 'nonsense' })).rejects.toMatchObject(code('BAD_USER_INPUT'));
     await expect(changes({}, outsider.id)).rejects.toMatchObject(code('APP_NOT_FOUND'));
@@ -204,11 +232,11 @@ describe('#4084 (3): releaseAgentTaskExternalId — V87 (Proposed): whoever may 
     const before = await stored(t.id);
     const released = await runAsActor({ workerId: head.id, agentId: agent.id }, () => release(t.id));
     expect(released).toMatchObject({ id: t.id, status: 'cancelled', externalId: null });
-    // Nothing else about the task changes.
+    // Nothing else about the task changes (the who-and-when-last-written stamps every task write sets aside).
     const after = await stored(t.id);
-    const { externalId: _x1, updatedAt: _u1, updatedBy: _b1, ...restBefore } = before as any;
-    const { externalId: _x2, updatedAt: _u2, updatedBy: _b2, ...restAfter } = after as any;
-    expect(restAfter).toEqual(restBefore);
+    const content = (row: any) => Object.fromEntries(Object.entries(row).filter(([k]) => k !== 'externalId' && !k.startsWith('updated')));
+    expect(content(after)).toEqual(content(before));
+    expect(before.externalId).toBe(X);
     // One team event naming the released id.
     const events = await releaseEvents(t.id);
     expect(events.map((e) => [e.payload, e.actorWorkerId])).toEqual([[{ externalId: X }, head.id]]);
