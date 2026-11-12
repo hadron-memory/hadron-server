@@ -31,11 +31,16 @@ export type RepairNotice = {
 export const noticeKey = (n: Pick<RepairNotice, 'repair' | 'checkedAt'>): string =>
   n.repair === 'RELAUNCHED' ? `relaunched:${n.checkedAt.toISOString()}` : ALERT_KEY;
 
-/** The line posted. Plain text: the poster neutralises any `@` in a name. */
+/** A name set by a tenant or a host key reaches a platform-authored line: markdown-significant characters are dropped. */
+const plainName = (s: string): string => s.replace(/[\[\]()<>`*_~|\\]/g, ' ').replace(/\s+/g, ' ').trim();
+
+/** The line posted. Plain text: the poster neutralises any `@` in a name; names are stripped of markdown syntax. */
 export function noticeBody(n: RepairNotice): string {
-  if (n.repair === 'RELAUNCHED') return `${n.workerName} was relaunched on ${n.hostLabel} (attempt ${n.attempt}).`;
+  const worker = plainName(n.workerName);
+  const host = plainName(n.hostLabel);
+  if (n.repair === 'RELAUNCHED') return `${worker} was relaunched on ${host} (attempt ${n.attempt}).`;
   const why = n.repair === 'NO_SNAPSHOT' ? 'it has no launch snapshot' : 'the relaunch attempt cap was reached';
-  return `${n.workerName} is dark on ${n.hostLabel} and was not relaunched: ${why}.`;
+  return `${worker} is dark on ${host} and was not relaunched: ${why}.`;
 }
 
 /** Mention tokens for the dark worker's chain: the nearest worker it reports to, else every App manager. */
@@ -53,6 +58,25 @@ async function chainTokens(db: PrismaClient, appId: string, workerId: string): P
   return users.map((u) => u.handle).filter((h): h is string => !!h).map((h) => h.toLowerCase());
 }
 
+const pending = new Set<Promise<void>>();
+
+/**
+ * Post the notices off the request path: the host key's answer never waits on up to 200 chat appends. A post that never ran
+ * (a restart) left its marker unclaimed, so the host's next report retries it; the claim makes a repeat harmless.
+ */
+export function postRepairNoticesDeferred(db: PrismaClient, appId: string, notices: readonly RepairNotice[]): void {
+  if (notices.length === 0) return;
+  const p: Promise<void> = postRepairNotices(db, appId, notices).catch((err) => {
+    console.error('[host-repair-notice] deferred posting failed:', err);
+  }).finally(() => { pending.delete(p); });
+  pending.add(p);
+}
+
+/** Resolves when every deferred post has finished. For tests and shutdown. */
+export async function settleRepairNotices(): Promise<void> {
+  while (pending.size > 0) await Promise.allSettled([...pending]);
+}
+
 /**
  * Post each notice after the report committed. A failed or chat-less post leaves its marker unclaimed, so the host's next
  * report retries it; one notice's failure never fails the report or the other notices.
@@ -68,7 +92,8 @@ export async function postRepairNotices(db: PrismaClient, appId: string, notices
         db,
         appId,
         noticeBody(n),
-        async (tx) => (await tx.$executeRaw`UPDATE workers SET repair_notice_key = ${key} WHERE id = ${n.workerId} AND repair_notice_key IS DISTINCT FROM ${key}`) > 0,
+        // A relaunch key never replaces a NEWER relaunch key (ISO times sort as text): a delayed batch cannot regress the marker.
+        async (tx) => (await tx.$executeRaw`UPDATE workers SET repair_notice_key = ${key} WHERE id = ${n.workerId} AND repair_notice_key IS DISTINCT FROM ${key} AND NOT COALESCE(${key} LIKE 'relaunched:%' AND repair_notice_key LIKE 'relaunched:%' AND repair_notice_key > ${key}, false)`) > 0,
         mentions,
       );
     } catch (err) {

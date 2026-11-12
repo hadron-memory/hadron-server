@@ -76,7 +76,7 @@ import { sessionHasHandoff } from '../../../lib/hostOperations/settle.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { normalizeAvailability, type AvailabilityInput } from './resolvers.agentTaskAlarms.js';
 import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
-import { postRepairNotices, ALERT_KEY, type RepairNotice } from '../../../lib/agentTasks/hostRepairNotice.js';
+import { postRepairNoticesDeferred, ALERT_KEY, type RepairNotice } from '../../../lib/agentTasks/hostRepairNotice.js';
 import { buildWorkerTerminal, repairRefusal, validateTerminalBatch, type StoredWorkerTerminal, type TerminalReportInput } from '../../../lib/workerTerminal.js';
 import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
 import {
@@ -539,9 +539,9 @@ export const hostOperationMutations = {
           continue;
         }
         // #4041 (V82): a repair outcome is judged per worker, so one bad report never blocks the rest of the batch.
-        const bad = repairRefusal(r);
-        if (bad) {
-          refused.push({ worker: r.worker, code: bad });
+        const refusal = repairRefusal(r);
+        if (refusal) {
+          refused.push({ worker: r.worker, code: refusal });
           continue;
         }
         const terminal = buildWorkerTerminal(r, { id: host.hostId, label: reg.label }, now);
@@ -559,7 +559,7 @@ export const hostOperationMutations = {
       return { stored, refused };
     });
     // After the commit, as the platform: the host key writes nothing here (cor:agt:070:04).
-    await postRepairNotices(ctx.db, noticeAppId, notices);
+    postRepairNoticesDeferred(ctx.db, noticeAppId, notices);
     return result;
   }),
 

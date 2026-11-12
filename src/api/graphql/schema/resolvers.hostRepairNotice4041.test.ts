@@ -2,6 +2,7 @@
  * #4041 (V82/V83) — a host's repair outcome on a dark report, and the notice the PLATFORM posts for it.
  * hrn:node:hadronmemory.com:hadron-dev-team-shared:decisions:2026-11-12-vera-rulings-host-repair-notice
  */
+import { settleRepairNotices } from '../../../lib/agentTasks/hostRepairNotice.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { randomBytes } from 'node:crypto';
@@ -29,8 +30,12 @@ let channel: { id: string };
 let key: { id: string };
 
 const ago = (min: number) => new Date(Date.now() - min * 60_000);
-const send = (reports: unknown[]) =>
-  M.setHostWorkerTerminals({}, { input: { appRef: app.id, reports } }, { db, appId: app.id, appKeyId: key.id, organizationId: org.id, roles: [] } as Context);
+// The notices post off the request path (Belinda P2-2), so a helper that reads the chat settles them first.
+const send = async (reports: unknown[]) => {
+  const r = await M.setHostWorkerTerminals({}, { input: { appRef: app.id, reports } }, { db, appId: app.id, appKeyId: key.id, organizationId: org.id, roles: [] } as Context);
+  await settleRepairNotices();
+  return r;
+};
 const dark = (worker: string, extra: Record<string, unknown> = {}) => ({
   worker, status: 'dark', prompt: 'unknown', reason: 'bare_shell', lastTurnAt: null, checkedAt: ago(1), ...extra,
 });
@@ -151,6 +156,38 @@ describe('NO_SNAPSHOT and CAP_REACHED alert once per worker, to the dark worker\
     const [p] = await posts();
     expect(p.content).not.toContain('@');
     expect(p.data.mentions).toEqual(['mara']);
+  });
+
+  it('markdown syntax in a worker or host name is dropped from the platform line (blind P3-3)', async () => {
+    await db.worker.update({ where: { id: kit.id }, data: { name: 'Kit [see this](https://evil.example) `x`' } });
+    await send([dark(kit.id, { repair: 'NO_SNAPSHOT' })]);
+    const [p] = await posts();
+    expect(p.content).not.toMatch(/[\[\]()`]/);
+    expect(p.content).toContain('Kit see this https://evil.example x is dark');
+  });
+
+  it('a delayed relaunch cannot regress the marker to an older relaunch key (blind P3-4)', async () => {
+    const { postRepairNotices } = await import('../../../lib/agentTasks/hostRepairNotice.js');
+    const mk = (min: number) => ({ workerId: kit.id, workerName: 'Kit', hostLabel: 'Orca One', repair: 'RELAUNCHED' as const, attempt: 1, checkedAt: ago(min) });
+    await postRepairNotices(db, app.id, [mk(2)]);
+    const newer = await keyOf(kit.id);
+    await postRepairNotices(db, app.id, [mk(5)]);
+    expect(await keyOf(kit.id)).toBe(newer);
+    expect(await posts()).toHaveLength(1);
+  });
+
+  it('the response does not wait on the posts: they settle afterwards', async () => {
+    const r = await M.setHostWorkerTerminals({}, { input: { appRef: app.id, reports: [dark(kit.id, { repair: 'NO_SNAPSHOT' })] } }, { db, appId: app.id, appKeyId: key.id, organizationId: org.id, roles: [] } as Context);
+    expect((r as any).stored).toHaveLength(1);
+    await settleRepairNotices();
+    expect(await posts()).toHaveLength(1);
+  });
+
+  it('the Worker type never exposes the dedupe marker (blind P3-7)', async () => {
+    const { typeDefs } = await import('./typeDefs.js');
+    const sdl = typeof typeDefs === 'string' ? typeDefs : String(typeDefs);
+    const block = sdl.slice(sdl.indexOf('\n  type Worker {'));
+    expect(block.slice(0, block.indexOf('\n  }'))).not.toMatch(/repairNoticeKey|repair_notice_key/);
   });
 
   it('a repeat posts nothing, and CAP_REACHED after NO_SNAPSHOT is the same alert', async () => {
