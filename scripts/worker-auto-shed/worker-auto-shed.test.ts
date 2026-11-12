@@ -33,11 +33,30 @@ function sandbox(): { root: string; home: string; bin: string; calls: string } {
   const home = join(root, 'home'); mkdirSync(home);
   const bin = join(root, 'bin'); mkdirSync(bin);
   const calls = join(root, 'hadron-calls.log');
-  // A `hadron` that records every call: print mode must never reach it.
-  writeFileSync(join(bin, 'hadron'), `#!/bin/sh\necho "$@" >> "${calls}"\nexit 0\n`);
+  // A `hadron` that records every call: print mode must never reach it. #3954: it also answers the two reads the
+  // human-presence check makes (the worker's name, and its terminal's prompt state, from <root>/terminal.json;
+  // the content FAIL makes that read exit 1).
+  writeFileSync(join(bin, 'hadron'), `#!/bin/sh
+echo "$@" >> "${calls}"
+case "$*" in
+  "team session whoami"*) echo "Demo (server-engineer)" ;;
+  "team worker get"*)
+    t="${root}/terminal.json"
+    if [ -f "$t" ] && [ "$(cat "$t")" = FAIL ]; then exit 1; fi
+    if [ -f "$t" ]; then cat "$t"; else echo '{"terminal":{"prompt":"empty"}}'; fi ;;
+esac
+exit 0
+`);
   chmodSync(join(bin, 'hadron'), 0o755);
+  // #3954: the transcript a PreCompact fire names. Default: one human prompt an hour old, so no conversation is live.
+  writeFileSync(join(root, 'transcript.jsonl'), humanEntry(60 * 60_000, 'an old question') + '\n');
   return { root, home, bin, calls };
 }
+/** One transcript line: a prompt that arrived `agoMs` ago. `origin.kind` is how Claude Code tags who authored it. */
+function promptEntry(agoMs: number, content: unknown, kind = 'human'): string {
+  return JSON.stringify({ type: 'user', origin: { kind }, promptSource: 'typed', timestamp: new Date(Date.now() - agoMs).toISOString(), message: { role: 'user', content } });
+}
+const humanEntry = (agoMs: number, text: string): string => promptEntry(agoMs, text);
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
 
 function listAll(dir: string): string[] {
@@ -69,7 +88,7 @@ function emittedByHook(hook: string): string {
   chmodSync(join(s.bin, 'rm'), 0o755);
   const r = spawnSync('bash', [hook], {
     encoding: 'utf8',
-    input: JSON.stringify({ trigger: 'auto', cwd: wt, transcript_path: '' }),
+    input: fireInput(wt),
     env: { PATH: `${s.bin}:${process.env.PATH}`, HOME: s.home, WORKER_AUTO_SHED_DRY: '1' },
   });
   expect(r.status, r.stderr).toBe(0);
@@ -212,7 +231,7 @@ function fire(hook: string, s: ReturnType<typeof sandbox>, wt: string, claudePid
   const r = spawnSync('bash', [hook], { encoding: 'utf8', input: fireInput(wt), env });
   return { status: r.status, log: shedLog(s) };
 }
-const fireInput = (wt: string): string => JSON.stringify({ trigger: 'auto', cwd: wt, transcript_path: '' });
+const fireInput = (wt: string): string => JSON.stringify({ trigger: 'auto', cwd: wt, transcript_path: join(dirname(wt), 'transcript.jsonl') });
 function shedLog(s: ReturnType<typeof sandbox>): string {
   const logPath = join(s.home, '.local', 'state', 'hadron-worker-shed', 'auto-shed.log');
   return existsSync(logPath) ? readFileSync(logPath, 'utf8') : '';
@@ -330,5 +349,167 @@ describe('#2163 part 1: a stopped agent cannot compact on the way out', () => {
       for (let i = 0; i < 50 && !agent.gone(); i++) await new Promise((r) => setTimeout(r, 100));
       expect(agent.gone(), 'the released stand-in never exited').toBe(true);
     });
+  });
+});
+
+/**
+ * #3954: the hook must not stop an agent while a human is in a conversation with it.
+ * Two skip branches (the terminal's prompt box holds a draft; the last human-authored prompt is within 15 minutes),
+ * both exit 0 so Claude Code's own (lossy) compaction runs, both fail toward NOT killing when the check cannot
+ * be made, and both post one warning line per skip episode (Holger, 2026-11-11: "15 min is fine, and yes to
+ * posting a warning"). Wake and delivery prompts are injected through the terminal too, so they are tagged
+ * `human` by Claude Code; the hook recognises them by their `[hadron tick|task|chat]` marker.
+ */
+describe('#3954: no kill while a human is in the conversation', () => {
+  const agents: Agent[] = [];
+  afterEach(() => { for (const a of agents.splice(0)) { try { process.kill(a.pid, 'SIGKILL'); } catch { /* gone */ } a.supervisor.kill('SIGKILL'); } });
+
+  async function stage(): Promise<{ s: ReturnType<typeof sandbox>; wt: string; agent: Agent; transcript: (...lines: string[]) => void; terminal: (content: string) => void }> {
+    const s = sandbox();
+    const wt = join(s.root, NAME); mkdirSync(wt);
+    const agent = await startAgent(s.root);
+    agents.push(agent);
+    return {
+      s, wt, agent,
+      transcript: (...lines) => writeFileSync(join(s.root, 'transcript.jsonl'), lines.join('\n') + '\n'),
+      terminal: (content) => writeFileSync(join(s.root, 'terminal.json'), content),
+    };
+  }
+  const state = (s: ReturnType<typeof sandbox>): string => join(s.home, '.local', 'state', 'hadron-worker-shed');
+  const warnings = (s: ReturnType<typeof sandbox>): string[] =>
+    (existsSync(s.calls) ? readFileSync(s.calls, 'utf8') : '').split('\n').filter((l) => l.startsWith('team chat post'));
+  const MIN = 60_000;
+
+  it('typing: a draft in the prompt box means no kill, compaction runs (exit 0)', async () => {
+    const { s, wt, agent, terminal } = await stage();
+    terminal('{"terminal":{"prompt":"not_empty"}}');
+    const r = fire(NEW_HOOK, s, wt, agent.pid);
+    expect(r.status, r.log).toBe(0);
+    expect(r.log).toMatch(/skip: human typing/);
+    expect(agent.gone(), 'the hook stopped an agent whose human was typing').toBe(false);
+    expect(existsSync(join(state(s), `${NAME}.prompt`)), 'a recovery prompt was left behind without a shed').toBe(false);
+    expect(existsSync(join(state(s), `${NAME}.last-auto-shed`)), 'a skip must not start the 10-minute cooldown').toBe(false);
+  });
+
+  it('conversation: a human prompt 5 minutes ago means no kill (exit 0)', async () => {
+    const { s, wt, agent, transcript } = await stage();
+    transcript(humanEntry(5 * MIN, 'what do you think about the second option?'));
+    const r = fire(NEW_HOOK, s, wt, agent.pid);
+    expect(r.status, r.log).toBe(0);
+    expect(r.log).toMatch(/skip: human conversation/);
+    expect(agent.gone(), 'the hook stopped an agent mid-conversation').toBe(false);
+  });
+
+  it('conversation: the window is 15 minutes: 14 skips, 16 kills', async () => {
+    const a = await stage();
+    a.transcript(humanEntry(14 * MIN, 'recent'));
+    expect(fire(NEW_HOOK, a.s, a.wt, a.agent.pid).log).toMatch(/skip: human conversation/);
+    const b = await stage();
+    b.transcript(humanEntry(16 * MIN, 'stale'));
+    const r = fire(NEW_HOOK, b.s, b.wt, b.agent.pid);
+    expect(r.status, r.log).toBe(2);
+    expect(r.log).toMatch(/stopping claude pid/);
+  });
+
+  it('conversation: a prompt whose content is an array of text blocks counts as a human prompt', async () => {
+    const { s, wt, agent, transcript } = await stage();
+    transcript(promptEntry(2 * MIN, [{ type: 'text', text: 'and what about the rollout?' }]));
+    expect(fire(NEW_HOOK, s, wt, agent.pid).log).toMatch(/skip: human conversation/);
+    expect(agent.gone()).toBe(false);
+  });
+
+  it.each([
+    ['a tick', '[hadron tick] tick team-tick: resolve your task for tick.team-tick yourself'],
+    ['a task delivery', '[hadron task] child finished: LOCAL review at abc (01a1)'],
+    ['a chat delivery', '[hadron chat] 2 for Beryl · #99237 Coco: hello'],
+    ['a pasted chat delivery', '\n\n<pasted_content id="6c71">\n[hadron chat] 2 for Beryl · #1 Bruce: hi\n</pasted_content id="6c71">'],
+  ])('wake and delivery prompts do not count as human: %s injected a minute ago still sheds', async (_n, text) => {
+    const { s, wt, agent, transcript } = await stage();
+    transcript(humanEntry(30 * MIN, 'an old question'), humanEntry(1 * MIN, text));
+    const r = fire(NEW_HOOK, s, wt, agent.pid);
+    expect(r.status, r.log).toBe(2);
+    expect(r.log).not.toMatch(/skip: human/);
+  });
+
+  it('tool results, assistant turns and non-human origins do not count either', async () => {
+    const { s, wt, agent, transcript } = await stage();
+    transcript(
+      humanEntry(30 * MIN, 'an old question'),
+      promptEntry(1 * MIN, 'a background task finished', 'task-notification'),
+      JSON.stringify({ type: 'user', timestamp: new Date(Date.now() - 1 * MIN).toISOString(), message: { role: 'user', content: [{ type: 'tool_result', content: 'ok' }] } }),
+      JSON.stringify({ type: 'assistant', timestamp: new Date(Date.now() - 1 * MIN).toISOString(), message: { role: 'assistant', content: 'done' } }),
+    );
+    const r = fire(NEW_HOOK, s, wt, agent.pid);
+    expect(r.status, r.log).toBe(2);
+  });
+
+  it('fails toward not killing when the terminal state cannot be read (exit 0, agent untouched)', async () => {
+    for (const bad of ['FAIL', 'not json', '{"terminal":{}}', '{"terminal":{"prompt":"mystery"}}']) {
+      const { s, wt, agent, terminal } = await stage();
+      terminal(bad);
+      const r = fire(NEW_HOOK, s, wt, agent.pid);
+      expect(r.status, `${bad}: ${r.log}`).toBe(0);
+      expect(r.log, bad).toMatch(/skip: human presence unreadable/);
+      expect(agent.gone(), `${bad}: the hook stopped an agent whose human state is unknown`).toBe(false);
+    }
+  });
+
+  it('fails toward not killing when the transcript cannot be read (exit 0, agent untouched)', async () => {
+    const { s, wt, agent } = await stage();
+    rmSync(join(s.root, 'transcript.jsonl'));
+    const r = fire(NEW_HOOK, s, wt, agent.pid);
+    expect(r.status, r.log).toBe(0);
+    expect(r.log).toMatch(/skip: human presence unreadable/);
+    expect(agent.gone()).toBe(false);
+  });
+
+  it('warns once per skip episode, in both skip cases, not on every attempt', async () => {
+    const { s, wt, agent, terminal } = await stage();
+    terminal('{"terminal":{"prompt":"not_empty"}}');
+    fire(NEW_HOOK, s, wt, agent.pid);
+    fire(NEW_HOOK, s, wt, agent.pid);
+    expect(warnings(s), 'one warning for the whole typing episode').toHaveLength(1);
+    expect(warnings(s)[0]).toMatch(/shed is due/);
+    // The same episode continues as a conversation skip: still no second warning.
+    terminal('{"terminal":{"prompt":"empty"}}');
+    writeFileSync(join(s.root, 'transcript.jsonl'), humanEntry(1 * MIN, 'ok, go on') + '\n');
+    expect(fire(NEW_HOOK, s, wt, agent.pid).log).toMatch(/skip: human conversation/);
+    expect(warnings(s)).toHaveLength(1);
+  });
+
+  it('the conversation skip warns too', async () => {
+    const { s, wt, agent, transcript } = await stage();
+    transcript(humanEntry(1 * MIN, 'a question'));
+    fire(NEW_HOOK, s, wt, agent.pid);
+    expect(warnings(s)).toHaveLength(1);
+  });
+
+  it('a new episode warns again: after the human is gone and a shed ran, the next skip posts', async () => {
+    const { s, wt, agent, terminal } = await stage();
+    terminal('{"terminal":{"prompt":"not_empty"}}');
+    fire(NEW_HOOK, s, wt, agent.pid);
+    expect(warnings(s)).toHaveLength(1);
+    terminal('{"terminal":{"prompt":"empty"}}');
+    expect(fire(NEW_HOOK, s, wt, agent.pid).status, 'the shed proceeds once no human is present').toBe(2);
+    // The shed ends the episode; the relaunched agent's next skip is a new one.
+    const again = await startAgent(s.root, 'again');
+    agents.push(again);
+    rmSync(join(state(s), `${NAME}.last-auto-shed`), { force: true });
+    terminal('{"terminal":{"prompt":"not_empty"}}');
+    fire(NEW_HOOK, s, wt, again.pid);
+    expect(warnings(s)).toHaveLength(2);
+  });
+
+  it('the kill path warns nobody', async () => {
+    const { s, wt, agent } = await stage();
+    expect(fire(NEW_HOOK, s, wt, agent.pid).status).toBe(2);
+    expect(warnings(s)).toHaveLength(0);
+  });
+
+  it('manual /compact stays untouched and reads nothing about the human', async () => {
+    const { s, wt } = await stage();
+    const r = spawnSync('bash', [NEW_HOOK], { encoding: 'utf8', input: JSON.stringify({ trigger: 'manual', cwd: wt, transcript_path: '' }), env: { PATH: `${s.bin}:${process.env.PATH}`, HOME: s.home } });
+    expect(r.status).toBe(0);
+    expect(existsSync(s.calls), 'a manual compact called hadron').toBe(false);
   });
 });
