@@ -6,6 +6,7 @@ import type { ActInstruction } from '../../../lib/auth/instructedAct.js';
 import { decryptToken } from '../../../lib/tokenCrypto.js';
 import { DEFAULT_AI_CONFIG_NAME } from '../../../lib/aiConfig.js';
 import { getDeploymentInfo } from '../../../mcp/deploymentInfo.js';
+import { CEREMONY_NEXT_PAGES } from '../../freshSignInRoutes.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { AgentNotFoundError, AmbiguousLegacyUrnError, UrnNotQualifiedError } from '../../../lib/entityRef/errors.js';
@@ -73,7 +74,14 @@ export function userApiKeyInventoryScope(ctx: Context, includeHidden: boolean | 
 }
 
 export const appQueries = {
-    serverInfo: async (_: unknown, __: unknown, ___: Context) => getDeploymentInfo(),
+    serverInfo: async (_: unknown, __: unknown, ___: Context) => {
+      const info = getDeploymentInfo();
+      // #4051: on-only, like passkeyRegistration (the field is removed from the schema while off). One origin: this same
+      // response's baseUrl, never the request's Host; the path is the revoke page's own constant.
+      return info.passkeyRegistration
+        ? { ...info, passkeyRevokeUrl: `${info.baseUrl}${CEREMONY_NEXT_PAGES.revoke}` }
+        : info;
+    },
 
     // #473 — the uniform paginated app list; replaces the org-ADMIN
     // apps(orgId!) and the member myApps. App doesn't carry a userId, so org
