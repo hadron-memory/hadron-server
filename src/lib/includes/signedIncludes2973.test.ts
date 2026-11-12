@@ -13,6 +13,9 @@ import { lintWarningPageForNodeId } from '../bootPromptLint.js';
 import { withCompileWrite } from '../bootPrompt.js';
 import { sha256Hex } from '../bootCompile/provenance.js';
 import { BROKEN_INCLUDE_NOTICE } from './spliceIncludes.js';
+import { setResolutionLimits } from './resolutionBudget.js';
+import { revisionSignatureCounts } from '../signing/revisionSignatureCounts.js';
+import { generateId } from '../id.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const ORIGIN = 'https://sign.example.test', RP = 'example.test';
@@ -34,12 +37,21 @@ beforeEach(async () => {
   partId = (await db.node.create({ data: { memoryId, loc: 'part', name: 'Part', content: 'v1' } })).id;
   sourceId = (await db.node.create({ data: { memoryId, loc: 'boot:source', name: 'Source', role: 'boot-prompt', content: '{{> part signed}}' } })).id;
 });
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => { vi.unstubAllEnvs(); setResolutionLimits(null); });
 
 /** Sign the current part through completion, recording the real writer-grade ceremony stamp. */
-async function signPart() {
+async function signPart(pending = false) {
   const key = softPasskey();
-  const passkeyId = await insertSoftPasskey(db, writerId, key, { rpId: RP });
+  const passkeyId = pending ? generateId() : await insertSoftPasskey(db, writerId, key, { rpId: RP });
+  if (pending) await db.$transaction(async tx => {
+    await tx.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION public.hadron_passkey_clock_offset() RETURNS interval LANGUAGE sql STABLE AS $$ SELECT interval '-71 hours' $$`);
+    await tx.$executeRaw`INSERT INTO passkey_credentials
+      (id, owner_id, credential_id, public_key, algorithm, user_handle, enrollment_rp_id, label, registered_at, counter,
+       transports, backup_eligible, backed_up, registration_method, window_ends_at)
+      VALUES (${passkeyId}, ${writerId}, ${key.credentialId}, ${key.cosePublicKey}, -7, ${Buffer.alloc(32, 7)}, ${RP}, 'Pending',
+        public.hadron_passkey_now(), 0, ARRAY['internal'], false, false, 'github', public.hadron_passkey_now() + interval '72 hours')`;
+    await tx.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION public.hadron_passkey_clock_offset() RETURNS interval LANGUAGE sql STABLE AS $$ SELECT interval '0' $$`);
+  });
   const req = await db.$transaction(tx => createSigningRequestInTransaction(tx, partId, {
     memoryId, requester: { userId: writerId, appId: null, workerId: null, sessionId: null }, mayWrite: async () => true,
   }));
@@ -100,6 +112,14 @@ describe('#2973 PR3 selection on reads and compile', () => {
   it('intersects approval and signing, rather than stopping on an unsigned newer approval', async () => {
     await signPart(); await approve(); await revise('v2'); await approve(); await source('approved signed'); await parity('v1', 1);
   });
+  it.each(['signed', 'approved signed'])('continues past one candidate batch for %s', async settings => {
+    await signPart(); await approve(); await revise('unsigned');
+    await db.nodeRevision.createMany({ data: Array.from({ length: 101 }, (_, i) => ({
+      nodeId: partId, memoryId, loc: 'part', name: 'Part', content: 'unsigned', revNo: i + 2, tags: [],
+    })) });
+    await db.node.update({ where: { id: partId }, data: { revSeq: 103, contentRevSeq: 103 } });
+    await source(settings); await parity('v1', 1);
+  });
   it('does not serve a signed but unapproved revision when both are required', async () => {
     await approve(); await revise('v2'); await signPart(); await source('approved signed'); await broken();
   });
@@ -111,6 +131,34 @@ describe('#2973 PR3 selection on reads and compile', () => {
   });
   it('a restore does not revive signing of the restored revision', async () => {
     await signPart(); await revise('v2'); await revise('v1'); await source('rev=3 signed'); await broken();
+  });
+  it('does not substitute different bytes between signature selection and retrieval', async () => {
+    await signPart(); await revise('v2'); await source('rev=1 signed');
+    let intercepted = false;
+    const wrapped = db.$extends({ query: { nodeRevision: { async findFirst({ args, query }) {
+      const row = await query(args);
+      if (args.where?.nodeId === partId && args.where?.revNo === 1 && row && 'content' in row) {
+        intercepted = true;
+        return { ...row, content: 'SUBSTITUTED_UNSIGNED_TEXT' };
+      }
+      return row;
+    } } } });
+    const c = { ...context(), db: wrapped as never };
+    const n = await resolvers.Query.node(null, { ref: sourceId } as never, c);
+    expect(await (resolvers as any).Node.content(n, {}, c, {})).toBe(`before ${BROKEN_INCLUDE_NOTICE} after`);
+    expect(intercepted).toBe(true);
+    await expect(assembleBootPrompt(wrapped as never, input())).rejects.toMatchObject({ code: 'BOOT_PROMPT_INCLUDE_REVISION_UNAVAILABLE' });
+  });
+  it('charges the signature predicate queries to a resolved read budget', async () => {
+    await signPart(); await source('rev=1 signed');
+    // Target and revision retrieval use two lookups; verifying a signature needs more.
+    setResolutionLimits({ limits: { maxLookups: 2 } });
+    await expect(read()).rejects.toMatchObject({ extensions: { code: 'CONTENT_RESOLUTION_LIMIT_EXCEEDED', limit: 'lookups' } });
+  });
+  it('can serve older signed text when the current body is null', async () => {
+    await signPart(); await revise('changed');
+    await db.node.update({ where: { id: partId }, data: { content: null } });
+    await source(); await parity('v1', 1);
   });
   it('a valid signature without its historical eligibility stamp counts for no include', async () => {
     await signPart();
@@ -125,6 +173,24 @@ describe('#2973 PR3 selection on reads and compile', () => {
     const passkeyId = await signPart();
     await db.$executeRaw`UPDATE passkey_credentials SET revoked_at = public.hadron_passkey_wall_now() WHERE id = ${passkeyId}`;
     await source(); await parity('v1', 1);
+  });
+  it('a pending first-key signature does not satisfy an include', async () => {
+    await signPart(true); await source(); await broken();
+  });
+  it('a cancelled first-key signature never satisfies an include', async () => {
+    const passkeyId = await signPart(true);
+    await db.$executeRaw`UPDATE passkey_credentials SET revoked_at = public.hadron_passkey_wall_now(),
+      window_ended_at = public.hadron_passkey_wall_now(), window_outcome = 'cancelled' WHERE id = ${passkeyId}`;
+    await source(); await broken();
+  });
+  it('the writer stamp counts only in its capture memory, including a move back', async () => {
+    await signPart();
+    const other = await db.memory.create({ data: { class: 'knowledge', name: 'Other', urn: 'include2973.test:other', organizationId: orgId } });
+    expect(await revisionSignatureCounts(db, partId, 1, 'include')).toBe(true);
+    await db.node.update({ where: { id: partId }, data: { memoryId: other.id } });
+    expect(await revisionSignatureCounts(db, partId, 1, 'include')).toBe(false);
+    await db.node.update({ where: { id: partId }, data: { memoryId } });
+    expect(await revisionSignatureCounts(db, partId, 1, 'include')).toBe(true);
   });
   it('reads the deployment flag per call and restores unchecked selection on rollback', async () => {
     await source(); vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'false'); await parity('v1', 1);

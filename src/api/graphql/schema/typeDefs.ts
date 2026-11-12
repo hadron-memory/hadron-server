@@ -2521,7 +2521,7 @@ export const typeDefs = `#graphql
     NO_QUALIFYING_REVISION
     "The include pins a revision and a newer revision is approved."
     PINNED_NEWER_APPROVED
-    "The include says signed; signing is not checked yet."
+    "The include says signed; this deployment's signing policy is off, so signing is not checked."
     SIGNING_NOT_CHECKED
     "The target is missing or the caller cannot read it. Position only: it never says which, or anything about the target."
     BROKEN_INCLUDE

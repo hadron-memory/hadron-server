@@ -11,7 +11,7 @@
  * It shares the readers' semantics instead of copying them:
  *   - tags are parsed by S1's `locateIncludeTags` (R77 code literals, R78 v2 URNs);
  *   - a revision is chosen by S2's `selectIncludeRevision` (rev pin, approved,
- *     signed ignored until signing ships, no settings = latest);
+ *     signed enforced while the deployment signing policy is on, no settings = latest);
  *   - the depth cap is S2's `MAX_RESOLVE_DEPTH` (R75: level 1..10, 11 refused).
  * Where a reader shows the broken-include notice, the compile refuses.
  *
@@ -42,6 +42,7 @@ import {
   IncludeReadMemo,
   MAX_RESOLVE_DEPTH,
   selectIncludeRevision,
+  type IncludeDb,
   type IncludeTarget,
 } from '../includes/spliceIncludes.js';
 import { sha256Hex, type CompiledOccurrence, type CompiledTarget } from './provenance.js';
@@ -103,7 +104,7 @@ export interface AssemblePlan {
   grants: AssembledGrant[];
 }
 
-type Db = Pick<PrismaClient, 'node' | 'memory' | 'nodeRevision' | 'agent' | 'agentOrgGrant' | 'agentSubscription' | '$queryRaw' | 'urnAlias'>;
+type Db = IncludeDb & Pick<PrismaClient, 'agentOrgGrant' | 'agentSubscription'>;
 
 type MemoryKind =
   | { kind: 'encrypted' }
@@ -338,7 +339,7 @@ export async function assembleBootPrompt(
       // R79: a pin to a revision that is not stored (never kept, or pruned) is a missing include, with
       // `approved` too. Existence is decided on the pin alone, apart from qualification, so an existing
       // revision that merely fails `approved` stays REVISION_UNAVAILABLE.
-      if (tag.settings.rev !== undefined && tag.settings.approved
+      if (tag.settings.rev !== undefined && (tag.settings.approved || tag.settings.signed)
         && !(await selectIncludeRevision(db, memo, target, { ...tag.settings, approved: false, signed: false }))) {
         throw new BootCompileRefusal('BOOT_PROMPT_INCLUDE_UNAVAILABLE', position);
       }
@@ -347,7 +348,7 @@ export async function assembleBootPrompt(
         // An existing revision that does not qualify (approved) is REVISION_UNAVAILABLE; a pin that
         // names no stored revision (never kept, or pruned) is a missing include (R79).
         throw new BootCompileRefusal(
-          tag.settings.approved ? 'BOOT_PROMPT_INCLUDE_REVISION_UNAVAILABLE' : 'BOOT_PROMPT_INCLUDE_UNAVAILABLE', position,
+          tag.settings.approved || tag.settings.signed ? 'BOOT_PROMPT_INCLUDE_REVISION_UNAVAILABLE' : 'BOOT_PROMPT_INCLUDE_UNAVAILABLE', position,
         );
       }
       const order = occurrences.length;

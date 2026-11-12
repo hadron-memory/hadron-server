@@ -7,6 +7,7 @@ import { IncludeReadMemo, selectIncludeRevision } from './includes/spliceInclude
 import { newestApprovedRevisionOf } from './nodeApproval.js';
 import { safeNodeUrnV2 } from './urnEmit.js';
 import { pageLintWarnings, type LintWarning, type LintWarningPage } from './bootPromptLint.js';
+import { signingSurfacePolicy } from './signing/surface.js';
 
 const MAX_OCCURRENCES = 10_000;
 const BATCH = 100;
@@ -95,7 +96,7 @@ export async function lintCompiledRevision(
         warnings.push(warning('POLICY_OVERRIDE', position, replaced ? `This App overrides Agent node ${replaced.loc}.` : 'This App overrides an Agent node.',
           { targetUrn: urn, overriddenNodeLoc: replaced?.loc ?? null }));
       }
-      if (readable && shown && settings.signed) warnings.push(warning('SIGNING_NOT_CHECKED', position,
+      if (readable && shown && settings.signed && !signingSurfacePolicy().signing) warnings.push(warning('SIGNING_NOT_CHECKED', position,
         'The "signed" setting is not checked yet: signing has not shipped, so this include is served as if it were not signed.', { targetUrn: urn }));
     }
     if (recompile) warnings.push(warning('RECOMPILE_AVAILABLE', 0, 'A source part has a newer revision; recompile available.'));
