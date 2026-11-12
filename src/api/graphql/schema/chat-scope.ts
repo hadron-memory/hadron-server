@@ -189,13 +189,16 @@ export async function locateAppClassMemory(args: {
   });
   if (keyed) return keyed.deletedAt ? null : keyed.id;
   const candidates = await db.memory.findMany({
-    where: { appId, class: 'app', sharedMemoryOfAgentId: null, deletedAt: null },
+    where: { appId, class: 'app', sharedMemoryOfAgentId: null },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-    select: { id: true, urn: true, legacyUrn: true },
+    select: { id: true, urn: true, legacyUrn: true, deletedAt: true },
   });
   const agentRow = await db.agent.findUnique({ where: { id: agentId }, select: { urn: true, legacyUrn: true } });
   const agentSlugs = agentSlugCandidates(agentRow ?? { urn: agentUrn });
-  return candidates.find((m) => memoryCarriesLegacyKeyFor(m, agentSlugs))?.id ?? null;
+  // The SAME row provisioning would adopt (oldest match, tombstones included). A tombstone is absent: never fall
+  // through to a younger live candidate, since provisioning would revive the older row as the home.
+  const chosen = candidates.find((m) => memoryCarriesLegacyKeyFor(m, agentSlugs));
+  return chosen && !chosen.deletedAt ? chosen.id : null;
 }
 
 /**

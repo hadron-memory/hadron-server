@@ -51,6 +51,11 @@ describe('#4039 INVALID_ENTRY_CONDITION on the GraphQL writers', () => {
     expect(await db.node.count({ where: { memoryId: memory.id, loc: 'conversations:welcome' } })).toBe(0);
   });
 
+  it('9 createNode (Baloo P2): the scalar missing form {missing: "chat.x"} is refused like the array form', async () => {
+    expect(await code(M.createNode({}, { input: conv({ entryCondition: { missing: 'chat.message_count' } }) }, ctx()))).toMatchObject({ reason: 'SCOPE_NOT_AVAILABLE_AT_START', detail: { field: 'chat.message_count' } });
+    expect(await db.node.count({ where: { memoryId: memory.id, loc: 'conversations:welcome' } })).toBe(0);
+  });
+
   it('9 createNode: message.data.*, an unknown scope, a disallowed operator and malformed JSON are refused with their reasons', async () => {
     expect(await code(M.createNode({}, { input: conv({ entryCondition: MSG_VAR }) }, ctx()))).toMatchObject({ reason: 'SCOPE_NOT_AVAILABLE_AT_START' });
     expect(await code(M.createNode({}, { input: conv({ entryCondition: { '==': [{ var: 'nope.x' }, 1] } }) }, ctx()))).toMatchObject({ reason: 'UNKNOWN_SCOPE' });

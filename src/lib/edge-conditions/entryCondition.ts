@@ -40,7 +40,7 @@ function unavailablePath(node: unknown, depth = 0): string | null {
     if (PATH_OPS.has(op)) {
       const candidates: unknown[] = op === 'var'
         ? [typeof args === 'string' ? args : Array.isArray(args) ? args[0] : null]
-        : op === 'missing' && Array.isArray(args) ? args
+        : op === 'missing' ? (Array.isArray(args) ? args : [args])
         : op === 'missing_some' && Array.isArray(args) && Array.isArray(args[1]) ? args[1] : [];
       for (const c of candidates) {
         if (typeof c === 'string' && UNAVAILABLE_PREFIXES.some((p) => c.startsWith(p))) return c;

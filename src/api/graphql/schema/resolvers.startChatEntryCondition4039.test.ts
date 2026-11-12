@@ -199,6 +199,18 @@ describe('#4039 refusals judged before any write', () => {
     expect((await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).deletedAt).toBeNull();
   });
 
+  it('4d2 (B2, Baloo P2): with an older tombstoned and a younger live legacy row, the start picks the row provisioning will revive: facts of the younger row are not read', async () => {
+    await seed([...conv('welcome', { seq: 1, condition: NAME_UNKNOWN }), ...conv('recent', { seq: 2 })]);
+    await opened(alice.id);
+    const older = (await sharedMemory())!;
+    const { id: _id, urn: _urn, ...rest } = older as any;
+    await db.memory.update({ where: { id: older.id }, data: { sharedMemoryOfAgentId: null, urn: `${org.urn}:intake-app:intake-agent:shared`, deletedAt: new Date(), createdAt: new Date(Date.now() - 86400000) } });
+    const younger = await db.memory.create({ data: { ...rest, id: generateId(), urn: `${org.urn}:intake-app2:intake-agent:shared`, legacyUrn: null, sharedMemoryOfAgentId: null, deletedAt: null, createdAt: new Date() } });
+    await db.node.create({ data: { id: generateId(), memoryId: younger.id, loc: 'data', name: 'data', nodeType: 'system', data: { users: { [alice.id]: { name: 'Ann' } } } as never } });
+    expect(await opened(alice.id)).toBe('welcome');
+    expect((await db.memory.findUniqueOrThrow({ where: { id: older.id } })).deletedAt).toBeNull();
+  });
+
   it('4e (B2): a live home memory the starter cannot read refuses MEMORY_UNREADABLE; nothing is read or written', async () => {
     await seed([...conv('welcome', { seq: 1, condition: NAME_UNKNOWN })]);
     const memory = await db.memory.create({ data: {
