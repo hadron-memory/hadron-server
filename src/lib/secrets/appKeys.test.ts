@@ -9,7 +9,7 @@ import { cleanDb, createDbAppWithKey } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { encryptBytesAad } from '../tokenCrypto.js';
 import {
-  AppKeyCache, SecretKeyUnavailableError, appKeyAad, appKeyCache, ensureAppKey, secretAppKeyCacheTtlMs,
+  AppKeyCache, SecretKeyUnavailableError, rootBinding, appKeyAad, appKeyCache, ensureAppKey, secretAppKeyCacheTtlMs,
   secretVersionAad, stagedValueAad, startAppKeyCacheSweepLoop, unwrapAppKey, DEFAULT_SECRET_APP_KEY_CACHE_TTL_MS,
 } from './appKeys.js';
 
@@ -140,6 +140,15 @@ describe('one active key (race)', () => {
     const second = await ensure(appA);
     expect(second.encryptionKey.toString('hex')).not.toBe(first);
   });
+  it('a missing App refuses with the typed error and mints nothing', async () => {
+    await refused(ensure('no-such-app'));
+    expect(await db.secretAppKey.count()).toBe(0);
+  });
+  it('outside a transaction the lock does not serialize, but the unique index backstop still returns the winner\'s key', async () => {
+    const out = await Promise.all([1, 2, 3, 4].map(() => ensureAppKey(db as never, appA)));
+    expect(new Set(out.map((h) => h.keyVersion))).toEqual(new Set([1]));
+    expect(await db.secretAppKey.count({ where: { appId: appA } })).toBe(1);
+  });
   it('deleting an App deletes its keys', async () => {
     await ensure(appA);
     await db.app.delete({ where: { id: appA } });
@@ -153,7 +162,7 @@ describe('key separation (R17)', () => {
     expect(a.encryptionKey.length).toBe(32); expect(a.fingerprintKey.length).toBe(32);
     expect(a.encryptionKey.equals(a.fingerprintKey)).toBe(false);
     expect(a.encryptionKey.equals(b.encryptionKey)).toBe(false);
-    const raw = appKeyCache.get(appA, 1)!;
+    const raw = appKeyCache.get(appA, 1, Date.now(), rootBinding(Buffer.from(ROOT, 'hex')))!;
     expect(raw).not.toBeNull();
     for (const sub of [a.encryptionKey, a.fingerprintKey]) expect(sub.equals(raw)).toBe(false);
     expect(Object.keys(a).sort()).toEqual(['appId', 'encryptionKey', 'fingerprintKey', 'keyVersion']);
@@ -163,7 +172,7 @@ describe('key separation (R17)', () => {
 describe('the root (R18)', () => {
   const bad: Array<[string, string | undefined]> = [
     ['unset', undefined], ['empty', ''], ['short hex', 'ab'.repeat(16)], ['long hex', 'ab'.repeat(33)],
-    ['not hex', 'zz'.repeat(32)], ['a 32-char passphrase', 'correct horse battery staple!!']];
+    ['not hex', 'zz'.repeat(32)], ['a 30-char passphrase', 'correct horse battery staple!!']];
   it.each(bad)('a root that is %s refuses unwrap and ensure, even for a cached key, and logs nothing sensitive', async (_n, value) => {
     await ensure(appA); await unwrap(appA, 1); // now cached
     const logs: string[] = [];
@@ -175,6 +184,23 @@ describe('the root (R18)', () => {
     expect(await db.secretAppKey.count({ where: { appId: appB } })).toBe(0);
     const all = logs.join('\n');
     for (const secret of [ROOT, value ?? '\u0001', await wrappedOf(appA, 1)]) if (secret.length > 3) expect(all).not.toContain(secret);
+  });
+  it('switching to ANOTHER VALID root refuses a cached key without clearing the cache, and keeps refusing while in use', async () => {
+    await ensure(appA); await unwrap(appA, 1);
+    expect(appKeyCache.size()).toBe(1);
+    process.env.SECRET_ROOT_KEY = OTHER_ROOT;
+    await refused(unwrap(appA, 1));
+    await refused(unwrap(appA, 1));
+    expect(appKeyCache.size()).toBe(0); // the stale entry was dropped (and its buffer overwritten), not served
+    process.env.SECRET_ROOT_KEY = ROOT;
+    expect((await unwrap(appA, 1)).keyVersion).toBe(1);
+  });
+  it('a cache entry is bound to its root: a different binding is a miss and drops the entry', () => {
+    const c = new AppKeyCache(); const key = randomBytes(32);
+    c.set('a', 1, key, 0, 'root-1');
+    expect(c.get('a', 1, 1, 'root-2')).toBeNull();
+    expect(c.size()).toBe(0);
+    expect(key.equals(Buffer.alloc(32))).toBe(true);
   });
   it('the refusal never carries the root, its length or a cause', async () => {
     process.env.SECRET_ROOT_KEY = 'not-the-root-value';
@@ -224,7 +250,7 @@ describe('the cache', () => {
     c.evictApp('a');
     expect(c.size()).toBe(1); expect(k1.equals(Buffer.alloc(32))).toBe(true); expect(k2.equals(Buffer.alloc(32))).toBe(false);
   });
-  it.each([undefined, '', ' ', '0', '-5', '1.5', 'abc', 'Infinity', '9'.repeat(30)])('TTL setting %j falls back to the default and never disables expiry', (v) => {
+  it.each([undefined, '', ' ', '0', '-5', '1.5', 'abc', 'Infinity', '9'.repeat(30), '0x10', '1e3', '+5', '5 ms'])('TTL setting %j falls back to the default and never disables expiry', (v) => {
     if (v === undefined) delete process.env.SECRET_APP_KEY_CACHE_TTL_MS; else process.env.SECRET_APP_KEY_CACHE_TTL_MS = v;
     expect(secretAppKeyCacheTtlMs()).toBe(DEFAULT_SECRET_APP_KEY_CACHE_TTL_MS);
   });

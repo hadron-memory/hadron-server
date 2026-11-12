@@ -22,7 +22,7 @@
  * Everything fails closed into one typed refusal with fixed text: the cause (no root, no row, wrong AAD, tampering,
  * not 32 bytes) is the operator's to diagnose from the database, not an oracle for a caller.
  */
-import { hkdfSync, randomBytes } from 'crypto';
+import { createHash, hkdfSync, randomBytes } from 'crypto';
 import { GraphQLError } from 'graphql';
 import type { Prisma } from '../../generated/prisma/index.js';
 import { decryptBytesAad, encryptBytesAad } from '../tokenCrypto.js';
@@ -73,12 +73,20 @@ function handleFor(appId: string, keyVersion: number, appKey: Buffer): AppKeyHan
   };
 }
 
-/** The root key from the environment, or the refusal. Read per call so a change needs no restart and a cache hit never outlives it. */
+/** The root key from the environment, or the refusal. Read per call so a change needs no restart. */
 function rootKey(): Buffer {
   const raw = process.env[SECRET_ROOT_KEY_ENV];
   if (raw === undefined || !/^[0-9a-fA-F]{64}$/.test(raw)) throw new SecretKeyUnavailableError();
   return Buffer.from(raw, 'hex');
 }
+
+/**
+ * What a cache entry is bound to: a digest of the root it was unwrapped under. A cached key is served only while
+ * the CURRENT root has that digest, so switching to another valid root is a miss (the entry is dropped and the
+ * row must unwrap under the new root), and a continuously used App cannot keep a stale entry alive past a
+ * rotation. The digest lives in process memory beside the keys it guards and is never logged.
+ */
+export const rootBinding = (root: Buffer): string => createHash('sha256').update('hadron:secret-root-binding:v1:').update(root).digest('hex');
 
 /** Unwrap with the row's AAD and require exactly 32 bytes, or refuse. */
 function unwrap(root: Buffer, appId: string, keyVersion: number, wrapped: string): Buffer {
@@ -103,7 +111,8 @@ export const DEFAULT_SECRET_APP_KEY_CACHE_TTL_MS = 5 * 60 * 1000;
 export function secretAppKeyCacheTtlMs(): number {
   const raw = process.env.SECRET_APP_KEY_CACHE_TTL_MS;
   if (raw !== undefined && raw.trim() !== '') {
-    const n = Number(raw);
+    // Decimal digits only: Number() would also accept hex ('0x10') and exponent ('1e3') spellings.
+    const n = /^[0-9]+$/.test(raw.trim()) ? Number(raw.trim()) : NaN;
     if (Number.isSafeInteger(n) && n > 0) return n;
   }
   return DEFAULT_SECRET_APP_KEY_CACHE_TTL_MS;
@@ -112,6 +121,8 @@ export function secretAppKeyCacheTtlMs(): number {
 interface CacheEntry {
   key: Buffer;
   lastUsedAt: number;
+  /** Digest of the root the key was unwrapped under; see {@link rootBinding}. */
+  binding: string;
 }
 
 export class AppKeyCache {
@@ -125,12 +136,15 @@ export class AppKeyCache {
     return now - entry.lastUsedAt >= secretAppKeyCacheTtlMs();
   }
 
-  /** A live entry's key (refreshing its clock), or null. An entry past its TTL is dropped here, whatever the sweep has done. */
-  get(appId: string, keyVersion: number, now: number = Date.now()): Buffer | null {
+  /**
+   * A live entry's key (refreshing its clock), or null. An entry past its TTL, or bound to a different root than
+   * `binding`, is dropped here, whatever the sweep has done.
+   */
+  get(appId: string, keyVersion: number, now: number = Date.now(), binding = ''): Buffer | null {
     const slot = AppKeyCache.slot(appId, keyVersion);
     const entry = this.entries.get(slot);
     if (!entry) return null;
-    if (this.expired(entry, now)) {
+    if (entry.binding !== binding || this.expired(entry, now)) {
       this.drop(slot, entry);
       return null;
     }
@@ -138,11 +152,11 @@ export class AppKeyCache {
     return entry.key;
   }
 
-  set(appId: string, keyVersion: number, key: Buffer, now: number = Date.now()): void {
+  set(appId: string, keyVersion: number, key: Buffer, now: number = Date.now(), binding = ''): void {
     const slot = AppKeyCache.slot(appId, keyVersion);
     const prior = this.entries.get(slot);
     if (prior && prior.key !== key) prior.key.fill(0);
-    this.entries.set(slot, { key, lastUsedAt: now });
+    this.entries.set(slot, { key, lastUsedAt: now, binding });
   }
 
   /** Evict every version of one App (its keys were deleted or rotated away). */
@@ -233,7 +247,8 @@ export async function unwrapAppKey(
   keyVersion: number,
 ): Promise<AppKeyHandle> {
   const root = rootKey();
-  const cached = appKeyCache.get(appId, keyVersion);
+  const binding = rootBinding(root);
+  const cached = appKeyCache.get(appId, keyVersion, Date.now(), binding);
   if (cached) return handleFor(appId, keyVersion, cached);
   const row = await db.secretAppKey.findUnique({
     where: { appId_keyVersion: { appId, keyVersion } },
@@ -246,7 +261,7 @@ export async function unwrapAppKey(
     key.fill(0);
     return handle;
   }
-  appKeyCache.set(appId, keyVersion, key);
+  appKeyCache.set(appId, keyVersion, key, Date.now(), binding);
   return handleFor(appId, keyVersion, key);
 }
 
@@ -254,8 +269,9 @@ export async function unwrapAppKey(
  * The App's active key, minting version 1 (or n+1 after every earlier version was retired) when none is active.
  * The common path takes no lock; creation is serialized by a transaction-scoped advisory lock per App, and the
  * loser re-reads under it and returns the winner's key, so two racing callers leave one active key. The partial
- * unique index `(app_id) WHERE retired_at IS NULL` is the backstop. An active key that does not unwrap refuses; it
- * never mints a second one beside it.
+ * unique index `(app_id) WHERE retired_at IS NULL` is the backstop (a P2002 on create re-reads the winner). Call it
+ * INSIDE a transaction: the advisory lock is transaction-scoped. The App must exist (a missing one refuses with
+ * `SECRET_KEY_UNAVAILABLE`). An active key that does not unwrap refuses; it never mints a second one beside it.
  */
 export async function ensureAppKey(db: Prisma.TransactionClient, appId: string): Promise<AppKeyHandle> {
   const root = rootKey();
@@ -269,13 +285,25 @@ export async function ensureAppKey(db: Prisma.TransactionClient, appId: string):
   await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`hadron:secret-app-key-mint:${appId}`}))`;
   row = await active();
   if (row) return unwrapAppKey(db, appId, row.keyVersion);
+  // The App must exist: refuse with the typed error rather than leak a raw foreign-key failure (and mint nothing).
+  if (!(await db.app.findUnique({ where: { id: appId }, select: { id: true } }))) throw new SecretKeyUnavailableError();
   const newest = await db.secretAppKey.findFirst({ where: { appId }, orderBy: { keyVersion: 'desc' }, select: { keyVersion: true } });
   const keyVersion = (newest?.keyVersion ?? 0) + 1;
   const key = randomBytes(32);
   try {
-    await db.secretAppKey.create({
-      data: { appId, keyVersion, wrappedKey: encryptBytesAad(key, appKeyAad(appId, keyVersion), root) },
-    });
+    try {
+      await db.secretAppKey.create({
+        data: { appId, keyVersion, wrappedKey: encryptBytesAad(key, appKeyAad(appId, keyVersion), root) },
+      });
+    } catch (err) {
+      // The partial unique index is the backstop when the advisory lock did not serialize (a caller outside a
+      // transaction releases it at once). Re-read once: the winner's key is the answer, not a raw P2002.
+      if ((err as { code?: string }).code === 'P2002') {
+        const winner = await active();
+        if (winner) return unwrapAppKey(db, appId, winner.keyVersion);
+      }
+      throw err;
+    }
     let mine = uncommitted.get(db);
     if (!mine) uncommitted.set(db, (mine = new Set()));
     mine.add(slotKey(appId, keyVersion));
