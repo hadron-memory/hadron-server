@@ -62,7 +62,7 @@ async function projectTeamRoster(readCtx: Context, app: TaskApp) {
   return {
     appId: app.id,
     asOf,
-    workers: entries.map((e) => ({ ...e, appId: app.id, teamPlacement: workingStateVisible ? e.teamPlacement : null, appUrn: app.urn, checkStatus: checks.get(e.workerId) ?? null,
+    workers: entries.map((e): RosterRow => ({ ...e, appId: app.id, teamPlacement: workingStateVisible ? e.teamPlacement : null, appUrn: app.urn, checkStatus: checks.get(e.workerId) ?? null,
       pausedUntil: pauses.get(e.workerId) ?? null, currentTask: tasks.get(e.workerId) ?? null,
       heldBy: holders.get(e.workerId)?.heldBy ?? null, heldAt: holders.get(e.workerId)?.heldAt ?? null,
       terminal: terminals.get(e.workerId) ?? null, internalsVisible: workingStateVisible })),
@@ -128,7 +128,7 @@ type RosterRow = Omit<RosterEntry, 'teamPlacement'> & {
   appUrn: string; checkStatus: WorkerCheckStatus | null; pausedUntil: Date | null; currentTask: RosterTaskSummary | null;
   heldBy: RosterHolder | null; heldAt: Date | null; terminal: StoredWorkerTerminal | null;
   /** maySeeWorkerInternals for this read: the one switch that also withholds a USER setter's identity (#3865). */
-  internalsVisible?: boolean;
+  internalsVisible: boolean;
 };
 
 /** Optional live metadata is outside the core roster transaction: a failed lookup must not
@@ -147,9 +147,9 @@ export const agentTaskMatchingFieldResolvers = {
     freeForWork: (r: RosterRow) => r.free,
     unavailableReason: (r: RosterRow) => (r.unavailable?.reason ? toGqlWord(r.unavailable.reason) : null),
     unavailableUntil: (r: RosterRow) => r.unavailable?.until ?? null,
-    // #3865: a USER setter's handle is the holder identity `heldBy` withholds, so it is withheld here by the same switch.
+    // #3981: only an explicit decision from maySeeWorkerInternals admits the USER setter identity; malformed rows fail closed.
     availability: (r: RosterRow) => (r.availabilityRecord
-      ? { ...r.availabilityRecord.row, ...(r.internalsVisible === false ? { setByUserId: null } : {}), __inEffect: r.availabilityRecord.inEffect }
+      ? { ...r.availabilityRecord.row, ...(r.internalsVisible === true ? {} : { setByUserId: null }), __inEffect: r.availabilityRecord.inEffect }
       : null),
     startedTasks: (r: RosterRow) => r.startedTaskIds,
     pendingTasks: (r: RosterRow) => r.pendingTaskIds,
