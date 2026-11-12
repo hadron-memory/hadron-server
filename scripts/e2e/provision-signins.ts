@@ -63,19 +63,33 @@ export async function provisionSignIns(db: PrismaClient): Promise<SignInEvidence
       expiresAt: new Date(Date.now() + 120000), clientStateHash: createHash('sha256').update(clientState).digest('hex') } });
     const verified = await fetch(`${base}/auth/email/verify?token=${raw}`, { redirect: 'manual' });
     assert.equal(verified.status, 302);
-    const code = new URL(verified.headers.get('location')!).searchParams.get('code');
-    assert(code);
-    const redeemed = await fetch(`${base}/auth/session`, { method: 'POST',
-      headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code, clientState }) });
-    assert.equal(redeemed.status, 200);
-    const session = await redeemed.json() as { token: string; isNew: boolean };
-    assert.equal(session.isNew, true);
+    // #4058: branch on the switch THIS server actually runs with (its /capabilities token), never an env guess.
+    const caps = await (await fetch(`${base}/capabilities`)).json() as { capabilities: string[] };
+    const registrationOn = caps.capabilities.includes('passkey-registration');
+    // The Location may be relative (the passkey hand-off is), so resolve it against the base.
+    const location = new URL(verified.headers.get('location')!, base);
     const fresh = await db.user.findUniqueOrThrow({ where: { email: 'fresh-user@e2e.test' } });
-    const identity = await graphqlIdentity(base, session.token);
-    assert.equal(identity.id, fresh.id);
+    if (registrationOn) {
+      // cor:aut:030:02: following an email link never signs anyone in on its own. Pin the rule, do not work around it:
+      // a hand-off to the passkey page, no login code, no session cookie. The account exists but holds nothing.
+      assert.equal(location.pathname, '/auth/passkey/sign-in');
+      assert.equal(location.searchParams.get('code'), null);
+      assert.equal(verified.headers.getSetCookie().some(c => c.startsWith('hadron_token=')), false);
+      evidence['fresh-user'] = { path: 'email-verify-passkey-handoff-no-session', isNew: true };
+    } else {
+      const code = location.searchParams.get('code');
+      assert(code);
+      const redeemed = await fetch(`${base}/auth/session`, { method: 'POST',
+        headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code, clientState }) });
+      assert.equal(redeemed.status, 200);
+      const session = await redeemed.json() as { token: string; isNew: boolean };
+      assert.equal(session.isNew, true);
+      const identity = await graphqlIdentity(base, session.token);
+      assert.equal(identity.id, fresh.id);
+      evidence['fresh-user'] = { path: 'email-verify-and-handoff', isNew: true };
+    }
     assert.equal(await db.orgMember.count({ where: { userId: fresh.id } }), 0);
     assert.equal(await db.memory.count({ where: { OR: [{ userId: fresh.id }, { ownerUserId: fresh.id }, { createdBy: fresh.id }] } }), 0);
-    evidence['fresh-user'] = { path: 'email-verify-and-handoff', isNew: true };
 
     // The only code-entry flow on main is REVIEW_DEMO for an existing account.
     // Exercise its CSRF form and actual signed cookie; never send real email.

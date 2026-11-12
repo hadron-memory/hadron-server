@@ -54,6 +54,7 @@ compose() {
       E2E_PASSKEY_SIGNING_ENABLED="${E2E_PASSKEY_SIGNING_ENABLED:-}" \
       E2E_SIGNING_CEREMONY_ORIGINS="${E2E_SIGNING_CEREMONY_ORIGINS:-}" \
       E2E_PASSKEY_RP_ID="${E2E_PASSKEY_RP_ID:-}" \
+      E2E_PASSKEY_REGISTRATION_ENABLED="${E2E_PASSKEY_REGISTRATION_ENABLED:-}" \
       docker compose ${env_args[@]+"${env_args[@]}"} --project-name "$project" --file /opt/hadron/scripts/e2e/compose.yaml "$@"
   fi
 }
