@@ -1,7 +1,11 @@
 /** #3982 — Holger model A: unreachable Apps look unknown; reachable non-managers keep FORBIDDEN.
  * Management admission precedes state/input errors and legacy ambiguity. Runtime authority is unchanged.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApolloServer } from '@apollo/server';
+import { typeDefs } from './typeDefs.js';
+import { formatGraphQLError } from '../formatError.js';
+import { runContext } from '../../../jobs/appRunDeps.js';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -11,6 +15,8 @@ import { resolvers, type Context } from './resolvers.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
 const M = resolvers.Mutation as any;
+const api = new ApolloServer<Context>({ typeDefs, resolvers, formatError: formatGraphQLError, includeStacktraceInErrorResponses: false });
+afterAll(() => api.stop());
 const ctx = (userId?: string, roles: Context['roles'] = ['READER']): Context => ({ db, userId, roles });
 
 async function refusal(p: Promise<unknown>): Promise<{ code: unknown; message: string }> {
@@ -156,6 +162,51 @@ describe('#3982 updateApp reach versus act (Holger model A)', () => {
     expect(await refusal(update(legacy, ctx(admin.id)))).toEqual(denied);
     await db.orgMember.create({ data: { organizationId: otherOrg.id, userId: admin.id, role: 'ADMIN' } });
     expect((await refusal(update(legacy, ctx(admin.id)))).code).toBe('AmbiguousLegacyUrnError');
+  });
+
+  it.each(['id', 'urn'] as const)('the GraphQL %s unknown response shape differs only in the caller-supplied ref', async kind => {
+    const ask = async (ref: string) => {
+      const result = await api.executeOperation({ query: 'mutation($ref:ID!){updateApp(ref:$ref,name:"changed"){id}}', variables: { ref } }, { contextValue: ctx(stranger.id) });
+      if (result.body.kind !== 'single') throw new Error('unexpected incremental response');
+      return JSON.parse(JSON.stringify(result.body.singleResult).split(ref).join('<ref>'));
+    };
+    const missing = kind === 'id' ? generateId() : `${org.urn}:missing`;
+    const a = await ask(app[kind]);
+    expect(a).toEqual(await ask(missing));
+    expect(a.errors).toHaveLength(1);
+    expect(a.errors[0]).toMatchObject({ message: 'APP_NOT_FOUND: <ref>', extensions: { code: 'APP_NOT_FOUND' } });
+    expect(a.data).toBeNull();
+  });
+
+  it('refused valid config/rename arguments never enter the transaction or side-effect writers', async () => {
+    const config = await db.aiServiceConfig.create({ data: { appId: app.id, name: 'default', provider: 'openai', model: 'synthetic' } });
+    const before = await row();
+    const writers = [vi.spyOn(db, '$transaction'), vi.spyOn(db.app, 'update'), vi.spyOn(db.aiServiceConfig, 'update'),
+      vi.spyOn(db.aiServiceConfig, 'create'), vi.spyOn(db.aiServiceConfig, 'delete'), vi.spyOn(db.urnAlias, 'create'), vi.spyOn(db.usageEvent, 'create')];
+    try {
+      const args = { urn: 'renamed', aiProvider: null };
+      for (const ref of [app.id, app.urn, generateId(), `${org.urn}:missing`]) {
+        expect(await refusal(update(ref, ctx(stranger.id), args))).toEqual(unknown(ref));
+      }
+      expect(await refusal(update(app.id, ctx(orgMember.id), args))).toEqual(denied);
+      for (const writer of writers) expect(writer).not.toHaveBeenCalled();
+      expect(await row()).toEqual(before);
+      expect(await db.aiServiceConfig.findUniqueOrThrow({ where: { id: config.id } })).toEqual(config);
+      expect(await db.urnAlias.findMany({ where: { entityType: 'APP', entityId: app.id } })).toEqual([]);
+    } finally { vi.restoreAllMocks(); }
+  });
+
+  it('a userless run needs its own live snapshot grant for reach, and a grant never confers update authority', async () => {
+    const schedule = await db.agentSchedule.create({ data: { id: generateId(), appId: app.id, organizationId: org.id, name: 'Synthetic', cron: '* * * * *', entryNodeUrn: 'hrn:node:synthetic.example:flows:report' } });
+    const run = await db.appRun.create({ data: { id: generateId(), appId: app.id, organizationId: org.id, triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: schedule.entryNodeUrn, status: 'RUNNING' } });
+    const c = runContext(db, run);
+    expect(await refusal(update(app.id, c))).toEqual(unknown(app.id));
+    const grant = await db.appAutomationTeamSnapshotGrant.create({ data: { appId: app.id, triggerKind: 'SCHEDULE', triggerId: schedule.id, grantedBy: admin.id } });
+    expect(await refusal(update(app.id, c))).toEqual(denied);
+    expect(await refusal(update(generateId(), c))).toMatchObject({ code: 'APP_NOT_FOUND' });
+    await db.appAutomationTeamSnapshotGrant.update({ where: { id: grant.id }, data: { revokedAt: new Date(), revokedBy: admin.id } });
+    expect(await refusal(update(app.id, c))).toEqual(unknown(app.id));
+    expect((await row()).name).toBe('Da');
   });
 
   it('syntax errors keep their independent refusal; DB faults during lookup and reach are never hidden', async () => {

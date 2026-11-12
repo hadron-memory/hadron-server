@@ -56,6 +56,7 @@ import { deriveSlugFromName } from '../../../lib/urn.js';
 import { parsePolicyLink } from '@hadron-memory/access-control';
 import { GraphQLError } from 'graphql';
 import { uninstallApp, reinstallApp, locateForDelete } from './appInstallState.js';
+import { requireUpdateAppTarget } from './appUpdateAccess.js';
 import {
   type AppType,
   type AppMembershipRole,
@@ -934,9 +935,12 @@ export const appMutations = {
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: ref may be ID, bare URN, or prefixed URN.
-      const { id: resolvedId } = await resolveAppRef(ctx.db, ref);
-      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
-      await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+      const app = await requireUpdateAppTarget(ctx, ref);
+      const resolvedId = app.id;
+      // #3982: only an admitted caller learns the retained row's deleted state.
+      if (app.deletedAt) {
+        throw new GraphQLError('This App is deleted.', { extensions: { code: 'APP_DELETED', appId: app.id } });
+      }
       // #3976 (cor:dmo:050:21): an uninstalled App is kept read-only, its own
       // fields included. Refused AFTER the gate, so only a caller the gate admits
       // learns the install state; re-judged under the row lock below.
