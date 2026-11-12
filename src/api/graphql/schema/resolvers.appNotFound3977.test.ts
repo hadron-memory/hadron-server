@@ -13,6 +13,8 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { runAuthContext } from '../../../lib/auth/runPrincipal.js';
 import { formatGraphQLError as formatError } from '../formatError.js';
+import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { AmbiguousLegacyUrnError } from '../../../lib/entityRef/errors.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -113,5 +115,25 @@ describe('#3977 participants with the role are unchanged', () => {
     await expect(SURFACES[2][1](ctx(reader.id), app.urn)).resolves.toBeDefined();
     const cast = await SURFACES[4][1](ctx(admin.id), app.urn) as any;
     expect(cast.name ?? cast.worker?.name).toBe('Zed');
+  });
+});
+
+describe('#3977 review fixes (blind seat, ffcddde45)', () => {
+  const CHAT = [SURFACES[0][1], SURFACES[1][1]];
+  it('a soft-deleted App, by id, is not reachable on team chat even to a member, an org ADMIN or its own key', async () => {
+    await db.app.update({ where: { id: app.id }, data: { deletedAt: new Date() } });
+    const callers = [ctx(member.id), ctx(admin.id), { db, roles: [], appId: app.id } as Context];
+    for (const call of CHAT) for (const c of callers) expect(await wire(call(c, app.id))).toEqual(NOT_FOUND);
+  });
+  it('an ambiguous legacy URN answers exactly what an absent ref answers', async () => {
+    const legacy = 'nf-org.com:dupe';
+    await db.app.update({ where: { id: app.id }, data: { legacyUrn: legacy } });
+    await db.app.update({ where: { id: foreignApp.id }, data: { legacyUrn: legacy } });
+    // Premise: the bare resolver DOES distinguish it (else this pin proves nothing).
+    await expect(resolveAppRef(db, legacy)).rejects.toBeInstanceOf(AmbiguousLegacyUrnError);
+    for (const [, call] of SURFACES) {
+      expect(await wire(call(ctx(outsider.id), legacy))).toEqual(NOT_FOUND);
+      expect(await wire(call(ctx(outsider.id), legacy))).toEqual(await wire(call(ctx(outsider.id), ABSENT)));
+    }
   });
 });

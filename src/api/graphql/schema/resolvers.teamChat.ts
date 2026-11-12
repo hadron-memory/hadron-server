@@ -143,6 +143,7 @@ type AppRow = {
   organizationId: string | null;
   ownerUserId: string | null;
   uninstalledAt: Date | null;
+  deletedAt?: Date | null;
 };
 
 /**
@@ -174,6 +175,9 @@ async function requireTeamChatAccess(
   // #3977 (V58): a caller who cannot REACH the App gets the absent-App answer (`appNotFound`); FORBIDDEN is for a
   // caller who can reach it and may not do THIS act (an impersonation session reads but never posts; the App's own
   // key reads but never posts).
+  // A soft-deleted App is unreachable to everyone, as in requireWorkerReadAccess: by ID it still resolves, so the
+  // gate (not the resolve) must give the absent-App answer, before any principal branch.
+  if (app.deletedAt) throw appNotFound();
   if (ctx.impersonation) {
     if (app.organizationId === null || app.organizationId !== ctx.impersonation.orgId) throw appNotFound();
     if (mode === 'post') throw forbidden();

@@ -5,7 +5,7 @@ import { isAppParticipant } from './appParticipantRead.js';
 import { listAppInstallations, resolveAppInstallation } from '../appInstallations.js';
 import { resolveAgentRef } from '../entityRef/agentRef.js';
 import { resolveAppRef } from '../entityRef/appRef.js';
-import { AgentNotFoundError, AppNotFoundError } from '../entityRef/errors.js';
+import { AgentNotFoundError, AmbiguousLegacyUrnError, AppNotFoundError } from '../entityRef/errors.js';
 import { isRunPrincipal } from './runPrincipal.js';
 import { runMayReadTeam } from './runTeamRead.js';
 
@@ -35,14 +35,15 @@ export const appNotFound = (): GraphQLError =>
 
 /**
  * `resolveAppRef` for the App-scoped team surfaces: an absent ref answers `appNotFound()`, the same bytes a
- * non-participant gets from the gates. Narrow: only the not-found error converts; an ambiguous legacy URN or a
- * database failure propagates.
+ * non-participant gets from the gates. Narrow: only the not-found and ambiguous-legacy-URN errors convert (an
+ * ambiguous reference would otherwise tell an outsider that SOME App matches it, before any participation check);
+ * a database failure propagates. A caller with an ambiguous legacy URN names the App by id instead.
  */
 export async function resolveAppRefConcealed(db: Context['db'], appRef: string): Promise<{ id: string }> {
   try {
     return await resolveAppRef(db, appRef);
   } catch (e) {
-    if (e instanceof AppNotFoundError) throw appNotFound();
+    if (e instanceof AppNotFoundError || e instanceof AmbiguousLegacyUrnError) throw appNotFound();
     throw e;
   }
 }
