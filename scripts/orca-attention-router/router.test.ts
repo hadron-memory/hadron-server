@@ -241,14 +241,6 @@ describe('promptLineIsEmpty: incident-derived empty-prompt cases (#5473, #1555, 
 });
 
 describe('loadConfig: roster, pin and coordinator-watch validation', () => {
-  const write = (over: Record<string, unknown>) => {
-    const path = join(root, 'c.json');
-    writeFileSync(path, JSON.stringify({
-      app: 'a', channel: 'c', stateDir: join(root, 's'),
-      roster: [{ worker: 'w', name: 'E', worktree: '/x' }], ...over,
-    }));
-    return path;
-  };
   it('config refuses an incomplete or duplicate roster', () => {
     const path = join(root, 'c.json');
     const base = { app: 'a', channel: 'c', stateDir: join(root, 's') };
