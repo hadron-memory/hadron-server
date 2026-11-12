@@ -1,6 +1,6 @@
 /** #4054 — aggregate, sanitized warning for un-emittable preview display addresses; digest identity controls. */
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildSchema, type GraphQLObjectType } from 'graphql';
+import { GraphQLError } from 'graphql';
 import { ApolloServer } from '@apollo/server';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -8,7 +8,7 @@ import { generateId } from '../../../lib/id.js';
 import { computeApprovalHash } from '../../../lib/approvalHash.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
 import { sha256Hex } from '../../../lib/bootCompile/provenance.js';
-import { requireFreshSigningPreview, signingPreviewDigest, type SigningPreviewRow } from '../../../lib/bootPrompt/signingSwitch.js';
+import { requireFreshSigningPreview, SIGNING_PREVIEW_STALE_CODE, signingPreviewDigest, type SigningPreviewRow } from '../../../lib/bootPrompt/signingSwitch.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 
@@ -79,17 +79,28 @@ describe('#4054 address-composition diagnostic', () => {
     expect(rows.every((r: any) => r.agentUrn === `hrn:agent:${authorRoot}:agent-slug`)).toBe(true);
     expect(events().map(c => c[1])).toEqual([{ schemaVersion: 1, reason: 'COMPOSITION_FAILED', agentFailures: 0, workerFailures: 1 }]);
   });
-  it('is silent for success, legacy-separator forms, an enforced (empty) preview and refusals', async () => {
+  it('is silent for success', async () => {
     await preview();
+    expect(events()).toHaveLength(0);
+  });
+  it('is silent for a legacy-separator agent URN', async () => {
     await db.agent.update({ where: { id: agentId }, data: { urn: `${authorRoot}::agent-slug` } });
     await preview();
+    expect(events()).toHaveLength(0);
+  });
+  it('is silent for an enforced empty preview', async () => {
     await db.organization.update({ where: { id: orgId }, data: { bootPromptSigningRequired: true } });
     vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'true');
     expect((await preview()).rows).toEqual([]);
-    vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'false');
-    await db.organization.update({ where: { id: orgId }, data: { bootPromptSigningRequired: false } });
+    expect(events()).toHaveLength(0);
+  });
+  it('is silent when a member caller is refused', async () => {
     await breakAgent();
     await expect(preview(context(memberId))).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    expect(events()).toHaveLength(0);
+  });
+  it('is silent when a caller with a different sessionId is refused', async () => {
+    await breakAgent();
     await expect(preview({ ...context(), sessionId: generateId() })).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     expect(events()).toHaveLength(0);
   });
@@ -136,6 +147,8 @@ describe('#4054 digest controls', () => {
     await db.agent.update({ where: { id: agentId }, data: { name: 'Renamed display agent' } });
     await expect(requireFreshSigningPreview(db, { token: before.previewToken, orgId, userId: adminId })).resolves.toBeUndefined();
     await db.appAgent.deleteMany({ where: { appId, agentId } });
-    await expect(requireFreshSigningPreview(db, { token: before.previewToken, orgId, userId: adminId })).rejects.toBeDefined();
+    const stale = requireFreshSigningPreview(db, { token: before.previewToken, orgId, userId: adminId });
+    await expect(stale).rejects.toBeInstanceOf(GraphQLError);
+    await expect(stale).rejects.toMatchObject({ extensions: { code: SIGNING_PREVIEW_STALE_CODE } });
   });
 });
