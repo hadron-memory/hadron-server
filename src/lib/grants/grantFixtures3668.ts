@@ -94,3 +94,17 @@ export async function insertEvent(w: World, grantId: string, over: Record<string
   await db.$executeRawUnsafe(text, ...params);
   return values.id as string;
 }
+
+/**
+ * #4067 (V86): a PUBLIC knowledge memory in the org with `n` live nodes, readable by every test user, for grants whose node-typed
+ * value must name a node the requester can read. Returns the node ids.
+ */
+export async function seedReadableNodes(orgId: string, n = 1): Promise<string[]> {
+  const tag = generateId().slice(0, 8);
+  const memory = await db.memory.create({ data: { id: generateId(), organizationId: orgId, urn: `pub-${tag}.test:kb`, name: `pub-${tag}`, class: 'knowledge', visibility: 'PUBLIC' } });
+  const ids: string[] = [];
+  for (let i = 0; i < n; i++) {
+    ids.push((await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: `n${i}`, name: `n${i}`, nodeType: 'info', content: 'x' } as never })).id);
+  }
+  return ids;
+}
