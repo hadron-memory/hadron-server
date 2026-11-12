@@ -209,6 +209,51 @@ describe('#3982 updateApp reach versus act (Holger model A)', () => {
     expect((await row()).name).toBe('Da');
   });
 
+  it.each([
+    new Error('management storage failure'),
+    new Error('Forbidden'),
+    new GraphQLError('management storage failure', { extensions: { code: 'INTERNAL_SERVER_ERROR' } }),
+  ])('management lookup faults propagate unchanged (%s), before the reach fallback or any write', async failure => {
+    const before = await row();
+    const lookup = vi.spyOn(db.orgMember, 'findFirst').mockRejectedValueOnce(failure);
+    const transaction = vi.spyOn(db, '$transaction');
+    try {
+      await expect(update(app.id, ctx(admin.id))).rejects.toBe(failure);
+      expect(lookup).toHaveBeenCalledTimes(1);
+      expect(transaction).not.toHaveBeenCalled();
+      expect(await row()).toEqual(before);
+    } finally { vi.restoreAllMocks(); }
+  });
+
+  it('a single legacy/alias claimant remains updatable by bare and prefixed URN', async () => {
+    const legacy = `${org.urn}:old`;
+    await db.app.update({ where: { id: app.id }, data: { legacyUrn: legacy } });
+    await db.urnAlias.create({ data: { entityType: 'APP', entityId: app.id, urn: legacy, reason: 'RENAME' } });
+    for (const ref of [legacy, `hrn:app:${legacy}`]) {
+      expect((await update(ref, ctx(admin.id))).id).toBe(app.id);
+    }
+  });
+
+  it('ambiguity keeps its existing typed GraphQL wire code after admission on every claimant', async () => {
+    const legacy = `${org.urn}:wire-legacy`;
+    await db.app.update({ where: { id: app.id }, data: { legacyUrn: legacy } });
+    await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Second', urn: `${org.urn}:second`, legacyUrn: legacy } });
+    const result = await api.executeOperation({ query: 'mutation($ref:ID!){updateApp(ref:$ref,name:"changed"){id}}', variables: { ref: legacy } }, { contextValue: ctx(admin.id) });
+    if (result.body.kind !== 'single') throw new Error('unexpected incremental response');
+    expect(result.body.singleResult.data).toBeNull();
+    expect(result.body.singleResult.errors).toHaveLength(1);
+    expect(result.body.singleResult.errors![0]!.extensions?.code).toBe('AmbiguousLegacyUrnError');
+    expect((await row()).name).toBe('Da');
+  });
+
+  it('a hybrid person with an App selection/key marker is still judged on the person, never key reach', async () => {
+    const key = await db.appKey.create({ data: { appId: app.id, keyHash: generateId(), keyPreview: 'test' } });
+    const selected = { ...ctx(stranger.id), appId: app.id, appKeyId: key.id };
+    expect(await refusal(update(app.id, selected))).toEqual(unknown(app.id));
+    await db.appMember.create({ data: { appId: app.id, userId: stranger.id, role: 'member' } });
+    expect(await refusal(update(app.id, selected))).toEqual(denied);
+  });
+
   it('syntax errors keep their independent refusal; DB faults during lookup and reach are never hidden', async () => {
     expect((await refusal(update('relative'))).code).toBe('URN_NOT_QUALIFIED');
     const failure = new Error('injected storage failure');
