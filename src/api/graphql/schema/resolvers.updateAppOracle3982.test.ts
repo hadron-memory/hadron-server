@@ -152,7 +152,7 @@ describe('#3982 updateApp reach versus act (Holger model A)', () => {
     await db.app.update({ where: { id: app.id }, data: { legacyUrn: legacy } });
     const second = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Second', urn: `${org.urn}:second` } });
     const third = await db.app.create({ data: { id: generateId(), organizationId: otherOrg.id, name: 'Third', urn: 'foreign.example:third' } });
-    for (const a of [second, third]) await db.urnAlias.create({ data: { entityType: 'APP', entityId: a.id, urn: legacy } });
+    for (const a of [second, third]) await db.urnAlias.create({ data: { entityType: 'APP', entityId: a.id, urn: legacy, reason: 'RENAME' } });
     expect(await refusal(update(legacy, ctx(admin.id)))).toEqual(denied);
     await db.orgMember.create({ data: { organizationId: otherOrg.id, userId: admin.id, role: 'ADMIN' } });
     expect((await refusal(update(legacy, ctx(admin.id)))).code).toBe('AmbiguousLegacyUrnError');
