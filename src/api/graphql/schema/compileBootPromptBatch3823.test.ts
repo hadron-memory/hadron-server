@@ -26,6 +26,7 @@ let orgId: string;
 let admin: { id: string };
 let stranger: { id: string };
 let appId: string;
+let appKeyId: string;
 let agentId: string;
 let agentMemId: string;
 let installId: string;
@@ -65,8 +66,9 @@ beforeEach(async () => {
   agentMemId = mem.id;
   const agent = await db.agent.create({ data: { id: generateId(), name: 'Agent', urn: 'b3823:agent', organizationId: orgId, systemMemoryId: mem.id } });
   agentId = agent.id;
-  const { app } = await createDbAppWithKey(db, 'b-app', orgId);
+  const { app, appKey } = await createDbAppWithKey(db, 'b-app', orgId);
   appId = app.id;
+  appKeyId = appKey.id;
   await createDbAppAgent(db, app.id, agent.id);
   installId = (await db.memory.create({
     data: { id: generateId(), class: 'system', name: 'install', urn: 'b3823:install', organizationId: orgId, appId, installOfAgentId: agentId, isInstallMemory: true },
@@ -312,19 +314,36 @@ describe('approval under a batch grant', () => {
   it('Andi P2: a worker session under an App key keeps the refusal: the lift needs a person\'s user and no App key', async () => {
     const c = await compiled(installId, `boot:workers:${workerId}:compiled`);
     await grant(c.id);
-    const keyed = { ...ctx(), appKeyId: generateId() } as Context;
+    const keyed = { ...ctx(), appKeyId } as Context;
     expect(await codeOf(asWorker(() => M.approveNode(null, { nodeRef: c.id }, keyed)))).not.toBe('NO_ERROR');
     expect((await db.node.findUniqueOrThrow({ where: { id: c.id } })).approvedRevNo).toBeNull();
   });
 
-  it('Riana P3-6: approveMemoryNodes (the bulk door) keeps the same shape: an App key refuses, a person\'s session lifts', async () => {
+  it('#3918: bulk approve honors a batch grant for a person\'s session and refuses an App key (the gate is presence-based: !!ctx.userId && !ctx.appKeyId)', async () => {
     const c = await compiled(installId, `boot:workers:${workerId}:compiled`);
     await grant(c.id);
-    const keyed = { ...ctx(), appKeyId: generateId() } as Context;
-    await asWorker(() => M.approveMemoryNodes(null, { memoryRef: installId }, keyed)).catch(() => undefined);
+    const keyed = { ...ctx(), appKeyId } as Context;
+    const refused = await asWorker(() => M.approveMemoryNodes(null, { memoryRef: installId }, keyed));
+    // the bulk door reports the refusal as a skipped boot prompt instead of failing the call
+    expect(refused.approvedCount).toBe(0);
+    expect(refused.skippedBootPromptCount).toBe(1);
+    expect(refused.skippedBootPrompts).toEqual([`boot:workers:${workerId}:compiled`]);
     expect((await db.node.findUniqueOrThrow({ where: { id: c.id } })).approvedRevNo).toBeNull();
-    await asWorker(() => M.approveMemoryNodes(null, { memoryRef: installId }, ctx()));
+    const lifted = await asWorker(() => M.approveMemoryNodes(null, { memoryRef: installId }, ctx()));
+    expect(lifted.approvedCount).toBe(1);
+    expect(lifted.skippedBootPromptCount).toBe(0);
     expect((await db.node.findUniqueOrThrow({ where: { id: c.id } })).approvedRevNo).not.toBeNull();
+  });
+
+  it('#3918 (S8, set-wise): bulk approve under a grant approves only the node the grant names; a second compiled node of the memory stays unapproved and is reported skipped', async () => {
+    const granted = await compiled(installId, `boot:workers:${workerId}:compiled`);
+    const ungranted = await compiled(installId, `boot:workers:${otherWorkerId}:compiled`);
+    await grant(granted.id);
+    const r = await asWorker(() => M.approveMemoryNodes(null, { memoryRef: installId }, ctx()));
+    expect(r.approvedCount).toBe(1);
+    expect(r.skippedBootPrompts).toEqual([`boot:workers:${otherWorkerId}:compiled`]);
+    expect((await db.node.findUniqueOrThrow({ where: { id: granted.id } })).approvedRevNo).not.toBeNull();
+    expect((await db.node.findUniqueOrThrow({ where: { id: ungranted.id } })).approvedRevNo).toBeNull();
   });
 
   it('a person approving as themselves is unaffected', async () => {
