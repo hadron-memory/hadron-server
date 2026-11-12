@@ -5,12 +5,14 @@
  * node `seq`, and `restoreRevision` brings all three back.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { Prisma } from '../../../generated/prisma/index.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
 import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
+import { loadChatScript } from '../../../lib/chatScript.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -133,7 +135,7 @@ describe('#4034 a pinned chat reads its script from the pinned revision', () => 
     const ids = await seedScript();
     const rule = await seedEdge(ids, 'conversations:main:check', 'conversations:alpha', { condition: { '==': [1, 2] } });
     await publish();
-    await db.edge.update({ where: { id: rule.id }, data: { condition: null } });
+    await db.edge.update({ where: { id: rule.id }, data: { condition: Prisma.JsonNull } });
 
     const chat = await startMain();
     const turn = await finishStage(chat.chatId);
@@ -181,7 +183,7 @@ describe('#4034 a pinned chat reads its script from the pinned revision', () => 
     revData.snapshot.nodes = revData.snapshot.nodes.filter((n: any) => !n.loc.startsWith('boot:'));
     await db.node.update({ where: { id: revNode.id }, data: { data: revData } });
 
-    await db.edge.update({ where: { id: rule.id }, data: { condition: null, priority: 0 } });
+    await db.edge.update({ where: { id: rule.id }, data: { condition: Prisma.JsonNull, priority: 0 } });
     await db.node.update({ where: { id: ids['conversations:main'] }, data: { seq: 99 } });
     await db.node.update({ where: { id: ids['conversations:alpha'] }, data: { seq: null } });
 
@@ -224,5 +226,36 @@ describe('#4034 a pinned chat reads its script from the pinned revision', () => 
     await db.node.update({ where: { id: ids['config'] }, data: { data: { mode: 'b' } } });
     const turn = await finishStage(chat.chatId);
     expect(turn.conversationHandoff).toBe('alpha');
+  });
+
+  it('pin 4b: the reader returns R\'s conversation seq after the draft reorders conversations', async () => {
+    const ids = await seedScript();
+    await db.node.update({ where: { id: ids['conversations:main'] }, data: { seq: 1 } });
+    await db.node.update({ where: { id: ids['conversations:alpha'] }, data: { seq: 2 } });
+    const revLoc = await publish();
+    await db.node.update({ where: { id: ids['conversations:main'] }, data: { seq: 9 } });
+    await db.node.update({ where: { id: ids['conversations:alpha'] }, data: { seq: 0 } });
+
+    const script = await loadChatScript(db, systemMemory.id, revLoc);
+    const seqs = Object.fromEntries((await script.nodesByPrefix('conversations:')).map((n) => [n.loc, n.seq]));
+    expect(script.source).toBe('snapshot');
+    expect(seqs['conversations:main']).toBe(1);
+    expect(seqs['conversations:alpha']).toBe(2);
+  });
+
+  it('pin 4c: a pre-v2 snapshot reads the conversation seq live (ruling Q9)', async () => {
+    const ids = await seedScript();
+    const revLoc = await publish();
+    const revNode = await db.node.findFirstOrThrow({ where: { memoryId: systemMemory.id, loc: revLoc } });
+    const data = revNode.data as any;
+    delete data.snapshot.edgeFormat;
+    await db.node.update({ where: { id: revNode.id }, data: { data } });
+    await db.node.update({ where: { id: ids['conversations:alpha'] }, data: { seq: 5 } });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const script = await loadChatScript(db, systemMemory.id, revLoc);
+    expect(script.source).toBe('snapshot-pre-v2');
+    const seqs = Object.fromEntries((await script.nodesByPrefix('conversations:')).map((n) => [n.loc, n.seq]));
+    expect(seqs['conversations:alpha']).toBe(5);
   });
 });

@@ -68,7 +68,8 @@ import { NodeNotFoundError, AgentNotFoundError, AppNotFoundError } from '../../.
 import { triggerManualRun } from './resolvers.appRun.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
-import type { Prisma } from '../../../generated/prisma/index.js';
+import { Prisma } from '../../../generated/prisma/index.js';
+import { CHAT_SCRIPT_EDGE_FORMAT } from '../../../lib/chatScript.js';
 import { serializeJson } from '../../../integrations/db/provider.js';
 import { deleteToolConnection, runEmailOperation, type ToolCalendarEvent } from '../../../lib/emailClient.js';
 import {
@@ -2276,7 +2277,7 @@ export const sessionMutations = {
       // Snapshot all non-revision nodes + edges in the system memory
       const nodes = await ctx.db.node.findMany({
         where: { memoryId: sysMemId, deletedAt: null, NOT: { loc: { startsWith: 'revisions' } } },
-        select: { loc: true, name: true, nodeType: true, description: true, content: true, data: true, tags: true },
+        select: { loc: true, name: true, nodeType: true, description: true, content: true, data: true, tags: true, seq: true },
       });
       const nodeIds = (await ctx.db.node.findMany({
         where: { memoryId: sysMemId, deletedAt: null, NOT: { loc: { startsWith: 'revisions' } } },
@@ -2295,6 +2296,9 @@ export const sessionMutations = {
         description: e.description,
         isRunnable: e.isRunnable,
         data: e.data,
+        // #4034 (plan D3, edgeFormat 2): a snapshot that drops these makes a pinned chat fire every conditional rule.
+        condition: e.condition ?? null,
+        priority: e.priority,
       }));
 
       // Ensure revisions parent exists
@@ -2346,7 +2350,7 @@ export const sessionMutations = {
               label,
               published: false,
               createdBy: ctx.userId ?? null,
-              snapshot: { nodes: nodes.map((n) => ({ ...n, tags: n.tags ?? [] })), edges: edgeSnapshots },
+              snapshot: { edgeFormat: CHAT_SCRIPT_EDGE_FORMAT, nodes: nodes.map((n) => ({ ...n, tags: n.tags ?? [] })), edges: edgeSnapshots },
             } as InputJsonValue,
           },
         });
@@ -2411,8 +2415,10 @@ export const sessionMutations = {
       if (!revNode) throw new Error(`Revision "${revisionLoc}" not found`);
 
       const revData = (revNode.data as Record<string, unknown>) ?? {};
-      const snapshot = revData.snapshot as { nodes: Array<Record<string, unknown>>; edges: Array<Record<string, unknown>> } | undefined;
+      const snapshot = revData.snapshot as { edgeFormat?: number; nodes: Array<Record<string, unknown>>; edges: Array<Record<string, unknown>> } | undefined;
       if (!snapshot) throw new Error('Revision has no snapshot data');
+      // #4034 (D3): only a v2 snapshot holds edge condition/priority and node seq to restore.
+      const restoresScriptFields = snapshot.edgeFormat === CHAT_SCRIPT_EDGE_FORMAT;
 
       // Auto-save current state before restoring
       await sessionMutations.createRevision({}, { agentId: resolvedAgentId, description: `Auto-save before restoring ${revisionLoc}` }, ctx);
@@ -2492,6 +2498,8 @@ export const sessionMutations = {
               data: (n.data ?? null) as InputJsonValue,
               tags: (n.tags as string[]) ?? [],
               deletedAt: null,
+              // #4034 (D3): a v2 snapshot carries the sibling order; a pre-v2 one never did, so the live row keeps its own.
+              ...(restoresScriptFields ? { seq: (n.seq as number | null | undefined) ?? null } : {}),
             };
             const prior = await tx.node.findUnique({
               where: { loc_memoryId: { loc, memoryId: sysMemId } },
@@ -2557,6 +2565,13 @@ export const sessionMutations = {
                 description: (e.description as string | null) ?? null,
                 isRunnable: (e.isRunnable as boolean | null) ?? null,
                 data: (e.data ?? null) as InputJsonValue,
+                // #4034 (D3, ruling R1 (a)): only a v2 snapshot holds these; a pre-v2 one restores as it always did.
+                ...(restoresScriptFields
+                  ? {
+                      condition: (e.condition ?? Prisma.JsonNull) as InputJsonValue,
+                      priority: (e.priority as number | undefined) ?? 0,
+                    }
+                  : {}),
               };
               // Upsert, not create: the edge soft-delete above leaves the
               // (loc, memoryId) slot occupied (Edge @@unique([loc, memoryId]) is
