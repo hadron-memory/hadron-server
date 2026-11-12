@@ -197,6 +197,38 @@ describe('next_stage check (#4035)', () => {
     expect((await engineState(chat.chatId)).stageName).toBe('step2');
   });
 
+  it('pin 7 (#4077): a stage list that cannot be read mid-chat moves nothing, records the turn and reports the name', async () => {
+    await seedNodes(flow(['step1', 'step2']));
+    const chat = await resolvers.Mutation.startChat({}, { agentId: agent.id }, userCtx(adminUser.id));
+    // The conversation node disappears from the script the chat reads (no published revision pins it).
+    await db.node.deleteMany({ where: { memoryId: systemMemory.id, loc: 'conversations:flow' } });
+    const before = await engineState(chat.chatId);
+    // loc-scope-ok: the chat id is unique to this test's one chat
+    const assistantTurns = () => db.node.count({ where: { loc: { startsWith: `${chat.chatId}:messages:` }, name: { endsWith: '-assistant' } } });
+    const turnsBefore = await assistantTurns();
+
+    const result = await resolvers.Mutation.processChatResponse(
+      {}, { chatId: chat.chatId, toolResponse: { message: 'Hm', next_stage: 'nope', onTrack: true } }, userCtx(adminUser.id),
+    );
+    expect(result.stageTransitioned).toBe(false);
+    expect(result.rejectedNextStage).toBe('nope');
+    const after = await engineState(chat.chatId);
+    expect(after.stageName).toBe(before.stageName);
+    expect((after.routeHistory as unknown[]).length).toBe((before.routeHistory as unknown[]).length);
+    expect(await assistantTurns()).toBe(turnsBefore + 1);
+  });
+
+  it('pin 8 (#4077): an empty stage list leaves next_stage unconstrained instead of offering an empty enum', async () => {
+    const { respondToolDefinition } = await import('./resolvers.helpers.js');
+    for (const names of [[], null, undefined]) {
+      const prop = (respondToolDefinition({}, names as any) as any)[0].parameters.properties.next_stage;
+      expect(prop.enum).toBeUndefined();
+      expect(prop.description).not.toMatch(/one of:\s*\(/);
+    }
+    const listed = (respondToolDefinition({}, ['a']) as any)[0].parameters.properties.next_stage;
+    expect(listed.enum).toEqual(['a', null]);
+  });
+
   it('pin 5 (green on main): the probe tool carries no enum', async () => {
     const { respondToolDefinition } = await import('./resolvers.helpers.js');
     expect((respondToolDefinition({}) as any)[0].parameters.properties.next_stage.enum).toBeUndefined();
