@@ -33,6 +33,21 @@ describe('#4036 routing edits', () => {
     ], node: async loc => ({ loc, name: loc, data: { stageOrder: ['first'] } }) });
     expect(decision.result).toMatchObject({ conversationCompleted: 'main', conversationHandoff: 'always', newStageName: 'first' });
   });
+  it('carries S2: an unknown named stage is reported without routing or rule evaluation', async () => {
+    let evaluated = 0;
+    const decision = await decide({ goalReached: false, nextStage: 'unknown', stageOrder: ['one', 'two'],
+      rules: [{ id: 'always', priority: 0, condition: null, data: { timing: 'always' }, targetLoc: 'conversations:other' }],
+      evaluate: async () => { evaluated++; return true; } });
+    expect(decision.result).toMatchObject({ rejectedNextStage: 'unknown', stageTransitioned: false, newStageName: null });
+    expect(decision.edits).toEqual([]); expect(evaluated).toBe(0);
+    const stale = applyChatRoutingDecision({ conversationName: 'changed', stageName: 'one' }, decision);
+    expect(stale).toMatchObject({ routingSkipped: true }); expect(stale.rejectedNextStage).toBeUndefined();
+  });
+  it('completion wins over S2 rejection of an unknown named stage', async () => {
+    const decision = await decide({ nextStage: 'unknown', stageOrder: ['one', 'two'] });
+    expect(decision.result).toMatchObject({ conversationCompleted: 'main', stageTransitioned: false });
+    expect(decision.result.rejectedNextStage).toBeUndefined();
+  });
   it('regression: ordinary named-stage progression evaluates no rule', async () => {
     let evaluated = 0;
     const decision = await decide({ goalReached: false, nextStage: 'two', rules: [{ id: 'always', priority: 0, condition: null, data: { timing: 'always' }, targetLoc: 'conversations:other' }], evaluate: async () => { evaluated++; return true; } });

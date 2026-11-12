@@ -957,7 +957,7 @@ async function postToChannelRoot(
   incarnation: ChannelIncarnation,
   args: { body: string; replyToSeq: number | null; sessionRef: string | null },
   /** #1791: the platform's own post. No principal authors it, no mention in it expands, and no one is credited. */
-  opts: { system?: boolean; claim?: (tx: Prisma.TransactionClient) => Promise<boolean> } = {},
+  opts: { system?: boolean; claim?: (tx: Prisma.TransactionClient) => Promise<boolean>; systemMentions?: readonly string[] } = {},
 ): Promise<TeamChatMessageOut> {
   const { body, replyToSeq, sessionRef } = args;
   let envelope: Record<string, unknown>;
@@ -996,7 +996,9 @@ async function postToChannelRoot(
   // `mentions` is finalized there, before authority, stamps and sealing.
   const useTeamTags = teamTagsEnabled();
   const metadataVisible = await canReadTeamMetadata(ctx, app?.id ?? null);
-  const bodyMentions = opts.system ? [] : extractMentions(body);
+  // #4041 (V83): the one exception is a token list the SERVER fills (never the body: its `@` stays neutralised), so no
+  // caller text adds a recipient.
+  const bodyMentions = opts.system ? [...new Set(opts.systemMentions ?? [])].filter((t) => !(BROADCAST_MENTION_TOKENS as readonly string[]).includes(t) && !t.startsWith('team.')) : extractMentions(body);
   let mentions = bodyMentions;
   if (replyToSeq != null) envelope.replyToSeq = replyToSeq;
 
@@ -1150,14 +1152,14 @@ async function postToChannelRoot(
     // row FOR UPDATE) and the stamps after it, so the Worker row is never taken SHARE then upgraded (Diego, cycle 3).
     let teamGraphHeld = false;
     const holdTeamGraph = async () => { await lockAppReportsTo(tx, app!.id, 'shared'); teamGraphHeld = true; };
-    const stampAuthority = mentions.length > 0 || (useTeamTags && app && !opts.system)
+    const stampAuthority = (mentions.length > 0 && !opts.system) || (useTeamTags && app && !opts.system)
       ? { authority: await lockStampAuthority(ctx, tx, app, useTeamTags && app && !opts.system ? holdTeamGraph : undefined) } : null;
     if (useTeamTags && app && !opts.system && !teamGraphHeld) {
       throw new GraphQLError('Cannot post team metadata for an unavailable App.', { extensions: { code: 'APP_UNINSTALLED' } });
     }
     if (useTeamTags) {
       const workers = !opts.system && app ? await tx.worker.findMany({ where: { appId: app.id }, select: { id: true, name: true, reportsToWorkerId: true, retiredAt: true } }) : [];
-      Object.assign(envelope, buildTeamSnapshot(workers, typeof envelope.authorWorkerId === 'string' ? envelope.authorWorkerId : null, mentions));
+      Object.assign(envelope, buildTeamSnapshot(workers, typeof envelope.authorWorkerId === 'string' ? envelope.authorWorkerId : null, opts.system ? [] : mentions));
     }
     // #1617 B — resume the author's lapsed session in THIS transaction, so it
     // commits with the message or not at all (#1625 review, Baloo P2-1). Every
@@ -1313,6 +1315,8 @@ export async function postSystemNotice(
   appId: string,
   body: string,
   claim?: (tx: Prisma.TransactionClient) => Promise<boolean>,
+  /** #4041 (V83): mention tokens the platform itself resolved (a dark worker's chain). Default none: a notice pages nobody. */
+  systemMentions?: readonly string[],
 ): Promise<boolean> {
   const target = await systemNoticeTarget(db, appId);
   if (!target) return false;
@@ -1323,7 +1327,7 @@ export async function postSystemNotice(
       target.root,
       target.incarnation,
       { body: body.replace(/@/g, '\uFF20'), replyToSeq: null, sessionRef: null },
-      { system: true, claim },
+      { system: true, claim, systemMentions },
     );
   } catch (e) {
     // The chat was deleted after we looked, or the claim was lost: nothing was written.

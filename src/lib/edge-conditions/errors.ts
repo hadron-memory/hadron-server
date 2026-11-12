@@ -16,6 +16,8 @@ export type EvaluationErrorCode =
   | 'RESERVED_NAME'
   | 'AST_TOO_LARGE'
   | 'AST_TOO_DEEP'
+  /** #4039: a `chat.*` or `message.data.*` variable in an entry condition, which is judged before any chat or message exists. */
+  | 'SCOPE_NOT_AVAILABLE_AT_START'
   | 'MEMORY_ENCRYPTED_NO_KEY'
   | 'TYPE_MISMATCH';
 

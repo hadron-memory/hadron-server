@@ -65,6 +65,7 @@ import {
   validateNodeDataExtractionSpecs,
   type EvaluationError,
 } from '../../../lib/edge-conditions/index.js';
+import { entryConditionOf, validateEntryCondition } from '../../../lib/edge-conditions/entryCondition.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
@@ -101,6 +102,7 @@ import { appPrincipalSessionWriteAllowed } from '../../../lib/sessionOwnership.j
 import { unauthenticatedError } from '../../../lib/refusals.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import type { ChatScript } from '../../../lib/chatScript.js';
+import { conversationStageOrder } from '../../../lib/chatRouting/nextStage.js';
 
 /**
  * Marks a Node row whose `content` field answers with the STORED text unless a
@@ -1367,6 +1369,30 @@ export function throwOnInvalidCondition(condition: unknown): void {
       code: 'INVALID_EDGE_CONDITION',
       reason: err.code,
       detail: err.detail,
+    },
+  });
+}
+
+/**
+ * #4039 (cor:cht:020:02, plan D7/D9): refuse a conversation node whose `data.entryCondition` is invalid or reads a
+ * variable that has no value at chat start. Judged from the loc and the data alone (any memory, depth-2
+ * `conversations:<name>`), so every writer that calls it answers the same. The detail carries only the variable path or
+ * operator the validator names: no edge id, no memory URN, no value. No `messageId`, like `INVALID_EDGE_CONDITION`.
+ */
+export function throwOnInvalidEntryCondition(loc: string, data: unknown): void {
+  const condition = entryConditionOf(loc, data);
+  if (condition === undefined) return;
+  const result = validateEntryCondition(condition);
+  if (result.ok) return;
+  const { code, message, detail } = result.error;
+  throw new GraphQLError(message, {
+    extensions: {
+      code: 'INVALID_ENTRY_CONDITION',
+      reason: code,
+      detail: {
+        ...(detail.field !== undefined ? { field: detail.field } : {}),
+        ...(detail.operator !== undefined ? { operator: detail.operator } : {}),
+      },
     },
   });
 }
@@ -3822,7 +3848,7 @@ export async function buildRespondToolSchema(
     dataProps[fieldName] = { type: spec.shape ?? 'string', description: spec.description ?? fieldName };
   }
 
-  return respondToolDefinition(dataProps);
+  return respondToolDefinition(dataProps, await conversationStageOrder(script, convName));
 }
 
 /**
@@ -3832,6 +3858,7 @@ export async function buildRespondToolSchema(
  */
 export function respondToolDefinition(
   dataProps: Record<string, unknown>,
+  stageNames?: readonly string[] | null,
 ): Array<{ name: string; description: string; parameters: unknown }> {
   return [{
     name: 'respond',
@@ -3841,7 +3868,14 @@ export function respondToolDefinition(
       properties: {
         message: { type: 'string', description: 'Your response to the user' },
         data: { type: 'object', properties: dataProps },
-        next_stage: { type: ['string', 'null'], description: 'Stage to transition to (null to stay in current stage)' },
+        next_stage: stageNames
+          ? {
+              // #4035: exactly this conversation's stages, plus null to stay. A name outside the list moves nothing.
+              type: ['string', 'null'],
+              enum: [...stageNames, null],
+              description: `Stage to transition to, one of: ${stageNames.join(', ')} (null to stay in current stage)`,
+            }
+          : { type: ['string', 'null'], description: 'Stage to transition to (null to stay in current stage)' },
         goal_reached: { type: 'boolean', description: 'Set true only when the current conversation goal has been reached; follow the stage prompt to decide. Omitted or false means it is not complete. This flag wins over next_stage.' },
         onTrack: { type: 'boolean', description: 'Is the current conversation/stage still the right fit for what the user is asking?' },
         offTrackReason: { type: 'string', description: 'If onTrack is false, explain why the conversation seems off-track' },

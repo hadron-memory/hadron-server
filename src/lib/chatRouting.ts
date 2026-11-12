@@ -1,5 +1,6 @@
 /** #4036 / cor:cht:030:02: shared turn routing and locked-origin application; S4 adds stage targets and detour returns. */
 import type { ScriptNode, ScriptRule } from './chatScript.js';
+import { decideNextStage } from './chatRouting/nextStage.js';
 
 export interface GoalStackEntry {
   description: string;
@@ -108,6 +109,7 @@ export interface ChatRoutingResult {
   conversationCompleted: string | null;
   detourReturned: boolean;
   routingSkipped: boolean;
+  rejectedNextStage?: string;
 }
 export interface ChatRoutingDecision {
   origin: RoutingOrigin;
@@ -123,7 +125,8 @@ const unchanged = (): ChatRoutingResult => ({ stageTransitioned: false, newStage
  */
 export async function decideChatRouting(input: {
   origin: RoutingOrigin;
-  nextStage?: string;
+  nextStage?: unknown;
+  stageOrder?: readonly string[] | null;
   goalReached?: unknown;
   rules: readonly ScriptRule[];
   node: (loc: string) => Promise<ScriptNode | null>;
@@ -145,16 +148,23 @@ export async function decideChatRouting(input: {
     });
   }
   // A flagged turn ignores the named stage, including for Q1's always-rule timing.
-  if (input.nextStage && !completed) {
-    if (input.nextStage !== origin.stageName) {
-      result.stageTransitioned = true; result.newStageName = input.nextStage;
-      edits.push(data => {
-        data.stageName = input.nextStage;
-        appendRouteEntry(data, { conversationUrn: conversationLoc, nodeUrn: `${conversationLoc}:${input.nextStage}`, action: 'ENTER',
-          trigger: { type: 'STAGE_TRANSITION', content: `next_stage: ${input.nextStage}` } });
-      });
+  if (!completed) {
+    const stage = decideNextStage(input.nextStage, origin.stageName, input.stageOrder ?? null);
+    if (stage.kind === 'rejected') {
+      result.rejectedNextStage = stage.name;
+      return decision;
     }
-    return decision;
+    if (stage.kind === 'stay') return decision;
+    if (stage.kind === 'move') {
+      const moveTo = stage.stage;
+      result.stageTransitioned = true; result.newStageName = moveTo;
+      edits.push(data => {
+        data.stageName = moveTo;
+        appendRouteEntry(data, { conversationUrn: conversationLoc, nodeUrn: `${conversationLoc}:${moveTo}`, action: 'ENTER',
+          trigger: { type: 'STAGE_TRANSITION', content: `next_stage: ${moveTo}` } });
+      });
+      return decision;
+    }
   }
   // The script reader already orders by priority with its stable tiebreak. First firing conversation target wins.
   for (const rule of input.rules) {
