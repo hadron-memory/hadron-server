@@ -138,6 +138,7 @@
     "AiServiceConfigTestError": "value",
     "AiServiceConfigTestResult": "envelope",
     "AiConfigTestKnob": "value",
+    "ChatProbeOutcome": "value",
     "AiProviderEndpoint": "value",
     "ResolvedAiConfig": "value",
     "ServedPromptProvenanceEntry": "value",
