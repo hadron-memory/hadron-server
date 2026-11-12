@@ -11,7 +11,7 @@ import { GraphQLError } from 'graphql';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { UrnNotQualifiedError } from '../../../lib/urn.js';
-import type { Context } from './resolvers.helpers.js';
+import { isMemoryReadableCached, type Context } from './resolvers.helpers.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { resolveGrantPerson, resolveGrantReader } from './resolvers.grant.js';
 import { manageRefusal, resolveGrantManager } from './resolvers.grantManage.js';
@@ -82,8 +82,9 @@ export const grantCreateMutations = {
           const again = await resolveGrantReader(txCtx);
           if (!again || again.appId !== reader.appId || again.workerId !== reader.workerId) throw notWorker();
         },
-        async (tx) => {
+        async (tx, txCtx) => {
           const id = await createPendingGrant(tx, {
+            canReadMemory: (memoryId) => isMemoryReadableCached(txCtx, memoryId),
             appId: reader.appId,
             requester: { userId, workerId: reader.workerId, sessionId: ctx.sessionId ?? null },
             holder: { kind, id: input.holderRef },
@@ -136,8 +137,9 @@ async function createAsManager(ctx: Context, input: CreateGrantInput) {
         const fresh = await txCtx.db.app.findUnique({ where: { id: app.id }, select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true } });
         if (!fresh || fresh.deletedAt || !(await managesApp(txCtx, fresh))) throw notManager();
       },
-      async (tx) => {
+      async (tx, txCtx) => {
         const id = await createPendingGrant(tx, {
+          canReadMemory: (memoryId) => isMemoryReadableCached(txCtx, memoryId),
           appId: app.id,
           requester: { userId, workerId: null, sessionId: null },
           holder: { kind, id: input.holderRef },
