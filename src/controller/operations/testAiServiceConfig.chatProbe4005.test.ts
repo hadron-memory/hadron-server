@@ -287,6 +287,37 @@ describe('the outcome matrix', () => {
     expect(captured.filter((c) => Array.isArray(c.body.tools))).toHaveLength(1);
   });
 
+  it('an internal throw while judging the call is NOT a provider failure: logged, rethrown after the usage row, nothing leaked', async () => {
+    const cfg = await mkConfig();
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const deps: AiConfigTestDeps = {
+      generate: async () => ({ text: 'OK', tokensIn: 1, tokensOut: 1, provider: 'openai', model: 'gpt-4o' }),
+      // a malformed result makes OUR classifier throw (calls is undefined)
+      generateChat: (async () => ({ calls: undefined, tokensIn: 7, tokensOut: 3 })) as never,
+      now: () => Date.now(), timeoutMs: 5_000, preflight: assertModelBuildable,
+    };
+    await expect(testAiServiceConfig(ctxFor(admin.id), cfg.id, {}, deps, true)).rejects.toBeInstanceOf(TypeError);
+    expect(spy.mock.calls.some((c) => String(c[0]).includes('chat probe internal error'))).toBe(true);
+    // the call that DID happen is still metered, with what it spent
+    const rows = await db.usageEvent.findMany({ where: { type: 'ai-config-test-chat' } });
+    expect(rows).toHaveLength(1);
+    spy.mockRestore();
+  });
+
+  it('a provider throw stays a closed provider failure and logs no internal error', async () => {
+    const cfg = await mkConfig();
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const deps: AiConfigTestDeps = {
+      generate: async () => ({ text: 'OK', tokensIn: 1, tokensOut: 1, provider: 'openai', model: 'gpt-4o' }),
+      generateChat: (async () => { throw new Error('upstream 503'); }) as never,
+      now: () => Date.now(), timeoutMs: 5_000, preflight: assertModelBuildable,
+    };
+    const r = await testAiServiceConfig(ctxFor(admin.id), cfg.id, {}, deps, true);
+    expect(r.chat).toEqual({ status: 'FAIL_PROVIDER_UNAVAILABLE' });
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
   it('a config with no key reports the closed status and makes no call', async () => {
     const cfg = await mkConfig({ apiKeyEncrypted: null, apiKeyPreview: null });
     const r = await run(cfg.id, ctxFor(admin.id), true);

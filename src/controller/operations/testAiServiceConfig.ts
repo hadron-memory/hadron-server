@@ -638,23 +638,50 @@ export async function testAiServiceConfig(
     if (quotaScope && !chatReservation) return 'FAIL_PROVIDER_UNAVAILABLE';
     const choice = chatToolChoiceFor(provider, model);
     let result: ChatProbeResult | null = null;
-    let status: ChatProbeStatus;
+    let status: ChatProbeStatus = 'FAIL_PROVIDER_UNAVAILABLE';
+    // Only the provider call's failure is the provider's: its text is never
+    // surfaced on this leg, the closed status is all it reports. A throw from
+    // OUR code (building the tool, judging the call) is an internal error: it
+    // is logged (scrubbed, name and message only) and rethrown AFTER the usage
+    // row and the reservation settle, so it can neither read as a provider
+    // failure nor leak the reservation (#4021 BLIND replacement seat, P2).
+    let internal: unknown = null;
+    let tools: ReturnType<typeof respondToolDefinition> | null = null;
     try {
-      result = await (deps.generateChat ?? generateChatProbe)(
-        resolved,
-        {
-          prompt: CHAT_PROBE_PROMPT,
-          ...(choice === 'AUTO' ? { system: RESPOND_ONCE_INSTRUCTION } : {}),
-          maxTokens: chatMaxTokens,
-          timeoutMs: deps.timeoutMs,
-        },
-        respondToolDefinition({}),
-        sdkToolChoiceFor(choice),
+      tools = respondToolDefinition({});
+    } catch (e) {
+      internal = e;
+    }
+    if (tools) {
+      try {
+        result = await (deps.generateChat ?? generateChatProbe)(
+          resolved,
+          {
+            prompt: CHAT_PROBE_PROMPT,
+            ...(choice === 'AUTO' ? { system: RESPOND_ONCE_INSTRUCTION } : {}),
+            maxTokens: chatMaxTokens,
+            timeoutMs: deps.timeoutMs,
+          },
+          tools,
+          sdkToolChoiceFor(choice),
+        );
+      } catch {
+        status = 'FAIL_PROVIDER_UNAVAILABLE';
+      }
+      if (result) {
+        try {
+          status = classifyChatProbe(result);
+        } catch (e) {
+          internal = e;
+        }
+      }
+    }
+    if (internal) {
+      console.error(
+        '[testAiServiceConfig] chat probe internal error:',
+        (internal as Error)?.name ?? 'Error',
+        scrub(String((internal as Error)?.message ?? internal), secrets),
       );
-      status = classifyChatProbe(result);
-    } catch {
-      // Provider text is never surfaced on this leg: the status is all it reports.
-      status = 'FAIL_PROVIDER_UNAVAILABLE';
     }
     const spentIn = result?.tokensIn ?? 0;
     const spentOut = result?.tokensOut ?? 0;
@@ -672,6 +699,7 @@ export async function testAiServiceConfig(
     if (quotaScope && chatReservation) {
       await settleReservation(ctx.db, 'org', quotaScope, 'llm.tokens', spentIn + spentOut - chatReserve, chatReservation);
     }
+    if (internal) throw internal;
     return status;
   }
 
