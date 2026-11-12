@@ -211,6 +211,20 @@ describe('#4039 refusals judged before any write', () => {
     expect((await db.memory.findUniqueOrThrow({ where: { id: older.id } })).deletedAt).toBeNull();
   });
 
+  it('4d3 (B2, Betty F1): a live unkeyed legacy row is the home the start reads; provisioning adopts the SAME row', async () => {
+    await seed([...conv('welcome', { seq: 1, condition: NAME_UNKNOWN }), ...conv('recent', { seq: 2 })]);
+    await opened(alice.id);
+    const keyed = (await sharedMemory())!;
+    await db.memory.update({ where: { id: keyed.id }, data: { sharedMemoryOfAgentId: null, urn: `${org.urn}:intake-app:intake-agent:shared` } });
+    await db.node.upsert({
+      where: { loc_memoryId: { loc: 'data', memoryId: keyed.id } },
+      update: { data: { users: { [alice.id]: { name: 'Ann' } } } as never },
+      create: { id: generateId(), memoryId: keyed.id, loc: 'data', name: 'data', nodeType: 'system', data: { users: { [alice.id]: { name: 'Ann' } } } as never },
+    });
+    expect(await opened(alice.id)).toBe('recent');
+    expect((await db.memory.findUniqueOrThrow({ where: { id: keyed.id } })).sharedMemoryOfAgentId).toBe(agentId);
+  });
+
   it('4e (B2): a live home memory the starter cannot read refuses MEMORY_UNREADABLE; nothing is read or written', async () => {
     await seed([...conv('welcome', { seq: 1, condition: NAME_UNKNOWN })]);
     const memory = await db.memory.create({ data: {
