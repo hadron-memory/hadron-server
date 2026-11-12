@@ -16940,6 +16940,20 @@ export const typeDefs = `#graphql
     dark
   }
 
+  """
+  #4041 (V82, hrn:node:hadronmemory.com:hadron-dev-team-shared:decisions:2026-11-12-vera-rulings-host-repair-notice;
+  hrn:node:hadronmemory.com:specs:cor:agt:070:01) — what a host's sweep did about a dark worker. A closed set, never
+  free text. The PLATFORM posts the notice, never the host key.
+  """
+  enum WorkerTerminalRepair {
+    "The host relaunched the worker; carries attempt."
+    RELAUNCHED
+    "The worker has no launch snapshot, so the host could not relaunch it."
+    NO_SNAPSHOT
+    "The host's relaunch attempt cap was reached."
+    CAP_REACHED
+  }
+
   "#2771 — what the terminal's input prompt looked like."
   enum WorkerTerminalPrompt {
     empty
@@ -16999,6 +17013,13 @@ export const typeDefs = `#graphql
     lastTurnAt: DateTime
     "When the host classified the terminal, not more than two minutes ahead of the server."
     checkedAt: DateTime!
+    """
+    #4041 (V82) — the outcome of the host's repair of a dark worker. Valid only with status dark; on a busy, idle or
+    locked report that worker's report is refused (REPAIR_NOT_DARK) and the rest of the batch is stored.
+    """
+    repair: WorkerTerminalRepair
+    "The relaunch's attempt number, at least 1: required with RELAUNCHED, refused (REPAIR_ATTEMPT_INVALID) otherwise."
+    attempt: Int
   }
 
   input SetHostWorkerTerminalsInput {
@@ -17013,7 +17034,7 @@ export const typeDefs = `#graphql
     urn: String!
   }
 
-  "#2771 — a report not stored for one worker: WORKER_NOT_FOUND or TERMINAL_REPORT_STALE."
+  "#2771 — a report not stored for one worker: WORKER_NOT_FOUND, TERMINAL_REPORT_STALE, REPAIR_NOT_DARK or REPAIR_ATTEMPT_INVALID."
   type WorkerTerminalRefusal {
     "The worker as the host named it."
     worker: String!
