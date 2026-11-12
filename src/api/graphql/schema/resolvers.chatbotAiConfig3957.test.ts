@@ -198,7 +198,7 @@ describe('chatAiConfigChoices', () => {
     expect(text).not.toContain(KEY);
     expect(text).not.toContain('3957');
     expect(text).not.toContain(foreign.id);
-    expect(Object.keys(list[2]).sort()).toEqual(['isAppChatbotConfig', 'isDefault', 'model', 'name', 'provider', 'value']);
+    expect(Object.keys(list[2]).sort()).toEqual(['isAppChatbotConfig', 'isDefault', 'model', 'name', 'provider', 'toolChoice', 'value']);
   });
 
   it('a non-member gets exactly the answer a missing App gets', async () => {
