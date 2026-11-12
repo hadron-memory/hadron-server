@@ -78,8 +78,13 @@ describe('#2843 owner creation and boundaries', () => {
     await denied(ctx(), {}, state.endsWith('agent') ? 'AGENT_NOT_INSTALLED' : 'FORBIDDEN');
   });
   it('rolls back Memory and root on injected root database failure', async () => {
-    vi.spyOn(rootLocks, 'lockLocForWrite').mockRejectedValue(new Error('2843 root failure'));
+    const rootLock = vi.spyOn(rootLocks, 'lockLocForWrite').mockImplementationOnce(async (tx, memoryId, loc) => {
+      expect(loc).toBe('Owner Notes');
+      expect(await tx.memory.findUnique({ where: { id: memoryId } })).toMatchObject({ name: 'Owner Notes' });
+      throw new Error('2843 root failure');
+    });
     await expect(create()).rejects.toThrow('2843 root failure');
+    expect(rootLock).toHaveBeenCalledTimes(1);
     expect(await db.memory.count()).toBe(0); expect(await db.node.count()).toBe(0);
   });
   it('retains root validation after owner authorization', async () => { await denied(ctx(), {name:'../invalid'}, 'BAD_USER_INPUT'); });

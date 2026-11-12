@@ -12,18 +12,26 @@ import { memoryLocalPath } from '../../../integrations/github/gitMirrorCheckout.
 const fixture = await vi.hoisted(async () => {
   const fs = await import('node:fs'), path = await import('node:path'), os = await import('node:os');
   return { root: fs.mkdtempSync(path.join(os.tmpdir(), 'root-storage-')),
-    snapshot: vi.fn(), cleanup: vi.fn(), write: vi.fn() };
+    observing: false, operations: [] as string[], write: vi.fn() };
 });
 vi.mock('../../../config.js', async original => ({ ...await original<typeof import('../../../config.js')>(), GRAPHS_PATH: fixture.root }));
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
-// Observe the old participants without replacing their real behavior: before retirement
-// these wrappers still perform the real snapshot/write against our private fixture.
-vi.mock('../../../lib/fsProjectionRollback.js', async original => {
-  const actual = await original<Record<string, (...args: any[]) => any>>();
-  return { ...actual,
-    snapshotProjection: (...args: any[]) => { fixture.snapshot(); return actual.snapshotProjection?.(...args); },
-    projectionCleanupFor: (...args: any[]) => { fixture.cleanup(); return actual.projectionCleanupFor?.(...args); },
-  };
+// Observe real filesystem operations only while the resolver runs. Removed export
+// names cannot observe a new snapshot/restore implementation; these can.
+vi.mock('node:fs', async original => {
+  const actual = await original<typeof import('node:fs')>();
+  const observed = Object.fromEntries([
+    'readFileSync', 'readdirSync', 'existsSync', 'mkdirSync',
+    'writeFileSync', 'rmSync', 'rmdirSync',
+  ].map(operation => [operation, (...args: any[]) => {
+    const target = args[0];
+    if (fixture.observing && typeof target === 'string' &&
+        (target === fixture.root || target.startsWith(`${fixture.root}/`))) {
+      fixture.operations.push(operation);
+    }
+    return (actual[operation as keyof typeof actual] as Function)(...args);
+  }]));
+  return { ...actual, ...observed };
 });
 vi.mock('../../../integrations/localFs/saveNodeToFs.js', async original => {
   const actual = await original<typeof import('../../../integrations/localFs/saveNodeToFs.js')>();
@@ -36,12 +44,15 @@ const M = resolvers.Mutation;
 let org: { id: string; urn: string }, app: { id: string }, agent: { id: string }, admin: { id: string }, plain: { id: string };
 const context = (userId: string): Context => ({ db, userId, roles: [] });
 type Door = 'personal' | 'organization' | 'app' | 'installed';
-function create(door: Door, name: string, denied = false) {
+async function create(door: Door, name: string, denied = false) {
   const ctx = context(denied || door === 'personal' ? plain.id : admin.id);
-  if (door === 'personal') return M.createMemory({}, { name, memoryClass: 'personal' }, ctx);
-  if (door === 'organization') return M.createMemory({}, { name, orgId: org.id }, ctx);
-  if (door === 'app') return M.createAppMemory({}, { name, appRef: app.id }, ctx);
-  return M.createMemoryInApp({}, { name, appRef: app.id, agentRef: agent.id, memoryClass: 'app' }, ctx);
+  fixture.observing = true;
+  try {
+    if (door === 'personal') return await M.createMemory({}, { name, memoryClass: 'personal' }, ctx);
+    if (door === 'organization') return await M.createMemory({}, { name, orgId: org.id }, ctx);
+    if (door === 'app') return await M.createAppMemory({}, { name, appRef: app.id }, ctx);
+    return await M.createMemoryInApp({}, { name, appRef: app.id, agentRef: agent.id, memoryClass: 'app' }, ctx);
+  } finally { fixture.observing = false; }
 }
 function snapshot(dir = fixture.root): string[] {
   return readdirSync(dir, { withFileTypes: true }).sort((a,b) => a.name.localeCompare(b.name)).flatMap(entry => {
@@ -51,8 +62,7 @@ function snapshot(dir = fixture.root): string[] {
   });
 }
 function noParticipants() {
-  expect(fixture.snapshot).not.toHaveBeenCalled();
-  expect(fixture.cleanup).not.toHaveBeenCalled();
+  expect(fixture.operations).toEqual([]);
   expect(fixture.write).not.toHaveBeenCalled();
 }
 beforeEach(async () => {
@@ -71,7 +81,7 @@ beforeEach(async () => {
   writeFileSync(join(checkout, 'sentinel'), 'synthetic checkout');
   mkdirSync(join(fixture.root, 'other-storage.test', '.node'), { recursive: true });
   writeFileSync(join(fixture.root, 'other-storage.test', '.node', 'node.yaml'), 'pre-existing root');
-  fixture.snapshot.mockClear(); fixture.cleanup.mockClear(); fixture.write.mockClear();
+  fixture.observing = false; fixture.operations.length = 0; fixture.write.mockClear();
 });
 for (const door of ['personal', 'organization', 'app', 'installed'] as const) describe(`database-only root creation: ${door}`, () => {
   it.each(['Ordinary', 'own:legal:multi', 'a::b', 'other-storage.test', 'other-storage.test:notes', 'other-storage.test:notes:deep'])('keeps filesystem byte-identical for legal name %s', async name => {
@@ -104,4 +114,17 @@ for (const door of ['organization', 'app', 'installed'] as const) it(`denied ${d
   await expect(create(door, 'other-storage.test:notes', true)).rejects.toThrow();
   expect(await db.memory.count()).toBe(0); expect(await db.node.count()).toBe(0);
   expect(snapshot()).toEqual(before); noParticipants();
+});
+
+it('observes real snapshot and restore operations even when bytes stay identical', () => {
+  const target = join(fixture.root, 'other-storage.test', '.node', 'node.yaml');
+  const before = snapshot();
+  fixture.observing = true;
+  try {
+    const bytes = readFileSync(target);
+    writeFileSync(target, bytes);
+    rmSync(join(fixture.root, 'absent'), { force: true });
+  } finally { fixture.observing = false; }
+  expect(fixture.operations).toEqual(['readFileSync', 'writeFileSync', 'rmSync']);
+  expect(snapshot()).toEqual(before);
 });

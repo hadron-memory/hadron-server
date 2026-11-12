@@ -92,8 +92,13 @@ describe('#2661 new free-standing app memory', () => {
     await refused(ctx(outsider.id), {appRef:personal.id});
   });
   it('rolls back the memory if creating its root fails', async () => {
-    vi.spyOn(rootLocks, 'lockLocForWrite').mockRejectedValue(new Error('injected root failure'));
+    const rootLock = vi.spyOn(rootLocks, 'lockLocForWrite').mockImplementationOnce(async (tx, memoryId, loc) => {
+      expect(loc).toBe('App Notes');
+      expect(await tx.memory.findUnique({ where: { id: memoryId } })).toMatchObject({ name: 'App Notes' });
+      throw new Error('injected root failure');
+    });
     await expect(create()).rejects.toThrow('injected root failure');
+    expect(rootLock).toHaveBeenCalledTimes(1);
     expect(await db.memory.count()).toBe(0);
     expect(await db.node.count()).toBe(0);
   });

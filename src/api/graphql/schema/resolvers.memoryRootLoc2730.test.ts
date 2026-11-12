@@ -116,8 +116,13 @@ for (const door of ['createMemory', 'createAppMemory', 'createMemoryInApp']) {
       expect(await db.memory.count()).toBe(0);
     });
     it('still reports a non-input filesystem fault as a server fault', async () => {
-      vi.spyOn(rootLocks, 'lockLocForWrite').mockRejectedValue(new Error('injected root failure'));
+      const rootLock = vi.spyOn(rootLocks, 'lockLocForWrite').mockImplementationOnce(async (tx, memoryId, loc) => {
+        expect(loc).toBe('Fine name');
+        expect(await tx.memory.findUnique({ where: { id: memoryId } })).toMatchObject({ name: 'Fine name' });
+        throw new Error('injected root failure');
+      });
       const err = await d().create('Fine name').catch(e => e);
+      expect(rootLock).toHaveBeenCalledTimes(1);
       expect(err.message).toContain('injected root failure');
       expect(err.extensions?.code).not.toBe('BAD_USER_INPUT');
     });
