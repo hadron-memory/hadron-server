@@ -781,8 +781,10 @@ export async function newestApprovedAndSignedRevisionForServe(
   /** The signature predicate (#2973 `revisionSignatureCounts`), judged per candidate revision. */
   signed: (revNo: number) => Promise<boolean>,
   cap: number = NEWEST_APPROVED_REVISION_SCAN_CAP,
+  /** #4008: examine only revisions numbered below this, for a caller that has already judged that revision and above. */
+  below?: number,
 ): Promise<NewestApprovedAndSignedRevision> {
-  let result = await newestApprovedAndSignedRevisionOf(db, nodeId, signed, cap);
+  let result = await newestApprovedAndSignedRevisionOf(db, nodeId, signed, cap, undefined, below);
   let approvedUnsigned = result.approvedUnsigned;
   for (let batch = 1; batch < NEWEST_APPROVED_REVISION_SCAN_BATCHES && !result.found && result.truncated && result.resumeBelow != null; batch++) {
     result = await newestApprovedAndSignedRevisionOf(db, nodeId, signed, cap, undefined, result.resumeBelow);

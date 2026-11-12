@@ -15,8 +15,7 @@ import { computeSigningPreviewRows } from '../../../lib/bootPrompt/signingSwitch
 
 let statements = 0;
 const logged = new PrismaClient({ datasourceUrl: process.env.DATABASE_URL, log: [{ emit: 'event', level: 'query' }] });
-const seen: string[] = [];
-logged.$on('query', (e) => { statements += 1; seen.push(e.query.replace(/\s+/g, ' ').slice(0, 150)); });
+logged.$on('query', () => { statements += 1; });
 afterAll(() => logged.$disconnect());
 
 const prov = (): CompiledProvenance => ({
@@ -46,7 +45,7 @@ async function install(i: number) {
 }
 
 async function statementsFor() {
-  statements = 0; seen.length = 0;
+  statements = 0;
   const rows = await computeSigningPreviewRows(logged as never, org.id);
   return { rows: rows.length, statements };
 }
@@ -60,7 +59,8 @@ describe('#4008 preview cost per row', () => {
     expect(small.rows).toBe(3);
     expect(large.rows).toBe(13);
     const perRow = (large.statements - small.statements) / (large.rows - small.rows);
-    console.log(seen.slice(-perRow).join('\n'));
-    expect(perRow).toBeLessThanOrEqual(6); // WIP budget: red on main at 32; the real ceiling is set with the fix
+    // Main ran 32 per row (the serve's own walk plus a second full revision walk). Now 23: the second walk is skipped
+    // for a served revision that is signed or has no older revision. The rest is the serve's own per-target reads.
+    expect(perRow).toBeLessThanOrEqual(24);
   }, 60_000);
 });
