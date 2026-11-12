@@ -178,15 +178,21 @@ describe('#4043 controls', () => {
     expect(sent.tools).toBeNull();
   });
 
-  it('shared response preserves its non-evaluating on-complete path before and after uninstall', async () => {
+  it.each([true, false])('shared response preserves its non-evaluating on-complete path (installed=%s)', async (installed) => {
     const started = await start('shared');
-    for (const installed of [true, false]) {
-      if (!installed) await loseLicence('uninstall');
-      const response = await observeDefinitionReads<any>(() => M.processChatResponse({}, { chatId: started.chatId, toolResponse: { message: 'done', next_stage: null } }, ctx()));
-      expect(response.value.conversationHandoff).toBeNull();
-      expect(response.systemReads).toEqual([]);
-      expect(response.edgeReads).toBe(0);
-    }
+    const root = await chatNodeByLocOrThrow(db, started.chatId);
+    if (!installed) await loseLicence('uninstall');
+    const install = await db.appAgent.findUnique({ where: { appId_agentId: { appId, agentId } } });
+    expect(install !== null).toBe(installed);
+    const state = await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } });
+    expect(state.state).toMatchObject({ conversationName: 'flow', stageName: 'step' });
+    const messages = () => db.node.count({ where: { memoryId: root.memoryId, loc: { startsWith: `${started.chatId}:messages:` } } });
+    const before = await messages();
+    const response = await observeDefinitionReads<any>(() => M.processChatResponse({}, { chatId: started.chatId, toolResponse: { message: 'done', next_stage: null } }, ctx()));
+    expect(await messages()).toBe(before + 1); // A no-op/already-complete return cannot satisfy this control.
+    expect(response.value.conversationHandoff).toBeNull();
+    expect(response.systemReads).toEqual([]);
+    expect(response.edgeReads).toBe(0);
   });
 
   it('private start selects a licensed App rather than the earlier retained unlicensed install', async () => {
