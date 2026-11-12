@@ -188,6 +188,23 @@ describe('the preview', () => {
     expect(byAgent.get(unsigned.agentId).compiledNodeUrn).toEqual(expect.stringContaining('boot:'));
   });
 
+  it('#4008 the signed-served shortcut and the older-signed walk agree with the revision history (several revisions)', async () => {
+    const newerSigned = await installed('NewerSigned', 'v1', { sign: true });
+    await recompile(newerSigned.nodeId, newerSigned.memoryId, newerSigned.agentId, 'v2');
+    await sign(newerSigned.nodeId, newerSigned.memoryId); // r2 approved AND signed: served and signed, no row
+    const deep = await installed('Deep', 'v1', { sign: true });
+    await recompile(deep.nodeId, deep.memoryId, deep.agentId, 'v2'); // r2 approved, unsigned
+    await recompile(deep.nodeId, deep.memoryId, deep.agentId, 'v3'); // r3 approved, unsigned: serves r3, would change to r1
+    const unapprovedAbove = await installed('Above', 'v1', { sign: true });
+    await recompile(unapprovedAbove.nodeId, unapprovedAbove.memoryId, unapprovedAbove.agentId, 'v2', false); // r2 not approved: r1 serves and is signed
+    const p = await preview();
+    const byAgent = new Map<string, any>(p.rows.map((r: any) => [r.agentId, r]));
+    expect(byAgent.has(newerSigned.agentId)).toBe(false);
+    expect(byAgent.has(unapprovedAbove.agentId)).toBe(false);
+    expect(byAgent.get(deep.agentId)).toMatchObject({ state: 'REVISION_CHANGES', servedRevSeq: 3, changesToRevSeq: 1 });
+    expect(p.total).toBe(1);
+  });
+
   it('includes a shared Agent from another organisation served in this organisation\'s Apps, and nothing else of that organisation\'s', async () => {
     const { agentId: foreignAgent, memoryId: foreignMem } = await mkAgent('Shared', other);
     const foreignNode = await compiledIn(foreignMem, foreignAgent, 'foreign v1');
