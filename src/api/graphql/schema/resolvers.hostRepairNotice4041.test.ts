@@ -117,6 +117,10 @@ describe('NO_SNAPSHOT and CAP_REACHED alert once per worker, to the dark worker\
     expect(rest).toEqual([]);
     expect(p.content).toBe('Kit is dark on Orca One and was not relaunched: it has no launch snapshot.');
     expect(p.data.mentions).toEqual(['mara']);
+    // Vera #101856: the waker is the system author, not a manager, so no exemption stamp: the wake counts against the
+    // daily budget (cor:agt:080:15) like any other.
+    expect(p.data.managerPost).toBeUndefined();
+    expect(p.data.broadcastWakes).toBeUndefined();
   });
 
   it('with no reporting line, mentions whoever manages the App', async () => {
