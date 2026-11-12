@@ -283,7 +283,7 @@ describe('#1149 the profile never widens a list', () => {
     const roster = await run('query($a: ID!) { teamRoster(appRef: $a) { __typename } }', { a: appA.id }, ctx(stranger.id));
     expect(roster.errors?.[0]?.extensions?.code).toBe('APP_NOT_FOUND');
     const list = await run('query($a: ID!) { workers(appRef: $a) { total } }', { a: appA.id }, ctx(stranger.id));
-    expect(list.errors?.[0]?.extensions?.code).toBe('FORBIDDEN');
+    expect(list.errors?.[0]?.extensions?.code).toBe('APP_NOT_FOUND');
     const byName = await run('query($a: ID!) { worker(ref: "Dan", appRef: $a) { id } }', { a: appA.id }, ctx(stranger.id));
     expect(byName.errors?.[0]).toMatchObject({ message: 'Worker not found.', extensions: { code: 'WORKER_NOT_FOUND' } });
   });
