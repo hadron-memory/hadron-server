@@ -87,6 +87,7 @@ import { taskListDateTime } from '../../../lib/agentTasks/listDateTime.js';
 import { normalizeFamily } from '../../../lib/agentTasks/family.js';
 import { GraphQLError } from 'graphql';
 import { Prisma, type PrismaClient } from '../../../generated/prisma/index.js';
+import { tickBatch } from './tickBatch.js';
 import { type Context, isAppParticipant, clampListTake, withoutRequestCaches, pageArgs, pageEnvelope } from './resolvers.helpers.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AppNotFoundError, WorkerNotFoundError } from '../../../lib/entityRef/errors.js';
@@ -3051,75 +3052,89 @@ export const agentTaskQueries = {
    * equal-time group — are never skipped (#1713 review, Diego P2-B). `since`
    * stays a coarse time filter, not a continuation.
    */
-  agentTeamEvents: async (
-    _: unknown,
-    args: { appRef: string; since?: unknown; after?: string | null; types?: string[] | null; codePrefix?: string | null; alarmsOnly?: boolean | null; taskId?: string | null; limit?: number | null },
-    ctx: Context,
-  ) => withReadableApp(ctx, args.appRef, async (c, app) => {
-    const since = args.since == null ? null : parseStartBy(args.since);
-    let afterWhere: Prisma.AgentTeamEventWhereInput = {};
-    if (args.after) {
-      // Scoped to this App: another App's event id is just an unknown cursor.
-      const cursor = isId(args.after)
-        ? await c.db.agentTeamEvent.findFirst({
-            where: { id: args.after, appId: app.id },
-            select: { id: true, createdAt: true },
-          })
-        : null;
-      if (!cursor) throw badInput('after is not an event of this App. Pass the id of the last event you read.');
-      afterWhere = {
-        OR: [
-          { createdAt: { gt: cursor.createdAt } },
-          { createdAt: cursor.createdAt, id: { gt: cursor.id } },
-        ],
-      };
-    }
-    return c.db.agentTeamEvent.findMany({
-      where: {
-        appId: app.id,
-        ...afterWhere,
-        ...(since ? { createdAt: { gt: since } } : {}),
-        ...((args.types?.length || args.codePrefix != null) ? { type: { ...(args.types?.length ? { in: args.types } : {}), ...(args.codePrefix != null ? { startsWith: escapePrismaLikePattern(args.codePrefix) } : {}) } } : {}),
-        ...(args.alarmsOnly ? { severity: 'alarm' } : {}),
-        ...(args.taskId ? { taskId: (await resolveTaskRef(c, args.taskId, app.id)) ?? args.taskId } : {}),
-      },
-      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      take: clampListTake(args.limit),
-    });
-  }),
+  agentTeamEvents: async (_: unknown, args: TeamEventsArgs, ctx: Context) =>
+    withReadableApp(ctx, args.appRef, (c, app) => readTeamEvents(c, app, args, clampListTake(args.limit))),
+
+  /**
+   * #3933 (cor:api:120:04, cor:agt:050:11 FIT condition (c)): the same read as agentTeamEvents, the `<field>Page` sibling, so a
+   * page tells the reader whether more remain. One row beyond the page is read to know; `nextCursor` is the id of the last event
+   * served when more remain (pass it as `after`, or with newestFirst as `before`) and null on the last page.
+   *
+   * #3949 (cor:api:120:04, cor:agt:050:11): the page size has a FLOOR of 1. This envelope carries no `total`, so a zero page
+   * could only say "is there anything", and `limit: 0` used to read the lookahead row yet serve none: events [], hasMore true,
+   * nextCursor null, a continuation nobody could follow. `limit` <= 0 now reads one event (clamped, never refused, like
+   * cor:api:090:04); hasMore true always carries a non-null nextCursor. The legacy agentTeamEvents list keeps `limit: 0` = [].
+   */
+  agentTeamEventsPage: async (_: unknown, args: TeamEventsArgs, ctx: Context) =>
+    withReadableApp(ctx, args.appRef, async (c, app) => {
+      const take = Math.max(1, clampListTake(args.limit));
+      const rows = await readTeamEvents(c, app, args, take + 1);
+      const events = rows.slice(0, take);
+      const hasMore = rows.length > take;
+      return { events, hasMore, nextCursor: hasMore ? events[events.length - 1]!.id : null };
+    }),
 };
+
+type TeamEventsArgs = { appRef: string; since?: unknown; after?: string | null; before?: string | null; newestFirst?: boolean | null; types?: string[] | null; codePrefix?: string | null; alarmsOnly?: boolean | null; alarmsInEffect?: boolean | null; taskId?: string | null; limit?: number | null };
+
+async function readTeamEvents(c: Context, app: { id: string }, args: TeamEventsArgs, take: number) {
+  const since = args.since == null ? null : parseStartBy(args.since);
+  // #3933 (cor:agt:050:11 FIT): the newest-end read. `after` continues forward and `before` backward, so each belongs to one
+  // direction; a cursor in the wrong one is refused rather than read as something else.
+  const newestFirst = args.newestFirst === true;
+  if (newestFirst && args.after) throw badInput('after continues the oldest-first read; with newestFirst pass before.');
+  if (!newestFirst && args.before) throw badInput('before continues the newestFirst read; pass newestFirst: true with it.');
+  let afterWhere: Prisma.AgentTeamEventWhereInput = {};
+  if (args.before) {
+    // Scoped to this App, like after: another App's event id is just an unknown cursor.
+    const cursor = isId(args.before)
+      ? await c.db.agentTeamEvent.findFirst({ where: { id: args.before, appId: app.id }, select: { id: true, createdAt: true } })
+      : null;
+    if (!cursor) throw badInput('before is not an event of this App. Pass the id of the last (oldest) event you read.');
+    afterWhere = { OR: [{ createdAt: { lt: cursor.createdAt } }, { createdAt: cursor.createdAt, id: { lt: cursor.id } }] };
+  }
+  if (args.after) {
+    // Scoped to this App: another App's event id is just an unknown cursor.
+    const cursor = isId(args.after)
+      ? await c.db.agentTeamEvent.findFirst({
+          where: { id: args.after, appId: app.id },
+          select: { id: true, createdAt: true },
+        })
+      : null;
+    if (!cursor) throw badInput('after is not an event of this App. Pass the id of the last event you read.');
+    afterWhere = {
+      OR: [
+        { createdAt: { gt: cursor.createdAt } },
+        { createdAt: cursor.createdAt, id: { gt: cursor.id } },
+      ],
+    };
+  }
+  const where: Prisma.AgentTeamEventWhereInput = {
+    appId: app.id,
+    ...(since ? { createdAt: { gt: since } } : {}),
+    ...((args.types?.length || args.codePrefix != null) ? { type: { ...(args.types?.length ? { in: args.types } : {}), ...(args.codePrefix != null ? { startsWith: escapePrismaLikePattern(args.codePrefix) } : {}) } } : {}),
+    // #3934: alarms in effect are alarms, and an acknowledged alarm is out of effect by definition (cor:agt:050:20).
+    ...(args.alarmsOnly || args.alarmsInEffect ? { severity: 'alarm' } : {}),
+    ...(args.alarmsInEffect ? { acknowledgedAt: null } : {}),
+    ...(args.taskId ? { taskId: (await resolveTaskRef(c, args.taskId, app.id)) ?? args.taskId } : {}),
+  };
+  // newestFirst is the exact mirror of the default (createdAt, id) order, so a page boundary inside equal timestamps never repeats or skips.
+  const orderBy: Prisma.AgentTeamEventOrderByWithRelationInput[] = newestFirst ? [{ createdAt: 'desc' }, { id: 'desc' }] : [{ createdAt: 'asc' }, { id: 'asc' }];
+  // #3934 (V77; gate disposition on hadron-server#3939): in effect = unacknowledged and no recorded end. Both are columns
+  // of rows already written, so this is an ordinary filtered page: the read works nothing out and its cost follows
+  // `limit`, not the App's alarm history. The end is written once, by the evaluator pass or the acknowledgement.
+  const inEffect: Prisma.AgentTeamEventWhereInput = args.alarmsInEffect ? { escalationEnd: { is: null } } : {};
+  return c.db.agentTeamEvent.findMany({
+    where: { AND: [where, afterWhere, inEffect] },
+    // newestFirst is the exact mirror of the default (createdAt, id) order, so a page boundary inside equal timestamps never repeats or skips.
+    orderBy: newestFirst ? [{ createdAt: 'desc' }, { id: 'desc' }] : [{ createdAt: 'asc' }, { id: 'asc' }],
+    take,
+  });
+}
 
 // ── Field resolvers ───────────────────────────────────────────────────────
 
 export type PartyView = { kind: 'WORKER' | 'USER'; id: string; name: string | null; urn: string | null };
-
-/**
- * #3867: one request's field-resolver lookups raised in the current tick, served together. Keyed by the Context OBJECT
- * (a WeakMap, like {@link relationQueues}): a copy made for another caller or transaction never inherits the queue, the
- * queue is removed before its flush starts, and no result is kept, so a later read always reaches the database. A wide
- * `agentTasks` page selects four parties and the open-children test per row; each was one statement per row, which
- * took the whole-App `--team` read to minutes.
- */
-function tickBatch<K, V>(flush: (ctx: Context, keys: K[]) => Promise<Map<K, V>>, missing: V): (ctx: Context, key: K) => Promise<V> {
-  type Request = { key: K; settle: (v: V) => void; fail: (e: unknown) => void };
-  const queues = new WeakMap<Context, Request[]>();
-  return (ctx, key) =>
-    new Promise<V>((settle, fail) => {
-      let queue = queues.get(ctx);
-      if (!queue) {
-        const fresh: Request[] = (queue = []);
-        queues.set(ctx, fresh);
-        queueMicrotask(() => {
-          queues.delete(ctx);
-          flush(ctx, [...new Set(fresh.map((r) => r.key))]).then(
-            (found) => { for (const r of fresh) r.settle(found.has(r.key) ? (found.get(r.key) as V) : missing); },
-            (e) => { for (const r of fresh) r.fail(e); },
-          );
-        });
-      }
-      queue.push({ key, settle, fail });
-    });
-}
 
 const workerPartyOf = tickBatch<string, PartyView | null>(async (ctx, ids) => {
   const rows = await ctx.db.worker.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, slug: true, app: { select: { urn: true } } } });
@@ -3128,6 +3143,20 @@ const workerPartyOf = tickBatch<string, PartyView | null>(async (ctx, ids) => {
 const userPartyOf = tickBatch<string, { id: string; handle: string | null } | null>(async (ctx, ids) => {
   const rows = await ctx.db.user.findMany({ where: { id: { in: ids } }, select: { id: true, handle: true } });
   return new Map(rows.map((u) => [u.id, u]));
+}, null);
+/** #3934: the fields of an event row the escalation end is read from. */
+type AlarmEndRow = { id: string; severity: string | null; acknowledgedAt: Date | null };
+/**
+ * #3934 (V77): when this alarm's escalation ended: the earlier of its acknowledgement and its RECORDED end. Nothing is
+ * worked out here (the pass or the acknowledgement wrote the record once), so a read cannot move the value. Batched per
+ * request: one lookup serves a page.
+ */
+const alarmEndOf = tickBatch<AlarmEndRow, Date | null>(async (ctx, rows) => {
+  const recorded = await ctx.db.alarmEscalationEnd.findMany({ where: { eventId: { in: rows.map((r) => r.id) } }, select: { eventId: true, endedAt: true } });
+  const at = new Map(recorded.map((r) => [r.eventId, r.endedAt]));
+  const earlier = (a: Date | null | undefined, b: Date | null | undefined): Date | null =>
+    a && b ? (a.getTime() <= b.getTime() ? a : b) : a ?? b ?? null;
+  return new Map(rows.map((r) => [r, earlier(r.acknowledgedAt, at.get(r.id))]));
 }, null);
 const hasOpenChild = tickBatch<string, boolean>(async (ctx, ids) => {
   const rows = await ctx.db.agentTask.findMany({ where: { parentTaskId: { in: ids }, status: { in: OPEN } }, select: { parentTaskId: true }, distinct: ['parentTaskId'] });
@@ -3458,6 +3487,9 @@ export const agentTaskFieldResolvers = {
       return eventPayloadFor(e, ctx);
     },
     severity: (e: { severity: string | null }) => (e.severity === 'alarm' ? 'ALARM' : null),
+    // #3934 (V77): when this alarm's escalation ended, from the same answer the wake schedule uses; null while in effect and on any
+    // ordinary event. Batched per request, so a page of events costs one evaluation, not one per row.
+    escalationEndedAt: (e: AlarmEndRow, _: unknown, ctx: Context) => (e.severity === 'alarm' ? alarmEndOf(ctx, e) : null),
     actor: (e: { actorWorkerId: string | null; actorUserId: string | null }, _: unknown, ctx: Context) =>
       partyView(ctx, e.actorWorkerId, e.actorWorkerId ? null : e.actorUserId),
     subjectWorker: (e: { subjectWorkerId: string | null }, _: unknown, ctx: Context) =>

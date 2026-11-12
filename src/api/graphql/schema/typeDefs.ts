@@ -1137,6 +1137,8 @@ export const typeDefs = `#graphql
     app
     aiServiceConfig
     user
+    "GraphQL only (hrn:node:hadronmemory.com:specs:cor:api:050): MCP hadron_search stays at seven types. Hits only for a person or worker session the task read gate admits."
+    agentTask
   }
 
   """
@@ -1170,6 +1172,8 @@ export const typeDefs = `#graphql
     score: Float!
     memoryId: ID
     organizationId: ID
+    "The entity's short handle when its kind has one (an agentTask's bare AT0.6508), else null. Render as given; never compose or parse."
+    handle: String
   }
 
   type GlobalSearchResult {
@@ -2076,7 +2080,7 @@ export const typeDefs = `#graphql
     expectedWorkerId, expectedWorkerName (null unless the caller may read that worker), foundWorkerId,
     foundWorkerName and foundSource (CLAIM or LIVE_SESSION), before any write: no claim is consumed and no
     session is started, ended or touched. With nothing of the caller's waiting the answer stays
-    NOTHING_TO_RESUME. Omitted or null: unchanged. Blank: BAD_USER_INPUT.
+    NOTHING_TO_RESUME. Omitted or null: unchanged. Blank or not an id (a URN or a name): BAD_USER_INPUT, before any read.
     """
     expectedWorkerId: ID
   }
@@ -3242,6 +3246,10 @@ export const typeDefs = `#graphql
     properties: JSON
     "#3125 S1: the revision setAppProperties checks expectedRevision against. 0 until the first changing write; each changing write adds 1. Null for a caller who may not read properties."
     propertiesRevision: Int
+    """
+    #3957 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10): one of this App's OWN AI configs, used for its chats unless a chat stored its own choice. An id, never a key. Readable by an App member and by whoever manages the App; null for anyone else, and null when unset. A deleted config clears it. Set and cleared with setAppChatbotAiConfig.
+    """
+    chatbotAiConfigId: ID
     "Spec 049 Phase 4: the App's default Channel — the row its team chat became (null until provisioned)."
     defaultChannel: Channel
     """
@@ -5039,6 +5047,16 @@ export const typeDefs = `#graphql
   type AiServiceConfig {
     id: ID!
     name: String!
+    """
+    The config's URN, computed from its owner's current URN plus its name
+    (hrn:node:hadronmemory.com:specs:cor:urn:010:01, V60-V63): hrn:aiconf:<org>:org:<name>,
+    hrn:aiconf:<root>:app:<app-slug>:<name>, hrn:aiconf:<author-root>:agent:<agent-slug>:<name>,
+    or hrn:aiconf:server:<name> for a HadronServer owner. Null for a name that cannot be a
+    URN atom (a trailing '-' or '_'), for a stored name that is not lower-case canonical, and for a
+    validly named config of a HadronServer that is not the current one (the oldest live row).
+    Renaming the config re-addresses it, with no alias.
+    """
+    urn: String
     ownerType: AiConfigOwnerType!
     "ID of the owning HadronServer / Organization / App / Agent."
     ownerId: ID!
@@ -5383,6 +5401,10 @@ export const typeDefs = `#graphql
   """
   type Chat {
     id: ID!
+    """
+    #3957 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10): the AI config choice stored with this chat — \`default\` or one of the App's config ids — or null when the chat stored none (it then follows the App's chatbot config, else \`default\`).
+    """
+    aiConfigChoice: String
     loc: String!
     title: String!
     conversationName: String
@@ -5407,6 +5429,21 @@ export const typeDefs = `#graphql
     gets an empty page.
     """
     servedPrompts(limit: Int, offset: Int): ServedPromptsPage!
+  }
+
+  """
+  #3957 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10): one entry of the list a chat chooses its AI config from. No key material.
+  """
+  type ChatAiConfigChoice {
+    "\`default\` for the walk entry, else the config id: the value to send back as aiConfigChoice."
+    value: String!
+    name: String!
+    "Null for the \`default\` entry, which names no single config."
+    provider: String
+    model: String
+    isDefault: Boolean!
+    "True for the App's own chatbot config (App.chatbotAiConfigId)."
+    isAppChatbotConfig: Boolean!
   }
 
   """
@@ -5570,6 +5607,12 @@ export const typeDefs = `#graphql
   type Worker {
     "Current lint of the compiled revision recorded for the open session; null when unavailable."
     promptLintWarnings(first: Int = 50, after: String): LintWarningPage
+    """
+    #3865 — the worker's stored availability record: reason, who set it (setBy, setByParty) and when (setAt), the
+    same record \`TeamRosterEntry.availability\` and \`teamAvailability\` return (hrn:node:hadronmemory.com:specs:cor:agt:060:02).
+    Worker-internals field: null for a caller who may not see them, and null when the worker has no record.
+    """
+    availability: WorkerAvailability
     id: ID!
     appId: ID!
     """
@@ -8241,11 +8284,14 @@ export const typeDefs = `#graphql
   route (hadron-portal#262).
 
   \`kind\` is the URN's type segment: memory | node | agent | org | app | user |
-  apprun | worker | noderev.
+  apprun | worker | noderev | aiconf (#3857: an AI service config, behind the same
+  gate as aiServiceConfig(ref:); an unreadable config answers null, as a missing
+  one does, hrn:node:hadronmemory.com:specs:cor:urn:010:01).
   \`id\` is the resolved entity's primary id. \`memoryId\` is set only for
   nodes (their owning memory), \`organizationId\` for apps, app runs, and
-  workers (their owning org) — both are the extra ids those resources'
-  canonical routes require.
+  workers (their owning org), and for an aiconf (#3857) the org that owns it or
+  its App or Agent (null for a server-owned config or a user-owned App or
+  Agent) — both are the extra ids those resources' canonical routes require.
   """
   type UrnResolution {
     kind:           String!
@@ -9025,6 +9071,8 @@ export const typeDefs = `#graphql
     read; the cursor is the (createdAt, id) pair, so events sharing a
     timestamp are never skipped. since is a coarse time filter (strictly
     after), not a continuation. limit defaults to 20 (cap 200).
+    #3933 (hrn:node:hadronmemory.com:specs:cor:agt:050:11): newestFirst reads from the newest end instead, the exact mirror
+    order with the same gate, filters and paging, continued with before (the id of the oldest event read).
     task.warning, task.edited and task.properties-changed are passive history (never wake, suppress a wake or count as activity); payload is {code}, changed field names only, or (task.properties-changed) the size and SHA-256 of the canonical JSON of the old and new properties, never their content.
     """
     agentTeamEvents(
@@ -9032,13 +9080,46 @@ export const typeDefs = `#graphql
       since: DateTime
       "The id of the last event read: the page continues strictly after it. An id that is not an event of this App is refused BAD_USER_INPUT."
       after: ID
+      "#3933: with newestFirst, the id of the last (oldest) event read; the page continues strictly older than it, by the same (createdAt, id) pair. An id that is not an event of this App is refused BAD_USER_INPUT. Refused without newestFirst."
+      before: ID
+      "#3933: true reads from the NEWEST end, the exact mirror of the default order, with the same gate, filters and paging (default 20, cap 200); continue with before, not after (refused with after). Omitted or false: the oldest-first read, unchanged."
+      newestFirst: Boolean
       types: [String!]
       "#3449: literal prefix, intersects nonempty types; app. includes legacy platform events. An empty prefix matches all types; omitted or empty types adds no type filter."
       codePrefix: String
       alarmsOnly: Boolean
+      """
+      #3934 — only alarms in effect (hrn:node:hadronmemory.com:specs:cor:agt:050:20): unacknowledged and with no recorded
+      escalation end, so escalationEndedAt is null. Implies alarmsOnly. An alarm out of effect is skipped, not hidden: read
+      without this filter to see it. false or omitted adds no filter.
+      """
+      alarmsInEffect: Boolean
       taskId: ID
       limit: Int
     ): [AgentTeamEvent!]!
+
+    """
+    #3933 (hrn:node:hadronmemory.com:specs:cor:api:120:04) — agentTeamEvents with the page's end told: the same arguments, gate,
+    filters, order and paging (except the page-size floor below), returning hasMore and nextCursor so a reader knows whether older (or newer) events remain without
+    another read. nextCursor is the id of the last event served when more remain, to pass as after (oldest-first) or, with
+    newestFirst, as before; null on the last page, and non-null whenever hasMore is true. The page size has a floor of 1:
+    limit is at least 1 (0 or less reads one event, never an empty page), default 20, cap 200 served and never refused
+    (hrn:node:hadronmemory.com:specs:cor:api:120:04). The legacy agentTeamEvents keeps limit 0 as an empty list.
+    """
+    agentTeamEventsPage(
+      appRef: ID!
+      since: DateTime
+      after: ID
+      before: ID
+      newestFirst: Boolean
+      types: [String!]
+      codePrefix: String
+      alarmsOnly: Boolean
+      "#3934 — as on agentTeamEvents: only alarms in effect (unacknowledged, escalation not stopped); implies alarmsOnly."
+      alarmsInEffect: Boolean
+      taskId: ID
+      limit: Int
+    ): AgentTeamEventsPage!
 
     """
     #3853 — the usage accounts an App has history for: one entry per label, host and family
@@ -10349,7 +10430,12 @@ export const typeDefs = `#graphql
     agentAIConfig(agentRef: ID!): AgentAIConfig
 
     """
-    The uniform single-config read. 'ref' is the config's ID (not a URN).
+    The uniform single-config read. 'ref' is the config's ID or its hrn:aiconf: URN
+    (#3857, hrn:node:hadronmemory.com:specs:cor:urn:010:01; see AiServiceConfig.urn).
+    On the URN path a config the caller may not read answers null, exactly as a
+    missing one does, because names such as 'default' are guessable
+    (hrn:node:hadronmemory.com:specs:cor:api:120:01); the ID path keeps the
+    posture below.
     Masked: never returns key material, only hasApiKey + apiKeyPreview
     (resolveAIConfig is the privileged decrypted read). Auth mirrors the list:
     platform ADMIN/OWNER for HADRON_SERVER; org ADMIN for ORGANIZATION;
@@ -10540,7 +10626,7 @@ export const typeDefs = `#graphql
 
     appRef/agentRef accept the entity's ID or URN.
     """
-    resolveAIConfig(name: String, appRef: ID, agentRef: ID): ResolvedAiConfig!
+    resolveAIConfig(name: String, appRef: ID, agentRef: ID, "#3957 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10): a chat of appRef. With it, the chat's stored aiConfigChoice wins, else the App's chatbot config, else the \`default\` walk above; a choice counts only while its config exists, belongs to appRef and is enabled. A chat that is not one of appRef's chats answers as a missing chat." chatId: ID): ResolvedAiConfig!
 
     """
     #1373: the known endpoints for a provider — the server's single suggestion
@@ -10576,6 +10662,15 @@ export const typeDefs = `#graphql
     appRef/agentRef accept the entity's ID or URN.
     """
     resolveAiServiceConfigs(appRef: ID, agentRef: ID): [AiServiceConfig!]!
+
+    """
+    #3957 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10): what a chat of this App may choose from — the App's OWN enabled AI configs plus one
+    \`default\` entry, which resolves through the App -> Agent -> Org -> Host walk at turn time. Send an entry's
+    \`value\` back as the chat's aiConfigChoice. Never a key, key preview, params or endpoint. Any App member may
+    call it (a platform admin too); anyone else, a missing App and a request that is not a signed-in person get
+    the same APP_NOT_FOUND answer.
+    """
+    chatAiConfigChoices(appRef: ID!): [ChatAiConfigChoice!]!
 
     """
     #2862 / hrn:node:hadronmemory.com:specs:cor:agt:040:03: a chatbot chat's served-prompt records, by chat id, and nothing
@@ -11476,6 +11571,15 @@ export const typeDefs = `#graphql
     #3323: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.
     """
     setAppProperties(appRef: String!, properties: JSON, expectedRevision: Int, instruction: ActInstructionInput): App!
+
+    """
+    #3957 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10, hrn:node:hadronmemory.com:specs:cor:dmo:050:12): set (configId) or clear (null) the App's chatbot
+    AI config. Whoever manages the App, a platform admin included even on a user-owned App: choosing a config reads,
+    sets and tests no key. A person acting as themselves. configId must be one of THIS App's own configs; another
+    App's, a deleted one and an unknown id all get the same AiServiceConfigNotFoundError. A disabled own config is
+    accepted and skipped at turn time until it is enabled again.
+    """
+    setAppChatbotAiConfig(appRef: ID!, configId: ID): App!
     """
     #2022 (hrn:node:hadronmemory.com:specs:cor:agt:090:01, :06) — set a stop signal. Whoever manages the App: any level and
     scope. A host key: a HALT on its own host only. Never replaces another signal. Refusals: APP_MANAGER_REQUIRED,
@@ -13695,14 +13799,14 @@ export const typeDefs = `#graphql
     # session, and chats only with its session's Agent. Anything else reads as an unknown user
     # or Agent. A signed-in user acts as themselves. The
     # subscription is provisioned in the transaction that creates the chat.
-    startChat(agentId: ID!, userId: String, conversationName: String, scope: ChatScope = private, isTestRun: Boolean = false, "#3096 / hrn:node:hadronmemory.com:specs:cor:dmo:150:08: optional client-reported model id, at most 256 UTF-16 code units, no control/format/line-separator characters or unpaired surrogates. Omitted or null fills empty for this call. Used only for prompt text and its immutable record, labelled client-reported; never billing, quotas or authorization. Invalid input refuses BAD_USER_INPUT without echoing it." llmModel: String): ChatStartResult!
+    startChat(agentId: ID!, userId: String, conversationName: String, scope: ChatScope = private, isTestRun: Boolean = false, "#3096 / hrn:node:hadronmemory.com:specs:cor:dmo:150:08: optional client-reported model id, at most 256 UTF-16 code units, no control/format/line-separator characters or unpaired surrogates. Omitted or null fills empty for this call. Used only for prompt text and its immutable record, labelled client-reported; never billing, quotas or authorization. Invalid input refuses BAD_USER_INPUT without echoing it." llmModel: String, "#3957 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10): optional AI config choice for this chat, stored with it: \`default\` or one of the chat App's own config ids from chatAiConfigChoices. Omitted keeps what the chat has. Any other id is refused as a missing config, revealing nothing about it." aiConfigChoice: String): ChatStartResult!
     """
     Process a user message (saves message, builds context, returns next prompt).
     #3501: CHAT_STATE_INVALID refuses unusable conversational state before the turn writes or builds a model prompt.
     CHAT_AUTHORITY_SCOPE_CHANGED refuses a write when the memory encryption flag changed before its lock; obtain
     fresh context, never automatically resubmit a model call or a turn after an uncertain commit.
     """
-    sendChatMessage(chatId: String!, userMessage: String!, "#3096 / hrn:node:hadronmemory.com:specs:cor:dmo:150:08: optional client-reported model id, at most 256 UTF-16 code units, no control/format/line-separator characters or unpaired surrogates. Omitted or null fills empty for this call. Used only for prompt text and its immutable record, labelled client-reported; never billing, quotas or authorization. Invalid input refuses BAD_USER_INPUT without echoing it." llmModel: String): ChatPromptResult!
+    sendChatMessage(chatId: String!, userMessage: String!, "#3096 / hrn:node:hadronmemory.com:specs:cor:dmo:150:08: optional client-reported model id, at most 256 UTF-16 code units, no control/format/line-separator characters or unpaired surrogates. Omitted or null fills empty for this call. Used only for prompt text and its immutable record, labelled client-reported; never billing, quotas or authorization. Invalid input refuses BAD_USER_INPUT without echoing it." llmModel: String, "#3957 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10): optional AI config choice for this chat, stored with it: \`default\` or one of the chat App's own config ids from chatAiConfigChoices. Omitted keeps what the chat has. Any other id is refused as a missing config, revealing nothing about it. The choice is stored in a second write, after the user message commits and before any model call: if that write fails, the message is kept, no turn runs, and the chat's previous choice stands. A caller resends the choice, not the message: the message is already stored, so do not send it again; send the choice again with your next message." aiConfigChoice: String): ChatPromptResult!
     """
     Process the LLM's tool response (extract data, transition stage, save assistant message)
 
@@ -14153,7 +14257,9 @@ export const typeDefs = `#graphql
     """
     Update an App.
 
-    Accepts the entity's ID or URN.
+    Accepts the entity's ID or URN. An uninstalled App is kept read-only
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:21): this refuses it with
+    APP_UNINSTALLED, for every field, after the access gate, writing nothing.
     """
     updateApp(
       ref: ID!
@@ -16426,6 +16532,15 @@ export const typeDefs = `#graphql
     chain: JSON
     acknowledgedBy: AgentTaskParty
     acknowledgedAt: DateTime
+    """
+    #3934 — alarms only: when this alarm's escalation ended, the earlier of its acknowledgement and its RECORDED end
+    (hrn:node:hadronmemory.com:specs:cor:agt:050:20); null while the alarm is in effect, and on any ordinary event. The
+    recorded end is written once, by the evaluator pass (every minute) or by the acknowledgement, from the earliest end the
+    available history supports for any kind of alarm: it is at most one pass late and never moves once written. Until it is
+    written the alarm reads as still in effect. Ending changes nothing on the alarm: it is not acknowledged, deleted or
+    hidden, and an owner may still acknowledge it.
+    """
+    escalationEndedAt: DateTime
     "A dark-worker alarm's payload carries its reason (overdue, wake-unacked) and window for every reader; its evidence (lastCheckedAt, oldestWakeAgeSeconds) only for a reader of the worker's internals."
     payload: JSON!
     createdAt: DateTime!
@@ -16437,6 +16552,15 @@ export const typeDefs = `#graphql
     episodeStart: DateTime
     "#1706 — alarms only: who the alarm wakes and when, nearest owner first (hrn:node:hadronmemory.com:specs:cor:agt:050:19). Null for an ordinary event."
     wakes: [AgentTeamAlarmSchedule!]
+  }
+
+  "#3933: one page of an App's team events and whether more remain (hrn:node:hadronmemory.com:specs:cor:api:120:04)."
+  type AgentTeamEventsPage {
+    events: [AgentTeamEvent!]!
+    "True when events beyond this page match the same read."
+    hasMore: Boolean!
+    "The id of the last event served when hasMore, to pass as after (or with newestFirst as before); null on the last page."
+    nextCursor: ID
   }
 
   enum AgentTeamEventSeverity {
@@ -17120,6 +17244,13 @@ export const typeDefs = `#graphql
     "Set when its own availability record makes it unavailable now."
     unavailableReason: AvailabilityReason
     unavailableUntil: DateTime
+    """
+    #3865 — the worker's stored availability record: its reason, who set it (setBy, setByParty) and when
+    (setAt), so a stale mark is told from a deliberate one without asking (hrn:node:hadronmemory.com:specs:cor:agt:060:02).
+    Present for any record, in effect or not (inEffect says which); null when the worker has none.
+    Reads nothing new: the record is the one setWorkerAvailability writes and teamAvailability returns.
+    """
+    availability: WorkerAvailability
     "Families it could run as that are unavailable in the App now (hrn:node:hadronmemory.com:specs:cor:agt:060:03)."
     unavailableFamilies: [String!]!
     "Started tasks it is the assignee of."

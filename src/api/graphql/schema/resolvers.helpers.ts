@@ -68,6 +68,8 @@ import {
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
+import { resolveAiConfigByUrn } from '../../../lib/entityRef/aiConfigRef.js';
+import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { resolveUserRefOrEmail } from '../../../lib/entityRef/userRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import {
@@ -457,7 +459,7 @@ export function isMemoryReadableCached(ctx: Context, memoryId: string): Promise<
   let pending = cache.get(memoryId);
   if (!pending) {
     pending = getAccessibleMemoryIds(ctx, memoryId).then(
-      (ids) => ids === null || ids.includes(memoryId),
+      (ids) => ids.includes(memoryId),
     );
     cache.set(memoryId, pending);
     // A rejection is not an answer: drop it so a one-shot fault is not replayed (#1327).
@@ -502,7 +504,7 @@ export function withoutRequestCaches(ctx: Context, db?: Prisma.TransactionClient
 export function isMemoryReadableFresh(ctx: Context, memoryId: string, tx?: Prisma.TransactionClient): Promise<boolean> {
   const uncached = withoutRequestCaches(ctx, tx);
   const cache = (ctx.memoryReadCache ??= new Map<string, Promise<boolean>>());
-  const pending = getAccessibleMemoryIds(uncached, memoryId).then((ids) => ids === null || ids.includes(memoryId));
+  const pending = getAccessibleMemoryIds(uncached, memoryId).then((ids) => ids.includes(memoryId));
   cache.set(memoryId, pending);
   pending.catch(() => { if (cache.get(memoryId) === pending) cache.delete(memoryId); });
   return pending;
@@ -547,7 +549,7 @@ export async function resolveReadableMemoryId(
     throw e;
   }
   const accessible = await getAccessibleMemoryIds(ctx, resolvedId);
-  if (accessible !== null && !accessible.includes(resolvedId)) return null;
+  if (!accessible.includes(resolvedId)) return null;
   return resolvedId;
 }
 
@@ -704,7 +706,7 @@ function userPrincipalOnly(ctx: Context): Context {
 function holdsContentReadIndependently(ctx: Context, memoryId: string): Promise<boolean> {
   const self = userPrincipalOnly(ctx);
   return getAccessibleMemoryIds(self, memoryId, { excludeAppDerived: true }).then(
-    (ids) => ids === null || ids.includes(memoryId),
+    (ids) => ids.includes(memoryId),
   );
 }
 
@@ -1119,7 +1121,7 @@ export function nodeNotFoundError(ref: string): GraphQLError {
 /** Per-list read snapshots; never shared with mutations or another request. */
 type MemoryRecordReadBatch = {
   memberOrgIds?: Promise<string[]>;
-  accessibleIds?: Promise<string[] | null>;
+  accessibleIds?: Promise<string[]>;
   /** #1813: the caller's system-record grant lookups, built from THIS list's ctx so it cannot span principals. */
   systemGrants?: SystemMemoryGrantBatch;
 };
@@ -1234,7 +1236,7 @@ export async function canReadMemoryRecord(
     }
     if (ctx.sessionId || ctx.impersonation || isRunPrincipal(ctx) || !ctx.userId) {
       const ids = await accessible();
-      return ids === null || ids.includes(memory.id);
+      return ids.includes(memory.id);
     }
     return (await systemMemoryReadGrants(ctx.db, ctx, memory.id, systemGrants())).length > 0;
   }
@@ -1257,11 +1259,11 @@ export async function canReadMemoryRecord(
     // The shared content gate checks the casting and excludes team/session rows.
     if (memory.class !== 'app') return false;
     const ids = await accessible();
-    return ids !== null && ids.includes(memory.id);
+    return ids.includes(memory.id);
   }
   if (ctx.appId && ctx.sessionId && !ctx.userId) {
     const ids = await accessible();
-    return ids === null || ids.includes(memory.id);
+    return ids.includes(memory.id);
   }
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return true;
   // All app-class shapes use their node-content audience. The historical
@@ -1269,7 +1271,7 @@ export async function canReadMemoryRecord(
   // a Worker/session memory record even when their nodes were concealed.
   if (memory.class === 'app') {
     const ids = await accessible();
-    return ids === null || ids.includes(memory.id);
+    return ids.includes(memory.id);
   }
   // findFirst (not findUnique) so a REVOKED (soft-deleted) membership no longer
   // grants access. A user-owned memory (org NULL) has no membership fast-path
@@ -1309,7 +1311,7 @@ export async function canReadMemoryRecord(
   }
   // Scope the shared gate to THIS memory so it stays an indexed point-read.
   const accessibleIds = await accessible();
-  return accessibleIds === null || accessibleIds.includes(memory.id);
+  return accessibleIds.includes(memory.id);
 }
 
 /**
@@ -2019,6 +2021,72 @@ export async function requireAiConfigOwnerAdmin(
 }
 
 /**
+ * #3976 (cor:dmo:050:21): an uninstalled App is kept read-only. Refuses with the
+ * `APP_UNINSTALLED` code the other App doors use; call it AFTER the access gate.
+ */
+export function assertAppNotUninstalled(app: { id: string; uninstalledAt: Date | null }): void {
+  if (app.uninstalledAt) {
+    throw new GraphQLError('Cannot update an uninstalled App.', {
+      extensions: { code: 'APP_UNINSTALLED', appId: app.id },
+    });
+  }
+}
+
+/**
+ * #3976: the AI-config registry writes (create/update/delete) on an APP-owned
+ * config refuse on an uninstalled App. Judged twice, like `updateApp`: early on
+ * the row (after the owner gate, so a refused caller learns nothing) and again on
+ * the `apps FOR UPDATE` row inside the write's transaction, which `uninstallApp`
+ * also locks. A non-APP owner is not touched. Not in `requireAiConfigOwnerAdmin`,
+ * which also gates reads.
+ */
+export async function assertAiConfigAppOwnerInstalled(
+  db: { app: { findUnique: (a: any) => Promise<{ id: string; uninstalledAt: Date | null } | null> } },
+  appId: string | null | undefined,
+): Promise<void> {
+  if (!appId) return;
+  const app = await db.app.findUnique({ where: { id: appId }, select: { id: true, uninstalledAt: true } });
+  if (app) assertAppNotUninstalled(app);
+}
+
+export async function lockAiConfigAppOwnerInstalled(
+  tx: { $queryRaw: (q: TemplateStringsArray, ...v: unknown[]) => Promise<unknown> },
+  appId: string | null | undefined,
+): Promise<void> {
+  if (!appId) return;
+  const rows = (await tx.$queryRaw`SELECT uninstalled_at FROM apps WHERE id = ${appId} FOR UPDATE`) as {
+    uninstalled_at: Date | null;
+  }[];
+  assertAppNotUninstalled({ id: appId, uninstalledAt: rows[0]?.uninstalled_at ?? null });
+}
+
+/**
+ * #3857 (V63): read a config by its `hrn:aiconf:` URN behind the SAME gate as
+ * the id read (`aiServiceConfig(ref:)`: org ADMIN of the owning org, platform
+ * ADMIN/OWNER for a server-owned one), through `requireAiConfigOwnerAdmin`
+ * rather than a copy of it.
+ *
+ * Differs from the id path in one way, on purpose: the names in a URN are
+ * guessable (`default`), so a config the caller may not read answers exactly as
+ * one that does not exist, null. Only an authorization denial and a
+ * name-resolution outcome collapse to null; a fault propagates (cor:api:260:01).
+ * Never returns the key: callers project the row through `toGqlAiServiceConfig`
+ * or an id.
+ */
+export async function readAiServiceConfigByUrn(ctx: Context, ref: string) {
+  const config = await resolveAiConfigByUrn(ctx.db, ref);
+  if (!config) return null;
+  try {
+    const owner = aiConfigOwnerOf(config);
+    await requireAiConfigOwnerAdmin(ctx, owner.ownerType, owner.ownerId);
+    return config;
+  } catch (e) {
+    if (isAuthorizationDenial(e) || refNamesNothing(e, { ambiguousNamesNothing: true })) return null;
+    throw e;
+  }
+}
+
+/**
  * Read gate for the masked config picker (resolveAiServiceConfigs). The picker
  * is scoped to ONE App's chat context, so for a non-admin caller all three of
  * these are required:
@@ -2279,8 +2347,14 @@ async function appDerivedMemoryIds(ctx: Context, onlyMemoryId?: string): Promise
 }
 
 /**
- * Returns the memory IDs accessible to the current caller, or null if the
- * caller has unrestricted access (global ADMIN/OWNER).
+ * Returns the memory IDs accessible to the current caller: always a materialised list, never an "unrestricted"
+ * sentinel (hrn:node:hadronmemory.com:specs:cor:acl:120:01, "A lens never grants"). A platform ADMIN/OWNER gets a
+ * list too, which still leaves out another user's owner-owned memories. #3921 narrowed the type from
+ * `string[] | null` once #3916 retired the operator principal, the last `return null`. A caller must not treat an
+ * empty list or a missing value as read-all.
+ *
+ * This is NOT `getAccessibleMemoryIds` in `src/mcp/access-control.ts`: that same-named function keeps its live
+ * ADMIN/OWNER -> null contract and is not narrowed.
  *
  * - Clients: memories from agent subscriptions only
  * - Users: memories from org memberships + cross-org subscriptions + public memories
@@ -2301,7 +2375,7 @@ export async function getAccessibleMemoryIds(
   // one App be re-granted to another App's audience. Everywhere else the fold
   // is correct and the default keeps it.
   options?: { excludeAppDerived?: boolean; publicTargetIds?: readonly string[] },
-): Promise<string[] | null> {
+): Promise<string[]> {
   const scope = onlyMemoryId ? { id: onlyMemoryId } : {};
   // App Key with an active session — hard-isolate to the session's memory
   // plus the agent's system memory, with only the named PUBLIC-knowledge
@@ -2639,7 +2713,7 @@ async function sessionAudienceFilter(ctx: Context): Promise<Record<string, unkno
 /** Prisma `where` clause that restricts nodes to accessible memories. */
 export async function memoryAccessFilter(ctx: Context): Promise<Record<string, unknown>> {
   const ids = await getAccessibleMemoryIds(ctx);
-  return ids === null ? {} : { memoryId: { in: ids } };
+  return { memoryId: { in: ids } };
 }
 
 /**

@@ -469,6 +469,13 @@
       "why": "AgentTaskParty(kind,id,name,urn via partyView; worker same-App or user handle only; audience App participants+App key)",
       "target": "AgentTaskParty"
     },
+    "AgentTeamEventsPage.events": {
+      "class": "parent-implies-child",
+      "audience": "the App's readers, the same withReadableApp gate as agentTeamEvents, which it shares a read with (readTeamEvents); outsiders are refused APP_NOT_FOUND before any row",
+      "spec": "cor:agt:050:21",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
+      "target": "AgentTeamEvent"
+    },
     "AgentTeamEvent.acknowledgedBy": {
       "class": "closed-projection",
       "projection": "AgentTaskParty",
@@ -1961,6 +1968,13 @@
       "why": "a sanitized roster row, never a Worker; admission is resolveParticipatedApp; teamPlacement, heldBy, heldAt and terminal nulled unless maySeeWorkerInternals passes, currentTask unless mayReadAppTasks passes",
       "target": "TeamRosterEntry"
     },
+    "TeamRosterEntry.availability": {
+      "class": "parent-implies-child",
+      "audience": "the roster read (withRosterAppRead / resolveParticipatedApp): App participants and the App's own key, read-only; the same audience Query.teamAvailability serves the same record to",
+      "spec": "cor:agt:060:02",
+      "resolver": "src/api/graphql/schema/resolvers.agentTaskMatching.ts::withRosterAppRead",
+      "target": "WorkerAvailability"
+    },
     "TeamRosterEntry.heldBy": {
       "class": "closed-projection",
       "projection": "WorkerHolder",
@@ -2097,6 +2111,12 @@
       "resolver": "src/api/graphql/schema/resolvers.worker.ts::app",
       "gate": "requireAppRead",
       "target": "App"
+    },
+    "Worker.availability": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.worker.ts::availability",
+      "gate": "maySeeWorkerInternals",
+      "target": "WorkerAvailability"
     },
     "Worker.continuity": {
       "class": "self-gated",

@@ -762,7 +762,7 @@ async function hostMemoryReadable(
 ): Promise<boolean> {
   if (ctx.impersonation && app) return true;
   const accessible = await getAccessibleMemoryIds(ctx, memoryId);
-  return accessible === null || accessible.includes(memoryId);
+  return accessible.includes(memoryId);
 }
 
 /**

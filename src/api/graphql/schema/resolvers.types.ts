@@ -41,6 +41,10 @@ import {
 } from '../../../lib/urnEmit.js';
 import { portalUrlForUrn } from '../../../lib/portalUrl.js';
 import { emitEntityUrnV2 } from '../../../lib/urnEmit.js';
+import { composeAiConfigUrn, type AiConfigUrnOwner } from '../../../lib/entityRef/aiConfigRef.js';
+import { loadAiConfigOwners, aiConfigOwnerKey, type AiConfigOwnerInfo, type AiConfigOwnerRef } from '../../../lib/aiConfigOwner.js';
+import { tickBatch } from './tickBatch.js';
+import { currentHadronServerId } from '../../../lib/hadronServer.js';
 import { servedEndpointInEffect, type InheritedFrom } from '../../../lib/effectiveSystemMemory.js';
 import { nodeContentValidationState } from '../../../lib/nodeContentValidation.js';
 // Spec 049 Phase 3b — AppRun.scope: the mint snapshot as the caller may read it.
@@ -136,7 +140,7 @@ function sessionEventMemoryIds(ctx: Context, parentSessionId: string): Promise<s
       const memories = await ctx.db.memory.findMany({
         where: { AND: [
           { OR: [strictSessionMemoryFilter(ctx), ...(bound?.memoryId ? [{ id: bound.memoryId }] : [])] },
-          ...(accessible === null ? [] : [{ id: { in: accessible } }]),
+          { id: { in: accessible } },
         ] },
         select: { id: true },
       });
@@ -687,10 +691,10 @@ async function flushAuthorshipTasks(ctx: Context, batch: { pending: Map<string, 
       select: { id: true, loc: true, memoryId: true },
     });
     const accessible = await getAccessibleMemoryIds(ctx);
-    const readable = accessible === null ? null : new Set(accessible);
+    const readable = new Set(accessible);
     const refs = new Map(await Promise.all(tasks.map(async (task) => [
       task.id,
-      readable === null || readable.has(task.memoryId) ? await resolveNodeUrnField(task, ctx) : null,
+      readable.has(task.memoryId) ? await resolveNodeUrnField(task, ctx) : null,
     ] as const)));
     for (const item of pending) item.resolve(refs.get(item.id) ?? null);
   } catch (error) {
@@ -927,10 +931,10 @@ async function flushValidationBatch(
     // Use the GraphQL node-content gate, including active-session isolation.
     // One access fold replaces a per-report task-memory check.
     const accessible = tasks.length === 0 ? [] : await getAccessibleMemoryIds(ctx);
-    const readable = accessible === null ? null : new Set(accessible);
+    const readable = new Set(accessible);
     const taskRefs = new Map(await Promise.all(tasks.map(async (task) => [
       task.id,
-      readable === null || readable.has(task.memoryId) ? await resolveNodeUrnField(task, ctx) : null,
+      readable.has(task.memoryId) ? await resolveNodeUrnField(task, ctx) : null,
     ] as const)));
     for (const item of pending) {
       const report = byKey.get(item.key) ?? null;
@@ -1103,8 +1107,89 @@ function truncatedChunksBatched(ctx: Context, nodeId: string): Promise<number | 
   return batch.result.then((byId) => byId.get(nodeId));
 }
 
+/**
+ * #3932: `AiServiceConfig.urn` owner lookups raised in the same tick share one query per owner kind
+ * ({@link loadAiConfigOwners}); keyed by the request Context, so nothing is kept past the tick. The batch is keyed by
+ * the string {@link aiConfigOwnerKey}; the ref behind each key is kept beside it, so the key is never parsed back (#3958).
+ */
+const aiConfigOwnerRefs = new WeakMap<Context, Map<string, AiConfigOwnerRef>>();
+const aiConfigOwnerBatch = tickBatch<string, AiConfigOwnerInfo | null>(async (ctx, keys) => {
+  const known = aiConfigOwnerRefs.get(ctx);
+  aiConfigOwnerRefs.delete(ctx); // before any await: a lookup raised after this point starts the next tick's map
+  const refs = keys.flatMap((k) => { const r = known?.get(k); return r ? [r] : []; });
+  return loadAiConfigOwners(ctx.db, refs);
+}, null);
+const aiConfigOwnerLookup = (ctx: Context, ref: AiConfigOwnerRef) => {
+  const key = aiConfigOwnerKey(ref);
+  let known = aiConfigOwnerRefs.get(ctx);
+  if (!known) aiConfigOwnerRefs.set(ctx, (known = new Map()));
+  known.set(key, ref);
+  return aiConfigOwnerBatch(ctx, key);
+};
+
+const aiConfigWarned = new WeakSet<object>();
+/** A warn that speaks once per request: the first call logs, the rest of that request stay quiet. */
+function aiConfigWarnOnce(ctx: Context): (msg: string) => void {
+  return (msg) => {
+    if (aiConfigWarned.has(ctx)) return;
+    aiConfigWarned.add(ctx);
+    console.warn(`${msg} (further aiconf URN misses in this request are not logged)`);
+  };
+}
+
 export const typeResolvers = {
   ...servedPromptTypeResolvers,
+  AiServiceConfig: {
+    /**
+     * #3857 (cor:urn:010:01, V60-V63): the config's URN, COMPUTED from its
+     * owner's current URN plus its name; null (logged) for a name that cannot be
+     * a URN atom. Identity only, so it sits on the row the caller already read
+     * through the config's own gate; it reads the owner's stored urn column and
+     * returns a string, never the owner object.
+     */
+    urn: async (
+      config: { name: string; ownerType: 'HADRON_SERVER' | 'ORGANIZATION' | 'APP' | 'AGENT'; ownerId: string },
+      _: unknown,
+      ctx: Context,
+    ): Promise<string | null> => {
+      // #3932: the owner is loaded per request tick, one query per owner kind; a config that cannot have a URN is
+      // logged once per request (the first one), not once per row.
+      const warn = aiConfigWarnOnce(ctx);
+      let owner: AiConfigUrnOwner | null;
+      const info = await aiConfigOwnerLookup(ctx, { ownerType: config.ownerType, ownerId: config.ownerId });
+      switch (config.ownerType) {
+        case 'HADRON_SERVER':
+          // `server` is the server answering (R3): only the CURRENT server's
+          // configs have the URN; another hadron_server row's would collide.
+          if (info?.current) {
+            owner = { kind: 'server' };
+          } else {
+            warn(`[aiconf-urn] no URN for a config of hadron_server ${config.ownerId}: it is not the current server`);
+            owner = null;
+          }
+          break;
+        case 'ORGANIZATION':
+        case 'APP':
+        case 'AGENT': {
+          // #3958: an owner row that is missing, or has a NULL urn, has no URN to compose from. The answer stays null
+          // (cor:urn:010:01); the data fault is logged once per request like the other null cases.
+          if (info?.urn != null) {
+            owner = { kind: config.ownerType === 'ORGANIZATION' ? 'org' : config.ownerType === 'APP' ? 'app' : 'agent', urn: info.urn };
+          } else {
+            warn(`[aiconf-urn] no URN for a config of ${config.ownerType.toLowerCase()} ${config.ownerId}: ${info ? 'the owner has a NULL urn' : 'the owner row is missing'}`);
+            owner = null;
+          }
+          break;
+        }
+        default:
+          // Every emitter projects through toGqlAiServiceConfig, which always
+          // carries the owner; a row without it must not read as "no URN" quietly.
+          warn('[aiconf-urn] AiServiceConfig parent without a known ownerType; urn is null');
+          owner = null;
+      }
+      return owner ? composeAiConfigUrn(owner, config.name, warn) : null;
+    },
+  },
   Chat: {
     servedPrompts: servedPromptOwnerFields.chatServedPrompts,
   },
@@ -1846,7 +1931,7 @@ export const typeResolvers = {
       });
       if (!row) return null;
       const accessible = await getAccessibleMemoryIds(ctx);
-      return accessible === null || accessible.includes(row.memoryId) ? row : null;
+      return accessible.includes(row.memoryId) ? row : null;
     },
     // 036-ai-service-config: registry-backed reads of the App's
     // 'default' config (legacy ai_* columns dropped).

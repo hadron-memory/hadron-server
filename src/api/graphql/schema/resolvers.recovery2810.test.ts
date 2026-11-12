@@ -382,11 +382,10 @@ describe('recoveryEdges answers ONE snapshot (#3454 review P1s)', () => {
     const ids = [inOrg, secondOrg, publicMemory, foreignOrg, personal];
     for (const ctx of [{ db, userId: member, roles: [] }, { db, userId: member, roles: ['ADMIN'] }] as Context[]) {
       const unscoped = await getAccessibleMemoryIds(ctx);
-      const unscopedSet = new Set(unscoped ?? ids);
+      const unscopedSet = new Set(unscoped);
       for (const id of ids) {
         const scoped = await getAccessibleMemoryIds(ctx, id);
-        // null is the gate's unrestricted answer and reads as accessible in both shapes.
-        expect([id, scoped === null || scoped.includes(id)]).toEqual([id, unscopedSet.has(id)]);
+        expect([id, scoped.includes(id)]).toEqual([id, unscopedSet.has(id)]);
       }
     }
   });

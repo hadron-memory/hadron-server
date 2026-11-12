@@ -84,7 +84,9 @@ import {
   pushGoal,
   appendRouteEntry,
   loadPublishedSnapshot,
+  rethrowAiConfigTyped,
 } from './resolvers.helpers.js';
+import { normalizeChatAiConfigChoice } from '../../../lib/chatbotAiConfig.js';
 import { assertNoMintedSpecRemoval } from '../../../lib/mintedSpecPermanence.js';
 import { refuseDecisionFamily } from '../../../lib/decisions/index.js';
 import { assertBatchMutable } from '../../../lib/bulkMutationGate.js';
@@ -200,6 +202,7 @@ export const chatMutations = {
         scope,
         isTestRun,
         llmModel,
+        aiConfigChoice,
       }: {
         agentId: string;
         userId?: string;
@@ -211,6 +214,8 @@ export const chatMutations = {
         // full rationale.
         isTestRun?: boolean;
         llmModel?: string | null;
+        // #3957 (cor:dmo:050:10): the chat's AI config choice, stored with it.
+        aiConfigChoice?: string | null;
       },
       ctx: Context,
     ) => {
@@ -448,6 +453,11 @@ export const chatMutations = {
           );
         }
         sharedAppId = selectedApp.id;
+        // Andi's F1 on #3960: a choice the App does not own is refused HERE, before the first chat provisions the
+        // App-class memory, so a refused start leaves nothing behind. (The lazy per-user branch below judges it the same way before its own create.)
+        if (aiConfigChoice != null) {
+          await normalizeChatAiConfigChoice(ctx.db, selectedApp.id, aiConfigChoice).catch(rethrowAiConfigTyped);
+        }
         // Idempotent: first shared chat under the (App, Agent) pair
         // provisions the app-class memory; subsequent calls reuse it.
         // Keyed per-agent (not per-app) so multi-Agent Apps — the model
@@ -543,6 +553,11 @@ export const chatMutations = {
                 })
               : null;
 
+          // Andi's F1 on #3960, the private arm: the memory below would belong to `matchingApp` (else to no App), so a
+          // choice that App does not own is refused before the memory exists. Same refusal as the later common check.
+          if (aiConfigChoice != null) {
+            await normalizeChatAiConfigChoice(ctx.db, matchingApp?.id ?? null, aiConfigChoice).catch(rethrowAiConfigTyped);
+          }
           const memoryClass: 'personal' | 'knowledge' = matchingApp
             ? 'personal'
             : 'knowledge';
@@ -616,6 +631,10 @@ export const chatMutations = {
       // in the holding memory without weakening the chat's authority gate.
       // #2047 (S10): the boot prompt is resolved first, so an unserveable one refuses before any chat exists.
       const chatAppId = (await ctx.db.memory.findUnique({ where: { id: targetMemoryId }, select: { appId: true } }))?.appId ?? null;
+      // #3957: judged here, before any chat, node or subscription write; the same refusal for every id the App does not own.
+      const startAiConfigChoice = aiConfigChoice == null
+        ? null
+        : await normalizeChatAiConfigChoice(ctx.db, chatAppId, aiConfigChoice).catch(rethrowAiConfigTyped);
       const chatServed = await serveChatPrompt(ctx.db, agent, chatAppId, reportedModel, ctx);
       let systemMessage = promptContent;
       if (promptContent.includes('{{')) {
@@ -692,6 +711,7 @@ export const chatMutations = {
       // that lets chat-list endpoints surface the tier without joining
       // Memory.class per row (data-model.md §2).
       const initialChatData: Record<string, unknown> = {
+        ...(startAiConfigChoice ? { aiConfigChoice: startAiConfigChoice } : {}),
         scope: chatScope,
         conversationName: convName,
         stageName: firstStage,
@@ -852,7 +872,7 @@ export const chatMutations = {
 
     sendChatMessage: async (
       _: unknown,
-      { chatId, userMessage, llmModel }: { chatId: string; userMessage: string; llmModel?: string | null },
+      { chatId, userMessage, llmModel, aiConfigChoice }: { chatId: string; userMessage: string; llmModel?: string | null; aiConfigChoice?: string | null },
       ctx: Context,
     ) => {
       requireRole(ctx, 'READER');
@@ -914,6 +934,11 @@ export const chatMutations = {
       // canonical portal chat path.
       const memory = await ctx.db.memory.findUnique({ where: { id: chatNode.memoryId } });
       if (!memory) throw new Error('Memory not found');
+      // #3957 (cor:dmo:050:10): a person who may send this chat's user turns stores its AI config choice. Judged
+      // before the first write of the turn; applied with the user message below, so this turn already follows it.
+      const sendAiConfigChoice = aiConfigChoice == null
+        ? null
+        : await normalizeChatAiConfigChoice(ctx.db, memory.appId ?? null, aiConfigChoice).catch(rethrowAiConfigTyped);
       let agent = null;
       if (memory.sharedMemoryOfAgentId || memory.userMemoryOfAgentId) {
         agent = await ctx.db.agent.findUnique({
@@ -1122,6 +1147,14 @@ export const chatMutations = {
       // Everything downstream reads the copy the allocation committed, not the
       // pre-lock one — a turn that raced us has already been folded in.
       chatData = allocatedChatData;
+      // #3965 (documented disposition; cor:dmo:050:10 needs only that a turn uses the chat's STORED config): this is a second
+      // write, after the user message has committed and before the stage loads or any model call. If it throws, the message is
+      // kept, no turn runs, and the chat's previous choice stands. A caller resends the choice, not the message (the message is stored; the choice rides on the next sendChatMessage). It is not moved
+      // into the allocation transaction: nothing in the law asks for that, and a turn never runs under a choice that was not stored.
+      if (sendAiConfigChoice !== null && chatData.aiConfigChoice !== sendAiConfigChoice) {
+        // A fresh read under the chat lock (#919): contribute this one key, never replay a stale blob.
+        chatData = await updateChatRootData(ctx.db, chatRef, memEncInfo, (fresh) => ({ ...fresh, aiConfigChoice: sendAiConfigChoice }), { inTx });
+      }
       const convName = chatData.conversationName as string;
       const stageName = chatData.stageName as string;
 

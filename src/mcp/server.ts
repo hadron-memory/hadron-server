@@ -3179,7 +3179,7 @@ export function createMcpServerInstance(
       const accessibleMemoryIds = await getAccessibleMemoryIds(db, auth);
       // The caller's own member orgs (admin or not) — the org allow-list for
       // non-admins, and the #609 hidden-org carve-out for admins.
-      const memberOrgIds = auth.userId ? await getMemberOrgIds(db, auth.userId) : [];
+      const memberOrgIds = auth.userId ? await getMemberOrgIds(db, auth.userId, auth.impersonation?.orgId) : [];
       const orgIds = isPlatformAdmin ? null : memberOrgIds;
       // Spec 049 Phase 3 — the ladder narrows the memory + node slices; a
       // scope's list is already ∩ access (S2), so handing it over narrows only.
@@ -3197,6 +3197,8 @@ export function createMcpServerInstance(
         orgIds: scopeRes?.kind === 'global' && scopeRes.orgScopeId ? [scopeRes.orgScopeId] : orgIds,
         viewerOrgIds: memberOrgIds,
         orgScopeId: scopeRes?.kind === 'global' ? scopeRes.orgScopeId : null,
+        // Same bound as the GraphQL surface: an impersonated session reads only its one org.
+        impersonationOrgId: auth.impersonation?.orgId ?? null,
       };
 
       const { hits, degraded } = await globalSearch(
@@ -3955,7 +3957,7 @@ export function createMcpServerInstance(
       db.agent.findMany({ where: { id: { in: scopes.map((s) => s.agentId).filter((x): x is string => !!x) } }, select: { id: true, urn: true } }),
       db.app.findMany({ where: { id: { in: scopes.map((s) => s.appId).filter((x): x is string => !!x) } }, select: { id: true, urn: true } }),
     ]);
-    const readable = accessible === null ? null : new Set(accessible);
+    const readable = new Set(accessible);
     const urnOf = { org: new Map(orgs.map((o) => [o.id, o.urn])), agent: new Map(agents.map((a) => [a.id, a.urn])), app: new Map(apps.map((a) => [a.id, a.urn])) };
     return scopes.map((s) => {
       const kind = s.appId ? 'app' : s.agentId ? 'agent' : 'org';
@@ -3963,7 +3965,7 @@ export function createMcpServerInstance(
       const ownerUrn = urnOf[kind].get(ownerId);
       const ownerLabel = ownerUrn ? safeEmitEntityUrnV2(kind, ownerUrn) : ownerId;
       const mine = joins.filter((j) => j.scopeId === s.id);
-      const shown = mine.filter((j) => readable === null || readable.has(j.memoryId));
+      const shown = mine.filter((j) => readable.has(j.memoryId));
       const hidden = mine.length - shown.length;
       const lines = [
         `**${s.name}** — ${kind === 'org' ? 'organization' : kind}-owned by ${ownerLabel} · id ${s.id}` + (s.description ? ` — ${s.description}` : ''),
@@ -4187,7 +4189,7 @@ export function createMcpServerInstance(
     };
     return rows.map((r) => {
       const ch = channels.get(r.channelId);
-      const readable = !!ch && (accessible === null || accessible.includes(ch.memoryId));
+      const readable = !!ch && accessible.includes(ch.memoryId);
       const channel = readable ? `${ch!.name} (${ch!.loc})` : `channel ${r.channelId} (host memory not readable to you)`;
       return `- ${channel} ← ${attendeeOf(r)} — ${r.role}${r.mentionOnly ? ', mention-only' : ''}${r.installDefault ? ', install default' : ''}\n  owner: ${r.appId ? `App ${r.appId}` : `organization ${r.organizationId}`} · id ${r.id}${r.description ? `\n  ${r.description}` : ''}`;
     });

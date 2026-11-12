@@ -87,6 +87,7 @@ import { modelGroupMutations, modelGroupQueries } from './resolvers.modelGroup.j
 import { agentTickerTemplateFieldResolvers, agentTickerTemplateMutations, agentTickerTemplateQueries } from './resolvers.agentTickerTemplate.js';
 import { deliverySettingsQueries, deliverySettingsMutations } from './resolvers.deliverySettings.js';
 import { appPropertiesMutations, appPropertiesTypeResolvers } from './resolvers.appProperties.js';
+import { chatbotAiConfigMutations, chatbotAiConfigQueries, chatbotAiConfigTypeResolvers } from './resolvers.chatbotAiConfig.js';
 import { untrackedTaskItemMutations, untrackedTaskItemQueries } from './resolvers.untrackedTaskItems.js';
 import { wakeMutations, wakeQueries } from './resolvers.wake.js';
 import { stopSignalMutations, stopSignalQueries } from './resolvers.stopSignal.js';
@@ -159,7 +160,7 @@ export const resolvers = {
   // it rather than replacing it (a bare spread would clobber the AI-config
   // and relation fields).
   // #3125 S1: the App's properties and their revision.
-  App: { ...typeResolvers.App, ...appPropertiesTypeResolvers },
+  App: { ...typeResolvers.App, ...appPropertiesTypeResolvers, ...chatbotAiConfigTypeResolvers },
   Agent: { ...typeResolvers.Agent, ...registerFieldResolvers.Agent, ...agentExtendedByFieldResolvers.Agent, ...agentClonedFromFieldResolvers.Agent, ...agentOfferReadinessFieldResolvers.Agent, ...bootPromptPointerFieldResolvers.Agent, ...agentTickerTemplateFieldResolvers.Agent },
   // #2045: the boot-prompt pointer read fields join the existing blocks.
   AppAgent: { ...typeResolvers.AppAgent, ...bootPromptPointerFieldResolvers.AppAgent },
@@ -194,6 +195,7 @@ export const resolvers = {
   MemoryConfigTemplate: memoryConfigTemplateFieldResolvers.MemoryConfigTemplate,
   MemoryConfigTemplateRule: memoryConfigTemplateFieldResolvers.MemoryConfigTemplateRule,
   Query: {
+    ...chatbotAiConfigQueries,
     ...passkeyQueries,
     ...recoveryQueries,
     ...nodeQueries,
@@ -302,6 +304,7 @@ export const resolvers = {
     ...modelGroupMutations,
     ...deliverySettingsMutations,
     ...appPropertiesMutations,
+    ...chatbotAiConfigMutations,
     ...runTeamSnapshotMutations,
     ...untrackedTaskItemMutations,
     ...stopSignalMutations,

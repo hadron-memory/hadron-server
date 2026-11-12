@@ -150,9 +150,7 @@ export const registerQueries = {
     const empty = { items: [] as RegisterEntry[], total: 0 };
     const scope = await resolveOrgScope(ctx, orgId);
     if (!scope) return empty;
-    const and: Prisma.RegisterEntryWhereInput[] = [{ deletedAt: null }];
-    const readable = await readableRegisterWhere(ctx);
-    if (readable) and.push(readable);
+    const and: Prisma.RegisterEntryWhereInput[] = [{ deletedAt: null }, await readableRegisterWhere(ctx)];
     if (scope.scopedOrgId) {
       and.push({ OR: [{ organizationId: scope.scopedOrgId }, { app: { organizationId: scope.scopedOrgId } }] });
     }
@@ -437,7 +435,7 @@ export const registerFieldResolvers = {
       });
       if (!channel) return null;
       const accessible = await getAccessibleMemoryIds(ctx);
-      return accessible === null || accessible.includes(channel.memoryId) ? channel : null;
+      return accessible.includes(channel.memoryId) ? channel : null;
     },
     /** The attendee's URN — a Worker's `hrn:worker:…` or the Agent's URN; null for "every attendee". */
     attendeeUrn: async (r: RegisterEntry, _: unknown, ctx: Context) => {

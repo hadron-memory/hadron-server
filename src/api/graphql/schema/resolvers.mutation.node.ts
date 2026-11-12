@@ -2309,10 +2309,10 @@ async function withNodeHistoryWrite<T>(ctx: Context, nodeId: string, memoryId: s
 export const nodeMoveOps = {
   async moveWithResult(
     ctx: Context,
-    { sourceRef, targetUrn, targetMemoryRef, requireUnminted, expectedSource, mirrorAfterMove = true, planOnly = false, limit = 100 }: {
+    { sourceRef, targetUrn, targetMemoryRef, requireUnminted, expectedSource, mirrorAfterMove = true, planOnly = false, limit }: {
       sourceRef: string; targetUrn?: string | null; targetMemoryRef?: string | null;
       /** cor:api:190:03: shared validation, no mutation effects. */
-      planOnly?: boolean; limit?: number;
+      planOnly?: boolean; limit?: number | null;
       /** A compound operation may mirror once after its follow-on edits. */
       mirrorAfterMove?: boolean;
       /** #1449/#1591: refuse (NODE_MINTED) when any moved node is minted, under the move's locks (renumber). */
@@ -2359,6 +2359,8 @@ export const nodeMoveOps = {
         let relocated: MoveNodeSubtreeResult['moved'] = [];
         let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
         let warningsWithheld = false;
+        // #3868: the plan's memory URNs, read inside the plan's RepeatableRead snapshot (cor:api:190:03, "true when answered").
+        let planMemoryUrns = new Map<string, string>();
         // #2622: a move rebases whole loc subtrees, so it is a chat-message
         // writer like any other — the #992 conflict surfaces typed here, once,
         // for every move caller (moveNode + the spec-corpus relocation).
@@ -2382,6 +2384,8 @@ export const nodeMoveOps = {
             // Both helpers below still run for their gates and the source
             // revalidation; their re-acquisitions are re-entrant no-ops.
             if (planOnly) {
+              const memories = await tx.memory.findMany({ where: { id: { in: [source.memoryId, destMemoryId] } }, select: { id: true, urn: true } });
+              planMemoryUrns = new Map(memories.map(m => [m.id, m.urn]));
               await assertLocWritable(tx, destMemoryId, [destLoc], 'create under');
             } else {
               await acquireLockSet(tx, [
@@ -2410,7 +2414,7 @@ export const nodeMoveOps = {
             // fails loud on a destination collision).
             if (planOnly) {
               const readable = await getAccessibleMemoryIds(txCtx, destMemoryId);
-              warningsWithheld = readable !== null && !readable.includes(destMemoryId);
+              warningsWithheld = !readable.includes(destMemoryId);
             }
             const result = await moveNodeSubtree(tx, {
               source,
@@ -2434,10 +2438,10 @@ export const nodeMoveOps = {
           { timeout: 120_000, ...(planOnly ? { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead } : {}) },
         ));
         if (planOnly) {
-          const memories = await ctx.db.memory.findMany({ where: { id: { in: [source.memoryId, destMemoryId] } }, select: { id: true, urn: true } });
-          const urns = new Map(memories.map(m => [m.id, m.urn]));
+          const urns = planMemoryUrns;
           const ordered = relocated.sort((a, b) => a.previousLoc < b.previousLoc ? -1 : a.previousLoc > b.previousLoc ? 1 : 0);
-          const bound = Math.max(1, Math.min(1000, Math.trunc(limit)));
+          // #3579: omitted and explicit null both mean the SDL default of 100; the response is clamped to 1..1000.
+          const bound = Math.max(1, Math.min(1000, Math.trunc(limit ?? 100)));
           return { node: { ...moved, moveLinkWarnings: linkWarnings }, relocated,
             plan: {
               nodes: ordered.slice(0, bound).map(n => ({ id: n.id,
@@ -4046,7 +4050,7 @@ export const nodeMutations = {
     // cross-memory edges gated by #783) — moveNodeSubtree handles both.
     /** cor:api:190:03: the real move's resolution, gates and checks, without writes. */
     planNodeMove: async (_: unknown,
-      args: { sourceRef: string; targetUrn?: string | null; targetMemoryRef?: string | null; limit?: number },
+      args: { sourceRef: string; targetUrn?: string | null; targetMemoryRef?: string | null; limit?: number | null },
       ctx: Context,
     ) => (await nodeMoveOps.moveWithResult(ctx, { ...args, planOnly: true })).plan,
 
@@ -4805,7 +4809,7 @@ export const nodeMutations = {
       const node = await ctx.db.node.findUnique({ where: { id: revisionRef.nodeId } });
       if (!node || node.deletedAt) throw notFound();
       const accessible = await getAccessibleMemoryIds(ctx);
-      const canRead = (memoryId: string) => accessible === null || accessible.includes(memoryId);
+      const canRead = (memoryId: string) => accessible.includes(memoryId);
       if (!canRead(node.memoryId) || !canRead(revisionRef.memoryId ?? node.memoryId)) throw notFound();
       await requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, node.memoryId);
       const revision = await ctx.db.nodeRevision.findUnique({ where: { id: revisionId } });
@@ -5166,7 +5170,7 @@ export const nodeMutations = {
       });
       if (!node || node.deletedAt) throw notFound();
       const accessible = await getAccessibleMemoryIds(ctx);
-      const canRead = (memId: string) => accessible === null || accessible.includes(memId);
+      const canRead = (memId: string) => accessible.includes(memId);
       if (!canRead(node.memoryId) || !canRead(revision.memoryId ?? node.memoryId)) {
         throw notFound();
       }
@@ -5252,7 +5256,7 @@ export const nodeMutations = {
         throw new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND', nodeRef } });
       }
       const accessibleIds = await getAccessibleMemoryIds(ctx);
-      if (accessibleIds !== null && !accessibleIds.includes(node.memoryId)) {
+      if (!accessibleIds.includes(node.memoryId)) {
         // Denied and not-found are indistinguishable on purpose (nodeById parity).
         throw new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND', nodeRef } });
       }
