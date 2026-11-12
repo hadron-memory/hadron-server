@@ -311,7 +311,13 @@ export const hostOperationMutations = {
           await recordHostKeyUse(tx, host, 'report', { operationId: op.id });
           return op;
         }
-        throw taskError('HOST_OPERATION_ALREADY_REPORTED', `This operation was already reported ${op.status}.`, { id: op.id });
+        // #4062: the recorded outcome in extensions.status, spelled as the HostOperationStatus enum (the spelling of the
+        // outcome the host sends), so a client reads the code, never the message. The message text is today's, pinned
+        // by resolvers.hostOperationAlreadyReported4062.test.ts while hadron-cli's poller still reads it (cli#1817).
+        throw taskError('HOST_OPERATION_ALREADY_REPORTED', `This operation was already reported ${op.status}.`, {
+          id: op.id,
+          status: op.status === 'succeeded' ? 'SUCCEEDED' : 'FAILED',
+        });
       }
       if (op.status !== 'collected') {
         throw taskError('HOST_OPERATION_NOT_COLLECTED', 'Collect an operation before reporting it.', { id: op.id });
