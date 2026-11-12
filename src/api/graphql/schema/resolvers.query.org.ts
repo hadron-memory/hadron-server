@@ -98,7 +98,7 @@ async function callerCanOpenResource(ctx: Context, resolved: ResolvedResource): 
  * impersonation only the shared org's Apps. A platform admin may read any ORG App through the org gate, so its scope is every org App plus the
  * user-owned Apps it owns or is a member of (a user-owned App has no admin arm); a caller with no user gets nothing.
  */
-async function taskAppScopeFor(ctx: Context, isPlatformAdmin: boolean): Promise<Record<string, unknown> | undefined> {
+export async function taskAppScopeFor(ctx: Context, isPlatformAdmin: boolean): Promise<Record<string, unknown> | undefined> {
   // A bound worker is judged by `resolveTaskActor` for its OWN App only, before any person or platform-admin arm, so
   // its candidate set is that one App however much the holding person could otherwise read.
   const workerId = currentActor().workerId;
@@ -133,6 +133,15 @@ async function taskAppScopeFor(ctx: Context, isPlatformAdmin: boolean): Promise<
   ];
   if (ctx.impersonation) and.push({ organizationId: ctx.impersonation.orgId });
   return { AND: and };
+}
+
+/**
+ * #3945 / #3972: the per-kind task read gate as the search's per-App closure: `mayReadAppTasks` on the FULL request context
+ * (so an impersonated session is confined to its shared org by `isAppParticipant`, cor:acl:100:03 / cor:acl:040:07), minus
+ * the ruled userless carve-out (an App key or a userless run gets no task hits even where the direct read admits it).
+ */
+export function taskReadGateFor(ctx: Context): (appId: string) => Promise<boolean> {
+  return async (appId) => ((isRunPrincipal(ctx) && !ctx.userId) || appKeyCaller(ctx) ? false : mayReadAppTasks(ctx, appId));
 }
 
 export const orgQueries = {
@@ -451,8 +460,7 @@ export const orgQueries = {
         // #3945: the per-kind task read gate, reused as-is, minus the ruled userless carve-out: an App key or a userless run
         // gets no task hits even where the direct read would admit it (every admitting arm of resolveTaskActor needs a user).
         taskAppScope: await taskAppScopeFor(ctx, isPlatformAdmin),
-        taskReadGate: async (appId) =>
-          (isRunPrincipal(ctx) && !ctx.userId) || appKeyCaller(ctx) ? false : mayReadAppTasks(ctx, appId),
+        taskReadGate: taskReadGateFor(ctx),
       };
       const res = await runGlobalSearch(ctx.db, { query, entityTypes, fields, limit, offset }, principal);
       if (!scopeRes) return res;
