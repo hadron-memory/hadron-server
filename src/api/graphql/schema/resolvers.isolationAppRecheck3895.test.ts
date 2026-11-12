@@ -57,9 +57,10 @@ async function clearAcrossWorkerLock(move: boolean) {
     const { rows: [{ pid }] } = await blocker.query('SELECT pg_backend_pid() AS pid');
     await blocker.query('SELECT id FROM workers WHERE id = $1 FOR UPDATE', [workerId]);
     let settled = false;
-    pending = M.clearWorkerIsolation({}, { workerRef: workerId }, context())
+    const outcome: Promise<{ value?: any; error?: any }> = M.clearWorkerIsolation({}, { workerRef: workerId }, context())
       .then((value: unknown) => ({ value }), (error: unknown) => ({ error }))
       .finally(() => { settled = true; });
+    pending = outcome;
     const deadline = Date.now() + 5000;
     let observed = false;
     while (!settled && Date.now() < deadline) {
@@ -78,7 +79,7 @@ async function clearAcrossWorkerLock(move: boolean) {
       expect(changed.rows).toEqual([{ app_id: destinationId }]);
     }
     await blocker.query('COMMIT');
-    return await pending;
+    return await outcome;
   } finally {
     await blocker.query('ROLLBACK');
     await blocker.end();
