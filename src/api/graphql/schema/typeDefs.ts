@@ -13805,6 +13805,13 @@ export const typeDefs = `#graphql
     and not the **team chat**, which is the App's shared channel.
 
     Accepts the entity's ID or URN.
+
+    #4039 (hrn:node:hadronmemory.com:specs:cor:cht:020:02): with no
+    conversationName, the chat opens in the first ordinary conversation, in the
+    author's order (Node.seq, then loc), whose data.entryCondition holds for the
+    starter; a conversation with no condition holds. A condition that cannot be
+    evaluated refuses with ENTRY_CONDITION_FAILED (extensions reason, messageId
+    and detail), and nothing is created. A named start never checks a condition.
     """
     # 017: scope defaults to private (FR-003). A shared request
     # requires a JWT user with an AppMember row in some App that

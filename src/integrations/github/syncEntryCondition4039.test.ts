@@ -56,7 +56,7 @@ describe('#4039 git sync refuses an invalid entry condition (9b)', () => {
     writeFrontmatterNode(join(repo(), 'plain.md'), { name: 'Plain' }, 'body');
     writeFrontmatterNode(join(repo(), 'conversations', 'welcome.md'), {
       name: 'welcome', data: { stageOrder: ['s1'], entryCondition: { '==': [{ var: 'chat.message_count' }, 0] } },
-    }, 'body');
+    } as never, 'body');
     const refused = await syncGraphFromGithub(graphOf());
     expect(String(refused.error)).toContain('invalid entry condition');
     expect(String(refused.error)).toContain('SCOPE_NOT_AVAILABLE_AT_START');
@@ -64,7 +64,7 @@ describe('#4039 git sync refuses an invalid entry condition (9b)', () => {
 
     writeFrontmatterNode(join(repo(), 'conversations', 'welcome.md'), {
       name: 'welcome', data: { stageOrder: ['s1'], entryCondition: { '!': [{ var: 'memory.name' }] } },
-    }, 'body');
+    } as never, 'body');
     expect((await syncGraphFromGithub(graphOf())).error).toBeUndefined();
     const stored = await db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc: 'conversations:welcome', memoryId } } });
     expect((stored.data as Record<string, unknown>).entryCondition).toEqual({ '!': [{ var: 'memory.name' }] });
