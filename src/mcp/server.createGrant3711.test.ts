@@ -10,7 +10,7 @@ import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 import { upsertPlatformActions } from '../lib/grants/actions.js';
-import { dropTestActions, seedWorld, type World } from '../lib/grants/grantFixtures3668.js';
+import { dropTestActions, seedReadableNodes, seedWorld, type World } from '../lib/grants/grantFixtures3668.js';
 import { createTestableMcpServer } from './server.js';
 import { runAsActor } from '../lib/requestActor.js';
 import type { AuthContext } from '../middleware/auth.js';
@@ -22,11 +22,12 @@ beforeAll(() => { vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'true'); });
 afterAll(async () => { await cleanDb(db); await dropTestActions(); vi.unstubAllEnvs(); });
 
 let w: World;
+let pubNode: string; // #4067: a node the requester can read
 let managerId: string; let memberId: string;
 let holderWorkerId: string;
 
 const input = (over: Record<string, unknown> = {}) => ({
-  app: w.appId, action: 'schedule.create', values: { entryNode: generateId() }, holderKind: 'WORKER', holderRef: holderWorkerId, reason: 'nightly digest', ...over,
+  app: w.appId, action: 'schedule.create', values: { entryNode: pubNode }, holderKind: 'WORKER', holderRef: holderWorkerId, reason: 'nightly digest', ...over,
 });
 function server(over: Partial<AuthContext> & { userId?: string } = {}) {
   const auth = { userId: managerId, roles: ['READER'], clientId: `user:${managerId}`, appId: w.appId, organizationId: w.orgId, ...over } as AuthContext;
@@ -37,6 +38,7 @@ const rows = () => db.$queryRawUnsafe<any[]>('SELECT * FROM grants');
 beforeEach(async () => {
   await cleanDb(db);
   w = await seedWorld();
+  [pubNode] = await seedReadableNodes(w.orgId);
   await upsertPlatformActions(db);
   memberId = w.userId; managerId = w.user2Id;
   await db.orgMember.create({ data: { organizationId: w.orgId, userId: memberId, role: 'CONTRIBUTOR' } });
