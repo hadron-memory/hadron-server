@@ -304,6 +304,45 @@ describe('the outcome matrix', () => {
     spy.mockRestore();
   });
 
+  it.each([[undefined], [null], [0], [false], ['']])('a falsy internal throw (%s) is still logged and rethrown, never a provider status', async (thrown) => {
+    const cfg = await mkConfig();
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const deps: AiConfigTestDeps = {
+        generate: async () => ({ text: 'OK', tokensIn: 1, tokensOut: 1, provider: 'openai', model: 'gpt-4o' }),
+        // the classifier reads result.calls: a getter that throws a falsy value
+        generateChat: (async () => ({ get calls(): never { throw thrown; }, tokensIn: 7, tokensOut: 3 })) as never,
+        now: () => Date.now(), timeoutMs: 5_000, preflight: assertModelBuildable,
+      };
+      await expect(testAiServiceConfig(ctxFor(admin.id), cfg.id, {}, deps, true)).rejects.toBe(thrown);
+      expect(spy.mock.calls.some((c) => String(c[0]).includes('chat probe internal error'))).toBe(true);
+      expect(await db.usageEvent.count({ where: { type: 'ai-config-test-chat' } })).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('the logged internal error never carries the key, in the name or the message', async () => {
+    const cfg = await mkConfig();
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const deps: AiConfigTestDeps = {
+        generate: async () => ({ text: 'OK', tokensIn: 1, tokensOut: 1, provider: 'openai', model: 'gpt-4o' }),
+        generateChat: (async () => ({
+          get calls(): never { const e = new Error(`boom ${SAVED_KEY}`); e.name = `Name-${SAVED_KEY}`; throw e; },
+          tokensIn: 1, tokensOut: 1,
+        })) as never,
+        now: () => Date.now(), timeoutMs: 5_000, preflight: assertModelBuildable,
+      };
+      await expect(testAiServiceConfig(ctxFor(admin.id), cfg.id, {}, deps, true)).rejects.toThrow();
+      const logged = spy.mock.calls.filter((c) => String(c[0]).includes('chat probe internal error'));
+      expect(logged).toHaveLength(1);
+      expect(JSON.stringify(logged[0])).not.toContain(SAVED_KEY);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('a provider throw stays a closed provider failure and logs no internal error', async () => {
     const cfg = await mkConfig();
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});

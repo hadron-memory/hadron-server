@@ -645,11 +645,13 @@ export async function testAiServiceConfig(
     // is logged (scrubbed, name and message only) and rethrown AFTER the usage
     // row and the reservation settle, so it can neither read as a provider
     // failure nor leak the reservation (#4021 BLIND replacement seat, P2).
-    let internal: unknown = null;
+    let hasInternal = false;
+    let internal: unknown;
     let tools: ReturnType<typeof respondToolDefinition> | null = null;
     try {
       tools = respondToolDefinition({});
     } catch (e) {
+      hasInternal = true;
       internal = e;
     }
     if (tools) {
@@ -672,15 +674,18 @@ export async function testAiServiceConfig(
         try {
           status = classifyChatProbe(result);
         } catch (e) {
+          hasInternal = true;
           internal = e;
         }
       }
     }
-    if (internal) {
+    if (hasInternal) {
+      // Name and message are both scrubbed and bounded: either can carry a secret.
+      const name = scrub(String((internal as Error | null | undefined)?.name ?? 'Error'), secrets).slice(0, 80);
       console.error(
         '[testAiServiceConfig] chat probe internal error:',
-        (internal as Error)?.name ?? 'Error',
-        scrub(String((internal as Error)?.message ?? internal), secrets),
+        name,
+        scrub(String((internal as Error | null | undefined)?.message ?? internal), secrets).slice(0, 500),
       );
     }
     const spentIn = result?.tokensIn ?? 0;
@@ -699,7 +704,7 @@ export async function testAiServiceConfig(
     if (quotaScope && chatReservation) {
       await settleReservation(ctx.db, 'org', quotaScope, 'llm.tokens', spentIn + spentOut - chatReserve, chatReservation);
     }
-    if (internal) throw internal;
+    if (hasInternal) throw internal;
     return status;
   }
 
