@@ -221,7 +221,7 @@ fi
 #                 else counts as human: a misjudged wake costs one lossy compaction, a
 #                 misjudged human costs their draft.
 # If the check cannot be made (no worker name, the terminal read fails or reports an
-# unknown state, the transcript is missing or unreadable) it fails toward NOT killing.
+# unknown or stale state, the transcript is missing, unreadable or has a malformed record) it fails toward NOT killing.
 # A skip starts no cooldown and writes nothing; each skip episode posts ONE line telling
 # the humans a shed is due (team chat). The marker is cleared when a fire finds no human,
 # and expires after 6 hours so a long-quiet marker cannot silence a new episode.
@@ -235,12 +235,17 @@ human_presence() {
   [ -n "$who" ] || { echo "unreadable:no worker name from whoami"; return; }
   state=$(timeout 15 hadron team worker get "$who" --json 2>/dev/null) || { echo "unreadable:terminal read failed"; return; }
   prompt=$(printf '%s' "$state" | jq -r '.terminal.prompt // empty' 2>/dev/null)
+  # A stale report is an old observation, not the live input box: an empty prompt in it proves nothing.
+  [ "$(printf '%s' "$state" | jq -r '.terminal.stale // false' 2>/dev/null)" = "true" ] && { echo "unreadable:terminal report is stale"; return; }
   case "$prompt" in
     not_empty) echo typing; return ;;
     empty) ;;
     *) echo "unreadable:terminal prompt state not reported"; return ;;
   esac
   { [ -n "$transcript" ] && [ -r "$transcript" ]; } || { echo "unreadable:transcript missing"; return; }
+  # `fromjson?` below drops a record that does not parse, which would read as "no human": so every
+  # non-blank record must parse first, or the history cannot be established.
+  timeout 30 jq -R 'select(length > 0) | fromjson' "$transcript" >/dev/null 2>&1 || { echo "unreadable:transcript has an unparseable record"; return; }
   out=$(timeout 30 jq -Rr 'fromjson? | select(.type == "user" and .origin.kind == "human")
       | ((.message.content | if type == "string" then . elif type == "array" then ([.[] | select(.type == "text") | .text] | join("\n")) else "" end) // "") as $t
       | select($t != "" and ($t | test("^\\s*(<pasted_content[^>]*>\\s*)?\\[hadron (tick|task|chat)\\]|^You just went through an AUTOMATIC SHED") | not))
