@@ -49,7 +49,7 @@ describe('phase-1 retirement', () => {
  });
  it('legacy isolation data cannot override NO_TASK, an active task, or PAUSED', async () => {
   // Model the prior-schema read result, including a column the new select no longer requests.
-  // The populated retained-row proof exercises the stored data separately.
+  // #3701 dropped the isolation columns; the stored-row proof below covers the surviving fields.
   const now = new Date();
   const fake = {
    app: { findUnique: async () => ({ teamPausedAt: null }) },
