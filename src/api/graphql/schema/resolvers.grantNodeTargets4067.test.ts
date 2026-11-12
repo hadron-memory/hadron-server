@@ -53,15 +53,15 @@ async function post(key: string, session: string | null, query: string, variable
 }
 const CREATE = 'mutation($i:CreateGrantInput!){createGrant(input:$i){id action values}}';
 const rows = () => db.$queryRawUnsafe<any[]>('SELECT * FROM grants');
-const base_ = (values: unknown, over: Record<string, unknown> = {}) => ({
+const grantInput = (values: unknown, over: Record<string, unknown> = {}) => ({
   action: 'schedule.create', values: { entryNode: values }, holderKind: 'WORKER', holderRef: holderWorkerId, reason: 'nightly digest', ...over,
 });
-const asWorker = (v: unknown) => post(memberKey, workerSession, CREATE, { i: { ...base_(v), holderRef: w.workerId } });
-const asManager = (v: unknown) => post(managerKey, null, CREATE, { i: { ...base_(v), appRef: w.appId } });
+const asWorker = (v: unknown) => post(memberKey, workerSession, CREATE, { i: { ...grantInput(v), holderRef: w.workerId } });
+const asManager = (v: unknown) => post(managerKey, null, CREATE, { i: { ...grantInput(v), appRef: w.appId } });
 const asMcp = async (v: unknown) => {
   const auth = { userId: managerId, roles: ['READER'], clientId: `user:${managerId}`, appId: w.appId, organizationId: w.orgId } as AuthContext;
   const s = createTestableMcpServer(auth, { sessionId: `g-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
-  return s.callToolText('hadron_create_grant', { app: w.appId, ...base_(v) });
+  return s.callToolText('hadron_create_grant', { app: w.appId, ...grantInput(v) });
 };
 
 beforeEach(async () => {
