@@ -5,11 +5,10 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb, chatNodeByLoc } from '../../../test/helpers.js';
+import { cleanDb, chatNodeByLoc, createDbAgentOrgGrant } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
 import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
-import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -167,6 +166,34 @@ describe('next_stage check (#4035)', () => {
     expect(moved.stageTransitioned).toBe(true);
     expect(moved.newStageName).toBe('step2');
     expect(moved.rejectedNextStage ?? null).toBeNull();
+    expect((await engineState(chat.chatId)).stageName).toBe('step2');
+  });
+
+  it('pin 6 (Baloo P2 on #4052): a shared App chat checks next_stage too; a known stage still moves', async () => {
+    await seedNodes(flow(['step1', 'step2']));
+    const app = await db.app.create({ data: { organizationId: orgA.id, name: 'Workspace', urn: 'test-org:workspace' } });
+    await db.appMember.create({ data: { appId: app.id, userId: adminUser.id, role: 'admin' } });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    await createDbAgentOrgGrant(db, orgA.id, agent.id);
+    const chat = await resolvers.Mutation.startChat({}, { agentId: agent.id, scope: 'shared' }, userCtx(adminUser.id));
+    const home = await db.memory.findUniqueOrThrow({ where: { id: (await chatNodeByLoc(db, chat.chatId, { includeDeleted: true }))!.memoryId } });
+    expect(home.sharedMemoryOfAgentId).toBe(agent.id);
+    expect(home.userMemoryOfAgentId).toBeNull();
+    expect(nextStageProp(chat.tools).enum).toEqual(['step1', 'step2', null]);
+
+    const bad = await resolvers.Mutation.processChatResponse(
+      {}, { chatId: chat.chatId, toolResponse: { message: 'x', next_stage: 'nope', onTrack: true } }, userCtx(adminUser.id),
+    );
+    expect(bad.stageTransitioned).toBe(false);
+    expect(bad.rejectedNextStage).toBe('nope');
+    const after = await engineState(chat.chatId);
+    expect(after.stageName).toBe('step1');
+    expect((after.routeHistory as unknown[]).length).toBe(1);
+
+    const ok = await resolvers.Mutation.processChatResponse(
+      {}, { chatId: chat.chatId, toolResponse: { message: 'y', next_stage: 'step2', onTrack: true } }, userCtx(adminUser.id),
+    );
+    expect(ok.stageTransitioned).toBe(true);
     expect((await engineState(chat.chatId)).stageName).toBe('step2');
   });
 

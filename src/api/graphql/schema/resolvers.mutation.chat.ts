@@ -1553,14 +1553,28 @@ export const chatMutations = {
       let turnSysMemId: string | null = null;
       let turnScript: ChatScript | null = null;
       {
+        // The Agent is resolved as sendChatMessage does: shared or user home memory, the legacy linked-memory
+        // fallback, and an App chat's Agent only while installed and licensed.
         const turnMemory = await ctx.db.memory.findUnique({ where: { id: chatNode.memoryId } });
-        const turnAgentId = turnMemory?.userMemoryOfAgentId;
-        if (turnAgentId) {
-          const turnAgent = await ctx.db.agent.findUnique({ where: { id: turnAgentId } });
-          turnSysMemId = ((turnAgent as any)?.systemMemoryId as string | null) ?? null;
-          if (turnSysMemId) {
-            turnScript = await loadChatScript(ctx.db, turnSysMemId, (chatData.startedWithRevision as string | null) ?? null);
-          }
+        type TurnAgent = { id: string; systemMemoryId?: string | null };
+        let turnAgent = null as TurnAgent | null;
+        if (turnMemory?.sharedMemoryOfAgentId || turnMemory?.userMemoryOfAgentId) {
+          turnAgent = await ctx.db.agent.findUnique({
+            where: { id: (turnMemory.sharedMemoryOfAgentId ?? turnMemory.userMemoryOfAgentId)! },
+          }) as TurnAgent | null;
+        } else if (turnMemory) {
+          const legacyAgents = await ctx.db.agent.findMany({
+            where: { deletedAt: null, memoryItems: { some: { memoryId: chatNode.memoryId } } },
+          });
+          turnAgent = (legacyAgents.find((a) => (a as any).systemMemoryId) ?? null) as TurnAgent | null;
+        }
+        if (turnMemory?.class === 'app' && turnAgent) {
+          const installed = turnMemory.appId && await isAgentInstalledAndLicensed(ctx.db, turnMemory.appId, turnAgent.id);
+          if (!installed) turnAgent = null;
+        }
+        turnSysMemId = turnAgent?.systemMemoryId ?? null;
+        if (turnSysMemId) {
+          turnScript = await loadChatScript(ctx.db, turnSysMemId, (chatData.startedWithRevision as string | null) ?? null);
         }
       }
       const stageOrder = turnScript
