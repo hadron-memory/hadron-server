@@ -147,6 +147,14 @@ describe('#4043 controls', () => {
     expect(sent.tools).toBeNull();
   });
 
+  it('shared chat retains its empty result for a soft-deleted Agent', async () => {
+    const started = await start('shared');
+    await db.agent.update({ where: { id: agentId }, data: { deletedAt: new Date() } });
+    const sent = await M.sendChatMessage({}, { chatId: started.chatId, userMessage: 'shared history' }, ctx());
+    expect(sent.systemMessage).toBe('');
+    expect(sent.tools).toBeNull();
+  });
+
   it('private start selects a licensed App rather than the earlier retained unlicensed install', async () => {
     await foreignHome();
     await loseLicence('revoked');
