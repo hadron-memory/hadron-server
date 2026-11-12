@@ -69,13 +69,27 @@ async function resolveOrDeny<T>(lookup: () => Promise<T>): Promise<T> {
   }
 }
 
-/** Project one row. `memoryUrn` is withheld from anyone who may not know that a personal/private memory is granted. */
-function project(row: GrantRow, memory: { urn: string; class: string; userId: string | null } | null, viewerId: string | undefined) {
+/** The memory fields a projection reads: the grant gate's own select (so the mark is the gate's answer) plus the URN. */
+const PROJECTION_MEMORY_SELECT = { ...GRANT_MEMORY_SELECT, urn: true } as const;
+type ProjectionMemory = Prisma.MemoryGetPayload<{ select: typeof PROJECTION_MEMORY_SELECT }>;
+
+/**
+ * Project one row. `memoryUrn` is withheld from anyone who may not know that a personal/private memory is granted.
+ *
+ * #4022 (V79, hrn:node:hadronmemory.com:specs:cor:agt:010:01): `notEffective` is true on an UNREVOKED row whose target
+ * memory {@link grantTargetRefusal} refuses now, and `notEffectiveReason` is that function's answer. It is the SAME
+ * function the write doors call, judged live at read, derived and never stored, so the mark goes when the memory
+ * qualifies again. Where the memory is concealed (`memoryUrn` null) both are null: a reason would describe a memory the
+ * caller may not know exists. A revoked row is not marked: `revokedAt` already says it does nothing.
+ */
+export function project(row: GrantRow, memory: ProjectionMemory | null, app: AppRow, viewerId: string | undefined) {
   const visible = memory !== null && (!isStrictOwnerClass(memory.class) || isStrictOwner({ userId: viewerId }, memory.userId));
+  const refusal = visible && row.revokedAt === null ? grantTargetRefusal(app, memory!) : null;
   return {
     id: row.id, appId: row.appId, memoryUrn: visible ? safeCanonicalUrn('memory', memory!.urn) : null,
     prefix: row.prefix, registerNodeUrn: row.registerNodeUrn, grantedBy: row.grantedBy,
     createdAt: row.createdAt, revokedAt: row.revokedAt, revokedBy: row.revokedBy,
+    notEffective: visible ? refusal !== null : null, notEffectiveReason: refusal,
   };
 }
 
@@ -151,8 +165,8 @@ export const appWriteGrantMutations = {
       if (!live) throw e;
       row = live;
     }
-    const memory = await ctx.db.memory.findUnique({ where: { id: memoryId }, select: { urn: true, class: true, userId: true } });
-    return project(row, memory, actorId);
+    const memory = await ctx.db.memory.findUnique({ where: { id: memoryId }, select: PROJECTION_MEMORY_SELECT });
+    return project(row, memory, app0, actorId);
   },
 
   revokeAppMemoryWriteGrant: async (_: unknown, { id, instruction }: { id: string; instruction?: ActInstruction | null }, ctx: Context) => {
@@ -191,8 +205,8 @@ export const appWriteGrantMutations = {
       },
     );
     const row = await ctx.db.appMemoryWriteGrant.findUniqueOrThrow({ where: { id } });
-    const memory = await ctx.db.memory.findUnique({ where: { id: row.memoryId }, select: { urn: true, class: true, userId: true } });
-    return project(row, memory, admission.userId);
+    const memory = await ctx.db.memory.findUnique({ where: { id: row.memoryId }, select: PROJECTION_MEMORY_SELECT });
+    return project(row, memory, app0, admission.userId);
   },
 };
 
@@ -207,11 +221,11 @@ export const appWriteGrantQueries = {
     const rows = await ctx.db.appMemoryWriteGrant.findMany({
       where: { appId, ...(input.includeRevoked ? {} : { revokedAt: null }) },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      include: { memory: { select: { urn: true, class: true, userId: true } } },
+      include: { memory: { select: PROJECTION_MEMORY_SELECT } },
     });
     // A grant on a personal or private memory tells a reader that the memory exists and is delegated: its owner only.
     return rows
       .filter((row) => !isStrictOwnerClass(row.memory.class) || isStrictOwner({ userId: actorId }, row.memory.userId))
-      .map((row) => project(row, row.memory, actorId));
+      .map((row) => project(row, row.memory, app, actorId));
   },
 };

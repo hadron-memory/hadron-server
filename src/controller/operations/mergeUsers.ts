@@ -379,6 +379,12 @@ async function assertSourceActorRowsFresh(
         WHERE admin_user_id = ${sourceUserId} OR target_user_id = ${sourceUserId} OR ended_by = ${sourceUserId}
       UNION ALL
       SELECT 'worker:' || id || ':' || coalesce(retired_at::text, '') FROM workers WHERE retired_by = ${sourceUserId}
+      UNION ALL
+      -- #3690 PR 2 (the section 10 carry of #3792): a create that committed while this merge waited at the source's anchor left a
+      -- grant row naming the source that this snapshot cannot see, and the rewrite below would skip it.
+      SELECT 'grant:' || id FROM grants
+        WHERE user_id = ${sourceUserId} OR issuer_user_id = ${sourceUserId} OR requested_by_user_id = ${sourceUserId}
+           OR verified_by = ${sourceUserId} OR revoked_by = ${sourceUserId}
     ) AS source_actor_rows ORDER BY row_key`;
   const snapshot = await tx.$queryRaw<Array<{ row_key: string }>>(rows);
   const fresh = await db.$queryRaw<Array<{ row_key: string }>>(rows);

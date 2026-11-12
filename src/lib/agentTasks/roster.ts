@@ -34,7 +34,7 @@
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { teamPlacement } from '../workerTeamChoice.js';
 import { tierOf, type ModelTier } from './family.js';
-import type { AvailabilityRecord } from './availability.js';
+import type { AvailabilityRecord, WorkerAvailabilityView } from './availability.js';
 import { loadWorkerWorkStates, type WorkerWorkState } from './matcher.js';
 import { alarmEpisodeKey, endedAlarmEpisodes, loadStallInputs, unreactedChildren } from './stall.js';
 
@@ -69,6 +69,12 @@ export type RosterEntry = {
   free: boolean;
   /** Its own availability record, when it makes the worker unavailable now. */
   unavailable: { reason: string | null; until: Date | null } | null;
+  /**
+   * #3865 — the worker's stored availability record, whether or not it is in effect, with the verdict
+   * (cor:agt:060:02). Null when it has none. The roster's `availability` field projects it, so "stale or
+   * deliberate" is answerable from the roster: the reason, who set it and when.
+   */
+  availabilityRecord: { row: NonNullable<WorkerAvailabilityView['own']>; inEffect: boolean } | null;
   /** Families it could run as that are unavailable in the App now. */
   unavailableFamilies: string[];
   startedTaskIds: string[];
@@ -212,6 +218,7 @@ export async function loadTeamRoster(db: Db, appId: string, now: Date): Promise<
         freeFamilies: w.freeFamilies,
         free: w.free,
         unavailable,
+        availabilityRecord: w.availability.own ? { row: w.availability.own, inEffect: w.availability.ownInEffect } : null,
         unavailableFamilies,
         startedTaskIds: startedIds,
         pendingTaskIds: pendingIds,

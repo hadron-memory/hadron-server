@@ -36,10 +36,10 @@ import { forbiddenError, unauthenticatedError } from '../../../lib/refusals.js';
  */
 type ChannelWithHostUrn = Channel & { memory?: { urn: string } | null };
 
-/** The caller's readable-memory clause, or null for the unrestricted principal. */
-async function readableMemoryWhere(ctx: Context): Promise<Prisma.MemoryWhereInput | null> {
+/** The caller's readable-memory clause: always a list-backed filter, never an unrestricted principal (#3921). */
+async function readableMemoryWhere(ctx: Context): Promise<Prisma.MemoryWhereInput> {
   const accessible = await getAccessibleMemoryIds(ctx);
-  return accessible === null ? null : { id: { in: accessible } };
+  return { id: { in: accessible } };
 }
 
 async function readableChannel(ctx: Context, ref: string): Promise<Channel | null> {
@@ -51,7 +51,7 @@ async function readableChannel(ctx: Context, ref: string): Promise<Channel | nul
   const row = await ctx.db.channel.findFirst({ where: { id, deletedAt: null } });
   if (!row) return null;
   const accessible = await getAccessibleMemoryIds(ctx);
-  if (accessible !== null && !accessible.includes(row.memoryId)) return null;
+  if (!accessible.includes(row.memoryId)) return null;
   return row;
 }
 
@@ -73,9 +73,7 @@ export const channelQueries = {
     const empty = { items: [] as Channel[], total: 0 };
     const scope = await resolveOrgScope(ctx, orgId);
     if (!scope) return empty;
-    const memoryWhere: Prisma.MemoryWhereInput[] = [{ deletedAt: null }];
-    const readable = await readableMemoryWhere(ctx);
-    if (readable) memoryWhere.push(readable);
+    const memoryWhere: Prisma.MemoryWhereInput[] = [{ deletedAt: null }, await readableMemoryWhere(ctx)];
     if (scope.scopedOrgId) memoryWhere.push({ organizationId: scope.scopedOrgId });
     if (filter?.memoryRef) {
       try {

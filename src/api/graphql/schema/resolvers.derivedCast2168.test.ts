@@ -305,7 +305,7 @@ it.each(['ROW', 'DERIVED'])(
       data: { role: 'READER' },
     });
     await expect(cast()).rejects.toMatchObject({
-      extensions: { code: 'FORBIDDEN' },
+      extensions: { code: 'APP_NOT_FOUND' },
     });
     expect(await db.worker.count()).toBe(0);
   },

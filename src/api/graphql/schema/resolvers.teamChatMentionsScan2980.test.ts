@@ -16,7 +16,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { parse, type FieldNode, type GraphQLResolveInfo, type OperationDefinitionNode, type FragmentDefinitionNode } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb } from '../../../test/helpers.js';
+import { cleanDb, suspendChatSeqUniqueness } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { ensureChannelWithRoot } from '../../../lib/channels.js';
 import { encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
@@ -93,6 +93,8 @@ async function filler(n: number): Promise<void> {
  * it copies the source's createdAt; pass `createdAt` and a `loc` to build a tie that orders on createdAt first.
  */
 async function duplicateSeq(seq: number, opts: { createdAt?: Date; loc?: string } = {}): Promise<void> {
+  // #992: such rows can no longer be written while the per-chat seq unique is installed; cleanDb reinstalls it.
+  await suspendChatSeqUniqueness(db);
   const src = await db.node.findFirstOrThrow({ where: { memoryId: memory.id, nodeType: 'chat-message', seq }, orderBy: { createdAt: 'asc' } });
   const loc = opts.loc ?? `${src.loc}-dup`;
   await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc, name: loc.split(':').pop()!, nodeType: 'chat-message', seq, messageChannelId: channel.id, content: src.content, data: src.data as never, createdAt: opts.createdAt ?? src.createdAt } });

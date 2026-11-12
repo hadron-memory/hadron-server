@@ -26,11 +26,11 @@ beforeEach(async () => { await cleanDb(db); await dropTestActions(); });
 afterAll(async () => { await dropTestActions(); });
 
 describe('the platform list', () => {
-  it('#3707 (S1b): the shipped list is exactly the two seeded actions, and a repeat of the upsert changes nothing (terms: seed3707.test.ts)', async () => {
-    expect(PLATFORM_ACTIONS.map((a) => a.name).sort()).toEqual(['schedule.create', 'webhook.create']);
+  it('#3707 (S1b): the shipped list is exactly the four seeded actions, and a repeat of the upsert changes nothing (terms: seed3707.test.ts)', async () => {
+    expect(PLATFORM_ACTIONS.map((a) => a.name).sort()).toEqual(['bootprompt.compile.approve', 'bootprompt.source.edit', 'schedule.create', 'webhook.create']);
     await upsertPlatformActions(db);
     const before = await db.$queryRawUnsafe<Array<{ n: number }>>(`SELECT count(*)::int AS n FROM actions`);
-    expect(await upsertPlatformActions(db)).toEqual({ inserted: 0, updated: 0, unchanged: 2 });
+    expect(await upsertPlatformActions(db)).toEqual({ inserted: 0, updated: 0, unchanged: 4 });
     expect(await db.$queryRawUnsafe(`SELECT count(*)::int AS n FROM actions`)).toEqual(before);
   });
 });
@@ -94,11 +94,11 @@ describe('no surface writes an action, or a grant (S1a has no writer)', () => {
   };
 
   it('answers the unknown-field error for every plausible write over real GraphQL operations', async () => {
-    for (const field of ['createAction', 'upsertAction', 'setAction', 'updateAction', 'deleteAction', 'registerAction', 'createGrant', 'activateGrant', 'revokeGrant', 'updateGrant', 'deleteGrant']) {
+    for (const field of ['createAction', 'upsertAction', 'setAction', 'updateAction', 'deleteAction', 'registerAction', 'activateGrant', 'updateGrant', 'deleteGrant']) {
       const out = await run(`mutation { ${field}(input: {}) { id } }`);
       expect(out.errors?.[0]?.message, field).toContain(`Cannot query field "${field}" on type "Mutation"`);
     }
-    for (const field of ['grant', 'grants', 'grantEvents', 'grantActions', 'action', 'actions']) {
+    for (const field of ['grantEvents', 'grantActions', 'action', 'actions']) {
       const out = await run(`query { ${field} { id } }`);
       expect(out.errors?.[0]?.message, field).toContain(`Cannot query field "${field}" on type "Query"`);
     }
@@ -136,16 +136,23 @@ describe('no surface writes an action, or a grant (S1a has no writer)', () => {
 
 // The grant- and action-named GraphQL surface at the S1a branch point (main e3c514d1): the six existing grant tables and
 // the action-register vocabulary, which stays untouched until #3669. A new entry here is a new surface: it needs its own gate.
+// #3711 (S2b) adds Query.appGrants and Mutation.revokeGrant / withdrawGrant (the manager's list, revoke and the requester's withdrawal); revokeGrant is
+// therefore no longer an unknown field and leaves the plausible-write loop below. Still no surface activates a grant.
+// #3789 (S2a-read, gated T3 Hardened) added the read-only Query.grant/grants (#3800 adds Query.myGrants) and their types. Still no writer.
+// #3649 slice B added grant signing requests: requestGrantSignature / withdrawGrantSigningRequest write a REQUEST row,
+// never a grant or an action, and grantSigningRequest reads one. Still no grant writer.
+// #3649 slice D added the READ projection of a grant's signatures: GrantSignature, GrantSignatureState, GrantSignatureStatus
+// (Grant.signatureStatus). Types only, no query or mutation; still no grant writer.
 const BASELINE = [
-  'Mutation.createAgentOrgGrant', 'Mutation.createConnectionGrant', 'Mutation.createPrincipalGrant', 'Mutation.grantApp', 'Mutation.grantAppKeyScope',
-  'Mutation.grantCredits', 'Mutation.mintActionTickets', 'Mutation.recordAppAction', 'Mutation.revokeAgentOrgGrant', 'Mutation.revokeAppGrant',
+  'Mutation.createAgentOrgGrant', 'Mutation.createConnectionGrant', 'Mutation.createGrant', 'Mutation.createPrincipalGrant', 'Mutation.grantApp', 'Mutation.grantAppKeyScope',
+  'Mutation.grantCredits', 'Mutation.mintActionTickets', 'Mutation.recordAppAction', 'Mutation.requestGrantSignature', 'Mutation.revokeAgentOrgGrant', 'Mutation.revokeAppGrant',
   'Mutation.revokeAppMemoryWriteGrant', 'Mutation.revokeAutomationReadGrant', 'Mutation.revokeAutomationTeamSnapshotGrant', 'Mutation.revokeConnectionGrant',
-  'Mutation.revokePrincipalGrant', 'Mutation.setAppMemoryWriteGrant', 'Mutation.setAutomationReadGrant', 'Mutation.setAutomationTeamSnapshotGrant',
-  'Query.actionRegisterIndex', 'Query.actionTickets', 'Query.appMemoryWriteGrants', 'Query.automationReadGrants', 'Query.automationTeamSnapshotGrant',
-  'Query.automationTeamSnapshotGrants', 'Query.connectionGrant', 'Query.connectionGrants', 'Query.effectiveActionPolicy', 'Query.principalGrant', 'Query.principalGrants',
+  'Mutation.revokeGrant', 'Mutation.revokePrincipalGrant', 'Mutation.setAppMemoryWriteGrant', 'Mutation.setAutomationReadGrant', 'Mutation.setAutomationTeamSnapshotGrant', 'Mutation.withdrawGrant', 'Mutation.withdrawGrantSigningRequest',
+  'Query.actionRegisterIndex', 'Query.actionTickets', 'Query.appGrants', 'Query.appMemoryWriteGrants', 'Query.automationReadGrants', 'Query.automationTeamSnapshotGrant',
+  'Query.automationTeamSnapshotGrants', 'Query.connectionGrant', 'Query.connectionGrants', 'Query.effectiveActionPolicy', 'Query.grant', 'Query.grantSigningRequest', 'Query.grants', 'Query.myGrants', 'Query.principalGrant', 'Query.principalGrants',
   'TYPE AccessGrant', 'TYPE ActionRegisterIndexEntry', 'TYPE ActionRegisterIndexPage', 'TYPE ActionRegisterIndexState', 'TYPE ActionTicket', 'TYPE ActionTicketsPage',
   'TYPE AgentOrgGrant', 'TYPE AppGrant', 'TYPE AppGrantName', 'TYPE AppMemoryWriteGrant', 'TYPE AutomationReadGrant', 'TYPE AutomationTeamSnapshotGrant',
-  'TYPE AutomationTeamSnapshotGrantPage', 'TYPE ConnectionGrant', 'TYPE ConnectionGrantsPage', 'TYPE EffectiveActionPolicy', 'TYPE GrantAnnouncement',
-  'TYPE GrantCreditsInput', 'TYPE MintActionTicketsInput', 'TYPE PrProtocolAction', 'TYPE PrincipalGrant', 'TYPE PrincipalGrantsPage', 'TYPE RecordAppActionResult',
+  'TYPE AutomationTeamSnapshotGrantPage', 'TYPE ConnectionGrant', 'TYPE ConnectionGrantsPage', 'TYPE CreateGrantInput', 'TYPE EffectiveActionPolicy', 'TYPE Grant', 'TYPE GrantAnnouncement',
+  'TYPE GrantCreditsInput', 'TYPE GrantHolderKind', 'TYPE GrantSignature', 'TYPE GrantSignatureState', 'TYPE GrantSignatureStatus', 'TYPE GrantSigningRequest', 'TYPE GrantSigningRequestState', 'TYPE GrantsPage', 'TYPE MintActionTicketsInput', 'TYPE PrProtocolAction', 'TYPE PrincipalGrant', 'TYPE PrincipalGrantsPage', 'TYPE RecordAppActionResult',
   'TYPE SkillExportAction', 'TYPE TickAction', 'TYPE TickActionState',
 ];

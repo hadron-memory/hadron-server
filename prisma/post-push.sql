@@ -685,6 +685,12 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
   ON "nodes" ("message_channel_id", "seq", "loc" COLLATE "C")
   WHERE "node_type" = 'chat-message' AND "deleted_at" IS NULL AND "seq" IS NOT NULL;
 
+-- #992 (cor:agt:020:04): per-chat message-seq uniqueness for canonical
+-- chat-message rows (the preflight + partial unique index). One source,
+-- shared verbatim with the #992 migration (pinned by
+-- src/lib/chatSeqUnique.test.ts).
+\ir chat-seq-invariants.sql
+
 -- #1606 / #1607 — comment-node invariants. One source, shared verbatim with
 -- migration 20261005200000_comment_nodes (pinned by src/lib/comments/invariantsSql.test.ts).
 \ir comment-invariants.sql
@@ -872,6 +878,9 @@ CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");
 -- #2763: the coordinator-cadence alarm's episodes and first-observed clocks (after the #1162 fence function).
 \ir coordinator-cadence-invariants.sql
 
+-- #3934: the recorded end of an alarm's escalation is written once.
+\ir alarm-escalation-end-invariants.sql
+
 -- #2014: the team-chat post limit's episodes and their worker fence.
 \ir post-limit-invariants.sql
 
@@ -894,3 +903,7 @@ CREATE INDEX IF NOT EXISTS "agent_team_events_pr_frozen_head_idx"
   WHERE "type" = 'pr.frozen';
 
 \ir grant-invariants.sql
+
+-- #3649 slice B: grant signing requests, append-only grant signature records, the grant stale trigger. One source, shared
+-- verbatim with migration 20261109200000_grant_signing (after grant-invariants.sql: the tables it guards reference grants).
+\ir grant-signing-invariants.sql

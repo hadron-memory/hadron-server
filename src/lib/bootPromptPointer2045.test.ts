@@ -369,7 +369,9 @@ describe('#2045 read exposure: one gate per owner, null in both fields when mask
 describe('#2045 surfaces and code inventory', () => {
   it('R24: no MCP tool writes a boot-prompt pointer', () => {
     const mcp = createTestableMcpServer({ userId: 'u', roles: [], clientId: 'user:u' });
-    expect(mcp.toolNames().filter((n) => /boot.?prompt/i.test(n))).toEqual([]);
+    // #3843 adds exactly one boot-prompt tool, and it is a read: hadron_agent_boot_prompt renders the served prompt and
+    // writes nothing (its own pins count every row it could write). Any other boot-prompt tool still fails here.
+    expect(mcp.toolNames().filter((n) => /boot.?prompt/i.test(n))).toEqual(['hadron_agent_boot_prompt']);
   });
 
   it('every BOOT_PROMPT_* code the server source can emit is on the agreed lists (6259928375 / 6259930578)', () => {
@@ -385,7 +387,9 @@ describe('#2045 surfaces and code inventory', () => {
       'BOOT_PROMPT_INCLUDE_UNAVAILABLE', 'BOOT_PROMPT_INCLUDE_RETIRED', 'BOOT_PROMPT_INCLUDE_REVISION_UNAVAILABLE', 'BOOT_PROMPT_INCLUDE_CYCLE',
       'BOOT_PROMPT_INCLUDE_TOO_DEEP', 'BOOT_PROMPT_INCLUDE_SOURCE_DISALLOWED', 'BOOT_PROMPT_GRANT_REQUIRED', 'BOOT_PROMPT_INCLUDE_MALFORMED',
       'BOOT_PROMPT_COMPILE_LIMIT_EXCEEDED'];
-    const allowed = new Set([...S6, ...S9, ...SERVE, ...BOOT_PROMPT_POINTER_CODES]);
+    // #2973 PR2: the organisation signing switch's own codes (not serve refusals): a stale preview token, and an unset token signer.
+    const SWITCH = ['BOOT_PROMPT_SIGNING_PREVIEW_STALE', 'BOOT_PROMPT_SIGNING_NOT_CONFIGURED'];
+    const allowed = new Set([...S6, ...S9, ...SERVE, ...SWITCH, ...BOOT_PROMPT_POINTER_CODES]);
     const src = fileURLToPath(new URL('..', import.meta.url));
     const found = new Set<string>();
     const walk = (dir: string) => {

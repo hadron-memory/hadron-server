@@ -1,3 +1,4 @@
+import { utilizationQueries } from './resolvers.utilization.js';
 import { runTeamSnapshotMutations, runTeamSnapshotQueries } from './resolvers.runTeamSnapshot.js';
 import { rateLimitQueries, rateLimitMutations } from './resolvers.rateLimit.js';
 import { registerRolePickQueries } from './resolvers.registerRolePick.js';
@@ -41,6 +42,7 @@ import { chatQueries } from './resolvers.query.chat.js';
 import { sessionQueries } from './resolvers.query.session.js';
 import { slackQueries } from './resolvers.query.slack.js';
 import { mcpQueries } from './resolvers.query.mcp.js';
+import { webPollMutations, webPollQueries } from './resolvers.webPoll.js';
 import { homeAssistantQueries } from './resolvers.query.homeAssistant.js';
 import { resendSenderQueries } from './resolvers.query.resendSender.js';
 import { secretMutations, secretQueries } from './resolvers.secret.js';
@@ -57,6 +59,10 @@ import { appRunMutations, appRunQueries } from './resolvers.appRun.js';
 import { meteringMutations, meteringQueries } from './resolvers.metering.js';
 import { connectionGrantMutations, connectionGrantQueries } from './resolvers.connectionGrant.js';
 import { principalGrantMutations, principalGrantQueries } from './resolvers.principalGrant.js';
+import { grantFieldResolvers, grantQueries } from './resolvers.grant.js';
+import { grantCreateMutations } from './resolvers.grantCreate.js';
+import { grantManageMutations, grantManageQueries } from './resolvers.grantManage.js';
+import { grantSigningFieldResolvers, grantSigningMutations, grantSigningQueries } from './resolvers.grantSigning.js';
 import { importNodeMutations } from './resolvers.mutation.importNode.js';
 import { assetMutations } from './resolvers.mutation.asset.js';
 import { memoryMutations } from './resolvers.mutation.memory.js';
@@ -66,8 +72,9 @@ import { orgMutations } from './resolvers.mutation.org.js';
 import { agentMutations } from './resolvers.mutation.agent.js';
 import { agentCloneMutations } from './resolvers.mutation.agentClone.js';
 import { workerMutations, workerQueries, workerFieldResolvers } from './resolvers.worker.js';
-import { bootPromptPointerFieldResolvers } from './resolvers.bootPromptPointer.js';
+import { agentServedBootPromptQueries, bootPromptPointerFieldResolvers } from './resolvers.bootPromptPointer.js';
 import { bootPromptPointerMutations } from './resolvers.mutation.bootPromptPointer.js';
+import { orgBootPromptSigningMutations, orgBootPromptSigningQueries } from './resolvers.orgBootPromptSigning.js';
 import { compileBootPromptMutations } from './resolvers.mutation.compileBootPrompt.js';
 import { teamRoleMutations, teamRoleQueries } from './resolvers.teamRole.js';
 import { teamSpecQueries } from './resolvers.teamSpec.js';
@@ -80,6 +87,7 @@ import { modelGroupMutations, modelGroupQueries } from './resolvers.modelGroup.j
 import { agentTickerTemplateFieldResolvers, agentTickerTemplateMutations, agentTickerTemplateQueries } from './resolvers.agentTickerTemplate.js';
 import { deliverySettingsQueries, deliverySettingsMutations } from './resolvers.deliverySettings.js';
 import { appPropertiesMutations, appPropertiesTypeResolvers } from './resolvers.appProperties.js';
+import { chatbotAiConfigMutations, chatbotAiConfigQueries, chatbotAiConfigTypeResolvers } from './resolvers.chatbotAiConfig.js';
 import { untrackedTaskItemMutations, untrackedTaskItemQueries } from './resolvers.untrackedTaskItems.js';
 import { wakeMutations, wakeQueries } from './resolvers.wake.js';
 import { stopSignalMutations, stopSignalQueries } from './resolvers.stopSignal.js';
@@ -92,6 +100,7 @@ import {
   agentTaskAlarmFieldResolvers,
 } from './resolvers.agentTaskAlarms.js';
 import { agentTaskMatchingQueries, agentTaskMatchingFieldResolvers } from './resolvers.agentTaskMatching.js';
+import { accountUsageQueries } from './resolvers.accountUsage.js';
 import { memoryConfigMutations, memoryConfigQueries, memoryConfigFieldResolvers } from './resolvers.memoryConfig.js';
 import { memoryConfigApplyMutations } from './resolvers.memoryConfigApply.js';
 import { nodeApprovalFieldResolvers, nodeApprovalMutations, nodeApprovalQueries } from './resolvers.nodeApproval.js';
@@ -151,7 +160,7 @@ export const resolvers = {
   // it rather than replacing it (a bare spread would clobber the AI-config
   // and relation fields).
   // #3125 S1: the App's properties and their revision.
-  App: { ...typeResolvers.App, ...appPropertiesTypeResolvers },
+  App: { ...typeResolvers.App, ...appPropertiesTypeResolvers, ...chatbotAiConfigTypeResolvers },
   Agent: { ...typeResolvers.Agent, ...registerFieldResolvers.Agent, ...agentExtendedByFieldResolvers.Agent, ...agentClonedFromFieldResolvers.Agent, ...agentOfferReadinessFieldResolvers.Agent, ...bootPromptPointerFieldResolvers.Agent, ...agentTickerTemplateFieldResolvers.Agent },
   // #2045: the boot-prompt pointer read fields join the existing blocks.
   AppAgent: { ...typeResolvers.AppAgent, ...bootPromptPointerFieldResolvers.AppAgent },
@@ -167,6 +176,9 @@ export const resolvers = {
   // #1632: signing requests and signatures.
   SigningRequest: signingFieldResolvers.SigningRequest,
   NodeSignature: signingFieldResolvers.NodeSignature,
+  GrantSigningRequest: grantSigningFieldResolvers.GrantSigningRequest,
+  Grant: grantFieldResolvers.Grant,
+  GrantSignature: grantFieldResolvers.GrantSignature,
   Comment: commentFieldResolvers.Comment,
   Decision: decisionFieldResolvers.Decision,
   DecisionLog: decisionFieldResolvers.DecisionLog,
@@ -183,6 +195,7 @@ export const resolvers = {
   MemoryConfigTemplate: memoryConfigTemplateFieldResolvers.MemoryConfigTemplate,
   MemoryConfigTemplateRule: memoryConfigTemplateFieldResolvers.MemoryConfigTemplateRule,
   Query: {
+    ...chatbotAiConfigQueries,
     ...passkeyQueries,
     ...recoveryQueries,
     ...nodeQueries,
@@ -199,6 +212,8 @@ export const resolvers = {
     ...memoryQueries,
     ...orgQueries,
     ...agentQueries,
+    ...agentServedBootPromptQueries,
+    ...orgBootPromptSigningQueries,
     ...appQueries,
     ...chatQueries,
     ...teamChatQueries,
@@ -217,6 +232,8 @@ export const resolvers = {
     ...hostOperationQueries,
     ...agentTaskAlarmQueries,
     ...agentTaskMatchingQueries,
+    ...accountUsageQueries,
+    ...utilizationQueries,
     ...registerRoleCandidateQueries,
     ...registerRolePickQueries,
     ...actionRegisterIndexQueries,
@@ -232,6 +249,7 @@ export const resolvers = {
     ...sessionQueries,
     ...slackQueries,
     ...mcpQueries,
+    ...webPollQueries,
     ...homeAssistantQueries,
     ...resendSenderQueries,
     ...secretQueries,
@@ -243,6 +261,9 @@ export const resolvers = {
     ...runTeamSnapshotQueries,
     ...connectionGrantQueries,
     ...principalGrantQueries,
+    ...grantQueries,
+    ...grantManageQueries,
+    ...grantSigningQueries,
     ...meteringQueries,
     ...rateLimitQueries,
     ...impersonationQueries,
@@ -270,6 +291,7 @@ export const resolvers = {
     ...agentCloneMutations,
     ...workerMutations,
     ...bootPromptPointerMutations,
+    ...orgBootPromptSigningMutations,
     ...compileBootPromptMutations,
     ...teamRoleMutations,
     ...teamChatMutations,
@@ -282,6 +304,7 @@ export const resolvers = {
     ...modelGroupMutations,
     ...deliverySettingsMutations,
     ...appPropertiesMutations,
+    ...chatbotAiConfigMutations,
     ...runTeamSnapshotMutations,
     ...untrackedTaskItemMutations,
     ...stopSignalMutations,
@@ -299,6 +322,9 @@ export const resolvers = {
     ...nodeApprovalMutations,
     ...contentValidationReportMutations,
     ...signingMutations,
+    ...grantSigningMutations,
+    ...grantCreateMutations,
+    ...grantManageMutations,
     ...commentMutations,
     ...decisionMutations,
     ...scopeMutations,
@@ -310,6 +336,7 @@ export const resolvers = {
     ...sessionMutations,
     ...slackMutations,
     ...mcpMutations,
+    ...webPollMutations,
     ...homeAssistantMutations,
     ...resendSenderMutations,
     ...secretMutations,

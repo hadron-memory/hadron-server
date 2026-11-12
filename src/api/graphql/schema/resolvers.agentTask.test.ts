@@ -666,6 +666,26 @@ describe('start / progress / finish — the assignee only (cor:agt:050:08)', () 
     await expectCode(asWorker(rook, () => M.recordAgentTaskProgress({}, { taskId: t.id }, ctx(member.id))), 'TASK_NOT_ASSIGNEE');
   });
 
+  it('#3863: the refusal names which actor the server saw, and still refuses before any write', async () => {
+    const t = await anneTask({ start: true });
+    const before = await db.agentTask.findUniqueOrThrow({ where: { id: t.id } });
+    const seen = async (p: Promise<unknown>) => {
+      try { await p; } catch (e) { return { code: (e as GraphQLError).extensions?.code, actor: (e as GraphQLError).extensions?.actor, message: (e as GraphQLError).message }; }
+      return null;
+    };
+    // No worker session on the request: it acted as the person.
+    const person = await seen(M.finishAgentTask({}, { taskId: t.id, result: { outcome: 'succeeded' } }, ctx(member.id)));
+    expect(person).toMatchObject({ code: 'TASK_NOT_ASSIGNEE', actor: 'person' });
+    expect(person!.message).toContain('carried no worker session');
+    // A different worker's session: same code, told apart.
+    const other = await seen(asWorker(rook, () => M.finishAgentTask({}, { taskId: t.id, result: { outcome: 'succeeded' } }, ctx(member.id))));
+    expect(other).toMatchObject({ code: 'TASK_NOT_ASSIGNEE', actor: 'worker' });
+    expect(other!.message).not.toContain('no worker session');
+    // Neither names the assignee, and the task is unchanged.
+    expect(JSON.stringify([person, other])).not.toContain(anne.id);
+    expect(await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).toEqual(before);
+  });
+
   it('a queued task can be started by nobody (050:08 edge case)', async () => {
     const t = await create(ctx(member.id), {});
     await expectCode(M.startAgentTask({}, { taskId: t.id }, ctx(member.id)), 'TASK_NOT_ASSIGNEE');

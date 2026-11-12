@@ -1,3 +1,4 @@
+import { endHeldGrants } from '../../../lib/grants/departure.js';
 import { markNewInstallPayload } from './installationPayload.js';
 import { requireInstructedAct, sameActPrincipal, type StaffActAdmission, type ActInstruction, type ActAdmission } from '../../../lib/auth/instructedAct.js';
 import { readActInstruction } from './resolvers.instruction.js';
@@ -46,7 +47,7 @@ import {
   SelfJoinNotAllowedError,
   AppUninstalledError,
 } from '../../../controller/operations/joinApp.js';
-import { AgentNotFoundError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
+import { AgentNotFoundError, AmbiguousLegacyUrnError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { leaveApp } from '../../../controller/operations/leaveApp.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
@@ -54,6 +55,8 @@ import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { deriveSlugFromName } from '../../../lib/urn.js';
 import { parsePolicyLink } from '@hadron-memory/access-control';
 import { GraphQLError } from 'graphql';
+import { uninstallApp, reinstallApp, locateForDelete } from './appInstallState.js';
+import { requireUpdateAppTarget } from './appUpdateAccess.js';
 import {
   type AppType,
   type AppMembershipRole,
@@ -70,6 +73,7 @@ import {
   uninstallAgentFromAppCore,
   requireReadableAgent,
   requirePersonalAppAgentInstall,
+  assertAppNotUninstalled,
 } from './resolvers.helpers.js';
 import { findOrCreateAppClassMemory } from './chat-scope.js';
 // Spec 049 Phase 4 — the App's default Channel, created with the App.
@@ -88,6 +92,7 @@ import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { requirePersonAsThemselves } from '../../../lib/auth/personAsThemselves.js';
 import { forbiddenError } from '../../../lib/refusals.js';
 import { ensureProjectZero } from '../../../lib/agentTasks/projectZero.js';
+import { isId as isEntityId } from '../../../lib/entityRef/shape.js';
 
 /**
  * #3474 (cor:acl:040:07 S7): an App's policy link is exactly `{ allow: string[] }`, or null, or left out. `parsePolicyLink`
@@ -930,9 +935,16 @@ export const appMutations = {
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: ref may be ID, bare URN, or prefixed URN.
-      const { id: resolvedId } = await resolveAppRef(ctx.db, ref);
-      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
-      await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+      const app = await requireUpdateAppTarget(ctx, ref);
+      const resolvedId = app.id;
+      // #3982: only an admitted caller learns the retained row's deleted state.
+      if (app.deletedAt) {
+        throw new GraphQLError('This App is deleted.', { extensions: { code: 'APP_DELETED', appId: app.id } });
+      }
+      // #3976 (cor:dmo:050:21): an uninstalled App is kept read-only, its own
+      // fields included. Refused AFTER the gate, so only a caller the gate admits
+      // learns the install state; re-judged under the row lock below.
+      assertAppNotUninstalled(app);
       // #510: the app-layer action-policy link (cor:acl:040:02) — validate
       // shape before storing; explicit null clears (= no restriction).
       assertAppPolicyShape(policy);
@@ -962,12 +974,13 @@ export const appMutations = {
       // maintain the App's 'default' registry config. Explicit null
       // aiProvider clears the whole config (legacy column-null semantics);
       // aiApiKey '' clears just the key.
+      const applyAiConfig = async (db: Prisma.TransactionClient): Promise<void> => {
       if (aiProvider !== undefined || aiModel !== undefined || aiApiKey !== undefined) {
-        const existing = await ctx.db.aiServiceConfig.findFirst({
+        const existing = await db.aiServiceConfig.findFirst({
           where: { appId: resolvedId, name: DEFAULT_AI_CONFIG_NAME },
         });
         if (aiProvider === null) {
-          if (existing) await ctx.db.aiServiceConfig.delete({ where: { id: existing.id } });
+          if (existing) await db.aiServiceConfig.delete({ where: { id: existing.id } });
         } else {
           const provider = aiProvider ?? existing?.provider;
           const model = aiModel ?? existing?.model;
@@ -1003,7 +1016,8 @@ export const appMutations = {
               // Re-judged on the LOCKED row (#1380 / #1389 review): a concurrent edit
               // after the read above must not let this write keep a provider
               // whose endpoint or key was cleared in between.
-              await ctx.db.$transaction(async (tx) => {
+              {
+                const tx = db;
                 const cur = await lockAiServiceConfig(tx, existing.id);
                 if (!cur) throw new AiServiceConfigNotFoundError(existing.id);
                 // Omitted args keep what the row holds NOW, not what the read
@@ -1034,9 +1048,9 @@ export const appMutations = {
                     updatedBy: ctx.userId ?? null,
                   },
                 });
-              });
+              }
             } else {
-              await ctx.db.aiServiceConfig.create({
+              await db.aiServiceConfig.create({
                 data: {
                   appId: resolvedId,
                   name: DEFAULT_AI_CONFIG_NAME,
@@ -1050,6 +1064,8 @@ export const appMutations = {
           }
         }
       }
+      };
+
       // #1079 — a rename and its alias record commit TOGETHER. Separately, the
       // window between them is exactly the failure the alias map exists to
       // prevent: the old URN has stopped resolving and nothing remembers it.
@@ -1068,9 +1084,14 @@ export const appMutations = {
         // FOR UPDATE serializes the renames and makes each one record the urn it
         // actually superseded. `updateOrganization` already did this; the three
         // single-entity paths did not.
-        const [lockedRow] = await tx.$queryRaw<{ urn: string }[]>`
-          SELECT urn FROM apps WHERE id = ${resolvedId} FOR UPDATE
+        const [lockedRow] = await tx.$queryRaw<{ urn: string; uninstalled_at: Date | null }[]>`
+          SELECT urn, uninstalled_at FROM apps WHERE id = ${resolvedId} FOR UPDATE
         `;
+        // #3976: re-judged on the LOCKED row — an uninstall that committed after the
+        // read above must not let any write through. Throwing rolls the transaction
+        // back, including the AI-config change applied below.
+        assertAppNotUninstalled({ id: resolvedId, uninstalledAt: lockedRow?.uninstalled_at ?? null });
+        await applyAiConfig(tx);
         if (newUrn !== undefined) {
           await recordUrnRename(tx, {
             entityType: 'APP',
@@ -1111,9 +1132,20 @@ export const appMutations = {
 
     deleteApp: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
       // 007-entity-id-or-urn: ref may be ID, bare URN, or prefixed URN.
-      const { id: resolvedId } = await resolveAppRef(ctx.db, ref);
-      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
+      // #3975 (cor:dmo:050:21, cor:api:140:02): a missing App and a refused caller get the one `authorizationDenied()`, by id and URN;
+      // the state refusals (deleted, ambiguous URN) come only after the gate. See locateForDelete.
+      const target = await locateForDelete(ctx, ref);
+      if (target.kind === 'none') throw authorizationDenied();
+      if (target.kind === 'ambiguous') {
+        // The ambiguity is shown only to a caller the gate admits on every claimant; anyone else gets the uniform refusal.
+        if (target.candidates.length === 0) throw authorizationDenied();
+        for (const c of target.candidates) await requireOwnerOrOrgRole(ctx, c, 'ADMIN');
+        throw new AmbiguousLegacyUrnError(target.ref);
+      }
+      const app = target.app;
+      const resolvedId = app.id;
       await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+      if (app.deletedAt) throw new GraphQLError('This App is deleted.', { extensions: { code: 'APP_DELETED', appId: resolvedId } });
       // Soft-delete the App. Secrets are org/user-owned only (#696), so there
       // are no app-owned secrets to sweep here anymore. The deletedAt-null guard
       // keeps the original deletedAt under a concurrent double-delete.
@@ -1131,16 +1163,26 @@ export const appMutations = {
           }
           await requireOwnerOrOrgRole(txCtx, current, 'ADMIN');
         },
-        (tx) => tx.app.updateMany({
-          where: { id: resolvedId, deletedAt: null },
-          data: { deletedAt: new Date() },
-        }).then(() => undefined),
-        { lockMode: 'exclusive', afterLock: async (tx) => {
+        async (tx) => {
+          const deleted = await tx.app.updateMany({
+            where: { id: resolvedId, deletedAt: null },
+            data: { deletedAt: new Date() },
+          });
+          // #3690: an App that HOLDS a grant (another App's grantee) is a holder that went: those grants end here, after the apps FOR
+          // UPDATE lock. Its OWN grants allow nothing already (the live check reads `apps.deleted_at`) and cascade at the reclaim.
+          if (deleted.count > 0) await endHeldGrants(tx, 'app', resolvedId);
+        },
+        // #3974: Uninstalled → Deleted while uninstalled (cor:dmo:050:21), by id only. resolveAppRef never reaches an uninstalled row by URN, but one uninstalled between the resolve and the lock must not be admitted for a URN either (§10 F1).
+        { lockMode: 'exclusive', allowUninstalledApp: isEntityId(ref), afterLock: async (tx) => {
           await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedId} FOR UPDATE`;
         } },
       );
       return true;
     },
+
+    // #3774 — App-level uninstall / reinstall (cor:dmo:050:21). deleteApp's gate and lock; see appInstallState.ts.
+    uninstallApp: async (_: unknown, { ref }: { ref: string }, ctx: Context) => uninstallApp(ctx, ref),
+    reinstallApp: async (_: unknown, { ref }: { ref: string }, ctx: Context) => reinstallApp(ctx, ref),
 
     installAgentIntoApp: async (
       _: unknown,

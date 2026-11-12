@@ -15,9 +15,10 @@ import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { listAgentProcesses, listAgentTasks, reverifyServed, type ListedNode } from '../../../lib/agentDefinitionLists.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
-import { isAgentInstalled } from '../../../lib/appAgent.js';
+import { isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
 import {
   type Context,
+  type AiServiceConfigRow,
   aiConfigOwnerOf,
   clampListTake,
   requireOrgRole,
@@ -28,6 +29,7 @@ import {
   resolveOrgScope,
   isPlatformAdmin,
   toGqlAiServiceConfig,
+  readAiServiceConfigByUrn,
   toGqlAiServiceConfigForPicker,
   requireAiConfigOwnerAdmin,
   requireAiConfigPickerAccess,
@@ -37,6 +39,30 @@ import {
   pageEnvelope,
 } from './resolvers.helpers.js';
 import { forbiddenError, unauthenticatedError } from '../../../lib/refusals.js';
+import { pinnedConfigFor } from '../../../lib/chatbotAiConfig.js';
+import { storedChatAiConfigChoice } from './resolvers.chatbotAiConfig.js';
+
+/** Credential cargo follows the selected source's management gate on both projections. */
+async function canManageResolvedConfig(ctx: Context, config: AiServiceConfigRow, agentRef?: string | null): Promise<boolean> {
+  const { ownerType, ownerId } = aiConfigOwnerOf(config);
+  try {
+    if (ownerType === 'AGENT') {
+      const source = await ctx.db.agent.findFirst({
+        where: { id: config.agentId!, deletedAt: null },
+        select: { organizationId: true, ownerUserId: true },
+      });
+      if (!source) throw new AgentNotFoundError(agentRef ?? ownerId);
+      await requireOwnerOrOrgRole(ctx, source, 'ADMIN');
+    } else {
+      // In particular, platform credentials still require platform management.
+      await requireAiConfigOwnerAdmin(ctx, ownerType, ownerId);
+    }
+    return true;
+  } catch (error) {
+    if (!(error instanceof GraphQLError) || error.extensions.code !== 'FORBIDDEN') throw error;
+    return false;
+  }
+}
 
 /**
  * #1892 — the full Node rows behind a list's entries, in list order, each
@@ -322,6 +348,12 @@ export const agentQueries = {
     // owning org otherwise.
     aiServiceConfig: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
       if (!ctx.userId && !isPlatformAdmin(ctx)) throw unauthenticatedError();
+      // #3857: an `hrn:aiconf:` URN takes the concealing path (V63); a bare id
+      // keeps the posture below.
+      if (/^(?:hrn|urn):/i.test(ref.trim())) {
+        const found = await readAiServiceConfigByUrn(ctx, ref);
+        return found ? toGqlAiServiceConfig(found) : null;
+      }
       const config = await ctx.db.aiServiceConfig.findUnique({ where: { id: ref } });
       if (!config) return null;
       try {
@@ -378,7 +410,7 @@ export const agentQueries = {
 
     resolveAIConfig: async (
       _: unknown,
-      { name, appRef, agentRef }: { name?: string | null; appRef?: string | null; agentRef?: string | null },
+      { name, appRef, agentRef, chatId }: { name?: string | null; appRef?: string | null; agentRef?: string | null; chatId?: string | null },
       ctx: Context,
     ) => {
       try {
@@ -390,7 +422,6 @@ export const agentQueries = {
         let userOwnedAgent = false;
         let personalAgentOwnerId: string | null = null;
         let appOwnerUserId: string | null = null;
-        let agentOwner: { organizationId: string | null; ownerUserId: string | null } | null = null;
         if (appRef) {
           const { id } = await resolveAppRef(ctx.db, appRef);
           resolvedAppId = id;
@@ -418,10 +449,9 @@ export const agentQueries = {
           // here" is decided BEFORE any Agent-specific denial below (the
           // personal-Agent owner gate), so a foreign Agent answers exactly as
           // an absent one (ruling A).
-          if (resolvedAppId && !(await isAgentInstalled(ctx.db, resolvedAppId, id))) {
+          if (resolvedAppId && !(await isAgentInstalledAndLicensed(ctx.db, resolvedAppId, id))) {
             throw new AgentNotFoundError(agentRef);
           }
-          agentOwner = agent;
           userOwnedAgent = agent.ownerUserId !== null;
           personalAgentOwnerId = agent.ownerUserId;
           if (userOwnedAgent) {
@@ -435,7 +465,7 @@ export const agentQueries = {
         }
         // #1946 (ruling A): with an App named, an Agent not installed in it
         // answers exactly as an absent one — one answer, no id.
-        if (resolvedAppId && resolvedAgentId && !(await isAgentInstalled(ctx.db, resolvedAppId, resolvedAgentId))) {
+        if (resolvedAppId && resolvedAgentId && !(await isAgentInstalledAndLicensed(ctx.db, resolvedAppId, resolvedAgentId))) {
           throw new AgentNotFoundError(agentRef!);
         }
         // A user-owned App's config is eligible only when it belongs to the
@@ -454,38 +484,33 @@ export const agentQueries = {
             throw forbiddenError();
           }
         }
-        const resolved = await resolveAiConfigWithFallback(ctx.db, name ?? null, {
-          appId: resolvedAppId,
-          agentId: resolvedAgentId,
-          organizationId: effectiveOrgId,
-        });
+        // #3957 (cor:dmo:050:10): with a chat of this App, its stored choice, else the App's chatbot config, else
+        // the walk below, unchanged. A pin that is gone, foreign or disabled is skipped as if unset.
+        const pinned = chatId
+          ? await pinnedConfigFor(ctx.db, resolvedAppId, await storedChatAiConfigChoice(ctx, chatId, resolvedAppId))
+          : null;
+        const resolved: { config: typeof pinned & object; ownerType: 'APP' | 'AGENT' | 'ORGANIZATION' | 'HADRON_SERVER' } = pinned
+          ? { config: pinned, ownerType: 'APP' }
+          // With a chat, the fallback is the well-known `default` walk whatever name the caller sent (cor:dmo:050:10).
+          : await resolveAiConfigWithFallback(ctx.db, chatId ? DEFAULT_AI_CONFIG_NAME : name ?? null, {
+              appId: resolvedAppId,
+              agentId: resolvedAgentId,
+              organizationId: effectiveOrgId,
+            });
         const { config, ownerType } = resolved;
-        if (appOwnerUserId !== null) {
-          // The shared walk can derive an installed Agent's org even when the
-          // App is user-owned. The App's owner may decrypt their own App row,
-          // but an outer org or Agent row still needs its own owner gate.
-          if (ownerType === 'ORGANIZATION') {
-            await requireOrgRole(ctx, config.organizationId!, 'ADMIN');
-          } else if (ownerType === 'AGENT' && agentOwner) {
-            await requireOwnerOrOrgRole(ctx, agentOwner, 'ADMIN');
-          } else if (ownerType === 'HADRON_SERVER') {
-            throw new NoAiConfigAvailableError(name ?? DEFAULT_AI_CONFIG_NAME, 'this App');
-          }
+        // Decide credential access from the selected source, not the install's
+        // manager. An authorized installation can still resolve its identity.
+        const discloseKey = await canManageResolvedConfig(ctx, config, agentRef);
+        if (appOwnerUserId !== null && ownerType === 'HADRON_SERVER') {
+          // Personal contexts do not gain a platform fallback through an install.
+          throw new NoAiConfigAvailableError(name ?? DEFAULT_AI_CONFIG_NAME, 'this App');
         }
         if (userOwnedAgent && !effectiveOrgId && ownerType === 'HADRON_SERVER') {
           // A personal Agent may use its own config or one on the user-owned
           // App it runs through. Neither context may reach the platform key.
           throw new NoAiConfigAvailableError(name ?? DEFAULT_AI_CONFIG_NAME, 'this Agent');
         }
-        if (ownerType === 'HADRON_SERVER' && config.apiKeyEncrypted && !isPlatformAdmin(ctx)) {
-          // Tenant admins may use the platform fallback for server-side calls,
-          // but the platform's provider credential must not leave the server.
-          throw new GraphQLError(
-            `AI configuration '${config.name}' resolved at the HADRON_SERVER level; only a platform administrator may decrypt its API key.`,
-            { extensions: { code: 'FORBIDDEN' } },
-          );
-        }
-        if (!config.apiKeyEncrypted) {
+        if (discloseKey && !config.apiKeyEncrypted) {
           // Resolvable but unusable: a config without a key cannot back an
           // LLM call (spec 036 edge case — name the config + level, never
           // key material).
@@ -500,9 +525,10 @@ export const agentQueries = {
           ownerType,
           provider: config.provider,
           model: config.model,
-          apiKey: decryptToken(config.apiKeyEncrypted),
-          params: config.params ?? null,
-          effectiveEndpoint: effectiveEndpoint(config),
+          apiKey: discloseKey ? decryptToken(config.apiKeyEncrypted!) : null,
+          params: discloseKey ? config.params ?? null : null,
+          // Match the picker: provider defaults are public, custom routes are not.
+          effectiveEndpoint: discloseKey || !config.endpoint ? effectiveEndpoint(config) : null,
           effectiveApiStyle: effectiveApiStyle(config),
         };
       } catch (e) {
@@ -534,7 +560,7 @@ export const agentQueries = {
         let resolvedAgentId: string | null = null;
         if (agentRef) {
           resolvedAgentId = (await resolveAgentRef(ctx.db, agentRef)).id;
-          if (!isPlatformAdmin(ctx) && !(await isAgentInstalled(ctx.db, resolvedAppId!, resolvedAgentId))) {
+          if (!isPlatformAdmin(ctx) && !(await isAgentInstalledAndLicensed(ctx.db, resolvedAppId!, resolvedAgentId))) {
             throw new AgentNotFoundError(agentRef);
           }
         }
@@ -542,7 +568,12 @@ export const agentQueries = {
           appId: resolvedAppId,
           agentId: resolvedAgentId,
         });
-        return resolved.map((r) => toGqlAiServiceConfigForPicker(r.config));
+        return await Promise.all(resolved.map(async ({ config }) => {
+          const masked = toGqlAiServiceConfigForPicker(config);
+          return await canManageResolvedConfig(ctx, config)
+            ? masked
+            : { ...masked, params: null, apiKeyPreview: null };
+        }));
       } catch (e) {
         rethrowAiConfigTyped(e);
       }

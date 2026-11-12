@@ -2,7 +2,7 @@ import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { personalOrgAgentLicenseHolds, personalOrgAgentServeAllowed } from '../../../lib/auth/personalOrgAgentInstall.js';
 import { bootPromptRefusal } from '../../../lib/bootPrompt/refusal.js';
 import { chatNotFoundError } from '../../../lib/chatNotFound.js';
-import { ENGINE_KEYS, engineState } from '../../../lib/chatRootEngineState.js';
+import { ENGINE_KEYS, engineState, readTurnNames } from '../../../lib/chatRootEngineState.js';
 import { appInstallationWhere } from '../../../lib/appInstallations.js';
 // chatMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { assertAuthoring, attestedAuthoring, authoringFromRequest } from '../../../lib/authoringAttestation.js';
@@ -47,7 +47,7 @@ import {
 import { compileTemplate } from '../../../lib/template.js';
 import { chargeRequestServed } from '../../../lib/includes/resolveNodeContent.js';
 import { applyPlatformVariables } from '../../../lib/personaDescription.js';
-import { agentPlatformValues } from '../../../lib/bootPrompt/variables.js';
+import { noWorkerVariables } from '../../../lib/bootPrompt/variables.js';
 import { recordServedPrompt, resolveServedBootPrompt, type ServedBootPrompt } from '../../../lib/bootPrompt/serve.js';
 import {
   evaluateEdgeCondition,
@@ -76,15 +76,15 @@ import { reportPartialTurn } from '../../../lib/chatPartialTurn.js';
 import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
 import {
   type Context,
-  type SnapshotNode,
   requireRole,
   requireMemoryWriteAccess,
   memoryAccessFilter,
   buildRespondToolSchema,
   pushGoal,
   appendRouteEntry,
-  loadPublishedSnapshot,
+  rethrowAiConfigTyped,
 } from './resolvers.helpers.js';
+import { normalizeChatAiConfigChoice } from '../../../lib/chatbotAiConfig.js';
 import { assertNoMintedSpecRemoval } from '../../../lib/mintedSpecPermanence.js';
 import { refuseDecisionFamily } from '../../../lib/decisions/index.js';
 import { assertBatchMutable } from '../../../lib/bulkMutationGate.js';
@@ -93,6 +93,8 @@ import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
 import { unauthenticatedError } from '../../../lib/refusals.js';
 import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds.js';
 import { pickUnnamedStartConversation, topLevelConversations } from '../../../lib/chatConversationOrder.js';
+import { loadChatScript, type ChatScript } from '../../../lib/chatScript.js';
+import { decideNextStage, conversationStageOrder } from '../../../lib/chatRouting/nextStage.js';
 
 /**
  * How many of a chat's most recent messages `sendChatMessage` hands the model.
@@ -157,7 +159,7 @@ export async function serveChatPrompt(
     }
   }
   const served = await resolveServedBootPrompt(db, { surface: 'chat', appId, agent: { id: agent.id, name: agent.name } });
-  const variables = { ...agentPlatformValues(agent), 'session.llmModel': llmModel ?? '' };
+  const variables = noWorkerVariables(agent, llmModel);
   // #3096 / cor:dmo:150:08: provenance label is record metadata, never another prompt variable.
   return { text: applyPlatformVariables(served.content, variables), served, variables: {
     ...variables, 'session.llmModel.source': llmModel === null ? 'unspecified' : 'client-reported',
@@ -200,6 +202,7 @@ export const chatMutations = {
         scope,
         isTestRun,
         llmModel,
+        aiConfigChoice,
       }: {
         agentId: string;
         userId?: string;
@@ -211,6 +214,8 @@ export const chatMutations = {
         // full rationale.
         isTestRun?: boolean;
         llmModel?: string | null;
+        // #3957 (cor:dmo:050:10): the chat's AI config choice, stored with it.
+        aiConfigChoice?: string | null;
       },
       ctx: Context,
     ) => {
@@ -300,39 +305,12 @@ export const chatMutations = {
       const systemMemoryId = (agent as any).systemMemoryId as string | null;
       if (!systemMemoryId) throw new Error('Agent has no system memory configured');
 
-      // If the agent has a published revision, read conversation structure
-      // from the snapshot (pin-to-version). Otherwise read from live nodes.
+      // If the agent has a published revision, the whole script (conversation structure, rules, extraction
+      // spec) is read from that snapshot (pin-to-version, #4034); otherwise from the live nodes.
       const publishedLoc = (agent as any).publishedRevisionLoc as string | null;
-      const snapshotLookup = await loadPublishedSnapshot(ctx.db, systemMemoryId, publishedLoc);
-
-      // Helper: find a node either from snapshot or live DB
-      async function findSystemNode(loc: string): Promise<SnapshotNode | null> {
-        if (snapshotLookup) return snapshotLookup(loc);
-        const n = await ctx.db.node.findFirst({
-          where: { memoryId: systemMemoryId!, loc, deletedAt: null },
-          select: { loc: true, name: true, nodeType: true, description: true, content: true, data: true },
-        });
-        return n as SnapshotNode | null;
-      }
-
-      // Helper: find all nodes matching a prefix (for conversation selection)
-      async function findSystemNodesByPrefix(prefix: string): Promise<SnapshotNode[]> {
-        if (snapshotLookup) {
-          // Scan the snapshot — loadPublishedSnapshot builds a Map, but
-          // we need prefix matching. Re-load the snapshot nodes.
-          const revNode = await ctx.db.node.findFirst({
-            where: { memoryId: systemMemoryId!, loc: publishedLoc!, deletedAt: null },
-            select: { data: true },
-          });
-          const snap = ((revNode?.data as any)?.snapshot?.nodes as SnapshotNode[]) ?? [];
-          return snap.filter((n) => n.loc.startsWith(prefix));
-        }
-        const nodes = await ctx.db.node.findMany({
-          where: { memoryId: systemMemoryId!, loc: { startsWith: prefix }, deletedAt: null },
-          select: { loc: true, name: true, nodeType: true, description: true, content: true, data: true },
-        });
-        return nodes as SnapshotNode[];
-      }
+      const script = await loadChatScript(ctx.db, systemMemoryId, publishedLoc);
+      const findSystemNode = (loc: string) => script.node(loc);
+      const findSystemNodesByPrefix = (prefix: string) => script.nodesByPrefix(prefix);
 
       // ── Conversation selection ───────────────────────────────────────
       let convName: string;
@@ -448,6 +426,11 @@ export const chatMutations = {
           );
         }
         sharedAppId = selectedApp.id;
+        // Andi's F1 on #3960: a choice the App does not own is refused HERE, before the first chat provisions the
+        // App-class memory, so a refused start leaves nothing behind. (The lazy per-user branch below judges it the same way before its own create.)
+        if (aiConfigChoice != null) {
+          await normalizeChatAiConfigChoice(ctx.db, selectedApp.id, aiConfigChoice).catch(rethrowAiConfigTyped);
+        }
         // Idempotent: first shared chat under the (App, Agent) pair
         // provisions the app-class memory; subsequent calls reuse it.
         // Keyed per-agent (not per-app) so multi-Agent Apps — the model
@@ -543,6 +526,11 @@ export const chatMutations = {
                 })
               : null;
 
+          // Andi's F1 on #3960, the private arm: the memory below would belong to `matchingApp` (else to no App), so a
+          // choice that App does not own is refused before the memory exists. Same refusal as the later common check.
+          if (aiConfigChoice != null) {
+            await normalizeChatAiConfigChoice(ctx.db, matchingApp?.id ?? null, aiConfigChoice).catch(rethrowAiConfigTyped);
+          }
           const memoryClass: 'personal' | 'knowledge' = matchingApp
             ? 'personal'
             : 'knowledge';
@@ -616,6 +604,10 @@ export const chatMutations = {
       // in the holding memory without weakening the chat's authority gate.
       // #2047 (S10): the boot prompt is resolved first, so an unserveable one refuses before any chat exists.
       const chatAppId = (await ctx.db.memory.findUnique({ where: { id: targetMemoryId }, select: { appId: true } }))?.appId ?? null;
+      // #3957: judged here, before any chat, node or subscription write; the same refusal for every id the App does not own.
+      const startAiConfigChoice = aiConfigChoice == null
+        ? null
+        : await normalizeChatAiConfigChoice(ctx.db, chatAppId, aiConfigChoice).catch(rethrowAiConfigTyped);
       const chatServed = await serveChatPrompt(ctx.db, agent, chatAppId, reportedModel, ctx);
       let systemMessage = promptContent;
       if (promptContent.includes('{{')) {
@@ -645,7 +637,7 @@ export const chatMutations = {
 
       // Build tool schema from hierarchical extraction spec
       // (agent-level config node + conversation-level + stage-level)
-      const tools = await buildRespondToolSchema(ctx.db, systemMemoryId, convName, stageData);
+      const tools = await buildRespondToolSchema(script, convName, stageData);
 
       // Create chat node in the target memory. The loc needs a unique
       // suffix since two chats started in the same minute by the same user
@@ -692,6 +684,7 @@ export const chatMutations = {
       // that lets chat-list endpoints surface the tier without joining
       // Memory.class per row (data-model.md §2).
       const initialChatData: Record<string, unknown> = {
+        ...(startAiConfigChoice ? { aiConfigChoice: startAiConfigChoice } : {}),
         scope: chatScope,
         conversationName: convName,
         stageName: firstStage,
@@ -792,7 +785,8 @@ export const chatMutations = {
             const stateInfo = await tx.memory.findUniqueOrThrow({ where: { id: targetMemoryId }, select: { id: true, isEncrypted: true } });
             const initialState = engineState(JSON.parse(JSON.stringify(initialChatData)), false);
             const initialData = { ...initialChatData };
-            for (const key of ENGINE_KEYS) if (key !== 'conversationName' && key !== 'stageName') delete initialData[key];
+            // #3557: the state row is the only home of every engine key, the two names included (no rollback mirror).
+            for (const key of ENGINE_KEYS) delete initialData[key];
             const storedRoot = encryptNodeFields({ data: initialData }, stateInfo);
             const storedState = encryptNodeFields({ data: initialState }, stateInfo);
             await lockAncestorsForCreateMany(tx, targetMemoryId, [chatLoc, `${chatLoc}:messages`]);
@@ -851,7 +845,7 @@ export const chatMutations = {
 
     sendChatMessage: async (
       _: unknown,
-      { chatId, userMessage, llmModel }: { chatId: string; userMessage: string; llmModel?: string | null },
+      { chatId, userMessage, llmModel, aiConfigChoice }: { chatId: string; userMessage: string; llmModel?: string | null; aiConfigChoice?: string | null },
       ctx: Context,
     ) => {
       requireRole(ctx, 'READER');
@@ -880,14 +874,13 @@ export const chatMutations = {
       await requireMemoryWriteAccess(ctx, chatNode.memoryId);
       const inTx = await chatWriteTx(ctx, chatNode.memoryId);
 
-      // Decrypt the chat node's metadata (it holds conversationName, stageName,
-      // messageCount in `data`) if the memory is encrypted.
+      // Decrypt the chat node's metadata (`data`; the engine names live in the state row, #3557) if the memory is encrypted.
       const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
       if (memEncInfo.isEncrypted) translateSessionExpired(memEncInfo.id, () => decryptNodeFields(chatNode, memEncInfo));
 
-      // #919: rebound below to the copy read under the chat lock. Everything
-      // before that point reads only `scope`, which is immutable for a chat's
-      // life, so a pre-lock read is safe there.
+      // #919: rebound below to the copy read under the chat lock. Before that point this copy supplies only the
+      // immutable `scope` and `startedWithRevision`, plus (#3557) the legacy names for a root with NO state row; the
+      // routing names themselves come from the state row (`readTurnNames`), and the locked re-check below judges them again.
       let chatData = (chatNode.data as Record<string, unknown>) ?? {};
 
       // Spec 017 — chat-scope invariant gate (data-model.md §I-1):
@@ -914,6 +907,11 @@ export const chatMutations = {
       // canonical portal chat path.
       const memory = await ctx.db.memory.findUnique({ where: { id: chatNode.memoryId } });
       if (!memory) throw new Error('Memory not found');
+      // #3957 (cor:dmo:050:10): a person who may send this chat's user turns stores its AI config choice. Judged
+      // before the first write of the turn; applied with the user message below, so this turn already follows it.
+      const sendAiConfigChoice = aiConfigChoice == null
+        ? null
+        : await normalizeChatAiConfigChoice(ctx.db, memory.appId ?? null, aiConfigChoice).catch(rethrowAiConfigTyped);
       let agent = null;
       if (memory.sharedMemoryOfAgentId || memory.userMemoryOfAgentId) {
         agent = await ctx.db.agent.findUnique({
@@ -939,44 +937,23 @@ export const chatMutations = {
       // read from that snapshot so mid-conversation publishes don't change
       // the prompts/stages under the user.
       const startedWithRevision = chatData.startedWithRevision as string | null;
-      const snapshotLookup = systemMemoryId
-        ? await loadPublishedSnapshot(ctx.db, systemMemoryId, startedWithRevision)
-        : null;
+      const script = systemMemoryId ? await loadChatScript(ctx.db, systemMemoryId, startedWithRevision) : null;
 
-      async function findSystemNode(loc: string): Promise<SnapshotNode | null> {
-        if (snapshotLookup) return snapshotLookup(loc);
-        if (!systemMemoryId) return null;
-        const n = await ctx.db.node.findFirst({
-          where: { memoryId: systemMemoryId, loc, deletedAt: null },
-          select: { loc: true, name: true, nodeType: true, description: true, content: true, data: true },
-        });
-        return n as SnapshotNode | null;
+      async function findSystemNode(loc: string) {
+        return script ? script.node(loc) : null;
       }
 
       // #3654: choose the fallback re-route target BEFORE any write, so the gate below sees the stage this turn will serve.
       // Pure reads; the chat root is updated only after the user message lands (see below).
-      const preConvName = chatData.conversationName as string;
-      const preStageName = chatData.stageName as string;
+      // #3557 R1: from the state row (the names are no longer mirrored into the root's data); legacy data only without a row.
+      const { conversationName: preConvName, stageName: preStageName } = await readTurnNames(ctx.db, chatNode, memEncInfo, chatData);
       let rerouteTarget: { convName: string; firstStage: string } | null = null;
       if (systemMemoryId) {
         const currentConv = await findSystemNode(`conversations:${preConvName}`);
         const currentConvData = (currentConv?.data as Record<string, unknown>) ?? {};
         if (currentConvData.isFallback === true) {
           // Scan all conversations for a goal match
-          const allConvNodes = await (async () => {
-            if (snapshotLookup) {
-              const revNode = await ctx.db.node.findFirst({
-                where: { memoryId: systemMemoryId, loc: startedWithRevision!, deletedAt: null },
-                select: { data: true },
-              });
-              return ((revNode?.data as any)?.snapshot?.nodes as SnapshotNode[] ?? []);
-            }
-            const nodes = await ctx.db.node.findMany({
-              where: { memoryId: systemMemoryId, loc: { startsWith: 'conversations:' }, deletedAt: null },
-              select: { loc: true, name: true, data: true, nodeType: true, description: true, content: true },
-            });
-            return nodes as SnapshotNode[];
-          })().then((nodes) => topLevelConversations(nodes));
+          const allConvNodes = topLevelConversations(await script!.nodesByPrefix('conversations:'));
           // #3405: both scans below walk top-level conversations in code-unit `loc` order
           // (cor:cht:030:02 step 3), so the first match and the default are deterministic.
 
@@ -1122,6 +1099,14 @@ export const chatMutations = {
       // Everything downstream reads the copy the allocation committed, not the
       // pre-lock one — a turn that raced us has already been folded in.
       chatData = allocatedChatData;
+      // #3965 (documented disposition; cor:dmo:050:10 needs only that a turn uses the chat's STORED config): this is a second
+      // write, after the user message has committed and before the stage loads or any model call. If it throws, the message is
+      // kept, no turn runs, and the chat's previous choice stands. A caller resends the choice, not the message (the message is stored; the choice rides on the next sendChatMessage). It is not moved
+      // into the allocation transaction: nothing in the law asks for that, and a turn never runs under a choice that was not stored.
+      if (sendAiConfigChoice !== null && chatData.aiConfigChoice !== sendAiConfigChoice) {
+        // A fresh read under the chat lock (#919): contribute this one key, never replay a stale blob.
+        chatData = await updateChatRootData(ctx.db, chatRef, memEncInfo, (fresh) => ({ ...fresh, aiConfigChoice: sendAiConfigChoice }), { inTx });
+      }
       const convName = chatData.conversationName as string;
       const stageName = chatData.stageName as string;
 
@@ -1225,7 +1210,7 @@ export const chatMutations = {
         }
 
         // Build tools from hierarchical extraction spec
-        tools = await buildRespondToolSchema(ctx.db, systemMemoryId, activeConvName, stageData);
+        tools = await buildRespondToolSchema(script!, activeConvName, stageData);
       }
 
       // Build message history — the most recent MODEL_HISTORY_LIMIT messages.
@@ -1395,9 +1380,17 @@ export const chatMutations = {
 
       const chatRef = { id: chatNode.id, memoryId: chatNode.memoryId, loc: chatNode.loc };
 
-      const message = (toolResponse.message as string) ?? '';
+      // #3992 (cor:cht:020:01 step 2): `message` is a required JSON string, the contract the `respond` tool schema
+      // publishes. Missing, null or non-string is refused BEFORE any write (no turn, merge, routing or history).
+      // The text names the field and type only: never the value or model text. An empty or whitespace-only string
+      // is a valid string and is recorded as sent. The other fields below keep their casts (separate issue).
+      if (typeof toolResponse.message !== 'string') {
+        throw new GraphQLError('processChatResponse: toolResponse.message is required and must be a string.', {
+          extensions: { code: 'BAD_USER_INPUT', field: 'message', expectedType: 'string' },
+        });
+      }
+      const message = toolResponse.message;
       const data = toolResponse.data as Record<string, unknown> | undefined;
-      const nextStage = toolResponse.next_stage as string | undefined;
       const onTrack = toolResponse.onTrack as boolean | undefined;
       const offTrackReason = toolResponse.offTrackReason as string | undefined;
 
@@ -1554,50 +1547,73 @@ export const chatMutations = {
       // included. Edits run in the order they were pushed.
       const chatRootEdits: Array<(chatData: Record<string, unknown>) => void> = [];
 
-      // 1. Explicit stage transition from the LLM
-      if (nextStage && nextStage !== chatData.stageName) {
+      // 1. Explicit stage transition from the LLM. #4035: the name is checked against the stages of the
+      // conversation the chat is pinned to; an unknown name moves nothing and comes back as rejectedNextStage.
+      let rejectedNextStage: string | null = null;
+      let turnSysMemId: string | null = null;
+      let turnScript: ChatScript | null = null;
+      {
+        // The Agent is resolved as sendChatMessage does: shared or user home memory, the legacy linked-memory
+        // fallback, and an App chat's Agent only while installed and licensed.
+        const turnMemory = await ctx.db.memory.findUnique({ where: { id: chatNode.memoryId } });
+        type TurnAgent = { id: string; systemMemoryId?: string | null };
+        let turnAgent = null as TurnAgent | null;
+        if (turnMemory?.sharedMemoryOfAgentId || turnMemory?.userMemoryOfAgentId) {
+          turnAgent = await ctx.db.agent.findUnique({
+            where: { id: (turnMemory.sharedMemoryOfAgentId ?? turnMemory.userMemoryOfAgentId)! },
+          }) as TurnAgent | null;
+        } else if (turnMemory) {
+          const legacyAgents = await ctx.db.agent.findMany({
+            where: { deletedAt: null, memoryItems: { some: { memoryId: chatNode.memoryId } } },
+          });
+          turnAgent = (legacyAgents.find((a) => (a as any).systemMemoryId) ?? null) as TurnAgent | null;
+        }
+        if (turnMemory?.class === 'app' && turnAgent) {
+          const installed = turnMemory.appId && await isAgentInstalledAndLicensed(ctx.db, turnMemory.appId, turnAgent.id);
+          if (!installed) turnAgent = null;
+        }
+        turnSysMemId = turnAgent?.systemMemoryId ?? null;
+        if (turnSysMemId) {
+          turnScript = await loadChatScript(ctx.db, turnSysMemId, (chatData.startedWithRevision as string | null) ?? null);
+        }
+      }
+      const stageOrder = turnScript
+        ? await conversationStageOrder(turnScript, (chatData.conversationName as string | null) ?? null)
+        : null;
+      const stageDecision = decideNextStage(toolResponse.next_stage, chatData.stageName as string | undefined, stageOrder);
+      if (stageDecision.kind === 'rejected') {
+        rejectedNextStage = stageDecision.name;
+      } else if (stageDecision.kind === 'move') {
+        const moveTo = stageDecision.stage;
         stageTransitioned = true;
-        newStageName = nextStage;
+        newStageName = moveTo;
         chatRootEdits.push((d) => {
-          d.stageName = nextStage;
+          d.stageName = moveTo;
           appendRouteEntry(d, {
-            nodeUrn: `conversations:${chatData.conversationName}:${nextStage}`,
+            nodeUrn: `conversations:${chatData.conversationName}:${moveTo}`,
             conversationUrn: `conversations:${chatData.conversationName}`,
             action: 'ENTER',
-            trigger: { type: 'STAGE_TRANSITION', content: `next_stage: ${nextStage}` },
+            trigger: { type: 'STAGE_TRANSITION', content: `next_stage: ${moveTo}` },
           });
         });
       }
 
       // 2. Evaluate on_complete edges when the conversation ends
       //    (next_stage is null and we're at the last stage)
-      if (!nextStage || nextStage === null) {
-        // Find the agent's system memory to look up edges
-        const memory = await ctx.db.memory.findUnique({ where: { id: chatNode.memoryId } });
-        const agentId = memory?.userMemoryOfAgentId;
-        if (agentId) {
-          const agent = await ctx.db.agent.findUnique({ where: { id: agentId } });
-          const sysMemId = (agent as any)?.systemMemoryId as string | null;
-          if (sysMemId) {
-            // Find the current stage node and look for outgoing edges
+      // R1 (a): a rejected name still NAMED a stage, so no rule runs on it.
+      if (stageDecision.kind === 'none') {
+        {
+          const sysMemId = turnSysMemId;
+          if (sysMemId && turnScript) {
+            // #4034: the rules, the agent config and the condition defaults come from the revision the chat
+            // is pinned to (`startedWithRevision`), not from the live draft (cor:cht:020:01, cor:cht:030:02).
             const currentStageLoc = `conversations:${chatData.conversationName}:${chatData.stageName}`;
-            const stageNode = await ctx.db.node.findFirst({
-              where: { memoryId: sysMemId, loc: currentStageLoc, deletedAt: null },
-              select: { id: true },
-            });
+            const script = turnScript;
+            const stageNode = await script.node(currentStageLoc);
             if (stageNode) {
-              const edges = await ctx.db.edge.findMany({
-                where: { sourceId: stageNode.id, deletedAt: null },
-                orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }],
-                include: { target: { select: { loc: true, data: true } } },
-              });
-              // Load agent config once for the agent.* scope.
-              const agentConfigNode = await ctx.db.node.findFirst({
-                where: { memoryId: sysMemId, loc: 'config', deletedAt: null },
-                select: { data: true },
-              });
+              const edges = await script.outgoingRules(currentStageLoc);
               const agentBag: Record<string, unknown> = {
-                config: (agentConfigNode?.data as Record<string, unknown> | null) ?? {},
+                config: await script.agentConfig(),
               };
               // Resolve the system memory's slug-path URN once so error-side
               // sourceNodeUrn composition stays canonical (urn:node:<mem>:<loc>)
@@ -1624,16 +1640,19 @@ export const chatMutations = {
               const memoryLayers: MemoryLayerHandle[] = [];
               // #910: conditions read the turn's own person's values only.
               const turnPersonId = ctx.userId ?? null;
-              memoryLayers.push(await buildPrismaMemoryLayer(
-                ctx.db, 'edge-memory', sysMemId, currentStageLoc, turnPersonId,
-              ));
-              if (chatNode.memoryId !== sysMemId) {
+              memoryLayers.push(await script.conditionLayerA('edge-memory', currentStageLoc, turnPersonId));
+              // #4034: when layer A is the pinned snapshot, the chat's own memory is ALWAYS added live, even when it
+              // is the system memory (single-memory chat): otherwise the facts the chat extracts would vanish from
+              // its conditions. Unpinned, layer A already is the live system memory, so the duplicate stays skipped.
+              // (Today the chat-scope invariant refuses a chat held by a system-class memory, so this branch is
+              // not reachable through the API and carries no pin; the guard keeps the plan's rule if that changes.)
+              if (chatNode.memoryId !== sysMemId || script.pinned) {
                 memoryLayers.push(await buildPrismaMemoryLayer(
                   ctx.db, 'user-memory', chatNode.memoryId, currentStageLoc, turnPersonId,
                 ));
               }
               for (const edge of edges) {
-                const edgeData = (edge.data as Record<string, unknown>) ?? {};
+                const edgeData = edge.data;
                 const timing = edgeData.timing as string ?? 'on_complete';
                 if (timing !== 'on_complete' && timing !== 'always') continue;
 
@@ -1683,7 +1702,7 @@ export const chatMutations = {
                 }
 
                 // Edge fires! Check behavior
-                const targetLoc = edge.target?.loc;
+                const targetLoc = edge.targetLoc;
                 if (!targetLoc) continue;
 
                 const behavior = edgeData.behavior as string ?? 'transition';
@@ -1704,10 +1723,7 @@ export const chatMutations = {
                   }
 
                   // Switch to the target conversation's first stage
-                  const targetConv = await ctx.db.node.findFirst({
-                    where: { memoryId: sysMemId, loc: targetLoc, deletedAt: null },
-                    select: { data: true },
-                  });
+                  const targetConv = await script.node(targetLoc);
                   const targetConvData = (targetConv?.data as Record<string, unknown>) ?? {};
                   const targetStages = (targetConvData.stageOrder as string[]) ?? [];
                   const targetFirstStage = targetStages[0];
@@ -1761,6 +1777,8 @@ export const chatMutations = {
         displayMessage: message,
         stageTransitioned,
         newStageName,
+        // Present only when a name was rejected, so the shape of every other turn's result is unchanged (GraphQL fills null).
+        ...(rejectedNextStage !== null ? { rejectedNextStage } : {}),
         conversationHandoff,
         chatEnded: false,
         onTrack: onTrack ?? true,

@@ -182,7 +182,7 @@ export async function holderAccess(
     // The holder must still be an eligible driver of this App's workers (the register's attendee rule).
     if (await isAppParticipant(actor, app)) {
       const ids = await getAccessibleMemoryIds(actor);
-      result = ids === null ? 'all' : new Set(ids);
+      result = new Set(ids);
     }
   }
   cache.set(holderId, result);
@@ -367,6 +367,12 @@ export async function computeDueWakes(args: {
   onWorkersSelected?: (workerIds: string[]) => void;
   /** #2755: derive the due wakes and return them without reserving, charging the budget or writing anything. */
   preview?: boolean;
+  /**
+   * #3455: a preview made on a CALLER's behalf (the GraphQL `dueWakes(preview: true)`). It reads what the caller may read, exactly as
+   * the spending read does: the platform's own preview (#2755, the dark-worker alarm) skips the caller's memory and task reading rights,
+   * which a caller's read must never inherit. Meaningful only with `preview`.
+   */
+  callerBounded?: boolean;
 }): Promise<DueWakesResult> {
   const { ctx, app, reader, requester } = args;
   const now = args.now ?? new Date();
@@ -433,13 +439,14 @@ export async function computeDueWakes(args: {
   // R1/B3: the caller's reading right, and each distinct holder's.
   // #2755: a PREVIEW is the platform's own read (the dark-worker alarm), which may read every channel and every task; the
   // holder's right, below, still applies.
-  const callerIds = args.preview ? null : await getAccessibleMemoryIds(ctx);
+  const platformRead = args.preview === true && args.callerBounded !== true;
+  const callerIds = platformRead ? null : await getAccessibleMemoryIds(ctx);
   const callerCan = (memoryId: string) => callerIds === null || callerIds.includes(memoryId);
   const holderCache = new Map<string, Set<string> | 'all' | null>();
   const holderOf = new Map<string, Set<string> | 'all' | null>();
 
   // #1708: task reasons, only for a caller who may read the App's tasks (cor:agt:050:21). App-wide, so one check.
-  const taskReader = args.preview ? true : await mayReadAppTasks(ctx, app.id);
+  const taskReader = platformRead ? true : await mayReadAppTasks(ctx, app.id);
   const pendingTasks = taskReader ? await pendingTaskWakes(db, ids, now) : new Map<string, PendingTaskWake[]>();
   /** A held worker's task reasons need its holder to be a participant still (the channels' holder test). */
   const tasksFor = (workerId: string): PendingTaskWake[] => (holderOf.get(workerId) === null ? [] : pendingTasks.get(workerId) ?? []);

@@ -240,7 +240,7 @@ async function checkChannels(ctx: Context, ids: unknown): Promise<string[]> {
     select: { id: true, memoryId: true },
   });
   const accessible = await getAccessibleMemoryIds(ctx);
-  const ok = new Set(rows.filter((r) => accessible === null || accessible.includes(r.memoryId)).map((r) => r.id));
+  const ok = new Set(rows.filter((r) => accessible.includes(r.memoryId)).map((r) => r.id));
   if (unique.some((id) => !ok.has(id))) throw badInput('A channel in channelIds does not exist or is not readable by you.');
   return unique;
 }
@@ -825,7 +825,6 @@ type WakeSettingsRow = {
 function wakeSettingsOut(workerId: string, row: WakeSettingsRow | null) {
   return {
     workerId, mentions: row?.mentions ?? 'IMMEDIATE', pausedUntil: row?.pausedUntil ?? null,
-    isolatedUntil: null, isolatedAt: null,
   };
 }
 
@@ -1257,7 +1256,7 @@ export const tickerFieldResolvers = {
       // The list is not a grant: show only the channels the reader can read.
       const accessible = await getAccessibleMemoryIds(ctx);
       const rows = await ctx.db.channel.findMany({ where: { id: { in: t.channelIds }, deletedAt: null } });
-      return rows.filter((c) => accessible === null || accessible.includes(c.memoryId));
+      return rows.filter((c) => accessible.includes(c.memoryId));
     },
     owner: (t: TickerRow, _: unknown, ctx: Context) => actorRef(ctx, t.ownerWorkerId, t.ownerUserId),
     subscribers: async (t: TickerRow, a: { first?: number | null; after?: string | null }, ctx: Context) => {

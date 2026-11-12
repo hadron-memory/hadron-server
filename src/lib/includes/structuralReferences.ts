@@ -1,6 +1,7 @@
 import type { Prisma } from '../../generated/prisma/index.js';
 import { parseIncludeTags } from './parseIncludeTags.js';
 import { includeUrnTarget } from './includeUrnTarget.js';
+import { storedByteFingerprintSql } from './storedByteFingerprint.js';
 
 export const INCLUDE_RETENTION_SCHEMA_VERSION = 1;
 export const INCLUDE_RETENTION_PARSER_VERSION = 1;
@@ -49,7 +50,7 @@ export async function replaceStructuralReferences(
     select: { memoryId: true, loc: true, revSeq: true, memory: { select: { isEncrypted: true } } },
   });
   const [stored] = await tx.$queryRaw<Array<{ fingerprint: string }>>`
-    SELECT encode(sha256(convert_to(CASE WHEN content IS NULL THEN 'null' ELSE 'text:' || content END, 'UTF8')), 'hex') AS fingerprint
+    SELECT ${storedByteFingerprintSql('content')} AS fingerprint
     FROM nodes WHERE id = ${includerId}`;
   if (!stored) throw new IncludeRetentionInactiveError();
   const references: Prisma.IncludeReferenceCreateManyInput[] = [];

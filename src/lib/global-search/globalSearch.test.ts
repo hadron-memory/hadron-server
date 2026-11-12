@@ -383,7 +383,12 @@ describe('globalSearch — access scope', () => {
 
   it('AiServiceConfig is scoped to owner org', async () => {
     expect(byType((await globalSearch(db, { query: 'frontier' }, viewerP())).hits, 'aiServiceConfig')).toHaveLength(0);
-    expect(ids(byType((await globalSearch(db, { query: 'default' }, viewerP())).hits, 'aiServiceConfig'))).toContain(fx.aiConfigA);
+    // #3917: the id read is org-ADMIN-only, so a CONTRIBUTOR member no longer finds it; an org ADMIN does.
+    expect(byType((await globalSearch(db, { query: 'default' }, viewerP())).hits, 'aiServiceConfig')).toHaveLength(0);
+    const orgAdminUser = await db.user.create({ data: { githubId: 7004, githubUsername: 'gs-orgadmin', roles: [] } });
+    await db.orgMember.create({ data: { organizationId: fx.orgA, userId: orgAdminUser.id, role: 'ADMIN' } });
+    const orgAdminP: SearchPrincipal = { ...viewerP(), viewerUserId: orgAdminUser.id };
+    expect(ids(byType((await globalSearch(db, { query: 'default' }, orgAdminP)).hits, 'aiServiceConfig'))).toContain(fx.aiConfigA);
     expect(ids(byType((await globalSearch(db, { query: 'frontier' }, adminP())).hits, 'aiServiceConfig'))).toContain(fx.aiConfigB);
   });
 

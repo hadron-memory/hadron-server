@@ -817,8 +817,8 @@ describe('auth matrix — one case per principal shape', () => {
   });
 
   it('a non-member is refused for both post and read', async () => {
-    await expectCode(post(ctx(outsider.id), {}), 'FORBIDDEN');
-    await expectCode(read(ctx(outsider.id)), 'FORBIDDEN');
+    await expectCode(post(ctx(outsider.id), {}), 'APP_NOT_FOUND');
+    await expectCode(read(ctx(outsider.id)), 'APP_NOT_FOUND');
   });
 
   it('an unauthenticated caller is refused as UNAUTHENTICATED, not FORBIDDEN (#1509)', async () => {
@@ -839,13 +839,13 @@ describe('auth matrix — one case per principal shape', () => {
     const app2 = await db.app.create({
       data: { id: generateId(), organizationId: org.id, name: 'Other App', urn: `${org.urn}:other` },
     });
-    await expectCode(read(ctx(undefined, app2.id)), 'FORBIDDEN');
+    await expectCode(read(ctx(undefined, app2.id)), 'APP_NOT_FOUND');
   });
 
   it('a hybrid user+selection principal is judged on the USER, not the selection', async () => {
     // outsider with an active-App selection of this very App — the selection
     // is not a credential (findings:auth-appid-credential-vs-selection).
-    await expectCode(post(ctx(outsider.id, app.id), {}), 'FORBIDDEN');
+    await expectCode(post(ctx(outsider.id, app.id), {}), 'APP_NOT_FOUND');
   });
 
   it('an impersonation session may read but never post', async () => {
@@ -874,7 +874,7 @@ describe('auth matrix — one case per principal shape', () => {
       roles: ['READER'],
       impersonation: { orgId: otherOrg.id } as any,
     } as Context;
-    await expectCode(Q.teamChatMessages({}, { appRef: app.id }, crossOrgImp), 'FORBIDDEN');
+    await expectCode(Q.teamChatMessages({}, { appRef: app.id }, crossOrgImp), 'APP_NOT_FOUND');
     // And a user-owned App is never readable under impersonation at all.
     const owner = await db.user.create({
       data: { id: generateId(), githubId: 93907, githubUsername: `tc-imp-owner-${Date.now()}`, roles: ['READER'] },
@@ -888,7 +888,7 @@ describe('auth matrix — one case per principal shape', () => {
       roles: ['READER'],
       impersonation: { orgId: org.id } as any,
     } as Context;
-    await expectCode(Q.teamChatMessages({}, { appRef: userApp.id }, ownerImp), 'FORBIDDEN');
+    await expectCode(Q.teamChatMessages({}, { appRef: userApp.id }, ownerImp), 'APP_NOT_FOUND');
   });
 
   it('a user-owned App is strictly owner-gated (spec 047)', async () => {
@@ -902,7 +902,7 @@ describe('auth matrix — one case per principal shape', () => {
     // anyone else — even a platform org admin — is refused.
     const page = await Q.teamChatMessages({}, { appRef: userApp.id }, ctx(owner.id));
     expect(page).toEqual({ items: [], total: 0 });
-    await expectCode(Q.teamChatMessages({}, { appRef: userApp.id }, ctx(admin.id)), 'FORBIDDEN');
+    await expectCode(Q.teamChatMessages({}, { appRef: userApp.id }, ctx(admin.id)), 'APP_NOT_FOUND');
   });
 });
 

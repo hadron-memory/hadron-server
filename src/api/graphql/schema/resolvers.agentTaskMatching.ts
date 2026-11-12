@@ -26,16 +26,20 @@ import { canSeeUserPersonalFieldsMany } from '../../../lib/auth/userVisibility.j
 const toGqlWord = (s: string): string => s.toUpperCase().replace(/-/g, '_');
 
 /** Shared projected rows. Person and run reads use RepeatableRead; run reads also hold live authority anchors through projection. */
-async function readTeamRoster(ctx: Context, appRef: string) {
-    if (isRunPrincipal(ctx) && !ctx.userId) return withReadableApp(ctx, appRef, projectTeamRoster, true);
+export async function withRosterAppRead<T>(ctx: Context, appRef: string, project: (readCtx: Context, app: TaskApp) => Promise<T>): Promise<T> {
+    if (isRunPrincipal(ctx) && !ctx.userId) return withReadableApp(ctx, appRef, project, true);
     // Admission, status and assignment projections share one read snapshot, including MCP callers.
     return ctx.db.$transaction(async (tx) => {
       const readCtx = withoutRequestCaches(ctx, tx);
       const { app } = await resolveParticipatedApp(readCtx, appRef);
-      return projectTeamRoster(readCtx, app);
+      return project(readCtx, app);
     // An explicit, bounded read budget avoids imposing Prisma's implicit 5s interactive-transaction default
     // on the now-serialized bulk roster loaders. This does not change query/lock or test timeouts.
     }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 20_000 });
+}
+
+async function readTeamRoster(ctx: Context, appRef: string) {
+  return withRosterAppRead(ctx, appRef, projectTeamRoster);
 }
 
 async function projectTeamRoster(readCtx: Context, app: TaskApp) {
@@ -58,10 +62,10 @@ async function projectTeamRoster(readCtx: Context, app: TaskApp) {
   return {
     appId: app.id,
     asOf,
-    workers: entries.map((e) => ({ ...e, appId: app.id, teamPlacement: workingStateVisible ? e.teamPlacement : null, appUrn: app.urn, checkStatus: checks.get(e.workerId) ?? null,
+    workers: entries.map((e): RosterRow => ({ ...e, appId: app.id, teamPlacement: workingStateVisible ? e.teamPlacement : null, appUrn: app.urn, checkStatus: checks.get(e.workerId) ?? null,
       pausedUntil: pauses.get(e.workerId) ?? null, currentTask: tasks.get(e.workerId) ?? null,
       heldBy: holders.get(e.workerId)?.heldBy ?? null, heldAt: holders.get(e.workerId)?.heldAt ?? null,
-      terminal: terminals.get(e.workerId) ?? null })),
+      terminal: terminals.get(e.workerId) ?? null, internalsVisible: workingStateVisible })),
   };
 }
 
@@ -123,6 +127,8 @@ type RosterRow = Omit<RosterEntry, 'teamPlacement'> & {
   teamPlacement: RosterEntry['teamPlacement'] | null;
   appUrn: string; checkStatus: WorkerCheckStatus | null; pausedUntil: Date | null; currentTask: RosterTaskSummary | null;
   heldBy: RosterHolder | null; heldAt: Date | null; terminal: StoredWorkerTerminal | null;
+  /** maySeeWorkerInternals for this read: the one switch that also withholds a USER setter's identity (#3865). */
+  internalsVisible: boolean;
 };
 
 /** Optional live metadata is outside the core roster transaction: a failed lookup must not
@@ -141,6 +147,10 @@ export const agentTaskMatchingFieldResolvers = {
     freeForWork: (r: RosterRow) => r.free,
     unavailableReason: (r: RosterRow) => (r.unavailable?.reason ? toGqlWord(r.unavailable.reason) : null),
     unavailableUntil: (r: RosterRow) => r.unavailable?.until ?? null,
+    // #3981: only an explicit decision from maySeeWorkerInternals admits the USER setter identity; malformed rows fail closed.
+    availability: (r: RosterRow) => (r.availabilityRecord
+      ? { ...r.availabilityRecord.row, ...(r.internalsVisible === true ? {} : { setByUserId: null }), __inEffect: r.availabilityRecord.inEffect }
+      : null),
     startedTasks: (r: RosterRow) => r.startedTaskIds,
     pendingTasks: (r: RosterRow) => r.pendingTaskIds,
     waitingOn: (r: RosterRow) => r.waitingOnTaskIds,

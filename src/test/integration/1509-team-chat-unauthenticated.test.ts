@@ -119,8 +119,8 @@ describe('#1509 — no principal is UNAUTHENTICATED on the team-chat appRef surf
   });
 
   it('CONTROL: an authenticated non-participant is still FORBIDDEN', async () => {
-    expect(codeOf(await gql('stranger', READ_MSGS, { a: appId }))).toBe('FORBIDDEN');
-    expect(codeOf(await gql('stranger', POST_MSG, { a: appId, b: 'nope' }))).toBe('FORBIDDEN');
+    expect(codeOf(await gql('stranger', READ_MSGS, { a: appId }))).toBe('APP_NOT_FOUND');
+    expect(codeOf(await gql('stranger', POST_MSG, { a: appId, b: 'nope' }))).toBe('APP_NOT_FOUND');
   });
 
   it('CONTROL: a participant still reads', async () => {

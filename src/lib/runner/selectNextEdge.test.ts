@@ -127,6 +127,24 @@ describe('selectNextEdge', () => {
     expect(low!.targetUrn).toBe('hrn:node:walk-org:flowmem:flow:defer');
   });
 
+  it('a bare `missing` condition with every field present does NOT route (#4056, V85); a missing field still does', async () => {
+    // `missing` returns [] when nothing is missing, and JSONLogic's empty array is falsy: that edge must not fire.
+    const act = await makeNode('flow:act');
+    const defer = await makeNode('flow:defer');
+    await makeEdge({ targetId: act, name: 'next.1.gap', condition: { missing: ['message.data.confidence'] } });
+    await makeEdge({ targetId: defer, name: 'next.2.rest' }); // fall-through
+
+    const present = await selectNextEdge(db, { sourceNode: source, view: { confidence: 0.9 } });
+    expect(present!.targetUrn).toBe('hrn:node:walk-org:flowmem:flow:defer');
+
+    const absent = await selectNextEdge(db, { sourceNode: source, view: {} });
+    expect(absent!.targetUrn).toBe('hrn:node:walk-org:flowmem:flow:act');
+
+    // no fall-through: a satisfied-nothing-missing bare condition ends the flow (null), it does not route
+    await db.edge.deleteMany({ where: { name: 'next.2.rest' } });
+    expect(await selectNextEdge(db, { sourceNode: source, view: { confidence: 0.9 } })).toBeNull();
+  });
+
   it('orders by numeric index, not lexical (next.2 before next.10)', async () => {
     const second = await makeNode('flow:second');
     const tenth = await makeNode('flow:tenth');

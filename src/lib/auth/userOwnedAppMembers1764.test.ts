@@ -258,10 +258,10 @@ describe('tasks and the team chat', () => {
     await M.createTeamChatMessage({}, { appRef: app.id, body: 'hello from a member' }, ctx(member.id));
     const page = await Q.teamChatMessages({}, { appRef: app.id }, ctx(member.id));
     expect(page.total).toBe(1);
-    expect(await code(Q.teamChatMessages({}, { appRef: app.id }, ctx(outsider.id)))).toBe('FORBIDDEN');
-    expect(await code(Q.teamChatMessages({}, { appRef: app.id }, ctx(otherMember.id)))).toBe('FORBIDDEN');
-    expect(await code(M.createTeamChatMessage({}, { appRef: app.id, body: 'x' }, ctx(outsider.id)))).toBe('FORBIDDEN');
-    expect(await code(Q.teamChatMessages({}, { appRef: app.id }, ctx(member.id, { impersonation: { orgId: 'x' } as any })))).toBe('FORBIDDEN');
+    expect(await code(Q.teamChatMessages({}, { appRef: app.id }, ctx(outsider.id)))).toBe('APP_NOT_FOUND');
+    expect(await code(Q.teamChatMessages({}, { appRef: app.id }, ctx(otherMember.id)))).toBe('APP_NOT_FOUND');
+    expect(await code(M.createTeamChatMessage({}, { appRef: app.id, body: 'x' }, ctx(outsider.id)))).toBe('APP_NOT_FOUND');
+    expect(await code(Q.teamChatMessages({}, { appRef: app.id }, ctx(member.id, { impersonation: { orgId: 'x' } as any })))).toBe('APP_NOT_FOUND');
   });
 });
 

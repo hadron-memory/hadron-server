@@ -159,7 +159,7 @@ export async function loadRoleCandidates(tx: Prisma.TransactionClient, c: Contex
         })).map((n) => [n.id, n] as const)
       : []);
     const accessible = await getAccessibleMemoryIds(c);
-    const canRead = (memoryId: string): boolean => accessible === null || accessible.includes(memoryId);
+    const canRead = (memoryId: string): boolean => accessible.includes(memoryId);
     const canReadAgent = await registerReadableAgents(c, agentRows.values());
     const { roleTask } = batchedRoleTasks(canReadAgent, taskLoc, rootOf, hits, taskByHit, canRead);
     for (const w of workers) {

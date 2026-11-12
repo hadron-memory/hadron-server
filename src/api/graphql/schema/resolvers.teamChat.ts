@@ -1,3 +1,4 @@
+import { refuseSupersededSession } from '../../../lib/sessionSuperseded.js';
 import { listAppInstallations } from '../../../lib/appInstallations.js';
 import { NodeNotFoundError, AmbiguousLegacyUrnError, UrnNotQualifiedError } from '../../../lib/entityRef/errors.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
@@ -76,10 +77,11 @@ import {
 import { isTeamSpaceRow, teamSpaceAudienceFilter, teamSpaceOwnerFilter } from '../../../lib/auth/teamSpace.js';
 // Spec 049 Phase 4 — the Channel row the team chat became.
 import { DEFAULT_CHANNEL_NAME, ensureChannelWithRoot } from '../../../lib/channels.js';
-import { locateTeamAgent } from '../../../lib/auth/workerRead.js';
+import { locateTeamAgent, appNotFound, resolveAppRefConcealed, isAppGateRefusal } from '../../../lib/auth/workerRead.js';
 import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
+import { mapChatSeqConflict } from '../../../lib/prismaErrors.js';
 import { recordMentionsWorker } from '../../../lib/mentionsReadResolution.js';
 import {
   maybeAdvanceOwnChannelRead,
@@ -141,6 +143,7 @@ type AppRow = {
   organizationId: string | null;
   ownerUserId: string | null;
   uninstalledAt: Date | null;
+  deletedAt?: Date | null;
 };
 
 /**
@@ -169,30 +172,34 @@ async function requireTeamChatAccess(
   app: AppRow,
   mode: 'post' | 'read',
 ): Promise<void> {
+  // #3977 (V58): a caller who cannot REACH the App gets the absent-App answer (`appNotFound`); FORBIDDEN is for a
+  // caller who can reach it and may not do THIS act (an impersonation session reads but never posts; the App's own
+  // key reads but never posts).
+  // A soft-deleted App is unreachable to everyone, as in requireWorkerReadAccess: by ID it still resolves, so the
+  // gate (not the resolve) must give the absent-App answer, before any principal branch.
+  if (app.deletedAt) throw appNotFound();
   if (ctx.impersonation) {
-    if (
-      mode === 'post' ||
-      app.organizationId === null ||
-      app.organizationId !== ctx.impersonation.orgId
-    ) {
-      throw forbidden();
-    }
+    if (app.organizationId === null || app.organizationId !== ctx.impersonation.orgId) throw appNotFound();
+    if (mode === 'post') throw forbidden();
   }
   if (!ctx.userId) {
     // Pure App-key principal: read-only, and only for its own App.
-    if (mode === 'read' && ctx.appId && ctx.appId === app.id) return;
+    if (ctx.appId && ctx.appId === app.id) {
+      if (mode === 'read') return;
+      throw forbidden();
+    }
     // A caller with NO principal never reaches here on the appRef surfaces:
     // they refuse it UNAUTHENTICATED before any lookup (requirePrincipal,
     // #1509). The Channel surfaces deliberately answer it CHANNEL_NOT_FOUND
-    // instead, identically to a missing ref, so the refusal stays FORBIDDEN.
-    throw forbidden();
+    // instead, identically to a missing ref.
+    throw appNotFound();
   }
   // The user branch is the shared App-participation predicate (#943 extracted
   // it to resolvers.helpers so startSession's appRef gate is the SAME rule,
   // not a second copy that can drift): AppMember at any role, org CONTRIBUTOR+,
   // or the owner of a user-owned App.
   if (await isAppParticipant(ctx, app)) return;
-  throw forbidden();
+  throw appNotFound();
 }
 
 /**
@@ -463,6 +470,7 @@ async function resolveSessionAuthor(
   hostMemoryId: string,
   sessionRef: string,
 ): Promise<{ workerId: string; agentId: string | null; name: string; sessionId: string; workerAppId: string; crossApp: boolean; resume: boolean }> {
+  await refuseSupersededSession(ctx, sessionRef);
   const session = await ctx.db.session.findUnique({
     where: { id: sessionRef },
     select: { id: true, appId: true, userId: true, workerId: true, agentId: true, endedAt: true, expiresAt: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, launchOperationId: true, memoryId: true },
@@ -759,7 +767,7 @@ async function hostMemoryReadable(
 ): Promise<boolean> {
   if (ctx.impersonation && app) return true;
   const accessible = await getAccessibleMemoryIds(ctx, memoryId);
-  return accessible === null || accessible.includes(memoryId);
+  return accessible.includes(memoryId);
 }
 
 /**
@@ -896,7 +904,7 @@ async function resolveChannelTarget(ctx: Context, channelRef: string, mode: 'pos
       await requireTeamChatAccess(ctx, app, 'read');
     } catch (e) {
       // Only the gate's refusal is "no match"; anything else is rethrown.
-      if (e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN') throw channelNotFound(ref);
+      if (isAppGateRefusal(e)) throw channelNotFound(ref);
       throw e;
     }
   }
@@ -949,7 +957,7 @@ async function postToChannelRoot(
   incarnation: ChannelIncarnation,
   args: { body: string; replyToSeq: number | null; sessionRef: string | null },
   /** #1791: the platform's own post. No principal authors it, no mention in it expands, and no one is credited. */
-  opts: { system?: boolean; claim?: (tx: Prisma.TransactionClient) => Promise<boolean> } = {},
+  opts: { system?: boolean; claim?: (tx: Prisma.TransactionClient) => Promise<boolean>; systemMentions?: readonly string[] } = {},
 ): Promise<TeamChatMessageOut> {
   const { body, replyToSeq, sessionRef } = args;
   let envelope: Record<string, unknown>;
@@ -988,7 +996,9 @@ async function postToChannelRoot(
   // `mentions` is finalized there, before authority, stamps and sealing.
   const useTeamTags = teamTagsEnabled();
   const metadataVisible = await canReadTeamMetadata(ctx, app?.id ?? null);
-  const bodyMentions = opts.system ? [] : extractMentions(body);
+  // #4041 (V83): the one exception is a token list the SERVER fills (never the body: its `@` stays neutralised), so no
+  // caller text adds a recipient.
+  const bodyMentions = opts.system ? [...new Set(opts.systemMentions ?? [])].filter((t) => !(BROADCAST_MENTION_TOKENS as readonly string[]).includes(t) && !t.startsWith('team.')) : extractMentions(body);
   let mentions = bodyMentions;
   if (replyToSeq != null) envelope.replyToSeq = replyToSeq;
 
@@ -1004,9 +1014,13 @@ async function postToChannelRoot(
   let messageLoc: string | null = null;
   // #2015: the admission instant of a worker's post, stamped into its createdAt below; null for a human or system post.
   let admittedAt: Date | null = null;
+  // #992: the allocator holds the chat-root lock, so this cannot fire in
+  // normal operation — but if the per-chat seq unique is ever violated here
+  // (a bug, a repaired-back row), the caller sees the typed refusal, never a
+  // raw P2002.
   let appended: { seq: number; inserted: Date };
   try {
-  appended = await appendChatMessage(ctx.db, root, memEncInfo, async ({ tx, seq, msgNum }) => {
+  appended = await mapChatSeqConflict(() => appendChatMessage(ctx.db, root, memEncInfo, async ({ tx, seq, msgNum }) => {
     // The Channel is re-checked LIVE under the lock (Copilot on PR #1169):
     // deleteChannel takes this same key, so a delete that committed between
     // resolving the target and acquiring it is seen here — a message is
@@ -1138,14 +1152,14 @@ async function postToChannelRoot(
     // row FOR UPDATE) and the stamps after it, so the Worker row is never taken SHARE then upgraded (Diego, cycle 3).
     let teamGraphHeld = false;
     const holdTeamGraph = async () => { await lockAppReportsTo(tx, app!.id, 'shared'); teamGraphHeld = true; };
-    const stampAuthority = mentions.length > 0 || (useTeamTags && app && !opts.system)
+    const stampAuthority = (mentions.length > 0 && !opts.system) || (useTeamTags && app && !opts.system)
       ? { authority: await lockStampAuthority(ctx, tx, app, useTeamTags && app && !opts.system ? holdTeamGraph : undefined) } : null;
     if (useTeamTags && app && !opts.system && !teamGraphHeld) {
       throw new GraphQLError('Cannot post team metadata for an unavailable App.', { extensions: { code: 'APP_UNINSTALLED' } });
     }
     if (useTeamTags) {
       const workers = !opts.system && app ? await tx.worker.findMany({ where: { appId: app.id }, select: { id: true, name: true, reportsToWorkerId: true, retiredAt: true } }) : [];
-      Object.assign(envelope, buildTeamSnapshot(workers, typeof envelope.authorWorkerId === 'string' ? envelope.authorWorkerId : null, mentions));
+      Object.assign(envelope, buildTeamSnapshot(workers, typeof envelope.authorWorkerId === 'string' ? envelope.authorWorkerId : null, opts.system ? [] : mentions));
     }
     // #1617 B — resume the author's lapsed session in THIS transaction, so it
     // commits with the message or not at all (#1625 review, Baloo P2-1). Every
@@ -1208,7 +1222,7 @@ async function postToChannelRoot(
       });
     }
     return row.createdAt;
-  }, { asChannel: true });
+  }, { asChannel: true }));
     } catch (e) {
       if (!(e instanceof PostRateLimited)) throw e;
       // #2014: the post is refused and nothing was stored; the alarm (once an hour) commits on its own.
@@ -1301,6 +1315,8 @@ export async function postSystemNotice(
   appId: string,
   body: string,
   claim?: (tx: Prisma.TransactionClient) => Promise<boolean>,
+  /** #4041 (V83): mention tokens the platform itself resolved (a dark worker's chain). Default none: a notice pages nobody. */
+  systemMentions?: readonly string[],
 ): Promise<boolean> {
   const target = await systemNoticeTarget(db, appId);
   if (!target) return false;
@@ -1311,7 +1327,7 @@ export async function postSystemNotice(
       target.root,
       target.incarnation,
       { body: body.replace(/@/g, '\uFF20'), replyToSeq: null, sessionRef: null },
-      { system: true, claim },
+      { system: true, claim, systemMentions },
     );
   } catch (e) {
     // The chat was deleted after we looked, or the claim was lost: nothing was written.
@@ -1388,6 +1404,9 @@ async function channelHoldsHeadStamp(ctx: Context, root: ChatRootRow, headId: st
   }
 }
 
+/** #3759: the cap on `teamHeadRefs`, counted on the raw list so a duplicate takes a slot. */
+const MAX_TEAM_HEAD_REFS = 20;
+
 async function readChannelRoot(
   ctx: Context,
   // #1196: null when the host memory belongs to no App. Used ONLY to resolve a
@@ -1397,7 +1416,7 @@ async function readChannelRoot(
   // P1 on PR #941). Everything else this function does is memory-scoped.
   appId: string | null,
   root: ChatRootRow,
-  args: { replyToSeq?: number | null; sinceSeq?: number | null; beforeSeq?: number | null; mentionsRef?: string | null; teamHeadRef?: string | null; untagged?: boolean | null; limit?: number | null; offset?: number | null },
+  args: { replyToSeq?: number | null; sinceSeq?: number | null; beforeSeq?: number | null; mentionsRef?: string | null; teamHeadRef?: string | null; teamHeadRefs?: string[] | null; untagged?: boolean | null; limit?: number | null; offset?: number | null },
   /**
    * #2980 — `countAll: false` says the caller will not show `total` (a GraphQL selection without it, `selectsField`).
    * Only the in-memory filter branch uses it: it then scans in batches in the paging direction and stops once the
@@ -1410,6 +1429,8 @@ async function readChannelRoot(
   opts: { countAll?: boolean } = {},
 ): Promise<{ items: TeamChatMessageOut[]; total: number }> {
   const { replyToSeq, sinceSeq, beforeSeq, mentionsRef, teamHeadRef, untagged, limit, offset } = args;
+  // #3759: `[]` is no team filter at all, the same as omitting the argument.
+  const teamHeadRefs = args.teamHeadRefs != null && args.teamHeadRefs.length > 0 ? args.teamHeadRefs : null;
   // The outer resolver has already established read access. Validate independently of
   // cursor/mention filters: a missing target is a refusal, a valid empty thread is not.
   if (replyToSeq != null) {
@@ -1423,10 +1444,22 @@ async function readChannelRoot(
       { extensions: { code: 'TEAM_CHAT_REPLY_NOT_FOUND', replyToSeq } });
   }
   const metadataVisible = await canReadTeamMetadata(ctx, appId);
-  const teamFiltered = teamHeadRef != null || untagged != null;
+  const teamFiltered = teamHeadRef != null || untagged != null || teamHeadRefs != null;
+  // #3759 refusal order, so no ref leaks: metadata gate, mutual exclusion, cap, then per-ref validation.
   if (teamFiltered && !metadataVisible) throw new GraphQLError('Team metadata is unavailable in this Channel.', { extensions: { code: 'TEAM_CHAT_TEAM_METADATA_FORBIDDEN' } });
   if (teamHeadRef != null && untagged != null) throw new GraphQLError('teamHeadRef and untagged are mutually exclusive.', { extensions: { code: 'BAD_USER_INPUT' } });
-  let selectedHead: string | null = null;
+  if (teamHeadRefs != null && (teamHeadRef != null || untagged != null)) throw new GraphQLError('teamHeadRefs is mutually exclusive with teamHeadRef and untagged.', { extensions: { code: 'BAD_USER_INPUT' } });
+  if (teamHeadRefs != null && teamHeadRefs.length > MAX_TEAM_HEAD_REFS) throw new GraphQLError(`teamHeadRefs accepts at most ${MAX_TEAM_HEAD_REFS} entries.`, { extensions: { code: 'BAD_USER_INPUT' } });
+  let selectedHeads: string[] = [];
+  if (teamHeadRefs != null) {
+    // Each entry passes the single-head check; one bad entry refuses the whole call with the same text.
+    const workers = await ctx.db.worker.findMany({ where: { appId: appId! }, select: { id: true, name: true, reportsToWorkerId: true, retiredAt: true } });
+    for (const ref of new Set(teamHeadRefs)) {
+      if (!workers.some(w => w.id === ref)
+        || !(isReadableTeamHead(workers, ref) || await channelHoldsHeadStamp(ctx, root, ref))) throw teamHeadInvalid();
+      selectedHeads.push(ref);
+    }
+  }
   if (teamHeadRef != null) {
     // The wire accepts stable IDs only, including authorized retired identities.
     // A leaf or unknown id refuses the same way (byte-identical, App-scoped), through the write path's head predicate.
@@ -1434,7 +1467,7 @@ async function readChannelRoot(
     // Reparenting keeps no history, so a head whose reports are gone is still one when this Channel holds a message stamped with it.
     if (!workers.some(w => w.id === teamHeadRef)
       || !(isReadableTeamHead(workers, teamHeadRef) || await channelHoldsHeadStamp(ctx, root, teamHeadRef))) throw teamHeadInvalid();
-    selectedHead = teamHeadRef;
+    selectedHeads = [teamHeadRef];
   }
   const memEncInfo = await getMemoryEncryptionInfo(ctx.db, root.memoryId);
   const memBareUrn = await hostMemoryUrn(ctx, root.memoryId);
@@ -1510,8 +1543,8 @@ async function readChannelRoot(
     envelopeFilters.push({ data: { path: ['replyToSeq'], equals: replyToSeq } });
   }
   if (teamFiltered && !memEncInfo.isEncrypted) {
-    const predicate: Prisma.NodeWhereInput = selectedHead
-      ? { data: { path: ['teamHeadIds'], array_contains: [selectedHead] } }
+    const predicate: Prisma.NodeWhereInput = selectedHeads.length > 0
+      ? { OR: selectedHeads.map((head) => ({ data: { path: ['teamHeadIds'], array_contains: [head] } })) }
       : { OR: [{ data: { path: ['teamHeadIds'], equals: Prisma.DbNull } }, { data: { path: ['teamHeadIds'], equals: Prisma.AnyNull } }, { data: { path: ['teamHeadIds'], equals: [] } }] };
     const noHeads = predicate;
     envelopeFilters.push(untagged === false ? { NOT: noHeads } : predicate);
@@ -1524,7 +1557,7 @@ async function readChannelRoot(
     // #2020: a worker sees what reaches it (lib/mentionReach.ts); a user, its handle.
     const matches = (msg: TeamChatMessageOut): boolean =>
       (replyToSeq == null || msg.replyToSeq === replyToSeq) &&
-      (!mentionsRef || (workerId !== null ? reachesWorker(msg, [workerId], tokens) : msg.mentions.some((t) => tokens.includes(t)))) && (!teamFiltered || !memEncInfo.isEncrypted || (selectedHead ? !!msg.teamTags?.some(t => t.headId === selectedHead) : untagged === false ? !!msg.teamTags?.length : !msg.teamTags?.length));
+      (!mentionsRef || (workerId !== null ? reachesWorker(msg, [workerId], tokens) : msg.mentions.some((t) => tokens.includes(t)))) && (!teamFiltered || !memEncInfo.isEncrypted || (selectedHeads.length > 0 ? !!msg.teamTags?.some(t => selectedHeads.includes(t.headId)) : untagged === false ? !!msg.teamTags?.length : !msg.teamTags?.length));
     type Hit = { row: MessageRow; msg: TeamChatMessageOut };
     let page: Hit[];
     let total: number;
@@ -1686,14 +1719,15 @@ export const teamChatMutations = {
   ): Promise<TeamChatMessageOut> => {
     requirePrincipal(ctx);
     assertBody(body);
-    const { id: appId } = await resolveAppRef(ctx.db, appRef);
+    const { id: appId } = await resolveAppRefConcealed(ctx.db, appRef);
     const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
+    // #3977: the gate decides can-reach BEFORE the uninstalled refusal, which only an existing App can give.
+    await requireTeamChatAccess(ctx, app, 'post');
     if (app.uninstalledAt) {
       throw new GraphQLError('Cannot post into an uninstalled App\'s team chat.', {
         extensions: { code: 'APP_UNINSTALLED', appId },
       });
     }
-    await requireTeamChatAccess(ctx, app, 'post');
 
     const located = await locateTeamChatRoot(ctx, app);
     // Every existing root passes through the SAME locked creation/reuse core
@@ -1761,7 +1795,7 @@ export const teamChatMutations = {
  */
 export async function resolveTeamChatReadTarget(ctx: Context, appRef: string): Promise<{ appId: string; root: ChatRootRow } | null> {
   requirePrincipal(ctx);
-  const { id: appId } = await resolveAppRef(ctx.db, appRef);
+  const { id: appId } = await resolveAppRefConcealed(ctx.db, appRef);
   const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
   await requireTeamChatAccess(ctx, app, 'read');
   const root = await locateTeamChatRoot(ctx, app);
@@ -1815,7 +1849,7 @@ export const teamChatQueries = {
       replyToSeq?: number | null;
       sinceSeq?: number | null;
       beforeSeq?: number | null;
-      mentionsRef?: string | null; teamHeadRef?: string | null; untagged?: boolean | null;
+      mentionsRef?: string | null; teamHeadRef?: string | null; teamHeadRefs?: string[] | null; untagged?: boolean | null;
       limit?: number | null;
       offset?: number | null;
     },
@@ -1915,7 +1949,7 @@ export const teamChatQueries = {
       replyToSeq?: number | null;
       sinceSeq?: number | null;
       beforeSeq?: number | null;
-      mentionsRef?: string | null; teamHeadRef?: string | null; untagged?: boolean | null;
+      mentionsRef?: string | null; teamHeadRef?: string | null; teamHeadRefs?: string[] | null; untagged?: boolean | null;
       limit?: number | null;
       offset?: number | null;
       expectedIncarnation?: number | null;

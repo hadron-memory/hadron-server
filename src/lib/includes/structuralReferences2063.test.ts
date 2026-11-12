@@ -1,8 +1,11 @@
 /** #2063 R1: structural capture only; no production retention caller is enabled. */
 import { readFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { Client } from 'pg';
 import { beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
+import { PARALLEL_DBS, workerDbName } from '../../test/dbWorkers.js';
 import * as nodeApproval from '../nodeApproval.js';
 import { computeApprovalHash } from '../approvalHash.js';
 import { generateDataKey } from '../crypto.js';
@@ -22,6 +25,34 @@ const fenced = <T>(work: (tx: Parameters<typeof replaceStructuralReferences>[0])
   withIncludeHistoryTransaction(db, context => work(includeHistoryClient(context)));
 const capture = (id: string, text: string | null) => fenced(tx => replaceStructuralReferences(tx, id, text));
 const relied = (id = target.id, memoryId = memory.id) => fenced(tx => reliedRevisionsOf(tx, id, memoryId));
+
+/** #3900: the worker's private test DB, a unique schema, and rollback on success or failure. */
+async function migrationProbe(sql: string, inspect: (client: Client, schema: string) => Promise<void>) {
+  expect(PARALLEL_DBS, 'migration probe requires a run-owned parallel worker clone').toBe(true);
+  const expectedDb = workerDbName(process.env.VITEST_POOL_ID ?? '1');
+  expect(new URL(process.env.DATABASE_URL!).pathname).toBe(`/${expectedDb}`);
+  const schema = `include_probe_${randomUUID().replaceAll('-', '')}`;
+  const client = new Client({ connectionString: process.env.DATABASE_URL });
+  await client.connect();
+  try {
+    expect((await client.query('SELECT current_database() AS name')).rows[0].name).toBe(expectedDb);
+    await client.query('BEGIN');
+    await client.query(`CREATE SCHEMA "${schema}"`);
+    await client.query(`SET LOCAL search_path TO "${schema}"`);
+    await client.query('CREATE TABLE nodes (id TEXT PRIMARY KEY)');
+    // node-postgres simple-query mode accepts the complete SQL script; PostgreSQL,
+    // not a client-side delimiter guess, parses quoted strings and procedural bodies.
+    // Precedent: src/test/migrations/taskNumber2666.test.ts uses multi-statement Client.query.
+    await client.query(sql);
+    await inspect(client, schema);
+  } finally {
+    try {
+      await client.query('ROLLBACK');
+      expect((await client.query('SELECT 1 FROM pg_namespace WHERE nspname = $1', [schema])).rows).toEqual([]);
+    } finally { await client.end(); }
+  }
+}
+
 async function activate() {
   // Test-only activation. R1 deliberately provides NO production activator.
   for (const n of await db.node.findMany({ select: { id: true, content: true } })) await capture(n.id, n.content);
@@ -317,18 +348,44 @@ describe('structural references (#2063 R1)', () => {
 
   it('migration applies from a nodes-only schema and rolls back cleanly', async () => {
     const sql = await readFile(new URL('../../../prisma/migrations/20261026040000_include_structural_references/migration.sql', import.meta.url), 'utf8');
-    await expect(db.$transaction(async tx => {
-      await tx.$executeRawUnsafe('CREATE SCHEMA beckett_migration_2063');
-      await tx.$executeRawUnsafe('SET LOCAL search_path TO beckett_migration_2063');
-      await tx.$executeRawUnsafe('CREATE TABLE nodes (id TEXT PRIMARY KEY)');
-      for (const statement of sql.split(';').filter(s => s.trim())) await tx.$executeRawUnsafe(statement);
-      const tables = await tx.$queryRaw<Array<{ name: string }>>`SELECT table_name AS name FROM information_schema.tables WHERE table_schema = 'beckett_migration_2063'`;
-      expect(tables.map(t => t.name)).toEqual(expect.arrayContaining(['include_references', 'include_source_coverage', 'include_retention_generation']));
-      throw new Error('rollback migration probe');
-    })).rejects.toThrow('rollback migration probe');
+    await migrationProbe(sql, async (client, schema) => {
+      const tables = await client.query('SELECT table_name AS name FROM information_schema.tables WHERE table_schema = $1', [schema]);
+      expect(tables.rows.map(t => t.name)).toEqual(expect.arrayContaining(['include_references', 'include_source_coverage', 'include_retention_generation']));
+      const indexes = await client.query('SELECT indexname FROM pg_indexes WHERE schemaname = $1', [schema]);
+      expect(indexes.rows.map(i => i.indexname)).toContain('include_references_target_memory_id_target_loc_idx');
+      const foreignKeys = await client.query("SELECT conname FROM pg_constraint WHERE connamespace = $1::regnamespace AND contype = 'f'", [schema]);
+      expect(foreignKeys.rows.map(f => f.conname).sort()).toEqual(['include_references_includer_id_fkey', 'include_source_coverage_includer_id_fkey']);
+    });
+  });
+
+  it.each([
+    ['string literal', "INSERT INTO quoted3900 VALUES ('literal;value');", ['literal;value']],
+    ['dollar-quoted bodies', `DO $probe3900$ BEGIN
+      INSERT INTO quoted3900 VALUES ('procedure');
+      INSERT INTO quoted3900 VALUES ('second');
+    END $probe3900$;
+    CREATE FUNCTION body3900() RETURNS text LANGUAGE sql AS $fn3900$ SELECT 'function;value' $fn3900$;
+    INSERT INTO quoted3900 SELECT body3900();`, ['function;value', 'procedure', 'second']],
+  ] as const)('migration probe preserves semicolons in %s and rolls back every object (#3900)', async (_name, sql, expected) => {
+    await migrationProbe(`CREATE TABLE quoted3900 (value TEXT); ${sql}`, async client => {
+      expect((await client.query('SELECT value FROM quoted3900 ORDER BY value')).rows.map(r => r.value)).toEqual(expected);
+    });
+  });
+
+  it('migration probe rolls back partial DDL when execution fails (#3900)', async () => {
+    await expect(migrationProbe('CREATE TABLE partial3900 (id INT); SELECT missing3900;', async () => {
+      throw new Error('failed migration must not reach inspection');
+    })).rejects.toMatchObject({ code: '42703' });
   });
 
   it('I: 10k-reference reverse lookup uses the address index', async () => {
+    // #3900: planner observation, not a deterministic index-use guarantee. CI pins
+    // pgvector/pgvector:pg16 (.github/workflows/test.yml), e2e pins pgvector/pgvector:pg17
+    // (scripts/e2e/compose.yaml); neither pins a minor release. This assertion is
+    // bounded to this synthetic 10k-row fixture after ANALYZE and its statistics.
+    // Other versions, distributions or planner costs can legitimately pick another
+    // plan; an index-name mismatch alone does not establish a product defect.
+    // A deterministic replacement/control needs its own gate; do not force a plan.
     await db.includeReference.createMany({ data: Array.from({ length: 10_000 }, (_, ordinal) => ({ includerId: source.id, ordinal, kind: 'loc' as const, reference: `part:${ordinal}`, targetMemoryId: memory.id, targetLoc: `part:${ordinal}`, metadataGeneration: 1 })) });
     await db.$executeRaw`ANALYZE include_references`;
     const plan = await db.$queryRaw<Array<{ 'QUERY PLAN': unknown }>>`EXPLAIN (FORMAT JSON) SELECT pinned_rev_no, requires_approved FROM include_references WHERE target_memory_id = ${memory.id} AND target_loc = 'part:5321'`;

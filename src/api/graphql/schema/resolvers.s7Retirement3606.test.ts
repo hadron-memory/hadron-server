@@ -5,6 +5,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { loadPendingReasons } from '../../../lib/tickers/checkPending.js';
+import { runAsActor } from '../../../lib/requestActor.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -49,7 +50,7 @@ describe('phase-1 retirement', () => {
  });
  it('legacy isolation data cannot override NO_TASK, an active task, or PAUSED', async () => {
   // Model the prior-schema read result, including a column the new select no longer requests.
-  // The populated retained-row proof exercises the stored data separately.
+  // #3701 dropped the isolation columns; the stored-row proof below covers the surviving fields.
   const now = new Date();
   const fake = {
    app: { findUnique: async () => ({ teamPausedAt: null }) },
@@ -81,18 +82,9 @@ describe('phase-1 retirement', () => {
  });
 });
 
-it('retains inert columns through deprecated doors and actual wake and delivery writes', async () => {
- const columns = await db.$queryRawUnsafe<Array<{table_name:string;column_name:string}>>(`
-  SELECT table_name,column_name FROM information_schema.columns WHERE table_schema='public' AND
-  ((table_name='apps' AND column_name='delivery_standby_enabled') OR
-   (table_name='worker_wake_settings' AND column_name IN ('isolated_until','isolated_at','isolated_by_user_id')))
-  ORDER BY table_name,column_name`);
- expect(columns).toHaveLength(4);
+it('keeps stored rows unchanged through deprecated doors and actual wake and delivery writes (#3695: the columns are gone)', async () => {
  await db.workerWakeSettings.create({data:{workerId:targetId,mentions:'OFF',pausedUntil:new Date('2099-01-01'),exemptEndedAt:new Date('2020-01-01')}});
- await db.$executeRawUnsafe(`UPDATE worker_wake_settings SET isolated_until='2099-01-01',
-  isolated_at='2020-01-01',isolated_by_user_id=$1 WHERE worker_id=$2`,holderId,targetId);
  await db.app.update({where:{id:appId},data:{deliveryBusyDelaySeconds:600,deliveryStuckWindowSeconds:1800,deliveryCheckPeriodSeconds:90,deliveryDarkAlarmWindowSeconds:3600}});
- await db.$executeRawUnsafe('UPDATE apps SET delivery_standby_enabled=true WHERE id=$1',appId);
  const snapshot=async()=>({
   settings:await db.$queryRawUnsafe('SELECT to_jsonb(w) AS row FROM worker_wake_settings w ORDER BY worker_id'),
   apps:await db.$queryRawUnsafe('SELECT to_jsonb(a) AS row FROM apps a ORDER BY id'),
@@ -115,18 +107,11 @@ it('retains inert columns through deprecated doors and actual wake and delivery 
   expect(await snapshot()).toEqual(before);
  }
  expect((await loadPendingReasons(db,appId,[targetId],new Date())).get(targetId)).toBe('PAUSED');
- const inertColumns=async()=>({
-  wake:await db.$queryRawUnsafe('SELECT isolated_until,isolated_at,isolated_by_user_id FROM worker_wake_settings WHERE worker_id=$1',targetId),
-  app:await db.$queryRawUnsafe('SELECT delivery_standby_enabled FROM apps WHERE id=$1',appId),
- });
- const inertBefore=await inertColumns();
  await M.setWorkerWakeSettings({}, {workerRef:targetId,input:{mentions:'IMMEDIATE'}},ctx(holderId));
  expect((await db.workerWakeSettings.findUniqueOrThrow({where:{workerId:targetId}})).mentions).toBe('IMMEDIATE');
- expect(await inertColumns()).toEqual(inertBefore);
  const pausedUntil=new Date('2098-01-01');
  await M.setWorkerWakeSettings({}, {workerRef:targetId,input:{pausedUntil}},ctx(holderId));
  expect((await db.workerWakeSettings.findUniqueOrThrow({where:{workerId:targetId}})).pausedUntil).toEqual(pausedUntil);
- expect(await inertColumns()).toEqual(inertBefore);
  const clearStart=Date.now();
  await M.setWorkerWakeSettings({}, {workerRef:targetId,input:{clearPause:true}},ctx(holderId));
  const clearEnd=Date.now();
@@ -134,11 +119,9 @@ it('retains inert columns through deprecated doors and actual wake and delivery 
  expect(cleared.pausedUntil).toBeNull();
  expect(cleared.exemptEndedAt!.getTime()).toBeGreaterThanOrEqual(clearStart);
  expect(cleared.exemptEndedAt!.getTime()).toBeLessThanOrEqual(clearEnd);
- expect(await inertColumns()).toEqual(inertBefore);
  const changed=await M.setAppDeliverySettings({}, {appRef:appId,input:{busyDelaySeconds:601}},ctx(adminId));
  expect(changed).toMatchObject({busyDelaySeconds:601,stuckWindowSeconds:1800,checkPeriodSeconds:90,darkAlarmWindowSeconds:3600});
  expect((await db.app.findUniqueOrThrow({where:{id:appId}})).deliveryBusyDelaySeconds).toBe(601);
- expect(await inertColumns()).toEqual(inertBefore);
  expect((await loadPendingReasons(db,appId,[targetId],new Date())).get(targetId)).toBe('NO_TASK');
 });
 
@@ -268,4 +251,70 @@ it('executes released CLI get/pause/clear-pause and portal get/set documents wit
    ['SetAppDeliverySettings','portal-delivery',{appRef:appId,input:{busyDelaySeconds:500}},'setAppDeliverySettings'],
   ] as const)expect((await execute(name,file,variables,ctx(adminId)))[key]).toMatchObject({standbyEnabled:false,standbyEffective:false});
  } finally {await server.stop();}
+});
+
+// #4020 (tests only; basis cor:agt:050:11 + cor:dmo:050:12, built as, not ruled; cor:agt:080:29 is history only: it is
+// why standby false or omission is a no-op at all). An instructed worker manager's no-op records no manager act.
+// Every test starts from cleanDb (beforeEach above), so no case inherits state from another.
+describe('instructed worker manager on the delivery and clear doors (#4020)', () => {
+ const instruction = { kind: 'LIVE_CHAT', ref: 'synthetic:instructed4020' };
+ let callerId: string;
+ const asInstructedManager = async <T>(call: (c: Context) => Promise<T>): Promise<T> => {
+  const worker = await db.worker.findUniqueOrThrow({ where: { id: targetId } });
+  const slug = `caller-${generateId()}`;
+  const caller = await db.worker.create({ data: { appId, agentId: worker.agentId, name: slug, slug, signature: '', trailer: '', heldByUserId: adminId } });
+  callerId = caller.id;
+  const session = await db.session.create({ data: { id: generateId(), appId, workerId: caller.id, agentId: worker.agentId, userId: adminId } });
+  return runAsActor({ workerId: caller.id, agentId: worker.agentId }, () => call(ctx(adminId, { sessionId: session.id })));
+ };
+ const acts = () => db.agentTeamEvent.findMany({ where: { appId, type: 'app.manager-act' } });
+ // The target worker's own row is in the snapshot, so a write to it (even an updated_at bump) is visible.
+ const snapshot = async () => ({
+  apps: await db.$queryRawUnsafe('SELECT to_jsonb(a) AS row FROM apps a ORDER BY id'),
+  settings: await db.$queryRawUnsafe('SELECT to_jsonb(w) AS row FROM worker_wake_settings w ORDER BY worker_id'),
+  target: await db.$queryRawUnsafe(`SELECT to_jsonb(w) AS row FROM workers w WHERE w.id = '${targetId}'`),
+  events: await db.agentTeamEvent.findMany({ where: { appId }, orderBy: { id: 'asc' } }),
+ });
+
+ it('B6 control: an instructed real delivery change updates the App and records one act, attributed to the caller', async () => {
+  const actsBefore = (await acts()).length;
+  const out = await asInstructedManager(c => M.setAppDeliverySettings({}, { appRef: appId, input: { busyDelaySeconds: 601 }, instruction }, c));
+  expect(out).toMatchObject({ busyDelaySeconds: 601 });
+  expect((await db.app.findUniqueOrThrow({ where: { id: appId } })).deliveryBusyDelaySeconds).toBe(601);
+  const after = await acts();
+  expect(after).toHaveLength(actsBefore + 1);
+  expect(after[after.length - 1]).toMatchObject({ appId, type: 'app.manager-act', actorWorkerId: callerId, actorUserId: adminId });
+ });
+
+ it.each([[{ standbyEnabled: false }], [{}]])('B4: an instructed delivery no-op %j writes nothing and records no act', async input => {
+  const before = await snapshot();
+  const actsBefore = (await acts()).length;
+  const out = await asInstructedManager(c => M.setAppDeliverySettings({}, { appRef: appId, input, instruction }, c));
+  expect(out).toMatchObject({ standbyEnabled: false, standbyEffective: false });
+  const after = await snapshot();
+  // The caller's own worker and session rows are test setup: compare only what the door could touch.
+  expect({ ...after, events: after.events.filter(e => before.events.every(b => b.id !== e.id)) }).toEqual({ ...before, events: [] });
+  expect(await acts()).toHaveLength(actsBefore);
+ });
+
+ it('B5: an instructed standbyEnabled:true refuses before every write', async () => {
+  const before = await snapshot();
+  await expect(asInstructedManager(c => M.setAppDeliverySettings({}, { appRef: appId, input: { standbyEnabled: true }, instruction }, c)))
+   .rejects.toMatchObject({ extensions: { code: 'DELIVERY_STANDBY_UNAVAILABLE' } });
+  const after = await snapshot();
+  expect({ ...after, events: after.events.filter(e => before.events.every(b => b.id !== e.id)) }).toEqual({ ...before, events: [] });
+ });
+
+ it('B2: an instructed clear door leaves a stored pause and the worker row untouched and records no act', async () => {
+  // The door is inert by contract (#3606, #3695): even with a stored pause it writes nothing. Seeding one gives a
+  // swallowing or writing regression something to change.
+  await db.workerWakeSettings.create({ data: { workerId: targetId, mentions: 'OFF', pausedUntil: new Date('2099-01-01') } });
+  const before = await snapshot();
+  const actsBefore = (await acts()).length;
+  const out = await asInstructedManager(c => M.clearWorkerIsolation({}, { workerRef: targetId, instruction }, c));
+  expect(out).toMatchObject({ workerId: targetId, mentions: 'OFF', pausedUntil: new Date('2099-01-01') });
+  const after = await snapshot();
+  expect({ ...after, events: after.events.filter(e => before.events.every(b => b.id !== e.id)) }).toEqual({ ...before, events: [] });
+  expect(await acts()).toHaveLength(actsBefore);
+ });
 });

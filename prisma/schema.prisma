@@ -396,7 +396,6 @@ model User {
   deletedBy        String?           @map("deleted_by")
 
   memberships                   OrgMember[]
-  heldGrants                    Grant[]                     @relation("GrantHolderUser")
   issuedGrants                  Grant[]                     @relation("GrantIssuer")
   sentInvitations               UserInvitation[]            @relation("SentInvitations")
   invitationActivations         UserInvitationActivation[]
@@ -620,6 +619,13 @@ model Organization {
   /// restriction (the layer is absent, not deny-all). Snapshotted into
   /// AppRun.policy at mint — edits apply to FUTURE runs only.
   policy          Json?
+  /// #2973 PR1 / cor:agt:040:09 — the organisation's boot-prompt signing
+  /// switch: when true, a compiled boot prompt served in this organisation's
+  /// Apps must be signed. DEFAULT false and NO control API in PR1, so no
+  /// organisation can be switched on and the serve check is inert through it;
+  /// PR2 adds the audience-gated switch (G1). The serve reads it only together
+  /// with the deployment's signing policy (G2, `signingSurfacePolicy().signing`).
+  bootPromptSigningRequired Boolean @default(false) @map("boot_prompt_signing_required")
 
   invitations            UserInvitation[]        @relation("OrgInvitations")
   exchangeConnections    ExchangeConnection[]
@@ -1861,6 +1867,8 @@ model Session {
   endedAt           DateTime?         @map("ended_at")
   /// First end wins. NULL on legacy ended rows is exposed as unknown, never backfilled.
   endReason         SessionEndReason? @map("end_reason")
+  /// #3818 V25: immediate successor stamped by the same bind transaction; disclosure is independently gated on read.
+  supersededBySessionId String?       @map("superseded_by_session_id")
   /// Set by the reaper (#930) when the session was auto-expired — meaning
   /// past `expiresAt`, and since #1114 nothing else. It no longer records an
   /// idle-window expiry, because there is no longer such a thing: inactivity
@@ -2192,7 +2200,6 @@ model Agent {
   readStates         ChannelReadState[]  @relation("ReadStateAgent")
   /// #974 — the named castings of this agent into Apps (cor:dmo:050:11).
   workers            Worker[]
-  heldGrants         Grant[]             @relation("GrantHolderAgent")
   /// #1885 (cor:dmo:050:14) — the base this Agent extends, and the Agents
   /// that extend it. Never called a parent: that word belongs to imports.
   extendsAgent       Agent?              @relation("AgentBase", fields: [extendsAgentId], references: [id], onDelete: Restrict)
@@ -2438,8 +2445,10 @@ model AiServiceConfig {
 
   hadronServer HadronServer? @relation(fields: [hadronServerId], references: [id], onDelete: Cascade)
   organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  app          App?          @relation(fields: [appId], references: [id], onDelete: Cascade)
+  app          App?          @relation("AppAiServiceConfigs", fields: [appId], references: [id], onDelete: Cascade)
   agent        Agent?        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  /// #3957: the Apps that name this config as their chatbot config (`App.chatbotAiConfigId`).
+  chatbotOfApps App[]        @relation("AppChatbotAiConfig")
 
   @@index([hadronServerId])
   @@index([organizationId])
@@ -3376,8 +3385,6 @@ model App {
   deliveryBusyDelaySeconds          Int                  @default(600) @map("delivery_busy_delay_seconds")
   /// Proposed bounds: 1..604800; strictly greater than busy delay + cadence floor.
   deliveryStuckWindowSeconds        Int                  @default(900) @map("delivery_stuck_window_seconds")
-  /// Inert compatibility storage (#3606 phase 1); physical removal requires a separate rollback-window gate.
-  deliveryStandbyEnabled            Boolean              @default(false) @map("delivery_standby_enabled")
   /// #2138 §3.2 — a worker with a task is expected to check its team channel every period (seconds);
   /// the team ticker's cadence is set together with it.
   deliveryCheckPeriodSeconds        Int                  @default(600) @map("delivery_check_period_seconds")
@@ -3479,6 +3486,8 @@ model App {
   workers                 Worker[]
   /// #1705 — the App's agent tasks and their append-only event stream.
   agentTasks              AgentTask[]
+  /// #3825 — latest decided match outcome per combination.
+  matchOutcomes           AgentMatchOutcome[]
   agentTaskCounters       AgentTaskCounter[]
   /// #1747 — tickers (cor:agt:080) and the grants held by this App's workers.
   tickers                 Ticker[]
@@ -3501,7 +3510,6 @@ model App {
   automationTeamSnapshotGrantEvents AppAutomationTeamSnapshotGrantEvent[]
   /// #3668 — grants issued in this App, the grants THIS App holds, and the grant events.
   grants                  Grant[]      @relation("GrantApp")
-  heldGrants              Grant[]      @relation("GrantHolderApp")
   grantEvents             GrantEvent[]
   /// #1706 — model-family availability (cor:agt:060:03) and the stall schedule.
   modelFamilyAvailability ModelFamilyAvailability[]
@@ -3538,7 +3546,12 @@ model App {
   logEntries              AppLogEntry[]
   usageEvents             UsageEvent[]
   pendingSetups           PendingSetup[]
-  aiServiceConfigs        AiServiceConfig[]
+  aiServiceConfigs        AiServiceConfig[] @relation("AppAiServiceConfigs")
+  /// #3957 (cor:dmo:050:10): one of THIS App's own configs, used for its chats unless a chat stored its own
+  /// choice. Same-App ownership and `enabled` are judged where it is read and written (a DB FK cannot say
+  /// "owned by this App"); a deleted config clears it (`SetNull`).
+  chatbotAiConfigId       String?           @map("chatbot_ai_config_id")
+  chatbotAiConfig         AiServiceConfig?  @relation("AppChatbotAiConfig", fields: [chatbotAiConfigId], references: [id], onDelete: SetNull)
   modelGroups             ModelGroup[]
   automationVersions      AutomationVersion[]
   connectionGrants        ConnectionGrant[]         @relation("AppConnectionGrants")
@@ -3554,6 +3567,7 @@ model App {
   @@index([urn])
   @@index([ownerUserId])
   @@index([legacyUrn])
+  @@index([chatbotAiConfigId])
   @@map("apps")
 }
 
@@ -4034,6 +4048,10 @@ model Worker {
   /// prisma/host-operation-invariants.sql) allows exactly the keys above, so a write that bypasses the resolver still
   /// cannot store more. Read behind `maySeeWorkerInternals` (cor:dmo:050:11).
   terminal Json? @map("terminal")
+  /// #4041 (V82) — the last host repair notice the PLATFORM posted for this worker, set in the post's own append
+  /// transaction: `alert` (a no-snapshot / cap-reached alert, once per worker until a report without a repair outcome or with
+  /// a relaunch) or `relaunched:<checkedAt>` (so a replayed relaunch report posts nothing twice). Never read by a client.
+  repairNoticeKey String? @map("repair_notice_key")
 
   app                  App                       @relation(fields: [appId], references: [id], onDelete: Cascade)
   /// SetNull: a worker row is never hard-deleted in normal operation, but an
@@ -4063,7 +4081,6 @@ model Worker {
   wakeAcks             WorkerWakeAck[]
   wakeReservation      AppWakeReservation?
   appGrants            AppGrant[]
-  heldGrants           Grant[]  @relation("GrantHolderWorker")
   launchableVia        HostRegistrationWorker[]
   hostOperations       HostOperation[]
   /// #2162 — this worker's context resets (cor:agt:050:27).
@@ -4544,6 +4561,7 @@ model PasskeyCredential {
 
   owner             User                       @relation(fields: [ownerId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   signatures        NodeSignature[]
+  grantSignatures   GrantSignature[]
   signIns           SignIn[]
   cancelToken       PasskeyCancelToken?
   notice            PasskeyRegistrationNotice?
@@ -4664,12 +4682,68 @@ model NodeSignature {
   signature           Bytes
   verifiedAt          DateTime @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("verified_at")
 
+  // #2973 C1 (cor:dmo:130:09, gate hold 6749839869 / 6750325233) — the at-signing
+  // eligibility stamp: HMAC-SHA256 under a retained registry key
+  // (`stamp_signing_keys`), written once by the ceremony at completion, beside the
+  // signature, never part of the signed payload. The plain columns beside it are
+  // the stamp's INPUT (what was attested); the tag binds them to the row's own
+  // identity fields, so none can be altered without breaking the tag — and the
+  // rows are append-only (`hadron_guard_node_signature` refuses every UPDATE).
+  // All five columns are NULL together on rows written before the stamp existed
+  // (the watermark): such a row's at-signing authority is unverifiable by
+  // construction and never counts — cor:dmo:130:09 rev 9 (Holger's R11 ruling,
+  // 2026-11-09) makes that the LAW, not a migration fence: the row keeps its visible
+  // state but counts toward no requirement, whatever its signer's authority was then
+  // or is now, and the node is signed again. A pre-stamp binary against this schema
+  // (or a rollback to one) writes exactly these rows; the columns are nullable so
+  // those writes succeed, and the law disposes of them.
+  /// The stamp tag: HMAC-SHA256(key[stamp_key_id], canonical stamp input), 32 bytes.
+  ceremonyStamp  Bytes?  @map("ceremony_stamp")
+  /// Which retained registry key verifies the tag. Unknown ids never count.
+  stampKeyId     Int?    @map("stamp_key_id")
+  /// The node's memory AT SIGNING (the capture-memory binding of the #92963 fence).
+  stampMemoryId  String? @map("stamp_memory_id")
+  /// The Agent/App the completion judged the signer to manage, when they did
+  /// (the manager grade). NULL = writer grade only — a lawful signature that
+  /// does not count for `compiled-boot-prompt` (admission is never narrowed).
+  stampOwnerKind String? @map("stamp_owner_kind")
+  /// The judged Agent/App's id (see `stampOwnerKind`).
+  stampOwnerId   String? @map("stamp_owner_id")
+
   node           Node              @relation(fields: [nodeId], references: [id], onDelete: Cascade, onUpdate: Restrict)
   signingRequest SigningRequest    @relation(fields: [signingRequestId], references: [id], onDelete: Cascade, onUpdate: Restrict)
   passkey        PasskeyCredential @relation(fields: [passkeyCredentialId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  /// Restrict: a key with stamps is retained forever (verification never retires).
+  stampSigningKey StampSigningKey?  @relation(fields: [stampKeyId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   @@index([nodeId])
   @@map("node_signatures")
+}
+
+/// #2973 C1 — the retained versioned registry of stamp HMAC keys. Random
+/// 32-byte purpose-scoped keys (never derived from `HADRON_ENCRYPTION_KEY`:
+/// retaining an old root would retain a key that decrypts everything, while a
+/// stamp key retains only stamp power), stored wrapped via AES-256-GCM with
+/// AAD `hadron:stamp-key:v1:<id>` so a ciphertext planted from any other
+/// tokenCrypto use fails its tag and the row is unusable (Rico #92969 §1).
+/// Rotating the root RE-WRAPS rows (decrypt under the old, wrap under the
+/// new), never invalidates them: verification keys are retained forever
+/// (`retiredAt` retires minting only, and nothing in PR1 sets it — no ops
+/// surface). Minting always uses the newest unretired key; a stamp names the
+/// key that must verify it.
+model StampSigningKey {
+  id          Int       @id @default(autoincrement())
+  /// base64(iv[12] | gcm-tag[16] | ciphertext), AES-256-GCM under
+  /// `HADRON_ENCRYPTION_KEY` with the row's AAD; the plaintext must be exactly
+  /// 32 bytes or the row is unusable (fail closed).
+  keyMaterial String    @map("key_material")
+  createdAt   DateTime  @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("created_at")
+  /// Retires MINTING under this key only; verification never retires.
+  retiredAt   DateTime? @map("retired_at")
+
+  signatures NodeSignature[]
+
+  @@map("stamp_signing_keys")
 }
 
 /// Short-lived, single-use handoff codes that keep the session JWT out of
@@ -6150,6 +6224,8 @@ model AgentTeamEvent {
   darkEpisode DarkWorkerEpisode?
   cadenceEpisode CoordinatorCadenceEpisode?
   postLimitEpisode PostLimitEpisode?
+  /// #3934 (V77): the recorded end of this alarm's escalation, written once by the evaluator pass or the acknowledgement.
+  escalationEnd AlarmEscalationEnd?
 
   @@unique([taskId, type, episodeStart], map: "agent_team_events_episode_uniq")
   @@index([appId, createdAt])
@@ -6185,6 +6261,21 @@ model AgentTeamAlarmSchedule {
   @@id([eventId, chainIndex])
   @@index([wokenAt, dueAt])
   @@map("agent_team_alarm_schedule")
+}
+
+/// #3934 (cor:agt:050:20, V77; gate disposition on hadron-server#3939): the RECORDED end of an alarm's escalation. The
+/// alarm event stream is append-only, so the end lives here: one row per alarm, written once (a trigger refuses any
+/// UPDATE), by the evaluator pass (every unacknowledged alarm it finds ended) or by the acknowledgement that froze an
+/// ended-but-unrecorded episode. `endedAt` is the earliest end the available history supports at the moment of writing;
+/// it is at most one evaluator tick late and never moves. Reads take the earlier of this and the acknowledgement.
+model AlarmEscalationEnd {
+  eventId    String   @id @map("event_id")
+  endedAt    DateTime @map("ended_at")
+  recordedAt DateTime @default(now()) @map("recorded_at")
+
+  event AgentTeamEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@map("alarm_escalation_ends")
 }
 
 /// #2755 — one dark-worker episode (a worker that went OVERDUE or left a due wake unacknowledged past the App's
@@ -6807,10 +6898,6 @@ model WorkerWakeSettings {
   workerId          String    @id @map("worker_id")
   mentions          String    @default("IMMEDIATE")
   pausedUntil       DateTime? @map("paused_until")
-  /// Inert compatibility storage (#3606 phase 1). New code neither consumes nor explicitly writes these values.
-  isolatedUntil     DateTime? @map("isolated_until")
-  isolatedAt        DateTime? @map("isolated_at")
-  isolatedByUserId  String?   @map("isolated_by_user_id")
   /// #2755 — when an ACTIVE pause was ended on purpose (clearPause), which erases
   /// the only timestamp that said when the exemption ended. Natural expiry needs none (its own end stays stored).
   exemptEndedAt     DateTime? @map("exempt_ended_at")
@@ -7034,6 +7121,34 @@ model TeamStopCoverage {
 /// worker that would otherwise match it was covered, or its creator was under a `pause` or `halt` (R71). The
 /// couldn't-be-assigned clock (cor:agt:050:17) doesn't count it. Opened and closed by the matcher's pass; one open
 /// hold per task (partial unique index).
+/// #3825 (cor:agt:060:13, V37/V44): the latest DECIDED match outcome per App and combination (family, tier, role; an
+/// open dimension is the empty string, V41). One upserted row, no append log; `failingSince` is the first no-worker
+/// outcome of the current streak and is cleared by a MATCHED. Rows older than 168 h are purged by the matcher sweep.
+/// Read only through `latestMatchOutcomes`; never returned on its own, never a per-candidate record (V22).
+model AgentMatchOutcome {
+  appId         String    @map("app_id")
+  family        String    @default("")
+  tier          String    @default("")
+  role          String    @default("")
+  /// 'MATCHED' | 'NO_WORKER'.
+  outcome       String
+  /// The coarse MatchFailureReason of a NO_WORKER outcome; null for MATCHED.
+  reason        String?
+  /// Database clock, microseconds (a stamp is never truncated to a millisecond, so two decisions rarely tie).
+  decidedAt     DateTime  @map("decided_at") @db.Timestamp(6)
+  failingSince  DateTime? @map("failing_since") @db.Timestamp(6)
+  /// The newest MATCHED decision seen, including one that arrived after a newer outcome; it orders late writes against
+  /// the streak (#3825 follow-up). The migration seeds a pre-existing NO_WORKER row with its latest failure instead: the
+  /// floor no older late failure joins (#3883). Never read outside `recordMatchOutcome`.
+  lastMatchedAt DateTime? @map("last_matched_at") @db.Timestamp(6)
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@id([appId, family, tier, role])
+  @@index([decidedAt])
+  @@map("agent_match_outcomes")
+}
+
 model AgentTaskStopHold {
   id        String    @id
   appId     String    @map("app_id")
@@ -7461,13 +7576,15 @@ model ChatRootEngineState {
 /// REGISTERED action (`actions`), the values it allows, its time frame and count, and why. Whether it is live is WORKED OUT
 /// (src/lib/grants/live.ts and the matching SQL fragment), never stored. Nothing in the server writes a row yet; the
 /// database guards (prisma/grant-invariants.sql) fix what any later writer may do: a row arrives pending, ends once by
-/// revocation, loses an erased issuer, and follows a user merge. Holder foreign keys are RESTRICT as INTERIM referential
-/// integrity on empty, producer-free tables (gate 6712456240); what an erased holder's grant becomes is UNSELECTED
-/// (cor:acl:140:08 Open, every holder kind), and no persistent producer may ship before it is ruled and re-gated.
+/// revocation or by its holder going (#3690 S2a-h: ruling 0255 item 3, 0259; the holder ids are sealed, with no foreign key),
+/// loses an erased issuer, and follows a user merge.
 model Grant {
   id                    String    @id @default(cuid())
   appId                 String    @map("app_id")
-  /// The holder: exactly one of these four (chk_grants_exactly_one_holder).
+  /// The holder: exactly one of these four (chk_grants_exactly_one_holder). SEALED ids, no foreign key (#3690 S2a-h): when the
+  /// holder goes the grant ends and the record stays (cor:acl:140:03, ruling 0255 item 3), so the id must survive the row it
+  /// names, and the CHECK forbids the SET NULL a foreign key would need. The kind is the column that is set. Integrity at
+  /// insert is the guard trigger's (the holder must exist and not be gone); the ending is `holderDepartedAt`.
   userId                String?   @map("user_id")
   agentId               String?   @map("agent_id")
   workerId              String?   @map("worker_id")
@@ -7492,19 +7609,24 @@ model Grant {
   activatedAt           DateTime? @map("activated_at")
   verificationKind      String?   @map("verification_kind")
   verifiedBy            String?   @map("verified_by")
-  signatureId           String?   @map("signature_id")
+  /// #3649 slice B: the signature that activated it (set by slice C's activation, never by a write surface). A signature
+  /// activates one grant, so the column is unique.
+  signatureId           String?   @unique @map("signature_id")
   revokedAt             DateTime? @map("revoked_at")
   revokedBy             String?   @map("revoked_by")
+  /// #3690 (S2a-h, cor:acl:140:03): when the HOLDER went (a person erased, a worker retired or deleted, an agent or an App
+  /// deleted). A FACT, like `revokedAt`, never a state label: the live check reads it, and nothing names the ended state.
+  /// Stamped once, and only on a grant not already ended (prisma/grant-invariants.sql); the holder id above stays.
+  holderDepartedAt      DateTime? @map("holder_departed_at")
   createdAt             DateTime  @default(now()) @map("created_at")
   updatedAt             DateTime  @updatedAt @map("updated_at")
 
   app         App     @relation("GrantApp", fields: [appId], references: [id], onDelete: Cascade)
-  user        User?   @relation("GrantHolderUser", fields: [userId], references: [id], onDelete: Restrict)
-  agent       Agent?  @relation("GrantHolderAgent", fields: [agentId], references: [id], onDelete: Restrict)
-  worker      Worker? @relation("GrantHolderWorker", fields: [workerId], references: [id], onDelete: Restrict)
-  granteeApp  App?    @relation("GrantHolderApp", fields: [granteeAppId], references: [id], onDelete: Restrict)
   issuer      User?   @relation("GrantIssuer", fields: [issuerUserId], references: [id], onDelete: SetNull)
   actionDef   Action  @relation(fields: [action], references: [name], onDelete: Restrict, onUpdate: Restrict)
+  signature   GrantSignature? @relation("GrantActivation", fields: [signatureId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  signingRequests GrantSigningRequest[]
+  signatures      GrantSignature[] @relation("GrantSignatures")
 
   @@index([appId, createdAt])
   @@index([userId])
@@ -7513,6 +7635,74 @@ model Grant {
   @@index([granteeAppId])
   @@index([action])
   @@map("grants")
+}
+
+/// #3649 slice B (cor:acl:140:07; the node-signing mirror cor:dmo:130:03) — a request for a person to sign ONE grant (gate
+/// selection 1: a single grant; a selection is later scope). Pinned at creation and immutable: the grant, its record version,
+/// the terms hash (cor:acl:140:09) and the payload version. No signer is named (ruling 0255, item 12): whoever signs must be
+/// able to issue the grant (cor:acl:140:04), judged at completion (slice C). It is open, then ends exactly once:
+/// completed | declined | expired | stale | withdrawn. Every timestamp is the DB clock, set by the guard trigger
+/// (prisma/grant-signing-invariants.sql), which also enforces the single end; a grant that is revoked, loses its holder or
+/// moves its terms ends its open requests stale. Kept for the grant's lifetime (it cascades only with the grant). User, App,
+/// worker and session ids are sealed history with no FK (conventions:append-only-table-trigger).
+model GrantSigningRequest {
+  /// 128 bits of randomness, base64url: never guessable (the node-signing id mint).
+  id                 String    @id
+  grantId            String    @map("grant_id")
+  /// The grant record's version and terms hash as the requester read them; completion requires both still to match.
+  version            Int
+  termsHash          String    @map("terms_hash")
+  payloadVersion     String    @map("payload_version")
+  /// The requester ACCOUNT is requesterUserId, else requesterAppId (the node-signing rule).
+  requesterUserId    String?   @map("requester_user_id")
+  requesterAppId     String?   @map("requester_app_id")
+  requesterWorkerId  String?   @map("requester_worker_id")
+  requesterSessionId String?   @map("requester_session_id")
+  /// open | completed | declined | expired | stale | withdrawn
+  state              String    @default("open")
+  createdAt          DateTime  @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("created_at")
+  expiresAt          DateTime  @map("expires_at")
+  endedAt            DateTime? @map("ended_at")
+
+  grant     Grant           @relation(fields: [grantId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  signature GrantSignature?
+
+  @@index([grantId, createdAt])
+  @@map("grant_signing_requests")
+}
+
+/// #3649 slice B (cor:acl:140:07, :09) — an append-only grant signature record: inserted only against an open request whose
+/// pins it repeats, never updated, deleted only with its grant. It keeps the SIGNED holder (kind and id) beside the version
+/// and terms hash, because a user merge may later move the grant's holder link and a later read must rebuild the terms the
+/// person signed, not the current row's (cor:acl:140:09). State is never stored; slice D derives it on read.
+model GrantSignature {
+  id                  String   @id @default(cuid())
+  grantId             String   @map("grant_id")
+  /// The request it completed; one record per request.
+  signingRequestId    String   @unique @map("signing_request_id")
+  /// A person, always. Sealed history: no FK.
+  signerId            String   @map("signer_id")
+  passkeyCredentialId String   @map("passkey_credential_id")
+  version             Int
+  termsHash           String   @map("terms_hash")
+  /// The holder as signed: user | agent | worker | app, and its id.
+  holderKind          String   @map("holder_kind")
+  holderId            String   @map("holder_id")
+  payloadVersion      String   @map("payload_version")
+  /// The WebAuthn RP ID the signature was made under (re-verification uses it, never the current config).
+  rpId                String   @map("rp_id")
+  authenticatorData   Bytes    @map("authenticator_data")
+  clientDataJson      Bytes    @map("client_data_json")
+  signature           Bytes
+  verifiedAt          DateTime @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("verified_at")
+
+  grant          Grant               @relation("GrantSignatures", fields: [grantId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  signingRequest GrantSigningRequest @relation(fields: [signingRequestId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  passkey        PasskeyCredential   @relation(fields: [passkeyCredentialId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  activatedGrant Grant?              @relation("GrantActivation")
+
+  @@index([grantId])
+  @@map("grant_signatures")
 }
 
 /// #3668 (S1a, cor:acl:140:01) — append-only history of a grant: who did what, when. Grant, App-scope and actor ids carry no

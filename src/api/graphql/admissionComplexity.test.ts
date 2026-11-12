@@ -30,9 +30,12 @@ const REVIEWED_PAGED_FIELDS = [
   "CompiledBootPrompt.lintWarnings", // #2048: default 50, cap 100; shared pageLintWarnings.
   "Mutation.claimUntrackedTaskItems", // #3125 S3: limit default 1, cap 10; common omitted bound 100 is conservative.
   "Mutation.collectHostOperations",
+  "Mutation.planNodeMove", // #3424: limit default100/cap1000; common omitted bound100 matches.
   "Node.lintWarnings",
   "Node.signingRequests",
   "NodeApprovalReceipt.lintWarnings",
+  "PublicOrganization.publicAgentsPage", // #3873: pageArgs, default 20, cap 200.
+  "PublicOrganization.publicMemoriesPage", // #3873: pageArgs, default 20, cap 200.
   "Query.actionRegisterIndex", // #3287: pageArgs, default 20, cap 200; below the common 100, so omission overestimates.
   "Query.actionTickets",
   "Query.agentAssets",
@@ -41,10 +44,12 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.agentTaskList", // #2421: limit applies only when symptom is present; default 3, cap 3.
   "Query.agentTasks",
   "Query.agentTeamEvents",
+  "Query.agentTeamEventsPage", // #3933: clampListTake, default 20, cap 200; the common omitted bound 100 is conservative.
   "Query.agentWebhooks",
   "Query.agents",
   "Query.aiModelPrices",
   "Query.aiServiceConfigs",
+  "Query.appGrants", // #3711: clampListTake, default 20, cap 200; the common omitted bound 100 is conservative.
   "Query.appKeysPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.appMemoryScope",
   "Query.appNodes",
@@ -59,7 +64,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.channelMessages",
   "Query.channels",
   "Query.chatHistory",
-  "Query.chatServedPrompts", // #2862: default 50, cap 200 (the field's own paging); under the shared 100 default.
+  "Query.chatServedPrompts", // #2862: default 20, cap 200 (the field's own paging); under the shared 100 default.
   "Query.commentThreads",
   "Query.compiledPromptProvenance",
   "Query.connectionGrants",
@@ -75,6 +80,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.findNodes",
   "Query.findObjects",
   "Query.globalSearch",
+  "Query.grants", // #3789: clampListTake, default 20, cap 200; the common omitted bound 100 is conservative.
   "Query.heldWorkers",
   "Query.homeAssistantInstances",
   "Query.hostOperations",
@@ -92,11 +98,13 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.myAgentSubscriptionsPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.myChats",
   "Query.myChatsPage", // #2212 A3: pageArgs, default 20, cap 200.
+  "Query.myGrants", // #3800: clampListTake, default 20, cap 200; the common omitted bound 100 is conservative.
   "Query.myUserApiKeysPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.nodeEdgeRemovals",
   "Query.nodeRevisions",
   "Query.nodeRevisionsPage",
   "Query.nodeUsage",
+  "Query.orgBootPromptSigningPreview", // #2973 PR2: default 50, cap 200; the common omitted bound 100 is conservative.
   "Query.organizations",
   "Query.principalGrants",
   "Query.publicAgents",

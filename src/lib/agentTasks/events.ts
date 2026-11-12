@@ -61,6 +61,14 @@ export const ASSIGNMENT_EVENT_TYPES = ['assignment.queued', 'assignment.matched'
  */
 export const ASSIGNED_EVENT_TYPES = ['task.assigned', 'task.reassigned', 'assignment.matched'] as const;
 
+/**
+ * #3934 (cor:agt:050:02): the events that CLEAR a task's assignee, so whoever held it stops holding it there. A hand-back to the
+ * queue is the only writer that does (a park to backlog refuses an assigned task, and a worker cannot be deleted while it holds
+ * one). Typed against the event union below, so renaming the event type on the writer side breaks the build here instead of
+ * silently desynchronising the reader of the holding stints (`endedAlarmEpisodeInstants`).
+ */
+export const ASSIGNEE_CLEARED_EVENT_TYPES = ['task.handed-back'] as const satisfies readonly TaskEventPayload['type'][];
+
 /** Passive history must be excluded from EVERY later-event/activity predicate when a kind is added here. */
 export const PASSIVE_EVENT_TYPES = ['task.warning', 'task.edited', 'task.properties-changed'] as const;
 /** #2609: only facts already readable by every team-event reader. Assignee state and future codes are excluded. */
@@ -650,6 +658,8 @@ export type CredentialAct =
   | 'app-key.list' | 'app-write-grant.list'
   | 'automation-read-grant.revoke' | 'automation-read-grant.list'
   | 'automation-team-snapshot-grant.revoke' | 'automation-team-snapshot-grant.list'
+  /** #3711: an instructed revoke of a grant (cor:acl:140:05). */
+  | 'grant.revoke'
   /** #3322: an instructed switch of an App memory asset's public link that changed the flag. */
   | 'asset.public-link';
 

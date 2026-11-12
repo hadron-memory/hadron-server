@@ -6,7 +6,7 @@ import { buildSchema, parse, validate } from 'graphql';
 import { typeDefs } from '../api/graphql/schema/typeDefs.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
-import { cleanDb } from '../test/helpers.js';
+import { cleanDb, suspendChatSeqUniqueness } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { ensureChannelWithRoot } from './channels.js';
 import { appendChatMessage } from './chatRoot.js';
@@ -234,6 +234,18 @@ describe('worker-owned ordinary reads', () => {
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toMatchObject({ lastSeenSeq: 2 });
   });
 
+  it('#3759 a teamHeadRefs read is a partial window and never advances the read cursor; an empty list is not a filter', async () => {
+    for (let i = 1; i <= 3; i++) await post(`message ${i}`);
+    const head = worker.id;
+    await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Report', slug: 'report', reportsToWorkerId: head } });
+    const ctx = userCtx({ sessionId });
+    await Q.channelMessages({}, { channelRef: channel.id, sinceSeq: 0, limit: 50, teamHeadRefs: [head] }, ctx);
+    await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0, limit: 50, teamHeadRefs: [head] }, ctx);
+    expect(await seenSeq(worker.id, channel.id)).toBe(0);
+    await Q.channelMessages({}, { channelRef: channel.id, sinceSeq: 0, limit: 50, teamHeadRefs: [] }, ctx);
+    expect(await seenSeq(worker.id, channel.id)).toBe(3);
+  });
+
   it('does not mark a cursor-less tail even when the whole chat fits', async () => {
     await post('only message');
     const page = await Q.channelMessages({}, { channelRef: channel.id }, userCtx({ sessionId }));
@@ -244,7 +256,9 @@ describe('worker-owned ordinary reads', () => {
   it('a partial page ending inside a legacy duplicate seq stops one short (#1362 review)', async () => {
     await post('one');
     await post('two, first of a pre-#919 duplicate pair');
-    // The backfilled sibling: same seq, written outside the allocator.
+    // The backfilled sibling: same seq, written outside the allocator —
+    // plantable only with #992's constraint aside (see the helper).
+    await suspendChatSeqUniqueness(db);
     await db.node.create({
       data: {
         id: generateId(), memoryId: channel.memoryId, loc: `${channel.loc}:messages:002-dup`, name: '002-dup',

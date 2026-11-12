@@ -1,6 +1,7 @@
 {
  "user": [
   "hadron_ack_wakes",
+  "hadron_agent_boot_prompt",
   "hadron_agent_processes",
   "hadron_agent_set_base",
   "hadron_agent_set_index_refs",
@@ -144,12 +145,15 @@
   "hadron_update_task",
   "hadron_update_worker",
   "hadron_validate",
+  "hadron_web_poll_cancel",
+  "hadron_web_poll_list",
   "hadron_whoami",
   "hadron_worker_availability_set",
   "hadron_worker_wake_settings"
  ],
  "userWithApp": [
   "hadron_ack_wakes",
+  "hadron_agent_boot_prompt",
   "hadron_agent_processes",
   "hadron_agent_set_base",
   "hadron_agent_set_index_refs",
@@ -293,12 +297,15 @@
   "hadron_update_task",
   "hadron_update_worker",
   "hadron_validate",
+  "hadron_web_poll_cancel",
+  "hadron_web_poll_list",
   "hadron_whoami",
   "hadron_worker_availability_set",
   "hadron_worker_wake_settings"
  ],
  "appKeyOnly": [
   "hadron_ack_wakes",
+  "hadron_agent_boot_prompt",
   "hadron_agent_processes",
   "hadron_agent_set_base",
   "hadron_agent_set_index_refs",
@@ -438,12 +445,15 @@
   "hadron_update_task",
   "hadron_update_worker",
   "hadron_validate",
+  "hadron_web_poll_cancel",
+  "hadron_web_poll_list",
   "hadron_whoami",
   "hadron_worker_availability_set",
   "hadron_worker_wake_settings"
  ],
  "impersonation": [
   "hadron_ack_wakes",
+  "hadron_agent_boot_prompt",
   "hadron_agent_processes",
   "hadron_agent_set_base",
   "hadron_agent_set_index_refs",
@@ -583,6 +593,8 @@
   "hadron_update_task",
   "hadron_update_worker",
   "hadron_validate",
+  "hadron_web_poll_cancel",
+  "hadron_web_poll_list",
   "hadron_whoami",
   "hadron_worker_availability_set",
   "hadron_worker_wake_settings"
