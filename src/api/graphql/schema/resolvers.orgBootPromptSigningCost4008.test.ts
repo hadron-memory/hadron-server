@@ -11,7 +11,7 @@ import { generateId } from '../../../lib/id.js';
 import { computeApprovalHash } from '../../../lib/approvalHash.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
 import { sha256Hex, type CompiledProvenance } from '../../../lib/bootCompile/provenance.js';
-import { computeSigningPreviewRows } from '../../../lib/bootPrompt/signingSwitch.js';
+import { computeSigningPreviewRows, mintSigningPreviewToken, requireFreshSigningPreview, signingPreviewDigest, dbNowMs } from '../../../lib/bootPrompt/signingSwitch.js';
 
 let statements = 0;
 const logged = new PrismaClient({ datasourceUrl: process.env.DATABASE_URL, log: [{ emit: 'event', level: 'query' }] });
@@ -62,5 +62,21 @@ describe('#4008 preview cost per row', () => {
     // Main ran 32 per row (the serve's own walk plus a second full revision walk). Now 23: the second walk is skipped
     // for a served revision that is signed or has no older revision. The rest is the serve's own per-target reads.
     expect(perRow).toBeLessThanOrEqual(24);
+  }, 60_000);
+
+  it("switch-on's own digest recompute (requireFreshSigningPreview) costs the same bounded statements per row", async () => {
+    const userId = generateId();
+    const redeem = async () => {
+      const digest = signingPreviewDigest(await computeSigningPreviewRows(db, org.id));
+      const token = mintSigningPreviewToken({ orgId: org.id, userId, digest, iatMs: await dbNowMs(db) });
+      statements = 0;
+      await requireFreshSigningPreview(logged as never, { token, orgId: org.id, userId });
+      return statements;
+    };
+    for (let i = 0; i < 3; i++) await install(i);
+    const small = await redeem();
+    for (let i = 3; i < 13; i++) await install(i);
+    const large = await redeem();
+    expect((large - small) / 10).toBeLessThanOrEqual(24);
   }, 60_000);
 });
