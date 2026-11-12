@@ -19,7 +19,7 @@ const registrationTypes = new Set(['PasskeyCredential', 'PasskeyWindow', 'Passke
 
 /** #1918: public-reference generators consume the same per-flag field data. */
 export const capabilityFields: Readonly<Record<string, Readonly<Record<string, 'signing' | 'registration'>>>> = {
-  ServerInfo: { signing: 'signing', passkeyRegistration: 'registration' },
+  ServerInfo: { signing: 'signing', passkeyRegistration: 'registration', passkeyRevokeUrl: 'registration' },
   Mutation: { createGrant: 'signing' },
 };
 

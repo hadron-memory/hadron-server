@@ -76,7 +76,8 @@ import { sessionHasHandoff } from '../../../lib/hostOperations/settle.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { normalizeAvailability, type AvailabilityInput } from './resolvers.agentTaskAlarms.js';
 import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
-import { buildWorkerTerminal, validateTerminalBatch, type StoredWorkerTerminal, type TerminalReportInput } from '../../../lib/workerTerminal.js';
+import { postRepairNoticesDeferred, ALERT_KEY, type RepairNotice } from '../../../lib/agentTasks/hostRepairNotice.js';
+import { buildWorkerTerminal, repairRefusal, validateTerminalBatch, type StoredWorkerTerminal, type TerminalReportInput } from '../../../lib/workerTerminal.js';
 import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
 import {
   authorizeContextResetStop,
@@ -499,7 +500,10 @@ export const hostOperationMutations = {
     const now = new Date();
     const checked = validateTerminalBatch(input.reports, now);
     if (!checked.ok) throw badInput(checked.message);
-    return asHost(ctx, input.appRef, async (tx, app, host) => {
+    const notices: RepairNotice[] = [];
+    let noticeAppId = '';
+    const result = await asHost(ctx, input.appRef, async (tx, app, host) => {
+      noticeAppId = app.id;
       const refs = new Map<string, string | null>();
       for (const r of checked.reports) refs.set(r.worker, await resolveTaskWorkerId(ctx, app.id, r.worker));
       // #2791 §10: the resolver spans every App, so a worker of ANOTHER tenant must read as absent BEFORE the duplicate
@@ -514,10 +518,10 @@ export const hostOperationMutations = {
       // Two refs naming one worker (an id and its name) are one report twice: sender's bug, nothing stored.
       const named = [...refs.values()].filter((id): id is string => id !== null);
       if (new Set(named).size !== named.length) throw badInput('A worker is reported at most once per call.');
-      const rows = new Map<string, { appId: string; retiredAt: Date | null; slug: string; terminal: StoredWorkerTerminal | null }>();
+      const rows = new Map<string, { appId: string; retiredAt: Date | null; slug: string; name: string; terminal: StoredWorkerTerminal | null; repairNoticeKey: string | null }>();
       for (const id of [...named].sort()) {
-        const [w] = await tx.$queryRaw<{ appId: string; retiredAt: Date | null; slug: string; terminal: StoredWorkerTerminal | null }[]>`
-          SELECT app_id AS "appId", retired_at AS "retiredAt", slug, terminal FROM workers WHERE id = ${id} FOR UPDATE`;
+        const [w] = await tx.$queryRaw<{ appId: string; retiredAt: Date | null; slug: string; name: string; terminal: StoredWorkerTerminal | null; repairNoticeKey: string | null }[]>`
+          SELECT app_id AS "appId", retired_at AS "retiredAt", slug, name, terminal, repair_notice_key AS "repairNoticeKey" FROM workers WHERE id = ${id} FOR UPDATE`;
         if (w) rows.set(id, w);
       }
       const [reg] = await tx.$queryRaw<{ id: string; label: string }[]>`
@@ -540,13 +544,29 @@ export const hostOperationMutations = {
           refused.push({ worker: r.worker, code: 'TERMINAL_REPORT_STALE' });
           continue;
         }
+        // #4041 (V82): a repair outcome is judged per worker, so one bad report never blocks the rest of the batch.
+        const refusal = repairRefusal(r);
+        if (refusal) {
+          refused.push({ worker: r.worker, code: refusal });
+          continue;
+        }
         const terminal = buildWorkerTerminal(r, { id: host.hostId, label: reg.label }, now);
-        await tx.worker.update({ where: { id }, data: { terminal: terminal as unknown as Prisma.InputJsonObject } });
+        // A report with no repair outcome, or a relaunch, re-arms the once-per-worker alert (the marker is only ever
+        // `alert` here; a relaunch's own marker is claimed with its post).
+        const rearm = (r.repair === null || r.repair === 'RELAUNCHED') && w.repairNoticeKey === ALERT_KEY;
+        await tx.worker.update({
+          where: { id },
+          data: { terminal: terminal as unknown as Prisma.InputJsonObject, ...(rearm ? { repairNoticeKey: null } : {}) },
+        });
         stored.push({ id, urn: composeWorkerUrn(app.urn, w.slug) });
+        if (r.repair) notices.push({ workerId: id, workerName: w.name, hostLabel: reg.label, repair: r.repair, attempt: r.attempt, checkedAt: r.checkedAt });
       }
       await recordHostKeyUse(tx, host, 'terminal', { count: stored.length });
       return { stored, refused };
     });
+    // After the commit, as the platform: the host key writes nothing here (cor:agt:070:04).
+    postRepairNoticesDeferred(ctx.db, noticeAppId, notices);
+    return result;
   }),
 
   /**
