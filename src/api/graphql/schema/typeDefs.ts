@@ -15472,6 +15472,8 @@ export const typeDefs = `#graphql
     displayMessage: String!
     stageTransitioned: Boolean!
     newStageName: String
+    "The stage name the turn asked for that is not one of the conversation's stages (hrn:node:hadronmemory.com:specs:cor:cht:030:02). The chat did not move; the turn is recorded. Null when the name was accepted or none was given."
+    rejectedNextStage: String
     conversationHandoff: String
     chatEnded: Boolean!
     onTrack: Boolean!
