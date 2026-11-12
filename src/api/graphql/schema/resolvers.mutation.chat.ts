@@ -60,7 +60,8 @@ import { AgentNotFoundError, UserNotFoundError } from '../../../lib/entityRef/er
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { appKeyMayActFor, appKeySessionMatchesAgent, canChatWithAgent, chatAuthorityAnchors, chatCarrierApps } from './agentChatAccess.js';
 import { withAuthorizedMemoryTx, withAuthorizedTx } from './authorizedTx.js';
-import { activeAppInstallLicenseIdsForAgent, isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
+import { activeAppInstallLicenseIdsForAgent } from '../../../lib/appAgent.js';
+import { chatHomeAgentIfLicensed } from '../../../lib/chatHomeAgent.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { type MemoryVisibility } from '../../../generated/prisma/index.js';
@@ -541,17 +542,23 @@ export const chatMutations = {
             })
           ).map((m) => m.organizationId);
 
-          const matchingApp =
+          const candidateApps =
             ownerOrgIds.length > 0
-              ? await ctx.db.app.findFirst({
+              ? await ctx.db.app.findMany({
                   where: {
                     ...appInstallationWhere(resolvedAgentId),
                     organizationId: { in: ownerOrgIds },
                     deletedAt: null,
                   },
                   select: { id: true },
+                  orderBy: { id: 'asc' },
                 })
-              : null;
+              : [];
+          // Installation membership alone includes retained, unlicensed rows.
+          const licensedAppIds = await activeAppInstallLicenseIdsForAgent(
+            ctx.db, resolvedAgentId, candidateApps.map((app) => app.id),
+          );
+          const matchingApp = candidateApps.find((app) => licensedAppIds.has(app.id)) ?? null;
 
           // Andi's F1 on #3960, the private arm: the memory below would belong to `matchingApp` (else to no App), so a
           // choice that App does not own is refused before the memory exists. Same refusal as the later common check.
@@ -950,14 +957,7 @@ export const chatMutations = {
         });
         agent = legacyAgents.find((a) => (a as any).systemMemoryId) ?? null;
       }
-      // Uninstall leaves the App's shared chat memory in place. Its historical
-      // Agent pointer is not a live grant: after uninstall, participants may
-      // still post to the chat, but its old system prompt and linked knowledge
-      // must not re-enter template retrieval.
-      if (memory.class === 'app' && agent) {
-        const installed = memory.appId && await isAgentInstalledAndLicensed(ctx.db, memory.appId, agent.id);
-        if (!installed) agent = null;
-      }
+      agent = await chatHomeAgentIfLicensed(ctx.db, memory, agent);
       const systemMemoryId = agent ? (agent as any).systemMemoryId as string : null;
 
       // Pin to version: if the chat was started with a published revision,
@@ -1618,7 +1618,8 @@ export const chatMutations = {
         const memory = await ctx.db.memory.findUnique({ where: { id: chatNode.memoryId } });
         const agentId = memory?.userMemoryOfAgentId;
         if (agentId) {
-          const agent = await ctx.db.agent.findUnique({ where: { id: agentId } });
+          const agent = await chatHomeAgentIfLicensed(ctx.db, memory!,
+            await ctx.db.agent.findUnique({ where: { id: agentId } }));
           const sysMemId = (agent as any)?.systemMemoryId as string | null;
           if (sysMemId) {
             // Find the current stage node and look for outgoing edges
