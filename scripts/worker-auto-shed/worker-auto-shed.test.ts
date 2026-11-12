@@ -454,6 +454,33 @@ describe('#3954: no kill while a human is in the conversation', () => {
     }
   });
 
+  it('fails toward not killing when the terminal report is stale (an old empty prompt proves nothing)', async () => {
+    for (const bad of ['{"terminal":{"prompt":"empty","stale":true,"status":"dark"}}', '{"terminal":{"prompt":"empty","stale":true}}']) {
+      const { s, wt, agent, terminal } = await stage();
+      terminal(bad);
+      const r = fire(NEW_HOOK, s, wt, agent.pid);
+      expect(r.status, `${bad}: ${r.log}`).toBe(0);
+      expect(r.log, bad).toMatch(/skip: human presence unreadable/);
+      expect(agent.gone(), `${bad}: stopped on a stale terminal report`).toBe(false);
+    }
+  });
+
+  it('fails toward not killing when the transcript holds a malformed record (truncated, or mixed with an old valid one)', async () => {
+    const bad: string[][] = [
+      ['{"type":"user","origin":{"kind":"human"},"timestamp":"2026-'],
+      [humanEntry(60 * MIN, 'old'), '{"type":"user","origin":{"kind":"hum'],
+      ['not json at all'],
+    ];
+    for (const lines of bad) {
+      const { s, wt, agent, transcript } = await stage();
+      transcript(...lines);
+      const r = fire(NEW_HOOK, s, wt, agent.pid);
+      expect(r.status, `${lines}: ${r.log}`).toBe(0);
+      expect(r.log, String(lines)).toMatch(/skip: human presence unreadable/);
+      expect(agent.gone(), `${lines}: stopped on an unparseable transcript`).toBe(false);
+    }
+  });
+
   it('fails toward not killing when the transcript cannot be read (exit 0, agent untouched)', async () => {
     const { s, wt, agent } = await stage();
     rmSync(join(s.root, 'transcript.jsonl'));
