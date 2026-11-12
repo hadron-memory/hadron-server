@@ -17,7 +17,7 @@ afterAll(() => api.stop());
 const Q = resolvers.Query!;
 let orgId: string, authorRoot: string, servingRoot: string, appId: string, agentId: string, workerId: string, adminId: string, memberId: string;
 const context = (userId = adminId): Context => ({ db, userId, roles: [] });
-const preview = (ctx = context()) => Q.orgBootPromptSigningPreview!({}, { org: orgId }, ctx, {} as never) as Promise<any>;
+const preview = (ctx = context()) => Q.orgBootPromptSigningPreview!({}, { org: orgId }, ctx) as Promise<any>;
 
 beforeEach(async () => {
   await cleanDb(db);
