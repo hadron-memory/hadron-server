@@ -8741,6 +8741,10 @@ export const typeDefs = `#graphql
     createdAt: DateTime!
     revokedAt: DateTime
     revokedBy: String
+    "True when this live grant can no longer take effect because its target memory is no longer one a write grant may target (for example an Agent system memory, or one later encrypted): the row is accurate but authorizes nothing, and only a revoke clears it. Derived at read by the same function the write doors call, never stored, and gone when the memory qualifies again. False on a revoked row and on an effective one. Null when memoryUrn is null (the memory is concealed from the caller). hrn:node:hadronmemory.com:specs:cor:agt:010:01"
+    notEffective: Boolean
+    "Why notEffective is true: system, encrypted, install-memory, no-owner or tenancy; null otherwise, and null whenever memoryUrn is null. Display only: a client must not branch on a value it does not know."
+    notEffectiveReason: String
   }
 
   "#2883: an automation's READ grant on one memory (the whole memory, or one loc prefix), held on the trigger row (a schedule or webhook) a run executes. Read-only: consulted only by the run's own node read, live at each read, never for writes, listing or search, and only for the memory's own run. It carries over an edit and a re-adoption and ends on revoke or when the trigger is deleted. Runs the trigger starts carry it; a manual run does not. hrn:node:hadronmemory.com:specs:cor:agt:010:01"

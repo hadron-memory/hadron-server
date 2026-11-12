@@ -17,6 +17,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { GRANT_MEMORY_SELECT, grantTargetRefusal } from '../../../lib/appWriteGrant.js';
 import { resolvers } from './resolvers.js';
+import { project } from './resolvers.appWriteGrant.js';
 
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -39,7 +40,7 @@ async function fixture() {
   const system = await mem('mark4022.test:sys', { class: 'system' });
   const foreignOrg = await db.organization.create({ data: { name: 'Foreign', urn: 'foreign4022.test' } });
   const ctx = { db, userId: mgr.id, roles: [] as never[] };
-  return { org, mgr, app, dest, personal, system, foreignOrg, ctx };
+  return { org, mgr, app, dest, personal, system, foreignOrg, ctx, mem };
 }
 type F = Awaited<ReturnType<typeof fixture>>;
 
@@ -84,9 +85,9 @@ describe('#4022 the listing marks a grant that cannot take effect', () => {
 
   it('one computation: for every memory state the mark equals grantTargetRefusal on the same row', async () => {
     const f = await fixture();
-    const enc = await db.memory.create({ data: { name: 'vault', urn: 'mark4022.test:vault', class: 'knowledge', visibility: 'ORGANIZATION', organizationId: f.org.id, isEncrypted: true } as never });
+    const enc = await f.mem('mark4022.test:vault', { isEncrypted: true });
     const foreign = await db.memory.create({ data: { name: 'foreign', urn: 'foreign4022.test:mem', class: 'knowledge', visibility: 'ORGANIZATION', organizationId: f.foreignOrg.id } as never });
-    const encPersonal = await db.memory.create({ data: { name: 'vm', urn: 'mark4022.test:vm', class: 'personal', userId: f.mgr.id, isEncrypted: true } as never });
+    const encPersonal = await f.mem('mark4022.test:vm', { class: 'personal', userId: f.mgr.id, isEncrypted: true });
     const memories = [f.dest, f.personal, f.system, enc, foreign, encPersonal];
     for (const m of memories) await rowOn(f, m.id);
     const app = await db.app.findUniqueOrThrow({ where: { id: f.app.id }, select: { id: true, organizationId: true, ownerUserId: true } });
@@ -139,6 +140,17 @@ describe('#4022 concealment: the mark never tells a caller about a memory they c
     expect(r.notEffective ?? null).toBeNull();
     expect(r.notEffectiveReason ?? null).toBeNull();
     expect(r.revokedAt).toBeInstanceOf(Date);
+  });
+
+  it('the projection itself withholds URN, mark and reason on an UNREVOKED row of a memory the viewer does not own (no door reaches this today; it is the guard)', async () => {
+    const f = await fixture();
+    const row = await rowOn(f, f.personal.id);
+    await db.memory.update({ where: { id: f.personal.id }, data: { isEncrypted: true } });
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: f.personal.id }, select: { ...GRANT_MEMORY_SELECT, urn: true } });
+    const app = await db.app.findUniqueOrThrow({ where: { id: f.app.id }, select: { id: true, organizationId: true, ownerUserId: true } });
+    const peer = await db.user.create({ data: { handle: 'mark-peer2' } });
+    expect(project(row, memory, app, peer.id)).toMatchObject({ memoryUrn: null, notEffective: null, notEffectiveReason: null });
+    expect(project(row, memory, app, f.mgr.id)).toMatchObject({ notEffective: true, notEffectiveReason: 'encrypted' });
   });
 
   it('CONTROL: a caller who may not list is refused exactly as before', async () => {
