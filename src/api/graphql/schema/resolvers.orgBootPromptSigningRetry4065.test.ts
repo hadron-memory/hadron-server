@@ -15,14 +15,44 @@ const abort = (sqlstate = '40001') => new Prisma.PrismaClientKnownRequestError('
 
 /** A db whose `$transaction` throws `error` for its first `failures` calls, then delegates. */
 function flaky(failures: number, error: () => Error = abort) {
-  const state = { attempts: 0 };
+  const state = { attempts: 0, thrown: [] as Error[] };
   const proxy = new Proxy(db, {
     get(target, prop) {
       if (prop === '$transaction') {
         return (...args: unknown[]) => {
           state.attempts += 1;
-          if (state.attempts <= failures) return Promise.reject(error());
+          if (state.attempts <= failures) {
+            const e = error();
+            state.thrown.push(e);
+            return Promise.reject(e);
+          }
           return (target.$transaction as (...a: unknown[]) => Promise<unknown>)(...args);
+        };
+      }
+      const v = Reflect.get(target, prop, target);
+      return typeof v === 'function' ? v.bind(target) : v;
+    },
+  });
+  return { state, ctx: (userId = adminId): Context => ({ db: proxy as typeof db, userId, roles: [] }) };
+}
+
+/**
+ * A db whose FIRST `$transaction` runs its callback for real, then (still inside the aborted attempt) lets `between`
+ * change the world and reports a 40001 abort; later calls delegate. This is the abort-inside-the-callback case: the
+ * retried attempt must re-read the state the first attempt did not see.
+ */
+function abortAfterFirstRun(between: () => Promise<unknown>) {
+  const state = { attempts: 0 };
+  const proxy = new Proxy(db, {
+    get(target, prop) {
+      if (prop === '$transaction') {
+        return async (...args: unknown[]) => {
+          state.attempts += 1;
+          const run = target.$transaction as (...a: unknown[]) => Promise<unknown>;
+          if (state.attempts > 1) return run.apply(target, args);
+          await run.apply(target, args);
+          await between();
+          throw abort();
         };
       }
       const v = Reflect.get(target, prop, target);
@@ -57,8 +87,11 @@ describe('#4065 signing reads retry a serialization abort', () => {
 
   it('answers with the original error once the retry budget is spent', async () => {
     const f = flaky(Infinity);
-    await expect(preview(f.ctx())).rejects.toMatchObject({ code: 'P2010', meta: { code: '40001' } });
+    const err = await preview(f.ctx()).then(() => null, (e: unknown) => e);
     expect(f.state.attempts).toBe(SERIALIZATION_RETRIES + 1);
+    expect(f.state.thrown).toHaveLength(SERIALIZATION_RETRIES + 1);
+    // the exact instance the last attempt threw, not a look-alike with the same fields
+    expect(err).toBe(f.state.thrown[f.state.thrown.length - 1]);
   });
 
   it('does not retry a P2010 carrying a different database code', async () => {
@@ -71,6 +104,19 @@ describe('#4065 signing reads retry a serialization abort', () => {
     const f = flaky(1);
     await expect(preview(f.ctx(memberId))).rejects.toMatchObject({ message: 'Forbidden', extensions: { code: 'FORBIDDEN' } });
     expect(f.state.attempts).toBe(2);
+  });
+
+  // cor:agt:040:09: a retried attempt is a fresh decision. A caller who lost membership between attempts is no longer
+  // current and gets the SAME refusal a non-member gets on a first attempt, whichever attempt the refusal lands on.
+  it.each([['preview', preview], ['status', status]] as const)('%s: a caller revoked between attempts is refused as a non-member is', async (_n, read) => {
+    const strangerId = (await db.user.create({ data: { githubId: 406503, githubUsername: `stranger-${generateId().slice(0, 8).toLowerCase()}` } })).id;
+    const firstAttempt = await read({ db, userId: strangerId, roles: [] }).then(() => null, (e: any) => e);
+    expect(firstAttempt).toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+
+    const f = abortAfterFirstRun(() => db.orgMember.updateMany({ where: { organizationId: orgId, userId: adminId }, data: { deletedAt: new Date() } }));
+    const retried = await read(f.ctx()).then(() => null, (e: any) => e);
+    expect(f.state.attempts).toBe(2);
+    expect(retried).toMatchObject({ message: firstAttempt.message, extensions: { code: firstAttempt.extensions.code } });
   });
 
   it('leaves the switch off when turning it on keeps aborting', async () => {
