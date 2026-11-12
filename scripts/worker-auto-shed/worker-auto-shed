@@ -15,8 +15,9 @@
 # of a compressed transcript. The snapshot preserves everything for mining.
 #
 # Rails: fires on trigger=auto ONLY (manual /compact stays the human's/agent's
-# own call); a 10-minute cooldown per worktree prevents restart loops; every
-# action logs to auto-shed.log.
+# own call); a 10-minute cooldown per worktree prevents restart loops; no kill
+# while a human is typing or in a conversation (#3954, below); every action
+# logs to auto-shed.log.
 set -u
 STATE_DIR="$HOME/.local/state/hadron-worker-shed"
 LOG="$STATE_DIR/auto-shed.log"
@@ -207,6 +208,69 @@ if [ -f "$stamp" ] && [ $(( $(date +%s) - $(stat -c %Y "$stamp") )) -lt 600 ]; t
   log "skip: $name shed within the last 10 minutes (loop guard)"
   exit 0
 fi
+# #3954: never stop an agent while a human is in a conversation with it. A draft in
+# the terminal's input box exists only there (not in the transcript snapshot), so the
+# kill destroys it for good. Two skip branches, both exit 0 so Claude Code's own
+# (lossy, recoverable) compaction runs:
+#   typing        the worker's terminal reports `prompt not_empty`
+#   conversation  the last human-authored prompt in the transcript is under 15 minutes old
+#                 (Holger, 2026-11-11). Claude Code tags every prompt typed into the terminal
+#                 `origin.kind=human`, including the wakes and deliveries the router injects,
+#                 so those are recognised by their `[hadron tick|task|chat]` marker (a paste
+#                 wraps them in <pasted_content>) and by the recovery prompt itself. Anything
+#                 else counts as human: a misjudged wake costs one lossy compaction, a
+#                 misjudged human costs their draft.
+# If the check cannot be made (no worker name, the terminal read fails or reports an
+# unknown state, the transcript is missing or unreadable) it fails toward NOT killing.
+# A skip starts no cooldown and writes nothing; each skip episode posts ONE line telling
+# the humans a shed is due (team chat). The marker is cleared when a fire finds no human,
+# and expires after 6 hours so a long-quiet marker cannot silence a new episode.
+HUMAN_WINDOW_SECS=900
+WARN_TTL_SECS=21600
+warned="$STATE_DIR/${name}.skip-warned"
+# Prints one word: clear | typing | conversation | unreadable:<reason>.
+human_presence() {
+  local who state prompt out last epoch
+  who=$(cd "$cwd" 2>/dev/null && timeout 15 hadron team session whoami 2>/dev/null | head -1 | sed 's/ (.*//')
+  [ -n "$who" ] || { echo "unreadable:no worker name from whoami"; return; }
+  state=$(timeout 15 hadron team worker get "$who" --json 2>/dev/null) || { echo "unreadable:terminal read failed"; return; }
+  prompt=$(printf '%s' "$state" | jq -r '.terminal.prompt // empty' 2>/dev/null)
+  case "$prompt" in
+    not_empty) echo typing; return ;;
+    empty) ;;
+    *) echo "unreadable:terminal prompt state not reported"; return ;;
+  esac
+  { [ -n "$transcript" ] && [ -r "$transcript" ]; } || { echo "unreadable:transcript missing"; return; }
+  out=$(timeout 30 jq -Rr 'fromjson? | select(.type == "user" and .origin.kind == "human")
+      | ((.message.content | if type == "string" then . elif type == "array" then ([.[] | select(.type == "text") | .text] | join("\n")) else "" end) // "") as $t
+      | select($t != "" and ($t | test("^\\s*(<pasted_content[^>]*>\\s*)?\\[hadron (tick|task|chat)\\]|^You just went through an AUTOMATIC SHED") | not))
+      | .timestamp' "$transcript" 2>/dev/null) || { echo "unreadable:transcript read failed"; return; }
+  last=$(printf '%s\n' "$out" | tail -1)
+  [ -n "$last" ] || { echo clear; return; }
+  epoch=$(date -d "$last" +%s 2>/dev/null) || { echo "unreadable:prompt timestamp"; return; }
+  if [ $(( $(date +%s) - epoch )) -lt "$HUMAN_WINDOW_SECS" ]; then echo conversation; else echo clear; fi
+}
+warn_once() {
+  if [ -f "$warned" ] && [ $(( $(date +%s) - $(stat -c %Y "$warned") )) -lt "$WARN_TTL_SECS" ]; then return; fi
+  if (cd "$cwd" && timeout 20 hadron team chat post "$name: my context is nearly full and a shed is due. I did not stop this session because you are in the middle of a conversation with it ($1). Tell me when you are done and I will shed, or run /shed yourself." >>"$LOG" 2>&1); then
+    touch "$warned"
+    log "$name: warned the human that a shed is due ($1)"
+  else
+    log "$name: warning post FAILED ($1); will retry on the next attempt"
+  fi
+}
+presence=$(human_presence)
+case "$presence" in
+  clear) rm -f "$warned" ;;
+  typing|conversation)
+    log "skip: human $presence ($name; letting compaction proceed, no kill)"
+    warn_once "$presence"
+    exit 0 ;;
+  *)
+    log "skip: human presence unreadable (${presence#unreadable:}); $name not stopped, letting compaction proceed"
+    exit 0 ;;
+esac
+
 rm -f "$killmark"
 touch "$stamp"
 
