@@ -10,7 +10,8 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const SCRIPTS = join(dirname(fileURLToPath(import.meta.url)), '..');
-// Built from parts so this file does not name the query it forbids.
+// Built from parts so this file does not name the query it forbids. Exact case on purpose: the cross-parent manifest
+// still classifies the server's TeamAttentionPage TYPES until S11 (#2027) removes them; that is not a caller.
 const QUERY = ['team', 'Attention', 'Page'].join('');
 const SELF = fileURLToPath(import.meta.url);
 
@@ -27,7 +28,7 @@ describe('#2030 C6: the attention poll is retired', () => {
   it('no file under scripts/ names the team attention query', () => {
     const hits: string[] = [];
     for (const p of walk(SCRIPTS)) {
-      if (p === SELF || !/\.(ts|mts|mjs|js|json|md|sh)$/.test(p)) continue;
+      if (p === SELF || !/\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|json|md|sh|py|ya?ml|toml)$/.test(p)) continue;
       if (readFileSync(p, 'utf8').includes(QUERY)) hits.push(relative(SCRIPTS, p));
     }
     expect(hits).toEqual([]);

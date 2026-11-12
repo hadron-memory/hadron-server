@@ -20,7 +20,7 @@ API any more (`noAttentionPoll.test.ts` pins that), which is what lets the serve
   cases recorded from the retired loop's tests, including real captures) and by the cli#907 captures in
   `router.test.ts`.
 
-Nothing here reads chat, sends input or calls the network by itself.
+Nothing here reads chat or sends input by itself; the helpers shell out to the `orca` and `hadron` CLIs through `runCommand` when a caller asks.
 
 ## The config and state directory stay
 
@@ -36,6 +36,10 @@ reports idle while a HUMAN is typing, and Orca's `draft` state can go stale. So 
 idle screen AND an empty composer, with an untracked terminal (Orca lost its output stream, as on a serve restart)
 decided by the screen shape alone. Measured 2026-09-30, finding
 `hrn:node:hadronmemory.com:hadron-server:findings:orca-terminal-send-busy-agent-claude-queues-codex-steers`.
+
+## Config flags that are now inert
+
+`coordinatorWatchMinutes` and the roster flags `coordinator` and `lifecycle` belonged to the retired liveness rule; `loadConfig` still validates them so existing files keep loading. The state directory's old files (`ledger.json`, `liveness*.json`, `loop.log`, `adopted.token`) are retired with the loop and can be deleted; `hadron team worker onboard` writes roster entries there.
 
 ## History
 

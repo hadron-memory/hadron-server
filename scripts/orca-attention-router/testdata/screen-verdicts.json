@@ -1,6 +1,6 @@
 [
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_eli",
@@ -22,7 +22,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "claude",
   "input": [
    "⏺ Done.",
@@ -40,7 +40,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_eli",
@@ -61,7 +61,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_eli",
@@ -80,7 +80,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "codex",
   "input": [
    "  Worked for 33s • 16:32",
@@ -95,7 +95,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_eli",
@@ -117,7 +117,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "claude",
   "input": [
    "  ⎿ Tip: Use /btw to ask a quick side question",
@@ -135,7 +135,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_eli",
@@ -153,7 +153,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "codex",
   "input": [
    "  • Working (6s • esc to interrupt)",
@@ -168,7 +168,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_eli",
@@ -189,7 +189,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "claude",
   "input": [
    " ▐▛███▛█   Claude Code v2.1.296",
@@ -206,7 +206,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_eli",
@@ -227,7 +227,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "codex",
   "input": [
    "│ ✨ Update available! 0.162.0 -> 0.162.1         │",
@@ -244,7 +244,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_eli",
@@ -264,7 +264,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "claude",
   "input": [
    "  some status output nobody classified",
@@ -280,7 +280,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_eli",
@@ -298,7 +298,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "claude",
   "input": [
    "────────────────────────────────────────────────────────────",
@@ -312,7 +312,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_eli",
@@ -332,7 +332,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "claude",
   "input": [
    "⏺ Done.",
@@ -348,7 +348,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_diego",
@@ -376,7 +376,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "codex",
   "input": [
    "    + 1 line (^t to expand)",
@@ -400,7 +400,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_gene",
@@ -428,7 +428,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "codex",
   "input": [
    "  Worked for 24s • 7:38 PM",
@@ -452,7 +452,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_xavier",
@@ -478,7 +478,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "codex",
   "input": [
    "    + 2 lines (^t to expand)",
@@ -500,7 +500,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_atilla",
@@ -527,7 +527,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "codex",
   "input": [
    "  Reviewer approved: https://github.com/hadron-memory/hadron-portal/pull/",
@@ -550,7 +550,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_eli",
@@ -569,7 +569,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "codex",
   "input": [
    "            deeply indented continuation-shaped output with no completed-",
@@ -584,7 +584,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_andi",
@@ -603,7 +603,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "codex",
   "input": [
    "  Worked for 1m 28s • 7:41 AM",
@@ -618,7 +618,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_greta",
@@ -639,7 +639,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "codex",
   "input": [
    "• Checked and marked read through #28306. No new tagged messages; all four PRs remain open at unchanged heads. No task",
@@ -656,7 +656,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_greta",
@@ -674,7 +674,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "codex",
   "input": [
    "  2 background terminals running · /ps to view · /stop to close",
@@ -688,7 +688,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_greta",
@@ -710,7 +710,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "codex",
   "input": [
    "• Checked and marked read through #28306. No new tagged messages; all four PRs remain open at unchanged heads. No task",
@@ -728,7 +728,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_andi",
@@ -747,7 +747,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "codex",
   "input": [
    "  Worked for 1m 28s • 7:41 AM",
@@ -762,7 +762,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_yuri",
@@ -787,7 +787,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "claude",
   "input": [
    "  #1958 progress: shed node done and corrected; rotate, start-session (both",
@@ -808,7 +808,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_yuri",
@@ -829,7 +829,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "claude",
   "input": [
    "✻ Worked for 2m 6s · done 3:58 PM",
@@ -846,7 +846,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_riana",
@@ -870,7 +870,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "codex",
   "input": [
    "• Ran hadron node create --help; ls /tmp/riana*1883* /tmp/riana*1877* | head -20",
@@ -890,7 +890,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_chip",
@@ -914,7 +914,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "codex",
   "input": [
    "  └ (no output)",
@@ -934,7 +934,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_chip",
@@ -959,7 +959,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "codex",
   "input": [
    "  └ (no output)",
@@ -980,7 +980,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_eli",
@@ -1001,7 +1001,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "codex",
   "input": [
    "  Worked for 1m 4s • 4:04 PM",
@@ -1018,7 +1018,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_eli",
@@ -1038,7 +1038,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "codex",
   "input": [
    "  ⓘ This content can’t be shown",
@@ -1054,7 +1054,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_eli",
@@ -1073,7 +1073,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "codex",
   "input": [
    "  Worked for 2m 6s • 16:32",
@@ -1088,7 +1088,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_eli",
@@ -1107,7 +1107,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "codex",
   "input": [
    "  Worked for 2m 6s • 16:32",
@@ -1122,7 +1122,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_eli",
@@ -1141,7 +1141,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "codex",
   "input": [
    "  Worked for 2m 6s • 16:32",
@@ -1156,7 +1156,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_eli",
@@ -1176,7 +1176,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "codex",
   "input": [
    "  ⓘ This content can’t be shown",
@@ -1192,7 +1192,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_eli",
@@ -1219,7 +1219,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "codex",
   "input": [
    "    + 2 lines (^t to expand)",
@@ -1242,7 +1242,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_eli",
@@ -1269,7 +1269,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "codex",
   "input": [
    "    + 2 lines (^t to expand)",
@@ -1292,7 +1292,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_eli",
@@ -1319,7 +1319,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "codex",
   "input": [
    "    + 2 lines (^t to expand)",
@@ -1342,7 +1342,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_eli",
@@ -1363,7 +1363,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "claude",
   "input": [
    "  Queued for my gate: Bindi's remaining attach-steps, Dan's 12-follow-up batch,",
@@ -1380,7 +1380,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_eli",
@@ -1402,7 +1402,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "claude",
   "input": [
    "  both types.",
@@ -1420,7 +1420,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_eli",
@@ -1439,7 +1439,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "claude",
   "input": [
    "  the router compacted several workers overnight",
@@ -1454,7 +1454,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_eli",
@@ -1473,7 +1473,7 @@
   ]
  },
  {
-  "k": "idle",
+  "k": "idleProof",
   "agent": "claude",
   "input": [
    "✻ Compacted while idle",
@@ -1488,7 +1488,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_baloo",
@@ -1510,7 +1510,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_eli",
@@ -1532,7 +1532,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_eli",
@@ -1551,7 +1551,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_eli",
@@ -1573,7 +1573,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_baloo",
@@ -1595,7 +1595,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_baloo",
@@ -1613,7 +1613,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_eli",
@@ -1635,7 +1635,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_eli",
@@ -1652,7 +1652,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_eli",
@@ -1671,7 +1671,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_baloo",
@@ -1689,7 +1689,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_baloo",
@@ -1707,7 +1707,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_baloo",
@@ -1725,7 +1725,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_eli",
@@ -1744,7 +1744,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_eli",
@@ -1763,7 +1763,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_eli",
@@ -1781,7 +1781,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": null,
   "expected": false,
@@ -1790,7 +1790,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_eli",
@@ -1812,7 +1812,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_ada",
@@ -1834,7 +1834,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_ada",
@@ -1855,7 +1855,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_ada",
@@ -1877,7 +1877,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": null,
   "expected": false,
@@ -1886,7 +1886,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_ada",
@@ -1905,7 +1905,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_ada",
@@ -1927,7 +1927,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_yuri",
@@ -1948,7 +1948,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_new",
@@ -1969,7 +1969,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_eli",
@@ -1990,7 +1990,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_00000000-0000-0000-0000-000000000000",
@@ -2020,7 +2020,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_00000000-0000-0000-0000-000000000000",
@@ -2049,7 +2049,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_00000000-0000-0000-0000-000000000000",
@@ -2078,7 +2078,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_00000000-0000-0000-0000-000000000000",
@@ -2109,7 +2109,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_00000000-0000-0000-0000-000000000000",
@@ -2141,7 +2141,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "claude",
   "input": {
    "handle": "term_00000000-0000-0000-0000-000000000000",
@@ -2183,7 +2183,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_00000000-0000-0000-0000-000000000000",
@@ -2226,7 +2226,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_00000000-0000-0000-0000-000000000000",
@@ -2252,7 +2252,7 @@
   ]
  },
  {
-  "k": "pet",
+  "k": "promptEmpty",
   "agent": "codex",
   "input": {
    "handle": "term_gene",
