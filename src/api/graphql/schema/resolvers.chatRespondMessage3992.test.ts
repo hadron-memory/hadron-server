@@ -1,23 +1,13 @@
 /**
  * #3992 — processChatResponse refuses a missing / null / non-string `message` (cor:cht:020:01 step 2, rev 34) with
  * BAD_USER_INPUT BEFORE any write; an empty or whitespace-only string is accepted and recorded as sent.
- * (Header of the #3514 fixture below, reused for its seeded agent + chat.)
- * #3514 — processChatResponse commits the assistant message and counter, then judges the extraction, then (only if
- * that passes) advances the stage. When the authoring gate refuses the extraction the call errors, and nothing used
- * to tell the caller that the message and counter had already committed. The refusal now carries a typed, additive
- * `extensions.partialTurn` report. Chip's five wire cases are the oracle (issue #3514); the gate's own semantics
- * (codes, untouched target, no revision) are pinned unchanged.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, chatNodeByLocOrThrow } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
-import { typeDefs } from './typeDefs.js';
 import { generateId } from '../../../lib/id.js';
 import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
-import { reportPartialTurn } from '../../../lib/chatPartialTurn.js';
-import { AuthoringAttestationError } from '../../../lib/authoringAttestation.js';
-import { GraphQLError } from 'graphql';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -63,7 +53,7 @@ const respond = (chatId: string, toolResponse: Record<string, unknown>) =>
 async function state(chatId: string) {
   const chat = await chatNodeByLocOrThrow(db, chatId);
   const data = await db.node.findFirst({ where: { memoryId: chat.memoryId, loc: 'data', deletedAt: null } });
-  const assistants = await db.node.count({ where: { memoryId: chat.memoryId, loc: { startsWith: `${chatId}:messages:` }, name: { endsWith: '-assistant' } } });
+  const assistants = await db.node.count({ where: { memoryId: chat.memoryId, loc: { startsWith: `${chatId}:messages:` } } });
   const root = (await db.node.findUniqueOrThrow({ where: { id: chat.id } })).data as Record<string, unknown>;
   const revisions = data ? await db.nodeRevision.count({ where: { nodeId: data.id } }) : 0;
   // #3496: the operational counter moved out of revisioned root data; stage remains there.
@@ -79,11 +69,11 @@ async function state(chatId: string) {
 const refusal = (p: Promise<unknown>) => p.then(() => null, (e) => e as { extensions?: Record<string, any>; message: string });
 
 describe('#3992 — respond `message` must be a JSON string, refused before any write', () => {
-  const bad: Array<[string, Record<string, unknown>, string]> = [
-    ['missing', { onTrack: true, data: { region: 'EU' }, next_stage: 'wrap' }, 'missing'],
-    ['null', { message: null, onTrack: true, data: { region: 'EU' }, next_stage: 'wrap' }, 'null'],
-    ['number', { message: 42, onTrack: true, data: { region: 'EU' }, next_stage: 'wrap' }, 'number'],
-    ['object', { message: { text: 'secret-model-text' }, onTrack: true, data: { region: 'EU' }, next_stage: 'wrap' }, 'object'],
+  const bad: Array<[string, Record<string, unknown>]> = [
+    ['missing', { onTrack: true, data: { region: 'EU' }, next_stage: 'wrap' }],
+    ['null', { message: null, onTrack: true, data: { region: 'EU' }, next_stage: 'wrap' }],
+    ['number', { message: 42, onTrack: true, data: { region: 'EU' }, next_stage: 'wrap' }],
+    ['object', { message: { text: 'secret-model-text' }, onTrack: true, data: { region: 'EU' }, next_stage: 'wrap' }],
   ];
   for (const [label, payload] of bad) {
     it(`${label}: BAD_USER_INPUT naming the field, nothing written, no partialTurn, no echo`, async () => {
