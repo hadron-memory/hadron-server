@@ -1428,7 +1428,16 @@ export const chatMutations = {
 
       const chatRef = { id: chatNode.id, memoryId: chatNode.memoryId, loc: chatNode.loc };
 
-      const message = (toolResponse.message as string) ?? '';
+      // #3992 (cor:cht:020:01 step 2): `message` is a required JSON string, the contract the `respond` tool schema
+      // publishes. Missing, null or non-string is refused BEFORE any write (no turn, merge, routing or history).
+      // The text names the field and type only: never the value or model text. An empty or whitespace-only string
+      // is a valid string and is recorded as sent. The other fields below keep their casts (separate issue).
+      if (typeof toolResponse.message !== 'string') {
+        throw new GraphQLError('processChatResponse: toolResponse.message is required and must be a string.', {
+          extensions: { code: 'BAD_USER_INPUT', field: 'message', expectedType: 'string' },
+        });
+      }
+      const message = toolResponse.message;
       const data = toolResponse.data as Record<string, unknown> | undefined;
       const nextStage = toolResponse.next_stage as string | undefined;
       const onTrack = toolResponse.onTrack as boolean | undefined;
