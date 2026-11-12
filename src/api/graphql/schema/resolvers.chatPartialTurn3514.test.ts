@@ -120,9 +120,9 @@ describe('#3514 — the refused extraction reports what the turn did and did not
     expect(after.revisions).toBe(before.revisions);
   });
 
-  const SUCCESS_KEYS = ['chatEnded', 'conversationHandoff', 'displayMessage', 'newStageName', 'offTrackReason', 'onTrack', 'stageTransitioned'];
+  const SUCCESS_KEYS = ['chatEnded', 'conversationCompleted', 'conversationHandoff', 'detourReturned', 'displayMessage', 'newStageName', 'offTrackReason', 'onTrack', 'routingSkipped', 'stageTransitioned'];
 
-  it('case 1: no role requirement, the extraction changes data: success, shape unchanged, no report', async () => {
+  it('case 1: no role requirement, the extraction changes data: success, additive routing fields, no report', async () => {
     const chatId = await seeded();
     const ok = await respond(chatId, { message: 'x', data: { region: 'US' }, next_stage: 'wrap', onTrack: true });
     expect(Object.keys(ok).sort()).toEqual(SUCCESS_KEYS);

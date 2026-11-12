@@ -405,7 +405,7 @@ describe('Edge evaluation in processChatResponse', () => {
       {},
       {
         chatId: chat.chatId,
-        toolResponse: { message: 'Welcome done', next_stage: null, onTrack: true },
+        toolResponse: { message: 'Welcome done', next_stage: null, goal_reached: true, onTrack: true },
       },
       userCtx(adminUser.id),
     );
@@ -473,7 +473,7 @@ describe('Edge evaluation in processChatResponse', () => {
       {},
       {
         chatId: chat.chatId,
-        toolResponse: { message: 'Checking', next_stage: null, onTrack: true },
+        toolResponse: { message: 'Checking', next_stage: null, goal_reached: true, onTrack: true },
       },
       userCtx(adminUser.id),
     );
@@ -519,7 +519,8 @@ describe('Edge evaluation in processChatResponse', () => {
         sourceId: nodeIds['conversations:main:check'],
         targetId: nodeIds['conversations:profile'],
         name: 'Fill profile if missing',
-        condition: { missing: ['memory.business_type'] },
+        // Use a Boolean-valued condition: bare missing returns an array, currently coerced with Boolean by the evaluator.
+        condition: { '!': { var: 'memory.business_type' } },
         data: {
           timing: 'on_complete',
           behavior: 'detour',
@@ -547,12 +548,15 @@ describe('Edge evaluation in processChatResponse', () => {
       userCtx(adminUser.id),
     );
 
+    const afterExtraction = await chatNodeByLoc(db, chat.chatId);
+    expect((await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: afterExtraction!.id } })).state).toMatchObject({ conversationName: 'main' });
+
     // Now complete the stage — business_type exists, so the condition is NOT met
     const result = await resolvers.Mutation.processChatResponse(
       {},
       {
         chatId: chat.chatId,
-        toolResponse: { message: 'Done', next_stage: null, onTrack: true },
+        toolResponse: { message: 'Done', next_stage: null, goal_reached: true, onTrack: true },
       },
       userCtx(adminUser.id),
     );
@@ -621,7 +625,7 @@ describe('Edge evaluation in processChatResponse', () => {
         chatId: chat.chatId,
         toolResponse: {
           message: 'Caller flagged this as urgent',
-          next_stage: null,
+          next_stage: null, goal_reached: true,
           data: { urgency: 'high' },
           onTrack: true,
         },
@@ -677,7 +681,7 @@ describe('Edge evaluation in processChatResponse', () => {
       {},
       {
         chatId: chat.chatId,
-        toolResponse: { message: 'Routine check-in', next_stage: null, onTrack: true },
+        toolResponse: { message: 'Routine check-in', next_stage: null, goal_reached: true, onTrack: true },
       },
       userCtx(adminUser.id),
     );
@@ -755,7 +759,7 @@ describe('Edge evaluation in processChatResponse', () => {
       {},
       {
         chatId: chat.chatId,
-        toolResponse: { message: 'Routing', next_stage: null, onTrack: true },
+        toolResponse: { message: 'Routing', next_stage: null, goal_reached: true, onTrack: true },
       },
       userCtx(adminUser.id),
     );
@@ -813,7 +817,7 @@ describe('Edge evaluation in processChatResponse', () => {
       {},
       {
         chatId: chat.chatId,
-        toolResponse: { message: 'Routing', next_stage: null, onTrack: true },
+        toolResponse: { message: 'Routing', next_stage: null, goal_reached: true, onTrack: true },
       },
       userCtx(adminUser.id),
     );

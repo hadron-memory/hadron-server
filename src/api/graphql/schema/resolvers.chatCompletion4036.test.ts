@@ -1,5 +1,5 @@
 /** #4036 S3: completion is explicit, engine-only, and routing edits compare the locked origin. */
-import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PrismaClient } from '../../../generated/prisma/index.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, chatNodeByLocOrThrow } from '../../../test/helpers.js';
@@ -7,6 +7,9 @@ import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
 import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
+import { generateDataKey } from '../../../lib/crypto.js';
+import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
+import { encryptChatEngineStateWithKey } from '../../../lib/chatRootEngineState.js';
 import { updateChatRootData } from '../../../lib/chatRoot.js';
 import { getMemoryEncryptionInfo } from '../../../lib/nodeCrypto.js';
 
@@ -14,6 +17,7 @@ vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGi
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
 const other = new PrismaClient({ datasourceUrl: process.env.DATABASE_URL });
 afterAll(() => other.$disconnect());
+afterEach(() => sessionKeyCache.clear());
 let userId: string, agentId: string, systemId: string, ids: Record<string, string>;
 const ctx = (client = db): Context => ({ db: client, roles: ['READER'], userId });
 const start = () => resolvers.Mutation.startChat({}, { agentId, conversationName: 'main' }, ctx());
@@ -77,7 +81,7 @@ describe('#4036 completion by explicit goal_reached', () => {
   });
   it.each([false, true])('reports failed-condition partial turn, extraction=%s, with no routing writes', async extraction => {
     await rule('on_complete', { unknown_operator: [] }); const chat = await start();
-    const error = await respond(chat.chatId, { goal_reached: true, ...(extraction ? { data: { fact: 'saved' } } : {}) }).catch(e => e);
+    const error = await respond(chat.chatId, { goal_reached: true, ...(extraction ? { data: { fact: 'saved' } } : {}) }).catch((e: unknown) => e);
     expect(error.extensions).toMatchObject({ code: 'EDGE_CONDITION_FAILED', partialTurn: {
       persisted: ['ASSISTANT_MESSAGE', 'MESSAGE_COUNTER', ...(extraction ? ['EXTRACTION'] : [])],
       refused: [{ component: 'STAGE_PROGRESSION', code: 'EDGE_CONDITION_FAILED' }], notRun: [],
@@ -88,9 +92,21 @@ describe('#4036 completion by explicit goal_reached', () => {
     expect(await db.chatRootCounter.findUniqueOrThrow({ where: { chatRootNodeId: root.id } })).toMatchObject({ messageCount: 1 });
     if (extraction) expect((await db.node.findFirstOrThrow({ where: { memoryId: root.memoryId, loc: 'data' } })).data).toMatchObject({ fact: 'saved' });
   });
+  it('does not report EXTRACTION as persisted when an equal extraction wrote nothing', async () => {
+    const chat = await start(); await respond(chat.chatId, { data: { fact: 'saved' } });
+    const { root } = await state(chat.chatId);
+    const prior = await db.node.findFirstOrThrow({ where: { memoryId: root.memoryId, loc: 'data' } });
+    await rule('on_complete', { unknown_operator: [] });
+    const error = await respond(chat.chatId, { goal_reached: true, data: { fact: 'saved' } }).catch((e: unknown) => e);
+    expect(error.extensions.partialTurn.persisted).toEqual(['ASSISTANT_MESSAGE', 'MESSAGE_COUNTER']);
+    expect((await db.node.findUniqueOrThrow({ where: { id: prior.id } })).updatedAt).toEqual(prior.updatedAt);
+  });
   it('does not expose completed names on encrypted chat rows', async () => {
     const chat = await start(); await respond(chat.chatId, { goal_reached: true });
     const { root } = await state(chat.chatId);
+    const key = generateDataKey();
+    await db.$transaction(tx => encryptChatEngineStateWithKey(tx, root.id, key));
+    sessionKeyCache.set(generateId(), root.memoryId, key);
     await db.memory.update({ where: { id: root.memoryId }, data: { isEncrypted: true } });
     const rows = await resolvers.Query.myChats({}, { agentRef: agentId }, ctx());
     expect(rows.find(r => r.loc === chat.chatId)).toMatchObject({ completedConversations: [] });

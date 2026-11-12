@@ -72,7 +72,8 @@ import {
   ChatScopeError,
 } from './chat-scope.js';
 import { chatLocFilter, pickChatNode } from '../../../lib/chatLoc.js';
-import { reportPartialTurn } from '../../../lib/chatPartialTurn.js';
+import { decideChatRouting, applyChatRoutingDecision } from '../../../lib/chatRouting.js';
+import { reportPartialTurn, routingRefusedReport } from '../../../lib/chatPartialTurn.js';
 import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
 import {
   type Context,
@@ -80,7 +81,6 @@ import {
   requireMemoryWriteAccess,
   memoryAccessFilter,
   buildRespondToolSchema,
-  pushGoal,
   appendRouteEntry,
   rethrowAiConfigTyped,
 } from './resolvers.helpers.js';
@@ -93,7 +93,7 @@ import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
 import { unauthenticatedError } from '../../../lib/refusals.js';
 import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds.js';
 import { pickUnnamedStartConversation, topLevelConversations } from '../../../lib/chatConversationOrder.js';
-import { loadChatScript } from '../../../lib/chatScript.js';
+import { loadChatScript, type ChatScript, type ScriptRule } from '../../../lib/chatScript.js';
 
 /**
  * How many of a chat's most recent messages `sendChatMessage` hands the model.
@@ -1465,6 +1465,7 @@ export const chatMutations = {
         declaredMemoryWide
           ? mergeTurnExtraction(stored, extracted, declaredMemoryWide, ctx.userId ?? null)
           : { ...(stored ?? {}), ...extracted };
+      let extractionPersisted = false;
       if (data && hasExtraction) recordNodeWrite(ctx.db, await inTx(async (tx) => {
         // #910: two members extract into the same memory from different chats,
         // under different chat locks. Serialize the read-modify-write on the
@@ -1533,218 +1534,79 @@ export const chatMutations = {
           return { id: dataNodeId, loc: 'data', memoryId: chatNode.memoryId };
         }
       // #3514: the assistant message and counter are already committed above; a refused extraction says so.
-      }).catch(reportPartialTurn), ctx);
+      }).catch(reportPartialTurn).then(ref => {
+        extractionPersisted = ref !== null;
+        return ref;
+      }), ctx);
 
-      // Handle stage transition + edge evaluation
-      let stageTransitioned = false;
-      let newStageName: string | null = null;
-      let conversationHandoff: string | null = null;
-      // #919: what this turn CHANGES about the chat root, recorded as edits and
-      // replayed at the end against a freshly read blob. Edge evaluation below
-      // is unbounded in wall-clock terms, and the root is stored whole — so
-      // writing back a snapshot taken at the top of the turn would roll back
-      // any send that committed while we were evaluating, `messageCount`
-      // included. Edits run in the order they were pushed.
-      const chatRootEdits: Array<(chatData: Record<string, unknown>) => void> = [];
-
-      // 1. Explicit stage transition from the LLM
-      if (nextStage && nextStage !== chatData.stageName) {
-        stageTransitioned = true;
-        newStageName = nextStage;
-        chatRootEdits.push((d) => {
-          d.stageName = nextStage;
-          appendRouteEntry(d, {
-            nodeUrn: `conversations:${chatData.conversationName}:${nextStage}`,
-            conversationUrn: `conversations:${chatData.conversationName}`,
-            action: 'ENTER',
-            trigger: { type: 'STAGE_TRANSITION', content: `next_stage: ${nextStage}` },
-          });
-        });
-      }
-
-      // 2. Evaluate on_complete edges when the conversation ends
-      //    (next_stage is null and we're at the last stage)
-      if (!nextStage || nextStage === null) {
-        // Find the agent's system memory to look up edges
+      // #4036 D1/D6: gather read-only inputs, decide outside the lock, then apply one CAS batch on the fresh origin.
+      const origin = { conversationName: chatData.conversationName as string | undefined, stageName: chatData.stageName as string | undefined };
+      const currentStageLoc = `conversations:${origin.conversationName}:${origin.stageName}`;
+      let script: ChatScript | undefined;
+      let rules: ScriptRule[] = [];
+      let memoryLayers: MemoryLayerHandle[] = [];
+      let agentBag: Record<string, unknown> = {};
+      let sysMemUrn = '';
+      if (!nextStage || toolResponse.goal_reached === true) {
+        // Keep the existing agent-resolution/access boundary; #4043's shared helper is carried on its main merge.
         const memory = await ctx.db.memory.findUnique({ where: { id: chatNode.memoryId } });
         const agentId = memory?.userMemoryOfAgentId;
         if (agentId) {
           const agent = await ctx.db.agent.findUnique({ where: { id: agentId } });
-          const sysMemId = (agent as any)?.systemMemoryId as string | null;
+          const sysMemId = agent?.systemMemoryId;
           if (sysMemId) {
-            // #4034: the rules, the agent config and the condition defaults come from the revision the chat
-            // is pinned to (`startedWithRevision`), not from the live draft (cor:cht:020:01, cor:cht:030:02).
-            const currentStageLoc = `conversations:${chatData.conversationName}:${chatData.stageName}`;
-            const script = await loadChatScript(ctx.db, sysMemId, (chatData.startedWithRevision as string | null) ?? null);
-            const stageNode = await script.node(currentStageLoc);
-            if (stageNode) {
-              const edges = await script.outgoingRules(currentStageLoc);
-              const agentBag: Record<string, unknown> = {
-                config: await script.agentConfig(),
-              };
-              // Resolve the system memory's slug-path URN once so error-side
-              // sourceNodeUrn composition stays canonical (urn:node:<mem>:<loc>)
-              // instead of the legacy urn:memory:<PK>:<loc> form (issue #99).
-              // TODO(#99-followup): this lookup-and-format pattern is now
-              // duplicated with src/mcp/server.ts:nodeUrn(). Extract a shared
-              // composer (likely a small package) per the audit's
-              // recommendation in issue #99.
-              const sysMem = await ctx.db.memory.findUnique({
-                where: { id: sysMemId },
-                select: { urn: true },
-              });
-              const sysMemUrn = sysMem?.urn ?? sysMemId;
-              // Build the memory cascade for this turn:
-              //   Layer A (defaults): agent's system memory — holds
-              //     conversation/stage definitions and any agent-wide
-              //     defaults under `loc: 'data'`. The source node lives
-              //     here, so its parent-chain walk also happens here.
-              //   Layer B (overrides): the user's per-user memory.
-              //     Wins over Layer A on conflict (CSS cascade per spec
-              //     FR-008/FR-009). For single-memory cases where the
-              //     chat memory IS the system memory, we skip the
-              //     duplicate layer.
-              const memoryLayers: MemoryLayerHandle[] = [];
-              // #910: conditions read the turn's own person's values only.
+            script = await loadChatScript(ctx.db, sysMemId, (chatData.startedWithRevision as string | null) ?? null);
+            if (await script.node(currentStageLoc)) {
+              rules = await script.outgoingRules(currentStageLoc);
+              agentBag = { config: await script.agentConfig() };
+              sysMemUrn = (await ctx.db.memory.findUnique({ where: { id: sysMemId }, select: { urn: true } }))?.urn ?? sysMemId;
               const turnPersonId = ctx.userId ?? null;
               memoryLayers.push(await script.conditionLayerA('edge-memory', currentStageLoc, turnPersonId));
-              // #4034: when layer A is the pinned snapshot, the chat's own memory is ALWAYS added live, even when it
-              // is the system memory (single-memory chat): otherwise the facts the chat extracts would vanish from
-              // its conditions. Unpinned, layer A already is the live system memory, so the duplicate stays skipped.
-              // (Today the chat-scope invariant refuses a chat held by a system-class memory, so this branch is
-              // not reachable through the API and carries no pin; the guard keeps the plan's rule if that changes.)
-              if (chatNode.memoryId !== sysMemId || script.pinned) {
-                memoryLayers.push(await buildPrismaMemoryLayer(
-                  ctx.db, 'user-memory', chatNode.memoryId, currentStageLoc, turnPersonId,
-                ));
-              }
-              for (const edge of edges) {
-                const edgeData = edge.data;
-                const timing = edgeData.timing as string ?? 'on_complete';
-                if (timing !== 'on_complete' && timing !== 'always') continue;
-
-                // Evaluate the JSONLogic condition (Edge.condition column).
-                // null = always fires.
-                if (edge.condition !== null && edge.condition !== undefined) {
-                  const evalResult = await evaluateEdgeCondition({
-                    condition: edge.condition,
-                    edge: {
-                      id: edge.id,
-                      sourceNodeUrn: formatUrn('node', `${sysMemUrn}:${currentStageLoc}`),
-                    },
-                    memoryLayers,
-                    chat: {
-                      message_count: messageCount,
-                      conversation_name: chatData.conversationName,
-                      stage: chatData.stageName,
-                    },
-                    agent: agentBag,
-                    messageData: data ?? undefined,
-                  });
-                  if (!evalResult.ok) {
-                    // FR-014/FR-015/FR-016: fail loud rather than silently
-                    // firing or skipping the edge. Structured log carries
-                    // edge id, field, memory URN, etc.; the user-facing
-                    // message comes from the i18n-ready mapping.
-                    console.error(
-                      `[edge-conditions] evaluation failed`,
-                      {
-                        edgeId: edge.id,
-                        code: evalResult.error.code,
-                        message: evalResult.error.message,
-                        detail: evalResult.error.detail,
-                      },
-                    );
-                    const userMsg = userMessageFor(evalResult.error);
-                    throw new GraphQLError(userMsg.text, {
-                      extensions: {
-                        code: 'EDGE_CONDITION_FAILED',
-                        reason: evalResult.error.code,
-                        messageId: userMsg.id,
-                        detail: evalResult.error.detail,
-                      },
-                    });
-                  }
-                  if (!evalResult.fired) continue;
-                }
-
-                // Edge fires! Check behavior
-                const targetLoc = edge.targetLoc;
-                if (!targetLoc) continue;
-
-                const behavior = edgeData.behavior as string ?? 'transition';
-
-                if (targetLoc.startsWith('conversations:') && targetLoc.split(':').length === 2) {
-                  // Target is a conversation — conversation handoff
-                  const targetConvName = targetLoc.split(':')[1];
-
-                  if (behavior === 'detour') {
-                    // Push current goal, transition to the detour conversation
-                    chatRootEdits.push((d) => {
-                      pushGoal(d, {
-                        description: (edgeData.label as string) ?? `Detour to ${targetConvName}`,
-                        createdBy: 'ASSISTANT',
-                        conversationUrn: targetLoc,
-                      });
-                    });
-                  }
-
-                  // Switch to the target conversation's first stage
-                  const targetConv = await script.node(targetLoc);
-                  const targetConvData = (targetConv?.data as Record<string, unknown>) ?? {};
-                  const targetStages = (targetConvData.stageOrder as string[]) ?? [];
-                  const targetFirstStage = targetStages[0];
-
-                  if (targetFirstStage) {
-                    conversationHandoff = targetConvName;
-                    stageTransitioned = true;
-                    newStageName = targetFirstStage;
-
-                    chatRootEdits.push((d) => {
-                      d.conversationName = targetConvName;
-                      d.stageName = targetFirstStage;
-                      appendRouteEntry(d, {
-                        conversationUrn: targetLoc,
-                        nodeUrn: `${targetLoc}:${targetFirstStage}`,
-                        action: 'ENTER',
-                        edgeUrn: edge.id,
-                        trigger: {
-                          type: behavior === 'detour' ? 'DETOUR_EDGE' : 'TRANSITION_EDGE',
-                          content: (edgeData.label as string) ?? undefined,
-                        },
-                      });
-                    });
-                  }
-                  break; // Only follow one edge
-                }
-              }
+              // S1: pinned defaults always receive the live home facts; live single-memory defaults need no duplicate.
+              if (chatNode.memoryId !== sysMemId || script.pinned) memoryLayers.push(await buildPrismaMemoryLayer(
+                ctx.db, 'user-memory', chatNode.memoryId, currentStageLoc, turnPersonId,
+              ));
             }
           }
         }
       }
-
-      // 3. Track onTrack status
-      if (onTrack === false) {
-        chatRootEdits.push((d) => {
-          d.lastOffTrackReason = offTrackReason ?? 'unspecified';
-          d.lastOffTrackAt = new Date().toISOString();
-        });
-      }
-
-      // #919: `messageCount` is deliberately absent here — the allocation above
-      // already committed it, and `fresh` carries whatever the latest turn
-      // wrote, which may be higher than the value this turn allocated.
-      await updateChatRootData(ctx.db, chatRef, memEncInfo, (fresh) => {
-        const next = { ...fresh, lastMessageAt: new Date().toISOString() };
-        for (const edit of chatRootEdits) edit(next);
+      const routing = await decideChatRouting({
+        origin, nextStage, goalReached: toolResponse.goal_reached, rules,
+        node: loc => script ? script.node(loc) : Promise.resolve(null),
+        evaluate: async edge => {
+          if (edge.condition == null) return true;
+          const evaluated = await evaluateEdgeCondition({
+            condition: edge.condition,
+            edge: { id: edge.id, sourceNodeUrn: formatUrn('node', `${sysMemUrn}:${currentStageLoc}`) },
+            memoryLayers, chat: { message_count: messageCount, conversation_name: origin.conversationName, stage: origin.stageName },
+            agent: agentBag, messageData: data ?? undefined,
+          });
+          if (!evaluated.ok) {
+            console.error('[edge-conditions] evaluation failed', { edgeId: edge.id, code: evaluated.error.code, message: evaluated.error.message, detail: evaluated.error.detail });
+            const userMsg = userMessageFor(evaluated.error);
+            throw new GraphQLError(userMsg.text, { extensions: {
+              code: 'EDGE_CONDITION_FAILED', reason: evaluated.error.code, messageId: userMsg.id, detail: evaluated.error.detail,
+              partialTurn: routingRefusedReport(extractionPersisted),
+            } });
+          }
+          return evaluated.fired;
+        },
+      });
+      let routingResult = routing.result;
+      await updateChatRootData(ctx.db, chatRef, memEncInfo, fresh => {
+        const next: Record<string, unknown> = { ...fresh, lastMessageAt: new Date().toISOString() };
+        routingResult = applyChatRoutingDecision(next, routing);
+        // Non-routing bookkeeping survives a stale-origin decision (R3).
+        if (onTrack === false) {
+          next.lastOffTrackReason = offTrackReason ?? 'unspecified';
+          next.lastOffTrackAt = new Date().toISOString();
+        }
         return next;
       }, { inTx });
 
       return {
         displayMessage: message,
-        stageTransitioned,
-        newStageName,
-        conversationHandoff,
+        ...routingResult,
         chatEnded: false,
         onTrack: onTrack ?? true,
         offTrackReason: offTrackReason ?? null,

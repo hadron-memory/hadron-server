@@ -5440,6 +5440,8 @@ export const typeDefs = `#graphql
     title: String!
     conversationName: String
     stageName: String
+    "Names of conversations this chat has completed, in first-completion order; empty for encrypted rows. hrn:node:hadronmemory.com:specs:cor:cht:030:02"
+    completedConversations: [String!]!
     messageCount: Int!
     createdAt: DateTime!
     lastMessageAt: DateTime
@@ -15466,6 +15468,12 @@ export const typeDefs = `#graphql
     newStageName: String
     conversationHandoff: String
     chatEnded: Boolean!
+    "Conversation completed by this turn's explicit goal_reached flag, or null. hrn:node:hadronmemory.com:specs:cor:cht:030:02"
+    conversationCompleted: String
+    "Whether this turn returned from a detour; false until the detour-return slice ships. hrn:node:hadronmemory.com:specs:cor:cht:030:02"
+    detourReturned: Boolean!
+    "Routing edits were skipped because a concurrent turn moved the chat from the decision's origin. hrn:node:hadronmemory.com:specs:cor:cht:030:02"
+    routingSkipped: Boolean!
     onTrack: Boolean!
     offTrackReason: String
   }
