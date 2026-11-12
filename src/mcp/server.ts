@@ -3179,7 +3179,7 @@ export function createMcpServerInstance(
       const accessibleMemoryIds = await getAccessibleMemoryIds(db, auth);
       // The caller's own member orgs (admin or not) — the org allow-list for
       // non-admins, and the #609 hidden-org carve-out for admins.
-      const memberOrgIds = auth.userId ? await getMemberOrgIds(db, auth.userId) : [];
+      const memberOrgIds = auth.userId ? await getMemberOrgIds(db, auth.userId, auth.impersonation?.orgId) : [];
       const orgIds = isPlatformAdmin ? null : memberOrgIds;
       // Spec 049 Phase 3 — the ladder narrows the memory + node slices; a
       // scope's list is already ∩ access (S2), so handing it over narrows only.
@@ -3197,6 +3197,8 @@ export function createMcpServerInstance(
         orgIds: scopeRes?.kind === 'global' && scopeRes.orgScopeId ? [scopeRes.orgScopeId] : orgIds,
         viewerOrgIds: memberOrgIds,
         orgScopeId: scopeRes?.kind === 'global' ? scopeRes.orgScopeId : null,
+        // Same bound as the GraphQL surface: an impersonated session reads only its one org.
+        impersonationOrgId: auth.impersonation?.orgId ?? null,
       };
 
       const { hits, degraded } = await globalSearch(
