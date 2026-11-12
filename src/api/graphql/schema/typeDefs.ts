@@ -11706,6 +11706,8 @@ export const typeDefs = `#graphql
     (hrn:node:hadronmemory.com:specs:cor:agt:070:03). Only after collecting it, and only its own host's (another's is
     HOST_OPERATION_NOT_FOUND). The same outcome again answers the operation as it is; a different one is
     HOST_OPERATION_ALREADY_REPORTED. Writes host.operation.succeeded or host.operation.failed.
+    #4062: HOST_OPERATION_ALREADY_REPORTED carries the operation id in extensions.id and the outcome already recorded in
+    extensions.status, as a HostOperationStatus value (SUCCEEDED or FAILED); read the outcome there, not from the message.
     #3309 (hrn:node:hadronmemory.com:specs:cor:agt:050:27 part 11): a worker.reset-context failure may name
     HOST_UNSUPPORTED, optionally followed by ": " and detail, only before its claim (phase requested).
     After the claim this reason is BAD_CONTEXT_RESET_INPUT; its message lists the reasons accepted at that phase.
