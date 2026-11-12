@@ -145,6 +145,7 @@ import {
   runOwnedEmailOperation,
   throwOnInvalidCondition,
   throwOnReservedExtractionSpec,
+  throwOnInvalidEntryCondition,
   requireMemoryWriteAccess,
   memoryWriteForbidden,
   isMemoryReadableCached,
@@ -575,6 +576,8 @@ async function writeNodeCoreRaw(
       // Reject saves whose extraction-spec arrays would write into the
       // reserved exception namespace (spec 001-edge-condition-spec FR-013).
       throwOnReservedExtractionSpec(input.data);
+      // #4039 (B4): an entry condition that is invalid, or reads a variable with no value at chat start, never lands.
+      throwOnInvalidEntryCondition(input.loc, input.data);
 
       // Snapshot current state before update (for revision history). The
       // update-by-PK path anchors on the immutable id; everything else keys

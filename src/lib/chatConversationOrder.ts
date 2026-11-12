@@ -9,7 +9,7 @@
  * the same on any Postgres collation and on a published snapshot's array order.
  */
 
-type ConversationNode = { loc: string; data?: unknown };
+type ConversationNode = { loc: string; data?: unknown; seq?: number | null };
 
 const flags = (n: ConversationNode) => (n.data as Record<string, unknown> | null | undefined) ?? {};
 
@@ -18,9 +18,26 @@ export function byLocCodeUnits<T extends { loc: string }>(nodes: readonly T[]): 
   return [...nodes].sort((a, b) => (a.loc < b.loc ? -1 : a.loc > b.loc ? 1 : 0));
 }
 
-/** Top-level conversation nodes only (`conversations:<name>`), in code-unit `loc` order. */
-export function topLevelConversations<T extends { loc: string }>(nodes: readonly T[]): T[] {
-  return byLocCodeUnits(nodes.filter((n) => n.loc.startsWith('conversations:') && n.loc.split(':').length === 2));
+/**
+ * #4039 (cor:cht:020:02 step 1, Q14/Q14a): the author's order. `Node.seq` ascending, a conversation with no `seq` after every
+ * set value, any tie by `loc` in code-unit order, so the order is total. With no `seq` anywhere it is exactly the `loc` order.
+ */
+export function byAuthorOrder<T extends { loc: string; seq?: number | null }>(nodes: readonly T[]): T[] {
+  return [...nodes].sort((a, b) => {
+    const as = a.seq ?? null;
+    const bs = b.seq ?? null;
+    if (as !== bs) {
+      if (as === null) return 1;
+      if (bs === null) return -1;
+      return as - bs;
+    }
+    return a.loc < b.loc ? -1 : a.loc > b.loc ? 1 : 0;
+  });
+}
+
+/** Top-level conversation nodes only (`conversations:<name>`), in the author's order ({@link byAuthorOrder}). */
+export function topLevelConversations<T extends { loc: string; seq?: number | null }>(nodes: readonly T[]): T[] {
+  return byAuthorOrder(nodes.filter((n) => n.loc.startsWith('conversations:') && n.loc.split(':').length === 2));
 }
 
 /** Neither setup nor fallback. */
@@ -41,8 +58,35 @@ export function isOrdinaryConversation(n: ConversationNode): boolean {
  */
 export function pickUnnamedStartConversation<T extends ConversationNode>(nodes: readonly T[]): T | null {
   const ordered = topLevelConversations(nodes);
-  return ordered.find(isOrdinaryConversation)
-    ?? ordered.find((n) => flags(n).isSetup === true)
+  return ordered.find(isOrdinaryConversation) ?? pickSetupOrFallback(ordered);
+}
+
+function pickSetupOrFallback<T extends ConversationNode>(ordered: readonly T[]): T | null {
+  return ordered.find((n) => flags(n).isSetup === true)
     ?? ordered.find((n) => flags(n).isFallback === true)
     ?? null;
+}
+
+/** True when this conversation node carries an entry condition (`data.entryCondition`, #4039 D7). */
+export function hasEntryCondition(n: ConversationNode): boolean {
+  const c = flags(n).entryCondition;
+  return c !== undefined && c !== null;
+}
+
+/**
+ * #4039 (cor:cht:020:02 steps 1-6): the conversation an UNNAMED start opens, by entry condition.
+ * Walks the ordinary conversations in the author's order and opens the first whose condition holds (no condition holds,
+ * step 4); when none does, ruling 0127's chain applies (setup, then fallback, else null). Setup and fallback are never
+ * in the scan. `holds` may throw: a condition that cannot be evaluated refuses the start, and the scan never skips it (step 6).
+ */
+export async function pickEntryConversation<T extends ConversationNode>(
+  nodes: readonly T[],
+  holds: (conversation: T) => Promise<boolean>,
+): Promise<T | null> {
+  const ordered = topLevelConversations(nodes);
+  for (const n of ordered) {
+    if (!isOrdinaryConversation(n)) continue;
+    if (!hasEntryCondition(n) || await holds(n)) return n;
+  }
+  return pickSetupOrFallback(ordered);
 }
