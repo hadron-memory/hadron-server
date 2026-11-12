@@ -6,7 +6,7 @@
  * replacing the old payload (raw memory URN + the library's exception, which carried the offending atom).
  * Synthetic sentinels only; stored locs are written straight to the table, bypassing `validateLoc`.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -23,6 +23,11 @@ let orgId: string;
 const mems: Record<string, string> = {};
 const ctx = (): Context => ({ db, userId: null, roles: [] } as unknown as Context);
 let calls: unknown[][];
+let priorFrontendUrl: string | undefined;
+const frontendUrlAtLoad = process.env.FRONTEND_URL;
+// Hygiene pin: after every test in this file has run, the process env is exactly what it was at load
+// (restored when it was set, absent when it was not). A failure here fails the suite.
+afterAll(() => { expect(process.env.FRONTEND_URL).toBe(frontendUrlAtLoad); });
 
 async function memory(kind: keyof typeof MEM_SLUGS): Promise<string> {
   const slug = MEM_SLUGS[kind];
@@ -37,6 +42,7 @@ const everything = () => JSON.stringify(calls, (_k, v) => (v instanceof Error ? 
 
 beforeEach(async () => {
   await cleanDb(db);
+  priorFrontendUrl = process.env.FRONTEND_URL;
   process.env.FRONTEND_URL = 'https://portal.test';
   const org = await db.organization.create({ data: { id: generateId(), name: 'sentinel org', urn: 'sentinelorg' } });
   orgId = org.id;
@@ -44,7 +50,12 @@ beforeEach(async () => {
   calls = [];
   for (const m of ['log', 'warn', 'error', 'info', 'debug'] as const) vi.spyOn(console, m).mockImplementation((...a: unknown[]) => { calls.push(a); });
 });
-afterEach(() => { vi.restoreAllMocks(); delete process.env.FRONTEND_URL; });
+afterEach(() => {
+  vi.restoreAllMocks();
+  // Restore, not delete: a developer's own FRONTEND_URL must survive this file; delete only when it was absent.
+  if (priorFrontendUrl === undefined) delete process.env.FRONTEND_URL;
+  else process.env.FRONTEND_URL = priorFrontendUrl;
+});
 
 const fallback = (memUrn: string, loc: string) => `hrn:node:${memUrn}:${loc}`;
 
@@ -137,6 +148,21 @@ describe('the sanitized fallback event', () => {
     const objs = events().map((c) => c[1] as Record<string, unknown>);
     expect(objs.map((o) => o.nodeId)).toEqual([null, 'node-id-1', 'node-id-2']);
     for (const o of objs) expect({ ...o, nodeId: null }).toEqual({ schemaVersion: 1, memoryId: mems.ordinary, nodeId: null, memoryShape: 'ORDINARY', locShape: 'INTERIOR_EMPTY_ATOM', emissionError: 'WRONG_PART_COUNT' });
+  });
+  it('an id-bearing caller that is not a Node field (own `id`, no `nodeId`) logs nodeId null: only the Node fields supply it', async () => {
+    // Kills a mutant that falls back to the caller's own `id` (`n.nodeId ?? n.id`) in resolveNodeUrnField.
+    await resolveNodeUrnField({ id: 'caller-own-id', loc: 'a::b', memoryId: mems.ordinary! } as any, ctx());
+    expect(events()).toHaveLength(1);
+    expect((events()[0]![1] as any).nodeId).toBeNull();
+    expect(everything()).not.toContain('caller-own-id');
+  });
+  it('a 64-character charset-valid atom is ORDINARY (the bound is inclusive) beside an invalid memory identity', async () => {
+    // Kills `a.length > MAX_ATOM_LEN` -> `>=` in classifyLocShape; the 65-character row above pins the other side.
+    const loc = 'a'.repeat(64);
+    const out = await resolveNodeUrnField({ loc, memoryId: mems.badCharset! }, ctx());
+    expect(out).toBe(fallback(await urnOf('badCharset'), loc));
+    expect(events().map((c) => c[1])).toEqual([{ schemaVersion: 1, memoryId: mems.badCharset, nodeId: null, memoryShape: 'INVALID', locShape: 'ORDINARY', emissionError: 'INVALID_ATOM_SHAPE' }]);
+    expect(everything()).not.toContain(loc);
   });
   it('no query is added: the memoized memory lookup runs once for many failing rows', async () => {
     const spy = vi.spyOn(db.memory, 'findUnique');
