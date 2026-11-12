@@ -11362,6 +11362,10 @@ export const typeDefs = `#graphql
     "Present and true only when passkey registration is enabled separately from node signing."
     passkeyRegistration: Boolean!
     """
+    #4051: the fixed, parameterless URL of the passkey revoke page (the deployment's baseUrl in this same response plus /passkeys/revoke), for a client that hands the owner off to it (hrn:node:hadronmemory.com:specs:cor:aut:040:08). Present only while passkey registration is enabled, exactly like passkeyRegistration: while it is off the field is removed from the schema, never null (hrn:node:hadronmemory.com:specs:cor:api:020:01), so check the passkey-registration token on GET /capabilities before selecting it. It names no passkey, credential, user or session, and is the same for every caller. Revoking happens interactively on that page; the URL grants nothing.
+    """
+    passkeyRevokeUrl: String!
+    """
     HADRON_SERVER_VERSION — the MCP/API-surface contract version.
     """
     version: String!
