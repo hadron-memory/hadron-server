@@ -18,6 +18,7 @@
  * Spec: cor:api:050:02
  */
 
+import { GraphQLError } from 'graphql';
 import { COMMENT_NODE_TYPE } from '../comments/index.js';
 import { searchContains } from '../../integrations/db/provider.js';
 import type { PrismaClient, Prisma } from '../../generated/prisma/index.js';
@@ -667,6 +668,123 @@ async function searchUsers(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
   return hits;
 }
 
+/** Added to a task's score on an exact handle match: above a tie with an exact title (tier 3 x name weight). */
+const EXACT_HANDLE_BOOST = 0.5;
+
+export const taskSearchLimits = {
+  /** Distinct Apps examined per page. */
+  page: 100,
+  /** Stop once this many Apps are admitted: the per-entity candidate cap bounds what they can contribute. */
+  admittedApps: 200,
+  /** Hard safety bound on Apps examined (denied ones included), so a broad query by a stranger stays bounded. */
+  maxScanned: 10_000,
+};
+
+/** The next page of distinct App ids (ascending, after `after`) holding a task that matches. */
+async function taskAppPage(db: PrismaClient, match: AnyWhere, after: string | null): Promise<{ appId: string }[]> {
+  return db.agentTask.findMany({
+    where: { AND: [match, after ? { appId: { gt: after } } : {}] } as Prisma.AgentTaskWhereInput,
+    distinct: ['appId'],
+    select: { appId: true },
+    orderBy: { appId: 'asc' },
+    take: taskSearchLimits.page,
+  });
+}
+
+/**
+ * #3945 (cor:api:050:02): tasks match on title and handle, both under `name` (case-insensitive substring), an exact
+ * handle ranking first. The per-App read gate runs on every App BEFORE a task becomes a candidate, so an unreadable
+ * task is indistinguishable from a missing one in hits, ranking and `total`. No gate (MCP) or no `name` field ⇒ nothing.
+ */
+async function searchAgentTasks(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
+  const { fields, q, principal } = ctx;
+  const gate = principal.taskReadGate;
+  if (!gate || !fields.has('name')) return [];
+  const match: AnyWhere = {
+    OR: [textPred('title', q), textPred('handle', q)],
+    ...(principal.orgScopeId || principal.taskAppScope
+      ? {
+          app: {
+            AND: [
+              ...(principal.orgScopeId ? [{ organizationId: principal.orgScopeId }] : []),
+              ...(principal.taskAppScope ? [principal.taskAppScope] : []),
+            ],
+          },
+        }
+      : {}),
+  };
+
+  const admitted: string[] = [];
+  let after: string | null = null;
+  let scanned = 0;
+  // Denied Apps never count against the admitted bound: only the hard scan bound stops a walk that keeps finding denied Apps.
+  while (admitted.length < taskSearchLimits.admittedApps && scanned < taskSearchLimits.maxScanned) {
+    const groups = await taskAppPage(ctx.db, match, after);
+    const ok = await Promise.all(
+      groups.map(async (g) => {
+        try {
+          return await gate(g.appId);
+        } catch (e) {
+          // A typed refusal reads as denied (never a signal); a database or programming failure must not read as "not allowed".
+          if (e instanceof GraphQLError) return false;
+          throw e;
+        }
+      }),
+    );
+    groups.forEach((g, i) => ok[i] && admitted.push(g.appId));
+    scanned += groups.length;
+    if (groups.length < taskSearchLimits.page) break;
+    after = groups[groups.length - 1]!.appId;
+  }
+  if (admitted.length === 0) return [];
+
+  const select = { id: true, handle: true, title: true, appId: true, app: { select: { organizationId: true } } } as const;
+  const [exact, rows] = await Promise.all([
+    ctx.db.agentTask.findMany({
+      where: { AND: [{ appId: { in: admitted } }, { handle: { equals: q, mode: 'insensitive' } }] } as Prisma.AgentTaskWhereInput,
+      select,
+      orderBy: { id: 'asc' },
+      take: ctx.cap,
+    }),
+    ctx.db.agentTask.findMany({
+      where: { AND: [{ appId: { in: admitted } }, match] } as Prisma.AgentTaskWhereInput,
+      select,
+      orderBy: { id: 'asc' },
+      take: ctx.cap,
+    }),
+  ]);
+  const seen = new Set<string>();
+  const hits: GlobalSearchHit[] = [];
+  for (const r of [...exact, ...rows]) {
+    if (seen.has(r.id)) continue;
+    seen.add(r.id);
+    const m = bestMatch(
+      [
+        { field: 'name', value: r.title },
+        { field: 'name', value: r.handle },
+      ],
+      q,
+      fields,
+    );
+    if (!m) continue;
+    hits.push({
+      entityType: 'agentTask',
+      id: r.id,
+      urn: null, // until #3878 serves task URNs (#3950)
+      name: r.title,
+      description: null, // pinned for this slice
+      matchedField: m.field,
+      // An exact handle (ignoring case) outranks every other match, an exact title included (cor:api:050:02).
+      score: r.handle !== null && r.handle.toLowerCase() === q.toLowerCase() ? m.score + EXACT_HANDLE_BOOST : m.score,
+      memoryId: null,
+      organizationId: r.app.organizationId,
+      handle: r.handle,
+    });
+    if (hits.length >= ctx.cap) break;
+  }
+  return hits;
+}
+
 export const ADAPTERS: Record<SearchEntityType, (ctx: AdapterCtx) => Promise<GlobalSearchHit[]>> = {
   organization: searchOrganizations,
   memory: searchMemories,
@@ -675,4 +793,5 @@ export const ADAPTERS: Record<SearchEntityType, (ctx: AdapterCtx) => Promise<Glo
   app: searchApps,
   aiServiceConfig: searchAiServiceConfigs,
   user: searchUsers,
+  agentTask: searchAgentTasks,
 };
