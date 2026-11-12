@@ -2287,6 +2287,8 @@ export const sessionMutations = {
         // Derived INCLUDE edges (#2040) are not snapshotted: restore re-derives them from content.
         where: { sourceId: { in: nodeIds }, deletedAt: null, governedKind: null },
         include: { source: { select: { loc: true } }, target: { select: { loc: true } } },
+        // #4034: the reader breaks equal-priority ties by snapshot order, so write it in the live read's order.
+        orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
       });
       const edgeSnapshots = edges.map((e) => ({
         sourceLoc: e.source.loc,

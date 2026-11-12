@@ -146,6 +146,8 @@ describe('#4034 a pinned chat reads its script from the pinned revision', () => 
     const ids = await seedScript();
     await seedEdge(ids, 'conversations:main:check', 'conversations:alpha');
     const revLoc = await publish();
+    // The draft now routes elsewhere: only a live rule read can reach it (the snapshot still says alpha).
+    await db.edge.updateMany({ where: { memoryId: systemMemory.id, sourceId: ids['conversations:main:check'] }, data: { targetId: ids['conversations:beta'] } });
     // Make the snapshot a pre-v2 one: no format marker, no condition/priority/seq on anything.
     const revNode = await db.node.findFirstOrThrow({ where: { memoryId: systemMemory.id, loc: revLoc } });
     const data = revNode.data as any;
@@ -159,9 +161,21 @@ describe('#4034 a pinned chat reads its script from the pinned revision', () => 
     warn.mockClear();
     const turn = await finishStage(chat.chatId);
 
-    expect(turn.conversationHandoff).toBe('alpha');
+    expect(turn.conversationHandoff).toBe('beta');
     const logged = warn.mock.calls.filter((c) => String(c[0]).includes('chat_script_pre_v2_live_rules'));
     expect(logged).toHaveLength(1);
+  });
+
+  it('pin 8: equal-priority rules are snapshotted in createdAt order, so routing matches the live read', async () => {
+    const ids = await seedScript();
+    const first = await seedEdge(ids, 'conversations:main:check', 'conversations:alpha');
+    const second = await seedEdge(ids, 'conversations:main:check', 'conversations:beta');
+    // `second` was created first by the clock, though inserted last: the live read puts it ahead of `first`.
+    await db.edge.update({ where: { id: second.id }, data: { createdAt: new Date(Date.now() - 60_000) } });
+    await publish();
+    const chat = await startMain();
+    const turn = await finishStage(chat.chatId);
+    expect(turn.conversationHandoff).toBe('beta');
   });
 
   it('pin 4: restoring a v2 revision brings back each rule condition and priority and each node seq', async () => {
