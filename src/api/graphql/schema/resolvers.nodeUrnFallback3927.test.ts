@@ -104,16 +104,17 @@ describe('the sanitized fallback event', () => {
   it.each(LOC_ROWS)('%s: bytes unchanged, exactly one closed-schema event, nothing raw', async (_l, loc, locShape, emissionError) => {
     const memUrn = await urnOf('ordinary');
     const nodeUrn = await resolveNodeUrnField({ loc, memoryId: mems.ordinary! }, ctx());
+    const logged = [...calls]; // before the oracles below: the shared round-trip helper logs on its own
     expect(nodeUrn).toBe(fallback(memUrn, loc)); // exact fallback bytes
     expect(() => emitNodeUrnV2(memUrn, loc)).toThrow(); // canonical emission failed, separately asserted
     expect(nodeUrnRoundTrips(memUrn, loc)).toBe(false);
-    expect(calls).toHaveLength(1);
-    expect(calls[0]).toHaveLength(2);
-    const [msg, obj] = calls[0] as [string, Record<string, unknown>];
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toHaveLength(2);
+    const [msg, obj] = logged[0] as [string, Record<string, unknown>];
     expect(msg).toBe(EVENT);
     expect(Object.keys(obj).sort()).toEqual(KEYS);
     expect(obj).toEqual({ schemaVersion: 1, memoryId: mems.ordinary, nodeId: null, memoryShape: 'ORDINARY', locShape, emissionError });
-    const text = everything();
+    const text = JSON.stringify(logged);
     for (const raw of ['SECRETLOC', 'sentinelorg', 'sentinel-mem', 'a'.repeat(65), 'emit', 'Slug contains', 'wrong number']) expect(text).not.toContain(raw);
     // Only closed strings leave the process: every value is an enum member, an opaque id, null or the version.
     for (const v of Object.values(obj)) expect(['string', 'number'].includes(typeof v) || v === null).toBe(true);
@@ -158,8 +159,8 @@ describe('the sanitized fallback event', () => {
     expect(events().map((c) => c[1])).toEqual([{ schemaVersion: 1, memoryId: mems.compound, nodeId: null, memoryShape: 'COMPOUND', locShape: 'INTERIOR_EMPTY_ATOM', emissionError: 'WRONG_PART_COUNT' }]);
   });
   it.each([['single-atom memory identity', 'badSingle'], ['out-of-charset memory identity', 'badCharset']] as const)('%s with an ORDINARY loc: memoryShape INVALID, locShape ORDINARY', async (_l, kind) => {
-    const out = await resolveNodeUrnField({ loc: 'docs:a', memoryId: mems[kind]! }, ctx());
-    expect(out).toBe(fallback(await urnOf(kind), 'docs:a'));
+    const out = await resolveNodeUrnField({ loc: 'a', memoryId: mems[kind]! }, ctx());
+    expect(out).toBe(fallback(await urnOf(kind), 'a'));
     expect(events()).toHaveLength(1);
     expect((events()[0]![1] as any)).toMatchObject({ memoryShape: 'INVALID', locShape: 'ORDINARY', memoryId: mems[kind] });
     expect(everything()).not.toContain('sentinel');
@@ -174,12 +175,29 @@ describe('the sanitized fallback event', () => {
     expect(calls.some((c) => String(c[0]).includes('[Node.urn]'))).toBe(false);
     expect(calls).toHaveLength(1);
   });
-  it('the fallback URN is served as-is by resolveUrn: report what it does (the slice repairs nothing)', async () => {
-    const urn = await resolveNodeUrnField({ loc: 'a::b', memoryId: mems.ordinary! }, ctx());
+  it('a memory whose stored root is empty fails with a non-library error: emissionError OTHER, memoryShape INVALID', async () => {
+    const m = await db.memory.create({ data: { id: generateId(), organizationId: orgId, urn: ':sentinel-mem', name: 'empty-root', class: 'knowledge' } });
+    const out = await resolveNodeUrnField({ loc: 'a:b', memoryId: m.id }, ctx());
+    expect(out).toBe('hrn:node::sentinel-mem:a:b');
+    expect(events().map((c) => c[1])).toEqual([{ schemaVersion: 1, memoryId: m.id, nodeId: null, memoryShape: 'INVALID', locShape: 'ORDINARY', emissionError: 'OTHER' }]);
+  });
+  it('classifyEmissionError maps only the library reasons; anything else, even null, is OTHER', async () => {
+    const { classifyEmissionError } = await import('../../../lib/nodeUrnDiagnostic.js');
+    expect([null, undefined, 'x', new Error('boom'), { reason: 'invalid-charset' }].map(classifyEmissionError)).toEqual(['OTHER', 'OTHER', 'OTHER', 'OTHER', 'OTHER']);
+  });
+  it('actual resolveUrn: a canonical node URN resolves for this caller, its stored-loc fallback does not (reported, not repaired)', async () => {
+    const admin = await db.user.create({ data: { id: generateId(), handle: 'probe-admin', roles: ['ADMIN'] } });
+    const rc = { db, userId: admin.id, roles: ['ADMIN'] } as unknown as Context;
+    const mk = (loc: string) => db.node.create({ data: { id: generateId(), memoryId: mems.ordinary!, loc, name: loc || 'root', ownerRepo: 'x/y', tags: [] } });
+    await mk('fine'); await mk('a::b');
+    const good = await resolveNodeUrnField({ loc: 'fine', memoryId: mems.ordinary! }, ctx());
+    const bad = await resolveNodeUrnField({ loc: 'a::b', memoryId: mems.ordinary! }, ctx());
     calls = [];
-    let outcome: string;
-    try { outcome = JSON.stringify(await (resolvers.Query as any).resolveUrn({}, { urn }, { ...ctx(), roles: ['ADMIN'] })); } catch (e) { outcome = `threw:${(e as any).extensions?.code ?? (e as Error).name}`; }
-    expect(typeof outcome).toBe('string');
-    expect(outcome).not.toContain('SECRETLOC');
+    const probe = async (urn: string) => { try { return await (resolvers.Query as any).resolveUrn({}, { urn }, rc); } catch (e) { return `threw:${(e as any).extensions?.code ?? (e as Error).name}`; } };
+    const found = await probe(good);
+    expect(found).not.toBeNull();
+    expect(typeof found === 'string' && found.startsWith('threw')).toBe(false);
+    expect(await probe(bad)).toBeNull();
+    expect(JSON.stringify(calls)).not.toContain('SECRETLOC');
   });
 });
