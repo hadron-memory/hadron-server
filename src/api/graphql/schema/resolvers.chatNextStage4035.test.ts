@@ -160,13 +160,13 @@ describe('next_stage check (#4035)', () => {
       {}, { chatId: chat.chatId, toolResponse: { message: 'a', next_stage: 'step1', onTrack: true } }, userCtx(adminUser.id),
     );
     expect(same.stageTransitioned).toBe(false);
-    expect(same.rejectedNextStage).toBeNull();
+    expect(same.rejectedNextStage ?? null).toBeNull();
     const moved = await resolvers.Mutation.processChatResponse(
       {}, { chatId: chat.chatId, toolResponse: { message: 'b', next_stage: 'step2', onTrack: true } }, userCtx(adminUser.id),
     );
     expect(moved.stageTransitioned).toBe(true);
     expect(moved.newStageName).toBe('step2');
-    expect(moved.rejectedNextStage).toBeNull();
+    expect(moved.rejectedNextStage ?? null).toBeNull();
     expect((await engineState(chat.chatId)).stageName).toBe('step2');
   });
 

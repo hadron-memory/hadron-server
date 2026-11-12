@@ -1763,7 +1763,8 @@ export const chatMutations = {
         displayMessage: message,
         stageTransitioned,
         newStageName,
-        rejectedNextStage,
+        // Present only when a name was rejected, so the shape of every other turn's result is unchanged (GraphQL fills null).
+        ...(rejectedNextStage !== null ? { rejectedNextStage } : {}),
         conversationHandoff,
         chatEnded: false,
         onTrack: onTrack ?? true,
