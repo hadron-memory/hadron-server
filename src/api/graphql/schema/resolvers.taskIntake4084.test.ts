@@ -90,11 +90,14 @@ describe('#4084 (1): agentTasks(externalIds:) — a bounded batch lookup inside 
 
   it('one bad entry refuses the whole list with BAD_USER_INPUT naming its position, never echoing it', async () => {
     await create({ externalId: X });
-    const bad = 'https://example.com/has space';
-    const err = await list({ externalIds: [X, bad] }).catch((e: any) => e);
-    expect(err).toMatchObject(code('BAD_USER_INPUT'));
-    expect(err.message).toContain('externalIds[1]');
-    expect(err.message).not.toContain(bad);
+    // The single form's check (checkExternalIdText: 1 to 512 code points, no lone surrogate), entry by entry.
+    const long = `https://example.com/${'x'.repeat(600)}`;
+    for (const bad of ['', long, 'https://example.com/\ud800']) {
+      const err = await list({ externalIds: [X, bad] }).catch((e: any) => e);
+      expect(err).toMatchObject(code('BAD_USER_INPUT'));
+      expect(err.message).toContain('externalIds[1]');
+      if (bad) expect(err.message).not.toContain(bad);
+    }
   });
 
   it('an empty list and a list over the cap are refused', async () => {
