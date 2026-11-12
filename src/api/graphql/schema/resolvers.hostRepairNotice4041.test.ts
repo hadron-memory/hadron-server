@@ -166,14 +166,27 @@ describe('NO_SNAPSHOT and CAP_REACHED alert once per worker, to the dark worker\
     expect(p.content).toContain('Kit see this https://evil.example x is dark');
   });
 
-  it('a delayed relaunch cannot regress the marker to an older relaunch key (blind P3-4)', async () => {
+  it('a delayed relaunch for an older report posts nothing and cannot regress the marker (blind P3-4)', async () => {
     const { postRepairNotices } = await import('../../../lib/agentTasks/hostRepairNotice.js');
     const mk = (min: number) => ({ workerId: kit.id, workerName: 'Kit', hostLabel: 'Orca One', repair: 'RELAUNCHED' as const, attempt: 1, checkedAt: ago(min) });
-    await postRepairNotices(db, app.id, [mk(2)]);
+    await send([dark(kit.id, { repair: 'RELAUNCHED', attempt: 1, checkedAt: ago(2) })]);
     const newer = await keyOf(kit.id);
+    expect(newer).toMatch(/^relaunched:/);
     await postRepairNotices(db, app.id, [mk(5)]);
     expect(await keyOf(kit.id)).toBe(newer);
     expect(await posts()).toHaveLength(1);
+  });
+
+  it('a delayed older alert cannot claim after a newer report re-armed the marker (Baloo P2)', async () => {
+    const { postRepairNotices } = await import('../../../lib/agentTasks/hostRepairNotice.js');
+    await M.setHostWorkerTerminals({}, { input: { appRef: app.id, reports: [dark(kit.id, { repair: 'NO_SNAPSHOT', checkedAt: ago(5) })] } }, { db, appId: app.id, appKeyId: key.id, organizationId: org.id, roles: [] } as Context);
+    await settleRepairNotices();
+    await send([dark(kit.id, { checkedAt: ago(4) })]); // re-arms
+    expect(await keyOf(kit.id)).toBeNull();
+    await postRepairNotices(db, app.id, [{ workerId: kit.id, workerName: 'Kit', hostLabel: 'Orca One', repair: 'NO_SNAPSHOT', attempt: null, checkedAt: ago(5) }]);
+    expect(await keyOf(kit.id)).toBeNull();
+    await send([dark(kit.id, { repair: 'CAP_REACHED', checkedAt: ago(3) })]);
+    expect(await posts()).toHaveLength(2);
   });
 
   it('the response does not wait on the posts: they settle afterwards', async () => {

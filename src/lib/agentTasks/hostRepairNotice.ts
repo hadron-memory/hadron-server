@@ -92,8 +92,9 @@ export async function postRepairNotices(db: PrismaClient, appId: string, notices
         db,
         appId,
         noticeBody(n),
-        // A relaunch key never replaces a NEWER relaunch key (ISO times sort as text): a delayed batch cannot regress the marker.
-        async (tx) => (await tx.$executeRaw`UPDATE workers SET repair_notice_key = ${key} WHERE id = ${n.workerId} AND repair_notice_key IS DISTINCT FROM ${key} AND NOT COALESCE(${key} LIKE 'relaunched:%' AND repair_notice_key LIKE 'relaunched:%' AND repair_notice_key > ${key}, false)`) > 0,
+        // The claim holds only while this notice's report is still the worker's latest (a newer report may have re-armed the marker,
+        // so a delayed older post cannot re-claim it; Baloo P2). A relaunch key never replaces a NEWER relaunch key (ISO times sort as text): a delayed batch cannot regress the marker.
+        async (tx) => (await tx.$executeRaw`UPDATE workers SET repair_notice_key = ${key} WHERE id = ${n.workerId} AND terminal->>'checkedAt' = ${n.checkedAt.toISOString()} AND repair_notice_key IS DISTINCT FROM ${key} AND NOT COALESCE(${key} LIKE 'relaunched:%' AND repair_notice_key LIKE 'relaunched:%' AND repair_notice_key > ${key}, false)`) > 0,
         mentions,
       );
     } catch (err) {
