@@ -64,8 +64,15 @@ export async function provisionSignIns(db: PrismaClient): Promise<SignInEvidence
     const verified = await fetch(`${base}/auth/email/verify?token=${raw}`, { redirect: 'manual' });
     assert.equal(verified.status, 302);
     // #4058: branch on the switch THIS server actually runs with (its /capabilities token), never an env guess.
-    const caps = await (await fetch(`${base}/capabilities`)).json() as { capabilities: string[] };
+    const capsRes = await fetch(`${base}/capabilities`);
+    assert.equal(capsRes.status, 200);
+    const caps = await capsRes.json() as { capabilities?: unknown };
+    assert(Array.isArray(caps.capabilities) && caps.capabilities.every(c => typeof c === 'string'), 'capabilities must be a string array');
     const registrationOn = caps.capabilities.includes('passkey-registration');
+    // The server must report the mode this stack was asked for (registration rides signing, signingSurfacePolicy), so a
+    // dropped or overridden switch fails loudly instead of silently seeding through the OFF branch.
+    const requested = process.env.PASSKEY_SIGNING_ENABLED === 'true' && process.env.PASSKEY_REGISTRATION_ENABLED === 'true';
+    assert.equal(registrationOn, requested, `stack asked for registration=${requested} but /capabilities says ${registrationOn}`);
     // The Location may be relative (the passkey hand-off is), so resolve it against the base.
     const location = new URL(verified.headers.get('location')!, base);
     const fresh = await db.user.findUniqueOrThrow({ where: { email: 'fresh-user@e2e.test' } });
