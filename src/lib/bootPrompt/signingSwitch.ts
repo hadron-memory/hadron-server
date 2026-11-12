@@ -137,15 +137,17 @@ export async function computeSigningPreviewRows(db: Db, orgId: string): Promise<
       const { compiledNodeId, servedRevSeq } = today.served;
       let status = statusByNode.get(compiledNodeId);
       if (!status) statusByNode.set(compiledNodeId, status = lazyRevisionSignatureStatus(db, compiledNodeId, 'compiled-boot-prompt'));
-      // #4008: the preview runs while the switch is OFF, so the serve above is the approval-only walk and `servedRevSeq`
-      // is the newest approved revision. When that revision itself counts as signed it IS the newest approved-and-signed
-      // one (the walk below would return it first), so the second revision walk is skipped; only an unsigned served
-      // revision needs it, to find the older signed one it would change to.
+      // #4008: the preview only has rows while the switch is OFF (`computeSigningPreviewRows` returns [] once it is
+      // enforced, and a switch-on's recompute runs before it flips), so the serve above is the approval-only walk and
+      // `servedRevSeq` is the newest approved revision, and every revision above it is unapproved. When it itself counts as
+      // signed it IS the newest approved-and-signed one, so the second walk is skipped. A first revision has nothing older
+      // to change to and nothing approved above it, so it is skipped too. Anything else runs the walk FROM THE TOP, as
+      // the enforced serve does (same scan ceiling): a signed revision the serve would not reach must not show as one a
+      // switch-on changes to.
       if ((await status(servedRevSeq)).counts) continue;
-      // Nothing numbered below revision 1 exists, so a first revision has no older signed one to change to.
       const walk = servedRevSeq <= 1
-        ? { found: null }
-        : await newestApprovedAndSignedRevisionForServe(db, compiledNodeId, async (rev) => (await status!(rev)).counts, undefined, servedRevSeq);
+        ? { found: null as { revNo: number } | null }
+        : await newestApprovedAndSignedRevisionForServe(db, compiledNodeId, async (rev) => (await status!(rev)).counts);
       const base = {
         appId: app.id, appUrn: app.urn, agentId: t.agentId, agentName: t.agentName, workerId: t.workerId, workerName: t.workerName,
         compiledNodeId, compiledNodeUrn: await nodeUrnOf(compiledNodeId), servedRevSeq,

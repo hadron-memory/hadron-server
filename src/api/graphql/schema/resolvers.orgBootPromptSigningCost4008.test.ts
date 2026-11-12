@@ -59,8 +59,8 @@ describe('#4008 preview cost per row', () => {
     expect(small.rows).toBe(3);
     expect(large.rows).toBe(13);
     const perRow = (large.statements - small.statements) / (large.rows - small.rows);
-    // Main ran 32 per row (the serve's own walk plus a second full revision walk). Now 23: the second walk is skipped
-    // for a served revision that is signed or has no older revision. The rest is the serve's own per-target reads.
+    // Main ran 32 per row (the serve's own walk plus a second full revision walk). Now 23 on these first-revision fixtures: the second walk is skipped
+    // for a served revision that is signed or is a first revision. The rest is the serve's own per-target reads.
     expect(perRow).toBeLessThanOrEqual(24);
   }, 60_000);
 
