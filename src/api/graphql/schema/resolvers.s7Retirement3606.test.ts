@@ -251,3 +251,54 @@ it('executes released CLI get/pause/clear-pause and portal get/set documents wit
   ] as const)expect((await execute(name,file,variables,ctx(adminId)))[key]).toMatchObject({standbyEnabled:false,standbyEffective:false});
  } finally {await server.stop();}
 });
+
+// #4020 (tests only; basis cor:agt:050:11 + cor:dmo:050:12, built as, not ruled; cor:agt:080:29 is history only: it is
+// why standby false or omission is a no-op at all). An instructed worker manager's no-op records no manager act.
+describe('instructed worker manager on the delivery and clear doors (#4020)', () => {
+ const instruction = { kind: 'LIVE_CHAT', ref: 'synthetic:instructed4020' };
+ const asInstructedManager = async <T>(call: (c: Context) => Promise<T>): Promise<T> => {
+  const worker = await db.worker.findUniqueOrThrow({ where: { id: targetId } });
+  const caller = await db.worker.create({ data: { appId, agentId: worker.agentId, name: 'Caller', slug: 'caller', signature: '', trailer: '', heldByUserId: adminId } });
+  const session = await db.session.create({ data: { id: generateId(), appId, workerId: caller.id, agentId: worker.agentId, userId: adminId } });
+  const { runAsActor } = await import('../../../lib/requestActor.js');
+  return runAsActor({ workerId: caller.id, agentId: worker.agentId }, () => call(ctx(adminId, { sessionId: session.id })));
+ };
+ const acts = () => db.agentTeamEvent.findMany({ where: { appId, type: 'app.manager-act' } });
+ const snapshot = async () => ({
+  apps: await db.$queryRawUnsafe('SELECT to_jsonb(a) AS row FROM apps a ORDER BY id'),
+  settings: await db.$queryRawUnsafe('SELECT to_jsonb(w) AS row FROM worker_wake_settings w ORDER BY worker_id'),
+  events: await db.agentTeamEvent.findMany({ where: { appId }, orderBy: { id: 'asc' } }),
+ });
+
+ it('B6 control: an instructed real change updates the App and records exactly one act', async () => {
+  const before = await snapshot();
+  const out = await asInstructedManager(c => M.setAppDeliverySettings({}, { appRef: appId, input: { busyDelaySeconds: 601 }, instruction }, c));
+  expect(out).toMatchObject({ busyDelaySeconds: 601 });
+  expect((await db.app.findUniqueOrThrow({ where: { id: appId } })).deliveryBusyDelaySeconds).toBe(601);
+  expect(await acts()).toHaveLength(1);
+  expect((await snapshot()).events).not.toEqual(before.events);
+ });
+
+ it.each([[{ standbyEnabled: false }], [{}]])('B4: an instructed no-op %j writes nothing and records no act', async input => {
+  const before = await snapshot();
+  const out = await asInstructedManager(c => M.setAppDeliverySettings({}, { appRef: appId, input, instruction }, c));
+  expect(out).toMatchObject({ standbyEnabled: false, standbyEffective: false });
+  expect(await snapshot()).toEqual(before);
+  expect(await acts()).toHaveLength(0);
+ });
+
+ it('B5: an instructed standbyEnabled:true refuses before every write', async () => {
+  const before = await snapshot();
+  await expect(asInstructedManager(c => M.setAppDeliverySettings({}, { appRef: appId, input: { standbyEnabled: true }, instruction }, c)))
+   .rejects.toMatchObject({ extensions: { code: 'DELIVERY_STANDBY_UNAVAILABLE' } });
+  expect(await snapshot()).toEqual(before);
+ });
+
+ it('B2: an instructed clear door records no act and writes nothing', async () => {
+  const before = await snapshot();
+  const out = await asInstructedManager(c => M.clearWorkerIsolation({}, { workerRef: targetId, instruction }, c));
+  expect(out).toMatchObject({ workerId: targetId, pausedUntil: null });
+  expect(await snapshot()).toEqual(before);
+  expect(await acts()).toHaveLength(0);
+ });
+});
