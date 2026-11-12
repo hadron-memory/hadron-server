@@ -75,6 +75,11 @@ export interface CreateGrantArgs {
   reason: string;
   /** The agent whose authority anchor the caller holds (null: none). An agent holder is accepted only if it is exactly this agent. */
   heldAgentAnchor?: string | null;
+  /**
+   * V86 (#4067, cor:acl:140:07): whether the REQUESTER can read this memory, judged on the transaction's own context (the calling
+   * worker's session on the worker arm, the person on the manager arm). A node-typed value must name a node in a memory this says yes to.
+   */
+  canReadMemory: (memoryId: string) => Promise<boolean>;
 }
 
 // #3834 / ruling0266, cor:acl:140:01: admission only; stored terms remain rebuildable under :09.
@@ -159,6 +164,22 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
     if (Array.isArray(v) && v.length > MAX_LIST_ENTRIES) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', 'LIST_TOO_LONG');
     if (!valueMatchesType(p.type, v)) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
     if (p.refusesWildcard && v === '*') throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} refuses a wildcard`);
+  }
+
+  // V86 (#4067, ruling 0265, cor:acl:140:07): a grant may name only a node its REQUESTER can read. The signer shows every node as its
+  // canonical URN, so an id that resolves to nothing could never be signed. A missing, deleted or unreadable node is the SAME refusal
+  // (same code, same detail as a malformed id), so this is no existence oracle. Judged before the insert: a refusal stores nothing.
+  for (const p of declared) {
+    if (p.type !== 'node-ref') continue;
+    const v = (values as Record<string, unknown>)[p.name];
+    const ids = [...new Set((Array.isArray(v) ? v : [v]).filter((x): x is string => typeof x === 'string' && x !== '*'))];
+    if (ids.length === 0) continue;
+    const nodes = await tx.node.findMany({ where: { id: { in: ids }, deletedAt: null }, select: { id: true, memoryId: true } });
+    let ok = nodes.length === ids.length;
+    for (const memoryId of ok ? new Set(nodes.map((n) => n.memoryId)) : []) {
+      if (!(await args.canReadMemory(memoryId))) { ok = false; break; }
+    }
+    if (!ok) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
   }
 
   // Count Unicode code points like task findings, with a UTF-16 fast bound so counting work is bounded.

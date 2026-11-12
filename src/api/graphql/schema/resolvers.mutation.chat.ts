@@ -101,7 +101,8 @@ import {
   entryStartMessageFor, validateEntryCondition, type EntryStartReason,
 } from '../../../lib/edge-conditions/entryCondition.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
-import { loadChatScript } from '../../../lib/chatScript.js';
+import { loadChatScript, type ChatScript } from '../../../lib/chatScript.js';
+import { decideNextStage, conversationStageOrder } from '../../../lib/chatRouting/nextStage.js';
 
 /**
  * How many of a chat's most recent messages `sendChatMessage` hands the model.
@@ -1493,7 +1494,6 @@ export const chatMutations = {
       }
       const message = toolResponse.message;
       const data = toolResponse.data as Record<string, unknown> | undefined;
-      const nextStage = toolResponse.next_stage as string | undefined;
       const onTrack = toolResponse.onTrack as boolean | undefined;
       const offTrackReason = toolResponse.offTrackReason as string | undefined;
 
@@ -1650,35 +1650,68 @@ export const chatMutations = {
       // included. Edits run in the order they were pushed.
       const chatRootEdits: Array<(chatData: Record<string, unknown>) => void> = [];
 
-      // 1. Explicit stage transition from the LLM
-      if (nextStage && nextStage !== chatData.stageName) {
+      // 1. Explicit stage transition from the LLM. #4035: the name is checked against the stages of the
+      // conversation the chat is pinned to; an unknown name moves nothing and comes back as rejectedNextStage.
+      let rejectedNextStage: string | null = null;
+      let turnSysMemId: string | null = null;
+      let turnScript: ChatScript | null = null;
+      {
+        // The Agent is resolved as sendChatMessage does: shared or user home memory, the legacy linked-memory
+        // fallback, and an App chat's Agent only while installed and licensed.
+        const turnMemory = await ctx.db.memory.findUnique({ where: { id: chatNode.memoryId } });
+        type TurnAgent = { id: string; systemMemoryId?: string | null };
+        let turnAgent = null as TurnAgent | null;
+        if (turnMemory?.sharedMemoryOfAgentId || turnMemory?.userMemoryOfAgentId) {
+          turnAgent = await ctx.db.agent.findUnique({
+            where: { id: (turnMemory.sharedMemoryOfAgentId ?? turnMemory.userMemoryOfAgentId)! },
+          }) as TurnAgent | null;
+        } else if (turnMemory) {
+          const legacyAgents = await ctx.db.agent.findMany({
+            where: { deletedAt: null, memoryItems: { some: { memoryId: chatNode.memoryId } } },
+          });
+          turnAgent = (legacyAgents.find((a) => (a as any).systemMemoryId) ?? null) as TurnAgent | null;
+        }
+        if (turnMemory?.class === 'app' && turnAgent) {
+          const installed = turnMemory.appId && await isAgentInstalledAndLicensed(ctx.db, turnMemory.appId, turnAgent.id);
+          if (!installed) turnAgent = null;
+        }
+        turnSysMemId = turnAgent?.systemMemoryId ?? null;
+        if (turnSysMemId) {
+          turnScript = await loadChatScript(ctx.db, turnSysMemId, (chatData.startedWithRevision as string | null) ?? null);
+        }
+      }
+      const stageOrder = turnScript
+        ? await conversationStageOrder(turnScript, (chatData.conversationName as string | null) ?? null)
+        : null;
+      const stageDecision = decideNextStage(toolResponse.next_stage, chatData.stageName as string | undefined, stageOrder);
+      if (stageDecision.kind === 'rejected') {
+        rejectedNextStage = stageDecision.name;
+      } else if (stageDecision.kind === 'move') {
+        const moveTo = stageDecision.stage;
         stageTransitioned = true;
-        newStageName = nextStage;
+        newStageName = moveTo;
         chatRootEdits.push((d) => {
-          d.stageName = nextStage;
+          d.stageName = moveTo;
           appendRouteEntry(d, {
-            nodeUrn: `conversations:${chatData.conversationName}:${nextStage}`,
+            nodeUrn: `conversations:${chatData.conversationName}:${moveTo}`,
             conversationUrn: `conversations:${chatData.conversationName}`,
             action: 'ENTER',
-            trigger: { type: 'STAGE_TRANSITION', content: `next_stage: ${nextStage}` },
+            trigger: { type: 'STAGE_TRANSITION', content: `next_stage: ${moveTo}` },
           });
         });
       }
 
       // 2. Evaluate on_complete edges when the conversation ends
       //    (next_stage is null and we're at the last stage)
-      if (!nextStage || nextStage === null) {
-        // Find the agent's system memory to look up edges
-        const memory = await ctx.db.memory.findUnique({ where: { id: chatNode.memoryId } });
-        const agentId = memory?.userMemoryOfAgentId;
-        if (agentId) {
-          const agent = await ctx.db.agent.findUnique({ where: { id: agentId } });
-          const sysMemId = (agent as any)?.systemMemoryId as string | null;
-          if (sysMemId) {
+      // R1 (a): a rejected name still NAMED a stage, so no rule runs on it.
+      if (stageDecision.kind === 'none') {
+        {
+          const sysMemId = turnSysMemId;
+          if (sysMemId && turnScript) {
             // #4034: the rules, the agent config and the condition defaults come from the revision the chat
             // is pinned to (`startedWithRevision`), not from the live draft (cor:cht:020:01, cor:cht:030:02).
             const currentStageLoc = `conversations:${chatData.conversationName}:${chatData.stageName}`;
-            const script = await loadChatScript(ctx.db, sysMemId, (chatData.startedWithRevision as string | null) ?? null);
+            const script = turnScript;
             const stageNode = await script.node(currentStageLoc);
             if (stageNode) {
               const edges = await script.outgoingRules(currentStageLoc);
@@ -1847,6 +1880,8 @@ export const chatMutations = {
         displayMessage: message,
         stageTransitioned,
         newStageName,
+        // Present only when a name was rejected, so the shape of every other turn's result is unchanged (GraphQL fills null).
+        ...(rejectedNextStage !== null ? { rejectedNextStage } : {}),
         conversationHandoff,
         chatEnded: false,
         onTrack: onTrack ?? true,

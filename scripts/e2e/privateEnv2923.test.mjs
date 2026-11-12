@@ -166,3 +166,19 @@ for (const [name, make] of [
     assert(!existsSync(s.stateDir));
   });
 }
+
+// #4058 (Greta F1): Compose ranks an exported variable above --env-file even when it is empty, so the registration
+// switch must reach the instance only when the HOST set it; otherwise a private-file `true` silently becomes OFF.
+test('registration switch: forwarded only when the host sets it, so a private-file value is not overridden', t => {
+  const regArg = c => /(^|\s)E2E_PASSKEY_REGISTRATION_ENABLED=/.test(c);
+  const unset = setup(t);
+  unset.run('up', 'priv', { E2E_PRIVATE_ENV_FILE: unset.envFile, E2E_PASSKEY_REGISTRATION_ENABLED: undefined });
+  const unsetCompose = composeCalls(unset.calls());
+  assert(unsetCompose.length > 0);
+  for (const c of unsetCompose) assert(!regArg(c), `host unset must not export the switch: ${c}`);
+  for (const value of ['true', 'false']) {
+    const set = setup(t);
+    set.run('up', 'priv', { E2E_PRIVATE_ENV_FILE: set.envFile, E2E_PASSKEY_REGISTRATION_ENABLED: value });
+    for (const c of composeCalls(set.calls())) assert(c.includes(`E2E_PASSKEY_REGISTRATION_ENABLED=${value} `), c);
+  }
+});

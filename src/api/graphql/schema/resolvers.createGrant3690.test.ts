@@ -19,7 +19,7 @@ import { USER_API_KEY_PREFIX, hashUserApiKey } from '../../../middleware/auth.js
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { upsertPlatformActions } from '../../../lib/grants/actions.js';
 import { isGrantLive } from '../../../lib/grants/live.js';
-import { dropTestActions, seedWorld, type World } from '../../../lib/grants/grantFixtures3668.js';
+import { dropTestActions, seedReadableNodes, seedWorld, type World } from '../../../lib/grants/grantFixtures3668.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -35,6 +35,9 @@ beforeAll(async () => {
 afterAll(async () => { await new Promise<void>((r) => http.close(() => r())); await cleanDb(db); await dropTestActions(); vi.unstubAllEnvs(); });
 
 let w: World;
+/** #4067: node ids the requester can read (a node-typed value must name one). */
+let pubNode: string;
+let pubNodes: string[];
 let rawKey: string;
 let sessionId: string;
 let otherWorkerId: string;
@@ -58,7 +61,7 @@ const CREATE = `mutation($i:CreateGrantInput!){createGrant(input:$i){id appId ac
   requestedByUserId requestedByWorkerId requestedBySessionId reason activatedAt revokedAt allows}}`;
 const asWorker = (input: Record<string, unknown>) => post(rawKey, sessionId, CREATE, { i: input });
 const rowCount = async () => Number((await db.$queryRawUnsafe<Array<{ n: bigint }>>('SELECT count(*) AS n FROM grants'))[0].n);
-const entry = () => ({ entryNode: generateId() });
+const entry = () => ({ entryNode: pubNode });
 const selfInput = (over: Record<string, unknown> = {}) => ({
   action: 'schedule.create', values: entry(), holderKind: 'WORKER', holderRef: w.workerId, reason: 'nightly digest', ...over,
 });
@@ -104,6 +107,7 @@ async function whileBlocking<T>(block: (tx: Prisma.TransactionClient) => Promise
 beforeEach(async () => {
   await cleanDb(db);
   w = await seedWorld();
+  [pubNode, ...pubNodes] = await seedReadableNodes(w.orgId, 3);
   await upsertPlatformActions(db);
   const org = await db.organization.findUniqueOrThrow({ where: { id: w.orgId } });
   for (const userId of [w.userId, w.user2Id]) await db.orgMember.create({ data: { organizationId: org.id, userId, role: 'CONTRIBUTOR' } });
@@ -156,7 +160,7 @@ describe('a bound worker creates a PENDING grant for itself or its role agent', 
   });
 
   it('a list value for a declared parameter is accepted (the action\'s own terms decide what a value is)', async () => {
-    const r = await asWorker(selfInput({ values: { entryNode: [generateId(), generateId()] } }));
+    const r = await asWorker(selfInput({ values: { entryNode: [pubNode, ...pubNodes.slice(0, 1)] } }));
     expect(r.errors).toBeUndefined();
   });
 });
@@ -276,6 +280,7 @@ describe('the locking carries from the section 10 review of #3792', () => {
     const { createPendingGrant } = await import('../../../lib/grants/create.js');
     const requester = { userId: w.userId, workerId: w.workerId, sessionId };
     await expect(db.$transaction((tx) => createPendingGrant(tx, {
+      canReadMemory: async () => true,
       appId: w.appId, requester, holder: { kind: 'worker', id: otherAppWorkerId },
       action: 'schedule.create', values: entry(), reason: 'x',
     }))).rejects.toMatchObject({ code: 'GRANT_HOLDER_NOT_ALLOWED' });
@@ -288,6 +293,7 @@ describe('the locking carries from the section 10 review of #3792', () => {
   const direct = async (over: { userId?: string; workerId?: string; anchored?: string | null; holder: { kind: 'worker' | 'agent'; id: string } }) => {
     const { createPendingGrant } = await import('../../../lib/grants/create.js');
     return db.$transaction((tx) => createPendingGrant(tx, {
+      canReadMemory: async () => true,
       appId: w.appId, requester: { userId: over.userId ?? w.userId, workerId: over.workerId ?? w.workerId, sessionId },
       holder: over.holder, heldAgentAnchor: over.holder.kind === 'agent' ? ('anchored' in over ? over.anchored : over.holder.id) : null, action: 'schedule.create', values: entry(), reason: 'x',
     }));
@@ -403,6 +409,7 @@ describe('#3829: the post-wait judgments, each pinned where it alone catches the
     await db.user.update({ where: { id: w.userId }, data: { deletedAt: new Date() } });
     expect(await db.user.count({ where: { id: w.userId } })).toBe(1);
     await expect(db.$transaction((tx) => createPendingGrant(tx, {
+      canReadMemory: async () => true,
       appId: w.appId, requester: { userId: w.userId, workerId: w.workerId, sessionId },
       holder: { kind: 'worker', id: w.workerId }, action: 'schedule.create', values: entry(), reason: 'x',
     }))).rejects.toMatchObject({ code: 'GRANT_REQUESTER_NOT_WORKER' });
