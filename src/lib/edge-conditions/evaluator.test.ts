@@ -173,6 +173,11 @@ describe('edge-conditions / evaluateEdgeCondition', () => {
       expect(r.ok).toBe(false);
       if (!r.ok) expect(r.error.code).toBe('DISALLOWED_OPERATOR');
     });
+    it('`!!` is outside the v1 allowlist: refused before evaluation, never read as truthiness (#4073)', async () => {
+      const r = await run({ '!!': [M_A] });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error.code).toBe('DISALLOWED_OPERATOR');
+    });
     it('an absent condition still fires, and a validation refusal is still a refusal, never "does not fire"', async () => {
       expect(await run(null)).toEqual({ ok: true, fired: true });
       const bad = await run({ cat: ['a', 'b'] });
