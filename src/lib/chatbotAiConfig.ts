@@ -16,6 +16,7 @@
  */
 import type { Prisma, PrismaClient, AiServiceConfig } from '../generated/prisma/index.js';
 import { AiServiceConfigNotFoundError } from './aiConfig.js';
+import { chatToolChoiceFor, type ChatToolChoice } from './llm/chatToolChoice.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -62,6 +63,8 @@ export interface ChatAiConfigChoice {
   model: string | null;
   isDefault: boolean;
   isAppChatbotConfig: boolean;
+  /** #4005: the server's tool-choice decision; null for the `default` entry. */
+  toolChoice: ChatToolChoice | null;
 }
 
 /**
@@ -78,10 +81,11 @@ export async function listChatAiConfigChoices(db: Db, appId: string): Promise<Ch
     }),
   ]);
   return [
-    { value: CHAT_AI_CONFIG_DEFAULT_CHOICE, name: CHAT_AI_CONFIG_DEFAULT_CHOICE, provider: null, model: null, isDefault: true, isAppChatbotConfig: false },
+    { value: CHAT_AI_CONFIG_DEFAULT_CHOICE, name: CHAT_AI_CONFIG_DEFAULT_CHOICE, provider: null, model: null, isDefault: true, isAppChatbotConfig: false, toolChoice: null },
     ...own.map((c) => ({
       value: c.id, name: c.name, provider: c.provider, model: c.model, isDefault: false,
       isAppChatbotConfig: c.id === app?.chatbotAiConfigId,
+      toolChoice: chatToolChoiceFor(c.provider, c.model),
     })),
   ];
 }

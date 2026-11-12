@@ -3828,6 +3828,17 @@ export async function buildRespondToolSchema(
     dataProps[fieldName] = { type: spec.shape ?? 'string', description: spec.description ?? fieldName };
   }
 
+  return respondToolDefinition(dataProps);
+}
+
+/**
+ * The respond() tool around an extraction data schema. Split out of
+ * buildRespondToolSchema (#4005) so the saved-config chat probe offers the
+ * SAME tool shape a chat turn does, with no extraction fields.
+ */
+export function respondToolDefinition(
+  dataProps: Record<string, unknown>,
+): Array<{ name: string; description: string; parameters: unknown }> {
   return [{
     name: 'respond',
     description: 'Respond to the user and extract data',

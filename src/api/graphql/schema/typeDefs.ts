@@ -5164,6 +5164,37 @@ export const typeDefs = `#graphql
     error: AiServiceConfigTestError
     "#1417: what each provider knob in the effective params did on the call. Empty unless the call completed (a failed call's adapter warnings are unknown), or when the params carry none. maxTokens is listed as the ceiling it set (ADJUSTED when the probe's cap is lower); toolCalling (a gate) is not a provider knob and is not listed."
     knobs: [AiConfigTestKnob!]!
+    "#4005: the chat probe's outcome. Null unless chatProbe was requested. A closed status and nothing else: no key, model text or provider text."
+    chat: ChatProbeOutcome
+  }
+
+  "#4005: the outcome of the chat probe."
+  type ChatProbeOutcome {
+    status: ChatProbeStatus!
+  }
+
+  """
+  #4005: PASS = exactly ONE respond call with a string message and every required field, whichever tool choice was sent.
+  FAIL_TEXT_ONLY = no tool call. FAIL_OTHER_TOOL = a call to a tool that was not offered. FAIL_MULTIPLE_CALLS = more than one call.
+  FAIL_MALFORMED = one respond call whose arguments do not fit its schema. FAIL_PROVIDER_UNAVAILABLE = the call failed or timed out, or
+  none could be made (no key, an unbuildable config, a quota refusal). UNSUPPORTED_PROVIDER = the provider is not offered tools.
+  """
+  enum ChatProbeStatus {
+    PASS
+    FAIL_TEXT_ONLY
+    FAIL_OTHER_TOOL
+    FAIL_MULTIPLE_CALLS
+    FAIL_MALFORMED
+    FAIL_PROVIDER_UNAVAILABLE
+    UNSUPPORTED_PROVIDER
+  }
+
+  "#4005: how a chat turn offers its respond tool."
+  enum ChatToolChoice {
+    "tool_choice auto: for the models that reject a forced choice. The turn also tells the model to answer by calling respond."
+    AUTO
+    "A forced choice of the respond tool: every other provider/model."
+    FORCED
   }
 
   "#1417: what one provider knob in the effective params did on the call."
@@ -5444,6 +5475,8 @@ export const typeDefs = `#graphql
     isDefault: Boolean!
     "True for the App's own chatbot config (App.chatbotAiConfigId)."
     isAppChatbotConfig: Boolean!
+    "#4005: the server's tool-choice decision for this config's provider and model, judged verbatim. Null for the \`default\` entry, which names no single config."
+    toolChoice: ChatToolChoice
   }
 
   """
@@ -13945,8 +13978,16 @@ export const typeDefs = `#graphql
     reaches the provider is metered (usage type ai-config-test); NO_API_KEY
     and KEY_UNREADABLE make no call and record nothing. The call is bounded
     by a 20s timeout. Rate-limited per caller and config (RATE_LIMITED).
+
+    #4005: chatProbe (default false) also runs ONE chat probe: the chat turn's
+    own respond tool, sent with the chat turn's tool-choice decision
+    (ChatAiConfigChoice.toolChoice), output capped at 64 tokens, 20s, no
+    retries. Its outcome is the closed AiServiceConfigTestResult.chat status.
+    It is a second, separately metered provider attempt (usage type
+    ai-config-test-chat) under the same one rate-limit unit. Absent or false,
+    the result and the call are exactly what they were.
     """
-    testAiServiceConfig(id: ID!, override: AiServiceConfigTestOverride): AiServiceConfigTestResult!
+    testAiServiceConfig(id: ID!, override: AiServiceConfigTestOverride, chatProbe: Boolean = false): AiServiceConfigTestResult!
 
     """
     036-ai-service-config: delete a named AI config (hard delete; the

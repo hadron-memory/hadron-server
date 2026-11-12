@@ -570,6 +570,80 @@ export async function generateWithTools(
   }
 }
 
+/** Whether a provider (and config) can be offered tools at all: the tool loop's own gate. */
+export function providerSupportsTools(config: { provider: string; params?: unknown }): boolean {
+  const optedIn =
+    config.provider === 'openai-compatible' &&
+    (config.params as { toolCalling?: unknown } | null | undefined)?.toolCalling === true;
+  return TOOL_LOOP_PROVIDERS.has(config.provider) || optedIn;
+}
+
+export interface ChatProbeCall {
+  name: string;
+  /** The arguments as the SDK parsed them; undefined when the call's input was not valid JSON for its schema. */
+  input: unknown;
+  /** The SDK could not match the call to a declared tool or its input to the schema. */
+  invalid: boolean;
+}
+
+export interface ChatProbeResult {
+  text: string;
+  calls: ChatProbeCall[];
+  tokensIn: number;
+  tokensOut: number;
+}
+
+/**
+ * #4005 — ONE tool-offering call, no execution and no loop: the chat probe
+ * offers the chat turn's respond tool with the chat turn's tool-choice
+ * decision and reports what the model called. Same model construction,
+ * endpoint guard and call settings as every other call; zero retries and a
+ * hard deadline, like the run probe.
+ */
+export async function generateChatProbe(
+  resolved: ResolvedAiConfig,
+  req: LlmRequest,
+  tools: ReadonlyArray<{ name: string; description: string; parameters: unknown }>,
+  toolChoice: 'auto' | { type: 'tool'; toolName: string },
+): Promise<ChatProbeResult> {
+  const { provider, model } = resolved.config;
+  const { settings } = callSettingsFor(resolved.config, req.maxTokens);
+  const sdkTools = Object.fromEntries(
+    tools.map((def) => [
+      def.name,
+      aiTool({ description: def.description, inputSchema: jsonSchema<Record<string, unknown>>(def.parameters as never) }),
+    ]),
+  );
+  try {
+    const out = await aiGenerateText({
+      model: modelFor(resolved),
+      ...(req.system ? { system: req.system } : {}),
+      prompt: req.prompt,
+      tools: sdkTools,
+      toolChoice,
+      ...settings,
+      ...(req.timeoutMs != null ? { abortSignal: AbortSignal.timeout(req.timeoutMs), maxRetries: 0 } : {}),
+    });
+    return {
+      text: out.text,
+      calls: out.toolCalls.map((c) => ({
+        name: c.toolName,
+        input: (c as { input?: unknown }).input,
+        invalid: (c as { invalid?: boolean }).invalid === true,
+      })),
+      tokensIn: out.usage?.inputTokens ?? 0,
+      tokensOut: out.usage?.outputTokens ?? 0,
+    };
+  } catch (err) {
+    if (err instanceof LlmInvocationError) throw err;
+    throw new LlmInvocationError(
+      `LLM call failed (${provider}/${model}): ${String((err as Error)?.message ?? err)}`,
+      provider,
+      isTransient(err),
+    );
+  }
+}
+
 export async function generateText(
   resolved: ResolvedAiConfig,
   req: LlmRequest,
