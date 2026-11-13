@@ -17745,6 +17745,10 @@ export const typeDefs = `#graphql
     format character and no user name or password (else BAD_USER_INPUT). Set only here: no edit takes it. A second
     task with the same value in this App, whatever the first task's state, is refused TASK_EXTERNAL_ID_TAKEN, which
     names no task (find it with agentTasks(externalId:)). Another App's tasks never conflict.
+    #4113 (hrn:node:hadronmemory.com:specs:cor:agt:050:02): naming it with YOURSELF as the assignee is the claim, and a
+    claim is created STARTED in this one call (startedAt set; task.created, task.assigned, task.started; never queued,
+    matched or alarmed as not started). A claim naming another assignee, no assignee, or an open blocker stays PENDING
+    (hrn:node:hadronmemory.com:specs:cor:agt:050:08 governs the first); a backlog task still takes no assignee.
     """
     externalId: String
     """
