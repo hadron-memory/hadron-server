@@ -19,7 +19,10 @@
  *    on a new session_id (a /clear or a shed relaunch), on a compaction boundary NOT YET CONSUMED (identity kept in
  *    the same serialized state, so a boundary resets exactly once), and on a genuine drop of HYSTERESIS_TOKENS below
  *    the threshold. No worktree-wide cooldown.
- *  - Freshness: the source line's timestamp must be within FRESHNESS_MS of now and not in the future.
+ *  - Timestamp: the source line's timestamp must parse and not be in the future. Its AGE does not matter: occupied context
+ *    does not shrink while a worker idles, and the first prompt after a task always follows an idle gap.
+ *  - Events: UserPromptSubmit adds `additionalContext`; Stop (a task boundary) returns `decision: block` with the reminder,
+ *    once per arm (the arm is shared), and never when `stop_hook_active` is set.
  *  - Untrusted input: session_id must match ^[A-Za-z0-9-]{8,64}$; transcript_path must resolve (realpath) to a regular
  *    file owned by this user under <CLAUDE_CONFIG_DIR or ~/.claude>/projects; only the last TAIL_BYTES are read; the
  *    emitted text, the log and the state never carry transcript text, tool output, usage objects or credentials.
@@ -44,7 +47,6 @@ export const THRESHOLDS = [['claude-opus', 150_000], ['claude-sonnet', 100_000],
 export const ESCALATION_TOKENS = 50_000;
 export const HYSTERESIS_TOKENS = 30_000;
 export const MAX_FIRES = 2;
-export const FRESHNESS_MS = 15 * 60_000;
 export const FUTURE_SKEW_MS = 60_000;
 export const TAIL_BYTES = 256 * 1024;
 export const STDIN_MAX_BYTES = 64 * 1024;
@@ -55,6 +57,11 @@ export const LOCK_WAIT_MS = 1_500;
 export const LOCK_STALE_MS = 10_000;
 const SESSION_ID = /^[A-Za-z0-9-]{8,64}$/;
 const STATE_FILE = /^[A-Za-z0-9-]{8,64}\.json$/;
+
+export const STOP_REMINDER_TEXT = (reclaimableK, thresholdK) =>
+  `Context reclaimable is about ${reclaimableK}k (approximate; policy ${thresholdK}k for your model). You are at a task boundary: ` +
+  'run the shed procedure now (task trim-context-clear-and-recover), unless an irreversible operation is still open; ' +
+  'then finish or record it first. This is a reminder: nothing is stopped for you.';
 
 export const REMINDER_TEXT = (reclaimableK, thresholdK) =>
   `Context reclaimable is about ${reclaimableK}k (approximate; policy ${thresholdK}k for your model). At your next completed-task ` +
@@ -102,7 +109,9 @@ export function scanTail(text, startedAtBeginning) {
 export function observe({ assistant, boundary }, now) {
   const fresh = (ts) => {
     const t = typeof ts === 'string' ? Date.parse(ts) : NaN;
-    return Number.isFinite(t) && now - t <= FRESHNESS_MS && t - now <= FUTURE_SKEW_MS;
+    // Age does not matter: occupied context does not shrink while a worker idles, and the first prompt after a task
+    // always arrives after an idle gap. Only an unparseable or future timestamp is untrustworthy.
+    return Number.isFinite(t) && t - now <= FUTURE_SKEW_MS;
   };
   const boundaryNewer = boundary && (!assistant || boundary.idx > assistant.idx);
   if (boundaryNewer) {
@@ -269,7 +278,10 @@ export function run(stdinText, env, opts = {}) {
     if (typeof stdinText !== 'string') return null;
     let input;
     try { input = JSON.parse(stdinText); } catch { return null; }
-    if (!input || typeof input !== 'object' || input.hook_event_name !== 'UserPromptSubmit') return null;
+    if (!input || typeof input !== 'object' || (input.hook_event_name !== 'UserPromptSubmit' && input.hook_event_name !== 'Stop')) return null;
+    const isStop = input.hook_event_name === 'Stop';
+    // A Stop hook that already blocked once must never block again: that is the loop guard Claude Code itself provides.
+    if (isStop && input.stop_hook_active === true) return null;
     if (typeof input.cwd === 'string') { const b = basename(input.cwd).replace(/[^A-Za-z0-9._-]/g, '').slice(0, 64); if (b) name = b; }
     const sid = input.session_id;
     if (typeof sid !== 'string' || !SESSION_ID.test(sid)) { logLine(stateRoot, name, 'skip: bad-session-id', now); return null; }
@@ -296,6 +308,11 @@ export function run(stdinText, env, opts = {}) {
       if (isNewSession) prune(dir, now);
       if (!d.fire) return null;
       logLine(stateRoot, name, `fire ${d.next.fires} reclaimable=${Math.round(d.reclaimable / 1000)}k`, now);
+      if (isStop) {
+        // Task end: ask for the shed now instead of at some later prompt. The arm was consumed above, so this blocks at most
+        // MAX_FIRES times per session and cannot loop.
+        return JSON.stringify({ decision: 'block', reason: STOP_REMINDER_TEXT(Math.round(d.reclaimable / 1000), Math.round(d.threshold / 1000)) });
+      }
       return JSON.stringify({
         hookSpecificOutput: {
           hookEventName: 'UserPromptSubmit',
