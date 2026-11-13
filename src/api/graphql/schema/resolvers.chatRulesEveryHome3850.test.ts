@@ -73,7 +73,7 @@ async function observeDefinitionReads<T>(run: () => Promise<T>) {
   const nodeSpies = (['findFirst', 'findMany', 'findUnique', 'findUniqueOrThrow', 'findFirstOrThrow'] as const).map((m) => vi.spyOn(db.node, m));
   const edgeSpy = vi.spyOn(db.edge, 'findMany');
   try {
-    const value = await run();
+    const value: any = await run();
     const nodeReads = nodeSpies.flatMap((sp) => sp.mock.calls).filter(([a]) => {
       const where = (a as any)?.where;
       const memory = where?.memoryId ?? where?.loc_memoryId?.memoryId;
