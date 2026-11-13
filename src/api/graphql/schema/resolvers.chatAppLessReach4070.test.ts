@@ -49,8 +49,9 @@ beforeEach(async () => {
   await serveEveryAgent(db);
 });
 
-/** A retained App-less home: started through licensed App L, then detached from it (an historical home). */
-async function retainedHome(who: Context, keepApp = false) {
+/** A home started through licensed App L. By default it is then detached from the App (`appId` cleared), giving a retained
+ * App-less (historical) home; `{ keepApp: true }` leaves it App-bearing, still attached to App L. */
+async function retainedHome(who: Context, { keepApp = false }: { keepApp?: boolean } = {}) {
   const started = await M.startChat({}, { agentId, scope: 'private', conversationName: 'flow' }, who);
   const root = await chatNodeByLocOrThrow(db, started.chatId);
   if (!keepApp) await db.memory.update({ where: { id: root.memoryId }, data: { appId: null } });
@@ -160,7 +161,7 @@ describe('#4070 pinned revision', () => {
 describe('#4070 controls', () => {
   it('P1: a consumer in the licensed App home fires the on-complete rule (observers see real reads)', async () => {
     // #4112: an unrelated licensed carrier no longer authorizes an App-less home; keep this positive control App-bearing.
-    const home = await retainedHome(consumerCtx(), true);
+    const home = await retainedHome(consumerCtx(), { keepApp: true });
     const seen = await observe<any>(() => respond(consumerCtx(), home.chatId));
     expect(seen.value.conversationHandoff).toBe('next');
     expect(seen.systemReads.length).toBeGreaterThan(0);
