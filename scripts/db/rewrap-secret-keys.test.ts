@@ -17,6 +17,7 @@ import { main, type SecretRewrapToolIo } from './rewrap-secret-keys.js';
 const ROOT_A = 'a1'.repeat(32);
 const ROOT_B = 'b2'.repeat(32);
 let appId: string;
+let orgId: string;
 let lines: string[] = [];
 let paths: string[] = [];
 
@@ -53,7 +54,8 @@ beforeEach(async () => {
   process.env.SECRET_ROOT_KEY = ROOT_A;
   appKeyCache.clear();
   const org = await db.organization.create({ data: { id: generateId(), name: 'rewrap org', urn: 'rewrap-org.test' } });
-  appId = (await createDbAppWithKey(db, 'rewrap-app', org.id)).app.id;
+  orgId = org.id;
+  appId = (await createDbAppWithKey(db, 'rewrap-app', orgId)).app.id;
   lines = [];
 });
 afterEach(async () => {
@@ -122,7 +124,7 @@ describe('secrets-root re-wrap tool: the run', () => {
   it('a planted row under a third root exits 1 and leaves every row as it was', async () => {
     await mint();
     const before = await wrapped();
-    const other = (await createDbAppWithKey(db, 'rewrap-other', (await db.app.findUniqueOrThrow({ where: { id: appId } })).orgId!)).app.id;
+    const other = (await createDbAppWithKey(db, 'rewrap-other', orgId)).app.id;
     await db.secretAppKey.create({
       data: { appId: other, keyVersion: 1, wrappedKey: encryptBytesAad(Buffer.alloc(32, 9), appKeyAad(other, 1), Buffer.from('e5'.repeat(32), 'hex')) },
     });

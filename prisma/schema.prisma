@@ -4746,6 +4746,18 @@ model SecretAppKey {
   @@map("secret_app_keys")
 }
 
+/// #4003 (S8 of #3991; FIT delta 2) — the key-check value of the ACTIVE secrets root, one row. A mint compares the
+/// instance's root against it and refuses on a mismatch, so an instance still running the old root after a re-wrap
+/// mints nothing. Moved only by the root re-wrap, in the same transaction as the keys. Holds no key material: an
+/// HMAC under the root over a fixed label. `id` is always 1 (CHECK in prisma/secret-rotation-invariants.sql).
+model SecretRootCheck {
+  id         Int      @id @default(1)
+  checkValue String   @map("check_value")
+  updatedAt  DateTime @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("updated_at")
+
+  @@map("secret_root_check")
+}
+
 model StampSigningKey {
   id          Int       @id @default(autoincrement())
   /// base64(iv[12] | gcm-tag[16] | ciphertext), AES-256-GCM under

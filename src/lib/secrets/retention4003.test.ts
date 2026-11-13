@@ -41,16 +41,20 @@ describe('SECRET_VERSION_RETENTION_DAYS (R5)', () => {
   });
 
   it.each(['', '   ', '0', '-1', '-30', '1.5', '30.0', '3651', '99999999999999999999', '1e2', '0x1e', '+30', 'thirty', '30d'])(
-    'falls back to 30 with one warn line for %j, never echoing the value',
+    'falls back to 30 with one warn line for %j',
     (raw) => {
       process.env[ENV] = raw;
       expect(secretVersionRetentionDays()).toBe(30);
       expect(warn).toHaveBeenCalledTimes(1);
-      const line = String(warn.mock.calls[0][0]);
-      expect(line).toContain(ENV);
-      if (raw.trim() !== '') expect(line).not.toContain(raw.trim());
+      expect(String(warn.mock.calls[0][0])).toContain(ENV);
     },
   );
+
+  it('never echoes the invalid value in the warning', () => {
+    process.env[ENV] = 'canary-7f3a9';
+    expect(secretVersionRetentionDays()).toBe(30);
+    expect(String(warn.mock.calls[0][0])).not.toContain('canary-7f3a9');
+  });
 
   it('warns once, not on every read, for the same invalid value', () => {
     process.env[ENV] = '0';

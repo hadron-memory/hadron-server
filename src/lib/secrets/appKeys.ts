@@ -22,7 +22,7 @@
  * Everything fails closed into one typed refusal with fixed text: the cause (no root, no row, wrong AAD, tampering,
  * not 32 bytes) is the operator's to diagnose from the database, not an oracle for a caller.
  */
-import { createHash, hkdfSync, randomBytes } from 'crypto';
+import { createHash, createHmac, hkdfSync, randomBytes, timingSafeEqual } from 'crypto';
 import { GraphQLError } from 'graphql';
 import type { Prisma } from '../../generated/prisma/index.js';
 import { decryptBytesAad, encryptBytesAad } from '../tokenCrypto.js';
@@ -74,7 +74,7 @@ function handleFor(appId: string, keyVersion: number, appKey: Buffer): AppKeyHan
 }
 
 /** The root key from the environment, or the refusal. Read per call so a change needs no restart. */
-function rootKey(): Buffer {
+export function rootKey(): Buffer {
   const raw = process.env[SECRET_ROOT_KEY_ENV];
   if (raw === undefined || !/^[0-9a-fA-F]{64}$/.test(raw)) throw new SecretKeyUnavailableError();
   return Buffer.from(raw, 'hex');
@@ -89,7 +89,7 @@ function rootKey(): Buffer {
 export const rootBinding = (root: Buffer): string => createHash('sha256').update('hadron:secret-root-binding:v1:').update(root).digest('hex');
 
 /** Unwrap with the row's AAD and require exactly 32 bytes, or refuse. */
-function unwrap(root: Buffer, appId: string, keyVersion: number, wrapped: string): Buffer {
+export function unwrap(root: Buffer, appId: string, keyVersion: number, wrapped: string): Buffer {
   let key: Buffer;
   try {
     key = decryptBytesAad(wrapped, appKeyAad(appId, keyVersion), root);
@@ -282,28 +282,56 @@ export async function ensureAppKey(db: Prisma.TransactionClient, appId: string):
   });
   let row = await active();
   if (row) return unwrapAppKey(db, appId, row.keyVersion);
-  await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`hadron:secret-app-key-mint:${appId}`}))`;
+  await lockAppKeyMint(db, appId);
   row = await active();
   if (row) return unwrapAppKey(db, appId, row.keyVersion);
+  // #4003 FIT delta 2: an instance whose root is not the recorded one mints nothing (checked under the lock).
+  await assertRootCheck(db, root);
   // The App must exist: refuse with the typed error rather than leak a raw foreign-key failure (and mint nothing).
   if (!(await db.app.findUnique({ where: { id: appId }, select: { id: true } }))) throw new SecretKeyUnavailableError();
   const newest = await db.secretAppKey.findFirst({ where: { appId }, orderBy: { keyVersion: 'desc' }, select: { keyVersion: true } });
-  const keyVersion = (newest?.keyVersion ?? 0) + 1;
+  try {
+    return await mintAppKeyVersion(db, appId, (newest?.keyVersion ?? 0) + 1, root);
+  } catch (err) {
+    // The partial unique index is the backstop when the advisory lock did not serialize (a caller outside a
+    // transaction releases it at once). Re-read once: the winner's key is the answer, not a raw P2002.
+    if ((err as { code?: string }).code === 'P2002') {
+      const winner = await active();
+      if (winner) return unwrapAppKey(db, appId, winner.keyVersion);
+    }
+    throw err;
+  }
+}
+
+/**
+ * Take the locks every key-creating leg holds, in one fixed order: the secrets-root lock SHARED (so a root re-wrap,
+ * which takes it exclusively, never interleaves with a mint), then the per-App mint lock. Both are
+ * transaction-scoped: call inside a transaction.
+ */
+export async function lockAppKeyMint(db: Prisma.TransactionClient, appId: string): Promise<void> {
+  await db.$executeRaw`SELECT pg_advisory_xact_lock_shared(hashtext(${SECRET_ROOT_LOCK}))`;
+  await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`hadron:secret-app-key-mint:${appId}`}))`;
+}
+
+/** The lock a root re-wrap holds exclusively and every mint holds shared. */
+export const SECRET_ROOT_LOCK = 'hadron:secret-root';
+
+/**
+ * Create App key `keyVersion` as a fresh random key wrapped under `root`, and return its subkeys. The caller holds
+ * {@link lockAppKeyMint} and has checked the root ({@link assertRootCheck}). The key is marked uncommitted for this
+ * transaction, so it never enters the process-wide cache before the row is durable.
+ */
+export async function mintAppKeyVersion(
+  db: Prisma.TransactionClient,
+  appId: string,
+  keyVersion: number,
+  root: Buffer,
+): Promise<AppKeyHandle> {
   const key = randomBytes(32);
   try {
-    try {
-      await db.secretAppKey.create({
-        data: { appId, keyVersion, wrappedKey: encryptBytesAad(key, appKeyAad(appId, keyVersion), root) },
-      });
-    } catch (err) {
-      // The partial unique index is the backstop when the advisory lock did not serialize (a caller outside a
-      // transaction releases it at once). Re-read once: the winner's key is the answer, not a raw P2002.
-      if ((err as { code?: string }).code === 'P2002') {
-        const winner = await active();
-        if (winner) return unwrapAppKey(db, appId, winner.keyVersion);
-      }
-      throw err;
-    }
+    await db.secretAppKey.create({
+      data: { appId, keyVersion, wrappedKey: encryptBytesAad(key, appKeyAad(appId, keyVersion), root) },
+    });
     let mine = uncommitted.get(db);
     if (!mine) uncommitted.set(db, (mine = new Set()));
     mine.add(slotKey(appId, keyVersion));
@@ -311,4 +339,38 @@ export async function ensureAppKey(db: Prisma.TransactionClient, appId: string):
   } finally {
     key.fill(0);
   }
+}
+
+// ── the root check (#4003, FIT delta 2) ─────────────────────────────────────
+
+/**
+ * The key-check value of a root: HMAC-SHA256 under the root over a fixed label. It identifies which root is active
+ * without revealing it (a 256-bit root cannot be recovered or guessed from it). Stored once, in
+ * `secret_root_check`, and moved only by the root re-wrap, in the same transaction as the keys.
+ */
+export const rootCheckValue = (root: Buffer): string => createHmac('sha256', root).update('hadron:secret-root-check:v1').digest('hex');
+
+/**
+ * Refuse (`SECRET_KEY_UNAVAILABLE`) unless `root` is the recorded active root. This is what makes an instance still
+ * running with the OLD root after a re-wrap fail closed: it would otherwise mint keys under a root nothing else
+ * reads. Call it holding {@link lockAppKeyMint} (the shared root lock), so a concurrent re-wrap is either fully
+ * visible or not yet started.
+ *
+ * With no recorded value (a fresh store, or one created before the check existed) the root is recorded, but only
+ * after it is proven: if any App key exists, the newest one must unwrap under `root`. Two first recorders race on
+ * the single row; the loser compares against the winner's value.
+ */
+export async function assertRootCheck(db: Prisma.TransactionClient, root: Buffer): Promise<void> {
+  const mine = rootCheckValue(root);
+  let row = await db.secretRootCheck.findUnique({ where: { id: 1 }, select: { checkValue: true } });
+  if (!row) {
+    const any = await db.secretAppKey.findFirst({ orderBy: { createdAt: 'desc' }, select: { appId: true, keyVersion: true, wrappedKey: true } });
+    if (any) unwrap(root, any.appId, any.keyVersion, any.wrappedKey).fill(0);
+    await db.$executeRaw`INSERT INTO secret_root_check (id, check_value) VALUES (1, ${mine}) ON CONFLICT (id) DO NOTHING`;
+    row = await db.secretRootCheck.findUnique({ where: { id: 1 }, select: { checkValue: true } });
+    if (!row) throw new SecretKeyUnavailableError();
+  }
+  const a = Buffer.from(row.checkValue, 'utf8');
+  const b = Buffer.from(mine, 'utf8');
+  if (a.length !== b.length || !timingSafeEqual(a, b)) throw new SecretKeyUnavailableError();
 }
