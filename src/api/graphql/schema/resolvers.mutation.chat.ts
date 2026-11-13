@@ -61,7 +61,7 @@ import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { appKeyMayActFor, appKeySessionMatchesAgent, canChatWithAgent, chatAuthorityAnchors, chatCarrierApps } from './agentChatAccess.js';
 import { withAuthorizedMemoryTx, withAuthorizedTx } from './authorizedTx.js';
 import { activeAppInstallLicenseIdsForAgent } from '../../../lib/appAgent.js';
-import { chatHomeAgentIfLicensed } from '../../../lib/chatHomeAgent.js';
+import { resolveChatHomeAgent } from '../../../lib/chatHomeAgent.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { type MemoryVisibility } from '../../../generated/prisma/index.js';
@@ -1022,22 +1022,10 @@ export const chatMutations = {
       const sendAiConfigChoice = aiConfigChoice == null
         ? null
         : await normalizeChatAiConfigChoice(ctx.db, memory.appId ?? null, aiConfigChoice).catch(rethrowAiConfigTyped);
-      let agent = null;
-      if (memory.sharedMemoryOfAgentId || memory.userMemoryOfAgentId) {
-        agent = await ctx.db.agent.findUnique({
-          where: { id: memory.sharedMemoryOfAgentId ?? memory.userMemoryOfAgentId! },
-        });
-      } else {
-        const legacyAgents = await ctx.db.agent.findMany({
-          where: { deletedAt: null, memoryItems: { some: { memoryId: chatNode.memoryId } } },
-        });
-        agent = legacyAgents.find((a) => (a as any).systemMemoryId) ?? null;
-      }
-      // Personal/legacy turns already refused a deleted Agent through the serve
-      // gate before any write (#3654). Preserve that refusal before licence-loss
-      // normalization hides the Agent. App-class chats retain their empty result.
-      if (memory.class !== 'app' && agent?.deletedAt) throw new AgentNotFoundError(agent.id);
-      agent = await chatHomeAgentIfLicensed(ctx.db, memory, agent);
+      // #4076: one shared lookup (resolve, deleted = none, licence). Personal/legacy turns already refused a
+      // deleted Agent through the serve gate before any write (#3654); keep that refusal. App-class chats retain their empty result.
+      const { agent, deletedAgentId } = await resolveChatHomeAgent(ctx.db, memory);
+      if (memory.class !== 'app' && deletedAgentId) throw new AgentNotFoundError(deletedAgentId);
       const systemMemoryId = agent ? (agent as any).systemMemoryId as string : null;
 
       // Pin to version: if the chat was started with a published revision,
@@ -1664,19 +1652,7 @@ export const chatMutations = {
         // fallback. Any App-reached home needs a live licence before even the
         // next-stage validator reads the script (#4043), regardless of class.
         const turnMemory = await ctx.db.memory.findUnique({ where: { id: chatNode.memoryId } });
-        type TurnAgent = { id: string; systemMemoryId?: string | null };
-        let turnAgent = null as TurnAgent | null;
-        if (turnMemory?.sharedMemoryOfAgentId || turnMemory?.userMemoryOfAgentId) {
-          turnAgent = await ctx.db.agent.findUnique({
-            where: { id: (turnMemory.sharedMemoryOfAgentId ?? turnMemory.userMemoryOfAgentId)! },
-          }) as TurnAgent | null;
-        } else if (turnMemory) {
-          const legacyAgents = await ctx.db.agent.findMany({
-            where: { deletedAt: null, memoryItems: { some: { memoryId: chatNode.memoryId } } },
-          });
-          turnAgent = (legacyAgents.find((a) => (a as any).systemMemoryId) ?? null) as TurnAgent | null;
-        }
-        if (turnMemory) turnAgent = await chatHomeAgentIfLicensed(ctx.db, turnMemory, turnAgent);
+        const turnAgent = turnMemory ? (await resolveChatHomeAgent(ctx.db, turnMemory)).agent as { systemMemoryId?: string | null } | null : null;
         turnSysMemId = turnAgent?.systemMemoryId ?? null;
         if (turnSysMemId) {
           turnScript = await loadChatScript(ctx.db, turnSysMemId, (chatData.startedWithRevision as string | null) ?? null);

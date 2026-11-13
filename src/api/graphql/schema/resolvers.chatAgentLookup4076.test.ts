@@ -79,12 +79,15 @@ describe('#4076 legacy order parity', () => {
 });
 
 describe('#4076 soft-deleted Agent resolves to none on both paths', () => {
-  it.each(['private', 'shared'] as const)('%s chat: response takes the no-Agent path for a deleted Agent', async (scope) => {
-    const started = await start(scope);
+  // On an App home the licence gate already hides a deleted Agent; the residual is an App-less home, where nothing else does.
+  it('App-less personal chat: response takes the no-Agent path for a deleted Agent', async () => {
+    const started = await start('private');
+    const root = await chatNodeByLocOrThrow(db, started.chatId);
+    await db.memory.update({ where: { id: root.memoryId }, data: { appId: null } });
     await db.agent.update({ where: { id: agentId }, data: { deletedAt: new Date() } });
-    // With an Agent, `step` is the current stage and is accepted; with none the stage list is unreadable and the name is refused (#4077).
-    const response = await M.processChatResponse({}, { chatId: started.chatId, toolResponse: { message: 'done', next_stage: 'step' } }, ctx());
-    expect(response.rejectedNextStage).toBe('step');
+    // With an Agent, `onlyA` is a listed stage and is accepted; with none the stage list is unreadable and the name is refused (#4077).
+    const response = await M.processChatResponse({}, { chatId: started.chatId, toolResponse: { message: 'done', next_stage: 'onlyA' } }, ctx());
+    expect(response.rejectedNextStage).toBe('onlyA');
     expect(response.conversationHandoff ?? null).toBeNull();
   });
 
