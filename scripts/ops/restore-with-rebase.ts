@@ -266,8 +266,13 @@ async function terminateBackend(adminUrl: string, pid: number): Promise<void> {
  * working connection limit, the default ACL) and a creating xid at or above `before`, the xmax read just before the
  * CREATE. A database that fails any of these is reported, never dropped. A competing creator that took the name first
  * makes this run's CREATE fail with an ERROR reply, which S1 treats as definitive and never reconciles (blind P1 on
- * 338deec1). Named residual: the reply to that refusal is ALSO lost, and the server's own oid counter handed the
- * competitor exactly the random oid this run chose.
+ * 338deec1). Named residual: the reply to that refusal is ALSO lost, and the competitor got exactly the random oid
+ * this run chose: by the server's own oid counter (accident), or on purpose by a CREATEDB role that read the chosen oid
+ * from this run's live S1 `creating` log line before the CREATE and raced it with `OID = n` (that log is the
+ * operator's, so keep it where only operators read it).
+ *
+ * `OID = n` on CREATE DATABASE is documented from PostgreSQL 15 (the pipeline requires 16+); any role allowed to
+ * CREATE DATABASE may name an oid at or above 16384 (FirstNormalObjectId), lower ones being pg_upgrade's.
  */
 export async function reconcileCreate(
   adminUrl: string,
@@ -441,13 +446,22 @@ export async function restoreWithRebase(opts: RunOptions): Promise<RunResult> {
     // ── S1: create, admission off, under an oid this run chose ────────────────
     // Every xid taken from here on is >= before: the window the reconcile below accepts for this run's CREATE.
     const before = (await maint.query<{ x: string }>('SELECT pg_snapshot_xmax(pg_current_snapshot())::text AS x')).rows[0].x;
-    const chosenOid = await chooseDatabaseOid(maint);
+    let chosenOid: number;
+    try {
+      chosenOid = await chooseDatabaseOid(maint);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await log({ runId, stage: 'S1', event: 'failed', message, teardown: 'absent' });
+      throw new RestoreError('S1', `${message}; nothing was created`, 'absent');
+    }
     await log({ runId, stage: 'S1', event: 'creating', oid: chosenOid });
+    let createAnswered = false;
     try {
       await maint.query(
         `CREATE DATABASE ${q(maint, opts.target)} OWNER ${q(maint, opts.ownerRole)} TEMPLATE ${q(maint, opts.template)}
            ALLOW_CONNECTIONS false CONNECTION LIMIT ${WORKING_CONNECTION_LIMIT} OID ${chosenOid}`,
       );
+      createAnswered = true;
       if (opts.fault === 'S1-reply') {
         // The CREATE committed; lose its reply: the session dies and this run never saw the answer.
         await terminateBackend(opts.adminUrl, maint.processID as number);
@@ -456,8 +470,9 @@ export async function restoreWithRebase(opts: RunOptions): Promise<RunResult> {
       oid = chosenOid;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      // An ERROR reply is definitive: the CREATE rolled back. Whatever holds the name now is someone else's.
-      if (refusedByServer(err)) {
+      // An ERROR reply TO THE CREATE is definitive: it rolled back. Whatever holds the name now is someone else's. (An
+      // error after the CREATE answered, only the S1-reply test seam, is a lost reply and reconciles by the chosen oid.)
+      if (!createAnswered && refusedByServer(err)) {
         const now = await status(opts.adminUrl, opts.target).catch(() => null);
         if (now?.status === 'ABSENT') {
           await log({ runId, stage: 'S1', event: 'failed', message, teardown: 'absent' });
