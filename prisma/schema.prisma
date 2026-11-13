@@ -6215,7 +6215,9 @@ model AgentTeamEvent {
   /// transaction id below the reader snapshot's xmin is final: every transaction that could still add a row has an id
   /// at or above it. agentTaskExternalIdChanges pages by `(txId, createdAt, id)` and serves only finished transactions,
   /// so a late commit is served late, never skipped. Rows written before this column existed hold `'0'`.
-  txId                   Unsupported("xid8")? @default(dbgenerated("pg_current_xact_id()")) @map("tx_id")
+  /// #4111: NOT NULL (a NULL cursor key would compare NULL and empty every later page); the default stays, so a
+  /// producer that omits it still gets a key. A logical restore re-keys it with `scripts/ops/restore-with-rebase`.
+  txId                   Unsupported("xid8") @default(dbgenerated("pg_current_xact_id()")) @map("tx_id")
   /// #1706 — stall alarms only: when the stall episode began (cor:agt:050:13),
   /// the instant of the move that began the condition, never the evaluator's
   /// clock. With `taskId` and `type` (the rule) it is the episode's key, and

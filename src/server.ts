@@ -1,5 +1,6 @@
 import { isSessionSupersededError, respondSessionSuperseded } from './lib/sessionSuperseded.js';
 import { assertRateReadiness, checkRateConfiguration, cleanupRateBuckets } from './lib/rateLimit/index.js';
+import { assertEventKeysLocal } from './lib/agentTasks/eventKeyRebase.js';
 import { deliveryPendingPlugin } from './api/graphql/deliveryPendingPlugin.js';
 import { verifiedLoginEvidence } from './auth/loginEvidence.js';
 import crypto from 'crypto';
@@ -241,6 +242,11 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // Preserve trust-proxy boot validation before the first DB-touching readiness check.
   // Both prerequisites still complete before this app can listen.
   await assertRateReadiness(db);
+
+  // #4111: a database logically restored without the event-key rebase holds agent_team_events keys this cluster never
+  // issued, and the changed-since read would hide those rows. Refuse before any route, loop or listener exists; the
+  // check only reads. Restores go through scripts/ops/restore-with-rebase, whose output passes.
+  await assertEventKeysLocal(db);
 
   // #557: a production deploy with no webhook secret refuses deliveries (the
   // route answers 503), so say so at BOOT rather than letting the operator
