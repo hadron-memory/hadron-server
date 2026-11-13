@@ -37,7 +37,7 @@ describe('#4113 a caller-own claim is created STARTED', () => {
     expect(r.startedAt).toBeInstanceOf(Date);
     expect(r.externalId).toBe(X);
     expect(r.assigneeUserId).toBe(me.id);
-    expect(t.status).toBe('STARTED');
+    expect(t.status).toBe('started');
   });
 
   it('writes the events startAgentTask writes, in order, with the same task.started shape', async () => {
@@ -102,7 +102,8 @@ describe('#4113 a caller-own claim is created STARTED', () => {
 describe('#4113 a claim-born STARTED task is not queued, matched or alarmed', () => {
   it('the matcher leaves it alone and the stall evaluator raises no not-started alarm', async () => {
     const t = await create({ externalId: X, assignee: { user: me.id } });
-    const later = new Date(Date.now() + 3 * 60 * 60 * 1000);
+    // 20 min: past the not-started window (15 min, 050:14), before no-progress (60 min), so only the former could fire.
+    const later = new Date(Date.now() + 20 * 60 * 1000);
     await taskMatcherTick(db, later);
     const stall = await taskStallTick(db, later);
     const r = await row(t.id);
@@ -112,5 +113,11 @@ describe('#4113 a claim-born STARTED task is not queued, matched or alarmed', ()
     expect(kinds).not.toContain('assignment.queued');
     expect(kinds).not.toContain('stall.not-started');
     expect(stall.raised).toBe(0);
+  });
+
+  it('control: the same horizon DOES raise the not-started alarm for a pending assigned task', async () => {
+    const t = await create({ assignee: { user: me.id } });
+    await taskStallTick(db, new Date(Date.now() + 20 * 60 * 1000));
+    expect((await db.agentTeamEvent.findMany({ where: { taskId: t.id } })).map((e) => e.type)).toContain('stall.not-started');
   });
 });

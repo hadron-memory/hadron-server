@@ -1958,6 +1958,21 @@ async function applyTaskCreate(
     throw badInput('A blocked task cannot be matched now.');
   }
   await checkFinishByAtDbClock(tx, p.finishBy, p.startBy);
+  // #4113 (cor:agt:050:02, cor:agt:120): a create that names an externalId AND whose assignee is the caller IS the claim,
+  // and a claim is created started: one write, so no create-then-start window and no not-started alarm (050:14). A claim
+  // for another assignee stays pending (050:08 governs it), as does one with an open blocker (startAgentTask refuses a
+  // blocked task, so a started one would break its own rule). Judged after the blockers link, on the row's own flag.
+  if (p.externalId !== null && p.status === 'pending' && assignee && sameParty(assignee, actorParty(actor))) {
+    const fresh = await tx.agentTask.findUniqueOrThrow({ where: { id: made.id } });
+    if (!fresh.blocked) {
+      const started = await tx.agentTask.update({
+        where: { id: made.id },
+        data: { status: 'started', startedAt: new Date(), ...updatedStamp(txCtx) },
+      });
+      await appendTaskEvent(tx, { appId: app.id, taskId: made.id, actor: eventActor(txCtx.userId), event: { type: 'task.started' } });
+      return { ...made, row: started };
+    }
+  }
   return { ...made, row };
 }
 
