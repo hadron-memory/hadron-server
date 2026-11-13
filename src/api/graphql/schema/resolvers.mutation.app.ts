@@ -1084,9 +1084,19 @@ export const appMutations = {
         // FOR UPDATE serializes the renames and makes each one record the urn it
         // actually superseded. `updateOrganization` already did this; the three
         // single-entity paths did not.
-        const [lockedRow] = await tx.$queryRaw<{ urn: string; uninstalled_at: Date | null }[]>`
-          SELECT urn, uninstalled_at FROM apps WHERE id = ${resolvedId} FOR UPDATE
+        const [lockedRow] = await tx.$queryRaw<{ urn: string; uninstalled_at: Date | null; deleted_at: Date | null }[]>`
+          SELECT urn, uninstalled_at, deleted_at FROM apps WHERE id = ${resolvedId} FOR UPDATE
         `;
+        // #4006 (cor:dmo:050:21): a deleted App is no longer a target for writes. A delete that
+        // committed after admission must refuse before applyAiConfig and recordUrnRename, rolling
+        // the transaction back. The caller is admitted, so an id ref gets APP_DELETED (#3982); a URN
+        // ref gets the answer admission gives a URN naming a deleted App (it reaches no row).
+        if (lockedRow?.deleted_at) {
+          if (isEntityId(ref)) {
+            throw new GraphQLError('This App is deleted.', { extensions: { code: 'APP_DELETED', appId: resolvedId } });
+          }
+          throw new AppNotFoundError(ref);
+        }
         // #3976: re-judged on the LOCKED row — an uninstall that committed after the
         // read above must not let any write through. Throwing rolls the transaction
         // back, including the AI-config change applied below.
