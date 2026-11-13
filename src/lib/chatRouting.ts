@@ -229,19 +229,23 @@ export async function decideChatRouting(input: {
     // Ruling item 2 (c): a stored stage that no longer resolves returns to the first stage of the conversation left.
     const stored = g.nodeUrn?.split(':')[2];
     const stage = stored && order.includes(stored) ? stored : order[0];
-    // The conversation left has no stages to enter. Skip this goal (it stays as written) and try the next older detour.
-    if (!stage) continue;
     const { createdAt } = g;
     guards.push(data => {
       const fresh = (data.goalStack as GoalStackEntry[] | undefined)?.[i];
       return !!fresh && fresh.status === 'ACTIVE' && fresh.createdAt === createdAt && fresh.detourTo === g.detourTo;
     });
-    result.detourReturned = true; note(conv, stage);
-    edits.push(data => {
+    const close = (data: Record<string, unknown>) => {
       const goal = (data.goalStack as GoalStackEntry[])[i];
       goal.status = 'COMPLETED'; goal.completedAt = new Date().toISOString();
-      moveTo(data, conv, stage, { type: 'DETOUR_RETURN' });
-    });
+    };
+    if (!stage) {
+      // Specs-engineer reading (Vera, #4100): the completion closes the MOST RECENT active detour goal (the detour did complete),
+      // one level per return. With no stage to return to the turn has nowhere to go: Q8a below. Never an older goal in this turn.
+      edits.push(close);
+      break;
+    }
+    result.detourReturned = true; note(conv, stage);
+    edits.push(data => { close(data); moveTo(data, conv, stage, { type: 'DETOUR_RETURN' }); });
     return decision;
   }
   const fb = input.fallback;

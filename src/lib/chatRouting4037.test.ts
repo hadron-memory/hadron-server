@@ -103,12 +103,20 @@ describe('#4037 detour return (pins 2, 3, 4, 7)', () => {
     run(await decide({ origin: { conversationName: 'anger', stageName: 'hot' }, goalStack: stack }), fresh);
     expect(fresh).toMatchObject({ conversationName: 'recent', stageName: 's1' });
   });
-  it('a newest detour goal whose conversation has no stages is skipped: an older resolvable goal still returns', async () => {
+  it('a newest detour goal whose conversation has no stages is closed as COMPLETED with no move; an older goal is untouched (one level per return)', async () => {
     const stack = [detour('recent', 's2', 'anger'), detour('empty', 'x', 'anger')];
     const fresh: Record<string, unknown> = { conversationName: 'anger', stageName: 'hot', goalStack: structuredClone(stack) };
     const { result } = run(await decide({ origin: { conversationName: 'anger', stageName: 'hot' }, goalStack: stack }), fresh);
-    expect(result).toMatchObject({ detourReturned: true, conversationHandoff: 'recent', newStageName: 's2' });
-    expect((fresh.goalStack as GoalStackEntry[]).map(g => g.status)).toEqual(['COMPLETED', 'ACTIVE']);
+    expect(result).toMatchObject({ detourReturned: false, stageTransitioned: false, conversationHandoff: null, conversationCompleted: 'anger' });
+    expect(fresh).toMatchObject({ conversationName: 'anger', stageName: 'hot' });
+    expect((fresh.goalStack as GoalStackEntry[]).map(g => g.status)).toEqual(['ACTIVE', 'COMPLETED']);
+  });
+  it('the same dead-end goal falls through to the fallback conversation (Q8a) when there is one', async () => {
+    const stack = [detour('empty', 'x', 'anger')];
+    const fresh: Record<string, unknown> = { conversationName: 'anger', stageName: 'hot', goalStack: structuredClone(stack) };
+    const { result } = run(await decide({ origin: { conversationName: 'anger', stageName: 'hot' }, goalStack: stack, fallback: { name: 'b', stageOrder: CONVS.b } }), fresh);
+    expect(result).toMatchObject({ detourReturned: false, conversationHandoff: 'b', newStageName: 'b1' });
+    expect((fresh.goalStack as GoalStackEntry[])[0].status).toBe('COMPLETED');
   });
   it('D6: the guarded apply drops the return when the goal changed between decision and apply', async () => {
     const stack = [detour('recent', 's2', 'anger')];
