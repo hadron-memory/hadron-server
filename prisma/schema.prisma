@@ -3208,7 +3208,7 @@ model Secret {
   /// key (src/lib/tokenCrypto.ts). NEVER selected into a read surface:
   /// redaction by construction, same as the aiConfig / HA / Resend / MCP
   /// registries. Rotation is overwrite (updateSecret), no versioning (v1).
-  valueEncrypted String   @map("value_encrypted")
+  valueEncrypted String?  @map("value_encrypted")
   /// Key-rotation lineage headroom; unused (null) while HADRON_ENCRYPTION_KEY
   /// is the only key.
   keyId          String?  @map("key_id")
@@ -3216,6 +3216,14 @@ model Secret {
   createdBy      String?  @map("created_by")
   updatedAt      DateTime @updatedAt @map("updated_at")
   updatedBy      String?  @map("updated_by")
+  /// #3997 (S2 of #3991): an App-owned secret keeps NO value here — its value is its newest `secret_versions` row
+  /// (`chk_secret_app_value`: `(owner_type = 'app') = (value_encrypted IS NULL)`). Org and user rows are as before.
+  /// Plain ids, so an agent's write is attributable to a worker as the grant tables do.
+  createdByWorkerId  String? @map("created_by_worker_id")
+  createdBySessionId String? @map("created_by_session_id")
+  /// Only meaningful for App rows (`chk_secret_protected_app_only`); the protection ceremony is S4.
+  protected      Boolean  @default(false)
+  versions       SecretVersion[]
 
   // Hard delete by design (registry-row posture): a deleted secret makes
   // referencing runs fail their resolution loud — the wanted signal.
@@ -4745,9 +4753,72 @@ model SecretAppKey {
   retiredAt  DateTime? @map("retired_at")
 
   app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+  versions SecretVersion[]
 
   @@id([appId, keyVersion])
   @@map("secret_app_keys")
+}
+
+/// #3997 (S2 of #3991): one stored value of an App-owned secret. Append-only in practice (a version is never edited);
+/// `superseded_at` is set when a newer one is stored. The ciphertext is left out of every default select at the client
+/// layer (`omit`, R12): only the store path and (S3) the read path select it by name.
+model SecretVersion {
+  id             String    @id @default(cuid())
+  secretId       String    @map("secret_id")
+  versionNo      Int       @map("version_no")
+  /// base64(iv[12] | gcm-tag[16] | ciphertext) under the App key's encryption subkey, AAD `secretVersionAad`.
+  valueEncrypted String    @map("value_encrypted")
+  /// The App and the App key version that encrypted it; (app_id, key_version) restricts deletion of the key.
+  appId          String    @map("app_id")
+  keyVersion     Int       @map("key_version")
+  /// Bytes of the stored plaintext JSON (the cap's unit).
+  sizeBytes      Int       @map("size_bytes")
+  writtenByUserId    String? @map("written_by_user_id")
+  writtenByWorkerId  String? @map("written_by_worker_id")
+  writtenBySessionId String? @map("written_by_session_id")
+  writtenAt      DateTime  @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("written_at")
+  supersededAt   DateTime? @map("superseded_at")
+
+  secret Secret       @relation(fields: [secretId], references: [id], onDelete: Cascade)
+  appKey SecretAppKey @relation(fields: [appId, keyVersion], references: [appId, keyVersion], onDelete: Restrict)
+
+  @@unique([secretId, versionNo], map: "secret_versions_secret_version_uniq")
+  @@map("secret_versions")
+}
+
+/// #3997: the append-only audit trail of App secrets. Plain values only (no foreign keys, so the trail outlives the
+/// secret and its App); never a value, ciphertext or fingerprint. A guard trigger refuses update, and refuses delete
+/// except the one-year purge S8 builds (`secret-events-invariants.sql`).
+model SecretEvent {
+  id          String   @id @default(cuid())
+  ownerType   String   @map("owner_type")
+  ownerId     String   @map("owner_id")
+  secretId    String   @map("secret_id")
+  secretName  String   @map("secret_name")
+  clientId    String?  @map("client_id")
+  versionNo   Int?     @map("version_no")
+  kind        String
+  outcome     String
+  actorUserId String?  @map("actor_user_id")
+  workerId    String?  @map("worker_id")
+  sessionId   String?  @map("session_id")
+  runId       String?  @map("run_id")
+  at          DateTime @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)"))
+
+  @@index([ownerType, ownerId, at], map: "secret_events_owner_at_idx")
+  @@index([secretId, at], map: "secret_events_secret_at_idx")
+  @@map("secret_events")
+}
+
+/// #3997 (R25): the durable start of the one-year event retention for a deleted owner. One row per deleted App that has
+/// events, written once; never updated; deleted only by the purge, last.
+model SecretOwnerTombstone {
+  ownerType String   @map("owner_type")
+  ownerId   String   @map("owner_id")
+  deletedAt DateTime @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("deleted_at")
+
+  @@id([ownerType, ownerId])
+  @@map("secret_owner_tombstones")
 }
 
 model StampSigningKey {

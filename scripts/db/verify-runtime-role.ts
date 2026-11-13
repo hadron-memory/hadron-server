@@ -69,6 +69,8 @@ const REQUIRED_TABLE_PRIVS = ['SELECT', 'INSERT', 'UPDATE', 'DELETE'];
  */
 const ACTIONS_TABLE = 'actions';
 const ACTIONS_SERVE_FORBIDDEN = ['INSERT', 'UPDATE', 'DELETE'];
+/** #3997: `secret_events` is append-only: the serve role inserts, reads and (for the one-year purge) deletes, and never updates. */
+const EVENTS_TABLE = 'secret_events';
 
 /** Names only ever reach SQL as bind parameters; the cap keeps a log line short. */
 function names(rows: { rel: string }[], max = 5): string {
@@ -147,9 +149,10 @@ export async function verifyRuntimeRole(client: Client, role: string): Promise<V
       continue;
     }
     const isActions = t.relname === ACTIONS_TABLE;
+    const isEvents = t.relname === EVENTS_TABLE;
     const q = await client.query(
       `SELECT bool_and(has_table_privilege($1, $2::oid, p)) AS ok FROM unnest($3::text[]) p`,
-      [role, t.oid, isActions ? ['SELECT'] : REQUIRED_TABLE_PRIVS],
+      [role, t.oid, isActions ? ['SELECT'] : isEvents ? REQUIRED_TABLE_PRIVS.filter((p) => p !== 'UPDATE') : REQUIRED_TABLE_PRIVS],
     );
     if (!q.rows[0].ok) missing.push({ rel: `public.${t.relname}` });
     const f = await client.query(
@@ -157,7 +160,7 @@ export async function verifyRuntimeRole(client: Client, role: string): Promise<V
       `SELECT string_agg(p, '/') AS held FROM unnest($3::text[]) p
         WHERE has_table_privilege($1, $2::oid, p)
            OR (p IN ('REFERENCES', 'INSERT', 'UPDATE') AND has_any_column_privilege($1, $2::oid, p))`,
-      [role, t.oid, isActions ? [...forbidden, ...ACTIONS_SERVE_FORBIDDEN] : forbidden],
+      [role, t.oid, isActions ? [...forbidden, ...ACTIONS_SERVE_FORBIDDEN] : isEvents ? [...forbidden, 'UPDATE'] : forbidden],
     );
     if (f.rows[0].held) extra.push({ rel: `public.${t.relname} (${f.rows[0].held})` });
   }

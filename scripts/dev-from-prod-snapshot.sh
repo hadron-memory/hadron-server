@@ -10,8 +10,9 @@
 #     setup")
 #   • excludes `secret_app_keys` (#3996, R18) → the wrapped per-App data keys never
 #     reach a developer machine; the table comes back empty from the schema sync.
-#     Later App-secret tables (secret_versions, secret_change_requests) join this
-#     list in the slice that creates them.
+#   • excludes `secret_versions` (#3997, R18) → App secret ciphertext never reaches a developer
+#     machine either. A later App-secret table (secret_change_requests) joins this list in the
+#     slice that creates it.
 #
 # ── READ BEFORE USING — two things a restore does NOT solve ──────────────────
 #   1. ENCRYPTION KEY. Columns encrypted under the prod HADRON_ENCRYPTION_KEY
@@ -98,6 +99,7 @@ echo "→ Dumping production (custom format, excluding _prisma_migrations)…"
 pg_dump -Fc --no-owner --no-privileges \
   --exclude-table='_prisma_migrations' \
   --exclude-table='secret_app_keys' \
+  --exclude-table='secret_versions' \
   --file="$DUMP" "$PROD_DATABASE_URL"
 
 # ── (re)create the target DB locally ─────────────────────────────────────────
