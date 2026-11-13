@@ -1037,7 +1037,7 @@ export const chatMutations = {
       // gate before any write (#3654). Preserve that refusal before licence-loss
       // normalization hides the Agent. App-class chats retain their empty result.
       if (memory.class !== 'app' && agent?.deletedAt) throw new AgentNotFoundError(agent.id);
-      agent = await chatHomeAgentIfLicensed(ctx.db, memory, agent, ctx);
+      agent = await chatHomeAgentIfLicensed(ctx.db, memory, agent);
       const systemMemoryId = agent ? (agent as any).systemMemoryId as string : null;
 
       // Pin to version: if the chat was started with a published revision,

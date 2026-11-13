@@ -7,7 +7,7 @@ import { isAgentInstalledAndLicensed } from './appAgent.js';
  * system-memory reads, independently of the home's class.
  *
  * - App-bearing home (#4043): the home's App must still install and license the Agent. No manager exemption.
- * - App-less home (#4070): the CURRENT request principal must still reach the Agent through the shared
+ * - App-less home (#4070), when the caller is passed (the response): the CURRENT request principal must still reach the Agent through the shared
  *   `canChatWithAgent`, the predicate `sendChatMessage` applies, so send and respond never disagree (cor:acl:010:01,
  *   the `system` row). The chat's creator, the stored home pointer and a historical App are not substitutes.
  *
@@ -18,10 +18,13 @@ export async function chatHomeAgentIfLicensed<T extends { id: string; organizati
   db: PrismaClient | Prisma.TransactionClient,
   home: { appId: string | null },
   agent: T | null,
-  caller: Context,
+  caller?: Context,
 ): Promise<T | null> {
   if (!agent) return agent;
   if (home.appId) return await isAgentInstalledAndLicensed(db, home.appId, agent.id) ? agent : null;
+  // `sendChatMessage` omits the caller: its serve gate already runs canChatWithAgent before any write and refuses
+  // with AGENT_NOT_FOUND, which must stay a refusal (#4070 CHECKED: send's refusal is unchanged).
+  if (!caller) return agent;
   const current = await caller.db.agent.findUnique({
     where: { id: agent.id },
     select: { id: true, organizationId: true, ownerUserId: true, visibility: true, deletedAt: true },
