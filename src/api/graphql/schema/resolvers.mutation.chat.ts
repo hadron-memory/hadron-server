@@ -74,7 +74,7 @@ import {
   ChatScopeError,
 } from './chat-scope.js';
 import { chatLocFilter, pickChatNode } from '../../../lib/chatLoc.js';
-import { decideChatRouting, applyChatRoutingDecision } from '../../../lib/chatRouting.js';
+import { decideChatRouting, applyChatRoutingDecision, getGoalStack } from '../../../lib/chatRouting.js';
 import { reportPartialTurn, routingRefusedReport } from '../../../lib/chatPartialTurn.js';
 import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
 import {
@@ -96,7 +96,7 @@ import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
 import { unauthenticatedError } from '../../../lib/refusals.js';
 import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds.js';
 import {
-  hasEntryCondition, isOrdinaryConversation, pickEntryConversation, pickUnnamedStartConversation, topLevelConversations,
+  hasEntryCondition, isOrdinaryConversation, pickEntryConversation, pickFallbackConversation, pickUnnamedStartConversation, topLevelConversations,
 } from '../../../lib/chatConversationOrder.js';
 import {
   entryStartMessageFor, validateEntryCondition, type EntryStartReason,
@@ -1692,8 +1692,14 @@ export const chatMutations = {
           ));
         }
       }
+      let fallback: { name: string; stageOrder: string[] } | null = null;
+      if (script && toolResponse.goal_reached === true) {
+        const picked = pickFallbackConversation(await script.nodesByPrefix('conversations:'));
+        const order = (picked?.data as Record<string, unknown> | undefined)?.stageOrder;
+        if (picked && Array.isArray(order)) fallback = { name: picked.loc.split(':')[1], stageOrder: order.filter((s): s is string => typeof s === 'string') };
+      }
       const routing = await decideChatRouting({
-        origin, nextStage: toolResponse.next_stage, stageOrder, goalReached: toolResponse.goal_reached, rules,
+        origin, goalStack: getGoalStack(chatData), fallback, nextStage: toolResponse.next_stage, stageOrder, goalReached: toolResponse.goal_reached, rules,
         node: loc => script ? script.node(loc) : Promise.resolve(null),
         evaluate: async edge => {
           if (edge.condition == null) return true;

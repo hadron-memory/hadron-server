@@ -40,7 +40,7 @@ describe('#4037 stage targets (pin 1)', () => {
 
 describe('#4037 detour push (pin 2 first half, pin 5)', () => {
   it('records where the chat leaves plus detourTo, with an EXIT then ENTER (DETOUR_EDGE)', async () => {
-    const decision = await decide({ goalReached: false, rules: [rule('edge1', 'conversations:anger', { timing: 'always', behavior: 'detour', label: 'Calm down' })] });
+    const decision = await decide({ origin: { conversationName: 'a', stageName: 's2' }, goalReached: false, rules: [rule('edge1', 'conversations:anger', { timing: 'always', behavior: 'detour', label: 'Calm down' })] });
     const { fresh } = run(decision, { conversationName: 'a', stageName: 's2' });
     expect(fresh.goalStack).toEqual([expect.objectContaining({ description: 'Calm down', conversationUrn: 'conversations:a', nodeUrn: 'conversations:a:s2', detourTo: 'conversations:anger', edgeUrn: 'edge1', status: 'ACTIVE' })]);
     expect(trail(fresh)).toEqual(['EXIT a', 'ENTER anger (DETOUR_EDGE)']);
