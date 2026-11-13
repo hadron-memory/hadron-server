@@ -138,6 +138,7 @@ import {
   type NodeMergeField,
 } from '../../../lib/nodeMerge.js';
 import { mapChatSeqConflict } from '../../../lib/prismaErrors.js';
+import { assertStorableText, edgeTextFields } from '../../../lib/unstorableTextInput.js';
 import {
   type Context,
   getAccessibleMemoryIds,
@@ -479,6 +480,16 @@ async function writeNodeCoreRaw(
         }
         throw e;
       }
+
+      // #4096: caller text a NUL or unpaired surrogate would fail the write (Postgres 22021 / encoding) is a typed BAD_USER_INPUT naming the field, here at the one
+      // writer every node door shares, after authorization and before any write. NOT in `mapChatSeqConflict` (see unstorableTextInput.ts).
+      assertStorableText({
+        name: input.name, description: input.description, abstract: input.abstract, content: input.content, tags: input.tags,
+        alias: input.alias, role: input.role, nodeType: input.nodeType, objectType: input.objectType,
+        ownerRepo: input.ownerRepo, llmModel: input.llmModel, aiAgent: input.aiAgent,
+        id: input.id, reason: input.reason, properties: input.properties, data: input.data,
+        ...edgeTextFields(input.edges),
+      });
 
       // #476 / #488 — contentType conversion at the single write seam, so the
       // converted Markdown (not the source HTML/PDF) is what every downstream
@@ -3133,6 +3144,9 @@ export const nodeMutations = {
         }
         return txCtx;
       };
+      // #4096: `newText` is caller text written through `tx.node.update`, outside the node writer. Refused typed after
+      // selection and write authorization, before any write (a dry run is refused too, so its preview never promises a write that fails).
+      assertStorableText({ newText });
       // A dry run writes nothing, but still makes the manager's deciding
       // gate under the same authority as the write branch.
       if (dryRun) {
