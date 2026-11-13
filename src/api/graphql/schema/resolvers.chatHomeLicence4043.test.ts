@@ -28,8 +28,9 @@ beforeEach(async () => {
   await db.appMember.create({ data: { appId, userId, role: 'member' } });
   for (const row of [
     { loc: 'conversations', data: {} },
-    { loc: 'conversations:flow', data: { stageOrder: ['step'], isSetup: false } },
+    { loc: 'conversations:flow', data: { stageOrder: ['step', 'other'], isSetup: false } },
     { loc: 'conversations:flow:step', data: { promptRef: 'prompts:step' } },
+    { loc: 'conversations:flow:other', data: { promptRef: 'prompts:step' } },
     { loc: 'prompts', data: {} },
     { loc: 'prompts:step', content: 'LICENSED STAGE', data: {} },
     { loc: 'conversations:next', data: { stageOrder: ['next'] } },
@@ -68,17 +69,31 @@ async function loseLicence(loss: Loss) {
   }
 }
 
-async function start(scope: 'private' | 'shared' = 'private') {
+/** Publish the Agent's current definition, so a chat started afterwards is pinned to it (`startedWithRevision`). */
+async function publishPin() {
+  const rev = await M.createRevision({}, { agentId }, ctx());
+  await M.publishRevision({}, { agentId, revisionLoc: rev.revisionLoc }, ctx());
+  return rev.revisionLoc as string;
+}
+
+async function start(scope: 'private' | 'shared' = 'private', pinned = false) {
+  const pin = pinned ? await publishPin() : null;
   const started = await M.startChat({}, { agentId, scope, conversationName: 'flow' }, ctx());
   expect(started.systemMessage).toContain('LICENSED STAGE');
+  // The pin is what makes loadChatScript read the definition eagerly; without it that call makes no read, so a
+  // licence gate moved after it would go unnoticed. Establish the pin (or its absence) instead of assuming it.
+  const root = await chatNodeByLocOrThrow(db, started.chatId);
+  expect((root.data as any).startedWithRevision ?? null).toBe(pin);
   return started;
 }
 
-/** Observe directly memory-scoped Node reads and edge reads without replacing results.
+/** Observe directly memory-scoped Node reads and edge reads from the Agent's definition, without replacing results.
  * The licensed control verifies this observer against both actual retrieval paths;
  * it is not a universal raw-SQL or transaction-client query recorder.
  */
 async function observeDefinitionReads<T>(run: () => Promise<T>) {
+  // Edge reads are keyed by their source node, so only reads from the Agent's definition nodes count.
+  const definitionNodeIds = new Set((await db.node.findMany({ where: { memoryId: systemId }, select: { id: true } })).map((n) => n.id));
   const first = vi.spyOn(db.node, 'findFirst');
   const many = vi.spyOn(db.node, 'findMany');
   const unique = vi.spyOn(db.node, 'findUnique');
@@ -93,7 +108,11 @@ async function observeDefinitionReads<T>(run: () => Promise<T>) {
       const memory = where?.memoryId ?? where?.loc_memoryId?.memoryId;
       return memory === systemId || memory?.equals === systemId || memory?.in?.includes(systemId);
     });
-    return { value, systemReads, edgeReads: edges.mock.calls.length };
+    const edgeReads = edges.mock.calls.filter(([args]) => {
+      const source = (args as any)?.where?.sourceId;
+      return typeof source === 'string' ? definitionNodeIds.has(source) : false;
+    }).length;
+    return { value, systemReads, edgeReads };
   } finally {
     for (const spy of [first, many, unique, uniqueOrThrow, firstOrThrow, edges]) spy.mockRestore();
   }
@@ -101,10 +120,11 @@ async function observeDefinitionReads<T>(run: () => Promise<T>) {
 
 for (const home of ['personal', 'knowledge'] as const) {
   for (const loss of ['uninstall', 'revoked', 'expired', 'inactive'] as const) {
-    describe(`#4043 ${home} home after ${loss}`, () => {
+   for (const pinned of [false, true]) {
+    describe(`#4043 ${home} home after ${loss}${pinned ? ' (pinned to a published revision)' : ''}`, () => {
       it('send gives empty prompt/no tools and reads no definition, even for the Agent manager', async () => {
         await foreignHome();
-        const started = await start();
+        const started = await start('private', pinned);
         const root = await chatNodeByLocOrThrow(db, started.chatId);
         if (home === 'knowledge') await db.memory.update({ where: { id: root.memoryId }, data: { class: 'knowledge', userId: null, organizationId: null, ownerUserId: userId, visibility: 'ORGANIZATION' } });
         await loseLicence(loss);
@@ -116,7 +136,7 @@ for (const home of ['personal', 'knowledge'] as const) {
 
       it('response evaluates no on-complete edges or system config, even for the Agent manager', async () => {
         await foreignHome();
-        const started = await start();
+        const started = await start('private', pinned);
         const root = await chatNodeByLocOrThrow(db, started.chatId);
         if (home === 'knowledge') await db.memory.update({ where: { id: root.memoryId }, data: { class: 'knowledge', userId: null, organizationId: null, ownerUserId: userId, visibility: 'ORGANIZATION' } });
         await loseLicence(loss);
@@ -126,9 +146,11 @@ for (const home of ['personal', 'knowledge'] as const) {
         expect(seen.edgeReads).toBe(0);
       });
 
+      // A pinned chat makes loadChatScript read the revision node at once, so these cases fail if a licence gate is
+      // moved to run after it. The unpinned cases pass either way and only cover the gate before the later reads.
       it('a named-stage response reads no definition for stage validation after licence loss', async () => {
         await foreignHome();
-        const started = await start();
+        const started = await start('private', pinned);
         const root = await chatNodeByLocOrThrow(db, started.chatId);
         if (home === 'knowledge') await db.memory.update({ where: { id: root.memoryId }, data: { class: 'knowledge', userId: null, organizationId: null, ownerUserId: userId, visibility: 'ORGANIZATION' } });
         await loseLicence(loss);
@@ -137,7 +159,22 @@ for (const home of ['personal', 'knowledge'] as const) {
         expect(seen.systemReads).toEqual([]);
         expect(seen.edgeReads).toBe(0);
       });
+
+      it('a response naming a distinct stage reads no definition to validate it after licence loss', async () => {
+        await foreignHome();
+        const started = await start('private', pinned);
+        const root = await chatNodeByLocOrThrow(db, started.chatId);
+        if (home === 'knowledge') await db.memory.update({ where: { id: root.memoryId }, data: { class: 'knowledge', userId: null, organizationId: null, ownerUserId: userId, visibility: 'ORGANIZATION' } });
+        await loseLicence(loss);
+        // With no licensed script there is no stage list to check the name against: decideNextStage then takes the name
+        // as given (stageOrder null), as the code does today. This asserts the reads only, not that outcome.
+        const seen = await observeDefinitionReads<any>(() => M.processChatResponse({}, { chatId: started.chatId, toolResponse: { message: 'done', next_stage: 'other' } }, ctx()));
+        expect(seen.value.conversationHandoff).toBeNull();
+        expect(seen.systemReads).toEqual([]);
+        expect(seen.edgeReads).toBe(0);
+      });
     });
+   }
   }
 }
 
@@ -155,6 +192,28 @@ describe('#4043 controls', () => {
     expect(response.edgeReads).toBeGreaterThan(0);
   });
 
+  it.each([false, true])('the licensed personal home moves to a distinct named stage and validates it against the definition (pinned=%s)', async (pinned) => {
+    await foreignHome();
+    const started = await start('private', pinned);
+    const root = await chatNodeByLocOrThrow(db, started.chatId);
+    const response = await observeDefinitionReads<any>(() => M.processChatResponse({}, { chatId: started.chatId, toolResponse: { message: 'done', next_stage: 'other' } }, ctx()));
+    const state = await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } });
+    expect(state.state).toMatchObject({ conversationName: 'flow', stageName: 'other' });
+    expect(response.systemReads.length).toBeGreaterThan(0);
+  });
+
+  it('the licensed personal home refuses a stage that is not in its conversation', async () => {
+    await foreignHome();
+    const started = await start();
+    const root = await chatNodeByLocOrThrow(db, started.chatId);
+    await M.processChatResponse({}, { chatId: started.chatId, toolResponse: { message: 'done', next_stage: 'nowhere' } }, ctx());
+    const state = await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } });
+    expect(state.state).toMatchObject({ stageName: 'step' });
+  });
+
+  // The licence checks above need the Memory's appId to name the install. That an app-class chat home always has one
+  // is not a code path here: the database premise is the CHECK constraint chk_memory_class_app_id (cor:dmo:060:01),
+  // so a row with class 'app' and a null appId cannot persist and needs no branch of its own.
   it('the database refuses an app-class chat home without appId', async () => {
     const started = await start('shared');
     const root = await chatNodeByLocOrThrow(db, started.chatId);
