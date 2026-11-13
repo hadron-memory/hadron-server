@@ -62,6 +62,7 @@ import { appKeyMayActFor, appKeySessionMatchesAgent, canChatWithAgent, chatAutho
 import { withAuthorizedMemoryTx, withAuthorizedTx } from './authorizedTx.js';
 import { activeAppInstallLicenseIdsForAgent } from '../../../lib/appAgent.js';
 import { chatHomeAgentIfLicensed } from '../../../lib/chatHomeAgent.js';
+import { canManageAgentSystemMemory } from '../../../lib/auth/managedSystemMemory.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { type MemoryVisibility } from '../../../generated/prisma/index.js';
@@ -314,13 +315,6 @@ export const chatMutations = {
       const systemMemoryId = (agent as any).systemMemoryId as string | null;
       if (!systemMemoryId) throw new Error('Agent has no system memory configured');
 
-      // If the agent has a published revision, the whole script (conversation structure, rules, extraction
-      // spec) is read from that snapshot (pin-to-version, #4034); otherwise from the live nodes.
-      const publishedLoc = (agent as any).publishedRevisionLoc as string | null;
-      const script = await loadChatScript(ctx.db, systemMemoryId, publishedLoc);
-      const findSystemNode = (loc: string) => script.node(loc);
-      const findSystemNodesByPrefix = (prefix: string) => script.nodesByPrefix(prefix);
-
       // ── Target memory selection ──────────────────────────────────────
       // The chat (and its future messages + extracted data) get stored
       // in a user-scoped memory. Four auth paths:
@@ -331,9 +325,10 @@ export const chatMutations = {
       //   1. App Key session with an active sessionId → use session.memoryId
       //   2. JWT user → find-or-create a per-user memory for (agent, ctx.userId)
       //   3. Legacy fallback → first writable memory attached to the agent
-      type StartTarget = { targetMemoryId: string | null; sharedAppId: string | null; ensureTarget: (() => Promise<string>) | null };
+      type StartTarget = { appId: string | null; targetMemoryId: string | null; sharedAppId: string | null; ensureTarget: (() => Promise<string>) | null };
       const selectStartTarget = async (): Promise<StartTarget> => {
       let targetMemoryId: string | null = null;
+      let prospectiveAppId: string | null = null;
       let sharedAppId: string | null = null;
       let ensureTarget: (() => Promise<string>) | null = null;
       if (chatScope === 'shared') {
@@ -456,8 +451,7 @@ export const chatMutations = {
         if (existing) {
           targetMemoryId = existing.id;
         } else {
-          // #4039 (D8): nothing is created until the start is decided.
-          ensureTarget = async () => {
+          // Resolve the prospective App before any definition read or provisioning (#4046).
           // Lazily provision a per-user memory for this (agent, user).
           // 008: personal-class memory requires app_id (chk_memory_class_app_id).
           // For a JWT-user chat we resolve the App via App.agent_id matching the
@@ -465,24 +459,6 @@ export const chatMutations = {
           // exists, we downgrade to a knowledge-class memory for this chat —
           // analogous to the migration's R-3 fallback for unattributed personal
           // memories.
-          if (!agent.organizationId) {
-            throw new GraphQLError('Lazy per-user memory provisioning is not supported for a user-owned Agent yet.', { extensions: { code: 'BAD_USER_INPUT' } });
-          }
-          const org = await ctx.db.organization.findUniqueOrThrow({
-            where: { id: agent.organizationId }, select: { urn: true },
-          });
-          const opaqueId = generateId();
-          const agentSlug = agentSlugFromUrn(agent.urn);
-          // #697 Stage 3: flat single-atom v2 urn (`<org>:<opaqueId>`). The
-          // per-user `app-user` scope lives in the row columns (class/userId/
-          // userMemoryOfAgentId/appId), not the URN path. Fresh opaque id ⇒ no
-          // collision, stored unaliased.
-          const memoryUrn = await mintMemoryUrnV2(ctx.db, {
-            root: org.urn,
-            desiredSlug: opaqueId,
-            authorRoot: agentSlug,
-          });
-
           const ownerOrgIds = (
             await ctx.db.orgMember.findMany({
               where: { userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
@@ -523,6 +499,27 @@ export const chatMutations = {
           const visibility: MemoryVisibility | null = matchingApp
             ? null
             : 'ORGANIZATION';
+
+          prospectiveAppId = matchingApp?.id ?? null;
+          // #4039/#4046: writes remain deferred until admission and entry selection pass.
+          ensureTarget = async () => {
+          if (!agent.organizationId) {
+            throw new GraphQLError('Lazy per-user memory provisioning is not supported for a user-owned Agent yet.', { extensions: { code: 'BAD_USER_INPUT' } });
+          }
+          const org = await ctx.db.organization.findUniqueOrThrow({
+            where: { id: agent.organizationId! }, select: { urn: true },
+          });
+          const opaqueId = generateId();
+          const agentSlug = agentSlugFromUrn(agent.urn);
+          // #697 Stage 3: flat single-atom v2 urn (`<org>:<opaqueId>`). The
+          // per-user `app-user` scope lives in the row columns (class/userId/
+          // userMemoryOfAgentId/appId), not the URN path. Fresh opaque id ⇒ no
+          // collision, stored unaliased.
+          const memoryUrn = await mintMemoryUrnV2(ctx.db, {
+            root: org.urn,
+            desiredSlug: opaqueId,
+            authorRoot: agentSlug,
+          });
 
           const created = await ctx.db.memory.create({
             data: {
@@ -565,8 +562,31 @@ export const chatMutations = {
         // #3292: an item never grants a userless principal, including an AppRun, a chat target (cor:dmo:050:09).
         targetMemoryId = !ctx.userId ? null : writable.find((m) => linkWriteTargetAdmits(tenant, m.memory, m.role))?.memoryId ?? null;
       }
-      return { targetMemoryId, sharedAppId, ensureTarget };
+      const appId = targetMemoryId
+        ? (await ctx.db.memory.findUnique({ where: { id: targetMemoryId }, select: { appId: true } }))?.appId ?? null
+        : sharedAppId ?? prospectiveAppId;
+      return { appId, targetMemoryId, sharedAppId, ensureTarget };
       };
+      // #4046 (cor:acl:010:01): a start's definition reads belong to its selected
+      // home's App, even before that home is provisioned. Managers have no App
+      // exemption; their direct route is available only when the home has no App.
+      const target = await selectStartTarget();
+      if (!target.targetMemoryId && !target.ensureTarget) throw new Error('No target memory available for this chat');
+      if (target.appId) {
+        if (!await chatHomeAgentIfLicensed(ctx.db, { appId: target.appId }, agent)) {
+          throw new AgentNotFoundError(agentId);
+        }
+      } else if (!await canManageAgentSystemMemory(ctx.db, ctx, systemMemoryId)) {
+        throw new AgentNotFoundError(agentId);
+      }
+
+      // If the agent has a published revision, the whole script (conversation structure, rules, extraction
+      // spec) is read from that snapshot (pin-to-version, #4034); otherwise from the live nodes.
+      const publishedLoc = (agent as any).publishedRevisionLoc as string | null;
+      const script = await loadChatScript(ctx.db, systemMemoryId, publishedLoc);
+      const findSystemNode = (loc: string) => script.node(loc);
+      const findSystemNodesByPrefix = (prefix: string) => script.nodesByPrefix(prefix);
+
       // #4039 (cor:cht:020:02 steps 3-6, B1-B3): does this conversation's entry condition hold for THIS starter?
       // Facts are the starter's own, from layer A (the pinned script's agent-wide defaults) and layer B (the located home
       // memory through the per-person view, #910). Nothing here writes. Any refusal is `ENTRY_CONDITION_FAILED`, judged before
@@ -633,7 +653,6 @@ export const chatMutations = {
 
       // ── Conversation selection ───────────────────────────────────────
       let convName: string;
-      let entrySelection: StartTarget | null = null;
       if (conversationName) {
         convName = conversationName;
       } else {
@@ -644,10 +663,9 @@ export const chatMutations = {
         let chosen: (typeof startNodes)[number] | null;
         if (topLevelConversations(startNodes).some((n) => isOrdinaryConversation(n) && hasEntryCondition(n))) {
           // D8: locate the home memory (a read, nothing written), evaluate, and provision only after the start is decided.
-          entrySelection = await selectStartTarget();
           // B1: eager. Whether the home memory is usable is decided before any condition is read, so an encrypted
           // memory with no key refuses even when the first conversation in order has no condition (cor:cht:020:02 edge case).
-          const entry = entryHolds(entrySelection.targetMemoryId);
+          const entry = entryHolds(target.targetMemoryId);
           await entry.prepare();
           chosen = await pickEntryConversation(startNodes, entry.holds);
         } else {
@@ -688,7 +706,6 @@ export const chatMutations = {
         promptContent = stageNode.content;
       }
 
-      const target = entrySelection ?? await selectStartTarget();
       let targetMemoryId = target.targetMemoryId;
       const sharedAppId = target.sharedAppId;
       if (target.ensureTarget) targetMemoryId = await target.ensureTarget();
@@ -840,6 +857,13 @@ export const chatMutations = {
         const chatAnchors = await chatAuthorityAnchors(
           ctx, gateRow, effectiveUserId !== 'anonymous' ? effectiveUserId : null,
         );
+        // The selected home is authority even when the caller is also an Agent manager.
+        if (target.appId) {
+          const app = await ctx.db.app.findUnique({ where: { id: target.appId }, select: { organizationId: true, ownerUserId: true } });
+          chatAnchors.push({ kind: 'app', id: target.appId });
+          if (app?.organizationId) chatAnchors.push({ kind: 'org', id: app.organizationId });
+          if (app?.ownerUserId) chatAnchors.push({ kind: 'user', id: app.ownerUserId });
+        }
         const anchored = new Set(chatAnchors.map((a) => `${a.kind}:${a.id}`));
         try {
           await withAuthorizedTx(ctx, chatAnchors, async (txCtx) => {
@@ -866,6 +890,12 @@ export const chatMutations = {
               current.ownerUserId !== gateRow.ownerUserId ||
               !(await canChatWithAgent(txCtx, current, { carriers }))
             ) {
+              throw new AgentNotFoundError(agentId);
+            }
+            // Re-judge the start route after waiting for authority anchors (#4046).
+            if (target.appId
+              ? !await chatHomeAgentIfLicensed(txCtx.db, { appId: target.appId }, current)
+              : !await canManageAgentSystemMemory(txCtx.db, txCtx, systemMemoryId)) {
               throw new AgentNotFoundError(agentId);
             }
             if (pureAppKey && !(await appKeySessionMatchesAgent(txCtx, resolvedAgentId))) {

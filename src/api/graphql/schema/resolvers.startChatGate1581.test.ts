@@ -93,6 +93,10 @@ beforeEach(async () => {
   } });
   // An App end user: a member of the App, NOT of the org.
   await db.appMember.create({ data: { appId: app.id, userId: endUser.id, role: 'member' } });
+  // #4046: this App end-user control reaches a retained App home, not a standalone definition.
+  await db.memory.create({ data: { name: 'End-user home', urn: `${orgA.urn}:end-user-home`,
+    class: 'personal', userId: endUser.id, createdBy: endUser.id,
+    userMemoryOfAgentId: agent.id, appId: app.id, organizationId: orgA.id } });
   // #2712: chats are served the Agent's boot prompt; an Agent without one is refused.
   await serveEveryAgent(db);
 });
@@ -135,11 +139,11 @@ describe('#1581: startChat gates the Agent before reading or licensing anything'
     expect(await subsFor(agent.id)).toEqual([]);
   });
 
-  it('CONTROL: a PUBLIC Agent is reachable by anyone signed in', async () => {
+  it('#4046: PUBLIC visibility does not admit an App-less non-manager start', async () => {
     await db.agent.update({ where: { id: agent.id }, data: { visibility: 'PUBLIC' } });
-    const out = await M.startChat(null, { agentId: agent.id }, userCtx(stranger.id));
-    expect(out.chatId).toMatch(/^chats:/);
-    expect(await subsFor(agent.id)).toEqual([stranger.id]);
+    await expect(M.startChat(null, { agentId: agent.id }, userCtx(stranger.id)))
+      .rejects.toMatchObject({ name: 'AgentNotFoundError' });
+    expect(await subsFor(agent.id)).toEqual([]);
   });
 
   it('a chat that fails after the gate leaves no license (provisioned in the chat transaction)', async () => {
@@ -321,7 +325,7 @@ describe('#1581: canChatWithAgent for a pure App key', () => {
 // exclusively cannot return while the license is about to commit, and after
 // it commits the re-run gate refuses.
 describe('#1585 review: a stale membership in a dead tenant\'s App does not block a chat', () => {
-  it('a PUBLIC Agent stays reachable when the caller is also a member of an App whose org was soft-deleted', async () => {
+  it('#4046: a PUBLIC Agent refuses App-less starts even with stale dead-org membership', async () => {
     await db.agent.update({ where: { id: agent.id }, data: { visibility: 'PUBLIC' } });
     const deadOrg = await db.organization.create({ data: { id: generateId(), name: 'dead', urn: 'dead-1585.example' } });
     const deadApp = await db.app.create({ data: {
@@ -331,9 +335,9 @@ describe('#1585 review: a stale membership in a dead tenant\'s App does not bloc
     await db.appMember.create({ data: { appId: deadApp.id, userId: stranger.id, role: 'member' } });
     // Org deletion deliberately leaves the App row intact.
     await db.organization.update({ where: { id: deadOrg.id }, data: { deletedAt: new Date() } });
-    const out = await M.startChat(null, { agentId: agent.id }, userCtx(stranger.id));
-    expect(out.chatId).toMatch(/^chats:/);
-    expect(await subsFor(agent.id)).toEqual([stranger.id]);
+    await expect(M.startChat(null, { agentId: agent.id }, userCtx(stranger.id)))
+      .rejects.toMatchObject({ name: 'AgentNotFoundError' });
+    expect(await subsFor(agent.id)).toEqual([]);
   });
 });
 
@@ -359,11 +363,11 @@ describe('#1585 review: the gate and the anchors agree on which Apps carry the r
     expect(await subsFor(agent.id)).not.toContain(stranger.id);
   });
 
-  it("CONTROL (Chip): a PUBLIC Agent stays reachable for a member of a dead owner's App", async () => {
+  it("#4046: PUBLIC visibility and a dead owner's App do not admit an App-less start", async () => {
     await db.agent.update({ where: { id: agent.id }, data: { visibility: 'PUBLIC' } });
     await deadOwnerApp(stranger.id);
-    const out = await M.startChat(null, { agentId: agent.id }, userCtx(stranger.id));
-    expect(out.chatId).toMatch(/^chats:/);
+    await expect(M.startChat(null, { agentId: agent.id }, userCtx(stranger.id)))
+      .rejects.toMatchObject({ name: 'AgentNotFoundError' });
   });
 });
 
@@ -383,6 +387,8 @@ describe('#1585 review: a carrier App that appears after anchor selection is fen
   }
 
   it('a chat admitted only through a newly licensed App waits for that App\'s deletion and is refused', async () => {
+    // #4046: begin with lawful direct manager reach, then remove it as the new carrier appears.
+    await db.orgMember.create({ data: { organizationId: orgA.id, userId: stranger.id, role: 'ADMIN' } });
     await db.agent.update({ where: { id: agent.id }, data: { visibility: 'PUBLIC' } });
     const orgX = await db.organization.create({ data: { id: generateId(), name: 'org-x', urn: 'org-x-1585.example' } });
     const appX = await db.app.create({ data: {
@@ -410,6 +416,7 @@ describe('#1585 review: a carrier App that appears after anchor selection is fen
       // PUBLIC, so the chat can now be admitted ONLY through App X.
       await tx.agentOrgGrant.create({ data: { orgId: orgX.id, agentId: agent.id, activatedAt: new Date() } });
       await tx.agent.update({ where: { id: agent.id }, data: { visibility: 'ORGANIZATION' } });
+      await tx.orgMember.delete({ where: { organizationId_userId: { organizationId: orgA.id, userId: stranger.id } } });
     }, { timeout: 20_000 });
     await h1IsHeld;
 

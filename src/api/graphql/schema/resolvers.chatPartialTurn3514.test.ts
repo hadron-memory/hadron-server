@@ -50,6 +50,9 @@ beforeEach(async () => {
       create: { id: generateId(), memoryId: systemMemoryId, loc: n.loc, name: n.loc.split(':').pop()!, nodeType: 'system', data: (n.data ?? null) as never, content: n.content ?? null },
     });
   }
+  // #4046: these turn tests start through a licensed App, never an App-less non-manager read.
+  await db.app.create({ data: { name: 'Turn fixture', urn: 'org-3514:chat-app', organizationId: org.id,
+    appAgents: { create: { agentId: agent.id } } } });
   await serveEveryAgent(db);
 });
 

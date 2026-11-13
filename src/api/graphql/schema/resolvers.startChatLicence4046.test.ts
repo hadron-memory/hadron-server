@@ -178,3 +178,48 @@ it('licensed non-manager App start remains admitted', async () => {
   await db.orgMember.updateMany({ where: { userId }, data: { role: 'READER' } });
   expect((await start()).systemMessage).toContain('LICENSED STAGE');
 });
+
+for (const route of ['app', 'manager'] as const) {
+  it(`rechecks ${route} admission at the locked write after authority changes`, async () => {
+    if (route === 'manager') {
+      await db.appAgent.delete({ where: { appId_agentId: { appId, agentId } } });
+      await db.agent.update({ where: { id: agentId }, data: { visibility: 'PUBLIC' } });
+    }
+    await start();
+    const before = await state();
+    const transaction = db.$transaction.bind(db) as (...args: any[]) => Promise<any>;
+    let changed = false;
+    const spy = vi.spyOn(db, '$transaction').mockImplementation((async (...args: any[]) => {
+      if (!changed) {
+        changed = true;
+        if (route === 'app') await db.appAgent.delete({ where: { appId_agentId: { appId, agentId } } });
+        else await db.orgMember.updateMany({ where: { userId }, data: { role: 'READER' } });
+      }
+      return transaction(...args);
+    }) as any);
+    try {
+      await expect(M.startChat({}, { agentId, conversationName: 'flow' }, ctx())).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
+      expect(changed).toBe(true); // The test reaches the locked write, not just the early guard.
+      expect(await state()).toBe(before);
+    } finally { spy.mockRestore(); }
+  });
+}
+
+it('retained App-less home admits the user-owned Agent owner', async () => {
+  const first = await start();
+  const root = await chatNodeByLocOrThrow(db, first.chatId);
+  await db.memory.update({ where: { id: root.memoryId }, data: { appId: null } });
+  await db.agent.update({ where: { id: agentId }, data: { organizationId: null, ownerUserId: userId } });
+  await db.memory.update({ where: { id: systemId }, data: { organizationId: null, ownerUserId: userId } });
+  expect((await start()).systemMessage).toContain('LICENSED STAGE');
+});
+it('live platform admin can use a retained App-less home; a stale platform claim cannot', async () => {
+  const first = await start();
+  const root = await chatNodeByLocOrThrow(db, first.chatId);
+  await db.memory.update({ where: { id: root.memoryId }, data: { appId: null } });
+  await db.orgMember.updateMany({ where: { userId }, data: { role: 'READER' } });
+  const platformCtx = { ...ctx(), roles: ['ADMIN'] } as Context;
+  await expect(M.startChat({}, { agentId, conversationName: 'flow' }, platformCtx)).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
+  await db.user.update({ where: { id: userId }, data: { roles: ['ADMIN'] } });
+  expect((await M.startChat({}, { agentId, conversationName: 'flow' }, platformCtx)).systemMessage).toContain('LICENSED STAGE');
+});

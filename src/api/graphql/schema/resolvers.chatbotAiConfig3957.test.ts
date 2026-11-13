@@ -325,8 +325,11 @@ describe('the chat path', () => {
   // Rodolfo P3-2 (cor:dmo:050:10: a pin naming another App's config, a deleted one or an id that doesn't exist is refused
   // like a missing id, with nothing revealing that the config exists): a chat with no App, and a REAL org config's id.
   it('a choice on a chat with no App is refused identically to a nonexistent id, after normalizing only the id the caller sent', async () => {
+    // #4046: only an Agent manager may start directly without an App.
+    await db.orgMember.create({ data: { userId: member.id, organizationId: org.id, role: 'ADMIN' } });
+    await db.appAgent.deleteMany({ where: { agentId: chatAgent.id } });
     const orgConfig = await db.aiServiceConfig.create({ data: { organizationId: org.id, name: 'org-wide', provider: 'openai', model: 'gpt-org', apiKeyEncrypted: encryptToken(KEY), apiKeyPreview: '…3957' } });
-    // `member` is not an org member, so the lazy per-user memory belongs to no App.
+    // The manager has no installed App, so the lazy per-user memory belongs to no App.
     // Victor's conditions: every occurrence of the caller's exact input becomes one shared placeholder on both sides and the WHOLE
     // serialized error is compared; and the echo is the verbatim input, never anything config-derived.
     const refusal = (id: string, run: () => Promise<unknown>) => run().then(() => null, (e: any) => {

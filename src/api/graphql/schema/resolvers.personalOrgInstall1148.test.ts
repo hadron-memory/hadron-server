@@ -170,6 +170,11 @@ async function seedChatConversation() {
   {loc:'prompts:research:scope',name:'scope',content:'Scope the research.'},
  ];
  for(const n of nodes) await db.node.create({data:{...n,id:generateId(),memoryId,nodeType:'system'}});
+ // #4046: chat controls land in licensed App homes; org readers have no App-less definition route.
+ for (const userId of [ownerId, outsiderId]) await db.memory.create({data:{
+  name:'App chat home',urn:`@personal-owner:chat-${userId}`,class:'personal',userId,ownerUserId:userId,
+  appId,userMemoryOfAgentId:agentId,createdBy:userId,
+ }});
  await serveAgentBootPrompt(db,agentId,'PRIVATE ORG CHAT SENTINEL');
 }
 it('startChat never returns organization boot text to a non-member App participant',async()=>{
