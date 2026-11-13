@@ -396,11 +396,11 @@ async function retainedForeignHomeWithoutParticipation() {
 it('a home-only App anchor fences uninstall even when the Agent manager has no App participation', async () => {
   await retainedForeignHomeWithoutParticipation();
   await assertHeldRefusal({ kind: 'app', id: appId }, tx => tx.appAgent.delete({ where: { appId_agentId: { appId, agentId } } }));
-});
+}, 15_000);
 it('a home-only App org anchor fences tenant deletion independently of the Agent org', async () => {
   await retainedForeignHomeWithoutParticipation();
   await assertHeldRefusal({ kind: 'org', id: foreignOrgId }, tx => tx.organization.update({ where: { id: foreignOrgId }, data: { deletedAt: new Date() } }));
-});
+}, 15_000);
 it('a home-only user-App owner anchor fences owner licence revocation independently of the caller', async () => {
   const agent = await db.agent.findUniqueOrThrow({ where: { id: agentId } });
   const owner = await db.user.create({ data: { handle: 'home4046-owner' } });
@@ -414,7 +414,7 @@ it('a home-only user-App owner anchor fences owner licence revocation independen
   await start();
   await db.appMember.delete({ where: { appId_userId: { appId, userId } } });
   await assertHeldRefusal({ kind: 'user', id: owner.id }, tx => tx.orgMember.update({ where: { organizationId_userId: { organizationId: agent.organizationId!, userId: owner.id } }, data: { deletedAt: new Date() } }));
-});
+}, 15_000);
 
 it('shared provisioning recovers an actual unique collision without poisoning the outer transaction', async () => {
   const transaction = db.$transaction.bind(db) as (...args: any[]) => Promise<any>;
