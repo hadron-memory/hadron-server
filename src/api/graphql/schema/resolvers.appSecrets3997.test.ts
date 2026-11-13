@@ -371,6 +371,8 @@ describe('App secrets S2 public acceptance', () => {
     const inv = readFileSync(new URL('../../../../prisma/secret-versions-invariants.sql', import.meta.url), 'utf8');
     const mig = readFileSync(new URL('../../../../prisma/migrations/20261114120000_app_secret_versions/migration.sql', import.meta.url), 'utf8');
     expect(mig).toContain(inv);
+    // `prisma migrate diff` prints an update banner after its script; pasting stdout once put it in this file and the migration failed to apply.
+    expect(mig).not.toMatch(/[┌│└─]|Update available/);
     expect(readFileSync(new URL('../../../../prisma/post-push.sql', import.meta.url), 'utf8')).toContain('\\ir secret-versions-invariants.sql');
   });
 });

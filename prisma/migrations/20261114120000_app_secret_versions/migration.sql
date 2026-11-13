@@ -70,16 +70,6 @@ ALTER TABLE "secret_versions" ADD CONSTRAINT "secret_versions_secret_id_fkey" FO
 
 -- AddForeignKey
 ALTER TABLE "secret_versions" ADD CONSTRAINT "secret_versions_app_id_key_version_fkey" FOREIGN KEY ("app_id", "key_version") REFERENCES "secret_app_keys"("app_id", "key_version") ON DELETE RESTRICT ON UPDATE CASCADE;
-┌─────────────────────────────────────────────────────────┐
-│  Update available 6.19.2 -> 8.0.0-rc.33                 │
-│                                                         │
-│  This is a major update - please follow the guide at    │
-│  https://pris.ly/d/major-version-upgrade                │
-│                                                         │
-│  Run the following to update                            │
-│    npm i --save-dev prisma@latest                       │
-│    npm i @prisma/client@latest                          │
-└─────────────────────────────────────────────────────────┘
 
 
 -- #3997 (S2 of #3991) — App-owned secrets: the widened owner CHECK, the value/owner pairing, versions bound to their
