@@ -93,10 +93,6 @@ beforeEach(async () => {
   } });
   // An App end user: a member of the App, NOT of the org.
   await db.appMember.create({ data: { appId: app.id, userId: endUser.id, role: 'member' } });
-  // #4046: this App end-user control reaches a retained App home, not a standalone definition.
-  await db.memory.create({ data: { name: 'End-user home', urn: `${orgA.urn}:end-user-home`,
-    class: 'personal', userId: endUser.id, createdBy: endUser.id,
-    userMemoryOfAgentId: agent.id, appId: app.id, organizationId: orgA.id } });
   // #2712: chats are served the Agent's boot prompt; an Agent without one is refused.
   await serveEveryAgent(db);
 });

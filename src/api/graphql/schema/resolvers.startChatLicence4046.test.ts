@@ -248,3 +248,22 @@ for (const route of ['app', 'manager'] as const) {
     } finally { spy.mockRestore(); }
   });
 }
+
+it('cold AppMember outside the Agent org starts in that live licensed App', async () => {
+  await db.orgMember.deleteMany({ where: { userId } });
+  const started = await start();
+  const root = await chatNodeByLocOrThrow(db, started.chatId);
+  expect((await db.memory.findUniqueOrThrow({ where: { id: root.memoryId } })).appId).toBe(appId);
+});
+it('an org READER without App membership is not an App participant', async () => {
+  await db.orgMember.updateMany({ where: { userId }, data: { role: 'READER' } });
+  await db.appMember.deleteMany({ where: { userId } });
+  await refusedStart();
+});
+it('an org CONTRIBUTOR without an AppMember row uses the licensed org App', async () => {
+  await db.orgMember.updateMany({ where: { userId }, data: { role: 'CONTRIBUTOR' } });
+  await db.appMember.deleteMany({ where: { userId } });
+  const started = await start();
+  const root = await chatNodeByLocOrThrow(db, started.chatId);
+  expect((await db.memory.findUniqueOrThrow({ where: { id: root.memoryId } })).appId).toBe(appId);
+});
