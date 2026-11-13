@@ -46,7 +46,7 @@ export function validEngineValue(key: string, value: unknown): boolean {
         && (!Object.hasOwn(e.trigger,'content') || (e.trigger as Record<string,unknown>).content === undefined || typeof (e.trigger as Record<string,unknown>).content === 'string')));
     return typeof e.description === 'string' && typeof e.createdBy === 'string' && ['ASSISTANT','USER'].includes(e.createdBy)
       && typeof e.status === 'string' && ['ACTIVE','COMPLETED','ABANDONED'].includes(e.status) && time(e.createdAt)
-      && strings(['language','topicUrn','conversationUrn','nodeUrn','edgeUrn'])
+      && strings(['language','topicUrn','conversationUrn','nodeUrn','edgeUrn','detourTo'])
       && (!Object.hasOwn(e,'completedAt') || time(e.completedAt));
   });
 }
