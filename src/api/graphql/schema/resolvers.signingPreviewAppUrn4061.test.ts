@@ -59,18 +59,25 @@ describe('#4061 signing preview appUrn', () => {
     expect(rows.find((r: any) => r.workerId === workerId).workerUrn).toBe(`hrn:worker:${servingRoot}:team-slug:worker-slug-2`);
   });
 
-  it('emits the same bytes over GraphQL, and the appUrn spelling stays outside the digest and the row order', async () => {
-    const canonical = await preview();
-    const digest = signingPreviewDigest(canonical.rows);
-    const order = canonical.rows.map((r: any) => `${r.appId}/${r.agentId}/${r.workerId}`);
+  it('emits the same bytes over GraphQL', async () => {
     await db.app.update({ where: { id: appId }, data: { urn: `${servingRoot}::team-slug` } });
-    const legacy = await preview();
-    expect(legacy.rows.map((r: any) => `${r.appId}/${r.agentId}/${r.workerId}`)).toEqual(order);
-    expect(signingPreviewDigest(legacy.rows)).toBe(digest);
     const result = await api.executeOperation({ query: `query($org:ID!){orgBootPromptSigningPreview(org:$org){rows{appUrn}}}`, variables: { org: orgId } }, { contextValue: context() });
     if (result.body.kind !== 'single') throw new Error('Unexpected incremental result');
     expect(result.body.singleResult.errors).toBeUndefined();
     expect((result.body.singleResult.data as any).orgBootPromptSigningPreview.rows).toEqual([{ appUrn: `hrn:app:${servingRoot}:team-slug` }, { appUrn: `hrn:app:${servingRoot}:team-slug` }]);
+  });
+
+  it('keeps appUrn out of the digest and the row order: previews whose appUrn differs (canonical, invalid stored form) digest identically', async () => {
+    const canonical = await preview();
+    const digest = signingPreviewDigest(canonical.rows);
+    const order = canonical.rows.map((r: any) => `${r.appId}/${r.agentId}/${r.workerId}`);
+    await db.app.update({ where: { id: appId }, data: { urn: 'invalid app address' } });
+    const invalid = await preview();
+    expect(invalid.rows.every((r: any) => r.appUrn === 'invalid app address')).toBe(true);
+    expect(canonical.rows.every((r: any) => r.appUrn === `hrn:app:${servingRoot}:team-slug`)).toBe(true);
+    expect(invalid.rows.map((r: any) => `${r.appId}/${r.agentId}/${r.workerId}`)).toEqual(order);
+    expect(signingPreviewDigest(invalid.rows)).toBe(digest);
+    expect(signingPreviewDigest(canonical.rows.map((r: any) => ({ ...r, appUrn: 'changed-app' })))).toBe(digest);
   });
 
   it('keeps the row non-null for an App whose stored form cannot emit (null semantics unchanged: raw stored value)', async () => {
