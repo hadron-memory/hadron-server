@@ -7,7 +7,7 @@
  *       --serve-role ROLE [--connect-role ROLE ...] --connection-limit N \
  *       (--db-settings-file FILE.json | --db-settings-from-env SOURCE_URL_VAR)
  *   pnpm ops:restore-with-rebase status NAME
- *   pnpm ops:restore-with-rebase teardown NAME --oid OID
+ *   pnpm ops:restore-with-rebase teardown NAME --oid OID --owner-role ROLE
  *
  * Connects with RESTORE_ADMIN_URL: the `restore_admin` login role on the maintenance database. It never prints a URL.
  *
@@ -39,7 +39,8 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { Client } from 'pg';
-import { rebaseEventKeys, type RebaseReport } from '../../src/lib/agentTasks/eventKeyRebase.js';
+import { clientConfig, connectionProfile, libpqEnv } from './connectionProfile.js';
+import { rebaseEventKeys, servingOrderDigest, type RebaseReport } from '../../src/lib/agentTasks/eventKeyRebase.js';
 
 const RUNTIME_ROLE_SQL = fileURLToPath(new URL('../../prisma/runtime-role.sql', import.meta.url));
 const AUDIT_SCHEMA = 'hadron_restore';
@@ -47,7 +48,7 @@ const AUDIT_SCHEMA = 'hadron_restore';
 const WORKING_CONNECTION_LIMIT = 4;
 
 /** Points where a test injects a failure. The CLI never sets one. */
-export type FaultPoint = 'S3' | 'S4' | 'final-verify' | 'pre-release' | 'release-reply';
+export type FaultPoint = 'S1-reply' | 'S3' | 'S4' | 'final-verify' | 'pre-release' | 'release-reply';
 
 export interface RunOptions {
   /** restore_admin on the maintenance database. */
@@ -85,20 +86,23 @@ export class RestoreError extends Error {
     readonly stage: string,
     message: string,
     readonly teardown: TeardownOutcome | null = null,
+    readonly oid: number | null = null,
   ) {
-    super(`[${stage}] ${message}${teardown ? ` (teardown: ${teardown})` : ''}`);
+    super(`[${stage}] ${message}${teardown ? ` (teardown: ${teardown}${oid != null ? `, oid ${oid}` : ''})` : ''}`);
   }
 }
 
 export type DatabaseStatus = 'ABSENT' | 'FENCED' | 'WORKING' | 'RELEASED';
-export type TeardownOutcome = 'absent' | 'dropped' | 'released-kept' | 'name-mismatch' | 'drop-failed';
+export type TeardownOutcome = 'absent' | 'dropped' | 'released-kept' | 'name-mismatch' | 'drop-failed' | 'uncertain';
 
 const q = (c: Client, id: string) => c.escapeIdentifier(id);
 
+/** A session from the same validated profile the pg_restore child gets (connectionProfile.ts). */
 async function connect(url: string, database?: string): Promise<Client> {
-  const u = new URL(url);
-  if (database) u.pathname = `/${encodeURIComponent(database)}`;
-  const c = new Client({ connectionString: u.toString(), application_name: 'restore-with-rebase' });
+  const c = new Client(clientConfig(connectionProfile(url, database)));
+  // An idle session that dies (a terminated backend, a dropped link) surfaces on its next query; without a listener the
+  // 'error' event would crash the process before the pipeline can reconcile or tear down.
+  c.on('error', () => undefined);
   await c.connect();
   return c;
 }
@@ -124,20 +128,6 @@ function run(cmd: string, args: string[], env: NodeJS.ProcessEnv): Promise<{ cod
     p.on('error', reject);
     p.on('close', (code) => resolve({ code: code ?? -1, stdout, stderr }));
   });
-}
-
-/** libpq environment for a child process, from a URL, so no URL appears on a command line. */
-function pgEnv(url: string, database: string): NodeJS.ProcessEnv {
-  const u = new URL(url);
-  return {
-    ...process.env,
-    PGHOST: decodeURIComponent(u.hostname),
-    PGPORT: u.port || '5432',
-    PGUSER: decodeURIComponent(u.username),
-    PGPASSWORD: decodeURIComponent(u.password),
-    PGDATABASE: database,
-    PGSSLMODE: u.searchParams.get('sslmode') ?? process.env.PGSSLMODE ?? 'prefer',
-  };
 }
 
 /** Extension names a `pg_restore -l` TOC declares (EXTENSION and COMMENT ... EXTENSION entries). */
@@ -259,6 +249,45 @@ export async function teardown(adminUrl: string, name: string, oid: number, owne
   }
 }
 
+/** Test support for the S1-reply fault: end a session from another connection, so its next query really fails. */
+async function terminateBackend(adminUrl: string, pid: number): Promise<void> {
+  const c = await connect(adminUrl);
+  try {
+    await c.query('SELECT pg_terminate_backend($1, 5000)', [pid]);
+  } finally {
+    await c.end();
+  }
+}
+
+/**
+ * After a failed or unanswered CREATE DATABASE, from a fresh connection: is the target there, and is it provably this
+ * run's? Provably = every attribute the CREATE set (owner, admission off, the working connection limit, the default
+ * ACL) and its row's creating xid at or above `before`, the xmax read just before the CREATE (S0 saw the name absent).
+ * A database that fails any of these is reported, never dropped. Named residual: a same-named database made in that
+ * window by another CREATEDB role with the same four attributes would be taken for this run's.
+ */
+export async function reconcileCreate(
+  adminUrl: string,
+  name: string,
+  ownerRole: string,
+  before: string,
+): Promise<'absent' | { oid: number; mine: boolean }> {
+  const c = await connect(adminUrl);
+  try {
+    const r = await c.query<{ oid: number; mine: boolean }>(
+      `SELECT d.oid::int AS oid,
+              (d.datdba = $2::regrole AND NOT d.datallowconn AND d.datconnlimit = $3 AND d.datacl IS NULL
+               AND pg_snapshot_xmax(pg_current_snapshot())::text::numeric - age(d.xmin) >= $4::numeric) AS mine
+         FROM pg_database d WHERE d.datname = $1`,
+      [name, ownerRole, WORKING_CONNECTION_LIMIT, before],
+    );
+    if (r.rowCount === 0) return 'absent';
+    return { oid: r.rows[0].oid, mine: r.rows[0].mine === true };
+  } finally {
+    await c.end();
+  }
+}
+
 /** runtime-role.sql's psql wrapper, for execution over an already-open connection (the hard fence admits no new one). */
 export function runtimeRoleSqlFor(serveRole: string, quoteLiteral: (s: string) => string, path = RUNTIME_ROLE_SQL): string {
   const lines = readFileSync(path, 'utf8')
@@ -290,6 +319,11 @@ export async function restoreWithRebase(opts: RunOptions): Promise<RunResult> {
   if (!Number.isSafeInteger(opts.connectionLimit) || opts.connectionLimit < 1) {
     throw new RestoreError(stage0, 'connection limit must be a positive integer');
   }
+  try {
+    connectionProfile(opts.adminUrl);
+  } catch (err) {
+    throw new RestoreError(stage0, err instanceof Error ? err.message : String(err));
+  }
   const dumpSha256 = await sha256File(opts.dump);
   await log({ runId, stage: stage0, event: 'dump', sha256: dumpSha256 });
 
@@ -310,7 +344,7 @@ export async function restoreWithRebase(opts: RunOptions): Promise<RunResult> {
       outcome = await teardown(opts.adminUrl, opts.target, oid, opts.ownerRole).catch(() => 'drop-failed' as const);
     }
     await log({ runId, stage, event: 'failed', message, teardown: outcome });
-    throw new RestoreError(stage, message, outcome);
+    throw new RestoreError(stage, message, outcome, oid);
   };
 
   try {
@@ -380,16 +414,37 @@ export async function restoreWithRebase(opts: RunOptions): Promise<RunResult> {
     await log({ runId, stage: stage0, event: 'ok', extensions: [...dumpExtensions].sort() });
 
     // ── S1: create, admission off ─────────────────────────────────────────────
+    // Every xid taken from here on is >= before: the window the reconcile below accepts for this run's CREATE.
+    const before = (await maint.query<{ x: string }>('SELECT pg_snapshot_xmax(pg_current_snapshot())::text AS x')).rows[0].x;
     try {
       await maint.query(
         `CREATE DATABASE ${q(maint, opts.target)} OWNER ${q(maint, opts.ownerRole)} TEMPLATE ${q(maint, opts.template)}
            ALLOW_CONNECTIONS false CONNECTION LIMIT ${WORKING_CONNECTION_LIMIT}`,
       );
+      if (opts.fault === 'S1-reply') await terminateBackend(opts.adminUrl, maint.processID as number);
+      oid = (await maint.query<{ oid: number }>('SELECT oid::int AS oid FROM pg_database WHERE datname = $1', [opts.target])).rows[0].oid;
     } catch (err) {
-      // Nothing was created by us (CREATE DATABASE is atomic), so there is nothing to tear down.
-      throw new RestoreError('S1', err instanceof Error ? err.message : String(err));
+      // An error does not prove nothing was created: the CREATE can commit and its reply be lost, or the oid lookup can
+      // fail after it. Re-read the catalog from a fresh connection; tear down only what is provably this run's.
+      const message = err instanceof Error ? err.message : String(err);
+      const found = await reconcileCreate(opts.adminUrl, opts.target, opts.ownerRole, before).catch(() => 'unknown' as const);
+      if (found === 'absent') {
+        await log({ runId, stage: 'S1', event: 'failed', message, teardown: 'absent' });
+        throw new RestoreError('S1', `${message}; ${opts.target} does not exist`, 'absent');
+      }
+      if (found === 'unknown' || found.mine === false) {
+        const at = found === 'unknown' ? 'the catalog could not be re-read' : `${opts.target} exists (oid ${found.oid}) but is not provably this run's`;
+        await log({ runId, stage: 'S1', event: 'failed', message, teardown: 'uncertain' });
+        throw new RestoreError(
+          'S1',
+          `${message}; CREATE DATABASE outcome uncertain: ${at}; inspect it, then teardown NAME --oid OID`,
+          'uncertain',
+          found === 'unknown' ? null : found.oid,
+        );
+      }
+      oid = found.oid;
+      return await tear('S1', err);
     }
-    oid = (await maint.query<{ oid: number }>('SELECT oid::int AS oid FROM pg_database WHERE datname = $1', [opts.target])).rows[0].oid;
     await log({ runId, stage: 'S1', event: 'created', oid });
 
     // ── S2: ACL fence, then admission for the working phase ───────────────────
@@ -430,7 +485,7 @@ export async function restoreWithRebase(opts: RunOptions): Promise<RunResult> {
         const restore = await run(
           pgRestore,
           [`--role=${opts.ownerRole}`, '--no-owner', '--no-privileges', '--exit-on-error', '-L', list, '-d', opts.target, opts.dump],
-          pgEnv(opts.adminUrl, opts.target),
+          libpqEnv(connectionProfile(opts.adminUrl, opts.target)),
         );
         if (restore.code !== 0) throw new Error(`pg_restore exited ${restore.code}: ${restore.stderr.trim().split('\n').slice(-1)[0] ?? ''}`);
       } finally {
@@ -550,13 +605,22 @@ export async function restoreWithRebase(opts: RunOptions): Promise<RunResult> {
   }
 }
 
-/** md5 of the event ids in serving order (only meaningful when the key column exists). */
+/**
+ * The serving order's streamed digest (`servingOrderDigest`), read in its own read-only repeatable-read transaction:
+ * bounded memory and no single-value limit at any history size (blind finding F3 on #4116). Only meaningful when the
+ * key column exists.
+ */
 async function eventOrderHash(c: Client, state: string): Promise<string> {
   if (state === 'no-event-table' || state === 'no-key-column') return '';
-  const r = await c.query<{ h: string | null }>(
-    `SELECT md5(string_agg(id, ',' ORDER BY tx_id, created_at, id)) AS h FROM agent_team_events`,
-  );
-  return r.rows[0].h ?? '';
+  await c.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+  try {
+    const d = await servingOrderDigest(c);
+    await c.query('COMMIT');
+    return `${d.rows}:${d.sha256}`;
+  } catch (err) {
+    await c.query('ROLLBACK').catch(() => undefined);
+    throw err;
+  }
 }
 
 /** Order, keys, ownership and grants, verified on the open session under the hard fence. */

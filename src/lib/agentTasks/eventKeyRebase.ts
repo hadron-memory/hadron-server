@@ -15,6 +15,7 @@
  * It is ONLY run by `scripts/ops/restore-with-rebase` against a new, fenced database (contract section B). It is not a
  * repair for a serving database.
  */
+import { createHash, randomBytes } from 'node:crypto';
 import type { ClientBase } from 'pg';
 
 /** The table states of contract section A, each with its write behaviour. */
@@ -116,20 +117,53 @@ async function assertWriterExcluded(client: ClientBase): Promise<void> {
   }
 }
 
+/** Rows per FETCH of a digest cursor: the most rows a digest holds in memory at once. */
+export const DIGEST_BATCH = 10_000;
+
+/** The digest of a query's rows, in its own order, and how many there were. */
+export interface RowDigest {
+  sha256: string;
+  rows: number;
+}
+
+/**
+ * sha256 over every row of `query`, in the query's order, streamed through a cursor `batch` rows at a time (#4111,
+ * blind finding F3 on #4116): no aggregate builds one value out of the whole table (a text value is capped at 1 GB) and
+ * no list of the whole table is held in memory. Each row is hashed as its JSON array of column values plus a newline, so
+ * the encoding is unambiguous. Select text columns only, so the values do not depend on type parsers. Must run inside a
+ * transaction (a cursor without HOLD lives only there); the caller's isolation decides what the rows are a snapshot of.
+ */
+export async function streamDigest(client: ClientBase, query: string, batch = DIGEST_BATCH): Promise<RowDigest> {
+  if (!Number.isSafeInteger(batch) || batch < 1) throw new Error('digest batch must be a positive integer');
+  const cursor = `digest_${randomBytes(6).toString('hex')}`;
+  await client.query(`DECLARE ${cursor} NO SCROLL CURSOR FOR ${query}`);
+  const h = createHash('sha256');
+  let rows = 0;
+  try {
+    for (;;) {
+      const page = await client.query<unknown[]>({ text: `FETCH FORWARD ${batch} FROM ${cursor}`, rowMode: 'array' });
+      for (const row of page.rows) h.update(`${JSON.stringify(row)}\n`);
+      rows += page.rows.length;
+      if (page.rows.length < batch) break;
+    }
+  } finally {
+    // After an error the transaction is aborted and CLOSE fails too; the caller's ROLLBACK closes the cursor.
+    await client.query(`CLOSE ${cursor}`).catch(() => undefined);
+  }
+  return { sha256: h.digest('hex'), rows };
+}
+
 /**
  * Every column of every row except `tx_id`, as each column's own text output (exact: numeric scale, timestamp
- * microseconds, jsonb's stored form), keyed by id. The column list is read from the catalog, so a column added later
- * is covered without editing this.
+ * microseconds, jsonb's stored form), in id order, as one streamed digest. The column list is read from the catalog,
+ * so a column added later is covered without editing this.
  */
-async function rowImages(client: ClientBase): Promise<Map<string, string>> {
+async function rowImages(client: ClientBase): Promise<RowDigest> {
   const cols = await client.query<{ cols: string }>(
     `SELECT string_agg(quote_ident(attname), ', ' ORDER BY attnum) AS cols FROM pg_attribute
       WHERE attrelid = '${EVENT_TABLE}'::regclass AND attnum > 0 AND NOT attisdropped AND attname <> 'tx_id'`,
   );
-  const res = await client.query<{ id: string; img: string }>(
-    `SELECT id, ROW(${cols.rows[0].cols})::text AS img FROM ${EVENT_TABLE}`,
-  );
-  return new Map(res.rows.map((r) => [r.id, r.img]));
+  return streamDigest(client, `SELECT id::text, ROW(${cols.rows[0].cols})::text FROM ${EVENT_TABLE} ORDER BY id`);
 }
 
 /**
@@ -145,7 +179,7 @@ async function rowImages(client: ClientBase): Promise<Map<string, string>> {
  *    be in its starting state and only this one `D`; after the re-enable every trigger must be in its starting state,
  *    this one `O`.
  *  - T1: every other column of every row is byte-identical (as text output) to the image taken under the lock before
- *    the disable; no row appears or disappears.
+ *    the disable; no row appears or disappears. Compared as streamed digests (`streamDigest`), so memory stays bounded.
  *
  * Owner-only (T4): `ALTER TABLE ... DISABLE TRIGGER` needs table ownership; this adds no grant or definer function.
  */
@@ -179,13 +213,11 @@ export async function withAppendOnlyTriggerOff<T>(
     throw new RebaseVerificationError('trigger state after the rebase differs from its start');
   }
   const after = await rowImages(client);
-  if (after.size !== images.size) {
-    throw new RebaseVerificationError(`row count changed while the trigger was off: ${images.size} -> ${after.size}`);
+  if (after.rows !== images.rows) {
+    throw new RebaseVerificationError(`row count changed while the trigger was off: ${images.rows} -> ${after.rows}`);
   }
-  for (const [id, img] of images) {
-    if (after.get(id) !== img) {
-      throw new RebaseVerificationError(`a column other than tx_id changed on event ${id}`);
-    }
+  if (after.sha256 !== images.sha256) {
+    throw new RebaseVerificationError('a column other than tx_id changed while the trigger was off');
   }
   return result;
 }
@@ -210,10 +242,9 @@ const RUNS_SQL = `
            OVER (ORDER BY tx_id, created_at, id ROWS UNBOUNDED PRECEDING) AS run
     FROM ordered`;
 
-/** The serving order as an id list. The verification compares the before and after lists element by element. */
-async function servingOrder(client: ClientBase): Promise<string[]> {
-  const res = await client.query<{ id: string }>(`SELECT id FROM ${EVENT_TABLE} ORDER BY tx_id, created_at, id`);
-  return res.rows.map((r) => r.id);
+/** The serving order S as a streamed digest of the id sequence. Equal digests and counts = the same order. */
+export async function servingOrderDigest(client: ClientBase, batch = DIGEST_BATCH): Promise<RowDigest> {
+  return streamDigest(client, `SELECT id::text FROM ${EVENT_TABLE} ORDER BY tx_id, created_at, id`, batch);
 }
 
 /**
@@ -225,7 +256,7 @@ async function servingOrder(client: ClientBase): Promise<string[]> {
  *  2. In its own statement: `X0 = pg_snapshot_xmax(pg_current_snapshot())`, asserting this transaction has no xid yet.
  *     Every xid any session takes later is `>= X0`. Then `LOCK ... IN ACCESS EXCLUSIVE MODE` (no reader either).
  *  3. Classify (empty / zero-only / local-only / rebase), count the runs K, refuse `K > X0 - 3` with zero writes.
- *  4. Snapshot the serving order, then `UPDATE ... WHERE tx_id IS DISTINCT FROM new` inside
+ *  4. Digest the serving order (streamed, bounded memory), then `UPDATE ... WHERE tx_id IS DISTINCT FROM new` inside
  *     `withAppendOnlyTriggerOff` (contract A2, T1-T3: only the key moves, one writer-excluding transaction, exactly
  *     that one trigger).
  *  5. Verify before COMMIT: row count unchanged, serving order identical to the snapshot, `max(tx_id) = K + 2`,
@@ -295,7 +326,7 @@ export async function rebaseEventKeys(client: ClientBase, opts: RebaseOptions = 
     const runs = Number(k.rows[0].runs);
     if (BigInt(runs) > capacity) throw new RebaseHeadroomError(runs, capacity);
 
-    const before = await servingOrder(client);
+    const before = await servingOrderDigest(client);
 
     const upd = await withAppendOnlyTriggerOff(
       client,
@@ -310,15 +341,11 @@ export async function rebaseEventKeys(client: ClientBase, opts: RebaseOptions = 
       opts.whileTriggerOff,
     );
 
-    const after = await servingOrder(client);
-    if (after.length !== before.length || after.length !== rows) {
-      throw new RebaseVerificationError(`row count changed: ${before.length} -> ${after.length}`);
+    const after = await servingOrderDigest(client);
+    if (after.rows !== before.rows || after.rows !== rows) {
+      throw new RebaseVerificationError(`row count changed: ${before.rows} -> ${after.rows}`);
     }
-    for (let i = 0; i < before.length; i++) {
-      if (before[i] !== after[i]) {
-        throw new RebaseVerificationError(`serving order changed at position ${i + 1}`);
-      }
-    }
+    if (after.sha256 !== before.sha256) throw new RebaseVerificationError('serving order changed');
     const post = await client.query<{ max: string; nulls: string; high: string; trig: string | null }>(
       `SELECT (SELECT max(tx_id)::text FROM ${EVENT_TABLE}) AS max,
               (SELECT count(*)::text FROM ${EVENT_TABLE} WHERE tx_id IS NULL) AS nulls,

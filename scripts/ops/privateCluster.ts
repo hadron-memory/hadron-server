@@ -48,6 +48,11 @@ export interface PrivateCluster {
   start(): void;
   /** Stop, set the next xid with pg_resetwal -x, start again. Throwaway clusters only. */
   setNextXid(xid: bigint): void;
+  /**
+   * Turn on TLS with a throwaway CA (server certificate for 127.0.0.1) and require certificate authentication for
+   * `certUser` over TLS. Returns the CA and a client certificate/key for that user, as files.
+   */
+  enableTls(certUser: string): { ca: string; cert: string; key: string };
   destroy(): void;
 }
 
@@ -89,6 +94,27 @@ export async function startPrivateCluster(name: string): Promise<PrivateCluster>
       if (!existsSync(clog)) writeFileSync(clog, Buffer.alloc(256 * 1024));
       else if (statSync(clog).size < 256 * 1024) truncateSync(clog, 256 * 1024);
       ctl('start');
+    },
+    enableTls(certUser: string) {
+      const tls = join(dir, 'tls');
+      execFileSync('mkdir', ['-p', tls]);
+      const ssl = (...args: string[]) => execFileSync('openssl', args, { cwd: tls, stdio: 'pipe' });
+      ssl('req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '2', '-subj', '/CN=restore-4111-test-ca', '-keyout', 'ca.key', '-out', 'ca.crt');
+      writeFileSync(join(tls, 'san.ext'), 'subjectAltName=IP:127.0.0.1\n');
+      ssl('req', '-newkey', 'rsa:2048', '-nodes', '-subj', '/CN=127.0.0.1', '-keyout', 'server.key', '-out', 'server.csr');
+      ssl('x509', '-req', '-in', 'server.csr', '-CA', 'ca.crt', '-CAkey', 'ca.key', '-CAcreateserial', '-days', '2', '-extfile', 'san.ext', '-out', 'server.crt');
+      ssl('req', '-newkey', 'rsa:2048', '-nodes', '-subj', `/CN=${certUser}`, '-keyout', 'client.key', '-out', 'client.csr');
+      ssl('x509', '-req', '-in', 'client.csr', '-CA', 'ca.crt', '-CAkey', 'ca.key', '-CAcreateserial', '-days', '2', '-out', 'client.crt');
+      execFileSync('chmod', ['600', join(tls, 'server.key'), join(tls, 'client.key')]);
+      appendFileSync(
+        join(data, 'postgresql.conf'),
+        `\nssl = on\nssl_cert_file = '${join(tls, 'server.crt')}'\nssl_key_file = '${join(tls, 'server.key')}'\nssl_ca_file = '${join(tls, 'ca.crt')}'\n`,
+      );
+      const hba = join(data, 'pg_hba.conf');
+      const rest = execFileSync('cat', [hba]).toString();
+      writeFileSync(hba, `hostssl all ${certUser} 127.0.0.1/32 cert\nhost all ${certUser} 127.0.0.1/32 reject\n${rest}`);
+      ctl('reload');
+      return { ca: join(tls, 'ca.crt'), cert: join(tls, 'client.crt'), key: join(tls, 'client.key') };
     },
     destroy() {
       try {

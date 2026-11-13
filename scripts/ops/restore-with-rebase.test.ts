@@ -427,4 +427,79 @@ describe.skipIf(!enabled)('#4111 restore-with-rebase on private clusters', { tim
     expect(await triggers()).toEqual(start);
     expect(start).toContainEqual({ n: 'agent_team_event_append_only', e: 'O' });
   });
+
+  // Blind finding F1 on #4116: an error from CREATE DATABASE does not prove nothing was created.
+  it('F1: the CREATE commits and the session dies before the oid is read: re-read from a fresh connection, torn down', async () => {
+    const target = fresh();
+    const events: Record<string, unknown>[] = [];
+    const err = await restoreWithRebase(base({ target, fault: 'S1-reply', log: (e) => void events.push(e) })).catch((e) => e);
+    expect(err).toBeInstanceOf(RestoreError);
+    expect(err.stage).toBe('S1');
+    expect(err.teardown).toBe('dropped');
+    expect(err.oid).toEqual(expect.any(Number));
+    expect(err.message).toMatch(/terminat|connection/i);
+    expect(await dbExists(target)).toBe(false);
+    expect(events.some((e) => e.event === 'created')).toBe(false);
+  });
+
+  it('F1: a same-named database another role made before the CREATE is reported as uncertain and never dropped', async () => {
+    const target = fresh();
+    const err = await restoreWithRebase(
+      base({
+        target,
+        // After S0 saw the name free, before S1's CREATE: a superuser makes the name, owned by someone else.
+        log: async (e) => {
+          if (e.stage === 'S0' && e.event === 'ok') await F.sql(B.url(), `CREATE DATABASE ${target}`);
+        },
+      }),
+    ).catch((e) => e);
+    expect(err).toBeInstanceOf(RestoreError);
+    expect(err.stage).toBe('S1');
+    expect(err.teardown).toBe('uncertain');
+    expect(err.message).toMatch(/already exists.*not provably this run's/s);
+    expect(await dbExists(target)).toBe(true);
+    await F.sql(B.url(), `DROP DATABASE ${target}`);
+  });
+
+  it('F1: a same-shaped database made by the owner itself before the window opens is still not taken for this run', async () => {
+    // Same owner, admission off, the working limit, default ACL: only the creating xid tells it apart.
+    const target = fresh();
+    await F.sql(B.url(), `CREATE DATABASE ${target} OWNER ${F.ROLES.owner} TEMPLATE ${F.TEMPLATE} ALLOW_CONNECTIONS false CONNECTION LIMIT 4`);
+    const { reconcileCreate } = await import('./restore-with-rebase.js');
+    const [{ x }] = await F.sql(B.url(), 'SELECT pg_snapshot_xmax(pg_current_snapshot())::text AS x');
+    expect(await reconcileCreate(F.adminUrl(B), target, F.ROLES.owner, x)).toEqual({ oid: expect.any(Number), mine: false });
+    expect(await reconcileCreate(F.adminUrl(B), `${target}_absent`, F.ROLES.owner, x)).toBe('absent');
+    await F.sql(B.url(), `DROP DATABASE ${target}`);
+  });
+
+  // Blind finding F2 on #4116: pg_restore gets the same TLS settings as the pipeline's own sessions.
+  it('F2: a restore whose admin connection needs a client certificate succeeds end to end (pg_restore included)', async () => {
+    const tlsRole = 'restore_tls';
+    await F.sql(B.url(), `CREATE ROLE ${tlsRole} LOGIN CREATEDB`);
+    await F.sql(B.url(), `GRANT ${F.ROLES.owner} TO ${tlsRole} WITH INHERIT FALSE, SET TRUE`);
+    const files = B.enableTls(tlsRole);
+    const url =
+      `postgresql://${tlsRole}@127.0.0.1:${B.port}/postgres?sslmode=verify-full` +
+      `&sslrootcert=${encodeURIComponent(files.ca)}&sslcert=${encodeURIComponent(files.cert)}&sslkey=${encodeURIComponent(files.key)}`;
+    // The reload is asynchronous: wait until the certificate rule answers.
+    const { status: st } = await import('./restore-with-rebase.js');
+    for (let i = 0; ; i++) {
+      try {
+        await st(url, 'postgres');
+        break;
+      } catch (e) {
+        if (i > 50) throw e;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
+    // Without the certificate the role cannot connect at all, so pg_restore must have used it.
+    expect(await tryConnect(`postgresql://${tlsRole}@127.0.0.1:${B.port}/postgres?sslmode=verify-full&sslrootcert=${encodeURIComponent(files.ca)}`)).toBe(false);
+    expect(await tryConnect(`postgresql://${tlsRole}@127.0.0.1:${B.port}/postgres`)).toBe(false);
+    const target = fresh();
+    const res = await restoreWithRebase(base({ adminUrl: url, target }));
+    expect(res.status).toBe('RELEASED');
+    expect((await F.servingOrder(B.url(target))).map((r) => r.id)).toEqual(sourceOrder.map((r) => r.id));
+    const sessions = await F.sql(B.url(), `SELECT count(*)::int AS n FROM pg_stat_ssl s JOIN pg_stat_activity a USING (pid) WHERE a.usename = $1 AND NOT s.ssl`, [tlsRole]);
+    expect(sessions[0].n).toBe(0);
+  });
 });

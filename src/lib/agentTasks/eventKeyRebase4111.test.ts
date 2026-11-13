@@ -11,6 +11,7 @@
  * The headroom refusal (R6, `K > C`) needs a cluster whose xid counter is small; it lives with the pipeline suite on a
  * private cluster (scripts/ops/restore-with-rebase.test.ts).
  */
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Client } from 'pg';
@@ -23,6 +24,7 @@ import {
   ForeignEventKeyError,
   rebaseEventKeys,
   RebaseVerificationError,
+  streamDigest,
   withAppendOnlyTriggerOff,
 } from './eventKeyRebase.js';
 
@@ -548,6 +550,72 @@ describe('#4111 R12: the named-trigger exception (A2, T1-T5, L1)', { timeout: 60
       } finally {
         await w.end();
       }
+    });
+  });
+});
+
+// Blind finding F3 on #4116: the verification digests stream through a cursor, so no single value is built out of the
+// whole history (text caps at 1 GB) and no more than one batch of rows is in memory at once.
+describe('#4111 F3: streamed verification digest', () => {
+  const series = (n: number) => `SELECT s.v::text, md5(s.v::text) FROM generate_series(1, ${n}) s(v) ORDER BY s.v`;
+  const reference = (n: number) => {
+    const h = createHash('sha256');
+    for (let g = 1; g <= n; g++) h.update(`${JSON.stringify([String(g), createHash('md5').update(String(g)).digest('hex')])}\n`);
+    return h.digest('hex');
+  };
+  const inTx = <T>(fn: (pg: Client) => Promise<T>) =>
+    withPg(async (pg) => {
+      await pg.query('BEGIN');
+      try {
+        return await fn(pg);
+      } finally {
+        await pg.query('ROLLBACK');
+      }
+    });
+
+  it('the digest is independent of the batch size and equals the row-by-row reference', async () => {
+    const one = await inTx((pg) => streamDigest(pg, series(25), 1));
+    const seven = await inTx((pg) => streamDigest(pg, series(25), 7));
+    const all = await inTx((pg) => streamDigest(pg, series(25)));
+    expect(one).toEqual({ sha256: reference(25), rows: 25 });
+    expect(seven).toEqual(one);
+    expect(all).toEqual(one);
+    expect((await inTx((pg) => streamDigest(pg, series(0), 7))).rows).toBe(0);
+  });
+
+  it('a large history is read in bounded batches, never as one value', async () => {
+    const n = 300_000;
+    const batch = 4_096;
+    const fetched: number[] = [];
+    const d = await inTx(async (pg) => {
+      const query = pg.query.bind(pg) as (...a: any[]) => Promise<any>;
+      (pg as any).query = async (...a: any[]) => {
+        const r = await query(...a);
+        const text = typeof a[0] === 'string' ? a[0] : a[0]?.text;
+        if (typeof text === 'string' && text.startsWith('FETCH')) fetched.push(r.rows.length);
+        return r;
+      };
+      return streamDigest(pg, series(n), batch);
+    });
+    expect(d).toEqual({ sha256: reference(n), rows: n });
+    expect(Math.max(...fetched)).toBe(batch);
+    expect(fetched.length).toBe(Math.ceil(n / batch) + (n % batch === 0 ? 1 : 0));
+  });
+
+  it('one changed value anywhere in the stream changes the digest; one row fewer changes the count', async () => {
+    const base = await inTx((pg) => streamDigest(pg, series(50), 7));
+    const changed = await inTx((pg) =>
+      streamDigest(pg, `SELECT s.v::text, CASE WHEN s.v = 43 THEN 'x' ELSE md5(s.v::text) END FROM generate_series(1, 50) s(v) ORDER BY s.v`, 7),
+    );
+    const fewer = await inTx((pg) => streamDigest(pg, series(49), 7));
+    expect(changed.rows).toBe(50);
+    expect(changed.sha256).not.toBe(base.sha256);
+    expect(fewer.rows).toBe(49);
+  });
+
+  it('refuses outside a transaction (a cursor without HOLD needs one)', async () => {
+    await withPg(async (pg) => {
+      await expect(streamDigest(pg, series(3))).rejects.toThrow(/transaction/i);
     });
   });
 });
