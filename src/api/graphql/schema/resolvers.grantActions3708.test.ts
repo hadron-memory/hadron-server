@@ -192,7 +192,9 @@ describe('every refusal is the same empty page / null', () => {
       const l = await viaResolver(ctx, LIST, { a: w.appId });
       expect(l.errors, label).toBeUndefined();
       expect(l.data, label).toEqual(EMPTY);
-      expect(await viaResolver(ctx, ONE, { a: w.appId, r: name }), label).toMatchObject(nullOne);
+      const one = await viaResolver(ctx, ONE, { a: w.appId, r: name });
+      expect(one.errors, label).toBeUndefined();
+      expect(one, label).toMatchObject(nullOne);
     }
   });
 });
@@ -221,8 +223,12 @@ describe('the participation edges (#4131, BLIND F2/F3)', () => {
       if (a.body.kind !== 'single') throw new Error('incremental');
       return JSON.parse(JSON.stringify(a.body.singleResult));
     };
-    expect((await run(LIST, { a: w.appId })).data).toEqual(EMPTY);
-    expect(await run(ONE, { a: w.appId, r: name() })).toMatchObject(nullOne);
+    const bareList = await run(LIST, { a: w.appId });
+    expect(bareList.errors, 'bare worker list').toBeUndefined(); // a refusal, not a request that errored
+    expect(bareList.data).toEqual(EMPTY);
+    const bareOne = await run(ONE, { a: w.appId, r: name() });
+    expect(bareOne.errors, 'bare worker one').toBeUndefined();
+    expect(bareOne).toMatchObject(nullOne);
   });
 
   it('a member of a DIFFERENT org naming this App is refused; the same person reads their own org\'s App (control)', async () => {
@@ -249,6 +255,7 @@ describe('the participation edges (#4131, BLIND F2/F3)', () => {
       await db.orgMember.update({ where: membership, data: { deletedAt: null } }); // never leave the shared fixture revoked
     }
     expect((await post(personKey, null, LIST, { a: w.appId })).data.grantActions.total).toBe(PLATFORM_ACTIONS.length);
+    expect((await post(workerKey, workerSession, LIST, { a: w.appId })).data.grantActions.total).toBe(PLATFORM_ACTIONS.length);
   });
 });
 
