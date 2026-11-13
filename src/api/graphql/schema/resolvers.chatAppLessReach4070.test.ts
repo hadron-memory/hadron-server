@@ -86,7 +86,8 @@ async function observe<T>(run: () => Promise<T>) {
 }
 
 const respond = (ctx: Context, chatId: string, next_stage: string | null = null) =>
-  M.processChatResponse({}, { chatId, toolResponse: { message: 'done', next_stage } }, ctx);
+  // #4036: the on-complete rule fires only on an explicit completion, so a null next_stage carries goal_reached.
+  M.processChatResponse({}, { chatId, toolResponse: { message: 'done', next_stage, ...(next_stage === null ? { goal_reached: true } : {}) } }, ctx);
 const messages = (memoryId: string, chatId: string) =>
   db.node.count({ where: { memoryId, loc: { startsWith: `${chatId}:messages:` } } });
 const routeHistory = async (rootId: string) =>
@@ -102,7 +103,9 @@ describe('#4070 lost reach on an App-less home (no org membership)', () => {
       const seen = await observe<any>(() => respond(consumerCtx(), home.chatId));
       expect(seen.value).toMatchObject({ displayMessage: 'done', stageTransitioned: false, newStageName: null, conversationHandoff: null, chatEnded: false });
       expect(await messages(home.memoryId, home.chatId), 'the assistant turn stays recorded exactly once').toBe(msgs + 1);
-      expect(await routeHistory(home.rootId), 'no edge-derived route entry').toEqual(history);
+      // The model's own completion flag records COMPLETED/GOAL_REACHED (input-driven, #4036); no Agent-edge entry is added.
+      const added = (await routeHistory(home.rootId)).slice(history.length);
+      expect(added.map((e: any) => [e.action, e.trigger?.type]), 'only the input-driven completion entry, no edge-derived route entry').toEqual([['COMPLETED', 'GOAL_REACHED']]);
       expect(seen.systemReads, 'no system definition/config/rule read after lost reach').toEqual([]);
       expect(seen.edgeReads).toBe(0);
     });

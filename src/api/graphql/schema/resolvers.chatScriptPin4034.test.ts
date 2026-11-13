@@ -99,7 +99,7 @@ const startMain = () =>
   resolvers.Mutation.startChat({}, { agentId: agent.id, conversationName: 'main' }, userCtx());
 const finishStage = (chatId: string) =>
   resolvers.Mutation.processChatResponse(
-    {}, { chatId, toolResponse: { message: 'done', next_stage: null, onTrack: true } }, userCtx(),
+    {}, { chatId, toolResponse: { message: 'done', next_stage: null, goal_reached: true, onTrack: true } }, userCtx(),
   );
 
 describe('#4034 a pinned chat reads its script from the pinned revision', () => {
