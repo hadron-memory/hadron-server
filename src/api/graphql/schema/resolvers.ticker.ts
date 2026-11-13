@@ -825,7 +825,6 @@ type WakeSettingsRow = {
 function wakeSettingsOut(workerId: string, row: WakeSettingsRow | null) {
   return {
     workerId, mentions: row?.mentions ?? 'IMMEDIATE', pausedUntil: row?.pausedUntil ?? null,
-    isolatedUntil: null, isolatedAt: null,
   };
 }
 

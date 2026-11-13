@@ -18,7 +18,7 @@ import { endHeldGrants } from '../../../lib/grants/departure.js';
 import { grantManageMutations } from './resolvers.grantManage.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { upsertPlatformActions } from '../../../lib/grants/actions.js';
-import { DB_NOW, dropTestActions, insertGrant, insertGrantUnguarded, raw, seedWorld, type World } from '../../../lib/grants/grantFixtures3668.js';
+import { DB_NOW, dropTestActions, insertGrant, insertGrantUnguarded, raw, seedReadableNodes, seedWorld, type World } from '../../../lib/grants/grantFixtures3668.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -34,6 +34,7 @@ beforeAll(async () => {
 afterAll(async () => { await new Promise<void>((r) => http.close(() => r())); await cleanDb(db); await dropTestActions(); vi.unstubAllEnvs(); });
 
 let w: World;
+let pubNode: string; // #4067: a node the requester can read
 /** manager: org ADMIN (user2). member: contributor (user1, drives the worker). outsider: no membership. */
 let managerId: string; let memberId: string; let outsiderId: string;
 let managerKey: string; let memberKey: string; let outsiderKey: string;
@@ -68,7 +69,7 @@ const CREATE = `mutation($i:CreateGrantInput!){createGrant(input:$i){${GRANT}}}`
 const REVOKE = `mutation($r:ID!,$ins:ActInstructionInput){revokeGrant(ref:$r,instruction:$ins){${GRANT}}}`;
 const WITHDRAW = `mutation($r:ID!){withdrawGrant(ref:$r){${GRANT}}}`;
 const LIST = `query($a:String!){appGrants(appRef:$a){total items{${GRANT}}}}`;
-const entry = () => ({ entryNode: generateId() });
+const entry = () => ({ entryNode: pubNode });
 const mgrInput = (over: Record<string, unknown> = {}) => ({
   appRef: w.appId, action: 'schedule.create', values: entry(), holderKind: 'WORKER', holderRef: otherWorkerId, reason: 'nightly digest', ...over,
 });
@@ -89,6 +90,7 @@ async function active(over: Record<string, any> = {}): Promise<string> {
 beforeEach(async () => {
   await cleanDb(db);
   w = await seedWorld();
+  [pubNode] = await seedReadableNodes(w.orgId);
   await upsertPlatformActions(db);
   memberId = w.userId; managerId = w.user2Id;
   outsiderId = (await db.user.create({ data: { handle: `out-${generateId().slice(0, 6)}` } })).id;

@@ -55,6 +55,7 @@
  */
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { USERS_SUBKEY, parseExtractionField } from './chatExtraction.js';
+import { isAgentInstalledAndLicensed } from './appAgent.js';
 
 /** Per-person buckets on a multi-human host's `data` node, keyed by user id. */
 export const USERS_KEY = USERS_SUBKEY;
@@ -69,6 +70,8 @@ const RESERVED_KEYS: ReadonlySet<string> = new Set([USERS_KEY, MEMORY_WIDE_KEYS_
 export interface DataHostMemory {
   id: string;
   class: string;
+  /** The HOME App; null fails closed (no declared memory-wide fields). */
+  appId: string | null;
   sharedMemoryOfAgentId: string | null;
   userMemoryOfAgentId: string | null;
 }
@@ -76,6 +79,7 @@ export interface DataHostMemory {
 export const DATA_HOST_MEMORY_SELECT = {
   id: true,
   class: true,
+  appId: true,
   sharedMemoryOfAgentId: true,
   userMemoryOfAgentId: true,
 } as const;
@@ -99,11 +103,20 @@ export function isMultiHumanChatHost(memory: Pick<DataHostMemory, 'class'> | nul
  * ambiguous and stays personal. Both the write path and the read path use this
  * one function, so a value is never filed under one rule and read under
  * another.
+ *
+ * The declarations live in the Agent's definition, so they are read only while
+ * the memory's HOME App has that Agent installed and licensed (#4038 C1). A
+ * null App, an uninstall or a lapsed licence yields the empty set, for every
+ * caller alike (no manager arm). Stored flat values stay; only fields listed in
+ * `memoryWideKeys` keep reading for everyone.
  */
 export async function declaredMemoryWideFields(
   db: PrismaClient,
   memory: DataHostMemory,
 ): Promise<Set<string>> {
+  const agentId = memory.sharedMemoryOfAgentId ?? memory.userMemoryOfAgentId;
+  if (!agentId || !memory.appId) return new Set();
+  if (!(await isAgentInstalledAndLicensed(db, memory.appId, agentId))) return new Set();
   const systemMemoryId = await hostAgentSystemMemoryId(db, memory);
   if (!systemMemoryId) return new Set();
   const nodes = await db.node.findMany({

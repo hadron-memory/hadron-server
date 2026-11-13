@@ -137,6 +137,58 @@ describe('edge-conditions / evaluateEdgeCondition', () => {
     });
   });
 
+  // #4056 / V85: the FINAL result fires exactly when jsonLogic.truthy(result). `missing` / `missing_some` return an
+  // array, and JSONLogic's empty array is falsy; `and` / `or` hand their operand back raw, so `[]` can arrive
+  // at the final coercion. Only `[]` changes versus Boolean(result); validation and refusals are untouched.
+  describe('final-result truthiness (#4056, V85)', () => {
+    const mem = { a: 'x' };
+    const run = (condition: unknown, data: Record<string, unknown> = mem) =>
+      evaluateEdgeCondition(baseRequest({ condition, memoryLayers: [inMemoryLayer('edge', data)] }));
+    const M_A = { missing: ['memory.a'] };
+    const M_B = { missing: ['memory.b'] };
+    const rows: Array<[label: string, condition: unknown, fired: boolean]> = [
+      ['1 bare missing, field present ([])', M_A, false],
+      ['2 bare missing, field absent (["b"])', M_B, true],
+      ['3 missing_some, enough present ([])', { missing_some: [1, ['memory.a', 'memory.b']] }, false],
+      ['4 missing_some, too few present (["b"])', { missing_some: [2, ['memory.a', 'memory.b']] }, true],
+      ['5 and [true, missing-nothing]', { and: [true, M_A] }, false],
+      ['6 or [false, missing-nothing]', { or: [false, M_A] }, false],
+      ['8 and [missing-nothing, missing-something] (fixture-24 shape)', { and: [M_A, M_B] }, false],
+      ['9 not of missing-nothing', { '!': M_A }, true],
+      ['10 and [missing-b, missing-c] (last operand non-empty)', { and: [M_B, { missing: ['memory.c'] }] }, true],
+      ['11a final 0', 0, false],
+      ['11b final ""', '', false],
+      ['11c final null var (absent path)', { var: 'memory.z' }, false],
+      ['12a final "0"', '0', true],
+      ['12b final 1', 1, true],
+      ['13 final [0] (non-empty array)', [0], true],
+      ['14 final {} (empty object)', {}, true],
+      ['15 final [] literal', [], false],
+    ];
+    it.each(rows)('%s', async (_label, condition, fired) => {
+      expect(await run(condition)).toEqual({ ok: true, fired });
+    });
+    it('row 7 is moot: `if` is outside the v1 allowlist, so validation still refuses it (unchanged by V85)', async () => {
+      const r = await run({ if: [true, M_A, true] });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error.code).toBe('DISALLOWED_OPERATOR');
+    });
+    it('`!!` is outside the v1 allowlist: refused before evaluation, never read as truthiness (#4073)', async () => {
+      const r = await run({ '!!': [M_A] });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error.code).toBe('DISALLOWED_OPERATOR');
+    });
+    it('an absent condition still fires, and a validation refusal is still a refusal, never "does not fire"', async () => {
+      expect(await run(null)).toEqual({ ok: true, fired: true });
+      const bad = await run({ cat: ['a', 'b'] });
+      expect(bad.ok).toBe(false);
+    });
+    it('a failing (encrypted) memory layer still refuses rather than firing or not firing', async () => {
+      const r = await evaluateEdgeCondition(baseRequest({ condition: M_A, memoryLayers: [failingLayer('hadronmemory.com:secureid:u1')] }));
+      expect(r.ok).toBe(false);
+    });
+  });
+
   describe('arithmetic', () => {
     it('multiplication inside a comparison', async () => {
       const result = await evaluateEdgeCondition(baseRequest({

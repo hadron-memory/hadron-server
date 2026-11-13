@@ -596,7 +596,7 @@ export async function newestApprovedRevisionOf(
  * under that revision number only. `live` carries `memoryId` too: the unmetered pre-filter (`revisionsWithNoApprovalHash`)
  * needs it.
  */
-async function servableRevisionNumbers(
+export async function servableRevisionNumbers(
   db: Pick<PrismaClient, 'node' | 'nodeRevision' | 'memory'> | Prisma.TransactionClient,
   nodeId: string,
   cap: number,

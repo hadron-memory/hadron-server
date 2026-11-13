@@ -1903,11 +1903,11 @@ export const agentMutations = {
 
     testAiServiceConfig: async (
       _: unknown,
-      { id, override }: { id: string; override?: AiConfigTestOverride | null },
+      { id, override, chatProbe }: { id: string; override?: AiConfigTestOverride | null; chatProbe?: boolean | null },
       ctx: Context,
     ) => {
       try {
-        return await testAiServiceConfig(ctx, id, override ?? {});
+        return await testAiServiceConfig(ctx, id, override ?? {}, undefined, chatProbe === true);
       } catch (e) {
         rethrowAiConfigTyped(e);
       }

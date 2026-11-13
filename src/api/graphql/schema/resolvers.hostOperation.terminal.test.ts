@@ -470,8 +470,11 @@ describe('the SDL: results are references, not Worker objects (G1)', () => {
   });
   it('the report input has no free-text field', () => {
     const input = (schema.getType('WorkerTerminalReportInput') as any).getFields();
-    expect(Object.keys(input).sort()).toEqual(['checkedAt', 'lastTurnAt', 'prompt', 'reason', 'status', 'worker']);
+    // #4041: `repair` (a closed enum) and `attempt` (an Int) join; still no String field other than the worker ref.
+    expect(Object.keys(input).sort()).toEqual(['attempt', 'checkedAt', 'lastTurnAt', 'prompt', 'reason', 'repair', 'status', 'worker']);
     expect(String(input.reason.type)).toBe('WorkerTerminalReason');
+    expect(String(input.repair.type)).toBe('WorkerTerminalRepair');
+    expect(String(input.attempt.type)).toBe('Int');
   });
   it('Worker and TeamRosterEntry carry terminal; the mutation is declared', () => {
     expect(fields('Worker')).toContain('terminal');

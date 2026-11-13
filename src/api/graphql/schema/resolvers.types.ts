@@ -122,6 +122,7 @@ import { isSessionLive, loadLastEventBySession, sessionLapsesAt, sessionState, D
 import type { SessionType } from '../../../generated/prisma/index.js';
 import { hasBoundAppSession, strictSessionMemoryFilter } from '../../../lib/auth/sessionPrivacy.js';
 import { projectSessionEventsFor } from './resolvers.usageProjection.js';
+import { NODE_URN_FALLBACK_EVENT, nodeUrnFallbackEvent } from '../../../lib/nodeUrnDiagnostic.js';
 
 // Request-local only: a session list computes the event memory set once.
 type SessionEventMemorySet = { ids: string[]; delegatedMemoryId: string | null };
@@ -186,7 +187,13 @@ function sessionEventMemoryIds(ctx: Context, parentSessionId: string): Promise<s
  * that opens it are always the same string.
  */
 export async function resolveNodeUrnField(
-  n: { loc: string; memoryId: string; memory?: { urn?: string } | null },
+  n: {
+    loc: string;
+    memoryId: string;
+    memory?: { urn?: string } | null;
+    /** #3927: the node's own id, ONLY from a caller that already holds it (the Node fields). Diagnostics only. */
+    nodeId?: string | null;
+  },
   ctx: Context,
 ): Promise<string> {
   const memUrn =
@@ -199,7 +206,8 @@ export async function resolveNodeUrnField(
   try {
     return emitNodeUrnV2(memUrn, n.loc);
   } catch (err) {
-    console.warn(`[Node.urn] failed to emit v2 node urn for memory "${memUrn}":`, err);
+    // #3927: one closed-schema event; no raw memory urn, loc or exception text (see nodeUrnDiagnostic.ts).
+    console.warn(NODE_URN_FALLBACK_EVENT, nodeUrnFallbackEvent({ memoryId: n.memoryId, nodeId: n.nodeId, memUrn, loc: n.loc, err }));
     // Best-effort flat-v2 fallback (single colon, never throws). Do NOT run
     // the stored urn back through a canonicalizer here — it can itself throw
     // on the same malformed value, defeating the serve-and-log posture of
@@ -1380,20 +1388,20 @@ export const typeResolvers = {
     memory: (n: { memoryId: string }, _: unknown, ctx: Context) => loadReadableMemoryRecord(ctx, n.memoryId),
     // #481 — see resolveNodeUrnField.
     urn: (
-      n: { loc: string; memoryId: string; memory?: { urn?: string } | null },
+      n: { id?: string; loc: string; memoryId: string; memory?: { urn?: string } | null },
       _: unknown,
       ctx: Context,
-    ) => resolveNodeUrnField(n, ctx),
+    ) => resolveNodeUrnField({ loc: n.loc, memoryId: n.memoryId, memory: n.memory, nodeId: n.id }, ctx),
     // #881 — the portal link for this node, so a client (the CLI's `node get`,
     // an agent citing a source to a human) hands over a URL instead of
     // assembling one out of a URN spelling the /app/u route may not resolve.
     // Nullable: no configured portal origin ⇒ no link (see lib/portalUrl.ts).
     // Built from the SAME URN the `urn` field returns, so the two can't diverge.
     portalUrl: async (
-      n: { loc: string; memoryId: string; memory?: { urn?: string } | null },
+      n: { id?: string; loc: string; memoryId: string; memory?: { urn?: string } | null },
       _: unknown,
       ctx: Context,
-    ) => portalUrlForUrn(await resolveNodeUrnField(n, ctx)),
+    ) => portalUrlForUrn(await resolveNodeUrnField({ loc: n.loc, memoryId: n.memoryId, memory: n.memory, nodeId: n.id }, ctx)),
     // #2610 — the action-register address for a register:<code> entry in an
     // Agent system memory; null for every other node. A second address beside
     // `urn` (which keeps resolving), computed from the holding Agent's own urn.

@@ -65,6 +65,7 @@ import {
   validateNodeDataExtractionSpecs,
   type EvaluationError,
 } from '../../../lib/edge-conditions/index.js';
+import { entryConditionOf, validateEntryCondition } from '../../../lib/edge-conditions/entryCondition.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
@@ -100,6 +101,8 @@ import { installWriteAllowed } from './installMemory.js';
 import { appPrincipalSessionWriteAllowed } from '../../../lib/sessionOwnership.js';
 import { unauthenticatedError } from '../../../lib/refusals.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
+import type { ChatScript } from '../../../lib/chatScript.js';
+import { conversationStageOrder } from '../../../lib/chatRouting/nextStage.js';
 
 /**
  * Marks a Node row whose `content` field answers with the STORED text unless a
@@ -1366,6 +1369,30 @@ export function throwOnInvalidCondition(condition: unknown): void {
       code: 'INVALID_EDGE_CONDITION',
       reason: err.code,
       detail: err.detail,
+    },
+  });
+}
+
+/**
+ * #4039 (cor:cht:020:02, plan D7/D9): refuse a conversation node whose `data.entryCondition` is invalid or reads a
+ * variable that has no value at chat start. Judged from the loc and the data alone (any memory, depth-2
+ * `conversations:<name>`), so every writer that calls it answers the same. The detail carries only the variable path or
+ * operator the validator names: no edge id, no memory URN, no value. No `messageId`, like `INVALID_EDGE_CONDITION`.
+ */
+export function throwOnInvalidEntryCondition(loc: string, data: unknown): void {
+  const condition = entryConditionOf(loc, data);
+  if (condition === undefined) return;
+  const result = validateEntryCondition(condition);
+  if (result.ok) return;
+  const { code, message, detail } = result.error;
+  throw new GraphQLError(message, {
+    extensions: {
+      code: 'INVALID_ENTRY_CONDITION',
+      reason: code,
+      detail: {
+        ...(detail.field !== undefined ? { field: detail.field } : {}),
+        ...(detail.operator !== undefined ? { operator: detail.operator } : {}),
+      },
     },
   });
 }
@@ -3764,27 +3791,21 @@ export type ExtractionSpecEntry = { field: string; description?: string; shape?:
  * key and the schema property name in agreement.
  */
 export async function resolveExtractionSpec(
-  db: PrismaClient,
-  systemMemoryId: string,
+  script: ChatScript,
   convName: string | null,
   stageData: Record<string, unknown>,
 ): Promise<ExtractionSpecEntry[]> {
   const allSpecs: ExtractionSpecEntry[] = [];
 
   // 1. Agent-level: config node with agentExtractionSpec
-  const configNode = await db.node.findFirst({
-    where: { memoryId: systemMemoryId, loc: 'config', deletedAt: null },
-    select: { data: true },
-  });
+  // #4034: through the chat script reader, so a pinned chat reads the config and conversation of its revision.
+  const configNode = await script.node('config');
   const agentSpec = (configNode?.data as Record<string, unknown>)?.agentExtractionSpec as ExtractionSpecEntry[] | undefined;
   if (agentSpec?.length) allSpecs.push(...agentSpec);
 
   // 2. Conversation-level
   if (convName) {
-    const convNode = await db.node.findFirst({
-      where: { memoryId: systemMemoryId, loc: `conversations:${convName}`, deletedAt: null },
-      select: { data: true },
-    });
+    const convNode = await script.node(`conversations:${convName}`);
     const convSpec = (convNode?.data as Record<string, unknown>)?.extractionSpec as ExtractionSpecEntry[] | undefined;
     if (convSpec?.length) allSpecs.push(...convSpec);
   }
@@ -3815,12 +3836,11 @@ export async function resolveExtractionSpec(
  * see or answer with.
  */
 export async function buildRespondToolSchema(
-  db: PrismaClient,
-  systemMemoryId: string,
+  script: ChatScript,
   convName: string | null,
   stageData: Record<string, unknown>,
 ): Promise<Array<{ name: string; description: string; parameters: unknown }> | null> {
-  const deduped = await resolveExtractionSpec(db, systemMemoryId, convName, stageData);
+  const deduped = await resolveExtractionSpec(script, convName, stageData);
 
   const dataProps: Record<string, unknown> = {};
   for (const spec of deduped) {
@@ -3828,6 +3848,18 @@ export async function buildRespondToolSchema(
     dataProps[fieldName] = { type: spec.shape ?? 'string', description: spec.description ?? fieldName };
   }
 
+  return respondToolDefinition(dataProps, await conversationStageOrder(script, convName));
+}
+
+/**
+ * The respond() tool around an extraction data schema. Split out of
+ * buildRespondToolSchema (#4005) so the saved-config chat probe offers the
+ * SAME tool shape a chat turn does, with no extraction fields.
+ */
+export function respondToolDefinition(
+  dataProps: Record<string, unknown>,
+  stageNames?: readonly string[] | null,
+): Array<{ name: string; description: string; parameters: unknown }> {
   return [{
     name: 'respond',
     description: 'Respond to the user and extract data',
@@ -3836,7 +3868,16 @@ export async function buildRespondToolSchema(
       properties: {
         message: { type: 'string', description: 'Your response to the user' },
         data: { type: 'object', properties: dataProps },
-        next_stage: { type: ['string', 'null'], description: 'Stage to transition to (null to stay in current stage)' },
+        // #4077: an empty or unreadable list offers no enum; an empty one would tell the model the conversation has no stages.
+        next_stage: stageNames && stageNames.length > 0
+          ? {
+              // #4035: exactly this conversation's stages, plus null to stay. A name outside the list moves nothing.
+              type: ['string', 'null'],
+              enum: [...stageNames, null],
+              description: `Stage to transition to, one of: ${stageNames.join(', ')} (null to stay in current stage)`,
+            }
+          : { type: ['string', 'null'], description: 'Stage to transition to (null to stay in current stage)' },
+        goal_reached: { type: 'boolean', description: 'Set true only when the current conversation goal has been reached; follow the stage prompt to decide. Omitted or false means it is not complete. This flag wins over next_stage.' },
         onTrack: { type: 'boolean', description: 'Is the current conversation/stage still the right fit for what the user is asking?' },
         offTrackReason: { type: 'string', description: 'If onTrack is false, explain why the conversation seems off-track' },
       },
@@ -3849,104 +3890,7 @@ export async function buildRespondToolSchema(
 // Goal stack helpers
 // ---------------------------------------------------------------------------
 
-export interface GoalStackEntry {
-  description: string;
-  language?: string;
-  createdAt: string;
-  createdBy: 'ASSISTANT' | 'USER';
-  topicUrn?: string;
-  conversationUrn?: string;
-  nodeUrn?: string;
-  edgeUrn?: string;
-  status: 'ACTIVE' | 'COMPLETED' | 'ABANDONED';
-  completedAt?: string;
-}
-
-export function getGoalStack(chatData: Record<string, unknown>): GoalStackEntry[] {
-  return (chatData.goalStack as GoalStackEntry[]) ?? [];
-}
-
-export function pushGoal(
-  chatData: Record<string, unknown>,
-  goal: Omit<GoalStackEntry, 'status' | 'createdAt'>,
-): GoalStackEntry[] {
-  const stack = getGoalStack(chatData);
-  stack.push({
-    ...goal,
-    status: 'ACTIVE',
-    createdAt: new Date().toISOString(),
-  });
-  chatData.goalStack = stack;
-  return stack;
-}
-
-export function popGoal(chatData: Record<string, unknown>): GoalStackEntry | null {
-  const stack = getGoalStack(chatData);
-  // Find the topmost ACTIVE entry and mark it COMPLETED
-  for (let i = stack.length - 1; i >= 0; i--) {
-    if (stack[i].status === 'ACTIVE') {
-      stack[i].status = 'COMPLETED';
-      stack[i].completedAt = new Date().toISOString();
-      chatData.goalStack = stack;
-      return stack[i];
-    }
-  }
-  return null;
-}
-
-export function currentGoal(chatData: Record<string, unknown>): GoalStackEntry | null {
-  const stack = getGoalStack(chatData);
-  for (let i = stack.length - 1; i >= 0; i--) {
-    if (stack[i].status === 'ACTIVE') return stack[i];
-  }
-  return null;
-}
-
-// ---------------------------------------------------------------------------
-// Route history helpers
-// ---------------------------------------------------------------------------
-
-export interface RouteHistoryEntry {
-  nodeUrn?: string;
-  topicUrn?: string;
-  conversationUrn?: string;
-  action: 'ENTER' | 'EXIT' | 'COMPLETED' | 'FOLLOWED';
-  trigger?: { type: string; content?: string };
-  edgeUrn?: string;
-  timestamp: string;
-}
-
-export function getRouteHistory(chatData: Record<string, unknown>): RouteHistoryEntry[] {
-  return (chatData.routeHistory as RouteHistoryEntry[]) ?? [];
-}
-
-export function appendRouteEntry(
-  chatData: Record<string, unknown>,
-  entry: Omit<RouteHistoryEntry, 'timestamp'>,
-): void {
-  const history = getRouteHistory(chatData);
-  history.push({ ...entry, timestamp: new Date().toISOString() });
-  chatData.routeHistory = history;
-}
-
-/**
- * Check if a conversation was recently visited (within the last N entries)
- * and left — used for loop prevention.
- */
-export function wasRecentlyVisited(
-  chatData: Record<string, unknown>,
-  conversationName: string,
-  lookback = 3,
-): boolean {
-  const history = getRouteHistory(chatData);
-  const recentExits = history
-    .slice(-lookback * 2)  // each visit is ENTER + EXIT, so look back 2x
-    .filter((e) =>
-      e.action === 'EXIT' &&
-      e.conversationUrn?.endsWith(`:${conversationName}`),
-    );
-  return recentExits.length > 0;
-}
+export { getGoalStack, pushGoal, popGoal, currentGoal, getRouteHistory, appendRouteEntry, wasRecentlyVisited, type GoalStackEntry, type RouteHistoryEntry } from '../../../lib/chatRouting.js';
 
 // Edge-condition memory layer construction lives in
 // `lib/edge-conditions/prisma-memory-layer.ts` (the Prisma adapter).
@@ -4020,50 +3964,7 @@ export function assetUrn(memoryUrn: string, assetId: string): string {
   return `${memoryUrn}:assets:${assetId}`;
 }
 
-// ---------------------------------------------------------------------------
-// Snapshot reader: reads nodes from a published revision snapshot instead
-// of the live database. Used by startChat/sendChatMessage when the agent
-// has a publishedRevisionLoc set.
-// ---------------------------------------------------------------------------
-
-export interface SnapshotNode {
-  loc: string;
-  name: string;
-  nodeType?: string;
-  description?: string | null;
-  content?: string | null;
-  data?: unknown;
-}
-
-/**
- * Load a published revision's snapshot and return a lookup function
- * that mimics db.node.findFirst for the system memory. Returns null
- * if no published revision exists (caller should fall back to live DB).
- */
-export async function loadPublishedSnapshot(
-  db: PrismaClient,
-  systemMemoryId: string,
-  publishedRevisionLoc: string | null,
-): Promise<((loc: string) => SnapshotNode | null) | null> {
-  if (!publishedRevisionLoc) return null;
-
-  const revNode = await db.node.findFirst({
-    where: { memoryId: systemMemoryId, loc: publishedRevisionLoc, deletedAt: null },
-    select: { data: true },
-  });
-  if (!revNode) return null;
-
-  const revData = (revNode.data as Record<string, unknown>) ?? {};
-  const snapshot = revData.snapshot as { nodes: SnapshotNode[] } | undefined;
-  if (!snapshot?.nodes) return null;
-
-  const nodesByLoc = new Map<string, SnapshotNode>();
-  for (const n of snapshot.nodes) {
-    nodesByLoc.set(n.loc, n);
-  }
-
-  return (loc: string) => nodesByLoc.get(loc) ?? null;
-}
+// The published-revision reader that lived here is `loadChatScript` (src/lib/chatScript.ts, #4034).
 
 // Rank runnable candidates against a loose hint: case-insensitive, matching
 // name/alias/loc/description, exact > prefix > substring.
