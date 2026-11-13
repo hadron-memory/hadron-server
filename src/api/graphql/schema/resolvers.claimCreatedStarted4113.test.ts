@@ -19,7 +19,10 @@ const X = 'https://github.com/hadron-memory/hadron-server/issues/4113';
 const create = (input: Record<string, unknown>, userId: string = me.id) =>
   M.createAgentTask({}, { input: { appRef: app.id, title: 'T', ...input } }, ctx(userId));
 const row = (id: string) => db.agentTask.findUniqueOrThrow({ where: { id } });
-const events = async (taskId: string) => (await db.agentTeamEvent.findMany({ where: { taskId }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })).map((e) => e.type);
+// The event table has no append sequence and same-millisecond ids carry a random tail, so no test asserts an order:
+// the types come back as a sorted list and every expectation is a sorted list too (Andi, #4115 LOCAL delta F2).
+const events = async (taskId: string) => (await db.agentTeamEvent.findMany({ where: { taskId } })).map((e) => e.type).sort();
+const types = (...t: string[]) => [...t].sort();
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -40,13 +43,13 @@ describe('#4113 a caller-own claim is created STARTED', () => {
     expect(t.status).toBe('started');
   });
 
-  it('writes the events startAgentTask writes, in order, with the same task.started shape', async () => {
+  it('writes the events startAgentTask writes, with the same task.started shape', async () => {
     const claim = await create({ externalId: X, assignee: { user: me.id } });
-    expect(await events(claim.id)).toEqual(['task.created', 'task.assigned', 'task.started']);
+    expect(await events(claim.id)).toEqual(types('task.created', 'task.assigned', 'task.started'));
     // The reference shape: create then start, as the CLI does today.
     const manual = await create({ assignee: { user: me.id } });
     await M.startAgentTask({}, { taskId: manual.id }, ctx());
-    expect(await events(manual.id)).toEqual(['task.created', 'task.assigned', 'task.started']);
+    expect(await events(manual.id)).toEqual(types('task.created', 'task.assigned', 'task.started'));
     const shape = async (id: string) => {
       const e = await db.agentTeamEvent.findFirstOrThrow({ where: { taskId: id, type: 'task.started' } });
       const { taskId: _t, id: _i, createdAt: _c, ...rest } = e as any;
@@ -60,7 +63,7 @@ describe('#4113 a caller-own claim is created STARTED', () => {
     const r = await row(t.id);
     expect(r.status).toBe('pending');
     expect(r.startedAt).toBeNull();
-    expect(await events(t.id)).toEqual(['task.created', 'task.assigned']);
+    expect(await events(t.id)).toEqual(types('task.created', 'task.assigned'));
   });
 
   it('a create with no externalId behaves as today: the caller as assignee stays PENDING', async () => {
@@ -71,7 +74,7 @@ describe('#4113 a caller-own claim is created STARTED', () => {
   it('a claim with no assignee stays PENDING and queued; a backlog claim still refuses an assignee', async () => {
     const t = await create({ externalId: X });
     expect((await row(t.id)).status).toBe('pending');
-    expect(await events(t.id)).toEqual(['task.created', 'assignment.queued']);
+    expect(await events(t.id)).toEqual(types('task.created', 'assignment.queued'));
     await expect(create({ externalId: 'https://x/2', status: 'BACKLOG', assignee: { user: me.id } }))
       .rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
   });
