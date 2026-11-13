@@ -1673,6 +1673,13 @@ export const chatMutations = {
       const sysMemId = turnAgent?.systemMemoryId;
       if (sysMemId) script = await loadChatScript(ctx.db, sysMemId, (chatData.startedWithRevision as string | null) ?? null);
       const stageOrder = script ? await conversationStageOrder(script, origin.conversationName ?? null) : null;
+      if (stageOrder === null && toolResponse.next_stage && toolResponse.goal_reached !== true) {
+        // #4077: keep main's unreadable-list diagnostic when next_stage is actually judged (the completion flag wins).
+        console.warn(JSON.stringify({
+          event: 'chat_stage_list_unreadable', chatId, conversationName: chatData.conversationName ?? null,
+          note: 'next_stage cannot be checked against the conversation stages; the name is rejected',
+        }));
+      }
       if (script && sysMemId && (!toolResponse.next_stage || toolResponse.goal_reached === true)) {
         if (await script.node(currentStageLoc)) {
           rules = await script.outgoingRules(currentStageLoc);

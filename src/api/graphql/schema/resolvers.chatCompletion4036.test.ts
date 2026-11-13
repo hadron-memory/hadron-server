@@ -55,6 +55,18 @@ describe('#4036 completion by explicit goal_reached', () => {
     expect(result.conversationHandoff).toBeNull();
     expect((await state(chat.chatId)).engine.conversationName).toBe('main');
   });
+  it('ignores a named stage without a rejection warning when completion wins and the stage list is unreadable', async () => {
+    const chat = await start();
+    await db.node.deleteMany({ where: { memoryId: systemId, loc: 'conversations:main' } });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const result = await respond(chat.chatId, { goal_reached: true, next_stage: 'unknown' });
+      expect(result).toMatchObject({ conversationCompleted: 'main', stageTransitioned: false, newStageName: null });
+      expect(result.rejectedNextStage).toBeUndefined();
+      expect(warn.mock.calls.filter(call => String(call[0]).includes('chat_stage_list_unreadable'))).toHaveLength(0);
+      expect((await state(chat.chatId)).engine.stageName).toBe('one');
+    } finally { warn.mockRestore(); }
+  });
   it('regression: always fires without a flag or next_stage', async () => {
     await rule('always'); const chat = await start();
     expect((await respond(chat.chatId)).conversationHandoff).toBe('target');

@@ -5,7 +5,7 @@ import { validEngineValue } from './chatRootEngineState.js';
 import { respondToolDefinition } from '../api/graphql/schema/resolvers.helpers.js';
 
 const decide = (extra: Partial<Parameters<typeof decideChatRouting>[0]> = {}) => decideChatRouting({
-  origin: { conversationName: 'main', stageName: 'one' }, goalReached: true, rules: [], node: async () => null, evaluate: async () => true, ...extra,
+  origin: { conversationName: 'main', stageName: 'one' }, stageOrder: ['one', 'two'], goalReached: true, rules: [], node: async () => null, evaluate: async () => true, ...extra,
 });
 describe('#4036 routing edits', () => {
   it.each([
@@ -43,8 +43,8 @@ describe('#4036 routing edits', () => {
     const stale = applyChatRoutingDecision({ conversationName: 'changed', stageName: 'one' }, decision);
     expect(stale).toMatchObject({ routingSkipped: true }); expect(stale.rejectedNextStage).toBeUndefined();
   });
-  it('completion wins over S2 rejection of an unknown named stage', async () => {
-    const decision = await decide({ nextStage: 'unknown', stageOrder: ['one', 'two'] });
+  it.each([{ stageOrder: null }, { stageOrder: [] }, { stageOrder: ['one', 'two'] }])('completion wins over S2 rejection with stage list %j', async ({ stageOrder }) => {
+    const decision = await decide({ nextStage: 'unknown', stageOrder });
     expect(decision.result).toMatchObject({ conversationCompleted: 'main', stageTransitioned: false });
     expect(decision.result.rejectedNextStage).toBeUndefined();
   });
