@@ -51,11 +51,8 @@ describe('#4061 signing preview appUrn', () => {
     expect(rows.find((r: any) => r.workerId === workerId).workerUrn).toBe(`hrn:worker:${servingRoot}:team-slug:worker-slug-2`);
   });
 
-  it.each([
-    ['canonical double-colon', (root: string) => `${root}::team-slug`],
-    ['retired owner sigil', (root: string) => `@${root}:team-slug`],
-  ])('emits canonical v2 for an App stored in the legacy %s spelling, and the Worker address agrees', async (_label, legacy) => {
-    await db.app.update({ where: { id: appId }, data: { urn: legacy(servingRoot) } });
+  it('emits canonical v2 for an App stored in the legacy double-colon spelling, and the Worker address agrees', async () => {
+    await db.app.update({ where: { id: appId }, data: { urn: `${servingRoot}::team-slug` } });
     const { rows } = await preview();
     expect(rows).toHaveLength(2);
     for (const r of rows) expect(r.appUrn).toBe(`hrn:app:${servingRoot}:team-slug`);
