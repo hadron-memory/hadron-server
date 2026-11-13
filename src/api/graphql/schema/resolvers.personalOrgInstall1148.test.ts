@@ -184,9 +184,10 @@ it('a later chat turn cannot re-serve org text after the individual participant 
  const caller={...context(outsiderId),appId};
  const started=await mutation.startChat({}, {agentId,scope:'private'},caller);
  expect(started.systemMessage).toContain('PRIVATE ORG CHAT SENTINEL');
- // Use a legal user-owned holding memory so its independent write right survives org removal.
+ // Keep the licensed App: this non-manager's independent write right survives org removal,
+ // while App-less retained homes require Agent management (#4112).
  const chat=await chatNodeByLocOrThrow(db,started.chatId);
- await db.memory.update({where:{id:chat.memoryId},data:{organizationId:null,ownerUserId:outsiderId,appId:null}});
+ await db.memory.update({where:{id:chat.memoryId},data:{organizationId:null,ownerUserId:outsiderId}});
  expect((await mutation.sendChatMessage({}, {chatId:started.chatId,userMessage:'Member control'},caller)).systemMessage).toContain('PRIVATE ORG CHAT SENTINEL');
  await db.orgMember.update({where:{organizationId_userId:{organizationId:orgId,userId:outsiderId}},data:{deletedAt:new Date()}});
  await expect(mutation.sendChatMessage({}, {chatId:started.chatId,userMessage:'Continue'},caller))
