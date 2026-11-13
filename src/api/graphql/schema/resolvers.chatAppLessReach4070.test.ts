@@ -196,8 +196,14 @@ describe('#4070 review follow-ups', () => {
     const home = await retainedHome(managerCtx());
     const memory = await db.memory.findUniqueOrThrow({ where: { id: home.memoryId } });
     const agentRow = await db.agent.findUniqueOrThrow({ where: { id: agentId } });
-    const hostile = new Proxy(db, { get: (t, k) => k === 'agent' ? { findUnique: () => { throw new Error('caller.db was read'); } } : (t as any)[k] });
+    const hostile = new Proxy(db, { get: (_t, k) => { throw new Error('caller.db was read: ' + String(k)); } });
     const out = await chatHomeAgentIfLicensed(db, memory, agentRow, { ...managerCtx(), db: hostile as any });
     expect(out?.id).toBe(agentId);
+    await db.$transaction(async tx => {
+      const ctx = { ...managerCtx(), db: hostile as any };
+      expect((await chatHomeAgentIfLicensed(tx, memory, agentRow, ctx))?.id).toBe(agentId);
+      await tx.orgMember.update({where:{organizationId_userId:{organizationId:agentRow.organizationId!,userId:managerId}},data:{role:'READER'}});
+      expect(await chatHomeAgentIfLicensed(tx, memory, agentRow, ctx)).toBeNull();
+    });
   });
 });
