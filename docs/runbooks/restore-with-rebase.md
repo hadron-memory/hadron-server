@@ -39,7 +39,9 @@ Missing P1 or P2 refuses at S0, before anything is created.
 
 `RESTORE_ADMIN_URL` is the only connection setting: the pipeline's own sessions and its `pg_restore` child both take
 host, port, user, password and TLS from it, and every inherited `PG*` variable except `PGPASSFILE` is dropped from the
-child's environment. Accepted query parameters: `sslmode` (`disable`, the default when absent; `require`; `verify-ca`,
+child's environment. The password comes from the URL or, for a password-less URL, from the password file (`PGPASSFILE`
+or `~/.pgpass`) on both sides; `PGPASSWORD` set beside a password-less URL is refused at S0, since the pipeline's own
+sessions would use it and `pg_restore` would not. Accepted query parameters: `sslmode` (`disable`, the default when absent; `require`; `verify-ca`,
 which needs `sslrootcert`; `verify-full`), `sslrootcert`, and `sslcert` with `sslkey` (file paths, for certificate
 authentication). Anything else (`prefer`, `allow`, `no-verify`, `require` with `sslrootcert`, `host`, `options`,
 `service`, …) is refused at S0, before anything is created. A verifying mode without `sslrootcert` uses the system trust
@@ -72,7 +74,7 @@ pnpm ops:restore-with-rebase run \
 | Stage | Who can connect to the target | What it does |
 |---|---|---|
 | S0 | (no target yet) | Read-only preflight: P1, P2, the target name is free, every extension the dump declares is in the template. Logs the dump's sha256. |
-| S1 | nobody (`ALLOW_CONNECTIONS false`) | `CREATE DATABASE … OWNER <owner> TEMPLATE <tpl>`; records the oid. If the statement errors or its reply is lost, the catalog is re-read from a fresh connection: absent means nothing was created; a database that is provably this run's (its owner, admission off, the working connection limit, the default ACL, created after S0) is torn down; anything else is reported as `teardown: uncertain` and left for the operator. |
+| S1 | nobody (`ALLOW_CONNECTIONS false`) | `CREATE DATABASE … OWNER <owner> TEMPLATE <tpl> … OID <n>`, under a random free oid this run chose (logged in the S1 `creating` line); records it. If the server refuses the statement with an ERROR, the CREATE rolled back: an existing database of that name belongs to someone else and is reported as `teardown: uncertain`, never dropped. If the reply is lost (the session or connection died), the catalog is re-read from a fresh connection: absent means nothing was created; a database that is provably this run's (the chosen oid, its owner, admission off, the working connection limit, the default ACL, created after S0) is torn down; anything else is reported as `teardown: uncertain` and left for the operator. |
 | S2 | `restore_admin` only (ACL fence) | Revokes `CONNECT`/`TEMPORARY` from `PUBLIC`, the owner, serve and app roles; grants `CONNECT` to `restore_admin`; verifies the ACL from the catalog; then admits connections for the working phase. |
 | S3 | `restore_admin` only | `pg_restore --role=<owner> --no-owner --no-privileges --exit-on-error -L <list>` (template extensions filtered out of the list); applies the database-level settings. |
 | S4 | `restore_admin` only | The key rebase, in one transaction (below). |
@@ -126,7 +128,7 @@ a plain `DROP DATABASE` (never `FORCE`). The error names the stage, the teardown
 |---|---|---|
 | `needs K xids of headroom, cluster has C` | The target cluster's id counter is too low for this history. The check runs at S4, after `pg_restore` has already written the target (and spent xids); the rebase itself writes nothing and the target is torn down. | Restore into a cluster whose counter is higher, or consume ids on the target first. A retry on the same cluster may pass, because the failed attempt consumed ids. |
 | `foreign session` at the hard fence | Something else is connected to the target (a superuser can connect past `ALLOW_CONNECTIONS false`). It is never killed. | The teardown's plain `DROP` does not wait: it fails at once with `teardown: drop-failed` and the target stays `FENCED`. Find the session; once it has gone, run `teardown` with the oid from the error line (or from `status`). |
-| `CREATE DATABASE outcome uncertain` (`teardown: uncertain`) | S1's statement failed or lost its reply, and a database with the target's name exists that is not provably this run's (or the catalog could not be re-read). Nothing was dropped. | Inspect it (`status <target>`); if it is this run's, `teardown` it with its oid. |
+| `CREATE DATABASE outcome uncertain` (`teardown: uncertain`) | S1's statement was refused (another creator holds the name) or lost its reply, and a database with the target's name exists that is not provably this run's (or the catalog could not be re-read). Nothing was dropped. | Inspect it (`status <target>`); if it is this run's, `teardown` it with its oid. |
 | `template … must exist, be IS_TEMPLATE and be superuser-made`, `template … is not quiescent`, `template … admits no connection` | P2 missing. Nothing created. | Fix the template. |
 | `<role> needs GRANT <owner> TO <role> WITH INHERIT FALSE, SET TRUE and no inherited path (P1)`, `… is a superuser`, `… lacks CREATEDB`, `… has CREATEROLE`, `role … is a superuser`, `the serve role must not be the owner role` | P1 or a role prerequisite missing. Nothing created. | Fix the role. |
 | `unsupported connection parameter: …`, `unsupported sslmode …`, `sslcert and sslkey must be given together`, … | `RESTORE_ADMIN_URL` has a setting the pipeline cannot hand to both its sessions and `pg_restore`. Nothing created. | Use the accepted parameters above. |

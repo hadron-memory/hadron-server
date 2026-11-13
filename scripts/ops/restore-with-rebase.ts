@@ -17,7 +17,7 @@
  *  (P2) a quiescent, superuser-made `IS_TEMPLATE` database holding the extensions the dump needs.
  *  (P3) read access to the dump, disk for a second copy, `pg_restore` 16+.
  *
- * Stages: S0 read-only preflight; S1 CREATE DATABASE with ALLOW_CONNECTIONS false; S2 ACL fence (only restore_admin may
+ * Stages: S0 read-only preflight; S1 CREATE DATABASE with ALLOW_CONNECTIONS false, under an oid this run chose; S2 ACL fence (only restore_admin may
  * connect), then admission on for the working phase; S3 pg_restore and the database-level settings; S4 the rebase.
  * Then the HARD fence (ALLOW_CONNECTIONS false, nothing else connected) for the grants (runtime-role.sql, CONNECT to the
  * owner and serve roles), final verification, the audit row and the steady connection limit; and last, alone, the
@@ -31,14 +31,14 @@
  * control against one, and it is a detector. The connection limit is not a fence. A superuser dropping and recreating
  * the name between teardown's lookup and its DROP is a named residual.
  */
-import { createHash } from 'node:crypto';
+import { createHash, randomInt } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createReadStream, readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
-import { Client } from 'pg';
+import { Client, DatabaseError } from 'pg';
 import { clientConfig, connectionProfile, libpqEnv } from './connectionProfile.js';
 import { rebaseEventKeys, servingOrderDigest, type RebaseReport } from '../../src/lib/agentTasks/eventKeyRebase.js';
 
@@ -260,15 +260,19 @@ async function terminateBackend(adminUrl: string, pid: number): Promise<void> {
 }
 
 /**
- * After a failed or unanswered CREATE DATABASE, from a fresh connection: is the target there, and is it provably this
- * run's? Provably = every attribute the CREATE set (owner, admission off, the working connection limit, the default
- * ACL) and its row's creating xid at or above `before`, the xmax read just before the CREATE (S0 saw the name absent).
- * A database that fails any of these is reported, never dropped. Named residual: a same-named database made in that
- * window by another CREATEDB role with the same four attributes would be taken for this run's.
+ * After an unanswered CREATE DATABASE (the session died, or the server ended it, before a reply), from a fresh
+ * connection: is the target there, and is it provably this run's? The CREATE named its own oid (`OID = chosen`), so
+ * provably = the row under `name` carries exactly that oid, every attribute the CREATE set (owner, admission off, the
+ * working connection limit, the default ACL) and a creating xid at or above `before`, the xmax read just before the
+ * CREATE. A database that fails any of these is reported, never dropped. A competing creator that took the name first
+ * makes this run's CREATE fail with an ERROR reply, which S1 treats as definitive and never reconciles (blind P1 on
+ * 338deec1). Named residual: the reply to that refusal is ALSO lost, and the server's own oid counter handed the
+ * competitor exactly the random oid this run chose.
  */
 export async function reconcileCreate(
   adminUrl: string,
   name: string,
+  chosenOid: number,
   ownerRole: string,
   before: string,
 ): Promise<'absent' | { oid: number; mine: boolean }> {
@@ -276,16 +280,37 @@ export async function reconcileCreate(
   try {
     const r = await c.query<{ oid: number; mine: boolean }>(
       `SELECT d.oid::int AS oid,
-              (d.datdba = $2::regrole AND NOT d.datallowconn AND d.datconnlimit = $3 AND d.datacl IS NULL
-               AND pg_snapshot_xmax(pg_current_snapshot())::text::numeric - age(d.xmin) >= $4::numeric) AS mine
+              (d.oid = $2::oid AND d.datdba = $3::regrole AND NOT d.datallowconn AND d.datconnlimit = $4 AND d.datacl IS NULL
+               AND pg_snapshot_xmax(pg_current_snapshot())::text::numeric - age(d.xmin) >= $5::numeric) AS mine
          FROM pg_database d WHERE d.datname = $1`,
-      [name, ownerRole, WORKING_CONNECTION_LIMIT, before],
+      [name, chosenOid, ownerRole, WORKING_CONNECTION_LIMIT, before],
     );
     if (r.rowCount === 0) return 'absent';
     return { oid: r.rows[0].oid, mine: r.rows[0].mine === true };
   } finally {
     await c.end();
   }
+}
+
+/**
+ * A random oid in the normal range (>= FirstNormalObjectId) that no database holds now; the CREATE names it. Capped at
+ * 2^31 - 1 because every catalog read here casts oid::int.
+ */
+async function chooseDatabaseOid(maint: Client): Promise<number> {
+  for (let i = 0; i < 16; i++) {
+    const candidate = randomInt(16384, 2 ** 31);
+    const used = await maint.query('SELECT 1 FROM pg_database WHERE oid = $1::oid', [candidate]);
+    if ((used.rowCount ?? 0) === 0) return candidate;
+  }
+  throw new Error('could not choose a free database oid');
+}
+
+/**
+ * Did the server answer this statement with an ERROR? Then its transaction rolled back and created nothing. A FATAL or
+ * PANIC reply, a dropped connection or any non-server error leaves the outcome open.
+ */
+function refusedByServer(err: unknown): boolean {
+  return err instanceof DatabaseError && err.severity === 'ERROR';
 }
 
 /** runtime-role.sql's psql wrapper, for execution over an already-open connection (the hard fence admits no new one). */
@@ -413,21 +438,42 @@ export async function restoreWithRebase(opts: RunOptions): Promise<RunResult> {
     if (missing.length) throw new RestoreError(stage0, `the dump needs extension(s) the template lacks: ${missing.join(', ')}`);
     await log({ runId, stage: stage0, event: 'ok', extensions: [...dumpExtensions].sort() });
 
-    // ── S1: create, admission off ─────────────────────────────────────────────
+    // ── S1: create, admission off, under an oid this run chose ────────────────
     // Every xid taken from here on is >= before: the window the reconcile below accepts for this run's CREATE.
     const before = (await maint.query<{ x: string }>('SELECT pg_snapshot_xmax(pg_current_snapshot())::text AS x')).rows[0].x;
+    const chosenOid = await chooseDatabaseOid(maint);
+    await log({ runId, stage: 'S1', event: 'creating', oid: chosenOid });
     try {
       await maint.query(
         `CREATE DATABASE ${q(maint, opts.target)} OWNER ${q(maint, opts.ownerRole)} TEMPLATE ${q(maint, opts.template)}
-           ALLOW_CONNECTIONS false CONNECTION LIMIT ${WORKING_CONNECTION_LIMIT}`,
+           ALLOW_CONNECTIONS false CONNECTION LIMIT ${WORKING_CONNECTION_LIMIT} OID ${chosenOid}`,
       );
-      if (opts.fault === 'S1-reply') await terminateBackend(opts.adminUrl, maint.processID as number);
-      oid = (await maint.query<{ oid: number }>('SELECT oid::int AS oid FROM pg_database WHERE datname = $1', [opts.target])).rows[0].oid;
+      if (opts.fault === 'S1-reply') {
+        // The CREATE committed; lose its reply: the session dies and this run never saw the answer.
+        await terminateBackend(opts.adminUrl, maint.processID as number);
+        await maint.query('SELECT 1');
+      }
+      oid = chosenOid;
     } catch (err) {
-      // An error does not prove nothing was created: the CREATE can commit and its reply be lost, or the oid lookup can
-      // fail after it. Re-read the catalog from a fresh connection; tear down only what is provably this run's.
       const message = err instanceof Error ? err.message : String(err);
-      const found = await reconcileCreate(opts.adminUrl, opts.target, opts.ownerRole, before).catch(() => 'unknown' as const);
+      // An ERROR reply is definitive: the CREATE rolled back. Whatever holds the name now is someone else's.
+      if (refusedByServer(err)) {
+        const now = await status(opts.adminUrl, opts.target).catch(() => null);
+        if (now?.status === 'ABSENT') {
+          await log({ runId, stage: 'S1', event: 'failed', message, teardown: 'absent' });
+          throw new RestoreError('S1', `${message}; ${opts.target} does not exist`, 'absent');
+        }
+        await log({ runId, stage: 'S1', event: 'failed', message, teardown: 'uncertain' });
+        throw new RestoreError(
+          'S1',
+          `${message}; CREATE DATABASE was refused, so ${opts.target}${now?.oid != null ? ` (oid ${now.oid})` : ''} is not provably this run's; left intact`,
+          'uncertain',
+          now?.oid ?? null,
+        );
+      }
+      // No answer: the CREATE may have committed. Re-read the catalog from a fresh connection; tear down only what is
+      // provably this run's (its chosen oid, its attributes, its xid window).
+      const found = await reconcileCreate(opts.adminUrl, opts.target, chosenOid, opts.ownerRole, before).catch(() => 'unknown' as const);
       if (found === 'absent') {
         await log({ runId, stage: 'S1', event: 'failed', message, teardown: 'absent' });
         throw new RestoreError('S1', `${message}; ${opts.target} does not exist`, 'absent');

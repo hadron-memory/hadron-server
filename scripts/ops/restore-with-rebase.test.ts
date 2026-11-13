@@ -339,7 +339,7 @@ describe.skipIf(!enabled)('#4111 restore-with-rebase on private clusters', { tim
     expect(events.some((e) => e.what === F.ROLES.other)).toBe(false);
   });
 
-  it('P3: a foreign (superuser) session at the hard fence aborts; it is never killed, and the drop waits for it', async () => {
+  it('P3: a foreign (superuser) session at the hard fence aborts; it is never killed, so the plain drop fails and leaves it', async () => {
     const target = fresh();
     let intruder: Client | null = null;
     const err = await restoreWithRebase(
@@ -423,7 +423,15 @@ describe.skipIf(!enabled)('#4111 restore-with-rebase on private clusters', { tim
     child.stdout.on('data', (d) => (out += d));
     child.stderr.on('data', (d) => (out += d));
     const result = await new Promise<{ code: number | null; listening: boolean }>((resolve) => {
-      const timer = setTimeout(() => resolve({ code: null, listening: false }), 90_000);
+      const timer = setTimeout(() => {
+        child.kill('SIGKILL');
+        resolve({ code: null, listening: false });
+      }, 90_000);
+      child.on('error', (err) => {
+        clearTimeout(timer);
+        out += `spawn error: ${err.message}\n`;
+        resolve({ code: null, listening: false });
+      });
       child.stdout.on('data', () => {
         if (out.includes('hadron-server listening')) {
           clearTimeout(timer);
@@ -539,7 +547,7 @@ describe.skipIf(!enabled)('#4111 restore-with-rebase on private clusters', { tim
     }
   });
 
-  it('S2: a session connected before admission refuses; it is never killed, so the drop waits for it', async () => {
+  it('S2: a session connected before admission refuses; it is never killed, so the plain drop fails and leaves it', async () => {
     const target = fresh();
     let early: Client | null = null;
     const err = await restoreWithRebase(
@@ -627,9 +635,120 @@ describe.skipIf(!enabled)('#4111 restore-with-rebase on private clusters', { tim
     await F.sql(B.url(), `CREATE DATABASE ${target} OWNER ${F.ROLES.owner} TEMPLATE ${F.TEMPLATE} ALLOW_CONNECTIONS false CONNECTION LIMIT 4`);
     const { reconcileCreate } = await import('./restore-with-rebase.js');
     const [{ x }] = await F.sql(B.url(), 'SELECT pg_snapshot_xmax(pg_current_snapshot())::text AS x');
-    expect(await reconcileCreate(F.adminUrl(B), target, F.ROLES.owner, x)).toEqual({ oid: expect.any(Number), mine: false });
-    expect(await reconcileCreate(F.adminUrl(B), `${target}_absent`, F.ROLES.owner, x)).toBe('absent');
+    const [{ oid }] = await F.sql(B.url(), 'SELECT oid::int AS oid FROM pg_database WHERE datname = $1', [target]);
+    // Even handed its own oid as the chosen one, the creating xid is outside the window.
+    expect(await reconcileCreate(F.adminUrl(B), target, oid, F.ROLES.owner, x)).toEqual({ oid, mine: false });
+    expect(await reconcileCreate(F.adminUrl(B), `${target}_absent`, oid, F.ROLES.owner, x)).toBe('absent');
     await F.sql(B.url(), `DROP DATABASE ${target}`);
+  });
+
+  // Blind P1 on 338deec1: resemblance and timing are not ownership. A same-shaped database another creator makes inside
+  // the window must survive this run's failure, whichever oid it got.
+  const sameShape = (target: string, extra = '') =>
+    `CREATE DATABASE ${target} OWNER ${F.ROLES.owner} TEMPLATE ${F.TEMPLATE} ALLOW_CONNECTIONS false CONNECTION LIMIT 4${extra}`;
+
+  it('blind P1: a competitor makes the same shape inside the window; the refused CREATE leaves it intact', async () => {
+    const target = fresh();
+    let theirs: number | null = null;
+    const err = await restoreWithRebase(
+      base({
+        target,
+        log: async (e) => {
+          if (e.stage === 'S1' && e.event === 'creating') {
+            await F.sql(B.url(), sameShape(target));
+            [{ oid: theirs }] = await F.sql(B.url(), 'SELECT oid::int AS oid FROM pg_database WHERE datname = $1', [target]);
+          }
+        },
+      }),
+    ).catch((e) => e);
+    expect(err).toBeInstanceOf(RestoreError);
+    expect(err.stage).toBe('S1');
+    expect(err.teardown).toBe('uncertain');
+    expect(err.oid).toBe(theirs);
+    expect(err.message).toMatch(/already exists.*refused.*not provably this run's/s);
+    const [{ oid }] = await F.sql(B.url(), 'SELECT oid::int AS oid FROM pg_database WHERE datname = $1', [target]);
+    expect(oid).toBe(theirs);
+    await F.sql(B.url(), `DROP DATABASE ${target}`);
+  });
+
+  it('blind P1: even a competitor holding the very oid this run chose survives a refused CREATE', async () => {
+    // Every check the lost-reply reconcile makes would pass for this database; only the ERROR reply tells it apart.
+    const target = fresh();
+    let chosen: number | null = null;
+    const err = await restoreWithRebase(
+      base({
+        target,
+        log: async (e) => {
+          if (e.stage === 'S1' && e.event === 'creating') {
+            chosen = e.oid as number;
+            await F.sql(B.url(), sameShape(target, ` OID ${chosen}`));
+          }
+        },
+      }),
+    ).catch((e) => e);
+    expect(err).toBeInstanceOf(RestoreError);
+    expect(err.stage).toBe('S1');
+    expect(err.teardown).toBe('uncertain');
+    expect(err.oid).toBe(chosen);
+    expect(await dbExists(target)).toBe(true);
+    await F.sql(B.url(), `DROP DATABASE ${target}`);
+  });
+
+  it('blind P1: after a lost reply, only the chosen oid is taken for this run, never a same-shaped one inside the window', async () => {
+    const target = fresh();
+    const [{ x }] = await F.sql(B.url(), 'SELECT pg_snapshot_xmax(pg_current_snapshot())::text AS x');
+    await F.sql(B.url(), sameShape(target));
+    const [{ oid }] = await F.sql(B.url(), 'SELECT oid::int AS oid FROM pg_database WHERE datname = $1', [target]);
+    const { reconcileCreate } = await import('./restore-with-rebase.js');
+    expect(await reconcileCreate(F.adminUrl(B), target, oid + 1, F.ROLES.owner, x)).toEqual({ oid, mine: false });
+    expect(await reconcileCreate(F.adminUrl(B), target, oid, F.ROLES.owner, x)).toEqual({ oid, mine: true });
+    await F.sql(B.url(), `DROP DATABASE ${target}`);
+  });
+
+  // Blind P2 on 338deec1: with a password-less URL, both sides must authenticate from the same source.
+  describe('blind P2: one password source for a password-less URL', () => {
+    const passwordless = () => F.adminUrl(B).replace(`:${encodeURIComponent(F.PASSWORD)}@`, '@');
+    let dir = '';
+    const saved = { PGPASSWORD: process.env.PGPASSWORD, PGPASSFILE: process.env.PGPASSFILE };
+    beforeAll(async () => {
+      if (!enabled) return;
+      const { mkdtempSync, writeFileSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      const { tmpdir } = await import('node:os');
+      dir = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), 'pgpass-4111-'));
+      const file = join(dir, 'pgpass');
+      writeFileSync(file, `127.0.0.1:${B.port}:*:${F.ROLES.admin}:${F.PASSWORD}\n`, { mode: 0o600 });
+      process.env.PGPASSFILE = file;
+    });
+    afterAll(async () => {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+      if (dir) (await import('node:fs')).rmSync(dir, { recursive: true, force: true });
+    });
+
+    it('an inherited PGPASSWORD (here the wrong one) beside a password-less URL refuses at S0, creating nothing', async () => {
+      expect(passwordless()).not.toContain(F.PASSWORD);
+      const target = fresh();
+      process.env.PGPASSWORD = 'not-the-password';
+      try {
+        await expect(restoreWithRebase(base({ target, adminUrl: passwordless() }))).rejects.toThrow(
+          /\[S0\] PGPASSWORD is set but the connection URL has no password/,
+        );
+      } finally {
+        delete process.env.PGPASSWORD;
+      }
+      expect(await dbExists(target)).toBe(false);
+    });
+
+    it('without PGPASSWORD both the sessions and the pg_restore child authenticate from the password file', async () => {
+      delete process.env.PGPASSWORD;
+      const target = fresh();
+      const res = await restoreWithRebase(base({ target, adminUrl: passwordless() }));
+      expect(res.status).toBe('RELEASED');
+      expect(await status(passwordless(), target)).toEqual({ status: 'RELEASED', oid: res.oid });
+    });
   });
 
   // Andi's LOCAL F1 on #4116: an inherited PGSERVICE redirected pg_restore into another cluster while every other step

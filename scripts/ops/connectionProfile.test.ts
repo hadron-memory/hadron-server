@@ -17,7 +17,13 @@ const file = (name: string) => {
 const ca = file('ca.crt');
 const cert = file('client.crt');
 const key = file('client.key');
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+// A runner's own PGPASSWORD would make every password-less URL below a refusal; the refusal has its own test.
+const runnerPassword = process.env.PGPASSWORD;
+delete process.env.PGPASSWORD;
+afterAll(() => {
+  rmSync(dir, { recursive: true, force: true });
+  if (runnerPassword !== undefined) process.env.PGPASSWORD = runnerPassword;
+});
 
 const base = 'postgresql://restore_admin:p%40ss@db.example:6543/postgres';
 const inherited = {
@@ -95,6 +101,16 @@ describe('#4111 F2: one connection profile for both sides', () => {
     expect(p.port).toBe(5432);
     expect(libpqEnv(p, { PGPASSWORD: 'inherited' }).PGPASSWORD).toBeUndefined();
     expect(clientConfig(p).password).toBeUndefined();
+  });
+
+  it('blind P2 on 338deec1: a password-less URL beside an inherited PGPASSWORD is refused; a URL password wins on both sides', () => {
+    const bare = 'postgresql://restore_admin@db.example/postgres';
+    expect(() => connectionProfile(bare, undefined, { PGPASSWORD: 'inherited' })).toThrow(ConnectionProfileError);
+    expect(() => connectionProfile(bare, undefined, { PGPASSWORD: '' })).toThrow(/PGPASSWORD is set but the connection URL has no password/);
+    expect(connectionProfile(bare, undefined, { PGPASSFILE: '/home/op/.pgpass' }).password).toBeUndefined();
+    const withPassword = connectionProfile(base, undefined, { PGPASSWORD: 'inherited' });
+    expect(clientConfig(withPassword).password).toBe('p@ss');
+    expect(libpqEnv(withPassword, { PGPASSWORD: 'inherited' }).PGPASSWORD).toBe('p@ss');
   });
 
   it.each([

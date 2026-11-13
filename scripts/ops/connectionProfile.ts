@@ -5,7 +5,7 @@
  * client certificate passed preflight and then failed (or used a different certificate) inside `pg_restore`.
  *
  * The URL is the only source: every inherited `PG*` variable except `PGPASSFILE` is removed from the child's
- * environment, and an absent `sslmode` means no TLS on both sides (not "whatever PGSSLMODE says"). A query parameter
+ * environment, an inherited `PGPASSWORD` beside a password-less URL is refused (node-postgres would read it), and an absent `sslmode` means no TLS on both sides (not "whatever PGSSLMODE says"). A query parameter
  * outside the supported set is refused before anything is created, rather than honoured by one side only.
  *
  * Supported: `sslmode` = `disable` | `require` | `verify-ca` | `verify-full`, with `sslrootcert`, `sslcert`, `sslkey`
@@ -40,8 +40,14 @@ export interface ConnectionProfile {
 /** A refused connection URL. The message names the parameter, never the URL or a value. */
 export class ConnectionProfileError extends Error {}
 
-/** Parse and validate; throws ConnectionProfileError. `database` overrides the URL's path. */
-export function connectionProfile(url: string, database?: string): ConnectionProfile {
+/**
+ * Parse and validate; throws ConnectionProfileError. `database` overrides the URL's path. `env` is the environment both
+ * sides would inherit: a password-less URL with `PGPASSWORD` set there is refused, because node-postgres falls back to
+ * that variable while the `pg_restore` child (whose inherited `PG*` is dropped) reads the password file, so the two
+ * sides could authenticate with different credentials (blind P2 on 338deec1). Refused, the only password sources left
+ * are the URL (both sides) or the password file (both sides).
+ */
+export function connectionProfile(url: string, database?: string, env: NodeJS.ProcessEnv = process.env): ConnectionProfile {
   let u: URL;
   try {
     u = new URL(url);
@@ -65,6 +71,9 @@ export function connectionProfile(url: string, database?: string): ConnectionPro
   if (mode === 'require' && sslrootcert) throw new ConnectionProfileError('sslmode require with sslrootcert: write sslmode verify-ca');
   if (mode === 'verify-ca' && !sslrootcert) throw new ConnectionProfileError('sslmode verify-ca needs sslrootcert');
   if (Boolean(sslcert) !== Boolean(sslkey)) throw new ConnectionProfileError('sslcert and sslkey must be given together');
+  if (!u.password && env.PGPASSWORD !== undefined) {
+    throw new ConnectionProfileError('PGPASSWORD is set but the connection URL has no password: put it in the URL or the password file, and unset PGPASSWORD');
+  }
   const path = decodeURIComponent(u.pathname.slice(1));
   return {
     host: decodeURIComponent(u.hostname.replace(/^\[|\]$/g, '')),
