@@ -70,12 +70,13 @@ async function seedConversations(systemMemoryId: string) {
 }
 
 async function holdingOf(userId: string): Promise<{ id: string }> {
-  const out = await M.startChat(null, { agentId: agentA.id }, userCtx(userId));
-  expect(out.chatId).toMatch(/^chats:/);
-  return db.memory.findFirstOrThrow({
-    where: { userMemoryOfAgentId: agentA.id, createdBy: userId, deletedAt: null },
-    select: { id: true },
-  });
+  // #4046: seed a retained holding directly; an org READER cannot start an App-less definition-driven chat.
+  // Promotion tests still exercise the exact App-less knowledge holding discriminator.
+  return db.memory.create({ data: {
+    urn: `${org.urn}:holding-${generateId()}`, name: 'Retained holding', class: 'knowledge',
+    visibility: 'ORGANIZATION', organizationId: org.id,
+    userMemoryOfAgentId: agentA.id, createdBy: userId,
+  }, select: { id: true } });
 }
 
 /** An org Agent with no system memory yet (the updateAgent first-attach shape). */
