@@ -239,14 +239,16 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     app.set('trust proxy', true);
   }
 
-  // Preserve trust-proxy boot validation before the first DB-touching readiness check.
+  // #4111: a database logically restored without the event-key rebase holds agent_team_events keys this cluster never
+  // issued, and the changed-since read would hide those rows. Refuse before any route, loop or listener exists AND
+  // before the first database write of the bootstrap (gate-owner P9 ruling on #4116, comment 6848664427): it runs after
+  // the non-writing trust-proxy validation above and BEFORE assertRateReadiness, which seeds missing rate metadata.
+  // The check only reads. Restores go through scripts/ops/restore-with-rebase, whose output passes.
+  await assertEventKeysLocal(db);
+
+  // Preserve trust-proxy boot validation before the first DB-writing readiness check (rate metadata seeding).
   // Both prerequisites still complete before this app can listen.
   await assertRateReadiness(db);
-
-  // #4111: a database logically restored without the event-key rebase holds agent_team_events keys this cluster never
-  // issued, and the changed-since read would hide those rows. Refuse before any route, loop or listener exists; the
-  // check only reads. Restores go through scripts/ops/restore-with-rebase, whose output passes.
-  await assertEventKeysLocal(db);
 
   // #557: a production deploy with no webhook secret refuses deliveries (the
   // route answers 503), so say so at BOOT rather than letting the operator

@@ -385,6 +385,101 @@ describe.skipIf(!enabled)('#4111 restore-with-rebase on private clusters', { tim
     expect(await F.servingOrder(B.url(db))).toEqual(before);
   });
 
+  // Gate-owner P9 ruling on #4116 (comment 6848664427): the WHOLE bootstrap writes nothing before the refusal, not only
+  // the check. The real entry point, on a plain foreign-key restore with no rate metadata (which assertRateReadiness
+  // would seed), against a whole-database image.
+  const appTables = async (url: string) => {
+    const tables = await F.sql<{ t: string }>(
+      url,
+      `SELECT c.relname AS t FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') ORDER BY 1`,
+    );
+    const out: { t: string; n: number; h: string }[] = [];
+    for (const { t } of tables) {
+      const [row] = await F.sql<{ n: number; h: string }>(
+        url,
+        `SELECT count(*)::int AS n, md5(coalesce(string_agg(x::text, '|' ORDER BY x::text), '')) AS h FROM public."${t}" x`,
+      );
+      out.push({ t, ...row });
+    }
+    return out;
+  };
+  const freePort = async () => {
+    const { createServer } = await import('node:net');
+    return new Promise<number>((resolve) => {
+      const srv = createServer();
+      srv.listen(0, '127.0.0.1', () => {
+        const { port } = srv.address() as { port: number };
+        srv.close(() => resolve(port));
+      });
+    });
+  };
+  /** Run src/index.ts as a development process; resolve on exit or on its listening line. */
+  const boot = async (databaseUrl: string, port: number) => {
+    const { spawn } = await import('node:child_process');
+    const env = { ...process.env, NODE_ENV: 'development', DATABASE_URL: databaseUrl, PORT: String(port), MIGRATE_DATABASE_URL: '', BASE_URL: `http://127.0.0.1:${port}` };
+    const child = spawn('node_modules/.bin/tsx', ['src/index.ts'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    child.stdout.on('data', (d) => (out += d));
+    child.stderr.on('data', (d) => (out += d));
+    const result = await new Promise<{ code: number | null; listening: boolean }>((resolve) => {
+      const timer = setTimeout(() => resolve({ code: null, listening: false }), 90_000);
+      child.stdout.on('data', () => {
+        if (out.includes('hadron-server listening')) {
+          clearTimeout(timer);
+          resolve({ code: null, listening: true });
+        }
+      });
+      child.on('exit', (code) => {
+        clearTimeout(timer);
+        resolve({ code, listening: false });
+      });
+    });
+    return { ...result, out: () => out, stop: () => child.kill('SIGKILL') };
+  };
+
+  it('P9 (ruling 6848664427): the real bootstrap refuses a plain foreign-key restore with zero database writes, no listener', async () => {
+    const db = fresh();
+    await F.sql(B.url(), `CREATE DATABASE ${db} TEMPLATE ${F.TEMPLATE}`);
+    const { execFileSync } = await import('node:child_process');
+    execFileSync(`${B.bin}/pg_restore`, ['--no-owner', '--no-privileges', '-d', B.url(db), dumps.full], { stdio: 'pipe' });
+    await F.sql(B.url(db), 'TRUNCATE rate_limit_policies, rate_limit_manifests CASCADE');
+    const before = await appTables(B.url(db));
+    expect(before.find((r) => r.t === 'rate_limit_manifests')?.n).toBe(0);
+    expect(before.find((r) => r.t === 'agent_team_events')?.n).toBeGreaterThan(0);
+    expect(before.every((r) => typeof r.h === 'string' && r.h.length === 32)).toBe(true);
+    const port = await freePort();
+    const run = await boot(B.url(db), port);
+    run.stop();
+    expect(run.listening, run.out()).toBe(false);
+    expect(run.code, run.out()).not.toBe(0);
+    expect(run.out()).toMatch(/FOREIGN_EVENT_KEYS|logically restored without the key rebase/);
+    expect(run.out()).not.toMatch(/hadron-server listening/);
+    const { connect: tcp } = await import('node:net');
+    const open = await new Promise<boolean>((resolve) => {
+      const sock = tcp(port, '127.0.0.1');
+      sock.on('connect', () => (sock.destroy(), resolve(true)));
+      sock.on('error', () => resolve(false));
+    });
+    expect(open).toBe(false);
+    expect(await appTables(B.url(db))).toEqual(before);
+  });
+
+  it('P9 positive: the pipeline output boots, and the ordinary readiness still seeds rate metadata', async () => {
+    const target = fresh();
+    await restoreWithRebase(base({ target }));
+    await F.sql(B.url(target), 'TRUNCATE rate_limit_policies, rate_limit_manifests CASCADE');
+    const port = await freePort();
+    const run = await boot(B.url(target, F.ROLES.owner, F.PASSWORD), port);
+    try {
+      expect(run.listening, run.out()).toBe(true);
+      const [{ n }] = await F.sql(B.url(target), 'SELECT count(*)::int AS n FROM rate_limit_manifests');
+      expect(n).toBeGreaterThan(0);
+    } finally {
+      run.stop();
+    }
+  });
+
   it('P12: the owner-only statements fail for restore_admin without SET ROLE', async () => {
     const target = fresh();
     await restoreWithRebase(base({ target }));
@@ -426,6 +521,71 @@ describe.skipIf(!enabled)('#4111 restore-with-rebase on private clusters', { tim
     }
     expect(await triggers()).toEqual(start);
     expect(start).toContainEqual({ n: 'agent_team_event_append_only', e: 'O' });
+  });
+
+  // Rook's P3-1 on #4116: the two S2 fence checks, pinned.
+  it('S2: a login role that inherits restore_admin can still connect, so the ACL fence refuses and tears down', async () => {
+    await F.sql(B.url(), `CREATE ROLE inherits_admin LOGIN PASSWORD '${F.PASSWORD}' IN ROLE ${F.ROLES.admin}`);
+    try {
+      const target = fresh();
+      const err = await restoreWithRebase(base({ target })).catch((e) => e);
+      expect(err).toBeInstanceOf(RestoreError);
+      expect(err.stage).toBe('S2');
+      expect(err.message).toMatch(/ACL fence: inherits_admin can still connect/);
+      expect(err.teardown).toBe('dropped');
+      expect(await dbExists(target)).toBe(false);
+    } finally {
+      await F.sql(B.url(), 'DROP ROLE inherits_admin');
+    }
+  });
+
+  it('S2: a session connected before admission refuses; it is never killed, so the drop waits for it', async () => {
+    const target = fresh();
+    let early: Client | null = null;
+    const err = await restoreWithRebase(
+      base({
+        target,
+        log: async (e) => {
+          if (e.stage === 'S1' && e.event === 'created') {
+            await F.sql(B.url(), `ALTER DATABASE ${target} ALLOW_CONNECTIONS true`);
+            early = new Client({ connectionString: B.url(target) });
+            await early.connect();
+          }
+        },
+      }),
+    ).catch((e) => e);
+    try {
+      expect(err).toBeInstanceOf(RestoreError);
+      expect(err.stage).toBe('S2');
+      expect(err.message).toMatch(/a session is connected before admission/);
+      expect(err.teardown).toBe('drop-failed');
+      expect(await dbExists(target)).toBe(true);
+    } finally {
+      await (early as Client | null)?.end();
+    }
+    expect(await teardown(F.adminUrl(B), target, err.oid, F.ROLES.owner)).toBe('dropped');
+  });
+
+  // Rook's P3-2 on #4116: three S0 refusals, pinned; nothing is created.
+  it('S0: CREATEROLE on restore_admin, a superuser connect role and a non-quiescent template each refuse', async () => {
+    const t1 = fresh();
+    await F.sql(B.url(), `ALTER ROLE ${F.ROLES.admin} CREATEROLE`);
+    try {
+      await expect(restoreWithRebase(base({ target: t1 }))).rejects.toThrow(/\[S0\].*has CREATEROLE/);
+    } finally {
+      await F.sql(B.url(), `ALTER ROLE ${F.ROLES.admin} NOCREATEROLE`);
+    }
+    const t2 = fresh();
+    await expect(restoreWithRebase(base({ target: t2, connectRoles: ['postgres'] }))).rejects.toThrow(/\[S0\] role postgres is a superuser/);
+    const t3 = fresh();
+    const holder = new Client({ connectionString: B.url(F.TEMPLATE) });
+    await holder.connect();
+    try {
+      await expect(restoreWithRebase(base({ target: t3 }))).rejects.toThrow(/\[S0\] template .* is not quiescent/);
+    } finally {
+      await holder.end();
+    }
+    for (const t of [t1, t2, t3]) expect(await dbExists(t)).toBe(false);
   });
 
   // Blind finding F1 on #4116: an error from CREATE DATABASE does not prove nothing was created.
@@ -470,6 +630,33 @@ describe.skipIf(!enabled)('#4111 restore-with-rebase on private clusters', { tim
     expect(await reconcileCreate(F.adminUrl(B), target, F.ROLES.owner, x)).toEqual({ oid: expect.any(Number), mine: false });
     expect(await reconcileCreate(F.adminUrl(B), `${target}_absent`, F.ROLES.owner, x)).toBe('absent');
     await F.sql(B.url(), `DROP DATABASE ${target}`);
+  });
+
+  // Andi's LOCAL F1 on #4116: an inherited PGSERVICE redirected pg_restore into another cluster while every other step
+  // used RESTORE_ADMIN_URL. The child's environment now comes from the URL alone.
+  it('LOCAL F1: an inherited PGSERVICE pointing at another cluster cannot redirect pg_restore', async () => {
+    const target = fresh();
+    // The decoy: the same database name on cluster A, empty, writable by a trusted superuser the service selects.
+    await F.sql(A.url(), `CREATE DATABASE ${target}`);
+    const { writeFileSync } = await import('node:fs');
+    const svc = `${A.dir}/pg_service.conf`;
+    writeFileSync(svc, `[decoy]\nhost=127.0.0.1\nport=${A.port}\nuser=postgres\ndbname=${target}\n`);
+    const saved = { s: process.env.PGSERVICE, f: process.env.PGSERVICEFILE };
+    process.env.PGSERVICE = 'decoy';
+    process.env.PGSERVICEFILE = svc;
+    try {
+      const res = await restoreWithRebase(base({ target }));
+      expect(res.status).toBe('RELEASED');
+    } finally {
+      if (saved.s === undefined) delete process.env.PGSERVICE;
+      else process.env.PGSERVICE = saved.s;
+      if (saved.f === undefined) delete process.env.PGSERVICEFILE;
+      else process.env.PGSERVICEFILE = saved.f;
+    }
+    expect((await F.servingOrder(B.url(target))).map((r) => r.id)).toEqual(sourceOrder.map((r) => r.id));
+    const [{ n }] = await F.sql(A.url(target), `SELECT count(*)::int AS n FROM pg_class c JOIN pg_namespace s ON s.oid = c.relnamespace WHERE s.nspname = 'public'`);
+    expect(n).toBe(0);
+    await F.sql(A.url(), `DROP DATABASE ${target}`);
   });
 
   // Blind finding F2 on #4116: pg_restore gets the same TLS settings as the pipeline's own sessions.

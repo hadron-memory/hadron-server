@@ -21,7 +21,8 @@ already given to clients resume at exactly the next change: nothing skipped, not
 unchanged.
 
 A server started on a database that still holds foreign keys refuses to boot (`FOREIGN_EVENT_KEYS`, from
-`assertEventKeysLocal` in `src/server.ts`). The check writes nothing. Its remedy is this runbook, into a NEW database.
+`assertEventKeysLocal` in `src/server.ts`). It runs before the bootstrap's first database write (the rate-metadata
+seeding in `assertRateReadiness`), so a refused boot writes nothing to the database and never listens. Its remedy is this runbook, into a NEW database.
 There is no in-place repair of a serving database.
 
 ## Prerequisites (checked by the pipeline, never created by it)

@@ -445,7 +445,8 @@ describe('#4111 R12: the named-trigger exception (A2, T1-T5, L1)', { timeout: 60
   });
 
   it.each([
-    ['another trigger disabled', 'ALTER TABLE agent_team_events DISABLE TRIGGER worker_reference_fence_1162', /trigger state/],
+    // Caught by the in-window check at the window's end (Rook P3-3 on #4116), not only by the after-check.
+    ['another trigger disabled', 'ALTER TABLE agent_team_events DISABLE TRIGGER worker_reference_fence_1162', /changed state while it was disabled/],
     ['session_replication_role = replica', 'SET LOCAL session_replication_role = replica', /session_replication_role/],
   ])('T3: %s inside the window fails the trigger-state check and rolls back', async (_what, inject, msg) => {
     const threshold = await buildHistory();

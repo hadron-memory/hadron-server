@@ -197,15 +197,17 @@ export async function withAppendOnlyTriggerOff<T>(
   const images = await rowImages(client);
 
   await client.query(`ALTER TABLE ${EVENT_TABLE} DISABLE TRIGGER ${APPEND_ONLY_TRIGGER}`);
+  await assertWriterExcluded(client);
+
+  const result = await fn();
+  if (whileOff) await whileOff(client);
+
+  // At the END of the window, after the work it guards (Rook's P3-3 on #4116): read before `fn`, it observed nothing.
   const off = await triggerStates(client);
   const expectedOff = start.map((t) => (t.name === APPEND_ONLY_TRIGGER ? { ...t, enabled: 'D' } : t));
   if (!sameTriggers(off, expectedOff)) {
     throw new RebaseVerificationError('a trigger other than the append-only trigger changed state while it was disabled');
   }
-  await assertWriterExcluded(client);
-
-  const result = await fn();
-  if (whileOff) await whileOff(client);
 
   await client.query(`ALTER TABLE ${EVENT_TABLE} ENABLE TRIGGER ${APPEND_ONLY_TRIGGER}`);
   await assertWriterExcluded(client);
