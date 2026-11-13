@@ -33,6 +33,10 @@ describe('findUnstorableText', () => {
     let deep: any = 'x\0';
     for (let i = 0; i < 200; i++) deep = { n: deep };
     expect(() => findUnstorableText({ data: deep })).not.toThrow();
+    expect(findUnstorableText({ data: deep })).toEqual({ field: 'data', what: 'a NUL (U+0000) character' });
+    let deepKey: any = { 'k\0': 1 };
+    for (let i = 0; i < 200; i++) deepKey = { n: deepKey };
+    expect(findUnstorableText({ data: deepKey })?.field).toBe('data');
   });
 });
 

@@ -20,20 +20,24 @@ function unstorable(value: string): UnstorableText['what'] | null {
   return null;
 }
 
-function scan(value: unknown, depth = 0): UnstorableText['what'] | null {
-  if (typeof value === 'string') return unstorable(value);
-  if (depth > 64 || value === null || typeof value !== 'object') return null;
-  if (Array.isArray(value)) {
-    for (const v of value) {
-      const what = scan(v, depth + 1);
+// Iterative, with no depth cap: a cap would leave a deep subtree uninspected and let a NUL beneath it reach the write.
+function scan(root: unknown): UnstorableText['what'] | null {
+  const stack: unknown[] = [root];
+  while (stack.length > 0) {
+    const value = stack.pop();
+    if (typeof value === 'string') {
+      const what = unstorable(value);
       if (what) return what;
+    } else if (Array.isArray(value)) {
+      for (const v of value) stack.push(v);
+    } else if (value !== null && typeof value === 'object') {
+      // JSON objects (`data`, `properties`): a NUL fails the jsonb write (22P05) in a key as in a value.
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+        const what = unstorable(k);
+        if (what) return what;
+        stack.push(v);
+      }
     }
-    return null;
-  }
-  // JSON objects (`data`, `properties`): a NUL fails the jsonb write (22P05) in a key as in a value.
-  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-    const what = unstorable(k) ?? scan(v, depth + 1);
-    if (what) return what;
   }
   return null;
 }

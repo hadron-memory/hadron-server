@@ -174,6 +174,9 @@ describe('#4096 MCP node tools (parity: typed refusal with the code, no row writ
     await M.createNode({}, { input: { memoryId: memory.id, loc: 'n1', name: 'N', content: 'before' } }, ctx(admin.id));
     shape(await mcp(admin.id).callToolText('hadron_update_node', { urn: urn('n1'), reason: nul }), 'reason');
     shape(await mcp(admin.id).callToolText('hadron_update_node', { urn: urn('n1'), data: { k: nul } }), 'data');
+    shape(await mcp(admin.id).callToolText('hadron_update_node', { urn: urn('n1'), edges: [{ targetUrn: urn('n1'), name: nul }] }), 'edges[0].name');
+    expect((await db.node.findFirstOrThrow({ where: { memoryId: memory.id, loc: 'n1' } })).content).toBe('before');
+    expect(await db.edge.count({ where: { memoryId: memory.id } })).toBe(0);
     shape(await mcp(admin.id).callToolText('hadron_create_node', { urn: urn('n2'), name: 'N', properties: { k: nul } }), 'properties');
     expect(await nodes()).toBe(1);
   });
