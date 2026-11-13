@@ -297,8 +297,8 @@ describe('the chat path', () => {
     // loc-scope-ok: whole-table counts, compared before and after one refused call.
     const counts = async () => [await db.memory.count(), await db.node.count(), await db.memorySubscription.count()];
     const asAdmin = (): Context => ({ db, userId: admin.id, roles: ['READER'] } as Context);
-    // `admin` is an org member, so the lazy per-user memory belongs to the App; `member` is not, so it belongs to none.
-    for (const [who, bad] of [[asAdmin, foreign.id], [asMember, foreign.id], [asMember, claude.id]] as const) {
+    // #4046: both the org manager and the AppMember now select the licensed App on a cold start.
+    for (const [who, bad] of [[asAdmin, foreign.id], [asMember, foreign.id]] as const) {
       // Atilla's P3: this person has no per-user memory for the Agent yet, so the lazy-create branch is the one tested.
       const asUser = who().userId!;
       expect(await db.memory.count({ where: { userMemoryOfAgentId: chatAgent.id, createdBy: asUser } })).toBe(0);
@@ -306,8 +306,14 @@ describe('the chat path', () => {
       expect(await code(start({ scope: 'private', aiConfigChoice: bad }, who()))).toBe('AiServiceConfigNotFoundError');
       expect(await counts()).toEqual(before);
     }
-    // the App's own config is accepted for the person it belongs to, and does provision
-    const ok = await start({ scope: 'private', aiConfigChoice: claude.id }, asAdmin());
+    // Retain the no-App refusal leg with a lawful direct manager and no installed App.
+    await db.appAgent.delete({ where: { appId_agentId: { appId: app.id, agentId: chatAgent.id } } });
+    const noAppBefore = await counts();
+    expect(await code(start({ scope: 'private', aiConfigChoice: claude.id }, asAdmin()))).toBe('AiServiceConfigNotFoundError');
+    expect(await counts()).toEqual(noAppBefore);
+    await db.appAgent.create({ data: { appId: app.id, agentId: chatAgent.id } });
+    // The AppMember's own config is accepted and the cold start provisions in that App.
+    const ok = await start({ scope: 'private', aiConfigChoice: claude.id }, asMember());
     expect(await stored(ok.chatId)).toBe(claude.id);
   });
 

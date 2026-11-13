@@ -1,6 +1,9 @@
 /** #4046: App-reached chat homes must not serve an uninstalled/unlicensed Agent's definition. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
+import { generateId } from '../../../lib/id.js';
+import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
+import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 import { cleanDb, chatNodeByLocOrThrow } from '../../../test/helpers.js';
 import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -78,7 +81,7 @@ async function start(scope: 'private' | 'shared' = 'private') {
  * The licensed control verifies this observer against both actual retrieval paths;
  * it is not a universal raw-SQL or transaction-client query recorder.
  */
-async function observeDefinitionReads<T>(run: () => Promise<T>) {
+async function observeDefinitionReads<T>(run: () => Promise<T>, beforeTransaction?: () => Promise<void>) {
   const first = vi.spyOn(db.node, 'findFirst');
   const many = vi.spyOn(db.node, 'findMany');
   const unique = vi.spyOn(db.node, 'findUnique');
@@ -105,8 +108,10 @@ async function observeDefinitionReads<T>(run: () => Promise<T>) {
       return typeof value === 'function' ? value.bind(target) : value;
     },
   });
-  const transactions = vi.spyOn(db, '$transaction').mockImplementation(((first: any, ...rest: any[]) =>
-    typeof first === 'function' ? transaction((tx: any) => first(wrap(tx)), ...rest) : transaction(first, ...rest)) as any);
+  const transactions = vi.spyOn(db, '$transaction').mockImplementation((async (first: any, ...rest: any[]) => {
+    await beforeTransaction?.();
+    return typeof first === 'function' ? transaction((tx: any) => first(wrap(tx)), ...rest) : transaction(first, ...rest);
+  }) as any);
   try {
     const value = await run();
     const systemReads = [...first.mock.calls, ...many.mock.calls, ...unique.mock.calls,
@@ -302,7 +307,7 @@ it.each(['private', 'shared'] as const)('cold and warm %s starts use the real li
 it('a bound App-key session starts only in its licensed home', async () => {
   const first = await start();
   const root = await chatNodeByLocOrThrow(db, first.chatId);
-  const session = await db.session.create({ data: { appId, agentId, userId, memoryId: root.memoryId, tool: 'vitest' } });
+  const session = await db.session.create({ data: { id: generateId(), appId, agentId, userId, memoryId: root.memoryId, tool: 'vitest' } });
   const keyCtx: Context = { db, appId, sessionId: session.id, roles: [] };
   expect((await M.startChat({}, { agentId, conversationName: 'flow' }, keyCtx)).systemMessage).toContain('LICENSED STAGE');
   await db.memory.update({ where: { id: root.memoryId }, data: { appId: null } });
@@ -351,4 +356,195 @@ it('shared admission stays on the selected App if the located home moves before 
     expect(seen.systemReads).toEqual([]);
     expect(await state()).toBe(expectedState);
   } finally { spy.mockRestore(); }
+});
+
+/** The only uncommitted revoker holds this named authority domain in our private test database. */
+async function assertHeldRefusal(anchor: { kind: 'app' | 'org' | 'user'; id: string }, revoke: (tx: any) => Promise<unknown>, scope: 'private' | 'shared' = 'private') {
+  const before = await state();
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let held!: () => void;
+  const ready = new Promise<void>(resolve => { held = resolve; });
+  const holder = db.$transaction(async tx => {
+    await lockAuthorityAnchors(tx, [anchor], 'exclusive');
+    await revoke(tx);
+    held();
+    await gate;
+  }, { timeout: 20_000 });
+  await ready;
+  let completed = false;
+  const request = observeDefinitionReads(async () => {
+    try { await M.startChat({}, { agentId, scope, conversationName: 'flow' }, ctx()); return null; }
+    catch (error) { return error as any; }
+  }).then(result => { completed = true; return result; });
+  try {
+    await waitForLockWaitersOfType(db, 'advisory', 1);
+    expect(completed).toBe(false);
+    expect(await state()).toBe(before);
+  } finally { release(); await holder; await request; }
+  const result = await request;
+  expect(result.value).toBeTruthy();
+  expect(result.systemReads).toEqual([]);
+  expect(await state()).toBe(before);
+}
+async function retainedForeignHomeWithoutParticipation() {
+  await foreignHome();
+  await start();
+  await db.appMember.deleteMany({ where: { appId, userId } });
+  await db.orgMember.deleteMany({ where: { organizationId: foreignOrgId, userId } });
+}
+it('a home-only App anchor fences uninstall even when the Agent manager has no App participation', async () => {
+  await retainedForeignHomeWithoutParticipation();
+  await assertHeldRefusal({ kind: 'app', id: appId }, tx => tx.appAgent.delete({ where: { appId_agentId: { appId, agentId } } }));
+});
+it('a home-only App org anchor fences tenant deletion independently of the Agent org', async () => {
+  await retainedForeignHomeWithoutParticipation();
+  await assertHeldRefusal({ kind: 'org', id: foreignOrgId }, tx => tx.organization.update({ where: { id: foreignOrgId }, data: { deletedAt: new Date() } }));
+});
+it('a home-only user-App owner anchor fences owner licence revocation independently of the caller', async () => {
+  const agent = await db.agent.findUniqueOrThrow({ where: { id: agentId } });
+  const owner = await db.user.create({ data: { handle: 'home4046-owner' } });
+  await db.orgMember.create({ data: { organizationId: agent.organizationId!, userId: owner.id, role: 'READER' } });
+  await db.agentSubscription.create({ data: { userId: owner.id, agentId, activatedAt: new Date('2020-01-01') } });
+  const app = await db.app.create({ data: { ownerUserId: owner.id, name: 'Owner licence', urn: '@home4046-owner:app' } });
+  await db.appAgent.delete({ where: { appId_agentId: { appId, agentId } } });
+  appId = app.id;
+  await db.appAgent.create({ data: { appId, agentId } });
+  await db.appMember.create({ data: { appId, userId, role: 'member' } });
+  await start();
+  await db.appMember.delete({ where: { appId_userId: { appId, userId } } });
+  await assertHeldRefusal({ kind: 'user', id: owner.id }, tx => tx.orgMember.update({ where: { organizationId_userId: { organizationId: agent.organizationId!, userId: owner.id } }, data: { deletedAt: new Date() } }));
+});
+
+it('shared provisioning recovers an actual unique collision without poisoning the outer transaction', async () => {
+  const transaction = db.$transaction.bind(db) as (...args: any[]) => Promise<any>;
+  let collided = false;
+  const spy = vi.spyOn(db, '$transaction').mockImplementation(((work: any, ...options: any[]) => transaction(async (tx: any) => {
+    const memory = new Proxy(tx.memory, { get(target, prop, receiver) {
+      if (prop === 'create') return async (args: any) => {
+        if (!collided && args.data?.class === 'app') {
+          collided = true;
+          await db.memory.create({ ...args, data: { ...args.data, id: generateId() } });
+        }
+        return target.create(args); // Real P2002, then the shared helper must recover its savepoint.
+      };
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    return work(new Proxy(tx, { get(target, prop, receiver) {
+      if (prop === 'memory') return memory;
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } }));
+  }, ...options)) as any);
+  try {
+    expect((await start('shared')).systemMessage).toContain('LICENSED STAGE');
+    expect(collided).toBe(true);
+    expect(await db.memory.count({ where: { appId, sharedMemoryOfAgentId: agentId } })).toBe(1);
+  } finally { spy.mockRestore(); }
+});
+
+it('failed savepoint recovery preserves the original provisioning error', async () => {
+  const transaction = db.$transaction.bind(db) as (...args: any[]) => Promise<any>;
+  const original = new Error('original provisioning connection error');
+  const secondary = new Error('secondary rollback error');
+  const before = await state();
+  let reached = false;
+  const spy = vi.spyOn(db, '$transaction').mockImplementation(((work: any, ...options: any[]) => transaction(async (tx: any) => {
+    const memory = new Proxy(tx.memory, { get(target, prop, receiver) {
+      if (prop === 'create') return (args: any) => {
+        if (args.data?.class === 'app') { reached = true; throw original; }
+        return target.create(args);
+      };
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    return work(new Proxy(tx, { get(target, prop, receiver) {
+      if (prop === 'memory') return memory;
+      if (prop === '$executeRawUnsafe') return (query: string, ...params: any[]) => {
+        if (query === 'ROLLBACK TO SAVEPOINT shared_chat_memory_create') throw secondary;
+        return target.$executeRawUnsafe(query, ...params);
+      };
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } }));
+  }, ...options)) as any);
+  try {
+    await expect(M.startChat({}, { agentId, scope: 'shared', conversationName: 'flow' }, ctx())).rejects.toBe(original);
+    expect(reached).toBe(true);
+    expect(await state()).toBe(before);
+  } finally { spy.mockRestore(); }
+});
+
+it('a cold start rolls back its home when parent creation fails after provisioning', async () => {
+  const transaction = db.$transaction.bind(db) as (...args: any[]) => Promise<any>;
+  const original = new Error('late parent failure');
+  const before = await state();
+  let reached = false;
+  const spy = vi.spyOn(db, '$transaction').mockImplementation(((work: any, ...options: any[]) => transaction(async (tx: any) => {
+    const node = new Proxy(tx.node, { get(target, prop, receiver) {
+      if (prop === 'upsert') return (args: any) => {
+        if (args.where?.loc_memoryId?.loc === 'chats') { reached = true; throw original; }
+        return target.upsert(args);
+      };
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    return work(new Proxy(tx, { get(target, prop, receiver) {
+      if (prop === 'node') return node;
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } }));
+  }, ...options)) as any);
+  try {
+    await expect(M.startChat({}, { agentId, conversationName: 'flow' }, ctx())).rejects.toBe(original);
+    expect(reached).toBe(true);
+    expect(await state()).toBe(before);
+  } finally { spy.mockRestore(); }
+});
+
+for (const scope of ['private', 'shared'] as const) {
+  it(`a cold ${scope} PUBLIC start cannot retain App membership that is revoked before the locked check`, async () => {
+    await db.orgMember.deleteMany({ where: { userId } });
+    await db.agent.update({ where: { id: agentId }, data: { visibility: 'PUBLIC' } });
+    await assertHeldRefusal({ kind: 'app', id: appId }, tx => tx.appMember.delete({ where: { appId_userId: { appId, userId } } }), scope);
+  });
+}
+it('a cold org-participant start rechecks CONTRIBUTOR after the org anchor wait', async () => {
+  const agent = await db.agent.findUniqueOrThrow({ where: { id: agentId } });
+  await db.orgMember.updateMany({ where: { userId }, data: { role: 'CONTRIBUTOR' } });
+  await db.appMember.deleteMany({ where: { userId } });
+  await assertHeldRefusal({ kind: 'org', id: agent.organizationId! }, tx => tx.orgMember.updateMany({ where: { userId }, data: { role: 'READER' } }));
+});
+
+it('an ineligible App-less start keeps the unknown-Agent answer even with an invalid config choice', async () => {
+  await db.appAgent.delete({ where: { appId_agentId: { appId, agentId } } });
+  await db.orgMember.updateMany({ where: { userId }, data: { role: 'READER' } });
+  const before = await state();
+  const result = await observeDefinitionReads(async () => {
+    try { await M.startChat({}, { agentId, conversationName: 'flow', aiConfigChoice: generateId() }, ctx()); return null; }
+    catch (error) { return error as any; }
+  });
+  expect(result.value?.code).toBe('AGENT_NOT_FOUND');
+  expect(result.systemReads).toEqual([]);
+  expect(await state()).toBe(before);
+});
+
+it('a replaced system pointer cannot read the old definition at locked admission', async () => {
+  await start();
+  const before = await state();
+  let changed = false;
+  const result = await observeDefinitionReads(async () => {
+    try { await M.startChat({}, { agentId, conversationName: 'flow' }, ctx()); return null; }
+    catch (error) { return error as any; }
+  }, async () => {
+    if (!changed) {
+      changed = true;
+      await db.agent.update({ where: { id: agentId }, data: { systemMemoryId: null } });
+    }
+  });
+  expect(changed).toBe(true);
+  expect(result.value?.code).toBe('AGENT_NOT_FOUND');
+  expect(result.systemReads).toEqual([]);
+  expect(await state()).toBe(before);
 });

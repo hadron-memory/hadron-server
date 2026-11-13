@@ -116,10 +116,10 @@ describe('#1581: startChat gates the Agent before reading or licensing anything'
     expect(await subsFor(agent.id)).toEqual([]);
   });
 
-  it('CONTROL: an org READER starts the chat and is licensed', async () => {
-    const out = await M.startChat(null, { agentId: agent.id }, userCtx(member.id));
-    expect(out.chatId).toMatch(/^chats:/);
-    expect(await subsFor(agent.id)).toEqual([member.id]);
+  it('#4046: an org READER without App participation cannot start', async () => {
+    await expect(M.startChat(null, { agentId: agent.id }, userCtx(member.id)))
+      .rejects.toMatchObject({ name: 'AgentNotFoundError' });
+    expect(await subsFor(agent.id)).toEqual([]);
   });
 
   it('CONTROL: an App end user (AppMember, not an org member) reaches the Agent through the live install', async () => {
@@ -295,6 +295,8 @@ describe('#1581: App-minted users through createAppUser + startAgentSession', ()
 
 describe('#1581 review: two concurrent first chats for the same user both complete', () => {
   it('neither chat transaction is aborted, and exactly one subscription exists', async () => {
+    // #4046: this subscription-race control reaches the App as an org CONTRIBUTOR.
+    await db.orgMember.update({ where: { organizationId_userId: { organizationId: orgA.id, userId: member.id } }, data: { role: 'CONTRIBUTOR' } });
     const results = await Promise.allSettled([
       M.startChat(null, { agentId: agent.id }, userCtx(member.id)),
       M.startChat(null, { agentId: agent.id }, userCtx(member.id)),
@@ -450,7 +452,8 @@ describe('#1573: startChat waits for an in-flight revocation of its read right',
     return { release, done };
   }
 
-  it('an org READER whose membership is being removed is refused after the removal commits', async () => {
+  it('an org CONTRIBUTOR whose membership is being removed is refused after the removal commits', async () => {
+    await db.orgMember.update({ where: { organizationId_userId: { organizationId: orgA.id, userId: member.id } }, data: { role: 'CONTRIBUTOR' } });
     const holder = await holdRevocation({ kind: 'org', id: orgA.id }, (tx) =>
       tx.orgMember.updateMany({ where: { organizationId: orgA.id, userId: member.id }, data: { deletedAt: new Date() } }));
     const chat = M.startChat(null, { agentId: agent.id }, userCtx(member.id));

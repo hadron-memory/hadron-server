@@ -283,6 +283,8 @@ export async function findOrCreateAppClassMemory(args: {
   ownerUserId?: string | null;
   actingUserId: string;
   db: PrismaClient;
+  /** Caller holds an outer transaction; isolate expected unique conflicts with a savepoint. */
+  inTransaction?: boolean;
 }): Promise<string> {
   const { appId, appUrn, appName, agentId, agentUrn, agentName, organizationId, actingUserId, db } =
     args;
@@ -378,6 +380,7 @@ export async function findOrCreateAppClassMemory(args: {
       authorRoot: agentSlug,
     });
     try {
+      if (args.inTransaction) await db.$executeRawUnsafe('SAVEPOINT shared_chat_memory_create');
       const created = await db.memory.create({
         data: {
           organizationId,
@@ -396,8 +399,15 @@ export async function findOrCreateAppClassMemory(args: {
         },
         select: { id: true },
       });
+      if (args.inTransaction) await db.$executeRawUnsafe('RELEASE SAVEPOINT shared_chat_memory_create');
       return created.id;
     } catch (err) {
+      if (args.inTransaction) {
+        try {
+          await db.$executeRawUnsafe('ROLLBACK TO SAVEPOINT shared_chat_memory_create');
+          await db.$executeRawUnsafe('RELEASE SAVEPOINT shared_chat_memory_create');
+        } catch { throw err; } // A dead connection cannot be repaired; preserve its original error.
+      }
       if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== 'P2002') throw err;
       const race = await db.memory.findUnique({
         where: { appId_sharedMemoryOfAgentId: { appId, sharedMemoryOfAgentId: agentId } },
