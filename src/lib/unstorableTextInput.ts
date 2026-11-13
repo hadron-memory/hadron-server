@@ -20,16 +20,46 @@ function unstorable(value: string): UnstorableText['what'] | null {
   return null;
 }
 
-/** The first field whose text cannot be stored, or null. A string, or an array of strings (tags), is inspected; anything else is not text. */
-export function findUnstorableText(fields: Record<string, unknown>): UnstorableText | null {
-  for (const [field, value] of Object.entries(fields)) {
-    const texts = typeof value === 'string' ? [value] : Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
-    for (const t of texts) {
-      const what = unstorable(t);
-      if (what) return { field, what };
+function scan(value: unknown, depth = 0): UnstorableText['what'] | null {
+  if (typeof value === 'string') return unstorable(value);
+  if (depth > 64 || value === null || typeof value !== 'object') return null;
+  if (Array.isArray(value)) {
+    for (const v of value) {
+      const what = scan(v, depth + 1);
+      if (what) return what;
     }
+    return null;
+  }
+  // JSON objects (`data`, `properties`): a NUL fails the jsonb write (22P05) in a key as in a value.
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    const what = unstorable(k) ?? scan(v, depth + 1);
+    if (what) return what;
   }
   return null;
+}
+
+/**
+ * The first field whose text cannot be stored, or null. A string, an array (tags), or a JSON value (`data`, `properties`)
+ * is inspected recursively, keys included; numbers, booleans and null are not text.
+ */
+export function findUnstorableText(fields: Record<string, unknown>): UnstorableText | null {
+  for (const [field, value] of Object.entries(fields)) {
+    const what = scan(value);
+    if (what) return { field, what };
+  }
+  return null;
+}
+
+/** Flattens a caller's inline `edges` list into `edges[i].<key>` text fields, so a refusal names the exact field. */
+export function edgeTextFields(edges: unknown): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (!Array.isArray(edges)) return out;
+  edges.forEach((edge, i) => {
+    if (edge && typeof edge === 'object') {
+      for (const [k, v] of Object.entries(edge as Record<string, unknown>)) out[`edges[${i}].${k}`] = v;
+    }
+  });
+  return out;
 }
 
 /** The refusal's text: names the field and the kind of character, never the value. */
@@ -41,4 +71,11 @@ export function unstorableTextMessage({ field, what }: UnstorableText): string {
 export function assertStorableText(fields: Record<string, unknown>): void {
   const found = findUnstorableText(fields);
   if (found) throw new GraphQLError(unstorableTextMessage(found), { extensions: { code: 'BAD_USER_INPUT', field: found.field } });
+}
+
+/** #4096: the MCP text for a delegated resolver's unstorable-text refusal (`[bad_user_input] …`, field named), or null for any other error. */
+export function unstorableTextText(e: unknown): string | null {
+  return e instanceof GraphQLError && e.extensions?.code === 'BAD_USER_INPUT' && typeof e.extensions.field === 'string'
+    ? `[bad_user_input] ${e.message}`
+    : null;
 }

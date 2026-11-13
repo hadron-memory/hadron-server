@@ -169,6 +169,7 @@ import {
   releaseOnceOnResponseEnd,
 } from './transportBounds.js';
 import { unstorableTextRefusal, refusalResult, toolErrorResult, withToolErrorBoundary } from './toolError.js';
+import { edgeTextFields, unstorableTextText } from '../lib/unstorableTextInput.js';
 import { refNamesNothing } from '../lib/entityRef/refNamesNothing.js';
 import { textResult } from './textResult.js';
 import { publicErrorExtensions } from '../lib/errorDiagnostics.js';
@@ -4341,8 +4342,8 @@ export function createMcpServerInstance(
         return refusalResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memoryId)}`);
       }
       // #4096: caller text a NUL or unpaired surrogate would fail the write (Postgres 22021 / encoding) is refused typed, before any write and after authorization.
-      const nulParent = unstorableTextRefusal({ name: rawName, description, tags });
-      if (nulParent) return nulParent;
+      const unstorableParent = unstorableTextRefusal({ name: rawName, description, tags });
+      if (unstorableParent) return unstorableParent;
 
       const parentMemoryState = await db.memory.findUniqueOrThrow({
         where: { id: memoryId }, select: { isEncrypted: true },
@@ -6442,8 +6443,8 @@ export function createMcpServerInstance(
         return refusalResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memoryId)}`);
       }
       // #4096: as hadron_create_parent_node — typed refusal, field named, before any write and after authorization.
-      const nulCreate = unstorableTextRefusal({ name, description, abstract, content, tags, role: rawRole, nodeType, objectType, llmModel, aiAgent });
-      if (nulCreate) return nulCreate;
+      const unstorableCreate = unstorableTextRefusal({ name, description, abstract, content, tags, role: rawRole, nodeType, objectType, llmModel, aiAgent, properties, data: nodeData, ...edgeTextFields(edges) });
+      if (unstorableCreate) return unstorableCreate;
       // #4039 (B4): an invalid entry condition on a conversation node never lands, before any write (parity with writeNodeCore).
       const entryRefusal = entryConditionRefusal(loc, nodeData);
       if (entryRefusal) return entryRefusal;
@@ -7042,8 +7043,8 @@ export function createMcpServerInstance(
         return refusalResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memory.id)}`);
       }
       // #4096: typed refusal for caller text carrying a NUL, after authorization and before any write.
-      const nulUpdate = unstorableTextRefusal({ name, description, abstract, content, tags, role: rawRole, nodeType, objectType, llmModel, aiAgent });
-      if (nulUpdate) return nulUpdate;
+      const unstorableUpdate = unstorableTextRefusal({ name, description, abstract, content, tags, role: rawRole, nodeType, objectType, llmModel, aiAgent, reason, properties, data: nodeData, ...edgeTextFields(edges) });
+      if (unstorableUpdate) return unstorableUpdate;
       // #4039 (B4): the same save-time check as hadron_create_node, before any write.
       const entryRefusal = entryConditionRefusal(loc, nodeData);
       if (entryRefusal) return entryRefusal;
@@ -7684,7 +7685,7 @@ export function createMcpServerInstance(
         // #4039 (B3): the entry-condition refusal keeps its code, reason and detail, as on hadron_create_node / hadron_update_node.
         return toolErrorResult(e, () => e instanceof GraphQLError && e.extensions?.code === 'INVALID_ENTRY_CONDITION'
           ? codedRefusalText(e)
-          : `Error: ${e instanceof Error ? e.message : 'update failed'}`, 'hadron_update_node_data:resolver');
+          : unstorableTextText(e) ?? `Error: ${e instanceof Error ? e.message : 'update failed'}`, 'hadron_update_node_data:resolver');
       }
     },
   );
@@ -7890,7 +7891,7 @@ export function createMcpServerInstance(
         }
         return textResult([header, coverage, ...guidance, ...lines, ...lintLines].join('\n'));
       } catch (e) {
-        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'search-and-replace failed'}`, 'hadron_replace_text:resolver');
+        return toolErrorResult(e, () => unstorableTextText(e) ?? `Error: ${e instanceof Error ? e.message : 'search-and-replace failed'}`, 'hadron_replace_text:resolver');
       }
     },
   );
