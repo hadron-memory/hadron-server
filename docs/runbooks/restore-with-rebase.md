@@ -28,13 +28,21 @@ There is no in-place repair of a serving database.
 
 | | What | Made by |
 |---|---|---|
-| P1 | A login role `restore_admin`: `LOGIN CREATEDB`, not superuser, no `CREATEROLE`, plus `GRANT <owner_role> TO restore_admin WITH INHERIT FALSE, SET TRUE` (PostgreSQL 16+). | a superuser, once |
-| P2 | A quiescent `IS_TEMPLATE` database, made by a superuser, holding every extension the dump needs (`vector`, which is not a trusted extension). | a superuser, once |
+| P1 | A login role `restore_admin`: `LOGIN CREATEDB`, not superuser, no `CREATEROLE`, plus `GRANT <owner_role> TO restore_admin WITH INHERIT FALSE, SET TRUE` (PostgreSQL 16+). No other path may let it inherit the owner role's privileges either (the check is `pg_has_role(restore_admin, <owner>, 'USAGE')` = false, not only the direct grant's INHERIT option). | a superuser, once |
+| P2 | A quiescent `IS_TEMPLATE` database, made by a superuser, holding every extension the dump needs (`vector`, which is not a trusted extension). It must admit connections (`datallowconn`) and `restore_admin` needs `CONNECT` on it: S0 reads its extensions over a `restore_admin` session. No session may be open on it during S0. | a superuser, once |
 | P3 | Read access to the dump, disk and WAL room for a second copy of the database, `pg_restore` 16 or later on the path. | the operator |
-| | The owner role (owns every `public` relation) and the serve role (`hadron_app` unless `RUNTIME_ROLE_NAME` says otherwise) exist on the target cluster. | as for any deployment |
-| | Enough transaction-id headroom: the target cluster's next xid must exceed K + 3. A fresh cluster with a large, many-run history may not have it; the pipeline refuses before writing (see "Refusals"). | — |
+| | The owner role (owns every `public` relation) and the serve role (`hadron_app` unless `RUNTIME_ROLE_NAME` says otherwise) exist on the target cluster. Neither, nor any `--connect-role`, may be a superuser, and the serve role must not be the owner role. | as for any deployment |
+| | Enough transaction-id headroom: the target cluster's next xid, read at S4 after `pg_restore` has run, must exceed K + 3. K is not known before the run. A fresh cluster with a large, many-run history may not have it; the pipeline then refuses at S4 and tears the restored target down (see "Refusals"). | — |
 
 Missing P1 or P2 refuses at S0, before anything is created.
+
+`RESTORE_ADMIN_URL` is the only connection setting: the pipeline's own sessions and its `pg_restore` child both take
+host, port, user, password and TLS from it, and every inherited `PG*` variable except `PGPASSFILE` is dropped from the
+child's environment. Accepted query parameters: `sslmode` (`disable`, the default when absent; `require`; `verify-ca`,
+which needs `sslrootcert`; `verify-full`), `sslrootcert`, and `sslcert` with `sslkey` (file paths, for certificate
+authentication). Anything else (`prefer`, `allow`, `no-verify`, `require` with `sslrootcert`, `host`, `options`,
+`service`, …) is refused at S0, before anything is created. A verifying mode without `sslrootcert` uses the system trust
+store on the `pg_restore` side and Node's bundled store on the other; name `sslrootcert` explicitly for a private CA.
 
 ## Run
 
@@ -55,6 +63,7 @@ pnpm ops:restore-with-rebase run \
   (`--db-settings-from-env` names an environment variable holding the source URL; it reads `pg_db_role_setting`) or
   as a JSON object of name to value. Neither: refused. `{}` is an explicit "none".
 - `--connect-role` (repeatable) adds login roles that get `CONNECT` at the end. The owner role always gets it.
+- `--connection-limit` is a positive integer; `-1` (unlimited) is refused at S0.
 - No URL is printed. Progress is JSON lines on stderr; the result is one JSON line on stdout.
 
 ### What happens, in order
@@ -62,7 +71,7 @@ pnpm ops:restore-with-rebase run \
 | Stage | Who can connect to the target | What it does |
 |---|---|---|
 | S0 | (no target yet) | Read-only preflight: P1, P2, the target name is free, every extension the dump declares is in the template. Logs the dump's sha256. |
-| S1 | nobody (`ALLOW_CONNECTIONS false`) | `CREATE DATABASE … OWNER <owner> TEMPLATE <tpl>`; records the oid. |
+| S1 | nobody (`ALLOW_CONNECTIONS false`) | `CREATE DATABASE … OWNER <owner> TEMPLATE <tpl>`; records the oid. If the statement errors or its reply is lost, the catalog is re-read from a fresh connection: absent means nothing was created; a database that is provably this run's (its owner, admission off, the working connection limit, the default ACL, created after S0) is torn down; anything else is reported as `teardown: uncertain` and left for the operator. |
 | S2 | `restore_admin` only (ACL fence) | Revokes `CONNECT`/`TEMPORARY` from `PUBLIC`, the owner, serve and app roles; grants `CONNECT` to `restore_admin`; verifies the ACL from the catalog; then admits connections for the working phase. |
 | S3 | `restore_admin` only | `pg_restore --role=<owner> --no-owner --no-privileges --exit-on-error -L <list>` (template extensions filtered out of the list); applies the database-level settings. |
 | S4 | `restore_admin` only | The key rebase, in one transaction (below). |
@@ -83,12 +92,18 @@ working phase that would open the ACL fence.
    that `session_replication_role` stayed `origin`, and that the serving order is identical. Any difference rolls
    the whole transaction back (keys, columns, trigger state).
 
-A second run on the result writes nothing (`state: local-only`).
+The rebase is idempotent: run again on its own result it writes nothing (`state: local-only`). The CLI cannot do that
+to a released database (`run` refuses an existing target); the route is to dump the result and restore that dump into
+another new target.
+
+The before/after comparisons (serving order, every non-key column) are sha256 digests streamed through a cursor 10,000
+rows at a time, so neither memory nor a single-value size limit bounds the history the pipeline can verify; the
+database's own sort and window spills to disk.
 
 ## Result
 
 ```json
-{"runId":"…","oid":16420,"dumpSha256":"…","rebase":{"state":"rebased","rows":…,"runs":…,"maxKey":"…"},"status":"RELEASED"}
+{"runId":"…","oid":16420,"dumpSha256":"…","rebase":{"state":"rebased","rows":…,"nonzeroRows":…,"runs":…,"x0":"…","capacity":"…","updated":…,"maxKey":"…"},"status":"RELEASED"}
 ```
 
 `rebase.state` is one of `empty`, `zero-only`, `local-only` (nothing to map, zero writes), `rebased`, or
@@ -103,14 +118,17 @@ The audit row records what was done. Nothing reads it to make a decision.
 ## Refusals and failures
 
 Every failure before the release statement tears the target down: from a fresh connection, by the recorded oid, with
-a plain `DROP DATABASE` (never `FORCE`). The error names the stage and the teardown outcome:
-`[S4] … (teardown: dropped)`.
+a plain `DROP DATABASE` (never `FORCE`). The error names the stage, the teardown outcome and the oid:
+`[S4] … (teardown: dropped, oid 16420)`.
 
 | Message | Meaning | Do |
 |---|---|---|
-| `needs K xids of headroom, cluster has C` | The target cluster's id counter is too low for this history. Zero writes. | Restore into a cluster whose counter is higher, or consume ids on the target first. |
-| `foreign session` at the hard fence | Something else is connected to the target (a superuser can connect past `ALLOW_CONNECTIONS false`). It is never killed. | Find it; the teardown's `DROP` waits for it. `teardown: drop-failed` means it is still there; run `teardown` again once it has gone. |
-| `template … must exist, be IS_TEMPLATE and be superuser-made` / missing role or SET membership | P1 or P2 missing. Nothing created. | Fix the prerequisite. |
+| `needs K xids of headroom, cluster has C` | The target cluster's id counter is too low for this history. The check runs at S4, after `pg_restore` has already written the target (and spent xids); the rebase itself writes nothing and the target is torn down. | Restore into a cluster whose counter is higher, or consume ids on the target first. A retry on the same cluster may pass, because the failed attempt consumed ids. |
+| `foreign session` at the hard fence | Something else is connected to the target (a superuser can connect past `ALLOW_CONNECTIONS false`). It is never killed. | The teardown's plain `DROP` does not wait: it fails at once with `teardown: drop-failed` and the target stays `FENCED`. Find the session; once it has gone, run `teardown` with the oid from the error line (or from `status`). |
+| `CREATE DATABASE outcome uncertain` (`teardown: uncertain`) | S1's statement failed or lost its reply, and a database with the target's name exists that is not provably this run's (or the catalog could not be re-read). Nothing was dropped. | Inspect it (`status <target>`); if it is this run's, `teardown` it with its oid. |
+| `template … must exist, be IS_TEMPLATE and be superuser-made`, `template … is not quiescent`, `template … admits no connection` | P2 missing. Nothing created. | Fix the template. |
+| `<role> needs GRANT <owner> TO <role> WITH INHERIT FALSE, SET TRUE and no inherited path (P1)`, `… is a superuser`, `… lacks CREATEDB`, `… has CREATEROLE`, `role … is a superuser`, `the serve role must not be the owner role` | P1 or a role prerequisite missing. Nothing created. | Fix the role. |
+| `unsupported connection parameter: …`, `unsupported sslmode …`, `sslcert and sslkey must be given together`, … | `RESTORE_ADMIN_URL` has a setting the pipeline cannot hand to both its sessions and `pg_restore`. Nothing created. | Use the accepted parameters above. |
 | a dump extension the template lacks | Nothing created. | Add the extension to the template (superuser). |
 
 ### Status and teardown
@@ -120,8 +138,15 @@ pnpm ops:restore-with-rebase status <target>               # ABSENT | FENCED | W
 pnpm ops:restore-with-rebase teardown <target> --oid <oid> --owner-role <owner_role>
 ```
 
+The oid is in the failed run's error line and its S1 `created` stderr line, and `status` prints it.
+
 `teardown` checks the recorded oid first: `absent` (already gone), `name-mismatch` (the oid now has another name;
 refuses, alert), `released-kept` (the database was released; it is never dropped), else `dropped` or `drop-failed`.
+
+Exit codes: `run` 0 when RELEASED, 1 on any refusal or failure; `status` 0, 1 on an error; `teardown` 0 for `dropped`
+and `absent`, 1 for `released-kept`, `name-mismatch` and `drop-failed` (a script must read the printed outcome, not
+only the code, to tell a kept released database from a failure); every command exits 2 on a usage error or a missing
+`RESTORE_ADMIN_URL`.
 
 If the reply to the release statement is lost (connection drop, operator interrupt), run `status`. `RELEASED` means
 the restore is complete. Never drop a released database to "retry".
