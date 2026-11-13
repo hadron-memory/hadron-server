@@ -197,6 +197,52 @@ describe('every refusal is the same empty page / null', () => {
   });
 });
 
+describe('the participation edges (#4131, BLIND F2/F3)', () => {
+  const nullOne = { data: { action: null } };
+  const name = () => PLATFORM_ACTIONS[0]!.name;
+  const refused = async (key: string | null, session: string | null, appRef: string, label: string) => {
+    const l = await post(key, session, LIST, { a: appRef });
+    expect(l.errors, label).toBeUndefined();
+    expect(l.data, label).toEqual(EMPTY);
+    expect(await post(key, session, ONE, { a: appRef, r: name() }), label).toMatchObject(nullOne);
+  };
+
+  it('a worker request carries its holder\'s credential: the session header alone, with no credential, is refused (a worker has no credential of its own)', async () => {
+    // Control: the same session WITH the holder's credential is admitted (the worker arrival path).
+    expect((await post(workerKey, workerSession, LIST, { a: w.appId })).data.grantActions.total).toBe(PLATFORM_ACTIONS.length);
+    await refused(null, workerSession, w.appId, 'session header only');
+    // The resolver's own guard, for a bound worker actor with no credential (a request cannot reach it: the session never binds
+    // without a person): a hand-built context.
+    const bare = { db, roles: [] } as unknown as Context;
+    const run = async (query: string, variables: Record<string, unknown>) => {
+      const a = await runAsActor({ workerId: w.workerId, agentId: w.agentId, userId: null }, () => direct.executeOperation({ query, variables }, { contextValue: bare }));
+      if (a.body.kind !== 'single') throw new Error('incremental');
+      return JSON.parse(JSON.stringify(a.body.singleResult));
+    };
+    expect((await run(LIST, { a: w.appId })).data).toEqual(EMPTY);
+    expect(await run(ONE, { a: w.appId, r: name() })).toMatchObject(nullOne);
+  });
+
+  it('a member of a DIFFERENT org naming this App is refused; the same person reads their own org\'s App (control)', async () => {
+    const other = await db.organization.create({ data: { name: 'g-other', urn: `other-${generateId().slice(0, 8)}.test` } });
+    const otherApp = await db.app.create({ data: { organizationId: other.id, name: 'g-other-app', urn: `${other.urn}:app` } });
+    await db.orgMember.create({ data: { organizationId: other.id, userId: w.user2Id, role: 'CONTRIBUTOR' } });
+    expect((await post(outsiderKey, null, LIST, { a: otherApp.id })).data.grantActions.total).toBe(PLATFORM_ACTIONS.length);
+    await refused(outsiderKey, null, w.appId, 'member of another org');
+    // Byte-identical to a person in no org at all: membership elsewhere discloses nothing.
+    const none = await keyFor((await db.user.create({ data: { handle: `n-${generateId().slice(0, 8)}` } })).id);
+    expect(JSON.stringify(await post(outsiderKey, null, LIST, { a: w.appId }))).toBe(JSON.stringify(await post(none, null, LIST, { a: w.appId })));
+  });
+
+  it('a former member (membership revoked) is refused, and so is their worker session; the same credential was admitted before (control)', async () => {
+    expect((await post(personKey, null, LIST, { a: w.appId })).data.grantActions.total).toBe(PLATFORM_ACTIONS.length);
+    expect((await post(workerKey, workerSession, LIST, { a: w.appId })).data.grantActions.total).toBe(PLATFORM_ACTIONS.length);
+    await db.orgMember.update({ where: { organizationId_userId: { organizationId: w.orgId, userId: w.userId } }, data: { deletedAt: new Date() } });
+    await refused(personKey, null, w.appId, 'revoked person');
+    await refused(workerKey, workerSession, w.appId, 'revoked person\'s worker session');
+  });
+});
+
 describe('the shape of the surface', () => {
   it('no Mutation reads or writes an action, and no summary is exposed', async () => {
     const intro = await post(personKey, null, '{ __schema { mutationType { fields { name type { name ofType { name ofType { name } } } } } } __type(name:"GrantAction"){ fields { name description } } }');
