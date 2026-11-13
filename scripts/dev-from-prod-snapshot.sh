@@ -8,6 +8,10 @@
 #   • excludes `_prisma_migrations` → keeps prod's migration ledger out of the
 #     local DB (local dev is `db push`-managed — see CLAUDE.md "Local Postgres
 #     setup")
+#   • excludes `secret_app_keys` (#3996, R18) → the wrapped per-App data keys never
+#     reach a developer machine; the table comes back empty from the schema sync.
+#     Later App-secret tables (secret_versions, secret_change_requests) join this
+#     list in the slice that creates them.
 #
 # ── READ BEFORE USING — two things a restore does NOT solve ──────────────────
 #   1. ENCRYPTION KEY. Columns encrypted under the prod HADRON_ENCRYPTION_KEY
@@ -93,6 +97,7 @@ trap cleanup EXIT
 echo "→ Dumping production (custom format, excluding _prisma_migrations)…"
 pg_dump -Fc --no-owner --no-privileges \
   --exclude-table='_prisma_migrations' \
+  --exclude-table='secret_app_keys' \
   --file="$DUMP" "$PROD_DATABASE_URL"
 
 # ── (re)create the target DB locally ─────────────────────────────────────────

@@ -3331,6 +3331,7 @@ model WaitingListItem {
 /// in `app_members`, not in `apps`.
 model App {
   id                                String               @id @default(cuid())
+  secretAppKeys                     SecretAppKey[]
   /// Display name.
   name                              String
   /// App-layer action-policy link (cor:acl:040:02) — same allow-list shape
@@ -4731,6 +4732,24 @@ model NodeSignature {
 /// (`retiredAt` retires minting only, and nothing in PR1 sets it — no ops
 /// surface). Minting always uses the newest unretired key; a stamp names the
 /// key that must verify it.
+/// #3996 (S1 of #3991) — an App's data key, wrapped (AES-256-GCM) under the platform root key `SECRET_ROOT_KEY`.
+/// AAD `hadron:secret-app-key:v1:<appId>:<keyVersion>`; a plaintext that is not exactly 32 bytes makes the row
+/// unusable (fail closed). The partial unique index (one ACTIVE key per App) is in secret-app-keys-invariants.sql.
+model SecretAppKey {
+  appId      String    @map("app_id")
+  keyVersion Int       @map("key_version")
+  /// base64(iv[12] | gcm-tag[16] | ciphertext). Never selected for display, never logged.
+  wrappedKey String    @map("wrapped_key")
+  createdAt  DateTime  @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("created_at")
+  /// A retired key stops encrypting; it still decrypts until no version uses it.
+  retiredAt  DateTime? @map("retired_at")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@id([appId, keyVersion])
+  @@map("secret_app_keys")
+}
+
 model StampSigningKey {
   id          Int       @id @default(autoincrement())
   /// base64(iv[12] | gcm-tag[16] | ciphertext), AES-256-GCM under
