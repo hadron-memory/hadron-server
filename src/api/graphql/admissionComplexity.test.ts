@@ -41,6 +41,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.agentAssets",
   "Query.agentSchedules",
   "Query.agentSubscriptionsPage", // #2213 S2: pageArgs, default 20, cap 200.
+  "Query.agentTaskExternalIdChanges", // #4084: clampListTake with a floor of 1, default 20, cap 200; the common omitted bound 100 is conservative.
   "Query.agentTaskList", // #2421: limit applies only when symptom is present; default 3, cap 3.
   "Query.agentTasks",
   "Query.agentTeamEvents",
@@ -80,6 +81,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.findNodes",
   "Query.findObjects",
   "Query.globalSearch",
+  "Query.grantActions", // #3708: clampListTake, default 20, cap 200; the common omitted bound 100 is conservative.
   "Query.grants", // #3789: clampListTake, default 20, cap 200; the common omitted bound 100 is conservative.
   "Query.heldWorkers",
   "Query.homeAssistantInstances",

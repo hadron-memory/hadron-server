@@ -98,7 +98,7 @@ describe('no surface writes an action, or a grant (S1a has no writer)', () => {
       const out = await run(`mutation { ${field}(input: {}) { id } }`);
       expect(out.errors?.[0]?.message, field).toContain(`Cannot query field "${field}" on type "Mutation"`);
     }
-    for (const field of ['grantEvents', 'grantActions', 'action', 'actions']) {
+    for (const field of ['grantEvents', 'actions']) {
       const out = await run(`query { ${field} { id } }`);
       expect(out.errors?.[0]?.message, field).toContain(`Cannot query field "${field}" on type "Query"`);
     }
@@ -138,6 +138,7 @@ describe('no surface writes an action, or a grant (S1a has no writer)', () => {
 // the action-register vocabulary, which stays untouched until #3669. A new entry here is a new surface: it needs its own gate.
 // #3711 (S2b) adds Query.appGrants and Mutation.revokeGrant / withdrawGrant (the manager's list, revoke and the requester's withdrawal); revokeGrant is
 // therefore no longer an unknown field and leaves the plausible-write loop below. Still no surface activates a grant.
+// #3708 (S1c) added the read-only Query.grantActions / Query.action and GrantAction, GrantActionParameter, GrantActionsPage. Still no writer.
 // #3789 (S2a-read, gated T3 Hardened) added the read-only Query.grant/grants (#3800 adds Query.myGrants) and their types. Still no writer.
 // #3649 slice B added grant signing requests: requestGrantSignature / withdrawGrantSigningRequest write a REQUEST row,
 // never a grant or an action, and grantSigningRequest reads one. Still no grant writer.
@@ -148,11 +149,11 @@ const BASELINE = [
   'Mutation.grantCredits', 'Mutation.mintActionTickets', 'Mutation.recordAppAction', 'Mutation.requestGrantSignature', 'Mutation.revokeAgentOrgGrant', 'Mutation.revokeAppGrant',
   'Mutation.revokeAppMemoryWriteGrant', 'Mutation.revokeAutomationReadGrant', 'Mutation.revokeAutomationTeamSnapshotGrant', 'Mutation.revokeConnectionGrant',
   'Mutation.revokeGrant', 'Mutation.revokePrincipalGrant', 'Mutation.setAppMemoryWriteGrant', 'Mutation.setAutomationReadGrant', 'Mutation.setAutomationTeamSnapshotGrant', 'Mutation.withdrawGrant', 'Mutation.withdrawGrantSigningRequest',
-  'Query.actionRegisterIndex', 'Query.actionTickets', 'Query.appGrants', 'Query.appMemoryWriteGrants', 'Query.automationReadGrants', 'Query.automationTeamSnapshotGrant',
-  'Query.automationTeamSnapshotGrants', 'Query.connectionGrant', 'Query.connectionGrants', 'Query.effectiveActionPolicy', 'Query.grant', 'Query.grantSigningRequest', 'Query.grants', 'Query.myGrants', 'Query.principalGrant', 'Query.principalGrants',
+  'Query.action', 'Query.actionRegisterIndex', 'Query.actionTickets', 'Query.appGrants', 'Query.appMemoryWriteGrants', 'Query.automationReadGrants', 'Query.automationTeamSnapshotGrant',
+  'Query.automationTeamSnapshotGrants', 'Query.connectionGrant', 'Query.connectionGrants', 'Query.effectiveActionPolicy', 'Query.grant', 'Query.grantActions', 'Query.grantSigningRequest', 'Query.grants', 'Query.myGrants', 'Query.principalGrant', 'Query.principalGrants',
   'TYPE AccessGrant', 'TYPE ActionRegisterIndexEntry', 'TYPE ActionRegisterIndexPage', 'TYPE ActionRegisterIndexState', 'TYPE ActionTicket', 'TYPE ActionTicketsPage',
   'TYPE AgentOrgGrant', 'TYPE AppGrant', 'TYPE AppGrantName', 'TYPE AppMemoryWriteGrant', 'TYPE AutomationReadGrant', 'TYPE AutomationTeamSnapshotGrant',
-  'TYPE AutomationTeamSnapshotGrantPage', 'TYPE ConnectionGrant', 'TYPE ConnectionGrantsPage', 'TYPE CreateGrantInput', 'TYPE EffectiveActionPolicy', 'TYPE Grant', 'TYPE GrantAnnouncement',
+  'TYPE AutomationTeamSnapshotGrantPage', 'TYPE ConnectionGrant', 'TYPE ConnectionGrantsPage', 'TYPE CreateGrantInput', 'TYPE EffectiveActionPolicy', 'TYPE Grant', 'TYPE GrantAction', 'TYPE GrantActionParameter', 'TYPE GrantActionsPage', 'TYPE GrantAnnouncement',
   'TYPE GrantCreditsInput', 'TYPE GrantHolderKind', 'TYPE GrantSignature', 'TYPE GrantSignatureState', 'TYPE GrantSignatureStatus', 'TYPE GrantSigningRequest', 'TYPE GrantSigningRequestState', 'TYPE GrantsPage', 'TYPE MintActionTicketsInput', 'TYPE PrProtocolAction', 'TYPE PrincipalGrant', 'TYPE PrincipalGrantsPage', 'TYPE RecordAppActionResult',
   'TYPE SkillExportAction', 'TYPE TickAction', 'TYPE TickActionState',
 ];

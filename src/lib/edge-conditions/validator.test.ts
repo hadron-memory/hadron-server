@@ -51,6 +51,7 @@ describe('edge-conditions / validateEdgeCondition', () => {
       ['filter'],
       ['if'],
       ['log'],
+      ['!!'],
     ])('rejects %s', (op) => {
       const condition = { [op]: [1, 2] };
       const result = validateEdgeCondition(condition);

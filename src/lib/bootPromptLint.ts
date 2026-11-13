@@ -8,6 +8,7 @@ import { decryptNodeFields } from './nodeCrypto.js';
 import { newestApprovedRevisionOf } from './nodeApproval.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
 import { safeNodeUrnV2 } from './urnEmit.js';
+import { signingSurfacePolicy } from './signing/surface.js';
 
 /**
  * #2048 (S11a, cor:agt:040:13) — link lint for a boot-prompt SOURCE.
@@ -214,7 +215,7 @@ export async function lintSourceWarnings(ctx: Context, subject: LintSubject): Pr
       }
     }
     // The setting is about the tag's own text, so it needs no target and discloses none.
-    if (tag.settings.signed) {
+    if (tag.settings.signed && !signingSurfacePolicy().signing) {
       warnings.push(warning(
         'SIGNING_NOT_CHECKED', tag.index,
         'The "signed" setting is not checked yet: signing has not shipped, so this include is served as if it were not signed.',

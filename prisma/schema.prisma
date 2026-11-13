@@ -4049,6 +4049,10 @@ model Worker {
   /// prisma/host-operation-invariants.sql) allows exactly the keys above, so a write that bypasses the resolver still
   /// cannot store more. Read behind `maySeeWorkerInternals` (cor:dmo:050:11).
   terminal Json? @map("terminal")
+  /// #4041 (V82) — the last host repair notice the PLATFORM posted for this worker, set in the post's own append
+  /// transaction: `alert` (a no-snapshot / cap-reached alert, once per worker until a report without a repair outcome or with
+  /// a relaunch) or `relaunched:<checkedAt>` (so a replayed relaunch report posts nothing twice). Never read by a client.
+  repairNoticeKey String? @map("repair_notice_key")
 
   app                  App                       @relation(fields: [appId], references: [id], onDelete: Cascade)
   /// SetNull: a worker row is never hard-deleted in normal operation, but an
@@ -6236,6 +6240,15 @@ model AgentTeamEvent {
   acknowledgedAt         DateTime? @map("acknowledged_at")
   payload                Json      @default("{}")
   createdAt              DateTime  @default(now()) @map("created_at")
+  /// #4084 (Glen's blind P2 on server#4089): the id of the transaction that wrote the event, set by the database
+  /// (`pg_current_xact_id()`), never by the application. `createdAt` is stamped when the row is written, not when it
+  /// commits, so a reader that advances by `(createdAt, id)` can pass an event whose transaction commits later. A
+  /// transaction id below the reader snapshot's xmin is final: every transaction that could still add a row has an id
+  /// at or above it. agentTaskExternalIdChanges pages by `(txId, createdAt, id)` and serves only finished transactions,
+  /// so a late commit is served late, never skipped. Rows written before this column existed hold `'0'`.
+  /// #4111: NOT NULL (a NULL cursor key would compare NULL and empty every later page); the default stays, so a
+  /// producer that omits it still gets a key. A logical restore re-keys it with `scripts/ops/restore-with-rebase`.
+  txId                   Unsupported("xid8") @default(dbgenerated("pg_current_xact_id()")) @map("tx_id")
   /// #1706 — stall alarms only: when the stall episode began (cor:agt:050:13),
   /// the instant of the move that began the condition, never the evaluator's
   /// clock. With `taskId` and `type` (the rule) it is the episode's key, and
@@ -6256,6 +6269,8 @@ model AgentTeamEvent {
 
   @@unique([taskId, type, episodeStart], map: "agent_team_events_episode_uniq")
   @@index([appId, createdAt])
+  /// #4084: the changed-since read's commit-safe order (agentTaskExternalIdChanges).
+  @@index([appId, txId, createdAt, id])
   @@index([taskId])
   /// #1707 — "assigned least recently" (cor:agt:060:06) reads a worker's
   /// latest assignment event.

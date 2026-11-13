@@ -92,6 +92,7 @@ import { type Context, isAppParticipant, clampListTake, withoutRequestCaches, pa
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AppNotFoundError, WorkerNotFoundError } from '../../../lib/entityRef/errors.js';
 import { isId } from '../../../lib/entityRef/shape.js';
+import { getPortalBaseUrl } from '../../../lib/portalUrl.js';
 import { parseTaskHandle, composeTaskHandle, handleDepth, MAX_HANDLE_DEPTH, MAX_HANDLE_LENGTH } from '../../../lib/agentTasks/handle.js';
 import { ensureProjectZero, PROJECT_ZERO_HANDLE, rootTaskWhere } from '../../../lib/agentTasks/projectZero.js';
 import { composeWorkerUrn, resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
@@ -125,6 +126,7 @@ import {
   type TaskEditField,
   type TaskHandBackCode,
   type EventActor,
+  type TaskEventPayload,
   type TaskParty,
 } from '../../../lib/agentTasks/events.js';
 import { loadAppModelGroups, matchAfterChange, matchTaskNow, matchTaskNowInTx } from '../../../lib/agentTasks/matcher.js';
@@ -1956,7 +1958,34 @@ async function applyTaskCreate(
     throw badInput('A blocked task cannot be matched now.');
   }
   await checkFinishByAtDbClock(tx, p.finishBy, p.startBy);
+  // #4113 (cor:agt:050:02, cor:agt:120): a create that names an externalId AND whose assignee is the caller IS the claim,
+  // and is created started (see startOwnClaim). A batch defers it until its second pass has linked the forward blockers.
+  if (!deferMatchBlockerCheck) {
+    const started = await startOwnClaim(tx, txCtx, app, p, assignee, made.id);
+    if (started) return { ...made, row: started };
+  }
   return { ...made, row };
+}
+
+/**
+ * #4113 (cor:agt:050:02, cor:agt:120): a create that names an externalId AND whose assignee is the caller IS the claim, and a
+ * claim is created started: one write, so no create-then-start window and no not-started alarm (050:14). A claim for
+ * another assignee stays pending (050:08 governs it), as does one with an open blocker (startAgentTask refuses a
+ * blocked task, so a started one would break its own rule). Judged after ALL the task's blockers link, on the row's own
+ * flag, so a batch calls it after the second pass: a started task takes no later blocker link. Null when not a claim.
+ */
+async function startOwnClaim(
+  tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, p: PreparedCreate, assignee: TaskParty | null, taskId: string,
+): Promise<TaskRow | null> {
+  if (p.externalId === null || p.status !== 'pending' || !assignee || !sameParty(assignee, actorParty(p.actor))) return null;
+  const fresh = await tx.agentTask.findUniqueOrThrow({ where: { id: taskId } });
+  if (fresh.blocked || fresh.status !== 'pending') return null;
+  const started = await tx.agentTask.update({
+    where: { id: taskId },
+    data: { status: 'started', startedAt: new Date(), ...updatedStamp(txCtx) },
+  });
+  await appendTaskEvent(tx, { appId: app.id, taskId, actor: eventActor(txCtx.userId), event: { type: 'task.started' } });
+  return started;
 }
 
 /**
@@ -2255,6 +2284,11 @@ export const agentTaskMutations = {
             throw atPosition(e, i + 1);
           }
         }
+      }
+      // #4113: a caller-own claim starts only now, once every link (backward and forward) has landed.
+      for (const [i, p] of prepared.entries()) {
+        const started = await startOwnClaim(tx, txCtx, app, p, assigneeOf(out[i]!.row), out[i]!.id);
+        if (started) out[i] = { ...out[i]!, row: started };
       }
       // Match-now judges the final derived blocker state, including forward-position links.
       // A refusal rolls back the whole batch before any post-commit attempt or wake can run.
@@ -2751,6 +2785,34 @@ export const agentTaskMutations = {
   },
 
   /**
+   * #4084 (hrn:node:hadronmemory.com:specs:cor:agt:120:02; who may release is V87, Proposed): give a task's outside item
+   * back by clearing its external id, so the next create naming it claims it. Whoever may cancel the task may release
+   * it (cor:agt:050:09: the owner, a worker up the owner's reporting chain, whoever manages the App, with #3323's
+   * instruction arm), in ANY status, so the assignee alone may not; and refused exactly as cancel refuses
+   * (TASK_NOT_OWNER, or TASK_NOT_FOUND for a task the caller cannot read). Authority is judged before anything about
+   * the id, then a task holding none refuses TASK_EXTERNAL_ID_NONE; either way nothing is written. Nothing else about
+   * the task changes. One team event, `task.external-id-released`, names the released id, for the team's reconcile
+   * pass (agentTaskExternalIdChanges); it is passive history, never stall activity. The id is never set again on this
+   * task: `externalId` is not in the update input (V29).
+   */
+  releaseAgentTaskExternalId: async (_: unknown, { taskId, instruction }: { taskId: string; instruction?: ActInstruction | null }, ctx: Context) =>
+    mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
+      if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
+        throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, releases its external id.", { taskId });
+      }
+      const released = task.externalId;
+      if (released == null) {
+        throw taskError('TASK_EXTERNAL_ID_NONE', 'This task holds no external id to release.', { taskId });
+      }
+      await tx.agentTask.update({ where: { id: task.id }, data: { externalId: null, ...updatedStamp(ctx) } });
+      await appendTaskEvent(tx, {
+        appId: app.id, taskId: task.id, actor: eventActor(ctx.userId),
+        event: { type: EXTERNAL_ID_RELEASED, externalId: released },
+      });
+      await recordInstructedManagerAct(tx, app.id, actor, 'task.release-external-id', { taskId: task.id });
+    }, {}, instruction),
+
+  /**
    * #2651 (hrn:node:hadronmemory.com:specs:cor:agt:050:29, Proposed details): hand a STARTED task back, by its
    * assignee only. The task loses its assignee, goes back to pending and re-enters the queue (cor:agt:050:03), with
    * a returning WORKER added to `requirements.excludeWorkerIds` so the matcher never gives it back to that worker
@@ -2865,6 +2927,28 @@ async function launchAssignee(db: Context['db'], t: TaskRow, family?: string): P
 
 // ── Queries ───────────────────────────────────────────────────────────────
 
+/**
+ * #4084: the most external ids one batch read names. With limit omitted the page is as long as the list, so this is
+ * also that page's length: it stays within the admission model's omitted-page charge (DEFAULT_OMITTED_PAGE_SIZE, 100,
+ * admissionComplexity.ts), so the batch can never be under-counted.
+ */
+export const TASK_EXTERNAL_IDS_MAX = 100;
+/** #4084: the release event's type, shared by its writer and the changed-since read. */
+const EXTERNAL_ID_RELEASED = 'task.external-id-released' as const;
+/**
+ * #4084 (cor:agt:120): the team events agentTaskExternalIdChanges reports, and the kind each is. The platform's own
+ * assignment (`assignment.matched`) is an assignment like `task.assigned`.
+ */
+const EXTERNAL_ID_CHANGE_KINDS = {
+  'task.assigned': 'ASSIGNED',
+  'assignment.matched': 'ASSIGNED',
+  'task.reassigned': 'REASSIGNED',
+  'task.handed-back': 'HANDED_BACK',
+  'task.cancelled': 'CANCELLED',
+  'task.finished': 'FINISHED',
+  [EXTERNAL_ID_RELEASED]: 'RELEASED',
+} as const satisfies Partial<Record<TaskEventPayload['type'], string>>;
+
 type ListArgs = {
   matchFailed?: boolean | null;
   appRef: string;
@@ -2877,6 +2961,8 @@ type ListArgs = {
   tagsAll?: string[] | null;
   source?: string | null;
   externalId?: string | null;
+  /** #4084: tasks holding any of these external ids (1 to {@link TASK_EXTERNAL_IDS_MAX}). */
+  externalIds?: string[] | null;
   /** #2649: tasks carrying a reference with exactly this target (and this kind when given); the label is ignored. */
   reference?: { kind?: string | null; target: string } | null;
   text?: string | null;
@@ -2942,6 +3028,25 @@ export const agentTaskQueries = {
         throw e;
       }
       filters.push({ externalId: args.externalId });
+    }
+    if (args.externalIds != null) {
+      // #4084 (cor:agt:120:02, cor:agt:050:21): the batch form, after the same App read gate, so it only narrows tasks
+      // the caller may already read. Each entry passes the single form's check; one bad entry refuses the whole list,
+      // naming its position and never its text. An empty list is refused rather than read as "no narrowing".
+      const ids = args.externalIds;
+      if (!Array.isArray(ids) || ids.length < 1 || ids.length > TASK_EXTERNAL_IDS_MAX) {
+        throw badInput(`externalIds takes 1 to ${TASK_EXTERNAL_IDS_MAX} ids.`);
+      }
+      ids.forEach((id, i) => {
+        try {
+          if (typeof id !== 'string') throw new TaskReferenceError(`externalId must be 1 to ${TASK_EXTERNAL_ID_MAX} characters.`);
+          checkExternalIdText(id);
+        } catch (e) {
+          if (e instanceof TaskReferenceError) throw badInput(`externalIds[${i}]: ${e.message}`);
+          throw e;
+        }
+      });
+      filters.push({ externalId: { in: ids } });
     }
     if (args.reference != null) {
       // #2649 (cor:agt:050:01): after the App read gate above, so it only narrows tasks the caller may already read.
@@ -3013,7 +3118,9 @@ export const agentTaskQueries = {
       omit: { resultFindings: true },
       where: { AND: [where, noZero, rootsWhere, ownerWhere, assigneeWhere, creatorWhere, ...filters] },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      take: clampListTake(args.limit),
+      // #4084: one task per id at most, so a batch read with no limit answers every id it names (the cap is the list
+      // cap), instead of cutting at the list default.
+      take: args.limit == null && args.externalIds?.length ? args.externalIds.length : clampListTake(args.limit),
       skip: Math.max(0, args.offset ?? 0),
     });
     }, true),
@@ -3072,6 +3179,82 @@ export const agentTaskQueries = {
       const events = rows.slice(0, take);
       const hasMore = rows.length > take;
       return { events, hasMore, nextCursor: hasMore ? events[events.length - 1]!.id : null };
+    }),
+
+  /**
+   * #4084 (hrn:node:hadronmemory.com:specs:cor:agt:120, minimal write-back): what changed on the App's tasks that carry
+   * an external id, oldest first, after an opaque cursor, for a team's reconcile pass. A generic question: it knows
+   * nothing about trackers. Read from the team event stream inside the same read gate as agentTeamEvents
+   * (cor:agt:050:21), so a change is exactly an event a reader could already see.
+   *
+   * A release clears the task's external id, so a filter on "tasks holding an id" could never return one (the FIT
+   * finding the gate made binding): every change carries the id its task held WHEN it happened, judged in this read's
+   * own order (#4107), so in the served order no change carrying an id follows that id's RELEASED. An id is set once, at
+   * create, and cleared at most once, by a release whose event names it; so a change before the release carries the
+   * released id, the release carries it too, and a change after the release (the task then holds none) is left out.
+   * The answer is the same whenever it is read: a reader who polled between a cancel and the release saw the cancel,
+   * and so does one who polls after both.
+   *
+   * Commit-safe order (Glen's blind P2 on #4089): `created_at` is stamped when a row is written, not when it commits, so
+   * paging by it lets a reader pass a change whose transaction is still open, and never see it. The order is
+   * `(tx_id, created_at, id)`, where `tx_id` is the writing transaction's id (set by the database), and only changes
+   * whose transaction id is below this read's snapshot xmin are served: every transaction that could still add a row
+   * has an id at or above xmin, so nothing can later appear behind a served cursor. A change is served once its
+   * transaction and every older one have ended (xmin is cluster-wide); it may lag, it is never skipped. Rows from
+   * before the column hold '0' and keep their (created_at, id) order. `tx_id` is never null: nothing writes it, and the
+   * column default fills every insert.
+   */
+  agentTaskExternalIdChanges: async (_: unknown, args: { appRef: string; after?: string | null; limit?: number | null }, ctx: Context) =>
+    withReadableApp(ctx, args.appRef, async (c, app) => {
+      const take = Math.max(1, clampListTake(args.limit));
+      if (args.after != null) {
+        // Scoped to this App: another App's cursor, or anything else, is just an unknown cursor.
+        const known = isId(args.after)
+          ? await c.db.agentTeamEvent.findFirst({ where: { id: args.after, appId: app.id }, select: { id: true } })
+          : null;
+        if (!known) throw badInput('after is not a cursor of this App. Pass the nextCursor (or a change\'s cursor) you read.');
+      }
+      const types = Object.keys(EXTERNAL_ID_CHANGE_KINDS);
+      // `r` is the task's release, if any (at most one: the id is never set again). The id a change carries is the one
+      // the task holds now, else, for a change at or before the release, the released id; after a release, none.
+      // #4107: "before" and "after" are judged on the serving key (tx_id, created_at, id), the order the page is served
+      // and the cursor advances in, never on created_at alone (a writer-stamped time): otherwise a change written after
+      // the release with an older stamp kept the id and was served after RELEASED.
+      const rows = await c.db.$queryRaw<{ id: string; createdAt: Date; type: string; taskId: string; externalId: string }[]>`
+        SELECT x.id, x."createdAt", x.type, x."taskId", x."externalId" FROM (
+          SELECT e.id, e.created_at AS "createdAt", e.type, e.task_id AS "taskId", e.tx_id AS "txId",
+                 COALESCE(t.external_id,
+                   CASE WHEN (e.tx_id, e.created_at, e.id) <= (r.tx_id, r.created_at, r.id) THEN r.payload->>'externalId' END) AS "externalId"
+          FROM agent_team_events e
+          JOIN agent_tasks t ON t.id = e.task_id
+          LEFT JOIN LATERAL (
+            SELECT rr.id, rr.tx_id, rr.created_at, rr.payload FROM agent_team_events rr
+            WHERE rr.task_id = e.task_id AND rr.type = ${EXTERNAL_ID_RELEASED}
+            ORDER BY rr.tx_id, rr.created_at, rr.id LIMIT 1
+          ) r ON true
+          WHERE e.app_id = ${app.id}
+            AND e.type IN (${Prisma.join(types)})
+            AND e.tx_id < pg_snapshot_xmin(pg_current_snapshot())
+            ${args.after != null ? Prisma.sql`AND (e.tx_id, e.created_at, e.id) > (SELECT tx_id, created_at, id FROM agent_team_events WHERE id = ${args.after})` : Prisma.empty}
+        ) x
+        WHERE x."externalId" IS NOT NULL
+        ORDER BY x."txId", x."createdAt", x.id
+        LIMIT ${take + 1}`;
+      const page = rows.slice(0, take);
+      const hasMore = rows.length > take;
+      const tasks = await c.db.agentTask.findMany({
+        omit: { resultFindings: true },
+        where: { id: { in: [...new Set(page.map((r) => r.taskId))] }, appId: app.id },
+      });
+      const byId = new Map(tasks.map((t) => [t.id, t]));
+      const changes = page.map((r) => ({
+        cursor: r.id,
+        at: r.createdAt,
+        kind: EXTERNAL_ID_CHANGE_KINDS[r.type as keyof typeof EXTERNAL_ID_CHANGE_KINDS],
+        externalId: r.externalId as string,
+        task: byId.get(r.taskId)!,
+      }));
+      return { changes, hasMore, nextCursor: hasMore ? rows[take - 1]!.id : null };
     }),
 };
 
@@ -3392,6 +3575,15 @@ export const agentTaskFieldResolvers = {
     },
   },
   AgentTask: {
+    /**
+     * #4084 (cor:agt:120: mark-tracked is given the portal URL as the server prints it): the portal's existing task
+     * page. Not the `/app/u/<urn>` resolver, which has no agent-task kind (the FIT finding). Null when FRONTEND_URL is
+     * unset or malformed, like Node.portalUrl (#881), so no client ever builds the link.
+     */
+    portalUrl: (t: TaskRow) => {
+      const base = getPortalBaseUrl();
+      return base ? `${base}/app/apps/${encodeURIComponent(t.appId)}/tasks/${encodeURIComponent(t.id)}` : null;
+    },
     /** #3816 (V22): present only on the create answer that ran the match; a later read has none. */
     matchSkipped: (t: TaskRow & { matchSkipped?: unknown }) => t.matchSkipped ?? null,
     matchFailure: (t: TaskRow) => t.matchFailedAt && t.matchFailedReason ? { reason: t.matchFailedReason, failedAt: t.matchFailedAt } : null,

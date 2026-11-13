@@ -18,7 +18,8 @@ import { type Context, withoutRequestCaches } from './resolvers.helpers.js';
 export async function withAuthorizedTx<T>(
   ctx: Context,
   anchors: readonly AuthorityAnchor[] | (() => readonly AuthorityAnchor[]),
-  authorize: (txCtx: Context) => Promise<void>,
+  /** `tx` is the transaction itself (#4012): a gate that takes row locks before judging uses it, never a cast of `txCtx.db`. */
+  authorize: (txCtx: Context, tx: Prisma.TransactionClient) => Promise<void>,
   write: (tx: Prisma.TransactionClient, txCtx: Context) => Promise<T>,
   options: {
     afterAnchors?: (tx: Prisma.TransactionClient) => Promise<void>;
@@ -123,7 +124,7 @@ export async function withAuthorizedTx<T>(
     }
 
     const txCtx = await liveTxContext(ctx, tx);
-    await authorize(txCtx);
+    await authorize(txCtx, tx);
     return write(tx, txCtx);
   }, {
     isolationLevel: options.isolationLevel,

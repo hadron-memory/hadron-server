@@ -2,7 +2,7 @@
  * #2046 (S9-2) — the strict assembler: what a compile reads, and every typed
  * refusal, against a real database. Read-only: no test here expects a write.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
@@ -131,15 +131,20 @@ describe('#2046 S9-2 — every refusal', () => {
     expect(await refusal(assembleBootPrompt(db, await input(agent.child!.mem, '{{> parts:a rev=1 approved}}')))).toBe('BOOT_PROMPT_INCLUDE_REVISION_UNAVAILABLE');
   });
 
-  // Dara P2-2 (held dependency): `signed` is accepted and stored, not checked, until the signing slice
-  // (cor:dmo:150:02, D7). The shared selector is the ONE place that says so; the compile must not diverge.
-  it('signed is selected as if absent, and `approved signed` as `approved` (held until signing ships)', async () => {
-    await put(agent.child!.mem, 'parts:a', 'latest');
-    const plan = await assembleBootPrompt(db, await input(agent.child!.mem, '{{> parts:a signed}}'));
-    expect(plan.text).toBe('latest');
-    expect(plan.occurrences[1]!.selection).toEqual({ rev: null, approved: false, signed: true });
-    await db.node.deleteMany({ where: { memoryId: agent.child!.mem, loc: 'boot:source' } });
-    expect(await refusal(assembleBootPrompt(db, await input(agent.child!.mem, '{{> parts:a approved signed}}')))).toBe('BOOT_PROMPT_INCLUDE_REVISION_UNAVAILABLE');
+  // #2973 PR3: the shared selector enforces signed while the deployment policy is on; compile cannot diverge.
+  it.each(['false', 'true'])('signed selection follows the deployment policy (flag=%s)', async flag => {
+    vi.stubEnv('PASSKEY_SIGNING_ENABLED', flag);
+    try {
+      await put(agent.child!.mem, 'parts:a', 'latest');
+      const args = await input(agent.child!.mem, '{{> parts:a signed}}');
+      if (flag === 'false') {
+        const plan = await assembleBootPrompt(db, args);
+        expect(plan.text).toBe('latest');
+        expect(plan.occurrences[1]!.selection).toEqual({ rev: null, approved: false, signed: true });
+      } else expect(await refusal(assembleBootPrompt(db, args))).toBe('BOOT_PROMPT_INCLUDE_REVISION_UNAVAILABLE');
+      await db.node.deleteMany({ where: { memoryId: agent.child!.mem, loc: 'boot:source' } });
+      expect(await refusal(assembleBootPrompt(db, await input(agent.child!.mem, '{{> parts:a approved signed}}')))).toBe('BOOT_PROMPT_INCLUDE_REVISION_UNAVAILABLE');
+    } finally { vi.unstubAllEnvs(); }
   });
 
   it('a cycle refuses', async () => {

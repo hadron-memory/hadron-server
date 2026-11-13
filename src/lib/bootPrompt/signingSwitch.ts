@@ -25,7 +25,9 @@ import { ROLE_ORDER } from '../auth/orgRole.js';
 import { newestApprovedAndSignedRevisionForServe } from '../nodeApproval.js';
 import { lazyRevisionSignatureStatus } from '../signing/revisionSignatureCounts.js';
 import { signingSurfacePolicy } from '../signing/surface.js';
-import { safeNodeUrnV2 } from '../urnEmit.js';
+import { composeWorkerUrn } from '../entityRef/workerRef.js';
+import { normalizeUrnForLookup } from '../urn.js';
+import { emitEntityUrnV2, safeNodeUrnV2 } from '../urnEmit.js';
 import { previewServedBootPrompt } from './serve.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
@@ -43,9 +45,11 @@ export interface SigningPreviewRow {
   appUrn: string;
   agentId: string;
   agentName: string;
+  agentUrn: string | null;
   /** Null for the install-level row (an uncustomised worker, or a chat, shares it). */
   workerId: string | null;
   workerName: string | null;
+  workerUrn: string | null;
   compiledNodeId: string;
   compiledNodeUrn: string | null;
   /** The revision served today. */
@@ -90,6 +94,11 @@ export async function requireSigningSwitchAudience(db: Db, userId: string, orgId
 const SEP = '\u0000';
 const keyOf = (r: { appId: string; agentId: string; workerId: string | null }) => `${r.appId}${SEP}${r.agentId}${SEP}${r.workerId ?? ''}`;
 
+/** #4017: only synchronous URN composition is caught; an un-emittable display address is null, never a fabricated/raw URN. */
+function previewAddress(compose: () => string): string | null {
+  try { return compose(); } catch { return null; }
+}
+
 /**
  * Every row of the preview, in the stable order (app, agent, worker). Empty while the switch is already ENFORCED
  * (nothing would change). A target the serve refuses today (no pointer, nothing approved, licence inactive, …) has no
@@ -118,16 +127,16 @@ export async function computeSigningPreviewRows(db: Db, orgId: string): Promise<
 
   for (const app of apps) {
     const [installs, workers] = await Promise.all([
-      db.appAgent.findMany({ where: { appId: app.id }, select: { agentId: true, agent: { select: { name: true } } }, orderBy: { agentId: 'asc' } }),
+      db.appAgent.findMany({ where: { appId: app.id }, select: { agentId: true, agent: { select: { name: true, urn: true } } }, orderBy: { agentId: 'asc' } }),
       db.worker.findMany({
         where: { appId: app.id, retiredAt: null, bootPromptNodeId: { not: null } },
-        select: { id: true, name: true, agentId: true, agent: { select: { name: true } } },
+        select: { id: true, name: true, slug: true, agentId: true, agent: { select: { name: true, urn: true } } },
         orderBy: { id: 'asc' },
       }),
     ]);
-    const targets: Array<{ agentId: string; agentName: string; workerId: string | null; workerName: string | null }> = [
-      ...installs.map((i) => ({ agentId: i.agentId, agentName: i.agent.name, workerId: null, workerName: null })),
-      ...workers.map((w) => ({ agentId: w.agentId, agentName: w.agent.name, workerId: w.id, workerName: w.name })),
+    const targets: Array<{ agentId: string; agentName: string; agentUrn: string | null; workerId: string | null; workerName: string | null; workerUrn: string | null }> = [
+      ...installs.map((i) => ({ agentId: i.agentId, agentName: i.agent.name, agentUrn: previewAddress(() => emitEntityUrnV2('agent', i.agent.urn)), workerId: null, workerName: null, workerUrn: null })),
+      ...workers.map((w) => ({ agentId: w.agentId, agentName: w.agent.name, agentUrn: previewAddress(() => emitEntityUrnV2('agent', w.agent.urn)), workerId: w.id, workerName: w.name, workerUrn: previewAddress(() => composeWorkerUrn(normalizeUrnForLookup(app.urn), w.slug)) })),
     ];
     for (const t of targets) {
       const today = await previewServedBootPrompt(db, {
@@ -137,17 +146,41 @@ export async function computeSigningPreviewRows(db: Db, orgId: string): Promise<
       const { compiledNodeId, servedRevSeq } = today.served;
       let status = statusByNode.get(compiledNodeId);
       if (!status) statusByNode.set(compiledNodeId, status = lazyRevisionSignatureStatus(db, compiledNodeId, 'compiled-boot-prompt'));
-      const walk = await newestApprovedAndSignedRevisionForServe(db, compiledNodeId, async (rev) => (await status!(rev)).counts);
-      if (walk.found?.revNo === servedRevSeq) continue;
+      // #4008: the preview only has rows while the switch is OFF (`computeSigningPreviewRows` returns [] once it is
+      // enforced, and a switch-on's recompute runs before it flips), so the serve above is the approval-only walk and
+      // `servedRevSeq` is the newest approved revision, and every revision above it is unapproved. When it itself counts as
+      // signed it IS the newest approved-and-signed one, so the second walk is skipped. A first revision has nothing older
+      // to change to and nothing approved above it, so it is skipped too. Anything else runs the walk FROM THE TOP, as
+      // the enforced serve does (same scan ceiling): a signed revision the serve would not reach must not show as one a
+      // switch-on changes to.
+      if ((await status(servedRevSeq)).counts) continue;
+      const walk = servedRevSeq <= 1
+        ? { found: null as { revNo: number } | null }
+        : await newestApprovedAndSignedRevisionForServe(db, compiledNodeId, async (rev) => (await status!(rev)).counts);
+      // #4061: canonical v2 like the sibling addresses (cor:urn:010:01); `appUrn` is non-null, so a stored form that cannot
+      // emit is served as stored, silently (#4054's diagnostic carries no address), rather than the null the nullable siblings use.
       const base = {
-        appId: app.id, appUrn: app.urn, agentId: t.agentId, agentName: t.agentName, workerId: t.workerId, workerName: t.workerName,
+        appId: app.id, appUrn: previewAddress(() => emitEntityUrnV2('app', app.urn)) ?? app.urn, agentId: t.agentId, agentName: t.agentName, agentUrn: t.agentUrn, workerId: t.workerId, workerName: t.workerName, workerUrn: t.workerUrn,
         compiledNodeId, compiledNodeUrn: await nodeUrnOf(compiledNodeId), servedRevSeq,
       };
       if (walk.found) rows.push({ ...base, state: 'REVISION_CHANGES', changesToRevSeq: walk.found.revNo });
       else rows.push({ ...base, state: (await status(servedRevSeq)).pending ? 'SIGNATURE_PENDING' : 'UNSIGNED_STOPS', changesToRevSeq: null });
     }
   }
+  warnAddressCompositionFailures(rows);
   return rows.sort((a, b) => (keyOf(a) < keyOf(b) ? -1 : keyOf(a) > keyOf(b) ? 1 : 0));
+}
+
+/**
+ * #4054: one aggregate, redacted warning per computation when a RETURNED row's display address could not be composed
+ * (the row still carries null). Counts displayed nulls per row, not distinct entities; an install-level row's absent
+ * Worker is not a failure. The payload is four fixed keys and carries no identifier, name, address or exception text.
+ */
+function warnAddressCompositionFailures(rows: readonly SigningPreviewRow[]): void {
+  const agentFailures = rows.filter((r) => r.agentUrn === null).length;
+  const workerFailures = rows.filter((r) => r.workerId !== null && r.workerUrn === null).length;
+  if (agentFailures + workerFailures === 0) return;
+  console.warn('signing.preview.address_composition_failed', { schemaVersion: 1, reason: 'COMPOSITION_FAILED', agentFailures, workerFailures });
 }
 
 /** The digest of the FULL preview: every row's target, served revision and state, across all pages. */

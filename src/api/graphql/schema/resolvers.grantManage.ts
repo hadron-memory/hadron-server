@@ -42,7 +42,7 @@ const notManager = () => manageRefusal(new GrantManageRefusal('GRANT_NOT_MANAGER
 const notFound = () => manageRefusal(new GrantManageRefusal('GRANT_NOT_FOUND'));
 
 /** An App by id or URN, or null when it is missing, malformed or soft-deleted (all one answer). Never an uninstalled-App distinction. */
-async function resolveLiveApp(ctx: Context, appRef: string): Promise<TaskApp | null> {
+export async function resolveLiveApp(ctx: Context, appRef: string): Promise<TaskApp | null> {
   let id: string;
   try {
     ({ id } = await resolveAppRef(ctx.db, appRef));
