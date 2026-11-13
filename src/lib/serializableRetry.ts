@@ -34,8 +34,9 @@ export function isSerializationFailure(e: unknown): boolean {
 }
 
 /**
- * Runs `run`, which must open ONE SERIALIZABLE transaction, and re-runs it when
- * Postgres aborts it as a serialization failure.
+ * Runs `run`, which must open ONE transaction at SERIALIZABLE or REPEATABLE READ
+ * (the latter for locking-read snapshots such as the signing reads, #2973/#4065),
+ * and re-runs it when Postgres aborts it as a serialization failure.
  *
  * This is for count-then-act invariants whose competing writers are all
  * SERIALIZABLE (`conventions:count-then-act-serializable-txn`): the aborted
