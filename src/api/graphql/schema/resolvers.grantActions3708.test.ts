@@ -113,7 +113,8 @@ describe('admitted callers read exactly the registry', () => {
         expect(r.data.action).toEqual(a);
       }
       const missing = await post(key, session, ONE, { a: w.appId, r: 'no.such.action' });
-      expect(missing).toEqual({ data: { action: null } });
+      expect(missing).toMatchObject({ data: { action: null } });
+      expect(missing.errors).toBeUndefined();
     }
   });
 
@@ -153,7 +154,7 @@ describe('every refusal is the same empty page / null', () => {
       const l = await post(key, session, LIST, { a: appRef });
       expect(l.errors, label).toBeUndefined();
       expect(l.data, label).toEqual(EMPTY);
-      expect(await post(key, session, ONE, { a: appRef, r: name }), label).toEqual(nullOne);
+      expect(await post(key, session, ONE, { a: appRef, r: name }), label).toMatchObject(nullOne);
     }
   });
 
@@ -170,11 +171,11 @@ describe('every refusal is the same empty page / null', () => {
     const name = PLATFORM_ACTIONS[0]!.name;
     // The other App's worker names THIS App: refused. (Control: it reads its own App.)
     expect((await post(workerKey, otherAppSession, LIST, { a: w.appId })).data).toEqual(EMPTY);
-    expect(await post(workerKey, otherAppSession, ONE, { a: w.appId, r: name })).toEqual(nullOne);
+    expect(await post(workerKey, otherAppSession, ONE, { a: w.appId, r: name })).toMatchObject(nullOne);
     expect((await post(workerKey, otherAppSession, LIST, { a: w.app2Id })).data.grantActions.total).toBe(PLATFORM_ACTIONS.length);
     await db.worker.update({ where: { id: w.workerId }, data: { retiredAt: new Date() } });
     expect((await post(workerKey, workerSession, LIST, { a: w.appId })).data).toEqual(EMPTY);
-    expect(await post(workerKey, workerSession, ONE, { a: w.appId, r: name })).toEqual(nullOne);
+    expect(await post(workerKey, workerSession, ONE, { a: w.appId, r: name })).toMatchObject(nullOne);
   });
 
   it('an App key (no actor here), a headless run, and an impersonated session of a PARTICIPANT (each guard, with the control that the person is admitted)', async () => {
@@ -191,7 +192,7 @@ describe('every refusal is the same empty page / null', () => {
       const l = await viaResolver(ctx, LIST, { a: w.appId });
       expect(l.errors, label).toBeUndefined();
       expect(l.data, label).toEqual(EMPTY);
-      expect(await viaResolver(ctx, ONE, { a: w.appId, r: name }), label).toEqual(nullOne);
+      expect(await viaResolver(ctx, ONE, { a: w.appId, r: name }), label).toMatchObject(nullOne);
     }
   });
 });

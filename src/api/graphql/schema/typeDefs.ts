@@ -7519,6 +7519,41 @@ export const typeDefs = `#graphql
   }
 
   """
+  #3708 (hrn:node:hadronmemory.com:specs:cor:acl:140:02, ruling 0255 item 2): one parameter an action declares.
+  """
+  type GrantActionParameter {
+    "The parameter's name, as a grant's values name it."
+    name: String!
+    "The kind of value it takes, e.g. node-ref."
+    type: String!
+    "True when a wildcard value is refused for this parameter."
+    refusesWildcard: Boolean!
+  }
+
+  """
+  #3708 (hrn:node:hadronmemory.com:specs:cor:acl:140:02): one registered action a grant can allow. The registry is written only by a deploy; no call creates, changes or deletes an action. There is no plain-language summary here (its own slice).
+  """
+  type GrantAction {
+    "The dotted code, unique, e.g. schedule.create."
+    name: String!
+    "Where the action comes from: PLATFORM today."
+    source: String!
+    "The tool that performs it, if any."
+    tool: String
+    "The parameters a grant of this action must supply."
+    parameters: [GrantActionParameter!]!
+    "The enforcement level the action DECLARES: what the platform promises, not an active guarantee. It says nothing about whether a gate enforces it today (schedule.create and webhook.create are not enforced until hadron-server#3483; the boot-prompt actions are checked where the grant is spent)."
+    enforcement: String!
+    "A closed key naming who may issue a grant of this action."
+    issuerRule: String!
+  }
+
+  type GrantActionsPage {
+    items: [GrantAction!]!
+    total: Int!
+  }
+
+  """
   #3690 PR 2 (hrn:node:hadronmemory.com:specs:cor:acl:140:05): what a bound worker asks for. There is deliberately no field for activation, a verifier, a signature, a use count, a version or an issuer: a grant is born pending and only signing (#3649) can make it live.
   """
   input CreateGrantInput {
@@ -11362,6 +11397,12 @@ export const typeDefs = `#graphql
     #3711 (hrn:node:hadronmemory.com:specs:cor:acl:140:05, ruling 0253 item 4): every grant of one App, in every state (pending, active, expired, spent, revoked, holder departed), newest first, for whoever manages the App as a person. It shows the whole record, including who revoked a grant, when its holder went and each signature's signer and passkey label, never a credential id or public key. Anyone else (a member who does not manage, an outsider, a worker session, an App key, a run, an impersonated session) and an unknown App get an empty page, never an error. limit 0 returns the count only.
     """
     appGrants(appRef: String!, limit: Int, offset: Int): GrantsPage!
+    """
+    #3708 (hrn:node:hadronmemory.com:specs:cor:acl:140:02, ruling 0255 item 2): the registered actions, by name, for anyone in the named App: a participating person, or a bound worker session of that App. The App is named, never inferred. Every other caller (no credential, a non-participant, an unknown, malformed or deleted App, another App's or a retired worker, an App key, a headless run, an impersonated session even of a participant) gets an empty page, never an error. Read only; limit 0 returns the count only.
+    """
+    grantActions(appRef: String!, limit: Int, offset: Int): GrantActionsPage!
+    "#3708: one registered action by its exact name, read under the same gate as grantActions. An unknown name and every refused caller answer null."
+    action(appRef: String!, ref: ID!): GrantAction
     "One action grant by ID - visible to the grantee or an admin of its org; null otherwise (no existence oracle)."
     principalGrant(ref: ID!): PrincipalGrant
     "Action grants. Default: the caller's own (self-audit is never gated). An org admin passing orgRef sees that org's grants, optionally narrowed by userRef."
