@@ -69,16 +69,28 @@ describe('#4038 shared chat', () => {
     expect(result.conversationHandoff).toBe('done');
   });
 
-  it('after the App uninstalls the Agent a shared turn fires no rule and reads no definition edge', async () => {
+  it('after the App uninstalls the Agent a shared turn fires no rule and reads no definition (edge or node)', async () => {
     const chat = await startShared(aliceId);
     await uninstall();
     const defNodes = new Set((await db.node.findMany({ where: { memoryId: systemId }, select: { id: true } })).map((n) => n.id));
     const spy = vi.spyOn(db.edge, 'findMany');
+    const nodeSpies = (['findFirst', 'findMany', 'findUnique', 'findUniqueOrThrow', 'findFirstOrThrow'] as const).map((m) => vi.spyOn(db.node, m));
     try {
       const result = await complete(as(aliceId), chat.chatId, { industry: 'farming' });
       expect(result.conversationHandoff).toBeNull();
       expect(spy.mock.calls.filter(([a]) => defNodes.has((a as any)?.where?.sourceId))).toHaveLength(0);
-    } finally { spy.mockRestore(); }
+      // C1: no read of the Agent's definition memory (a node read before the licence refusal would show here), except
+      // the memory-wide-field list, which stays live by ruling Q10 (chatScript.ts) and is the one call of this shape.
+      const isQ10FieldList = (where: any) => where?.OR?.length === 2
+        && where.OR.some((c: any) => c.loc === 'config') && where.OR.some((c: any) => c.loc?.startsWith === 'conversations:');
+      const systemReads = nodeSpies.flatMap((s) => s.mock.calls).filter(([a]) => {
+        const where = (a as any)?.where;
+        if (isQ10FieldList(where)) return false;
+        const memory = where?.memoryId ?? where?.loc_memoryId?.memoryId;
+        return memory === systemId || memory?.equals === systemId || memory?.in?.includes(systemId);
+      });
+      expect(systemReads).toEqual([]);
+    } finally { spy.mockRestore(); for (const n of nodeSpies) n.mockRestore(); }
   });
 
   it("member A's condition does not see member B's bucket", async () => {
