@@ -92,6 +92,26 @@ describe('#4107: the release boundary is judged on the serving key (tx_id, creat
     expect(served(await changes({ after: first.changes[0].cursor }))).toEqual([]);
   });
 
+  it('a change sharing the release\'s tx_id (same transaction, or a legacy 0) is judged by (created_at, id) next', async () => {
+    const t = await create();
+    // One transaction writes the release and then a change stamped after it: equal tx_id, so the stamp decides,
+    // exactly as it decides the served order.
+    await db.$transaction([
+      db.$executeRaw`UPDATE agent_tasks SET external_id = NULL WHERE id = ${t.id}`,
+      db.$executeRaw`
+        INSERT INTO agent_team_events (id, app_id, type, task_id, payload, created_at)
+        VALUES (${generateId()}, ${app.id}, 'task.external-id-released', ${t.id},
+                ${JSON.stringify({ type: 'task.external-id-released', externalId: X })}::jsonb, clock_timestamp() AT TIME ZONE 'UTC')`,
+      stampedAssignment(t.id, '1 hour'),
+    ]);
+    const [{ n }] = await db.$queryRaw<{ n: number }[]>`
+      SELECT count(DISTINCT tx_id)::int AS n FROM agent_team_events WHERE task_id = ${t.id} AND type IN ('task.external-id-released', 'task.assigned')`;
+    expect(n).toBe(1);
+    const rows = served(await changes());
+    expectNothingAfterRelease(rows);
+    expect(rows).toEqual([['RELEASED', X]]);
+  });
+
   it('a transaction that began before the release but writes after it sorts after it (tx_id is taken at the first write)', async () => {
     const t = await create();
     const pg = new Client({ connectionString: process.env.DATABASE_URL });
