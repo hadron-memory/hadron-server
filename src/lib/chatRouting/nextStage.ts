@@ -17,8 +17,9 @@ export type NextStageDecision =
   | { kind: 'rejected'; name: string };
 
 /**
- * `stageOrder` is null when the conversation's stage list could not be read; the name is then taken as before
- * (there is nothing to check it against).
+ * `stageOrder` is null when the conversation's stage list could not be read (#4077). A move is lawful only to a
+ * name that IS one of the conversation's stages (cor:cht:030:02 mechanism 1), and an unreadable list cannot
+ * establish that for any name, so every name other than the current stage is rejected, as with an empty list.
  */
 export function decideNextStage(
   nextStage: unknown,
@@ -28,7 +29,7 @@ export function decideNextStage(
   if (nextStage === null || nextStage === undefined || nextStage === '') return { kind: 'none' };
   if (typeof nextStage !== 'string') return { kind: 'rejected', name: String(nextStage) };
   if (nextStage === currentStage) return { kind: 'stay' };
-  if (stageOrder !== null && !stageOrder.includes(nextStage)) return { kind: 'rejected', name: nextStage };
+  if (stageOrder === null || !stageOrder.includes(nextStage)) return { kind: 'rejected', name: nextStage };
   return { kind: 'move', stage: nextStage };
 }
 

@@ -18,9 +18,11 @@ describe('decideNextStage (#4035)', () => {
     expect(decideNextStage('b', 'a', order)).toEqual({ kind: 'move', stage: 'b' });
     expect(decideNextStage('z', 'a', order)).toEqual({ kind: 'rejected', name: 'z' });
   });
-  it('an unreadable list (null) takes the name as before; an empty list rejects every other name', () => {
-    expect(decideNextStage('z', 'a', null)).toEqual({ kind: 'move', stage: 'z' });
+  it('#4077: an unreadable list (null) cannot establish any name as a stage, so it rejects like an empty one (cor:cht:030:02)', () => {
+    expect(decideNextStage('z', 'a', null)).toEqual({ kind: 'rejected', name: 'z' });
+    expect(decideNextStage('z', undefined, null)).toEqual({ kind: 'rejected', name: 'z' });
     expect(decideNextStage('z', 'a', [])).toEqual({ kind: 'rejected', name: 'z' });
+    expect(decideNextStage(null, 'a', null)).toEqual({ kind: 'none' });
   });
   it('no current stage: a listed name moves', () => {
     expect(decideNextStage('a', undefined, order)).toEqual({ kind: 'move', stage: 'a' });

@@ -1715,6 +1715,13 @@ export const chatMutations = {
       const stageOrder = turnScript
         ? await conversationStageOrder(turnScript, (chatData.conversationName as string | null) ?? null)
         : null;
+      if (stageOrder === null && toolResponse.next_stage) {
+        // #4077: the list could not be read (no conversation name, no resolvable Agent or script, or the node is missing from it).
+        console.warn(JSON.stringify({
+          event: 'chat_stage_list_unreadable', chatId, conversationName: chatData.conversationName ?? null,
+          note: 'next_stage cannot be checked against the conversation stages; the name is rejected',
+        }));
+      }
       const stageDecision = decideNextStage(toolResponse.next_stage, chatData.stageName as string | undefined, stageOrder);
       if (stageDecision.kind === 'rejected') {
         rejectedNextStage = stageDecision.name;
