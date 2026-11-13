@@ -1,6 +1,6 @@
 import type { PrismaClient, Prisma } from '../generated/prisma/index.js';
 import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
-import { canChatWithAgent } from '../api/graphql/schema/agentChatAccess.js';
+import { canManageAgentSystemMemory } from './auth/managedSystemMemory.js';
 import { isAgentInstalledAndLicensed } from './appAgent.js';
 import { AgentNotFoundError } from './entityRef/errors.js';
 
@@ -8,9 +8,9 @@ import { AgentNotFoundError } from './entityRef/errors.js';
  * system-memory reads, independently of the home's class.
  *
  * - App-bearing home (#4043): the home's App must still install and license the Agent. No manager exemption.
- * - App-less home (#4070), when the caller is passed (the response): the CURRENT request principal must still reach the Agent through the shared
- *   `canChatWithAgent`, the predicate `sendChatMessage` applies, so send and respond never disagree (cor:acl:010:01,
- *   the `system` row). The chat's creator, the stored home pointer and a historical App are not substitutes.
+ * - App-less home (#4112), when the caller is passed (the response): the CURRENT principal must manage the Agent's
+ *   system memory (cor:acl:010:01 system row, cor:dmo:050:13), the same manager arm start applies. PUBLIC visibility,
+ *   org READER reach, the chat's creator and a historical App are not substitutes. Send uses the same judgement below.
  *
  * Returning null means "no Agent definition for this turn": the caller records the turn and routes nothing, with no
  * error and no new oracle (cor:cht:020:01).
@@ -28,14 +28,15 @@ export async function chatHomeAgentIfLicensed<T extends { id: string }>(
   return await callerReachesAgent(db, caller, agent.id) ? agent : null;
 }
 
-/** The current request principal's reach, judged through the handle the caller was given (never `caller.db`, so a
- * transaction client and the shared predicate see one snapshot). The Agent row is re-read, not trusted from the caller. */
+/** #4112: App-less definition admission uses the shared manager predicate through the supplied DB handle, never
+ * caller.db. Re-read the Agent and reject deleted/missing definitions before asking about current management. */
 async function callerReachesAgent(db: PrismaClient | Prisma.TransactionClient, caller: Context, agentId: string): Promise<boolean> {
   const current = await db.agent.findUnique({
     where: { id: agentId },
-    select: { id: true, organizationId: true, ownerUserId: true, visibility: true, deletedAt: true },
+    select: { systemMemoryId: true, deletedAt: true },
   });
-  return !!current && await canChatWithAgent({ ...caller, db: db as Context['db'] }, current);
+  return !!current && !current.deletedAt && !!current.systemMemoryId
+    && await canManageAgentSystemMemory(db as PrismaClient, caller, current.systemMemoryId);
 }
 
 /** #4070 (send): an App-less home whose Agent the current caller cannot reach is refused as an unknown Agent,
