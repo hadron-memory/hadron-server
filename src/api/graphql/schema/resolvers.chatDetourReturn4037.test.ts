@@ -21,7 +21,7 @@ async function state(chatId: string) {
 }
 const trail = (e: Record<string, any>) => e.routeHistory.map((r: any) => `${r.action} ${r.conversationUrn.replace('conversations:', '')}${r.trigger && r.action !== 'COMPLETED' ? ` (${r.trigger.type})` : ''}`);
 async function edge(from: string, to: string, data: Record<string, unknown>, priority = 0) {
-  await db.edge.create({ data: { memoryId: systemId, loc: deriveEdgeLoc(from, 'route', to), name: 'route', sourceId: ids[from], targetId: ids[to], priority, data }, });
+  await db.edge.create({ data: { memoryId: systemId, loc: deriveEdgeLoc(from, 'route', to), name: 'route', sourceId: ids[from], targetId: ids[to], priority, data: data as object }, });
 }
 beforeEach(async () => {
   await cleanDb(db);
