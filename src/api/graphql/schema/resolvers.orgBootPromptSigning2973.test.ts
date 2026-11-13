@@ -240,23 +240,37 @@ describe('the preview', () => {
     for (const n of ['A1', 'A2', 'A3', 'A4', 'A5']) await installed(n, 'v1');
     const seen: string[] = [];
     let after: string | null = null;
-    const tokens = new Set<string>();
+    let firstPageToken: string | null = null;
     for (let i = 0; i < 10; i++) {
       const page: any = await preview(ctxOf(admin), { first: 2, after });
       expect(page.total).toBe(5);
-      tokens.add(page.previewToken);
+      firstPageToken ??= page.previewToken as string;
       seen.push(...page.rows.map((r: any) => r.agentId));
       if (!page.hasMore) break;
       after = page.endCursor;
     }
     expect(seen).toHaveLength(5);
     expect(new Set(seen).size).toBe(5);
-    // The token binds the digest of the FULL preview: a token from page one switches on after the last page's rows are known.
-    expect(tokens.size).toBeGreaterThanOrEqual(1);
+    // The token binds the digest of the FULL preview (cor:agt:040:09, cor:api:120:04: the preview is the whole list across every
+    // page). Tokens differ per page (each carries its own `iat`), so the pin is behavioural: page one's token, kept while every later
+    // page was read, switches signing on. A digest of only the current page's rows would be refused STALE here (#4119).
+    expect(await caught(turnOn(firstPageToken))).toEqual({ ok: true });
+    expect(await status()).toBe(true);
     for (const bad of [0, -1, 1.5]) {
       expect(await caught(preview(ctxOf(admin), { first: bad }))).toMatchObject({ ok: false, code: 'BAD_USER_INPUT' });
     }
     expect(await caught(preview(ctxOf(admin), { first: 1, after: 'not-a-cursor' }))).toMatchObject({ ok: false, code: 'BAD_USER_INPUT' });
+  });
+
+  it("a page-one token goes stale when a row on a LATER page changes (the digest covers the whole list, #4119)", async () => {
+    const insts: any[] = [];
+    for (const n of ['B1', 'B2', 'B3', 'B4', 'B5']) insts.push(await installed(n, 'v1'));
+    const p1: any = await preview(ctxOf(admin), { first: 2 });
+    const firstPageIds = new Set(p1.rows.map((r: any) => r.agentId));
+    const later = insts.find((i) => !firstPageIds.has(i.agentId));
+    await recompile(later.nodeId, later.memoryId, later.agentId, 'changed');
+    expect(await caught(turnOn(p1.previewToken))).toMatchObject({ ok: false, code: 'BOOT_PROMPT_SIGNING_PREVIEW_STALE' });
+    expect(await status()).toBe(false);
   });
 
   it('defaults to a page of 20 and serves a request over the cap at the cap (cor:api:120:04)', async () => {
