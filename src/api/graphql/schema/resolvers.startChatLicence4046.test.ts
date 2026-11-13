@@ -548,3 +548,37 @@ it('a replaced system pointer cannot read the old definition at locked admission
   expect(result.systemReads).toEqual([]);
   expect(await state()).toBe(before);
 });
+
+it('parent ensure recovers a real loc-memory collision without aborting the chat transaction', async () => {
+  const prior = await start();
+  const home = (await chatNodeByLocOrThrow(db, prior.chatId)).memoryId;
+  await db.node.delete({ where: { loc_memoryId: { memoryId: home, loc: 'chats' } } });
+  const transaction = db.$transaction.bind(db) as (...args: any[]) => Promise<any>;
+  let collided = false;
+  const spy = vi.spyOn(db, '$transaction').mockImplementation(((work: any, ...options: any[]) => transaction(async (tx: any) => {
+    const node = new Proxy(tx.node, { get(target, prop, receiver) {
+      if (prop === 'upsert') return async (args: any) => {
+        if (!collided && args.where?.loc_memoryId?.loc === 'chats') {
+          collided = true;
+          // Model a writer winning after an emulated upsert's cold lookup. The
+          // following INSERT creates a real P2002 inside the guarded savepoint.
+          await db.node.create({ data: { ...args.create, id: generateId() } });
+          return target.create({ data: args.create });
+        }
+        return target.upsert(args);
+      };
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    return work(new Proxy(tx, { get(target, prop, receiver) {
+      if (prop === 'node') return node;
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } }));
+  }, ...options)) as any);
+  try {
+    expect((await start()).systemMessage).toContain('LICENSED STAGE');
+    expect(collided).toBe(true);
+    expect(await db.node.count({ where: { memoryId: home, loc: 'chats' } })).toBe(1);
+  } finally { spy.mockRestore(); }
+});
