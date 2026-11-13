@@ -82,6 +82,7 @@ import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js'
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { mapChatSeqConflict } from '../../../lib/prismaErrors.js';
+import { assertStorableText } from '../../../lib/unstorableTextInput.js';
 import { recordMentionsWorker } from '../../../lib/mentionsReadResolution.js';
 import {
   maybeAdvanceOwnChannelRead,
@@ -930,6 +931,8 @@ function assertBody(body: unknown): asserts body is string {
       extensions: { code: 'BAD_USER_INPUT' },
     });
   }
+  // #4096: a NUL or unpaired surrogate cannot be stored (Postgres 22021 / encoding); the caller's own text is refused typed, naming the field.
+  assertStorableText({ body });
   if (body.length > TEAM_CHAT_BODY_MAX_CHARS) {
     throw new GraphQLError(
       `body exceeds the team-chat cap of ${TEAM_CHAT_BODY_MAX_CHARS} characters (got ${body.length}). Store large artifacts as their own node and link them.`,

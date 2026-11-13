@@ -168,7 +168,7 @@ import {
   mcpPrincipalKey,
   releaseOnceOnResponseEnd,
 } from './transportBounds.js';
-import { refusalResult, toolErrorResult, withToolErrorBoundary } from './toolError.js';
+import { unstorableTextRefusal, refusalResult, toolErrorResult, withToolErrorBoundary } from './toolError.js';
 import { refNamesNothing } from '../lib/entityRef/refNamesNothing.js';
 import { textResult } from './textResult.js';
 import { publicErrorExtensions } from '../lib/errorDiagnostics.js';
@@ -4340,6 +4340,9 @@ export function createMcpServerInstance(
       if (!(await canWriteToMemory(db, auth, memoryId, EXPLICIT_REF))) {
         return refusalResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memoryId)}`);
       }
+      // #4096: caller text a NUL or unpaired surrogate would fail the write (Postgres 22021 / encoding) is refused typed, before any write and after authorization.
+      const nulParent = unstorableTextRefusal({ name: rawName, description, tags });
+      if (nulParent) return nulParent;
 
       const parentMemoryState = await db.memory.findUniqueOrThrow({
         where: { id: memoryId }, select: { isEncrypted: true },
@@ -6438,6 +6441,9 @@ export function createMcpServerInstance(
       if (!(await canWriteToMemory(db, auth, memoryId, EXPLICIT_REF))) {
         return refusalResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memoryId)}`);
       }
+      // #4096: as hadron_create_parent_node — typed refusal, field named, before any write and after authorization.
+      const nulCreate = unstorableTextRefusal({ name, description, abstract, content, tags, role: rawRole, nodeType, objectType, llmModel, aiAgent });
+      if (nulCreate) return nulCreate;
       // #4039 (B4): an invalid entry condition on a conversation node never lands, before any write (parity with writeNodeCore).
       const entryRefusal = entryConditionRefusal(loc, nodeData);
       if (entryRefusal) return entryRefusal;
@@ -7035,6 +7041,9 @@ export function createMcpServerInstance(
       if (!(await canWriteToMemory(db, auth, memory.id, EXPLICIT_REF))) {
         return refusalResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memory.id)}`);
       }
+      // #4096: typed refusal for caller text carrying a NUL, after authorization and before any write.
+      const nulUpdate = unstorableTextRefusal({ name, description, abstract, content, tags, role: rawRole, nodeType, objectType, llmModel, aiAgent });
+      if (nulUpdate) return nulUpdate;
       // #4039 (B4): the same save-time check as hadron_create_node, before any write.
       const entryRefusal = entryConditionRefusal(loc, nodeData);
       if (entryRefusal) return entryRefusal;
