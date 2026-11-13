@@ -3,7 +3,8 @@
  * two PRIVATE throwaway clusters. Source A has its xid counter moved to ~1,000,000 with `pg_resetwal -x` (a throwaway
  * cluster only), so its keys are "H" on the fresh target B (xmax ~2,000). B carries the operator prerequisites P1/P2.
  *
- * Skipped where no PostgreSQL server binaries are installed (initdb, pg_ctl, pg_resetwal).
+ * Skipped where no PostgreSQL server binaries with pgvector are installed (initdb, pg_ctl, pg_resetwal, vector.control);
+ * hosted CI is such a runner, so this suite runs on a developer or QA host with the two private clusters.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Client } from 'pg';

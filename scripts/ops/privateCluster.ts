@@ -13,7 +13,15 @@ import { tmpdir } from 'node:os';
 export function pgBinDir(): string | null {
   for (const v of ['17', '16', '18']) {
     const dir = `/usr/lib/postgresql/${v}/bin`;
-    if (existsSync(join(dir, 'initdb')) && existsSync(join(dir, 'pg_resetwal'))) return dir;
+    // The Hadron schema needs pgvector in the SAME installation: a runner with server binaries but no vector
+    // extension for them (GitHub's ubuntu image, whose pgvector lives in the service container) cannot host the suite.
+    if (
+      existsSync(join(dir, 'initdb')) &&
+      existsSync(join(dir, 'pg_resetwal')) &&
+      existsSync(`/usr/share/postgresql/${v}/extension/vector.control`)
+    ) {
+      return dir;
+    }
   }
   return null;
 }
