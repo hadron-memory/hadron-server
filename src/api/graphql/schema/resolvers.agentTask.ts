@@ -3161,6 +3161,15 @@ export const agentTaskQueries = {
    * released id, the release carries it too, and a change after the release (the task then holds none) is left out.
    * The answer is the same whenever it is read: a reader who polled between a cancel and the release saw the cancel,
    * and so does one who polls after both.
+   *
+   * Commit-safe order (Glen's blind P2 on #4089): `created_at` is stamped when a row is written, not when it commits, so
+   * paging by it lets a reader pass a change whose transaction is still open, and never see it. The order is
+   * `(tx_id, created_at, id)`, where `tx_id` is the writing transaction's id (set by the database), and only changes
+   * whose transaction id is below this read's snapshot xmin are served: every transaction that could still add a row
+   * has an id at or above xmin, so nothing can later appear behind a served cursor. A change is served once its
+   * transaction and every older one have ended (xmin is cluster-wide); it may lag, it is never skipped. Rows from
+   * before the column hold '0' and keep their (created_at, id) order. `tx_id` is never null: nothing writes it, and the
+   * column default fills every insert.
    */
   agentTaskExternalIdChanges: async (_: unknown, args: { appRef: string; after?: string | null; limit?: number | null }, ctx: Context) =>
     withReadableApp(ctx, args.appRef, async (c, app) => {
@@ -3177,7 +3186,7 @@ export const agentTaskQueries = {
       // the task holds now, else, for a change at or before the release, the released id; after a release, none.
       const rows = await c.db.$queryRaw<{ id: string; createdAt: Date; type: string; taskId: string; externalId: string }[]>`
         SELECT x.id, x."createdAt", x.type, x."taskId", x."externalId" FROM (
-          SELECT e.id, e.created_at AS "createdAt", e.type, e.task_id AS "taskId",
+          SELECT e.id, e.created_at AS "createdAt", e.type, e.task_id AS "taskId", e.tx_id AS "txId",
                  COALESCE(t.external_id,
                    CASE WHEN (e.created_at, e.id) <= (r.created_at, r.id) THEN r.payload->>'externalId' END) AS "externalId"
           FROM agent_team_events e
@@ -3189,10 +3198,11 @@ export const agentTaskQueries = {
           ) r ON true
           WHERE e.app_id = ${app.id}
             AND e.type IN (${Prisma.join(types)})
-            ${args.after != null ? Prisma.sql`AND (e.created_at, e.id) > (SELECT created_at, id FROM agent_team_events WHERE id = ${args.after})` : Prisma.empty}
+            AND e.tx_id < pg_snapshot_xmin(pg_current_snapshot())
+            ${args.after != null ? Prisma.sql`AND (e.tx_id, e.created_at, e.id) > (SELECT tx_id, created_at, id FROM agent_team_events WHERE id = ${args.after})` : Prisma.empty}
         ) x
         WHERE x."externalId" IS NOT NULL
-        ORDER BY x."createdAt", x.id
+        ORDER BY x."txId", x."createdAt", x.id
         LIMIT ${take + 1}`;
       const page = rows.slice(0, take);
       const hasMore = rows.length > take;

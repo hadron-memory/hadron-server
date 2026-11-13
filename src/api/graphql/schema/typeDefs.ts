@@ -9172,13 +9172,15 @@ export const typeDefs = `#graphql
 
     """
     #4084 (hrn:node:hadronmemory.com:specs:cor:agt:120, minimal write-back) — what changed on this App's tasks that carry an
-    external id, oldest first, for a team's reconcile pass: an assignment (by hand or by the platform), a reassignment, a
-    hand-back, a cancel, a finish and a release of the id. Each change is one team event, read inside the same gate as
-    agentTeamEvents (hrn:node:hadronmemory.com:specs:cor:agt:050:21); anyone else is refused APP_NOT_FOUND. A RELEASED
-    change carries the id the release cleared (its task no longer holds it); every other change carries the id its task
-    holds, and changes to a task whose id was later released are left out. Pass nextCursor as after to continue; with after
-    omitted the read starts at the oldest change. after is opaque: a value that is not a cursor of this App is
-    BAD_USER_INPUT. limit defaults to 20 (cap 200, floor 1).
+    external id, for a team's reconcile pass: an assignment (by hand or by the platform), a reassignment, a hand-back, a
+    cancel, a finish and a release of the id. Each change is one team event, read inside the same gate as agentTeamEvents
+    (hrn:node:hadronmemory.com:specs:cor:agt:050:21); anyone else is refused APP_NOT_FOUND. A RELEASED change carries the id
+    the release cleared (its task no longer holds it); a change before the release carries that id too, and a change after
+    it (the task then holds none) is left out; every other change carries the id its task holds. Order is commit-safe,
+    oldest first: a change is served only once the transaction that wrote it, and every older one, has ended, so it may
+    appear a moment late but never behind a cursor already served. Pass nextCursor (or the last change's cursor) as after
+    to continue; with after omitted the read starts at the oldest change. after is opaque: a value that is not a cursor of
+    this App is BAD_USER_INPUT. limit defaults to 20 (cap 200, floor 1).
     """
     agentTaskExternalIdChanges(appRef: ID!, after: String, limit: Int): AgentTaskExternalIdChangePage!
 
