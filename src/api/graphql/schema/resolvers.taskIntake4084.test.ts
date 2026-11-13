@@ -149,7 +149,8 @@ describe('#4084 (1): agentTasks(externalIds:) — a bounded batch lookup inside 
   });
 });
 
-describe('#4084 (2): agentTaskExternalIdChanges — what changed on tasks with an external id', () => {
+// settle() may wait up to 10s for another transaction on the cluster to end, so the tests here get room for it.
+describe('#4084 (2): agentTaskExternalIdChanges — what changed on tasks with an external id', { timeout: 15_000 }, () => {
   it('reports assign, reassign, hand-back, cancel, finish and release, oldest first; a task without an id never appears', async () => {
     const a = await create({ externalId: X });
     const b = await create({ externalId: Y });
@@ -291,6 +292,8 @@ describe('#4084 (2): agentTaskExternalIdChanges — what changed on tasks with a
   it('is in the SDL', async () => {
     const t = await create({ externalId: X });
     await M.cancelAgentTask({}, { taskId: t.id }, ctx());
+    // Served once every older transaction has ended (xmin is cluster-wide: another worker's open transaction counts).
+    await settle();
     const r = await gql(
       'query($a:ID!){agentTaskExternalIdChanges(appRef:$a,limit:5){changes{cursor at kind externalId task{id}} hasMore nextCursor}}',
       { a: app.id },
