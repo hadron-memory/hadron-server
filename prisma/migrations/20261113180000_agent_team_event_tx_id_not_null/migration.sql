@@ -17,7 +17,8 @@
 --       off and after, and it must be back to 'O';
 --   T1  only NULL becomes '0': every other column of every row is compared, as text, with the image taken before.
 -- Any discrepancy raises, and the whole transaction (keys, columns, trigger state) rolls back. With no NULL row the
--- block returns before touching the trigger. A refusal here is a code defect, not a data preflight, so it is not HDPRF.
+-- block returns before touching the trigger. A refusal here is a code defect, not a data preflight, so it raises a plain
+-- exception (the #3770 refusal SQLSTATE is for data preflights only).
 BEGIN;
 
 LOCK TABLE "agent_team_events" IN ACCESS EXCLUSIVE MODE;
