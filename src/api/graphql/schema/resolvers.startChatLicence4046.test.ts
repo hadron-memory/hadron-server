@@ -85,16 +85,39 @@ async function observeDefinitionReads<T>(run: () => Promise<T>) {
   const uniqueOrThrow = vi.spyOn(db.node, 'findUniqueOrThrow');
   const firstOrThrow = vi.spyOn(db.node, 'findFirstOrThrow');
   const edges = vi.spyOn(db.edge, 'findMany');
+  const transactionReads: any[] = [];
+  let transactionEdges = 0;
+  const transaction = db.$transaction.bind(db) as (...args: any[]) => Promise<any>;
+  const wrap = (client: any) => new Proxy(client, {
+    get(target, prop, receiver) {
+      if (prop === 'node' || prop === 'edge') return new Proxy(target[prop], {
+        get(model, method, modelReceiver) {
+          const value = Reflect.get(model, method, modelReceiver);
+          if (typeof value !== 'function') return value;
+          return (...args: any[]) => {
+            if (prop === 'node' && ['findFirst', 'findMany', 'findUnique', 'findUniqueOrThrow', 'findFirstOrThrow'].includes(String(method))) transactionReads.push([args[0]]);
+            if (prop === 'edge' && method === 'findMany') transactionEdges++;
+            return value.apply(model, args);
+          };
+        },
+      });
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  const transactions = vi.spyOn(db, '$transaction').mockImplementation(((first: any, ...rest: any[]) =>
+    typeof first === 'function' ? transaction((tx: any) => first(wrap(tx)), ...rest) : transaction(first, ...rest)) as any);
   try {
     const value = await run();
     const systemReads = [...first.mock.calls, ...many.mock.calls, ...unique.mock.calls,
-      ...uniqueOrThrow.mock.calls, ...firstOrThrow.mock.calls].filter(([args]) => {
+      ...uniqueOrThrow.mock.calls, ...firstOrThrow.mock.calls, ...transactionReads].filter(([args]) => {
       const where = (args as any)?.where;
       const memory = where?.memoryId ?? where?.loc_memoryId?.memoryId;
       return memory === systemId || memory?.equals === systemId || memory?.in?.includes(systemId);
     });
-    return { value, systemReads, edgeReads: edges.mock.calls.length };
+    return { value, systemReads, edgeReads: edges.mock.calls.length + transactionEdges };
   } finally {
+    transactions.mockRestore();
     for (const spy of [first, many, unique, uniqueOrThrow, firstOrThrow, edges]) spy.mockRestore();
   }
 }
@@ -266,4 +289,66 @@ it('an org CONTRIBUTOR without an AppMember row uses the licensed org App', asyn
   const started = await start();
   const root = await chatNodeByLocOrThrow(db, started.chatId);
   expect((await db.memory.findUniqueOrThrow({ where: { id: root.memoryId } })).appId).toBe(appId);
+});
+
+it.each(['private', 'shared'] as const)('cold and warm %s starts use the real licensed home App', async scope => {
+  const first = await start(scope);
+  const second = await start(scope);
+  const a = await chatNodeByLocOrThrow(db, first.chatId);
+  const b = await chatNodeByLocOrThrow(db, second.chatId);
+  expect(a.memoryId).toBe(b.memoryId);
+  expect((await db.memory.findUniqueOrThrow({ where: { id: a.memoryId } })).appId).toBe(appId);
+});
+it('a bound App-key session starts only in its licensed home', async () => {
+  const first = await start();
+  const root = await chatNodeByLocOrThrow(db, first.chatId);
+  const session = await db.session.create({ data: { appId, agentId, userId, memoryId: root.memoryId, tool: 'vitest' } });
+  const keyCtx: Context = { db, appId, sessionId: session.id, roles: [] };
+  expect((await M.startChat({}, { agentId, conversationName: 'flow' }, keyCtx)).systemMessage).toContain('LICENSED STAGE');
+  await db.memory.update({ where: { id: root.memoryId }, data: { appId: null } });
+  const before = await state();
+  const seen = await observeDefinitionReads(async () => {
+    try { await M.startChat({}, { agentId, conversationName: 'flow' }, keyCtx); return null; }
+    catch (error) { return error; }
+  });
+  expect(seen.value).toBeTruthy();
+  expect(seen.systemReads).toEqual([]);
+  expect(await state()).toBe(before);
+});
+it('two cold shared starts recover a real pairing collision inside the outer transaction', async () => {
+  const starts = await Promise.all([start('shared'), start('shared')]);
+  const roots = await Promise.all(starts.map(s => chatNodeByLocOrThrow(db, s.chatId)));
+  expect(roots[0].id).not.toBe(roots[1].id);
+  expect(roots[0].memoryId).toBe(roots[1].memoryId);
+  expect(await db.memory.count({ where: { appId, sharedMemoryOfAgentId: agentId } })).toBe(1);
+});
+
+it('shared admission stays on the selected App if the located home moves before App derivation', async () => {
+  const initial = await start('shared');
+  const root = await chatNodeByLocOrThrow(db, initial.chatId);
+  const app = await db.app.findUniqueOrThrow({ where: { id: appId } });
+  const other = await db.app.create({ data: { name: 'Other installed App', urn: `${app.urn}-other`, organizationId: app.organizationId } });
+  await db.appAgent.create({ data: { appId: other.id, agentId } });
+  const find = db.memory.findUnique.bind(db.memory);
+  let changed = false;
+  let expectedState: string | undefined;
+  const spy = vi.spyOn(db.memory, 'findUnique').mockImplementation((async (args: any) => {
+    if (!changed && args.where?.id === root.memoryId && args.select?.appId === true) {
+      changed = true;
+      await db.memory.update({ where: { id: root.memoryId }, data: { appId: other.id } });
+      await db.appAgent.delete({ where: { appId_agentId: { appId, agentId } } });
+      expectedState = await state();
+    }
+    return find(args);
+  }) as any);
+  try {
+    const seen = await observeDefinitionReads(async () => {
+      try { await M.startChat({}, { agentId, scope: 'shared', conversationName: 'flow' }, ctx()); return null; }
+      catch (error) { return error as any; }
+    });
+    expect(changed).toBe(true);
+    expect(seen.value?.code).toBe('AGENT_NOT_FOUND');
+    expect(seen.systemReads).toEqual([]);
+    expect(await state()).toBe(expectedState);
+  } finally { spy.mockRestore(); }
 });
