@@ -61,7 +61,7 @@ import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { appKeyMayActFor, appKeySessionMatchesAgent, canChatWithAgent, chatAuthorityAnchors, chatCarrierApps } from './agentChatAccess.js';
 import { withAuthorizedMemoryTx, withAuthorizedTx } from './authorizedTx.js';
 import { activeAppInstallLicenseIdsForAgent } from '../../../lib/appAgent.js';
-import { chatHomeAgentIfLicensed, resolveChatHomeAgent } from '../../../lib/chatHomeAgent.js';
+import { chatHomeAgentIfLicensed, refuseUnreachableChatHomeAgent, resolveChatHomeAgent } from '../../../lib/chatHomeAgent.js';
 import { canManageAgentSystemMemory } from '../../../lib/auth/managedSystemMemory.js';
 import { participantAppWhere } from '../../../lib/auth/appParticipation.js';
 import { GraphQLError } from 'graphql';
@@ -76,7 +76,7 @@ import {
   ChatScopeError,
 } from './chat-scope.js';
 import { chatLocFilter, pickChatNode } from '../../../lib/chatLoc.js';
-import { decideChatRouting, applyChatRoutingDecision } from '../../../lib/chatRouting.js';
+import { decideChatRouting, applyChatRoutingDecision, getGoalStack } from '../../../lib/chatRouting.js';
 import { reportPartialTurn, routingRefusedReport } from '../../../lib/chatPartialTurn.js';
 import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
 import {
@@ -98,7 +98,7 @@ import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
 import { unauthenticatedError } from '../../../lib/refusals.js';
 import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds.js';
 import {
-  hasEntryCondition, isOrdinaryConversation, pickEntryConversation, pickUnnamedStartConversation, topLevelConversations,
+  hasEntryCondition, isOrdinaryConversation, pickEntryConversation, pickFallbackConversation, pickUnnamedStartConversation, topLevelConversations,
 } from '../../../lib/chatConversationOrder.js';
 import {
   entryStartMessageFor, validateEntryCondition, type EntryStartReason,
@@ -1093,6 +1093,8 @@ export const chatMutations = {
       // deleted Agent through the serve gate before any write (#3654); keep that refusal. App-class chats retain their empty result.
       const { agent, deletedAgentId } = await resolveChatHomeAgent(ctx.db, memory);
       if (memory.class !== 'app' && deletedAgentId) throw new AgentNotFoundError(deletedAgentId);
+      // #4070: an App-less home the caller can no longer reach is refused here, before the pinned revision is read.
+      await refuseUnreachableChatHomeAgent(ctx.db, memory, agent, ctx);
       const systemMemoryId = agent ? (agent as any).systemMemoryId as string : null;
 
       // Pin to version: if the chat was started with a published revision,
@@ -1709,9 +1711,10 @@ export const chatMutations = {
       const memoryLayers: MemoryLayerHandle[] = [];
       let agentBag: Record<string, unknown> = {};
       let sysMemUrn = '';
-      // #4076/#4043: share main's resolve/deleted/licence lookup BEFORE any pinned script or stage read.
+      // #4076/#4043: share main's resolve/deleted/licence lookup BEFORE any pinned script or stage read. #4070: the response passes
+      // the request principal so an App-less home re-checks the caller's CURRENT reach in the same lookup.
       const turnMemory = await ctx.db.memory.findUnique({ where: { id: chatNode.memoryId } });
-      const turnAgent = turnMemory ? (await resolveChatHomeAgent(ctx.db, turnMemory)).agent as { systemMemoryId?: string | null } | null : null;
+      const turnAgent = turnMemory ? (await resolveChatHomeAgent(ctx.db, turnMemory, ctx)).agent as { systemMemoryId?: string | null } | null : null;
       const sysMemId = turnAgent?.systemMemoryId;
       if (sysMemId) script = await loadChatScript(ctx.db, sysMemId, (chatData.startedWithRevision as string | null) ?? null);
       const stageOrder = script ? await conversationStageOrder(script, origin.conversationName ?? null) : null;
@@ -1734,8 +1737,14 @@ export const chatMutations = {
           ));
         }
       }
+      let fallback: { name: string; stageOrder: string[] } | null = null;
+      if (script && toolResponse.goal_reached === true) {
+        const picked = pickFallbackConversation(await script.nodesByPrefix('conversations:'));
+        const order = (picked?.data as Record<string, unknown> | undefined)?.stageOrder;
+        if (picked && Array.isArray(order)) fallback = { name: picked.loc.split(':')[1], stageOrder: order.filter((s): s is string => typeof s === 'string') };
+      }
       const routing = await decideChatRouting({
-        origin, nextStage: toolResponse.next_stage, stageOrder, goalReached: toolResponse.goal_reached, rules,
+        origin, goalStack: getGoalStack(chatData), fallback, nextStage: toolResponse.next_stage, stageOrder, goalReached: toolResponse.goal_reached, rules,
         node: loc => script ? script.node(loc) : Promise.resolve(null),
         evaluate: async edge => {
           if (edge.condition == null) return true;

@@ -67,6 +67,14 @@ function pickSetupOrFallback<T extends ConversationNode>(ordered: readonly T[]):
     ?? null;
 }
 
+/**
+ * #4037 (cor:cht:030:02 Q8a): the conversation a completed chat with nowhere else to go moves to: the first conversation
+ * flagged fallback in the author's order. One flagged both setup and fallback counts as setup (ruling 0127), so it is not a target.
+ */
+export function pickFallbackConversation<T extends ConversationNode>(nodes: readonly T[]): T | null {
+  return topLevelConversations(nodes).find((n) => flags(n).isFallback === true && flags(n).isSetup !== true) ?? null;
+}
+
 /** True when this conversation node carries an entry condition (`data.entryCondition`, #4039 D7). */
 export function hasEntryCondition(n: ConversationNode): boolean {
   const c = flags(n).entryCondition;
