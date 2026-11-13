@@ -240,9 +240,15 @@ describe('the participation edges (#4131, BLIND F2/F3)', () => {
   it('a former member (membership revoked) is refused, and so is their worker session; the same credential was admitted before (control)', async () => {
     expect((await post(personKey, null, LIST, { a: w.appId })).data.grantActions.total).toBe(PLATFORM_ACTIONS.length);
     expect((await post(workerKey, workerSession, LIST, { a: w.appId })).data.grantActions.total).toBe(PLATFORM_ACTIONS.length);
-    await db.orgMember.update({ where: { organizationId_userId: { organizationId: w.orgId, userId: w.userId } }, data: { deletedAt: new Date() } });
-    await refused(personKey, null, w.appId, 'revoked person');
-    await refused(workerKey, workerSession, w.appId, 'revoked person\'s worker session');
+    const membership = { organizationId_userId: { organizationId: w.orgId, userId: w.userId } };
+    await db.orgMember.update({ where: membership, data: { deletedAt: new Date() } });
+    try {
+      await refused(personKey, null, w.appId, 'revoked person');
+      await refused(workerKey, workerSession, w.appId, 'revoked person\'s worker session');
+    } finally {
+      await db.orgMember.update({ where: membership, data: { deletedAt: null } }); // never leave the shared fixture revoked
+    }
+    expect((await post(personKey, null, LIST, { a: w.appId })).data.grantActions.total).toBe(PLATFORM_ACTIONS.length);
   });
 });
 
