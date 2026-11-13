@@ -3877,6 +3877,7 @@ export function respondToolDefinition(
               description: `Stage to transition to, one of: ${stageNames.join(', ')} (null to stay in current stage)`,
             }
           : { type: ['string', 'null'], description: 'Stage to transition to (null to stay in current stage)' },
+        goal_reached: { type: 'boolean', description: 'Set true only when the current conversation goal has been reached; follow the stage prompt to decide. Omitted or false means it is not complete. This flag wins over next_stage.' },
         onTrack: { type: 'boolean', description: 'Is the current conversation/stage still the right fit for what the user is asking?' },
         offTrackReason: { type: 'string', description: 'If onTrack is false, explain why the conversation seems off-track' },
       },
@@ -3889,104 +3890,7 @@ export function respondToolDefinition(
 // Goal stack helpers
 // ---------------------------------------------------------------------------
 
-export interface GoalStackEntry {
-  description: string;
-  language?: string;
-  createdAt: string;
-  createdBy: 'ASSISTANT' | 'USER';
-  topicUrn?: string;
-  conversationUrn?: string;
-  nodeUrn?: string;
-  edgeUrn?: string;
-  status: 'ACTIVE' | 'COMPLETED' | 'ABANDONED';
-  completedAt?: string;
-}
-
-export function getGoalStack(chatData: Record<string, unknown>): GoalStackEntry[] {
-  return (chatData.goalStack as GoalStackEntry[]) ?? [];
-}
-
-export function pushGoal(
-  chatData: Record<string, unknown>,
-  goal: Omit<GoalStackEntry, 'status' | 'createdAt'>,
-): GoalStackEntry[] {
-  const stack = getGoalStack(chatData);
-  stack.push({
-    ...goal,
-    status: 'ACTIVE',
-    createdAt: new Date().toISOString(),
-  });
-  chatData.goalStack = stack;
-  return stack;
-}
-
-export function popGoal(chatData: Record<string, unknown>): GoalStackEntry | null {
-  const stack = getGoalStack(chatData);
-  // Find the topmost ACTIVE entry and mark it COMPLETED
-  for (let i = stack.length - 1; i >= 0; i--) {
-    if (stack[i].status === 'ACTIVE') {
-      stack[i].status = 'COMPLETED';
-      stack[i].completedAt = new Date().toISOString();
-      chatData.goalStack = stack;
-      return stack[i];
-    }
-  }
-  return null;
-}
-
-export function currentGoal(chatData: Record<string, unknown>): GoalStackEntry | null {
-  const stack = getGoalStack(chatData);
-  for (let i = stack.length - 1; i >= 0; i--) {
-    if (stack[i].status === 'ACTIVE') return stack[i];
-  }
-  return null;
-}
-
-// ---------------------------------------------------------------------------
-// Route history helpers
-// ---------------------------------------------------------------------------
-
-export interface RouteHistoryEntry {
-  nodeUrn?: string;
-  topicUrn?: string;
-  conversationUrn?: string;
-  action: 'ENTER' | 'EXIT' | 'COMPLETED' | 'FOLLOWED';
-  trigger?: { type: string; content?: string };
-  edgeUrn?: string;
-  timestamp: string;
-}
-
-export function getRouteHistory(chatData: Record<string, unknown>): RouteHistoryEntry[] {
-  return (chatData.routeHistory as RouteHistoryEntry[]) ?? [];
-}
-
-export function appendRouteEntry(
-  chatData: Record<string, unknown>,
-  entry: Omit<RouteHistoryEntry, 'timestamp'>,
-): void {
-  const history = getRouteHistory(chatData);
-  history.push({ ...entry, timestamp: new Date().toISOString() });
-  chatData.routeHistory = history;
-}
-
-/**
- * Check if a conversation was recently visited (within the last N entries)
- * and left — used for loop prevention.
- */
-export function wasRecentlyVisited(
-  chatData: Record<string, unknown>,
-  conversationName: string,
-  lookback = 3,
-): boolean {
-  const history = getRouteHistory(chatData);
-  const recentExits = history
-    .slice(-lookback * 2)  // each visit is ENTER + EXIT, so look back 2x
-    .filter((e) =>
-      e.action === 'EXIT' &&
-      e.conversationUrn?.endsWith(`:${conversationName}`),
-    );
-  return recentExits.length > 0;
-}
+export { getGoalStack, pushGoal, popGoal, currentGoal, getRouteHistory, appendRouteEntry, wasRecentlyVisited, type GoalStackEntry, type RouteHistoryEntry } from '../../../lib/chatRouting.js';
 
 // Edge-condition memory layer construction lives in
 // `lib/edge-conditions/prisma-memory-layer.ts` (the Prisma adapter).
