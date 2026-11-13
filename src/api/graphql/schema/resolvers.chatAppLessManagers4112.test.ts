@@ -137,7 +137,7 @@ describe('#4112 retained App-less turns require Agent management', () => {
     expect((await db.memory.findUniqueOrThrow({ where: { id: home.memoryId } })).appId).toBeNull();
     const sent = await observe(managerId, ctx => send(ctx, home));
     expect(sent.reads.length).toBeGreaterThan(0);
-    const seen = await observe(managerId, ctx => respond(ctx, home));
+    const seen = await observe<any>(managerId, ctx => respond(ctx, home));
     expect(seen.value.conversationHandoff).toBe('next');
     expect(seen.reads.length).toBeGreaterThan(0);
   });
@@ -146,7 +146,7 @@ describe('#4112 retained App-less turns require Agent management', () => {
     expect((await db.memory.findUniqueOrThrow({ where: { id: home.memoryId } })).appId).toBe(appId);
     const sent = await observe(consumerId, ctx => send(ctx, home));
     expect(sent.reads.length).toBeGreaterThan(0);
-    const seen = await observe(consumerId, ctx => respond(ctx, home));
+    const seen = await observe<any>(consumerId, ctx => respond(ctx, home));
     expect(seen.value.conversationHandoff).toBe('next');
     expect(seen.reads.length).toBeGreaterThan(0);
   });
