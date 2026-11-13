@@ -62,6 +62,29 @@ const complete = (ctx: Context, chatId: string, data?: Record<string, unknown>) 
   M.processChatResponse({}, { chatId, toolResponse: { message: 'ok', goal_reached: true, ...(data ? { data } : {}), onTrack: true } }, ctx);
 const uninstall = () => db.appAgent.delete({ where: { appId_agentId: { appId, agentId } } });
 
+// C1 (Vera, #103559): a non-manager member's turn after uninstall reads nothing from the Agent's system memory. Alice is an
+// org CONTRIBUTOR, not a manager, so cor:dmo:050:13 does not excuse a read. Every `db.node` read method and `db.edge.findMany`
+// is spied; the only exempt call is the memory-wide-field list, which stays live by ruling Q10 (chatScript.ts) and is
+// matched by its exact where shape.
+async function observeDefinitionReads<T>(run: () => Promise<T>) {
+  const defNodes = new Set((await db.node.findMany({ where: { memoryId: systemId }, select: { id: true } })).map((n) => n.id));
+  const nodeSpies = (['findFirst', 'findMany', 'findUnique', 'findUniqueOrThrow', 'findFirstOrThrow'] as const).map((m) => vi.spyOn(db.node, m));
+  const edgeSpy = vi.spyOn(db.edge, 'findMany');
+  const isQ10FieldList = (where: any) => where?.OR?.length === 2
+    && where.OR.some((c: any) => c.loc === 'config') && where.OR.some((c: any) => c.loc?.startsWith === 'conversations:');
+  try {
+    const value = await run();
+    const nodeReads = nodeSpies.flatMap((sp) => sp.mock.calls).filter(([a]) => {
+      const where = (a as any)?.where;
+      if (isQ10FieldList(where)) return false;
+      const memory = where?.memoryId ?? where?.loc_memoryId?.memoryId;
+      return memory === systemId || memory?.equals === systemId || memory?.in?.includes(systemId);
+    });
+    const edgeReads = edgeSpy.mock.calls.filter(([a]) => defNodes.has((a as any)?.where?.sourceId));
+    return { value, reads: [...nodeReads, ...edgeReads] };
+  } finally { for (const sp of [...nodeSpies, edgeSpy]) sp.mockRestore(); }
+}
+
 describe('#4038 shared chat', () => {
   it('a flagged completion fires the rule in a shared chat', async () => {
     const chat = await startShared(aliceId);
@@ -69,28 +92,15 @@ describe('#4038 shared chat', () => {
     expect(result.conversationHandoff).toBe('done');
   });
 
-  it('after the App uninstalls the Agent a shared turn fires no rule and reads no definition (edge or node)', async () => {
+  it('after the App uninstalls the Agent a shared turn fires no rule and reads no definition (edge or node), on send and response', async () => {
     const chat = await startShared(aliceId);
     await uninstall();
-    const defNodes = new Set((await db.node.findMany({ where: { memoryId: systemId }, select: { id: true } })).map((n) => n.id));
-    const spy = vi.spyOn(db.edge, 'findMany');
-    const nodeSpies = (['findFirst', 'findMany', 'findUnique', 'findUniqueOrThrow', 'findFirstOrThrow'] as const).map((m) => vi.spyOn(db.node, m));
-    try {
-      const result = await complete(as(aliceId), chat.chatId, { industry: 'farming' });
-      expect(result.conversationHandoff).toBeNull();
-      expect(spy.mock.calls.filter(([a]) => defNodes.has((a as any)?.where?.sourceId))).toHaveLength(0);
-      // C1: no read of the Agent's definition memory (a node read before the licence refusal would show here), except
-      // the memory-wide-field list, which stays live by ruling Q10 (chatScript.ts) and is the one call of this shape.
-      const isQ10FieldList = (where: any) => where?.OR?.length === 2
-        && where.OR.some((c: any) => c.loc === 'config') && where.OR.some((c: any) => c.loc?.startsWith === 'conversations:');
-      const systemReads = nodeSpies.flatMap((s) => s.mock.calls).filter(([a]) => {
-        const where = (a as any)?.where;
-        if (isQ10FieldList(where)) return false;
-        const memory = where?.memoryId ?? where?.loc_memoryId?.memoryId;
-        return memory === systemId || memory?.equals === systemId || memory?.in?.includes(systemId);
-      });
-      expect(systemReads).toEqual([]);
-    } finally { spy.mockRestore(); for (const n of nodeSpies) n.mockRestore(); }
+    const sent = await observeDefinitionReads(() => M.sendChatMessage({}, { chatId: chat.chatId, userMessage: 'after uninstall' }, as(aliceId)));
+    expect(sent.value.systemMessage).toBe('');
+    expect(sent.reads).toEqual([]);
+    const done = await observeDefinitionReads(() => complete(as(aliceId), chat.chatId, { industry: 'farming' }));
+    expect(done.value.conversationHandoff).toBeNull();
+    expect(done.reads).toEqual([]);
   });
 
   it("member A's condition does not see member B's bucket", async () => {
@@ -126,11 +136,16 @@ describe('#4038 App-key session memory', () => {
     expect((await complete(as(aliceId), chat.chatId)).conversationHandoff).toBe('done');
   });
 
-  it.each(['personal'] as const)('C1: after uninstall a %s session chat evaluates no rules', async (cls) => {
+  it.each(['personal'] as const)('C1: after uninstall a %s session chat evaluates no rules and reads no definition, on send and response', async (cls) => {
     const { keyCtx } = await sessionHome(cls);
     const chat = await M.startChat({}, { agentId, conversationName: 'intake' }, keyCtx);
     await db.edge.updateMany({ where: { memoryId: systemId, loc: { contains: 'route' } }, data: { condition: Prisma.DbNull } });
     await uninstall();
-    expect((await complete(as(aliceId), chat.chatId)).conversationHandoff).toBeNull();
+    const sent = await observeDefinitionReads(() => M.sendChatMessage({}, { chatId: chat.chatId, userMessage: 'after uninstall' }, as(aliceId)));
+    expect(sent.value.systemMessage).toBe('');
+    expect(sent.reads).toEqual([]);
+    const done = await observeDefinitionReads(() => complete(as(aliceId), chat.chatId));
+    expect(done.value.conversationHandoff).toBeNull();
+    expect(done.reads).toEqual([]);
   });
 });
