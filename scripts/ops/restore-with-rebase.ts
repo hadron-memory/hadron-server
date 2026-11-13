@@ -66,7 +66,8 @@ export interface RunOptions {
   dbSettings: Record<string, string> | null;
   runId?: string;
   pgRestore?: string;
-  log?: (event: Record<string, unknown>) => void;
+  /** Stage events (JSON lines on stderr by default). Awaited, so a test can act at a stage boundary. */
+  log?: (event: Record<string, unknown>) => void | Promise<unknown>;
   fault?: FaultPoint;
 }
 
@@ -270,7 +271,10 @@ export function runtimeRoleSqlFor(serveRole: string, quoteLiteral: (s: string) =
 
 /** The whole pipeline. Returns only when the target is RELEASED; any earlier failure throws a RestoreError. */
 export async function restoreWithRebase(opts: RunOptions): Promise<RunResult> {
-  const log = opts.log ?? ((e) => process.stderr.write(`${JSON.stringify(e)}\n`));
+  const sink = opts.log ?? ((e: Record<string, unknown>) => void process.stderr.write(`${JSON.stringify(e)}\n`));
+  const log = async (e: Record<string, unknown>) => {
+    await sink(e);
+  };
   const runId = opts.runId ?? `restore-${new Date().toISOString().replace(/[:.]/g, '-')}`;
   const fault = (point: FaultPoint) => {
     if (opts.fault === point) throw new Error(`injected fault at ${point}`);
@@ -287,7 +291,7 @@ export async function restoreWithRebase(opts: RunOptions): Promise<RunResult> {
     throw new RestoreError(stage0, 'connection limit must be a positive integer');
   }
   const dumpSha256 = await sha256File(opts.dump);
-  log({ runId, stage: stage0, event: 'dump', sha256: dumpSha256 });
+  await log({ runId, stage: stage0, event: 'dump', sha256: dumpSha256 });
 
   const version = await run(pgRestore, ['--version'], process.env);
   const major = Number(/(\d+)(?:\.\d+)?/.exec(version.stdout)?.[1] ?? 0);
@@ -305,7 +309,7 @@ export async function restoreWithRebase(opts: RunOptions): Promise<RunResult> {
     if (oid != null) {
       outcome = await teardown(opts.adminUrl, opts.target, oid, opts.ownerRole).catch(() => 'drop-failed' as const);
     }
-    log({ runId, stage, event: 'failed', message, teardown: outcome });
+    await log({ runId, stage, event: 'failed', message, teardown: outcome });
     throw new RestoreError(stage, message, outcome);
   };
 
@@ -373,7 +377,7 @@ export async function restoreWithRebase(opts: RunOptions): Promise<RunResult> {
     const dumpExtensions = tocExtensions(toc.stdout);
     const missing = [...dumpExtensions].filter((e) => !templateExtensions.has(e));
     if (missing.length) throw new RestoreError(stage0, `the dump needs extension(s) the template lacks: ${missing.join(', ')}`);
-    log({ runId, stage: stage0, event: 'ok', extensions: [...dumpExtensions].sort() });
+    await log({ runId, stage: stage0, event: 'ok', extensions: [...dumpExtensions].sort() });
 
     // ── S1: create, admission off ─────────────────────────────────────────────
     try {
@@ -386,7 +390,7 @@ export async function restoreWithRebase(opts: RunOptions): Promise<RunResult> {
       throw new RestoreError('S1', err instanceof Error ? err.message : String(err));
     }
     oid = (await maint.query<{ oid: number }>('SELECT oid::int AS oid FROM pg_database WHERE datname = $1', [opts.target])).rows[0].oid;
-    log({ runId, stage: 'S1', event: 'created', oid });
+    await log({ runId, stage: 'S1', event: 'created', oid });
 
     // ── S2: ACL fence, then admission for the working phase ───────────────────
     try {
@@ -409,7 +413,7 @@ export async function restoreWithRebase(opts: RunOptions): Promise<RunResult> {
       await maint.query(`SET ROLE ${q(maint, opts.ownerRole)}`);
       await maint.query(`ALTER DATABASE ${q(maint, opts.target)} ALLOW_CONNECTIONS true`);
       await maint.query('RESET ROLE');
-      log({ runId, stage: 'S2', event: 'fenced', connect: grantees });
+      await log({ runId, stage: 'S2', event: 'fenced', connect: grantees });
     } catch (err) {
       await maint.query('RESET ROLE').catch(() => undefined);
       return await tear('S2', err);
@@ -438,7 +442,7 @@ export async function restoreWithRebase(opts: RunOptions): Promise<RunResult> {
         await maint.query(`ALTER DATABASE ${q(maint, opts.target)} SET ${q(maint, name)} = ${maint.escapeLiteral(value)}`);
       }
       await maint.query('RESET ROLE');
-      log({ runId, stage: 'S3', event: 'restored', settings: Object.keys(opts.dbSettings).sort() });
+      await log({ runId, stage: 'S3', event: 'restored', settings: Object.keys(opts.dbSettings).sort() });
     } catch (err) {
       await maint.query('RESET ROLE').catch(() => undefined);
       return await tear('S3', err);
@@ -461,7 +465,7 @@ export async function restoreWithRebase(opts: RunOptions): Promise<RunResult> {
         rebase = await rebaseEventKeys(target);
       }
       orderHash = await eventOrderHash(target, rebase.state);
-      log({ runId, stage: 'S4', event: 'rebased', ...rebase });
+      await log({ runId, stage: 'S4', event: 'rebased', ...rebase });
     } catch (err) {
       return await tear('S4', err);
     }
@@ -520,6 +524,7 @@ export async function restoreWithRebase(opts: RunOptions): Promise<RunResult> {
 
     // ── Release: one statement, last ─────────────────────────────────────────
     try {
+      await log({ runId, stage: 'release', event: 'releasing', oid });
       await maint.query(`ALTER DATABASE ${q(maint, opts.target)} ALLOW_CONNECTIONS true`);
       fault('release-reply');
       released = true;
@@ -528,12 +533,12 @@ export async function restoreWithRebase(opts: RunOptions): Promise<RunResult> {
       const now = await status(opts.adminUrl, opts.target).catch(() => null);
       if (now?.status === 'RELEASED' && now.oid === oid) {
         released = true;
-        log({ runId, stage: 'release', event: 'reply-lost-but-released', oid });
+        await log({ runId, stage: 'release', event: 'reply-lost-but-released', oid });
       } else {
         return await tear('release', err);
       }
     }
-    log({ runId, stage: 'release', event: 'released', oid });
+    await log({ runId, stage: 'release', event: 'released', oid });
     return { runId, oid: oid!, dumpSha256, rebase, status: 'RELEASED' };
   } catch (err) {
     if (err instanceof RestoreError) throw err;
