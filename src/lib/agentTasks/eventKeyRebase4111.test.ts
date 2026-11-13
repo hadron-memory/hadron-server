@@ -18,7 +18,13 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
-import { assertEventKeysLocal, ForeignEventKeyError, rebaseEventKeys } from './eventKeyRebase.js';
+import {
+  assertEventKeysLocal,
+  ForeignEventKeyError,
+  rebaseEventKeys,
+  RebaseVerificationError,
+  withAppendOnlyTriggerOff,
+} from './eventKeyRebase.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -303,5 +309,245 @@ describe('#4111: the boot check refuses foreign event keys and writes nothing', 
     expect(await db.$queryRaw`SELECT id, tx_id::text AS k FROM agent_team_events ORDER BY id`).toEqual(before);
     await withPg((pg) => rebaseEventKeys(pg));
     await expect(assertEventKeysLocal(db)).resolves.toBeUndefined();
+  });
+});
+
+/** Every row, every column (tx_id included), as text: "byte-identical to its start" compares these. */
+const tableImage = async () =>
+  (await db.$queryRaw<{ r: string }[]>`SELECT e::text AS r FROM agent_team_events e ORDER BY id`).map((x) => x.r);
+/** Every trigger on the table and its tgenabled state. */
+const triggerImage = async () =>
+  (
+    await db.$queryRaw<{ t: string }[]>`
+      SELECT tgname::text || '=' || tgenabled::text AS t FROM pg_trigger
+       WHERE tgrelid = 'agent_team_events'::regclass ORDER BY tgname`
+  ).map((x) => x.t);
+const NOT_NULL_SQL = readFileSync(
+  new URL('../../../prisma/migrations/20261113180000_agent_team_event_tx_id_not_null/migration.sql', import.meta.url),
+  'utf8',
+);
+
+/** Wait until `pids` are all blocked on a lock. */
+async function waitingOnLock(pids: number[]): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    const [{ n }] = await db.$queryRaw<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid = ANY(${pids}::int[]) AND wait_event_type = 'Lock'`;
+    if (n === pids.length) return;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error('the second connection never waited on the lock');
+}
+
+/** One event with NULL tx_id, the way #4084 left the column, plus a fixed history; returns the NULL row's id. */
+async function legacyNullColumn(): Promise<string> {
+  await buildHistory();
+  const t = await createTask(apps[0], 50);
+  await db.$executeRawUnsafe('ALTER TABLE agent_team_events ALTER COLUMN tx_id DROP NOT NULL');
+  const id = generateId();
+  await db.$executeRaw`
+    INSERT INTO agent_team_events (id, app_id, type, task_id, payload, tx_id)
+    VALUES (${id}, ${apps[0].id}, 'task.assigned', ${t.id}, '{"type":"task.assigned"}'::jsonb, NULL)`;
+  return id;
+}
+
+describe('#4111 R12: the named-trigger exception (A2, T1-T5, L1)', { timeout: 60_000 }, () => {
+  it.each([
+    ['payload', `UPDATE agent_team_events SET payload = payload || '{"injected":1}'::jsonb WHERE id = (SELECT min(id) FROM agent_team_events)`, /other than tx_id/],
+    [
+      'acknowledgement',
+      `UPDATE agent_team_events SET acknowledged_at = now(), acknowledged_by_user_id = (SELECT min(id) FROM users)
+        WHERE severity = 'alarm'`,
+      /other than tx_id/,
+    ],
+    ['actor', `UPDATE agent_team_events SET actor_app_key_id = 'injected' WHERE id = (SELECT min(id) FROM agent_team_events)`, /other than tx_id/],
+    ['deleted-row', `DELETE FROM agent_team_events WHERE id = (SELECT min(id) FROM agent_team_events)`, /while the trigger was off/],
+    [
+      'inserted-row',
+      `INSERT INTO agent_team_events (id, app_id, type, task_id, payload)
+       SELECT 'injected4111', app_id, type, task_id, payload FROM agent_team_events WHERE id = (SELECT min(id) FROM agent_team_events)`,
+      /while the trigger was off/,
+    ],
+  ])('T1: a %s change while the trigger is off aborts; keys, columns and trigger state roll back', async (_what, inject, msg) => {
+    const threshold = await buildHistory();
+    // An unacknowledged alarm: acknowledging it is the one change the trigger admits, and still not one the rebase may make.
+    const [task] = await db.$queryRaw<{ id: string }[]>`SELECT id FROM agent_tasks WHERE app_id = ${apps[0].id} LIMIT 1`;
+    await db.$executeRaw`
+      INSERT INTO agent_team_events (id, app_id, type, task_id, payload, severity)
+      VALUES (${generateId()}, ${apps[0].id}, 'task.stalled', ${task.id}, '{}'::jsonb, 'alarm')`;
+    await shiftKeys(threshold, (await xmax()) + 1_000_000_000n);
+    const table = await tableImage();
+    const triggers = await triggerImage();
+    const err = await withPg((pg) =>
+      rebaseEventKeys(pg, { whileTriggerOff: async (c) => void expect((await c.query(inject)).rowCount).toBe(1) }),
+    ).catch((e) => e);
+    expect(err).toBeInstanceOf(RebaseVerificationError);
+    expect(err.message).toMatch(msg);
+    expect(await tableImage()).toEqual(table);
+    expect(await triggerImage()).toEqual(triggers);
+    expect(triggers).toContain('agent_team_event_append_only=O');
+  });
+
+  it('T2: a second connection\'s INSERT and UPDATE wait for the transaction, then meet the enabled trigger', async () => {
+    const threshold = await buildHistory();
+    await shiftKeys(threshold, (await xmax()) + 1_000_000_000n);
+    const [target] = await db.$queryRaw<{ id: string; task: string; p: unknown }[]>`
+      SELECT id, task_id AS task, payload AS p FROM agent_team_events ORDER BY id LIMIT 1`;
+    const w1 = new Client({ connectionString: process.env.DATABASE_URL });
+    const w2 = new Client({ connectionString: process.env.DATABASE_URL });
+    await Promise.all([w1.connect(), w2.connect()]);
+    try {
+      const pids = [(await w1.query('SELECT pg_backend_pid() AS p')).rows[0].p, (await w2.query('SELECT pg_backend_pid() AS p')).rows[0].p];
+      let update: Promise<unknown> = Promise.resolve();
+      let insert: Promise<unknown> = Promise.resolve();
+      const report = await withPg((pg) =>
+        rebaseEventKeys(pg, {
+          whileTriggerOff: async () => {
+            update = w1.query(`UPDATE agent_team_events SET payload = '{"while":"off"}'::jsonb WHERE id = $1`, [target.id]).catch((e) => e);
+            insert = w2
+              .query(
+                `INSERT INTO agent_team_events (id, app_id, type, task_id, payload, acknowledged_at)
+                 VALUES ($1, $2, 'task.assigned', $3, '{}'::jsonb, now())`,
+                [generateId(), apps[0].id, target.task],
+              )
+              .catch((e) => e);
+            await waitingOnLock(pids);
+          },
+        }),
+      );
+      expect(report.state).toBe('rebased');
+      expect(String(await update)).toMatch(/append-only/);
+      expect(String(await insert)).toMatch(/already acknowledged/);
+      const [row] = await db.$queryRaw<{ p: unknown }[]>`SELECT payload AS p FROM agent_team_events WHERE id = ${target.id}`;
+      expect(row.p).toEqual(target.p);
+    } finally {
+      await Promise.all([w1.end(), w2.end()]);
+    }
+  });
+
+  it('T2: the split and autocommit forms are refused before the trigger is touched', async () => {
+    await buildHistory();
+    const triggers = await triggerImage();
+    let ran = false;
+    const fn = async () => void (ran = true);
+    await withPg(async (pg) => {
+      // Autocommit: no transaction, so no lock survives the statement.
+      await expect(withAppendOnlyTriggerOff(pg, fn)).rejects.toThrow(/split or autocommit form refused/);
+      // A transaction whose lock does not exclude writers.
+      await pg.query('BEGIN');
+      await pg.query('LOCK TABLE agent_team_events IN ROW EXCLUSIVE MODE');
+      await expect(withAppendOnlyTriggerOff(pg, fn)).rejects.toThrow(/split or autocommit form refused/);
+      await pg.query('ROLLBACK');
+    });
+    expect(ran).toBe(false);
+    expect(await triggerImage()).toEqual(triggers);
+  });
+
+  it.each([
+    ['another trigger disabled', 'ALTER TABLE agent_team_events DISABLE TRIGGER worker_reference_fence_1162', /trigger state/],
+    ['session_replication_role = replica', 'SET LOCAL session_replication_role = replica', /session_replication_role/],
+  ])('T3: %s inside the window fails the trigger-state check and rolls back', async (_what, inject, msg) => {
+    const threshold = await buildHistory();
+    await shiftKeys(threshold, (await xmax()) + 1_000_000_000n);
+    const table = await tableImage();
+    const triggers = await triggerImage();
+    const err = await withPg((pg) => rebaseEventKeys(pg, { whileTriggerOff: async (c) => void (await c.query(inject)) })).catch(
+      (e) => e,
+    );
+    expect(err).toBeInstanceOf(RebaseVerificationError);
+    expect(err.message).toMatch(msg);
+    expect(await tableImage()).toEqual(table);
+    expect(await triggerImage()).toEqual(triggers);
+  });
+
+  it('L1: a transaction that already holds an xid at X0 is refused before any write', async () => {
+    const threshold = await buildHistory();
+    await shiftKeys(threshold, (await xmax()) + 1_000_000_000n);
+    const table = await tableImage();
+    const err = await withPg(async (pg) => {
+      await pg.query('BEGIN');
+      await pg.query('SELECT pg_current_xact_id()');
+      return rebaseEventKeys(pg).catch((e) => e);
+    });
+    expect(err).toBeInstanceOf(RebaseVerificationError);
+    expect(err.message).toMatch(/after this transaction took xid/);
+    expect(await tableImage()).toEqual(table);
+  });
+
+  it('T5: the migration backfill changes only NULL to 0; every other column and every trigger state is unchanged', async () => {
+    const id = await legacyNullColumn();
+    const before = await tableImage();
+    const triggers = await triggerImage();
+    await withPg((pg) => pg.query(NOT_NULL_SQL));
+    const after = await tableImage();
+    expect(after.length).toBe(before.length);
+    const nullRow = before.findIndex((r) => r.startsWith(`(${id},`));
+    // Only the NULL row's image changes, and only by its key.
+    expect(after.filter((r, i) => r !== before[i])).toEqual([after[nullRow]]);
+    expect(await triggerImage()).toEqual(triggers);
+  });
+
+  it.each([
+    ['a payload change in the backfill (T1)', (s: string) => s.replace(`SET "tx_id" = '0'::xid8`, `SET "tx_id" = '0'::xid8, "payload" = '{}'::jsonb`), /T1/],
+    ['DISABLE TRIGGER ALL (T3)', (s: string) => s.replaceAll('TRIGGER "agent_team_event_append_only"', 'TRIGGER ALL'), /T3/],
+    [
+      'session_replication_role instead of the named disable (T3)',
+      (s: string) =>
+        s
+          .replace('ALTER TABLE "agent_team_events" DISABLE TRIGGER "agent_team_event_append_only";', `SET LOCAL session_replication_role = replica;`)
+          .replace('ALTER TABLE "agent_team_events" ENABLE TRIGGER "agent_team_event_append_only";', ''),
+      /T3/,
+    ],
+    ['no writer-excluding lock (T2)', (s: string) => s.replace('LOCK TABLE "agent_team_events" IN ACCESS EXCLUSIVE MODE;', ''), /T2/],
+  ])('T5 mutant: %s aborts the migration with a complete rollback', async (_what, mutate, msg) => {
+    await legacyNullColumn();
+    const mutated = mutate(NOT_NULL_SQL);
+    expect(mutated).not.toBe(NOT_NULL_SQL);
+    const table = await tableImage();
+    const triggers = await triggerImage();
+    const err = await withPg(async (pg) => {
+      const e = await pg.query(mutated).catch((x) => x);
+      await pg.query('ROLLBACK').catch(() => undefined);
+      return e;
+    });
+    expect(String(err)).toMatch(msg);
+    expect(await tableImage()).toEqual(table);
+    expect(await triggerImage()).toEqual(triggers);
+    const [{ notnull }] = await db.$queryRaw<{ notnull: boolean }[]>`
+      SELECT attnotnull AS notnull FROM pg_attribute WHERE attrelid = 'agent_team_events'::regclass AND attname = 'tx_id'`;
+    expect(notnull).toBe(false);
+  });
+
+  it('T5/T2: a writer that arrives during the migration waits, then meets the enabled trigger and NOT NULL', async () => {
+    const id = await legacyNullColumn();
+    const [{ task }] = await db.$queryRaw<{ task: string }[]>`SELECT task_id AS task FROM agent_team_events WHERE id = ${id}`;
+    const body = NOT_NULL_SQL.replace(/COMMIT;\s*$/, '');
+    expect(body).not.toBe(NOT_NULL_SQL);
+    await withPg(async (mig) => {
+      await mig.query(body);
+      const w = new Client({ connectionString: process.env.DATABASE_URL });
+      await w.connect();
+      try {
+        const pid = (await w.query('SELECT pg_backend_pid() AS p')).rows[0].p;
+        const acked = w
+          .query(
+            `INSERT INTO agent_team_events (id, app_id, type, task_id, payload, acknowledged_at, tx_id)
+             VALUES ($1, $2, 'task.assigned', $3, '{}'::jsonb, now(), NULL)`,
+            [generateId(), apps[0].id, task],
+          )
+          .catch((e) => e);
+        await waitingOnLock([pid]);
+        await mig.query('COMMIT');
+        expect(String(await acked)).toMatch(/already acknowledged|null value/);
+        await expect(
+          w.query(`INSERT INTO agent_team_events (id, app_id, type, task_id, payload, tx_id) VALUES ($1, $2, 'task.assigned', $3, '{}'::jsonb, NULL)`, [
+            generateId(),
+            apps[0].id,
+            task,
+          ]),
+        ).rejects.toThrow(/null value/);
+      } finally {
+        await w.end();
+      }
+    });
   });
 });

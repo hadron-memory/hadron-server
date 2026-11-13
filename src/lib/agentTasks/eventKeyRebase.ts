@@ -68,6 +68,128 @@ export class RebaseVerificationError extends Error {
 export const EVENT_TABLE = 'agent_team_events';
 export const APPEND_ONLY_TRIGGER = 'agent_team_event_append_only';
 
+/** Test seam: run inside the trigger-off window, on the rebase's own connection. Never set in production. */
+export interface RebaseOptions {
+  whileTriggerOff?: (client: ClientBase) => Promise<void>;
+}
+
+/** One trigger's state, as `pg_trigger` records it. */
+interface TriggerState {
+  name: string;
+  enabled: string;
+}
+
+/** Every trigger on the table (internal ones included), by name. */
+async function triggerStates(client: ClientBase): Promise<TriggerState[]> {
+  const res = await client.query<TriggerState>(
+    `SELECT tgname::text AS name, tgenabled::text AS enabled FROM pg_trigger
+      WHERE tgrelid = '${EVENT_TABLE}'::regclass ORDER BY tgname`,
+  );
+  return res.rows;
+}
+
+const sameTriggers = (a: TriggerState[], b: TriggerState[]) =>
+  a.length === b.length && a.every((t, i) => t.name === b[i].name && t.enabled === b[i].enabled);
+
+/**
+ * T2's precondition: this backend holds EXCLUSIVE or ACCESS EXCLUSIVE on the table, granted. A relation lock lives
+ * only inside a transaction, so this also refuses the autocommit form (each statement its own transaction, the
+ * trigger visible as off to other sessions between them) and a transaction that never locked the table.
+ */
+async function assertWriterExcluded(client: ClientBase): Promise<void> {
+  const res = await client.query<{ held: boolean; role: string }>(
+    `SELECT EXISTS (SELECT 1 FROM pg_locks
+                     WHERE pid = pg_backend_pid() AND locktype = 'relation' AND granted
+                       AND relation = '${EVENT_TABLE}'::regclass
+                       AND mode IN ('ExclusiveLock', 'AccessExclusiveLock')) AS held,
+            current_setting('session_replication_role') AS role`,
+  );
+  if (!res.rows[0].held) {
+    throw new RebaseVerificationError(
+      `${APPEND_ONLY_TRIGGER} may only be disabled inside one transaction that holds EXCLUSIVE or ACCESS EXCLUSIVE ` +
+        `on ${EVENT_TABLE} (split or autocommit form refused)`,
+    );
+  }
+  // T3: session_replication_role = replica silences every ordinary trigger without changing tgenabled.
+  if (res.rows[0].role !== 'origin') {
+    throw new RebaseVerificationError(`session_replication_role is ${res.rows[0].role}, not origin`);
+  }
+}
+
+/**
+ * Every column of every row except `tx_id`, as each column's own text output (exact: numeric scale, timestamp
+ * microseconds, jsonb's stored form), keyed by id. The column list is read from the catalog, so a column added later
+ * is covered without editing this.
+ */
+async function rowImages(client: ClientBase): Promise<Map<string, string>> {
+  const cols = await client.query<{ cols: string }>(
+    `SELECT string_agg(quote_ident(attname), ', ' ORDER BY attnum) AS cols FROM pg_attribute
+      WHERE attrelid = '${EVENT_TABLE}'::regclass AND attnum > 0 AND NOT attisdropped AND attname <> 'tx_id'`,
+  );
+  const res = await client.query<{ id: string; img: string }>(
+    `SELECT id, ROW(${cols.rows[0].cols})::text AS img FROM ${EVENT_TABLE}`,
+  );
+  return new Map(res.rows.map((r) => [r.id, r.img]));
+}
+
+/**
+ * The named-trigger exception of #4111 contract A2 (CHECKED amendment 6846467521, T1-T3): run `fn` with
+ * `agent_team_event_append_only` disabled, and prove before returning that nothing but `tx_id` changed.
+ *
+ *  - T2: the caller's transaction must already hold EXCLUSIVE or ACCESS EXCLUSIVE on the table (checked in
+ *    `pg_locks`); the disable, `fn`, the re-enable and every check run inside it, so no other session ever sees the
+ *    trigger off. This helper does not commit or roll back: on a throw the CALLER rolls back, which restores the keys,
+ *    every other column and the trigger state together.
+ *  - T3: the trigger is disabled by exact name, never ALL/USER, and `session_replication_role` must stay `origin`.
+ *    While disabled, every other trigger (the #1162 worker-reference fence and the internal FK triggers included) must
+ *    be in its starting state and only this one `D`; after the re-enable every trigger must be in its starting state,
+ *    this one `O`.
+ *  - T1: every other column of every row is byte-identical (as text output) to the image taken under the lock before
+ *    the disable; no row appears or disappears.
+ *
+ * Owner-only (T4): `ALTER TABLE ... DISABLE TRIGGER` needs table ownership; this adds no grant or definer function.
+ */
+export async function withAppendOnlyTriggerOff<T>(
+  client: ClientBase,
+  fn: () => Promise<T>,
+  whileOff?: (client: ClientBase) => Promise<void>,
+): Promise<T> {
+  await assertWriterExcluded(client);
+  const start = await triggerStates(client);
+  const own = start.find((t) => t.name === APPEND_ONLY_TRIGGER);
+  if (own?.enabled !== 'O') {
+    throw new RebaseVerificationError(`${APPEND_ONLY_TRIGGER} is ${own?.enabled ?? 'missing'} before the rebase, not O`);
+  }
+  const images = await rowImages(client);
+
+  await client.query(`ALTER TABLE ${EVENT_TABLE} DISABLE TRIGGER ${APPEND_ONLY_TRIGGER}`);
+  const off = await triggerStates(client);
+  const expectedOff = start.map((t) => (t.name === APPEND_ONLY_TRIGGER ? { ...t, enabled: 'D' } : t));
+  if (!sameTriggers(off, expectedOff)) {
+    throw new RebaseVerificationError('a trigger other than the append-only trigger changed state while it was disabled');
+  }
+  await assertWriterExcluded(client);
+
+  const result = await fn();
+  if (whileOff) await whileOff(client);
+
+  await client.query(`ALTER TABLE ${EVENT_TABLE} ENABLE TRIGGER ${APPEND_ONLY_TRIGGER}`);
+  await assertWriterExcluded(client);
+  if (!sameTriggers(await triggerStates(client), start)) {
+    throw new RebaseVerificationError('trigger state after the rebase differs from its start');
+  }
+  const after = await rowImages(client);
+  if (after.size !== images.size) {
+    throw new RebaseVerificationError(`row count changed while the trigger was off: ${images.size} -> ${after.size}`);
+  }
+  for (const [id, img] of images) {
+    if (after.get(id) !== img) {
+      throw new RebaseVerificationError(`a column other than tx_id changed on event ${id}`);
+    }
+  }
+  return result;
+}
+
 /**
  * The ascending-run assignment, in SQL so the comparison uses the column's own collation. Rows are walked in serving
  * order S; a new run starts at the first row and wherever `(created_at, id)` is NOT strictly greater than the previous
@@ -103,14 +225,15 @@ async function servingOrder(client: ClientBase): Promise<string[]> {
  *  2. In its own statement: `X0 = pg_snapshot_xmax(pg_current_snapshot())`, asserting this transaction has no xid yet.
  *     Every xid any session takes later is `>= X0`. Then `LOCK ... IN ACCESS EXCLUSIVE MODE` (no reader either).
  *  3. Classify (empty / zero-only / local-only / rebase), count the runs K, refuse `K > X0 - 3` with zero writes.
- *  4. Snapshot the serving order, disable the append-only trigger, `UPDATE ... WHERE tx_id IS DISTINCT FROM new`,
- *     re-enable it.
+ *  4. Snapshot the serving order, then `UPDATE ... WHERE tx_id IS DISTINCT FROM new` inside
+ *     `withAppendOnlyTriggerOff` (contract A2, T1-T3: only the key moves, one writer-excluding transaction, exactly
+ *     that one trigger).
  *  5. Verify before COMMIT: row count unchanged, serving order identical to the snapshot, `max(tx_id) = K + 2`,
  *     no NULL, no key at or above X0, the trigger enabled again.
  *
  * Idempotent: a rebased table is local-only, so a second run writes nothing.
  */
-export async function rebaseEventKeys(client: ClientBase): Promise<RebaseReport> {
+export async function rebaseEventKeys(client: ClientBase, opts: RebaseOptions = {}): Promise<RebaseReport> {
   await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
   try {
     // EXCLUSIVE first: it conflicts with every write lock, so no writer can touch the table from here on, and unlike
@@ -174,15 +297,18 @@ export async function rebaseEventKeys(client: ClientBase): Promise<RebaseReport>
 
     const before = await servingOrder(client);
 
-    await client.query(`ALTER TABLE ${EVENT_TABLE} DISABLE TRIGGER ${APPEND_ONLY_TRIGGER}`);
-    const upd = await client.query(
-      `UPDATE ${EVENT_TABLE} e
-          SET tx_id = (2 + r.run)::text::xid8
-         FROM (${RUNS_SQL}) r
-        WHERE e.id = r.id
-          AND e.tx_id IS DISTINCT FROM (2 + r.run)::text::xid8`,
+    const upd = await withAppendOnlyTriggerOff(
+      client,
+      () =>
+        client.query(
+          `UPDATE ${EVENT_TABLE} e
+              SET tx_id = (2 + r.run)::text::xid8
+             FROM (${RUNS_SQL}) r
+            WHERE e.id = r.id
+              AND e.tx_id IS DISTINCT FROM (2 + r.run)::text::xid8`,
+        ),
+      opts.whileTriggerOff,
     );
-    await client.query(`ALTER TABLE ${EVENT_TABLE} ENABLE TRIGGER ${APPEND_ONLY_TRIGGER}`);
 
     const after = await servingOrder(client);
     if (after.length !== before.length || after.length !== rows) {

@@ -19,7 +19,13 @@ import {
   tocExtensions,
   type RunOptions,
 } from './restore-with-rebase.js';
-import { assertEventKeysLocal, ForeignEventKeyError, rebaseEventKeys, RebaseHeadroomError } from '../../src/lib/agentTasks/eventKeyRebase.js';
+import {
+  assertEventKeysLocal,
+  ForeignEventKeyError,
+  rebaseEventKeys,
+  RebaseHeadroomError,
+  withAppendOnlyTriggerOff,
+} from '../../src/lib/agentTasks/eventKeyRebase.js';
 
 const enabled = pgBinDir() !== null;
 let A: PrivateCluster;
@@ -393,5 +399,31 @@ describe.skipIf(!enabled)('#4111 restore-with-rebase on private clusters', { tim
     } finally {
       await c.end();
     }
+  });
+  it('T4: the serve role cannot disable the append-only trigger, by name, by ALL, or by session_replication_role', async () => {
+    const target = fresh();
+    await restoreWithRebase(base({ target }));
+    const triggers = () =>
+      F.sql(B.url(target), `SELECT tgname::text AS n, tgenabled::text AS e FROM pg_trigger WHERE tgrelid = 'agent_team_events'::regclass ORDER BY 1`);
+    const start = await triggers();
+    const c = new Client({ connectionString: B.url(target, F.ROLES.serve, F.PASSWORD) });
+    await c.connect();
+    try {
+      await expect(c.query('ALTER TABLE agent_team_events DISABLE TRIGGER agent_team_event_append_only')).rejects.toThrow(
+        /must be owner/,
+      );
+      await expect(c.query('ALTER TABLE agent_team_events DISABLE TRIGGER ALL')).rejects.toThrow(/must be owner/);
+      await expect(c.query('SET session_replication_role = replica')).rejects.toThrow(/permission denied/);
+      // Through the helper, inside a writer-excluding transaction the serve role can take: still refused at the ALTER.
+      await c.query('BEGIN');
+      await c.query('LOCK TABLE agent_team_events IN EXCLUSIVE MODE');
+      await expect(withAppendOnlyTriggerOff(c, async () => undefined)).rejects.toThrow(/must be owner/);
+      await c.query('ROLLBACK');
+      await expect(c.query(`UPDATE agent_team_events SET tx_id = '3' WHERE tx_id <> '3'`)).rejects.toThrow(/append-only/);
+    } finally {
+      await c.end();
+    }
+    expect(await triggers()).toEqual(start);
+    expect(start).toContainEqual({ n: 'agent_team_event_append_only', e: 'O' });
   });
 });
