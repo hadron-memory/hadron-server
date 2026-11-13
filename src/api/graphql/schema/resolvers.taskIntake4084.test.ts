@@ -12,6 +12,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
+import { Client } from 'pg';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -42,7 +43,27 @@ const create = (input: Record<string, unknown>, userId: string = owner.id, appRe
   M.createAgentTask({}, { input: { appRef, title: 'T', ...input } }, ctx(userId));
 const list = (args: Record<string, unknown>, userId: string = owner.id, appRef: string = app.id) =>
   Q.agentTasks(null, { appRef, ...args }, ctx(userId));
-const changes = (args: Record<string, unknown> = {}, userId: string = owner.id, appRef: string = app.id) =>
+/**
+ * Wait until every transaction that began before this call has ended: take a fresh transaction id, then poll until the
+ * snapshot's xmin is past it. The changed-since read serves a change only once its transaction, and every older one, is
+ * final; xmin is cluster-wide, so another vitest worker's open transaction on its own clone can hold it back briefly.
+ */
+async function settle(): Promise<void> {
+  const [{ x }] = await db.$queryRaw<{ x: string }[]>`SELECT pg_current_xact_id()::text AS x`;
+  for (let i = 0; i < 200; i++) {
+    const [{ done }] = await db.$queryRaw<{ done: boolean }[]>`
+      SELECT pg_snapshot_xmin(pg_current_snapshot()) > ${x}::xid8 AS done`;
+    if (done) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error('settle: an older transaction stayed open for 10s');
+}
+const changes = async (args: Record<string, unknown> = {}, userId: string = owner.id, appRef: string = app.id) => {
+  await settle();
+  return Q.agentTaskExternalIdChanges(null, { appRef, ...args }, ctx(userId));
+};
+/** The same read with no settle: what a poller sees while another transaction is still open. */
+const changesNow = (args: Record<string, unknown> = {}, userId: string = owner.id, appRef: string = app.id) =>
   Q.agentTaskExternalIdChanges(null, { appRef, ...args }, ctx(userId));
 const release = (taskId: string, c: Context = ctx()) => M.releaseAgentTaskExternalId({}, { taskId }, c);
 const stored = (id: string) => db.agentTask.findUniqueOrThrow({ where: { id } });
@@ -196,6 +217,53 @@ describe('#4084 (2): agentTaskExternalIdChanges — what changed on tasks with a
     expect(second.hasMore).toBe(false);
     // Nothing new after the last change: an empty page, the cursor still accepted.
     expect((await changes({ after: second.changes[0].cursor })).changes).toEqual([]);
+  });
+
+  it('a change whose transaction commits late is served late, never skipped (Glen blind P2 on #4089)', async () => {
+    const a = await create({ externalId: X });
+    const b = await create({ externalId: Y });
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    const poll = async () => {
+      const page = await changesNow(cursor ? { after: cursor } : {});
+      for (const ch of page.changes) seen.push(`${ch.kind}:${ch.externalId}`);
+      if (page.changes.length) cursor = page.changes[page.changes.length - 1].cursor;
+    };
+    // A writes its change first (the earlier created_at) and stays open; B writes later and commits at once.
+    const pg = new Client({ connectionString: process.env.DATABASE_URL });
+    await pg.connect();
+    try {
+      await pg.query('BEGIN');
+      await pg.query(
+        `INSERT INTO agent_team_events (id, app_id, type, task_id, payload, created_at)
+         VALUES ($1, $2, 'task.cancelled', $3, '{"type":"task.cancelled"}', (clock_timestamp() AT TIME ZONE 'UTC') - interval '1 second')`,
+        [generateId(), app.id, a.id]);
+      await M.cancelAgentTask({}, { taskId: b.id }, ctx());
+      // A poller reads while A is still open, and keeps its cursor.
+      await poll();
+      await pg.query('COMMIT');
+    } finally {
+      await pg.end();
+    }
+    await settle();
+    await poll();
+    // Both changes reach the poller, each once: A's late commit is not behind the cursor it already holds.
+    expect(seen.sort()).toEqual([`CANCELLED:${X}`, `CANCELLED:${Y}`]);
+  });
+
+  it('a change written after a poll with an older stamp (the matcher passes its tick time) is not behind the cursor', async () => {
+    const a = await create({ externalId: X });
+    const b = await create({ externalId: Y });
+    await M.cancelAgentTask({}, { taskId: b.id }, ctx());
+    const first = await changes();
+    expect(first.changes.map((ch: any) => ch.externalId)).toEqual([Y]);
+    // A transaction that begins after that poll but stamps an earlier time, as appendTaskEvent's createdAt allows.
+    await db.$executeRaw`
+      INSERT INTO agent_team_events (id, app_id, type, task_id, payload, created_at)
+      VALUES (${generateId()}, ${app.id}, 'task.cancelled', ${a.id}, '{"type":"task.cancelled"}'::jsonb,
+              (clock_timestamp() AT TIME ZONE 'UTC') - interval '1 hour')`;
+    const next = await changes({ after: first.changes[0].cursor });
+    expect(next.changes.map((ch: any) => [ch.kind, ch.externalId])).toEqual([['CANCELLED', X]]);
   });
 
   it('a cursor from another App is refused like an unknown one; a non-participant gets APP_NOT_FOUND', async () => {
