@@ -157,8 +157,10 @@ export async function computeSigningPreviewRows(db: Db, orgId: string): Promise<
       const walk = servedRevSeq <= 1
         ? { found: null as { revNo: number } | null }
         : await newestApprovedAndSignedRevisionForServe(db, compiledNodeId, async (rev) => (await status!(rev)).counts);
+      // #4061: canonical v2 like the sibling addresses (cor:urn:010:01); `appUrn` is non-null, so a stored form that cannot
+      // emit is served as stored, silently (#4054's diagnostic carries no address), rather than the null the nullable siblings use.
       const base = {
-        appId: app.id, appUrn: app.urn, agentId: t.agentId, agentName: t.agentName, agentUrn: t.agentUrn, workerId: t.workerId, workerName: t.workerName, workerUrn: t.workerUrn,
+        appId: app.id, appUrn: previewAddress(() => emitEntityUrnV2('app', app.urn)) ?? app.urn, agentId: t.agentId, agentName: t.agentName, agentUrn: t.agentUrn, workerId: t.workerId, workerName: t.workerName, workerUrn: t.workerUrn,
         compiledNodeId, compiledNodeUrn: await nodeUrnOf(compiledNodeId), servedRevSeq,
       };
       if (walk.found) rows.push({ ...base, state: 'REVISION_CHANGES', changesToRevSeq: walk.found.revNo });

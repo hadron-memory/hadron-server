@@ -5390,6 +5390,7 @@ export const typeDefs = `#graphql
   "#2973 PR2: one served compiled boot prompt the switch would change. workerId is null on the install-level row (an uncustomised worker and a chat share it)."
   type BootPromptSigningPreviewRow {
     appId: ID!
+    "Canonical v2 URN of this row's App (#4061), like agentUrn and workerUrn; a stored form that cannot be emitted is served as stored. hrn:node:hadronmemory.com:specs:cor:urn:010:01"
     appUrn: String!
     agentId: ID!
     agentName: String!
