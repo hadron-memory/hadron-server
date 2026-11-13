@@ -141,6 +141,18 @@ describe('#4070 lost reach on an App-less home (no org membership)', () => {
   });
 });
 
+describe('#4070 pinned revision', () => {
+  it('lost reach on a chat pinned to a revision reads not even the revision node (the gate precedes loadChatScript)', async () => {
+    const home = await retainedHome(consumerCtx());
+    const root = await db.node.findUniqueOrThrow({ where: { id: home.rootId } });
+    await db.node.update({ where: { id: home.rootId }, data: { data: { ...(root.data as object), startedWithRevision: 'revisions:r1' } } });
+    await loseReach('revoked');
+    const seen = await observe<any>(() => respond(consumerCtx(), home.chatId));
+    expect(seen.value.conversationHandoff).toBeNull();
+    expect(seen.systemReads).toEqual([]);
+  });
+});
+
 describe('#4070 controls', () => {
   it('P1: a consumer who still has licensed reach fires the on-complete rule (observers see real reads)', async () => {
     const home = await retainedHome(consumerCtx());
