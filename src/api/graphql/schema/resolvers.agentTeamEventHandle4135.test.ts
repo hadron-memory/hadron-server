@@ -40,10 +40,11 @@ describe('AgentTeamEvent.taskHandle (#4135)', () => {
     await event(project.id); await event(child.id, 'task.cancelled');
     const response = await run(`{ agentTeamEvents(appRef:"${app.id}") { taskId taskHandle } agentTeamEventsPage(appRef:"${app.id}") { events { taskId taskHandle } } }`);
     expect(response.errors).toBeUndefined();
-    const expected = [{ taskId: project.id, taskHandle: project.handle }, { taskId: child.id, taskHandle: child.handle }];
+    const byTask = (a: { taskId: string }, b: { taskId: string }) => a.taskId.localeCompare(b.taskId);
+    const expected = [{ taskId: project.id, taskHandle: project.handle }, { taskId: child.id, taskHandle: child.handle }].sort(byTask);
     expect(project.handle).toMatch(/^AT\d+$/); expect(child.handle).toBe(`${project.handle}.1`);
-    expect(response.data?.agentTeamEvents).toEqual(expected);
-    expect((response.data?.agentTeamEventsPage as any).events).toEqual(expected);
+    expect((response.data?.agentTeamEvents as any[]).sort(byTask)).toEqual(expected);
+    expect((response.data?.agentTeamEventsPage as any).events.sort(byTask)).toEqual(expected);
   });
 
   it('never invents a handle for taskless events or a retained event whose task was deleted', async () => {
@@ -55,6 +56,15 @@ describe('AgentTeamEvent.taskHandle (#4135)', () => {
     expect(rows).toHaveLength(5);
     expect(rows.map((row: any) => row.taskHandle)).toEqual(Array(5).fill(null));
     expect(rows.find((row: any) => row.taskId === deleted.id)).toBeDefined();
+  });
+
+  it('also returns the handle when acknowledging an existing task alarm', async () => {
+    const t = await task();
+    const alarm = await db.agentTeamEvent.create({ data: { id: generateId(), appId: app.id, taskId: t.id,
+      type: 'stall.not-started', severity: 'alarm', chain: [{ userId: member.id }], episodeStart: new Date() } });
+    const response = await run(`mutation { acknowledgeAlarm(eventId:"${alarm.id}") { id taskHandle } }`);
+    expect(response.errors).toBeUndefined();
+    expect(response.data?.acknowledgeAlarm).toEqual({ id: alarm.id, taskHandle: t.handle });
   });
 
   it('reads 50 distinct task handles in one batch, with no per-event task lookup', async () => {
