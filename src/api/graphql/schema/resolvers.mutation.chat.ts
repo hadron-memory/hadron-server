@@ -861,7 +861,8 @@ export const chatMutations = {
                   : await memoryAccessFilter(txCtx);
               // #910: the first prompt reads the starter's own extracted values only.
               // #40: a served resolved read, so it counts toward the request's aggregate like any other.
-              systemMessage = chargeRequestServed(txCtx, promptContent, await compileTemplate(promptContent, null, targetMemoryId, txCtx.db, access, txCtx.userId ?? null));
+              // Authorization/render reads use txCtx; the served-byte aggregate belongs to the original request.
+              systemMessage = chargeRequestServed(ctx, promptContent, await compileTemplate(promptContent, null, targetMemoryId, txCtx.db, access, txCtx.userId ?? null));
             }
 
             // Build tool schema from hierarchical extraction spec
