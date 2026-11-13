@@ -97,7 +97,7 @@ import { chmodSync, linkSync, mkdirSync, readFileSync, realpathSync, renameSync,
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  loadConfig, DEFAULT_CONFIG, runCommand, listTerminals, resolveTerminal, teamBinding,
+  loadConfig, DEFAULT_CONFIG, runCommand, listTerminals, resolveTerminal, teamBinding, isPlainDirectory, plainDirectoryPin,
   readScreen, promptIsEmptyFromTerm, screenAgentFamily, isIdle, idleProofAbovePrompt,
   CALL_TIMEOUT_MS, type Config, type RosterEntry, type Runner, type RunResult,
 } from '../orca-attention-router/router.js';
@@ -724,7 +724,7 @@ const realPath = (p: string): string => { try { return realpathSync(p); } catch 
  * or the session read failed), or `no terminal` (no connected, writable terminal in its worktree). The session read is
  * made once per worker per pass, and only for a worker asked about.
  */
-export function hostRoster(cfg: Config, terminals: Array<{ worktreePath?: string; connected?: boolean; writable?: boolean }>, run: Runner): {
+export function hostRoster(cfg: Config, terminals: Array<{ handle?: string; worktreePath?: string; connected?: boolean; writable?: boolean }>, run: Runner): {
   entry: (workerId: string, name: string) => RosterEntry | null; why: (workerId: string) => string;
 } {
   const live = new Set<string>();
@@ -737,6 +737,11 @@ export function hostRoster(cfg: Config, terminals: Array<{ worktreePath?: string
   const memo = new Map<string, { wt?: string; why: string }>();
   const resolveWorker = (workerId: string): { wt?: string; why: string } => {
     const file = cfg.roster.find((e) => e.worker === workerId);
+    if (file && isPlainDirectory(realPath(file.worktree))) {
+      // #4091: a plain directory is live exactly when its guarded pin passes; the reason is the fixed, greppable one.
+      const r = plainDirectoryPin(file, terminals as any, cfg.roster);
+      return { wt: realPath(file.worktree), why: 'why' in r ? r.why : '' };
+    }
     if (file) return { wt: realPath(file.worktree), why: live.has(realPath(file.worktree)) ? '' : 'no terminal' };
     const bound = byWorker.get(workerId) ?? [];
     if (bound.length === 0) return { why: 'no binding' };

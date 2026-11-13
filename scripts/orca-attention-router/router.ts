@@ -201,7 +201,7 @@ function parse(res: RunResult, what: string): Record<string, any> {
   }
 }
 
-interface Terminal {
+export interface Terminal {
   handle: string;
   worktreePath?: string;
   agentIdentity?: string | null;
@@ -599,19 +599,62 @@ const real = (p: string): string => {
  */
 export function teamBinding(worktree: string): { workerId: string; sessionId?: string; appId?: string } | null {
   try {
+    let file: string;
     const dotGit = join(worktree, '.git');
-    let gitDir = dotGit;
-    if (statSync(dotGit).isFile()) {
-      const pointer = readFileSync(dotGit, 'utf8').trim().replace(/^gitdir:\s*/, '');
-      gitDir = isAbsolute(pointer) ? pointer : join(worktree, pointer);
+    let hasGit = true;
+    try { statSync(dotGit); } catch { hasGit = false; }
+    if (hasGit) {
+      let gitDir = dotGit;
+      if (statSync(dotGit).isFile()) {
+        const pointer = readFileSync(dotGit, 'utf8').trim().replace(/^gitdir:\s*/, '');
+        gitDir = isAbsolute(pointer) ? pointer : join(worktree, pointer);
+      }
+      file = join(gitDir, 'hadron-team-session.json');
+    } else {
+      // #4091 — a plain directory (hadron-cli#1968): no .git, the binding sits in `<dir>/.hadron-team/`.
+      file = join(worktree, '.hadron-team', 'hadron-team-session.json');
     }
-    const binding = JSON.parse(readFileSync(join(gitDir, 'hadron-team-session.json'), 'utf8'));
+    const binding = JSON.parse(readFileSync(file, 'utf8'));
     if (typeof binding.workerId !== 'string' || !binding.workerId) return null;
     const str = (v: unknown): string | undefined => (typeof v === 'string' && v ? v : undefined);
     return { workerId: binding.workerId, sessionId: str(binding.sessionId), appId: str(binding.appId) };
   } catch {
     return null;
   }
+}
+
+/** A plain-directory row (#4091): the directory has no `.git` but holds a `.hadron-team/` binding file. */
+export function isPlainDirectory(dir: string): boolean {
+  try { statSync(join(dir, '.git')); return false; } catch { /* no .git */ }
+  try { return statSync(join(dir, '.hadron-team', 'hadron-team-session.json')).isFile(); } catch { return false; }
+}
+
+/**
+ * #4091 ruling (a) — the guarded pin for a plain-directory row. The pin is trusted even though the pinned terminal's
+ * worktreePath differs, only when (1) the directory's binding names this row's worker, (2) the pinned handle exists and
+ * is connected and writable, and (3) no other roster row resolves to the same handle (its pin or its worktree) and the
+ * terminal's own worktreePath is not a directory bound to a different worker. Any failure is a hold with a fixed reason;
+ * there is never a fallback to identity or screen matching.
+ */
+export function plainDirectoryPin(
+  entry: RosterEntry, terminals: Terminal[], roster: RosterEntry[],
+): { handle: string; terminal: Terminal } | { why: string } {
+  const bound = boundWorker(real(entry.worktree));
+  if (bound !== entry.worker) return { why: `plain directory: binding names ${bound ?? 'no worker'}` };
+  if (!entry.terminal) return { why: 'plain directory: pin missing' };
+  const pinned = terminals.find((t) => t.handle === entry.terminal);
+  if (!pinned || pinned.connected === false || pinned.writable === false) return { why: 'plain directory: pin stale' };
+  for (const other of roster) {
+    if (other.worker === entry.worker) continue;
+    if (other.terminal === pinned.handle || (pinned.worktreePath && real(other.worktree) === real(pinned.worktreePath))) {
+      return { why: `plain directory: pin claimed by ${other.worker}` };
+    }
+  }
+  if (pinned.worktreePath) {
+    const owner = boundWorker(real(pinned.worktreePath));
+    if (owner && owner !== entry.worker) return { why: `plain directory: pin claimed by ${owner}` };
+  }
+  return { handle: pinned.handle, terminal: pinned };
 }
 
 /** The worker id a CLI team-session binding in this worktree names, if any. */
@@ -636,6 +679,14 @@ export function resolveTerminal(
   const worktree = real(entry.worktree);
   const bound = boundWorker(worktree);
   if (bound && bound !== entry.worker) return [null, `worktree is bound to another worker (${bound})`, 'none'];
+  if (isPlainDirectory(worktree)) {
+    const r = plainDirectoryPin(entry, terminals, cfg?.roster ?? []);
+    if ('why' in r) return [null, r.why, 'none'];
+    const family = AGENT_IDENTITIES.has(r.terminal.agentIdentity ?? '')
+      ? (r.terminal.agentIdentity as string)
+      : (cfg && run ? (screenAgentFamily(readScreen(cfg, r.handle, run)) ?? '') : '');
+    return [r.handle, family || 'pinned main terminal', 'pin'];
+  }
   const inWorktree = terminals.filter(
     (t) => t.worktreePath && real(t.worktreePath) === worktree && t.connected !== false && t.writable !== false,
   );

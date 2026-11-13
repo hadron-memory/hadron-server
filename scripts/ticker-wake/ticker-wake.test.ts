@@ -321,6 +321,17 @@ describe('selection and delivery', () => {
     expect(log()).toContain('bound to another worker');
   });
 
+  it('#4091: a plain-directory row whose pin is stale holds with the fixed reason, sends nothing', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK])];
+    mkdirSync(join(dir, '.hadron-team'), { recursive: true });
+    writeFileSync(join(dir, '.hadron-team', 'hadron-team-session.json'), JSON.stringify({ workerId: 'w-ada' }));
+    f.terminalReply = () => ({ ok: true, result: { terminals: [{ handle: 'term_other', incarnationId: f.incarnation, worktreePath: dir, connected: true, writable: true, agentIdentity: 'claude' }] } });
+    await go();
+    expect(f.sent).toEqual([]);
+    expect(f.acked).toEqual([]);
+    expect(log()).toContain('Ada: held (plain directory: pin stale on this host)');
+  });
+
   it('--dry sends and acks nothing and writes no receipt', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK])];
     await go({ dry: true });
