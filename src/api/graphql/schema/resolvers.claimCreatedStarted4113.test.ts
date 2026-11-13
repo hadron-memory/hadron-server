@@ -19,7 +19,7 @@ const X = 'https://github.com/hadron-memory/hadron-server/issues/4113';
 const create = (input: Record<string, unknown>, userId: string = me.id) =>
   M.createAgentTask({}, { input: { appRef: app.id, title: 'T', ...input } }, ctx(userId));
 const row = (id: string) => db.agentTask.findUniqueOrThrow({ where: { id } });
-const events = async (taskId: string) => (await db.agentTeamEvent.findMany({ where: { taskId }, orderBy: { createdAt: 'asc' } })).map((e) => e.type);
+const events = async (taskId: string) => (await db.agentTeamEvent.findMany({ where: { taskId }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })).map((e) => e.type);
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -119,5 +119,30 @@ describe('#4113 a claim-born STARTED task is not queued, matched or alarmed', ()
     const t = await create({ assignee: { user: me.id } });
     await taskStallTick(db, new Date(Date.now() + 20 * 60 * 1000));
     expect((await db.agentTeamEvent.findMany({ where: { taskId: t.id } })).map((e) => e.type)).toContain('stall.not-started');
+  });
+});
+
+// Andi's P2 (#4115 LOCAL): the claim starts only after every blocker link of its batch has landed, so a forward or a
+// backward blockedByPositions link on a caller-own claim neither refuses the batch nor starts a blocked task.
+describe('#4113 a claim inside createAgentTasks', () => {
+  const INFO = { path: { key: 'createAgentTasks', prev: undefined, typename: 'Mutation' } };
+  const batch = (tasks: unknown[]) => M.createAgentTasks(null, { appRef: app.id, tasks }, ctx(), INFO);
+  const mine = (extra: Record<string, unknown> = {}) => ({ title: 'claim', externalId: X, assignee: { user: me.id }, ...extra });
+
+  it('an unblocked claim in a batch is STARTED', async () => {
+    const out = await batch([{ task: mine() }, { task: { title: 'plain' } }]);
+    expect((await row(out[0].id)).status).toBe('started');
+    expect((await row(out[1].id)).status).toBe('pending');
+  });
+
+  it.each([
+    ['forward', () => [{ task: mine(), blockedByPositions: [2] }, { task: { title: 'blocker' } }], 0],
+    ['backward', () => [{ task: { title: 'blocker' } }, { task: mine(), blockedByPositions: [1] }], 1],
+  ] as const)('a claim with a %s blockedByPositions link does not refuse the batch and stays PENDING, blocked', async (_n, tasks, at) => {
+    const out = await batch(tasks());
+    const r = await row(out[at].id);
+    expect(r.status).toBe('pending');
+    expect(r.blocked).toBe(true);
+    expect(r.startedAt).toBeNull();
   });
 });
