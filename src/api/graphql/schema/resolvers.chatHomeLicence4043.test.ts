@@ -140,7 +140,7 @@ for (const home of ['personal', 'knowledge'] as const) {
         const root = await chatNodeByLocOrThrow(db, started.chatId);
         if (home === 'knowledge') await db.memory.update({ where: { id: root.memoryId }, data: { class: 'knowledge', userId: null, organizationId: null, ownerUserId: userId, visibility: 'ORGANIZATION' } });
         await loseLicence(loss);
-        const seen = await observeDefinitionReads<any>(() => M.processChatResponse({}, { chatId: started.chatId, toolResponse: { message: 'done', next_stage: null } }, ctx()));
+        const seen = await observeDefinitionReads<any>(() => M.processChatResponse({}, { chatId: started.chatId, toolResponse: { message: 'done', next_stage: null, goal_reached: true } }, ctx()));
         expect(seen.value.conversationHandoff, 'an unlicensed Agent must not evaluate on-complete edges').toBeNull();
         expect(seen.systemReads).toEqual([]);
         expect(seen.edgeReads).toBe(0);
@@ -166,8 +166,8 @@ for (const home of ['personal', 'knowledge'] as const) {
         const root = await chatNodeByLocOrThrow(db, started.chatId);
         if (home === 'knowledge') await db.memory.update({ where: { id: root.memoryId }, data: { class: 'knowledge', userId: null, organizationId: null, ownerUserId: userId, visibility: 'ORGANIZATION' } });
         await loseLicence(loss);
-        // With no licensed script there is no stage list to check the name against: decideNextStage then takes the name
-        // as given (stageOrder null), as the code does today. This asserts the reads only, not that outcome.
+        // With no licensed script the stage list is unreadable: #4077 rejects the distinct name.
+        // This pin isolates definition reads; the S2 suite also pins the rejection result.
         const seen = await observeDefinitionReads<any>(() => M.processChatResponse({}, { chatId: started.chatId, toolResponse: { message: 'done', next_stage: 'other' } }, ctx()));
         expect(seen.value.conversationHandoff).toBeNull();
         expect(seen.systemReads).toEqual([]);
@@ -186,7 +186,7 @@ describe('#4043 controls', () => {
     expect(sent.value.systemMessage).toContain('LICENSED STAGE');
     expect(sent.value.tools).not.toBeNull();
     expect(sent.systemReads.length).toBeGreaterThan(0);
-    const response = await observeDefinitionReads<any>(() => M.processChatResponse({}, { chatId: started.chatId, toolResponse: { message: 'done', next_stage: null } }, ctx()));
+    const response = await observeDefinitionReads<any>(() => M.processChatResponse({}, { chatId: started.chatId, toolResponse: { message: 'done', next_stage: null, goal_reached: true } }, ctx()));
     expect(response.value.conversationHandoff).toBe('next');
     expect(response.systemReads.length).toBeGreaterThan(0);
     expect(response.edgeReads).toBeGreaterThan(0);
@@ -229,7 +229,7 @@ describe('#4043 controls', () => {
     const sent = await M.sendChatMessage({}, { chatId: started.chatId, userMessage: 'standalone' }, ctx());
     expect(sent.systemMessage).toContain('LICENSED STAGE');
     expect(sent.tools).not.toBeNull();
-    const response = await M.processChatResponse({}, { chatId: started.chatId, toolResponse: { message: 'done', next_stage: null } }, ctx());
+    const response = await M.processChatResponse({}, { chatId: started.chatId, toolResponse: { message: 'done', next_stage: null, goal_reached: true } }, ctx());
     expect(response.conversationHandoff).toBe('next');
   });
 
@@ -259,7 +259,7 @@ describe('#4043 controls', () => {
     expect(state.state).toMatchObject({ conversationName: 'flow', stageName: 'step' });
     const messages = () => db.node.count({ where: { memoryId: root.memoryId, loc: { startsWith: `${started.chatId}:messages:` } } });
     const before = await messages();
-    const response = await observeDefinitionReads<any>(() => M.processChatResponse({}, { chatId: started.chatId, toolResponse: { message: 'done', next_stage: null } }, ctx()));
+    const response = await observeDefinitionReads<any>(() => M.processChatResponse({}, { chatId: started.chatId, toolResponse: { message: 'done', next_stage: null, goal_reached: true } }, ctx()));
     expect(await messages()).toBe(before + 1); // A no-op/already-complete return cannot satisfy this control.
     if (installed) {
       // #4035 on main now resolves the shared chat's Agent for response routing.
