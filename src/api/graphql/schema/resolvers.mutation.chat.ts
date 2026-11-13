@@ -571,6 +571,11 @@ export const chatMutations = {
       // home's App, even before that home is provisioned. Managers have no App
       // exemption; their direct route is available only when the home has no App.
       const target = await selectStartTarget();
+      // #3301: an Agent's own system row is never a home, even on a corrupt/session fixture.
+      // Keep its existing no-target answer before any definition read or route-specific refusal.
+      if (target.targetMemoryId && await ctx.db.agent.findFirst({ where: { systemMemoryId: target.targetMemoryId }, select: { id: true } })) {
+        target.targetMemoryId = null;
+      }
       if (!target.targetMemoryId && !target.ensureTarget) throw new Error('No target memory available for this chat');
       if (target.appId) {
         if (!await chatHomeAgentIfLicensed(ctx.db, { appId: target.appId }, agent)) {
