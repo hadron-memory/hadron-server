@@ -113,7 +113,7 @@ describe('#4037 detour return (pins 2, 3, 4, 7)', () => {
   it('D6: the guarded apply drops the return when the goal changed between decision and apply', async () => {
     const stack = [detour('recent', 's2', 'anger')];
     const decision = await decide({ origin: { conversationName: 'anger', stageName: 'hot' }, goalStack: stack });
-    for (const goalStack of [[{ ...stack[0], status: 'COMPLETED' }], [{ ...stack[0], createdAt: '2026-11-13T09:09:09.000Z' }], []]) {
+    for (const goalStack of [[goal({ description: 'shifted in front' }), stack[0]], [{ ...stack[0], status: 'COMPLETED' }], [{ ...stack[0], createdAt: '2026-11-13T09:09:09.000Z' }], []]) {
       const fresh: Record<string, unknown> = { conversationName: 'anger', stageName: 'hot', goalStack };
       const before = structuredClone(fresh);
       expect(applyChatRoutingDecision(fresh, decision)).toMatchObject({ routingSkipped: true, detourReturned: false });

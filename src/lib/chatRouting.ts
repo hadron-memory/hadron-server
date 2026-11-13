@@ -120,6 +120,11 @@ export interface ChatRoutingDecision {
   guards: Array<(data: Record<string, unknown>) => boolean>;
   result: ChatRoutingResult;
 }
+/** A conversation node's stage names in order; anything unreadable is no stages. */
+const stagesOf = (node: ScriptNode | null): string[] => {
+  const list = (node?.data as Record<string, unknown> | undefined)?.stageOrder;
+  return Array.isArray(list) ? list.filter((x): x is string => typeof x === 'string') : [];
+};
 const unchanged = (): ChatRoutingResult => ({ stageTransitioned: false, newStageName: null, conversationHandoff: null, conversationCompleted: null, detourReturned: false, routingSkipped: false });
 
 /**
@@ -198,8 +203,7 @@ export async function decideChatRouting(input: {
     const parts = rule.targetLoc?.split(':') ?? [];
     if (parts[0] !== 'conversations' || (parts.length !== 2 && parts.length !== 3) || !parts[1]) continue;
     const targetName = parts[1], targetConv = `conversations:${targetName}`;
-    const stages = ((await input.node(targetConv))?.data as Record<string, unknown> | undefined)?.stageOrder;
-    const order = Array.isArray(stages) ? stages.filter((s): s is string => typeof s === 'string') : [];
+    const order = stagesOf(await input.node(targetConv));
     const stage = parts.length === 3 ? (order.includes(parts[2]) ? parts[2] : undefined) : order[0];
     if (!stage) continue; // unresolvable: fires nothing, pushes nothing, evaluation continues
     const behavior = (rule.data.behavior as string) ?? 'transition';
@@ -221,8 +225,7 @@ export async function decideChatRouting(input: {
     const g = stack[i];
     if (g.status !== 'ACTIVE' || typeof g.detourTo !== 'string' || !g.conversationUrn?.startsWith('conversations:')) continue;
     const conv = g.conversationUrn.split(':')[1];
-    const stages = ((await input.node(`conversations:${conv}`))?.data as Record<string, unknown> | undefined)?.stageOrder;
-    const order = Array.isArray(stages) ? stages.filter((s): s is string => typeof s === 'string') : [];
+    const order = stagesOf(await input.node(`conversations:${conv}`));
     // Ruling item 2 (c): a stored stage that no longer resolves returns to the first stage of the conversation left.
     const stored = g.nodeUrn?.split(':')[2];
     const stage = stored && order.includes(stored) ? stored : order[0];
