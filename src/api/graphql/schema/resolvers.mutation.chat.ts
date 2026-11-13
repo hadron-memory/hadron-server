@@ -61,7 +61,7 @@ import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { appKeyMayActFor, appKeySessionMatchesAgent, canChatWithAgent, chatAuthorityAnchors, chatCarrierApps } from './agentChatAccess.js';
 import { withAuthorizedMemoryTx, withAuthorizedTx } from './authorizedTx.js';
 import { activeAppInstallLicenseIdsForAgent } from '../../../lib/appAgent.js';
-import { chatHomeAgentIfLicensed } from '../../../lib/chatHomeAgent.js';
+import { resolveChatHomeAgent } from '../../../lib/chatHomeAgent.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { type MemoryVisibility } from '../../../generated/prisma/index.js';
@@ -1022,22 +1022,10 @@ export const chatMutations = {
       const sendAiConfigChoice = aiConfigChoice == null
         ? null
         : await normalizeChatAiConfigChoice(ctx.db, memory.appId ?? null, aiConfigChoice).catch(rethrowAiConfigTyped);
-      let agent = null;
-      if (memory.sharedMemoryOfAgentId || memory.userMemoryOfAgentId) {
-        agent = await ctx.db.agent.findUnique({
-          where: { id: memory.sharedMemoryOfAgentId ?? memory.userMemoryOfAgentId! },
-        });
-      } else {
-        const legacyAgents = await ctx.db.agent.findMany({
-          where: { deletedAt: null, memoryItems: { some: { memoryId: chatNode.memoryId } } },
-        });
-        agent = legacyAgents.find((a) => (a as any).systemMemoryId) ?? null;
-      }
-      // Personal/legacy turns already refused a deleted Agent through the serve
-      // gate before any write (#3654). Preserve that refusal before licence-loss
-      // normalization hides the Agent. App-class chats retain their empty result.
-      if (memory.class !== 'app' && agent?.deletedAt) throw new AgentNotFoundError(agent.id);
-      agent = await chatHomeAgentIfLicensed(ctx.db, memory, agent);
+      // #4076: one shared lookup (resolve, deleted = none, licence). Personal/legacy turns already refused a
+      // deleted Agent through the serve gate before any write (#3654); keep that refusal. App-class chats retain their empty result.
+      const { agent, deletedAgentId } = await resolveChatHomeAgent(ctx.db, memory);
+      if (memory.class !== 'app' && deletedAgentId) throw new AgentNotFoundError(deletedAgentId);
       const systemMemoryId = agent ? (agent as any).systemMemoryId as string : null;
 
       // Pin to version: if the chat was started with a published revision,
@@ -1654,22 +1642,9 @@ export const chatMutations = {
       const memoryLayers: MemoryLayerHandle[] = [];
       let agentBag: Record<string, unknown> = {};
       let sysMemUrn = '';
-      // #4043: resolve shared/user/legacy homes exactly as main does, then gate ALL App-reached homes
-      // before loading definitions, including S2's named-stage validation. Retained pointers confer no licence.
+      // #4076/#4043: share main's resolve/deleted/licence lookup BEFORE any pinned script or stage read.
       const turnMemory = await ctx.db.memory.findUnique({ where: { id: chatNode.memoryId } });
-      type TurnAgent = { id: string; systemMemoryId?: string | null };
-      let turnAgent: TurnAgent | null = null;
-      if (turnMemory?.sharedMemoryOfAgentId || turnMemory?.userMemoryOfAgentId) {
-        turnAgent = await ctx.db.agent.findUnique({
-          where: { id: (turnMemory.sharedMemoryOfAgentId ?? turnMemory.userMemoryOfAgentId)! },
-        });
-      } else if (turnMemory) {
-        const legacyAgents = await ctx.db.agent.findMany({
-          where: { deletedAt: null, memoryItems: { some: { memoryId: chatNode.memoryId } } },
-        });
-        turnAgent = legacyAgents.find(a => a.systemMemoryId) ?? null;
-      }
-      if (turnMemory) turnAgent = await chatHomeAgentIfLicensed(ctx.db, turnMemory, turnAgent);
+      const turnAgent = turnMemory ? (await resolveChatHomeAgent(ctx.db, turnMemory)).agent as { systemMemoryId?: string | null } | null : null;
       const sysMemId = turnAgent?.systemMemoryId;
       if (sysMemId) script = await loadChatScript(ctx.db, sysMemId, (chatData.startedWithRevision as string | null) ?? null);
       const stageOrder = script ? await conversationStageOrder(script, origin.conversationName ?? null) : null;
