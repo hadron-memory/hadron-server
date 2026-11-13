@@ -11,6 +11,7 @@ import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { generateId } from '../../../lib/id.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
+import { createDbAgentOrgGrant } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { compileTemplate } from '../../../lib/template.js';
 import { buildPrismaMemoryLayer } from '../../../lib/edge-conditions/prisma-memory-layer.js';
@@ -66,22 +67,25 @@ const complete = (ctx: Context, chatId: string, data?: Record<string, unknown>) 
 const uninstall = () => db.appAgent.delete({ where: { appId_agentId: { appId, agentId } } });
 
 // C1 (Vera, #103559): a non-manager member's turn after uninstall reads nothing from the Agent's system memory. Alice is an
-// org CONTRIBUTOR, not a manager, so cor:dmo:050:13 does not excuse a read. Every `db.node` read method and `db.edge.findMany`
-// is spied; nothing is exempt: the memory-wide-field list is gated on the home App's licence too.
+// org CONTRIBUTOR, not a manager, so cor:dmo:050:13 does not excuse a read. Every read method of `db.node` and `db.edge`
+// and the raw-SQL doors are spied and matched on the ids in their arguments; nothing is exempt: the memory-wide-field list is gated on the home App's licence too.
 async function observeDefinitionReads<T>(run: () => Promise<T>) {
-  const defNodes = new Set((await db.node.findMany({ where: { memoryId: systemId }, select: { id: true } })).map((n) => n.id));
-  const nodeSpies = (['findFirst', 'findMany', 'findUnique', 'findUniqueOrThrow', 'findFirstOrThrow'] as const).map((m) => vi.spyOn(db.node, m));
-  const edgeSpy = vi.spyOn(db.edge, 'findMany');
+  const defIds = [systemId, ...(await db.node.findMany({ where: { memoryId: systemId }, select: { id: true } })).map((n) => n.id)];
+  // Every read shape counts, not a few known ones: any call whose arguments mention the definition memory or one of its
+  // nodes is a read of it, whatever the method (find*, count, aggregate, groupBy) or the table (node, edge, raw SQL).
+  const reads = (['findFirst', 'findMany', 'findUnique', 'findUniqueOrThrow', 'findFirstOrThrow', 'count', 'aggregate', 'groupBy'] as const)
+    .flatMap((m) => [['node', m], ['edge', m]] as const);
+  const spies = reads.map(([t, m]) => ({ name: `${t}.${m}`, spy: vi.spyOn((db as any)[t], m) }));
+  const rawSpies = (['$queryRaw', '$queryRawUnsafe'] as const).map((m) => ({ name: m, spy: vi.spyOn(db as any, m) }));
+  const mentions = (args: unknown) => {
+    const text = JSON.stringify(args, (_k, v) => (typeof v === 'bigint' ? String(v) : v)) ?? '';
+    return defIds.some((id) => text.includes(id));
+  };
   try {
     const value: any = await run();
-    const nodeReads = nodeSpies.flatMap((sp) => sp.mock.calls).filter(([a]) => {
-      const where = (a as any)?.where;
-      const memory = where?.memoryId ?? where?.loc_memoryId?.memoryId;
-      return memory === systemId || memory?.equals === systemId || memory?.in?.includes(systemId);
-    });
-    const edgeReads = edgeSpy.mock.calls.filter(([a]) => defNodes.has((a as any)?.where?.sourceId));
-    return { value, reads: [...nodeReads, ...edgeReads] };
-  } finally { for (const sp of [...nodeSpies, edgeSpy]) sp.mockRestore(); }
+    const seen = [...spies, ...rawSpies].flatMap(({ name, spy }) => spy.mock.calls.filter((c) => mentions(c)).map((c) => ({ name, args: c })));
+    return { value, reads: seen };
+  } finally { for (const { spy } of [...spies, ...rawSpies]) spy.mockRestore(); }
 }
 
 describe('#4038 shared chat', () => {
@@ -168,7 +172,7 @@ describe('#4038 C1 declared memory-wide fields follow the home App licence', () 
 
   it.each([
     ['uninstall', () => uninstall()],
-    ['lapsed licence', () => db.app.update({ where: { id: appId }, data: { uninstalledAt: new Date() } })],
+    ['App marked uninstalled', () => db.app.update({ where: { id: appId }, data: { uninstalledAt: new Date() } })],
   ])('after %s: no declared field, zero system-node reads, own values and memoryWideKeys still read, for a member and a manager alike', async (_n, lapse) => {
     await lapse();
     for (const who of [aliceId, bobId, adminId]) {
@@ -205,5 +209,63 @@ describe('#4038 C1 declared memory-wide fields follow the home App licence', () 
     expect((await declaredMemoryWideFields(db, memory)).size).toBe(0);
     expect(spy).not.toHaveBeenCalled();
     spy.mockRestore();
+  });
+});
+
+// Baloo's P2 and Betty's P2 (#4114 LOCAL and BLIND): a lapsed LICENCE is a foreign-org Agent whose AgentOrgGrant is no longer
+// usable while the App is live and the Agent still installed. An install-only decision (the AppAgent row plus a live App)
+// passes every case above; these fail it.
+describe('#4038 C1 a lapsed AgentOrgGrant (live App, Agent still installed)', () => {
+  let holderId: string, shared: string;
+  const stored = () => ({ region: 'EU', secret: 'flat-legacy', memoryWideKeys: ['secret'], users: { [aliceId]: { industry: 'farming' }, [bobId]: { industry: 'mining' } } });
+  const view = (personId: string) => dataViewFor(db, shared, stored(), personId) as Promise<Record<string, unknown>>;
+  const lapse = (state: 'revoked' | 'expired' | 'inactive') => db.agentOrgGrant.update({
+    where: { orgId_agentId: { orgId: holderId, agentId } },
+    data: state === 'revoked' ? { revokedAt: new Date() } : state === 'expired' ? { expiresAt: new Date(0) } : { activatedAt: null },
+  });
+  const renew = () => db.agentOrgGrant.update({ where: { orgId_agentId: { orgId: holderId, agentId } }, data: { revokedAt: null, expiresAt: null, activatedAt: new Date() } });
+
+  beforeEach(async () => {
+    // The Agent stays in its own org; the App moves to a holder org, so the Agent is foreign to it and only a grant licenses it.
+    const holder = await db.organization.create({ data: { name: 'Holder', urn: 'holder4038.test' } });
+    holderId = holder.id;
+    for (const u of [adminId, aliceId, bobId]) await db.orgMember.create({ data: { organizationId: holderId, userId: u, role: u === adminId ? 'ADMIN' : 'CONTRIBUTOR' } });
+    await db.app.update({ where: { id: appId }, data: { organizationId: holderId } });
+    await createDbAgentOrgGrant(db, holderId, agentId);
+    await startShared(aliceId);
+    shared = (await db.memory.findFirstOrThrow({ where: { appId, class: 'app' } })).id;
+  });
+
+  it('control: the foreign Agent under an active grant is licensed and reads its declared field', async () => {
+    expect(await view(bobId)).toMatchObject({ region: 'EU' });
+  });
+
+  it.each(['revoked', 'expired', 'inactive'] as const)('a %s grant: declared field gone for every reader, zero definition reads, own values and memoryWideKeys stay, renewal restores', async (state) => {
+    await lapse(state);
+    for (const who of [aliceId, bobId, adminId]) {
+      const seen = await observeDefinitionReads(() => view(who));
+      expect(seen.reads).toEqual([]);
+      expect(seen.value).not.toHaveProperty('region');
+      expect(seen.value).toMatchObject({ secret: 'flat-legacy' });
+    }
+    expect(await view(aliceId)).toMatchObject({ industry: 'farming' });
+    await renew();
+    expect(await view(bobId)).toMatchObject({ region: 'EU' });
+  });
+
+  it.each(['revoked', 'expired', 'inactive'] as const)('a %s grant: shared extraction reads no definition and files the declared field under the speaker, not flat; renewal restores Bob\'s view of the old flat value', async (state) => {
+    const chat = await startShared(aliceId);
+    await complete(as(aliceId), chat.chatId, { region: 'EU' });
+    expect(((await db.node.findFirstOrThrow({ where: { memoryId: shared, loc: 'data' } })).data as any).region).toBe('EU');
+    await lapse(state);
+    const done = await observeDefinitionReads(() => complete(as(aliceId), chat.chatId, { region: 'XX' }));
+    expect(done.reads).toEqual([]);
+    const data = (await db.node.findFirstOrThrow({ where: { memoryId: shared, loc: 'data' } })).data as any;
+    expect(data.region).toBe('EU');
+    expect(data.users[aliceId].region).toBe('XX');
+    expect(data.users[bobId]?.region).toBeUndefined();
+    expect(await dataViewFor(db, shared, data, bobId)).not.toHaveProperty('region');
+    await renew();
+    expect(await dataViewFor(db, shared, data, bobId)).toMatchObject({ region: 'EU' });
   });
 });
