@@ -21,6 +21,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { formatGraphQLError } from '../formatError.js';
 import { DEFAULT_OMITTED_PAGE_SIZE, OMITTED_PAGE_SIZE } from '../admissionComplexity.js';
 import { TASK_EXTERNAL_IDS_MAX } from './resolvers.agentTask.js';
+import { PASSIVE_EVENT_TYPES } from '../../../lib/agentTasks/events.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 
@@ -266,6 +267,13 @@ describe('#4084 (2): agentTaskExternalIdChanges — what changed on tasks with a
     expect(next.changes.map((ch: any) => [ch.kind, ch.externalId])).toEqual([['CANCELLED', X]]);
   });
 
+  it('a platform assignment (assignment.matched) is an ASSIGNED change (Bianca §10 P3 on #4089)', async () => {
+    const t = await create({ externalId: X });
+    // The matcher's own event, as appendTaskEvent writes it for a match; the read keys on the type alone.
+    await db.agentTeamEvent.create({ data: { appId: app.id, taskId: t.id, type: 'assignment.matched', payload: { type: 'assignment.matched' } } });
+    expect((await changes()).changes.map((ch: any) => [ch.kind, ch.externalId])).toEqual([['ASSIGNED', X]]);
+  });
+
   it('a cursor from another App is refused like an unknown one; a non-participant gets APP_NOT_FOUND', async () => {
     const t = await create({ externalId: X }, owner.id, other.id);
     await M.cancelAgentTask({}, { taskId: t.id }, ctx());
@@ -332,6 +340,11 @@ describe('#4084 (3): releaseAgentTaskExternalId — V87 (Proposed): whoever may 
     expect({ c: hidden.extensions.code, m: hidden.message.replace(t.id, '<id>') })
       .toEqual({ c: absent.extensions.code, m: absent.message.replace(/[0-9a-f]{32}/, '<id>') });
     expect((await stored(t.id)).externalId).toBe(X);
+  });
+
+  it('the release event is passive: it is no owner reaction and no wake activity (Bianca §10 P3 on #4089)', () => {
+    // The stall rules and task wakes exclude PASSIVE_EVENT_TYPES; a release changes who holds the outside item, not the work.
+    expect(PASSIVE_EVENT_TYPES).toContain('task.external-id-released');
   });
 
   it('a task with no external id refuses (a second release too), and nothing changes', async () => {
