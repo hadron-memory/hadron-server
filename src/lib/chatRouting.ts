@@ -226,7 +226,8 @@ export async function decideChatRouting(input: {
     // Ruling item 2 (c): a stored stage that no longer resolves returns to the first stage of the conversation left.
     const stored = g.nodeUrn?.split(':')[2];
     const stage = stored && order.includes(stored) ? stored : order[0];
-    if (!stage) break;
+    // The conversation left has no stages to enter. Skip this goal (it stays as written) and try the next older detour.
+    if (!stage) continue;
     const { createdAt } = g;
     guards.push(data => {
       const fresh = (data.goalStack as GoalStackEntry[] | undefined)?.[i];

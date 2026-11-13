@@ -103,6 +103,13 @@ describe('#4037 detour return (pins 2, 3, 4, 7)', () => {
     run(await decide({ origin: { conversationName: 'anger', stageName: 'hot' }, goalStack: stack }), fresh);
     expect(fresh).toMatchObject({ conversationName: 'recent', stageName: 's1' });
   });
+  it('a newest detour goal whose conversation has no stages is skipped: an older resolvable goal still returns', async () => {
+    const stack = [detour('recent', 's2', 'anger'), detour('empty', 'x', 'anger')];
+    const fresh: Record<string, unknown> = { conversationName: 'anger', stageName: 'hot', goalStack: structuredClone(stack) };
+    const { result } = run(await decide({ origin: { conversationName: 'anger', stageName: 'hot' }, goalStack: stack }), fresh);
+    expect(result).toMatchObject({ detourReturned: true, conversationHandoff: 'recent', newStageName: 's2' });
+    expect((fresh.goalStack as GoalStackEntry[]).map(g => g.status)).toEqual(['COMPLETED', 'ACTIVE']);
+  });
   it('D6: the guarded apply drops the return when the goal changed between decision and apply', async () => {
     const stack = [detour('recent', 's2', 'anger')];
     const decision = await decide({ origin: { conversationName: 'anger', stageName: 'hot' }, goalStack: stack });
