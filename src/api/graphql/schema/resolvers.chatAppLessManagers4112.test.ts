@@ -3,7 +3,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, chatNodeByLocOrThrow } from '../../../test/helpers.js';
 import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
-import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -99,12 +98,11 @@ const send = (ctx: Context, home: Home) => M.sendChatMessage({}, { chatId: home.
 const respond = (ctx: Context, home: Home) => M.processChatResponse({}, { chatId: home.chatId, toolResponse: { message: 'recorded answer', goal_reached: true, next_stage: null } }, ctx);
 const messages = (home: Home) => db.node.count({ where: { memoryId: home.memoryId, loc: { startsWith: `${home.chatId}:messages:` } } });
 async function errorOf(run: () => Promise<unknown>) {
-  try { await run(); return null; } catch (error: any) { return { message: error.message, extensions: error.extensions }; }
+  try { await run(); return null; } catch (error: any) { return { message: error.message, code: error.code, ref: error.ref, extensions: error.extensions }; }
 }
+/** A soft-deleted Agent is unknown under the same input ref (cor:dmo:010:04), exercising the real absent-Agent branch. */
 async function unknownAgentError(home: Home, userId: string) {
-  await db.memory.update({ where: { id: home.memoryId }, data: { userMemoryOfAgentId: null } });
-  const root = await db.node.findUniqueOrThrow({ where: { id: home.rootId } });
-  await db.node.update({ where: { id: home.rootId }, data: { data: { ...(root.data as object), agentId: generateId() } } });
+  await db.agent.update({ where: { id: agentId }, data: { deletedAt: new Date() } });
   return errorOf(() => send(context(userId), home));
 }
 
@@ -119,7 +117,7 @@ describe('#4112 retained App-less turns require Agent management', () => {
       const home = await setup();
       const before = await messages(home);
       const seen = await observe(who(), ctx => errorOf(() => send(ctx, home)));
-      expect(seen.value, 'a non-manager cannot send in the retained standalone home').toMatchObject({ extensions: { code: 'AGENT_NOT_FOUND' } });
+      expect(seen.value, 'a non-manager cannot send in the retained standalone home').toMatchObject({ code: 'AGENT_NOT_FOUND' });
       expect(seen.reads, 'no definition, config, revision or routing read before refusal').toEqual([]);
       expect(await messages(home)).toBe(before);
       expect(seen.value, 'same refusal as an unknown Agent, including message and extensions').toEqual(await unknownAgentError(home, who()));

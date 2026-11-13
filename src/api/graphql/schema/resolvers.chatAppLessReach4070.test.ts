@@ -50,10 +50,10 @@ beforeEach(async () => {
 });
 
 /** A retained App-less home: started through licensed App L, then detached from it (an historical home). */
-async function retainedHome(who: Context) {
+async function retainedHome(who: Context, keepApp = false) {
   const started = await M.startChat({}, { agentId, scope: 'private', conversationName: 'flow' }, who);
   const root = await chatNodeByLocOrThrow(db, started.chatId);
-  await db.memory.update({ where: { id: root.memoryId }, data: { appId: null } });
+  if (!keepApp) await db.memory.update({ where: { id: root.memoryId }, data: { appId: null } });
   return { chatId: started.chatId, memoryId: root.memoryId, rootId: root.id };
 }
 
@@ -158,8 +158,9 @@ describe('#4070 pinned revision', () => {
 });
 
 describe('#4070 controls', () => {
-  it('P1: a consumer who still has licensed reach fires the on-complete rule (observers see real reads)', async () => {
-    const home = await retainedHome(consumerCtx());
+  it('P1: a consumer in the licensed App home fires the on-complete rule (observers see real reads)', async () => {
+    // #4112: an unrelated licensed carrier no longer authorizes an App-less home; keep this positive control App-bearing.
+    const home = await retainedHome(consumerCtx(), true);
     const seen = await observe<any>(() => respond(consumerCtx(), home.chatId));
     expect(seen.value.conversationHandoff).toBe('next');
     expect(seen.systemReads.length).toBeGreaterThan(0);
@@ -191,12 +192,12 @@ describe('#4070 review follow-ups', () => {
     } finally { spy.mockRestore(); }
   });
 
-  it('H1: the helper judges reach through the db handle it was given, not caller.db (Gizelle P2)', async () => {
-    const home = await retainedHome(consumerCtx());
+  it('H1: the helper judges manager reach through the db handle it was given, not caller.db (Gizelle P2)', async () => {
+    const home = await retainedHome(managerCtx());
     const memory = await db.memory.findUniqueOrThrow({ where: { id: home.memoryId } });
     const agentRow = await db.agent.findUniqueOrThrow({ where: { id: agentId } });
     const hostile = new Proxy(db, { get: (t, k) => k === 'agent' ? { findUnique: () => { throw new Error('caller.db was read'); } } : (t as any)[k] });
-    const out = await chatHomeAgentIfLicensed(db, memory, agentRow, { ...consumerCtx(), db: hostile as any });
+    const out = await chatHomeAgentIfLicensed(db, memory, agentRow, { ...managerCtx(), db: hostile as any });
     expect(out?.id).toBe(agentId);
   });
 });
