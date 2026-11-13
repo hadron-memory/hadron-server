@@ -12,6 +12,9 @@ import { generateId } from '../../../lib/id.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
 import { resolvers, type Context } from './resolvers.js';
+import { compileTemplate } from '../../../lib/template.js';
+import { buildPrismaMemoryLayer } from '../../../lib/edge-conditions/prisma-memory-layer.js';
+import { dataViewFor, declaredMemoryWideFields } from '../../../lib/memoryDataView.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -64,19 +67,15 @@ const uninstall = () => db.appAgent.delete({ where: { appId_agentId: { appId, ag
 
 // C1 (Vera, #103559): a non-manager member's turn after uninstall reads nothing from the Agent's system memory. Alice is an
 // org CONTRIBUTOR, not a manager, so cor:dmo:050:13 does not excuse a read. Every `db.node` read method and `db.edge.findMany`
-// is spied; the only exempt call is the memory-wide-field list, which stays live by ruling Q10 (chatScript.ts) and is
-// matched by its exact where shape.
+// is spied; nothing is exempt: the memory-wide-field list is gated on the home App's licence too.
 async function observeDefinitionReads<T>(run: () => Promise<T>) {
   const defNodes = new Set((await db.node.findMany({ where: { memoryId: systemId }, select: { id: true } })).map((n) => n.id));
   const nodeSpies = (['findFirst', 'findMany', 'findUnique', 'findUniqueOrThrow', 'findFirstOrThrow'] as const).map((m) => vi.spyOn(db.node, m));
   const edgeSpy = vi.spyOn(db.edge, 'findMany');
-  const isQ10FieldList = (where: any) => where?.OR?.length === 2
-    && where.OR.some((c: any) => c.loc === 'config') && where.OR.some((c: any) => c.loc?.startsWith === 'conversations:');
   try {
     const value = await run();
     const nodeReads = nodeSpies.flatMap((sp) => sp.mock.calls).filter(([a]) => {
       const where = (a as any)?.where;
-      if (isQ10FieldList(where)) return false;
       const memory = where?.memoryId ?? where?.loc_memoryId?.memoryId;
       return memory === systemId || memory?.equals === systemId || memory?.in?.includes(systemId);
     });
@@ -147,5 +146,64 @@ describe('#4038 App-key session memory', () => {
     const done = await observeDefinitionReads(() => complete(as(aliceId), chat.chatId));
     expect(done.value.conversationHandoff).toBeNull();
     expect(done.reads).toEqual([]);
+  });
+});
+
+// C1 remedy (#4038, AT0.7083): the memory-wide field list is read from the Agent's definition, so it is gated on the
+// HOME App's install-and-licence check, in the one shared helper, for every caller alike (no manager arm).
+describe('#4038 C1 declared memory-wide fields follow the home App licence', () => {
+  let shared: string;
+  const stored = () => ({ region: 'EU', secret: 'flat-legacy', memoryWideKeys: ['secret'], users: { [aliceId]: { industry: 'farming' }, [bobId]: { industry: 'mining' } } });
+  const view = (personId: string) => dataViewFor(db, shared, stored(), personId) as Promise<Record<string, unknown>>;
+  beforeEach(async () => {
+    await startShared(aliceId);
+    shared = (await db.memory.findFirstOrThrow({ where: { appId, class: 'app' } })).id;
+  });
+
+  it('licensed: the declared field reads flat for everyone, each member also reads only their own', async () => {
+    expect(await view(aliceId)).toMatchObject({ region: 'EU', secret: 'flat-legacy', industry: 'farming' });
+    expect(await view(bobId)).toMatchObject({ region: 'EU', secret: 'flat-legacy', industry: 'mining' });
+    expect((await view(bobId)).industry).not.toBe('farming');
+  });
+
+  it.each([
+    ['uninstall', () => uninstall()],
+    ['lapsed licence', () => db.app.update({ where: { id: appId }, data: { uninstalledAt: new Date() } })],
+  ])('after %s: no declared field, zero system-node reads, own values and memoryWideKeys still read, for a member and a manager alike', async (_n, lapse) => {
+    await lapse();
+    for (const who of [aliceId, bobId, adminId]) {
+      const seen = await observeDefinitionReads(() => view(who));
+      expect(seen.reads).toEqual([]);
+      expect(seen.value).not.toHaveProperty('region');
+      expect(seen.value).toMatchObject({ secret: 'flat-legacy' });
+    }
+    expect(await view(aliceId)).toMatchObject({ industry: 'farming' });
+    expect(await view(bobId)).toMatchObject({ industry: 'mining' });
+  });
+
+  it('reinstalling restores the declared list with no rewrite', async () => {
+    await uninstall();
+    expect(await view(aliceId)).not.toHaveProperty('region');
+    await db.appAgent.create({ data: { appId, agentId } });
+    expect(await view(aliceId)).toMatchObject({ region: 'EU' });
+  });
+
+  it('a template render and a condition read follow the same gate', async () => {
+    await db.node.create({ data: { memoryId: shared, loc: 'data', name: 'data', nodeType: 'data', data: stored() as never } });
+    const render = () => compileTemplate('{{region}}|{{industry}}|{{secret}}', null, shared, db, {}, aliceId);
+    const cond = async () => (await (await buildPrismaMemoryLayer(db, 'memory', shared, '', aliceId)).read('region')) as { value?: unknown };
+    expect(await render()).toBe('EU|farming|flat-legacy');
+    expect((await cond()).value).toBe('EU');
+    await uninstall();
+    expect(await render()).toBe('|farming|flat-legacy');
+    expect((await cond()).value).toBeUndefined();
+  });
+
+  it('a memory with no home App fails closed without a database read', async () => {
+    const spy = vi.spyOn(db.agent, 'findUnique');
+    const memory = { id: shared, class: 'app', appId: null, sharedMemoryOfAgentId: agentId, userMemoryOfAgentId: null };
+    expect((await declaredMemoryWideFields(db, memory)).size).toBe(0);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
   });
 });
