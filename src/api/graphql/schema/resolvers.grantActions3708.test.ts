@@ -204,7 +204,9 @@ describe('the participation edges (#4131, BLIND F2/F3)', () => {
     const l = await post(key, session, LIST, { a: appRef });
     expect(l.errors, label).toBeUndefined();
     expect(l.data, label).toEqual(EMPTY);
-    expect(await post(key, session, ONE, { a: appRef, r: name() }), label).toMatchObject(nullOne);
+    const one = await post(key, session, ONE, { a: appRef, r: name() });
+    expect(one.errors, label).toBeUndefined();
+    expect(one, label).toMatchObject(nullOne);
   };
 
   it('a worker request carries its holder\'s credential: the session header alone, with no credential, is refused (a worker has no credential of its own)', async () => {
@@ -232,6 +234,7 @@ describe('the participation edges (#4131, BLIND F2/F3)', () => {
     // Byte-identical to a person in no org at all: membership elsewhere discloses nothing.
     const none = await keyFor((await db.user.create({ data: { handle: `n-${generateId().slice(0, 8)}` } })).id);
     expect(JSON.stringify(await post(outsiderKey, null, LIST, { a: w.appId }))).toBe(JSON.stringify(await post(none, null, LIST, { a: w.appId })));
+    expect(JSON.stringify(await post(outsiderKey, null, ONE, { a: w.appId, r: name() }))).toBe(JSON.stringify(await post(none, null, ONE, { a: w.appId, r: name() })));
   });
 
   it('a former member (membership revoked) is refused, and so is their worker session; the same credential was admitted before (control)', async () => {
