@@ -3156,7 +3156,8 @@ export const agentTaskQueries = {
    * (cor:agt:050:21), so a change is exactly an event a reader could already see.
    *
    * A release clears the task's external id, so a filter on "tasks holding an id" could never return one (the FIT
-   * finding the gate made binding): every change carries the id its task held WHEN it happened. An id is set once, at
+   * finding the gate made binding): every change carries the id its task held WHEN it happened, judged in this read's
+   * own order (#4107), so in the served order no change carrying an id follows that id's RELEASED. An id is set once, at
    * create, and cleared at most once, by a release whose event names it; so a change before the release carries the
    * released id, the release carries it too, and a change after the release (the task then holds none) is left out.
    * The answer is the same whenever it is read: a reader who polled between a cancel and the release saw the cancel,
@@ -3184,17 +3185,20 @@ export const agentTaskQueries = {
       const types = Object.keys(EXTERNAL_ID_CHANGE_KINDS);
       // `r` is the task's release, if any (at most one: the id is never set again). The id a change carries is the one
       // the task holds now, else, for a change at or before the release, the released id; after a release, none.
+      // #4107: "before" and "after" are judged on the serving key (tx_id, created_at, id), the order the page is served
+      // and the cursor advances in, never on created_at alone (a writer-stamped time): otherwise a change written after
+      // the release with an older stamp kept the id and was served after RELEASED.
       const rows = await c.db.$queryRaw<{ id: string; createdAt: Date; type: string; taskId: string; externalId: string }[]>`
         SELECT x.id, x."createdAt", x.type, x."taskId", x."externalId" FROM (
           SELECT e.id, e.created_at AS "createdAt", e.type, e.task_id AS "taskId", e.tx_id AS "txId",
                  COALESCE(t.external_id,
-                   CASE WHEN (e.created_at, e.id) <= (r.created_at, r.id) THEN r.payload->>'externalId' END) AS "externalId"
+                   CASE WHEN (e.tx_id, e.created_at, e.id) <= (r.tx_id, r.created_at, r.id) THEN r.payload->>'externalId' END) AS "externalId"
           FROM agent_team_events e
           JOIN agent_tasks t ON t.id = e.task_id
           LEFT JOIN LATERAL (
-            SELECT rr.id, rr.created_at, rr.payload FROM agent_team_events rr
+            SELECT rr.id, rr.tx_id, rr.created_at, rr.payload FROM agent_team_events rr
             WHERE rr.task_id = e.task_id AND rr.type = ${EXTERNAL_ID_RELEASED}
-            ORDER BY rr.created_at, rr.id LIMIT 1
+            ORDER BY rr.tx_id, rr.created_at, rr.id LIMIT 1
           ) r ON true
           WHERE e.app_id = ${app.id}
             AND e.type IN (${Prisma.join(types)})
