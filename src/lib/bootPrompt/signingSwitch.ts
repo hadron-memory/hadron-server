@@ -187,7 +187,6 @@ export async function computeSigningPreviewRows(db: Db, orgId: string): Promise<
 
   const nodes = new Map<string, BulkNode>();
   const withSnapshots = new Set<string>();
-  const compiledRevs = new Map<string, number[]>();
   const withSignatures = new Set<string>();
   for (const ids of chunked(nodeIds)) {
     for (const n of await db.node.findMany({
@@ -199,10 +198,6 @@ export async function computeSigningPreviewRows(db: Db, orgId: string): Promise<
       },
     })) nodes.set(n.id, n);
     for (const g of await db.nodeRevision.groupBy({ by: ['nodeId'], where: { nodeId: { in: ids } } })) withSnapshots.add(g.nodeId);
-    for (const r of await db.compiledPromptRevision.findMany({ where: { compiledNodeId: { in: ids } }, select: { compiledNodeId: true, compiledRevNo: true } })) {
-      const held = compiledRevs.get(r.compiledNodeId);
-      if (held) held.push(r.compiledRevNo); else compiledRevs.set(r.compiledNodeId, [r.compiledRevNo]);
-    }
     for (const g of await db.nodeSignature.groupBy({ by: ['nodeId'], where: { nodeId: { in: ids } } })) withSignatures.add(g.nodeId);
   }
   // The serve share-locks the node it serves from (in one statement here, in id order so two previews cannot deadlock).
@@ -227,7 +222,20 @@ export async function computeSigningPreviewRows(db: Db, orgId: string): Promise<
   // The compile record the serve reads provenance from: the greatest at or below the served revision. Its parse and
   // occurrence count are checked here from one bulk read; anything that does not hold is `unproven`, which hands the
   // target to the serve itself, so a corrupt record throws exactly what it threw.
-  const provenanceAt = (nodeId: string, servedRevSeq: number): number => Math.max(-1, ...(compiledRevs.get(nodeId) ?? []).filter((r) => r <= servedRevSeq));
+  // One row per (node, served revision): the greatest compile record at or below it, picked by the database, so the
+  // history a node has accumulated is never read into memory and nothing spreads it into a call.
+  const provenanceAtMap = new Map<string, number>();
+  const loadProvenanceAt = async (pairs: Array<{ nodeId: string; rev: number }>): Promise<void> => {
+    const wanted = pairs.filter((p) => !provenanceAtMap.has(`${p.nodeId}${SEP}${p.rev}`));
+    for (const group of chunkedBy(wanted, 1000)) {
+      const rowsRead = await db.$queryRaw<Array<{ node_id: string; rev: number; at: number | null }>>`
+        SELECT w.node_id, w.rev, (SELECT MAX(c.compiled_rev_no) FROM compiled_prompt_revisions c
+          WHERE c.compiled_node_id = w.node_id AND c.compiled_rev_no <= w.rev) AS at
+        FROM unnest(${group.map((p) => p.nodeId)}::text[], ${group.map((p) => p.rev)}::int[]) AS w(node_id, rev)`;
+      for (const r of rowsRead) provenanceAtMap.set(`${r.node_id}${SEP}${r.rev}`, r.at ?? -1);
+    }
+  };
+  const provenanceAt = (nodeId: string, servedRevSeq: number): number => provenanceAtMap.get(`${nodeId}${SEP}${servedRevSeq}`) ?? -1;
   const provenanceOk = new Map<string, boolean>();
   const verifyProvenance = async (pairs: Array<{ nodeId: string; at: number }>): Promise<void> => {
     const wanted = pairs.filter((p) => !provenanceOk.has(`${p.nodeId}${SEP}${p.at}`));
@@ -265,6 +273,7 @@ export async function computeSigningPreviewRows(db: Db, orgId: string): Promise<
     const rev = node && node.deletedAt === null && node.memory.deletedAt === null ? await servedRevOf(node) : null;
     decided.set(t, node && rev !== null ? { node, rev } : null);
   }
+  await loadProvenanceAt([...decided.values()].flatMap((d) => (d ? [{ nodeId: d.node.id, rev: d.rev }] : [])));
   await verifyProvenance([...decided.values()].flatMap((d) => {
     if (!d) return [];
     const at = provenanceAt(d.node.id, d.rev);

@@ -209,6 +209,21 @@ describe('#4016 the set-wise preview equals the per-target serve, row for row', 
     expect(ours.some((r) => r.workerId !== null)).toBe(true);
   }, 120_000);
 
+  it('a node with a deep compile history reads the greatest record at or below the served revision, never the history', async () => {
+    const deep = await mkAgent('deep');
+    const node = await compiled(deep.memoryId, deep.agentId, 'd1');
+    await recompile(node, deep.memoryId, deep.agentId, 'd2');
+    await recompile(node, deep.memoryId, deep.agentId, 'd3');
+    // 400 compile records ABOVE the served revision: none may be chosen, and none may be read into memory
+    await db.compiledPromptRevision.createMany({
+      data: Array.from({ length: 400 }, (_, k) => ({ compiledNodeId: node, compiledRevNo: 4 + k, contentHash: sha256Hex(`h${k}`), targetKind: 'AGENT', targetAgentId: deep.agentId, provenance: prov() as never, occurrenceCount: 1 })) as never,
+    });
+    await installPointer(deep.agentId, node);
+    const ours = project(await computeSigningPreviewRows(db, org.id));
+    expect(ours).toEqual(await oracleRows(db, org.id));
+    expect(ours.some((r) => r.compiledNodeId === node && r.servedRevSeq === 3)).toBe(true);
+  }, 120_000);
+
   it('a compile record that does not parse is thrown exactly as the per-target serve throws it, never a silent row', async () => {
     const bad = await mkAgent('bad');
     const node = (await withCompileWrite(() => db.node.create({ data: { id: generateId(), memoryId: bad.memoryId, loc: `boot:${generateId()}`, name: 'compiled', content: 'bad', role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE } }))).id as string;
@@ -303,15 +318,20 @@ describe('#4016 the audience gates still run before any preview read', () => {
     const outsider = await db.user.create({ data: { githubId: 401601, githubUsername: `bulk-out-${generateId().slice(0, 5)}`, roles: [] } });
     const run = async (orgRef: string) => {
       statementText = [];
+      const result = await attempt(orgRef);
+      return { ...result, queries: statementText.join('\n') };
+    };
+    const attempt = async (orgRef: string) => {
       const spy = new Proxy(logged, {}) as never;
       try { await (resolvers.Query as any).orgBootPromptSigningPreview({}, { org: orgRef, first: 1 }, { db: spy, userId: outsider.id, roles: [] } as Context); return null; }
       catch (e: any) { return { code: e?.extensions?.code, message: e?.message }; }
     };
     const member = await run(org.id);
     const unknown = await run('no-such-org.example');
-    expect(member?.code).toBe('FORBIDDEN');
-    expect(member).toEqual(unknown);
-    expect(statementText.join('\n')).not.toMatch(/app_agents|compiled_prompt_revisions|node_signatures|FROM "public"\."nodes"/);
+    expect(member.code).toBe('FORBIDDEN');
+    expect({ code: member.code, message: member.message }).toEqual({ code: unknown.code, message: unknown.message });
+    // each call's own statements, so a read for the real organisation cannot hide behind the unknown one
+    for (const r of [member, unknown]) expect(r.queries).not.toMatch(/app_agents|compiled_prompt_revisions|node_signatures|FROM "public"\."nodes"/);
   });
 });
 
