@@ -9071,6 +9071,16 @@ export const typeDefs = `#graphql
       source: String
       "#3125 S2: the task with exactly this externalId (compared as written, 1 to 512 characters, else BAD_USER_INPUT). Runs inside the App read gate, so it only finds this App's task."
       externalId: String
+      """
+      #4084 (hrn:node:hadronmemory.com:specs:cor:agt:120:02): the tasks holding any of these external ids, each compared
+      exactly as written. 1 to 100 ids; each entry passes the externalId check (1 to 512 characters, no unpaired
+      surrogate), and ONE bad entry refuses the whole list with BAD_USER_INPUT naming its position (externalIds[i]), never
+      its text; an empty list is BAD_USER_INPUT, never "no narrowing". At most one task holds an id, so with limit omitted
+      the page is as long as the list and answers every id; an id no task of this App holds matches nothing. Runs inside
+      the App read gate (hrn:node:hadronmemory.com:specs:cor:agt:050:21), so another App's task with the same id never
+      appears. ANDed with every other filter, externalId included.
+      """
+      externalIds: [String!]
       "#2649: tasks carrying a reference with exactly this target, and this kind when given; the label is ignored. Runs inside the App read gate."
       reference: AgentTaskReferenceFilter
       "#2663: true narrows to finished tasks with at least one undisposed finding; false/omitted do not narrow. Existing App read scope, before paging (hrn:node:hadronmemory.com:specs:cor:agt:050:30)."
@@ -9161,6 +9171,20 @@ export const typeDefs = `#graphql
       taskId: ID
       limit: Int
     ): AgentTeamEventsPage!
+
+    """
+    #4084 (hrn:node:hadronmemory.com:specs:cor:agt:120, minimal write-back) — what changed on this App's tasks that carry an
+    external id, for a team's reconcile pass: an assignment (by hand or by the platform), a reassignment, a hand-back, a
+    cancel, a finish and a release of the id. Each change is one team event, read inside the same gate as agentTeamEvents
+    (hrn:node:hadronmemory.com:specs:cor:agt:050:21); anyone else is refused APP_NOT_FOUND. A RELEASED change carries the id
+    the release cleared (its task no longer holds it); a change before the release carries that id too, and a change after
+    it (the task then holds none) is left out; every other change carries the id its task holds. Order is commit-safe,
+    oldest first: a change is served only once the transaction that wrote it, and every older one, has ended, so it may
+    appear a moment late but never behind a cursor already served. Pass nextCursor (or the last change's cursor) as after
+    to continue; with after omitted the read starts at the oldest change. after is opaque: a value that is not a cursor of
+    this App is BAD_USER_INPUT. limit defaults to 20 (cap 200, floor 1).
+    """
+    agentTaskExternalIdChanges(appRef: ID!, after: String, limit: Int): AgentTaskExternalIdChangePage!
 
     """
     #3853 — the usage accounts an App has history for: one entry per label, host and family
@@ -11854,6 +11878,17 @@ export const typeDefs = `#graphql
     #3323: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.
     """
     cancelAgentTask(taskId: ID!, instruction: ActInstructionInput): AgentTask!
+
+    """
+    #4084 (hrn:node:hadronmemory.com:specs:cor:agt:120:02; who may release is Proposed, V87) — give a task's outside item
+    back: clear its externalId so the next create naming it claims it. Whoever may cancel the task may release it
+    (hrn:node:hadronmemory.com:specs:cor:agt:050:09), in any status; the assignee alone may not. Refused like a cancel:
+    TASK_NOT_FOUND (a task you cannot read reads as absent), TASK_NOT_OWNER, APP_UNINSTALLED; then
+    TASK_EXTERNAL_ID_NONE when the task holds no external id (a second release included). Nothing else about the task
+    changes, and a refusal writes nothing. One task.external-id-released team event names the released id. The id is never
+    set again on this task. #3323's instruction arm applies as on cancelAgentTask.
+    """
+    releaseAgentTaskExternalId(taskId: ID!, instruction: ActInstructionInput): AgentTask!
 
     """
     #2651 — hand a started task back: its assignee only (hrn:node:hadronmemory.com:specs:cor:agt:050:29). The task
@@ -16453,6 +16488,12 @@ export const typeDefs = `#graphql
     source: String
     "#3125 S2 (hrn:node:hadronmemory.com:specs:cor:agt:120:02): the outside item this task claims (an issue's canonical URL), set once at creation and never edited. Unique within the App, whatever the task's state. Null when none."
     externalId: String
+    """
+    #4084 (hrn:node:hadronmemory.com:specs:cor:agt:120) — the portal page that opens this task,
+    <FRONTEND_URL>/app/apps/<appId>/tasks/<taskId>, printed by the server so no client builds it. Null when FRONTEND_URL
+    is unset or malformed (as Node.portalUrl).
+    """
+    portalUrl: String
     "Null for a root task."
     parentTaskId: ID
     owner: AgentTaskParty!
@@ -16622,6 +16663,39 @@ export const typeDefs = `#graphql
     episodeStart: DateTime
     "#1706 — alarms only: who the alarm wakes and when, nearest owner first (hrn:node:hadronmemory.com:specs:cor:agt:050:19). Null for an ordinary event."
     wakes: [AgentTeamAlarmSchedule!]
+  }
+
+  "#4084 (hrn:node:hadronmemory.com:specs:cor:agt:120): what a change to a task with an external id was."
+  enum AgentTaskExternalIdChangeKind {
+    "task.assigned, or the platform's assignment.matched"
+    ASSIGNED
+    REASSIGNED
+    "The assignee handed the task back to the queue."
+    HANDED_BACK
+    CANCELLED
+    FINISHED
+    "The external id was released (cleared); externalId is the released id."
+    RELEASED
+  }
+
+  "#4084 (hrn:node:hadronmemory.com:specs:cor:agt:120): one change to a task with an external id."
+  type AgentTaskExternalIdChange {
+    "Opaque; pass it as after to read the changes that follow this one."
+    cursor: String!
+    at: DateTime!
+    kind: AgentTaskExternalIdChangeKind!
+    "The task's external id, or for RELEASED the id the release cleared."
+    externalId: String!
+    "The task as it is now."
+    task: AgentTask!
+  }
+
+  "#4084: one page of agentTaskExternalIdChanges and whether more remain (hrn:node:hadronmemory.com:specs:cor:api:120:04)."
+  type AgentTaskExternalIdChangePage {
+    changes: [AgentTaskExternalIdChange!]!
+    hasMore: Boolean!
+    "The cursor to pass as after when hasMore; null on the last page."
+    nextCursor: String
   }
 
   "#3933: one page of an App's team events and whether more remain (hrn:node:hadronmemory.com:specs:cor:api:120:04)."
