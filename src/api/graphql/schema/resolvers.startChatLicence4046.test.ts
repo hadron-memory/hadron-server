@@ -223,3 +223,28 @@ it('live platform admin can use a retained App-less home; a stale platform claim
   await db.user.update({ where: { id: userId }, data: { roles: ['ADMIN'] } });
   expect((await M.startChat({}, { agentId, conversationName: 'flow' }, platformCtx)).systemMessage).toContain('LICENSED STAGE');
 });
+
+for (const route of ['app', 'manager'] as const) {
+  it(`cold ${route} refusal at the locked write leaves no provisioned memory or parent`, async () => {
+    if (route === 'manager') {
+      await db.appAgent.delete({ where: { appId_agentId: { appId, agentId } } });
+      await db.agent.update({ where: { id: agentId }, data: { visibility: 'PUBLIC' } });
+    }
+    const before = await state();
+    const transaction = db.$transaction.bind(db) as (...args: any[]) => Promise<any>;
+    let changed = false;
+    const spy = vi.spyOn(db, '$transaction').mockImplementation((async (...args: any[]) => {
+      if (!changed) {
+        changed = true;
+        if (route === 'app') await db.appAgent.delete({ where: { appId_agentId: { appId, agentId } } });
+        else await db.orgMember.updateMany({ where: { userId }, data: { role: 'READER' } });
+      }
+      return transaction(...args);
+    }) as any);
+    try {
+      await expect(M.startChat({}, { agentId, conversationName: 'flow' }, ctx())).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
+      expect(changed).toBe(true);
+      expect(await state()).toBe(before);
+    } finally { spy.mockRestore(); }
+  });
+}
