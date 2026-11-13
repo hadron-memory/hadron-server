@@ -20,7 +20,7 @@ export async function chatHomeAgentIfLicensed<T extends { id: string }>(
  * Order is binding: resolve (a soft-deleted Agent is none, cor:dmo:010:04), then licence
  * ({@link chatHomeAgentIfLicensed}), then the caller reads the Agent's definition.
  * A shared/user home pointer names its Agent; otherwise (legacy) the first non-deleted Agent
- * linked by a memory item that has a system memory, in the documented order (createdAt, id).
+ * linked by a LIVE (not soft-deleted) memory item that has a system memory, in the documented order (createdAt, id).
  * `deletedAgentId` names a pointer's soft-deleted Agent so a caller can keep its own refusal.
  */
 export async function resolveChatHomeAgent(
@@ -36,7 +36,7 @@ export async function resolveChatHomeAgent(
     else agent = found;
   } else {
     const legacy = await db.agent.findMany({
-      where: { deletedAt: null, memoryItems: { some: { memoryId: memory.id } } },
+      where: { deletedAt: null, memoryItems: { some: { memoryId: memory.id, deletedAt: null } } },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     });
     agent = legacy.find((a) => (a as any).systemMemoryId) ?? null;

@@ -78,6 +78,22 @@ describe('#4076 legacy order parity', () => {
   });
 });
 
+describe('#4076 legacy link liveness', () => {
+  it('a soft-deleted link does not make an older Agent the chosen one', async () => {
+    const b = await M.createAgent({}, { orgId, name: 'Agent B', visibility: 'ORGANIZATION' }, ctx());
+    await seedScript(b.systemMemoryId, 'B', 'onlyB');
+    await db.agent.update({ where: { id: b.id }, data: { createdAt: new Date('2000-01-01T00:00:00Z') } });
+    await serveEveryAgent(db);
+    const started = await start();
+    await makeLegacy(started.chatId, [agentId, b.id]);
+    await db.agentMemoryItem.updateMany({ where: { agentId: b.id }, data: { deletedAt: new Date() } });
+    const sent = await M.sendChatMessage({}, { chatId: started.chatId, userMessage: 'hi' }, ctx());
+    expect(sent.systemMessage).toContain('STAGE OF A');
+    const res = await M.processChatResponse({}, { chatId: started.chatId, toolResponse: { message: 'ok', next_stage: 'onlyA' } }, ctx());
+    expect(res.rejectedNextStage ?? null).toBeNull();
+  });
+});
+
 describe('#4076 soft-deleted Agent resolves to none on both paths', () => {
   // On an App home the licence gate already hides a deleted Agent; the residual is an App-less home, where nothing else does.
   it('App-less personal chat: response takes the no-Agent path for a deleted Agent', async () => {
