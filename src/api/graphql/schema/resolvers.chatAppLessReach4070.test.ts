@@ -6,6 +6,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, chatNodeByLocOrThrow } from '../../../test/helpers.js';
 import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { resolvers, type Context } from './resolvers.js';
+import { chatHomeAgentIfLicensed } from '../../../lib/chatHomeAgent.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -168,5 +169,31 @@ describe('#4070 controls', () => {
     const seen = await observe<any>(() => respond(managerCtx(), home.chatId));
     expect(seen.value.conversationHandoff).toBe('next');
     expect(seen.systemReads.length).toBeGreaterThan(0);
+  });
+});
+
+describe('#4070 review follow-ups', () => {
+  it('S1: send on a lost-reach App-less home refuses AGENT_NOT_FOUND BEFORE it reads the pinned revision (Baloo P2_1)', async () => {
+    const rev = await M.createRevision({}, { agentId }, managerCtx());
+    await M.publishRevision({}, { agentId, revisionLoc: rev.revisionLoc }, managerCtx());
+    const home = await retainedHome(consumerCtx());
+    const root = await db.node.findUniqueOrThrow({ where: { id: home.rootId } });
+    expect((root.data as any).startedWithRevision, 'the chat must be pinned for this pin to mean anything').toBe(rev.revisionLoc);
+    await loseReach('revoked');
+    const spy = vi.spyOn(db.node, 'findFirst');
+    try {
+      await expect(M.sendChatMessage({}, { chatId: home.chatId, userMessage: 'after loss' }, consumerCtx())).rejects.toThrow(/not found|AGENT_NOT_FOUND/i);
+      const reads = spy.mock.calls.filter(([a]) => (a as any)?.where?.memoryId === systemId);
+      expect(reads, 'no protected system read before the refusal').toEqual([]);
+    } finally { spy.mockRestore(); }
+  });
+
+  it('H1: the helper judges reach through the db handle it was given, not caller.db (Gizelle P2)', async () => {
+    const home = await retainedHome(consumerCtx());
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: home.memoryId } });
+    const agentRow = await db.agent.findUniqueOrThrow({ where: { id: agentId } });
+    const hostile = new Proxy(db, { get: (t, k) => k === 'agent' ? { findUnique: () => { throw new Error('caller.db was read'); } } : (t as any)[k] });
+    const out = await chatHomeAgentIfLicensed(db, memory, agentRow, { ...consumerCtx(), db: hostile as any });
+    expect(out?.id).toBe(agentId);
   });
 });
