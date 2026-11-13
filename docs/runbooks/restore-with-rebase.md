@@ -39,7 +39,8 @@ Missing P1 or P2 refuses at S0, before anything is created.
 
 `RESTORE_ADMIN_URL` is the only connection setting: the pipeline's own sessions and its `pg_restore` child both take
 host, port, user, password and TLS from it, and every inherited `PG*` variable except `PGPASSFILE` is dropped from the
-child's environment. The password comes from the URL or, for a password-less URL, from the password file (`PGPASSFILE`
+child's environment. The URL must name the user (without one node-postgres would take `PGUSER` and libpq the OS
+account). The password comes from the URL or, for a password-less URL, from the password file (`PGPASSFILE`
 or `~/.pgpass`) on both sides; `PGPASSWORD` set beside a password-less URL is refused at S0, since the pipeline's own
 sessions would use it and `pg_restore` would not. Accepted query parameters: `sslmode` (`disable`, the default when absent; `require`; `verify-ca`,
 which needs `sslrootcert`; `verify-full`), `sslrootcert`, and `sslcert` with `sslkey` (file paths, for certificate

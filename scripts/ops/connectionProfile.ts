@@ -5,7 +5,8 @@
  * client certificate passed preflight and then failed (or used a different certificate) inside `pg_restore`.
  *
  * The URL is the only source: every inherited `PG*` variable except `PGPASSFILE` is removed from the child's
- * environment, an inherited `PGPASSWORD` beside a password-less URL is refused (node-postgres would read it), and an absent `sslmode` means no TLS on both sides (not "whatever PGSSLMODE says"). A query parameter
+ * environment, a URL without a user name is refused (node-postgres would take `PGUSER`, libpq the OS account), an
+ * inherited `PGPASSWORD` beside a password-less URL is refused (node-postgres would read it), and an absent `sslmode` means no TLS on both sides (not "whatever PGSSLMODE says"). A query parameter
  * outside the supported set is refused before anything is created, rather than honoured by one side only.
  *
  * Supported: `sslmode` = `disable` | `require` | `verify-ca` | `verify-full`, with `sslrootcert`, `sslcert`, `sslkey`
@@ -56,6 +57,9 @@ export function connectionProfile(url: string, database?: string, env: NodeJS.Pr
   }
   if (u.protocol !== 'postgresql:' && u.protocol !== 'postgres:') throw new ConnectionProfileError('connection URL is not postgresql://');
   if (!u.hostname) throw new ConnectionProfileError('connection URL has no host (socket paths are not supported)');
+  // Without a user name node-postgres falls back to an inherited PGUSER while the pg_restore child (PG* dropped) uses
+  // the OS account: two identities (§10 P2 on be911099). The URL must name the user.
+  if (!u.username) throw new ConnectionProfileError('connection URL has no user name');
   for (const key of u.searchParams.keys()) {
     if (!SUPPORTED.has(key)) throw new ConnectionProfileError(`unsupported connection parameter: ${key}`);
   }

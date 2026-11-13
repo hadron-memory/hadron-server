@@ -113,6 +113,12 @@ describe('#4111 F2: one connection profile for both sides', () => {
     expect(libpqEnv(withPassword, { PGPASSWORD: 'inherited' }).PGPASSWORD).toBe('p@ss');
   });
 
+  it('§10 P2 on be911099: a URL without a user name is refused, whatever PGUSER says', () => {
+    expect(() => connectionProfile('postgresql://db.example/postgres', undefined, { PGUSER: 'x' })).toThrow(/no user name/);
+    expect(() => connectionProfile('postgresql://:secret@db.example/postgres', undefined, {})).toThrow(/no user name/);
+    expect(connectionProfile('postgresql://restore_admin@db.example/postgres', undefined, { PGUSER: 'x' }).user).toBe('restore_admin');
+  });
+
   it.each([
     ['an unknown parameter', `${base}?options=-c%20x%3Dy`, /unsupported connection parameter: options/],
     ['a host parameter', `${base}?host=%2Fvar%2Frun`, /unsupported connection parameter: host/],

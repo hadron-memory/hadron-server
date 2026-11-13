@@ -694,6 +694,26 @@ describe.skipIf(!enabled)('#4111 restore-with-rebase on private clusters', { tim
     await F.sql(B.url(), `DROP DATABASE ${target}`);
   });
 
+  it('§10 P3-6: a CREATE refused for its own reason (the chosen oid got taken) with the name still free reports absent', async () => {
+    const target = fresh();
+    const other = `${target}_oid_holder`;
+    const err = await restoreWithRebase(
+      base({
+        target,
+        log: async (e) => {
+          if (e.stage === 'S1' && e.event === 'creating') await F.sql(B.url(), `CREATE DATABASE ${other} OID ${e.oid as number}`);
+        },
+      }),
+    ).catch((e) => e);
+    expect(err).toBeInstanceOf(RestoreError);
+    expect(err.stage).toBe('S1');
+    expect(err.teardown).toBe('absent');
+    expect(err.message).toMatch(/does not exist/);
+    expect(await dbExists(target)).toBe(false);
+    expect(await dbExists(other)).toBe(true);
+    await F.sql(B.url(), `DROP DATABASE ${other}`);
+  });
+
   it('blind P1: after a lost reply, only the chosen oid is taken for this run, never a same-shaped one inside the window', async () => {
     const target = fresh();
     const [{ x }] = await F.sql(B.url(), 'SELECT pg_snapshot_xmax(pg_current_snapshot())::text AS x');
