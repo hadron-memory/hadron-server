@@ -1959,21 +1959,33 @@ async function applyTaskCreate(
   }
   await checkFinishByAtDbClock(tx, p.finishBy, p.startBy);
   // #4113 (cor:agt:050:02, cor:agt:120): a create that names an externalId AND whose assignee is the caller IS the claim,
-  // and a claim is created started: one write, so no create-then-start window and no not-started alarm (050:14). A claim
-  // for another assignee stays pending (050:08 governs it), as does one with an open blocker (startAgentTask refuses a
-  // blocked task, so a started one would break its own rule). Judged after the blockers link, on the row's own flag.
-  if (p.externalId !== null && p.status === 'pending' && assignee && sameParty(assignee, actorParty(actor))) {
-    const fresh = await tx.agentTask.findUniqueOrThrow({ where: { id: made.id } });
-    if (!fresh.blocked) {
-      const started = await tx.agentTask.update({
-        where: { id: made.id },
-        data: { status: 'started', startedAt: new Date(), ...updatedStamp(txCtx) },
-      });
-      await appendTaskEvent(tx, { appId: app.id, taskId: made.id, actor: eventActor(txCtx.userId), event: { type: 'task.started' } });
-      return { ...made, row: started };
-    }
+  // and is created started (see startOwnClaim). A batch defers it until its second pass has linked the forward blockers.
+  if (!deferMatchBlockerCheck) {
+    const started = await startOwnClaim(tx, txCtx, app, p, assignee, made.id);
+    if (started) return { ...made, row: started };
   }
   return { ...made, row };
+}
+
+/**
+ * #4113 (cor:agt:050:02, cor:agt:120): a create that names an externalId AND whose assignee is the caller IS the claim, and a
+ * claim is created started: one write, so no create-then-start window and no not-started alarm (050:14). A claim for
+ * another assignee stays pending (050:08 governs it), as does one with an open blocker (startAgentTask refuses a
+ * blocked task, so a started one would break its own rule). Judged after ALL the task's blockers link, on the row's own
+ * flag, so a batch calls it after the second pass: a started task takes no later blocker link. Null when not a claim.
+ */
+async function startOwnClaim(
+  tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, p: PreparedCreate, assignee: TaskParty | null, taskId: string,
+): Promise<TaskRow | null> {
+  if (p.externalId === null || p.status !== 'pending' || !assignee || !sameParty(assignee, actorParty(p.actor))) return null;
+  const fresh = await tx.agentTask.findUniqueOrThrow({ where: { id: taskId } });
+  if (fresh.blocked || fresh.status !== 'pending') return null;
+  const started = await tx.agentTask.update({
+    where: { id: taskId },
+    data: { status: 'started', startedAt: new Date(), ...updatedStamp(txCtx) },
+  });
+  await appendTaskEvent(tx, { appId: app.id, taskId, actor: eventActor(txCtx.userId), event: { type: 'task.started' } });
+  return started;
 }
 
 /**
@@ -2272,6 +2284,11 @@ export const agentTaskMutations = {
             throw atPosition(e, i + 1);
           }
         }
+      }
+      // #4113: a caller-own claim starts only now, once every link (backward and forward) has landed.
+      for (const [i, p] of prepared.entries()) {
+        const started = await startOwnClaim(tx, txCtx, app, p, assigneeOf(out[i]!.row), out[i]!.id);
+        if (started) out[i] = { ...out[i]!, row: started };
       }
       // Match-now judges the final derived blocker state, including forward-position links.
       // A refusal rolls back the whole batch before any post-commit attempt or wake can run.
