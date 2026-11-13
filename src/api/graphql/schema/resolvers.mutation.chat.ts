@@ -61,7 +61,7 @@ import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { appKeyMayActFor, appKeySessionMatchesAgent, canChatWithAgent, chatAuthorityAnchors, chatCarrierApps } from './agentChatAccess.js';
 import { withAuthorizedMemoryTx, withAuthorizedTx } from './authorizedTx.js';
 import { activeAppInstallLicenseIdsForAgent } from '../../../lib/appAgent.js';
-import { resolveChatHomeAgent } from '../../../lib/chatHomeAgent.js';
+import { refuseUnreachableChatHomeAgent, resolveChatHomeAgent } from '../../../lib/chatHomeAgent.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { type MemoryVisibility } from '../../../generated/prisma/index.js';
@@ -1026,6 +1026,8 @@ export const chatMutations = {
       // deleted Agent through the serve gate before any write (#3654); keep that refusal. App-class chats retain their empty result.
       const { agent, deletedAgentId } = await resolveChatHomeAgent(ctx.db, memory);
       if (memory.class !== 'app' && deletedAgentId) throw new AgentNotFoundError(deletedAgentId);
+      // #4070: an App-less home the caller can no longer reach is refused here, before the pinned revision is read.
+      await refuseUnreachableChatHomeAgent(ctx.db, memory, agent, ctx);
       const systemMemoryId = agent ? (agent as any).systemMemoryId as string : null;
 
       // Pin to version: if the chat was started with a published revision,
