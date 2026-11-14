@@ -169,7 +169,7 @@ import {
   releaseOnceOnResponseEnd,
 } from './transportBounds.js';
 import { unstorableTextRefusal, refusalResult, toolErrorResult, withToolErrorBoundary } from './toolError.js';
-import { edgeTextFields, unstorableTextText } from '../lib/unstorableTextInput.js';
+import { edgeTextFields, findUnstorableText, unstorableTextMessage, unstorableTextText } from '../lib/unstorableTextInput.js';
 import { refNamesNothing } from '../lib/entityRef/refNamesNothing.js';
 import { textResult } from './textResult.js';
 import { publicErrorExtensions } from '../lib/errorDiagnostics.js';
@@ -903,6 +903,10 @@ export async function addEdge(args: {
   // Spec 037: the edge's identity is its loc within the source memory.
   // Author-supplied loc is validated; otherwise derive it deterministically
   // so re-running with the same endpoints + name stays idempotent.
+  // #4106: caller text Postgres would reject (NUL, lone surrogate) is refused typed, after the gates above and before
+  // the loc derives from `name`; `loc` itself is validated just below.
+  const unstorable = findUnstorableText({ name, loc: authoredLoc, description });
+  if (unstorable) return { error: `[bad_user_input] ${unstorableTextMessage(unstorable)}` };
   const edgeLoc =
     authoredLoc != null && authoredLoc !== '' ? authoredLoc : deriveEdgeLoc(sourceNode.loc, name, target.loc);
   try {
@@ -3456,7 +3460,7 @@ export function createMcpServerInstance(
             'Use hadron_set_active_memory to work in it.',
         );
       } catch (e) {
-        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'create failed'}`, 'hadron_create_memory:resolver');
+        return toolErrorResult(e, () => unstorableTextText(e) ?? `Error: ${e instanceof Error ? e.message : 'create failed'}`, 'hadron_create_memory:resolver');
       }
     },
   );
@@ -3479,7 +3483,7 @@ export function createMcpServerInstance(
         const created = await resolvers.Mutation.createAppMemory({}, { appRef: app, name, shortDescription, description, tags }, ctx);
         return textResult(`Memory created: ${safeEmitEntityUrnV2('memory', created.urn)} (class: app, id: ${created.id}).`);
       } catch (e) {
-        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'create failed'}`, 'hadron_create_app_memory:resolver');
+        return toolErrorResult(e, () => unstorableTextText(e) ?? `Error: ${e instanceof Error ? e.message : 'create failed'}`, 'hadron_create_app_memory:resolver');
       }
     },
   );
@@ -7955,7 +7959,7 @@ export function createMcpServerInstance(
           )}`,
         );
       } catch (err) {
-        return roleWriterRefusalText(err) !== null ? refusalResult(roleWriterRefusalText(err) as string) : toolErrorResult(err, () => String((err as Error)?.message ?? err), 'hadron_update_edge');
+        return roleWriterRefusalText(err) !== null ? refusalResult(roleWriterRefusalText(err) as string) : toolErrorResult(err, () => unstorableTextText(err) ?? String((err as Error)?.message ?? err), 'hadron_update_edge');
       }
     },
   );
