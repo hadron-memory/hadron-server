@@ -6377,8 +6377,8 @@ export const typeDefs = `#graphql
     protected: Boolean!
     "The newest version's number. App secrets only; null for org and user secrets (they have no versions)."
     currentVersion: Int
-    "An App secret's kept versions, newest first: numbers, sizes and authorship, never a value. Empty for org and user secrets."
-    versions: [SecretVersion!]!
+    "An App secret's kept versions, newest first: numbers, sizes and authorship, never a value. Paged (hrn:node:hadronmemory.com:specs:cor:api:120:04): default 20, cap 200, limit 0 counts only. Empty for org and user secrets."
+    versions(limit: Int, offset: Int): SecretVersionsPage!
   }
 
   """
@@ -6413,6 +6413,13 @@ export const typeDefs = `#graphql
     workerId: String
     sessionId: String
     at: DateTime!
+  }
+
+  type SecretVersionsPage {
+    items: [SecretVersion!]!
+    total: Int!
+    "Whether versions remain past this page."
+    hasMore: Boolean!
   }
 
   type SecretEventsPage {

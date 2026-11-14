@@ -150,9 +150,19 @@ export function validateAndEncryptSecret(
   kind: string,
   metadata: unknown,
   value: unknown,
+  opts?: SecretPayloadOptions,
 ): ValidatedSecretInput {
-  const { metadata: normalized, valueJson } = validateSecretPayload(kind, metadata, value);
+  const { metadata: normalized, valueJson } = validateSecretPayload(kind, metadata, value, opts);
   return { metadata: normalized, valueEncrypted: encryptToken(valueJson) };
+}
+
+export interface SecretPayloadOptions {
+  /**
+   * Apply the value-size cap (default true). A metadata-only edit re-validates the STORED value for kind and shape
+   * but passes false: the cap binds a value when it is written, so a value stored under an older, looser rule (an
+   * org or user value of at most 32,768 characters but more than 32,768 bytes) never freezes its own metadata (#4157).
+   */
+  enforceValueSize?: boolean;
 }
 
 /** Per-kind validation, shared by every owner type; encryption is the caller's (platform key, or the App key). */
@@ -160,6 +170,7 @@ export function validateSecretPayload(
   kind: string,
   metadata: unknown,
   value: unknown,
+  opts: SecretPayloadOptions = {},
 ): ValidatedSecretPayload {
   if (!(SECRET_KINDS as readonly string[]).includes(kind)) {
     throw badInput(`Unknown secret kind "${kind}". v1 kinds: ${SECRET_KINDS.join(', ')}.`);
@@ -197,7 +208,7 @@ export function validateSecretPayload(
   }
   const valueJson = JSON.stringify(value);
   const sizeBytes = Buffer.byteLength(valueJson, 'utf8');
-  if (sizeBytes > SECRET_VALUE_MAX_BYTES) {
+  if (opts.enforceValueSize !== false && sizeBytes > SECRET_VALUE_MAX_BYTES) {
     throw badInput(`value is too large (max ${SECRET_VALUE_MAX_BYTES} bytes).`);
   }
   return { metadata: normalized, valueJson, sizeBytes };

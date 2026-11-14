@@ -19,7 +19,7 @@
  * memory-owned scope stays superseded (#696, D-2026-07-15-006).
  */
 import { GraphQLError } from 'graphql';
-import type { Context } from './resolvers.helpers.js';
+import { pageArgs, pageEnvelope, type Context } from './resolvers.helpers.js';
 import {
   clampListTake,
   isAppParticipant,
@@ -315,6 +315,7 @@ export const secretMutations = {
       secret.kind,
       effectiveMetadata,
       effectiveValue,
+      { enforceValueSize: args.value !== undefined },
     );
 
     return ctx.db.secret.update({
@@ -420,7 +421,9 @@ async function updateAppSecret(ctx: Context, found: SecretRow, args: UpdateSecre
       if (secret.protected) throw protectedRefusal();
       const effectiveValue = args.value !== undefined ? args.value : await currentAppSecretValue(tx, secret);
       const effectiveMetadata = args.metadata !== undefined ? args.metadata : secret.metadata;
-      const { metadata, valueJson, sizeBytes } = validateSecretPayload(secret.kind, effectiveMetadata, effectiveValue);
+      const { metadata, valueJson, sizeBytes } = validateSecretPayload(secret.kind, effectiveMetadata, effectiveValue, {
+        enforceValueSize: args.value !== undefined,
+      });
       let versionNo: number | null = null;
       if (args.value !== undefined) versionNo = await addAppSecretVersion(tx, secret, valueJson, sizeBytes, actor);
       const updated = await tx.secret.update({
@@ -556,12 +559,27 @@ export const secretFields = {
     const row = await ctx.db.secretVersion.findFirst({ where: { secretId: s.id }, orderBy: { versionNo: 'desc' }, select: { versionNo: true } });
     return row?.versionNo ?? null;
   },
-  versions: async (s: { id: string; ownerType: string }, _: unknown, ctx: Context) => {
-    if (s.ownerType !== 'app') return [];
-    return ctx.db.secretVersion.findMany({
-      where: { secretId: s.id },
-      orderBy: { versionNo: 'desc' },
-      select: { id: true, versionNo: true, sizeBytes: true, writtenAt: true, writtenByUserId: true, writtenByWorkerId: true, supersededAt: true },
-    });
+  /** Paged (cor:api:120:04): default 20, cap 200, limit 0 counts only; `hasMore` says whether rows remain. */
+  versions: async (
+    s: { id: string; ownerType: string },
+    args: { limit?: number | null; offset?: number | null },
+    ctx: Context,
+  ) => {
+    if (s.ownerType !== 'app') return pageEnvelope([], 0, 0);
+    const { take, skip } = pageArgs(args ?? {});
+    const where = { secretId: s.id };
+    const [items, total] = await Promise.all([
+      take === 0
+        ? Promise.resolve([])
+        : ctx.db.secretVersion.findMany({
+            where,
+            orderBy: { versionNo: 'desc' },
+            take,
+            skip,
+            select: { id: true, versionNo: true, sizeBytes: true, writtenAt: true, writtenByUserId: true, writtenByWorkerId: true, supersededAt: true },
+          }),
+      ctx.db.secretVersion.count({ where }),
+    ]);
+    return pageEnvelope(items, total, skip);
   },
 };

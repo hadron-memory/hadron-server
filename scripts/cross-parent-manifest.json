@@ -1844,7 +1844,13 @@
     },
     "Secret.versions": {
       "class": "parent-implies-child",
-      "audience": "the callers Query.secret admits for the parent (canSeeSecretOwner); an App secret's versions as metadata only (number, size, authorship), never the value or its ciphertext",
+      "audience": "the callers Query.secret admits for the parent (canSeeSecretOwner); a page of an App secret's versions, paged per parent (cor:api:120:04)",
+      "resolver": "src/api/graphql/schema/resolvers.secret.ts::canSeeSecretOwner",
+      "target": "SecretVersionsPage"
+    },
+    "SecretVersionsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "the callers Query.secret admits for the parent secret (canSeeSecretOwner); versions as metadata only (number, size, authorship), never the value or its ciphertext",
       "resolver": "src/api/graphql/schema/resolvers.secret.ts::canSeeSecretOwner",
       "target": "SecretVersion"
     },

@@ -5,6 +5,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { SECRET_SCOPE_ORDER, SECRET_OWNER_TYPES } from '../../../lib/secrets.js';
+import { encryptToken, decryptToken } from '../../../lib/tokenCrypto.js';
 import { buildSchema, type GraphQLObjectType } from 'graphql';
 import { typeDefs } from './typeDefs.js';
 import { resolveRunSecret } from '../../../lib/runner/secrets.js';
@@ -75,7 +76,9 @@ describe('App secrets S2 public acceptance', () => {
     await resolvers.Mutation.updateSecret({}, { ref: secret.id, value: 'v-two' }, context(memberId));
     const shown: any = await resolvers.Query.secret({}, { ref: secret.id }, context(memberId));
     expect(await resolvers.Secret.currentVersion(shown, {}, context(memberId))).toBe(2);
-    const versions: any[] = await resolvers.Secret.versions(shown, {}, context(memberId));
+    const page: any = await resolvers.Secret.versions(shown, {}, context(memberId));
+    const versions: any[] = page.items;
+    expect(page).toMatchObject({ total: 2, hasMore: false });
     expect(versions.map((v) => v.versionNo)).toEqual([2, 1]);
     expect(versions[0].supersededAt).toBeNull();
     expect(versions[1].supersededAt).not.toBeNull();
@@ -123,6 +126,41 @@ describe('App secrets S2 public acceptance', () => {
     expect(nos).toHaveLength(MAX_SECRET_VERSIONS);
     expect(nos[0]).toBe(3);
     expect(nos.at(-1)).toBe(MAX_SECRET_VERSIONS + 2);
+  });
+
+  it('pages Secret.versions: default 20, offset, hasMore, limit 0 counts only, over-cap served as 200 (cor:api:120:04)', async () => {
+    const secret = await create(memberId, 'paged');
+    for (let i = 2; i <= 30; i++) await resolvers.Mutation.updateSecret({}, { ref: secret.id, value: `v${i}` }, context(memberId));
+    const shown: any = await resolvers.Query.secret({}, { ref: secret.id }, context(memberId));
+    const first: any = await resolvers.Secret.versions(shown, {}, context(memberId));
+    expect(first.items).toHaveLength(20);
+    expect(first.items[0].versionNo).toBe(30);
+    expect(first).toMatchObject({ total: 30, hasMore: true });
+    const rest: any = await resolvers.Secret.versions(shown, { limit: 20, offset: 20 }, context(memberId));
+    expect(rest.items.map((v: any) => v.versionNo)).toEqual([10, 9, 8, 7, 6, 5, 4, 3, 2, 1]);
+    expect(rest.hasMore).toBe(false);
+    expect(await resolvers.Secret.versions(shown, { limit: 0 }, context(memberId))).toMatchObject({ items: [], total: 30, hasMore: true });
+    expect((await resolvers.Secret.versions(shown, { limit: 5000 }, context(memberId)) as any).items).toHaveLength(30);
+    expect(await resolvers.Secret.versions({ id: 'x', ownerType: 'org' }, {}, context(memberId))).toEqual({ items: [], total: 0, hasMore: false });
+    const sdl = buildSchema(typeDefs);
+    const field = (sdl.getType('Secret') as GraphQLObjectType).getFields().versions;
+    expect(field.args.map((a) => a.name)).toEqual(['limit', 'offset']);
+    expect(String(field.type)).toBe('SecretVersionsPage!');
+  });
+
+  it('grandfathers a stored value over the byte cap: a metadata-only edit succeeds, a new value over the cap is still refused (#4157)', async () => {
+    const legacy = 'é'.repeat(16_400); // 16,402 JSON chars (under the old character check), 32,802 bytes
+    const row = await db.secret.create({ data: {
+      id: generateId(), ownerType: 'user', ownerId, name: 'legacy-multibyte', kind: 'generic', metadata: {},
+      valueEncrypted: encryptToken(JSON.stringify(legacy)),
+    } });
+    const edited: any = await resolvers.Mutation.updateSecret({}, { ref: row.id, metadata: { note: 'edited' } }, context(ownerId));
+    expect(edited.metadata).toEqual({ note: 'edited' });
+    const stored = await db.secret.findUniqueOrThrow({ where: { id: row.id } });
+    expect(JSON.parse(decryptToken(stored.valueEncrypted!))).toBe(legacy);
+    const code = await resolvers.Mutation.updateSecret({}, { ref: row.id, value: legacy }, context(ownerId)).then(
+      () => 'ACCEPTED', (e: unknown) => (e as { extensions?: { code?: string } }).extensions?.code);
+    expect(code).toBe('BAD_USER_INPUT');
   });
 
   it('refuses a secret beyond the per-App cap with its own code', async () => {
