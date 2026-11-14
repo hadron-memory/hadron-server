@@ -58,6 +58,7 @@ import {
   secretActorOf,
 } from '../../../lib/secrets/appSecrets.js';
 import { withAuthorizedTx } from './authorizedTx.js';
+import { tickBatch } from './tickBatch.js';
 
 function badInput(message: string): GraphQLError {
   return new GraphQLError(message, { extensions: { code: 'BAD_USER_INPUT' } });
@@ -552,12 +553,59 @@ export const secretQueries = {
   },
 };
 
+type VersionRow = { id: string; versionNo: number; sizeBytes: number; writtenAt: Date; writtenByUserId: string | null; writtenByWorkerId: string | null; supersededAt: Date | null };
+type VersionsPageResult = { items: VersionRow[]; total: number };
+
+/**
+ * #4157: `Secret.currentVersion` of every App secret raised in the same tick shares ONE grouped query, not one
+ * `findFirst` per parent. Keyed by the request Context (see `tickBatch`), so nothing outlives the tick. The newest
+ * version is the max over ALL of a secret's versions, never derived from a paged subset.
+ */
+const currentVersionBatch = tickBatch<string, number | null>(async (ctx, ids) => {
+  const rows = await ctx.db.secretVersion.groupBy({ by: ['secretId'], where: { secretId: { in: ids } }, _max: { versionNo: true } });
+  return new Map(rows.map((r) => [r.secretId, r._max.versionNo ?? null]));
+}, null);
+
+/**
+ * #4157: `Secret.versions` pages raised in the same tick share one grouped count and one windowed read per distinct
+ * (take, skip), so each parent keeps its own page and `hasMore`. The key is `<secretId>|<take>|<skip>`; a secret id
+ * is a cuid, which cannot contain the separator.
+ */
+const versionsPageBatch = tickBatch<string, VersionsPageResult>(async (ctx, keys) => {
+  const wanted = keys.map((k) => { const [id, take, skip] = k.split('|'); return { key: k, id, take: Number(take), skip: Number(skip) }; });
+  const ids = [...new Set(wanted.map((w) => w.id))];
+  const counts = await ctx.db.secretVersion.groupBy({ by: ['secretId'], where: { secretId: { in: ids } }, _count: { _all: true } });
+  const total = new Map(counts.map((c) => [c.secretId, c._count._all]));
+  const out = new Map<string, VersionsPageResult>();
+  const windows = new Map<string, { take: number; skip: number; ids: string[] }>();
+  for (const w of wanted) {
+    out.set(w.key, { items: [], total: total.get(w.id) ?? 0 });
+    if (w.take === 0) continue;
+    const g = windows.get(`${w.take}|${w.skip}`) ?? { take: w.take, skip: w.skip, ids: [] };
+    g.ids.push(w.id);
+    windows.set(`${w.take}|${w.skip}`, g);
+  }
+  for (const g of windows.values()) {
+    const rows = await ctx.db.$queryRaw<(VersionRow & { secretId: string })[]>`
+      SELECT id, secret_id AS "secretId", version_no AS "versionNo", size_bytes AS "sizeBytes", written_at AS "writtenAt",
+             written_by_user_id AS "writtenByUserId", written_by_worker_id AS "writtenByWorkerId", superseded_at AS "supersededAt"
+        FROM (SELECT v.*, row_number() OVER (PARTITION BY v.secret_id ORDER BY v.version_no DESC) AS rn
+                FROM secret_versions v WHERE v.secret_id = ANY(${g.ids}::text[])) t
+       WHERE t.rn > ${g.skip} AND t.rn <= ${g.skip + g.take}
+       ORDER BY t.secret_id, t.version_no DESC`;
+    for (const r of rows) {
+      const { secretId, ...item } = r;
+      out.get(`${secretId}|${g.take}|${g.skip}`)?.items.push(item);
+    }
+  }
+  return out;
+}, { items: [], total: 0 });
+
 /** `Secret` field resolvers for the App half: versions are metadata only, newest first. Org and user secrets have none. */
 export const secretFields = {
   currentVersion: async (s: { id: string; ownerType: string }, _: unknown, ctx: Context) => {
     if (s.ownerType !== 'app') return null;
-    const row = await ctx.db.secretVersion.findFirst({ where: { secretId: s.id }, orderBy: { versionNo: 'desc' }, select: { versionNo: true } });
-    return row?.versionNo ?? null;
+    return currentVersionBatch(ctx, s.id);
   },
   /** Paged (cor:api:120:04): default 20, cap 200, limit 0 counts only; `hasMore` says whether rows remain. */
   versions: async (
@@ -567,19 +615,7 @@ export const secretFields = {
   ) => {
     if (s.ownerType !== 'app') return pageEnvelope([], 0, 0);
     const { take, skip } = pageArgs(args ?? {});
-    const where = { secretId: s.id };
-    const [items, total] = await Promise.all([
-      take === 0
-        ? Promise.resolve([])
-        : ctx.db.secretVersion.findMany({
-            where,
-            orderBy: { versionNo: 'desc' },
-            take,
-            skip,
-            select: { id: true, versionNo: true, sizeBytes: true, writtenAt: true, writtenByUserId: true, writtenByWorkerId: true, supersededAt: true },
-          }),
-      ctx.db.secretVersion.count({ where }),
-    ]);
-    return pageEnvelope(items, total, skip);
+    const page = await versionsPageBatch(ctx, `${s.id}|${take}|${skip}`);
+    return pageEnvelope(page.items, page.total, skip);
   },
 };
