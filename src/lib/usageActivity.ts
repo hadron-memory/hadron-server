@@ -113,6 +113,9 @@ export function isValidTimeZone(tz: string): boolean {
 /** Width of one rollup cell (#2719). Every current IANA UTC offset is a multiple of it. */
 export const ROLLUP_CELL_MS = 15 * 60_000;
 
+/** The earliest instant the reader serves from whole cells (cell aligned); see {@link rollupMiddle}. */
+export const ROLLUP_MIN_MS = Date.UTC(1990, 0, 1);
+
 /**
  * The whole-cell span `[from, to)` that the rollup answers for a window (#2719 slice 2), or null when the window is
  * answered from `usage_events` alone. The two partial edge cells, each under one cell wide, and any cell before the
@@ -131,7 +134,9 @@ async function rollupMiddle(
   // `applies_from` is cell-aligned by construction; rounding it up keeps a hand-set boundary from leaving the events
   // between it and the next cell edge in neither the rollup nor the raw range.
   const maintainedFrom = Math.ceil(state.applies_from.getTime() / ROLLUP_CELL_MS) * ROLLUP_CELL_MS;
-  const start = state.complete ? firstWhole : Math.max(firstWhole, maintainedFrom);
+  // Whole cells are only trusted from ROLLUP_MIN_MS on: before it some zones had offsets that are not multiples of 15
+  // minutes (Amsterdam 1937, Monrovia 1972), so a cell could straddle a local midnight. Those times use the raw rows.
+  const start = Math.max(ROLLUP_MIN_MS, state.complete ? firstWhole : Math.max(firstWhole, maintainedFrom));
   const end = Math.floor(to.getTime() / ROLLUP_CELL_MS) * ROLLUP_CELL_MS;
   return start < end ? { from: new Date(start), to: new Date(end) } : null;
 }

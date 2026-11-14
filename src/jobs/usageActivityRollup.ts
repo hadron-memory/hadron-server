@@ -2,12 +2,17 @@
  * usageActivityRollup — the one-time backfill and the read-only drift check for the usage-activity rollup
  * (#2719 slice 2; prisma/usage-activity-rollup-invariants.sql maintains it from then on).
  *
- * BACKFILL fills every cell BEFORE the state row's `applies_from` from usage_events, then flips `complete`. Each
- * chunk is a whole number of cells and is OVERWRITTEN (delete the span, insert the recount), never added to, so a
- * rerun, a resumed run or a crash between chunks cannot double count. The triggers ignore cells before
- * `applies_from`, so no live write touches the span being rewritten; an event inserted with a past `created_at`
- * while the backfill runs can be missed, which the drift check reports. Deploying the migration without running this
- * is correct: the reader answers those cells from usage_events. RUNNING IT ON PRODUCTION NEEDS ITS OWN GRANT.
+ * The triggers maintain EVERY cell from the moment the migration runs, so the backfill only has to make the cells
+ * before the state row's `applies_from` agree with usage_events once, then flip `complete` (which lets the reader use
+ * them). Each chunk is a whole number of cells and is OVERWRITTEN (delete the span, insert the recount), never added
+ * to, so a rerun, a resumed run or a crash between chunks cannot double count. A chunk runs in one transaction that
+ * first takes SHARE ROW EXCLUSIVE on usage_events (writers wait for it; reads do not), so the recount is a consistent
+ * snapshot, nothing else touches the span while it is rewritten, and two backfills running together take their chunks
+ * one after the other. A change to an already rebuilt span after its chunk committed is netted by the triggers like
+ * any write, including a backdated insert, a delete, a soft delete or a user merge. Each chunk re-reads the state row
+ * under lock and stops if the backfill is complete or the boundary moved. Deploying the migration without running this
+ * is correct: the reader answers those cells from usage_events. RUNNING IT ON PRODUCTION NEEDS ITS OWN GRANT, and it
+ * briefly holds off event writes once per chunk (one day of cells by default).
  *
  * DRIFT CHECK compares the rollup with a recount from usage_events over closed cells and reports every mismatch. It
  * never repairs: a reader of a drifted cell sees the rollup value, so this check is the control.
@@ -37,28 +42,37 @@ export interface BackfillResult {
 /** Fill every cell before `applies_from` and mark the rollup complete. See the file header for the guarantees. */
 export async function backfillUsageActivityRollup(
   db: PrismaClient,
-  options: { chunkCells?: number } = {},
+  options: { chunkCells?: number; /** Test hook: runs after each committed chunk. */ afterChunk?: (index: number) => Promise<void> } = {},
 ): Promise<BackfillResult> {
   const chunkMs = Math.max(1, Math.trunc(options.chunkCells ?? DEFAULT_CHUNK_CELLS)) * ROLLUP_CELL_MS;
   const [state] = await db.$queryRaw<Array<{ applies_from: Date; complete: boolean }>>`
     SELECT applies_from, complete FROM usage_activity_rollup_state WHERE id = 1`;
   if (!state) throw new Error('usage_activity_rollup_state has no row: the migration did not run');
   if (state.complete) return { alreadyComplete: true, chunks: 0, cellsWritten: 0 };
+  const boundary = naive(state.applies_from);
 
-  // The first cell the triggers maintain: applies_from rounded up to a cell edge (it is aligned unless set by hand).
+  // The first cell the reader will trust: applies_from rounded up to a cell edge (it is aligned unless set by hand).
   const end = Math.ceil(state.applies_from.getTime() / ROLLUP_CELL_MS) * ROLLUP_CELL_MS;
+  // The lowest cell that can need rewriting: the oldest live event, or an older stale cell (a trigger netted a delete of
+  // an event the rollup never counted, so the cell holds a negative count).
   const [{ first }] = await db.$queryRaw<Array<{ first: Date | null }>>`
-    SELECT MIN(created_at) AS first FROM usage_events
-    WHERE created_at < ${naive(new Date(end))}::timestamp AND type IN ('read', 'write') AND deleted_at IS NULL`;
+    SELECT LEAST(
+      (SELECT MIN(created_at) FROM usage_events
+        WHERE created_at < ${naive(new Date(end))}::timestamp AND type IN ('read', 'write') AND deleted_at IS NULL),
+      (SELECT MIN(cell) FROM usage_activity_cells WHERE cell < ${naive(new Date(end))}::timestamp)) AS first`;
   let chunks = 0;
   let cellsWritten = 0;
   if (first) {
     for (let start = floorCell(first.getTime()); start < end; start += chunkMs) {
       const a = naive(new Date(start));
       const b = naive(new Date(Math.min(start + chunkMs, end)));
-      const [, inserted] = await db.$transaction([
-        db.$executeRaw`DELETE FROM usage_activity_cells WHERE cell >= ${a}::timestamp AND cell < ${b}::timestamp`,
-        db.$executeRaw`
+      const inserted = await db.$transaction(async (tx) => {
+        await tx.$executeRaw`LOCK TABLE usage_events IN SHARE ROW EXCLUSIVE MODE`;
+        const [now] = await tx.$queryRaw<Array<{ complete: boolean; same: boolean }>>`
+          SELECT complete, applies_from = ${boundary}::timestamp AS same FROM usage_activity_rollup_state WHERE id = 1 FOR UPDATE`;
+        if (!now || now.complete || !now.same) return null;
+        await tx.$executeRaw`DELETE FROM usage_activity_cells WHERE cell >= ${a}::timestamp AND cell < ${b}::timestamp`;
+        return tx.$executeRaw`
           INSERT INTO usage_activity_cells (scope_kind, scope_id, cell, reads, writes)
           SELECT s.k, s.sid, hadron_usage_cell(e.created_at),
                  COUNT(*) FILTER (WHERE e.type = 'read'), COUNT(*) FILTER (WHERE e.type = 'write')
@@ -66,17 +80,24 @@ export async function backfillUsageActivityRollup(
           CROSS JOIN LATERAL (VALUES ('user', e.user_id), ('memory', e.memory_id)) AS s(k, sid)
           WHERE e.created_at >= ${a}::timestamp AND e.created_at < ${b}::timestamp
             AND e.type IN ('read', 'write') AND e.deleted_at IS NULL AND s.sid IS NOT NULL
-          GROUP BY 1, 2, 3`,
-      ]);
+          GROUP BY 1, 2, 3`;
+      }, { timeout: 600_000, maxWait: 600_000 });
+      if (inserted === null) break; // another run completed it, or the boundary moved: the guarded flip below decides
       chunks++;
       cellsWritten += inserted;
+      if (options.afterChunk) await options.afterChunk(chunks);
     }
   }
   // Guarded on the boundary the run read: a state row moved under us is not marked complete by a stale run.
   const done = await db.$executeRaw`
     UPDATE usage_activity_rollup_state SET complete = true
-    WHERE id = 1 AND NOT complete AND applies_from = ${naive(state.applies_from)}::timestamp`;
-  if (done !== 1) throw new Error('usage_activity_rollup_state changed during the backfill; rerun it');
+    WHERE id = 1 AND NOT complete AND applies_from = ${boundary}::timestamp`;
+  if (done !== 1) {
+    const [after] = await db.$queryRaw<Array<{ complete: boolean; same: boolean }>>`
+      SELECT complete, applies_from = ${boundary}::timestamp AS same FROM usage_activity_rollup_state WHERE id = 1`;
+    if (after?.complete && after.same) return { alreadyComplete: true, chunks, cellsWritten }; // a concurrent run finished it
+    throw new Error('usage_activity_rollup_state changed during the backfill; rerun it');
+  }
   return { alreadyComplete: false, chunks, cellsWritten };
 }
 

@@ -6,22 +6,25 @@
 -- A cell is (scope, 15-minute UTC cell): scope 'user' counts the events attributed to a user, scope 'memory' the events
 -- attributed to a memory (the event's OWN memory_id, cor:dmo:080:02). An event with both ids counts in both scopes; one
 -- with neither counts in none. Only live read/write events count, exactly the predicate getUsageActivity reads.
--- Every current IANA offset is a multiple of 15 minutes, so a cell never straddles a local day, week or month edge.
+-- The reader uses whole cells only for times from 1990 on, where every IANA offset is a multiple of 15 minutes, so a cell
+-- never straddles a local day, week or month edge; earlier times are answered from usage_events.
 --
--- usage_activity_rollup_state.applies_from is the first cell the triggers maintain. Until the backfill job sets
--- complete, cells before it are NOT in the rollup and the reader answers them from usage_events.
+-- The triggers maintain EVERY cell from the moment they exist, whatever the backfill has done. usage_activity_rollup_state
+-- only tells the READER where to trust the cells: applies_from is the first cell that is complete by construction, and
+-- until the backfill job sets complete, cells before it are answered from usage_events. The backfill rebuilds each span
+-- from usage_events under a write lock on that table, so a later change to an already rebuilt span is netted by these
+-- triggers like any other write.
 
 CREATE OR REPLACE FUNCTION hadron_usage_cell(ts timestamp) RETURNS timestamp
 LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
   SELECT date_trunc('hour', ts) + floor(extract(minute FROM ts) / 15)::int * interval '15 minutes'
 $$;
 
--- The first cell the triggers maintain: -infinity once the backfill completed, the stored boundary before that, and
--- NULL (the triggers do nothing, the reader never uses the rollup) when no state row exists.
+-- -infinity (the triggers maintain every cell) while a state row exists, NULL (the triggers do nothing, the reader never
+-- uses the rollup) when none does.
 CREATE OR REPLACE FUNCTION hadron_usage_rollup_floor() RETURNS timestamp
 LANGUAGE sql STABLE AS $$
-  SELECT CASE WHEN complete THEN '-infinity'::timestamp ELSE applies_from END
-  FROM usage_activity_rollup_state WHERE id = 1
+  SELECT '-infinity'::timestamp FROM usage_activity_rollup_state WHERE id = 1
 $$;
 
 CREATE OR REPLACE FUNCTION hadron_usage_rollup_after_insert() RETURNS trigger
@@ -29,8 +32,9 @@ LANGUAGE plpgsql AS $$
 DECLARE floor_cell timestamp := hadron_usage_rollup_floor();
 BEGIN
   IF floor_cell IS NULL THEN RETURN NULL; END IF;
-  -- One grouped upsert per statement, rows in key order so two concurrent statements take their row locks in the
-  -- same order and cannot deadlock.
+  -- One grouped upsert per statement, rows in key order, so the row locks of ONE statement are taken in key order. Two
+  -- single-statement writers therefore cannot deadlock on each other; a transaction that runs several statements can
+  -- still lock cells in opposite orders across statements, and a writer that needs that case reliable must retry.
   INSERT INTO usage_activity_cells (scope_kind, scope_id, cell, reads, writes)
   SELECT d.k, d.sid, d.cell, d.r, d.w FROM (
     SELECT s.k, s.sid, hadron_usage_cell(n.created_at) AS cell,

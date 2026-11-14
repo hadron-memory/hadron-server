@@ -9,7 +9,7 @@ import { Prisma } from '../generated/prisma/index.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
-import { getUsageActivity, ROLLUP_CELL_MS, type UsageActivityBucketSize, type UsageActivityScope } from './usageActivity.js';
+import { getUsageActivity, ROLLUP_CELL_MS, ROLLUP_MIN_MS, type UsageActivityBucketSize, type UsageActivityScope } from './usageActivity.js';
 import { backfillUsageActivityRollup, findUsageActivityRollupDrift } from '../jobs/usageActivityRollup.js';
 
 const naive = (d: Date) => d.toISOString().replace('Z', '');
@@ -234,21 +234,92 @@ describe('#2719 backfill and the watermark', () => {
     expect(await cellCount()).toBe(0);
   });
 
-  it('writes after the boundary are maintained, earlier ones are not, and a mixed window still equals the raw scan', async () => {
+  it('the triggers maintain cells on both sides of the boundary, and a mixed window still equals the raw scan', async () => {
     await setState(false, at(-10 * 1440));
     await seedMixed();
-    expect(await cellCount()).toBeGreaterThan(0);
-    // the boundary is a floor on what the triggers maintain: no cell older than it exists
     const [{ n }] = await db.$queryRaw<Array<{ n: bigint }>>`SELECT COUNT(*) AS n FROM usage_activity_cells WHERE cell < ${naive(new Date(Math.ceil(at(-10 * 1440).getTime() / 900_000) * 900_000))}::timestamp`;
-    expect(Number(n)).toBe(0);
+    expect(Number(n)).toBeGreaterThan(0); // maintained, but the reader does not trust them until complete
     const scope = { from: at(-46 * 1440), to: at(1), bucket: 'WEEK' as const, timeZone: 'UTC', memoryIds: [memX] };
     expect(await getUsageActivity(db, scope)).toEqual(await oracle(scope));
+  });
+
+  it('a change to an already rebuilt span before completion is not lost (delete, soft delete, move, backdated insert)', async () => {
+    await setState(false, at(1));
+    await seedMixed();
+    const ids = (await db.usageEvent.findMany({ where: { userId: alice.id, type: 'read' }, orderBy: { createdAt: 'asc' }, take: 6, select: { id: true } })).map((e) => e.id);
+    const result = await backfillUsageActivityRollup(db, {
+      chunkCells: 4,
+      afterChunk: async (i) => {
+        if (i !== 3) return; // the oldest chunks are committed now: change them behind the backfill
+        await db.usageEvent.delete({ where: { id: ids[0] } });
+        await db.usageEvent.update({ where: { id: ids[1] }, data: { deletedAt: new Date() } });
+        await db.usageEvent.update({ where: { id: ids[2] }, data: { userId: bob.id } });
+        await insert([{ userId: alice.id, memoryId: memX, createdAt: at(-44 * 1440) }]);
+      },
+    });
+    expect(result.chunks).toBeGreaterThan(5);
+    expect((await drift()).total).toBe(0);
+    const scope = { from: at(-46 * 1440), to: at(1), bucket: 'DAY' as const, timeZone: 'UTC', userId: alice.id };
+    expect(await getUsageActivity(db, scope)).toEqual(await oracle(scope));
+  });
+
+  it('two backfills at once end complete, agree with a recount and write no duplicate cell', async () => {
+    await setState(false, at(1));
+    await seedMixed();
+    const runs = await Promise.allSettled([backfillUsageActivityRollup(db, { chunkCells: 5 }), backfillUsageActivityRollup(db, { chunkCells: 5 })]);
+    expect(runs.map((r) => r.status)).toEqual(['fulfilled', 'fulfilled']);
+    expect((await drift()).total).toBe(0);
+    const [state] = await db.$queryRaw<Array<{ complete: boolean }>>`SELECT complete FROM usage_activity_rollup_state WHERE id = 1`;
+    expect(state.complete).toBe(true);
+  });
+
+  it('a backfill chunk waits for a writer that is mid-transaction, and the cells still equal a recount', async () => {
+    await setState(false, at(1));
+    await insert([{ userId: alice.id, memoryId: memX, createdAt: at(-3000) }]);
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let inserted!: () => void;
+    const writerIn = new Promise<void>((r) => { inserted = r; });
+    const writer = db.$transaction(async (tx) => {
+      await tx.usageEvent.create({ data: { id: generateId(), type: 'write', userId: alice.id, memoryId: memX, createdAt: at(-2990) } });
+      inserted();
+      await held;
+    });
+    await writerIn;
+    let finished = false;
+    const backfill = backfillUsageActivityRollup(db).then((r) => { finished = true; return r; });
+    await new Promise((r) => setTimeout(r, 600));
+    expect(finished).toBe(false); // the chunk is queued behind the writer's lock
+    release();
+    await writer;
+    expect((await backfill).alreadyComplete).toBe(false);
+    expect((await drift()).total).toBe(0);
+  });
+
+  it('a stale negative cell older than every event is rebuilt away', async () => {
+    await setState(false, at(1));
+    await db.$executeRaw`INSERT INTO usage_activity_cells (scope_kind, scope_id, cell, reads, writes) VALUES ('user', ${alice.id}, ${naive(new Date(Math.floor(T0 / 900_000) * 900_000 - 90 * 86_400_000))}::timestamp, -1, 0)`;
+    await insert([{ userId: alice.id, memoryId: memX, createdAt: at(-3000) }]);
+    await backfillUsageActivityRollup(db);
+    expect((await drift()).total).toBe(0);
+  });
+
+  it('a historical midnight with a non-quarter-hour offset answers from the raw rows', async () => {
+    // Africa/Monrovia was UTC-0:44:30 until 1972-01-07: local midnight falls inside a 15-minute cell
+    expect(Date.UTC(1971, 11, 31)).toBeLessThan(ROLLUP_MIN_MS);
+    const t = (m: number) => new Date(Date.UTC(1971, 11, 31, 0, 44, 0) + m * 1000);
+    await insert([{ userId: alice.id, memoryId: memX, createdAt: t(0) }, { userId: alice.id, memoryId: memX, createdAt: t(40) }, { userId: alice.id, memoryId: memX, createdAt: t(70) }]);
+    for (const bucket of ['DAY', 'WEEK', 'MONTH'] as const) {
+      const scope = { from: new Date(Date.UTC(1971, 11, 1)), to: new Date(Date.UTC(1972, 0, 3)), bucket, timeZone: 'Africa/Monrovia', userId: alice.id };
+      expect(await getUsageActivity(db, scope)).toEqual(await oracle(scope));
+    }
   });
 
   it('backfill fills history, is idempotent, repairs a planted bad cell, and flips complete', async () => {
     await setState(false, at(1)); // a deploy at T0+1min: later events are maintained, earlier history waits for the backfill
     await seedMixed();
-    await db.$executeRaw`INSERT INTO usage_activity_cells (scope_kind, scope_id, cell, reads, writes) VALUES ('user', ${alice.id}, ${naive(new Date(Math.floor(T0 / 900_000) * 900_000 - 86_400_000))}::timestamp, -3, 9)`;
+    await db.$executeRaw`INSERT INTO usage_activity_cells (scope_kind, scope_id, cell, reads, writes) VALUES ('user', ${alice.id}, ${naive(new Date(Math.floor(T0 / 900_000) * 900_000 - 86_400_000))}::timestamp, -3, 9)
+      ON CONFLICT (scope_kind, scope_id, cell) DO UPDATE SET reads = -3, writes = 9`;
     const first = await backfillUsageActivityRollup(db, { chunkCells: 7 });
     expect(first.alreadyComplete).toBe(false);
     expect(first.chunks).toBeGreaterThan(5);
