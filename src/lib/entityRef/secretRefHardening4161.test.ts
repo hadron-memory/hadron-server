@@ -6,12 +6,19 @@
  *  4. Org-owned App, org READER: not-found on read, update and delete; a seeded event makes the secretEvents pin differential.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as urn from '../urn.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { parseSecretUrn, resolveSecretRef, type ParsedSecretUrn } from './secretRef.js';
 import { SecretNotFoundError } from './errors.js';
+
+// Passthrough wrapper so one test can make the library's atom check fault; every other test sees the real function.
+vi.mock('../urn.js', async (orig) => {
+  const actual = await orig<typeof import('../urn.js')>();
+  return { ...actual, validateAtomShape: vi.fn(actual.validateAtomShape) };
+});
 
 const ROOT = 's4161.test';
 let ownerId: string;
@@ -33,7 +40,11 @@ beforeEach(async () => {
   appId = (await mkApp('ops')).id;
   appSecretId = (await mkAppSecret(appId, 'key')).id;
 });
-afterEach(() => vi.restoreAllMocks());
+const savedKey = process.env.HADRON_ENCRYPTION_KEY;
+afterEach(() => {
+  vi.restoreAllMocks();
+  if (savedKey === undefined) delete process.env.HADRON_ENCRYPTION_KEY; else process.env.HADRON_ENCRYPTION_KEY = savedKey;
+});
 
 describe('item 1: ParsedSecretUrn is a discriminated union', () => {
   it('each arm carries its own kind and none of the other arm\'s fields', () => {
@@ -49,11 +60,18 @@ describe('item 1: ParsedSecretUrn is a discriminated union', () => {
     const b: ParsedSecretUrn = { kind: 'app', root: 'r', name: 'n' };
     // @ts-expect-error an app-arm value cannot carry a rootType
     const c: ParsedSecretUrn = { kind: 'app', root: 'r', name: 'n', appSlug: 's', rootType: 'user' };
-    expect([a, b, c]).toHaveLength(3);
+    void [a, b, c]; // compile-time only: `tsc --noEmit` (CI) fails if any @ts-expect-error above stops being an error
   });
 });
 
 describe('item 2: the App slug is atom-checked at parse (C1: lenient, never strict)', () => {
+  it('only the library\'s validation refusal is masked: any other error from the atom check propagates', () => {
+    vi.mocked(urn.validateAtomShape).mockImplementationOnce(() => { throw new TypeError('library fault'); });
+    expect(() => parseSecretUrn(`hrn:secret:${ROOT}:app:ops:key`)).toThrow(TypeError);
+    // and the real refusal is still the masked one
+    expect(() => parseSecretUrn(`hrn:secret:${ROOT}:app:-lead:key`)).toThrow(SecretNotFoundError);
+  });
+
   it('a slug that fails atom shape is refused at parse with SecretNotFoundError, before any database read', async () => {
     const spy = vi.spyOn(db.app, 'findMany');
     const spyFirst = vi.spyOn(db.app, 'findFirst');

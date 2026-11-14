@@ -32,7 +32,7 @@
  */
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { isId as isIdFunc } from './shape.js';
-import { assertFullyQualifiedUrn, validateAtomShape } from '../urn.js';
+import { assertFullyQualifiedUrn, validateAtomShape, UrnParseError } from '../urn.js';
 import {
   SecretNotFoundError,
   AppNotFoundError,
@@ -47,7 +47,8 @@ import { SECRET_NAME_RE, type SecretOwnerType } from '../secrets.js';
 
 /**
  * A parsed secret URN, discriminated on `kind` (#4161) so a field of one arm cannot be half-set on the other.
- * The `kind` names urn-lib-js's `ParsedSecretUrnV2.ownerKind` split (`root` / `app`) in the server's own words.
+ * `principal` (not the library's `root`) because this arm covers a user or org owner whose root is resolved by pool lookup;
+ * the other arm is `app`, as in urn-lib-js's `ParsedSecretUrnV2.ownerKind`.
  */
 export type ParsedSecretUrn =
   | {
@@ -105,7 +106,11 @@ export function parseSecretUrn(ref: string): ParsedSecretUrn {
     // `validateUserSlug`: an uppercase pre-#575 slug, or one reached through the stored alias map, must keep resolving
     // (cor:urn:010:02). It refuses what no App can be named, before any database read, with the same not-found answer
     // the lookup would have given. A legacy secret name outside `SECRET_NAME_RE` is not addressable by App URN (by id only).
-    try { validateAtomShape(appSlug, appSlug); } catch { throw new SecretNotFoundError(ref); }
+    // Narrow catch: only the library's own validation refusal is masked; any other error is a code fault and propagates.
+    try { validateAtomShape(appSlug, appSlug); } catch (err) {
+      if (err instanceof UrnParseError) throw new SecretNotFoundError(ref);
+      throw err;
+    }
     return { kind: 'app', root: appRoot, appSlug, name: appName };
   }
   // Org/user-owned: exactly `<root>:<name>`.
