@@ -54,13 +54,18 @@ export async function revealWithReadClient(ctx: Context, clientId: string): Prom
     ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
   ];
   const actor = secretActorOf(ctx);
-  return withAuthorizedTx(ctx, anchors, async () => undefined, async (tx, txCtx) => {
+  // A refused read on the holder's own client is recorded (cor:sec:060:02, cor:sec:010:05). The refusal rolls its transaction back,
+  // so the record is written afterwards in its own, and only once the holder check has passed: a stranger leaves no trace.
+  let known: { ownerId: string; secretId: string; secretName: string } | null = null;
+  try {
+  return await withAuthorizedTx(ctx, anchors, async () => undefined, async (tx, txCtx) => {
     // Lock order: secret row, then grant row (the same as issuing and deleting).
     const secretLocked = await lockSecretRow(tx, pre.secretId);
     const client = await tx.secretReadClient.findUnique({ where: { id: clientId } });
     if (!client) throw notFound();
     const grant = await tx.grant.findUnique({ where: { id: client.grantId }, select: { workerId: true, action: true, appId: true } });
     if (!grant || grant.action !== 'secret.reveal' || grant.workerId !== workerId || grant.appId !== client.appId) throw notFound();
+    known = { ownerId: client.appId, secretId: client.secretId, secretName: client.secretName };
     if (!secretLocked || client.endedAt) throw refusal('SECRET_DELETED', 'The secret this client read has been deleted.');
     const secret = await tx.secret.findUnique({ where: { id: client.secretId }, select: { id: true, name: true, kind: true, ownerId: true, ownerType: true } });
     if (!secret || secret.ownerType !== 'app' || secret.ownerId !== client.appId) throw refusal('SECRET_DELETED', 'The secret this client read has been deleted.');
@@ -94,4 +99,12 @@ export async function revealWithReadClient(ctx: Context, clientId: string): Prom
     const after = await tx.grant.findUniqueOrThrow({ where: { id: client.grantId }, select: { maxUses: true, useCount: true } });
     return { value: JSON.stringify(value), secretName: secret.name, readsLeft: after.maxUses === null ? null : after.maxUses - after.useCount };
   });
+  } catch (e) {
+    const code = e instanceof GraphQLError ? String(e.extensions?.code ?? '') : '';
+    const k = known as { ownerId: string; secretId: string; secretName: string } | null;
+    if (k && code && code !== SECRET_READ_CLIENT_NOT_FOUND) {
+      await recordSecretEvent(ctx.db as never, { ...k, kind: 'REVEAL', outcome: code, actor }).catch(() => undefined);
+    }
+    throw e;
+  }
 }

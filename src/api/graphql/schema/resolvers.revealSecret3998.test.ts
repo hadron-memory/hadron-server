@@ -40,6 +40,10 @@ beforeEach(async () => {
 describe('#3998 revealSecret', () => {
   it('a pending grant reveals nothing', async () => {
     expect(await code(reveal(workerId))).toBe('SECRET_READ_CLIENT_PENDING');
+    // The holder's refused read is recorded; a stranger's leaves nothing.
+    expect(await db.secretEvent.count({ where: { secretId, kind: 'REVEAL', outcome: 'SECRET_READ_CLIENT_PENDING' } })).toBe(1);
+    await code(reveal(otherWorkerId));
+    expect(await db.secretEvent.count({ where: { secretId, kind: 'REVEAL' } })).toBe(1);
   });
 
   it('the bound holder reads: one use and one USE event each, the budget ends it SPENT', async () => {
