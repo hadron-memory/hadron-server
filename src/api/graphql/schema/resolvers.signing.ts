@@ -199,7 +199,7 @@ function loadSignatureStatus(ctx: Context, nodeId: string): Promise<NodeSignatur
 }
 
 /** Parent Node gates/projections are unchanged; filter effective expiry in SQL before taking the page. */
-async function loadSigningRequestsPage(n: { id: string }, args: ListPageArgs & { state?: string | null }, ctx: Context) {
+function signingRequestsWindow(n: { id: string }, args: ListPageArgs & { state?: string | null }) {
   const state = args.state?.toLowerCase();
   const scope = `signingRequests:${n.id}:${state ?? ''}`;
   const window = listPageArgs(args, scope, 'createdAt-desc-id-desc');
@@ -212,6 +212,11 @@ async function loadSigningRequestsPage(n: { id: string }, args: ListPageArgs & {
     { createdAt: { lt: new Date(window.after.createdAt!) } },
     { createdAt: new Date(window.after.createdAt!), id: { lt: window.after.id } },
   ] } : {};
+  return { window, where, boundary };
+}
+
+async function loadSigningRequestsPage(n: { id: string }, args: ListPageArgs & { state?: string | null }, ctx: Context) {
+  const { window, where, boundary } = signingRequestsWindow(n, args);
   // The page and the unbounded-by-cursor total share one read snapshot and effective-state instant.
   const { rows, total } = await ctx.db.$transaction(async tx => ({
     rows: await tx.signingRequest.findMany({ where: { AND: [where, boundary] }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], skip: window.offset, take: window.take + 1 }),
@@ -228,11 +233,12 @@ export const signingFieldResolvers = {
   Node: {
     /** #1632 / cor:dmo:130:06 — the node's signatures and their derived states. */
     signatureStatus: (n: { id: string }, _: unknown, ctx: Context) => loadSignatureStatus(ctx, n.id),
-    /** #1632 — the node's signing requests, newest first; the same readers as its signatures (#10019). */
     signingRequestsPage,
+    /** #1632 — the node's signing requests, newest first; the same readers as its signatures (#10019). */
     signingRequests: async (n: { id: string }, { state, first }: { state?: string | null; first?: number | null }, ctx: Context) => {
-      const { rows, window } = await loadSigningRequestsPage(n, { state, first }, ctx);
-      return rows.slice(0, window.take);
+      const { where, window } = signingRequestsWindow(n, { state, first });
+      // The legacy array has no total: one bounded read, no transaction or discarded count per parent.
+      return ctx.db.signingRequest.findMany({ where, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: window.take });
     },
   },
   SigningRequest: {
