@@ -67,6 +67,22 @@ describe('#4106 createEdge / updateEdge', () => {
       expect(await edges()).toBe(0);
     });
   }
+  it('a valid JSONLogic condition holding a NUL or lone-surrogate literal is refused typed (create and update), a clean literal stores', async () => {
+    const cond = (s: string) => ({ '==': [{ var: 'memory.x' }, s] });
+    await refused(create({ condition: cond(nul) }), 'condition');
+    await refused(create({ condition: cond(lone) }), 'condition');
+    expect(await edges()).toBe(0);
+    const e = await create({ name: 'okc', condition: cond('fine') });
+    await refused(M.updateEdge({}, { edgeRef: e.id, condition: cond(nul) }, ctx(admin.id)), 'condition');
+    const text = await mcp().callToolText('hadron_update_edge', { edgeRef: e.id, condition: cond(nul) });
+    shape(text, 'condition');
+  });
+  it('searchReplaceInNodes refuses a lone-surrogate oldText typed and leaves the node untouched', async () => {
+    await M.updateNode({}, { input: { id: n1.id, content: 'a😀b', expectedRevision: undefined } }, ctx(admin.id)).catch(() => undefined);
+    const before = await db.node.findUniqueOrThrow({ where: { id: n1.id } });
+    await refused(M.searchReplaceInNodes({}, { input: { oldText: '\ud83d', newText: 'X', memoryIds: [memory.id], fields: ['content'], dryRun: false } }, ctx(admin.id)), 'oldText');
+    expect((await db.node.findUniqueOrThrow({ where: { id: n1.id } })).content).toBe(before.content);
+  });
   it('condition already refuses with its own typed code, never a server fault (existing behaviour)', async () => {
     for (const patch of [{ condition: { k: nul } }]) {
       const e: any = await create(patch).catch((x: any) => x);

@@ -3146,7 +3146,7 @@ export const nodeMutations = {
       };
       // #4096: `newText` is caller text written through `tx.node.update`, outside the node writer. Refused typed after
       // selection and write authorization, before any write (a dry run is refused too, so its preview never promises a write that fails).
-      assertStorableText({ newText });
+      assertStorableText({ newText, oldText }); // #4106: a lone-surrogate oldText splits a stored pair into unstorable derived text
       // A dry run writes nothing, but still makes the manager's deciding
       // gate under the same authority as the write branch.
       if (dryRun) {
@@ -3748,7 +3748,7 @@ export const nodeMutations = {
       // #4106: caller text a NUL or lone surrogate would make Postgres reject (22021 / 22P05 in jsonb) is refused typed,
       // after the gates above and before the loc derives from `name` or anything is written. `loc` and `condition`
       // already refuse with their own typed codes.
-      assertStorableText({ name, loc, description, data });
+      assertStorableText({ name, loc, description, data, condition });
       const edgeLoc = loc != null && loc !== '' ? loc : deriveEdgeLoc(src.loc, name ?? null, tgt.loc);
       try {
         validateLoc(edgeLoc);
@@ -3934,7 +3934,7 @@ export const nodeMutations = {
         });
       }
       await requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, edgeMem.memoryId);
-      assertStorableText({ name, description, data }); // #4106: after the gates, before any write
+      assertStorableText({ name, description, data, condition }); // #4106: after the gates, before any write
       const updatedEdge = await ctx.db.$transaction(async (tx) => {
         await lockInstallAuthoritiesFirst(tx, ctx, [edgeMem.memoryId]);
         await tx.$queryRaw`SELECT id FROM memories WHERE id = ${edgeMem.memoryId} FOR SHARE`;
