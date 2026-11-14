@@ -910,3 +910,6 @@ CREATE INDEX IF NOT EXISTS "agent_team_events_pr_frozen_head_idx"
 -- #3649 slice B: grant signing requests, append-only grant signature records, the grant stale trigger. One source, shared
 -- verbatim with migration 20261109200000_grant_signing (after grant-invariants.sql: the tables it guards reference grants).
 \ir grant-signing-invariants.sql
+
+-- #3998 (S3 of #3991): secret read clients (after grants and secrets exist). Verbatim with migration 20261114140000_secret_read_clients.
+\ir secret-read-clients-invariants.sql

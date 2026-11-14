@@ -3519,6 +3519,7 @@ model App {
   automationTeamSnapshotGrantEvents AppAutomationTeamSnapshotGrantEvent[]
   /// #3668 — grants issued in this App, the grants THIS App holds, and the grant events.
   grants                  Grant[]      @relation("GrantApp")
+  secretReadClients       SecretReadClient[]
   grantEvents             GrantEvent[]
   /// #1706 — model-family availability (cor:agt:060:03) and the stall schedule.
   modelFamilyAvailability ModelFamilyAvailability[]
@@ -7728,6 +7729,7 @@ model Grant {
   signature   GrantSignature? @relation("GrantActivation", fields: [signatureId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   signingRequests GrantSigningRequest[]
   signatures      GrantSignature[] @relation("GrantSignatures")
+  secretReadClient SecretReadClient?
 
   @@index([appId, createdAt])
   @@index([userId])
@@ -7736,6 +7738,36 @@ model Grant {
   @@index([granteeAppId])
   @@index([action])
   @@map("grants")
+}
+
+/// #3998 (S3 of #3991) — the ASSOCIATION between one grant and one App secret: which secret a `secret.reveal` grant reads.
+/// It carries NO window, budget, mark or counter (plan R1): the grant row is the counter and the judge, and every one of
+/// those is read from it. The id is 128 bits of randomness (base64url), the handle the holder presents. `secretId` is
+/// sealed, with no foreign key, so a deleted secret's id never reaches a new secret of the same name (R2); the only end
+/// this row stores is one the grant cannot express (`SECRET_DELETED`, and `PROTECTED` from S4), set once by a trigger or
+/// the protection ceremony (prisma/secret-read-clients-invariants.sql). Cascades only with its grant.
+model SecretReadClient {
+  id           String    @id
+  grantId      String    @unique @map("grant_id")
+  appId        String    @map("app_id")
+  secretId     String    @map("secret_id")
+  /// The secret's name when the client was issued: display only, never a lookup key.
+  secretName   String    @map("secret_name")
+  /// The issuing person, sealed (no FK; erasure keeps the history). The grant's own issuer link is nulled on erasure.
+  issuerUserId String?   @map("issuer_user_id")
+  /// The grant's issuer is its person holder. Stored once so S4's protection change and read check can query it.
+  selfIssued   Boolean   @map("self_issued")
+  /// SECRET_DELETED | PROTECTED, set together with `endedAt`, once.
+  endReason    String?   @map("end_reason")
+  endedAt      DateTime? @map("ended_at")
+  createdAt    DateTime  @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("created_at")
+
+  grant Grant @relation(fields: [grantId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  app   App   @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@index([appId, secretId])
+  @@index([issuerUserId])
+  @@map("secret_read_clients")
 }
 
 /// #3649 slice B (cor:acl:140:07; the node-signing mirror cor:dmo:130:03) — a request for a person to sign ONE grant (gate
