@@ -12,7 +12,7 @@ import { parseUrnV2 } from '@hadron-memory/urn-lib-js';
 import type { ActionParameter } from './actions.js';
 
 export type GrantSummaryReason =
-  | 'MISSING_VALUE' | 'UNSUPPORTED_TYPE' | 'WILDCARD' | 'LIST' | 'UNKNOWN_PLACEHOLDER' | 'MALFORMED_TEMPLATE' | 'NOT_CANONICAL';
+  | 'MISSING_VALUE' | 'UNSUPPORTED_TYPE' | 'WILDCARD' | 'UNKNOWN_PLACEHOLDER' | 'MALFORMED_TEMPLATE' | 'NOT_CANONICAL';
 
 /** The summary cannot be written. The message names a placeholder, never a value. Nothing is ever printed in its place. */
 export class GrantSummaryError extends Error {
@@ -28,7 +28,7 @@ export interface SummaryInput {
   action: SummaryAction;
   /** The grant's App, by its canonical URN. */
   app: { urn: string };
-  /** The grant's values, by parameter name. A `node-ref` value is the key into `refs`. */
+  /** The grant's values, by parameter name. A `node-ref` value, and each entry of a list of them, is the key into `refs`. */
   values: Readonly<Record<string, unknown>>;
   /** Each stored `node-ref` value resolved to its node's canonical URN. */
   refs: Readonly<Record<string, { urn: string }>>;
@@ -82,13 +82,22 @@ export function renderGrantSummary(input: SummaryInput, fmt: SummaryFormatters =
     if (!param) throw new GrantSummaryError('UNKNOWN_PLACEHOLDER', `summary placeholder {${name}} is not a parameter of the action`);
     const value = values[name];
     if (value === undefined || value === null || value === '') throw new GrantSummaryError('MISSING_VALUE', `summary placeholder {${name}} has no value`);
-    if (Array.isArray(value)) throw new GrantSummaryError('LIST', `summary placeholder {${name}} has a list value`);
-    if (value === '*' || typeof value === 'object') throw new GrantSummaryError('WILDCARD', `summary placeholder {${name}} has a wildcard or structured value`);
-    if (param.type !== 'node-ref') throw new GrantSummaryError('UNSUPPORTED_TYPE', `summary placeholder {${name}} has a parameter type the summary cannot write`);
-    if (typeof value !== 'string') throw new GrantSummaryError('UNSUPPORTED_TYPE', `summary placeholder {${name}} has a value of a type the summary cannot write`);
-    const ref = Object.prototype.hasOwnProperty.call(refs, value) ? refs[value] : undefined;
-    if (!ref) throw new GrantSummaryError('MISSING_VALUE', `summary placeholder {${name}} has no resolved node`);
-    resolved.set(name, fmt['node-ref'](ref.urn, name));
+    // A list (an action that names several things, such as the boot prompts of a batch grant) is written as each entry's URN, in
+    // the stored order, separated by ", ". Every entry is judged exactly as a single value is, so one entry the summary cannot
+    // write refuses the whole sentence. An empty list has no value.
+    const entries: unknown[] = Array.isArray(value) ? value : [value];
+    if (entries.length === 0) throw new GrantSummaryError('MISSING_VALUE', `summary placeholder {${name}} has no value`);
+    const written: string[] = [];
+    for (const entry of entries) {
+      if (entry === undefined || entry === null || entry === '') throw new GrantSummaryError('MISSING_VALUE', `summary placeholder {${name}} has no value`);
+      if (entry === '*' || typeof entry === 'object') throw new GrantSummaryError('WILDCARD', `summary placeholder {${name}} has a wildcard or structured value`);
+      if (param.type !== 'node-ref') throw new GrantSummaryError('UNSUPPORTED_TYPE', `summary placeholder {${name}} has a parameter type the summary cannot write`);
+      if (typeof entry !== 'string') throw new GrantSummaryError('UNSUPPORTED_TYPE', `summary placeholder {${name}} has a value of a type the summary cannot write`);
+      const ref = Object.prototype.hasOwnProperty.call(refs, entry) ? refs[entry] : undefined;
+      if (!ref) throw new GrantSummaryError('MISSING_VALUE', `summary placeholder {${name}} has no resolved node`);
+      written.push(fmt['node-ref'](ref.urn, name));
+    }
+    resolved.set(name, written.join(', '));
   }
   // One pass: String.replace never re-reads what it inserted, so a value that looks like a placeholder is printed once, literally.
   return action.summaryTemplate.replace(TOKEN, (_whole, name: string) => resolved.get(name)!);

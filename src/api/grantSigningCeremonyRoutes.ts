@@ -114,9 +114,10 @@ function render(out){
  what.appendChild(dl);view.appendChild(what);
  const why=el('section');why.appendChild(el('h2','The requester\\'s reason'));
  why.appendChild(el('p','In their own words. Hadron did not write or check this text.'));
- why.appendChild(el('blockquote',v.requesterReason));view.appendChild(why);
+ why.appendChild(el('blockquote',v.requesterReason));
+ why.appendChild(el('p','Written by '+(v.reasonAuthor.name||'a deleted user')+(v.reasonAuthor.via?' via '+v.reasonAuthor.via:'')+', who asked for this grant.'));view.appendChild(why);
  const meta=el('section');meta.appendChild(el('h2','This request'));
- meta.appendChild(el('p','Requested by '+v.requester.name+(v.requester.via?' via '+v.requester.via:'')+'.'));
+ meta.appendChild(el('p','Signature requested by '+v.requester.name+(v.requester.via?' via '+v.requester.via:'')+'.'));
  meta.appendChild(el('p','Expires '+stamp(new Date(v.requestExpiresAt))+'.'));
  meta.appendChild(el('p','Signing makes this grant active, and makes you its issuer.'));
  view.appendChild(meta);

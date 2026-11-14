@@ -210,6 +210,38 @@ describe('C9 + C5: the proof shows the server-built terms only to someone who ma
     expect(p.json.signing.challenge).toMatch(/^[A-Za-z0-9_-]{43}$/);
   });
 
+  // The reason is the words of whoever asked for the GRANT. The account that later asks for its signature (a manager, from the
+  // grants list) is a different one, and the page must not name it as the author of the reason.
+  it('the reason is attributed to who asked for the grant, not to who asked for the signature', async () => {
+    const author = await db.user.create({ data: { handle: 'gs-reason-author', roles: [] } });
+    const g = generateId();
+    await db.$executeRawUnsafe(`INSERT INTO grants (id, app_id, worker_id, requested_by_user_id, requested_by_worker_id, action, action_values, reason, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $3, 'schedule.create', $5::jsonb, $6, (clock_timestamp() AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC'))`,
+    g, appId, workerId, author.id, JSON.stringify({ entryNode: entryNodeId }), REASON);
+    const p = await prove((await openRequest(g)).id, admin);
+    expect(p.json.outcome).toBe('open');
+    expect(p.json.view.requesterReason).toBe(REASON);
+    expect(p.json.view.reasonAuthor).toEqual({ name: 'gs-reason-author', via: 'gs-worker' });
+    expect(p.json.view.requester).toEqual({ name: 'gs-requester', via: null });
+  });
+
+  it('a grant with no requester link (an erased requester) names no author', async () => {
+    const p = await prove((await openRequest(await insertGrant())).id, admin);
+    expect(p.json.view.reasonAuthor).toEqual({ name: null, via: null });
+  });
+
+  it('a grant naming several nodes shows each as its URN and may be signed', async () => {
+    const second = await createDbNode(db, { loc: 'flows:weekly', memoryId, name: 'Weekly', content: 'x' });
+    const g = generateId();
+    await db.$executeRawUnsafe(`INSERT INTO grants (id, app_id, worker_id, action, action_values, reason, created_at, updated_at)
+      VALUES ($1, $2, $3, 'schedule.create', $4::jsonb, $5, (clock_timestamp() AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC'))`,
+    g, appId, workerId, JSON.stringify({ entryNode: [entryNodeId, second.id] }), REASON);
+    const p = await prove((await openRequest(g)).id, admin);
+    expect(p.json.outcome).toBe('open');
+    expect(p.json.canSign).toBe(true);
+    expect(p.json.view.summary).toBe(`Create a schedule in ${appUrn} that starts at the entry node ${entryNodeUrn}, ${entryNodeUrn.replace(/nightly$/, 'weekly')}`);
+  });
+
   // Rodolfo §10 P3-1 (#3805): the proof's data-exposure guards. A grant naming a node the prover cannot read shows no summary,
   // offers no signing, names no URN of that node, and mints no GRANT_SIGN ceremony.
   async function grantOnUnreadableNode(): Promise<{ grantId: string; nodeId: string; nodeUrnPart: string }> {

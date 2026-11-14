@@ -17,7 +17,7 @@ import { PLATFORM_ACTIONS, upsertPlatformActions, type ActionDefinition } from '
 
 const act = (name: string, over: Partial<ActionDefinition> = {}): ActionDefinition => ({
   name, source: 'PLATFORM', parameters: [{ name: 'entryNode', type: 'node-ref', refusesWildcard: true }], tool: null,
-  enforcement: 'SERVER', issuerRule: 'TEST_ONLY', summaryTemplate: 'Create a thing in {app}', ...over,
+  enforcement: 'SERVER', issuerRule: 'TEST_ONLY', summaryTemplate: 'Create a thing in {app} at {entryNode}', ...over,
 });
 type Row = { name: string; xmin: string; updated_at: Date; summary_template: string };
 const rows = () => db.$queryRawUnsafe<Row[]>(`SELECT name, xmin::text AS xmin, updated_at, summary_template FROM actions WHERE name LIKE 'test.s1a.%' ORDER BY name`);
@@ -49,9 +49,9 @@ describe('upsertPlatformActions is idempotent and never deletes', () => {
     await upsertPlatformActions(db, [act('test.s1a.one'), act('test.s1a.two')]);
     const first = await rows();
     await new Promise((r) => setTimeout(r, 25));
-    expect(await upsertPlatformActions(db, [act('test.s1a.one', { summaryTemplate: 'Changed' }), act('test.s1a.two')])).toEqual({ inserted: 0, updated: 1, unchanged: 1 });
+    expect(await upsertPlatformActions(db, [act('test.s1a.one', { summaryTemplate: 'Changed {entryNode}' }), act('test.s1a.two')])).toEqual({ inserted: 0, updated: 1, unchanged: 1 });
     const after = await rows();
-    expect(after[0].summary_template).toBe('Changed');
+    expect(after[0].summary_template).toBe('Changed {entryNode}');
     expect(after[0].updated_at.getTime()).toBeGreaterThan(first[0].updated_at.getTime());
     expect(after[1]).toEqual(first[1]);
   });
