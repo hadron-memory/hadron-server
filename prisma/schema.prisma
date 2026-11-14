@@ -335,6 +335,7 @@ enum AssetScanStatus {
 /// "create account" request would push the chain over quota, the
 /// account is still created (don't block a real human on a counter).
 model User {
+  secretChangeRequests SecretChangeRequest[]
   id               String            @id @default(cuid())
   /// Unique username, e.g. "holger"; displayed as `@holger` in UI and node
   /// frontmatter `author` field, and the owner namespace of a user-owned
@@ -3222,6 +3223,7 @@ model Secret {
   createdByWorkerId  String? @map("created_by_worker_id")
   createdBySessionId String? @map("created_by_session_id")
   /// Only meaningful for App rows (`chk_secret_protected_app_only`); the protection ceremony is S4.
+  changeRevision Int @default(0) @map("change_revision")
   protected      Boolean  @default(false)
   versions       SecretVersion[]
 
@@ -3338,6 +3340,7 @@ model WaitingListItem {
 /// survives an AppMember removal) is independent — it's a row delete
 /// in `app_members`, not in `apps`.
 model App {
+  secretChangeRequests SecretChangeRequest[]
   id                                String               @id @default(cuid())
   secretAppKeys                     SecretAppKey[]
   /// Display name.
@@ -7850,4 +7853,30 @@ model Action {
   grants Grant[]
 
   @@map("actions")
+}
+
+/// #3999: a person's immutable proposed change. Ciphertext is never a read-surface field.
+model SecretChangeRequest {
+  id String @id
+  appId String @map("app_id")
+  secretId String? @map("secret_id")
+  secretName String @map("secret_name")
+  secretKind String @map("secret_kind")
+  metadata Json
+  operation String
+  requesterId String @map("requester_id")
+  state String @default("open")
+  snapshot String
+  stagedValueEncrypted String? @map("staged_value_encrypted")
+  keyVersion Int? @map("key_version")
+  sizeBytes Int? @map("size_bytes")
+  protectedResult Boolean? @map("protected_result")
+  writeVersion Boolean @default(true) @map("write_version")
+  createdAt DateTime @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("created_at") @db.Timestamp(3)
+  expiresAt DateTime @map("expires_at") @db.Timestamp(3)
+  endedAt DateTime? @map("ended_at") @db.Timestamp(3)
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+  requester User @relation(fields: [requesterId], references: [id], onDelete: Cascade)
+  @@index([appId, secretName, state], map: "secret_change_requests_secret_open")
+  @@map("secret_change_requests")
 }

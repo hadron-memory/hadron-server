@@ -6346,6 +6346,20 @@ export const typeDefs = `#graphql
     inputSchema: JSON
   }
 
+  """Requester-only state, never the value or ciphertext. hrn:node:hadronmemory.com:specs:cor:sec:070:02"""
+  type SecretChangeRequest {
+    """The change request id."""
+    id: ID!
+    """The effective state, with expiry judged on the server clock."""
+    state: String!
+    """The requested operation."""
+    operation: String!
+    """Creation time."""
+    createdAt: String!
+    """Expiry time."""
+    expiresAt: String!
+  }
+
   """
   One named, owner-scoped secret — the general secret store (#677).
   Polymorphic owner (user | org | app). The value is encrypted at rest and
@@ -10126,6 +10140,8 @@ export const typeDefs = `#graphql
     """
     mcpServerTools(ref: ID!): [McpServerTool!]
 
+    """Your own change request; null for every other caller. hrn:node:hadronmemory.com:specs:cor:sec:070:02"""
+    secretChangeRequest(id: ID!): SecretChangeRequest
     """
     Fetch one secret's inspectable half (never the value). Null when the
     row does not exist OR the caller is not entitled to its owner scope —
@@ -13799,6 +13815,7 @@ export const typeDefs = `#graphql
       name: String!
       kind: String!
       metadata: JSON
+      protected: Boolean
       value: JSON!
     ): Secret!
 
@@ -13810,7 +13827,12 @@ export const typeDefs = `#graphql
     the cascade and flow config reference the name; create a new name
     instead. The effective (metadata, value) pair is re-validated per kind.
     """
-    updateSecret(ref: ID!, metadata: JSON, value: JSON): Secret!
+    updateSecret(ref: ID!, metadata: JSON, value: JSON, protected: Boolean): Secret!
+    """Open a protection change for your own passkey ceremony. hrn:node:hadronmemory.com:specs:cor:sec:070:02"""
+    setSecretProtected(ref: ID!, protected: Boolean!): Secret!
+    """Withdraw your own open change request and clear its staged value. hrn:node:hadronmemory.com:specs:cor:sec:070:02"""
+    withdrawSecretChangeRequest(id: ID!): Boolean!
+
 
     "Hard-delete a secret, every version with it; referencing runs fail their resolution loud (or fall through the cascade) afterwards. An unprotected App secret is deleted by its creator or whoever manages the App, each as a person."
     deleteSecret(ref: ID!): Boolean!

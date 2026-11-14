@@ -22,7 +22,6 @@ import { GraphQLError } from 'graphql';
 import { pageArgs, pageEnvelope, type Context } from './resolvers.helpers.js';
 import {
   clampListTake,
-  isAppParticipant,
   isOrgMemberOrAdmin,
   requireOrgRole,
 } from './resolvers.helpers.js';
@@ -43,8 +42,6 @@ import {
 import { forbiddenError } from '../../../lib/refusals.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
-import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
-import { managesApp } from '../../../lib/auth/appManagement.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AmbiguousLegacyUrnError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { admitOperationRate } from '../../../lib/rateLimit/index.js';
@@ -57,6 +54,7 @@ import {
   recordSecretEvent,
   secretActorOf,
 } from '../../../lib/secrets/appSecrets.js';
+import { stageSecretChange, changeSnapshot, needsPasskey, deliverStaged } from '../../../lib/secrets/changeRequests.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 
 function badInput(message: string): GraphQLError {
@@ -134,51 +132,7 @@ function unknownOwnerType(_ownerType: never): never {
   throw forbiddenError();
 }
 
-type AppSecretRow = { id: string; organizationId: string | null; ownerUserId: string | null };
-
-/** The App when it is live (not deleted, not uninstalled); null otherwise. */
-async function loadLiveApp(ctx: Context, appId: string): Promise<AppSecretRow | null> {
-  const app = await ctx.db.app.findUnique({
-    where: { id: appId },
-    select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true },
-  });
-  if (!app || app.deletedAt || app.uninstalledAt) return null;
-  return app;
-}
-
-/**
- * The caller as a MEMBER of a live App (cor:sec:020:02): a person acting as themselves who participates in the App. An
- * App key (no user), an impersonated session and a run are not members and see and change nothing. Returns the App row,
- * or null. A bound worker session is its driving person's session, so it passes when that person is a member.
- */
-async function appMember(ctx: Context, appId: string): Promise<AppSecretRow | null> {
-  if (!ctx.userId || ctx.impersonation || isRunPrincipal(ctx)) return null;
-  const app = await loadLiveApp(ctx, appId);
-  if (!app) return null;
-  return (await isAppParticipant(ctx, app)) ? app : null;
-}
-
-async function requireAppMember(ctx: Context, appId: string): Promise<AppSecretRow> {
-  const app = await appMember(ctx, appId);
-  if (!app) throw authorizationDenied();
-  return app;
-}
-
-/** Whoever manages the live App, as a person acting as themselves (cor:dmo:050:12). */
-async function appManager(ctx: Context, appId: string): Promise<AppSecretRow | null> {
-  if (!ctx.userId || ctx.impersonation || isRunPrincipal(ctx)) return null;
-  const app = await loadLiveApp(ctx, appId);
-  if (!app) return null;
-  return (await managesApp(ctx, app)) ? app : null;
-}
-
-/** The authority anchors an App secret write depends on: the App, and its organization when it has one. */
-function appAnchors(app: AppSecretRow) {
-  return [
-    { kind: 'app' as const, id: app.id },
-    ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
-  ];
-}
+import { loadLiveApp, appMember, appManager, requireAppMember, appAnchors } from '../../../lib/secrets/access.js';
 
 function appRateIdentity(ctx: Context) {
   return ctx.limiterIdentity ?? transportRateIdentity(ctx as never);
@@ -240,6 +194,7 @@ async function canSeeSecretOwner(
 }
 
 export interface CreateSecretArgs {
+  protected?: boolean;
   ownerType: string;
   ownerRef?: string | null;
   name: string;
@@ -249,18 +204,40 @@ export interface CreateSecretArgs {
 }
 
 export interface UpdateSecretArgs {
+  protected?: boolean;
   ref: string;
   metadata?: Record<string, unknown> | null;
   value?: unknown;
 }
 
 export const secretMutations = {
+  /** cor:sec:070:01-02: every protection transition requires the requester's own passkey. */
+  setSecretProtected: async (_: unknown, { ref, protected: protect }: { ref: string; protected: boolean }, ctx: Context) => {
+    await admitOperationRate(ctx, ctx.db, 'WRITES', appRateIdentity(ctx));
+    const found = await findSecretByRef(ctx, ref);
+    if (!found || found.ownerType !== 'app' || !(await canSeeSecretOwner(ctx, 'app', found.ownerId))) throw notFound();
+    const app = await loadLiveApp(ctx, found.ownerId);
+    if (!app) throw notFound();
+    return deliverStaged(await withAuthorizedTx<SecretRow | GraphQLError>(ctx, appAnchors(app), async (txCtx) => {
+      await requirePersonOnlyAct(txCtx, 'secret.change', needsPasskey);
+      if (protect) await requireAppMember(txCtx, found.ownerId);
+      else if (!(await appManager(txCtx, found.ownerId))) throw forbiddenError();
+    }, async (tx) => {
+      if (!(await lockSecretRow(tx, found.id))) throw notFound();
+      const secret = await tx.secret.findUniqueOrThrow({ where: { id: found.id } });
+      const latest = await tx.secretVersion.findFirst({ where: { secretId: secret.id }, orderBy: { versionNo: 'desc' }, select: { versionNo: true } });
+      return stageSecretChange(tx, ctx, { appId: secret.ownerId, secretId: secret.id, name: secret.name, kind: secret.kind,
+        metadata: secret.metadata, operation: protect ? 'SET_PROTECTED' : 'CLEAR_PROTECTED', snapshot: changeSnapshot(secret, latest?.versionNo ?? 0) });
+    }));
+  },
+
   /** Create a named, owner-scoped secret (gate per the matrix above). */
   createSecret: async (_: unknown, args: CreateSecretArgs, ctx: Context) => {
     const ownerType = assertOwnerType(args.ownerType);
     const ownerId = await resolveSecretOwnerRef(ctx, ownerType, args.ownerRef);
     const name = args.name.trim().toLowerCase();
 
+    if (args.protected && ownerType !== 'app') throw badInput('Protection is available only for App secrets.');
     if (ownerType === 'app') return createAppSecret(ctx, ownerId, name, args);
 
     await requireSecretOwnerWrite(ctx, ownerType, ownerId);
@@ -305,8 +282,9 @@ export const secretMutations = {
     }
     if (secret.ownerType === 'app') return updateAppSecret(ctx, secret, args);
     await requireSecretOwnerWrite(ctx, secret.ownerType as SecretOwnerType, secret.ownerId);
+    if (args.protected !== undefined) throw badInput('Protection is available only for App secrets.');
 
-    if (args.metadata === undefined && args.value === undefined) {
+    if (args.metadata === undefined && args.value === undefined && args.protected === undefined) {
       throw badInput('Pass metadata and/or value.');
     }
     const effectiveValue = args.value !== undefined ? args.value : decryptSecretValue(secret);
@@ -351,18 +329,13 @@ function notFound(): GraphQLError {
   return new GraphQLError('Secret not found.', { extensions: { code: 'NOT_FOUND' } });
 }
 
-/** A protected secret changes only through a person's change request (cor:sec:070:02, S4); until S4 every change refuses. */
-function protectedRefusal(): GraphQLError {
-  return new GraphQLError('This secret is protected: it changes only through a change request.', { extensions: { code: 'SECRET_PROTECTED' } });
-}
-
 async function createAppSecret(ctx: Context, appId: string, name: string, args: CreateSecretArgs) {
   await admitOperationRate(ctx, ctx.db, 'WRITES', appRateIdentity(ctx));
   const app = await loadLiveApp(ctx, appId);
   if (!app) throw authorizationDenied();
   const actor = secretActorOf(ctx);
   try {
-    return await withAuthorizedTx(
+    return deliverStaged(await withAuthorizedTx<SecretRow | GraphQLError>(
       ctx,
       appAnchors(app),
       async (txCtx) => { await requireAppMember(txCtx, appId); },
@@ -371,6 +344,8 @@ async function createAppSecret(ctx: Context, appId: string, name: string, args: 
           throw badInput('name must be lowercase [a-z0-9-], start alphanumeric, max 64 chars.');
         }
         const { metadata, valueJson, sizeBytes } = validateSecretPayload(args.kind, args.metadata, args.value);
+        if (args.protected) return stageSecretChange(tx, ctx, { appId, secretId: null, name, kind: args.kind,
+          metadata: metadata as never, operation: 'STORE', snapshot: 'absent', valueJson, sizeBytes });
         await assertAppSecretRoom(tx, appId);
         const secret = await tx.secret.create({
           data: {
@@ -383,7 +358,7 @@ async function createAppSecret(ctx: Context, appId: string, name: string, args: 
         await recordSecretEvent(tx, { ownerId: appId, secretId: secret.id, secretName: name, kind: 'STORE', versionNo, actor });
         return secret;
       },
-    );
+    ));
   } catch (err) {
     if (isSecretNameConflict(err)) {
       throw badInput(`A secret named "${name}" already exists at this scope.`);
@@ -405,25 +380,33 @@ async function updateAppSecret(ctx: Context, found: SecretRow, args: UpdateSecre
   await admitOperationRate(ctx, ctx.db, 'WRITES', appRateIdentity(ctx));
   const app = await loadLiveApp(ctx, found.ownerId);
   if (!app) throw notFound();
-  if (args.metadata === undefined && args.value === undefined) {
+  if (args.metadata === undefined && args.value === undefined && args.protected === undefined) {
     throw badInput('Pass metadata and/or value.');
   }
   const actor = secretActorOf(ctx);
-  return withAuthorizedTx(
+  const result = await withAuthorizedTx<SecretRow | GraphQLError>(
     ctx,
     appAnchors(app),
-    async (txCtx) => { await requireAppMember(txCtx, found.ownerId); },
+    async (txCtx) => {
+      await requireAppMember(txCtx, found.ownerId);
+      if (args.protected === false && !(await appManager(txCtx, found.ownerId))) throw forbiddenError();
+    },
     async (tx) => {
       // The secret row's lock serializes stores: two racing value changes end at n+1 and n+2, never a duplicate or a gap.
       if (!(await lockSecretRow(tx, found.id))) throw notFound();
       const secret = await tx.secret.findUnique({ where: { id: found.id } });
       if (!secret) throw notFound();
-      if (secret.protected) throw protectedRefusal();
       const effectiveValue = args.value !== undefined ? args.value : await currentAppSecretValue(tx, secret);
       const effectiveMetadata = args.metadata !== undefined ? args.metadata : secret.metadata;
       const { metadata, valueJson, sizeBytes } = validateSecretPayload(secret.kind, effectiveMetadata, effectiveValue, {
         enforceValueSize: args.value !== undefined,
       });
+      if (secret.protected || args.protected !== undefined) {
+        const latest = await tx.secretVersion.findFirst({ where: { secretId: secret.id }, orderBy: { versionNo: 'desc' }, select: { versionNo: true } });
+        return stageSecretChange(tx, ctx, { appId: secret.ownerId, secretId: secret.id, name: secret.name, kind: secret.kind,
+          metadata: metadata as never, operation: 'STORE', snapshot: changeSnapshot(secret, latest?.versionNo ?? 0), valueJson, sizeBytes,
+          protectedResult: args.protected, writeVersion: args.value !== undefined });
+      }
       let versionNo: number | null = null;
       if (args.value !== undefined) versionNo = await addAppSecretVersion(tx, secret, valueJson, sizeBytes, actor);
       const updated = await tx.secret.update({
@@ -437,6 +420,8 @@ async function updateAppSecret(ctx: Context, found: SecretRow, args: UpdateSecre
       return updated;
     },
   );
+  if (result instanceof GraphQLError) throw result;
+  return result;
 }
 
 /**
@@ -449,11 +434,11 @@ async function deleteAppSecret(ctx: Context, found: SecretRow) {
   const app = await loadLiveApp(ctx, found.ownerId);
   if (!app) throw notFound();
   const actor = secretActorOf(ctx);
-  return withAuthorizedTx(
+  const result = await withAuthorizedTx<boolean | GraphQLError>(
     ctx,
     appAnchors(app),
     async (txCtx) => {
-      const userId = await requirePersonOnlyAct(txCtx, 'secret.delete', () => forbiddenError());
+      const userId = await requirePersonOnlyAct(txCtx, 'secret.delete', found.protected ? needsPasskey : () => forbiddenError());
       const manager = (await appManager(txCtx, found.ownerId)) !== null;
       const creator = found.createdBy === userId && (await appMember(txCtx, found.ownerId)) !== null;
       if (!manager && !creator) throw forbiddenError();
@@ -462,13 +447,19 @@ async function deleteAppSecret(ctx: Context, found: SecretRow) {
       if (!(await lockSecretRow(tx, found.id))) throw notFound();
       const secret = await tx.secret.findUnique({ where: { id: found.id } });
       if (!secret) throw notFound();
-      if (secret.protected) throw protectedRefusal();
+      if (secret.protected) {
+        const latest = await tx.secretVersion.findFirst({ where: { secretId: secret.id }, orderBy: { versionNo: 'desc' }, select: { versionNo: true } });
+        return stageSecretChange(tx, ctx, { appId: secret.ownerId, secretId: secret.id, name: secret.name, kind: secret.kind,
+          metadata: secret.metadata, operation: 'DELETE', snapshot: changeSnapshot(secret, latest?.versionNo ?? 0) });
+      }
       const newest = await tx.secretVersion.findFirst({ where: { secretId: secret.id }, orderBy: { versionNo: 'desc' }, select: { versionNo: true } });
       await recordSecretEvent(tx, { ownerId: secret.ownerId, secretId: secret.id, secretName: secret.name, kind: 'DELETE', versionNo: newest?.versionNo ?? null, actor });
       await tx.secret.delete({ where: { id: secret.id } });
       return true;
     },
   );
+  if (result instanceof GraphQLError) throw result;
+  return result;
 }
 
 export const secretQueries = {
