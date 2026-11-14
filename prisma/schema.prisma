@@ -2413,7 +2413,7 @@ model AiServiceConfig {
   organizationId  String?   @map("organization_id")
   appId           String?   @map("app_id")
   agentId         String?   @map("agent_id")
-  /// Provider identifier; known: 'anthropic' | 'openai' | 'glm' | 'bedrock' |
+  /// Provider identifier; known: 'anthropic' | 'openai' | 'glm' | 'kimi' | 'bedrock' |
   /// 'openai-compatible' (endpoint required). Validated against the registry
   /// in src/lib/aiConfig.ts.
   provider        String
