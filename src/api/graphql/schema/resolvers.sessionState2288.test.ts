@@ -214,3 +214,99 @@ describe('#2288 Session.state', () => {
   });
 
 });
+
+/**
+ * #2317 Step 1: how many own-App policy queries a Session list costs. The loader
+ * caches by App and batches within one microtask turn, so an App arriving in a
+ * later turn (an ended row skips the activity await) could open a second batch.
+ * These are measured controls: every row must describe ITS OWN App's policy, and
+ * the traced `db` (passed through the context, so nothing hides behind the
+ * extension layer) counts `app.findMany` calls that select `sessionDormancyDays`.
+ */
+describe('#2317 own-App policy queries for Session lists', () => {
+  type Row = { id: string; state: string };
+  const policyDays = [1, 7, 90];
+  async function appsWith(days: number[]) {
+    const org = await db.organization.findFirstOrThrow({ where: { members: { some: { userId: owner.id } } } });
+    return Promise.all(days.map((d, i) => db.app.create({ data: { organizationId: org.id, name: `p${i}-${d}`, urn: `${org.urn}:p${i}-${generateId().slice(0, 6)}`, sessionDormancyDays: d } })));
+  }
+  async function listSessions(gql: string, root: 'sessions' | 'sessionsPage') {
+    let policy = 0;
+    let total = 0;
+    const traced = db.$extends({ query: { $allOperations: async ({ model, operation, args, query }) => {
+      total++;
+      if (model === 'App' && operation === 'findMany' && (args as { select?: { sessionDormancyDays?: boolean } }).select?.sessionDormancyDays) policy++;
+      return query(args);
+    } } });
+    const out = await server.executeOperation({ query: gql }, { contextValue: { ...ctx(), db: traced as never } });
+    if (out.body.kind !== 'single') throw new Error('incremental response');
+    expect(out.body.singleResult.errors).toBeUndefined();
+    const data = out.body.singleResult.data?.[root] as Row[] | { items: Row[] };
+    return { rows: Array.isArray(data) ? data : data.items, policy, total };
+  }
+  const expectedState = (idle: number, days: number) => (idle > days * D ? 'DORMANT' : 'LAPSED');
+  const LIST = '{sessions(limit:200){ id state isLive lapsesAt }}';
+
+  it('scenario 1: open sessions in one App cost one policy query', async () => {
+    await Promise.all(Array.from({ length: 6 }, () => session(8 * D)));
+    const r = await listSessions(LIST, 'sessions');
+    expect(r.rows).toHaveLength(6);
+    expect(r.policy).toBe(1);
+  });
+
+  it.each([
+    ['2: 12 open sessions over 3 Apps', 12, 3, 0],
+    ['3: 6 open + 6 ended over 3 Apps', 12, 3, 6],
+    ['5: 200 sessions over 10 Apps', 200, 10, 0],
+  ] as const)('scenario %s: each session uses its own App policy at one policy query', async (_label, count, appCount, ended) => {
+    const days = Array.from({ length: appCount }, (_, i) => policyDays[i % policyDays.length]! + Math.floor(i / policyDays.length));
+    const apps = await appsWith(days);
+    const idles = [5 * D, 10 * D];
+    const expected = new Map<string, string>();
+    await Promise.all(Array.from({ length: count }, async (_, i) => {
+      const a = i % appCount;
+      const idle = idles[i % idles.length]!;
+      const isEnded = i < ended;
+      const row = await session(idle, { appId: apps[a]!.id, ...(isEnded ? { endedAt: NOW } : {}) });
+      expected.set(row.id, isEnded ? 'ENDED' : expectedState(idle, days[a]!));
+    }));
+    const r = await listSessions(LIST, 'sessions');
+    expect(r.rows).toHaveLength(count);
+    for (const row of r.rows) expect(row.state).toBe(expected.get(row.id));
+    // Measured on main: one batch holds every App, ended rows included (#2317).
+    expect(r.policy).toBe(1);
+  });
+
+  it('scenario 3b: ended rows in only one App, open rows in two others (the earlier-turn path)', async () => {
+    const days = [1, 7, 90];
+    const apps = await appsWith(days);
+    const expected = new Map<string, string>();
+    await Promise.all(Array.from({ length: 12 }, async (_, i) => {
+      const a = i % 3;
+      const isEnded = a === 0;
+      const row = await session(10 * D, { appId: apps[a]!.id, ...(isEnded ? { endedAt: NOW } : {}) });
+      expected.set(row.id, isEnded ? 'ENDED' : expectedState(10 * D, days[a]!));
+    }));
+    const r = await listSessions(LIST, 'sessions');
+    expect(r.rows).toHaveLength(12);
+    for (const row of r.rows) expect(row.state).toBe(expected.get(row.id));
+    // Measured on main: terminal rows reach the policy load a turn before open rows (they skip the activity
+    // await), so a terminal-only App opens its own batch: 2 policy queries here, never more than one per turn class.
+    // Accepted in #2317 (one extra primary-key IN query); a coalescing change would tighten this to 1.
+    expect(r.policy).toBe(2);
+  });
+
+  it('scenario 5b: sessionsPage over 10 Apps uses full-row parents and its own-App policies', async () => {
+    const days = Array.from({ length: 10 }, (_, i) => policyDays[i % 3]! + Math.floor(i / 3));
+    const apps = await appsWith(days);
+    const expected = new Map<string, string>();
+    await Promise.all(Array.from({ length: 50 }, async (_, i) => {
+      const row = await session(8 * D, { appId: apps[i % 10]!.id });
+      expected.set(row.id, expectedState(8 * D, days[i % 10]!));
+    }));
+    const r = await listSessions('{sessionsPage(limit:50){ items { id state isLive lapsesAt } }}', 'sessionsPage');
+    expect(r.rows).toHaveLength(50);
+    for (const row of r.rows) expect(row.state).toBe(expected.get(row.id));
+    expect(r.policy).toBe(1);
+  });
+});
