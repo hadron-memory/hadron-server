@@ -127,6 +127,10 @@ function modelFor(resolved: ResolvedAiConfig): LanguageModel {
     case 'glm':
       // Default CHAT_COMPLETIONS: Zhipu and Z.ai serve only /chat/completions.
       return openAiCompatible(createOpenAI({ apiKey: key, baseURL: defaultEndpoint('glm')!, ...conn }));
+    case 'kimi':
+      // #4170: Moonshot serves Chat Completions; own key only (kimi is not an
+      // ambient-credential provider), pinned to its catalogue default host.
+      return openAiCompatible(createOpenAI({ apiKey: key, baseURL: defaultEndpoint('kimi')!, ...conn }));
     case 'openai-compatible':
       // #1373: a caller-named host speaking an OpenAI wire protocol. Its
       // endpoint is required at write time; a row that somehow lacks one must
@@ -264,7 +268,7 @@ const EXTRACTION_NATIVE_TIMEOUT_MS = (() => {
 })();
 
 /** Providers whose native structured-output path is not trusted yet. */
-const JSON_PROMPT_ONLY_PROVIDERS = new Set(['bedrock', 'glm', 'openai-compatible']);
+const JSON_PROMPT_ONLY_PROVIDERS = new Set(['bedrock', 'glm', 'kimi', 'openai-compatible']);
 
 export async function generateExtraction(
   resolved: ResolvedAiConfig,
