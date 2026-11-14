@@ -138,6 +138,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.users",
   "Query.validateMemory",
   "Query.workers",
+  "Secret.readClients", // #3998 B+C: pageArgs default 20, cap 200; common omitted bound 100 is conservative.
   "Secret.versions", // #3997: pageArgs default 20, cap 200; below the common 100, so omission overestimates.
   "ServedPrompt.currentLint", // #2048: default 50, cap 100; shared pageLintWarnings.
   "ServedPrompt.provenance",
