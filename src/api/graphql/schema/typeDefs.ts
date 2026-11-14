@@ -15651,7 +15651,7 @@ export const typeDefs = `#graphql
     chatEnded: Boolean!
     "Conversation completed by this turn's explicit goal_reached flag, or null. hrn:node:hadronmemory.com:specs:cor:cht:030:02"
     conversationCompleted: String
-    "Whether this turn returned from a detour; false until the detour-return slice ships. hrn:node:hadronmemory.com:specs:cor:cht:030:02"
+    "Whether this turn returned the chat from a detour to the conversation and stage the most recent active detour left. False when a completion rule fired instead, or routing was skipped. hrn:node:hadronmemory.com:specs:cor:cht:030:02"
     detourReturned: Boolean!
     "Routing edits were skipped because a concurrent turn moved the chat from the decision's origin. hrn:node:hadronmemory.com:specs:cor:cht:030:02"
     routingSkipped: Boolean!
