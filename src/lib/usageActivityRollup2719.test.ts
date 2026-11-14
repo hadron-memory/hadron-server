@@ -4,13 +4,16 @@
  * The write pins run each path that changes usage_events after the fact (insert, soft delete, user merge, user delete,
  * type or time update, hard delete, truncate) and then require the stored cells to equal a recount (the drift check).
  */
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Prisma } from '../generated/prisma/index.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { getUsageActivity, ROLLUP_CELL_MS, ROLLUP_MIN_MS, type UsageActivityBucketSize, type UsageActivityScope } from './usageActivity.js';
 import { backfillUsageActivityRollup, findUsageActivityRollupDrift } from '../jobs/usageActivityRollup.js';
+
+// The seed and the backfills are heavy on a loaded CI shard (a 5 s default timed out in shard 4): one file-wide bound.
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
 
 const naive = (d: Date) => d.toISOString().replace('Z', '');
 const T0 = Date.UTC(2026, 8, 20, 10, 7, 33, 123); // a fixed, deliberately unaligned instant
