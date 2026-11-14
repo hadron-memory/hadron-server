@@ -899,5 +899,7 @@ describe('check-graphql-sdl — tagged raw-SQL literals (#1087)', () => {
     const { offenders, documents } = scanTaggedLiterals();
     expect(documents).toBeGreaterThan(50);
     expect(offenders).toEqual([]);
-  });
+    // #4125: walks the whole repo, so its cost grows with the tree and the runner load: ~3 s on a quiet host, 3.45 s
+    // on a loaded CI shard against the 5 s default. 30 s declares the cost; the suite-wide default is left alone.
+  }, 30_000);
 });

@@ -412,7 +412,9 @@ describe('#1329 on MCP, readable means hadron_get_node can load it', () => {
     const concealed = [JSON.stringify(await viaMcp()), JSON.stringify(await viaMcp(claim)), JSON.stringify(await viaMcp({ task: holdingTaskId, revision: 1 }))];
     await repoint(null);
     expect(concealed).toEqual([JSON.stringify(await viaMcp()), JSON.stringify(await viaMcp()), JSON.stringify(await viaMcp())]);
-  });
+    // #4125: six MCP round trips plus a repoint. ~1.2 s on a quiet host, 5.3 s on a loaded CI shard (the 5 s default
+    // failed it once). 30 s declares what it costs; the suite-wide default is left alone on purpose.
+  }, 30_000);
 
   it('an exact claim is admitted on GraphQL and refused on MCP: the disclosed admission difference', async () => {
     const mcp = await viaMcp(claim);
