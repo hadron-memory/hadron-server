@@ -1850,8 +1850,8 @@
     },
     "SecretEventsPage.items": {
       "class": "parent-implies-child",
-      "audience": "whoever manages the App, as a person acting as themselves: Query.secretEvents answers an empty page to everyone else, an App key, an impersonated session and a run; never a value",
-      "resolver": "src/api/graphql/schema/resolvers.secret.ts::appManager",
+      "audience": "any member of the App, as a person acting as themselves: Query.secretEvents answers an empty page to everyone else, an App key, an impersonated session and a run; never a value",
+      "resolver": "src/api/graphql/schema/resolvers.secret.ts::appMember",
       "target": "SecretEvent"
     },
     "ServedPromptsPage.items": {

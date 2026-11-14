@@ -384,11 +384,20 @@ async function createAppSecret(ctx: Context, appId: string, name: string, args: 
       },
     );
   } catch (err) {
-    if ((err as { code?: string } | null)?.code === 'P2002') {
+    if (isSecretNameConflict(err)) {
       throw badInput(`A secret named "${name}" already exists at this scope.`);
     }
     throw err;
   }
+}
+
+/** A unique violation on the NAME. Any other one (the App key's own primary key under a race) is not a name clash and passes through. */
+function isSecretNameConflict(err: unknown): boolean {
+  const e = err as { code?: string; meta?: { target?: unknown } } | null;
+  if (e?.code !== 'P2002') return false;
+  const target = e.meta?.target;
+  const text = Array.isArray(target) ? target.join(',') : typeof target === 'string' ? target : '';
+  return /name/i.test(text);
 }
 
 async function updateAppSecret(ctx: Context, found: SecretRow, args: UpdateSecretArgs) {
@@ -514,8 +523,9 @@ export const secretQueries = {
   },
 
   /**
-   * The audit events of ONE App secret, newest first, for whoever manages the App (cor:dmo:050:12). Anyone else, an App
-   * key and an impersonated session get an EMPTY page, the same as a missing secret. Never a value.
+   * The audit events of ONE App secret, newest first, for any MEMBER of the App (cor:sec:010:05, ruled 2026-11-14 by
+   * Victor under 0265: a person acting as themselves, or a bound worker session in its own App). A non-member, an App
+   * key, a run and an impersonated session get an EMPTY page, the same as a missing secret. Never a value.
    */
   secretEvents: async (
     _: unknown,
@@ -525,7 +535,7 @@ export const secretQueries = {
     const empty = { items: [], total: 0 };
     const secret = await findSecretByRef(ctx, args.ref);
     if (!secret || secret.ownerType !== 'app') return empty;
-    if (!(await appManager(ctx, secret.ownerId))) return empty;
+    if (!(await appMember(ctx, secret.ownerId))) return empty;
     await admitOperationRate(ctx, ctx.db, 'OTHER_READS', appRateIdentity(ctx));
     const where = { ownerType: 'app', ownerId: secret.ownerId, secretId: secret.id };
     const take = clampListTake(args.limit);

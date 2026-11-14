@@ -9,7 +9,7 @@ import { buildSchema, type GraphQLObjectType } from 'graphql';
 import { typeDefs } from './typeDefs.js';
 import { resolveRunSecret } from '../../../lib/runner/secrets.js';
 import { currentAppSecretValue, lockSecretRow, MAX_SECRETS_PER_APP, MAX_SECRET_VERSIONS } from '../../../lib/secrets/appSecrets.js';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 
 let ownerId: string;
 let memberId: string;
@@ -159,13 +159,13 @@ describe('App secrets S2 public acceptance', () => {
     const b = await create(memberId, 'aad-b', 'value-b');
     const va = await db.secretVersion.findFirstOrThrow({ where: { secretId: a.id }, omit: { valueEncrypted: false } });
     await db.secretVersion.updateMany({ where: { secretId: b.id }, data: { valueEncrypted: va.valueEncrypted } });
-    await expect(currentAppSecretValue(db as never, { id: b.id, ownerId: appId })).rejects.toBeTruthy();
+    await expect(currentAppSecretValue(db as never, { id: b.id, ownerId: appId })).rejects.toThrow(/authenticate data/);
     await expect(currentAppSecretValue(db as never, { id: a.id, ownerId: appId })).resolves.toBe('value-a');
     // Within ONE secret, version 1's ciphertext in the version 2 row fails too: the AAD names the version number.
     await resolvers.Mutation.updateSecret({}, { ref: a.id, value: 'value-a2' }, context(memberId));
     const v1 = await db.secretVersion.findFirstOrThrow({ where: { secretId: a.id, versionNo: 1 }, omit: { valueEncrypted: false } });
     await db.secretVersion.updateMany({ where: { secretId: a.id, versionNo: 2 }, data: { valueEncrypted: v1.valueEncrypted } });
-    await expect(currentAppSecretValue(db as never, { id: a.id, ownerId: appId })).rejects.toBeTruthy();
+    await expect(currentAppSecretValue(db as never, { id: a.id, ownerId: appId })).rejects.toThrow(/authenticate data/);
   });
 
   it('a canary value, stored and rotated, appears in no row, event, log line or error', async () => {
@@ -202,8 +202,8 @@ describe('App secrets S2 public acceptance', () => {
       expect(await resolvers.Query.secret({}, { ref: secret.id }, ctx)).toBeNull();
       await expect(resolvers.Query.secrets({}, { ownerType: 'app', ownerRef: appId }, ctx)).resolves.toEqual({ items: [], total: 0 });
       await expect(resolvers.Query.secretEvents({}, { ref: secret.id }, ctx)).resolves.toEqual({ items: [], total: 0 });
-      await expect(resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: appId, name: 'k', kind: 'generic', value: 1 }, ctx)).rejects.toBeTruthy();
-      await expect(resolvers.Mutation.updateSecret({}, { ref: secret.id, value: 'x' }, ctx)).rejects.toBeTruthy();
+      await expect(resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: appId, name: 'k', kind: 'generic', value: 1 }, ctx)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+      await expect(resolvers.Mutation.updateSecret({}, { ref: secret.id, value: 'x' }, ctx)).rejects.toMatchObject({ extensions: { code: 'NOT_FOUND' } });
     }
     expect(await db.secretVersion.count({ where: { secretId: secret.id } })).toBe(1);
   });
@@ -216,7 +216,7 @@ describe('App secrets S2 public acceptance', () => {
     const impersonated = { db, userId: memberId, roles: [], impersonation: { actorUserId: ownerId, orgId: org.id } } as unknown as Context;
     expect(await resolvers.Query.secret({}, { ref: own.id }, impersonated)).toBeNull();
     await expect(resolvers.Query.secrets({}, { ownerType: 'app', ownerRef: orgApp.id }, impersonated)).resolves.toEqual({ items: [], total: 0 });
-    await expect(resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: orgApp.id, name: 'imp-store', kind: 'generic', value: 1 }, impersonated)).rejects.toBeTruthy();
+    await expect(resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: orgApp.id, name: 'imp-store', kind: 'generic', value: 1 }, impersonated)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
   });
 
   it('a run never resolves an App secret, even when no org or user secret has that name', async () => {
@@ -225,14 +225,25 @@ describe('App secrets S2 public acceptance', () => {
     const runCtx = { db, run: { userId: memberId, organizationId: org.id } } as never;
     await expect(resolveRunSecret(runCtx, { name: 'only-in-app' })).resolves.toBeNull();
     await expect(resolveRunSecret(runCtx, { name: 'only-in-app', scope: 'app' as never })).resolves.toBeNull();
-    const poll = readFileSync(new URL('../../../lib/runner/tools/webPollTools.ts', import.meta.url), 'utf8');
-    expect(poll).not.toMatch(/enum: \[\.\.\.SECRET_OWNER_TYPES\]/);
+    // Every run tool, not one file: none may derive an enum or a check from the owner list, which now names 'app'.
+    const toolsDir = new URL('../../../lib/runner/tools/', import.meta.url);
+    for (const f of readdirSync(toolsDir).filter((n) => n.endsWith('.ts') && !n.endsWith('.test.ts'))) {
+      const src = readFileSync(new URL(f, toolsDir), 'utf8');
+      expect(src, f).not.toMatch(/SECRET_OWNER_TYPES|isSecretOwnerType/);
+    }
+  });
+
+  it('listing an App ref that does not resolve answers the same empty page as one the caller may not see', async () => {
+    const missing = await resolvers.Query.secrets({}, { ownerType: 'app', ownerRef: generateId() }, context(memberId));
+    expect(missing).toEqual({ items: [], total: 0 });
+    const garbage = await resolvers.Query.secrets({}, { ownerType: 'app', ownerRef: 'hrn:app:nope.invalid:nothing' }, context(memberId));
+    expect(garbage).toEqual({ items: [], total: 0 });
   });
 
   it('an uninstalled App and a deleted organization refuse stores and answer empty', async () => {
     const secret = await create(memberId);
     await db.app.update({ where: { id: appId }, data: { uninstalledAt: new Date() } });
-    await expect(create(memberId, 'after-uninstall')).rejects.toBeTruthy();
+    await expect(create(memberId, 'after-uninstall')).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     expect(await resolvers.Query.secret({}, { ref: secret.id }, context(memberId))).toBeNull();
     await expect(resolvers.Query.secrets({}, { ownerType: 'app', ownerRef: appId }, context(memberId))).resolves.toEqual({ items: [], total: 0 });
   });
@@ -257,7 +268,7 @@ describe('App secrets S2 public acceptance', () => {
   it('a creator who left the App can no longer delete', async () => {
     const s = await create(memberId, 'left');
     await db.appMember.delete({ where: { appId_userId: { appId, userId: memberId } } });
-    await expect(resolvers.Mutation.deleteSecret({}, { ref: s.id }, context(memberId))).rejects.toBeTruthy();
+    await expect(resolvers.Mutation.deleteSecret({}, { ref: s.id }, context(memberId))).rejects.toMatchObject({ extensions: { code: 'NOT_FOUND' } });
     expect(await db.secret.count({ where: { id: s.id } })).toBe(1);
   });
 
@@ -329,13 +340,28 @@ describe('App secrets S2 public acceptance', () => {
     await expect(db.$executeRaw`TRUNCATE TABLE secret_events`).resolves.toBeDefined(); // owner-only; the serve role's revoke is pinned below
   });
 
-  it('events are listed for whoever manages the App, newest first, and for nobody else', async () => {
+  it('events are listed for any member of the App, newest first, and for nobody else', async () => {
     const s = await create(memberId, 'listed');
     await resolvers.Mutation.updateSecret({}, { ref: s.id, value: 'two' }, context(memberId));
     const page: any = await resolvers.Query.secretEvents({}, { ref: s.id }, context(ownerId));
     expect(page.total).toBe(2);
     expect(page.items.map((e: any) => e.kind)).toEqual(['VERSION', 'STORE']);
-    await expect(resolvers.Query.secretEvents({}, { ref: s.id }, context(memberId))).resolves.toEqual({ items: [], total: 0 });
+    const asMember: any = await resolvers.Query.secretEvents({}, { ref: s.id }, context(memberId));
+    expect(asMember.total).toBe(2);
+    await expect(resolvers.Query.secretEvents({}, { ref: s.id }, context(outsiderId))).resolves.toEqual({ items: [], total: 0 });
+  });
+
+  it('events page by limit and offset in a stable newest-first order, and a secret with no stored version says so', async () => {
+    const s = await create(memberId, 'paged');
+    for (const v of ['b', 'c', 'd']) await resolvers.Mutation.updateSecret({}, { ref: s.id, value: v }, context(memberId));
+    const all: any = await resolvers.Query.secretEvents({}, { ref: s.id }, context(memberId));
+    expect(all.total).toBe(4);
+    const p1: any = await resolvers.Query.secretEvents({}, { ref: s.id, limit: 2, offset: 0 }, context(memberId));
+    const p2: any = await resolvers.Query.secretEvents({}, { ref: s.id, limit: 2, offset: 2 }, context(memberId));
+    expect(p1.total).toBe(4);
+    expect([...p1.items, ...p2.items].map((e: any) => e.id)).toEqual(all.items.map((e: any) => e.id));
+    await db.secretVersion.deleteMany({ where: { secretId: s.id } });
+    await expect(currentAppSecretValue(db as never, { id: s.id, ownerId: appId })).rejects.toMatchObject({ extensions: { code: 'SECRET_VERSION_MISSING' } });
   });
 
   it('the one-year purge rule: event and tombstone deletes are refused unless the owner is gone and its year is up', async () => {

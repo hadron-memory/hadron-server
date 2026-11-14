@@ -10129,8 +10129,8 @@ export const typeDefs = `#graphql
     secret(ref: ID!): Secret
 
     """
-    The audit events of ONE App secret, newest first, for whoever manages the App (hrn:node:hadronmemory.com:specs:cor:dmo:050:12).
-    Anyone else, an App key and an impersonated session get an empty page. Never a value.
+    The audit events of ONE App secret, newest first, for any member of the App (hrn:node:hadronmemory.com:specs:cor:sec:010:05).
+    A non-member, an App key, a run and an impersonated session get an empty page, the same as a missing secret. Never a value.
     """
     secretEvents(ref: ID!, limit: Int, offset: Int): SecretEventsPage!
 
@@ -10138,8 +10138,8 @@ export const typeDefs = `#graphql
     Paginated secret list for ONE owner scope (the hadron secret ls
     surface). ownerRef accepts ID or URN (cor:api:140) and defaults to the
     caller for ownerType user. An unresolvable ref or a non-entitled owner
-    (for an App: anyone who is not a member of it, an App key and an
-    impersonated session) yields an empty page — no disclosure. Name-ascending order (id
+    (for an App: anyone who is neither a member nor a manager of it, an App
+    key and an impersonated session) yields an empty page — no disclosure. Name-ascending order (id
     tiebreak); limit default 20 / cap 200; limit: 0 -> count only.
     """
     secrets(ownerType: String!, ownerRef: ID, limit: Int, offset: Int): SecretsPage!

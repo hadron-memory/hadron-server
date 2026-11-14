@@ -108,14 +108,14 @@ export async function addAppSecretVersion(
 /**
  * The current value of an App secret, decrypted under its App key with the version's own AAD. Used server-side only,
  * to re-validate a metadata-only change against the stored value; no GraphQL field returns it (S3 adds the one read
- * path). Fails closed: a missing version, a wrong AAD or a missing key refuses.
+ * path). Fails closed: a missing version (`SECRET_VERSION_MISSING`), a wrong AAD or a missing key refuses.
  */
 export async function currentAppSecretValue(tx: Prisma.TransactionClient, secret: { id: string; ownerId: string }): Promise<unknown> {
   const row = await tx.secretVersion.findFirst({
     where: { secretId: secret.id }, orderBy: { versionNo: 'desc' },
     omit: { valueEncrypted: false },
   });
-  if (!row) throw limitRefusal('SECRET_KEY_UNAVAILABLE', 'The secret store is unavailable.');
+  if (!row) throw limitRefusal('SECRET_VERSION_MISSING', 'The secret has no stored version.');
   const key = await unwrapAppKey(tx, secret.ownerId, row.keyVersion);
   return JSON.parse(decryptBytesAad(row.valueEncrypted, secretVersionAad(secret.id, row.versionNo), key.encryptionKey).toString('utf8'));
 }
