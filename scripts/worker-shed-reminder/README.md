@@ -1,6 +1,6 @@
 # worker-shed-reminder (#2163 part 2)
 
-A Claude Code `UserPromptSubmit` hook that reminds a worker to run the team's shed procedure when its context is large.
+A Claude Code `UserPromptSubmit` (and, when wired, `Stop`) hook that reminds a worker to run the team's shed procedure when its context is large.
 It reminds and nothing else: no terminal input, no handoff, no process stop, no session end or rebind, no settings write,
 no PostToolUse or PreCompact hook. Output is one fixed `hookSpecificOutput.additionalContext` JSON object, or nothing.
 Any failure is silence with exit 0.
@@ -18,3 +18,9 @@ Any failure is silence with exit 0.
 - Observed on Claude Code 2.1.306 (print mode, disposable session): `/clear` makes a new `session_id` and transcript, resume and
   `/compact` keep both, a compaction appends a `compact_boundary` line carrying `postTokens`, slash commands fire no
   `UserPromptSubmit`. Interactive TUI parity, automatic compaction parity and Codex are not established.
+- **Idle gaps do not silence it** (2026-11-13, Cedric): the age of the last usage line is not checked, only that its timestamp
+  parses and is not in the future. Before this the hook skipped as `stale` after 15 minutes, which is the normal gap before a
+  worker's next prompt, so it almost never fired.
+- **Stop (task boundary).** Wired as a second hook group on the `Stop` event with the same command, the hook shares the arm and,
+  when it fires, returns `{"decision":"block","reason":...}` once so the worker sheds at the task boundary instead of at some later
+  prompt. It never blocks when `stop_hook_active` is set, and fires at most twice per session like the prompt reminder.

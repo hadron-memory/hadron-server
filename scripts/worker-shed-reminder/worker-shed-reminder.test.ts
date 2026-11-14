@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  ESCALATION_TOKENS, FLOOR_TOKENS, FRESHNESS_MS, HYSTERESIS_TOKENS, LOCK_STALE_MS, REMINDER_TEXT, STATE_MAX_FILES, TAIL_BYTES,
+  ESCALATION_TOKENS, FLOOR_TOKENS, HYSTERESIS_TOKENS, LOCK_STALE_MS, REMINDER_TEXT, STATE_MAX_FILES, TAIL_BYTES,
   decide, observe, run, scanTail, thresholdFor, withLock,
 } from './worker-shed-reminder.mjs';
 
@@ -129,7 +129,7 @@ describe('exact output', () => {
   });
 });
 
-describe('malformed, stale, future and unknown data stay silent', () => {
+describe('malformed, future and unknown data stay silent', () => {
   const cases: Array<[string, (b: Box) => void]> = [
     ['no assistant line', (b) => write(b, [JSON.stringify({ type: 'user', message: { content: 'hi' } })])],
     ['no usage object', (b) => write(b, [JSON.stringify({ type: 'assistant', timestamp: iso(NOW), message: { model: OPUS } })])],
@@ -137,7 +137,6 @@ describe('malformed, stale, future and unknown data stay silent', () => {
     ['negative counts', (b) => write(b, [asst(0, { input: 2, read: -300_000, create: 0 })])],
     ['fractional counts', (b) => write(b, [asst(0, { input: 2.5, read: 300_000, create: 0 })])],
     ['non-finite counts', (b) => write(b, [JSON.stringify({ type: 'assistant', timestamp: iso(NOW), message: { model: OPUS, usage: { input_tokens: 1e999, cache_read_input_tokens: 1, cache_creation_input_tokens: 1 } } })])],
-    ['stale last usage', (b) => write(b, [asst(occ(200_000), { ts: NOW - FRESHNESS_MS - 1_000 })])],
     ['future timestamp', (b) => write(b, [asst(occ(200_000), { ts: NOW + 5 * 60_000 })])],
     ['missing timestamp', (b) => write(b, [JSON.stringify({ type: 'assistant', message: { model: OPUS, usage: { input_tokens: 1, cache_read_input_tokens: occ(200_000), cache_creation_input_tokens: 0 } } })])],
     ['unparseable timestamp', (b) => write(b, [asst(occ(200_000)).replace(/"timestamp":"[^"]+"/, '"timestamp":"not-a-date"')])],
@@ -152,10 +151,34 @@ describe('malformed, stale, future and unknown data stay silent', () => {
     expect(existsSync(join(b.stateDir, 'reminder', `${SID}.json`))).toBe(false);
   });
 
-  it('a stale latest line wins over an older fresh one: it is the LATEST usage that counts', () => {
+  it('the LATEST usage counts, however old it is: an older high line does not outvote a newer low one', () => {
     const b = box();
-    write(b, [asst(occ(200_000), { ts: NOW - 60_000 }), asst(occ(5_000), { ts: NOW - FRESHNESS_MS - 5_000 })]);
+    write(b, [asst(occ(200_000), { ts: NOW - 3 * 3_600_000 }), asst(occ(5_000), { ts: NOW - 60_000 })]);
     expect(call(b)).toBeNull();
+  });
+
+  it('an idle gap does not silence the reminder: a last usage hours old still fires (Cedric, 2026-11-13)', () => {
+    const b = box();
+    write(b, [asst(occ(200_000), { ts: NOW - 6 * 3_600_000 })]);
+    expect(call(b)).not.toBeNull();
+  });
+
+  it('Stop at a task boundary blocks once with the reminder, never when stop_hook_active, and shares the arm', () => {
+    const b = box();
+    write(b, [asst(occ(200_000))]);
+    expect(call(b, { hook_event_name: 'Stop', stop_hook_active: true })).toBeNull();
+    const stop = JSON.parse(call(b, { hook_event_name: 'Stop' })!);
+    expect(stop.decision).toBe('block');
+    expect(stop.reason).toContain('run the shed procedure now');
+    expect(stop.hookSpecificOutput).toBeUndefined();
+    // The arm was consumed by the Stop fire: the next prompt is silent.
+    expect(call(b)).toBeNull();
+  });
+
+  it('Stop below the threshold is silent', () => {
+    const b = box();
+    write(b, [asst(occ(5_000))]);
+    expect(call(b, { hook_event_name: 'Stop' })).toBeNull();
   });
 
   it('a boundary with bad data is silent and does not fall back to an older assistant usage', () => {
@@ -163,7 +186,7 @@ describe('malformed, stale, future and unknown data stay silent', () => {
     for (const bad of [boundary('b1', -5), boundary('b1', 1.5), boundary('', occ(200_000)),
       JSON.stringify({ type: 'system', subtype: 'compact_boundary', timestamp: iso(NOW - 2_000), compactMetadata: { postTokens: occ(200_000) } }),
       JSON.stringify({ type: 'system', subtype: 'compact_boundary', uuid: 'b1', timestamp: iso(NOW) }),
-      boundary('b1', 200_000, NOW - FRESHNESS_MS - 1_000), boundary('b1', 200_000, NOW + 600_000)]) {
+      boundary('b1', 200_000, NOW + 600_000)]) {
       rmSync(b.stateDir, { recursive: true, force: true });
       write(b, [asst(occ(300_000)), bad]);
       expect(call(b)).toBeNull();
