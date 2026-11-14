@@ -29,6 +29,7 @@ import { hadronSendSms, resolveRunTools } from './index.js';
 import { maskPhoneNumber, MAX_SMS_BODY_CHARS } from './smsTools.js';
 import type { AppRun } from '../../../generated/prisma/index.js';
 import type { RunToolContext } from './types.js';
+import { testRunAgentId } from '../../../test/runAgent.js';
 
 const ORG_URN = 'sms-tool-org';
 const TO = '+15551234567';
@@ -41,7 +42,7 @@ async function mintRun(): Promise<AppRun> {
     data: {
       id: generateId(),
       organizationId: orgId,
-      appId,
+      appId, agentId: await testRunAgentId(db, orgId, appId),
       triggerKind: 'MANUAL',
       entryNodeUrn: `${ORG_URN}::mem::flow:entry`,
       status: 'RUNNING',

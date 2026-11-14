@@ -9,6 +9,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { testRunAgentId } from '../../../test/runAgent.js';
 
 let org: { id: string; urn: string };
 let reader: { id: string };
@@ -31,8 +32,8 @@ beforeEach(async () => {
   app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Flow', urn: `${org.urn}:flow` } });
 });
 
-const run = () => db.appRun.create({
-  data: { id: generateId(), organizationId: org.id, appId: app.id, triggerKind: 'MANUAL', entryNodeUrn: `hrn:node:${org.urn}:f:e`, status: 'COMPLETED' } as never,
+const run = async () => db.appRun.create({
+  data: { id: generateId(), organizationId: org.id, appId: app.id, agentId: await testRunAgentId(db, org.id, app.id), triggerKind: 'MANUAL', entryNodeUrn: `hrn:node:${org.urn}:f:e`, status: 'COMPLETED' } as never,
 });
 
 describe('#1577 — appRun(ref:) conceals an unreadable run', () => {

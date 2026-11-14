@@ -19,6 +19,7 @@ import { createTestableMcpServer } from './server.js';
 import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 import type { AuthContext } from '../middleware/auth.js';
 import type { RunToolContext } from '../lib/runner/tools/types.js';
+import { testRunAgentId } from '../test/runAgent.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const Q = resolvers.Query as any;
@@ -104,7 +105,7 @@ async function fixture() {
   const ctx = (u: { id: string }, extra: Partial<AuthContext> = {}): AuthContext =>
     ({ userId: u.id, roles: ['READER'], ...extra }) as AuthContext;
   const run = await db.appRun.create({ data: {
-    id: generateId(), organizationId: elsewhere.id, appId: app.id, userId: creatorOut.id, triggerKind: 'SCHEDULE',
+    id: generateId(), organizationId: elsewhere.id, appId: app.id, agentId: await testRunAgentId(db, elsewhere.id, app.id), userId: creatorOut.id, triggerKind: 'SCHEDULE',
     triggerId: (await db.agentSchedule.create({ data: { id: generateId(), organizationId: elsewhere.id, appId: app.id, name: 'S', cron: '* * * * *', entryNodeUrn: `hrn:node:${hOut.urn}:${LOC}` } })).id,
     entryNodeUrn: `hrn:node:${hOut.urn}:${LOC}`,
   } as never });

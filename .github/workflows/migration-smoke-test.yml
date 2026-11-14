@@ -112,6 +112,11 @@ jobs:
           #     composite keys Prisma cannot model against a polymorphic owner), so
           #     the diff wants to DROP them; the five lines and their
           #     `-- DropForeignKey` comment are whitelisted.
+          #   - #3689 (#3910 F1): `app_runs.agent_id` is NOT NULL in the DB (the
+          #     migration; post-push.sql for push-synced DBs) but optional in
+          #     schema.prisma, so a build serving the old nullable column after an
+          #     HDPRF-refused migration can still read retained agentless runs. The
+          #     diff wants to DROP NOT NULL; that line is whitelisted.
           # Any OTHER line in the diff is real drift and must fail CI.
           # Invoke the prisma bin directly (not `pnpm prisma`): pnpm 11's
           # verify-deps-before-run preamble ("Already up to date" / "Done
@@ -132,6 +137,7 @@ jobs:
             | grep -vE '^DROP INDEX "nodes_data_gin";$' \
             | grep -vE '^ALTER TABLE "agent_tasks" ALTER COLUMN "task_number" DROP NOT NULL,$' \
             | grep -vE '^ALTER COLUMN "handle" DROP NOT NULL;$' \
+            | grep -vE '^ALTER TABLE "app_runs" ALTER COLUMN "agent_id" DROP NOT NULL;$' \
             | grep -vE '^ALTER TABLE "served_prompts" DROP CONSTRAINT "served_prompts_(chat|run_owner|session_owner)_fkey";$' \
             | grep -vE '^DROP INDEX "(app_runs|sessions)_served_prompt_owner_uniq";$' \
             || true)

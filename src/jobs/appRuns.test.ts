@@ -43,6 +43,7 @@ import {
   type RunExecutionDeps,
 } from './appRuns.js';
 import { schedulerTick } from './scheduler.js';
+import { testRunAgentId } from '../test/runAgent.js';
 
 let orgId: string;
 let appId: string;
@@ -944,7 +945,7 @@ describe('schedulerTick (plan §7)', () => {
     const s = await makeSchedule();
     await db.appRun.create({
       data: {
-        id: generateId(), organizationId: orgId, appId, triggerKind: 'SCHEDULE',
+        id: generateId(), organizationId: orgId, appId, agentId: await testRunAgentId(db, orgId, appId), triggerKind: 'SCHEDULE',
         triggerId: s.id, entryNodeUrn: s.entryNodeUrn, status: 'RUNNING',
       },
     });
@@ -1074,7 +1075,7 @@ describe('setQuotaLimit + ensureQuotaRowsForScope (#510)', () => {
 });
 
 describe('a headless run writes as its agent (#1610)', () => {
-  it('executes inside an actor scope carrying AppRun.agentId, and as nobody without one', async () => {
+  it('executes inside an actor scope carrying AppRun.agentId (#3689: a run without one cannot exist)', async () => {
     const { currentActor } = await import('../lib/requestActor.js');
     const agent = await db.agent.create({ data: { id: generateId(), urn: 'run-org::run-agent', name: 'run-agent', organizationId: orgId } });
     await db.appAgent.create({ data: { appId, agentId: agent.id } });
@@ -1088,15 +1089,9 @@ describe('a headless run writes as its agent (#1610)', () => {
     });
     const withAgent = await mint({ agentId: agent.id });
     expect(await executeAppRun(db, withAgent.id, capture)).toBe('completed');
-    // #2712: R74 refuses minting a run with no Agent; a legacy row without one still runs as nobody.
-    const without = await db.appRun.create({ data: {
-      id: generateId(), organizationId: orgId, appId, triggerKind: 'MANUAL', entryNodeUrn: withAgent.entryNodeUrn,
-      budgetTokens: withAgent.budgetTokensInitial, budgetActions: withAgent.budgetActionsInitial,
-      budgetTokensInitial: withAgent.budgetTokensInitial, budgetActionsInitial: withAgent.budgetActionsInitial,
-      costMicroCents: 0n, timeoutMs: withAgent.timeoutMs,
-    } });
-    expect(await executeAppRun(db, without.id, capture)).toBe('completed');
-    expect(seen).toEqual([{ workerId: null, agentId: agent.id }, { workerId: null, agentId: null }]);
+    // #3689 (cor:agt:010:01 rev 45): the legacy agentless row this test once ran is refused by the database (NOT NULL +
+    // foreign key), pinned in src/test/integration/3689-apprun-agent-required.test.ts.
+    expect(seen).toEqual([{ workerId: null, agentId: agent.id }]);
     // Outside the run nothing leaks.
     expect(currentActor()).toEqual({ workerId: null, agentId: null });
   });

@@ -10,6 +10,7 @@ import { updateChatRootData, withChatRootLock } from './chatRoot.js';
 import { ensureCurrentNodeRevisionInTransaction } from './nodeRevisionSnapshot.js';
 import { chatMutations } from '../api/graphql/schema/resolvers.mutation.chat.js';
 import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
+import { testRunAgentId } from '../test/runAgent.js';
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 let root: { id: string; loc: string; memoryId: string }, userId: string, ctx: Context;
 beforeEach(async () => {
@@ -280,7 +281,7 @@ it('5: a real on-behalf-of run rename records a revision without HUMAN', async (
   const app = await db.app.create({ data: { id: generateId(), organizationId: memory.organizationId!, name: 'run3501', urn: `run3501:${generateId()}` } });
   await db.appAgent.create({ data: { appId: app.id, agentId: memory.userMemoryOfAgentId! } });
   await db.agentSubscription.create({ data: { userId, agentId: memory.userMemoryOfAgentId!, activatedAt: new Date() } });
-  const run = await db.appRun.create({ data: { id: generateId(), organizationId: memory.organizationId!, appId: app.id, userId, triggerKind: 'MANUAL', entryNodeUrn: 'hrn:node:example.com:synthetic:entry' } });
+  const run = await db.appRun.create({ data: { id: generateId(), organizationId: memory.organizationId!, appId: app.id, agentId: await testRunAgentId(db, memory.organizationId!, app.id), userId, triggerKind: 'MANUAL', entryNodeUrn: 'hrn:node:example.com:synthetic:entry' } });
   await db.memory.update({ where: { id: memory.id }, data: { appId: app.id } });
   await fingerprint(); const before = await raw();
   await chatMutations.updateChatTitle(null, { chatId: root.loc, title: 'Run title' }, { ...ctx, appId: app.id, clientId: `run:${run.id}`, portalHumanUserId: undefined });

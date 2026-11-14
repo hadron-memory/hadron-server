@@ -37,3 +37,14 @@ export function bootPromptRefusal(
     extensions: { code, surface: where.surface, agentName: where.agentName },
   });
 }
+
+/**
+ * #3689 (gate R2): the refusal's code when `err` is one built by {@link bootPromptRefusal}, else null. The trigger doors
+ * (webhook, schedule) answer it as a typed launch refusal instead of an internal fault: a trigger that names no Agent,
+ * or one whose Agent's boot prompt cannot be served, is refused the same way on every surface (cor:agt:040:10).
+ */
+export function bootPromptRefusalCode(err: unknown): BootPromptRefusalCode | null {
+  if (!(err instanceof GraphQLError)) return null;
+  const code = err.extensions?.code;
+  return typeof code === 'string' && (BOOT_PROMPT_REFUSAL_CODES as readonly string[]).includes(code) ? (code as BootPromptRefusalCode) : null;
+}

@@ -21,6 +21,7 @@ import { hadronRecordContentValidation, resolveRunTools } from '../lib/runner/to
 import type { RunToolContext } from '../lib/runner/tools/types.js';
 import type { AppRun } from '../generated/prisma/index.js';
 import { createTestableMcpServer } from './server.js';
+import { testRunAgentId } from '../test/runAgent.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
@@ -65,7 +66,7 @@ async function stamp(kind: 'HUMAN' | 'TASK' | null) {
 async function mintRun(entryNodeId: string | null): Promise<AppRun> {
   return db.appRun.create({
     data: {
-      id: generateId(), organizationId: orgId, appId, userId: leo,
+      id: generateId(), organizationId: orgId, appId, agentId: await testRunAgentId(db, orgId, appId), userId: leo,
       triggerKind: 'MANUAL', entryNodeUrn: 'cvm-org:mem:flow', entryNodeId, status: 'RUNNING',
     },
   });
