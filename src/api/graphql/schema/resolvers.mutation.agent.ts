@@ -44,6 +44,7 @@ import {
 } from '../../../controller/operations/publishAgentImport.js';
 import { assertMaySubscribeOrgToPublicAgent } from '../../../controller/operations/subscribeOrgToPublicAgent.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
+import { endGrantsOfAgentsNoLongerInstalled, liveAppsWhereInstalled } from '../../../lib/grants/agentInstallDeparture.js';
 import { removeAgentImport } from '../../../controller/operations/removeAgentImport.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { writeAgentBase } from '../../../lib/agentBase.js';
@@ -1170,6 +1171,8 @@ export const agentMutations = {
           });
         }
         const deletedAt = new Date();
+        // #4172 D4 is vacuous on main: assertNoLiveAgentReferences (above) refuses deleting an agent installed in a live App, so a
+        // deleted parent never witnesses a derived install there; pinned in resolvers.agentUninstallDeparture4172.test.ts.
         await tx.agent.update({ where: { id }, data: { deletedAt } });
         // #3690 / ruling 0259: any agent delete, soft delete included, is a departure. No FK action fires on a soft delete, so the grants
         // the agent HOLDS end here, after the `agents FOR UPDATE` lock (afterLock below): the grant row lock is the last one.
@@ -1443,6 +1446,15 @@ export const agentMutations = {
               updatedBy: ctx.userId ?? ctx.clientId ?? null,
             },
           });
+          // #4172 (D3): the licence stopped being usable, so an install of this agent in the org's Apps that existed ONLY by derivation
+          // through an importing parent is gone. Candidates: the org's live Apps where a parent that imports it is installed.
+          const parents = await tx.agentImport.findMany({ where: { importedAgentId: resolvedAgentId }, select: { parentAgentId: true } });
+          const candidateApps = new Set<string>();
+          for (const { parentAgentId } of parents) {
+            for (const appId of await liveAppsWhereInstalled(tx, parentAgentId, resolvedOrgId)) candidateApps.add(appId);
+          }
+          await endGrantsOfAgentsNoLongerInstalled(
+            tx, [...candidateApps].map((appId) => ({ appId, agentId: resolvedAgentId })), ctx.userId ?? null);
           return tx.agentOrgGrant.findUnique({
             where: { orgId_agentId: { orgId: resolvedOrgId, agentId: resolvedAgentId } },
           });
@@ -1536,7 +1548,24 @@ export const agentMutations = {
       if (!edge) {
         await requireReadableAgent(ctx, await ctx.db.agent.findUnique({ where: { id: resolvedImportedId } }), importedAgentRef);
       }
-      await removeAgentImport(ctx.db, resolvedParentId, resolvedImportedId);
+      // #4172: one authorized transaction, so the edge delete and the grants it ends commit or roll back together.
+      await withAuthorizedTx(
+        ctx,
+        [
+          { kind: 'agent', id: resolvedParentId },
+          ...(parent.organizationId ? [{ kind: 'org' as const, id: parent.organizationId }] : []),
+          ...(parent.ownerUserId ? [{ kind: 'user' as const, id: parent.ownerUserId }] : []),
+        ],
+        async (txCtx) => {
+          const current = await txCtx.db.agent.findUniqueOrThrow({ where: { id: resolvedParentId } });
+          if (current.organizationId !== parent.organizationId || current.ownerUserId !== parent.ownerUserId) {
+            throw new Error('Agent ownership changed; retry the operation');
+          }
+          await requireAgentAccess(txCtx, current, 'ADMIN');
+        },
+        (tx) => removeAgentImport(tx, resolvedParentId, resolvedImportedId, ctx.userId ?? null),
+        { lockMode: 'exclusive' },
+      );
       return true;
     },
 

@@ -124,6 +124,10 @@ describe('5: the end happens once, and nothing re-points the holder', () => {
 describe('a departure stamp needs its cause: the sealed holder has actually gone', () => {
   const stamp = (id: string) => exec(`UPDATE grants SET holder_departed_at = ${DB_NOW} WHERE id = $1`, id);
   it('a bare stamp on a grant whose holder is still there is refused, for every holder kind', async () => {
+    // #4171/#4172: "still there" for a person is a LIVE MEMBERSHIP in the org that owns the grant's App, and for an agent an
+    // EFFECTIVE INSTALLATION in the grant's App (the guard's causes); the fixtures give both.
+    await db.orgMember.create({ data: { organizationId: w.orgId, userId: w.user2Id, role: 'CONTRIBUTOR' } });
+    await db.appAgent.create({ data: { appId: w.appId, agentId: w.agentId } });
     for (const k of KINDS) {
       const id = await activeGrant({ user_id: null, [k.col]: k.id() });
       await refused(stamp(id), /grants are append-only/);
