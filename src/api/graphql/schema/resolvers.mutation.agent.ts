@@ -47,7 +47,7 @@ import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentO
 import { removeAgentImport } from '../../../controller/operations/removeAgentImport.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { writeAgentBase } from '../../../lib/agentBase.js';
-import { AgentNotFoundError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
+import { AgentNotFoundError, AmbiguousLegacyUrnError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
@@ -252,6 +252,16 @@ class PromotionOwnerDriftError extends Error {
 
 /** Attempts at deciding a promotion under anchors that match the target's current owner. */
 const MAX_PROMOTION_OWNER_ATTEMPTS = 3;
+
+/**
+ * #4140 (LOCAL F1): a ref that names no single memory is a miss. An ambiguous legacy alias is thrown before
+ * the caller's readability is known, so letting it escape would tell a caller who can read neither claimant
+ * "live aliases exist" where a missing ref answers the uniform refusal. Only these two typed outcomes are
+ * folded; a malformed relative URN and real faults keep propagating.
+ */
+function isUnresolvedTarget(e: unknown): boolean {
+  return e instanceof MemoryNotFoundError || e instanceof AmbiguousLegacyUrnError;
+}
 
 /** The one refusal a promotion target the caller can't read answers with (cor:api:140:03). */
 function promotionTargetNotFound(callerRef: string): MemoryNotFoundError {
@@ -612,8 +622,8 @@ export const agentMutations = {
       { orgRef: orgId, name, description, systemMemoryRef, visibility, type, surfaces, personaRole, usesTasks, resetContextAfterTask, memberRoles }: { orgRef?: string | null; name: string; description?: string; systemMemoryRef?: string | null; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; memberRoles?: string[] | null },
       ctx: Context,
     ) => {
-      // spec 047: an agent is owned by EXACTLY ONE of an org or a user. `orgId`
-      // present ⇒ org-owned (org ADMIN); `orgId` omitted ⇒ user-owned by the
+      // spec 047: an agent is owned by EXACTLY ONE of an org or a user. `orgRef`
+      // present ⇒ org-owned (org ADMIN); `orgRef` omitted ⇒ user-owned by the
       // caller, namespaced under their `@<handle>`. The chosen `namespace` is
       // the URN owner-atom (org domain OR `@<handle>`) — the rest of the compose
       // path is identical, and the system memory inherits the same owner.
@@ -662,7 +672,7 @@ export const agentMutations = {
         try {
           systemMemoryId = (await resolveMemoryRef(ctx.db, systemMemoryRef)).id;
         } catch (e) {
-          if (e instanceof MemoryNotFoundError) throw promotionTargetNotFound(systemMemoryRef);
+          if (isUnresolvedTarget(e)) throw promotionTargetNotFound(systemMemoryRef);
           throw e;
         }
       }
@@ -768,7 +778,7 @@ export const agentMutations = {
           try {
             incoming = (await resolveMemoryRef(ctx.db, systemMemoryRef)).id;
           } catch (e) {
-            if (e instanceof MemoryNotFoundError) throw refusedChange();
+            if (isUnresolvedTarget(e)) throw refusedChange();
             throw e;
           }
           if (incoming !== agent.systemMemoryId) throw refusedChange();
@@ -801,7 +811,7 @@ export const agentMutations = {
           try {
             incoming = (await resolveMemoryRef(ctx.db, systemMemoryRef)).id;
           } catch (e) {
-            if (e instanceof MemoryNotFoundError) throw promotionTargetNotFound(systemMemoryRef);
+            if (isUnresolvedTarget(e)) throw promotionTargetNotFound(systemMemoryRef);
             throw e;
           }
           const found = await ctx.db.memory.findUnique({ where: { id: incoming } });

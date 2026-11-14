@@ -183,14 +183,69 @@ describe('#4140 updateAgent(systemMemoryRef)', () => {
       expect(e.message).toBe(`MEMORY_NOT_FOUND: ${r}`);
     }
   });
-  it('first attach on a USER-owned agent is the owner\'s act BEFORE resolution: an admin sees the same FORBIDDEN for a missing and an existing ref', async () => {
+  it('first attach on a USER-owned agent is the owner\'s act BEFORE resolution: an admitted platform ADMIN sees the exact FORBIDDEN for existing, missing and relative refs', async () => {
     const owner = await db.user.create({ data: { id: generateId(), githubId: 940199, githubUsername: `refs4140-owner-${generateId()}`, handle: `own${generateId().slice(0, 8)}`.toLowerCase(), roles: ['READER'] } });
     const agent = await db.agent.create({ data: { id: generateId(), ownerUserId: owner.id, urn: `${owner.handle}:brainless`, name: 'Mine', visibility: 'PERSONAL' } });
-    await db.orgMember.create({ data: { id: generateId(), organizationId: orgA.id, userId: owner.id, role: 'READER' } });
+    // A persisted PLATFORM admin passes Agent admission (the personal agent is visible to them), so the owner-act
+    // guard is what refuses. A plain org ADMIN would stop earlier at AGENT_NOT_FOUND and never reach it (LOCAL F2).
+    const pa = await db.user.create({ data: { id: generateId(), githubId: 940198, githubUsername: `refs4140-pa-${generateId()}`, roles: ['ADMIN'] } });
+    const paCtx = { db, userId: pa.id, roles: ['ADMIN'], clientId: `user:${pa.id}` } as unknown as Context;
     const m = await knowledge(orgA, 'x');
-    const exists = await refusal(M.updateAgent({}, { ref: agent.id, systemMemoryRef: m.id }, ctxOf(admin.id)));
-    const missing = await refusal(M.updateAgent({}, { ref: agent.id, systemMemoryRef: generateId() }, ctxOf(admin.id)));
-    expect(codeOf(exists)).toBe(codeOf(missing));
-    expect(codeOf(exists)).not.toBe('MEMORY_NOT_FOUND');
+    for (const ref of [m.id, m.urn, generateId(), `${orgA.urn}:never-existed`, 'relative:shape']) {
+      const e = await refusal(M.updateAgent({}, { ref: agent.id, systemMemoryRef: ref }, paCtx));
+      expect(codeOf(e)).toBe('FORBIDDEN');
+      expect(e.message).toMatch(/owner's act/);
+    }
+    expect((await db.agent.findUniqueOrThrow({ where: { id: agent.id } })).systemMemoryId).toBeNull();
+  });
+  it('positive control: a non-owner platform ADMIN resending the CURRENT system memory by URN succeeds unchanged', async () => {
+    const owner = await db.user.create({ data: { id: generateId(), githubId: 940197, githubUsername: `refs4140-own2-${generateId()}`, handle: `own${generateId().slice(0, 8)}`.toLowerCase(), roles: ['READER'] } });
+    const created = await M.createAgent({}, { name: 'Mine with brain' }, ctxOf(owner.id));
+    const sys = await db.memory.findUniqueOrThrow({ where: { id: created.systemMemoryId } });
+    const pa = await db.user.create({ data: { id: generateId(), githubId: 940196, githubUsername: `refs4140-pa2-${generateId()}`, roles: ['ADMIN'] } });
+    const paCtx = { db, userId: pa.id, roles: ['ADMIN'], clientId: `user:${pa.id}` } as unknown as Context;
+    const out = await M.updateAgent({}, { ref: created.id, systemMemoryRef: sys.urn, description: 'admin touch' }, paCtx);
+    expect(out.systemMemoryId).toBe(sys.id);
+  });
+});
+
+describe('#4140 LOCAL F1: an unreadable AMBIGUOUS legacy alias is indistinguishable from a missing ref', () => {
+  const twoClaimants = async () => {
+    const claim = `${orgB.urn}:ambig-${generateId()}`;
+    const a = await knowledge(orgB, 'amb1');
+    const b = await knowledge(orgB, 'amb2');
+    await db.memory.updateMany({ where: { id: { in: [a.id, b.id] } }, data: { legacyUrn: claim } });
+    await db.orgMember.deleteMany({ where: { organizationId: orgB.id, userId: admin.id } });
+    return { claim, ids: [a.id, b.id] };
+  };
+  const clear = (ids: string[]) => db.memory.updateMany({ where: { id: { in: ids } }, data: { legacyUrn: null } });
+
+  it('createAgent: same answer with and without the foreign aliases', async () => {
+    const { claim, ids } = await twoClaimants();
+    const withAlias = await refusal(M.createAgent({}, { orgRef: orgA.id, name: 'Amb', systemMemoryRef: claim }, ctxOf(admin.id)));
+    await clear(ids);
+    const without = await refusal(M.createAgent({}, { orgRef: orgA.id, name: 'Amb', systemMemoryRef: claim }, ctxOf(admin.id)));
+    expect(codeOf(withAlias)).toBe('MEMORY_NOT_FOUND');
+    expect(withAlias.message).toBe(without.message);
+    expect(withAlias.message).toBe(`MEMORY_NOT_FOUND: ${claim}`);
+  });
+  it('updateAgent first attach: same answer with and without the foreign aliases', async () => {
+    const a = await brainless('AmbAttach');
+    const { claim, ids } = await twoClaimants();
+    const withAlias = await refusal(M.updateAgent({}, { ref: a.id, systemMemoryRef: claim }, ctxOf(admin.id)));
+    await clear(ids);
+    const without = await refusal(M.updateAgent({}, { ref: a.id, systemMemoryRef: claim }, ctxOf(admin.id)));
+    expect(codeOf(withAlias)).toBe('MEMORY_NOT_FOUND');
+    expect(withAlias.message).toBe(without.message);
+  });
+  it('updateAgent while attached: the one Cannot-unset-or-change refusal either way', async () => {
+    const a = await M.createAgent({}, { orgRef: orgA.id, name: 'AmbAttached' }, ctxOf(admin.id));
+    const { claim, ids } = await twoClaimants();
+    const withAlias = await refusal(M.updateAgent({}, { ref: a.id, systemMemoryRef: claim }, ctxOf(admin.id)));
+    await clear(ids);
+    const without = await refusal(M.updateAgent({}, { ref: a.id, systemMemoryRef: claim }, ctxOf(admin.id)));
+    expect(codeOf(withAlias)).toBe('BAD_USER_INPUT');
+    expect(withAlias.message).toMatch(/Cannot unset or change/);
+    expect(withAlias.message).toBe(without.message);
   });
 });
