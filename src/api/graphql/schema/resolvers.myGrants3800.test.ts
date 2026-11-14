@@ -236,6 +236,23 @@ describe('allows', () => {
   });
 });
 
+describe('allows reads the ACTION\'s limits (#4163)', () => {
+  const setLimits = (max: string, life: string) => db.$executeRawUnsafe(`UPDATE actions SET max_uses = ${max}, lifetime_seconds = ${life} WHERE name LIKE 'test.s1a.%'`);
+  it('an hour-old grant and a once-used grant read allows false though the row states no limit; a fresh one reads true', async () => {
+    await setLimits('1', '3600');
+    try {
+      const old = await mine({ activated_at: raw(`${DB_NOW} - interval '2 hours'`) });
+      const used = await mine({ use_count: 1 });
+      const fresh = await mine({ activated_at: raw(`${DB_NOW} - interval '10 minutes'`) });
+      const r = await asMe();
+      const by = new Map((r.data.myGrants.items as Array<{ id: string; allows: boolean }>).map((i) => [i.id, i.allows]));
+      expect(by.get(old)).toBe(false);
+      expect(by.get(used)).toBe(false);
+      expect(by.get(fresh)).toBe(true);
+    } finally { await setLimits('NULL', 'NULL'); }
+  });
+});
+
 describe('the surface', () => {
   it('is a read: the query exists and no writer or MCP tool was added', () => {
     expect(typeDefs).toContain('myGrants(limit: Int, offset: Int): GrantsPage!');
