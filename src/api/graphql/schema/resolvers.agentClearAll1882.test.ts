@@ -50,7 +50,7 @@ describe('#1882 — platform clear of user-owned Agent credentials', () => {
       const otherBefore = await db.aiServiceConfig.findMany({ where: { agentId: otherAgentId }, orderBy: { id: 'asc' } });
       const decrypt = vi.spyOn(tokenCrypto, 'decryptToken');
       const response = await api.executeOperation({
-        query: 'mutation($ref: ID!) { clearAgentAIConfig(agentId: $ref) { id name aiProvider aiModel aiApiKeyPreview hasAiApiKey } }',
+        query: 'mutation($ref: ID!) { clearAgentAIConfig(agentRef: $ref) { id name aiProvider aiModel aiApiKeyPreview hasAiApiKey } }',
         variables: { ref: `hrn:agent:clear-owner:target` },
       }, { contextValue: context(adminId, [role]) });
       expect(response.body.kind).toBe('single');
@@ -81,7 +81,7 @@ describe('#1882 — platform clear of user-owned Agent credentials', () => {
     const otherBefore = await db.aiServiceConfig.findMany({ where: { agentId: otherAgentId }, orderBy: { id: 'asc' } });
     const decrypt = vi.spyOn(tokenCrypto, 'decryptToken');
     const response = await api.executeOperation({
-      query: 'mutation($ref: ID!) { clearAgentAIConfig(agentId: $ref) { id aiProvider aiModel aiApiKeyPreview hasAiApiKey } }',
+      query: 'mutation($ref: ID!) { clearAgentAIConfig(agentRef: $ref) { id aiProvider aiModel aiApiKeyPreview hasAiApiKey } }',
       variables: { ref: agentId },
     }, { contextValue: context(ownerId) });
     expect(response.body.kind).toBe('single');
@@ -109,7 +109,7 @@ describe('#1882 — platform clear of user-owned Agent credentials', () => {
     const orgAgent = await db.agent.create({ data: { id: generateId(), organizationId: orgId, name: 'Org Agent', urn: 'clear-controls.test:agent', visibility: 'ORGANIZATION' } });
     await config(orgAgent.id, 'default');
     const backup = await config(orgAgent.id, 'backup');
-    await resolvers.Mutation.clearAgentAIConfig({}, { agentId: orgAgent.id }, context(adminId, ['ADMIN']));
+    await resolvers.Mutation.clearAgentAIConfig({}, { agentRef: orgAgent.id }, context(adminId, ['ADMIN']));
     expect(await db.aiServiceConfig.findMany({ where: { agentId: orgAgent.id } })).toEqual([backup]);
   });
 

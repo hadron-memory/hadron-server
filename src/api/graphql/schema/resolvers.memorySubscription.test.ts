@@ -93,7 +93,7 @@ describe('createMemorySubscription', () => {
   it('subscriber-org admin can create a subscription to a PUBLIC memory (input by ID)', async () => {
     const sub = await resolvers.Mutation.createMemorySubscription(
       null,
-      { memoryId: publicMemory.id, orgId: subscriberOrg.id, role: 'READER' },
+      { memoryRef: publicMemory.id, orgRef: subscriberOrg.id, role: 'READER' },
       adminCtx(subscriberAdminUser.id),
     );
     expect(sub.memoryId).toBe(publicMemory.id);
@@ -105,7 +105,7 @@ describe('createMemorySubscription', () => {
   it('accepts URNs for both memoryId and orgId', async () => {
     const sub = await resolvers.Mutation.createMemorySubscription(
       null,
-      { memoryId: publicMemory.urn, orgId: subscriberOrg.urn, role: 'READER' },
+      { memoryRef: publicMemory.urn, orgRef: subscriberOrg.urn, role: 'READER' },
       adminCtx(subscriberAdminUser.id),
     );
     expect(sub.memoryId).toBe(publicMemory.id);
@@ -116,8 +116,8 @@ describe('createMemorySubscription', () => {
     const sub = await resolvers.Mutation.createMemorySubscription(
       null,
       {
-        memoryId: `urn:memory:${publicMemory.urn}`,
-        orgId: `urn:org:${subscriberOrg.urn}`,
+        memoryRef: `urn:memory:${publicMemory.urn}`,
+        orgRef: `urn:org:${subscriberOrg.urn}`,
         role: 'READER',
       },
       adminCtx(subscriberAdminUser.id),
@@ -130,7 +130,7 @@ describe('createMemorySubscription', () => {
     await expect(
       resolvers.Mutation.createMemorySubscription(
         null,
-        { memoryId: privateMemory.id, orgId: subscriberOrg.id, role: 'READER' },
+        { memoryRef: privateMemory.id, orgRef: subscriberOrg.id, role: 'READER' },
         adminCtx(subscriberAdminUser.id),
       ),
     ).rejects.toMatchObject({ extensions: { code: 'SUBSCRIPTION_REQUIRES_PUBLIC_MEMORY' } });
@@ -146,7 +146,7 @@ describe('createMemorySubscription', () => {
     await expect(
       resolvers.Mutation.createMemorySubscription(
         null,
-        { memoryId: publicMemory.id, orgId: subscriberOrg.id, role: 'READER' },
+        { memoryRef: publicMemory.id, orgRef: subscriberOrg.id, role: 'READER' },
         readerCtx(reader.id),
       ),
     ).rejects.toThrow();
@@ -156,7 +156,7 @@ describe('createMemorySubscription', () => {
     await expect(
       resolvers.Mutation.createMemorySubscription(
         null,
-        { memoryId: publicMemory.id, orgId: ownerOrg.id, role: 'READER' },
+        { memoryRef: publicMemory.id, orgRef: ownerOrg.id, role: 'READER' },
         adminCtx(ownerAdminUser.id),
       ),
     ).rejects.toMatchObject({ extensions: { code: 'OWNER_ORG_CANNOT_SUBSCRIBE' } });
@@ -171,7 +171,7 @@ describe('createMemorySubscription', () => {
     });
     const err = await resolvers.Mutation.createMemorySubscription(
       null,
-      { memoryId: privateMemory.id, orgId: subscriberOrg.id, role: 'READER' },
+      { memoryRef: privateMemory.id, orgRef: subscriberOrg.id, role: 'READER' },
       readerCtx(outsider.id),
     ).then(() => null, (e: unknown) => e);
     expect(err).not.toBeNull();
@@ -218,7 +218,7 @@ describe('createMemorySubscription', () => {
       db: staleMemoryOnce(db, () => db.memory.update({ where: { id: publicMemory.id }, data: { visibility: 'ORGANIZATION' } })),
     };
     await expect(
-      resolvers.Mutation.createMemorySubscription(null, { memoryId: publicMemory.id, orgId: subscriberOrg.id, role: 'READER' }, ctx),
+      resolvers.Mutation.createMemorySubscription(null, { memoryRef: publicMemory.id, orgRef: subscriberOrg.id, role: 'READER' }, ctx),
     ).rejects.toMatchObject({
       message: 'Only public memories can be subscribed to by other organizations',
       extensions: { code: 'SUBSCRIPTION_REQUIRES_PUBLIC_MEMORY' },
@@ -231,7 +231,7 @@ describe('createMemorySubscription', () => {
       db: staleMemoryOnce(db, () => db.memory.update({ where: { id: publicMemory.id }, data: { organizationId: subscriberOrg.id } })),
     };
     await expect(
-      resolvers.Mutation.createMemorySubscription(null, { memoryId: publicMemory.id, orgId: subscriberOrg.id, role: 'READER' }, ctx),
+      resolvers.Mutation.createMemorySubscription(null, { memoryRef: publicMemory.id, orgRef: subscriberOrg.id, role: 'READER' }, ctx),
     ).rejects.toMatchObject({
       message: 'Owner organization has implicit access and cannot subscribe',
       extensions: { code: 'OWNER_ORG_CANNOT_SUBSCRIBE' },
@@ -268,7 +268,7 @@ describe('createMemorySubscription', () => {
       resolvers.Mutation.createMemorySubscription(
         null,
         // 25-char cuid-shaped string that doesn't exist in DB.
-        { memoryId: 'cnonexistentnonexistent12', orgId: subscriberOrg.id, role: 'READER' },
+        { memoryRef: 'cnonexistentnonexistent12', orgRef: subscriberOrg.id, role: 'READER' },
         adminCtx(subscriberAdminUser.id),
       ),
     ).rejects.toThrow(/No match for memoryRef/);
@@ -279,7 +279,7 @@ describe('createMemorySubscription', () => {
       resolvers.Mutation.createMemorySubscription(
         null,
         // URN-shaped string that doesn't exist in DB.
-        { memoryId: publicMemory.id, orgId: 'no-such-org-urn', role: 'READER' },
+        { memoryRef: publicMemory.id, orgRef: 'no-such-org-urn', role: 'READER' },
         adminCtx(subscriberAdminUser.id),
       ),
     ).rejects.toThrow(/No match for orgRef/);
@@ -306,7 +306,7 @@ describe('updateMemorySubscription', () => {
   it('owner-org admin can update the role (input by ID)', async () => {
     const sub = await resolvers.Mutation.updateMemorySubscription(
       null,
-      { memoryId: publicMemory.id, orgId: subscriberOrg.id, role: 'CONTRIBUTOR' },
+      { memoryRef: publicMemory.id, orgRef: subscriberOrg.id, role: 'CONTRIBUTOR' },
       adminCtx(ownerAdminUser.id),
     );
     expect(sub.role).toBe('CONTRIBUTOR');
@@ -315,7 +315,7 @@ describe('updateMemorySubscription', () => {
   it('accepts URNs for both memoryId and orgId', async () => {
     const sub = await resolvers.Mutation.updateMemorySubscription(
       null,
-      { memoryId: publicMemory.urn, orgId: subscriberOrg.urn, role: 'CONTRIBUTOR' },
+      { memoryRef: publicMemory.urn, orgRef: subscriberOrg.urn, role: 'CONTRIBUTOR' },
       adminCtx(ownerAdminUser.id),
     );
     expect(sub.role).toBe('CONTRIBUTOR');
@@ -341,7 +341,7 @@ describe('deleteMemorySubscription', () => {
   it('owner-org admin can delete (input by ID)', async () => {
     const result = await resolvers.Mutation.deleteMemorySubscription(
       null,
-      { memoryId: publicMemory.id, orgId: subscriberOrg.id },
+      { memoryRef: publicMemory.id, orgRef: subscriberOrg.id },
       adminCtx(ownerAdminUser.id),
     );
     expect(result).toBe(true);
@@ -354,7 +354,7 @@ describe('deleteMemorySubscription', () => {
   it('subscriber-org admin can also delete (either side admin gates)', async () => {
     const result = await resolvers.Mutation.deleteMemorySubscription(
       null,
-      { memoryId: publicMemory.id, orgId: subscriberOrg.id },
+      { memoryRef: publicMemory.id, orgRef: subscriberOrg.id },
       adminCtx(subscriberAdminUser.id),
     );
     expect(result).toBe(true);
@@ -363,7 +363,7 @@ describe('deleteMemorySubscription', () => {
   it('accepts URNs for both memoryId and orgId', async () => {
     const result = await resolvers.Mutation.deleteMemorySubscription(
       null,
-      { memoryId: publicMemory.urn, orgId: subscriberOrg.urn },
+      { memoryRef: publicMemory.urn, orgRef: subscriberOrg.urn },
       adminCtx(ownerAdminUser.id),
     );
     expect(result).toBe(true);
@@ -376,7 +376,7 @@ describe('deleteMemorySubscription', () => {
     await expect(
       resolvers.Mutation.deleteMemorySubscription(
         null,
-        { memoryId: publicMemory.id, orgId: subscriberOrg.id },
+        { memoryRef: publicMemory.id, orgRef: subscriberOrg.id },
         readerCtx(stranger.id),
       ),
     ).rejects.toThrow(/Forbidden/);

@@ -67,7 +67,7 @@ const UPDATE = `
 
 const CREATE = `
   mutation Create($orgId: ID!, $name: String!, $source: String) {
-    createMemory(orgId: $orgId, name: $name, source: $source) { id source }
+    createMemory(orgRef: $orgId, name: $name, source: $source) { id source }
   }
 `;
 

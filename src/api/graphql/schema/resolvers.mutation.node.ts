@@ -4792,11 +4792,11 @@ export const nodeMutations = {
     // invocation before a transaction or other write side effect.
     replaceSubtree: async (
       _: unknown,
-      { memoryId }: { memoryId: string },
+      { memoryRef }: { memoryRef: string },
       ctx: Context,
     ) => {
       // Preserve the ordinary write-access and concealed-memory boundary.
-      const { id } = await resolveMemoryRefForWrite(ctx, memoryId);
+      const { id } = await resolveMemoryRefForWrite(ctx, memoryRef);
       await requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, id);
       return ctx.db.$transaction(async tx => {
         await lockInstallAuthoritiesFirst(tx, ctx, [id]);

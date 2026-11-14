@@ -276,7 +276,7 @@ describe('locked vs unlocked writes', () => {
         });
         await atOldFlag;
         await resolvers.Mutation.encryptMemory(
-          {}, { memoryId: plainMemory.id, passphrase: PASS },
+          {}, { memoryRef: plainMemory.id, passphrase: PASS },
           { db, roles: ['ADMIN'], userId: owner.id } as Context,
         );
         release();
@@ -321,7 +321,7 @@ describe('locked vs unlocked writes', () => {
       });
       await atOldFlag;
       await resolvers.Mutation.encryptMemory(
-        {}, { memoryId: plainMemory.id, passphrase: PASS },
+        {}, { memoryRef: plainMemory.id, passphrase: PASS },
         { db, roles: ['ADMIN'], userId: owner.id } as Context,
       );
       release();

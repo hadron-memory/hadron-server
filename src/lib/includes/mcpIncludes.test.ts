@@ -28,7 +28,7 @@ beforeEach(async () => {
   const org = await db.organization.create({ data: { id: generateId(), name: 'Inc Org', urn: 'inc.example' } });
   admin = await db.user.create({ data: { githubId: 204003, githubUsername: 'inc-admin3', handle: 'inc-admin3', roles: [] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  const m = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'inc' }, gql());
+  const m = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'inc' }, gql());
   memoryId = m.id; memoryUrn = m.urn;
   await db.node.create({ data: { id: generateId(), memoryId, loc: 'b', name: 'b', content: 'B' } });
 });

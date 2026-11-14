@@ -127,7 +127,7 @@ describe('(b) chatToolChoiceFor(provider, model): the pure unsaved-pair decision
 
 describe('(c) chatEffectiveToolChoice(chatId)', () => {
   const asMember = (extra: Partial<Context> = {}) => ctx(member, extra);
-  const start = (args: Record<string, unknown> = {}, c: Context = asMember()) => M.startChat(null, { agentId: agent.id, scope: 'shared', ...args }, c);
+  const start = (args: Record<string, unknown> = {}, c: Context = asMember()) => M.startChat(null, { agentRef: agent.id, scope: 'shared', ...args }, c);
   const effective = (chatId: string, c: Context = asMember()) => Q.chatEffectiveToolChoice(null, { chatId }, c);
 
   it('default branch: a chat on `default` returns the decision of the config the walk lands on, at Agent, Org and Host level', async () => {

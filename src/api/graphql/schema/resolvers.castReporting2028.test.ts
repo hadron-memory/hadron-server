@@ -499,7 +499,7 @@ it('public self-leave cannot commit between the deciding membership read and the
   await started;
   const observed = observeTransactionBackend(db);
   let left = false;
-  const leaving = observed.db.$transaction(tx => M.leaveApp({}, { appId: app.id }, { ...memberCtx, db: tx }));
+  const leaving = observed.db.$transaction(tx => M.leaveApp({}, { appRef: app.id }, { ...memberCtx, db: tx }));
   const outcome = leaving.then(value => { left = true; return { value }; }, error => { left = true; return { error }; });
   try {
     const pid = await observed.backendFor(leaving);
@@ -526,7 +526,7 @@ it('self-leave winning its row lock is rechecked after the cast waits, with no m
   let release!: () => void; let ready!: () => void;
   const held = new Promise<void>(r => { release = r; }); const started = new Promise<void>(r => { ready = r; });
   const leaving = db.$transaction(async tx => {
-    await M.leaveApp({}, { appId: app.id }, { ...memberCtx, db: tx }); ready(); await held;
+    await M.leaveApp({}, { appRef: app.id }, { ...memberCtx, db: tx }); ready(); await held;
   }, { timeout: 30000 });
   await started;
   const observed = observeTransactionBackend(db);

@@ -67,8 +67,8 @@ import {
   requireOrgRole,
   requireOwnerOrOrgRole,
   rethrowAiConfigTyped,
-  resolveUserRefArg,
-  resolveAppRefArg,
+  resolveRequiredUserRef,
+  resolveRequiredAppRef,
   APP_INCLUDE,
   installAgentIntoAppCore,
   uninstallAgentFromAppCore,
@@ -276,31 +276,25 @@ async function provisionAppSharedMemory(
 
 async function removeAppMemberWithAdmission(
   _: unknown,
-  {
-    appRef,
-    appId,
-    userRef,
-    userId,
-    instruction,
-  }: {
-    appRef?: string | null;
-    appId?: string | null;
-    userRef?: string | null;
-    userId?: string | null;
+  { appRef, userRef, instruction }: {
+    appRef: string;
+    userRef: string;
     instruction?: ActInstruction | null;
   },
   ctx: Context,
   expectedAdmission?: StaffActAdmission,
 ): Promise<boolean> {
   // #764 + #816 review: appRef/userRef accept id / URN / (user) handle /
-  // email. Evaluate the ROLE gate BEFORE resolving the target user, so an
+  // email. #4142 (S6 chunk F) dropped the deprecated appId/userId aliases:
+  // the refs are required. Evaluate the ROLE gate BEFORE resolving the
+  // target user, so an
   // unauthorized caller can't turn user resolution into an existence
   // oracle. A role-authorized caller may remove anyone; everyone else may
   // remove ONLY themselves — and a self-only caller's target resolution
   // maps any miss to the same Forbidden, with the resolved id required to
   // be the caller, so an unknown handle/email is indistinguishable from a
   // real user they can't remove.
-  const resolvedAppId = await resolveAppRefArg(ctx.db, { ref: appRef, id: appId });
+  const resolvedAppId = await resolveRequiredAppRef(ctx.db, appRef);
   const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
   const forbidRemove = () =>
     forbiddenError('Forbidden: only org admins, App owners, or the user themselves can remove members');
@@ -313,9 +307,9 @@ async function removeAppMemberWithAdmission(
   const authorizedByRole = await callerManagesAppMembers(ctx, app, resolvedAppId);
   let resolvedUserId: string;
   if (authorizedByRole) {
-    resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
+    resolvedUserId = await resolveRequiredUserRef(ctx.db, userRef);
   } else {
-    resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId }).catch(
+    resolvedUserId = await resolveRequiredUserRef(ctx.db, userRef).catch(
       (e: unknown) => {
         if (e instanceof GraphQLError && e.extensions?.code === 'NOT_FOUND') throw forbidRemove();
         throw e;
@@ -1271,25 +1265,17 @@ export const appMutations = {
     // and contracts/agent-app-graphql.md "ensureAppMember".
     ensureAppMember: async (
       _: unknown,
-      {
-        appRef,
-        appId,
-        userRef,
-        userId,
-        role,
-        instruction,
-      }: {
-        appRef?: string | null;
-        appId?: string | null;
-        userRef?: string | null;
-        userId?: string | null;
+      { appRef, userRef, role, instruction }: {
+        appRef: string;
+        userRef: string;
         role: string;
         instruction?: ActInstruction | null;
       },
       ctx: Context,
     ) => {
       // #764: appRef/userRef accept id / URN / (user) handle / email.
-      const resolvedAppId = await resolveAppRefArg(ctx.db, { ref: appRef, id: appId });
+      // #4142 (S6 chunk F): the deprecated appId/userId aliases dropped.
+      const resolvedAppId = await resolveRequiredAppRef(ctx.db, appRef);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
 
       // Authorization: ADMIN/OWNER of the App's owning org, the user-owner of a
@@ -1308,7 +1294,7 @@ export const appMutations = {
       // Target user resolved AFTER the authorization gate above (which keys off
       // ctx.userId), so an unauthorized caller can't use NOT_FOUND to enumerate
       // users.
-      const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
+      const resolvedUserId = await resolveRequiredUserRef(ctx.db, userRef);
       try {
         await withAuthorizedTx(
           ctx,
@@ -1377,7 +1363,7 @@ export const appMutations = {
     // validation are delegated to `joinApp` → `ensureAppMember`.
     joinApp: async (
       _: unknown,
-      { appId }: { appId: string },
+      { appRef }: { appRef: string },
       ctx: Context,
     ) => {
       if (!ctx.userId) {
@@ -1393,7 +1379,7 @@ export const appMutations = {
       // resolveAppRef can throw the typed errors we want to surface.
       let resolvedAppId: string;
       try {
-        ({ id: resolvedAppId } = await resolveAppRef(ctx.db, appId));
+        ({ id: resolvedAppId } = await resolveAppRef(ctx.db, appRef));
         // #1573: self-service membership is an authority write. Hold the App
         // and its owner (org or user) shared, alongside the joining user the
         // helper adds, so removeAppMember / deleteApp / uninstall (exclusive on
@@ -1454,7 +1440,7 @@ export const appMutations = {
     // currently-logged-in user leaves an App. Idempotent.
     leaveApp: async (
       _: unknown,
-      { appId, instruction }: { appId: string; instruction?: ActInstruction | null },
+      { appRef, instruction }: { appRef: string; instruction?: ActInstruction | null },
       ctx: Context,
     ): Promise<{ appId: string; userId: string }> => {
       if (!ctx.userId) {
@@ -1462,7 +1448,7 @@ export const appMutations = {
           extensions: { code: 'UNAUTHENTICATED' },
         });
       }
-      const { id: resolvedAppId } = await resolveAppRef(ctx.db, appId);
+      const { id: resolvedAppId } = await resolveAppRef(ctx.db, appRef);
       // Preserve legacy person cleanup: reference resolution already identified the App; no second existence probe.
       // Worker admission is carried into the locked member-removal implementation below.
       const admission = await requireInstructedAct(ctx, resolvedAppId, instruction, async () => true,
@@ -1473,7 +1459,7 @@ export const appMutations = {
         await leaveApp(ctx.db, { appId: resolvedAppId, userId: ctx.userId });
       } else {
         // Reuse the locked member gate and canonical removal/no-op records for a worker's self-leave.
-        await removeAppMemberWithAdmission(_, { appId: resolvedAppId, userId: ctx.userId, instruction }, ctx, admission);
+        await removeAppMemberWithAdmission(_, { appRef: resolvedAppId, userRef: ctx.userId, instruction }, ctx, admission);
       }
       return { appId: resolvedAppId, userId: ctx.userId };
     },

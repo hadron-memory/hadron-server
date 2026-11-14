@@ -27,7 +27,7 @@ let memoryId: string, adminId: string, orgUrn: string;
 const ctx = (): Context => ({ db, roles: ['ADMIN'], userId: adminId, clientId: `user:${adminId}` });
 
 async function mkMemory(name: string, ordered: boolean) {
-  const memory = await resolvers.Mutation.createMemory(null, { orgId: (await db.organization.findFirstOrThrow()).id, name }, ctx());
+  const memory = await resolvers.Mutation.createMemory(null, { orgRef: (await db.organization.findFirstOrThrow()).id, name }, ctx());
   if (ordered) await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'r1', name: 'r1', seq: 1 } });
   return memory.id as string;
 }

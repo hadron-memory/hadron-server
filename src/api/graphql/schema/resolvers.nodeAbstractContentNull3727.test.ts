@@ -450,7 +450,7 @@ describe('#3727 generated kind doors — controls (acceptance 2: doors inherit t
     const org = await db.organization.create({ data: { name: 'Door', urn: `n3727-door-${generateId()}.example` } });
     const admin = (await db.user.create({ data: { handle: `n3727-adm-${generateId()}`, roles: ['ADMIN'] } })).id;
     await db.orgMember.create({ data: { organizationId: org.id, userId: admin, role: 'ADMIN' } });
-    const doorMemory = (await M.createMemory(null, { orgId: org.id, name: 'Door memory' }, { db, userId: admin, roles: ['ADMIN'] } as Context)).id;
+    const doorMemory = (await M.createMemory(null, { orgRef: org.id, name: 'Door memory' }, { db, userId: admin, roles: ['ADMIN'] } as Context)).id;
     const adminCtx = { db, userId: admin, roles: ['ADMIN'] } as Context;
 
     const log = await M.createDecisionLog(null, { memoryRef: doorMemory, loc: 'decisions', defaultDeciders: [admin] }, adminCtx);
@@ -489,7 +489,7 @@ describe('#3727 generated kind doors — controls (acceptance 2: doors inherit t
     const admin = (await db.user.create({ data: { handle: `n3727-run-${generateId()}`, roles: ['ADMIN'] } })).id;
     await db.orgMember.create({ data: { organizationId: org.id, userId: admin, role: 'ADMIN' } });
     const M = resolvers.Mutation as unknown as Record<string, (a: unknown, b: Record<string, unknown>, c: Context) => Promise<{ id: string }>>;
-    const runMemory = (await M.createMemory(null, { orgId: org.id, name: 'Run memory' }, { db, userId: admin, roles: ['ADMIN'] } as Context)).id;
+    const runMemory = (await M.createMemory(null, { orgRef: org.id, name: 'Run memory' }, { db, userId: admin, roles: ['ADMIN'] } as Context)).id;
     const run = { principal: { db, roles: [], userId: admin }, db, run: { id: 'run-n3727', organizationId: org.id } } as never;
     const memRow = await db.memory.findUniqueOrThrow({ where: { id: runMemory } });
     const urn = `hrn:node:${memRow.urn}:runtool`;

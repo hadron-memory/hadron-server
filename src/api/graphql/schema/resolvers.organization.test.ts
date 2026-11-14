@@ -314,7 +314,7 @@ describe('Mutation.createOrganization — rejects a malformed org URN (#376)', (
 
 describe('Mutation.deleteOrganization (007-entity-id-or-urn)', () => {
   it('accepts a URN', async () => {
-    const ok = await resolvers.Mutation.deleteOrganization({}, { id: org.urn }, adminCtx());
+    const ok = await resolvers.Mutation.deleteOrganization({}, { ref: org.urn }, adminCtx());
     expect(ok).toBe(true);
     const after = await db.organization.findUnique({ where: { id: org.id } });
     expect(after?.deletedAt).not.toBeNull();
@@ -329,7 +329,7 @@ describe('Mutation.linkGithubApp (007-entity-id-or-urn)', () => {
   it('accepts a URN', async () => {
     const updated = await resolvers.Mutation.linkGithubApp(
       {},
-      { orgId: org.urn, installationId: 12345 },
+      { orgRef: org.urn, installationId: 12345 },
       adminCtx(),
     );
     expect(updated.id).toBe(org.id);
@@ -348,7 +348,7 @@ describe('Mutation.unlinkGithubApp (007-entity-id-or-urn)', () => {
   it('accepts a URN', async () => {
     const updated = await resolvers.Mutation.unlinkGithubApp(
       {},
-      { orgId: org.urn },
+      { orgRef: org.urn },
       adminCtx(),
     );
     expect(updated.githubInstallationId).toBeNull();
@@ -359,7 +359,7 @@ describe('Mutation.updateOrgGithubApp (007-entity-id-or-urn)', () => {
   it('accepts a URN', async () => {
     const updated = await resolvers.Mutation.updateOrgGithubApp(
       {},
-      { orgId: org.urn, appId: 'app-id-007', privateKey: 'pk-007' },
+      { orgRef: org.urn, appId: 'app-id-007', privateKey: 'pk-007' },
       adminCtx(),
     );
     expect(updated.githubAppId).toBe('app-id-007');
@@ -370,7 +370,7 @@ describe('Mutation.createUserInvitation (007-entity-id-or-urn)', () => {
   it('accepts a URN', async () => {
     const invite = await resolvers.Mutation.createUserInvitation(
       {},
-      { orgId: org.urn, memberRole: 'READER', name: 'urn-invite' },
+      { orgRef: org.urn, memberRole: 'READER', name: 'urn-invite' },
       adminCtx(),
     );
     expect(invite.organizationId).toBe(org.id);
@@ -390,7 +390,7 @@ describe('Mutation.addOrgMember / updateOrgMember / removeOrgMember (007-entity-
   it('addOrgMember accepts a URN as orgId', async () => {
     const member = await resolvers.Mutation.addOrgMember(
       {},
-      { orgId: org.urn, userId: target.id, role: 'CONTRIBUTOR' },
+      { orgRef: org.urn, userRef: target.id, role: 'CONTRIBUTOR' },
       adminCtx(),
     );
     expect(member.organizationId).toBe(org.id);
@@ -404,7 +404,7 @@ describe('Mutation.addOrgMember / updateOrgMember / removeOrgMember (007-entity-
     });
     const updated = await resolvers.Mutation.updateOrgMember(
       {},
-      { orgId: org.urn, userId: target.id, role: 'CONTRIBUTOR' },
+      { orgRef: org.urn, userRef: target.id, role: 'CONTRIBUTOR' },
       adminCtx(),
     );
     expect(updated.role).toBe('CONTRIBUTOR');
@@ -416,7 +416,7 @@ describe('Mutation.addOrgMember / updateOrgMember / removeOrgMember (007-entity-
     });
     const ok = await resolvers.Mutation.removeOrgMember(
       {},
-      { orgId: org.urn, userId: target.id },
+      { orgRef: org.urn, userRef: target.id },
       adminCtx(),
     );
     expect(ok).toBe(true);
@@ -433,7 +433,7 @@ describe('Mutation.createMemory / createAgent / createApp (007-entity-id-or-urn)
   it('createMemory accepts a URN as orgId', async () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: org.urn, name: 'urn-mem' },
+      { orgRef: org.urn, name: 'urn-mem' },
       adminCtx(),
     );
     expect(mem.organizationId).toBe(org.id);

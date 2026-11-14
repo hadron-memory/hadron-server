@@ -70,7 +70,7 @@ beforeEach(async () => {
     { organizationId: org.id, userId: other.id, role: 'CONTRIBUTOR' },
     { organizationId: org.id, userId: reader.id, role: 'READER' },
   ] });
-  memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'discussion' }, gqlCtx(admin.id));
+  memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'discussion' }, gqlCtx(admin.id));
   target = await db.node.create({
     data: { id: generateId(), memoryId: memory.id, loc: 'spec:1', name: 'The rule', abstract: 'A', content: 'The rule body' },
   });

@@ -54,11 +54,11 @@ beforeEach(async () => {
   const a = await db.user.create({ data: { githubId: 9821, githubUsername: 'se-admin', roles: ['ADMIN'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: a.id, role: 'ADMIN' } });
   adminId = a.id;
-  const mem = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'intel' }, admin());
+  const mem = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'intel' }, admin());
   memId = mem.id;
   memUrn = mem.urn;
   await (resolvers.Mutation as any).updateMemory(null, { id: memId, schema }, admin());
-  const free = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'free' }, admin());
+  const free = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'free' }, admin());
   freeMemId = free.id;
 });
 
@@ -146,8 +146,8 @@ describe('replaceSubtree — retired bulk path', () => {
         null,
         {
           ownerRepo: 'acme/repo',
-          memoryId: memId,
-          nodes: [{ memoryId: memId, loc: 'imp', name: 'I', objectType: 'competitor', properties: {} }],
+          memoryRef: memId,
+          nodes: [{ memoryRef: memId, loc: 'imp', name: 'I', objectType: 'competitor', properties: {} }],
           edges: [],
         },
         admin(),

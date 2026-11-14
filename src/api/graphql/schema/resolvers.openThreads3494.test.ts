@@ -22,7 +22,7 @@ beforeEach(async () => {
   const org = await db.organization.create({ data: { id: generateId(), name: 'Groom', urn: `groom-${generateId()}.test` } });
   [userId, otherId] = await Promise.all([0, 1].map(async i => (await db.user.create({ data: { handle: `groom-${i}-${generateId()}` } })).id));
   await db.orgMember.createMany({ data: [userId, otherId].map(id => ({ organizationId: org.id, userId: id, role: 'ADMIN' as const })) });
-  const mem = await M.createMemory(null, { orgId: org.id, name: 'groom' }, ctx()); memoryId = mem.id;
+  const mem = await M.createMemory(null, { orgRef: org.id, name: 'groom' }, ctx()); memoryId = mem.id;
   nodes = Object.fromEntries(await Promise.all(['A','B','B2','C','D','E','F'].map(async k => [k, await create(`case:${k}`)])));
   await comment(nodes.A.id); await comment(nodes.A.id, otherId);
   for (const k of ['B','B2','F']) {

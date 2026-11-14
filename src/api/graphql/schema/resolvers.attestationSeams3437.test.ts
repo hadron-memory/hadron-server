@@ -299,7 +299,7 @@ describe('#3437 item 7: an encrypted no-op, on real ciphertext', () => {
       await db.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, role, authorTaskId: privateTask, authorTaskRequired: true } });
       await db.node.create({ data: { id: generateId(), memoryId: privateId, loc, name: loc, content: 'cat', role, ...stamp } });
     }
-    await resolvers.Mutation.encryptMemory(null, { memoryId: privateId, dataKey }, ctx());
+    await resolvers.Mutation.encryptMemory(null, { memoryRef: privateId, dataKey }, ctx());
     sessionKeyCache.set('seams-3437', privateId, key);
   });
 

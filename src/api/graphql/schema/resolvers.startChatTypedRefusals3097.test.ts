@@ -34,7 +34,7 @@ async function seedNode(loc: string, data: object | null = null, content: string
 
 async function expectRefusal(args: Record<string, unknown>, code: string, message: RegExp) {
   const nodesBefore = await db.node.count();
-  const err = await M.startChat(null, { agentId: agent.id, ...args }, ctx()).then(() => null, (e: unknown) => e);
+  const err = await M.startChat(null, { agentRef: agent.id, ...args }, ctx()).then(() => null, (e: unknown) => e);
   expect(err).toBeInstanceOf(ChatScopeError);
   expect((err as ChatScopeError).extensions.code).toBe(code);
   expect((err as ChatScopeError).message).toMatch(message);
@@ -80,7 +80,7 @@ describe('#3097: startChat refuses the empty conversation states with a typed co
     await seedNode('conversations');
     await seedNode('conversations:qa', { stageOrder: ['s1'] });
     await seedNode('conversations:qa:s1', {});
-    const out = await M.startChat(null, { agentId: agent.id }, ctx());
+    const out = await M.startChat(null, { agentRef: agent.id }, ctx());
     expect(out.chatId ?? out.id).toBeTruthy();
   });
 });

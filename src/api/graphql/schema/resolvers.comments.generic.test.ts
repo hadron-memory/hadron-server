@@ -52,7 +52,7 @@ beforeEach(async () => {
   orgId = org.id;
   admin = await db.user.create({ data: { githubId: 160611, githubUsername: 'gen-admin', handle: 'gen-admin', roles: [] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'generic' }, as());
+  memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'generic' }, as());
 });
 
 describe('generic node writes refuse comments (cor:dmo:110:04)', () => {

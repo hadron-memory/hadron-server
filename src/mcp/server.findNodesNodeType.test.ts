@@ -31,7 +31,7 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   adminId = admin.id;
   const ctx = { db, roles: ['ADMIN'], userId: admin.id } as Context;
-  const mem = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'typed' }, ctx);
+  const mem = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'typed' }, ctx);
   memUrn = mem.urn;
   memId = mem.id;
   const mk = (memoryId: string, loc: string, nodeType: string, extra: Record<string, unknown> = {}) =>
@@ -45,7 +45,7 @@ beforeEach(async () => {
   // A memory the outsider cannot read, holding a node of the probed type.
   const outsider = await db.user.create({ data: { githubId: 9832, githubUsername: 'nt-outsider' } });
   outsiderId = outsider.id;
-  const other = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'hidden' }, ctx);
+  const other = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'hidden' }, ctx);
   otherMemUrn = other.urn;
   await mk(other.id, 'secret-task', 'task');
 });

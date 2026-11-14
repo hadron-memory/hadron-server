@@ -55,7 +55,7 @@ vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGi
 const dataKey = Buffer.alloc(32, 51).toString('base64');
 const SENTINEL = 'sentinel-passphrase-3450-do-not-log';
 const DRIVER_TEXT = 'connect ECONNREFUSED 10.9.8.7:5432 at db-internal-3450';
-const ENCRYPT = 'mutation($id: ID!) { encryptMemory(memoryId: $id) { id isEncrypted } }';
+const ENCRYPT = 'mutation($id: ID!) { encryptMemory(memoryRef: $id) { id isEncrypted } }';
 const READ = 'query($ref: ID!) { memory(ref: $ref) { id } }';
 
 let server: Server;
@@ -140,7 +140,7 @@ describe('#3450 an operational failure in the header path, through the real Apol
 describe('#3450 no secret in a routed fault', () => {
   it('a derivation fault keeps the passphrase off the wire and out of the fault log', async () => {
     const m = await newPrivate(owner.id, 'sealed');
-    await resolvers.Mutation.encryptMemory({}, { memoryId: m.id, passphrase: 'an-earlier-passphrase' }, { db, userId: owner.id, roles: ['READER'] } as never);
+    await resolvers.Mutation.encryptMemory({}, { memoryRef: m.id, passphrase: 'an-earlier-passphrase' }, { db, userId: owner.id, roles: ['READER'] } as never);
     sessionKeyCache.clear();
     inject.scrypt = Object.assign(new Error('memory limit exceeded'), { code: 'ERR_CRYPTO_OPERATION_FAILED' });
     const reply = await send(READ, { ref: m.id }, [{ memory: m.id, passphrase: SENTINEL }]);
@@ -151,7 +151,7 @@ describe('#3450 no secret in a routed fault', () => {
 
   it('a numeric passphrase, which Node would echo, keeps NOT_FOUND and logs nothing', async () => {
     const m = await newPrivate(owner.id, 'sealed');
-    await resolvers.Mutation.encryptMemory({}, { memoryId: m.id, passphrase: 'an-earlier-passphrase' }, { db, userId: owner.id, roles: ['READER'] } as never);
+    await resolvers.Mutation.encryptMemory({}, { memoryRef: m.id, passphrase: 'an-earlier-passphrase' }, { db, userId: owner.id, roles: ['READER'] } as never);
     sessionKeyCache.clear();
     const reply = await send(READ, { ref: m.id }, [{ memory: m.id, passphrase: 987654321 }]);
     expect(code(reply)).toBe('NOT_FOUND');
@@ -163,7 +163,7 @@ describe('#3450 no secret in a routed fault', () => {
 describe('#3450 a stored row with unusable KDF parameters', () => {
   it('a numeric passphrase keeps the KDF refusal, and nothing is logged', async () => {
     const m = await newPrivate(owner.id, 'sealed');
-    await resolvers.Mutation.encryptMemory({}, { memoryId: m.id, passphrase: 'an-earlier-passphrase' }, { db, userId: owner.id, roles: ['READER'] } as never);
+    await resolvers.Mutation.encryptMemory({}, { memoryRef: m.id, passphrase: 'an-earlier-passphrase' }, { db, userId: owner.id, roles: ['READER'] } as never);
     sessionKeyCache.clear();
     await db.memory.update({ where: { id: m.id }, data: { kdfParams: { alg: 'scrypt', N: 3, r: 8, p: 1 } } });
     const reply = await send(READ, { ref: m.id }, [{ memory: m.id, passphrase: 987654321 }]);
@@ -278,7 +278,7 @@ describe('#3450 nothing staged outlives its request', () => {
   });
 
   it('a first-encryption entry never claimed: a later encryptMemory without the header has no secret', async () => {
-    const invalid = 'mutation($id: ID!) { encryptMemory(memoryId: $id) { nosuchfield } }';
+    const invalid = 'mutation($id: ID!) { encryptMemory(memoryRef: $id) { nosuchfield } }';
     const staged = await send(invalid, { id: memory.id }, [{ memory: memory.id, passphrase: 'never-used-3450' }]);
     expect(staged.errors?.length).toBeGreaterThan(0);
     const later = await send(ENCRYPT, { id: memory.id }, undefined);
@@ -297,7 +297,7 @@ describe('#3450 an operation key on a plaintext memory', () => {
     await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'entry', name: 'Entry', content: 'plain 3450' } });
     const store = { key: parseDataKey(dataKey) } as { key: ReturnType<typeof parseDataKey>; consumed?: boolean };
     const refused = requestOperationKeyStorage.run(store, () =>
-      resolvers.Mutation.encryptMemory({}, { memoryId: memory.id }, { db, appId: app.id, roles: [] } as never));
+      resolvers.Mutation.encryptMemory({}, { memoryRef: memory.id }, { db, appId: app.id, roles: [] } as never));
     await expect(refused).rejects.toThrow();
     expect(store.consumed).toBeUndefined();
     expect(await row(memory.id)).toMatchObject({ isEncrypted: false, keyVerifier: null, kdfSalt: null });

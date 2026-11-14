@@ -39,7 +39,7 @@ beforeEach(async () => {
     data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' },
   });
   const memory = await resolvers.Mutation.createMemory(
-    {}, { orgId: org.id, name: 'before' }, graphCtx(),
+    {}, { orgRef: org.id, name: 'before' }, graphCtx(),
   );
   memoryId = memory.id;
   const action = await db.node.create({

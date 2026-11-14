@@ -25,7 +25,7 @@ beforeEach(async () => {
   const user = await db.user.create({ data: { githubId: 206302, githubUsername: 'pins2063', handle: 'pins2063', roles: [] } });
   userId = user.id;
   await db.orgMember.create({ data: { organizationId: org.id, userId, role: 'ADMIN' } });
-  memoryId = (await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'pins2063' }, ctx())).id;
+  memoryId = (await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'pins2063' }, ctx())).id;
 });
 it('warns for a readable plain revision with fixed text and no target details', async () => {
   await db.node.create({ data: { id: generateId(), memoryId, loc: 'target', name: 'Secret title', content: 'Secret text' } });

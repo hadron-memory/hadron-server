@@ -97,7 +97,7 @@ beforeEach(async () => {
   });
   const memory = await resolvers.Mutation.createMemory(
     {},
-    { orgId: org.id, name: 'impmem' },
+    { orgRef: org.id, name: 'impmem' },
     gqlCtx(),
   );
   memoryId = memory.id;

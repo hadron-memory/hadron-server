@@ -267,7 +267,7 @@ describe('createAgentTask — root tasks: any App participant (cor:agt:050:06)',
   it('#1714/#1731: a self-joined plain member is a participant and names an owner; the row is not the owner role', async () => {
     await db.agent.update({ where: { id: teamAgent.id }, data: { installationPolicy: { maxMembers: 'unlimited', memberRoles: ['owner', 'member'], selfJoinRole: 'member' } as never } });
     await db.appAgent.create({ data: { appId: app.id, agentId: teamAgent.id } });
-    await M.joinApp({}, { appId: app.id }, ctx(outsider.id));
+    await M.joinApp({}, { appRef: app.id }, ctx(outsider.id));
     expect((await db.appMember.findUniqueOrThrow({ where: { appId_userId: { appId: app.id, userId: outsider.id } } })).role).toBe('member');
     const t = await create(ctx(outsider.id), { owner: { user: member.id } });
     expect(t.ownerUserId).toBe(member.id);

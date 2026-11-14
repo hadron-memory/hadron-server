@@ -40,7 +40,7 @@ beforeEach(async () => {
   const a = await db.user.create({ data: { githubId: 9811, githubUsername: 'ms-admin', roles: ['ADMIN'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: a.id, role: 'ADMIN' } });
   adminId = a.id;
-  const mem = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'intel' }, admin());
+  const mem = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'intel' }, admin());
   memId = mem.id;
   memUrn = mem.urn;
 });

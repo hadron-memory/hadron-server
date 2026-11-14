@@ -251,7 +251,7 @@ describe('the chat path', () => {
     await db.appAgent.create({ data: { appId: app.id, agentId: chatAgent.id } });
     await serveEveryAgent(db);
   });
-  const start = (args: Record<string, unknown>, c: Context = asMember()) => M.startChat(null, { agentId: chatAgent.id, scope: 'shared', ...args }, c);
+  const start = (args: Record<string, unknown>, c: Context = asMember()) => M.startChat(null, { agentRef: chatAgent.id, scope: 'shared', ...args }, c);
 
   // loc-scope-ok: a count over every memory, to prove that a refused start left no chat anywhere.
   const chatCount = () => db.node.count({ where: { loc: { startsWith: 'chats:' }, nodeType: { not: 'message' }, name: { not: 'messages' } } });

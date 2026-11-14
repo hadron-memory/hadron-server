@@ -582,7 +582,7 @@ describe('encryptMemory — locked conversion (#1346)', () => {
     });
     await db.node.update({ where: { id: nodeId }, data: { memoryId: destination.id } });
     await resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, ownerCtx());
-    await resolvers.Mutation.encryptMemory({}, { memoryId: destination.id, dataKey: destinationKey }, ownerCtx());
+    await resolvers.Mutation.encryptMemory({}, { memoryRef: destination.id, dataKey: destinationKey }, ownerCtx());
 
     await expect(resolvers.Mutation.restoreNodeRevision(
       {}, { revisionId: prior.id }, ownerCtx(),

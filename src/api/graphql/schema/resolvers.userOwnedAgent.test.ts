@@ -385,16 +385,16 @@ describe('#1787 — a platform admin manages a user-owned Agent (cor:dmo:050:13,
     await expect(resolvers.Mutation.deleteAiServiceConfig(null, { id: cfg.id }, admin())).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     // The agentAIConfig upsert has the same kept-key shape — owner-only too.
     await expect(resolvers.Mutation.updateAgentAIConfig(
-      null, { agentId: agent.id, provider: 'openai', model: 'gpt-x' }, admin(),
+      null, { agentRef: agent.id, provider: 'openai', model: 'gpt-x' }, admin(),
     )).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     // Clearing is pure deletion (no exfil): the admin arm holds, covering shutdown.
-    expect(await resolvers.Mutation.clearAgentAIConfig(null, { agentId: agent.id }, admin())).not.toBeNull();
+    expect(await resolvers.Mutation.clearAgentAIConfig(null, { agentRef: agent.id }, admin())).not.toBeNull();
     // Owner control: set still works for the owner (with a key — the admin's
     // clear above removed the stored one). The test operation is not exercised
     // for the owner: it would call the real provider; its owner path is
     // unchanged by this diff and covered by the 036 suites.
     const set = await resolvers.Mutation.updateAgentAIConfig(
-      null, { agentId: agent.id, provider: 'openai', model: 'gpt-x', apiKey: 'sk-owner-new' },
+      null, { agentRef: agent.id, provider: 'openai', model: 'gpt-x', apiKey: 'sk-owner-new' },
       ctx({ userId: ownerId, roles: ['READER'] }),
     );
     expect(set).not.toBeNull();
@@ -428,15 +428,15 @@ describe('#1787 — a platform admin manages a user-owned Agent (cor:dmo:050:13,
 
   it('the admin may update the definition through the revision surface (within "update it"; PR body corrected)', async () => {
     const agent = await rogueAgent();
-    const revision = await resolvers.Mutation.createRevision(null, { agentId: agent.id, description: 'admin snapshot' }, admin());
+    const revision = await resolvers.Mutation.createRevision(null, { agentRef: agent.id, description: 'admin snapshot' }, admin());
     expect(revision).not.toBeNull();
   });
 
   it('the admin restores a definition revision too (#1841: the revision surface is pinned at both ends)', async () => {
     const agent = await rogueAgent();
-    const revision = await resolvers.Mutation.createRevision(null, { agentId: agent.id, description: 'to restore' }, admin());
+    const revision = await resolvers.Mutation.createRevision(null, { agentRef: agent.id, description: 'to restore' }, admin());
     expect(revision.revisionLoc).toMatch(/^revisions:/);
-    const restored = await resolvers.Mutation.restoreRevision(null, { agentId: agent.id, revisionLoc: revision.revisionLoc }, admin());
+    const restored = await resolvers.Mutation.restoreRevision(null, { agentRef: agent.id, revisionLoc: revision.revisionLoc }, admin());
     expect(restored).not.toBeNull();
   });
 });

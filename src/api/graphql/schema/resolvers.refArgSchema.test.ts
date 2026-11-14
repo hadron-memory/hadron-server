@@ -58,13 +58,66 @@ const EXPECTED_REF_ARGS: Record<string, string[]> = {
   createChannelMessage: ['channelRef', 'sessionRef'],
   advanceChannelReadState: ['attendeeRef', 'appRef', 'channelRef'],
   markOwnTeamChatRead: ['appRef', 'sessionRef', 'channelRef'],
+  // #4142 (S6) — the hard-rename slices B–F. Chunk A (memory reads) waits on
+  // #4136 and is NOT here. Every entry is a Mutation whose entity argument
+  // renamed with no alias; the stray check below holds each one to that.
+  createMemory: ['orgRef'],
+  deleteMemory: ['ref'],
+  setMemorySourceToken: ['ref'],
+  syncMemory: ['ref'],
+  pushMemoryToGit: ['ref'],
+  replaceSubtree: ['memoryRef'],
+  linkMemoryToUser: ['memoryRef'],
+  encryptMemory: ['memoryRef'],
+  deleteOrganization: ['ref'],
+  linkGithubApp: ['orgRef'],
+  updateOrgGithubApp: ['orgRef'],
+  unlinkGithubApp: ['orgRef'],
+  createUserInvitation: ['orgRef'],
+  startChat: ['agentRef'],
+  updateAgentAIConfig: ['agentRef'],
+  clearAgentAIConfig: ['agentRef'],
+  createRevision: ['agentRef'],
+  publishRevision: ['agentRef'],
+  restoreRevision: ['agentRef'],
+  acquireEditorLock: ['agentRef'],
+  releaseEditorLock: ['agentRef'],
+  joinApp: ['appRef'],
+  leaveApp: ['appRef'],
+  // The nine alias-drops of chunk F: the survivor `<entity>Ref` args are now
+  // REQUIRED (ID!) — the deprecated `…Id` alias is gone from the SDL.
+  createMemorySubscription: ['memoryRef', 'orgRef'],
+  updateMemorySubscription: ['memoryRef', 'orgRef'],
+  deleteMemorySubscription: ['memoryRef', 'orgRef'],
+  ensureAppMember: ['appRef', 'userRef'],
+  removeAppMember: ['appRef', 'userRef'],
+  revokeAgentSubscription: ['userRef', 'agentRef'],
+  addOrgMember: ['orgRef', 'userRef'],
+  updateOrgMember: ['orgRef', 'userRef'],
+  removeOrgMember: ['orgRef', 'userRef'],
 };
 
 /**
  * Args that legitimately stay `<entity>Id` because they are genuine PKs, per
  * the convention ("output fields, DB columns, resolved locals" → `<entity>Id`).
  */
-const ALLOWED_ID_ARGS = new Set(['systemMemoryId', 'userId']);
+const ALLOWED_ID_ARGS = new Set([
+  'systemMemoryId',
+  // startChat.userId: a PK compare-and-set against the session's user, not an
+  // entity the caller names (#4142 S6 ruling A) — and #4140's to drop.
+  'userId',
+  // #4142 (S6): external-system / label args the stray regex catches by
+  // spelling, not Hadron entity PK refs.
+  // linkGithubApp.installationId: a GitHub App INSTALLATION id (external
+  // system, an Int) — pairs with orgRef, which names the Hadron org.
+  'installationId',
+  // updateOrgGithubApp.appId: the GitHub App's own numeric id (external
+  // system), not a Hadron App ref — the Hadron org is named by orgRef.
+  'appId',
+  // linkMemoryToUser.externalUserId: the external identity's label at the
+  // App's IdP; the Hadron memory is named by memoryRef.
+  'externalUserId',
+]);
 
 const mutationFields = () => {
   const schema = buildSchema(typeDefs);

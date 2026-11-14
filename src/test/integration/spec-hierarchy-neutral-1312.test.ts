@@ -154,7 +154,7 @@ beforeAll(async () => {
 
   const memory = await gql(
     key.owner!,
-    `mutation($orgId: ID!, $name: String!) { createMemory(orgId: $orgId, name: $name) { id urn } }`,
+    `mutation($orgId: ID!, $name: String!) { createMemory(orgRef: $orgId, name: $name) { id urn } }`,
     { orgId: org.id, name: `spec-hierarchy-${suffix}` },
   );
   expect(memory.errors, JSON.stringify(memory.errors)).toBeUndefined();

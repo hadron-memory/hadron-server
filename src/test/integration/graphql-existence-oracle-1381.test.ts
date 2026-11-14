@@ -284,7 +284,7 @@ const PROBES: Probe[] = [
   },
   {
     name: 'replaceSubtree',
-    query: `mutation($r: String!) { replaceSubtree(ownerRepo: "x", memoryId: $r, nodes: [], edges: []) }`,
+    query: `mutation($r: String!) { replaceSubtree(ownerRepo: "x", memoryRef: $r, nodes: [], edges: []) }`,
     on: 'memUrn', vars: (r) => ({ r }), missingCode: 'MEMORY_NOT_FOUND',
   },
   {
@@ -304,7 +304,7 @@ const PROBES: Probe[] = [
   },
   {
     name: 'deleteMemory(a personal memory)',
-    query: `mutation($r: ID!) { deleteMemory(id: $r) }`,
+    query: `mutation($r: ID!) { deleteMemory(ref: $r) }`,
     on: 'personalUrn', vars: (r) => ({ r }), missingCode: 'MEMORY_NOT_FOUND',
   },
   {
@@ -314,12 +314,12 @@ const PROBES: Probe[] = [
   },
   {
     name: 'deleteMemory',
-    query: `mutation($r: ID!) { deleteMemory(id: $r) }`,
+    query: `mutation($r: ID!) { deleteMemory(ref: $r) }`,
     on: 'memUrn', vars: (r) => ({ r }), missingCode: 'MEMORY_NOT_FOUND',
   },
   {
     name: 'encryptMemory',
-    query: `mutation($r: ID!) { encryptMemory(memoryId: $r, passphrase: "correct horse battery staple") { id } }`,
+    query: `mutation($r: ID!) { encryptMemory(memoryRef: $r, passphrase: "correct horse battery staple") { id } }`,
     on: 'memUrn', vars: (r) => ({ r }), missingCode: 'MEMORY_NOT_FOUND',
   },
   {
@@ -365,18 +365,18 @@ const PROBES: Probe[] = [
     on: 'memId', vars: (r) => ({ r }), missingCode: 'MEMORY_NOT_FOUND',
   },
   {
-    name: 'setMemorySourceToken(id:)',
-    query: `mutation($r: ID!) { setMemorySourceToken(id: $r, token: "t") { id } }`,
+    name: 'setMemorySourceToken(ref:)',
+    query: `mutation($r: ID!) { setMemorySourceToken(ref: $r, token: "t") { id } }`,
     on: 'memId', vars: (r) => ({ r }), missingCode: 'MEMORY_NOT_FOUND',
   },
   {
-    name: 'syncMemory(id:)',
-    query: `mutation($r: ID!) { syncMemory(id: $r) { id } }`,
+    name: 'syncMemory(ref:)',
+    query: `mutation($r: ID!) { syncMemory(ref: $r) { id } }`,
     on: 'memId', vars: (r) => ({ r }), missingCode: 'MEMORY_NOT_FOUND',
   },
   {
-    name: 'pushMemoryToGit(id:)',
-    query: `mutation($r: ID!) { pushMemoryToGit(id: $r) }`,
+    name: 'pushMemoryToGit(ref:)',
+    query: `mutation($r: ID!) { pushMemoryToGit(ref: $r) }`,
     on: 'memId', vars: (r) => ({ r }), missingCode: 'MEMORY_NOT_FOUND',
   },
 ];
@@ -460,7 +460,7 @@ describe('#1381 — controls: what concealment must not change', () => {
     // The record-gate classifier reads the memory row with `findUnique`; the
     // authorization it wraps here (requireOwnerOrOrgRole) does not, having
     // loaded the row already. The spy must fire, or this proves nothing.
-    const probe = PROBES.find((p) => p.name === 'syncMemory(id:)')!;
+    const probe = PROBES.find((p) => p.name === 'syncMemory(ref:)')!;
     const before = await sideEffects();
     const fault = vi.spyOn(db.memory, 'findUnique').mockRejectedValueOnce(new Error('injected classification db failure'));
     try {
@@ -479,9 +479,11 @@ describe('#1381 — controls: what concealment must not change', () => {
   it('deleteMemorySubscription: a MALFORMED orgRef on a hidden memory answers as the missing memory', async () => {
     // Both-or-neither is caller input: a missing memory refuses before the org
     // is parsed, so a hidden one must not answer BAD_USER_INPUT instead.
-    const q = `mutation($r: String!, $o: String!, $i: ID!) { deleteMemorySubscription(memoryRef: $r, orgRef: $o, orgId: $i) }`;
-    const existing = await gql('outsider', q, { r: target.memUrn!.existing, o: ids.otherOrg, i: ids.otherOrg });
-    const missing = await gql('outsider', q, { r: target.memUrn!.missing, o: ids.otherOrg, i: ids.otherOrg });
+    // (#4142 S6 dropped the orgId alias, so the malformed value rides orgRef
+    // itself — the memory-first order this pins is unchanged.)
+    const q = `mutation($r: String!, $o: String!) { deleteMemorySubscription(memoryRef: $r, orgRef: $o) }`;
+    const existing = await gql('outsider', q, { r: target.memUrn!.existing, o: 'not-a-qualified-urn' });
+    const missing = await gql('outsider', q, { r: target.memUrn!.missing, o: 'not-a-qualified-urn' });
     expect(code(missing)).toBe('NOT_FOUND');
     expect(wire(existing, target.memUrn!.existing)).toBe(wire(missing, target.memUrn!.missing));
   });

@@ -467,9 +467,9 @@ describe('Mutation.replaceSubtree retirement (#454)', () => {
         {
           ownerRepo, memoryId,
           nodes: [
-            { memoryId: graphA.id, loc: 'bulk.new', name: 'new', content: 'replacement' },
-            { memoryId: graphA.id, loc: 'bulk.new-runnable', name: 'new-runnable', isRunnable: true },
-            { memoryId: graphA.id, loc: 'bulk.new-governed', name: 'new-governed', role: 'task' },
+            { memoryRef: graphA.id, loc: 'bulk.new', name: 'new', content: 'replacement' },
+            { memoryRef: graphA.id, loc: 'bulk.new-runnable', name: 'new-runnable', isRunnable: true },
+            { memoryRef: graphA.id, loc: 'bulk.new-governed', name: 'new-governed', role: 'task' },
           ],
           edges: [{ sourceLoc: 'bulk.new', targetLoc: 'bulk.new-runnable', name: 'rel' }],
         },
@@ -486,11 +486,11 @@ describe('Mutation.replaceSubtree retirement (#454)', () => {
 
   it('preserves write authorization and concealed-memory errors', async () => {
     await expect(resolvers.Mutation.replaceSubtree(
-      null, { ownerRepo: 'org-a/repo', memoryId: graphA.id, nodes: [], edges: [] },
+      null, { ownerRepo: 'org-a/repo', memoryRef: graphA.id, nodes: [], edges: [] },
       ctx({ appId: appReader.id, userId: appMember.id }),
     )).rejects.toThrow('Forbidden');
     await expect(resolvers.Mutation.replaceSubtree(
-      null, { ownerRepo: 'org-b/repo', memoryId: graphB.id, nodes: [], edges: [] },
+      null, { ownerRepo: 'org-b/repo', memoryRef: graphB.id, nodes: [], edges: [] },
       ctx({ appId: appContributor.id, userId: appMember.id }),
     )).rejects.toThrow(`MEMORY_NOT_FOUND: ${graphB.id}`);
   });

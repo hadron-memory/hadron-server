@@ -34,7 +34,7 @@ vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGi
 const dataKey = Buffer.alloc(32, 41).toString('base64');
 const wrongKey = Buffer.alloc(32, 42).toString('base64');
 const passphrase = 'correct horse battery staple 1796';
-const ENCRYPT = 'mutation($id: ID!) { encryptMemory(memoryId: $id) { id isEncrypted } }';
+const ENCRYPT = 'mutation($id: ID!) { encryptMemory(memoryRef: $id) { id isEncrypted } }';
 const READ = 'query($ref: ID!) { memory(ref: $ref) { id } }';
 
 let server: Server;
@@ -136,7 +136,7 @@ describe('#1796 acceptance 2: encryptMemory with no secret argument', () => {
   });
 
   it('a literal memoryId and a named operation in a multi-operation document work too', async () => {
-    const doc = `query Other { __typename } mutation Encrypt { encryptMemory(memoryId: "${memory.id}") { id isEncrypted } }`;
+    const doc = `query Other { __typename } mutation Encrypt { encryptMemory(memoryRef: "${memory.id}") { id isEncrypted } }`;
     const reply = await send(doc, {}, { keys: [{ memory: memory.id, dataKey }], operationName: 'Encrypt' });
     expect(reply.errors).toBeUndefined();
     expect((await row(memory.id)).isEncrypted).toBe(true);
@@ -213,7 +213,7 @@ describe('#1796 acceptance 2: encryptMemory with no secret argument', () => {
     const completion = vi.spyOn(memoryMutations, 'encryptMemory');
     try {
       await withTestOperationKey(dataKey, app.id, () => resolvers.Mutation.linkMemoryToUser(
-        {}, { memoryId: anon.id, externalUserId: 'link-1796' }, { db, appId: app.id, roles: [] },
+        {}, { memoryRef: anon.id, externalUserId: 'link-1796' }, { db, appId: app.id, roles: [] },
       ));
       expect(completion).toHaveBeenCalledTimes(1);
       const args = completion.mock.calls[0][1] as Record<string, unknown>;
@@ -239,7 +239,7 @@ describe('#1796 acceptance 3: the header refuses as the argument does', () => {
 
   it('on a first encryption, a header entry and an argument together are refused: one secret, one channel', async () => {
     const reply = await send(
-      'mutation($id: ID!, $k: String) { encryptMemory(memoryId: $id, dataKey: $k) { id } }',
+      'mutation($id: ID!, $k: String) { encryptMemory(memoryRef: $id, dataKey: $k) { id } }',
       { id: memory.id, k: dataKey },
       { keys: [{ memory: memory.id, dataKey }] },
     );
@@ -254,7 +254,7 @@ describe('#1796 acceptance 3: the header refuses as the argument does', () => {
   });
 
   describe('the operation names its memory through a variable default', () => {
-    const DEFAULTED = (id: string) => `mutation($id: ID! = "${id}") { encryptMemory(memoryId: $id) { id isEncrypted } }`;
+    const DEFAULTED = (id: string) => `mutation($id: ID! = "${id}") { encryptMemory(memoryRef: $id) { id isEncrypted } }`;
 
     it('an omitted variable takes the default the resolver will receive', async () => {
       const reply = await send(DEFAULTED(memory.id), {}, { keys: [{ memory: memory.id, passphrase }] });
@@ -264,7 +264,7 @@ describe('#1796 acceptance 3: the header refuses as the argument does', () => {
 
     it.each(['toString', 'constructor', 'hasOwnProperty'])('a variable named %s is not supplied by Object.prototype', async (name) => {
       const reply = await send(
-        `mutation($${name}: ID! = "${memory.id}") { encryptMemory(memoryId: $${name}) { id isEncrypted } }`,
+        `mutation($${name}: ID! = "${memory.id}") { encryptMemory(memoryRef: $${name}) { id isEncrypted } }`,
         {},
         { keys: [{ memory: memory.id, dataKey }] },
       );
@@ -327,12 +327,12 @@ describe('#1796 acceptance 3: the header refuses as the argument does', () => {
     // Every shape of the operation, not only the one a first encryption is staged for: the narrow
     // recognizer decides who may stage, so it can't also decide who is concealed from.
     it.each([
-      ['under a directive', (id: string) => `mutation { encryptMemory(memoryId: "${id}") @include(if: true) { id } }`],
-      ['behind a named fragment', (id: string) => `mutation { ...F } fragment F on Mutation { encryptMemory(memoryId: "${id}") { id } }`],
-      ['behind a nested fragment', (id: string) => `mutation { ...F } fragment F on Mutation { ...G } fragment G on Mutation { encryptMemory(memoryId: "${id}") { id } }`],
-      ['behind an inline fragment', (id: string) => `mutation { ... on Mutation { encryptMemory(memoryId: "${id}") { id } } }`],
-      ['beside another root field', (id: string) => `mutation { encryptMemory(memoryId: "${id}") { id } updateMemory(memoryId: "${id}", name: "x") { id } }`],
-      ['twice under aliases', (id: string) => `mutation { a: encryptMemory(memoryId: "${id}") { id } b: encryptMemory(memoryId: "${id}") { id } }`],
+      ['under a directive', (id: string) => `mutation { encryptMemory(memoryRef: "${id}") @include(if: true) { id } }`],
+      ['behind a named fragment', (id: string) => `mutation { ...F } fragment F on Mutation { encryptMemory(memoryRef: "${id}") { id } }`],
+      ['behind a nested fragment', (id: string) => `mutation { ...F } fragment F on Mutation { ...G } fragment G on Mutation { encryptMemory(memoryRef: "${id}") { id } }`],
+      ['behind an inline fragment', (id: string) => `mutation { ... on Mutation { encryptMemory(memoryRef: "${id}") { id } } }`],
+      ['beside another root field', (id: string) => `mutation { encryptMemory(memoryRef: "${id}") { id } updateMemory(memoryRef: "${id}", name: "x") { id } }`],
+      ['twice under aliases', (id: string) => `mutation { a: encryptMemory(memoryRef: "${id}") { id } b: encryptMemory(memoryRef: "${id}") { id } }`],
     ])('gets the missing-memory answer with encryptMemory %s', async (_label, doc) => {
       const encrypted = await newPrivate(owner.id, 'sealed');
       await db.memory.update({ where: { id: encrypted.id }, data: { isEncrypted: true, keyVerifier: makeKeyVerifier(parseDataKey(dataKey)) } });
@@ -393,10 +393,10 @@ describe('#1796 acceptance 4: an entry on a plaintext memory, on anything but en
   });
 
   it.each([
-    ['beside another root field', (id: string) => `mutation { encryptMemory(memoryId: "${id}") { id } updateMemory(memoryId: "${id}", name: "x") { id } }`],
-    ['twice under aliases', (id: string) => `mutation { a: encryptMemory(memoryId: "${id}") { id } b: encryptMemory(memoryId: "${id}") { id } }`],
-    ['behind a fragment', (id: string) => `mutation { ...F } fragment F on Mutation { encryptMemory(memoryId: "${id}") { id } }`],
-    ['under a directive', (id: string) => `mutation { encryptMemory(memoryId: "${id}") @include(if: true) { id } }`],
+    ['beside another root field', (id: string) => `mutation { encryptMemory(memoryRef: "${id}") { id } updateMemory(memoryRef: "${id}", name: "x") { id } }`],
+    ['twice under aliases', (id: string) => `mutation { a: encryptMemory(memoryRef: "${id}") { id } b: encryptMemory(memoryRef: "${id}") { id } }`],
+    ['behind a fragment', (id: string) => `mutation { ...F } fragment F on Mutation { encryptMemory(memoryRef: "${id}") { id } }`],
+    ['under a directive', (id: string) => `mutation { encryptMemory(memoryRef: "${id}") @include(if: true) { id } }`],
   ])('encryptMemory %s', async (_label, doc) => {
     notEncrypted(await send(doc(memory.id), {}, { keys: [{ memory: memory.id, dataKey }] }));
     expect((await row(memory.id)).isEncrypted).toBe(false);
@@ -407,7 +407,7 @@ describe('#1796 acceptance 4: an entry on a plaintext memory, on anything but en
   });
 
   it('a query whose root field is spelled encryptMemory is not the mutation', async () => {
-    notEncrypted(await send(`query { encryptMemory(memoryId: "${memory.id}") { id } }`, {}, { keys: [{ memory: memory.id, dataKey }] }));
+    notEncrypted(await send(`query { encryptMemory(memoryRef: "${memory.id}") { id } }`, {}, { keys: [{ memory: memory.id, dataKey }] }));
     expect((await row(memory.id)).isEncrypted).toBe(false);
   });
 
@@ -447,7 +447,7 @@ describe('#1796 completion with the header and an argument both present (argumen
   beforeEach(async () => {
     await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true, keyVerifier: makeKeyVerifier(parseDataKey(dataKey)) } });
   });
-  const COMPLETE = 'mutation($id: ID!, $key: String) { encryptMemory(memoryId: $id, dataKey: $key) { id isEncrypted } }';
+  const COMPLETE = 'mutation($id: ID!, $key: String) { encryptMemory(memoryRef: $id, dataKey: $key) { id isEncrypted } }';
 
   it('the same key in both completes', async () => {
     const reply = await send(COMPLETE, { id: memory.id, key: dataKey }, { keys: [{ memory: memory.id, dataKey }] });

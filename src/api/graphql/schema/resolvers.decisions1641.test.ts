@@ -98,7 +98,7 @@ beforeEach(async () => {
     { organizationId: org.id, userId: holger.id, role: 'CONTRIBUTOR' },
     { organizationId: org.id, userId: reader.id, role: 'READER' },
   ] });
-  memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'team-shared' }, as());
+  memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'team-shared' }, as());
 });
 
 describe('#1728 Channel roots cannot squat decision-code space', () => {
@@ -542,7 +542,7 @@ describe('§3.2 — no generic path writes, deletes, moves or merges a decision'
   it('the memory holding a log: never deleted, encrypted or git-mirrored; a clone leaves decisions behind', async () => {
     await createLog().then((log) => ask(log.row.id));
     await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'ordinary', name: 'Ordinary' } });
-    expect(await codeOf(M.deleteMemory(null, { id: memory.id }, as()))).toBe('DECISION_CONTAINED');
+    expect(await codeOf(M.deleteMemory(null, { ref: memory.id }, as()))).toBe('DECISION_CONTAINED');
     expect(await codeOf(M.updateMemory(null, { id: memory.id, source: 'https://github.com/x/y' }, as()))).toBe('DECISION_LOG_MIRRORED');
     const clone = await M.cloneMemory(null, { ref: memory.id, targetUrn: 'hrn:mem:decision.example:copy' }, as());
     const cloned = await db.node.findMany({ where: { memoryId: clone.id } });
@@ -555,7 +555,7 @@ describe('§3.2 — no generic path writes, deletes, moves or merges a decision'
     const priv = await resolvers.Mutation.createMemory(null, { orgId, name: 'assistant', memoryClass: 'private' }, as(holger.id));
     await M.createDecisionLog(null, { memoryRef: priv.id, loc: 'decisions', defaultDeciders: [holger.id] }, as(holger.id));
     const dataKey = Buffer.alloc(32, 7).toString('base64');
-    expect(await codeOf(M.encryptMemory(null, { memoryId: priv.id, dataKey }, as(holger.id)))).toBe('DECISION_LOG_ENCRYPTED');
+    expect(await codeOf(M.encryptMemory(null, { memoryRef: priv.id, dataKey }, as(holger.id)))).toBe('DECISION_LOG_ENCRYPTED');
   });
 
   it('approval: a log is never approvable, a decision not yet (S2), and bulk approval skips both with a receipt', async () => {

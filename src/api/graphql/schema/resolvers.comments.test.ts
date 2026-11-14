@@ -55,7 +55,7 @@ beforeEach(async () => {
     { organizationId: org.id, userId: writer.id, role: 'CONTRIBUTOR' },
     { organizationId: org.id, userId: reader.id, role: 'READER' },
   ] });
-  memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'discussion' }, as());
+  memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'discussion' }, as());
 });
 
 describe('createComment (cor:dmo:110:01–05)', () => {

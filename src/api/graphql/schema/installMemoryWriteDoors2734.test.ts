@@ -112,8 +112,8 @@ describe.each(doors)('#2734 %s', (name, call) => {
 
 it('keeps replaceSubtree retired after a manager gate and conceals outsiders', async () => {
  const f=await fixture();const before=await snapshot(f);
- await expect(M.replaceSubtree({}, {memoryId:f.node.memoryId}, context(f.admin.id))).rejects.toMatchObject({extensions:{code:'REPLACE_SUBTREE_RETIRED'}});
- await expect(M.replaceSubtree({}, {memoryId:f.node.memoryId}, context(f.outsider.id))).rejects.toThrow();
+ await expect(M.replaceSubtree({}, {memoryRef:f.node.memoryId}, context(f.admin.id))).rejects.toMatchObject({extensions:{code:'REPLACE_SUBTREE_RETIRED'}});
+ await expect(M.replaceSubtree({}, {memoryRef:f.node.memoryId}, context(f.outsider.id))).rejects.toThrow();
  expect(await snapshot(f)).toEqual(before);
 });
 
@@ -166,7 +166,7 @@ it.each(['retired','tombstone','dry-run'] as const)('rechecks %s authority despi
   const value=Reflect.get(target,key);return typeof value==='function'?value.bind(target):value;
  }});
  const c={...context(f.admin.id),db:wrapped};
- const call=mode==='retired'?M.replaceSubtree({}, {memoryId:f.node.memoryId},c)
+ const call=mode==='retired'?M.replaceSubtree({}, {memoryRef:f.node.memoryId},c)
   :mode==='tombstone'?M.deleteNode({}, {nodeRef:f.node.id},c)
   :M.searchReplaceInNodes({}, {input:{nodeIds:[f.node.id],oldText:'before',newText:'after',fields:['content'],dryRun:true}},c);
  await expect(call).rejects.toMatchObject({extensions:{code:'FORBIDDEN'}});expect(crossed).toBe(true);expect(await snapshot(f)).toEqual(before);

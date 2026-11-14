@@ -31,7 +31,7 @@ beforeEach(async () => {
   orgId = org.id;
   admin = await db.user.create({ data: { githubId: 204101, githubUsername: 'newest-admin', handle: 'newest-admin', roles: [] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'newest-approved' }, as());
+  memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'newest-approved' }, as());
 });
 
 describe('newestApprovedRevisionOf (#2041)', () => {

@@ -164,7 +164,7 @@ it('11: encryptMemory converts state on live AND tombstoned roots in its real co
   await db.chatRootEngineState.create({ data: { chatRootNodeId: dead.id, state: { conversationName: 'tombstone-private-name', stageName: 'old-stage' } } });
   await db.memory.update({ where: { id: root.memoryId }, data: { class: 'private' } });
   const key = generateDataKey();
-  await memoryMutations.encryptMemory(null, { memoryId: root.memoryId, dataKey: key.raw.toString('base64') }, ctx);
+  await memoryMutations.encryptMemory(null, { memoryRef: root.memoryId, dataKey: key.raw.toString('base64') }, ctx);
   const rows = await db.chatRootEngineState.findMany({ where: { chatRootNodeId: { in: [root.id, dead.id] } } });
   expect(rows).toHaveLength(2);
   for (const row of rows) { expect(row.state).toHaveProperty('__enc'); expect(JSON.stringify(row.state)).not.toContain('stage'); }
@@ -196,13 +196,13 @@ it.each(['encrypt', 'promote'])('12/11: real %s commits on a second connection b
   let flip: () => Promise<unknown>;
   if (method === 'encrypt') {
     await db.memory.update({ where: { id: root.memoryId }, data: { class: 'private' } });
-    flip = () => memoryMutations.encryptMemory(null, { memoryId: root.memoryId, dataKey: key.raw.toString('base64') }, ctx);
+    flip = () => memoryMutations.encryptMemory(null, { memoryRef: root.memoryId, dataKey: key.raw.toString('base64') }, ctx);
   } else {
     const memory = await db.memory.findUniqueOrThrow({ where: { id: root.memoryId } });
     const app = await db.app.create({ data: { id: generateId(), name: 'promotion3501', urn: `promotion3501:${generateId()}`, organizationId: memory.organizationId!, identifyUserMethod: 'SECRET', createUserPermission: 'IMPLICIT' } });
     await db.appAgent.create({ data: { appId: app.id, agentId: memory.userMemoryOfAgentId! } });
     await db.memory.update({ where: { id: memory.id }, data: { class: 'app', appId: app.id, userId: null, createdBy: null, anonymousExpiresAt: new Date(Date.now() + 86400000) } });
-    flip = () => withTestOperationKey(key.raw.toString('base64'), app.id, () => memoryMutations.linkMemoryToUser(null, { memoryId: memory.id, externalUserId: '3501-synthetic' }, { db, appId: app.id, roles: [] } as Context));
+    flip = () => withTestOperationKey(key.raw.toString('base64'), app.id, () => memoryMutations.linkMemoryToUser(null, { memoryRef: memory.id, externalUserId: '3501-synthetic' }, { db, appId: app.id, roles: [] } as Context));
   }
   let observedAtPromotionCommit = false;
   const originalCompletion = memoryMutations.encryptMemory;
@@ -422,7 +422,7 @@ it('security: real encryptMemory completes past malformed engine state and encry
   await db.memory.update({ where: { id: root.memoryId }, data: { class: 'private' } });
   await db.chatRootEngineState.create({ data: { chatRootNodeId: root.id, state: { stageName: '\t' } } });
   const later = await db.node.create({ data: { id: generateId(), memoryId: root.memoryId, loc: 'zz:later', name: 'later', nodeType: 'note', content: 'SYNTHETIC-LATER-CONTENT' } });
-  await memoryMutations.encryptMemory(null, { memoryId: root.memoryId, dataKey: key.raw.toString('base64') }, ctx);
+  await memoryMutations.encryptMemory(null, { memoryRef: root.memoryId, dataKey: key.raw.toString('base64') }, ctx);
   const state = (await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } })).state;
   const after = await db.node.findUniqueOrThrow({ where: { id: later.id } });
   expect(state).toHaveProperty('__enc');

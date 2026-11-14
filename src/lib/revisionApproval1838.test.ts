@@ -35,7 +35,7 @@ beforeEach(async () => {
   orgId = org.id;
   admin = await db.user.create({ data: { githubId: 183801, githubUsername: 'rev-admin', handle: 'rev-admin', roles: [] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'rev-approvals' }, as());
+  memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'rev-approvals' }, as());
 });
 
 describe('revisionApprovalOf (#1838, R7)', () => {
@@ -211,7 +211,7 @@ describe('entering an encrypted memory ends approvals (#1838, cor:dmo:120:04)', 
     await resolvers.Mutation.approveNode(null, { nodeRef: gone.id }, as());
     await resolvers.Mutation.deleteNode(null, { nodeRef: gone.id }, as());
     const dataKey = Buffer.alloc(32, 9).toString('base64');
-    await resolvers.Mutation.encryptMemory(null, { memoryId: enc.id, dataKey }, as());
+    await resolvers.Mutation.encryptMemory(null, { memoryRef: enc.id, dataKey }, as());
     for (const id of [n.id, gone.id]) {
       const row = await db.node.findUniqueOrThrow({ where: { id } });
       expect(row.approvalHash).toBeNull();
@@ -291,7 +291,7 @@ describe('anonymous promotion ends approvals in its flip transaction (#1838, QA 
     const spy = vi.spyOn(memoryMutations, 'encryptMemory').mockRejectedValue(new Error('interrupted'));
     try {
       await expect(withTestOperationKey(key, app.id, () =>
-        resolvers.Mutation.linkMemoryToUser({}, { memoryId: anon.id, externalUserId: 'promo-user' }, { db, appId: app.id, roles: [] }),
+        resolvers.Mutation.linkMemoryToUser({}, { memoryRef: anon.id, externalUserId: 'promo-user' }, { db, appId: app.id, roles: [] }),
       )).rejects.toThrow('interrupted');
     } finally { spy.mockRestore(); }
     expect((await db.memory.findUniqueOrThrow({ where: { id: anon.id } })).isEncrypted).toBe(true);

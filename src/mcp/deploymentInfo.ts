@@ -105,7 +105,25 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // so a lagging build silently records the session fallback — a healthy-looking
 // receipt with the wrong attribution. Clients gate on the `worklog-model`
 // capability token rather than the version.
-export const HADRON_SERVER_VERSION = '0.21.0';
+// 0.22.0 — BREAKING, entity refs S6 (#4142, slices B–F): the GraphQL mutation
+// args that name entities renamed to `<entity>Ref` and (where the deprecated
+// `…Id` alias dropped) became REQUIRED — `createMemory.orgRef`,
+// `deleteMemory.ref`, `setMemorySourceToken.ref`, `syncMemory.ref`,
+// `pushMemoryToGit.ref`, `replaceSubtree.memoryRef`,
+// `linkMemoryToUser.memoryRef`, `encryptMemory.memoryRef`,
+// `deleteOrganization.ref`, `linkGithubApp.orgRef`, `updateOrgGithubApp.orgRef`,
+// `unlinkGithubApp.orgRef`, `createUserInvitation.orgRef`,
+// `startChat.agentRef`, `updateAgentAIConfig.agentRef`,
+// `clearAgentAIConfig.agentRef`, `createRevision.agentRef`,
+// `publishRevision.agentRef`, `restoreRevision.agentRef`,
+// `acquireEditorLock.agentRef`, `releaseEditorLock.agentRef`,
+// `joinApp.appRef`, `leaveApp.appRef`, and the nine alias-drop mutations
+// (`*MemorySubscription`, `ensureAppMember`/`removeAppMember`,
+// `revokeAgentSubscription`, `add`/`update`/`removeOrgMember`). A lagging
+// build's `…Id` argument is now an UNKNOWN argument — GraphQL refuses the
+// whole operation, unlike MCP's silent drop. (Chunk A, the memory reads,
+// follows #4136.)
+export const HADRON_SERVER_VERSION = '0.22.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

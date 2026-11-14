@@ -143,7 +143,6 @@ import {
   resolveMemoryRefForWrite,
   canOpenMemoryRecordById,
   refArgNotFoundError,
-  chosenRefArg,
   requireMemoryWriteAccess,
   withoutRequestCaches,
   MEMORY_INCLUDE,
@@ -159,8 +158,8 @@ import {
   resolveMemoryRefForMemberGate,
   resolveSelfUserRefForMemberGate,
   resolveUserRefArg,
-  resolveOrgRefArg,
-  resolveMemoryRefArg,
+  resolveRequiredOrgRef,
+  resolveRequiredMemoryRef,
   getAccessibleMemoryIds,
   type MergeMemoriesInput,
   assertMemoryRootLoc,
@@ -347,10 +346,10 @@ async function lockAttachmentPair(
 async function refuseHiddenSubscriptionMemory(
   ctx: Context,
   memoryId: string,
-  refArg: { ref?: string | null; id?: string | null },
+  memoryRef: string,
 ): Promise<void> {
   if (await canOpenMemoryRecordById(ctx, memoryId)) return;
-  throw refArgNotFoundError('memory', chosenRefArg(refArg)!);
+  throw refArgNotFoundError('memory', memoryRef.trim());
 }
 
 /**
@@ -371,7 +370,7 @@ async function requireMemorySubscription(
     select: { memoryId: true },
   });
   if (row) return;
-  if (!(await canOpenMemoryRecordById(ctx, memoryId))) throw refArgNotFoundError('memory', memoryRef);
+  if (!(await canOpenMemoryRecordById(ctx, memoryId))) throw refArgNotFoundError('memory', memoryRef.trim());
   throw new GraphQLError('No subscription from that organization to this memory.', {
     extensions: { code: 'NOT_FOUND' },
   });
@@ -535,7 +534,7 @@ export const memoryMutations = {
     createMemory: async (
       _: unknown,
       {
-        orgId,
+        orgRef,
         name,
         shortDescription,
         description,
@@ -559,7 +558,7 @@ export const memoryMutations = {
         draftCorpus,
       }: {
         // spec 047: OPTIONAL — omitted ⇒ user-owned (caller's `@handle` namespace).
-        orgId?: string | null; name: string;
+        orgRef?: string | null; name: string;
         shortDescription?: string; description?: string; data?: Record<string, unknown> | null; tags?: string[];
         license?: string; category0?: string; category1?: string; category2?: string;
         iconUrl?: string; heroUrl?: string; homeUrl?: string;
@@ -582,19 +581,19 @@ export const memoryMutations = {
       },
       ctx: Context,
     ) => {
-      // spec 047 — user-owned tenancy: omitting `orgId` creates the memory in
+      // spec 047 — user-owned tenancy: omitting `orgRef` creates the memory in
       // the authenticated caller's own `@<handle>` namespace (organizationId
       // NULL, ownerUserId = caller) instead of under an org. The two paths
       // diverge on owner resolution, authorization, and URN root below.
-      const userOwned = orgId == null;
+      const userOwned = orgRef == null;
       if (userOwned && !ctx.userId) {
         throw new GraphQLError(
           'Creating a user-owned memory (no orgId) requires an authenticated user (the creator is the owner).',
           { extensions: { code: 'UNAUTHENTICATED' } },
         );
       }
-      // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
-      const resolvedOrgId = userOwned ? null : (await resolveOrgRef(ctx.db, orgId!)).id;
+      // 007-entity-id-or-urn: orgRef may be ID, bare URN, or prefixed URN.
+      const resolvedOrgId = userOwned ? null : (await resolveOrgRef(ctx.db, orgRef!)).id;
 
       // #621 — friendly guard mirroring chk_memory_max_rev_count_positive.
       // Explicit `null` is rejected (there is no "null" cap — omit the arg to
@@ -1305,11 +1304,11 @@ export const memoryMutations = {
       return count;
     },
 
-    deleteMemory: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+    deleteMemory: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
       // includeDeleted: a re-delete on an already-soft-deleted memory must
       // return true (FR-014 idempotency). The default resolveMemoryRef
       // would throw MemoryNotFoundError on the second call.
-      const { id: resolvedId } = await resolveMemoryRef(ctx.db, id, { includeDeleted: true });
+      const { id: resolvedId } = await resolveMemoryRef(ctx.db, ref, { includeDeleted: true });
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedId } });
       // Spec 013: class-aware authz. Personal-class memories have a single
       // owner in Memory.userId. The chk_personal_visibility_user CHECK
@@ -1324,7 +1323,7 @@ export const memoryMutations = {
       // #1381: a caller who cannot open this memory gets resolveMemoryRef's
       // miss — the owner-only refusals below also named the memory's class.
       const authorizeDelete = (authCtx: Context, current: typeof memory) =>
-        concealUnreadableDenial(authCtx, resolvedId, id, async () => {
+        concealUnreadableDenial(authCtx, resolvedId, ref, async () => {
           if (isInstallMemoryRow(current)) {
             // #2044, R45: whoever manages the App (its owner, an OWNER-role member,
             // an org admin) deletes its install memory by hand, also after the App
@@ -1815,12 +1814,11 @@ export const memoryMutations = {
 
     setMemorySourceToken: async (
       _: unknown,
-      { id, token, expiresAt }: { id: string; token: string; expiresAt?: string },
+      { ref, token, expiresAt }: { ref: string; token: string; expiresAt?: string },
       ctx: Context,
     ) => {
       // #1381: resolve (typed miss, URN accepted) and conceal as updateMemory does.
-      const ref = id;
-      ({ id } = await resolveMemoryRef(ctx.db, ref));
+      const { id } = await resolveMemoryRef(ctx.db, ref);
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
       await concealUnreadableDenial(ctx, id, ref, () => requireMemoryManageAccess(ctx, memory));
       const encrypted = encryptToken(token);
@@ -2010,30 +2008,19 @@ export const memoryMutations = {
 
     createMemorySubscription: async (
       _: unknown,
-      {
-        memoryRef,
-        memoryId,
-        orgRef,
-        orgId,
-        role,
-      }: {
-        memoryRef?: string | null;
-        memoryId?: string | null;
-        orgRef?: string | null;
-        orgId?: string | null;
-        role: string;
-      },
+      { memoryRef, orgRef, role }: { memoryRef: string; orgRef: string; role: string },
       ctx: Context,
     ) => {
       // #764 (was 007-entity-id-or-urn): memoryRef/orgRef accept id / URN /
-      // (org) handle. memoryId/orgId are the deprecated aliases.
-      const resolvedMemoryId = await resolveMemoryRefArg(ctx.db, { ref: memoryRef, id: memoryId });
+      // (org) handle. #4142 (S6 chunk F) dropped the deprecated memoryId/orgId
+      // aliases: the refs are required and the only way in.
+      const resolvedMemoryId = await resolveRequiredMemoryRef(ctx.db, memoryRef);
       // #1381: hidden from this caller ⇒ resolveRefArg's own miss, decided HERE,
       // before the org resolves — an org error arriving first would tell an
       // existing memory from a missing one. No caller who cannot open the
       // memory can succeed here, so this narrows nobody legitimate.
-      await refuseHiddenSubscriptionMemory(ctx, resolvedMemoryId, { ref: memoryRef, id: memoryId });
-      const resolvedOrgId = await resolveOrgRefArg(ctx.db, { ref: orgRef, id: orgId });
+      await refuseHiddenSubscriptionMemory(ctx, resolvedMemoryId, memoryRef);
+      const resolvedOrgId = await resolveRequiredOrgRef(ctx.db, orgRef);
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
 
       // 035-visibility-enum-cleanup: only PUBLIC memories are cross-org
@@ -2060,7 +2047,7 @@ export const memoryMutations = {
       return withAuthorizedMemoryTx(
         ctx, resolvedMemoryId, [{ kind: 'org', id: resolvedOrgId }],
         async (txCtx) => {
-          await refuseHiddenSubscriptionMemory(txCtx, resolvedMemoryId, { ref: memoryRef, id: memoryId });
+          await refuseHiddenSubscriptionMemory(txCtx, resolvedMemoryId, memoryRef);
           await requireOrgRole(txCtx, resolvedOrgId, 'ADMIN');
           const current = await txCtx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
           if (current.visibility !== 'PUBLIC') {
@@ -2085,41 +2072,29 @@ export const memoryMutations = {
 
     updateMemorySubscription: async (
       _: unknown,
-      {
-        memoryRef,
-        memoryId,
-        orgRef,
-        orgId,
-        role,
-      }: {
-        memoryRef?: string | null;
-        memoryId?: string | null;
-        orgRef?: string | null;
-        orgId?: string | null;
-        role: string;
-      },
+      { memoryRef, orgRef, role }: { memoryRef: string; orgRef: string; role: string },
       ctx: Context,
     ) => {
-      const resolvedMemoryId = await resolveMemoryRefArg(ctx.db, { ref: memoryRef, id: memoryId });
+      const resolvedMemoryId = await resolveRequiredMemoryRef(ctx.db, memoryRef);
       // #1381: hidden from this caller ⇒ resolveRefArg's own miss, decided HERE,
       // before the org resolves — an org error arriving first would tell an
       // existing memory from a missing one. No caller who cannot open the
       // memory can succeed here, so this narrows nobody legitimate.
-      await refuseHiddenSubscriptionMemory(ctx, resolvedMemoryId, { ref: memoryRef, id: memoryId });
-      const resolvedOrgId = await resolveOrgRefArg(ctx.db, { ref: orgRef, id: orgId });
+      await refuseHiddenSubscriptionMemory(ctx, resolvedMemoryId, memoryRef);
+      const resolvedOrgId = await resolveRequiredOrgRef(ctx.db, orgRef);
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
       // Only callers who can open the memory reach here (#1381), so this
       // denial discloses nothing they did not already know.
       await requireMemoryManageAccess(ctx, memory);
       // A missing subscription is a typed NOT_FOUND, not Prisma's P2025 text.
-      await requireMemorySubscription(ctx, resolvedMemoryId, resolvedOrgId, chosenRefArg({ ref: memoryRef, id: memoryId })!);
+      await requireMemorySubscription(ctx, resolvedMemoryId, resolvedOrgId, memoryRef);
       return withAuthorizedMemoryTx(
         ctx, resolvedMemoryId, [{ kind: 'org', id: resolvedOrgId }],
         async (txCtx) => {
-          await refuseHiddenSubscriptionMemory(txCtx, resolvedMemoryId, { ref: memoryRef, id: memoryId });
+          await refuseHiddenSubscriptionMemory(txCtx, resolvedMemoryId, memoryRef);
           const current = await txCtx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
           await requireMemoryManageAccess(txCtx, current);
-          await requireMemorySubscription(txCtx, resolvedMemoryId, resolvedOrgId, chosenRefArg({ ref: memoryRef, id: memoryId })!);
+          await requireMemorySubscription(txCtx, resolvedMemoryId, resolvedOrgId, memoryRef);
         },
         (tx) => tx.memorySubscription.update({
           where: { memoryId_organizationId: { memoryId: resolvedMemoryId, organizationId: resolvedOrgId } },
@@ -2132,31 +2107,22 @@ export const memoryMutations = {
 
     deleteMemorySubscription: async (
       _: unknown,
-      {
-        memoryRef,
-        memoryId,
-        orgRef,
-        orgId,
-      }: {
-        memoryRef?: string | null;
-        memoryId?: string | null;
-        orgRef?: string | null;
-        orgId?: string | null;
-      },
+      { memoryRef, orgRef }: { memoryRef: string; orgRef: string },
       ctx: Context,
     ) => {
-      const resolvedMemoryId = await resolveMemoryRefArg(ctx.db, { ref: memoryRef, id: memoryId });
+      const resolvedMemoryId = await resolveRequiredMemoryRef(ctx.db, memoryRef);
       // #1381: unlike create/update, a caller who cannot open the memory CAN
       // succeed here — an admin of the subscribing org removing its own
       // subscription — so it is not refused up front. Instead any org error
       // becomes the memory's miss when the memory is hidden, so an org error
       // arriving first cannot tell an existing memory from a missing one.
       const memoryHidden = !(await canOpenMemoryRecordById(ctx, resolvedMemoryId));
-      const resolvedOrgId = await resolveOrgRefArg(ctx.db, { ref: orgRef, id: orgId }).catch((e: unknown) => {
-        // Only CALLER-INPUT errors are converted — a missing org, both-or-neither,
-        // a malformed URN — since a missing memory refuses before the org is ever
-        // parsed. A DB fault is not input: it propagates as itself, never as
-        // "no such memory" (@copilot, PR #1383).
+      const resolvedOrgId = await resolveRequiredOrgRef(ctx.db, orgRef).catch((e: unknown) => {
+        // Only CALLER-INPUT errors are converted — a missing org, a malformed
+        // URN, an ambiguous rename alias — since a missing memory refuses
+        // before the org is ever parsed. A DB fault is not input: it
+        // propagates as itself, never as "no such memory" (@copilot, PR #1383;
+        // the both-or-neither arm died with the orgId alias in #4142 S6 chunk F).
         const callerInput =
           e instanceof UrnNotQualifiedError ||
           // An org ref whose legacy alias names two orgs is caller input too
@@ -2164,7 +2130,7 @@ export const memoryMutations = {
           e instanceof AmbiguousLegacyUrnError ||
           (e instanceof GraphQLError && (e.extensions.code === 'NOT_FOUND' || e.extensions.code === 'BAD_USER_INPUT'));
         if (memoryHidden && callerInput) {
-          throw refArgNotFoundError('memory', chosenRefArg({ ref: memoryRef, id: memoryId })!);
+          throw refArgNotFoundError('memory', memoryRef.trim());
         }
         throw e;
       });
@@ -2189,7 +2155,7 @@ export const memoryMutations = {
         return m?.role === 'ADMIN' || m?.role === 'OWNER';
       };
       // #1381: a caller who cannot open the memory gets resolveRefArg's own miss.
-      const chosen = chosenRefArg({ ref: memoryRef, id: memoryId })!;
+      const chosen = memoryRef.trim();
       await concealUnreadableDenial(
         ctx,
         resolvedMemoryId,
@@ -2233,10 +2199,9 @@ export const memoryMutations = {
       return true;
     },
 
-    syncMemory: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+    syncMemory: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
       // #1381: resolve (typed miss, URN accepted) and conceal as updateMemory does.
-      const ref = id;
-      ({ id } = await resolveMemoryRef(ctx.db, ref));
+      const { id } = await resolveMemoryRef(ctx.db, ref);
       const memory = await ctx.db.memory.findUniqueOrThrow({
         where: { id },
         include: { organization: true },
@@ -2268,10 +2233,9 @@ export const memoryMutations = {
       return ctx.db.memory.findUniqueOrThrow({ where: { id }, include: MEMORY_INCLUDE });
     },
 
-    pushMemoryToGit: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+    pushMemoryToGit: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
       // #1381: resolve (typed miss, URN accepted) and conceal as updateMemory does.
-      const ref = id;
-      ({ id } = await resolveMemoryRef(ctx.db, ref));
+      const { id } = await resolveMemoryRef(ctx.db, ref);
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
       await concealUnreadableDenial(ctx, id, ref, () => requireMemoryManageAccess(ctx, memory));
 
@@ -2287,18 +2251,18 @@ export const memoryMutations = {
 
     linkMemoryToUser: async (
       _: unknown,
-      { memoryId, externalUserId }: { memoryId: string; externalUserId: string },
+      { memoryRef, externalUserId }: { memoryRef: string; externalUserId: string },
       ctx: Context,
     ) => {
       if (!ctx.appId) throw forbiddenError('Forbidden: App Key required');
-      // 007-entity-id-or-urn: memoryId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
+      // 007-entity-id-or-urn: memoryRef may be ID, bare URN, or prefixed URN.
+      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: ctx.appId } });
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
       const [{ now: promotionNow }] = await ctx.db.$queryRaw<Array<{ now: Date }>>`SELECT clock_timestamp() AS now`;
       // #1644: both promotion paths belong to this App's live anonymous
       // provisioning scope. Registered holdings require their owner's authority.
-      await concealUnreadableDenial(ctx, resolvedMemoryId, memoryId, async () => {
+      await concealUnreadableDenial(ctx, resolvedMemoryId, memoryRef, async () => {
         if (memory.organizationId !== app.organizationId || !memory.userMemoryOfAgentId ||
             memory.deletedAt || memory.anonymousExpiresAt === null || memory.anonymousExpiresAt <= promotionNow || memory.userId !== null || memory.class !== 'app' ||
             memory.appId !== ctx.appId || memory.isEncrypted || ctx.impersonation) {
@@ -2492,7 +2456,7 @@ export const memoryMutations = {
         // already consumed, and a second claim refuses.
         await requestKeyStorage.run(new Map([[resolvedMemoryId, key]]), () =>
           requestOperationKeyStorage.run({}, () =>
-            memoryMutations.encryptMemory({}, { memoryId: resolvedMemoryId }, ctx)));
+            memoryMutations.encryptMemory({}, { memoryRef: resolvedMemoryId }, ctx)));
         return ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
       }
 
@@ -2538,14 +2502,14 @@ export const memoryMutations = {
     encryptMemory: async (
       _: unknown,
       {
-        memoryId,
+        memoryRef,
         dataKey: dataKeyArgument,
         passphrase: passphraseArgument,
-      }: { memoryId: string; dataKey?: string | null; passphrase?: string | null },
+      }: { memoryRef: string; dataKey?: string | null; passphrase?: string | null },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: memoryId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
+      // 007-entity-id-or-urn: memoryRef may be ID, bare URN, or prefixed URN.
+      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
       // #1796 (cor:sec:040:04): the secret travels beside the operation. A first encryption's entry
       // comes from x-hadron-memory-keys, unverified because no verifier exists yet. A completion's key
@@ -2564,7 +2528,7 @@ export const memoryMutations = {
         memory.appId === ctx.appId && memory.class === 'private' &&
         memory.userId !== null && memory.isEncrypted &&
         (!!dataKey || !!stagedKey || operationKeySupplied) && !passphrase;
-      await concealUnreadableDenial(ctx, resolvedMemoryId, memoryId, async () => {
+      await concealUnreadableDenial(ctx, resolvedMemoryId, memoryRef, async () => {
         if (!isStrictOwner(ctx, memory.userId) && !appCompletionOnly) {
           throw new GraphQLError('Only the memory owner may encrypt it.', {
             extensions: { code: 'FORBIDDEN' },
@@ -2673,7 +2637,7 @@ export const memoryMutations = {
           await tx.$queryRaw`SELECT id FROM memories WHERE id = ${resolvedMemoryId} FOR UPDATE`;
           const current = await tx.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
           const txCtx = { ...ctx, db: tx } as Context;
-          await concealUnreadableDenial(txCtx, resolvedMemoryId, memoryId, async () => {
+          await concealUnreadableDenial(txCtx, resolvedMemoryId, memoryRef, async () => {
             if (current.deletedAt) throw new GraphQLError('Memory not found.', { extensions: { code: 'FORBIDDEN' } });
             if (!isStrictOwner(ctx, current.userId)) {
               throw new GraphQLError('Only the memory owner may encrypt it.', {
@@ -2717,7 +2681,7 @@ export const memoryMutations = {
       const lockConversionMemory = async (tx: Prisma.TransactionClient) => {
         await tx.$queryRaw`SELECT id FROM memories WHERE id = ${resolvedMemoryId} FOR SHARE`;
         const current = await tx.memory.findUnique({ where: { id: resolvedMemoryId } });
-        await concealUnreadableDenial({ ...ctx, db: tx } as Context, resolvedMemoryId, memoryId, async () => {
+        await concealUnreadableDenial({ ...ctx, db: tx } as Context, resolvedMemoryId, memoryRef, async () => {
           if (!current || current.deletedAt || (!isStrictOwner(ctx, current.userId) &&
               !(appCompletionOnly && current.appId === ctx.appId && current.userId === memory.userId &&
                 current.class === 'private' && current.isEncrypted))) {

@@ -84,8 +84,8 @@ describe('#1551 principal-grant authority fence', () => {
       await waitForLockWaitersOfType(db, 'transactionid', 1);
       let removed = false;
       const removal = resolvers.Mutation.removeOrgMember(null, {
-        orgId: org.id, userId: orgAdmin.id,
-      }, { db, userId: owner.id, roles: [] } as Context)
+        orgRef: org.id, userRef: orgAdmin.id,
+      }, { db, userRef: owner.id, roles: [] } as Context)
         .then((value: unknown) => { removed = true; return value; });
       await waitForLockWaitersOfType(db, 'advisory', 1);
       expect(removed).toBe(false);
@@ -147,10 +147,10 @@ describe('requireOrgAction — no grant rows (transcription check)', () => {
       resolvers.Mutation.cloneMemory({}, { ref: mem.id, targetUrn: 'org-a::km-2' }, contributorCtx()),
     ).rejects.toThrow('Forbidden');
     await expect(
-      resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'new-mem' }, contributorCtx()),
+      resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'new-mem' }, contributorCtx()),
     ).rejects.toThrow('Forbidden');
     await expect(
-      resolvers.Mutation.deleteMemory({}, { id: mem.id }, contributorCtx()),
+      resolvers.Mutation.deleteMemory({}, { ref: mem.id }, contributorCtx()),
     ).rejects.toThrow('Forbidden');
   });
 
@@ -164,12 +164,12 @@ describe('requireOrgAction — no grant rows (transcription check)', () => {
     expect(clone.urn).toBe('org-a:km-clone');
     const created = await resolvers.Mutation.createMemory(
       {},
-      { orgId: org.id, name: 'made-by-admin' },
+      { orgRef: org.id, name: 'made-by-admin' },
       orgAdminCtx(),
     );
     expect(created.id).toBeTruthy();
     await expect(
-      resolvers.Mutation.deleteMemory({}, { id: mem.id }, orgAdminCtx()),
+      resolvers.Mutation.deleteMemory({}, { ref: mem.id }, orgAdminCtx()),
     ).resolves.toBeTruthy();
   });
 
@@ -207,7 +207,7 @@ describe('requireOrgAction — individual grants', () => {
     );
     expect(clone.urn).toBe('org-a:km-clone');
     await expect(
-      resolvers.Mutation.deleteMemory({}, { id: mem.id }, contributorCtx()),
+      resolvers.Mutation.deleteMemory({}, { ref: mem.id }, contributorCtx()),
     ).rejects.toThrow('Forbidden');
   });
 
@@ -215,7 +215,7 @@ describe('requireOrgAction — individual grants', () => {
     await grantActions(reader.id, ['memory.create']);
     const created = await resolvers.Mutation.createMemory(
       {},
-      { orgId: org.id, name: 'reader-made' },
+      { orgRef: org.id, name: 'reader-made' },
       readerCtx(),
     );
     expect(created.id).toBeTruthy();
@@ -225,7 +225,7 @@ describe('requireOrgAction — individual grants', () => {
     const mem = await createKnowledgeMemory();
     await grantActions(contributor.id, ['memory.*']);
     await expect(
-      resolvers.Mutation.deleteMemory({}, { id: mem.id }, contributorCtx()),
+      resolvers.Mutation.deleteMemory({}, { ref: mem.id }, contributorCtx()),
     ).resolves.toBeTruthy();
   });
 

@@ -24,7 +24,7 @@ const createNode = (memoryId: string, loc: string) => db.node.create({
 });
 const aliasesFor = (id: string) => db.urnAlias.findMany({ where: { entityType: 'NODE', entityId: id } });
 const createMemory = (name: string, draftCorpus?: boolean | null) =>
-  resolvers.Mutation.createMemory(null, { orgId: org.id, name, ...(draftCorpus !== undefined ? { draftCorpus } : {}) }, ctx());
+  resolvers.Mutation.createMemory(null, { orgRef: org.id, name, ...(draftCorpus !== undefined ? { draftCorpus } : {}) }, ctx());
 const corpusState = (memory: { id: string }) =>
   resolvers.Memory.corpusState(memory, {}, ctx());
 /** Stamp a node minted directly (the mint flow has its own tests). */

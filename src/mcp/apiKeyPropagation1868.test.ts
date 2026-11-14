@@ -45,7 +45,7 @@ beforeEach(async () => {
     { organizationId: org.id, userId: admin.id, role: 'ADMIN' },
     { organizationId: org.id, userId: member.id, role: 'CONTRIBUTOR' },
   ] });
-  memory = await M.createMemory(null, { orgId: org.id, name: 'discussion' }, as(admin.id));
+  memory = await M.createMemory(null, { orgRef: org.id, name: 'discussion' }, as(admin.id));
   app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.id.toLowerCase()}:team` } });
   await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
   const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, as(admin.id));

@@ -32,7 +32,7 @@ beforeEach(async () => {
 describe('#574 — display name → slug at create', () => {
   it('createMemory slugifies a spacey, uppercase name', async () => {
     const mem = await resolvers.Mutation.createMemory(
-      {}, { orgId: org.id, name: 'Flow Lab Notes' }, ctx,
+      {}, { orgRef: org.id, name: 'Flow Lab Notes' }, ctx,
     );
     expect(mem.urn).toBe('slug-org:flow-lab-notes');
     expect(mem.urn).not.toMatch(/[A-Z ]/);
@@ -60,7 +60,7 @@ describe('#574 — display name → slug at create', () => {
 
 describe('#574 — display name → slug at rename', () => {
   it('updateMemory slugifies an explicit rename slug', async () => {
-    const mem = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'start' }, ctx);
+    const mem = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'start' }, ctx);
     const renamed = await resolvers.Mutation.updateMemory(
       {}, { id: mem.id, urn: 'New Slug Value' }, ctx,
     );

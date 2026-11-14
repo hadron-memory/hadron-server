@@ -138,7 +138,7 @@ describe('#1644 encryption authority', () => {
     const anon = await db.memory.create({ data: { name: 'Anonymous', urn: 'enc-owner.test:anon', organizationId: orgId, appId, userMemoryOfAgentId: agent.id, anonymousExpiresAt: new Date(Date.now() + 86400000), class: 'app' } });
     const before = await db.memory.findUniqueOrThrow({ where: { id: anon.id } });
     const usersBefore = await db.user.count();
-    await expect(withTestOperationKey(promotionKey, ({ db, appId: otherAppId, roles: [] }).appId, () => resolvers.Mutation.linkMemoryToUser({}, { memoryId: anon.id, externalUserId: 'sibling-user' }, { db, appId: otherAppId, roles: [] })))
+    await expect(withTestOperationKey(promotionKey, ({ db, appId: otherAppId, roles: [] }).appId, () => resolvers.Mutation.linkMemoryToUser({}, { memoryRef: anon.id, externalUserId: 'sibling-user' }, { db, appId: otherAppId, roles: [] })))
       .rejects.toMatchObject({ code: 'MEMORY_NOT_FOUND' });
     expect(await db.memory.findUniqueOrThrow({ where: { id: anon.id } })).toEqual(before);
     expect(await db.user.count()).toBe(usersBefore);
@@ -186,7 +186,7 @@ describe('#1644 encryption authority', () => {
       return row;
     }) as typeof db.memory.findUniqueOrThrow);
     try {
-      await expect(withTestOperationKey(promotionKey, ({ db, appId, roles: [] }).appId, () => resolvers.Mutation.linkMemoryToUser({}, { memoryId: anon.id, externalUserId: 'race-user' }, { db, appId, roles: [] })))
+      await expect(withTestOperationKey(promotionKey, ({ db, appId, roles: [] }).appId, () => resolvers.Mutation.linkMemoryToUser({}, { memoryRef: anon.id, externalUserId: 'race-user' }, { db, appId, roles: [] })))
         .rejects.toMatchObject({ extensions: { code: 'MEMORY_WRITE_CONFLICT' } });
     } finally { read.mockRestore(); }
     expect(await db.memory.findUniqueOrThrow({ where: { id: anon.id } })).toMatchObject({
@@ -323,7 +323,7 @@ describe('#1644 encryption authority', () => {
 
   it('an ownerless anonymous memory never grants public encryption to an App key', async () => {
     const anon = await db.memory.create({ data: { name: 'Ownerless', urn: 'enc-owner.test:ownerless', organizationId: orgId, appId, class: 'app' } });
-    await expect(resolvers.Mutation.encryptMemory({}, { memoryId: anon.id, dataKey }, { db, appId, roles: [] }))
+    await expect(resolvers.Mutation.encryptMemory({}, { memoryRef: anon.id, dataKey }, { db, appId, roles: [] }))
       .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     expect(await db.memory.findUniqueOrThrow({ where: { id: anon.id } })).toEqual(anon);
   });

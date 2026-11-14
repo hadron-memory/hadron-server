@@ -45,7 +45,7 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: target.id, role: 'CONTRIBUTOR' } });
   const ctx: Context = { db, userId: user.id, roles: [] };
-  memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'upd-user' }, ctx);
+  memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'upd-user' }, ctx);
   agent = await db.agent.create({ data: { id: generateId(), urn: 'updbyuser.example:eng', name: 'eng', organizationId: org.id } });
   const app = await db.app.create({ data: { id: generateId(), name: 'Team', urn: 'updbyuser.example:team', organizationId: org.id } });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });

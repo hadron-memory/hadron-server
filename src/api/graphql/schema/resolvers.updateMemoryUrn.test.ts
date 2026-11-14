@@ -41,7 +41,7 @@ describe('updateMemory — rejects a non-bare URN slug (no corruption persisted)
   it('throws BAD_USER_INPUT and does NOT mutate the stored URN', async () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: orgA.id, name: 'experiments' },
+      { orgRef: orgA.id, name: 'experiments' },
       adminCtx(),
     );
     const before = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });
@@ -62,7 +62,7 @@ describe('updateMemory — rejects a non-bare URN slug (no corruption persisted)
   it('also rejects a scheme-prefixed slug and a `::`-bearing slug', async () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: orgA.id, name: 'exp2' },
+      { orgRef: orgA.id, name: 'exp2' },
       adminCtx(),
     );
     for (const bad of ['hrn:memory:org-a::exp2', 'foo::bar', 'agent:org-a::x']) {
@@ -75,7 +75,7 @@ describe('updateMemory — rejects a non-bare URN slug (no corruption persisted)
   it('accepts a bare slug rename and persists `<org>:<slug>`', async () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: orgA.id, name: 'old-slug' },
+      { orgRef: orgA.id, name: 'old-slug' },
       adminCtx(),
     );
     await resolvers.Mutation.updateMemory(
@@ -90,7 +90,7 @@ describe('updateMemory — rejects a non-bare URN slug (no corruption persisted)
   it('leaves the URN untouched on a metadata-only update (no urn arg)', async () => {
     const mem = await resolvers.Mutation.createMemory(
       {},
-      { orgId: orgA.id, name: 'keep-urn' },
+      { orgRef: orgA.id, name: 'keep-urn' },
       adminCtx(),
     );
     const before = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });

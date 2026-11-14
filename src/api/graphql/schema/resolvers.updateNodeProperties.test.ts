@@ -55,7 +55,7 @@ beforeEach(async () => {
   admin = await db.user.create({ data: { githubId: 8901, githubUsername: 'unp-admin', roles: ['ADMIN'] } });
   member = await db.user.create({ data: { githubId: 8902, githubUsername: 'unp-member', roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  memory = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'unp-mem' }, ctx());
+  memory = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'unp-mem' }, ctx());
 });
 
 describe('updateNodeProperties — merge semantics', () => {

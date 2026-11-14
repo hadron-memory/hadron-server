@@ -56,7 +56,7 @@ beforeEach(async () => {
   });
   memory = await resolvers.Mutation.createMemory(
     {},
-    { orgId: org.id, name: 'roe-mem' },
+    { orgRef: org.id, name: 'roe-mem' },
     ctx(),
   );
   source = await db.node.create({

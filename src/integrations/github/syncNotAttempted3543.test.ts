@@ -24,7 +24,7 @@ let before: unknown;
 const ctx = (userId = ownerId): Context => ({ db, userId, roles: ['READER'] });
 const snapshot = async () => ({ memory: await db.memory.findUniqueOrThrow({ where: { id: memory.id } }), nodes: await db.node.findMany({ where: { memoryId: memory.id } }) });
 const graphQL = async (userId = ownerId) => {
-  const res = await server.executeOperation({ query: 'mutation($id:ID!){syncMemory(id:$id){id syncStatus lastSyncReport}}', variables: { id: memory.id } }, { contextValue: ctx(userId) });
+  const res = await server.executeOperation({ query: 'mutation($id:ID!){syncMemory(ref:$id){id syncStatus lastSyncReport}}', variables: { id: memory.id } }, { contextValue: ctx(userId) });
   if (res.body.kind !== 'single') throw new Error('unexpected incremental response');
   return res.body.singleResult;
 };
