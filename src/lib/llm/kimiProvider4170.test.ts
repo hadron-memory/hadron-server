@@ -132,6 +132,20 @@ describe('#4170 acceptance 2 — no process-key fallback', () => {
     expect(captured).toEqual([]);
   });
 
+  it.each(['HADRON_SERVER', 'ORGANIZATION', 'APP', 'AGENT'])('keyless %s kimi generateExtraction is refused before any request (default host and explicit endpoint)', async (ownerType) => {
+    vi.stubEnv('OPENAI_API_KEY', SENTINEL);
+    const seen = stubDefaultHost();
+    const fields = [{ name: 'city', type: 'string' }] as never;
+    for (const endpoint of [null, `${origin}/v1`]) {
+      const err = await generateExtraction(resolved('kimi', null, endpoint, null, null, ownerType), { prompt: 'hi' }, fields).catch((e) => e);
+      expect(err, `${ownerType} ${endpoint}`).toBeInstanceOf(LlmInvocationError);
+      expect((err as LlmInvocationError).transient).toBe(false);
+      expect(String(err.message)).not.toContain(SENTINEL);
+    }
+    expect(seen).toEqual([]);
+    expect(captured).toEqual([]);
+  });
+
   it('keyless kimi with an explicit endpoint is refused too', async () => {
     vi.stubEnv('OPENAI_API_KEY', SENTINEL);
     const err = await generateText(resolved('kimi', null, `${origin}/v1`, null, null, 'HADRON_SERVER'), { prompt: 'hi' }).catch((e) => e);

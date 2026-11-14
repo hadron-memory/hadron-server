@@ -129,7 +129,7 @@ function modelFor(resolved: ResolvedAiConfig): LanguageModel {
       return openAiCompatible(createOpenAI({ apiKey: key, baseURL: defaultEndpoint('glm')!, ...conn }));
     case 'kimi':
       // #4170: Moonshot serves Chat Completions; own key only (kimi is not an
-      // ambient-credential provider), pinned to its catalogue default host.
+      // ambient-credential provider), the catalogue default host when no endpoint is set.
       return openAiCompatible(createOpenAI({ apiKey: key, baseURL: defaultEndpoint('kimi')!, ...conn }));
     case 'openai-compatible':
       // #1373: a caller-named host speaking an OpenAI wire protocol. Its
