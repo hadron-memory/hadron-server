@@ -8,8 +8,7 @@
  * when its holder does, cor:acl:140:03), its App has not been deleted (a soft-deleted scope App allows nothing until the reclaim
  * cascades the row), started (`starts_at <= now`, inclusive), not expired (`expires_at > now`, the end is exclusive) and not
  * spent (`max_uses` is NULL or `use_count < max_uses`).
- * The state is worked out here and never stored. The `cor:acl:140:03` open questions (a grant signed before its start,
- * a pending grant past its expiry) are NOT given a name here: both simply allow nothing.
+ * The state is worked out here and never stored. The lifecycle state NAME is state.ts (#4173); `allows` is exactly state ACTIVE and started.
  */
 import { Prisma } from '../../generated/prisma/index.js';
 

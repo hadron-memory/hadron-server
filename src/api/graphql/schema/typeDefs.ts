@@ -7485,9 +7485,30 @@ export const typeDefs = `#graphql
   enum GrantHolderKind { USER AGENT WORKER APP }
 
   """
+  #4173 (hrn:node:hadronmemory.com:specs:cor:acl:140:03): where a grant stands, worked out from its record on every read and never stored. An
+  ended grant keeps its first end. A grant withdrawn before #4173 shipped reads REVOKED (its withdrawal was not recorded separately). No
+  name exists yet for an end from a deleted secret or from protection being turned on.
+  """
+  enum GrantState {
+    "Asked for and not yet signed. Allows nothing."
+    PENDING
+    "Signed and not ended. Allows its action once its start has come (allows says whether that is now)."
+    ACTIVE
+    "Its use limit was reached."
+    SPENT
+    "Its expiry came first (a pending grant past its expiry too)."
+    EXPIRED
+    "Ended by a person's revoke."
+    REVOKED
+    "Its pending request was withdrawn."
+    WITHDRAWN
+    "The holder went (a person erased, a worker retired, an agent or App deleted)."
+    HOLDER_GONE
+  }
+
+  """
   A grant (#3789, hrn:node:hadronmemory.com:specs:cor:acl:140:05): ids and scalars only, so no other entity's field resolvers are reachable
-  through it. Its stored facts as stored, and allows, which is computed. There is deliberately NO state label: nothing names the
-  cases hrn:node:hadronmemory.com:specs:cor:acl:140:03 leaves open (withdrawn, past expiry while pending, signed before its start, a departed holder).
+  through it. Its stored facts as stored, and allows and state, which are computed (#4173).
   """
   type Grant {
     id: ID!
@@ -7523,6 +7544,8 @@ export const typeDefs = `#graphql
     holderDepartedAt: DateTime
     "Whether the grant allows its action right now, judged on the database clock by the one live function (activated, not revoked, holder not gone, App not deleted, started, not expired, not spent). A fact about this instant, never a lifecycle name."
     allows: Boolean!
+    "#4173: the lifecycle state (hrn:node:hadronmemory.com:specs:cor:acl:140:03), the same on every surface that returns the grant."
+    state: GrantState!
     "#3649 slice D (hrn:node:hadronmemory.com:specs:cor:acl:140:07) — its signatures, each re-verified on this read from the stored assertion. Readable by exactly those who may read the grant; it adds no reach."
     signatureStatus: GrantSignatureStatus!
   }

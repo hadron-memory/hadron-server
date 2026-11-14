@@ -11,6 +11,7 @@ import { cleanDb } from '../../test/helpers.js';
 import { DB_NOW, dropTestActions, insertGrant, insertGrantUnguarded, raw, seedWorld, type World } from './grantFixtures3668.js';
 import { grantLiveSql, isGrantLive } from './live.js';
 import { endGrant, GrantManageRefusal } from './manage.js';
+import { getGrantForManager, getGrantForWorker, listGrantsForManager, listGrantsForPerson, listGrantsForWorker } from './read.js';
 import { deriveGrantState, grantStateSql, type GrantState, type GrantStateFields } from './state.js';
 
 let w: World;
@@ -65,6 +66,7 @@ describe('grantStateSql (the fragment) agrees with the function, and allows is u
       for (const expiresAt of [null, at(-3000), at(-1000), at(0), at(-500), at(4000)]) for (const [maxUses, useCount] of [[null, 0], [2, 1], [2, 2]] as const)
         for (const startsAt of [null, at(2000)]) for (const withdrawn of [false, true]) {
           if (withdrawn && (revokedAt === null || activatedAt !== null)) continue;
+          if (startsAt !== null && expiresAt !== null && startsAt.getTime() >= expiresAt.getTime()) continue; // chk_grants_shape
           rows.push({ name: `grid ${n++}`, row: full({ activatedAt, revokedAt, withdrawnAt: withdrawn ? revokedAt : null, holderDepartedAt: departed, expiresAt, maxUses, useCount, startsAt }) });
         }
     const ids = new Map<string, { name: string; row: GrantStateFields }>();
@@ -89,7 +91,7 @@ describe('grantStateSql (the fragment) agrees with the function, and allows is u
 });
 
 const ender = () => ({ userId: w.userId, workerId: null, sessionId: null });
-const events = async (id: string) => (await db.$queryRaw<Array<{ action: string }>>`SELECT action FROM grant_events WHERE grant_id = ${id} ORDER BY created_at`).map((e) => e.action);
+const events = async (id: string) => (await db.$queryRaw<Array<{ action: string }>>`SELECT action FROM grant_events WHERE grant_id = ${id} ORDER BY at`).map((e) => e.action);
 const stored = async (id: string) => (await db.$queryRaw<Array<{ revoked_at: Date | null; withdrawn_at: Date | null; updated_at: Date; state: string }>>(
   Prisma.sql`SELECT revoked_at, withdrawn_at, updated_at, (${grantStateSql('g')}) AS state FROM grants g WHERE id = ${id}`))[0];
 const end = (id: string, pendingOnly = false) => db.$transaction((tx) => endGrant(tx, id, ender(), { authorize: () => undefined, pendingOnly, ...(pendingOnly ? { kind: 'withdraw' as const } : { kind: 'revoke' as const }) }));
@@ -186,7 +188,22 @@ describe('the guard trigger and the events CHECK (A24)', () => {
   });
   it('WITHDRAW is an accepted event action; others are still refused', async () => {
     const id = await insertGrant(w);
-    await sql(`INSERT INTO grant_events (id, grant_id, app_id, action, created_at) VALUES ('ev-w', $1, $2, 'WITHDRAW', ${DB_NOW})`, id, w.appId);
-    await expect(sql(`INSERT INTO grant_events (id, grant_id, app_id, action, created_at) VALUES ('ev-x', $1, $2, 'BOGUS', ${DB_NOW})`, id, w.appId)).rejects.toThrow();
+    await sql(`INSERT INTO grant_events (id, grant_id, app_id, action, at) VALUES ('ev-w', $1, $2, 'WITHDRAW', ${DB_NOW})`, id, w.appId);
+    await expect(sql(`INSERT INTO grant_events (id, grant_id, app_id, action, at) VALUES ('ev-x', $1, $2, 'BOGUS', ${DB_NOW})`, id, w.appId)).rejects.toThrow();
+  });
+});
+
+describe('A22/A23 one row, one state on every read surface; the worker scope is unchanged', () => {
+  it('manager list, manager get, person list and worker get/list agree; a withdrawn row requested by this worker (held by another) stays absent', async () => {
+    const held = await insertGrant(w, { user_id: null, worker_id: w.workerId, requested_by_worker_id: w.workerId, expires_at: FUTURE });
+    await db.$transaction((tx) => endGrant(tx, held, ender(), { kind: 'withdraw', pendingOnly: true, authorize: () => undefined }));
+    const asked = await insertGrant(w, { requested_by_worker_id: w.workerId, expires_at: FUTURE }); // held by a person, asked by this worker
+    await db.$transaction((tx) => endGrant(tx, asked, ender(), { kind: 'withdraw', pendingOnly: true, authorize: () => undefined }));
+    const reader = { appId: w.appId, workerId: w.workerId };
+    expect((await getGrantForWorker(db, reader, held))!.state).toBe('WITHDRAWN');
+    expect((await getGrantForManager(db, w.appId, held, true))!.state).toBe('WITHDRAWN');
+    expect((await listGrantsForManager(db, w.appId, {})).items.map((g) => g.state).sort()).toEqual(['WITHDRAWN', 'WITHDRAWN']);
+    expect((await listGrantsForWorker(db, reader, {})).items.map((g) => g.id)).toEqual([held]); // A23: the requester-only arm needs revoked_at IS NULL
+    expect((await listGrantsForPerson(db, w.userId, {})).items.map((g) => g.state)).toEqual(['WITHDRAWN']);
   });
 });
