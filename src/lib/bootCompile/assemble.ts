@@ -12,6 +12,8 @@
  *   - tags are parsed by S1's `locateIncludeTags` (R77 code literals, R78 v2 URNs);
  *   - a revision is chosen by S2's `selectIncludeRevision` (rev pin, approved,
  *     signed enforced while the deployment signing policy is on, no settings = latest);
+ *     a tag's settings are read through `effectiveIncludeSettings`, so `signed` while signing is not checked
+ *     changes neither the qualification (approved, signed), the existence pre-check nor the refusal class (#4033);
  *   - the depth cap is S2's `MAX_RESOLVE_DEPTH` (R75: level 1..10, 11 refused).
  * Where a reader shows the broken-include notice, the compile refuses.
  *
@@ -39,6 +41,7 @@ import { agentBaseChain } from '../agentBase.js';
 import { isBootPromptRole } from '../bootPrompt.js';
 import { IncludeSyntaxError, locateIncludeTags, type IncludeTag } from '../includes/parseIncludeTags.js';
 import {
+  effectiveIncludeSettings,
   IncludeReadMemo,
   MAX_RESOLVE_DEPTH,
   selectIncludeRevision,
@@ -332,23 +335,25 @@ export async function assembleBootPrompt(
         id: found.node.id, memoryId: found.node.memoryId, content: found.node.content, revSeq: found.node.revSeq,
         memory: { id: found.node.memoryId, isEncrypted: false },
       };
+      // While signing is not checked `signed` is ignored: judge the tag as if it were not there (#4033).
+      const settings = effectiveIncludeSettings(tag.settings);
       // R79: a pin to a revision the target does not have refuses like a missing include.
       if (tag.settings.rev !== undefined && tag.settings.rev > found.node.revSeq) {
         throw new BootCompileRefusal('BOOT_PROMPT_INCLUDE_UNAVAILABLE', position);
       }
       // R79: a pin to a revision that is not stored (never kept, or pruned) is a missing include, with
-      // `approved` too. Existence is decided on the pin alone, apart from qualification, so an existing
-      // revision that merely fails `approved` stays REVISION_UNAVAILABLE.
-      if (tag.settings.rev !== undefined && (tag.settings.approved || tag.settings.signed)
-        && !(await selectIncludeRevision(db, memo, target, { ...tag.settings, approved: false, signed: false }))) {
+      // `approved` or an enforced `signed` too. Existence is decided on the pin alone, apart from qualification, so an
+      // existing revision that merely fails `approved` or `signed` stays REVISION_UNAVAILABLE.
+      if (settings.rev !== undefined && (settings.approved || settings.signed)
+        && !(await selectIncludeRevision(db, memo, target, { ...settings, approved: false, signed: false }))) {
         throw new BootCompileRefusal('BOOT_PROMPT_INCLUDE_UNAVAILABLE', position);
       }
-      const selected = await selectIncludeRevision(db, memo, target, tag.settings);
+      const selected = await selectIncludeRevision(db, memo, target, settings);
       if (!selected) {
-        // An existing revision that does not qualify (approved) is REVISION_UNAVAILABLE; a pin that
+        // An existing revision that does not qualify (approved, or signed while it is checked) is REVISION_UNAVAILABLE; a pin that
         // names no stored revision (never kept, or pruned) is a missing include (R79).
         throw new BootCompileRefusal(
-          tag.settings.approved || tag.settings.signed ? 'BOOT_PROMPT_INCLUDE_REVISION_UNAVAILABLE' : 'BOOT_PROMPT_INCLUDE_UNAVAILABLE', position,
+          settings.approved || settings.signed ? 'BOOT_PROMPT_INCLUDE_REVISION_UNAVAILABLE' : 'BOOT_PROMPT_INCLUDE_UNAVAILABLE', position,
         );
       }
       const order = occurrences.length;
