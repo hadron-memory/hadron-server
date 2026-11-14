@@ -177,6 +177,22 @@ async function approvedText(
 }
 
 /**
+ * #4033 — the settings a tag EFFECTIVELY carries: while the deployment does not check signatures, `signed` is
+ * accepted and stored but ignored (cor:dmo:150:02), so every decision made from a tag's settings (the selector, the
+ * compile's existence pre-check and refusal class, the null-body fast path) reads this, never `tag.settings`, and
+ * answers exactly as it would for the same tag without `signed`. The policy is read per call (G2: live, never cached
+ * at boot, and not snapshotted per operation: no spec asks for a snapshot, and the flag is a deployment constant that
+ * only a restart changes). Provenance and lint keep the tag's own `signed`: it is what the author wrote.
+ */
+export function effectiveIncludeSettings(settings: IncludeTag['settings']): IncludeTag['settings'] {
+  return settings.signed && !signingSurfacePolicy().signing ? { ...settings, signed: false } : settings;
+}
+
+/** The one warning text for a `signed` include while signing is not checked, shared by the source and compiled lints. */
+export const SIGNING_NOT_CHECKED_TEXT =
+  'The "signed" setting is not checked: this deployment does not check signatures, so this include is served as if it were not signed.';
+
+/**
  * #2046 — THE include selector (cor:dmo:150:02), shared by every read and by the
  * boot-prompt compile so the two cannot disagree about which revision a tag
  * serves. `approved` (pinned or not) serves the revision the shared approval
@@ -184,6 +200,11 @@ async function approvedText(
  * serves the latest. While the deployment's signing policy is on, `signed`
  * requires the included memory's at-signing writer stamp (cor:dmo:130:09).
  * Null when no revision qualifies: a reader shows the notice, a compile refuses.
+ *
+ * The signed search without a pin is bounded: it examines at most `NEWEST_APPROVED_REVISION_SCAN_CAP` candidates
+ * per batch and `NEWEST_APPROVED_REVISION_SCAN_BATCHES` batches (1,000 newest servable revisions). A signed revision
+ * older than that is not reached and the include does not resolve (fail closed); a pin (`rev=N`) is not searched.
+ * An encrypted target is never selected by `signed`.
  */
 export async function selectIncludeRevision(
   db: IncludeDb, memo: IncludeReadMemo, target: IncludeTarget, settings: IncludeTag['settings'],
@@ -269,9 +290,10 @@ async function expandTag(
   }
   const target = await lookupTarget(db, access, memo, memoryId, loc, targetId, opts.budget, prepaid);
   if (!target || trail.has(target.id)) return unresolved(opts);
-  const selected = await selectIncludeRevision(db, memo, target, tag.settings, opts.budget);
+  const settings = effectiveIncludeSettings(tag.settings);
+  const selected = await selectIncludeRevision(db, memo, target, settings, opts.budget);
   if (!selected) return unresolved(opts);
-  if (!tag.settings.approved && !tag.settings.signed && tag.settings.rev === undefined && target.content == null) return '';
+  if (!settings.approved && !settings.signed && settings.rev === undefined && target.content == null) return '';
   // Rendered per traversal: this node's ancestors and depth travel with it.
   return spliceWithin(db, access, memo, opts, selected.text, target.memoryId, new Set([...trail, target.id]), level + 1);
 }
