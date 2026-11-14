@@ -1,6 +1,7 @@
 /** #4036 / cor:cht:030:02: shared turn routing and locked-origin application; S4 adds stage targets and detour returns. */
 import type { ScriptNode, ScriptRule } from './chatScript.js';
 import { decideNextStage } from './chatRouting/nextStage.js';
+import { recordSkippedOnComplete } from './chatRouting/skipMetrics.js';
 
 export interface GoalStackEntry {
   description: string;
@@ -195,28 +196,34 @@ export async function decideChatRouting(input: {
     result.stageTransitioned = true; result.newStageName = stage;
     result.conversationHandoff = conv !== origin.conversationName ? conv : null;
   };
-  // The script reader already orders by priority with its stable tiebreak. First firing target wins.
-  for (const rule of input.rules) {
-    const timing = (rule.data.timing as string) ?? 'on_complete';
-    if (timing !== 'always' && !(timing === 'on_complete' && completed)) continue;
-    if (!await input.evaluate(rule)) continue;
-    const parts = rule.targetLoc?.split(':') ?? [];
-    if (parts[0] !== 'conversations' || (parts.length !== 2 && parts.length !== 3) || !parts[1]) continue;
-    const targetName = parts[1], targetConv = `conversations:${targetName}`;
-    const order = stagesOf(await input.node(targetConv));
-    const stage = parts.length === 3 ? (order.includes(parts[2]) ? parts[2] : undefined) : order[0];
-    if (!stage) continue; // unresolvable: fires nothing, pushes nothing, evaluation continues
-    const behavior = (rule.data.behavior as string) ?? 'transition';
-    const label = (rule.data.label as string) ?? undefined;
-    if (behavior === 'detour' && origin.conversationName) {
-      edits.push(data => {
-        pushGoal(data, { description: label ?? `Detour to ${targetName}`, createdBy: 'ASSISTANT', conversationUrn: conversationLoc,
-          nodeUrn: origin.stageName ? `${conversationLoc}:${origin.stageName}` : undefined, edgeUrn: rule.id, detourTo: targetConv });
-      });
+  let skippedOnCompleteRules = 0;
+  try {
+    // The script reader already orders by priority with its stable tiebreak. First firing target wins.
+    for (const rule of input.rules) {
+      const timing = (rule.data.timing as string) ?? 'on_complete';
+      if (timing === 'on_complete' && !completed) skippedOnCompleteRules++;
+      if (timing !== 'always' && !(timing === 'on_complete' && completed)) continue;
+      if (!await input.evaluate(rule)) continue;
+      const parts = rule.targetLoc?.split(':') ?? [];
+      if (parts[0] !== 'conversations' || (parts.length !== 2 && parts.length !== 3) || !parts[1]) continue;
+      const targetName = parts[1], targetConv = `conversations:${targetName}`;
+      const order = stagesOf(await input.node(targetConv));
+      const stage = parts.length === 3 ? (order.includes(parts[2]) ? parts[2] : undefined) : order[0];
+      if (!stage) continue; // unresolvable: fires nothing, pushes nothing, evaluation continues
+      const behavior = (rule.data.behavior as string) ?? 'transition';
+      const label = (rule.data.label as string) ?? undefined;
+      if (behavior === 'detour' && origin.conversationName) {
+        edits.push(data => {
+          pushGoal(data, { description: label ?? `Detour to ${targetName}`, createdBy: 'ASSISTANT', conversationUrn: conversationLoc,
+            nodeUrn: origin.stageName ? `${conversationLoc}:${origin.stageName}` : undefined, edgeUrn: rule.id, detourTo: targetConv });
+        });
+      }
+      note(targetName, stage);
+      edits.push(data => moveTo(data, targetName, stage, { type: behavior === 'detour' ? 'DETOUR_EDGE' : 'TRANSITION_EDGE', content: label }, rule.id));
+      return decision;
     }
-    note(targetName, stage);
-    edits.push(data => moveTo(data, targetName, stage, { type: behavior === 'detour' ? 'DETOUR_EDGE' : 'TRANSITION_EDGE', content: label }, rule.id));
-    return decision;
+  } finally {
+    recordSkippedOnComplete(input.goalReached, skippedOnCompleteRules);
   }
   if (!completed || !origin.conversationName) return decision;
   // No rule fired. Return to the most recent active detour goal (the seed goal and legacy goals carry no detourTo).

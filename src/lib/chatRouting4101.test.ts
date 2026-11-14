@@ -23,7 +23,7 @@ beforeEach(async () => {
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
 describe('#4101 skipped on_complete observability', () => {
-  it.each([[undefined, 'absent'], [false, 'false'], [null, 'non_boolean'], ['PRIVATE RAW FLAG', 'non_boolean'], [1, 'non_boolean']] as const)('classifies %s by kind, never value', async (flag, kind) => {
+  it.each([[undefined, 'absent'], [false, 'false'], [null, 'non_boolean'], ['PRIVATE RAW FLAG', 'non_boolean'], [1, 'non_boolean'], [{ secret: 'PRIVATE RAW OBJECT' }, 'non_boolean']] as const)('classifies %s by kind, never value', async (flag, kind) => {
     const result = await decide(flag);
     expect(result.result.conversationHandoff).toBeNull();
     expect(info).toHaveBeenCalledExactlyOnceWith(JSON.stringify(snapshot(kind)));
@@ -55,6 +55,21 @@ describe('#4101 skipped on_complete observability', () => {
     expect(JSON.parse(info.mock.calls[1][0] as string)).toEqual({ event: 'chat.on_complete_skipped', minimumIntervalMs: 60_000,
       skippedDecisions: { absent: 1, false: 1001, non_boolean: 1 }, skippedRules: { absent: 1, false: 2001, non_boolean: 1 } });
     expect(vi.getTimerCount()).toBe(0);
+  });
+  it('saturates counts, and ignores true or empty observations defensively', async () => {
+    const { recordSkippedOnComplete } = await import('./chatRouting/skipMetrics.js');
+    recordSkippedOnComplete(true, 2); recordSkippedOnComplete(false, 0); expect(info).not.toHaveBeenCalled();
+    recordSkippedOnComplete(false, Number.MAX_SAFE_INTEGER);
+    recordSkippedOnComplete(false, Number.MAX_SAFE_INTEGER); now += 60_000;
+    recordSkippedOnComplete(false, 2);
+    expect(JSON.parse(info.mock.calls[1][0] as string)).toEqual(snapshot('false', 2, Number.MAX_SAFE_INTEGER));
+  });
+  it('preserves the original routing error even when the diagnostic sink also fails', async () => {
+    info.mockImplementation(() => { throw new Error('broken log sink'); });
+    const original = new Error('original evaluation failure');
+    await expect(route({ origin: {}, goalReached: false, rules: [rule(), rule('always', 'always')], node: async () => null,
+      evaluate: async () => { throw original; } })).rejects.toBe(original);
+    expect(info).toHaveBeenCalledTimes(1);
   });
   it('diagnostic failure cannot change routing, and a failed emission consumes its rate slot', async () => {
     info.mockImplementation(() => { throw new Error('broken log sink'); });
