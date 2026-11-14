@@ -7,6 +7,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+import { deploymentSchema } from './deploymentSchema.js';
 
 const schema = buildSchema(typeDefs);
 let app: { id: string };
@@ -115,7 +116,6 @@ describe('AgentTeamEvent.taskHandle boundary, batching and wiring (#4153)', () =
     const page = await run(query());
     expect(page.errors).toBeUndefined();
     const rows = (page.data?.agentTeamEventsPage as any).events as { taskId: string; taskHandle: string | null }[];
-    expect(rows.find(r => r.taskId === foreign.id)).toBeDefined();
     expect(rows.filter(r => r.taskId === foreign.id).map(r => r.taskHandle)).toEqual([null, null]);
     expect(rows.find(r => r.taskId === own.id)?.taskHandle).toBe(own.handle);
     // The single raw event (acknowledgeAlarm) takes the field resolver's own lookup, which carries the App scope itself.
@@ -153,8 +153,11 @@ describe('AgentTeamEvent.taskHandle boundary, batching and wiring (#4153)', () =
     expect(many).toHaveBeenCalledTimes(1); expect(unique).not.toHaveBeenCalled(); expect(first).not.toHaveBeenCalled();
   });
 
-  describe('through the production ApolloServer construction (src/server.ts)', () => {
-    const server = new ApolloServer<Context>({ typeDefs, resolvers });
+  // src/server.ts builds its ApolloServer inside createServer() from deploymentSchema()'s typeDefs and resolvers (the plugin set and
+  // error formatting are separate concerns this pin does not claim). The wiring pinned here is that same schema/resolver pair, executed by Apollo.
+  describe('through an ApolloServer built from deploymentSchema(), as src/server.ts builds it', () => {
+    const wired = deploymentSchema();
+    const server = new ApolloServer<Context>({ typeDefs: wired.typeDefs, resolvers: wired.resolvers });
     beforeAll(() => server.start());
     afterAll(() => server.stop());
     const exec = async (q: string, contextValue: Context = ctx()) => {
