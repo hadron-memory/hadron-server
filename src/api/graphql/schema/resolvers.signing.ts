@@ -199,17 +199,29 @@ function loadSignatureStatus(ctx: Context, nodeId: string): Promise<NodeSignatur
 }
 
 /** Parent Node gates/projections are unchanged; filter effective expiry in SQL before taking the page. */
-async function signingRequestsPage(n: { id: string }, args: ListPageArgs & { state?: string | null }, ctx: Context) {
+async function loadSigningRequestsPage(n: { id: string }, args: ListPageArgs & { state?: string | null }, ctx: Context) {
   const state = args.state?.toLowerCase();
   const scope = `signingRequests:${n.id}:${state ?? ''}`;
-  const { take, offset } = listPageArgs(args, scope);
+  const window = listPageArgs(args, scope, 'createdAt-desc-id-desc');
   const now = new Date();
   const where: Prisma.SigningRequestWhereInput = { nodeId: n.id };
   if (state === 'expired') where.OR = [{ state: 'expired' }, { state: 'open', expiresAt: { lte: now } }];
   else if (state === 'open') Object.assign(where, { state, expiresAt: { gt: now } });
   else if (state) where.state = state;
-  const rows = await ctx.db.signingRequest.findMany({ where, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], skip: offset, take: take + 1 });
-  return listPage(rows, take, offset, scope);
+  const boundary: Prisma.SigningRequestWhereInput = window.after ? { OR: [
+    { createdAt: { lt: new Date(window.after.createdAt!) } },
+    { createdAt: new Date(window.after.createdAt!), id: { lt: window.after.id } },
+  ] } : {};
+  // The page and the unbounded-by-cursor total share one read snapshot and effective-state instant.
+  const { rows, total } = await ctx.db.$transaction(async tx => ({
+    rows: await tx.signingRequest.findMany({ where: { AND: [where, boundary] }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], skip: window.offset, take: window.take + 1 }),
+    total: await tx.signingRequest.count({ where }),
+  }), { isolationLevel: 'RepeatableRead' });
+  return { rows, window, total };
+}
+async function signingRequestsPage(n: { id: string }, args: ListPageArgs & { state?: string | null }, ctx: Context) {
+  const { rows, window, total } = await loadSigningRequestsPage(n, args, ctx);
+  return listPage(rows, window, total, row => ({ id: row.id, createdAt: row.createdAt.toISOString() }));
 }
 
 export const signingFieldResolvers = {
@@ -218,8 +230,10 @@ export const signingFieldResolvers = {
     signatureStatus: (n: { id: string }, _: unknown, ctx: Context) => loadSignatureStatus(ctx, n.id),
     /** #1632 — the node's signing requests, newest first; the same readers as its signatures (#10019). */
     signingRequestsPage,
-    signingRequests: async (n: { id: string }, args: ListPageArgs & { state?: string | null }, ctx: Context) =>
-      (await signingRequestsPage(n, args, ctx)).items,
+    signingRequests: async (n: { id: string }, { state, first }: { state?: string | null; first?: number | null }, ctx: Context) => {
+      const { rows, window } = await loadSigningRequestsPage(n, { state, first }, ctx);
+      return rows.slice(0, window.take);
+    },
   },
   SigningRequest: {
     nodeUrn: async (r: SigningRequestRow, _: unknown, ctx: Context) => {

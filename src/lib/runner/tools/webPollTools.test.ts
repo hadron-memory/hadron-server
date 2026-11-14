@@ -280,8 +280,8 @@ it('#4123 run list is bounded and exposes continuation with the existing jobs ke
   const { ctx } = await seedContext();
   const jobs = Array.from({ length: 25 }, (_, i) => ({ jobId: `poll-${String(i).padStart(2, '0')}`, status: 'active', expiresAt: '2030-01-01T00:00:00Z', triggerCount: 0, consecutiveFailures: 0 }));
   vi.mocked(listPolls).mockResolvedValue({ jobs: [...jobs].reverse() });
-  const first = await webPollList.execute(ctx, {}) as { jobs: typeof jobs; hasMore: boolean; nextCursor: string };
-  expect(first.jobs).toEqual(jobs.slice(0, 20)); expect(first.hasMore).toBe(true);
+  const first = await webPollList.execute(ctx, {}) as { jobs: typeof jobs; total: number; hasMore: boolean; nextCursor: string };
+  expect(first.jobs).toEqual(jobs.slice(0, 20)); expect(first.total).toBe(25); expect(first.hasMore).toBe(true);
   const next = await webPollList.execute(ctx, { after: first.nextCursor }) as typeof first;
-  expect(next.jobs).toEqual(jobs.slice(20)); expect(next.hasMore).toBe(false); expect(next.nextCursor).toBeNull();
+  expect(next.jobs).toEqual(jobs.slice(20)); expect(next.total).toBe(25); expect(next.hasMore).toBe(false); expect(next.nextCursor).toBeNull();
 });

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { buildSchema, parse, validate } from 'graphql';
+import { buildSchema, isObjectType, parse, validate } from 'graphql';
 import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
 import { db } from '../../../integrations/db/client.js';
@@ -35,8 +35,12 @@ it('SDL preserves the portal page type and exposes distinct marketplace/page/cur
     const schema = buildSchema(typeDefs);
     expect(schema.getType('MarketplaceResourcePage')).toBeDefined();
     expect(schema.getType('PublicResourceRefPage')).toBeUndefined();
+    const nodeType = schema.getType('Node');
+    if (!isObjectType(nodeType)) throw new Error('Missing Node type');
+    expect(nodeType.getFields().signingRequests.args.map(a => a.name)).toEqual(['state', 'first']);
+    expect(schema.getQueryType()!.getFields().webPolls.args.map(a => a.name)).toEqual(['orgRef', 'first']);
     expect(validate(schema, parse('query { publicOrganization(ref:"x") { publicMemoriesPage { items { id } total hasMore } } }')).map(x => x.message)).toEqual([]);
-    const errors = validate(schema, parse('query { webPollsPage(orgRef:"x",first:20,after:null) { items { jobId } hasMore nextCursor } node(ref:"x") { signingRequestsPage(state:OPEN,first:20,after:null) { items { id } hasMore nextCursor } } }'));
+    const errors = validate(schema, parse('query { webPollsPage(orgRef:"x",first:20,after:null,offset:null) { items { jobId } total hasMore nextCursor } node(ref:"x") { signingRequestsPage(state:OPEN,first:20,after:null,offset:null) { items { id } total hasMore nextCursor } } }'));
     expect(errors.map(x => x.message)).toEqual([]);
 });
 it('poll pages default to 20, continue without duplicates, clamp at cap, and retain legacy array shape', async () => {
@@ -83,13 +87,14 @@ it('signing pages filter effective expiry before paging and continue through the
     expect(b.items.map((x: any) => x.id)).toEqual(expected.slice(5));
     expect(b.hasMore).toBe(false);
     expect(b.nextCursor).toBeNull();
-    expect((await N.signingRequests({ id: nodeId }, { state: 'EXPIRED', first: 5, after: a.nextCursor }, ctx()))).toHaveLength(5);
+    expect((await N.signingRequests({ id: nodeId }, { state: 'EXPIRED', first: 5 }, ctx()))).toHaveLength(5);
 });
 it('new signing pages suppress inherited and concealed payloads before the loader runs', async () => {
     const load = vi.fn(async (_parent: unknown, _args: unknown, _ctx: Context) => ({ items: [{ id: 'private-request' }], hasMore: false, nextCursor: null }));
     const fields = withInstallConcealment(withInheritedNodeProjection({ signingRequestsPage: load }));
     for (const parent of [{ id: nodeId, inheritedFrom: { via: 'child' } }, { id: nodeId, [INSTALL_CONCEALED]: true }]) {
-        expect(await fields.signingRequestsPage(parent, {}, ctx())).toEqual({ items: [], hasMore: false, nextCursor: null });
+        expect(await fields.signingRequestsPage(parent, {}, ctx())).toEqual({ items: [], total: 0, hasMore: false, nextCursor: null });
+        await expect(Promise.resolve().then(() => fields.signingRequestsPage(parent, { after: 'opaque', offset: 0 }, ctx()))).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
     }
     expect(load).not.toHaveBeenCalled();
     expect((await fields.signingRequestsPage({ id: nodeId }, {}, ctx())).items).toHaveLength(1);
@@ -103,19 +108,19 @@ function jobs(ids: string[]) {
     vi.mocked(listPolls).mockResolvedValue({ jobs: ids.map(jobId => ({ jobId, status: 'active', expiresAt: '2030-01-01T00:00:00Z', triggerCount: 0, consecutiveFailures: 0 })) });
 }
 it('keyset survives a deleted poll anchor and insertions on either side of its boundary, with exact totals', async () => {
-    await pollRows(['a', 'b', 'c', 'd', '0', 'bc']); jobs(['a', 'b', 'c', 'd']);
+    await pollRows(['a', 'b', 'c', 'd', '0', '00', 'bc']); jobs(['a', 'b', 'c', 'd']);
     const first = await Q.webPollsPage(null, { orgRef: orgId, first: 2 }, ctx());
     expect(first.items.map((x: any) => x.jobId)).toEqual(['a', 'b']);
     await db.webFetchPollBinding.delete({ where: { jobId: 'b' } });
-    jobs(['0', 'a', 'bc', 'c', 'd']);
+    jobs(['0', '00', 'a', 'bc', 'c', 'd']);
     const next = await Q.webPollsPage(null, { orgRef: orgId, first: 2, after: first.nextCursor }, ctx());
     expect(next.items.map((x: any) => x.jobId)).toEqual(['bc', 'c']);
     const last = await Q.webPollsPage(null, { orgRef: orgId, first: 2, after: next.nextCursor }, ctx());
     expect(last.items.map((x: any) => x.jobId)).toEqual(['d']);
-    expect(first.total).toBe(4); expect(next.total).toBe(5); expect(last.total).toBe(5);
+    expect(first.total).toBe(4); expect(next.total).toBe(6); expect(last.total).toBe(6);
     expect(last.hasMore).toBe(false); expect(last.nextCursor).toBeNull();
     const offset = await Q.webPollsPage(null, { orgRef: orgId, first: 2, offset: 2 }, ctx());
-    expect(offset.items.map((x: any) => x.jobId)).toEqual(['bc', 'c']);
+    expect(offset.items.map((x: any) => x.jobId)).toEqual(['a', 'bc']);
 });
 it('cursor plus explicit offset refuses before any list or authorization lookup', async () => {
     const noReads = { ...ctx(), db: new Proxy(db, { get() { throw new Error('unexpected DB lookup'); } }) };
@@ -147,4 +152,17 @@ it('signing keyset does not repeat a row when a newer request is inserted before
     expect(next.items.map((x: any) => x.id)).toEqual(ordered.slice(2).map(x => x.id));
     expect(first.total).toBe(5); expect(next.total).toBe(6); expect(next.nextCursor).toBeNull();
     await expect(N.signingRequestsPage({ id: nodeId }, { state: 'EXPIRED', after: first.nextCursor }, ctx())).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+});
+it('legacy arrays stay independent of cursor encryption configuration', async () => {
+    await pollRows(['a', 'b']); jobs(['a', 'b']);
+    await db.signingRequest.createMany({ data: Array.from({ length: 2 }, () => ({ id: generateId(), nodeId, revision: 1, requesterUserId: userId, approvalHash: 'a'.repeat(64), payloadVersion: 'hadron-signature-v3', state: 'open', expiresAt: new Date(Date.now() + 3600000) })) });
+    const key = process.env.HADRON_ENCRYPTION_KEY;
+    delete process.env.HADRON_ENCRYPTION_KEY;
+    try {
+        expect(await Q.webPolls(null, { orgRef: orgId, first: 1 }, ctx())).toHaveLength(1);
+        expect(await N.signingRequests({ id: nodeId }, { first: 1 }, ctx())).toHaveLength(1);
+    } finally {
+        if (key === undefined) delete process.env.HADRON_ENCRYPTION_KEY;
+        else process.env.HADRON_ENCRYPTION_KEY = key;
+    }
 });

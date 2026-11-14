@@ -80,15 +80,15 @@ export function registerWebPollTools(server: McpServer, deps: { db: PrismaClient
     'hadron_web_poll_list',
     'List an organization\'s active page-monitor watches (the web_poll_start jobs): id, state, the query-free URL, the App ' +
       'and run that started it, schedule and trigger counters. No credential material is returned. Org ADMIN/OWNER only, ' +
-      'and the org, user and context App policy must allow tool.web_poll. One page, default 20, cap 100; pass after for the next.',
+      'and the org, user and context App policy must allow tool.web_poll. One page, default 20, cap 100, exact total; pass after for keyset continuation or offset, never both.',
     SHAPE_HADRON_WEB_POLL_LIST,
-    async (args: { orgRef?: string; first?: number; after?: string }) => {
+    async (args: { orgRef?: string; first?: number; after?: string; offset?: number }) => {
       const ref = orgOf(args.orgRef);
       if (!ref) return noOrg();
       try {
-        const page = await Q.webPollsPage({}, { orgRef: ref, first: args.first, after: args.after }, ctxOf());
+        const page = await Q.webPollsPage({}, { orgRef: ref, first: args.first, after: args.after, offset: args.offset }, ctxOf());
         const polls = page.items;
-        return textResult((polls.length ? `${polls.length} watch(es):\n\n${polls.map(renderWebPoll).join('\n')}` : 'No active watches.') + `\nhasMore: ${page.hasMore}` + (page.nextCursor ? `\nnextCursor: ${page.nextCursor}` : ''));
+        return textResult((polls.length ? `${polls.length} watch(es):\n\n${polls.map(renderWebPoll).join('\n')}` : 'No active watches.') + `\ntotal: ${page.total}\nhasMore: ${page.hasMore}` + (page.nextCursor ? `\nnextCursor: ${page.nextCursor}` : ''));
       } catch (e) {
         return refusal(e);
       }
@@ -115,7 +115,7 @@ export function registerWebPollTools(server: McpServer, deps: { db: PrismaClient
 
 // Parameter shapes live at module scope so every MCP server instance shares them (#2260).
 const orgRef = z.string().optional().describe('The organization id or URN. Defaults to the active organization.');
-const SHAPE_HADRON_WEB_POLL_LIST = { orgRef, first: z.number().int().optional().describe('Default 20, clamped to 1–100.'), after: z.string().optional().describe('nextCursor from the previous page.') };
+const SHAPE_HADRON_WEB_POLL_LIST = { orgRef, first: z.number().int().optional().describe('Default 20, clamped to 1–100.'), after: z.string().optional().describe('Authenticated row-value nextCursor from the previous page; never combine with offset.'), offset: z.number().int().optional().describe('Offset alternative; never combine with after.') };
 const SHAPE_HADRON_WEB_POLL_CANCEL = {
   orgRef,
   jobId: z.string().describe('The watch\'s jobId, as hadron_web_poll_list prints it.'),

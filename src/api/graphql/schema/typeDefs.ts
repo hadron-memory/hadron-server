@@ -1580,9 +1580,9 @@ export const typeDefs = `#graphql
     "#1632 (hrn:node:hadronmemory.com:specs:cor:dmo:130:06) — the node's signatures and their derived states, current signers first. Batch-loaded on list and search reads. An encrypted node reads NOT_APPLICABLE and lists none."
     signatureStatus: NodeSignatureStatus!
     "#1632 (hrn:node:hadronmemory.com:specs:cor:dmo:130:03) — the node's signing requests, newest first, including ended ones (#10019). state filters on the effective state (an open request past its deadline is EXPIRED). first: 1–100, default 20."
-    signingRequests(state: SigningRequestState, first: Int = 20, after: String): [SigningRequest!]! @deprecated(reason: "Use signingRequestsPage for hasMore and nextCursor.")
-    "The node's signing requests with the same reader gate; effective-state filtering precedes paging. Newest first (createdAt, id descending). Default 20, clamp 1–100; after is a filter-scoped offset cursor. A live list, not a snapshot: inserts or state changes between pages may shift rows. hrn:node:hadronmemory.com:specs:cor:api:120:04."
-    signingRequestsPage(state: SigningRequestState, first: Int = 20, after: String): SigningRequestsPage!
+    signingRequests(state: SigningRequestState, first: Int = 20): [SigningRequest!]! @deprecated(reason: "Use signingRequestsPage for hasMore and nextCursor.")
+    "The node's signing requests with the same reader gate; effective-state filtering precedes paging. Newest first (createdAt, id descending). Default 20, clamp 1–100; after is an authenticated filter-scoped keyset (createdAt, id), valid after deletion of the boundary row. offset is an alternative, never combined with after. total counts the full current filtered set. hrn:node:hadronmemory.com:specs:cor:api:120:04; hrn:node:hadronmemory.com:specs:cor:api:120:05."
+    signingRequestsPage(state: SigningRequestState, first: Int = 20, after: String, offset: Int): SigningRequestsPage!
     "#1610 — the Worker that created this node, when it was written in a worker session. The user is createdBy. Null for a write with no worker behind it, and for nodes written before #1610."
     createdByWorker: ActorRef
     "#1610 — the Agent behind this node's creation: a worker's role agent, an agent session, or a headless App run. Null when no agent was behind it."
@@ -6303,9 +6303,10 @@ export const typeDefs = `#graphql
     total: Int!
   }
 
-  "One page of org-bound watches in jobId order. Default 20, clamp 1–100. Offset cursor; live changes between calls may shift rows. hrn:node:hadronmemory.com:specs:cor:api:120:04."
+  "One page of org-bound watches in jobId order. Default 20, clamp 1–100. Authenticated jobId keyset cursors survive deletion of the boundary row. Offset is a separate option. total counts current org-bound watches. hrn:node:hadronmemory.com:specs:cor:api:120:04."
   type WebPollsPage {
     items: [WebPoll!]!
+    total: Int!
     hasMore: Boolean!
     nextCursor: String
   }
@@ -6313,6 +6314,7 @@ export const typeDefs = `#graphql
   "One page of a node's signing requests, including ended requests. hrn:node:hadronmemory.com:specs:cor:api:120:04."
   type SigningRequestsPage {
     items: [SigningRequest!]!
+    total: Int!
     hasMore: Boolean!
     nextCursor: String
   }
@@ -10126,11 +10128,11 @@ export const typeDefs = `#graphql
     The organization's active page-monitor watches (#1562): what web_poll_list
     returns inside a run, for org ADMIN/OWNER outside one. Refused with
     POLICY_DENIED when the org, caller user or App-in-context policy omits tool.web_poll (no App layer when the context has no App). Jobs
-    with no routing binding in this org are not listed. One page only: default 20, clamp 1–100, after continues in jobId order; use webPollsPage for hasMore and nextCursor.
+    with no routing binding in this org are not listed. One page only: default 20, clamp 1–100, use webPollsPage for hasMore and nextCursor.
     """
-    webPolls(orgRef: ID!, first: Int = 20, after: String): [WebPoll!]! @deprecated(reason: "One bounded page only; use webPollsPage for hasMore and nextCursor.")
-    "The same org ADMIN/OWNER and tool.web_poll policy gates as webPolls, before fetching jobs; App policy is read only for the App in the caller context. Jobs without a routing binding in this org are omitted. Default 20, clamp 1–100; cursor scoped to org. Live jobId ordering; changes between pages may shift rows. hrn:node:hadronmemory.com:specs:cor:api:120:04."
-    webPollsPage(orgRef: ID!, first: Int = 20, after: String): WebPollsPage!
+    webPolls(orgRef: ID!, first: Int = 20): [WebPoll!]! @deprecated(reason: "One bounded page only; use webPollsPage for hasMore and nextCursor.")
+    "The same org ADMIN/OWNER and tool.web_poll policy gates as webPolls, before fetching jobs; App policy is read only for the App in the caller context. Jobs without a routing binding in this org are omitted. Default 20, clamp 1–100; authenticated jobId keyset cursor scoped to org. offset is an alternative, never combined with after. total counts all currently admitted watches. hrn:node:hadronmemory.com:specs:cor:api:120:04; hrn:node:hadronmemory.com:specs:cor:api:120:05."
+    webPollsPage(orgRef: ID!, first: Int = 20, after: String, offset: Int): WebPollsPage!
 
     """
     Live tools/list passthrough for one registered server (org member) —

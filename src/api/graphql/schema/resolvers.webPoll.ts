@@ -6,7 +6,7 @@
  * GraphQL fields and the MCP tools call these resolvers, so the gate is
  * computed once.
  */
-import { listPage, listPageArgs, type ListPageArgs } from '../../../lib/listPage.js';
+import { idListPage, idListRows, listPageArgs, validateListPageInput, type ListPageArgs } from '../../../lib/listPage.js';
 import { GraphQLError } from 'graphql';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { cancelOrgWebPoll, listOrgWebPolls, webPollPolicyAllows } from '../../../lib/webPolls.js';
@@ -25,19 +25,25 @@ async function authorize(ctx: Context, orgRef: string): Promise<string> {
   return organizationId;
 }
 
-async function webPollsPage(_: unknown, args: { orgRef: string } & ListPageArgs, ctx: Context) {
+async function loadWebPolls(args: { orgRef: string } & ListPageArgs, ctx: Context) {
+  validateListPageInput(args);
   const orgId = await authorize(ctx, args.orgRef);
   const scope = `webPolls:${orgId}`;
-  const { take, offset } = listPageArgs(args, scope);
+  const window = listPageArgs(args, scope);
   const rows = await listOrgWebPolls(ctx.db, orgId);
-  rows.sort((a, b) => a.jobId < b.jobId ? -1 : a.jobId > b.jobId ? 1 : 0);
-  return listPage(rows.slice(offset, offset + take + 1), take, offset, scope);
+  return { rows, window };
+}
+async function webPollsPage(_: unknown, args: { orgRef: string } & ListPageArgs, ctx: Context) {
+  const { rows, window } = await loadWebPolls(args, ctx);
+  return idListPage(rows, window, row => row.jobId);
 }
 export const webPollQueries = {
   webPollsPage,
   /** Compatibility list: one bounded page with the same authorization. */
-  webPolls: async (_: unknown, args: { orgRef: string } & ListPageArgs, ctx: Context) =>
-    (await webPollsPage(_, args, ctx)).items,
+  webPolls: async (_: unknown, { orgRef, first }: { orgRef: string; first?: number | null }, ctx: Context) => {
+    const { rows, window } = await loadWebPolls({ orgRef, first }, ctx);
+    return idListRows(rows, window, row => row.jobId).rows.slice(0, window.take);
+  },
 };
 
 export const webPollMutations = {

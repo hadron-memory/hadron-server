@@ -13,7 +13,7 @@ import {
 import { loadWebFetchAuthSecret } from '../secrets.js';
 import { SECRET_SCOPE_ORDER, type SecretOwnerType } from '../../secrets.js';
 import { redactUrl } from '../../webUrl.js';
-import { listPage, listPageArgs, type ListPageArgs } from '../../listPage.js';
+import { idListPage, listPageArgs, type ListPageArgs } from '../../listPage.js';
 import { cancelOrgWebPoll } from '../../webPolls.js';
 import type { RunToolDef } from './types.js';
 import { coerceHeaders } from './webTools.js';
@@ -216,15 +216,14 @@ export const webPollList: RunToolDef = {
   name: 'web_poll_list',
   policyAction: 'tool.web_poll',
   description:
-    'List one page of this organization\'s active web polls with status and counters only. Default 20, cap 100; hasMore and nextCursor disclose continuation. Pass after to continue. Credential material is never returned.',
-  inputSchema: { type: 'object', properties: { first: { type: 'integer', description: 'Default 20, clamp 1–100.' }, after: { type: 'string', description: 'nextCursor from the previous page.' } } },
+    'List one page of this organization\'s active web polls with status and counters only. Default 20, cap 100; total is exact; hasMore and nextCursor disclose authenticated keyset continuation. offset is a separate alternative, never combined with after. Pass after to continue. Credential material is never returned.',
+  inputSchema: { type: 'object', properties: { first: { type: 'integer', description: 'Default 20, clamp 1–100.' }, after: { type: 'string', description: 'Authenticated nextCursor from the previous page, never with offset.' }, offset: { type: 'integer', description: 'Offset alternative, never with after.' } } },
   cost: 0,
   execute: async (ctx, args) => {
     const scope = `runWebPolls:${ctx.run.organizationId}`;
-    const { take, offset } = listPageArgs(args as ListPageArgs, scope);
+    const window = listPageArgs(args as ListPageArgs, scope);
     const { jobs } = await listPolls(ctx.run.organizationId);
-    const ordered = [...jobs].sort((a, b) => a.jobId < b.jobId ? -1 : a.jobId > b.jobId ? 1 : 0);
-    const { items, ...page } = listPage(ordered.slice(offset, offset + take + 1), take, offset, scope);
+    const { items, ...page } = idListPage(jobs, window, row => row.jobId);
     return { jobs: items, ...page };
   },
 };
