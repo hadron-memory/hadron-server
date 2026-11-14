@@ -38,6 +38,16 @@ beforeEach(async () => {
 });
 
 describe('#3998 revealSecret', () => {
+  it('judges the stored issuer, not the caller: a non-manager driver reads under a manager-issued client, and a demoted issuer stops it', async () => {
+    await activate(grantId);
+    const driver = (await db.user.create({ data: { email: `${generateId()}@s3.test` } })).id;
+    const asDriver = () => asWorker(workerId, () => resolvers.Mutation.revealSecret({}, { clientId }, ctxOf(driver)));
+    expect(await code(asDriver())).toBe('OK');
+    // The issuer (the App's owner) is no longer the owner: the driver's own standing never substitutes.
+    await db.app.update({ where: { id: appId }, data: { ownerUserId: driver } });
+    expect(await code(asDriver())).toBe('SECRET_READ_CLIENT_ISSUER_GONE');
+  });
+
   it('a pending grant reveals nothing', async () => {
     expect(await code(reveal(workerId))).toBe('SECRET_READ_CLIENT_PENDING');
     // The holder's refused read is recorded; a stranger's leaves nothing.
