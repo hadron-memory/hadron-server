@@ -6,6 +6,7 @@ import { db } from '../../src/integrations/db/client.js';
 import { cleanDb, createDbAppWithKey } from '../../src/test/helpers.js';
 import { generateId } from '../../src/lib/id.js';
 import { appKeyCache, ensureAppKey } from '../../src/lib/secrets/appKeys.js';
+import { addAppSecretVersion } from '../../src/lib/secrets/appSecrets.js';
 import { main } from './rotate-app-key.js';
 
 const ROOT = 'a1'.repeat(32);
@@ -26,7 +27,7 @@ beforeEach(async () => {
 afterEach(() => { delete process.env.SECRET_ROOT_KEY; appKeyCache.clear(); });
 
 describe('rotate-app-key tool', () => {
-  it.each([[[]], [['--app']], [['--app', '--x']], [['some-app-id']], [['--app', 'a', 'b']]])('usage %j exits 2', async (argv) => {
+  it.each([[[]], [['--app']], [['--app', '--x']], [['some-app-id']], [['--app', 'a', 'b']], [['--reencrypt', '--app', 'a']], [['--app', 'a', '--reencrypt', '--reencrypt']]])('usage %j exits 2', async (argv) => {
     expect(await main(argv as string[], io())).toBe(2);
   });
 
@@ -46,5 +47,15 @@ describe('rotate-app-key tool', () => {
     expect(lines.some((l) => l.includes('refused'))).toBe(true);
     expect((await keys()).map((k) => [k.keyVersion, k.retiredAt === null])).toEqual([[1, true]]);
     expect(lines.join('\n')).not.toContain('f6f6');
+  });
+
+  it('--reencrypt rotates and moves every version to the new key in one transaction, and prints only counts', async () => {
+    const secret = await db.secret.create({ data: { ownerType: 'app', ownerId: appId, name: 'tool-reenc', kind: 'generic' } });
+    await db.$transaction((tx) => addAppSecretVersion(tx, { id: secret.id, ownerId: appId }, JSON.stringify('TOOL-CANARY'), 13,
+      { userId: null, workerId: null, sessionId: null }));
+    expect(await main(['--app', appId, '--reencrypt'], io())).toBe(0);
+    expect(lines.some((l) => l.includes('key_version=2') && l.includes('reencrypted=1'))).toBe(true);
+    expect((await db.secretVersion.findFirstOrThrow({ where: { secretId: secret.id } })).keyVersion).toBe(2);
+    expect(lines.join('\n')).not.toContain('TOOL-CANARY');
   });
 });
