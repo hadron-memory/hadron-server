@@ -37,9 +37,15 @@ const SCALED_ENV = {
 /** The scaled aggregate (the 5 + 25 + 10 + 5 shape, scaled): every step budget plus slack for process spawns on a loaded host. */
 const SCALED_TOTAL_MS = (SCALED.stdin + SCALED.whoami + SCALED.worker + SCALED.transcript + SCALED.warn) * 1000 + 3000;
 
+/** Hard ceiling for any hook run: `timeout` signals its whole process group, so a hung hook and its children die with it. */
+const HARNESS_DEADLINE_S = 60;
+const hookCmd = (): [string, string[]] => ['timeout', ['-k', '2', String(HARNESS_DEADLINE_S), 'bash', HOOK]];
+const children: Array<ReturnType<typeof spawn>> = [];
+
 const roots: string[] = [];
 const agents: Array<{ pid: number; supervisor: ReturnType<typeof spawn> }> = [];
 afterEach(() => {
+  for (const c of children.splice(0)) { try { if (c.pid) process.kill(-c.pid, 'SIGKILL'); } catch { /* gone */ } }
   for (const a of agents.splice(0)) { try { process.kill(a.pid, 'SIGKILL'); } catch { /* gone */ } a.supervisor.kill('SIGKILL'); }
   for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true });
 });
@@ -68,11 +74,18 @@ nap() { [ -f "${k}/$1" ] && sleep "$(cat "${k}/$1")"; }
 case "$*" in
   "team session whoami --json"*)
     nap sleep-whoami
+    nap sleep-whoami-json
+    [ -f "${k}/ignore-term-whoami" ] && { trap '' TERM; exec sleep 30; }
     b=$(cat "${k}/whoami-json" 2>/dev/null || echo '{"workerName":"Demo-wt"}')
     [ "$b" = FAIL ] && exit 1
     echo "$b" ;;
   "team session whoami"*)
     nap sleep-whoami
+    if [ -f "${k}/stamp-text" ]; then
+      date +%s.%N > "${k}/text-start"
+      trap 'date +%s.%N > "${k}/text-end"; exit 143' TERM
+      sleep 5 >/dev/null 2>&1 & wait $!
+    fi
     b=$(cat "${k}/whoami-text" 2>/dev/null || echo 'Demo-wt (server-engineer)')
     [ "$b" = FAIL ] && exit 1
     [ "$b" = EMPTY ] && exit 0
@@ -122,10 +135,11 @@ const shedLog = (s: Sb): string => (existsSync(join(stateDir(s), 'auto-shed.log'
 const warnings = (s: Sb): string[] => (existsSync(s.calls) ? readFileSync(s.calls, 'utf8') : '').split('\n').filter((l) => l.startsWith('team chat post'));
 
 /** One PreCompact(auto) fire; `scaled` runs it under the scaled-down budgets, otherwise the defaults apply. */
-function fire(s: Sb, opts: { scaled?: boolean; input?: string } = {}): { status: number | null; log: string; ms: number } {
-  const env: Record<string, string> = { PATH: `${s.bin}:${process.env.PATH}`, HOME: s.home, CLAUDE_PID: String(s.pid), ...(opts.scaled ? SCALED_ENV : {}) };
+function fire(s: Sb, opts: { scaled?: boolean; input?: string; env?: Record<string, string> } = {}): { status: number | null; log: string; ms: number } {
+  const env: Record<string, string> = { PATH: `${s.bin}:${process.env.PATH}`, HOME: s.home, CLAUDE_PID: String(s.pid), ...(opts.scaled ? SCALED_ENV : {}), ...(opts.env ?? {}) };
   const t0 = Date.now();
-  const r = spawnSync('bash', [HOOK], { encoding: 'utf8', input: opts.input ?? JSON.stringify({ trigger: 'auto', cwd: s.wt, transcript_path: join(s.root, 'transcript.jsonl') }), env });
+  const [cmd, args] = hookCmd();
+  const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: (HARNESS_DEADLINE_S + 10) * 1000, killSignal: 'SIGKILL', input: opts.input ?? JSON.stringify({ trigger: 'auto', cwd: s.wt, transcript_path: join(s.root, 'transcript.jsonl') }), env });
   return { status: r.status, log: shedLog(s), ms: Date.now() - t0 };
 }
 
@@ -140,7 +154,9 @@ describe('#4011 A: the whole hook is bounded on every skip path', () => {
   it('a stalled stdin is a skip, not a kill: exit 0 within the stdin budget, logged, nothing else read', async () => {
     const s = await stage();
     const t0 = Date.now();
-    const child = spawn('bash', [HOOK], { stdio: ['pipe', 'pipe', 'pipe'], env: { PATH: `${s.bin}:${process.env.PATH}`, HOME: s.home, CLAUDE_PID: String(s.pid), ...SCALED_ENV } });
+    const [cmd, args] = hookCmd();
+    const child = spawn(cmd, args, { detached: true, stdio: ['pipe', 'pipe', 'pipe'], env: { PATH: `${s.bin}:${process.env.PATH}`, HOME: s.home, CLAUDE_PID: String(s.pid), ...SCALED_ENV } });
+    children.push(child);
     child.stdin.write('{"trigger":"auto","cw'); // a partial record, then silence with the pipe held open
     const status: number = await new Promise((res) => child.on('close', (c) => res(c ?? -1)));
     expect(status).toBe(0);
@@ -197,11 +213,20 @@ describe('#4011 A: the whole hook is bounded on every skip path', () => {
     expect(s.gone()).toBe(false);
   });
 
+  it('a step that ignores SIGTERM is killed after the grace: exit 0, no kill of the agent, inside the aggregate plus the grace', async () => {
+    const s = await stage();
+    knob(s, 'ignore-term-whoami', '');
+    const r = fire(s, { scaled: true, env: { WORKER_AUTO_SHED_T_KILL_GRACE: '0.3' } });
+    expect(r.status, r.log).toBe(0);
+    expect(r.log).toContain('skip: human presence unreadable (whoami timed out)');
+    expect(s.gone(), 'a SIGTERM-proof whoami stopped the agent').toBe(false);
+    expect(r.ms, `took ${r.ms} ms`).toBeLessThan(SCALED_TOTAL_MS);
+  });
+
   it('an invalid or zero override falls back to the default instead of disabling the bound', async () => {
     const s = await stage();
     knob(s, 'sleep-whoami', '7');
-    const env = { PATH: `${s.bin}:${process.env.PATH}`, HOME: s.home, CLAUDE_PID: String(s.pid), WORKER_AUTO_SHED_T_WHOAMI: '0', WORKER_AUTO_SHED_T_WORKER: 'abc' };
-    const r = spawnSync('bash', [HOOK], { encoding: 'utf8', input: JSON.stringify({ trigger: 'auto', cwd: s.wt, transcript_path: join(s.root, 'transcript.jsonl') }), env });
+    const r = fire(s, { env: { WORKER_AUTO_SHED_T_WHOAMI: '0', WORKER_AUTO_SHED_T_WORKER: 'abc' } });
     // `timeout 0` would mean "no limit" and let the 7 s whoami finish (shed, exit 2); the 5 s default applies instead,
     // so the step times out: unreadable, exit 0, no kill.
     expect(r.status, shedLog(s)).toBe(0);
@@ -290,14 +315,20 @@ describe('#4011 C: the whoami worker must be the hook worker', () => {
     expect(warnings(s)).toHaveLength(1);
   });
 
-  it('the text fallback shares the whoami budget: a slow --json that then fails cannot be followed by a second full allowance', async () => {
+  it('the text fallback gets only the REMAINING whoami budget: --json burns part of it then fails, the text form stalls', async () => {
     const s = await stage();
-    knob(s, 'sleep-whoami', '5'); // both forms are slow
-    const r = fire(s, { scaled: true });
-    expect(r.log).toContain('whoami timed out');
-    expect(r.ms, `took ${r.ms} ms: the fallback got its own allowance`).toBeLessThan((SCALED.whoami * 1000) + 1500 + (SCALED.warn * 1000) + 1500);
-    const calls = readFileSync(s.calls, 'utf8').split('\n').filter((l) => l.startsWith('team session whoami'));
-    expect(calls.length, 'the text fallback must not start after the budget is spent').toBeLessThanOrEqual(1);
+    knob(s, 'sleep-whoami-json', '1.5'); // --json consumes 1.5 of the 2 s budget, then fails
+    knob(s, 'whoami-json', 'FAIL');
+    knob(s, 'stamp-text', ''); // the text form stalls and records when it started and when it was told to stop
+    const r = fire(s, { scaled: true, env: { WORKER_AUTO_SHED_T_WHOAMI: '2' } });
+    expect(r.status, r.log).toBe(0);
+    expect(r.log).toContain('skip: human presence unreadable (whoami timed out)');
+    const start = Number(readFileSync(join(s.root, 'k', 'text-start'), 'utf8'));
+    const end = Number(readFileSync(join(s.root, 'k', 'text-end'), 'utf8'));
+    // remaining is about 0.5 s; a fresh full allowance would be 2 s.
+    expect(end - start, `the text fallback ran ${(end - start).toFixed(2)} s`).toBeGreaterThan(0.2);
+    expect(end - start, `the text fallback ran ${(end - start).toFixed(2)} s: it got a fresh allowance`).toBeLessThan(1.3);
+    expect(s.gone()).toBe(false);
   });
 });
 
