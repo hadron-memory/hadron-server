@@ -30,8 +30,16 @@ export interface SecretIssuance {
 }
 
 export async function requireSecretReadClientIssuer(ctx: Context, secretId: string): Promise<SecretIssuance> {
-  const tx = ctx.db;
   const userId = await requirePersonOnlyAct(ctx, 'secret.issue-read-client', authorizationDenied);
+  return judgeSecretReadClientIssuer(ctx, userId, secretId);
+}
+
+/**
+ * The issuer rule for a NAMED person, without the person-only door. The reveal path judges the stored issuer again with it,
+ * so a client whose issuer was demoted, left the App or was superseded as writer stops reading (Q21).
+ */
+export async function judgeSecretReadClientIssuer(ctx: Context, userId: string, secretId: string): Promise<SecretIssuance> {
+  const tx = ctx.db;
   const secret = await tx.secret.findUnique({ where: { id: secretId }, select: { id: true, name: true, ownerType: true, ownerId: true } });
   if (!secret || secret.ownerType !== 'app') throw authorizationDenied();
   const app = await tx.app.findUnique({

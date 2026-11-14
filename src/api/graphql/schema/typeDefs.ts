@@ -6379,6 +6379,14 @@ export const typeDefs = `#graphql
     selfIssued: Boolean!
   }
 
+  type SecretRevealed {
+    secretName: String!
+    "The current value as JSON text."
+    value: String!
+    "Reads left on the grant, or null when it has no budget."
+    readsLeft: Int
+  }
+
   type Secret {
     id: ID!
     "Owner scope: user | org | app."
@@ -13843,6 +13851,13 @@ export const typeDefs = `#graphql
     App, or the issuer themself. The client id is returned here, to the issuer, and to the holder; it never reads on its own.
     """
     issueSecretReadClient(input: IssueSecretReadClientInput!): SecretReadClientIssued!
+
+    """
+    Reveal an App secret's value through a read client (hrn:node:hadronmemory.com:specs:cor:sec:060), spending exactly one use. Only the
+    worker session the client's grant names; a person, an App key, a run and an impersonation get SECRET_READ_CLIENT_NOT_FOUND, as does
+    an unknown client id or another holder's. The use and the audit event commit before the value is returned.
+    """
+    revealSecret(clientId: ID!): SecretRevealed!
 
     """
     Register a Home Assistant instance (org ADMIN/OWNER). orgRef accepts

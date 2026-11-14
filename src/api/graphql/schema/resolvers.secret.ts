@@ -61,6 +61,7 @@ import { withAuthorizedTx } from './authorizedTx.js';
 import { createPendingGrant, GrantCreateRefusal } from '../../../lib/grants/create.js';
 import { requireSecretReadClientIssuer } from '../../../lib/secrets/readClientIssuer.js';
 import { generateId } from '../../../lib/id.js';
+import { revealWithReadClient } from '../../../lib/secrets/readClientReveal.js';
 
 function badInput(message: string): GraphQLError {
   return new GraphQLError(message, { extensions: { code: 'BAD_USER_INPUT' } });
@@ -259,6 +260,7 @@ export interface UpdateSecretArgs {
 
 export const secretMutations = {
   /** Issue a read client for an App secret: a pending reveal grant and its client, made together (cor:sec:060:01). */
+  revealSecret: (_: unknown, { clientId }: { clientId: string }, ctx: Context) => revealSecretMutation(ctx, clientId),
   issueSecretReadClient: (_: unknown, { input }: { input: IssueReadClientInput }, ctx: Context) => issueSecretReadClient(ctx, input),
 
   /** Create a named, owner-scoped secret (gate per the matrix above). */
@@ -471,10 +473,17 @@ async function deleteAppSecret(ctx: Context, found: SecretRow) {
       if (secret.protected) throw protectedRefusal();
       const newest = await tx.secretVersion.findFirst({ where: { secretId: secret.id }, orderBy: { versionNo: 'desc' }, select: { versionNo: true } });
       await recordSecretEvent(tx, { ownerId: secret.ownerId, secretId: secret.id, secretName: secret.name, kind: 'DELETE', versionNo: newest?.versionNo ?? null, actor });
+      await tx.$executeRaw`UPDATE secret_read_clients SET end_reason = 'SECRET_DELETED', ended_at = (clock_timestamp() AT TIME ZONE 'UTC')
+         WHERE secret_id = ${secret.id} AND ended_at IS NULL`;
       await tx.secret.delete({ where: { id: secret.id } });
       return true;
     },
   );
+}
+
+async function revealSecretMutation(ctx: Context, clientId: string) {
+  await admitOperationRate(ctx, ctx.db, 'CREDENTIALS', appRateIdentity(ctx));
+  return revealWithReadClient(ctx, clientId);
 }
 
 /** The most live read clients one secret carries (#3998 plan R4): a bound on the list a manager reads and the grants a secret answers to. */
