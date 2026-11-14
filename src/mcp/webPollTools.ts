@@ -16,10 +16,11 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { UrnNotQualifiedError } from '../lib/urn.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
+import type { ListPage, ListPageArgs } from '../lib/listPage.js';
 import type { OrgWebPoll } from '../lib/webPolls.js';
 
 type Resolver<A, R> = (parent: unknown, args: A, ctx: Context) => Promise<R>;
-const Q = resolvers.Query as unknown as { webPolls: Resolver<{ orgRef: string }, OrgWebPoll[]> };
+const Q = resolvers.Query as unknown as { webPollsPage: Resolver<{ orgRef: string } & ListPageArgs, ListPage<OrgWebPoll>> };
 const M = resolvers.Mutation as unknown as {
   cancelWebPoll: Resolver<{ orgRef: string; jobId: string }, { jobId: string; cancelled: true; alreadyCancelled: boolean }>;
 };
@@ -79,14 +80,15 @@ export function registerWebPollTools(server: McpServer, deps: { db: PrismaClient
     'hadron_web_poll_list',
     'List an organization\'s active page-monitor watches (the web_poll_start jobs): id, state, the query-free URL, the App ' +
       'and run that started it, schedule and trigger counters. No credential material is returned. Org ADMIN/OWNER only, ' +
-      'and the org, user and App policy must allow tool.web_poll.',
+      'and the org, user and context App policy must allow tool.web_poll. One page, default 20, cap 100; pass after for the next.',
     SHAPE_HADRON_WEB_POLL_LIST,
-    async (args: { orgRef?: string }) => {
+    async (args: { orgRef?: string; first?: number; after?: string }) => {
       const ref = orgOf(args.orgRef);
       if (!ref) return noOrg();
       try {
-        const polls = await Q.webPolls({}, { orgRef: ref }, ctxOf());
-        return textResult(polls.length ? `${polls.length} watch(es):\n\n${polls.map(renderWebPoll).join('\n')}` : 'No active watches.');
+        const page = await Q.webPollsPage({}, { orgRef: ref, first: args.first, after: args.after }, ctxOf());
+        const polls = page.items;
+        return textResult((polls.length ? `${polls.length} watch(es):\n\n${polls.map(renderWebPoll).join('\n')}` : 'No active watches.') + `\nhasMore: ${page.hasMore}` + (page.nextCursor ? `\nnextCursor: ${page.nextCursor}` : ''));
       } catch (e) {
         return refusal(e);
       }
@@ -113,7 +115,7 @@ export function registerWebPollTools(server: McpServer, deps: { db: PrismaClient
 
 // Parameter shapes live at module scope so every MCP server instance shares them (#2260).
 const orgRef = z.string().optional().describe('The organization id or URN. Defaults to the active organization.');
-const SHAPE_HADRON_WEB_POLL_LIST = { orgRef };
+const SHAPE_HADRON_WEB_POLL_LIST = { orgRef, first: z.number().int().optional().describe('Default 20, clamped to 1–100.'), after: z.string().optional().describe('nextCursor from the previous page.') };
 const SHAPE_HADRON_WEB_POLL_CANCEL = {
   orgRef,
   jobId: z.string().describe('The watch\'s jobId, as hadron_web_poll_list prints it.'),

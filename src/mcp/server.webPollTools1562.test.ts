@@ -73,7 +73,7 @@ describe('hadron_web_poll_list', () => {
   });
 
   it('says so when there are none, and refuses a plain member with the GraphQL code', async () => {
-    expect(text(await mcp(authOf(admin.id)).callTool('hadron_web_poll_list', { orgRef: orgId }))).toBe('No active watches.');
+    expect(text(await mcp(authOf(admin.id)).callTool('hadron_web_poll_list', { orgRef: orgId }))).toBe('No active watches.\nhasMore: false');
     expect(code(text(await mcp(authOf(member.id)).callTool('hadron_web_poll_list', { orgRef: orgId })))).toBe('FORBIDDEN');
   });
 
@@ -103,4 +103,15 @@ describe('hadron_web_poll_cancel', () => {
     expect(s.toolDescription('hadron_web_poll_cancel')).toMatch(/Stop a page-monitor watch/);
     expect(s.toolDescription('hadron_web_poll_list')).toMatch(/active page-monitor watches/);
   });
+});
+
+it('#4123 MCP list reports hasMore and accepts the next cursor', async () => {
+  for (const id of ['page-a', 'page-b']) await bind(orgId, id);
+  vi.mocked(listPolls).mockResolvedValue({ jobs: ['page-b', 'page-a'].map(jobId => ({ jobId, status: 'active', expiresAt: '2030-01-01T00:00:00Z', triggerCount: 0, consecutiveFailures: 0 })) });
+  const server = mcp(authOf(admin.id));
+  const first = text(await server.callTool('hadron_web_poll_list', { orgRef: orgId, first: 1 }));
+  expect(first).toContain('page-a'); expect(first).not.toContain('page-b'); expect(first).toContain('hasMore: true');
+  const after = /nextCursor: (\S+)/.exec(first)![1];
+  const next = text(await server.callTool('hadron_web_poll_list', { orgRef: orgId, first: 1, after }));
+  expect(next).toContain('page-b'); expect(next).not.toContain('page-a'); expect(next).toContain('hasMore: false');
 });

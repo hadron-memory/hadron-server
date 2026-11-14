@@ -6,6 +6,7 @@
  * GraphQL fields and the MCP tools call these resolvers, so the gate is
  * computed once.
  */
+import { listPage, listPageArgs, type ListPageArgs } from '../../../lib/listPage.js';
 import { GraphQLError } from 'graphql';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { cancelOrgWebPoll, listOrgWebPolls, webPollPolicyAllows } from '../../../lib/webPolls.js';
@@ -24,10 +25,19 @@ async function authorize(ctx: Context, orgRef: string): Promise<string> {
   return organizationId;
 }
 
+async function webPollsPage(_: unknown, args: { orgRef: string } & ListPageArgs, ctx: Context) {
+  const orgId = await authorize(ctx, args.orgRef);
+  const scope = `webPolls:${orgId}`;
+  const { take, offset } = listPageArgs(args, scope);
+  const rows = await listOrgWebPolls(ctx.db, orgId);
+  rows.sort((a, b) => a.jobId < b.jobId ? -1 : a.jobId > b.jobId ? 1 : 0);
+  return listPage(rows.slice(offset, offset + take + 1), take, offset, scope);
+}
 export const webPollQueries = {
-  /** The org's active watches (org ADMIN/OWNER; `tool.web_poll` policy). */
-  webPolls: async (_: unknown, { orgRef }: { orgRef: string }, ctx: Context) =>
-    listOrgWebPolls(ctx.db, await authorize(ctx, orgRef)),
+  webPollsPage,
+  /** Compatibility list: one bounded page with the same authorization. */
+  webPolls: async (_: unknown, args: { orgRef: string } & ListPageArgs, ctx: Context) =>
+    (await webPollsPage(_, args, ctx)).items,
 };
 
 export const webPollMutations = {

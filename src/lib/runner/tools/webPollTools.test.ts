@@ -275,3 +275,13 @@ describe('#1564 — web_poll_start advertises only the secret scopes the store a
     })).rejects.toThrow(`"credentialScope" must be one of ${SECRET_SCOPE_ORDER.join(', ')}.`);
   });
 });
+
+it('#4123 run list is bounded and exposes continuation with the existing jobs key', async () => {
+  const { ctx } = await seedContext();
+  const jobs = Array.from({ length: 25 }, (_, i) => ({ jobId: `poll-${String(i).padStart(2, '0')}`, status: 'active', expiresAt: '2030-01-01T00:00:00Z', triggerCount: 0, consecutiveFailures: 0 }));
+  vi.mocked(listPolls).mockResolvedValue({ jobs: [...jobs].reverse() });
+  const first = await webPollList.execute(ctx, {}) as { jobs: typeof jobs; hasMore: boolean; nextCursor: string };
+  expect(first.jobs).toEqual(jobs.slice(0, 20)); expect(first.hasMore).toBe(true);
+  const next = await webPollList.execute(ctx, { after: first.nextCursor }) as typeof first;
+  expect(next.jobs).toEqual(jobs.slice(20)); expect(next.hasMore).toBe(false); expect(next.nextCursor).toBeNull();
+});

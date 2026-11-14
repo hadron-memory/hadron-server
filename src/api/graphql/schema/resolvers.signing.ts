@@ -1,3 +1,5 @@
+import { listPage, listPageArgs, type ListPageArgs } from '../../../lib/listPage.js';
+import type { Prisma } from '../../../generated/prisma/index.js';
 import { GraphQLError } from 'graphql';
 import type { PrismaClient } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
@@ -196,23 +198,28 @@ function loadSignatureStatus(ctx: Context, nodeId: string): Promise<NodeSignatur
   });
 }
 
+/** Parent Node gates/projections are unchanged; filter effective expiry in SQL before taking the page. */
+async function signingRequestsPage(n: { id: string }, args: ListPageArgs & { state?: string | null }, ctx: Context) {
+  const state = args.state?.toLowerCase();
+  const scope = `signingRequests:${n.id}:${state ?? ''}`;
+  const { take, offset } = listPageArgs(args, scope);
+  const now = new Date();
+  const where: Prisma.SigningRequestWhereInput = { nodeId: n.id };
+  if (state === 'expired') where.OR = [{ state: 'expired' }, { state: 'open', expiresAt: { lte: now } }];
+  else if (state === 'open') Object.assign(where, { state, expiresAt: { gt: now } });
+  else if (state) where.state = state;
+  const rows = await ctx.db.signingRequest.findMany({ where, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], skip: offset, take: take + 1 });
+  return listPage(rows, take, offset, scope);
+}
+
 export const signingFieldResolvers = {
   Node: {
     /** #1632 / cor:dmo:130:06 — the node's signatures and their derived states. */
     signatureStatus: (n: { id: string }, _: unknown, ctx: Context) => loadSignatureStatus(ctx, n.id),
     /** #1632 — the node's signing requests, newest first; the same readers as its signatures (#10019). */
-    signingRequests: async (n: { id: string }, { state, first }: { state?: string | null; first?: number | null }, ctx: Context) => {
-      const take = Math.min(Math.max(first ?? 20, 1), 100);
-      const rows = await ctx.db.signingRequest.findMany({
-        where: { nodeId: n.id },
-        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-        // A state filter is applied to the EFFECTIVE state, so it reads past the stored page.
-        ...(state ? {} : { take }),
-      });
-      if (!state) return rows;
-      const now = new Date();
-      return rows.filter((r) => effectiveRequestState(r, now).toUpperCase() === state).slice(0, take);
-    },
+    signingRequestsPage,
+    signingRequests: async (n: { id: string }, args: ListPageArgs & { state?: string | null }, ctx: Context) =>
+      (await signingRequestsPage(n, args, ctx)).items,
   },
   SigningRequest: {
     nodeUrn: async (r: SigningRequestRow, _: unknown, ctx: Context) => {

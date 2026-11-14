@@ -4,7 +4,7 @@ import { deploymentSchema } from './deploymentSchema.js';
 import { signingSurfacePolicy } from '../../../lib/signing/surface.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 
-const fields = ['requestNodeSignature', 'withdrawSigningRequest', 'signingRequest', 'signatureStatus', 'signingRequests'];
+const fields = ['requestNodeSignature', 'withdrawSigningRequest', 'signingRequest', 'signatureStatus', 'signingRequests', 'signingRequestsPage'];
 const tools = ['hadron_request_signature', 'hadron_get_signing_request', 'hadron_withdraw_signing_request'];
 afterEach(() => vi.unstubAllEnvs());
 
@@ -21,7 +21,7 @@ describe('#1895 off-state discovery and execution', () => {
     const surface = deploymentSchema();
     const schema = buildSchema(surface.typeDefs);
     const sdl = printSchema(schema);
-    for (const name of [...fields, 'SigningRequest', 'NodeSignature', 'SigningRequester', 'SignatureState']) {
+    for (const name of [...fields, 'SigningRequest', 'SigningRequestsPage', 'NodeSignature', 'SigningRequester', 'SignatureState']) {
       expect(sdl).not.toMatch(new RegExp(`\\b${name}\\b`));
     }
     const result = await graphql({ schema, source: '{ signingRequest(id:"opaque") { id } }' });
@@ -31,6 +31,7 @@ describe('#1895 off-state discovery and execution', () => {
     expect(surface.resolvers.Mutation).not.toHaveProperty('withdrawSigningRequest');
     expect(surface.resolvers.Node).not.toHaveProperty('signatureStatus');
     expect(surface.resolvers.Node).not.toHaveProperty('signingRequests');
+    expect(surface.resolvers.Node).not.toHaveProperty('signingRequestsPage');
     const mcp = createTestableMcpServer({ roles: [] });
     for (const name of tools) {
       expect(mcp.toolNames()).not.toContain(name);
