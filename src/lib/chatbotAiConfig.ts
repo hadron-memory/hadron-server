@@ -100,7 +100,7 @@ export async function listChatAiConfigChoices(db: Db, appId: string): Promise<Ch
  * provider, model or key.
  */
 export async function effectiveChatToolChoice(
-  db: Db & PrismaClient,
+  db: PrismaClient,
   chat: { appId: string | null; agentId: string | null; storedChoice: unknown },
 ): Promise<ChatToolChoice | null> {
   const pinned = await pinnedConfigFor(db, chat.appId, chat.storedChoice);

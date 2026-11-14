@@ -17,7 +17,7 @@ import { Prisma } from '../../../generated/prisma/index.js';
 import { AiServiceConfigNotFoundError } from '../../../lib/aiConfig.js';
 import { effectiveChatToolChoice, listChatAiConfigChoices } from '../../../lib/chatbotAiConfig.js';
 import { chatToolChoiceFor } from '../../../lib/llm/chatToolChoice.js';
-import { isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
+import { resolveChatHomeAgent } from '../../../lib/chatHomeAgent.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { isRefusedPrincipal } from '../../../lib/auth/requestPrincipal.js';
 import { currentActor } from '../../../lib/requestActor.js';
@@ -92,33 +92,22 @@ async function readableChatForToolChoice(ctx: Context, chatId: string) {
   return chatNode;
 }
 
-/** The Agent a chat belongs to: the same derivation `sendChatMessage` uses (an uninstalled App-class Agent no longer counts). */
-async function chatAgentIdOf(ctx: Context, memory: { id: string; class: string; appId: string | null; sharedMemoryOfAgentId: string | null; userMemoryOfAgentId: string | null }): Promise<string | null> {
-  let agentId: string | null = memory.sharedMemoryOfAgentId ?? memory.userMemoryOfAgentId;
-  if (!agentId) {
-    const legacy = await ctx.db.agent.findMany({
-      where: { deletedAt: null, memoryItems: { some: { memoryId: memory.id } } },
-      select: { id: true, systemMemoryId: true },
-    });
-    agentId = legacy.find((a) => a.systemMemoryId)?.id ?? null;
-  }
-  if (agentId && memory.class === 'app' && !(memory.appId && (await isAgentInstalledAndLicensed(ctx.db, memory.appId, agentId)))) return null;
-  return agentId;
-}
-
 export const chatbotAiConfigQueries = {
   chatEffectiveToolChoice: async (_: unknown, { chatId }: { chatId: string }, ctx: Context) => {
     const chatNode = await readableChatForToolChoice(ctx, chatId);
     const memory = await ctx.db.memory.findUnique({
       where: { id: chatNode.memoryId },
-      select: { id: true, class: true, appId: true, sharedMemoryOfAgentId: true, userMemoryOfAgentId: true },
+      select: { id: true, appId: true, sharedMemoryOfAgentId: true, userMemoryOfAgentId: true },
     });
     if (!memory) throw chatNotFoundError(chatId);
     const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
-    if (memEncInfo.isEncrypted) translateSessionExpired(memEncInfo.id, () => decryptNodeFields(chatNode, memEncInfo));
-    const storedChoice = ((chatNode.data as Record<string, unknown> | null) ?? {}).aiConfigChoice;
+    const readable = memEncInfo.isEncrypted ? translateSessionExpired(memEncInfo.id, () => decryptNodeFields(chatNode, memEncInfo)) : chatNode;
+    const storedChoice = ((readable.data as Record<string, unknown> | null) ?? {}).aiConfigChoice;
     try {
-      return await effectiveChatToolChoice(ctx.db, { appId: memory.appId, agentId: await chatAgentIdOf(ctx, memory), storedChoice });
+      // The Agent comes from the turn's own lookup (#4076), so a retained pointer, an uninstalled Agent, a soft-deleted
+      // one and the legacy-link order all resolve exactly as the turn resolves them (Gizelle's F1 on #4151).
+      const { agent } = await resolveChatHomeAgent(ctx.db, memory, ctx);
+      return await effectiveChatToolChoice(ctx.db, { appId: memory.appId, agentId: (agent as { id: string } | null)?.id ?? null, storedChoice });
     } catch (e) {
       return rethrowAiConfigTyped(e);
     }

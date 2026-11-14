@@ -10,6 +10,11 @@ import { cleanDb, createDbAgentOrgGrant, chatNodeByLocOrThrow } from '../../../t
 import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { generateId } from '../../../lib/id.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
+import { chatToolChoiceFor } from '../../../lib/llm/chatToolChoice.js';
+import { effectiveChatToolChoice } from '../../../lib/chatbotAiConfig.js';
+import { encryptNodeFields } from '../../../lib/nodeCrypto.js';
+import { generateDataKey } from '../../../lib/crypto.js';
+import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { resolveAiConfig, resolveAiConfigs, resolveAiConfigWithFallback, resolveDefaultAiConfig } from '../../../lib/aiConfig.js';
 import { resolvers, type Context } from './resolvers.js';
 
@@ -120,7 +125,7 @@ describe('(b) chatToolChoiceFor(provider, model): the pure unsaved-pair decision
   });
 });
 
-describe('(a) chatEffectiveToolChoice(chatId)', () => {
+describe('(c) chatEffectiveToolChoice(chatId)', () => {
   const asMember = (extra: Partial<Context> = {}) => ctx(member, extra);
   const start = (args: Record<string, unknown> = {}, c: Context = asMember()) => M.startChat(null, { agentId: agent.id, scope: 'shared', ...args }, c);
   const effective = (chatId: string, c: Context = asMember()) => Q.chatEffectiveToolChoice(null, { chatId }, c);
@@ -148,15 +153,25 @@ describe('(a) chatEffectiveToolChoice(chatId)', () => {
     const chosenAuto = await start({ aiConfigChoice: auto.id });
     const chosenForced = await start({ aiConfigChoice: forced.id });
     const unchosen = await start({});
-    expect(await effective(chosenAuto.chatId)).toBe('AUTO');
-    expect(await effective(chosenForced.chatId)).toBe('FORCED');
-    expect(await effective(unchosen.chatId)).toBe('FORCED'); // the walk's `default`
+    // Drift guard (Glen's P2 on #4151): the turn's own resolution, `resolveAIConfig(chatId:)`, judged by the one predicate, must
+    // agree with the new query for every chat in every state below.
+    const viaTurn = async (chatId: string) => {
+      const r = await Q.resolveAIConfig(null, { name: 'default', appRef: app.id, chatId }, ctx(admin));
+      return chatToolChoiceFor(r.provider, r.model);
+    };
+    const agree = async (chatId: string, expected: string) => {
+      expect(await effective(chatId)).toBe(expected);
+      expect(await viaTurn(chatId)).toBe(expected);
+    };
+    await agree(chosenAuto.chatId, 'AUTO');
+    await agree(chosenForced.chatId, 'FORCED');
+    await agree(unchosen.chatId, 'FORCED'); // the walk's `default`
     await db.app.update({ where: { id: app.id }, data: { chatbotAiConfigId: auto.id } });
-    expect(await effective(unchosen.chatId)).toBe('AUTO'); // the App chatbot config
-    expect(await effective(chosenForced.chatId)).toBe('FORCED'); // a stored choice still outranks it
+    await agree(unchosen.chatId, 'AUTO'); // the App chatbot config
+    await agree(chosenForced.chatId, 'FORCED'); // a stored choice still outranks it
     await db.aiServiceConfig.update({ where: { id: auto.id }, data: { enabled: false } });
-    expect(await effective(unchosen.chatId)).toBe('FORCED'); // disabled chatbot config: falls to the walk
-    expect(await effective(chosenAuto.chatId)).toBe('FORCED'); // disabled stored choice: falls through to the walk
+    await agree(unchosen.chatId, 'FORCED'); // disabled chatbot config: falls to the walk
+    await agree(chosenAuto.chatId, 'FORCED'); // disabled stored choice: falls through to the walk
     expect(walk.model).toBe('gpt-x');
   });
 
@@ -172,6 +187,53 @@ describe('(a) chatEffectiveToolChoice(chatId)', () => {
   it('answers null, and does not raise, when nothing resolves', async () => {
     const { chatId } = await start({});
     expect(await effective(chatId)).toBeNull();
+  });
+
+  it('retained private chat: after the Agent is uninstalled the turn drops it, and so does the answer (Gizelle F1)', async () => {
+    await cfg({ agentId: agent.id }, 'default', 'anthropic', 'claude-sonnet-5-5'); // Agent default: AUTO
+    await cfg({ organizationId: org.id }, 'default', 'openai', 'gpt-x'); // Org default: FORCED
+    const { chatId } = await start({ scope: 'private', aiConfigChoice: 'default' });
+    const node = await chatNodeByLocOrThrow(db, chatId);
+    expect((await db.memory.findUniqueOrThrow({ where: { id: node.memoryId } })).appId).toBe(app.id); // App-bearing, but private
+    expect(await effective(chatId)).toBe('AUTO'); // control
+    await db.appAgent.delete({ where: { appId_agentId: { appId: app.id, agentId: agent.id } } });
+    expect(await effective(chatId)).toBe('FORCED');
+  });
+
+  it('an encrypted chat\'s stored choice is read, not skipped', async () => {
+    const auto = await cfg({ appId: app.id }, 'auto', 'anthropic', 'claude-opus-5-5');
+    await cfg({ appId: app.id }, 'default', 'openai', 'gpt-x');
+    const { chatId } = await start({ aiConfigChoice: auto.id });
+    const node = await chatNodeByLocOrThrow(db, chatId);
+    sessionKeyCache.set(generateId(), node.memoryId, generateDataKey());
+    await db.memory.update({ where: { id: node.memoryId }, data: { isEncrypted: true } });
+    await db.node.update({ where: { id: node.id }, data: { data: encryptNodeFields({ data: node.data }, { id: node.memoryId, isEncrypted: true }).data! as never } });
+    expect(JSON.stringify((await chatNodeByLocOrThrow(db, chatId)).data)).not.toContain(auto.id); // really ciphertext at rest
+    expect(await effective(chatId)).toBe('AUTO'); // the walk's default would be FORCED
+  });
+
+  it('a user-owned App whose walk lands on the platform config answers null; its own config still answers', async () => {
+    const host = await hostServer();
+    await cfg({ hadronServerId: host.id }, 'default', 'anthropic', 'claude-sonnet-5-5');
+    const mine = await db.app.create({ data: { ownerUserId: member.id, name: 'Mine', urn: `member-${generateId()}:mine` } });
+    const ask = () => effectiveChatToolChoice(db, { appId: mine.id, agentId: null, storedChoice: null });
+    expect(await ask()).toBeNull(); // the platform's config is not available to a personal App
+    await cfg({ appId: mine.id }, 'default', 'anthropic', 'claude-opus-5-5');
+    expect(await ask()).toBe('AUTO');
+  });
+
+  it('#829: a planted node at the chat\'s loc cannot be picked over the real chat', async () => {
+    await cfg({ appId: app.id }, 'default', 'openai', 'gpt-x'); // the real chat's App: FORCED
+    const { chatId } = await start({ aiConfigChoice: 'default' });
+    const real = await chatNodeByLocOrThrow(db, chatId);
+    // A co-member plants the same loc in a SECOND app memory the caller also belongs to: both rows survive the entitlement
+    // filter, so only the oldest-wins ordering settles it. That App's `default` is AUTO, so picking the plant is visible.
+    const appB = await db.app.create({ data: { organizationId: org.id, name: 'Second', urn: `${org.urn}:second` } });
+    await db.appMember.createMany({ data: [{ appId: appB.id, userId: member.id, role: 'reader' }, { appId: appB.id, userId: outsider.id, role: 'reader' }] });
+    await cfg({ appId: appB.id }, 'default', 'anthropic', 'claude-sonnet-5-5');
+    const memB = await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `plant-mem-${generateId()}`, name: 'plant-mem', class: 'app', appId: appB.id, createdBy: outsider.id } });
+    await db.node.create({ data: { id: generateId(), memoryId: memB.id, loc: real.loc, name: 'plant', createdBy: outsider.id, data: { aiConfigChoice: 'default' } as never } });
+    expect(await effective(chatId)).toBe('FORCED'); // the oldest, real chat
   });
 
   it('gate: unauthenticated and impersonated callers are refused before any read; an unreadable chat and an unknown chat answer byte-identically', async () => {
