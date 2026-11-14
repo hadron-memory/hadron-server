@@ -83,6 +83,13 @@ describe('#4106 createEdge / updateEdge', () => {
     await refused(M.searchReplaceInNodes({}, { input: { oldText: '\ud83d', newText: 'X', memoryIds: [memory.id], fields: ['content'], dryRun: false } }, ctx(admin.id)), 'oldText');
     expect((await db.node.findUniqueOrThrow({ where: { id: n1.id } })).content).toBe(before.content);
   });
+  it('searchReplaceInNodes refuses a regex oldText that splits a stored surrogate pair, writing nothing', async () => {
+    const n = await M.createNode({}, { input: { memoryId: memory.id, loc: 'emoji', name: 'E', content: 'a😀b' } }, ctx(admin.id));
+    await refused(M.searchReplaceInNodes({}, { input: { oldText: '\\ud83d', regex: true, newText: 'X', memoryIds: [memory.id], fields: ['content'], dryRun: false } }, ctx(admin.id)), 'oldText');
+    expect((await db.node.findUniqueOrThrow({ where: { id: n.id } })).content).toBe('a😀b');
+    const text = await mcp().callToolText('hadron_replace_text', { oldText: '\\ud83d', regex: true, newText: 'X', memoryUrns: [`hrn:mem:${memoryUrn}`], fields: ['content'] });
+    shape(text, 'oldText');
+  });
   it('condition already refuses with its own typed code, never a server fault (existing behaviour)', async () => {
     for (const patch of [{ condition: { k: nul } }]) {
       const e: any = await create(patch).catch((x: any) => x);

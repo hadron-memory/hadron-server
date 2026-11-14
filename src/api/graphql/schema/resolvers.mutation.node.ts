@@ -3147,6 +3147,9 @@ export const nodeMutations = {
       // #4096: `newText` is caller text written through `tx.node.update`, outside the node writer. Refused typed after
       // selection and write authorization, before any write (a dry run is refused too, so its preview never promises a write that fails).
       assertStorableText({ newText, oldText }); // #4106: a lone-surrogate oldText splits a stored pair into unstorable derived text
+      // #4106: a regex `oldText` (an escape such as \ud83d) can match half of a stored pair; the guard above sees only the raw
+      // input, so the DERIVED text of every planned change is checked too, naming `oldText`, before any write.
+      assertStorableText({ oldText: plans.map((p) => p.changed) });
       // A dry run writes nothing, but still makes the manager's deciding
       // gate under the same authority as the write branch.
       if (dryRun) {
