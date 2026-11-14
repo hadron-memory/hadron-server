@@ -100,6 +100,7 @@ pg_dump -Fc --no-owner --no-privileges \
   --exclude-table='_prisma_migrations' \
   --exclude-table='secret_app_keys' \
   --exclude-table='secret_versions' \
+  --exclude-table='secret_change_requests' \
   --file="$DUMP" "$PROD_DATABASE_URL"
 
 # ── (re)create the target DB locally ─────────────────────────────────────────

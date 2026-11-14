@@ -21,7 +21,7 @@ export const MAX_SECRETS_PER_APP = 500;
 /** A secret keeps at most this many versions; the oldest SUPERSEDED go first (cor:sec:010:03). The current one never goes. */
 export const MAX_SECRET_VERSIONS = 50;
 
-export type SecretEventKind = 'STORE' | 'VERSION' | 'METADATA' | 'DELETE';
+export type SecretEventKind = 'STORE' | 'VERSION' | 'METADATA' | 'DELETE' | 'PROTECT' | 'UNPROTECT';
 
 /** Who acted, as plain ids (no foreign keys), the way the grant tables record it. */
 export interface SecretActor {

@@ -310,11 +310,11 @@ describe('App secrets S2 public acceptance', () => {
     expect(await db.secret.count({ where: { id: s.id } })).toBe(1);
   });
 
-  it('a protected secret refuses every change until the change-request path exists', async () => {
+  it('a protected secret hands changes to the passkey request path', async () => {
     const s = await create(memberId, 'prot');
     await db.secret.update({ where: { id: s.id }, data: { protected: true } });
-    await expect(resolvers.Mutation.updateSecret({}, { ref: s.id, value: 'x' }, context(memberId))).rejects.toMatchObject({ extensions: { code: 'SECRET_PROTECTED' } });
-    await expect(resolvers.Mutation.deleteSecret({}, { ref: s.id }, context(ownerId))).rejects.toMatchObject({ extensions: { code: 'SECRET_PROTECTED' } });
+    await expect(resolvers.Mutation.updateSecret({}, { ref: s.id, value: 'x' }, context(memberId))).rejects.toMatchObject({ extensions: { code: 'SECRET_PROTECTED_NEEDS_PASSKEY' } });
+    await expect(resolvers.Mutation.deleteSecret({}, { ref: s.id }, context(ownerId))).rejects.toMatchObject({ extensions: { code: 'SECRET_PROTECTED_NEEDS_PASSKEY' } });
   });
 
   it('only an App row can be protected or valueless: the owner/value CHECKs', async () => {
