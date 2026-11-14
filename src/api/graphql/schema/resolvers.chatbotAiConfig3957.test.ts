@@ -38,11 +38,12 @@ beforeEach(async () => {
   ] });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   await createDbAgentOrgGrant(db, org.id, agent.id);
-  const mk = (appId: string, name: string, provider: string, model: string, enabled = true) =>
-    db.aiServiceConfig.create({ data: { appId, name, provider, model, apiKeyEncrypted: encryptToken(KEY), apiKeyPreview: '…3957', enabled } });
+  const mk = (appId: string, name: string, provider: string, model: string, enabled = true, id?: string) =>
+    db.aiServiceConfig.create({ data: { id, appId, name, provider, model, apiKeyEncrypted: encryptToken(KEY), apiKeyPreview: '…3957', enabled } });
   dflt = await mk(app.id, 'default', 'anthropic', 'claude-default');
   claude = await mk(app.id, 'claude', 'anthropic', 'claude-sonnet');
-  glm = await mk(app.id, 'glm', 'glm', 'glm-5');
+  // #4155: a legal public id containing the short secret suffix must never look like a credential leak.
+  glm = await mk(app.id, 'glm', 'glm', 'glm-5', true, '01953957000000000000000000000001');
   foreign = await mk(other.id, 'foreign', 'openai', 'gpt-x');
 });
 
@@ -194,11 +195,30 @@ describe('chatAiConfigChoices', () => {
       [dflt.id, 'default', false, false],
       [glm.id, 'glm', false, true],
     ]);
-    const text = JSON.stringify(list);
-    expect(text).not.toContain(KEY);
-    expect(text).not.toContain('3957');
-    expect(text).not.toContain(foreign.id);
-    expect(Object.keys(list[2]).sort()).toEqual(['isAppChatbotConfig', 'isDefault', 'model', 'name', 'provider', 'value']);
+    expect(glm.id).toMatch(/^[0-9a-f]{32}$/);
+    expect(glm.id).toContain('3957');
+    // #4155: use the exact fixture preview; the short suffix can occur in a public id.
+    const assertProjection = (choices: typeof list) => {
+      const text = JSON.stringify(choices);
+      expect(text).not.toContain(KEY);
+      expect(text).not.toContain(glm.apiKeyPreview);
+      expect(text).not.toContain(foreign.id);
+      expect(Object.keys(choices[2]).sort()).toEqual(['isAppChatbotConfig', 'isDefault', 'model', 'name', 'provider', 'toolChoice', 'value']);
+    };
+    expect(glm.apiKeyPreview).toBe('…3957');
+    assertProjection(list);
+
+    // Mutate the actual projection, and prove each control applied before asking the same guards to reject it.
+    for (const [field, value] of [['name', KEY], ['model', glm.apiKeyPreview]] as const) {
+      const leaked = structuredClone(list);
+      leaked[2][field] = value;
+      expect(leaked[2][field]).toBe(value);
+      expect(() => assertProjection(leaked), `credential value in ${field}`).toThrow();
+    }
+    const extraField = structuredClone(list);
+    extraField[2].apiKeyPreview = null; // no marker in the value: only the exact shape guard catches this
+    expect(Object.hasOwn(extraField[2], 'apiKeyPreview')).toBe(true);
+    expect(() => assertProjection(extraField), 'forbidden credential field').toThrow();
   });
 
   it('a non-member gets exactly the answer a missing App gets', async () => {
@@ -297,8 +317,8 @@ describe('the chat path', () => {
     // loc-scope-ok: whole-table counts, compared before and after one refused call.
     const counts = async () => [await db.memory.count(), await db.node.count(), await db.memorySubscription.count()];
     const asAdmin = (): Context => ({ db, userId: admin.id, roles: ['READER'] } as Context);
-    // `admin` is an org member, so the lazy per-user memory belongs to the App; `member` is not, so it belongs to none.
-    for (const [who, bad] of [[asAdmin, foreign.id], [asMember, foreign.id], [asMember, claude.id]] as const) {
+    // #4046: both the org manager and the AppMember now select the licensed App on a cold start.
+    for (const [who, bad] of [[asAdmin, foreign.id], [asMember, foreign.id]] as const) {
       // Atilla's P3: this person has no per-user memory for the Agent yet, so the lazy-create branch is the one tested.
       const asUser = who().userId!;
       expect(await db.memory.count({ where: { userMemoryOfAgentId: chatAgent.id, createdBy: asUser } })).toBe(0);
@@ -306,8 +326,14 @@ describe('the chat path', () => {
       expect(await code(start({ scope: 'private', aiConfigChoice: bad }, who()))).toBe('AiServiceConfigNotFoundError');
       expect(await counts()).toEqual(before);
     }
-    // the App's own config is accepted for the person it belongs to, and does provision
-    const ok = await start({ scope: 'private', aiConfigChoice: claude.id }, asAdmin());
+    // Retain the no-App refusal leg with a lawful direct manager and no installed App.
+    await db.appAgent.delete({ where: { appId_agentId: { appId: app.id, agentId: chatAgent.id } } });
+    const noAppBefore = await counts();
+    expect(await code(start({ scope: 'private', aiConfigChoice: claude.id }, asAdmin()))).toBe('AiServiceConfigNotFoundError');
+    expect(await counts()).toEqual(noAppBefore);
+    await db.appAgent.create({ data: { appId: app.id, agentId: chatAgent.id } });
+    // The AppMember's own config is accepted and the cold start provisions in that App.
+    const ok = await start({ scope: 'private', aiConfigChoice: claude.id }, asMember());
     expect(await stored(ok.chatId)).toBe(claude.id);
   });
 
@@ -325,8 +351,11 @@ describe('the chat path', () => {
   // Rodolfo P3-2 (cor:dmo:050:10: a pin naming another App's config, a deleted one or an id that doesn't exist is refused
   // like a missing id, with nothing revealing that the config exists): a chat with no App, and a REAL org config's id.
   it('a choice on a chat with no App is refused identically to a nonexistent id, after normalizing only the id the caller sent', async () => {
+    // #4046: only an Agent manager may start directly without an App.
+    await db.orgMember.create({ data: { userId: member.id, organizationId: org.id, role: 'ADMIN' } });
+    await db.appAgent.deleteMany({ where: { agentId: chatAgent.id } });
     const orgConfig = await db.aiServiceConfig.create({ data: { organizationId: org.id, name: 'org-wide', provider: 'openai', model: 'gpt-org', apiKeyEncrypted: encryptToken(KEY), apiKeyPreview: '…3957' } });
-    // `member` is not an org member, so the lazy per-user memory belongs to no App.
+    // The manager has no installed App, so the lazy per-user memory belongs to no App.
     // Victor's conditions: every occurrence of the caller's exact input becomes one shared placeholder on both sides and the WHOLE
     // serialized error is compared; and the echo is the verbatim input, never anything config-derived.
     const refusal = (id: string, run: () => Promise<unknown>) => run().then(() => null, (e: any) => {

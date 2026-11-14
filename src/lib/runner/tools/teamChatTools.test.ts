@@ -121,7 +121,7 @@ describe('the read gate (#2520 criterion 1, matrix)', () => {
   it('(c) a userId principal who is not an App participant gets the same FORBIDDEN teamChatMessages gives; a Channel ref gets CHANNEL_NOT_FOUND', async () => {
     const c = toolCtx(await mintRun({ userId: outsider.id }));
     const direct = await code(Q.teamChatMessages({}, { appRef: app.id }, c.principal));
-    expect(direct).toBe('FORBIDDEN');
+    expect(direct).toBe('APP_NOT_FOUND');
     expect(await code(teamChatRead.execute(c, {}))).toBe(direct);
     expect(await code(teamChatRead.execute(c, { channelRef: channel.id }))).toBe('CHANNEL_NOT_FOUND');
   });

@@ -44,6 +44,8 @@ for port in "$E2E_PORT" "$E2E_PORTAL_PORT"; do
   [[ "$port" =~ ^[1-9][0-9]{3,4}$ && "$port" -ge 1024 && "$port" -le 65535 ]] || { echo 'Ports must be 1024..65535' >&2; exit 2; }
 done
 [[ "$E2E_PORT" != "$E2E_PORTAL_PORT" ]] || { echo 'API and portal ports must differ' >&2; exit 2; }
+# #4058: the registration switch is forwarded only when the host SET it. An explicit empty value would override the
+# private env file's (Compose ranks an exported variable above --env-file even when empty) and silently test OFF.
 compose() {
   local env_args=()
   (( private_env_active )) && env_args=(--env-file "$private_env_file")
@@ -54,6 +56,7 @@ compose() {
       E2E_PASSKEY_SIGNING_ENABLED="${E2E_PASSKEY_SIGNING_ENABLED:-}" \
       E2E_SIGNING_CEREMONY_ORIGINS="${E2E_SIGNING_CEREMONY_ORIGINS:-}" \
       E2E_PASSKEY_RP_ID="${E2E_PASSKEY_RP_ID:-}" \
+      ${E2E_PASSKEY_REGISTRATION_ENABLED+E2E_PASSKEY_REGISTRATION_ENABLED="$E2E_PASSKEY_REGISTRATION_ENABLED"} \
       docker compose ${env_args[@]+"${env_args[@]}"} --project-name "$project" --file /opt/hadron/scripts/e2e/compose.yaml "$@"
   fi
 }

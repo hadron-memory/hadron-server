@@ -3208,7 +3208,7 @@ model Secret {
   /// key (src/lib/tokenCrypto.ts). NEVER selected into a read surface:
   /// redaction by construction, same as the aiConfig / HA / Resend / MCP
   /// registries. Rotation is overwrite (updateSecret), no versioning (v1).
-  valueEncrypted String   @map("value_encrypted")
+  valueEncrypted String?  @map("value_encrypted")
   /// Key-rotation lineage headroom; unused (null) while HADRON_ENCRYPTION_KEY
   /// is the only key.
   keyId          String?  @map("key_id")
@@ -3216,6 +3216,14 @@ model Secret {
   createdBy      String?  @map("created_by")
   updatedAt      DateTime @updatedAt @map("updated_at")
   updatedBy      String?  @map("updated_by")
+  /// #3997 (S2 of #3991): an App-owned secret keeps NO value here — its value is its newest `secret_versions` row
+  /// (`chk_secret_app_value`: `(owner_type = 'app') = (value_encrypted IS NULL)`). Org and user rows are as before.
+  /// Plain ids, so an agent's write is attributable to a worker as the grant tables do.
+  createdByWorkerId  String? @map("created_by_worker_id")
+  createdBySessionId String? @map("created_by_session_id")
+  /// Only meaningful for App rows (`chk_secret_protected_app_only`); the protection ceremony is S4.
+  protected      Boolean  @default(false)
+  versions       SecretVersion[]
 
   // Hard delete by design (registry-row posture): a deleted secret makes
   // referencing runs fail their resolution loud — the wanted signal.
@@ -3331,6 +3339,7 @@ model WaitingListItem {
 /// in `app_members`, not in `apps`.
 model App {
   id                                String               @id @default(cuid())
+  secretAppKeys                     SecretAppKey[]
   /// Display name.
   name                              String
   /// App-layer action-policy link (cor:acl:040:02) — same allow-list shape
@@ -4048,6 +4057,10 @@ model Worker {
   /// prisma/host-operation-invariants.sql) allows exactly the keys above, so a write that bypasses the resolver still
   /// cannot store more. Read behind `maySeeWorkerInternals` (cor:dmo:050:11).
   terminal Json? @map("terminal")
+  /// #4041 (V82) — the last host repair notice the PLATFORM posted for this worker, set in the post's own append
+  /// transaction: `alert` (a no-snapshot / cap-reached alert, once per worker until a report without a repair outcome or with
+  /// a relaunch) or `relaunched:<checkedAt>` (so a replayed relaunch report posts nothing twice). Never read by a client.
+  repairNoticeKey String? @map("repair_notice_key")
 
   app                  App                       @relation(fields: [appId], references: [id], onDelete: Cascade)
   /// SetNull: a worker row is never hard-deleted in normal operation, but an
@@ -4727,6 +4740,87 @@ model NodeSignature {
 /// (`retiredAt` retires minting only, and nothing in PR1 sets it — no ops
 /// surface). Minting always uses the newest unretired key; a stamp names the
 /// key that must verify it.
+/// #3996 (S1 of #3991) — an App's data key, wrapped (AES-256-GCM) under the platform root key `SECRET_ROOT_KEY`.
+/// AAD `hadron:secret-app-key:v1:<appId>:<keyVersion>`; a plaintext that is not exactly 32 bytes makes the row
+/// unusable (fail closed). The partial unique index (one ACTIVE key per App) is in secret-app-keys-invariants.sql.
+model SecretAppKey {
+  appId      String    @map("app_id")
+  keyVersion Int       @map("key_version")
+  /// base64(iv[12] | gcm-tag[16] | ciphertext). Never selected for display, never logged.
+  wrappedKey String    @map("wrapped_key")
+  createdAt  DateTime  @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("created_at")
+  /// A retired key stops encrypting; it still decrypts until no version uses it.
+  retiredAt  DateTime? @map("retired_at")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+  versions SecretVersion[]
+
+  @@id([appId, keyVersion])
+  @@map("secret_app_keys")
+}
+
+/// #3997 (S2 of #3991): one stored value of an App-owned secret. Append-only in practice (a version is never edited);
+/// `superseded_at` is set when a newer one is stored. The ciphertext is left out of every default select at the client
+/// layer (`omit`, R12): only the store path and (S3) the read path select it by name.
+model SecretVersion {
+  id             String    @id @default(cuid())
+  secretId       String    @map("secret_id")
+  versionNo      Int       @map("version_no")
+  /// base64(iv[12] | gcm-tag[16] | ciphertext) under the App key's encryption subkey, AAD `secretVersionAad`.
+  valueEncrypted String    @map("value_encrypted")
+  /// The App and the App key version that encrypted it; (app_id, key_version) restricts deletion of the key.
+  appId          String    @map("app_id")
+  keyVersion     Int       @map("key_version")
+  /// Bytes of the stored plaintext JSON (the cap's unit).
+  sizeBytes      Int       @map("size_bytes")
+  writtenByUserId    String? @map("written_by_user_id")
+  writtenByWorkerId  String? @map("written_by_worker_id")
+  writtenBySessionId String? @map("written_by_session_id")
+  writtenAt      DateTime  @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("written_at")
+  supersededAt   DateTime? @map("superseded_at")
+
+  secret Secret       @relation(fields: [secretId], references: [id], onDelete: Cascade)
+  appKey SecretAppKey @relation(fields: [appId, keyVersion], references: [appId, keyVersion], onDelete: Restrict)
+
+  @@unique([secretId, versionNo], map: "secret_versions_secret_version_uniq")
+  @@map("secret_versions")
+}
+
+/// #3997: the append-only audit trail of App secrets. Plain values only (no foreign keys, so the trail outlives the
+/// secret and its App); never a value, ciphertext or fingerprint. A guard trigger refuses update, and refuses delete
+/// except the one-year purge S8 builds (`secret-events-invariants.sql`).
+model SecretEvent {
+  id          String   @id @default(cuid())
+  ownerType   String   @map("owner_type")
+  ownerId     String   @map("owner_id")
+  secretId    String   @map("secret_id")
+  secretName  String   @map("secret_name")
+  clientId    String?  @map("client_id")
+  versionNo   Int?     @map("version_no")
+  kind        String
+  outcome     String
+  actorUserId String?  @map("actor_user_id")
+  workerId    String?  @map("worker_id")
+  sessionId   String?  @map("session_id")
+  runId       String?  @map("run_id")
+  at          DateTime @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)"))
+
+  @@index([ownerType, ownerId, at], map: "secret_events_owner_at_idx")
+  @@index([secretId, at], map: "secret_events_secret_at_idx")
+  @@map("secret_events")
+}
+
+/// #3997 (R25): the durable start of the one-year event retention for a deleted owner. One row per deleted App that has
+/// events, written once; never updated; deleted only by the purge, last.
+model SecretOwnerTombstone {
+  ownerType String   @map("owner_type")
+  ownerId   String   @map("owner_id")
+  deletedAt DateTime @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("deleted_at")
+
+  @@id([ownerType, ownerId])
+  @@map("secret_owner_tombstones")
+}
+
 model StampSigningKey {
   id          Int       @id @default(autoincrement())
   /// base64(iv[12] | gcm-tag[16] | ciphertext), AES-256-GCM under
@@ -6205,6 +6299,15 @@ model AgentTeamEvent {
   acknowledgedAt         DateTime? @map("acknowledged_at")
   payload                Json      @default("{}")
   createdAt              DateTime  @default(now()) @map("created_at")
+  /// #4084 (Glen's blind P2 on server#4089): the id of the transaction that wrote the event, set by the database
+  /// (`pg_current_xact_id()`), never by the application. `createdAt` is stamped when the row is written, not when it
+  /// commits, so a reader that advances by `(createdAt, id)` can pass an event whose transaction commits later. A
+  /// transaction id below the reader snapshot's xmin is final: every transaction that could still add a row has an id
+  /// at or above it. agentTaskExternalIdChanges pages by `(txId, createdAt, id)` and serves only finished transactions,
+  /// so a late commit is served late, never skipped. Rows written before this column existed hold `'0'`.
+  /// #4111: NOT NULL (a NULL cursor key would compare NULL and empty every later page); the default stays, so a
+  /// producer that omits it still gets a key. A logical restore re-keys it with `scripts/ops/restore-with-rebase`.
+  txId                   Unsupported("xid8") @default(dbgenerated("pg_current_xact_id()")) @map("tx_id")
   /// #1706 — stall alarms only: when the stall episode began (cor:agt:050:13),
   /// the instant of the move that began the condition, never the evaluator's
   /// clock. With `taskId` and `type` (the rule) it is the episode's key, and
@@ -6225,6 +6328,8 @@ model AgentTeamEvent {
 
   @@unique([taskId, type, episodeStart], map: "agent_team_events_episode_uniq")
   @@index([appId, createdAt])
+  /// #4084: the changed-since read's commit-safe order (agentTaskExternalIdChanges).
+  @@index([appId, txId, createdAt, id])
   @@index([taskId])
   /// #1707 — "assigned least recently" (cor:agt:060:06) reads a worker's
   /// latest assignment event.

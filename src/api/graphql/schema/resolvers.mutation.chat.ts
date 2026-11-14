@@ -60,31 +60,34 @@ import { AgentNotFoundError, UserNotFoundError } from '../../../lib/entityRef/er
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { appKeyMayActFor, appKeySessionMatchesAgent, canChatWithAgent, chatAuthorityAnchors, chatCarrierApps } from './agentChatAccess.js';
 import { withAuthorizedMemoryTx, withAuthorizedTx } from './authorizedTx.js';
-import { activeAppInstallLicenseIdsForAgent, isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
+import { activeAppInstallLicenseIdsForAgent } from '../../../lib/appAgent.js';
+import { chatHomeAgentIfLicensed, refuseUnreachableChatHomeAgent, resolveChatHomeAgent } from '../../../lib/chatHomeAgent.js';
+import { canManageAgentSystemMemory } from '../../../lib/auth/managedSystemMemory.js';
+import { participantAppWhere } from '../../../lib/auth/appParticipation.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
-import { type MemoryVisibility } from '../../../generated/prisma/index.js';
+import { type MemoryVisibility, type Prisma } from '../../../generated/prisma/index.js';
 import {
   validateChatScopeInvariants,
   findOrCreateAppClassMemory,
+  locateAppClassMemory,
   chatScopeAccessFilter,
   sharedChatKnowledgeMemoryIds,
   ChatScopeError,
 } from './chat-scope.js';
 import { chatLocFilter, pickChatNode } from '../../../lib/chatLoc.js';
-import { reportPartialTurn } from '../../../lib/chatPartialTurn.js';
+import { decideChatRouting, applyChatRoutingDecision, getGoalStack } from '../../../lib/chatRouting.js';
+import { reportPartialTurn, routingRefusedReport } from '../../../lib/chatPartialTurn.js';
 import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
 import {
   type Context,
-  type SnapshotNode,
   requireRole,
   requireMemoryWriteAccess,
   memoryAccessFilter,
   buildRespondToolSchema,
-  pushGoal,
   appendRouteEntry,
-  loadPublishedSnapshot,
   rethrowAiConfigTyped,
+  loadReadableMemoryRecord,
 } from './resolvers.helpers.js';
 import { normalizeChatAiConfigChoice } from '../../../lib/chatbotAiConfig.js';
 import { assertNoMintedSpecRemoval } from '../../../lib/mintedSpecPermanence.js';
@@ -94,7 +97,15 @@ import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
 import { unauthenticatedError } from '../../../lib/refusals.js';
 import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds.js';
-import { pickUnnamedStartConversation, topLevelConversations } from '../../../lib/chatConversationOrder.js';
+import {
+  hasEntryCondition, isOrdinaryConversation, pickEntryConversation, pickFallbackConversation, pickUnnamedStartConversation, topLevelConversations,
+} from '../../../lib/chatConversationOrder.js';
+import {
+  entryStartMessageFor, validateEntryCondition, type EntryStartReason,
+} from '../../../lib/edge-conditions/entryCondition.js';
+import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
+import { loadChatScript, type ChatScript, type ScriptRule } from '../../../lib/chatScript.js';
+import { conversationStageOrder } from '../../../lib/chatRouting/nextStage.js';
 
 /**
  * How many of a chat's most recent messages `sendChatMessage` hands the model.
@@ -305,83 +316,6 @@ export const chatMutations = {
       const systemMemoryId = (agent as any).systemMemoryId as string | null;
       if (!systemMemoryId) throw new Error('Agent has no system memory configured');
 
-      // If the agent has a published revision, read conversation structure
-      // from the snapshot (pin-to-version). Otherwise read from live nodes.
-      const publishedLoc = (agent as any).publishedRevisionLoc as string | null;
-      const snapshotLookup = await loadPublishedSnapshot(ctx.db, systemMemoryId, publishedLoc);
-
-      // Helper: find a node either from snapshot or live DB
-      async function findSystemNode(loc: string): Promise<SnapshotNode | null> {
-        if (snapshotLookup) return snapshotLookup(loc);
-        const n = await ctx.db.node.findFirst({
-          where: { memoryId: systemMemoryId!, loc, deletedAt: null },
-          select: { loc: true, name: true, nodeType: true, description: true, content: true, data: true },
-        });
-        return n as SnapshotNode | null;
-      }
-
-      // Helper: find all nodes matching a prefix (for conversation selection)
-      async function findSystemNodesByPrefix(prefix: string): Promise<SnapshotNode[]> {
-        if (snapshotLookup) {
-          // Scan the snapshot — loadPublishedSnapshot builds a Map, but
-          // we need prefix matching. Re-load the snapshot nodes.
-          const revNode = await ctx.db.node.findFirst({
-            where: { memoryId: systemMemoryId!, loc: publishedLoc!, deletedAt: null },
-            select: { data: true },
-          });
-          const snap = ((revNode?.data as any)?.snapshot?.nodes as SnapshotNode[]) ?? [];
-          return snap.filter((n) => n.loc.startsWith(prefix));
-        }
-        const nodes = await ctx.db.node.findMany({
-          where: { memoryId: systemMemoryId!, loc: { startsWith: prefix }, deletedAt: null },
-          select: { loc: true, name: true, nodeType: true, description: true, content: true, data: true },
-        });
-        return nodes as SnapshotNode[];
-      }
-
-      // ── Conversation selection ───────────────────────────────────────
-      let convName: string;
-      if (conversationName) {
-        convName = conversationName;
-      } else {
-        // #3405 (cor:cht:020:01 step 1, ruling 0127): ordinary by code-unit loc, then setup,
-        // then fallback. Same rule on the live and the published-snapshot script.
-        const chosen = pickUnnamedStartConversation(await findSystemNodesByPrefix('conversations:'));
-        if (!chosen) {
-          throw new ChatScopeError('AGENT_HAS_NO_CONVERSATIONS', 'Agent has no conversations configured.');
-        }
-        convName = chosen.loc.split(':')[1];
-      }
-
-      const convNode = await findSystemNode(`conversations:${convName}`);
-      if (!convNode) {
-        throw new ChatScopeError(
-          'CONVERSATION_NOT_FOUND',
-          `Conversation "${convName}" not found in agent's system memory.`,
-        );
-      }
-
-      const convData = (convNode.data as Record<string, unknown>) ?? {};
-      const stageOrder = (convData.stageOrder as string[]) ?? [];
-      const firstStage = stageOrder[0];
-      if (!firstStage) {
-        throw new ChatScopeError('CONVERSATION_HAS_NO_STAGES', `Conversation "${convName}" has no stages.`);
-      }
-
-      // Load the first stage
-      const stageNode = await findSystemNode(`conversations:${convName}:${firstStage}`);
-      const stageData = (stageNode?.data as Record<string, unknown>) ?? {};
-
-      // Load the prompt
-      const promptRef = stageData.promptRef as string | undefined;
-      let promptContent = '';
-      if (promptRef) {
-        const promptNode = await findSystemNode(promptRef);
-        promptContent = promptNode?.content ?? '';
-      } else if (stageNode?.content) {
-        promptContent = stageNode.content;
-      }
-
       // ── Target memory selection ──────────────────────────────────────
       // The chat (and its future messages + extracted data) get stored
       // in a user-scoped memory. Four auth paths:
@@ -392,8 +326,24 @@ export const chatMutations = {
       //   1. App Key session with an active sessionId → use session.memoryId
       //   2. JWT user → find-or-create a per-user memory for (agent, ctx.userId)
       //   3. Legacy fallback → first writable memory attached to the agent
+      /** #4046: eligible cold homes follow live participation, within the stamped start-route limits. */
+      const coldAppWhere = async (client: Context['db'], principal: Context): Promise<Prisma.AppWhereInput | null> => {
+        if (!principal.userId) return null;
+        const participation = await participantAppWhere(client, principal, { includeMemberships: true });
+        return participation ? { AND: [
+          participation,
+          appInstallationWhere(resolvedAgentId),
+          { OR: [{ ownerUserId: null }, { ownerUser: { deletedAt: null } }] },
+          // Owner-only user Apps remain outside this start route (Vera #102893).
+          { OR: [{ organizationId: { not: null } }, { members: { some: { userId: principal.userId } } }] },
+        ] } : null;
+      };
+      type StartTarget = { appId: string | null; targetMemoryId: string | null; sharedAppId: string | null; ensureTarget: ((client: Context['db']) => Promise<string>) | null };
+      const selectStartTarget = async (): Promise<StartTarget> => {
       let targetMemoryId: string | null = null;
+      let prospectiveAppId: string | null = null;
       let sharedAppId: string | null = null;
+      let ensureTarget: ((client: Context['db']) => Promise<string>) | null = null;
       if (chatScope === 'shared') {
         // Spec 017 FR-006 + research.md Q-R2: shared chats require a
         // JWT-user AppMember context. Two distinct rejection paths so
@@ -453,28 +403,32 @@ export const chatMutations = {
           );
         }
         sharedAppId = selectedApp.id;
-        // Andi's F1 on #3960: a choice the App does not own is refused HERE, before the first chat provisions the
-        // App-class memory, so a refused start leaves nothing behind. (The lazy per-user branch below judges it the same way before its own create.)
-        if (aiConfigChoice != null) {
-          await normalizeChatAiConfigChoice(ctx.db, selectedApp.id, aiConfigChoice).catch(rethrowAiConfigTyped);
-        }
         // Idempotent: first shared chat under the (App, Agent) pair
         // provisions the app-class memory; subsequent calls reuse it.
         // Keyed per-agent (not per-app) so multi-Agent Apps — the model
         // the 2026-05-12-user-installing-app session settled on — get
         // one shared memory per installed Agent.
-        targetMemoryId = await findOrCreateAppClassMemory({
-          appId: selectedApp.id,
-          appUrn: selectedApp.urn,
-          appName: selectedApp.name,
-          agentId: resolvedAgentId,
-          agentUrn: agent.urn,
-          agentName: agent.name,
-          organizationId: selectedApp.organizationId,
-          ownerUserId: selectedApp.ownerUserId,
-          actingUserId: ctx.userId,
-          db: ctx.db,
+        // #4039 (D8): found with no write (no create, no revive, no adopt); provisioned only once the start is decided.
+        targetMemoryId = await locateAppClassMemory({
+          appId: selectedApp.id, agentId: resolvedAgentId, agentUrn: agent.urn, db: ctx.db,
         });
+        const sharedApp = selectedApp;
+        ensureTarget = async (client) => {
+          const liveApp = await client.app.findUniqueOrThrow({ where: { id: sharedApp.id }, select: { id: true, urn: true, name: true, organizationId: true, ownerUserId: true } });
+          return findOrCreateAppClassMemory({
+            appId: sharedApp.id,
+            appUrn: liveApp.urn,
+            appName: liveApp.name,
+            agentId: resolvedAgentId,
+            agentUrn: agent.urn,
+            agentName: agent.name,
+            organizationId: liveApp.organizationId,
+            ownerUserId: liveApp.ownerUserId,
+            actingUserId: ctx.userId!,
+            db: client,
+            inTransaction: true,
+          });
+        };
       } else if (ctx.appId && ctx.sessionId && !ctx.userId) {
         // #934: PURE App-key shape only — user principals can now carry a
         // session binding too (heartbeat attribution), and a hybrid
@@ -509,55 +463,30 @@ export const chatMutations = {
         if (existing) {
           targetMemoryId = existing.id;
         } else {
-          // Lazily provision a per-user memory for this (agent, user).
-          // 008: personal-class memory requires app_id (chk_memory_class_app_id).
-          // For a JWT-user chat we resolve the App via App.agent_id matching the
-          // chat agent inside the user's accessible orgs. If no matching App
-          // exists, we downgrade to a knowledge-class memory for this chat —
-          // analogous to the migration's R-3 fallback for unattributed personal
-          // memories.
-          if (!agent.organizationId) {
-            throw new GraphQLError('Lazy per-user memory provisioning is not supported for a user-owned Agent yet.', { extensions: { code: 'BAD_USER_INPUT' } });
+          // Resolve the prospective App before any definition read or provisioning (#4046).
+          // App participants use a licensed App-bound personal home. If none
+          // qualifies, only an Agent manager's direct route can provision a
+          // standalone knowledge home; admission below decides that before writes.
+          // #4046 gate amendment: AppMember Apps and org CONTRIBUTOR+ Apps,
+          // using the shared participation predicate. Owner-only user Apps remain
+          // outside this start path (Vera #102893); membership still qualifies.
+          const candidateWhere = await coldAppWhere(ctx.db, ctx);
+          const candidateApps = candidateWhere ? await ctx.db.app.findMany({
+            where: candidateWhere,
+            select: { id: true, organizationId: true, ownerUserId: true },
+            orderBy: { id: 'asc' },
+          }) : [];
+          const licensedAppIds = await activeAppInstallLicenseIdsForAgent(
+            ctx.db, resolvedAgentId, candidateApps.map(app => app.id),
+          );
+          let matchingApp: (typeof candidateApps)[number] | undefined;
+          for (const app of candidateApps) {
+            if (licensedAppIds.has(app.id) && await personalOrgAgentServeAllowed(ctx.db, app, resolvedAgentId, ctx.userId)) {
+              matchingApp = app;
+              break;
+            }
           }
-          const org = await ctx.db.organization.findUniqueOrThrow({
-            where: { id: agent.organizationId }, select: { urn: true },
-          });
-          const opaqueId = generateId();
-          const agentSlug = agentSlugFromUrn(agent.urn);
-          // #697 Stage 3: flat single-atom v2 urn (`<org>:<opaqueId>`). The
-          // per-user `app-user` scope lives in the row columns (class/userId/
-          // userMemoryOfAgentId/appId), not the URN path. Fresh opaque id ⇒ no
-          // collision, stored unaliased.
-          const memoryUrn = await mintMemoryUrnV2(ctx.db, {
-            root: org.urn,
-            desiredSlug: opaqueId,
-            authorRoot: agentSlug,
-          });
 
-          const ownerOrgIds = (
-            await ctx.db.orgMember.findMany({
-              where: { userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
-              select: { organizationId: true },
-            })
-          ).map((m) => m.organizationId);
-
-          const matchingApp =
-            ownerOrgIds.length > 0
-              ? await ctx.db.app.findFirst({
-                  where: {
-                    ...appInstallationWhere(resolvedAgentId),
-                    organizationId: { in: ownerOrgIds },
-                    deletedAt: null,
-                  },
-                  select: { id: true },
-                })
-              : null;
-
-          // Andi's F1 on #3960, the private arm: the memory below would belong to `matchingApp` (else to no App), so a
-          // choice that App does not own is refused before the memory exists. Same refusal as the later common check.
-          if (aiConfigChoice != null) {
-            await normalizeChatAiConfigChoice(ctx.db, matchingApp?.id ?? null, aiConfigChoice).catch(rethrowAiConfigTyped);
-          }
           const memoryClass: 'personal' | 'knowledge' = matchingApp
             ? 'personal'
             : 'knowledge';
@@ -569,27 +498,49 @@ export const chatMutations = {
             ? null
             : 'ORGANIZATION';
 
-          const created = await ctx.db.memory.create({
-            data: {
-              organizationId: agent.organizationId,
-              urn: memoryUrn,
-              name: `${agent.name} — ${ctx.userId}`,
-              // 005-agent-subscription: personal-class memory; userId
-              // owner-pivot is required by the bidirectional CHECK
-              // constraint (class IN (personal,private) ⇔ userId NOT NULL). Note:
-              // organizationId stays at agent.organizationId here for
-              // the legacy JWT-user path; the spec's FR-015 (use
-              // user's personal org) applies to the new App-keyed
-              // AgentSubscription auto-provisioning path.
-              userId: matchingApp ? ctx.userId : null,
-              class: memoryClass,
-              visibility,
-              userMemoryOfAgentId: resolvedAgentId,
-              appId: matchingApp?.id,
-              createdBy: ctx.userId,
-            },
-          });
-          targetMemoryId = created.id;
+          prospectiveAppId = matchingApp?.id ?? null;
+          // #4039/#4046: writes remain deferred until admission and entry selection pass.
+          ensureTarget = async (client) => {
+            if (!agent.organizationId) {
+              throw new GraphQLError('Lazy per-user memory provisioning is not supported for a user-owned Agent yet.', { extensions: { code: 'BAD_USER_INPUT' } });
+            }
+            const org = await client.organization.findUniqueOrThrow({
+              where: { id: agent.organizationId }, select: { urn: true },
+            });
+            const opaqueId = generateId();
+            const agentSlug = agentSlugFromUrn(agent.urn);
+            // #697 Stage 3: flat single-atom v2 urn (`<org>:<opaqueId>`). The
+            // per-user `app-user` scope lives in the row columns (class/userId/
+            // userMemoryOfAgentId/appId), not the URN path. Fresh opaque id ⇒ no
+            // collision, stored unaliased.
+            const memoryUrn = await mintMemoryUrnV2(client, {
+              root: org.urn,
+              desiredSlug: opaqueId,
+              authorRoot: agentSlug,
+            });
+
+            const created = await client.memory.create({
+              data: {
+                organizationId: agent.organizationId,
+                urn: memoryUrn,
+                name: `${agent.name} — ${ctx.userId}`,
+                // 005-agent-subscription: personal-class memory; userId
+                // owner-pivot is required by the bidirectional CHECK
+                // constraint (class IN (personal,private) ⇔ userId NOT NULL). Note:
+                // organizationId stays at agent.organizationId here for
+                // the legacy JWT-user path; the spec's FR-015 (use
+                // user's personal org) applies to the new App-keyed
+                // AgentSubscription auto-provisioning path.
+                userId: matchingApp ? ctx.userId : null,
+                class: memoryClass,
+                visibility,
+                userMemoryOfAgentId: resolvedAgentId,
+                appId: matchingApp?.id,
+                createdBy: ctx.userId,
+              },
+            });
+            return created.id;
+          };
         }
       } else {
         // Legacy: use the agent's first writable attached memory.
@@ -609,131 +560,30 @@ export const chatMutations = {
         // #3292: an item never grants a userless principal, including an AppRun, a chat target (cor:dmo:050:09).
         targetMemoryId = !ctx.userId ? null : writable.find((m) => linkWriteTargetAdmits(tenant, m.memory, m.role))?.memoryId ?? null;
       }
-
-      // #3301 (refs #2895, Vera's ruling option a; cor:cht:010:02): an Agent's system memory is the Agent's
-      // own definition, never a chat's target, on EVERY branch (session, shared, user, legacy item). One
-      // check after selection covers them all, so a branch added later is covered too. Refused through the
-      // same null as any unreadable target, so the answer discloses nothing. It sits BEFORE the chat write
-      // and, in the user branch, a found system row means nothing is provisioned.
-      if (targetMemoryId && await ctx.db.agent.findFirst({ where: { systemMemoryId: targetMemoryId }, select: { id: true } })) {
-        targetMemoryId = null;
-      }
-
-      if (!targetMemoryId) {
-        throw new Error('No target memory available for this chat');
-      }
-
-      // Compile the prompt with Mustache against the target memory's data.
-      //
-      // Spec 017 D5: shared chats keep their allowedReadSet filter (no
-      // personal memories); private chats retain the caller's read filter.
-      // #1835 intersects either filter with targetMemoryId, so bare refs stay
-      // in the holding memory without weakening the chat's authority gate.
-      // #2047 (S10): the boot prompt is resolved first, so an unserveable one refuses before any chat exists.
-      const chatAppId = (await ctx.db.memory.findUnique({ where: { id: targetMemoryId }, select: { appId: true } }))?.appId ?? null;
-      // #3957: judged here, before any chat, node or subscription write; the same refusal for every id the App does not own.
-      const startAiConfigChoice = aiConfigChoice == null
-        ? null
-        : await normalizeChatAiConfigChoice(ctx.db, chatAppId, aiConfigChoice).catch(rethrowAiConfigTyped);
-      const chatServed = await serveChatPrompt(ctx.db, agent, chatAppId, reportedModel, ctx);
-      let systemMessage = promptContent;
-      if (promptContent.includes('{{')) {
-        const access =
-          chatScope === 'shared'
-            ? chatScopeAccessFilter(
-                {
-                  scope: 'shared',
-                  memoryId: targetMemoryId,
-                  appId: sharedAppId,
-                  authorUserId: ctx.userId ?? effectiveUserId,
-                  agentId: resolvedAgentId,
-                },
-                {
-                  knowledgeMemoryIds: await sharedChatKnowledgeMemoryIds(
-                    ctx.db, resolvedAgentId, sharedAppId!, ctx.userId!,
-                  ),
-                  systemMemoryId,
-                  appClassMemoryId: targetMemoryId, // for shared, chat.memoryId IS the app-class memory
-                },
-              )
-            : await memoryAccessFilter(ctx);
-        // #910: the first prompt reads the starter's own extracted values only.
-        // #40: a served resolved read, so it counts toward the request's aggregate like any other.
-        systemMessage = chargeRequestServed(ctx, promptContent, await compileTemplate(promptContent, null, targetMemoryId, ctx.db, access, ctx.userId ?? null));
-      }
-
-      // Build tool schema from hierarchical extraction spec
-      // (agent-level config node + conversation-level + stage-level)
-      const tools = await buildRespondToolSchema(ctx.db, systemMemoryId, convName, stageData);
-
-      // Create chat node in the target memory. The loc needs a unique
-      // suffix since two chats started in the same minute by the same user
-      // on the same conversation would otherwise collide on (loc, memoryId).
-      // Use the last 8 chars of a UUIDv7 (the random portion — the first
-      // bytes are a timestamp and collide for calls in the same second).
-      //
-      // Sanitize `convName` to `[a-zA-Z0-9-]` before embedding in the
-      // loc: ':' is the URN structural delimiter, and `myChats` /
-      // chat_scope_backfill use `loc NOT LIKE '%:messages%'` to
-      // distinguish chat-root nodes from message rows. A user-supplied
-      // `conversationName` containing `:messages` would slip out of
-      // both filters.
-      const safeConvName = convName.replace(/[^a-zA-Z0-9-]/g, '-');
-      const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
-      const shortId = generateId().slice(-8);
-      const chatName = `${ts}-${shortId}-${safeConvName}`;
-      const chatLoc = `chats:${chatName}`;
-
-      // Ensure the chats parent exists
-      try {
-        await ctx.db.node.upsert({
-          where: { loc_memoryId: { loc: 'chats', memoryId: targetMemoryId } },
-          create: {
-            id: generateId(), memoryId: targetMemoryId, loc: 'chats',
-            name: 'chats', nodeType: 'record',
-          },
-          update: {},
-        });
-      } catch (err) {
-        // #2476: only the cold-path race loss means the parent exists.
-        if (!isNodeLocUniqueViolation(err)) throw err;
-      }
-
-      // Look up the conversation's goal for the initial goal stack entry
-      const convGoals = (convData.goalDescriptions as string[]) ?? [];
-      const initialGoal = convGoals[0] ?? `${convName} conversation`;
-
-      // Create the chat node with initial goal stack and route history.
-      // Spec 017: data.scope carries the chosen tier (FR-001/FR-002,
-      // immutable post-creation). The target-memory selection above
-      // routed the chat into the matching memory class (personal for
-      // private, app for shared); data.scope is the denormalization
-      // that lets chat-list endpoints surface the tier without joining
-      // Memory.class per row (data-model.md §2).
-      const initialChatData: Record<string, unknown> = {
-        ...(startAiConfigChoice ? { aiConfigChoice: startAiConfigChoice } : {}),
-        scope: chatScope,
-        conversationName: convName,
-        stageName: firstStage,
-        userId: effectiveUserId,
-        startedWithRevision: publishedLoc ?? null,
-        createdAt: new Date().toISOString(),
-        goalStack: [{
-          description: initialGoal,
-          createdBy: 'USER',
-          createdAt: new Date().toISOString(),
-          conversationUrn: `conversations:${convName}`,
-          nodeUrn: `conversations:${convName}:${firstStage}`,
-          status: 'ACTIVE',
-        }],
-        routeHistory: [{
-          conversationUrn: `conversations:${convName}`,
-          nodeUrn: `conversations:${convName}:${firstStage}`,
-          action: 'ENTER',
-          trigger: { type: 'CHAT_START', content: convName },
-          timestamp: new Date().toISOString(),
-        }],
+      const homeAppId = targetMemoryId
+        ? (await ctx.db.memory.findUnique({ where: { id: targetMemoryId }, select: { appId: true } }))?.appId ?? null
+        : null;
+      // A shared start belongs to the selected App, even if its located row moves concurrently.
+      const appId = sharedAppId ?? homeAppId ?? prospectiveAppId;
+      return { appId, targetMemoryId, sharedAppId, ensureTarget };
       };
+      // #4046 (cor:acl:010:01): a start's definition reads belong to its selected
+      // home's App, even before that home is provisioned. Managers have no App
+      // exemption; their direct route is available only when the home has no App.
+      const target = await selectStartTarget();
+      // #3301: an Agent's own system row is never a home, even on a corrupt/session fixture.
+      // Keep its existing no-target answer before any definition read or route-specific refusal.
+      if (target.targetMemoryId && await ctx.db.agent.findFirst({ where: { systemMemoryId: target.targetMemoryId }, select: { id: true } })) {
+        target.targetMemoryId = null;
+      }
+      if (!target.targetMemoryId && !target.ensureTarget) throw new Error('No target memory available for this chat');
+      if (target.appId) {
+        if (!await chatHomeAgentIfLicensed(ctx.db, { appId: target.appId }, agent)) {
+          throw new AgentNotFoundError(agentId);
+        }
+      } else if (!await canManageAgentSystemMemory(ctx.db, ctx, systemMemoryId)) {
+        throw new AgentNotFoundError(agentId);
+      }
 
       // #664/#752: the chat node and its messages parent live under the `chats`
       // subtree — a concurrent non-recursive delete of `chats` (or the chat)
@@ -752,14 +602,22 @@ export const chatMutations = {
       // the caller unanchored. After the gate re-runs inside the transaction,
       // every carrier App (and its owner) must already be anchored; if not, the
       // attempt aborts before any write and retries with fresh anchors.
-      let chatStarted = false;
-      for (let attempt = 0; attempt < 3 && !chatStarted; attempt++) {
-        const chatAnchors = await chatAuthorityAnchors(
+      let startedResult: { chatId: string; systemMessage: string; tools: Awaited<ReturnType<typeof buildRespondToolSchema>>; conversationName: string; stageName: string } | null = null;
+      for (let attempt = 0; attempt < 3 && !startedResult; attempt++) {
+        const chatAnchors = [...await chatAuthorityAnchors(
           ctx, gateRow, effectiveUserId !== 'anonymous' ? effectiveUserId : null,
-        );
+        )];
+        if (target.targetMemoryId) chatAnchors.push({ kind: 'memory', id: target.targetMemoryId });
+        // The selected home is authority even when the caller is also an Agent manager.
+        if (target.appId) {
+          const app = await ctx.db.app.findUnique({ where: { id: target.appId }, select: { organizationId: true, ownerUserId: true } });
+          chatAnchors.push({ kind: 'app', id: target.appId });
+          if (app?.organizationId) chatAnchors.push({ kind: 'org', id: app.organizationId });
+          if (app?.ownerUserId) chatAnchors.push({ kind: 'user', id: app.ownerUserId });
+        }
         const anchored = new Set(chatAnchors.map((a) => `${a.kind}:${a.id}`));
         try {
-          await withAuthorizedTx(ctx, chatAnchors, async (txCtx) => {
+          startedResult = await withAuthorizedTx(ctx, chatAnchors, async (txCtx) => {
             const current = await txCtx.db.agent.findUnique({
               where: { id: resolvedAgentId },
               select: { id: true, organizationId: true, ownerUserId: true, visibility: true, deletedAt: true },
@@ -785,13 +643,308 @@ export const chatMutations = {
             ) {
               throw new AgentNotFoundError(agentId);
             }
+            // A home transfer or App-owner change must not admit from an unanchored snapshot.
+            if (target.targetMemoryId) {
+              const home = await txCtx.db.memory.findUnique({ where: { id: target.targetMemoryId }, select: { appId: true } });
+              if (!home || home.appId !== target.appId) throw new AgentNotFoundError(agentId);
+            }
+            if (target.appId) {
+              const app = await txCtx.db.app.findUnique({ where: { id: target.appId }, select: { organizationId: true, ownerUserId: true } });
+              const needed = [`app:${target.appId}`, ...(app?.organizationId ? [`org:${app.organizationId}`] : []), ...(app?.ownerUserId ? [`user:${app.ownerUserId}`] : [])];
+              if (needed.some(key => !anchored.has(key))) throw new ChatAuthorityScopeChanged();
+            }
+            // Selecting a new App home is also a grant: PUBLIC reach cannot
+            // preserve stale App participation after an anchor wait.
+            if (target.sharedAppId && txCtx.userId) {
+              const member = await txCtx.db.appMember.findUnique({ where: { appId_userId: { appId: target.sharedAppId, userId: txCtx.userId } } });
+              if (!member) throw new AgentNotFoundError(agentId);
+            } else if (target.ensureTarget && target.appId && txCtx.userId) {
+              const participation = await coldAppWhere(txCtx.db, txCtx);
+              if (!participation || !await txCtx.db.app.findFirst({ where: { AND: [participation, { id: target.appId }] }, select: { id: true } })) {
+                throw new AgentNotFoundError(agentId);
+              }
+            }
+            // Re-judge the start route after waiting for authority anchors (#4046).
+            if (target.appId
+              ? !await chatHomeAgentIfLicensed(txCtx.db, { appId: target.appId }, current)
+              : !await canManageAgentSystemMemory(txCtx.db, txCtx, systemMemoryId)) {
+              throw new AgentNotFoundError(agentId);
+            }
             if (pureAppKey && !(await appKeySessionMatchesAgent(txCtx, resolvedAgentId))) {
               throw new AgentNotFoundError(agentId);
             }
             if (actingUserId != null && actingUserId !== ctx.userId && !(await appKeyMayActFor(txCtx, actingUserId))) {
               throw new UserNotFoundError(actingUserId);
             }
-          }, async (tx) => {
+          }, async (tx, txCtx) => {
+            const agent = await txCtx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId }, include: { memoryItems: { include: { memory: true } } } });
+            if (agent.systemMemoryId !== systemMemoryId) throw new AgentNotFoundError(agentId);
+            // #3957/#3960: validate the prospective App choice before reads or provisioning.
+            const chatAppId = target.appId;
+            const startAiConfigChoice = aiConfigChoice == null
+              ? null
+              : await normalizeChatAiConfigChoice(txCtx.db, chatAppId, aiConfigChoice).catch(rethrowAiConfigTyped);
+            // Every definition read, provisioning write and chat write is now behind the locked admission.
+            // If the agent has a published revision, the whole script (conversation structure, rules, extraction
+            // spec) is read from that snapshot (pin-to-version, #4034); otherwise from the live nodes.
+            const publishedLoc = (agent as any).publishedRevisionLoc as string | null;
+            const script = await loadChatScript(txCtx.db, systemMemoryId, publishedLoc);
+            const findSystemNode = (loc: string) => script.node(loc);
+            const findSystemNodesByPrefix = (prefix: string) => script.nodesByPrefix(prefix);
+
+            // #4039 (cor:cht:020:02 steps 3-6, B1-B3): does this conversation's entry condition hold for THIS starter?
+            // Facts are the starter's own, from layer A (the pinned script's agent-wide defaults) and layer B (the located home
+            // memory through the per-person view, #910). Nothing here writes. Any refusal is `ENTRY_CONDITION_FAILED`, judged before
+            // the chat, memory, counter or subscription exists; the detail never carries a fact value or a memory identifier.
+            const entryFailed = (reason: EntryStartReason, detail: { conversation?: string; field?: string; operator?: string } = {}) => {
+              const msg = entryStartMessageFor(reason);
+              console.error('[chat-start] entry condition failed', { agentId: resolvedAgentId, reason, detail });
+              return new GraphQLError(msg.text, {
+                extensions: {
+                  code: 'ENTRY_CONDITION_FAILED', reason, messageId: msg.id,
+                  detail: {
+                    ...(detail.conversation !== undefined ? { conversation: detail.conversation } : {}),
+                    ...(detail.field !== undefined ? { field: detail.field } : {}),
+                    ...(detail.operator !== undefined ? { operator: detail.operator } : {}),
+                  },
+                },
+              });
+            };
+            const entryHolds = (locatedMemoryId: string | null) => {
+              let ready: Promise<{ homeMemoryId: string | null; agentBag: Record<string, unknown> }> | null = null;
+              // Once per start: the located memory must be live and readable by the starter, and a key must be cached when it is encrypted.
+              const prepare = () => ready ??= (async () => {
+                let homeMemoryId = locatedMemoryId;
+                // #3301: an Agent's system memory is never a chat's home, so it holds no facts.
+                if (homeMemoryId && await txCtx.db.agent.findFirst({ where: { systemMemoryId: homeMemoryId }, select: { id: true } })) homeMemoryId = null;
+                if (homeMemoryId) {
+                  // The shared read gate decrypts an encrypted memory's record, so with no cached key it throws SESSION_EXPIRED:
+                  // that is B1's refusal (the home memory is the starter's own), never a bare internal error.
+                  const readable = await loadReadableMemoryRecord(txCtx, homeMemoryId).catch((e: unknown) => {
+                    if (e instanceof Error && e.message.startsWith('SESSION_EXPIRED')) throw entryFailed('MEMORY_ENCRYPTED_NO_KEY');
+                    throw e;
+                  });
+                  if (!readable) throw entryFailed('MEMORY_UNREADABLE');
+                  const row = await txCtx.db.memory.findUnique({ where: { id: homeMemoryId }, select: { isEncrypted: true } });
+                  if (row?.isEncrypted && !sessionKeyCache.getByMemoryId(homeMemoryId)) throw entryFailed('MEMORY_ENCRYPTED_NO_KEY');
+                }
+                return { homeMemoryId, agentBag: { config: await script.agentConfig() } as Record<string, unknown> };
+              })();
+              const holds = async (conv: { loc: string; data?: unknown }): Promise<boolean> => {
+                const { homeMemoryId, agentBag } = await prepare();
+                const conversation = conv.loc.split(':')[1];
+                const condition = (conv.data as Record<string, unknown> | null | undefined)?.entryCondition;
+                // B4: re-validate what a writer outside the save check may have stored, so a `chat.*` condition can never evaluate.
+                const valid = validateEntryCondition(condition);
+                if (!valid.ok) throw entryFailed(valid.error.code, { conversation, ...valid.error.detail });
+                const personId = txCtx.userId ?? null; // the same person the turn's conditions read (#910)
+                const layers: MemoryLayerHandle[] = [await script.conditionLayerA('entry-memory', conv.loc, personId)];
+                if (homeMemoryId && (homeMemoryId !== systemMemoryId || script.pinned)) {
+                  layers.push(await buildPrismaMemoryLayer(txCtx.db, 'user-memory', homeMemoryId, conv.loc, personId));
+                }
+                const result = await evaluateEdgeCondition({
+                  condition,
+                  edge: { id: conv.loc, sourceNodeUrn: conv.loc },
+                  memoryLayers: layers,
+                  agent: agentBag,
+                });
+                if (!result.ok) {
+                  throw entryFailed(result.error.code, { conversation, field: result.error.detail.field, operator: result.error.detail.operator });
+                }
+                return result.fired;
+              };
+              return { prepare, holds };
+            };
+
+            // ── Conversation selection ───────────────────────────────────────
+            let convName: string;
+            if (conversationName) {
+              convName = conversationName;
+            } else {
+              // #3405 (cor:cht:020:01 step 1, ruling 0127): ordinary conversations first, then setup, then fallback.
+              // #4039 (cor:cht:020:02): in the author's order (`Node.seq`, nulls last, ties by loc), the first whose
+              // entry condition holds. Same rule on the live and the published-snapshot script.
+              const startNodes = await findSystemNodesByPrefix('conversations:');
+              let chosen: (typeof startNodes)[number] | null;
+              if (topLevelConversations(startNodes).some((n) => isOrdinaryConversation(n) && hasEntryCondition(n))) {
+                // D8: locate the home memory (a read, nothing written), evaluate, and provision only after the start is decided.
+                // B1: eager. Whether the home memory is usable is decided before any condition is read, so an encrypted
+                // memory with no key refuses even when the first conversation in order has no condition (cor:cht:020:02 edge case).
+                const entry = entryHolds(target.targetMemoryId);
+                await entry.prepare();
+                chosen = await pickEntryConversation(startNodes, entry.holds);
+              } else {
+                chosen = pickUnnamedStartConversation(startNodes);
+              }
+              if (!chosen) {
+                throw new ChatScopeError('AGENT_HAS_NO_CONVERSATIONS', 'Agent has no conversations configured.');
+              }
+              convName = chosen.loc.split(':')[1];
+            }
+
+            const convNode = await findSystemNode(`conversations:${convName}`);
+            if (!convNode) {
+              throw new ChatScopeError(
+                'CONVERSATION_NOT_FOUND',
+                `Conversation "${convName}" not found in agent's system memory.`,
+              );
+            }
+
+            const convData = (convNode.data as Record<string, unknown>) ?? {};
+            const stageOrder = (convData.stageOrder as string[]) ?? [];
+            const firstStage = stageOrder[0];
+            if (!firstStage) {
+              throw new ChatScopeError('CONVERSATION_HAS_NO_STAGES', `Conversation "${convName}" has no stages.`);
+            }
+
+            // Load the first stage
+            const stageNode = await findSystemNode(`conversations:${convName}:${firstStage}`);
+            const stageData = (stageNode?.data as Record<string, unknown>) ?? {};
+
+            // Load the prompt
+            const promptRef = stageData.promptRef as string | undefined;
+            let promptContent = '';
+            if (promptRef) {
+              const promptNode = await findSystemNode(promptRef);
+              promptContent = promptNode?.content ?? '';
+            } else if (stageNode?.content) {
+              promptContent = stageNode.content;
+            }
+
+            let targetMemoryId = target.targetMemoryId;
+            const sharedAppId = target.sharedAppId;
+            // #2047: an unserveable boot prompt refuses before provisioning as well as chat writes.
+            const chatServed = await serveChatPrompt(txCtx.db, agent, chatAppId, reportedModel, txCtx);
+            if (target.ensureTarget) targetMemoryId = await target.ensureTarget(txCtx.db);
+
+            // #3301 (refs #2895, Vera's ruling option a; cor:cht:010:02): an Agent's system memory is the Agent's
+            // own definition, never a chat's target, on EVERY branch (session, shared, user, legacy item). One
+            // check after selection covers them all, so a branch added later is covered too. Refused through the
+            // same null as any unreadable target, so the answer discloses nothing. It sits BEFORE the chat write
+            // and, in the user branch, a found system row means nothing is provisioned.
+            if (targetMemoryId && await txCtx.db.agent.findFirst({ where: { systemMemoryId: targetMemoryId }, select: { id: true } })) {
+              targetMemoryId = null;
+            }
+
+            if (!targetMemoryId) {
+              throw new Error('No target memory available for this chat');
+            }
+
+            // Compile the prompt with Mustache against the target memory's data.
+            //
+            // Spec 017 D5: shared chats keep their allowedReadSet filter (no
+            // personal memories); private chats retain the caller's read filter.
+            // #1835 intersects either filter with targetMemoryId, so bare refs stay
+            // in the holding memory without weakening the chat's authority gate.
+            const actualHome = await txCtx.db.memory.findUnique({ where: { id: targetMemoryId }, select: { appId: true } });
+            if (!actualHome || actualHome.appId !== chatAppId) throw new AgentNotFoundError(agentId);
+            let systemMessage = promptContent;
+            if (promptContent.includes('{{')) {
+              const access =
+                chatScope === 'shared'
+                  ? chatScopeAccessFilter(
+                      {
+                        scope: 'shared',
+                        memoryId: targetMemoryId,
+                        appId: sharedAppId,
+                        authorUserId: txCtx.userId ?? effectiveUserId,
+                        agentId: resolvedAgentId,
+                      },
+                      {
+                        knowledgeMemoryIds: await sharedChatKnowledgeMemoryIds(
+                          txCtx.db, resolvedAgentId, sharedAppId!, txCtx.userId!,
+                        ),
+                        systemMemoryId,
+                        appClassMemoryId: targetMemoryId, // for shared, chat.memoryId IS the app-class memory
+                      },
+                    )
+                  : await memoryAccessFilter(txCtx);
+              // #910: the first prompt reads the starter's own extracted values only.
+              // #40: a served resolved read, so it counts toward the request's aggregate like any other.
+              // Authorization/render reads use txCtx; the served-byte aggregate belongs to the original request.
+              systemMessage = chargeRequestServed(ctx, promptContent, await compileTemplate(promptContent, null, targetMemoryId, txCtx.db, access, txCtx.userId ?? null));
+            }
+
+            // Build tool schema from hierarchical extraction spec
+            // (agent-level config node + conversation-level + stage-level)
+            const tools = await buildRespondToolSchema(script, convName, stageData);
+
+            // Create chat node in the target memory. The loc needs a unique
+            // suffix since two chats started in the same minute by the same user
+            // on the same conversation would otherwise collide on (loc, memoryId).
+            // Use the last 8 chars of a UUIDv7 (the random portion — the first
+            // bytes are a timestamp and collide for calls in the same second).
+            //
+            // Sanitize `convName` to `[a-zA-Z0-9-]` before embedding in the
+            // loc: ':' is the URN structural delimiter, and `myChats` /
+            // chat_scope_backfill use `loc NOT LIKE '%:messages%'` to
+            // distinguish chat-root nodes from message rows. A user-supplied
+            // `conversationName` containing `:messages` would slip out of
+            // both filters.
+            const safeConvName = convName.replace(/[^a-zA-Z0-9-]/g, '-');
+            const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
+            const shortId = generateId().slice(-8);
+            const chatName = `${ts}-${shortId}-${safeConvName}`;
+            const chatLoc = `chats:${chatName}`;
+
+            // Parent creation belongs to this transaction too; ancestor locks precede row writes.
+            await lockAncestorsForCreateMany(tx, targetMemoryId, [chatLoc, `${chatLoc}:messages`]);
+            await tx.$executeRawUnsafe('SAVEPOINT start_chat_parent');
+            try {
+              await txCtx.db.node.upsert({
+                where: { loc_memoryId: { loc: 'chats', memoryId: targetMemoryId } },
+                create: {
+                  id: generateId(), memoryId: targetMemoryId, loc: 'chats',
+                  name: 'chats', nodeType: 'record',
+                },
+                update: {},
+              });
+              await tx.$executeRawUnsafe('RELEASE SAVEPOINT start_chat_parent');
+            } catch (err) {
+              try {
+                await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT start_chat_parent');
+                await tx.$executeRawUnsafe('RELEASE SAVEPOINT start_chat_parent');
+              } catch { throw err; } // Preserve the deciding error if the connection died.
+              // #2476: only the cold-path race loss means the parent exists.
+              if (!isNodeLocUniqueViolation(err)) throw err;
+            }
+
+            // Look up the conversation's goal for the initial goal stack entry
+            const convGoals = (convData.goalDescriptions as string[]) ?? [];
+            const initialGoal = convGoals[0] ?? `${convName} conversation`;
+
+            // Create the chat node with initial goal stack and route history.
+            // Spec 017: data.scope carries the chosen tier (FR-001/FR-002,
+            // immutable post-creation). The target-memory selection above
+            // routed the chat into the matching memory class (personal for
+            // private, app for shared); data.scope is the denormalization
+            // that lets chat-list endpoints surface the tier without joining
+            // Memory.class per row (data-model.md §2).
+            const initialChatData: Record<string, unknown> = {
+              ...(startAiConfigChoice ? { aiConfigChoice: startAiConfigChoice } : {}),
+              scope: chatScope,
+              conversationName: convName,
+              stageName: firstStage,
+              userId: effectiveUserId,
+              startedWithRevision: publishedLoc ?? null,
+              createdAt: new Date().toISOString(),
+              goalStack: [{
+                description: initialGoal,
+                createdBy: 'USER',
+                createdAt: new Date().toISOString(),
+                conversationUrn: `conversations:${convName}`,
+                nodeUrn: `conversations:${convName}:${firstStage}`,
+                status: 'ACTIVE',
+              }],
+              routeHistory: [{
+                conversationUrn: `conversations:${convName}`,
+                nodeUrn: `conversations:${convName}:${firstStage}`,
+                action: 'ENTER',
+                trigger: { type: 'CHAT_START', content: convName },
+                timestamp: new Date().toISOString(),
+              }],
+            };
+
             // 005-agent-subscription FR-002: auto-provision an AgentSubscription
             // on the first user-attributed contact for (user, agent). Idempotent.
             // Skip for the "anonymous" sentinel — there is no User row.
@@ -816,7 +969,6 @@ export const chatMutations = {
             for (const key of ENGINE_KEYS) delete initialData[key];
             const storedRoot = encryptNodeFields({ data: initialData }, stateInfo);
             const storedState = encryptNodeFields({ data: initialState }, stateInfo);
-            await lockAncestorsForCreateMany(tx, targetMemoryId, [chatLoc, `${chatLoc}:messages`]);
             const chatNodeId = generateId();
             startedNodes.push({ id: chatNodeId, loc: chatLoc, memoryId: targetMemoryId });
             await tx.node.create({
@@ -830,7 +982,7 @@ export const chatMutations = {
                 // what #915's audit expects to find. It stays PROVENANCE — the
                 // chat's creator is never an authorization gate (cor:acl:030:01),
                 // because every member of the host may post here.
-                createdBy: ctx.userId ?? null,
+                createdBy: txCtx.userId ?? null,
               },
             });
             await tx.chatRootCounter.create({data:{chatRootNodeId:chatNodeId}});
@@ -848,26 +1000,24 @@ export const chatMutations = {
               data: {
                 id: messagesNodeId, memoryId: targetMemoryId, loc: `${chatLoc}:messages`,
                 name: 'messages', nodeType: 'record',
-                createdBy: ctx.userId ?? null,
+                createdBy: txCtx.userId ?? null,
               },
             });
+            return { chatId: chatLoc, systemMessage: chatServed.text + '\n\n' + systemMessage, tools, conversationName: convName, stageName: firstStage };
+
           });
-          chatStarted = true;
         } catch (error) {
           if (error instanceof ChatAuthorityScopeChanged) continue;
           throw error;
         }
       }
-      if (!chatStarted) throw new Error('The Agent\'s access changed repeatedly while starting the chat; retry.');
+      if (!startedResult) throw new Error('The Agent\'s access changed repeatedly while starting the chat; retry.');
 
       // #1061 — starting a chat creates two real nodes (the chat record and its
       // messages parent), so it is two writes.
       recordNodeUsage(ctx.db, 'write', startedNodes, ctx);
 
-      // The served boot prompt leads the system message (#2047).
-      systemMessage = chatServed.text + '\n\n' + systemMessage;
-
-      return { chatId: chatLoc, systemMessage, tools, conversationName: convName, stageName: firstStage };
+      return startedResult;
     },
 
     sendChatMessage: async (
@@ -939,43 +1089,22 @@ export const chatMutations = {
       const sendAiConfigChoice = aiConfigChoice == null
         ? null
         : await normalizeChatAiConfigChoice(ctx.db, memory.appId ?? null, aiConfigChoice).catch(rethrowAiConfigTyped);
-      let agent = null;
-      if (memory.sharedMemoryOfAgentId || memory.userMemoryOfAgentId) {
-        agent = await ctx.db.agent.findUnique({
-          where: { id: memory.sharedMemoryOfAgentId ?? memory.userMemoryOfAgentId! },
-        });
-      } else {
-        const legacyAgents = await ctx.db.agent.findMany({
-          where: { deletedAt: null, memoryItems: { some: { memoryId: chatNode.memoryId } } },
-        });
-        agent = legacyAgents.find((a) => (a as any).systemMemoryId) ?? null;
-      }
-      // Uninstall leaves the App's shared chat memory in place. Its historical
-      // Agent pointer is not a live grant: after uninstall, participants may
-      // still post to the chat, but its old system prompt and linked knowledge
-      // must not re-enter template retrieval.
-      if (memory.class === 'app' && agent) {
-        const installed = memory.appId && await isAgentInstalledAndLicensed(ctx.db, memory.appId, agent.id);
-        if (!installed) agent = null;
-      }
+      // #4076: one shared lookup (resolve, deleted = none, licence). Personal/legacy turns already refused a
+      // deleted Agent through the serve gate before any write (#3654); keep that refusal. App-class chats retain their empty result.
+      const { agent, deletedAgentId } = await resolveChatHomeAgent(ctx.db, memory);
+      if (memory.class !== 'app' && deletedAgentId) throw new AgentNotFoundError(deletedAgentId);
+      // #4070: an App-less home the caller can no longer reach is refused here, before the pinned revision is read.
+      await refuseUnreachableChatHomeAgent(ctx.db, memory, agent, ctx);
       const systemMemoryId = agent ? (agent as any).systemMemoryId as string : null;
 
       // Pin to version: if the chat was started with a published revision,
       // read from that snapshot so mid-conversation publishes don't change
       // the prompts/stages under the user.
       const startedWithRevision = chatData.startedWithRevision as string | null;
-      const snapshotLookup = systemMemoryId
-        ? await loadPublishedSnapshot(ctx.db, systemMemoryId, startedWithRevision)
-        : null;
+      const script = systemMemoryId ? await loadChatScript(ctx.db, systemMemoryId, startedWithRevision) : null;
 
-      async function findSystemNode(loc: string): Promise<SnapshotNode | null> {
-        if (snapshotLookup) return snapshotLookup(loc);
-        if (!systemMemoryId) return null;
-        const n = await ctx.db.node.findFirst({
-          where: { memoryId: systemMemoryId, loc, deletedAt: null },
-          select: { loc: true, name: true, nodeType: true, description: true, content: true, data: true },
-        });
-        return n as SnapshotNode | null;
+      async function findSystemNode(loc: string) {
+        return script ? script.node(loc) : null;
       }
 
       // #3654: choose the fallback re-route target BEFORE any write, so the gate below sees the stage this turn will serve.
@@ -988,20 +1117,7 @@ export const chatMutations = {
         const currentConvData = (currentConv?.data as Record<string, unknown>) ?? {};
         if (currentConvData.isFallback === true) {
           // Scan all conversations for a goal match
-          const allConvNodes = await (async () => {
-            if (snapshotLookup) {
-              const revNode = await ctx.db.node.findFirst({
-                where: { memoryId: systemMemoryId, loc: startedWithRevision!, deletedAt: null },
-                select: { data: true },
-              });
-              return ((revNode?.data as any)?.snapshot?.nodes as SnapshotNode[] ?? []);
-            }
-            const nodes = await ctx.db.node.findMany({
-              where: { memoryId: systemMemoryId, loc: { startsWith: 'conversations:' }, deletedAt: null },
-              select: { loc: true, name: true, data: true, nodeType: true, description: true, content: true },
-            });
-            return nodes as SnapshotNode[];
-          })().then((nodes) => topLevelConversations(nodes));
+          const allConvNodes = topLevelConversations(await script!.nodesByPrefix('conversations:'));
           // #3405: both scans below walk top-level conversations in code-unit `loc` order
           // (cor:cht:030:02 step 3), so the first match and the default are deterministic.
 
@@ -1258,7 +1374,7 @@ export const chatMutations = {
         }
 
         // Build tools from hierarchical extraction spec
-        tools = await buildRespondToolSchema(ctx.db, systemMemoryId, activeConvName, stageData);
+        tools = await buildRespondToolSchema(script!, activeConvName, stageData);
       }
 
       // Build message history — the most recent MODEL_HISTORY_LIMIT messages.
@@ -1428,9 +1544,17 @@ export const chatMutations = {
 
       const chatRef = { id: chatNode.id, memoryId: chatNode.memoryId, loc: chatNode.loc };
 
-      const message = (toolResponse.message as string) ?? '';
+      // #3992 (cor:cht:020:01 step 2): `message` is a required JSON string, the contract the `respond` tool schema
+      // publishes. Missing, null or non-string is refused BEFORE any write (no turn, merge, routing or history).
+      // The text names the field and type only: never the value or model text. An empty or whitespace-only string
+      // is a valid string and is recorded as sent. The other fields below keep their casts (separate issue).
+      if (typeof toolResponse.message !== 'string') {
+        throw new GraphQLError('processChatResponse: toolResponse.message is required and must be a string.', {
+          extensions: { code: 'BAD_USER_INPUT', field: 'message', expectedType: 'string' },
+        });
+      }
+      const message = toolResponse.message;
       const data = toolResponse.data as Record<string, unknown> | undefined;
-      const nextStage = toolResponse.next_stage as string | undefined;
       const onTrack = toolResponse.onTrack as boolean | undefined;
       const offTrackReason = toolResponse.offTrackReason as string | undefined;
 
@@ -1505,6 +1629,7 @@ export const chatMutations = {
         declaredMemoryWide
           ? mergeTurnExtraction(stored, extracted, declaredMemoryWide, ctx.userId ?? null)
           : { ...(stored ?? {}), ...extracted };
+      let extractionPersisted = false;
       if (data && hasExtraction) recordNodeWrite(ctx.db, await inTx(async (tx) => {
         // #910: two members extract into the same memory from different chats,
         // under different chat locks. Serialize the read-modify-write on the
@@ -1573,228 +1698,88 @@ export const chatMutations = {
           return { id: dataNodeId, loc: 'data', memoryId: chatNode.memoryId };
         }
       // #3514: the assistant message and counter are already committed above; a refused extraction says so.
-      }).catch(reportPartialTurn), ctx);
+      }).catch(reportPartialTurn).then(ref => {
+        extractionPersisted = ref !== null;
+        return ref;
+      }), ctx);
 
-      // Handle stage transition + edge evaluation
-      let stageTransitioned = false;
-      let newStageName: string | null = null;
-      let conversationHandoff: string | null = null;
-      // #919: what this turn CHANGES about the chat root, recorded as edits and
-      // replayed at the end against a freshly read blob. Edge evaluation below
-      // is unbounded in wall-clock terms, and the root is stored whole — so
-      // writing back a snapshot taken at the top of the turn would roll back
-      // any send that committed while we were evaluating, `messageCount`
-      // included. Edits run in the order they were pushed.
-      const chatRootEdits: Array<(chatData: Record<string, unknown>) => void> = [];
-
-      // 1. Explicit stage transition from the LLM
-      if (nextStage && nextStage !== chatData.stageName) {
-        stageTransitioned = true;
-        newStageName = nextStage;
-        chatRootEdits.push((d) => {
-          d.stageName = nextStage;
-          appendRouteEntry(d, {
-            nodeUrn: `conversations:${chatData.conversationName}:${nextStage}`,
-            conversationUrn: `conversations:${chatData.conversationName}`,
-            action: 'ENTER',
-            trigger: { type: 'STAGE_TRANSITION', content: `next_stage: ${nextStage}` },
-          });
-        });
+      // #4036 D1/D6: gather licensed, pinned inputs, decide outside the lock, then apply one CAS batch.
+      const origin = { conversationName: chatData.conversationName as string | undefined, stageName: chatData.stageName as string | undefined };
+      const currentStageLoc = `conversations:${origin.conversationName}:${origin.stageName}`;
+      let script: ChatScript | undefined;
+      let rules: ScriptRule[] = [];
+      const memoryLayers: MemoryLayerHandle[] = [];
+      let agentBag: Record<string, unknown> = {};
+      let sysMemUrn = '';
+      // #4076/#4043: share main's resolve/deleted/licence lookup BEFORE any pinned script or stage read. #4070: the response passes
+      // the request principal so an App-less home re-checks the caller's CURRENT reach in the same lookup.
+      const turnMemory = await ctx.db.memory.findUnique({ where: { id: chatNode.memoryId } });
+      const turnAgent = turnMemory ? (await resolveChatHomeAgent(ctx.db, turnMemory, ctx)).agent as { systemMemoryId?: string | null } | null : null;
+      const sysMemId = turnAgent?.systemMemoryId;
+      if (sysMemId) script = await loadChatScript(ctx.db, sysMemId, (chatData.startedWithRevision as string | null) ?? null);
+      const stageOrder = script ? await conversationStageOrder(script, origin.conversationName ?? null) : null;
+      if (stageOrder === null && toolResponse.next_stage && toolResponse.goal_reached !== true) {
+        // #4077: keep main's unreadable-list diagnostic when next_stage is actually judged (the completion flag wins).
+        console.warn(JSON.stringify({
+          event: 'chat_stage_list_unreadable', chatId, conversationName: chatData.conversationName ?? null,
+          note: 'next_stage cannot be checked against the conversation stages; the name is rejected',
+        }));
       }
-
-      // 2. Evaluate on_complete edges when the conversation ends
-      //    (next_stage is null and we're at the last stage)
-      if (!nextStage || nextStage === null) {
-        // Find the agent's system memory to look up edges
-        const memory = await ctx.db.memory.findUnique({ where: { id: chatNode.memoryId } });
-        const agentId = memory?.userMemoryOfAgentId;
-        if (agentId) {
-          const agent = await ctx.db.agent.findUnique({ where: { id: agentId } });
-          const sysMemId = (agent as any)?.systemMemoryId as string | null;
-          if (sysMemId) {
-            // Find the current stage node and look for outgoing edges
-            const currentStageLoc = `conversations:${chatData.conversationName}:${chatData.stageName}`;
-            const stageNode = await ctx.db.node.findFirst({
-              where: { memoryId: sysMemId, loc: currentStageLoc, deletedAt: null },
-              select: { id: true },
-            });
-            if (stageNode) {
-              const edges = await ctx.db.edge.findMany({
-                where: { sourceId: stageNode.id, deletedAt: null },
-                orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }],
-                include: { target: { select: { loc: true, data: true } } },
-              });
-              // Load agent config once for the agent.* scope.
-              const agentConfigNode = await ctx.db.node.findFirst({
-                where: { memoryId: sysMemId, loc: 'config', deletedAt: null },
-                select: { data: true },
-              });
-              const agentBag: Record<string, unknown> = {
-                config: (agentConfigNode?.data as Record<string, unknown> | null) ?? {},
-              };
-              // Resolve the system memory's slug-path URN once so error-side
-              // sourceNodeUrn composition stays canonical (urn:node:<mem>:<loc>)
-              // instead of the legacy urn:memory:<PK>:<loc> form (issue #99).
-              // TODO(#99-followup): this lookup-and-format pattern is now
-              // duplicated with src/mcp/server.ts:nodeUrn(). Extract a shared
-              // composer (likely a small package) per the audit's
-              // recommendation in issue #99.
-              const sysMem = await ctx.db.memory.findUnique({
-                where: { id: sysMemId },
-                select: { urn: true },
-              });
-              const sysMemUrn = sysMem?.urn ?? sysMemId;
-              // Build the memory cascade for this turn:
-              //   Layer A (defaults): agent's system memory — holds
-              //     conversation/stage definitions and any agent-wide
-              //     defaults under `loc: 'data'`. The source node lives
-              //     here, so its parent-chain walk also happens here.
-              //   Layer B (overrides): the user's per-user memory.
-              //     Wins over Layer A on conflict (CSS cascade per spec
-              //     FR-008/FR-009). For single-memory cases where the
-              //     chat memory IS the system memory, we skip the
-              //     duplicate layer.
-              const memoryLayers: MemoryLayerHandle[] = [];
-              // #910: conditions read the turn's own person's values only.
-              const turnPersonId = ctx.userId ?? null;
-              memoryLayers.push(await buildPrismaMemoryLayer(
-                ctx.db, 'edge-memory', sysMemId, currentStageLoc, turnPersonId,
-              ));
-              if (chatNode.memoryId !== sysMemId) {
-                memoryLayers.push(await buildPrismaMemoryLayer(
-                  ctx.db, 'user-memory', chatNode.memoryId, currentStageLoc, turnPersonId,
-                ));
-              }
-              for (const edge of edges) {
-                const edgeData = (edge.data as Record<string, unknown>) ?? {};
-                const timing = edgeData.timing as string ?? 'on_complete';
-                if (timing !== 'on_complete' && timing !== 'always') continue;
-
-                // Evaluate the JSONLogic condition (Edge.condition column).
-                // null = always fires.
-                if (edge.condition !== null && edge.condition !== undefined) {
-                  const evalResult = await evaluateEdgeCondition({
-                    condition: edge.condition,
-                    edge: {
-                      id: edge.id,
-                      sourceNodeUrn: formatUrn('node', `${sysMemUrn}:${currentStageLoc}`),
-                    },
-                    memoryLayers,
-                    chat: {
-                      message_count: messageCount,
-                      conversation_name: chatData.conversationName,
-                      stage: chatData.stageName,
-                    },
-                    agent: agentBag,
-                    messageData: data ?? undefined,
-                  });
-                  if (!evalResult.ok) {
-                    // FR-014/FR-015/FR-016: fail loud rather than silently
-                    // firing or skipping the edge. Structured log carries
-                    // edge id, field, memory URN, etc.; the user-facing
-                    // message comes from the i18n-ready mapping.
-                    console.error(
-                      `[edge-conditions] evaluation failed`,
-                      {
-                        edgeId: edge.id,
-                        code: evalResult.error.code,
-                        message: evalResult.error.message,
-                        detail: evalResult.error.detail,
-                      },
-                    );
-                    const userMsg = userMessageFor(evalResult.error);
-                    throw new GraphQLError(userMsg.text, {
-                      extensions: {
-                        code: 'EDGE_CONDITION_FAILED',
-                        reason: evalResult.error.code,
-                        messageId: userMsg.id,
-                        detail: evalResult.error.detail,
-                      },
-                    });
-                  }
-                  if (!evalResult.fired) continue;
-                }
-
-                // Edge fires! Check behavior
-                const targetLoc = edge.target?.loc;
-                if (!targetLoc) continue;
-
-                const behavior = edgeData.behavior as string ?? 'transition';
-
-                if (targetLoc.startsWith('conversations:') && targetLoc.split(':').length === 2) {
-                  // Target is a conversation — conversation handoff
-                  const targetConvName = targetLoc.split(':')[1];
-
-                  if (behavior === 'detour') {
-                    // Push current goal, transition to the detour conversation
-                    chatRootEdits.push((d) => {
-                      pushGoal(d, {
-                        description: (edgeData.label as string) ?? `Detour to ${targetConvName}`,
-                        createdBy: 'ASSISTANT',
-                        conversationUrn: targetLoc,
-                      });
-                    });
-                  }
-
-                  // Switch to the target conversation's first stage
-                  const targetConv = await ctx.db.node.findFirst({
-                    where: { memoryId: sysMemId, loc: targetLoc, deletedAt: null },
-                    select: { data: true },
-                  });
-                  const targetConvData = (targetConv?.data as Record<string, unknown>) ?? {};
-                  const targetStages = (targetConvData.stageOrder as string[]) ?? [];
-                  const targetFirstStage = targetStages[0];
-
-                  if (targetFirstStage) {
-                    conversationHandoff = targetConvName;
-                    stageTransitioned = true;
-                    newStageName = targetFirstStage;
-
-                    chatRootEdits.push((d) => {
-                      d.conversationName = targetConvName;
-                      d.stageName = targetFirstStage;
-                      appendRouteEntry(d, {
-                        conversationUrn: targetLoc,
-                        nodeUrn: `${targetLoc}:${targetFirstStage}`,
-                        action: 'ENTER',
-                        edgeUrn: edge.id,
-                        trigger: {
-                          type: behavior === 'detour' ? 'DETOUR_EDGE' : 'TRANSITION_EDGE',
-                          content: (edgeData.label as string) ?? undefined,
-                        },
-                      });
-                    });
-                  }
-                  break; // Only follow one edge
-                }
-              }
-            }
-          }
+      if (script && sysMemId && (!toolResponse.next_stage || toolResponse.goal_reached === true)) {
+        if (await script.node(currentStageLoc)) {
+          rules = await script.outgoingRules(currentStageLoc);
+          agentBag = { config: await script.agentConfig() };
+          sysMemUrn = (await ctx.db.memory.findUnique({ where: { id: sysMemId }, select: { urn: true } }))?.urn ?? sysMemId;
+          const turnPersonId = ctx.userId ?? null;
+          memoryLayers.push(await script.conditionLayerA('edge-memory', currentStageLoc, turnPersonId));
+          if (chatNode.memoryId !== sysMemId || script.pinned) memoryLayers.push(await buildPrismaMemoryLayer(
+            ctx.db, 'user-memory', chatNode.memoryId, currentStageLoc, turnPersonId,
+          ));
         }
       }
-
-      // 3. Track onTrack status
-      if (onTrack === false) {
-        chatRootEdits.push((d) => {
-          d.lastOffTrackReason = offTrackReason ?? 'unspecified';
-          d.lastOffTrackAt = new Date().toISOString();
-        });
+      let fallback: { name: string; stageOrder: string[] } | null = null;
+      if (script && toolResponse.goal_reached === true) {
+        const picked = pickFallbackConversation(await script.nodesByPrefix('conversations:'));
+        const order = (picked?.data as Record<string, unknown> | undefined)?.stageOrder;
+        if (picked && Array.isArray(order)) fallback = { name: picked.loc.split(':')[1], stageOrder: order.filter((s): s is string => typeof s === 'string') };
       }
-
-      // #919: `messageCount` is deliberately absent here — the allocation above
-      // already committed it, and `fresh` carries whatever the latest turn
-      // wrote, which may be higher than the value this turn allocated.
-      await updateChatRootData(ctx.db, chatRef, memEncInfo, (fresh) => {
-        const next = { ...fresh, lastMessageAt: new Date().toISOString() };
-        for (const edit of chatRootEdits) edit(next);
+      const routing = await decideChatRouting({
+        origin, goalStack: getGoalStack(chatData), fallback, nextStage: toolResponse.next_stage, stageOrder, goalReached: toolResponse.goal_reached, rules,
+        node: loc => script ? script.node(loc) : Promise.resolve(null),
+        evaluate: async edge => {
+          if (edge.condition == null) return true;
+          const evaluated = await evaluateEdgeCondition({
+            condition: edge.condition,
+            edge: { id: edge.id, sourceNodeUrn: formatUrn('node', `${sysMemUrn}:${currentStageLoc}`) },
+            memoryLayers, chat: { message_count: messageCount, conversation_name: origin.conversationName, stage: origin.stageName },
+            agent: agentBag, messageData: data ?? undefined,
+          });
+          if (!evaluated.ok) {
+            console.error('[edge-conditions] evaluation failed', { edgeId: edge.id, code: evaluated.error.code, message: evaluated.error.message, detail: evaluated.error.detail });
+            const userMsg = userMessageFor(evaluated.error);
+            throw new GraphQLError(userMsg.text, { extensions: {
+              code: 'EDGE_CONDITION_FAILED', reason: evaluated.error.code, messageId: userMsg.id, detail: evaluated.error.detail,
+              partialTurn: routingRefusedReport(extractionPersisted),
+            } });
+          }
+          return evaluated.fired;
+        },
+      });
+      let routingResult = routing.result;
+      await updateChatRootData(ctx.db, chatRef, memEncInfo, fresh => {
+        const next: Record<string, unknown> = { ...fresh, lastMessageAt: new Date().toISOString() };
+        routingResult = applyChatRoutingDecision(next, routing);
+        // Non-routing bookkeeping survives a stale-origin decision (R3).
+        if (onTrack === false) {
+          next.lastOffTrackReason = offTrackReason ?? 'unspecified';
+          next.lastOffTrackAt = new Date().toISOString();
+        }
         return next;
       }, { inTx });
 
       return {
         displayMessage: message,
-        stageTransitioned,
-        newStageName,
-        conversationHandoff,
+        ...routingResult,
         chatEnded: false,
         onTrack: onTrack ?? true,
         offTrackReason: offTrackReason ?? null,

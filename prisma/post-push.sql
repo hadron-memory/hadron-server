@@ -193,11 +193,7 @@ ALTER TABLE model_groups
 -- D-2026-07-15-006 narrows the #679 secret store to org/user owners (the flat
 -- v2 secret URN carries a single root principal; app-/memory-owned shapes are
 -- superseded). Synced with the 20260716120000 migration + src/test/globalSetup.ts.
-ALTER TABLE secrets
-  DROP CONSTRAINT IF EXISTS chk_secret_owner_type;
-ALTER TABLE secrets
-  ADD CONSTRAINT chk_secret_owner_type
-  CHECK (owner_type IN ('user', 'org'));
+-- (#3997 widened the owner CHECK to user/org/app; it lives in secret-versions-invariants.sql.)
 
 -- ─── spec 047 Phase 2c: user-OR-org ownership ────────────────────────────
 -- App / Agent / Memory are owned by EXACTLY ONE of an organization or a user
@@ -815,6 +811,9 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- marker. One source, shared verbatim with migration 20261013160000_signing_requests.
 \ir signing-invariants.sql
 
+-- #3996 (S1 of #3991): per-App data keys. One source, shared verbatim with migration 20261112150000_secret_app_keys.
+\ir secret-app-keys-invariants.sql
+
 -- #1885: an Agent extends at most one base Agent; no cycles, at most 4 in a
 -- chain. One source, shared verbatim with migration 20261014120000_agent_base
 -- (pinned by src/api/graphql/schema/resolvers.agentBase1885.test.ts).
@@ -883,6 +882,10 @@ CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");
 
 -- #2014: the team-chat post limit's episodes and their worker fence.
 \ir post-limit-invariants.sql
+
+-- #3997 (S2 of #3991): App-owned secrets, versions, events, tombstones. One source, shared verbatim with migration
+-- 20261114120000_app_secret_versions. After worker-reference-invariants.sql: it puts the #1162 fence on its three tables.
+\ir secret-versions-invariants.sql
 
 -- #2479: per-trigger run budget limits.
 \ir trigger-run-budget-invariants.sql

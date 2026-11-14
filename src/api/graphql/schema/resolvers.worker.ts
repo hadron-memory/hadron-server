@@ -1,6 +1,6 @@
 import { endHeldGrants } from '../../../lib/grants/departure.js';
 import { personalOrgAgentServeAllowed } from '../../../lib/auth/personalOrgAgentInstall.js';
-import { requireWorkerReadAccess, locateTeamAgent, forbidden, type AppRow } from '../../../lib/auth/workerRead.js';
+import { requireWorkerReadAccess, locateTeamAgent, forbidden, appNotFound, resolveAppRefConcealed, isAppGateRefusal, type AppRow } from '../../../lib/auth/workerRead.js';
 export { requireWorkerReadAccess, locateTeamAgent, ROLES_BRANCH_PREFIX } from '../../../lib/auth/workerRead.js';
 import { listAppInstallations, resolveAppInstallation, resolveUnfilteredAppInstallation, lockAppInstallation } from '../../../lib/appInstallations.js';
 import { lockStaffingAct } from '../../../lib/auth/staffingAct.js';
@@ -131,6 +131,10 @@ const SLUG_RACE_RETRY_LIMIT = 50;
  * rights. Impersonation sessions are read-only support views — never staff.
  */
 async function requireWorkerStaffAccess(ctx: Context, app: AppRow): Promise<void> {
+  // #3977 (V58): this gate answers FORBIDDEN, so it is only ever reached by a caller who CAN reach the App: every
+  // caller decides reach first with `requireWorkerReadAccess` (the cast target, `admitWorkerStaffAct`, the
+  // in-transaction recheck, and the worker-ref surfaces through `resolveReadableWorkerRef`). Staffing is a subset
+  // of the read audience.
   if (ctx.impersonation) throw forbidden();
   if (!ctx.userId) throw forbidden();
   if (app.ownerUserId !== null) {
@@ -162,9 +166,23 @@ async function admitWorkerStaffAct(
   ctx: Context, scope: AppRow, instruction?: ActInstruction | null, expected?: StaffActAdmission, lock = false,
 ): Promise<StaffActAdmission> {
   const app = await ctx.db.app.findUniqueOrThrow({ where: { id: scope.id } });
-  if (app.deletedAt || app.organizationId !== scope.organizationId || app.ownerUserId !== scope.ownerUserId) throw forbidden();
+  // #3977: reach is decided before any step that differs for an existing App (a deleted App is unreachable).
+  try { await requireWorkerReadAccess(ctx, app); } catch (e) {
+    // See the instructed-act note below: a holder who lost reach is FORBIDDEN as before (#3599).
+    if (instruction && e instanceof GraphQLError && e.extensions?.code === 'APP_NOT_FOUND') throw forbidden();
+    throw e;
+  }
+  if (app.organizationId !== scope.organizationId || app.ownerUserId !== scope.ownerUserId) throw forbidden();
   const admission = await requireInstructedAct(ctx, app.id, instruction,
-    async () => { await requireWorkerStaffAccess(ctx, app); return true; }, readActInstruction, forbidden,
+    async () => {
+      try { await requireWorkerStaffAccess(ctx, app); } catch (e) {
+        // An instructed act is judged on the HOLDER's authority, not as an outsider's probe: a holder who lost reach
+        // since the first admission is refused FORBIDDEN as before (#3599); only a direct caller gets the not-found.
+        if (instruction && e instanceof GraphQLError && e.extensions?.code === 'APP_NOT_FOUND') throw forbidden();
+        throw e;
+      }
+      return true;
+    }, readActInstruction, forbidden,
     { name: 'workers.staff', lock });
   if (expected && !sameActPrincipal(expected, admission)) throw forbidden();
   return admission;
@@ -200,7 +218,16 @@ export async function requireWorkerProfileAccess(ctx: Context, app: AppRow): Pro
       throw forbidden();
     }
   }
-  if (!ctx.userId || isRunPrincipal(ctx)) return requireWorkerReadAccess(ctx, app);
+  if (!ctx.userId || isRunPrincipal(ctx)) {
+    // The profile surface keeps its own FORBIDDEN contract (#3977 leaves the profile-link exception alone; its
+    // callers collapse it into the worker-not-found answer): the participant gate's not-found answer maps back.
+    try {
+      return await requireWorkerReadAccess(ctx, app);
+    } catch (e) {
+      if (e instanceof GraphQLError && e.extensions?.code === 'APP_NOT_FOUND') throw forbidden();
+      throw e;
+    }
+  }
 }
 
 /**
@@ -349,7 +376,7 @@ export async function resolveReadableWorkerRef(
   try {
     await requireWorkerReadAccess(ctx, app);
   } catch (e) {
-    if (!(e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN')) throw e;
+    if (!isAppGateRefusal(e)) throw e;
     throw workerNotFound(workerRef);
   }
   return { worker, app };
@@ -368,7 +395,7 @@ async function resolveProfileWorkerRef(ctx: Context, workerRef: string): Promise
   try {
     await requireWorkerProfileAccess(ctx, app);
   } catch (e) {
-    if (!(e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN')) throw e;
+    if (!isAppGateRefusal(e)) throw e;
     throw workerNotFound(workerRef);
   }
   return worker;
@@ -474,7 +501,7 @@ export async function resolveWorkerBindCandidatesByName(ctx: Context, name: stri
     try {
       await requireWorkerReadAccess(ctx, app);
     } catch (e) {
-      if (!(e instanceof GraphQLError && e.extensions.code === 'FORBIDDEN')) throw e;
+      if (!isAppGateRefusal(e)) throw e;
       continue;
     }
     const id = await resolveWorkerIdByName(ctx.db, app.id, name);
@@ -543,7 +570,7 @@ export async function resolveWorkerIdByNameGated(
     // identical. Deliberately opposite reasoning to the collapse this function
     // exists for: hiding WHY a caller was refused is the point; hiding THAT the
     // database is down never is.
-    if (!(e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN')) throw e;
+    if (!isAppGateRefusal(e)) throw e;
     return null;
   }
   return resolveWorkerIdByName(ctx.db, appId, name);
@@ -835,8 +862,10 @@ async function resolveCastTarget(ctx: Context, args: CastArgs, expectedAgentId?:
   }
 
   // 1. Resolve the App (cor:api:140 — PK or URN) and gate.
-  const { id: appId } = await resolveAppRef(ctx.db, appRef);
+  const { id: appId } = await resolveAppRefConcealed(ctx.db, appRef);
   const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
+  // #3977: can-reach is decided BEFORE the uninstalled refusal, which only an existing App can give.
+  await requireWorkerReadAccess(ctx, app);
   if (app.uninstalledAt) {
     throw new GraphQLError('Cannot cast a worker in an uninstalled App.', {
       extensions: { code: 'APP_UNINSTALLED', appId },
@@ -847,8 +876,7 @@ async function resolveCastTarget(ctx: Context, args: CastArgs, expectedAgentId?:
   if (choice.kind === 'REPORTS_TO') {
     if (!(await managesApp(ctx, app))) throw new GraphQLError('Only whoever manages the App may name a reporting head at cast.', { extensions: { code: 'WORKER_REPORTS_TO_FORBIDDEN' } });
     // Ada36559 supersedes the dropped push-model S5/S7 dependency (#2138r4/#2130).
-    // A future pull-shaped standby activation MUST initialize coverage for existing reports
-    // before removing this guard and admitting new reports atomically under its common bracket.
+    // Standby is withdrawn and not planned (#3606); its stored column was dropped by #3701.
     reportingHeadId = await resolveCastReportingHead(ctx, appId, choice.ref);
     const head = await ctx.db.worker.findUniqueOrThrow({ where: { id: reportingHeadId }, select: { retiredAt: true } });
     if (head.retiredAt) throw new GraphQLError('A worker cannot report to a retired worker.', { extensions: { code: 'WORKER_REPORTS_TO_RETIRED', reportsTo: reportingHeadId } });
@@ -1039,7 +1067,7 @@ export const workerMutations = {
             }
             // The early read preserves refusal ordering; the deciding row is fresh after membership waits.
             const freshApp = await tx.app.findUniqueOrThrow({ where: { id: appId } });
-            if (freshApp.deletedAt) throw forbidden();
+            await requireWorkerReadAccess(txCtx, freshApp);
             if (freshApp.organizationId !== app.organizationId || freshApp.ownerUserId !== app.ownerUserId) throw castTargetChanged();
             await requireWorkerStaffAccess(txCtx, freshApp);
             const freshAgent = await tx.agent.findUniqueOrThrow({ where: { id: agent.id } });
@@ -1985,7 +2013,7 @@ export const workerQueries = {
     }: { appRef: string; includeRetired?: boolean | null; limit?: number | null; offset?: number | null },
     ctx: Context,
   ) => {
-    const { id: appId } = await resolveAppRef(ctx.db, appRef);
+    const { id: appId } = await resolveAppRefConcealed(ctx.db, appRef);
     const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
     await requireWorkerReadAccess(ctx, app);
     const where = {
@@ -2847,7 +2875,7 @@ async function maySeeWorkerProfile(ctx: Context, appId: string): Promise<boolean
         await requireWorkerProfileAccess(ctx, app);
         return true;
       } catch (e) {
-        if (!(e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN')) throw e;
+        if (!isAppGateRefusal(e)) throw e;
         return false;
       }
     })();

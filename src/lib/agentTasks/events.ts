@@ -42,6 +42,8 @@ export const TASK_EVENT_TYPES = [
   'task.properties-changed',
   // #2651 (cor:agt:050:29): a started task handed back by its assignee; the reason code only, never its text.
   'task.handed-back',
+  // #4084 (cor:agt:120:02, V87 Proposed): a task's external id released; the payload names the released id.
+  'task.external-id-released',
 ] as const;
 export type TaskEventType = (typeof TASK_EVENT_TYPES)[number];
 
@@ -70,7 +72,7 @@ export const ASSIGNED_EVENT_TYPES = ['task.assigned', 'task.reassigned', 'assign
 export const ASSIGNEE_CLEARED_EVENT_TYPES = ['task.handed-back'] as const satisfies readonly TaskEventPayload['type'][];
 
 /** Passive history must be excluded from EVERY later-event/activity predicate when a kind is added here. */
-export const PASSIVE_EVENT_TYPES = ['task.warning', 'task.edited', 'task.properties-changed'] as const;
+export const PASSIVE_EVENT_TYPES = ['task.warning', 'task.edited', 'task.properties-changed', 'task.external-id-released'] as const;
 /** #2609: only facts already readable by every team-event reader. Assignee state and future codes are excluded. */
 export const RECORDED_TASK_WARNING_CODES = ['task.create.no-source', 'task.finish.open-children'] as const;
 export type RecordedTaskWarningCode = (typeof RECORDED_TASK_WARNING_CODES)[number];
@@ -120,6 +122,12 @@ export type TaskEventPayload =
   | { type: 'task.cancelled'; fromStatus: 'backlog' | 'pending' | 'started'; openChildCount: number }
   /** #2651: the code only. The optional reason text is on the task row, never here (cor:agt:050:29). */
   | { type: 'task.handed-back'; code: TaskHandBackCode }
+  /**
+   * #4084 (cor:agt:120:02, V87 Proposed): the external id a release cleared. The id is readable to every reader of the
+   * team's events already (it is on the task, under the same read gate, cor:agt:050:21), so naming it discloses nothing
+   * new; the team's reconcile pass needs it, because the task no longer holds it.
+   */
+  | { type: 'task.external-id-released'; externalId: string }
   | { type: 'task.parked' }
   | { type: 'task.ready' }
   | { type: 'assignment.queued' }
@@ -184,6 +192,8 @@ function payloadJson(e: TaskEventPayload): Prisma.InputJsonObject {
     case 'task.handed-back':
       if (!(TASK_HAND_BACK_CODES as readonly string[]).includes(e.code)) throw new Error('Unsupported task hand-back code');
       return { code: e.code };
+    case 'task.external-id-released':
+      return { externalId: e.externalId };
     case 'task.parked':
     case 'task.ready':
     case 'assignment.queued':
@@ -684,7 +694,7 @@ export async function appendCredentialInstructionEvent(
 /** #3323: which S4a door an instructed App-manager act went through (hrn:node:hadronmemory.com:specs:cor:dmo:050:12). */
 export type ManagerAct =
   | 'task.assign' | 'task.reassign' | 'task.cancel' | 'task.park' | 'task.ready' | 'task.update'
-  | 'task.finding-dispose' | 'task.priority' | 'task.blocker-add' | 'task.blocker-remove' | 'task.create'
+  | 'task.finding-dispose' | 'task.priority' | 'task.release-external-id' | 'task.blocker-add' | 'task.blocker-remove' | 'task.create'
   | 'alarm.acknowledge' | 'worker.availability' | 'model-family.availability' | 'app.stall-schedule'
   | 'app.model-group.set' | 'app.model-group.delete' | 'app.properties'
   // #3321 (S4b): the host-operation, stop-signal, ticker, settings, isolation and wake doors.

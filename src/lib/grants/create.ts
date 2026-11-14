@@ -16,11 +16,16 @@
  *
  * VALUES. The action's declared parameters are the whole boundary: exactly the declared keys, each a value
  * `grantTermsBytes` can write (a string, the wildcard where the parameter allows it, or a list of distinct strings), judged
- * by its parameter's declared type (cor:acl:140:01, :02). What that guarantees is a SHAPE, not secrecy: no undeclared key is
- * stored, and the one type today, `node-ref`, admits only an id-shaped token (`NODE_ID_RE`), never free text. An id-shaped
- * token is not checked to name a node, so a caller can still put a secret that happens to fit that shape in a declared
- * parameter; nothing here detects it. A new parameter type brings its own rule (an unknown type is refused) and must say what
- * it admits. A refusal names the term, never the value. (#3829 G, George on #3814.)
+ * by its parameter's declared type (cor:acl:140:01, :02). The type check is a SHAPE: no undeclared key is stored, and the one
+ * type today, `node-ref`, admits only an id-shaped token (`NODE_ID_RE`), never free text. Shape alone says nothing about the
+ * node, so (V86, #4067; the Create line of hrn:node:hadronmemory.com:specs:cor:acl:140:05) a node-typed value must also name a
+ * live node the REQUESTER can read, or the call is refused: a merely id-shaped token, a missing, deleted or unreadable node
+ * all get the one GRANT_VALUES_INVALID answer. The reason is the signer, which shows every node as its URN
+ * (hrn:node:hadronmemory.com:specs:cor:acl:140:07): an id that resolves to nothing could never be signed. The check is
+ * made at creation only: a node deleted or made unreadable AFTER the grant is stored is not checked here (the signing page
+ * treats it as unsignable, #3805), so a stored grant does not always name a live node. A new parameter type brings its own
+ * rule (an unknown type is refused) and must say what it admits. A refusal names the term, never the value. (#3829 G,
+ * George on #3814.)
  *
  * LOCKS. The caller holds the App, requester-user and (for an agent holder) agent authority anchors. This module then locks the
  * requester's worker row FOR SHARE, so a `retireWorker` that committed first is seen, and one that comes next waits for this
@@ -75,6 +80,11 @@ export interface CreateGrantArgs {
   reason: string;
   /** The agent whose authority anchor the caller holds (null: none). An agent holder is accepted only if it is exactly this agent. */
   heldAgentAnchor?: string | null;
+  /**
+   * V86 (#4067, cor:acl:140:07): whether the REQUESTER can read this memory, judged on the transaction's own context (the calling
+   * worker's session on the worker arm, the person on the manager arm). A node-typed value must name a node in a memory this says yes to.
+   */
+  canReadMemory: (memoryId: string) => Promise<boolean>;
 }
 
 // #3834 / ruling0266, cor:acl:140:01: admission only; stored terms remain rebuildable under :09.
@@ -159,6 +169,22 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
     if (Array.isArray(v) && v.length > MAX_LIST_ENTRIES) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', 'LIST_TOO_LONG');
     if (!valueMatchesType(p.type, v)) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
     if (p.refusesWildcard && v === '*') throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} refuses a wildcard`);
+  }
+
+  // V86 (#4067, ruling 0265, cor:acl:140:07): a grant may name only a node its REQUESTER can read. The signer shows every node as its
+  // canonical URN, so an id that resolves to nothing could never be signed. A missing, deleted or unreadable node is the SAME refusal
+  // (same code, same detail as a malformed id), so this is no existence oracle. Judged before the insert: a refusal stores nothing.
+  for (const p of declared) {
+    if (p.type !== 'node-ref') continue;
+    const v = (values as Record<string, unknown>)[p.name];
+    const ids = [...new Set((Array.isArray(v) ? v : [v]).filter((x): x is string => typeof x === 'string' && x !== '*'))];
+    if (ids.length === 0) continue;
+    const nodes = await tx.node.findMany({ where: { id: { in: ids }, deletedAt: null }, select: { id: true, memoryId: true } });
+    let ok = nodes.length === ids.length;
+    for (const memoryId of ok ? new Set(nodes.map((n) => n.memoryId)) : []) {
+      if (!(await args.canReadMemory(memoryId))) { ok = false; break; }
+    }
+    if (!ok) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
   }
 
   // Count Unicode code points like task findings, with a UTF-16 fast bound so counting work is bounded.

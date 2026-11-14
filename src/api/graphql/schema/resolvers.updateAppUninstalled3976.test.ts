@@ -18,8 +18,8 @@ async function refusal(p: Promise<unknown>): Promise<{ code: unknown; message: s
   try {
     await p;
   } catch (e) {
-    const err = e as GraphQLError;
-    return { code: err.extensions?.code, message: err.message };
+    const err = e as GraphQLError & { code?: string };
+    return { code: err.extensions?.code ?? err.code, message: err.message };
   }
   throw new Error('expected a rejection');
 }
@@ -90,10 +90,12 @@ describe('#3976 updateApp on an uninstalled App', () => {
   it('refuses AFTER the gate: a caller the gate refuses learns nothing about the install state', async () => {
     await uninstall();
     const installedOther = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Live', urn: `${org.urn}:live` } });
-    const ghost = await refusal(M.updateApp({}, { ref: installedOther.id, description: 'x' }, ctx(stranger.id)));
+    // #3982: reachable non-managers retain FORBIDDEN; an outsider learns only unknown-App.
     for (const who of [member.id, stranger.id]) {
+      const reference = await refusal(M.updateApp({}, { ref: installedOther.id, description: 'x' }, ctx(who)));
       const r = await refusal(M.updateApp({}, { ref: app.id, description: 'x' }, ctx(who)));
-      expect(r).toEqual(ghost);
+      expect(r.code).toBe(reference.code);
+      expect(r.code).toBe(who === member.id ? 'FORBIDDEN' : 'APP_NOT_FOUND');
       expect(r.code).not.toBe('APP_UNINSTALLED');
     }
   });

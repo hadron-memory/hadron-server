@@ -10,7 +10,7 @@ import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { USER_API_KEY_PREFIX, hashUserApiKey } from '../../../middleware/auth.js';
 import { upsertPlatformActions } from '../../../lib/grants/actions.js';
-import { dropTestActions, seedWorld, type World } from '../../../lib/grants/grantFixtures3668.js';
+import { dropTestActions, seedReadableNodes, seedWorld, type World } from '../../../lib/grants/grantFixtures3668.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -26,6 +26,7 @@ beforeAll(async () => {
 afterAll(async () => { await new Promise<void>((r) => http.close(() => r())); await cleanDb(db); await dropTestActions(); vi.unstubAllEnvs(); });
 
 let w: World;
+let pubNode: string; // #4067: a node the requester can read
 /** manager: org ADMIN (user2). member: contributor (user1, drives the worker). outsider: no membership. */
 let managerId: string; let memberId: string; let outsiderId: string;
 let managerKey: string; let memberKey: string; let outsiderKey: string;
@@ -49,6 +50,7 @@ const CREATE = 'mutation($i:CreateGrantInput!){createGrant(input:$i){id appId re
 beforeEach(async () => {
   await cleanDb(db);
   w = await seedWorld();
+  [pubNode] = await seedReadableNodes(w.orgId);
   await upsertPlatformActions(db);
   memberId = w.userId; managerId = w.user2Id;
   outsiderId = (await db.user.create({ data: { handle: `out-${generateId().slice(0, 6)}` } })).id;
@@ -71,7 +73,7 @@ async function refs(appId: string) {
   await db.urnAlias.create({ data: { urn: renamed, entityType: 'APP', entityId: appId, reason: 'RENAME', replacedByUrn: bare } });
   return { id: appId, canonical: `hrn:app:${bare}`, double: `hrn:app:${bare.replace(/:/g, '::')}`, legacy: `hrn:app:${legacy}`, renamed: `hrn:app:${renamed}` };
 }
-const input = (appRef: string, holderRef = w.workerId) => ({ appRef, action: 'schedule.create', values: { entryNode: generateId() }, holderKind: 'WORKER', holderRef, reason: 'reference parity' });
+const input = (appRef: string, holderRef = w.workerId) => ({ appRef, action: 'schedule.create', values: { entryNode: pubNode }, holderKind: 'WORKER', holderRef, reason: 'reference parity' });
 const workerCall = (appRef: string) => post(memberKey, workerSession, CREATE, { i: input(appRef) });
 const grantCount = () => db.grant.count();
 

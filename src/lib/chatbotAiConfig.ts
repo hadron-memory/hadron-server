@@ -13,9 +13,11 @@
  *    App's chatbot config. A pin counts only while its config exists, belongs to the chat's App and is enabled;
  *    otherwise it is skipped as if unset, so a disabled config never wins here either.
  *  - {@link listChatAiConfigChoices}: what a member may choose from. Never a key, key preview or endpoint.
+ *  - {@link effectiveChatToolChoice} (#4042): the tool-choice decision of the config a turn would use.
  */
 import type { Prisma, PrismaClient, AiServiceConfig } from '../generated/prisma/index.js';
-import { AiServiceConfigNotFoundError } from './aiConfig.js';
+import { AiServiceConfigNotFoundError, DEFAULT_AI_CONFIG_NAME, NoAiConfigAvailableError, resolveAiConfigWithFallback } from './aiConfig.js';
+import { chatToolChoiceFor, type ChatToolChoice } from './llm/chatToolChoice.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -62,6 +64,8 @@ export interface ChatAiConfigChoice {
   model: string | null;
   isDefault: boolean;
   isAppChatbotConfig: boolean;
+  /** #4005: the server's tool-choice decision; null for the `default` entry. */
+  toolChoice: ChatToolChoice | null;
 }
 
 /**
@@ -78,10 +82,38 @@ export async function listChatAiConfigChoices(db: Db, appId: string): Promise<Ch
     }),
   ]);
   return [
-    { value: CHAT_AI_CONFIG_DEFAULT_CHOICE, name: CHAT_AI_CONFIG_DEFAULT_CHOICE, provider: null, model: null, isDefault: true, isAppChatbotConfig: false },
+    { value: CHAT_AI_CONFIG_DEFAULT_CHOICE, name: CHAT_AI_CONFIG_DEFAULT_CHOICE, provider: null, model: null, isDefault: true, isAppChatbotConfig: false, toolChoice: null },
     ...own.map((c) => ({
       value: c.id, name: c.name, provider: c.provider, model: c.model, isDefault: false,
       isAppChatbotConfig: c.id === app?.chatbotAiConfigId,
+      toolChoice: chatToolChoiceFor(c.provider, c.model),
     })),
   ];
+}
+
+/**
+ * #4042: the tool-choice decision of the config a chat turn would use, resolved in the turn's own order — the chat's
+ * stored choice, else `App.chatbotAiConfigId` ({@link pinnedConfigFor}), else the well-known `default` walk
+ * App -> Agent -> Org -> Host — and judged by the ONE predicate (`chatToolChoiceFor`, cor:dmo:050:10). Null only when
+ * nothing resolves (the turn would raise `NoAiConfigAvailableError`, and so does a user-owned App's walk that lands
+ * on the platform's config, which `resolveAIConfig` refuses the same way). Returns the decision only: no id, name,
+ * provider, model or key.
+ */
+export async function effectiveChatToolChoice(
+  db: PrismaClient,
+  chat: { appId: string | null; agentId: string | null; storedChoice: unknown },
+): Promise<ChatToolChoice | null> {
+  const pinned = await pinnedConfigFor(db, chat.appId, chat.storedChoice);
+  if (pinned) return chatToolChoiceFor(pinned.provider, pinned.model);
+  try {
+    const walked = await resolveAiConfigWithFallback(db, DEFAULT_AI_CONFIG_NAME, { appId: chat.appId, agentId: chat.agentId });
+    if (walked.ownerType === 'HADRON_SERVER' && chat.appId) {
+      const app = await db.app.findUnique({ where: { id: chat.appId }, select: { ownerUserId: true } });
+      if (app?.ownerUserId != null) return null;
+    }
+    return walked.toolChoice;
+  } catch (e) {
+    if (e instanceof NoAiConfigAvailableError) return null;
+    throw e;
+  }
 }

@@ -1,4 +1,4 @@
-import { signingSurfacePolicy } from '../lib/signing/surface.js';
+import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 
 /**
  * Server-identity / deployment-info surface — answers "which hadron-server
@@ -205,10 +205,10 @@ export function getDeploymentInfo(): DeploymentInfo {
     raw && raw !== '/'
       ? raw
       : `http://localhost:${process.env.PORT || 4000}`;
-  const policy = signingSurfacePolicy();
+  const present = serverInfoFieldPresence();
   return {
     baseUrl, version: HADRON_SERVER_VERSION,
-    ...(policy.signing ? { signing: true as const } : {}),
-    ...(policy.registration ? { passkeyRegistration: true as const } : {}),
+    ...(present.signing ? { signing: true as const } : {}),
+    ...(present.passkeyRegistration ? { passkeyRegistration: true as const } : {}),
   };
 }

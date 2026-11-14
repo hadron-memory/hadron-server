@@ -32,6 +32,7 @@ import { pathUnderGraphsRoot } from '../localFs/pathUnderGraphsRoot.js';
 import { InvalidNodeNameError, loadGraphFromFs, type UnreadableFile } from '../localFs/loadGraphFromFs.js';
 import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
 import { validateEdgeCondition } from '../../lib/edge-conditions/validator.js';
+import { entryConditionOf, validateEntryCondition } from '../../lib/edge-conditions/entryCondition.js';
 import { countCrossMemoryEdgesForNodeDelete } from '../../lib/crossMemoryEdgeDelete.js';
 import { db } from '../db/client.js';
 import { serializeTags } from '../db/provider.js';
@@ -570,6 +571,17 @@ const syncGraphFromGithubAsSystem = async (
     correctionCheckCompleted = false;
     try {
       await db.$transaction(async (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => {
+      // #4039 (B4): a conversation node whose entry condition is invalid, or reads a variable with no value at chat start,
+      // refuses the whole sync the way an invalid edge condition does, before the first write of this attempt.
+      for (const n of fsGraph.nodes) {
+        if (typeof n.loc !== 'string') continue;
+        const condition = entryConditionOf(n.loc, 'data' in n ? n.data : undefined);
+        if (condition === undefined) continue;
+        const validation = validateEntryCondition(condition);
+        if (!validation.ok) {
+          throw new Error(`Git sync node loc "${n.loc}" has an invalid entry condition (${validation.error.code}): ${validation.error.message}`);
+        }
+      }
       // Hold every endpoint memory key in one stable order for the ENTIRE
       // snapshot-to-cleanup/edge-write interval. This includes graph.id, so it
       // preserves the cleanup-vs-resurrection serialization added earlier.

@@ -168,7 +168,8 @@ import {
   mcpPrincipalKey,
   releaseOnceOnResponseEnd,
 } from './transportBounds.js';
-import { refusalResult, toolErrorResult, withToolErrorBoundary } from './toolError.js';
+import { unstorableTextRefusal, refusalResult, toolErrorResult, withToolErrorBoundary } from './toolError.js';
+import { edgeTextFields, unstorableTextText } from '../lib/unstorableTextInput.js';
 import { refNamesNothing } from '../lib/entityRef/refNamesNothing.js';
 import { textResult } from './textResult.js';
 import { publicErrorExtensions } from '../lib/errorDiagnostics.js';
@@ -273,7 +274,7 @@ import { lintWarningPageForNodeId, renderLintWarnings } from '../lib/bootPromptL
 const REPLACE_LINT_MAX_NODES = 100;
 import { safePlainPinWarnings, renderIncludePinWarnings, includePinWarningsFor } from '../lib/includes/plainPinWarnings.js';
 import { assertIncludesWritable, includeRefusalText, syncDerivedIncludesEdges } from '../lib/includes/writeIncludes.js';
-import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds, safeCanonicalUrn, isOwnerOrOrgMember } from '../api/graphql/schema/resolvers.helpers.js';
+import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds, safeCanonicalUrn, isOwnerOrOrgMember, throwOnInvalidEntryCondition } from '../api/graphql/schema/resolvers.helpers.js';
 import { composeWorkerPrompt, describeServedWorker, loadAppWorkerActivity, loadAppWorkerCheckStatuses, maySeeWorkerInternals } from '../api/graphql/schema/resolvers.worker.js';
 import { renderCheckStatusLong, renderCheckStatusShort, type WorkerCheckStatus } from '../lib/workerCheckStatus.js';
 import { splitNodeUrnTolerant, nodeFragmentRefusal } from '../lib/splitNodeUrnTolerant.js';
@@ -1165,6 +1166,20 @@ function codedRefusalText(e: unknown): string {
   const { code, ...rest } = publicErrorExtensions(e.extensions ?? {});
   const extras = Object.entries(rest).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
   return [`[${String(code ?? 'ERROR').toLowerCase()}] ${e.message}`, ...extras].join('\n');
+}
+
+/**
+ * #4039 (B4): the MCP form of `throwOnInvalidEntryCondition`: the same code, reason and detail, as the typed refusal text
+ * the tools already use for a coded resolver refusal. Null when the write carries no entry condition or a valid one.
+ */
+function entryConditionRefusal(loc: string, data: unknown) {
+  try {
+    throwOnInvalidEntryCondition(loc, data);
+    return null;
+  } catch (e) {
+    if (e instanceof GraphQLError) return refusalResult(codedRefusalText(e));
+    throw e;
+  }
 }
 
 function safeEmitEntityUrnV2(type: 'memory' | 'app' | 'agent' | 'org', bareUrn: string): string {
@@ -4326,6 +4341,9 @@ export function createMcpServerInstance(
       if (!(await canWriteToMemory(db, auth, memoryId, EXPLICIT_REF))) {
         return refusalResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memoryId)}`);
       }
+      // #4096: caller text a NUL or unpaired surrogate would fail the write (Postgres 22021 / encoding) is refused typed, before any write and after authorization.
+      const unstorableParent = unstorableTextRefusal({ name: rawName, description, tags });
+      if (unstorableParent) return unstorableParent;
 
       const parentMemoryState = await db.memory.findUniqueOrThrow({
         where: { id: memoryId }, select: { isEncrypted: true },
@@ -6424,6 +6442,12 @@ export function createMcpServerInstance(
       if (!(await canWriteToMemory(db, auth, memoryId, EXPLICIT_REF))) {
         return refusalResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memoryId)}`);
       }
+      // #4096: as hadron_create_parent_node — typed refusal, field named, before any write and after authorization.
+      const unstorableCreate = unstorableTextRefusal({ name, description, abstract, content, tags, role: rawRole, nodeType, objectType, llmModel, aiAgent, properties, data: nodeData, ...edgeTextFields(edges) });
+      if (unstorableCreate) return unstorableCreate;
+      // #4039 (B4): an invalid entry condition on a conversation node never lands, before any write (parity with writeNodeCore).
+      const entryRefusal = entryConditionRefusal(loc, nodeData);
+      if (entryRefusal) return entryRefusal;
 
       // #1201 — the GOVERNED-KIND gate, on the state this create would PRODUCE.
       // Inline here for the same reason as on hadron_update_node: this handler
@@ -7018,6 +7042,12 @@ export function createMcpServerInstance(
       if (!(await canWriteToMemory(db, auth, memory.id, EXPLICIT_REF))) {
         return refusalResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memory.id)}`);
       }
+      // #4096: typed refusal for caller text carrying a NUL, after authorization and before any write.
+      const unstorableUpdate = unstorableTextRefusal({ name, description, abstract, content, tags, role: rawRole, nodeType, objectType, llmModel, aiAgent, reason, properties, data: nodeData, ...edgeTextFields(edges) });
+      if (unstorableUpdate) return unstorableUpdate;
+      // #4039 (B4): the same save-time check as hadron_create_node, before any write.
+      const entryRefusal = entryConditionRefusal(loc, nodeData);
+      if (entryRefusal) return entryRefusal;
       // Spec 049 S4: an in-place update takes no lock, so the gate is explicit.
       try {
         await assertLocWritable(db, memory.id, loc, 'update');
@@ -7652,7 +7682,10 @@ export function createMcpServerInstance(
         const urn = await nodeUrn(node.loc, node.memoryId);
         return textResult(`Node data merged: ${urn} (id: ${node.id})${renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), node.id))}`);
       } catch (e) {
-        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'update failed'}`, 'hadron_update_node_data:resolver');
+        // #4039 (B3): the entry-condition refusal keeps its code, reason and detail, as on hadron_create_node / hadron_update_node.
+        return toolErrorResult(e, () => e instanceof GraphQLError && e.extensions?.code === 'INVALID_ENTRY_CONDITION'
+          ? codedRefusalText(e)
+          : unstorableTextText(e) ?? `Error: ${e instanceof Error ? e.message : 'update failed'}`, 'hadron_update_node_data:resolver');
       }
     },
   );
@@ -7858,7 +7891,7 @@ export function createMcpServerInstance(
         }
         return textResult([header, coverage, ...guidance, ...lines, ...lintLines].join('\n'));
       } catch (e) {
-        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'search-and-replace failed'}`, 'hadron_replace_text:resolver');
+        return toolErrorResult(e, () => unstorableTextText(e) ?? `Error: ${e instanceof Error ? e.message : 'search-and-replace failed'}`, 'hadron_replace_text:resolver');
       }
     },
   );

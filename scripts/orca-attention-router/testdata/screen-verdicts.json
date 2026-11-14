@@ -1,0 +1,2272 @@
+[
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "⏺ Done.",
+    "❯ an earlier submitted turn",
+    "✻ Cogitated for 1m 3s",
+    "────────────────────────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "nudges an idle roster worker with a mention once, proving idle first, and adopts the token",
+   "passes the adopted token back on the next poll"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "claude",
+  "input": [
+   "⏺ Done.",
+   "❯ an earlier submitted turn",
+   "✻ Cogitated for 1m 3s",
+   "────────────────────────────────────────────────────────────",
+   "❯ ",
+   "────────────────────────────────────────────────────────────",
+   "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+  ],
+  "expected": "idle",
+  "from": [
+   "an UNTRACKED terminal times out tui-idle forever, but a screen that proves the idle prompt still delivers",
+   "a TRACKED terminal that times out NUDGES when the screen proves a completed turn (the busy-misread fix)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "⏺ Done.",
+    "❯ an earlier submitted turn",
+    "✻ Cogitated for 1m 3s",
+    "────────────────────────────────────────────────────────────",
+    "❯ mid-turn output",
+    "────────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+   ]
+  },
+  "expected": false,
+  "from": [
+   "an untracked terminal whose screen shows activity holds as unknown, not busy"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "  Worked for 33s • 16:32",
+    "› Ask Codex to do anything",
+    "  GPT-6-Sol high · ~/orca/workspaces/hadron-server/andi · Start worker session as Andi",
+    "  ? for shortcuts"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "#1845 codex shape — tracked timeout over a Worked-for frame nudges (Atilla/Chip, held 2442/877 min as busy)",
+   "a codex screen resolves as codex, so the family flows to the gates"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "codex",
+  "input": [
+   "  Worked for 33s • 16:32",
+   "› Ask Codex to do anything",
+   "  GPT-6-Sol high · ~/orca/workspaces/hadron-server/andi · Start worker session as Andi",
+   "  ? for shortcuts"
+  ],
+  "expected": "idle",
+  "from": [
+   "#1845 codex shape — tracked timeout over a Worked-for frame nudges (Atilla/Chip, held 2442/877 min as busy)",
+   "a pin on an identity-lost, UNTRACKED terminal derives the family from ONE screen read and still proves idle"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "  ⎿ Tip: Use /btw to ask a quick side question",
+    "  (ctrl+b to run in background)",
+    "✽ Bunning… (5m 55s · ↓ 15.6k tokens)",
+    "────────────────────────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a TRACKED terminal that times out still HOLDS on a live working indicator — the screen vetoes",
+   "an untracked BUSY Claude with an EMPTY composer holds as unknown — no mid-turn nudge (#1700 P2)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "claude",
+  "input": [
+   "  ⎿ Tip: Use /btw to ask a quick side question",
+   "  (ctrl+b to run in background)",
+   "✽ Bunning… (5m 55s · ↓ 15.6k tokens)",
+   "────────────────────────────────────────────────────────────",
+   "❯ ",
+   "────────────────────────────────────────────────────────────",
+   "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+  ],
+  "expected": "busy",
+  "from": [
+   "a TRACKED terminal that times out still HOLDS on a live working indicator — the screen vetoes",
+   "an untracked BUSY Claude with an EMPTY composer holds as unknown — no mid-turn nudge (#1700 P2)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "  • Working (6s • esc to interrupt)",
+    "› Ask Codex to do anything",
+    "  GPT-6-Sol high · ~/orca/workspaces/hadron-server/andi · Start worker session as Andi",
+    "  ? for shortcuts"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "same for Codex: the Working line above the placeholder holds the nudge (#1700 P2)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "codex",
+  "input": [
+   "  • Working (6s • esc to interrupt)",
+   "› Ask Codex to do anything",
+   "  GPT-6-Sol high · ~/orca/workspaces/hadron-server/andi · Start worker session as Andi",
+   "  ? for shortcuts"
+  ],
+  "expected": "busy",
+  "from": [
+   "same for Codex: the Working line above the placeholder holds the nudge (#1700 P2)",
+   "holds the token for a busy worker, then nudges only it once idle"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    " ▐▛███▛█   Claude Code v2.1.296",
+    "▝▜██████▀  glm-5.3 · API Usage Billing",
+    " ▝▝   ▝▝   ~/orca/workspaces/hadron-server/cody",
+    "────────────────────────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a FRESH Claude/GLM launch (welcome banner, no done-marker) is positively idle and delivers (#1700 P2 r2)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "claude",
+  "input": [
+   " ▐▛███▛█   Claude Code v2.1.296",
+   "▝▜██████▀  glm-5.3 · API Usage Billing",
+   " ▝▝   ▝▝   ~/orca/workspaces/hadron-server/cody",
+   "────────────────────────────────────────────────────────────",
+   "❯ ",
+   "────────────────────────────────────────────────────────────",
+   "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+  ],
+  "expected": "idle",
+  "from": [
+   "a FRESH Claude/GLM launch (welcome banner, no done-marker) is positively idle and delivers (#1700 P2 r2)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "│ ✨ Update available! 0.162.0 -> 0.162.1         │",
+    "  >_ OpenAI Codex (v0.162.0)",
+    "     ~/orca/workspaces/hadron-server/dara",
+    "  permissions: YOLO mode",
+    "› Ask Codex to do anything",
+    "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/dara",
+    "  ? for shortcuts"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a FRESH Codex launch (version banner above the placeholder) is positively idle and delivers (#1700 P2 r2)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "codex",
+  "input": [
+   "│ ✨ Update available! 0.162.0 -> 0.162.1         │",
+   "  >_ OpenAI Codex (v0.162.0)",
+   "     ~/orca/workspaces/hadron-server/dara",
+   "  permissions: YOLO mode",
+   "› Ask Codex to do anything",
+   "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/dara",
+   "  ? for shortcuts"
+  ],
+  "expected": "idle",
+  "from": [
+   "a FRESH Codex launch (version banner above the placeholder) is positively idle and delivers (#1700 P2 r2)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "  some status output nobody classified",
+    "  another unrecognized line",
+    "────────────────────────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "an untracked screen with NEITHER a busy marker NOR a positive idle marker HOLDS as unknown (#1700 P2 r2)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "claude",
+  "input": [
+   "  some status output nobody classified",
+   "  another unrecognized line",
+   "────────────────────────────────────────────────────────────",
+   "❯ ",
+   "────────────────────────────────────────────────────────────",
+   "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+  ],
+  "expected": "unknown",
+  "from": [
+   "an untracked screen with NEITHER a busy marker NOR a positive idle marker HOLDS as unknown (#1700 P2 r2)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "────────────────────────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a MINIMAL screen (prompt box only, nothing above) is MISSING liveness evidence and holds (#1700 P2 r3)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "claude",
+  "input": [
+   "────────────────────────────────────────────────────────────",
+   "❯ ",
+   "────────────────────────────────────────────────────────────",
+   "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+  ],
+  "expected": "unknown",
+  "from": [
+   "a MINIMAL screen (prompt box only, nothing above) is MISSING liveness evidence and holds (#1700 P2 r3)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "⏺ Done.",
+    "an unrecognized current status",
+    "────────────────────────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a HISTORICAL done-marker does not rescue a newer unrecognized status — holds as unknown (#1700 P2 r3)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "claude",
+  "input": [
+   "⏺ Done.",
+   "an unrecognized current status",
+   "────────────────────────────────────────────────────────────",
+   "❯ ",
+   "────────────────────────────────────────────────────────────",
+   "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+  ],
+  "expected": "unknown",
+  "from": [
+   "a HISTORICAL done-marker does not rescue a newer unrecognized status — holds as unknown (#1700 P2 r3)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_diego",
+   "source": "screen",
+   "tail": [
+    "    + 1 line (^t to expand)",
+    "  Worked for 10s • 3:49 AM",
+    "  ↳ Recap: Completed and posted the assigned blind reviews and carries,",
+    "            including #1899’s race fix, #1929, #1923, cli#883, and latest",
+    "            #1930/#1959 approvals. Reviews were static; local test execution is",
+    "            not reported. The router classifier fix is merged but not yet",
+    "            reloaded. Chat is confirmed read through #12203; the latest unread",
+    "            batch remains pending.",
+    "            Next: Read unfiltered team chat from #12204 using the live session,",
+    "            handle dispatches, and mark read; finish silently if no action is",
+    "            needed.",
+    "› Ask Codex to do anything",
+    "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-portal/diego · Review hadron-…",
+    "  ? for shortcuts"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a completed Codex turn whose ↳ Recap tail trails the Worked-for footer DELIVERS — the recap is the marker’s own chrome (#1968, Diego captured 2026-10-15)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "codex",
+  "input": [
+   "    + 1 line (^t to expand)",
+   "  Worked for 10s • 3:49 AM",
+   "  ↳ Recap: Completed and posted the assigned blind reviews and carries,",
+   "            including #1899’s race fix, #1929, #1923, cli#883, and latest",
+   "            #1930/#1959 approvals. Reviews were static; local test execution is",
+   "            not reported. The router classifier fix is merged but not yet",
+   "            reloaded. Chat is confirmed read through #12203; the latest unread",
+   "            batch remains pending.",
+   "            Next: Read unfiltered team chat from #12204 using the live session,",
+   "            handle dispatches, and mark read; finish silently if no action is",
+   "            needed.",
+   "› Ask Codex to do anything",
+   "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-portal/diego · Review hadron-…",
+   "  ? for shortcuts"
+  ],
+  "expected": "idle",
+  "from": [
+   "a completed Codex turn whose ↳ Recap tail trails the Worked-for footer DELIVERS — the recap is the marker’s own chrome (#1968, Diego captured 2026-10-15)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_gene",
+   "source": "screen",
+   "tail": [
+    "  Worked for 24s • 7:38 PM",
+    "  ↳ Recap: Gene completed the comment API migration in PR #1070 after #1059/",
+    "            #1060 merged, then pushed hint and history-link fixes with",
+    "            regression tests. The migration passed full validation; follow-ups",
+    "            passed targeted tests and typecheck. Latest review/deployment",
+    "            status is unconfirmed. Current task is reading unread chat from",
+    "            #9605; completion and any assignments remain unconfirmed. Keep",
+    "            Gene’s session open.",
+    "            Next: Read chat unfiltered from #9605 using Gene’s existing",
+    "            session, act on assignments, then mark read; finish silently if",
+    "            none.",
+    "› Ask Codex to do anything",
+    "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-portal/gene · Bind Gene worker…",
+    "  ? for shortcuts"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a Worked-for footer 11 lines above the prompt is INSIDE the deepened window and delivers (#1968, Gene captured 2026-10-15)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "codex",
+  "input": [
+   "  Worked for 24s • 7:38 PM",
+   "  ↳ Recap: Gene completed the comment API migration in PR #1070 after #1059/",
+   "            #1060 merged, then pushed hint and history-link fixes with",
+   "            regression tests. The migration passed full validation; follow-ups",
+   "            passed targeted tests and typecheck. Latest review/deployment",
+   "            status is unconfirmed. Current task is reading unread chat from",
+   "            #9605; completion and any assignments remain unconfirmed. Keep",
+   "            Gene’s session open.",
+   "            Next: Read chat unfiltered from #9605 using Gene’s existing",
+   "            session, act on assignments, then mark read; finish silently if",
+   "            none.",
+   "› Ask Codex to do anything",
+   "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-portal/gene · Bind Gene worker…",
+   "  ? for shortcuts"
+  ],
+  "expected": "idle",
+  "from": [
+   "a Worked-for footer 11 lines above the prompt is INSIDE the deepened window and delivers (#1968, Gene captured 2026-10-15)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_xavier",
+   "source": "screen",
+   "tail": [
+    "    + 2 lines (^t to expand)",
+    "• Read unfiltered and marked through #11441. Replied to Vera’s Built-line",
+    "  survey as Xavier in #11442.",
+    "  Worked for 1m 4s • 4:04 PM",
+    "  ↳ Recap: The task is to read Hadron team chat unfiltered, handle actionable",
+    "            mentions, and mark it read. Latest backlog was read and marked",
+    "            through #11441; Xavier replied to Vera’s Built-line survey in",
+    "            #11442. #1842 reached CHECKED, T2 + §10 and was posted to Eden.",
+    "            #1770 was dispatched but remains in review under Xylon’s gate.",
+    "› Ask Codex to do anything",
+    "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/xavier · Verify Xavier…",
+    "  ? for shortcuts"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a recap tail over an in-window Worked-for footer is skipped like trailing banner chrome and delivers (#1968, Xavier captured 2026-10-15)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "codex",
+  "input": [
+   "    + 2 lines (^t to expand)",
+   "• Read unfiltered and marked through #11441. Replied to Vera’s Built-line",
+   "  survey as Xavier in #11442.",
+   "  Worked for 1m 4s • 4:04 PM",
+   "  ↳ Recap: The task is to read Hadron team chat unfiltered, handle actionable",
+   "            mentions, and mark it read. Latest backlog was read and marked",
+   "            through #11441; Xavier replied to Vera’s Built-line survey in",
+   "            #11442. #1842 reached CHECKED, T2 + §10 and was posted to Eden.",
+   "            #1770 was dispatched but remains in review under Xylon’s gate.",
+   "› Ask Codex to do anything",
+   "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/xavier · Verify Xavier…",
+   "  ? for shortcuts"
+  ],
+  "expected": "idle",
+  "from": [
+   "a recap tail over an in-window Worked-for footer is skipped like trailing banner chrome and delivers (#1968, Xavier captured 2026-10-15)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_atilla",
+   "source": "screen",
+   "tail": [
+    "  Reviewer approved: https://github.com/hadron-memory/hadron-portal/pull/",
+    "  1118#issuecomment-6182034412",
+    "  Receipt posted: https://github.com/hadron-memory/hadron-server/pull/1932#",
+    "  issuecomment-6180470118",
+    "    + 3 lines (^t to expand)",
+    "  Worked for 1m 28s • 7:41 AM",
+    "  ↳ Recap: Seat verdict saved and read back before the signed receipt was",
+    "            posted; the private stack is cleaned and the binding stays live.",
+    "            Chat was marked read through the receipt; nothing else was owed.",
+    "            Next: available for routing.",
+    "› Ask Codex to do anything",
+    "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/atilla · Static review…",
+    "  ? for shortcuts"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a folded-URL receipt pushing Worked-for past the old 8-line fold still delivers — depth 16 reaches the footer (#1968, Atilla’s canonical shape)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "codex",
+  "input": [
+   "  Reviewer approved: https://github.com/hadron-memory/hadron-portal/pull/",
+   "  1118#issuecomment-6182034412",
+   "  Receipt posted: https://github.com/hadron-memory/hadron-server/pull/1932#",
+   "  issuecomment-6180470118",
+   "    + 3 lines (^t to expand)",
+   "  Worked for 1m 28s • 7:41 AM",
+   "  ↳ Recap: Seat verdict saved and read back before the signed receipt was",
+   "            posted; the private stack is cleaned and the binding stays live.",
+   "            Chat was marked read through the receipt; nothing else was owed.",
+   "            Next: available for routing.",
+   "› Ask Codex to do anything",
+   "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/atilla · Static review…",
+   "  ? for shortcuts"
+  ],
+  "expected": "idle",
+  "from": [
+   "a folded-URL receipt pushing Worked-for past the old 8-line fold still delivers — depth 16 reaches the footer (#1968, Atilla’s canonical shape)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "            deeply indented continuation-shaped output with no completed-",
+    "            turn footer anywhere on screen",
+    "› Ask Codex to do anything",
+    "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/riana · Start worker session…",
+    "  ? for shortcuts"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a deep-indented tail with NO idle marker anywhere on screen still HOLDS — the recap skip never substitutes for a marker (#1968)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "codex",
+  "input": [
+   "            deeply indented continuation-shaped output with no completed-",
+   "            turn footer anywhere on screen",
+   "› Ask Codex to do anything",
+   "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/riana · Start worker session…",
+   "  ? for shortcuts"
+  ],
+  "expected": "unknown",
+  "from": [
+   "a deep-indented tail with NO idle marker anywhere on screen still HOLDS — the recap skip never substitutes for a marker (#1968)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_andi",
+   "source": "screen",
+   "tail": [
+    "  Worked for 1m 28s • 7:41 AM",
+    "          an indented current status nobody classified",
+    "› Ask Codex to do anything",
+    "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…",
+    "  ? for shortcuts"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a deep indent with NO recap header is a current status — an old Worked-for marker must NOT prove idle over it (Andi P2, #1976 review)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "codex",
+  "input": [
+   "  Worked for 1m 28s • 7:41 AM",
+   "          an indented current status nobody classified",
+   "› Ask Codex to do anything",
+   "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…",
+   "  ? for shortcuts"
+  ],
+  "expected": "unknown",
+  "from": [
+   "a deep indent with NO recap header is a current status — an old Worked-for marker must NOT prove idle over it (Andi P2, #1976 review)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_greta",
+   "source": "screen",
+   "tail": [
+    "• Checked and marked read through #28306. No new tagged messages; all four PRs remain open at unchanged heads. No task",
+    "  progress changed; merge coordination remains pending.",
+    "  Worked for 23s • 3:08 PM",
+    "  2 background terminals running · /ps to view · /stop to close",
+    "› Ask Codex to do anything",
+    "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-portal/greta · Recover Greta session after restart",
+    "  ? for shortcuts"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "the background-terminals status line trails a Worked-for footer and DELIVERS (Greta, held 7.5 h as unknown, 2026-10-21)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "codex",
+  "input": [
+   "• Checked and marked read through #28306. No new tagged messages; all four PRs remain open at unchanged heads. No task",
+   "  progress changed; merge coordination remains pending.",
+   "  Worked for 23s • 3:08 PM",
+   "  2 background terminals running · /ps to view · /stop to close",
+   "› Ask Codex to do anything",
+   "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-portal/greta · Recover Greta session after restart",
+   "  ? for shortcuts"
+  ],
+  "expected": "idle",
+  "from": [
+   "the background-terminals status line trails a Worked-for footer and DELIVERS (Greta, held 7.5 h as unknown, 2026-10-21)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_greta",
+   "source": "screen",
+   "tail": [
+    "  2 background terminals running · /ps to view · /stop to close",
+    "› Ask Codex to do anything",
+    "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-portal/greta · Recover Greta session after restart",
+    "  ? for shortcuts"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "the background-terminals line alone is weak: with no completed-turn marker the window still holds"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "codex",
+  "input": [
+   "  2 background terminals running · /ps to view · /stop to close",
+   "› Ask Codex to do anything",
+   "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-portal/greta · Recover Greta session after restart",
+   "  ? for shortcuts"
+  ],
+  "expected": "unknown",
+  "from": [
+   "the background-terminals line alone is weak: with no completed-turn marker the window still holds"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_greta",
+   "source": "screen",
+   "tail": [
+    "• Checked and marked read through #28306. No new tagged messages; all four PRs remain open at unchanged heads. No task",
+    "  progress changed; merge coordination remains pending.",
+    "  Worked for 23s • 3:08 PM",
+    "• Working (6s • esc to interrupt)",
+    "  2 background terminals running · /ps to view · /stop to close",
+    "› Ask Codex to do anything",
+    "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-portal/greta · Recover Greta session after restart",
+    "  ? for shortcuts"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a running turn beside the background-terminals line is still busy"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "codex",
+  "input": [
+   "• Checked and marked read through #28306. No new tagged messages; all four PRs remain open at unchanged heads. No task",
+   "  progress changed; merge coordination remains pending.",
+   "  Worked for 23s • 3:08 PM",
+   "• Working (6s • esc to interrupt)",
+   "  2 background terminals running · /ps to view · /stop to close",
+   "› Ask Codex to do anything",
+   "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-portal/greta · Recover Greta session after restart",
+   "  ? for shortcuts"
+  ],
+  "expected": "busy",
+  "from": [
+   "a running turn beside the background-terminals line is still busy"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_andi",
+   "source": "screen",
+   "tail": [
+    "  Worked for 1m 28s • 7:41 AM",
+    "  an unindented current status nobody classified",
+    "› Ask Codex to do anything",
+    "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…",
+    "  ? for shortcuts"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "an unindented current status over an old Worked-for marker holds — the codex arm of the #1700 r3 counterexample (Andi control, #1976 review)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "codex",
+  "input": [
+   "  Worked for 1m 28s • 7:41 AM",
+   "  an unindented current status nobody classified",
+   "› Ask Codex to do anything",
+   "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…",
+   "  ? for shortcuts"
+  ],
+  "expected": "unknown",
+  "from": [
+   "an unindented current status over an old Worked-for marker holds — the codex arm of the #1700 r3 counterexample (Andi control, #1976 review)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_yuri",
+   "source": "screen",
+   "tail": [
+    "  #1958 progress: shed node done and corrected; rotate, start-session (both",
+    "  tracks), and end-session nodes next — same ladders, rotation keeps end",
+    "  --resume-claim since its successor starts fresh by design.",
+    "✻ Worked for 1m 10s · done 3:54 PM",
+    "  ※ recap: Executing my half of #1958: rewriting the lifecycle task nodes to use",
+    "    resume claims. The shed node is done and corrected; next action is applying",
+    "    the same claim ladders to the rotate and start/end-session nodes.",
+    "────────────────────────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a Claude recap block (header 2, continuation 4) trails its done-marker and DELIVERS — header-RELATIVE indent covers both families (#1977, Yuri captured 2026-10-15)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "claude",
+  "input": [
+   "  #1958 progress: shed node done and corrected; rotate, start-session (both",
+   "  tracks), and end-session nodes next — same ladders, rotation keeps end",
+   "  --resume-claim since its successor starts fresh by design.",
+   "✻ Worked for 1m 10s · done 3:54 PM",
+   "  ※ recap: Executing my half of #1958: rewriting the lifecycle task nodes to use",
+   "    resume claims. The shed node is done and corrected; next action is applying",
+   "    the same claim ladders to the rotate and start/end-session nodes.",
+   "────────────────────────────────────────────────────────────",
+   "❯ ",
+   "────────────────────────────────────────────────────────────",
+   "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+  ],
+  "expected": "idle",
+  "from": [
+   "a Claude recap block (header 2, continuation 4) trails its done-marker and DELIVERS — header-RELATIVE indent covers both families (#1977, Yuri captured 2026-10-15)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_yuri",
+   "source": "screen",
+   "tail": [
+    "✻ Worked for 2m 6s · done 3:58 PM",
+    "    const verdict = computeLiveness(row);",
+    "    return verdict;",
+    "────────────────────────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "4-indent output under a done-marker with NO recap header is unrecognized and HOLDS — the rule never skips without an anchor (#1977 counterexample)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "claude",
+  "input": [
+   "✻ Worked for 2m 6s · done 3:58 PM",
+   "    const verdict = computeLiveness(row);",
+   "    return verdict;",
+   "────────────────────────────────────────────────────────────",
+   "❯ ",
+   "────────────────────────────────────────────────────────────",
+   "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+  ],
+  "expected": "unknown",
+  "from": [
+   "4-indent output under a done-marker with NO recap header is unrecognized and HOLDS — the rule never skips without an anchor (#1977 counterexample)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_riana",
+   "source": "screen",
+   "tail": [
+    "• Ran hadron node create --help; ls /tmp/riana*1883* /tmp/riana*1877* | head -20",
+    "    + 109 lines (^t to expand)",
+    "  ⓘ This content can’t be shown",
+    "  We take extra care with some cybersecurity requests. If you’re doing",
+    "  authorized security work, apply for Daybreak to get broader access.",
+    "  Learn more: https://help.openai.com/en/articles/20001326",
+    "  Apply for Daybreak: https://openai.com/form/enterprise-trusted-access-for-cyber/",
+    "› Ask Codex to do anything",
+    "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/riana · Start worker session…",
+    "  ? for shortcuts"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a content-suppressed turn (notice box, NO Worked-for footer) is completed chrome and DELIVERS (#1983, Riana captured 2026-10-15)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "codex",
+  "input": [
+   "• Ran hadron node create --help; ls /tmp/riana*1883* /tmp/riana*1877* | head -20",
+   "    + 109 lines (^t to expand)",
+   "  ⓘ This content can’t be shown",
+   "  We take extra care with some cybersecurity requests. If you’re doing",
+   "  authorized security work, apply for Daybreak to get broader access.",
+   "  Learn more: https://help.openai.com/en/articles/20001326",
+   "  Apply for Daybreak: https://openai.com/form/enterprise-trusted-access-for-cyber/",
+   "› Ask Codex to do anything",
+   "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/riana · Start worker session…",
+   "  ? for shortcuts"
+  ],
+  "expected": "idle",
+  "from": [
+   "a content-suppressed turn (notice box, NO Worked-for footer) is completed chrome and DELIVERS (#1983, Riana captured 2026-10-15)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_chip",
+   "source": "screen",
+   "tail": [
+    "  └ (no output)",
+    "    + Show details",
+    "  ⓘ This content can’t be shown",
+    "  We take extra care with some cybersecurity requests. If you’re doing authorized security work, apply for Daybreak to",
+    "  get broader access.",
+    "  Learn more: https://help.openai.com/en/articles/20001326",
+    "  Apply for Daybreak: https://openai.com/form/enterprise-trusted-access-for-cyber/",
+    "› Ask Codex to do anything",
+    "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/chip-t1 · Catch up Chip QA session",
+    "  ? for shortcuts"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a suppressed turn with NO output at all — └ (no output) + the notice — DELIVERS (#1983, Chip captured 2026-10-15)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "codex",
+  "input": [
+   "  └ (no output)",
+   "    + Show details",
+   "  ⓘ This content can’t be shown",
+   "  We take extra care with some cybersecurity requests. If you’re doing authorized security work, apply for Daybreak to",
+   "  get broader access.",
+   "  Learn more: https://help.openai.com/en/articles/20001326",
+   "  Apply for Daybreak: https://openai.com/form/enterprise-trusted-access-for-cyber/",
+   "› Ask Codex to do anything",
+   "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/chip-t1 · Catch up Chip QA session",
+   "  ? for shortcuts"
+  ],
+  "expected": "idle",
+  "from": [
+   "a suppressed turn with NO output at all — └ (no output) + the notice — DELIVERS (#1983, Chip captured 2026-10-15)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_chip",
+   "source": "screen",
+   "tail": [
+    "  └ (no output)",
+    "    + Show details",
+    "  ⓘ This content can’t be shown",
+    "  We take extra care with some cybersecurity requests. If you’re doing authorized security work, apply for Daybreak to",
+    "  get broader access.",
+    "  Learn more: https://help.openai.com/en/articles/20001326",
+    "  Apply for Daybreak: https://openai.com/form/enterprise-trusted-access-for-cyber/",
+    "  • Working (6s • esc to interrupt)",
+    "› Ask Codex to do anything",
+    "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/chip-t1 · Catch up Chip QA session",
+    "  ? for shortcuts"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a pinned busy line ABOVE a notice box still wins — the sweep runs before the marker judgment (#1983)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "codex",
+  "input": [
+   "  └ (no output)",
+   "    + Show details",
+   "  ⓘ This content can’t be shown",
+   "  We take extra care with some cybersecurity requests. If you’re doing authorized security work, apply for Daybreak to",
+   "  get broader access.",
+   "  Learn more: https://help.openai.com/en/articles/20001326",
+   "  Apply for Daybreak: https://openai.com/form/enterprise-trusted-access-for-cyber/",
+   "  • Working (6s • esc to interrupt)",
+   "› Ask Codex to do anything",
+   "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/chip-t1 · Catch up Chip QA session",
+   "  ? for shortcuts"
+  ],
+  "expected": "busy",
+  "from": [
+   "a pinned busy line ABOVE a notice box still wins — the sweep runs before the marker judgment (#1983)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "  Worked for 1m 4s • 4:04 PM",
+    "  ↳ Recap: The task is to read Hadron team chat unfiltered,",
+    "            mentions, and mark it read.",
+    "  an unrecognized current status at the header indent",
+    "› Ask Codex to do anything",
+    "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…",
+    "  ? for shortcuts"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a newer SAME-INDENT unknown status after a RECAP header is judged, not swallowed — holds (Andi P2, #1985 review)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "codex",
+  "input": [
+   "  Worked for 1m 4s • 4:04 PM",
+   "  ↳ Recap: The task is to read Hadron team chat unfiltered,",
+   "            mentions, and mark it read.",
+   "  an unrecognized current status at the header indent",
+   "› Ask Codex to do anything",
+   "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…",
+   "  ? for shortcuts"
+  ],
+  "expected": "unknown",
+  "from": [
+   "a newer SAME-INDENT unknown status after a RECAP header is judged, not swallowed — holds (Andi P2, #1985 review)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "  ⓘ This content can’t be shown",
+    "  We take extra care with some cybersecurity requests.",
+    "  an unrecognized current status at the header indent",
+    "› Ask Codex to do anything",
+    "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…",
+    "  ? for shortcuts"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a newer SAME-INDENT unknown status after the NOTICE header is judged, not swallowed — holds (Andi P2, #1985 review)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "codex",
+  "input": [
+   "  ⓘ This content can’t be shown",
+   "  We take extra care with some cybersecurity requests.",
+   "  an unrecognized current status at the header indent",
+   "› Ask Codex to do anything",
+   "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…",
+   "  ? for shortcuts"
+  ],
+  "expected": "unknown",
+  "from": [
+   "a newer SAME-INDENT unknown status after the NOTICE header is judged, not swallowed — holds (Andi P2, #1985 review)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "  Worked for 2m 6s • 16:32",
+    "  Learn more: https://example.com/documentation",
+    "› Ask Codex to do anything",
+    "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…",
+    "  ? for shortcuts"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a BARE Learn-more URL with no notice above is ordinary output and HOLDS (Andi delta P2, #1985 review round 2)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "codex",
+  "input": [
+   "  Worked for 2m 6s • 16:32",
+   "  Learn more: https://example.com/documentation",
+   "› Ask Codex to do anything",
+   "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…",
+   "  ? for shortcuts"
+  ],
+  "expected": "unknown",
+  "from": [
+   "a BARE Learn-more URL with no notice above is ordinary output and HOLDS (Andi delta P2, #1985 review round 2)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "  Worked for 2m 6s • 16:32",
+    "  Apply for Daybreak: https://openai.com/form/enterprise-trusted-access/",
+    "› Ask Codex to do anything",
+    "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…",
+    "  ? for shortcuts"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a BARE Apply label with no notice above is ordinary output and HOLDS (Andi delta P2, #1985 review round 2)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "codex",
+  "input": [
+   "  Worked for 2m 6s • 16:32",
+   "  Apply for Daybreak: https://openai.com/form/enterprise-trusted-access/",
+   "› Ask Codex to do anything",
+   "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…",
+   "  ? for shortcuts"
+  ],
+  "expected": "unknown",
+  "from": [
+   "a BARE Apply label with no notice above is ordinary output and HOLDS (Andi delta P2, #1985 review round 2)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "  Worked for 2m 6s • 16:32",
+    "  openai.com/form/enterprise-trusted-access-for-cyber/",
+    "› Ask Codex to do anything",
+    "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…",
+    "  ? for shortcuts"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a BARE wrapped notice URL fragment with no notice above HOLDS (Andi delta P2, #1985 review round 2)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "codex",
+  "input": [
+   "  Worked for 2m 6s • 16:32",
+   "  openai.com/form/enterprise-trusted-access-for-cyber/",
+   "› Ask Codex to do anything",
+   "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…",
+   "  ? for shortcuts"
+  ],
+  "expected": "unknown",
+  "from": [
+   "a BARE wrapped notice URL fragment with no notice above HOLDS (Andi delta P2, #1985 review round 2)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "  ⓘ This content can’t be shown",
+    "  an unrecognized current status arrived after the header",
+    "  Learn more: https://help.openai.com/en/articles/20001326",
+    "› Ask Codex to do anything",
+    "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…",
+    "  ? for shortcuts"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a status line BETWEEN the notice header and its body ends the block — the status is judged and HOLDS (nothing newer in between, #12876)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "codex",
+  "input": [
+   "  ⓘ This content can’t be shown",
+   "  an unrecognized current status arrived after the header",
+   "  Learn more: https://help.openai.com/en/articles/20001326",
+   "› Ask Codex to do anything",
+   "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…",
+   "  ? for shortcuts"
+  ],
+  "expected": "unknown",
+  "from": [
+   "a status line BETWEEN the notice header and its body ends the block — the status is judged and HOLDS (nothing newer in between, #12876)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "    + 2 lines (^t to expand)",
+    "• Read unfiltered and marked through #11441. Replied to Vera’s Built-line",
+    "  survey as Xavier in #11442.",
+    "  Worked for 1m 4s • 4:04 PM",
+    "  ↳ Recap: The task is to read Hadron team chat unfiltered, handle actionable",
+    "            mentions, and mark it read. Latest backlog was read and marked",
+    "            through #11441; Xavier replied to Vera’s Built-line survey in",
+    "            #11442. #1842 reached CHECKED, T2 + §10 and was posted to Eden.",
+    "            #1770 was dispatched but remains in review under Xylon’s gate.",
+    "  • Working (6s • esc to interrupt)",
+    "› Ask Codex to do anything",
+    "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/xavier · Verify Xavier…",
+    "  ? for shortcuts"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a pinned busy line ABOVE a recap tail still wins — the sweep runs before the positional judgment (#1968)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "codex",
+  "input": [
+   "    + 2 lines (^t to expand)",
+   "• Read unfiltered and marked through #11441. Replied to Vera’s Built-line",
+   "  survey as Xavier in #11442.",
+   "  Worked for 1m 4s • 4:04 PM",
+   "  ↳ Recap: The task is to read Hadron team chat unfiltered, handle actionable",
+   "            mentions, and mark it read. Latest backlog was read and marked",
+   "            through #11441; Xavier replied to Vera’s Built-line survey in",
+   "            #11442. #1842 reached CHECKED, T2 + §10 and was posted to Eden.",
+   "            #1770 was dispatched but remains in review under Xylon’s gate.",
+   "  • Working (6s • esc to interrupt)",
+   "› Ask Codex to do anything",
+   "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/xavier · Verify Xavier…",
+   "  ? for shortcuts"
+  ],
+  "expected": "busy",
+  "from": [
+   "a pinned busy line ABOVE a recap tail still wins — the sweep runs before the positional judgment (#1968)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "    + 2 lines (^t to expand)",
+    "• Read unfiltered and marked through #11441. Replied to Vera’s Built-line",
+    "  survey as Xavier in #11442.",
+    "  Worked for 1m 4s • 4:04 PM",
+    "  ↳ Recap: The task is to read Hadron team chat unfiltered, handle actionable",
+    "            mentions, and mark it read. Latest backlog was read and marked",
+    "            through #11441; Xavier replied to Vera’s Built-line survey in",
+    "            #11442. #1842 reached CHECKED, T2 + §10 and was posted to Eden.",
+    "            #1770 was dispatched but remains in review under Xylon’s gate.",
+    "a column-zero current status nobody classified",
+    "› Ask Codex to do anything",
+    "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/xavier · Verify Xavier…",
+    "  ? for shortcuts"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a COLUMN-ZERO status line after a recap block ends the block and is judged — no throw, unrecognized holds (Andi round 2, #1976 review)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "codex",
+  "input": [
+   "    + 2 lines (^t to expand)",
+   "• Read unfiltered and marked through #11441. Replied to Vera’s Built-line",
+   "  survey as Xavier in #11442.",
+   "  Worked for 1m 4s • 4:04 PM",
+   "  ↳ Recap: The task is to read Hadron team chat unfiltered, handle actionable",
+   "            mentions, and mark it read. Latest backlog was read and marked",
+   "            through #11441; Xavier replied to Vera’s Built-line survey in",
+   "            #11442. #1842 reached CHECKED, T2 + §10 and was posted to Eden.",
+   "            #1770 was dispatched but remains in review under Xylon’s gate.",
+   "a column-zero current status nobody classified",
+   "› Ask Codex to do anything",
+   "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/xavier · Verify Xavier…",
+   "  ? for shortcuts"
+  ],
+  "expected": "unknown",
+  "from": [
+   "a COLUMN-ZERO status line after a recap block ends the block and is judged — no throw, unrecognized holds (Andi round 2, #1976 review)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "    + 2 lines (^t to expand)",
+    "• Read unfiltered and marked through #11441. Replied to Vera’s Built-line",
+    "  survey as Xavier in #11442.",
+    "  Worked for 1m 4s • 4:04 PM",
+    "  ↳ Recap: The task is to read Hadron team chat unfiltered, handle actionable",
+    "            mentions, and mark it read. Latest backlog was read and marked",
+    "            through #11441; Xavier replied to Vera’s Built-line survey in",
+    "            #11442. #1842 reached CHECKED, T2 + §10 and was posted to Eden.",
+    "            #1770 was dispatched but remains in review under Xylon’s gate.",
+    "• Working (6s • esc to interrupt)",
+    "› Ask Codex to do anything",
+    "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/xavier · Verify Xavier…",
+    "  ? for shortcuts"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a COLUMN-ZERO known busy line after a recap block is caught by the sweep — busy wins, no throw (Chip runtime matrix, #1976 review)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "codex",
+  "input": [
+   "    + 2 lines (^t to expand)",
+   "• Read unfiltered and marked through #11441. Replied to Vera’s Built-line",
+   "  survey as Xavier in #11442.",
+   "  Worked for 1m 4s • 4:04 PM",
+   "  ↳ Recap: The task is to read Hadron team chat unfiltered, handle actionable",
+   "            mentions, and mark it read. Latest backlog was read and marked",
+   "            through #11441; Xavier replied to Vera’s Built-line survey in",
+   "            #11442. #1842 reached CHECKED, T2 + §10 and was posted to Eden.",
+   "            #1770 was dispatched but remains in review under Xylon’s gate.",
+   "• Working (6s • esc to interrupt)",
+   "› Ask Codex to do anything",
+   "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/xavier · Verify Xavier…",
+   "  ? for shortcuts"
+  ],
+  "expected": "busy",
+  "from": [
+   "a COLUMN-ZERO known busy line after a recap block is caught by the sweep — busy wins, no throw (Chip runtime matrix, #1976 review)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "  Queued for my gate: Bindi's remaining attach-steps, Dan's 12-follow-up batch,",
+    "  Session open.",
+    "✻ Brewed for 2m 36s · done 3:20 AM",
+    "────────────────────────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a REAL idle screen — ordinary output text above the done-marker — DELIVERS (production calibration, #8165)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "claude",
+  "input": [
+   "  Queued for my gate: Bindi's remaining attach-steps, Dan's 12-follow-up batch,",
+   "  Session open.",
+   "✻ Brewed for 2m 36s · done 3:20 AM",
+   "────────────────────────────────────────────────────────────",
+   "❯ ",
+   "────────────────────────────────────────────────────────────",
+   "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+  ],
+  "expected": "idle",
+  "from": [
+   "a REAL idle screen — ordinary output text above the done-marker — DELIVERS (production calibration, #8165)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "  both types.",
+    "  file\". I've marked team chat read through #8177, the worktree is clean, and I'm standing by.",
+    "✻ Cooked for 9m 42s · done 3:26 AM",
+    "  ✔ Update installed · Restart to update",
+    "────────────────────────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a REAL idle screen with an update banner after the done-marker DELIVERS (#8165)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "claude",
+  "input": [
+   "  both types.",
+   "  file\". I've marked team chat read through #8177, the worktree is clean, and I'm standing by.",
+   "✻ Cooked for 9m 42s · done 3:26 AM",
+   "  ✔ Update installed · Restart to update",
+   "────────────────────────────────────────────────────────────",
+   "❯ ",
+   "────────────────────────────────────────────────────────────",
+   "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+  ],
+  "expected": "idle",
+  "from": [
+   "a REAL idle screen with an update banner after the done-marker DELIVERS (#8165)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "  the router compacted several workers overnight",
+    "────────────────────────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "prose containing the word compacted is NOT the banner - holds as unknown (#1746 P2)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "claude",
+  "input": [
+   "  the router compacted several workers overnight",
+   "────────────────────────────────────────────────────────────",
+   "❯ ",
+   "────────────────────────────────────────────────────────────",
+   "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+  ],
+  "expected": "unknown",
+  "from": [
+   "prose containing the word compacted is NOT the banner - holds as unknown (#1746 P2)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "✻ Compacted while idle",
+    "────────────────────────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a Compacted-while-idle banner is positive idle chrome (#8165)"
+  ]
+ },
+ {
+  "k": "idleProof",
+  "agent": "claude",
+  "input": [
+   "✻ Compacted while idle",
+   "────────────────────────────────────────────────────────────",
+   "❯ ",
+   "────────────────────────────────────────────────────────────",
+   "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+  ],
+  "expected": "idle",
+  "from": [
+   "a Compacted-while-idle banner is positive idle chrome (#8165)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_baloo",
+   "source": "screen",
+   "tail": [
+    "  ⎿ Tip: Use /btw to ask a quick side question",
+    "  (ctrl+b to run in background)",
+    "✽ Bunning… (5m 55s · ↓ 15.6k tokens)",
+    "────────────────────────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a dropped frontier is recorded covered, so a held token does not re-run the gates for it",
+   "sends FRESH counts and records the fresh mention frontier, never the stale poll numbers"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "⏺ Done.",
+    "❯ an earlier submitted turn",
+    "✻ Cogitated for 1m 3s",
+    "────────────────────────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+   ],
+   "draft": "SCRATCH-907 draft probe one"
+  },
+  "expected": false,
+  "from": [
+   "any Orca draft pins a Claude worker: Orca blanks the box, so the screen cannot refute it (cli#907 c02/c09)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "  Worked for 33s • 16:32",
+    "› Ask Codex to do anything",
+    "  GPT-6-Sol high · ~/orca/workspaces/hadron-server/andi · Start worker session as Andi",
+    "  ? for shortcuts"
+   ],
+   "draft": "pending codex text"
+  },
+  "expected": false,
+  "from": [
+   "a Codex draft stays authoritative: its composer renders empty while text is pending"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "⏺ Done.",
+    "❯ an earlier submitted turn",
+    "✻ Cogitated for 1m 3s",
+    "────────────────────────────────────────────────────────────",
+    "❯ Holger typing here",
+    "────────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+   ],
+   "draft": "Holger typing here"
+  },
+  "expected": false,
+  "from": [
+   "re-proves the prompt empty after the recompute: typing during the scan holds, not sends"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_baloo",
+   "source": "screen",
+   "tail": [
+    "⏺ Done.",
+    "❯ an earlier submitted turn",
+    "✻ Cogitated for 1m 3s",
+    "────────────────────────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "adoption carries a nudge whose frontier postdates the token: no duplicate nudge next poll (blind-review P2, first head)",
+   "an accepted nudge is persisted at once: a later failure in the same poll cannot resend it (@codex P2, #1490)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_baloo",
+   "source": "screen",
+   "tail": [
+    "  • Working (6s • esc to interrupt)",
+    "› Ask Codex to do anything",
+    "  GPT-6-Sol high · ~/orca/workspaces/hadron-server/andi · Start worker session as Andi",
+    "  ? for shortcuts"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "holds the token for a busy worker, then nudges only it once idle"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "⏺ Done.",
+    "❯ an earlier submitted turn",
+    "✻ Cogitated for 1m 3s",
+    "────────────────────────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents",
+    "orca@orca1:~/ws/eli$ "
+   ]
+  },
+  "expected": false,
+  "from": [
+   "a shell printing a CAPTURED Claude idle screen then its own prompt HOLDS — no send (blind P2, #1823)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "  Claude Code v2.1.296 — a captured banner line",
+    "  ordinary output",
+    "orca@orca1:~/ws/eli$ "
+   ]
+  },
+  "expected": false,
+  "from": [
+   "a WRONG family guess is caught one gate later: banner chrome without a composer holds (blind P2 pin, #1823)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "  Worked for 33s • 16:32",
+    "› Ask Codex to do anything",
+    "  GPT-6-Sol high · ~/orca/workspaces/hadron-server/andi · Start worker session as Andi",
+    "  ? for shortcuts",
+    "orca@orca1:~/ws/eli$ "
+   ]
+  },
+  "expected": false,
+  "from": [
+   "codex side: a captured Codex screen with an appended shell prompt holds at the footer check (blind P2 pin, #1823)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_baloo",
+   "source": "screen",
+   "tail": [
+    "  Worked for 33s • 16:32",
+    "› Holger typing here",
+    "  GPT-6-Sol high · ~/orca/workspaces/hadron-server/andi · Start worker session as Andi",
+    "  ? for shortcuts"
+   ]
+  },
+  "expected": false,
+  "from": [
+   "holds an idle worker whose prompt has text, then nudges it once the prompt is empty"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_baloo",
+   "source": "screen",
+   "tail": [
+    "  Worked for 33s • 16:32",
+    "› Ask Codex to do anything",
+    "  GPT-6-Sol high · ~/orca/workspaces/hadron-server/andi · Start worker session as Andi",
+    "  ? for shortcuts"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "holds an idle worker whose prompt has text, then nudges it once the prompt is empty"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_baloo",
+   "source": "screen",
+   "tail": [
+    "  permissions: YOLO mode",
+    "›",
+    "  GPT-6-Sol high · ~/orca/workspaces/hadron-server/baloo"
+   ],
+   "draft": "half typed"
+  },
+  "expected": false,
+  "from": [
+   "holds a Codex worker whose typed text shows only in the draft, over an empty-looking prompt"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "  Worked for 33s • 16:32",
+    "› Ask Codex to do anything",
+    "  GPT-6-Sol high · ~/orca/workspaces/hadron-server/andi · Start worker session as Andi",
+    "  ? for shortcuts"
+   ],
+   "draft": "typed in Orca"
+  },
+  "expected": false,
+  "from": [
+   "holds on a composer draft, a non-screen read, or an unreadable terminal"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "  Worked for 33s • 16:32",
+    "› Ask Codex to do anything",
+    "  GPT-6-Sol high · ~/orca/workspaces/hadron-server/andi · Start worker session as Andi",
+    "  ? for shortcuts"
+   ],
+   "draft": "   "
+  },
+  "expected": false,
+  "from": [
+   "holds on a composer draft, a non-screen read, or an unreadable terminal"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen-unavailable",
+   "tail": [
+    "  Worked for 33s • 16:32",
+    "› Ask Codex to do anything",
+    "  GPT-6-Sol high · ~/orca/workspaces/hadron-server/andi · Start worker session as Andi",
+    "  ? for shortcuts"
+   ]
+  },
+  "expected": false,
+  "from": [
+   "holds on a composer draft, a non-screen read, or an unreadable terminal"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": null,
+  "expected": false,
+  "from": [
+   "holds on a composer draft, a non-screen read, or an unreadable terminal"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "⏺ Done.",
+    "❯ an earlier submitted turn",
+    "✻ Cogitated for 1m 3s",
+    "────────────────────────────────────────────────────────────",
+    "❯ typed words",
+    "────────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+   ],
+   "draft": "typed words"
+  },
+  "expected": false,
+  "from": [
+   "a Claude draft still holds when the box RENDERS the text — the draft is corroborated, not stale"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_ada",
+   "source": "screen",
+   "tail": [
+    "⏺ Done.",
+    "❯ an earlier submitted turn",
+    "✻ Cogitated for 1m 3s",
+    "────────────────────────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "an idle flagged worker whose watermark fell behind — ZERO mentions — is woken through the full guard chain",
+   "the idle-watch wake reads the open-task count before the final gates and never after them (#2630)"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_ada",
+   "source": "screen",
+   "tail": [
+    "  ⎿ Tip: Use /btw to ask a quick side question",
+    "  (ctrl+b to run in background)",
+    "✽ Bunning… (5m 55s · ↓ 15.6k tokens)",
+    "────────────────────────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a busy screen at the full gate HOLDS with its reason and resets the clock"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_ada",
+   "source": "screen",
+   "tail": [
+    "⏺ Done.",
+    "❯ an earlier submitted turn",
+    "✻ Cogitated for 1m 3s",
+    "────────────────────────────────────────────────────────────",
+    "❯ typed mid-watch",
+    "────────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+   ],
+   "draft": "typed mid-watch"
+  },
+  "expected": false,
+  "from": [
+   "a non-empty draft at the full gate HOLDS with its reason and resets the clock"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": null,
+  "expected": false,
+  "from": [
+   "an unreadable screen at the full gate HOLDS with its reason"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_ada",
+   "source": "screen",
+   "tail": [
+    "  • Working (6s • esc to interrupt)",
+    "› Ask Codex to do anything",
+    "  GPT-6-Sol high · ~/orca/workspaces/hadron-server/andi · Start worker session as Andi",
+    "  ? for shortcuts"
+   ]
+  },
+  "expected": false,
+  "from": [
+   "interrupted idle: a busy probe observation resets the clock to zero and preserves coveredFrontier",
+   "a HELD mention observation is non-idle evidence: the liveness clock restarts and no liveness send happens"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_ada",
+   "source": "screen",
+   "tail": [
+    "⏺ Done.",
+    "❯ an earlier submitted turn",
+    "✻ Cogitated for 1m 3s",
+    "────────────────────────────────────────────────────────────",
+    "❯ Holger typing here",
+    "────────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+   ],
+   "draft": "Holger typing here"
+  },
+  "expected": false,
+  "from": [
+   "a half-typed prompt at the probe is interrupted idle: silent reset, no send, no hold"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_yuri",
+   "source": "screen",
+   "tail": [
+    "⏺ Done.",
+    "❯ an earlier submitted turn",
+    "✻ Cogitated for 1m 3s",
+    "────────────────────────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a delivered liveness nudge is persisted at once: a failure later in the same poll cannot resend it"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_new",
+   "source": "screen",
+   "tail": [
+    "⏺ Done.",
+    "❯ an earlier submitted turn",
+    "✻ Cogitated for 1m 3s",
+    "────────────────────────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a replaced terminal restarts the clock: the idle episode is measured on one continuous terminal"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_eli",
+   "source": "screen",
+   "tail": [
+    "  ⎿ Tip: Use /btw to ask a quick side question",
+    "  (ctrl+b to run in background)",
+    "✽ Bunning… (5m 55s · ↓ 15.6k tokens)",
+    "────────────────────────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+   ]
+  },
+  "expected": false,
+  "from": [
+   "a pin never bypasses the guard chain: a busy pinned terminal holds"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_00000000-0000-0000-0000-000000000000",
+   "status": "running",
+   "tail": [
+    " ▐▛███▛█   Claude Code v2.1.303",
+    "▝▜██████▀  Sonnet 5.5 · Claude Max",
+    " ▝▝   ▝▝   ~/orca/workspaces/hadron-cli/joshua-907-scratch",
+    "  Updated to latest. Got 37 features, 227 bugfixes, and 65 other changes.",
+    "  code.claude.com/docs/en/changelog for details",
+    "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+    "❯",
+    "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+   ],
+   "truncated": false,
+   "limited": false,
+   "oldestCursor": "0",
+   "nextCursor": "1",
+   "latestCursor": "1",
+   "returnedLineCount": 9,
+   "source": "screen"
+  },
+  "expected": true,
+  "from": [
+   "c01-start (claude) empty=true"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_00000000-0000-0000-0000-000000000000",
+   "status": "running",
+   "tail": [
+    " ▐▛███▛█   Claude Code v2.1.303",
+    "▝▜██████▀  Sonnet 5.5 · Claude Max",
+    " ▝▝   ▝▝   ~/orca/workspaces/hadron-cli/joshua-907-scratch",
+    "                                                                                                    ◐ medium · /effort",
+    "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+    "❯",
+    "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+    "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents"
+   ],
+   "truncated": false,
+   "limited": false,
+   "oldestCursor": "0",
+   "nextCursor": "14",
+   "latestCursor": "14",
+   "returnedLineCount": 8,
+   "source": "screen"
+  },
+  "expected": true,
+  "from": [
+   "c30-restart (claude) empty=true"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_00000000-0000-0000-0000-000000000000",
+   "status": "running",
+   "tail": [
+    " ▐▛███▛█   Claude Code v2.1.303",
+    "▝▜██████▀  Sonnet 5.5 · Claude Max",
+    " ▝▝   ▝▝   ~/orca/workspaces/hadron-cli/joshua-907-scratch",
+    "                                                                                                    ◐ medium · /effort",
+    "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+    "❯",
+    "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+    "  ⏵⏵ auto mode on (shift+tab to cycle)"
+   ],
+   "truncated": false,
+   "limited": false,
+   "oldestCursor": "0",
+   "nextCursor": "14",
+   "latestCursor": "14",
+   "returnedLineCount": 8,
+   "source": "screen"
+  },
+  "expected": true,
+  "from": [
+   "c33-bs-on-empty (claude) empty=true"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_00000000-0000-0000-0000-000000000000",
+   "status": "running",
+   "tail": [
+    " ▐▛███▛█   Claude Code v2.1.303",
+    "▝▜██████▀  Sonnet 5.5 · Claude Max",
+    " ▝▝   ▝▝   ~/orca/workspaces/hadron-cli/joshua-907-scratch",
+    "  Updated to latest. Got 37 features, 227 bugfixes, and 65 other changes.",
+    "  code.claude.com/docs/en/changelog for details",
+    "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+    "❯",
+    "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+   ],
+   "truncated": false,
+   "limited": false,
+   "oldestCursor": "0",
+   "nextCursor": "1",
+   "latestCursor": "1",
+   "returnedLineCount": 9,
+   "source": "screen",
+   "draft": "SCRATCH-907 draft probe one"
+  },
+  "expected": false,
+  "from": [
+   "c02-draft (claude) empty=false"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_00000000-0000-0000-0000-000000000000",
+   "status": "running",
+   "tail": [
+    " ▐▛███▛█   Claude Code v2.1.303",
+    "▝▜██████▀  Sonnet 5.5 · Claude Max",
+    " ▝▝   ▝▝   ~/orca/workspaces/hadron-cli/joshua-907-scratch",
+    "  Updated to latest. Got 37 features, 227 bugfixes, and 65 other changes.",
+    "  code.claude.com/docs/en/changelog for details",
+    "                                                                                                 ctrl+g to edit in Vim",
+    "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+    "❯",
+    "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+   ],
+   "truncated": false,
+   "limited": false,
+   "oldestCursor": "0",
+   "nextCursor": "1",
+   "latestCursor": "1",
+   "returnedLineCount": 10,
+   "source": "screen",
+   "draft": "SCRATCH-907 multi line A\nSCRATCH-907 multi line B (do not act on this)"
+  },
+  "expected": false,
+  "from": [
+   "c09-multiline (claude) empty=false"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "claude",
+  "input": {
+   "handle": "term_00000000-0000-0000-0000-000000000000",
+   "status": "running",
+   "tail": [
+    " ▐▛███▛█   Claude Code v2.1.303",
+    "▝▜██████▀  Sonnet 5.5 · Claude Max",
+    " ▝▝   ▝▝   ~/orca/workspaces/hadron-cli/joshua-907-scratch",
+    "  Updated to latest. Got 37 features, 227 bugfixes, and 65 other changes.",
+    "  code.claude.com/docs/en/changelog for details",
+    "❯ SCRATCH-907 test: reply with exactly the word ok, use no tools",
+    "● ok",
+    "✻ Crunched for 2s · done 11:14 PM",
+    "❯ SCRATCH-907 test: call the AskUserQuestion tool once, asking me to pick between options Alpha and Beta. Do nothing",
+    "  else.",
+    "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+    " ☐ Pick one",
+    "Which option do you pick?",
+    "❯ 1. Alpha",
+    "     Choose option Alpha.",
+    "  2. Beta",
+    "     Choose option Beta.",
+    "  3. Type something.",
+    "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+    "  4. Chat about this",
+    "Enter to select · ↑/↓ to navigate · Esc to cancel"
+   ],
+   "truncated": false,
+   "limited": false,
+   "oldestCursor": "0",
+   "nextCursor": "1",
+   "latestCursor": "1",
+   "returnedLineCount": 21,
+   "source": "screen"
+  },
+  "expected": false,
+  "from": [
+   "c20-askuser (claude) empty=false"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_00000000-0000-0000-0000-000000000000",
+   "status": "running",
+   "tail": [
+    "  >_ OpenAI Codex (v0.163.0)",
+    "     ~/orca/workspaces/hadron-cli/joshua-907-scratch",
+    "                                                       ⣀⣤⣤⣤⣀⣀",
+    "                                                    ⣠⣶⣿⣿⣿⣿⣿⣿⣿⣿⣦⣤⣤⣤⣤⣤⣤⡀",
+    "                                                  ⢀⣾⣿⣿⠿⠋⠉⠉⢉⣭⣿⣿⣿⣿⣿⠿⣿⣿⣿⣿⣷⣄",
+    "                                                 ⣀⣾⣿⣿⠃ ⣀⣴⣾⣿⣿⡿⠟⠋ ⣀⡀ ⠈⠙⢿⣿⣿⣧",
+    "                                              ⣀⣶⣿⣿⣿⣿⡇ ⢸⣿⣿⡿⠛⠉⢀⣠⣴⣿⣿⣿⣷⣦⣀⠈⢻⣿⣿⡇",
+    "                                             ⣰⣿⣿⡿⢿⣿⣿⡇ ⢸⣿⣿⢀⣤⣶⣿⣿⣿⠟⠛⠻⣿⣿⣿⣿⣮⣿⣿⡷",
+    "                                            ⢰⣿⣿⡟⠁⢸⣿⣿⡇ ⢸⣿⣿⣿⣿⠿⠿⣿⣿⣿⣦⣄⡀⠈⠛⠿⣿⣿⣿⣧⡀",
+    "                                            ⣾⣿⣿⠃ ⢸⣿⣿⡇ ⢸⣿⣿⠋⠁  ⠈⠙⢻⣿⣿⣿⣶⣤⡀ ⠹⢿⣿⣷⡄",
+    "                                            ⢸⣿⣿⣇ ⠸⣿⣿⣷⣦⣼⣿⣿      ⢸⣿⣿⠻⢿⣿⣿⡇ ⠘⣿⣿⣿",
+    "                                            ⠈⢿⣿⣿⣦⡀⠈⠛⠿⣿⣿⣿⣿⣄⡀  ⢀⣠⣼⣿⣿  ⣿⣿⡇  ⣿⣿⣿⠇",
+    "                                              ⢻⣿⣿⣿⣷⣦⣀⠈⠙⠻⣿⣿⣿⣶⣶⣿⣿⣿⣿⣿  ⣿⣿⡇ ⣠⣿⣿⣿",
+    "                                              ⢸⣿⣿⡿⢿⣿⣿⣿⣦⣠⣴⣿⣿⣿⡿⠟⠋⢸⣿⣿  ⣿⣿⣷⣴⣿⣿⣿⠃",
+    "                                              ⠘⣿⣿⣷ ⠈⠛⢿⣿⣿⣿⠿⠋⠉ ⣠⣴⣿⣿⣿  ⣿⣿⣿⣿⣿⠟⠁",
+    "                                               ⠻⣿⣿⣿⣤⣀ ⠈⠉ ⢀⣤⣶⣿⣿⣿⠿⠟⠁ ⣰⣿⣿⡟⠋⠁",
+    "                                                ⠈⠿⣿⣿⣿⣿⣶⣾⣿⣿⣿⣿⠟⠋⠁  ⣠⣼⣿⣿⡟",
+    "                                                   ⠙⠛⠛⠛⠻⠛⢿⣿⣿⣿⣿⣷⣾⣿⣿⣿⡿⠏",
+    "                                                          ⠈⠙⠛⠿⠿⠿⠿⠛⠉",
+    "› Ask Codex to do anything",
+    "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-cli/joshua-907-scratch",
+    "  ? for shortcuts"
+   ],
+   "truncated": false,
+   "limited": false,
+   "oldestCursor": "0",
+   "nextCursor": "5",
+   "latestCursor": "5",
+   "returnedLineCount": 22,
+   "source": "screen"
+  },
+  "expected": true,
+  "from": [
+   "x01-start (codex) empty=true"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_00000000-0000-0000-0000-000000000000",
+   "status": "running",
+   "tail": [
+    "  >_ OpenAI Codex (v0.163.0)",
+    "     ~/orca/workspaces/hadron-cli/joshua-907-scratch",
+    "›",
+    "  GPT-6.1-Sol default · ~/orca/workspaces/hadron-cli/joshua-907-scratch"
+   ],
+   "truncated": false,
+   "limited": false,
+   "oldestCursor": "0",
+   "nextCursor": "5",
+   "latestCursor": "5",
+   "returnedLineCount": 4,
+   "source": "screen",
+   "draft": "SCRATCH-907 codex draft one"
+  },
+  "expected": false,
+  "from": [
+   "x02-draft (codex) empty=false"
+  ]
+ },
+ {
+  "k": "promptEmpty",
+  "agent": "codex",
+  "input": {
+   "handle": "term_gene",
+   "source": "screen",
+   "tail": [
+    "  Worked for 33s • 16:32",
+    "› Ask Codex to do anything",
+    "  GPT-6-Sol high · ~/orca/workspaces/hadron-server/andi · Start worker session as Andi",
+    "  ? for shortcuts"
+   ]
+  },
+  "expected": true,
+  "from": [
+   "a claude and a codex terminal receive the same text"
+  ]
+ }
+]

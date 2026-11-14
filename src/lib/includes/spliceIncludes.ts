@@ -2,7 +2,10 @@ import { includeUrnTarget } from './includeUrnTarget.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { decryptNodeFields } from '../nodeCrypto.js';
 import { sessionKeyCache } from '../sessionKeyCache.js';
-import { revisionApprovalOf, newestApprovedRevisionOf } from '../nodeApproval.js';
+import { revisionApprovalOf, newestApprovedRevisionOf, newestApprovedAndSignedRevisionOf, servableRevisionNumbers,
+  NEWEST_APPROVED_REVISION_SCAN_CAP, NEWEST_APPROVED_REVISION_SCAN_BATCHES } from '../nodeApproval.js';
+import { lazyRevisionSignatureCounts, revisionSignatureCounts, type SignatureDb } from '../signing/revisionSignatureCounts.js';
+import { signingSurfacePolicy } from '../signing/surface.js';
 import {
   locateIncludeTags, locateLiteralIncludeTags, maskCode, IncludeSyntaxError, TooManyIncludeTags, type IncludeTag,
 } from './parseIncludeTags.js';
@@ -65,7 +68,7 @@ export interface SpliceOptions {
   budget?: ResolutionBudget;
 }
 
-export type IncludeDb = Pick<PrismaClient, 'node' | 'memory' | 'nodeRevision' | 'urnAlias'>;
+export type IncludeDb = SignatureDb & Pick<PrismaClient, 'urnAlias'>;
 type Db = IncludeDb;
 
 
@@ -174,18 +177,73 @@ async function approvedText(
 }
 
 /**
+ * #4033 — the settings a tag EFFECTIVELY carries: while the deployment does not check signatures, `signed` is
+ * accepted and stored but ignored (cor:dmo:150:02), so every decision made from a tag's settings (the selector, the
+ * compile's existence pre-check and refusal class, the null-body fast path) reads this, never `tag.settings`, and
+ * answers exactly as it would for the same tag without `signed`. The policy is read per call (G2: live, never cached
+ * at boot, and not snapshotted per operation: no spec asks for a snapshot, and the flag is a deployment constant that
+ * only a restart changes). Provenance and lint keep the tag's own `signed`: it is what the author wrote.
+ */
+export function effectiveIncludeSettings(settings: IncludeTag['settings']): IncludeTag['settings'] {
+  return settings.signed && !signingSurfacePolicy().signing ? { ...settings, signed: false } : settings;
+}
+
+/** The one warning text for a `signed` include while signing is not checked, shared by the source and compiled lints. */
+export const SIGNING_NOT_CHECKED_TEXT =
+  'The "signed" setting is not checked: this deployment does not check signatures, so this include is served as if it were not signed.';
+
+/**
  * #2046 — THE include selector (cor:dmo:150:02), shared by every read and by the
  * boot-prompt compile so the two cannot disagree about which revision a tag
  * serves. `approved` (pinned or not) serves the revision the shared approval
  * predicate qualifies; `rev=N` alone serves stored revision N; no settings
- * serves the latest. `signed` is ignored until signing ships (D7), as before.
+ * serves the latest. While the deployment's signing policy is on, `signed`
+ * requires the included memory's at-signing writer stamp (cor:dmo:130:09).
  * Null when no revision qualifies: a reader shows the notice, a compile refuses.
+ *
+ * The signed search without a pin is bounded: it examines at most `NEWEST_APPROVED_REVISION_SCAN_CAP` candidates
+ * per batch and `NEWEST_APPROVED_REVISION_SCAN_BATCHES` batches (1,000 newest servable revisions). A signed revision
+ * older than that is not reached and the include does not resolve (fail closed); a pin (`rev=N`) is not searched.
+ * An encrypted target is never selected by `signed`.
  */
 export async function selectIncludeRevision(
   db: IncludeDb, memo: IncludeReadMemo, target: IncludeTarget, settings: IncludeTag['settings'],
   /** A read's budget. The boot-prompt compile passes none: it has its own limits (cor:agt:040:12). */
   budget?: ResolutionBudget,
 ): Promise<{ revNo: number; text: string } | null> {
+  if (settings.signed && signingSurfacePolicy().signing) {
+    if (target.memory.isEncrypted) return null;
+    const counts = lazyRevisionSignatureCounts(db, target.id, 'include', budget);
+    let revNo = settings.rev;
+    if (revNo === undefined) {
+      let below: number | undefined;
+      // A batch boundary is not evidence that no revision qualifies. Continue within the same hard ceiling
+      // as the serve walk; metered reads also stop loudly when their resolution budget runs out.
+      for (let batch = 0; batch < NEWEST_APPROVED_REVISION_SCAN_BATCHES; batch++) {
+        if (settings.approved) {
+          const result = await newestApprovedAndSignedRevisionOf(db, target.id, counts, undefined, budget, below);
+          revNo = result.found?.revNo;
+          if (revNo !== undefined || !result.truncated || result.resumeBelow == null) break;
+          below = result.resumeBelow;
+        } else {
+          const { candidates } = await servableRevisionNumbers(db, target.id, NEWEST_APPROVED_REVISION_SCAN_CAP, budget, below);
+          const examined = candidates.slice(0, NEWEST_APPROVED_REVISION_SCAN_CAP);
+          for (const candidate of examined) {
+            if (await counts(candidate)) { revNo = candidate; break; }
+          }
+          if (revNo !== undefined || candidates.length <= NEWEST_APPROVED_REVISION_SCAN_CAP) break;
+          below = examined[examined.length - 1];
+        }
+      }
+    }
+    if (revNo === undefined) return null;
+    const selected = settings.approved
+      ? await approvedText(db, target, revNo, budget)
+      : await lookupRevision(db, memo, target, revNo, budget).then(text => text == null ? null : { revNo: revNo!, text });
+    if (!selected) return null;
+    // Revalidate against captured served bytes, so a selector/retrieval race cannot substitute unsigned text.
+    return await revisionSignatureCounts(db, target.id, revNo, 'include', { content: selected.text, meter: budget }) ? selected : null;
+  }
   if (settings.approved) return approvedText(db, target, settings.rev, budget);
   if (settings.rev !== undefined) {
     const text = await lookupRevision(db, memo, target, settings.rev, budget);
@@ -205,8 +263,6 @@ async function expandTag(
   db: Db, access: Record<string, unknown>, memo: IncludeReadMemo, opts: SpliceOptions,
   tag: IncludeTag, includerMemoryId: string, trail: ReadonlySet<string>, level: number,
 ): Promise<string> {
-  // `signed` is stored and ignored until the signing ceremony ships (cor:dmo:150:02,
-  // Vera's D7): it serves as if absent, and `approved signed` as `approved`.
   // #40: every expansion is charged first, before depth, cycle or any lookup, so an
   // empty-leaf fan-out (which serves no bytes) is still bounded.
   opts.budget?.chargeExpansion();
@@ -234,9 +290,10 @@ async function expandTag(
   }
   const target = await lookupTarget(db, access, memo, memoryId, loc, targetId, opts.budget, prepaid);
   if (!target || trail.has(target.id)) return unresolved(opts);
-  const selected = await selectIncludeRevision(db, memo, target, tag.settings, opts.budget);
+  const settings = effectiveIncludeSettings(tag.settings);
+  const selected = await selectIncludeRevision(db, memo, target, settings, opts.budget);
   if (!selected) return unresolved(opts);
-  if (!tag.settings.approved && tag.settings.rev === undefined && target.content == null) return '';
+  if (!settings.approved && !settings.signed && settings.rev === undefined && target.content == null) return '';
   // Rendered per traversal: this node's ancestors and depth travel with it.
   return spliceWithin(db, access, memo, opts, selected.text, target.memoryId, new Set([...trail, target.id]), level + 1);
 }

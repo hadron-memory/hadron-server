@@ -138,6 +138,7 @@
     "AiServiceConfigTestError": "value",
     "AiServiceConfigTestResult": "envelope",
     "AiConfigTestKnob": "value",
+    "ChatProbeOutcome": "value",
     "AiProviderEndpoint": "value",
     "ResolvedAiConfig": "value",
     "ServedPromptProvenanceEntry": "value",
@@ -187,6 +188,9 @@
     "ConnectionGrantsPage": "envelope",
     "PrincipalGrantsPage": "envelope",
     "GrantsPage": "envelope",
+    "GrantActionsPage": "envelope",
+    "GrantAction": "value",
+    "GrantActionParameter": "value",
     "AgentWebhooksPage": "envelope",
     "AgentWebhookCredentials": "value",
     "PolicyLayerVerdict": "value",
@@ -1834,9 +1838,27 @@
     },
     "SecretsPage.items": {
       "class": "parent-implies-child",
-      "audience": "callers passing canSeeSecretOwner: the user themselves (not impersonating) or org members; metadata only, never the value",
+      "audience": "callers passing canSeeSecretOwner: the user themselves (not impersonating), org members, or for an App secret a member of the App or whoever manages it (a person acting as themselves, never an App key, an impersonated session or a run); metadata only, never the value",
       "resolver": "src/api/graphql/schema/resolvers.secret.ts::canSeeSecretOwner",
       "target": "Secret"
+    },
+    "Secret.versions": {
+      "class": "parent-implies-child",
+      "audience": "the callers Query.secret admits for the parent (canSeeSecretOwner); a page of an App secret's versions, paged per parent (cor:api:120:04)",
+      "resolver": "src/api/graphql/schema/resolvers.secret.ts::canSeeSecretOwner",
+      "target": "SecretVersionsPage"
+    },
+    "SecretVersionsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "the callers Query.secret admits for the parent secret (canSeeSecretOwner); versions as metadata only (number, size, authorship), never the value or its ciphertext",
+      "resolver": "src/api/graphql/schema/resolvers.secret.ts::canSeeSecretOwner",
+      "target": "SecretVersion"
+    },
+    "SecretEventsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "any member of the App, as a person acting as themselves: Query.secretEvents answers an empty page to everyone else, an App key, an impersonated session and a run; never a value",
+      "resolver": "src/api/graphql/schema/resolvers.secret.ts::appMember",
+      "target": "SecretEvent"
     },
     "ServedPromptsPage.items": {
       "class": "self-gated",
@@ -2200,6 +2222,20 @@
       "projection": "NodeRevisionEditor",
       "why": "NodeRevisionEditor(handle,urn only; identity tier cor:acl:070:01); an erased signer resolves null (cor:acl:140:08)",
       "target": "NodeRevisionEditor"
+    },
+    "AgentTaskExternalIdChange.task": {
+      "class": "parent-implies-child",
+      "audience": "the App's readers, the same withReadableApp gate as agentTeamEvents (agentTaskExternalIdChanges reads the App's team events and the tasks they name, both scoped to that App); outsiders are refused APP_NOT_FOUND before any row",
+      "spec": "cor:agt:050:21",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
+      "target": "AgentTask"
+    },
+    "AgentTaskExternalIdChangePage.changes": {
+      "class": "parent-implies-child",
+      "audience": "the App's readers, the same withReadableApp gate as agentTeamEvents (agentTaskExternalIdChanges reads the App's team events and the tasks they name, both scoped to that App); outsiders are refused APP_NOT_FOUND before any row",
+      "spec": "cor:agt:050:21",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
+      "target": "AgentTaskExternalIdChange"
     }
   }
 }
