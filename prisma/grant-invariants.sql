@@ -1,5 +1,5 @@
 -- #3668 (S1a): the database half of the grant row, its events and the actions table. One source; the newest migration to
--- carry it (20261110010300_grant_requester_erasure) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
+-- carry it (20261114130000_grant_spend_counter) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
 -- post-push.sql applies it.
 --
 -- GRANTS. Exactly one holder (a user, an agent, a worker or an App); the CHECK cannot pass on NULL, because
@@ -34,6 +34,7 @@ ALTER TABLE grants ADD CONSTRAINT chk_grants_shape CHECK (
   btrim(reason) <> '' AND
   (max_uses IS NULL OR max_uses > 0) AND
   use_count >= 0 AND
+  (max_uses IS NULL OR use_count <= max_uses) AND
   version >= 1 AND
   (starts_at IS NULL OR expires_at IS NULL OR starts_at < expires_at) AND
   (revoked_at IS NULL) = (revoked_by IS NULL) AND
@@ -50,7 +51,7 @@ LANGUAGE plpgsql AS $$
 DECLARE
   -- Columns that may differ between OLD and NEW; each is judged by its own rule below.
   movable text[] := ARRAY['updated_at', 'user_id', 'issuer_user_id', 'requested_by_user_id', 'verified_by', 'revoked_at', 'revoked_by',
-                          'holder_departed_at', 'activated_at', 'verification_kind', 'signature_id'];
+                          'holder_departed_at', 'activated_at', 'verification_kind', 'signature_id', 'use_count'];
   db_now timestamp(3) := (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3);
 BEGIN
   IF TG_OP = 'DELETE' THEN
@@ -87,6 +88,23 @@ BEGIN
   -- UPDATE: nothing but the movable columns may differ.
   IF (to_jsonb(NEW) - movable) <> (to_jsonb(OLD) - movable) THEN
     RAISE EXCEPTION 'grants are append-only' USING ERRCODE = '23514';
+  END IF;
+  -- The one spend (#3998, #3991 R1): a LIVE grant's use_count rises by exactly one, and nothing else moves in that update but
+  -- updated_at. The grant row is the counter, so a budget cannot be spent twice and a fall can never restore a read. Live is
+  -- judged here on the database clock, on the row's own newest state (the UPDATE holds the row lock; a concurrent spender that
+  -- waited re-reads OLD after the first commits): activated, not revoked, holder present, App not deleted, started, not
+  -- expired, not spent. A pending, revoked, departed, not-started, expired or spent row refuses the spend, as does a rise of two.
+  IF NEW.use_count IS DISTINCT FROM OLD.use_count THEN
+    IF NEW.use_count <> OLD.use_count + 1
+       OR OLD.activated_at IS NULL OR OLD.revoked_at IS NOT NULL OR OLD.holder_departed_at IS NOT NULL
+       OR (OLD.starts_at IS NOT NULL AND OLD.starts_at > db_now)
+       OR (OLD.expires_at IS NOT NULL AND OLD.expires_at <= db_now)
+       OR (OLD.max_uses IS NOT NULL AND OLD.use_count >= OLD.max_uses)
+       OR EXISTS (SELECT 1 FROM apps WHERE id = OLD.app_id AND deleted_at IS NOT NULL)
+       OR (to_jsonb(NEW) - 'updated_at' - 'use_count') <> (to_jsonb(OLD) - 'updated_at' - 'use_count') THEN
+      RAISE EXCEPTION 'grants are append-only: a spend is exactly one use on a live grant' USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
   END IF;
   -- The one activation (#3649 slice C): a pending grant, by its own completed signature, and nothing else in the same update.
   -- The signer becomes the issuer; the time is the database's. The caller holds the grant row (FOR UPDATE) when it writes this,
