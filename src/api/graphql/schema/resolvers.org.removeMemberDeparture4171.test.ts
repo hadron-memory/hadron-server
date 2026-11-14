@@ -14,6 +14,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { DB_NOW, dropTestActions, insertGrant, insertGrantUnguarded, raw, seedWorld, type World } from '../../../lib/grants/grantFixtures3668.js';
 import { endHeldGrants } from '../../../lib/grants/departure.js';
+import { waitForLockWaiters } from '../../../test/lockWait.js';
 import { resolvers, type Context } from './resolvers.js';
 
 const M = resolvers.Mutation as any;
@@ -175,4 +176,19 @@ describe('G: the database guard\'s person arm, against a real guarded UPDATE (ba
     await expect(stamp(revoked)).rejects.toThrow(/append-only/);
     await expect(stamp(erased)).rejects.toThrow(/append-only/);
   });
+});
+
+// #4210 §10 (Rodolfo): a grant that EXPIRES while the door waits on its row lock keeps its expiry, not a departure stamp.
+describe('expiry while the door waits on the grant row', () => {
+  it('a grant expiring while the org leave waits on its row is not stamped', async () => {
+    const id = await active({ user_id: w.user2Id, app_id: w.appId, activated_at: raw(`${DB_NOW} - interval '2 hours'`), expires_at: raw(`${DB_NOW} + interval '2 seconds'`) });
+    let release!: () => void; let locked!: () => void;
+    const lockedP = new Promise<void>((r) => { locked = r; }); const releaseP = new Promise<void>((r) => { release = r; });
+    const blocker = db.$transaction(async (tx) => { await tx.$queryRaw`SELECT id FROM grants WHERE id = ${id} FOR UPDATE`; locked(); await releaseP; }, { timeout: 20_000 });
+    await lockedP;
+    const p = remove();
+    try { await waitForLockWaiters(db as any); await new Promise((r) => setTimeout(r, 2600)); } finally { release(); }
+    await blocker; await p;
+    expect((await row(id)).departed).toBe(false);
+  }, 30_000);
 });

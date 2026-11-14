@@ -14,6 +14,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { DB_NOW, dropTestActions, insertGrantUnguarded, raw, seedWorld, type World } from '../../../lib/grants/grantFixtures3668.js';
 import { resolveAppInstallation } from '../../../lib/appInstallations.js';
+import { waitForLockWaiters } from '../../../test/lockWait.js';
 import { resolvers, type Context } from './resolvers.js';
 
 const M = resolvers.Mutation as any;
@@ -216,6 +217,32 @@ describe('the SQL guard proves the TRUE cause (a bare stamp)', () => {
     await importEdge(parent.id, fa.id);
     expect(await sqlSays(w.appId, fa.id)).toBe(!!(await resolveAppInstallation(db, w.appId, fa.id)));
   });
+  it('P-diff-2 (#4210 BLIND P3): an unactivated licence, a deleted App, a deleted imported-agent organization, direct plus derived', async () => {
+    const sqlSays = async (a: string, g: string) => (await db.$queryRawUnsafe<Array<{ r: boolean }>>('SELECT hadron_agent_installed_in_app($1,$2) AS r', a, g))[0]!.r;
+    const agree = async (label: string) => {
+      for (const g of [w.agentId, parent.id, child.id]) {
+        expect(await sqlSays(w.appId, g), `${label}:${g}`).toBe(!!(await resolveAppInstallation(db, w.appId, g)));
+      }
+    };
+    await install(w.appId, parent.id);
+    const other = await db.organization.create({ data: { name: 'o2', urn: `o2-${generateId().slice(0, 6)}.test` } });
+    // agent_imports carries a required FK to a licence row, so "no licence row" is not reachable through an edge: the licence is
+    // created UNACTIVATED here, the closest reachable shape of the fallback branch.
+    await db.agentOrgGrant.create({ data: { orgId: w.orgId, agentId: child.id } });
+    await db.agentImport.create({ data: { parentAgentId: parent.id, importedAgentId: child.id, position: edgePos++, required: true, agentOrgGrantOrgId: w.orgId, agentOrgGrantAgentId: child.id } });
+    await agree('unactivated licence');
+    await db.agentOrgGrant.update({ where: { orgId_agentId: { orgId: w.orgId, agentId: child.id } }, data: { activatedAt: new Date() } });
+    await agree('licence usable');
+    await db.agent.update({ where: { id: child.id }, data: { organizationId: other.id } });
+    await db.organization.update({ where: { id: other.id }, data: { deletedAt: new Date() } });
+    await agree('imported agent organization deleted');
+    await db.organization.update({ where: { id: other.id }, data: { deletedAt: null } });
+    await db.agent.update({ where: { id: child.id }, data: { organizationId: w.orgId } });
+    await install(w.appId, child.id);
+    await agree('direct row plus derived');
+    await db.app.update({ where: { id: w.appId }, data: { deletedAt: new Date() } });
+    await agree('App deleted');
+  });
 });
 
 // #4210 LOCAL F1: two removals under DIFFERENT anchors in one App used to deadlock (40P01) on each other's post-delete witness
@@ -280,4 +307,20 @@ describe('F1: concurrent removals under different anchors do not deadlock', () =
     expect(results.map((r) => (r.status === 'rejected' ? String(r.reason) : r.status))).toEqual(['fulfilled', 'fulfilled']);
     expect((await row(grant)).departed).toBe(true);
   }, 40000);
+});
+
+// #4210 §10 (Rodolfo): a grant that EXPIRES while the door waits on its row lock keeps its expiry, not a departure stamp.
+describe('expiry while the door waits on the grant row', () => {
+  it('a grant expiring while the uninstall waits on its row is not stamped', async () => {
+    await install(w.appId, w.agentId);
+    const id = await held(w.agentId, w.appId, { activated_at: raw(`${DB_NOW} - interval '2 hours'`), expires_at: raw(`${DB_NOW} + interval '2 seconds'`) });
+    let release!: () => void; let locked!: () => void;
+    const lockedP = new Promise<void>((r) => { locked = r; }); const releaseP = new Promise<void>((r) => { release = r; });
+    const blocker = db.$transaction(async (tx) => { await tx.$queryRaw`SELECT id FROM grants WHERE id = ${id} FOR UPDATE`; locked(); await releaseP; }, { timeout: 20_000 });
+    await lockedP;
+    const p = uninstall(w.appId, w.agentId);
+    try { await waitForLockWaiters(db as any); await new Promise((r) => setTimeout(r, 2600)); } finally { release(); }
+    await blocker; await p;
+    expect((await row(id)).departed).toBe(false);
+  }, 30_000);
 });

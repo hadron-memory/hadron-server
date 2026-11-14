@@ -13,7 +13,7 @@
  */
 
 import type { Prisma } from '../../generated/prisma/index.js';
-import { endGrantsOfAgentsNoLongerInstalled, fenceAppsForWitnessDelete, importedPairsOfParent, liveAppsWhereInstalled } from '../../lib/grants/agentInstallDeparture.js';
+import { endGrantsOfAgentsNoLongerInstalled, fenceAppsForWitnessDelete, liveAppsWhereInstalled } from '../../lib/grants/agentInstallDeparture.js';
 
 export async function removeAgentImport(
   tx: Prisma.TransactionClient,
@@ -21,15 +21,17 @@ export async function removeAgentImport(
   importedAgentId: string,
   removedBy: string | null = null,
 ): Promise<void> {
-  // The Apps the edge could have witnessed an install in, read BEFORE the edge goes (the edge is what the pairs are named from).
   // Fence every App the edge could witness an install in BEFORE the delete (two parents' removals would otherwise deadlock on
   // each other's post-delete witness scans, #4210 F1), then re-read: an App the parent was installed in meanwhile is fenced too.
   const fenced = new Set(await fenceAppsForWitnessDelete(tx, await liveAppsWhereInstalled(tx, parentAgentId)));
   const apps = await liveAppsWhereInstalled(tx, parentAgentId);
   await fenceAppsForWitnessDelete(tx, apps.filter((a) => !fenced.has(a)));
-  const pairs = await importedPairsOfParent(tx, parentAgentId, apps, importedAgentId);
   // Idempotent: a missing row is a no-op (deleteMany never throws on it); any other error surfaces.
   const gone = await tx.agentImport.deleteMany({ where: { parentAgentId, importedAgentId } });
   if (gone.count === 0) return;
+  // Candidates are named AFTER the delete from the imported agent we already hold, over the Apps seen before AND after it: a parent
+  // installed in a new App between the reads is not missed (#4210 §10 P3-2). Extra candidates are harmless, each is judged.
+  const after = await liveAppsWhereInstalled(tx, parentAgentId);
+  const pairs = [...new Set([...apps, ...after])].map((appId) => ({ appId, agentId: importedAgentId }));
   await endGrantsOfAgentsNoLongerInstalled(tx, pairs, removedBy);
 }
