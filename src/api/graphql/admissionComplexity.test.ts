@@ -33,6 +33,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Mutation.planNodeMove", // #3424: limit default100/cap1000; common omitted bound100 matches.
   "Node.lintWarnings",
   "Node.signingRequests",
+  "Node.signingRequestsPage", // #4123: default20/cap100, bounded SQL take+1 after effective-state filter.
   "NodeApprovalReceipt.lintWarnings",
   "PublicOrganization.publicAgentsPage", // #3873: pageArgs, default 20, cap 200.
   "PublicOrganization.publicMemoriesPage", // #3873: pageArgs, default 20, cap 200.
@@ -136,6 +137,8 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.usageEventsPage",
   "Query.users",
   "Query.validateMemory",
+  "Query.webPolls", // #4123: bounded compatibility list.
+  "Query.webPollsPage", // #4123: default20/cap100.
   "Query.workers",
   "Secret.versions", // #3997: pageArgs default 20, cap 200; below the common 100, so omission overestimates.
   "ServedPrompt.currentLint", // #2048: default 50, cap 100; shared pageLintWarnings.

@@ -115,7 +115,7 @@
     "StartImpersonationResult": "envelope",
     "AppCreated": "value",
     "AppAIConfig": "value",
-    "PublicResourceRefPage": "envelope",
+    "MarketplaceResourcePage": "envelope",
     "PublicResourceRefsPage": "envelope",
     "MemoryTransferDependent": "value",
     "MemoryTransferBlocker": "value",
@@ -315,7 +315,9 @@
     "ReviewSlotReadiness": "value",
     "GrantSignatureStatus": "value",
     "TeamUtilization": "value",
-    "WorkerUtilization": "value"
+    "WorkerUtilization": "value",
+    "WebPollsPage": "envelope",
+    "SigningRequestsPage": "envelope"
   },
   "entries": {
     "ActionTicketsPage.items": {
@@ -1704,7 +1706,7 @@
       "why": "PublicResourceRef(id,name,urn,description; public-readable rows only)",
       "target": "PublicResourceRef"
     },
-    "PublicResourceRefPage.items": {
+    "MarketplaceResourcePage.items": {
       "class": "closed-projection",
       "projection": "PublicResourceRef",
       "why": "PublicResourceRef(id,name,urn,description; public-readable rows only)",
@@ -2236,6 +2238,18 @@
       "spec": "cor:agt:050:21",
       "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
       "target": "AgentTaskExternalIdChange"
+    },
+    "WebPollsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "Same org ADMIN and tool.web_poll policy authorization as the existing webPolls list, with org-bound redacted rows.",
+      "resolver": "src/api/graphql/schema/resolvers.webPoll.ts::webPollsPage",
+      "target": "WebPoll"
+    },
+    "SigningRequestsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "Only signing requests of the already readable Node; no authorization widening.",
+      "resolver": "src/api/graphql/schema/resolvers.signing.ts::signingRequestsPage",
+      "target": "SigningRequest"
     }
   }
 }

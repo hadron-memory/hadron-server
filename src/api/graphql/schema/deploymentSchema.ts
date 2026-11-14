@@ -5,7 +5,7 @@ import { SERVER_INFO_SWITCH_FIELDS, serverInfoFieldPresence, signingSurfacePolic
 
 const signingTypes = new Set([
   'SigningRequestState', 'SignatureState', 'SigningRequester',
-  'SigningRequest', 'NodeSignature', 'NodeSignatureStatus',
+  'SigningRequest', 'SigningRequestsPage', 'NodeSignature', 'NodeSignatureStatus',
   // #3649 slice B: grant signing rides the same switch (ruling 0255, item 17).
   'GrantSigningRequestState', 'GrantSigningRequest',
   // #3690 PR 2: creating a grant rides the same switch, so none can be made where it could not be signed.

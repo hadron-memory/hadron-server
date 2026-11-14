@@ -277,7 +277,7 @@ describe('#2064 full-scope §10 (Riana) — response and discovery boundaries', 
     try {
       const result = await server.executeOperation(
         { query: `mutation($i:UpdateNodeInput!){updateNode(input:$i){id memoryId loc name revision description abstract tags content data
-          memory{id} outgoingEdges{id} incomingEdges{id} asset{id} signingRequests{id} commentSummary{comments openThreads oldestOpenThreadAt}
+          memory{id} outgoingEdges{id} incomingEdges{id} asset{id} signingRequests{id} signingRequestsPage{items{id} hasMore nextCursor} commentSummary{comments openThreads oldestOpenThreadAt}
           approvalStatus{state approval{revision}} mintStatus{minted mintedByInfo} authorship{__typename} createdByWorker{id} updatedByAgent{id} updatedByUser{handle}
           contentValidation{state} signatureStatus{state signatures{id}}}}`, variables: { i: { install: f.install, loc: 'prompts:lane', description: 'only-this' } } },
         { contextValue: ctx },
@@ -292,7 +292,7 @@ describe('#2064 full-scope §10 (Riana) — response and discovery boundaries', 
       // Selecting `revision` on a concealed write must not error (Node.revision reads revSeq): Andi, Charles, Bindi.
       expect(out.revision).toBe((await db.node.findUniqueOrThrow({ where: { id: node.id } })).revSeq);
       expect(out).toMatchObject({ description: null, abstract: null, tags: [], content: null, data: null, memory: null,
-        outgoingEdges: [], incomingEdges: [], asset: null, signingRequests: [], authorship: null, createdByWorker: null, updatedByAgent: null,
+        outgoingEdges: [], incomingEdges: [], asset: null, signingRequests: [], signingRequestsPage: { items: [], hasMore: false, nextCursor: null }, authorship: null, createdByWorker: null, updatedByAgent: null,
         // Ruth's #2064 merge condition: #2189's updatedByUser re-reads the last editor by node id, so it is concealed too.
         updatedByUser: null });
       expect(out.commentSummary).toEqual({ comments: 0, openThreads: 0, oldestOpenThreadAt: null });

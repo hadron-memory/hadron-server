@@ -399,6 +399,7 @@ const CONCEALED_FIELDS: Record<string, () => unknown> = {
   asset: () => null,
   inheritedFrom: () => null,
   signingRequests: () => [],
+  signingRequestsPage: () => ({ items: [], hasMore: false, nextCursor: null }),
   outgoingEdges: () => [],
   incomingEdges: () => [],
   commentSummary: () => ({ openThreads: 0, resolvedThreads: 0, comments: 0, viewerOpenThreadId: null, oldestOpenThreadAt: null }),
