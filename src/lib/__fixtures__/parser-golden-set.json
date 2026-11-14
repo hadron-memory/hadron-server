@@ -326,31 +326,28 @@
       "expectedParserRewrites": []
     },
     {
-      "_note": "app-owned: the app: marker survives canonicalization (no type-marker-optionality rewrite).",
+      "_note": "v1 `::` App/memory-owned secret spelling (#679) is refused since urn-lib-js 0.0.22 (r81, #3998): the App secret is the flat v2 shape hrn:secret:<root>:app:<app>:<name>.",
       "input": "hrn:secret:acme.com::app:internal-ops::stripe-key",
-      "expectedType": "secret",
-      "expectedParserCanonical": "hrn:secret:acme.com::app:internal-ops::stripe-key",
-      "expectedParserRewrites": []
+      "expectedReject": "invalid-segment-shape",
+      "offendingSegment": "app:internal-ops"
     },
     {
+      "_note": "v1 `::` App/memory-owned secret spelling (#679) is refused since urn-lib-js 0.0.22 (r81, #3998): the App secret is the flat v2 shape hrn:secret:<root>:app:<app>:<name>.",
       "input": "hrn:secret:@holger::app:gmail-app::stripe-key",
-      "expectedType": "secret",
-      "expectedParserCanonical": "hrn:secret:@holger::app:gmail-app::stripe-key",
-      "expectedParserRewrites": []
+      "expectedReject": "invalid-segment-shape",
+      "offendingSegment": "app:gmail-app"
     },
     {
-      "_note": "memory-owned: the memory: marker survives too.",
+      "_note": "v1 `::` App/memory-owned secret spelling (#679) is refused since urn-lib-js 0.0.22 (r81, #3998): the App secret is the flat v2 shape hrn:secret:<root>:app:<app>:<name>.",
       "input": "hrn:secret:acme.com::memory:secureid::stripe-key",
-      "expectedType": "secret",
-      "expectedParserCanonical": "hrn:secret:acme.com::memory:secureid::stripe-key",
-      "expectedParserRewrites": []
+      "expectedReject": "invalid-segment-shape",
+      "offendingSegment": "memory:secureid"
     },
     {
-      "_note": "legacy urn: scheme normalizes to hrn: for secrets too.",
+      "_note": "v1 `::` App/memory-owned secret spelling (#679) is refused since urn-lib-js 0.0.22 (r81, #3998): the App secret is the flat v2 shape hrn:secret:<root>:app:<app>:<name>.",
       "input": "urn:secret:acme.com::app:internal-ops::stripe-key",
-      "expectedType": "secret",
-      "expectedParserCanonical": "hrn:secret:acme.com::app:internal-ops::stripe-key",
-      "expectedParserRewrites": ["legacy-urn-scheme"]
+      "expectedReject": "invalid-segment-shape",
+      "offendingSegment": "app:internal-ops"
     },
     {
       "_note": "secret owner marker must be app:/memory: — a bad marker is rejected at parse (not parse-OK-then-resolve-fail).",
