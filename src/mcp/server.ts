@@ -99,6 +99,7 @@ import { registerTickerTools } from './tickerTools.js';
 import { registerStopSignalTools } from './stopSignalTools.js';
 import { registerWebPollTools } from './webPollTools.js';
 import { registerGrantTools } from './grantTools.js';
+import { registerSecretTools } from './secretTools.js';
 import { openThreadCounts, type CommentCounts } from '../lib/comments/summary.js';
 import { loadSignatureStatuses, type NodeSignatureStatusView } from '../lib/signing/status.js';
 import { nodeContentValidationState } from '../lib/nodeContentValidation.js';
@@ -2437,6 +2438,7 @@ export function createMcpServerInstance(
     'hadron_web_poll_list',
     // #3711 — hadron_create_grant acts as the person and clears any worker binding itself (src/mcp/grantTools.ts); no session argument.
     'hadron_create_grant',
+    'hadron_list_secrets', 'hadron_get_secret', // #3998: metadata reads, never a reveal or write.
     // Per-connection selections and key handling: nothing authored.
     'hadron_set_active_memory', 'hadron_set_active_app', 'hadron_set_active_org', 'hadron_set_active_scope',
     'hadron_unlock_memory', 'hadron_lock_memory',
@@ -3874,6 +3876,7 @@ export function createMcpServerInstance(
   registerWebPollTools(server, { db, auth });
   // #3711 — a person who manages an App asks for a grant (ruling 0255 item 21); never as a worker.
   registerGrantTools(server, { db, auth });
+  registerSecretTools(server, { db, auth });
   registerAutomationPinTools(server, { db, auth });
   // #1892 — an Agent's task and process lists (cor:dmo:050:15, :16).
   registerAgentDefinitionTools(server, { db, auth });
