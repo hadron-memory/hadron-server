@@ -1,0 +1,80 @@
+name: E2E Seed
+
+# #4074 (follow-up to #4058/#4060): nothing else in CI executes scripts/e2e/seed.ts, so the passkey branches of
+# scripts/e2e/provision-signins.ts (cor:aut:030:02 pin on registration ON, login-code redemption on OFF) were covered
+# only by hand-run stack QA. Each row runs the real seed, unmodified, against a real Postgres and the seed's own
+# loopback server; /capabilities is read live, never mocked. Controls expect the passkey-registration token ABSENT
+# (cor:api:020:01), which the seed's requested-vs-actual assert enforces. The last row is the red control: it mutates the
+# checkout so the server drops the registration switch (the #4058 shape) and requires the seed to refuse that stack.
+on:
+  pull_request:
+    paths:
+      - 'scripts/e2e/**'
+      - '.github/workflows/e2e-seed.yml'
+      - 'src/lib/signing/**'
+      - 'src/auth/**'
+      - 'src/server.ts'
+      - 'prisma/schema.prisma'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/e2e/**'
+      - '.github/workflows/e2e-seed.yml'
+      - 'src/lib/signing/**'
+      - 'src/auth/**'
+      - 'src/server.ts'
+      - 'prisma/schema.prisma'
+
+permissions:
+  contents: read
+
+jobs:
+  seed-row:
+    name: seed (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: 'signing ON / registration ON', signing: 'true', registration: 'true', expect: pass }
+          - { name: 'signing OFF / registration OFF', signing: 'false', registration: 'false', expect: pass }
+          - { name: 'signing ON / registration OFF', signing: 'true', registration: 'false', expect: pass }
+          - { name: 'red control: dropped registration switch', signing: 'true', registration: 'true', expect: fail, mutate: drop-registration }
+    env:
+      DATABASE_URL: postgresql://e2e:e2e@db:5432/e2e
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: e2e
+          POSTGRES_PASSWORD: e2e
+          POSTGRES_DB: e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U e2e -d e2e"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm prisma generate
+      # seed.ts refuses any database host but `db` (compose's service name) and writes /fixtures.
+      - name: Provide the compose names the seed insists on
+        run: |
+          echo '127.0.0.1 db' | sudo tee -a /etc/hosts
+          sudo mkdir -p /fixtures && sudo chown "$USER" /fixtures
+      - name: Run the seed for this row
+        env:
+          ROW_SIGNING: ${{ matrix.signing }}
+          ROW_REGISTRATION: ${{ matrix.registration }}
+          ROW_EXPECT: ${{ matrix.expect }}
+          ROW_MUTATE: ${{ matrix.mutate }}
+        run: scripts/e2e/seed-lane.sh
