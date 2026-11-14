@@ -95,3 +95,56 @@ it('new signing pages suppress inherited and concealed payloads before the loade
     expect((await fields.signingRequestsPage({ id: nodeId }, {}, ctx())).items).toHaveLength(1);
     expect(load).toHaveBeenCalledTimes(1);
 });
+
+async function pollRows(ids: string[]) {
+    await db.webFetchPollBinding.createMany({ data: ids.map(jobId => ({ jobId, sourceRunId: runId, organizationId: orgId, appId, entryNodeUrn: 'flow:start', url: 'https://example.test/watch' })) });
+}
+function jobs(ids: string[]) {
+    vi.mocked(listPolls).mockResolvedValue({ jobs: ids.map(jobId => ({ jobId, status: 'active', expiresAt: '2030-01-01T00:00:00Z', triggerCount: 0, consecutiveFailures: 0 })) });
+}
+it('keyset survives a deleted poll anchor and insertions on either side of its boundary, with exact totals', async () => {
+    await pollRows(['a', 'b', 'c', 'd', '0', 'bc']); jobs(['a', 'b', 'c', 'd']);
+    const first = await Q.webPollsPage(null, { orgRef: orgId, first: 2 }, ctx());
+    expect(first.items.map((x: any) => x.jobId)).toEqual(['a', 'b']);
+    await db.webFetchPollBinding.delete({ where: { jobId: 'b' } });
+    jobs(['0', 'a', 'bc', 'c', 'd']);
+    const next = await Q.webPollsPage(null, { orgRef: orgId, first: 2, after: first.nextCursor }, ctx());
+    expect(next.items.map((x: any) => x.jobId)).toEqual(['bc', 'c']);
+    const last = await Q.webPollsPage(null, { orgRef: orgId, first: 2, after: next.nextCursor }, ctx());
+    expect(last.items.map((x: any) => x.jobId)).toEqual(['d']);
+    expect(first.total).toBe(4); expect(next.total).toBe(5); expect(last.total).toBe(5);
+    expect(last.hasMore).toBe(false); expect(last.nextCursor).toBeNull();
+    const offset = await Q.webPollsPage(null, { orgRef: orgId, first: 2, offset: 2 }, ctx());
+    expect(offset.items.map((x: any) => x.jobId)).toEqual(['bc', 'c']);
+});
+it('cursor plus explicit offset refuses before any list or authorization lookup', async () => {
+    const noReads = { ...ctx(), db: new Proxy(db, { get() { throw new Error('unexpected DB lookup'); } }) };
+    await expect(Q.webPollsPage(null, { orgRef: orgId, after: 'opaque', offset: 0 }, noReads)).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    await expect(N.signingRequestsPage({ id: nodeId }, { after: 'opaque', offset: 0 }, noReads)).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    expect(listPolls).not.toHaveBeenCalled();
+});
+it('forged, edited and filter-mismatched cursors have the same refusal and never fetch sidecar rows', async () => {
+    await pollRows(['a', 'b', 'c']); jobs(['a', 'b', 'c']);
+    const page = await Q.webPollsPage(null, { orgRef: orgId, first: 1 }, ctx());
+    const edited = page.nextCursor.slice(0, 10) + (page.nextCursor[10] === 'A' ? 'B' : 'A') + page.nextCursor.slice(11);
+    const forged = Buffer.from(JSON.stringify({ scope: `webPolls:${orgId}`, offset: 1 })).toString('base64url');
+    vi.mocked(listPolls).mockClear();
+    for (const after of [forged, edited, 'invalid']) {
+        await expect(Q.webPollsPage(null, { orgRef: orgId, after }, ctx())).rejects.toMatchObject({ message: 'Invalid page cursor or size.', extensions: { code: 'BAD_USER_INPUT' } });
+    }
+    await expect(N.signingRequestsPage({ id: nodeId }, { after: page.nextCursor }, ctx())).rejects.toMatchObject({ message: 'Invalid page cursor or size.', extensions: { code: 'BAD_USER_INPUT' } });
+    expect(listPolls).not.toHaveBeenCalled();
+});
+it('signing keyset does not repeat a row when a newer request is inserted before page two; total remains exact', async () => {
+    const input = () => ({ id: generateId(), nodeId, revision: 1, requesterUserId: userId, approvalHash: 'a'.repeat(64), payloadVersion: 'hadron-signature-v3', state: 'open', expiresAt: new Date(Date.now() + 3600000) });
+    await db.signingRequest.createMany({ data: Array.from({ length: 5 }, input) });
+    const ordered = await db.signingRequest.findMany({ where: { nodeId }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] });
+    const first = await N.signingRequestsPage({ id: nodeId }, { first: 2 }, ctx());
+    expect(first.items.map((x: any) => x.id)).toEqual(ordered.slice(0, 2).map(x => x.id));
+    const inserted = await db.signingRequest.create({ data: input() });
+    expect(inserted.createdAt.getTime()).toBeGreaterThan(ordered[0].createdAt.getTime());
+    const next = await N.signingRequestsPage({ id: nodeId }, { first: 100, after: first.nextCursor }, ctx());
+    expect(next.items.map((x: any) => x.id)).toEqual(ordered.slice(2).map(x => x.id));
+    expect(first.total).toBe(5); expect(next.total).toBe(6); expect(next.nextCursor).toBeNull();
+    await expect(N.signingRequestsPage({ id: nodeId }, { state: 'EXPIRED', after: first.nextCursor }, ctx())).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+});
