@@ -142,12 +142,45 @@ mkdir -p "$STATE_DIR"
 # read hanging forever — frozen TUI, no log line, worker silent 5h). A read
 # that never completes must time out and let the hook exit (hook failure is
 # benign next to wedging the agent's UI thread indefinitely).
-input=$(timeout 10 cat)
-trigger=$(printf '%s' "$input" | jq -r '.trigger // empty' 2>/dev/null)
-cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)
-transcript=$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null)
+# #4011 A: every step has its own budget so process start to exit stays <= 45 s on every skip path
+# (stdin 5 + presence 25 [whoami 5, worker get 5, one transcript pass 10, margin 5] + warning post 10 + log/cleanup 5).
+# A step that times out is an UNREADABLE presence: logged, warned once, exit 0, never a kill. The values are
+# overridable (tests run scaled down); anything that is not a positive number falls back to the default, because
+# `timeout 0` means "no limit" and would switch the bound off.
+budget() {
+  local v=${!1:-}
+  if printf '%s' "$v" | grep -Eq '^[0-9]+([.][0-9]+)?$' && awk -v x="$v" 'BEGIN{exit !(x>0)}'; then printf '%s' "$v"; else printf '%s' "$2"; fi
+}
+T_STDIN=$(budget WORKER_AUTO_SHED_T_STDIN 5)
+T_WHOAMI=$(budget WORKER_AUTO_SHED_T_WHOAMI 5)
+T_WORKER=$(budget WORKER_AUTO_SHED_T_WORKER 5)
+T_TRANSCRIPT=$(budget WORKER_AUTO_SHED_T_TRANSCRIPT 10)
+T_WARN=$(budget WORKER_AUTO_SHED_T_WARN 10)
+# SIGTERM alone does not bound a command that ignores it: every timed step escalates to SIGKILL after this grace,
+# which the 45 s aggregate accounts for (<= 1 s on each of stdin, whoami, worker get, transcript, warning post).
+KILL_GRACE=$(budget WORKER_AUTO_SHED_T_KILL_GRACE 1)
+# #4011 F1: parsing is inside its segment's budget too. jqb runs jq on stdin with whatever is LEFT of the segment's
+# budget (never less than 50 ms, so a parse of a tiny document after a slow command still runs): a jq that stalls is
+# a timeout (124/137), classified unreadable by the caller. Worst case is stdin 7.05 + whoami 7.05 + worker get 7.05
+# + transcript 11 + warning 11 = 43.2 s, inside the 45 s bound (5 s log/cleanup margin not even needed).
+jqb() {
+  local b=$1 t0=$2 rem
+  shift 2
+  rem=$(awk -v b="$b" -v t0="$t0" -v n="$(date +%s.%N)" 'BEGIN{r=b-(n-t0); if (r<0.05) r=0.05; printf "%.3f", r}')
+  timeout -k "$KILL_GRACE" "$rem" jq "$@" 2>/dev/null
+}
+is_timeout() { [ "$1" -eq 124 ] || [ "$1" -eq 137 ]; }
 ts() { date -u +%FT%TZ; }
 log() { printf '%s %s\n' "$(ts)" "$1" >>"$LOG"; }
+T0_HOOK=$(date +%s.%N)
+input=$(timeout -k "$KILL_GRACE" "$T_STDIN" cat); in_rc=$?
+# 124 = timed out on SIGTERM, 137 = it ignored SIGTERM and needed the SIGKILL escalation.
+if [ "$in_rc" -eq 124 ] || [ "$in_rc" -eq 137 ]; then log "skip: stdin read timed out (${T_STDIN}s); nothing read, no kill"; exit 0; fi
+# No cwd is known until these parse, so a stdin failure has no worker to attribute a chat warning to: it is logged only.
+trigger=$(jqb "$T_STDIN" "$T0_HOOK" -r '.trigger // empty' <<<"$input"); p1=$?
+cwd=$(jqb "$T_STDIN" "$T0_HOOK" -r '.cwd // empty' <<<"$input"); p2=$?
+transcript=$(jqb "$T_STDIN" "$T0_HOOK" -r '.transcript_path // empty' <<<"$input"); p3=$?
+if is_timeout "$p1" || is_timeout "$p2" || is_timeout "$p3"; then log "skip: stdin parse timed out (${T_STDIN}s budget); no kill"; exit 0; fi
 
 if [ "$trigger" != "auto" ]; then
   log "skip: trigger=$trigger (manual /compact untouched)"
@@ -231,25 +264,54 @@ warned="$STATE_DIR/${name}.skip-warned"
 # Prints one word: clear | typing | conversation | unreadable:<reason>.
 human_presence() {
   local who state prompt out last epoch
-  who=$(cd "$cwd" 2>/dev/null && timeout 15 hadron team session whoami 2>/dev/null | head -1 | sed 's/ (.*//')
+  local t0 rc left wj jrc tw0 stale
+  t0=$(date +%s.%N)
+  # `whoami --json` first (.workerName); the text form is the fallback and shares the SAME budget.
+  wj=$(cd "$cwd" 2>/dev/null && timeout -k "$KILL_GRACE" "$T_WHOAMI" hadron team session whoami --json 2>/dev/null); rc=$?
+  { [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; } && { echo "unreadable:whoami timed out"; return; }
+  who=""
+  if [ "$rc" -eq 0 ]; then
+    who=$(jqb "$T_WHOAMI" "$t0" -r '.workerName // empty' <<<"$wj"); jrc=$?
+    is_timeout "$jrc" && { echo "unreadable:whoami timed out"; return; }
+  fi
+  if [ -z "$who" ]; then
+    left=$(awk -v b="$T_WHOAMI" -v t0="$t0" -v n="$(date +%s.%N)" 'BEGIN{printf "%.3f", b-(n-t0)}')
+    awk -v x="$left" 'BEGIN{exit !(x>0)}' || { echo "unreadable:whoami timed out"; return; }
+    wj=$(cd "$cwd" 2>/dev/null && timeout -k "$KILL_GRACE" "$left" hadron team session whoami 2>/dev/null); rc=$?
+    { [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; } && { echo "unreadable:whoami timed out"; return; }
+    who=$(printf '%s\n' "$wj" | head -1 | sed 's/ (.*//')
+  fi
   [ -n "$who" ] || { echo "unreadable:no worker name from whoami"; return; }
-  state=$(timeout 15 hadron team worker get "$who" --json 2>/dev/null) || { echo "unreadable:terminal read failed"; return; }
-  prompt=$(printf '%s' "$state" | jq -r '.terminal.prompt // empty' 2>/dev/null)
+  # The worker whoami reports must be the worker this hook fires for; anything else proves nothing about THIS terminal.
+  [ "${who,,}" = "${name,,}" ] || { echo "unreadable:whoami worker differs from hook worker"; return; }
+  tw0=$(date +%s.%N)
+  state=$(timeout -k "$KILL_GRACE" "$T_WORKER" hadron team worker get "$who" --json 2>/dev/null); rc=$?
+  { [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; } && { echo "unreadable:worker get timed out"; return; }
+  [ "$rc" -eq 0 ] || { echo "unreadable:terminal read failed"; return; }
+  prompt=$(jqb "$T_WORKER" "$tw0" -r '.terminal.prompt // empty' <<<"$state"); jrc=$?
+  is_timeout "$jrc" && { echo "unreadable:worker get timed out"; return; }
   # A stale report is an old observation, not the live input box: an empty prompt in it proves nothing.
-  [ "$(printf '%s' "$state" | jq -r '.terminal.stale // false' 2>/dev/null)" = "true" ] && { echo "unreadable:terminal report is stale"; return; }
+  stale=$(jqb "$T_WORKER" "$tw0" -r '.terminal.stale // false' <<<"$state"); jrc=$?
+  is_timeout "$jrc" && { echo "unreadable:worker get timed out"; return; }
+  [ "$stale" = "true" ] && { echo "unreadable:terminal report is stale"; return; }
   case "$prompt" in
     not_empty) echo typing; return ;;
     empty) ;;
     *) echo "unreadable:terminal prompt state not reported"; return ;;
   esac
   { [ -n "$transcript" ] && [ -r "$transcript" ]; } || { echo "unreadable:transcript missing"; return; }
-  # `fromjson?` below drops a record that does not parse, which would read as "no human": so every
-  # non-blank record must parse first, or the history cannot be established.
-  timeout 30 jq -R 'select(length > 0) | fromjson' "$transcript" >/dev/null 2>&1 || { echo "unreadable:transcript has an unparseable record"; return; }
-  out=$(timeout 30 jq -Rr 'fromjson? | select(.type == "user" and .origin.kind == "human")
+  # ONE pass: `fromjson` WITHOUT `?` fails the whole run on a record that does not parse (a dropped record would
+  # read as "no human"), and the same pass prints the human prompt timestamps.
+  out=$(timeout -k "$KILL_GRACE" "$T_TRANSCRIPT" jq -Rr 'select(length > 0) | fromjson | select(.type == "user" and .origin.kind == "human")
       | ((.message.content | if type == "string" then . elif type == "array" then ([.[] | select(.type == "text") | .text] | join("\n")) else "" end) // "") as $t
       | select($t != "" and ($t | test("^\\s*(<pasted_content[^>]*>\\s*)?\\[hadron (tick|task|chat)\\]|^You just went through an AUTOMATIC SHED") | not))
-      | .timestamp' "$transcript" 2>/dev/null) || { echo "unreadable:transcript read failed"; return; }
+      | .timestamp' "$transcript" 2>/dev/null); rc=$?
+  case "$rc" in
+    0) ;;
+    124|137) echo "unreadable:transcript read timed out"; return ;;
+    5) echo "unreadable:transcript has an unparseable record"; return ;;
+    *) echo "unreadable:transcript read failed"; return ;;
+  esac
   last=$(printf '%s\n' "$out" | tail -1)
   [ -n "$last" ] || { echo clear; return; }
   epoch=$(date -d "$last" +%s 2>/dev/null) || { echo "unreadable:prompt timestamp"; return; }
@@ -263,7 +325,7 @@ warn_once() {
   else
     msg="$name: my context is nearly full and a shed is due. I did not stop this session because you are in the middle of a conversation with it ($1). Tell me when you are done and I will shed, or run /shed yourself."
   fi
-  if (cd "$cwd" && timeout 20 hadron team chat post "$msg" >>"$LOG" 2>&1); then
+  if (cd "$cwd" && timeout -k "$KILL_GRACE" "$T_WARN" hadron team chat post "$msg" >>"$LOG" 2>&1); then
     touch "$warned"
     log "$name: warned the human that a shed is due ($1${2:+: $2})"
   else
