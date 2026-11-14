@@ -3203,6 +3203,14 @@ export const agentTaskQueries = {
    * transaction and every older one have ended (xmin is cluster-wide); it may lag, it is never skipped. Rows from
    * before the column hold '0' and keep their (created_at, id) order. `tx_id` is never null: nothing writes it, and the
    * column default fills every insert.
+   *
+   * The id arm of the key (#4097): it decides only between rows of one transaction — distinct transactions get
+   * distinct xid8s, and door-written rows stamp `created_at = now()`, fixed per transaction — and the release door
+   * writes no other change-kind event for the task, so for door-written rows the id never decides released-id
+   * retention; a full tie is reachable only by forced rows (the append-only trigger's INSERT arm leaves `tx_id` to
+   * the writer). Whatever the id tail then does — the generator does not order within a millisecond — the served
+   * order and the classification share the key, so no change carrying an id follows that id's RELEASED in the served
+   * order (#4097 tests, blocks 1).
    */
   agentTaskExternalIdChanges: async (_: unknown, args: { appRef: string; after?: string | null; limit?: number | null }, ctx: Context) =>
     withReadableApp(ctx, args.appRef, async (c, app) => {
@@ -3220,16 +3228,23 @@ export const agentTaskQueries = {
       // #4107: "before" and "after" are judged on the serving key (tx_id, created_at, id), the order the page is served
       // and the cursor advances in, never on created_at alone (a writer-stamped time): otherwise a change written after
       // the release with an older stamp kept the id and was served after RELEASED.
+      // #4097: the id arm of that key decides only between rows of ONE transaction — distinct transactions get
+      // distinct xid8s from the database and door-written rows stamp created_at = now(), fixed per transaction — and
+      // no door writes a change-kind event and the release for one task in one transaction (the release door writes
+      // only the release), so for door-written rows the id never decides; a tie is reachable only by forced rows.
+      // #4097 (N14): both event-to-task joins are App-tight — agent_team_events.task_id carries no FK, so a forced or
+      // legacy row can name another App's task: without the predicate such a row leaked that task's external id (or a
+      // foreign RELEASED payload moved this App's boundary) and hydrated to no task mid-page.
       const rows = await c.db.$queryRaw<{ id: string; createdAt: Date; type: string; taskId: string; externalId: string }[]>`
         SELECT x.id, x."createdAt", x.type, x."taskId", x."externalId" FROM (
           SELECT e.id, e.created_at AS "createdAt", e.type, e.task_id AS "taskId", e.tx_id AS "txId",
                  COALESCE(t.external_id,
                    CASE WHEN (e.tx_id, e.created_at, e.id) <= (r.tx_id, r.created_at, r.id) THEN r.payload->>'externalId' END) AS "externalId"
           FROM agent_team_events e
-          JOIN agent_tasks t ON t.id = e.task_id
+          JOIN agent_tasks t ON t.id = e.task_id AND t.app_id = e.app_id
           LEFT JOIN LATERAL (
             SELECT rr.id, rr.tx_id, rr.created_at, rr.payload FROM agent_team_events rr
-            WHERE rr.task_id = e.task_id AND rr.type = ${EXTERNAL_ID_RELEASED}
+            WHERE rr.task_id = e.task_id AND rr.app_id = e.app_id AND rr.type = ${EXTERNAL_ID_RELEASED}
             ORDER BY rr.tx_id, rr.created_at, rr.id LIMIT 1
           ) r ON true
           WHERE e.app_id = ${app.id}
