@@ -1,6 +1,6 @@
 -- #3483 (Grants phase 3): the grant guard admits a USE, use_count + 1 on a row live at that instant and nothing else moving.
 -- #3668 (S1a): the database half of the grant row, its events and the actions table. One source; the newest migration to
--- carry it (20261111040000_grant_use_spend) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
+-- carry it (20261114130000_grant_use_spend) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
 -- post-push.sql applies it.
 --
 -- GRANTS. Exactly one holder (a user, an agent, a worker or an App); the CHECK cannot pass on NULL, because
