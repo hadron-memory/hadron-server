@@ -4,16 +4,14 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
-import { requireSecretReadClientIssuer, SECRET_READ_CLIENT_SUPERSEDED, type IssuerCaller } from './readClientIssuer.js';
+import { requireSecretReadClientIssuer, SECRET_READ_CLIENT_SUPERSEDED } from './readClientIssuer.js';
+import type { Context } from '../../api/graphql/schema/resolvers.js';
+type IssuerCaller = Context;
 
 let ownerId: string; let memberId: string; let writer2Id: string; let outsiderId: string; let adminId: string;
 let appId: string; let workerId: string; let sessionId: string; let orgAppId: string; let secretId: string;
 const mk = async () => (await db.user.create({ data: { email: `${generateId()}@i.test` } })).id;
-const caller = (userId: string, over: Record<string, unknown> = {}): IssuerCaller => ({
-  db, userId, roles: [], isAppParticipant: async (app) => app.ownerUserId === userId
-    || !!(await db.appMember.findFirst({ where: { appId: app.id, userId } })),
-  ...over,
-} as unknown as IssuerCaller);
+const caller = (userId: string, over: Record<string, unknown> = {}): IssuerCaller => ({ db, userId, roles: [], ...over } as unknown as IssuerCaller);
 const code = (p: Promise<unknown>) => p.then(() => 'OK', (e: { extensions?: { code?: string } }) => e.extensions?.code ?? 'ERR');
 const version = async (by: { user?: string; worker?: string }, n: number) => {
   await db.$executeRaw`INSERT INTO secret_app_keys (app_id, key_version, wrapped_key) VALUES (${appId}, 1, 'k') ON CONFLICT DO NOTHING`;
@@ -36,7 +34,7 @@ beforeEach(async () => {
   secretId = generateId();
   await db.$executeRaw`INSERT INTO secrets (id, owner_type, owner_id, name, kind, updated_at) VALUES (${secretId}, 'app', ${appId}, 'tok', 'generic', now())`;
 });
-const gate = (c: IssuerCaller, id = secretId) => db.$transaction((tx) => requireSecretReadClientIssuer(c, tx, id));
+const gate = (c: IssuerCaller, id = secretId) => requireSecretReadClientIssuer(c, id);
 
 describe('#3998 secret read client issuer', () => {
   it('lets the App owner issue as a manager', async () => {

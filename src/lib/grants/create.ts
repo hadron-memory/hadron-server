@@ -35,6 +35,7 @@
 import type { Prisma } from '../../generated/prisma/index.js';
 import { isAgentInstalledAndLicensed } from '../appAgent.js';
 import { generateId } from '../id.js';
+import { isModelReadableKind } from '../secrets.js';
 import { grantTermsBytes, GrantTermsError, type GrantHolderKind } from './terms.js';
 
 export type GrantCreateCode =
@@ -95,6 +96,9 @@ const MAX_LIST_ENTRIES = 100;
 const NODE_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
 /** Judge a value by its parameter's declared type. An unknown type is refused (fail closed), so a new type needs its rule here. */
 function valueMatchesType(type: string, value: unknown): boolean {
+  // #3998 (cor:acl:140:09, secret forms): a secret id is ONE stored id, never a list or the wildcard; the mark is one of two tokens, exactly.
+  if (type === 'secret-ref') return typeof value === 'string' && NODE_ID_RE.test(value);
+  if (type === 'secret-mark') return value === 'keep' || value === 'delete';
   if (type !== 'node-ref') return false;
   const one = (v: unknown) => v === '*' || (typeof v === 'string' && NODE_ID_RE.test(v));
   return Array.isArray(value) ? value.every(one) : one(value);
@@ -185,6 +189,14 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
       if (!(await args.canReadMemory(memoryId))) { ok = false; break; }
     }
     if (!ok) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
+  }
+
+  // #3998: a secret-ref names a secret of THIS App whose kind a model may read (an inject-only kind has no reveal client). A missing,
+  // other-App, org, user or inject-only secret is the same refusal as a malformed id, so this is no existence oracle.
+  for (const p of declared) {
+    if (p.type !== 'secret-ref') continue;
+    const secret = await tx.secret.findFirst({ where: { id: (values as Record<string, unknown>)[p.name] as string, ownerType: 'app', ownerId: appId }, select: { kind: true } });
+    if (!secret || !isModelReadableKind(secret.kind)) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
   }
 
   // Count Unicode code points like task findings, with a UTF-16 fast bound so counting work is bounded.

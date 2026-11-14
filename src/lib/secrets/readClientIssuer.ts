@@ -9,18 +9,14 @@
  *     else has since written a newer one, a former writer is refused with SECRET_READ_CLIENT_SUPERSEDED (Q21). A version a
  *     worker wrote has no person writer, so only a manager issues for it.
  * Anyone else, and a missing or deleted secret or App, gets the uniform authorization refusal: someone who may not issue sees
- * nothing of the secret. Run inside the issuing transaction, after the secret row is locked, so a newer write cannot slip in.
+ * nothing of the secret. Reads through `ctx.db`: the issuing transaction's client, called after the secret row is locked, so a newer write cannot slip in.
  */
 import { GraphQLError } from 'graphql';
-import type { Prisma } from '../../generated/prisma/index.js';
+import type { Context } from '../../api/graphql/schema/resolvers.js';
+import { isAppParticipant } from '../auth/appParticipantRead.js';
 import { authorizationDenied } from '../auth/authorizationDenied.js';
-import { requirePersonOnlyAct, type PersonGateContext } from '../auth/personAsThemselves.js';
-import { managesApp, type AppManagerCaller } from '../auth/appManagement.js';
-
-export type IssuerCaller = PersonGateContext & AppManagerCaller & {
-  /** The caller's App participation, as the secret resolvers judge it. */
-  isAppParticipant: (app: { id: string; organizationId: string | null; ownerUserId: string | null }) => Promise<boolean>;
-};
+import { requirePersonOnlyAct } from '../auth/personAsThemselves.js';
+import { managesApp } from '../auth/appManagement.js';
 
 export const SECRET_READ_CLIENT_SUPERSEDED = 'SECRET_READ_CLIENT_SUPERSEDED';
 
@@ -33,11 +29,8 @@ export interface SecretIssuance {
   asWriter: boolean;
 }
 
-export async function requireSecretReadClientIssuer(
-  ctx: IssuerCaller,
-  tx: Prisma.TransactionClient,
-  secretId: string,
-): Promise<SecretIssuance> {
+export async function requireSecretReadClientIssuer(ctx: Context, secretId: string): Promise<SecretIssuance> {
+  const tx = ctx.db;
   const userId = await requirePersonOnlyAct(ctx, 'secret.issue-read-client', authorizationDenied);
   const secret = await tx.secret.findUnique({ where: { id: secretId }, select: { id: true, name: true, ownerType: true, ownerId: true } });
   if (!secret || secret.ownerType !== 'app') throw authorizationDenied();
@@ -51,7 +44,7 @@ export async function requireSecretReadClientIssuer(
   // No platform arm: judge the manager predicate without the caller's platform roles (Q26).
   if (await managesApp({ ...ctx, roles: [] }, app)) return { ...base, asWriter: false };
 
-  if (!(await ctx.isAppParticipant(app))) throw authorizationDenied();
+  if (!(await isAppParticipant(ctx, app))) throw authorizationDenied();
   const newest = await tx.secretVersion.findFirst({
     where: { secretId: secret.id }, orderBy: { versionNo: 'desc' },
     select: { writtenByUserId: true, writtenByWorkerId: true },

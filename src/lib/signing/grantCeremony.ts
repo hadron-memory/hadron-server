@@ -101,9 +101,11 @@ async function personContext(tx: Prisma.TransactionClient, userId: string): Prom
  * GraphQLError, and any of them is "no". Anything else (a database failure) is not an answer about eligibility and propagates
  * (Gloria P3-2, #3805): it must not read as SIGNER_NOT_ELIGIBLE.
  */
-async function mayIssue(ctx: Context, action: string, appId: string): Promise<boolean> {
+async function mayIssue(ctx: Context, action: string, appId: string, grantId: string): Promise<boolean> {
   try {
-    await issuers.requireActionIssuer(ctx, action, appId);
+    // #3998: an issuer rule may depend on what the grant names (one secret), so the gate reads the stored values.
+    const grant = await ctx.db.grant.findUnique({ where: { id: grantId }, select: { values: true } });
+    await issuers.requireActionIssuer(ctx, action, appId, grant?.values);
     return true;
   } catch (e) {
     if (e instanceof GraphQLError) return false;
@@ -253,7 +255,7 @@ export async function proveForGrantSigning(db: PrismaClient, a: {
     const grantApp = await tx.grant.findUnique({ where: { id: row.grantId }, select: { appId: true, action: true } });
     if (!grantApp) throw new CeremonyRefused();
     // The issuer gate before anything about the grant: someone who may not issue it learns nothing, not even that it exists.
-    if (!(await mayIssue(ctx, grantApp.action, grantApp.appId))) throw new CeremonyRefused();
+    if (!(await mayIssue(ctx, grantApp.action, grantApp.appId, row.grantId))) throw new CeremonyRefused();
 
     const [{ now }] = await tx.$queryRaw<Array<{ now: Date }>>`SELECT hadron_signing_now() AS now`;
     const state = effectiveRequestState(row, now);
@@ -387,7 +389,7 @@ async function lockAndJudge(tx: Prisma.TransactionClient, txCtx: Context, loc: L
   const ended = grantEnded(g, pins, now);
   if (ended) throw new GrantSigningRefusal('SIGNING_REQUEST_ENDED', 'This grant can no longer be signed.', { state: ended });
   // The signer must still be able to ISSUE the grant (cor:acl:140:04), judged under the locks on the transaction's context.
-  if (!(await mayIssue(txCtx, g.action, g.app_id))) throw new GrantSigningRefusal('SIGNER_NOT_ELIGIBLE', 'You can no longer issue this grant.');
+  if (!(await mayIssue(txCtx, g.action, g.app_id, g.id))) throw new GrantSigningRefusal('SIGNER_NOT_ELIGIBLE', 'You can no longer issue this grant.');
   // The credential: the signer's own, unrevoked, enrolled under this RP ID.
   const rpId = passkeyRpId();
   if (!credential || credential.revoked_at !== null || credential.enrollment_rp_id !== rpId) {
@@ -475,7 +477,7 @@ export async function declineGrantSigning(db: PrismaClient, a: { requestId: stri
     } catch { throw new CeremonyRefused(); }
     if (cer.challenge_hash !== sha256Hex(challenge)) throw new CeremonyRefused();
     if (!(await consumeCeremony(tx, { id: a.ceremonyId, browserNonceHash: a.browserNonceHash, purpose: 'GRANT_SIGN' }))) throw new CeremonyRefused();
-    if (!(await mayIssue(txCtx, loc.action, loc.appId))) throw new GrantSigningRefusal('SIGNER_NOT_ELIGIBLE', 'You can no longer issue this grant.');
+    if (!(await mayIssue(txCtx, loc.action, loc.appId, loc.request.grantId))) throw new GrantSigningRefusal('SIGNER_NOT_ELIGIBLE', 'You can no longer issue this grant.');
     const [{ now }] = await tx.$queryRaw<Array<{ now: Date }>>`SELECT hadron_signing_now() AS now`;
     const state = effectiveRequestState({ state: request.state, expiresAt: request.expires_at }, now);
     if (state !== 'open') throw new GrantSigningRefusal('SIGNING_REQUEST_ENDED', 'This signing request has ended.', { state: state.toUpperCase() });

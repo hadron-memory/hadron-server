@@ -56,6 +56,19 @@ export const PLATFORM_ACTIONS: readonly ActionDefinition[] = [
     name: 'bootprompt.compile.approve', source: 'PLATFORM', parameters: [{ name: 'compiledNode', type: 'node-ref', refusesWildcard: true }], tool: null,
     enforcement: 'SERVER', issuerRule: 'APP_MANAGER', summaryTemplate: 'Compile and approve the boot prompts {compiledNode} in {app}, any number of times within an hour',
   },
+  // #3998 (S3 of #3991, cor:acl:140:09 secret forms, byte review passed at checkpoint 1): reveal the value of ONE App secret. Seeded once,
+  // complete: the secret as its stored id (a single value, never a name, a list or the wildcard) and the mark, exactly "keep" or "delete"
+  // (the secret is deleted by the read that spends the last use). The window and the budget are the grant's own starts, expires and
+  // max uses, so nothing about them is a parameter. The mark has no placeholder: its hyphenated name cannot be one, and the signing
+  // page shows it beside the sentence. `secret.use` is S5's and is not seeded here.
+  {
+    name: 'secret.reveal', source: 'PLATFORM', tool: null, enforcement: 'SERVER', issuerRule: 'SECRET_READ_CLIENT',
+    parameters: [
+      { name: 'secret', type: 'secret-ref', refusesWildcard: true },
+      { name: 'auto-delete', type: 'secret-mark', refusesWildcard: true },
+    ],
+    summaryTemplate: 'Read the value of the secret {secret} of {app}',
+  },
 ];
 
 export interface UpsertResult { inserted: number; updated: number; unchanged: number }
