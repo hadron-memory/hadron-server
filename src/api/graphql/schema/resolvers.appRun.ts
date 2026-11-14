@@ -36,6 +36,7 @@ import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { type Context, requireOrgRole, requireOwnerOrOrgRole, isPlatformAdmin } from './resolvers.helpers.js';
 import { withAuthorizedTx } from './authorizedTx.js';
+import { admitWorkerTrigger, workerBoundActor, workerTriggerGrantEnforced, workerTriggerWouldBeAdmitted } from '../../../lib/grants/triggerGrant.js';
 import { requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { hasAppRelationship } from '../../../lib/auth/appRelationship.js';
@@ -534,13 +535,11 @@ export const appRunMutations = {
     // Spec 049 Phase 3b: the trigger's scope — readable by the caller and owned
     // by this App's context; snapshotted onto each run at mint.
     const scopeId = input.scopeRef?.trim() ? await resolveScopeForTrigger(ctx, app.id, input.scopeRef) : null;
-    const automationPin = await captureSetupConsent(ctx.db, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId, ctx, configSelection({ ...input, agentId }));
-    // #2438: the setup pin already resolved the entry — its entryId is the
-    // stable key. The unadopted marker carries none (⇒ null: an unresolvable
-    // entry keeps the URN path; D20 records the setup failure).
-    const entryNodeId = automationPin != null && typeof automationPin === 'object' && 'entryId' in automationPin
-      ? (automationPin as { entryId: string }).entryId : null;
-    return ctx.db.agentSchedule.create({
+    // #2438: the setup pin resolves the entry — its entryId is the stable key. The unadopted marker carries none (⇒ null: an
+    // unresolvable entry keeps the URN path; D20 records the setup failure).
+    const entryIdOf = (pin: unknown): string | null => pin != null && typeof pin === 'object' && 'entryId' in pin
+      ? (pin as { entryId: string }).entryId : null;
+    const create = (db: Pick<Context['db'], 'agentSchedule'>, automationPin: unknown, entryNodeId: string | null) => db.agentSchedule.create({
       data: {
         id: generateId(),
         organizationId: app.organizationId,
@@ -567,6 +566,34 @@ export const appRunMutations = {
         createdBy: ctx.userId ?? ctx.clientId ?? null,
       },
     });
+    // #3483 (cor:agt:010:01 rev 46): a worker-bound caller needs a live, signed `schedule.create` grant for this entry node,
+    // spent in the same transaction as the create. Off (the default), or for a person, this is main's single write.
+    // The caller's own authority is re-judged inside the spend's transaction behind the shared authority anchors (gate
+    // 6756824828 item 5, as the webhook door does), so an ADMIN membership revoked before the spend commits refuses and spends
+    // nothing; then the consent is captured, the grant admitted and spent (the last lock), and the row written.
+    if (workerTriggerGrantEnforced() && await workerBoundActor(ctx)) {
+      return withAuthorizedTx(
+        ctx,
+        [{ kind: 'org', id: app.organizationId }, { kind: 'app', id: app.id },
+          ...(agentId ? [{ kind: 'agent' as const, id: agentId }] : [])],
+        async (txCtx) => {
+          const currentApp = await requireScheduleAdmin(txCtx, input.appRef);
+          if (currentApp.id !== app.id || currentApp.organizationId !== app.organizationId) {
+            throw new Error('App scope changed; retry schedule creation');
+          }
+          if (agentId) await resolveInstalledAgent(txCtx, app.id, input.agentRef);
+          if (input.scopeRef?.trim()) await resolveScopeForTrigger(txCtx, app.id, input.scopeRef);
+        },
+        async (tx, txCtx) => {
+          const automationPin = await captureSetupConsent(tx as never, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId, txCtx, configSelection({ ...input, agentId }));
+          const entryNodeId = entryIdOf(automationPin);
+          await admitWorkerTrigger(tx, txCtx, { appId: app.id, action: 'schedule.create', entryNodeId });
+          return create(tx, automationPin, entryNodeId);
+        },
+      );
+    }
+    const automationPin = await captureSetupConsent(ctx.db, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId, ctx, configSelection({ ...input, agentId }));
+    return create(ctx.db, automationPin, entryIdOf(automationPin));
   },
 
   /** Org-ADMIN update; stored run-as authority requires its owner except for an exact stop-only edit (#1643). */
@@ -638,6 +665,24 @@ export const appRunMutations = {
             : input.scopeRef.trim() === ''
               ? null
               : await resolveScopeForTrigger(txCtx, existing.appId, input.scopeRef);
+        const recapture = input.entryNodeUrn != null || input.runAsSelf != null || input.aiConfigName !== undefined || agentId !== undefined
+          ? await captureSetupConsent(tx as never, existing.appId,
+            input.runAsSelf != null ? resolveRunAsSelf(txCtx, input.runAsSelf) : existing.userId,
+            // #2438 BLIND P2 (Andi): with no new entry supplied, capture by
+            // the stamped id — after a rename the stored URN is stale, and
+            // re-capturing it would break a working schedule's consent.
+            input.entryNodeUrn ?? existing.entryNodeId ?? existing.entryNodeUrn, existing.organizationId, txCtx, configSelection({ ...existing, ...input, agentId: agentId === undefined ? existing.agentId : agentId })).then(consent => ({
+            // #2438: a re-captured setup pin re-stamps the entry id with
+            // it (the marker's absent entryId clears to null only when the
+            // entry itself no longer resolves — the URN path takes over).
+            automationPin: consent as never,
+            entryNodeId: consent != null && typeof consent === 'object' && 'entryId' in consent ? (consent as { entryId: string }).entryId : null,
+          }))
+          : null;
+        // #3483: an edit that re-captures the automation (entry node, run-as-self, AI configuration or Agent) needs the
+        // create's grant, for the entry node the edit leaves (cor:agt:010:01 rev 46; which action is Open there: built as
+        // `schedule.create`). The schedule row is already held; the grant is the last lock. Other edits are unchanged.
+        if (recapture) await admitWorkerTrigger(tx, txCtx, { appId: existing.appId, action: 'schedule.create', entryNodeId: recapture.entryNodeId });
         return tx.agentSchedule.update({
           where: { id },
           data: {
@@ -646,18 +691,7 @@ export const appRunMutations = {
             ...modeFields,
             ...(input.timezone != null ? { timezone } : {}),
             ...(input.entryNodeUrn != null ? { entryNodeUrn: input.entryNodeUrn } : {}),
-            ...(input.entryNodeUrn != null || input.runAsSelf != null || input.aiConfigName !== undefined || agentId !== undefined ? await captureSetupConsent(tx as never, existing.appId,
-              input.runAsSelf != null ? resolveRunAsSelf(txCtx, input.runAsSelf) : existing.userId,
-              // #2438 BLIND P2 (Andi): with no new entry supplied, capture by
-              // the stamped id — after a rename the stored URN is stale, and
-              // re-capturing it would break a working schedule's consent.
-              input.entryNodeUrn ?? existing.entryNodeId ?? existing.entryNodeUrn, existing.organizationId, txCtx, configSelection({ ...existing, ...input, agentId: agentId === undefined ? existing.agentId : agentId })).then(consent => ({
-              // #2438: a re-captured setup pin re-stamps the entry id with
-              // it (the marker's absent entryId clears to null only when the
-              // entry itself no longer resolves — the URN path takes over).
-              automationPin: consent as never,
-              ...(consent != null && typeof consent === 'object' && 'entryId' in consent ? { entryNodeId: (consent as { entryId: string }).entryId } : { entryNodeId: null }),
-            })) : {}),
+            ...(recapture ?? {}),
             ...(input.eventData !== undefined ? { eventData: input.eventData as never } : {}),
             ...(input.policy !== undefined ? { policy: input.policy as never } : {}),
             ...(input.aiConfigName !== undefined ? { aiConfigName: input.aiConfigName } : {}),
@@ -785,6 +819,11 @@ export const appRunMutations = {
         // resolution (same as createAgentSchedule); null on the unadopted
         // marker — that row keeps the URN path.
         const consent = await captureSetupConsent(tx as never, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId, ctx, configSelection({ ...input, agentId }));
+        // #3483: a worker-bound caller spends a live, signed `webhook.create` grant for this entry node here, the last lock.
+        await admitWorkerTrigger(tx, ctx, {
+          appId: app.id, action: 'webhook.create',
+          entryNodeId: consent != null && typeof consent === 'object' && 'entryId' in consent ? (consent as { entryId: string }).entryId : null,
+        });
         return tx.agentWebhook.create({
         data: {
         id: generateId(),
@@ -1035,6 +1074,11 @@ export const appRunQueries = {
     if (input.cron != null) validatedCronNext(input.cron, timezone);
     const runAt = input.runAt != null ? validatedRunAt(input.runAt) : null;
     const outcome = await captureSetupOutcome(ctx.db, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId, ctx, configSelection({ ...input, agentId }));
+    // #3483 row 10: a worker-bound caller whose create would be refused for want of a grant is told so, with no hash. No
+    // lock, no spend. Off (the default), or for a person, this reads nothing.
+    if (!await workerTriggerWouldBeAdmitted(ctx, { appId: app.id, action: 'schedule.create', entryNodeId: outcome.adoptable ? outcome.pin.entryId : null })) {
+      return { outcome: 'GRANT_REQUIRED', hash: null, summary: null, reason: null };
+    }
     if (!outcome.adoptable) {
       return { outcome: 'CANNOT_BE_ADOPTED', hash: null, summary: null, reason: outcome.marker.reason === 'MEMORY_UNREADABLE' ? 'MEMORY_UNREADABLE' : 'OTHER' };
     }

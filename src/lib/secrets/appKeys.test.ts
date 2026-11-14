@@ -13,8 +13,24 @@ import {
   secretVersionAad, stagedValueAad, startAppKeyCacheSweepLoop, unwrapAppKey, DEFAULT_SECRET_APP_KEY_CACHE_TTL_MS,
 } from './appKeys.js';
 
+// Records every plaintext key `decryptBytesAad` returns, so a test can see whether a buffer was overwritten after use.
+const decrypted = vi.hoisted(() => [] as Buffer[]);
+vi.mock('../tokenCrypto.js', async (orig) => {
+  const real = await orig<typeof import('../tokenCrypto.js')>();
+  return {
+    ...real,
+    decryptBytesAad: (...args: Parameters<typeof real.decryptBytesAad>) => {
+      const out = real.decryptBytesAad(...args);
+      decrypted.push(out);
+      return out;
+    },
+  };
+});
+
+const ZERO32 = Buffer.alloc(32);
 const ROOT = 'a1'.repeat(32);
 const OTHER_ROOT = 'b2'.repeat(32);
+const B = 'binding-under-test';
 let orgId: string;
 let appA: string;
 let appB: string;
@@ -33,7 +49,14 @@ beforeEach(async () => {
   appA = (await createDbAppWithKey(db, 'keys-a', orgId)).app.id;
   appB = (await createDbAppWithKey(db, 'keys-b', orgId)).app.id;
 });
-afterEach(() => { delete process.env.SECRET_ROOT_KEY; vi.restoreAllMocks(); vi.useRealTimers(); appKeyCache.clear(); });
+afterEach(() => {
+  delete process.env.SECRET_ROOT_KEY;
+  delete process.env.SECRET_APP_KEY_CACHE_TTL_MS;
+  delete process.env.DISABLE_SECRET_SWEEP;
+  decrypted.length = 0;
+  vi.restoreAllMocks(); vi.useRealTimers();
+  appKeyCache.clear();
+});
 
 describe('wrapping and binding (R19)', () => {
   it('mints version 1 on first need, then reuses it', async () => {
@@ -149,6 +172,37 @@ describe('one active key (race)', () => {
     expect(new Set(out.map((h) => h.keyVersion))).toEqual(new Set([1]));
     expect(await db.secretAppKey.count({ where: { appId: appA } })).toBe(1);
   });
+  it('the P2002 backstop returns the winner\'s key when two creators are HELD at the create (a barrier, not timing)', async () => {
+    // Both callers run on a non-transaction client, so the advisory lock is released at once and does not
+    // serialize them. Each create is held until BOTH have arrived, so both have already read "no active key" and
+    // computed version 1: the loser's create must hit the partial unique index, and only the backstop saves it.
+    let arrived = 0;
+    let open!: () => void;
+    const gate = new Promise<void>((r) => { open = r; });
+    const held = new Proxy(db, {
+      get(target, prop) {
+        if (prop === 'secretAppKey') {
+          return new Proxy(target.secretAppKey, {
+            get(model, name) {
+              if (name === 'create') {
+                return async (args: never) => { if (++arrived === 2) open(); await gate; return model.create(args); };
+              }
+              const v = (model as never)[name];
+              return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(model) : v;
+            },
+          });
+        }
+        const v = (target as never)[prop];
+        return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    });
+    const [a, b] = await Promise.all([ensureAppKey(held as never, appA), ensureAppKey(held as never, appA)]);
+    expect(arrived).toBe(2);
+    expect(a.keyVersion).toBe(1);
+    expect(b.keyVersion).toBe(1);
+    expect(a.encryptionKey.equals(b.encryptionKey)).toBe(true);
+    expect(await db.secretAppKey.count({ where: { appId: appA } })).toBe(1);
+  });
   it('deleting an App deletes its keys', async () => {
     await ensure(appA);
     await db.app.delete({ where: { id: appA } });
@@ -218,20 +272,20 @@ describe('the root (R18)', () => {
 describe('the cache', () => {
   it('serves a live entry without reading the row, and use refreshes its clock', async () => {
     const c = new AppKeyCache(); const key = randomBytes(32);
-    c.set('a', 1, key, 1000);
-    expect(c.get('a', 1, 1000 + DEFAULT_SECRET_APP_KEY_CACHE_TTL_MS - 1)).toBe(key);
-    expect(c.get('a', 1, 1000 + 2 * DEFAULT_SECRET_APP_KEY_CACHE_TTL_MS - 2)).toBe(key); // refreshed at the first get
+    c.set('a', 1, key, 1000, B);
+    expect(c.get('a', 1, 1000 + DEFAULT_SECRET_APP_KEY_CACHE_TTL_MS - 1, B)).toBe(key);
+    expect(c.get('a', 1, 1000 + 2 * DEFAULT_SECRET_APP_KEY_CACHE_TTL_MS - 2, B)).toBe(key); // refreshed at the first get
   });
   it('a cached key past its expiry is dropped at use even with no sweep, and its buffer is overwritten', () => {
     const c = new AppKeyCache(); const key = randomBytes(32);
-    c.set('a', 1, key, 0);
-    expect(c.get('a', 1, DEFAULT_SECRET_APP_KEY_CACHE_TTL_MS)).toBeNull();
+    c.set('a', 1, key, 0, B);
+    expect(c.get('a', 1, DEFAULT_SECRET_APP_KEY_CACHE_TTL_MS, B)).toBeNull();
     expect(c.size()).toBe(0);
     expect(key.equals(Buffer.alloc(32))).toBe(true);
   });
   it('the sweep drops only expired entries and overwrites them', () => {
     const c = new AppKeyCache(); const old = randomBytes(32), fresh = randomBytes(32);
-    c.set('a', 1, old, 0); c.set('b', 1, fresh, DEFAULT_SECRET_APP_KEY_CACHE_TTL_MS);
+    c.set('a', 1, old, 0, B); c.set('b', 1, fresh, DEFAULT_SECRET_APP_KEY_CACHE_TTL_MS, B);
     expect(c.sweepExpired(DEFAULT_SECRET_APP_KEY_CACHE_TTL_MS + 1)).toBe(1);
     expect(old.equals(Buffer.alloc(32))).toBe(true);
     expect(fresh.equals(Buffer.alloc(32))).toBe(false);
@@ -244,9 +298,47 @@ describe('the cache', () => {
     appKeyCache.clear();
     await refused(unwrap(appA, 1));
   });
+  it('replacing the entry of a slot overwrites the old key, and re-setting the same buffer does not', () => {
+    const c = new AppKeyCache(); const a = randomBytes(32), b = randomBytes(32);
+    c.set('a', 1, a, 0, B);
+    c.set('a', 1, b, 0, B);
+    expect(a.equals(ZERO32)).toBe(true);
+    expect(b.equals(ZERO32)).toBe(false);
+    expect(c.get('a', 1, 0, B)).toBe(b);
+    c.set('a', 1, b, 0, B); // the same buffer again: it is the live key, not a replaced one
+    expect(b.equals(ZERO32)).toBe(false);
+    expect(c.size()).toBe(1);
+  });
+  it('the binding is a required parameter of get and set (R19; a Proposed line in cor:sec:010:04)', () => {
+    // A defaulted binding would let a caller step around the root binding. This is enforced by tsc, which CI runs.
+    const c = new AppKeyCache();
+    // @ts-expect-error binding is required
+    expect(c.get('a', 1, 0)).toBeNull();
+    // @ts-expect-error binding is required
+    c.set('a', 1, randomBytes(32), 0);
+    // @ts-expect-error now and binding are required
+    c.set('a', 2, randomBytes(32));
+  });
+  it('a key unwrapped for an uncommitted mint is overwritten once its subkeys are derived, and never cached', async () => {
+    await db.$transaction(async (tx) => {
+      await ensureAppKey(tx, appA);
+      decrypted.length = 0;
+      const h = await unwrapAppKey(tx, appA, 1);
+      expect(decrypted).toHaveLength(1);
+      expect(decrypted[0].equals(ZERO32)).toBe(true);
+      expect(h.encryptionKey.equals(ZERO32)).toBe(false); // the handle's subkeys survive
+      expect(appKeyCache.size()).toBe(0);
+    });
+    // Control: after the commit the same unwrap is cached, and its buffer is live (not overwritten).
+    decrypted.length = 0;
+    await unwrap(appA, 1);
+    expect(decrypted).toHaveLength(1);
+    expect(decrypted[0].equals(ZERO32)).toBe(false);
+    expect(appKeyCache.size()).toBe(1);
+  });
   it('evictApp drops every version of that App only', () => {
     const c = new AppKeyCache(); const k1 = randomBytes(32), k2 = randomBytes(32);
-    c.set('a', 1, k1); c.set('a', 2, randomBytes(32)); c.set('b', 1, k2);
+    c.set('a', 1, k1, Date.now(), B); c.set('a', 2, randomBytes(32), Date.now(), B); c.set('b', 1, k2, Date.now(), B);
     c.evictApp('a');
     expect(c.size()).toBe(1); expect(k1.equals(Buffer.alloc(32))).toBe(true); expect(k2.equals(Buffer.alloc(32))).toBe(false);
   });
@@ -256,17 +348,17 @@ describe('the cache', () => {
   });
   it('a valid TTL setting is honoured', () => {
     process.env.SECRET_APP_KEY_CACHE_TTL_MS = '1000';
-    const c = new AppKeyCache(); c.set('a', 1, randomBytes(32), 0);
-    expect(c.get('a', 1, 999)).not.toBeNull();
-    expect(c.get('a', 1, 1998)).not.toBeNull(); // 999 ms since the refresh
-    expect(c.get('a', 1, 3000)).toBeNull();
+    const c = new AppKeyCache(); c.set('a', 1, randomBytes(32), 0, B);
+    expect(c.get('a', 1, 999, B)).not.toBeNull();
+    expect(c.get('a', 1, 1998, B)).not.toBeNull(); // 999 ms since the refresh
+    expect(c.get('a', 1, 3000, B)).toBeNull();
   });
   it('the sweep runs on its own timer, whatever DISABLE_SECRET_SWEEP says', async () => {
     vi.useFakeTimers();
     process.env.DISABLE_SECRET_SWEEP = 'true';
     process.env.SECRET_APP_KEY_CACHE_TTL_MS = '1000';
     const key = randomBytes(32);
-    appKeyCache.set('a', 1, key);
+    appKeyCache.set('a', 1, key, Date.now(), B);
     const loop = startAppKeyCacheSweepLoop();
     try {
       await vi.advanceTimersByTimeAsync(3000);
