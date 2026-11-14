@@ -172,6 +172,30 @@ describe('App-shape secret URN (#4154)', () => {
     expect(await codeOf(resolvers.Mutation.deleteSecret({}, { ref }, context(orgOnlyId)))).toBe('NOT_FOUND');
     expect(await codeOf(resolvers.Mutation.updateSecret({}, { ref, metadata: { n: 1 } } as never, context(orgOnlyId)))).toBe('NOT_FOUND');
     expect(await db.secret.count({ where: { id: appSecretId } })).toBe(1);
+    // secretEvents gates on App membership alone: the org ADMIN gets an empty page, the App member's page is not empty-by-gate.
+    const events: any = await resolvers.Query.secretEvents({}, { ref }, context(orgOnlyId));
+    expect(events).toEqual({ items: [], total: 0 });
+  });
+
+  it('condition 6: a soft-deleted root org does not change what an App secret URN reaches (the App row, not the org row, decides)', async () => {
+    const ref = `hrn:secret:${ROOT}:app:ops:key`;
+    await db.organization.updateMany({ where: { urn: ROOT }, data: { deletedAt: new Date() } });
+    // The URN still names the live App's secret, exactly as `hrn:app:<root>:ops` still resolves; the surface gate is appMember.
+    expect(await resolveSecretRef(db, ref)).toEqual({ id: appSecretId });
+    const asMember: any = await resolvers.Query.secret({}, { ref }, context(memberId));
+    expect(asMember?.id).toBe(appSecretId);
+    expect(await resolvers.Query.secret({}, { ref }, context(outsiderId))).toBeNull();
+    // The org/user arm of the same root answers not-found once the org is deleted (it masks a dead org).
+    await expect(resolveSecretRef(db, `hrn:secret:${ROOT}:key`)).rejects.toThrow(SecretNotFoundError);
+  });
+
+  it('the production callers of resolveSecretRef are exactly the secret resolvers (the caller inventory the gating claim rests on)', () => {
+    const root = new URL('../../', import.meta.url);
+    const walk = (u: URL): string[] => readdirSync(u, { withFileTypes: true }).flatMap((e) =>
+      e.isDirectory() ? (e.name === 'generated' || e.name === 'node_modules' ? [] : walk(new URL(`${e.name}/`, u)))
+        : e.name.endsWith('.ts') && !/\.test\.ts$/.test(e.name) ? [new URL(e.name, u).pathname] : []);
+    const users = walk(root).filter((f) => /\bresolveSecretRef\b/.test(readFileSync(f, 'utf8'))).map((f) => f.split('/src/')[1]).sort();
+    expect(users).toEqual(['api/graphql/schema/resolvers.secret.ts', 'lib/entityRef/errors.ts', 'lib/entityRef/secretRef.ts']);
   });
 
   it('no run path reaches the resolver: no runner tool imports resolveSecretRef or parseSecretUrn', () => {

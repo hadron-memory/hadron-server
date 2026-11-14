@@ -162,7 +162,8 @@ export async function resolveSecretRef(
     // Contract (#4154): `resolveAppRef` throws only AppNotFoundError (unknown, uninstalled or deleted App) or
     // AmbiguousLegacyUrnError (an alias naming more than one live App) for a well-formed ref; both are masked as a
     // missing secret. It does not check that the root org is alive: an App stays addressable while its row is live,
-    // and every surface re-gates on the secret's own owner (appMember / appManager) after this resolves.
+    // and the one production caller (`findSecretByRef` in resolvers.secret.ts, pinned by secretRefApp4154.test.ts) re-gates
+    // on the loaded secret's own owner after this resolves; a new caller must do the same.
     let appId: string;
     try {
       appId = (await resolveAppRef(db, `hrn:app:${parsed.root}:${parsed.appSlug}`)).id;
