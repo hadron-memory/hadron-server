@@ -40,6 +40,8 @@ export async function requireSecretReadClientIssuer(ctx: Context, secretId: stri
  */
 export async function judgeSecretReadClientIssuer(ctx: Context, userId: string, secretId: string): Promise<SecretIssuance> {
   const tx = ctx.db;
+  // The NAMED person is judged, never the caller: on the reveal path the caller is the holder's driver, not the issuer.
+  const named = { ...ctx, userId, roles: [] as string[], impersonation: undefined } as Context;
   const secret = await tx.secret.findUnique({ where: { id: secretId }, select: { id: true, name: true, ownerType: true, ownerId: true } });
   if (!secret || secret.ownerType !== 'app') throw authorizationDenied();
   const app = await tx.app.findUnique({
@@ -50,9 +52,9 @@ export async function judgeSecretReadClientIssuer(ctx: Context, userId: string, 
   const base = { secretId: secret.id, secretName: secret.name, appId: app.id, userId };
 
   // No platform arm: judge the manager predicate without the caller's platform roles (Q26).
-  if (await managesApp({ ...ctx, roles: [] }, app)) return { ...base, asWriter: false };
+  if (await managesApp(named, app)) return { ...base, asWriter: false };
 
-  if (!(await isAppParticipant(ctx, app))) throw authorizationDenied();
+  if (!(await isAppParticipant(named, app))) throw authorizationDenied();
   const newest = await tx.secretVersion.findFirst({
     where: { secretId: secret.id }, orderBy: { versionNo: 'desc' },
     select: { writtenByUserId: true, writtenByWorkerId: true },

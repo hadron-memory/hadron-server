@@ -16,6 +16,7 @@ import { readGrantForUpdate } from '../grants/live.js';
 import { isModelReadableKind } from '../secrets.js';
 import { currentAppSecretValue, lockSecretRow, recordSecretEvent, secretActorOf } from './appSecrets.js';
 import { judgeSecretReadClientIssuer, SECRET_READ_CLIENT_SUPERSEDED } from './readClientIssuer.js';
+import { isAppParticipant } from '../auth/appParticipantRead.js';
 import { authorizationDenied } from '../auth/authorizationDenied.js';
 
 export const SECRET_READ_CLIENT_NOT_FOUND = 'SECRET_READ_CLIENT_NOT_FOUND';
@@ -40,10 +41,27 @@ export function deadGrantState(r: {
   return 'ENDED';
 }
 
-export async function revealWithReadClient(ctx: Context, clientId: string): Promise<{ value: string; secretName: string; readsLeft: number | null }> {
+export interface RevealResult { value: string; secretName: string; readsLeft: number | null }
+
+/** The GraphQL door: a bound worker only. A person, an App key, a run and an impersonation get the uniform answer. */
+export async function revealWithReadClient(ctx: Context, clientId: string): Promise<RevealResult> {
   const workerId = boundWorkerId();
-  // A bound worker only. A person, an App key, a run and an impersonation get the uniform answer.
   if (!workerId || !ctx.userId || ctx.impersonation) throw notFound();
+  return revealAs(ctx, clientId, { kind: 'worker', workerId });
+}
+
+/**
+ * The passkey page's door (cor:sec:060, ruling R5): a PERSON holder, as themselves, after a passkey assertion the caller has
+ * already verified for `userId`. Never reachable from an API token; `ctx` is built by the page from the proven person alone.
+ */
+export async function revealForPersonHolder(ctx: Context, clientId: string): Promise<RevealResult> {
+  if (!ctx.userId || ctx.impersonation || boundWorkerId()) throw notFound();
+  return revealAs(ctx, clientId, { kind: 'person', userId: ctx.userId });
+}
+
+type Holder = { kind: 'worker'; workerId: string } | { kind: 'person'; userId: string };
+
+async function revealAs(ctx: Context, clientId: string, holder: Holder): Promise<RevealResult> {
   const pre = await ctx.db.secretReadClient.findUnique({ where: { id: clientId }, select: { appId: true, secretId: true, grantId: true } });
   if (!pre) throw notFound();
   const app = await ctx.db.app.findUnique({ where: { id: pre.appId }, select: { id: true, organizationId: true, ownerUserId: true } });
@@ -63,8 +81,14 @@ export async function revealWithReadClient(ctx: Context, clientId: string): Prom
     const secretLocked = await lockSecretRow(tx, pre.secretId);
     const client = await tx.secretReadClient.findUnique({ where: { id: clientId } });
     if (!client) throw notFound();
-    const grant = await tx.grant.findUnique({ where: { id: client.grantId }, select: { workerId: true, action: true, appId: true, issuerUserId: true } });
-    if (!grant || grant.action !== 'secret.reveal' || grant.workerId !== workerId || grant.appId !== client.appId) throw notFound();
+    const grant = await tx.grant.findUnique({ where: { id: client.grantId }, select: { workerId: true, userId: true, agentId: true, action: true, appId: true, issuerUserId: true } });
+    if (!grant || grant.action !== 'secret.reveal' || grant.appId !== client.appId) throw notFound();
+    const heldBy = holder.kind === 'worker'
+      ? grant.workerId === holder.workerId
+      : grant.userId === holder.userId && grant.workerId === null && grant.agentId === null;
+    if (!heldBy) throw notFound();
+    // A person holder must still be an App participant at every read (R5).
+    if (holder.kind === 'person' && !(await isAppParticipant({ ...txCtx, db: tx } as Context, app))) throw notFound();
     known = { ownerId: client.appId, secretId: client.secretId, secretName: client.secretName };
     if (!secretLocked || client.endedAt) throw refusal('SECRET_DELETED', 'The secret this client read has been deleted.');
     const secret = await tx.secret.findUnique({ where: { id: client.secretId }, select: { id: true, name: true, kind: true, ownerId: true, ownerType: true } });
@@ -94,7 +118,7 @@ export async function revealWithReadClient(ctx: Context, clientId: string): Prom
     // One use, guarded by the grant row itself (exactly +1 on a live row), and its USE event.
     const spent = await tx.$executeRaw`UPDATE grants SET use_count = use_count + 1, updated_at = (clock_timestamp() AT TIME ZONE 'UTC') WHERE id = ${client.grantId}`;
     if (spent !== 1) throw notFound();
-    await tx.grantEvent.create({ data: { grantId: client.grantId, appId: client.appId, action: 'USE', workerId } });
+    await tx.grantEvent.create({ data: { grantId: client.grantId, appId: client.appId, action: 'USE', ...(holder.kind === 'worker' ? { workerId: holder.workerId } : { actorUserId: holder.userId }) } });
     const newest = await tx.secretVersion.findFirst({ where: { secretId: secret.id }, orderBy: { versionNo: 'desc' }, select: { versionNo: true } });
     await recordSecretEvent(tx, { ownerId: secret.ownerId, secretId: secret.id, secretName: secret.name, kind: 'REVEAL', versionNo: newest?.versionNo ?? null, actor });
     const value = await currentAppSecretValue(tx, { id: secret.id, ownerId: secret.ownerId });

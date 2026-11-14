@@ -72,7 +72,7 @@ export class NoAiConfigAvailableError extends Error {
 
 // ── Provider registry + validation ──────────────────────────────────────
 
-export const KNOWN_AI_PROVIDERS = ['anthropic', 'openai', 'glm', 'bedrock', 'openai-compatible'] as const;
+export const KNOWN_AI_PROVIDERS = ['anthropic', 'openai', 'glm', 'kimi', 'bedrock', 'openai-compatible'] as const;
 export type AiProvider = (typeof KNOWN_AI_PROVIDERS)[number];
 
 export const DEFAULT_AI_CONFIG_NAME = 'default';
@@ -116,6 +116,8 @@ const PROVIDER_PARAMS: Record<AiProvider, z.ZodType> = {
     reasoningEffort: z.enum(['low', 'medium', 'high']).optional(),
   }),
   glm: baseParams,
+  // #4170: Moonshot; own key only, same params as glm (no toolCalling opt-in).
+  kimi: baseParams,
   // Bedrock credentials travel JSON-encoded in the apiKey field (portal
   // convention, finding llm-provider-config-surfaces); params stay generic.
   bedrock: baseParams,
