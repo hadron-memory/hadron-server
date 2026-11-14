@@ -136,7 +136,8 @@ BEGIN
   RETURN NULL;
 END $$;
 
--- A cell that nets to zero, or is born with nothing positive, is removed, so the rollup never keeps the id or the activity
+-- A cell that nets to zero or below (an erased user's events were only partly counted, the rest pre-date the install), or is
+-- born with nothing positive, is removed, so the rollup never keeps the id or the activity
 -- timeline of an erased user (the user-delete foreign-key action, a merge's loser, a hard delete) behind a row of zeros
 -- or of negatives. The upserts reach a zero by UPDATING an existing row; a cell INSERTED with no positive count is the
 -- removal of an event that was never counted (history from before the install, not yet backfilled), which no cell holds
@@ -152,7 +153,7 @@ END $$;
 DROP TRIGGER IF EXISTS usage_activity_cells_drop_zero ON usage_activity_cells;
 CREATE TRIGGER usage_activity_cells_drop_zero
   AFTER UPDATE ON usage_activity_cells
-  FOR EACH ROW WHEN (NEW.reads = 0 AND NEW.writes = 0)
+  FOR EACH ROW WHEN (NEW.reads <= 0 AND NEW.writes <= 0)
   EXECUTE FUNCTION hadron_usage_rollup_drop_zero();
 
 DROP TRIGGER IF EXISTS usage_activity_cells_drop_nonpositive_insert ON usage_activity_cells;

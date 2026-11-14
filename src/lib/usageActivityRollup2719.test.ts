@@ -217,6 +217,18 @@ describe('#2719 the triggers keep the cells equal to a recount on every write pa
     expect((await drift()).total).toBe(0);
   });
 
+  it('an erased user whose cell mixes pre-install and post-install events leaves no cell row (the update goes negative)', async () => {
+    const carol = await db.user.create({ data: { id: generateId(), githubId: 271905, githubUsername: 'rollup-carol3' } });
+    await db.$executeRaw`DELETE FROM usage_activity_rollup_state WHERE id = 1`;
+    await insert([{ userId: carol.id, memoryId: memX, createdAt: at(-5) }]); // pre-install: never counted
+    await db.$executeRaw`INSERT INTO usage_activity_rollup_state (id, applies_from, complete) VALUES (1, ${naive(at(60))}::timestamp, false)`;
+    await insert([{ userId: carol.id, memoryId: memX, createdAt: at(-4) }]); // post-install: counted into the same cell
+    expect(await cellCount()).toBeGreaterThan(0);
+    await db.user.delete({ where: { id: carol.id } });
+    const left = await db.$queryRaw<Array<{ n: bigint }>>`SELECT COUNT(*) AS n FROM usage_activity_cells WHERE scope_id = ${carol.id}`;
+    expect(Number(left[0].n)).toBe(0);
+  });
+
   it('a memory-scope cell whose scope_id equals a user id is not counted in that user\'s activity', async () => {
     await insert([{ userId: alice.id, memoryId: memX, createdAt: at(-60) }]);
     await db.$executeRaw`INSERT INTO usage_activity_cells (scope_kind, scope_id, cell, reads, writes) VALUES ('memory', ${alice.id}, ${naive(new Date(Math.floor(at(-60).getTime() / 900_000) * 900_000))}::timestamp, 7, 7)`;
