@@ -63,7 +63,7 @@ export async function revealWithReadClient(ctx: Context, clientId: string): Prom
     const secretLocked = await lockSecretRow(tx, pre.secretId);
     const client = await tx.secretReadClient.findUnique({ where: { id: clientId } });
     if (!client) throw notFound();
-    const grant = await tx.grant.findUnique({ where: { id: client.grantId }, select: { workerId: true, action: true, appId: true } });
+    const grant = await tx.grant.findUnique({ where: { id: client.grantId }, select: { workerId: true, action: true, appId: true, issuerUserId: true } });
     if (!grant || grant.action !== 'secret.reveal' || grant.workerId !== workerId || grant.appId !== client.appId) throw notFound();
     known = { ownerId: client.appId, secretId: client.secretId, secretName: client.secretName };
     if (!secretLocked || client.endedAt) throw refusal('SECRET_DELETED', 'The secret this client read has been deleted.');
@@ -82,9 +82,11 @@ export async function revealWithReadClient(ctx: Context, clientId: string): Prom
       throw refusal(`SECRET_READ_CLIENT_${state}`, `This read client cannot read: ${state}.`);
     }
     // An erased issuer stops the reads; a demoted, departed or superseded one too (the issuer rule is judged again).
-    if (!client.issuerUserId) throw refusal('SECRET_READ_CLIENT_ISSUER_GONE', 'This read client has no issuer.');
+    // The grant's own issuer link is the CURRENT one: it follows an account merge and is nulled by erasure. The client row's copy is sealed history.
+    const issuerUserId = grant.issuerUserId;
+    if (!issuerUserId) throw refusal('SECRET_READ_CLIENT_ISSUER_GONE', 'This read client has no issuer.');
     try {
-      await judgeSecretReadClientIssuer({ ...txCtx, db: tx } as Context, client.issuerUserId, secret.id);
+      await judgeSecretReadClientIssuer({ ...txCtx, db: tx } as Context, issuerUserId, secret.id);
     } catch (e) {
       if (e instanceof GraphQLError && e.extensions?.code === SECRET_READ_CLIENT_SUPERSEDED) throw e;
       throw refusal('SECRET_READ_CLIENT_ISSUER_GONE', 'The issuer of this read client may no longer issue it.');

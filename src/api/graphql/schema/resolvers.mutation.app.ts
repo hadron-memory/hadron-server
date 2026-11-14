@@ -1187,6 +1187,8 @@ export const appMutations = {
             const actor = secretActorOf(ctx);
             const secrets = await tx.secret.findMany({ where: { ownerType: 'app', ownerId: resolvedId }, select: { id: true, name: true } });
             for (const secret of secrets) await recordSecretEvent(tx, { ownerId: resolvedId, secretId: secret.id, secretName: secret.name, kind: 'DELETE', actor });
+            await tx.$executeRaw`UPDATE secret_read_clients SET end_reason = 'SECRET_DELETED', ended_at = (clock_timestamp() AT TIME ZONE 'UTC')
+               WHERE app_id = ${resolvedId} AND ended_at IS NULL`;
             await tx.secret.deleteMany({ where: { ownerType: 'app', ownerId: resolvedId } });
             await tx.$executeRaw`INSERT INTO secret_owner_tombstones (owner_type, owner_id)
               SELECT 'app', ${resolvedId} WHERE EXISTS (SELECT 1 FROM secret_events WHERE owner_type = 'app' AND owner_id = ${resolvedId})

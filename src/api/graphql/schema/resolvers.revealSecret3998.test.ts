@@ -91,4 +91,13 @@ describe('#3998 revealSecret', () => {
     expect(await resolvers.Query.mySecretReadClients({}, {}, ctxOf(outsider))).toEqual([]);
     expect(await resolvers.Query.mySecretReadClients({}, {}, { ...ctxOf(ownerId), impersonation: { by: 'x' } } as never)).toEqual([]);
   });
+
+  it('an erased issuer (the grant link nulled) stops the reads; a merged issuer follows the grant link', async () => {
+    await activate(grantId);
+    await db.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER grants_guard');
+    await db.$executeRawUnsafe('UPDATE grants SET issuer_user_id = NULL WHERE id = $1', grantId);
+    await db.$executeRawUnsafe('ALTER TABLE grants ENABLE TRIGGER grants_guard');
+    expect(await code(reveal(workerId))).toBe('SECRET_READ_CLIENT_ISSUER_GONE');
+    expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(0);
+  });
 });
