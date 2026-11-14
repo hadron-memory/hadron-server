@@ -3307,12 +3307,20 @@ async function readTeamEvents(c: Context, app: { id: string }, args: TeamEventsA
   // of rows already written, so this is an ordinary filtered page: the read works nothing out and its cost follows
   // `limit`, not the App's alarm history. The end is written once, by the evaluator pass or the acknowledgement.
   const inEffect: Prisma.AgentTeamEventWhereInput = args.alarmsInEffect ? { escalationEnd: { is: null } } : {};
-  return c.db.agentTeamEvent.findMany({
+  const events = await c.db.agentTeamEvent.findMany({
     where: { AND: [where, afterWhere, inEffect] },
     // newestFirst is the exact mirror of the default (createdAt, id) order, so a page boundary inside equal timestamps never repeats or skips.
     orderBy: newestFirst ? [{ createdAt: 'desc' }, { id: 'desc' }] : [{ createdAt: 'asc' }, { id: 'asc' }],
     take,
   });
+  // #4135: use the stored AgentTask.handle (cor:agt:050:01, Proposed), once per page.
+  // Event task ids are retained after deletion; an absent row must never invent a handle.
+  const taskIds = [...new Set(events.flatMap(e => e.taskId ? [e.taskId] : []))];
+  const tasks = taskIds.length ? await c.db.agentTask.findMany({
+    where: { appId: app.id, id: { in: taskIds } }, select: { id: true, handle: true },
+  }) : [];
+  const handles = new Map(tasks.map(t => [t.id, t.handle]));
+  return events.map(e => ({ ...e, taskHandle: e.taskId ? handles.get(e.taskId) ?? null : null }));
 }
 
 // ── Field resolvers ───────────────────────────────────────────────────────
@@ -3673,6 +3681,12 @@ export const agentTaskFieldResolvers = {
       t.assignedAt ? partyView(ctx, t.assignedByWorkerId, t.assignedByWorkerId ? null : t.assignedBy) : null,
   },
   AgentTeamEvent: {
+    // Page reads already hydrate this field in one batch. AcknowledgeAlarm returns a single raw event.
+    taskHandle: async (e: { appId: string; taskId: string | null; taskHandle?: string | null }, _: unknown, ctx: Context) => {
+      if (e.taskHandle !== undefined) return e.taskHandle;
+      if (!e.taskId) return null;
+      return (await ctx.db.agentTask.findFirst({ where: { id: e.taskId, appId: e.appId }, select: { handle: true } }))?.handle ?? null;
+    },
     // #2755: a dark-worker alarm's evidence is for a reader of the worker's internals; every other payload is as written.
     payload: async (e: { type: string; appId: string; payload: unknown }, _: unknown, ctx: Context) => {
       const { eventPayloadFor } = await import('../../../lib/agentTasks/darkWorker.js');

@@ -13,14 +13,18 @@ export const CONNECT_TIMEOUT_MS = 15_000;
 
 /** Owner-only, psql-free. Absent serve role preserves legacy single-role installs. */
 export async function revokeRuntimeMigrations(client: Client, role: string): Promise<void> {
-  const found = await client.query<{ is_current_user: boolean; owns_migrations: boolean; revoke_actions: boolean }>(`
+  const found = await client.query<{ is_current_user: boolean; owns_migrations: boolean; revoke_actions: boolean; revoke_secret_events: boolean }>(`
     SELECT r.rolname = current_user AS is_current_user,
       EXISTS (SELECT 1 FROM pg_class c
         WHERE c.oid = to_regclass('public._prisma_migrations') AND c.relowner = r.oid) AS owns_migrations,
       -- Only the table's own owner can revoke on it, and a serve role that IS the owner keeps its own privileges.
       EXISTS (SELECT 1 FROM pg_class c
         WHERE c.oid = to_regclass('public.actions') AND c.relowner = (SELECT oid FROM pg_roles WHERE rolname = current_user)
-          AND c.relowner <> r.oid) AS revoke_actions
+          AND c.relowner <> r.oid) AS revoke_actions,
+      -- #3997: the same for the append-only audit table.
+      EXISTS (SELECT 1 FROM pg_class c
+        WHERE c.oid = to_regclass('public.secret_events') AND c.relowner = (SELECT oid FROM pg_roles WHERE rolname = current_user)
+          AND c.relowner <> r.oid) AS revoke_secret_events
     FROM pg_roles r WHERE r.rolname = $1`, [role]);
   const target = found.rows[0];
   // Legacy/self-hosted installs may use the configured serve name as OWNER.
@@ -36,6 +40,11 @@ export async function revokeRuntimeMigrations(client: Client, role: string): Pro
   // the table (a single-role install) keeps its own privileges.
   if (target && !target.is_current_user && target.revoke_actions) {
     await client.query(`REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE public.actions FROM ${escapeIdentifier(role)}`);
+  }
+  // #3997 (R25): `secret_events` is append-only. The serve role keeps INSERT, SELECT and DELETE (the one-year purge runs as the serve
+  // role; the guard trigger refuses every other delete) and loses UPDATE and TRUNCATE, which the default ACLs grant to a new table.
+  if (target && !target.is_current_user && target.revoke_secret_events) {
+    await client.query(`REVOKE UPDATE, TRUNCATE ON TABLE public.secret_events FROM ${escapeIdentifier(role)}`);
   }
 }
 

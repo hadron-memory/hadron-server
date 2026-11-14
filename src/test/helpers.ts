@@ -149,7 +149,8 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // #2973: stamp_signing_keys is FK-free itself (node_signatures references IT), so
   // nothing cascades it away — key generations would leak between tests otherwise.
   // #3835: no leftover writer may overlap this TRUNCATE (quiesce, then lock `nodes` first).
-  await truncateAfterQuiescence('TRUNCATE TABLE node_signatures, stamp_signing_keys, signing_requests, passkey_credentials, worker_reference_fences, user_deletion_audits, agent_clone_audits, user_api_key_deletions CASCADE');
+  // #3997: secret_events and secret_owner_tombstones are FK-free and append-only by trigger (a row DELETE is refused), so test cleanup truncates them.
+  await truncateAfterQuiescence('TRUNCATE TABLE node_signatures, stamp_signing_keys, signing_requests, passkey_credentials, worker_reference_fences, user_deletion_audits, agent_clone_audits, user_api_key_deletions, secret_events, secret_owner_tombstones CASCADE');
   // Pending first-party login states (FK-free; keyed on the OAuth state).
   await db.pendingLoginState.deleteMany();
   // #1079 — the URN alias map. Deliberately FK-FREE: it must outlive the row it
