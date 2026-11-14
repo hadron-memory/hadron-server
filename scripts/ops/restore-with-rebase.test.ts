@@ -4,7 +4,7 @@
  * cluster only), so its keys are "H" on the fresh target B (xmax ~2,000). B carries the operator prerequisites P1/P2.
  *
  * Skipped where no PostgreSQL server binaries with pgvector are installed (initdb, pg_ctl, pg_resetwal, vector.control);
- * hosted CI is such a runner, so this suite runs on a developer or QA host with the two private clusters.
+ * #4118 hosted CI installs both prerequisites and sets REQUIRE_PRIVATE_CLUSTER=1, which fails instead of skipping.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Client } from 'pg';
@@ -139,6 +139,49 @@ afterAll(() => {
 });
 
 describe.skipIf(!enabled)('#4111 restore-with-rebase on private clusters', { timeout: 120_000 }, () => {
+  it('#4118: an ERROR after CREATE answered reconciles and tears down its own database', async () => {
+    const target = fresh();
+    const err = await restoreWithRebase(base({ target, fault: 'S1-error' })).catch((e) => e);
+    try {
+      expect(err).toBeInstanceOf(RestoreError);
+      expect(err.stage).toBe('S1');
+      expect(err.teardown).toBe('dropped');
+      expect(await dbExists(target)).toBe(false);
+    } finally {
+      await F.sql(B.url(), `DROP DATABASE IF EXISTS ${target}`);
+    }
+  });
+
+  it('#4118: backfill refuses session_replication_role before changing any row or trigger', async () => {
+    const target = fresh();
+    await F.sql(B.url(), `CREATE DATABASE ${target}`);
+    const c = new Client({ connectionString: B.url(target) });
+    await c.connect();
+    try {
+      // A minimal legacy table reaches the migration's guard with a real superuser
+      // session. No other tables, defaults, or runtime gates can mask that check.
+      await c.query(`CREATE TABLE agent_team_events (id text PRIMARY KEY, tx_id xid8);
+        INSERT INTO agent_team_events VALUES ('legacy', NULL);
+        CREATE FUNCTION pin_append() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+        CREATE TRIGGER agent_team_event_append_only BEFORE UPDATE ON agent_team_events
+          FOR EACH ROW EXECUTE FUNCTION pin_append()`);
+      const { readFileSync } = await import('node:fs');
+      const sql = readFileSync('prisma/migrations/20261113180000_agent_team_event_tx_id_not_null/migration.sql', 'utf8');
+      await c.query('SET session_replication_role = replica');
+      await expect(c.query(sql)).rejects.toThrow(/#4111 T3: session_replication_role is replica, not origin/);
+      await c.query('ROLLBACK');
+      expect((await c.query('SELECT tx_id FROM agent_team_events')).rows).toEqual([{ tx_id: null }]);
+      expect((await c.query(`SELECT tgenabled FROM pg_trigger WHERE tgname = 'agent_team_event_append_only'`)).rows).toEqual([{ tgenabled: 'O' }]);
+      // Control: the identical migration succeeds with the normal replication role.
+      await c.query('SET session_replication_role = origin');
+      await c.query(sql);
+      expect((await c.query('SELECT tx_id::text FROM agent_team_events')).rows).toEqual([{ tx_id: '0' }]);
+    } finally {
+      await c.end();
+      await F.sql(B.url(), `DROP DATABASE ${target}`);
+    }
+  });
+
   it('R1/R7/P4/P8/P11: restores a mixed L/H history in exact source order, owner-owned, no dump ACLs, settings applied', async () => {
     expect(sourceOrder.some((r) => BigInt(r.k) >= 1_000_000n)).toBe(true);
     const target = fresh();
@@ -697,21 +740,24 @@ describe.skipIf(!enabled)('#4111 restore-with-rebase on private clusters', { tim
   it('§10 P3-6: a CREATE refused for its own reason (the chosen oid got taken) with the name still free reports absent', async () => {
     const target = fresh();
     const other = `${target}_oid_holder`;
-    const err = await restoreWithRebase(
-      base({
-        target,
-        log: async (e) => {
-          if (e.stage === 'S1' && e.event === 'creating') await F.sql(B.url(), `CREATE DATABASE ${other} OID ${e.oid as number}`);
-        },
-      }),
-    ).catch((e) => e);
-    expect(err).toBeInstanceOf(RestoreError);
-    expect(err.stage).toBe('S1');
-    expect(err.teardown).toBe('absent');
-    expect(err.message).toMatch(/does not exist/);
-    expect(await dbExists(target)).toBe(false);
-    expect(await dbExists(other)).toBe(true);
-    await F.sql(B.url(), `DROP DATABASE ${other}`);
+    try {
+      const err = await restoreWithRebase(
+        base({
+          target,
+          log: async (e) => {
+            if (e.stage === 'S1' && e.event === 'creating') await F.sql(B.url(), `CREATE DATABASE ${other} OID ${e.oid as number}`);
+          },
+        }),
+      ).catch((e) => e);
+      expect(err).toBeInstanceOf(RestoreError);
+      expect(err.stage).toBe('S1');
+      expect(err.teardown).toBe('absent');
+      expect(err.message).toMatch(/does not exist/);
+      expect(await dbExists(target)).toBe(false);
+      expect(await dbExists(other)).toBe(true);
+    } finally {
+      await F.sql(B.url(), `DROP DATABASE IF EXISTS ${other}`);
+    }
   });
 
   it('blind P1: after a lost reply, only the chosen oid is taken for this run, never a same-shaped one inside the window', async () => {

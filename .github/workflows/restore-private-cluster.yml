@@ -1,0 +1,57 @@
+name: Restore private cluster
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: restore-private-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  restore-private-cluster:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ['16', '17']
+    env:
+      REQUIRE_PRIVATE_CLUSTER: '1'
+      PRIVATE_CLUSTER_PG_VERSION: ${{ matrix.pg }}
+      # The fixture clusters and dumps belong on the runner's disk, never /dev/shm.
+      TMPDIR: ${{ runner.temp }}
+      # Prisma generation needs a syntactically valid URL; the suite creates all
+      # of its own databases on fresh private ports and never connects to this.
+      DATABASE_URL: postgresql://postgres@127.0.0.1/unused
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+      # PGDG's signed repository supplies server binaries AND matching vector.
+      # https://www.postgresql.org/download/linux/ubuntu/
+      - name: Install PostgreSQL ${{ matrix.pg }} and pgvector
+        env:
+          PG_MAJOR: ${{ matrix.pg }}
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail --silent --show-error --location \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt noble-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y "postgresql-$PG_MAJOR" "postgresql-$PG_MAJOR-pgvector"
+          echo "/usr/lib/postgresql/$PG_MAJOR/bin" >> "$GITHUB_PATH"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm prisma generate
+      - name: Run restore assertions and regression pins (PostgreSQL ${{ matrix.pg }})
+        run: pnpm exec vitest run --config scripts/ops/vitest.private.config.ts
