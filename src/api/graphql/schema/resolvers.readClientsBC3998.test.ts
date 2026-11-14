@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ApolloServer } from '@apollo/server';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { deleteUserAccount } from '../../../controller/operations/deleteUser.js';
 import { mergeUsers } from '../../../test/mergeConsent.js';
 import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
@@ -103,13 +104,17 @@ describe('#3998 B client audience and grant-derived projections', () => {
   });
 
   it('App keys and impersonation see no client ids, including nested fields', async () => {
+    await activate();
     for (const extra of [{ appId, appKeyId: 'test-key' }, { impersonation: { by: 'operator' } }]) {
       const caller = ctx(ownerId, extra as Partial<Context>);
       expect(await resolvers.Query.mySecretReadClients({}, {}, caller)).toEqual([]);
       const result = await clients('', caller);
       expect(result.errors).toBeUndefined();
       expect(result.data?.secret).toBeNull();
+      await expect(asWorker(workerId, () => resolvers.Mutation.revealSecret({}, { clientId }, caller))).rejects.toBeDefined();
     }
+    const permitted = await asWorker(workerId, () => resolvers.Mutation.revealSecret({}, { clientId }, ctx()));
+    expect(permitted).toMatchObject({ value: expect.stringContaining('bc-canary') });
   });
 
   it('removes secret signing-dependent doors from the deployment schema when signing is off', () => {
@@ -129,12 +134,29 @@ describe('#3998 B client audience and grant-derived projections', () => {
 describe('#3998 B+C org deletion and current identities', () => {
   it('a deleted org hides secret/client metadata and refuses a reveal without spending', async () => {
     await activate();
+    await db.appMember.create({ data: { appId, userId: ownerId, role: 'owner' } });
     await db.organization.update({ where: { id: orgId }, data: { deletedAt: new Date() } });
+    await expect(judgeSecretReadClientIssuer(ctx(), ownerId, secretId)).rejects.toBeDefined();
     expect(await resolvers.Query.secret({}, { ref: secretId }, ctx())).toBeNull();
     expect(await resolvers.Query.mySecretReadClients({}, {}, ctx())).toEqual([]);
     await expect(asWorker(workerId, () => resolvers.Mutation.revealSecret({}, { clientId }, ctx()))).rejects.toBeDefined();
     expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(0);
     expect(await db.grantEvent.count({ where: { grantId, action: 'USE' } })).toBe(0);
+  });
+
+  it('account erasure keeps sealed attribution but removes current issuer visibility and refuses spending', async () => {
+    await activate();
+    const survivor = await db.user.create({ data: { handle: `remaining-${generateId()}` } });
+    await db.orgMember.create({ data: { organizationId: orgId, userId: survivor.id, role: 'ADMIN' } });
+    await deleteUserAccount(db, { targetUserId: ownerId, actorUserId: ownerId });
+    expect((await db.secretReadClient.findUniqueOrThrow({ where: { id: clientId } })).issuerUserId).toBe(ownerId);
+    expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).issuerUserId).toBeNull();
+    expect(await resolvers.Query.mySecretReadClients({}, {}, ctx(ownerId))).toEqual([]);
+    const history = await clients('', ctx(survivor.id));
+    expect(history.errors).toBeUndefined();
+    expect((history.data?.secret as any).readClients.items[0]).toMatchObject({ clientId: null, endReason: 'ISSUER_GONE' });
+    await expect(asWorker(workerId, () => resolvers.Mutation.revealSecret({}, { clientId }, ctx(survivor.id)))).rejects.toBeDefined();
+    expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(0);
   });
 
   it('judges the named issuer, never the holder\'s or driver\'s manager authority', async () => {
