@@ -70,4 +70,16 @@ describe('#3998 secret.reveal', () => {
       expect(await refusal(grant({ secret: id, 'auto-delete': 'keep' }))).toBe('GRANT_VALUES_INVALID');
     }
   });
+
+  it('admits a live person holder for secret.reveal only, and refuses a gone person or another action', async () => {
+    const person = (id: string, action = 'secret.reveal') => db.$transaction((tx) => createPendingGrant(tx, {
+      appId: w.appId, requester: { userId: w.userId, workerId: null, sessionId: null }, holder: { kind: 'user', id },
+      action, values: { secret: secretId, 'auto-delete': 'keep' }, reason: 'r', canReadMemory: async () => true,
+    }));
+    const id = await person(w.userId);
+    const row = await db.$queryRaw<Array<{ user_id: string; agent_id: string | null; worker_id: string | null }>>`SELECT user_id, agent_id, worker_id FROM grants WHERE id = ${id}`;
+    expect(row[0]).toEqual({ user_id: w.userId, agent_id: null, worker_id: null });
+    expect(await refusal(person(generateId()))).toBe('GRANT_HOLDER_NOT_ALLOWED');
+    expect(await refusal(person(w.userId, 'secret.delete'))).toBe('GRANT_HOLDER_NOT_ALLOWED');
+  });
 });

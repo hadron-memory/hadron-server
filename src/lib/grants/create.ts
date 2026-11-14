@@ -104,6 +104,9 @@ function valueMatchesType(type: string, value: unknown): boolean {
   return Array.isArray(value) ? value.every(one) : one(value);
 }
 
+/** The one action a person may hold (#3998). */
+const SECRET_REVEAL_ACTION = 'secret.reveal';
+
 interface ActionRow { name: string; parameters: unknown }
 interface WorkerRow { id: string; app_id: string; agent_id: string; retired_at: Date | null }
 
@@ -151,6 +154,11 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
     // Held by the agent in this App: installed, licensed and not deleted here, judged on the locked state.
     const agents = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM agents WHERE id = ${holder.id} AND deleted_at IS NULL FOR SHARE`;
     if (agents.length === 0 || !(await isAgentInstalledAndLicensed(tx, appId, holder.id))) throw new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED');
+  } else if (holder.kind === 'user' && args.action === SECRET_REVEAL_ACTION) {
+    // #3998: a PERSON holds a secret.reveal grant (the one action that reads its secret on a server-hosted passkey page). Live,
+    // locked FOR SHARE so an erasure that comes next waits and ends the new row through endHeldGrants. No other action has a person holder.
+    const people = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM users WHERE id = ${holder.id} AND deleted_at IS NULL FOR SHARE`;
+    if (people.length === 0) throw new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED');
   } else {
     throw new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED');
   }
@@ -219,13 +227,14 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
   if (startsAt && expiresAt && expiresAt.getTime() <= startsAt.getTime()) throw new GrantCreateRefusal('GRANT_TERMS_INVALID', 'expires must follow starts');
 
   const id = generateId();
-  // (kinds user and app were refused above: the holder column is one of this closed pair)
+  // (kind app is refused above; kind user only for secret.reveal)
+  const userId = holder.kind === 'user' ? holder.id : null;
   const agentId = holder.kind === 'agent' ? holder.id : null;
   const workerId = holder.kind === 'worker' ? holder.id : null;
   await tx.$executeRaw`
-    INSERT INTO grants (id, app_id, agent_id, worker_id, requested_by_user_id, requested_by_worker_id, requested_by_session_id,
+    INSERT INTO grants (id, app_id, user_id, agent_id, worker_id, requested_by_user_id, requested_by_worker_id, requested_by_session_id,
                         action, action_values, starts_at, expires_at, max_uses, reason, created_at, updated_at)
-    VALUES (${id}, ${appId}, ${agentId}, ${workerId}, ${requester.userId}, ${requester.workerId}, ${requester.sessionId},
+    VALUES (${id}, ${appId}, ${userId}, ${agentId}, ${workerId}, ${requester.userId}, ${requester.workerId}, ${requester.sessionId},
             ${action.name}, ${JSON.stringify(values)}::jsonb, ${startsAt?.toISOString() ?? null}::timestamptz AT TIME ZONE 'UTC', ${expiresAt?.toISOString() ?? null}::timestamptz AT TIME ZONE 'UTC', ${maxUses}, ${args.reason},
             (clock_timestamp() AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC'))`;
   return id;
