@@ -16,16 +16,16 @@ import { SecretNotFoundError } from './errors.js';
 describe('parseSecretUrn', () => {
   it('decomposes the org/user root shapes (v2 flat + legacy spellings)', () => {
     // Bare org root — both the v2 single-colon and legacy `::` forms.
-    expect(parseSecretUrn('hrn:secret:acme.com:k')).toEqual({ root: 'acme.com', name: 'k' });
-    expect(parseSecretUrn('hrn:secret:acme.com::k')).toEqual({ root: 'acme.com', name: 'k' });
+    expect(parseSecretUrn('hrn:secret:acme.com:k')).toEqual({ kind: 'principal', root: 'acme.com', name: 'k' });
+    expect(parseSecretUrn('hrn:secret:acme.com::k')).toEqual({ kind: 'principal', root: 'acme.com', name: 'k' });
     // Bare user root (v2, resolved by pool lookup — no pinned rootType).
-    expect(parseSecretUrn('hrn:secret:holger:k')).toEqual({ root: 'holger', name: 'k' });
+    expect(parseSecretUrn('hrn:secret:holger:k')).toEqual({ kind: 'principal', root: 'holger', name: 'k' });
     // Legacy `@`/`user:` sigils pin the user.
-    expect(parseSecretUrn('hrn:secret:@holger::k')).toEqual({ rootType: 'user', root: 'holger', name: 'k' });
-    expect(parseSecretUrn('hrn:secret:user:holger::k')).toEqual({ rootType: 'user', root: 'holger', name: 'k' });
+    expect(parseSecretUrn('hrn:secret:@holger::k')).toEqual({ kind: 'principal', rootType: 'user', root: 'holger', name: 'k' });
+    expect(parseSecretUrn('hrn:secret:user:holger::k')).toEqual({ kind: 'principal', rootType: 'user', root: 'holger', name: 'k' });
     // Legacy urn: prefix + bare form both accepted.
-    expect(parseSecretUrn('urn:secret:acme.com::k')).toEqual({ root: 'acme.com', name: 'k' });
-    expect(parseSecretUrn('acme.com::k')).toEqual({ root: 'acme.com', name: 'k' });
+    expect(parseSecretUrn('urn:secret:acme.com::k')).toEqual({ kind: 'principal', root: 'acme.com', name: 'k' });
+    expect(parseSecretUrn('acme.com::k')).toEqual({ kind: 'principal', root: 'acme.com', name: 'k' });
   });
 
   it('rejects a structurally invalid or superseded (app/memory) secret URN', () => {
