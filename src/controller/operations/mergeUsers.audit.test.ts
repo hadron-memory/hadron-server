@@ -100,7 +100,8 @@ describe('mergeUsers audit actor registry', () => {
           OR (table_name = 'grant_signing_requests' AND column_name = 'requester_user_id')
           OR (table_name = 'grant_signatures' AND column_name = 'signer_id')
           OR (table_name = 'secret_events' AND column_name = 'actor_user_id')
-          OR (table_name = 'secret_versions' AND column_name = 'written_by_user_id'))
+          OR (table_name = 'secret_versions' AND column_name = 'written_by_user_id')
+          OR (table_name = 'secret_read_clients' AND column_name = 'issuer_user_id'))
     `;
     const schemaPairs = new Set(columns.map(({ table_name, column_name }) => `${table_name}.${column_name}`));
     const covered = coveredPairs(AUDIT_USER_COLUMNS);
