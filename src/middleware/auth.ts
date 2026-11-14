@@ -1,3 +1,4 @@
+import { refuseSupersededSession } from '../lib/sessionSuperseded.js';
 import { transportRateIdentity, type RateIdentity } from '../lib/rateLimit/identity.js';
 import { ownsSession } from '../lib/sessionOwnership.js';
 import { createHash, randomBytes } from 'crypto';
@@ -31,7 +32,7 @@ export interface AuthContext {
   /**
    * #1705 — the request NAMED a session (X-Hadron-Session) that did not
    * validate, so `sessionId` is unset and the request proceeds unbound (the
-   * pre-existing silent-drop behaviour, unchanged). A surface whose actor is
+   * silent-drop behaviour except supersession, which refuses typed (#3818)). A surface whose actor is
    * the session's worker reads this to refuse rather than act as the bare
    * credential: a worker whose session ended must not silently become its
    * human driver (agent tasks, cor:agt:050:08).
@@ -206,6 +207,13 @@ export async function resolveAuthContextWithStatus(
   req: Request,
   db: PrismaClient,
 ): Promise<{ auth: AuthContext; credentialStatus: CredentialStatus }> {
+  const result = await resolveCredentialContextWithStatus(req, db);
+  await bindPresentedSession(req, db, result.auth);
+  return result;
+}
+
+/** Resolve identity before transport-specific scope/ownership checks; no execution binding yet. */
+export async function resolveCredentialContextWithStatus(req: Request, db: PrismaClient) {
   const { auth, credentialStatus } = await resolveAuthContextInner(req, db);
   const identity = transportRateIdentity(auth, req.ip);
   return { auth: identity.principal || identity.ip ? { ...auth, limiterIdentity: identity } : auth, credentialStatus };
@@ -228,8 +236,6 @@ async function resolveAuthContextInner(
   if (!authHeader?.startsWith('Bearer ')) return { auth: {}, credentialStatus: 'anonymous' };
 
   const token = authHeader.slice(7);
-  const sessionIdHeader = req.headers['x-hadron-session'];
-  const sessionId = Array.isArray(sessionIdHeader) ? sessionIdHeader[0] : sessionIdHeader;
 
   let ctx: AuthContext;
   if (token.startsWith(APP_KEY_PREFIX)) {
@@ -247,11 +253,17 @@ async function resolveAuthContextInner(
   const credentialStatus: CredentialStatus = ctx.userId || ctx.appId
     ? 'authenticated'
     : incompleteChecks.has(ctx) ? 'unavailable' : 'refused';
+  return { auth: ctx, credentialStatus };
+}
+
+/** Apply the execution header only after a transport has accepted the credential. */
+export async function bindPresentedSession(req: Request, db: PrismaClient, ctx: AuthContext): Promise<void> {
+  const header = req.headers['x-hadron-session'];
+  const sessionId = Array.isArray(header) ? header[0] : header;
   if (sessionId) await bindSession(db, ctx, sessionId);
   // #2176: the validated user behind this request's writes, from the SAME resolved context
   // `editorFromAuth` reads for the revision, never from anything the client asserts.
   publishUser(ctx.userId ?? null);
-  return { auth: ctx, credentialStatus };
 }
 
 /**
@@ -279,8 +291,8 @@ async function resolveAuthContextInner(
  * memory reach exactly their user reach (the #967 narrow-never-grant posture,
  * mirrored for user principals).
  *
- * An invalid binding is silently dropped (the request proceeds unbound) —
- * the pre-existing App-key behavior, kept identical for both shapes.
+ * A superseded execution binding is refused typed (#3818 V24). Other invalid
+ * bindings retain the existing silent-drop behavior for both principal shapes.
  */
 async function bindSession(
   db: PrismaClient,
@@ -322,6 +334,9 @@ export async function validateSessionBinding(
       app: { select: { sessionDormancyDays: true } },
     },
   });
+  if (session?.endedAt) {
+    await refuseSupersededSession({ ...principal, db }, sessionId);
+  }
   if (!session || session.endedAt) return null;
   const now = new Date();
   if (session.expiresAt && session.expiresAt <= now) return null;

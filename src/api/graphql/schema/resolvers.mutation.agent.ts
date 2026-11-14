@@ -1,4 +1,5 @@
 // agentMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { endHeldGrants } from '../../../lib/grants/departure.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
 import { refuseLegacyBaseUrl, requireEndpointFor, requireKeyFor, validateApiStyle, validateEndpoint } from '../../../lib/aiEndpoint.js';
 import { testAiServiceConfig, type AiConfigTestOverride } from '../../../controller/operations/testAiServiceConfig.js';
@@ -53,6 +54,7 @@ import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { deriveSlugFromName } from '../../../lib/urn.js';
 import { normalizeHandleOrNull } from '../../../lib/userHandle.js';
 import { generateId } from '../../../lib/id.js';
+import { seedAgentSkeleton } from '../../../lib/agentSkeleton.js';
 import { isLifecycleActive } from '@hadron-memory/access-control';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
@@ -76,6 +78,8 @@ import {
   getAccessibleMemoryIds,
   requireMemoryWriteAccess,
   AGENT_INCLUDE,
+  assertAiConfigAppOwnerInstalled,
+  lockAiConfigAppOwnerInstalled,
 } from './resolvers.helpers.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
@@ -192,7 +196,7 @@ async function assertPromotableSystemMemory(ctx: Context, target: PromotionTarge
   const notFound = promotionTargetNotFound;
   if (!target || target.deletedAt) throw notFound();
   const readable = await getAccessibleMemoryIds(ctx, target.id);
-  if (readable !== null && !readable.includes(target.id)) throw notFound();
+  if (!readable.includes(target.id)) throw notFound();
   // The refusals below reach only a reader, so their order discloses nothing;
   // the specific ones come before the write gate so a reader learns why.
   if (target.class === 'group') {
@@ -453,7 +457,7 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
       resolvedSystemMemoryId = systemMemory.id;
     }
 
-    return tx.agent.create({
+    const agent = await tx.agent.create({
       data: {
         // #2171 (R211): a NEW Agent offers owner and member unless told otherwise.
         // The column default stays owner-only so no existing row changes meaning.
@@ -470,6 +474,9 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
       },
       include: AGENT_INCLUDE,
     });
+    // #3833: the skeleton parents (boot, boot:rules, processes, tasks), only the locs the effective memory lacks.
+    await seedAgentSkeleton(tx, resolvedSystemMemoryId, ctx.userId ?? ctx.clientId ?? null);
+    return agent;
   }).catch((e: unknown) => {
     // #935: under CONCURRENT creates the pre-check above races — the loser
     // surfaces as P2002 on the agent (or derived system-memory) urn unique
@@ -488,7 +495,8 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
   // #2199 (cor:rag:010:01 r17): a memory promoted to class='system' is always summary-indexed. Its existing nodes were
   // written while it was an ordinary memory, so stamp them for the drain (post-commit; a fresh auto-provisioned memory
   // is empty and every later write enqueues itself). Never fails the create.
-  if (systemMemoryId && createdAgent.systemMemoryId) {
+  // #3833: a fresh memory now holds the seeded skeleton too, so stamp on every create.
+  if (createdAgent.systemMemoryId) {
     await backfillMemoryEmbeddings(ctx.db, createdAgent.systemMemoryId).catch((err) => {
       console.warn('[createAgent] system memory embedding backfill failed:', err);
     });
@@ -1163,6 +1171,9 @@ export const agentMutations = {
         }
         const deletedAt = new Date();
         await tx.agent.update({ where: { id }, data: { deletedAt } });
+        // #3690 / ruling 0259: any agent delete, soft delete included, is a departure. No FK action fires on a soft delete, so the grants
+        // the agent HOLDS end here, after the `agents FOR UPDATE` lock (afterLock below): the grant row lock is the last one.
+        await endHeldGrants(tx, 'agent', id);
         if (agent.systemMemoryId) {
           await tx.memory.updateMany({ where: { id: agent.systemMemoryId }, data: { deletedAt } });
         }
@@ -1361,7 +1372,7 @@ export const agentMutations = {
       });
       if (!isLifecycleActive(grant)) {
         throw new GraphQLError(
-          'An AgentOrgGrant already exists for this organization and Agent, but it is not active. Ask the Agent owner to issue a new grant or clear the revocation.',
+          'An AgentOrgGrant already exists for this organization and Agent, but it is not active. A revoked or expired grant is not reactivated by createAgentOrgGrant (cor:dmo:050:07).',
           {
             extensions: {
               code: 'AGENT_ORG_GRANT_INACTIVE',
@@ -1760,6 +1771,7 @@ export const agentMutations = {
     ) => {
       try {
         const { ownerWhere } = await requireAiConfigOwnerAdmin(ctx, args.ownerType, args.ownerId);
+        await assertAiConfigAppOwnerInstalled(ctx.db, ownerWhere.appId);
         const name = validateAiConfigName(args.name);
         validateProviderAndParams(args.provider, args.params ?? null);
         validateParamRanges(args.provider, args.params ?? null);
@@ -1771,7 +1783,9 @@ export const agentMutations = {
         // No upsert: a P2002 from the partial unique (owner, name) index is
         // the duplicate-name typed error, not a retry (upsert is not
         // race-safe on the cold path).
-        const config = await ctx.db.aiServiceConfig.create({
+        const config = await ctx.db.$transaction(async (tx) => {
+          await lockAiConfigAppOwnerInstalled(tx, ownerWhere.appId);
+          return tx.aiServiceConfig.create({
           data: {
             ...ownerWhere,
             name,
@@ -1792,6 +1806,7 @@ export const agentMutations = {
             enabled: args.enabled ?? true,
             createdBy: ctx.userId ?? null,
           },
+          });
         });
         return toGqlAiServiceConfig(config);
       } catch (e: unknown) {
@@ -1822,7 +1837,8 @@ export const agentMutations = {
         const existing = await ctx.db.aiServiceConfig.findUnique({ where: { id: args.id } });
         if (!existing) throw new AiServiceConfigNotFoundError(args.id);
         const owner = aiConfigOwnerOf(existing);
-        await requireAiConfigOwnerAdmin(ctx, owner.ownerType, owner.ownerId);
+        const { ownerWhere: updateOwnerWhere } = await requireAiConfigOwnerAdmin(ctx, owner.ownerType, owner.ownerId);
+        await assertAiConfigAppOwnerInstalled(ctx.db, updateOwnerWhere.appId);
         if (args.params !== undefined) refuseLegacyBaseUrl(args.params);
         // Omitted = unchanged; null or '' = clear back to the provider default.
         const endpoint =
@@ -1853,6 +1869,7 @@ export const agentMutations = {
         // write can't leave a config the write-time rules refuse, including a
         // provider/style pair neither of two racing updates judged.
         const config = await ctx.db.$transaction(async (tx) => {
+          await lockAiConfigAppOwnerInstalled(tx, updateOwnerWhere.appId);
           const cur = await lockAiServiceConfig(tx, existing.id);
           if (!cur) throw new AiServiceConfigNotFoundError(args.id);
           const provider = judge(cur);
@@ -1886,11 +1903,11 @@ export const agentMutations = {
 
     testAiServiceConfig: async (
       _: unknown,
-      { id, override }: { id: string; override?: AiConfigTestOverride | null },
+      { id, override, chatProbe }: { id: string; override?: AiConfigTestOverride | null; chatProbe?: boolean | null },
       ctx: Context,
     ) => {
       try {
-        return await testAiServiceConfig(ctx, id, override ?? {});
+        return await testAiServiceConfig(ctx, id, override ?? {}, undefined, chatProbe === true);
       } catch (e) {
         rethrowAiConfigTyped(e);
       }
@@ -1901,8 +1918,11 @@ export const agentMutations = {
         const existing = await ctx.db.aiServiceConfig.findUnique({ where: { id } });
         if (!existing) throw new AiServiceConfigNotFoundError(id);
         const owner = aiConfigOwnerOf(existing);
-        await requireAiConfigOwnerAdmin(ctx, owner.ownerType, owner.ownerId);
-        await ctx.db.aiServiceConfig.delete({ where: { id: existing.id } });
+        const { ownerWhere } = await requireAiConfigOwnerAdmin(ctx, owner.ownerType, owner.ownerId);
+        await ctx.db.$transaction(async (tx) => {
+          await lockAiConfigAppOwnerInstalled(tx, ownerWhere.appId);
+          await tx.aiServiceConfig.delete({ where: { id: existing.id } });
+        });
         return true;
       } catch (e) {
         rethrowAiConfigTyped(e);

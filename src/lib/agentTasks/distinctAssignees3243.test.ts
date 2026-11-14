@@ -115,10 +115,11 @@ it('each role/family/min-tier constraint is still judged per task in a distinct 
  expect(tasks.map((t:any)=>t.assigneeWorkerId)).toEqual([a.id,b.id]);
 });
 
-it('post-commit launch receives the family selected by the atomic match',async()=>{
+it('post-commit launch is not asked for a worker the atomic match chose with an open session (#3815; was: receives the family)',async()=>{
  await worker(); const spy=vi.spyOn(launchModule,'launchForAssignment');
  try {const [task]=await batch([matched({familyIn:['claude']})],true);
- expect(spy.mock.calls.filter(call=>call[1].taskId===task.id).map(call=>call[1].family)).toEqual(['claude']);
+ expect(task.assigneeWorkerId).not.toBeNull();
+ expect(spy.mock.calls.filter(call=>call[1].taskId===task.id)).toEqual([]);
  }finally{spy.mockRestore();}
 });
 

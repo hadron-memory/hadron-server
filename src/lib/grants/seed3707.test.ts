@@ -17,16 +17,17 @@ const seeded = () => db.$queryRawUnsafe<Row[]>(
   `SELECT name, source, parameters, tool, enforcement, issuer_rule, summary_template, xmin::text AS xmin, updated_at
      FROM actions WHERE name IN ('schedule.create', 'webhook.create') ORDER BY name`);
 
-beforeEach(async () => { await cleanDb(db); await dropTestActions(); await db.$executeRawUnsafe(`DELETE FROM actions WHERE name IN ('schedule.create', 'webhook.create')`); });
+beforeEach(async () => { await cleanDb(db); await dropTestActions(); await db.$executeRawUnsafe(`DELETE FROM actions WHERE name IN ('schedule.create', 'webhook.create', 'bootprompt.source.edit', 'bootprompt.compile.approve')`); });
 
 describe('#3707: the shipped platform list', () => {
-  it('names exactly schedule.create and webhook.create, and nothing else', () => {
-    expect(PLATFORM_ACTIONS.map((a) => a.name).sort()).toEqual(['schedule.create', 'webhook.create']);
+  it('names exactly the four seeded actions, and nothing else (#3823 added the two boot-prompt grants)', () => {
+    expect(PLATFORM_ACTIONS.map((a) => a.name).sort()).toEqual(['bootprompt.compile.approve', 'bootprompt.source.edit', 'schedule.create', 'webhook.create']);
   });
 
   it('each declares the ruled terms: entry-node parameter that refuses a wildcard, server-enforced, platform source, no tool', () => {
-    expect(PLATFORM_ACTIONS).toHaveLength(2);
-    for (const a of PLATFORM_ACTIONS) {
+    const entry = PLATFORM_ACTIONS.filter((a) => a.name === 'schedule.create' || a.name === 'webhook.create');
+    expect(entry).toHaveLength(2);
+    for (const a of entry) {
       expect(a.parameters, a.name).toEqual([{ name: 'entryNode', type: 'node-ref', refusesWildcard: true }]);
       expect(a.enforcement, a.name).toBe('SERVER');
       expect(a.source, a.name).toBe('PLATFORM');
@@ -38,13 +39,14 @@ describe('#3707: the shipped platform list', () => {
   it('the issuer rules are closed keys, one per action', () => {
     expect(Object.fromEntries(PLATFORM_ACTIONS.map((a) => [a.name, a.issuerRule]))).toEqual({
       'schedule.create': 'APP_SCHEDULE_ADMIN', 'webhook.create': 'APP_WEBHOOK_ADMIN',
+      'bootprompt.source.edit': 'APP_MANAGER', 'bootprompt.compile.approve': 'APP_MANAGER',
     });
   });
 });
 
 describe('#3707: the deploy upsert writes both rows, and a second run changes nothing', () => {
   it('a first upsert inserts both rows with the declared terms', async () => {
-    expect(await upsertPlatformActions(db)).toEqual({ inserted: 2, updated: 0, unchanged: 0 });
+    expect(await upsertPlatformActions(db)).toEqual({ inserted: 4, updated: 0, unchanged: 0 });
     const rows = await seeded();
     expect(rows.map((r) => r.name)).toEqual(['schedule.create', 'webhook.create']);
     for (const r of rows) {
@@ -58,14 +60,14 @@ describe('#3707: the deploy upsert writes both rows, and a second run changes no
     await upsertPlatformActions(db);
     const first = await seeded();
     await new Promise((r) => setTimeout(r, 25));
-    expect(await upsertPlatformActions(db)).toEqual({ inserted: 0, updated: 0, unchanged: 2 });
+    expect(await upsertPlatformActions(db)).toEqual({ inserted: 0, updated: 0, unchanged: 4 });
     expect(await seeded()).toEqual(first);
   });
 
   it('a drifted row is put back by the next upsert (the list in code is the source)', async () => {
     await upsertPlatformActions(db);
     await db.$executeRawUnsafe(`UPDATE actions SET enforcement = 'RECORDED_ONLY' WHERE name = 'schedule.create'`);
-    expect(await upsertPlatformActions(db)).toEqual({ inserted: 0, updated: 1, unchanged: 1 });
+    expect(await upsertPlatformActions(db)).toEqual({ inserted: 0, updated: 1, unchanged: 3 });
     expect((await seeded())[0].enforcement).toBe('SERVER');
   });
 });

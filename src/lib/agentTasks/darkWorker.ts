@@ -170,6 +170,11 @@ async function raise(db: PrismaClient, app: { id: string; organizationId: string
   let chainEmpty = false;
   try {
     const eventId = await db.$transaction(async (tx) => {
+      // #3774: fence uninstallApp / deleteApp. They hold `apps FOR UPDATE`, so this share lock waits for one in flight and then
+      // sees its commit; a pass that listed the App as installed before the uninstall must not open an episode after it (nothing
+      // would close it: later sweeps skip the App).
+      const live = await tx.$queryRaw<{ id: string }[]>`SELECT id FROM apps WHERE id = ${app.id} AND deleted_at IS NULL AND uninstalled_at IS NULL FOR SHARE`;
+      if (live.length === 0) return null;
       const chain = await darkAlarmChain(tx, app, dark.workerId);
       chainEmpty = chain.length === 0;
       const eventId = generateId();
@@ -193,6 +198,7 @@ async function raise(db: PrismaClient, app: { id: string; organizationId: string
       // SERIALIZABLE like `raiseStallAlarm`: the chain names manager users, sealed, and `mergeUsers` refuses to merge an
       // account named in an open alarm. A raise racing a merge is a read-write cycle Postgres aborts on one side.
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    if (eventId === null) return null; // the App is no longer installed
     // #2807: with no reporting line and no manager the alarm opens and nobody is woken. The alarm stays readable as it
     // is; this one line, once per raised episode and after the commit, is how an operator learns of it. Ids only.
     if (chainEmpty) console.warn(JSON.stringify({ event: 'dark_worker.chain_empty', appId: app.id, workerId: dark.workerId, eventId }));

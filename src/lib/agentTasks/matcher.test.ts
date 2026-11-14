@@ -24,7 +24,7 @@ import { generateId } from '../id.js';
 import { runAsActor } from '../requestActor.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { taskMatcherTick } from '../../jobs/taskMatcher.js';
-import { __matcherTesting, compareRank, eligibleFamily, loadWorkerWorkStates, matchable, matchQueuedTasks, parseRequirements } from './matcher.js';
+import { __matcherTesting, compareRank, eligibleFamily, loadWorkerWorkStates, matchable, matchQueuedTasks, matchTaskNow, needsHostStart, parseRequirements } from './matcher.js';
 import { registerHost } from './hosts.js';
 import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
 
@@ -363,12 +363,14 @@ describe('the family follows the BINDING, not activity (#1723 review, Diego P2-2
     expect(await familyOf(baloo)).toBe('codex');
     const [state] = (await loadWorkerWorkStates(db, app.id, new Date())).filter((w) => w.id === baloo.id);
     expect(state).toMatchObject({ bound: true, live: false, bindingFamily: 'codex', launchableFamilies: ['glm'], families: ['codex'], freeFamilies: ['codex'] });
-    // A quiet BOUND worker is not matchable, whatever a host could launch it as: a glm-only task stays queued, and so does a codex one.
+    // #3815: a quiet BOUND worker is matchable, but only as its binding's family, whatever a host could launch it as:
+    // a glm-only task stays queued, a codex one is assigned, and no host start is issued over the open session.
     const glmOnly = await queued('09:00', { familyIn: ['glm'] });
     const codexOk = await queued('09:01', { familyIn: ['codex'] });
     await matchQueuedTasks(db, new Date(), { appId: app.id });
     expect(await assigneeOf(glmOnly.id)).toBeNull();
-    expect(await assigneeOf(codexOk.id)).toBeNull();
+    expect(await assigneeOf(codexOk.id)).toBe(baloo.id);
+    expect(await db.hostOperation.count()).toBe(0);
   });
 
   it('an actual end clears it; only then does a host family apply', async () => {
@@ -386,14 +388,12 @@ describe('the family follows the BINDING, not activity (#1723 review, Diego P2-2
     expect(await familyOf(baloo)).toBe('glm');
   });
 
-  it('a quiet binding that is driven again is matched as its family', async () => {
+  it('#3815: a quiet binding is matched as its family', async () => {
     const s = await bind(baloo, 'codex', new Date(Date.now() - 25 * 3_600_000));
     const t = await queued('09:00', { role: 'reviewer' });
     await matchQueuedTasks(db, new Date(), { appId: app.id });
-    expect(await assigneeOf(t.id)).toBeNull();
-    await db.session.update({ where: { id: s.id }, data: { updatedAt: new Date() } });
-    await matchQueuedTasks(db, new Date(), { appId: app.id });
     expect(await assigneeOf(t.id)).toBe(baloo.id);
+    expect(s.id).toBeTruthy();
   });
 });
 
@@ -489,9 +489,55 @@ describe('cor:agt:060:05 — free for work: each disqualifier on its own', () =>
     })).toBe(false);
   });
 
-  it('a lapsed session (idle past its window) is not live, so not matched', async () => {
+  it('#3815: a quiet session (idle past its window, still open) is matched; silence is not abandonment', async () => {
     expect(await matchesBaloo(() => bind(baloo, 'codex', at('10:00')).then(() => undefined), new Date(at('10:00').getTime() + 25 * 3_600_000)))
-      .toBe(false);
+      .toBe(true);
+  });
+
+  it('#3815: a session past its hard expiry (not yet reaped) is not matched', async () => {
+    expect(await matchesBaloo(async () => {
+      const s = await bind(baloo, 'codex', at('10:00'));
+      await db.session.update({ where: { id: s.id }, data: { expiresAt: at('10:30') } });
+    }, new Date(at('10:00').getTime() + 25 * 3_600_000))).toBe(false);
+  });
+
+  it('#3815: a quiet worker is the only candidate: not NOBODY_FREE on match-now', async () => {
+    await bind(baloo, 'codex', at('10:00'));
+    const later = new Date(at('10:00').getTime() + 25 * 3_600_000);
+    const t = await queued('11:00', { role: 'reviewer' }, { matchPending: true });
+    expect(await matchTaskNow(db, t.id, later)).toBeNull();
+    const row = await db.agentTask.findUniqueOrThrow({ where: { id: t.id }, select: { assigneeWorkerId: true, matchFailedReason: true } });
+    expect(row).toEqual({ assigneeWorkerId: baloo.id, matchFailedReason: null });
+  });
+
+  it('#3815: the sweep also assigns the only quiet candidate', async () => {
+    await bind(baloo, 'codex', at('10:00'));
+    const t = await queued('11:00', { role: 'reviewer' });
+    const later = new Date(at('10:00').getTime() + 25 * 3_600_000);
+    expect(await matchQueuedTasks(db, later, { appId: app.id })).toEqual([{ taskId: t.id, workerId: baloo.id, family: 'codex' }]);
+  });
+
+  it('#3815: a stalled, retired or task-holding worker stays excluded when quiet too', async () => {
+    const later = new Date(at('10:00').getTime() + 25 * 3_600_000);
+    expect(await matchesBaloo(async () => {
+      await bind(baloo, 'codex', at('10:00'));
+      await db.workerAvailability.create({ data: { workerId: baloo.id, state: 'unavailable', reason: 'stalled', setAt: at('10:30'), setBy: 'stall-rule' } });
+    }, later)).toBe(false);
+  });
+
+  it('#3815 V16: no worker.start is issued for a matched worker whose session is open, quiet or live', async () => {
+    await registerHost(db, { appId: app.id, hostId: 'orca1', label: 'orca1', pollIntervalSeconds: 60, workers: [{ workerId: baloo.id, family: 'codex', worktrees: ['repo/baloo'] }] }, at('10:00'));
+    await bind(baloo, 'codex', at('10:00'));
+    const t = await queued('11:00', { role: 'reviewer' });
+    await matchQueuedTasks(db, new Date(at('10:00').getTime() + 25 * 3_600_000), { appId: app.id });
+    expect(await assigneeOf(t.id)).toBe(baloo.id);
+    expect(await db.hostOperation.count()).toBe(0);
+  });
+
+  it('#3815 V16: needsHostStart is true only for an unbound, not-live worker', () => {
+    expect(needsHostStart({ bound: false, live: false })).toBe(true);
+    expect(needsHostStart({ bound: true, live: false })).toBe(false);
+    expect(needsHostStart({ bound: true, live: true })).toBe(false);
   });
 
   it('the newest open session is the binding: its family wins, even when it reported none', async () => {
@@ -756,18 +802,21 @@ describe('#1961 the roster SDL states the shipped matching rule', () => {
   const field = (name: string) => new RegExp(`"([^"]*)"\\n\\s*${name}: `).exec(/type TeamRosterEntry \{[^}]*\}/.exec(typeDefs)![0])?.[1] ?? '';
   const state = (name: string) => new RegExp(`"([^"]*)"\\n\\s*${name}\\n`).exec(/enum TeamRosterState \{[^}]*\}/.exec(typeDefs)![0])?.[1] ?? '';
 
-  it('matchable: a bound worker only while live, an unbound one always (free for work then needs a launchable family)', () => {
+  it('matchable: a bound worker with an open session, live or quiet; an unbound one always (free for work then needs a launchable family)', () => {
     expect(matchable({ bound: true, live: true })).toBe(true);
-    expect(matchable({ bound: true, live: false })).toBe(false);
+    expect(matchable({ bound: true, live: false, openSession: true })).toBe(true);
+    expect(matchable({ bound: true, live: false, openSession: false })).toBe(false);
     expect(matchable({ bound: false, live: false })).toBe(true);
+    expect(matchable({ bound: true, live: false, openSession: true, endingSession: true })).toBe(false);
     expect(matchable({ bound: false, live: false, endingSession: true })).toBe(false);
   });
 
   it('liveSession and AVAILABLE describe that rule, with no pre-T6 restriction left', () => {
-    expect(field('liveSession')).toContain('The matcher assigns to a BOUND worker only while it has one');
+    expect(field('liveSession')).toContain('Matching does not need one');
     expect(field('liveSession')).toContain('an unbound worker is matched when a live host can launch it');
     expect(state('AVAILABLE')).toContain('an unbound worker a live host can launch, which the matcher assigns to');
-    expect(state('AVAILABLE')).toContain('which the matcher leaves alone until its session is live again');
+    expect(state('AVAILABLE')).toContain('which the matcher also assigns to');
+    expect(state('AVAILABLE')).not.toContain('leaves alone');
     for (const text of [field('liveSession'), state('AVAILABLE')]) expect(text).not.toMatch(/host-operations slice|until T6/);
   });
 });

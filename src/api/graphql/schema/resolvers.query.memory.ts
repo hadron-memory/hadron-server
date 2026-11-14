@@ -603,7 +603,7 @@ export const memoryQueries = {
             { class: 'system' as any, isInstallMemory: true, id: { in: installListable } },
             {
               class: 'app' as any,
-              ...(accessibleIds === null ? {} : { id: { in: accessibleIds } }),
+              id: { in: accessibleIds },
               OR: [
                 { organizationId: { in: orgIds } },
                 { appId: { in: memberApps.map(row => row.appId) } },

@@ -43,6 +43,10 @@ export const TERMINAL_REPORT_MAX = 200;
 /** How far ahead of the server's clock a host's `checkedAt` may be, in ms. */
 export const TERMINAL_CHECKED_AT_SKEW_MS = 2 * 60 * 1000;
 
+/** #4041 (V82): what a host did about a dark worker. */
+export const TERMINAL_REPAIRS = ['RELAUNCHED', 'NO_SNAPSHOT', 'CAP_REACHED'] as const;
+export type TerminalRepair = (typeof TERMINAL_REPAIRS)[number];
+
 /** The stored object. */
 export type WorkerTerminal = {
   host: { id: string; label: string };
@@ -62,6 +66,8 @@ export type TerminalReportInput = {
   reason?: string | null;
   lastTurnAt?: Date | string | null;
   checkedAt: Date | string;
+  repair?: string | null;
+  attempt?: number | null;
 };
 
 /** A report that passed whole-batch validation. */
@@ -72,9 +78,23 @@ export type ValidTerminalReport = {
   reason: TerminalReason | null;
   lastTurnAt: Date | null;
   checkedAt: Date;
+  /** #4041: not stored; the platform's notice is posted from it. Checked per worker, not per batch. */
+  repair: TerminalRepair | null;
+  attempt: number | null;
 };
 
-const KEY_SET = new Set<string>(['worker', 'status', 'prompt', 'reason', 'lastTurnAt', 'checkedAt']);
+const KEY_SET = new Set<string>(['worker', 'status', 'prompt', 'reason', 'lastTurnAt', 'checkedAt', 'repair', 'attempt']);
+
+/**
+ * #4041 (V82): is this report's repair outcome valid? Refused per worker (the rest of the batch stands), not for the
+ * batch: only a dark report carries one, and `attempt` (at least 1) goes with RELAUNCHED and nothing else.
+ */
+export function repairRefusal(r: Pick<ValidTerminalReport, 'status' | 'repair' | 'attempt'>): 'REPAIR_NOT_DARK' | 'REPAIR_ATTEMPT_INVALID' | null {
+  if (r.repair === null) return r.attempt === null ? null : 'REPAIR_ATTEMPT_INVALID';
+  if (r.status !== 'dark') return 'REPAIR_NOT_DARK';
+  if (r.repair === 'RELAUNCHED') return r.attempt !== null && Number.isSafeInteger(r.attempt) && r.attempt >= 1 ? null : 'REPAIR_ATTEMPT_INVALID';
+  return r.attempt === null ? null : 'REPAIR_ATTEMPT_INVALID';
+}
 
 /**
  * Validate a whole batch (cor:agt:070:09): the sender's bugs refuse the batch and nothing is stored. Returns the first
@@ -113,7 +133,12 @@ export function validateTerminalBatch(
       if (turn.getTime() > checkedAt.getTime()) return { ok: false, message: 'lastTurnAt is after checkedAt.' };
       lastTurnAt = turn;
     }
-    out.push({ worker: r.worker, status: r.status as TerminalStatus, prompt: r.prompt as TerminalPrompt, reason: reason as TerminalReason | null, lastTurnAt, checkedAt });
+    const repair = r.repair ?? null;
+    if (repair !== null && !(TERMINAL_REPAIRS as readonly string[]).includes(repair)) return { ok: false, message: 'repair is not one of the closed outcomes.' };
+    out.push({
+      worker: r.worker, status: r.status as TerminalStatus, prompt: r.prompt as TerminalPrompt, reason: reason as TerminalReason | null,
+      lastTurnAt, checkedAt, repair: repair as TerminalRepair | null, attempt: r.attempt ?? null,
+    });
   }
   return { ok: true, reports: out };
 }

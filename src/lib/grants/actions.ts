@@ -8,6 +8,7 @@
  * DELETES: a grant may name any row it ever wrote (FK RESTRICT), and what a retired action allows is not defined yet.
  */
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
+import { summaryPlaceholders } from './summary.js';
 
 export const ACTION_ENFORCEMENT = ['SERVER', 'CREDENTIAL', 'HARNESS_INSTRUCTION', 'RECORDED_ONLY'] as const;
 export type ActionEnforcement = (typeof ACTION_ENFORCEMENT)[number];
@@ -44,6 +45,17 @@ export const PLATFORM_ACTIONS: readonly ActionDefinition[] = [
     name: 'webhook.create', source: 'PLATFORM', parameters: [ENTRY_NODE], tool: null, enforcement: 'SERVER',
     issuerRule: 'APP_WEBHOOK_ADMIN', summaryTemplate: 'Create a webhook in {app} that starts at the entry node {entryNode}',
   },
+  // #3823 (ruling 0267, cor:agt:040:11 r8): the two boot-prompt grants. The edit names ONE source node (a single value, enforced
+  // where it is spent); the batch names the compiled prompts it covers. The signer must manage the App, and what more the signer must
+  // manage for the named node is judged where the grant is spent (src/lib/grants/bootPromptGrant.ts), on the node itself.
+  {
+    name: 'bootprompt.source.edit', source: 'PLATFORM', parameters: [{ name: 'sourceNode', type: 'node-ref', refusesWildcard: true }], tool: null,
+    enforcement: 'SERVER', issuerRule: 'APP_MANAGER', summaryTemplate: 'Change the text of the boot prompt source {sourceNode} in {app}, once, within an hour',
+  },
+  {
+    name: 'bootprompt.compile.approve', source: 'PLATFORM', parameters: [{ name: 'compiledNode', type: 'node-ref', refusesWildcard: true }], tool: null,
+    enforcement: 'SERVER', issuerRule: 'APP_MANAGER', summaryTemplate: 'Compile and approve the boot prompts {compiledNode} in {app}, any number of times within an hour',
+  },
 ];
 
 export interface UpsertResult { inserted: number; updated: number; unchanged: number }
@@ -57,6 +69,14 @@ function validate(list: readonly ActionDefinition[]): void {
     if (!(ACTION_ENFORCEMENT as readonly string[]).includes(a.enforcement)) throw new Error(`action ${a.name}: unknown enforcement level`);
     if (a.source !== 'PLATFORM') throw new Error(`action ${a.name}: source must be PLATFORM`);
     if (!a.issuerRule || !a.summaryTemplate) throw new Error(`action ${a.name}: issuerRule and summaryTemplate are required`);
+    // #3742: a template may name {app} and its action's parameters, nothing else, so no template can ask the renderer for text it must refuse.
+    const names = new Set(a.parameters.map((p) => p.name));
+    if (names.has('app')) throw new Error(`action ${a.name}: a parameter named "app" would be ambiguous with {app}`);
+    let placeholders: string[];
+    try { placeholders = summaryPlaceholders(a.summaryTemplate); } catch (e) { throw new Error(`action ${a.name}: summaryTemplate has a malformed placeholder or brace`, { cause: e }); }
+    for (const p of placeholders) {
+      if (p !== 'app' && !names.has(p)) throw new Error(`action ${a.name}: summaryTemplate names unknown placeholder {${p}}`);
+    }
   }
 }
 

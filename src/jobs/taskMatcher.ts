@@ -11,7 +11,8 @@
  *      with its notices, so a worker it no longer covers is matched in this pass;
  *   4. (#3246) release each match-now reservation whose one attempt never ran (the process died between the create
  *      commit and the attempt) after a fixed, tunable time, and make that attempt (cor:agt:060:10);
- *   5. match every App's queued tasks to workers free for work
+ *   5. (#3825) purge match outcomes past the 168 h retention;
+ *   6. match every App's queued tasks to workers free for work
  *      (cor:agt:060:06), and record the stop holds of what stays queued.
  *
  * The sweep backs up the event-driven runs (`matchAfterChange`: a task created
@@ -28,6 +29,7 @@
 
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { matchQueuedTasks, recoverInterruptedMatches } from '../lib/agentTasks/matcher.js';
+import { purgeMatchOutcomes } from '../lib/agentTasks/matchOutcomes.js';
 import { sweepLostHosts } from '../lib/agentTasks/hosts.js';
 import { recordLapsedAvailability } from '../lib/agentTasks/availability.js';
 import { sweepExpiredStopSignals } from '../lib/stopSignals/sweep.js';
@@ -60,6 +62,12 @@ export async function taskMatcherTick(db: PrismaClient, now = new Date()): Promi
     result.recovered = await recoverInterruptedMatches(db, now);
   } catch (err) {
     console.error('[task-matcher] recovering interrupted matches failed:', err);
+  }
+  try {
+    // #3825: match outcomes older than the 168 h retention (no window can read them); bounded per pass.
+    await purgeMatchOutcomes(db);
+  } catch (err) {
+    console.error('[task-matcher] purging match outcomes failed:', err);
   }
   try {
     result.matched = (await matchQueuedTasks(db, now, { anchor })).length;

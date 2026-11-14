@@ -151,7 +151,9 @@ for (const path of ['live', 'snapshot'] as const) describe(`#3405 fallback re-ro
     expect(chat.conversationName).toBe('fallback');
     await M.sendChatMessage({}, { chatId: chat.chatId, userMessage }, ctx());
     const node = await chatNodeByLoc(db, chat.chatId, { includeDeleted: true });
-    return (node?.data as Record<string, unknown>).conversationName;
+    // #3557: the name lives only in the state row (no rollback mirror in the root's data).
+    const row = await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: node!.id } });
+    return (row.state as Record<string, unknown>).conversationName;
   }
 
   it('two conversations both matching the signals: re-routes to the lower loc, whatever the insertion order', async () => {

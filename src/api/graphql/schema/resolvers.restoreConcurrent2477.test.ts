@@ -24,6 +24,9 @@ beforeEach(async () => {
   const agent = await M.createAgent({}, { orgId: org.id, name: 'Restore concurrency', visibility: 'PERSONAL' }, context);
   agentId = agent.id;
   memoryId = agent.systemMemoryId!;
+  // #3833: createAgent now seeds skeleton parents. This fixture models a two-node graph (alpha, beta), and the seeded rows
+  // would be row-locked by the first restore while it waits at the barrier, so start from an empty memory.
+  await db.node.deleteMany({ where: { memoryId } });
   const source = await db.node.create({ data: { id: generateId(), memoryId, loc: 'alpha', name: 'Alpha', nodeType: 'system', content: 'snapshot alpha' } });
   const target = await db.node.create({ data: { id: generateId(), memoryId, loc: 'beta', name: 'Beta', nodeType: 'system', content: 'snapshot beta' } });
   await db.edge.create({ data: { id: generateId(), memoryId, loc: 'alpha:link:beta', name: 'link', sourceId: source.id, targetId: target.id } });

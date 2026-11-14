@@ -58,7 +58,7 @@ async function reads(c: Context) {
   };
 }
 function refused(r: Awaited<ReturnType<typeof reads>>) {
-  expect(r.workers.errors?.[0]?.extensions?.code, 'workers(appRef) must refuse').toBe('FORBIDDEN');
+  expect(r.workers.errors?.[0]?.extensions?.code, 'workers(appRef) must refuse').toBe('APP_NOT_FOUND');
   // A denied worker(ref) collapses to the absent-worker answer (resolveProfileWorkerRef).
   expect(r.worker.errors?.[0]?.extensions?.code, 'worker(ref) must refuse').toBe('WORKER_NOT_FOUND');
   expect(r.held.errors, 'heldWorkers answers a page, never an error').toBeUndefined();
@@ -95,7 +95,7 @@ it('RED3360: an ungranted userless run of the App is refused the roster on every
 it('RED3360: workers(appRef) refuses an ungranted run', async () => {
   const out = await wire(WORKERS, { a: appId }, asRun(await runOf(await schedule())));
   expect(out.data?.workers ?? null, 'roster leaked').toBeNull();
-  expect(out.errors?.[0]?.extensions?.code).toBe('FORBIDDEN');
+  expect(out.errors?.[0]?.extensions?.code).toBe('APP_NOT_FOUND');
 });
 
 it('RED3360: worker(ref) refuses an ungranted run like an absent worker', async () => {

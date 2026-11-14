@@ -17,7 +17,7 @@
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { Client } from 'pg';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { baseTestDbUrl, maintenanceUrl, quoteDbIdent, withDbName } from './dbWorkers.js';
 import { buildTestSchema } from './schemaTemplate.js';
 
@@ -70,12 +70,65 @@ async function snapshot(client: Client): Promise<Snapshot> {
   return new Map(rows.map((r) => [r.k, r.d]));
 }
 
-/** Collapse whitespace runs: a function body is kept as written, so indentation alone can differ. */
-const squash = (d: string) => d.replace(/\s+/g, ' ').trim();
+/** Normalize only SQL whitespace, preserving literals, quoted identifiers and comments byte-for-byte.
+ * pg_get_functiondef wraps the source in AS $tag$...$tag$: that outer wrapper holds SQL to scan,
+ * while any dollar-quoted value INSIDE the source is literal text and must stay exact.
+ * This is deliberately conservative (including backslash escapes and comment formatting).
+ */
+function squash(d: string, functionDefinition = true): string {
+  let out = '';
+  for (let i = 0; i < d.length;) {
+    const start = i;
+    if (/\s/.test(d[i])) {
+      while (i < d.length && /\s/.test(d[i])) i++;
+      // A line comment already emitted its significant newline; indentation after it adds no token.
+      out += out.endsWith('\n') ? '' : ' ';
+    } else if (d[i] === "'" || d[i] === '"') {
+      const quote = d[i++];
+      const escaped = quote === "'" && /(?:^|[^A-Za-z_0-9$])E$/i.test(d.slice(0, start));
+      while (i < d.length) {
+        // Ordinary strings depend on standard_conforming_strings: keep the entire source exact rather than guess.
+        if (d[i] === '\\' && quote === "'" && !escaped) return d;
+        if (d[i] === '\\' && escaped) { i = Math.min(i + 2, d.length); continue; }
+        if (d[i++] === quote) {
+          if (d[i] === quote) { i++; continue; }
+          break;
+        }
+      }
+      out += d.slice(start, i);
+    } else if (d.startsWith('--', i)) {
+      const end = d.indexOf('\n', i);
+      i = end < 0 ? d.length : end + 1;
+      out += d.slice(start, i);
+    } else if (d.startsWith('/*', i)) {
+      let depth = 1;
+      i += 2;
+      while (i < d.length && depth > 0) {
+        if (d.startsWith('/*', i)) { depth++; i += 2; }
+        else if (d.startsWith('*/', i)) { depth--; i += 2; }
+        else i++;
+      }
+      out += d.slice(start, i);
+    } else {
+      const tag = d.slice(i).match(/^\$(?:[A-Za-z_\u0080-\uFFFF][A-Za-z_0-9\u0080-\uFFFF]*)?\$/)?.[0];
+      const end = tag ? d.indexOf(tag, i + tag.length) : -1;
+      if (tag && end >= 0) {
+        const body = d.slice(i + tag.length, end);
+        // Only the function's AS wrapper contains SQL; nested dollar strings are opaque.
+        out += tag + (functionDefinition && /\bAS\s*$/i.test(out) ? squash(body, false) : body) + tag;
+        i = end + tag.length;
+      } else {
+        out += d[i++];
+      }
+    }
+  }
+  return out.trim();
+}
 
 /**
  * Objects added, removed or redefined between two snapshots, one line each. A function whose body differs
- * ONLY in whitespace is `reformatted`, not `changed`: Postgres stores an SQL function's body as written
+ * ONLY in whitespace outside literals/comments is `reformatted`, not `changed`: Postgres stores
+ * an SQL function's body as written
  * (constraints, indexes and triggers are deparsed canonically, so they cannot differ that way), and a
  * copy indented inside a JS template literal differs from post-push.sql in nothing else. It is still
  * reported, never dropped.
@@ -105,6 +158,15 @@ async function diffInRolledBackTx(client: Client, base: Snapshot, fn: () => Prom
   }
 }
 
+async function closeScratch(client: Client | undefined, admin: Client | undefined, database: string): Promise<void> {
+  await client?.end().catch(() => {});
+  try {
+    await admin?.query(`DROP DATABASE IF EXISTS ${quoteDbIdent(database)} WITH (FORCE)`);
+  } finally {
+    await admin?.end().catch(() => {});
+  }
+}
+
 const scratch = `hadron_test_parity434_${process.pid}_${randomBytes(4).toString('hex')}`;
 let admin: Client;
 let client: Client;
@@ -123,9 +185,7 @@ describe('#434 the template catalog comparator (fresh template, rolled-back cont
   }, 300_000);
 
   afterAll(async () => {
-    await client?.end().catch(() => {});
-    await admin?.query(`DROP DATABASE IF EXISTS ${quoteDbIdent(scratch)} WITH (FORCE)`).catch(() => {});
-    await admin?.end().catch(() => {});
+    await closeScratch(client, admin, scratch);
     // DROP DATABASE of a full schema can take well past the 10s default hook
     // timeout when the whole suite is loading the server (seen at 8c8b3149).
   }, 120_000);
@@ -156,6 +216,35 @@ describe('#434 the template catalog comparator (fresh template, rolled-back cont
     expect(changes[0]).toMatch(/^changed con:memories\.chk_memory_chunk_tokens_positive\n/);
   });
 
+  it('#2964 control: a real failed DROP is surfaced (DROP inside a transaction)', async () => {
+    const failingAdmin = new Client({ connectionString: maintenanceUrl() });
+    await failingAdmin.connect();
+    try {
+      await failingAdmin.query('BEGIN');
+    } catch (error) {
+      await failingAdmin.end().catch(() => {});
+      throw error;
+    }
+    // Never target the live suite database, even if BEGIN were accidentally removed.
+    // PostgreSQL checks active_sql_transaction (25001) before looking up this nonexistent database.
+    // closeScratch owns failingAdmin from here and ends it exactly once, including on the refused DROP.
+    await expect(closeScratch(undefined, failingAdmin, `${scratch}_never_created`)).rejects.toMatchObject({ code: '25001' });
+  });
+
+  it('#2964 control: a real SQL literal whitespace change is changed', async () => {
+    await client.query('BEGIN');
+    try {
+      await client.query("CREATE FUNCTION public.literal2964() RETURNS text LANGUAGE sql AS $$ SELECT 'a  b'::text $$");
+      const before = await snapshot(client);
+      await client.query("CREATE OR REPLACE FUNCTION public.literal2964() RETURNS text LANGUAGE sql AS $$ SELECT 'a b'::text $$");
+      const changes = diff(before, await snapshot(client));
+      expect(changes).toHaveLength(1);
+      expect(changes[0]).toMatch(/^changed fn:literal2964/);
+    } finally {
+      await client.query('ROLLBACK');
+    }
+  });
+
   it('control: a function body that differs only in whitespace is reported as reformatted, not changed', async () => {
     const body = fresh.get('fn:hadron_nodes_tsv(p_name text, p_alias text, p_loc text, p_tags text[], p_description text, p_abstract text, p_content text, p_properties text, p_data text)')!;
     const changes = await diffInRolledBackTx(client, fresh, async () => {
@@ -181,5 +270,57 @@ describe('#434 the vitest global setup applies no DDL of its own', () => {
 
   it('reads no prisma/*.sql file (a string literal naming one; prose may still cite post-push.sql)', () => {
     expect(source.match(/prisma\/[\w.-]+\.sql['"`]/g) ?? []).toEqual([]);
+  });
+});
+
+/** #2964: the comparator must distinguish literal changes and surface a failed scratch drop. */
+describe('#2964 comparator safety controls', () => {
+  it('surfaces a failed scratch drop while still ending both clients', async () => {
+    const failure = new Error('forced scratch DROP failure');
+    const endClient = vi.fn().mockRejectedValue(new Error('client already closed'));
+    const endAdmin = vi.fn().mockRejectedValue(new Error('admin already closed'));
+    const query = vi.fn().mockRejectedValue(failure);
+    await expect(closeScratch({ end: endClient } as unknown as Client, { query, end: endAdmin } as unknown as Client, 'hadron_test_parity434_forced')).rejects.toBe(failure);
+    expect(query).toHaveBeenCalledWith('DROP DATABASE IF EXISTS "hadron_test_parity434_forced" WITH (FORCE)');
+    expect(endClient).toHaveBeenCalledOnce();
+    expect(endAdmin).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["SELECT 'a  b';", "SELECT 'a b';"],
+    ["SELECT 'a\n  b';", "SELECT 'a\n b';"],
+    ['SELECT $text$a  b$text$;', 'SELECT $text$a b$text$;'],
+    ['SELECT $é$a  b$é$;', 'SELECT $é$a b$é$;'],
+    ["SELECT 'a''  b';", "SELECT 'a'' b';"],
+    ['SELECT "a  b";', 'SELECT "a b";'],
+    [String.raw`SELECT E'a\'  b';`, String.raw`SELECT E'a\' b';`],
+    [String.raw`SELECT 'a\'  b';`, String.raw`SELECT 'a\' b';`], // valid escapes with standard_conforming_strings=off
+    ["SELECT E'a''  b';", "SELECT E'a'' b';"],
+    [String.raw`SELECT U&'a\0020  b';`, String.raw`SELECT U&'a\0020 b';`],
+    ['AS $nested$a  b$nested$;', 'AS $nested$a b$nested$;'],
+    ["EXECUTE $query$SELECT 'a  b'$query$;", "EXECUTE $query$SELECT 'a b'$query$;"],
+    [String.raw`SELECT "a\" || "b  c";`, String.raw`SELECT "a\" || "b c";`],
+    [String.raw`SELECT 'a\' || 'b  c';`, String.raw`SELECT 'a\' || 'b c';`],
+  ])('classifies a quoted-content whitespace change as changed: %s', (before, after) => {
+    const wrap = (body: string) => `CREATE OR REPLACE FUNCTION public.literal2964() RETURNS text LANGUAGE sql AS $function$\n${body}\n$function$;`;
+    expect(diff(new Map([['fn:literal2964()', wrap(before)]]), new Map([['fn:literal2964()', wrap(after)]]))[0]).toMatch(/^changed fn:literal2964/);
+  });
+
+  it.each([
+    ['-- comment  text\nSELECT 1;', '-- comment text\nSELECT 1;'],
+    ['/* outer /* inner  text */ end */ SELECT 1;', '/* outer /* inner text */ end */ SELECT 1;'],
+  ])('keeps comment contents exact, including nested block comments: %s', (before, after) => {
+    const wrap = (body: string) => `CREATE FUNCTION x() RETURNS int LANGUAGE sql AS $function$\n${body}\n$function$;`;
+    expect(diff(new Map([['fn:x()', wrap(before)]]), new Map([['fn:x()', wrap(after)]]))[0]).toMatch(/^changed fn:x/);
+  });
+
+  it('re-indents SQL following a line comment without changing the comment terminator', () => {
+    const body = "CREATE FUNCTION x() RETURNS int LANGUAGE sql AS $function$\n-- comment\nSELECT 1;\n$function$;";
+    expect(diff(new Map([['fn:x()', body]]), new Map([['fn:x()', body.replace(/\n/g, '\n    ')]]))[0]).toMatch(/^reformatted fn:x/);
+  });
+
+  it('still classifies ordinary re-indentation outside literals as reformatted', () => {
+    const body = "CREATE FUNCTION x() RETURNS text LANGUAGE sql AS $function$\nSELECT 'a  b';\n$function$;";
+    expect(diff(new Map([['fn:x()', body]]), new Map([['fn:x()', body.replace(/\n/g, '\n    ')]]))[0]).toMatch(/^reformatted fn:x/);
   });
 });

@@ -224,12 +224,14 @@ export async function renderEvent(e: EventRow, ctx: Context): Promise<string> {
     const owner = (await agentTaskAlarmFieldResolvers.AgentTeamAlarmSchedule.owner(w as never, {}, ctx)) as Party;
     return `${partyLabel(owner)} (${w.wokenAt ? `woken ${w.wokenAt.toISOString()}` : `due ${w.dueAt.toISOString()}`})`;
   }));
+  // #3934: when this alarm's escalation ended (V77), from the same answer the GraphQL field gives; omitted while it is in effect.
+  const escalationEnded = (await E.escalationEndedAt(e as never, {}, ctx)) as Date | null;
   const ack = e.acknowledgedAt
     ? `acknowledged ${e.acknowledgedAt.toISOString()} by ${partyLabel((await E.acknowledgedBy(e as never, {}, ctx)) as Party)}`
     : 'not acknowledged';
   return [
     line,
-    `  episode since ${e.episodeStart ? e.episodeStart.toISOString() : '?'} · ${ack}`,
+    `  episode since ${e.episodeStart ? e.episodeStart.toISOString() : '?'} · ${ack}${escalationEnded ? ` · escalation ended ${escalationEnded.toISOString()}` : ''}`,
     `  chain: ${chain.join(' → ') || 'nobody'}`,
   ].join('\n');
 }
@@ -745,6 +747,7 @@ const SHAPE_HADRON_TEAM_EVENTS = {
   after: z.string().optional().describe('The id of the last event you read; the page continues strictly after it.'),
   types: z.array(z.string()).optional().describe('e.g. task.assigned, task.finished.'),
   alarmsOnly: z.boolean().optional(),
+  alarmsInEffect: z.boolean().optional().describe('Only alarms in effect (cor:agt:050:20): unacknowledged and still escalating. Implies alarmsOnly.'),
   taskId: z.string().optional(),
   limit: z.number().int().nonnegative().optional().describe('Default 20, cap 200.'),
   session: SESSION_READ,

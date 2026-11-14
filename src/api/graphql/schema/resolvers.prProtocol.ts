@@ -7,7 +7,7 @@
  */
 import { Prisma } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
-import { mutateTask, mayDirectTask, isAssignee, refuseEnded, withReadableTask, resolveTaskRef, taskError, type TaskRow, type TaskActor, type TaskApp } from './resolvers.agentTask.js';
+import { mutateTask, mayDirectTask, isAssignee, notAssignee, refuseEnded, withReadableTask, resolveTaskRef, taskError, type TaskRow, type TaskActor, type TaskApp } from './resolvers.agentTask.js';
 import { appendTaskEvent, eventActor } from '../../../lib/agentTasks/events.js';
 import { PR_EVENT_TYPES, REVIEW_VERDICTS, type ReviewVerdict, type PrProtocolEvent } from '../../../lib/agentTasks/prProtocol.js';
 import { storedTaskReferences } from '../../../lib/agentTasks/references.js';
@@ -113,7 +113,7 @@ async function ownerChain(tx: Prisma.TransactionClient, c: Context, app: TaskApp
   }
 }
 function assignee(actor: TaskActor, task: TaskRow) {
-  if (!isAssignee(actor, task)) throw taskError('TASK_NOT_ASSIGNEE', 'Only the task\'s assignee performs this command.');
+  if (!isAssignee(actor, task)) throw notAssignee(actor, 'Only the task\'s assignee performs this command.');
 }
 
 /** Mirrors obey the ordinary size/schema constraints, but are never consulted as protocol facts. */

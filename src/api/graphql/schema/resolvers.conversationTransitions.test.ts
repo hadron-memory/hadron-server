@@ -405,7 +405,7 @@ describe('Edge evaluation in processChatResponse', () => {
       {},
       {
         chatId: chat.chatId,
-        toolResponse: { message: 'Welcome done', next_stage: null, onTrack: true },
+        toolResponse: { message: 'Welcome done', next_stage: null, goal_reached: true, onTrack: true },
       },
       userCtx(adminUser.id),
     );
@@ -473,7 +473,7 @@ describe('Edge evaluation in processChatResponse', () => {
       {},
       {
         chatId: chat.chatId,
-        toolResponse: { message: 'Checking', next_stage: null, onTrack: true },
+        toolResponse: { message: 'Checking', next_stage: null, goal_reached: true, onTrack: true },
       },
       userCtx(adminUser.id),
     );
@@ -519,7 +519,8 @@ describe('Edge evaluation in processChatResponse', () => {
         sourceId: nodeIds['conversations:main:check'],
         targetId: nodeIds['conversations:profile'],
         name: 'Fill profile if missing',
-        condition: { missing: ['memory.business_type'] },
+        // Use a Boolean-valued condition: bare missing returns an array, currently coerced with Boolean by the evaluator.
+        condition: { '!': { var: 'memory.business_type' } },
         data: {
           timing: 'on_complete',
           behavior: 'detour',
@@ -547,18 +548,71 @@ describe('Edge evaluation in processChatResponse', () => {
       userCtx(adminUser.id),
     );
 
+    const afterExtraction = await chatNodeByLoc(db, chat.chatId);
+    expect((await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: afterExtraction!.id } })).state).toMatchObject({ conversationName: 'main' });
+
     // Now complete the stage — business_type exists, so the condition is NOT met
     const result = await resolvers.Mutation.processChatResponse(
       {},
       {
         chatId: chat.chatId,
-        toolResponse: { message: 'Done', next_stage: null, onTrack: true },
+        toolResponse: { message: 'Done', next_stage: null, goal_reached: true, onTrack: true },
       },
       userCtx(adminUser.id),
     );
 
     // Edge should NOT have fired
     expect(result.conversationHandoff).toBeNull();
+  });
+
+  it('a bare `missing` on_complete condition with every field present does NOT hand off or advance; absent does (#4056, V85)', async () => {
+    // `missing` returns [] when nothing is missing, JSONLogic's empty array is falsy: the edge must not fire.
+    // The existing "NOT met" test above does not discriminate (it passes on Boolean(result) too), so this one reads the
+    // condition off `message.data.*`, which the turn's own data does populate, with an absent-field reachability control.
+    const nodeIds = await seedNodes([
+      { loc: 'conversations', name: 'conversations' },
+      { loc: 'conversations:main', name: 'main', data: { stageOrder: ['check'], isSetup: false } },
+      { loc: 'conversations:main:check', name: 'check', data: {} },
+      { loc: 'conversations:profile', name: 'profile', data: { stageOrder: ['fill'], isSetup: false } },
+      { loc: 'conversations:profile:fill', name: 'fill', data: {} },
+    ]);
+    await db.edge.create({
+      data: {
+        id: generateId(),
+        memoryId: systemMemory.id,
+        loc: deriveEdgeLoc('conversations:main:check', 'Fill profile if missing', 'conversations:profile'),
+        sourceId: nodeIds['conversations:main:check'],
+        targetId: nodeIds['conversations:profile'],
+        name: 'Fill profile if missing',
+        condition: { missing: ['message.data.confidence'] },
+        data: { timing: 'on_complete', behavior: 'detour' },
+      },
+    });
+    const engineState = async (chatId: string) => {
+      const node = await chatNodeByLoc(db, chatId, { includeDeleted: true });
+      return (await db.chatRootEngineState.findUnique({ where: { chatRootNodeId: node!.id } }))?.state as Record<string, unknown>;
+    };
+
+    // present: nothing missing -> [] -> falsy -> no handoff, still on main:check
+    const present = await resolvers.Mutation.startChat({}, { agentId: agent.id, conversationName: 'main' }, userCtx(adminUser.id));
+    const stayed = await resolvers.Mutation.processChatResponse(
+      {},
+      { chatId: present.chatId, toolResponse: { message: 'done', next_stage: null, goal_reached: true, onTrack: true, data: { confidence: 0.9 } } },
+      userCtx(adminUser.id),
+    );
+    expect(stayed.conversationHandoff).toBeNull();
+    expect(stayed.stageTransitioned).toBe(false);
+    expect(await engineState(present.chatId)).toMatchObject({ conversationName: 'main', stageName: 'check' });
+
+    // absent: ["confidence"] -> truthy -> hands off to profile (reachability control: the edge IS routable)
+    const absent = await resolvers.Mutation.startChat({}, { agentId: agent.id, conversationName: 'main' }, userCtx(adminUser.id));
+    const moved = await resolvers.Mutation.processChatResponse(
+      {},
+      { chatId: absent.chatId, toolResponse: { message: 'done', next_stage: null, goal_reached: true, onTrack: true } },
+      userCtx(adminUser.id),
+    );
+    expect(moved.conversationHandoff).toBe('profile');
+    expect(moved.stageTransitioned).toBe(true);
   });
 
   it('JSONLogic condition mixing message.data and chat scopes (Pong-shaped)', async () => {
@@ -621,7 +675,7 @@ describe('Edge evaluation in processChatResponse', () => {
         chatId: chat.chatId,
         toolResponse: {
           message: 'Caller flagged this as urgent',
-          next_stage: null,
+          next_stage: null, goal_reached: true,
           data: { urgency: 'high' },
           onTrack: true,
         },
@@ -677,7 +731,7 @@ describe('Edge evaluation in processChatResponse', () => {
       {},
       {
         chatId: chat.chatId,
-        toolResponse: { message: 'Routine check-in', next_stage: null, onTrack: true },
+        toolResponse: { message: 'Routine check-in', next_stage: null, goal_reached: true, onTrack: true },
       },
       userCtx(adminUser.id),
     );
@@ -755,7 +809,7 @@ describe('Edge evaluation in processChatResponse', () => {
       {},
       {
         chatId: chat.chatId,
-        toolResponse: { message: 'Routing', next_stage: null, onTrack: true },
+        toolResponse: { message: 'Routing', next_stage: null, goal_reached: true, onTrack: true },
       },
       userCtx(adminUser.id),
     );
@@ -813,7 +867,7 @@ describe('Edge evaluation in processChatResponse', () => {
       {},
       {
         chatId: chat.chatId,
-        toolResponse: { message: 'Routing', next_stage: null, onTrack: true },
+        toolResponse: { message: 'Routing', next_stage: null, goal_reached: true, onTrack: true },
       },
       userCtx(adminUser.id),
     );

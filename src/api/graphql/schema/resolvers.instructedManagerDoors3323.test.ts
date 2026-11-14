@@ -83,6 +83,12 @@ const doors: Record<string, Door> = {
       return t.title === 'Renamed' && (t.properties as any)?.k === 1;
     },
   },
+  // #4084 (Bianca §10 P3 on #4089): the release door records its instructed act like cancel, whose authority it mirrors.
+  releaseAgentTaskExternalId: {
+    act: 'task.release-external-id',
+    call: (instruction, c) => M.releaseAgentTaskExternalId({}, { taskId: f.held.id, instruction }, c),
+    took: async () => (await db.agentTask.findUniqueOrThrow({ where: { id: f.held.id } })).externalId === null,
+  },
   disposeAgentTaskFinding: {
     act: 'task.finding-dispose',
     call: (instruction, c) => M.disposeAgentTaskFinding({}, { taskRef: f.finished.id, findingId: 'F1', disposition: 'fixed', instruction }, c),
@@ -186,6 +192,7 @@ beforeEach(async () => {
   await M.startAgentTask({}, { taskId: finished.id }, asBoss);
   await M.finishAgentTask({}, { taskId: finished.id, result: { outcome: 'done', summary: 's', findings: [{ id: 'F1', severity: 'P2', text: 'one' }, { id: 'F2', severity: 'P3', text: 'two' }] } }, asBoss);
   const foreignTask = await mk({ title: 'Foreign' }, otherApp.id);
+  const held = await mk({ title: 'Held', externalId: `https://tracker.test/s4a-${n}/1` });
   // An alarm with no owner in its chain: only the manager arm acknowledges it.
   const alarm = await db.agentTeamEvent.create({ data: {
     appId: app.id, taskId: task.id, type: 'stall.not-started', severity: 'alarm', chain: [] as never, episodeStart: new Date(),
@@ -194,7 +201,7 @@ beforeEach(async () => {
     appId: otherApp.id, taskId: foreignTask.id, type: 'stall.not-started', severity: 'alarm', chain: [] as never, episodeStart: new Date(),
   } });
   await db.modelGroup.create({ data: { appId: app.id, name: 'slow', patterns: ['glm-*'], createdBy: boss.id, updatedBy: boss.id } });
-  f = { holder, other, boss, org, app, otherApp, agent, worker, target, session, task, backlog, assigned, blocker, blocked, finished, foreignTask, alarm, foreignAlarm };
+  f = { holder, other, boss, org, app, otherApp, agent, worker, target, session, task, backlog, assigned, blocker, blocked, finished, foreignTask, alarm, foreignAlarm, held };
 });
 
 describe('#3323 the S4a doors admit an instructed worker on its holder\'s App-manager right', () => {
