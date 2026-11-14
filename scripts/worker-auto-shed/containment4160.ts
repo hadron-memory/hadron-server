@@ -124,29 +124,30 @@ export function signalOwned(run: OwnedRun, pid: number, sig: NodeJS.Signals, sta
   return 'signaled';
 }
 
-export interface CleanupResult { passes: number; clean: boolean; owned: number; unverifiable: number; groupKills: number; deadlineHit: boolean }
+export interface CleanupResult { passes: number; clean: boolean; owned: number; unverifiable: number; unverifiablePids?: number[]; groupKills: number; deadlineHit: boolean }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /** One sweep pass: signals every provably owned pid, tallies the ones that cannot be proven either way. */
-function sweepPass(run: OwnedRun, ops: ProcOps, seen: Map<number, string>, skip: Set<number>): { owned: number; unverifiable: number } {
+function sweepPass(run: OwnedRun, ops: ProcOps, seen: Map<number, string>, skip: Set<number>): { owned: number; unverifiable: number; pids: number[] } {
   let owned = 0;
   let unverifiable = 0;
+  const pids: number[] = [];
   for (const pid of ops.list()) {
     if (run.protectedPids.has(pid) || skip.has(pid)) continue;
     const st = ops.stat(pid);
     if (st === 'gone') { seen.delete(pid); continue; }
-    if (st === 'unreadable') { if (seen.has(pid)) unverifiable++; continue; }
+    if (st === 'unreadable') { if (seen.has(pid)) { unverifiable++; pids.push(pid); }; continue; }
     if (st.state === 'Z' || st.state === 'X') { seen.delete(pid); continue; }
     const uid = ops.uid(pid);
     if (uid === 'gone') { seen.delete(pid); continue; }
-    if (uid === 'unreadable') { if (seen.has(pid)) unverifiable++; continue; }
+    if (uid === 'unreadable') { if (seen.has(pid)) { unverifiable++; pids.push(pid); }; continue; }
     if (uid !== run.uid) continue;
     const env = ops.environ(pid);
     if (env === 'gone') { seen.delete(pid); continue; }
     if (env === 'unreadable') {
       // Someone in the launcher's session whose evidence we cannot read, or one we already proved owned: never zero.
-      if (seen.has(pid) || (run.launcher && st.sid === run.launcher.sid)) unverifiable++;
+      if (seen.has(pid) || (run.launcher && st.sid === run.launcher.sid)) { unverifiable++; pids.push(pid); };
       continue;
     }
     if (!ownsEnv(run, env)) continue;
@@ -156,12 +157,12 @@ function sweepPass(run: OwnedRun, ops: ProcOps, seen: Map<number, string>, skip:
     // The start-time first recorded here is re-checked inside signalOwned in the tick of the kill.
     signalOwned(run, pid, 'SIGKILL', start, ops);
   }
-  return { owned, unverifiable };
+  return { owned, unverifiable, pids };
 }
 
 async function sweepLoop(run: OwnedRun, ops: ProcOps, seen: Map<number, string>, skip: Set<number>, t0: number, deadlineMs: number, maxPasses: number, gapMs: number): Promise<CleanupResult & { used: number }> {
   let clean = 0;
-  let last = { owned: 0, unverifiable: 0 };
+  let last: { owned: number; unverifiable: number; pids: number[] } = { owned: 0, unverifiable: 0, pids: [] };
   let passes = 0;
   let deadlineHit = false;
   while (passes < maxPasses) {
@@ -172,7 +173,7 @@ async function sweepLoop(run: OwnedRun, ops: ProcOps, seen: Map<number, string>,
     if (clean >= 2) break;
     await sleep(gapMs);
   }
-  return { passes, clean: clean >= 2, owned: last.owned, unverifiable: last.unverifiable, groupKills: 0, deadlineHit, used: passes };
+  return { passes, clean: clean >= 2, owned: last.owned, unverifiable: last.unverifiable, unverifiablePids: last.pids, groupKills: 0, deadlineHit, used: passes };
 }
 
 /** Group kill needs a VERIFIED live member: the launcher while Node has not reaped it, else a /proc entry in the group. */
@@ -215,13 +216,25 @@ export async function cleanupOwned(run: OwnedRun, o: CleanupOpts = {}): Promise<
     signalOwned(run, run.watchdog.pid, 'SIGKILL', run.watchdog.start, ops);
     r = await sweepLoop(run, ops, seen, new Set(), t0, deadlineMs, maxPasses, gapMs);
   }
-  return { passes: r.passes, clean: r.clean, owned: r.owned, unverifiable: r.unverifiable, groupKills, deadlineHit: r.deadlineHit };
+  return { passes: r.passes, clean: r.clean, owned: r.owned, unverifiable: r.unverifiable, unverifiablePids: r.unverifiablePids, groupKills, deadlineHit: r.deadlineHit };
+}
+
+/** Best-effort, read-only description of one pid for a failure message (no environ content): which evidence was unreadable and why. */
+export function describePid(pid: number): string {
+  const read = (f: string): string => { try { return readFileSync(`/proc/${pid}/${f}`, 'latin1'); } catch (e) { return `<${(e as NodeJS.ErrnoException).code ?? 'ERR'}>`; } };
+  const st = read('stat');
+  const i = st.lastIndexOf(')');
+  const f = i >= 0 ? st.slice(i + 1).trim().split(/\s+/) : [];
+  const status = read('status');
+  const g = (k: string): string => new RegExp(`^${k}:\\s*(.*)$`, 'm').exec(status)?.[1]?.replace(/\s+/g, ' ') ?? '?';
+  const envRead = (() => { try { return `ok(${readFileSync(`/proc/${pid}/environ`, 'latin1').length}B)`; } catch (e) { return `<${(e as NodeJS.ErrnoException).code ?? 'ERR'}>`; } })();
+  return `pid=${pid} comm=${read('comm').trim()} state=${f[0] ?? '?'} ppid=${f[1] ?? '?'} sid=${f[3] ?? '?'} uid=${g('Uid')} caps=${g('CapEff')} seccomp=${g('Seccomp')} environ=${envRead}`;
 }
 
 /** The final zero-survivor assertion: counts only, plus the stated limitation for unverifiable evidence. */
 export function assertNoSurvivors(r: CleanupResult): void {
   if (r.clean && r.owned === 0 && r.unverifiable === 0) return;
-  const limit = r.unverifiable > 0 ? ` limitation: ${r.unverifiable} process(es) could not be verified as owned or gone (unreadable /proc evidence); none were signaled` : '';
+  const limit = r.unverifiable > 0 ? ` limitation: ${r.unverifiable} process(es) could not be verified as owned or gone (unreadable /proc evidence); none were signaled; ${(r.unverifiablePids ?? []).slice(0, 5).map(describePid).join(' | ')}` : '';
   throw new Error(`containment4160: ${r.owned} owned survivor(s), ${r.unverifiable} unverifiable after ${r.passes} pass(es)${r.deadlineHit ? ' (cleanup deadline hit)' : ''}.${limit}`);
 }
 
