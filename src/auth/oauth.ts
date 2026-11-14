@@ -854,11 +854,12 @@ async function validateClientAndRedirectUri(
  * #3764: `state` is the client's opaque value and RFC 6749 §4.1.2 requires it returned unchanged, so a long one is
  * ACCEPTED and echoed byte for byte, never dropped. The bound is only a request-size limit: 4096 characters, eight
  * times the old 512 and far above any state a real client sends (a CSRF nonce or a signed blob), small enough that the
- * value still rides the consent form, the sign-in `return_to` and the redirect without nearing a header limit. Above
+ * value still rides the consent form, the sign-in `return_to` and the redirect without nearing a header limit (for a
+ * typical base64url state; a state made only of reserved characters percent-encodes to about 3x). Above
  * it the request is refused with `invalid_request`, NO code, and the error redirect echoes the supplied state exactly
  * (§4.1.2.1). The corpus fixes no number (cor:aut:030:01 states the round-trip guarantee only).
  */
-const STATE_MAX_LENGTH = 4096;
+export const STATE_MAX_LENGTH = 4096;
 /**
  * PKCE S256 challenges are base64url-encoded SHA-256 outputs:
  * exactly 43 chars without padding. RFC 7636 §4.2 mandates a
@@ -1142,10 +1143,14 @@ async function handleAuthorizePost(req: Request, res: Response): Promise<void> {
     return;
   }
 
-  // #3764: a supplied state is never dropped on this leg either. No bound check is needed here: the authorize GET
-  // refuses an over-bound state before it renders the form, and the consent grant proof binds the state the GET saw,
-  // so a form carrying a longer one fails the proof below with `invalid_request` and that supplied state echoed.
+  // #3764: a supplied state is never dropped on this leg either. The same bound as the authorize GET applies BEFORE
+  // any echo (the deny branch below echoes without a proof check), so a forged form cannot push an unbounded value
+  // into a Location header. An in-bound state that differs from the GET's fails the grant proof below.
   const state = typeof body.state === 'string' ? body.state : '';
+  if (state.length > STATE_MAX_LENGTH) {
+    redirectWithOAuthError(res, redirectUri, 'invalid_request', state);
+    return;
+  }
 
   // 4. Fail-closed decision check. ONLY literal 'approve' mints.
   if (body.decision !== 'approve') {

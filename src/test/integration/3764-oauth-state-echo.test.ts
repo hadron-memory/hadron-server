@@ -14,6 +14,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { signJwt } from '../../auth/jwt.js';
 import { generateId } from '../../lib/id.js';
+import { STATE_MAX_LENGTH } from '../../auth/oauth.js';
 
 let server: Server;
 let baseUrl: string;
@@ -37,8 +38,8 @@ beforeEach(async () => {
   cookie = `hadron_token=${await signJwt({ sub: user.id, roles: ['CONTRIBUTOR'] })}`;
 });
 
-/** The accepted bound (src/auth/oauth.ts STATE_MAX_LENGTH): 8x the old 512, set in the PR. */
-const OAUTH_STATE_MAX_LENGTH = 4096;
+/** The accepted bound, imported so the boundary rows can never test a stale number. */
+const OAUTH_STATE_MAX_LENGTH = STATE_MAX_LENGTH;
 const CHALLENGE = 'a'.repeat(43);
 // Characters that need URL-encoding in the redirect and escaping in the form, repeated to length.
 const filler = (n: number) => 'sT%&=+ "<>\'/?#é'.repeat(Math.ceil(n / 14)).slice(0, n);
@@ -56,7 +57,7 @@ const get = (extra: Record<string, string | undefined>) =>
   fetch(`${baseUrl}/oauth/authorize?${query(extra)}`, { redirect: 'manual', headers: { cookie } });
 
 /** GET to the consent page, then POST the form's own fields back (decision=approve unless given). */
-async function consentPost(state: string | undefined, decision = 'approve', formState: string | undefined = state) {
+async function consentPost(state: string | undefined, decision = 'approve', formState?: string) {
   const res = await get({ state });
   expect(res.status).toBe(200);
   const html = await res.text();
@@ -67,7 +68,10 @@ async function consentPost(state: string | undefined, decision = 'approve', form
     _csrf: csrf, decision, client_id: clientId, redirect_uri: REDIRECT, code_challenge: CHALLENGE,
     code_challenge_method: 'S256', resource: RESOURCE, scope: 'mcp', grant_proof: proof,
   };
-  if (formState !== undefined) fields.state = formState;
+  // The honest path posts what the browser decodes from the page's hidden field, not the original string.
+  const hidden = html.match(/name="state"\s+value="([^"]*)"/)?.[1];
+  const posted = formState !== undefined ? formState : hidden === undefined ? undefined : htmlDecode(hidden);
+  if (posted !== undefined) fields.state = posted;
   const post = await fetch(`${baseUrl}/oauth/authorize`, {
     method: 'POST', redirect: 'manual',
     headers: { 'content-type': 'application/x-www-form-urlencoded', cookie: `${cookie}; _hadron_csrf=${csrfCookie}` },
@@ -75,6 +79,10 @@ async function consentPost(state: string | undefined, decision = 'approve', form
   });
   return { html, post };
 }
+/** What a browser does with an attribute value: decode the character references. `&amp;` goes last. */
+const htmlDecode = (v: string) => v
+  .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;|&#x27;/g, "'")
+  .replace(/&amp;/g, '&');
 const loc = (r: Response) => new URL(r.headers.get('location')!);
 const authCodes = () => db.authCode.count();
 
@@ -85,8 +93,9 @@ describe('#3764 GET /oauth/authorize — a supplied state is returned unchanged'
     // The consent page carries it in the hidden field, HTML-escaped (the browser decodes it back).
     const field = html.match(/name="state"\s+value="([^"]*)"/)?.[1];
     expect(field).toBeDefined();
-    expect(field).not.toMatch(/[<>']/);
-    expect(field!.length).toBeGreaterThan(0);
+    expect(field).not.toMatch(/[<>"']/);
+    expect(field).not.toMatch(/&amp;amp;|&amp;lt;|&amp;quot;|&amp;#39;/); // no double escaping
+    expect(htmlDecode(field!)).toBe(state); // the browser's view of the field is the supplied state
     expect(post.status).toBe(302);
     const u = loc(post);
     expect(u.searchParams.get('code')).toMatch(/^[0-9a-f]{64}$/);
@@ -141,5 +150,45 @@ describe('#3764 POST /oauth/authorize (consent) — the same rules on the second
     expect(u.searchParams.get('error')).toBe('access_denied');
     expect(u.searchParams.get('state')).toBe(state);
     expect(await authCodes()).toBe(0);
+  });
+});
+
+describe('#3764 review follow-ups (blind P2/P3, security P3)', () => {
+  it('deny with a forged over-bound state is refused before any echo of the unbounded value', async () => {
+    const forged = filler(OAUTH_STATE_MAX_LENGTH + 1);
+    const { post } = await consentPost('short-state', 'deny', forged);
+    const u = loc(post);
+    expect(u.searchParams.get('error')).toBe('invalid_request');
+    expect(u.searchParams.has('code')).toBe(false);
+    expect(await authCodes()).toBe(0);
+  });
+
+  it('an in-bound state swapped between GET and POST fails the grant proof: no code', async () => {
+    const { post } = await consentPost('state-A', 'approve', 'state-B');
+    const u = loc(post);
+    expect(u.searchParams.get('error')).toBe('invalid_request');
+    expect(u.searchParams.get('state')).toBe('state-B');
+    expect(await authCodes()).toBe(0);
+  });
+
+  it('an over-bound state with an UNREGISTERED redirect_uri never redirects', async () => {
+    const res = await get({ state: filler(OAUTH_STATE_MAX_LENGTH + 1), redirect_uri: 'https://evil.example.com/cb' });
+    expect(res.status).not.toBe(302);
+    expect(res.headers.get('location')).toBeNull();
+    expect(await authCodes()).toBe(0);
+  });
+
+  it('an over-bound state holding control characters refuses with a redirect, not a 500', async () => {
+    const state = `a\r\nb\u0000${'x'.repeat(OAUTH_STATE_MAX_LENGTH)}`;
+    const res = await get({ state });
+    expect(res.status).toBe(302);
+    expect(loc(res).searchParams.get('error')).toBe('invalid_request');
+    expect(loc(res).searchParams.get('state')).toBe(state);
+  });
+
+  it('a repeated state parameter counts as absent: no state on the redirect, no error', async () => {
+    const res = await fetch(`${baseUrl}/oauth/authorize?${query({})}&state=a&state=b`, { redirect: 'manual', headers: { cookie } });
+    expect(res.status).toBe(200); // the consent page, i.e. not refused
+    expect(await res.text()).not.toMatch(/name="state"\s+value="[^"]+"/);
   });
 });
