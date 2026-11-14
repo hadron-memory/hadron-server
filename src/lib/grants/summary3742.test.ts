@@ -118,7 +118,7 @@ describe('#3742 pin 3: a value the renderer cannot write refuses with the typed 
 
 describe('#3742 pin 4: substitution is one pass, a value that looks like a placeholder is printed literally, once', () => {
   // A canonical URN cannot carry a brace, so the one-pass rule is shown through the formatter hook with permissive formatters.
-  const loose = { app: (u: string) => u, 'node-ref': (u: string) => u };
+  const loose = { app: (u: string) => u, 'node-ref': (u: string) => u, 'secret-ref': (u: string) => u };
   it('braces inside the App and node text stay as they are', () => {
     const out = renderGrantSummary(input({ app: { urn: 'A{entryNode}' }, refs: { n1: { urn: 'N{app}' } } }), loose);
     expect(out).toBe('Create a schedule in A{entryNode} that starts at the entry node N{app}');

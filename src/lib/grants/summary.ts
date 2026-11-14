@@ -8,7 +8,7 @@
  * canonical URN, never by a name or any other free text. A name can be text the requester wrote, and the server's own
  * sentence must never carry it. Built as written ("built as", not ruled) on the Proposed lines of cor:acl:140:02/:07.
  */
-import { parseUrnV2 } from '@hadron-memory/urn-lib-js';
+import { parseSecretUrnV2, parseUrnV2 } from '@hadron-memory/urn-lib-js';
 import type { ActionParameter } from './actions.js';
 
 export type GrantSummaryReason =
@@ -62,12 +62,22 @@ function canonical(kind: keyof typeof URN_KIND, placeholder: string, urn: unknow
   if (!ok) throw new GrantSummaryError('NOT_CANONICAL', `summary placeholder {${placeholder}} needs a canonical ${URN_KIND[kind]} URN`);
   return urn as string;
 }
+/** An App secret's canonical URN (urn-lib-js 0.0.22, cor:urn:010:01): the typed parse must say it is an App secret, and nothing may trail it. */
+function canonicalSecret(placeholder: string, urn: unknown): string {
+  let ok = false;
+  if (typeof urn === 'string') {
+    try { ok = parseSecretUrnV2(urn).ownerKind === 'app' && !urn.includes('#'); } catch { ok = false; }
+  }
+  if (!ok) throw new GrantSummaryError('NOT_CANONICAL', `summary placeholder {${placeholder}} needs a canonical App secret URN`);
+  return urn as string;
+}
 export const SUMMARY_FORMATTERS = {
   app: (urn: string) => canonical('app', 'app', urn),
   'node-ref': (urn: string, placeholder: string) => canonical('node-ref', placeholder, urn),
+  'secret-ref': (urn: string, placeholder: string) => canonicalSecret(placeholder, urn),
 } as const;
 
-export type SummaryFormatters = { app: (urn: string) => string; 'node-ref': (urn: string, placeholder: string) => string };
+export type SummaryFormatters = { app: (urn: string) => string; 'node-ref': (urn: string, placeholder: string) => string; 'secret-ref': (urn: string, placeholder: string) => string };
 
 export function renderGrantSummary(input: SummaryInput, fmt: SummaryFormatters = SUMMARY_FORMATTERS): string {
   const { action, app, values, refs } = input;
@@ -84,11 +94,11 @@ export function renderGrantSummary(input: SummaryInput, fmt: SummaryFormatters =
     if (value === undefined || value === null || value === '') throw new GrantSummaryError('MISSING_VALUE', `summary placeholder {${name}} has no value`);
     if (Array.isArray(value)) throw new GrantSummaryError('LIST', `summary placeholder {${name}} has a list value`);
     if (value === '*' || typeof value === 'object') throw new GrantSummaryError('WILDCARD', `summary placeholder {${name}} has a wildcard or structured value`);
-    if (param.type !== 'node-ref') throw new GrantSummaryError('UNSUPPORTED_TYPE', `summary placeholder {${name}} has a parameter type the summary cannot write`);
+    if (param.type !== 'node-ref' && param.type !== 'secret-ref') throw new GrantSummaryError('UNSUPPORTED_TYPE', `summary placeholder {${name}} has a parameter type the summary cannot write`);
     if (typeof value !== 'string') throw new GrantSummaryError('UNSUPPORTED_TYPE', `summary placeholder {${name}} has a value of a type the summary cannot write`);
     const ref = Object.prototype.hasOwnProperty.call(refs, value) ? refs[value] : undefined;
     if (!ref) throw new GrantSummaryError('MISSING_VALUE', `summary placeholder {${name}} has no resolved node`);
-    resolved.set(name, fmt['node-ref'](ref.urn, name));
+    resolved.set(name, param.type === 'secret-ref' ? fmt['secret-ref'](ref.urn, name) : fmt['node-ref'](ref.urn, name));
   }
   // One pass: String.replace never re-reads what it inserted, so a value that looks like a placeholder is printed once, literally.
   return action.summaryTemplate.replace(TOKEN, (_whole, name: string) => resolved.get(name)!);

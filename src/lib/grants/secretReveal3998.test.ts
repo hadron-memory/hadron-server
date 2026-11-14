@@ -83,3 +83,18 @@ describe('#3998 secret.reveal', () => {
     expect(await refusal(person(w.userId, 'secret.delete'))).toBe('GRANT_HOLDER_NOT_ALLOWED');
   });
 });
+
+import { renderGrantSummary } from './summary.js';
+import { composeAppSecretUrnV2 } from '@hadron-memory/urn-lib-js';
+describe('#3998 secret.reveal summary line', () => {
+  const action = PLATFORM_ACTIONS.find((x) => x.name === 'secret.reveal')!;
+  const app = { urn: 'hrn:app:acme.com:ops' };
+  const urn = composeAppSecretUrnV2('acme.com', 'ops', 'stripe-key');
+  it('writes the App secret as its canonical URN', () => {
+    expect(renderGrantSummary({ action, app, values: { secret: 'S1', 'auto-delete': 'keep' }, refs: { S1: { urn } } }))
+      .toBe(`Read the value of the secret ${urn} of hrn:app:acme.com:ops`);
+  });
+  it.each(['hrn:secret:acme.com:stripe-key', 'stripe-key', `${urn}#data`, `${urn} x`])('refuses %s', (bad) => {
+    expect(() => renderGrantSummary({ action, app, values: { secret: 'S1', 'auto-delete': 'keep' }, refs: { S1: { urn: bad } } })).toThrow();
+  });
+});

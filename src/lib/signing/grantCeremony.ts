@@ -20,6 +20,7 @@
  * read after the last lock. Every other writer that ends a request (revocation, a holder's departure, withdrawal) takes
  * the grant row before the request, so the two orders cannot cycle.
  */
+import { composeAppSecretUrnV2, parseUrnV2 } from '@hadron-memory/urn-lib-js';
 import { createHash, randomBytes } from 'node:crypto';
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
@@ -205,8 +206,19 @@ async function summaryFor(ctx: Context, tx: Prisma.TransactionClient, g: GrantRo
   const values = g.action_values as Record<string, unknown>;
   const refs: Record<string, { urn: string }> = {};
   for (const p of action.parameters) {
-    if (p.type !== 'node-ref') continue;
     const id = values[p.name];
+    if (p.type === 'secret-ref') {
+      // #3998: the secret shows as its canonical App secret URN (urn-lib-js 0.0.22). A gone or foreign secret is unsignable.
+      if (typeof id !== 'string') continue;
+      const secret = await tx.secret.findFirst({ where: { id, ownerType: 'app', ownerId: g.app_id }, select: { name: true } });
+      if (!secret) return null;
+      try {
+        const app = parseUrnV2(appUrn);
+        refs[id] = { urn: composeAppSecretUrnV2(app.root, app.segments[0], secret.name) };
+      } catch { return null; }
+      continue;
+    }
+    if (p.type !== 'node-ref') continue;
     if (typeof id !== 'string') continue;
     const node = await tx.node.findFirst({ where: { id, deletedAt: null }, select: { loc: true, memoryId: true } });
     if (!node || !(await isMemoryReadableCached(ctx, node.memoryId))) return null;
