@@ -148,3 +148,15 @@ END $$;
 DROP TRIGGER IF EXISTS apps_secrets_gone ON apps;
 CREATE TRIGGER apps_secrets_gone BEFORE DELETE ON apps
 FOR EACH ROW EXECUTE FUNCTION hadron_apps_secrets_gone();
+
+-- #1162: the worker and session ids these tables record are typed references, under the same writer fence as every other one.
+-- The fence function exists from migration 20261016050000; this file is applied after it.
+DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "secrets";
+CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "secrets"
+  FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.created_by_worker_id', 's:$.created_by_session_id');
+DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "secret_versions";
+CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "secret_versions"
+  FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.written_by_worker_id', 's:$.written_by_session_id');
+DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "secret_events";
+CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "secret_events"
+  FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.worker_id', 's:$.session_id');
