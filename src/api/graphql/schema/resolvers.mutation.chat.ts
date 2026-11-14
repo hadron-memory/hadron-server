@@ -78,7 +78,7 @@ import {
 import { chatLocFilter, pickChatNode } from '../../../lib/chatLoc.js';
 import { decideChatRouting, applyChatRoutingDecision, getGoalStack } from '../../../lib/chatRouting.js';
 import { reportPartialTurn, routingRefusedReport } from '../../../lib/chatPartialTurn.js';
-import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
+import { recordNodeUsage, recordNodeWrite, type UsageNodeRef } from '../../../lib/usageRecorder.js';
 import {
   type Context,
   requireRole,
@@ -1630,7 +1630,15 @@ export const chatMutations = {
           ? mergeTurnExtraction(stored, extracted, declaredMemoryWide, ctx.userId ?? null)
           : { ...(stored ?? {}), ...extracted };
       let extractionPersisted = false;
-      if (data && hasExtraction) recordNodeWrite(ctx.db, await inTx(async (tx) => {
+      // #4102 F3 — the extraction transaction's report contract: it resolves to a UsageNodeRef only
+      // after its write committed in this transaction (the update path or the create path below), or
+      // to null exactly when the fold changed nothing authored — nothing is written then, so an
+      // encrypted row is not re-encrypted and a stamp is not cleared. A refusal never resolves to
+      // null: it throws (AuthoringAttestationError → reportPartialTurn's #3514 partial-turn error),
+      // so `extractionPersisted` (ref !== null) means "a write committed", never "refused" — the
+      // distinction routingRefusedReport reports on a later refused leg, whose wire shape rides the
+      // Proposed partial-turn rule in cor:cht:020:01 (R1 on #4036) and is unchanged here.
+      if (data && hasExtraction) recordNodeWrite(ctx.db, await inTx(async (tx): Promise<UsageNodeRef | null> => {
         // #910: two members extract into the same memory from different chats,
         // under different chat locks. Serialize the read-modify-write on the
         // `data` loc so neither turn loses the other's bucket.
@@ -1699,6 +1707,7 @@ export const chatMutations = {
         }
       // #3514: the assistant message and counter are already committed above; a refused extraction says so.
       }).catch(reportPartialTurn).then(ref => {
+        // null is "no authored change, nothing written", never a refusal — a refusal throws above (#4102 F3).
         extractionPersisted = ref !== null;
         return ref;
       }), ctx);
