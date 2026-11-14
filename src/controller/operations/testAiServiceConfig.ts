@@ -599,6 +599,8 @@ export async function testAiServiceConfig(
       apiKeyEncrypted: overrideKey ? encryptToken(overrideKey) : keySource === 'SAVED' ? row.apiKeyEncrypted : null,
     },
     ownerType: owner.ownerType,
+    // #4042: the probe's own pair (saved or the edit under test), judged by the same one predicate as everything else.
+    toolChoice: chatToolChoiceFor(provider, model),
   };
 
   // An override key is the caller's own; a platform credential, stored or the

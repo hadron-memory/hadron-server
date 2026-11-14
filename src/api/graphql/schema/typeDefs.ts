@@ -10774,6 +10774,23 @@ export const typeDefs = `#graphql
     chatAiConfigChoices(appRef: ID!): [ChatAiConfigChoice!]!
 
     """
+    #4042 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10, hrn:node:hadronmemory.com:specs:cor:acl:030:01): the tool-choice decision the chat turn will use for this chat's
+    effective config: same predicate, same resolve order as the turn (the chat's stored choice, else the App's chatbot
+    config, else the \`default\` walk). Null when no level matches, and for a user-owned App whose walk lands on the platform's config (which that App may not use); otherwise non-null.
+    Authorized through the single-chat read gate chatHistory uses: a chat has no access layer of its own, so read is
+    decided by the host memory. A chat the caller may not read answers exactly as a chat that does not exist.
+    The decision only: no key, id, name, provider or model.
+    """
+    chatEffectiveToolChoice(chatId: String!): ChatToolChoice
+
+    """
+    #4042 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10): the chat turn's tool-choice decision for an UNSAVED (provider, model) pair, by the same one
+    predicate, judged verbatim. Pure: reads no config rows, decrypts nothing, calls no provider and meters no usage.
+    Any signed-in caller; no owner context is consulted. An unknown or unlisted provider or model answers FORCED, never a refusal.
+    """
+    chatToolChoiceFor(provider: String!, model: String!): ChatToolChoice!
+
+    """
     #2862 / hrn:node:hadronmemory.com:specs:cor:agt:040:03: a chatbot chat's served-prompt records, by chat id, and nothing
     else about the chat. The same read as Chat.servedPrompts (newest first, default 50, cap 200): readable only by
     whoever manages the App named by the chat's first record, and only that App's records. Everyone else, an unknown

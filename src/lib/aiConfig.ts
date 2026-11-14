@@ -15,6 +15,7 @@ import { z } from 'zod';
 
 import type { AiServiceConfig, Prisma, PrismaClient } from '../generated/prisma/index.js';
 import { encryptToken } from './tokenCrypto.js';
+import { chatToolChoiceFor, type ChatToolChoice } from './llm/chatToolChoice.js';
 
 // ── Typed errors (Constitution S2 — resolver layer maps name → extensions.code) ──
 
@@ -217,6 +218,16 @@ export interface AiConfigContext {
 export interface ResolvedAiConfig {
   config: AiServiceConfig;
   ownerType: AiConfigOwnerType;
+  /**
+   * #4042: the chat turn's tool-choice decision for this config, from the one predicate
+   * (`chatToolChoiceFor`, cor:dmo:050:10). Non-null on every resolve path, whatever level of the walk wins.
+   */
+  toolChoice: ChatToolChoice;
+}
+
+/** The one place a walk result is built, so no resolve path can omit the decision (#4042). */
+function resolved(config: AiServiceConfig, ownerType: AiConfigOwnerType): ResolvedAiConfig {
+  return { config, ownerType, toolChoice: chatToolChoiceFor(config.provider, config.model) };
 }
 
 /**
@@ -261,7 +272,7 @@ export async function resolveAiConfig(
       include: { aiServiceConfigs: { where: { name, enabled: true }, take: 1 } },
     });
     const config = app?.aiServiceConfigs[0];
-    if (config) return { config, ownerType: 'APP' };
+    if (config) return resolved(config, 'APP');
     if (!organizationId) organizationId = app?.organizationId ?? null;
   }
 
@@ -271,7 +282,7 @@ export async function resolveAiConfig(
       include: { aiServiceConfigs: { where: { name, enabled: true }, take: 1 } },
     });
     const config = agent?.aiServiceConfigs[0];
-    if (config) return { config, ownerType: 'AGENT' };
+    if (config) return resolved(config, 'AGENT');
     if (!organizationId) organizationId = agent?.organizationId ?? null;
     personalAgent = agent?.ownerUserId != null;
   }
@@ -280,7 +291,7 @@ export async function resolveAiConfig(
     const config = await db.aiServiceConfig.findFirst({
       where: { organizationId, name, enabled: true },
     });
-    if (config) return { config, ownerType: 'ORGANIZATION' };
+    if (config) return resolved(config, 'ORGANIZATION');
   }
 
   if (!hostLevelOpen(personalAgent, organizationId)) return null;
@@ -289,7 +300,7 @@ export async function resolveAiConfig(
     where: { hadronServerId: { not: null }, name, enabled: true },
     orderBy: { createdAt: 'asc' },
   });
-  if (config) return { config, ownerType: 'HADRON_SERVER' };
+  if (config) return resolved(config, 'HADRON_SERVER');
 
   return null;
 }
@@ -327,7 +338,7 @@ export async function resolveAiConfigs(
   const byName = new Map<string, ResolvedAiConfig>();
   const collect = (configs: AiServiceConfig[], ownerType: AiConfigOwnerType): void => {
     for (const config of configs) {
-      if (!byName.has(config.name)) byName.set(config.name, { config, ownerType });
+      if (!byName.has(config.name)) byName.set(config.name, resolved(config, ownerType));
     }
   };
 
