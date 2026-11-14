@@ -38,6 +38,7 @@ import type { AssertionParts } from './verify.js';
 import { verifySigningAssertion } from './verify.js';
 import { grantSignaturePayloadBytes } from './grantPayload.js';
 import { signatureChallenge } from './payload.js';
+import { generateId } from '../id.js';
 import { passkeyRpId, signingCeremonyOrigins, SigningNotConfiguredError } from './config.js';
 import { effectiveRequestState } from './requests.js';
 import { GrantSigningRefusal } from './grantRequests.js';
@@ -465,7 +466,26 @@ export async function completeGrantSigning(db: PrismaClient, a: {
            signature_id = ${signature.id}, updated_at = (clock_timestamp() AT TIME ZONE 'UTC')
      WHERE id = ${g.id}`;
     await tx.grantEvent.create({ data: { grantId: g.id, appId: g.app_id, action: 'ACTIVATE', actorUserId: loc.signerId } });
+    await ensureSecretReadClient(tx, g, loc.signerId);
   }, { lockMode: 'shared' });
+}
+
+/**
+ * #3998: a `secret.reveal` grant requested through the grant path (not `issueSecretReadClient`) has no client row yet. Signing
+ * creates it: the signer is the issuer, fixed here and never changed; the client is self-issued when the holder is that person.
+ * Idempotent for a grant `issueSecretReadClient` already gave a row.
+ */
+async function ensureSecretReadClient(tx: Prisma.TransactionClient, g: GrantRow, signerId: string): Promise<void> {
+  if (g.action !== 'secret.reveal') return;
+  const values = (g.action_values ?? {}) as Record<string, unknown>;
+  const secretId = typeof values.secret === 'string' ? values.secret : null;
+  if (!secretId) return;
+  if (await tx.secretReadClient.findUnique({ where: { grantId: g.id }, select: { id: true } })) return;
+  const secret = await tx.secret.findFirst({ where: { id: secretId, ownerType: 'app', ownerId: g.app_id }, select: { name: true } });
+  if (!secret) return;
+  await tx.secretReadClient.create({
+    data: { id: generateId(), grantId: g.id, appId: g.app_id, secretId, secretName: secret.name, issuerUserId: signerId, selfIssued: g.user_id === signerId },
+  });
 }
 
 /** Decline: the proven issuer's own signing ceremony turns the request down. The grant stays pending. */

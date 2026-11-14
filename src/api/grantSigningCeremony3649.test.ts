@@ -296,6 +296,24 @@ describe('C1: one assertion activates the grant, in one transaction', () => {
   });
 });
 
+describe('#3998: signing a secret.reveal grant creates its read client', () => {
+  it('the signer becomes the client issuer; a self-held grant is self-issued; no second row is made', async () => {
+    const secret = await db.secret.create({ data: { ownerType: 'app', ownerId: appId, name: 'api-token', kind: 'revealable' } as never });
+    const id = generateId();
+    await db.$executeRawUnsafe(`INSERT INTO grants (id, app_id, worker_id, action, action_values, reason, max_uses, created_at, updated_at)
+      VALUES ($1, $2, $3, 'secret.reveal', $4::jsonb, 'read it', 3, (clock_timestamp() AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC'))`,
+    id, appId, workerId, JSON.stringify({ secret: secret.id, 'auto-delete': 'keep' }));
+    expect(await db.secretReadClient.count({ where: { grantId: id } })).toBe(0);
+    const req = await openRequest(id);
+    const p = await prove(req.id, admin);
+    const r = await post(req.id, 'complete', signingBody(p, admin), p.cookie);
+    expect(r.status).toBe(200);
+    const rows = await db.secretReadClient.findMany({ where: { grantId: id } });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ issuerUserId: admin.id, selfIssued: false, secretId: secret.id, secretName: 'api-token', appId });
+  });
+});
+
 describe('refusals at completion are judged before any write', () => {
   async function expectNothingWritten(g: string, reqId: string, userId: string, counterBefore: number) {
     expect((await grantRow(g)).activated_at).toBeNull();
