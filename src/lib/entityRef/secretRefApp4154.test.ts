@@ -11,6 +11,7 @@ import { generateId } from '../id.js';
 import { encryptToken } from '../tokenCrypto.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { parseSecretUrn, resolveSecretRef } from './secretRef.js';
+import { resolveAppRef } from './appRef.js';
 import { AppNotFoundError, SecretNotFoundError } from './errors.js';
 
 const ROOT = 's2c.test';
@@ -54,7 +55,9 @@ describe('App-shape secret URN (#4154)', () => {
     expect(await resolveSecretRef(db, 'hrn:secret:handle-s2c:key')).toEqual({ id: userSecretId });
     expect(await resolveSecretRef(db, `hrn:secret:${ROOT}:app:ops:key`)).toEqual({ id: appSecretId });
     // An App with no secret of that name does not fall through to the org or user secret of that name.
-    await mkApp('empty');
+    const empty = await mkApp('empty');
+    // The App itself resolves, so the not-found below is the missing secret, not a missing App.
+    expect(await resolveAppRef(db, `hrn:app:${ROOT}:empty`)).toEqual({ id: empty.id });
     await expect(resolveSecretRef(db, `hrn:secret:${ROOT}:app:empty:key`)).rejects.toThrow(SecretNotFoundError);
     // An org/user URN never reaches an App secret.
     await mkAppSecret(appId, 'only-app');
@@ -80,6 +83,7 @@ describe('App-shape secret URN (#4154)', () => {
       `hrn:secret:${ROOT}:ops:key`, // three segments, no literal `app`
       `hrn:secret:${ROOT}:app:ops::key`, // mixed separators
       `hrn:secret:${ROOT}::app:ops:key`,
+      `hrn:secret:${ROOT}::app::ops::key`, // the all-double-colon spelling is the legacy shape too
     ]) {
       await expect(resolveSecretRef(db, ref), ref).rejects.toThrow(SecretNotFoundError);
     }
@@ -154,6 +158,19 @@ describe('App-shape secret URN (#4154)', () => {
     const missing = await resolvers.Mutation.deleteSecret({}, { ref: `hrn:secret:${ROOT}:app:ops:missing` }, context(outsiderId)).then(
       () => 'DELETED', (e: unknown) => (e as { extensions?: { code?: string } }).extensions?.code);
     expect(code).toBe(missing);
+    expect(code).toBe('NOT_FOUND');
+    expect(await db.secret.count({ where: { id: appSecretId } })).toBe(1);
+  });
+
+  it('condition 5b: an org member who is not an App member gets the missing answer on read, update and delete', async () => {
+    const orgId = (await db.organization.findFirstOrThrow({ where: { urn: ROOT } })).id;
+    const orgOnlyId = (await db.user.create({ data: { email: `${generateId()}@s2c.test` } })).id;
+    await db.orgMember.create({ data: { organizationId: orgId, userId: orgOnlyId, role: 'ADMIN' } });
+    const ref = `hrn:secret:${ROOT}:app:ops:key`;
+    expect(await resolvers.Query.secret({}, { ref }, context(orgOnlyId))).toBeNull();
+    const codeOf = (p: Promise<unknown>) => p.then(() => 'OK', (e: unknown) => (e as { extensions?: { code?: string } }).extensions?.code);
+    expect(await codeOf(resolvers.Mutation.deleteSecret({}, { ref }, context(orgOnlyId)))).toBe('NOT_FOUND');
+    expect(await codeOf(resolvers.Mutation.updateSecret({}, { ref, metadata: { n: 1 } } as never, context(orgOnlyId)))).toBe('NOT_FOUND');
     expect(await db.secret.count({ where: { id: appSecretId } })).toBe(1);
   });
 

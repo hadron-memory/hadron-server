@@ -82,7 +82,8 @@ export function parseSecretUrn(ref: string): ParsedSecretUrn {
   if (!hasLegacySeparator && segments.length === 4 && segments[1] === 'app') {
     const [appRoot, , appSlug, appName] = segments as [string, string, string, string];
     if (
-      appRoot.length === 0 || /^@|^user:/.test(appRoot) || /\s/.test(appRoot) ||
+      // `user:<handle>` cannot reach here (the split leaves no colon in a segment); it is refused by the segment count.
+      appRoot.length === 0 || appRoot.startsWith('@') || /\s/.test(appRoot) ||
       appSlug.length === 0 || /\s/.test(appSlug) || !SECRET_NAME_RE.test(appName)
     ) {
       throw new SecretNotFoundError(ref);
@@ -158,6 +159,10 @@ export async function resolveSecretRef(
   const parsed = parseSecretUrn(ref);
 
   if (parsed.appSlug !== undefined) {
+    // Contract (#4154): `resolveAppRef` throws only AppNotFoundError (unknown, uninstalled or deleted App) or
+    // AmbiguousLegacyUrnError (an alias naming more than one live App) for a well-formed ref; both are masked as a
+    // missing secret. It does not check that the root org is alive: an App stays addressable while its row is live,
+    // and every surface re-gates on the secret's own owner (appMember / appManager) after this resolves.
     let appId: string;
     try {
       appId = (await resolveAppRef(db, `hrn:app:${parsed.root}:${parsed.appSlug}`)).id;
