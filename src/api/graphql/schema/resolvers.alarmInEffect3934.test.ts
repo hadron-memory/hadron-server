@@ -1,3 +1,4 @@
+import { settledTeamEventQueries } from '../../../test/teamEventHorizon.js';
 /**
  * #3934 (cor:agt:050:20, V77 "an alarm in effect") — `AgentTeamEvent.escalationEndedAt` and the `agentTeamEvents`
  * `alarmsInEffect` filter.
@@ -28,7 +29,7 @@ const DAY = '2026-10-09';
 const at = (hhmm: string): Date => new Date(`${DAY}T${hhmm}:00Z`);
 const iso = (hhmm: string): string => at(hhmm).toISOString();
 const ctx = (userId?: string): Context => ({ db, userId, roles: ['READER'] });
-const server = new ApolloServer<Context>({ typeDefs, resolvers });
+const server = new ApolloServer<Context>({ typeDefs, resolvers: { ...resolvers, Query: settledTeamEventQueries(resolvers.Query, db) } });
 
 let app: { id: string };
 let agentId: string;

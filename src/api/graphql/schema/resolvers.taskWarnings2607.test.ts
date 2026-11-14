@@ -1,3 +1,4 @@
+import { settledTeamEventQueries } from '../../../test/teamEventHorizon.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #2607 (action register phase 3) — warnings on task cancel and alarm acknowledgement.
@@ -23,7 +24,7 @@ vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGi
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
 
 const M = resolvers.Mutation as any;
-const Q = resolvers.Query as any;
+const Q = settledTeamEventQueries(resolvers.Query, db) as any;
 
 let org: { id: string; urn: string };
 let admin: { id: string };
@@ -177,7 +178,7 @@ describe('task.cancel.open-children', () => {
   it('is advice only: no task.warning history event (warning events are not in this slice)', async () => {
     const parent = await task({ ownerUserId: member.id });
     await child(parent.id, { ownerUserId: member.id }, 'pending');
-    const server = new ApolloServer<Context>({ typeDefs, resolvers, plugins: [taskWarningsPlugin] });
+    const server = new ApolloServer<Context>({ typeDefs, resolvers: { ...resolvers, Query: settledTeamEventQueries(resolvers.Query, db) }, plugins: [taskWarningsPlugin] });
     await server.executeOperation({ query: `mutation { c: cancelAgentTask(taskId: "${parent.id}") { id } }` }, { contextValue: ctx(member.id) });
     expect(await db.agentTeamEvent.count({ where: { appId: app.id, type: 'task.warning' } })).toBe(0);
   });
@@ -258,7 +259,7 @@ describe('the carrier: extensions.warnings on a real GraphQL response', () => {
     const parent = await task({ ownerUserId: admin.id });
     await child(parent.id, { ownerUserId: admin.id }, 'started');
     const a = await alarm();
-    const server = new ApolloServer<Context>({ typeDefs, resolvers, plugins: [taskWarningsPlugin] });
+    const server = new ApolloServer<Context>({ typeDefs, resolvers: { ...resolvers, Query: settledTeamEventQueries(resolvers.Query, db) }, plugins: [taskWarningsPlugin] });
     const res = await server.executeOperation({
       query: `mutation { c: cancelAgentTask(taskId: "${parent.id}") { id status } k: acknowledgeAlarm(eventId: "${a.id}") { id } }`,
     }, { contextValue: ctx(admin.id) });

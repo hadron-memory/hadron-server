@@ -1,3 +1,4 @@
+import { settledTeamEventQueries } from '../../../test/teamEventHorizon.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #1705 — agent tasks (Task Management T1): authorization matrix, lifecycle,
@@ -31,7 +32,7 @@ vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({
 }));
 
 const M = resolvers.Mutation as any;
-const Q = resolvers.Query as any;
+const Q = settledTeamEventQueries(resolvers.Query, db) as any;
 const F = resolvers as any;
 
 function ctx(userId?: string, extra: Partial<Context> = {}): Context {

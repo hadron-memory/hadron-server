@@ -9208,13 +9208,13 @@ export const typeDefs = `#graphql
     agentTaskTree(root: ID!): [AgentTask!]
 
     """
-    #1705 — a team App's event stream (hrn:node:hadronmemory.com:specs:cor:agt:050:11), in (createdAt, id)
-    order. To read the next page pass after: the id of the last event you
-    read; the cursor is the (createdAt, id) pair, so events sharing a
-    timestamp are never skipped. since is a coarse time filter (strictly
-    after), not a continuation. limit defaults to 20 (cap 200).
-    #3933 (hrn:node:hadronmemory.com:specs:cor:agt:050:11): newestFirst reads from the newest end instead, the exact mirror
-    order with the same gate, filters and paging, continued with before (the id of the oldest event read).
+    #1705 — a team App's event stream (hrn:node:hadronmemory.com:specs:cor:agt:050:11).
+    #4098: oldest-first follows the writing transaction, then (createdAt, id) within it. Only transactions below
+    the snapshot xmin are served: a poll can lag while an older transaction is open, but late commits and later
+    writes with older caller timestamps cannot fall behind a served forward cursor. after remains the id of the
+    last event read, not an opaque token. since is a coarse time filter (strictly after), not a continuation.
+    limit defaults to 20 (cap 200). newestFirst/before retain descending (createdAt, id) history order with the
+    same gate, filters and paging; they are not a forward continuation.
     task.warning, task.edited and task.properties-changed are passive history (never wake, suppress a wake or count as activity); payload is {code}, changed field names only, or (task.properties-changed) the size and SHA-256 of the canonical JSON of the old and new properties, never their content.
     """
     agentTeamEvents(
@@ -9224,7 +9224,7 @@ export const typeDefs = `#graphql
       after: ID
       "#3933: with newestFirst, the id of the last (oldest) event read; the page continues strictly older than it, by the same (createdAt, id) pair. An id that is not an event of this App is refused BAD_USER_INPUT. Refused without newestFirst."
       before: ID
-      "#3933: true reads from the NEWEST end, the exact mirror of the default order, with the same gate, filters and paging (default 20, cap 200); continue with before, not after (refused with after). Omitted or false: the oldest-first read, unchanged."
+      "#3933: true reads history from the NEWEST timestamp by (createdAt, id) descending, with the same gate, filters and paging (default 20, cap 200); continue with before, not after (refused with after). Omitted or false: the commit-safe forward stream."
       newestFirst: Boolean
       types: [String!]
       "#3449: literal prefix, intersects nonempty types; app. includes legacy platform events. An empty prefix matches all types; omitted or empty types adds no type filter."
@@ -9243,7 +9243,8 @@ export const typeDefs = `#graphql
     """
     #3933 (hrn:node:hadronmemory.com:specs:cor:api:120:04) — agentTeamEvents with the page's end told: the same arguments, gate,
     filters, order and paging (except the page-size floor below), returning hasMore and nextCursor so a reader knows whether older (or newer) events remain without
-    another read. nextCursor is the id of the last event served when more remain, to pass as after (oldest-first) or, with
+    another read. For the forward stream, hasMore describes the eligible prefix below the snapshot horizon; keep the
+    cursor and poll again while older transactions remain open. nextCursor is the id of the last event served when more remain, to pass as after (oldest-first) or, with
     newestFirst, as before; null on the last page, and non-null whenever hasMore is true. The page size has a floor of 1:
     limit is at least 1 (0 or less reads one event, never an empty page), default 20, cap 200 served and never refused
     (hrn:node:hadronmemory.com:specs:cor:api:120:04). The legacy agentTeamEvents keeps limit 0 as an empty list.

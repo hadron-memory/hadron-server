@@ -3152,12 +3152,10 @@ export const agentTaskQueries = {
     }, true),
 
   /**
-   * An App's team event stream (cor:agt:050:11, :21), in (createdAt, id)
-   * order. Continue a page with `after`: the id of the last event read. The
-   * cursor is the PAIR, so rows sharing a timestamp — the task.created and
-   * task.assigned one transaction writes, or a capped page cutting a larger
-   * equal-time group — are never skipped (#1713 review, Diego P2-B). `since`
-   * stays a coarse time filter, not a continuation.
+   * An App's team event stream (cor:agt:050:11, :21). #4098: oldest-first pages use the sealed
+   * (tx_id,created_at,id) order from #4089; after remains an event id. A poll may lag behind an older
+   * open transaction, but cannot skip its late commit or a later transaction's backdated stamp.
+   * since stays a coarse time filter, not a continuation. newestFirst/before keep their history order.
    */
   agentTeamEvents: async (_: unknown, args: TeamEventsArgs, ctx: Context) =>
     withReadableApp(ctx, args.appRef, (c, app) => readTeamEvents(c, app, args, clampListTake(args.limit))),
@@ -3267,31 +3265,22 @@ async function readTeamEvents(c: Context, app: { id: string }, args: TeamEventsA
   const newestFirst = args.newestFirst === true;
   if (newestFirst && args.after) throw badInput('after continues the oldest-first read; with newestFirst pass before.');
   if (!newestFirst && args.before) throw badInput('before continues the newestFirst read; pass newestFirst: true with it.');
-  let afterWhere: Prisma.AgentTeamEventWhereInput = {};
+  let beforeWhere: Prisma.AgentTeamEventWhereInput = {};
   if (args.before) {
     // Scoped to this App, like after: another App's event id is just an unknown cursor.
     const cursor = isId(args.before)
       ? await c.db.agentTeamEvent.findFirst({ where: { id: args.before, appId: app.id }, select: { id: true, createdAt: true } })
       : null;
     if (!cursor) throw badInput('before is not an event of this App. Pass the id of the last (oldest) event you read.');
-    afterWhere = { OR: [{ createdAt: { lt: cursor.createdAt } }, { createdAt: cursor.createdAt, id: { lt: cursor.id } }] };
+    beforeWhere = { OR: [{ createdAt: { lt: cursor.createdAt } }, { createdAt: cursor.createdAt, id: { lt: cursor.id } }] };
   }
   if (args.after) {
-    // Scoped to this App: another App's event id is just an unknown cursor.
     const cursor = isId(args.after)
-      ? await c.db.agentTeamEvent.findFirst({
-          where: { id: args.after, appId: app.id },
-          select: { id: true, createdAt: true },
-        })
+      ? await c.db.agentTeamEvent.findFirst({ where: { id: args.after, appId: app.id }, select: { id: true } })
       : null;
     if (!cursor) throw badInput('after is not an event of this App. Pass the id of the last event you read.');
-    afterWhere = {
-      OR: [
-        { createdAt: { gt: cursor.createdAt } },
-        { createdAt: cursor.createdAt, id: { gt: cursor.id } },
-      ],
-    };
   }
+  const taskId = args.taskId ? (await resolveTaskRef(c, args.taskId, app.id)) ?? args.taskId : null;
   const where: Prisma.AgentTeamEventWhereInput = {
     appId: app.id,
     ...(since ? { createdAt: { gt: since } } : {}),
@@ -3299,20 +3288,39 @@ async function readTeamEvents(c: Context, app: { id: string }, args: TeamEventsA
     // #3934: alarms in effect are alarms, and an acknowledged alarm is out of effect by definition (cor:agt:050:20).
     ...(args.alarmsOnly || args.alarmsInEffect ? { severity: 'alarm' } : {}),
     ...(args.alarmsInEffect ? { acknowledgedAt: null } : {}),
-    ...(args.taskId ? { taskId: (await resolveTaskRef(c, args.taskId, app.id)) ?? args.taskId } : {}),
+    ...(taskId ? { taskId } : {}),
   };
-  // newestFirst is the exact mirror of the default (createdAt, id) order, so a page boundary inside equal timestamps never repeats or skips.
-  const orderBy: Prisma.AgentTeamEventOrderByWithRelationInput[] = newestFirst ? [{ createdAt: 'desc' }, { id: 'desc' }] : [{ createdAt: 'asc' }, { id: 'asc' }];
-  // #3934 (V77; gate disposition on hadron-server#3939): in effect = unacknowledged and no recorded end. Both are columns
-  // of rows already written, so this is an ordinary filtered page: the read works nothing out and its cost follows
-  // `limit`, not the App's alarm history. The end is written once, by the evaluator pass or the acknowledgement.
+  // #3934: an alarm is in effect only while unacknowledged and without a stored escalation end.
   const inEffect: Prisma.AgentTeamEventWhereInput = args.alarmsInEffect ? { escalationEnd: { is: null } } : {};
-  const events = await c.db.agentTeamEvent.findMany({
-    where: { AND: [where, afterWhere, inEffect] },
-    // newestFirst is the exact mirror of the default (createdAt, id) order, so a page boundary inside equal timestamps never repeats or skips.
-    orderBy: newestFirst ? [{ createdAt: 'desc' }, { id: 'desc' }] : [{ createdAt: 'asc' }, { id: 'asc' }],
+  // #4098: every oldest-first page, including the first, advances in the same commit-safe key as #4089.
+  // tx_id below snapshot xmin is sealed: no transaction can later add a row behind a served cursor. A later
+  // transaction with a backdated caller stamp still sorts later by tx_id. Within a sealed transaction, every
+  // event is already visible, so (created_at,id) safely breaks ties. Historic tx_id=0 rows retain their old order.
+  // All filters and the row projection run in ONE snapshot, including mutable alarm acknowledgements/ends.
+  type EventRow = Prisma.AgentTeamEventGetPayload<Record<string, never>>;
+  const events = newestFirst ? await c.db.agentTeamEvent.findMany({
+    where: { AND: [where, beforeWhere, inEffect] },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     take,
-  });
+  }) : await c.db.$queryRaw<EventRow[]>`
+    SELECT e.id, e.app_id AS "appId", e.type, e.task_id AS "taskId",
+      e.actor_user_id AS "actorUserId", e.actor_worker_id AS "actorWorkerId", e.actor_agent_id AS "actorAgentId",
+      e.actor_run_id AS "actorRunId", e.actor_app_key_id AS "actorAppKeyId",
+      e.subject_worker_id AS "subjectWorkerId", e.subject_user_id AS "subjectUserId", e.severity, e.chain,
+      e.acknowledged_by_user_id AS "acknowledgedByUserId", e.acknowledged_by_worker_id AS "acknowledgedByWorkerId",
+      e.acknowledged_at AS "acknowledgedAt", e.payload, e.created_at AS "createdAt", e.episode_start AS "episodeStart"
+    FROM agent_team_events e
+    WHERE e.app_id = ${app.id}
+      AND e.tx_id < pg_snapshot_xmin(pg_current_snapshot())
+      ${args.after ? Prisma.sql`AND (e.tx_id,e.created_at,e.id) > (SELECT tx_id,created_at,id FROM agent_team_events WHERE id=${args.after} AND app_id=${app.id})` : Prisma.empty}
+      ${since ? Prisma.sql`AND e.created_at > ${since.toISOString()}::timestamp` : Prisma.empty}
+      ${args.types?.length ? Prisma.sql`AND e.type IN (${Prisma.join(args.types)})` : Prisma.empty}
+      ${args.codePrefix != null ? Prisma.sql`AND starts_with(e.type,${args.codePrefix})` : Prisma.empty}
+      ${args.alarmsOnly || args.alarmsInEffect ? Prisma.sql`AND e.severity='alarm'` : Prisma.empty}
+      ${args.alarmsInEffect ? Prisma.sql`AND e.acknowledged_at IS NULL AND NOT EXISTS (SELECT 1 FROM alarm_escalation_ends z WHERE z.event_id=e.id)` : Prisma.empty}
+      ${taskId ? Prisma.sql`AND e.task_id=${taskId}` : Prisma.empty}
+    ORDER BY e.tx_id,e.created_at,e.id
+    LIMIT ${take}`;
   // #4135: use the stored AgentTask.handle (cor:agt:050:01, Proposed), once per page.
   // Event task ids are retained after deletion; an absent row must never invent a handle.
   const taskIds = [...new Set(events.flatMap(e => e.taskId ? [e.taskId] : []))];
