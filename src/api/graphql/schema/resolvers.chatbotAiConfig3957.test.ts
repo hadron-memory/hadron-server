@@ -38,11 +38,12 @@ beforeEach(async () => {
   ] });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   await createDbAgentOrgGrant(db, org.id, agent.id);
-  const mk = (appId: string, name: string, provider: string, model: string, enabled = true) =>
-    db.aiServiceConfig.create({ data: { appId, name, provider, model, apiKeyEncrypted: encryptToken(KEY), apiKeyPreview: '…3957', enabled } });
+  const mk = (appId: string, name: string, provider: string, model: string, enabled = true, id?: string) =>
+    db.aiServiceConfig.create({ data: { id, appId, name, provider, model, apiKeyEncrypted: encryptToken(KEY), apiKeyPreview: '…3957', enabled } });
   dflt = await mk(app.id, 'default', 'anthropic', 'claude-default');
   claude = await mk(app.id, 'claude', 'anthropic', 'claude-sonnet');
-  glm = await mk(app.id, 'glm', 'glm', 'glm-5');
+  // #4155: a legal public id containing the short secret suffix must never look like a credential leak.
+  glm = await mk(app.id, 'glm', 'glm', 'glm-5', true, '01953957000000000000000000000001');
   foreign = await mk(other.id, 'foreign', 'openai', 'gpt-x');
 });
 
