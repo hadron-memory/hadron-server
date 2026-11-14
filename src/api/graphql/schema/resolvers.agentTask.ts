@@ -294,8 +294,13 @@ export async function resolveTaskActor(ctx: Context, app: TaskApp): Promise<Task
   return { kind: 'user', userId: ctx.userId };
 }
 
-/** The write-side preconditions every task mutation shares, after the actor resolved. */
-export function requireWritable(ctx: Context, app: TaskApp): void {
+/**
+ * The write-side preconditions every task mutation shares, after the actor resolved. `allowUninstalled` (#4167,
+ * hrn:node:hadronmemory.com:specs:cor:acl:140:05, Holger 2026-11-14) is ONLY the revoke door: whoever manages the
+ * App may end its grants also while the App is uninstalled (not deleted), so that door names the exception —
+ * impersonation and a refused binding still refuse, and every other caller keeps the uninstalled refusal.
+ */
+export function requireWritable(ctx: Context, app: TaskApp, options: { allowUninstalled?: boolean } = {}): void {
   if (ctx.impersonation) throw forbidden('Impersonation sessions are read-only.');
   if (ctx.sessionBindingRefused) {
     throw taskError(
@@ -304,7 +309,7 @@ export function requireWritable(ctx: Context, app: TaskApp): void {
         'Nothing was written. Bind a live session, or send no session to act as yourself.',
     );
   }
-  if (app.uninstalledAt) throw taskError('APP_UNINSTALLED', 'This App is uninstalled; its tasks are read-only.');
+  if (app.uninstalledAt && !options.allowUninstalled) throw taskError('APP_UNINSTALLED', 'This App is uninstalled; its tasks are read-only.');
 }
 
 export async function loadApp(ctx: Context, appId: string): Promise<TaskApp | null> {
@@ -1143,6 +1148,12 @@ export async function inTaskWriteTx<T>(
     lockWorkerIds?: readonly (string | null | undefined)[];
     /** #3243: fill and lock the whole live candidate pool at the existing graph-before-worker point. */
     lockWorkerPool?: Set<string>;
+    /**
+     * #4167 (hrn:node:hadronmemory.com:specs:cor:acl:140:05): the App anchor and the in-transaction re-check admit an
+     * UNINSTALLED (not deleted) App — only `revokeGrant`, whose manager arm the ruling of 2026-11-14 widens. A deleted
+     * App still refuses everywhere, and every other task write keeps the liveness check.
+     */
+    allowUninstalledApp?: boolean;
   } = {},
 ): Promise<T> {
   const anchors: AuthorityAnchor[] = [
@@ -1168,7 +1179,7 @@ export async function inTaskWriteTx<T>(
           const again = await resolveTaskActor(txCtx, fresh);
           if (!again || !sameActor(again, actor)) throw new TaskGateRefused();
         }
-        requireWritable(txCtx, fresh);
+        requireWritable(txCtx, fresh, { allowUninstalled: options.allowUninstalledApp });
       },
       (tx, txCtx) => {
         // #3323: an admission belongs to the attempt that judged it; a retried attempt judges again.
@@ -1177,6 +1188,7 @@ export async function inTaskWriteTx<T>(
       },
       {
         lockMode: options.lockMode,
+        allowUninstalledApp: options.allowUninstalledApp,
         afterLock: async (tx) => {
           await lockStopFence(tx, app.id, options.stopFence ?? 'shared');
           await lockTaskGraph(tx, app.id, options.taskGraph ?? 'shared');

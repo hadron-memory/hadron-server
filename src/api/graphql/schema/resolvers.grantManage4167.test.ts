@@ -31,7 +31,17 @@ beforeAll(async () => {
   await new Promise<void>((r) => http.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
 });
-afterAll(async () => { await new Promise<void>((r) => http.close(() => r)); await cleanDb(db); await dropTestActions(); vi.unstubAllEnvs(); });
+// Teardown: destroy keep-alive sockets, then close — BOUNDED, because this server's close callback is
+// observed to hang even with zero connections on this runner (a teardown flake, not a code defect;
+// the fork is torn down right after regardless, and the DB cleanup below still runs).
+afterAll(async () => {
+  http.closeIdleConnections?.();
+  http.closeAllConnections?.();
+  await Promise.race([new Promise<void>((r) => http.close(() => r)), new Promise<void>((r) => setTimeout(r, 2000))]);
+  await cleanDb(db);
+  await dropTestActions();
+  vi.unstubAllEnvs();
+});
 
 let w: World;
 let pubNode: string; // #4067: a node the requester can read
