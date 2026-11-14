@@ -32,7 +32,7 @@
  */
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { isId as isIdFunc } from './shape.js';
-import { assertFullyQualifiedUrn } from '../urn.js';
+import { assertFullyQualifiedUrn, validateAtomShape } from '../urn.js';
 import {
   SecretNotFoundError,
   AppNotFoundError,
@@ -45,19 +45,32 @@ import { resolveAppRef } from './appRef.js';
 import { resolveUserRef } from './userRef.js';
 import { SECRET_NAME_RE, type SecretOwnerType } from '../secrets.js';
 
-export interface ParsedSecretUrn {
-  /**
-   * 'user' when a legacy `@`/`user:` sigil pinned it; undefined for a bare v2
-   * root (org-or-user, resolved by pool lookup).
-   */
-  rootType?: 'user';
-  /** The bare root atom (org domain or user handle, sigil stripped; for an App secret, the App's root). */
-  root: string;
-  /** Set for an App-owned secret (`<root>:app:<app-slug>:<name>`); undefined for an org/user secret. */
-  appSlug?: string;
-  /** The secret's name (the final segment). */
-  name: string;
-}
+/**
+ * A parsed secret URN, discriminated on `kind` (#4161) so a field of one arm cannot be half-set on the other.
+ * The `kind` names urn-lib-js's `ParsedSecretUrnV2.ownerKind` split (`root` / `app`) in the server's own words.
+ */
+export type ParsedSecretUrn =
+  | {
+      kind: 'principal';
+      /**
+       * 'user' when a legacy `@`/`user:` sigil pinned it; undefined for a bare v2
+       * root (org-or-user, resolved by pool lookup).
+       */
+      rootType?: 'user';
+      /** The bare root atom (org domain or user handle, sigil stripped). */
+      root: string;
+      /** The secret's name (the final segment). */
+      name: string;
+    }
+  | {
+      kind: 'app';
+      /** The App's root atom (org domain or user handle). */
+      root: string;
+      /** The App's slug atom (lenient atom shape; an alias or an uppercase pre-#575 slug still resolves). */
+      appSlug: string;
+      /** The secret's name (the final segment, `SECRET_NAME_RE`). */
+      name: string;
+    };
 
 /**
  * Decompose an `hrn:secret:…` URN into its owner root + name. Accepts the
@@ -88,7 +101,12 @@ export function parseSecretUrn(ref: string): ParsedSecretUrn {
     ) {
       throw new SecretNotFoundError(ref);
     }
-    return { root: appRoot, appSlug, name: appName };
+    // #4161 (C1, cor:urn:010:01 slug rule): the LENIENT read-side atom check (charset + 64 chars, case-lenient), never
+    // `validateUserSlug`: an uppercase pre-#575 slug, or one reached through the stored alias map, must keep resolving
+    // (cor:urn:010:02). It refuses what no App can be named, before any database read, with the same not-found answer
+    // the lookup would have given. A legacy secret name outside `SECRET_NAME_RE` is not addressable by App URN (by id only).
+    try { validateAtomShape(appSlug, appSlug); } catch { throw new SecretNotFoundError(ref); }
+    return { kind: 'app', root: appRoot, appSlug, name: appName };
   }
   // Org/user-owned: exactly `<root>:<name>`.
   if (segments.length !== 2 || segments.some((s) => s.length === 0)) {
@@ -103,15 +121,15 @@ export function parseSecretUrn(ref: string): ParsedSecretUrn {
   if (rawRoot.startsWith('@')) {
     const handle = rawRoot.slice(1);
     if (handle.length === 0) throw new SecretNotFoundError(ref);
-    return { rootType: 'user', root: handle, name };
+    return { kind: 'principal', rootType: 'user', root: handle, name };
   }
   if (userMarker) {
-    return { rootType: 'user', root: userMarker[1], name };
+    return { kind: 'principal', rootType: 'user', root: userMarker[1], name };
   }
   // A bare root is one principal atom: a colon inside it is some other shape (for example `<root>:app::<name>`),
   // which no principal can answer to, so it is refused here instead of parsing as a root nobody has.
   if (rawRoot.includes(':')) throw new SecretNotFoundError(ref);
-  return { root: rawRoot, name };
+  return { kind: 'principal', root: rawRoot, name };
 }
 
 /**
@@ -122,7 +140,7 @@ export function parseSecretUrn(ref: string): ParsedSecretUrn {
  */
 async function resolveSecretOwnerCandidates(
   db: PrismaClient,
-  parsed: ParsedSecretUrn,
+  parsed: Extract<ParsedSecretUrn, { kind: 'principal' }>,
 ): Promise<Array<{ ownerType: SecretOwnerType; ownerId: string }>> {
   if (parsed.rootType === 'user') {
     const user = await resolveUserRef(db, `hrn:user:${parsed.root}`); // throws UserNotFoundError
@@ -158,7 +176,7 @@ export async function resolveSecretRef(
   assertFullyQualifiedUrn(ref, 'secret');
   const parsed = parseSecretUrn(ref);
 
-  if (parsed.appSlug !== undefined) {
+  if (parsed.kind === 'app') {
     // Contract (#4154): `resolveAppRef` throws only AppNotFoundError (unknown, uninstalled or deleted App) or
     // AmbiguousLegacyUrnError (an alias naming more than one live App) for a well-formed ref; both are masked as a
     // missing secret. It does not check that the root org is alive: an App stays addressable while its row is live,
@@ -170,7 +188,13 @@ export async function resolveSecretRef(
     } catch (err) {
       // Unknown / uninstalled / deleted App, or an alias that names more than one live App: all the same answer as a
       // missing secret. Only these typed outcomes are masked; operational/DB errors propagate.
-      if (err instanceof AppNotFoundError || err instanceof AmbiguousLegacyUrnError) throw new SecretNotFoundError(ref);
+      if (err instanceof AmbiguousLegacyUrnError) {
+        // #4161: the uniform mask hides a data-integrity fault (two live Apps behind one alias, cor:urn:010:02), so
+        // record it once for operators. The line names the alias and nothing else: no secret name, no caller.
+        console.warn(JSON.stringify({ level: 'warn', event: 'secret_urn_ambiguous_app_alias', alias: `${parsed.root}:app:${parsed.appSlug}` }));
+        throw new SecretNotFoundError(ref);
+      }
+      if (err instanceof AppNotFoundError) throw new SecretNotFoundError(ref);
       throw err;
     }
     const appSecret = await db.secret.findUnique({
