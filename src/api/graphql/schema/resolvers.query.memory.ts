@@ -600,7 +600,10 @@ export const memoryQueries = {
             // #2044: an install memory is NOT an org-wide record (its customisation is the App's):
             // the org clause skips it, and the clause below lists it to its own audience alone.
             { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private', 'group', 'app'] as any }, isInstallMemory: false },
-            { class: 'system' as any, isInstallMemory: true, id: { in: installListable } },
+            // #4181 / cor:api:100, cor:acl:010:01: with `orgId` the install clause is narrowed like its org
+            // neighbour: the memory sits in its App's own org (user-owned Apps' install memories have no org
+            // and reach their owner through the user-owned clause below).
+            { class: 'system' as any, isInstallMemory: true, id: { in: installListable }, ...(scope.scopedOrgId ? { organizationId: scope.scopedOrgId } : {}) },
             {
               class: 'app' as any,
               id: { in: accessibleIds },
