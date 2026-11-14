@@ -129,7 +129,8 @@ exit 0
 case "$*" in
   *-R*) [ -f "${k}/ignore-term-jq" ] && { trap '' TERM; exec sleep 30; }
         [ -f "${k}/sleep-jq" ] && sleep "$(cat "${k}/sleep-jq")" ;;
-  *.workerName*) [ -f "${k}/sleep-jq-workername" ] && sleep "$(cat "${k}/sleep-jq-workername")" ;;
+  *.workerName*) [ -f "${k}/set-uptime2" ] && cp "${k}/set-uptime2" "${k}/uptime"
+                 [ -f "${k}/sleep-jq-workername" ] && sleep "$(cat "${k}/sleep-jq-workername")" ;;
   *.terminal.prompt*|*.terminal.stale*) [ -f "${k}/sleep-jq-terminal" ] && sleep "$(cat "${k}/sleep-jq-terminal")" ;;
   *.trigger*|*.cwd*|*.transcript_path*) [ -f "${k}/sleep-jq-stdin" ] && sleep "$(cat "${k}/sleep-jq-stdin")" ;;
 esac
@@ -164,7 +165,8 @@ function promptEntry(agoMs: number, content: unknown, kind = 'human'): string {
 const knob = (s: Sb, file: string, body: string): void => writeFileSync(join(s.root, 'k', file), body);
 const transcript = (s: Sb, ...lines: string[]): void => writeFileSync(join(s.root, 'transcript.jsonl'), lines.join('\n') + '\n');
 const stateDir = (s: Sb): string => join(s.home, '.local', 'state', 'hadron-worker-shed');
-const shedLog = (s: Sb): string => (existsSync(join(stateDir(s), 'auto-shed.log')) ? readFileSync(join(stateDir(s), 'auto-shed.log'), 'utf8') : '');
+// A regular file only: K4 makes the log a fifo, and reading a fifo with no writer blocks forever.
+const shedLog = (s: Sb): string => { const f = join(stateDir(s), 'auto-shed.log'); return existsSync(f) && statSync(f).isFile() ? readFileSync(f, 'utf8') : ''; };
 const warnings = (s: Sb): string[] => (existsSync(s.calls) ? readFileSync(s.calls, 'utf8') : '').split('\n').filter((l) => l.startsWith('team chat post'));
 
 /** One PreCompact(auto) fire; `scaled` runs it under the scaled-down budgets, otherwise the defaults apply. */
@@ -588,7 +590,7 @@ describe('#4160 preventive: the shared guard deadline', () => {
   it('K1 a BACKWARD clock step cannot extend the deadline: elapsed never decreases', async () => {
     const s = await stage();
     setUptime(s, '1000.00 0.00\n');
-    knob(s, 'sleep-whoami', '0.5'); knob(s, 'set-uptime', '900.00 0.00\n'); // 100 s backwards after whoami
+    knob(s, 'set-uptime', '1000.30 0.00\n'); knob(s, 'set-uptime2', '900.00 0.00\n'); // +0.3 s once whoami answers (read by the hook), then 100 s BACKWARD during the whoami parse
     const r = fire(s, { scaled: true, env: { ...KG, ...clockEnv(s), WORKER_AUTO_SHED_T_HOOK: '2.4' } });
     expect(r.status, r.log).toBe(0);
     expect(r.log, 'with a decreasing clock the worker-get step would have run').toMatch(/skip: guard deadline before worker get/);
@@ -778,7 +780,7 @@ const owned = (rid = 'rid-1') => (): ProcRead<string> => `PATH=/bin\0HARNESS_RUN
 
 describe('#4160 item 2: signal identity and unverifiable evidence (mocked /proc)', () => {
   it('parseStat reads fields from AFTER the last ")": a comm with spaces and parentheses cannot shift them', () => {
-    const rest = 'S 7 500 500 0 -1 4194560 100 0 0 0 0 0 0 0 0 20 0 1 0 987654 1000 100 0 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0';
+    const rest = 'S 7 500 500 0 -1 4194560 100 0 0 0 0 0 0 0 20 0 1 0 987654 1000 100 0 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0';
     expect(parseStat(`1234 (we ird) (name) ${rest}`)).toEqual({ state: 'S', ppid: 7, pgrp: 500, sid: 500, start: '987654' });
   });
 

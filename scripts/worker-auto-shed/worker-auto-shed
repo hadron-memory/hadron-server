@@ -159,28 +159,85 @@ T_WARN=$(budget WORKER_AUTO_SHED_T_WARN 10)
 # SIGTERM alone does not bound a command that ignores it: every timed step escalates to SIGKILL after this grace,
 # which the 45 s aggregate accounts for (<= 1 s on each of stdin, whoami, worker get, transcript, warning post).
 KILL_GRACE=$(budget WORKER_AUTO_SHED_T_KILL_GRACE 1)
-# #4011 F1: parsing is inside its segment's budget too. jqb runs jq on stdin with whatever is LEFT of the segment's
-# budget (never less than 50 ms, so a parse of a tiny document after a slow command still runs): a jq that stalls is
-# a timeout (124/137), classified unreadable by the caller. Worst case is stdin 7.05 + whoami 7.05 + worker get 7.05
-# + transcript 11 + warning 11 = 43.2 s, inside the 45 s bound (5 s log/cleanup margin not even needed).
-jqb() {
-  local b=$1 t0=$2 rem
-  shift 2
-  rem=$(awk -v b="$b" -v t0="$t0" -v n="$(date +%s.%N)" 'BEGIN{r=b-(n-t0); if (r<0.05) r=0.05; printf "%.3f", r}')
-  timeout -k "$KILL_GRACE" "$rem" jq "$@" 2>/dev/null
+# #4160 item 1: ONE absolute deadline shared by every guard-region step (SKIP paths only; a clear path that commits to
+# shed work never consults it). Time is the shell builtin `read` of /proc/uptime (CLOCK_BOOTTIME: monotonic, immune to
+# wall-clock steps), in integer centiseconds: no `date`/`awk` fork to stall. A high-water mark means a reading below it is
+# ignored, so a backward step cannot extend the deadline. An unreadable clock cannot measure: the run takes the
+# guard-unreadable SKIP exit (exit 0, no kill, never a fall-through to static budgets). The test seam
+# WORKER_AUTO_SHED_UPTIME_FILE is honoured only as a regular file under the temp dir; normal runs read /proc/uptime.
+to_cs() {
+  local v=$1 i f=""
+  i=${v%%.*}; [[ $v == *.* ]] && f=${v#*.}
+  f="${f}00"; f=${f:0:2}
+  printf '%d' $(( 10#${i:-0} * 100 + 10#$f ))
+}
+HW_CS=""
+NOW_CS=0
+clock_cs() {
+  local up _ f=/proc/uptime cs
+  if [ -n "${WORKER_AUTO_SHED_UPTIME_FILE:-}" ] && [ -f "$WORKER_AUTO_SHED_UPTIME_FILE" ] && [ ! -L "$WORKER_AUTO_SHED_UPTIME_FILE" ]; then
+    case "$WORKER_AUTO_SHED_UPTIME_FILE" in "${TMPDIR:-/tmp}"/*) f=$WORKER_AUTO_SHED_UPTIME_FILE ;; esac
+  fi
+  up=""
+  read -r up _ < "$f" 2>/dev/null
+  [[ $up =~ ^[0-9]+\.[0-9]{2}$ ]] || return 1
+  cs=$(( 10#${up%.*} * 100 + 10#${up#*.} ))
+  if [ -n "$HW_CS" ] && [ "$cs" -lt "$HW_CS" ]; then cs=$HW_CS; fi
+  HW_CS=$cs; NOW_CS=$cs
+}
+GREASON=""; GBS=""; GOUT=""
+# gbudget <step budget cs> <label>: GBS = min(step, P_END - now - KILL_GRACE) as seconds. rc 1 clock unreadable, 2 under 0.2 s left.
+gbudget() {
+  local b=$1 room
+  GREASON=""
+  clock_cs || { GREASON="guard clock unreadable"; return 1; }
+  room=$(( P_END_CS - NOW_CS - KG_CS ))
+  [ "$room" -lt "$b" ] && b=$room
+  if [ "$b" -lt 20 ]; then GREASON="guard deadline before $2"; return 2; fi
+  printf -v GBS '%d.%02d' $(( b / 100 )) $(( b % 100 ))
+}
+# gjq <segment budget cs> <segment start cs> <label> jq-args... (stdin passed through): result in GOUT. Past P_END a parse is skipped,
+# never run at its floor. Deadline/clock skips return 124 so the callers' existing timeout handling classifies them unreadable.
+gjq() {
+  local segb=$1 segt0=$2 label=$3 rem room
+  shift 3
+  GREASON=""
+  clock_cs || { GREASON="guard clock unreadable"; GOUT=""; return 124; }
+  rem=$(( segb - (NOW_CS - segt0) ))
+  [ "$rem" -lt 5 ] && rem=5
+  room=$(( P_END_CS - NOW_CS - KG_CS ))
+  if [ "$room" -lt 5 ]; then GREASON="guard deadline before $label"; GOUT=""; return 124; fi
+  [ "$room" -lt "$rem" ] && rem=$room
+  printf -v GBS '%d.%02d' $(( rem / 100 )) $(( rem % 100 ))
+  GOUT=$(timeout -k "$KILL_GRACE" "$GBS" jq "$@" 2>/dev/null)
 }
 is_timeout() { [ "$1" -eq 124 ] || [ "$1" -eq 137 ]; }
 ts() { date -u +%FT%TZ; }
-log() { printf '%s %s\n' "$(ts)" "$1" >>"$LOG"; }
-T0_HOOK=$(date +%s.%N)
-input=$(timeout -k "$KILL_GRACE" "$T_STDIN" cat); in_rc=$?
+log() { timeout -k 0.2 0.5 sh -c 'printf "%s %s\n" "$1" "$2" >>"$3"' _ "$(ts)" "$1" "$LOG" 2>/dev/null; }
+if ! clock_cs; then log "skip: guard clock unreadable; unreadable, no kill"; exit 0; fi
+T0_CS=$NOW_CS
+T_HOOK_S=$(budget WORKER_AUTO_SHED_T_HOOK 44)
+T_HOOK_CS=$(to_cs "$T_HOOK_S")
+if [ "$T_HOOK_CS" -gt 4400 ]; then T_HOOK_CS=4400; log "guard: T_HOOK clamped to 44"; else log "guard: T_HOOK=$T_HOOK_S"; fi
+KG_CS=$(to_cs "$KILL_GRACE")
+T_STDIN_CS=$(to_cs "$T_STDIN"); T_WHOAMI_CS=$(to_cs "$T_WHOAMI"); T_WORKER_CS=$(to_cs "$T_WORKER")
+T_TRANSCRIPT_CS=$(to_cs "$T_TRANSCRIPT"); T_WARN_CS=$(to_cs "$T_WARN")
+C_CS=100                                                  # log + marker + exit, reserved last
+G_END_CS=$(( T0_CS + T_HOOK_CS ))
+P_END_CS=$(( G_END_CS - (T_WARN_CS + KG_CS) - C_CS ))     # presence region end; the warning slice and C are carved out first
+if ! gbudget "$T_STDIN_CS" stdin; then log "skip: $GREASON; unreadable, no kill"; exit 0; fi
+input=$(timeout -k "$KILL_GRACE" "$GBS" cat); in_rc=$?
 # 124 = timed out on SIGTERM, 137 = it ignored SIGTERM and needed the SIGKILL escalation.
 if [ "$in_rc" -eq 124 ] || [ "$in_rc" -eq 137 ]; then log "skip: stdin read timed out (${T_STDIN}s); nothing read, no kill"; exit 0; fi
 # No cwd is known until these parse, so a stdin failure has no worker to attribute a chat warning to: it is logged only.
-trigger=$(jqb "$T_STDIN" "$T0_HOOK" -r '.trigger // empty' <<<"$input"); p1=$?
-cwd=$(jqb "$T_STDIN" "$T0_HOOK" -r '.cwd // empty' <<<"$input"); p2=$?
-transcript=$(jqb "$T_STDIN" "$T0_HOOK" -r '.transcript_path // empty' <<<"$input"); p3=$?
-if is_timeout "$p1" || is_timeout "$p2" || is_timeout "$p3"; then log "skip: stdin parse timed out (${T_STDIN}s budget); no kill"; exit 0; fi
+gr=""
+gjq "$T_STDIN_CS" "$T0_CS" "stdin parse" -r '.trigger // empty' <<<"$input"; p1=$?; trigger=$GOUT; [ -n "$GREASON" ] && gr=$GREASON
+gjq "$T_STDIN_CS" "$T0_CS" "stdin parse" -r '.cwd // empty' <<<"$input"; p2=$?; cwd=$GOUT; [ -n "$GREASON" ] && gr=$GREASON
+gjq "$T_STDIN_CS" "$T0_CS" "stdin parse" -r '.transcript_path // empty' <<<"$input"; p3=$?; transcript=$GOUT; [ -n "$GREASON" ] && gr=$GREASON
+if is_timeout "$p1" || is_timeout "$p2" || is_timeout "$p3"; then
+  if [ -n "$gr" ]; then log "skip: $gr; unreadable, no kill"; else log "skip: stdin parse timed out (${T_STDIN}s budget); no kill"; fi
+  exit 0
+fi
 
 if [ "$trigger" != "auto" ]; then
   log "skip: trigger=$trigger (manual /compact untouched)"
@@ -264,58 +321,65 @@ warned="$STATE_DIR/${name}.skip-warned"
 # Prints one word: clear | typing | conversation | unreadable:<reason>.
 human_presence() {
   local who state prompt out last epoch
-  local t0 rc left wj jrc tw0 stale
-  t0=$(date +%s.%N)
+  local rc left wj jrc stale t0 tw0
+  PRESENCE=""
+  clock_cs || { PRESENCE="unreadable:guard clock unreadable"; return; }
+  t0=$NOW_CS
   # `whoami --json` first (.workerName); the text form is the fallback and shares the SAME budget.
-  wj=$(cd "$cwd" 2>/dev/null && timeout -k "$KILL_GRACE" "$T_WHOAMI" hadron team session whoami --json 2>/dev/null); rc=$?
-  { [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; } && { echo "unreadable:whoami timed out"; return; }
+  gbudget "$T_WHOAMI_CS" whoami || { PRESENCE="unreadable:$GREASON"; return; }
+  wj=$(cd "$cwd" 2>/dev/null && timeout -k "$KILL_GRACE" "$GBS" hadron team session whoami --json 2>/dev/null); rc=$?
+  { [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; } && { PRESENCE="unreadable:whoami timed out"; return; }
   who=""
   if [ "$rc" -eq 0 ]; then
-    who=$(jqb "$T_WHOAMI" "$t0" -r '.workerName // empty' <<<"$wj"); jrc=$?
-    is_timeout "$jrc" && { echo "unreadable:whoami timed out"; return; }
+    gjq "$T_WHOAMI_CS" "$t0" "whoami parse" -r '.workerName // empty' <<<"$wj"; jrc=$?; who=$GOUT
+    if is_timeout "$jrc"; then PRESENCE="unreadable:${GREASON:-whoami timed out}"; return; fi
   fi
   if [ -z "$who" ]; then
-    left=$(awk -v b="$T_WHOAMI" -v t0="$t0" -v n="$(date +%s.%N)" 'BEGIN{printf "%.3f", b-(n-t0)}')
-    awk -v x="$left" 'BEGIN{exit !(x>0)}' || { echo "unreadable:whoami timed out"; return; }
-    wj=$(cd "$cwd" 2>/dev/null && timeout -k "$KILL_GRACE" "$left" hadron team session whoami 2>/dev/null); rc=$?
-    { [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; } && { echo "unreadable:whoami timed out"; return; }
+    clock_cs || { PRESENCE="unreadable:guard clock unreadable"; return; }
+    left=$(( T_WHOAMI_CS - (NOW_CS - t0) ))
+    [ "$left" -gt 0 ] || { PRESENCE="unreadable:whoami timed out"; return; }
+    gbudget "$left" "whoami fallback" || { PRESENCE="unreadable:$GREASON"; return; }
+    wj=$(cd "$cwd" 2>/dev/null && timeout -k "$KILL_GRACE" "$GBS" hadron team session whoami 2>/dev/null); rc=$?
+    { [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; } && { PRESENCE="unreadable:whoami timed out"; return; }
     who=$(printf '%s\n' "$wj" | head -1 | sed 's/ (.*//')
   fi
-  [ -n "$who" ] || { echo "unreadable:no worker name from whoami"; return; }
+  [ -n "$who" ] || { PRESENCE="unreadable:no worker name from whoami"; return; }
   # The worker whoami reports must be the worker this hook fires for; anything else proves nothing about THIS terminal.
-  [ "${who,,}" = "${name,,}" ] || { echo "unreadable:whoami worker differs from hook worker"; return; }
-  tw0=$(date +%s.%N)
-  state=$(timeout -k "$KILL_GRACE" "$T_WORKER" hadron team worker get "$who" --json 2>/dev/null); rc=$?
-  { [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; } && { echo "unreadable:worker get timed out"; return; }
-  [ "$rc" -eq 0 ] || { echo "unreadable:terminal read failed"; return; }
-  prompt=$(jqb "$T_WORKER" "$tw0" -r '.terminal.prompt // empty' <<<"$state"); jrc=$?
-  is_timeout "$jrc" && { echo "unreadable:worker get timed out"; return; }
+  [ "${who,,}" = "${name,,}" ] || { PRESENCE="unreadable:whoami worker differs from hook worker"; return; }
+  gbudget "$T_WORKER_CS" "worker get" || { PRESENCE="unreadable:$GREASON"; return; }
+  tw0=$NOW_CS
+  state=$(timeout -k "$KILL_GRACE" "$GBS" hadron team worker get "$who" --json 2>/dev/null); rc=$?
+  { [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; } && { PRESENCE="unreadable:worker get timed out"; return; }
+  [ "$rc" -eq 0 ] || { PRESENCE="unreadable:terminal read failed"; return; }
+  gjq "$T_WORKER_CS" "$tw0" "worker get parse" -r '.terminal.prompt // empty' <<<"$state"; jrc=$?; prompt=$GOUT
+  if is_timeout "$jrc"; then PRESENCE="unreadable:${GREASON:-worker get timed out}"; return; fi
   # A stale report is an old observation, not the live input box: an empty prompt in it proves nothing.
-  stale=$(jqb "$T_WORKER" "$tw0" -r '.terminal.stale // false' <<<"$state"); jrc=$?
-  is_timeout "$jrc" && { echo "unreadable:worker get timed out"; return; }
-  [ "$stale" = "true" ] && { echo "unreadable:terminal report is stale"; return; }
+  gjq "$T_WORKER_CS" "$tw0" "worker get parse" -r '.terminal.stale // false' <<<"$state"; jrc=$?; stale=$GOUT
+  if is_timeout "$jrc"; then PRESENCE="unreadable:${GREASON:-worker get timed out}"; return; fi
+  [ "$stale" = "true" ] && { PRESENCE="unreadable:terminal report is stale"; return; }
   case "$prompt" in
-    not_empty) echo typing; return ;;
+    not_empty) PRESENCE=typing; return ;;
     empty) ;;
-    *) echo "unreadable:terminal prompt state not reported"; return ;;
+    *) PRESENCE="unreadable:terminal prompt state not reported"; return ;;
   esac
-  { [ -n "$transcript" ] && [ -r "$transcript" ]; } || { echo "unreadable:transcript missing"; return; }
+  { [ -n "$transcript" ] && [ -r "$transcript" ]; } || { PRESENCE="unreadable:transcript missing"; return; }
+  gbudget "$T_TRANSCRIPT_CS" transcript || { PRESENCE="unreadable:$GREASON"; return; }
   # ONE pass: `fromjson` WITHOUT `?` fails the whole run on a record that does not parse (a dropped record would
   # read as "no human"), and the same pass prints the human prompt timestamps.
-  out=$(timeout -k "$KILL_GRACE" "$T_TRANSCRIPT" jq -Rr 'select(length > 0) | fromjson | select(.type == "user" and .origin.kind == "human")
+  out=$(timeout -k "$KILL_GRACE" "$GBS" jq -Rr 'select(length > 0) | fromjson | select(.type == "user" and .origin.kind == "human")
       | ((.message.content | if type == "string" then . elif type == "array" then ([.[] | select(.type == "text") | .text] | join("\n")) else "" end) // "") as $t
       | select($t != "" and ($t | test("^\\s*(<pasted_content[^>]*>\\s*)?\\[hadron (tick|task|chat)\\]|^You just went through an AUTOMATIC SHED") | not))
       | .timestamp' "$transcript" 2>/dev/null); rc=$?
   case "$rc" in
     0) ;;
-    124|137) echo "unreadable:transcript read timed out"; return ;;
-    5) echo "unreadable:transcript has an unparseable record"; return ;;
-    *) echo "unreadable:transcript read failed"; return ;;
+    124|137) PRESENCE="unreadable:transcript read timed out"; return ;;
+    5) PRESENCE="unreadable:transcript has an unparseable record"; return ;;
+    *) PRESENCE="unreadable:transcript read failed"; return ;;
   esac
   last=$(printf '%s\n' "$out" | tail -1)
-  [ -n "$last" ] || { echo clear; return; }
-  epoch=$(date -d "$last" +%s 2>/dev/null) || { echo "unreadable:prompt timestamp"; return; }
-  if [ $(( $(date +%s) - epoch )) -lt "$HUMAN_WINDOW_SECS" ]; then echo conversation; else echo clear; fi
+  [ -n "$last" ] || { PRESENCE=clear; return; }
+  epoch=$(date -d "$last" +%s 2>/dev/null) || { PRESENCE="unreadable:prompt timestamp"; return; }
+  if [ $(( $(date +%s) - epoch )) -lt "$HUMAN_WINDOW_SECS" ]; then PRESENCE=conversation; else PRESENCE=clear; fi
 }
 warn_once() {
   if [ -f "$warned" ] && [ $(( $(date +%s) - $(stat -c %Y "$warned") )) -lt "$WARN_TTL_SECS" ]; then return; fi
@@ -325,14 +389,23 @@ warn_once() {
   else
     msg="$name: my context is nearly full and a shed is due. I did not stop this session because you are in the middle of a conversation with it ($1). Tell me when you are done and I will shed, or run /shed yourself."
   fi
-  if (cd "$cwd" && timeout -k "$KILL_GRACE" "$T_WARN" hadron team chat post "$msg" >>"$LOG" 2>&1); then
+  # One attempt, inside the guard: min(T_WARN, G_END - C - now - KILL_GRACE); under 0.2 s left the post is not started and the
+  # marker stays untouched, so the NEXT fire posts it. An unreadable clock keeps the fixed T_WARN + KILL_GRACE bound.
+  local wb=$T_WARN wcs room
+  if clock_cs; then
+    wcs=$T_WARN_CS; room=$(( G_END_CS - C_CS - NOW_CS - KG_CS ))
+    [ "$room" -lt "$wcs" ] && wcs=$room
+    if [ "$wcs" -lt 20 ]; then log "$name: warning skipped: guard deadline ($1); will retry on the next attempt"; return; fi
+    printf -v wb '%d.%02d' $(( wcs / 100 )) $(( wcs % 100 ))
+  fi
+  if (cd "$cwd" && timeout -k "$KILL_GRACE" "$wb" hadron team chat post "$msg" >>"$LOG" 2>&1); then
     touch "$warned"
     log "$name: warned the human that a shed is due ($1${2:+: $2})"
   else
     log "$name: warning post FAILED ($1); will retry on the next attempt"
   fi
 }
-presence=$(human_presence)
+human_presence; presence=$PRESENCE
 case "$presence" in
   clear) rm -f "$warned" ;;
   typing|conversation)
@@ -340,7 +413,10 @@ case "$presence" in
     warn_once "$presence"
     exit 0 ;;
   *)
-    log "skip: human presence unreadable (${presence#unreadable:}); $name not stopped, letting compaction proceed"
+    case "${presence#unreadable:}" in
+      guard\ *) log "skip: ${presence#unreadable:}; unreadable, no kill" ;;
+      *) log "skip: human presence unreadable (${presence#unreadable:}); $name not stopped, letting compaction proceed" ;;
+    esac
     warn_once unreadable "${presence#unreadable:}"
     exit 0 ;;
 esac
