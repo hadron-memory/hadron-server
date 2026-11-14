@@ -105,7 +105,12 @@ exit 0
   chmodSync(join(bin, 'hadron'), 0o755);
   // A jq that can be made slow for the transcript filter only (the one with -R), so a "huge transcript" is deterministic.
   writeFileSync(join(bin, 'jq'), `#!/bin/bash
-case "$*" in *-R*) [ -f "${k}/sleep-jq" ] && sleep "$(cat "${k}/sleep-jq")" ;; esac
+case "$*" in
+  *-R*) [ -f "${k}/sleep-jq" ] && sleep "$(cat "${k}/sleep-jq")" ;;
+  *.workerName*) [ -f "${k}/sleep-jq-workername" ] && sleep "$(cat "${k}/sleep-jq-workername")" ;;
+  *.terminal.prompt*|*.terminal.stale*) [ -f "${k}/sleep-jq-terminal" ] && sleep "$(cat "${k}/sleep-jq-terminal")" ;;
+  *.trigger*|*.cwd*|*.transcript_path*) [ -f "${k}/sleep-jq-stdin" ] && sleep "$(cat "${k}/sleep-jq-stdin")" ;;
+esac
 exec "${REAL_JQ}" "$@"
 `);
   chmodSync(join(bin, 'jq'), 0o755);
@@ -177,6 +182,21 @@ describe('#4011 A: the whole hook is bounded on every skip path', () => {
     expect(r.log).toContain(`skip: human presence unreadable (${reason})`);
     expect(s.gone(), 'a timed-out step stopped the agent').toBe(false);
     expect(warnings(s)).toHaveLength(1);
+    expect(r.ms, `took ${r.ms} ms`).toBeLessThan(SCALED_TOTAL_MS);
+  });
+
+  it.each([
+    ['whoami .workerName parse', 'sleep-jq-workername', 'skip: human presence unreadable (whoami timed out)', true],
+    ['worker get prompt/stale parse', 'sleep-jq-terminal', 'skip: human presence unreadable (worker get timed out)', true],
+    ['stdin field parse', 'sleep-jq-stdin', 'skip: stdin parse timed out', false],
+  ])('a stalled %s is inside its segment budget: exit 0, no kill, inside the aggregate (QA F1)', async (_n, file, expected, calledHadron) => {
+    const s = await stage();
+    knob(s, file, '5');
+    const r = fire(s, { scaled: true });
+    expect(r.status, r.log).toBe(0);
+    expect(r.log).toContain(expected);
+    expect(s.gone(), 'a stalled parse stopped the agent').toBe(false);
+    expect(existsSync(s.calls), `hadron calls presence: ${calledHadron}`).toBe(calledHadron);
     expect(r.ms, `took ${r.ms} ms`).toBeLessThan(SCALED_TOTAL_MS);
   });
 

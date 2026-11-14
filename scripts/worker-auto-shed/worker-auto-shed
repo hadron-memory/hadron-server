@@ -159,14 +159,28 @@ T_WARN=$(budget WORKER_AUTO_SHED_T_WARN 10)
 # SIGTERM alone does not bound a command that ignores it: every timed step escalates to SIGKILL after this grace,
 # which the 45 s aggregate accounts for (<= 1 s on each of stdin, whoami, worker get, transcript, warning post).
 KILL_GRACE=$(budget WORKER_AUTO_SHED_T_KILL_GRACE 1)
+# #4011 F1: parsing is inside its segment's budget too. jqb runs jq on stdin with whatever is LEFT of the segment's
+# budget (never less than 50 ms, so a parse of a tiny document after a slow command still runs): a jq that stalls is
+# a timeout (124/137), classified unreadable by the caller. Worst case is stdin 7.05 + whoami 7.05 + worker get 7.05
+# + transcript 11 + warning 11 = 43.2 s, inside the 45 s bound (5 s log/cleanup margin not even needed).
+jqb() {
+  local b=$1 t0=$2 rem
+  shift 2
+  rem=$(awk -v b="$b" -v t0="$t0" -v n="$(date +%s.%N)" 'BEGIN{r=b-(n-t0); if (r<0.05) r=0.05; printf "%.3f", r}')
+  timeout -k "$KILL_GRACE" "$rem" jq "$@" 2>/dev/null
+}
+is_timeout() { [ "$1" -eq 124 ] || [ "$1" -eq 137 ]; }
 ts() { date -u +%FT%TZ; }
 log() { printf '%s %s\n' "$(ts)" "$1" >>"$LOG"; }
+T0_HOOK=$(date +%s.%N)
 input=$(timeout -k "$KILL_GRACE" "$T_STDIN" cat); in_rc=$?
 # 124 = timed out on SIGTERM, 137 = it ignored SIGTERM and needed the SIGKILL escalation.
 if [ "$in_rc" -eq 124 ] || [ "$in_rc" -eq 137 ]; then log "skip: stdin read timed out (${T_STDIN}s); nothing read, no kill"; exit 0; fi
-trigger=$(printf '%s' "$input" | jq -r '.trigger // empty' 2>/dev/null)
-cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)
-transcript=$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null)
+# No cwd is known until these parse, so a stdin failure has no worker to attribute a chat warning to: it is logged only.
+trigger=$(jqb "$T_STDIN" "$T0_HOOK" -r '.trigger // empty' <<<"$input"); p1=$?
+cwd=$(jqb "$T_STDIN" "$T0_HOOK" -r '.cwd // empty' <<<"$input"); p2=$?
+transcript=$(jqb "$T_STDIN" "$T0_HOOK" -r '.transcript_path // empty' <<<"$input"); p3=$?
+if is_timeout "$p1" || is_timeout "$p2" || is_timeout "$p3"; then log "skip: stdin parse timed out (${T_STDIN}s budget); no kill"; exit 0; fi
 
 if [ "$trigger" != "auto" ]; then
   log "skip: trigger=$trigger (manual /compact untouched)"
@@ -250,13 +264,16 @@ warned="$STATE_DIR/${name}.skip-warned"
 # Prints one word: clear | typing | conversation | unreadable:<reason>.
 human_presence() {
   local who state prompt out last epoch
-  local t0 rc left wj
+  local t0 rc left wj jrc tw0 stale
   t0=$(date +%s.%N)
   # `whoami --json` first (.workerName); the text form is the fallback and shares the SAME budget.
   wj=$(cd "$cwd" 2>/dev/null && timeout -k "$KILL_GRACE" "$T_WHOAMI" hadron team session whoami --json 2>/dev/null); rc=$?
   { [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; } && { echo "unreadable:whoami timed out"; return; }
   who=""
-  [ "$rc" -eq 0 ] && who=$(printf '%s' "$wj" | jq -r '.workerName // empty' 2>/dev/null)
+  if [ "$rc" -eq 0 ]; then
+    who=$(jqb "$T_WHOAMI" "$t0" -r '.workerName // empty' <<<"$wj"); jrc=$?
+    is_timeout "$jrc" && { echo "unreadable:whoami timed out"; return; }
+  fi
   if [ -z "$who" ]; then
     left=$(awk -v b="$T_WHOAMI" -v t0="$t0" -v n="$(date +%s.%N)" 'BEGIN{printf "%.3f", b-(n-t0)}')
     awk -v x="$left" 'BEGIN{exit !(x>0)}' || { echo "unreadable:whoami timed out"; return; }
@@ -267,12 +284,16 @@ human_presence() {
   [ -n "$who" ] || { echo "unreadable:no worker name from whoami"; return; }
   # The worker whoami reports must be the worker this hook fires for; anything else proves nothing about THIS terminal.
   [ "${who,,}" = "${name,,}" ] || { echo "unreadable:whoami worker differs from hook worker"; return; }
+  tw0=$(date +%s.%N)
   state=$(timeout -k "$KILL_GRACE" "$T_WORKER" hadron team worker get "$who" --json 2>/dev/null); rc=$?
   { [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; } && { echo "unreadable:worker get timed out"; return; }
   [ "$rc" -eq 0 ] || { echo "unreadable:terminal read failed"; return; }
-  prompt=$(printf '%s' "$state" | jq -r '.terminal.prompt // empty' 2>/dev/null)
+  prompt=$(jqb "$T_WORKER" "$tw0" -r '.terminal.prompt // empty' <<<"$state"); jrc=$?
+  is_timeout "$jrc" && { echo "unreadable:worker get timed out"; return; }
   # A stale report is an old observation, not the live input box: an empty prompt in it proves nothing.
-  [ "$(printf '%s' "$state" | jq -r '.terminal.stale // false' 2>/dev/null)" = "true" ] && { echo "unreadable:terminal report is stale"; return; }
+  stale=$(jqb "$T_WORKER" "$tw0" -r '.terminal.stale // false' <<<"$state"); jrc=$?
+  is_timeout "$jrc" && { echo "unreadable:worker get timed out"; return; }
+  [ "$stale" = "true" ] && { echo "unreadable:terminal report is stale"; return; }
   case "$prompt" in
     not_empty) echo typing; return ;;
     empty) ;;
