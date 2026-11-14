@@ -195,11 +195,30 @@ describe('chatAiConfigChoices', () => {
       [dflt.id, 'default', false, false],
       [glm.id, 'glm', false, true],
     ]);
-    const text = JSON.stringify(list);
-    expect(text).not.toContain(KEY);
-    expect(text).not.toContain('3957');
-    expect(text).not.toContain(foreign.id);
-    expect(Object.keys(list[2]).sort()).toEqual(['isAppChatbotConfig', 'isDefault', 'model', 'name', 'provider', 'toolChoice', 'value']);
+    expect(glm.id).toMatch(/^[0-9a-f]{32}$/);
+    expect(glm.id).toContain('3957');
+    // #4155: use the exact fixture preview; the short suffix can occur in a public id.
+    const assertProjection = (choices: typeof list) => {
+      const text = JSON.stringify(choices);
+      expect(text).not.toContain(KEY);
+      expect(text).not.toContain(glm.apiKeyPreview);
+      expect(text).not.toContain(foreign.id);
+      expect(Object.keys(choices[2]).sort()).toEqual(['isAppChatbotConfig', 'isDefault', 'model', 'name', 'provider', 'toolChoice', 'value']);
+    };
+    expect(glm.apiKeyPreview).toBe('…3957');
+    assertProjection(list);
+
+    // Mutate the actual projection, and prove each control applied before asking the same guards to reject it.
+    for (const [field, value] of [['name', KEY], ['model', glm.apiKeyPreview]] as const) {
+      const leaked = structuredClone(list);
+      leaked[2][field] = value;
+      expect(leaked[2][field]).toBe(value);
+      expect(() => assertProjection(leaked), `credential value in ${field}`).toThrow();
+    }
+    const extraField = structuredClone(list);
+    extraField[2].apiKeyPreview = null; // no marker in the value: only the exact shape guard catches this
+    expect(Object.hasOwn(extraField[2], 'apiKeyPreview')).toBe(true);
+    expect(() => assertProjection(extraField), 'forbidden credential field').toThrow();
   });
 
   it('a non-member gets exactly the answer a missing App gets', async () => {
