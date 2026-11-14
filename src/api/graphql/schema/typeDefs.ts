@@ -6379,6 +6379,17 @@ export const typeDefs = `#graphql
     selfIssued: Boolean!
   }
 
+  type SecretReadClient {
+    clientId: ID!
+    grantId: ID!
+    secretId: ID!
+    secretName: String!
+    selfIssued: Boolean!
+    "SECRET_DELETED | PROTECTED once the client has ended, else null."
+    endReason: String
+    createdAt: DateTime!
+  }
+
   type SecretRevealed {
     secretName: String!
     "The current value as JSON text."
@@ -11502,6 +11513,11 @@ export const typeDefs = `#graphql
     An App key, a run, an impersonated session and a worker session get an empty page, never an error. limit 0 returns the count only.
     """
     myGrants(limit: Int, offset: Int): GrantsPage!
+    """
+    The read clients the caller issued or holds (hrn:node:hadronmemory.com:specs:cor:sec:060): a client id is shown only to its issuer and
+    its holder. Empty for an App key, a run and an impersonation. Revoke one with revokeGrant on its grantId.
+    """
+    mySecretReadClients(limit: Int, offset: Int): [SecretReadClient!]!
     """
     #3711 (hrn:node:hadronmemory.com:specs:cor:acl:140:05, ruling 0253 item 4): every grant of one App, in every state (pending, active, expired, spent, revoked, holder departed), newest first, for whoever manages the App as a person. It shows the whole record, including who revoked a grant, when its holder went and each signature's signer and passkey label, never a credential id or public key. Anyone else (a member who does not manage, an outsider, a worker session, an App key, a run, an impersonated session) and an unknown App get an empty page, never an error. limit 0 returns the count only.
     """

@@ -76,4 +76,15 @@ describe('#3998 revealSecret', () => {
     expect(await code(reveal(workerId))).toBe('SECRET_DELETED');
     expect((await db.secretReadClient.findUniqueOrThrow({ where: { id: clientId } })).endReason).toBe('SECRET_DELETED');
   });
+
+  it('mySecretReadClients: the issuer and the bound holder see the client; an outsider and an impersonation see none', async () => {
+    const mine: any = await resolvers.Query.mySecretReadClients({}, {}, ctxOf(ownerId));
+    expect(mine).toHaveLength(1);
+    expect(mine[0]).toMatchObject({ clientId, grantId, secretName: 'tok', selfIssued: false });
+    const held: any = await asWorker(workerId, () => resolvers.Query.mySecretReadClients({}, {}, ctxOf(ownerId)));
+    expect(held).toHaveLength(1);
+    const outsider = (await db.user.create({ data: { email: `${generateId()}@s3.test` } })).id;
+    expect(await resolvers.Query.mySecretReadClients({}, {}, ctxOf(outsider))).toEqual([]);
+    expect(await resolvers.Query.mySecretReadClients({}, {}, { ...ctxOf(ownerId), impersonation: { by: 'x' } } as never)).toEqual([]);
+  });
 });

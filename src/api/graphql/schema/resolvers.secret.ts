@@ -44,6 +44,7 @@ import { forbiddenError } from '../../../lib/refusals.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { boundWorkerId } from '../../../lib/bootPrompt.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AmbiguousLegacyUrnError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
@@ -566,6 +567,19 @@ async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) 
 }
 
 export const secretQueries = {
+  mySecretReadClients: async (_: unknown, args: { limit?: number | null; offset?: number | null }, ctx: Context) => {
+    const workerId = boundWorkerId();
+    if (!ctx.userId || ctx.impersonation || isRunPrincipal(ctx)) return [];
+    await admitOperationRate(ctx, ctx.db, 'OTHER_READS', appRateIdentity(ctx));
+    const take = clampListTake(args.limit);
+    if (take === 0) return [];
+    const rows = await ctx.db.secretReadClient.findMany({
+      where: { OR: [{ issuerUserId: ctx.userId }, { grant: { userId: ctx.userId } }, ...(workerId ? [{ grant: { workerId } }] : [])] },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take, skip: Math.max(0, args.offset ?? 0),
+    });
+    return rows.map((r) => ({ clientId: r.id, grantId: r.grantId, secretId: r.secretId, secretName: r.secretName, selfIssued: r.selfIssued, endReason: r.endReason, createdAt: r.createdAt }));
+  },
+
   /**
    * Fetch one secret (inspectable half only). Null for missing AND for
    * not-entitled — indistinguishable by design.
