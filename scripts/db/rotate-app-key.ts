@@ -3,7 +3,11 @@
  * `SECRET_ROOT_KEY`. Ops-script only in v1 (FIT delta 1, option a; Victor under ruling 0265): there is no GraphQL,
  * CLI or MCP surface.
  *
- *   DATABASE_URL=<owner url> SECRET_ROOT_KEY=<from the secret store> pnpm tsx scripts/db/rotate-app-key.ts --app <appId>
+ *   DATABASE_URL=<owner url> SECRET_ROOT_KEY=<from the secret store> pnpm tsx scripts/db/rotate-app-key.ts --app <appId> [--reencrypt]
+ *
+ * `--reencrypt` (the compromise runbook) also re-encrypts every version of the App under the new key, in the SAME
+ * transaction as the rotation, so either both happen or neither does. Without it, old versions stay under their own
+ * (retired) key until a later run with the flag. The output carries counts and ids only, never a value.
  *
  * New versions are written under n+1 at once; versions under older keys stay readable (a retired key still
  * unwraps). The root comes from the environment the server itself reads, never argv, and must be the recorded
@@ -15,7 +19,7 @@
 import { pathToFileURL } from 'node:url';
 import { PrismaClient } from '../../src/generated/prisma/index.js';
 import { SecretKeyUnavailableError } from '../../src/lib/secrets/appKeys.js';
-import { rotateAppKey } from '../../src/lib/secrets/rotation.js';
+import { reencryptAppSecretVersions, rotateAppKey } from '../../src/lib/secrets/rotation.js';
 
 const TAG = 'db.secret_app_key_rotate';
 
@@ -25,8 +29,9 @@ export interface RotateToolIo {
 }
 
 export async function main(argv: readonly string[], io: RotateToolIo): Promise<number> {
-  if (argv.length !== 2 || argv[0] !== '--app' || !argv[1] || argv[1].startsWith('--')) {
-    io.log(`${TAG}.usage: --app <appId>`);
+  const reencrypt = argv.length === 3 && argv[2] === '--reencrypt';
+  if ((argv.length !== 2 && !reencrypt) || argv[0] !== '--app' || !argv[1] || argv[1].startsWith('--')) {
+    io.log(`${TAG}.usage: --app <appId> [--reencrypt]`);
     return 2;
   }
   const appId = argv[1];
@@ -36,8 +41,12 @@ export async function main(argv: readonly string[], io: RotateToolIo): Promise<n
   }
   const db = new PrismaClient({ datasourceUrl: io.env.DATABASE_URL });
   try {
-    const handle = await db.$transaction((tx) => rotateAppKey(tx, appId));
-    io.log(`${TAG} ok app=${appId} key_version=${handle.keyVersion}`);
+    // A large App's re-encrypt can outlast Prisma's 5 s default; the run is an attended ops step.
+    const { handle, moved } = await db.$transaction(async (tx) => {
+      const h = await rotateAppKey(tx, appId);
+      return { handle: h, moved: reencrypt ? await reencryptAppSecretVersions(tx, appId) : null };
+    }, { timeout: 10 * 60 * 1000, maxWait: 60 * 1000 });
+    io.log(`${TAG} ok app=${appId} key_version=${handle.keyVersion}${moved === null ? '' : ` reencrypted=${moved}`}`);
     handle.encryptionKey.fill(0);
     handle.fingerprintKey.fill(0);
     return 0;

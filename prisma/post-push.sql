@@ -815,7 +815,7 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 \ir secret-app-keys-invariants.sql
 
 -- #4003 (S8 of #3991): the secrets root's key-check value. One source, shared verbatim with migration
--- 20261113160000_secret_root_check.
+-- 20261114160000_secret_root_check.
 \ir secret-rotation-invariants.sql
 
 -- #1885: an Agent extends at most one base Agent; no cycles, at most 4 in a

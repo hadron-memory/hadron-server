@@ -96,6 +96,7 @@ import { handleMcpRequest, handleMcpDelete, startMcpTransportSweepLoop } from '.
 import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories.js';
 import { startPasskeyCeremonySweepLoop } from './jobs/sweepPasskeyCeremonies.js';
 import { startMergeConsentSweepLoop } from './jobs/sweepMergeConsents.js';
+import { secretSweepDisabledReason, startSecretSweepLoop } from './jobs/secretSweep.js';
 import { startGitMirrorObligationSweepLoop } from './jobs/sweepGitMirrorObligations.js';
 import { startOauthClientGcLoop } from './jobs/gcOauthClients.js';
 import { startAssetJanitorLoop } from './jobs/janitorAssets.js';
@@ -1933,6 +1934,14 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
 
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_MERGE_CONSENT_SWEEP !== 'true') {
     startMergeConsentSweepLoop(db);
+  }
+
+  // #4003 (S8 of #3991) — App secret retention: superseded versions past SECRET_VERSION_RETENTION_DAYS or the
+  // kept-versions cap, and events a year after their App is gone. Hourly. A disabled sweep is logged (plan #3991).
+  {
+    const off = secretSweepDisabledReason();
+    if (off === null) startSecretSweepLoop(db);
+    else if (off !== 'NODE_ENV=test') console.warn(`secret_sweep.disabled reason=${off}`);
   }
 
   // #3122: transient passkey/signing ceremonies; independent of feature flags so old rows still retire.

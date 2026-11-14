@@ -42,7 +42,7 @@ const purgeEvents = (secretId: string) =>
   db.secretEvent.findMany({ where: { secretId, kind: 'PURGE' }, orderBy: { versionNo: 'asc' } });
 /** Back-date a version's supersession (no guard on that column). */
 const supersededDaysAgo = (secretId: string, versionNo: number, days: number) =>
-  db.$executeRaw`UPDATE secret_versions SET superseded_at = (clock_timestamp() AT TIME ZONE 'UTC') - make_interval(days => ${days})
+  db.$executeRaw`UPDATE secret_versions SET superseded_at = (clock_timestamp() AT TIME ZONE 'UTC') - make_interval(days => ${days}::int)
     WHERE secret_id = ${secretId} AND version_no = ${versionNo}`;
 /** Decrypt one stored version under its own App key version and AAD. */
 const decryptVersion = async (secretId: string, versionNo: number): Promise<unknown> => {
@@ -57,7 +57,7 @@ const decryptVersion = async (secretId: string, versionNo: number): Promise<unkn
 const tombstoneDaysAgo = (ownerIdArg: string, days: number) =>
   db.$transaction([
     db.$executeRawUnsafe('ALTER TABLE secret_owner_tombstones DISABLE TRIGGER secret_owner_tombstone_guard'),
-    db.$executeRaw`UPDATE secret_owner_tombstones SET deleted_at = (clock_timestamp() AT TIME ZONE 'UTC') - make_interval(days => ${days})
+    db.$executeRaw`UPDATE secret_owner_tombstones SET deleted_at = (clock_timestamp() AT TIME ZONE 'UTC') - make_interval(days => ${days}::int)
       WHERE owner_type = 'app' AND owner_id = ${ownerIdArg}`,
     db.$executeRawUnsafe('ALTER TABLE secret_owner_tombstones ENABLE TRIGGER secret_owner_tombstone_guard'),
   ]);

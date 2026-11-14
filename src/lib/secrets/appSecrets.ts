@@ -21,7 +21,8 @@ export const MAX_SECRETS_PER_APP = 500;
 /** A secret keeps at most this many versions; the oldest SUPERSEDED go first (cor:sec:010:03). The current one never goes. */
 export const MAX_SECRET_VERSIONS = 50;
 
-export type SecretEventKind = 'STORE' | 'VERSION' | 'METADATA' | 'DELETE';
+/** `PURGE` (#4003, S8): a superseded version deleted by retention or the kept-versions cap; one event per version. */
+export type SecretEventKind = 'STORE' | 'VERSION' | 'METADATA' | 'DELETE' | 'PURGE';
 
 /** Who acted, as plain ids (no foreign keys), the way the grant tables record it. */
 export interface SecretActor {
@@ -99,9 +100,17 @@ export async function addAppSecretVersion(
     await tx.$executeRaw`UPDATE secret_versions SET superseded_at = (clock_timestamp() AT TIME ZONE 'UTC')
       WHERE secret_id = ${secret.id} AND version_no < ${versionNo} AND superseded_at IS NULL`;
   }
-  // Retention by count: the newest MAX versions stay; older superseded ones go (never the current one).
-  await tx.$executeRaw`DELETE FROM secret_versions WHERE secret_id = ${secret.id} AND superseded_at IS NOT NULL
-    AND version_no <= ${versionNo - MAX_SECRET_VERSIONS}`;
+  // Retention by count: the newest MAX versions stay; older superseded ones go (never the current one). Each one
+  // dropped writes a PURGE event (#4003) carrying the actor whose store pushed it out.
+  const dropped = await tx.$queryRaw<Array<{ version_no: number }>>`DELETE FROM secret_versions
+    WHERE secret_id = ${secret.id} AND superseded_at IS NOT NULL AND version_no <= ${versionNo - MAX_SECRET_VERSIONS}
+    RETURNING version_no`;
+  if (dropped.length > 0) {
+    const { name } = await tx.secret.findUniqueOrThrow({ where: { id: secret.id }, select: { name: true } });
+    for (const d of dropped.sort((a, b) => a.version_no - b.version_no)) {
+      await recordSecretEvent(tx, { ownerId: secret.ownerId, secretId: secret.id, secretName: name, kind: 'PURGE', versionNo: d.version_no, actor });
+    }
+  }
   return versionNo;
 }
 
