@@ -11,17 +11,24 @@ import { tmpdir } from 'node:os';
 
 /** The PostgreSQL server binaries directory, or null when none is installed. */
 export function pgBinDir(): string | null {
-  for (const v of ['17', '16', '18']) {
+  // #4118: pin the requested CI matrix major; never claim a PG16 run using PG17.
+  const selected = process.env.PRIVATE_CLUSTER_PG_VERSION;
+  if (selected && !['16', '17', '18'].includes(selected)) throw new Error('unsupported private cluster PostgreSQL major');
+  for (const v of selected ? [selected] : ['17', '16', '18']) {
     const dir = `/usr/lib/postgresql/${v}/bin`;
     // The Hadron schema needs pgvector in the SAME installation: a runner with server binaries but no vector
     // extension for them (GitHub's ubuntu image, whose pgvector lives in the service container) cannot host the suite.
     if (
       existsSync(join(dir, 'initdb')) &&
+      existsSync(join(dir, 'pg_ctl')) &&
       existsSync(join(dir, 'pg_resetwal')) &&
       existsSync(`/usr/share/postgresql/${v}/extension/vector.control`)
     ) {
       return dir;
     }
+  }
+  if (process.env.REQUIRE_PRIVATE_CLUSTER === '1') {
+    throw new Error('private cluster is required: install PostgreSQL server binaries and matching pgvector');
   }
   return null;
 }

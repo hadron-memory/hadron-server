@@ -62,6 +62,7 @@ import {
   type CommentNodeData,
   type CommentOp,
 } from '../../../lib/comments/index.js';
+import { assertStorableText } from '../../../lib/unstorableTextInput.js';
 import { openThreadCounts, viewerOpenThreads, type CommentCounts } from '../../../lib/comments/summary.js';
 import { deleteThreadsInTx } from '../../../lib/comments/lifecycle.js';
 
@@ -872,6 +873,8 @@ export const commentMutations = {
     const body = validateBody(args.body);
     const quote = validateQuote(args.quote);
     const { authorKey, node: target } = await prepareWrite(ctx, args.targetRef, 'target', 'write');
+    // #4106: caller text a NUL or lone surrogate would make Postgres reject (22021) is refused typed, after the gates.
+    assertStorableText({ body, quote });
     let view: CommentView;
     try {
       view = await commentTx(ctx, target.memoryId, 'write', async (tx, txCtx) => {
@@ -928,6 +931,7 @@ export const commentMutations = {
   replyToComment: async (_: unknown, args: { commentRef: string; body: string }, ctx: Context): Promise<CommentView> => {
     const body = validateBody(args.body);
     const { authorKey, node, key } = await prepareWrite(ctx, args.commentRef, 'comment', 'write');
+    assertStorableText({ body }); // #4106
     const id = await commentTx(ctx, node.memoryId, 'write', async (tx, txCtx) => {
       const { root } = await lockInThread(tx, node.id, node.memoryId);
       refuseStub(root.commentMeta!);
@@ -954,6 +958,7 @@ export const commentMutations = {
     return changeComment(ctx, args.commentRef, 'write', 'edit', (row, actorKey) => {
       requireAuthor(row.commentMeta!, actorKey);
       refuseStub(row.commentMeta!);
+      assertStorableText({ body, quote }); // #4106: before the patch is applied
       return { patch: { content: body, data: quote !== undefined ? { quote } : {} }, meta: {} };
     }, args.expectedRevision);
   },
