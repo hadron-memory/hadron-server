@@ -116,6 +116,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.registerRoleCandidates", // #2608: limit default 20, cap 200 (clampListTake); below the common 100, so omission overestimates.
   "Query.resendSenders",
   "Query.scopes",
+  "Query.secretEvents", // #3997: limit default 20, cap 200 (clampListTake); below the common 100, so omission overestimates.
   "Query.secrets",
   "Query.sessions",
   "Query.sessionsPage",
