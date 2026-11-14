@@ -170,21 +170,32 @@ describe('endGrant: a withdrawal is its own fact and event; the first end stands
 
 describe('the guard trigger and the events CHECK (A24)', () => {
   const sql = (q: string, ...p: unknown[]) => db.$executeRawUnsafe(q, ...p);
+  // One statement-wide instant: both columns read the same value, which clock_timestamp() would not give.
+  const STMT = "(statement_timestamp() AT TIME ZONE 'UTC')";
+  const refused = (q: string, ...p: unknown[]) => expect(sql(q, ...p)).rejects.toThrow(/grants are append-only/);
+  const withdrawnOf = async (id: string) => (await db.$queryRawUnsafe<Array<{ withdrawn_at: Date | null; revoked_at: Date | null }>>('SELECT withdrawn_at, revoked_at FROM grants WHERE id = $1', id))[0];
   it('withdrawn_at is set once, equal to revoked_at, on a never-activated row, in the revoke statement', async () => {
     const id = await insertGrant(w);
-    await expect(sql(`UPDATE grants SET withdrawn_at = ${DB_NOW} WHERE id = $1`, id)).rejects.toThrow(); // not revoked
-    await expect(sql(`UPDATE grants SET revoked_at = ${DB_NOW}, revoked_by = $2, withdrawn_at = ${DB_NOW} + interval '1 second' WHERE id = $1`, id, w.userId)).rejects.toThrow(); // differs
-    await sql(`UPDATE grants SET revoked_at = ${DB_NOW}, revoked_by = $2, withdrawn_at = revoked_at WHERE id = $1`, id, w.userId).catch(() => undefined);
+    await refused(`UPDATE grants SET withdrawn_at = ${STMT} WHERE id = $1`, id); // not revoked
+    await refused(`UPDATE grants SET revoked_at = ${STMT}, revoked_by = $2, withdrawn_at = ${STMT} + interval '1 second' WHERE id = $1`, id, w.userId); // differs
+    // the legal path must succeed (no swallowed failure) and leave the two stamps equal
+    await sql(`UPDATE grants SET revoked_at = ${STMT}, revoked_by = $2, withdrawn_at = ${STMT} WHERE id = $1`, id, w.userId);
+    const row = await withdrawnOf(id);
+    expect(row.withdrawn_at).not.toBeNull();
+    expect(row.withdrawn_at!.getTime()).toBe(row.revoked_at!.getTime());
     const ok = await insertGrant(w);
-    await sql(`UPDATE grants SET revoked_at = (clock_timestamp() AT TIME ZONE 'UTC'), revoked_by = $2 WHERE id = $1`, ok, w.userId);
-    await expect(sql(`UPDATE grants SET withdrawn_at = revoked_at WHERE id = $1`, ok)).rejects.toThrow(); // marker after the revoke stamp
+    await sql(`UPDATE grants SET revoked_at = ${STMT}, revoked_by = $2 WHERE id = $1`, ok, w.userId);
+    await refused(`UPDATE grants SET withdrawn_at = revoked_at WHERE id = $1`, ok); // marker after the revoke stamp
   });
   it('not on an activated row, never cleared, never moved, never at INSERT', async () => {
     const act = await insertGrantUnguarded(w, { activated_at: PAST });
-    await expect(sql(`UPDATE grants SET revoked_at = ${DB_NOW}, revoked_by = $2, withdrawn_at = ${DB_NOW} WHERE id = $1`, act, w.userId)).rejects.toThrow();
+    await refused(`UPDATE grants SET revoked_at = ${STMT}, revoked_by = $2, withdrawn_at = ${STMT} WHERE id = $1`, act, w.userId);
     const wd = await insertGrant(w);
-    await sql(`UPDATE grants SET revoked_at = (clock_timestamp() AT TIME ZONE 'UTC'), revoked_by = $2, withdrawn_at = (clock_timestamp() AT TIME ZONE 'UTC') WHERE id = $1`, wd, w.userId).catch(() => undefined);
-    await expect(insertGrant(w, { revoked_at: raw(DB_NOW), revoked_by: w.userId, withdrawn_at: raw(DB_NOW) })).rejects.toThrow();
+    await sql(`UPDATE grants SET revoked_at = ${STMT}, revoked_by = $2, withdrawn_at = ${STMT} WHERE id = $1`, wd, w.userId);
+    expect((await withdrawnOf(wd)).withdrawn_at).not.toBeNull(); // setup really withdrew it
+    await refused(`UPDATE grants SET withdrawn_at = NULL WHERE id = $1`, wd); // cleared
+    await refused(`UPDATE grants SET withdrawn_at = withdrawn_at + interval '1 second' WHERE id = $1`, wd); // moved
+    await expect(insertGrant(w, { revoked_at: raw(DB_NOW), revoked_by: w.userId, withdrawn_at: raw(DB_NOW) })).rejects.toThrow(); // at INSERT
   });
   it('WITHDRAW is an accepted event action; others are still refused', async () => {
     const id = await insertGrant(w);
