@@ -77,6 +77,11 @@ function validate(list: readonly ActionDefinition[]): void {
     for (const p of placeholders) {
       if (p !== 'app' && !names.has(p)) throw new Error(`action ${a.name}: summaryTemplate names unknown placeholder {${p}}`);
     }
+    // The signer reads the summary, and the signature covers every value: a parameter the template never names would be a term
+    // the person signs without having been shown it.
+    for (const n of names) {
+      if (!placeholders.includes(n)) throw new Error(`action ${a.name}: summaryTemplate never names the parameter {${n}}`);
+    }
   }
 }
 
