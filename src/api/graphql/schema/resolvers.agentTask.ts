@@ -1149,9 +1149,9 @@ export async function inTaskWriteTx<T>(
     /** #3243: fill and lock the whole live candidate pool at the existing graph-before-worker point. */
     lockWorkerPool?: Set<string>;
     /**
-     * #4167 (hrn:node:hadronmemory.com:specs:cor:acl:140:05): the App anchor and the in-transaction re-check admit an
-     * UNINSTALLED (not deleted) App — only `revokeGrant`, whose manager arm the ruling of 2026-11-14 widens. A deleted
-     * App still refuses everywhere, and every other task write keeps the liveness check.
+     * #4167: the App anchor and the in-transaction re-check admit an UNINSTALLED (not deleted) App — only
+     * `revokeGrant`, whose manager arm the ruling widens. A deleted App still refuses everywhere, and every
+     * other task write keeps the liveness check.
      */
     allowUninstalledApp?: boolean;
   } = {},
@@ -1179,6 +1179,8 @@ export async function inTaskWriteTx<T>(
           const again = await resolveTaskActor(txCtx, fresh);
           if (!again || !sameActor(again, actor)) throw new TaskGateRefused();
         }
+        // No deleted clause here by design: the anchor liveness check above carries the deleted exclusion for
+        // every writer, opted-in or not; this re-check only relaxes the UNINSTALLED refusal, never that one.
         requireWritable(txCtx, fresh, { allowUninstalled: options.allowUninstalledApp });
       },
       (tx, txCtx) => {

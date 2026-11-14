@@ -105,7 +105,9 @@ export const grantManageMutations = {
     // (hrn:node:hadronmemory.com:specs:cor:acl:140:05, Holger 2026-11-14) is the one exception: an UNINSTALLED (not deleted) App no
     // longer refuses this door — whoever manages the App may end its grants — and the judge below scopes that to the manager arm alone.
     if (!app || app.deletedAt || !actor || isRunPrincipal(ctx)) throw notManager();
-    try { requireWritable(ctx, app, { allowUninstalled: true }); } catch (e) { if (e instanceof GraphQLError) throw notManager(); throw e; }
+    try {
+      requireWritable(ctx, app, { allowUninstalled: true });
+    } catch (e) { if (e instanceof GraphQLError) throw notManager(); throw e; }
     try {
       return await inTaskWriteTx(ctx, app, actor, notManager, async (tx, txCtx, fresh) => {
         // The caller's session row is fenced before the judgement, so a session end cannot commit between it and the write.
@@ -117,9 +119,9 @@ export const grantManageMutations = {
         let manager = false;
         const admission: ActAdmission = await requireInstructedAct(txCtx, fresh.id, instruction, async () => {
           manager = await managesApp(txCtx, fresh);
-          // #4167: while the App is UNINSTALLED (not deleted) only the manager arm is admitted — the issuer and
-          // instructed-worker arms keep their installed-App refusal, so the door's one widening stays the ruling's.
-          if (fresh.uninstalledAt && !manager) throw notManager();
+          // #4167: while the App is UNINSTALLED (not deleted) only the manager arm is admitted — a false return
+          // (issuer, instructed-worker, non-manager alike) is refused by requireInstructedAct as notManager.
+          if (fresh.uninstalledAt) return manager;
           return manager || (issuerHint !== null && issuerHint === txCtx.userId && await issuerStillMember(txCtx, fresh, txCtx.userId));
         }, readActInstruction, notManager);
         const ender: GrantEnder = {
@@ -143,7 +145,9 @@ export const grantManageMutations = {
       }, { allowUninstalledApp: true, ...(actor.kind === 'worker' ? { lockWorkerIds: [actor.workerId] } : {}) });
     } catch (e) {
       if (e instanceof GrantManageRefusal) throw manageRefusal(e.code === 'GRANT_NOT_FOUND' ? new GrantManageRefusal('GRANT_NOT_MANAGER') : e);
-      // An App uninstalled between the read and the lock reads as the same refusal (the task door's own code would tell a non-manager).
+      // Reachable, not stale: inTaskWriteTx's own catch rewrites a mid-tx gate refusal (e.g. a membership that
+      // lapsed between the pre-tx and in-tx actor resolves) to APP_UNINSTALLED while the App is uninstalled.
+      // This door answers that as the non-manager does, so no refusal ever names the App's install state.
       if (e instanceof GraphQLError && e.extensions?.code === 'APP_UNINSTALLED') throw notManager();
       throw e;
     }

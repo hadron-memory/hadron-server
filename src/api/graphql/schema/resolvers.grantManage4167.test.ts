@@ -31,13 +31,13 @@ beforeAll(async () => {
   await new Promise<void>((r) => http.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
 });
-// Teardown: destroy keep-alive sockets, then close — BOUNDED, because this server's close callback is
-// observed to hang even with zero connections on this runner (a teardown flake, not a code defect;
-// the fork is torn down right after regardless, and the DB cleanup below still runs).
+// Teardown: destroy keep-alive sockets, then close. The race stays BOUNDED as a safety net, but with
+// `() => r()` the close callback actually resolves the promise — the earlier `() => r` form returned the
+// resolver instead of calling it, so every run silently waited out the full 2 s (misread as a runner flake).
 afterAll(async () => {
   http.closeIdleConnections?.();
   http.closeAllConnections?.();
-  await Promise.race([new Promise<void>((r) => http.close(() => r)), new Promise<void>((r) => setTimeout(r, 2000))]);
+  await Promise.race([new Promise<void>((r) => http.close(() => r())), new Promise<void>((r) => setTimeout(r, 2000))]);
   await cleanDb(db);
   await dropTestActions();
   vi.unstubAllEnvs();
@@ -49,16 +49,18 @@ let pubNode: string; // #4067: a node the requester can read
 let managerId: string; let memberId: string;
 let managerKey: string; let memberKey: string;
 let otherWorkerId: string;
+/** Worker sessions for the instructed-worker arm: one held by the member (non-manager), one by the manager. */
+let memberWorkerSession: string; let managerWorkerSession: string; let managerWorkerId: string;
 
 async function keyFor(userId: string): Promise<string> {
   const k = `${USER_API_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
   await db.userApiKey.create({ data: { userId, oauthScopes: [], keyHash: hashUserApiKey(k), keyPreview: k.slice(-4) } });
   return k;
 }
-async function post(key: string, query: string, variables: Record<string, unknown> = {}): Promise<any> {
+async function post(key: string, query: string, variables: Record<string, unknown> = {}, session?: string): Promise<any> {
   const res = await fetch(`${base}/graphql`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${key}`, ...(session ? { 'x-hadron-session': session } : {}) },
     body: JSON.stringify({ query, variables }),
   });
   return res.json();
@@ -67,6 +69,7 @@ const code = (r: any): string | undefined => r.errors?.[0]?.extensions?.code;
 const msg = (r: any): string | undefined => r.errors?.[0]?.message;
 const GRANT = 'id revokedAt revokedByUserId allows';
 const REVOKE = `mutation($r:ID!){revokeGrant(ref:$r){${GRANT}}}`;
+const REVOKE_INS = `mutation($r:ID!,$ins:ActInstructionInput){revokeGrant(ref:$r,instruction:$ins){${GRANT}}}`;
 const WITHDRAW = `mutation($r:ID!){withdrawGrant(ref:$r){${GRANT}}}`;
 const entry = () => ({ entryNode: pubNode });
 const grantRows = async () => db.$queryRawUnsafe<any[]>('SELECT * FROM grants ORDER BY created_at');
@@ -97,10 +100,17 @@ beforeEach(async () => {
   await db.appAgent.create({ data: { appId: w.appId, agentId: w.agentId } });
   [managerKey, memberKey] = await Promise.all([keyFor(managerId), keyFor(memberId)]);
   otherWorkerId = (await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: w.appId, agentId: w.agentId, name: 'p', slug: `p-${generateId().slice(0, 6)}` } })).id;
+  const heldWorkerSession = async (holder: string, name: string): Promise<{ workerId: string; sessionId: string }> => {
+    const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: w.appId, agentId: w.agentId, name, slug: `${name}-${generateId().slice(0, 6)}`, heldByUserId: holder } });
+    const session = await db.session.create({ data: { id: generateId(), appId: w.appId, userId: holder, workerId: worker.id, agentId: w.agentId } });
+    return { workerId: worker.id, sessionId: session.id };
+  };
+  memberWorkerSession = (await heldWorkerSession(memberId, 'mw')).sessionId;
+  ({ workerId: managerWorkerId, sessionId: managerWorkerSession } = await heldWorkerSession(managerId, 'gw'));
 });
 
 describe('#4167: whoever manages the App revokes also while it is uninstalled (cor:acl:140:05)', () => {
-  it('RED (the ruling): a manager revokes an ACTIVE grant of an uninstalled App — stamped, ONE REVOKE event naming the person, no worker or session', async () => {
+  it('the ruling: a manager revokes an ACTIVE grant of an uninstalled App — stamped, ONE REVOKE event naming the person, no worker or session', async () => {
     const id = await active(managerId);
     await uninstall();
     const r = await post(managerKey, REVOKE, { r: id });
@@ -116,7 +126,7 @@ describe('#4167: whoever manages the App revokes also while it is uninstalled (c
     expect(ev[0]).toMatchObject({ actor_user_id: managerId, worker_id: null, session_id: null });
   });
 
-  it('RED (S10): the end survives a reinstall — still revoked, still exactly one event, and a second revoke changes nothing', async () => {
+  it('the end survives a reinstall — still revoked, still exactly one event, and a second revoke changes nothing', async () => {
     const id = await active(managerId);
     await uninstall();
     expect((await post(managerKey, REVOKE, { r: id })).errors).toBeUndefined();
@@ -190,5 +200,51 @@ describe('#4167: whoever manages the App revokes also while it is uninstalled (c
     await expect(grantManageMutations.revokeGrant(null, { ref: id }, impCtx)).rejects.toMatchObject({ extensions: { code: 'GRANT_NOT_MANAGER' } });
     expect((await grantRows())[0].revoked_at).toBeNull();
     expect(await events(id)).toHaveLength(0);
+  });
+
+  it('positive control for the run/impersonation contexts: the SAME ctx shape minus the marker revokes fine, installed and uninstalled', async () => {
+    const personCtx = { db, userId: managerId, appId: w.appId, organizationId: w.orgId, roles: [] } as never;
+    const installedId = await active(managerId);
+    const ok = await grantManageMutations.revokeGrant(null, { ref: installedId }, personCtx);
+    expect(ok.revokedAt).not.toBeNull();
+    expect(ok.revokedBy).toBe(managerId);
+    const uninstalledId = await active(managerId);
+    await uninstall();
+    const again = await grantManageMutations.revokeGrant(null, { ref: uninstalledId }, personCtx);
+    expect(again.revokedAt).not.toBeNull();
+    expect(await events(uninstalledId)).toHaveLength(1);
+  });
+
+  it('the instructed-worker arm itself works here (positive control): the manager\'s held worker revokes on a valid instruction while INSTALLED — person is the revoker, worker in the event', async () => {
+    const id = await active(managerId);
+    const r = await post(managerKey, REVOKE_INS, { r: id, ins: { kind: 'LIVE_CHAT', ref: 'live-chat-1' } }, managerWorkerSession);
+    expect(r.errors).toBeUndefined();
+    expect(r.data.revokeGrant).toMatchObject({ id, allows: false, revokedByUserId: managerId });
+    const ev = await events(id);
+    expect(ev).toHaveLength(1);
+    expect(ev[0]).toMatchObject({ actor_user_id: managerId, worker_id: managerWorkerId });
+  });
+
+  it('the instructed-worker arm keeps its installed-App refusal while uninstalled: even the MANAGER\'S held worker on a valid instruction is refused, nothing stamped', async () => {
+    const id = await active(managerId);
+    await uninstall();
+    const r = await post(managerKey, REVOKE_INS, { r: id, ins: { kind: 'LIVE_CHAT', ref: 'live-chat-1' } }, managerWorkerSession);
+    expect(code(r)).toBe('GRANT_NOT_MANAGER');
+    expect((await grantRows().then((rows) => rows.find((row) => row.id === id))).revoked_at).toBeNull();
+    expect(await events(id)).toHaveLength(0);
+    expect(await db.agentTeamEvent.count({ where: { type: 'app.credential-act' } })).toBe(0);
+  });
+
+  it('a NON-manager\'s held worker is refused alike while uninstalled — the byte-identical refusal the installed App gives the same session', async () => {
+    const installedId = await active(managerId);
+    const installed = await post(memberKey, REVOKE_INS, { r: installedId, ins: { kind: 'LIVE_CHAT', ref: 'live-chat-1' } }, memberWorkerSession);
+    const uninstalledId = await active(managerId);
+    await uninstall();
+    const uninstalled = await post(memberKey, REVOKE_INS, { r: uninstalledId, ins: { kind: 'LIVE_CHAT', ref: 'live-chat-1' } }, memberWorkerSession);
+    expect(code(installed)).toBe('GRANT_NOT_MANAGER');
+    expect(code(uninstalled)).toBe('GRANT_NOT_MANAGER');
+    expect(msg(uninstalled)).toBe(msg(installed));
+    expect((await grantRows()).every((row) => row.revoked_at === null)).toBe(true);
+    expect(await events(uninstalledId)).toHaveLength(0);
   });
 });
