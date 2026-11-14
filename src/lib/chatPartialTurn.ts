@@ -43,12 +43,17 @@ export function reportPartialTurn(e: unknown): never {
   throw e;
 }
 
-/** #4036 / cor:cht:020:01 (Proposed partial-turn extension): the condition refused routing after earlier legs committed. */
-export function routingRefusedReport(extracted: boolean): {
+/**
+ * #4036 / cor:cht:020:01 (Proposed partial-turn extension): the condition refused routing after earlier legs committed.
+ * #4102 F9: the parameter mirrors the resolver's `extractionPersisted` — true only when the extraction transaction
+ * committed a write. Its null-on-no-write outcome is false here (nothing persisted), and a refused extraction never
+ * reaches this call at all (it throws before routing runs).
+ */
+export function routingRefusedReport(extractionPersisted: boolean): {
   persisted: Array<'ASSISTANT_MESSAGE' | 'MESSAGE_COUNTER' | 'EXTRACTION'>;
   refused: [{ component: 'STAGE_PROGRESSION'; code: 'EDGE_CONDITION_FAILED' }];
   notRun: [];
 } {
-  return { persisted: ['ASSISTANT_MESSAGE', 'MESSAGE_COUNTER', ...(extracted ? ['EXTRACTION' as const] : [])],
+  return { persisted: ['ASSISTANT_MESSAGE', 'MESSAGE_COUNTER', ...(extractionPersisted ? ['EXTRACTION' as const] : [])],
     refused: [{ component: 'STAGE_PROGRESSION', code: 'EDGE_CONDITION_FAILED' }], notRun: [] };
 }
