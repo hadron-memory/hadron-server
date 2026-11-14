@@ -128,8 +128,10 @@ const stagesOf = (node: ScriptNode | null): string[] => {
 const unchanged = (): ChatRoutingResult => ({ stageTransitioned: false, newStageName: null, conversationHandoff: null, conversationCompleted: null, detourReturned: false, routingSkipped: false });
 
 /**
- * Decide one turn using the pinned script supplied by the caller. No database or locks here; the callbacks only read
- * script nodes/evaluate conditions. Rules are first-fires-wins: a rule that resolves (a conversation with a first stage,
+ * Decide one turn using the pinned script supplied by the caller. The decision itself opens no database connection and
+ * takes no locks (#4102 F9); its CALLBACKS may read database layers — `node` reads script nodes and `evaluate` reads
+ * the memory layers behind condition evaluation — so the licensing and pinning gates belong to the caller, before
+ * this runs. Rules are first-fires-wins: a rule that resolves (a conversation with a first stage,
  * or a stage that is in its conversation's `stageOrder`) ends evaluation; one that does not resolve fires nothing, pushes
  * nothing and evaluation goes on (a detour to a conversation with no stages included). Only when the turn completed
  * and no rule fired does the chat return to the most recent active detour goal (Q3/Q5/Q6), else move to the fallback
@@ -137,8 +139,10 @@ const unchanged = (): ChatRoutingResult => ({ stageTransitioned: false, newStage
  */
 export async function decideChatRouting(input: {
   origin: RoutingOrigin;
+  /** The model's raw `next_stage` tool-response value: deliberately `unknown` (arbitrary JSON in), judged only by decideNextStage's runtime validation — never a cast (#4102 F9). */
   nextStage?: unknown;
   stageOrder?: readonly string[] | null;
+  /** The model's raw `goal_reached` tool-response value: deliberately `unknown` (arbitrary JSON in); only the literal boolean `true` completes — cor:cht:030:02 K2, see the strict check below (#4102 F9). */
   goalReached?: unknown;
   rules: readonly ScriptRule[];
   node: (loc: string) => Promise<ScriptNode | null>;
@@ -151,6 +155,8 @@ export async function decideChatRouting(input: {
   const origin = { ...input.origin }, edits: ChatRoutingDecision['edits'] = [], result = unchanged();
   const guards: ChatRoutingDecision['guards'] = [];
   const decision = { origin, edits, guards, result };
+  // Strict on purpose: only the literal boolean `true` completes ('true', 1 and other truthy JSON values must not) —
+  // runtime validation of an unknown JSON input, not a TypeScript assumption (cor:cht:030:02 K2; #4036's suite pins it).
   const completed = input.goalReached === true;
   const conversationLoc = `conversations:${origin.conversationName}`;
   if (completed && origin.conversationName) {
