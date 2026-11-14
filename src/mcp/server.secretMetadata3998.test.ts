@@ -48,6 +48,7 @@ beforeEach(async () => {
 
 describe('#3998 MCP metadata and manager request arm', () => {
   it('walks every registered secret tool result: metadata only, no read/store/use/reveal door', async () => {
+    const inject = await secretMutations.createSecret({}, { ownerType: 'app', ownerRef: appId, name: 'inject-only', kind: 'webfetch-auth', metadata: { urlPrefix: 'https://example.test/api' }, value: { type: 'bearer', token: CANARY } }, context());
     const s = server();
     const names = s.toolNames().filter(n => /secret/i.test(n));
     expect(names.sort()).toEqual(['hadron_get_secret', 'hadron_list_secrets']);
@@ -56,7 +57,8 @@ describe('#3998 MCP metadata and manager request arm', () => {
       noValue(result);
       expect(JSON.stringify(result)).toContain('token');
     }
-    expect(await db.secretEvent.count({ where: { secretId, action: 'REVEAL' } })).toBe(0);
+    noValue(await s.callTool('hadron_get_secret', { ref: inject.id }));
+    expect(await db.secretEvent.count({ where: { secretId, kind: 'REVEAL' } })).toBe(0);
   });
 
   it('returns paged App metadata and conceals org/user scopes and unknown refs', async () => {
