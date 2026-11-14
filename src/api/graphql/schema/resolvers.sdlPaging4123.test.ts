@@ -4,6 +4,8 @@ import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { effectiveRequestState } from '../../../lib/signing/requests.js';
+import { webPollList } from '../../../lib/runner/tools/webPollTools.js';
 import { generateId } from '../../../lib/id.js';
 import { withInheritedNodeProjection } from './resolvers.inheritedNode.js';
 import { withInstallConcealment, INSTALL_CONCEALED } from './installMemory.js';
@@ -88,6 +90,11 @@ it('signing pages filter effective expiry before paging and continue through the
     expect(b.hasMore).toBe(false);
     expect(b.nextCursor).toBeNull();
     expect((await N.signingRequests({ id: nodeId }, { state: 'EXPIRED', first: 5 }, ctx()))).toHaveLength(5);
+    const openIds = ordered.filter(x => !expired.has(x.id)).map(x => x.id);
+    const open = await N.signingRequestsPage({ id: nodeId }, { state: 'OPEN', first: 100 }, ctx());
+    expect(open.items.map((x: any) => x.id)).toEqual(openIds);
+    expect(open.total).toBe(openIds.length);
+    expect(open.hasMore).toBe(false); expect(open.nextCursor).toBeNull();
 });
 it('new signing pages suppress inherited and concealed payloads before the loader runs', async () => {
     const load = vi.fn(async (_parent: unknown, _args: unknown, _ctx: Context) => ({ items: [{ id: 'private-request' }], hasMore: false, nextCursor: null }));
@@ -146,6 +153,8 @@ it('signing keyset does not repeat a row when a newer request is inserted before
     const ordered = await db.signingRequest.findMany({ where: { nodeId }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] });
     const first = await N.signingRequestsPage({ id: nodeId }, { first: 2 }, ctx());
     expect(first.items.map((x: any) => x.id)).toEqual(ordered.slice(0, 2).map(x => x.id));
+    // The insert guard assigns createdAt from the DB clock; wait beyond its millisecond precision.
+    await db.$queryRaw`SELECT pg_sleep(0.002)::text`;
     const inserted = await db.signingRequest.create({ data: input() });
     expect(inserted.createdAt.getTime()).toBeGreaterThan(ordered[0].createdAt.getTime());
     const next = await N.signingRequestsPage({ id: nodeId }, { first: 100, after: first.nextCursor }, ctx());
@@ -164,5 +173,57 @@ it('legacy arrays stay independent of cursor encryption configuration', async ()
     } finally {
         if (key === undefined) delete process.env.HADRON_ENCRYPTION_KEY;
         else process.env.HADRON_ENCRYPTION_KEY = key;
+    }
+});
+
+it('legacy signing reads use one bounded row query per call and no transaction or count', async () => {
+    const findMany = vi.fn(db.signingRequest.findMany.bind(db.signingRequest));
+    const count = vi.fn(() => { throw new Error('legacy must not count'); });
+    const transaction = vi.fn(() => { throw new Error('legacy must not transact'); });
+    const legacyDb = new Proxy(db, { get(target, key) {
+        if (key === '$transaction') return transaction;
+        if (key === 'signingRequest') return { findMany, count };
+        const value = Reflect.get(target, key); return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    for (const state of [undefined, 'OPEN', 'EXPIRED']) {
+        expect(await N.signingRequests({ id: nodeId }, { state, first: 2 }, { ...ctx(), db: legacyDb })).toEqual([]);
+    }
+    expect(findMany).toHaveBeenCalledTimes(3);
+    for (const [query] of findMany.mock.calls) expect(query).toMatchObject({ take: 2 });
+    expect(count).not.toHaveBeenCalled(); expect(transaction).not.toHaveBeenCalled();
+});
+it('canonical signing filters agree with effectiveRequestState for every stored state and the expiry boundary', async () => {
+    const instant = new Date('2026-11-14T12:00:00.000Z');
+    const rows = ['open', 'completed', 'declined', 'expired', 'stale', 'withdrawn'].flatMap(state => [-1, 0, 1].map(delta => ({
+        id: generateId(), nodeId, revision: 1, requesterUserId: userId, approvalHash: 'a'.repeat(64),
+        payloadVersion: 'hadron-signature-v3', state, createdAt: new Date(instant.getTime() - 3600000),
+        expiresAt: new Date(instant.getTime() + delta), endedAt: state === 'open' ? null : new Date(instant.getTime() - 1000),
+    })));
+    // Read-state fixtures only: bypass the one insert lifecycle trigger transactionally, never the shape constraints.
+    // Completed fixtures do not claim a real signature ceremony. Trigger state rolls back on any failure.
+    await db.$transaction(async tx => {
+        await tx.$executeRawUnsafe('ALTER TABLE signing_requests DISABLE TRIGGER signing_request_guard');
+        await tx.signingRequest.createMany({ data: rows });
+        await tx.$executeRawUnsafe('ALTER TABLE signing_requests ENABLE TRIGGER signing_request_guard');
+    });
+    const ordered = await db.signingRequest.findMany({ where: { nodeId }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] });
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(instant);
+    for (const state of ['open', 'completed', 'declined', 'expired', 'stale', 'withdrawn']) {
+        const expected = ordered.filter(row => effectiveRequestState(row, instant) === state).map(row => row.id);
+        const page = await N.signingRequestsPage({ id: nodeId }, { state: state.toUpperCase(), first: 100 }, ctx());
+        expect(page.items.map((row: any) => row.id), state).toEqual(expected);
+        expect(page.total, state).toBe(expected.length);
+    }
+});
+it('canonical poll pages and run-tool report the existing missing cursor-key configuration error', async () => {
+    await pollRows(['a', 'b']); jobs(['a', 'b']);
+    const run = await db.appRun.findUniqueOrThrow({ where: { id: runId } });
+    const original = process.env.HADRON_ENCRYPTION_KEY;
+    delete process.env.HADRON_ENCRYPTION_KEY;
+    try {
+        await expect(Q.webPollsPage(null, { orgRef: orgId, first: 1 }, ctx())).rejects.toThrow('HADRON_ENCRYPTION_KEY env var is required');
+        await expect(webPollList.execute({ db, run, principal: ctx(), log: () => {} }, { first: 1 })).rejects.toThrow('HADRON_ENCRYPTION_KEY env var is required');
+    } finally {
+        if (original === undefined) delete process.env.HADRON_ENCRYPTION_KEY; else process.env.HADRON_ENCRYPTION_KEY = original;
     }
 });
