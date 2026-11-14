@@ -587,6 +587,16 @@ describe('#4160 preventive: the shared guard deadline', () => {
     expect(r.log).toContain('guard: T_HOOK clamped to 44');
   });
 
+  it('P4 the transcript step is capped by the deadline, not only by its own budget: a 5 s transcript budget ends at the presence region (M2)', async () => {
+    const s = await stage();
+    knob(s, 'ignore-term-jq', '');
+    const r = fire(s, { scaled: true, env: { ...KG, WORKER_AUTO_SHED_T_HOOK: '3.5', WORKER_AUTO_SHED_T_TRANSCRIPT: '5' } });
+    expect(r.status, r.log).toBe(0);
+    expect(r.log).toMatch(/transcript read timed out/);
+    expect(s.gone()).toBe(false);
+    expect(r.ms, `P4 wall ${r.ms} ms: the step ran on its own 5 s budget`).toBeLessThan(3500);
+  });
+
   it('K1 a BACKWARD clock step cannot extend the deadline: elapsed never decreases', async () => {
     const s = await stage();
     setUptime(s, '1000.00 0.00\n');
