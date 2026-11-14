@@ -126,6 +126,46 @@ describe('updateAgent first attach refuses a private or personal source (G-J)', 
   }
 });
 
+describe('updateAgent: the locked re-check refuses too (a class that turned private after the pre-lock read)', () => {
+  it('I: the pre-lock read answers a stale non-private class; the deciding transaction still refuses and applies nothing', async () => {
+    const src = await source('private', 'org');
+    const before = await snapshot(src.id);
+    const agent = await brainlessAgent('org', 'C');
+    let stale = 0;
+    const memoryDelegate = new Proxy(db.memory, {
+      get(target, prop, receiver) {
+        if (prop === 'findUnique') {
+          return async (args: any) => {
+            const row = await (target as any).findUnique(args);
+            if (stale === 0 && row?.id === src.id && !args?.select) {
+              stale++;
+              return { ...row, class: 'knowledge' };
+            }
+            return row;
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    const staleDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === 'memory') return memoryDelegate;
+        const v = Reflect.get(target, prop, receiver);
+        return typeof v === 'function' ? v.bind(target) : v;
+      },
+    });
+    const ctx = { db: staleDb as typeof db, userId: owner.id, roles: ['READER'] } as Context;
+    const err = await refusal(M.updateAgent({}, { ref: agent.id, systemMemoryId: src.id, description: 'must not land' }, ctx));
+    expect(stale).toBe(1);
+    expect(err.extensions?.code).toBe('BAD_USER_INPUT');
+    expect(err.message).toContain('private');
+    expect(await snapshot(src.id)).toEqual(before);
+    const a = await db.agent.findUniqueOrThrow({ where: { id: agent.id } });
+    expect(a.systemMemoryId).toBeNull();
+    expect(a.description).not.toBe('must not land');
+  });
+});
+
 describe('controls and concealment', () => {
   it('E/F: createAgent without systemMemoryId still succeeds, user-owned and org-owned', async () => {
     const e = await M.createAgent({}, { name: 'E', visibility: 'PERSONAL' }, userCtx(owner.id));

@@ -186,6 +186,7 @@ type PromotionTarget = {
  * 3. it is not a `group` memory, even for its owner or a writer: its audience
  *    is its MemoryMember rows (cor:acl:010:01), which a system memory drops,
  *    so the promotion would lock the owner out and widen the audience;
+ * 3b. it is not a `private` or `personal` memory (#4216, cor:dmo:050:01);
  * 4. it is not an App's install memory ({@link assertNotInstallMemory});
  * 5. it is not a memory an Agent holds for a person or an App
  *    ({@link assertNotAgentHolding}), even when its owner asks.
@@ -203,6 +204,18 @@ async function assertPromotableSystemMemory(ctx: Context, target: PromotionTarge
     throw new GraphQLError("A group memory cannot become an Agent's system memory: its members would lose it.", {
       extensions: { code: 'BAD_USER_INPUT' },
     });
+  }
+  // #4216 (ruled option A, cor:dmo:050:01): a private or personal memory is
+  // strict-owner by class (cor:dmo:060:01) and carries `user_id`; a system
+  // memory is readable through every App that installs the Agent and must not.
+  // Promotion would set visibility NULL under a set `user_id` and break
+  // chk_personal_visibility_user (INTERNAL), so it is refused, whoever owns the
+  // Agent. After the readable check, so a non-reader learns nothing of its class.
+  if (target.class === 'private' || target.class === 'personal') {
+    throw new GraphQLError(
+      `A ${target.class} memory cannot become an Agent's system memory: it belongs to one person.`,
+      { extensions: { code: 'BAD_USER_INPUT' } },
+    );
   }
   assertNotInstallMemory(target);
   assertNotAgentHolding(target);
