@@ -160,6 +160,34 @@ export const AI_CONFIG_CHAT_PROBE_MAX_TOKENS = 64;
 const CHAT_PROBE_PROMPT = 'Say hello.';
 
 /**
+ * #4028: characters per token assumed when sizing the chat probe's reservation from its ENCODED request. Three is
+ * deliberately below the usual ~4 for English prose: JSON schema text (braces, quotes, short keys) tokenizes worse,
+ * and over-reserving only holds back quota that settles to the real count, while under-reserving lets a probe spend
+ * past what it held.
+ */
+export const AI_CONFIG_CHAT_PROBE_CHARS_PER_TOKEN = 3;
+
+/**
+ * #4028: the platform-funded reservation base for the chat probe: an upper estimate of its input tokens from what is
+ * actually sent (the user turn, the optional system line, and every tool's name, description and parameter schema, wrapped
+ * as the widest wire shape (the OpenAI function envelope) wraps it), plus the same fixed margin the run probe holds for provider framing. Derived from the request, so a respond
+ * tool that grows is covered without anyone re-measuring a constant. The reservation is this base plus the output cap
+ * (the finding `ai-config-probe-cap-and-reservation-must-agree`); the cap itself is unchanged.
+ */
+export function chatProbeReserveBase(
+  req: { prompt: string; system?: string },
+  tools: ReadonlyArray<{ name: string; description: string; parameters: unknown }>,
+): number {
+  const encoded =
+    req.prompt.length +
+    (req.system?.length ?? 0) +
+    JSON.stringify(
+      tools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.parameters } })),
+    ).length;
+  return Math.ceil(encoded / AI_CONFIG_CHAT_PROBE_CHARS_PER_TOKEN) + AI_CONFIG_TEST_TOKEN_RESERVE;
+}
+
+/**
  * Judge one chat-probe call against the chat turn's own respond schema:
  * exactly ONE respond call carrying a string `message` and every required
  * field of the right type passes, whichever tool choice was sent. An empty
@@ -633,20 +661,10 @@ export async function testAiServiceConfig(
 
   async function runChatLeg(): Promise<ChatProbeStatus> {
     const chatMaxTokens = Math.min(paramsMaxTokens ?? AI_CONFIG_CHAT_PROBE_MAX_TOKENS, AI_CONFIG_CHAT_PROBE_MAX_TOKENS);
-    const chatReserve = AI_CONFIG_TEST_TOKEN_RESERVE + chatMaxTokens;
-    const chatReservation = quotaScope
-      ? await reserveQuota(ctx.db, 'org', quotaScope, 'llm.tokens', defaultQuotaLimit('org', 'llm.tokens'), chatReserve)
-      : null;
-    if (quotaScope && !chatReservation) return 'FAIL_PROVIDER_UNAVAILABLE';
     const choice = chatToolChoiceFor(provider, model);
-    let result: ChatProbeResult | null = null;
-    let status: ChatProbeStatus = 'FAIL_PROVIDER_UNAVAILABLE';
-    // Only the provider call's failure is the provider's: its text is never
-    // surfaced on this leg, the closed status is all it reports. A throw from
-    // OUR code (building the tool, judging the call) is an internal error: it
-    // is logged (scrubbed, name and message only) and rethrown AFTER the usage
-    // row and the reservation settle, so it can neither read as a provider
-    // failure nor leak the reservation (#4021 BLIND replacement seat, P2).
+    // #4028: the tool is built BEFORE the reservation so the base is sized from the request that will be sent. A throw
+    // building it is judged below exactly as before (an internal error, settled, never the provider's); the
+    // reservation then holds only the run probe's margin, since nothing is sent.
     let hasInternal = false;
     let internal: unknown;
     let tools: ReturnType<typeof respondToolDefinition> | null = null;
@@ -656,6 +674,22 @@ export async function testAiServiceConfig(
       hasInternal = true;
       internal = e;
     }
+    const chatReserve =
+      (tools
+        ? chatProbeReserveBase({ prompt: CHAT_PROBE_PROMPT, ...(choice === 'AUTO' ? { system: RESPOND_ONCE_INSTRUCTION } : {}) }, tools)
+        : AI_CONFIG_TEST_TOKEN_RESERVE) + chatMaxTokens;
+    const chatReservation = quotaScope
+      ? await reserveQuota(ctx.db, 'org', quotaScope, 'llm.tokens', defaultQuotaLimit('org', 'llm.tokens'), chatReserve)
+      : null;
+    if (quotaScope && !chatReservation) return 'FAIL_PROVIDER_UNAVAILABLE';
+    let result: ChatProbeResult | null = null;
+    let status: ChatProbeStatus = 'FAIL_PROVIDER_UNAVAILABLE';
+    // Only the provider call's failure is the provider's: its text is never
+    // surfaced on this leg, the closed status is all it reports. A throw from
+    // OUR code (building the tool, judging the call) is an internal error: it
+    // is logged (scrubbed, name and message only) and rethrown AFTER the usage
+    // row and the reservation settle, so it can neither read as a provider
+    // failure nor leak the reservation (#4021 BLIND replacement seat, P2).
     if (tools) {
       try {
         result = await (deps.generateChat ?? generateChatProbe)(
