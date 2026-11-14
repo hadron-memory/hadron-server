@@ -137,10 +137,14 @@ export class AppKeyCache {
   }
 
   /**
+   * `now` and `binding` are REQUIRED on `get` and `set` (#4032): a defaulted binding would let a caller step around
+   * the root binding that keeps a cached key from outliving its root (R19, still a Proposed line in
+   * `cor:sec:010:04`). Pass `rootBinding(root)` from the root you just read.
+   *
    * A live entry's key (refreshing its clock), or null. An entry past its TTL, or bound to a different root than
    * `binding`, is dropped here, whatever the sweep has done.
    */
-  get(appId: string, keyVersion: number, now: number = Date.now(), binding = ''): Buffer | null {
+  get(appId: string, keyVersion: number, now: number, binding: string): Buffer | null {
     const slot = AppKeyCache.slot(appId, keyVersion);
     const entry = this.entries.get(slot);
     if (!entry) return null;
@@ -152,14 +156,18 @@ export class AppKeyCache {
     return entry.key;
   }
 
-  set(appId: string, keyVersion: number, key: Buffer, now: number = Date.now(), binding = ''): void {
+  set(appId: string, keyVersion: number, key: Buffer, now: number, binding: string): void {
     const slot = AppKeyCache.slot(appId, keyVersion);
     const prior = this.entries.get(slot);
     if (prior && prior.key !== key) prior.key.fill(0);
     this.entries.set(slot, { key, lastUsedAt: now, binding });
   }
 
-  /** Evict every version of one App (its keys were deleted or rotated away). */
+  /**
+   * Evict every version of one App (its keys were deleted or rotated away).
+   * S2 note (#4032): nothing calls this on App deletion yet. Deletion purges the App's key rows, so S2 should evict
+   * here too, or an in-process copy outlives the rows (`cor:sec:010:04`, Why).
+   */
   evictApp(appId: string): void {
     for (const [slot, entry] of this.entries) {
       if (slot.startsWith(`${appId}\u0000`)) this.drop(slot, entry);
@@ -192,6 +200,10 @@ export class AppKeyCache {
   }
 }
 
+/**
+ * The process-wide cache. S2 notes (#4032): `get` hands the RAW App key to any importer, so S2 callers must use
+ * {@link unwrapAppKey} (subkeys per purpose, R17) and never this method for encryption.
+ */
 export const appKeyCache = new AppKeyCache();
 
 export interface AppKeySweepLoop {
@@ -270,7 +282,12 @@ export async function unwrapAppKey(
  * The common path takes no lock; creation is serialized by a transaction-scoped advisory lock per App, and the
  * loser re-reads under it and returns the winner's key, so two racing callers leave one active key. The partial
  * unique index `(app_id) WHERE retired_at IS NULL` is the backstop (a P2002 on create re-reads the winner). Call it
- * INSIDE a transaction: the advisory lock is transaction-scoped. The App must exist (a missing one refuses with
+ * INSIDE a transaction: the advisory lock is transaction-scoped. On a client that is not a transaction (autocommit)
+ * the lock is released at once, so the P2002 backstop above does the serializing; and the key a call mints is
+ * remembered as uncommitted for the life of that client object, so it is never put in the process-wide cache
+ * through that client (safe, only slower). S2 note (#4032): a P2002 raised INSIDE a caller's transaction aborts
+ * that transaction, so the re-read fails closed with a raw error instead of the typed refusal; S2 callers should use
+ * the default isolation and not rely on the re-read after a failed statement. The App must exist (a missing one refuses with
  * `SECRET_KEY_UNAVAILABLE`). An active key that does not unwrap refuses; it never mints a second one beside it.
  */
 export async function ensureAppKey(db: Prisma.TransactionClient, appId: string): Promise<AppKeyHandle> {
