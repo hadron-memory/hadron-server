@@ -231,7 +231,7 @@ describe('allows', () => {
       expect(item.allows, name).toBe(allows);
       const row = await db.grant.findUniqueOrThrow({ where: { id: item.id } });
       const [{ now }] = await db.$queryRaw<Array<{ now: Date }>>`SELECT (clock_timestamp() AT TIME ZONE 'UTC') AS now`;
-      expect(isGrantLive({ ...row, appDeletedAt: null }, now), `isGrantLive ${name}`).toBe(allows);
+      expect(isGrantLive({ ...row, appDeletedAt: null, actionMaxUses: null, actionLifetimeSeconds: null }, now), `isGrantLive ${name}`).toBe(allows);
     }
   });
 });

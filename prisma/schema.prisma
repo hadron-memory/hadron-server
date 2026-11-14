@@ -7844,6 +7844,10 @@ model Action {
   /// A closed key the server maps to a gate function; never SQL or code.
   issuerRule      String   @map("issuer_rule")
   summaryTemplate String   @map("summary_template")
+  /// #4163: a limit on uses that applies to every grant of this action (NULL: none). A grant's own max_uses can only narrow it.
+  maxUses         Int?     @map("max_uses")
+  /// #4163: a limit on lifetime from activation, in seconds, for every grant of this action (NULL: none). A grant's own expiry can only narrow it.
+  lifetimeSeconds Int?     @map("lifetime_seconds")
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
 

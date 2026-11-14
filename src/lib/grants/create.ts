@@ -60,7 +60,9 @@ export class GrantCreateRefusal extends Error {
       ? 'A grant reason must contain at most 2,000 characters.'
       : code === 'GRANT_VALUES_INVALID' && detail === 'LIST_TOO_LONG'
         ? 'Each grant value list must contain at most 100 entries.'
-        : MESSAGES[code]);
+        : code === 'GRANT_TERMS_INVALID' && detail === 'MAX_USES_OUTSIDE_ACTION_LIMIT'
+          ? 'This action limits its uses: the grant must state a count of uses no higher than the action allows.'
+          : MESSAGES[code]);
     this.name = 'GrantCreateRefusal';
   }
 }
@@ -100,7 +102,7 @@ function valueMatchesType(type: string, value: unknown): boolean {
   return Array.isArray(value) ? value.every(one) : one(value);
 }
 
-interface ActionRow { name: string; parameters: unknown }
+interface ActionRow { name: string; parameters: unknown; max_uses: number | null }
 interface WorkerRow { id: string; app_id: string; agent_id: string; retired_at: Date | null }
 
 /** The declared parameter names of an action row (the closed list S1b seeds), or null if the row is malformed. */
@@ -152,7 +154,7 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
   }
 
   // The action: a registered row (no free-text stand-in). Its declared parameters are the values' whole boundary.
-  const actions = await tx.$queryRaw<ActionRow[]>`SELECT name, parameters FROM actions WHERE name = ${args.action}`;
+  const actions = await tx.$queryRaw<ActionRow[]>`SELECT name, parameters, max_uses FROM actions WHERE name = ${args.action}`;
   const action = actions[0];
   if (!action) throw new GrantCreateRefusal('GRANT_ACTION_UNKNOWN');
   const declared = declaredParameters(action.parameters);
@@ -205,6 +207,12 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
     throw e;
   }
   if (startsAt && expiresAt && expiresAt.getTime() <= startsAt.getTime()) throw new GrantCreateRefusal('GRANT_TERMS_INVALID', 'expires must follow starts');
+  // #4163 (cor:acl:140:02, V50): an action that limits its uses has its grants written to say so. The grant's own count can only
+  // narrow the action's, and it must be stated, so the signed terms show the limit the signer is told of ("once") and the count is
+  // spent on the row. A grant outside the bound is refused now and stores nothing.
+  if (action.max_uses !== null && (maxUses === null || maxUses > action.max_uses)) {
+    throw new GrantCreateRefusal('GRANT_TERMS_INVALID', 'MAX_USES_OUTSIDE_ACTION_LIMIT');
+  }
 
   const id = generateId();
   // (kinds user and app were refused above: the holder column is one of this closed pair)
