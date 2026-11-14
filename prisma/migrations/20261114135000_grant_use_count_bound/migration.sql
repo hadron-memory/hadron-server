@@ -1,7 +1,7 @@
--- #3998 (S3 of #3991): the grant is the secret-read counter. use_count rises by exactly one on a live grant, nothing else moves
--- with it, and max_uses bounds it by CHECK. Existing rows all have use_count 0 (it could not move before), so the CHECK cannot refuse data.
+-- #3998 (S3 of #3991): max_uses bounds use_count by CHECK, on top of #3483's use arm (20261114130000_grant_use_spend). Existing rows
+-- all have use_count within max_uses (the guard refused any spend at the bound), so the CHECK cannot refuse data.
 -- #3668 (S1a): the database half of the grant row, its events and the actions table. One source; the newest migration to
--- carry it (20261114130000_grant_spend_counter) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
+-- carry it (20261114135000_grant_use_count_bound) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
 -- post-push.sql applies it.
 --
 -- GRANTS. Exactly one holder (a user, an agent, a worker or an App); the CHECK cannot pass on NULL, because
@@ -15,6 +15,9 @@
 --     grant at its current version, by that signer, whose signing request has completed. The signer becomes the issuer
 --     (issuer_user_id := verified_by). Only a grant not revoked, not left by its holder and not past its expiry activates, and
 --     nothing else moves in the same update. After that the three activation columns never move again;
+--   * it is USED (#3483, cor:acl:140:03 single-use and repeating grants): use_count goes up by exactly one, and only while the
+--     row is live on the database clock (activated, not revoked, holder not gone, App not deleted, started, not expired, below
+--     its max_uses), with nothing else moving but updated_at. The caller holds the row FOR UPDATE and writes the USE event;
 --   * it ends ONCE, by revoked_at stamped together with revoked_by, or by its HOLDER going: holder_departed_at is stamped
 --     (NULL to a time, never back) by the AFTER DELETE triggers below on every hard delete of a holder row, and by the
 --     deleting code on the soft deletes (an erased person, a retired worker, a deleted agent or App). The first end stands:
@@ -52,8 +55,8 @@ CREATE OR REPLACE FUNCTION hadron_guard_grant() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
   -- Columns that may differ between OLD and NEW; each is judged by its own rule below.
-  movable text[] := ARRAY['updated_at', 'user_id', 'issuer_user_id', 'requested_by_user_id', 'verified_by', 'revoked_at', 'revoked_by',
-                          'holder_departed_at', 'activated_at', 'verification_kind', 'signature_id', 'use_count'];
+  movable text[] := ARRAY['updated_at', 'use_count', 'user_id', 'issuer_user_id', 'requested_by_user_id', 'verified_by', 'revoked_at', 'revoked_by',
+                          'holder_departed_at', 'activated_at', 'verification_kind', 'signature_id'];
   db_now timestamp(3) := (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3);
 BEGIN
   IF TG_OP = 'DELETE' THEN
@@ -91,20 +94,17 @@ BEGIN
   IF (to_jsonb(NEW) - movable) <> (to_jsonb(OLD) - movable) THEN
     RAISE EXCEPTION 'grants are append-only' USING ERRCODE = '23514';
   END IF;
-  -- The one spend (#3998, #3991 R1): a LIVE grant's use_count rises by exactly one, and nothing else moves in that update but
-  -- updated_at. The grant row is the counter, so a budget cannot be spent twice and a fall can never restore a read. Live is
-  -- judged here on the database clock, on the row's own newest state (the UPDATE holds the row lock; a concurrent spender that
-  -- waited re-reads OLD after the first commits): activated, not revoked, holder present, App not deleted, started, not
-  -- expired, not spent. A pending, revoked, departed, not-started, expired or spent row refuses the spend, as does a rise of two.
+  -- A use (#3483): +1 on a row live at this instant, and nothing else in the same update. The caller holds the row FOR UPDATE,
+  -- so the revocation, departure, expiry and count read here are the row's newest.
   IF NEW.use_count IS DISTINCT FROM OLD.use_count THEN
-    IF NEW.use_count <> OLD.use_count + 1
+    IF NEW.use_count IS DISTINCT FROM OLD.use_count + 1
        OR OLD.activated_at IS NULL OR OLD.revoked_at IS NOT NULL OR OLD.holder_departed_at IS NOT NULL
        OR (OLD.starts_at IS NOT NULL AND OLD.starts_at > db_now)
        OR (OLD.expires_at IS NOT NULL AND OLD.expires_at <= db_now)
        OR (OLD.max_uses IS NOT NULL AND OLD.use_count >= OLD.max_uses)
-       OR EXISTS (SELECT 1 FROM apps WHERE id = OLD.app_id AND deleted_at IS NOT NULL)
-       OR (to_jsonb(NEW) - 'updated_at' - 'use_count') <> (to_jsonb(OLD) - 'updated_at' - 'use_count') THEN
-      RAISE EXCEPTION 'grants are append-only: a spend is exactly one use on a live grant' USING ERRCODE = '23514';
+       OR EXISTS (SELECT 1 FROM apps p WHERE p.id = OLD.app_id AND p.deleted_at IS NOT NULL)
+       OR (to_jsonb(NEW) - ARRAY['updated_at', 'use_count']) <> (to_jsonb(OLD) - ARRAY['updated_at', 'use_count']) THEN
+      RAISE EXCEPTION 'grants are append-only: a use adds one to a live grant and moves nothing else' USING ERRCODE = '23514';
     END IF;
     RETURN NEW;
   END IF;
