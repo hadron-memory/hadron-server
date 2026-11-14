@@ -11,7 +11,10 @@
  *     these pins force the tie with explicit inserts, as the append-only trigger's INSERT arm allows.
  *  2. Two concurrent releases of one task: the loser answers TASK_EXTERNAL_ID_NONE, one event is written. Rides
  *     Proposed V87 (a task with no id refuses, changing nothing; a release records one event naming the id) — a
- *     reversal changes this pin, not the mechanism.
+ *     reversal changes this pin, not the mechanism. The race is made DETERMINISTIC by holding the task row FOR
+ *     UPDATE on the test's own connection until BOTH calls sit in a Lock wait (pg_stat_activity): a bare
+ *     Promise.allSettled race only caught a removed lockTask FOR UPDATE when the loser's read happened to land
+ *     before the winner's commit (Brooks's #4194 LOCAL P2 — the mutant passed 7/10 runs).
  *  3. The batch read `agentTasks(externalIds:)` windows on an explicit offset like any list (cor:api:120:04;
  *     cor:api:040:02: windowing the caller asked for is not truncation).
  *  4. N14: the changes read joins events to tasks App-tight. An event naming another App's task (task_id has no FK,
@@ -20,6 +23,7 @@
  *     event naming this App's task must not move this App's release boundary off the foreign payload's id.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { Client } from 'pg';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -150,19 +154,50 @@ describe('#4097 (1): the id tiebreaker decides only within one transaction (Axel
 });
 
 describe('#4097 (2): two concurrent releases of one task (rides Proposed V87)', () => {
-  it('exactly one wins; the loser refuses TASK_EXTERNAL_ID_NONE with nothing written; one event, no id left', async () => {
+  it('exactly one wins; the loser refuses TASK_EXTERNAL_ID_NONE with nothing written; one event, no id left', { timeout: 15_000 }, async () => {
     const t = await create({ externalId: X });
-    // Two calls in flight at once: both pass the unlocked pre-reads, both enter their transaction, and lockTask's
-    // SELECT ... FOR UPDATE serializes them on the task row. The loser's re-read (a fresh statement under READ
-    // COMMITTED) sees the winner's committed clear and refuses before writing anything.
-    const results = await Promise.allSettled([release(t.id), release(t.id)]);
-    const codes = results.map((r) => (r.status === 'fulfilled' ? 'ok' : r.reason?.extensions?.code));
-    expect(codes.filter((c) => c === 'ok')).toHaveLength(1);
-    expect(codes.filter((c) => c === 'TASK_EXTERNAL_ID_NONE')).toHaveLength(1);
-    expect((await stored(t.id)).externalId).toBeNull();
-    const events = await releaseEvents(t.id);
-    expect(events).toHaveLength(1);
-    expect(events[0]!.payload).toEqual({ externalId: X });
+    // Determinism (the #4194 LOCAL P2 fold): the task row is held FOR UPDATE on a connection of the test's own,
+    // OUTSIDE the Prisma pool, before either call starts. Both calls then run their unlocked pre-reads and park
+    // with their read-check already done — at lockTask's SELECT ... FOR UPDATE while the row is held; at the
+    // unguarded UPDATE instead if that lock is ever removed — and pg_stat_activity is polled (from a second
+    // private connection, so a 1-core runner's 3-connection pool never has to serve the poller beside the two
+    // parked transactions) until BOTH sit in a Lock wait. Only then is the hold released: the calls' serialized
+    // order under the row lock decides, never their arrival order. With the lock intact the loser acquires the
+    // row only after the winner's commit and its re-read — a fresh statement under READ COMMITTED — sees the
+    // cleared id and refuses before writing anything; with the lock gone both calls pass the stale read, both
+    // write, and the two-ok/two-event assertions below go red.
+    const holder = new Client({ connectionString: process.env.DATABASE_URL });
+    const probe = new Client({ connectionString: process.env.DATABASE_URL });
+    await holder.connect();
+    await probe.connect();
+    try {
+      await holder.query('BEGIN');
+      await holder.query('SELECT id FROM agent_tasks WHERE id = $1 FOR UPDATE', [t.id]);
+      const calls = Promise.allSettled([release(t.id), release(t.id)]);
+      let parked = false;
+      for (let i = 0; i < 400; i += 1) {
+        const { rows: [{ n }] } = await probe.query<{ n: number }>(
+          'SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = $1',
+          ['Lock'],
+        );
+        if (n >= 2) { parked = true; break; }
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      // With lockTask intact neither call can pass the held row, so a miss here is a harness fault, not a pass.
+      expect(parked).toBe(true);
+      await holder.query('COMMIT');
+      const results = await calls;
+      const codes = results.map((r) => (r.status === 'fulfilled' ? 'ok' : r.reason?.extensions?.code));
+      expect(codes.filter((c) => c === 'ok')).toHaveLength(1);
+      expect(codes.filter((c) => c === 'TASK_EXTERNAL_ID_NONE')).toHaveLength(1);
+      expect((await stored(t.id)).externalId).toBeNull();
+      const events = await releaseEvents(t.id);
+      expect(events).toHaveLength(1);
+      expect(events[0]!.payload).toEqual({ externalId: X });
+    } finally {
+      await holder.end();
+      await probe.end();
+    }
   });
 });
 
