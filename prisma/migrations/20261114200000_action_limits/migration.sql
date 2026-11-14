@@ -2,6 +2,23 @@
 -- activation that apply to every grant of it. Both are NULL (no limit) until the deploy-time upsert (src/lib/grants/actions.ts)
 -- writes them; the shared live definition (src/lib/grants/live.ts) and the guard below read them with the grant row.
 ALTER TABLE "actions" ADD COLUMN "max_uses" INTEGER, ADD COLUMN "lifetime_seconds" INTEGER;
+
+-- BEGIN #4163 backfill
+-- The limits take effect for grants already stored. (1) State the platform's limits on the two boot-prompt actions now, so no
+-- grant reads live between this migration and the deploy-time upsert (which writes the same values). (2) An edit grant used
+-- before this change was spent by its USE event alone and kept use_count 0; count that one use so the shared definition reads it
+-- spent and a departing worker no longer stamps it (ruling 0259). use_count is a derived fact, not a signed term, so no signed
+-- terms change. The grant guard admits only +1 on a live row, so it is paused for this one statement and restored in the same
+-- transaction; the migration runs as the table owner.
+UPDATE "actions" SET "max_uses" = 1, "lifetime_seconds" = 3600 WHERE "name" = 'bootprompt.source.edit';
+UPDATE "actions" SET "lifetime_seconds" = 3600 WHERE "name" = 'bootprompt.compile.approve';
+ALTER TABLE "grants" DISABLE TRIGGER grants_guard;
+UPDATE "grants" g SET "use_count" = 1, "updated_at" = (clock_timestamp() AT TIME ZONE 'UTC')
+ WHERE g."action" = 'bootprompt.source.edit' AND g."use_count" = 0
+   AND EXISTS (SELECT 1 FROM "grant_events" e WHERE e."grant_id" = g."id" AND e."action" = 'USE');
+ALTER TABLE "grants" ENABLE TRIGGER grants_guard;
+-- END #4163 backfill
+
 -- #3668 (S1a): the database half of the grant row, its events and the actions table. One source; the newest migration to
 -- carry it (20261114200000_action_limits) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
 -- post-push.sql applies it.

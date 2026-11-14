@@ -17,6 +17,7 @@ import { createPendingGrant, GrantCreateRefusal } from '../../../lib/grants/crea
 import { endHeldGrants } from '../../../lib/grants/departure.js';
 import { getGrantForWorker } from '../../../lib/grants/read.js';
 import { isGrantLive, readGrantForUpdate } from '../../../lib/grants/live.js';
+import { readFileSync } from 'node:fs';
 import { DB_NOW, insertGrantUnguarded, raw, type World } from '../../../lib/grants/grantFixtures3668.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -205,5 +206,32 @@ describe('item 3: a grant ended by use or by the hour keeps its first end when t
     await db.$executeRawUnsafe(`DELETE FROM workers WHERE id = '${workerId}'`);
     for (const id of [used, timedOut]) expect((await row(id)).holderDepartedAt).toBeNull();
     expect((await row(live)).holderDepartedAt).not.toBeNull();
+  });
+});
+
+describe('upgrade: a grant used before the count existed (LOCAL P2, Baloo)', () => {
+  const backfill = () => {
+    const sql = readFileSync(new URL('../../../../prisma/migrations/20261114200000_action_limits/migration.sql', import.meta.url), 'utf8');
+    return sql.slice(sql.indexOf('-- BEGIN #4163 backfill'), sql.indexOf('-- END #4163 backfill'));
+  };
+  it('the migration counts the earlier use: it reads spent, and retiring the worker leaves its first end', async () => {
+    const s = await source();
+    const g = await grant({ sourceNode: s.id }, { max_uses: null, use_count: 0 });
+    await db.grantEvent.create({ data: { grantId: g, appId, action: 'USE', workerId } });
+    const untouched = await grant({ sourceNode: s.id }, { max_uses: null, use_count: 0 });
+    // as it stood before the upgrade: no limits on the action
+    await db.$executeRawUnsafe(`UPDATE actions SET max_uses = NULL, lifetime_seconds = NULL WHERE name = '${EDIT}'`);
+    expect((await view(g)).allows).toBe(true);
+    for (const stmt of backfill().split(';\n').map((x) => x.replace(/^(--.*\n)+/gm, '').trim()).filter(Boolean)) await db.$executeRawUnsafe(stmt);
+    expect((await row(g)).useCount).toBe(1);
+    expect((await row(untouched)).useCount).toBe(0);
+    expect((await db.action.findUniqueOrThrow({ where: { name: EDIT } })).maxUses).toBe(1);
+    expect((await view(g)).allows).toBe(false);
+    await db.worker.update({ where: { id: workerId }, data: { retiredAt: new Date() } });
+    await db.$transaction((tx) => endHeldGrants(tx, 'worker', workerId));
+    expect((await row(g)).holderDepartedAt).toBeNull();
+    expect((await row(untouched)).holderDepartedAt).not.toBeNull();
+    // the guard is back on after the migration statement
+    await expect(db.$executeRawUnsafe(`UPDATE grants SET use_count = use_count + 5 WHERE id = '${untouched}'`)).rejects.toThrow(/append-only/);
   });
 });
