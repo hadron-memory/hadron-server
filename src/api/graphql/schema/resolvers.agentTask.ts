@@ -3226,10 +3226,10 @@ export const agentTaskQueries = {
                  COALESCE(t.external_id,
                    CASE WHEN (e.tx_id, e.created_at, e.id) <= (r.tx_id, r.created_at, r.id) THEN r.payload->>'externalId' END) AS "externalId"
           FROM agent_team_events e
-          JOIN agent_tasks t ON t.id = e.task_id
+          JOIN agent_tasks t ON t.id = e.task_id AND t.app_id = e.app_id
           LEFT JOIN LATERAL (
             SELECT rr.id, rr.tx_id, rr.created_at, rr.payload FROM agent_team_events rr
-            WHERE rr.task_id = e.task_id AND rr.type = ${EXTERNAL_ID_RELEASED}
+            WHERE rr.task_id = e.task_id AND rr.app_id = e.app_id AND rr.type = ${EXTERNAL_ID_RELEASED}
             ORDER BY rr.tx_id, rr.created_at, rr.id LIMIT 1
           ) r ON true
           WHERE e.app_id = ${app.id}

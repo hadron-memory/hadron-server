@@ -239,12 +239,12 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
   const finishByTaskIds = tasks.filter((t) => t.finishBy).map((t) => t.id);
   const [progress, queued, activity, userCalls, startByEdits, finishByEdits, finishByAlarms] = await Promise.all([
     db.agentTeamEvent.groupBy({
-      by: ['taskId'],
+      by: ['taskId', 'appId'],
       where: { taskId: { in: ids }, type: 'task.progress' },
       _max: { createdAt: true },
     }),
     db.agentTeamEvent.groupBy({
-      by: ['taskId'],
+      by: ['taskId', 'appId'],
       where: { taskId: { in: ids }, type: 'assignment.queued' },
       _max: { createdAt: true },
     }),
@@ -254,37 +254,45 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
     // progress, finish, cancel, park, ready); a read leaves none (#1848), and
     // an event with no task (availability, host) is not a task call.
     ownerUserIds.length
-      ? db.agentTeamEvent.groupBy({
-        by: ['appId', 'actorUserId'],
-        // actorWorkerId null: a worker-bound call made under the person's credential
-        // carries their user id too, but it is the WORKER's activity, not theirs.
-        where: { actorUserId: { in: ownerUserIds }, actorWorkerId: null, taskId: { not: null }, type: { startsWith: 'task.', notIn: [...PASSIVE_EVENT_TYPES] } },
-        _max: { createdAt: true },
-      })
+      // #4202: the event's task must be a task of the event's App (the join), so a row naming another App's task is
+      // nobody's call here.
+      ? db.$queryRaw<{ appId: string; actorUserId: string; at: Date }[]>(Prisma.sql`
+        SELECT e.app_id AS "appId", e.actor_user_id AS "actorUserId", max(e.created_at) AS "at"
+        FROM agent_team_events e
+        JOIN agent_tasks t ON t.id = e.task_id AND t.app_id = e.app_id
+        WHERE e.actor_user_id IN (${Prisma.join(ownerUserIds)})
+          AND e.actor_worker_id IS NULL
+          AND e.type LIKE 'task.%'
+          AND e.type NOT IN (${Prisma.join([...PASSIVE_EVENT_TYPES])})
+        GROUP BY e.app_id, e.actor_user_id`)
       : Promise.resolve([]),
     db.agentTeamEvent.groupBy({
-      by: ['taskId'],
+      by: ['taskId', 'appId'],
       where: { taskId: { in: ids }, type: 'task.edited', payload: { path: ['fields'], array_contains: ['startBy'] } },
       _max: { createdAt: true },
     }),
     db.agentTeamEvent.groupBy({
-      by: ['taskId'],
+      by: ['taskId', 'appId'],
       where: { taskId: { in: ids }, type: 'task.edited', payload: { path: ['fields'], array_contains: ['finishBy'] } },
       _max: { createdAt: true },
     }),
     finishByTaskIds.length
       ? db.agentTeamEvent.findMany({
         where: { taskId: { in: finishByTaskIds }, type: STALL_EVENT_TYPE['finish-by'], episodeStart: { not: null } },
-        select: { taskId: true, episodeStart: true },
+        select: { taskId: true, appId: true, episodeStart: true },
       })
       : Promise.resolve([]),
   ]);
-  const userCallAt = new Map(userCalls.map((r) => [`${r.appId}:${r.actorUserId}`, r._max.createdAt]));
+  // #4202 (cor:agt:050:01, :11, :12, :13, :15): `agent_team_events.task_id` has no foreign key, so an event can name a
+  // task of another App. Such a row counts for nothing: only an event of the task's own App is read below.
+  const appOf = new Map(tasks.map((t) => [t.id, t.appId]));
+  const own = <T extends { taskId: string | null; appId: string }>(rows: T[]): T[] => rows.filter((r) => r.taskId !== null && appOf.get(r.taskId) === r.appId);
+  const userCallAt = new Map(userCalls.map((r) => [`${r.appId}:${r.actorUserId}`, r.at]));
   const { intervals: stopIntervals, holds: stopHoldsBy } = await loadStopIntervals(db, workerIds, ids);
-  const progressBy = new Map(progress.map((p) => [p.taskId, p._max.createdAt]));
-  const queuedBy = new Map(queued.map((q) => [q.taskId, q._max.createdAt]));
-  const editedBy = new Map(startByEdits.map(e => [e.taskId, e._max.createdAt]));
-  const finishByEditedBy = new Map(finishByEdits.map(e => [e.taskId, e._max.createdAt]));
+  const progressBy = new Map(own(progress).map((p) => [p.taskId, p._max.createdAt]));
+  const queuedBy = new Map(own(queued).map((q) => [q.taskId, q._max.createdAt]));
+  const editedBy = new Map(own(startByEdits).map(e => [e.taskId, e._max.createdAt]));
+  const finishByEditedBy = new Map(own(finishByEdits).map(e => [e.taskId, e._max.createdAt]));
   const childrenBy = new Map<string, typeof children>();
   for (const c of children) {
     const list = childrenBy.get(c.parentTaskId as string) ?? [];
@@ -316,7 +324,7 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
       queuedAt: queuedBy.get(task.id) ?? null,
       startByEditedAt: editedBy.get(task.id) ?? null,
       finishByEditedAt: finishByEditedBy.get(task.id) ?? null,
-      finishByAlarmStart: task.finishBy ? currentFinishByAlarmStart(task.id, task.finishBy, finishByAlarms) : null,
+      finishByAlarmStart: task.finishBy ? currentFinishByAlarmStart(task.id, task.finishBy, own(finishByAlarms)) : null,
       stopIntervals,
       stopHolds: stopHoldsBy.get(task.id) ?? [],
     };
@@ -769,7 +777,7 @@ const TERMINAL_STATUSES: ReadonlySet<string> = new Set(['finished', 'cancelled',
  */
 export async function endedAlarmEpisodes(
   db: Db,
-  alarms: { taskId: string | null; type: string; episodeStart: Date | null }[],
+  alarms: { taskId: string | null; type: string; episodeStart: Date | null; appId?: string }[],
   now: Date,
 ): Promise<Set<string>> {
   return new Set((await endedAlarmEpisodeInstants(db, alarms, now)).keys());
@@ -788,17 +796,17 @@ export async function endedAlarmEpisodes(
  */
 export async function endedAlarmEpisodeInstants(
   db: Db,
-  alarms: { taskId: string | null; type: string; episodeStart: Date | null }[],
+  alarms: { taskId: string | null; type: string; episodeStart: Date | null; appId?: string }[],
   now: Date,
 ): Promise<Map<string, Date>> {
   const out = new Map<string, Date>();
-  const subject = alarms.filter((a): a is { taskId: string; type: string; episodeStart: Date } =>
+  const subject = alarms.filter((a): a is { taskId: string; type: string; episodeStart: Date; appId?: string } =>
     !!a.taskId && !!a.episodeStart && STALL_ALARM_TYPES.has(a.type));
   const taskIds = [...new Set(subject.map((a) => a.taskId))];
   if (taskIds.length === 0) return out;
   const tasks = await db.agentTask.findMany({
     where: { id: { in: taskIds }, app: { deletedAt: null, uninstalledAt: null } },
-    select: { id: true, status: true, finishedAt: true, cancelledAt: true, updatedAt: true, startedAt: true, assignedAt: true, releasedAt: true, assigneeWorkerId: true },
+    select: { id: true, appId: true, status: true, finishedAt: true, cancelledAt: true, updatedAt: true, startedAt: true, assignedAt: true, releasedAt: true, assigneeWorkerId: true },
   });
   const rowOf = new Map(tasks.map((t) => [t.id, t]));
   const openIds = tasks.filter((t) => OPEN_STATUSES.includes(t.status)).map((t) => t.id);
@@ -815,6 +823,8 @@ export async function endedAlarmEpisodeInstants(
   const endedSubject = subject.filter((a) => {
     const row = rowOf.get(a.taskId);
     if (row === undefined) return false; // unknown: not found among live, installed Apps' tasks
+    // #4202: an alarm of one App naming a task of another is judged from nothing of that task (cor:agt:050:01, :19).
+    if (a.appId !== undefined && a.appId !== row.appId) return false;
     const i = inputsOf.get(a.taskId);
     return TERMINAL_STATUSES.has(row.status) || !!(i && !running.has(alarmEpisodeKey(a.taskId, a.type, a.episodeStart)));
   });
@@ -835,7 +845,8 @@ export async function endedAlarmEpisodeInstants(
       min(e.created_at) FILTER (WHERE e.type = 'task.handed-back') AS "handedBack",
       min(e.created_at) FILTER (WHERE e.type = 'task.started') AS "started"
     FROM unnest(${pairs.map((a) => a.taskId)}::text[], ${pairs.map((a) => toNaiveUtc(a.episodeStart))}::timestamp[]) AS p(task_id, start)
-    JOIN agent_team_events e ON e.task_id = p.task_id AND e.created_at > p.start
+    JOIN agent_tasks pt ON pt.id = p.task_id
+    JOIN agent_team_events e ON e.task_id = p.task_id AND e.app_id = pt.app_id AND e.created_at > p.start
       AND e.type IN ('task.progress', 'task.edited', 'task.assigned', 'task.reassigned', 'assignment.matched', 'task.released', 'task.handed-back', 'task.started')
     GROUP BY p.task_id, p.start`;
   const firstOf = new Map(firsts.map((f) => [`${f.taskId}|${new Date(f.start).getTime()}`, f]));
@@ -854,11 +865,11 @@ export async function endedAlarmEpisodeInstants(
   // assignee held the task, or before the episode began, never counts. Activity is the session's start, its heartbeat
   // (not an auto-expiry's maintenance write) and an attributed usage event, as the roster counts it, never after the
   // session ended. A latest-only value cannot say when it FIRST happened; this can.
-  const assignments = await db.agentTeamEvent.findMany({
+  const assignments = (await db.agentTeamEvent.findMany({
     where: { taskId: { in: [...new Set(pairs.map((a) => a.taskId))] }, type: { in: [...ASSIGNED_EVENT_TYPES, ...ASSIGNEE_CLEARED_EVENT_TYPES] } },
-    select: { taskId: true, type: true, createdAt: true, payload: true },
+    select: { taskId: true, appId: true, type: true, createdAt: true, payload: true },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-  });
+  })).filter((e) => e.taskId !== null && rowOf.get(e.taskId)?.appId === e.appId); // #4202: the task's own App's events only
   type Window = { k: string; worker: string; lo: Date; hi: string };
   const FOREVER = '9999-12-31T00:00:00.000';
   const workerOf = (party: unknown): string | null => (party as { workerId?: string } | null)?.workerId ?? null;
@@ -952,7 +963,7 @@ export async function endedAlarmEpisodeInstants(
  */
 export async function alarmEpisodeEnds(
   db: Db,
-  alarms: { id: string; taskId: string | null; type: string; episodeStart: Date | null }[],
+  alarms: { id: string; taskId: string | null; type: string; episodeStart: Date | null; appId?: string }[],
   now: Date,
 ): Promise<Map<string, Date>> {
   const out = new Map<string, Date>();
@@ -1000,7 +1011,7 @@ export async function recordEndedEscalations(db: Db, now: Date): Promise<number>
         type: { in: [...STALL_ALARM_TYPES, 'alarm.dark-worker', 'alarm.coordinator-cadence'] },
         app: { deletedAt: null, uninstalledAt: null },
       },
-      select: { id: true, taskId: true, type: true, episodeStart: true },
+      select: { id: true, appId: true, taskId: true, type: true, episodeStart: true },
       orderBy: { id: 'asc' },
       take: ESCALATION_RECORD_BATCH,
     });
@@ -1028,7 +1039,7 @@ const ESCALATION_RECORD_BATCH = 200;
  */
 export async function freezeEndedEscalation(
   db: Db,
-  alarm: { id: string; taskId: string | null; type: string; episodeStart: Date | null },
+  alarm: { id: string; taskId: string | null; type: string; episodeStart: Date | null; appId?: string },
   now: Date,
 ): Promise<void> {
   const ends = await alarmEpisodeEnds(db, [alarm], now);
@@ -1053,8 +1064,8 @@ export async function freezeEndedEscalation(
  */
 export async function wakeDueOwners(db: PrismaClient, now = new Date()): Promise<number> {
   return db.$transaction(async (tx) => {
-    const due = await tx.$queryRaw<{ eventId: string; chainIndex: number; taskId: string | null; type: string; episodeStart: Date | null }[]>`
-      SELECT w.event_id AS "eventId", w.chain_index AS "chainIndex",
+    const due = await tx.$queryRaw<{ eventId: string; chainIndex: number; appId: string; taskId: string | null; type: string; episodeStart: Date | null }[]>`
+      SELECT w.event_id AS "eventId", w.chain_index AS "chainIndex", e.app_id AS "appId",
              e.task_id AS "taskId", e.type, e.episode_start AS "episodeStart"
       FROM agent_team_alarm_schedule w
       JOIN agent_team_events e ON e.id = w.event_id
@@ -1074,7 +1085,7 @@ export async function wakeDueOwners(db: PrismaClient, now = new Date()): Promise
     if (taskIds.length) await tx.$queryRaw`SELECT id FROM agent_tasks WHERE id IN (${Prisma.join(taskIds)}) ORDER BY id FOR SHARE`;
     // #3934: the one answer the event reads share (`alarmEpisodeEnds`), for every kind of alarm: a task alarm by its
     // task's record (#2200), a dark-worker (#2755) or coordinator-cadence (#2763) alarm by its own episode row.
-    const endedEvents = new Set((await alarmEpisodeEnds(tx, due.map((d) => ({ id: d.eventId, taskId: d.taskId, type: d.type, episodeStart: d.episodeStart })), now)).keys());
+    const endedEvents = new Set((await alarmEpisodeEnds(tx, due.map((d) => ({ id: d.eventId, appId: d.appId, taskId: d.taskId, type: d.type, episodeStart: d.episodeStart })), now)).keys());
     if (endedEvents.size) {
       // The alarm's own episode is over: close EVERY row of it still unwoken (not only the due ones), so no later
       // owner up the chain is woken for a condition that is gone. Nothing else is written: the alarm, its chain and

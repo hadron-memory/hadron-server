@@ -13,6 +13,8 @@ import { generateId } from '../id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { endedAlarmEpisodeInstants, effectiveWindows, loadStallInputs, stallCandidates } from './stall.js';
 import { pendingTaskWakes } from './taskWakes.js';
+import { loadTeamRoster } from './roster.js';
+import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 
 vi.mock('../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 
@@ -126,6 +128,16 @@ describe('#4202 episode end (stall.ts, the first-transition read)', () => {
     expect([...ends.values()].map((d) => d.getTime())).toEqual([ago(50).getTime()]);
   });
 
+  it("a foreign task.reassigned naming the task does not move the holder's stint, so the assignee's own earlier activity is still the end", async () => {
+    const task = await makeTask(A, 'A task', { status: 'finished', finishedAt: ago(10) });
+    const episodeStart = ago(200);
+    const w = await db.worker.findUniqueOrThrow({ where: { id: A.worker.id }, select: { agentId: true } });
+    await db.session.create({ data: { id: generateId(), appId: A.app.id, userId: A.user.id, workerId: A.worker.id, agentId: w.agentId, type: 'DEVELOPER', startedAt: ago(150), updatedAt: ago(150) } });
+    await plant({ appId: B.app.id, type: 'task.reassigned', taskId: task.id, at: ago(100), payload: { from: { workerId: B.worker.id }, to: { workerId: A.worker.id } } });
+    const ends = await endedAlarmEpisodeInstants(db, [{ taskId: task.id, type: 'stall.no-progress', episodeStart }], now);
+    expect([...ends.values()].map((d) => d.getTime())).toEqual([ago(150).getTime()]);
+  });
+
   it('an alarm whose App differs from its task\'s App is not classified from the task', async () => {
     const task = await makeTask(B, 'B task', { status: 'finished', finishedAt: ago(10) });
     const ends = await endedAlarmEpisodeInstants(db, [{ taskId: task.id, type: 'stall.no-progress', episodeStart: ago(200), appId: A.app.id }], now);
@@ -181,6 +193,14 @@ describe('#4202 task wakes (taskWakes.ts)', () => {
     expect(taskIds(await pendingTaskWakes(db, [B.worker.id], now), B.worker.id)).toEqual([]);
   });
 
+  it("an owner's activity on the parent recorded in another App does not suppress the child-finish wake", async () => {
+    const parent = await makeTask(B, 'parent');
+    const child = await makeTask(B, 'child', { parentTaskId: parent.id, status: 'finished', finishedAt: ago(10) });
+    await plant({ appId: B.app.id, type: 'task.finished', taskId: child.id, at: ago(10), actorWorkerId: A.worker.id });
+    await plant({ appId: A.app.id, type: 'task.progress', taskId: parent.id, at: ago(5), actorWorkerId: B.worker.id });
+    expect(taskIds(await pendingTaskWakes(db, [B.worker.id], now), B.worker.id)).toEqual([child.id]);
+  });
+
   it('control: a child\'s finish in its own App wakes the owner', async () => {
     const parent = await makeTask(B, 'parent');
     const child = await makeTask(B, 'child', { parentTaskId: parent.id, status: 'finished', finishedAt: ago(4) });
@@ -200,5 +220,49 @@ describe('#4202 task wakes (taskWakes.ts)', () => {
     const wakes = await pendingTaskWakes(db, [A.worker.id], now);
     expect(JSON.stringify([...wakes.values()])).not.toContain('B secret title');
     expect(taskIds(wakes, A.worker.id)).toEqual([]);
+  });
+});
+
+describe('#4202 the roster and the external-id change feed', () => {
+  it('an alarm of App A naming a task of App B is not worker A\'s move on the roster', async () => {
+    const taskB = await makeTask(B, 'B task');
+    const alarm = await plant({ appId: A.app.id, type: 'stall.no-progress', taskId: taskB.id, at: ago(2), severity: 'alarm', episodeStart: ago(100), chain: [{ workerId: A.worker.id }] });
+    await db.$executeRaw`INSERT INTO agent_team_alarm_schedule (event_id, chain_index, due_at, woken_at) VALUES (${alarm}, 0, ${ago(2)}, ${ago(2)})`;
+    const entry = (await loadTeamRoster(db, A.app.id, now)).find((r: { workerId?: string; id?: string }) => (r.workerId ?? r.id) === A.worker.id);
+    expect(entry?.state).not.toBe('YOUR_MOVE');
+  });
+
+  it('control: the same alarm naming a task of its own App is', async () => {
+    const taskA = await makeTask(A, 'A task');
+    const episodeStart = stallCandidates((await loadStallInputs(db, { id: taskA.id }, now))[0], effectiveWindows(null), now).find((c) => c.rule === 'no-progress')!.episodeStart;
+    const alarm = await plant({ appId: A.app.id, type: 'stall.no-progress', taskId: taskA.id, at: ago(2), severity: 'alarm', episodeStart, chain: [{ workerId: A.worker.id }] });
+    await db.$executeRaw`INSERT INTO agent_team_alarm_schedule (event_id, chain_index, due_at, woken_at) VALUES (${alarm}, 0, ${ago(2)}, ${ago(2)})`;
+    const entry = (await loadTeamRoster(db, A.app.id, now)).find((r: { workerId?: string; id?: string }) => (r.workerId ?? r.id) === A.worker.id);
+    expect(entry?.state).toBe('YOUR_MOVE');
+  });
+
+  const X = 'https://example.test/issues/4202';
+  const feed = async () => {
+    // xmin is cluster-wide: wait until every transaction that began before this call has ended (as the #4084 tests do).
+    const [{ x }] = await db.$queryRaw<{ x: string }[]>`SELECT pg_current_xact_id()::text AS x`;
+    for (let i = 0; i < 200; i++) {
+      const [{ done }] = await db.$queryRaw<{ done: boolean }[]>`SELECT pg_snapshot_xmin(pg_current_snapshot()) > ${x}::xid8 AS done`;
+      if (done) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    const ctx = { db, userId: A.user.id, roles: ['READER'] } as Context;
+    return (resolvers as any).Query.agentTaskExternalIdChanges(null, { appRef: A.app.id }, ctx);
+  };
+
+  it('a change in App A naming a task of App B never carries B\'s external id into A\'s feed', async () => {
+    const taskB = await makeTask(B, 'B task', { externalId: X });
+    await plant({ appId: A.app.id, type: 'task.assigned', taskId: taskB.id, at: ago(1), payload: { type: 'task.assigned' } });
+    expect(JSON.stringify(await feed(), (_k, v) => (typeof v === 'bigint' ? v.toString() : v))).not.toContain(X);
+  });
+
+  it('control: a change of a task of App A carries its external id', async () => {
+    const taskA = await makeTask(A, 'A task', { externalId: X });
+    await plant({ appId: A.app.id, type: 'task.assigned', taskId: taskA.id, at: ago(1), payload: { type: 'task.assigned' } });
+    expect(JSON.stringify(await feed(), (_k, v) => (typeof v === 'bigint' ? v.toString() : v))).toContain(X);
   });
 });

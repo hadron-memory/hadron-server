@@ -114,13 +114,15 @@ export function rosterState(f: {
 
 /** The woken wakes on unacknowledged alarms in an App, per worker owner, nearest first. */
 async function loadWokenAlarms(db: Db, appId: string, now: Date): Promise<Map<string, string[]>> {
-  const rows = await db.$queryRaw<{ eventId: string; workerId: string | null; taskId: string | null; type: string; episodeStart: Date | null }[]>`
-    SELECT e.id AS "eventId", e.chain -> s.chain_index ->> 'workerId' AS "workerId",
+  const rows = await db.$queryRaw<{ eventId: string; appId: string; workerId: string | null; taskId: string | null; type: string; episodeStart: Date | null }[]>`
+    SELECT e.id AS "eventId", e.app_id AS "appId", e.chain -> s.chain_index ->> 'workerId' AS "workerId",
            e.task_id AS "taskId", e.type, e.episode_start AS "episodeStart"
     FROM agent_team_events e
     JOIN agent_team_alarm_schedule s ON s.event_id = e.id
     WHERE e.app_id = ${appId} AND e.severity = 'alarm' AND e.acknowledged_at IS NULL
       AND s.woken_at IS NOT NULL
+      -- #4202: an alarm naming a task of another App is nobody's move here (a missing task is left as it was).
+      AND NOT EXISTS (SELECT 1 FROM agent_tasks ft WHERE ft.id = e.task_id AND ft.app_id <> e.app_id)
     ORDER BY e.created_at, e.id`;
   // #2200 (R196): an alarm whose own episode has ended is no longer anyone's move, from that instant: classified
   // live here, never from the escalation's `ended_at`, which waits for a pass.
