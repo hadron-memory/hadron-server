@@ -73,6 +73,9 @@ export async function proveSecretChange(db: PrismaClient, a: SecretAssertion) {
  return authorized(db,r,verified.snapshot.ownerId,async (tx) => {
   const proof = await decideCeremonyAssertion(tx,{ ceremonyId:a.ceremonyId,browserNonceHash:a.browserNonceHash,purpose:'SECRET_CHANGE_PROOF',verified:verified.snapshot });
   if (!proof || proof.ownerId !== r.requester_id) throw refuse();
+  // A new successful proof retires this browser's earlier completion proof before returning any state.
+  await tx.$executeRaw`UPDATE passkey_ceremonies SET consumed_at=(clock_timestamp() AT TIME ZONE 'UTC')
+   WHERE purpose='SECRET_CHANGE' AND browser_nonce_hash=${a.browserNonceHash} AND consumed_at IS NULL`;
   const current = await request(tx,r.id); if (!current) throw refuse();
   const [{ now }] = await tx.$queryRaw<Array<{ now: Date }>>`SELECT hadron_signing_now() AS now`;
   if (current.state !== 'open' || current.expires_at <= now) return { outcome:'ended' as const,state:current.expires_at <= now && current.state==='open'?'expired':current.state };
@@ -99,7 +102,7 @@ export async function completeSecretChange(db: PrismaClient,a:SecretAssertion):P
   const [{now}]=await tx.$queryRaw<Array<{now:Date}>>`SELECT hadron_signing_now() AS now`;
   if(r.state!=='open')throw refuse();
   const end=async(state:string,code:string)=>{
-   await tx.$executeRaw`UPDATE secret_change_requests SET state=${state},ended_at=${now} WHERE id=${r.id}`;
+   await tx.$executeRaw`UPDATE secret_change_requests SET state=${state},ended_at=(${now.toISOString()}::timestamptz AT TIME ZONE 'UTC') WHERE id=${r.id}`;
    return new GraphQLError('This secret change is no longer available.',{extensions:{code}});
   };
   if(r.expires_at<=now)return end('expired','SECRET_CHANGE_REQUEST_EXPIRED');
@@ -116,7 +119,7 @@ export async function completeSecretChange(db: PrismaClient,a:SecretAssertion):P
    if (secret.createdBy !== ctx.userId && !(await appManager(ctx, r.app_id))) throw refuse();
    await recordSecretEvent(tx,{ownerId:r.app_id,secretId:secret.id,secretName:r.secret_name,kind:'DELETE',actor});
    // Mark completion before deletion; keep the terminal request for requester polling, with no staged value.
-   await tx.$executeRaw`UPDATE secret_change_requests SET state='completed',ended_at=${now} WHERE id=${r.id}`;
+   await tx.$executeRaw`UPDATE secret_change_requests SET state='completed',ended_at=(${now.toISOString()}::timestamptz AT TIME ZONE 'UTC') WHERE id=${r.id}`;
    await tx.secret.delete({where:{id:secret.id}});return null;
   }
   if(r.operation==='STORE'){
@@ -138,9 +141,10 @@ export async function completeSecretChange(db: PrismaClient,a:SecretAssertion):P
    await tx.secret.update({where:{id:secret.id},data:{protected:r.operation==='SET_PROTECTED',updatedBy:r.requester_id}});
    await recordSecretEvent(tx,{ownerId:r.app_id,secretId:secret.id,secretName:r.secret_name,kind:r.operation==='SET_PROTECTED'?'PROTECT':'UNPROTECT',actor});
   }
-  // S3 integration for BOTH SET_PROTECTED and STORE with protected_result=true: end person-self-issued clients here.
-  // This draft must not freeze until that hook and the activation/read guards are folded after S3 merges.
-  await tx.$executeRaw`UPDATE secret_change_requests SET state='completed',ended_at=${now} WHERE id=${r.id}`;
+  // S3 fold: BOTH SET_PROTECTED and STORE with protected_result=true must end person-self-issued clients atomically.
+  // Acquire affected grant/lifecycle locks in S3's canonical order BEFORE request/credential locks above, not at this late marker.
+  // This draft must not freeze until those locks, the transition and activation/read guards fold in after S3 merges.
+  await tx.$executeRaw`UPDATE secret_change_requests SET state='completed',ended_at=(${now.toISOString()}::timestamptz AT TIME ZONE 'UTC') WHERE id=${r.id}`;
   return null;
  });
  if(result instanceof GraphQLError)throw result;

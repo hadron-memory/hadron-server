@@ -21,8 +21,7 @@ const key=softPasskey();
 const ctx=():Context=>({db,userId,roles:[]} as unknown as Context);
 const error=async(p:Promise<unknown>)=>p.then(()=>{throw new Error('expected refusal');},e=>e);
 async function stage(){return (await error(resolvers.Mutation.updateSecret({}, {ref:secretId,value:'staged-canary'},ctx()))).extensions.requestId as string;}
-async function proof(id:string,k=key,opts:{uv?:boolean;origin?:string}={}){
- const nonce='browser-nonce-for-secret-change';
+async function proof(id:string,k=key,opts:{uv?:boolean;origin?:string}={},nonce='browser-nonce-for-secret-change'){
  const open=await openSecretProof(db,{requestId:id,browserNonceHash:hash(nonce)});
  return proveSecretChange(db,{requestId:id,ceremonyId:open.ceremonyId,browserNonceHash:hash(nonce),credentialId:k.credentialId,
  assertion:k.assert({payload:Buffer.alloc(0),rawChallenge:Buffer.from(open.challenge,'base64url'),origin:ORIGIN,rpId:RP,...opts})});
@@ -262,5 +261,48 @@ describe('#3999 wire error and canary boundary',()=>{
    expect(JSON.stringify(await db.secretEvent.findMany({where:{secretId}}))).not.toContain(canary);
    expect(JSON.stringify(calls)).not.toContain(canary);
   }finally{await api.stop();for(const spy of spies)spy.mockRestore();}
+ });
+});
+
+describe('#3999 request authority and revision pins',()=>{
+ it('rejects a different credential owner even with the completion challenge from the requester browser',async()=>{
+  const other=(await db.user.create({data:{email:`${generateId()}@s4.test`}})).id;
+  await db.appMember.create({data:{appId,userId:other,role:'reader'}});const k=softPasskey();await insertSoftPasskey(db,other,k,{rpId:RP});
+  const id=await stage(),p=await proof(id);await expect(complete(id,p,k)).rejects.toThrow();
+  expect((await row(id)).state).toBe('open');expect(await db.secretVersion.count({where:{secretId}})).toBe(1);
+ });
+ it('rejects a changed-then-restored secret even if its old timestamp and metadata were restored',async()=>{
+  const id=await stage(),p=await proof(id),original=await db.secret.findUniqueOrThrow({where:{id:secretId}});
+  await db.$executeRaw`UPDATE secrets SET metadata='{"changed":true}'::jsonb,updated_at=(${original.updatedAt.toISOString()}::timestamptz AT TIME ZONE 'UTC') WHERE id=${secretId}`;
+  await db.$executeRaw`UPDATE secrets SET metadata=${JSON.stringify(original.metadata)}::jsonb,updated_at=(${original.updatedAt.toISOString()}::timestamptz AT TIME ZONE 'UTC') WHERE id=${secretId}`;
+  const restored=await db.secret.findUniqueOrThrow({where:{id:secretId}});
+  expect(restored.updatedAt).toEqual(original.updatedAt);
+  expect(restored.metadata).toEqual(original.metadata);
+  expect(restored.protected).toBe(original.protected);
+  expect(restored.changeRevision).toBe(original.changeRevision+2);
+  await expect(complete(id,p)).rejects.toMatchObject({extensions:{code:'SECRET_CHANGE_REQUEST_STALE'}});
+ });
+});
+
+describe('#3999 UTC-naive transaction timestamps',()=>{
+ it('records completion on the UTC clock even with a non-UTC transaction timezone',async()=>{
+  const id=await stage(),p=await proof(id);
+  const transact=db.$transaction.bind(db);
+  const spy=vi.spyOn(db,'$transaction').mockImplementationOnce(((f:any,opts:any)=>transact(async(tx)=>{
+   await tx.$executeRawUnsafe("SET LOCAL TIME ZONE 'Pacific/Auckland'");return f(tx);
+  },opts)) as any);
+  try{await complete(id,p);}finally{spy.mockRestore();}
+  const [r]=await db.$queryRaw<Array<{utc:boolean}>>`SELECT ended_at >= created_at AND ended_at <= hadron_signing_now() AS utc FROM secret_change_requests WHERE id=${id}`;
+  expect(r.utc).toBe(true);
+ });
+});
+
+
+describe('#3999 proof rotation',()=>{
+ it('a fresh proof in the same browser retires the earlier completion ceremony',async()=>{
+  const first=await stage(),second=await stage(),p1=await proof(first) as any;
+  const p2=await proof(second,key,{},p1.nonce);
+  await expect(complete(first,p1)).rejects.toThrow();expect((await row(first)).state).toBe('open');
+  await complete(second,p2);expect((await row(second)).state).toBe('completed');
  });
 });

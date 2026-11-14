@@ -55,7 +55,7 @@ export async function stageSecretChange(tx: Prisma.TransactionClient, ctx: Conte
 /** An expired request is never presented as live, even before the clearing sweep. */
 export function visibleChange(r: ChangeRequest, now: Date) {
  return { id: r.id, state: r.state === 'open' && r.expires_at <= now ? 'expired' : r.state,
-  operation: r.operation, createdAt: r.created_at.toISOString(), expiresAt: r.expires_at.toISOString() };
+  operation: r.operation, createdAt: r.created_at, expiresAt: r.expires_at };
 }
 /** Clear expired ciphertext in bounded batches; expiry remains enforced independently at every use. */
 export async function sweepExpiredSecretChanges(tx: Prisma.TransactionClient): Promise<number> {

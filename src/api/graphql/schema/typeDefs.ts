@@ -6355,9 +6355,9 @@ export const typeDefs = `#graphql
     """The requested operation."""
     operation: String!
     """Creation time."""
-    createdAt: String!
+    createdAt: DateTime!
     """Expiry time."""
-    expiresAt: String!
+    expiresAt: DateTime!
   }
 
   """
