@@ -58,6 +58,9 @@ import {
   secretActorOf,
 } from '../../../lib/secrets/appSecrets.js';
 import { withAuthorizedTx } from './authorizedTx.js';
+import { createPendingGrant, GrantCreateRefusal } from '../../../lib/grants/create.js';
+import { requireSecretReadClientIssuer } from '../../../lib/secrets/readClientIssuer.js';
+import { generateId } from '../../../lib/id.js';
 
 function badInput(message: string): GraphQLError {
   return new GraphQLError(message, { extensions: { code: 'BAD_USER_INPUT' } });
@@ -255,6 +258,9 @@ export interface UpdateSecretArgs {
 }
 
 export const secretMutations = {
+  /** Issue a read client for an App secret: a pending reveal grant and its client, made together (cor:sec:060:01). */
+  issueSecretReadClient: (_: unknown, { input }: { input: IssueReadClientInput }, ctx: Context) => issueSecretReadClient(ctx, input),
+
   /** Create a named, owner-scoped secret (gate per the matrix above). */
   createSecret: async (_: unknown, args: CreateSecretArgs, ctx: Context) => {
     const ownerType = assertOwnerType(args.ownerType);
@@ -469,6 +475,85 @@ async function deleteAppSecret(ctx: Context, found: SecretRow) {
       return true;
     },
   );
+}
+
+/** The most live read clients one secret carries (#3998 plan R4): a bound on the list a manager reads and the grants a secret answers to. */
+const MAX_LIVE_READ_CLIENTS = 100;
+
+interface IssueReadClientInput {
+  secretRef: string; holderKind: 'USER' | 'WORKER'; holderRef?: string | null; autoDelete: boolean;
+  startsAt?: Date | string | null; expiresAt?: Date | string | null; maxReads?: number | null; reason: string;
+}
+
+function readClientRefusal(code: string, message: string): GraphQLError {
+  return new GraphQLError(message, { extensions: { code } });
+}
+
+function asTime(v: Date | string | null | undefined): Date | null {
+  if (v === null || v === undefined) return null;
+  const d = v instanceof Date ? v : new Date(v);
+  if (Number.isNaN(d.getTime())) throw badInput('A time is not a valid date.');
+  return d;
+}
+
+/**
+ * Issue a read client (cor:sec:060:01): the pending `secret.reveal` grant and its client row, in ONE transaction. Only a person
+ * acting as themselves, who manages the App or wrote the current version (`requireSecretReadClientIssuer`, judged under the
+ * secret row's lock so a newer version cannot slip in). The grant still needs the issuer's passkey signature, which judges the
+ * issuer rule again. A client with an auto-delete mark needs a window or a read budget.
+ */
+async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) {
+  await admitOperationRate(ctx, ctx.db, 'WRITES', appRateIdentity(ctx));
+  const found = await findSecretByRef(ctx, input.secretRef);
+  if (!found || found.ownerType !== 'app') throw authorizationDenied();
+  const app = await loadLiveApp(ctx, found.ownerId);
+  if (!app) throw authorizationDenied();
+  const startsAt = asTime(input.startsAt);
+  const expiresAt = asTime(input.expiresAt);
+  const maxUses = input.maxReads ?? null;
+  if (input.autoDelete && !expiresAt && maxUses === null) {
+    throw readClientRefusal('SECRET_AUTO_DELETE_NEEDS_LIMIT', 'An auto-delete mark needs a window or a read budget.');
+  }
+  try {
+    return await withAuthorizedTx(
+      ctx,
+      appAnchors(app),
+      async (txCtx) => {
+        if (!(await lockSecretRow(txCtx.db as never, found.id))) throw authorizationDenied();
+        await requireSecretReadClientIssuer(txCtx, found.id);
+      },
+      async (tx, txCtx) => {
+        const userId = txCtx.userId as string;
+        const issuance = await requireSecretReadClientIssuer({ ...txCtx, db: tx } as Context, found.id);
+        const holder = input.holderKind === 'USER'
+          ? { kind: 'user' as const, id: userId }
+          : { kind: 'worker' as const, id: input.holderRef ?? '' };
+        if (input.holderKind === 'USER' && input.holderRef && input.holderRef !== userId) {
+          throw readClientRefusal('GRANT_HOLDER_NOT_ALLOWED', 'A person holds a read client only for themself.');
+        }
+        const live = await tx.$queryRaw<Array<{ n: bigint }>>`
+          SELECT count(*) AS n FROM secret_read_clients c JOIN grants g ON g.id = c.grant_id
+           WHERE c.secret_id = ${found.id} AND c.ended_at IS NULL AND g.revoked_at IS NULL AND g.holder_departed_at IS NULL`;
+        if (Number(live[0]?.n ?? 0) >= MAX_LIVE_READ_CLIENTS) {
+          throw readClientRefusal('SECRET_READ_CLIENT_LIMIT', 'This secret already has the most read clients it may have.');
+        }
+        const grantId = await createPendingGrant(tx, {
+          appId: app.id, requester: { userId, workerId: null, sessionId: null }, holder,
+          action: 'secret.reveal', values: { secret: found.id, 'auto-delete': input.autoDelete ? 'delete' : 'keep' },
+          startsAt, expiresAt, maxUses, reason: input.reason, canReadMemory: async () => false,
+        });
+        const clientId = generateId();
+        const selfIssued = holder.kind === 'user' && holder.id === userId;
+        await tx.secretReadClient.create({
+          data: { id: clientId, grantId, appId: app.id, secretId: found.id, secretName: issuance.secretName, issuerUserId: userId, selfIssued },
+        });
+        return { clientId, grantId, secretName: issuance.secretName, selfIssued };
+      },
+    );
+  } catch (error) {
+    if (error instanceof GrantCreateRefusal) throw readClientRefusal(error.code, error.message);
+    throw error;
+  }
 }
 
 export const secretQueries = {

@@ -6358,6 +6358,27 @@ export const typeDefs = `#graphql
   secret keeps its values as versions: every store adds one
   (hrn:node:hadronmemory.com:specs:cor:sec:010:03).
   """
+  input IssueSecretReadClientInput {
+    "The App secret, by id or URN."
+    secretRef: ID!
+    "WORKER: a live worker of the App (holderRef is its id). USER: the issuer themself (holderRef omitted)."
+    holderKind: GrantHolderKind!
+    holderRef: ID
+    "Delete the secret at the client's last read or when its window ends. Needs a window or a read budget."
+    autoDelete: Boolean! = false
+    startsAt: DateTime
+    expiresAt: DateTime
+    maxReads: Int
+    reason: String!
+  }
+
+  type SecretReadClientIssued {
+    clientId: ID!
+    grantId: ID!
+    secretName: String!
+    selfIssued: Boolean!
+  }
+
   type Secret {
     id: ID!
     "Owner scope: user | org | app."
@@ -13814,6 +13835,14 @@ export const typeDefs = `#graphql
 
     "Hard-delete a secret, every version with it; referencing runs fail their resolution loud (or fall through the cascade) afterwards. An unprotected App secret is deleted by its creator or whoever manages the App, each as a person."
     deleteSecret(ref: ID!): Boolean!
+
+    """
+    Issue a read client for an App secret (hrn:node:hadronmemory.com:specs:cor:sec:060:01): one pending "secret.reveal" grant and
+    its client, made together. A person only (never a worker session, a run, an impersonated session or an App key), who manages the
+    App or wrote the secret's current version. The grant waits for the issuer's passkey signature; the holder is a live worker of the
+    App, or the issuer themself. The client id is returned here, to the issuer, and to the holder; it never reads on its own.
+    """
+    issueSecretReadClient(input: IssueSecretReadClientInput!): SecretReadClientIssued!
 
     """
     Register a Home Assistant instance (org ADMIN/OWNER). orgRef accepts
