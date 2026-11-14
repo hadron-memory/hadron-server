@@ -217,3 +217,67 @@ describe('the SQL guard proves the TRUE cause (a bare stamp)', () => {
     expect(await sqlSays(w.appId, fa.id)).toBe(!!(await resolveAppInstallation(db, w.appId, fa.id)));
   });
 });
+
+// #4210 LOCAL F1: two removals under DIFFERENT anchors in one App used to deadlock (40P01) on each other's post-delete witness
+// scans. Both writes are driven by the real resolvers and held at a barrier right after their own witness delete, so the pin is
+// red unless the second door waits at the fence BEFORE deleting (then only one reaches the barrier and the barrier times out
+// into the release path below).
+function barrierDb(model: 'agentImport' | 'appAgent') {
+  let reached = 0; let release!: () => void;
+  const barrier = new Promise<void>((r) => { release = r; });
+  // The fenced door never reaches the barrier together with the other one: release after a bound so the first can finish.
+  const timer = setTimeout(() => release(), 2500);
+  const proxied = new Proxy(db, { get(target, key) {
+    if (key === '$transaction') return (fn: any, options: any) => target.$transaction(async (tx: any) => {
+      const wrapped = new Proxy(tx, { get(t, k) {
+        if (k === model) return new Proxy(t[model], { get(m, name) {
+          if (name === 'deleteMany') return async (...args: any[]) => {
+            const result = await m.deleteMany(...args); reached++; if (reached === 2) release();
+            await barrier; return result;
+          };
+          const v = m[name]; return typeof v === 'function' ? v.bind(m) : v;
+        } });
+        const v = t[k]; return typeof v === 'function' ? v.bind(t) : v;
+      } });
+      return fn(wrapped);
+    }, { ...options, timeout: 20000 });
+    const v = (target as any)[key]; return typeof v === 'function' ? v.bind(target) : v;
+  } });
+  return { proxied: proxied as unknown as typeof db, done: () => clearTimeout(timer) };
+}
+
+describe('F1: concurrent removals under different anchors do not deadlock', () => {
+  it('two parents owned by different people, one App, one imported agent: both removeAgentImport calls succeed', async () => {
+    const u2 = await db.user.create({ data: { handle: `other-${generateId().slice(0, 8)}` } });
+    const p1 = await db.agent.create({ data: { ownerUserId: admin.id, name: 'p1', urn: `p1-${generateId()}` } });
+    const p2 = await db.agent.create({ data: { ownerUserId: u2.id, name: 'p2', urn: `p2-${generateId()}` } });
+    await install(w.appId, p1.id); await install(w.appId, p2.id);
+    await importEdge(p1.id, child.id); await importEdge(p2.id, child.id);
+    const grant = await held(child.id, w.appId);
+    const { proxied, done } = barrierDb('agentImport');
+    const results = await Promise.allSettled([
+      M.removeAgentImport({}, { parentAgentRef: p1.id, importedAgentRef: child.id }, { db: proxied, userId: admin.id, roles: ['READER'] }),
+      M.removeAgentImport({}, { parentAgentRef: p2.id, importedAgentRef: child.id }, { db: proxied, userId: u2.id, roles: ['READER'] }),
+    ]);
+    done();
+    expect(results.map((r) => (r.status === 'rejected' ? String(r.reason) : r.status))).toEqual(['fulfilled', 'fulfilled']);
+    expect((await row(grant)).departed).toBe(true);
+  }, 40000);
+
+  it('two different parents uninstalled from one App at once: both succeed and the imported agent ends', async () => {
+    const p1 = await db.agent.create({ data: { organizationId: w.orgId, name: 'q1', urn: `${w.orgId}:q1` } });
+    const p2 = await db.agent.create({ data: { organizationId: w.orgId, name: 'q2', urn: `${w.orgId}:q2` } });
+    await install(w.appId, p1.id); await install(w.appId, p2.id);
+    await importEdge(p1.id, child.id); await importEdge(p2.id, child.id);
+    const grant = await held(child.id, w.appId);
+    const { proxied, done } = barrierDb('appAgent');
+    const c = { db: proxied, userId: admin.id, roles: ['READER'] };
+    const results = await Promise.allSettled([
+      M.uninstallAgentFromApp({}, { appRef: w.appId, agentRef: p1.id }, c),
+      M.uninstallAgentFromApp({}, { appRef: w.appId, agentRef: p2.id }, c),
+    ]);
+    done();
+    expect(results.map((r) => (r.status === 'rejected' ? String(r.reason) : r.status))).toEqual(['fulfilled', 'fulfilled']);
+    expect((await row(grant)).departed).toBe(true);
+  }, 40000);
+});

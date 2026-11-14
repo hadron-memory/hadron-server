@@ -3555,7 +3555,9 @@ export async function uninstallAgentFromAppCore(
         tx, [{ appId: resolvedAppId, agentId: resolvedAgentId }, ...importedHere], ctx.userId ?? null);
     },
     { lockMode: 'exclusive', afterLock: async (tx) => {
-      await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedAppId} FOR SHARE`;
+      // NO KEY UPDATE, not SHARE (#4210 F1): two uninstalls of different agents in one App delete their own app_agents rows and then
+      // scan each other's FOR SHARE; the fence makes the second wait before it deletes anything.
+      await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedAppId} FOR NO KEY UPDATE`;
     } },
   );
   return { appId: resolvedAppId, agentId: resolvedAgentId };

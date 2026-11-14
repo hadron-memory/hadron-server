@@ -13,7 +13,7 @@
  */
 
 import type { Prisma } from '../../generated/prisma/index.js';
-import { endGrantsOfAgentsNoLongerInstalled, importedPairsOfParent, liveAppsWhereInstalled } from '../../lib/grants/agentInstallDeparture.js';
+import { endGrantsOfAgentsNoLongerInstalled, fenceAppsForWitnessDelete, importedPairsOfParent, liveAppsWhereInstalled } from '../../lib/grants/agentInstallDeparture.js';
 
 export async function removeAgentImport(
   tx: Prisma.TransactionClient,
@@ -22,7 +22,11 @@ export async function removeAgentImport(
   removedBy: string | null = null,
 ): Promise<void> {
   // The Apps the edge could have witnessed an install in, read BEFORE the edge goes (the edge is what the pairs are named from).
+  // Fence every App the edge could witness an install in BEFORE the delete (two parents' removals would otherwise deadlock on
+  // each other's post-delete witness scans, #4210 F1), then re-read: an App the parent was installed in meanwhile is fenced too.
+  const fenced = new Set(await fenceAppsForWitnessDelete(tx, await liveAppsWhereInstalled(tx, parentAgentId)));
   const apps = await liveAppsWhereInstalled(tx, parentAgentId);
+  await fenceAppsForWitnessDelete(tx, apps.filter((a) => !fenced.has(a)));
   const pairs = await importedPairsOfParent(tx, parentAgentId, apps, importedAgentId);
   // Idempotent: a missing row is a no-op (deleteMany never throws on it); any other error surfaces.
   const gone = await tx.agentImport.deleteMany({ where: { parentAgentId, importedAgentId } });

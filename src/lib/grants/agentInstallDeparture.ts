@@ -42,6 +42,19 @@ export async function endGrantsOfAgentsNoLongerInstalled(
   return { departed, ended };
 }
 
+/**
+ * Fence the Apps a door is about to delete a witness (an app_agents row or an agent_imports edge) from, BEFORE the delete, in id
+ * order. Without it two doors on the same App under different anchors (two parents' owners, say) each delete their own witness and
+ * then FOR SHARE-scan the other's still-visible one: a lock cycle (40P01, #4210 LOCAL F1). NO KEY UPDATE conflicts with the
+ * installation locks' FOR SHARE and with itself, so the second door waits here, holding nothing, and then sees the first one's
+ * committed result; it does not conflict with the FOR KEY SHARE an app_agents insert takes. Returns the Apps fenced.
+ */
+export async function fenceAppsForWitnessDelete(tx: Prisma.TransactionClient, appIds: readonly string[]): Promise<string[]> {
+  const ids = [...new Set(appIds)].sort();
+  if (ids.length) await tx.$queryRaw`SELECT id FROM apps WHERE id = ANY(${ids}::text[]) ORDER BY id FOR NO KEY UPDATE`;
+  return ids;
+}
+
 /** The live org Apps in which `parentAgentId` is physically installed (a derived install needs such a witness). */
 export async function liveAppsWhereInstalled(tx: Prisma.TransactionClient, parentAgentId: string, organizationId?: string): Promise<string[]> {
   const rows = await tx.appAgent.findMany({

@@ -1,7 +1,8 @@
 -- #4171 + #4172 (Holger rulings A, epic #1975): a grant's holder DEPARTS without being deleted. A person who leaves the organization
 -- that owns the grant's App (user arm), and an agent left with no effective installation in the App (agent arm, with the new SQL twin
 -- hadron_agent_installed_in_app of resolveAppInstallation). The guard function and the new function are REPLACED; no table, column or
--- row changes, no backfill and no data check (so no HDPRF refusal), and expand-safe: the previous image's existing erasure and deletion
+-- row changes, no backfill and no refusing data check (so no HDPRF refusal; the canonical tail below re-adds the UNCHANGED CHECKs, as the
+-- carrier before it does, which re-validates them and takes short table locks on grants, grant_events and actions), and expand-safe: the previous image's existing erasure and deletion
 -- departure calls run unchanged against the replaced functions. The canonical file below carries BOTH arms.
 -- #3668 (S1a): the database half of the grant row, its events and the actions table. One source; the newest migration to
 -- carry it (20261114140000_grant_org_leave_agent_uninstall) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
