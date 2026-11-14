@@ -9,22 +9,27 @@
  *    own (another App's, a deleted one, one that never existed) is refused as one missing-config answer.
  *  - `chatAiConfigChoices(appRef)`: any App member (a platform admin too). A caller who is not a member gets the
  *    answer a missing App gets. The projection carries no key, key preview, params or endpoint.
+ *  - `chatEffectiveToolChoice(chatId)` (#4042): the tool-choice decision of the config the chat's turn would use,
+ *    through the single-chat read gate `chatHistory` uses (cor:acl:030:01); an unreadable chat answers as a missing one.
+ *  - `chatToolChoiceFor(provider, model)` (#4042): the same one predicate for an unsaved pair; pure, any signed-in caller.
  */
 import { Prisma } from '../../../generated/prisma/index.js';
 import { AiServiceConfigNotFoundError } from '../../../lib/aiConfig.js';
-import { listChatAiConfigChoices } from '../../../lib/chatbotAiConfig.js';
+import { effectiveChatToolChoice, listChatAiConfigChoices } from '../../../lib/chatbotAiConfig.js';
+import { chatToolChoiceFor } from '../../../lib/llm/chatToolChoice.js';
+import { isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { isRefusedPrincipal } from '../../../lib/auth/requestPrincipal.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
-import { forbiddenError } from '../../../lib/refusals.js';
+import { forbiddenError, unauthenticatedError } from '../../../lib/refusals.js';
 import { chatLocFilter, pickChatNode } from '../../../lib/chatLoc.js';
 import { chatNotFoundError } from '../../../lib/chatNotFound.js';
 import { translateSessionExpired } from '../../../lib/channels.js';
 import { decryptNodeFields, getMemoryEncryptionInfo } from '../../../lib/nodeCrypto.js';
 import { withAuthorizedTx } from './authorizedTx.js';
-import { isPlatformAdmin, rethrowAiConfigTyped, type Context } from './resolvers.helpers.js';
+import { isMemoryReadableCached, isPlatformAdmin, rethrowAiConfigTyped, type Context } from './resolvers.helpers.js';
 
 type AppRow = { id: string; organizationId: string | null; ownerUserId: string | null };
 
@@ -64,7 +69,67 @@ export const chatbotAiConfigTypeResolvers = {
   },
 };
 
+/**
+ * #4042: the chat a caller may read, for `chatEffectiveToolChoice`. The same steps `chatHistory` runs, in the same
+ * order, built from the same shared pieces (`chatLocFilter`, `pickChatNode`, `isMemoryReadableCached`) and copying
+ * none of its rules: sign-in, no impersonation (#876), entitlement-filtered lookup with the oldest node winning
+ * (#829), then the host memory's content-read gate (cor:acl:030:01). Unlike `chatHistory`, a denied read answers
+ * `chatNotFoundError`, byte-identical to a chat that does not exist, so the answer reveals nothing about which chats exist.
+ */
+async function readableChatForToolChoice(ctx: Context, chatId: string) {
+  if (!ctx.userId) throw unauthenticatedError();
+  if (ctx.impersonation) throw forbiddenError();
+  const chatNode = pickChatNode(
+    await ctx.db.node.findMany({
+      where: await chatLocFilter(ctx.db, chatId, ctx),
+      orderBy: { createdAt: 'asc' as const },
+      take: 2,
+    }),
+    chatId,
+  );
+  if (!chatNode) throw chatNotFoundError(chatId);
+  if (!(await isMemoryReadableCached(ctx, chatNode.memoryId))) throw chatNotFoundError(chatId);
+  return chatNode;
+}
+
+/** The Agent a chat belongs to: the same derivation `sendChatMessage` uses (an uninstalled App-class Agent no longer counts). */
+async function chatAgentIdOf(ctx: Context, memory: { id: string; class: string; appId: string | null; sharedMemoryOfAgentId: string | null; userMemoryOfAgentId: string | null }): Promise<string | null> {
+  let agentId: string | null = memory.sharedMemoryOfAgentId ?? memory.userMemoryOfAgentId;
+  if (!agentId) {
+    const legacy = await ctx.db.agent.findMany({
+      where: { deletedAt: null, memoryItems: { some: { memoryId: memory.id } } },
+      select: { id: true, systemMemoryId: true },
+    });
+    agentId = legacy.find((a) => a.systemMemoryId)?.id ?? null;
+  }
+  if (agentId && memory.class === 'app' && !(memory.appId && (await isAgentInstalledAndLicensed(ctx.db, memory.appId, agentId)))) return null;
+  return agentId;
+}
+
 export const chatbotAiConfigQueries = {
+  chatEffectiveToolChoice: async (_: unknown, { chatId }: { chatId: string }, ctx: Context) => {
+    const chatNode = await readableChatForToolChoice(ctx, chatId);
+    const memory = await ctx.db.memory.findUnique({
+      where: { id: chatNode.memoryId },
+      select: { id: true, class: true, appId: true, sharedMemoryOfAgentId: true, userMemoryOfAgentId: true },
+    });
+    if (!memory) throw chatNotFoundError(chatId);
+    const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
+    if (memEncInfo.isEncrypted) translateSessionExpired(memEncInfo.id, () => decryptNodeFields(chatNode, memEncInfo));
+    const storedChoice = ((chatNode.data as Record<string, unknown> | null) ?? {}).aiConfigChoice;
+    try {
+      return await effectiveChatToolChoice(ctx.db, { appId: memory.appId, agentId: await chatAgentIdOf(ctx, memory), storedChoice });
+    } catch (e) {
+      return rethrowAiConfigTyped(e);
+    }
+  },
+
+  // A function of the public predicate, not of any tenant row: no database read, no decrypt, no provider call, no usage.
+  chatToolChoiceFor: async (_: unknown, { provider, model }: { provider: string; model: string }, ctx: Context) => {
+    if (!ctx.userId && !ctx.appId) throw unauthenticatedError();
+    return chatToolChoiceFor(provider, model);
+  },
+
   chatAiConfigChoices: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
     try {
       if (!isDirectPerson(ctx)) throw new AppNotFoundError(appRef);

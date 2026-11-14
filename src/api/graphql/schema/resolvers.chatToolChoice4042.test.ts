@@ -162,10 +162,11 @@ describe('(a) chatEffectiveToolChoice(chatId)', () => {
 
   it('no-App chat: an Agent chat with no App still gets the walk\'s decision', async () => {
     await cfg({ agentId: agent.id }, 'default', 'anthropic', 'claude-fable-5-2');
-    const { chatId } = await start({ scope: 'private' });
+    await db.appAgent.delete({ where: { appId_agentId: { appId: app.id, agentId: agent.id } } }); // no installed App: the org manager's chat is App-less
+    const { chatId } = await start({ scope: 'private' }, ctx(admin));
     const node = await chatNodeByLocOrThrow(db, chatId);
     expect((await db.memory.findUniqueOrThrow({ where: { id: node.memoryId } })).appId).toBeNull();
-    expect(await effective(chatId)).toBe('AUTO');
+    expect(await effective(chatId, ctx(admin))).toBe('AUTO');
   });
 
   it('answers null, and does not raise, when nothing resolves', async () => {
@@ -186,9 +187,16 @@ describe('(a) chatEffectiveToolChoice(chatId)', () => {
     const denied = await effective(chatId, ctx(member)).catch((e: any) => e); // an App member who is not the chat's owner
     const unknown = await effective('chats:nope', ctx(member)).catch((e: any) => e);
     const stranger = await effective(chatId, ctx(outsider)).catch((e: any) => e);
-    for (const e of [denied, unknown, stranger]) expect(e.extensions?.code).toBe('CHAT_NOT_FOUND');
+    // The entitlement filter (`chatLocFilter`) admits a chat's AUTHOR; only the host memory's read gate refuses them once they
+    // are no longer a participant. This is the caller that proves the gate, not the filter, is doing the work.
+    const shared = await start({}, ctx(member));
+    expect(await effective(shared.chatId, ctx(member))).toBe('AUTO'); // control: the author reads their own shared chat
+    await db.appMember.delete({ where: { appId_userId: { appId: app.id, userId: member.id } } });
+    const lapsed = await effective(shared.chatId, ctx(member)).catch((e: any) => e);
+    for (const e of [denied, unknown, stranger, lapsed]) expect(e.extensions?.code).toBe('CHAT_NOT_FOUND');
     const shape = (e: any, id: string) => JSON.stringify({ m: e.message.split(id).join('<c>'), x: e.extensions });
     expect(shape(denied, chatId)).toBe(shape(unknown, 'chats:nope'));
     expect(shape(stranger, chatId)).toBe(shape(unknown, 'chats:nope'));
+    expect(shape(lapsed, shared.chatId)).toBe(shape(unknown, 'chats:nope'));
   });
 });
