@@ -29,10 +29,10 @@ async function read(surface:typeof surfaces[number],after:string|undefined,limit
  return (await resolvers.Query.agentTeamEventsPage({}, {appRef:appId,after,limit},context())).events;
 }
 describe('#4098 committed-event completeness',()=>{
- it.each(surfaces)('%s: an older open writer is delivered after commit, without advancing past it',async(surface)=>{
-  const anchor=await event(T);await settle();
+ it.each(surfaces.flatMap(surface=>[{surface,anchored:true},{surface,anchored:false}]))('$surface: an older open writer is delivered after commit (existing cursor=$anchored)',async({surface,anchored})=>{
+  const anchor=anchored?await event(T):null;await settle();
   const pg=new Client({connectionString:process.env.DATABASE_URL});await pg.connect();let open=false;
-  const olderId=generateId();let cursor=anchor.id;const seen:string[]=[];
+  const olderId=generateId();let cursor=anchor?.id;const seen:string[]=[];
   const poll=async()=>{const rows=await read(surface,cursor);seen.push(...rows.map(r=>r.id));if(rows.length)cursor=rows[rows.length-1].id;};
   try{
    await pg.query('BEGIN');open=true;
