@@ -118,9 +118,9 @@ describe('App-shape secret URN (#4154)', () => {
 
   it('condition 4: parity with the URN libraries — the same accept/refuse set for the secret shapes (cor:urn:010:01)', () => {
     // Accepted: org/user `<root>:<name>` and App `<root>:app:<slug>:<name>`.
-    expect(parseSecretUrn(`hrn:secret:${ROOT}:app:ops:key`)).toEqual({ root: ROOT, appSlug: 'ops', name: 'key' });
-    expect(parseSecretUrn('hrn:secret:acme.com:app:eng-team:openai-key')).toEqual({ root: 'acme.com', appSlug: 'eng-team', name: 'openai-key' });
-    expect(parseSecretUrn('hrn:secret:acme.com:stripe-key')).toEqual({ root: 'acme.com', name: 'stripe-key' });
+    expect(parseSecretUrn(`hrn:secret:${ROOT}:app:ops:key`)).toEqual({ kind: 'app', root: ROOT, appSlug: 'ops', name: 'key' });
+    expect(parseSecretUrn('hrn:secret:acme.com:app:eng-team:openai-key')).toEqual({ kind: 'app', root: 'acme.com', appSlug: 'eng-team', name: 'openai-key' });
+    expect(parseSecretUrn('hrn:secret:acme.com:stripe-key')).toEqual({ kind: 'principal', root: 'acme.com', name: 'stripe-key' });
     // Refused: wrong shape, empty atoms, a leaf that is not a name atom, a root that is not a bare principal.
     for (const ref of [
       'hrn:secret:acme.com:app:eng-team', // no name
