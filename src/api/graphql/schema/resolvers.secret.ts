@@ -567,7 +567,7 @@ const currentVersionBatch = tickBatch<string, number | null>(async (ctx, ids) =>
 }, null);
 
 /**
- * #4157: `Secret.versions` pages raised in the same tick share one grouped count and one windowed read per distinct
+ * #4157: `Secret.versions` pages raised in the same tick share one grouped count and one lateral read (an index-bounded `LIMIT` per secret, via the unique `(secret_id, version_no)`) per distinct
  * (take, skip), so each parent keeps its own page and `hasMore`. The key is `<secretId>|<take>|<skip>`; a secret id
  * is a cuid, which cannot contain the separator.
  */
@@ -587,12 +587,13 @@ const versionsPageBatch = tickBatch<string, VersionsPageResult>(async (ctx, keys
   }
   for (const g of windows.values()) {
     const rows = await ctx.db.$queryRaw<(VersionRow & { secretId: string })[]>`
-      SELECT id, secret_id AS "secretId", version_no AS "versionNo", size_bytes AS "sizeBytes", written_at AS "writtenAt",
-             written_by_user_id AS "writtenByUserId", written_by_worker_id AS "writtenByWorkerId", superseded_at AS "supersededAt"
-        FROM (SELECT v.*, row_number() OVER (PARTITION BY v.secret_id ORDER BY v.version_no DESC) AS rn
-                FROM secret_versions v WHERE v.secret_id = ANY(${g.ids}::text[])) t
-       WHERE t.rn > ${g.skip} AND t.rn <= ${g.skip + g.take}
-       ORDER BY t.secret_id, t.version_no DESC`;
+      SELECT v.id, v.secret_id AS "secretId", v.version_no AS "versionNo", v.size_bytes AS "sizeBytes", v.written_at AS "writtenAt",
+             v.written_by_user_id AS "writtenByUserId", v.written_by_worker_id AS "writtenByWorkerId", v.superseded_at AS "supersededAt"
+        FROM unnest(${g.ids}::text[]) AS s(id)
+        CROSS JOIN LATERAL (
+          SELECT * FROM secret_versions x WHERE x.secret_id = s.id ORDER BY x.version_no DESC OFFSET ${g.skip} LIMIT ${g.take}
+        ) v
+       ORDER BY v.secret_id, v.version_no DESC`;
     for (const r of rows) {
       const { secretId, ...item } = r;
       out.get(`${secretId}|${g.take}|${g.skip}`)?.items.push(item);

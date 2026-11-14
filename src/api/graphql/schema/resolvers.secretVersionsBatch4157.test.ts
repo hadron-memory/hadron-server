@@ -54,8 +54,8 @@ describe('#4157 versions batching', () => {
       counts.push(count());
       vi.restoreAllMocks();
     }
-    expect(counts[1]).toBe(counts[0]);
-    expect(counts[0]).toBeLessThanOrEqual(3);
+    // Exact contract: one grouped max, one grouped count, one lateral read. Zero would mean the spies hooked nothing.
+    expect(counts).toEqual([3, 3]);
   });
 
   it('keeps each parent its own page, total, hasMore and newest version under batching (acceptance 2)', async () => {
@@ -93,7 +93,7 @@ describe('#4157 versions batching', () => {
     expect(JSON.stringify(batched)).not.toMatch(/valueEncrypted|ciphertext/i);
   });
 
-  it('answers different pages for the same secret raised in one tick, and isolates secrets (cross-owner)', async () => {
+  it('answers different pages for the same secret raised in one tick, and keeps a second secret apart', async () => {
     const a = await makeSecret('a', 4);
     const b = await makeSecret('b', 1);
     const ctx = context(ownerId);
@@ -114,6 +114,24 @@ describe('#4157 versions batching', () => {
       { cur: null, ver: { items: [], total: 0, hasMore: false } },
       { cur: null, ver: { items: [], total: 0, hasMore: false } },
     ]);
+  });
+
+  it('fails every parent when the batched read fails, and a later tick starts clean', async () => {
+    const a = await makeSecret('a', 2);
+    const b = await makeSecret('b', 2);
+    const ctx = context(ownerId);
+    const boom = vi.spyOn(db.secretVersion as any, 'groupBy').mockRejectedValueOnce(new Error('boom'));
+    const settled = await Promise.allSettled([R.Secret.currentVersion(a, {}, ctx), R.Secret.currentVersion(b, {}, ctx)]);
+    expect(settled.map((r) => r.status)).toEqual(['rejected', 'rejected']);
+    boom.mockRestore();
+    expect((await page(ctx, [a, b])).map((r) => r.cur)).toEqual([2, 2]);
+  });
+
+  it('keeps two request contexts apart when both raise the same secret in one tick', async () => {
+    const a = await makeSecret('a', 3);
+    const count = spyVersionQueries();
+    await Promise.all([page(context(ownerId), [a]), page(context(ownerId), [a])]);
+    expect(count()).toBe(6);
   });
 
   it('does not keep a result past the tick: a later read sees a later write', async () => {
