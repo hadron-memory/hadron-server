@@ -58,7 +58,7 @@ const comments = () => db.node.count({ where: { memoryId: memory.id, nodeType: '
 describe('#4106 createEdge / updateEdge', () => {
   const create = (extra: Record<string, unknown>) => M.createEdge({}, { sourceRef: n1.id, targetRef: n2.id, ...extra }, ctx(admin.id));
   for (const [field, patch] of [
-    ['name', { name: nul }], ['description', { description: nul }],
+    ['name', { name: nul }], ['description', { description: nul }], ['loc', { loc: nul }],
     ['data', { data: { k: nul } }], ['data', { data: { [nul]: 1 } }],
     ['name', { name: lone }],
   ] as [string, Record<string, unknown>][]) {
@@ -67,8 +67,8 @@ describe('#4106 createEdge / updateEdge', () => {
       expect(await edges()).toBe(0);
     });
   }
-  it('loc and condition already refuse with their own typed codes, never a server fault (existing behaviour)', async () => {
-    for (const patch of [{ loc: nul }, { condition: { k: nul } }]) {
+  it('condition already refuses with its own typed code, never a server fault (existing behaviour)', async () => {
+    for (const patch of [{ condition: { k: nul } }]) {
       const e: any = await create(patch).catch((x: any) => x);
       expect(e.extensions?.code).toBeTruthy();
       expect(e.extensions.code).not.toBe('INTERNAL_SERVER_ERROR');
@@ -79,13 +79,13 @@ describe('#4106 createEdge / updateEdge', () => {
   it('updateEdge refuses it typed and leaves the edge untouched', async () => {
     const e = await create({ name: 'ok' });
     const snap = await db.edge.findUniqueOrThrow({ where: { id: e.id } });
-    for (const [field, patch] of [['name', { name: nul }], ['description', { description: nul }], ['data', { data: { k: nul } }]] as [string, any][]) {
+    for (const [field, patch] of [['name', { name: nul }], ['description', { description: nul }], ['loc', { loc: nul }], ['data', { data: { k: nul } }]] as [string, any][]) {
       await refused(M.updateEdge({}, { edgeRef: e.id, ...patch }, ctx(admin.id)), field);
     }
     expect(await db.edge.findUniqueOrThrow({ where: { id: e.id } })).toEqual(snap);
   });
   it('hadron_create_edge refuses it typed with the code, writing no edge', async () => {
-    for (const [field, patch] of [['name', { name: nul }], ['description', { description: nul }]] as [string, any][]) {
+    for (const [field, patch] of [['name', { name: nul }], ['description', { description: nul }], ['loc', { loc: nul }]] as [string, any][]) {
       shape(await mcp().callToolText('hadron_create_edge', { sourceUrn: urn('n1'), targetUrn: urn('n2'), ...patch }), field);
     }
     expect(await edges()).toBe(0);
@@ -116,8 +116,9 @@ describe('#4106 comments', () => {
   it('replyToComment and editComment refuse it typed and leave the thread untouched', async () => {
     const c = await M.createComment({}, { targetRef: n1.id, body: 'first' }, ctx(admin.id));
     await refused(M.replyToComment({}, { commentRef: c.id, body: nul }, ctx(admin.id)), 'body');
-    await refused(M.editComment({}, { commentRef: c.id, body: nul }, ctx(admin.id)), 'body');
-    await refused(M.editComment({}, { commentRef: c.id, quote: nul }, ctx(admin.id)), 'quote');
+    const expectedRevision = (await db.node.findUniqueOrThrow({ where: { id: c.id } })).revSeq;
+    await refused(M.editComment({}, { commentRef: c.id, body: nul, expectedRevision }, ctx(admin.id)), 'body');
+    await refused(M.editComment({}, { commentRef: c.id, quote: nul, expectedRevision }, ctx(admin.id)), 'quote');
     expect(await comments()).toBe(1);
   });
   it('the MCP comment tools refuse it typed with the code', async () => {
@@ -125,7 +126,8 @@ describe('#4106 comments', () => {
     expect(await comments()).toBe(0);
     const c = await M.createComment({}, { targetRef: n1.id, body: 'first' }, ctx(admin.id));
     shape(await mcp().callToolText('hadron_reply_to_comment', { commentRef: c.id, body: nul }), 'body');
-    shape(await mcp().callToolText('hadron_edit_comment', { commentRef: c.id, body: nul }), 'body');
+    const expectedRevision = (await db.node.findUniqueOrThrow({ where: { id: c.id } })).revSeq;
+    shape(await mcp().callToolText('hadron_edit_comment', { commentRef: c.id, body: nul, expectedRevision }), 'body');
     expect(await comments()).toBe(1);
   });
   it('still stores ordinary and non-BMP comment text (control)', async () => {

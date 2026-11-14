@@ -3745,6 +3745,10 @@ export const nodeMutations = {
       if (!tgt || !(await isMemoryReadableCached(ctx, tgt.memoryId))) {
         throw new GraphQLError(`Target node not found: "${targetRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
       }
+      // #4106: caller text a NUL or lone surrogate would make Postgres reject (22021 / 22P05 in jsonb) is refused typed,
+      // after the gates above and before the loc derives from `name` or anything is written. `loc` and `condition`
+      // already refuse with their own typed codes.
+      assertStorableText({ name, loc, description, data });
       const edgeLoc = loc != null && loc !== '' ? loc : deriveEdgeLoc(src.loc, name ?? null, tgt.loc);
       try {
         validateLoc(edgeLoc);
@@ -3866,6 +3870,7 @@ export const nodeMutations = {
         throwOnInvalidCondition(condition);
       }
       if (loc != null && loc !== '') {
+        assertStorableText({ loc }); // #4106: typed, and the value is never echoed (InvalidLocError's message would)
         try {
           validateLoc(loc);
         } catch (e) {
@@ -3929,6 +3934,7 @@ export const nodeMutations = {
         });
       }
       await requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, edgeMem.memoryId);
+      assertStorableText({ name, description, data }); // #4106: after the gates, before any write
       const updatedEdge = await ctx.db.$transaction(async (tx) => {
         await lockInstallAuthoritiesFirst(tx, ctx, [edgeMem.memoryId]);
         await tx.$queryRaw`SELECT id FROM memories WHERE id = ${edgeMem.memoryId} FOR SHARE`;
