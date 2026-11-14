@@ -105,7 +105,7 @@ export const chatbotAiConfigQueries = {
     const storedChoice = ((readable.data as Record<string, unknown> | null) ?? {}).aiConfigChoice;
     try {
       // The Agent comes from the turn's own lookup (#4076), so a retained pointer, an uninstalled Agent, a soft-deleted
-      // one and the legacy-link order all resolve exactly as the turn resolves them (Gizelle's F1 on #4151).
+      // one and the legacy-link order all resolve exactly as the turn resolves them.
       const { agent } = await resolveChatHomeAgent(ctx.db, memory, ctx);
       return await effectiveChatToolChoice(ctx.db, { appId: memory.appId, agentId: (agent as { id: string } | null)?.id ?? null, storedChoice });
     } catch (e) {

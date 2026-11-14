@@ -146,6 +146,17 @@ describe('(c) chatEffectiveToolChoice(chatId)', () => {
     expect(await effective(chatId)).toBe('AUTO'); // Host level
   });
 
+  // Drift guard: the turn's own resolution, `resolveAIConfig(chatId:)`, judged by the one predicate, must
+  // agree with the new query for every chat in every state below.
+  const viaTurn = async (chatId: string) => {
+    const r = await Q.resolveAIConfig(null, { name: 'default', appRef: app.id, chatId }, ctx(admin));
+    return chatToolChoiceFor(r.provider, r.model);
+  };
+  const agree = async (chatId: string, expected: string) => {
+    expect(await effective(chatId)).toBe(expected);
+    expect(await viaTurn(chatId)).toBe(expected);
+  };
+
   it('choice branch: a stored own choice, else the App chatbot config, else the walk; a disabled pin is skipped as the turn skips it', async () => {
     const walk = await cfg({ appId: app.id }, 'default', 'openai', 'gpt-x'); // FORCED
     const auto = await cfg({ appId: app.id }, 'auto', 'anthropic', 'claude-opus-5-5'); // AUTO
@@ -153,16 +164,6 @@ describe('(c) chatEffectiveToolChoice(chatId)', () => {
     const chosenAuto = await start({ aiConfigChoice: auto.id });
     const chosenForced = await start({ aiConfigChoice: forced.id });
     const unchosen = await start({});
-    // Drift guard (Glen's P2 on #4151): the turn's own resolution, `resolveAIConfig(chatId:)`, judged by the one predicate, must
-    // agree with the new query for every chat in every state below.
-    const viaTurn = async (chatId: string) => {
-      const r = await Q.resolveAIConfig(null, { name: 'default', appRef: app.id, chatId }, ctx(admin));
-      return chatToolChoiceFor(r.provider, r.model);
-    };
-    const agree = async (chatId: string, expected: string) => {
-      expect(await effective(chatId)).toBe(expected);
-      expect(await viaTurn(chatId)).toBe(expected);
-    };
     await agree(chosenAuto.chatId, 'AUTO');
     await agree(chosenForced.chatId, 'FORCED');
     await agree(unchosen.chatId, 'FORCED'); // the walk's `default`
@@ -189,13 +190,13 @@ describe('(c) chatEffectiveToolChoice(chatId)', () => {
     expect(await effective(chatId)).toBeNull();
   });
 
-  it('retained private chat: after the Agent is uninstalled the turn drops it, and so does the answer (Gizelle F1)', async () => {
+  it('retained private chat: after the Agent is uninstalled the turn drops it, and so does the answer', async () => {
     await cfg({ agentId: agent.id }, 'default', 'anthropic', 'claude-sonnet-5-5'); // Agent default: AUTO
     await cfg({ organizationId: org.id }, 'default', 'openai', 'gpt-x'); // Org default: FORCED
     const { chatId } = await start({ scope: 'private', aiConfigChoice: 'default' });
     const node = await chatNodeByLocOrThrow(db, chatId);
     expect((await db.memory.findUniqueOrThrow({ where: { id: node.memoryId } })).appId).toBe(app.id); // App-bearing, but private
-    expect(await effective(chatId)).toBe('AUTO'); // control
+    expect(await effective(chatId)).toBe('AUTO'); // control (`resolveAIConfig(chatId:)` serves shared chats only, so no turn cross-check here)
     await db.appAgent.delete({ where: { appId_agentId: { appId: app.id, agentId: agent.id } } });
     expect(await effective(chatId)).toBe('FORCED');
   });
@@ -218,6 +219,8 @@ describe('(c) chatEffectiveToolChoice(chatId)', () => {
     const mine = await db.app.create({ data: { ownerUserId: member.id, name: 'Mine', urn: `member-${generateId()}:mine` } });
     const ask = () => effectiveChatToolChoice(db, { appId: mine.id, agentId: null, storedChoice: null });
     expect(await ask()).toBeNull(); // the platform's config is not available to a personal App
+    // the turn's own resolution refuses the same state (drift guard for the host-refusal branch)
+    await expect(Q.resolveAIConfig(null, { name: 'default', appRef: mine.id }, ctx(admin))).rejects.toThrow();
     await cfg({ appId: mine.id }, 'default', 'anthropic', 'claude-opus-5-5');
     expect(await ask()).toBe('AUTO');
   });
@@ -251,7 +254,7 @@ describe('(c) chatEffectiveToolChoice(chatId)', () => {
     const stranger = await effective(chatId, ctx(outsider)).catch((e: any) => e);
     // The entitlement filter (`chatLocFilter`) admits a chat's AUTHOR; only the host memory's read gate refuses them once they
     // are no longer a participant. This is the caller that proves the gate, not the filter, is doing the work.
-    const shared = await start({}, ctx(member));
+    const shared = await start({}, asMember());
     expect(await effective(shared.chatId, ctx(member))).toBe('AUTO'); // control: the author reads their own shared chat
     await db.appMember.delete({ where: { appId_userId: { appId: app.id, userId: member.id } } });
     const lapsed = await effective(shared.chatId, ctx(member)).catch((e: any) => e);
