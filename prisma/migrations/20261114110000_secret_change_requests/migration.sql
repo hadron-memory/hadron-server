@@ -7,13 +7,13 @@ CREATE TRIGGER secret_change_revision BEFORE UPDATE ON secrets FOR EACH ROW EXEC
 -- #3999: staged values are request-bound; terminal requests retain no ciphertext.
 CREATE TABLE secret_change_requests (
  id text PRIMARY KEY,
- app_id text NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+ app_id text NOT NULL REFERENCES apps(id) ON DELETE CASCADE ON UPDATE CASCADE,
  secret_id text,
  secret_name text NOT NULL,
  secret_kind text NOT NULL,
  metadata jsonb NOT NULL,
  operation text NOT NULL,
- requester_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ requester_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE ON UPDATE CASCADE,
  state text NOT NULL DEFAULT 'open',
  snapshot text NOT NULL,
  staged_value_encrypted text,

@@ -1,5 +1,8 @@
+import { ApolloServer } from '@apollo/server';
+import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
+import { formatGraphQLError } from '../../api/graphql/formatError.js';
 /** #3999 real database and real software-passkey assertions, no production or provider calls. */
-import { beforeEach, describe, it, expect } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
@@ -232,5 +235,32 @@ describe('#3999 completion expiry clock',()=>{
   }finally{
    await db.$executeRawUnsafe("CREATE OR REPLACE FUNCTION hadron_signing_now() RETURNS timestamp(3) LANGUAGE sql VOLATILE AS $$ SELECT (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3) $$");
   }
+ });
+});
+
+
+describe('#3999 wire error and canary boundary',()=>{
+ it('keeps the staged value out of real Apollo responses, coercion errors, events and captured logs',async()=>{
+  const canary='R11-plaintext-a5719';
+  const calls:unknown[][]=[];
+  const spies=[vi.spyOn(console,'log'),vi.spyOn(console,'warn'),vi.spyOn(console,'error')];
+  for(const spy of spies)spy.mockImplementation((...a:unknown[])=>{calls.push(a);});
+  const api=new ApolloServer<Context>({typeDefs,resolvers,formatError:formatGraphQLError,includeStacktraceInErrorResponses:false});
+  try{
+   await api.start();
+   const query='mutation($ref:ID!,$value:JSON!,$protected:Boolean){updateSecret(ref:$ref,value:$value,protected:$protected){id}}';
+   const result=await api.executeOperation({query,variables:{ref:secretId,value:canary}},{contextValue:ctx()});
+   expect(result.body.kind).toBe('single');
+   if(result.body.kind!=='single')throw new Error('unexpected response kind');
+   expect(result.body.singleResult.errors?.[0].extensions).toMatchObject({code:'SECRET_PROTECTED_NEEDS_PASSKEY',requestId:expect.any(String),ceremonyUrl:expect.any(String)});
+   expect(JSON.stringify(result.body)).not.toContain(canary);
+   const coercion=await api.executeOperation({query,variables:{ref:secretId,value:canary,protected:canary}},{contextValue:ctx()});
+   expect(coercion.body.kind).toBe('single');
+   if(coercion.body.kind==='single')expect(coercion.body.singleResult.errors?.[0].extensions?.code).toBe('BAD_USER_INPUT');
+   expect(JSON.stringify(coercion.body)).not.toContain(canary);
+   expect(await db.secretEvent.findMany({where:{secretId}})).not.toEqual([]);
+   expect(JSON.stringify(await db.secretEvent.findMany({where:{secretId}}))).not.toContain(canary);
+   expect(JSON.stringify(calls)).not.toContain(canary);
+  }finally{await api.stop();for(const spy of spies)spy.mockRestore();}
  });
 });
