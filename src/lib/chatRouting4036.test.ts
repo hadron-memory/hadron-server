@@ -2,7 +2,6 @@
 import { describe, expect, it } from 'vitest';
 import { decideChatRouting, applyChatRoutingDecision } from './chatRouting.js';
 import { validEngineValue } from './chatRootEngineState.js';
-import { respondToolDefinition } from '../api/graphql/schema/resolvers.helpers.js';
 
 const decide = (extra: Partial<Parameters<typeof decideChatRouting>[0]> = {}) => decideChatRouting({
   origin: { conversationName: 'main', stageName: 'one' }, stageOrder: ['one', 'two'], goalReached: true, rules: [], node: async () => null, evaluate: async () => true, ...extra,
@@ -54,16 +53,13 @@ describe('#4036 routing edits', () => {
     expect(decision.result).toMatchObject({ conversationCompleted: null, newStageName: 'two', detourReturned: false }); expect(evaluated).toBe(0);
   });
 });
-describe('#4036 completion state and tool contract', () => {
+// #4102 F9: the respond tool's goal_reached schema assertion moved to the api layer
+// (resolvers.chatCompletion4036.test.ts) so this lib-only file imports no api-layer code.
+describe('#4036 completion state', () => {
   it('validates completion arrays independently of goal-stack entries, including calendar times', () => {
     expect(validEngineValue('completedConversations', [{ conversation: 'main', completedAt: '2026-11-12T01:02:03.000Z' }])).toBe(true);
     for (const entry of [null, { conversation: '', completedAt: '2026-11-12T01:02:03Z' }, { conversation: 'main', completedAt: '2026-02-30T01:02:03Z' }, { conversation: 'main', completedAt: 'not-a-time' }]) {
       expect(validEngineValue('completedConversations', [entry])).toBe(false);
     }
-  });
-  it('adds an optional boolean goal_reached to the shared respond schema', () => {
-    const parameters = respondToolDefinition({})[0].parameters as any;
-    expect(parameters.properties.goal_reached).toMatchObject({ type: 'boolean', description: expect.any(String) });
-    expect(parameters.required).not.toContain('goal_reached');
   });
 });

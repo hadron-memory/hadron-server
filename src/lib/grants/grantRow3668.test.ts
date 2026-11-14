@@ -20,7 +20,7 @@ describe('prisma/grant-invariants.sql parity', () => {
   it('the newest migration to carry it ends with a byte-identical copy, and post-push includes the file', () => {
     const sql = readFileSync(new URL('../../../prisma/grant-invariants.sql', import.meta.url), 'utf8');
     // #4173: the withdrawn-state migration carries the full canonical guard, after activation.
-    const dir = readdirSync(new URL('../../../prisma/migrations', import.meta.url)).find((d) => d === '20261114130000_grant_withdrawn_state');
+    const dir = readdirSync(new URL('../../../prisma/migrations', import.meta.url)).find((d) => d === '20261114140000_grant_withdrawn_state');
     expect(dir).toBeTruthy();
     expect(readFileSync(new URL(`../../../prisma/migrations/${dir}/migration.sql`, import.meta.url), 'utf8').endsWith(sql)).toBe(true);
     expect(readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8')).toContain('\\ir grant-invariants.sql');

@@ -7,8 +7,7 @@ import { approvalDepth, headlineOf, summarizeAutomation, type TriggerFacts } fro
 import { runAuthContext, isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 import { hasAppRelationship } from '../../../lib/auth/appRelationship.js';
-import { boundWorkerId } from '../../../lib/bootPrompt.js';
-import { currentActorAmbiguity } from '../../../lib/requestActor.js';
+import { workerBoundActor } from '../../../lib/grants/triggerGrant.js';
 import { AppNotFoundError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
@@ -47,10 +46,10 @@ const badInput = (message: string) => new GraphQLError(message, { extensions: { 
  */
 export async function requireAdopterContext(ctx: Context): Promise<string> {
   if (!ctx.userId || ctx.impersonation || isRunPrincipal(ctx)) throw denied();
-  // An ambiguous MCP actor (several live worker bindings, none named) and a refused session binding are worker
-  // shapes too: the same refusals as the boot-prompt pointer gate (assertMayWriteBootPromptPointer).
-  if (boundWorkerId() || currentActorAmbiguity() !== null || ctx.sessionBindingRefused) throw workerRefused();
-  if (ctx.sessionId && await ctx.db.session.findFirst({ where: { id: ctx.sessionId, workerId: { not: null } }, select: { id: true } })) throw workerRefused();
+  // An ambiguous MCP actor (several live worker bindings, none named), a refused session binding and a session row that
+  // names a worker are worker shapes too: the same refusals as the boot-prompt pointer gate (assertMayWriteBootPromptPointer).
+  // #3483: ONE worker test, shared with the schedule and webhook grant door (src/lib/grants/triggerGrant.ts).
+  if (await workerBoundActor(ctx)) throw workerRefused();
   return ctx.userId;
 }
 
