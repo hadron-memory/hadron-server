@@ -602,7 +602,9 @@ export const memoryQueries = {
             { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private', 'group', 'app'] as any }, isInstallMemory: false },
             // #4181 / cor:api:100, cor:acl:010:01: with `orgId` the install clause is narrowed like its org
             // neighbour: the memory sits in its App's own org (user-owned Apps' install memories have no org
-            // and reach their owner through the user-owned clause below).
+            // and reach their owner through the user-owned clause below, pinned in the #4181 test). A ternary on
+            // `scopedOrgId`, not `orgIds`: unscoped, `orgIds` is the caller's MEMBER orgs, which would drop an App
+            // owner's install memory outside them; scoped, `orgIds` is exactly [scopedOrgId] (resolveOrgScope).
             { class: 'system' as any, isInstallMemory: true, id: { in: installListable }, ...(scope.scopedOrgId ? { organizationId: scope.scopedOrgId } : {}) },
             {
               class: 'app' as any,

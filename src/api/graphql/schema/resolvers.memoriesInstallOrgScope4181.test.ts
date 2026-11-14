@@ -93,4 +93,19 @@ describe('#4181 memories(orgId) install-memory clause is org-scoped', () => {
     expect(await idsFor(ctxOf(u.id), orgA, null)).toContain(own.id);
     expect(await idsFor(ctxOf(u.id), orgB, null)).toContain(own.id);
   });
+  it('F1 (blind): the owner of a USER-OWNED App still lists its install memory under orgId=A, through the user-owned clause', async () => {
+    const u = await user('user-app-owner');
+    await db.orgMember.create({ data: { organizationId: orgA, userId: u.id, role: 'CONTRIBUTOR' } });
+    const app = await db.app.create({ data: { id: generateId(), name: 'user-app', urn: `u-${u.id}:user-app`, ownerUserId: u.id } as any });
+    const mem = await db.memory.create({
+      data: { id: generateId(), class: 'system', name: 'user-install', urn: `u-${u.id}:user-install`, ownerUserId: u.id, appId: app.id, isInstallMemory: true },
+    });
+    expect(await idsFor(ctxOf(u.id), orgA)).toContain(mem.id);
+    expect(await idsFor(ctxOf(u.id), orgA)).not.toContain(b.mem.id);
+  });
+
+  it('F5 (blind): an org the caller is not a member of answers an empty page, never B\'s install memory', async () => {
+    const stranger = await user('no-relationship');
+    expect(await idsFor(ctxOf(stranger.id), orgB)).toEqual([]);
+  });
 });
