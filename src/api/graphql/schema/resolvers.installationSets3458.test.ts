@@ -27,8 +27,8 @@ beforeEach(async () => {
   const user = await db.user.create({ data: { handle: `sets-${suffix}`, roles: ['READER'] } });
   userId = user.id;
   await db.orgMember.create({ data: { organizationId: orgId, userId, role: 'ADMIN' } });
-  physical = await M.createAgent({}, { orgId, name: 'Physical', personaRole: 'writer' }, ctx());
-  derived = await M.createAgent({}, { orgId, name: 'Derived', personaRole: 'reader' }, ctx());
+  physical = await M.createAgent({}, { orgRef: orgId, name: 'Physical', personaRole: 'writer' }, ctx());
+  derived = await M.createAgent({}, { orgRef: orgId, name: 'Derived', personaRole: 'reader' }, ctx());
   foreign = await db.agent.create({ data: { name: 'Unlicensed', urn: `${external.urn}:agent`, organizationId: external.id, visibility: 'ORGANIZATION' } });
   const app = async (name: string, day: number) => db.app.create({ data: { name, urn: `${org.urn}:${name}`, organizationId: orgId, createdAt: new Date(`2026-01-0${day}`) } });
   appId = (await app('older', 1)).id;

@@ -40,7 +40,7 @@ beforeEach(async () => {
   [admin, member, outsider] = await Promise.all(['admin', 'member', 'outsider'].map(h =>
     db.user.create({ data: { handle: `${h}-${s}`, roles: ['READER'] } })));
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  agent = await M.createAgent({}, { orgId: org.id, name: 'chat-agent', visibility: 'ORGANIZATION' }, { db, userId: admin.id, roles: ['ADMIN'] } as Context);
+  agent = await M.createAgent({}, { orgRef: org.id, name: 'chat-agent', visibility: 'ORGANIZATION' }, { db, userId: admin.id, roles: ['ADMIN'] } as Context);
   app = await db.app.create({ data: { organizationId: org.id, name: 'Workspace', urn: `${org.urn}:workspace` } });
   await db.appMember.createMany({ data: [
     { appId: app.id, userId: admin.id, role: 'admin' },

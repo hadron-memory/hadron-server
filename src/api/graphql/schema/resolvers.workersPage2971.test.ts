@@ -38,7 +38,7 @@ beforeEach(async () => {
   userId = (await db.user.create({ data: { roles: ['READER'] } })).id;
   await db.orgMember.create({ data: { organizationId: org.id, userId, role: 'ADMIN' } });
   const ctx: Context = { db, userId, roles: ['READER'] };
-  const agent = await resolvers.Mutation.createAgent({}, { orgId: org.id, name: 'Page Agent', personaRole: 'engineer' }, ctx);
+  const agent = await resolvers.Mutation.createAgent({}, { orgRef: org.id, name: 'Page Agent', personaRole: 'engineer' }, ctx);
   await serveAgentBootPrompt(db, agent.id, 'PAGE-PROMPT {{worker.name}}');
   const app = await db.app.create({ data: { organizationId: org.id, name: 'Pages', urn: `${org.urn}:pages` } });
   appId = app.id;

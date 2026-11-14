@@ -91,7 +91,7 @@ beforeEach(async () => {
   admin = await db.user.create({ data: { githubId: 260701, githubUsername: 'tw7-admin', handle: 'tw7-admin', roles: ['READER'] } });
   member = await db.user.create({ data: { githubId: 260702, githubUsername: 'tw7-member', handle: 'tw7-member', roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id));
+  const agent = await M.createAgent({}, { orgRef: org.id, name: 'Team Agent' }, ctx(admin.id));
   teamAgentId = agent.id;
   teamMemoryId = (await db.agent.findUniqueOrThrow({ where: { id: teamAgentId } })).systemMemoryId as string;
   teamMemoryUrn = (await db.memory.findUniqueOrThrow({ where: { id: teamMemoryId } })).urn;

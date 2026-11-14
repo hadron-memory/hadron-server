@@ -345,12 +345,12 @@ export const orgMutations = {
     updateOrganization: async (
       _: unknown,
       {
-        id,
+        ref: id,
         name,
         urn,
         listedOnMarketplace,
         policy,
-      }: { id: string; name?: string; urn?: string; listedOnMarketplace?: boolean; policy?: unknown },
+      }: { ref: string; name?: string; urn?: string; listedOnMarketplace?: boolean; policy?: unknown },
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: id may be ID, bare URN, or prefixed URN.

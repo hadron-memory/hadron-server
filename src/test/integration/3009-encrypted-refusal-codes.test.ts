@@ -63,7 +63,7 @@ async function refusal(query: string, variables: Record<string, unknown>) {
 describe('#3009 typed encrypted-memory refusals on the wire', () => {
   it('vector opt-in without acknowledgment returns its code, four disclosures and memoryRef, and is not reported', async () => {
     const extensions = await refusal(
-      'mutation($id: ID!){ updateMemory(id: $id, vectorIndexEnabled: true){ id } }', { id: memory.id },
+      'mutation($id: ID!){ updateMemory(ref: $id, vectorIndexEnabled: true){ id } }', { id: memory.id },
     );
     expect(extensions).toEqual({
       code: 'ENCRYPTED_VECTOR_INDEX_NOT_ACKNOWLEDGED', disclosure: [...FR_026_DISCLOSURE], memoryRef: memory.urn,

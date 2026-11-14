@@ -26,7 +26,7 @@ beforeEach(async () => {
   outsider = await db.user.create({ data: { githubId: 92969001, githubUsername: `rnd-o-${n}`, roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
-  agent = await M.createAgent({}, { orgId: org.id, name: 'Engineer', personaRole: 'engineer' }, ctx());
+  agent = await M.createAgent({}, { orgRef: org.id, name: 'Engineer', personaRole: 'engineer' }, ctx());
   await serveAgentBootPrompt(db, agent.id, '{{worker.signature}}\n{{worker.trailer}}');
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   const made = await M.castWorker({}, { appRef: app.id, agentRef: agent.id, name: 'Anne' }, ctx());

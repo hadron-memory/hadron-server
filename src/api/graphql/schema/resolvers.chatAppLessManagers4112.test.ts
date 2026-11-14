@@ -20,7 +20,7 @@ beforeEach(async () => {
   managerId = (await db.user.create({ data: { handle: 'managers4112-manager' } })).id;
   consumerId = (await db.user.create({ data: { handle: 'managers4112-consumer' } })).id;
   await db.orgMember.create({ data: { organizationId: org.id, userId: managerId, role: 'ADMIN' } });
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'Managed definition', visibility: 'PUBLIC' }, context(managerId));
+  const agent = await M.createAgent({}, { orgRef: org.id, name: 'Managed definition', visibility: 'PUBLIC' }, context(managerId));
   agentId = agent.id; systemId = agent.systemMemoryId;
   const carrier = await db.organization.create({ data: { name: 'Licensed carrier', urn: 'managers4112.carrier' } });
   const app = await db.app.create({ data: { organizationId: carrier.id, name: 'Licensed App', urn: `${carrier.urn}:app` } });

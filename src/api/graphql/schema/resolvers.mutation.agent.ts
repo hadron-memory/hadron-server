@@ -50,6 +50,8 @@ import { writeAgentBase } from '../../../lib/agentBase.js';
 import { AgentNotFoundError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
+import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
+import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { deriveSlugFromName } from '../../../lib/urn.js';
 import { normalizeHandleOrNull } from '../../../lib/userHandle.js';
@@ -127,6 +129,8 @@ export interface CreateAgentCoreInput {
   name: string;
   description?: string;
   systemMemoryId?: string;
+  /** #4140: the caller's own reference to `systemMemoryId`, the only thing a not-found names. */
+  systemMemoryRef?: string;
   visibility?: string;
   type?: 'ASSISTANT' | 'CHATBOT';
   surfaces?: string[];
@@ -192,8 +196,8 @@ type PromotionTarget = {
  *
  * Owner congruence and the already-claimed check stay at the call sites.
  */
-async function assertPromotableSystemMemory(ctx: Context, target: PromotionTarget | null): Promise<void> {
-  const notFound = promotionTargetNotFound;
+async function assertPromotableSystemMemory(ctx: Context, target: PromotionTarget | null, callerRef: string): Promise<void> {
+  const notFound = () => promotionTargetNotFound(callerRef);
   if (!target || target.deletedAt) throw notFound();
   const readable = await getAccessibleMemoryIds(ctx, target.id);
   if (!readable.includes(target.id)) throw notFound();
@@ -250,8 +254,10 @@ class PromotionOwnerDriftError extends Error {
 const MAX_PROMOTION_OWNER_ATTEMPTS = 3;
 
 /** The one refusal a promotion target the caller can't read answers with (cor:api:140:03). */
-function promotionTargetNotFound(): GraphQLError {
-  return new GraphQLError('Memory not found', { extensions: { code: 'MEMORY_NOT_FOUND' } });
+function promotionTargetNotFound(callerRef: string): MemoryNotFoundError {
+  // #4140 (cor:api:140:03): ONE answer for every not-found a promotion door can produce (resolver miss,
+  // deleted, unreadable, drift-exhaustion), naming only the caller's own reference, never a resolved id.
+  return new MemoryNotFoundError(callerRef);
 }
 
 /**
@@ -296,6 +302,7 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
     name,
     description,
     systemMemoryId,
+    systemMemoryRef,
     visibility,
     type,
     surfaces,
@@ -376,7 +383,7 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
       break;
     } catch (e) {
       if (!(e instanceof PromotionOwnerDriftError)) throw e;
-      if (attempt >= MAX_PROMOTION_OWNER_ATTEMPTS) throw promotionTargetNotFound();
+      if (attempt >= MAX_PROMOTION_OWNER_ATTEMPTS) throw promotionTargetNotFound(systemMemoryRef ?? systemMemoryId!);
     }
   }
   function createAgentTx(promotionOwner: PromotionOwner | null) {
@@ -389,7 +396,7 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
       }
       const found = await tx.memory.findUnique({ where: { id: systemMemoryId }, select: PROMOTION_TARGET_SELECT });
       const decideCtx = promotionOwner ? await fencedPromotionCtx(ctx, tx, promotionOwner, found) : ctx;
-      await assertPromotableSystemMemory(decideCtx, found);
+      await assertPromotableSystemMemory(decideCtx, found, systemMemoryRef ?? systemMemoryId);
       const target = found!;
       // spec 047 / #949: the promoted memory must share the agent's owner —
       // same org (org-owned) OR same user (user-owned). One shared assertion
@@ -602,7 +609,7 @@ async function requireKnownImportedAgent(
 export const agentMutations = {
     createAgent: async (
       _: unknown,
-      { orgId, name, description, systemMemoryId, visibility, type, surfaces, personaRole, usesTasks, resetContextAfterTask, memberRoles }: { orgId?: string | null; name: string; description?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; memberRoles?: string[] | null },
+      { orgRef: orgId, name, description, systemMemoryRef, visibility, type, surfaces, personaRole, usesTasks, resetContextAfterTask, memberRoles }: { orgRef?: string | null; name: string; description?: string; systemMemoryRef?: string | null; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; memberRoles?: string[] | null },
       ctx: Context,
     ) => {
       // spec 047: an agent is owned by EXACTLY ONE of an org or a user. `orgId`
@@ -619,7 +626,7 @@ export const agentMutations = {
       // string is a common "unset" sentinel elsewhere in this file). Omit orgId
       // entirely to create a personal agent. (Copilot review, #682.)
       if (orgId !== undefined && orgId !== null && orgId.trim() === '') {
-        throw new GraphQLError('orgId must be a non-empty organization ID or URN — omit it entirely to create a personal agent.', { extensions: { code: 'BAD_USER_INPUT' } });
+        throw new GraphQLError('orgRef must be a non-empty organization ID or URN — omit it entirely to create a personal agent.', { extensions: { code: 'BAD_USER_INPUT' } });
       }
       if (orgId) {
         // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
@@ -646,6 +653,19 @@ export const agentMutations = {
         // resolves migrated rows via the stored alias map (#697 Task A).
         namespace = handle;
       }
+      // #4140: the system-memory ref resolves AFTER the org / personal authority above (resolving earlier
+      // would answer a non-admin differently for a missing and an existing memory). An empty value is
+      // "absent" (auto-provision), exactly as before, and is never resolved. A miss gets the one uniform
+      // not-found naming the caller's ref; a malformed relative URN keeps its separate typed refusal.
+      let systemMemoryId: string | undefined;
+      if (systemMemoryRef) {
+        try {
+          systemMemoryId = (await resolveMemoryRef(ctx.db, systemMemoryRef)).id;
+        } catch (e) {
+          if (e instanceof MemoryNotFoundError) throw promotionTargetNotFound(systemMemoryRef);
+          throw e;
+        }
+      }
       // #935: authorization + owner resolution above, provisioning in the
       // shared core.
       return createAgentCore(ctx, {
@@ -655,6 +675,7 @@ export const agentMutations = {
         name,
         description,
         systemMemoryId,
+        systemMemoryRef: systemMemoryRef || undefined,
         visibility,
         type,
         surfaces,
@@ -667,7 +688,7 @@ export const agentMutations = {
 
     updateAgent: async (
       _: unknown,
-      { ref, name, urn, description, systemMemoryId, visibility, listedOnMarketplace, type, surfaces, personaRole, usesTasks, resetContextAfterTask, registerDefaults, memberRoles }: { ref: string; name?: string; urn?: string; description?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string | null; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; registerDefaults?: { mentionOnly?: boolean | null } | null; memberRoles?: string[] | null },
+      { ref, name, urn, description, systemMemoryRef, visibility, listedOnMarketplace, type, surfaces, personaRole, usesTasks, resetContextAfterTask, registerDefaults, memberRoles }: { ref: string; name?: string; urn?: string; description?: string; systemMemoryRef?: string | null; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string | null; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; registerDefaults?: { mentionOnly?: boolean | null } | null; memberRoles?: string[] | null },
       ctx: Context,
     ) => {
       // #929 review: normalize persona dressing (blank-after-trim clears).
@@ -728,17 +749,31 @@ export const agentMutations = {
       // deciding transaction so a refusal cannot leave it half-applied (#1364).
       let promoteSystemMemoryId: string | null = null;
       let promoteObservedOwner: PromotionOwner | null = null;
-      if (systemMemoryId !== undefined) {
-        const incoming = systemMemoryId === '' ? null : systemMemoryId;
-        if (agent.systemMemoryId && incoming !== agent.systemMemoryId) {
+      if (systemMemoryRef !== undefined) {
+        // #4140. Empty / null is an unset request (refused when one is attached, a no-op otherwise: it
+        // is never resolved and never reaches the FK column).
+        const refusedChange = () => new GraphQLError(
           // Typed, like the in-transaction twin below (#2856, cor:api:260:01): a plain
           // Error reads as a fault, but this is a refusal of the caller's own input.
-          throw new GraphQLError(
-            "Cannot unset or change an agent's system memory. Delete the agent to replace it.",
-            { extensions: { code: 'BAD_USER_INPUT' } },
-          );
+          "Cannot unset or change an agent's system memory. Delete the agent to replace it.",
+          { extensions: { code: 'BAD_USER_INPUT' } },
+        );
+        let incoming: string | null = null;
+        if (agent.systemMemoryId) {
+          // Already attached: the caller is ADMIN (gate above) and this adds no owner-act gate. A ref that
+          // is not the CURRENT system memory (other, missing, unreadable or empty) gets this ONE refusal,
+          // so it cannot tell a missing memory from an existing one. A malformed relative URN keeps its
+          // own typed refusal (shape, not existence).
+          if (!systemMemoryRef) throw refusedChange();
+          try {
+            incoming = (await resolveMemoryRef(ctx.db, systemMemoryRef)).id;
+          } catch (e) {
+            if (e instanceof MemoryNotFoundError) throw refusedChange();
+            throw e;
+          }
+          if (incoming !== agent.systemMemoryId) throw refusedChange();
         }
-        if (!agent.systemMemoryId && incoming) {
+        if (!agent.systemMemoryId && systemMemoryRef) {
           // #1818 review (Emerson P2-C): on a USER-owned agent, first-attach is
           // the OWNER's act. An admin managing the agent (#1787) must not
           // re-point its definition at one of the owner's other memories — the
@@ -761,8 +796,16 @@ export const agentMutations = {
           // this memory converted to class='system' with its visibility cleared
           // and uploads disabled, attached to nothing. Deferring the write is
           // what makes the refusal and the promotion succeed or fail together.
+          // First attach: the owner-act gate above precedes resolution (#4140); a miss is the uniform
+          // not-found naming the caller's ref, like every other not-found of this door.
+          try {
+            incoming = (await resolveMemoryRef(ctx.db, systemMemoryRef)).id;
+          } catch (e) {
+            if (e instanceof MemoryNotFoundError) throw promotionTargetNotFound(systemMemoryRef);
+            throw e;
+          }
           const found = await ctx.db.memory.findUnique({ where: { id: incoming } });
-          await assertPromotableSystemMemory(ctx, found);
+          await assertPromotableSystemMemory(ctx, found, systemMemoryRef);
           const target = found!;
           // #949: was a bare `target.organizationId !== agent.organizationId`,
           // which for a USER-owned agent compares `null !== null` ⇒ false and
@@ -989,6 +1032,7 @@ export const agentMutations = {
           await assertPromotableSystemMemory(
             await fencedPromotionCtx(ctx, tx, promoteObservedOwner!, lockedFound),
             lockedFound,
+            systemMemoryRef!,
           );
           const lockedTarget = lockedFound!;
           assertSystemMemoryOwner(lockedAgent, {
@@ -1040,7 +1084,8 @@ export const agentMutations = {
           ...(name !== undefined ? { name } : {}),
           ...(newUrn !== undefined ? { urn: newUrn } : {}),
           ...(description !== undefined ? { description } : {}),
-          ...(systemMemoryId !== undefined ? { systemMemoryId } : {}),
+          // #4140: only a first-attach writes the column, with the RESOLVED id (never the raw argument).
+          ...(promoteSystemMemoryId ? { systemMemoryId: promoteSystemMemoryId } : {}),
           ...(visibility !== undefined ? { visibility: visibility as AgentVisibility } : {}),
           // cor:acl:080:04 — opt-in marketplace catalogue flag (advertisement,
           // not access; independent of visibility). NOT NULL column: an explicit
@@ -1071,9 +1116,9 @@ export const agentMutations = {
         // re-derive them from the current owner and decide again. Out of
         // attempts, the uniform not-found (never an existence signal).
         if (err instanceof PromotionOwnerDriftError) {
-          if (attempt >= MAX_PROMOTION_OWNER_ATTEMPTS) throw promotionTargetNotFound();
+          if (attempt >= MAX_PROMOTION_OWNER_ATTEMPTS) throw promotionTargetNotFound(systemMemoryRef!);
           promoteObservedOwner = await observePromotionOwner(ctx.db, promoteSystemMemoryId!);
-          if (!promoteObservedOwner) throw promotionTargetNotFound();
+          if (!promoteObservedOwner) throw promotionTargetNotFound(systemMemoryRef!);
           continue;
         }
         if (err instanceof AgentLinkSetChangedError) {
@@ -1298,7 +1343,7 @@ export const agentMutations = {
      *
      * The recovery path for rows that predate the shared owner assertion: a
      * system memory can only ever be created by Agent provisioning, so before
-     * this there was nothing to hand `updateAgent(systemMemoryId:)` and the
+     * this there was nothing to hand `updateAgent(systemMemoryRef:)` and the
      * only fix was to recreate the Agent, move its role nodes, reinstall the
      * App, and retire the old one.
      *

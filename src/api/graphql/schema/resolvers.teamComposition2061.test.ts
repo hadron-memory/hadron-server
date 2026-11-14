@@ -37,7 +37,7 @@ beforeEach(async () => {
   const outsider = await db.user.create({ data: { githubId: 830_000_000 + n, githubUsername: `composition-outsider-${n}`, roles: ['READER'] } });
   memberId = member.id; outsiderId = outsider.id;
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  const agent = await (resolvers.Mutation as any).createAgent({}, { orgId: org.id, name: 'Composition Agent' }, ctx(admin.id));
+  const agent = await (resolvers.Mutation as any).createAgent({}, { orgRef: org.id, name: 'Composition Agent' }, ctx(admin.id));
   const app = await db.app.create({ data: { organizationId: org.id, name: 'Composition', urn: `composition-${n}.example:team` } });
   appId = app.id;
   await db.appMember.create({ data: { appId, userId: memberId, role: 'member' } });

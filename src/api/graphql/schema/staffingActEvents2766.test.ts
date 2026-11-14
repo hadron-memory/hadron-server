@@ -52,7 +52,7 @@ beforeEach(async () => {
   agentId = teamAgent.id;
   ({ app } = await createDbAppWithKey(db, 'sa-app', orgId));
   await createDbAppAgent(db, app.id, agentId);
-  const role = await M.createAgent({}, { orgId, name: 'Backend Engineer', personaRole: 'backend-engineer', systemPrompt: 'You are {{name}}, a {{role}}.' }, ctxOf(admin.id));
+  const role = await M.createAgent({}, { orgRef: orgId, name: 'Backend Engineer', personaRole: 'backend-engineer', systemPrompt: 'You are {{name}}, a {{role}}.' }, ctxOf(admin.id));
   roleAgent = { id: role.id };
   await db.appAgent.create({ data: { appId: app.id, agentId: roleAgent.id } });
   caster = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId, name: 'Caster', slug: 'caster', heldByUserId: holder.id } });

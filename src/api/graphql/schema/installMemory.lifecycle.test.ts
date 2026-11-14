@@ -558,10 +558,10 @@ describe('#2044 install memory — it can never become an Agent\'s brain (Andi P
     const f = await fixture();
     await f.create(f.admin);
     const [row] = await f.installRows();
-    await expect(M.createAgent({}, { orgId, name: 'Promoted Install', systemMemoryId: row!.id }, ctxOf(f.admin.id)))
+    await expect(M.createAgent({}, { orgRef: orgId, name: 'Promoted Install', systemMemoryRef: row!.id }, ctxOf(f.admin.id)))
       .rejects.toThrow(/install memory/i);
     const plain = await db.agent.create({ data: { id: generateId(), name: 'Plain', urn: `${orgId}:plain`, organizationId: orgId } });
-    await expect(M.updateAgent({}, { ref: plain.id, systemMemoryId: row!.id }, ctxOf(f.admin.id)))
+    await expect(M.updateAgent({}, { ref: plain.id, systemMemoryRef: row!.id }, ctxOf(f.admin.id)))
       .rejects.toThrow(/install memory/i);
     expect(await db.agent.count({ where: { systemMemoryId: row!.id } })).toBe(0);
     const after = await db.memory.findUniqueOrThrow({ where: { id: row!.id } });
@@ -576,10 +576,10 @@ describe('#2044 install memory — it can never become an Agent\'s brain (Andi P
     await f.create(f.admin);
     const [row] = await f.installRows();
     await db.memory.update({ where: { id: row!.id }, data: { installOfAgentId: null } });
-    await expect(M.createAgent({}, { orgId, name: 'Promoted Detached', systemMemoryId: row!.id }, ctxOf(f.admin.id)))
+    await expect(M.createAgent({}, { orgRef: orgId, name: 'Promoted Detached', systemMemoryRef: row!.id }, ctxOf(f.admin.id)))
       .rejects.toThrow(/install memory/i);
     const plain = await db.agent.create({ data: { id: generateId(), name: 'Plain2', urn: `${orgId}:plain2`, organizationId: orgId } });
-    await expect(M.updateAgent({}, { ref: plain.id, systemMemoryId: row!.id }, ctxOf(f.admin.id)))
+    await expect(M.updateAgent({}, { ref: plain.id, systemMemoryRef: row!.id }, ctxOf(f.admin.id)))
       .rejects.toThrow(/install memory/i);
     // And it still blocks reclaiming the deleted App's URN until a manager deletes it.
     await M.deleteApp({}, { ref: f.app.id }, ctxOf(f.admin.id));

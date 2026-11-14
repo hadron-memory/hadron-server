@@ -31,7 +31,7 @@ beforeEach(async () => {
   for (const u of [admin, alice]) {
     await db.orgMember.create({ data: { organizationId: org.id, userId: u.id, role: u === admin ? 'ADMIN' : 'CONTRIBUTOR' } });
   }
-  agent = await resolvers.Mutation.createAgent({}, { orgId: org.id, name: 'intake-agent', visibility: 'ORGANIZATION' }, { db, roles: ['ADMIN'], userId: admin.id });
+  agent = await resolvers.Mutation.createAgent({}, { orgRef: org.id, name: 'intake-agent', visibility: 'ORGANIZATION' }, { db, roles: ['ADMIN'], userId: admin.id });
   const systemMemoryId = (agent as unknown as { systemMemoryId: string }).systemMemoryId;
   const nodes: Array<{ loc: string; data?: unknown; content?: string }> = [
     { loc: 'config', data: { agentExtractionSpec: [{ field: 'memory.region' }] } },

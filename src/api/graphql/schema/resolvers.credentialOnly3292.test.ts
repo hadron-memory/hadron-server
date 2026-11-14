@@ -18,7 +18,7 @@ async function seed() {
   const user = await db.user.create({ data: { handle: `owner-${generateId().toLowerCase()}`, roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
   const userContext = { db, userId: user.id, roles: ['READER'] } as Context;
-  const agent = await mutations.createAgent({}, { orgId: org.id, name: 'Credential Agent' }, userContext);
+  const agent = await mutations.createAgent({}, { orgRef: org.id, name: 'Credential Agent' }, userContext);
   const { app } = await createDbAppWithKey(db, 'credential-default', org.id);
   await createDbAppAgent(db, app.id, agent.id);
   const memory = async (name: string, visibility: 'ORGANIZATION' | 'PUBLIC') => db.memory.create({
