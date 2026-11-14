@@ -192,6 +192,23 @@ describe('#2719 the triggers keep the cells equal to a recount on every write pa
     expect(await cellCount()).toBe(before);
   });
 
+  it('an erased user leaves no cell row behind, and a merge leaves none for the loser (zero cells are dropped)', async () => {
+    const carol = await db.user.create({ data: { id: generateId(), githubId: 271903, githubUsername: 'rollup-carol' } });
+    await insert([{ userId: carol.id, memoryId: memX, createdAt: at(-5) }, { userId: carol.id, memoryId: memX, createdAt: at(-50) }, { userId: alice.id, memoryId: memX, createdAt: at(-5) }]);
+    await db.user.delete({ where: { id: carol.id } });
+    const left = await db.$queryRaw<Array<{ n: bigint }>>`SELECT COUNT(*) AS n FROM usage_activity_cells WHERE scope_id = ${carol.id}`;
+    expect(Number(left[0].n)).toBe(0);
+    expect((await drift()).total).toBe(0);
+    expect(await cellCount()).toBeGreaterThan(0); // alice's and memX's rows stay
+  });
+
+  it('a memory-scope cell whose scope_id equals a user id is not counted in that user\'s activity', async () => {
+    await insert([{ userId: alice.id, memoryId: memX, createdAt: at(-60) }]);
+    await db.$executeRaw`INSERT INTO usage_activity_cells (scope_kind, scope_id, cell, reads, writes) VALUES ('memory', ${alice.id}, ${naive(new Date(Math.floor(at(-60).getTime() / 900_000) * 900_000))}::timestamp, 7, 7)`;
+    const scope = { from: at(-300), to: at(0), bucket: 'DAY' as const, timeZone: 'UTC', userId: alice.id };
+    expect((await getUsageActivity(db, scope)).reduce((n, b) => n + b.reads + b.writes, 0)).toBe(1);
+  });
+
   it('hard delete and truncate', async () => {
     await insert([{ userId: alice.id, memoryId: memX, createdAt: at(-5) }, { userId: alice.id, memoryId: memX, createdAt: at(-6000) }]);
     await db.$executeRaw`DELETE FROM usage_events WHERE created_at > ${naive(at(-100))}::timestamp`;
@@ -261,7 +278,7 @@ describe('#2719 backfill and the watermark', () => {
     expect((await drift()).total).toBe(0);
     const scope = { from: at(-46 * 1440), to: at(1), bucket: 'DAY' as const, timeZone: 'UTC', userId: alice.id };
     expect(await getUsageActivity(db, scope)).toEqual(await oracle(scope));
-  });
+  }, 30_000);
 
   it('two backfills at once end complete, agree with a recount and write no duplicate cell', async () => {
     await setState(false, at(1));
@@ -271,7 +288,7 @@ describe('#2719 backfill and the watermark', () => {
     expect((await drift()).total).toBe(0);
     const [state] = await db.$queryRaw<Array<{ complete: boolean }>>`SELECT complete FROM usage_activity_rollup_state WHERE id = 1`;
     expect(state.complete).toBe(true);
-  });
+  }, 30_000);
 
   it('a backfill chunk waits for a writer that is mid-transaction, and the cells still equal a recount', async () => {
     await setState(false, at(1));

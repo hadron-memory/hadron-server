@@ -136,6 +136,23 @@ BEGIN
   RETURN NULL;
 END $$;
 
+-- A cell that nets to zero is removed, so the rollup never keeps the id or the activity timeline of an erased user (the
+-- user-delete foreign-key action, a merge's loser, a hard delete) behind a row of zeros. Row level and on UPDATE only: the
+-- upserts reach a zero by updating an existing row, and an insert never carries a zero.
+CREATE OR REPLACE FUNCTION hadron_usage_rollup_drop_zero() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  DELETE FROM usage_activity_cells
+  WHERE scope_kind = NEW.scope_kind AND scope_id = NEW.scope_id AND cell = NEW.cell AND reads = 0 AND writes = 0;
+  RETURN NULL;
+END $$;
+
+DROP TRIGGER IF EXISTS usage_activity_cells_drop_zero ON usage_activity_cells;
+CREATE TRIGGER usage_activity_cells_drop_zero
+  AFTER UPDATE ON usage_activity_cells
+  FOR EACH ROW WHEN (NEW.reads = 0 AND NEW.writes = 0)
+  EXECUTE FUNCTION hadron_usage_rollup_drop_zero();
+
 DROP TRIGGER IF EXISTS usage_events_rollup_insert ON usage_events;
 CREATE TRIGGER usage_events_rollup_insert
   AFTER INSERT ON usage_events
