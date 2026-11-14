@@ -1,5 +1,6 @@
 import { encryptChatEngineStateWithKey } from '../../../lib/chatRootEngineState.js';
 // memoryMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { assertStorableText } from '../../../lib/unstorableTextInput.js';
 import { SYNC_NOT_ATTEMPTED, syncNotAttemptedMessage } from '../../../integrations/github/syncNotAttempted.js';
 import { applyOrgDefaultsAtCreation } from './resolvers.memoryConfigOrgDefault.js';
 import { endApprovalsOnEncryptedEntry } from '../../../lib/nodeApproval.js';
@@ -705,6 +706,7 @@ export const memoryMutations = {
       // after the gates and before ensureUserHandle, the tombstone reclaim or
       // any create.
       assertMemoryRootLoc(name);
+      assertStorableText({ shortDescription, description, tags }); // #4106: caller text, refused typed before any write
 
       // The URN root is the owner principal's bare namespace atom — an org
       // domain (`baragaun.com`) or, for the user-owned path, the caller's
