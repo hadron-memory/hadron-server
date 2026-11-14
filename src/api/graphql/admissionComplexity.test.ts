@@ -116,6 +116,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.registerRoleCandidates", // #2608: limit default 20, cap 200 (clampListTake); below the common 100, so omission overestimates.
   "Query.resendSenders",
   "Query.scopes",
+  "Query.secretEvents", // #3997: limit default 20, cap 200 (clampListTake); below the common 100, so omission overestimates.
   "Query.secrets",
   "Query.sessions",
   "Query.sessionsPage",
@@ -136,6 +137,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.users",
   "Query.validateMemory",
   "Query.workers",
+  "Secret.versions", // #3997: pageArgs default 20, cap 200; below the common 100, so omission overestimates.
   "ServedPrompt.currentLint", // #2048: default 50, cap 100; shared pageLintWarnings.
   "ServedPrompt.provenance",
   "Session.servedPrompts",

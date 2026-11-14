@@ -15,6 +15,7 @@ import {
   randomBytes,
 } from 'crypto';
 import { generateId } from '../../../lib/id.js';
+import { recordSecretEvent, secretActorOf } from '../../../lib/secrets/appSecrets.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
 import {
   DEFAULT_AI_CONFIG_NAME,
@@ -1156,9 +1157,10 @@ export const appMutations = {
       const resolvedId = app.id;
       await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
       if (app.deletedAt) throw new GraphQLError('This App is deleted.', { extensions: { code: 'APP_DELETED', appId: resolvedId } });
-      // Soft-delete the App. Secrets are org/user-owned only (#696), so there
-      // are no app-owned secrets to sweep here anymore. The deletedAt-null guard
-      // keeps the original deletedAt under a concurrent double-delete.
+      // Soft-delete the App. The deletedAt-null guard keeps the original deletedAt under a concurrent double-delete.
+      // #3997 (cor:sec:010:01 "a secret never outlives its owner"): its App-owned secrets go in the SAME transaction, each
+      // with a DELETE event, and the owner's tombstone (the durable start of the one-year event retention, R25) is written
+      // when the App has events. The BEFORE DELETE trigger on `apps` covers the hard-delete paths (account erasure, URN reclaim).
       await withAuthorizedTx(
         ctx,
         [
@@ -1181,6 +1183,15 @@ export const appMutations = {
           // #3690: an App that HOLDS a grant (another App's grantee) is a holder that went: those grants end here, after the apps FOR
           // UPDATE lock. Its OWN grants allow nothing already (the live check reads `apps.deleted_at`) and cascade at the reclaim.
           if (deleted.count > 0) await endHeldGrants(tx, 'app', resolvedId);
+          if (deleted.count > 0) {
+            const actor = secretActorOf(ctx);
+            const secrets = await tx.secret.findMany({ where: { ownerType: 'app', ownerId: resolvedId }, select: { id: true, name: true } });
+            for (const secret of secrets) await recordSecretEvent(tx, { ownerId: resolvedId, secretId: secret.id, secretName: secret.name, kind: 'DELETE', actor });
+            await tx.secret.deleteMany({ where: { ownerType: 'app', ownerId: resolvedId } });
+            await tx.$executeRaw`INSERT INTO secret_owner_tombstones (owner_type, owner_id)
+              SELECT 'app', ${resolvedId} WHERE EXISTS (SELECT 1 FROM secret_events WHERE owner_type = 'app' AND owner_id = ${resolvedId})
+              ON CONFLICT DO NOTHING`;
+          }
         },
         // #3974: Uninstalled → Deleted while uninstalled (cor:dmo:050:21), by id only. resolveAppRef never reaches an uninstalled row by URN, but one uninstalled between the resolve and the lock must not be admitted for a URN either (§10 F1).
         { lockMode: 'exclusive', allowUninstalledApp: isEntityId(ref), afterLock: async (tx) => {

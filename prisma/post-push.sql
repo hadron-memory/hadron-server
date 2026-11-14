@@ -193,11 +193,7 @@ ALTER TABLE model_groups
 -- D-2026-07-15-006 narrows the #679 secret store to org/user owners (the flat
 -- v2 secret URN carries a single root principal; app-/memory-owned shapes are
 -- superseded). Synced with the 20260716120000 migration + src/test/globalSetup.ts.
-ALTER TABLE secrets
-  DROP CONSTRAINT IF EXISTS chk_secret_owner_type;
-ALTER TABLE secrets
-  ADD CONSTRAINT chk_secret_owner_type
-  CHECK (owner_type IN ('user', 'org'));
+-- (#3997 widened the owner CHECK to user/org/app; it lives in secret-versions-invariants.sql.)
 
 -- ─── spec 047 Phase 2c: user-OR-org ownership ────────────────────────────
 -- App / Agent / Memory are owned by EXACTLY ONE of an organization or a user
@@ -886,6 +882,10 @@ CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");
 
 -- #2014: the team-chat post limit's episodes and their worker fence.
 \ir post-limit-invariants.sql
+
+-- #3997 (S2 of #3991): App-owned secrets, versions, events, tombstones. One source, shared verbatim with migration
+-- 20261114120000_app_secret_versions. After worker-reference-invariants.sql: it puts the #1162 fence on its three tables.
+\ir secret-versions-invariants.sql
 
 -- #2479: per-trigger run budget limits.
 \ir trigger-run-budget-invariants.sql

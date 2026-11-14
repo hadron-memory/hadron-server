@@ -6348,16 +6348,19 @@ export const typeDefs = `#graphql
 
   """
   One named, owner-scoped secret — the general secret store (#677).
-  Polymorphic owner (user | org | app | memory). The value is encrypted
-  at rest and WRITE-ONLY: no field here ever returns it — kind + metadata
-  are the inspectable half (you can see THAT a secret exists and, for
+  Polymorphic owner (user | org | app). The value is encrypted at rest and
+  WRITE-ONLY: no field here ever returns it — kind + metadata are the
+  inspectable half (you can see THAT a secret exists and, for
   webfetch-auth, WHERE it applies, without decrypting). A bare name
   resolves at run time via the CSS cascade, most-specific-first:
-  memory -> app -> user -> org.
+  user -> org. An App-owned secret is NEVER in that cascade: no run
+  resolves it (hrn:node:hadronmemory.com:specs:cor:sec:020:01). An App
+  secret keeps its values as versions: every store adds one
+  (hrn:node:hadronmemory.com:specs:cor:sec:010:03).
   """
   type Secret {
     id: ID!
-    "Owner scope: user | org | app | memory."
+    "Owner scope: user | org | app."
     ownerType: String!
     ownerId: ID!
     "Cascade-resolution key; unique per owner; lowercase [a-z0-9-], max 64."
@@ -6370,6 +6373,58 @@ export const typeDefs = `#graphql
     createdBy: String
     updatedAt: DateTime!
     updatedBy: String
+    "Whether changes need a person's change request. App secrets only; always false for org and user secrets."
+    protected: Boolean!
+    "The newest version's number. App secrets only; null for org and user secrets (they have no versions)."
+    currentVersion: Int
+    "An App secret's kept versions, newest first: numbers, sizes and authorship, never a value. Paged (hrn:node:hadronmemory.com:specs:cor:api:120:04): default 20, cap 200, limit 0 counts only. Empty for org and user secrets."
+    versions(limit: Int, offset: Int): SecretVersionsPage!
+  }
+
+  """
+  One stored value of an App-owned secret, as metadata only: there is no field that returns the value or its ciphertext.
+  """
+  type SecretVersion {
+    id: ID!
+    versionNo: Int!
+    "Bytes of the stored value."
+    sizeBytes: Int!
+    writtenAt: DateTime!
+    writtenByUserId: String
+    writtenByWorkerId: String
+    "Set when a newer version was stored; null on the current version."
+    supersededAt: DateTime
+  }
+
+  """
+  One audit event of an App secret: who did what, when, with what outcome. Never a value.
+  """
+  type SecretEvent {
+    id: ID!
+    ownerType: String!
+    ownerId: ID!
+    secretId: ID!
+    secretName: String!
+    versionNo: Int
+    "STORE | VERSION | METADATA | DELETE."
+    kind: String!
+    outcome: String!
+    actorUserId: String
+    workerId: String
+    sessionId: String
+    at: DateTime!
+  }
+
+  type SecretVersionsPage {
+    items: [SecretVersion!]!
+    total: Int!
+    "Whether versions remain past this page."
+    hasMore: Boolean!
+  }
+
+  type SecretEventsPage {
+    items: [SecretEvent!]!
+    total: Int!
   }
 
   """
@@ -10075,15 +10130,23 @@ export const typeDefs = `#graphql
     Fetch one secret's inspectable half (never the value). Null when the
     row does not exist OR the caller is not entitled to its owner scope —
     no existence disclosure. Entitlement: user -> that user; org -> org
-    member; app -> app owner or org member; memory -> memory READ.
+    member; app -> a member of the App (a person acting as themselves;
+    an App key and an impersonated session get null).
     """
     secret(ref: ID!): Secret
+
+    """
+    The audit events of ONE App secret, newest first, for any member of the App (hrn:node:hadronmemory.com:specs:cor:sec:010:05).
+    A non-member, an App key, a run and an impersonated session get an empty page, the same as a missing secret. Never a value.
+    """
+    secretEvents(ref: ID!, limit: Int, offset: Int): SecretEventsPage!
 
     """
     Paginated secret list for ONE owner scope (the hadron secret ls
     surface). ownerRef accepts ID or URN (cor:api:140) and defaults to the
     caller for ownerType user. An unresolvable ref or a non-entitled owner
-    yields an empty page — no disclosure. Name-ascending order (id
+    (for an App: anyone who is neither a member nor a manager of it, an App
+    key and an impersonated session) yields an empty page — no disclosure. Name-ascending order (id
     tiebreak); limit default 20 / cap 200; limit: 0 -> count only.
     """
     secrets(ownerType: String!, ownerRef: ID, limit: Int, offset: Int): SecretsPage!
@@ -13720,12 +13783,15 @@ export const typeDefs = `#graphql
     """
     Create a named, owner-scoped secret (#677). Gate per owner scope:
     user -> that user (ownerRef optional, defaults to the caller); org ->
-    org ADMIN; app -> app owner / org ADMIN; memory -> memory WRITE.
-    value is the secret payload — encrypted at rest, write-only, never
-    returned. kind selects validation: generic (opaque JSON) or
+    org ADMIN; app -> any member of the App, as a person (an App key, an
+    impersonated session and a run are refused; the value is stored as
+    version 1). value is the secret payload — encrypted at rest,
+    write-only, never returned; at most 32 KiB of stored JSON, counted in
+    bytes. kind selects validation: generic (opaque JSON) or
     webfetch-auth ({type: bearer|basic|header, ...} + metadata.urlPrefix
     origin binding). A run resolves the name via the CSS cascade
-    (memory -> app -> user -> org) at entitled scopes only.
+    (user -> org) at entitled scopes only; an App secret is never resolved
+    by a run (hrn:node:hadronmemory.com:specs:cor:sec:020:02).
     """
     createSecret(
       ownerType: String!
@@ -13737,14 +13803,16 @@ export const typeDefs = `#graphql
     ): Secret!
 
     """
-    Overwrite a secret's value and/or metadata (v1 rotation — no
-    versioning). Name, kind, and owner are immutable — the cascade and
-    flow config reference the name; create a new name instead. The
-    effective (metadata, value) pair is re-validated per kind.
+    Change a secret's value and/or metadata. For an org or user secret a
+    value OVERWRITES (no versions). For an App secret a value ADDS the next
+    version and never overwrites (hrn:node:hadronmemory.com:specs:cor:sec:010:03);
+    any member of the App may store. Name, kind, and owner are immutable —
+    the cascade and flow config reference the name; create a new name
+    instead. The effective (metadata, value) pair is re-validated per kind.
     """
     updateSecret(ref: ID!, metadata: JSON, value: JSON): Secret!
 
-    "Hard-delete a secret; referencing runs fail their resolution loud (or fall through the cascade) afterwards."
+    "Hard-delete a secret, every version with it; referencing runs fail their resolution loud (or fall through the cascade) afterwards. An unprotected App secret is deleted by its creator or whoever manages the App, each as a person."
     deleteSecret(ref: ID!): Boolean!
 
     """
