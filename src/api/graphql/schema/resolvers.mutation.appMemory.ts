@@ -48,6 +48,7 @@ import { agentSlugFromUrn, deriveSlugFromName } from '../../../lib/urn.js';
 import { createNode } from '../../../controller/operations/createNode.js';
 import { withFsProjectionRollback } from '../../../lib/fsProjectionRollback.js';
 import { reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
+import { assertStorableText } from '../../../lib/unstorableTextInput.js';
 import { type Context, requireOrgRole, requireOwnerOrOrgRole, MEMORY_INCLUDE, concealUnreadableDenial, withoutRequestCaches, assertMemoryRootLoc } from './resolvers.helpers.js';
 
 /** App-associable memory classes (the DB CHECK forbids app_id only on system). */
@@ -226,6 +227,7 @@ export const appMemoryMutations = {
     if (!name.trim()) throw new GraphQLError('Memory name must not be empty.', { extensions: { code: 'BAD_USER_INPUT' } });
     // #2730: refuse an unprojectable root after authorization, before any write.
     assertMemoryRootLoc(name);
+    assertStorableText({ shortDescription, description, tags }); // #4106: caller text, refused typed before any write
     return withFsProjectionRollback(() => withAuthorizedTx(ctx, [
       ...(observed.organizationId ? [{ kind: 'org' as const, id: observed.organizationId }] : []),
       ...(observed.ownerUserId ? [{ kind: 'user' as const, id: observed.ownerUserId }] : []),
@@ -319,6 +321,7 @@ export const appMemoryMutations = {
     // #2730: the root node's loc is `name`; refuse an unprojectable one after the
     // gates and before the tombstone reclaim or any create.
     assertMemoryRootLoc(name);
+    assertStorableText({ shortDescription, description, tags }); // #4106: caller text, refused typed before any write
     const agentSlug = agentSlugFromUrn(agent.urn);
     const slug = deriveSlugFromName(name);
 
