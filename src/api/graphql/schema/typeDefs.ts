@@ -9169,7 +9169,8 @@ export const typeDefs = `#graphql
       exactly as written. 1 to 100 ids; each entry passes the externalId check (1 to 512 characters, no unpaired
       surrogate), and ONE bad entry refuses the whole list with BAD_USER_INPUT naming its position (externalIds[i]), never
       its text; an empty list is BAD_USER_INPUT, never "no narrowing". At most one task holds an id, so with limit omitted
-      the page is as long as the list and answers every id; an id no task of this App holds matches nothing. Runs inside
+      — and offset omitted or 0 — the page is as long as the list and answers every id; an explicit offset windows the
+      batch like any list. An id no task of this App holds matches nothing. Runs inside
       the App read gate (hrn:node:hadronmemory.com:specs:cor:agt:050:21), so another App's task with the same id never
       appears. ANDed with every other filter, externalId included.
       """
@@ -9270,8 +9271,9 @@ export const typeDefs = `#graphql
     external id, for a team's reconcile pass: an assignment (by hand or by the platform), a reassignment, a hand-back, a
     cancel, a finish and a release of the id. Each change is one team event, read inside the same gate as agentTeamEvents
     (hrn:node:hadronmemory.com:specs:cor:agt:050:21); anyone else is refused APP_NOT_FOUND. A RELEASED change carries the id
-    the release cleared (its task no longer holds it); a change before the release carries that id too, and a change after
-    it (the task then holds none) is left out; every other change carries the id its task holds. Order is commit-safe,
+    the release cleared (its task no longer holds it); a change before the release in this read's own order — the
+    (tx_id, created_at, id) key the page is served by, not wall-clock time — carries that id too, and a change after it in
+    that order (the task then holds none) is left out; every other change carries the id its task holds. Order is commit-safe,
     oldest first: a change is served only once the transaction that wrote it, and every older one, has ended, so it may
     appear a moment late but never behind a cursor already served. Pass nextCursor (or the last change's cursor) as after
     to continue; with after omitted the read starts at the oldest change. after is opaque: a value that is not a cursor of
@@ -15653,7 +15655,7 @@ export const typeDefs = `#graphql
     chatEnded: Boolean!
     "Conversation completed by this turn's explicit goal_reached flag, or null. hrn:node:hadronmemory.com:specs:cor:cht:030:02"
     conversationCompleted: String
-    "Whether this turn returned from a detour; false until the detour-return slice ships. hrn:node:hadronmemory.com:specs:cor:cht:030:02"
+    "Whether this turn returned the chat from a detour to the conversation and stage the most recent active detour left. False when a completion rule fired instead, or routing was skipped. hrn:node:hadronmemory.com:specs:cor:cht:030:02"
     detourReturned: Boolean!
     "Routing edits were skipped because a concurrent turn moved the chat from the decision's origin. hrn:node:hadronmemory.com:specs:cor:cht:030:02"
     routingSkipped: Boolean!
