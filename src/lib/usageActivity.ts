@@ -9,6 +9,14 @@
  * no rows are streamed into the process. Only non-empty buckets come back — a
  * window with no activity yields `[]`, and the portal zero-fills client-side.
  *
+ * #2719 slice 2: the whole 15-minute cells inside the window are summed from the
+ * `usage_activity_cells` rollup (kept by triggers on `usage_events`, see
+ * prisma/usage-activity-rollup-invariants.sql), so the cost no longer scales with
+ * the caller's raw event count. The two partial edge cells, and any cell before
+ * the rollup's backfill boundary, are answered from `usage_events` with the
+ * original predicate. The answer is identical to the raw scan for every window,
+ * bucket size and IANA zone (every current UTC offset is a multiple of 15 min).
+ *
  * AUTHORIZATION IS THE CALLER'S JOB. This module takes an already-authorized
  * scope: either a `userId` (the caller's own activity) or a `memoryId` the
  * caller has been confirmed to read. It performs no access checks.
@@ -102,6 +110,32 @@ export function isValidTimeZone(tz: string): boolean {
   }
 }
 
+/** Width of one rollup cell (#2719). Every current IANA UTC offset is a multiple of it. */
+export const ROLLUP_CELL_MS = 15 * 60_000;
+
+/**
+ * The whole-cell span `[from, to)` that the rollup answers for a window (#2719 slice 2), or null when the window is
+ * answered from `usage_events` alone. The two partial edge cells, each under one cell wide, and any cell before the
+ * rollup's `applies_from` while its backfill is incomplete, always come from the raw rows with the original predicate,
+ * so the answer equals the raw scan for every window. No state row, or no whole cell inside the window, means null.
+ */
+async function rollupMiddle(
+  db: Pick<PrismaClient, '$queryRaw'>,
+  from: Date,
+  to: Date,
+): Promise<{ from: Date; to: Date } | null> {
+  const [state] = await db.$queryRaw<Array<{ applies_from: Date; complete: boolean }>>`
+    SELECT applies_from, complete FROM usage_activity_rollup_state WHERE id = 1`;
+  if (!state) return null;
+  const firstWhole = Math.ceil(from.getTime() / ROLLUP_CELL_MS) * ROLLUP_CELL_MS;
+  // `applies_from` is cell-aligned by construction; rounding it up keeps a hand-set boundary from leaving the events
+  // between it and the next cell edge in neither the rollup nor the raw range.
+  const maintainedFrom = Math.ceil(state.applies_from.getTime() / ROLLUP_CELL_MS) * ROLLUP_CELL_MS;
+  const start = state.complete ? firstWhole : Math.max(firstWhole, maintainedFrom);
+  const end = Math.floor(to.getTime() / ROLLUP_CELL_MS) * ROLLUP_CELL_MS;
+  return start < end ? { from: new Date(start), to: new Date(end) } : null;
+}
+
 /**
  * Count `read` and `write` events per time bucket within a window.
  *
@@ -133,10 +167,6 @@ export async function getUsageActivity(
   // memories'. The early return makes that unreachable.
   if (scope.memoryIds?.length === 0) return [];
 
-  const scopePredicate = scope.memoryIds
-    ? Prisma.sql`e.memory_id IN (${Prisma.join(scope.memoryIds)})`
-    : Prisma.sql`e.user_id = ${scope.userId}`;
-
   // Defense in depth for a SHARED service: the GraphQL enum guards the query
   // path, but the widget provider's bucket comes from raw config JSON. Without
   // this an unknown value binds `undefined` into date_trunc and surfaces as an
@@ -145,6 +175,15 @@ export async function getUsageActivity(
     throw new Error(`Unknown usage-activity bucket size: ${String(scope.bucket)}`);
   }
   const field = BUCKET_FIELD[scope.bucket];
+
+  const rawScope = scope.memoryIds
+    ? Prisma.sql`e.memory_id IN (${Prisma.join(scope.memoryIds)})`
+    : Prisma.sql`e.user_id = ${scope.userId}`;
+  const cellScope = scope.memoryIds
+    ? Prisma.sql`c.scope_kind = 'memory' AND c.scope_id IN (${Prisma.join(scope.memoryIds)})`
+    : Prisma.sql`c.scope_kind = 'user' AND c.scope_id = ${scope.userId}`;
+
+  const middle = await rollupMiddle(db, scope.from, scope.to);
 
   // The DOUBLE `AT TIME ZONE` is load-bearing — do not "simplify" it to one.
   // `created_at` is `timestamp WITHOUT time zone` holding a UTC instant (how
@@ -167,7 +206,30 @@ export async function getUsageActivity(
   // ~7 hours of events silently fell outside their own window (correct on a UTC
   // server, wrong everywhere else). Keeping the COLUMN bare rather than wrapping
   // it also preserves the (user_id|memory_id, created_at) index range scan.
-  const rows = await db.$queryRaw<Array<{ date: string; reads: bigint; writes: bigint }>>`
+  const rows = middle
+    ? await db.$queryRaw<Array<{ date: string; reads: bigint; writes: bigint }>>`
+    SELECT to_char(date_trunc(${field}, (u.t AT TIME ZONE 'UTC') AT TIME ZONE ${scope.timeZone}), 'YYYY-MM-DD') AS date,
+           SUM(u.reads)::bigint AS reads,
+           SUM(u.writes)::bigint AS writes
+    FROM (
+      SELECT c.cell AS t, c.reads AS reads, c.writes AS writes
+      FROM usage_activity_cells c
+      WHERE c.cell >= ${toNaiveUtc(middle.from)}::timestamp
+        AND c.cell < ${toNaiveUtc(middle.to)}::timestamp
+        AND ${cellScope}
+      UNION ALL
+      SELECT e.created_at AS t, (e.type = 'read')::int::bigint AS reads, (e.type = 'write')::int::bigint AS writes
+      FROM usage_events e
+      WHERE ((e.created_at >= ${toNaiveUtc(scope.from)}::timestamp AND e.created_at < ${toNaiveUtc(middle.from)}::timestamp)
+          OR (e.created_at >= ${toNaiveUtc(middle.to)}::timestamp AND e.created_at < ${toNaiveUtc(scope.to)}::timestamp))
+        AND e.type IN ('read', 'write')
+        AND e.deleted_at IS NULL
+        AND ${rawScope}
+    ) u
+    GROUP BY 1
+    HAVING SUM(u.reads) <> 0 OR SUM(u.writes) <> 0
+    ORDER BY 1`
+    : await db.$queryRaw<Array<{ date: string; reads: bigint; writes: bigint }>>`
     SELECT to_char(date_trunc(${field}, (e.created_at AT TIME ZONE 'UTC') AT TIME ZONE ${scope.timeZone}), 'YYYY-MM-DD') AS date,
            COUNT(*) FILTER (WHERE e.type = 'read')  AS reads,
            COUNT(*) FILTER (WHERE e.type = 'write') AS writes
@@ -176,7 +238,7 @@ export async function getUsageActivity(
       AND e.created_at < ${toNaiveUtc(scope.to)}::timestamp
       AND e.type IN ('read', 'write')
       AND e.deleted_at IS NULL
-      AND ${scopePredicate}
+      AND ${rawScope}
     GROUP BY 1
     ORDER BY 1`;
 

@@ -2021,6 +2021,34 @@ model UsageEvent {
   @@map("usage_events")
 }
 
+/// #2719 slice 2: the usage-activity rollup. One row per (scope, 15-minute UTC cell) holding the live `read` and
+/// `write` event counts of that cell, maintained by statement-level triggers on `usage_events`
+/// (prisma/usage-activity-rollup-invariants.sql), never written by application code. `scopeKind` is `user` (events
+/// attributed to the user) or `memory` (events attributed to the event's own `memoryId`); no FK on purpose, the rollup
+/// follows the events and an event outlives its memory (#796).
+model UsageActivityCell {
+  scopeKind String   @map("scope_kind")
+  scopeId   String   @map("scope_id")
+  cell      DateTime
+  reads     BigInt   @default(0)
+  writes    BigInt   @default(0)
+
+  @@id([scopeKind, scopeId, cell])
+  @@map("usage_activity_cells")
+}
+
+/// #2719 slice 2: the rollup's single state row (`id = 1`). The triggers maintain every cell at or after `appliesFrom`;
+/// cells before it enter by the backfill job, which sets `complete`. Until then the reader answers earlier cells from
+/// `usage_events`, so deploying before the backfill is correct, only not faster. `appliesFrom` stays a real timestamp
+/// (Prisma cannot read -infinity); `complete` carries the "all history" meaning.
+model UsageActivityRollupState {
+  id          Int      @id @default(1)
+  appliesFrom DateTime @map("applies_from")
+  complete    Boolean  @default(false)
+
+  @@map("usage_activity_rollup_state")
+}
+
 /// **The Agent definition** — what a Builder creates and what the
 /// marketplace sells. One Agent row holds the canonical conversation
 /// design (system memory), the default AI config, the declared
