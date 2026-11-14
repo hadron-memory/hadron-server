@@ -23,8 +23,6 @@ jobs:
     env:
       REQUIRE_PRIVATE_CLUSTER: '1'
       PRIVATE_CLUSTER_PG_VERSION: ${{ matrix.pg }}
-      # The fixture clusters and dumps belong on the runner's disk, never /dev/shm.
-      TMPDIR: ${{ runner.temp }}
       # Prisma generation needs a syntactically valid URL; the suite creates all
       # of its own databases on fresh private ports and never connects to this.
       DATABASE_URL: postgresql://postgres@127.0.0.1/unused
@@ -54,4 +52,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm prisma generate
       - name: Run restore assertions and regression pins (PostgreSQL ${{ matrix.pg }})
+        env:
+          # runner context is available at step scope; fixtures belong on disk.
+          TMPDIR: ${{ runner.temp }}
         run: pnpm exec vitest run --config scripts/ops/vitest.private.config.ts
