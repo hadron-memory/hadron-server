@@ -7,6 +7,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { contextCapTick, __capSweepTesting } from '../../../lib/contextReset/capSweep.js';
+import { issueReset } from '../../../lib/contextReset/contextReset.js';
+import { PLATFORM_ACTOR } from '../../../lib/agentTasks/events.js';
 import { buildASTSchema, parse } from 'graphql';
 import { typeDefs } from './typeDefs.js';
 import { resolvers } from './resolvers.js';
@@ -321,6 +323,31 @@ describe('what the pass decides, and fair rotation across bounded passes (Diego 
       VALUES (${`r${Math.random()}`}, ${F.app.id}, ${hour.id}, ${hs.id}, 'context-cap', NULL, 'failed', 'HOST_UNSUPPORTED', now(), now())`;
     await report();
     expect(await contextCapTick(db)).toBe(1);
+    expect(__capSweepTesting.decided).toEqual([F.kit.id]);
+  });
+
+  it('issueReset itself refuses a worker with no open session (Peter #108933): the sweep\'s EXISTS is only an optimisation', async () => {
+    const w = await mk('Bare');
+    // Both ways: with no host to take it the cap path could return before the session is touched, a task-end reset (which
+    // records a failed row when no host can) could not; the guard alone stops both.
+    for (const unsupportedIsFailure of [false, true]) {
+      const out = await db.$transaction((tx) => issueReset(tx, {
+        appId: F.app.id, workerId: w.id, taskId: unsupportedIsFailure ? 'some-task' : null, cause: unsupportedIsFailure ? 'task-end' : 'context-cap',
+        actor: PLATFORM_ACTOR, now: new Date(), unsupportedIsFailure, extra: {},
+      }));
+      expect(out).toBeNull();
+    }
+    expect(await db.contextReset.count({ where: { workerId: w.id } })).toBe(0);
+    expect(await db.hostOperation.count({ where: { workerId: w.id } })).toBe(0);
+  });
+
+  it('Diego\'s shape: earlier over-cap workers in a paused App never keep Kit out, over two bounded ticks', async () => {
+    const paused = await db.app.create({ data: { organizationId: F.orgId, name: 'Paused2', urn: `paused2-${Math.random()}.example:p`.replace('.', '-'), teamPausedAt: new Date() }, select: { id: true } });
+    for (let i = 0; i < 25; i += 1) { const w = await mk(`P${i}`, paused.id); await session(w, paused.id); await over(w.id, new Date(Date.now() - 10 * MIN - (30 - i) * 1000).toISOString()); }
+    await report();
+    __capSweepTesting.page = 5; __capSweepTesting.maxPages = 2;
+    const n = (await contextCapTick(db)) + (await contextCapTick(db));
+    expect(n).toBe(1);
     expect(__capSweepTesting.decided).toEqual([F.kit.id]);
   });
 
