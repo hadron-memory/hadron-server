@@ -237,17 +237,45 @@ describe('the next assignment starts a fresh run (cor:agt:070:08)', () => {
     expect(await starts()).toEqual([]);
   });
 
-  it('under a team pause nothing is started: the task waits, assigned and pending', async () => {
+  it('under a team pause nothing is started: the task waits, assigned and pending; lifting the pause starts it (Peter, #108945)', async () => {
     await db.session.update({ where: { id: f.session.id }, data: { endedAt: new Date() } });
     await M.setTeamPause({}, { appRef: f.app.id, paused: true }, ctx(f.manager.id));
     const next = await unassigned();
     await assignKit(next.id);
     expect(await starts()).toEqual([]);
     expect(await db.agentTask.findUniqueOrThrow({ where: { id: next.id } })).toMatchObject({ assigneeWorkerId: f.kit.id, status: 'pending' });
-    // Lifted, the next assignment starts Kit.
+    // Lifted: the task assigned during the pause starts Kit, once, naming that task.
     await M.setTeamPause({}, { appRef: f.app.id, paused: false }, ctx(f.manager.id));
-    await assignKit((await unassigned()).id);
+    expect((await starts()).map((o) => [o.issuedBy, o.args])).toEqual([
+      ['platform', { workerId: f.kit.id, worktree: 'hadron-server/kit', family: 'claude', taskId: next.id }],
+    ]);
+    // A second pause and lift issues nothing more: that start is still in flight.
+    await M.setTeamPause({}, { appRef: f.app.id, paused: true }, ctx(f.manager.id));
+    await M.setTeamPause({}, { appRef: f.app.id, paused: false }, ctx(f.manager.id));
     expect(await starts()).toHaveLength(1);
+  });
+
+  it('lifting a pause starts only for tasks assigned during it: an older open task of an unbound worker starts nobody, and a lift with no pause does nothing', async () => {
+    await db.session.update({ where: { id: f.session.id }, data: { endedAt: new Date() } });
+    const old = await pendingTask(f.kit, { assignedAt: new Date(Date.now() - 60 * MIN) });
+    await M.setTeamPause({}, { appRef: f.app.id, paused: false }, ctx(f.manager.id));
+    await M.setTeamPause({}, { appRef: f.app.id, paused: true }, ctx(f.manager.id));
+    await M.setTeamPause({}, { appRef: f.app.id, paused: false }, ctx(f.manager.id));
+    expect(await starts()).toEqual([]);
+    expect((await db.agentTask.findUniqueOrThrow({ where: { id: old.id } })).status).toBe('pending');
+  });
+
+  it('a task assigned during a pause and ended or moved before the lift starts nobody; a worker with an open session is not started over', async () => {
+    await db.session.update({ where: { id: f.session.id }, data: { endedAt: new Date() } });
+    await M.setTeamPause({}, { appRef: f.app.id, paused: true }, ctx(f.manager.id));
+    const gone = await unassigned();
+    await assignKit(gone.id);
+    await f.cancel(gone.id);
+    const open = await unassigned();
+    await assignKit(open.id);
+    await f.bind(f.kit);
+    await M.setTeamPause({}, { appRef: f.app.id, paused: false }, ctx(f.manager.id));
+    expect(await starts()).toEqual([]);
   });
 
   it('D3: a process that died mid-task is never restarted by a second worker.start: the session is open, so no assignment or matcher pass issues one', async () => {
@@ -345,6 +373,16 @@ describe('the last task reassigned away ends the session too (Peter, team chat #
     const p = await f.startedTask();
     const toPerson = await M.reassignAgentTask({}, { taskId: p.id, assignee: { user: f.holder.id } }, ctx(f.manager.id));
     expect(await F.AgentTask.sessionEndRequest(toPerson, {}, ctx(f.manager.id))).toBeNull();
+  });
+
+  it('Peter #108945: a worker reads only a request addressed to itself; a person reads the assignee\'s', async () => {
+    const t = await f.startedTask();
+    const finished = await f.finish(t.id);
+    // Kit, the asked worker, and a person (the holder, the manager) read it.
+    expect(await f.asWorker(f.kit, () => F.AgentTask.sessionEndRequest(finished, {}, ctx(f.holder.id)))).toMatchObject({ workerId: f.kit.id, sessionId: f.session.id });
+    expect(await F.AgentTask.sessionEndRequest(finished, {}, ctx(f.manager.id))).toMatchObject({ workerId: f.kit.id });
+    // Ada, another worker reading Kit's task, never reads an ask to end a session that is not hers.
+    expect(await f.asWorker(f.ada, () => F.AgentTask.sessionEndRequest(finished, {}, ctx(f.holder.id)))).toBeNull();
   });
 
   it('Kit moving its own last task away is still woken (END_SESSION): it cannot read the ask on a task that is no longer its', async () => {
