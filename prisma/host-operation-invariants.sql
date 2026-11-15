@@ -38,8 +38,12 @@ BEGIN
       IF NOT (v #>> '{}') ~ '^[A-Za-z0-9_-]{1,64}$' THEN RETURN false; END IF;
     ELSIF k = 'family' THEN
       IF NOT (v #>> '{}') ~ '^[a-z0-9][a-z0-9._-]{0,63}$' THEN RETURN false; END IF;
-    ELSIF op_type = 'worker.start' AND k IN ('model', 'effort', 'accountProfile') THEN
+    ELSIF op_type = 'worker.start' AND k IN ('effort', 'accountProfile') THEN
       IF NOT (v #>> '{}') ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' THEN RETURN false; END IF;
+    -- The model keeps the assignment's own stored shape (prisma/host-assignment-invariants.sql), so a model an S1a row
+    -- holds always starts; the stricter profile token is the API's rule for every new write (#4251 blind P2).
+    ELSIF op_type = 'worker.start' AND k = 'model' THEN
+      IF NOT (host_operation_token_ok(v #>> '{}') AND length(v #>> '{}') <= 128) THEN RETURN false; END IF;
     ELSIF op_type = 'worker.start' AND k = 'lifecycle' THEN
       IF (v #>> '{}') NOT IN ('LONG_LIVED', 'SHORT_LIVED') THEN RETURN false; END IF;
     ELSIF NOT host_operation_token_ok(v #>> '{}') THEN

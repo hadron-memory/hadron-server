@@ -17,6 +17,8 @@ import { runAsActor } from '../../../lib/requestActor.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../../../middleware/auth.js';
 import { loadLaunchableFamilies } from '../../../lib/agentTasks/hosts.js';
 import { resolvers, type Context } from './resolvers.js';
+import { ApolloServer } from '@apollo/server';
+import { typeDefs } from './typeDefs.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -215,9 +217,47 @@ describe('acceptance 3: worker.start carries the profile tokens and no command',
     const base = { id: generateId(), appId: app.id, hostId: 'orca1', type: 'worker.start', workerId: kit.id, issuedBy: 'platform', holdUserId: holder.id };
     const args = { workerId: kit.id, worktree: 'hadron-server/kit', family: 'claude' };
     await expect(db.hostOperation.create({ data: { ...base, args: { ...args, model: 'claude-opus-5-5', effort: 'high', accountProfile: 'worker', lifecycle: 'SHORT_LIVED' } } })).resolves.toBeTruthy();
-    for (const bad of [{ accountProfile: 'a b' }, { model: 'a/b' }, { effort: '$(id)' }, { command: 'claude' }, { accountProfile: 1 }, { lifecycle: 'FOREVER' }, { lifecycle: 'long_lived' }]) {
+    for (const bad of [{ accountProfile: 'a b' }, { accountProfile: 'a/b' }, { model: 'a b' }, { model: '$(id)' }, { effort: '$(id)' }, { command: 'claude' }, { accountProfile: 1 }, { lifecycle: 'FOREVER' }, { lifecycle: 'long_lived' }]) {
       await expect(db.hostOperation.create({ data: { ...base, id: generateId(), args: { ...args, ...bad } } }), JSON.stringify(bad)).rejects.toThrow();
     }
+  });
+});
+
+describe('upgrade: a model an S1a assignment holds still starts (#4251 blind P2)', () => {
+  it("a stored model in S1a's wider host-token shape (vendor/model) is carried by the start and accepted by the args check", async () => {
+    // S1a's resolver accepted a host token as the model, so such a row may exist; the database admits it today.
+    await db.hostWorkerAssignment.create({ data: { id: generateId(), appId: app.id, hostId: 'orca1', workerId: kit.id, workdir: 'hadron-server/kit', family: 'claude', model: 'vendor/model', createdByUserId: manager.id } });
+    await setSource('SERVER');
+    await register(orca1, [{ worker: 'Kit', family: 'claude', worktrees: ['hadron-server/kit'] }]);
+    await M.createAgentTask({}, { input: { appRef: app.id, title: 'Work', assignee: { worker: kit.id }, closeSessionWhenDone: false } }, ctx(manager.id));
+    const op = await db.hostOperation.findFirst({ where: { workerId: kit.id, type: 'worker.start' } });
+    expect(op?.args).toMatchObject({ model: 'vendor/model', lifecycle: 'LONG_LIVED' });
+    // A new write of that model is still refused: the stricter token is the API's rule.
+    expect(await code(assign({ model: 'vendor/model', replace: true }))).toBe('BAD_LAUNCHER_PROFILE');
+  });
+});
+
+describe('through the public GraphQL schema (#4251 blind P3)', () => {
+  it('assignHostWorker stores effort and accountProfile, and hostSetup returns them', async () => {
+    const server = new ApolloServer<Context>({ typeDefs, resolvers });
+    const assigned = await server.executeOperation({
+      query: `mutation($input: AssignHostWorkerInput!) { assignHostWorker(input: $input) { hostId family model effort accountProfile } }`,
+      variables: { input: { appRef: app.id, hostId: 'orca1', worker: 'Kit', workdir: 'hadron-server/kit', family: 'codex', model: 'gpt-6.1-sol', effort: 'high', accountProfile: 'codex-main' } },
+    }, { contextValue: ctx(manager.id) });
+    expect(assigned.body.kind === 'single' && assigned.body.singleResult.errors).toBeFalsy();
+    expect(assigned.body.kind === 'single' && assigned.body.singleResult.data).toEqual({
+      assignHostWorker: { hostId: 'orca1', family: 'codex', model: 'gpt-6.1-sol', effort: 'high', accountProfile: 'codex-main' } });
+    const read = await server.executeOperation({
+      query: `query($appRef: String!) { hostSetup(appRef: $appRef) { source assignments { hostId family model effort accountProfile } } }`,
+      variables: { appRef: app.id },
+    }, { contextValue: keyCtx(orca1) });
+    expect(read.body.kind === 'single' && read.body.singleResult.data).toEqual({
+      hostSetup: { source: 'HOST', assignments: [{ hostId: 'orca1', family: 'codex', model: 'gpt-6.1-sol', effort: 'high', accountProfile: 'codex-main' }] } });
+    const refused = await server.executeOperation({
+      query: `mutation($input: AssignHostWorkerInput!) { assignHostWorker(input: $input) { id } }`,
+      variables: { input: { appRef: app.id, hostId: 'orca1', worker: 'Kit', workdir: 'hadron-server/kit', family: 'codex', accountProfile: 'a b', replace: true } },
+    }, { contextValue: ctx(manager.id) });
+    expect(refused.body.kind === 'single' && refused.body.singleResult.errors?.[0]?.extensions?.code).toBe('BAD_LAUNCHER_PROFILE');
   });
 });
 
