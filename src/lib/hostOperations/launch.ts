@@ -265,6 +265,9 @@ export async function launchForAssignment(
  * launchForAssignment never throws (it logs and returns null), so one task cannot stop the rest. Runs after the lift
  * committed; never fails it. Returns the operations issued.
  */
+/** Test seam: runs before each task's start in {@link launchAfterTeamResume}; a throw stands for any per-task fault. */
+export const __launchTesting: { beforeResumeLaunch?: (t: { id: string; workerId: string }) => Promise<void> | void } = {};
+
 export async function launchAfterTeamResume(db: PrismaClient, appId: string, pausedAt: Date, now = new Date()): Promise<string[]> {
   try {
     const tasks = await db.$queryRaw<{ id: string; workerId: string; family: string | null }[]>`
@@ -279,6 +282,7 @@ export async function launchAfterTeamResume(db: PrismaClient, appId: string, pau
       ORDER BY t.assignee_worker_id, (t.status = 'pending') DESC, t.assigned_at, t.id`;
     const issued: string[] = [];
     for (const t of tasks) {
+      await __launchTesting.beforeResumeLaunch?.(t);
       const family = normalizeFamily(t.family);
       const op = await launchForAssignment(db, { appId, taskId: t.id, workerId: t.workerId, ...(family ? { family } : {}) }, now);
       if (op) issued.push(op);
