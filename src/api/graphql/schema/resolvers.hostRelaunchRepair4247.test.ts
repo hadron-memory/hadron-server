@@ -356,6 +356,14 @@ describe('the database refuses a raw write the resolver would not make', () => {
     await expect(raw({ ...base, repairReason: 'PAUSED' })).rejects.toThrow(no);
     await expect(raw({ ...base, repairAttempt: 1 })).rejects.toThrow(no);
     await expect(raw({ ...ok, repairNote: 'the screen said' })).rejects.toThrow(no);
+    // A key that is ABSENT (not null) makes its predicate SQL NULL, which a CHECK passes: each is pinned on its own.
+    const { repairAttempt: _a, ...noAttempt } = ok;
+    const { repairReason: _r, ...noReason } = ok;
+    const { repair: _p, ...noRepair } = ok;
+    await expect(raw(noAttempt)).rejects.toThrow(no);
+    await expect(raw(noReason)).rejects.toThrow(no);
+    await expect(raw(noRepair)).rejects.toThrow(no);
+    await expect(raw({ ...noAttempt, repair: 'RELAUNCH_FAILED', repairReason: 'TIMEOUT' })).rejects.toThrow(no);
   });
 });
 
