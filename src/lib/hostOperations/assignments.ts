@@ -41,18 +41,35 @@ export const isHostSetupSource = (v: unknown): v is HostSetupSource =>
 /** The per-row refusal a checked registration reports for a worker the platform did not assign to that host. */
 export const HOST_WORKER_NOT_ASSIGNED = 'HOST_WORKER_NOT_ASSIGNED';
 
-/** A model family token, as a host operation carries it. */
-const FAMILY = /^[a-z0-9][a-z0-9._-]{0,63}$/;
-/** A model is a name token of at most this many characters. */
-export const HOST_ASSIGNMENT_MODEL_MAX = 128;
+/**
+ * #4230 (S1b, decision G1) — the families a host has a fixed launcher template for (hadron-cli C3). A launcher
+ * profile names one of these; any other family has no launcher, so it is refused rather than stored for a start that
+ * could never run. The list grows with the CLI's templates.
+ */
+export const LAUNCHER_FAMILIES = ['claude', 'codex', 'glm', 'kimi'] as const;
+/**
+ * A launcher profile value (model, effort, accountProfile): a plain token, letters, digits and . _ -, starting with a
+ * letter or digit, at most 128 characters. No slash, space or shell character, and never an option: the host types the
+ * command it builds from these into a shell (hadron-cli C3), so the token itself must be inert there.
+ */
+export const LAUNCHER_PROFILE_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
-/** An assignment refused by its shape; nothing was written. */
+/** An assignment refused by its shape; nothing was written. A launcher-profile field is BAD_LAUNCHER_PROFILE (#4230). */
 export class HostAssignmentArgsError extends Error {
-  readonly code = 'BAD_HOST_ASSIGNMENT_ARGS';
-  constructor(message: string) {
+  constructor(message: string, readonly code: 'BAD_HOST_ASSIGNMENT_ARGS' | 'BAD_LAUNCHER_PROFILE' = 'BAD_HOST_ASSIGNMENT_ARGS') {
     super(message);
     this.name = 'HostAssignmentArgsError';
   }
+}
+
+const badProfile = (message: string) => new HostAssignmentArgsError(message, 'BAD_LAUNCHER_PROFILE');
+const PROFILE_RULE = 'a token: letters, digits, ".", "_" or "-", starting with a letter or digit, at most 128 characters';
+
+/** An optional launcher-profile value: null when absent, the token when it is one, else BAD_LAUNCHER_PROFILE. */
+function profileToken(name: string, v: unknown): string | null {
+  if (v === null || v === undefined) return null;
+  if (typeof v !== 'string' || !LAUNCHER_PROFILE_TOKEN.test(v)) throw badProfile(`${name} is ${PROFILE_RULE}.`);
+  return v;
 }
 
 const TOKEN_RULE = 'a name token (letters, digits and . _ / @ + -, starting with a letter or digit, no "..", "//" or trailing "/")';
@@ -61,8 +78,10 @@ const TOKEN_RULE = 'a name token (letters, digits and . _ / @ + -, starting with
  * Validate an assignment's fields, returning them exactly as they will be stored. Throws
  * {@link HostAssignmentArgsError}: the refusal depends only on the caller's own input.
  */
-export function validateHostAssignment(input: { hostId: unknown; workdir: unknown; family: unknown; model?: unknown }): {
-  hostId: string; workdir: string; family: string; model: string | null;
+export function validateHostAssignment(input: {
+  hostId: unknown; workdir: unknown; family: unknown; model?: unknown; effort?: unknown; accountProfile?: unknown;
+}): {
+  hostId: string; workdir: string; family: string; model: string | null; effort: string | null; accountProfile: string | null;
 } {
   const hostId = typeof input.hostId === 'string' ? input.hostId.trim() : '';
   if (!HOST_ID_PATTERN.test(hostId)) {
@@ -72,15 +91,15 @@ export function validateHostAssignment(input: { hostId: unknown; workdir: unknow
     throw new HostAssignmentArgsError(`workdir is ${TOKEN_RULE}: the name the host knows the working directory by, never a path.`);
   }
   const family = typeof input.family === 'string' ? normalizeFamily(input.family) : null;
-  if (!family || !FAMILY.test(family)) throw new HostAssignmentArgsError('family is a lowercase model family token, e.g. claude or codex.');
-  let model: string | null = null;
-  if (input.model !== null && input.model !== undefined) {
-    if (!isHostToken(input.model) || input.model.length > HOST_ASSIGNMENT_MODEL_MAX) {
-      throw new HostAssignmentArgsError(`model is ${TOKEN_RULE}, at most ${HOST_ASSIGNMENT_MODEL_MAX} characters.`);
-    }
-    model = input.model;
+  if (!family || !(LAUNCHER_FAMILIES as readonly string[]).includes(family)) {
+    throw badProfile(`family is one a host has a launcher for: ${LAUNCHER_FAMILIES.join(', ')}.`);
   }
-  return { hostId, workdir: input.workdir, family, model };
+  return {
+    hostId, workdir: input.workdir, family,
+    model: profileToken('model', input.model),
+    effort: profileToken('effort', input.effort),
+    accountProfile: profileToken('accountProfile', input.accountProfile),
+  };
 }
 
 /** Is `v` a host id an assignment read may filter by? */
@@ -137,5 +156,7 @@ export const ASSIGNMENT_JOIN = Prisma.sql`
 /** Under `server`: assigned to this host, and the host's registration confirms the assigned workdir. */
 export const ASSIGNMENT_IN_EFFECT = Prisma.sql`(a.host_setup_source <> 'server' OR (ha.id IS NOT NULL AND ha.workdir = ANY(w.worktrees)))`;
 export const ASSIGNMENT_FAMILY = Prisma.sql`COALESCE(ha.family, w.family)`;
+/** #4230: the launcher profile a start carries, under `server` only (all null under `host`, or without an assignment). */
+export const ASSIGNMENT_PROFILE = Prisma.sql`ha.model AS model, ha.effort AS effort, ha.account_profile AS "accountProfile"`;
 /** The worktrees a start may name: under `server` only the assigned workdir. */
 export const ASSIGNMENT_WORKTREES = Prisma.sql`CASE WHEN ha.id IS NOT NULL THEN ARRAY[ha.workdir] ELSE w.worktrees END`;

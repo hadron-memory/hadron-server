@@ -55,7 +55,23 @@ describe('the invariants file', () => {
     const block = "-- #2771 (proposed cor:agt:070:09) — a worker's stored terminal report";
     const head = source.slice(0, source.indexOf(block));
     expect(source.indexOf(block)).toBeGreaterThan(0);
-    expect(migration.endsWith(`\n${(head + migration.slice(migration.indexOf(block))).replaceAll(", 'checkpoint', 'sweep'", '').replaceAll(", 'checkpoint'", '')}`)).toBe(true);
+    // #4230 (S1b) widened worker.start's optional keys in host_operation_args_ok; its migration carries the function as
+    // it is now, so the old copy is compared with the function as it was (the S1b lines taken out).
+    const S1B_KEYS = "    -- #4230 (S1b, decision G1): a start may carry its assignment's typed launcher profile and its Agent's lifecycle,\n    -- never a command.\n";
+    const S1B_CHECK = "\n    ELSIF op_type = 'worker.start' AND k IN ('effort', 'accountProfile') THEN\n      IF NOT (v #>> '{}') ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' THEN RETURN false; END IF;" +
+      "\n    -- The model: the one launcher-model grammar the assignment store uses too (host_launcher_model_ok, above)." +
+      "\n    ELSIF op_type = 'worker.start' AND k = 'model' THEN\n      IF NOT host_launcher_model_ok(v #>> '{}') THEN RETURN false; END IF;" +
+      "\n    ELSIF op_type = 'worker.start' AND k = 'lifecycle' THEN\n      IF (v #>> '{}') NOT IN ('LONG_LIVED', 'SHORT_LIVED') THEN RETURN false; END IF;";
+    expect(head.includes(S1B_KEYS) && head.includes(S1B_CHECK)).toBe(true);
+    // #4251: the one launcher-model grammar is its own block, before host_operation_args_ok.
+    const S1B_MODEL_FN = head.slice(head.indexOf('-- #4230 (S1b; #4251 blind P2, Peter #108855)'), head.indexOf('-- cor:agt:070:03 — the closed set of typed operations'));
+    expect(S1B_MODEL_FN).toContain('CREATE OR REPLACE FUNCTION host_launcher_model_ok');
+    const pre4230 = head.replace(S1B_MODEL_FN, '').replace(S1B_KEYS, '').replace(", 'model', 'effort', 'accountProfile', 'lifecycle']", ']').replace(S1B_CHECK, '');
+    expect(migration.endsWith(`\n${(pre4230 + migration.slice(migration.indexOf(block))).replaceAll(", 'checkpoint', 'sweep'", '').replaceAll(", 'checkpoint'", '')}`)).toBe(true);
+    const fnStart = source.indexOf('-- #4230 (S1b; #4251 blind P2, Peter #108855)');
+    const fn = source.slice(fnStart, source.indexOf('$$;\n', source.indexOf('-- cor:agt:070:03 — the closed set of typed operations')) + 4);
+    const s1b = readFileSync(new URL('../../../prisma/migrations/20261115230000_host_launcher_profiles/migration.sql', import.meta.url), 'utf8');
+    expect(s1b).toContain(`\n${fn}`);
     // #4247: the CHECK was widened again by 20261115170000_worker_terminal_relaunch_repair, which carries the current block.
     const relaunch = readFileSync(new URL('../../../prisma/migrations/20261115170000_worker_terminal_relaunch_repair/migration.sql', import.meta.url), 'utf8');
     expect(relaunch.endsWith(`\n${source.slice(source.indexOf(block))}`)).toBe(true);
