@@ -8,16 +8,14 @@
  *
  * WHO STARTS (cor:agt:070:05, :08): whoever manages the App, by hand, with or
  * without a task; and the platform, when a task is assigned (by hand or by
- * matching) to a held worker with no live session that has an existing
- * worktree on a live host. Vera's V16 (ruling 0265; drafted in 070:08 as
- * Proposed, #4226) narrows that to no OPEN session: a worker with an open
- * session, quiet or live, is reached through it, never started over it. A worker nobody holds is never started. Without
- * such a worktree nothing is issued and the task waits (the not-started alarm
- * tells its owner). Nothing here creates a worktree (cor:agt:070:06; resetting
- * an existing one inside the start is drafted as Proposed there, G6, #4226).
- * KNOWN GAP (#4237): `lockStartableWorker` below still refuses only a LIVE
- * session, so a start by hand, a reassign or a named create can still land over
- * a quiet open one; the matcher's own start is guarded (`needsHostStart`, #3815).
+ * matching) to a held worker with no open session that has an existing
+ * worktree on a live host. "Open", not "live", is Vera's V16 (ruling 0265;
+ * drafted in 070:08 as Proposed, #4226), built by #4237: a worker with an open
+ * session, quiet or live, is reached through it, never started over it. A
+ * worker nobody holds is never started. Without such a worktree nothing is
+ * issued and the task waits (the not-started alarm tells its owner). Nothing
+ * here creates a worktree (cor:agt:070:06; resetting an existing one inside the
+ * start is drafted as Proposed there, G6, #4226).
  *
  * THE GRANT (A): the agent a host starts runs on the HOLDER's own token,
  * already configured on that host. The host passes it a single-use grant, minted
@@ -82,19 +80,33 @@ export async function liveRegistrationsFor(
   });
 }
 
-/** Does the worker have a live session now (cor:agt:020:11, the roster's and the bind's one predicate)? */
-async function hasLiveSession(db: Db, workerId: string, now: Date): Promise<boolean> {
+/**
+ * The worker's activity row (cor:agt:020:11, the roster's and the bind's one fold): `hasLiveSession`, and `bound`, an
+ * open (not ended) session however quiet, the same fact the matcher's `needsHostStart` reads.
+ */
+async function sessionStateOf(db: Db, workerId: string, now: Date): Promise<{ live: boolean; open: boolean }> {
   const { loadWorkersActivity } = await import('../../api/graphql/schema/resolvers.worker.js');
-  return (await loadWorkersActivity({ db } as unknown as Context, [workerId], now)).get(workerId)?.hasLiveSession ?? false;
+  const a = (await loadWorkersActivity({ db } as unknown as Context, [workerId], now)).get(workerId);
+  return { live: a?.hasLiveSession ?? false, open: a?.bound ?? false };
 }
+
+/**
+ * Which session refuses a start. `'live'`: a manager's own start (cor:agt:070:05), a deliberate act that may start a
+ * worker whose open session is quiet. `'open'`: every platform start for an assignment (cor:agt:070:08 as narrowed by
+ * V16, ruling 0265; #4237): a worker with an open session, live or quiet, is reached through it by the assignment
+ * notice and never started over (#1114, #3818).
+ */
+export type StartRefusalWindow = 'live' | 'open';
 
 /**
  * The checks every start shares, on the transaction client with the worker row
  * locked FOR UPDATE (so two starts of one worker serialize): the worker is of
- * the App, not retired, held, has no live session and no start in flight. Throws
- * {@link LaunchRefusal}.
+ * the App, not retired, held, has no live (or, for `refuse: 'open'`, no open)
+ * session and no start in flight. Throws {@link LaunchRefusal}.
  */
-export async function lockStartableWorker(tx: Prisma.TransactionClient, appId: string, workerId: string, now: Date): Promise<StartHold> {
+export async function lockStartableWorker(
+  tx: Prisma.TransactionClient, appId: string, workerId: string, now: Date, refuse: StartRefusalWindow,
+): Promise<StartHold> {
   const [w] = await tx.$queryRaw<{ appId: string; retiredAt: Date | null; heldByUserId: string | null; heldAt: Date | null }[]>`
     SELECT app_id AS "appId", retired_at AS "retiredAt", held_by_user_id AS "heldByUserId", held_at AS "heldAt"
     FROM workers WHERE id = ${workerId} FOR UPDATE`;
@@ -103,8 +115,10 @@ export async function lockStartableWorker(tx: Prisma.TransactionClient, appId: s
   // cor:agt:070:08 (kept by the Team on Orca drafts, G5, #4226): a worker nobody holds is never started; there is
   // nobody to bind it on behalf of.
   if (!w.heldByUserId) throw new LaunchRefusal('WORKER_NOT_HELD', 'Nobody holds this worker, so no host starts it.');
-  // LIVE, not open: V16 (Proposed in 070:08) says no OPEN session; aligning the check is #4237.
-  if (await hasLiveSession(tx, workerId, now)) throw new LaunchRefusal('WORKER_LIVE', 'This worker already has a live session.');
+  const session = await sessionStateOf(tx, workerId, now);
+  if (session.live) throw new LaunchRefusal('WORKER_LIVE', 'This worker already has a live session.');
+  // V16 (Proposed in 070:08, #4226), built by #4237: a platform start for an assignment needs no OPEN session.
+  if (refuse === 'open' && session.open) throw new LaunchRefusal('WORKER_SESSION_OPEN', 'This worker has an open session; the assignment reaches it there.');
   const pending = await tx.hostOperation.findFirst({
     where: { workerId, type: 'worker.start', status: { in: ['issued', 'collected'] } },
     select: { id: true },
@@ -166,8 +180,7 @@ export async function insertWorkerStart(
 
 /**
  * cor:agt:070:08 — the platform's start for an assignment: if the task's worker
- * assignee is held, has no live session (V16, Proposed in the rule, says no OPEN
- * session; the matcher only calls this for one with none, other callers: #4237) and an
+ * assignee is held, has no open session (V16, Proposed in the rule; #4237) and an
  * existing worktree on a live host,
  * issue `worker.start` there (the first such host by id, and the first worktree
  * it lists: Proposed). Otherwise nothing is issued and the task waits. Runs
@@ -201,7 +214,7 @@ export async function launchForAssignment(
       if (!task || task.assigneeWorkerId !== a.workerId || !['pending', 'started'].includes(task.status)) return null;
       let hold: StartHold;
       try {
-        hold = await lockStartableWorker(tx, a.appId, a.workerId, now);
+        hold = await lockStartableWorker(tx, a.appId, a.workerId, now, 'open');
       } catch (e) {
         if (e instanceof LaunchRefusal) return null;
         throw e;

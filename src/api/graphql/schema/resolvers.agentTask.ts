@@ -2026,8 +2026,8 @@ async function afterTaskCreate(
   const created = await ctx.db.agentTask.findUniqueOrThrow({ where: { id: taskId } });
   // #1709 (cor:agt:070:08): `startItsAssignee` is true when the create NAMED its assignee, or a distinct-batch match chose a
   // worker with no open session (`needsHostStart`). #3815 (ruling 0265 V16-V19): any other matcher-chosen assignee is started
-  // by the matcher's own rule (a host start only for a worker with no open session), so this live-only launch check must not
-  // run for it. `matchTaskNow` runs after the create transaction commits, so `created` below already carries its assignee.
+  // by the matcher's own rule (a host start only for a worker with no open session). #4237: `launchAssignee` applies that same
+  // no-open-session rule (V16) to a named, hand or reassigned start, so a quiet open session is reached, never started over. `matchTaskNow` runs after the create transaction commits, so `created` below already carries its assignee.
   if (startItsAssignee) await launchAssignee(ctx.db, created, family);
   await emitTaskWarnings(ctx, info, created.appId, { codes: warn, taskId: created.id });
   return created;
@@ -2485,8 +2485,8 @@ export const agentTaskMutations = {
       });
       await recordInstructedManagerAct(tx, app.id, actor, 'task.assign', { taskId: task.id });
     }, { workers: async (appId) => [await partyWorkerForLock(ctx, appId, assignee)] }, instruction);
-    // #1709 (cor:agt:070:08): an assignment by hand starts a held worker with no live session through its host.
-    // V16 (Proposed in the rule) says no OPEN session; this path still tests live: #4237.
+    // #1709 (cor:agt:070:08): an assignment by hand starts a held worker with no open session through its host
+    // (V16, Proposed in the rule; built by #4237).
     await launchAssignee(ctx.db, assigned);
     await emitTaskWarnings(ctx, info, assigned.appId, { codes: warn, taskId: assigned.id });
     return assigned;
@@ -2932,8 +2932,8 @@ async function assigneeAdvice(
 
 /**
  * #1709 (cor:agt:070:08; Holger via Vera #10773 (6): assignment by hand launches too, not only matching). After the
- * assignment committed: if its assignee is a worker, ask the platform to start it through its host. Never fails the
- * assignment; a worker it cannot start leaves the task waiting.
+ * assignment committed: if its assignee is a worker, ask the platform to start it through its host; only a worker with no
+ * open session is started (V16, #4237), one with an open session has the task by its notice. Never fails the assignment; a worker it cannot start leaves the task waiting.
  */
 async function launchAssignee(db: Context['db'], t: TaskRow, family?: string): Promise<void> {
   if (!t.assigneeWorkerId || !['pending', 'started'].includes(t.status)) return;

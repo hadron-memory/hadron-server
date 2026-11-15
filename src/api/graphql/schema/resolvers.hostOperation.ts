@@ -488,7 +488,9 @@ export const hostOperationMutations = {
    * order, then the registration FOR SHARE once (workers before registration, as registerHost, so no cycle).
    *
    * The server builds what it stores (`buildWorkerTerminal`): `host` is the key's host and its registration's label,
-   * `reportedAt` is the server's clock. The report decides nothing. The alarm verdict is computed from the stored
+   * `reportedAt` is the server's clock. #4225 S4a: a report may carry the worker's context size (`contextTokens` with
+   * `contextMeasuredAt`, or neither); a malformed size refuses the batch like any other malformed field, and a worker
+   * this host does not run is refused for its row as before, so its size is never stored. The report decides nothing. The alarm verdict is computed from the stored
    * rows after the write and returned, never stored, and names only coordinators THIS host registers.
    */
   setHostWorkerTerminals: async (
@@ -765,7 +767,8 @@ async function issueWorkerStart(
         throw taskError('HOST_OPERATION_NOT_PERMITTED', 'Only whoever manages the App starts a worker through its host.');
       }
       const now = new Date();
-      const hold = await lockStartableWorker(tx, freshApp.id, workerId, now);
+      // #4237: a manager's own start keeps the live test (cor:agt:070:05): restarting a quiet worker is deliberate.
+      const hold = await lockStartableWorker(tx, freshApp.id, workerId, now, 'live');
       // Diego P2-2: the registration, its worktree and the lapse count hold still through the insert.
       await fenceHostDecision(tx, freshApp.id);
       const [reg] = await liveRegistrationsFor(tx, freshApp.id, workerId, now, hostId);
@@ -818,7 +821,11 @@ function issuer(ctx: Context, actor: TaskActor) {
     : { issuedBy: 'user', issuedByUserId: actor.userId, issuedByWorkerId: null, issuedByAgentId: null };
 }
 
-/** A success's typed result: the created worktree for `worktree.create`; nothing for the others in this slice. */
+/**
+ * A success's typed result, by operation type: `{worktree}` for `worktree.create` (built here), `{sessionId}` for a
+ * succeeded `worker.start` and `{handoff}` (boolean) for `worker.end` (both set by `reportHostOperation`, which
+ * overwrites this function's null); null for the others. #4245 keeps the `HostOperation.result` SDL text in step.
+ */
 function successResult(type: HostOperationType, worktree: string | null | undefined): Prisma.InputJsonObject | null {
   if (type === 'worktree.create') {
     if (!isHostToken(worktree)) throw badInput('A created worktree reports its name: a host-operation token.');
