@@ -188,14 +188,15 @@ describe('one summary post per run, only when something changed (cor:agt:020:14 
     const [p] = await posts();
     expect(p.content).toContain('2 fixed');
   });
-  it('runs that cannot post do not starve another App\'s recovery (#4255 Clark F4)', async () => {
+  it('runs that cannot post do not starve another App\'s recovery, however many hosts they name (#4255 Clark F4)', async () => {
     const x = Math.floor(Math.random() * 1_000_000);
     const dark = await db.app.create({ data: { organizationId: org.id, name: 'NoChat', urn: `${org.urn}:nochat${x}` }, select: { id: true } });
-    for (let i = 0; i < 60; i++) {
-      const c = validateSweepRun(run({ runId: `nc${i}`, planned: 1, applied: 1, lines: lines(1) }) as any, new Date());
-      if (!c.ok) throw new Error(c.message);
-      await db.$transaction((tx) => insertSweepRun(tx, dark.id, `h${i}`, c.run));
-    }
+    // 600 distinct hosts, older than the normal App's run: more than one scan's worth, all unpostable.
+    await db.$executeRaw`
+      INSERT INTO host_sweep_runs (id, app_id, host_id, run_key, started_at, ended_at, mode, planned, applied, skipped, failed, lines, recorded_at)
+      SELECT 'nochat' || g, ${dark.id}, 'h' || g, 'r' || g, now() AT TIME ZONE 'UTC', now() AT TIME ZONE 'UTC', 'APPLY', 1, 1, 0, 0, '[]'::jsonb,
+             (now() AT TIME ZONE 'UTC') - interval '5 minutes' + g * interval '1 millisecond'
+      FROM generate_series(1, 600) g`;
     const ok = validateSweepRun(run({ planned: 1, applied: 1, lines: lines(1) }) as any, new Date());
     if (!ok.ok) throw new Error(ok.message);
     await db.$transaction((tx) => insertSweepRun(tx, app.id, 'orca1', ok.run));
