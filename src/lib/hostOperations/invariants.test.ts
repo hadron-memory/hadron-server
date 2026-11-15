@@ -56,7 +56,7 @@ describe('the invariants file', () => {
     const head = source.slice(0, source.indexOf(block));
     expect(source.indexOf(block)).toBeGreaterThan(0);
     // #4225: the reset operation's args were widened in this file (taskId optional, a closed cause), and carried by
-    // 20261115240000_context_cap, which also carries #4230/#4251's start keys; the original migration holds the function as it was.
+    // 20261115270000_context_cap, which also carries #4230/#4251's start keys; the original migration holds the function as it was.
     const withTheCapWideningUndone = (t: string) => t
       .replace("    -- #4225: the task is named only when there is one (a context-cap reset has none), and the cause is a closed set.\n", '')
       .replace("required := ARRAY['workerId', 'sessionId', 'resetId']; optional := ARRAY['taskId', 'cause'];", "required := ARRAY['workerId', 'sessionId', 'taskId', 'resetId'];")
@@ -80,7 +80,7 @@ describe('the invariants file', () => {
     // #4251's migration carries the function before the cap widening (this slice's migration carries it after).
     expect(s1b).toContain(`\n${withTheCapWideningUndone(fn)}`);
     const capFn = source.slice(source.indexOf('CREATE OR REPLACE FUNCTION host_operation_args_ok'), source.indexOf('$$;', source.indexOf('CREATE OR REPLACE FUNCTION host_operation_args_ok')) + 3);
-    const cap = readFileSync(new URL('../../../prisma/migrations/20261115240000_context_cap/migration.sql', import.meta.url), 'utf8');
+    const cap = readFileSync(new URL('../../../prisma/migrations/20261115270000_context_cap/migration.sql', import.meta.url), 'utf8');
     // The cap migration carries the function as main has it (the #4230 start keys and #4251's model grammar) with the cause.
     expect(cap).toContain(capFn);
     expect(capFn).toContain("host_launcher_model_ok(v #>> '{}')");
