@@ -16855,7 +16855,8 @@ export const typeDefs = `#graphql
     #1709 — the request this task's finish or cancellation made that its worker assignee end its session
     (hrn:node:hadronmemory.com:specs:cor:agt:050:10); null when none was made (closeSessionWhenDone false, a person
     assignee, or no open session; #4223: for a worker of a SHORT_LIVED Agent, another pending or started task is still
-    assigned to it). A worker that finishes its own task reads it here: end the session, with a handoff,
+    assigned to it). #4223: reassigning a SHORT_LIVED Agent's worker's last pending or started task away asks that
+    worker too, so a task may have made several requests; this is the latest, and workerId says whom it asks. A worker that finishes its own task reads it here: end the session, with a handoff,
     before dueAt, or the platform ends it through a live host.
     """
     sessionEndRequest: AgentTaskSessionEndRequest
@@ -16870,6 +16871,8 @@ export const typeDefs = `#graphql
 
   "#1709 — a task's request that its assignee end its session (hrn:node:hadronmemory.com:specs:cor:agt:050:10)."
   type AgentTaskSessionEndRequest {
+    "#4223: the worker asked to end its session: the task's assignee when it finished or was cancelled, or the former assignee when the task was reassigned away from a short-lived worker."
+    workerId: ID!
     "The session asked to end: only this one is ever ended, never a later replacement."
     sessionId: ID!
     requestedAt: DateTime!

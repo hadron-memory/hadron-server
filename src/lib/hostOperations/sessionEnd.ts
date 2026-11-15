@@ -25,6 +25,11 @@
  * (no parking). When the LAST such task finishes or is cancelled, it is asked exactly as above, and the same grace and
  * the same `worker.end` follow. A worker marked leave-alone (`Worker.leaveAlone`, #4224) keeps the ordinary rule, so
  * a marked worker is never ended by its Agent's lifecycle. LONG_LIVED, the default, is unchanged.
+ *
+ * REASSIGNED AWAY (Peter, team chat #108497; one Proposed sentence in 050:10): a short-lived worker whose last open
+ * task is reassigned to someone else is asked the same way, by the reassignment's transaction, with the FORMER
+ * assignee as the request's worker. So one task may carry several requests over its life, one per worker it left or
+ * ended under; `AgentTask.sessionEndRequest` shows the latest, with the worker it asks.
  */
 
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
@@ -80,9 +85,15 @@ export async function requestSessionEnd(
   tx: Prisma.TransactionClient,
   args: {
     appId: string;
+    /** The task as it was BEFORE this write: `assigneeWorkerId` is the worker that finished it, had it cancelled, or lost it. */
     task: { id: string; closeSessionWhenDone: boolean; assigneeWorkerId: string | null };
     actor: EventActor;
     now: Date;
+    /**
+     * `reassigned`: the task did not end, it moved to another assignee (the caller holds the former assignee's
+     * per-worker lock too). Only the lifecycle asks then; `closeSessionWhenDone` is about the task's end.
+     */
+    cause?: 'reassigned';
   },
 ): Promise<{ id: string; sessionId: string; dueAt: Date } | null> {
   const { task, now } = args;
@@ -94,7 +105,7 @@ export async function requestSessionEnd(
       where: { assigneeWorkerId: task.assigneeWorkerId, status: { in: ['pending', 'started'] }, id: { not: task.id } },
     });
     if (otherOpen > 0) return null;
-  } else if (!task.closeSessionWhenDone) {
+  } else if (args.cause === 'reassigned' || !task.closeSessionWhenDone) {
     return null;
   }
   const [session] = await tx.$queryRaw<{ id: string }[]>`
@@ -117,8 +128,9 @@ export async function requestSessionEnd(
       actorAgentId: args.actor.agentId,
       actorRunId: args.actor.runId ?? null,
       subjectWorkerId: task.assigneeWorkerId,
-      // #4223: `lifecycle` is present exactly when the Agent's lifecycle, not the task's closeSessionWhenDone, asked.
-      payload: { sessionId: session.id, dueAt: dueAt.toISOString(), graceMinutes: grace, ...(byLifecycle ? { lifecycle: 'SHORT_LIVED' } : {}) },
+      // #4223: `lifecycle` is present exactly when the Agent's lifecycle, not the task's closeSessionWhenDone, asked;
+      // `cause` exactly when the task did not end but was reassigned away.
+      payload: { sessionId: session.id, dueAt: dueAt.toISOString(), graceMinutes: grace, ...(byLifecycle ? { lifecycle: 'SHORT_LIVED' } : {}), ...(args.cause ? { cause: args.cause } : {}) },
       createdAt: now,
     },
   });

@@ -30,7 +30,7 @@ const MIN = 60_000;
 
 let f: ResetFixture;
 
-const requestOf = (taskId: string) => db.taskSessionEndRequest.findUnique({ where: { taskId } });
+const requestOf = (taskId: string) => db.taskSessionEndRequest.findFirst({ where: { taskId } });
 const resets = () => db.contextReset.count();
 const setLifecycle = (lifecycle: 'LONG_LIVED' | 'SHORT_LIVED') => db.agent.update({ where: { id: f.agentId }, data: { lifecycle } });
 /** A pending task assigned to `who`, written directly (no launch, no wake). */

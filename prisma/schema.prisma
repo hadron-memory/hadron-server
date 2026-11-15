@@ -6874,7 +6874,8 @@ model ContextReset {
 model TaskSessionEndRequest {
   id                  String    @id
   appId               String    @map("app_id")
-  taskId              String    @unique @map("task_id")
+  /// #4223: not unique. A task asks once per worker it ended under or was reassigned away from.
+  taskId              String    @map("task_id")
   workerId            String    @map("worker_id")
   sessionId           String    @map("session_id")
   /// The `task.session-end-requested` event this request wrote.
@@ -6892,6 +6893,7 @@ model TaskSessionEndRequest {
 
   @@index([resolvedAt, dueAt])
   @@index([workerId])
+  @@index([taskId])
   @@map("task_session_end_requests")
 }
 
