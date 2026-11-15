@@ -351,6 +351,26 @@ describe('what the pass decides, and fair rotation across bounded passes (Diego 
     expect(__capSweepTesting.decided).toEqual([F.kit.id]);
   });
 
+  it('Diego\'s refreshed prefix: reports that keep arriving for workers ahead of Kit cannot keep the cursor from reaching him (stable scan key)', async () => {
+    // Six over-cap idle workers with sessions and no capable host, whose ids sort BEFORE Kit's; each tick their hosts report
+    // again (a new checkedAt) and then Kit's does. A cursor on the mutable checkedAt is overtaken by the refreshed ones.
+    const prefix: { id: string }[] = [];
+    for (let i = 0; i < 6; i += 1) {
+      const w = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: `00p${i}`, appId: F.app.id, agentId: F.agentId, name: `Pre${i}`, slug: `pre-${i}` }, select: { id: true } });
+      await session(w);
+      prefix.push(w);
+    }
+    __capSweepTesting.page = 1; __capSweepTesting.maxPages = 2; // two workers a pass
+    let issued = 0;
+    for (let tick = 0; tick < 8 && issued === 0; tick += 1) {
+      for (const [i, w] of prefix.entries()) await over(w.id, new Date(Date.now() - 8 * MIN + tick * 20_000 + i * 100).toISOString());
+      await report();
+      issued += await contextCapTick(db);
+    }
+    expect(issued).toBe(1);
+    expect(await resets()).toHaveLength(1);
+  });
+
   it('a pass bounded below the candidate count rotates: progress carries to the next pass until Kit is reached', async () => {
     // 25 earlier over-cap workers WITH sessions and no capable host: only the decision itself can pass them over.
     for (let i = 0; i < 25; i += 1) { const w = await mk(`Old${i}`); await session(w); await over(w.id, new Date(Date.now() - 10 * MIN - (30 - i) * 1000).toISOString()); }
