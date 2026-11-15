@@ -10,7 +10,7 @@
  * | Event                                   | Subject                                   | Reason          |
  * |-----------------------------------------|-------------------------------------------|-----------------|
  * | task.assigned / .reassigned / assignment.matched | the new assignee (the task's LATEST assignment only) | ASSIGNED / REASSIGNED / MATCHED |
- * | a child's task.finished                 | the child's owner (050:16 r2)             | CHILD_FINISHED  |
+ * | a child's task.finished / .cancelled    | the child's owner (050:16 r2) AND the parent's assignee (#4234, G7) | CHILD_FINISHED / CHILD_CANCELLED |
  * | an unacknowledged alarm                 | its currently-woken chain position, a worker (050:19) | ALARM |
  * | task.session-end-requested (#1709), when someone else ended the task, or (#4223) the task was reassigned away from the asked worker | the asked worker, while that session is open and the request unresolved (050:10) | END_SESSION |
  *
@@ -42,7 +42,7 @@ import { alarmEpisodeKey, currentAlarmEpisodes } from './stall.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
-export type TaskWakeEvent = 'ASSIGNED' | 'REASSIGNED' | 'MATCHED' | 'CHILD_FINISHED' | 'ALARM' | 'END_SESSION';
+export type TaskWakeEvent = 'ASSIGNED' | 'REASSIGNED' | 'MATCHED' | 'CHILD_FINISHED' | 'CHILD_CANCELLED' | 'ALARM' | 'END_SESSION';
 
 /** One event a worker is due a wake for. `chainIndex` is 0 except for an alarm's woken position. */
 export type PendingTaskWake = {
@@ -81,6 +81,10 @@ const TASKLESS_ALARMS = [
 ] as const;
 
 const OPEN = Prisma.sql`('pending', 'started')`;
+
+/** #4234 (G7): a child's end, finished or cancelled, and the wake event each one is. */
+const CHILD_END_KIND = { 'task.finished': 'CHILD_FINISHED', 'task.cancelled': 'CHILD_CANCELLED' } as const;
+const CHILD_END_TYPES = Object.keys(CHILD_END_KIND) as Array<keyof typeof CHILD_END_KIND>;
 
 /** The App row of `t` is live: not deleted, not uninstalled, its org (if any) not deleted. */
 const liveApp = (t: string) => Prisma.sql`EXISTS (
@@ -126,20 +130,24 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
         AND NOT EXISTS (SELECT 1 FROM agent_team_events x
                         WHERE x.task_id = t.id AND x.actor_worker_id = l.subject_worker_id AND x.created_at >= l.created_at AND x.type NOT LIKE 'app.%' AND x.type NOT IN (${Prisma.join([...PASSIVE_EVENT_TYPES])}))
         AND ${undelivered('l.subject_worker_id', 'l.id', '0')}`),
-    // A child's finish, for its owner, while the parent is open and the owner has not acted on the parent since.
-    // An owner who finished the child itself already knows.
+    // A child's end (finished or cancelled), for each of two subjects: the child's owner (cor:agt:050:16 r2) and the
+    // parent's CURRENT assignee (#4234, Holger's G7 ruling: a running implementer waiting on its review, QA and merge
+    // tasks is woken by each one's end, so it never polls). The UNION makes one subject of the usual case, where the
+    // parent's assignee made the child and owns it. Each subject's wake holds while the parent is open and that
+    // subject has not acted on the parent since; a subject who ended the child itself already knows.
     db.$queryRaw<Row[]>(Prisma.sql`
-      SELECT c.owner_worker_id AS "workerId", c.id AS "taskId", e.id AS "eventId", e.type, c.title, c.handle, e.created_at AS at
+      SELECT s.wid AS "workerId", c.id AS "taskId", e.id AS "eventId", e.type, c.title, c.handle, e.created_at AS at
       FROM agent_team_events e
       JOIN agent_tasks c ON c.id = e.task_id
       JOIN agent_tasks p ON p.id = c.parent_task_id
-      JOIN workers w ON w.id = c.owner_worker_id AND w.app_id = c.app_id
-      WHERE e.type = 'task.finished' AND c.owner_worker_id IN (${ids}) AND p.status IN ${OPEN}
-        AND e.actor_worker_id IS DISTINCT FROM c.owner_worker_id
+      CROSS JOIN LATERAL (SELECT c.owner_worker_id AS wid UNION SELECT p.assignee_worker_id) s
+      JOIN workers w ON w.id = s.wid AND w.app_id = c.app_id
+      WHERE e.type IN (${Prisma.join([...CHILD_END_TYPES])}) AND s.wid IN (${ids}) AND p.status IN ${OPEN}
+        AND e.actor_worker_id IS DISTINCT FROM s.wid
         AND ${liveApp('c')}
         AND NOT EXISTS (SELECT 1 FROM agent_team_events x
-                        WHERE x.task_id = p.id AND x.actor_worker_id = c.owner_worker_id AND x.created_at >= e.created_at AND x.type NOT LIKE 'app.%' AND x.type NOT IN (${Prisma.join([...PASSIVE_EVENT_TYPES])}))
-        AND ${undelivered('c.owner_worker_id', 'e.id', '0')}`),
+                        WHERE x.task_id = p.id AND x.actor_worker_id = s.wid AND x.created_at >= e.created_at AND x.type NOT LIKE 'app.%' AND x.type NOT IN (${Prisma.join([...PASSIVE_EVENT_TYPES])}))
+        AND ${undelivered('s.wid', 'e.id', '0')}`),
     // An unacknowledged alarm's highest woken chain position, when that position names one of these workers.
     db.$queryRaw<(Row & { chainIndex: number; episodeStart: Date | null })[]>(Prisma.sql`
       SELECT (e.chain -> s.idx ->> 'workerId') AS "workerId", t.id AS "taskId", e.id AS "eventId", e.type, t.title, t.handle,
@@ -198,7 +206,7 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
     push({ workerId: r.workerId, taskId: r.taskId, eventId: r.eventId, title: r.title, handle: r.handle, at: r.at, chainIndex: 0,
       event: ASSIGNED_KIND[r.type as keyof typeof ASSIGNED_KIND] });
   }
-  for (const r of finished) push({ ...r, chainIndex: 0, event: 'CHILD_FINISHED' });
+  for (const r of finished) push({ ...r, chainIndex: 0, event: CHILD_END_KIND[r.type as keyof typeof CHILD_END_KIND] });
   for (const r of endSession) push({ ...r, chainIndex: 0, event: 'END_SESSION' });
   for (const r of alarms) {
     if (!r.episodeStart || !current.has(alarmEpisodeKey(r.taskId, r.type, r.episodeStart))) continue;
@@ -221,8 +229,8 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
  * Returns how many events it newly recorded.
  */
 export async function recordUndeliverableTaskWakes(db: PrismaClient, now = new Date()): Promise<number> {
-  // Workers a task event could be pending for: assignees of open tasks, owners of finished children under an open
-  // parent, and worker positions of unacknowledged alarms. Retired workers and dead Apps are never due.
+  // Workers a task event could be pending for: assignees of open tasks (a parent's assignee among them, #4234), owners
+  // of ended (finished or cancelled) children under an open parent, and worker positions of unacknowledged alarms. Retired workers and dead Apps are never due.
   const candidates = await db.$queryRaw<{ id: string; dormancyDays: number }[]>(Prisma.sql`
     SELECT w.id, a.session_dormancy_days AS "dormancyDays"
     FROM workers w JOIN apps a ON a.id = w.app_id
@@ -232,7 +240,7 @@ export async function recordUndeliverableTaskWakes(db: PrismaClient, now = new D
       AND (
         w.id IN (SELECT assignee_worker_id FROM agent_tasks WHERE status IN ${OPEN} AND assignee_worker_id IS NOT NULL)
         OR w.id IN (SELECT c.owner_worker_id FROM agent_tasks c JOIN agent_tasks p ON p.id = c.parent_task_id
-                    WHERE c.status = 'finished' AND p.status IN ${OPEN} AND c.owner_worker_id IS NOT NULL)
+                    WHERE c.status IN ('finished', 'cancelled') AND p.status IN ${OPEN} AND c.owner_worker_id IS NOT NULL)
         OR w.id IN (SELECT jsonb_array_elements(e.chain) ->> 'workerId' FROM agent_team_events e
                     WHERE e.severity = 'alarm' AND e.acknowledged_at IS NULL AND e.chain IS NOT NULL)
       )`);
