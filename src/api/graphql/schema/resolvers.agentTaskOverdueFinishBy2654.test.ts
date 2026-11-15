@@ -101,3 +101,27 @@ it('differential: AgentTask.overdue is true iff the overdue filter lists the tas
   expect(no.every((t) => !t.overdue)).toBe(true);
   expect(titles(yes).concat(titles(no)).sort()).toEqual(['a', 'backlog', 'finished', 'future', 'none', 'r1', 'r2', 'started-start-by-only']);
 });
+it('one request reads the clock once: a deadline crossed between the filter and the field cannot split them', async () => {
+  const t0 = now;
+  await task('crossing', { finishBy: new Date(t0.getTime() + 5_000) });
+  let reads = 0;
+  // Each clock read is 10s later than the last; two reads would put the deadline between them.
+  const ticking = new Proxy(db as any, {
+    get(target, prop, recv) {
+      if (prop !== '$queryRaw') return Reflect.get(target, prop, recv);
+      return (strings: TemplateStringsArray, ...rest: unknown[]) =>
+        strings.join('?').includes('date_trunc')
+          ? Promise.resolve([{ now: new Date(t0.getTime() + 10_000 * reads++) }])
+          : target.$queryRaw(strings, ...rest);
+    },
+  });
+  const api = new ApolloServer<Context>({ typeDefs, resolvers });
+  const r = await api.executeOperation(
+    { query: `query($app:ID!){agentTasks(appRef:$app,overdue:false,limit:200){title overdue}}`, variables: { app: appId } },
+    { contextValue: { ...ctx(), db: ticking } },
+  );
+  if (r.body.kind !== 'single' || r.body.singleResult.errors) throw new Error(JSON.stringify(r.body));
+  const rows = (r.body.singleResult.data as any).agentTasks as { title: string; overdue: boolean }[];
+  expect(reads).toBe(1);
+  expect(rows).toEqual([{ title: 'crossing', overdue: false }]);
+});

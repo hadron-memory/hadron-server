@@ -2996,7 +2996,10 @@ export function isTaskOverdue(
   return a || b;
 }
 
-/** The database clock at the DateTime precision the API exposes, read once per request for the `overdue` field. */
+/**
+ * The database clock at the DateTime precision the API exposes, read once per request (the GraphQL context object is
+ * per request) and shared by the `overdue` filter and the `overdue` field.
+ */
 const requestNow = new WeakMap<object, Promise<Date>>();
 async function dbNowFor(c: { db: { $queryRaw: (...a: any[]) => Promise<any> } }): Promise<Date> {
   let p = requestNow.get(c);
@@ -3146,8 +3149,9 @@ export const agentTaskQueries = {
       if (range.gte || range.lte) filters.push({ [field]: range });
     }
     if (args.overdue != null) {
-      // Match the millisecond precision exposed by DateTime, using the database clock.
-      const [{ now }] = await c.db.$queryRaw<{ now: Date }[]>`SELECT date_trunc('milliseconds', CURRENT_TIMESTAMP) AS now`;
+      // One database-clock snapshot per request, shared with the `overdue` field, so a deadline crossing mid-request
+      // cannot make the filter and the field disagree.
+      const now = await dbNowFor(c);
       const late = overdueWhere(now);
       // SQL NOT over nullable startBy / finishBy alone would also discard tasks with no deadline: the negation is
       // written out so a task with neither time is never overdue and always falls in `false`.
