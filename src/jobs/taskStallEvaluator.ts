@@ -42,13 +42,13 @@ import { anchorNow } from '../lib/stopSignals/state.js';
 import { sweepContextResets } from '../lib/contextReset/contextReset.js';
 import { evaluateDarkWorkers } from '../lib/agentTasks/darkWorker.js';
 import { evaluateCoordinatorCadence } from '../lib/agentTasks/coordinatorCadence.js';
-import { evaluateStaleSweeps } from '../lib/agentTasks/sweepRuns.js';
+import { evaluateStaleSweeps, postPendingSweepSummaries } from '../lib/agentTasks/sweepRuns.js';
 
-export type TaskStallTickResult = { raised: number; woken: number; cleared: number; undeliverable: number; sessionEnds: number; hostOperationsSettled: number; contextResetsEnded: number; darkRaised: number; cadenceRaised: number; staleSweepRaised: number };
+export type TaskStallTickResult = { raised: number; woken: number; cleared: number; undeliverable: number; sessionEnds: number; hostOperationsSettled: number; contextResetsEnded: number; darkRaised: number; cadenceRaised: number; staleSweepRaised: number; sweepSummariesPosted: number };
 
 /** One pass at `now`. Each step runs even when an earlier one failed. */
 export async function taskStallTick(db: PrismaClient, now = new Date()): Promise<TaskStallTickResult> {
-  const result: TaskStallTickResult = { raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0, contextResetsEnded: 0, darkRaised: 0, cadenceRaised: 0, staleSweepRaised: 0 };
+  const result: TaskStallTickResult = { raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0, contextResetsEnded: 0, darkRaised: 0, cadenceRaised: 0, staleSweepRaised: 0, sweepSummariesPosted: 0 };
   // #2022: the monotonic half of `now`'s sample, so a raise decides at its own moment (stall.ts raiseStallAlarm).
   const anchor = anchorNow();
   try {
@@ -74,6 +74,12 @@ export async function taskStallTick(db: PrismaClient, now = new Date()): Promise
     result.staleSweepRaised = (await evaluateStaleSweeps(db, now)).length;
   } catch (err) {
     console.error('[task-stall] stale-sweep evaluation failed:', err);
+  }
+  // #4255 (Clark F1): a sweep summary whose deferred post was lost is posted from the persisted run.
+  try {
+    result.sweepSummariesPosted = await postPendingSweepSummaries(db, now);
+  } catch (err) {
+    console.error('[task-stall] sweep summary retry failed:', err);
   }
   try {
     result.woken = await wakeDueOwners(db, now);

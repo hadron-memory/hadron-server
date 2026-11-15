@@ -14,7 +14,7 @@
  * under the 10-a-minute cap (cor:agt:020:14). Its marker (`posted_at`) is claimed inside the post's own transaction, so
  * a replay or a second instance posts nothing more.
  *
- * ONE ALARM. A host of an App whose sweep mode is OBSERVE or APPLY and whose newest run ended more than five minutes ago
+ * ONE ALARM. A host of an App whose sweep mode is OBSERVE or APPLY whose newest run was recorded more than five minutes ago
  * raises ONE `alarm.stale-sweep` per episode, to the App's managers (the chain with no reporting line: `appManagerUserIds`).
  * The episode (`host_sweep_episodes`) de-duplicates it and ends when the host records its next run, or when the mode goes
  * OFF. A host that never ran is judged from the later of its registration and the last change of the mode, so switching
@@ -45,8 +45,9 @@ const OUTCOMES: readonly SweepOutcome[] = ['APPLIED', 'SKIPPED', 'FAILED'];
 export type SweepRunLine = { worker: string; outcome: SweepOutcome; reason: string };
 export type SweepRunInput = {
   runId: string;
-  startedAt: Date;
-  endedAt: Date;
+  /** The DateTime scalar hands a resolver an ISO string; a Date is accepted for direct callers. */
+  startedAt: Date | string;
+  endedAt: Date | string;
   mode: string;
   planned: number;
   applied: number;
@@ -75,10 +76,13 @@ export function validateSweepRun(input: SweepRunInput, now: Date): { ok: true; r
   const fail = (message: string) => ({ ok: false as const, message });
   if (!input || typeof input.runId !== 'string' || !RUN_KEY.test(input.runId)) return fail('runId is a token of 1 to 64 letters, digits and . _ : -.');
   if (input.mode !== 'OBSERVE' && input.mode !== 'APPLY') return fail('mode is OBSERVE or APPLY: a sweep in mode OFF acts on nothing and records nothing.');
-  const { startedAt, endedAt } = input;
-  if (!(startedAt instanceof Date) || !(endedAt instanceof Date) || Number.isNaN(startedAt.getTime()) || Number.isNaN(endedAt.getTime())) {
-    return fail('startedAt and endedAt are required timestamps.');
-  }
+  const toDate = (v: unknown): Date | null => {
+    const d = v instanceof Date ? v : typeof v === 'string' ? new Date(v) : null;
+    return d && !Number.isNaN(d.getTime()) ? d : null;
+  };
+  const startedAt = toDate(input.startedAt);
+  const endedAt = toDate(input.endedAt);
+  if (!startedAt || !endedAt) return fail('startedAt and endedAt are required timestamps.');
   if (endedAt.getTime() < startedAt.getTime()) return fail('endedAt is not before startedAt.');
   if (endedAt.getTime() - startedAt.getTime() > SWEEP_RUN_MAX_DURATION_MS) return fail('A run lasts at most one hour.');
   if (endedAt.getTime() > now.getTime() + SWEEP_RUN_MAX_SKEW_MS) return fail('endedAt is more than two minutes ahead of the server.');
@@ -125,6 +129,9 @@ export type RecordedRun = { id: string; created: boolean };
  * host's open stale-sweep episode: the host has swept. Returns whether this call created the row.
  */
 export async function insertSweepRun(tx: Prisma.TransactionClient, appId: string, hostId: string, run: CheckedSweepRun): Promise<RecordedRun> {
+  // Shares the registration row with the stale-sweep raise (which holds it FOR UPDATE while it re-reads and opens the episode):
+  // a run either commits before the raise re-reads, so it is seen, or waits for the raise and then ends the episode (#4255 Braxton P3-2).
+  await tx.$queryRaw`SELECT id FROM host_registrations WHERE app_id = ${appId} AND host_id = ${hostId} FOR SHARE`;
   const id = generateId();
   const rows = await tx.$queryRaw<{ id: string }[]>`
     INSERT INTO host_sweep_runs (id, app_id, host_id, run_key, started_at, ended_at, mode, planned, applied, skipped, failed, lines, recorded_at)
@@ -143,9 +150,16 @@ export async function insertSweepRun(tx: Prisma.TransactionClient, appId: string
 
 const pending = new Set<Promise<void>>();
 
-/** Post a run's summary off the request path: the host key's answer never waits on a chat append. A failed post leaves the marker unclaimed. */
-export function postSweepSummaryDeferred(db: PrismaClient, appId: string, runId: string, body: string): void {
-  const p: Promise<void> = postSweepSummary(db, appId, runId, body).then(() => undefined).catch((err) => {
+/** At most one summary post per host in this window (#4255 Braxton P2-2): a host key cannot flood the team chat as the platform. */
+export const SUMMARY_MIN_GAP_SECONDS = 60;
+/** A run whose post has not landed is retried by the stall tick for this long after it was recorded, then left as a record only. */
+export const SUMMARY_RETRY_MINUTES = 10;
+/** A run is not retried until it is this old: the deferred post of the request itself is still in flight. */
+const SUMMARY_RETRY_GRACE_SECONDS = 20;
+
+/** Post a run's summary off the request path: the host key's answer never waits on a chat append. A failed post leaves the marker unclaimed; {@link postPendingSweepSummaries} retries it. */
+export function postSweepSummaryDeferred(db: PrismaClient, appId: string, runId: string): void {
+  const p: Promise<void> = postSweepSummary(db, appId, runId).then(() => undefined).catch((err) => {
     console.error('[sweep-summary] posting failed:', err);
   }).finally(() => { pending.delete(p); });
   pending.add(p);
@@ -156,11 +170,51 @@ export async function settleSweepSummaries(): Promise<void> {
   while (pending.size > 0) await Promise.allSettled([...pending]);
 }
 
-/** One post as the system author; the marker is claimed in the post's own append transaction, so it is posted at most once. */
-export async function postSweepSummary(db: PrismaClient, appId: string, runId: string, body: string): Promise<boolean> {
+/**
+ * Post one run's summary, built from the PERSISTED row (never from a caller's payload), as the system author. False when the
+ * run needs none, is already posted, is throttled by the host's previous post, or the App has no chat. The marker is claimed in
+ * the post's own append transaction, under a per-host lock so two posts of one host cannot both pass the gap check.
+ */
+export async function postSweepSummary(db: PrismaClient, appId: string, runId: string): Promise<boolean> {
+  const row = await db.hostSweepRun.findFirst({ where: { id: runId, appId, postedAt: null } });
+  if (!row || row.applied + row.failed <= 0) return false;
+  const reg = await db.hostRegistration.findFirst({ where: { appId, hostId: row.hostId }, select: { label: true } });
+  const body = summaryBody({
+    hostLabel: reg?.label ?? row.hostId,
+    run: { mode: row.mode as 'OBSERVE' | 'APPLY', applied: row.applied, failed: row.failed, skipped: row.skipped, planned: row.planned, lines: (Array.isArray(row.lines) ? row.lines : []) as SweepRunLine[] },
+  });
   const { postSystemNotice } = await import('../../api/graphql/schema/resolvers.teamChat.js');
-  return postSystemNotice(db, appId, body, async (tx) =>
-    (await tx.$executeRaw`UPDATE host_sweep_runs SET posted_at = (now() AT TIME ZONE 'UTC') WHERE id = ${runId} AND app_id = ${appId} AND posted_at IS NULL`) > 0);
+  return postSystemNotice(db, appId, body, async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'sweep-summary:' + appId + ':' + row.hostId}))`;
+    return (await tx.$executeRaw`
+      UPDATE host_sweep_runs SET posted_at = (now() AT TIME ZONE 'UTC')
+      WHERE id = ${runId} AND app_id = ${appId} AND posted_at IS NULL
+        AND NOT EXISTS (SELECT 1 FROM host_sweep_runs o WHERE o.app_id = ${appId} AND o.host_id = ${row.hostId}
+                        AND o.posted_at > (now() AT TIME ZONE 'UTC') - make_interval(secs => ${SUMMARY_MIN_GAP_SECONDS}))`) > 0;
+  });
+}
+
+/**
+ * Durable recovery of the deferred post (#4255 Clark F1): the runs with something to say whose marker is still unclaimed (the
+ * append failed, the process stopped after the commit, or the host's previous post was inside the gap), oldest first, within
+ * {@link SUMMARY_RETRY_MINUTES} of being recorded. Runs from the stall tick; each post keeps the atomic claim and the gap.
+ */
+export async function postPendingSweepSummaries(db: PrismaClient, now = new Date()): Promise<number> {
+  const from = toNaiveUtc(new Date(now.getTime() - SUMMARY_RETRY_MINUTES * 60_000));
+  const to = toNaiveUtc(new Date(now.getTime() - SUMMARY_RETRY_GRACE_SECONDS * 1000));
+  const due = await db.$queryRaw<{ id: string; appId: string }[]>`
+    SELECT r.id, r.app_id AS "appId" FROM host_sweep_runs r
+    WHERE r.posted_at IS NULL AND r.applied + r.failed > 0 AND r.recorded_at > ${from}::timestamp AND r.recorded_at <= ${to}::timestamp
+    ORDER BY r.recorded_at, r.id LIMIT 50`;
+  let posted = 0;
+  for (const r of due) {
+    try {
+      if (await postSweepSummary(db, r.appId, r.id)) posted++;
+    } catch (err) {
+      console.error(`[sweep-summary] retrying run ${r.id} failed:`, err);
+    }
+  }
+  return posted;
 }
 
 /** Open one episode and raise its alarm, in one transaction. Null when the host already has an open episode or is no longer stale. */
@@ -170,6 +224,7 @@ async function raise(db: PrismaClient, app: { id: string; organizationId: string
       const [live] = await tx.$queryRaw<{ mode: string }[]>`
         SELECT sweep_mode::text AS mode FROM apps WHERE id = ${app.id} AND deleted_at IS NULL AND uninstalled_at IS NULL FOR SHARE`;
       if (!live || live.mode === 'OFF') return null;
+      await tx.$queryRaw`SELECT id FROM host_registrations WHERE app_id = ${app.id} AND host_id = ${hostId} FOR UPDATE`;
       // Judged again here, in the transaction that opens the episode: a run recorded since the pass read is seen now.
       const last = await lastActivity(tx as unknown as PrismaClient, app.id, hostId);
       if (!last || now.getTime() - last.at.getTime() <= STALE_SWEEP_WINDOW_MINUTES * 60_000) return null;
@@ -203,12 +258,12 @@ async function raise(db: PrismaClient, app: { id: string; organizationId: string
 }
 
 /**
- * The clock a host's staleness runs from: its newest run's end; with no run, the later of its registration and the App's
+ * The clock a host's staleness runs from: when the server last RECORDED a run for it (the host's own `ended_at` is its clock, which may be wrong: #4255 Braxton P2-1); with no run, the later of its registration and the App's
  * latest sweep-mode change. `run` says which. Null when the host has no registration.
  */
 async function lastActivity(db: PrismaClient, appId: string, hostId: string): Promise<{ at: Date; run: boolean } | null> {
   const [row] = await db.$queryRaw<{ lastRun: Date | null; registeredAt: Date | null; modeChangedAt: Date | null }[]>`
-    SELECT (SELECT MAX(ended_at) FROM host_sweep_runs WHERE app_id = ${appId} AND host_id = ${hostId}) AS "lastRun",
+    SELECT (SELECT MAX(recorded_at) FROM host_sweep_runs WHERE app_id = ${appId} AND host_id = ${hostId}) AS "lastRun",
            (SELECT registered_at FROM host_registrations WHERE app_id = ${appId} AND host_id = ${hostId}) AS "registeredAt",
            (SELECT MAX(created_at) FROM agent_team_events WHERE app_id = ${appId} AND type = 'team.sweep-mode-changed') AS "modeChangedAt"`;
   if (!row) return null;

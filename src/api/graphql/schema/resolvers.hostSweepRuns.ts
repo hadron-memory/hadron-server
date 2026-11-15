@@ -17,7 +17,7 @@ import { asHost, recordingRefusal } from './resolvers.hostOperation.js';
 import { appKeyCaller } from '../../../lib/appKeyScopes/scopes.js';
 import { keyEverHeldHostOperate, keyHostId, recordHostKeyUse, recordHostKeyUseApart } from '../../../lib/hostOperations/hostKey.js';
 import {
-  insertSweepRun, needsSummary, postSweepSummaryDeferred, summaryBody, validateSweepRun, type SweepRunInput, type SweepRunLine,
+  insertSweepRun, needsSummary, postSweepSummaryDeferred, validateSweepRun, type SweepRunInput, type SweepRunLine,
 } from '../../../lib/agentTasks/sweepRuns.js';
 
 const badInput = (message: string): GraphQLError => taskError('BAD_USER_INPUT', message);
@@ -68,19 +68,16 @@ export const hostSweepRunMutations = {
       if (!input) throw badInput('input is required.');
       const checked = validateSweepRun(input, new Date());
       if (!checked.ok) throw badInput(checked.message);
-      let post: { appId: string; runId: string; body: string } | null = null;
+      let post: { appId: string; runId: string } | null = null;
       const row = await asHost(ctx, input.appRef, async (tx: Prisma.TransactionClient, app, host) => {
         const { id, created } = await insertSweepRun(tx, app.id, host.hostId, checked.run);
-        const reg = await tx.hostRegistration.findFirst({ where: { appId: app.id, hostId: host.hostId }, select: { label: true } });
-        if (created && needsSummary(checked.run)) {
-          post = { appId: app.id, runId: id, body: summaryBody({ hostLabel: reg?.label ?? host.hostId, run: checked.run }) };
-        }
+        if (created && needsSummary(checked.run)) post = { appId: app.id, runId: id };
         await recordHostKeyUse(tx, host, 'sweep', { count: checked.run.lines.length });
         return tx.hostSweepRun.findUniqueOrThrow({ where: { id } });
       });
       // After the commit, as the platform: the host key writes only the record (cor:agt:070:04).
-      const p = post as { appId: string; runId: string; body: string } | null;
-      if (p) postSweepSummaryDeferred(ctx.db, p.appId, p.runId, p.body);
+      const p = post as { appId: string; runId: string } | null;
+      if (p) postSweepSummaryDeferred(ctx.db, p.appId, p.runId);
       return project(row as unknown as Row);
     }),
 };

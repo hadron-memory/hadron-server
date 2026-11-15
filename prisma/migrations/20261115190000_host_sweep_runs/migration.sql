@@ -1,7 +1,7 @@
 -- #4233 (S10 of #4229): the sweep run record, the stale-sweep episodes and the 'sweep' host-key use.
 -- Additive: two new tables and one widened CHECK. Nothing existing is rewritten.
 -- #4233 (S10 of #4229) — the sweep run record and the stale-sweep episodes. One source, shared verbatim with migration
--- 20261115170000_host_sweep_runs. Idempotent: every statement is IF NOT EXISTS or drop-then-add.
+-- 20261115190000_host_sweep_runs. Idempotent: every statement is IF NOT EXISTS or drop-then-add.
 CREATE TABLE IF NOT EXISTS host_sweep_runs (
   id          TEXT PRIMARY KEY,
   app_id      TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE ON UPDATE CASCADE,

@@ -2,8 +2,10 @@
  * #4233 (S10 of #4229) — the sweep run record, its one summary post, and the stale-sweep alarm.
  * Pins: each fails on main (the mutation, the query and the alarm type do not exist there).
  */
-import { settleSweepSummaries, evaluateStaleSweeps, postSweepSummary } from '../../../lib/agentTasks/sweepRuns.js';
+import { settleSweepSummaries, evaluateStaleSweeps, postSweepSummary, postPendingSweepSummaries, insertSweepRun, validateSweepRun } from '../../../lib/agentTasks/sweepRuns.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { buildSchema, defaultFieldResolver, graphql } from 'graphql';
+import { typeDefs } from './typeDefs.js';
 import { randomBytes } from 'node:crypto';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -87,13 +89,25 @@ describe('record and read (acceptance: readable as hostSweepRuns by App particip
     expect(await db.hostSweepRun.count({ where: { appId: app.id } })).toBe(1);
   });
 
+  it('the real GraphQL path accepts ISO DateTime strings (the scalar hands the resolver a string, #4255 Cloe P1)', async () => {
+    const schema = buildSchema(typeDefs);
+    const fieldResolver = (p: any, a: any, c: any, i: any) =>
+      typeof (resolvers as any)[i.parentType.name]?.[i.fieldName] === 'function' ? (resolvers as any)[i.parentType.name][i.fieldName](p, a, c, i) : defaultFieldResolver(p, a, c, i);
+    const source = 'mutation($input: RecordHostSweepRunInput!){ recordHostSweepRun(input: $input){ runId endedAt applied } }';
+    const input = { ...run({ planned: 1, applied: 1, lines: [{ worker: 'Kit', outcome: 'APPLIED', reason: 'DIED' }] }), startedAt: ago(1).toISOString(), endedAt: ago(0.5).toISOString() };
+    const out = await graphql({ schema, source, variableValues: { input }, contextValue: hostCtx(), fieldResolver });
+    expect(out.errors).toBeUndefined();
+    expect(out.data!.recordHostSweepRun).toMatchObject({ applied: 1 });
+    await settleSweepSummaries();
+    expect(validateSweepRun({ ...input, mode: 'APPLY' } as any, new Date()).ok).toBe(true);
+    expect(await db.hostSweepRun.count()).toBe(1);
+  });
+
   it('a host key reads its own host only; another host answers HOST_NOT_FOUND like a missing one', async () => {
     await record();
     expect(await Q.hostSweepRuns({}, { appRef: app.id, hostId: 'orca1' }, hostCtx())).toHaveLength(1);
-    const foreign = Q.hostSweepRuns({}, { appRef: app.id, hostId: 'orca2' }, hostCtx());
-    const missing = Q.hostSweepRuns({}, { appRef: app.id, hostId: 'nowhere' }, hostCtx());
-    await expect(foreign).rejects.toMatchObject({ extensions: { code: 'HOST_NOT_FOUND' } });
-    await expect(missing).rejects.toMatchObject({ extensions: { code: 'HOST_NOT_FOUND' } });
+    await expect(Q.hostSweepRuns({}, { appRef: app.id, hostId: 'orca2' }, hostCtx())).rejects.toMatchObject({ extensions: { code: 'HOST_NOT_FOUND' } });
+    await expect(Q.hostSweepRuns({}, { appRef: app.id, hostId: 'nowhere' }, hostCtx())).rejects.toMatchObject({ extensions: { code: 'HOST_NOT_FOUND' } });
   });
 
   it('only a host key records: a person is refused, and a host records under its own host id', async () => {
@@ -154,8 +168,38 @@ describe('one summary post per run, only when something changed (cor:agt:020:14 
   it('the marker is claimed once: a second post of the same run writes nothing (the claim, not the row conflict, holds it)', async () => {
     await record({ runId: 'claim', planned: 1, applied: 1 });
     const row = await db.hostSweepRun.findFirstOrThrow({ where: { runKey: 'claim' } });
-    expect(await postSweepSummary(db, app.id, row.id, 'again')).toBe(false);
+    expect(await postSweepSummary(db, app.id, row.id)).toBe(false);
     expect(await posts()).toHaveLength(1);
+  });
+  it('a host cannot flood the chat: 30 runs with fixes, back to back, post once (the host gap, #4255 Braxton P2-2)', async () => {
+    for (let i = 0; i < 30; i++) await record({ planned: 1, applied: 1, lines: lines(1) });
+    expect(await posts()).toHaveLength(1);
+    expect(await db.hostSweepRun.count()).toBe(30);
+  });
+  it('a summary lost after the commit is posted from the persisted run by the next tick, once (#4255 Clark F1)', async () => {
+    const checked = validateSweepRun(run({ planned: 2, applied: 2, lines: lines(2) }) as any, new Date());
+    if (!checked.ok) throw new Error(checked.message);
+    // The commit happened and the deferred post never ran (a restart): the row exists with its marker unclaimed.
+    await db.$transaction((tx) => insertSweepRun(tx, app.id, 'orca1', checked.run));
+    expect(await posts()).toHaveLength(0);
+    expect(await postPendingSweepSummaries(db, new Date())).toBe(0); // inside the grace: the request's own post may still be in flight
+    expect(await postPendingSweepSummaries(db, new Date(Date.now() + 60_000))).toBe(1);
+    expect(await postPendingSweepSummaries(db, new Date(Date.now() + 61_000))).toBe(0);
+    const [p] = await posts();
+    expect(p.content).toContain('2 fixed');
+  });
+  it('a run recorded long ago is not posted late: the retry window is ten minutes', async () => {
+    const checked = validateSweepRun(run({ planned: 1, applied: 1, lines: lines(1) }) as any, new Date());
+    if (!checked.ok) throw new Error(checked.message);
+    await db.$transaction((tx) => insertSweepRun(tx, app.id, 'orca1', checked.run));
+    expect(await postPendingSweepSummaries(db, new Date(Date.now() + 11 * 60_000))).toBe(0);
+  });
+  it('the host label (host-supplied text) reaches the post without markdown syntax (#4255 Braxton P3-1)', async () => {
+    await db.hostRegistration.updateMany({ where: { appId: app.id, hostId: 'orca1' }, data: { label: '[x](https://e.example) `code`' } });
+    await record({ planned: 1, applied: 1, lines: lines(1) });
+    const [p] = await posts();
+    expect(p.content.split(' (')[0]).not.toMatch(/[\[\]()`]/);
+    expect(p.content).toContain('x https://e.example code');
   });
   it('a host-supplied token cannot inject markup or a mention into the line', async () => {
     await record({ planned: 1, applied: 1, lines: [{ worker: 'Kit@all', outcome: 'APPLIED', reason: 'DIED' }] });
@@ -168,35 +212,47 @@ describe('the stale-sweep alarm', () => {
   const later = (min: number) => new Date(Date.now() + min * 60_000);
   const episodes = () => db.hostSweepEpisode.findMany({ where: { appId: app.id }, orderBy: { openedAt: 'asc' } });
 
-  it('fires once per episode for a host whose last run ended over five minutes ago, to the managers', async () => {
+  it('fires once per episode for a host whose last run was recorded over five minutes ago, to the managers', async () => {
     await setMode('OBSERVE');
-    await record({ runId: 'old', startedAt: ago(8), endedAt: ago(7) });
-    expect(await evaluateStaleSweeps(db, new Date())).toHaveLength(1);
-    expect(await evaluateStaleSweeps(db, new Date())).toHaveLength(0);
+    await record({ runId: 'old' });
     expect(await evaluateStaleSweeps(db, later(3))).toHaveLength(0);
-    const [a, ...rest] = await alarms();
-    expect(rest).toEqual([]);
+    expect(await evaluateStaleSweeps(db, later(6))).toHaveLength(2); // orca1, and orca2 which never ran and registered over five minutes before
+    expect(await evaluateStaleSweeps(db, later(6))).toHaveLength(0);
+    expect(await evaluateStaleSweeps(db, later(9))).toHaveLength(0);
+    const all = await alarms();
+    expect(all).toHaveLength(2);
+    const a = all.find((e) => (e.payload as any).hostId === 'orca1')!;
     expect(a).toMatchObject({ severity: 'alarm', taskId: null, subjectWorkerId: null });
-    expect(a!.payload).toMatchObject({ reason: 'stale-sweep', hostId: 'orca1', windowMinutes: 5 });
-    expect(a!.chain).toEqual([{ userId: manager.id, via: 'manager' }]);
+    expect(a.payload).toMatchObject({ reason: 'stale-sweep', hostId: 'orca1', windowMinutes: 5 });
+    expect(a.chain).toEqual([{ userId: manager.id, via: 'manager' }]);
   });
 
   it('clears on the next run, and a later silence is a new episode', async () => {
     await setMode('APPLY');
-    await record({ runId: 'old', startedAt: ago(8), endedAt: ago(7) });
-    await evaluateStaleSweeps(db, new Date());
-    expect((await episodes())[0]!.endedAt).toBeNull();
-    await record({ runId: 'fresh' });
-    expect((await episodes())[0]!.endedAt).not.toBeNull();
-    expect(await evaluateStaleSweeps(db, new Date())).toHaveLength(0);
-    expect(await evaluateStaleSweeps(db, later(6))).toHaveLength(2); // orca1 again; orca2 never ran and registered 6+ minutes ago
+    await evaluateStaleSweeps(db, later(6));
+    expect((await episodes()).every((e) => e.endedAt === null)).toBe(true);
+    await record({ runId: 'fresh' }, hostCtx());
+    const byHost = new Map((await episodes()).map((e) => [e.hostId, e]));
+    expect(byHost.get('orca1')!.endedAt).not.toBeNull();
+    expect(byHost.get('orca2')!.endedAt).toBeNull();
+    expect(await evaluateStaleSweeps(db, later(4))).toHaveLength(0);
+    expect(await evaluateStaleSweeps(db, later(13))).toHaveLength(1); // orca1 silent again: a new episode
     expect(await alarms()).toHaveLength(3);
   });
 
-  it('raises nothing inside five minutes, with the sweep mode OFF, or for a host that has not been silent that long', async () => {
-    await record({ runId: 'recent', startedAt: ago(5), endedAt: ago(4) });
+  it('a host whose clock runs slow does not re-alarm after every run: staleness is the server\'s recorded time (#4255 Braxton P2-1)', async () => {
     await setMode('OBSERVE');
-    expect(await evaluateStaleSweeps(db, new Date())).toHaveLength(0);
+    for (let i = 0; i < 4; i++) {
+      await record({ runId: `slow${i}`, startedAt: ago(8), endedAt: ago(7) });
+      expect(await evaluateStaleSweeps(db, new Date())).toHaveLength(0);
+    }
+    expect(await alarms()).toHaveLength(0);
+  });
+
+  it('raises nothing inside five minutes or with the sweep mode OFF', async () => {
+    await record({ runId: 'recent' });
+    await setMode('OBSERVE');
+    expect(await evaluateStaleSweeps(db, later(4))).toHaveLength(0);
     await setMode('OFF');
     expect(await evaluateStaleSweeps(db, later(30))).toHaveLength(0);
     expect(await alarms()).toHaveLength(0);
@@ -211,14 +267,13 @@ describe('the stale-sweep alarm', () => {
     expect((await episodes()).every((e) => e.endedAt !== null)).toBe(true);
   });
 
-  it('the alarm is in the open alarm list until acknowledged, and its end is read from the episode', async () => {
+  it('the alarm\'s end is read from its episode', async () => {
     await setMode('OBSERVE');
-    await record({ runId: 'old', startedAt: ago(8), endedAt: ago(7) });
-    await evaluateStaleSweeps(db, new Date());
+    await evaluateStaleSweeps(db, later(6));
     await record({ runId: 'fresh' });
     const { alarmEpisodeEnds } = await import('../../../lib/agentTasks/stall.js');
-    const [a] = await alarms();
-    const ends = await alarmEpisodeEnds(db, [{ id: a!.id, taskId: null, type: a!.type, episodeStart: null }], new Date());
-    expect(ends.get(a!.id)).toBeInstanceOf(Date);
+    const a = (await alarms()).find((e) => (e.payload as any).hostId === 'orca1')!;
+    const ends = await alarmEpisodeEnds(db, [{ id: a.id, taskId: null, type: a.type, episodeStart: null }], new Date());
+    expect(ends.get(a.id)).toBeInstanceOf(Date);
   });
 });
