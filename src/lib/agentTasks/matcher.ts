@@ -15,12 +15,13 @@ import { lockTaskGraph } from './blockers.js';
  * bound, else one a live host registration can launch it as (060:04). A worker kept bound after a finished
  * task (`closeSessionWhenDone: false`) is free and keeps its family.
  *
- * WHO IS MATCHED (`matchable`, shipped with T6, #1709): a BOUND worker only
- * while its session is LIVE (cor:agt:020:11) and has reported a family, since
- * a quiet session has nobody driving it and matching it would only park the
- * task; an UNBOUND worker when a live host registration can launch it, as one
- * of the families that host lists (`MATCH_UNBOUND_LAUNCHABLE`; the assignment
- * then issues a `worker.start`). That restriction is the matcher's; the family
+ * WHO IS MATCHED (`matchable`, shipped with T6, #1709; #3815 V16): a BOUND
+ * worker while its session is OPEN, live or quiet (a quiet session is not gone,
+ * #1114), and has reported a family; the assignment reaches it through that
+ * session and no host start is issued (`needsHostStart`; V16 narrows
+ * cor:agt:070:08 to a worker with no open session, Proposed there, #4226). An UNBOUND worker when a live host
+ * registration can launch it, as one of the families that host lists
+ * (`MATCH_UNBOUND_LAUNCHABLE`; the assignment then issues a `worker.start`). That restriction is the matcher's; the family
  * still follows the binding (#1723 review, Diego P2-2), and the roster still
  * reports a quiet bound worker as free (`liveSession` tells them apart).
  * #1709 (T6): a worker waiting on a session end (cor:agt:050:10: an open
