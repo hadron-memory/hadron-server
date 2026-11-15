@@ -238,22 +238,21 @@ describe('#4224 hostDesiredState — short-lived', () => {
     expect(await verdict(kit)).toEqual(['RUNNING', 'HOLDS_TASK']);
   });
 
-  it('a started task waiting on an open child: STOPPED, WAITING_ON_CHILDREN; the child ending makes it RUNNING again', async () => {
+  it('G7: a started task waiting on an open child keeps the worker RUNNING, HOLDS_TASK; never parked', async () => {
+    // Holger's G7 ruling (team-on-orca-decisions, log 2026-11-15 15:10): the implementer is not stopped while it waits
+    // on its child tasks; it stays up with its context and is woken by their events.
     const parent = await task(kit, 'started');
     const child = await task(zoe, 'pending', parent.id);
-    expect(await verdict(kit)).toEqual(['STOPPED', 'WAITING_ON_CHILDREN']);
+    expect(await verdict(kit)).toEqual(['RUNNING', 'HOLDS_TASK']);
     // The child's assignee holds a task of her own.
     expect(await verdict(zoe, 'orca2')).toEqual(['RUNNING', 'HOLDS_TASK']);
-    await db.agentTask.update({ where: { id: child.id }, data: { status: 'finished', startedAt: new Date(), finishedAt: new Date(), resultOutcome: 'succeeded' } });
+    await db.agentTask.update({ where: { id: child.id }, data: { status: 'started', startedAt: new Date() } });
     expect(await verdict(kit)).toEqual(['RUNNING', 'HOLDS_TASK']);
-  });
-
-  it('one task waiting and another not: RUNNING, HOLDS_TASK', async () => {
-    const parent = await task(kit, 'started');
-    await task(zoe, 'started', parent.id);
-    expect(await verdict(kit)).toEqual(['STOPPED', 'WAITING_ON_CHILDREN']);
-    await task(kit, 'pending');
+    await db.agentTask.update({ where: { id: child.id }, data: { status: 'finished', finishedAt: new Date(), resultOutcome: 'succeeded' } });
     expect(await verdict(kit)).toEqual(['RUNNING', 'HOLDS_TASK']);
+    // Only when its own task ends is it stopped.
+    await db.agentTask.update({ where: { id: parent.id }, data: { status: 'finished', finishedAt: new Date(), resultOutcome: 'succeeded' } });
+    expect(await verdict(kit)).toEqual(['STOPPED', 'NO_OPEN_TASK']);
   });
 
   it('an override wins over a held task', async () => {
@@ -517,7 +516,7 @@ async function waitForAnchorHeld(): Promise<void> {
 describe('#4224 the decision table (pure)', () => {
   const base: DesiredStateFacts = {
     sweepMode: 'APPLY', leaveAlone: false, retired: false, stopLevel: null, teamPaused: false, resetting: false,
-    lifecycle: 'LONG_LIVED', openTasks: 0, runnableTasks: 0,
+    lifecycle: 'LONG_LIVED', openTasks: 0,
   };
   const d = (f: Partial<DesiredStateFacts>) => {
     const r = decideDesiredState({ ...base, ...f });
@@ -540,11 +539,11 @@ describe('#4224 the decision table (pure)', () => {
     expect(d({ sweepMode: 'OBSERVE' })).toEqual(['RUNNING', 'LONG_LIVED', null, null]);
   });
 
-  it('short-lived: no task, a runnable task, only waiting tasks', () => {
+  it('short-lived: no task, or any open task (G7: one waiting on children included)', () => {
     const s = { lifecycle: 'SHORT_LIVED' as const };
     expect(d(s)).toEqual(['STOPPED', 'NO_OPEN_TASK', null, null]);
-    expect(d({ ...s, openTasks: 2, runnableTasks: 1 })).toEqual(['RUNNING', 'HOLDS_TASK', null, null]);
-    expect(d({ ...s, openTasks: 2, runnableTasks: 0 })).toEqual(['STOPPED', 'WAITING_ON_CHILDREN', null, null]);
+    expect(d({ ...s, openTasks: 1 })).toEqual(['RUNNING', 'HOLDS_TASK', null, null]);
+    expect(d({ ...s, openTasks: 2 })).toEqual(['RUNNING', 'HOLDS_TASK', null, null]);
   });
 });
 

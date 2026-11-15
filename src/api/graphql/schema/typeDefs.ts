@@ -4909,7 +4909,7 @@ export const typeDefs = `#graphql
     usesTasks: Boolean!
     "#2162 (hrn:node:hadronmemory.com:specs:cor:agt:050:27): when a task one of this Agent's workers had started finishes or is cancelled, and it holds no other started task, its host resets the worker's context (a shed: the binding and session stay). Default false. Set by whoever manages the Agent."
     resetContextAfterTask: Boolean!
-    "#4224 (S3 of #4229): how long this Agent's workers run. LONG_LIVED (default): a worker's process should always run. SHORT_LIVED: only while the worker is the assignee of a pending or started task that is not waiting on child tasks. Read by hostDesiredState at each call; changing it moves no session or process by itself. Set by whoever manages the Agent, like usesTasks."
+    "#4224 (S3 of #4229): how long this Agent's workers run. LONG_LIVED (default): a worker's process should always run. SHORT_LIVED: only while the worker is the assignee of a pending or started task, one waiting on its child tasks included. Read by hostDesiredState at each call; changing it moves no session or process by itself. Set by whoever manages the Agent, like usesTasks."
     lifecycle: AgentLifecycle!
     type: AgentType!
     surfaces: [String!]!
@@ -16475,7 +16475,7 @@ export const typeDefs = `#graphql
   enum AgentLifecycle {
     "The worker's process should always run (the default, and the behaviour before this field existed)."
     LONG_LIVED
-    "The worker's process should run only while it is the assignee of a pending or started task that is not waiting on child tasks."
+    "The worker's process should run only while it is the assignee of a pending or started task (one waiting on its child tasks included)."
     SHORT_LIVED
   }
 
@@ -16496,7 +16496,7 @@ export const typeDefs = `#graphql
   }
 
   """
-  #4224 (S3 of #4229): why a worker's desired state is what it is. A closed set. The first four come from the
+  #4224 (S3 of #4229): why a worker's desired state is what it is. A closed set. The first three come from the
   Agent's lifecycle. RETIRED, HALTED, PAUSED, TEAM_PAUSED and RESETTING always win over the lifecycle, in that order,
   and always read STOPPED. LEAVE_ALONE wins over all of those, and SWEEP_OFF over everything: with either, nothing
   is desired (desired is null) and wouldBe says what the state would otherwise be.
@@ -16504,12 +16504,10 @@ export const typeDefs = `#graphql
   enum DesiredStateReason {
     "A worker of a LONG_LIVED Agent: RUNNING."
     LONG_LIVED
-    "A worker of a SHORT_LIVED Agent that is the assignee of a pending task, or of a started task with no open child: RUNNING."
+    "A worker of a SHORT_LIVED Agent that is the assignee of a pending or started task, including one waiting on its child tasks (the worker stays up and is woken by their events): RUNNING."
     HOLDS_TASK
     "A worker of a SHORT_LIVED Agent that is the assignee of no pending or started task: STOPPED."
     NO_OPEN_TASK
-    "A worker of a SHORT_LIVED Agent whose every open task is started and waiting on an open child task (hrn:node:hadronmemory.com:specs:cor:agt:050:04): STOPPED."
-    WAITING_ON_CHILDREN
     "The worker is retired."
     RETIRED
     "A live halt stop signal covers the worker (hrn:node:hadronmemory.com:specs:cor:agt:090:01)."

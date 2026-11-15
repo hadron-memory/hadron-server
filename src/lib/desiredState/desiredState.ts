@@ -9,8 +9,10 @@
  * hrn:node:hadronmemory.com:hadron-dev-team-shared:coordination:team-on-orca-decisions):
  *
  * - A worker of a LONG_LIVED Agent should run.
- * - A worker of a SHORT_LIVED Agent should run while it is the assignee of a pending or started task that is not
- *   waiting on child tasks (a started task with an open child waits, cor:agt:050:04); otherwise it is stopped.
+ * - A worker of a SHORT_LIVED Agent should run while it is the assignee of any pending or started task, including
+ *   one waiting on its child tasks (cor:agt:050:04): it stays up with its context and is woken by their events
+ *   (Holger's G7 ruling, decision log 2026-11-15 15:10, which replaced the earlier default of parking it).
+ *   Otherwise it is stopped.
  * - These always win over the lifecycle, in this order: retired; halted or paused by a stop signal (cor:agt:090; a
  *   `pause-dispatch` signal stops assignment only and changes nothing here); a team pause (cor:agt:100:04,
  *   `App.teamPausedAt`); a context reset in progress (cor:agt:050:27, the `resetting` availability mark).
@@ -40,9 +42,9 @@ export const SWEEP_MODES: readonly SweepMode[] = Object.values(SweepModeEnum);
 
 export type DesiredRunState = 'RUNNING' | 'STOPPED';
 
-/** The closed set of reasons. The first four come from the lifecycle; the rest override it. */
+/** The closed set of reasons. The first three come from the lifecycle; the rest override it. */
 export const DESIRED_STATE_REASONS = [
-  'LONG_LIVED', 'HOLDS_TASK', 'NO_OPEN_TASK', 'WAITING_ON_CHILDREN',
+  'LONG_LIVED', 'HOLDS_TASK', 'NO_OPEN_TASK',
   'RETIRED', 'HALTED', 'PAUSED', 'TEAM_PAUSED', 'RESETTING', 'LEAVE_ALONE', 'SWEEP_OFF',
 ] as const;
 export type DesiredStateReason = (typeof DESIRED_STATE_REASONS)[number];
@@ -58,10 +60,8 @@ export type DesiredStateFacts = {
   /** A context reset holds the worker (its `resetting` mark is in effect). */
   resetting: boolean;
   lifecycle: AgentLifecycle;
-  /** Pending or started tasks the worker is the assignee of. */
+  /** Pending or started tasks the worker is the assignee of (a task waiting on its children counts, G7). */
   openTasks: number;
-  /** Of those, the ones not waiting on a child: pending, or started with no open child. */
-  runnableTasks: number;
 };
 
 export type DesiredStateVerdict = {
@@ -81,8 +81,7 @@ function underlying(f: DesiredStateFacts): { desired: DesiredRunState; reason: D
   if (f.teamPaused) return { desired: 'STOPPED', reason: 'TEAM_PAUSED' };
   if (f.resetting) return { desired: 'STOPPED', reason: 'RESETTING' };
   if (f.lifecycle === 'LONG_LIVED') return { desired: 'RUNNING', reason: 'LONG_LIVED' };
-  if (f.runnableTasks > 0) return { desired: 'RUNNING', reason: 'HOLDS_TASK' };
-  if (f.openTasks > 0) return { desired: 'STOPPED', reason: 'WAITING_ON_CHILDREN' };
+  if (f.openTasks > 0) return { desired: 'RUNNING', reason: 'HOLDS_TASK' };
   return { desired: 'STOPPED', reason: 'NO_OPEN_TASK' };
 }
 
@@ -139,11 +138,9 @@ export async function loadHostDesiredState(db: Db, appId: string, hostId: string
       where: { id: { in: ids }, appId },
       select: { id: true, name: true, retiredAt: true, leaveAlone: true, agent: { select: { lifecycle: true } } },
     }),
-    // Per assignee: its open tasks, and those of them not waiting on a child (cor:agt:050:04: started with an open child).
-    db.$queryRaw<{ workerId: string; open: number; runnable: number }[]>(Prisma.sql`
-      SELECT t.assignee_worker_id AS "workerId", count(*)::int AS open,
-             (count(*) FILTER (WHERE t.status = 'pending' OR NOT EXISTS (
-                SELECT 1 FROM agent_tasks c WHERE c.parent_task_id = t.id AND c.status IN ('pending', 'started'))))::int AS runnable
+    // Per assignee: its open tasks. One waiting on its children counts (G7: the worker is not parked).
+    db.$queryRaw<{ workerId: string; open: number }[]>(Prisma.sql`
+      SELECT t.assignee_worker_id AS "workerId", count(*)::int AS open
       FROM agent_tasks t
       WHERE t.app_id = ${appId} AND t.assignee_worker_id IN (${Prisma.join(ids)}) AND t.status IN ('pending', 'started')
       GROUP BY t.assignee_worker_id`),
@@ -186,7 +183,6 @@ export async function loadHostDesiredState(db: Db, appId: string, hostId: string
         resetting: resetting.has(w.id),
         lifecycle: w.agent.lifecycle,
         openTasks: t?.open ?? 0,
-        runnableTasks: t?.runnable ?? 0,
       }),
       openSessionId: sessionOf.get(w.id) ?? null,
       family: setup.family,
