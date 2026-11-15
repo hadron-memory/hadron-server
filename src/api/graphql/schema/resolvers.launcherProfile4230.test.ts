@@ -171,7 +171,7 @@ describe('acceptance 3: worker.start carries the profile tokens and no command',
     await setSource('SERVER');
     await hostLists();
     const op = await task();
-    expect(op!.args).toEqual({ workerId: kit.id, worktree: 'hadron-server/kit', family: 'claude', model: 'claude-opus-5-5', effort: 'high', accountProfile: 'worker', taskId: expect.any(String) });
+    expect(op!.args).toEqual({ workerId: kit.id, worktree: 'hadron-server/kit', family: 'claude', model: 'claude-opus-5-5', effort: 'high', accountProfile: 'worker', lifecycle: 'LONG_LIVED', taskId: expect.any(String) });
   });
 
   it('SERVER: a field the assignment leaves unset is not in the start', async () => {
@@ -179,7 +179,15 @@ describe('acceptance 3: worker.start carries the profile tokens and no command',
     await setSource('SERVER');
     await hostLists();
     const op = await task();
-    expect(Object.keys(op!.args as object).sort()).toEqual(['family', 'taskId', 'workerId', 'worktree']);
+    expect(Object.keys(op!.args as object).sort()).toEqual(['family', 'lifecycle', 'taskId', 'workerId', 'worktree']);
+  });
+
+  it("SERVER: the start carries the Agent's lifecycle as it is when the start is issued (Peter #108323)", async () => {
+    await db.agent.update({ where: { id: agentId }, data: { lifecycle: 'SHORT_LIVED' } });
+    await assign();
+    await setSource('SERVER');
+    await hostLists();
+    expect((await task())!.args).toMatchObject({ lifecycle: 'SHORT_LIVED', accountProfile: 'worker' });
   });
 
   it("SERVER: a manager's own start carries the assignment's profile; a caller never passes one", async () => {
@@ -188,14 +196,14 @@ describe('acceptance 3: worker.start carries the profile tokens and no command',
     await hostLists();
     const start = (args: Record<string, unknown>) =>
       M.issueHostOperation({}, { input: { appRef: app.id, hostId: 'orca1', worker: kit.id, type: 'worker.start', args } }, ctx(manager.id));
-    for (const extra of [{ model: 'claude-opus-5-5' }, { accountProfile: 'worker' }, { effort: 'low' }, { command: 'claude' }]) {
+    for (const extra of [{ model: 'claude-opus-5-5' }, { accountProfile: 'worker' }, { effort: 'low' }, { lifecycle: 'LONG_LIVED' }, { command: 'claude' }]) {
       expect(await code(start({ worktree: 'hadron-server/kit', family: 'claude', ...extra })), JSON.stringify(extra)).toBe('BAD_HOST_OPERATION_ARGS');
     }
     const op = await start({ worktree: 'hadron-server/kit', family: 'claude' });
-    expect(op.args).toEqual({ workerId: kit.id, worktree: 'hadron-server/kit', family: 'claude', model: 'claude-opus-5-5', effort: 'low', accountProfile: 'worker' });
+    expect(op.args).toEqual({ workerId: kit.id, worktree: 'hadron-server/kit', family: 'claude', model: 'claude-opus-5-5', effort: 'low', accountProfile: 'worker', lifecycle: 'LONG_LIVED' });
   });
 
-  it('HOST (the default): a start carries no profile, whatever the assignment says', async () => {
+  it('HOST (the default): a start carries no profile and no lifecycle, whatever the assignment says', async () => {
     await assign({ effort: 'high' });
     await hostLists();
     const op = await task();
@@ -206,8 +214,8 @@ describe('acceptance 3: worker.start carries the profile tokens and no command',
     // A start records the hold it was issued under (#1883, prisma/host-launch-invariants.sql).
     const base = { id: generateId(), appId: app.id, hostId: 'orca1', type: 'worker.start', workerId: kit.id, issuedBy: 'platform', holdUserId: holder.id };
     const args = { workerId: kit.id, worktree: 'hadron-server/kit', family: 'claude' };
-    await expect(db.hostOperation.create({ data: { ...base, args: { ...args, model: 'claude-opus-5-5', effort: 'high', accountProfile: 'worker' } } })).resolves.toBeTruthy();
-    for (const bad of [{ accountProfile: 'a b' }, { model: 'a/b' }, { effort: '$(id)' }, { command: 'claude' }, { accountProfile: 1 }]) {
+    await expect(db.hostOperation.create({ data: { ...base, args: { ...args, model: 'claude-opus-5-5', effort: 'high', accountProfile: 'worker', lifecycle: 'SHORT_LIVED' } } })).resolves.toBeTruthy();
+    for (const bad of [{ accountProfile: 'a b' }, { model: 'a/b' }, { effort: '$(id)' }, { command: 'claude' }, { accountProfile: 1 }, { lifecycle: 'FOREVER' }, { lifecycle: 'long_lived' }]) {
       await expect(db.hostOperation.create({ data: { ...base, id: generateId(), args: { ...args, ...bad } } }), JSON.stringify(bad)).rejects.toThrow();
     }
   });
