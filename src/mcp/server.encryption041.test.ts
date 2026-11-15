@@ -90,7 +90,7 @@ beforeEach(async () => {
   // are exactly what production writes.
   await resolvers.Mutation.encryptMemory(
     {},
-    { memoryId, passphrase: PASS },
+    { memoryRef: memoryId, passphrase: PASS },
     { db, roles: ['ADMIN'], userId: owner.id } as Context,
   );
 });

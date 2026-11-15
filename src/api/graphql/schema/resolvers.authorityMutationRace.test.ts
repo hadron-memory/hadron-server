@@ -50,7 +50,7 @@ describe('#1551 actual mutation races', () => {
     }, { timeout: 20_000 });
     await locked;
 
-    const grant = M.addOrgMember(null, { orgId, userRef: target.id, role: 'READER' }, ctx())
+    const grant = M.addOrgMember(null, { orgRef: orgId, userRef: target.id, role: 'READER' }, ctx())
       .then(() => ({ ok: true }), (error: unknown) => ({ ok: false, error }));
     try {
       await waitForLockWaitersOfType(db, 'transactionid', 1);

@@ -319,7 +319,7 @@ describe('#1944 startSession\'s optional agentRef: an unreadable Agent answers l
  */
 const GROUP_A: Array<[string, (agentRef: string) => { query: string; variables: Record<string, unknown> }, (ref: string) => Answer]> = [
   ['revokeAgentSubscription',
-    (ref) => ({ query: 'mutation($ref: String, $user: String) { revokeAgentSubscription(agentRef: $ref, userRef: $user) { agentId } }', variables: { ref, user: member } }),
+    (ref) => ({ query: 'mutation($ref: ID!, $user: ID!) { revokeAgentSubscription(agentRef: $ref, userRef: $user) { agentId } }', variables: { ref, user: member } }),
     (ref) => ({ data: null, error: { message: `No match for agentRef "${ref}".`, extensions: { code: 'NOT_FOUND' } } })],
   ['removeAgentImport',
     (ref) => ({ query: 'mutation($ref: ID!, $imp: ID!) { removeAgentImport(parentAgentRef: $ref, importedAgentRef: $imp) }', variables: { ref, imp: urnOf(pub) } }),

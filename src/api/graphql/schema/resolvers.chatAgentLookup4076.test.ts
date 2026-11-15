@@ -45,7 +45,7 @@ beforeEach(async () => {
 });
 
 async function start(scope: 'private' | 'shared' = 'private') {
-  return M.startChat({}, { agentId, scope, conversationName: 'flow' }, ctx());
+  return M.startChat({}, { agentRef: agentId, scope, conversationName: 'flow' }, ctx());
 }
 
 /** Turn the started chat's memory into a legacy one: no home pointers, agents linked by read-write items. */

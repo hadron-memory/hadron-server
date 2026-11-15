@@ -90,7 +90,7 @@ beforeEach(async () => {
   });
   adminId = admin.id;
   await db.orgMember.create({ data: { organizationId: orgId, userId: adminId, role: 'ADMIN' } });
-  memoryId = (await resolvers.Mutation.createMemory({}, { orgId, name: 'corpus' }, ctx())).id;
+  memoryId = (await resolvers.Mutation.createMemory({}, { orgRef: orgId, name: 'corpus' }, ctx())).id;
 });
 
 describe('the register — small, closed, and unequal on purpose', () => {

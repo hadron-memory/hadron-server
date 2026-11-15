@@ -465,7 +465,7 @@ describe('Mutation.replaceSubtree retirement (#454)', () => {
       await expect(resolvers.Mutation.replaceSubtree(
         null,
         {
-          ownerRepo, memoryId,
+          ownerRepo, memoryRef: memoryId,
           nodes: [
             { memoryRef: graphA.id, loc: 'bulk.new', name: 'new', content: 'replacement' },
             { memoryRef: graphA.id, loc: 'bulk.new-runnable', name: 'new-runnable', isRunnable: true },

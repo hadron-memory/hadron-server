@@ -34,7 +34,7 @@ beforeEach(async () => {
   const a = await db.user.create({ data: { githubId: 9831, githubUsername: 'cf-admin', roles: ['ADMIN'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: a.id, role: 'ADMIN' } });
   adminId = a.id;
-  const mem = await resolvers.Mutation.createMemory({}, { orgId, name: 'intel' }, admin());
+  const mem = await resolvers.Mutation.createMemory({}, { orgRef: orgId, name: 'intel' }, admin());
   memId = mem.id;
   memUrn = mem.urn;
   await updateMemory({ id: memId, schema: competitorSchema });
@@ -86,7 +86,7 @@ describe('restoreNodeRevision — enforces the current schema (#737)', () => {
 
 describe('mergeMemories — enforces the target schema on relocate (#737)', () => {
   it('rejects relocating an undeclared-collection node into a schema-governed target', async () => {
-    const src = await resolvers.Mutation.createMemory({}, { orgId, name: 'src' }, admin());
+    const src = await resolvers.Mutation.createMemory({}, { orgRef: orgId, name: 'src' }, admin());
     await db.node.create({ data: { id: generateId(), memoryId: src.id, loc: 'g', name: 'G', objectType: 'gadget', properties: {} } as any });
     await expect(
       (resolvers.Mutation as any).mergeMemories(null, { input: { source: src.id, target: memId } }, admin()),

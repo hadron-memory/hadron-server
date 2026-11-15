@@ -29,7 +29,7 @@ it('counts absent/false/non-boolean direct calls by kind, true routes normally, 
   let now = 1_000_000; vi.spyOn(performance, 'now').mockImplementation(() => now);
   const info = vi.spyOn(console, 'info').mockImplementation(() => {});
   for (const [fields, kind] of [[{}, 'absent'], [{ goal_reached: false }, 'false'], [{ goal_reached: 'SECRET RAW FLAG' }, 'non_boolean'], [{ goal_reached: true }, null]] as const) {
-    const chat = await resolvers.Mutation.startChat({}, { agentId, conversationName: 'main' }, context);
+    const chat = await resolvers.Mutation.startChat({}, { agentRef: agentId, conversationName: 'main' }, context);
     info.mockClear(); now += 60_000;
     const result = await resolvers.Mutation.processChatResponse({}, { chatId: chat.chatId, toolResponse: { message: 'PRIVATE ASSISTANT TEXT', ...fields } }, context);
     const signals = info.mock.calls.filter(call => typeof call[0] === 'string' && call[0].includes('chat.on_complete_skipped'));

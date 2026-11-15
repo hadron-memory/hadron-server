@@ -145,7 +145,7 @@ describe('a target\'s lifecycle carries its threads (cor:dmo:110:02/05)', () => 
     const target = await node('mv:1');
     const c = await comment(target.id);
     const reply = await M.replyToComment(null, { commentRef: c.id, body: 'r' }, as());
-    const dest = await resolvers.Mutation.createMemory(null, { orgId, name: 'dest' }, as());
+    const dest = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'dest' }, as());
     await M.moveNode(null, { sourceRef: target.id, targetUrn: nodeUrn(dest, 'mv:1') }, as());
     for (const id of [c.id, reply.id]) {
       expect((await db.node.findUniqueOrThrow({ where: { id } })).memoryId).toBe(dest.id);
@@ -154,7 +154,7 @@ describe('a target\'s lifecycle carries its threads (cor:dmo:110:02/05)', () => 
     const page = await Q.commentThreads(null, { targetRef: target.id }, as());
     expect(page.total).toBe(1);
 
-    const priv = await resolvers.Mutation.createMemory(null, { orgId, name: 'priv' }, as());
+    const priv = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'priv' }, as());
     await db.memory.update({ where: { id: priv.id }, data: { class: 'private', userId: admin.id, visibility: null } });
     expect((await errorOf(M.moveNode(null, { sourceRef: target.id, targetUrn: nodeUrn(priv, 'mv:1') }, as()))).extensions)
       .toMatchObject({ code: 'COMMENT_MOVE_UNCOMMENTABLE', class: 'private', nodes: [{ nodeId: target.id, loc: 'mv:1', comments: 2 }] });
@@ -163,7 +163,7 @@ describe('a target\'s lifecycle carries its threads (cor:dmo:110:02/05)', () => 
   it('a move into a system memory carries the threads (#1935: only private refuses)', async () => {
     const target = await node('mv:sys');
     const c = await comment(target.id);
-    const sys = await resolvers.Mutation.createMemory(null, { orgId, name: 'sys-dest' }, as());
+    const sys = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'sys-dest' }, as());
     await db.memory.update({ where: { id: sys.id }, data: { class: 'system', visibility: null } });
     // #2206: a system memory is written as a live Agent's definition, by whoever manages that Agent.
     await db.agent.create({ data: { id: generateId(), name: 'Sys Agent', urn: `${sys.urn}-agent`, organizationId: orgId, systemMemoryId: sys.id } });
@@ -233,7 +233,7 @@ describe('#1663 review cycle', () => {
   it('an admin thread delete clears a node for a move into a private memory; deleted threads follow their target', async () => {
     const target = await node('st:3');
     const c = await comment(target.id);
-    const priv = await resolvers.Mutation.createMemory(null, { orgId, name: 'priv-dest', memoryClass: 'private' }, as());
+    const priv = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'priv-dest', memoryClass: 'private' }, as());
     expect((await errorOf(M.moveNode(null, { sourceRef: target.id, targetUrn: nodeUrn(priv, 'st:3') }, as()))).extensions)
       .toMatchObject({ code: 'COMMENT_MOVE_UNCOMMENTABLE' });
     await M.deleteCommentThread(null, { commentRef: c.id, reason: 'clearing for the move' }, as());
@@ -245,7 +245,7 @@ describe('#1663 review cycle', () => {
   it('an old-revision anchor in another memory needs read access to that memory (Atilla P2-3)', async () => {
     const writer = await db.user.create({ data: { githubId: 160698, githubUsername: 'gen-writer', roles: [] } });
     await db.orgMember.create({ data: { organizationId: orgId, userId: writer.id, role: 'CONTRIBUTOR' } });
-    const priv = await resolvers.Mutation.createMemory(null, { orgId, name: 'priv-src', memoryClass: 'private' }, as());
+    const priv = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'priv-src', memoryClass: 'private' }, as());
     const target = await node('an:1', priv.id);
     await M.updateNode(null, { input: { id: target.id, content: 'second' } }, as());
     await M.moveNode(null, { sourceRef: target.id, targetUrn: nodeUrn(memory, 'an:1') }, as());
@@ -263,7 +263,7 @@ describe('#1663 review — encrypted memories (local P2-2)', () => {
   it('encrypts body, quote and reasons at rest, reads them back with the key, and refuses SESSION_EXPIRED without it', async () => {
     // An org memory is encrypted by its org App, not a user (encryptMemory);
     // the state is set up directly, with the target's content encrypted.
-    const enc = await resolvers.Mutation.createMemory(null, { orgId, name: 'enc-comments' }, as());
+    const enc = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'enc-comments' }, as());
     const key = parseDataKey(dataKey);
     await db.memory.update({ where: { id: enc.id }, data: { isEncrypted: true, vectorIndexEnabled: false } });
     const target = await db.node.create({
@@ -305,7 +305,7 @@ describe('#1663 review — encrypted memories (local P2-2)', () => {
 
   // Rook P3-1 (#1866): the retained snapshot arm must never compute a fingerprint.
   it('an older revision in the same encrypted memory anchors without computing or storing a hash', async () => {
-    const enc = await resolvers.Mutation.createMemory(null, { orgId, name: 'enc-old-revision' }, as());
+    const enc = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'enc-old-revision' }, as());
     const key = parseDataKey(dataKey);
     await db.memory.update({ where: { id: enc.id }, data: { isEncrypted: true, vectorIndexEnabled: false } });
     const target = await db.node.create({ data: {
@@ -351,7 +351,7 @@ describe('#1663 review — encrypted memories (local P2-2)', () => {
   });
 
   it('a plaintext target still hashes an old-revision snapshot in another, encrypted memory with its key, else UNAVAILABLE', async () => {
-    const src = await resolvers.Mutation.createMemory(null, { orgId, name: 'enc-src' }, as());
+    const src = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'enc-src' }, as());
     const target = await node('e:2', src.id);
     await M.updateNode(null, { input: { id: target.id, content: 'second' } }, as());
     await M.moveNode(null, { sourceRef: target.id, targetUrn: nodeUrn(memory, 'e:2') }, as());

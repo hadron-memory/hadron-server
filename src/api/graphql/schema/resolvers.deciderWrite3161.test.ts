@@ -24,7 +24,7 @@ beforeEach(async () => {
     { organizationId: orgId, userId: admin, role: 'ADMIN' },
     { organizationId: orgId, userId: candidate, role: 'CONTRIBUTOR' },
   ] });
-  memoryId = (await M.createMemory(null, { orgId, name: 'Decider memory' }, ctx())).id;
+  memoryId = (await M.createMemory(null, { orgRef: orgId, name: 'Decider memory' }, ctx())).id;
 });
 
 describe('#3161 decider write eligibility at all three doors', () => {

@@ -108,13 +108,13 @@ const sites = [
     name: 'startChat (chats parent)',
     parentLoc: 'chats',
     run: (ctxDb: Context['db']) =>
-      resolvers.Mutation.startChat({}, { agentId }, { db: ctxDb, roles: ['ADMIN'], userId: admin.id }),
+      resolvers.Mutation.startChat({}, { agentRef: agentId }, { db: ctxDb, roles: ['ADMIN'], userId: admin.id }),
   },
   {
     name: 'createRevision (revisions parent)',
     parentLoc: 'revisions',
     run: (ctxDb: Context['db']) =>
-      resolvers.Mutation.createRevision({}, { agentId }, { db: ctxDb, roles: ['ADMIN'], userId: admin.id }),
+      resolvers.Mutation.createRevision({}, { agentRef: agentId }, { db: ctxDb, roles: ['ADMIN'], userId: admin.id }),
   },
 ] as const;
 

@@ -217,7 +217,7 @@ describe('#1796 acceptance 2: encryptMemory with no secret argument', () => {
       ));
       expect(completion).toHaveBeenCalledTimes(1);
       const args = completion.mock.calls[0][1] as Record<string, unknown>;
-      expect(Object.keys(args)).toEqual(['memoryId']);
+      expect(Object.keys(args)).toEqual(['memoryRef']);
     } finally { completion.mockRestore(); }
     expect((await row(anon.id)).isEncrypted).toBe(true);
   });

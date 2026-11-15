@@ -284,7 +284,7 @@ const PROBES: Probe[] = [
   },
   {
     name: 'replaceSubtree',
-    query: `mutation($r: String!) { replaceSubtree(ownerRepo: "x", memoryRef: $r, nodes: [], edges: []) }`,
+    query: `mutation($r: ID!) { replaceSubtree(ownerRepo: "x", memoryRef: $r, nodes: [], edges: []) }`,
     on: 'memUrn', vars: (r) => ({ r }), missingCode: 'MEMORY_NOT_FOUND',
   },
   {
@@ -324,27 +324,27 @@ const PROBES: Probe[] = [
   },
   {
     name: 'createMemorySubscription',
-    query: `mutation($r: String!, $o: String!) { createMemorySubscription(memoryRef: $r, orgRef: $o, role: READER) { role } }`,
+    query: `mutation($r: ID!, $o: ID!) { createMemorySubscription(memoryRef: $r, orgRef: $o, role: READER) { role } }`,
     on: 'memUrn', vars: (r) => ({ r, o: ids.otherOrg }), missingCode: 'NOT_FOUND',
   },
   {
     name: 'updateMemorySubscription',
-    query: `mutation($r: String!, $o: String!) { updateMemorySubscription(memoryRef: $r, orgRef: $o, role: READER) { role } }`,
+    query: `mutation($r: ID!, $o: ID!) { updateMemorySubscription(memoryRef: $r, orgRef: $o, role: READER) { role } }`,
     on: 'memUrn', vars: (r) => ({ r, o: ids.otherOrg }), missingCode: 'NOT_FOUND',
   },
   {
     name: 'deleteMemorySubscription',
-    query: `mutation($r: String!, $o: String!) { deleteMemorySubscription(memoryRef: $r, orgRef: $o) }`,
+    query: `mutation($r: ID!, $o: ID!) { deleteMemorySubscription(memoryRef: $r, orgRef: $o) }`,
     on: 'memUrn', vars: (r) => ({ r, o: ids.otherOrg }), missingCode: 'NOT_FOUND',
   },
   {
     name: 'deleteMemorySubscription (an org the caller does not administer)',
-    query: `mutation($r: String!, $o: String!) { deleteMemorySubscription(memoryRef: $r, orgRef: $o) }`,
+    query: `mutation($r: ID!, $o: ID!) { deleteMemorySubscription(memoryRef: $r, orgRef: $o) }`,
     on: 'memUrn', vars: (r) => ({ r, o: ids.neutralOrg }), missingCode: 'NOT_FOUND',
   },
   {
     name: 'createMemorySubscription (an App-scoped PUBLIC memory the caller cannot open)',
-    query: `mutation($r: String!, $o: String!) { createMemorySubscription(memoryRef: $r, orgRef: $o, role: READER) { role } }`,
+    query: `mutation($r: ID!, $o: ID!) { createMemorySubscription(memoryRef: $r, orgRef: $o, role: READER) { role } }`,
     on: 'appPublicUrn', vars: (r) => ({ r, o: ids.otherOrg }), missingCode: 'NOT_FOUND',
   },
   // The org resolves AFTER the memory: an org error must not arrive first for
@@ -353,8 +353,8 @@ const PROBES: Probe[] = [
     name: `${verb}MemorySubscription (a missing orgRef)`,
     query:
       verb === 'delete'
-        ? `mutation($r: String!, $o: String!) { deleteMemorySubscription(memoryRef: $r, orgRef: $o) }`
-        : `mutation($r: String!, $o: String!) { ${verb}MemorySubscription(memoryRef: $r, orgRef: $o, role: READER) { role } }`,
+        ? `mutation($r: ID!, $o: ID!) { deleteMemorySubscription(memoryRef: $r, orgRef: $o) }`
+        : `mutation($r: ID!, $o: ID!) { ${verb}MemorySubscription(memoryRef: $r, orgRef: $o, role: READER) { role } }`,
     on: 'memUrn',
     vars: (r: string) => ({ r, o: `no-such-org-${suffix}` }),
     missingCode: 'NOT_FOUND',
@@ -366,12 +366,12 @@ const PROBES: Probe[] = [
   },
   {
     name: 'setMemorySourceToken(ref:)',
-    query: `mutation($r: ID!) { setMemorySourceToken(ref: $r, token: "t") { id } }`,
+    query: `mutation($r: ID!) { setMemorySourceToken(ref: $r, token: "t") { ref: id } }`,
     on: 'memId', vars: (r) => ({ r }), missingCode: 'MEMORY_NOT_FOUND',
   },
   {
     name: 'syncMemory(ref:)',
-    query: `mutation($r: ID!) { syncMemory(ref: $r) { id } }`,
+    query: `mutation($r: ID!) { syncMemory(ref: $r) { ref: id } }`,
     on: 'memId', vars: (r) => ({ r }), missingCode: 'MEMORY_NOT_FOUND',
   },
   {
@@ -481,7 +481,7 @@ describe('#1381 — controls: what concealment must not change', () => {
     // is parsed, so a hidden one must not answer BAD_USER_INPUT instead.
     // (#4142 S6 dropped the orgId alias, so the malformed value rides orgRef
     // itself — the memory-first order this pins is unchanged.)
-    const q = `mutation($r: String!, $o: String!) { deleteMemorySubscription(memoryRef: $r, orgRef: $o) }`;
+    const q = `mutation($r: ID!, $o: ID!) { deleteMemorySubscription(memoryRef: $r, orgRef: $o) }`;
     const existing = await gql('outsider', q, { r: target.memUrn!.existing, o: 'not-a-qualified-urn' });
     const missing = await gql('outsider', q, { r: target.memUrn!.missing, o: 'not-a-qualified-urn' });
     expect(code(missing)).toBe('NOT_FOUND');
@@ -497,7 +497,7 @@ describe('#1381 — controls: what concealment must not change', () => {
     await db.urnAlias.createMany({
       data: [a, b].map((o) => ({ id: generateId(), urn: shared, entityType: 'ORGANIZATION' as const, entityId: o.id, reason: 'RENAME' as const })),
     });
-    const q = `mutation($r: String!, $o: String!) { deleteMemorySubscription(memoryRef: $r, orgRef: $o) }`;
+    const q = `mutation($r: ID!, $o: ID!) { deleteMemorySubscription(memoryRef: $r, orgRef: $o) }`;
     // Positive control: a caller who CAN open the memory sees the ambiguity itself.
     const visible = await gql('reader', q, { r: target.memUrn!.existing, o: `hrn:org:${shared}` });
     expect(visible.errors?.[0]?.message ?? '', 'precondition: the alias really is ambiguous').toMatch(/ambiguous|more than one/i);
@@ -508,7 +508,7 @@ describe('#1381 — controls: what concealment must not change', () => {
   });
 
   it('deleteMemorySubscription: a fault resolving the org propagates, even for a hidden memory', async () => {
-    const q = `mutation($r: String!, $o: String!) { deleteMemorySubscription(memoryRef: $r, orgRef: $o) }`;
+    const q = `mutation($r: ID!, $o: ID!) { deleteMemorySubscription(memoryRef: $r, orgRef: $o) }`;
     const fault = vi.spyOn(db.organization, 'findFirst').mockRejectedValueOnce(new Error('injected org-resolution db failure'));
     try {
       const result = await gql('outsider', q, { r: target.memUrn!.existing, o: `oracle-1381-neutral-${suffix}` });

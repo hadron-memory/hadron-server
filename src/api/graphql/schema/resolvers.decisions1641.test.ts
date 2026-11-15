@@ -552,7 +552,7 @@ describe('§3.2 — no generic path writes, deletes, moves or merges a decision'
   });
 
   it('encryptMemory refuses a memory holding a log (reciprocal to createDecisionLog)', async () => {
-    const priv = await resolvers.Mutation.createMemory(null, { orgId, name: 'assistant', memoryClass: 'private' }, as(holger.id));
+    const priv = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'assistant', memoryClass: 'private' }, as(holger.id));
     await M.createDecisionLog(null, { memoryRef: priv.id, loc: 'decisions', defaultDeciders: [holger.id] }, as(holger.id));
     const dataKey = Buffer.alloc(32, 7).toString('base64');
     expect(await codeOf(M.encryptMemory(null, { memoryRef: priv.id, dataKey }, as(holger.id)))).toBe('DECISION_LOG_ENCRYPTED');
@@ -574,7 +574,7 @@ describe('§3.2 — no generic path writes, deletes, moves or merges a decision'
 describe('a personal assistant outside any team (§3.4, r4 use case)', () => {
   it('an agent in another org\'s App asks in its human\'s log; the human sees it awaiting them', async () => {
     // Holger's own unencrypted personal memory; he creates the log and decides.
-    const personal = await resolvers.Mutation.createMemory(null, { orgId, name: 'pa', memoryClass: 'personal' }, as(holger.id));
+    const personal = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'pa', memoryClass: 'personal' }, as(holger.id));
     const log = await M.createDecisionLog(null, { memoryRef: personal.id, loc: 'decisions', defaultDeciders: [holger.id] }, as(holger.id));
     // The agent writes on Holger's own token (the honest limit of §6.1: to the server it IS him).
     const d = await runAsActor({ workerId: null, agentId: 'pa-agent' }, () => ask(log.row.id, simple(), holger.id));

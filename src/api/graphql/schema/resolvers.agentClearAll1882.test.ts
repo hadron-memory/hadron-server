@@ -61,14 +61,14 @@ describe('#1882 — platform clear of user-owned Agent credentials', () => {
       expect(response.body.singleResult.data?.clearAgentAIConfig).toMatchObject({ id: agentId, aiProvider: null, aiModel: null, aiApiKeyPreview: null, hasAiApiKey: false });
       expect(decrypt).not.toHaveBeenCalled();
       expect(JSON.stringify(response.body.singleResult)).not.toMatch(/sk-1882|apiKeyEncrypted|fixture-model|\.\.\.1882/);
-      await resolvers.Mutation.clearAgentAIConfig({}, { agentId }, context(adminId, [role]));
+      await resolvers.Mutation.clearAgentAIConfig({}, { agentRef: agentId }, context(adminId, [role]));
       expect(await db.aiServiceConfig.count({ where: { agentId } })).toBe(0);
     },
   );
 
   it('clears a named-only user-owned Agent when no default exists', async () => {
     await config(agentId, 'only-backup');
-    await resolvers.Mutation.clearAgentAIConfig({}, { agentId }, context(adminId, ['ADMIN']));
+    await resolvers.Mutation.clearAgentAIConfig({}, { agentRef: agentId }, context(adminId, ['ADMIN']));
     expect(await db.aiServiceConfig.count({ where: { agentId } }), '#1882: absence of default must not skip the named clear').toBe(0);
   });
 
@@ -92,7 +92,7 @@ describe('#1882 — platform clear of user-owned Agent credentials', () => {
     expect(response.body.singleResult.data?.clearAgentAIConfig).toMatchObject({ id: agentId, aiProvider: null, aiModel: null, aiApiKeyPreview: null, hasAiApiKey: false });
     expect(decrypt).not.toHaveBeenCalled();
     expect(JSON.stringify(response.body.singleResult)).not.toMatch(/sk-1882|apiKeyEncrypted|fixture-model|\.\.\.1882/);
-    await resolvers.Mutation.clearAgentAIConfig({}, { agentId }, context(ownerId));
+    await resolvers.Mutation.clearAgentAIConfig({}, { agentRef: agentId }, context(ownerId));
     expect(await db.aiServiceConfig.count({ where: { agentId } })).toBe(0);
   });
 
@@ -101,7 +101,7 @@ describe('#1882 — platform clear of user-owned Agent credentials', () => {
     await config(agentId, 'backup');
     const before = await configs();
     const caller = { ...context(ownerId), impersonation: { orgId, sessionId: 'support', actorUserId: adminId } } as Context;
-    await expect(resolvers.Mutation.clearAgentAIConfig({}, { agentId }, caller)).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
+    await expect(resolvers.Mutation.clearAgentAIConfig({}, { agentRef: agentId }, caller)).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
     expect(await configs()).toEqual(before);
   });
 
@@ -118,7 +118,7 @@ describe('#1882 — platform clear of user-owned Agent credentials', () => {
     await config(agentId, 'backup');
     const before = await configs();
     for (const caller of [context(adminId), { ...context(adminId, ['ADMIN']), impersonation: { orgId, sessionId: 'support', actorUserId: adminId } } as Context]) {
-      await expect(resolvers.Mutation.clearAgentAIConfig({}, { agentId }, caller)).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
+      await expect(resolvers.Mutation.clearAgentAIConfig({}, { agentRef: agentId }, caller)).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
       expect(await configs()).toEqual(before);
     }
   });
@@ -127,7 +127,7 @@ describe('#1882 — platform clear of user-owned Agent credentials', () => {
     await config(agentId, 'backup');
     const before = await configs();
     await db.user.update({ where: { id: adminId }, data: { roles: ['READER'] } });
-    await expect(resolvers.Mutation.clearAgentAIConfig({}, { agentId }, context(adminId, ['ADMIN'])))
+    await expect(resolvers.Mutation.clearAgentAIConfig({}, { agentRef: agentId }, context(adminId, ['ADMIN'])))
       .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     expect(await configs()).toEqual(before);
   });
@@ -141,7 +141,7 @@ describe('#1882 — platform clear of user-owned Agent credentials', () => {
     await db.$transaction(async (tx) => {
       await lockAuthorityAnchors(tx, [{ kind: 'user', id: adminId }], 'exclusive');
       await tx.user.update({ where: { id: adminId }, data: { roles: ['READER'] } });
-      const clearing = resolvers.Mutation.clearAgentAIConfig({}, { agentId }, { ...context(adminId, ['ADMIN']), db: observed.db });
+      const clearing = resolvers.Mutation.clearAgentAIConfig({}, { agentRef: agentId }, { ...context(adminId, ['ADMIN']), db: observed.db });
       outcome = clearing.catch((error: unknown) => error);
       const pid = await observed.backendFor(clearing);
       await waitForAdvisoryWaiter(db, { pid, key: { form: 'int-pair', first: 'authorization:user', second: adminId } });
@@ -164,7 +164,7 @@ describe('#1882 — platform clear of user-owned Agent credentials', () => {
         };
       },
     });
-    await expect(resolvers.Mutation.clearAgentAIConfig({}, { agentId }, { ...context(adminId, ['ADMIN']), db: moved }))
+    await expect(resolvers.Mutation.clearAgentAIConfig({}, { agentRef: agentId }, { ...context(adminId, ['ADMIN']), db: moved }))
       .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     expect(await configs()).toEqual(before);
   });

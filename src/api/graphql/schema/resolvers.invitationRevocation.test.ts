@@ -47,7 +47,7 @@ describe('#1558 inviter revocation', () => {
       roles: ['ADMIN'],
     } });
     const issued = await M.createUserInvitation(null, {
-      orgId, memberRole: 'READER', maxActivations: 2,
+      orgRef: orgId, memberRole: 'READER', maxActivations: 2,
     }, ctx(platformAdmin.id));
     expect(await db.orgMember.findFirst({ where: { organizationId: orgId, userId: platformAdmin.id } }))
       .toBeNull();
@@ -61,7 +61,7 @@ describe('#1558 inviter revocation', () => {
       roles: ['ADMIN'],
     } });
     const issued = await M.createUserInvitation(null, {
-      orgId, memberRole: 'READER', maxActivations: 2,
+      orgRef: orgId, memberRole: 'READER', maxActivations: 2,
     }, ctx(platformAdmin.id));
     await db.user.update({ where: { id: platformAdmin.id }, data: { roles: ['READER'] } });
     await expect(M.acceptInvitation(null, { slug: issued.slug }, ctx(inviteeId)))
@@ -76,7 +76,7 @@ describe('#1558 inviter revocation', () => {
       roles: ['ADMIN'],
     } });
     const issued = await M.createUserInvitation(null, {
-      orgId, memberRole: 'READER', maxActivations: 2,
+      orgRef: orgId, memberRole: 'READER', maxActivations: 2,
     }, ctx(platformAdmin.id));
     let release!: () => void;
     let held!: () => void;
@@ -112,7 +112,7 @@ describe('#1558 inviter revocation', () => {
   it('removal revokes only the removed admin’s invitations', async () => {
     const removed = await invite(adminId);
     const remaining = await invite(ownerId);
-    await M.removeOrgMember(null, { orgId, userRef: adminId }, ctx(ownerId));
+    await M.removeOrgMember(null, { orgRef: orgId, userRef: adminId }, ctx(ownerId));
     expect((await db.userInvitation.findUniqueOrThrow({ where: { id: removed.id } })).deletedAt).not.toBeNull();
     expect((await db.userInvitation.findUniqueOrThrow({ where: { id: remaining.id } })).deletedAt).toBeNull();
     await expect(M.acceptInvitation(null, { slug: removed.slug }, ctx(inviteeId)))
@@ -122,7 +122,7 @@ describe('#1558 inviter revocation', () => {
 
   it('demotion below ADMIN revokes invitations', async () => {
     const issued = await invite(adminId);
-    await M.updateOrgMember(null, { orgId, userRef: adminId, role: 'CONTRIBUTOR' }, ctx(ownerId));
+    await M.updateOrgMember(null, { orgRef: orgId, userRef: adminId, role: 'CONTRIBUTOR' }, ctx(ownerId));
     expect((await db.userInvitation.findUniqueOrThrow({ where: { id: issued.id } })).deletedAt).not.toBeNull();
   });
 
@@ -166,7 +166,7 @@ describe('#1558 inviter revocation', () => {
     }, { timeout: 20_000 });
     await locked;
 
-    const removal = M.removeOrgMember(null, { orgId, userRef: adminId }, ctx(ownerId));
+    const removal = M.removeOrgMember(null, { orgRef: orgId, userRef: adminId }, ctx(ownerId));
     try {
       await waitForLockWaitersOfType(db, 'transactionid', 1);
       const acceptance = M.acceptInvitation(null, { slug: issued.slug }, ctx(inviteeId));
@@ -195,12 +195,12 @@ describe('#1558 inviter revocation', () => {
     await locked;
 
     const invitation = M.createUserInvitation(null, {
-      orgId, memberRole: 'READER', maxActivations: 2,
+      orgRef: orgId, memberRole: 'READER', maxActivations: 2,
     }, ctx(adminId));
     try {
       await waitForLockWaitersOfType(db, 'transactionid', 1);
       let removed = false;
-      const removal = M.removeOrgMember(null, { orgId, userRef: adminId }, ctx(ownerId))
+      const removal = M.removeOrgMember(null, { orgRef: orgId, userRef: adminId }, ctx(ownerId))
         .then((value: unknown) => { removed = true; return value; });
       await waitForLockWaitersOfType(db, 'advisory', 1);
       expect(removed).toBe(false);
@@ -227,10 +227,10 @@ describe('#1558 inviter revocation', () => {
     }, { timeout: 20_000 });
     await locked;
 
-    const addition = M.addOrgMember(null, { orgId, userRef: inviteeId, role: 'READER' }, ctx(ownerId));
+    const addition = M.addOrgMember(null, { orgRef: orgId, userRef: inviteeId, role: 'READER' }, ctx(ownerId));
     try {
       await waitForLockWaitersOfType(db, 'transactionid', 1);
-      const removal = M.removeOrgMember(null, { orgId, userRef: inviteeId }, ctx(ownerId));
+      const removal = M.removeOrgMember(null, { orgRef: orgId, userRef: inviteeId }, ctx(ownerId));
       await waitForLockWaitersOfType(db, 'advisory', 1);
       release();
       await holder;

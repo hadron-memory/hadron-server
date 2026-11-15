@@ -71,14 +71,14 @@ async function loseLicence(loss: Loss) {
 
 /** Publish the Agent's current definition, so a chat started afterwards is pinned to it (`startedWithRevision`). */
 async function publishPin() {
-  const rev = await M.createRevision({}, { agentId }, ctx());
-  await M.publishRevision({}, { agentId, revisionLoc: rev.revisionLoc }, ctx());
+  const rev = await M.createRevision({}, { agentRef: agentId }, ctx());
+  await M.publishRevision({}, { agentRef: agentId, revisionLoc: rev.revisionLoc }, ctx());
   return rev.revisionLoc as string;
 }
 
 async function start(scope: 'private' | 'shared' = 'private', pinned = false) {
   const pin = pinned ? await publishPin() : null;
-  const started = await M.startChat({}, { agentId, scope, conversationName: 'flow' }, ctx());
+  const started = await M.startChat({}, { agentRef: agentId, scope, conversationName: 'flow' }, ctx());
   expect(started.systemMessage).toContain('LICENSED STAGE');
   // The pin is what makes loadChatScript read the definition eagerly; without it that call makes no read, so a
   // licence gate moved after it would go unnoticed. Establish the pin (or its absence) instead of assuming it.

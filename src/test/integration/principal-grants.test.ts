@@ -85,7 +85,7 @@ describe('#1551 principal-grant authority fence', () => {
       let removed = false;
       const removal = resolvers.Mutation.removeOrgMember(null, {
         orgRef: org.id, userRef: orgAdmin.id,
-      }, { db, userRef: owner.id, roles: [] } as Context)
+      }, { db, userId: owner.id, roles: [] } as Context)
         .then((value: unknown) => { removed = true; return value; });
       await waitForLockWaitersOfType(db, 'advisory', 1);
       expect(removed).toBe(false);

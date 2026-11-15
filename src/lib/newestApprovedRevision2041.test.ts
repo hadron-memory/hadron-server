@@ -103,7 +103,7 @@ describe('newestApprovedRevisionOf (#2041)', () => {
     const n = await mk('n:9');
     await approve(n.id); // rev 1
     await edit(n.id, 'v2');
-    const other = await resolvers.Mutation.createMemory(null, { orgId, name: 'elsewhere' }, as());
+    const other = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'elsewhere' }, as());
     await db.nodeRevision.updateMany({ where: { nodeId: n.id, revNo: 1 }, data: { memoryId: other.id } });
     expect((await newestApprovedRevisionOf(db, n.id)).found).toBeNull();
   });
@@ -111,7 +111,7 @@ describe('newestApprovedRevisionOf (#2041)', () => {
   it('a foreign-memory snapshot holding the live number is not read through as the live revision (Baloo P2)', async () => {
     const n = await mk('n:11');
     await approve(n.id); // rev 1, live: approved
-    const other = await resolvers.Mutation.createMemory(null, { orgId, name: 'elsewhere-live' }, as());
+    const other = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'elsewhere-live' }, as());
     const live = await db.node.findUniqueOrThrow({ where: { id: n.id } });
     // A retained snapshot at the live number, captured in another memory, covering the same approved text.
     await db.nodeRevision.create({ data: {

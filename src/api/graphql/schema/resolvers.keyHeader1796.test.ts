@@ -76,7 +76,7 @@ describe('#1796 schema boundary', () => {
         }
       }
     }
-    expect(encryptionArgs.sort()).toEqual(['dataKey', 'memoryId', 'passphrase']);
+    expect(encryptionArgs.sort()).toEqual(['dataKey', 'memoryRef', 'passphrase']);
     expect(found.sort()).toEqual(['Mutation.encryptMemory.dataKey', 'Mutation.encryptMemory.passphrase']);
   });
 

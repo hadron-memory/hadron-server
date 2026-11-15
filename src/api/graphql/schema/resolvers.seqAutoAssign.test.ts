@@ -47,7 +47,7 @@ beforeEach(async () => {
   });
   adminId = admin.id;
   await db.orgMember.create({ data: { organizationId: orgId, userId: adminId, role: 'ADMIN' } });
-  const memory = await resolvers.Mutation.createMemory({}, { orgId, name: 'seqmem' }, gqlCtx());
+  const memory = await resolvers.Mutation.createMemory({}, { orgRef: orgId, name: 'seqmem' }, gqlCtx());
   memoryId = memory.id;
   // Fully-qualified memory URN (org::memory) for node-URN construction. The
   // stored urn uses a single colon (seqa-org:seqmem); hadron_create_node wants the

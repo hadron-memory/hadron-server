@@ -29,7 +29,7 @@ beforeEach(async () => {
     { organizationId: orgId, userId: admin, role: 'ADMIN' },
     { organizationId: orgId, userId: candidate, role: 'CONTRIBUTOR' },
   ] });
-  memoryId = (await M.createMemory(null, { orgId, name: 'Decider follow-ups' }, ctx())).id;
+  memoryId = (await M.createMemory(null, { orgRef: orgId, name: 'Decider follow-ups' }, ctx())).id;
 });
 
 describe('#3173 decision-log eligibility follow-ups', () => {

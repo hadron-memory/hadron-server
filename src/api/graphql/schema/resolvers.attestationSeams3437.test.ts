@@ -188,7 +188,7 @@ describe('#3437 item 4: the seams a `carry` context would silently open', () => 
     const replace = (input: Record<string, unknown>) => resolvers.Mutation.searchReplaceInSpecNodes(null, { input } as never, ctx());
 
     beforeEach(async () => {
-      draftId = (await resolvers.Mutation.createMemory(null, { orgId, name: 'specs-draft', draftCorpus: true }, ctx())).id;
+      draftId = (await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'specs-draft', draftCorpus: true }, ctx())).id;
       specTask = (await db.node.create({ data: { id: generateId(), memoryId: draftId, loc: 'author-task', name: 'T', isRunnable: true } })).id;
       const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: draftId } });
       await db.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, role: 'spec', authorTaskId: specTask, authorTaskRequired: true } });
@@ -291,7 +291,7 @@ describe('#3437 item 7: an encrypted no-op, on real ciphertext', () => {
 
   /** A private memory, its rules and two stamped rows, then real encryption over all of it. */
   beforeEach(async () => {
-    privateId = (await resolvers.Mutation.createMemory(null, { orgId, name: 'private-draft', memoryClass: 'private', draftCorpus: true }, ctx())).id;
+    privateId = (await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'private-draft', memoryClass: 'private', draftCorpus: true }, ctx())).id;
     privateTask = (await db.node.create({ data: { id: generateId(), memoryId: privateId, loc: 'author-task', name: 'T', isRunnable: true } })).id;
     const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: privateId } });
     const stamp = { authorshipKind: 'TASK' as const, authoredByTask: privateTask, authoredByRevision: 1, authoredAt: new Date() };

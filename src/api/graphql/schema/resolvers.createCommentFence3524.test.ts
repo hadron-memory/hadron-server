@@ -50,7 +50,7 @@ function seamDb(hooks: { before?: () => Promise<void>; after?: () => Promise<voi
 }
 
 async function memoryWithTarget(opts: { encrypted: boolean; name: string }) {
-  const memory = await resolvers.Mutation.createMemory(null, { orgId, name: opts.name }, ctxOf(admin.id));
+  const memory = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: opts.name }, ctxOf(admin.id));
   if (opts.encrypted) await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true, vectorIndexEnabled: false } });
   const target = await db.node.create({
     data: {

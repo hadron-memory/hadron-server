@@ -239,7 +239,7 @@ describe('createMemorySubscription', () => {
   });
 
   it('a duplicate subscription (unique violation) stays a server fault, not a typed refusal', async () => {
-    const args = { memoryId: publicMemory.id, orgId: subscriberOrg.id, role: 'READER' };
+    const args = { memoryRef: publicMemory.id, orgRef: subscriberOrg.id, role: 'READER' };
     await resolvers.Mutation.createMemorySubscription(null, args, adminCtx(subscriberAdminUser.id));
     const err = await resolvers.Mutation.createMemorySubscription(null, args, adminCtx(subscriberAdminUser.id))
       .then(() => null, (e: unknown) => e);
@@ -250,7 +250,7 @@ describe('createMemorySubscription', () => {
     const server = new ApolloServer<Context>({ typeDefs, resolvers });
     const out = await server.executeOperation(
       {
-        query: 'mutation($m: String!, $o: String!) { createMemorySubscription(memoryRef: $m, orgRef: $o, role: READER) { id } }',
+        query: 'mutation($m: ID!, $o: ID!) { createMemorySubscription(memoryRef: $m, orgRef: $o, role: READER) { id } }',
         variables: { m: publicMemory.id, o: subscriberOrg.id },
       },
       { contextValue: adminCtx(subscriberAdminUser.id) },
