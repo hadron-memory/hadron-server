@@ -84,7 +84,8 @@ describe('over the cap and proven idle: one reset', () => {
     const [op, ...more] = await ops();
     expect(more).toEqual([]);
     expect(op!.id).toBe(r.hostOperationId);
-    expect(op!.args).toEqual({ workerId: F.kit.id, sessionId: F.session.id, resetId: r.id });
+    // Wolfgang #108825 / Peter #108828: the cause rides in the args too, so the host's checkpoint needs no extra read.
+    expect(op!.args).toEqual({ workerId: F.kit.id, sessionId: F.session.id, resetId: r.id, cause: 'context-cap' });
     expect((op!.args as any).taskId).toBeUndefined();
     const ev = await db.agentTeamEvent.findMany({ where: { type: 'task.context-reset-requested', subjectWorkerId: F.kit.id } });
     expect(ev).toHaveLength(1);
@@ -268,6 +269,25 @@ describe('the task-end reset is unchanged', () => {
     await F.finish(t.id);
     const [r] = await resets();
     expect(r).toMatchObject({ cause: 'task-end', taskId: t.id });
+  });
+});
+
+describe('the operation args carry the cause, from a closed set', () => {
+  const op = (args: Record<string, string>) => db.hostOperation.create({
+    data: { id: `o${Math.random()}`.replace('.', ''), appId: F.app.id, hostId: 'orca1', type: 'worker.reset-context', workerId: F.kit.id, args, issuedBy: 'platform' },
+  });
+  const base = { workerId: '', sessionId: 's1', resetId: 'r1' };
+  it('accepts context-cap and task-end, with or without a task, and refuses any other word or a non-string', async () => {
+    const a = { ...base, workerId: F.kit.id };
+    await expect(op({ ...a, cause: 'context-cap' })).resolves.toBeTruthy();
+    await expect(op({ ...a, taskId: 't1', cause: 'task-end' })).resolves.toBeTruthy();
+    await expect(op({ ...a, taskId: 't1' })).resolves.toBeTruthy();
+    await expect(op({ ...a, cause: 'whatever' })).rejects.toThrow(/chk_host_operations_shape/);
+    await expect(op({ ...a, cause: 'context cap' })).rejects.toThrow(/chk_host_operations_shape/);
+  });
+  it('the application validator takes it too', async () => {
+    const { validateHostOperation } = await import('../../../lib/hostOperations/types.js');
+    expect(validateHostOperation('worker.reset-context', { workerId: 'w', sessionId: 's', resetId: 'r', cause: 'context-cap' }).args.cause).toBe('context-cap');
   });
 });
 
