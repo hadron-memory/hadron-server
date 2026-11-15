@@ -4056,6 +4056,8 @@ model Worker {
   /// availability, matcher, stall rule or alarm. No screen text is ever stored; `chk_workers_terminal_shape` (in
   /// prisma/host-operation-invariants.sql) allows exactly the keys above, so a write that bypasses the resolver still
   /// cannot store more. Read behind `maySeeWorkerInternals` (cor:dmo:050:11).
+  /// #4225 S4a — the object also carries `contextTokens` and `contextMeasuredAt` (the worker's context size as its
+  /// host measured it; both null when the host cannot measure, never 0; absent on a row stored before #4225).
   terminal Json? @map("terminal")
   /// #4041 (V82) — the last host repair notice the PLATFORM posted for this worker, set in the post's own append
   /// transaction: `alert` (a no-snapshot / cap-reached alert, once per worker until a report without a repair outcome or with
