@@ -864,6 +864,8 @@ CREATE TRIGGER agent_clone_audits_immutable
 
 -- S12 explicit reporting choice (legacy UNSET retained).
 \ir worker-team-choice-invariants.sql
+-- #4224: the leave-alone marker's shape (same rule as migration 20261115120000_desired_state).
+\ir desired-state-invariants.sql
 -- #423: outgoing-edge lookup/delete must not scan every tenant’s edges.
 CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");
 -- #2047: the served-prompt record — one owner, owner-consistent identity, immutable, deleted only with its owner. After
