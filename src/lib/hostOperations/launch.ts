@@ -217,8 +217,12 @@ export async function launchForAssignment(
         ...(owner?.organizationId ? [{ kind: 'org' as const, id: owner.organizationId }] : []),
         ...(owner?.ownerUserId ? [{ kind: 'user' as const, id: owner.ownerUserId }] : []),
       ], 'shared');
-      const app = await tx.app.findUnique({ where: { id: a.appId }, select: { deletedAt: true, uninstalledAt: true } });
+      const app = await tx.app.findUnique({ where: { id: a.appId }, select: { deletedAt: true, uninstalledAt: true, teamPausedAt: true } });
       if (!app || app.deletedAt || app.uninstalledAt) return null;
+      // #4223 (S2 of #4229): under a team pause (cor:agt:100:04) the platform starts nobody; the task waits, and its
+      // not-started alarm tells its owner. The pause writer takes the App's anchor exclusively, so this is the pause
+      // in force. A manager's own start (cor:agt:070:05) is not this path.
+      if (app.teamPausedAt) return null;
       // #2022 (cor:agt:090:03 edge case): a worker a live stop signal covers is never started for a task. The fence
       // orders this with a signal set after the assignment committed; a manager's own start is not this path.
       await lockStopFence(tx, a.appId, 'shared');

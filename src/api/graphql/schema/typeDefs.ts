@@ -4909,7 +4909,7 @@ export const typeDefs = `#graphql
     usesTasks: Boolean!
     "#2162 (hrn:node:hadronmemory.com:specs:cor:agt:050:27): when a task one of this Agent's workers had started finishes or is cancelled, and it holds no other started task, its host resets the worker's context (a shed: the binding and session stay). Default false. Set by whoever manages the Agent."
     resetContextAfterTask: Boolean!
-    "#4224 (S3 of #4229): how long this Agent's workers run. LONG_LIVED (default): a worker's process should always run. SHORT_LIVED: only while the worker is the assignee of a pending or started task, one waiting on its child tasks included. Read by hostDesiredState at each call; changing it moves no session or process by itself. Set by whoever manages the Agent, like usesTasks."
+    "#4224 (S3 of #4229): how long this Agent's workers run. LONG_LIVED (default): a worker's process should always run. SHORT_LIVED: only while the worker is the assignee of a pending or started task, one waiting on its child tasks included. Read by hostDesiredState at each call; changing it moves no session or process by itself. #4223 (hrn:node:hadronmemory.com:specs:cor:agt:050:10, Proposed there): for a SHORT_LIVED Agent's worker a task's closeSessionWhenDone is not read; the worker is asked to end its session when the last pending or started task assigned to it finishes or is cancelled, never while another is open, and no context reset is requested (resetContextAfterTask is not read). A worker marked leave-alone keeps the ordinary rule. Set by whoever manages the Agent, like usesTasks."
     lifecycle: AgentLifecycle!
     type: AgentType!
     surfaces: [String!]!
@@ -16848,12 +16848,14 @@ export const typeDefs = `#graphql
     """
     Whether finishing or cancelling asks the assignee to end its worker session
     (hrn:node:hadronmemory.com:specs:cor:agt:050:10). Set by whoever assigns. #1709: carried out; see sessionEndRequest.
+    #4223: not read for a worker of a SHORT_LIVED Agent (Agent.lifecycle), whose session ends with its last open task.
     """
     closeSessionWhenDone: Boolean!
     """
     #1709 — the request this task's finish or cancellation made that its worker assignee end its session
     (hrn:node:hadronmemory.com:specs:cor:agt:050:10); null when none was made (closeSessionWhenDone false, a person
-    assignee, or no open session). A worker that finishes its own task reads it here: end the session, with a handoff,
+    assignee, or no open session; #4223: for a worker of a SHORT_LIVED Agent, another pending or started task is still
+    assigned to it). A worker that finishes its own task reads it here: end the session, with a handoff,
     before dueAt, or the platform ends it through a live host.
     """
     sessionEndRequest: AgentTaskSessionEndRequest

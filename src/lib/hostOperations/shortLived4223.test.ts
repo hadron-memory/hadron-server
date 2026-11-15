@@ -137,6 +137,17 @@ describe('an open task keeps the worker up (G7: no parking)', () => {
     expect(await resets()).toBe(0);
   });
 
+  it('two tasks ending at once: exactly one of them asks (the count is read under the per-worker lock)', async () => {
+    for (let round = 0; round < 3; round += 1) {
+      const mine = await f.startedTask();
+      const other = await pendingTask();
+      await Promise.all([f.finish(mine.id), f.cancel(other.id)]);
+      const asked = await db.taskSessionEndRequest.findMany({ where: { taskId: { in: [mine.id, other.id] } } });
+      expect(asked.map((r) => r.sessionId)).toEqual([f.session.id]);
+    }
+    expect(await resets()).toBe(0);
+  });
+
   it('S5/S7: a build task waiting on its child tasks keeps Kit up; a child finishing or being cancelled asks nothing of Kit', async () => {
     const build = await f.startedTask();
     const child = (title: string) =>
