@@ -143,7 +143,7 @@ describe('the invariants file', () => {
 
   it("the database keeps an assigned worker in its App: moving it is refused until its assignments are removed (#4241 P2-2)", async () => {
     await db.hostWorkerAssignment.create({ data: { id: generateId(), appId: app.id, hostId: 'orca1', workerId: kit.id, workdir: 'hadron-server/kit', family: 'claude', createdByUserId: manager.id } });
-    await expect(db.$executeRaw`UPDATE workers SET app_id = ${otherApp.id} WHERE id = ${kit.id}`).rejects.toThrow(/host assignments/);
+    await expect(db.$executeRaw`UPDATE workers SET app_id = ${otherApp.id} WHERE id = ${kit.id}`).rejects.toThrow(/host_worker_assignments_worker_app_fkey/);
     expect((await db.worker.findUniqueOrThrow({ where: { id: kit.id } })).appId).toBe(app.id);
     // A worker with no assignment moves as before.
     expect(await db.$executeRaw`UPDATE workers SET app_id = ${otherApp.id} WHERE id = ${ada.id}`).toBe(1);
@@ -448,7 +448,7 @@ describe('the same-App fact holds under concurrency (#4241 blind delta, Diego P2
       const insert = inserter.query(insertAssignmentSql, [generateId(), app.id, kit.id, manager.id]).then(() => 'inserted', (e: Error) => e.message);
       await untilWaiting(mover, { pid });
       await mover.query('COMMIT');
-      expect(await insert).toMatch(/not in the assignment's App/);
+      expect(await insert).toMatch(/host_worker_assignments_worker_app_fkey/);
       expect(await db.hostWorkerAssignment.count()).toBe(0);
     } finally {
       await mover.query('ROLLBACK').catch(() => undefined);
@@ -467,12 +467,60 @@ describe('the same-App fact holds under concurrency (#4241 blind delta, Diego P2
       const move = mover.query('UPDATE workers SET app_id = $1 WHERE id = $2', [otherApp.id, kit.id]).then(() => 'moved', (e: Error) => e.message);
       await untilWaiting(inserter, { pid });
       await inserter.query('COMMIT');
-      expect(await move).toMatch(/has host assignments/);
+      expect(await move).toMatch(/host_worker_assignments_worker_app_fkey/);
       expect((await db.worker.findUniqueOrThrow({ where: { id: kit.id } })).appId).toBe(app.id);
     } finally {
       await inserter.query('ROLLBACK').catch(() => undefined);
       await inserter.end();
       await mover.end();
+    }
+  });
+  // REPEATABLE READ: the waiting side's snapshot predates the other side's commit, so a check by plain query would
+  // read the old state and pass. The foreign key's own check still refuses it (#4241 blind delta at 2ce78a82, Diego P2).
+  it('REPEATABLE READ: a mover whose snapshot predates the assignment cannot move the assigned worker', async () => {
+    const mover = await pgClient();
+    const inserter = await pgClient();
+    try {
+      await mover.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
+      await mover.query('SELECT count(*) FROM host_worker_assignments'); // the snapshot is taken here, before the insert
+      await inserter.query('BEGIN');
+      await inserter.query(insertAssignmentSql, [generateId(), app.id, kit.id, manager.id]);
+      const { rows: [{ pid }] } = await mover.query('SELECT pg_backend_pid() AS pid');
+      const move = mover.query('UPDATE workers SET app_id = $1 WHERE id = $2', [otherApp.id, kit.id]).then(() => 'moved', (e: Error) => e.message);
+      await untilWaiting(inserter, { pid });
+      await inserter.query('COMMIT');
+      expect(await move).toMatch(/host_worker_assignments_worker_app_fkey|could not serialize/);
+      await mover.query('ROLLBACK');
+      expect((await db.worker.findUniqueOrThrow({ where: { id: kit.id } })).appId).toBe(app.id);
+      expect(await db.hostWorkerAssignment.count()).toBe(1);
+    } finally {
+      await inserter.query('ROLLBACK').catch(() => undefined);
+      await mover.query('ROLLBACK').catch(() => undefined);
+      await inserter.end();
+      await mover.end();
+    }
+  });
+
+  it('REPEATABLE READ: an inserter whose snapshot predates the move cannot assign the moved worker', async () => {
+    const mover = await pgClient();
+    const inserter = await pgClient();
+    try {
+      await inserter.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
+      await inserter.query('SELECT count(*) FROM workers'); // the snapshot is taken here, before the move
+      await mover.query('BEGIN');
+      await mover.query('UPDATE workers SET app_id = $1 WHERE id = $2', [otherApp.id, kit.id]);
+      const { rows: [{ pid }] } = await inserter.query('SELECT pg_backend_pid() AS pid');
+      const insert = inserter.query(insertAssignmentSql, [generateId(), app.id, kit.id, manager.id]).then(() => 'inserted', (e: Error) => e.message);
+      await untilWaiting(mover, { pid });
+      await mover.query('COMMIT');
+      expect(await insert).toMatch(/host_worker_assignments_worker_app_fkey|could not serialize/);
+      await inserter.query('ROLLBACK');
+      expect(await db.hostWorkerAssignment.count()).toBe(0);
+    } finally {
+      await mover.query('ROLLBACK').catch(() => undefined);
+      await inserter.query('ROLLBACK').catch(() => undefined);
+      await mover.end();
+      await inserter.end();
     }
   });
 });
