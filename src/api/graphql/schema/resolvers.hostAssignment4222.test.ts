@@ -131,7 +131,7 @@ describe('the invariants file', () => {
     expect(profile.length).toBeGreaterThan(0);
     const s1a = source.replace(profile, '  (launcher_profile IS NULL OR (host_operation_token_ok(launcher_profile) AND length(launcher_profile) <= 128))');
     expect(migration.endsWith(`\n${s1a}`)).toBe(true);
-    const s1b = readFileSync(new URL('../../../../prisma/migrations/20261115170000_host_launcher_profiles/migration.sql', import.meta.url), 'utf8');
+    const s1b = readFileSync(new URL('../../../../prisma/migrations/20261115180000_host_launcher_profiles/migration.sql', import.meta.url), 'utf8');
     expect(s1b.endsWith(`\n${source}`)).toBe(true);
     expect(readFileSync(new URL('../../../../prisma/post-push.sql', import.meta.url), 'utf8')).toContain('\\ir host-assignment-invariants.sql');
   });
