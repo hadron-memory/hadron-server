@@ -47,7 +47,8 @@ import { RegisterLookup, type RegisterEntry } from '../../../lib/actionRegister/
 import { boundedRead, emitTaskWarnings } from './resolvers.taskWarnings.js';
 import { tickCodeOfSlug } from '../../../lib/tickers/tickCode.js';
 import { loadDeliverySettings, parseDeliverySettingsPatch, validateDeliverySettings, type DeliverySettings } from '../../../lib/tickers/deliverySettings.js';
-import { Prisma } from '../../../generated/prisma/index.js';
+import { Prisma, type PrismaClient } from '../../../generated/prisma/index.js';
+import { launchAfterTeamResume } from '../../../lib/hostOperations/launch.js';
 import { type Context, getAccessibleMemoryIds, pageArgs, pageEnvelope } from './resolvers.helpers.js';
 import {
   type TaskApp,
@@ -786,16 +787,22 @@ export async function writeTeamPause(ctx: Context, appRef: string, paused: boole
   const participated = await resolveParticipatedApp(ctx, appRef);
   const { app } = participated;
   const actor = withInstruction(participated.actor, instruction);
-  return writeInApp(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, fresh) => {
+  // #4223: the pause this call lifted, if it lifted one (reset on a retried attempt).
+  let lifted: Date | null = null;
+  const view = await writeInApp(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, fresh) => {
     if (!(await actorManagesApp(txCtx, fresh, actor, actor.instructed))) {
       throw taskError('FORBIDDEN', 'Only whoever manages this App can pause or resume the team.');
     }
     const cur = await tx.app.findUniqueOrThrow({ where: { id: fresh.id }, select: { teamPausedAt: true } });
+    lifted = !paused ? cur.teamPausedAt : null;
     if (paused && !cur.teamPausedAt) await tx.app.update({ where: { id: fresh.id }, data: { teamPausedAt: new Date() } });
     if (!paused && cur.teamPausedAt) await tx.app.update({ where: { id: fresh.id }, data: { teamPausedAt: null, teamResumedAt: new Date() } }); // the end restarts every worker's check clock
     if (paused !== (cur.teamPausedAt !== null)) await recordInstructedManagerAct(tx, fresh.id, actor, paused ? 'team.pause' : 'team.resume');
     return { teamPausedAt: (await tx.app.findUniqueOrThrow({ where: { id: fresh.id }, select: { teamPausedAt: true } })).teamPausedAt };
   }, { lockMode: 'exclusive' });
+  // #4223: the lift committed. Tasks assigned during the pause were not started (launchForAssignment); start them now.
+  if (lifted) await launchAfterTeamResume(ctx.db as PrismaClient, app.id, lifted);
+  return view;
 }
 
 // ── Settings projections ──────────────────────────────────────────────────

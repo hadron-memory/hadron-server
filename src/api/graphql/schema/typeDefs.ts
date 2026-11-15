@@ -11783,7 +11783,7 @@ export const typeDefs = `#graphql
     setAppTickerSettings(appRef: String!, input: AppTickerSettingsInput!, instruction: ActInstructionInput): AppTickerSettings!
     "App managers only; omitted preserves, null refuses. Standby activation is unavailable until S7 (hrn:node:hadronmemory.com:specs:cor:agt:080:19). #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only."
     setAppDeliverySettings(appRef: String!, input: AppDeliverySettingsInput!, instruction: ActInstructionInput): AppDeliverySettings!
-    "#2138: pause or resume the whole team, as whoever manages the App. Separate from each worker's own pause: a worker cannot lift it, and ending it clears no self-pause. While paused, no worker is nudged and every worker's check status is PENDING (TEAM_PAUSED). #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only."
+    "#2138: pause or resume the whole team, as whoever manages the App. Separate from each worker's own pause: a worker cannot lift it, and ending it clears no self-pause. While paused, no worker is nudged and every worker's check status is PENDING (TEAM_PAUSED). #4223: while paused, the platform issues no worker.start for an assignment; lifting the pause starts the held workers with no open session whose tasks were assigned during it, and no others. #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only."
     setTeamPause(appRef: String!, paused: Boolean!, instruction: ActInstructionInput): TeamPause!
     """
     #4224 (S3 of #4229) — set the App's sweep mode, as whoever manages the App. OFF (the default) restores today's
@@ -16858,8 +16858,8 @@ export const typeDefs = `#graphql
     (hrn:node:hadronmemory.com:specs:cor:agt:050:10); null when none was made (closeSessionWhenDone false, a person
     assignee, or no open session; #4223: for a worker of a SHORT_LIVED Agent, another pending or started task is still
     assigned to it). Reassigning such a worker's last pending or started task away asks that former assignee too, by a
-    wake and never here: this field shows only the latest request made of the task's current worker assignee, and is
-    null for a task assigned to a person or to nobody. A worker that finishes its own task reads it here: end the session, with a handoff,
+    wake and never here: this field shows only the latest request made of the task's current worker assignee, is
+    null for a task assigned to a person or to nobody, and is null for a reader that is another worker. A worker that finishes its own task reads it here: end the session, with a handoff,
     before dueAt, or the platform ends it through a live host.
     """
     sessionEndRequest: AgentTaskSessionEndRequest

@@ -219,8 +219,8 @@ export async function launchForAssignment(
       ], 'shared');
       const app = await tx.app.findUnique({ where: { id: a.appId }, select: { deletedAt: true, uninstalledAt: true, teamPausedAt: true } });
       if (!app || app.deletedAt || app.uninstalledAt) return null;
-      // #4223 (S2 of #4229): under a team pause (cor:agt:100:04) the platform starts nobody; the task waits, and its
-      // not-started alarm tells its owner. The pause writer takes the App's anchor exclusively, so this is the pause
+      // #4223 (S2 of #4229): under a team pause (cor:agt:100:04) the platform starts nobody; the task waits until
+      // the pause is lifted (launchAfterTeamResume), and its not-started alarm tells its owner meanwhile. The pause writer takes the App's anchor exclusively, so this is the pause
       // in force. A manager's own start (cor:agt:070:05) is not this path.
       if (app.teamPausedAt) return null;
       // #2022 (cor:agt:090:03 edge case): a worker a live stop signal covers is never started for a task. The fence
@@ -248,6 +248,40 @@ export async function launchForAssignment(
   } catch (err) {
     console.error('[host-launch] launching an assigned worker failed:', a, err);
     return null;
+  }
+}
+
+/**
+ * #4223 (Peter, team chat #108945): after a team pause is lifted, start the workers whose tasks were assigned DURING
+ * it, which {@link launchForAssignment} left waiting. Only those: a task assigned at or after `pausedAt`, still
+ * pending or started, still that worker's; one per worker (a pending one first, then the earliest assigned). Every
+ * older open task is left exactly as a lift left it before the pause stopped any start, so lifting a pause never
+ * starts a team's whole roster. Each start goes through launchForAssignment, with all its checks (held, no open
+ * session, no start in flight, no stop signal, a live host with the worktree) and as the family the matcher chose
+ * when it made the assignment. Runs after the lift committed; never fails it. Returns the operations issued.
+ */
+export async function launchAfterTeamResume(db: PrismaClient, appId: string, pausedAt: Date, now = new Date()): Promise<string[]> {
+  try {
+    const tasks = await db.$queryRaw<{ id: string; workerId: string; family: string | null }[]>`
+      SELECT DISTINCT ON (t.assignee_worker_id) t.id, t.assignee_worker_id AS "workerId",
+             (SELECT CASE WHEN e.type = 'assignment.matched' THEN e.payload ->> 'family' END
+              FROM agent_team_events e
+              WHERE e.task_id = t.id AND e.type IN ('task.assigned', 'task.reassigned', 'assignment.matched')
+              ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS family
+      FROM agent_tasks t
+      WHERE t.app_id = ${appId} AND t.assignee_worker_id IS NOT NULL AND t.status IN ('pending', 'started')
+        AND t.assigned_at >= ${toNaiveUtc(pausedAt)}::timestamp
+      ORDER BY t.assignee_worker_id, (t.status = 'pending') DESC, t.assigned_at, t.id`;
+    const issued: string[] = [];
+    for (const t of tasks) {
+      const family = normalizeFamily(t.family);
+      const op = await launchForAssignment(db, { appId, taskId: t.id, workerId: t.workerId, ...(family ? { family } : {}) }, now);
+      if (op) issued.push(op);
+    }
+    return issued;
+  } catch (err) {
+    console.error('[host-launch] starting workers after a team pause was lifted failed:', appId, err);
+    return [];
   }
 }
 

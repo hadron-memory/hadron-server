@@ -3724,8 +3724,12 @@ export const agentTaskFieldResolvers = {
       // #4223: a task may carry several requests, one for each time it ended under a worker or was reassigned away
       // from one. Only its CURRENT worker assignee's is shown, the latest: a request made of a former assignee names
       // that worker's session, and whoever reads the task now must never take it for its own (#4253 blind review,
-      // Cedric P2-1). The former assignee is woken for it instead (taskWakes.ts, END_SESSION).
+      // Cedric P2-1). The former assignee is woken for it instead (taskWakes.ts, END_SESSION). And a reader that IS
+      // a worker reads only a request addressed to itself (Peter, team chat #108945): a person, a run or an App key
+      // reads the assignee's, with the worker it asks in `workerId`.
       if (!t.assigneeWorkerId) return null;
+      const reader = currentActor().workerId;
+      if (reader && reader !== t.assigneeWorkerId) return null;
       const r = await ctx.db.taskSessionEndRequest.findFirst({
         where: { taskId: t.id, workerId: t.assigneeWorkerId }, orderBy: [{ requestedAt: 'desc' }, { id: 'desc' }],
       });
