@@ -173,6 +173,8 @@ export async function insertWorkerStart(
       // #3321: a worker on its holder's instruction; the session it starts is still the manager's kind of launch.
       | { issuedBy: 'worker'; issuedByUserId: string | null; issuedByWorkerId: string; issuedByAgentId: string | null };
     hold: StartHold;
+    /** #4231: why the platform issued a start with no task (`DESIRED_RUNNING`); omitted for every other start. */
+    issuedReason?: 'DESIRED_RUNNING';
   },
 ): Promise<string> {
   const id = generateId();
@@ -187,6 +189,7 @@ export async function insertWorkerStart(
       ...a.issuer,
       holdUserId: a.hold.userId,
       holdAt: a.hold.at,
+      ...(a.issuedReason ? { issuedReason: a.issuedReason } : {}),
     },
   });
   return id;

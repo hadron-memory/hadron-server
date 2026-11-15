@@ -890,6 +890,8 @@ CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");
 
 -- #2014: the team-chat post limit's episodes and their worker fence.
 \ir post-limit-invariants.sql
+-- #4231: the platform start's reason and the start-failing episodes (after the #1162 fence file and post-limit).
+\ir desired-start-invariants.sql
 
 -- #3997 (S2 of #3991): App-owned secrets, versions, events, tombstones. One source, shared verbatim with migration
 -- 20261114120000_app_secret_versions. After worker-reference-invariants.sql: it puts the #1162 fence on its three tables.

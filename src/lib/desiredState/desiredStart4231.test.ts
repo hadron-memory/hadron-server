@@ -92,9 +92,13 @@ describe('#4231: a long-lived worker that should run and has no session is start
     expect(await starts()).toHaveLength(1);
   });
 
-  it('a short-lived worker is never started by this loop', async () => {
+  it('a short-lived worker is never started by this loop, even while it holds a task (its task\'s own start covers it)', async () => {
     await tick();
     expect(await starts(sam.id)).toHaveLength(0);
+    // Written straight to the table, so no assignment start runs: only this loop could start Sam now.
+    await db.agentTask.create({ data: { appId: app.id, title: 'T', ownerUserId: admin.id, assigneeWorkerId: sam.id, assignedAt: new Date(), closeSessionWhenDone: false } });
+    await tick();
+    expect(await starts(sam.id), 'the desired-state loop started a short-lived worker').toHaveLength(0);
   });
 
   it('a worker with an open session, however quiet, is not started', async () => {

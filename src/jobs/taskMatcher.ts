@@ -13,7 +13,9 @@
  *      commit and the attempt) after a fixed, tunable time, and make that attempt (cor:agt:060:10);
  *   5. (#3825) purge match outcomes past the 168 h retention;
  *   6. match every App's queued tasks to workers free for work
- *      (cor:agt:060:06), and record the stop holds of what stays queued.
+ *      (cor:agt:060:06), and record the stop holds of what stays queued;
+ *   7. (#4231) start every long-lived worker that should run and has no
+ *      session, in each App that applies its sweep (src/lib/desiredState/desiredStart.ts).
  *
  * The sweep backs up the event-driven runs (`matchAfterChange`: a task created
  * with no assignee, a task finished or cancelled, an availability change) and
@@ -34,14 +36,15 @@ import { sweepLostHosts } from '../lib/agentTasks/hosts.js';
 import { recordLapsedAvailability } from '../lib/agentTasks/availability.js';
 import { sweepExpiredStopSignals } from '../lib/stopSignals/sweep.js';
 import { anchorNow } from '../lib/stopSignals/state.js';
+import { startDesiredWorkers } from '../lib/desiredState/desiredStart.js';
 
-export type TaskMatcherTickResult = { lost: number; lapsed: number; expired: number; recovered: number; matched: number };
+export type TaskMatcherTickResult = { lost: number; lapsed: number; expired: number; recovered: number; matched: number; desiredStarts: number };
 
 /** One pass at `now`. Each step runs even when an earlier one failed. */
 export async function taskMatcherTick(db: PrismaClient, now = new Date()): Promise<TaskMatcherTickResult> {
   // #2022: the monotonic half of `now`'s sample, so every stop decision of the pass is made at its own moment.
   const anchor = anchorNow();
-  const result: TaskMatcherTickResult = { lost: 0, lapsed: 0, expired: 0, recovered: 0, matched: 0 };
+  const result: TaskMatcherTickResult = { lost: 0, lapsed: 0, expired: 0, recovered: 0, matched: 0, desiredStarts: 0 };
   try {
     result.lost = await sweepLostHosts(db, now);
   } catch (err) {
@@ -73,6 +76,12 @@ export async function taskMatcherTick(db: PrismaClient, now = new Date()): Promi
     result.matched = (await matchQueuedTasks(db, now, { anchor })).length;
   } catch (err) {
     console.error('[task-matcher] matching failed:', err);
+  }
+  try {
+    // #4231: after matching, so a task's own start (cor:agt:070:08) goes first.
+    result.desiredStarts = await startDesiredWorkers(db, now, anchor);
+  } catch (err) {
+    console.error('[task-matcher] desired-state starts failed:', err);
   }
   return result;
 }

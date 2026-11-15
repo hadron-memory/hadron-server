@@ -17240,6 +17240,12 @@ export const typeDefs = `#graphql
     "Why it failed, as the host said it."
     failureReason: String
     """
+    #4231 — why the platform issued it when no task did: DESIRED_RUNNING for the start of a long-lived worker that
+    should run and has no session (hrn:node:hadronmemory.com:specs:cor:agt:070:05, Proposed). Null for every other
+    operation.
+    """
+    issuedReason: String
+    """
     #1709 — worker.start only, and only in collectHostOperations' answer: the single-use launch grant to pass to the
     agent the host starts (it redeems it at startSession with its holder's own token). Short-lived; never stored in clear
     and never shown again. #1928: while it is live, a re-collection leaves the start out of the answer; once it expires,
