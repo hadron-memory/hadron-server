@@ -108,6 +108,10 @@ export function validateHostOperation(type: unknown, args: unknown): { type: Hos
         : 'a name token (letters, digits and . _ / @ + -, starting with a letter or digit, no "..", "//" or trailing "/")';
       throw new HostOperationArgsError('BAD_HOST_OPERATION_ARGS', `${type}'s "${k}" must be ${what}.`);
     }
+    // #4225: the reset's cause is a closed set, as in the database CHECK, not any token.
+    if (type === 'worker.reset-context' && k === 'cause' && v !== 'task-end' && v !== 'context-cap') {
+      throw new HostOperationArgsError('BAD_HOST_OPERATION_ARGS', `${type}'s "cause" is task-end or context-cap.`);
+    }
     out[k] = kind === 'family' ? normalizeFamily(v as string)! : v as string;
   }
   for (const k of Object.keys(spec.required)) {
