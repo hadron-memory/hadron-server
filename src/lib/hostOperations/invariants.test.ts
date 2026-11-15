@@ -55,7 +55,16 @@ describe('the invariants file', () => {
     const block = "-- #2771 (proposed cor:agt:070:09) — a worker's stored terminal report";
     const head = source.slice(0, source.indexOf(block));
     expect(source.indexOf(block)).toBeGreaterThan(0);
-    expect(migration.endsWith(`\n${(head + migration.slice(migration.indexOf(block))).replaceAll(", 'checkpoint'", '')}`)).toBe(true);
+    // #4225: the reset operation's args were widened in this file (taskId optional, a closed cause), and carried by
+    // 20261115220000_context_cap; the original migration holds the function as it was.
+    const widened = (t: string) => t
+      .replace("    -- #4225: the task is named only when there is one (a context-cap reset has none), and the cause is a closed set.\n", '')
+      .replace("required := ARRAY['workerId', 'sessionId', 'resetId']; optional := ARRAY['taskId', 'cause'];", "required := ARRAY['workerId', 'sessionId', 'taskId', 'resetId'];")
+      .replace("    ELSIF k = 'cause' THEN\n      IF NOT (v #>> '{}') IN ('task-end', 'context-cap') THEN RETURN false; END IF;\n", '');
+    expect(migration.endsWith(`\n${widened(head + migration.slice(migration.indexOf(block))).replaceAll(", 'checkpoint'", '')}`)).toBe(true);
+    const capFn = source.slice(source.indexOf('CREATE OR REPLACE FUNCTION host_operation_args_ok'), source.indexOf('$$;', source.indexOf('CREATE OR REPLACE FUNCTION host_operation_args_ok')) + 3);
+    const cap = readFileSync(new URL('../../../prisma/migrations/20261115220000_context_cap/migration.sql', import.meta.url), 'utf8');
+    expect(cap).toContain(capFn);
     // #4247: the CHECK was widened again by 20261115170000_worker_terminal_relaunch_repair, which carries the current block.
     const relaunch = readFileSync(new URL('../../../prisma/migrations/20261115170000_worker_terminal_relaunch_repair/migration.sql', import.meta.url), 'utf8');
     expect(relaunch.endsWith(`\n${source.slice(source.indexOf(block))}`)).toBe(true);

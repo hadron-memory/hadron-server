@@ -23,7 +23,8 @@ BEGIN
     WHEN 'worker.end' THEN required := ARRAY['workerId', 'sessionId'];
     WHEN 'worktree.remove' THEN required := ARRAY['workerId', 'worktree'];
     -- #2162 (cor:agt:050:27): reset a worker's context, a shed and never a session end.
-    WHEN 'worker.reset-context' THEN required := ARRAY['workerId', 'sessionId', 'taskId', 'resetId'];
+    -- #4225: the task is named only when there is one (a context-cap reset has none), and the cause is a closed set.
+    WHEN 'worker.reset-context' THEN required := ARRAY['workerId', 'sessionId', 'resetId']; optional := ARRAY['taskId', 'cause'];
     ELSE RETURN false;
   END CASE;
   FOREACH k IN ARRAY required LOOP
@@ -34,6 +35,8 @@ BEGIN
     IF jsonb_typeof(v) IS DISTINCT FROM 'string' THEN RETURN false; END IF;
     IF k IN ('workerId', 'sessionId', 'eventId', 'taskId', 'resetId') THEN
       IF NOT (v #>> '{}') ~ '^[A-Za-z0-9_-]{1,64}$' THEN RETURN false; END IF;
+    ELSIF k = 'cause' THEN
+      IF NOT (v #>> '{}') IN ('task-end', 'context-cap') THEN RETURN false; END IF;
     ELSIF k = 'family' THEN
       IF NOT (v #>> '{}') ~ '^[a-z0-9][a-z0-9._-]{0,63}$' THEN RETURN false; END IF;
     ELSIF NOT host_operation_token_ok(v #>> '{}') THEN

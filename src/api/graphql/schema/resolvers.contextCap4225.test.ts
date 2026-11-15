@@ -328,25 +328,15 @@ describe('the operation args carry the cause, from a closed set', () => {
   it('a reset op with neither taskId nor cause is accepted, so the cap migration\'s function is the one in force', async () => {
     await expect(op({ ...base, workerId: F.kit.id, sessionId: F.session.id, resetId: 'r9' })).resolves.toBeTruthy();
   });
-  it('post-push.sql includes the host-operation file BEFORE the context-reset file, so the later definition of host_operation_args_ok wins', async () => {
-    const { readFileSync } = await import('node:fs');
-    const post = readFileSync(new URL('../../../../prisma/post-push.sql', import.meta.url), 'utf8');
-    const a = post.indexOf('\\ir host-operation-invariants.sql');
-    const b = post.indexOf('\\ir context-reset-invariants.sql');
-    expect(a).toBeGreaterThan(0);
-    expect(b).toBeGreaterThan(a);
-  });
-  it('the two definitions differ in exactly the reset-context line and the cause check: no other drift', async () => {
-    const { readFileSync } = await import('node:fs');
-    const fn = (f: string, from = 0) => {
-      const t = readFileSync(new URL(`../../../../prisma/${f}`, import.meta.url), 'utf8');
-      const i = t.indexOf('CREATE OR REPLACE FUNCTION host_operation_args_ok', from);
-      return t.slice(i, t.indexOf('$$;', i) + 3);
-    };
-    const first = fn('host-operation-invariants.sql')
-      .replace("required := ARRAY['workerId', 'sessionId', 'taskId', 'resetId'];", "required := ARRAY['workerId', 'sessionId', 'resetId']; optional := ARRAY['taskId', 'cause'];")
-      .replace("    ELSIF k = 'family' THEN", "    ELSIF k = 'cause' THEN\n      IF NOT (v #>> '{}') IN ('task-end', 'context-cap') THEN RETURN false; END IF;\n    ELSIF k = 'family' THEN");
-    expect(fn('context-reset-invariants.sql')).toBe(first);
+  it('host_operation_args_ok has exactly ONE definition among the post-push files (Peter #108853), the one that takes the cause', async () => {
+    const { readFileSync, readdirSync } = await import('node:fs');
+    const dir = new URL('../../../../prisma/', import.meta.url);
+    const defs = readdirSync(dir).filter((f) => f.endsWith('.sql'))
+      .filter((f) => readFileSync(new URL(f, dir), 'utf8').includes('CREATE OR REPLACE FUNCTION host_operation_args_ok'));
+    expect(defs).toEqual(['host-operation-invariants.sql']);
+    const src = readFileSync(new URL('host-operation-invariants.sql', dir), 'utf8');
+    expect(src).toContain("optional := ARRAY['taskId', 'cause']");
+    expect(src).toContain("IN ('task-end', 'context-cap')");
   });
   it('the application validator refuses a cause outside the closed set', async () => {
     const { validateHostOperation } = await import('../../../lib/hostOperations/types.js');
