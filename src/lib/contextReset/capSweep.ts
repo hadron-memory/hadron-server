@@ -44,7 +44,7 @@ async function overCap(
 ): Promise<(Candidate & { checkedAt: string })[]> {
   const at = now.toISOString();
   const hourAgo = toNaiveUtc(new Date(now.getTime() - CAP_RESET_INTERVAL_MS));
-  const rows = await tx.$queryRaw<{ workerId: string; appId: string; contextTokens: number; contextMeasuredAt: string; cap: number }[]>`
+  const rows = await tx.$queryRaw<{ workerId: string; appId: string; contextTokens: number; contextMeasuredAt: string; cap: number; checkedAt: string }[]>`
     SELECT w.id AS "workerId", w.app_id AS "appId", (w.terminal->>'contextTokens')::int AS "contextTokens",
            w.terminal->>'contextMeasuredAt' AS "contextMeasuredAt", a.context_cap AS cap, w.terminal->>'checkedAt' AS "checkedAt"
     FROM workers w
