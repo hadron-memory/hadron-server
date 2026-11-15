@@ -31,11 +31,11 @@ Tokens are counted with the `o200k_base` encoding (`gpt-tokenizer`), run locally
 
 | Pilot role | Words before | Words after | Tokens before | Tokens after | Tokens after / before |
 |---|---|---|---|---|---|
-| server-engineer | 5,674 | 1,056 | 7,934 | 1,669 | 21% |
-| qa-engineer | 4,793 | 1,122 | 6,484 | 1,688 | 26% |
-| coordinator | 8,541 | 1,132 | 11,910 | 1,751 | 15% |
+| server-engineer | 5,674 | 1,113 | 7,934 | 1,733 | 22% |
+| qa-engineer | 4,793 | 1,179 | 6,484 | 1,752 | 27% |
+| coordinator | 8,541 | 1,189 | 11,910 | 1,815 | 15% |
 
-The core alone is 802 words (1,248 tokens); the role pages are 254, 320 and 330 words.
+The core alone is 859 words (1,312 tokens); the role pages are 254, 320 and 330 words.
 
 Baseline for every role with a served prompt (the `saas-pm` Agent did not resolve by that name and is not measured):
 
@@ -87,14 +87,16 @@ Acceptance: a fresh run with no handoff states its task and standing directions 
 
 What was run: five separate headless processes (`claude -p`, model `claude-sonnet-5-5`), each started in my bound worktree with the server-engineer prompt rendered for Eli as its only briefing, and one line of input: recover as the briefing says, stop after the read-back. Each process could run only read-only `hadron` commands (`session whoami`, `task mine`, `task get`, `node get`, `chat read`, `worker get`). No handoff was given and the prompt reads none.
 
-What a correct read-back had to contain: the task (AT0.7559, hadron-server#4228 S7, from the task record), the task's own directions, and both standing directions in my state note (`hrn:node:hadronmemory.com:hadron-dev-team-eli:state`: my repo is hadron-server, and questions go to Peter with a default while Holger is away).
+What a correct read-back had to contain: the task (AT0.7559, hadron-server#4228 S7, from the task record), the task's own directions, and both standing directions in my state note (the `state` node in my working memory, `hrn:mem:hadronmemory.com:hadron-dev-team-eli`: my repo is hadron-server, and questions go to Peter with a default while Holger is away).
 
 | Round | Prompt | Result |
 |---|---|---|
 | 1 | First wording | 4 of 5. One run reported the state note as missing and so left out both of its directions. Step 3 named the memory and left the run to build the node address; "missing is normal" then hid the wrong address. |
-| 2 | Step 3 gives the exact command and says where the slug comes from; step 5 names both sources of directions | 5 of 5. Every run named the task, the task's own directions and both state-note directions. |
+| 2 | Step 3 gives the exact command and says where the address comes from (the slug of the worker URL); step 5 names both sources of directions | 5 of 5. Every run named the task, the task's own directions and both state-note directions. |
+| 3 | Steps 1, 3 and 4 as changed by review. First run of this wording: 4 of 5; one run cut the state-note read short with `head -20`, saw only the header and reported no directions. Step 3 now says to read all of it. | 4 of 5, then the fix below |
+| 4 | Step 3 with the read-all line | 5 of 5. Every run named the task, its own directions and both state-note directions (hadron-server only; questions to Peter with a default). |
 
-Each run took 5 or 6 turns and about $0.20.
+Each run took 5 to 12 turns and about $0.20.
 
 Limits of this trial:
 
@@ -102,6 +104,7 @@ Limits of this trial:
 - One worker, one role page, one model. The QA and coordinator pages were measured, not trialled.
 - The chat read mark was not advanced: `mark-read` is a write and was not allowed. Every run reported that instead of claiming it.
 - After round 2, one string in direction 7 changed (the commit trailer now ends with the worker URL, matching the platform's trailer template). It is not part of recovery and the trial was not repeated for it.
+- After round 2, step 3 changed (Wolfgang's C7 note: find the state note through the worker's `memory:` id, `Worker.memoryId`), step 1 (plain `session start`, no `--as`) and step 4 (mark read only after a fully seen read) changed on Coco's review. Rounds 3 and 4 re-ran the trial on that wording.
 
 ## Putting it in service
 
@@ -115,7 +118,7 @@ The path, for one role. It needs a person who manages the role Agent, acting as 
 
 A worker session is refused steps 1 and 2 (`BOOT_PROMPT_WORKER_SESSION_REFUSED`; the one exception is a signed edit grant for the worker's own source), can do step 3 only for an existing compiled node named by a signed `bootprompt.compile.approve` grant (`hadron agent compile --as-worker`), and never approves (step 4). `BOOT_PROMPT_SERVE_ENABLED`, which #2833 mentions, no longer exists: #2712 retired it and `resolvers.deleteSystemPrompt2712.test.ts` pins that.
 
-Rollback is step 4 in reverse: the earlier source and compiled revisions stay in history, and the serve never falls back by itself.
+Rollback: the earlier revisions stay in history, and the serve never falls back by itself, because it picks the newest approved revision, so re-approving an older one does not outrank a newer approved one. Make the old text newest instead: on the compiled node, `hadron node revision list`, then `hadron node revision restore <id>` of the last revision served before step 4. That writes a new newest revision. A manager approves it (`approveNode`), then checks `hadron team worker get <name>`, whose `boot prompt (next bind)` line names the revision a worker will be served. Restore the source node the same way so a later compile does not bring the new text back.
 
 ## Defaults taken (Holger is away; recorded for Peter and the decision queue)
 
