@@ -278,6 +278,38 @@ describe('the next assignment starts a fresh run (cor:agt:070:08)', () => {
     expect(await starts()).toEqual([]);
   });
 
+  it('Cedric N1: the lift starts a task MATCHED during the pause as the family the matcher chose, and one reassigned by hand since as a hand assignment (no family)', async () => {
+    await db.session.update({ where: { id: f.session.id }, data: { endedAt: new Date() } });
+    await db.worker.update({ where: { id: f.ada.id }, data: { retiredAt: new Date() } });
+    const codexOnly = () =>
+      M.registerHost({}, {
+        input: {
+          appRef: f.app.id, label: 'Orca', pollIntervalSeconds: 600, capabilities: ['worker.reset-context'],
+          workers: [{ worker: f.kit.id, family: 'codex', worktrees: ['hadron-server/kit'] }],
+        },
+      }, f.keyCtx());
+    await M.setTeamPause({}, { appRef: f.app.id, paused: true }, ctx(f.manager.id));
+    const matched = await unassigned();
+    await db.agentTask.update({ where: { id: matched.id }, data: { status: 'pending' } });
+    await taskMatcherTick(db, new Date());
+    expect((await db.agentTask.findUniqueOrThrow({ where: { id: matched.id } })).assigneeWorkerId).toBe(f.kit.id);
+    const [m] = await db.agentTeamEvent.findMany({ where: { taskId: matched.id, type: 'assignment.matched' } });
+    expect((m!.payload as { family: string }).family).toBe('claude');
+    expect(await starts()).toEqual([]);
+    // The host now launches Kit only as codex. The match was as claude, so the lift starts nothing as another family.
+    await codexOnly();
+    await M.setTeamPause({}, { appRef: f.app.id, paused: false }, ctx(f.manager.id));
+    expect(await starts()).toEqual([]);
+    // Moved by hand to a person and back to Kit during a second pause: the latest assignment is a hand one, which
+    // names no family (launchAssignee passes none either), so the lift starts Kit as the host launches it.
+    await M.setTeamPause({}, { appRef: f.app.id, paused: true }, ctx(f.manager.id));
+    await M.reassignAgentTask({}, { taskId: matched.id, assignee: { user: f.holder.id } }, ctx(f.manager.id));
+    await M.reassignAgentTask({}, { taskId: matched.id, assignee: { worker: f.kit.id } }, ctx(f.manager.id));
+    expect(await starts()).toEqual([]);
+    await M.setTeamPause({}, { appRef: f.app.id, paused: false }, ctx(f.manager.id));
+    expect((await starts()).map((o) => o.args)).toEqual([{ workerId: f.kit.id, worktree: 'hadron-server/kit', family: 'codex', taskId: matched.id }]);
+  });
+
   it('D3: a process that died mid-task is never restarted by a second worker.start: the session is open, so no assignment or matcher pass issues one', async () => {
     const t = await f.startedTask();
     // Kit's process is gone; the platform sees only an open, quiet session.

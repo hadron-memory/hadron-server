@@ -257,8 +257,13 @@ export async function launchForAssignment(
  * pending or started, still that worker's; one per worker (a pending one first, then the earliest assigned). Every
  * older open task is left exactly as a lift left it before the pause stopped any start, so lifting a pause never
  * starts a team's whole roster. Each start goes through launchForAssignment, with all its checks (held, no open
- * session, no start in flight, no stop signal, a live host with the worktree) and as the family the matcher chose
- * when it made the assignment. Runs after the lift committed; never fails it. Returns the operations issued.
+ * session, no start in flight, no stop signal, a live host with the worktree). The family is the one an assignment's
+ * own launch would have named: the matcher's, when the task's LATEST assignment event is a match; none when it is a
+ * hand assignment or reassignment (`launchAssignee` names none either), even if an earlier match of the same task
+ * named one (#4253 blind delta, Cedric N1). A task assigned after the lift had its own launch at its assignment, so
+ * the window needs no upper bound: a second call for it finds that start in flight or its session open.
+ * launchForAssignment never throws (it logs and returns null), so one task cannot stop the rest. Runs after the lift
+ * committed; never fails it. Returns the operations issued.
  */
 export async function launchAfterTeamResume(db: PrismaClient, appId: string, pausedAt: Date, now = new Date()): Promise<string[]> {
   try {
