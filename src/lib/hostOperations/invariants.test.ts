@@ -70,7 +70,7 @@ describe('the invariants file', () => {
     expect(migration.endsWith(`\n${(pre4230 + migration.slice(migration.indexOf(block))).replaceAll(", 'checkpoint', 'sweep'", '').replaceAll(", 'checkpoint'", '')}`)).toBe(true);
     const fnStart = source.indexOf('-- #4230 (S1b; #4251 blind P2, Peter #108855)');
     const fn = source.slice(fnStart, source.indexOf('$$;\n', source.indexOf('-- cor:agt:070:03 — the closed set of typed operations')) + 4);
-    const s1b = readFileSync(new URL('../../../prisma/migrations/20261115180000_host_launcher_profiles/migration.sql', import.meta.url), 'utf8');
+    const s1b = readFileSync(new URL('../../../prisma/migrations/20261115230000_host_launcher_profiles/migration.sql', import.meta.url), 'utf8');
     expect(s1b).toContain(`\n${fn}`);
     // #4247: the CHECK was widened again by 20261115170000_worker_terminal_relaunch_repair, which carries the current block.
     const relaunch = readFileSync(new URL('../../../prisma/migrations/20261115170000_worker_terminal_relaunch_repair/migration.sql', import.meta.url), 'utf8');

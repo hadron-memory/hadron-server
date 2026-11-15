@@ -134,7 +134,7 @@ describe('the invariants file', () => {
       .replace('  -- The one launcher-model grammar, shared with worker.start\'s argument check (prisma/host-operation-invariants.sql).\n  (model IS NULL OR host_launcher_model_ok(model)) AND\n',
         '  (model IS NULL OR (host_operation_token_ok(model) AND length(model) <= 128)) AND\n');
     expect(migration.endsWith(`\n${s1a}`)).toBe(true);
-    const s1b = readFileSync(new URL('../../../../prisma/migrations/20261115180000_host_launcher_profiles/migration.sql', import.meta.url), 'utf8');
+    const s1b = readFileSync(new URL('../../../../prisma/migrations/20261115230000_host_launcher_profiles/migration.sql', import.meta.url), 'utf8');
     expect(s1b.endsWith(`\n${source}`)).toBe(true);
     expect(readFileSync(new URL('../../../../prisma/post-push.sql', import.meta.url), 'utf8')).toContain('\\ir host-assignment-invariants.sql');
   });
