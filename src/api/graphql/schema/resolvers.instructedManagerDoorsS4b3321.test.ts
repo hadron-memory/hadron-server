@@ -42,6 +42,8 @@ const snapshot = async () => ({
   wake: await db.workerWakeSettings.findMany({ orderBy: { workerId: 'asc' } }),
   events: await db.agentTeamEvent.findMany({ orderBy: { id: 'asc' } }),
   app: await db.app.findUniqueOrThrow({ where: { id: f.app.id } }),
+  // #4224: the leave-alone door writes a worker row.
+  workers: await db.worker.findMany({ where: { appId: f.app.id }, orderBy: { id: 'asc' } }),
 });
 
 type Door = {
@@ -142,6 +144,18 @@ const doors: Record<string, Door> = {
     act: 'team.pause',
     call: (i, c) => M.setTeamPause({}, { appRef: f.app.id, paused: true, instruction: i }, c),
     took: async () => (await db.app.findUniqueOrThrow({ where: { id: f.app.id } })).teamPausedAt !== null,
+  },
+  // #4224 (S3 of #4229; #4242 blind P2-1): the sweep-mode and leave-alone doors.
+  setAppSweepMode: {
+    act: 'app.sweep-mode',
+    call: (i, c) => M.setAppSweepMode({}, { appRef: f.app.id, mode: 'APPLY', instruction: i }, c),
+    took: async () => (await db.app.findUniqueOrThrow({ where: { id: f.app.id } })).sweepMode === 'APPLY',
+  },
+  setWorkerLeaveAlone: {
+    act: 'worker.leave-alone',
+    call: (i, c) => M.setWorkerLeaveAlone({}, { input: { worker: f.idle.id, leaveAlone: true, reason: 'not migrated' }, instruction: i }, c),
+    took: async () => (await db.worker.findUniqueOrThrow({ where: { id: f.idle.id } })).leaveAlone === true,
+    subject: () => ({ workerId: f.idle.id }),
   },
   dueWakes: {
     act: 'wake.read',
@@ -294,6 +308,18 @@ describe('#3321 the rows name the holder whose right was used', () => {
     expect(set.setByUserId).toBe(f.holder.id);
     await asWorker(() => doors.liftTeamStopSignal!.call(live, bound()));
     expect((await db.teamStopSignal.findUniqueOrThrow({ where: { id: f.signal.id } })).endedByUserId).toBe(f.holder.id);
+  });
+});
+
+describe('#4224 the leave-alone marker names the holder whose right was used', () => {
+  it('by is the holder, and the change is one worker.leave-alone-changed event acted by the worker', async () => {
+    await asWorker(() => doors.setWorkerLeaveAlone!.call(live, bound()));
+    expect((await db.worker.findUniqueOrThrow({ where: { id: f.idle.id } })).leaveAloneBy).toBe(f.holder.id);
+    const ev = await db.agentTeamEvent.findMany({ where: { type: 'worker.leave-alone-changed' } });
+    expect(ev.map((e) => [e.subjectWorkerId, e.actorUserId, e.actorWorkerId, e.payload])).toEqual([[f.idle.id, f.holder.id, f.worker.id, { leaveAlone: true }]]);
+    await asWorker(() => doors.setAppSweepMode!.call(live, bound()));
+    const sw = await db.agentTeamEvent.findMany({ where: { type: 'team.sweep-mode-changed' } });
+    expect(sw.map((e) => [e.actorUserId, e.actorWorkerId, e.payload])).toEqual([[f.holder.id, f.worker.id, { from: 'OFF', to: 'APPLY' }]]);
   });
 });
 

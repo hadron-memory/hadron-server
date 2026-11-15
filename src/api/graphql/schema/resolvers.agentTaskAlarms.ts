@@ -153,7 +153,7 @@ type WorkerAvailabilityRow = Prisma.WorkerAvailabilityGetPayload<Record<string, 
 type ModelFamilyAvailabilityRow = Prisma.ModelFamilyAvailabilityGetPayload<Record<string, never>> & { __inEffect?: boolean };
 
 /** Resolve the worker an availability write names, within an App the caller participates in — or WORKER_NOT_FOUND. */
-async function resolveAvailabilityWorker(
+export async function resolveAvailabilityWorker(
   ctx: Context,
   ref: string,
   appRef: string | null | undefined,
