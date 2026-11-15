@@ -264,3 +264,77 @@ describe('the next assignment starts a fresh run (cor:agt:070:08)', () => {
     expect(row).toMatchObject({ desired: 'RUNNING', reason: 'HOLDS_TASK', openSessionId: f.session.id });
   });
 });
+
+describe('the last task reassigned away ends the session too (Peter, team chat #108497)', () => {
+  const F = resolvers as any;
+  const reassign = (taskId: string, to: { id: string }, c = ctx(f.manager.id)) =>
+    M.reassignAgentTask({}, { taskId, assignee: { worker: to.id } }, c);
+  const requestsOf = (taskId: string) => db.taskSessionEndRequest.findMany({ where: { taskId }, orderBy: [{ requestedAt: 'asc' }, { id: 'asc' }] });
+
+  it('reassigning Kit\'s last open task to Ada asks Kit to end its session, wakes it (END_SESSION), and requests no reset', async () => {
+    const t = await f.startedTask();
+    await reassign(t.id, f.ada);
+    const [r, ...more] = await requestsOf(t.id);
+    expect(more).toEqual([]);
+    expect(r).toMatchObject({ workerId: f.kit.id, sessionId: f.session.id, requestedByWorkerId: null, resolution: null });
+    expect(r!.dueAt.getTime() - r!.requestedAt.getTime()).toBe(10 * MIN);
+    const e = await db.agentTeamEvent.findUniqueOrThrow({ where: { id: r!.eventId } });
+    expect(e).toMatchObject({ type: 'task.session-end-requested', taskId: t.id, subjectWorkerId: f.kit.id });
+    expect(e.payload).toMatchObject({ sessionId: f.session.id, lifecycle: 'SHORT_LIVED', cause: 'reassigned' });
+    const due = (await pendingTaskWakes(db, [f.kit.id], new Date())).get(f.kit.id) ?? [];
+    expect(due.filter((w) => w.event === 'END_SESSION').map((w) => w.taskId)).toEqual([t.id]);
+    expect(await resets()).toBe(0);
+    // After the grace the platform ends that session through Kit's host.
+    expect(await sweepSessionEndRequests(db, r!.dueAt)).toBe(1);
+    expect((await db.hostOperation.findMany({ where: { type: 'worker.end' } })).map((o) => o.args)).toEqual([{ workerId: f.kit.id, sessionId: f.session.id }]);
+  });
+
+  it('a pending last task reassigned away asks too', async () => {
+    const t = await pendingTask();
+    await reassign(t.id, f.ada);
+    expect(await requestsOf(t.id)).toMatchObject([{ workerId: f.kit.id, sessionId: f.session.id }]);
+  });
+
+  it('another open task keeps Kit up: reassigning one of two away asks nothing', async () => {
+    const t = await f.startedTask({ close: true });
+    await pendingTask();
+    await reassign(t.id, f.ada);
+    expect(await requestsOf(t.id)).toEqual([]);
+    expect(await db.agentTeamEvent.count({ where: { type: 'task.session-end-requested' } })).toBe(0);
+  });
+
+  it('control: a LONG_LIVED Agent, a leave-alone worker, and a move to a person: Kit is asked only by its lifecycle', async () => {
+    await setLifecycle('LONG_LIVED');
+    const long = await f.startedTask({ close: true });
+    await reassign(long.id, f.ada);
+    expect(await requestsOf(long.id)).toEqual([]);
+    await setLifecycle('SHORT_LIVED');
+    await db.worker.update({ where: { id: f.kit.id }, data: { leaveAlone: true, leaveAloneReason: 'migration', leaveAloneAt: new Date() } });
+    const marked = await f.startedTask({ close: true });
+    await reassign(marked.id, f.ada);
+    expect(await requestsOf(marked.id)).toEqual([]);
+    await db.worker.update({ where: { id: f.kit.id }, data: { leaveAlone: false, leaveAloneReason: null, leaveAloneAt: null } });
+    // To a person: Kit still loses its last task.
+    const toPerson = await f.startedTask();
+    await M.reassignAgentTask({}, { taskId: toPerson.id, assignee: { user: f.holder.id } }, ctx(f.manager.id));
+    expect(await requestsOf(toPerson.id)).toMatchObject([{ workerId: f.kit.id }]);
+  });
+
+  it('a task can ask twice, once per worker: Kit when it is moved away, Ada when she finishes it as her last; the task shows the latest, naming its worker', async () => {
+    const adaSession = await f.bind(f.ada);
+    const t = await f.startedTask();
+    const moved = await reassign(t.id, f.ada);
+    expect(await F.AgentTask.sessionEndRequest(moved, {}, ctx(f.manager.id))).toMatchObject({ workerId: f.kit.id, sessionId: f.session.id });
+    const finished = await f.finish(t.id, f.ada);
+    const all = await requestsOf(t.id);
+    expect(all.map((r) => [r.workerId, r.sessionId])).toEqual([[f.kit.id, f.session.id], [f.ada.id, adaSession.id]]);
+    expect(await F.AgentTask.sessionEndRequest(finished, {}, ctx(f.holder.id))).toMatchObject({ workerId: f.ada.id, sessionId: adaSession.id, resolution: null });
+  });
+
+  it('the move and Kit\'s own finish of another task at once: exactly one asks Kit', async () => {
+    const mine = await f.startedTask();
+    const other = await pendingTask();
+    await Promise.all([f.finish(mine.id), reassign(other.id, f.ada)]);
+    expect(await db.taskSessionEndRequest.count({ where: { workerId: f.kit.id } })).toBe(1);
+  });
+});
