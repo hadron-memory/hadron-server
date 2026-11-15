@@ -143,6 +143,13 @@ describe('assignHostWorker: whoever manages the App states what a host runs', ()
     expect(await db.hostWorkerAssignment.count()).toBe(0);
   });
 
+  it('an App key is refused before its arguments are read: a malformed request answers the same as a good one', async () => {
+    for (const k of [orca1, plainKey]) {
+      expect(await code(assign({ workdir: '../x' }, keyCtx(k)))).toBe('HOST_ASSIGNMENT_NOT_PERMITTED');
+      expect(await code(unassign({ hostId: '-x' }, keyCtx(k)))).toBe('HOST_ASSIGNMENT_NOT_PERMITTED');
+    }
+  });
+
   it('an existing assignment is refused HOST_ASSIGNMENT_EXISTS unless replace is set; replace updates it in place', async () => {
     const first = await assign();
     expect(await code(assign({ workdir: 'elsewhere' }))).toBe('HOST_ASSIGNMENT_EXISTS');
@@ -227,9 +234,10 @@ describe('setHostSetupSource: the App opts in', () => {
     expect(await code(setSource('SERVER', ctx(member.id)))).toBe('HOST_ASSIGNMENT_NOT_PERMITTED');
     expect(await code(setSource('SERVER', keyCtx(orca1)))).toBe('HOST_ASSIGNMENT_NOT_PERMITTED');
     expect((await setup(ctx(manager.id))).source).toBe('HOST');
-    expect((await setSource('SERVER')).source).toBe('SERVER');
+    expect(await setSource('SERVER')).toBe('SERVER');
     expect((await setup(keyCtx(orca1))).source).toBe('SERVER');
-    expect((await setSource('HOST')).source).toBe('HOST');
+    expect(await setSource('HOST')).toBe('HOST');
+    expect(await code(setSource('FILE'))).toBe('BAD_USER_INPUT');
   });
 });
 
@@ -288,8 +296,8 @@ describe('registerHost is checked against the assignments once the App opts in',
 
 describe('a start uses the assignment (cor:agt:070:08 unchanged: with none, nothing is issued)', () => {
   const task = async () => {
-    const t = await M.createAgentTask({}, { input: { appRef: app.id, title: 'Work', closeSessionWhenDone: false } }, ctx(manager.id));
-    await M.assignAgentTask({}, { taskId: t.id, assignee: { worker: kit.id } }, ctx(manager.id));
+    // Assigned at creation: a task created with no assignee is matched at once, Kit being launchable.
+    await M.createAgentTask({}, { input: { appRef: app.id, title: 'Work', assignee: { worker: kit.id }, closeSessionWhenDone: false } }, ctx(manager.id));
     return db.hostOperation.findFirst({ where: { workerId: kit.id, type: 'worker.start' } });
   };
   const hostLists = (worktrees: string[]) => register(orca1, [{ worker: 'Kit', family: 'claude', worktrees }]);

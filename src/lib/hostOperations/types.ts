@@ -38,6 +38,8 @@ export type HostOperationStatus = (typeof HOST_OPERATION_STATUSES)[number];
 
 /** A name argument. Same shape as `host_operation_token_ok` in prisma/agent-task-matching-invariants.sql. */
 export const HOST_TOKEN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/@+-]{0,255}$/;
+/** A host's id within its App (cor:agt:070:04): the one its key's host:operate scope names. */
+export const HOST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 /** An id argument (a worker, session, event or task id). */
 export const HOST_ID_ARG_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 /** At most this many worktrees per worker in one registration. */

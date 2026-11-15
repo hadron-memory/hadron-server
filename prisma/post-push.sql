@@ -785,6 +785,10 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- src/lib/hostOperations/launch.test.ts).
 \ir host-launch-invariants.sql
 
+-- #4222: host worker assignments and the App's setup-source switch. One source, shared verbatim with migration
+-- 20261115120000_host_worker_assignments (pinned by src/api/graphql/schema/resolvers.hostAssignment4222.test.ts).
+\ir host-assignment-invariants.sql
+
 -- #1631: shared passkey registry invariant guards.
 \ir passkey-invariants.sql
 

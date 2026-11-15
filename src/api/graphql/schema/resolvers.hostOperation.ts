@@ -71,6 +71,7 @@ import type { ActInstruction } from '../../../lib/auth/instructedAct.js';
 import { recordInEffect } from '../../../lib/agentTasks/availability.js';
 import { matchAfterChange } from '../../../lib/agentTasks/matcher.js';
 import { fenceHostDecision, insertWorkerStart, LaunchRefusal, liveRegistrationsFor, lockStartableWorker, mintLaunchGrants } from '../../../lib/hostOperations/launch.js';
+import { HOST_WORKER_NOT_ASSIGNED } from '../../../lib/hostOperations/assignments.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { sessionHasHandoff } from '../../../lib/hostOperations/settle.js';
 import { isId } from '../../../lib/entityRef/shape.js';
@@ -210,13 +211,17 @@ export const hostOperationMutations = {
     if (!input) throw badInput('input is required.');
     const { app, host, authorize } = await hostKeyEntry(ctx, input.appRef);
     const workers: { workerId: string; family: string; worktrees: string[] }[] = [];
+    /** The ref each listed worker was given by, so a per-row refusal names it as the host wrote it. */
+    const given = new Map<string, string>();
     for (const w of input.workers ?? []) {
       // A worker of another App, or none at all, is refused by the writer like a retired one: by its ref, no oracle.
       const id = (await resolveTaskWorkerId(ctx, app.id, w.worker)) ?? w.worker;
       workers.push({ workerId: id, family: w.family, worktrees: w.worktrees ?? [] });
+      if (!given.has(id)) given.set(id, w.worker);
     }
+    let notAssigned: string[] = [];
     try {
-      await registerHost(
+      ({ notAssigned } = await registerHost(
         ctx.db,
         {
           appId: app.id, hostId: host.hostId, label: input.label, pollIntervalSeconds: input.pollIntervalSeconds, workers,
@@ -227,7 +232,7 @@ export const hostOperationMutations = {
           authorize,
           afterWrite: (tx, r) => recordHostKeyUse(tx, host, 'register', { count: r.workerCount }),
         },
-      );
+      ));
     } catch (e) {
       if (e instanceof HostRegistrationError) {
         if (e.code === 'APP_NOT_LIVE') throw appNotFound(input.appRef);
@@ -237,7 +242,10 @@ export const hostOperationMutations = {
     }
     // A registration can make a worker launchable, so a queued task may now match (cor:agt:060:06).
     await matchAfterChange(ctx.db, app.id);
-    return loadRegistrationView(ctx, app.id, host.hostId);
+    // #4222: under a server-held setup, the workers this host listed that the platform did not assign to it. One
+    // code for every reason (unassigned, another host's, retired, another App's, naming nothing): no oracle.
+    const refusedWorkers = notAssigned.map((id) => ({ worker: given.get(id) ?? id, code: HOST_WORKER_NOT_ASSIGNED }));
+    return { ...(await loadRegistrationView(ctx, app.id, host.hostId)), refusedWorkers };
   }),
 
   /**
@@ -854,6 +862,8 @@ async function loadRegistrationViews(ctx: Context, appId: string, hostId?: strin
     live: isRegistrationLive(r, now, checkIns),
     capabilities: r.capabilities,
     workers: r.workers.map((w) => ({ workerId: w.workerId, family: w.family, worktrees: w.worktrees })),
+    /** #4222: set only on registerHost's own answer. */
+    refusedWorkers: [] as { worker: string; code: string }[],
   }));
 }
 

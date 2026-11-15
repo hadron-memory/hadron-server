@@ -3526,6 +3526,11 @@ model App {
   /// #1707 — hosts that registered which workers they can launch (cor:agt:070:01).
   hostRegistrations       HostRegistration[]
   hostOperations          HostOperation[]
+  /// #4222 (cor:agt:070:01, change Proposed) — who states which workers a host runs: `host` (the default: the host
+  /// states it at registration, as before) or `server` (the platform's assignments; a registration is checked against
+  /// them). Set by whoever manages the App. Shape: prisma/host-assignment-invariants.sql.
+  hostSetupSource         String                 @default("host") @map("host_setup_source")
+  hostWorkerAssignments   HostWorkerAssignment[]
   /// #2162 — the context resets of this App's workers.
   contextResets           ContextReset[]
   /// #2022 (S6, cor:agt:090) — the App's stop signals, live and ended.
@@ -4092,6 +4097,7 @@ model Worker {
   appGrants            AppGrant[]
   launchableVia        HostRegistrationWorker[]
   hostOperations       HostOperation[]
+  hostAssignments      HostWorkerAssignment[]
   /// #2162 — this worker's context resets (cor:agt:050:27).
   contextResets        ContextReset[]
   /// #2022 — worker- and team-scope stop signals naming this worker as target.
@@ -6629,6 +6635,35 @@ model HostRegistrationWorker {
   @@id([registrationId, workerId])
   @@index([workerId])
   @@map("host_registration_workers")
+}
+
+/// #4222 (S1a of #4229; cor:agt:070:01, change Proposed) — one worker the platform says a host of a team App runs:
+/// the working directory it runs in there (a name token the host resolves: an Orca worktree name, or a plain
+/// directory name for a worker without Git), the model family and, optionally, the model. Never a path, a command
+/// or a credential (cor:agt:070:03). `launcherProfile` is #4230's (S1b); nothing writes it yet. Set and removed by
+/// whoever manages the App. In effect only while the worker is not retired, and used by registration and by starts
+/// only while the App's `hostSetupSource` is `server`. Shape: prisma/host-assignment-invariants.sql.
+model HostWorkerAssignment {
+  id              String   @id
+  appId           String   @map("app_id")
+  hostId          String   @map("host_id")
+  workerId        String   @map("worker_id")
+  workdir         String
+  family          String
+  model           String?
+  launcherProfile String?  @map("launcher_profile")
+  /// The person who made the assignment (a plain id, like a host operation's issuer: it outlives the account).
+  createdByUserId String   @map("created_by_user_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @default(now()) @map("updated_at")
+
+  app    App    @relation(fields: [appId], references: [id], onDelete: Cascade)
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@unique([appId, workerId, hostId], map: "host_worker_assignments_app_worker_host_uniq")
+  @@index([appId, hostId])
+  @@index([workerId])
+  @@map("host_worker_assignments")
 }
 
 /// #1709 (Task Management T6) — one typed operation the platform issued to one
