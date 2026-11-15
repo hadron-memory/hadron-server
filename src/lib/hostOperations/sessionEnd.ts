@@ -32,6 +32,11 @@
  * short-lived worker or ends under a worker (nothing limits it to one per worker: moved away and back, a worker has
  * two). `AgentTask.sessionEndRequest` shows only the task's current assignee's latest; the former assignee has no
  * task to read its request on, so it is always woken for it (taskWakes.ts, END_SESSION).
+ *
+ * #4265 — HANDED BACK (cor:agt:050:10 r20, Proposed; Peter, team chat #109434): a short-lived worker that hands back
+ * its last open task (cor:agt:050:29) is asked the same way, by the hand-back's transaction. The task goes back to
+ * the queue with no assignee, so the request is never read on the task: the worker is woken for it, although it made
+ * the hand-back itself, and a later assignee of the re-queued task never reads it.
  */
 
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
@@ -48,6 +53,9 @@ export const SESSION_END_GRACE_MIN_MINUTES = 1;
 export const SESSION_END_GRACE_MAX_MINUTES = 1440;
 
 export const SESSION_END_REQUESTED_EVENT = 'task.session-end-requested';
+
+/** How a task left its worker assignee WITHOUT ending (#4223 reassigned away, #4265 handed back). */
+export type SessionEndCause = 'reassigned' | 'handed-back';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -73,7 +81,7 @@ export async function workerLifecycle(
 }
 
 /**
- * In the finish's or cancellation's transaction (the task row locked, and the assignee's per-worker assignment lock
+ * In the finish's, cancellation's, reassignment's or hand-back's transaction (the task row locked, and the assignee's per-worker assignment lock
  * held, which every assignment, start, finish and cancel takes: src/lib/agentTasks/workerLock.ts): ask the task's
  * worker assignee to end its open session, if the rule says so. Returns the request, or null when nothing is asked.
  *
@@ -92,10 +100,11 @@ export async function requestSessionEnd(
     actor: EventActor;
     now: Date;
     /**
-     * `reassigned`: the task did not end, it moved to another assignee (the caller holds the former assignee's
-     * per-worker lock too). Only the lifecycle asks then; `closeSessionWhenDone` is about the task's end.
+     * The task did not end. `reassigned`: it moved to another assignee (the caller holds the former assignee's
+     * per-worker lock too). `handed-back` (#4265): its assignee returned it to the queue. Only the lifecycle asks
+     * then; `closeSessionWhenDone` is about the task's end.
      */
-    cause?: 'reassigned';
+    cause?: SessionEndCause;
   },
 ): Promise<{ id: string; sessionId: string; dueAt: Date } | null> {
   const { task, now } = args;
@@ -107,7 +116,7 @@ export async function requestSessionEnd(
       where: { assigneeWorkerId: task.assigneeWorkerId, status: { in: ['pending', 'started'] }, id: { not: task.id } },
     });
     if (otherOpen > 0) return null;
-  } else if (args.cause === 'reassigned' || !task.closeSessionWhenDone) {
+  } else if (args.cause || !task.closeSessionWhenDone) {
     return null;
   }
   const [session] = await tx.$queryRaw<{ id: string }[]>`
@@ -131,7 +140,7 @@ export async function requestSessionEnd(
       actorRunId: args.actor.runId ?? null,
       subjectWorkerId: task.assigneeWorkerId,
       // #4223: `lifecycle` is present exactly when the Agent's lifecycle, not the task's closeSessionWhenDone, asked;
-      // `cause` exactly when the task did not end but was reassigned away.
+      // `cause` exactly when the task did not end but was reassigned away or (#4265) handed back.
       payload: { sessionId: session.id, dueAt: dueAt.toISOString(), graceMinutes: grace, ...(byLifecycle ? { lifecycle: 'SHORT_LIVED' } : {}), ...(args.cause ? { cause: args.cause } : {}) },
       createdAt: now,
     },
