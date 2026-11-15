@@ -18,17 +18,9 @@ ALTER TABLE host_worker_assignments ADD CONSTRAINT chk_host_worker_assignments_s
   (launcher_profile IS NULL OR (host_operation_token_ok(launcher_profile) AND length(launcher_profile) <= 128))
 );
 
--- An assignment names only a worker of its own App, and a worker that has assignments keeps its App. A composite
--- foreign key, not a trigger: PostgreSQL's foreign-key checks see committed rows under every isolation level (a
--- REPEATABLE READ writer whose snapshot predates the other write gets a serialization failure), so neither an insert
--- naming another App's worker nor a move of an assigned worker to another App can commit, whichever commits first
--- (#4241 blind review, Diego P2-2 and its deltas). The resolver checks the App too; this makes it a database fact.
--- The target is unique trivially (id is the primary key); it exists so the key can name it. Moving an assigned worker
--- is refused (ON UPDATE NO ACTION): remove its assignments first. Deleting the worker removes them.
-CREATE UNIQUE INDEX IF NOT EXISTS workers_host_assignment_owner_uniq ON workers (id, app_id);
-ALTER TABLE host_worker_assignments DROP CONSTRAINT IF EXISTS host_worker_assignments_worker_app_fkey;
-ALTER TABLE host_worker_assignments ADD CONSTRAINT host_worker_assignments_worker_app_fkey
-  FOREIGN KEY (worker_id, app_id) REFERENCES workers (id, app_id) ON DELETE CASCADE;
+-- An assignment names only a worker of its own App, and a worker that has assignments keeps its App: the composite
+-- foreign key (worker_id, app_id) -> workers (id, app_id), modelled in schema.prisma (#4241 blind review, Diego P2).
+-- Foreign-key checks see committed rows at every isolation level, so it holds when an insert and a move race.
 
 -- Earlier heads of #4241 enforced this with triggers; a database that applied one of them drops them here.
 DROP TRIGGER IF EXISTS trg_host_worker_assignments_same_app ON host_worker_assignments;

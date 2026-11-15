@@ -4106,6 +4106,8 @@ model Worker {
   /// The URN atom's uniqueness. Unfiltered on retirement, like
   /// `workers_app_name_uniq`: a retired worker's URN must keep resolving.
   @@unique([appId, slug], map: "workers_app_slug_uniq")
+  /// #4222: the target of host_worker_assignments' (worker_id, app_id) key; unique trivially (id is the key).
+  @@unique([id, appId], map: "workers_host_assignment_owner_uniq")
   @@index([appId])
   @@index([agentId])
   /// #1050 — "what does this person hold", across Apps.
@@ -6658,7 +6660,10 @@ model HostWorkerAssignment {
   updatedAt       DateTime @default(now()) @map("updated_at")
 
   app    App    @relation(fields: [appId], references: [id], onDelete: Cascade)
-  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  /// The worker AND its App (#4241 blind review, Diego P2): an assignment names only a worker of its own App, and a worker
+  /// that has assignments keeps its App (onUpdate NoAction). Foreign-key checks see committed rows at every isolation
+  /// level, so this holds when an insert and a move race.
+  worker Worker @relation(fields: [workerId, appId], references: [id, appId], onDelete: Cascade, onUpdate: NoAction, map: "host_worker_assignments_worker_app_fkey")
 
   @@unique([appId, workerId, hostId], map: "host_worker_assignments_app_worker_host_uniq")
   @@index([appId, hostId])
