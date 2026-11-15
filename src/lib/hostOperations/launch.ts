@@ -39,7 +39,7 @@ import { generateId } from '../id.js';
 import { toNaiveUtc } from '../sessionActivity.js';
 import { HOST_LAPSE_CHECK_INS_DEFAULT, lockAppHostLapse } from '../agentTasks/hosts.js';
 import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
-import { ASSIGNMENT_FAMILY, ASSIGNMENT_IN_EFFECT, ASSIGNMENT_JOIN, ASSIGNMENT_WORKTREES, lockHostSetup } from './assignments.js';
+import { ASSIGNMENT_FAMILY, ASSIGNMENT_IN_EFFECT, ASSIGNMENT_JOIN, ASSIGNMENT_PROFILE, ASSIGNMENT_WORKTREES, lockHostSetup } from './assignments.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 
 /** A grant lives this long after it is minted (Proposed: long enough to start an agent, short enough to be useless later). */
@@ -63,6 +63,8 @@ export class LaunchRefusal extends Error {
  * worktrees a start may name there. #4222: under `hostSetupSource: server` these are the ASSIGNMENT's family and its
  * one workdir, and a host the worker is not assigned to, or whose registration does not list that workdir, is absent
  * (so nothing is issued and the task waits, cor:agt:070:08). Under `host` they are the registration's own, unchanged.
+ * #4230: `profile` is the assignment's launcher profile under `server` (each field null when unset), and null under
+ * `host`: a start carries only what the platform holds.
  */
 export async function liveRegistrationsFor(
   db: Db,
@@ -70,9 +72,10 @@ export async function liveRegistrationsFor(
   workerId: string,
   now: Date,
   hostId?: string,
-): Promise<{ hostId: string; family: string; worktrees: string[] }[]> {
-  const rows = await db.$queryRaw<{ hostId: string; family: string; worktrees: string[] }[]>`
-    SELECT r.host_id AS "hostId", ${ASSIGNMENT_FAMILY} AS family, ${ASSIGNMENT_WORKTREES} AS worktrees
+): Promise<{ hostId: string; family: string; worktrees: string[]; profile: LauncherProfile | null }[]> {
+  const rows = await db.$queryRaw<({ hostId: string; family: string; worktrees: string[]; server: boolean } & LauncherProfile)[]>`
+    SELECT r.host_id AS "hostId", ${ASSIGNMENT_FAMILY} AS family, ${ASSIGNMENT_WORKTREES} AS worktrees, ${ASSIGNMENT_PROFILE},
+      a.host_setup_source = 'server' AS server
     FROM host_registrations r
     JOIN host_registration_workers w ON w.registration_id = r.id AND w.worker_id = ${workerId}
     JOIN apps a ON a.id = r.app_id
@@ -83,10 +86,22 @@ export async function liveRegistrationsFor(
       ${hostId ? Prisma.sql`AND r.host_id = ${hostId}` : Prisma.empty}
       AND r.refreshed_at + make_interval(secs => r.poll_interval_seconds * COALESCE(s.host_lapse_check_ins, ${HOST_LAPSE_CHECK_INS_DEFAULT})) >= ${toNaiveUtc(now)}::timestamp
     ORDER BY r.host_id`;
-  return rows.flatMap((r) => {
+  return rows.flatMap(({ model, effort, accountProfile, server, ...r }) => {
     const family = normalizeFamily(r.family);
-    return family ? [{ ...r, family }] : [];
+    return family ? [{ ...r, family, profile: server ? { model, effort, accountProfile } : null }] : [];
   });
+}
+
+/** #4230 (S1b, decision G1): the typed launcher fields a start carries besides its family; never a command. */
+export type LauncherProfile = { model: string | null; effort: string | null; accountProfile: string | null };
+
+/** The profile's set fields, as start arguments: an unset field is absent, never an empty or null value. */
+function profileArgs(p: LauncherProfile | null | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (p?.model) out.model = p.model;
+  if (p?.effort) out.effort = p.effort;
+  if (p?.accountProfile) out.accountProfile = p.accountProfile;
+  return out;
 }
 
 /**
@@ -167,26 +182,41 @@ export async function insertWorkerStart(
   tx: Prisma.TransactionClient,
   a: {
     appId: string; hostId: string; workerId: string; worktree: string; family: string; taskId: string | null;
+    /**
+     * #4230: the assignment's launcher profile (from {@link liveRegistrationsFor}); none under `host`. With a profile the
+     * start also carries the Agent's lifecycle, read here, in the start's own transaction, so the launcher needs no
+     * second read that a lifecycle change could race (Peter #108323).
+     */
+    profile?: LauncherProfile | null;
     issuer:
       | { issuedBy: 'platform' }
       | { issuedBy: 'user'; issuedByUserId: string; issuedByAgentId: string | null }
       // #3321: a worker on its holder's instruction; the session it starts is still the manager's kind of launch.
       | { issuedBy: 'worker'; issuedByUserId: string | null; issuedByWorkerId: string; issuedByAgentId: string | null };
     hold: StartHold;
+    /** #4231: why the platform issued a start with no task (`DESIRED_RUNNING`); omitted for every other start. */
+    issuedReason?: 'DESIRED_RUNNING';
   },
 ): Promise<string> {
   const id = generateId();
+  let lifecycle: Record<string, string> = {};
+  if (a.profile) {
+    const [row] = await tx.$queryRaw<{ lifecycle: string }[]>`
+      SELECT ag.lifecycle::text AS lifecycle FROM workers w JOIN agents ag ON ag.id = w.agent_id WHERE w.id = ${a.workerId}`;
+    if (row) lifecycle = { lifecycle: row.lifecycle };
+  }
   await tx.hostOperation.create({
     data: {
       id,
       appId: a.appId,
       hostId: a.hostId,
       type: 'worker.start',
-      args: { workerId: a.workerId, worktree: a.worktree, family: a.family, ...(a.taskId ? { taskId: a.taskId } : {}) },
+      args: { workerId: a.workerId, worktree: a.worktree, family: a.family, ...profileArgs(a.profile), ...lifecycle, ...(a.taskId ? { taskId: a.taskId } : {}) },
       workerId: a.workerId,
       ...a.issuer,
       holdUserId: a.hold.userId,
       holdAt: a.hold.at,
+      ...(a.issuedReason ? { issuedReason: a.issuedReason } : {}),
     },
   });
   return id;
@@ -238,7 +268,7 @@ export async function launchForAssignment(
       if (!reg) return null;
       return insertWorkerStart(tx, {
         appId: a.appId, hostId: reg.hostId, workerId: a.workerId, worktree: reg.worktrees[0]!, family: reg.family,
-        taskId: a.taskId, issuer: { issuedBy: 'platform' }, hold,
+        profile: reg.profile, taskId: a.taskId, issuer: { issuedBy: 'platform' }, hold,
       });
     });
   } catch (err) {

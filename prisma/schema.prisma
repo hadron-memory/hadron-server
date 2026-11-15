@@ -3533,6 +3533,7 @@ model App {
   cadenceEpisodes         CoordinatorCadenceEpisode[]
   cadenceClocks           CoordinatorCadenceClock[]
   postLimitEpisodes       PostLimitEpisode[]
+  startFailingEpisodes    StartFailingEpisode[]
   hostSweepRuns           HostSweepRun[]
   hostSweepEpisodes       HostSweepEpisode[]
   automationAdoptionEvents AutomationAdoptionEvent[]
@@ -3996,6 +3997,7 @@ model Worker {
   cadenceEpisodes    CoordinatorCadenceEpisode[]
   cadenceClock       CoordinatorCadenceClock?
   postLimitEpisodes PostLimitEpisode[]
+  startFailingEpisodes StartFailingEpisode[]
   appId             String    @map("app_id")
   agentId           String    @map("agent_id")
   /// The worker's name ("Iris") — the identity every surface renders.
@@ -6372,6 +6374,7 @@ model AgentTeamEvent {
   darkEpisode DarkWorkerEpisode?
   cadenceEpisode CoordinatorCadenceEpisode?
   postLimitEpisode PostLimitEpisode?
+  startFailingEpisode StartFailingEpisode?
   hostSweepEpisode HostSweepEpisode?
   /// #3934 (V77): the recorded end of this alarm's escalation, written once by the evaluator pass or the acknowledgement.
   escalationEnd AlarmEscalationEnd?
@@ -6485,6 +6488,26 @@ model CoordinatorCadenceClock {
   worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
 
   @@map("coordinator_cadence_clocks")
+}
+
+/// #4231 (S8 of #4229) — a worker whose platform starts keep failing: three failed platform `worker.start`s in an hour
+/// stop the desired-state start for it, and ONE `alarm.start-failing` goes to its reporting line per episode. An
+/// episode closes an hour after it opened, so a worker still failing then is alarmed again. At most one open per
+/// worker (a partial unique index, prisma/desired-start-invariants.sql).
+model StartFailingEpisode {
+  id       String    @id @default(cuid())
+  appId    String    @map("app_id")
+  workerId String    @map("worker_id")
+  eventId  String    @unique @map("event_id")
+  openedAt DateTime  @map("opened_at")
+  endedAt  DateTime? @map("ended_at")
+
+  app    App            @relation(fields: [appId], references: [id], onDelete: Cascade)
+  worker Worker         @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  event  AgentTeamEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([appId, endedAt])
+  @@map("start_failing_episodes")
 }
 
 /// #2014 — one post-limit episode: the first refusal of a worker's team-chat post by the rate limit in an hour. It only
@@ -6734,8 +6757,8 @@ model HostRegistrationWorker {
 
 /// #4222 (S1a of #4229; cor:agt:070:01, change Proposed) — one worker the platform says a host of a team App runs:
 /// the working directory it runs in there (a name token the host resolves: an Orca worktree name, or a plain
-/// directory name for a worker without Git), the model family and, optionally, the model. Never a path, a command
-/// or a credential (cor:agt:070:03). `launcherProfile` is #4230's (S1b); nothing writes it yet. Set and removed by
+/// directory name for a worker without Git), and its launcher profile (#4230, S1b: family, model, effort, accountProfile,
+/// each a token). Never a path, a command or a credential (cor:agt:070:03). Set and removed by
 /// whoever manages the App. In effect only while the worker is not retired, and used by registration and by starts
 /// only while the App's `hostSetupSource` is `server`. Shape: prisma/host-assignment-invariants.sql.
 model HostWorkerAssignment {
@@ -6746,7 +6769,10 @@ model HostWorkerAssignment {
   workdir         String
   family          String
   model           String?
-  launcherProfile String?  @map("launcher_profile")
+  /// #4230 (S1b, decision G1): the launcher profile is typed fields, never a command. family above, model, and these two.
+  effort          String?
+  /// The host-local account the launcher runs under (a token the host maps to its launcher; never a path or credential).
+  accountProfile  String?  @map("account_profile")
   /// The person who made the assignment (a plain id, like a host operation's issuer: it outlives the account).
   createdByUserId String   @map("created_by_user_id")
   createdAt       DateTime @default(now()) @map("created_at")
@@ -6803,6 +6829,10 @@ model HostOperation {
   /// account merge changes the holder (Holger via Vera #10775).
   holdUserId       String?   @map("hold_user_id")
   holdAt           DateTime? @map("hold_at")
+  /// #4231 (S8 of #4229) — why the platform issued it, when that is not a task: `DESIRED_RUNNING` for the start of a
+  /// long-lived worker that should run and has no session (cor:agt:070:05 S7, Proposed). Null for every other
+  /// operation. Shape: prisma/desired-start-invariants.sql.
+  issuedReason     String?   @map("issued_reason")
 
   app    App    @relation(fields: [appId], references: [id], onDelete: Cascade)
   worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)

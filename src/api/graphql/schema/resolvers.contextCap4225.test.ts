@@ -431,6 +431,17 @@ describe('the operation args carry the cause, from a closed set', () => {
     expect(src).toContain("optional := ARRAY['taskId', 'cause']");
     expect(src).toContain("IN ('task-end', 'context-cap')");
   });
+  it('the surviving host_operation_args_ok carries #4230/#4251\'s start keys AND the cap\'s cause (the carry from main)', async () => {
+    const ok = async (type: string, args: Record<string, string>) =>
+      ((await db.$queryRaw<{ ok: boolean }[]>`SELECT host_operation_args_ok(${type}, ${JSON.stringify(args)}::jsonb, 'w') AS ok`)[0]!).ok;
+    const start = { workerId: 'w', worktree: 'wt', family: 'claude' };
+    expect(await ok('worker.start', { ...start, lifecycle: 'SHORT_LIVED', effort: 'high', accountProfile: 'max1', model: 'claude-sonnet-5-5' })).toBe(true);
+    expect(await ok('worker.start', { ...start, lifecycle: 'FOREVER' })).toBe(false);
+    expect(await ok('worker.start', { ...start, model: 'not a model!' })).toBe(false);
+    expect(await ok('worker.reset-context', { workerId: 'w', sessionId: 's', resetId: 'r', cause: 'context-cap' })).toBe(true);
+    expect(await ok('worker.reset-context', { workerId: 'w', sessionId: 's', resetId: 'r', cause: 'nope' })).toBe(false);
+    expect(await ok('worker.reset-context', { workerId: 'w', sessionId: 's', resetId: 'r', taskId: 't', lifecycle: 'LONG_LIVED' })).toBe(false);
+  });
   it('the application validator refuses a cause outside the closed set', async () => {
     const { validateHostOperation } = await import('../../../lib/hostOperations/types.js');
     expect(() => validateHostOperation('worker.reset-context', { workerId: 'w', sessionId: 's', resetId: 'r', cause: 'whatever' })).toThrow(/cause/);

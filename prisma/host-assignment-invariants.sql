@@ -14,8 +14,11 @@ ALTER TABLE host_worker_assignments ADD CONSTRAINT chk_host_worker_assignments_s
   host_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$' AND
   host_operation_token_ok(workdir) AND
   family ~ '^[a-z0-9][a-z0-9._-]{0,63}$' AND
-  (model IS NULL OR (host_operation_token_ok(model) AND length(model) <= 128)) AND
-  (launcher_profile IS NULL OR (host_operation_token_ok(launcher_profile) AND length(launcher_profile) <= 128))
+  -- The one launcher-model grammar, shared with worker.start's argument check (prisma/host-operation-invariants.sql).
+  (model IS NULL OR host_launcher_model_ok(model)) AND
+  -- #4230 (S1b, decision G1): the rest of the launcher profile, plain tokens with no slash, space or shell character.
+  (effort IS NULL OR effort ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') AND
+  (account_profile IS NULL OR account_profile ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$')
 );
 
 -- An assignment names only a worker of its own App, and a worker that has assignments keeps its App: the composite

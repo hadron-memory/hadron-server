@@ -54,7 +54,7 @@ describe('the invariants file', () => {
     const marker = '\n-- #4225 S4b (epic #4229; cor:agt:050:27 part 12, Proposed)';
     expect(SOURCE.indexOf(marker)).toBeGreaterThan(0);
     expect(migration.endsWith(`\n${SOURCE.slice(0, SOURCE.indexOf(marker))}`)).toBe(true);
-    const cap = readFileSync(new URL('../../../prisma/migrations/20261115220000_context_cap/migration.sql', import.meta.url), 'utf8');
+    const cap = readFileSync(new URL('../../../prisma/migrations/20261115240000_context_cap/migration.sql', import.meta.url), 'utf8');
     expect(cap.endsWith(SOURCE.slice(SOURCE.indexOf(marker)))).toBe(true);
     const post = readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8');
     expect(post).toContain('\\ir context-reset-invariants.sql');
