@@ -31,15 +31,22 @@ export const CAP_RESET_INTERVAL_MS = 60 * 60_000;
 /** A report older than this is not proof the composer is idle now. The host's sweep reports every few minutes. */
 export const CAP_REPORT_FRESH_MS = 20 * 60_000;
 const PAGE = 50;
+/** A pass reads at most this many pages (PAGE workers each): a bound, not a window, so no worker is ever starved behind others. */
+const MAX_PAGES = 200;
+
+type Cursor = { checkedAt: string; id: string };
 
 type Candidate = { workerId: string; appId: string; contextTokens: number; contextMeasuredAt: Date; cap: number };
 
 /** The workers over their Agent's cap and proven idle, as the last stored report says. Filtered by `workerId` for the re-read. */
-async function overCap(tx: Prisma.TransactionClient | PrismaClient, now: Date, workerId: string | null, lock: boolean): Promise<Candidate[]> {
+async function overCap(
+  tx: Prisma.TransactionClient | PrismaClient, now: Date, workerId: string | null, lock: boolean, after: Cursor | null = null,
+): Promise<(Candidate & { checkedAt: string })[]> {
   const at = now.toISOString();
+  const hourAgo = toNaiveUtc(new Date(now.getTime() - CAP_RESET_INTERVAL_MS));
   const rows = await tx.$queryRaw<{ workerId: string; appId: string; contextTokens: number; contextMeasuredAt: string; cap: number }[]>`
     SELECT w.id AS "workerId", w.app_id AS "appId", (w.terminal->>'contextTokens')::int AS "contextTokens",
-           w.terminal->>'contextMeasuredAt' AS "contextMeasuredAt", a.context_cap AS cap
+           w.terminal->>'contextMeasuredAt' AS "contextMeasuredAt", a.context_cap AS cap, w.terminal->>'checkedAt' AS "checkedAt"
     FROM workers w
     ${OPEN_SESSION_PLACEMENT_JOIN}
     JOIN agents a ON a.id = COALESCE(os.agent_id, w.agent_id)
@@ -52,6 +59,10 @@ async function overCap(tx: Prisma.TransactionClient | PrismaClient, now: Date, w
       AND CASE WHEN jsonb_typeof(w.terminal->'contextTokens') = 'number' THEN (w.terminal->>'contextTokens')::int END > a.context_cap
       AND (w.terminal->>'checkedAt')::timestamptz >= ${at}::timestamptz - make_interval(secs => ${CAP_REPORT_FRESH_MS / 1000})
       AND (${workerId}::text IS NULL OR w.id = ${workerId})
+      AND EXISTS (SELECT 1 FROM sessions s WHERE s.worker_id = w.id AND s.ended_at IS NULL AND s.deleted_at IS NULL)
+      AND NOT EXISTS (SELECT 1 FROM context_resets r WHERE r.worker_id = w.id
+                      AND (r.ended_at IS NULL OR (r.cause = 'context-cap' AND r.requested_at > ${hourAgo}::timestamp)))
+      AND (${after?.checkedAt ?? null}::text IS NULL OR (w.terminal->>'checkedAt', w.id) > (${after?.checkedAt ?? null}::text, ${after?.id ?? null}::text))
     ORDER BY w.terminal->>'checkedAt', w.id
     LIMIT ${PAGE}
     ${lock ? Prisma.sql`FOR SHARE OF a` : Prisma.empty}`;
@@ -91,14 +102,22 @@ async function decide(db: PrismaClient, c: Candidate, now: Date): Promise<boolea
 
 /** One pass: returns how many resets it issued. A failure for one worker never stops the others. */
 export async function contextCapTick(db: PrismaClient, now: Date = new Date()): Promise<number> {
-  const due = await overCap(db, now, null, false);
   let issued = 0;
-  for (const c of due) {
-    try {
-      if (await decide(db, c, now)) issued += 1;
-    } catch (err) {
-      console.error('[context-cap] deciding a reset failed:', c.workerId, err);
+  let after: Cursor | null = null;
+  // Page through EVERY candidate by (checkedAt, id): a worker that cannot be reset (no capable host, say) is passed over, and
+  // never keeps the ones behind it out of the pass (Diego, P2 at cc136d0af).
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const due = await overCap(db, now, null, false, after);
+    for (const c of due) {
+      try {
+        if (await decide(db, c, now)) issued += 1;
+      } catch (err) {
+        console.error('[context-cap] deciding a reset failed:', c.workerId, err);
+      }
     }
+    if (due.length < PAGE) break;
+    const last = due[due.length - 1]!;
+    after = { checkedAt: last.checkedAt, id: last.workerId };
   }
   return issued;
 }

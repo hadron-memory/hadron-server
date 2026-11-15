@@ -10,6 +10,7 @@ import { contextCapTick } from '../../../lib/contextReset/capSweep.js';
 import { buildASTSchema, parse } from 'graphql';
 import { typeDefs } from './typeDefs.js';
 import { resolvers } from './resolvers.js';
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { M, MIN, PROC, NEW_PROC, ctx, code, setUpResetFixture, type ResetFixture } from '../../../test/contextResetFixture.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -259,6 +260,45 @@ describe('not over the cap, not proven idle, or not capped: nothing', () => {
     await report({ contextMeasuredAt: new Date(Date.now() + 60_000) });
     expect(await contextCapTick(db)).toBe(0);
     expect(await resets()).toHaveLength(1);
+  });
+});
+
+describe('a full page of workers that cannot be reset does not hide one that can (Diego P2)', () => {
+  it('60 earlier over-cap idle workers with no open session, then Kit: Kit is reset in one pass', async () => {
+    const stale = ago(10).toISOString();
+    for (let i = 0; i < 60; i += 1) {
+      const w = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: F.app.id, agentId: F.agentId, name: `Idle${i}`, slug: `idle-${i}` }, select: { id: true } });
+      const terminal = {
+        host: { id: 'orca1', label: 'Orca' }, status: 'idle', prompt: 'empty', reason: null, lastTurnAt: null,
+        checkedAt: new Date(Date.now() - 10 * MIN - (60 - i) * 1000).toISOString(), reportedAt: stale,
+        contextTokens: CAP + 5, contextMeasuredAt: stale,
+      };
+      await db.$executeRaw`UPDATE workers SET terminal = ${JSON.stringify(terminal)}::jsonb WHERE id = ${w.id}`;
+    }
+    await report();
+    expect(await contextCapTick(db)).toBe(1);
+    expect(await resets()).toHaveLength(1);
+  });
+  it('60 earlier over-cap idle workers WITH sessions but no capable host (so the SQL cannot exclude them), then Kit', async () => {
+    for (let i = 0; i < 60; i += 1) {
+      const w = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: F.app.id, agentId: F.agentId, name: `Open${i}`, slug: `open-${i}` }, select: { id: true } });
+      await F.bind(w);
+      const at = new Date(Date.now() - 10 * MIN - (60 - i) * 1000).toISOString();
+      const terminal = { host: { id: 'orca1', label: 'Orca' }, status: 'idle', prompt: 'empty', reason: null, lastTurnAt: null, checkedAt: at, reportedAt: at, contextTokens: CAP + 5, contextMeasuredAt: at };
+      await db.$executeRaw`UPDATE workers SET terminal = ${JSON.stringify(terminal)}::jsonb WHERE id = ${w.id}`;
+    }
+    await report();
+    expect(await contextCapTick(db)).toBe(1);
+    expect(await resets()).toHaveLength(1);
+    expect(await db.contextReset.count()).toBe(1);
+  });
+  it('and the ones that were skipped stay skipped: a second pass issues nothing', async () => {
+    const w = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: F.app.id, agentId: F.agentId, name: 'Idle', slug: 'idle' }, select: { id: true } });
+    const t = new Date(Date.now() - 5 * MIN).toISOString();
+    await db.$executeRaw`UPDATE workers SET terminal = ${JSON.stringify({ host: { id: 'orca1', label: 'Orca' }, status: 'idle', prompt: 'empty', reason: null, lastTurnAt: null, checkedAt: t, reportedAt: t, contextTokens: CAP + 5, contextMeasuredAt: t })}::jsonb WHERE id = ${w.id}`;
+    await report();
+    expect(await contextCapTick(db)).toBe(1);
+    expect(await contextCapTick(db)).toBe(0);
   });
 });
 
