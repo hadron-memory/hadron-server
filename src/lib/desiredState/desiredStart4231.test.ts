@@ -115,6 +115,35 @@ describe('#4231: a long-lived worker that should run and has no session is start
   });
 });
 
+describe('#4231 under hostSetupSource SERVER: only through a live host the worker is assigned to (S1a)', () => {
+  const assign = (worker: string, hostId: string, workdir: string) =>
+    M.assignHostWorker({}, { input: { appRef: app.id, hostId, worker, workdir, family: 'claude' } }, ctx(admin.id));
+  const server = () => M.setHostSetupSource({}, { appRef: app.id, source: 'SERVER' }, ctx(admin.id));
+
+  it('assigned to orca1, whose registration lists the workdir: started there, in the assigned workdir', async () => {
+    await assign('Kit', 'orca1', 'hadron-server/kit');
+    await server();
+    await tick();
+    const ops = await starts();
+    expect(ops).toHaveLength(1);
+    expect(ops[0]).toMatchObject({ hostId: 'orca1', issuedReason: 'DESIRED_RUNNING' });
+    expect(ops[0]!.args).toMatchObject({ worktree: 'hadron-server/kit' });
+  });
+
+  it('not assigned anywhere: not started, though orca1 registers it', async () => {
+    await server();
+    await tick();
+    expect(await starts()).toHaveLength(0);
+  });
+
+  it('assigned to a host with no live registration: not started', async () => {
+    await assign('Kit', 'orca3', 'hadron-server/kit');
+    await server();
+    await tick();
+    expect(await starts()).toHaveLength(0);
+  });
+});
+
 describe('#4231: nothing is started unless the App applies its sweep, or when an override holds', () => {
   it('sweep OFF or OBSERVE starts nothing', async () => {
     await sweep('OBSERVE');
