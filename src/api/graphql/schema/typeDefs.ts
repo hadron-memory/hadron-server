@@ -9115,9 +9115,11 @@ export const typeDefs = `#graphql
     hostRegistrations(appRef: String!): [HostRegistration!]!
     """
     #4224 (S3 of #4229) — for each worker one host runs: whether its agent process should be running, and why. A
-    host's sweep reads this once per pass and compares it with what it sees. A host's workers are the ones its
-    registration lists (hrn:node:hadronmemory.com:specs:cor:agt:070:01), live or lapsed, with the family and worktrees it
-    registered; reading the platform's own assignments (hostSetup, #4222) when hostSetupSource is server is a follow-up. Rows are ordered by worker name.
+    host's sweep reads this once per pass and compares it with what it sees. While the App's hostSetupSource is HOST
+    (the default), a host's workers are the ones its registration lists (hrn:node:hadronmemory.com:specs:cor:agt:070:01),
+    live or lapsed, with the family and worktrees it registered. While it is SERVER (#4248), they are the platform's
+    assignments to that host (hostSetup, #4222), a retired worker's excluded, each with the assignment's family and its
+    one workdir; a host with an assignment but no registration is found. Rows are ordered by worker name.
     Readers: whoever reads the App's tasks and events (hrn:node:hadronmemory.com:specs:cor:agt:050:21), the App's own key included. A key
     that holds or ever held host:operate reads its own live host only (hrn:node:hadronmemory.com:specs:cor:agt:070:04); any other hostId
     answers HOST_NOT_FOUND, exactly as a host the App does not have. A host key's read is a recorded use
