@@ -64,7 +64,9 @@ export type TerminalRepair = (typeof TERMINAL_REPAIRS)[number];
  * come up). Closed sets, never text: each outcome takes only its own reasons.
  */
 export const RELAUNCH_REFUSED_REASONS = ['IDENTITY_MISMATCH', 'DUPLICATE_AGENT', 'PAUSED', 'HALTED', 'LEAVE_ALONE', 'NO_LAUNCHER_PROFILE'] as const;
-export const RELAUNCH_FAILED_REASONS = ['LAUNCH_EXIT_NONZERO', 'TERMINAL_CREATE_REFUSED', 'TIMEOUT'] as const;
+// #4259: SETUP_FAILED — the host could not prepare the launch (a setup or disk error), so the launcher never ran;
+// VERIFY_FAILED — the launcher ran, but the host could not prove the agent came up.
+export const RELAUNCH_FAILED_REASONS = ['LAUNCH_EXIT_NONZERO', 'TERMINAL_CREATE_REFUSED', 'TIMEOUT', 'SETUP_FAILED', 'VERIFY_FAILED'] as const;
 export const TERMINAL_REPAIR_REASONS = [...RELAUNCH_REFUSED_REASONS, ...RELAUNCH_FAILED_REASONS] as const;
 export type TerminalRepairReason = (typeof TERMINAL_REPAIR_REASONS)[number];
 
