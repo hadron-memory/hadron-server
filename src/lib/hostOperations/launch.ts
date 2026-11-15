@@ -63,7 +63,7 @@ export class LaunchRefusal extends Error {
  * worktrees a start may name there. #4222: under `hostSetupSource: server` these are the ASSIGNMENT's family and its
  * one workdir, and a host the worker is not assigned to, or whose registration does not list that workdir, is absent
  * (so nothing is issued and the task waits, cor:agt:070:08). Under `host` they are the registration's own, unchanged.
- * #4230: `profile` is the assignment's launcher profile under `server` (each field null when unset), and all null under
+ * #4230: `profile` is the assignment's launcher profile under `server` (each field null when unset), and null under
  * `host`: a start carries only what the platform holds.
  */
 export async function liveRegistrationsFor(
@@ -72,9 +72,10 @@ export async function liveRegistrationsFor(
   workerId: string,
   now: Date,
   hostId?: string,
-): Promise<{ hostId: string; family: string; worktrees: string[]; profile: LauncherProfile }[]> {
-  const rows = await db.$queryRaw<({ hostId: string; family: string; worktrees: string[] } & LauncherProfile)[]>`
-    SELECT r.host_id AS "hostId", ${ASSIGNMENT_FAMILY} AS family, ${ASSIGNMENT_WORKTREES} AS worktrees, ${ASSIGNMENT_PROFILE}
+): Promise<{ hostId: string; family: string; worktrees: string[]; profile: LauncherProfile | null }[]> {
+  const rows = await db.$queryRaw<({ hostId: string; family: string; worktrees: string[]; server: boolean } & LauncherProfile)[]>`
+    SELECT r.host_id AS "hostId", ${ASSIGNMENT_FAMILY} AS family, ${ASSIGNMENT_WORKTREES} AS worktrees, ${ASSIGNMENT_PROFILE},
+      a.host_setup_source = 'server' AS server
     FROM host_registrations r
     JOIN host_registration_workers w ON w.registration_id = r.id AND w.worker_id = ${workerId}
     JOIN apps a ON a.id = r.app_id
@@ -85,9 +86,9 @@ export async function liveRegistrationsFor(
       ${hostId ? Prisma.sql`AND r.host_id = ${hostId}` : Prisma.empty}
       AND r.refreshed_at + make_interval(secs => r.poll_interval_seconds * COALESCE(s.host_lapse_check_ins, ${HOST_LAPSE_CHECK_INS_DEFAULT})) >= ${toNaiveUtc(now)}::timestamp
     ORDER BY r.host_id`;
-  return rows.flatMap(({ model, effort, accountProfile, ...r }) => {
+  return rows.flatMap(({ model, effort, accountProfile, server, ...r }) => {
     const family = normalizeFamily(r.family);
-    return family ? [{ ...r, family, profile: { model, effort, accountProfile } }] : [];
+    return family ? [{ ...r, family, profile: server ? { model, effort, accountProfile } : null }] : [];
   });
 }
 
@@ -95,7 +96,7 @@ export async function liveRegistrationsFor(
 export type LauncherProfile = { model: string | null; effort: string | null; accountProfile: string | null };
 
 /** The profile's set fields, as start arguments: an unset field is absent, never an empty or null value. */
-function profileArgs(p: LauncherProfile | undefined): Record<string, string> {
+function profileArgs(p: LauncherProfile | null | undefined): Record<string, string> {
   const out: Record<string, string> = {};
   if (p?.model) out.model = p.model;
   if (p?.effort) out.effort = p.effort;
@@ -181,8 +182,12 @@ export async function insertWorkerStart(
   tx: Prisma.TransactionClient,
   a: {
     appId: string; hostId: string; workerId: string; worktree: string; family: string; taskId: string | null;
-    /** #4230: the assignment's launcher profile (from {@link liveRegistrationsFor}); none under `host`. */
-    profile?: LauncherProfile;
+    /**
+     * #4230: the assignment's launcher profile (from {@link liveRegistrationsFor}); none under `host`. With a profile the
+     * start also carries the Agent's lifecycle, read here, in the start's own transaction, so the launcher needs no
+     * second read that a lifecycle change could race (Peter #108323).
+     */
+    profile?: LauncherProfile | null;
     issuer:
       | { issuedBy: 'platform' }
       | { issuedBy: 'user'; issuedByUserId: string; issuedByAgentId: string | null }
@@ -192,13 +197,19 @@ export async function insertWorkerStart(
   },
 ): Promise<string> {
   const id = generateId();
+  let lifecycle: Record<string, string> = {};
+  if (a.profile) {
+    const [row] = await tx.$queryRaw<{ lifecycle: string }[]>`
+      SELECT ag.lifecycle::text AS lifecycle FROM workers w JOIN agents ag ON ag.id = w.agent_id WHERE w.id = ${a.workerId}`;
+    if (row) lifecycle = { lifecycle: row.lifecycle };
+  }
   await tx.hostOperation.create({
     data: {
       id,
       appId: a.appId,
       hostId: a.hostId,
       type: 'worker.start',
-      args: { workerId: a.workerId, worktree: a.worktree, family: a.family, ...profileArgs(a.profile), ...(a.taskId ? { taskId: a.taskId } : {}) },
+      args: { workerId: a.workerId, worktree: a.worktree, family: a.family, ...profileArgs(a.profile), ...lifecycle, ...(a.taskId ? { taskId: a.taskId } : {}) },
       workerId: a.workerId,
       ...a.issuer,
       holdUserId: a.hold.userId,

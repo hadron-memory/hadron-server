@@ -6,7 +6,7 @@ ALTER TABLE "host_worker_assignments" DROP COLUMN "launcher_profile",
 ADD COLUMN     "account_profile" TEXT,
 ADD COLUMN     "effort" TEXT;
 
--- worker.start may carry the profile: host_operation_args_ok as prisma/host-operation-invariants.sql defines it,
+-- worker.start may carry the profile and the Agent's lifecycle: host_operation_args_ok as prisma/host-operation-invariants.sql defines it,
 -- verbatim. It only widens the start's optional keys; every stored operation still passes.
 -- cor:agt:070:03 — the closed set of typed operations, each with exactly its own
 -- arguments (#1709's T6 table, Proposed): no other key, and every name argument
@@ -23,8 +23,9 @@ BEGIN
   IF jsonb_typeof(args) IS DISTINCT FROM 'object' THEN RETURN false; END IF;
   CASE op_type
     WHEN 'worktree.create' THEN required := ARRAY['workerId', 'repo', 'baseBranch', 'branchName', 'label'];
-    -- #4230 (S1b, decision G1): a start may carry its assignment's typed launcher profile, never a command.
-    WHEN 'worker.start' THEN required := ARRAY['workerId', 'worktree', 'family']; optional := ARRAY['taskId', 'model', 'effort', 'accountProfile'];
+    -- #4230 (S1b, decision G1): a start may carry its assignment's typed launcher profile and its Agent's lifecycle,
+    -- never a command.
+    WHEN 'worker.start' THEN required := ARRAY['workerId', 'worktree', 'family']; optional := ARRAY['taskId', 'model', 'effort', 'accountProfile', 'lifecycle'];
     WHEN 'worker.deliver' THEN required := ARRAY['workerId', 'sessionId', 'eventId'];
     WHEN 'worker.end' THEN required := ARRAY['workerId', 'sessionId'];
     WHEN 'worktree.remove' THEN required := ARRAY['workerId', 'worktree'];
@@ -44,6 +45,8 @@ BEGIN
       IF NOT (v #>> '{}') ~ '^[a-z0-9][a-z0-9._-]{0,63}$' THEN RETURN false; END IF;
     ELSIF op_type = 'worker.start' AND k IN ('model', 'effort', 'accountProfile') THEN
       IF NOT (v #>> '{}') ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' THEN RETURN false; END IF;
+    ELSIF op_type = 'worker.start' AND k = 'lifecycle' THEN
+      IF (v #>> '{}') NOT IN ('LONG_LIVED', 'SHORT_LIVED') THEN RETURN false; END IF;
     ELSIF NOT host_operation_token_ok(v #>> '{}') THEN
       RETURN false;
     END IF;
