@@ -8,8 +8,9 @@
  * App: cor:agt:050:18 to :20), never a recipient resolved by role name. The mentions are filled here from the chain; nothing
  * in the report or the body adds a recipient.
  *
- * Dedupe is `workers.repair_notice_key`, claimed in the post's own append transaction: `alert` (one alert per worker, re-armed
- * by a report without a repair outcome or with a relaunch) or `relaunched:<checkedAt>` (a replayed relaunch posts nothing).
+ * Dedupe is `workers.repair_notice_key`, claimed in the post's own append transaction: a space-separated set of alert tokens
+ * (`alert` for NO_SNAPSHOT and CAP_REACHED, `<outcome>:<reason>` for #4247's two), each posted once per episode and the set
+ * cleared by a report without a repair outcome or with a relaunch; or `relaunched:<checkedAt>` (a replayed relaunch posts nothing).
  */
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { mentionTokenOf } from '../mentionToken.js';
@@ -114,8 +115,17 @@ export async function postRepairNotices(db: PrismaClient, appId: string, notices
         appId,
         noticeBody(n),
         // The claim holds only while this notice's report is still the worker's latest (a newer report may have re-armed the marker,
-        // so a delayed older post cannot re-claim it; Baloo P2). A relaunch key never replaces a NEWER relaunch key (ISO times sort as text): a delayed batch cannot regress the marker.
-        async (tx) => (await tx.$executeRaw`UPDATE workers SET repair_notice_key = ${key} WHERE id = ${n.workerId} AND terminal->>'checkedAt' = ${n.checkedAt.toISOString()} AND repair_notice_key IS DISTINCT FROM ${key} AND NOT COALESCE(${key} LIKE 'relaunched:%' AND repair_notice_key LIKE 'relaunched:%' AND repair_notice_key > ${key}, false)`) > 0,
+        // so a delayed older post cannot re-claim it; Baloo P2).
+        async (tx) => {
+          const at = n.checkedAt.toISOString();
+          if (key.startsWith('relaunched:')) {
+            // A relaunch key replaces the marker and never replaces a NEWER relaunch key (ISO times sort as text): a delayed batch cannot regress it.
+            return (await tx.$executeRaw`UPDATE workers SET repair_notice_key = ${key} WHERE id = ${n.workerId} AND terminal->>'checkedAt' = ${at} AND repair_notice_key IS DISTINCT FROM ${key} AND NOT COALESCE(repair_notice_key LIKE 'relaunched:%' AND repair_notice_key > ${key}, false)`) > 0;
+          }
+          // #4247: an alert token joins the set the episode has already posted (space-separated), so A, B, A posts A once. A
+          // relaunch marker is replaced by it (an alert follows a relaunch as a new episode).
+          return (await tx.$executeRaw`UPDATE workers SET repair_notice_key = CASE WHEN repair_notice_key IS NULL OR repair_notice_key LIKE 'relaunched:%' THEN ${key} ELSE repair_notice_key || ' ' || ${key} END WHERE id = ${n.workerId} AND terminal->>'checkedAt' = ${at} AND (repair_notice_key IS NULL OR repair_notice_key LIKE 'relaunched:%' OR position(' ' || ${key} || ' ' IN ' ' || repair_notice_key || ' ') = 0)`) > 0;
+        },
         mentions,
       );
     } catch (err) {

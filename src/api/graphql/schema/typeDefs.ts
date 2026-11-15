@@ -17366,6 +17366,15 @@ export const typeDefs = `#graphql
     contextTokens: Int
     "#4225 — when the host measured contextTokens; judge its age from this. Null exactly when contextTokens is."
     contextMeasuredAt: DateTime
+    """
+    #4247 — what the host did about this dark worker, stored for RELAUNCH_REFUSED and RELAUNCH_FAILED only. Null for the
+    other outcomes (they are not stored) and when the report carried none; the next report replaces it.
+    """
+    repair: WorkerTerminalRepair
+    "#4247 — why the relaunch was refused or failed. Null exactly when repair is."
+    repairReason: WorkerTerminalRepairReason
+    "#4247 — the relaunch's attempt number, at least 1. Null exactly when repair is."
+    repairAttempt: Int
   }
 
   "#2771 — one worker's terminal report. There is no free-text field."
@@ -17387,7 +17396,7 @@ export const typeDefs = `#graphql
     repair: WorkerTerminalRepair
     """
     #4247 — why the relaunch was refused or failed: required with RELAUNCH_REFUSED and RELAUNCH_FAILED (from that
-    outcome's own set), refused (REPAIR_REASON_INVALID) with any other outcome or none. Not stored: the notice carries it.
+    outcome's own set), refused (REPAIR_REASON_INVALID) with any other outcome or none. Stored on the report with the outcome.
     """
     repairReason: WorkerTerminalRepairReason
     "The relaunch's attempt number, at least 1: required with RELAUNCHED, RELAUNCH_REFUSED and RELAUNCH_FAILED, refused (REPAIR_ATTEMPT_INVALID) otherwise."

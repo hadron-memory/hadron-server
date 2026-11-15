@@ -44,7 +44,7 @@ export type TerminalReason = (typeof TERMINAL_REASONS)[number];
  * The keys of the stored object, exactly. The DB CHECK on `workers.terminal` lists the same keys; it lets the two
  * context keys be absent, because a row stored before #4225 has neither.
  */
-export const TERMINAL_KEYS = ['host', 'status', 'prompt', 'reason', 'lastTurnAt', 'checkedAt', 'reportedAt', 'contextTokens', 'contextMeasuredAt'] as const;
+export const TERMINAL_KEYS = ['host', 'status', 'prompt', 'reason', 'lastTurnAt', 'checkedAt', 'reportedAt', 'contextTokens', 'contextMeasuredAt', 'repair', 'repairReason', 'repairAttempt'] as const;
 
 /** #4225: the largest context size a report carries (GraphQL's Int range). The smallest is 1: unmeasured is null. */
 export const CONTEXT_TOKENS_MAX = 2_147_483_647;
@@ -80,6 +80,13 @@ export type WorkerTerminal = {
   /** #4225: null when the host could not measure this worker. Absent on a row stored before #4225. */
   contextTokens?: number | null;
   contextMeasuredAt?: string | null;
+  /**
+   * #4247: the host's repair outcome, stored for RELAUNCH_REFUSED and RELAUNCH_FAILED only, with the reason and attempt. The
+   * keys are absent otherwise: RELAUNCHED, NO_SNAPSHOT and CAP_REACHED are not stored (#4041).
+   */
+  repair?: 'RELAUNCH_REFUSED' | 'RELAUNCH_FAILED';
+  repairReason?: TerminalRepairReason;
+  repairAttempt?: number;
 };
 
 /** One report as a host sends it. */
@@ -212,6 +219,9 @@ export function buildWorkerTerminal(r: ValidTerminalReport, host: { id: string; 
     reportedAt: reportedAt.toISOString(),
     contextTokens: r.contextTokens,
     contextMeasuredAt: r.contextMeasuredAt ? r.contextMeasuredAt.toISOString() : null,
+    ...((r.repair === 'RELAUNCH_REFUSED' || r.repair === 'RELAUNCH_FAILED') && r.repairReason !== null && r.attempt !== null
+      ? { repair: r.repair, repairReason: r.repairReason, repairAttempt: r.attempt }
+      : {}),
   };
 }
 
@@ -231,5 +241,8 @@ export function workerTerminalView(t: StoredWorkerTerminal | null | undefined) {
     reportedAt: new Date(t.reportedAt),
     contextTokens: t.contextTokens ?? null,
     contextMeasuredAt: t.contextMeasuredAt ? new Date(t.contextMeasuredAt) : null,
+    repair: t.repair ?? null,
+    repairReason: t.repairReason ?? null,
+    repairAttempt: t.repairAttempt ?? null,
   };
 }
