@@ -155,6 +155,9 @@ export async function startDesiredWorker(
       if (!reg) return 'no-host';
       await insertWorkerStart(tx, {
         appId: a.appId, hostId: reg.hostId, workerId: a.workerId, worktree: reg.worktrees[0]!, family: reg.family,
+        // #4267: the assignment's launcher profile (null under `host`), as the other start paths pass it; with it the
+        // start also carries the Agent's lifecycle.
+        profile: reg.profile,
         taskId: null, issuer: { issuedBy: 'platform' }, hold, issuedReason: DESIRED_RUNNING,
       });
       return 'issued';
