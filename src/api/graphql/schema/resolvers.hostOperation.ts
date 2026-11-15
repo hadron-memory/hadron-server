@@ -765,7 +765,8 @@ async function issueWorkerStart(
         throw taskError('HOST_OPERATION_NOT_PERMITTED', 'Only whoever manages the App starts a worker through its host.');
       }
       const now = new Date();
-      const hold = await lockStartableWorker(tx, freshApp.id, workerId, now);
+      // #4237: a manager's own start keeps the live test (cor:agt:070:05): restarting a quiet worker is deliberate.
+      const hold = await lockStartableWorker(tx, freshApp.id, workerId, now, 'live');
       // Diego P2-2: the registration, its worktree and the lapse count hold still through the insert.
       await fenceHostDecision(tx, freshApp.id);
       const [reg] = await liveRegistrationsFor(tx, freshApp.id, workerId, now, hostId);
