@@ -821,7 +821,11 @@ function issuer(ctx: Context, actor: TaskActor) {
     : { issuedBy: 'user', issuedByUserId: actor.userId, issuedByWorkerId: null, issuedByAgentId: null };
 }
 
-/** A success's typed result: the created worktree for `worktree.create`; nothing for the others in this slice. */
+/**
+ * A success's typed result, by operation type: `{worktree}` for `worktree.create` (built here), `{sessionId}` for a
+ * succeeded `worker.start` and `{handoff}` (boolean) for `worker.end` (both set by `reportHostOperation`, which
+ * overwrites this function's null); null for the others. #4245 keeps the `HostOperation.result` SDL text in step.
+ */
 function successResult(type: HostOperationType, worktree: string | null | undefined): Prisma.InputJsonObject | null {
   if (type === 'worktree.create') {
     if (!isHostToken(worktree)) throw badInput('A created worktree reports its name: a host-operation token.');
