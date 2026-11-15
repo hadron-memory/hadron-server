@@ -15,6 +15,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { resolvers, type Context } from './resolvers.js';
 import { buildASTSchema, parse } from 'graphql';
 import { typeDefs } from './typeDefs.js';
+import { RELAUNCH_FAILED_REASONS, RELAUNCH_REFUSED_REASONS, TERMINAL_REPAIR_REASONS } from '../../../lib/workerTerminal.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -74,7 +75,8 @@ beforeEach(async () => {
 
 
 const REFUSED = ['IDENTITY_MISMATCH', 'DUPLICATE_AGENT', 'PAUSED', 'HALTED', 'LEAVE_ALONE', 'NO_LAUNCHER_PROFILE'] as const;
-const FAILED = ['LAUNCH_EXIT_NONZERO', 'TERMINAL_CREATE_REFUSED', 'TIMEOUT'] as const;
+// #4259: SETUP_FAILED and VERIFY_FAILED join the failure set.
+const FAILED = ['LAUNCH_EXIT_NONZERO', 'TERMINAL_CREATE_REFUSED', 'TIMEOUT', 'SETUP_FAILED', 'VERIFY_FAILED'] as const;
 const refused = (worker: string, extra: Record<string, unknown> = {}) =>
   dark(worker, { repair: 'RELAUNCH_REFUSED', repairReason: 'PAUSED', attempt: 1, ...extra });
 const failed = (worker: string, extra: Record<string, unknown> = {}) =>
@@ -112,6 +114,8 @@ describe('each new outcome is accepted with each of its reasons and posts one al
     LAUNCH_EXIT_NONZERO: 'the launcher exited with an error',
     TERMINAL_CREATE_REFUSED: 'Orca refused to create the terminal',
     TIMEOUT: 'the relaunch timed out',
+    SETUP_FAILED: 'the host could not prepare the launch',
+    VERIFY_FAILED: 'the host could not confirm the agent came up',
   };
   for (const reason of REFUSED) {
     it(`RELAUNCH_REFUSED / ${reason} reads exactly`, async () => {
@@ -178,6 +182,8 @@ describe('once per (worker, outcome, reason) per episode', () => {
 describe('the reason and the attempt are judged per worker, the rest of the batch stands', () => {
   const bad: [string, Record<string, unknown>, string][] = [
     ['RELAUNCH_REFUSED with a failure reason', refused('', { repairReason: 'TIMEOUT' }), 'REPAIR_REASON_INVALID'],
+    ['RELAUNCH_REFUSED with SETUP_FAILED (#4259)', refused('', { repairReason: 'SETUP_FAILED' }), 'REPAIR_REASON_INVALID'],
+    ['RELAUNCH_REFUSED with VERIFY_FAILED (#4259)', refused('', { repairReason: 'VERIFY_FAILED' }), 'REPAIR_REASON_INVALID'],
     ['RELAUNCH_FAILED with a refusal reason', failed('', { repairReason: 'PAUSED' }), 'REPAIR_REASON_INVALID'],
     ['RELAUNCH_REFUSED with no reason', refused('', { repairReason: undefined }), 'REPAIR_REASON_INVALID'],
     ['RELAUNCH_FAILED with a null reason', failed('', { repairReason: null }), 'REPAIR_REASON_INVALID'],
@@ -246,6 +252,12 @@ describe('the SDL', () => {
     const reasons = /enum WorkerTerminalRepairReason \{([^}]*)\}/.exec(sdl)![1]!;
     for (const v of [...REFUSED, ...FAILED]) expect(reasons).toContain(v);
     expect(/input WorkerTerminalReportInput \{[^}]*repairReason: WorkerTerminalRepairReason/s.test(sdl)).toBe(true);
+  });
+  it('#4259: the reason enum is exactly the closed set the server checks, and the sets are the ones these tests drive', () => {
+    const values = (buildASTSchema(parse(typeDefs)).getType('WorkerTerminalRepairReason') as any).getValues().map((v: any) => v.name);
+    expect(values).toEqual([...TERMINAL_REPAIR_REASONS]);
+    expect([...RELAUNCH_REFUSED_REASONS]).toEqual([...REFUSED]);
+    expect([...RELAUNCH_FAILED_REASONS]).toEqual([...FAILED]);
   });
 });
 
@@ -342,6 +354,10 @@ describe('the database refuses a raw write the resolver would not make', () => {
   it('rejects a wrong-set reason, a missing key, a bad attempt, another outcome, a non-dark status and extra text', async () => {
     const ok = { ...base, repair: 'RELAUNCH_REFUSED', repairReason: 'PAUSED', repairAttempt: 1 };
     await expect(raw({ ...ok, repairReason: 'TIMEOUT' })).rejects.toThrow(no);
+    // #4259: the two new failure reasons are refused with RELAUNCH_REFUSED.
+    await expect(raw({ ...ok, repairReason: 'SETUP_FAILED' })).rejects.toThrow(no);
+    await expect(raw({ ...ok, repairReason: 'VERIFY_FAILED' })).rejects.toThrow(no);
+    await expect(raw({ ...ok, repair: 'RELAUNCH_FAILED', repairReason: 'SETUP_FAILURE' })).rejects.toThrow(no);
     await expect(raw({ ...ok, repair: 'RELAUNCH_FAILED' })).rejects.toThrow(no);
     await expect(raw({ ...ok, repairReason: 'BECAUSE' })).rejects.toThrow(no);
     await expect(raw({ ...ok, repairReason: null })).rejects.toThrow(no);

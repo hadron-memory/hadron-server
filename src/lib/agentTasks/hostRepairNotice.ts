@@ -49,6 +49,8 @@ const REASON_TEXT: Record<TerminalRepairReason, string> = {
   LAUNCH_EXIT_NONZERO: 'the launcher exited with an error',
   TERMINAL_CREATE_REFUSED: 'Orca refused to create the terminal',
   TIMEOUT: 'the relaunch timed out',
+  SETUP_FAILED: 'the host could not prepare the launch',
+  VERIFY_FAILED: 'the host could not confirm the agent came up',
 };
 
 /** A name set by a tenant or a host key reaches a platform-authored line: markdown-significant characters are dropped. */

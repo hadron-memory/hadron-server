@@ -17534,14 +17534,14 @@ export const typeDefs = `#graphql
     RELAUNCH_REFUSED
     """
     #4247 — the host tried to relaunch the worker and it did not come up. Carries repairReason from the failure set
-    (LAUNCH_EXIT_NONZERO, TERMINAL_CREATE_REFUSED, TIMEOUT) and attempt.
+    (LAUNCH_EXIT_NONZERO, TERMINAL_CREATE_REFUSED, TIMEOUT, SETUP_FAILED, VERIFY_FAILED) and attempt.
     """
     RELAUNCH_FAILED
   }
 
   """
   #4247 — why a relaunch was refused or failed. A closed set, never free text. The first six go with RELAUNCH_REFUSED,
-  the last three with RELAUNCH_FAILED; a reason from the other set is refused (REPAIR_REASON_INVALID).
+  the last five with RELAUNCH_FAILED; a reason from the other set is refused (REPAIR_REASON_INVALID).
   """
   enum WorkerTerminalRepairReason {
     "The worker's identity does not match its launch snapshot."
@@ -17562,6 +17562,10 @@ export const typeDefs = `#graphql
     TERMINAL_CREATE_REFUSED
     "The relaunch timed out."
     TIMEOUT
+    "#4259 — the host could not prepare the launch (a setup or disk error); the launcher never ran."
+    SETUP_FAILED
+    "#4259 — the launcher ran, but the host could not prove the agent came up."
+    VERIFY_FAILED
   }
 
   "#2771 — what the terminal's input prompt looked like."
