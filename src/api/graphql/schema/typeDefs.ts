@@ -16986,7 +16986,8 @@ export const typeDefs = `#graphql
   #4222 — one worker the platform says a host runs (hrn:node:hadronmemory.com:specs:cor:agt:070:01, the change Proposed).
   workdir is the name the host knows the worker's working directory by (an Orca worktree name, or a plain directory
   name for a worker without Git); like every argument a host acts on it is a name token, never a path, a command or a
-  credential (hrn:node:hadronmemory.com:specs:cor:agt:070:03). model is optional.
+  credential (hrn:node:hadronmemory.com:specs:cor:agt:070:03). model is optional and a record only: a start carries the
+  workdir and family, never the model.
   """
   type HostWorkerAssignment {
     id: ID!
@@ -17017,7 +17018,7 @@ export const typeDefs = `#graphql
     workdir: String!
     "The model family it runs as there, e.g. claude or codex."
     family: String!
-    "The model, a name token of at most 128 characters. Optional."
+    "The model, a name token of at most 128 characters. Optional. A record only: a start carries the workdir and family, not the model."
     model: String
     "Change an existing assignment of this worker to this host instead of refusing HOST_ASSIGNMENT_EXISTS."
     replace: Boolean

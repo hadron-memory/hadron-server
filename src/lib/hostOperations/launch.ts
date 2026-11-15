@@ -127,15 +127,17 @@ export function sameHold(issued: { holdUserId: string | null; holdAt: Date | nul
  * protocol): the App's host-lapse lock SHARED with its count (a count change waits), then every registration of the
  * App FOR SHARE (a refresh that would drop the worker or its worktree waits), BEFORE the separate read of which hosts
  * are live and list the worker. Taken after the worker row: registerHost takes the workers it lists FOR SHARE before
- * its registration row, so the orders never cycle. #4222 adds the App's host-setup lock SHARED, last (a writer of an
- * assignment or of the switch takes it exclusive, after its own worker row and never with a registration row).
+ * its registration row, so the orders never cycle. #4222 adds the App's host-setup lock SHARED, BEFORE the
+ * registration rows, as registerHost takes it before its own row (a writer of an assignment or of the switch takes it
+ * exclusive, after its own worker row and never with a registration row). Taken after them instead, a start queued
+ * behind a writer would hold the rows a registration holding the lock shared waits for (#4241, Diego P2-1).
  */
 export async function fenceHostDecision(tx: Prisma.TransactionClient, appId: string): Promise<void> {
   await lockAppHostLapse(tx, appId, 'shared');
   await tx.$queryRaw`SELECT app_id FROM agent_task_stall_schedule WHERE app_id = ${appId} FOR SHARE`;
-  await tx.$queryRaw`SELECT id FROM host_registrations WHERE app_id = ${appId} ORDER BY id FOR SHARE`;
-  // #4222: the switch and the assignments too (an unassign or a switch change waits), last.
+  // #4222: the switch and the assignments too (an unassign or a switch change waits), before the registration rows.
   await lockHostSetup(tx, appId, 'shared');
+  await tx.$queryRaw`SELECT id FROM host_registrations WHERE app_id = ${appId} ORDER BY id FOR SHARE`;
 }
 
 /** Insert a worker.start for a validated host, worktree and family. */

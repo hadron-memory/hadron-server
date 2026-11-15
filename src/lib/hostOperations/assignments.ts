@@ -20,7 +20,10 @@
  * THE LOCK. Every writer of an assignment or of the switch holds the App's host-setup lock EXCLUSIVE; a registration
  * and a start's host decision hold it SHARED through their own write, so a start is never issued from an assignment
  * removed while it was being decided. It is taken AFTER the worker rows a transaction locks (a start locks its
- * worker first, registerHost the workers it lists) and is never upgraded.
+ * worker first, registerHost the workers it lists), BEFORE any host_registrations row (registerHost's own row, a
+ * start's FOR SHARE of the App's rows), and is never upgraded. A writer takes no registration row. One order on
+ * both sides: a start that held registration rows while queued for this lock behind a writer could close a cycle
+ * with a registration holding it shared and waiting for its row (#4241 blind review, Diego P2-1).
  */
 
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';

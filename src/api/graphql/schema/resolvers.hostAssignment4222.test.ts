@@ -10,12 +10,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { Client } from 'pg';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../../../middleware/auth.js';
 import { loadLaunchableFamilies } from '../../../lib/agentTasks/hosts.js';
+import { fenceHostDecision } from '../../../lib/hostOperations/launch.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -114,6 +116,16 @@ describe('the invariants file', () => {
     await expect(db.$executeRaw`UPDATE apps SET host_setup_source = 'file' WHERE id = ${app.id}`).rejects.toThrow();
     // A worker of another App is refused by the database too.
     await expect(db.hostWorkerAssignment.create({ data: { ...base, workerId: zed.id } })).rejects.toThrow();
+  });
+
+  it("the database keeps an assigned worker in its App: moving it is refused until its assignments are removed (#4241 P2-2)", async () => {
+    await db.hostWorkerAssignment.create({ data: { id: generateId(), appId: app.id, hostId: 'orca1', workerId: kit.id, workdir: 'hadron-server/kit', family: 'claude', createdByUserId: manager.id } });
+    await expect(db.$executeRaw`UPDATE workers SET app_id = ${otherApp.id} WHERE id = ${kit.id}`).rejects.toThrow(/host assignments/);
+    expect((await db.worker.findUniqueOrThrow({ where: { id: kit.id } })).appId).toBe(app.id);
+    // A worker with no assignment moves as before.
+    expect(await db.$executeRaw`UPDATE workers SET app_id = ${otherApp.id} WHERE id = ${ada.id}`).toBe(1);
+    await db.hostWorkerAssignment.deleteMany({ where: { workerId: kit.id } });
+    expect(await db.$executeRaw`UPDATE workers SET app_id = ${otherApp.id} WHERE id = ${kit.id}`).toBe(1);
   });
 });
 
@@ -315,6 +327,8 @@ describe('a start uses the assignment (cor:agt:070:08 unchanged: with none, noth
     const op = await task();
     expect(op).toMatchObject({ hostId: 'orca1', issuedBy: 'platform' });
     expect(op!.args).toMatchObject({ worktree: 'hadron-cli/kit', family: 'codex' });
+    // The model is a record only: a start carries no model (#4241 P3).
+    expect(op!.args).not.toHaveProperty('model');
     expect((await loadLaunchableFamilies(db, { appId: app.id }, new Date())).get(kit.id)).toEqual(['codex']);
   });
 
@@ -341,5 +355,42 @@ describe('a start uses the assignment (cor:agt:070:08 unchanged: with none, noth
     expect(await code(start({ worktree: 'hadron-server/kit', family: 'codex' }))).toBe('BAD_HOST_OPERATION_ARGS');
     expect(await code(start({ worktree: 'hadron-cli/kit', family: 'claude' }))).toBe('BAD_HOST_OPERATION_ARGS');
     expect((await start({ worktree: 'hadron-cli/kit', family: 'codex' })).args).toMatchObject({ worktree: 'hadron-cli/kit', family: 'codex' });
+  });
+});
+
+describe('lock order: a start takes the host-setup lock before the registration rows, as registerHost does', () => {
+  it('a start queued behind a setup writer holds no registration row (#4241 blind review, Diego P2-1)', async () => {
+    await register(orca1, [{ worker: 'Kit', family: 'claude', worktrees: ['hadron-server/kit'] }]);
+    const writer = new Client({ connectionString: process.env.DATABASE_URL });
+    const registration = new Client({ connectionString: process.env.DATABASE_URL });
+    await writer.connect();
+    await registration.connect();
+    try {
+      // A setup writer (an unassign, a switch change) holds the lock exclusive.
+      await writer.query('BEGIN');
+      await writer.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`host-setup:${app.id}`]);
+      // A start's host decision queues behind it.
+      let fenced = false;
+      const start = db.$transaction(async (tx) => {
+        await fenceHostDecision(tx, app.id);
+        fenced = true;
+      }, { timeout: 20_000 });
+      await new Promise((r) => setTimeout(r, 500));
+      expect(fenced).toBe(false);
+      // While it waits it holds no registration row, so a registration (which holds the lock shared and then
+      // writes its row) is never blocked by it: no cycle through the writer's queue.
+      await registration.query('BEGIN');
+      const locked = await registration.query('SELECT id FROM host_registrations WHERE app_id = $1 FOR UPDATE NOWAIT', [app.id]);
+      expect(locked.rowCount).toBe(1);
+      await registration.query('ROLLBACK');
+      await writer.query('COMMIT');
+      await start;
+      expect(fenced).toBe(true);
+    } finally {
+      await registration.query('ROLLBACK').catch(() => undefined);
+      await writer.query('ROLLBACK').catch(() => undefined);
+      await registration.end();
+      await writer.end();
+    }
   });
 });

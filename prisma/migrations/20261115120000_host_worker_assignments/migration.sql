@@ -66,6 +66,24 @@ CREATE TRIGGER trg_host_worker_assignments_same_app
   BEFORE INSERT OR UPDATE ON host_worker_assignments
   FOR EACH ROW EXECUTE FUNCTION host_worker_assignment_same_app();
 
+-- The same fact from the worker's side: a worker that has assignments keeps its App, so no move of a worker leaves
+-- an assignment naming it in the App it left (#4241 blind review, Diego P2-2). Remove its assignments first.
+CREATE OR REPLACE FUNCTION host_worker_assignment_worker_app_fixed() RETURNS trigger AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM host_worker_assignments ha WHERE ha.worker_id = NEW.id AND ha.app_id <> NEW.app_id) THEN
+    RAISE EXCEPTION 'workers: worker % has host assignments in its App, so its App does not change', NEW.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'chk_host_worker_assignments_same_app';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_workers_host_assignment_app_fixed ON workers;
+CREATE TRIGGER trg_workers_host_assignment_app_fixed
+  BEFORE UPDATE OF app_id ON workers
+  FOR EACH ROW WHEN (OLD.app_id IS DISTINCT FROM NEW.app_id)
+  EXECUTE FUNCTION host_worker_assignment_worker_app_fixed();
+
 -- #1162: the worker id an assignment records is a typed reference, under the same writer fence as every other one.
 -- The fence function exists from migration 20261016050000; post-push.sql applies this file after
 -- worker-reference-invariants.sql, which defines it.
