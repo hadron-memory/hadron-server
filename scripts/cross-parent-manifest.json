@@ -287,6 +287,8 @@
     "AgentTeamAlarmSchedule": "value",
     "HostRegistrationWorker": "value",
     "HostOperationPage": "envelope",
+    "HostSetup": "envelope",
+    "HostRegistrationRefusal": "value",
     "ContextResetStep": "value",
     "WorkerTerminal": "value",
     "WorkerTerminalRef": "value",
@@ -1162,6 +1164,18 @@
       "audience": "whoever reads the App's tasks and events (withReadableApp); a key that ever held host:operate is refused; rows limited to the App",
       "resolver": "src/api/graphql/schema/resolvers.hostOperation.ts::withReadableApp",
       "target": "HostOperation"
+    },
+    "HostSetup.assignments": {
+      "class": "parent-implies-child",
+      "audience": "hostSetup gated by withReadableApp: App participants plus the App's own key; a host key reads only its own host's rows, a revoked host scope reads nothing (#4222)",
+      "resolver": "src/api/graphql/schema/resolvers.hostAssignment.ts::withReadableApp",
+      "target": "HostWorkerAssignment"
+    },
+    "HostWorkerAssignment.worker": {
+      "class": "parent-implies-child",
+      "audience": "hostSetup gated by withReadableApp; assignHostWorker needs resolveParticipatedApp and actorManagesApp; rows limited to the App, a worker of the same App only (DB trigger) (#4222)",
+      "resolver": "src/api/graphql/schema/resolvers.hostAssignment.ts::withReadableApp",
+      "target": "Worker"
     },
     "HostRegistrationWorker.worker": {
       "class": "parent-implies-child",

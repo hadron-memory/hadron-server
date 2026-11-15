@@ -32,7 +32,7 @@ ALTER TABLE "host_worker_assignments" ADD CONSTRAINT "host_worker_assignments_wo
 -- #4222 (S1a of #4229): the workers the platform says a host runs, and the App's setup-source switch.
 -- Source of truth for these objects; the migration carries a byte-identical copy
 -- (pinned by src/api/graphql/schema/resolvers.hostAssignment4222.test.ts) and post-push.sql includes this file,
--- after agent-task-matching-invariants.sql, whose host_operation_token_ok it uses.
+-- after agent-task-matching-invariants.sql (host_operation_token_ok) and worker-reference-invariants.sql (the fence).
 
 -- cor:agt:070:01 (change Proposed): who states which workers a host runs. `host` until the App opts in.
 ALTER TABLE apps DROP CONSTRAINT IF EXISTS chk_apps_host_setup_source;
@@ -65,3 +65,10 @@ DROP TRIGGER IF EXISTS trg_host_worker_assignments_same_app ON host_worker_assig
 CREATE TRIGGER trg_host_worker_assignments_same_app
   BEFORE INSERT OR UPDATE ON host_worker_assignments
   FOR EACH ROW EXECUTE FUNCTION host_worker_assignment_same_app();
+
+-- #1162: the worker id an assignment records is a typed reference, under the same writer fence as every other one.
+-- The fence function exists from migration 20261016050000; post-push.sql applies this file after
+-- worker-reference-invariants.sql, which defines it.
+DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "host_worker_assignments";
+CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "host_worker_assignments"
+  FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.worker_id');
