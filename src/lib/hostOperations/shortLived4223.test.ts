@@ -16,7 +16,6 @@ import { resolvers } from '../../api/graphql/schema/resolvers.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { setUpResetFixture, type ResetFixture } from '../../test/contextResetFixture.js';
 import { resolveSessionEndRequest, sweepSessionEndRequests } from './sessionEnd.js';
-import { __launchTesting } from './launch.js';
 import { pendingTaskWakes } from '../agentTasks/taskWakes.js';
 import { loadWorkerWorkStates } from '../agentTasks/matcher.js';
 import { taskMatcherTick } from '../../jobs/taskMatcher.js';
@@ -309,32 +308,6 @@ describe('the next assignment starts a fresh run (cor:agt:070:08)', () => {
     expect(await starts()).toEqual([]);
     await M.setTeamPause({}, { appRef: f.app.id, paused: false }, ctx(f.manager.id));
     expect((await starts()).map((o) => o.args)).toEqual([{ workerId: f.kit.id, worktree: 'hadron-server/kit', family: 'codex', taskId: matched.id }]);
-  });
-
-  it('Peter #109181 (N2): one task whose start faults at the lift does not stop the others', async () => {
-    await db.session.update({ where: { id: f.session.id }, data: { endedAt: new Date() } });
-    await M.registerHost({}, {
-      input: {
-        appRef: f.app.id, label: 'Orca', pollIntervalSeconds: 600, capabilities: ['worker.reset-context'],
-        workers: [f.kit, f.ada].map((w) => ({ worker: w.id, family: 'claude', worktrees: [`hadron-server/${w.id}`] })),
-      },
-    }, f.keyCtx());
-    await M.setTeamPause({}, { appRef: f.app.id, paused: true }, ctx(f.manager.id));
-    const forKit = await unassigned();
-    await assignKit(forKit.id);
-    const forAda = await unassigned();
-    await M.assignAgentTask({}, { taskId: forAda.id, assignee: { worker: f.ada.id } }, ctx(f.manager.id));
-    const [first, second] = [f.kit.id, f.ada.id].sort();
-    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    __launchTesting.beforeResumeLaunch = (t) => { if (t.workerId === first) throw new Error('boom'); };
-    try {
-      const view = await M.setTeamPause({}, { appRef: f.app.id, paused: false }, ctx(f.manager.id));
-      expect(view.teamPausedAt).toBeNull(); // the lift itself never fails
-    } finally {
-      __launchTesting.beforeResumeLaunch = undefined;
-      errors.mockRestore();
-    }
-    expect((await starts()).map((o) => o.workerId)).toEqual([second]);
   });
 
   it('D3: a process that died mid-task is never restarted by a second worker.start: the session is open, so no assignment or matcher pass issues one', async () => {

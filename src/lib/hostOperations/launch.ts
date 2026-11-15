@@ -262,12 +262,9 @@ export async function launchForAssignment(
  * hand assignment or reassignment (`launchAssignee` names none either), even if an earlier match of the same task
  * named one (#4253 blind delta, Cedric N1). A task assigned after the lift had its own launch at its assignment, so
  * the window needs no upper bound: a second call for it finds that start in flight or its session open.
- * Each task is started on its own: a fault in one is logged and the rest go on. Runs after the lift committed; never
- * fails it. Returns the operations issued.
+ * launchForAssignment never throws (it logs and returns null), so one task cannot stop the rest. Runs after the lift
+ * committed; never fails it. Returns the operations issued.
  */
-/** Test seam: runs before each task's start in {@link launchAfterTeamResume}; a throw stands for any per-task fault. */
-export const __launchTesting: { beforeResumeLaunch?: (t: { id: string; workerId: string }) => Promise<void> | void } = {};
-
 export async function launchAfterTeamResume(db: PrismaClient, appId: string, pausedAt: Date, now = new Date()): Promise<string[]> {
   try {
     const tasks = await db.$queryRaw<{ id: string; workerId: string; family: string | null }[]>`
@@ -282,15 +279,9 @@ export async function launchAfterTeamResume(db: PrismaClient, appId: string, pau
       ORDER BY t.assignee_worker_id, (t.status = 'pending') DESC, t.assigned_at, t.id`;
     const issued: string[] = [];
     for (const t of tasks) {
-      // Each task on its own (Peter, team chat #109181, N2): a fault starting one worker never stops the others.
-      try {
-        await __launchTesting.beforeResumeLaunch?.(t);
-        const family = normalizeFamily(t.family);
-        const op = await launchForAssignment(db, { appId, taskId: t.id, workerId: t.workerId, ...(family ? { family } : {}) }, now);
-        if (op) issued.push(op);
-      } catch (err) {
-        console.error('[host-launch] starting a worker after a team pause was lifted failed:', { appId, taskId: t.id, workerId: t.workerId }, err);
-      }
+      const family = normalizeFamily(t.family);
+      const op = await launchForAssignment(db, { appId, taskId: t.id, workerId: t.workerId, ...(family ? { family } : {}) }, now);
+      if (op) issued.push(op);
     }
     return issued;
   } catch (err) {
