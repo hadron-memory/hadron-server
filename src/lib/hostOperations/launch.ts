@@ -8,11 +8,14 @@
  *
  * WHO STARTS (cor:agt:070:05, :08): whoever manages the App, by hand, with or
  * without a task; and the platform, when a task is assigned (by hand or by
- * matching) to a held worker with no open session (V16, #4237: a quiet open
- * session is reached through it, never started over) that has an existing
- * worktree on a live host. A worker nobody holds is never started. Without such
- * a worktree nothing is issued and the task waits (the not-started alarm tells
- * its owner). Nothing here creates a worktree (cor:agt:070:06).
+ * matching) to a held worker with no open session that has an existing
+ * worktree on a live host. "Open", not "live", is Vera's V16 (ruling 0265;
+ * drafted in 070:08 as Proposed, #4226), built by #4237: a worker with an open
+ * session, quiet or live, is reached through it, never started over it. A
+ * worker nobody holds is never started. Without such a worktree nothing is
+ * issued and the task waits (the not-started alarm tells its owner). Nothing
+ * here creates a worktree (cor:agt:070:06; resetting an existing one inside the
+ * start is drafted as Proposed there, G6, #4226).
  *
  * THE GRANT (A): the agent a host starts runs on the HOLDER's own token,
  * already configured on that host. The host passes it a single-use grant, minted
@@ -36,6 +39,7 @@ import { generateId } from '../id.js';
 import { toNaiveUtc } from '../sessionActivity.js';
 import { HOST_LAPSE_CHECK_INS_DEFAULT, lockAppHostLapse } from '../agentTasks/hosts.js';
 import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
+import { ASSIGNMENT_FAMILY, ASSIGNMENT_IN_EFFECT, ASSIGNMENT_JOIN, ASSIGNMENT_WORKTREES, lockHostSetup } from './assignments.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 
 /** A grant lives this long after it is minted (Proposed: long enough to start an agent, short enough to be useless later). */
@@ -54,7 +58,12 @@ export class LaunchRefusal extends Error {
   }
 }
 
-/** The live registrations of `hostId` (or every host) that list the worker, with its family and worktrees. */
+/**
+ * The live registrations of `hostId` (or every host) that list the worker, with the family it starts as and the
+ * worktrees a start may name there. #4222: under `hostSetupSource: server` these are the ASSIGNMENT's family and its
+ * one workdir, and a host the worker is not assigned to, or whose registration does not list that workdir, is absent
+ * (so nothing is issued and the task waits, cor:agt:070:08). Under `host` they are the registration's own, unchanged.
+ */
 export async function liveRegistrationsFor(
   db: Db,
   appId: string,
@@ -63,11 +72,14 @@ export async function liveRegistrationsFor(
   hostId?: string,
 ): Promise<{ hostId: string; family: string; worktrees: string[] }[]> {
   const rows = await db.$queryRaw<{ hostId: string; family: string; worktrees: string[] }[]>`
-    SELECT r.host_id AS "hostId", w.family, w.worktrees
+    SELECT r.host_id AS "hostId", ${ASSIGNMENT_FAMILY} AS family, ${ASSIGNMENT_WORKTREES} AS worktrees
     FROM host_registrations r
     JOIN host_registration_workers w ON w.registration_id = r.id AND w.worker_id = ${workerId}
+    JOIN apps a ON a.id = r.app_id
+    ${ASSIGNMENT_JOIN}
     LEFT JOIN agent_task_stall_schedule s ON s.app_id = r.app_id
     WHERE r.app_id = ${appId}
+      AND ${ASSIGNMENT_IN_EFFECT}
       ${hostId ? Prisma.sql`AND r.host_id = ${hostId}` : Prisma.empty}
       AND r.refreshed_at + make_interval(secs => r.poll_interval_seconds * COALESCE(s.host_lapse_check_ins, ${HOST_LAPSE_CHECK_INS_DEFAULT})) >= ${toNaiveUtc(now)}::timestamp
     ORDER BY r.host_id`;
@@ -109,10 +121,12 @@ export async function lockStartableWorker(
     FROM workers WHERE id = ${workerId} FOR UPDATE`;
   if (!w || w.appId !== appId) throw new LaunchRefusal('WORKER_NOT_FOUND', 'Worker not found.');
   if (w.retiredAt) throw new LaunchRefusal('WORKER_RETIRED', 'This worker is retired.');
-  // cor:agt:070:08: a worker nobody holds is never started; there is nobody to bind it on behalf of.
+  // cor:agt:070:08 (kept by the Team on Orca drafts, G5, #4226): a worker nobody holds is never started; there is
+  // nobody to bind it on behalf of.
   if (!w.heldByUserId) throw new LaunchRefusal('WORKER_NOT_HELD', 'Nobody holds this worker, so no host starts it.');
   const session = await sessionStateOf(tx, workerId, now);
   if (session.live) throw new LaunchRefusal('WORKER_LIVE', 'This worker already has a live session.');
+  // V16 (Proposed in 070:08, #4226), built by #4237: a platform start for an assignment needs no OPEN session.
   if (refuse === 'open' && session.open) throw new LaunchRefusal('WORKER_SESSION_OPEN', 'This worker has an open session; the assignment reaches it there.');
   const pending = await tx.hostOperation.findFirst({
     where: { workerId, type: 'worker.start', status: { in: ['issued', 'collected'] } },
@@ -135,11 +149,16 @@ export function sameHold(issued: { holdUserId: string | null; holdAt: Date | nul
  * protocol): the App's host-lapse lock SHARED with its count (a count change waits), then every registration of the
  * App FOR SHARE (a refresh that would drop the worker or its worktree waits), BEFORE the separate read of which hosts
  * are live and list the worker. Taken after the worker row: registerHost takes the workers it lists FOR SHARE before
- * its registration row, so the orders never cycle.
+ * its registration row, so the orders never cycle. #4222 adds the App's host-setup lock SHARED, BEFORE the
+ * registration rows, as registerHost takes it before its own row (a writer of an assignment or of the switch takes it
+ * exclusive, after its own worker row and never with a registration row). Taken after them instead, a start queued
+ * behind a writer would hold the rows a registration holding the lock shared waits for (#4241, Diego P2-1).
  */
 export async function fenceHostDecision(tx: Prisma.TransactionClient, appId: string): Promise<void> {
   await lockAppHostLapse(tx, appId, 'shared');
   await tx.$queryRaw`SELECT app_id FROM agent_task_stall_schedule WHERE app_id = ${appId} FOR SHARE`;
+  // #4222: the switch and the assignments too (an unassign or a switch change waits), before the registration rows.
+  await lockHostSetup(tx, appId, 'shared');
   await tx.$queryRaw`SELECT id FROM host_registrations WHERE app_id = ${appId} ORDER BY id FOR SHARE`;
 }
 
@@ -175,7 +194,8 @@ export async function insertWorkerStart(
 
 /**
  * cor:agt:070:08 — the platform's start for an assignment: if the task's worker
- * assignee is held, has no open session (V16, #4237) and an existing worktree on a live host,
+ * assignee is held, has no open session (V16, Proposed in the rule; #4237) and an
+ * existing worktree on a live host,
  * issue `worker.start` there (the first such host by id, and the first worktree
  * it lists: Proposed). Otherwise nothing is issued and the task waits. Runs
  * AFTER the assignment committed, in its own transaction; never fails the

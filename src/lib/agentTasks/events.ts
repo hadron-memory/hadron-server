@@ -742,7 +742,9 @@ export type ManagerAct =
   | 'ticker.templates-apply' | 'worker.wake-settings'
   | 'app.ticker-settings' | 'app.delivery-settings' | 'team.pause' | 'team.resume' | 'wake.read'
   // #4224 (S3 of #4229): the leave-alone marker and the App's sweep mode.
-  | 'worker.leave-alone' | 'app.sweep-mode';
+  | 'worker.leave-alone' | 'app.sweep-mode'
+  // #4222: the host-setup doors (which workers a host runs, and the App's switch for it).
+  | 'host-setup.assign' | 'host-setup.unassign' | 'host-setup.source';
 
 /** The ids an instructed App-manager act concerns; never content (cor:agt:050:11). */
 export type ManagerActSubject = { taskId?: string; workerId?: string; eventId?: string; tickerId?: string; signalId?: string };

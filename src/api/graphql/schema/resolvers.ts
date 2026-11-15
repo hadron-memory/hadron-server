@@ -96,6 +96,7 @@ import { deliveryBatchMutations, deliveryBatchQueries } from './resolvers.delive
 import { appKeyScopeMutations, appKeyScopeFieldResolvers } from './resolvers.appKeyScope.js';
 import { hostOperationMutations, hostOperationQueries, hostOperationFieldResolvers } from './resolvers.hostOperation.js';
 import { desiredStateMutations, desiredStateQueries, desiredStateWorkerFields } from './resolvers.desiredState.js';
+import { hostAssignmentMutations, hostAssignmentQueries, hostAssignmentFieldResolvers } from './resolvers.hostAssignment.js';
 import {
   agentTaskAlarmMutations,
   agentTaskAlarmQueries,
@@ -150,6 +151,7 @@ export const resolvers = {
   AgentTickerTemplate: agentTickerTemplateFieldResolvers.AgentTickerTemplate,
   ...appKeyScopeFieldResolvers,
   ...hostOperationFieldResolvers,
+  ...hostAssignmentFieldResolvers,
   // #1706 — alarm wakes and availability. AgentTeamEvent already has a block
   // in agentTaskFieldResolvers; the wakes field joins it rather than replacing it.
   ...agentTaskAlarmFieldResolvers,
@@ -233,6 +235,7 @@ export const resolvers = {
     ...deliveryBatchQueries,
     ...hostOperationQueries,
     ...desiredStateQueries,
+    ...hostAssignmentQueries,
     ...agentTaskAlarmQueries,
     ...agentTaskMatchingQueries,
     ...accountUsageQueries,
@@ -317,6 +320,7 @@ export const resolvers = {
     ...appKeyScopeMutations,
     ...hostOperationMutations,
     ...desiredStateMutations,
+    ...hostAssignmentMutations,
     ...agentTaskAlarmMutations,
     ...memoryConfigMutations,
     ...memoryConfigTemplateMutations,

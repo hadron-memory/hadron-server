@@ -21,9 +21,10 @@
  * - The App's sweep mode OFF wins over everything: nothing is desired of any worker, and each row still says what
  *   its state would be.
  *
- * WHICH WORKERS A HOST RUNS. Until S1a (#4222) stores the assignment on the platform, a host's workers are the ones
- * its registration lists (cor:agt:070:01), live or lapsed, with the family and worktrees it registered. That read
- * is `hostWorkers` below, alone, so S1a replaces one function.
+ * WHICH WORKERS A HOST RUNS. A host's workers are the ones its registration lists (cor:agt:070:01), live or lapsed,
+ * with the family and worktrees it registered. S1a (#4222) now also holds them on the platform (`hostSetup`, behind
+ * `App.hostSetupSource`); reading those when the source is `server` is a follow-up, and it replaces this one read,
+ * `hostWorkers` below.
  *
  * Pure reads. Nothing here starts, stops or changes anything.
  */
@@ -97,9 +98,9 @@ export function decideDesiredState(f: DesiredStateFacts): DesiredStateVerdict {
 export type HostWorker = { workerId: string; family: string; worktrees: string[] };
 
 /**
- * The workers `hostId` runs in `appId`, or null when the App has no such host. Today: the host's registration
+ * The workers `hostId` runs in `appId`, or null when the App has no such host: the host's registration
  * (cor:agt:070:01), whether or not it is live, since a host that stopped refreshing still has the same workers.
- * S1a (#4222) replaces this read with the platform's own assignment.
+ * The follow-up to #4222 swaps this for the platform's assignments when `App.hostSetupSource` is `server`.
  */
 export async function hostWorkers(db: Db, appId: string, hostId: string): Promise<HostWorker[] | null> {
   const reg = await db.hostRegistration.findUnique({
