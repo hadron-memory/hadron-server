@@ -67,7 +67,7 @@ describe('the invariants file', () => {
     const S1B_MODEL_FN = head.slice(head.indexOf('-- #4230 (S1b; #4251 blind P2, Peter #108855)'), head.indexOf('-- cor:agt:070:03 — the closed set of typed operations'));
     expect(S1B_MODEL_FN).toContain('CREATE OR REPLACE FUNCTION host_launcher_model_ok');
     const pre4230 = head.replace(S1B_MODEL_FN, '').replace(S1B_KEYS, '').replace(", 'model', 'effort', 'accountProfile', 'lifecycle']", ']').replace(S1B_CHECK, '');
-    expect(migration.endsWith(`\n${(pre4230 + migration.slice(migration.indexOf(block))).replaceAll(", 'checkpoint'", '')}`)).toBe(true);
+    expect(migration.endsWith(`\n${(pre4230 + migration.slice(migration.indexOf(block))).replaceAll(", 'checkpoint', 'sweep'", '').replaceAll(", 'checkpoint'", '')}`)).toBe(true);
     const fnStart = source.indexOf('-- #4230 (S1b; #4251 blind P2, Peter #108855)');
     const fn = source.slice(fnStart, source.indexOf('$$;\n', source.indexOf('-- cor:agt:070:03 — the closed set of typed operations')) + 4);
     const s1b = readFileSync(new URL('../../../prisma/migrations/20261115180000_host_launcher_profiles/migration.sql', import.meta.url), 'utf8');
@@ -77,7 +77,10 @@ describe('the invariants file', () => {
     expect(relaunch.endsWith(`\n${source.slice(source.indexOf(block))}`)).toBe(true);
     const checkpoint = readFileSync(new URL('../../../prisma/migrations/20261103014500_host_checkpoint_use_action/migration.sql', import.meta.url),'utf8');
     const check = source.slice(source.indexOf('ALTER TABLE host_key_uses DROP CONSTRAINT'),source.indexOf('CREATE OR REPLACE FUNCTION host_key_use_append_only')).trim();
-    expect(checkpoint.trim().endsWith(check)).toBe(true);
+    // #4233: the checkpoint migration's copy predates 'sweep'; the sweep migration carries the current CHECK.
+    expect(checkpoint.trim().endsWith(check.replaceAll(", 'checkpoint', 'sweep'", ", 'checkpoint'"))).toBe(true);
+    const sweep = readFileSync(new URL('../../../prisma/migrations/20261115190000_host_sweep_runs/migration.sql', import.meta.url), 'utf8');
+    expect(sweep.trim().endsWith(check)).toBe(true);
     const post = readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8');
     const at = post.indexOf('\\ir host-operation-invariants.sql');
     expect(at).toBeGreaterThan(post.indexOf('\\ir agent-task-matching-invariants.sql'));
