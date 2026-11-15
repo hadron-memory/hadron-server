@@ -6,6 +6,7 @@
  * registers both with a worktree. Unless a test says otherwise the App's sweep mode is APPLY.
  */
 
+import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
@@ -13,7 +14,7 @@ import { declareAllStopLanes } from '../../test/stopLanes.js';
 import { generateId } from '../id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
-import { startDesiredWorkers, START_FAILING_EVENT_TYPE } from './desiredStart.js';
+import { startDesiredWorker, startDesiredWorkers, START_FAILING_EVENT_TYPE } from './desiredStart.js';
 import { loadHostDesiredState } from './desiredState.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -130,6 +131,30 @@ describe('#4231: a long-lived worker that should run and has no session is start
 });
 
 describe('#4231: one host failing does not stop the pass (#4257 blind F1, F2)', () => {
+  it('an App whose host list throws is skipped; the next App still starts its worker', async () => {
+    // A second App, Team 2, with its own long-lived worker Kai on its own host orca9.
+    const app2 = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team 2', urn: `${org.urn}:team2` }, select: { id: true } });
+    await db.appMember.create({ data: { appId: app2.id, userId: bo.id, role: 'member' } });
+    const agentId = (await db.worker.findUniqueOrThrow({ where: { id: kit.id }, select: { agentId: true } })).agentId;
+    const kai = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app2.id, agentId, name: 'Kai', slug: 'kai', heldByUserId: bo.id, heldAt: new Date() }, select: { id: true } });
+    const k = await db.appKey.create({ data: { id: generateId(), appId: app2.id, keyHash: `h-${generateId()}`, keyPreview: 'ijkl', label: 'orca9' }, select: { id: true } });
+    await M.grantAppKeyScope({}, { id: k.id, scope: 'host:operate', hostId: 'orca9' }, ctx(admin.id));
+    await M.registerHost({}, { input: { appRef: app2.id, label: 'Orca 9', pollIntervalSeconds: 600, workers: [
+      { worker: kai.id, family: 'claude', worktrees: ['hadron-server/kai'] },
+    ] } }, { db, appId: app2.id, appKeyId: k.id, roles: [] } as Context);
+    await declareAllStopLanes(db, app2.id);
+    await M.setAppSweepMode({}, { appRef: app2.id, mode: 'APPLY' }, ctx(admin.id));
+    // The first App by id fails to list its hosts (the pass's first raw read).
+    const spy = vi.spyOn(db, '$queryRaw').mockRejectedValueOnce(new Error('host list failed'));
+    try {
+      await tick();
+    } finally {
+      spy.mockRestore();
+    }
+    const started = [...await starts(kit.id), ...await starts(kai.id)];
+    expect(started, 'one App\'s failed host list aborted the pass for every App after it').toHaveLength(1);
+  });
+
   it('a host whose desired-state read throws is skipped; the worker still starts through the next host', async () => {
     await registerOrca2();
     vi.mocked(loadHostDesiredState).mockRejectedValueOnce(new Error('orca1 read failed'));
@@ -259,5 +284,47 @@ describe('#4231: three failed starts in an hour stop further starts and raise on
     await tick();
     expect((await starts()).filter((o) => o.status === 'issued')).toHaveLength(1);
     expect(await alarms()).toHaveLength(0);
+  });
+});
+
+describe('#4231: the fences re-decide under the locks what changed since the pass read it (#4257 §10 P3)', () => {
+  // Calling the per-worker start directly models a change between the pass's read and its transaction.
+  const direct = () => startDesiredWorker(db, { appId: app.id, workerId: kit.id, hostId: 'orca1' }, new Date());
+
+  it('the App stopped applying its sweep (OBSERVE, then OFF): skipped', async () => {
+    await sweep('OBSERVE');
+    expect(await direct()).toBe('skipped');
+    await sweep('OFF');
+    expect(await direct()).toBe('skipped');
+    expect(await starts()).toHaveLength(0);
+  });
+
+  it('leave-alone, a halt or a team pause set since the read: skipped', async () => {
+    await M.setWorkerLeaveAlone({}, { input: { worker: kit.id, leaveAlone: true } }, ctx(admin.id));
+    expect(await direct()).toBe('skipped');
+    await M.setWorkerLeaveAlone({}, { input: { worker: kit.id, leaveAlone: false } }, ctx(admin.id));
+    await M.setTeamStopSignal({}, { input: { appRef: app.id, level: 'HALT', scope: 'WORKER', worker: kit.id } }, ctx(admin.id));
+    expect(await direct()).toBe('skipped');
+    await M.setTeamPause({}, { appRef: app.id, paused: true }, ctx(admin.id));
+    expect(await direct()).toBe('skipped');
+    expect(await starts()).toHaveLength(0);
+  });
+
+  it('a short-lived worker: skipped', async () => {
+    expect(await startDesiredWorker(db, { appId: app.id, workerId: sam.id, hostId: 'orca1' }, new Date())).toBe('skipped');
+    expect(await starts(sam.id)).toHaveLength(0);
+  });
+
+  it('a session opened since the read: skipped', async () => {
+    await db.session.create({ data: { id: generateId(), appId: app.id, workerId: kit.id, userId: bo.id } });
+    expect(await direct()).toBe('skipped');
+    expect(await starts()).toHaveLength(0);
+  });
+});
+
+describe('#4231: the migration carries the invariants file verbatim (#4257 local P3)', () => {
+  it('migration.sql ends with prisma/desired-start-invariants.sql', () => {
+    const read = (f: string) => readFileSync(new URL(`../../../prisma/${f}`, import.meta.url), 'utf8').trimEnd();
+    expect(read('migrations/20261115210000_desired_start/migration.sql').endsWith(read('desired-start-invariants.sql'))).toBe(true);
   });
 });
