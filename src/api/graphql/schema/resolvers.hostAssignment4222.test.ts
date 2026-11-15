@@ -72,6 +72,29 @@ const register = (k: { id: string }, workers: unknown[] = []) =>
   M.registerHost({}, { input: { appRef: app.id, label: 'Orca', pollIntervalSeconds: 600, workers } }, keyCtx(k));
 const rows = (s: { assignments: any[] }) => s.assignments.map((a) => [a.hostId, a.workerId, a.workdir, a.family, a.model]);
 
+/** A raw connection on this run's database (the per-worker URL), for interleavings Prisma cannot hold open. */
+async function pgClient(): Promise<Client> {
+  const c = new Client({ connectionString: process.env.DATABASE_URL });
+  await c.connect();
+  return c;
+}
+/** Resolves once PostgreSQL reports a backend waiting for a lock: `pid` given, that backend; else any backend waiting
+ * for the App's host-setup advisory lock. Polls pg_locks, never a sleep; fails after 10 s (#4241, Diego P3). */
+async function untilWaiting(probe: Client, a: { pid?: number; setupOf?: string }): Promise<void> {
+  for (let i = 0; i < 400; i++) {
+    const { rowCount } = a.pid !== undefined
+      ? await probe.query('SELECT 1 FROM pg_locks WHERE pid = $1 AND NOT granted', [a.pid])
+      : await probe.query(
+        `SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted
+           AND objid::bigint = (hashtext($1)::bigint & 4294967295)`, [`host-setup:${a.setupOf}`]);
+    if (rowCount) return;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error('no backend ever waited for the lock');
+}
+const insertAssignmentSql = `INSERT INTO host_worker_assignments (id, app_id, host_id, worker_id, workdir, family, created_by_user_id)
+  VALUES ($1, $2, 'orca1', $3, 'hadron-server/kit', 'claude', $4)`;
+
 beforeEach(async () => {
   await cleanDb(db);
   const n = Math.floor(Math.random() * 1_000_000);
@@ -101,7 +124,7 @@ beforeEach(async () => {
 describe('the invariants file', () => {
   it('the migration carries a byte-identical copy and post-push includes it', () => {
     const source = readFileSync(new URL('../../../../prisma/host-assignment-invariants.sql', import.meta.url), 'utf8');
-    const migration = readFileSync(new URL('../../../../prisma/migrations/20261115120000_host_worker_assignments/migration.sql', import.meta.url), 'utf8');
+    const migration = readFileSync(new URL('../../../../prisma/migrations/20261115140000_host_worker_assignments/migration.sql', import.meta.url), 'utf8');
     expect(migration.endsWith(`\n${source}`)).toBe(true);
     expect(readFileSync(new URL('../../../../prisma/post-push.sql', import.meta.url), 'utf8')).toContain('\\ir host-assignment-invariants.sql');
   });
@@ -361,21 +384,19 @@ describe('a start uses the assignment (cor:agt:070:08 unchanged: with none, noth
 describe('lock order: a start takes the host-setup lock before the registration rows, as registerHost does', () => {
   it('a start queued behind a setup writer holds no registration row (#4241 blind review, Diego P2-1)', async () => {
     await register(orca1, [{ worker: 'Kit', family: 'claude', worktrees: ['hadron-server/kit'] }]);
-    const writer = new Client({ connectionString: process.env.DATABASE_URL });
-    const registration = new Client({ connectionString: process.env.DATABASE_URL });
-    await writer.connect();
-    await registration.connect();
+    const writer = await pgClient();
+    const registration = await pgClient();
     try {
       // A setup writer (an unassign, a switch change) holds the lock exclusive.
       await writer.query('BEGIN');
       await writer.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`host-setup:${app.id}`]);
-      // A start's host decision queues behind it.
+      // A start's host decision queues behind it: PostgreSQL reports it waiting for that lock.
       let fenced = false;
       const start = db.$transaction(async (tx) => {
         await fenceHostDecision(tx, app.id);
         fenced = true;
       }, { timeout: 20_000 });
-      await new Promise((r) => setTimeout(r, 500));
+      await untilWaiting(registration, { setupOf: app.id });
       expect(fenced).toBe(false);
       // While it waits it holds no registration row, so a registration (which holds the lock shared and then
       // writes its row) is never blocked by it: no cycle through the writer's queue.
@@ -393,4 +414,118 @@ describe('lock order: a start takes the host-setup lock before the registration 
       await writer.end();
     }
   });
+
+  it('registerHost holds the host-setup lock shared: it waits for a setup writer (#4241 §10, Rook F1)', async () => {
+    const writer = await pgClient();
+    try {
+      await writer.query('BEGIN');
+      await writer.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`host-setup:${app.id}`]);
+      let registered = false;
+      const reg = register(orca1, [{ worker: 'Kit', family: 'claude', worktrees: ['hadron-server/kit'] }]).then((r: unknown) => {
+        registered = true;
+        return r;
+      });
+      await untilWaiting(writer, { setupOf: app.id });
+      expect(registered).toBe(false);
+      await writer.query('COMMIT');
+      await reg;
+      expect(registered).toBe(true);
+    } finally {
+      await writer.query('ROLLBACK').catch(() => undefined);
+      await writer.end();
+    }
+  });
+});
+
+describe('the same-App fact holds under concurrency (#4241 blind delta, Diego P2)', () => {
+  it('a worker moved to another App while an assignment is inserted: the insert waits, then is refused', async () => {
+    const mover = await pgClient();
+    const inserter = await pgClient();
+    try {
+      await mover.query('BEGIN');
+      await mover.query('UPDATE workers SET app_id = $1 WHERE id = $2', [otherApp.id, kit.id]); // no assignment yet
+      const { rows: [{ pid }] } = await inserter.query('SELECT pg_backend_pid() AS pid');
+      const insert = inserter.query(insertAssignmentSql, [generateId(), app.id, kit.id, manager.id]).then(() => 'inserted', (e: Error) => e.message);
+      await untilWaiting(mover, { pid });
+      await mover.query('COMMIT');
+      expect(await insert).toMatch(/not in the assignment's App/);
+      expect(await db.hostWorkerAssignment.count()).toBe(0);
+    } finally {
+      await mover.query('ROLLBACK').catch(() => undefined);
+      await mover.end();
+      await inserter.end();
+    }
+  });
+
+  it('an assignment inserted while the worker is moved: the move waits, then is refused', async () => {
+    const mover = await pgClient();
+    const inserter = await pgClient();
+    try {
+      await inserter.query('BEGIN');
+      await inserter.query(insertAssignmentSql, [generateId(), app.id, kit.id, manager.id]);
+      const { rows: [{ pid }] } = await mover.query('SELECT pg_backend_pid() AS pid');
+      const move = mover.query('UPDATE workers SET app_id = $1 WHERE id = $2', [otherApp.id, kit.id]).then(() => 'moved', (e: Error) => e.message);
+      await untilWaiting(inserter, { pid });
+      await inserter.query('COMMIT');
+      expect(await move).toMatch(/has host assignments/);
+      expect((await db.worker.findUniqueOrThrow({ where: { id: kit.id } })).appId).toBe(app.id);
+    } finally {
+      await inserter.query('ROLLBACK').catch(() => undefined);
+      await inserter.end();
+      await mover.end();
+    }
+  });
+});
+
+describe("the instructed arm: a held worker on its holder's instruction (#3321; #4241 §10, Rook F2)", () => {
+  const live = { kind: 'LIVE_CHAT', ref: 'client-chat:turn-4241' };
+  const managerActs = () => db.agentTeamEvent.findMany({ where: { type: 'app.manager-act' }, orderBy: { id: 'asc' } });
+  let boss: { id: string };
+  let bossSession: { id: string };
+  let adaSession: { id: string };
+  beforeEach(async () => {
+    boss = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name: 'Boss', slug: 'boss', heldByUserId: manager.id, heldAt: new Date() }, select: { id: true } });
+    bossSession = await db.session.create({ data: { id: generateId(), appId: app.id, agentId, workerId: boss.id, userId: manager.id, tool: 'vitest' }, select: { id: true } });
+    adaSession = await db.session.create({ data: { id: generateId(), appId: app.id, agentId, workerId: ada.id, userId: holder.id, tool: 'vitest' }, select: { id: true } });
+  });
+  const asBoss = <T>(fn: (c: Context) => Promise<T>) => asWorker(boss, () => fn(ctx(manager.id, { sessionId: bossSession.id })));
+  const asAda = <T>(fn: (c: Context) => Promise<T>) => asWorker(ada, () => fn(ctx(holder.id, { sessionId: adaSession.id })));
+  const doors: Record<string, { act: string; call: (c: Context) => Promise<unknown>; took: () => Promise<boolean> }> = {
+    assignHostWorker: {
+      act: 'host-setup.assign',
+      call: (c) => M.assignHostWorker({}, { input: { appRef: app.id, ...KIT }, instruction: live }, c),
+      took: async () => (await db.hostWorkerAssignment.count()) === 1,
+    },
+    unassignHostWorker: {
+      act: 'host-setup.unassign',
+      call: (c) => M.unassignHostWorker({}, { input: { appRef: app.id, hostId: 'orca1', worker: 'Kit' }, instruction: live }, c),
+      took: async () => (await db.hostWorkerAssignment.count()) === 0,
+    },
+    setHostSetupSource: {
+      act: 'host-setup.source',
+      call: (c) => M.setHostSetupSource({}, { appRef: app.id, source: 'SERVER', instruction: live }, c),
+      took: async () => (await db.app.findUniqueOrThrow({ where: { id: app.id } })).hostSetupSource === 'server',
+    },
+  };
+  for (const [name, door] of Object.entries(doors)) {
+    it(`${name}: a worker held by a manager, on an instruction, is admitted with exactly one record`, async () => {
+      if (name === 'unassignHostWorker') await assign();
+      const before = (await managerActs()).length;
+      await asBoss(door.call);
+      expect(await door.took()).toBe(true);
+      const acts = (await managerActs()).slice(before);
+      expect(acts).toHaveLength(1);
+      expect(acts[0]).toMatchObject({ appId: app.id, actorUserId: manager.id, actorWorkerId: boss.id });
+      expect(acts[0]!.payload).toMatchObject({ act: door.act, instruction: live });
+    });
+
+    it(`${name}: a worker whose holder does not manage the App is refused, nothing written`, async () => {
+      if (name === 'unassignHostWorker') await assign();
+      const before = { acts: (await managerActs()).length, rows: await db.hostWorkerAssignment.findMany(), app: await db.app.findUniqueOrThrow({ where: { id: app.id } }) };
+      expect(await code(asAda(door.call))).toBe('HOST_ASSIGNMENT_NOT_PERMITTED');
+      expect((await managerActs()).length).toBe(before.acts);
+      expect(await db.hostWorkerAssignment.findMany()).toEqual(before.rows);
+      expect((await db.app.findUniqueOrThrow({ where: { id: app.id } })).hostSetupSource).toBe(before.app.hostSetupSource);
+    });
+  }
 });

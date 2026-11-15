@@ -50,10 +50,17 @@ ALTER TABLE host_worker_assignments ADD CONSTRAINT chk_host_worker_assignments_s
 );
 
 -- An assignment names only a worker of its own App. The writer checks this too; the trigger makes it a database
--- fact, so no later writer can assign another tenant's worker to a host.
+-- fact, so no later writer can assign another tenant's worker to a host. The worker row is locked FOR SHARE before
+-- it is judged, which conflicts with any update of the row: a concurrent move of the worker to another App either
+-- committed first (this check then reads the new App and refuses) or waits for this insert to commit (and the
+-- trigger below then sees this assignment and refuses the move). A plain read would let both commit (#4241 blind
+-- delta, Diego P2).
 CREATE OR REPLACE FUNCTION host_worker_assignment_same_app() RETURNS trigger AS $$
+DECLARE
+  worker_app TEXT;
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM workers w WHERE w.id = NEW.worker_id AND w.app_id = NEW.app_id) THEN
+  SELECT w.app_id INTO worker_app FROM workers w WHERE w.id = NEW.worker_id FOR SHARE;
+  IF worker_app IS DISTINCT FROM NEW.app_id THEN
     RAISE EXCEPTION 'host_worker_assignments: worker % is not in the assignment''s App', NEW.worker_id
       USING ERRCODE = 'check_violation', CONSTRAINT = 'chk_host_worker_assignments_same_app';
   END IF;
@@ -67,7 +74,9 @@ CREATE TRIGGER trg_host_worker_assignments_same_app
   FOR EACH ROW EXECUTE FUNCTION host_worker_assignment_same_app();
 
 -- The same fact from the worker's side: a worker that has assignments keeps its App, so no move of a worker leaves
--- an assignment naming it in the App it left (#4241 blind review, Diego P2-2). Remove its assignments first.
+-- an assignment naming it in the App it left (#4241 blind review, Diego P2-2). Remove its assignments first. A BEFORE
+-- UPDATE row trigger runs once the row is locked, so an assignment insert holding the row FOR SHARE has committed by
+-- then, and this check reads it.
 CREATE OR REPLACE FUNCTION host_worker_assignment_worker_app_fixed() RETURNS trigger AS $$
 BEGIN
   IF EXISTS (SELECT 1 FROM host_worker_assignments ha WHERE ha.worker_id = NEW.id AND ha.app_id <> NEW.app_id) THEN

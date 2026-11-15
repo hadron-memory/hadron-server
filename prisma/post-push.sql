@@ -864,7 +864,7 @@ CREATE TRIGGER agent_clone_audits_immutable
 \ir worker-reference-invariants.sql
 
 -- #4222: host worker assignments and the App's setup-source switch. One source, shared verbatim with migration
--- 20261115120000_host_worker_assignments (pinned by src/api/graphql/schema/resolvers.hostAssignment4222.test.ts). After
+-- 20261115140000_host_worker_assignments (pinned by src/api/graphql/schema/resolvers.hostAssignment4222.test.ts). After
 -- worker-reference-invariants.sql, whose fence function its trigger uses.
 \ir host-assignment-invariants.sql
 
