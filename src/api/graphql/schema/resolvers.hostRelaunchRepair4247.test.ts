@@ -102,14 +102,29 @@ describe('each new outcome is accepted with each of its reasons and posts one al
       expect(p.data.mentions).toEqual(['mara']);
     });
   }
-  it('the reasons read differently: every one of the nine has its own text', async () => {
-    const bodies = new Set<string>();
-    let i = 10;
-    for (const reason of REFUSED) { await send([refused(kit.id, { repairReason: reason, checkedAt: ago(i--) }), dark(solo.id, { checkedAt: ago(i) })]); }
-    for (const reason of FAILED) { await send([failed(kit.id, { repairReason: reason, checkedAt: ago(i--) })]); }
-    for (const p of await posts()) bodies.add(p.content.replace(/^.*: /, ''));
-    expect(bodies.size).toBe(9);
-  });
+  const TEXT: Record<string, string> = {
+    IDENTITY_MISMATCH: 'its identity does not match its launch snapshot',
+    DUPLICATE_AGENT: 'another agent is already running there',
+    PAUSED: 'it is paused',
+    HALTED: 'it is halted',
+    LEAVE_ALONE: 'it is marked leave-alone',
+    NO_LAUNCHER_PROFILE: 'it has no launcher profile',
+    LAUNCH_EXIT_NONZERO: 'the launcher exited with an error',
+    TERMINAL_CREATE_REFUSED: 'Orca refused to create the terminal',
+    TIMEOUT: 'the relaunch timed out',
+  };
+  for (const reason of REFUSED) {
+    it(`RELAUNCH_REFUSED / ${reason} reads exactly`, async () => {
+      await send([refused(kit.id, { repairReason: reason })]);
+      expect((await posts())[0].content).toBe(`Kit is dark on Orca One and was not relaunched (attempt 1): ${TEXT[reason]}.`);
+    });
+  }
+  for (const reason of FAILED) {
+    it(`RELAUNCH_FAILED / ${reason} reads exactly`, async () => {
+      await send([failed(kit.id, { repairReason: reason })]);
+      expect((await posts())[0].content).toBe(`The relaunch of Kit on Orca One failed (attempt 1): ${TEXT[reason]}.`);
+    });
+  }
   it('with no reporting line, mentions whoever manages the App', async () => {
     await send([failed(solo.id)]);
     const [p] = await posts();
