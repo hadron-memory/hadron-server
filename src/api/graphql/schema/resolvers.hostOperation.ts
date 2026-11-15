@@ -797,6 +797,8 @@ async function issueWorkerStart(
       const e = issuer(ctx, actor);
       id = await insertWorkerStart(tx, {
         appId: freshApp.id, hostId, workerId, worktree: args.worktree!, family: args.family!, taskId: args.taskId ?? null,
+        // #4230: the profile is the assignment's, never the caller's (worker.start takes no profile argument).
+        profile: reg.profile,
         issuer: actor.kind === 'worker'
           ? { issuedBy: 'worker', issuedByUserId: e.issuedByUserId, issuedByWorkerId: actor.workerId, issuedByAgentId: e.issuedByAgentId }
           : { issuedBy: 'user', issuedByUserId: e.issuedByUserId!, issuedByAgentId: e.issuedByAgentId },

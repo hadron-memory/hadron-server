@@ -78,6 +78,9 @@ const TASKLESS_ALARMS = [
     title: Prisma.sql`sw.name || ' has stopped assigning work'` },
   { type: 'alarm.post-limit', handle: 'LIMIT', openEpisodeRequired: false,
     title: Prisma.sql`sw.name || '''s team-chat post was refused by the post limit' || CASE WHEN e.payload ->> 'limit' IS NULL THEN '' ELSE ' (' || (e.payload ->> 'limit') || ')' END` },
+  // #4231: delivered and escalated until acknowledged; its episode only de-duplicates.
+  { type: 'alarm.start-failing', handle: 'START', openEpisodeRequired: false,
+    title: Prisma.sql`sw.name || '''s platform starts keep failing'` },
 ] as const;
 
 const OPEN = Prisma.sql`('pending', 'started')`;
