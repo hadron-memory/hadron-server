@@ -621,6 +621,45 @@ export async function appendReportsToEvent(
   });
 }
 
+/**
+ * #4224 (S3 of #4229): one `worker.leave-alone-changed` event per change of a worker's leave-alone marker, in the
+ * write's own transaction. The marker's new value only: the reason is text and stays on the worker row
+ * (cor:agt:050:11, ids only).
+ */
+export async function appendLeaveAloneChangedEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; actor: EventActor; workerId: string; leaveAlone: boolean },
+): Promise<void> {
+  await tx.agentTeamEvent.create({
+    data: {
+      appId: args.appId,
+      type: 'worker.leave-alone-changed',
+      actorUserId: args.actor.userId,
+      actorWorkerId: args.actor.workerId,
+      actorAgentId: args.actor.agentId,
+      subjectWorkerId: args.workerId,
+      payload: { leaveAlone: args.leaveAlone },
+    },
+  });
+}
+
+/** #4224 (S3 of #4229): one `team.sweep-mode-changed` event per change of the App's sweep mode: from and to. */
+export async function appendSweepModeChangedEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; actor: EventActor; from: string; to: string },
+): Promise<void> {
+  await tx.agentTeamEvent.create({
+    data: {
+      appId: args.appId,
+      type: 'team.sweep-mode-changed',
+      actorUserId: args.actor.userId,
+      actorWorkerId: args.actor.workerId,
+      actorAgentId: args.actor.agentId,
+      payload: { from: args.from, to: args.to },
+    },
+  });
+}
+
 /** #3307 / cor:dmo:050:12: one instruction record for a signature/trailer act; no template text is recorded. */
 export async function appendWorkerSignatureInstructionEvent(
  tx: Prisma.TransactionClient,
@@ -702,6 +741,8 @@ export type ManagerAct =
   | 'stop.set' | 'stop.lift' | 'ticker.update' | 'ticker.delete' | 'ticker.subscribe' | 'ticker.unsubscribe'
   | 'ticker.templates-apply' | 'worker.wake-settings'
   | 'app.ticker-settings' | 'app.delivery-settings' | 'team.pause' | 'team.resume' | 'wake.read'
+  // #4224 (S3 of #4229): the leave-alone marker and the App's sweep mode.
+  | 'worker.leave-alone' | 'app.sweep-mode'
   // #4222: the host-setup doors (which workers a host runs, and the App's switch for it).
   | 'host-setup.assign' | 'host-setup.unassign' | 'host-setup.source';
 
