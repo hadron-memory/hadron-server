@@ -17376,6 +17376,13 @@ export const typeDefs = `#graphql
     checkedAt: DateTime!
     "When the server stored the report."
     reportedAt: DateTime!
+    """
+    #4225 — the size of the worker's context in tokens, as its host measured it. Null when the host could not measure
+    it (never 0), and on a report stored before hosts sent it. Shown only: it decides nothing.
+    """
+    contextTokens: Int
+    "#4225 — when the host measured contextTokens; judge its age from this. Null exactly when contextTokens is."
+    contextMeasuredAt: DateTime
   }
 
   "#2771 — one worker's terminal report. There is no free-text field."
@@ -17397,6 +17404,13 @@ export const typeDefs = `#graphql
     repair: WorkerTerminalRepair
     "The relaunch's attempt number, at least 1: required with RELAUNCHED, refused (REPAIR_ATTEMPT_INVALID) otherwise."
     attempt: Int
+    """
+    #4225 — the size of the worker's context in tokens, measured on the host: a whole number from 1. Null or omitted
+    when the host cannot measure this worker, never 0. A number only: no transcript text is sent.
+    """
+    contextTokens: Int
+    "#4225 — when the host measured contextTokens, not more than two minutes ahead of the server. Sent exactly when contextTokens is."
+    contextMeasuredAt: DateTime
   }
 
   input SetHostWorkerTerminalsInput {

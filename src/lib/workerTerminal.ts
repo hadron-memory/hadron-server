@@ -8,6 +8,12 @@
  *
  * The field decides nothing: it feeds no `checkStatus` (cor:agt:100:03 stays derived), no availability
  * (cor:agt:060:08), no matcher, no stall rule and no server alarm.
+ *
+ * #4225 S4a (epic #4229) — the report also carries the worker's context size: `contextTokens` (a count the host
+ * measured locally) and `contextMeasuredAt`. Both or neither. A family the host cannot measure reports null, never 0,
+ * and each stored report replaces the last one whole, so an unmeasured report leaves no stale size behind. Only the
+ * number and the instant leave the host; no transcript text does. It is reported and shown, and enforces nothing
+ * (the cap is S4b).
  */
 
 /** The terminal states a host reports. */
@@ -34,8 +40,14 @@ export const TERMINAL_REASONS = [
 ] as const;
 export type TerminalReason = (typeof TERMINAL_REASONS)[number];
 
-/** The keys of the stored object, exactly. The DB CHECK on `workers.terminal` lists the same keys. */
-export const TERMINAL_KEYS = ['host', 'status', 'prompt', 'reason', 'lastTurnAt', 'checkedAt', 'reportedAt'] as const;
+/**
+ * The keys of the stored object, exactly. The DB CHECK on `workers.terminal` lists the same keys; it lets the two
+ * context keys be absent, because a row stored before #4225 has neither.
+ */
+export const TERMINAL_KEYS = ['host', 'status', 'prompt', 'reason', 'lastTurnAt', 'checkedAt', 'reportedAt', 'contextTokens', 'contextMeasuredAt'] as const;
+
+/** #4225: the largest context size a report carries (GraphQL's Int range). The smallest is 1: unmeasured is null. */
+export const CONTEXT_TOKENS_MAX = 2_147_483_647;
 
 /** The most reports one call carries. */
 export const TERMINAL_REPORT_MAX = 200;
@@ -56,6 +68,9 @@ export type WorkerTerminal = {
   lastTurnAt: string | null;
   checkedAt: string;
   reportedAt: string;
+  /** #4225: null when the host could not measure this worker. Absent on a row stored before #4225. */
+  contextTokens?: number | null;
+  contextMeasuredAt?: string | null;
 };
 
 /** One report as a host sends it. */
@@ -68,6 +83,8 @@ export type TerminalReportInput = {
   checkedAt: Date | string;
   repair?: string | null;
   attempt?: number | null;
+  contextTokens?: number | null;
+  contextMeasuredAt?: Date | string | null;
 };
 
 /** A report that passed whole-batch validation. */
@@ -81,9 +98,12 @@ export type ValidTerminalReport = {
   /** #4041: not stored; the platform's notice is posted from it. Checked per worker, not per batch. */
   repair: TerminalRepair | null;
   attempt: number | null;
+  /** #4225: both set or both null. */
+  contextTokens: number | null;
+  contextMeasuredAt: Date | null;
 };
 
-const KEY_SET = new Set<string>(['worker', 'status', 'prompt', 'reason', 'lastTurnAt', 'checkedAt', 'repair', 'attempt']);
+const KEY_SET = new Set<string>(['worker', 'status', 'prompt', 'reason', 'lastTurnAt', 'checkedAt', 'repair', 'attempt', 'contextTokens', 'contextMeasuredAt']);
 
 /**
  * #4041 (V82): is this report's repair outcome valid? Refused per worker (the rest of the batch stands), not for the
@@ -135,9 +155,25 @@ export function validateTerminalBatch(
     }
     const repair = r.repair ?? null;
     if (repair !== null && !(TERMINAL_REPAIRS as readonly string[]).includes(repair)) return { ok: false, message: 'repair is not one of the closed outcomes.' };
+    // #4225: a size is a whole number from 1 (unmeasured is null, never 0) with the instant it was measured.
+    const contextTokens = r.contextTokens ?? null;
+    let contextMeasuredAt: Date | null = null;
+    if (contextTokens !== null && !(Number.isSafeInteger(contextTokens) && contextTokens >= 1 && contextTokens <= CONTEXT_TOKENS_MAX)) {
+      return { ok: false, message: `contextTokens is a whole number from 1 to ${CONTEXT_TOKENS_MAX}, or null when the host cannot measure it.` };
+    }
+    if (r.contextMeasuredAt !== null && r.contextMeasuredAt !== undefined) {
+      if (contextTokens === null) return { ok: false, message: 'contextMeasuredAt goes with contextTokens.' };
+      const measured = r.contextMeasuredAt instanceof Date ? r.contextMeasuredAt : new Date(r.contextMeasuredAt);
+      if (Number.isNaN(measured.getTime())) return { ok: false, message: 'contextMeasuredAt is not a time.' };
+      if (measured.getTime() > now.getTime() + TERMINAL_CHECKED_AT_SKEW_MS) return { ok: false, message: 'contextMeasuredAt is in the future.' };
+      contextMeasuredAt = measured;
+    } else if (contextTokens !== null) {
+      return { ok: false, message: 'contextTokens carries contextMeasuredAt.' };
+    }
     out.push({
       worker: r.worker, status: r.status as TerminalStatus, prompt: r.prompt as TerminalPrompt, reason: reason as TerminalReason | null,
       lastTurnAt, checkedAt, repair: repair as TerminalRepair | null, attempt: r.attempt ?? null,
+      contextTokens, contextMeasuredAt,
     });
   }
   return { ok: true, reports: out };
@@ -153,6 +189,8 @@ export function buildWorkerTerminal(r: ValidTerminalReport, host: { id: string; 
     lastTurnAt: r.lastTurnAt ? r.lastTurnAt.toISOString() : null,
     checkedAt: r.checkedAt.toISOString(),
     reportedAt: reportedAt.toISOString(),
+    contextTokens: r.contextTokens,
+    contextMeasuredAt: r.contextMeasuredAt ? r.contextMeasuredAt.toISOString() : null,
   };
 }
 
@@ -170,5 +208,7 @@ export function workerTerminalView(t: StoredWorkerTerminal | null | undefined) {
     lastTurnAt: t.lastTurnAt ? new Date(t.lastTurnAt) : null,
     checkedAt: new Date(t.checkedAt),
     reportedAt: new Date(t.reportedAt),
+    contextTokens: t.contextTokens ?? null,
+    contextMeasuredAt: t.contextMeasuredAt ? new Date(t.contextMeasuredAt) : null,
   };
 }
