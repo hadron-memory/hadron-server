@@ -36,6 +36,7 @@ const resets = () => db.contextReset.findMany({ where: { workerId: F.kit.id }, o
 const ops = () => db.hostOperation.findMany({ where: { workerId: F.kit.id, type: 'worker.reset-context' } });
 
 beforeEach(async () => {
+  __capSweepTesting.reset();
   F = await setUpResetFixture();
   // The cap must not lean on the task-end setting: switch that off.
   await M.updateAgent({}, { ref: F.agentId, resetContextAfterTask: false }, ctx(F.manager.id));
@@ -308,8 +309,8 @@ describe('what the pass decides, and fair rotation across bounded passes (Diego 
     contextTokens: CAP + 5, contextMeasuredAt: at })}::jsonb WHERE id = ${id}`;
   const mk = async (name: string, appId = F.app.id) => db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId, agentId: F.agentId, name, slug: name.toLowerCase() }, select: { id: true } });
   const session = (w: { id: string }, appId = F.app.id) => db.session.create({ data: { id: `s${Math.random()}`.replace('.', ''), appId, workerId: w.id, agentId: F.agentId, userId: F.holder.id, startedAt: ago(3), updatedAt: ago(3) }, select: { id: true } });
-  beforeEach(() => { __capSweepTesting.decided = []; });
-  afterEach(() => { __capSweepTesting.page = 50; __capSweepTesting.maxPages = 200; __capSweepTesting.decided = null; });
+  beforeEach(() => { __capSweepTesting.decided = []; __capSweepTesting.reset(); });
+  afterEach(() => { __capSweepTesting.page = 50; __capSweepTesting.maxPages = 200; __capSweepTesting.decided = null; __capSweepTesting.reset(); });
 
   it('never decides a worker with no open session, one in a paused App, or one with a reset live or asked for in the hour', async () => {
     const noSession = await mk('NoSession'); await over(noSession.id);
@@ -371,11 +372,12 @@ describe('the operation args carry the cause, from a closed set', () => {
   it('a reset op with neither taskId nor cause is accepted, so the cap migration\'s function is the one in force', async () => {
     await expect(op({ ...base, workerId: F.kit.id, sessionId: F.session.id, resetId: 'r9' })).resolves.toBeTruthy();
   });
-  it('host_operation_args_ok has exactly ONE definition among the post-push files (Peter #108853), the one that takes the cause', async () => {
-    const { readFileSync, readdirSync } = await import('node:fs');
+  it('host_operation_args_ok has exactly ONE definition among the files post-push.sql includes (Peter #108853), the one that takes the cause', async () => {
+    const { readFileSync } = await import('node:fs');
     const dir = new URL('../../../../prisma/', import.meta.url);
-    const defs = readdirSync(dir).filter((f) => f.endsWith('.sql'))
-      .filter((f) => readFileSync(new URL(f, dir), 'utf8').includes('CREATE OR REPLACE FUNCTION host_operation_args_ok'));
+    const included = [...readFileSync(new URL('post-push.sql', dir), 'utf8').matchAll(/^\\ir\s+(\S+)/gm)].map((m) => m[1]!);
+    expect(included).toContain('host-operation-invariants.sql');
+    const defs = included.filter((f) => readFileSync(new URL(f, dir), 'utf8').includes('CREATE OR REPLACE FUNCTION host_operation_args_ok'));
     expect(defs).toEqual(['host-operation-invariants.sql']);
     const src = readFileSync(new URL('host-operation-invariants.sql', dir), 'utf8');
     expect(src).toContain("optional := ARRAY['taskId', 'cause']");

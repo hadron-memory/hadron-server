@@ -26,17 +26,33 @@ import { OPEN_SESSION_PLACEMENT_JOIN } from '../sessionPlacement.js';
 import { toNaiveUtc } from '../sessionActivity.js';
 import { issueReset } from './contextReset.js';
 
-/** At most one cap reset per worker in this long. */
+/**
+ * At most one cap reset per worker in this long, counted from the last one REQUESTED whatever became of it: it is also how long a
+ * refused or failed one keeps the next from being asked for, by design (part 12: "at most once an hour").
+ */
 export const CAP_RESET_INTERVAL_MS = 60 * 60_000;
 /** A report older than this is not proof the composer is idle now. The host's sweep reports every few minutes. */
 export const CAP_REPORT_FRESH_MS = 20 * 60_000;
 /** Test seam: the page size and page bound of a pass, and a record of every worker a pass decided. */
-export const __capSweepTesting: { page: number; maxPages: number; decided: string[] | null } = { page: 50, maxPages: 200, decided: null };
+export const __capSweepTesting: { page: number; maxPages: number; decided: string[] | null; reset: () => void } = {
+  page: 50, maxPages: 200, decided: null, reset: () => { resume = null; },
+};
 type Cursor = { checkedAt: string; id: string };
+
+/**
+ * Where the last bounded pass stopped, so the next one carries on from there instead of starting at the first again (Diego's
+ * P2 at 40cc6c00d: a larger bound only moves the starvation). Null: the last pass reached the end, so the next starts fresh.
+ * Per process; two servers each rotate on their own, and the locked re-read keeps their decisions apart.
+ */
+let resume: Cursor | null = null;
 
 type Candidate = { workerId: string; appId: string; contextTokens: number; contextMeasuredAt: Date; cap: number };
 
-/** The workers over their Agent's cap and proven idle, as the last stored report says. Filtered by `workerId` for the re-read. */
+/**
+ * The workers over their Agent's cap and proven idle, as the last stored report says. Filtered by `workerId` for the re-read.
+ * "Open session" here is the one `issueReset` picks and `OPEN_SESSION_PLACEMENT_JOIN` places the worker by: the worker's own
+ * `sessions` row with `ended_at` and `deleted_at` null; the three read the same table with the same predicate (Arianna N-A).
+ */
 async function overCap(
   tx: Prisma.TransactionClient | PrismaClient, now: Date, workerId: string | null, lock: boolean, after: Cursor | null = null,
 ): Promise<(Candidate & { checkedAt: string })[]> {
@@ -48,7 +64,9 @@ async function overCap(
     FROM workers w
     ${OPEN_SESSION_PLACEMENT_JOIN}
     JOIN agents a ON a.id = COALESCE(os.agent_id, w.agent_id)
+    JOIN apps ap ON ap.id = w.app_id
     WHERE w.retired_at IS NULL
+      AND ap.deleted_at IS NULL AND ap.uninstalled_at IS NULL AND ap.team_paused_at IS NULL
       AND a.context_cap IS NOT NULL AND a.lifecycle = 'LONG_LIVED'
       AND w.terminal IS NOT NULL
       AND w.terminal->>'status' = 'idle' AND w.terminal->>'prompt' = 'empty'
@@ -102,11 +120,14 @@ async function decide(db: PrismaClient, c: Candidate, now: Date): Promise<boolea
 /** One pass: returns how many resets it issued. A failure for one worker never stops the others. */
 export async function contextCapTick(db: PrismaClient, now: Date = new Date()): Promise<number> {
   let issued = 0;
-  let after: Cursor | null = null;
-  // Page through EVERY candidate by (checkedAt, id): a worker that cannot be reset (no capable host, say) is passed over, and
-  // never keeps the ones behind it out of the pass (Diego, P2 at cc136d0af).
+  let after: Cursor | null = resume;
+  // Page through the candidates by (checkedAt, id): a worker that cannot be reset (no capable host, say) is passed over, and a
+  // pass bounded by maxPages hands its place to the next one (`resume`), so every candidate is reached within a few passes
+  // however many are ahead of it (Diego at cc136d0af and 40cc6c00d).
+  resume = null;
   for (let page = 0; page < __capSweepTesting.maxPages; page += 1) {
     const due = await overCap(db, now, null, false, after);
+
     for (const c of due) {
       try {
         if (await decide(db, c, now)) issued += 1;
@@ -114,9 +135,10 @@ export async function contextCapTick(db: PrismaClient, now: Date = new Date()): 
         console.error('[context-cap] deciding a reset failed:', c.workerId, err);
       }
     }
-    if (due.length < __capSweepTesting.page) break;
+    if (due.length < __capSweepTesting.page) return issued; // reached the end: the next pass starts fresh
     const last = due[due.length - 1]!;
     after = { checkedAt: last.checkedAt, id: last.workerId };
   }
+  resume = after; // bounded: the next pass carries on from here
   return issued;
 }
