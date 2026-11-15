@@ -50,7 +50,12 @@ beforeEach(async () => {
 describe('the invariants file', () => {
   it('the migration carries a byte-identical copy, and post-push includes it', () => {
     const migration = readFileSync(new URL('../../../prisma/migrations/20261024100000_context_reset/migration.sql', import.meta.url), 'utf8');
-    expect(migration.endsWith(`\n${SOURCE}`)).toBe(true);
+    // #4225: the file grew a block at its end; the original migration carries everything before it, the new one the block.
+    const marker = '\n-- #4225 S4b (epic #4229; cor:agt:050:27 part 12, Proposed)';
+    expect(SOURCE.indexOf(marker)).toBeGreaterThan(0);
+    expect(migration.endsWith(`\n${SOURCE.slice(0, SOURCE.indexOf(marker))}`)).toBe(true);
+    const cap = readFileSync(new URL('../../../prisma/migrations/20261115200000_context_cap/migration.sql', import.meta.url), 'utf8');
+    expect(cap.endsWith(SOURCE.slice(SOURCE.indexOf(marker)))).toBe(true);
     const post = readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8');
     expect(post).toContain('\\ir context-reset-invariants.sql');
   });

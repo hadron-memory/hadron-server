@@ -64,7 +64,7 @@ describe('Agent.contextCap', () => {
     });
   }
   it('a person who does not manage the Agent cannot set it', async () => {
-    expect(await code(M.updateAgent({}, { ref: F.agentId, contextCap: 5 }, ctx(F.holder.id)))).toBeDefined();
+    await expect(M.updateAgent({}, { ref: F.agentId, contextCap: 5 }, ctx(F.holder.id))).rejects.toThrow();
     expect((await db.agent.findUniqueOrThrow({ where: { id: F.agentId } }) as any).contextCap).toBe(CAP);
   });
   it('the database refuses 0 and a negative cap on a raw write', async () => {
@@ -84,7 +84,7 @@ describe('over the cap and proven idle: one reset', () => {
     const [op, ...more] = await ops();
     expect(more).toEqual([]);
     expect(op!.id).toBe(r.hostOperationId);
-    expect(op!.args).toMatchObject({ workerId: F.kit.id, sessionId: F.session.id, resetId: r.id, cause: 'context-cap' });
+    expect(op!.args).toEqual({ workerId: F.kit.id, sessionId: F.session.id, resetId: r.id });
     expect((op!.args as any).taskId).toBeUndefined();
     const ev = await db.agentTeamEvent.findMany({ where: { type: 'task.context-reset-requested', subjectWorkerId: F.kit.id } });
     expect(ev).toHaveLength(1);
@@ -97,7 +97,10 @@ describe('over the cap and proven idle: one reset', () => {
     expect(await contextCapTick(db)).toBe(1);
     expect(await contextCapTick(db)).toBe(0);
     await db.contextReset.updateMany({ where: { workerId: F.kit.id }, data: { phase: 'failed', reason: 'HOST_LOST', endedAt: new Date() } });
-    expect(await contextCapTick(db, new Date(Date.now() + 30 * MIN))).toBe(0);
+    // A NEW measurement after the request, so only the hour (not the stale measurement) holds the second one back.
+    await F.register(F.orca1, { pollIntervalSeconds: 7200 });
+    await report({ contextMeasuredAt: new Date(Date.now() + 60_000) });
+    expect(await contextCapTick(db, new Date(Date.now() + 10 * MIN))).toBe(0);
     expect(await resets()).toHaveLength(1);
   });
 
@@ -106,6 +109,7 @@ describe('over the cap and proven idle: one reset', () => {
     await contextCapTick(db);
     await db.contextReset.updateMany({ where: { workerId: F.kit.id }, data: { phase: 'failed', reason: 'HOST_LOST', endedAt: new Date() } });
     const later = new Date(Date.now() + 61 * MIN);
+    await F.register(F.orca1, { pollIntervalSeconds: 7200 }); // the host stays live at `later`
     // The same report, only aged: its measurement predates the last request, so it proves nothing new.
     await db.$executeRaw`UPDATE workers SET terminal = jsonb_set(terminal, '{checkedAt}', to_jsonb(${new Date(later.getTime() - MIN).toISOString()}::text)) WHERE id = ${F.kit.id}`;
     expect(await contextCapTick(db, later)).toBe(0);
@@ -145,11 +149,11 @@ describe('the existing protocol carries it to done', () => {
     await F.step('claimContextReset', { resetId: r.id, epoch: 0, process: PROC });
     const reg = await F.step('registerContextResetRecovery', { resetId: r.id, epoch: 1, sessionId: F.session.id, checkpointNode: cp.id });
     expect(reg.refused).toBeNull();
-    const stop = await F.step('authorizeContextResetStop', { resetId: r.id, epoch: 2, process: PROC });
+    const stop = await F.step('authorizeContextResetStop', { resetId: r.id, epoch: 1, process: PROC });
     expect(stop.refused).toBeNull();
-    const stopped = await F.step('reportContextResetAgentStopped', { resetId: r.id, epoch: 3 });
+    const stopped = await F.step('reportContextResetAgentStopped', { resetId: r.id, epoch: 1 });
     expect(stopped.reset.phase).toBe('agent-stopped');
-    const re = await F.step('reportContextResetRelaunched', { resetId: r.id, epoch: 4, process: NEW_PROC });
+    const re = await F.step('reportContextResetRelaunched', { resetId: r.id, epoch: 1, process: NEW_PROC });
     expect(re.reset.phase).toBe('relaunched');
     // The worker carries the `resetting` mark meanwhile, on every assignment path.
     const mark = await db.workerAvailability.findUniqueOrThrow({ where: { workerId: F.kit.id } });
@@ -173,10 +177,19 @@ describe('the existing protocol carries it to done', () => {
     const claimed = await F.step('claimContextReset', { resetId: r.id, epoch: 0, process: PROC });
     expect(claimed.refused).toBe('SETTING_OFF');
   });
+  it('the claim refuses SETTING_OFF when the Agent became short-lived meanwhile', async () => {
+    await report();
+    await contextCapTick(db);
+    const r = (await resets())[0];
+    await M.collectHostOperations({}, { appRef: F.app.id }, F.keyCtx());
+    await M.updateAgent({}, { ref: F.agentId, lifecycle: 'SHORT_LIVED' }, ctx(F.manager.id));
+    expect((await F.step('claimContextReset', { resetId: r.id, epoch: 0, process: PROC })).refused).toBe('SETTING_OFF');
+  });
   it('the host reads the reset with its cause and a null task', async () => {
     await report();
     await contextCapTick(db);
     const r = (await resets())[0];
+    await M.collectHostOperations({}, { appRef: F.app.id }, F.keyCtx());
     const read = await (resolvers.Query as any).contextReset({}, { appRef: F.app.id, resetId: r.id }, F.keyCtx());
     expect(read).toMatchObject({ id: r.id, cause: 'context-cap', taskId: null, phase: 'requested' });
   });
@@ -241,7 +254,8 @@ describe('not over the cap, not proven idle, or not capped: nothing', () => {
     await M.updateAgent({}, { ref: F.agentId, resetContextAfterTask: true }, ctx(F.manager.id));
     await F.finish(t.id);
     expect(await resets()).toHaveLength(1);
-    await report();
+    // Measured after that request, so only the live reset holds this one back.
+    await report({ contextMeasuredAt: new Date(Date.now() + 60_000) });
     expect(await contextCapTick(db)).toBe(0);
     expect(await resets()).toHaveLength(1);
   });
@@ -282,6 +296,6 @@ describe('the SDL', () => {
   });
   it('the recovery registration input no longer requires a task', () => {
     const input = (schema.getType('RegisterContextResetRecoveryInput') as any)?.getFields();
-    expect(String(input?.taskId?.type)).toBe('String');
+    expect(String(input?.taskId?.type)).toBe('ID');
   });
 });

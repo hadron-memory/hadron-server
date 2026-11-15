@@ -4911,6 +4911,13 @@ export const typeDefs = `#graphql
     resetContextAfterTask: Boolean!
     "#4224 (S3 of #4229): how long this Agent's workers run. LONG_LIVED (default): a worker's process should always run. SHORT_LIVED: only while the worker is the assignee of a pending or started task, one waiting on its child tasks included. Read by hostDesiredState at each call; changing it moves no session or process by itself. Set by whoever manages the Agent, like usesTasks."
     lifecycle: AgentLifecycle!
+    """
+    #4225 (S4b of #4229; hrn:node:hadronmemory.com:specs:cor:agt:050:27 part 12, Proposed; G4): the context size, in tokens,
+    above which a worker of this LONG_LIVED Agent whose host reports it idle at an empty prompt is reset (one
+    worker.reset-context, at most one an hour per worker). Null (the default) is no cap. A busy worker is never reset
+    for it, and a SHORT_LIVED Agent's workers ignore it. Set by whoever manages the Agent.
+    """
+    contextCap: Int
     type: AgentType!
     surfaces: [String!]!
     # #928/#974 persona dressing (cor:agt:020:01): universal metadata that
@@ -13588,7 +13595,7 @@ export const typeDefs = `#graphql
 
     orgId accepts the org's ID or URN.
     """
-    createAgent(orgId: ID, name: String!, description: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, "#4224: omitted or null is LONG_LIVED." lifecycle: AgentLifecycle, "#2171 (R211): the member roles the Agent offers. Omitted: owner and member. Empty or malformed: BAD_USER_INPUT." memberRoles: [String!]): Agent!
+    createAgent(orgId: ID, name: String!, description: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, "#4224: omitted or null is LONG_LIVED." lifecycle: AgentLifecycle, "#4225: the context cap in tokens, a whole number from 1; omitted or null is no cap." contextCap: Int, "#2171 (R211): the member roles the Agent offers. Omitted: owner and member. Empty or malformed: BAD_USER_INPUT." memberRoles: [String!]): Agent!
     """
     Clone an Agent into an organization you administer: a new PERSONAL-draft Agent
     with its own copy of the source's system memory, its links and imports, and a recorded origin. Needs a
@@ -13619,7 +13626,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    updateAgent(ref: ID!, name: String, urn: String, description: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, "#4224: omitted or null leaves it unchanged." lifecycle: AgentLifecycle, registerDefaults: RegisterDefaultsInput, "#2171 (R211): replaces the member roles the Agent offers (and nothing else in its installation policy). Omitted or null: unchanged. Empty or malformed: BAD_USER_INPUT. Existing members keep their role." memberRoles: [String!]): Agent!
+    updateAgent(ref: ID!, name: String, urn: String, description: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, "#4224: omitted or null leaves it unchanged." lifecycle: AgentLifecycle, "#4225: the context cap in tokens, a whole number from 1; omitted leaves it, null clears it (no cap)." contextCap: Int, registerDefaults: RegisterDefaultsInput, "#2171 (R211): replaces the member roles the Agent offers (and nothing else in its installation policy). Omitted or null: unchanged. Empty or malformed: BAD_USER_INPUT. Existing members keep their role." memberRoles: [String!]): Agent!
 
     """
     Soft-delete an Agent and its owned system memory. Requires management
@@ -17319,7 +17326,8 @@ export const typeDefs = `#graphql
     checkpoint: ContextResetCheckpointInput
     "The reset's own session and task."
     sessionId: ID!
-    taskId: ID!
+    "The task the reset belongs to; omitted (or empty) for a reset with no task, one asked for by the Agent's context cap (cause context-cap)."
+    taskId: ID
   }
 
   input AuthorizeContextResetStopInput {
@@ -17357,7 +17365,10 @@ export const typeDefs = `#graphql
     appId: ID!
     workerId: ID!
     sessionId: ID!
-    taskId: ID!
+    "Null for a reset with no task: one asked for by the Agent's context cap (#4225)."
+    taskId: ID
+    "#4225: what asked for the reset: task-end (a task's finish or cancel) or context-cap (the Agent's context cap, S4b)."
+    cause: String!
     hostId: String
     hostOperationId: ID
     phase: String!
