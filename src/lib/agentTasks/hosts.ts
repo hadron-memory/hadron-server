@@ -260,12 +260,51 @@ export async function loadLaunchableFamilies(
   scope: { appId: string } | { workerIds: string[] },
   now: Date,
 ): Promise<Map<string, string[]>> {
-  if ('workerIds' in scope && scope.workerIds.length === 0) return new Map();
+  const out = new Map<string, string[]>();
+  for (const r of await loadLaunchableAssignments(db, scope, now)) {
+    const family = normalizeFamily(r.family);
+    if (!family) continue;
+    const list = out.get(r.workerId) ?? [];
+    if (!list.includes(family)) list.push(family);
+    out.set(r.workerId, list);
+  }
+  return out;
+}
+
+/**
+ * #4232 (S9): the model each worker's in-effect ASSIGNMENTS on live hosts name, per worker: one entry per distinct
+ * (host, family, model) the worker is launchable as, `null` for an assignment (or a host-stated registration) that
+ * names no model. Same rows, same filters as {@link loadLaunchableFamilies}; an assignment is in effect only while the
+ * App's `hostSetupSource` is `server`, so under `host` every entry is `null`. The matcher reads the tier of an unbound
+ * worker from these (`workerTier`).
+ */
+export async function loadLaunchableModels(
+  db: Db,
+  scope: { appId: string } | { workerIds: string[] },
+  now: Date,
+): Promise<Map<string, (string | null)[]>> {
+  const out = new Map<string, (string | null)[]>();
+  for (const r of await loadLaunchableAssignments(db, scope, now)) {
+    if (!normalizeFamily(r.family)) continue;
+    const list = out.get(r.workerId) ?? [];
+    if (!list.includes(r.model)) list.push(r.model);
+    out.set(r.workerId, list);
+  }
+  return out;
+}
+
+/** The one query behind both readers above: what each live host's registration and assignment say a worker runs as. */
+async function loadLaunchableAssignments(
+  db: Db,
+  scope: { appId: string } | { workerIds: string[] },
+  now: Date,
+): Promise<{ workerId: string; family: string; model: string | null }[]> {
+  if ('workerIds' in scope && scope.workerIds.length === 0) return [];
   const where = 'appId' in scope
     ? Prisma.sql`r.app_id = ${scope.appId}`
     : Prisma.sql`w.worker_id IN (${Prisma.join(scope.workerIds)})`;
-  const rows = await db.$queryRaw<{ workerId: string; family: string }[]>`
-    SELECT DISTINCT w.worker_id AS "workerId", ${ASSIGNMENT_FAMILY} AS family
+  return db.$queryRaw<{ workerId: string; family: string; model: string | null }[]>`
+    SELECT DISTINCT w.worker_id AS "workerId", ${ASSIGNMENT_FAMILY} AS family, ha.model AS model
     FROM host_registration_workers w
     JOIN host_registrations r ON r.id = w.registration_id
     -- #1709 (cor:agt:060:05, 070:08): a host launches only a worker someone holds, in a worktree it already has.
@@ -279,16 +318,7 @@ export async function loadLaunchableFamilies(
     WHERE ${where}
       AND ${ASSIGNMENT_IN_EFFECT}
       AND r.refreshed_at + make_interval(secs => r.poll_interval_seconds * ${LAPSE_SQL}) >= ${toNaiveUtc(now)}::timestamp
-    ORDER BY 1, 2`;
-  const out = new Map<string, string[]>();
-  for (const r of rows) {
-    const family = normalizeFamily(r.family);
-    if (!family) continue;
-    const list = out.get(r.workerId) ?? [];
-    if (!list.includes(family)) list.push(family);
-    out.set(r.workerId, list);
-  }
-  return out;
+    ORDER BY 1, 2, 3`;
 }
 
 /**

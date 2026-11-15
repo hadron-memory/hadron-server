@@ -164,11 +164,11 @@ describe('#4232 matching an unbound worker by its assignment', () => {
     await assign(w.Una, 'opus');
     const hi = await queued({ role: 'reviewer', minTier: 'high' });
     const claim = (await db.agentTask.findUniqueOrThrow({ where: { id: hi.id }, select: { id: true, appId: true, requirements: true, closeSessionWhenDone: true, createdByWorkerId: true } })) as any;
-    expect(await __matcherTesting.tryAssign(db, claim, w.Una.id, 'claude', at('11:01'), { minTier: 'high' }, anchorNow())).toBe('assigned');
+    expect(await __matcherTesting.tryAssign(db, claim, w.Una.id, 'claude', at('11:01'), {}, anchorNow())).toBe('assigned');
     const lo = await queued({ role: 'reviewer', minTier: 'high' });
     await db.hostWorkerAssignment.updateMany({ where: { workerId: w.Tre.id }, data: {} });
     await assign(w.Tre, 'sonnet');
     const claim2 = (await db.agentTask.findUniqueOrThrow({ where: { id: lo.id }, select: { id: true, appId: true, requirements: true, closeSessionWhenDone: true, createdByWorkerId: true } })) as any;
-    expect(await __matcherTesting.tryAssign(db, claim2, w.Tre.id, 'claude', at('11:01'), { minTier: 'high' }, anchorNow())).toBe('worker-not-free');
+    expect(await __matcherTesting.tryAssign(db, claim2, w.Tre.id, 'claude', at('11:01'), {}, anchorNow())).toBe('worker-not-free');
   });
 });

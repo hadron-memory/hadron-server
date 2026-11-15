@@ -31,8 +31,9 @@ import { lockTaskGraph } from './blockers.js';
  * work (060:05) is unchanged, and the roster still shows such a worker free.
  *
  * TIER (#2252 D1, cor:agt:060:06): a task may name `minTier` (low < mid < high). Eligible = the filters above AND tier >=
- * minTier, where a worker's tier is its binding model's (`tierOf`) and unknown (an unbound worker included) is never
- * eligible under a minimum. Among the eligible, the lowest sufficient tier wins, then least recently assigned; with no
+ * minTier, where a worker's tier is its binding model's (`tierOf`) while bound; an UNBOUND worker's is the lowest tier
+ * of the models its in-effect host assignments name on live hosts (#4232, S9 of #4229; `workerTier`, `tierOfAssignedModel`).
+ * Unknown (no binding and no assigned model, or one the mapping can't place) is never eligible under a minimum. Among the eligible, the lowest sufficient tier wins, then least recently assigned; with no
  * minimum the cheapest KNOWN tier goes first and an unknown one last. A tier never admits a worker the role, family,
  * exclusion or name rule keeps out. The hard bound is re-read on the deciding row in `stillFreeAs`; the preference
  * order is the pass's snapshot. No `maxTier`, no downshift, no launch change.
@@ -69,10 +70,10 @@ import { loadAppWorkerActivity, loadWorkersActivity } from '../../api/graphql/sc
 import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
 import { loadAvailabilityByFamily, type WorkerAvailabilityView } from './availability.js';
 import { appendTaskEvent, ASSIGNED_EVENT_TYPES, PLATFORM_ACTOR } from './events.js';
-import { loadLaunchableFamilies } from './hosts.js';
+import { loadLaunchableFamilies, loadLaunchableModels } from './hosts.js';
 import { launchForAssignment } from '../hostOperations/launch.js';
 import { PENDING_SESSION_END_SQL } from '../hostOperations/sessionEnd.js';
-import { normalizeFamily, tierOf, type ModelTier } from './family.js';
+import { normalizeFamily, tierOf, tierOfAssignedModel, type ModelTier } from './family.js';
 import { effectiveModelGroups, modelGroupsAllowed, normalizeModelGroupName, type EffectiveModelGroup } from './modelGroups.js';
 import { combinationsOf, decisionClock, recordMatchOutcome, type Combination, type DbInstant } from './matchOutcomes.js';
 import { locateTeamAgent } from '../../api/graphql/schema/resolvers.worker.js';
@@ -179,8 +180,21 @@ export async function loadAppModelGroups(db: Db, appId: string, opts: { strict?:
  * The tier a worker runs at: its binding's model's, and unknown (null) when it is unbound or the model isn't mapped
  * (`tierOf` returns null for what it can't place; nothing here guesses).
  */
-export function workerTier(w: { bound: boolean; bindingModel: string | null }): ModelTier | null {
-  return w.bound ? tierOf(w.bindingModel) : null;
+export function workerTier(w: { bound: boolean; bindingModel: string | null; assignedModels?: readonly (string | null)[] }): ModelTier | null {
+  if (w.bound) return tierOf(w.bindingModel);
+  // #4232 (S9): an unbound worker runs as its host assignment says (S1a). The lowest tier among its in-effect
+  // assignments on live hosts, since the host that starts it is not chosen here; one that names no model or one the
+  // mapping can't place makes the tier unknown, and unknown never meets a minimum. The binding's model, once there is a
+  // binding, always wins (the branch above): this is only what a worker with no binding is known to be launched as.
+  const models = w.assignedModels ?? [];
+  if (models.length === 0) return null;
+  let lowest: ModelTier | null = null;
+  for (const m of models) {
+    const t = tierOfAssignedModel(m);
+    if (t === null) return null;
+    if (lowest === null || TIER_RANK[t] < TIER_RANK[lowest]) lowest = t;
+  }
+  return lowest;
 }
 
 /** May a worker of `tier` take a task with these requirements? No minimum admits all; under a minimum, unknown never. */
@@ -200,7 +214,7 @@ export function tierPreference(tier: ModelTier | null): number {
  */
 export function eligibleFor(
   req: Requirements,
-  w: { id: string; role: string | null; freeFamilies: string[]; bound: boolean; bindingModel: string | null },
+  w: { id: string; role: string | null; freeFamilies: string[]; bound: boolean; bindingModel: string | null; assignedModels?: readonly (string | null)[] },
   groups: EffectiveModelGroup[] = [],
 ): string | null {
   // #2831 S2: an unbound worker has no model, so it is in no group (fails every In, passes every NotIn).
@@ -294,6 +308,8 @@ export type WorkerWorkState = {
   lastActiveAt: Date | null;
   /** Families a live host registration can launch it as. */
   launchableFamilies: string[];
+  /** #4232: the models its in-effect host assignments name (null: none named); an unbound worker's tier reads these. */
+  assignedModels: (string | null)[];
   /** #1709: waiting on a session end (an open request, or an outstanding `worker.end`); not matched meanwhile. */
   endingSession: boolean;
   /** The families it can run as now (060:04): its binding's when bound, else its launchable ones. */
@@ -394,9 +410,10 @@ export async function loadWorkerWorkStates(db: Db, appId: string, now: Date, opt
   // #2458: a worker with an open session is matched on that session's agent and role, not the live worker row.
   // Only the matcher asks (`bySession`): a manager-facing read, the roster, shows the live row (cor:dmo:050:11).
   const placed = opts?.bySession ? await loadOpenSessionPlacements(db, ids) : new Map<string, { role: string; usesTasks: boolean }>();
-  const [activity, launchable, open, lastAssigned, ending] = await Promise.all([
+  const [activity, launchable, launchableModels, open, lastAssigned, ending] = await Promise.all([
     loadAppWorkerActivity({ db } as unknown as Context, appId, { now }),
     loadLaunchableFamilies(db, { appId }, now),
+    loadLaunchableModels(db, { appId }, now),
     db.agentTask.groupBy({
       by: ['assigneeWorkerId'],
       where: { appId, assigneeWorkerId: { in: ids }, status: { in: OPEN_STATUSES } },
@@ -417,7 +434,7 @@ export async function loadWorkerWorkStates(db: Db, appId: string, now: Date, opt
       ...w, role: placed.get(w.id)?.role ?? w.role, usesTasks: placed.get(w.id)?.usesTasks ?? w.agent.usesTasks, bound, live, openSession, bindingFamily,
       bindingModel: bound ? a?.bindingModel ?? null : null,
       modelReportedAt: bound ? a?.modelReportedAt ?? null : null,
-      launchableFamilies, lastActiveAt: a?.lastActiveAt ?? null, endingSession: ending.has(w.id),
+      launchableFamilies, assignedModels: bound ? [] : launchableModels.get(w.id) ?? [], lastActiveAt: a?.lastActiveAt ?? null, endingSession: ending.has(w.id),
       families: familiesOf({ bound, bindingFamily, launchableFamilies }),
     };
   });
@@ -469,7 +486,9 @@ async function stillFreeAs(tx: Prisma.TransactionClient, appId: string, workerId
   if (!matchable({ bound, live: activity?.hasLiveSession ?? false, openSession: activity?.holdsOpenSession ?? false, endingSession })) return null;
   // #2252 D1: the hard bound, judged on the model read AFTER the session-row locks above, so a refresh that held a
   // session row while this waited is seen (an unbound worker is unknown). The preference order is the pass's snapshot.
-  if (!tierAllowed(req, workerTier({ bound, bindingModel: activity?.bindingModel ?? null }))) return null;
+  const assignedModels = bound ? [] : (await loadLaunchableModels(tx, { workerIds: [workerId] }, decidedAt)).get(workerId) ?? [];
+  const tier = workerTier({ bound, bindingModel: activity?.bindingModel ?? null, assignedModels });
+  if (!tierAllowed(req, tier)) return null;
   // #2831 S2: groups are live, so they are read here, after the same locks, never from the pass's snapshot.
   if ((req.modelGroupIn || req.modelGroupNotIn) && !modelGroupsAllowed(req, bound ? activity?.bindingModel ?? null : null, await loadAppModelGroups(tx, appId))) return null;
   const launchable = bound ? [] : (await loadLaunchableFamilies(tx, { workerIds: [workerId] }, decidedAt)).get(workerId) ?? [];
@@ -478,7 +497,7 @@ async function stillFreeAs(tx: Prisma.TransactionClient, appId: string, workerId
   const availability = (await loadAvailabilityByFamily(tx, [{ id: workerId, appId, families: [family] }], decidedAt)).get(workerId) as WorkerAvailabilityView;
   if (freeFamiliesOf({ retired: false, openTaskCount, families: [family], availability }).length === 0) return null;
   // #3825 (V44): the chosen worker's own combination, judged on the same rows as the decision above.
-  return { family, tier: workerTier({ bound, bindingModel: activity?.bindingModel ?? null }), role: owner.role };
+  return { family, tier, role: owner.role };
 }
 
 // ── Assigning ─────────────────────────────────────────────────────────────
