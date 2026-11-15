@@ -71,12 +71,13 @@ import type { ActInstruction } from '../../../lib/auth/instructedAct.js';
 import { recordInEffect } from '../../../lib/agentTasks/availability.js';
 import { matchAfterChange } from '../../../lib/agentTasks/matcher.js';
 import { fenceHostDecision, insertWorkerStart, LaunchRefusal, liveRegistrationsFor, lockStartableWorker, mintLaunchGrants } from '../../../lib/hostOperations/launch.js';
+import { HOST_WORKER_NOT_ASSIGNED } from '../../../lib/hostOperations/assignments.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { sessionHasHandoff } from '../../../lib/hostOperations/settle.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { normalizeAvailability, type AvailabilityInput } from './resolvers.agentTaskAlarms.js';
 import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
-import { postRepairNoticesDeferred, ALERT_KEY, type RepairNotice } from '../../../lib/agentTasks/hostRepairNotice.js';
+import { postRepairNoticesDeferred, type RepairNotice } from '../../../lib/agentTasks/hostRepairNotice.js';
 import { buildWorkerTerminal, repairRefusal, validateTerminalBatch, type StoredWorkerTerminal, type TerminalReportInput } from '../../../lib/workerTerminal.js';
 import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
 import {
@@ -152,7 +153,7 @@ export async function hostKeyEntry(ctx: Context, appRef: string): Promise<{ app:
 }
 
 /** A host-key write: the gate, then one transaction holding the App's anchor shared, re-checked, with the use recorded by `body`. */
-async function asHost<T>(
+export async function asHost<T>(
   ctx: Context,
   appRef: string,
   body: (tx: Prisma.TransactionClient, app: TaskApp, host: HostKey) => Promise<T>,
@@ -210,13 +211,17 @@ export const hostOperationMutations = {
     if (!input) throw badInput('input is required.');
     const { app, host, authorize } = await hostKeyEntry(ctx, input.appRef);
     const workers: { workerId: string; family: string; worktrees: string[] }[] = [];
+    /** The ref each listed worker was given by, so a per-row refusal names it as the host wrote it. */
+    const given = new Map<string, string>();
     for (const w of input.workers ?? []) {
       // A worker of another App, or none at all, is refused by the writer like a retired one: by its ref, no oracle.
       const id = (await resolveTaskWorkerId(ctx, app.id, w.worker)) ?? w.worker;
       workers.push({ workerId: id, family: w.family, worktrees: w.worktrees ?? [] });
+      if (!given.has(id)) given.set(id, w.worker);
     }
+    let notAssigned: string[] = [];
     try {
-      await registerHost(
+      ({ notAssigned } = await registerHost(
         ctx.db,
         {
           appId: app.id, hostId: host.hostId, label: input.label, pollIntervalSeconds: input.pollIntervalSeconds, workers,
@@ -227,7 +232,7 @@ export const hostOperationMutations = {
           authorize,
           afterWrite: (tx, r) => recordHostKeyUse(tx, host, 'register', { count: r.workerCount }),
         },
-      );
+      ));
     } catch (e) {
       if (e instanceof HostRegistrationError) {
         if (e.code === 'APP_NOT_LIVE') throw appNotFound(input.appRef);
@@ -237,7 +242,10 @@ export const hostOperationMutations = {
     }
     // A registration can make a worker launchable, so a queued task may now match (cor:agt:060:06).
     await matchAfterChange(ctx.db, app.id);
-    return loadRegistrationView(ctx, app.id, host.hostId);
+    // #4222: under a server-held setup, the workers this host listed that the platform did not assign to it. One
+    // code for every reason (unassigned, another host's, retired, another App's, naming nothing): no oracle.
+    const refusedWorkers = notAssigned.map((id) => ({ worker: given.get(id) ?? id, code: HOST_WORKER_NOT_ASSIGNED }));
+    return { ...(await loadRegistrationView(ctx, app.id, host.hostId)), refusedWorkers };
   }),
 
   /**
@@ -488,7 +496,9 @@ export const hostOperationMutations = {
    * order, then the registration FOR SHARE once (workers before registration, as registerHost, so no cycle).
    *
    * The server builds what it stores (`buildWorkerTerminal`): `host` is the key's host and its registration's label,
-   * `reportedAt` is the server's clock. The report decides nothing. The alarm verdict is computed from the stored
+   * `reportedAt` is the server's clock. #4225 S4a: a report may carry the worker's context size (`contextTokens` with
+   * `contextMeasuredAt`, or neither); a malformed size refuses the batch like any other malformed field, and a worker
+   * this host does not run is refused for its row as before, so its size is never stored. The report decides nothing. The alarm verdict is computed from the stored
    * rows after the write and returned, never stored, and names only coordinators THIS host registers.
    */
   setHostWorkerTerminals: async (
@@ -553,13 +563,14 @@ export const hostOperationMutations = {
         const terminal = buildWorkerTerminal(r, { id: host.hostId, label: reg.label }, now);
         // A report with no repair outcome, or a relaunch, re-arms the once-per-worker alert (the marker is only ever
         // `alert` here; a relaunch's own marker is claimed with its post).
-        const rearm = (r.repair === null || r.repair === 'RELAUNCHED') && w.repairNoticeKey === ALERT_KEY;
+        // #4247: the marker is `alert` or `<outcome>:<reason>` for an alert, and `relaunched:<time>` for a relaunch (kept).
+        const rearm = (r.repair === null || r.repair === 'RELAUNCHED') && w.repairNoticeKey !== null && !w.repairNoticeKey.startsWith('relaunched:');
         await tx.worker.update({
           where: { id },
           data: { terminal: terminal as unknown as Prisma.InputJsonObject, ...(rearm ? { repairNoticeKey: null } : {}) },
         });
         stored.push({ id, urn: composeWorkerUrn(app.urn, w.slug) });
-        if (r.repair) notices.push({ workerId: id, workerName: w.name, hostLabel: reg.label, repair: r.repair, attempt: r.attempt, checkedAt: r.checkedAt });
+        if (r.repair) notices.push({ workerId: id, workerName: w.name, hostLabel: reg.label, repair: r.repair, repairReason: r.repairReason, attempt: r.attempt, checkedAt: r.checkedAt });
       }
       await recordHostKeyUse(tx, host, 'terminal', { count: stored.length });
       return { stored, refused };
@@ -680,7 +691,7 @@ export const hostOperationMutations = {
   /** Register the durable checkpoint before any process control (§3.4). */
   registerContextResetRecovery: (
     _: unknown,
-    { input }: { input: ResetStepInput & { checkpointNode?: string | null; checkpoint?: {title:string;content:string} | null; sessionId: string; taskId: string } },
+    { input }: { input: ResetStepInput & { checkpointNode?: string | null; checkpoint?: {title:string;content:string} | null; sessionId: string; taskId?: string | null } },
     ctx: Context,
   ) => {
     let write: CheckpointWrite | undefined;
@@ -765,7 +776,8 @@ async function issueWorkerStart(
         throw taskError('HOST_OPERATION_NOT_PERMITTED', 'Only whoever manages the App starts a worker through its host.');
       }
       const now = new Date();
-      const hold = await lockStartableWorker(tx, freshApp.id, workerId, now);
+      // #4237: a manager's own start keeps the live test (cor:agt:070:05): restarting a quiet worker is deliberate.
+      const hold = await lockStartableWorker(tx, freshApp.id, workerId, now, 'live');
       // Diego P2-2: the registration, its worktree and the lapse count hold still through the insert.
       await fenceHostDecision(tx, freshApp.id);
       const [reg] = await liveRegistrationsFor(tx, freshApp.id, workerId, now, hostId);
@@ -785,6 +797,8 @@ async function issueWorkerStart(
       const e = issuer(ctx, actor);
       id = await insertWorkerStart(tx, {
         appId: freshApp.id, hostId, workerId, worktree: args.worktree!, family: args.family!, taskId: args.taskId ?? null,
+        // #4230: the profile is the assignment's, never the caller's (worker.start takes no profile argument).
+        profile: reg.profile,
         issuer: actor.kind === 'worker'
           ? { issuedBy: 'worker', issuedByUserId: e.issuedByUserId, issuedByWorkerId: actor.workerId, issuedByAgentId: e.issuedByAgentId }
           : { issuedBy: 'user', issuedByUserId: e.issuedByUserId!, issuedByAgentId: e.issuedByAgentId },
@@ -818,7 +832,11 @@ function issuer(ctx: Context, actor: TaskActor) {
     : { issuedBy: 'user', issuedByUserId: actor.userId, issuedByWorkerId: null, issuedByAgentId: null };
 }
 
-/** A success's typed result: the created worktree for `worktree.create`; nothing for the others in this slice. */
+/**
+ * A success's typed result, by operation type: `{worktree}` for `worktree.create` (built here), `{sessionId}` for a
+ * succeeded `worker.start` and `{handoff}` (boolean) for `worker.end` (both set by `reportHostOperation`, which
+ * overwrites this function's null); null for the others. #4245 keeps the `HostOperation.result` SDL text in step.
+ */
 function successResult(type: HostOperationType, worktree: string | null | undefined): Prisma.InputJsonObject | null {
   if (type === 'worktree.create') {
     if (!isHostToken(worktree)) throw badInput('A created worktree reports its name: a host-operation token.');
@@ -854,6 +872,8 @@ async function loadRegistrationViews(ctx: Context, appId: string, hostId?: strin
     live: isRegistrationLive(r, now, checkIns),
     capabilities: r.capabilities,
     workers: r.workers.map((w) => ({ workerId: w.workerId, family: w.family, worktrees: w.worktrees })),
+    /** #4222: set only on registerHost's own answer. */
+    refusedWorkers: [] as { worker: string; code: string }[],
   }));
 }
 

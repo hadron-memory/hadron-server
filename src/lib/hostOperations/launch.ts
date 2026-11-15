@@ -8,10 +8,14 @@
  *
  * WHO STARTS (cor:agt:070:05, :08): whoever manages the App, by hand, with or
  * without a task; and the platform, when a task is assigned (by hand or by
- * matching) to a held worker with no live session that has an existing
- * worktree on a live host. A worker nobody holds is never started. Without such
- * a worktree nothing is issued and the task waits (the not-started alarm tells
- * its owner). Nothing here creates a worktree (cor:agt:070:06).
+ * matching) to a held worker with no open session that has an existing
+ * worktree on a live host. "Open", not "live", is Vera's V16 (ruling 0265;
+ * drafted in 070:08 as Proposed, #4226), built by #4237: a worker with an open
+ * session, quiet or live, is reached through it, never started over it. A
+ * worker nobody holds is never started. Without such a worktree nothing is
+ * issued and the task waits (the not-started alarm tells its owner). Nothing
+ * here creates a worktree (cor:agt:070:06; resetting an existing one inside the
+ * start is drafted as Proposed there, G6, #4226).
  *
  * THE GRANT (A): the agent a host starts runs on the HOLDER's own token,
  * already configured on that host. The host passes it a single-use grant, minted
@@ -35,6 +39,7 @@ import { generateId } from '../id.js';
 import { toNaiveUtc } from '../sessionActivity.js';
 import { HOST_LAPSE_CHECK_INS_DEFAULT, lockAppHostLapse } from '../agentTasks/hosts.js';
 import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
+import { ASSIGNMENT_FAMILY, ASSIGNMENT_IN_EFFECT, ASSIGNMENT_JOIN, ASSIGNMENT_PROFILE, ASSIGNMENT_WORKTREES, lockHostSetup } from './assignments.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 
 /** A grant lives this long after it is minted (Proposed: long enough to start an agent, short enough to be useless later). */
@@ -53,50 +58,91 @@ export class LaunchRefusal extends Error {
   }
 }
 
-/** The live registrations of `hostId` (or every host) that list the worker, with its family and worktrees. */
+/**
+ * The live registrations of `hostId` (or every host) that list the worker, with the family it starts as and the
+ * worktrees a start may name there. #4222: under `hostSetupSource: server` these are the ASSIGNMENT's family and its
+ * one workdir, and a host the worker is not assigned to, or whose registration does not list that workdir, is absent
+ * (so nothing is issued and the task waits, cor:agt:070:08). Under `host` they are the registration's own, unchanged.
+ * #4230: `profile` is the assignment's launcher profile under `server` (each field null when unset), and null under
+ * `host`: a start carries only what the platform holds.
+ */
 export async function liveRegistrationsFor(
   db: Db,
   appId: string,
   workerId: string,
   now: Date,
   hostId?: string,
-): Promise<{ hostId: string; family: string; worktrees: string[] }[]> {
-  const rows = await db.$queryRaw<{ hostId: string; family: string; worktrees: string[] }[]>`
-    SELECT r.host_id AS "hostId", w.family, w.worktrees
+): Promise<{ hostId: string; family: string; worktrees: string[]; profile: LauncherProfile | null }[]> {
+  const rows = await db.$queryRaw<({ hostId: string; family: string; worktrees: string[]; server: boolean } & LauncherProfile)[]>`
+    SELECT r.host_id AS "hostId", ${ASSIGNMENT_FAMILY} AS family, ${ASSIGNMENT_WORKTREES} AS worktrees, ${ASSIGNMENT_PROFILE},
+      a.host_setup_source = 'server' AS server
     FROM host_registrations r
     JOIN host_registration_workers w ON w.registration_id = r.id AND w.worker_id = ${workerId}
+    JOIN apps a ON a.id = r.app_id
+    ${ASSIGNMENT_JOIN}
     LEFT JOIN agent_task_stall_schedule s ON s.app_id = r.app_id
     WHERE r.app_id = ${appId}
+      AND ${ASSIGNMENT_IN_EFFECT}
       ${hostId ? Prisma.sql`AND r.host_id = ${hostId}` : Prisma.empty}
       AND r.refreshed_at + make_interval(secs => r.poll_interval_seconds * COALESCE(s.host_lapse_check_ins, ${HOST_LAPSE_CHECK_INS_DEFAULT})) >= ${toNaiveUtc(now)}::timestamp
     ORDER BY r.host_id`;
-  return rows.flatMap((r) => {
+  return rows.flatMap(({ model, effort, accountProfile, server, ...r }) => {
     const family = normalizeFamily(r.family);
-    return family ? [{ ...r, family }] : [];
+    return family ? [{ ...r, family, profile: server ? { model, effort, accountProfile } : null }] : [];
   });
 }
 
-/** Does the worker have a live session now (cor:agt:020:11, the roster's and the bind's one predicate)? */
-async function hasLiveSession(db: Db, workerId: string, now: Date): Promise<boolean> {
-  const { loadWorkersActivity } = await import('../../api/graphql/schema/resolvers.worker.js');
-  return (await loadWorkersActivity({ db } as unknown as Context, [workerId], now)).get(workerId)?.hasLiveSession ?? false;
+/** #4230 (S1b, decision G1): the typed launcher fields a start carries besides its family; never a command. */
+export type LauncherProfile = { model: string | null; effort: string | null; accountProfile: string | null };
+
+/** The profile's set fields, as start arguments: an unset field is absent, never an empty or null value. */
+function profileArgs(p: LauncherProfile | null | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (p?.model) out.model = p.model;
+  if (p?.effort) out.effort = p.effort;
+  if (p?.accountProfile) out.accountProfile = p.accountProfile;
+  return out;
 }
+
+/**
+ * The worker's activity row (cor:agt:020:11, the roster's and the bind's one fold): `hasLiveSession`, and `bound`, an
+ * open (not ended) session however quiet, the same fact the matcher's `needsHostStart` reads.
+ */
+async function sessionStateOf(db: Db, workerId: string, now: Date): Promise<{ live: boolean; open: boolean }> {
+  const { loadWorkersActivity } = await import('../../api/graphql/schema/resolvers.worker.js');
+  const a = (await loadWorkersActivity({ db } as unknown as Context, [workerId], now)).get(workerId);
+  return { live: a?.hasLiveSession ?? false, open: a?.bound ?? false };
+}
+
+/**
+ * Which session refuses a start. `'live'`: a manager's own start (cor:agt:070:05), a deliberate act that may start a
+ * worker whose open session is quiet. `'open'`: every platform start for an assignment (cor:agt:070:08 as narrowed by
+ * V16, ruling 0265; #4237): a worker with an open session, live or quiet, is reached through it by the assignment
+ * notice and never started over (#1114, #3818).
+ */
+export type StartRefusalWindow = 'live' | 'open';
 
 /**
  * The checks every start shares, on the transaction client with the worker row
  * locked FOR UPDATE (so two starts of one worker serialize): the worker is of
- * the App, not retired, held, has no live session and no start in flight. Throws
- * {@link LaunchRefusal}.
+ * the App, not retired, held, has no live (or, for `refuse: 'open'`, no open)
+ * session and no start in flight. Throws {@link LaunchRefusal}.
  */
-export async function lockStartableWorker(tx: Prisma.TransactionClient, appId: string, workerId: string, now: Date): Promise<StartHold> {
+export async function lockStartableWorker(
+  tx: Prisma.TransactionClient, appId: string, workerId: string, now: Date, refuse: StartRefusalWindow,
+): Promise<StartHold> {
   const [w] = await tx.$queryRaw<{ appId: string; retiredAt: Date | null; heldByUserId: string | null; heldAt: Date | null }[]>`
     SELECT app_id AS "appId", retired_at AS "retiredAt", held_by_user_id AS "heldByUserId", held_at AS "heldAt"
     FROM workers WHERE id = ${workerId} FOR UPDATE`;
   if (!w || w.appId !== appId) throw new LaunchRefusal('WORKER_NOT_FOUND', 'Worker not found.');
   if (w.retiredAt) throw new LaunchRefusal('WORKER_RETIRED', 'This worker is retired.');
-  // cor:agt:070:08: a worker nobody holds is never started; there is nobody to bind it on behalf of.
+  // cor:agt:070:08 (kept by the Team on Orca drafts, G5, #4226): a worker nobody holds is never started; there is
+  // nobody to bind it on behalf of.
   if (!w.heldByUserId) throw new LaunchRefusal('WORKER_NOT_HELD', 'Nobody holds this worker, so no host starts it.');
-  if (await hasLiveSession(tx, workerId, now)) throw new LaunchRefusal('WORKER_LIVE', 'This worker already has a live session.');
+  const session = await sessionStateOf(tx, workerId, now);
+  if (session.live) throw new LaunchRefusal('WORKER_LIVE', 'This worker already has a live session.');
+  // V16 (Proposed in 070:08, #4226), built by #4237: a platform start for an assignment needs no OPEN session.
+  if (refuse === 'open' && session.open) throw new LaunchRefusal('WORKER_SESSION_OPEN', 'This worker has an open session; the assignment reaches it there.');
   const pending = await tx.hostOperation.findFirst({
     where: { workerId, type: 'worker.start', status: { in: ['issued', 'collected'] } },
     select: { id: true },
@@ -118,11 +164,16 @@ export function sameHold(issued: { holdUserId: string | null; holdAt: Date | nul
  * protocol): the App's host-lapse lock SHARED with its count (a count change waits), then every registration of the
  * App FOR SHARE (a refresh that would drop the worker or its worktree waits), BEFORE the separate read of which hosts
  * are live and list the worker. Taken after the worker row: registerHost takes the workers it lists FOR SHARE before
- * its registration row, so the orders never cycle.
+ * its registration row, so the orders never cycle. #4222 adds the App's host-setup lock SHARED, BEFORE the
+ * registration rows, as registerHost takes it before its own row (a writer of an assignment or of the switch takes it
+ * exclusive, after its own worker row and never with a registration row). Taken after them instead, a start queued
+ * behind a writer would hold the rows a registration holding the lock shared waits for (#4241, Diego P2-1).
  */
 export async function fenceHostDecision(tx: Prisma.TransactionClient, appId: string): Promise<void> {
   await lockAppHostLapse(tx, appId, 'shared');
   await tx.$queryRaw`SELECT app_id FROM agent_task_stall_schedule WHERE app_id = ${appId} FOR SHARE`;
+  // #4222: the switch and the assignments too (an unassign or a switch change waits), before the registration rows.
+  await lockHostSetup(tx, appId, 'shared');
   await tx.$queryRaw`SELECT id FROM host_registrations WHERE app_id = ${appId} ORDER BY id FOR SHARE`;
 }
 
@@ -131,26 +182,41 @@ export async function insertWorkerStart(
   tx: Prisma.TransactionClient,
   a: {
     appId: string; hostId: string; workerId: string; worktree: string; family: string; taskId: string | null;
+    /**
+     * #4230: the assignment's launcher profile (from {@link liveRegistrationsFor}); none under `host`. With a profile the
+     * start also carries the Agent's lifecycle, read here, in the start's own transaction, so the launcher needs no
+     * second read that a lifecycle change could race (Peter #108323).
+     */
+    profile?: LauncherProfile | null;
     issuer:
       | { issuedBy: 'platform' }
       | { issuedBy: 'user'; issuedByUserId: string; issuedByAgentId: string | null }
       // #3321: a worker on its holder's instruction; the session it starts is still the manager's kind of launch.
       | { issuedBy: 'worker'; issuedByUserId: string | null; issuedByWorkerId: string; issuedByAgentId: string | null };
     hold: StartHold;
+    /** #4231: why the platform issued a start with no task (`DESIRED_RUNNING`); omitted for every other start. */
+    issuedReason?: 'DESIRED_RUNNING';
   },
 ): Promise<string> {
   const id = generateId();
+  let lifecycle: Record<string, string> = {};
+  if (a.profile) {
+    const [row] = await tx.$queryRaw<{ lifecycle: string }[]>`
+      SELECT ag.lifecycle::text AS lifecycle FROM workers w JOIN agents ag ON ag.id = w.agent_id WHERE w.id = ${a.workerId}`;
+    if (row) lifecycle = { lifecycle: row.lifecycle };
+  }
   await tx.hostOperation.create({
     data: {
       id,
       appId: a.appId,
       hostId: a.hostId,
       type: 'worker.start',
-      args: { workerId: a.workerId, worktree: a.worktree, family: a.family, ...(a.taskId ? { taskId: a.taskId } : {}) },
+      args: { workerId: a.workerId, worktree: a.worktree, family: a.family, ...profileArgs(a.profile), ...lifecycle, ...(a.taskId ? { taskId: a.taskId } : {}) },
       workerId: a.workerId,
       ...a.issuer,
       holdUserId: a.hold.userId,
       holdAt: a.hold.at,
+      ...(a.issuedReason ? { issuedReason: a.issuedReason } : {}),
     },
   });
   return id;
@@ -158,7 +224,8 @@ export async function insertWorkerStart(
 
 /**
  * cor:agt:070:08 — the platform's start for an assignment: if the task's worker
- * assignee is held, has no live session and an existing worktree on a live host,
+ * assignee is held, has no open session (V16, Proposed in the rule; #4237) and an
+ * existing worktree on a live host,
  * issue `worker.start` there (the first such host by id, and the first worktree
  * it lists: Proposed). Otherwise nothing is issued and the task waits. Runs
  * AFTER the assignment committed, in its own transaction; never fails the
@@ -180,8 +247,12 @@ export async function launchForAssignment(
         ...(owner?.organizationId ? [{ kind: 'org' as const, id: owner.organizationId }] : []),
         ...(owner?.ownerUserId ? [{ kind: 'user' as const, id: owner.ownerUserId }] : []),
       ], 'shared');
-      const app = await tx.app.findUnique({ where: { id: a.appId }, select: { deletedAt: true, uninstalledAt: true } });
+      const app = await tx.app.findUnique({ where: { id: a.appId }, select: { deletedAt: true, uninstalledAt: true, teamPausedAt: true } });
       if (!app || app.deletedAt || app.uninstalledAt) return null;
+      // #4223 (S2 of #4229): under a team pause (cor:agt:100:04) the platform starts nobody; the task waits until
+      // the pause is lifted (launchAfterTeamResume), and its not-started alarm tells its owner meanwhile. The pause writer takes the App's anchor exclusively, so this is the pause
+      // in force. A manager's own start (cor:agt:070:05) is not this path.
+      if (app.teamPausedAt) return null;
       // #2022 (cor:agt:090:03 edge case): a worker a live stop signal covers is never started for a task. The fence
       // orders this with a signal set after the assignment committed; a manager's own start is not this path.
       await lockStopFence(tx, a.appId, 'shared');
@@ -191,7 +262,7 @@ export async function launchForAssignment(
       if (!task || task.assigneeWorkerId !== a.workerId || !['pending', 'started'].includes(task.status)) return null;
       let hold: StartHold;
       try {
-        hold = await lockStartableWorker(tx, a.appId, a.workerId, now);
+        hold = await lockStartableWorker(tx, a.appId, a.workerId, now, 'open');
       } catch (e) {
         if (e instanceof LaunchRefusal) return null;
         throw e;
@@ -201,12 +272,51 @@ export async function launchForAssignment(
       if (!reg) return null;
       return insertWorkerStart(tx, {
         appId: a.appId, hostId: reg.hostId, workerId: a.workerId, worktree: reg.worktrees[0]!, family: reg.family,
-        taskId: a.taskId, issuer: { issuedBy: 'platform' }, hold,
+        profile: reg.profile, taskId: a.taskId, issuer: { issuedBy: 'platform' }, hold,
       });
     });
   } catch (err) {
     console.error('[host-launch] launching an assigned worker failed:', a, err);
     return null;
+  }
+}
+
+/**
+ * #4223 (Peter, team chat #108945): after a team pause is lifted, start the workers whose tasks were assigned DURING
+ * it, which {@link launchForAssignment} left waiting. Only those: a task assigned at or after `pausedAt`, still
+ * pending or started, still that worker's; one per worker (a pending one first, then the earliest assigned). Every
+ * older open task is left exactly as a lift left it before the pause stopped any start, so lifting a pause never
+ * starts a team's whole roster. Each start goes through launchForAssignment, with all its checks (held, no open
+ * session, no start in flight, no stop signal, a live host with the worktree). The family is the one an assignment's
+ * own launch would have named: the matcher's, when the task's LATEST assignment event is a match; none when it is a
+ * hand assignment or reassignment (`launchAssignee` names none either), even if an earlier match of the same task
+ * named one (#4253 blind delta, Cedric N1). A task assigned after the lift had its own launch at its assignment, so
+ * the window needs no upper bound: a second call for it finds that start in flight or its session open.
+ * launchForAssignment never throws (it logs and returns null), so one task cannot stop the rest. Runs after the lift
+ * committed; never fails it. Returns the operations issued.
+ */
+export async function launchAfterTeamResume(db: PrismaClient, appId: string, pausedAt: Date, now = new Date()): Promise<string[]> {
+  try {
+    const tasks = await db.$queryRaw<{ id: string; workerId: string; family: string | null }[]>`
+      SELECT DISTINCT ON (t.assignee_worker_id) t.id, t.assignee_worker_id AS "workerId",
+             (SELECT CASE WHEN e.type = 'assignment.matched' THEN e.payload ->> 'family' END
+              FROM agent_team_events e
+              WHERE e.task_id = t.id AND e.type IN ('task.assigned', 'task.reassigned', 'assignment.matched')
+              ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS family
+      FROM agent_tasks t
+      WHERE t.app_id = ${appId} AND t.assignee_worker_id IS NOT NULL AND t.status IN ('pending', 'started')
+        AND t.assigned_at >= ${toNaiveUtc(pausedAt)}::timestamp
+      ORDER BY t.assignee_worker_id, (t.status = 'pending') DESC, t.assigned_at, t.id`;
+    const issued: string[] = [];
+    for (const t of tasks) {
+      const family = normalizeFamily(t.family);
+      const op = await launchForAssignment(db, { appId, taskId: t.id, workerId: t.workerId, ...(family ? { family } : {}) }, now);
+      if (op) issued.push(op);
+    }
+    return issued;
+  } catch (err) {
+    console.error('[host-launch] starting workers after a team pause was lifted failed:', appId, err);
+    return [];
   }
 }
 
