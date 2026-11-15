@@ -14,9 +14,14 @@ import { generateId } from '../id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { startDesiredWorkers, START_FAILING_EVENT_TYPE } from './desiredStart.js';
+import { loadHostDesiredState } from './desiredState.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
+vi.mock('./desiredState.js', async (orig) => {
+  const m = await orig<typeof import('./desiredState.js')>();
+  return { ...m, loadHostDesiredState: vi.fn(m.loadHostDesiredState) };
+});
 
 const M = resolvers.Mutation as any;
 const ctx = (userId?: string): Context => ({ db, userId, roles: ['READER'] }) as Context;
@@ -30,6 +35,15 @@ let ada: { id: string };
 let kit: { id: string };
 let sam: { id: string };
 let orca1: { id: string };
+
+/** A second host, orca2, registering Kit in its own worktree. */
+async function registerOrca2() {
+  const k = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: `h-${generateId()}`, keyPreview: 'efgh', label: 'orca2' }, select: { id: true } });
+  await M.grantAppKeyScope({}, { id: k.id, scope: 'host:operate', hostId: 'orca2' }, ctx(admin.id));
+  await M.registerHost({}, { input: { appRef: app.id, label: 'Orca 2', pollIntervalSeconds: 600, workers: [
+    { worker: kit.id, family: 'claude', worktrees: ['hadron-server/kit2'] },
+  ] } }, keyCtx(k));
+}
 
 const starts = (workerId = kit.id) => db.hostOperation.findMany({ where: { workerId, type: 'worker.start' }, orderBy: { issuedAt: 'asc' } });
 const tick = (now = new Date()) => startDesiredWorkers(db, now);
@@ -115,6 +129,26 @@ describe('#4231: a long-lived worker that should run and has no session is start
   });
 });
 
+describe('#4231: one host failing does not stop the pass (#4257 blind F1, F2)', () => {
+  it('a host whose desired-state read throws is skipped; the worker still starts through the next host', async () => {
+    await registerOrca2();
+    vi.mocked(loadHostDesiredState).mockRejectedValueOnce(new Error('orca1 read failed'));
+    await tick();
+    const ops = await starts();
+    expect(ops, 'one host\'s failed read aborted the whole pass').toHaveLength(1);
+    expect(ops[0]).toMatchObject({ hostId: 'orca2' });
+  });
+
+  it('the first host by id has lapsed: the start goes through the next live host', async () => {
+    await registerOrca2();
+    await db.hostRegistration.updateMany({ where: { appId: app.id, hostId: 'orca1' }, data: { refreshedAt: new Date(Date.now() - 30 * 86_400_000) } });
+    await tick();
+    const ops = await starts();
+    expect(ops, 'a lapsed first host stopped the start').toHaveLength(1);
+    expect(ops[0]).toMatchObject({ hostId: 'orca2', args: { worktree: 'hadron-server/kit2' } });
+  });
+});
+
 describe('#4231 under hostSetupSource SERVER: only through a live host the worker is assigned to (S1a)', () => {
   const assign = (worker: string, hostId: string, workdir: string) =>
     M.assignHostWorker({}, { input: { appRef: app.id, hostId, worker, workdir, family: 'claude' } }, ctx(admin.id));
@@ -188,6 +222,33 @@ describe('#4231: three failed starts in an hour stop further starts and raise on
     expect(raised[0]).toMatchObject({ subjectWorkerId: kit.id, severity: 'alarm', taskId: null });
     expect(raised[0]!.chain).toEqual([{ workerId: ada.id }]);
     await tick();
+    expect(await alarms()).toHaveLength(1);
+  });
+
+  it('an hour after its alarm, a worker still failing is alarmed again; once the failures age out, starts resume', async () => {
+    for (const m of [58, 57, 56]) await failedStart(m);
+    await tick();
+    expect(await alarms()).toHaveLength(1);
+    // The episode opened 61 minutes ago and the worker is still failing: it rolls over, with exactly one new alarm.
+    await db.startFailingEpisode.updateMany({ where: { workerId: kit.id }, data: { openedAt: new Date(Date.now() - 61 * 60_000) } });
+    await tick();
+    await tick();
+    expect(await alarms(), 'the rolled-over episode raised no new alarm, or more than one').toHaveLength(2);
+    expect((await starts()).filter((o) => o.status === 'issued')).toHaveLength(0);
+    // Five minutes on, the failures have aged out of the hour: the start resumes with no further alarm.
+    await tick(new Date(Date.now() + 5 * 60_000));
+    expect((await starts()).filter((o) => o.status === 'issued'), 'starts did not resume once the failures aged out').toHaveLength(1);
+    expect(await alarms()).toHaveLength(2);
+  });
+
+  it('two concurrent passes issue one start', async () => {
+    await Promise.all([tick(), tick()]);
+    expect(await starts()).toHaveLength(1);
+  });
+
+  it('two concurrent passes under the trip raise one alarm', async () => {
+    for (const m of [50, 30, 10]) await failedStart(m);
+    await Promise.all([tick(), tick()]);
     expect(await alarms()).toHaveLength(1);
   });
 
