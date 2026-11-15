@@ -125,7 +125,14 @@ describe('the invariants file', () => {
   it('the migration carries a byte-identical copy and post-push includes it', () => {
     const source = readFileSync(new URL('../../../../prisma/host-assignment-invariants.sql', import.meta.url), 'utf8');
     const migration = readFileSync(new URL('../../../../prisma/migrations/20261115140000_host_worker_assignments/migration.sql', import.meta.url), 'utf8');
-    expect(migration.endsWith(`\n${source}`)).toBe(true);
+    // #4230 (S1b) changed only the shape CHECK's last clauses (launcher_profile gave way to effort and account_profile),
+    // and its migration carries the file as it is now; this one carries it as it was, with those clauses.
+    const profile = source.slice(source.indexOf('  -- #4230 (S1b, decision G1)'), source.indexOf('\n);', source.indexOf('  -- #4230 (S1b, decision G1)')));
+    expect(profile.length).toBeGreaterThan(0);
+    const s1a = source.replace(profile, '  (launcher_profile IS NULL OR (host_operation_token_ok(launcher_profile) AND length(launcher_profile) <= 128))');
+    expect(migration.endsWith(`\n${s1a}`)).toBe(true);
+    const s1b = readFileSync(new URL('../../../../prisma/migrations/20261115160000_host_launcher_profiles/migration.sql', import.meta.url), 'utf8');
+    expect(s1b.endsWith(`\n${source}`)).toBe(true);
     expect(readFileSync(new URL('../../../../prisma/post-push.sql', import.meta.url), 'utf8')).toContain('\\ir host-assignment-invariants.sql');
   });
 
@@ -159,7 +166,7 @@ describe('assignHostWorker: whoever manages the App states what a host runs', ()
     expect(rows(await setup(ctx(manager.id)))).toEqual([['orca1', kit.id, 'hadron-server/kit', 'claude', 'fable-5.2']]);
     const row = await db.hostWorkerAssignment.findFirstOrThrow({ where: { appId: app.id } });
     expect(row.createdByUserId).toBe(manager.id);
-    expect(row.launcherProfile).toBeNull();
+    expect([row.effort, row.accountProfile]).toEqual([null, null]); // #4230's profile fields, unset here
   });
 
   it('the family is normalized, the model is optional, and a worker may be assigned to two hosts', async () => {
@@ -194,12 +201,16 @@ describe('assignHostWorker: whoever manages the App states what a host runs', ()
     expect(await db.hostWorkerAssignment.count()).toBe(1);
   });
 
-  it('refuses a path, an option, a bad family, model or host id as BAD_HOST_ASSIGNMENT_ARGS', async () => {
+  it('refuses a path, an option or a bad host id as BAD_HOST_ASSIGNMENT_ARGS, and a bad family or model as BAD_LAUNCHER_PROFILE', async () => {
     for (const bad of [
       { workdir: '/home/orca/x' }, { workdir: '../x' }, { workdir: '-rf' }, { workdir: 'a//b' }, { workdir: 'a/' }, { workdir: '' },
-      { workdir: 'bash -c x' }, { family: 'claude code' }, { family: '' }, { model: 'a b' }, { model: '--dangerously' }, { hostId: '-x' }, { hostId: '' },
+      { workdir: 'bash -c x' }, { hostId: '-x' }, { hostId: '' },
     ]) {
       expect(await code(assign(bad)), JSON.stringify(bad)).toBe('BAD_HOST_ASSIGNMENT_ARGS');
+    }
+    // #4230: the family and model are the launcher profile's, and refuse with its code.
+    for (const bad of [{ family: 'claude code' }, { family: '' }, { model: 'a b' }, { model: '--dangerously' }]) {
+      expect(await code(assign(bad)), JSON.stringify(bad)).toBe('BAD_LAUNCHER_PROFILE');
     }
     expect(await db.hostWorkerAssignment.count()).toBe(0);
   });
@@ -350,8 +361,8 @@ describe('a start uses the assignment (cor:agt:070:08 unchanged: with none, noth
     const op = await task();
     expect(op).toMatchObject({ hostId: 'orca1', issuedBy: 'platform' });
     expect(op!.args).toMatchObject({ worktree: 'hadron-cli/kit', family: 'codex' });
-    // The model is a record only: a start carries no model (#4241 P3).
-    expect(op!.args).not.toHaveProperty('model');
+    // #4230 (S1b): a start now carries the assignment's model too (S1a's "a record only" ended there).
+    expect(op!.args).toMatchObject({ model: 'fable-5.2' });
     expect((await loadLaunchableFamilies(db, { appId: app.id }, new Date())).get(kit.id)).toEqual(['codex']);
   });
 

@@ -11862,12 +11862,14 @@ export const typeDefs = `#graphql
     """
     registerHost(input: RegisterHostInput!): HostRegistration!
     """
-    #4222 — assign a worker to a host of its App: the workdir it runs in there, its model family and, optionally, its
-    model (hrn:node:hadronmemory.com:specs:cor:agt:070:01, the change Proposed). Whoever manages the App
+    #4222 — assign a worker to a host of its App: the workdir it runs in there, and its launcher profile (#4230: family,
+    and optionally model, effort and accountProfile; hrn:node:hadronmemory.com:specs:cor:agt:070:01, the change
+    Proposed). Whoever manages the App
     (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), or a held worker on its holder's instruction; never an App key.
     A worker may be assigned to several hosts. The assignment is a record until the App's hostSetupSource is SERVER.
-    Refused BAD_HOST_ASSIGNMENT_ARGS (a field that is not its token shape: a path, an option, a command),
-    HOST_ASSIGNMENT_NOT_PERMITTED, WORKER_NOT_FOUND, WORKER_RETIRED, and HOST_ASSIGNMENT_EXISTS when this worker is
+    Refused BAD_HOST_ASSIGNMENT_ARGS (a workdir or host id that is not its token shape: a path, an option, a command),
+    BAD_LAUNCHER_PROFILE (a family no host has a launcher for, or a model, effort or accountProfile that is not a
+    profile token), HOST_ASSIGNMENT_NOT_PERMITTED, WORKER_NOT_FOUND, WORKER_RETIRED, and HOST_ASSIGNMENT_EXISTS when this worker is
     already assigned to that host and replace is not set. A refusal writes nothing.
     """
     assignHostWorker(input: AssignHostWorkerInput!, instruction: ActInstructionInput): HostWorkerAssignment!
@@ -16986,8 +16988,9 @@ export const typeDefs = `#graphql
   #4222 — one worker the platform says a host runs (hrn:node:hadronmemory.com:specs:cor:agt:070:01, the change Proposed).
   workdir is the name the host knows the worker's working directory by (an Orca worktree name, or a plain directory
   name for a worker without Git); like every argument a host acts on it is a name token, never a path, a command or a
-  credential (hrn:node:hadronmemory.com:specs:cor:agt:070:03). model is optional and a record only: a start carries the
-  workdir and family, never the model.
+  credential (hrn:node:hadronmemory.com:specs:cor:agt:070:03). #4230: family, model, effort and accountProfile are its
+  typed launcher profile, never a command (decision G1); while the App's hostSetupSource is SERVER a worker.start
+  carries the set ones, and the host builds the command from a fixed template for the family.
   """
   type HostWorkerAssignment {
     id: ID!
@@ -16997,6 +17000,10 @@ export const typeDefs = `#graphql
     workdir: String!
     family: String!
     model: String
+    "#4230 — the effort the launcher runs the model at, a profile token. Null when unset."
+    effort: String
+    "#4230 — the host-local account the launcher runs under, a profile token the host maps to its launcher; never a path or a credential. Null when unset."
+    accountProfile: String
     createdByUserId: ID!
     createdAt: DateTime!
     updatedAt: DateTime!
@@ -17016,10 +17023,14 @@ export const typeDefs = `#graphql
     worker: String!
     "The name the host knows the working directory by: a name token (letters, digits and . _ / @ + -, starting with a letter or digit, no .., // or trailing /), at most 256 characters."
     workdir: String!
-    "The model family it runs as there, e.g. claude or codex."
+    "The model family it runs as there: one a host has a launcher for (claude, codex, glm or kimi)."
     family: String!
-    "The model, a name token of at most 128 characters. Optional. A record only: a start carries the workdir and family, not the model."
+    "The model, a profile token: letters, digits, . _ or -, starting with a letter or digit, at most 128 characters. Optional."
     model: String
+    "#4230 — the effort, a profile token. Optional."
+    effort: String
+    "#4230 — the host-local account profile the launcher runs under, a profile token. Optional."
+    accountProfile: String
     "Change an existing assignment of this worker to this host instead of refusing HOST_ASSIGNMENT_EXISTS."
     replace: Boolean
   }

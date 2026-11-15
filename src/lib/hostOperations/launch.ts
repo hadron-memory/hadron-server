@@ -39,7 +39,7 @@ import { generateId } from '../id.js';
 import { toNaiveUtc } from '../sessionActivity.js';
 import { HOST_LAPSE_CHECK_INS_DEFAULT, lockAppHostLapse } from '../agentTasks/hosts.js';
 import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
-import { ASSIGNMENT_FAMILY, ASSIGNMENT_IN_EFFECT, ASSIGNMENT_JOIN, ASSIGNMENT_WORKTREES, lockHostSetup } from './assignments.js';
+import { ASSIGNMENT_FAMILY, ASSIGNMENT_IN_EFFECT, ASSIGNMENT_JOIN, ASSIGNMENT_PROFILE, ASSIGNMENT_WORKTREES, lockHostSetup } from './assignments.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 
 /** A grant lives this long after it is minted (Proposed: long enough to start an agent, short enough to be useless later). */
@@ -63,6 +63,8 @@ export class LaunchRefusal extends Error {
  * worktrees a start may name there. #4222: under `hostSetupSource: server` these are the ASSIGNMENT's family and its
  * one workdir, and a host the worker is not assigned to, or whose registration does not list that workdir, is absent
  * (so nothing is issued and the task waits, cor:agt:070:08). Under `host` they are the registration's own, unchanged.
+ * #4230: `profile` is the assignment's launcher profile under `server` (each field null when unset), and all null under
+ * `host`: a start carries only what the platform holds.
  */
 export async function liveRegistrationsFor(
   db: Db,
@@ -70,9 +72,9 @@ export async function liveRegistrationsFor(
   workerId: string,
   now: Date,
   hostId?: string,
-): Promise<{ hostId: string; family: string; worktrees: string[] }[]> {
-  const rows = await db.$queryRaw<{ hostId: string; family: string; worktrees: string[] }[]>`
-    SELECT r.host_id AS "hostId", ${ASSIGNMENT_FAMILY} AS family, ${ASSIGNMENT_WORKTREES} AS worktrees
+): Promise<{ hostId: string; family: string; worktrees: string[]; profile: LauncherProfile }[]> {
+  const rows = await db.$queryRaw<({ hostId: string; family: string; worktrees: string[] } & LauncherProfile)[]>`
+    SELECT r.host_id AS "hostId", ${ASSIGNMENT_FAMILY} AS family, ${ASSIGNMENT_WORKTREES} AS worktrees, ${ASSIGNMENT_PROFILE}
     FROM host_registrations r
     JOIN host_registration_workers w ON w.registration_id = r.id AND w.worker_id = ${workerId}
     JOIN apps a ON a.id = r.app_id
@@ -83,10 +85,22 @@ export async function liveRegistrationsFor(
       ${hostId ? Prisma.sql`AND r.host_id = ${hostId}` : Prisma.empty}
       AND r.refreshed_at + make_interval(secs => r.poll_interval_seconds * COALESCE(s.host_lapse_check_ins, ${HOST_LAPSE_CHECK_INS_DEFAULT})) >= ${toNaiveUtc(now)}::timestamp
     ORDER BY r.host_id`;
-  return rows.flatMap((r) => {
+  return rows.flatMap(({ model, effort, accountProfile, ...r }) => {
     const family = normalizeFamily(r.family);
-    return family ? [{ ...r, family }] : [];
+    return family ? [{ ...r, family, profile: { model, effort, accountProfile } }] : [];
   });
+}
+
+/** #4230 (S1b, decision G1): the typed launcher fields a start carries besides its family; never a command. */
+export type LauncherProfile = { model: string | null; effort: string | null; accountProfile: string | null };
+
+/** The profile's set fields, as start arguments: an unset field is absent, never an empty or null value. */
+function profileArgs(p: LauncherProfile | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (p?.model) out.model = p.model;
+  if (p?.effort) out.effort = p.effort;
+  if (p?.accountProfile) out.accountProfile = p.accountProfile;
+  return out;
 }
 
 /**
@@ -167,6 +181,8 @@ export async function insertWorkerStart(
   tx: Prisma.TransactionClient,
   a: {
     appId: string; hostId: string; workerId: string; worktree: string; family: string; taskId: string | null;
+    /** #4230: the assignment's launcher profile (from {@link liveRegistrationsFor}); none under `host`. */
+    profile?: LauncherProfile;
     issuer:
       | { issuedBy: 'platform' }
       | { issuedBy: 'user'; issuedByUserId: string; issuedByAgentId: string | null }
@@ -182,7 +198,7 @@ export async function insertWorkerStart(
       appId: a.appId,
       hostId: a.hostId,
       type: 'worker.start',
-      args: { workerId: a.workerId, worktree: a.worktree, family: a.family, ...(a.taskId ? { taskId: a.taskId } : {}) },
+      args: { workerId: a.workerId, worktree: a.worktree, family: a.family, ...profileArgs(a.profile), ...(a.taskId ? { taskId: a.taskId } : {}) },
       workerId: a.workerId,
       ...a.issuer,
       holdUserId: a.hold.userId,
@@ -238,7 +254,7 @@ export async function launchForAssignment(
       if (!reg) return null;
       return insertWorkerStart(tx, {
         appId: a.appId, hostId: reg.hostId, workerId: a.workerId, worktree: reg.worktrees[0]!, family: reg.family,
-        taskId: a.taskId, issuer: { issuedBy: 'platform' }, hold,
+        profile: reg.profile, taskId: a.taskId, issuer: { issuedBy: 'platform' }, hold,
       });
     });
   } catch (err) {

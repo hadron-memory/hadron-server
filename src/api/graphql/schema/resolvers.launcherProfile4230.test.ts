@@ -70,28 +70,6 @@ const register = (k: { id: string }, workers: unknown[] = []) =>
   M.registerHost({}, { input: { appRef: app.id, label: 'Orca', pollIntervalSeconds: 600, workers } }, keyCtx(k));
 const rows = (s: { assignments: any[] }) => s.assignments.map((a) => [a.hostId, a.workerId, a.workdir, a.family, a.model]);
 
-/** A raw connection on this run's database (the per-worker URL), for interleavings Prisma cannot hold open. */
-async function pgClient(): Promise<Client> {
-  const c = new Client({ connectionString: process.env.DATABASE_URL });
-  await c.connect();
-  return c;
-}
-/** Resolves once PostgreSQL reports a backend waiting for a lock: `pid` given, that backend; else any backend waiting
- * for the App's host-setup advisory lock. Polls pg_locks, never a sleep; fails after 10 s (#4241, Diego P3). */
-async function untilWaiting(probe: Client, a: { pid?: number; setupOf?: string }): Promise<void> {
-  for (let i = 0; i < 400; i++) {
-    const { rowCount } = a.pid !== undefined
-      ? await probe.query('SELECT 1 FROM pg_locks WHERE pid = $1 AND NOT granted', [a.pid])
-      : await probe.query(
-        `SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted
-           AND objid::bigint = (hashtext($1)::bigint & 4294967295)`, [`host-setup:${a.setupOf}`]);
-    if (rowCount) return;
-    await new Promise((r) => setTimeout(r, 25));
-  }
-  throw new Error('no backend ever waited for the lock');
-}
-const insertAssignmentSql = `INSERT INTO host_worker_assignments (id, app_id, host_id, worker_id, workdir, family, created_by_user_id)
-  VALUES ($1, $2, 'orca1', $3, 'hadron-server/kit', 'claude', $4)`;
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -225,7 +203,8 @@ describe('acceptance 3: worker.start carries the profile tokens and no command',
   });
 
   it("the database's check on host-operation args admits the profile tokens and nothing else", async () => {
-    const base = { id: generateId(), appId: app.id, hostId: 'orca1', type: 'worker.start', workerId: kit.id, issuedBy: 'platform' };
+    // A start records the hold it was issued under (#1883, prisma/host-launch-invariants.sql).
+    const base = { id: generateId(), appId: app.id, hostId: 'orca1', type: 'worker.start', workerId: kit.id, issuedBy: 'platform', holdUserId: holder.id };
     const args = { workerId: kit.id, worktree: 'hadron-server/kit', family: 'claude' };
     await expect(db.hostOperation.create({ data: { ...base, args: { ...args, model: 'claude-opus-5-5', effort: 'high', accountProfile: 'worker' } } })).resolves.toBeTruthy();
     for (const bad of [{ accountProfile: 'a b' }, { model: 'a/b' }, { effort: '$(id)' }, { command: 'claude' }, { accountProfile: 1 }]) {

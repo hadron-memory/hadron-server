@@ -55,7 +55,17 @@ describe('the invariants file', () => {
     const block = "-- #2771 (proposed cor:agt:070:09) — a worker's stored terminal report";
     const head = source.slice(0, source.indexOf(block));
     expect(source.indexOf(block)).toBeGreaterThan(0);
-    expect(migration.endsWith(`\n${(head + migration.slice(migration.indexOf(block))).replaceAll(", 'checkpoint'", '')}`)).toBe(true);
+    // #4230 (S1b) widened worker.start's optional keys in host_operation_args_ok; its migration carries the function as
+    // it is now, so the old copy is compared with the function as it was (the S1b lines taken out).
+    const S1B_KEYS = "    -- #4230 (S1b, decision G1): a start may carry its assignment's typed launcher profile, never a command.\n";
+    const S1B_CHECK = "\n    ELSIF op_type = 'worker.start' AND k IN ('model', 'effort', 'accountProfile') THEN\n      IF NOT (v #>> '{}') ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' THEN RETURN false; END IF;";
+    expect(head.includes(S1B_KEYS) && head.includes(S1B_CHECK)).toBe(true);
+    const pre4230 = head.replace(S1B_KEYS, '').replace(", 'model', 'effort', 'accountProfile']", ']').replace(S1B_CHECK, '');
+    expect(migration.endsWith(`\n${(pre4230 + migration.slice(migration.indexOf(block))).replaceAll(", 'checkpoint'", '')}`)).toBe(true);
+    const fnStart = source.indexOf('-- cor:agt:070:03 — the closed set of typed operations');
+    const fn = source.slice(fnStart, source.indexOf('$$;\n', fnStart) + 4);
+    const s1b = readFileSync(new URL('../../../prisma/migrations/20261115160000_host_launcher_profiles/migration.sql', import.meta.url), 'utf8');
+    expect(s1b).toContain(`\n${fn}`);
     const context = readFileSync(new URL('../../../prisma/migrations/20261115120000_worker_terminal_context/migration.sql', import.meta.url), 'utf8');
     expect(context.endsWith(`\n${source.slice(source.indexOf(block))}`)).toBe(true);
     const checkpoint = readFileSync(new URL('../../../prisma/migrations/20261103014500_host_checkpoint_use_action/migration.sql', import.meta.url),'utf8');

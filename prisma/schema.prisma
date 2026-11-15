@@ -6643,8 +6643,8 @@ model HostRegistrationWorker {
 
 /// #4222 (S1a of #4229; cor:agt:070:01, change Proposed) — one worker the platform says a host of a team App runs:
 /// the working directory it runs in there (a name token the host resolves: an Orca worktree name, or a plain
-/// directory name for a worker without Git), the model family and, optionally, the model. Never a path, a command
-/// or a credential (cor:agt:070:03). `launcherProfile` is #4230's (S1b); nothing writes it yet. Set and removed by
+/// directory name for a worker without Git), and its launcher profile (#4230, S1b: family, model, effort, accountProfile,
+/// each a token). Never a path, a command or a credential (cor:agt:070:03). Set and removed by
 /// whoever manages the App. In effect only while the worker is not retired, and used by registration and by starts
 /// only while the App's `hostSetupSource` is `server`. Shape: prisma/host-assignment-invariants.sql.
 model HostWorkerAssignment {
@@ -6655,7 +6655,10 @@ model HostWorkerAssignment {
   workdir         String
   family          String
   model           String?
-  launcherProfile String?  @map("launcher_profile")
+  /// #4230 (S1b, decision G1): the launcher profile is typed fields, never a command. family above, model, and these two.
+  effort          String?
+  /// The host-local account the launcher runs under (a token the host maps to its launcher; never a path or credential).
+  accountProfile  String?  @map("account_profile")
   /// The person who made the assignment (a plain id, like a host operation's issuer: it outlives the account).
   createdByUserId String   @map("created_by_user_id")
   createdAt       DateTime @default(now()) @map("created_at")

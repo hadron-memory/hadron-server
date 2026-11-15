@@ -51,7 +51,8 @@ const notPermitted = () =>
   taskError('HOST_ASSIGNMENT_NOT_PERMITTED', 'Only whoever manages the App says which workers its hosts run.');
 
 type AssignInput = {
-  appRef: string; hostId: string; worker: string; workdir: string; family: string; model?: string | null; replace?: boolean | null;
+  appRef: string; hostId: string; worker: string; workdir: string; family: string; model?: string | null;
+  effort?: string | null; accountProfile?: string | null; replace?: boolean | null;
 };
 
 /**
@@ -87,8 +88,9 @@ const record = (tx: Prisma.TransactionClient, appId: string, actor: TaskActor, a
 
 export const hostAssignmentMutations = {
   /**
-   * #4222 — assign a worker to a host of its App: the workdir it runs in there, its family and, optionally, its
-   * model. Refusals, in order: BAD_HOST_ASSIGNMENT_ARGS (the caller's own input), HOST_ASSIGNMENT_NOT_PERMITTED,
+   * #4222 — assign a worker to a host of its App: the workdir it runs in there, and its launcher profile (#4230:
+   * family, and optionally model, effort and accountProfile). Refusals, in order: BAD_HOST_ASSIGNMENT_ARGS (the
+   * workdir or host id) or BAD_LAUNCHER_PROFILE (a profile field), both the caller's own input; HOST_ASSIGNMENT_NOT_PERMITTED,
    * WORKER_NOT_FOUND, WORKER_RETIRED, HOST_ASSIGNMENT_EXISTS (unless `replace`). Nothing is written on a refusal.
    */
   assignHostWorker: async (_: unknown, { input, instruction }: { input: AssignInput; instruction?: ActInstruction | null }, ctx: Context) => {
@@ -119,9 +121,10 @@ export const hostAssignmentMutations = {
         throw taskError('HOST_ASSIGNMENT_EXISTS', 'This worker is already assigned to that host. Pass replace to change the assignment.', { workerId, hostId: v.hostId });
       }
       const row = existing
-        ? await tx.hostWorkerAssignment.update({ where: key, data: { workdir: v.workdir, family: v.family, model: v.model, updatedAt: new Date() } })
+        ? await tx.hostWorkerAssignment.update({ where: key, data: { workdir: v.workdir, family: v.family, model: v.model, effort: v.effort, accountProfile: v.accountProfile, updatedAt: new Date() } })
         : await tx.hostWorkerAssignment.create({
-          data: { id: generateId(), appId: freshApp.id, hostId: v.hostId, workerId, workdir: v.workdir, family: v.family, model: v.model, createdByUserId: writer(ctx) },
+          data: { id: generateId(), appId: freshApp.id, hostId: v.hostId, workerId, workdir: v.workdir, family: v.family, model: v.model, effort: v.effort,
+            accountProfile: v.accountProfile, createdByUserId: writer(ctx) },
         });
       await record(tx, freshApp.id, actor, 'host-setup.assign', workerId);
       return row;
