@@ -282,6 +282,59 @@ describe('#4224 open session and setup fields', () => {
   });
 });
 
+describe('#4248: which workers a host runs follows hostSetupSource', () => {
+  const assign = (w: string, hostId: string, workdir: string, family: string) =>
+    M.assignHostWorker({}, { input: { appRef: app.id, hostId, worker: w, workdir, family } }, ctx(admin.id));
+  const source = (s: 'HOST' | 'SERVER') => M.setHostSetupSource({}, { appRef: app.id, source: s }, ctx(admin.id));
+  const names = async (hostId = 'orca1') => (await state(ctx(admin.id), hostId)).workers.map((r) => r.name);
+
+  beforeEach(async () => {
+    // orca1 registers Ada and Kit. The platform assigns Kit (another family and workdir than registered) and Zoe,
+    // whom orca1's registration does not list, to orca1; Ada is registered there but not assigned.
+    await assign('Kit', 'orca1', 'hadron-server/kit', 'claude');
+    await assign('Zoe', 'orca1', 'hadron-cli/zoe', 'codex');
+  });
+
+  it('SERVER: the host\'s assignments, with their family and workdir; an assigned worker the registration does not list is in, a registered one not assigned is out', async () => {
+    await source('SERVER');
+    expect(await names(), 'desired state under SERVER must list the assignments, not the registration').toEqual(['Kit', 'Zoe']);
+    expect(await rowOf(kit)).toMatchObject({ family: 'claude', worktrees: ['hadron-server/kit'] });
+    expect(await rowOf(zoe)).toMatchObject({ family: 'codex', worktrees: ['hadron-cli/zoe'] });
+  });
+
+  it('SERVER: a retired worker\'s assignment is not in effect', async () => {
+    await source('SERVER');
+    await db.worker.update({ where: { id: zoe.id }, data: { retiredAt: new Date() } });
+    expect(await names()).toEqual(['Kit']);
+  });
+
+  it('SERVER: a host with assignments and no registration has them; a host with neither is not found', async () => {
+    await assign('Ada', 'orca3', 'hadron-server/ada', 'claude');
+    await source('SERVER');
+    expect(await names('orca3')).toEqual(['Ada']);
+    expect(await code(state(ctx(admin.id), 'orca9'))).toBe('HOST_NOT_FOUND');
+  });
+
+  it('SERVER: a registered host with no assignments runs nobody', async () => {
+    await source('SERVER');
+    expect(await names('orca2')).toEqual([]);
+  });
+
+  it('SERVER: orca1\'s own key reads its assignments', async () => {
+    await source('SERVER');
+    expect((await state(keyCtx(orca1))).workers.map((r) => r.name)).toEqual(['Kit', 'Zoe']);
+  });
+
+  it('HOST (the default): the registration, unchanged, whatever is assigned', async () => {
+    expect(await names()).toEqual(['Ada', 'Kit']);
+    expect(await rowOf(kit)).toMatchObject({ family: 'codex', worktrees: ['hadron-server/kit', 'hadron-cli/kit'] });
+    await source('SERVER');
+    await source('HOST');
+    expect(await names()).toEqual(['Ada', 'Kit']);
+    expect(await code(state(ctx(admin.id), 'orca3'))).toBe('HOST_NOT_FOUND');
+  });
+});
+
 describe('#4224 leave-alone', () => {
   it('a marked worker reads LEAVE_ALONE with what it would be, and nothing desired', async () => {
     await task(kit, 'pending');
