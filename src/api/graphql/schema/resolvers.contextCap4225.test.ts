@@ -309,7 +309,8 @@ describe('what the pass decides, and fair rotation across bounded passes (Diego 
   const over = (id: string, at = ago(5).toISOString()) => db.$executeRaw`UPDATE workers SET terminal = ${JSON.stringify({
     host: { id: 'orca1', label: 'Orca' }, status: 'idle', prompt: 'empty', reason: null, lastTurnAt: null, checkedAt: at, reportedAt: at,
     contextTokens: CAP + 5, contextMeasuredAt: at })}::jsonb WHERE id = ${id}`;
-  const mk = async (name: string, appId = F.app.id) => db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId, agentId: F.agentId, name, slug: name.toLowerCase() }, select: { id: true } });
+  // Ids sort before Kit's when given: the scan key is the worker id.
+  const mk = async (name: string, appId = F.app.id, id?: string) => db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, ...(id ? { id } : {}), appId, agentId: F.agentId, name, slug: name.toLowerCase() }, select: { id: true } });
   const session = (w: { id: string }, appId = F.app.id) => db.session.create({ data: { id: `s${Math.random()}`.replace('.', ''), appId, workerId: w.id, agentId: F.agentId, userId: F.holder.id, startedAt: ago(3), updatedAt: ago(3) }, select: { id: true } });
   beforeEach(() => { __capSweepTesting.decided = []; __capSweepTesting.reset(); });
   afterEach(() => { __capSweepTesting.page = 50; __capSweepTesting.maxPages = 200; __capSweepTesting.decided = null; __capSweepTesting.reset(); });
@@ -373,7 +374,7 @@ describe('what the pass decides, and fair rotation across bounded passes (Diego 
 
   it('a pass bounded below the candidate count rotates: progress carries to the next pass until Kit is reached', async () => {
     // 25 earlier over-cap workers WITH sessions and no capable host: only the decision itself can pass them over.
-    for (let i = 0; i < 25; i += 1) { const w = await mk(`Old${i}`); await session(w); await over(w.id, new Date(Date.now() - 10 * MIN - (30 - i) * 1000).toISOString()); }
+    for (let i = 0; i < 25; i += 1) { const w = await mk(`Old${i}`, F.app.id, `00o${String(i).padStart(2, '0')}`); await session(w); await over(w.id, new Date(Date.now() - 10 * MIN - (30 - i) * 1000).toISOString()); }
     await report();
     __capSweepTesting.page = 5; __capSweepTesting.maxPages = 2; // 10 workers a pass
     let issued = 0;
@@ -384,7 +385,7 @@ describe('what the pass decides, and fair rotation across bounded passes (Diego 
   });
 
   it('and wraps: once it reaches the end, the next pass starts again from the first', async () => {
-    for (let i = 0; i < 12; i += 1) { const w = await mk(`Old${i}`); await session(w); await over(w.id, new Date(Date.now() - 10 * MIN - (30 - i) * 1000).toISOString()); }
+    for (let i = 0; i < 12; i += 1) { const w = await mk(`Old${i}`, F.app.id, `00w${String(i).padStart(2, '0')}`); await session(w); await over(w.id, new Date(Date.now() - 10 * MIN - (30 - i) * 1000).toISOString()); }
     __capSweepTesting.page = 5; __capSweepTesting.maxPages = 2;
     for (let tick = 0; tick < 4; tick += 1) await contextCapTick(db);
     const seen = __capSweepTesting.decided!;

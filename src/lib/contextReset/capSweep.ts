@@ -37,7 +37,8 @@ export const CAP_REPORT_FRESH_MS = 20 * 60_000;
 export const __capSweepTesting: { page: number; maxPages: number; decided: string[] | null; reset: () => void } = {
   page: 50, maxPages: 200, decided: null, reset: () => { resume = null; },
 };
-type Cursor = { checkedAt: string; id: string };
+/** The scan key is the worker's id: stable, so a report that refreshes `checkedAt` cannot move a worker past the cursor. */
+type Cursor = { id: string };
 
 /**
  * Where the last bounded pass stopped, so the next one carries on from there instead of starting at the first again (Diego's
@@ -55,12 +56,12 @@ type Candidate = { workerId: string; appId: string; contextTokens: number; conte
  */
 async function overCap(
   tx: Prisma.TransactionClient | PrismaClient, now: Date, workerId: string | null, lock: boolean, after: Cursor | null = null,
-): Promise<(Candidate & { checkedAt: string })[]> {
+): Promise<Candidate[]> {
   const at = now.toISOString();
   const hourAgo = toNaiveUtc(new Date(now.getTime() - CAP_RESET_INTERVAL_MS));
-  const rows = await tx.$queryRaw<{ workerId: string; appId: string; contextTokens: number; contextMeasuredAt: string; cap: number; checkedAt: string }[]>`
+  const rows = await tx.$queryRaw<{ workerId: string; appId: string; contextTokens: number; contextMeasuredAt: string; cap: number }[]>`
     SELECT w.id AS "workerId", w.app_id AS "appId", (w.terminal->>'contextTokens')::int AS "contextTokens",
-           w.terminal->>'contextMeasuredAt' AS "contextMeasuredAt", a.context_cap AS cap, w.terminal->>'checkedAt' AS "checkedAt"
+           w.terminal->>'contextMeasuredAt' AS "contextMeasuredAt", a.context_cap AS cap
     FROM workers w
     ${OPEN_SESSION_PLACEMENT_JOIN}
     JOIN agents a ON a.id = COALESCE(os.agent_id, w.agent_id)
@@ -78,8 +79,8 @@ async function overCap(
       AND EXISTS (SELECT 1 FROM sessions s WHERE s.worker_id = w.id AND s.ended_at IS NULL AND s.deleted_at IS NULL)
       AND NOT EXISTS (SELECT 1 FROM context_resets r WHERE r.worker_id = w.id
                       AND (r.ended_at IS NULL OR (r.cause = 'context-cap' AND r.requested_at > ${hourAgo}::timestamp)))
-      AND (${after?.checkedAt ?? null}::text IS NULL OR (w.terminal->>'checkedAt', w.id) > (${after?.checkedAt ?? null}::text, ${after?.id ?? null}::text))
-    ORDER BY w.terminal->>'checkedAt', w.id
+      AND (${after?.id ?? null}::text IS NULL OR w.id > ${after?.id ?? null}::text)
+    ORDER BY w.id
     LIMIT ${__capSweepTesting.page}
     ${lock ? Prisma.sql`FOR SHARE OF a` : Prisma.empty}`;
   return rows.map((r) => ({ ...r, contextMeasuredAt: new Date(r.contextMeasuredAt) }));
@@ -121,7 +122,7 @@ async function decide(db: PrismaClient, c: Candidate, now: Date): Promise<boolea
 export async function contextCapTick(db: PrismaClient, now: Date = new Date()): Promise<number> {
   let issued = 0;
   let after: Cursor | null = resume;
-  // Page through the candidates by (checkedAt, id): a worker that cannot be reset (no capable host, say) is passed over, and a
+  // Page through the candidates by worker id: a worker that cannot be reset (no capable host, say) is passed over, and a
   // pass bounded by maxPages hands its place to the next one (`resume`), so every candidate is reached within a few passes
   // however many are ahead of it (Diego at cc136d0af and 40cc6c00d).
   resume = null;
@@ -137,7 +138,7 @@ export async function contextCapTick(db: PrismaClient, now: Date = new Date()): 
     }
     if (due.length < __capSweepTesting.page) return issued; // reached the end: the next pass starts fresh
     const last = due[due.length - 1]!;
-    after = { checkedAt: last.checkedAt, id: last.workerId };
+    after = { id: last.workerId };
   }
   resume = after; // bounded: the next pass carries on from here
   return issued;
