@@ -72,21 +72,36 @@ export async function startDesiredWorkers(db: PrismaClient, now = new Date(), an
   const apps = await db.app.findMany({ where: { sweepMode: 'APPLY', deletedAt: null, uninstalledAt: null }, select: { id: true } });
   let issued = 0;
   for (const app of apps) {
-    // A worker listed by several hosts is tried on the first, by host id; the in-flight guard stops a second start.
-    const candidates = new Map<string, string>();
-    for (const hostId of await hostIdsOf(db, app.id)) {
-      const state = await loadHostDesiredState(db, app.id, hostId, now);
-      for (const r of state?.workers ?? []) if (startable(r) && !candidates.has(r.workerId)) candidates.set(r.workerId, hostId);
-    }
-    for (const [workerId, hostId] of candidates) {
-      const outcome = await startDesiredWorker(db, { appId: app.id, workerId, hostId }, now, anchor);
-      if (outcome === 'issued') issued++;
-      else if (outcome === 'tripped') {
+    // Every host that lists the worker as startable, by host id. The first is tried; a host that turns out unusable
+    // under the locks (its registration lapsed, or it no longer lists a worktree) falls through to the next.
+    const candidates = new Map<string, string[]>();
+    try {
+      for (const hostId of await hostIdsOf(db, app.id)) {
         try {
-          await raiseStartFailingAlarm(db, app.id, workerId, now);
+          const state = await loadHostDesiredState(db, app.id, hostId, now);
+          for (const r of state?.workers ?? []) if (startable(r)) candidates.set(r.workerId, [...(candidates.get(r.workerId) ?? []), hostId]);
         } catch (err) {
-          console.error('[desired-start] raising the start-failing alarm failed:', { appId: app.id, workerId }, err);
+          // One host's read failing skips that host only.
+          console.error('[desired-start] reading a host\'s desired state failed:', { appId: app.id, hostId }, err);
         }
+      }
+    } catch (err) {
+      // One App's host list failing skips that App only.
+      console.error('[desired-start] listing an App\'s hosts failed:', { appId: app.id }, err);
+      continue;
+    }
+    for (const [workerId, hostIds] of candidates) {
+      for (const hostId of hostIds) {
+        const outcome = await startDesiredWorker(db, { appId: app.id, workerId, hostId }, now, anchor);
+        if (outcome === 'issued') issued++;
+        else if (outcome === 'tripped') {
+          try {
+            await raiseStartFailingAlarm(db, app.id, workerId, now);
+          } catch (err) {
+            console.error('[desired-start] raising the start-failing alarm failed:', { appId: app.id, workerId }, err);
+          }
+        }
+        if (outcome !== 'no-host') break;
       }
     }
   }
@@ -103,14 +118,15 @@ async function recentFailures(db: Db, workerId: string, now: Date): Promise<numb
 
 /**
  * Start one worker if it is still startable once every fence is held (file header). `issued` when a start was
- * inserted, `tripped` when the failure limit stopped it, `skipped` otherwise.
+ * inserted, `tripped` when the failure limit stopped it, `no-host` when this host has no live registration listing a
+ * worktree for it (the caller tries the worker's next host), `skipped` otherwise.
  */
 export async function startDesiredWorker(
   db: PrismaClient,
   a: { appId: string; workerId: string; hostId: string },
   now: Date,
   anchor: number = anchorNow(),
-): Promise<'issued' | 'tripped' | 'skipped'> {
+): Promise<'issued' | 'tripped' | 'skipped' | 'no-host'> {
   try {
     const owner = await db.app.findUnique({ where: { id: a.appId }, select: { organizationId: true, ownerUserId: true } });
     return await db.$transaction(async (tx) => {
@@ -136,7 +152,7 @@ export async function startDesiredWorker(
       if ((await recentFailures(tx, a.workerId, now)) >= START_FAILURE_LIMIT) return 'tripped';
       await fenceHostDecision(tx, a.appId);
       const reg = (await liveRegistrationsFor(tx, a.appId, a.workerId, now, a.hostId)).find((r) => r.worktrees.length > 0);
-      if (!reg) return 'skipped';
+      if (!reg) return 'no-host';
       await insertWorkerStart(tx, {
         appId: a.appId, hostId: reg.hostId, workerId: a.workerId, worktree: reg.worktrees[0]!, family: reg.family,
         taskId: null, issuer: { issuedBy: 'platform' }, hold, issuedReason: DESIRED_RUNNING,

@@ -6483,10 +6483,6 @@ model CoordinatorCadenceClock {
   @@map("coordinator_cadence_clocks")
 }
 
-/// #2014 — one post-limit episode: the first refusal of a worker's team-chat post by the rate limit in an hour. It only
-/// de-duplicates the alarm raised with it (agent_team_events, type `alarm.post-limit`); the alarm itself stays open until
-/// acknowledged. At most one OPEN row per worker (partial unique index in prisma/post-limit-invariants.sql); an open
-/// episode older than an hour is closed (`endedAt = openedAt + 1 hour`) by the next refusal, which then opens a new one.
 /// #4231 (S8 of #4229) — a worker whose platform starts keep failing: three failed platform `worker.start`s in an hour
 /// stop the desired-state start for it, and ONE `alarm.start-failing` goes to its reporting line per episode. An
 /// episode closes an hour after it opened, so a worker still failing then is alarmed again. At most one open per
@@ -6507,6 +6503,10 @@ model StartFailingEpisode {
   @@map("start_failing_episodes")
 }
 
+/// #2014 — one post-limit episode: the first refusal of a worker's team-chat post by the rate limit in an hour. It only
+/// de-duplicates the alarm raised with it (agent_team_events, type `alarm.post-limit`); the alarm itself stays open until
+/// acknowledged. At most one OPEN row per worker (partial unique index in prisma/post-limit-invariants.sql); an open
+/// episode older than an hour is closed (`endedAt = openedAt + 1 hour`) by the next refusal, which then opens a new one.
 model PostLimitEpisode {
   id       String    @id @default(cuid())
   appId    String    @map("app_id")
