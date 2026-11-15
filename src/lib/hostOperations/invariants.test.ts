@@ -56,8 +56,9 @@ describe('the invariants file', () => {
     const head = source.slice(0, source.indexOf(block));
     expect(source.indexOf(block)).toBeGreaterThan(0);
     expect(migration.endsWith(`\n${(head + migration.slice(migration.indexOf(block))).replaceAll(", 'checkpoint', 'sweep'", '').replaceAll(", 'checkpoint'", '')}`)).toBe(true);
-    const context = readFileSync(new URL('../../../prisma/migrations/20261115120000_worker_terminal_context/migration.sql', import.meta.url), 'utf8');
-    expect(context.endsWith(`\n${source.slice(source.indexOf(block))}`)).toBe(true);
+    // #4247: the CHECK was widened again by 20261115170000_worker_terminal_relaunch_repair, which carries the current block.
+    const relaunch = readFileSync(new URL('../../../prisma/migrations/20261115170000_worker_terminal_relaunch_repair/migration.sql', import.meta.url), 'utf8');
+    expect(relaunch.endsWith(`\n${source.slice(source.indexOf(block))}`)).toBe(true);
     const checkpoint = readFileSync(new URL('../../../prisma/migrations/20261103014500_host_checkpoint_use_action/migration.sql', import.meta.url),'utf8');
     const check = source.slice(source.indexOf('ALTER TABLE host_key_uses DROP CONSTRAINT'),source.indexOf('CREATE OR REPLACE FUNCTION host_key_use_append_only')).trim();
     // #4233: the checkpoint migration's copy predates 'sweep'; the sweep migration carries the current CHECK.

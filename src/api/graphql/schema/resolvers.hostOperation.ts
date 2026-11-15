@@ -77,7 +77,7 @@ import { sessionHasHandoff } from '../../../lib/hostOperations/settle.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { normalizeAvailability, type AvailabilityInput } from './resolvers.agentTaskAlarms.js';
 import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
-import { postRepairNoticesDeferred, ALERT_KEY, type RepairNotice } from '../../../lib/agentTasks/hostRepairNotice.js';
+import { postRepairNoticesDeferred, type RepairNotice } from '../../../lib/agentTasks/hostRepairNotice.js';
 import { buildWorkerTerminal, repairRefusal, validateTerminalBatch, type StoredWorkerTerminal, type TerminalReportInput } from '../../../lib/workerTerminal.js';
 import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
 import {
@@ -563,13 +563,14 @@ export const hostOperationMutations = {
         const terminal = buildWorkerTerminal(r, { id: host.hostId, label: reg.label }, now);
         // A report with no repair outcome, or a relaunch, re-arms the once-per-worker alert (the marker is only ever
         // `alert` here; a relaunch's own marker is claimed with its post).
-        const rearm = (r.repair === null || r.repair === 'RELAUNCHED') && w.repairNoticeKey === ALERT_KEY;
+        // #4247: the marker is `alert` or `<outcome>:<reason>` for an alert, and `relaunched:<time>` for a relaunch (kept).
+        const rearm = (r.repair === null || r.repair === 'RELAUNCHED') && w.repairNoticeKey !== null && !w.repairNoticeKey.startsWith('relaunched:');
         await tx.worker.update({
           where: { id },
           data: { terminal: terminal as unknown as Prisma.InputJsonObject, ...(rearm ? { repairNoticeKey: null } : {}) },
         });
         stored.push({ id, urn: composeWorkerUrn(app.urn, w.slug) });
-        if (r.repair) notices.push({ workerId: id, workerName: w.name, hostLabel: reg.label, repair: r.repair, attempt: r.attempt, checkedAt: r.checkedAt });
+        if (r.repair) notices.push({ workerId: id, workerName: w.name, hostLabel: reg.label, repair: r.repair, repairReason: r.repairReason, attempt: r.attempt, checkedAt: r.checkedAt });
       }
       await recordHostKeyUse(tx, host, 'terminal', { count: stored.length });
       return { stored, refused };
