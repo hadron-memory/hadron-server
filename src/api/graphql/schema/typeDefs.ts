@@ -9102,6 +9102,15 @@ export const typeDefs = `#graphql
     "#1709 — the App's host registrations, liveness derived now (hrn:node:hadronmemory.com:specs:cor:agt:070:01). Whoever reads the App's tasks and events, the App's own key included."
     hostRegistrations(appRef: String!): [HostRegistration!]!
     """
+    #4222 — what the platform says the App's hosts run (hrn:node:hadronmemory.com:specs:cor:agt:070:01, the change Proposed):
+    the hostSetupSource switch and the assignments in effect, of one host when hostId is given. Whoever reads the
+    App's tasks and events, the App's own key included. A host key (an App key holding host:operate) reads only its
+    own host's rows: without hostId it gets them, and a hostId naming another host answers exactly like a host with
+    no assignments (hrn:node:hadronmemory.com:specs:cor:agt:070:04). A key whose host:operate was revoked is refused
+    FORBIDDEN whatever it passes. Each host-key read is recorded (hrn:node:hadronmemory.com:specs:cor:agt:070:07).
+    """
+    hostSetup(appRef: String!, hostId: String): HostSetup!
+    """
     #3273 (hrn:node:hadronmemory.com:specs:cor:agt:050:27, hrn:node:hadronmemory.com:specs:cor:agt:070:04):
     the current state of one context reset whose operation this App key's host collected, ended resets included.
     The host-key gate runs first, as for the protocol steps: HOST_KEY_REQUIRED (not an App key), APP_NOT_FOUND
@@ -11848,8 +11857,31 @@ export const typeDefs = `#graphql
     host:operate, which names the host; the request names none (hrn:node:hadronmemory.com:specs:cor:agt:070:04). Refreshing within the App's lapse count
     of poll intervals keeps it live. Refused HOST_KEY_REQUIRED for anyone else, APP_KEY_SCOPE_REQUIRED without the
     scope, APP_KEY_SESSION_BOUND with a session, BAD_HOST_REGISTRATION for a bad shape or a worker not of the App.
+    #4222: while the App's hostSetupSource is SERVER, a listed worker the platform did not assign to this host is
+    left out and reported in refusedWorkers (HOST_WORKER_NOT_ASSIGNED) instead; the registration still succeeds.
     """
     registerHost(input: RegisterHostInput!): HostRegistration!
+    """
+    #4222 — assign a worker to a host of its App: the workdir it runs in there, its model family and, optionally, its
+    model (hrn:node:hadronmemory.com:specs:cor:agt:070:01, the change Proposed). Whoever manages the App
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), or a held worker on its holder's instruction; never an App key.
+    A worker may be assigned to several hosts. The assignment is a record until the App's hostSetupSource is SERVER.
+    Refused BAD_HOST_ASSIGNMENT_ARGS (a field that is not its token shape: a path, an option, a command),
+    HOST_ASSIGNMENT_NOT_PERMITTED, WORKER_NOT_FOUND, WORKER_RETIRED, and HOST_ASSIGNMENT_EXISTS when this worker is
+    already assigned to that host and replace is not set. A refusal writes nothing.
+    """
+    assignHostWorker(input: AssignHostWorkerInput!, instruction: ActInstructionInput): HostWorkerAssignment!
+    "#4222 — remove a worker's assignment to a host. Whoever manages the App, as for assignHostWorker (HOST_ASSIGNMENT_NOT_PERMITTED otherwise). True when one was removed, false when there was none; a retired worker's assignment is removable."
+    unassignHostWorker(input: UnassignHostWorkerInput!, instruction: ActInstructionInput): Boolean!
+    """
+    #4222 — set who states which workers the App's hosts run: HOST (the default) or SERVER. Whoever manages the App
+    (HOST_ASSIGNMENT_NOT_PERMITTED otherwise). Under SERVER, registerHost accepts only the workers assigned to that
+    host and reports the rest per row as HOST_WORKER_NOT_ASSIGNED in refusedWorkers, never failing the registration;
+    a worker is started only on a host it is assigned to whose registration lists the assigned workdir, in that
+    workdir and as the assigned family; with none, nothing is issued and the task waits
+    (hrn:node:hadronmemory.com:specs:cor:agt:070:08). Takes effect at the next registration and start decision.
+    """
+    setHostSetupSource(appRef: String!, source: HostSetupSource!, instruction: ActInstructionInput): HostSetupSource!
     """
     #1709 — a host collects its own operations, oldest first: those still ISSUED (now marked COLLECTED) and those it
     collected and has not reported, except a worker.start whose launch grant is still live (#1928: a re-collection never
@@ -16933,6 +16965,69 @@ export const typeDefs = `#graphql
     "#2162 — the capability-gated operation types this host declared it performs (hrn:node:hadronmemory.com:specs:cor:agt:070:01, Proposed): worker.reset-context. A host is never issued one it did not declare."
     capabilities: [String!]!
     workers: [HostRegistrationWorker!]!
+    "#4222 — on registerHost's own answer only (empty on every read): the workers the host listed that were left out because the App's hostSetupSource is SERVER and the platform did not assign them to this host. The registration itself succeeded with the rest."
+    refusedWorkers: [HostRegistrationRefusal!]!
+  }
+
+  "#4222 — one worker a checked registration left out. code is HOST_WORKER_NOT_ASSIGNED, whatever the reason (unassigned, assigned to another host, retired, of another App, or naming nothing)."
+  type HostRegistrationRefusal {
+    "The worker as the host named it."
+    worker: String!
+    code: String!
+  }
+
+  "#4222 — who states which workers a host runs (hrn:node:hadronmemory.com:specs:cor:agt:070:01, the change Proposed). HOST: the host, at registration (the default, as before). SERVER: the platform's assignments; a registration is checked against them and a start uses them."
+  enum HostSetupSource {
+    HOST
+    SERVER
+  }
+
+  """
+  #4222 — one worker the platform says a host runs (hrn:node:hadronmemory.com:specs:cor:agt:070:01, the change Proposed).
+  workdir is the name the host knows the worker's working directory by (an Orca worktree name, or a plain directory
+  name for a worker without Git); like every argument a host acts on it is a name token, never a path, a command or a
+  credential (hrn:node:hadronmemory.com:specs:cor:agt:070:03). model is optional and a record only: a start carries the
+  workdir and family, never the model.
+  """
+  type HostWorkerAssignment {
+    id: ID!
+    hostId: String!
+    workerId: ID!
+    worker: Worker
+    workdir: String!
+    family: String!
+    model: String
+    createdByUserId: ID!
+    createdAt: DateTime!
+    updatedAt: DateTime!
+  }
+
+  "#4222 — what the platform says an App's hosts run: the switch, and the assignments in effect (a retired worker's are left out), by host then worker."
+  type HostSetup {
+    source: HostSetupSource!
+    assignments: [HostWorkerAssignment!]!
+  }
+
+  input AssignHostWorkerInput {
+    appRef: String!
+    "The host's id within the App: the one its key's host:operate scope names. It need not have registered yet."
+    hostId: String!
+    "The worker: its id, URN or name within the App."
+    worker: String!
+    "The name the host knows the working directory by: a name token (letters, digits and . _ / @ + -, starting with a letter or digit, no .., // or trailing /), at most 256 characters."
+    workdir: String!
+    "The model family it runs as there, e.g. claude or codex."
+    family: String!
+    "The model, a name token of at most 128 characters. Optional. A record only: a start carries the workdir and family, not the model."
+    model: String
+    "Change an existing assignment of this worker to this host instead of refusing HOST_ASSIGNMENT_EXISTS."
+    replace: Boolean
+  }
+
+  input UnassignHostWorkerInput {
+    appRef: String!
+    hostId: String!
+    worker: String!
   }
 
   "#1709 — a worker a host can launch: the family it would run as, and its existing worktrees there."

@@ -785,6 +785,7 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- src/lib/hostOperations/launch.test.ts).
 \ir host-launch-invariants.sql
 
+
 -- #1631: shared passkey registry invariant guards.
 \ir passkey-invariants.sql
 
@@ -861,6 +862,11 @@ CREATE TRIGGER agent_clone_audits_immutable
 
 -- #1162: newly introduced typed Worker/session references fence hard deletion.
 \ir worker-reference-invariants.sql
+
+-- #4222: host worker assignments and the App's setup-source switch. One source, shared verbatim with migration
+-- 20261115140000_host_worker_assignments (pinned by src/api/graphql/schema/resolvers.hostAssignment4222.test.ts). After
+-- worker-reference-invariants.sql, whose fence function its trigger uses.
+\ir host-assignment-invariants.sql
 
 -- S12 explicit reporting choice (legacy UNSET retained).
 \ir worker-team-choice-invariants.sql
