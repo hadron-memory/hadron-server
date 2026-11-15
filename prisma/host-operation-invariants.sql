@@ -202,6 +202,7 @@ ALTER TABLE task_session_end_requests ADD CONSTRAINT chk_task_session_end_reques
 -- #4247 — plus the outcome of a refused or failed relaunch: repair (RELAUNCH_REFUSED or RELAUNCH_FAILED), repairReason (from
 -- that outcome's own set) and repairAttempt (a whole number from 1), all three or none, and only on a dark report. An
 -- ABSENT key makes its test SQL NULL, which a CHECK passes, so the three-key branch is wrapped in COALESCE(..., false).
+-- #4259 — the failure set gains SETUP_FAILED and VERIFY_FAILED.
 ALTER TABLE workers DROP CONSTRAINT IF EXISTS chk_workers_terminal_shape;
 ALTER TABLE workers ADD CONSTRAINT chk_workers_terminal_shape CHECK (
   terminal IS NULL OR (
@@ -234,7 +235,7 @@ ALTER TABLE workers ADD CONSTRAINT chk_workers_terminal_shape CHECK (
       (terminal ->> 'repairAttempt')::numeric <= 2147483647 AND
       CASE (terminal ->> 'repair')
         WHEN 'RELAUNCH_REFUSED' THEN COALESCE((terminal ->> 'repairReason') IN ('IDENTITY_MISMATCH', 'DUPLICATE_AGENT', 'PAUSED', 'HALTED', 'LEAVE_ALONE', 'NO_LAUNCHER_PROFILE'), false)
-        WHEN 'RELAUNCH_FAILED' THEN COALESCE((terminal ->> 'repairReason') IN ('LAUNCH_EXIT_NONZERO', 'TERMINAL_CREATE_REFUSED', 'TIMEOUT'), false)
+        WHEN 'RELAUNCH_FAILED' THEN COALESCE((terminal ->> 'repairReason') IN ('LAUNCH_EXIT_NONZERO', 'TERMINAL_CREATE_REFUSED', 'TIMEOUT', 'SETUP_FAILED', 'VERIFY_FAILED'), false)
         ELSE false END, false))
   )
 );

@@ -85,9 +85,16 @@ describe('the invariants file', () => {
     expect(cap).toContain(capFn);
     expect(capFn).toContain("host_launcher_model_ok(v #>> '{}')");
     expect(capFn).toContain("optional := ARRAY['taskId', 'cause']");
-    // #4247: the CHECK was widened again by 20261115170000_worker_terminal_relaunch_repair, which carries the current block.
+    // #4247: the CHECK was widened again by 20261115170000_worker_terminal_relaunch_repair. #4259 widened it once more, by
+    // 20261115260000_relaunch_failure_codes, which carries the current block; the #4247 copy is the block without the
+    // #4259 lines (its comment line and the two new failure reasons).
+    const current = source.slice(source.indexOf(block));
+    const L4259 = "-- #4259 — the failure set gains SETUP_FAILED and VERIFY_FAILED.\n";
+    expect(current.includes(L4259) && current.includes(", 'SETUP_FAILED', 'VERIFY_FAILED'")).toBe(true);
     const relaunch = readFileSync(new URL('../../../prisma/migrations/20261115170000_worker_terminal_relaunch_repair/migration.sql', import.meta.url), 'utf8');
-    expect(relaunch.endsWith(`\n${source.slice(source.indexOf(block))}`)).toBe(true);
+    expect(relaunch.endsWith(`\n${current.replace(L4259, '').replace(", 'SETUP_FAILED', 'VERIFY_FAILED'", '')}`)).toBe(true);
+    const codes = readFileSync(new URL('../../../prisma/migrations/20261115260000_relaunch_failure_codes/migration.sql', import.meta.url), 'utf8');
+    expect(codes.endsWith(`\n${current}`)).toBe(true);
     const checkpoint = readFileSync(new URL('../../../prisma/migrations/20261103014500_host_checkpoint_use_action/migration.sql', import.meta.url),'utf8');
     const check = source.slice(source.indexOf('ALTER TABLE host_key_uses DROP CONSTRAINT'),source.indexOf('CREATE OR REPLACE FUNCTION host_key_use_append_only')).trim();
     // #4233: the checkpoint migration's copy predates 'sweep'; the sweep migration carries the current CHECK.
