@@ -268,6 +268,8 @@ export const ALARM_EVENT_TYPES = [
   'alarm.post-limit',
   // #4231: a worker whose platform starts keep failing (three in an hour). Task-less; its episode lives in `start_failing_episodes`.
   'alarm.start-failing',
+  // #4233: a host whose sweep stopped reporting (S10 of #4229). Task-less and workerless; its episode lives in `host_sweep_episodes`.
+  'alarm.stale-sweep',
 ] as const;
 export type AlarmEventType = (typeof ALARM_EVENT_TYPES)[number];
 

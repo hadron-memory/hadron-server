@@ -9127,6 +9127,13 @@ export const typeDefs = `#graphql
     """
     hostDesiredState(appRef: String!, hostId: String!): HostDesiredState!
     """
+    #4233 (S10 of #4229) — the recorded runs of one host's sweep, newest first: when each ran, its mode, the counts
+    planned, applied, skipped and failed, and up to 50 per-worker lines with reason codes. Read by whoever reads the
+    App's tasks and events (a participant, the App's own key) and by a host key for ITS OWN host only: another host
+    answers HOST_NOT_FOUND, exactly as a host the App does not have. limit is 1 to 100 (default 20). Reads only.
+    """
+    hostSweepRuns(appRef: String!, hostId: String!, limit: Int): [HostSweepRun!]!
+    """
     #4222 — what the platform says the App's hosts run (hrn:node:hadronmemory.com:specs:cor:agt:070:01, the change Proposed):
     the hostSetupSource switch and the assignments in effect, of one host when hostId is given. Whoever reads the
     App's tasks and events, the App's own key included. A host key (an App key holding host:operate) reads only its
@@ -11963,6 +11970,15 @@ export const typeDefs = `#graphql
     The report decides nothing: it feeds no check status, availability, matcher, stall rule or alarm.
     """
     setHostWorkerTerminals(input: SetHostWorkerTerminalsInput!): SetHostWorkerTerminalsResult!
+    """
+    #4233 (S10 of #4229) — a host records one run of its sweep. The host key only (HOST_KEY_REQUIRED otherwise); the
+    host is the key's own. The whole report is validated first and a malformed one stores nothing (BAD_USER_INPUT): a
+    mode of OBSERVE or APPLY, counts from 0, at most 50 lines of worker token, outcome and reason code, and no free
+    text. The same runId for the same host is the same run: a replay returns it and changes nothing. A run that applied
+    or failed something produces ONE summary post in the App's team chat, from the platform, and a run that changed
+    nothing posts nothing. Recording a run ends the host's stale-sweep alarm episode.
+    """
+    recordHostSweepRun(input: RecordHostSweepRunInput!): HostSweepRun!
     """
     #1709 — issue an operation to one of the App's registered hosts (hrn:node:hadronmemory.com:specs:cor:agt:070:05).
     A type outside the closed set is HOST_OPERATION_TYPE_UNKNOWN (hrn:node:hadronmemory.com:specs:cor:agt:070:03), a
@@ -15998,8 +16014,10 @@ export const typeDefs = `#graphql
     REASSIGNED
     "The platform's matcher assigned it (hrn:node:hadronmemory.com:specs:cor:agt:060:06)."
     MATCHED
-    "A child task finished; the reason names the child (hrn:node:hadronmemory.com:specs:cor:agt:050:16)."
+    "A child task finished; the reason names the child. Due to the child's owner (hrn:node:hadronmemory.com:specs:cor:agt:050:16) and, #4234, to the parent's current assignee."
     CHILD_FINISHED
+    "#4234 — a child task was cancelled; the reason names the child. Due to the same two as CHILD_FINISHED (hrn:node:hadronmemory.com:specs:cor:agt:050:16)."
+    CHILD_CANCELLED
     "An unacknowledged alarm's currently-woken chain position (hrn:node:hadronmemory.com:specs:cor:agt:050:19). Delivering it never acknowledges the alarm."
     ALARM
     "#1709 — the task was cancelled and asks its assignee to end its session (hrn:node:hadronmemory.com:specs:cor:agt:050:10). Due while that session is open and the platform has not yet ended it through a host."
@@ -16008,7 +16026,7 @@ export const typeDefs = `#graphql
 
   "#1708 — the task a TASK reason is for: shown only to a caller who may read the App's tasks (hrn:node:hadronmemory.com:specs:cor:agt:050:21)."
   type DueTaskReason {
-    "The task's id (for CHILD_FINISHED, the child's)."
+    "The task's id (for CHILD_FINISHED and CHILD_CANCELLED, the child's)."
     id: ID!
     "The event delivered; acknowledging the wake records delivery on it."
     eventId: ID!
@@ -16579,6 +16597,64 @@ export const typeDefs = `#graphql
     worktrees: [String!]!
   }
 
+  "#4233: what a sweep did to one worker in one run."
+  enum SweepRunOutcome {
+    APPLIED
+    SKIPPED
+    FAILED
+  }
+
+  "#4233: one worker's line in a sweep run: the worker as the host named it, what became of it, and a reason code."
+  type HostSweepRunLine {
+    worker: String!
+    outcome: SweepRunOutcome!
+    "A code (capital letters, digits, underscores), never text."
+    reason: String!
+  }
+
+  "#4233 (S10 of #4229): one run of a host's sweep, as the host reported it."
+  type HostSweepRun {
+    id: ID!
+    hostId: String!
+    "The host's own token for the run."
+    runId: String!
+    startedAt: DateTime!
+    endedAt: DateTime!
+    "OBSERVE or APPLY; a sweep in mode OFF records nothing."
+    mode: SweepMode!
+    planned: Int!
+    applied: Int!
+    skipped: Int!
+    failed: Int!
+    "At most 50 lines."
+    lines: [HostSweepRunLine!]!
+    "When the server stored the run."
+    recordedAt: DateTime!
+  }
+
+  input HostSweepRunLineInput {
+    worker: String!
+    outcome: SweepRunOutcome!
+    reason: String!
+  }
+
+  input RecordHostSweepRunInput {
+    appRef: String!
+    "A token of 1 to 64 letters, digits and . _ : - that names this run for this host; a replay is the same run."
+    runId: String!
+    startedAt: DateTime!
+    "Not before startedAt, not more than two minutes ahead of the server, and within an hour of startedAt."
+    endedAt: DateTime!
+    "OBSERVE or APPLY."
+    mode: SweepMode!
+    planned: Int!
+    applied: Int!
+    skipped: Int!
+    failed: Int!
+    "At most 50."
+    lines: [HostSweepRunLineInput!]
+  }
+
   "#4224: the desired state of every worker one host runs, and the App's sweep mode."
   type HostDesiredState {
     hostId: String!
@@ -16938,7 +17014,7 @@ export const typeDefs = `#graphql
   type AgentTeamEvent {
     id: ID!
     appId: ID!
-    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled, task.handed-back (#2651: its payload is the reason code only, never the reason text); the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable, stall.finish-by (#2648), alarm.dark-worker (#2755: task-less, subjectWorker is the worker gone dark), alarm.coordinator-cadence (#2763: task-less, subjectWorker is the coordinator that stopped assigning); availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost; host.operation.succeeded, host.operation.failed (hrn:node:hadronmemory.com:specs:cor:agt:070:02)."
+    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled, task.handed-back (#2651: its payload is the reason code only, never the reason text); the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable, stall.finish-by (#2648), alarm.dark-worker (#2755: task-less, subjectWorker is the worker gone dark), alarm.coordinator-cadence (#2763: task-less, subjectWorker is the coordinator that stopped assigning); alarm.stale-sweep (#4233: task-less and workerless: a host of an App in sweep mode OBSERVE or APPLY whose last run the server recorded more than five minutes ago (the server's clock, not the host's; a switch-on of the mode restarts the clock); payload.hostId names the host, the alarm goes to the App's managers and ends when the host records its next run); availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost; host.operation.succeeded, host.operation.failed (hrn:node:hadronmemory.com:specs:cor:agt:070:02)."
     type: String!
     taskId: ID
     "The task's stored handle (hrn:node:hadronmemory.com:specs:cor:agt:050:01, Proposed). Null when taskId is null or the task no longer exists; never invented."

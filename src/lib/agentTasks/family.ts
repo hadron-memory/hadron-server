@@ -80,6 +80,18 @@ export function tierOf(llmModel: string | null | undefined): ModelTier | null {
   return name ? TIER_BY_NAME[name] ?? null : null;
 }
 
+/**
+ * #4232 (S9 of #4229) — the tier of a model a MANAGER ASSIGNED to a worker on a host (S1a, #4222), as opposed to one a
+ * session reported about itself. The assigned model is what the host launches (`--model opus`), so the bare launcher
+ * aliases `opus` / `sonnet` / `haiku` are the usual spelling and count here; {@link tierOf} stays strict for the
+ * self-declared binding model, where a bare tier word proves nothing. Anything else is {@link tierOf}'s answer.
+ */
+export function tierOfAssignedModel(model: string | null | undefined): ModelTier | null {
+  const m = model?.trim().toLowerCase();
+  if (!m) return null;
+  return Object.hasOwn(TIER_BY_NAME, m) ? TIER_BY_NAME[m] : tierOf(m);
+}
+
 /** The family a reported model and tool imply, or null when they don't classify the session. */
 export function deriveFamily(args: { llmModel?: string | null; tool?: string | null }): string | null {
   const model = args.llmModel?.trim().toLowerCase();

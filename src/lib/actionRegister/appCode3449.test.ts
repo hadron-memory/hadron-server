@@ -55,7 +55,7 @@ describe('reserved App event code namespace', () => {
       if (scan.raw) rawPaths.push(path);
     }
     expect([...found].sort()).toEqual(legacy);
-    expect(rawPaths.sort()).toEqual(['src/lib/agentTasks/coordinatorCadence.ts', 'src/lib/agentTasks/darkWorker.ts', 'src/lib/agentTasks/events.ts', 'src/lib/agentTasks/postLimit.ts', 'src/lib/desiredState/desiredStart.ts'].sort());
+    expect(rawPaths.sort()).toEqual(['src/lib/agentTasks/coordinatorCadence.ts', 'src/lib/agentTasks/darkWorker.ts', 'src/lib/agentTasks/events.ts', 'src/lib/agentTasks/postLimit.ts', 'src/lib/agentTasks/sweepRuns.ts', 'src/lib/desiredState/desiredStart.ts'].sort());
     expect(TICK_CODE_PREFIX).toBe('tick.');
   });
   it('the census sees new entries in every guarded source shape and ignores payload/grant names', () => {

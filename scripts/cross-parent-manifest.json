@@ -319,7 +319,8 @@
     "TeamUtilization": "value",
     "WorkerUtilization": "value",
     "WorkerDesiredState": "value",
-    "HostDesiredState": "envelope"
+    "HostDesiredState": "envelope",
+    "HostSweepRunLine": "value"
   },
   "entries": {
     "ActionTicketsPage.items": {

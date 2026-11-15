@@ -3530,6 +3530,8 @@ model App {
   cadenceClocks           CoordinatorCadenceClock[]
   postLimitEpisodes       PostLimitEpisode[]
   startFailingEpisodes    StartFailingEpisode[]
+  hostSweepRuns           HostSweepRun[]
+  hostSweepEpisodes       HostSweepEpisode[]
   automationAdoptionEvents AutomationAdoptionEvent[]
   /// #2484 — this App's prefix-scoped write grants for its userless runs, and their append-only history.
   memoryWriteGrants       AppMemoryWriteGrant[]
@@ -6369,6 +6371,7 @@ model AgentTeamEvent {
   cadenceEpisode CoordinatorCadenceEpisode?
   postLimitEpisode PostLimitEpisode?
   startFailingEpisode StartFailingEpisode?
+  hostSweepEpisode HostSweepEpisode?
   /// #3934 (V77): the recorded end of this alarm's escalation, written once by the evaluator pass or the acknowledgement.
   escalationEnd AlarmEscalationEnd?
 
@@ -6521,6 +6524,57 @@ model PostLimitEpisode {
 
   @@index([appId, endedAt])
   @@map("post_limit_episodes")
+}
+
+/// #4233 (S10 of #4229) — one run of a host's one-minute sweep, as the host reported it: when it ran, in which mode, how
+/// many workers it planned to change and what became of them, and up to 50 per-worker lines (`lines`: worker token,
+/// outcome, reason code; never free text). Written once by the host key (`recordHostSweepRun`), never changed except
+/// that `postedAt` is claimed by the run's one summary post. `runKey` is the host's own token for the run: a replayed
+/// report is the same row. Shape: prisma/host-sweep-invariants.sql.
+model HostSweepRun {
+  id         String    @id
+  appId      String    @map("app_id")
+  hostId     String    @map("host_id")
+  runKey     String    @map("run_key")
+  startedAt  DateTime  @map("started_at")
+  endedAt    DateTime  @map("ended_at")
+  mode       SweepMode
+  planned    Int
+  applied    Int
+  skipped    Int
+  failed     Int
+  lines      Json      @default("[]")
+  recordedAt DateTime  @default(now()) @map("recorded_at")
+  /// When the run's summary post was written; NULL for a run that needed none, or whose post has not run yet.
+  postedAt   DateTime? @map("posted_at")
+  /// When the retry pass last tried this run's post and did not land it (no chat, the host gap, a failed append). The retry queue
+  /// orders untried runs first, so a run that cannot post goes to the back and never holds the scan (#4255 Clark F4).
+  summaryTriedAt DateTime? @map("summary_tried_at")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@unique([appId, hostId, runKey], map: "host_sweep_runs_run_uniq")
+  @@index([appId, hostId, recordedAt(sort: Desc)], map: "host_sweep_runs_host_recent_idx")
+  @@map("host_sweep_runs")
+}
+
+/// #4233 — one stale-sweep episode: a host of an App whose sweep mode is OBSERVE or APPLY whose last run is older than five
+/// minutes. It de-duplicates the task-less alarm raised with it (agent_team_events, type `alarm.stale-sweep`, subject worker
+/// NULL). At most one OPEN row per (App, host) (partial unique index in prisma/host-sweep-invariants.sql); the episode ends
+/// when the host records its next run, or when the App's sweep mode goes OFF.
+model HostSweepEpisode {
+  id       String    @id @default(cuid())
+  appId    String    @map("app_id")
+  hostId   String    @map("host_id")
+  eventId  String    @unique @map("event_id")
+  openedAt DateTime  @map("opened_at")
+  endedAt  DateTime? @map("ended_at")
+
+  app   App            @relation(fields: [appId], references: [id], onDelete: Cascade)
+  event AgentTeamEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([appId, endedAt])
+  @@map("host_sweep_episodes")
 }
 
 /// #1706 — one worker's availability for work (cor:agt:060:02). At most one
