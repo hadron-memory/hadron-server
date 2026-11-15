@@ -95,6 +95,7 @@ import { stopSignalMutations, stopSignalQueries } from './resolvers.stopSignal.j
 import { deliveryBatchMutations, deliveryBatchQueries } from './resolvers.deliveryBatch.js';
 import { appKeyScopeMutations, appKeyScopeFieldResolvers } from './resolvers.appKeyScope.js';
 import { hostOperationMutations, hostOperationQueries, hostOperationFieldResolvers } from './resolvers.hostOperation.js';
+import { hostSweepRunMutations, hostSweepRunQueries } from './resolvers.hostSweepRuns.js';
 import { desiredStateMutations, desiredStateQueries, desiredStateWorkerFields } from './resolvers.desiredState.js';
 import { hostAssignmentMutations, hostAssignmentQueries, hostAssignmentFieldResolvers } from './resolvers.hostAssignment.js';
 import {
@@ -235,6 +236,7 @@ export const resolvers = {
     ...deliveryBatchQueries,
     ...hostOperationQueries,
     ...desiredStateQueries,
+    ...hostSweepRunQueries,
     ...hostAssignmentQueries,
     ...agentTaskAlarmQueries,
     ...agentTaskMatchingQueries,
@@ -320,6 +322,7 @@ export const resolvers = {
     ...appKeyScopeMutations,
     ...hostOperationMutations,
     ...desiredStateMutations,
+    ...hostSweepRunMutations,
     ...hostAssignmentMutations,
     ...agentTaskAlarmMutations,
     ...memoryConfigMutations,
