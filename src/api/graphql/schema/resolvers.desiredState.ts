@@ -52,7 +52,8 @@ export const desiredStateQueries = {
         const state = hostId ? await loadHostDesiredState(c.db, app.id, hostId, new Date()) : null;
         if (!state) throw hostNotFound(hostId);
         return state;
-      });
+        // Coherent: every fact a row is composed from comes from one repeatable-read snapshot (#4242 blind P2-2).
+      }, false, undefined, { coherent: true });
       const key = appKeyCaller(ctx);
       if (key) await recordHostKeyUseApart(ctx.db, key, 'read', { count: out.workers.length });
       return out;
@@ -142,10 +143,17 @@ export const desiredStateMutations = {
   },
 };
 
-type WorkerMarker = { appId: string; leaveAloneReason: string | null; leaveAloneBy: string | null };
+type WorkerMarker = { appId: string; leaveAlone: boolean; leaveAloneReason: string | null; leaveAloneBy: string | null; leaveAloneAt: Date | null };
 
-/** The marker's reason and setter are working state, masked like `retiredBy`; the marker itself reads with the worker. */
+/**
+ * The marker and its reason, setter and time are working state (cor:dmo:050:11: a profile-only reader sees identity
+ * only), masked to null like `retiredBy` for a caller who may not see the worker's internals (#4242 local F1).
+ */
 export const desiredStateWorkerFields = {
+  leaveAlone: async (w: WorkerMarker, _: unknown, ctx: Context) =>
+    (await maySeeWorkerInternals(ctx, w.appId)) ? w.leaveAlone : null,
+  leaveAloneAt: async (w: WorkerMarker, _: unknown, ctx: Context) =>
+    (await maySeeWorkerInternals(ctx, w.appId)) ? w.leaveAloneAt : null,
   leaveAloneReason: async (w: WorkerMarker, _: unknown, ctx: Context) =>
     (await maySeeWorkerInternals(ctx, w.appId)) ? w.leaveAloneReason : null,
   leaveAloneBy: async (w: WorkerMarker, _: unknown, ctx: Context) =>

@@ -26,17 +26,17 @@
  * Pure reads. Nothing here starts, stops or changes anything.
  */
 
-import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
+import { AgentLifecycle as AgentLifecycleEnum, Prisma, SweepMode as SweepModeEnum, type PrismaClient } from '../../generated/prisma/index.js';
 import { recordInEffect } from '../agentTasks/availability.js';
 import { coveringSignals, strongestLevel, type StopLevel } from '../stopSignals/state.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
-export const AGENT_LIFECYCLES = ['LONG_LIVED', 'SHORT_LIVED'] as const;
-export type AgentLifecycle = (typeof AGENT_LIFECYCLES)[number];
-
-export const SWEEP_MODES = ['OFF', 'OBSERVE', 'APPLY'] as const;
-export type SweepMode = (typeof SWEEP_MODES)[number];
+/** The schema's enums (prisma/schema.prisma) are the one definition; these lists are read from the generated client. */
+export type AgentLifecycle = AgentLifecycleEnum;
+export const AGENT_LIFECYCLES: readonly AgentLifecycle[] = Object.values(AgentLifecycleEnum);
+export type SweepMode = SweepModeEnum;
+export const SWEEP_MODES: readonly SweepMode[] = Object.values(SweepModeEnum);
 
 export type DesiredRunState = 'RUNNING' | 'STOPPED';
 

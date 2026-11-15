@@ -5926,13 +5926,13 @@ export const typeDefs = `#graphql
     retiredAt: DateTime
     "Who retired this worker. WORKING-STATE field (#1149), masked like createdBy."
     retiredBy: String
-    "#4224 (S3 of #4229): the leave-alone marker (setWorkerLeaveAlone). A host's sweep observes and reports a marked worker and never starts, stops or repairs it."
-    leaveAlone: Boolean!
+    "#4224 (S3 of #4229): the leave-alone marker (setWorkerLeaveAlone). A host's sweep observes and reports a marked worker and never starts, stops or repairs it. WORKING-STATE field (#1149, hrn:node:hadronmemory.com:specs:cor:dmo:050:11): null for a caller who may see only the worker's profile."
+    leaveAlone: Boolean
     "Why the worker is marked leave-alone, when a reason was given. WORKING-STATE field (#1149), masked like createdBy."
     leaveAloneReason: String
     "The user who marked the worker leave-alone. WORKING-STATE field (#1149), masked like createdBy."
     leaveAloneBy: String
-    "When the worker was marked leave-alone; null when it is not marked."
+    "When the worker was marked leave-alone; null when it is not marked. WORKING-STATE field (#1149), masked like createdBy."
     leaveAloneAt: DateTime
     """
     #2047 / hrn:node:hadronmemory.com:specs:cor:agt:040:03: the boot prompt served to this worker's open session. Readable by whoever may read the worker's

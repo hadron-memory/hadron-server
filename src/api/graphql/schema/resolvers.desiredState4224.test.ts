@@ -9,6 +9,8 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
+import { ApolloServer } from '@apollo/server';
+import { typeDefs } from './typeDefs.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -21,6 +23,19 @@ import { resolvers, type Context } from './resolvers.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
+// #4242 blind P2-2: a pass-through that records the isolation level of the transaction the stop-signal fact is read on.
+const isolationSeen: string[] = [];
+vi.mock('../../../lib/stopSignals/state.js', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../../../lib/stopSignals/state.js')>();
+  return {
+    ...orig,
+    coveringSignals: async (...args: Parameters<typeof orig.coveringSignals>) => {
+      const [{ level }] = await (args[0] as any).$queryRaw`SELECT current_setting('transaction_isolation') AS level`;
+      isolationSeen.push(level);
+      return orig.coveringSignals(...args);
+    },
+  };
+});
 
 const M = resolvers.Mutation as any;
 const Q = resolvers.Query as any;
@@ -336,9 +351,39 @@ describe('#4224 leave-alone', () => {
     expect(row.leaveAlone).toBe(true);
     expect(await F.Worker.leaveAloneReason(row, {}, ctx(admin.id))).toBe('why');
     expect(await F.Worker.leaveAloneBy(row, {}, ctx(admin.id))).toBe(admin.id);
-    expect(row.leaveAloneAt).toBeInstanceOf(Date);
+    expect(await F.Worker.leaveAloneAt(row, {}, ctx(admin.id))).toBeInstanceOf(Date);
     expect(await F.Worker.leaveAloneReason(row, {}, ctx(outsider.id))).toBeNull();
     expect(await F.Worker.leaveAloneBy(row, {}, ctx(outsider.id))).toBeNull();
+    // #4242 blind P3 / local F1: the marker itself and when it was set are working state too.
+    expect(await F.Worker.leaveAloneAt(row, {}, ctx(outsider.id))).toBeNull();
+    expect(await F.Worker.leaveAlone(row, {}, ctx(admin.id))).toBe(true);
+    expect(await F.Worker.leaveAlone(row, {}, ctx(member.id))).toBe(true);
+    expect(await F.Worker.leaveAlone(row, {}, ctx(outsider.id))).toBeNull();
+  });
+});
+
+describe('#4242 local F1: the marker over GraphQL', () => {
+  it('a participant reads the marker and its fields; an outsider reading the worker sees none of them', async () => {
+    await leaveAlone(kit, true, ctx(admin.id), 'why');
+    const api = new ApolloServer<Context>({ typeDefs, resolvers });
+    await api.start();
+    try {
+      const q = 'query($ref: ID!) { worker(ref: $ref) { name leaveAlone leaveAloneReason leaveAloneBy leaveAloneAt } }';
+      const read = async (c: Context) => {
+        const r = await api.executeOperation({ query: q, variables: { ref: kit.id } }, { contextValue: c });
+        if (r.body.kind !== 'single') throw new Error('unexpected incremental response');
+        return r.body.singleResult;
+      };
+      const mine = await read(ctx(member.id));
+      expect(mine.errors).toBeUndefined();
+      expect(mine.data?.worker).toMatchObject({ name: 'Kit', leaveAlone: true, leaveAloneReason: 'why', leaveAloneBy: admin.id });
+      expect((mine.data?.worker as any).leaveAloneAt).not.toBeNull();
+      const theirs = await read(ctx(outsider.id));
+      expect(theirs.errors).toBeUndefined();
+      expect(theirs.data?.worker).toEqual({ name: 'Kit', leaveAlone: null, leaveAloneReason: null, leaveAloneBy: null, leaveAloneAt: null });
+    } finally {
+      await api.stop();
+    }
   });
 });
 
@@ -358,16 +403,14 @@ describe('#4224 sweep mode', () => {
   });
 
   it('is set by whoever manages the App, recorded once per change, and read on the App', async () => {
+    const setup = new Set((await events('team.sweep-mode-changed')).map((e) => e.id));
     expect((await sweep('APPLY')).sweepMode).toBe('APPLY');
     expect((await sweep('APPLY')).sweepMode).toBe('APPLY');
     expect((await db.app.findUniqueOrThrow({ where: { id: app.id } })).sweepMode).toBe('APPLY');
     expect((await state()).sweepMode).toBe('APPLY');
-    const ev = await events('team.sweep-mode-changed');
-    // beforeEach moved OFF to OBSERVE; this test moved OBSERVE to APPLY once.
-    expect(ev.map((e) => [e.actorUserId, e.payload])).toEqual([
-      [admin.id, { from: 'OFF', to: 'OBSERVE' }],
-      [admin.id, { from: 'OBSERVE', to: 'APPLY' }],
-    ]);
+    // Only this test's own changes (the setup's mode change is excluded by id): one change, not two.
+    const ev = (await events('team.sweep-mode-changed')).filter((e) => !setup.has(e.id));
+    expect(ev.map((e) => [e.actorUserId, e.payload])).toEqual([[admin.id, { from: 'OBSERVE', to: 'APPLY' }]]);
   });
 
   it('a participant who does not manage the App, a key and an outsider cannot set it', async () => {
@@ -422,6 +465,16 @@ describe('#4224 who reads a host\'s desired state', () => {
     const uses = await db.hostKeyUse.findMany({ where: { appKeyId: orca1.id, action: 'read' }, orderBy: { usedAt: 'asc' } });
     expect(uses.length - before).toBe(2);
     expect(uses.slice(-2).map((x) => [x.hostId, x.count, x.refusedCode])).toEqual([['orca1', 2, null], ['orca1', null, 'HOST_NOT_FOUND']]);
+  });
+});
+
+describe('#4242 blind P2-2: one snapshot per read', () => {
+  it('a participant\'s and a host key\'s read compose their facts inside one repeatable-read transaction', async () => {
+    isolationSeen.length = 0;
+    await state(ctx(admin.id));
+    await state(keyCtx(orca1));
+    await state(keyCtx(plainKey), 'orca2');
+    expect(isolationSeen).toEqual(['repeatable read', 'repeatable read', 'repeatable read']);
   });
 });
 
