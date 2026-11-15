@@ -135,6 +135,8 @@ export interface CreateAgentCoreInput {
   usesTasks?: boolean | null;
   /** #2162 (cor:agt:050:27): reset a worker's context when its task ends. Default false; null means the default. */
   resetContextAfterTask?: boolean | null;
+  /** #4224 (S3 of #4229): how long this Agent's workers run. Default LONG_LIVED; null means the default. */
+  lifecycle?: 'LONG_LIVED' | 'SHORT_LIVED' | null;
   /** #2171 (R211): omitted/null = the default, owner and member. */
   memberRoles?: string[] | null;
 }
@@ -470,6 +472,7 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
         personaRole: personaRoleNorm,
         ...(input.usesTasks != null ? { usesTasks: input.usesTasks } : {}),
         ...(input.resetContextAfterTask != null ? { resetContextAfterTask: input.resetContextAfterTask } : {}),
+        ...(input.lifecycle != null ? { lifecycle: input.lifecycle } : {}),
         createdBy: ctx.userId ?? ctx.clientId ?? null,
       },
       include: AGENT_INCLUDE,
@@ -602,7 +605,7 @@ async function requireKnownImportedAgent(
 export const agentMutations = {
     createAgent: async (
       _: unknown,
-      { orgId, name, description, systemMemoryId, visibility, type, surfaces, personaRole, usesTasks, resetContextAfterTask, memberRoles }: { orgId?: string | null; name: string; description?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; memberRoles?: string[] | null },
+      { orgId, name, description, systemMemoryId, visibility, type, surfaces, personaRole, usesTasks, resetContextAfterTask, lifecycle, memberRoles }: { orgId?: string | null; name: string; description?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; lifecycle?: 'LONG_LIVED' | 'SHORT_LIVED' | null; memberRoles?: string[] | null },
       ctx: Context,
     ) => {
       // spec 047: an agent is owned by EXACTLY ONE of an org or a user. `orgId`
@@ -661,13 +664,14 @@ export const agentMutations = {
         personaRole,
         usesTasks,
         resetContextAfterTask,
+        lifecycle,
         memberRoles,
       });
     },
 
     updateAgent: async (
       _: unknown,
-      { ref, name, urn, description, systemMemoryId, visibility, listedOnMarketplace, type, surfaces, personaRole, usesTasks, resetContextAfterTask, registerDefaults, memberRoles }: { ref: string; name?: string; urn?: string; description?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string | null; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; registerDefaults?: { mentionOnly?: boolean | null } | null; memberRoles?: string[] | null },
+      { ref, name, urn, description, systemMemoryId, visibility, listedOnMarketplace, type, surfaces, personaRole, usesTasks, resetContextAfterTask, lifecycle, registerDefaults, memberRoles }: { ref: string; name?: string; urn?: string; description?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string | null; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; lifecycle?: 'LONG_LIVED' | 'SHORT_LIVED' | null; registerDefaults?: { mentionOnly?: boolean | null } | null; memberRoles?: string[] | null },
       ctx: Context,
     ) => {
       // #929 review: normalize persona dressing (blank-after-trim clears).
@@ -1055,6 +1059,9 @@ export const agentMutations = {
           // #2162 (cor:agt:050:27, R116): the same gate and lock as usesTasks; null and omitted change nothing. Turning
           // it off cancels nothing in flight: a reset's claim re-reads it (SETTING_OFF).
           ...(resetContextAfterTask != null ? { resetContextAfterTask } : {}),
+          // #4224 (S3 of #4229): the same gate and lock as usesTasks; null and omitted change nothing. It moves no
+          // session or process by itself: the desired-state query reads it at each call.
+          ...(lifecycle != null ? { lifecycle } : {}),
           // Spec 049 Phase 5: the install-row defaults — a scalar declaration,
           // stored as given; null clears to the platform defaults.
           ...(mergedPolicy !== undefined ? { installationPolicy: mergedPolicy } : {}),

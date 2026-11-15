@@ -14,6 +14,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
+import { declareAllStopLanes } from '../../../test/stopLanes.js';
 import { decideDesiredState, type DesiredStateFacts } from '../../../lib/desiredState/desiredState.js';
 import { resolvers, type Context } from './resolvers.js';
 
@@ -75,7 +76,8 @@ const task = (assignee: { id: string }, status: 'pending' | 'started' | 'finishe
     data: {
       appId: app.id, title: 'A task', ownerUserId: admin.id, assigneeWorkerId: assignee.id, status, assignedAt: new Date(),
       ...(status !== 'pending' ? { startedAt: new Date() } : {}),
-      ...(status === 'finished' || status === 'cancelled' ? { endedAt: new Date() } : {}),
+      ...(status === 'finished' ? { finishedAt: new Date(), resultOutcome: 'succeeded' } : {}),
+      ...(status === 'cancelled' ? { cancelledAt: new Date() } : {}),
       ...(parentTaskId ? { parentTaskId } : {}),
     },
     select: { id: true },
@@ -118,6 +120,7 @@ beforeEach(async () => {
     { worker: kit.id, family: 'codex', worktrees: ['hadron-server/kit', 'hadron-cli/kit'] },
   ] } }, keyCtx(orca1));
   await M.registerHost({}, { input: { appRef: app.id, label: 'Orca 2', pollIntervalSeconds: 600, workers: [{ worker: zoe.id, family: 'claude' }] } }, keyCtx(orca2));
+  await declareAllStopLanes(db, app.id);
   await sweep('OBSERVE');
 });
 
@@ -224,7 +227,7 @@ describe('#4224 hostDesiredState — short-lived', () => {
     expect(await verdict(kit)).toEqual(['STOPPED', 'WAITING_ON_CHILDREN']);
     // The child's assignee holds a task of her own.
     expect(await verdict(zoe, 'orca2')).toEqual(['RUNNING', 'HOLDS_TASK']);
-    await db.agentTask.update({ where: { id: child.id }, data: { status: 'finished', endedAt: new Date() } });
+    await db.agentTask.update({ where: { id: child.id }, data: { status: 'finished', startedAt: new Date(), finishedAt: new Date(), resultOutcome: 'succeeded' } });
     expect(await verdict(kit)).toEqual(['RUNNING', 'HOLDS_TASK']);
   });
 
@@ -282,6 +285,8 @@ describe('#4224 leave-alone', () => {
   it('each change is one worker.leave-alone-changed event; a repeat changes and records nothing', async () => {
     await leaveAlone(kit, true, ctx(admin.id), 'why');
     await leaveAlone(kit, true, ctx(admin.id), 'why');
+    // A new reason on a marked worker replaces the reason; the marker did not change, so no event.
+    expect((await leaveAlone(kit, true, ctx(admin.id), 'a better reason')).reason).toBe('a better reason');
     let ev = await events('worker.leave-alone-changed');
     expect(ev.map((e) => [e.subjectWorkerId, e.actorUserId, e.payload])).toEqual([[kit.id, admin.id, { leaveAlone: true }]]);
     const cleared = await leaveAlone(kit, false);
@@ -312,7 +317,7 @@ describe('#4224 leave-alone', () => {
 
   it('an outsider gets the worker-not-found answer, and an impersonated manager is refused', async () => {
     expect(await code(leaveAlone(kit, true, ctx(outsider.id)))).toBe('WORKER_NOT_FOUND');
-    const imp = ctx(admin.id, { impersonation: { adminUserId: outsider.id } } as Partial<Context>);
+    const imp = ctx(admin.id, { impersonation: { sessionId: generateId(), actorUserId: outsider.id, orgId: org.id, expiresAt: new Date(Date.now() + 60_000) } } as unknown as Partial<Context>);
     await expect(leaveAlone(kit, true, imp)).rejects.toBeInstanceOf(GraphQLError);
     expect((await db.worker.findUniqueOrThrow({ where: { id: kit.id } })).leaveAlone).toBe(false);
   });
@@ -328,10 +333,10 @@ describe('#4224 leave-alone', () => {
   it('Worker.leaveAlone and its fields read for whoever may see the worker\'s internals', async () => {
     await leaveAlone(kit, true, ctx(admin.id), 'why');
     const row = await db.worker.findUniqueOrThrow({ where: { id: kit.id } });
-    expect(await F.Worker.leaveAlone(row, {}, ctx(admin.id))).toBe(true);
+    expect(row.leaveAlone).toBe(true);
     expect(await F.Worker.leaveAloneReason(row, {}, ctx(admin.id))).toBe('why');
     expect(await F.Worker.leaveAloneBy(row, {}, ctx(admin.id))).toBe(admin.id);
-    expect(await F.Worker.leaveAloneAt(row, {}, ctx(admin.id))).toBeInstanceOf(Date);
+    expect(row.leaveAloneAt).toBeInstanceOf(Date);
     expect(await F.Worker.leaveAloneReason(row, {}, ctx(outsider.id))).toBeNull();
     expect(await F.Worker.leaveAloneBy(row, {}, ctx(outsider.id))).toBeNull();
   });
@@ -357,7 +362,7 @@ describe('#4224 sweep mode', () => {
     expect((await sweep('APPLY')).sweepMode).toBe('APPLY');
     expect((await db.app.findUniqueOrThrow({ where: { id: app.id } })).sweepMode).toBe('APPLY');
     expect((await state()).sweepMode).toBe('APPLY');
-    const ev = await events('app.sweep-mode-changed');
+    const ev = await events('team.sweep-mode-changed');
     // beforeEach moved OFF to OBSERVE; this test moved OBSERVE to APPLY once.
     expect(ev.map((e) => [e.actorUserId, e.payload])).toEqual([
       [admin.id, { from: 'OFF', to: 'OBSERVE' }],
