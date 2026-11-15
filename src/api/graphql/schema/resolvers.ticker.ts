@@ -935,6 +935,19 @@ async function changeSubscription(
     const worker = { id: w.id, name: w.name, heldByUserId: w.heldByUserId };
     if (op === 'subscribe') {
       if (w.retiredAt) throw taskError('WORKER_RETIRED', 'A retired worker cannot be subscribed.');
+      // #4234 (S11 of #4229): a SHORT_LIVED Agent's worker runs only while it holds a task and is handed no wake
+      // while stopped (`isStoppedShortLived`), so its ticks would mostly never fire. Refused, after authorization so
+      // the refusal discloses nothing to a caller who may not subscribe it. A plain read, no lock: a lifecycle change
+      // racing this write is covered by the delivery rule, which reads the lifecycle at every dueWakes.
+      // Unsubscribing stays allowed, for a subscription made before the Agent became short-lived.
+      const agent = await tx.agent.findUnique({ where: { id: w.agentId }, select: { lifecycle: true } });
+      if (agent?.lifecycle === 'SHORT_LIVED') {
+        throw taskError(
+          'TICKER_ON_SHORT_LIVED',
+          'This worker\'s Agent is short-lived: it runs only while it holds a task, so a ticker could not wake it. ' +
+            'Give it the work as a task instead. Nothing was changed.',
+        );
+      }
       if (live) return { subscription: live, authority: decision.authority, changed: false, ticker: t, worker, grantee };
       const created = await tx.tickerSubscription.create({
         data: {
