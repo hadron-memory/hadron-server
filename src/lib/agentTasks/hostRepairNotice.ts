@@ -14,7 +14,7 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { mentionTokenOf } from '../mentionToken.js';
 import { darkAlarmChain } from './darkWorker.js';
-import type { TerminalRepair } from '../workerTerminal.js';
+import type { TerminalRepair, TerminalRepairReason } from '../workerTerminal.js';
 
 export const ALERT_KEY = 'alert';
 
@@ -23,13 +23,32 @@ export type RepairNotice = {
   workerName: string;
   hostLabel: string;
   repair: TerminalRepair;
+  /** #4247: set with RELAUNCH_REFUSED and RELAUNCH_FAILED. */
+  repairReason?: TerminalRepairReason | null;
   attempt: number | null;
   checkedAt: Date;
 };
 
 /** The marker a notice claims, or null for none. */
-export const noticeKey = (n: Pick<RepairNotice, 'repair' | 'checkedAt'>): string =>
-  n.repair === 'RELAUNCHED' ? `relaunched:${n.checkedAt.toISOString()}` : ALERT_KEY;
+export const noticeKey = (n: Pick<RepairNotice, 'repair' | 'checkedAt'> & { repairReason?: TerminalRepairReason | null }): string =>
+  n.repair === 'RELAUNCHED'
+    ? `relaunched:${n.checkedAt.toISOString()}`
+    : n.repair === 'RELAUNCH_REFUSED' || n.repair === 'RELAUNCH_FAILED'
+      ? `${n.repair}:${n.repairReason}`
+      : ALERT_KEY;
+
+/** #4247: the closed reasons in words. Fixed text only: nothing a host sends reaches the line. */
+const REASON_TEXT: Record<TerminalRepairReason, string> = {
+  IDENTITY_MISMATCH: 'its identity does not match its launch snapshot',
+  DUPLICATE_AGENT: 'another agent is already running there',
+  PAUSED: 'it is paused',
+  HALTED: 'it is halted',
+  LEAVE_ALONE: 'it is marked leave-alone',
+  NO_LAUNCHER_PROFILE: 'it has no launcher profile',
+  LAUNCH_EXIT_NONZERO: 'the launcher exited with an error',
+  TERMINAL_CREATE_REFUSED: 'Orca refused to create the terminal',
+  TIMEOUT: 'the relaunch timed out',
+};
 
 /** A name set by a tenant or a host key reaches a platform-authored line: markdown-significant characters are dropped. */
 const plainName = (s: string): string => s.replace(/[\[\]()<>`*_~|\\]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -39,6 +58,8 @@ export function noticeBody(n: RepairNotice): string {
   const worker = plainName(n.workerName);
   const host = plainName(n.hostLabel);
   if (n.repair === 'RELAUNCHED') return `${worker} was relaunched on ${host} (attempt ${n.attempt}).`;
+  if (n.repair === 'RELAUNCH_REFUSED' && n.repairReason) return `${worker} is dark on ${host} and was not relaunched (attempt ${n.attempt}): ${REASON_TEXT[n.repairReason]}.`;
+  if (n.repair === 'RELAUNCH_FAILED' && n.repairReason) return `The relaunch of ${worker} on ${host} failed (attempt ${n.attempt}): ${REASON_TEXT[n.repairReason]}.`;
   const why = n.repair === 'NO_SNAPSHOT' ? 'it has no launch snapshot' : 'the relaunch attempt cap was reached';
   return `${worker} is dark on ${host} and was not relaunched: ${why}.`;
 }
