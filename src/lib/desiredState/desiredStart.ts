@@ -69,7 +69,7 @@ async function hostIdsOf(db: Db, appId: string): Promise<string[]> {
  * number of starts issued.
  */
 export async function startDesiredWorkers(db: PrismaClient, now = new Date(), anchor: number = anchorNow()): Promise<number> {
-  const apps = await db.app.findMany({ where: { sweepMode: 'APPLY', deletedAt: null, uninstalledAt: null }, select: { id: true } });
+  const apps = await db.app.findMany({ where: { sweepMode: 'APPLY', deletedAt: null, uninstalledAt: null }, select: { id: true }, orderBy: { id: 'asc' } });
   let issued = 0;
   for (const app of apps) {
     // Every host that lists the worker as startable, by host id. The first is tried; a host that turns out unusable
