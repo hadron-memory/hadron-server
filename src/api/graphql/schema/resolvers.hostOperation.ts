@@ -153,7 +153,7 @@ export async function hostKeyEntry(ctx: Context, appRef: string): Promise<{ app:
 }
 
 /** A host-key write: the gate, then one transaction holding the App's anchor shared, re-checked, with the use recorded by `body`. */
-async function asHost<T>(
+export async function asHost<T>(
   ctx: Context,
   appRef: string,
   body: (tx: Prisma.TransactionClient, app: TaskApp, host: HostKey) => Promise<T>,
