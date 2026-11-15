@@ -16000,8 +16000,10 @@ export const typeDefs = `#graphql
     REASSIGNED
     "The platform's matcher assigned it (hrn:node:hadronmemory.com:specs:cor:agt:060:06)."
     MATCHED
-    "A child task finished; the reason names the child (hrn:node:hadronmemory.com:specs:cor:agt:050:16)."
+    "A child task finished; the reason names the child. Due to the child's owner (hrn:node:hadronmemory.com:specs:cor:agt:050:16) and, #4234, to the parent's current assignee."
     CHILD_FINISHED
+    "#4234 — a child task was cancelled; the reason names the child. Due to the same two as CHILD_FINISHED (hrn:node:hadronmemory.com:specs:cor:agt:050:16)."
+    CHILD_CANCELLED
     "An unacknowledged alarm's currently-woken chain position (hrn:node:hadronmemory.com:specs:cor:agt:050:19). Delivering it never acknowledges the alarm."
     ALARM
     "#1709 — the task was cancelled and asks its assignee to end its session (hrn:node:hadronmemory.com:specs:cor:agt:050:10). Due while that session is open and the platform has not yet ended it through a host."
@@ -16010,7 +16012,7 @@ export const typeDefs = `#graphql
 
   "#1708 — the task a TASK reason is for: shown only to a caller who may read the App's tasks (hrn:node:hadronmemory.com:specs:cor:agt:050:21)."
   type DueTaskReason {
-    "The task's id (for CHILD_FINISHED, the child's)."
+    "The task's id (for CHILD_FINISHED and CHILD_CANCELLED, the child's)."
     id: ID!
     "The event delivered; acknowledging the wake records delivery on it."
     eventId: ID!
