@@ -60,7 +60,8 @@ const ARGS: Record<HostOperationType, { required: Record<string, ArgKind>; optio
   'worker.deliver': { required: { workerId: 'id', sessionId: 'id', eventId: 'id' } },
   'worker.end': { required: { workerId: 'id', sessionId: 'id' } },
   'worktree.remove': { required: { workerId: 'id', worktree: 'token' } },
-  'worker.reset-context': { required: { workerId: 'id', sessionId: 'id', taskId: 'id', resetId: 'id' } },
+  // #4225: a context-cap reset has no task.
+  'worker.reset-context': { required: { workerId: 'id', sessionId: 'id', resetId: 'id' }, optional: { taskId: 'id', cause: 'token' } },
 };
 
 const FAMILY = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -106,6 +107,10 @@ export function validateHostOperation(type: unknown, args: unknown): { type: Hos
       const what = kind === 'id' ? 'an id' : kind === 'family' ? 'a lowercase model family token'
         : 'a name token (letters, digits and . _ / @ + -, starting with a letter or digit, no "..", "//" or trailing "/")';
       throw new HostOperationArgsError('BAD_HOST_OPERATION_ARGS', `${type}'s "${k}" must be ${what}.`);
+    }
+    // #4225: the reset's cause is a closed set, as in the database CHECK, not any token.
+    if (type === 'worker.reset-context' && k === 'cause' && v !== 'task-end' && v !== 'context-cap') {
+      throw new HostOperationArgsError('BAD_HOST_OPERATION_ARGS', `${type}'s "cause" is task-end or context-cap.`);
     }
     out[k] = kind === 'family' ? normalizeFamily(v as string)! : v as string;
   }

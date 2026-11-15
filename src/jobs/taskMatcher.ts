@@ -29,6 +29,7 @@
  * event-driven runs and the lapse recording.
  */
 
+import { contextCapTick } from '../lib/contextReset/capSweep.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { matchQueuedTasks, recoverInterruptedMatches } from '../lib/agentTasks/matcher.js';
 import { purgeMatchOutcomes } from '../lib/agentTasks/matchOutcomes.js';
@@ -65,6 +66,12 @@ export async function taskMatcherTick(db: PrismaClient, now = new Date()): Promi
     result.recovered = await recoverInterruptedMatches(db, now);
   } catch (err) {
     console.error('[task-matcher] recovering interrupted matches failed:', err);
+  }
+  try {
+    // #4225 S4b: a long-lived worker over its Agent's context cap, proven idle (cor:agt:050:27 part 12).
+    await contextCapTick(db, now);
+  } catch (err) {
+    console.error('[task-matcher] context cap pass failed:', err);
   }
   try {
     // #3825: match outcomes older than the 168 h retention (no window can read them); bounded per pass.

@@ -55,6 +55,12 @@ describe('the invariants file', () => {
     const block = "-- #2771 (proposed cor:agt:070:09) — a worker's stored terminal report";
     const head = source.slice(0, source.indexOf(block));
     expect(source.indexOf(block)).toBeGreaterThan(0);
+    // #4225: the reset operation's args were widened in this file (taskId optional, a closed cause), and carried by
+    // 20261115270000_context_cap, which also carries #4230/#4251's start keys; the original migration holds the function as it was.
+    const withTheCapWideningUndone = (t: string) => t
+      .replace("    -- #4225: the task is named only when there is one (a context-cap reset has none), and the cause is a closed set.\n", '')
+      .replace("required := ARRAY['workerId', 'sessionId', 'resetId']; optional := ARRAY['taskId', 'cause'];", "required := ARRAY['workerId', 'sessionId', 'taskId', 'resetId'];")
+      .replace("    ELSIF k = 'cause' THEN\n      IF NOT (v #>> '{}') IN ('task-end', 'context-cap') THEN RETURN false; END IF;\n", '');
     // #4230 (S1b) widened worker.start's optional keys in host_operation_args_ok; its migration carries the function as
     // it is now, so the old copy is compared with the function as it was (the S1b lines taken out).
     const S1B_KEYS = "    -- #4230 (S1b, decision G1): a start may carry its assignment's typed launcher profile and its Agent's lifecycle,\n    -- never a command.\n";
@@ -67,11 +73,18 @@ describe('the invariants file', () => {
     const S1B_MODEL_FN = head.slice(head.indexOf('-- #4230 (S1b; #4251 blind P2, Peter #108855)'), head.indexOf('-- cor:agt:070:03 — the closed set of typed operations'));
     expect(S1B_MODEL_FN).toContain('CREATE OR REPLACE FUNCTION host_launcher_model_ok');
     const pre4230 = head.replace(S1B_MODEL_FN, '').replace(S1B_KEYS, '').replace(", 'model', 'effort', 'accountProfile', 'lifecycle']", ']').replace(S1B_CHECK, '');
-    expect(migration.endsWith(`\n${(pre4230 + migration.slice(migration.indexOf(block))).replaceAll(", 'checkpoint', 'sweep'", '').replaceAll(", 'checkpoint'", '')}`)).toBe(true);
+    expect(migration.endsWith(`\n${withTheCapWideningUndone(pre4230 + migration.slice(migration.indexOf(block))).replaceAll(", 'checkpoint', 'sweep'", '').replaceAll(", 'checkpoint'", '')}`)).toBe(true);
     const fnStart = source.indexOf('-- #4230 (S1b; #4251 blind P2, Peter #108855)');
     const fn = source.slice(fnStart, source.indexOf('$$;\n', source.indexOf('-- cor:agt:070:03 — the closed set of typed operations')) + 4);
     const s1b = readFileSync(new URL('../../../prisma/migrations/20261115230000_host_launcher_profiles/migration.sql', import.meta.url), 'utf8');
-    expect(s1b).toContain(`\n${fn}`);
+    // #4251's migration carries the function before the cap widening (this slice's migration carries it after).
+    expect(s1b).toContain(`\n${withTheCapWideningUndone(fn)}`);
+    const capFn = source.slice(source.indexOf('CREATE OR REPLACE FUNCTION host_operation_args_ok'), source.indexOf('$$;', source.indexOf('CREATE OR REPLACE FUNCTION host_operation_args_ok')) + 3);
+    const cap = readFileSync(new URL('../../../prisma/migrations/20261115270000_context_cap/migration.sql', import.meta.url), 'utf8');
+    // The cap migration carries the function as main has it (the #4230 start keys and #4251's model grammar) with the cause.
+    expect(cap).toContain(capFn);
+    expect(capFn).toContain("host_launcher_model_ok(v #>> '{}')");
+    expect(capFn).toContain("optional := ARRAY['taskId', 'cause']");
     // #4247: the CHECK was widened again by 20261115170000_worker_terminal_relaunch_repair. #4259 widened it once more, by
     // 20261115260000_relaunch_failure_codes, which carries the current block; the #4247 copy is the block without the
     // #4259 lines (its comment line and the two new failure reasons).

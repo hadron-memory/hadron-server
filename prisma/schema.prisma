@@ -2066,6 +2066,10 @@ model Agent {
   /// #4224 (S3 of #4229) — every worker cast from this Agent shares it. Default LONG_LIVED, so no existing Agent
   /// changes behaviour; written by whoever manages the Agent, like `usesTasks`.
   lifecycle             AgentLifecycle  @default(LONG_LIVED)
+  /// #4225 (S4b of #4229, cor:agt:050:27 part 12, Proposed; G4) — the context size, in tokens, above which a worker of this
+  /// LONG_LIVED Agent that its host reports idle is reset (`worker.reset-context`), at most once an hour. Null (the default)
+  /// is no cap. Written by whoever manages the Agent, like `usesTasks`. `chk_agents_context_cap` keeps it at 1 or more.
+  contextCap            Int?            @map("context_cap")
   organizationId        String?         @map("organization_id")
   /// User owner of a user-owned Agent (rooted on the bare `<handle>` — #697 v2,
   /// no `@` sigil). The org/owner XOR is ENFORCED — `chk_agent_owner_xor` in
@@ -6915,7 +6919,11 @@ model ContextReset {
   workerId             String    @map("worker_id")
   /// The worker's session open when the task ended: the fence the claim re-checks.
   sessionId            String    @map("session_id")
-  taskId               String    @unique @map("task_id")
+  /// Null for a `context-cap` reset (#4225): it belongs to no task. `chk_context_resets_cause` ties the two together.
+  taskId               String?   @unique @map("task_id")
+  /// #4225: what asked for the reset: `task-end` (a task's finish or cancel, cor:agt:050:27 part 2) or `context-cap` (the
+  /// Agent's cap, part 12). Never changes (`trg_context_resets_cause_immutable`).
+  cause                String    @default("task-end")
   /// The host the reset was issued to; null when no capable live host registered the worker (HOST_UNSUPPORTED).
   hostId               String?   @map("host_id")
   hostOperationId      String?   @unique @map("host_operation_id")

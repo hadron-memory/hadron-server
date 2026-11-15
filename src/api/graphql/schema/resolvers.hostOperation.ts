@@ -691,7 +691,7 @@ export const hostOperationMutations = {
   /** Register the durable checkpoint before any process control (§3.4). */
   registerContextResetRecovery: (
     _: unknown,
-    { input }: { input: ResetStepInput & { checkpointNode?: string | null; checkpoint?: {title:string;content:string} | null; sessionId: string; taskId: string } },
+    { input }: { input: ResetStepInput & { checkpointNode?: string | null; checkpoint?: {title:string;content:string} | null; sessionId: string; taskId?: string | null } },
     ctx: Context,
   ) => {
     let write: CheckpointWrite | undefined;
