@@ -30,7 +30,8 @@ const MIN = 60_000;
 
 let f: ResetFixture;
 
-const requestOf = (taskId: string) => db.taskSessionEndRequest.findFirst({ where: { taskId } });
+/** The task's latest request (a task may carry several, #4223). */
+const requestOf = (taskId: string) => db.taskSessionEndRequest.findFirst({ where: { taskId }, orderBy: [{ requestedAt: 'desc' }, { id: 'desc' }] });
 const resets = () => db.contextReset.count();
 const setLifecycle = (lifecycle: 'LONG_LIVED' | 'SHORT_LIVED') => db.agent.update({ where: { id: f.agentId }, data: { lifecycle } });
 /** A pending task assigned to `who`, written directly (no launch, no wake). */
@@ -320,15 +321,68 @@ describe('the last task reassigned away ends the session too (Peter, team chat #
     expect(await requestsOf(toPerson.id)).toMatchObject([{ workerId: f.kit.id }]);
   });
 
-  it('a task can ask twice, once per worker: Kit when it is moved away, Ada when she finishes it as her last; the task shows the latest, naming its worker', async () => {
+  it('a task can ask twice, once per worker: Kit when it is moved away, Ada when she finishes it as her last; the task shows only its own assignee\'s request', async () => {
     const adaSession = await f.bind(f.ada);
     const t = await f.startedTask();
     const moved = await reassign(t.id, f.ada);
-    expect(await F.AgentTask.sessionEndRequest(moved, {}, ctx(f.manager.id))).toMatchObject({ workerId: f.kit.id, sessionId: f.session.id });
+    // The task is Ada's now: the request it made of Kit is Kit's wake, never something the task's reader acts on.
+    expect(await F.AgentTask.sessionEndRequest(moved, {}, ctx(f.manager.id))).toBeNull();
     const finished = await f.finish(t.id, f.ada);
     const all = await requestsOf(t.id);
     expect(all.map((r) => [r.workerId, r.sessionId])).toEqual([[f.kit.id, f.session.id], [f.ada.id, adaSession.id]]);
     expect(await F.AgentTask.sessionEndRequest(finished, {}, ctx(f.holder.id))).toMatchObject({ workerId: f.ada.id, sessionId: adaSession.id, resolution: null });
+  });
+
+  it('Cedric P2-1: a later finisher never reads the former assignee\'s request on the task', async () => {
+    await f.bind(f.ada);
+    await pendingTask(f.ada); // Ada keeps another open task, so finishing asks nothing of her
+    const t = await f.startedTask();
+    await reassign(t.id, f.ada);
+    const finished = await f.finish(t.id, f.ada);
+    expect((await requestsOf(t.id)).map((r) => r.workerId)).toEqual([f.kit.id]);
+    expect(await F.AgentTask.sessionEndRequest(finished, {}, ctx(f.holder.id))).toBeNull();
+    // Moved to a person: the task shows nothing either.
+    const p = await f.startedTask();
+    const toPerson = await M.reassignAgentTask({}, { taskId: p.id, assignee: { user: f.holder.id } }, ctx(f.manager.id));
+    expect(await F.AgentTask.sessionEndRequest(toPerson, {}, ctx(f.manager.id))).toBeNull();
+  });
+
+  it('Kit moving its own last task away is still woken (END_SESSION): it cannot read the ask on a task that is no longer its', async () => {
+    const t = await db.agentTask.create({
+      data: { appId: f.app.id, title: 'Mine to give', ownerWorkerId: f.kit.id, assigneeWorkerId: f.kit.id, status: 'pending', assignedAt: new Date(), closeSessionWhenDone: false },
+      select: { id: true },
+    });
+    await f.asWorker(f.kit, () => reassign(t.id, f.ada, ctx(f.holder.id)));
+    expect(await requestsOf(t.id)).toMatchObject([{ workerId: f.kit.id, requestedByWorkerId: f.kit.id }]);
+    const due = (await pendingTaskWakes(db, [f.kit.id], new Date())).get(f.kit.id) ?? [];
+    expect(due.filter((w) => w.event === 'END_SESSION').map((w) => w.taskId)).toEqual([t.id]);
+    // Control: a worker that FINISHED its own last task reads the ask on the task and is not woken for it.
+    await db.session.update({ where: { id: f.session.id }, data: { endedAt: new Date() } });
+    const again = await f.bind(f.kit);
+    const own = await f.startedTask();
+    await f.finish(own.id);
+    expect(await requestOf(own.id)).toMatchObject({ sessionId: again.id });
+    const after = (await pendingTaskWakes(db, [f.kit.id], new Date())).get(f.kit.id) ?? [];
+    expect(after.filter((w) => w.event === 'END_SESSION')).toEqual([]);
+  });
+
+  it('Cedric P2-2: a reassignment to the same worker is refused and asks nothing', async () => {
+    const t = await f.startedTask();
+    await expect(reassign(t.id, f.kit)).rejects.toMatchObject({ extensions: { code: 'TASK_INVALID_TRANSITION' } });
+    expect(await requestsOf(t.id)).toEqual([]);
+  });
+
+  it('moved away and back, then finished: two requests of Kit; the task shows the later one', async () => {
+    await f.bind(f.ada);
+    await pendingTask(f.ada);
+    const t = await f.startedTask();
+    await reassign(t.id, f.ada);
+    await reassign(t.id, f.kit);
+    await f.asWorker(f.kit, () => M.startAgentTask({}, { taskId: t.id }, ctx(f.holder.id))).catch(() => undefined);
+    const finished = await f.finish(t.id);
+    const all = await requestsOf(t.id);
+    expect(all.map((r) => r.workerId)).toEqual([f.kit.id, f.kit.id]);
+    expect(await F.AgentTask.sessionEndRequest(finished, {}, ctx(f.holder.id))).toMatchObject({ workerId: f.kit.id, requestedAt: all[1]!.requestedAt });
   });
 
   it('the move and Kit\'s own finish of another task at once: exactly one asks Kit', async () => {
