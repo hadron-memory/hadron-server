@@ -16987,7 +16987,11 @@ export const typeDefs = `#graphql
     issuedAt: DateTime!
     collectedAt: DateTime
     finishedAt: DateTime
-    "A success's typed result: {worktree} for worktree.create."
+    """
+    A success's typed result, by type: {worktree} for worktree.create, {sessionId} (the worker session the start's grant
+    bound) for worker.start, {handoff} (a boolean: whether a handoff was written) for worker.end. Null for worker.deliver,
+    worktree.remove and worker.reset-context, for a failure, and until the operation finishes.
+    """
     result: JSON
     "Why it failed, as the host said it."
     failureReason: String
