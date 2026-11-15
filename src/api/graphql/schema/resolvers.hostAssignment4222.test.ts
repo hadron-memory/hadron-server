@@ -129,7 +129,10 @@ describe('the invariants file', () => {
     // and its migration carries the file as it is now; this one carries it as it was, with those clauses.
     const profile = source.slice(source.indexOf('  -- #4230 (S1b, decision G1)'), source.indexOf('\n);', source.indexOf('  -- #4230 (S1b, decision G1)')));
     expect(profile.length).toBeGreaterThan(0);
-    const s1a = source.replace(profile, '  (launcher_profile IS NULL OR (host_operation_token_ok(launcher_profile) AND length(launcher_profile) <= 128))');
+    const s1a = source.replace(profile, '  (launcher_profile IS NULL OR (host_operation_token_ok(launcher_profile) AND length(launcher_profile) <= 128))')
+      // #4251: the model clause now calls the one launcher-model grammar; S1a's copy has it inline.
+      .replace('  -- The one launcher-model grammar, shared with worker.start\'s argument check (prisma/host-operation-invariants.sql).\n  (model IS NULL OR host_launcher_model_ok(model)) AND\n',
+        '  (model IS NULL OR (host_operation_token_ok(model) AND length(model) <= 128)) AND\n');
     expect(migration.endsWith(`\n${s1a}`)).toBe(true);
     const s1b = readFileSync(new URL('../../../../prisma/migrations/20261115180000_host_launcher_profiles/migration.sql', import.meta.url), 'utf8');
     expect(s1b.endsWith(`\n${source}`)).toBe(true);

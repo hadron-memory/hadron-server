@@ -237,6 +237,23 @@ describe('upgrade: a model an S1a assignment holds still starts (#4251 blind P2)
   });
 });
 
+describe('one launcher-model grammar for the store and the start (Peter #108855)', () => {
+  it('every model the assignment store accepts, a start carries; every model it refuses, a start refuses', async () => {
+    const values = ['z-ai/glm-4.6', 'vendor/model', 'claude-opus-5-5', 'a@b', 'a+b', 'x'.repeat(128), 'x'.repeat(129), 'a b', '-x', '../x', 'a//b', 'a/', '$(id)', "a'b"];
+    const outcomes: [string, boolean, boolean][] = [];
+    for (const model of values) {
+      const stored = await db.hostWorkerAssignment.create({ data: { id: generateId(), appId: app.id, hostId: 'orca1', workerId: kit.id, workdir: 'hadron-server/kit', family: 'claude', model, createdByUserId: manager.id } })
+        .then(() => true, () => false);
+      await db.hostWorkerAssignment.deleteMany({ where: { appId: app.id } });
+      const started = await db.hostOperation.create({ data: { id: generateId(), appId: app.id, hostId: 'orca1', type: 'worker.start', workerId: kit.id, issuedBy: 'platform', holdUserId: holder.id,
+        args: { workerId: kit.id, worktree: 'hadron-server/kit', family: 'claude', model } } }).then(() => true, () => false);
+      outcomes.push([model.slice(0, 12), stored, started]);
+    }
+    expect(outcomes.filter(([, a, b]) => a !== b)).toEqual([]);
+    expect(Object.fromEntries(outcomes.map(([m, a]) => [m, a]))).toMatchObject({ 'z-ai/glm-4.6': true, 'vendor/model': true, 'a b': false, '-x': false, '$(id)': false });
+  });
+});
+
 describe('through the public GraphQL schema (#4251 blind P3)', () => {
   it('assignHostWorker stores effort and accountProfile, and hostSetup returns them', async () => {
     const server = new ApolloServer<Context>({ typeDefs, resolvers });
