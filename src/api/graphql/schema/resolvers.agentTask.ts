@@ -2486,6 +2486,7 @@ export const agentTaskMutations = {
       await recordInstructedManagerAct(tx, app.id, actor, 'task.assign', { taskId: task.id });
     }, { workers: async (appId) => [await partyWorkerForLock(ctx, appId, assignee)] }, instruction);
     // #1709 (cor:agt:070:08): an assignment by hand starts a held worker with no live session through its host.
+    // V16 (Proposed in the rule) says no OPEN session; this path still tests live: #4237.
     await launchAssignee(ctx.db, assigned);
     await emitTaskWarnings(ctx, info, assigned.appId, { codes: warn, taskId: assigned.id });
     return assigned;

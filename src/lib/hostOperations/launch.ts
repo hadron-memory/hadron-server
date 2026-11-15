@@ -9,9 +9,15 @@
  * WHO STARTS (cor:agt:070:05, :08): whoever manages the App, by hand, with or
  * without a task; and the platform, when a task is assigned (by hand or by
  * matching) to a held worker with no live session that has an existing
- * worktree on a live host. A worker nobody holds is never started. Without such
- * a worktree nothing is issued and the task waits (the not-started alarm tells
- * its owner). Nothing here creates a worktree (cor:agt:070:06).
+ * worktree on a live host. Vera's V16 (ruling 0265; drafted in 070:08 as
+ * Proposed, #4226) narrows that to no OPEN session: a worker with an open
+ * session, quiet or live, is reached through it, never started over it. A worker nobody holds is never started. Without
+ * such a worktree nothing is issued and the task waits (the not-started alarm
+ * tells its owner). Nothing here creates a worktree (cor:agt:070:06; resetting
+ * an existing one inside the start is drafted as Proposed there, G6, #4226).
+ * KNOWN GAP (#4237): `lockStartableWorker` below still refuses only a LIVE
+ * session, so a start by hand, a reassign or a named create can still land over
+ * a quiet open one; the matcher's own start is guarded (`needsHostStart`, #3815).
  *
  * THE GRANT (A): the agent a host starts runs on the HOLDER's own token,
  * already configured on that host. The host passes it a single-use grant, minted
@@ -94,8 +100,10 @@ export async function lockStartableWorker(tx: Prisma.TransactionClient, appId: s
     FROM workers WHERE id = ${workerId} FOR UPDATE`;
   if (!w || w.appId !== appId) throw new LaunchRefusal('WORKER_NOT_FOUND', 'Worker not found.');
   if (w.retiredAt) throw new LaunchRefusal('WORKER_RETIRED', 'This worker is retired.');
-  // cor:agt:070:08: a worker nobody holds is never started; there is nobody to bind it on behalf of.
+  // cor:agt:070:08 (kept by the Team on Orca drafts, G5, #4226): a worker nobody holds is never started; there is
+  // nobody to bind it on behalf of.
   if (!w.heldByUserId) throw new LaunchRefusal('WORKER_NOT_HELD', 'Nobody holds this worker, so no host starts it.');
+  // LIVE, not open: V16 (Proposed in 070:08) says no OPEN session; aligning the check is #4237.
   if (await hasLiveSession(tx, workerId, now)) throw new LaunchRefusal('WORKER_LIVE', 'This worker already has a live session.');
   const pending = await tx.hostOperation.findFirst({
     where: { workerId, type: 'worker.start', status: { in: ['issued', 'collected'] } },
@@ -158,7 +166,9 @@ export async function insertWorkerStart(
 
 /**
  * cor:agt:070:08 — the platform's start for an assignment: if the task's worker
- * assignee is held, has no live session and an existing worktree on a live host,
+ * assignee is held, has no live session (V16, Proposed in the rule, says no OPEN
+ * session; the matcher only calls this for one with none, other callers: #4237) and an
+ * existing worktree on a live host,
  * issue `worker.start` there (the first such host by id, and the first worktree
  * it lists: Proposed). Otherwise nothing is issued and the task waits. Runs
  * AFTER the assignment committed, in its own transaction; never fails the
