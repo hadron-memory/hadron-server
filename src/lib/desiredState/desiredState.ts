@@ -21,16 +21,16 @@
  * - The App's sweep mode OFF wins over everything: nothing is desired of any worker, and each row still says what
  *   its state would be.
  *
- * WHICH WORKERS A HOST RUNS. A host's workers are the ones its registration lists (cor:agt:070:01), live or lapsed,
- * with the family and worktrees it registered. S1a (#4222) now also holds them on the platform (`hostSetup`, behind
- * `App.hostSetupSource`); reading those when the source is `server` is a follow-up, and it replaces this one read,
- * `hostWorkers` below.
+ * WHICH WORKERS A HOST RUNS. Under the App's `hostSetupSource` `host` (the default), the ones its registration lists
+ * (cor:agt:070:01), live or lapsed, with the family and worktrees it registered. Under `server`, the platform's
+ * assignments to that host (S1a, #4222; read here since #4248). One read, `hostWorkers` below.
  *
  * Pure reads. Nothing here starts, stops or changes anything.
  */
 
 import { AgentLifecycle as AgentLifecycleEnum, Prisma, SweepMode as SweepModeEnum, type PrismaClient } from '../../generated/prisma/index.js';
 import { recordInEffect } from '../agentTasks/availability.js';
+import { loadHostAssignments, loadHostSetupSource } from '../hostOperations/assignments.js';
 import { coveringSignals, strongestLevel, type StopLevel } from '../stopSignals/state.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
@@ -98,11 +98,22 @@ export function decideDesiredState(f: DesiredStateFacts): DesiredStateVerdict {
 export type HostWorker = { workerId: string; family: string; worktrees: string[] };
 
 /**
- * The workers `hostId` runs in `appId`, or null when the App has no such host: the host's registration
- * (cor:agt:070:01), whether or not it is live, since a host that stopped refreshing still has the same workers.
- * The follow-up to #4222 swaps this for the platform's assignments when `App.hostSetupSource` is `server`.
+ * The workers `hostId` runs in `appId`, or null when the App has no such host. Which list depends on the App's
+ * `hostSetupSource` (#4222, #4248):
+ *  - `host` (the default): the host's registration (cor:agt:070:01), whether or not it is live, since a host that
+ *    stopped refreshing still has the same workers; with the family and worktrees it registered.
+ *  - `server`: the platform's assignments to that host in effect (`loadHostAssignments`: a retired worker's row is
+ *    skipped), with the assignment's family and its one workdir. An assigned worker the registration does not list is
+ *    in (the sweep reports what it should run, not what the host confirmed), and a registered one not assigned is out.
+ *    The host exists if it has a registration or an assignment.
  */
 export async function hostWorkers(db: Db, appId: string, hostId: string): Promise<HostWorker[] | null> {
+  if ((await loadHostSetupSource(db, appId)) === 'server') {
+    const assigned = await loadHostAssignments(db, appId, hostId);
+    if (assigned.length > 0) return assigned.map((a) => ({ workerId: a.workerId, family: a.family, worktrees: [a.workdir] }));
+    const reg = await db.hostRegistration.findUnique({ where: { appId_hostId: { appId, hostId } }, select: { id: true } });
+    return reg ? [] : null;
+  }
   const reg = await db.hostRegistration.findUnique({
     where: { appId_hostId: { appId, hostId } },
     select: { workers: { select: { workerId: true, family: true, worktrees: true } } },
