@@ -13,6 +13,8 @@ import { ensureChannelWithRoot } from '../../../lib/channels.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../../../middleware/auth.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { resolvers, type Context } from './resolvers.js';
+import { buildASTSchema, parse } from 'graphql';
+import { typeDefs } from './typeDefs.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -118,11 +120,6 @@ describe('each new outcome is accepted with each of its reasons and posts one al
     const [p] = await posts();
     expect(p.createdBy).not.toBe(manager.id);
     expect(p.data.managerPost).toBeUndefined();
-  });
-  it('the report is stored without the outcome or the reason', async () => {
-    await send([failed(kit.id)]);
-    const t = (await db.worker.findUniqueOrThrow({ where: { id: kit.id } })).terminal as any;
-    expect(Object.keys(t).sort()).toEqual(['checkedAt', 'contextMeasuredAt', 'contextTokens', 'host', 'lastTurnAt', 'prompt', 'reason', 'reportedAt', 'status']);
   });
 });
 
@@ -234,5 +231,124 @@ describe('the SDL', () => {
     const reasons = /enum WorkerTerminalRepairReason \{([^}]*)\}/.exec(sdl)![1]!;
     for (const v of [...REFUSED, ...FAILED]) expect(reasons).toContain(v);
     expect(/input WorkerTerminalReportInput \{[^}]*repairReason: WorkerTerminalRepairReason/s.test(sdl)).toBe(true);
+  });
+});
+
+const view = async (id: string) => (resolvers as any).Worker.terminal(await db.worker.findUniqueOrThrow({ where: { id } }), {}, ctx(manager.id));
+
+describe('once per episode means once per (worker, outcome, reason), whatever came between', () => {
+  it('A, B, A posts A once: the third report is the same alert as the first', async () => {
+    await send([refused(kit.id, { repairReason: 'PAUSED', checkedAt: ago(5) })]);
+    await send([refused(kit.id, { repairReason: 'HALTED', checkedAt: ago(4) })]);
+    await send([refused(kit.id, { repairReason: 'PAUSED', checkedAt: ago(3) })]);
+    expect((await posts()).map((p) => p.content.replace(/^.*: /, ''))).toEqual(['it is paused.', 'it is halted.']);
+  });
+  it('across the two outcomes: REFUSED/PAUSED, FAILED/TIMEOUT, REFUSED/PAUSED posts twice', async () => {
+    await send([refused(kit.id, { checkedAt: ago(5) })]);
+    await send([failed(kit.id, { checkedAt: ago(4) })]);
+    await send([refused(kit.id, { checkedAt: ago(3) })]);
+    expect(await posts()).toHaveLength(2);
+  });
+  it('NO_SNAPSHOT, a new outcome, NO_SNAPSHOT again: two posts (the old alert is one token of the set)', async () => {
+    await send([dark(kit.id, { repair: 'NO_SNAPSHOT', checkedAt: ago(5) })]);
+    await send([failed(kit.id, { checkedAt: ago(4) })]);
+    await send([dark(kit.id, { repair: 'CAP_REACHED', checkedAt: ago(3) })]);
+    expect(await posts()).toHaveLength(2);
+  });
+  it('a report with no repair outcome ends the episode: the same alert posts again', async () => {
+    await send([refused(kit.id, { checkedAt: ago(6) })]);
+    await send([failed(kit.id, { checkedAt: ago(5) })]);
+    await send([dark(kit.id, { checkedAt: ago(4) })]);
+    await send([refused(kit.id, { checkedAt: ago(3) })]);
+    await send([failed(kit.id, { checkedAt: ago(2) })]);
+    expect(await posts()).toHaveLength(4);
+  });
+  it('a relaunch ends the episode too', async () => {
+    await send([refused(kit.id, { checkedAt: ago(6) })]);
+    await send([failed(kit.id, { checkedAt: ago(5) })]);
+    await send([dark(kit.id, { repair: 'RELAUNCHED', attempt: 2, checkedAt: ago(4) })]);
+    await send([refused(kit.id, { checkedAt: ago(3) })]);
+    expect(await posts()).toHaveLength(4);
+  });
+  it('a replayed batch of an earlier A posts nothing', async () => {
+    const a = [refused(kit.id, { checkedAt: ago(5) })];
+    await send(a);
+    await send([refused(kit.id, { repairReason: 'HALTED', checkedAt: ago(4) })]);
+    await send(a);
+    expect(await posts()).toHaveLength(2);
+  });
+});
+
+describe('the new outcomes are stored on the report and shown on Worker.terminal', () => {
+  it('RELAUNCH_REFUSED is read back with its reason and attempt', async () => {
+    await send([refused(kit.id, { repairReason: 'HALTED', attempt: 4 })]);
+    const t = await view(kit.id);
+    expect(t).toMatchObject({ status: 'dark', repair: 'RELAUNCH_REFUSED', repairReason: 'HALTED', repairAttempt: 4 });
+    const stored = (await db.worker.findUniqueOrThrow({ where: { id: kit.id } })).terminal as any;
+    expect(Object.keys(stored).sort()).toEqual(['checkedAt', 'contextMeasuredAt', 'contextTokens', 'host', 'lastTurnAt', 'prompt', 'reason', 'repair', 'repairAttempt', 'repairReason', 'reportedAt', 'status']);
+  });
+  it('RELAUNCH_FAILED likewise', async () => {
+    await send([failed(kit.id, { repairReason: 'LAUNCH_EXIT_NONZERO', attempt: 2 })]);
+    expect(await view(kit.id)).toMatchObject({ repair: 'RELAUNCH_FAILED', repairReason: 'LAUNCH_EXIT_NONZERO', repairAttempt: 2 });
+  });
+  it('the next report replaces it: no outcome means null', async () => {
+    await send([failed(kit.id, { checkedAt: ago(3) })]);
+    await send([dark(kit.id, { checkedAt: ago(2) })]);
+    expect(await view(kit.id)).toMatchObject({ repair: null, repairReason: null, repairAttempt: null });
+  });
+  it('the existing three are still not stored, and read null', async () => {
+    for (const [i, extra] of [{ repair: 'RELAUNCHED', attempt: 1 }, { repair: 'NO_SNAPSHOT' }, { repair: 'CAP_REACHED' }].entries()) {
+      await send([dark(kit.id, { ...extra, checkedAt: ago(9 - i) })]);
+      const stored = (await db.worker.findUniqueOrThrow({ where: { id: kit.id } })).terminal as any;
+      expect(Object.keys(stored)).not.toContain('repair');
+      expect(await view(kit.id)).toMatchObject({ repair: null, repairReason: null, repairAttempt: null });
+    }
+  });
+  it('a reader who may not see the terminal sees none of it', async () => {
+    await send([failed(kit.id)]);
+    const outsider = await db.user.create({ data: { githubId: 92_000_000 + Math.floor(Math.random() * 1e6), githubUsername: `rp-out-${Date.now()}`, roles: ['READER'] }, select: { id: true } });
+    expect(await (resolvers as any).Worker.terminal(await db.worker.findUniqueOrThrow({ where: { id: kit.id } }), {}, ctx(outsider.id))).toBeNull();
+  });
+});
+
+describe('the database refuses a raw write the resolver would not make', () => {
+  const raw = (v: unknown) => db.$executeRaw`UPDATE workers SET terminal = ${JSON.stringify(v)}::jsonb WHERE id = ${kit.id}`;
+  const at = new Date().toISOString();
+  const base = {
+    host: { id: 'orca1', label: 'Orca' }, status: 'dark', prompt: 'unknown', reason: 'bare_shell',
+    lastTurnAt: null, checkedAt: at, reportedAt: at,
+  };
+  const no = /chk_workers_terminal_shape/;
+  it('accepts each outcome with its own reasons, and a row with none of the three keys', async () => {
+    await expect(raw(base)).resolves.toBe(1);
+    for (const r of REFUSED) await expect(raw({ ...base, repair: 'RELAUNCH_REFUSED', repairReason: r, repairAttempt: 1 })).resolves.toBe(1);
+    for (const r of FAILED) await expect(raw({ ...base, repair: 'RELAUNCH_FAILED', repairReason: r, repairAttempt: 2147483647 })).resolves.toBe(1);
+  });
+  it('rejects a wrong-set reason, a missing key, a bad attempt, another outcome, a non-dark status and extra text', async () => {
+    const ok = { ...base, repair: 'RELAUNCH_REFUSED', repairReason: 'PAUSED', repairAttempt: 1 };
+    await expect(raw({ ...ok, repairReason: 'TIMEOUT' })).rejects.toThrow(no);
+    await expect(raw({ ...ok, repair: 'RELAUNCH_FAILED' })).rejects.toThrow(no);
+    await expect(raw({ ...ok, repairReason: 'BECAUSE' })).rejects.toThrow(no);
+    await expect(raw({ ...ok, repairReason: null })).rejects.toThrow(no);
+    await expect(raw({ ...ok, repairAttempt: null })).rejects.toThrow(no);
+    await expect(raw({ ...ok, repairAttempt: 0 })).rejects.toThrow(no);
+    await expect(raw({ ...ok, repairAttempt: 1.5 })).rejects.toThrow(no);
+    await expect(raw({ ...ok, repairAttempt: 2147483648 })).rejects.toThrow(no);
+    await expect(raw({ ...ok, repairAttempt: '1' })).rejects.toThrow(no);
+    await expect(raw({ ...ok, repair: 'RELAUNCHED' })).rejects.toThrow(no);
+    await expect(raw({ ...ok, repair: 'NO_SNAPSHOT', repairReason: null, repairAttempt: null })).rejects.toThrow(no);
+    await expect(raw({ ...ok, status: 'idle', reason: null })).rejects.toThrow(no);
+    await expect(raw({ ...base, repairReason: 'PAUSED' })).rejects.toThrow(no);
+    await expect(raw({ ...base, repairAttempt: 1 })).rejects.toThrow(no);
+    await expect(raw({ ...ok, repairNote: 'the screen said' })).rejects.toThrow(no);
+  });
+});
+
+describe('the SDL: WorkerTerminal shows the outcome', () => {
+  it('carries repair, repairReason and repairAttempt, all nullable, and no text', () => {
+    const t = (buildASTSchema(parse(typeDefs)).getType('WorkerTerminal') as any).getFields();
+    expect(String(t.repair?.type)).toBe('WorkerTerminalRepair');
+    expect(String(t.repairReason?.type)).toBe('WorkerTerminalRepairReason');
+    expect(String(t.repairAttempt?.type)).toBe('Int');
   });
 });
