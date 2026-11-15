@@ -188,6 +188,20 @@ describe('one summary post per run, only when something changed (cor:agt:020:14 
     const [p] = await posts();
     expect(p.content).toContain('2 fixed');
   });
+  it('runs that cannot post do not starve another App\'s recovery (#4255 Clark F4)', async () => {
+    const x = Math.floor(Math.random() * 1_000_000);
+    const dark = await db.app.create({ data: { organizationId: org.id, name: 'NoChat', urn: `${org.urn}:nochat${x}` }, select: { id: true } });
+    for (let i = 0; i < 60; i++) {
+      const c = validateSweepRun(run({ runId: `nc${i}`, planned: 1, applied: 1, lines: lines(1) }) as any, new Date());
+      if (!c.ok) throw new Error(c.message);
+      await db.$transaction((tx) => insertSweepRun(tx, dark.id, `h${i}`, c.run));
+    }
+    const ok = validateSweepRun(run({ planned: 1, applied: 1, lines: lines(1) }) as any, new Date());
+    if (!ok.ok) throw new Error(ok.message);
+    await db.$transaction((tx) => insertSweepRun(tx, app.id, 'orca1', ok.run));
+    expect(await postPendingSweepSummaries(db, new Date(Date.now() + 60_000))).toBe(1);
+    expect(await posts()).toHaveLength(1);
+  });
   it('a run recorded long ago is not posted late: the retry window is ten minutes', async () => {
     const checked = validateSweepRun(run({ planned: 1, applied: 1, lines: lines(1) }) as any, new Date());
     if (!checked.ok) throw new Error(checked.message);
@@ -246,6 +260,25 @@ describe('the stale-sweep alarm', () => {
       await record({ runId: `slow${i}`, startedAt: ago(8), endedAt: ago(7) });
       expect(await evaluateStaleSweeps(db, new Date())).toHaveLength(0);
     }
+    expect(await alarms()).toHaveLength(0);
+  });
+
+  it('a run that commits while the raise waits on the registration lock is seen, so no alarm follows it (#4255 Braxton P3-2)', async () => {
+    await setMode('OBSERVE');
+    // orca1 registered long ago and never ran: stale until the in-flight run below commits.
+    await db.hostRegistration.updateMany({ where: { appId: app.id, hostId: 'orca1' }, data: { registeredAt: ago(10) } });
+    const c = validateSweepRun(run({ runId: 'inflight' }) as any, new Date());
+    if (!c.ok) throw new Error(c.message);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let inserted!: () => void;
+    const insertedP = new Promise<void>((r) => { inserted = r; });
+    const writer = db.$transaction(async (tx) => { await insertSweepRun(tx, app.id, 'orca1', c.run); inserted(); await gate; });
+    await insertedP;
+    const pass = evaluateStaleSweeps(db, new Date());
+    await new Promise((r) => setTimeout(r, 800)); // the raise for orca1 is now waiting on the registration row
+    release();
+    await Promise.all([writer, pass]);
     expect(await alarms()).toHaveLength(0);
   });
 

@@ -156,6 +156,9 @@ export const SUMMARY_MIN_GAP_SECONDS = 60;
 export const SUMMARY_RETRY_MINUTES = 10;
 /** A run is not retried until it is this old: the deferred post of the request itself is still in flight. */
 const SUMMARY_RETRY_GRACE_SECONDS = 20;
+/** The hosts a retry pass looks at, and the posts it may make. */
+const SUMMARY_RETRY_SCAN = 500;
+const SUMMARY_RETRY_POSTS = 50;
 
 /** Post a run's summary off the request path: the host key's answer never waits on a chat append. A failed post leaves the marker unclaimed; {@link postPendingSweepSummaries} retries it. */
 export function postSweepSummaryDeferred(db: PrismaClient, appId: string, runId: string): void {
@@ -202,12 +205,20 @@ export async function postSweepSummary(db: PrismaClient, appId: string, runId: s
 export async function postPendingSweepSummaries(db: PrismaClient, now = new Date()): Promise<number> {
   const from = toNaiveUtc(new Date(now.getTime() - SUMMARY_RETRY_MINUTES * 60_000));
   const to = toNaiveUtc(new Date(now.getTime() - SUMMARY_RETRY_GRACE_SECONDS * 1000));
+  // One candidate per HOST (its oldest unposted run: the host gap lets only one post per minute anyway), so a population of
+  // runs that cannot post (an App with no chat) is bounded by its hosts, and cannot hold the scan against another App's
+  // recoverable run; every candidate is tried each tick and the number of posts, not of attempts, is what is capped (#4255
+  // Clark F4).
   const due = await db.$queryRaw<{ id: string; appId: string }[]>`
-    SELECT r.id, r.app_id AS "appId" FROM host_sweep_runs r
-    WHERE r.posted_at IS NULL AND r.applied + r.failed > 0 AND r.recorded_at > ${from}::timestamp AND r.recorded_at <= ${to}::timestamp
-    ORDER BY r.recorded_at, r.id LIMIT 50`;
+    SELECT d.id, d."appId" FROM (
+      SELECT DISTINCT ON (r.app_id, r.host_id) r.id, r.app_id AS "appId", r.recorded_at
+      FROM host_sweep_runs r
+      WHERE r.posted_at IS NULL AND r.applied + r.failed > 0 AND r.recorded_at > ${from}::timestamp AND r.recorded_at <= ${to}::timestamp
+      ORDER BY r.app_id, r.host_id, r.recorded_at, r.id) d
+    ORDER BY d.recorded_at, d.id LIMIT ${SUMMARY_RETRY_SCAN}`;
   let posted = 0;
   for (const r of due) {
+    if (posted >= SUMMARY_RETRY_POSTS) break;
     try {
       if (await postSweepSummary(db, r.appId, r.id)) posted++;
     } catch (err) {
@@ -249,7 +260,9 @@ async function raise(db: PrismaClient, app: { id: string; organizationId: string
         data: managers.map((_, i) => ({ eventId, chainIndex: i, dueAt: new Date(now.getTime() + i * windowMs), wokenAt: i === 0 ? now : null })),
       });
       return eventId;
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 30_000, maxWait: 10_000 });
+    // READ COMMITTED on purpose (#4255 Braxton P3-2): the registration lock above is the fence against a run committing now, and a
+    // snapshot taken before its wait would not see that run. The one-open-episode index decides a duplicate race.
+    }, { timeout: 30_000, maxWait: 10_000 });
   } catch (err) {
     if (isSerializationFailure(err)) return null;
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') return null;
