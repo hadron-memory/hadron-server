@@ -185,6 +185,22 @@ enum AgentType {
   CHATBOT
 }
 
+/// #4224 (S3 of #4229) — how long a worker of this Agent runs. LONG_LIVED (default, today's behaviour): its
+/// process should always run. SHORT_LIVED: it should run only while the worker is the assignee of a pending or
+/// started task that is not waiting on child tasks. Read by the desired-state query (src/lib/desiredState).
+enum AgentLifecycle {
+  LONG_LIVED
+  SHORT_LIVED
+}
+
+/// #4224 (S3 of #4229) — the App's sweep switch. OFF (default): the host sweep acts on no worker and every desired-state
+/// row says SWEEP_OFF. OBSERVE: the sweep compares and reports. APPLY: it also repairs.
+enum SweepMode {
+  OFF
+  OBSERVE
+  APPLY
+}
+
 enum LogLevel {
   DEBUG
   INFO
@@ -2045,6 +2061,9 @@ model Agent {
   /// no other started task, the platform asks the worker's host to reset its context: a shed, never a session end.
   /// Off by default; written by whoever manages the Agent, like `usesTasks`.
   resetContextAfterTask Boolean         @default(false) @map("reset_context_after_task")
+  /// #4224 (S3 of #4229) — every worker cast from this Agent shares it. Default LONG_LIVED, so no existing Agent
+  /// changes behaviour; written by whoever manages the Agent, like `usesTasks`.
+  lifecycle             AgentLifecycle  @default(LONG_LIVED)
   organizationId        String?         @map("organization_id")
   /// User owner of a user-owned Agent (rooted on the bare `<handle>` — #697 v2,
   /// no `@` sigil). The org/owner XOR is ENFORCED — `chk_agent_owner_xor` in
@@ -3407,6 +3426,8 @@ model App {
   teamPausedAt                      DateTime?            @map("team_paused_at")
   /// #2138 §3.6 — when the last team pause ENDED; restarts every worker's check clock (the status is not OVERDUE the moment a pause lifts). NULL = never paused.
   teamResumedAt                     DateTime?            @map("team_resumed_at")
+  /// #4224 (S3 of #4229) — the sweep switch (see SweepMode). OFF by default: one write restores today's behaviour.
+  sweepMode                         SweepMode            @default(OFF) @map("sweep_mode")
   /// The fastest ticker a worker may subscribe ITSELF to: [floor, 86400].
   tickerSelfSubscribeCadenceSeconds Int                  @default(600) @map("ticker_self_subscribe_cadence_seconds")
   /// How many live tickers the App may have: [1, 100].
@@ -4068,6 +4089,16 @@ model Worker {
   /// transaction: `alert` (a no-snapshot / cap-reached alert, once per worker until a report without a repair outcome or with
   /// a relaunch) or `relaunched:<checkedAt>` (so a replayed relaunch report posts nothing twice). Never read by a client.
   repairNoticeKey String? @map("repair_notice_key")
+  /// #4224 (S3 of #4229) — the leave-alone marker: the host sweep observes and reports this worker but never starts,
+  /// stops or repairs it. Set and cleared by whoever manages the App (`setWorkerLeaveAlone`), each change one
+  /// `worker.leave-alone-changed` team event. The reason, the user who last set it and when are set together with
+  /// the marker and cleared with it (chk_workers_leave_alone_shape, prisma/desired-state-invariants.sql).
+  leaveAlone       Boolean   @default(false) @map("leave_alone")
+  leaveAloneReason String?   @map("leave_alone_reason")
+  /// The user who set the marker (the manager, or the holder a worker acted on the instruction of). A bare id, no FK:
+  /// a record of who acted, like `retiredBy`.
+  leaveAloneBy     String?   @map("leave_alone_by")
+  leaveAloneAt     DateTime? @map("leave_alone_at")
 
   app                  App                       @relation(fields: [appId], references: [id], onDelete: Cascade)
   /// SetNull: a worker row is never hard-deleted in normal operation, but an

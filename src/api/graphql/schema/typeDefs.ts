@@ -3223,6 +3223,8 @@ export const typeDefs = `#graphql
     availableMemberRoles: [String!]!
     "#2138: when the whole team was paused (setTeamPause), or null. Separate from every worker's own pause."
     teamPausedAt: DateTime
+    "#4224 (S3 of #4229): the App's sweep switch (setAppSweepMode). OFF by default."
+    sweepMode: SweepMode!
     """
     #2109 — whether the current caller manages this App: its owner, an owner-role
     member, a live ADMIN or OWNER of its organization, or a platform admin for an
@@ -4907,6 +4909,8 @@ export const typeDefs = `#graphql
     usesTasks: Boolean!
     "#2162 (hrn:node:hadronmemory.com:specs:cor:agt:050:27): when a task one of this Agent's workers had started finishes or is cancelled, and it holds no other started task, its host resets the worker's context (a shed: the binding and session stay). Default false. Set by whoever manages the Agent."
     resetContextAfterTask: Boolean!
+    "#4224 (S3 of #4229): how long this Agent's workers run. LONG_LIVED (default): a worker's process should always run. SHORT_LIVED: only while the worker is the assignee of a pending or started task, one waiting on its child tasks included. Read by hostDesiredState at each call; changing it moves no session or process by itself. Set by whoever manages the Agent, like usesTasks."
+    lifecycle: AgentLifecycle!
     type: AgentType!
     surfaces: [String!]!
     # #928/#974 persona dressing (cor:agt:020:01): universal metadata that
@@ -5922,6 +5926,14 @@ export const typeDefs = `#graphql
     retiredAt: DateTime
     "Who retired this worker. WORKING-STATE field (#1149), masked like createdBy."
     retiredBy: String
+    "#4224 (S3 of #4229): the leave-alone marker (setWorkerLeaveAlone). A host's sweep observes and reports a marked worker and never starts, stops or repairs it. WORKING-STATE field (#1149, hrn:node:hadronmemory.com:specs:cor:dmo:050:11): null for a caller who may see only the worker's profile."
+    leaveAlone: Boolean
+    "Why the worker is marked leave-alone, when a reason was given. WORKING-STATE field (#1149), masked like createdBy."
+    leaveAloneReason: String
+    "The user who marked the worker leave-alone. WORKING-STATE field (#1149), masked like createdBy."
+    leaveAloneBy: String
+    "When the worker was marked leave-alone; null when it is not marked. WORKING-STATE field (#1149), masked like createdBy."
+    leaveAloneAt: DateTime
     """
     #2047 / hrn:node:hadronmemory.com:specs:cor:agt:040:03: the boot prompt served to this worker's open session. Readable by whoever may read the worker's
     internals; null for anyone else, and when no session is open.
@@ -9102,6 +9114,17 @@ export const typeDefs = `#graphql
     "#1709 — the App's host registrations, liveness derived now (hrn:node:hadronmemory.com:specs:cor:agt:070:01). Whoever reads the App's tasks and events, the App's own key included."
     hostRegistrations(appRef: String!): [HostRegistration!]!
     """
+    #4224 (S3 of #4229) — for each worker one host runs: whether its agent process should be running, and why. A
+    host's sweep reads this once per pass and compares it with what it sees. A host's workers are the ones its
+    registration lists (hrn:node:hadronmemory.com:specs:cor:agt:070:01), live or lapsed, with the family and worktrees it
+    registered; reading the platform's own assignments (hostSetup, #4222) when hostSetupSource is server is a follow-up. Rows are ordered by worker name.
+    Readers: whoever reads the App's tasks and events (hrn:node:hadronmemory.com:specs:cor:agt:050:21), the App's own key included. A key
+    that holds or ever held host:operate reads its own live host only (hrn:node:hadronmemory.com:specs:cor:agt:070:04); any other hostId
+    answers HOST_NOT_FOUND, exactly as a host the App does not have. A host key's read is a recorded use
+    (hrn:node:hadronmemory.com:specs:cor:agt:070:07). Reads only: nothing is started, stopped or changed.
+    """
+    hostDesiredState(appRef: String!, hostId: String!): HostDesiredState!
+    """
     #4222 — what the platform says the App's hosts run (hrn:node:hadronmemory.com:specs:cor:agt:070:01, the change Proposed):
     the hostSetupSource switch and the assignments in effect, of one host when hostId is given. Whoever reads the
     App's tasks and events, the App's own key included. A host key (an App key holding host:operate) reads only its
@@ -11761,6 +11784,27 @@ export const typeDefs = `#graphql
     "#2138: pause or resume the whole team, as whoever manages the App. Separate from each worker's own pause: a worker cannot lift it, and ending it clears no self-pause. While paused, no worker is nudged and every worker's check status is PENDING (TEAM_PAUSED). #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only."
     setTeamPause(appRef: String!, paused: Boolean!, instruction: ActInstructionInput): TeamPause!
     """
+    #4224 (S3 of #4229) — set the App's sweep mode, as whoever manages the App. OFF (the default) restores today's
+    behaviour in one write: every hostDesiredState row then says SWEEP_OFF and a sweep acts on nothing. A change is
+    one team.sweep-mode-changed team event (from, to); setting the mode it already has changes and records nothing.
+    Refusals: FORBIDDEN (not a manager; an App key never is). The App-manager arm also admits the manager's held
+    worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.
+    """
+    setAppSweepMode(appRef: String!, mode: SweepMode!, instruction: ActInstructionInput): AppSweepMode!
+    """
+    #4224 (S3 of #4229) — mark a worker leave-alone, or clear the marker, as whoever manages the App. A marked
+    worker's hostDesiredState row says LEAVE_ALONE: a sweep observes and reports it and never starts, stops or repairs
+    it. A change of the marker is one worker.leave-alone-changed team event (the new value only, never the reason); a
+    call that changes nothing records nothing. Marking an already marked worker with another reason replaces the
+    reason, who set it and when.
+    Refusals: WORKER_NOT_FOUND (also for a caller who is not a participant of the worker's App),
+    WORKER_LEAVE_ALONE_NOT_PERMITTED (a participant who does not manage the App; a worker's session without an
+    instruction), WORKER_RETIRED, BAD_USER_INPUT (a reason on a clear, or one over 500 characters). The App-manager
+    arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12),
+    recorded as one app.manager-act event, ids only.
+    """
+    setWorkerLeaveAlone(input: SetWorkerLeaveAloneInput!, instruction: ActInstructionInput): WorkerLeaveAlone!
+    """
     #3125 S1 (hrn:node:hadronmemory.com:specs:cor:dmo:050:20) — replace the App's properties with this JSON object; null
     or an empty object clears them. Whoever manages the App only: as themselves, or through their held worker's
     session on an instruction (a worker with none, an App key, a run and an impersonation are refused). Never put a secret here. When expectedRevision is sent it must equal
@@ -13542,7 +13586,7 @@ export const typeDefs = `#graphql
 
     orgId accepts the org's ID or URN.
     """
-    createAgent(orgId: ID, name: String!, description: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, "#2171 (R211): the member roles the Agent offers. Omitted: owner and member. Empty or malformed: BAD_USER_INPUT." memberRoles: [String!]): Agent!
+    createAgent(orgId: ID, name: String!, description: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, "#4224: omitted or null is LONG_LIVED." lifecycle: AgentLifecycle, "#2171 (R211): the member roles the Agent offers. Omitted: owner and member. Empty or malformed: BAD_USER_INPUT." memberRoles: [String!]): Agent!
     """
     Clone an Agent into an organization you administer: a new PERSONAL-draft Agent
     with its own copy of the source's system memory, its links and imports, and a recorded origin. Needs a
@@ -13573,7 +13617,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    updateAgent(ref: ID!, name: String, urn: String, description: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, registerDefaults: RegisterDefaultsInput, "#2171 (R211): replaces the member roles the Agent offers (and nothing else in its installation policy). Omitted or null: unchanged. Empty or malformed: BAD_USER_INPUT. Existing members keep their role." memberRoles: [String!]): Agent!
+    updateAgent(ref: ID!, name: String, urn: String, description: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, "#4224: omitted or null leaves it unchanged." lifecycle: AgentLifecycle, registerDefaults: RegisterDefaultsInput, "#2171 (R211): replaces the member roles the Agent offers (and nothing else in its installation policy). Omitted or null: unchanged. Empty or malformed: BAD_USER_INPUT. Existing members keep their role." memberRoles: [String!]): Agent!
 
     """
     Soft-delete an Agent and its owned system memory. Requires management
@@ -16457,6 +16501,111 @@ export const typeDefs = `#graphql
     isolatedByHandle: String @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
     "Always false: isolation has been removed."
     isolated: Boolean! @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
+  }
+
+  "#4224 (S3 of #4229): how long an Agent's workers run."
+  enum AgentLifecycle {
+    "The worker's process should always run (the default, and the behaviour before this field existed)."
+    LONG_LIVED
+    "The worker's process should run only while it is the assignee of a pending or started task (one waiting on its child tasks included)."
+    SHORT_LIVED
+  }
+
+  "#4224 (S3 of #4229): the App's sweep switch."
+  enum SweepMode {
+    "The sweep acts on no worker: every hostDesiredState row says SWEEP_OFF. The default."
+    OFF
+    "The sweep compares desired state with what it sees and reports; it repairs nothing."
+    OBSERVE
+    "The sweep also repairs what it can."
+    APPLY
+  }
+
+  "#4224: whether a worker's agent process should be running."
+  enum DesiredRunState {
+    RUNNING
+    STOPPED
+  }
+
+  """
+  #4224 (S3 of #4229): why a worker's desired state is what it is. A closed set. The first three come from the
+  Agent's lifecycle. RETIRED, HALTED, PAUSED, TEAM_PAUSED and RESETTING always win over the lifecycle, in that order,
+  and always read STOPPED. LEAVE_ALONE wins over all of those, and SWEEP_OFF over everything: with either, nothing
+  is desired (desired is null) and wouldBe says what the state would otherwise be.
+  """
+  enum DesiredStateReason {
+    "A worker of a LONG_LIVED Agent: RUNNING."
+    LONG_LIVED
+    "A worker of a SHORT_LIVED Agent that is the assignee of a pending or started task, including one waiting on its child tasks (the worker stays up and is woken by their events): RUNNING."
+    HOLDS_TASK
+    "A worker of a SHORT_LIVED Agent that is the assignee of no pending or started task: STOPPED."
+    NO_OPEN_TASK
+    "The worker is retired."
+    RETIRED
+    "A live halt stop signal covers the worker (hrn:node:hadronmemory.com:specs:cor:agt:090:01)."
+    HALTED
+    "A live pause stop signal covers the worker (hrn:node:hadronmemory.com:specs:cor:agt:090:01). A pause-dispatch signal stops assignment only and is not a reason here."
+    PAUSED
+    "The App is under a team pause (App.teamPausedAt)."
+    TEAM_PAUSED
+    "A context reset holds the worker (hrn:node:hadronmemory.com:specs:cor:agt:050:27): its host is relaunching it."
+    RESETTING
+    "The worker is marked leave-alone (Worker.leaveAlone)."
+    LEAVE_ALONE
+    "The App's sweep mode is OFF."
+    SWEEP_OFF
+  }
+
+  "#4224: one worker's desired state on one host, with the setup the host needs to start it."
+  type WorkerDesiredState {
+    workerId: ID!
+    name: String!
+    "The lifecycle of the worker's Agent."
+    lifecycle: AgentLifecycle!
+    "RUNNING or STOPPED; null exactly when reason is LEAVE_ALONE or SWEEP_OFF, where nothing is desired and a reader acts on nothing."
+    desired: DesiredRunState
+    reason: DesiredStateReason!
+    "Set exactly when desired is null: the state the worker would have without the marker, or with the sweep on."
+    wouldBe: DesiredRunState
+    "The reason for wouldBe; never LEAVE_ALONE or SWEEP_OFF. Null when wouldBe is."
+    wouldBeReason: DesiredStateReason
+    "The worker's open session (not ended), or null. Open, not live: a quiet session is still open."
+    openSessionId: ID
+    "The model family the host registered the worker to run as."
+    family: String!
+    "The worker's existing worktrees on this host, as the host names them; empty when it has none."
+    worktrees: [String!]!
+  }
+
+  "#4224: the desired state of every worker one host runs, and the App's sweep mode."
+  type HostDesiredState {
+    hostId: String!
+    sweepMode: SweepMode!
+    workers: [WorkerDesiredState!]!
+  }
+
+  "#4224: the App's sweep mode after setAppSweepMode."
+  type AppSweepMode {
+    sweepMode: SweepMode!
+  }
+
+  "#4224: a worker's leave-alone marker after setWorkerLeaveAlone. reason, by and at are null when the worker is not marked."
+  type WorkerLeaveAlone {
+    workerId: ID!
+    leaveAlone: Boolean!
+    reason: String
+    "The user who set the marker."
+    by: String
+    at: DateTime
+  }
+
+  input SetWorkerLeaveAloneInput {
+    "The worker: its id or URN, or its name together with appRef."
+    worker: String!
+    appRef: ID
+    leaveAlone: Boolean!
+    "Optional, only when marking: why the sweep leaves this worker alone. At most 500 characters."
+    reason: String
   }
 
   "#2138: the App's team pause. teamPausedAt is null when the team is not paused."

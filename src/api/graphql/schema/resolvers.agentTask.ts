@@ -385,8 +385,11 @@ async function inKeyReadTx<T>(
   onGone: () => T,
   body: (txCtx: Context, app: TaskApp) => Promise<T>,
   timeoutMs?: number,
+  /** #4224: one repeatable-read snapshot for the whole read (see `withReadableApp`'s `coherent`). */
+  coherent = false,
 ): Promise<T> {
-  return inAnchoredAppTx(ctx, appId, onGone, async (txCtx, app) => ((await keyMayReadApp(txCtx, app)) ? body(txCtx, app) : onGone()), false, timeoutMs);
+  const run = () => inAnchoredAppTx(ctx, appId, onGone, async (txCtx, app) => ((await keyMayReadApp(txCtx, app)) ? body(txCtx, app) : onGone()), coherent, timeoutMs);
+  return coherent ? retryOnSerializationFailure(run) : run();
 }
 
 /** One transaction holding the App's authority anchors SHARED, with the App re-read after the lock (see `inKeyReadTx`). */
@@ -412,6 +415,13 @@ async function inAnchoredAppTx<T>(
       if (head.organizationId) await tx.$queryRaw`SELECT id FROM organizations WHERE id = ${head.organizationId} FOR SHARE`;
       if (head.ownerUserId) await tx.$queryRaw`SELECT id FROM users WHERE id = ${head.ownerUserId} FOR SHARE`;
       await tx.$queryRaw`SELECT id FROM apps WHERE id = ${head.id} FOR SHARE`;
+      // #4224: a key's own rows too, so a key or scope revoked while we waited is a 40001 (and a fresh gate), never
+      // a stale admission from the snapshot. A newly granted scope is an insert the snapshot misses: that only refuses.
+      const key = appKeyCaller(ctx);
+      if (key) {
+        await tx.$queryRaw`SELECT id FROM app_keys WHERE id = ${key.appKeyId} FOR SHARE`;
+        await tx.$queryRaw`SELECT id FROM app_key_scopes WHERE app_key_id = ${key.appKeyId} ORDER BY id FOR SHARE`;
+      }
     }
     const txCtx = withoutRequestCaches(ctx, tx);
     const app = await loadApp(txCtx, appId);
@@ -491,6 +501,13 @@ export async function withReadableApp<T>(
   ctx: Context, appRef: string, body: (c: Context, app: TaskApp) => Promise<T>, allowRun = false,
   /** #3884 — the key arm's transaction cap in ms, for a read whose bounded work can outlast Prisma's 5 s default. Unset keeps the default. */
   keyTxTimeoutMs?: number,
+  /**
+   * #4224 — run `body` on ONE repeatable-read snapshot, for a read that composes several facts into one answer (a
+   * verdict no single instant justified is worse than a stale one). A participant's body runs in its own
+   * repeatable-read transaction; a key's runs in the anchored coherent transaction the run read uses, with the key's
+   * own rows locked too. Either retries a serialization failure with a fresh gate. Not for the run arm.
+   */
+  opts: { coherent?: boolean } = {},
 ): Promise<T> {
   if (isRunPrincipal(ctx) && !ctx.userId && allowRun) {
     let id: string;
@@ -501,7 +518,11 @@ export async function withReadableApp<T>(
   const key = appKeyCaller(ctx);
   if (!key) {
     const { app } = await resolveParticipatedApp(ctx, appRef);
-    return body(ctx, app);
+    if (!opts.coherent) return body(ctx, app);
+    return retryOnSerializationFailure(() => ctx.db.$transaction(
+      (tx) => body(withoutRequestCaches(ctx, tx), app),
+      { timeout: 20_000, isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+    ));
   }
   let appId: string;
   try {
@@ -511,7 +532,7 @@ export async function withReadableApp<T>(
     throw e;
   }
   if (appId !== key.appId) throw appNotFound(appRef);
-  return inKeyReadTx(ctx, appId, () => { throw appNotFound(appRef); }, body, keyTxTimeoutMs);
+  return inKeyReadTx(ctx, appId, () => { throw appNotFound(appRef); }, body, keyTxTimeoutMs, opts.coherent === true);
 }
 
 /**

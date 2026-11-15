@@ -317,7 +317,9 @@
     "ReviewSlotReadiness": "value",
     "GrantSignatureStatus": "value",
     "TeamUtilization": "value",
-    "WorkerUtilization": "value"
+    "WorkerUtilization": "value",
+    "WorkerDesiredState": "value",
+    "HostDesiredState": "envelope"
   },
   "entries": {
     "ActionTicketsPage.items": {
