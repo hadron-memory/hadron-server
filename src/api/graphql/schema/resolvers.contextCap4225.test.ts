@@ -4,9 +4,9 @@
  * host reports it idle at an empty prompt gets ONE `worker.reset-context`, at most once an hour, through the existing
  * protocol and fence. A busy worker is reported only; a short-lived Agent's workers ignore the cap; no cap is no limit.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
-import { contextCapTick } from '../../../lib/contextReset/capSweep.js';
+import { contextCapTick, __capSweepTesting } from '../../../lib/contextReset/capSweep.js';
 import { buildASTSchema, parse } from 'graphql';
 import { typeDefs } from './typeDefs.js';
 import { resolvers } from './resolvers.js';
@@ -299,6 +299,49 @@ describe('a full page of workers that cannot be reset does not hide one that can
     await report();
     expect(await contextCapTick(db)).toBe(1);
     expect(await contextCapTick(db)).toBe(0);
+  });
+});
+
+describe('what the pass decides, and fair rotation across bounded passes (Diego P2, Arianna N-B)', () => {
+  const over = (id: string, at = ago(5).toISOString()) => db.$executeRaw`UPDATE workers SET terminal = ${JSON.stringify({
+    host: { id: 'orca1', label: 'Orca' }, status: 'idle', prompt: 'empty', reason: null, lastTurnAt: null, checkedAt: at, reportedAt: at,
+    contextTokens: CAP + 5, contextMeasuredAt: at })}::jsonb WHERE id = ${id}`;
+  const mk = async (name: string, appId = F.app.id) => db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId, agentId: F.agentId, name, slug: name.toLowerCase() }, select: { id: true } });
+  const session = (w: { id: string }, appId = F.app.id) => db.session.create({ data: { id: `s${Math.random()}`.replace('.', ''), appId, workerId: w.id, agentId: F.agentId, userId: F.holder.id, startedAt: ago(3), updatedAt: ago(3) }, select: { id: true } });
+  beforeEach(() => { __capSweepTesting.decided = []; });
+  afterEach(() => { __capSweepTesting.page = 50; __capSweepTesting.maxPages = 200; __capSweepTesting.decided = null; });
+
+  it('never decides a worker with no open session, one in a paused App, or one with a reset live or asked for in the hour', async () => {
+    const noSession = await mk('NoSession'); await over(noSession.id);
+    const paused = await db.app.create({ data: { organizationId: F.orgId, name: 'Paused', urn: `paused-${Math.random()}.example:p`.replace('.', '-'), teamPausedAt: new Date() }, select: { id: true } });
+    const inPaused = await mk('InPaused', paused.id); await session(inPaused, paused.id); await over(inPaused.id);
+    const hour = await mk('InHour'); const hs = await session(hour); await over(hour.id);
+    await db.$executeRaw`INSERT INTO context_resets (id, app_id, worker_id, session_id, cause, host_id, phase, reason, requested_at, ended_at)
+      VALUES (${`r${Math.random()}`}, ${F.app.id}, ${hour.id}, ${hs.id}, 'context-cap', NULL, 'failed', 'HOST_UNSUPPORTED', now(), now())`;
+    await report();
+    expect(await contextCapTick(db)).toBe(1);
+    expect(__capSweepTesting.decided).toEqual([F.kit.id]);
+  });
+
+  it('a pass bounded below the candidate count rotates: progress carries to the next pass until Kit is reached', async () => {
+    // 25 earlier over-cap workers WITH sessions and no capable host: only the decision itself can pass them over.
+    for (let i = 0; i < 25; i += 1) { const w = await mk(`Old${i}`); await session(w); await over(w.id, new Date(Date.now() - 10 * MIN - (30 - i) * 1000).toISOString()); }
+    await report();
+    __capSweepTesting.page = 5; __capSweepTesting.maxPages = 2; // 10 workers a pass
+    let issued = 0;
+    for (let tick = 0; tick < 5 && issued === 0; tick += 1) issued += await contextCapTick(db);
+    expect(issued).toBe(1);
+    expect(await resets()).toHaveLength(1);
+    expect(new Set(__capSweepTesting.decided).size).toBeGreaterThan(20);
+  });
+
+  it('and wraps: once it reaches the end, the next pass starts again from the first', async () => {
+    for (let i = 0; i < 12; i += 1) { const w = await mk(`Old${i}`); await session(w); await over(w.id, new Date(Date.now() - 10 * MIN - (30 - i) * 1000).toISOString()); }
+    __capSweepTesting.page = 5; __capSweepTesting.maxPages = 2;
+    for (let tick = 0; tick < 4; tick += 1) await contextCapTick(db);
+    const seen = __capSweepTesting.decided!;
+    expect(new Set(seen).size).toBe(12); // every worker decided at least once
+    expect(seen.length).toBeGreaterThan(12); // and the first ones again after the wrap
   });
 });
 
