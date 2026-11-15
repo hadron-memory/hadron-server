@@ -9115,9 +9115,11 @@ export const typeDefs = `#graphql
     hostRegistrations(appRef: String!): [HostRegistration!]!
     """
     #4224 (S3 of #4229) — for each worker one host runs: whether its agent process should be running, and why. A
-    host's sweep reads this once per pass and compares it with what it sees. A host's workers are the ones its
-    registration lists (hrn:node:hadronmemory.com:specs:cor:agt:070:01), live or lapsed, with the family and worktrees it
-    registered; reading the platform's own assignments (hostSetup, #4222) when hostSetupSource is server is a follow-up. Rows are ordered by worker name.
+    host's sweep reads this once per pass and compares it with what it sees. While the App's hostSetupSource is HOST
+    (the default), a host's workers are the ones its registration lists (hrn:node:hadronmemory.com:specs:cor:agt:070:01),
+    live or lapsed, with the family and worktrees it registered. While it is SERVER (#4248), they are the platform's
+    assignments to that host (hostSetup, #4222), a retired worker's excluded, each with the assignment's family and its
+    one workdir; a host with an assignment but no registration is found. Rows are ordered by worker name.
     Readers: whoever reads the App's tasks and events (hrn:node:hadronmemory.com:specs:cor:agt:050:21), the App's own key included. A key
     that holds or ever held host:operate reads its own live host only (hrn:node:hadronmemory.com:specs:cor:agt:070:04); any other hostId
     answers HOST_NOT_FOUND, exactly as a host the App does not have. A host key's read is a recorded use
@@ -17437,6 +17439,41 @@ export const typeDefs = `#graphql
     NO_SNAPSHOT
     "The host's relaunch attempt cap was reached."
     CAP_REACHED
+    """
+    #4247 — the host did not relaunch the worker because a safety check declined it. Carries repairReason from the
+    refusal set (IDENTITY_MISMATCH, DUPLICATE_AGENT, PAUSED, HALTED, LEAVE_ALONE, NO_LAUNCHER_PROFILE) and attempt.
+    """
+    RELAUNCH_REFUSED
+    """
+    #4247 — the host tried to relaunch the worker and it did not come up. Carries repairReason from the failure set
+    (LAUNCH_EXIT_NONZERO, TERMINAL_CREATE_REFUSED, TIMEOUT) and attempt.
+    """
+    RELAUNCH_FAILED
+  }
+
+  """
+  #4247 — why a relaunch was refused or failed. A closed set, never free text. The first six go with RELAUNCH_REFUSED,
+  the last three with RELAUNCH_FAILED; a reason from the other set is refused (REPAIR_REASON_INVALID).
+  """
+  enum WorkerTerminalRepairReason {
+    "The worker's identity does not match its launch snapshot."
+    IDENTITY_MISMATCH
+    "Another agent is already running in the worker's place."
+    DUPLICATE_AGENT
+    "The worker is paused."
+    PAUSED
+    "The worker is halted."
+    HALTED
+    "The worker is marked leave-alone."
+    LEAVE_ALONE
+    "The worker has no launcher profile."
+    NO_LAUNCHER_PROFILE
+    "The launcher exited non-zero."
+    LAUNCH_EXIT_NONZERO
+    "Orca refused to create the terminal."
+    TERMINAL_CREATE_REFUSED
+    "The relaunch timed out."
+    TIMEOUT
   }
 
   "#2771 — what the terminal's input prompt looked like."
@@ -17491,6 +17528,15 @@ export const typeDefs = `#graphql
     contextTokens: Int
     "#4225 — when the host measured contextTokens; judge its age from this. Null exactly when contextTokens is."
     contextMeasuredAt: DateTime
+    """
+    #4247 — what the host did about this dark worker, stored for RELAUNCH_REFUSED and RELAUNCH_FAILED only. Null for the
+    other outcomes (they are not stored) and when the report carried none; the next report replaces it.
+    """
+    repair: WorkerTerminalRepair
+    "#4247 — why the relaunch was refused or failed. Null exactly when repair is."
+    repairReason: WorkerTerminalRepairReason
+    "#4247 — the relaunch's attempt number, at least 1. Null exactly when repair is."
+    repairAttempt: Int
   }
 
   "#2771 — one worker's terminal report. There is no free-text field."
@@ -17510,7 +17556,12 @@ export const typeDefs = `#graphql
     locked report that worker's report is refused (REPAIR_NOT_DARK) and the rest of the batch is stored.
     """
     repair: WorkerTerminalRepair
-    "The relaunch's attempt number, at least 1: required with RELAUNCHED, refused (REPAIR_ATTEMPT_INVALID) otherwise."
+    """
+    #4247 — why the relaunch was refused or failed: required with RELAUNCH_REFUSED and RELAUNCH_FAILED (from that
+    outcome's own set), refused (REPAIR_REASON_INVALID) with any other outcome or none. Stored on the report with the outcome.
+    """
+    repairReason: WorkerTerminalRepairReason
+    "The relaunch's attempt number, at least 1: required with RELAUNCHED, RELAUNCH_REFUSED and RELAUNCH_FAILED, refused (REPAIR_ATTEMPT_INVALID) otherwise."
     attempt: Int
     """
     #4225 — the size of the worker's context in tokens, measured on the host: a whole number from 1. Null or omitted
@@ -17533,7 +17584,7 @@ export const typeDefs = `#graphql
     urn: String!
   }
 
-  "#2771 — a report not stored for one worker: WORKER_NOT_FOUND, TERMINAL_REPORT_STALE, REPAIR_NOT_DARK or REPAIR_ATTEMPT_INVALID."
+  "#2771 — a report not stored for one worker: WORKER_NOT_FOUND, TERMINAL_REPORT_STALE, REPAIR_NOT_DARK, REPAIR_ATTEMPT_INVALID or REPAIR_REASON_INVALID."
   type WorkerTerminalRefusal {
     "The worker as the host named it."
     worker: String!

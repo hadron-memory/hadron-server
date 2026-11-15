@@ -67,8 +67,9 @@ describe('the invariants file', () => {
     const fn = source.slice(fnStart, source.indexOf('$$;\n', fnStart) + 4);
     const s1b = readFileSync(new URL('../../../prisma/migrations/20261115180000_host_launcher_profiles/migration.sql', import.meta.url), 'utf8');
     expect(s1b).toContain(`\n${fn}`);
-    const context = readFileSync(new URL('../../../prisma/migrations/20261115120000_worker_terminal_context/migration.sql', import.meta.url), 'utf8');
-    expect(context.endsWith(`\n${source.slice(source.indexOf(block))}`)).toBe(true);
+    // #4247: the CHECK was widened again by 20261115170000_worker_terminal_relaunch_repair, which carries the current block.
+    const relaunch = readFileSync(new URL('../../../prisma/migrations/20261115170000_worker_terminal_relaunch_repair/migration.sql', import.meta.url), 'utf8');
+    expect(relaunch.endsWith(`\n${source.slice(source.indexOf(block))}`)).toBe(true);
     const checkpoint = readFileSync(new URL('../../../prisma/migrations/20261103014500_host_checkpoint_use_action/migration.sql', import.meta.url),'utf8');
     const check = source.slice(source.indexOf('ALTER TABLE host_key_uses DROP CONSTRAINT'),source.indexOf('CREATE OR REPLACE FUNCTION host_key_use_append_only')).trim();
     expect(checkpoint.trim().endsWith(check)).toBe(true);
