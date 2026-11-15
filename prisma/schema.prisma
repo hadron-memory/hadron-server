@@ -187,7 +187,9 @@ enum AgentType {
 
 /// #4224 (S3 of #4229) — how long a worker of this Agent runs. LONG_LIVED (default, today's behaviour): its
 /// process should always run. SHORT_LIVED: it should run only while the worker is the assignee of a pending or
-/// started task that is not waiting on child tasks. Read by the desired-state query (src/lib/desiredState).
+/// started task, one waiting on its child tasks included (G7). Read by the desired-state query
+/// (src/lib/desiredState) and, #4223, by a task's finish or cancellation: the worker's session ends with its last
+/// open task (src/lib/hostOperations/sessionEnd.ts).
 enum AgentLifecycle {
   LONG_LIVED
   SHORT_LIVED
@@ -6958,7 +6960,8 @@ model ContextReset {
 model TaskSessionEndRequest {
   id                  String    @id
   appId               String    @map("app_id")
-  taskId              String    @unique @map("task_id")
+  /// #4223: not unique. A task asks each time it ends under a worker or is reassigned away from a short-lived one.
+  taskId              String    @map("task_id")
   workerId            String    @map("worker_id")
   sessionId           String    @map("session_id")
   /// The `task.session-end-requested` event this request wrote.
@@ -6976,6 +6979,7 @@ model TaskSessionEndRequest {
 
   @@index([resolvedAt, dueAt])
   @@index([workerId])
+  @@index([taskId])
   @@map("task_session_end_requests")
 }
 
