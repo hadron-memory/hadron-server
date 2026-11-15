@@ -44,7 +44,7 @@ export type TerminalReason = (typeof TERMINAL_REASONS)[number];
  * The keys of the stored object, exactly. The DB CHECK on `workers.terminal` lists the same keys; it lets the two
  * context keys be absent, because a row stored before #4225 has neither.
  */
-export const TERMINAL_KEYS = ['host', 'status', 'prompt', 'reason', 'lastTurnAt', 'checkedAt', 'reportedAt', 'contextTokens', 'contextMeasuredAt'] as const;
+export const TERMINAL_KEYS = ['host', 'status', 'prompt', 'reason', 'lastTurnAt', 'checkedAt', 'reportedAt', 'contextTokens', 'contextMeasuredAt', 'repair', 'repairReason', 'repairAttempt'] as const;
 
 /** #4225: the largest context size a report carries (GraphQL's Int range). The smallest is 1: unmeasured is null. */
 export const CONTEXT_TOKENS_MAX = 2_147_483_647;
@@ -56,8 +56,17 @@ export const TERMINAL_REPORT_MAX = 200;
 export const TERMINAL_CHECKED_AT_SKEW_MS = 2 * 60 * 1000;
 
 /** #4041 (V82): what a host did about a dark worker. */
-export const TERMINAL_REPAIRS = ['RELAUNCHED', 'NO_SNAPSHOT', 'CAP_REACHED'] as const;
+export const TERMINAL_REPAIRS = ['RELAUNCHED', 'NO_SNAPSHOT', 'CAP_REACHED', 'RELAUNCH_REFUSED', 'RELAUNCH_FAILED'] as const;
 export type TerminalRepair = (typeof TERMINAL_REPAIRS)[number];
+
+/**
+ * #4247 (for hadron-cli#2060): why a relaunch was refused (a safety pin declined it) or failed (it was tried and did not
+ * come up). Closed sets, never text: each outcome takes only its own reasons.
+ */
+export const RELAUNCH_REFUSED_REASONS = ['IDENTITY_MISMATCH', 'DUPLICATE_AGENT', 'PAUSED', 'HALTED', 'LEAVE_ALONE', 'NO_LAUNCHER_PROFILE'] as const;
+export const RELAUNCH_FAILED_REASONS = ['LAUNCH_EXIT_NONZERO', 'TERMINAL_CREATE_REFUSED', 'TIMEOUT'] as const;
+export const TERMINAL_REPAIR_REASONS = [...RELAUNCH_REFUSED_REASONS, ...RELAUNCH_FAILED_REASONS] as const;
+export type TerminalRepairReason = (typeof TERMINAL_REPAIR_REASONS)[number];
 
 /** The stored object. */
 export type WorkerTerminal = {
@@ -71,6 +80,13 @@ export type WorkerTerminal = {
   /** #4225: null when the host could not measure this worker. Absent on a row stored before #4225. */
   contextTokens?: number | null;
   contextMeasuredAt?: string | null;
+  /**
+   * #4247: the host's repair outcome, stored for RELAUNCH_REFUSED and RELAUNCH_FAILED only, with the reason and attempt. The
+   * keys are absent otherwise: RELAUNCHED, NO_SNAPSHOT and CAP_REACHED are not stored (#4041).
+   */
+  repair?: 'RELAUNCH_REFUSED' | 'RELAUNCH_FAILED';
+  repairReason?: TerminalRepairReason;
+  repairAttempt?: number;
 };
 
 /** One report as a host sends it. */
@@ -82,6 +98,7 @@ export type TerminalReportInput = {
   lastTurnAt?: Date | string | null;
   checkedAt: Date | string;
   repair?: string | null;
+  repairReason?: string | null;
   attempt?: number | null;
   contextTokens?: number | null;
   contextMeasuredAt?: Date | string | null;
@@ -97,23 +114,32 @@ export type ValidTerminalReport = {
   checkedAt: Date;
   /** #4041: not stored; the platform's notice is posted from it. Checked per worker, not per batch. */
   repair: TerminalRepair | null;
+  /** #4247: with RELAUNCH_REFUSED or RELAUNCH_FAILED and nothing else. Not stored. */
+  repairReason: TerminalRepairReason | null;
   attempt: number | null;
   /** #4225: both set or both null. */
   contextTokens: number | null;
   contextMeasuredAt: Date | null;
 };
 
-const KEY_SET = new Set<string>(['worker', 'status', 'prompt', 'reason', 'lastTurnAt', 'checkedAt', 'repair', 'attempt', 'contextTokens', 'contextMeasuredAt']);
+const KEY_SET = new Set<string>(['worker', 'status', 'prompt', 'reason', 'lastTurnAt', 'checkedAt', 'repair', 'repairReason', 'attempt', 'contextTokens', 'contextMeasuredAt']);
 
 /**
- * #4041 (V82): is this report's repair outcome valid? Refused per worker (the rest of the batch stands), not for the
- * batch: only a dark report carries one, and `attempt` (at least 1) goes with RELAUNCHED and nothing else.
+ * #4041 (V82), #4247: is this report's repair outcome valid? Refused per worker (the rest of the batch stands), not for the
+ * batch: only a dark report carries one. `attempt` (at least 1) goes with RELAUNCHED, RELAUNCH_REFUSED and RELAUNCH_FAILED
+ * and nothing else; `repairReason` goes with the last two, from that outcome's own set, and nothing else.
  */
-export function repairRefusal(r: Pick<ValidTerminalReport, 'status' | 'repair' | 'attempt'>): 'REPAIR_NOT_DARK' | 'REPAIR_ATTEMPT_INVALID' | null {
-  if (r.repair === null) return r.attempt === null ? null : 'REPAIR_ATTEMPT_INVALID';
+export function repairRefusal(
+  r: Pick<ValidTerminalReport, 'status' | 'repair' | 'repairReason' | 'attempt'>,
+): 'REPAIR_NOT_DARK' | 'REPAIR_ATTEMPT_INVALID' | 'REPAIR_REASON_INVALID' | null {
+  if (r.repair === null) return r.attempt !== null ? 'REPAIR_ATTEMPT_INVALID' : r.repairReason !== null ? 'REPAIR_REASON_INVALID' : null;
   if (r.status !== 'dark') return 'REPAIR_NOT_DARK';
-  if (r.repair === 'RELAUNCHED') return r.attempt !== null && Number.isSafeInteger(r.attempt) && r.attempt >= 1 ? null : 'REPAIR_ATTEMPT_INVALID';
-  return r.attempt === null ? null : 'REPAIR_ATTEMPT_INVALID';
+  const takesAttempt = r.repair === 'RELAUNCHED' || r.repair === 'RELAUNCH_REFUSED' || r.repair === 'RELAUNCH_FAILED';
+  if (takesAttempt ? !(r.attempt !== null && Number.isSafeInteger(r.attempt) && r.attempt >= 1) : r.attempt !== null) return 'REPAIR_ATTEMPT_INVALID';
+  const reasons: readonly string[] | null =
+    r.repair === 'RELAUNCH_REFUSED' ? RELAUNCH_REFUSED_REASONS : r.repair === 'RELAUNCH_FAILED' ? RELAUNCH_FAILED_REASONS : null;
+  if (reasons === null) return r.repairReason === null ? null : 'REPAIR_REASON_INVALID';
+  return r.repairReason !== null && reasons.includes(r.repairReason) ? null : 'REPAIR_REASON_INVALID';
 }
 
 /**
@@ -155,6 +181,8 @@ export function validateTerminalBatch(
     }
     const repair = r.repair ?? null;
     if (repair !== null && !(TERMINAL_REPAIRS as readonly string[]).includes(repair)) return { ok: false, message: 'repair is not one of the closed outcomes.' };
+    const repairReason = r.repairReason ?? null;
+    if (repairReason !== null && !(TERMINAL_REPAIR_REASONS as readonly unknown[]).includes(repairReason)) return { ok: false, message: 'repairReason is not one of the closed reasons.' };
     // #4225: a size is a whole number from 1 (unmeasured is null, never 0) with the instant it was measured.
     const contextTokens = r.contextTokens ?? null;
     let contextMeasuredAt: Date | null = null;
@@ -172,7 +200,7 @@ export function validateTerminalBatch(
     }
     out.push({
       worker: r.worker, status: r.status as TerminalStatus, prompt: r.prompt as TerminalPrompt, reason: reason as TerminalReason | null,
-      lastTurnAt, checkedAt, repair: repair as TerminalRepair | null, attempt: r.attempt ?? null,
+      lastTurnAt, checkedAt, repair: repair as TerminalRepair | null, repairReason: repairReason as TerminalRepairReason | null, attempt: r.attempt ?? null,
       contextTokens, contextMeasuredAt,
     });
   }
@@ -191,6 +219,9 @@ export function buildWorkerTerminal(r: ValidTerminalReport, host: { id: string; 
     reportedAt: reportedAt.toISOString(),
     contextTokens: r.contextTokens,
     contextMeasuredAt: r.contextMeasuredAt ? r.contextMeasuredAt.toISOString() : null,
+    ...((r.repair === 'RELAUNCH_REFUSED' || r.repair === 'RELAUNCH_FAILED') && r.repairReason !== null && r.attempt !== null
+      ? { repair: r.repair, repairReason: r.repairReason, repairAttempt: r.attempt }
+      : {}),
   };
 }
 
@@ -210,5 +241,8 @@ export function workerTerminalView(t: StoredWorkerTerminal | null | undefined) {
     reportedAt: new Date(t.reportedAt),
     contextTokens: t.contextTokens ?? null,
     contextMeasuredAt: t.contextMeasuredAt ? new Date(t.contextMeasuredAt) : null,
+    repair: t.repair ?? null,
+    repairReason: t.repairReason ?? null,
+    repairAttempt: t.repairAttempt ?? null,
   };
 }
