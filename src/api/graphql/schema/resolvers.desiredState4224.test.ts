@@ -17,6 +17,8 @@ import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { declareAllStopLanes } from '../../../test/stopLanes.js';
+import { waitForLockWaiters } from '../../../test/lockWait.js';
+import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { decideDesiredState, type DesiredStateFacts } from '../../../lib/desiredState/desiredState.js';
 import { resolvers, type Context } from './resolvers.js';
 
@@ -477,6 +479,40 @@ describe('#4242 blind P2-2: one snapshot per read', () => {
     expect(isolationSeen).toEqual(['repeatable read', 'repeatable read', 'repeatable read']);
   });
 });
+
+describe('#4242 §10 F1: a revocation committed during the anchor wait is seen', () => {
+  it('a host key whose scope is revoked while its coherent read waits on the anchors is refused, never answered from the older snapshot', async () => {
+    let release!: () => void;
+    const released = new Promise<void>((r) => { release = r; });
+    // The revoker: holds the App's anchors exclusively (as revokeAppKeyScope does) and revokes orca1's scope.
+    const revoker = db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'app', id: app.id }, { kind: 'org', id: org.id }], 'exclusive');
+      await tx.appKeyScope.updateMany({ where: { appKeyId: orca1.id, scope: 'host:operate', revokedAt: null }, data: { revokedAt: new Date(), revokedByUserId: admin.id } });
+      await released;
+    }, { timeout: 20_000 });
+    // Give the revoker its locks before the read starts, then let the read block on the anchor (its snapshot is older).
+    await waitForAnchorHeld();
+    const read = refusal(state(keyCtx(orca1), 'orca1'));
+    await waitForLockWaiters(db, 1);
+    release();
+    await revoker;
+    expect((await read).extensions.code).toBe('HOST_NOT_FOUND');
+  }, 30_000);
+});
+
+/** Resolve once some backend holds an exclusive advisory lock (the revoker's anchors). */
+async function waitForAnchorHeld(): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  for (;;) {
+    const [{ n }] = await db.$queryRaw<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM pg_locks
+      WHERE locktype = 'advisory' AND granted AND mode = 'ExclusiveLock'
+        AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`;
+    if (n > 0) return;
+    if (Date.now() > deadline) throw new Error('the revoker never took its anchors');
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
 
 describe('#4224 the decision table (pure)', () => {
   const base: DesiredStateFacts = {
