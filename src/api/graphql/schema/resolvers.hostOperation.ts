@@ -488,7 +488,9 @@ export const hostOperationMutations = {
    * order, then the registration FOR SHARE once (workers before registration, as registerHost, so no cycle).
    *
    * The server builds what it stores (`buildWorkerTerminal`): `host` is the key's host and its registration's label,
-   * `reportedAt` is the server's clock. The report decides nothing. The alarm verdict is computed from the stored
+   * `reportedAt` is the server's clock. #4225 S4a: a report may carry the worker's context size (`contextTokens` with
+   * `contextMeasuredAt`, or neither); a malformed size refuses the batch like any other malformed field, and a worker
+   * this host does not run is refused for its row as before, so its size is never stored. The report decides nothing. The alarm verdict is computed from the stored
    * rows after the write and returned, never stored, and names only coordinators THIS host registers.
    */
   setHostWorkerTerminals: async (
