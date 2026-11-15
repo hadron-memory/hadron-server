@@ -28,8 +28,10 @@
  *
  * REASSIGNED AWAY (Peter, team chat #108497; one Proposed sentence in 050:10): a short-lived worker whose last open
  * task is reassigned to someone else is asked the same way, by the reassignment's transaction, with the FORMER
- * assignee as the request's worker. So one task may carry several requests over its life, one per worker it left or
- * ended under; `AgentTask.sessionEndRequest` shows the latest, with the worker it asks.
+ * assignee as the request's worker. So one task may carry several requests over its life: one each time it leaves a
+ * short-lived worker or ends under a worker (nothing limits it to one per worker: moved away and back, a worker has
+ * two). `AgentTask.sessionEndRequest` shows only the task's current assignee's latest; the former assignee has no
+ * task to read its request on, so it is always woken for it (taskWakes.ts, END_SESSION).
  */
 
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';

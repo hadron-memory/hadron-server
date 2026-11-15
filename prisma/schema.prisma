@@ -6876,7 +6876,7 @@ model ContextReset {
 model TaskSessionEndRequest {
   id                  String    @id
   appId               String    @map("app_id")
-  /// #4223: not unique. A task asks once per worker it ended under or was reassigned away from.
+  /// #4223: not unique. A task asks each time it ends under a worker or is reassigned away from a short-lived one.
   taskId              String    @map("task_id")
   workerId            String    @map("worker_id")
   sessionId           String    @map("session_id")

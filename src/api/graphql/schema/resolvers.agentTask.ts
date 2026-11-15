@@ -3721,8 +3721,14 @@ export const agentTaskFieldResolvers = {
     references: (t: TaskRow) => storedTaskReferences(t.references).map(r => ({ kind: REFERENCE_KIND_TO_GQL[r.kind], target: r.target, label: r.label ?? null })),
     /** #1709 (cor:agt:050:10) — the request this task's end made; the task was already read, so its readers read it. */
     sessionEndRequest: async (t: TaskRow, _: unknown, ctx: Context) => {
-      // #4223: a task may carry one request per worker it ended under or was reassigned away from; the latest is shown.
-      const r = await ctx.db.taskSessionEndRequest.findFirst({ where: { taskId: t.id }, orderBy: [{ requestedAt: 'desc' }, { id: 'desc' }] });
+      // #4223: a task may carry several requests, one for each time it ended under a worker or was reassigned away
+      // from one. Only its CURRENT worker assignee's is shown, the latest: a request made of a former assignee names
+      // that worker's session, and whoever reads the task now must never take it for its own (#4253 blind review,
+      // Cedric P2-1). The former assignee is woken for it instead (taskWakes.ts, END_SESSION).
+      if (!t.assigneeWorkerId) return null;
+      const r = await ctx.db.taskSessionEndRequest.findFirst({
+        where: { taskId: t.id, workerId: t.assigneeWorkerId }, orderBy: [{ requestedAt: 'desc' }, { id: 'desc' }],
+      });
       return r ? { ...r, resolution: r.resolution ? r.resolution.toUpperCase().replace(/-/g, '_') : null } : null;
     },
     /** cor:agt:050:03 — pending with no assignee. Derived, never stored. */
