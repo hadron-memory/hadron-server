@@ -25,7 +25,10 @@ import { toNaiveUtc } from '../sessionActivity.js';
 import { appendHostEvent } from './events.js';
 import { FAMILY_PATTERN } from './availability.js';
 import { normalizeFamily } from './family.js';
-import { HOST_CAPABILITIES, HOST_WORKTREES_MAX, isHostCapability, isHostToken } from '../hostOperations/types.js';
+import { HOST_CAPABILITIES, HOST_ID_PATTERN, HOST_WORKTREES_MAX, isHostCapability, isHostToken } from '../hostOperations/types.js';
+import {
+  ASSIGNMENT_FAMILY, ASSIGNMENT_IN_EFFECT, ASSIGNMENT_JOIN, assignedWorkerIds, loadHostSetupSource, lockHostSetup,
+} from '../hostOperations/assignments.js';
 
 /**
  * cor:agt:070:01 (#1763; Holger, team chat #10405) — a registration lapses
@@ -38,7 +41,7 @@ export const HOST_LAPSE_CHECK_INS_MAX = 10;
 
 /** The App's lapse count, in SQL: `s` is a LEFT JOIN of agent_task_stall_schedule on the registration's App. */
 const LAPSE_SQL = Prisma.sql`COALESCE(s.host_lapse_check_ins, ${HOST_LAPSE_CHECK_INS_DEFAULT})`;
-export const HOST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+export { HOST_ID_PATTERN };
 export const HOST_LABEL_MAX = 128;
 export const HOST_POLL_SECONDS_MAX = 86_400;
 /** At most this many workers per registration. */
@@ -98,7 +101,12 @@ export type RegisterHostHooks = {
  * Register or refresh a host (cor:agt:070:01). INTERNAL: see the file header.
  *
  * Replaces the host's worker list with `workers`, each a worker of the App
- * that is not retired, with a family token. Writes `host.registered` when the
+ * that is not retired, with a family token. #4222: once the App's
+ * `hostSetupSource` is `server`, only the workers the platform assigned to
+ * this host are accepted; every other one listed (unassigned, assigned to
+ * another host, retired, of another App, or naming nothing: one answer for
+ * all) is left out and returned in `notAssigned`, and the registration still
+ * succeeds with the rest. Writes `host.registered` when the
  * host is new, or was lapsed; an ordinary refresh writes nothing. Runs under
  * the App's authority anchor (shared), so an uninstall or delete either
  * committed first and is refused here, or waits for this write.
@@ -108,7 +116,7 @@ export async function registerHost(
   input: HostRegistrationInput,
   now = new Date(),
   hooks: RegisterHostHooks = {},
-): Promise<{ registrationId: string; registered: boolean }> {
+): Promise<{ registrationId: string; registered: boolean; notAssigned: string[] }> {
   const hostId = (input.hostId ?? '').trim();
   const label = (input.label ?? '').trim();
   if (!HOST_ID_PATTERN.test(hostId)) {
@@ -171,13 +179,29 @@ export async function registerHost(
     if (!app || app.deletedAt || app.uninstalledAt) {
       throw new HostRegistrationError('APP_NOT_LIVE', 'The App does not exist or is uninstalled.');
     }
-    if (workers.size) {
-      // FOR SHARE: a concurrent retire either committed first (and is refused
-      // here) or waits for this registration. ORDER BY id: lock in the same order as setHostWorkerTerminals
-      // (FOR UPDATE, id order), or the two deadlock (40P01, #2791 §10).
-      const rows = await tx.$queryRaw<{ id: string; appId: string; retiredAt: Date | null }[]>`
+    // FOR SHARE: a concurrent retire either committed first (and is refused
+    // here) or waits for this registration. ORDER BY id: lock in the same order as setHostWorkerTerminals
+    // (FOR UPDATE, id order), or the two deadlock (40P01, #2791 §10).
+    const rows = workers.size
+      ? await tx.$queryRaw<{ id: string; appId: string; retiredAt: Date | null }[]>`
         SELECT id, app_id AS "appId", retired_at AS "retiredAt" FROM workers
-        WHERE id IN (${Prisma.join([...workers.keys()])}) ORDER BY id FOR SHARE`;
+        WHERE id IN (${Prisma.join([...workers.keys()])}) ORDER BY id FOR SHARE`
+      : [];
+    // #4222: the host-setup lock SHARED, after the worker rows (src/lib/hostOperations/assignments.ts, the lock):
+    // the switch and the assignments hold still through this registration's write.
+    await lockHostSetup(tx, input.appId, 'shared');
+    const notAssigned: string[] = [];
+    if ((await loadHostSetupSource(tx, input.appId)) === 'server') {
+      // The platform states what this host runs; the host confirms. Anything else it lists is reported, per row.
+      const assigned = await assignedWorkerIds(tx, input.appId, hostId, [...workers.keys()]);
+      for (const id of [...workers.keys()]) {
+        if (!assigned.has(id)) {
+          notAssigned.push(id);
+          workers.delete(id);
+        }
+      }
+    }
+    if (workers.size) {
       const ok = new Set(rows.filter((r) => r.appId === input.appId && !r.retiredAt).map((r) => r.id));
       const bad = [...workers.keys()].filter((id) => !ok.has(id));
       if (bad.length) {
@@ -218,7 +242,7 @@ export async function registerHost(
         appId: input.appId, type: 'host.registered', registrationId: cur.id, hostId, workerCount: workers.size, createdAt: now,
       });
     }
-    return { registrationId: cur.id, registered };
+    return { registrationId: cur.id, registered, notAssigned };
   });
 }
 
@@ -227,37 +251,83 @@ export async function registerHost(
  * (cor:agt:060:04 for an unbound worker): workerId → families, sorted. #1709:
  * only a held, unretired worker with an existing worktree on that host is
  * launchable (060:05: a host launches only a worker someone holds; 070:06).
+ * #4222: under `hostSetupSource: server` the worker must also be assigned to
+ * that host with a workdir the host's registration lists, and the family is
+ * the assignment's.
  */
 export async function loadLaunchableFamilies(
   db: Db,
   scope: { appId: string } | { workerIds: string[] },
   now: Date,
 ): Promise<Map<string, string[]>> {
-  if ('workerIds' in scope && scope.workerIds.length === 0) return new Map();
+  return (await loadLaunchable(db, scope, now)).families;
+}
+
+/**
+ * #4232 (S9): the model each worker's in-effect ASSIGNMENTS on live hosts name, per worker: one entry per distinct
+ * model among the (host, family) pairs the worker is launchable as, `null` for an assignment (or a host-stated
+ * registration) that names no model. Same rows, same filters as {@link loadLaunchableFamilies}; an assignment is in
+ * effect only while the App's `hostSetupSource` is `server`, so under `host` every entry is `null`. The matcher reads
+ * the tier of an unbound worker from these (`workerTier`).
+ */
+export async function loadLaunchableModels(
+  db: Db,
+  scope: { appId: string } | { workerIds: string[] },
+  now: Date,
+): Promise<Map<string, (string | null)[]>> {
+  return (await loadLaunchable(db, scope, now)).models;
+}
+
+/**
+ * Both readers above from ONE statement (the matcher needs families and models together, per pass and per
+ * assignment decision; #4250 blind review F1): workerId → launchable families, and workerId → assigned models.
+ */
+export async function loadLaunchable(
+  db: Db,
+  scope: { appId: string } | { workerIds: string[] },
+  now: Date,
+): Promise<{ families: Map<string, string[]>; models: Map<string, (string | null)[]> }> {
+  const families = new Map<string, string[]>();
+  const models = new Map<string, (string | null)[]>();
+  for (const r of await loadLaunchableAssignments(db, scope, now)) {
+    const family = normalizeFamily(r.family);
+    if (!family) continue;
+    const f = families.get(r.workerId) ?? [];
+    if (!f.includes(family)) f.push(family);
+    families.set(r.workerId, f);
+    const m = models.get(r.workerId) ?? [];
+    if (!m.includes(r.model)) m.push(r.model);
+    models.set(r.workerId, m);
+  }
+  return { families, models };
+}
+
+/** The one query behind both readers above: what each live host's registration and assignment say a worker runs as. */
+async function loadLaunchableAssignments(
+  db: Db,
+  scope: { appId: string } | { workerIds: string[] },
+  now: Date,
+): Promise<{ workerId: string; family: string; model: string | null }[]> {
+  if ('workerIds' in scope && scope.workerIds.length === 0) return [];
   const where = 'appId' in scope
     ? Prisma.sql`r.app_id = ${scope.appId}`
     : Prisma.sql`w.worker_id IN (${Prisma.join(scope.workerIds)})`;
-  const rows = await db.$queryRaw<{ workerId: string; family: string }[]>`
-    SELECT DISTINCT w.worker_id AS "workerId", w.family
+  return db.$queryRaw<{ workerId: string; family: string; model: string | null }[]>`
+    SELECT DISTINCT w.worker_id AS "workerId", ${ASSIGNMENT_FAMILY} AS family, ha.model AS model
     FROM host_registration_workers w
     JOIN host_registrations r ON r.id = w.registration_id
     -- #1709 (cor:agt:060:05, 070:08): a host launches only a worker someone holds, in a worktree it already has.
     JOIN workers wk ON wk.id = w.worker_id AND wk.held_by_user_id IS NOT NULL AND wk.retired_at IS NULL
       AND cardinality(w.worktrees) > 0
     JOIN apps a ON a.id = r.app_id AND a.deleted_at IS NULL AND a.uninstalled_at IS NULL
+    -- #4222: under a server-held setup, only a worker assigned to that host, whose workdir the host confirms, as
+    -- the assigned family.
+    ${ASSIGNMENT_JOIN}
     LEFT JOIN agent_task_stall_schedule s ON s.app_id = r.app_id
     WHERE ${where}
+      AND ${ASSIGNMENT_IN_EFFECT}
       AND r.refreshed_at + make_interval(secs => r.poll_interval_seconds * ${LAPSE_SQL}) >= ${toNaiveUtc(now)}::timestamp
-    ORDER BY 1, 2`;
-  const out = new Map<string, string[]>();
-  for (const r of rows) {
-    const family = normalizeFamily(r.family);
-    if (!family) continue;
-    const list = out.get(r.workerId) ?? [];
-    if (!list.includes(family)) list.push(family);
-    out.set(r.workerId, list);
-  }
-  return out;
+    ORDER BY 1, 2, 3`;
 }
 
 /**

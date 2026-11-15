@@ -42,12 +42,20 @@ jobs:
           PG_MAJOR: ${{ matrix.pg }}
         run: |
           sudo install -d /usr/share/postgresql-common/pgdg
+          # Bounded retry for transient transport faults (#4262: curl 56 on this
+          # download, green on rerun). 5 retries with curl's doubling backoff,
+          # 10 s to connect and 60 s per attempt, and at most 180 s of retrying
+          # in total; a persistent failure still exits nonzero and fails the job.
           sudo curl --fail --silent --show-error --location \
+            --retry 5 --retry-all-errors --retry-max-time 180 \
+            --connect-timeout 10 --max-time 60 \
             https://www.postgresql.org/media/keys/ACCC4CF8.asc \
             -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
           echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt noble-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
-          sudo apt-get update
-          sudo apt-get install -y "postgresql-$PG_MAJOR" "postgresql-$PG_MAJOR-pgvector"
+          # apt's own per-download retry for the same class of fault on the
+          # repository fetches that follow.
+          sudo apt-get -o Acquire::Retries=5 update
+          sudo apt-get -o Acquire::Retries=5 install -y "postgresql-$PG_MAJOR" "postgresql-$PG_MAJOR-pgvector"
           echo "/usr/lib/postgresql/$PG_MAJOR/bin" >> "$GITHUB_PATH"
       - run: pnpm install --frozen-lockfile
       - run: pnpm prisma generate

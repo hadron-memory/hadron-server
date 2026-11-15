@@ -266,6 +266,10 @@ export const ALARM_EVENT_TYPES = [
   'alarm.coordinator-cadence',
   // #2014: a worker's team-chat post refused by the rate limit. Task-less; its episode lives in `post_limit_episodes`.
   'alarm.post-limit',
+  // #4231: a worker whose platform starts keep failing (three in an hour). Task-less; its episode lives in `start_failing_episodes`.
+  'alarm.start-failing',
+  // #4233: a host whose sweep stopped reporting (S10 of #4229). Task-less and workerless; its episode lives in `host_sweep_episodes`.
+  'alarm.stale-sweep',
 ] as const;
 export type AlarmEventType = (typeof ALARM_EVENT_TYPES)[number];
 
@@ -621,6 +625,45 @@ export async function appendReportsToEvent(
   });
 }
 
+/**
+ * #4224 (S3 of #4229): one `worker.leave-alone-changed` event per change of a worker's leave-alone marker, in the
+ * write's own transaction. The marker's new value only: the reason is text and stays on the worker row
+ * (cor:agt:050:11, ids only).
+ */
+export async function appendLeaveAloneChangedEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; actor: EventActor; workerId: string; leaveAlone: boolean },
+): Promise<void> {
+  await tx.agentTeamEvent.create({
+    data: {
+      appId: args.appId,
+      type: 'worker.leave-alone-changed',
+      actorUserId: args.actor.userId,
+      actorWorkerId: args.actor.workerId,
+      actorAgentId: args.actor.agentId,
+      subjectWorkerId: args.workerId,
+      payload: { leaveAlone: args.leaveAlone },
+    },
+  });
+}
+
+/** #4224 (S3 of #4229): one `team.sweep-mode-changed` event per change of the App's sweep mode: from and to. */
+export async function appendSweepModeChangedEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; actor: EventActor; from: string; to: string },
+): Promise<void> {
+  await tx.agentTeamEvent.create({
+    data: {
+      appId: args.appId,
+      type: 'team.sweep-mode-changed',
+      actorUserId: args.actor.userId,
+      actorWorkerId: args.actor.workerId,
+      actorAgentId: args.actor.agentId,
+      payload: { from: args.from, to: args.to },
+    },
+  });
+}
+
 /** #3307 / cor:dmo:050:12: one instruction record for a signature/trailer act; no template text is recorded. */
 export async function appendWorkerSignatureInstructionEvent(
  tx: Prisma.TransactionClient,
@@ -701,7 +744,11 @@ export type ManagerAct =
   | `host-operation.${'worker.start' | 'worker.end' | 'worktree.create' | 'worktree.remove'}`
   | 'stop.set' | 'stop.lift' | 'ticker.update' | 'ticker.delete' | 'ticker.subscribe' | 'ticker.unsubscribe'
   | 'ticker.templates-apply' | 'worker.wake-settings'
-  | 'app.ticker-settings' | 'app.delivery-settings' | 'team.pause' | 'team.resume' | 'wake.read';
+  | 'app.ticker-settings' | 'app.delivery-settings' | 'team.pause' | 'team.resume' | 'wake.read'
+  // #4224 (S3 of #4229): the leave-alone marker and the App's sweep mode.
+  | 'worker.leave-alone' | 'app.sweep-mode'
+  // #4222: the host-setup doors (which workers a host runs, and the App's switch for it).
+  | 'host-setup.assign' | 'host-setup.unassign' | 'host-setup.source';
 
 /** The ids an instructed App-manager act concerns; never content (cor:agt:050:11). */
 export type ManagerActSubject = { taskId?: string; workerId?: string; eventId?: string; tickerId?: string; signalId?: string };

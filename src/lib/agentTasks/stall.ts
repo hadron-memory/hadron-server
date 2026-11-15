@@ -975,6 +975,12 @@ export async function alarmEpisodeEnds(
     const over = await db.coordinatorCadenceEpisode.findMany({ where: { eventId: { in: cadenceIds }, endedAt: { not: null } }, select: { eventId: true, endedAt: true } });
     for (const e of over) out.set(e.eventId, e.endedAt as Date);
   }
+  // #4233: a stale-sweep alarm's episode ends when the host records its next run (or the App's sweep mode goes OFF).
+  const sweepIds = alarms.filter((a) => a.type === 'alarm.stale-sweep').map((a) => a.id);
+  if (sweepIds.length) {
+    const over = await db.hostSweepEpisode.findMany({ where: { eventId: { in: sweepIds }, endedAt: { not: null } }, select: { eventId: true, endedAt: true } });
+    for (const e of over) out.set(e.eventId, e.endedAt as Date);
+  }
   return out;
 }
 
@@ -997,7 +1003,7 @@ export async function recordEndedEscalations(db: Db, now: Date): Promise<number>
       // re-asked every pass for ever.
       where: {
         severity: 'alarm', acknowledgedAt: null, escalationEnd: { is: null }, id: { gt: after },
-        type: { in: [...STALL_ALARM_TYPES, 'alarm.dark-worker', 'alarm.coordinator-cadence'] },
+        type: { in: [...STALL_ALARM_TYPES, 'alarm.dark-worker', 'alarm.coordinator-cadence', 'alarm.stale-sweep'] },
         app: { deletedAt: null, uninstalledAt: null },
       },
       select: { id: true, taskId: true, type: true, episodeStart: true },

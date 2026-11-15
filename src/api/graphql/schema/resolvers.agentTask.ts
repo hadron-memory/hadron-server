@@ -294,8 +294,13 @@ export async function resolveTaskActor(ctx: Context, app: TaskApp): Promise<Task
   return { kind: 'user', userId: ctx.userId };
 }
 
-/** The write-side preconditions every task mutation shares, after the actor resolved. */
-export function requireWritable(ctx: Context, app: TaskApp): void {
+/**
+ * The write-side preconditions every task mutation shares, after the actor resolved. `allowUninstalled` (#4167,
+ * hrn:node:hadronmemory.com:specs:cor:acl:140:05, Holger 2026-11-14) is ONLY the revoke door: whoever manages the
+ * App may end its grants also while the App is uninstalled (not deleted), so that door names the exception —
+ * impersonation and a refused binding still refuse, and every other caller keeps the uninstalled refusal.
+ */
+export function requireWritable(ctx: Context, app: TaskApp, options: { allowUninstalled?: boolean } = {}): void {
   if (ctx.impersonation) throw forbidden('Impersonation sessions are read-only.');
   if (ctx.sessionBindingRefused) {
     throw taskError(
@@ -304,7 +309,7 @@ export function requireWritable(ctx: Context, app: TaskApp): void {
         'Nothing was written. Bind a live session, or send no session to act as yourself.',
     );
   }
-  if (app.uninstalledAt) throw taskError('APP_UNINSTALLED', 'This App is uninstalled; its tasks are read-only.');
+  if (app.uninstalledAt && !options.allowUninstalled) throw taskError('APP_UNINSTALLED', 'This App is uninstalled; its tasks are read-only.');
 }
 
 export async function loadApp(ctx: Context, appId: string): Promise<TaskApp | null> {
@@ -380,8 +385,11 @@ async function inKeyReadTx<T>(
   onGone: () => T,
   body: (txCtx: Context, app: TaskApp) => Promise<T>,
   timeoutMs?: number,
+  /** #4224: one repeatable-read snapshot for the whole read (see `withReadableApp`'s `coherent`). */
+  coherent = false,
 ): Promise<T> {
-  return inAnchoredAppTx(ctx, appId, onGone, async (txCtx, app) => ((await keyMayReadApp(txCtx, app)) ? body(txCtx, app) : onGone()), false, timeoutMs);
+  const run = () => inAnchoredAppTx(ctx, appId, onGone, async (txCtx, app) => ((await keyMayReadApp(txCtx, app)) ? body(txCtx, app) : onGone()), coherent, timeoutMs);
+  return coherent ? retryOnSerializationFailure(run) : run();
 }
 
 /** One transaction holding the App's authority anchors SHARED, with the App re-read after the lock (see `inKeyReadTx`). */
@@ -407,6 +415,13 @@ async function inAnchoredAppTx<T>(
       if (head.organizationId) await tx.$queryRaw`SELECT id FROM organizations WHERE id = ${head.organizationId} FOR SHARE`;
       if (head.ownerUserId) await tx.$queryRaw`SELECT id FROM users WHERE id = ${head.ownerUserId} FOR SHARE`;
       await tx.$queryRaw`SELECT id FROM apps WHERE id = ${head.id} FOR SHARE`;
+      // #4224: a key's own rows too, so a key or scope revoked while we waited is a 40001 (and a fresh gate), never
+      // a stale admission from the snapshot. A newly granted scope is an insert the snapshot misses: that only refuses.
+      const key = appKeyCaller(ctx);
+      if (key) {
+        await tx.$queryRaw`SELECT id FROM app_keys WHERE id = ${key.appKeyId} FOR SHARE`;
+        await tx.$queryRaw`SELECT id FROM app_key_scopes WHERE app_key_id = ${key.appKeyId} ORDER BY id FOR SHARE`;
+      }
     }
     const txCtx = withoutRequestCaches(ctx, tx);
     const app = await loadApp(txCtx, appId);
@@ -486,6 +501,13 @@ export async function withReadableApp<T>(
   ctx: Context, appRef: string, body: (c: Context, app: TaskApp) => Promise<T>, allowRun = false,
   /** #3884 — the key arm's transaction cap in ms, for a read whose bounded work can outlast Prisma's 5 s default. Unset keeps the default. */
   keyTxTimeoutMs?: number,
+  /**
+   * #4224 — run `body` on ONE repeatable-read snapshot, for a read that composes several facts into one answer (a
+   * verdict no single instant justified is worse than a stale one). A participant's body runs in its own
+   * repeatable-read transaction; a key's runs in the anchored coherent transaction the run read uses, with the key's
+   * own rows locked too. Either retries a serialization failure with a fresh gate. Not for the run arm.
+   */
+  opts: { coherent?: boolean } = {},
 ): Promise<T> {
   if (isRunPrincipal(ctx) && !ctx.userId && allowRun) {
     let id: string;
@@ -496,7 +518,11 @@ export async function withReadableApp<T>(
   const key = appKeyCaller(ctx);
   if (!key) {
     const { app } = await resolveParticipatedApp(ctx, appRef);
-    return body(ctx, app);
+    if (!opts.coherent) return body(ctx, app);
+    return retryOnSerializationFailure(() => ctx.db.$transaction(
+      (tx) => body(withoutRequestCaches(ctx, tx), app),
+      { timeout: 20_000, isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+    ));
   }
   let appId: string;
   try {
@@ -506,7 +532,7 @@ export async function withReadableApp<T>(
     throw e;
   }
   if (appId !== key.appId) throw appNotFound(appRef);
-  return inKeyReadTx(ctx, appId, () => { throw appNotFound(appRef); }, body, keyTxTimeoutMs);
+  return inKeyReadTx(ctx, appId, () => { throw appNotFound(appRef); }, body, keyTxTimeoutMs, opts.coherent === true);
 }
 
 /**
@@ -1143,6 +1169,12 @@ export async function inTaskWriteTx<T>(
     lockWorkerIds?: readonly (string | null | undefined)[];
     /** #3243: fill and lock the whole live candidate pool at the existing graph-before-worker point. */
     lockWorkerPool?: Set<string>;
+    /**
+     * #4167: the App anchor and the in-transaction re-check admit an UNINSTALLED (not deleted) App — only
+     * `revokeGrant`, whose manager arm the ruling widens. A deleted App still refuses everywhere, and every
+     * other task write keeps the liveness check.
+     */
+    allowUninstalledApp?: boolean;
   } = {},
 ): Promise<T> {
   const anchors: AuthorityAnchor[] = [
@@ -1168,7 +1200,9 @@ export async function inTaskWriteTx<T>(
           const again = await resolveTaskActor(txCtx, fresh);
           if (!again || !sameActor(again, actor)) throw new TaskGateRefused();
         }
-        requireWritable(txCtx, fresh);
+        // No deleted clause here by design: the anchor liveness check above carries the deleted exclusion for
+        // every writer, opted-in or not; this re-check only relaxes the UNINSTALLED refusal, never that one.
+        requireWritable(txCtx, fresh, { allowUninstalled: options.allowUninstalledApp });
       },
       (tx, txCtx) => {
         // #3323: an admission belongs to the attempt that judged it; a retried attempt judges again.
@@ -1177,6 +1211,7 @@ export async function inTaskWriteTx<T>(
       },
       {
         lockMode: options.lockMode,
+        allowUninstalledApp: options.allowUninstalledApp,
         afterLock: async (tx) => {
           await lockStopFence(tx, app.id, options.stopFence ?? 'shared');
           await lockTaskGraph(tx, app.id, options.taskGraph ?? 'shared');
@@ -2012,8 +2047,8 @@ async function afterTaskCreate(
   const created = await ctx.db.agentTask.findUniqueOrThrow({ where: { id: taskId } });
   // #1709 (cor:agt:070:08): `startItsAssignee` is true when the create NAMED its assignee, or a distinct-batch match chose a
   // worker with no open session (`needsHostStart`). #3815 (ruling 0265 V16-V19): any other matcher-chosen assignee is started
-  // by the matcher's own rule (a host start only for a worker with no open session), so this live-only launch check must not
-  // run for it. `matchTaskNow` runs after the create transaction commits, so `created` below already carries its assignee.
+  // by the matcher's own rule (a host start only for a worker with no open session). #4237: `launchAssignee` applies that same
+  // no-open-session rule (V16) to a named, hand or reassigned start, so a quiet open session is reached, never started over. `matchTaskNow` runs after the create transaction commits, so `created` below already carries its assignee.
   if (startItsAssignee) await launchAssignee(ctx.db, created, family);
   await emitTaskWarnings(ctx, info, created.appId, { codes: warn, taskId: created.id });
   return created;
@@ -2471,7 +2506,8 @@ export const agentTaskMutations = {
       });
       await recordInstructedManagerAct(tx, app.id, actor, 'task.assign', { taskId: task.id });
     }, { workers: async (appId) => [await partyWorkerForLock(ctx, appId, assignee)] }, instruction);
-    // #1709 (cor:agt:070:08): an assignment by hand starts a held worker with no live session through its host.
+    // #1709 (cor:agt:070:08): an assignment by hand starts a held worker with no open session through its host
+    // (V16, Proposed in the rule; built by #4237).
     await launchAssignee(ctx.db, assigned);
     await emitTaskWarnings(ctx, info, assigned.appId, { codes: warn, taskId: assigned.id });
     return assigned;
@@ -2592,6 +2628,10 @@ export const agentTaskMutations = {
         appId: app.id, taskId: task.id, actor: eventActor(ctx.userId),
         event: { type: 'task.reassigned', from, to: party, closeSessionWhenDone: close },
       });
+      // #4223 (cor:agt:050:10, Proposed; Peter, team chat #108497): a short-lived worker whose last open task moves
+      // away is asked to end its session, as on a finish or a cancel. `task` is the row before the move, so its
+      // assignee is the worker that lost it; that worker's per-worker lock is held (`assignee: true`).
+      await requestSessionEnd(tx, { appId: app.id, task, actor: eventActor(ctx.userId), now: new Date(), cause: 'reassigned' });
       await recordInstructedManagerAct(tx, app.id, actor, 'task.reassign', { taskId: task.id });
     }, { assignee: true, workers: async (appId) => [await partyWorkerForLock(ctx, appId, assignee)] }, instruction);
     await launchAssignee(ctx.db, reassigned);
@@ -2865,6 +2905,12 @@ export const agentTaskMutations = {
       await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: evActor, event: { type: 'task.handed-back', code } });
       // #1707: it enters the queue again, and this event is the unassignable rule's queue-entry stamp (cor:agt:050:17).
       await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: evActor, event: { type: 'assignment.queued' } });
+      // #4265 (hrn:node:hadronmemory.com:specs:cor:agt:050:10 r20, Proposed; Peter, team chat #109434): a short-lived
+      // worker that hands back its last open task is asked to end its session, as on a finish, a cancel or a
+      // reassignment away. `task` is the row before the hand-back, so its assignee is the worker handing it back,
+      // whose per-worker lock is held (`assignee: true`). The cause keeps `closeSessionWhenDone` out of it: the task
+      // did not end, so a long-lived or leave-alone worker is never asked here.
+      await requestSessionEnd(tx, { appId: app.id, task, actor: evActor, now, cause: 'handed-back' });
     }, { assignee: true });
     // #1707 (cor:agt:060:06): another free worker may take it right away; the returning worker is excluded.
     await matchAfterChange(ctx.db, handedBack.appId);
@@ -2917,8 +2963,8 @@ async function assigneeAdvice(
 
 /**
  * #1709 (cor:agt:070:08; Holger via Vera #10773 (6): assignment by hand launches too, not only matching). After the
- * assignment committed: if its assignee is a worker, ask the platform to start it through its host. Never fails the
- * assignment; a worker it cannot start leaves the task waiting.
+ * assignment committed: if its assignee is a worker, ask the platform to start it through its host; only a worker with no
+ * open session is started (V16, #4237), one with an open session has the task by its notice. Never fails the assignment; a worker it cannot start leaves the task waiting.
  */
 async function launchAssignee(db: Context['db'], t: TaskRow, family?: string): Promise<void> {
   if (!t.assigneeWorkerId || !['pending', 'started'].includes(t.status)) return;
@@ -3681,7 +3727,18 @@ export const agentTaskFieldResolvers = {
     references: (t: TaskRow) => storedTaskReferences(t.references).map(r => ({ kind: REFERENCE_KIND_TO_GQL[r.kind], target: r.target, label: r.label ?? null })),
     /** #1709 (cor:agt:050:10) — the request this task's end made; the task was already read, so its readers read it. */
     sessionEndRequest: async (t: TaskRow, _: unknown, ctx: Context) => {
-      const r = await ctx.db.taskSessionEndRequest.findUnique({ where: { taskId: t.id } });
+      // #4223: a task may carry several requests, one for each time it ended under a worker or was reassigned away
+      // from one. Only its CURRENT worker assignee's is shown, the latest: a request made of a former assignee names
+      // that worker's session, and whoever reads the task now must never take it for its own (#4253 blind review,
+      // Cedric P2-1). The former assignee is woken for it instead (taskWakes.ts, END_SESSION). And a reader that IS
+      // a worker reads only a request addressed to itself (Peter, team chat #108945): a person, a run or an App key
+      // reads the assignee's, with the worker it asks in `workerId`.
+      if (!t.assigneeWorkerId) return null;
+      const reader = currentActor().workerId;
+      if (reader && reader !== t.assigneeWorkerId) return null;
+      const r = await ctx.db.taskSessionEndRequest.findFirst({
+        where: { taskId: t.id, workerId: t.assigneeWorkerId }, orderBy: [{ requestedAt: 'desc' }, { id: 'desc' }],
+      });
       return r ? { ...r, resolution: r.resolution ? r.resolution.toUpperCase().replace(/-/g, '_') : null } : null;
     },
     /** cor:agt:050:03 — pending with no assignee. Derived, never stored. */
