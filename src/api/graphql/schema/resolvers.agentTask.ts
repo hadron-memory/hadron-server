@@ -2905,6 +2905,12 @@ export const agentTaskMutations = {
       await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: evActor, event: { type: 'task.handed-back', code } });
       // #1707: it enters the queue again, and this event is the unassignable rule's queue-entry stamp (cor:agt:050:17).
       await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: evActor, event: { type: 'assignment.queued' } });
+      // #4265 (hrn:node:hadronmemory.com:specs:cor:agt:050:10 r20, Proposed; Peter, team chat #109434): a short-lived
+      // worker that hands back its last open task is asked to end its session, as on a finish, a cancel or a
+      // reassignment away. `task` is the row before the hand-back, so its assignee is the worker handing it back,
+      // whose per-worker lock is held (`assignee: true`). The cause keeps `closeSessionWhenDone` out of it: the task
+      // did not end, so a long-lived or leave-alone worker is never asked here.
+      await requestSessionEnd(tx, { appId: app.id, task, actor: evActor, now, cause: 'handed-back' });
     }, { assignee: true });
     // #1707 (cor:agt:060:06): another free worker may take it right away; the returning worker is excluded.
     await matchAfterChange(ctx.db, handedBack.appId);

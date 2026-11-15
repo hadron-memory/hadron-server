@@ -12,7 +12,7 @@
  * | task.assigned / .reassigned / assignment.matched | the new assignee (the task's LATEST assignment only) | ASSIGNED / REASSIGNED / MATCHED |
  * | a child's task.finished / .cancelled    | the child's owner (050:16 r2) AND the parent's assignee (#4234, G7) | CHILD_FINISHED / CHILD_CANCELLED |
  * | an unacknowledged alarm                 | its currently-woken chain position, a worker (050:19) | ALARM |
- * | task.session-end-requested (#1709), when someone else ended the task, or (#4223) the task was reassigned away from the asked worker | the asked worker, while that session is open and the request unresolved (050:10) | END_SESSION |
+ * | task.session-end-requested (#1709), when someone else ended the task, or (#4223) the task was reassigned away from the asked worker, or (#4265) that worker handed it back | the asked worker, while that session is open and the request unresolved (050:10) | END_SESSION |
  *
  * A wake for an event stays due until a wake proof naming it is acknowledged
  * (`worker_delivery_task_events.delivered_at`), or until it no longer asks
@@ -176,7 +176,8 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
       JOIN workers w ON w.id = q.worker_id AND w.app_id = t.app_id
       WHERE q.worker_id IN (${ids}) AND q.resolved_at IS NULL
         -- #4223: or the task is no longer the asked worker's (reassigned away from a short-lived worker, even by that
-        -- worker itself): it has no task to read the request on, so it is always woken.
+        -- worker itself): it has no task to read the request on, so it is always woken. #4265: a hand-back too, which
+        -- the asked worker always makes itself and which leaves the task with no assignee (NULL is distinct).
         AND (q.requested_by_worker_id IS DISTINCT FROM q.worker_id OR t.assignee_worker_id IS DISTINCT FROM q.worker_id)
         AND ${liveApp('t')}
         AND ${undelivered('q.worker_id', 'q.event_id', '0')}`),
