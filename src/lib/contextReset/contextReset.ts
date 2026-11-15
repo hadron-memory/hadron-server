@@ -200,11 +200,15 @@ export async function requestContextReset(
   // R115/R116: the Agent's setting, held like the matcher holds usesTasks. The newest open session here is the one chosen
   // just below (same ordering), and claimContextReset reads the agent of that named session, so the two agree. #2458: a worker with an open session is read
   // on the agent that session was bound under, not the live worker row.
-  const [agent] = await tx.$queryRaw<{ on: boolean }[]>`
-    SELECT a.reset_context_after_task AS "on" FROM workers w
+  const [agent] = await tx.$queryRaw<{ on: boolean; lifecycle: string }[]>`
+    SELECT a.reset_context_after_task AS "on", a.lifecycle::text AS lifecycle FROM workers w
     ${OPEN_SESSION_PLACEMENT_JOIN}
     JOIN agents a ON a.id = COALESCE(os.agent_id, w.agent_id) WHERE w.id = ${workerId} FOR SHARE OF a`;
   if (!agent?.on) return null;
+  // #4223 (S2 of #4229; cor:agt:050:27 part 9, decision G4): a short-lived Agent never requests a reset. Its worker's
+  // context ends with its session, when its last task ends (cor:agt:050:10), and a task ending beside another open
+  // one must leave the running worker's context intact (G7).
+  if (agent.lifecycle === 'SHORT_LIVED') return null;
   const otherStarted = await tx.agentTask.count({ where: { assigneeWorkerId: workerId, status: 'started', id: { not: a.task.id } } });
   if (otherStarted > 0) return null;
   // R120: a team pause suppresses it. The App's anchors are held by the task write, and the pause writer takes them
