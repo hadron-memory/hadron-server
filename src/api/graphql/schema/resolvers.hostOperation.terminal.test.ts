@@ -472,9 +472,11 @@ describe('the SDL: results are references, not Worker objects (G1)', () => {
     const input = (schema.getType('WorkerTerminalReportInput') as any).getFields();
     // #4041: `repair` (a closed enum) and `attempt` (an Int) join; still no String field other than the worker ref.
     // #4225: `contextTokens` (an Int) and `contextMeasuredAt` (a DateTime) join; still no String field other than the worker ref.
-    expect(Object.keys(input).sort()).toEqual(['attempt', 'checkedAt', 'contextMeasuredAt', 'contextTokens', 'lastTurnAt', 'prompt', 'reason', 'repair', 'status', 'worker']);
+    expect(Object.keys(input).sort()).toEqual(['attempt', 'checkedAt', 'contextMeasuredAt', 'contextTokens', 'lastTurnAt', 'prompt', 'reason', 'repair', 'repairReason', 'status', 'worker']);
     expect(String(input.reason.type)).toBe('WorkerTerminalReason');
     expect(String(input.repair.type)).toBe('WorkerTerminalRepair');
+    // #4247: `repairReason` is a closed enum too.
+    expect(String(input.repairReason.type)).toBe('WorkerTerminalRepairReason');
     expect(String(input.attempt.type)).toBe('Int');
   });
   it('Worker and TeamRosterEntry carry terminal; the mutation is declared', () => {
