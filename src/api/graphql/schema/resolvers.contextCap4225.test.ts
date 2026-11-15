@@ -278,10 +278,10 @@ describe('the operation args carry the cause, from a closed set', () => {
   });
   const base = { workerId: '', sessionId: 's1', resetId: 'r1' };
   it('accepts context-cap and task-end, with or without a task, and refuses any other word or a non-string', async () => {
-    const a = { ...base, workerId: F.kit.id };
+    const a = { ...base, workerId: F.kit.id, sessionId: F.session.id };
     await expect(op({ ...a, cause: 'context-cap' })).resolves.toBeTruthy();
-    await expect(op({ ...a, taskId: 't1', cause: 'task-end' })).resolves.toBeTruthy();
-    await expect(op({ ...a, taskId: 't1' })).resolves.toBeTruthy();
+    await expect(op({ ...a, taskId: 't1', cause: 'task-end', resetId: 'r2' })).resolves.toBeTruthy();
+    await expect(op({ ...a, taskId: 't1', resetId: 'r3' })).resolves.toBeTruthy();
     await expect(op({ ...a, cause: 'whatever' })).rejects.toThrow(/chk_host_operations_shape/);
     await expect(op({ ...a, cause: 'context cap' })).rejects.toThrow(/chk_host_operations_shape/);
   });

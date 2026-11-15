@@ -278,7 +278,7 @@ export async function issueReset(
         appId: a.appId,
         hostId,
         type: 'worker.reset-context',
-        args: { workerId, sessionId: session.id, ...(a.taskId ? { taskId: a.taskId } : {}), resetId },
+        args: { workerId, sessionId: session.id, ...(a.taskId ? { taskId: a.taskId } : {}), resetId, ...(a.cause === 'context-cap' ? { cause: a.cause } : {}) },
         workerId,
         issuedBy: 'platform',
       },

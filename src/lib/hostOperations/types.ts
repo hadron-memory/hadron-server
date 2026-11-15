@@ -61,7 +61,7 @@ const ARGS: Record<HostOperationType, { required: Record<string, ArgKind>; optio
   'worker.end': { required: { workerId: 'id', sessionId: 'id' } },
   'worktree.remove': { required: { workerId: 'id', worktree: 'token' } },
   // #4225: a context-cap reset has no task.
-  'worker.reset-context': { required: { workerId: 'id', sessionId: 'id', resetId: 'id' }, optional: { taskId: 'id' } },
+  'worker.reset-context': { required: { workerId: 'id', sessionId: 'id', resetId: 'id' }, optional: { taskId: 'id', cause: 'token' } },
 };
 
 const FAMILY = /^[a-z0-9][a-z0-9._-]{0,63}$/;
