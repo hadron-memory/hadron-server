@@ -28,7 +28,7 @@ import { toNaiveUtc } from '../sessionActivity.js';
 import { isSerializationFailure } from './stall.js';
 
 export const STALE_SWEEP_EVENT_TYPE = 'alarm.stale-sweep';
-/** A host's sweep is stale when its last run ended this long ago. */
+/** A host's sweep is stale when the server last recorded a run for it this long ago (the server's clock, never the host's). */
 export const STALE_SWEEP_WINDOW_MINUTES = 5;
 /** The most per-worker lines a run record keeps. */
 export const SWEEP_RUN_MAX_LINES = 50;
@@ -109,7 +109,7 @@ export function validateSweepRun(input: SweepRunInput, now: Date): { ok: true; r
 export const needsSummary = (r: Pick<CheckedSweepRun, 'applied' | 'failed'>): boolean => r.applied + r.failed > 0;
 
 /** Strip markdown syntax from a token a host key supplied before it reaches a platform-authored line. */
-const plain = (s: string): string => s.replace(/[\[\]()<>`*_~|\\]/g, ' ').replace(/\s+/g, ' ').trim();
+const plain = (s: string): string => s.replace(/[\[\]()<>`*_~|\\@]/g, ' ').replace(/\s+/g, ' ').trim();
 
 /** The one line a run posts. Plain text; tokens only. Names at most {@link SUMMARY_LINES} worker lines, then the rest as a count. */
 export function summaryBody(args: { hostLabel: string; run: Pick<CheckedSweepRun, 'mode' | 'applied' | 'failed' | 'skipped' | 'planned' | 'lines'> }): string {
@@ -282,9 +282,12 @@ async function lastActivity(db: PrismaClient, appId: string, hostId: string): Pr
            (SELECT registered_at FROM host_registrations WHERE app_id = ${appId} AND host_id = ${hostId}) AS "registeredAt",
            (SELECT MAX(created_at) FROM agent_team_events WHERE app_id = ${appId} AND type = 'team.sweep-mode-changed') AS "modeChangedAt"`;
   if (!row) return null;
-  if (row.lastRun) return { at: row.lastRun, run: true };
-  if (!row.registeredAt) return null;
-  return { at: new Date(Math.max(row.registeredAt.getTime(), row.modeChangedAt?.getTime() ?? 0)), run: false };
+  // The latest of the last recorded run and the last change of the App's sweep mode: a host that ran yesterday, whose App went
+  // OFF and was switched on again now, gets the grace of a fresh switch-on and not an alarm in the same minute (#4255 Diego).
+  // A host that never ran counts from its registration instead.
+  const base = row.lastRun ?? row.registeredAt;
+  if (!base) return null;
+  return { at: new Date(Math.max(base.getTime(), row.modeChangedAt?.getTime() ?? 0)), run: row.lastRun !== null };
 }
 
 /**

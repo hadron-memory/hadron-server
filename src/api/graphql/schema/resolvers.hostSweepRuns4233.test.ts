@@ -283,6 +283,16 @@ describe('the stale-sweep alarm', () => {
     expect(await alarms()).toHaveLength(0);
   });
 
+  it('a host that ran long ago gets the grace of a fresh switch-on: no alarm in the minute the mode comes back on (#4255 Diego)', async () => {
+    await record({ runId: 'yesterday' });
+    await db.$executeRaw`UPDATE host_sweep_runs SET recorded_at = recorded_at - interval '1 day'`;
+    await setMode('OBSERVE');
+    await db.agentTeamEvent.create({ data: { appId: app.id, type: 'team.sweep-mode-changed', payload: { from: 'OFF', to: 'OBSERVE' } } });
+    expect(await evaluateStaleSweeps(db, new Date())).toHaveLength(0);
+    expect((await alarms()).filter((e) => (e.payload as any).hostId === 'orca1')).toHaveLength(0);
+    expect(await evaluateStaleSweeps(db, later(6))).toHaveLength(2);
+  });
+
   it('raises nothing inside five minutes or with the sweep mode OFF', async () => {
     await record({ runId: 'recent' });
     await setMode('OBSERVE');
