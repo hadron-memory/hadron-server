@@ -10,7 +10,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
  * `opus` / `sonnet` / `haiku` count for an ASSIGNED model only (a manager typed it); `tierOf` stays strict for the
  * self-declared binding model.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import type { Prisma } from '../../generated/prisma/index.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
@@ -18,7 +18,8 @@ import { generateId } from '../id.js';
 import { anchorNow } from '../stopSignals/state.js';
 import { resolvers } from '../../api/graphql/schema/resolvers.js';
 import { __matcherTesting, matchQueuedTasks, workerTier } from './matcher.js';
-import { registerHost } from './hosts.js';
+import { tierOfAssignedModel } from './family.js';
+import { loadLaunchableModels, registerHost } from './hosts.js';
 
 const M = resolvers.Mutation as any;
 const at = (hhmm: string): Date => new Date(`2026-10-31T${hhmm}:00Z`);
@@ -28,24 +29,7 @@ let app: { id: string };
 let agentId: string;
 let mia: { id: string };
 const w: Record<string, { id: string }> = {};
-
-beforeEach(async () => {
-  await cleanDb(db);
-  const n = Math.floor(Math.random() * 1_000_000);
-  const org = await db.organization.create({ data: { name: 'S9', urn: `s9-${n}.example` } });
-  const admin = await db.user.create({ data: { githubId: 800_000 + n, githubUsername: `s9-admin-${n}`, roles: ['READER'] } });
-  mia = await db.user.create({ data: { githubId: 900_000 + n, githubUsername: `s9-mia-${n}`, roles: ['READER'] } });
-  await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  agentId = (await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id))).id;
-  app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `s9-${n}.example:team`, hostSetupSource: 'server' }, select: { id: true } });
-  await db.appMember.create({ data: { appId: app.id, userId: mia.id, role: 'member' } });
-  for (const name of ['Una', 'Dov', 'Tre']) {
-    w[name] = await db.worker.create({
-      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name, slug: name.toLowerCase(), role: 'reviewer', heldByUserId: mia.id }, select: { id: true },
-    });
-  }
-});
-afterEach(() => { delete process.env.DISABLE_TASK_MATCHER; });
+let seq = 0;
 
 /** An assignment on `hostId` and a live registration that lists its workdir. */
 async function assign(worker: { id: string }, model: string | null, hostId = 'h1', family = 'claude') {
@@ -83,7 +67,32 @@ describe('#4232 workerTier — the pure rule', () => {
   });
 });
 
+describe('#4232 tierOfAssignedModel', () => {
+  it('reads aliases and full ids, trimmed and case-folded; nothing else', () => {
+    expect(tierOfAssignedModel(' OPUS ')).toBe('high');
+    expect(tierOfAssignedModel('Claude-Sonnet-5-5')).toBe('mid');
+    for (const bad of ['', '  ', null, undefined, 'claude-opus', 'octopus', 'gpt-5', 'opus-ish']) expect(tierOfAssignedModel(bad as never), String(bad)).toBeNull();
+  });
+});
+
 describe('#4232 matching an unbound worker by its assignment', () => {
+  beforeEach(async () => {
+    await cleanDb(db);
+    const n = (process.pid % 100_000) * 1000 + ++seq;
+    const org = await db.organization.create({ data: { name: 'S9', urn: `s9-${n}.example` } });
+    const admin = await db.user.create({ data: { githubId: 800_000 + n, githubUsername: `s9-admin-${n}`, roles: ['READER'] } });
+    mia = await db.user.create({ data: { githubId: 900_000 + n, githubUsername: `s9-mia-${n}`, roles: ['READER'] } });
+    await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
+    agentId = (await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id))).id;
+    app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `s9-${n}.example:team`, hostSetupSource: 'server' }, select: { id: true } });
+    await db.appMember.create({ data: { appId: app.id, userId: mia.id, role: 'member' } });
+    for (const name of ['Una', 'Dov', 'Tre']) {
+      w[name] = await db.worker.create({
+        data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name, slug: name.toLowerCase(), role: 'reviewer', heldByUserId: mia.id }, select: { id: true },
+      });
+    }
+  });
+
   it('S1: an unbound worker assigned `opus` matches a minTier high task', async () => {
     await assign(w.Una, 'opus');
     const t = await queued({ role: 'reviewer', minTier: 'high' });
@@ -113,7 +122,7 @@ describe('#4232 matching an unbound worker by its assignment', () => {
     const t = await queued({ role: 'reviewer', minTier: 'low' });
     await run();
     expect(await assigneeOf(t.id)).toBeNull();
-    // Dov has no assignment at all (a plain host registration under `host` setup is not in effect here).
+    // Una's tier is unknown, which only a minimum refuses: with no minimum she is still free for work.
     const free = await queued({ role: 'reviewer' });
     await run();
     expect(await assigneeOf(free.id)).toBe(w.Una.id); // no minimum: unknown tiers still match
@@ -165,10 +174,33 @@ describe('#4232 matching an unbound worker by its assignment', () => {
     const hi = await queued({ role: 'reviewer', minTier: 'high' });
     const claim = (await db.agentTask.findUniqueOrThrow({ where: { id: hi.id }, select: { id: true, appId: true, requirements: true, closeSessionWhenDone: true, createdByWorkerId: true } })) as any;
     expect(await __matcherTesting.tryAssign(db, claim, w.Una.id, 'claude', at('11:01'), {}, anchorNow())).toBe('assigned');
-    const lo = await queued({ role: 'reviewer', minTier: 'high' });
-    await db.hostWorkerAssignment.updateMany({ where: { workerId: w.Tre.id }, data: {} });
+    const sonnetTask = await queued({ role: 'reviewer', minTier: 'high' });
     await assign(w.Tre, 'sonnet');
-    const claim2 = (await db.agentTask.findUniqueOrThrow({ where: { id: lo.id }, select: { id: true, appId: true, requirements: true, closeSessionWhenDone: true, createdByWorkerId: true } })) as any;
-    expect(await __matcherTesting.tryAssign(db, claim2, w.Tre.id, 'claude', at('11:01'), {}, anchorNow())).toBe('worker-not-free');
+    const claim2 = (await db.agentTask.findUniqueOrThrow({ where: { id: sonnetTask.id }, select: { id: true, appId: true, requirements: true, closeSessionWhenDone: true, createdByWorkerId: true } })) as any;
+    expect(await __matcherTesting.tryAssign(db, claim2, w.Tre.id, 'claude', at('11:01'), {}, anchorNow())).toBe('worker-not-free'); // the re-check's one refusal, tier included
+  });
+
+  it('S10: an assignment with no model beside one that names `opus` makes the tier unknown (the loader keeps the null)', async () => {
+    await assign(w.Una, 'opus', 'h1');
+    await assign(w.Una, null, 'h2');
+    expect((await loadLaunchableModels(db, { workerIds: [w.Una.id] }, at('11:01'))).get(w.Una.id)?.slice().sort()).toEqual([null, 'opus']);
+    const t = await queued({ role: 'reviewer', minTier: 'low' });
+    await run();
+    expect(await assigneeOf(t.id)).toBeNull();
+  });
+
+  it('S11: the same model on two hosts collapses to one entry', async () => {
+    await assign(w.Una, 'opus', 'h1');
+    await assign(w.Una, 'opus', 'h2');
+    expect((await loadLaunchableModels(db, { workerIds: [w.Una.id] }, at('11:01'))).get(w.Una.id)).toEqual(['opus']);
+  });
+
+  it('S12: an assignment on a lapsed host stops counting', async () => {
+    await assign(w.Una, 'opus');
+    const t = await queued({ role: 'reviewer', minTier: 'high' });
+    // the registration was refreshed at 11:00 with a 60 s poll; a day later it has lapsed
+    expect((await loadLaunchableModels(db, { workerIds: [w.Una.id] }, new Date('2026-11-01T11:00:00Z'))).size).toBe(0);
+    await matchQueuedTasks(db, new Date('2026-11-01T11:00:00Z'), { appId: app.id });
+    expect(await assigneeOf(t.id)).toBeNull();
   });
 });

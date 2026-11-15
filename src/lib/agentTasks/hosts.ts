@@ -260,37 +260,46 @@ export async function loadLaunchableFamilies(
   scope: { appId: string } | { workerIds: string[] },
   now: Date,
 ): Promise<Map<string, string[]>> {
-  const out = new Map<string, string[]>();
-  for (const r of await loadLaunchableAssignments(db, scope, now)) {
-    const family = normalizeFamily(r.family);
-    if (!family) continue;
-    const list = out.get(r.workerId) ?? [];
-    if (!list.includes(family)) list.push(family);
-    out.set(r.workerId, list);
-  }
-  return out;
+  return (await loadLaunchable(db, scope, now)).families;
 }
 
 /**
  * #4232 (S9): the model each worker's in-effect ASSIGNMENTS on live hosts name, per worker: one entry per distinct
- * (host, family, model) the worker is launchable as, `null` for an assignment (or a host-stated registration) that
- * names no model. Same rows, same filters as {@link loadLaunchableFamilies}; an assignment is in effect only while the
- * App's `hostSetupSource` is `server`, so under `host` every entry is `null`. The matcher reads the tier of an unbound
- * worker from these (`workerTier`).
+ * model among the (host, family) pairs the worker is launchable as, `null` for an assignment (or a host-stated
+ * registration) that names no model. Same rows, same filters as {@link loadLaunchableFamilies}; an assignment is in
+ * effect only while the App's `hostSetupSource` is `server`, so under `host` every entry is `null`. The matcher reads
+ * the tier of an unbound worker from these (`workerTier`).
  */
 export async function loadLaunchableModels(
   db: Db,
   scope: { appId: string } | { workerIds: string[] },
   now: Date,
 ): Promise<Map<string, (string | null)[]>> {
-  const out = new Map<string, (string | null)[]>();
+  return (await loadLaunchable(db, scope, now)).models;
+}
+
+/**
+ * Both readers above from ONE statement (the matcher needs families and models together, per pass and per
+ * assignment decision; #4250 blind review F1): workerId → launchable families, and workerId → assigned models.
+ */
+export async function loadLaunchable(
+  db: Db,
+  scope: { appId: string } | { workerIds: string[] },
+  now: Date,
+): Promise<{ families: Map<string, string[]>; models: Map<string, (string | null)[]> }> {
+  const families = new Map<string, string[]>();
+  const models = new Map<string, (string | null)[]>();
   for (const r of await loadLaunchableAssignments(db, scope, now)) {
-    if (!normalizeFamily(r.family)) continue;
-    const list = out.get(r.workerId) ?? [];
-    if (!list.includes(r.model)) list.push(r.model);
-    out.set(r.workerId, list);
+    const family = normalizeFamily(r.family);
+    if (!family) continue;
+    const f = families.get(r.workerId) ?? [];
+    if (!f.includes(family)) f.push(family);
+    families.set(r.workerId, f);
+    const m = models.get(r.workerId) ?? [];
+    if (!m.includes(r.model)) m.push(r.model);
+    models.set(r.workerId, m);
   }
-  return out;
+  return { families, models };
 }
 
 /** The one query behind both readers above: what each live host's registration and assignment say a worker runs as. */
