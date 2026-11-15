@@ -6524,6 +6524,9 @@ model HostSweepRun {
   recordedAt DateTime  @default(now()) @map("recorded_at")
   /// When the run's summary post was written; NULL for a run that needed none, or whose post has not run yet.
   postedAt   DateTime? @map("posted_at")
+  /// When the retry pass last tried this run's post and did not land it (no chat, the host gap, a failed append). The retry queue
+  /// orders untried runs first, so a run that cannot post goes to the back and never holds the scan (#4255 Clark F4).
+  summaryTriedAt DateTime? @map("summary_tried_at")
 
   app App @relation(fields: [appId], references: [id], onDelete: Cascade)
 

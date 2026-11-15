@@ -205,25 +205,28 @@ export async function postSweepSummary(db: PrismaClient, appId: string, runId: s
 export async function postPendingSweepSummaries(db: PrismaClient, now = new Date()): Promise<number> {
   const from = toNaiveUtc(new Date(now.getTime() - SUMMARY_RETRY_MINUTES * 60_000));
   const to = toNaiveUtc(new Date(now.getTime() - SUMMARY_RETRY_GRACE_SECONDS * 1000));
-  // One candidate per HOST (its oldest unposted run: the host gap lets only one post per minute anyway), taken round-robin
-  // across Apps: every App's oldest candidate is considered before any App's second. A tenant whose runs cannot post (no chat)
-  // therefore holds one slot per round, not the scan, however many hosts it names (#4255 Clark F4). Every candidate is tried each
-  // tick, and the number of posts, not of attempts, is what is capped.
+  // The queue is the `summary_tried_at` stamp (the scanDueAt pattern): a run whose post has not been tried comes first, and a run
+  // that was tried and did not land (no chat, the host gap, a failed append) goes to the back. So runs that cannot post (any
+  // number of Apps with no chat) are looked at once per round of the queue and never hold the scan against a deliverable run,
+  // whatever their number (#4255 Clark F4). One candidate per HOST (its oldest unposted run: the host gap lets only one post
+  // per minute anyway), round-robin across Apps within the same tried-ness, so one App's hosts do not fill a round either.
   const due = await db.$queryRaw<{ id: string; appId: string }[]>`
     SELECT d.id, d."appId" FROM (
-      SELECT h.id, h."appId", h.recorded_at, row_number() OVER (PARTITION BY h."appId" ORDER BY h.recorded_at, h.id) AS round
+      SELECT h.id, h."appId", h.recorded_at, h.tried_at, row_number() OVER (PARTITION BY h."appId" ORDER BY h.tried_at NULLS FIRST, h.recorded_at, h.id) AS round
       FROM (
-        SELECT DISTINCT ON (r.app_id, r.host_id) r.id, r.app_id AS "appId", r.recorded_at
+        SELECT DISTINCT ON (r.app_id, r.host_id) r.id, r.app_id AS "appId", r.recorded_at, r.summary_tried_at AS tried_at
         FROM host_sweep_runs r
         WHERE r.posted_at IS NULL AND r.applied + r.failed > 0 AND r.recorded_at > ${from}::timestamp AND r.recorded_at <= ${to}::timestamp
         ORDER BY r.app_id, r.host_id, r.recorded_at, r.id) h) d
-    ORDER BY d.round, d.recorded_at, d.id LIMIT ${SUMMARY_RETRY_SCAN}`;
+    ORDER BY d.tried_at NULLS FIRST, d.round, d.recorded_at, d.id LIMIT ${SUMMARY_RETRY_SCAN}`;
   let posted = 0;
   for (const r of due) {
     if (posted >= SUMMARY_RETRY_POSTS) break;
     try {
       if (await postSweepSummary(db, r.appId, r.id)) posted++;
+      else await db.$executeRaw`UPDATE host_sweep_runs SET summary_tried_at = ${toNaiveUtc(now)}::timestamp WHERE id = ${r.id} AND posted_at IS NULL`;
     } catch (err) {
+      await db.$executeRaw`UPDATE host_sweep_runs SET summary_tried_at = ${toNaiveUtc(now)}::timestamp WHERE id = ${r.id} AND posted_at IS NULL`.catch(() => undefined);
       console.error(`[sweep-summary] retrying run ${r.id} failed:`, err);
     }
   }

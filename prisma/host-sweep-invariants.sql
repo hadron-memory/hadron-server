@@ -14,10 +14,13 @@ CREATE TABLE IF NOT EXISTS host_sweep_runs (
   failed      INTEGER NOT NULL,
   lines       JSONB NOT NULL DEFAULT '[]',
   recorded_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  posted_at   TIMESTAMP(3)
+  posted_at   TIMESTAMP(3),
+  summary_tried_at TIMESTAMP(3)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS host_sweep_runs_run_uniq ON host_sweep_runs (app_id, host_id, run_key);
 CREATE INDEX IF NOT EXISTS host_sweep_runs_host_recent_idx ON host_sweep_runs (app_id, host_id, recorded_at DESC);
+-- The retry pass's queue: runs with something to say whose summary has not landed (a partial index Prisma cannot model).
+CREATE INDEX IF NOT EXISTS host_sweep_runs_unposted_idx ON host_sweep_runs (recorded_at) WHERE posted_at IS NULL AND applied + failed > 0;
 ALTER TABLE host_sweep_runs DROP CONSTRAINT IF EXISTS chk_host_sweep_runs_shape;
 ALTER TABLE host_sweep_runs ADD CONSTRAINT chk_host_sweep_runs_shape CHECK (
   mode <> 'OFF' AND ended_at >= started_at AND

@@ -203,6 +203,24 @@ describe('one summary post per run, only when something changed (cor:agt:020:14 
     expect(await postPendingSweepSummaries(db, new Date(Date.now() + 60_000))).toBe(1);
     expect(await posts()).toHaveLength(1);
   });
+  it('520 unpostable Apps sharing the cap do not starve one deliverable run across ticks (#4255 Clark F4, multi-App)', async () => {
+    const x = Math.floor(Math.random() * 1_000_000);
+    await db.app.createMany({ data: Array.from({ length: 520 }, (_, i) => ({ organizationId: org.id, name: `NoChat${i}`, urn: `${org.urn}:nc${x}-${i}` })) });
+    const dark = await db.app.findMany({ where: { urn: { startsWith: `${org.urn}:nc${x}-` } }, select: { id: true } });
+    await db.$executeRaw`
+      INSERT INTO host_sweep_runs (id, app_id, host_id, run_key, started_at, ended_at, mode, planned, applied, skipped, failed, lines, recorded_at)
+      SELECT 'multi' || row_number() OVER (), a, 'h', 'r', now() AT TIME ZONE 'UTC', now() AT TIME ZONE 'UTC', 'APPLY', 1, 1, 0, 0, '[]'::jsonb,
+             (now() AT TIME ZONE 'UTC') - interval '5 minutes'
+      FROM unnest(${dark.map((d) => d.id)}::text[]) AS a`;
+    const ok = validateSweepRun(run({ planned: 1, applied: 1, lines: lines(1) }) as any, new Date());
+    if (!ok.ok) throw new Error(ok.message);
+    await db.$transaction((tx) => insertSweepRun(tx, app.id, 'orca1', ok.run));
+    // Each tick is a minute apart; the unpostable Apps fill the scan on the first, and must not on the next.
+    let total = 0;
+    for (let tick = 1; tick <= 3; tick++) total += await postPendingSweepSummaries(db, new Date(Date.now() + (tick + 0.5) * 60_000));
+    expect(total).toBe(1);
+    expect(await posts()).toHaveLength(1);
+  }, 60_000);
   it('a run recorded long ago is not posted late: the retry window is ten minutes', async () => {
     const checked = validateSweepRun(run({ planned: 1, applied: 1, lines: lines(1) }) as any, new Date());
     if (!checked.ok) throw new Error(checked.message);
