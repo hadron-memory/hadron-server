@@ -19,6 +19,8 @@ import { setUpResetFixture, code, ctx, type ResetFixture } from '../../test/cont
 import { generateId } from '../id.js';
 import { sweepSessionEndRequests } from './sessionEnd.js';
 import { lockWorkersForAssignment } from '../agentTasks/workerLock.js';
+import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
+import { HANDOFFS_PARENT_LOC, HANDOFF_SESSION_KEY } from '../workerHandoff.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -235,6 +237,93 @@ describe('entry 2: endAgentlessSession, the host\'s own end', () => {
     const p = M.endAgentlessSession({}, { input: { appRef: f.app.id, workerRef: f.kit.id, sessionId: f.session.id, reason: 'AGENT_ABSENT' } }, ctx(f.manager.id));
     expect(await code(p)).toBe('HOST_KEY_REQUIRED');
     expect((await sessionOf()).endedAt).toBeNull();
+  });
+});
+
+describe('the session must run on the calling host (#4294 §10, Rook P2-1)', () => {
+  /** orca2 registers Kit too, so both hosts pass the registration check. */
+  /** Record Kit's session as launched on `hostId` by a worker.start issued there (chk_sessions_launch's three columns). */
+  const launchedOn = async (hostId: string) => {
+    const opId = generateId();
+    await db.hostOperation.create({
+      data: { id: opId, appId: f.app.id, hostId, type: 'worker.start', args: { workerId: f.kit.id, worktree: 'kit', family: 'claude' }, workerId: f.kit.id, issuedBy: 'platform', holdUserId: f.holder.id },
+    });
+    await db.session.update({ where: { id: f.session.id }, data: { launchHostId: hostId, launchOperationId: opId, launchIssuedBy: 'platform' } });
+  };
+  const secondHost = async () => {
+    const orca2 = await f.hostKey('orca2');
+    await f.register(orca2, { workers: [f.kit.id] });
+    return orca2;
+  };
+
+  it('a session launched on orca1: orca2, which also registers Kit, is refused and the session stays open; orca1 ends it', async () => {
+    const orca2 = await secondHost();
+    await launchedOn('orca1');
+    expect(await code(endAgentless({}, orca2)), 'another host ended a session launched on orca1').toBe('HOST_DOES_NOT_RUN_WORKER');
+    expect((await sessionOf()).endedAt).toBeNull();
+    expect(await endAgentless()).toMatchObject({ ended: true });
+  });
+
+  it('entry 1: a worker.end that reached orca2 for a session launched on orca1, reported AGENT_ABSENT, stays FAILED and open', async () => {
+    const orca2 = await secondHost();
+    await launchedOn('orca1');
+    const op = await collectedEnd('orca2', orca2);
+    expect(await reportFailed(op, 'AGENT_ABSENT', orca2), 'orca2\'s proof ended a session running on orca1').toMatchObject({ status: 'failed' });
+    expect((await sessionOf()).endedAt).toBeNull();
+  });
+
+  it('a hand-started session with two registering hosts: neither ends it, unless its client reported the host', async () => {
+    const orca2 = await secondHost();
+    expect(await code(endAgentless({}, orca2))).toBe('HOST_DOES_NOT_RUN_WORKER');
+    expect(await code(endAgentless())).toBe('HOST_DOES_NOT_RUN_WORKER');
+    expect((await sessionOf()).endedAt).toBeNull();
+    await db.session.update({ where: { id: f.session.id }, data: { host: 'orca1' } });
+    expect(await code(endAgentless({}, orca2))).toBe('HOST_DOES_NOT_RUN_WORKER');
+    expect(await endAgentless()).toMatchObject({ ended: true });
+  });
+
+  it('a hand-started session whose only other registering host is lost: the remaining host is the sole one and ends it', async () => {
+    await secondHost();
+    await db.hostRegistration.updateMany({ where: { appId: f.app.id, hostId: 'orca2' }, data: { lostAt: new Date() } });
+    expect(await endAgentless()).toMatchObject({ ended: true });
+  });
+});
+
+describe('the remaining guards (#4294 §10 P3s; blind P3 F1)', () => {
+  it('a soft-deleted session is not the worker\'s: SESSION_NOT_WORKERS, nothing ends', async () => {
+    await db.session.update({ where: { id: f.session.id }, data: { deletedAt: new Date() } });
+    expect(await code(endAgentless())).toBe('SESSION_NOT_WORKERS');
+    expect((await sessionOf()).endedAt).toBeNull();
+  });
+
+  it('a host scope revoked while the call waits for the App anchor: refused APP_KEY_SCOPE_REQUIRED, the session stays open', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let held!: () => void;
+    const holding = new Promise<void>((r) => { held = r; });
+    // A revoker holds the App's anchor exclusively and revokes orca1's scope; the end's re-check runs after it commits.
+    const revoker = db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'app', id: f.app.id }], 'exclusive');
+      await tx.appKeyScope.updateMany({ where: { appKeyId: f.orca1.id, scope: 'host:operate' }, data: { revokedAt: new Date(), revokedByUserId: f.manager.id } });
+      held();
+      await gate;
+    }, { timeout: 20_000 });
+    await holding;
+    const end = endAgentless().then(() => undefined, (e: { extensions?: { code?: string } }) => e.extensions?.code);
+    await new Promise((r) => setTimeout(r, 300));
+    release();
+    await revoker;
+    expect(await end, 'the revocation fence did not re-check the key').toBe('APP_KEY_SCOPE_REQUIRED');
+    expect((await sessionOf()).endedAt).toBeNull();
+  });
+
+  it('a handoff the worker wrote before it exited is reported (handoff: true); the end itself writes none', async () => {
+    const before = await db.node.count({ where: { memoryId: f.kitMemory.id } });
+    await db.node.create({
+      data: { id: generateId(), memoryId: f.kitMemory.id, loc: `${HANDOFFS_PARENT_LOC}:0001`, name: 'Handoff', content: 'state', data: { [HANDOFF_SESSION_KEY]: f.session.id } },
+    });
+    expect(await endAgentless()).toEqual({ sessionId: f.session.id, ended: true, handoff: true });
+    expect(await db.node.count({ where: { memoryId: f.kitMemory.id } })).toBe(before + 1);
   });
 });
 
