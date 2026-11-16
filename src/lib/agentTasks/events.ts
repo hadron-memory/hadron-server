@@ -159,7 +159,10 @@ function payloadJson(e: TaskEventPayload): Prisma.InputJsonObject {
     case 'review.scheduled': return { slots: e.slots };
     case 'pr.frozen': return { head: e.head, pullRequest: e.pullRequest };
     case 'review.seat.assigned': return { slot: e.slot, head: e.head, supersedes: e.supersedes };
-    case 'review.verdict': return { slot: e.slot, head: e.head, verdict: e.verdict, node: e.node, receipt: e.receipt };
+    case 'review.verdict': return {
+      slot: e.slot, head: e.head, verdict: e.verdict, node: e.node, receipt: e.receipt,
+      reviewerFamily: e.reviewerFamily, reviewerModel: e.reviewerModel, modelReportedAt: e.modelReportedAt,
+    };
     case 'pr.ready': return { head: e.head };
     case 'task.edited':
       if (e.fields.some(f => !(TASK_EDIT_FIELDS as readonly string[]).includes(f))) throw new Error('Unsupported task edit field');
