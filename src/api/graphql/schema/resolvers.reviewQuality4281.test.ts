@@ -61,6 +61,8 @@ async function review(r: Review = {}) {
   const parent = r.inBuild ?? build;
   const slot = SLOTS[nextSlot++]!;
   const t = await M.createAgentTask!({}, { input: { parentTaskId: parent.id, title: slot, assignee: { user: holder.id }, source: 'synthetic' } }, ctx(author.id));
+  // A seat binds the build's CURRENT frozen head; re-freezing an earlier head keeps its first-freeze position (#4280).
+  if (r.head) await M.freezePullRequestHead!({}, { taskRef: parent.id, head: r.head }, ctx(author.id));
   await M.assignReviewSeat!({}, { taskRef: t.id, slot, head: r.head ?? H }, ctx(author.id));
   await M.startAgentTask!({}, { taskId: t.id }, ctx(holder.id));
   for (const v of r.verdicts ?? [r]) await verdictEvent((r.inApp ?? app).id, t.id, slot, v);
@@ -384,7 +386,9 @@ describe('#4287: defects missed, from the defect links (#4280; cor:agt:130:05, :
     await review({ inBuild: pr, head: H2, family: 'ada' });
     await link(D(1), H2);
     await link(D(2), H2);
+    // Another PR's defects (one with no head, which would count against every approving review of THAT PR) count nothing here.
     await link(D(3), H, build);
+    await link(D(4), null, build);
     expect((await byFamily()).ada).toMatchObject({ approvingReviews: 1, defectsMissed: 2, defectsMissedPerApprovingReview: 2 });
   });
 
