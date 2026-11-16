@@ -7005,7 +7005,8 @@ model HostKeyUse {
   /// `register` | `collect` | `report` | `availability` | `read` (#1881: the
   /// App's host registrations or host-operations listing, read with the key;
   /// #2931: its host's tickers, `count` the rows returned) |
-  /// `session` (#1969: a refused session write; always carries a refusedCode).
+  /// `session` (#1969: a refused session write, always with a refusedCode; #4292: also
+  /// endAgentlessSession, accepted with refusedCode null and `count` 1 when it ended the session, else 0).
   action      String
   operationId String?  @map("operation_id")
   count       Int?

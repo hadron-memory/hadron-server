@@ -76,7 +76,7 @@ export async function endAgentlessSession(
   }[]>`
     SELECT worker_id AS "workerId", app_id AS "appId", ended_at AS "endedAt", deleted_at AS "deletedAt",
       launch_host_id AS "launchHostId"
-    FROM sessions WHERE id = ${sessionId} FOR UPDATE`;
+    FROM sessions WHERE id = ${sessionId} AND app_id = ${appId} FOR UPDATE`;
   await lockHostSetup(tx, appId, 'shared');
   // Every registration of the App, in id order (pickLiveHost's and fenceHostDecision's lock): the sole-host test below
   // reads them all, so a registration that would add or drop the worker waits for this decision.
