@@ -2312,9 +2312,18 @@ async function queryWorkerActivity(
   scope: Prisma.Sql,
   now: Date,
 ): Promise<Map<string, WorkerActivity>> {
-  const rows = await ctx.db.$queryRaw<
-    { workerId: string; live: boolean; holdsOpen: boolean; lastActiveAt: Date | null; bound: boolean; bindingFamily: string | null; bindingModel: string | null; modelReportedAt: Date | null }[]
-  >(workerActivitySql(scope, now));
+  type Row = { workerId: string; live: boolean; holdsOpen: boolean; lastActiveAt: Date | null; bound: boolean; bindingFamily: string | null; bindingModel: string | null; modelReportedAt: Date | null };
+  // #4273: the per-session usage probe below is estimated per session and so crosses jit_above_cost on any App with a
+  // few thousand sessions, though almost every probe is never executed; JIT then compiled for ~400 ms on a 4 ms plan, and
+  // the stall tick reached this read nine times a pass. The setting is local to the transaction it is made in.
+  const run = async (tx: Pick<Prisma.TransactionClient, '$executeRaw' | '$queryRaw'>): Promise<Row[]> => {
+    await tx.$executeRaw`SELECT set_config('jit', 'off', true)`;
+    return tx.$queryRaw<Row[]>(workerActivitySql(scope, now));
+  };
+  const db = ctx.db as unknown as Prisma.TransactionClient & { $transaction?: unknown };
+  const rows = typeof db.$transaction === 'function'
+    ? await (db as unknown as { $transaction: <T>(f: (tx: Prisma.TransactionClient) => Promise<T>) => Promise<T> }).$transaction((tx) => run(tx))
+    : await run(db);
   return new Map<string, WorkerActivity>(
     rows.map((row) => [
       row.workerId,
@@ -2405,8 +2414,43 @@ export function workerActivitySql(scope: Prisma.Sql, now: Date): Prisma.Sql {
            -- was still driving the worker. Postgres LEAST ignores a null end,
            -- so an open session remains uncapped.
            ), s.ended_at)) AS "lastActiveAt"
-    FROM sessions s
-    JOIN workers w ON w.id = s.worker_id
+    FROM workers w
+    -- #4273: only the sessions that can change an answer. Every open session stays (live, holdsOpen, bound and the binding's
+    -- family, model and report time come from open sessions alone). An ENDED session reaches only lastActiveAt, as
+    -- LEAST(GREATEST(started_at, ...), ended_at), which is at least its own started_at and at most its ended_at; so an
+    -- ended session that ended BEFORE the worker's latest start is beaten by that later session (whose activity is at least
+    -- its own start) and cannot be the maximum. The kept ended sessions are those ending at or after that start, served
+    -- by sessions_worker_ended_idx and sessions_worker_started_idx, so the rows read follow the open and overlapping
+    -- sessions, never the worker's lifetime of them. A session that ended before it started (never written by the
+    -- platform) does not set the latest start. Reading every session made each liveness read, five per stall tick, grow
+    -- with the App's whole session history (QA: 42,000 -> 84,000 rows on doubled history).
+    JOIN LATERAL (
+      SELECT s1.* FROM sessions s1
+      WHERE s1.worker_id = w.id AND s1.deleted_at IS NULL AND s1.ended_at IS NULL
+      UNION ALL
+      -- The ended ones are walked from the newest end backwards, one index probe per step (ORDER BY ... LIMIT 1 on
+      -- sessions_worker_ended_idx), and the walk stops at the first one that ends before the worker's latest start: a bare
+      -- range condition leaves the planner free to read every session of the worker through sessions_worker_id_idx instead.
+      SELECT k.* FROM (
+        WITH RECURSIVE bound AS (
+          SELECT max(x.started_at) AS at FROM sessions x
+          WHERE x.worker_id = w.id AND x.deleted_at IS NULL AND (x.ended_at IS NULL OR x.ended_at >= x.started_at)
+        ), walk AS (
+          (SELECT t.* FROM sessions t
+           WHERE t.worker_id = w.id AND t.deleted_at IS NULL AND t.ended_at IS NOT NULL
+           ORDER BY t.ended_at DESC, t.id DESC LIMIT 1)
+          UNION ALL
+          SELECT n.* FROM walk, bound, LATERAL (
+            SELECT t.* FROM sessions t
+            WHERE t.worker_id = w.id AND t.deleted_at IS NULL AND t.ended_at IS NOT NULL
+              AND (t.ended_at, t.id) < (walk.ended_at, walk.id)
+            ORDER BY t.ended_at DESC, t.id DESC LIMIT 1
+          ) n
+          WHERE walk.ended_at >= bound.at
+        )
+        SELECT walk.* FROM walk, bound WHERE walk.ended_at >= bound.at
+      ) k
+    ) s ON true
     LEFT JOIN LATERAL (
       -- #1952: the "+ interval '0'" is load-bearing. A bare max(created_at)
       -- lets the planner serve the max by walking usage_events_created_at_idx
