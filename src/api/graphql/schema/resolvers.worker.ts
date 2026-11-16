@@ -2423,10 +2423,42 @@ export function workerActivitySql(scope: Prisma.Sql, now: Date): Prisma.Sql {
       -- #1903: served by the partial usage_events_session_activity_idx
       -- (post-push.sql).
       WHERE e.session_id = s.id AND e.counts_as_activity
+        -- #4271: a session that ended, was not auto-expired and whose updated_at is at or past its end is already
+        -- capped by its own stamps: LEAST(GREATEST(started_at, updated_at, x), ended_at) = ended_at for any x, and
+        -- live / holdsOpen / bound need an open row. Its usage events cannot change any column, so they are not read
+        -- (a condition on the outer row only: a one-time filter, no scan). Reading them made every roster grow with
+        -- the App's whole usage history.
+        -- COALESCE: a NULL updated_at (or end) proves nothing closed, so the session's events are read (#4272 QA P2:
+        -- without it the comparison is NULL, NOT NULL is NULL, and the WHERE dropped them).
+        AND NOT COALESCE(s.ended_at IS NOT NULL AND s.auto_expired_at IS NULL AND s.updated_at >= s.ended_at, false)
     ) ue ON true
     WHERE ${scope} AND s.deleted_at IS NULL
     GROUP BY s.worker_id
   `;
+}
+
+/**
+ * #4271: ONE App-wide activity fold shared by every liveness read inside one read-only roster pass. The roster reached
+ * this aggregate four times per call (work states, availability and both stall-input passes), each a full fold. Shared
+ * only inside one TRANSACTION (one snapshot: the answer cannot change under it), only at the pass's own instant, and
+ * only for workers of that App; any other read falls through to its own query. Keyed by the transaction client, so
+ * concurrent requests on the shared client never see it.
+ */
+const sharedActivity = new WeakMap<object, { appId: string; at: number; workerIds: Set<string>; fold: Promise<Map<string, WorkerActivity>> }>();
+
+/** Run `read` with one shared activity fold of `appId` at `now` (see {@link sharedActivity}); `db` must be a transaction. */
+export async function withSharedWorkerActivity<T>(db: Prisma.TransactionClient, appId: string, now: Date, read: () => Promise<T>): Promise<T> {
+  // A transaction client has no $transaction of its own; on the shared client the memo would cross requests.
+  if (sharedActivity.has(db) || typeof (db as { $transaction?: unknown }).$transaction === 'function') return read();
+  const workers = await db.worker.findMany({ where: { appId }, select: { id: true } });
+  const fold = queryWorkerActivity({ db } as unknown as Context, Prisma.sql`w.app_id = ${appId}`, now);
+  fold.catch(() => undefined); // awaited by its readers; never an unhandled rejection
+  sharedActivity.set(db, { appId, at: now.getTime(), workerIds: new Set(workers.map((w) => w.id)), fold });
+  try {
+    return await read();
+  } finally {
+    sharedActivity.delete(db);
+  }
 }
 
 /** One aggregate query for the bounded #1344 page, never one per App/worker. */
@@ -2436,6 +2468,11 @@ export async function loadWorkersActivity(
   now = new Date(),
 ): Promise<Map<string, WorkerActivity>> {
   if (workerIds.length === 0) return new Map();
+  const shared = sharedActivity.get(ctx.db);
+  if (shared && shared.at === now.getTime() && workerIds.every((id) => shared.workerIds.has(id))) {
+    const fold = await shared.fold;
+    return new Map(workerIds.flatMap((id) => (fold.has(id) ? [[id, fold.get(id)!] as const] : [])));
+  }
   return queryWorkerActivity(
     ctx,
     Prisma.sql`w.id IN (${Prisma.join(workerIds)})`,
@@ -2474,7 +2511,10 @@ export async function loadAppWorkerActivity(
   const cached = cache?.get(appId);
   if (cached) return cached;
 
-  const pending = queryWorkerActivity(ctx, Prisma.sql`w.app_id = ${appId}`, now);
+  const shared = sharedActivity.get(ctx.db);
+  const pending = shared && shared.appId === appId && shared.at === now.getTime()
+    ? shared.fold.then((fold) => new Map(fold))
+    : queryWorkerActivity(ctx, Prisma.sql`w.app_id = ${appId}`, now);
 
   cache?.set(appId, pending);
   return pending;

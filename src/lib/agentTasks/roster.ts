@@ -37,6 +37,7 @@ import { tierOf, type ModelTier } from './family.js';
 import type { AvailabilityRecord, WorkerAvailabilityView } from './availability.js';
 import { loadWorkerWorkStates, type WorkerWorkState } from './matcher.js';
 import { alarmEpisodeKey, endedAlarmEpisodes, loadStallInputs, unreactedChildren } from './stall.js';
+import { withSharedWorkerActivity } from '../../api/graphql/schema/resolvers.worker.js';
 
 export const ROSTER_STATES = [
   'YOUR_MOVE', 'UNAVAILABLE', 'WAITING', 'WORKING', 'ASSIGNED_NOT_STARTED', 'AVAILABLE', 'NO_FAMILY', 'NOT_LAUNCHABLE',
@@ -144,6 +145,11 @@ function ownUnavailable(w: WorkerWorkState): { reason: string | null; until: Dat
 
 /** The roster of one App's workers that are not retired, by name, at `now`. */
 export async function loadTeamRoster(db: Db, appId: string, now: Date): Promise<RosterEntry[]> {
+  // #4271: inside the roster's read transaction every liveness read shares one App-wide fold at `now`.
+  return withSharedWorkerActivity(db as Prisma.TransactionClient, appId, now, () => readTeamRoster(db, appId, now));
+}
+
+async function readTeamRoster(db: Db, appId: string, now: Date): Promise<RosterEntry[]> {
   const states = await loadWorkerWorkStates(db, appId, now);
   if (states.length === 0) return [];
   const [inputs, woken, structure] = await Promise.all([
