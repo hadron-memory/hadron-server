@@ -119,6 +119,34 @@ describe('acceptance 1: a manager sets the profile; the host reads exactly those
   });
 });
 
+describe('#4275: replace writes the whole placement: an omitted profile field is cleared, as hadron-cli documents (cli#2176, #2184)', () => {
+  const FULL = { model: 'claude-opus-5-5', effort: 'high', accountProfile: 'worker' } as const;
+  const OTHER = { model: 'claude-sonnet-5-5', effort: 'low', accountProfile: 'codex-main' } as const;
+  // The placement's own fields only, so a test can leave a profile field out of the input altogether.
+  const place = (profile: Record<string, unknown>, replace = false) =>
+    M.assignHostWorker({}, { input: { appRef: app.id, hostId: 'orca1', worker: 'Kit', workdir: 'hadron-server/kit', family: 'claude', ...profile, ...(replace ? { replace: true } : {}) } }, ctx(manager.id));
+  const stored = async () => PROFILE(await db.hostWorkerAssignment.findFirstOrThrow({ where: { appId: app.id } }));
+
+  for (const field of ['model', 'effort', 'accountProfile'] as const) {
+    const rest = Object.fromEntries(Object.entries(FULL).filter(([k]) => k !== field));
+    it(`${field} OMITTED on replace is cleared; the fields given keep their values`, async () => {
+      await place(FULL);
+      await place(rest, true);
+      expect(await stored(), `an omitted ${field} survived a replace`).toEqual({ family: 'claude', ...FULL, [field]: null });
+    });
+    it(`${field} given as an explicit null on replace is cleared`, async () => {
+      await place(FULL);
+      await place({ ...FULL, [field]: null }, true);
+      expect(await stored()).toEqual({ family: 'claude', ...FULL, [field]: null });
+    });
+    it(`${field} given explicitly on replace keeps the value given (control)`, async () => {
+      await place(FULL);
+      await place({ ...FULL, [field]: OTHER[field] }, true);
+      expect(await stored()).toEqual({ family: 'claude', ...FULL, [field]: OTHER[field] });
+    });
+  }
+});
+
 describe('acceptance 2: a value that is not a token, or an unknown family, is BAD_LAUNCHER_PROFILE and nothing is stored', () => {
   const BAD = ['a b', 'a/b', '../x', '$(id)', '`id`', 'a;b', 'a|b', 'a&b', "a'b", 'a"b', '-rf', '--dangerously', 'a>b', '', 'x'.repeat(129)];
   it('model, effort or accountProfile with a space, slash or shell character', async () => {
