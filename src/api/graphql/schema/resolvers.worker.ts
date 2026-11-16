@@ -2440,9 +2440,16 @@ export function workerActivitySql(scope: Prisma.Sql, now: Date): Prisma.Sql {
 /**
  * #4271: ONE App-wide activity fold shared by every liveness read inside one read-only roster pass. The roster reached
  * this aggregate four times per call (work states, availability and both stall-input passes), each a full fold. Shared
- * only inside one TRANSACTION (one snapshot: the answer cannot change under it), only at the pass's own instant, and
- * only for workers of that App; any other read falls through to its own query. Keyed by the transaction client, so
- * concurrent requests on the shared client never see it.
+ * only inside one TRANSACTION, only at the pass's own instant, and only for workers of that App; any other read falls
+ * through to its own query (each boundary pinned in sharedWorkerActivity4276.test.ts). Keyed by the transaction
+ * client, so concurrent requests on the shared client never see it.
+ *
+ * What one fold means depends on the transaction's isolation (#4276, Clark's #4272 blind note). Both callers of
+ * `loadTeamRoster` read at RepeatableRead: the person path (`withRosterAppRead`) and the run-tool path
+ * (`teamSnapshotTools.ts` through `inRunTeamReadTx`, which opens `inAnchoredAppTx` with `coherentRunRead`). There the
+ * transaction is one snapshot, so the shared answer is the one every reader would have computed. A caller at Read
+ * Committed (each statement its own snapshot) would get ONE statement's answer for every reader instead: no less
+ * consistent than separate folds, but not a transaction-wide snapshot.
  */
 const sharedActivity = new WeakMap<object, { appId: string; at: number; workerIds: Set<string>; fold: Promise<Map<string, WorkerActivity>> }>();
 
