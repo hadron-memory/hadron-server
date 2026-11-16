@@ -150,3 +150,58 @@ describe('#4273 — known limit: a pass that raises N new alarms is linear in N,
     }
   });
 });
+
+describe('#4273 — acceptance 4(c): the rows a settled pass reads do not follow lifetime history', () => {
+  /** Rows of `table` the transaction has read so far (its own counters; pg_stat_xact_*). */
+  async function rowsRead(tx: { $queryRawUnsafe: PrismaClient['$queryRawUnsafe'] }, table: string): Promise<number> {
+    const [t] = await tx.$queryRawUnsafe<{ n: bigint }[]>(`SELECT COALESCE(seq_tup_read, 0) + COALESCE(idx_tup_fetch, 0) AS n FROM pg_stat_xact_user_tables WHERE relname = '${table}'`);
+    return Number(t?.n ?? 0);
+  }
+
+  async function seedHistory(from: number, finished: number) {
+    const to = from + finished - 1;
+    // Finished tasks of Liam, each with 20 progress events, and a long-ended session with usage events: all history.
+    await db.$executeRaw`INSERT INTO agent_tasks (id, app_id, title, owner_worker_id, assignee_worker_id, assigned_at, started_at, finished_at, status, result_outcome, close_session_when_done, task_number, handle, updated_at, created_at)
+      SELECT md5('h' || g), ${appId}, 'H', ${ada}, ${liam}, now() - interval '30 days', now() - interval '30 days', now() - interval '29 days', 'finished', 'succeeded', false, 100000 + g, 'AT' || (100000 + g), now() - interval '29 days', now() - interval '30 days'
+      FROM generate_series(${from}, ${to}) g`;
+    await db.$executeRaw`INSERT INTO agent_team_events (id, app_id, type, task_id, actor_worker_id, payload, created_at)
+      SELECT md5('he' || g || '.' || k), ${appId}, 'task.progress', md5('h' || g), ${liam}, '{}'::jsonb, now() - interval '29 days'
+      FROM generate_series(${from}, ${to}) g, generate_series(1, 20) k`;
+    // Each finished task also had a stall alarm in its day: history of the very type the raised-keys read looks for.
+    await db.$executeRaw`INSERT INTO agent_team_events (id, app_id, type, task_id, subject_worker_id, severity, chain, payload, created_at, episode_start)
+      SELECT md5('ha' || g), ${appId}, 'stall.not-started', md5('h' || g), ${liam}, 'alarm', '[]'::jsonb, '{}'::jsonb, now() - interval '30 days', now() - interval '30 days'
+      FROM generate_series(${from}, ${to}) g`;
+    const sid = generateId();
+    await db.$executeRaw`INSERT INTO sessions (id, app_id, worker_id, started_at, updated_at, ended_at) VALUES (${sid}, ${appId}, ${liam}, now() - interval '20 days', now() - interval '20 days' + interval '1 hour', now() - interval '20 days' + interval '1 hour')`;
+    await db.$executeRaw`INSERT INTO usage_events (id, type, session_id, counts_as_activity, created_at)
+      SELECT md5('u' || ${sid} || g), 'llm.call', ${sid}, true, now() - interval '20 days' + (g || ' seconds')::interval FROM generate_series(1, ${finished * 5}) g`;
+    await db.$executeRaw`ANALYZE agent_tasks`;
+    await db.$executeRaw`ANALYZE agent_team_events`;
+    await db.$executeRaw`ANALYZE usage_events`;
+  }
+
+  async function settledPassReads(): Promise<{ events: number; usage: number; tasks: number }> {
+    return db.$transaction(async (tx) => {
+      await tx.$executeRaw`SET LOCAL enable_indexonlyscan = off`;
+      await evaluateStalls(tx as unknown as PrismaClient, new Date());
+      return { events: await rowsRead(tx, 'agent_team_events'), usage: await rowsRead(tx, 'usage_events'), tasks: await rowsRead(tx, 'agent_tasks') };
+    });
+  }
+
+  it('a settled pass reads the same rows with 50 finished tasks of history as with 1,500 (bounded by the open work, not the history)', async () => {
+    for (let i = 0; i < 6; i++) await pending('10:00', i % 2 ? anne : liam);
+    await evaluateStalls(db, new Date());
+    await seedHistory(1, 50);
+    const small = await settledPassReads();
+    await seedHistory(51, 1_450); // 1,500 finished tasks in all
+    const large = await settledPassReads();
+    // Never more than the small history read (the counters of a tiny table move with the plan chosen, so not equality), and
+    // far below the history's own size (7,500 usage events, 30,000 task events).
+    expect(large.usage).toBeLessThanOrEqual(small.usage + 10);
+    expect(large.events).toBeLessThanOrEqual(small.events + 10);
+    expect(large.usage).toBeLessThan(100);
+    // The tasks table is read through the open-status index: history adds a bounded number of rows, never one per finished task.
+    expect(large.tasks).toBeLessThan(small.tasks + 100);
+    expect(large.events).toBeLessThan(200);
+  }, 120_000);
+});
