@@ -5,6 +5,7 @@
  * read. The answers would often LOOK the same, so the pins count the folds actually run (the #2278 count pin's hook).
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Prisma } from '../../../generated/prisma/index.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -23,7 +24,6 @@ const traced = db.$extends({ query: { $allOperations: async ({ args, operation, 
   if (operation === '$queryRaw' && JSON.stringify(args).includes('bindingModel')) folds++;
   return query(args);
 } } });
-type Traced = typeof traced;
 
 let app: { id: string };
 let other: { id: string };
@@ -34,8 +34,9 @@ const later = new Date(now.getTime() + 60_000);
 
 const read = (c: unknown, ids: string[], at = now) => loadWorkersActivity({ db: c } as unknown as Context, ids, at);
 /** One transaction on the traced client; the fold count starts at zero inside it. */
-const inTx = <T>(fn: (tx: Parameters<Parameters<Traced['$transaction']>[0]>[0]) => Promise<T>) =>
-  traced.$transaction(async (tx) => { folds = 0; return fn(tx); });
+// The extended client's transaction is a TransactionClient at runtime; its static type is the extension's.
+const inTx = <T>(fn: (tx: Prisma.TransactionClient) => Promise<T>) =>
+  traced.$transaction(async (tx) => { folds = 0; return fn(tx as unknown as Prisma.TransactionClient); });
 
 beforeEach(async () => {
   await cleanDb(db);
