@@ -116,6 +116,24 @@ function assignee(actor: TaskActor, task: TaskRow) {
   if (!isAssignee(actor, task)) throw notAssignee(actor, 'Only the task\'s assignee performs this command.');
 }
 
+/**
+ * #4235 S12a (cor:agt:130:02): which model reviewed, copied from the session the reviewing WORKER records through. The
+ * request's own bound session when it is an open session of that worker, else the worker's binding (its newest open
+ * session, the matcher's ordering). The values are the session's self-report (`family`, `llmModel`,
+ * `modelReportedAt`), never an argument of the verdict call, and null wherever nothing is recorded: a person (no
+ * worker session), no open session, or a null column. Never derived, never 'unknown'. Readiness does not read them.
+ */
+async function reviewerModelSnapshot(tx: Prisma.TransactionClient, actor: TaskActor, sessionId: string | undefined) {
+  const none = { reviewerFamily: null, reviewerModel: null, modelReportedAt: null };
+  if (actor.kind !== 'worker') return none;
+  const where = { workerId: actor.workerId, endedAt: null, deletedAt: null };
+  const select = { family: true, llmModel: true, modelReportedAt: true } as const;
+  const session = (sessionId ? await tx.session.findFirst({ where: { ...where, id: sessionId }, select }) : null)
+    ?? await tx.session.findFirst({ where, orderBy: [{ startedAt: 'desc' }, { id: 'desc' }], select });
+  if (!session) return none;
+  return { reviewerFamily: session.family || null, reviewerModel: session.llmModel || null, modelReportedAt: session.modelReportedAt?.toISOString() ?? null };
+}
+
 /** Mirrors obey the ordinary size/schema constraints, but are never consulted as protocol facts. */
 async function record(tx: Prisma.TransactionClient, c: Context, task: TaskRow, event: PrProtocolEvent, mirror: Record<string, Prisma.InputJsonValue | null>) {
   const properties = normalizeTaskProperties({ ...(task.properties as Record<string, unknown> | null ?? {}), ...mirror });
@@ -286,7 +304,8 @@ export const prProtocolMutations = {
       }
       if (!(REVIEW_VERDICTS as readonly string[]).includes(args.verdict)) throw badInput('Unknown review verdict.');
       const node = optionalMetadata(args.node, 'node'), receipt = optionalMetadata(args.receipt, 'receipt');
-      await record(tx, c, row, { type: 'review.verdict', slot: assigned.slot, head, verdict: args.verdict, node, receipt }, { 'review.verdict': args.verdict, 'review.node': node, 'review.receipt': receipt });
+      const reviewer = await reviewerModelSnapshot(tx, actor, c.sessionId);
+      await record(tx, c, row, { type: 'review.verdict', slot: assigned.slot, head, verdict: args.verdict, node, receipt, ...reviewer }, { 'review.verdict': args.verdict, 'review.node': node, 'review.receipt': receipt });
     }, { taskGraph: 'exclusive' });
     return { task, action: await action(ctx, task.appId, 'review.verdict') };
   },
