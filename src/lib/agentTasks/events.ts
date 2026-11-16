@@ -72,7 +72,9 @@ export const ASSIGNED_EVENT_TYPES = ['task.assigned', 'task.reassigned', 'assign
 export const ASSIGNEE_CLEARED_EVENT_TYPES = ['task.handed-back'] as const satisfies readonly TaskEventPayload['type'][];
 
 /** Passive history must be excluded from EVERY later-event/activity predicate when a kind is added here. */
-export const PASSIVE_EVENT_TYPES = ['task.warning', 'task.edited', 'task.properties-changed', 'task.external-id-released'] as const;
+// #4286: a defect link (review.defect-linked) is a QA fact about the task, not its assignee acting on it, so it never
+// clears an assignment or child-end wake (taskWakes.ts).
+export const PASSIVE_EVENT_TYPES = ['task.warning', 'task.edited', 'task.properties-changed', 'task.external-id-released', 'review.defect-linked'] as const;
 /** #2609: only facts already readable by every team-event reader. Assignee state and future codes are excluded. */
 export const RECORDED_TASK_WARNING_CODES = ['task.create.no-source', 'task.finish.open-children'] as const;
 export type RecordedTaskWarningCode = (typeof RECORDED_TASK_WARNING_CODES)[number];
