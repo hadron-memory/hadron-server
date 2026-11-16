@@ -2428,7 +2428,9 @@ export function workerActivitySql(scope: Prisma.Sql, now: Date): Prisma.Sql {
         -- live / holdsOpen / bound need an open row. Its usage events cannot change any column, so they are not read
         -- (a condition on the outer row only: a one-time filter, no scan). Reading them made every roster grow with
         -- the App's whole usage history.
-        AND NOT (s.ended_at IS NOT NULL AND s.auto_expired_at IS NULL AND s.updated_at >= s.ended_at)
+        -- COALESCE: a NULL updated_at (or end) proves nothing closed, so the session's events are read (#4272 QA P2:
+        -- without it the comparison is NULL, NOT NULL is NULL, and the WHERE dropped them).
+        AND NOT COALESCE(s.ended_at IS NOT NULL AND s.auto_expired_at IS NULL AND s.updated_at >= s.ended_at, false)
     ) ue ON true
     WHERE ${scope} AND s.deleted_at IS NULL
     GROUP BY s.worker_id
