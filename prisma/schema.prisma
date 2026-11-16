@@ -195,6 +195,20 @@ enum AgentLifecycle {
   SHORT_LIVED
 }
 
+/// #4291 (S14 of #4229; decision record run-settings-are-not-worker-identity, settled A) — the generic effort scale of a
+/// run. LOW..MAX are requests the launcher maps to the family's own values (hadron-cli#2199); UNSET is the family's
+/// default. NOT_APPLICABLE is REPORT-ONLY: a session whose family has no effort control records it, and so may the
+/// worker's last-used record; a task never carries it, and a start that falls back to it sends UNSET.
+enum EffortLevel {
+  LOW
+  MEDIUM
+  HIGH
+  XHIGH
+  MAX
+  UNSET
+  NOT_APPLICABLE
+}
+
 /// #4224 (S3 of #4229) — the App's sweep switch. OFF (default): the host sweep acts on no worker and every desired-state
 /// row says SWEEP_OFF. OBSERVE: the sweep compares and reports. APPLY: it also repairs.
 enum SweepMode {
@@ -1851,6 +1865,9 @@ model Session {
   /// column: no historical backfill. Not `updated_at`, which unrelated writes
   /// move. Describes a self-report, not verified detection.
   modelReportedAt   DateTime?         @map("model_reported_at")
+  /// #4291 — the effort this session runs at, as the launcher applied it and the session reported it (start, resume or
+  /// updateSession). Null until reported; NOT_APPLICABLE for a family with no effort control. A report, never a control.
+  effort            EffortLevel?
   /// #1709 (cor:agt:070:08; Holger via Vera #10773) — a host-launched session:
   /// the host that started it, the `worker.start` operation, the task it was
   /// launched for (none for a manager's start without one), and who issued the
@@ -4111,6 +4128,13 @@ model Worker {
   /// a record of who acted, like `retiredBy`.
   leaveAloneBy     String?   @map("leave_alone_by")
   leaveAloneAt     DateTime? @map("leave_alone_at")
+  /// #4291 (decisions 2 and 8) — the worker's record of its run settings: the family, model and effort its session last
+  /// reported, one value each and no history. A REPORT, not a control: written only from a session's bind or report
+  /// (src/lib/agentTasks/runSettings.ts `recordRunSettings`), never cleared by a null, kept when the worker unbinds. A
+  /// start reads it after the task's own setting (cor:agt:070:08); an unbound worker is matched on it (cor:agt:060:04).
+  lastUsedFamily   String?      @map("last_used_family")
+  lastUsedModel    String?      @map("last_used_model")
+  lastUsedEffort   EffortLevel? @map("last_used_effort")
 
   app                  App                       @relation(fields: [appId], references: [id], onDelete: Cascade)
   /// SetNull: a worker row is never hard-deleted in normal operation, but an
@@ -6236,6 +6260,18 @@ model AgentTask {
   /// Set by whoever assigns; T6 acts on it (cor:agt:050:10). False unless the assigner asks (R182, #2249): the
   /// default only reaches a raw insert, since every create path writes the resolved value.
   closeSessionWhenDone Boolean   @default(false) @map("close_session_when_done")
+  /// #4291 (decision 5, settled B) — the task's own run settings, each optional: a family, an exact model OR a generic
+  /// tier (high, mid, low), and an effort (never NOT_APPLICABLE). What a start for this task launches, before the
+  /// worker's record; not a matching requirement. Validated at creation (src/lib/agentTasks/runSettings.ts).
+  runFamily            String?      @map("run_family")
+  runModel             String?      @map("run_model")
+  runTier              String?      @map("run_tier")
+  runEffort            EffortLevel? @map("run_effort")
+  /// #4291 — the settings the run actually used: the assignee's newest open session's, read when the task was started.
+  /// Null until started, for a person, or when that session reported none. Shown beside the task's own settings.
+  appliedFamily        String?      @map("applied_family")
+  appliedModel         String?      @map("applied_model")
+  appliedEffort        EffortLevel? @map("applied_effort")
   /// The latest assignment, by hand or by the matcher, in the #1610 actor shape.
   assignedAt           DateTime? @map("assigned_at")
   assignedBy           String?   @map("assigned_by")

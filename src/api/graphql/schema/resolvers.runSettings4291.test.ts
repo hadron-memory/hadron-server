@@ -14,7 +14,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
-import { matchQueuedTasks } from '../../../lib/agentTasks/matcher.js';
+import { launchedAs, loadWorkerWorkStates, matchQueuedTasks } from '../../../lib/agentTasks/matcher.js';
 import { startDesiredWorkers } from '../../../lib/desiredState/desiredStart.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
@@ -161,6 +161,13 @@ describe('the worker record: written from what the session reports, never cleare
     expect(r.lastUsed).toEqual({ family: 'claude', model: 'gpt-6.1', effort: 'MAX' });
   });
 
+  it('a model nothing classifies reports no family: the record keeps the family it had', async () => {
+    await setRecord(kit, { family: 'codex', model: 'gpt-6.1', effort: null });
+    const s = await bind(kit, { llmModel: 'mystery-1' });
+    expect(((await db.session.findUniqueOrThrow({ where: { id: s.id } })) as any).family).toBeNull();
+    expect(await recordOf(kit)).toEqual({ family: 'codex', model: 'mystery-1', effort: null });
+  });
+
   it('a report on an ENDED session does not move the record: the record follows the running session', async () => {
     const s = await bind(kit, { llmModel: 'claude-sonnet-5-5' });
     await M.endSession({}, { id: s.id }, ctx(bo.id));
@@ -176,6 +183,14 @@ describe('the worker record: written from what the session reports, never cleare
     await M.endSession({}, { id: s.id }, ctx(bo.id));
     await assignTo(sam);
     expect(await startArgs(sam)).toEqual([expect.objectContaining({ family: 'glm', model: 'glm-4.6', effort: 'UNSET' })]);
+  });
+
+  it('an effort outside the scale is refused before anything is written', async () => {
+    const s = await bind(kit, { llmModel: 'claude-sonnet-5-5', effort: 'LOW' });
+    expect(await refusal(M.updateSession({}, { id: s.id, llmModel: 'gpt-6.1', effort: 'TURBO' }, ctx(bo.id)))).toMatchObject({ code: 'BAD_USER_INPUT' });
+    expect(await refusal(bind(sam, { effort: 'TURBO' }))).toMatchObject({ code: 'BAD_USER_INPUT' });
+    expect(await recordOf(kit)).toEqual({ family: 'claude', model: 'claude-sonnet-5-5', effort: 'LOW' });
+    expect(await db.session.count({ where: { workerId: sam.id } })).toBe(0);
   });
 
   it('a worker that never reported has an empty record: the roster shows a null effort', async () => {
@@ -328,6 +343,21 @@ describe('a run setting is not a requirement for a worker that is already runnin
     }
   });
 
+  it('a hand-back clears the applied settings: they were that run\'s, not the next one\'s', async () => {
+    const s = await bind(sam, { llmModel: 'claude-sonnet-5-5' });
+    const t = await assignTo(sam, { family: 'codex' });
+    const asSam = <R>(fn: (c: Context) => Promise<R>) => runAsActor({ workerId: sam.id, agentId: shortAgent }, () => fn({ ...ctx(bo.id), sessionId: s.id } as Context));
+    await asSam((c) => M.startAgentTask({}, { taskId: t.id }, c));
+    expect(T.appliedRunSettings(await db.agentTask.findUniqueOrThrow({ where: { id: t.id } }))).toMatchObject({ family: 'claude' });
+    await asSam((c) => M.handBackAgentTask({}, { taskRef: t.id, reason: { code: 'CANNOT_DO', text: 'not mine' } }, c));
+    const row = await db.agentTask.findUniqueOrThrow({ where: { id: t.id } });
+    expect(row.status).toBe('pending');
+    // The stored values, not only the read: a later start by a worker with no open session stamps nothing over them.
+    expect({ family: (row as any).appliedFamily, model: (row as any).appliedModel, effort: (row as any).appliedEffort }).toEqual({ family: null, model: null, effort: null });
+    expect(T.appliedRunSettings(row)).toBeNull();
+    expect(T.runSettings(row)).toMatchObject({ family: 'codex' });
+  });
+
   it('a task that has not started shows no applied settings', async () => {
     const t = await queue({ family: 'codex' }, {}, 'nobody');
     expect(T.appliedRunSettings(await db.agentTask.findUniqueOrThrow({ where: { id: t.id } }))).toBeNull();
@@ -341,6 +371,23 @@ describe('a run setting is not a requirement for a worker that is already runnin
     const t = await queue({ family: 'codex' });
     await match();
     expect(await assigneeOf(t.id)).toBe(sam.id);
+  });
+
+  it('a bound claude worker is NOT matched to familyIn [codex] because the task also overrides the family to codex: it is judged on its running session', async () => {
+    await bind(sam, { llmModel: 'claude-sonnet-5-5' });
+    const t = await queue({ family: 'codex' }, { familyIn: ['codex'] });
+    await match();
+    expect(await assigneeOf(t.id)).toBeNull();
+    // The same through the single-shot match, which decides from the same view.
+    const now = await M.createAgentTask({}, { input: { appRef: app.id, title: 'Build', match: true, requirements: { role: 'builder', familyIn: ['codex'] }, runSettings: { family: 'codex' } } }, ctx(admin.id));
+    expect(await assigneeOf(now.id)).toBeNull();
+  });
+
+  it('a bound low-tier worker is NOT matched to minTier mid because the task overrides the tier to high', async () => {
+    await bind(sam, { llmModel: 'claude-haiku-5-5' });
+    const t = await queue({ tier: 'high' }, { minTier: 'mid' });
+    await match();
+    expect(await assigneeOf(t.id)).toBeNull();
   });
 });
 
@@ -369,6 +416,13 @@ describe('the matcher: an unbound short-lived worker is judged on what the launc
     expect((await startArgs(sam))[0]).toMatchObject({ family: 'claude', tier: 'high' });
   });
 
+  it('the single-shot match (match: true) judges the same launch: record codex, familyIn [claude], override claude is assigned and started as claude', async () => {
+    await setRecord(sam, { family: 'codex', model: 'gpt-6.1', effort: null });
+    const t = await M.createAgentTask({}, { input: { appRef: app.id, title: 'Build', match: true, requirements: { role: 'builder', familyIn: ['claude'] }, runSettings: { family: 'claude' } } }, ctx(admin.id));
+    expect(await assigneeOf(t.id)).toBe(sam.id);
+    expect((await startArgs(sam))[0]).toMatchObject({ family: 'claude', taskId: t.id });
+  });
+
   it('an unbound worker is matched on its record, not on the family its host registered (060:04)', async () => {
     await setRecord(sam, { family: 'codex', model: 'gpt-6.1', effort: null });
     const claudeOnly = await queue(null, { familyIn: ['claude'] });
@@ -383,6 +437,21 @@ describe('the matcher: an unbound short-lived worker is judged on what the launc
     const t = await queue({ family: 'claude' }, { familyIn: ['claude'] }, 'coordinator');
     await match();
     expect(await assigneeOf(t.id)).toBeNull();
+  });
+
+  it('the pass\'s own view (which the stop holds and the skip reasons read without a re-check): only an unbound SHORT_LIVED worker is one a launch sets up, and an unavailable override family leaves it not free', async () => {
+    await setRecord(sam, { family: 'codex', model: 'gpt-6.1', effort: null });
+    await setRecord(kit, { family: 'codex', model: 'gpt-6.1', effort: null });
+    const states = await loadWorkerWorkStates(db, app.id, new Date(), { bySession: true });
+    const [k, s] = [states.find((w) => w.id === kit.id)!, states.find((w) => w.id === sam.id)!];
+    expect({ kit: k.launchSets, sam: s.launchSets }).toEqual({ kit: false, sam: true });
+    const run = { family: 'claude', model: null, tier: null, effort: null };
+    expect(launchedAs(s, run, () => true)).toMatchObject({ families: ['claude'], freeFamilies: ['claude'], free: true });
+    expect(launchedAs(s, run, () => false)).toMatchObject({ families: ['claude'], freeFamilies: [], free: false });
+    expect(launchedAs(k, run, () => true)).toBe(k);
+    await bind(sam, { llmModel: 'claude-sonnet-5-5' });
+    const bound = (await loadWorkerWorkStates(db, app.id, new Date(), { bySession: true })).find((w) => w.id === sam.id)!;
+    expect(bound.launchSets).toBe(false);
   });
 
   it('an override family the App has marked unavailable keeps the worker out', async () => {

@@ -85,6 +85,9 @@ import { taskListDateTime } from '../../../lib/agentTasks/listDateTime.js';
 // APP_NOT_FOUND (#1713 review, Rook P3-1; the resolvePilotApp posture).
 
 import { normalizeFamily } from '../../../lib/agentTasks/family.js';
+import {
+  checkRunSettingsAgainst, RunSettingsError, stampAppliedRunSettings, taskRunSettingsOf, validateTaskRunSettings, type TaskRunSettings,
+} from '../../../lib/agentTasks/runSettings.js';
 import { GraphQLError } from 'graphql';
 import { Prisma, type PrismaClient } from '../../../generated/prisma/index.js';
 import { tickBatch } from './tickBatch.js';
@@ -200,6 +203,24 @@ export const taskNotFound = notFound;
 /** #2664: the longest `text` filter, after trimming. */
 const TASK_TEXT_FILTER_MAX = 200;
 const badInput = (message: string): GraphQLError => taskError('BAD_USER_INPUT', message);
+/**
+ * #4291 (cor:agt:050:01, Proposed): a task's run settings refused by their shape or against the task's own requirements.
+ * One code, with the closed `reason` (src/lib/agentTasks/runSettings.ts RUN_SETTINGS_REFUSALS); the refusal depends only
+ * on the caller's own input, and nothing is written.
+ */
+function runSettingsChecked<T>(check: () => T): T {
+  try {
+    return check();
+  } catch (e) {
+    if (e instanceof RunSettingsError) throw taskError('TASK_RUN_SETTINGS_INVALID', e.message, { reason: e.reason });
+    throw e;
+  }
+}
+/** The start's last step, in its transaction: stamp the settings the run uses (#4291) and return the row as it now is. */
+async function startedWithAppliedSettings(tx: Prisma.TransactionClient, taskId: string): Promise<TaskRow> {
+  await stampAppliedRunSettings(tx, taskId);
+  return tx.agentTask.findUniqueOrThrow({ where: { id: taskId } });
+}
 const forbidden = (message = 'You are not a participant of this App.'): GraphQLError =>
   taskError('FORBIDDEN', message);
 
@@ -1353,6 +1374,8 @@ type CreateInput = {
   owner?: PartyInput;
   assignee?: PartyInput;
   requirements?: RequirementsInput | null;
+  /** #4291 (cor:agt:050:01): the task's own run settings; validated by `validateTaskRunSettings`. */
+  runSettings?: unknown;
   startBy?: unknown;
   /** #2648 (cor:agt:050:14): the finish-by deadline; exempts the task from every stall window. */
   finishBy?: unknown;
@@ -1378,6 +1401,8 @@ async function insertTask(
     externalId?: string | null;
     tags: string[]; references?: TaskReference[]; startBy: Date | null; finishBy?: Date | null; closeSessionWhenDone: boolean; priority?: number;
     requirements: Prisma.InputJsonObject | null; owner: TaskParty; assignee: TaskParty | null;
+    /** #4291: already validated against `requirements` by the caller; set only here, at creation. */
+    runSettings?: TaskRunSettings | null;
     /** #2420: already normalized and schema-checked by the caller, which also decided the creator may set it. */
     properties?: Prisma.InputJsonObject | null;
     created: Record<string, unknown>; assigned: Record<string, unknown>; evActor: EventActor;
@@ -1447,6 +1472,8 @@ async function insertTask(
       parentTaskId: parentId,
       clonedFromId: a.clonedFromId ?? null,
       requirements: a.requirements ?? Prisma.DbNull,
+      runFamily: a.runSettings?.family ?? null, runModel: a.runSettings?.model ?? null,
+      runTier: a.runSettings?.tier ?? null, runEffort: a.runSettings?.effort ?? null,
       matchPending: a.matchPending ?? false,
       properties: a.properties ?? Prisma.DbNull,
       ...partyColumns('owner', a.owner),
@@ -1578,9 +1605,9 @@ export async function createStartedClaim(
         startBy: null, closeSessionWhenDone: false, requirements: null, owner, assignee: owner, status: 'pending',
         created: createdStamp(txCtx), assigned: assignedStamp(txCtx, now), evActor: eventActor(txCtx.userId),
       });
-      const started = await tx.agentTask.update({ where: { id: made.id }, data: { status: 'started', startedAt: new Date(), ...updatedStamp(txCtx) } });
+      await tx.agentTask.update({ where: { id: made.id }, data: { status: 'started', startedAt: new Date(), ...updatedStamp(txCtx) } });
       await appendTaskEvent(tx, { appId: fresh.id, taskId: made.id, actor: eventActor(txCtx.userId), event: { type: 'task.started' } });
-      return started;
+      return startedWithAppliedSettings(tx, made.id);
     }, { lockWorkerIds: [lockedWorker] });
   } catch (e) {
     if (e instanceof GraphQLError && e.extensions?.code === 'TASK_EXTERNAL_ID_TAKEN') return null;
@@ -1661,12 +1688,12 @@ export async function createStartedClaimFor(
         evActor, evFor,
       });
       // The start the assignee would make, made here on their behalf (V41, the claims exception to cor:agt:050:08).
-      const started = await tx.agentTask.update({
+      await tx.agentTask.update({
         where: { id: made.id },
         data: { status: 'started', startedAt: new Date(), updatedBy: null, updatedByWorkerId: null, updatedByAgentId: null },
       });
       await appendTaskEvent(tx, { appId: fresh.id, taskId: made.id, actor: evActor, forParty: evFor, event: { type: 'task.started' } });
-      return started;
+      return startedWithAppliedSettings(tx, made.id);
     }, { lockWorkerIds: [lockedAssignee] });
   } catch (e) {
     if (e instanceof GraphQLError && e.extensions?.code === 'TASK_EXTERNAL_ID_TAKEN') return null;
@@ -1895,6 +1922,8 @@ async function resolveCreateParties(tx: Prisma.TransactionClient, txCtx: Context
   } else {
     requirements = await normalizeRequirements(txCtx, app, input.requirements);
   }
+  // #4291: the run settings, judged against the requirements as they will be stored. A clone copies none.
+  const runSettings = runSettingsChecked(() => validateTaskRunSettings(input.runSettings, requirements as Record<string, never> | null));
   let owner: TaskParty = actorParty(actor);
   if (input.owner) {
     // #1757 (cor:agt:050:01, Holger team chat #8183): a root task's
@@ -1941,7 +1970,7 @@ async function resolveCreateParties(tx: Prisma.TransactionClient, txCtx: Context
       await checkAgainstTeamSchema(tx, txCtx, app.id, properties);
     }
   }
-  return { requirements, owner, assignee, properties };
+  return { requirements, runSettings, owner, assignee, properties };
 }
 
 /**
@@ -1972,7 +2001,7 @@ async function applyTaskCreate(
     const src = await tx.agentTask.findUnique({ where: { id: p.clone.sourceId }, select: { appId: true } });
     if (!src || src.appId !== app.id) throw notFound(p.clone.sourceId);
   }
-  const { requirements, owner, assignee, properties } = await resolveCreateParties(tx, txCtx, app, p);
+  const { requirements, runSettings, owner, assignee, properties } = await resolveCreateParties(tx, txCtx, app, p);
   if (assignee?.workerId && assignee.workerId !== p.lockedAssignee) {
     throw taskError('TASK_CONFLICT', 'The assignee named changed while this write waited; try again.');
   }
@@ -1985,7 +2014,7 @@ async function applyTaskCreate(
   const made = await insertTask(tx, {
     app, parentId: parentTaskId, project: input.project === true, title: p.title, description: p.description, source: p.source,
     externalId: p.externalId, tags: p.tags, references: p.references, startBy: p.startBy, finishBy: p.finishBy,
-    closeSessionWhenDone: p.closeSessionWhenDone, requirements, properties, owner, assignee, status: p.status, priority: keepPriority ? p.priority : undefined, clonedFromId: p.clone?.sourceId ?? null,
+    closeSessionWhenDone: p.closeSessionWhenDone, requirements, runSettings, properties, owner, assignee, status: p.status, priority: keepPriority ? p.priority : undefined, clonedFromId: p.clone?.sourceId ?? null,
     created: createdStamp(txCtx), assigned: assignedStamp(txCtx, new Date()), evActor: eventActor(txCtx.userId), matchPending: input.match === true,
   });
   const row = await tx.agentTask.findUniqueOrThrow({ where: { id: made.id } });
@@ -2017,12 +2046,12 @@ async function startOwnClaim(
   if (p.externalId === null || p.status !== 'pending' || !assignee || !sameParty(assignee, actorParty(p.actor))) return null;
   const fresh = await tx.agentTask.findUniqueOrThrow({ where: { id: taskId } });
   if (fresh.blocked || fresh.status !== 'pending') return null;
-  const started = await tx.agentTask.update({
+  await tx.agentTask.update({
     where: { id: taskId },
     data: { status: 'started', startedAt: new Date(), ...updatedStamp(txCtx) },
   });
   await appendTaskEvent(tx, { appId: app.id, taskId, actor: eventActor(txCtx.userId), event: { type: 'task.started' } });
-  return started;
+  return startedWithAppliedSettings(tx, taskId);
 }
 
 /**
@@ -2142,7 +2171,11 @@ export const agentTaskMutations = {
           case 'title': value = normalizeTitle(input.title as string); break;
           case 'description': value = optionalText(input.description as string | null, TASK_DESCRIPTION_MAX, 'description'); break;
           case 'tags': value = normalizeTags(input.tags as string[] | null); break;
-          case 'requirements': value = await normalizeRequirements(txCtx, app, input.requirements as RequirementsInput | null); break;
+          case 'requirements':
+            value = await normalizeRequirements(txCtx, app, input.requirements as RequirementsInput | null);
+            // #4291: the task's stored run settings must still satisfy the requirements it would now hold.
+            runSettingsChecked(() => checkRunSettingsAgainst(taskRunSettingsOf(task), value as Record<string, never> | null));
+            break;
           case 'startBy': value = input.startBy === '' ? null : parseStartBy(input.startBy); break;
           case 'finishBy': value = input.finishBy === '' ? null : parseFinishBy(input.finishBy); break;
           case 'closeSessionWhenDone':
@@ -2672,6 +2705,8 @@ export const agentTaskMutations = {
         data: { status: 'started', startedAt: new Date(), ...updatedStamp(ctx) },
       });
       await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.started' } });
+      // #4291: the settings this run uses, read from the assignee's open session now, shown beside the task's own.
+      await stampAppliedRunSettings(tx, task.id);
     }, { assignee: true });
     await emitTaskWarnings(ctx, info, started.appId, { codes: warn });
     return started;
@@ -2895,6 +2930,8 @@ export const agentTaskMutations = {
         },
         data: {
           status: 'pending', startedAt: null, assigneeWorkerId: null, assigneeUserId: null,
+          // #4291: the settings of the run that handed it back are not the next run's.
+          appliedFamily: null, appliedModel: null, appliedEffort: null,
           ...(requirements ? { requirements } : {}),
           handBackReasonCode: code, handBackReasonText: text, handedBackAt: now,
           ...updatedStamp(ctx),
@@ -3725,6 +3762,17 @@ export const agentTaskFieldResolvers = {
         modelGroupNotIn: (r.modelGroupNotIn as string[]) ?? null,
       };
     },
+    /** #4291 (cor:agt:050:01): the task's own run settings; null when it names none. */
+    runSettings: (t: TaskRow) => taskRunSettingsOf(t),
+    /**
+     * #4291: the settings the run actually used, stamped from the assignee's open session when the task started; null
+     * before that (and for a task no worker session started). Beside `runSettings`, so an override a running worker did
+     * not apply is visible.
+     */
+    appliedRunSettings: (t: TaskRow) =>
+      t.startedAt && (t.appliedFamily || t.appliedModel || t.appliedEffort)
+        ? { family: t.appliedFamily, model: t.appliedModel, effort: t.appliedEffort }
+        : null,
     /** #2649 (cor:agt:050:01 References): the stored strings, in order; nothing about any target is read. */
     references: (t: TaskRow) => storedTaskReferences(t.references).map(r => ({ kind: REFERENCE_KIND_TO_GQL[r.kind], target: r.target, label: r.label ?? null })),
     /** #1709 (cor:agt:050:10) — the request this task's end made; the task was already read, so its readers read it. */
