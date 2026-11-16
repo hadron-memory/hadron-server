@@ -14,6 +14,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { resolvers, type Context } from './resolvers.js';
+import { runAsActor } from '../../../lib/requestActor.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -25,10 +26,15 @@ const live = { kind: 'LIVE_CHAT', ref: 'client-chat:turn-4280' };
 
 let f: any;
 const person = (userId: string, extra: Partial<Context> = {}): Context => ({ db, userId, roles: ['READER'], ...extra }) as Context;
-/** A worker acting through its bound session; its holder is the request's user. */
-const asWorker = (w: { session: { id: string }; holderId: string }, extra: Partial<Context> = {}) => person(w.holderId, { sessionId: w.session.id, ...extra });
-const link = (c: Context, args: Record<string, unknown> = {}) =>
-  M.linkDefectToPullRequest!({}, { defectRef: DEFECT, prTaskRef: f.build.id, ...args }, c);
+type Bound = { id: string; agentId: string; session: { id: string }; holderId: string };
+/** A worker acting through its bound session: the request's user is its holder, and the request actor is the worker. */
+const asWorker = (w: Bound): Context & { worker: Bound } => ({ ...person(w.holderId, { sessionId: w.session.id }), worker: w }) as Context & { worker: Bound };
+const call = (c: Context, args: Record<string, unknown>) => {
+  const run = () => M.linkDefectToPullRequest!({}, { defectRef: DEFECT, prTaskRef: f.build.id, ...args }, c);
+  const w = (c as { worker?: Bound }).worker;
+  return w ? runAsActor({ workerId: w.id, agentId: w.agentId, userId: w.holderId }, run) : run();
+};
+const link = (c: Context, args: Record<string, unknown> = {}) => call(c, args);
 const linkEvents = (taskId = f.build.id) => db.agentTeamEvent.findMany({ where: { taskId, type: 'review.defect-linked' }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
 const code = async (p: Promise<unknown>) => { try { await p; return 'RESOLVED'; } catch (e: any) { return e.extensions?.code ?? String(e); } };
 /** The whole refusal, so two refusals can be compared byte for byte. */
@@ -36,13 +42,14 @@ const refusal = async (p: Promise<unknown>) => { try { await p; return 'RESOLVED
 
 beforeEach(async () => {
   await cleanDb(db);
-  const [manager, member, outsider] = await Promise.all(['dl-manager', 'dl-member', 'dl-outsider'].map((handle) => db.user.create({ data: { handle, roles: ['READER'] } })));
+  const [manager, member, outsider, stranger] = await Promise.all(['dl-manager', 'dl-member', 'dl-outsider', 'dl-stranger'].map((handle) => db.user.create({ data: { handle, roles: ['READER'] } })));
   const org = await db.organization.create({ data: { name: 'Defects', urn: `defects-${generateId()}.test` } });
   const app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
   const otherApp = await db.app.create({ data: { organizationId: org.id, name: 'Other', urn: `${org.urn}:other` } });
   await db.appMember.create({ data: { appId: app.id, userId: manager.id, role: 'owner' } });
   await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
-  await db.appMember.create({ data: { appId: otherApp.id, userId: member.id, role: 'member' } });
+  // Quinn's holder belongs only to the other App, so App A is not readable to that caller.
+  await db.appMember.create({ data: { appId: otherApp.id, userId: stranger.id, role: 'member' } });
   const agent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:agent`, name: 'Agent' } });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   await db.appAgent.create({ data: { appId: otherApp.id, agentId: agent.id } });
@@ -55,7 +62,7 @@ beforeEach(async () => {
   const peter = await worker(app.id, 'Peter', 'coordinator', member.id);
   const sam = await worker(app.id, 'Sam', 'server-engineer', member.id);
   const mo = await worker(app.id, 'Mo', 'server-engineer', manager.id);
-  const quinn = await worker(otherApp.id, 'Quinn', 'qa-engineer', member.id);
+  const quinn = await worker(otherApp.id, 'Quinn', 'qa-engineer', stranger.id);
   const create = (input: Record<string, unknown>, by = manager.id) => M.createAgentTask!({}, { input: { appRef: app.id, source: 'synthetic', ...input } }, person(by));
   const build = await create({ title: 'Build', assignee: { user: member.id }, references: [{ kind: 'PULL_REQUEST', target: 'https://github.com/example/project/pull/8000' }] });
   for (const head of [H1, H2]) await M.freezePullRequestHead!({}, { taskRef: build.id, head }, person(member.id));
@@ -121,9 +128,24 @@ describe('#4280: a caller who may not read the App is answered as for a task tha
   it('a worker of another App: byte-identical to linking a nonexistent task', async () => {
     const missing = generateId();
     const foreign = await refusal(link(asWorker(f.quinn)));
-    const absent = await refusal(M.linkDefectToPullRequest!({}, { defectRef: DEFECT, prTaskRef: missing }, asWorker(f.quinn)));
+    const absent = await refusal(call(asWorker(f.quinn), { prTaskRef: missing }));
     expect(foreign).not.toBe('RESOLVED');
     expect(foreign.replaceAll(f.build.id, '<ref>')).toBe(absent.replaceAll(missing, '<ref>'));
+    expect(await linkEvents()).toHaveLength(0);
+  });
+
+  it('another App\'s key, and a run of another App: byte-identical to a nonexistent task, not DEFECT_LINK_FORBIDDEN', async () => {
+    const otherKey = await db.appKey.create({ data: { appId: f.otherApp.id, keyHash: generateId(), keyPreview: 'efgh', label: 'K2' } });
+    const missing = generateId();
+    for (const c of [
+      { db, appId: f.otherApp.id, appKeyId: otherKey.id, roles: [] },
+      { db, appId: f.otherApp.id, organizationId: f.org.id, clientId: `run:${generateId()}`, roles: [] },
+    ] as unknown as Context[]) {
+      const foreign = await refusal(link(c));
+      const absent = await refusal(call(c, { prTaskRef: missing }));
+      expect(foreign).toContain('TASK_NOT_FOUND');
+      expect(foreign.replaceAll(f.build.id, '<ref>')).toBe(absent.replaceAll(missing, '<ref>'));
+    }
     expect(await linkEvents()).toHaveLength(0);
   });
 
