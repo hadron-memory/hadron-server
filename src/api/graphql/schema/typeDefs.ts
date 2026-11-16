@@ -12006,9 +12006,12 @@ export const typeDefs = `#graphql
     (hrn:node:hadronmemory.com:specs:cor:agt:050:10, Proposed). A worker.end reported FAILED with a failureReason whose
     leading code is AGENT_ABSENT runs the same check and, when it holds, ends the session and reads SUCCEEDED.
     Refusals: HOST_DOES_NOT_RUN_WORKER (this host's registration does not list the worker, or under a server-held setup
-    it is not assigned there), SESSION_NOT_WORKERS, WORKER_NOT_SHORT_LIVED, WORKER_HAS_OPEN_TASK (the worker is the
+    it is not assigned there, or the session runs on another host: a host-launched session's launch host, or for a
+    hand-started session the host its client reported, else this host must be the only live registration listing the
+    worker), SESSION_NOT_WORKERS, WORKER_NOT_SHORT_LIVED, WORKER_HAS_OPEN_TASK (the worker is the
     assignee of a PENDING or STARTED task; extensions.taskId names it). A session that already ended answers
-    ended: false and writes nothing. The end is recorded with endReason agent_absent and no handoff.
+    ended: false and writes nothing. The end is recorded with endReason agent_absent; it writes no handoff, and
+    handoff in the result is true only when one the worker wrote before it exited names the session.
     """
     endAgentlessSession(input: EndAgentlessSessionInput!): AgentlessSessionEnd!
     """

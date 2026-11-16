@@ -12,17 +12,20 @@
  * THE CONDITIONS, judged under the locks:
  *  - the reporting host runs the worker: its registration lists the worker and, under a server-held setup, the
  *    worker is assigned to that host with its workdir confirmed (the launch readers' ASSIGNMENT_IN_EFFECT);
+ *  - the session runs on that host: a host-launched session names it as its launch host; a hand-started one reported
+ *    it as its own host, or the host is the only live registration listing the worker (#4294 §10, Rook P2-1);
  *  - the worker's Agent is SHORT_LIVED (the Agent its open session was bound under, as #4223 reads it);
  *  - the worker is the assignee of no PENDING or STARTED task. A task waiting on its open children is STARTED, so
  *    050:10's G7 is covered.
  *
  * THE LOCK ORDER (src/lib/agentTasks/workerLock.ts): the per-worker assignment lock FIRST, which every assignment,
- * start and bind takes; then the session row FOR UPDATE; then the App's host-setup lock SHARED and the host's
- * registration row FOR SHARE (the setHostWorkerAvailability order: worker, then registration); then the reads. An
+ * start and bind takes; then the session row FOR UPDATE; then the App's host-setup lock SHARED and every registration
+ * of the App FOR SHARE in id order (resolveSessionEndRequest's order: session, then registrations); then the reads. An
  * assignment to this worker either committed before the lock (the open-task check sees it and refuses) or waits until
  * this transaction ends (it then finds no open session and the ordinary start path runs).
  *
- * THE END: `endedAt` now, `endReason: agent_absent`, no handoff. The next bind reads continuity MISSING (cor:agt:020:10,
+ * THE END: `endedAt` now, `endReason: agent_absent`; this end writes no handoff (the result's `handoff` says whether
+ * one the worker wrote before it exited names the session). Without one, the next bind reads continuity MISSING (cor:agt:020:10,
  * "no handoff was recorded"), never an empty handoff. A session that already ended is left exactly as it is.
  */
 
@@ -63,12 +66,18 @@ export async function endAgentlessSession(
 ): Promise<{ ended: boolean; handoff: boolean }> {
   const { appId, hostId, workerId, sessionId, now } = args;
   await lockWorkersForAssignment(tx, [workerId]);
-  const [session] = await tx.$queryRaw<{ workerId: string | null; appId: string | null; endedAt: Date | null; deletedAt: Date | null }[]>`
-    SELECT worker_id AS "workerId", app_id AS "appId", ended_at AS "endedAt", deleted_at AS "deletedAt"
+  const [session] = await tx.$queryRaw<{
+    workerId: string | null; appId: string | null; endedAt: Date | null; deletedAt: Date | null; launchHostId: string | null; host: string | null;
+  }[]>`
+    SELECT worker_id AS "workerId", app_id AS "appId", ended_at AS "endedAt", deleted_at AS "deletedAt",
+      launch_host_id AS "launchHostId", host
     FROM sessions WHERE id = ${sessionId} FOR UPDATE`;
   await lockHostSetup(tx, appId, 'shared');
+  // Every registration of the App, in id order (pickLiveHost's and fenceHostDecision's lock): the sole-host test below
+  // reads them all, so a registration that would add or drop the worker waits for this decision.
+  await tx.$queryRaw`SELECT id FROM host_registrations WHERE app_id = ${appId} ORDER BY id FOR SHARE`;
   const [reg] = await tx.$queryRaw<{ id: string }[]>`
-    SELECT id FROM host_registrations WHERE app_id = ${appId} AND host_id = ${hostId} FOR SHARE`;
+    SELECT id FROM host_registrations WHERE app_id = ${appId} AND host_id = ${hostId}`;
   const runs = reg
     ? await tx.$queryRaw<{ ok: number }[]>`
         SELECT 1 AS ok FROM host_registrations r
@@ -84,6 +93,13 @@ export async function endAgentlessSession(
   }
   if (!session || session.workerId !== workerId || session.appId !== appId || session.deletedAt) {
     throw new AgentlessEndRefusal('SESSION_NOT_WORKERS', 'That session is not this worker\'s.');
+  }
+  // #4294 §10 (Rook P2-1): a worker may be registered by several hosts, and a host's proof covers only its own machine.
+  // So the session must run on THIS host: a host-launched session names its host; a hand-started one (an interactive
+  // session, C9) counts as this host's when its own client reported this host, or when this host is the only live
+  // registration listing the worker. Refused as not running the worker, so no oracle.
+  if (!(await sessionRunsOn(tx, appId, workerId, session, hostId))) {
+    throw new AgentlessEndRefusal('HOST_DOES_NOT_RUN_WORKER', 'This host does not run that worker.');
   }
   if (session.endedAt) {
     return { ended: false, handoff: await sessionHasHandoff(tx, workerId, sessionId) };
@@ -102,4 +118,25 @@ export async function endAgentlessSession(
   }
   await tx.session.updateMany({ where: { id: sessionId, endedAt: null }, data: { endedAt: now, endReason: 'agent_absent' } });
   return { ended: true, handoff: await sessionHasHandoff(tx, workerId, sessionId) };
+}
+
+/**
+ * Does the session run on `hostId`? A host-launched session: exactly when its launch host is this host. A hand-started
+ * one: when the host its own client reported is this host id, or this host is the only live (not lost) registration of
+ * the App listing the worker. The caller holds every registration of the App FOR SHARE.
+ */
+async function sessionRunsOn(
+  tx: Prisma.TransactionClient,
+  appId: string,
+  workerId: string,
+  session: { launchHostId: string | null; host: string | null },
+  hostId: string,
+): Promise<boolean> {
+  if (session.launchHostId !== null) return session.launchHostId === hostId;
+  if (session.host === hostId) return true;
+  const hosts = await tx.$queryRaw<{ hostId: string }[]>`
+    SELECT DISTINCT r.host_id AS "hostId" FROM host_registrations r
+    JOIN host_registration_workers w ON w.registration_id = r.id AND w.worker_id = ${workerId}
+    WHERE r.app_id = ${appId} AND r.lost_at IS NULL`;
+  return hosts.length === 1 && hosts[0]!.hostId === hostId;
 }
