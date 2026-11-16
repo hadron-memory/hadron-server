@@ -221,17 +221,18 @@ describe('rows: one per family and model, reported apart from unreported, and on
     ]);
   });
 
-  it('a snapshot with no family, no model or neither, and a verdict from before snapshots, all go in the one "not recorded" row, last', async () => {
+  it('a snapshot with no family (null or empty), no model or neither, and a verdict from before snapshots, all go in the one "not recorded" row, last', async () => {
     await review({ family: 'family-f', model: 'model-m', findings: 1, dispositions: ['fixed'] });
     await review({ family: null, model: 'model-m', findings: 2, dispositions: ['rejected'] });
     await review({ family: 'family-f', model: null, reportedAt: null, verdict: 'FAIL' });
     await review({ family: null, model: null, reportedAt: null });
     await review({ legacy: true, findings: 1 });
+    await review({ family: '', model: 'model-m' });
     expect(await rows()).toEqual([
       expect.objectContaining({ recorded: true, family: 'family-f', model: 'model-m', modelReported: true, reviews: 1, findings: 1, confirmedFindings: 1 }),
       { recorded: false, family: null, model: null, modelReported: null,
-        reviews: 4, findings: 3, findingsPerReview: 3 / 4, confirmedFindings: 0, rejectedFindings: 1, undisposedFindings: 2, shareConfirmed: 0,
-        approvingReviews: 3, defectsMissed: null, defectsMissedPerApprovingReview: null },
+        reviews: 5, findings: 3, findingsPerReview: 3 / 5, confirmedFindings: 0, rejectedFindings: 1, undisposedFindings: 2, shareConfirmed: 0,
+        approvingReviews: 4, defectsMissed: null, defectsMissedPerApprovingReview: null },
     ]);
   });
 
@@ -257,12 +258,26 @@ describe('readers are the readers of the App\'s tasks and events (cor:agt:050:21
     const mine = await refusal(report(NOV, outsider.id));
     expect(mine).toEqual(await refusal(Q.agentTeamEvents!({}, { appRef: app.id }, ctx(outsider.id))));
     expect(mine).toMatchObject({ message: 'App not found.', extensions: { code: 'APP_NOT_FOUND' } });
-    const missing = await refusal(report(NOV, outsider.id, 'no-such-app'));
+    const missing = await refusal(report(NOV, outsider.id, generateId()));
     expect({ ...mine, extensions: { ...mine.extensions, appRef: null } }).toEqual({ ...missing, extensions: { ...missing.extensions, appRef: null } });
     // A malformed month tells an outsider nothing more: the gate answers first.
     expect(await refusal(report('not-a-month', outsider.id))).toEqual(mine);
     // No signed-in caller at all.
     await expect(Q.reviewQualityReport!({}, { appRef: app.id, month: NOV }, { db, roles: ['READER'] })).rejects.toBeTruthy();
+  });
+
+  it('the App\'s own live key reads its App\'s report as it reads the events (cor:agt:050:23); another App\'s, or a revoked key, is refused the same way', async () => {
+    await review({ findings: 1 });
+    const other = await appWithMembers('other');
+    const key = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: `h-${generateId()}`, keyPreview: 'abcd' }, select: { id: true } });
+    const keyCtx = () => ({ db, appId: app.id, appKeyId: key.id, roles: [] });
+    const asKey = (appRef: string) => Q.reviewQualityReport!({}, { appRef, month: NOV }, keyCtx());
+    const r = await asKey(app.id);
+    expect(r.rows).toMatchObject([{ reviews: 1, findings: 1 }]);
+    expect(r.asOf).toBeInstanceOf(Date);
+    expect(await refusal(asKey(other.id))).toEqual(await refusal(Q.agentTeamEvents!({}, { appRef: other.id }, keyCtx())));
+    await db.appKey.update({ where: { id: key.id }, data: { revokedAt: new Date() } });
+    expect(await refusal(asKey(app.id))).toEqual(await refusal(Q.agentTeamEvents!({}, { appRef: app.id }, keyCtx())));
   });
 
   it('another App\'s reviews are never counted, even for someone who reads both', async () => {
