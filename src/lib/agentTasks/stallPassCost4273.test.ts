@@ -282,6 +282,8 @@ describe('#4273 — the pruned session read answers exactly what the full read a
     await mk(anne, { startedAt: day(3), updatedAt: day(3, 6), endedAt: day(2) }); // same end as the one above
     await mk(anne, { startedAt: day(0, -2), updatedAt: day(0, -1), deletedAt: day(0) }); // deleted: counts for nothing
     await mk(anne, { startedAt: day(1, 2), updatedAt: day(1, 3), autoExpiredAt: day(1, 4), endedAt: day(1, 5) });
+    await mk(anne, { startedAt: day(5), updatedAt: day(5) }); // open but quiet for days: bound, holds a binding, not live
+    await mk(liam, { startedAt: day(0, -1), updatedAt: day(0, -1) }); // open and recent: live (the gate's row class)
     // liam: only ended sessions, the newest not the longest.
     await mk(liam, { startedAt: day(10), updatedAt: day(9), endedAt: day(8) });
     await mk(liam, { startedAt: day(5), updatedAt: day(5), endedAt: day(4) });
@@ -299,8 +301,20 @@ describe('#4273 — the pruned session read answers exactly what the full read a
       });
       expect(got.get(w)?.lastActiveAt?.getTime()).toBe(Math.max(...times));
     }
+    // The gate side (cor:agt:020:11) judges the SAME open rows with isSessionLive over the rows in hand; the SQL aggregate must
+    // agree for every worker, whatever ended history surrounds the open sessions.
+    const { isSessionLive } = await import('../sessionActivity.js');
+    const openRows = await db.session.findMany({ where: { workerId: { in: [anne, liam, ada] }, endedAt: null, deletedAt: null } });
+    for (const w of [anne, liam, ada]) {
+      const mine = openRows.filter((x) => x.workerId === w);
+      expect(got.get(w)?.hasLiveSession).toBe(mine.some((x) => isSessionLive(x as any, null, now)));
+      expect(got.get(w)?.bound).toBe(mine.length > 0);
+      expect(got.get(w)?.holdsOpenSession).toBe(mine.length > 0);
+    }
+    expect(got.get(anne)?.hasLiveSession).toBe(false);
+    expect(got.get(liam)?.hasLiveSession).toBe(true);
     expect(got.get(ada)?.bound).toBe(true);
-    expect(got.get(anne)?.bound).toBe(false);
+    expect(got.get(ada)?.bindingFamily).toBe('claude');
   });
 });
 
