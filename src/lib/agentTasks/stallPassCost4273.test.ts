@@ -13,6 +13,7 @@ import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
+import { PrismaClient } from '../../generated/prisma/index.js';
 import { evaluateStalls } from './stall.js';
 import { taskStallTick } from '../../jobs/taskStallEvaluator.js';
 
@@ -128,5 +129,24 @@ describe('#4273 — the liveness aggregate runs with JIT off, locally to its tra
       const [{ jit }] = await tx.$queryRaw<{ jit: string }[]>`SELECT current_setting('jit') AS jit`;
       expect(jit).toBe('off');
     });
+  });
+});
+
+describe('#4273 — known limit: a pass that raises N new alarms is linear in N, with a bounded cost per raise', () => {
+  it('each raise is one re-decision in its own transaction: at most 40 statements, however many tasks and alarms exist', async () => {
+    // A first pass after downtime raises every due episode, one Serializable re-decision each (the stop fence is why raises are
+    // not batched). Pinned: the statements per raise stay bounded (about 20 on the #4271 seed), so N raises cost ~N x 10 ms.
+    for (let i = 0; i < 20; i++) await pending('10:00', i % 2 ? anne : liam);
+    const logged = new PrismaClient({ datasourceUrl: process.env.DATABASE_URL, log: [{ emit: 'event', level: 'query' }] });
+    let statements = 0;
+    (logged as any).$on('query', () => { statements++; });
+    try {
+      const raised = (await evaluateStalls(logged as any, at('10:15'))).length;
+      expect(raised).toBe(20);
+      // The page's own reads are a constant (not per raise); allow 30 of them.
+      expect(statements).toBeLessThanOrEqual(20 * 40 + 30);
+    } finally {
+      await logged.$disconnect();
+    }
   });
 });
