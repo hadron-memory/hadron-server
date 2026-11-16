@@ -169,6 +169,25 @@ describe('#4298 — a not-started episode ends at the start, not at the assignme
     expect(await events()).toMatchObject([{ id: alarm.id, escalationEndedAt: iso('10:17') }]);
   });
 
+  // Peter's ruling on #4298 (team chat #110709): forward fix only, no repair of recorded ends; a task still PENDING after an
+  // alarm of its was wrongly ended must raise again. A recorded end is per alarm, never per task: the next episode of the
+  // same task has its own key and its own alarm. Not red on main: it holds that an old wrong end hides nothing live.
+  it('a still-pending task whose earlier alarm carries a wrong recorded end raises again for its next episode, in effect', async () => {
+    const { t, alarm } = await assignedThenAlarmed();
+    await db.agentTask.update({ where: { id: t.id }, data: { assigneeWorkerId: rook.id, assignedAt: at('10:20') } });
+    await event(t.id, { type: 'task.reassigned', from: party(anne), to: party(rook), closeSessionWhenDone: false }, at('10:20', GAP_MS));
+    // The end main recorded for the first alarm: its own opening assignment. Immutable history, left as it is.
+    await db.alarmEscalationEnd.create({ data: { eventId: alarm.id, endedAt: at('10:00', GAP_MS) } });
+    await tick('10:36');
+    const again = await db.agentTeamEvent.findMany({ where: { taskId: t.id, type: 'stall.not-started' }, orderBy: { createdAt: 'asc' } });
+    expect(again.map((a) => a.episodeStart)).toEqual([at('10:00'), at('10:20')]);
+    await record('10:37');
+    expect(await inEffect()).toEqual([again[1].id]);
+    const byId = new Map((await events()).map((e) => [e.id, e.escalationEndedAt]));
+    expect(byId.get(again[1].id)).toBeNull();
+    expect(byId.get(alarm.id)).toBe(at('10:00', GAP_MS).toISOString()); // not repaired
+  });
+
   // Scope (the gate on #4298: the not-started rule only). Every other rule still counts from its episode's start. Not
   // red on main: it holds the change to the one rule.
   it('another rule is unchanged: a couldn\'t-be-assigned episode still ends at the first assignment after its start', async () => {
