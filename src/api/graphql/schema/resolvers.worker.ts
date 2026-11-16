@@ -2444,12 +2444,12 @@ export function workerActivitySql(scope: Prisma.Sql, now: Date): Prisma.Sql {
  * through to its own query (each boundary pinned in sharedWorkerActivity4276.test.ts). Keyed by the transaction
  * client, so concurrent requests on the shared client never see it.
  *
- * What one fold means depends on the transaction's isolation (#4276, Clark's #4272 blind note). The person path
- * (`withRosterAppRead`) is RepeatableRead: one snapshot, so the shared answer is the one every reader would have
- * computed. The run-tool path (`teamSnapshotTools.ts` through `inRunTeamReadTx`) runs at the default Read Committed,
- * where each statement takes its own snapshot: there the share gives every reader the answer of ONE statement, where
- * separate folds could each have seen a different commit. That is no less consistent than before, but it is not a
- * transaction-wide snapshot.
+ * What one fold means depends on the transaction's isolation (#4276, Clark's #4272 blind note). Both callers of
+ * `loadTeamRoster` read at RepeatableRead: the person path (`withRosterAppRead`) and the run-tool path
+ * (`teamSnapshotTools.ts` through `inRunTeamReadTx`, which opens `inAnchoredAppTx` with `coherentRunRead`). There the
+ * transaction is one snapshot, so the shared answer is the one every reader would have computed. A caller at Read
+ * Committed (each statement its own snapshot) would get ONE statement's answer for every reader instead: no less
+ * consistent than separate folds, but not a transaction-wide snapshot.
  */
 const sharedActivity = new WeakMap<object, { appId: string; at: number; workerIds: Set<string>; fold: Promise<Map<string, WorkerActivity>> }>();
 
