@@ -11996,7 +11996,7 @@ export const typeDefs = `#graphql
     #3309 (hrn:node:hadronmemory.com:specs:cor:agt:050:27 part 11): a worker.reset-context failure may name
     HOST_UNSUPPORTED, optionally followed by ": " and detail, only before its claim (phase requested).
     After the claim this reason is BAD_CONTEXT_RESET_INPUT; its message lists the reasons accepted at that phase.
-    #4292: a worker.end FAILED with a reason whose leading code is AGENT_ABSENT ends the session when
+    #4292: an end-session operation FAILED with a reason whose leading code is AGENT_ABSENT ends the session when
     endAgentlessSession's conditions hold, and reads SUCCEEDED with handoff false; otherwise it stays FAILED, the session open.
     """
     reportHostOperation(input: ReportHostOperationInput!): HostOperation!
