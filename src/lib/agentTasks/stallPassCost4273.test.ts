@@ -221,7 +221,7 @@ describe('#4273 — acceptance 4(c): the rows a settled pass reads do not follow
 });
 
 describe('#4273 — acceptance 4(c) on the WHOLE tick: session rows read do not follow ended-session history', () => {
-  async function tickSessionRows(): Promise<number> {
+  async function measureTickOnce(): Promise<number> {
     const url = new URL(process.env.DATABASE_URL!);
     url.searchParams.set('options', '-c enable_indexonlyscan=off -c enable_seqscan=off'); // every row an index path visits is a counted fetch; a test table is too small for the planner to prefer an index
     const read = async () => {
@@ -246,6 +246,19 @@ describe('#4273 — acceptance 4(c) on the WHOLE tick: session rows read do not 
     await taskStallTick(client as any, new Date());
     await client.$disconnect(); // a backend's counters are flushed when it exits
     return (await counted()) - before;
+  }
+
+  /**
+   * #4285: the smallest of three measurements of the same settled tick. The table counters are per table, so ANY other
+   * statement on this database inside the window (a late counter flush from the pool, autovacuum, a fire-and-forget run left
+   * by an earlier step) is added to the figure; noise only ever adds. A settled tick is idempotent, so its true cost is the
+   * minimum, and a real regression (the whole history read) is in every measurement, so it still fails. Main run 43859882551
+   * read 1484 once on a loaded shard while the same pin passed on every other run.
+   */
+  async function tickSessionRows(): Promise<number> {
+    const runs: number[] = [];
+    for (let i = 0; i < 3; i++) runs.push(await measureTickOnce());
+    return Math.min(...runs);
   }
 
   async function endedSessions(from: number, count: number) {
