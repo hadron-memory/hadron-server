@@ -45,8 +45,11 @@ const plain = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
  * - #4287, defects missed (#4280's rule; cor:agt:130:05, :06): an approving review misses each defect linked
  *   (`review.defect-linked`) to its seat's build task whose `introducedAtHead` is null, or was first frozen on that
  *   task no later than the head the review approved: heads in the order of the build's `pr.frozen` events, a head
- *   frozen twice at its FIRST freeze (created_at, then tx_id, then id). A head approved before the defect was
- *   introduced never contained it. One link per (defect, task), so each defect counts once per review.
+ *   frozen twice at its FIRST freeze. Each head's position is that one event's (created_at, tx_id, id), compared as a
+ *   row (#4289 blind F1: independent minima could mix two events and tie). A head approved before the defect was
+ *   introduced never contained it. One link per (defect, task), so each defect counts once per review. Both heads
+ *   always have a freeze: a seat is assigned only at a frozen head, and a link names only a frozen one
+ *   (DEFECT_HEAD_NOT_FROZEN); a missing one would compare unknown and count nothing.
  */
 async function countReviews(tx: Context['db'], appId: string, start: Date, end: Date): Promise<Counted[]> {
   return tx.$queryRaw<Counted[]>(Prisma.sql`
@@ -69,11 +72,13 @@ async function countReviews(tx: Context['db'], appId: string, start: Date, end: 
           SELECT count(*) FROM agent_team_events d
           WHERE d.app_id = ${appId} AND d.task_id = t.parent_task_id AND d.type = 'review.defect-linked'
             AND (d.payload->>'introducedAtHead' IS NULL OR (
-              SELECT (min(f.created_at), min(f.tx_id)) FROM agent_team_events f
+              SELECT (f.created_at, f.tx_id, f.id) FROM agent_team_events f
               WHERE f.app_id = ${appId} AND f.task_id = t.parent_task_id AND f.type = 'pr.frozen' AND f.payload->>'head' = d.payload->>'introducedAtHead'
+              ORDER BY f.created_at, f.tx_id, f.id LIMIT 1
             ) <= (
-              SELECT (min(f.created_at), min(f.tx_id)) FROM agent_team_events f
+              SELECT (f.created_at, f.tx_id, f.id) FROM agent_team_events f
               WHERE f.app_id = ${appId} AND f.task_id = t.parent_task_id AND f.type = 'pr.frozen' AND f.payload->>'head' = l.payload->>'head'
+              ORDER BY f.created_at, f.tx_id, f.id LIMIT 1
             ))
         ) ELSE 0 END AS missed
       FROM latest l
