@@ -2312,9 +2312,18 @@ async function queryWorkerActivity(
   scope: Prisma.Sql,
   now: Date,
 ): Promise<Map<string, WorkerActivity>> {
-  const rows = await ctx.db.$queryRaw<
-    { workerId: string; live: boolean; holdsOpen: boolean; lastActiveAt: Date | null; bound: boolean; bindingFamily: string | null; bindingModel: string | null; modelReportedAt: Date | null }[]
-  >(workerActivitySql(scope, now));
+  type Row = { workerId: string; live: boolean; holdsOpen: boolean; lastActiveAt: Date | null; bound: boolean; bindingFamily: string | null; bindingModel: string | null; modelReportedAt: Date | null };
+  // #4273: the per-session usage probe below is estimated per session and so crosses jit_above_cost on any App with a
+  // few thousand sessions, though almost every probe is never executed; JIT then compiled for ~400 ms on a 4 ms plan, and
+  // the stall tick reached this read nine times a pass. The setting is local to the transaction it is made in.
+  const run = async (tx: Pick<Prisma.TransactionClient, '$executeRaw' | '$queryRaw'>): Promise<Row[]> => {
+    await tx.$executeRaw`SELECT set_config('jit', 'off', true)`;
+    return tx.$queryRaw<Row[]>(workerActivitySql(scope, now));
+  };
+  const db = ctx.db as unknown as Prisma.TransactionClient & { $transaction?: unknown };
+  const rows = typeof db.$transaction === 'function'
+    ? await (db as unknown as { $transaction: <T>(f: (tx: Prisma.TransactionClient) => Promise<T>) => Promise<T> }).$transaction((tx) => run(tx))
+    : await run(db);
   return new Map<string, WorkerActivity>(
     rows.map((row) => [
       row.workerId,

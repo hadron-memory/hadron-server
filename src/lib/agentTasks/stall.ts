@@ -704,23 +704,45 @@ export async function evaluateStalls(db: PrismaClient, now = new Date(), anchor:
     after = page[page.length - 1].id;
     const inputs = await loadStallInputs(db, { id: { in: page.map((t) => t.id) } }, now);
     const windows = await loadWindows(db, [...new Set(page.map((t) => t.appId))]);
-    for (const i of inputs) {
-      for (const c of stallCandidates(i, windows.get(i.task.appId) as StallWindows, now)) {
-        try {
-          const id = await raiseStallAlarm(db, c, now, {}, anchor);
-          if (id) raised.push(id);
-        } catch (err) {
-          // Lost a serialization race (a concurrent pass raised the same
-          // episode, a merge rewrote an owner, a T1 move): the next pass re-evaluates.
-          if (isSerializationFailure(err)) continue;
-          // One task's failure never stops the pass; the next pass retries it.
-          console.error(`[task-stall] raising ${c.rule} on task ${c.taskId} failed:`, err);
-        }
+    const due: StallCandidate[] = [];
+    for (const i of inputs) due.push(...stallCandidates(i, windows.get(i.task.appId) as StallWindows, now));
+    // #4273: an episode whose alarm is already raised is the common case on every pass after the first, and
+    // `raiseStallAlarm` would reload the task's inputs in its own transaction only to find the unique key
+    // (task, type, episode start) taken. One read for the page answers it; a key raised between this read and the
+    // raise is still refused by that same unique key, so the alarms are the ones raised before.
+    const raisedKeys = await loadRaisedEpisodeKeys(db, due);
+    for (const c of due) {
+      if (raisedKeys.has(alarmEpisodeKey(c.taskId, STALL_EVENT_TYPE[c.rule], c.episodeStart))) continue;
+      try {
+        const id = await raiseStallAlarm(db, c, now, {}, anchor);
+        if (id) raised.push(id);
+      } catch (err) {
+        // Lost a serialization race (a concurrent pass raised the same
+        // episode, a merge rewrote an owner, a T1 move): the next pass re-evaluates.
+        if (isSerializationFailure(err)) continue;
+        // One task's failure never stops the pass; the next pass retries it.
+        console.error(`[task-stall] raising ${c.rule} on task ${c.taskId} failed:`, err);
       }
     }
     if (page.length < EVALUATION_PAGE) break;
   }
   return raised;
+}
+
+/** #4273 — the keys (`alarmEpisodeKey`) of these candidates' episodes whose alarm event already exists. */
+async function loadRaisedEpisodeKeys(db: Db, candidates: StallCandidate[]): Promise<Set<string>> {
+  const out = new Set<string>();
+  if (candidates.length === 0) return out;
+  const rows = await db.agentTeamEvent.findMany({
+    where: {
+      taskId: { in: [...new Set(candidates.map((c) => c.taskId))] },
+      type: { in: [...new Set(candidates.map((c) => STALL_EVENT_TYPE[c.rule]))] },
+      episodeStart: { not: null },
+    },
+    select: { taskId: true, type: true, episodeStart: true },
+  });
+  for (const r of rows) if (r.taskId && r.episodeStart) out.add(alarmEpisodeKey(r.taskId, r.type, r.episodeStart));
+  return out;
 }
 
 /** An alarm's episode key: its task, its type (the rule) and its episode start. */
