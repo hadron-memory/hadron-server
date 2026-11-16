@@ -729,19 +729,20 @@ export async function evaluateStalls(db: PrismaClient, now = new Date(), anchor:
   return raised;
 }
 
-/** #4273 — the keys (`alarmEpisodeKey`) of these candidates' episodes whose alarm event already exists. */
+/**
+ * #4273 — the keys (`alarmEpisodeKey`) of these candidates' episodes whose alarm event already exists. Asks for exactly the
+ * candidates' own (task, type, episode start) tuples, served by that unique key, so a task with a long alarm history
+ * (every earlier episode) costs one row per candidate, never one per past episode (Diego P2 on 34689907).
+ */
 async function loadRaisedEpisodeKeys(db: Db, candidates: StallCandidate[]): Promise<Set<string>> {
   const out = new Set<string>();
   if (candidates.length === 0) return out;
-  const rows = await db.agentTeamEvent.findMany({
-    where: {
-      taskId: { in: [...new Set(candidates.map((c) => c.taskId))] },
-      type: { in: [...new Set(candidates.map((c) => STALL_EVENT_TYPE[c.rule]))] },
-      episodeStart: { not: null },
-    },
-    select: { taskId: true, type: true, episodeStart: true },
-  });
-  for (const r of rows) if (r.taskId && r.episodeStart) out.add(alarmEpisodeKey(r.taskId, r.type, r.episodeStart));
+  const rows = await db.$queryRaw<{ taskId: string; type: string; episodeStart: Date }[]>`
+    SELECT e.task_id AS "taskId", e.type, e.episode_start AS "episodeStart"
+    FROM unnest(${candidates.map((c) => c.taskId)}::text[], ${candidates.map((c) => STALL_EVENT_TYPE[c.rule])}::text[],
+                ${candidates.map((c) => toNaiveUtc(c.episodeStart))}::timestamp[]) AS p(task_id, type, start)
+    JOIN agent_team_events e ON e.task_id = p.task_id AND e.type = p.type AND e.episode_start = p.start`;
+  for (const r of rows) out.add(alarmEpisodeKey(r.taskId, r.type, r.episodeStart));
   return out;
 }
 

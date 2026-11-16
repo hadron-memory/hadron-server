@@ -204,4 +204,16 @@ describe('#4273 — acceptance 4(c): the rows a settled pass reads do not follow
     expect(large.tasks).toBeLessThan(small.tasks + 100);
     expect(large.events).toBeLessThan(200);
   }, 120_000);
+
+  it('a task with 1,500 earlier alarm episodes costs a settled pass the same rows as a task with none (the read is the candidate\'s own key)', async () => {
+    const t = await pending('10:00');
+    await evaluateStalls(db, new Date()); // the current episode's alarm is raised
+    const small = await settledPassReads();
+    await db.$executeRaw`INSERT INTO agent_team_events (id, app_id, type, task_id, subject_worker_id, severity, chain, payload, created_at, episode_start)
+      SELECT md5('old' || g), ${appId}, 'stall.not-started', ${t.id}, ${anne}, 'alarm', '[]'::jsonb, '{}'::jsonb, now() - interval '40 days', now() - interval '40 days' - (g || ' minutes')::interval
+      FROM generate_series(1, 1500) g`;
+    await db.$executeRaw`ANALYZE agent_team_events`;
+    const large = await settledPassReads();
+    expect(large.events).toBeLessThanOrEqual(small.events + 10);
+  }, 60_000);
 });
