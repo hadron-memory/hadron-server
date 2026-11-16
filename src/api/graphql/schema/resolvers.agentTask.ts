@@ -195,6 +195,8 @@ export function notAssignee(actor: TaskActor, message: string, ext: Record<strin
 }
 const notFound = (taskId: string): GraphQLError =>
   taskError('TASK_NOT_FOUND', 'Task not found.', { taskId });
+/** The refusal for a task that does not exist or that the caller may not read, for a door outside `mutateTask`. */
+export const taskNotFound = notFound;
 /** #2664: the longest `text` filter, after trimming. */
 const TASK_TEXT_FILTER_MAX = 200;
 const badInput = (message: string): GraphQLError => taskError('BAD_USER_INPUT', message);

@@ -11602,6 +11602,21 @@ export const typeDefs = `#graphql
     revokedBy: ID
   }
 
+  "#4280 — a defect linked to the pull request it escaped from (the review.defect-linked event on the PR's build task)."
+  type DefectLink {
+    "The PR's build task."
+    taskId: ID!
+    "The defect's issue URL, as given."
+    defect: String!
+    "The head that introduced the defect, or null when the link names none."
+    introducedAtHead: String
+    "The review.defect-linked event that records the link."
+    eventId: ID!
+    linkedAt: DateTime!
+    "False when the pair was already linked: this is the existing link, and nothing was written."
+    created: Boolean!
+  }
+
   type Mutation {
     "#3448 — owner-chain only, never the assignee (hrn:node:hadronmemory.com:specs:cor:agt:050:09). Non-empty unique colon-separated atom slots, at most 64 characters each; latest event replaces the schedule. Dropping a current negative slot at the frozen head refuses REVIEW_SEAT_NOT_SUPERSEDABLE. All five protocol commands refuse finished/cancelled written tasks with TASK_ENDED after checking authority."
     setReviewSchedule(taskRef: ID!, slots: [String!]!): PrProtocolResult!
@@ -11613,6 +11628,10 @@ export const typeDefs = `#graphql
     recordReviewVerdict(taskRef: ID!, head: String!, verdict: ReviewVerdict!, node: String, receipt: String): PrProtocolResult!
     "#3448 — build assignee records pr.ready only when every current scheduled seat is finished with APPROVE, PASS or CARRY at the frozen head. Its verdict actor must differ from both the build's current assignee and the newest pr.frozen actor; Worker/person identity stays distinct from holder credentials. PR_NOT_READY carries failing slots; event facts only, never opaque properties (hrn:node:hadronmemory.com:specs:cor:agt:050:28)."
     recordReadyCall(taskRef: ID!, head: String!): PrProtocolResult!
+    """
+    #4280 (S12b; Proposed hrn:node:hadronmemory.com:specs:cor:agt:130:05) — record that a defect found after a pull request merged traces back to it: one review.defect-linked event on the PR's build task (prTaskRef, which needs a pull_request reference: PR_REFERENCE_MISSING). defectRef is the defect's issue URL, under the same rules as a task reference of kind issue, stored as given. introducedAtHead, when given, is a full 40-hex head frozen on that task (DEFECT_HEAD_NOT_FROZEN otherwise); the review-quality report counts the defect against approving reviews at that head or a later one. Who: a worker through its bound session whose current Worker.role is qa-engineer or coordinator, a person who manages the App, or a worker whose holder manages it, with an instruction. The App's key and a run may not. A caller who may not read the App is answered as for a task that does not exist (TASK_NOT_FOUND); one who may read it but not link gets DEFECT_LINK_FORBIDDEN, with nothing written. One link per (defect, task): linking the same pair again returns the existing link with created false and writes nothing. A link never changes a verdict, a seat, readiness or the task.
+    """
+    linkDefectToPullRequest(defectRef: String!, prTaskRef: ID!, introducedAtHead: String, instruction: ActInstructionInput): DefectLink!
 
     "Platform ADMIN/OWNER human only. Version-checked limits/mode edit, audit recorded; no counter reset (#1793)."
     setRateLimitPolicy(input: SetRateLimitPolicyInput!): RateLimitPolicy!
