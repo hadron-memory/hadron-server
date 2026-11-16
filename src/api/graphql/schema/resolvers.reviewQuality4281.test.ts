@@ -400,6 +400,23 @@ describe('#4287: defects missed, from the defect links (#4280; cor:agt:130:05, :
     expect((await byFamily()).ada).toMatchObject({ reviews: 3, approvingReviews: 2, defectsMissed: 1, defectsMissedPerApprovingReview: 1 / 2 });
   });
 
+  it('#4289 blind F1: two heads first frozen at the same instant in one transaction are ordered by event id, not tied', async () => {
+    const [HA, HB] = ['a', 'b'].map((d) => d.repeat(40));
+    const tied = await M.createAgentTask!({}, { input: { appRef: app.id, title: 'PR 8002', source: 'synthetic', assignee: { user: author.id }, references: [{ kind: 'PULL_REQUEST', target: 'https://github.com/example/project/pull/8002' }] } }, ctx(owner.id));
+    await M.setReviewSchedule!({}, { taskRef: tied.id, slots: SLOTS }, ctx(owner.id));
+    // One transaction (one tx_id), one created_at: only the ids order these two first freezes, HA's before HB's.
+    const same = new Date();
+    await db.$transaction(async (tx) => {
+      for (const [id, head] of [['0'.repeat(31) + 'a', HA], ['0'.repeat(31) + 'b', HB]] as const) {
+        await tx.agentTeamEvent.create({ data: { id, appId: app.id, taskId: tied.id, type: 'pr.frozen', actorUserId: author.id, createdAt: same,
+          payload: { head, pullRequest: 'https://github.com/example/project/pull/8002' } } });
+      }
+    });
+    await review({ inBuild: tied, head: HA, family: 'earlier' });
+    await link(D(7), HB, tied);
+    expect((await byFamily()).earlier, 'a tie on (created_at, tx_id) counted a defect introduced after the approved head').toMatchObject({ defectsMissed: 0 });
+  });
+
   it('the SDL has no defectsMissedUnavailableReason, and defectsMissed is a non-null Int', async () => {
     const { buildASTSchema, parse } = await import('graphql');
     const schema = buildASTSchema(parse(typeDefs));
