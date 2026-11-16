@@ -132,6 +132,14 @@ describe('#4271: the liveness aggregate keeps every answer that depends on usage
     expect((await fold(w)).lastActiveAt?.getTime()).toBe(end.getTime() - HOUR);
   });
 
+  it('an ended session with no updated_at (#4272 QA P2): a usage event inside it counts', async () => {
+    const w = await worker('Ivy');
+    const end = new Date(now.getTime() - 2 * DAY);
+    const s = await session(w, { startedAt: new Date(end.getTime() - 5 * HOUR), updatedAt: null, endedAt: end });
+    await usage(s, 1, new Date(end.getTime() - HOUR));
+    expect((await fold(w)).lastActiveAt?.getTime(), 'a NULL updated_at made the guard skip a session it cannot prove closed').toBe(end.getTime() - HOUR);
+  });
+
   it('an auto-expired session: its updated_at is not activity, so a usage event inside it counts', async () => {
     const w = await worker('Eve');
     const end = new Date(now.getTime() - 2 * DAY);
