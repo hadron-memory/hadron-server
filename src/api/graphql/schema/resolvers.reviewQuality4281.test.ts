@@ -10,7 +10,8 @@
  *    still count there, so every report states when it was worked out;
  *  - findings are the seat task's resultFindings; confirmed = fixed, accepted or deferred; rejected is not confirmed and
  *    undisposed is its own count; approving = APPROVE, PASS or CARRY;
- *  - defects missed is null with a stated reason, never 0, until defect links exist (hadron-server#4280);
+ *  - defects missed (#4287) is an integer from S12b's defect links (#4280), 0 with none; its per-approving share is null
+ *    only with no approving review;
  *  - readers are exactly the readers of the App's tasks and events.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -36,7 +37,7 @@ let owner: any, author: any, holder: any, outsider: any, app: any, build: any, n
 const ctx = (userId: string, extra: Record<string, unknown> = {}) => ({ db, userId, roles: ['READER' as const], ...extra });
 
 type Snapshot = { family?: string | null; model?: string | null; reportedAt?: string | null; legacy?: boolean };
-type Verdict = Snapshot & { verdict?: string; at?: Date };
+type Verdict = Snapshot & { verdict?: string; at?: Date; head?: string };
 type Disposition = 'fixed' | 'accepted' | 'deferred' | 'rejected';
 type Review = Verdict & { verdicts?: Verdict[]; findings?: number; dispositions?: Disposition[]; end?: 'finish' | 'cancel' | 'none'; inApp?: any; inBuild?: any };
 
@@ -44,7 +45,7 @@ type Review = Verdict & { verdicts?: Verdict[]; findings?: number; dispositions?
 const verdictEvent = (appId: string, taskId: string, slot: string, v: Verdict) =>
   db.agentTeamEvent.create({ data: {
     appId, taskId, type: 'review.verdict', actorUserId: holder.id, createdAt: v.at ?? MID_NOV,
-    payload: { slot, head: H, verdict: v.verdict ?? 'APPROVE', node: null, receipt: null,
+    payload: { slot, head: v.head ?? H, verdict: v.verdict ?? 'APPROVE', node: null, receipt: null,
       ...(v.legacy ? {} : {
         reviewerFamily: v.family === undefined ? 'family-f' : v.family,
         reviewerModel: v.model === undefined ? 'model-m' : v.model,
@@ -60,7 +61,9 @@ async function review(r: Review = {}) {
   const parent = r.inBuild ?? build;
   const slot = SLOTS[nextSlot++]!;
   const t = await M.createAgentTask!({}, { input: { parentTaskId: parent.id, title: slot, assignee: { user: holder.id }, source: 'synthetic' } }, ctx(author.id));
-  await M.assignReviewSeat!({}, { taskRef: t.id, slot, head: H }, ctx(author.id));
+  // A seat binds the build's CURRENT frozen head; re-freezing an earlier head keeps its first-freeze position (#4280).
+  if (r.head) await M.freezePullRequestHead!({}, { taskRef: parent.id, head: r.head }, ctx(author.id));
+  await M.assignReviewSeat!({}, { taskRef: t.id, slot, head: r.head ?? H }, ctx(author.id));
   await M.startAgentTask!({}, { taskId: t.id }, ctx(holder.id));
   for (const v of r.verdicts ?? [r]) await verdictEvent((r.inApp ?? app).id, t.id, slot, v);
   if ((r.end ?? 'finish') === 'finish') {
@@ -108,7 +111,7 @@ describe('the four measures match a hand count (cor:agt:130:06, #4281)', () => {
       recorded: true, family: 'family-f', model: 'model-m', modelReported: true,
       reviews: 3, findings: 4, findingsPerReview: 4 / 3,
       confirmedFindings: 2, rejectedFindings: 1, undisposedFindings: 1, shareConfirmed: 2 / 4,
-      approvingReviews: 2, defectsMissed: null, defectsMissedPerApprovingReview: null,
+      approvingReviews: 2, defectsMissed: 0, defectsMissedPerApprovingReview: 0,
     }]);
   });
 
@@ -128,11 +131,11 @@ describe('the four measures match a hand count (cor:agt:130:06, #4281)', () => {
     expect(await rows()).toMatchObject([{ reviews: 6, approvingReviews: 3 }]);
   });
 
-  it('defects missed is not available before defect links exist: null with a stated reason, never 0', async () => {
+  it('#4287: with no defect links, defects missed is 0, not null, and the report carries no unavailable reason', async () => {
     await review({ verdict: 'APPROVE' });
     const r = await report();
-    expect(r.rows[0]).toMatchObject({ approvingReviews: 1, defectsMissed: null, defectsMissedPerApprovingReview: null });
-    expect(r.defectsMissedUnavailableReason).toBe('Defect links are not recorded yet (hadron-server#4280).');
+    expect(r.rows[0]).toMatchObject({ approvingReviews: 1, defectsMissed: 0, defectsMissedPerApprovingReview: 0 });
+    expect(r).not.toHaveProperty('defectsMissedUnavailableReason');
   });
 });
 
@@ -193,9 +196,9 @@ describe('the month is the UTC calendar month of the latest verdict', () => {
     expect(r.asOf.getTime()).toBeLessThanOrEqual(Date.now() + 1000);
   });
 
-  it('a month with no reviews has no rows, and still says when it was worked out and why defects missed is absent', async () => {
+  it('a month with no reviews has no rows, and still says when it was worked out', async () => {
     const r = await report('2031-02');
-    expect(r).toMatchObject({ month: '2031-02', rows: [], defectsMissedUnavailableReason: expect.any(String) });
+    expect(r).toMatchObject({ month: '2031-02', rows: [] });
     expect(r.asOf).toBeInstanceOf(Date);
   });
 
@@ -232,7 +235,7 @@ describe('rows: one per family and model, reported apart from unreported, and on
       expect.objectContaining({ recorded: true, family: 'family-f', model: 'model-m', modelReported: true, reviews: 1, findings: 1, confirmedFindings: 1 }),
       { recorded: false, family: null, model: null, modelReported: null,
         reviews: 5, findings: 3, findingsPerReview: 3 / 5, confirmedFindings: 0, rejectedFindings: 1, undisposedFindings: 2, shareConfirmed: 0,
-        approvingReviews: 4, defectsMissed: null, defectsMissedPerApprovingReview: null },
+        approvingReviews: 4, defectsMissed: 0, defectsMissedPerApprovingReview: 0 },
     ]);
   });
 
@@ -309,7 +312,7 @@ describe('the surface', () => {
     expect(await rows(event.createdAt.toISOString().slice(0, 7))).toEqual([{
       recorded: true, family: 'family-live', model: 'model-live', modelReported: true,
       reviews: 1, findings: 2, findingsPerReview: 2, confirmedFindings: 1, rejectedFindings: 0, undisposedFindings: 1, shareConfirmed: 1 / 2,
-      approvingReviews: 0, defectsMissed: null, defectsMissedPerApprovingReview: null,
+      approvingReviews: 0, defectsMissed: 0, defectsMissedPerApprovingReview: null,
     }]);
   });
 
@@ -319,7 +322,7 @@ describe('the surface', () => {
     const api = new ApolloServer({ typeDefs, resolvers });
     const res = await api.executeOperation({
       query: `query($appRef: ID!, $month: String!) { reviewQualityReport(appRef: $appRef, month: $month) {
-        month asOf defectsMissedUnavailableReason
+        month asOf
         rows { recorded family model modelReported reviews findings findingsPerReview confirmedFindings rejectedFindings undisposedFindings shareConfirmed approvingReviews defectsMissed defectsMissedPerApprovingReview }
       } }`,
       variables: { appRef: app.id, month: NOV },
@@ -329,10 +332,97 @@ describe('the surface', () => {
     expect(body.errors).toBeUndefined();
     const r = body.data.reviewQualityReport;
     expect(Number.isNaN(Date.parse(r.asOf))).toBe(false);
-    expect(r).toMatchObject({ month: NOV, defectsMissedUnavailableReason: 'Defect links are not recorded yet (hadron-server#4280).' });
+    expect(r).toMatchObject({ month: NOV });
     expect(r.rows).toEqual([
-      { recorded: true, family: 'family-f', model: 'model-m', modelReported: true, reviews: 1, findings: 3, findingsPerReview: 3, confirmedFindings: 1, rejectedFindings: 0, undisposedFindings: 2, shareConfirmed: 1 / 3, approvingReviews: 1, defectsMissed: null, defectsMissedPerApprovingReview: null },
-      { recorded: false, family: null, model: null, modelReported: null, reviews: 1, findings: 0, findingsPerReview: 0, confirmedFindings: 0, rejectedFindings: 0, undisposedFindings: 0, shareConfirmed: null, approvingReviews: 1, defectsMissed: null, defectsMissedPerApprovingReview: null },
+      { recorded: true, family: 'family-f', model: 'model-m', modelReported: true, reviews: 1, findings: 3, findingsPerReview: 3, confirmedFindings: 1, rejectedFindings: 0, undisposedFindings: 2, shareConfirmed: 1 / 3, approvingReviews: 1, defectsMissed: 0, defectsMissedPerApprovingReview: 0 },
+      { recorded: false, family: null, model: null, modelReported: null, reviews: 1, findings: 0, findingsPerReview: 0, confirmedFindings: 0, rejectedFindings: 0, undisposedFindings: 0, shareConfirmed: null, approvingReviews: 1, defectsMissed: 0, defectsMissedPerApprovingReview: 0 },
     ]);
+  });
+});
+
+describe('#4287: defects missed, from the defect links (#4280; cor:agt:130:05, :06)', () => {
+  const [H1, H2, H3] = ['1', '2', '3'].map((d) => d.repeat(40));
+  let pr: any;
+  /** A build with H1, H2 and H3 frozen in that order (S12b's "later head" order). */
+  beforeEach(async () => {
+    pr = await M.createAgentTask!({}, { input: { appRef: app.id, title: 'PR 8000', source: 'synthetic', assignee: { user: author.id }, references: [{ kind: 'PULL_REQUEST', target: 'https://github.com/example/project/pull/8000' }] } }, ctx(owner.id));
+    await M.setReviewSchedule!({}, { taskRef: pr.id, slots: SLOTS }, ctx(owner.id));
+    for (const head of [H1, H2, H3]) await M.freezePullRequestHead!({}, { taskRef: pr.id, head }, ctx(author.id));
+  });
+  /** One review.defect-linked event on the PR's build task, the payload linkDefectToPullRequest writes. */
+  const link = (defect: string, introducedAtHead: string | null, task = pr) =>
+    db.agentTeamEvent.create({ data: { appId: app.id, taskId: task.id, type: 'review.defect-linked', actorUserId: owner.id, payload: { defect, introducedAtHead } } });
+  const D = (n: number) => `https://github.com/example/project/issues/${9000 + n}`;
+  const byFamily = async () => Object.fromEntries((await rows()).map((r: any) => [r.family, r]));
+
+  it('Victor\'s 130:05 scenario: Ada\'s APPROVE at the introducing head H2 counts; Rico\'s APPROVE at H1 does not', async () => {
+    await review({ inBuild: pr, head: H2, family: 'ada' });
+    await review({ inBuild: pr, head: H1, family: 'rico' });
+    await link(D(1), H2);
+    const f = await byFamily();
+    expect(f.ada).toMatchObject({ approvingReviews: 1, defectsMissed: 1, defectsMissedPerApprovingReview: 1 });
+    expect(f.rico, 'a head approved before the defect was introduced counted it').toMatchObject({ defectsMissed: 0 });
+  });
+
+  it('an approval at a head after the introducing head counts; a non-approving verdict at the introducing head does not', async () => {
+    await review({ inBuild: pr, head: H3, family: 'later' });
+    await review({ inBuild: pr, head: H2, family: 'changes', verdict: 'CHANGES_REQUESTED' });
+    await link(D(1), H2);
+    const f = await byFamily();
+    expect(f.later).toMatchObject({ defectsMissed: 1 });
+    expect(f.changes).toMatchObject({ approvingReviews: 0, defectsMissed: 0, defectsMissedPerApprovingReview: null });
+  });
+
+  it('a link with no introducedAtHead counts against every approving review of the PR', async () => {
+    await review({ inBuild: pr, head: H1, family: 'first' });
+    await review({ inBuild: pr, head: H3, family: 'last' });
+    await link(D(1), null);
+    const f = await byFamily();
+    expect(f.first).toMatchObject({ defectsMissed: 1 });
+    expect(f.last).toMatchObject({ defectsMissed: 1 });
+  });
+
+  it('two defects introduced at one head count 2 for a seat that approved it; a defect on another PR counts nothing here', async () => {
+    await review({ inBuild: pr, head: H2, family: 'ada' });
+    await link(D(1), H2);
+    await link(D(2), H2);
+    // Another PR's defects (one with no head, which would count against every approving review of THAT PR) count nothing here.
+    await link(D(3), H, build);
+    await link(D(4), null, build);
+    expect((await byFamily()).ada).toMatchObject({ approvingReviews: 1, defectsMissed: 2, defectsMissedPerApprovingReview: 2 });
+  });
+
+  it('a family row sums its seats, and the share divides by its approving reviews', async () => {
+    await review({ inBuild: pr, head: H2, family: 'ada' });
+    await review({ inBuild: pr, head: H1, family: 'ada' });
+    await review({ inBuild: pr, head: H2, family: 'ada', verdict: 'FAIL' });
+    await link(D(1), H2);
+    expect((await byFamily()).ada).toMatchObject({ reviews: 3, approvingReviews: 2, defectsMissed: 1, defectsMissedPerApprovingReview: 1 / 2 });
+  });
+
+  it('#4289 blind F1: two heads first frozen at the same instant in one transaction are ordered by event id, not tied', async () => {
+    const [HA, HB] = ['a', 'b'].map((d) => d.repeat(40));
+    const tied = await M.createAgentTask!({}, { input: { appRef: app.id, title: 'PR 8002', source: 'synthetic', assignee: { user: author.id }, references: [{ kind: 'PULL_REQUEST', target: 'https://github.com/example/project/pull/8002' }] } }, ctx(owner.id));
+    await M.setReviewSchedule!({}, { taskRef: tied.id, slots: SLOTS }, ctx(owner.id));
+    // One transaction (one tx_id), one created_at: only the ids order these two first freezes, HA's before HB's.
+    const same = new Date();
+    await db.$transaction(async (tx) => {
+      for (const [id, head] of [['0'.repeat(31) + 'a', HA], ['0'.repeat(31) + 'b', HB]] as const) {
+        await tx.agentTeamEvent.create({ data: { id, appId: app.id, taskId: tied.id, type: 'pr.frozen', actorUserId: author.id, createdAt: same,
+          payload: { head, pullRequest: 'https://github.com/example/project/pull/8002' } } });
+      }
+    });
+    await review({ inBuild: tied, head: HA, family: 'earlier' });
+    await link(D(7), HB, tied);
+    expect((await byFamily()).earlier, 'a tie on (created_at, tx_id) counted a defect introduced after the approved head').toMatchObject({ defectsMissed: 0 });
+  });
+
+  it('the SDL has no defectsMissedUnavailableReason, and defectsMissed is a non-null Int', async () => {
+    const { buildASTSchema, parse } = await import('graphql');
+    const schema = buildASTSchema(parse(typeDefs));
+    const report = (schema.getType('ReviewQualityReport') as any).getFields();
+    expect(report.defectsMissedUnavailableReason).toBeUndefined();
+    const row = (schema.getType('ReviewQualityRow') as any).getFields();
+    expect(String(row.defectsMissed.type)).toBe('Int!');
   });
 });
