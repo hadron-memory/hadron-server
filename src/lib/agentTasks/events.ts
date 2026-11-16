@@ -123,6 +123,11 @@ export type TaskEventPayload =
   /** #2651: the code only. The optional reason text is on the task row, never here (cor:agt:050:29). */
   | { type: 'task.handed-back'; code: TaskHandBackCode }
   /**
+   * #4280 (S12b, Proposed cor:agt:130:05): a defect found after the PR merged traces to this build task's PR. `defect`
+   * is the issue URL as given; `introducedAtHead` a head frozen on this task, or null. Never a readiness input.
+   */
+  | { type: 'review.defect-linked'; defect: string; introducedAtHead: string | null }
+  /**
    * #4084 (cor:agt:120:02, V87 Proposed): the external id a release cleared. The id is readable to every reader of the
    * team's events already (it is on the task, under the same read gate, cor:agt:050:21), so naming it discloses nothing
    * new; the team's reconcile pass needs it, because the task no longer holds it.
@@ -158,6 +163,7 @@ function payloadJson(e: TaskEventPayload): Prisma.InputJsonObject {
   switch (e.type) {
     case 'review.scheduled': return { slots: e.slots };
     case 'pr.frozen': return { head: e.head, pullRequest: e.pullRequest };
+    case 'review.defect-linked': return { defect: e.defect, introducedAtHead: e.introducedAtHead };
     case 'review.seat.assigned': return { slot: e.slot, head: e.head, supersedes: e.supersedes };
     case 'review.verdict': return {
       slot: e.slot, head: e.head, verdict: e.verdict, node: e.node, receipt: e.receipt,
@@ -751,7 +757,9 @@ export type ManagerAct =
   // #4224 (S3 of #4229): the leave-alone marker and the App's sweep mode.
   | 'worker.leave-alone' | 'app.sweep-mode'
   // #4222: the host-setup doors (which workers a host runs, and the App's switch for it).
-  | 'host-setup.assign' | 'host-setup.unassign' | 'host-setup.source';
+  | 'host-setup.assign' | 'host-setup.unassign' | 'host-setup.source'
+  // #4280 (S12b): linking a post-merge defect to the PR it escaped from.
+  | 'review.defect-link';
 
 /** The ids an instructed App-manager act concerns; never content (cor:agt:050:11). */
 export type ManagerActSubject = { taskId?: string; workerId?: string; eventId?: string; tickerId?: string; signalId?: string };
