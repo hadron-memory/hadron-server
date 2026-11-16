@@ -12,14 +12,14 @@
  * THE CONDITIONS, judged under the locks:
  *  - the reporting host runs the worker: its registration lists the worker and, under a server-held setup, the
  *    worker is assigned to that host with its workdir confirmed (the launch readers' ASSIGNMENT_IN_EFFECT);
- *  - the session runs on that host: a host-launched session names it as its launch host; a hand-started one reported
- *    it as its own host, or the host is the only live registration listing the worker (#4294 §10, Rook P2-1);
+ *  - the session runs on that host: a host-launched session names it as its launch host; for a hand-started one it is
+ *    the worker's sole live registration (#4294 §10, Rook P2-1; Peter's ruling, team chat #110707);
  *  - the worker's Agent is SHORT_LIVED (the Agent its open session was bound under, as #4223 reads it);
  *  - the worker is the assignee of no PENDING or STARTED task. A task waiting on its open children is STARTED, so
  *    050:10's G7 is covered.
  *
  * THE LOCK ORDER (src/lib/agentTasks/workerLock.ts): the per-worker assignment lock FIRST, which every assignment,
- * start and bind takes; then the session row FOR UPDATE; then the App's host-setup lock SHARED and every registration
+ * start and bind takes; then the App's host-lapse lock SHARED with its count; then the session row FOR UPDATE; then the App's host-setup lock SHARED and every registration
  * of the App FOR SHARE in id order (resolveSessionEndRequest's order: session, then registrations); then the reads. An
  * assignment to this worker either committed before the lock (the open-task check sees it and refuses) or waits until
  * this transaction ends (it then finds no open session and the ordinary start path runs).
@@ -31,6 +31,8 @@
 
 import { Prisma } from '../../generated/prisma/index.js';
 import { lockWorkersForAssignment } from '../agentTasks/workerLock.js';
+import { lockAppLapseCheckIns } from '../agentTasks/hosts.js';
+import { toNaiveUtc } from '../sessionActivity.js';
 import { ASSIGNMENT_IN_EFFECT, lockHostSetup } from './assignments.js';
 import { workerLifecycle } from './sessionEnd.js';
 import { sessionHasHandoff } from './settle.js';
@@ -66,11 +68,14 @@ export async function endAgentlessSession(
 ): Promise<{ ended: boolean; handoff: boolean }> {
   const { appId, hostId, workerId, sessionId, now } = args;
   await lockWorkersForAssignment(tx, [workerId]);
+  // The App's host-lapse count, held shared until this ends (the start path's order: worker, then lapse; the session-end
+  // sweep's: lapse, then session, then registrations), for the sole-live-registration read below.
+  const checkIns = await lockAppLapseCheckIns(tx, appId);
   const [session] = await tx.$queryRaw<{
-    workerId: string | null; appId: string | null; endedAt: Date | null; deletedAt: Date | null; launchHostId: string | null; host: string | null;
+    workerId: string | null; appId: string | null; endedAt: Date | null; deletedAt: Date | null; launchHostId: string | null;
   }[]>`
     SELECT worker_id AS "workerId", app_id AS "appId", ended_at AS "endedAt", deleted_at AS "deletedAt",
-      launch_host_id AS "launchHostId", host
+      launch_host_id AS "launchHostId"
     FROM sessions WHERE id = ${sessionId} FOR UPDATE`;
   await lockHostSetup(tx, appId, 'shared');
   // Every registration of the App, in id order (pickLiveHost's and fenceHostDecision's lock): the sole-host test below
@@ -94,11 +99,11 @@ export async function endAgentlessSession(
   if (!session || session.workerId !== workerId || session.appId !== appId || session.deletedAt) {
     throw new AgentlessEndRefusal('SESSION_NOT_WORKERS', 'That session is not this worker\'s.');
   }
-  // #4294 §10 (Rook P2-1): a worker may be registered by several hosts, and a host's proof covers only its own machine.
-  // So the session must run on THIS host: a host-launched session names its host; a hand-started one (an interactive
-  // session, C9) counts as this host's when its own client reported this host, or when this host is the only live
-  // registration listing the worker. Refused as not running the worker, so no oracle.
-  if (!(await sessionRunsOn(tx, appId, workerId, session, hostId))) {
+  // #4294 §10 (Rook P2-1; Peter's ruling, team chat #110707): a worker may be registered by several hosts, and a host's
+  // proof covers only its own machine. A session started by a launch operation is ended only by that operation's host;
+  // a hand-started one (an interactive session, C9) only by the worker's sole live registration. Otherwise refused as
+  // not running the worker, so no oracle.
+  if (!(await sessionRunsOn(tx, { appId, workerId, hostId, now, checkIns }, session))) {
     throw new AgentlessEndRefusal('HOST_DOES_NOT_RUN_WORKER', 'This host does not run that worker.');
   }
   if (session.endedAt) {
@@ -122,21 +127,19 @@ export async function endAgentlessSession(
 
 /**
  * Does the session run on `hostId`? A host-launched session: exactly when its launch host is this host. A hand-started
- * one: when the host its own client reported is this host id, or this host is the only live (not lost) registration of
- * the App listing the worker. The caller holds every registration of the App FOR SHARE.
+ * one: when this host is the worker's sole live registration in the App (refreshed within the lapse window, as
+ * pickLiveHost and liveRegistrationsFor read it). The caller holds the lapse count and every registration FOR SHARE.
  */
 async function sessionRunsOn(
   tx: Prisma.TransactionClient,
-  appId: string,
-  workerId: string,
-  session: { launchHostId: string | null; host: string | null },
-  hostId: string,
+  at: { appId: string; workerId: string; hostId: string; now: Date; checkIns: number },
+  session: { launchHostId: string | null },
 ): Promise<boolean> {
-  if (session.launchHostId !== null) return session.launchHostId === hostId;
-  if (session.host === hostId) return true;
+  if (session.launchHostId !== null) return session.launchHostId === at.hostId;
   const hosts = await tx.$queryRaw<{ hostId: string }[]>`
     SELECT DISTINCT r.host_id AS "hostId" FROM host_registrations r
-    JOIN host_registration_workers w ON w.registration_id = r.id AND w.worker_id = ${workerId}
-    WHERE r.app_id = ${appId} AND r.lost_at IS NULL`;
-  return hosts.length === 1 && hosts[0]!.hostId === hostId;
+    JOIN host_registration_workers w ON w.registration_id = r.id AND w.worker_id = ${at.workerId}
+    WHERE r.app_id = ${at.appId}
+      AND r.refreshed_at + make_interval(secs => r.poll_interval_seconds * ${at.checkIns}) >= ${toNaiveUtc(at.now)}::timestamp`;
+  return hosts.length === 1 && hosts[0]!.hostId === at.hostId;
 }

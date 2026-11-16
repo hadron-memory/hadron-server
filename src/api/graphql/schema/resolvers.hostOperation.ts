@@ -63,6 +63,7 @@ import {
   HostRegistrationError,
   isRegistrationLive,
   registerHost,
+  lockAppLapseCheckIns,
   HOST_ID_PATTERN,
   HOST_LAPSE_CHECK_INS_DEFAULT,
 } from '../../../lib/agentTasks/hosts.js';
@@ -317,7 +318,11 @@ export const hostOperationMutations = {
       if (agentAbsent) {
         // The operation's type and worker never change after issue, so this unlocked read names the right worker.
         const head = await tx.hostOperation.findUnique({ where: { id: input.id }, select: { type: true, workerId: true, appId: true, hostId: true } });
-        if (head?.type === 'worker.end' && head.appId === app.id && head.hostId === host.hostId) await lockWorkersForAssignment(tx, [head.workerId]);
+        if (head?.type === 'worker.end' && head.appId === app.id && head.hostId === host.hostId) {
+          await lockWorkersForAssignment(tx, [head.workerId]);
+          // And the App's host-lapse count before the operation's row, as the settle sweep takes them (#4294 §10).
+          await lockAppLapseCheckIns(tx, app.id);
+        }
       }
       const [locked] = await tx.$queryRaw<{ id: string }[]>`SELECT id FROM host_operations WHERE id = ${input.id} FOR UPDATE`;
       const op = locked ? await tx.hostOperation.findUnique({ where: { id: input.id } }) : null;

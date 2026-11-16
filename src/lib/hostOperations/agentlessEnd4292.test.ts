@@ -272,19 +272,19 @@ describe('the session must run on the calling host (#4294 §10, Rook P2-1)', () 
     expect((await sessionOf()).endedAt).toBeNull();
   });
 
-  it('a hand-started session with two registering hosts: neither ends it, unless its client reported the host', async () => {
+  it('a hand-started session with two live registering hosts: neither ends it, whatever host its client reported (Peter #110707)', async () => {
     const orca2 = await secondHost();
     expect(await code(endAgentless({}, orca2))).toBe('HOST_DOES_NOT_RUN_WORKER');
     expect(await code(endAgentless())).toBe('HOST_DOES_NOT_RUN_WORKER');
-    expect((await sessionOf()).endedAt).toBeNull();
     await db.session.update({ where: { id: f.session.id }, data: { host: 'orca1' } });
-    expect(await code(endAgentless({}, orca2))).toBe('HOST_DOES_NOT_RUN_WORKER');
-    expect(await endAgentless()).toMatchObject({ ended: true });
+    expect(await code(endAgentless()), 'a self-reported session host stood in for the sole live registration').toBe('HOST_DOES_NOT_RUN_WORKER');
+    expect((await sessionOf()).endedAt).toBeNull();
   });
 
-  it('a hand-started session whose only other registering host is lost: the remaining host is the sole one and ends it', async () => {
-    await secondHost();
-    await db.hostRegistration.updateMany({ where: { appId: f.app.id, hostId: 'orca2' }, data: { lostAt: new Date() } });
+  it('a hand-started session whose other registering host has lapsed: the remaining live host is the sole one and ends it', async () => {
+    const orca2 = await secondHost();
+    await db.hostRegistration.updateMany({ where: { appId: f.app.id, hostId: 'orca2' }, data: { refreshedAt: new Date(Date.now() - 24 * 3_600_000) } });
+    expect(await code(endAgentless({}, orca2)), 'a lapsed host counted as live').toBe('HOST_DOES_NOT_RUN_WORKER');
     expect(await endAgentless()).toMatchObject({ ended: true });
   });
 });
