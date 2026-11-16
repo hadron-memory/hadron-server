@@ -1782,6 +1782,8 @@ enum SessionEndReason {
   ended
   superseded
   expired
+  /// #4292: the host that runs a SHORT_LIVED worker ended the session on its proof that no agent runs (cor:agt:050:10, Proposed).
+  agent_absent
 }
 
 model Session {

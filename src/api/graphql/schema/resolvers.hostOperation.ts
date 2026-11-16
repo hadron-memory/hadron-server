@@ -74,6 +74,7 @@ import { fenceHostDecision, insertWorkerStart, LaunchRefusal, liveRegistrationsF
 import { HOST_WORKER_NOT_ASSIGNED } from '../../../lib/hostOperations/assignments.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { sessionHasHandoff } from '../../../lib/hostOperations/settle.js';
+import { AGENT_ABSENT, AgentlessEndRefusal, endAgentlessSession, isAgentAbsentReason } from '../../../lib/hostOperations/agentlessEnd.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { normalizeAvailability, type AvailabilityInput } from './resolvers.agentTaskAlarms.js';
 import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
@@ -309,7 +310,15 @@ export const hostOperationMutations = {
     }
     if (status === 'succeeded' && input.failureReason != null) throw badInput('Only a failure carries a reason.');
     const endedSessions: string[] = [];
+    // #4292: a worker.end failed with the closed proof AGENT_ABSENT may end the session, which needs the worker's
+    // per-worker assignment lock; it is taken before any row lock (workerLock.ts), so before the operation's own.
+    const agentAbsent = status === 'failed' && isAgentAbsentReason(reason);
     const reported = await asHost(ctx, input.appRef, async (tx, app, host) => {
+      if (agentAbsent) {
+        // The operation's type and worker never change after issue, so this unlocked read names the right worker.
+        const head = await tx.hostOperation.findUnique({ where: { id: input.id }, select: { type: true, workerId: true, appId: true, hostId: true } });
+        if (head?.type === 'worker.end' && head.appId === app.id && head.hostId === host.hostId) await lockWorkersForAssignment(tx, [head.workerId]);
+      }
       const [locked] = await tx.$queryRaw<{ id: string }[]>`SELECT id FROM host_operations WHERE id = ${input.id} FOR UPDATE`;
       const op = locked ? await tx.hostOperation.findUnique({ where: { id: input.id } }) : null;
       if (!op || op.appId !== app.id || op.hostId !== host.hostId) throw opNotFound(input.id);
@@ -357,7 +366,18 @@ export const hostOperationMutations = {
           await tx.session.updateMany({ where: { id: args.sessionId, endedAt: null }, data: { endedAt: now, endReason: 'ended' } });
           endedSessions.push(args.sessionId);
         }
-        const ended = status === 'succeeded' || Boolean(session?.endedAt);
+        // #4292: a failure that proves no agent runs ends the session of a short-lived worker this host runs, with no
+        // open task (the same function as endAgentlessSession). A condition unmet leaves today's outcome: FAILED, open.
+        let agentlessEnded = false;
+        if (agentAbsent && session && !session.endedAt) {
+          try {
+            agentlessEnded = (await endAgentlessSession(tx, { appId: app.id, hostId: host.hostId, workerId: args.workerId, sessionId: args.sessionId, now })).ended;
+          } catch (e) {
+            if (!(e instanceof AgentlessEndRefusal)) throw e;
+          }
+          if (agentlessEnded) endedSessions.push(args.sessionId);
+        }
+        const ended = status === 'succeeded' || agentlessEnded || Boolean(session?.endedAt);
         if (ended) {
           outcome = 'succeeded';
           result = { handoff: await sessionHasHandoff(tx, args.workerId, args.sessionId) };
@@ -399,6 +419,45 @@ export const hostOperationMutations = {
     // A session the host ended releases its memory keys once its end is durable, as every end does.
     for (const id of endedSessions) sessionKeyCache.evict(id);
     return reported;
+  }),
+
+  /**
+   * #4292 (S15 of #4229; cor:agt:050:10, Proposed) — the host's own end of an open session of a SHORT_LIVED worker it
+   * runs, after proving no agent runs (AGENT_ABSENT): the backstop when the platform's worker.end never came or already
+   * failed. The host is the key's; the request names none. Refusals: HOST_DOES_NOT_RUN_WORKER (also for a worker it
+   * cannot see), SESSION_NOT_WORKERS, WORKER_NOT_SHORT_LIVED, WORKER_HAS_OPEN_TASK (naming the task). A session that
+   * already ended answers `ended: false` and writes nothing. Recorded as the key's `session` use, refusals included.
+   */
+  endAgentlessSession: async (
+    _: unknown,
+    { input }: { input: { appRef: string; workerRef: string; sessionId: string; reason: string } },
+    ctx: Context,
+  ) => recordingRefusal(ctx, 'session', null, async () => {
+    if (!input) throw badInput('input is required.');
+    if (input.reason !== AGENT_ABSENT) throw badInput(`reason is ${AGENT_ABSENT}.`);
+    if (typeof input.sessionId !== 'string' || input.sessionId === '') throw badInput('sessionId is required.');
+    const { app, host, authorize } = await hostKeyEntry(ctx, input.appRef);
+    // A worker of another App, or none, is refused like one this host does not run: no oracle.
+    const workerId = await resolveTaskWorkerId(ctx, app.id, input.workerRef);
+    const now = new Date();
+    let out: { ended: boolean; handoff: boolean };
+    try {
+      out = await ctx.db.$transaction(async (tx) => {
+        await authorize(tx);
+        if (!workerId) throw new AgentlessEndRefusal('HOST_DOES_NOT_RUN_WORKER', 'This host does not run that worker.');
+        const r = await endAgentlessSession(tx, { appId: app.id, hostId: host.hostId, workerId, sessionId: input.sessionId, now });
+        await recordHostKeyUse(tx, host, 'session', { count: r.ended ? 1 : 0 });
+        return r;
+      });
+    } catch (e) {
+      if (e instanceof AgentlessEndRefusal) {
+        throw taskError(e.code, e.message, e.taskId ? { taskId: e.taskId } : undefined);
+      }
+      throw e;
+    }
+    // An ended session releases its memory keys once its end is durable, as every end does.
+    if (out.ended) sessionKeyCache.evict(input.sessionId);
+    return { sessionId: input.sessionId, ...out };
   }),
 
   /**

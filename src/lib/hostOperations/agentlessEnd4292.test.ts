@@ -197,6 +197,22 @@ describe('entry 2: endAgentlessSession, the host\'s own end', () => {
     expect(await db.hostKeyUse.count({ where: { appKeyId: orca2.id, refusedCode: 'HOST_DOES_NOT_RUN_WORKER' } })).toBe(1);
   });
 
+  it('a server-held setup (#4222): only the host the worker is assigned to, with its workdir confirmed, runs it', async () => {
+    await db.hostRegistrationWorker.updateMany({ where: { workerId: f.kit.id }, data: { worktrees: ['kit'] } });
+    await db.app.update({ where: { id: f.app.id }, data: { hostSetupSource: 'server' } });
+    const assign = (hostId: string) => db.hostWorkerAssignment.create({
+      data: { id: generateId(), appId: f.app.id, hostId, workerId: f.kit.id, workdir: 'kit', family: 'claude', createdByUserId: f.manager.id },
+    });
+    // orca1's registration lists Kit, but the platform assigned Kit to orca2.
+    const elsewhere = await assign('orca2');
+    expect(await code(endAgentless())).toBe('HOST_DOES_NOT_RUN_WORKER');
+    expect((await sessionOf()).endedAt).toBeNull();
+    // Assigned to orca1 instead: it runs Kit.
+    await db.hostWorkerAssignment.delete({ where: { id: elsewhere.id } });
+    await assign('orca1');
+    expect(await endAgentless()).toMatchObject({ ended: true });
+  });
+
   it('a worker of no App or another App reads HOST_DOES_NOT_RUN_WORKER (no oracle)', async () => {
     expect(await code(endAgentless({ workerRef: generateId() }))).toBe('HOST_DOES_NOT_RUN_WORKER');
   });

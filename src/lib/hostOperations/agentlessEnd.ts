@@ -1,0 +1,105 @@
+/**
+ * #4292 (S15 of the Team on Orca epic, #4229) — the host ends an open session of a SHORT_LIVED worker it runs, after
+ * proving that no agent runs (the closed reason AGENT_ABSENT). A third explicit end besides the worker's own and the
+ * end-session host operation (cor:agt:050:10, Proposed amendment; cross-referenced from 070:05). Holger's C9 ruling
+ * (hrn:node:hadronmemory.com:hadron-business:decisions:run-settings-are-not-worker-identity): the same for an
+ * interactive short-lived session; the agent ending its own session stays the fast path, the host is the backstop.
+ * Whether the agent was interactive or headless is the host's concern when it proves absence; here it is one worker.
+ *
+ * ONE FUNCTION, TWO ENTRY POINTS: a `worker.end` reported FAILED with AGENT_ABSENT (reportHostOperation), and the
+ * host's own `endAgentlessSession`, so the two cannot drift.
+ *
+ * THE CONDITIONS, judged under the locks:
+ *  - the reporting host runs the worker: its registration lists the worker and, under a server-held setup, the
+ *    worker is assigned to that host with its workdir confirmed (the launch readers' ASSIGNMENT_IN_EFFECT);
+ *  - the worker's Agent is SHORT_LIVED (the Agent its open session was bound under, as #4223 reads it);
+ *  - the worker is the assignee of no PENDING or STARTED task. A task waiting on its open children is STARTED, so
+ *    050:10's G7 is covered.
+ *
+ * THE LOCK ORDER (src/lib/agentTasks/workerLock.ts): the per-worker assignment lock FIRST, which every assignment,
+ * start and bind takes; then the session row FOR UPDATE; then the App's host-setup lock SHARED and the host's
+ * registration row FOR SHARE (the setHostWorkerAvailability order: worker, then registration); then the reads. An
+ * assignment to this worker either committed before the lock (the open-task check sees it and refuses) or waits until
+ * this transaction ends (it then finds no open session and the ordinary start path runs).
+ *
+ * THE END: `endedAt` now, `endReason: agent_absent`, no handoff. The next bind reads continuity MISSING (cor:agt:020:10,
+ * "no handoff was recorded"), never an empty handoff. A session that already ended is left exactly as it is.
+ */
+
+import { Prisma } from '../../generated/prisma/index.js';
+import { lockWorkersForAssignment } from '../agentTasks/workerLock.js';
+import { ASSIGNMENT_IN_EFFECT, lockHostSetup } from './assignments.js';
+import { workerLifecycle } from './sessionEnd.js';
+import { sessionHasHandoff } from './settle.js';
+
+/** The closed proof a host gives that no agent runs in the worker's worktree. */
+export const AGENT_ABSENT = 'AGENT_ABSENT';
+
+/**
+ * Does a host's free-text failure reason carry the closed proof? Its leading code, up to whitespace or a colon, is
+ * exactly AGENT_ABSENT (the context reset's convention for a coded failure reason). Anything else is free text.
+ */
+export const isAgentAbsentReason = (reason: string | null | undefined): boolean =>
+  ((reason ?? '').split(/[\s:]/, 1)[0] ?? '') === AGENT_ABSENT;
+
+export type AgentlessEndRefusalCode = 'HOST_DOES_NOT_RUN_WORKER' | 'SESSION_NOT_WORKERS' | 'WORKER_NOT_SHORT_LIVED' | 'WORKER_HAS_OPEN_TASK';
+
+/** A condition was not met; nothing was written. `taskId` names the open task for WORKER_HAS_OPEN_TASK. */
+export class AgentlessEndRefusal extends Error {
+  constructor(readonly code: AgentlessEndRefusalCode, message: string, readonly taskId?: string) {
+    super(message);
+    this.name = 'AgentlessEndRefusal';
+  }
+}
+
+/**
+ * End `sessionId` of `workerId` on the host's proof, in the caller's transaction (which holds the App's authority
+ * anchor shared and has re-checked the host key). Returns `ended: true` when this call ended it, `ended: false` when it
+ * had already ended (nothing written), and whether a handoff names it. Throws {@link AgentlessEndRefusal}.
+ */
+export async function endAgentlessSession(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; hostId: string; workerId: string; sessionId: string; now: Date },
+): Promise<{ ended: boolean; handoff: boolean }> {
+  const { appId, hostId, workerId, sessionId, now } = args;
+  await lockWorkersForAssignment(tx, [workerId]);
+  const [session] = await tx.$queryRaw<{ workerId: string | null; appId: string | null; endedAt: Date | null; deletedAt: Date | null }[]>`
+    SELECT worker_id AS "workerId", app_id AS "appId", ended_at AS "endedAt", deleted_at AS "deletedAt"
+    FROM sessions WHERE id = ${sessionId} FOR UPDATE`;
+  await lockHostSetup(tx, appId, 'shared');
+  const [reg] = await tx.$queryRaw<{ id: string }[]>`
+    SELECT id FROM host_registrations WHERE app_id = ${appId} AND host_id = ${hostId} FOR SHARE`;
+  const runs = reg
+    ? await tx.$queryRaw<{ ok: number }[]>`
+        SELECT 1 AS ok FROM host_registrations r
+        JOIN host_registration_workers w ON w.registration_id = r.id AND w.worker_id = ${workerId}
+        JOIN workers wk ON wk.id = w.worker_id AND wk.app_id = r.app_id
+        JOIN apps a ON a.id = r.app_id
+        LEFT JOIN host_worker_assignments ha
+          ON a.host_setup_source = 'server' AND ha.app_id = r.app_id AND ha.host_id = r.host_id AND ha.worker_id = w.worker_id
+        WHERE r.id = ${reg.id} AND ${ASSIGNMENT_IN_EFFECT}`
+    : [];
+  if (runs.length === 0) {
+    throw new AgentlessEndRefusal('HOST_DOES_NOT_RUN_WORKER', 'This host does not run that worker.');
+  }
+  if (!session || session.workerId !== workerId || session.appId !== appId || session.deletedAt) {
+    throw new AgentlessEndRefusal('SESSION_NOT_WORKERS', 'That session is not this worker\'s.');
+  }
+  if (session.endedAt) {
+    return { ended: false, handoff: await sessionHasHandoff(tx, workerId, sessionId) };
+  }
+  const { shortLived } = await workerLifecycle(tx, workerId);
+  if (!shortLived) {
+    throw new AgentlessEndRefusal('WORKER_NOT_SHORT_LIVED', 'Only a short-lived worker\'s session is ended on a host\'s proof that no agent runs.');
+  }
+  const open = await tx.agentTask.findFirst({
+    where: { assigneeWorkerId: workerId, status: { in: ['pending', 'started'] } },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    select: { id: true },
+  });
+  if (open) {
+    throw new AgentlessEndRefusal('WORKER_HAS_OPEN_TASK', 'The worker is the assignee of an open task, so its session stays open.', open.id);
+  }
+  await tx.session.updateMany({ where: { id: sessionId, endedAt: null }, data: { endedAt: now, endReason: 'agent_absent' } });
+  return { ended: true, handoff: await sessionHasHandoff(tx, workerId, sessionId) };
+}
