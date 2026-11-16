@@ -15,9 +15,13 @@ import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { resolvers, type Context } from './resolvers.js';
 import { runAsActor } from '../../../lib/requestActor.js';
+import { pendingTaskWakes } from '../../../lib/agentTasks/taskWakes.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
+// #4286: whether a run may read its App's team (a run, its root trigger and a team-snapshot grant); false unless a pin sets it.
+const runGrant = vi.hoisted(() => ({ value: false }));
+vi.mock('../../../lib/auth/runTeamRead.js', () => ({ runMayReadTeam: vi.fn(async () => runGrant.value) }));
 
 const M = resolvers.Mutation as Record<string, (...args: any[]) => Promise<any>>;
 const H1 = 'a'.repeat(40), H2 = 'b'.repeat(40), NEVER = 'c'.repeat(40);
@@ -41,6 +45,7 @@ const code = async (p: Promise<unknown>) => { try { await p; return 'RESOLVED'; 
 const refusal = async (p: Promise<unknown>) => { try { await p; return 'RESOLVED'; } catch (e: any) { return JSON.stringify({ message: e.message, extensions: e.extensions }); } };
 
 beforeEach(async () => {
+  runGrant.value = false;
   await cleanDb(db);
   const [manager, member, outsider, stranger] = await Promise.all(['dl-manager', 'dl-member', 'dl-outsider', 'dl-stranger'].map((handle) => db.user.create({ data: { handle, roles: ['READER'] } })));
   const org = await db.organization.create({ data: { name: 'Defects', urn: `defects-${generateId()}.test` } });
@@ -117,9 +122,18 @@ describe('#4280: who may link a defect to a PR', () => {
     expect(await linkEvents()).toHaveLength(0);
   });
 
-  it('a run may not link, even one started by a person who manages the App', async () => {
+  it('a run may not link, even one started by a person who manages the App: DEFECT_LINK_FORBIDDEN, nothing written', async () => {
     const run = { db, appId: f.app.id, userId: f.manager.id, organizationId: f.org.id, clientId: `run:${generateId()}`, roles: [] } as unknown as Context;
-    expect(await code(link(run))).not.toBe('RESOLVED');
+    expect(await code(link(run))).toBe('DEFECT_LINK_FORBIDDEN');
+    expect(await linkEvents()).toHaveLength(0);
+  });
+
+  it('#4286: a userless run of the App that may read its team is refused DEFECT_LINK_FORBIDDEN; one that may not, as a missing task', async () => {
+    const run = { db, appId: f.app.id, organizationId: f.org.id, clientId: `run:${generateId()}`, roles: [] } as unknown as Context;
+    runGrant.value = true;
+    expect(await code(link(run)), 'a userless run that may read the task got another answer').toBe('DEFECT_LINK_FORBIDDEN');
+    runGrant.value = false;
+    expect(await code(link(run))).toBe('TASK_NOT_FOUND');
     expect(await linkEvents()).toHaveLength(0);
   });
 });
@@ -163,6 +177,28 @@ describe('#4280: the link itself', () => {
     const again = await link(asWorker(f.peter), { introducedAtHead: H2 });
     expect(again).toMatchObject({ eventId: first.eventId, introducedAtHead: H1, created: false });
     expect(await linkEvents()).toHaveLength(1);
+  });
+
+  it('#4286: two concurrent links of one pair write one event; exactly one call says created', async () => {
+    const [a, b] = await Promise.all([link(asWorker(f.colin), { introducedAtHead: H1 }), link(asWorker(f.peter), { introducedAtHead: H1 })]);
+    expect(await linkEvents()).toHaveLength(1);
+    expect(a.eventId).toBe(b.eventId);
+    expect([a.created, b.created].filter(Boolean)).toHaveLength(1);
+  });
+
+  it('#4286: a retry of a linked pair still validates its head: an unfrozen introducedAtHead is refused, not answered with the link', async () => {
+    await link(asWorker(f.colin), { introducedAtHead: H1 });
+    expect(await code(link(asWorker(f.colin), { introducedAtHead: NEVER }))).toBe('DEFECT_HEAD_NOT_FROZEN');
+    expect(await linkEvents()).toHaveLength(1);
+  });
+
+  it('#4286: a link is not the assignee acting on its task: it leaves the assignee\'s assignment wake pending', async () => {
+    const t = await M.createAgentTask!({}, { input: { appRef: f.app.id, source: 'synthetic', title: 'QA-held build', assignee: { worker: f.colin.id },
+      references: [{ kind: 'PULL_REQUEST', target: 'https://github.com/example/project/pull/8001' }] } }, person(f.manager.id));
+    const wakes = async () => ((await pendingTaskWakes(db, [f.colin.id], new Date())).get(f.colin.id) ?? []).filter((w) => w.taskId === t.id);
+    expect(await wakes()).toHaveLength(1);
+    await link(asWorker(f.colin), { prTaskRef: t.id });
+    expect(await wakes(), 'the defect link cleared the assignee\'s assignment wake').toHaveLength(1);
   });
 
   it('a task with no pull_request reference is refused, nothing written', async () => {
