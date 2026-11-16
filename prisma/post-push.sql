@@ -836,6 +836,14 @@ CREATE INDEX IF NOT EXISTS usage_events_session_activity_idx
 CREATE INDEX IF NOT EXISTS agent_team_events_person_activity_idx
   ON agent_team_events (actor_user_id, app_id, created_at) WHERE actor_worker_id IS NULL AND task_id IS NOT NULL;
 
+-- #4273: the worker-liveness read (workerActivitySql) keeps a worker's open sessions and the ended ones that end at or after
+-- its latest start; these two partial indexes serve those ranges. Same definitions as migrations
+-- 20261115290000_sessions_worker_ended_idx and 20261115291000_sessions_worker_started_idx (built CONCURRENTLY there).
+CREATE INDEX IF NOT EXISTS sessions_worker_ended_idx
+  ON sessions (worker_id, ended_at DESC, id DESC) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS sessions_worker_started_idx
+  ON sessions (worker_id, started_at DESC) WHERE deleted_at IS NULL;
+
 -- #1647: the admin-erasure audit is append-only and its reason is trimmed, 1-500 code points
 -- (Prisma can model neither; the migration carries the same statements).
 ALTER TABLE user_deletion_audits DROP CONSTRAINT IF EXISTS chk_user_deletion_reason;

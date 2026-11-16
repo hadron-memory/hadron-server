@@ -14,7 +14,7 @@ import { generateId } from '../id.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { PrismaClient } from '../../generated/prisma/index.js';
-import { evaluateStalls } from './stall.js';
+import { evaluateStalls, loadStallInputs, raiseStallAlarm, stallCandidates, STALL_WINDOW_DEFAULTS } from './stall.js';
 import { taskStallTick } from '../../jobs/taskStallEvaluator.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -182,8 +182,10 @@ describe('#4273 — acceptance 4(c): the rows a settled pass reads do not follow
 
   async function settledPassReads(): Promise<{ events: number; usage: number; tasks: number }> {
     return db.$transaction(async (tx) => {
+      // Index-only scans are switched off so every row an index path visits is a counted heap fetch (else the counters would
+      // read 0 for a covering index and the pin could not fail).
       await tx.$executeRaw`SET LOCAL enable_indexonlyscan = off`;
-      await evaluateStalls(tx as unknown as PrismaClient, new Date());
+      expect(await evaluateStalls(tx as unknown as PrismaClient, new Date())).toEqual([]); // a settled pass raises nothing
       return { events: await rowsRead(tx, 'agent_team_events'), usage: await rowsRead(tx, 'usage_events'), tasks: await rowsRead(tx, 'agent_tasks') };
     });
   }
@@ -216,4 +218,118 @@ describe('#4273 — acceptance 4(c): the rows a settled pass reads do not follow
     const large = await settledPassReads();
     expect(large.events).toBeLessThanOrEqual(small.events + 10);
   }, 60_000);
+});
+
+describe('#4273 — acceptance 4(c) on the WHOLE tick: session rows read do not follow ended-session history', () => {
+  async function tickSessionRows(): Promise<number> {
+    const url = new URL(process.env.DATABASE_URL!);
+    url.searchParams.set('options', '-c enable_indexonlyscan=off -c enable_seqscan=off'); // every row an index path visits is a counted fetch; a test table is too small for the planner to prefer an index
+    const read = async () => {
+      const [r] = await db.$queryRaw<{ n: bigint }[]>`SELECT COALESCE(seq_tup_read, 0) + COALESCE(idx_tup_fetch, 0) AS n FROM pg_stat_user_tables WHERE relname = 'sessions'`;
+      return Number(r?.n ?? 0);
+    };
+    // Backend counters reach the shared view when a backend flushes them (on idle, or on exit), so wait until the figure
+    // stops moving (two equal reads 600 ms apart) instead of trusting one fixed sleep: a loaded machine flushes late.
+    const counted = async () => {
+      let last = await read();
+      for (let i = 0; i < 40; i++) {
+        await new Promise((r) => setTimeout(r, 600));
+        const now = await read();
+        if (now === last) return now;
+        last = now;
+      }
+      return last;
+    };
+    const client = new PrismaClient({ datasourceUrl: url.toString() });
+    await client.$connect();
+    const before = await counted();
+    await taskStallTick(client as any, new Date());
+    await client.$disconnect(); // a backend's counters are flushed when it exits
+    return (await counted()) - before;
+  }
+
+  async function endedSessions(from: number, count: number) {
+    await db.$executeRaw`INSERT INTO sessions (id, app_id, worker_id, started_at, updated_at, ended_at)
+      SELECT md5('es' || w || k), ${appId}, w, now() - ((100 + k) || ' days')::interval, now() - ((100 + k) || ' days')::interval + interval '1 hour', now() - ((100 + k) || ' days')::interval + interval '1 hour'
+      FROM unnest(ARRAY[${anne}, ${liam}, ${ada}]::text[]) w, generate_series(${from}, ${from + count - 1}) k`;
+    await db.$executeRaw`ANALYZE sessions`;
+  }
+
+  it('a settled whole tick reads the same session rows with 10 ended sessions per worker as with 400', async () => {
+    for (let i = 0; i < 4; i++) await pending('10:00', i % 2 ? anne : liam);
+    // Open sessions for the assignees: the rows that DO matter.
+    for (const w of [anne, liam]) await db.session.create({ data: { id: generateId(), appId, workerId: w, startedAt: new Date(Date.now() - 3_600_000), updatedAt: new Date() } });
+    await endedSessions(1, 10);
+    await taskStallTick(db, new Date()); // settle: the first pass raises and records
+    const small = await tickSessionRows();
+    await endedSessions(11, 390);
+    const large = await tickSessionRows();
+    expect(large).toBeLessThanOrEqual(small + 20);
+    expect(large).toBeLessThan(200); // 400 ended sessions x 3 workers = 1,200 rows of history per liveness read before
+  }, 120_000);
+});
+
+describe('#4273 — the pruned session read answers exactly what the full read answered', () => {
+  it('lastActiveAt, live, open and binding fields over open, overlapping, tied, deleted, auto-expired and out-of-order sessions', async () => {
+    const { loadWorkersActivity } = await import('../../api/graphql/schema/resolvers.worker.js');
+    const now = at('12:00');
+    const day = (d: number, h = 0) => new Date(at('12:00').getTime() - d * 86_400_000 + h * 3_600_000);
+    const mk = (workerId: string, o: Record<string, unknown>) => db.session.create({ data: { id: generateId(), appId, workerId, ...o } as any });
+    // anne: a long-lived ended session that overlaps the latest start, older ended ones, a tie, a deleted one, an auto-expired one.
+    await mk(anne, { startedAt: day(40), updatedAt: day(30), endedAt: day(1) }); // overlaps the latest start: kept
+    await mk(anne, { startedAt: day(20), updatedAt: day(19), endedAt: day(19) }); // ended before the latest start: pruned, beaten
+    await mk(anne, { startedAt: day(3), updatedAt: day(3, 5), endedAt: day(2) });
+    await mk(anne, { startedAt: day(3), updatedAt: day(3, 6), endedAt: day(2) }); // same end as the one above
+    await mk(anne, { startedAt: day(0, -2), updatedAt: day(0, -1), deletedAt: day(0) }); // deleted: counts for nothing
+    await mk(anne, { startedAt: day(1, 2), updatedAt: day(1, 3), autoExpiredAt: day(1, 4), endedAt: day(1, 5) });
+    // liam: only ended sessions, the newest not the longest.
+    await mk(liam, { startedAt: day(10), updatedAt: day(9), endedAt: day(8) });
+    await mk(liam, { startedAt: day(5), updatedAt: day(5), endedAt: day(4) });
+    await mk(liam, { startedAt: day(30), updatedAt: day(2), endedAt: day(2) }); // started long ago, ended last
+    // ada: an open session and old ended ones.
+    await mk(ada, { startedAt: day(0, -1), updatedAt: day(0, -1), family: 'claude', llmModel: 'm' });
+    await mk(ada, { startedAt: day(9), updatedAt: day(9), endedAt: day(8) });
+    const got = await loadWorkersActivity({ db } as unknown as Context, [anne, liam, ada], now);
+    // The full read: every undeleted session, LEAST(GREATEST(started, updated unless auto-expired, usage), ended).
+    const all = await db.session.findMany({ where: { workerId: { in: [anne, liam, ada] }, deletedAt: null } });
+    for (const w of [anne, liam, ada]) {
+      const times = all.filter((x) => x.workerId === w).map((x) => {
+        const v = Math.max(x.startedAt.getTime(), x.autoExpiredAt || !x.updatedAt ? 0 : x.updatedAt.getTime());
+        return x.endedAt ? Math.min(v, x.endedAt.getTime()) : v;
+      });
+      expect(got.get(w)?.lastActiveAt?.getTime()).toBe(Math.max(...times));
+    }
+    expect(got.get(ada)?.bound).toBe(true);
+    expect(got.get(anne)?.bound).toBe(false);
+  });
+});
+
+describe('#4273 — what the skip replaces: a raise for an already-taken key refuses and writes nothing', () => {
+  const writes = async () => ({
+    events: await db.agentTeamEvent.count(),
+    schedule: await db.agentTeamAlarmSchedule.count(),
+    availability: await db.workerAvailability.count(),
+  });
+
+  async function candidateFor(taskId: string, now: Date) {
+    const [inputs] = await loadStallInputs(db, { id: taskId }, now);
+    return stallCandidates(inputs!, STALL_WINDOW_DEFAULTS, now).find((c) => c.rule === 'not-started')!;
+  }
+
+  for (const state of ['live', 'acknowledged', 'escalation ended'] as const) {
+    it(`${state}: the old path (raiseStallAlarm) returns null and writes nothing, and the pass, which now skips it, writes nothing either`, async () => {
+      const t = await pending('10:00');
+      const now = at('10:15');
+      const c = await candidateFor(t.id, now);
+      expect(await raiseStallAlarm(db, c, now)).not.toBeNull(); // raised once
+      const [alarm] = await db.agentTeamEvent.findMany({ where: { taskId: t.id } });
+      if (state === 'acknowledged') await db.agentTeamEvent.update({ where: { id: alarm!.id }, data: { acknowledgedAt: at('10:20'), acknowledgedByWorkerId: ada } });
+      if (state === 'escalation ended') await db.alarmEscalationEnd.create({ data: { eventId: alarm!.id, endedAt: at('10:30') } });
+      const before = await writes();
+      expect(await raiseStallAlarm(db, c, at('10:40'))).toBeNull(); // the refusal the skip replaces: the key is taken, in every state
+      expect(await writes()).toEqual(before);
+      expect(await evaluateStalls(db, at('10:40'))).toEqual([]);
+      expect(await writes()).toEqual(before);
+    });
+  }
 });
