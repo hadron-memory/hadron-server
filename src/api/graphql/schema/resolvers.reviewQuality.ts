@@ -12,12 +12,10 @@ import { taskError, withReadableApp } from './resolvers.agentTask.js';
 import { toNaiveUtc } from '../../../lib/sessionActivity.js';
 
 const MONTH = /^([2-9]\d{3})-(0[1-9]|1[0-2])$/;
-/** Until `review.defect-linked` events exist (S12b), defects missed cannot be counted: null with this reason, never 0. */
-export const DEFECTS_MISSED_UNAVAILABLE = 'Defect links are not recorded yet (hadron-server#4280).';
 
 type Counted = {
   asOf: Date; family: string | null; model: string | null; reported: boolean | null;
-  reviews: number | null; findings: number; confirmed: number; rejected: number; undisposed: number; approving: number;
+  reviews: number | null; findings: number; confirmed: number; rejected: number; undisposed: number; approving: number; missed: number;
 };
 
 /** `YYYY-MM` to the half-open UTC range [first instant of the month, first instant of the next). */
@@ -44,6 +42,11 @@ const plain = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
  * - a snapshot with no family or no model (null, absent before S12a, or empty) is "not recorded": one row, never a family.
  * - findings are the seat's `result_findings`; the dispositions trigger keeps `finding_dispositions` at most one per
  *   finding and only on findings that exist, so undisposed = findings - dispositions.
+ * - #4287, defects missed (#4280's rule; cor:agt:130:05, :06): an approving review misses each defect linked
+ *   (`review.defect-linked`) to its seat's build task whose `introducedAtHead` is null, or was first frozen on that
+ *   task no later than the head the review approved: heads in the order of the build's `pr.frozen` events, a head
+ *   frozen twice at its FIRST freeze (created_at, then tx_id, then id). A head approved before the defect was
+ *   introduced never contained it. One link per (defect, task), so each defect counts once per review.
  */
 async function countReviews(tx: Context['db'], appId: string, start: Date, end: Date): Promise<Counted[]> {
   return tx.$queryRaw<Counted[]>(Prisma.sql`
@@ -61,7 +64,18 @@ async function countReviews(tx: Context['db'], appId: string, start: Date, end: 
         CASE WHEN jsonb_typeof(t.result_findings) = 'array' THEN jsonb_array_length(t.result_findings) ELSE 0 END AS findings,
         jsonb_array_length(t.finding_dispositions) AS disposed,
         (SELECT count(*) FROM jsonb_array_elements(t.finding_dispositions) d WHERE d->>'disposition' IN ('fixed', 'accepted', 'deferred')) AS confirmed,
-        (SELECT count(*) FROM jsonb_array_elements(t.finding_dispositions) d WHERE d->>'disposition' = 'rejected') AS rejected
+        (SELECT count(*) FROM jsonb_array_elements(t.finding_dispositions) d WHERE d->>'disposition' = 'rejected') AS rejected,
+        CASE WHEN l.payload->>'verdict' IN ('APPROVE', 'PASS', 'CARRY') THEN (
+          SELECT count(*) FROM agent_team_events d
+          WHERE d.app_id = ${appId} AND d.task_id = t.parent_task_id AND d.type = 'review.defect-linked'
+            AND (d.payload->>'introducedAtHead' IS NULL OR (
+              SELECT (min(f.created_at), min(f.tx_id)) FROM agent_team_events f
+              WHERE f.app_id = ${appId} AND f.task_id = t.parent_task_id AND f.type = 'pr.frozen' AND f.payload->>'head' = d.payload->>'introducedAtHead'
+            ) <= (
+              SELECT (min(f.created_at), min(f.tx_id)) FROM agent_team_events f
+              WHERE f.app_id = ${appId} AND f.task_id = t.parent_task_id AND f.type = 'pr.frozen' AND f.payload->>'head' = l.payload->>'head'
+            ))
+        ) ELSE 0 END AS missed
       FROM latest l
       JOIN agent_tasks t ON t.id = l.task_id AND t.app_id = ${appId}
       WHERE l.created_at < ${toNaiveUtc(end)}::timestamp AND t.status = 'finished'
@@ -77,11 +91,12 @@ async function countReviews(tx: Context['db'], appId: string, start: Date, end: 
         COALESCE(sum(confirmed), 0)::int AS confirmed,
         COALESCE(sum(rejected), 0)::int AS rejected,
         COALESCE(sum(findings - disposed), 0)::int AS undisposed,
-        (count(*) FILTER (WHERE verdict IN ('APPROVE', 'PASS', 'CARRY')))::int AS approving
+        (count(*) FILTER (WHERE verdict IN ('APPROVE', 'PASS', 'CARRY')))::int AS approving,
+        COALESCE(sum(missed), 0)::int AS missed
       FROM keyed
       GROUP BY 1, 2, 3
     )
-    SELECT s."asOf", c.family, c.model, c.reported, c.reviews, c.findings, c.confirmed, c.rejected, c.undisposed, c.approving
+    SELECT s."asOf", c.family, c.model, c.reported, c.reviews, c.findings, c.confirmed, c.rejected, c.undisposed, c.approving, c.missed
     FROM (SELECT statement_timestamp() AS "asOf") s LEFT JOIN counted c ON true`);
 }
 
@@ -99,7 +114,9 @@ export const reviewQualityQueries = {
           confirmedFindings: r.confirmed, rejectedFindings: r.rejected, undisposedFindings: r.undisposed,
           // No findings, no share: 0 ÷ 0 is not a share of 0.
           shareConfirmed: r.findings > 0 ? r.confirmed / r.findings : null,
-          approvingReviews: r.approving, defectsMissed: null, defectsMissedPerApprovingReview: null,
+          // #4287: always a count; the share is null only with no approving review to divide by.
+          approvingReviews: r.approving, defectsMissed: r.missed,
+          defectsMissedPerApprovingReview: r.approving > 0 ? r.missed / r.approving : null,
         };
       });
       // Recorded rows by family, model, then reported before unreported (code-unit order, the same on every database);
@@ -107,6 +124,6 @@ export const reviewQualityQueries = {
       rows.sort((a, b) => Number(b.recorded) - Number(a.recorded)
         || plain(a.family ?? '', b.family ?? '') || plain(a.model ?? '', b.model ?? '')
         || Number(b.modelReported) - Number(a.modelReported));
-      return { month, asOf: counted[0]!.asOf, rows, defectsMissedUnavailableReason: DEFECTS_MISSED_UNAVAILABLE };
+      return { month, asOf: counted[0]!.asOf, rows };
     }),
 };

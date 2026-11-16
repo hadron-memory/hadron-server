@@ -18143,8 +18143,6 @@ export const typeDefs = `#graphql
     asOf: DateTime!
     "One row per family and model, a reported model apart from an unreported one, ordered by family, model, then reported first; the not-recorded row, when there is one, is last. Empty when the month has no reviews."
     rows: [ReviewQualityRow!]!
-    "Why defectsMissed is null on every row; null once defect links are counted. Until review.defect-linked events exist (hadron-server#4280) defects missed is not available, which is never the same as 0."
-    defectsMissedUnavailableReason: String
   }
 
   """
@@ -18177,9 +18175,9 @@ export const typeDefs = `#graphql
     shareConfirmed: Float
     "Reviews whose latest verdict is APPROVE, PASS or CARRY."
     approvingReviews: Int!
-    "Missed defects counted against the approving reviews; null while not available (see defectsMissedUnavailableReason), never 0 for that reason."
-    defectsMissed: Int
-    "defectsMissed / approvingReviews; null while defects missed is not available or there is no approving review."
+    "#4287 — defects missed by the approving reviews, from the defect links (linkDefectToPullRequest, #4280): an approving review misses each defect linked to its PR whose introducedAtHead is the head it approved or an earlier one, in the order the PR's heads were first frozen, and every defect linked with no introducedAtHead. A head approved before the defect was introduced never contained it. 0 when nothing is linked."
+    defectsMissed: Int!
+    "defectsMissed / approvingReviews; null only when there is no approving review."
     defectsMissedPerApprovingReview: Float
   }
 
