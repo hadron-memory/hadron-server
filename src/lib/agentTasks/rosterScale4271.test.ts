@@ -13,14 +13,16 @@
  * usage events must still be read.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { Prisma } from '../../generated/prisma/index.js';
+import { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { workerActivitySql } from '../../api/graphql/schema/resolvers.worker.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
+import { withRosterAppRead } from '../../api/graphql/schema/resolvers.agentTaskMatching.js';
 import { loadTeamRoster } from './roster.js';
+import { loadStallInputs } from './stall.js';
 import { toNaiveUtc } from '../sessionActivity.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -89,6 +91,9 @@ describe('#4271: one roster read touches usage history only where it can change 
     }
     // Ana is live now: one open session with 5 recent events.
     await usage(await session(crew[0]!, { startedAt: new Date(now.getTime() - HOUR), updatedAt: new Date(now.getTime() - 10 * 60_000) }), 5, new Date(now.getTime() - 60_000));
+    // She holds a started task, so every liveness read of the roster (work states, availability, both stall-input
+    // passes) asks about her.
+    await db.agentTask.create({ data: { appId: app.id, title: 'A', ownerWorkerId: lead, assigneeWorkerId: crew[0]!, assignedAt: new Date(now.getTime() - HOUR), startedAt: new Date(now.getTime() - HOUR), status: 'started', closeSessionWhenDone: false } });
     // Ben's not-started alarm ended when he started the task an hour ago: the roster classifies it from his activity
     // in the episode's window (endedAlarmEpisodeInstants), which none of the old sessions overlaps.
     const at = new Date(now.getTime() - 3 * HOUR);
@@ -105,8 +110,9 @@ describe('#4271: one roster read touches usage history only where it can change 
       const roster = await loadTeamRoster(tx as any, app.id, now);
       return { read: (await usageRowsRead(tx)) - before, roster };
     }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
-    // Ana's 5 open-session rows, read by each liveness caller, and nothing from the 6,000-row history.
-    expect(read, `one roster read touched ${read} usage_events rows for 5 that can matter`).toBeLessThanOrEqual(50);
+    // Ana's 5 open-session rows, read ONCE (one shared fold for the whole read; four separate folds would read 20),
+    // and nothing from the 6,000-row history. Measured: 5.
+    expect(read, `one roster read touched ${read} usage_events rows for 5 that can matter`).toBeLessThanOrEqual(10);
     const ana = roster.find((r) => r.name === 'Ana')!;
     expect(ana.liveSession).toBe(true);
     // The answer is the history's: Ben's last activity is the end of his newest ended session.
@@ -149,5 +155,50 @@ describe('#4271: the liveness aggregate keeps every answer that depends on usage
     const r = await fold(w);
     expect(r.live).toBe(true);
     expect(r.lastActiveAt?.getTime()).toBe(now.getTime() - 60_000);
+  });
+});
+
+describe('#4271 (gate acceptance 7): a person\'s activity counts only in its own App', () => {
+  it('a call in App B does not count as the owner\'s reaction to a child ended in App A; a call in App A does', async () => {
+    const b = await db.app.create({ data: { organizationId: (await db.app.findUniqueOrThrow({ where: { id: app.id } })).organizationId, name: 'B', urn: `b-${generateId()}.example:b` }, select: { id: true } });
+    const w = await worker('Hal');
+    const ended = new Date(now.getTime() - 2 * HOUR);
+    const parent = await db.agentTask.create({ data: { appId: app.id, title: 'P', ownerUserId: person.id, assigneeWorkerId: w, assignedAt: ended, startedAt: ended, status: 'started', closeSessionWhenDone: false }, select: { id: true } });
+    await db.agentTask.create({ data: { appId: app.id, title: 'C', ownerUserId: person.id, parentTaskId: parent.id, assigneeWorkerId: w, assignedAt: ended, startedAt: ended, finishedAt: ended, status: 'finished', resultOutcome: 'succeeded', closeSessionWhenDone: false } });
+    const callIn = async (appId: string, at: Date) => {
+      const t = await db.agentTask.create({ data: { appId, title: 'X', ownerUserId: person.id, closeSessionWhenDone: false }, select: { id: true } });
+      await db.$executeRaw`INSERT INTO agent_team_events (id, app_id, type, task_id, actor_user_id, payload, created_at)
+        VALUES (${generateId()}, ${appId}, 'task.progress', ${t.id}, ${person.id}, '{}'::jsonb, ${toNaiveUtc(at)}::timestamp)`;
+    };
+    const ownerActivity = async () => {
+      const [i] = await loadStallInputs(db as any, { id: parent.id }, now);
+      return i!.endedChildren[0]!.ownerActivityAt;
+    };
+    await callIn(b.id, new Date(now.getTime() - HOUR));
+    expect(await ownerActivity(), 'a call in another App counted as the owner\'s reaction').toBeNull();
+    await callIn(app.id, new Date(now.getTime() - 30 * 60_000));
+    expect((await ownerActivity())?.getTime()).toBe(now.getTime() - 30 * 60_000);
+  });
+});
+
+describe('#4271: the roster read runs without JIT', () => {
+  it('inside withRosterAppRead the transaction has jit off; the next statement on the same pooled connection sees the default', async () => {
+    await db.appMember.create({ data: { appId: app.id, userId: person.id, role: 'member' } });
+    // One connection, so the statement after the roster read runs on the very connection the read used.
+    const url = new URL(process.env.DATABASE_URL!);
+    url.searchParams.set('connection_limit', '1');
+    const one = new PrismaClient({ datasourceUrl: url.toString() });
+    try {
+      const jit = async () => (await one.$queryRaw<{ jit: string; pid: number }[]>`SELECT current_setting('jit') AS jit, pg_backend_pid() AS pid`)[0]!;
+      const before = await jit();
+      const inside = await withRosterAppRead({ db: one, userId: person.id, roles: ['READER'] } as unknown as Context, app.id, async (readCtx) =>
+        (await readCtx.db.$queryRaw<{ jit: string; pid: number }[]>`SELECT current_setting('jit') AS jit, pg_backend_pid() AS pid`)[0]!);
+      const after = await jit();
+      expect(inside.jit, 'the roster read JIT-compiles its aggregates').toBe('off');
+      expect(new Set([before.pid, inside.pid, after.pid]).size, 'the three statements did not share one connection').toBe(1);
+      expect(after.jit, 'jit=off outlived the roster read on its pooled connection').toBe(before.jit);
+    } finally {
+      await one.$disconnect();
+    }
   });
 });

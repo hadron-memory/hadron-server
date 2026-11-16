@@ -830,6 +830,12 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 CREATE INDEX IF NOT EXISTS usage_events_session_activity_idx
   ON usage_events (session_id, created_at) WHERE counts_as_activity;
 
+-- #4271: the stall rules' person-activity read (loadStallInputs' userCalls, cor:agt:050:12) by actor and App. Partial,
+-- so Prisma's schema language can't model it. Same definition as migration
+-- 20261115280000_agent_team_events_person_activity_idx, which builds it CONCURRENTLY for production.
+CREATE INDEX IF NOT EXISTS agent_team_events_person_activity_idx
+  ON agent_team_events (actor_user_id, app_id, created_at) WHERE actor_worker_id IS NULL AND task_id IS NOT NULL;
+
 -- #1647: the admin-erasure audit is append-only and its reason is trimmed, 1-500 code points
 -- (Prisma can model neither; the migration carries the same statements).
 ALTER TABLE user_deletion_audits DROP CONSTRAINT IF EXISTS chk_user_deletion_reason;

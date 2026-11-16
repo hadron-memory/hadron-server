@@ -258,7 +258,10 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
         by: ['appId', 'actorUserId'],
         // actorWorkerId null: a worker-bound call made under the person's credential
         // carries their user id too, but it is the WORKER's activity, not theirs.
-        where: { actorUserId: { in: ownerUserIds }, actorWorkerId: null, taskId: { not: null }, type: { startsWith: 'task.', notIn: [...PASSIVE_EVENT_TYPES] } },
+        // #4271: only the loaded tasks' Apps. The answer is keyed by (appId, actorUserId) and read with the task's own
+        // App, so another App's calls never counted; reading them scanned every App's events
+        // (agent_team_events_person_activity_idx serves this read).
+        where: { appId: { in: [...new Set(tasks.map((t) => t.appId))] }, actorUserId: { in: ownerUserIds }, actorWorkerId: null, taskId: { not: null }, type: { startsWith: 'task.', notIn: [...PASSIVE_EVENT_TYPES] } },
         _max: { createdAt: true },
       })
       : Promise.resolve([]),
@@ -899,11 +902,17 @@ export async function endedAlarmEpisodeInstants(
         SELECT p.k AS "k", min(x.t) AS "t"
         FROM unnest(${windows2.map((w) => w.k)}::text[], ${windows2.map((w) => w.worker)}::text[],
                     ${windows2.map((w) => toNaiveUtc(w.lo))}::timestamp[], ${windows2.map((w) => w.hi)}::timestamp[]) AS p(k, worker_id, lo, hi)
+        -- #4271: only a session that can hold an instant in (lo, hi] (an ended one's instants are at or before its
+        -- end, so it must end after lo), and only its usage events inside the window (usage_events_session_activity_idx
+        -- is (session_id, created_at)). Both are the outer WHERE applied early, so the answer is unchanged; reading
+        -- every event of every session made the roster grow with the App's history.
         JOIN sessions s ON s.worker_id = p.worker_id AND s.deleted_at IS NULL
+          AND (s.ended_at IS NULL OR s.ended_at > p.lo)
         CROSS JOIN LATERAL (
           SELECT s.started_at AS t
           UNION ALL SELECT s.updated_at WHERE s.auto_expired_at IS NULL
           UNION ALL SELECT e.created_at FROM usage_events e WHERE e.session_id = s.id AND e.counts_as_activity
+            AND e.created_at > p.lo AND e.created_at <= p.hi
         ) x
         WHERE x.t > p.lo AND x.t <= p.hi AND (s.ended_at IS NULL OR x.t <= s.ended_at)
         GROUP BY p.k`
