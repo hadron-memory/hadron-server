@@ -165,6 +165,18 @@ export function workerRunRecordOf(row: { lastUsedFamily?: string | null; lastUse
   return { family: normalizeFamily(row.lastUsedFamily), model: row.lastUsedModel ?? null, effort: isEffortLevel(row.lastUsedEffort) ? row.lastUsedEffort : null };
 }
 
+/**
+ * A model goes with a family only when it is not another family's: one the mapping places in a DIFFERENT family is left
+ * out, one it cannot place is kept (nothing proves it foreign). The record holds one value each and a null never clears
+ * it, so a session that reports only a new family leaves the previous family's model beside it; a start and the matcher
+ * read the record's model through this, never raw (#4295 BLIND, Clark F2).
+ */
+export function modelOfFamily(family: string | null, model: string | null): string | null {
+  if (!model) return null;
+  const implied = deriveFamily({ llmModel: model });
+  return implied && family && implied !== family ? null : model;
+}
+
 /** What a host stated for the worker: the family it registered or assigned, and the assignment's launcher profile. */
 export type StartSeed = { family: string; model: string | null; effort: string | null };
 
@@ -178,7 +190,8 @@ export type StartSettings = { family: string; model?: string; tier?: ModelTier; 
  */
 export function launchBase(record: WorkerRunRecord, seed: StartSeed): { family: string; model: string | null; effort: string | null } {
   if (recordIsEmpty(record)) return { family: seed.family, model: seed.model, effort: seed.effort };
-  return { family: record.family ?? seed.family, model: record.model, effort: record.effort };
+  const family = record.family ?? seed.family;
+  return { family, model: modelOfFamily(family, record.model), effort: record.effort };
 }
 
 /**

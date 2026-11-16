@@ -813,9 +813,12 @@ export const sessionMutations = {
         const started = normalizeFamily(launch?.args.family);
         if (started && (input.llmModel == null || family === null)) family = started;
       }
-      // #4291: the model and effort a host-started bind runs with are its start's, unless the bind reports its own.
+      // #4291: the effort a host-started bind runs with is its start's, unless the bind reports its own; so is the model.
       const effort: EffortLevel | null = explicitEffortOrThrow(input.effort) ?? effortFromToken(launch?.args.effort);
-      const boundModel: string | null = input.llmModel ?? launch?.args.model ?? null;
+      // The start's model belongs to the start's family: a bind that reports ANOTHER family (and no model) does not
+      // inherit it, or the session and the worker's record would pair a family with another family's model (#4295 BLIND, Clark F2).
+      const startedModel = launch?.args.model && family === normalizeFamily(launch.args.family) ? launch.args.model : null;
+      const boundModel: string | null = input.llmModel ?? startedModel;
 
       const workerRef = input.workerRef?.trim();
       if (workerRef) {

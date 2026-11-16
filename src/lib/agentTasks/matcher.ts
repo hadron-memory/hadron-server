@@ -77,7 +77,7 @@ import { type Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { loadAppWorkerActivity, loadWorkersActivity } from '../../api/graphql/schema/resolvers.worker.js';
 import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
 import { loadAvailabilityByFamily, loadFamilyAvailability, type WorkerAvailabilityView } from './availability.js';
-import { recordIsEmpty, runFamilyOf, taskRunSettingsOf, workerRunRecordOf, type TaskRunSettings, type WorkerRunRecord } from './runSettings.js';
+import { modelOfFamily, recordIsEmpty, runFamilyOf, taskRunSettingsOf, workerRunRecordOf, type TaskRunSettings, type WorkerRunRecord } from './runSettings.js';
 import { appendTaskEvent, ASSIGNED_EVENT_TYPES, PLATFORM_ACTOR } from './events.js';
 import { loadLaunchable } from './hosts.js';
 import { launchForAssignment } from '../hostOperations/launch.js';
@@ -362,7 +362,8 @@ export function unboundRunView(
   record: WorkerRunRecord, launchableFamilies: string[], assignedModels: (string | null)[],
 ): { families: string[]; models: (string | null)[] } {
   if (launchableFamilies.length === 0 || recordIsEmpty(record)) return { families: launchableFamilies, models: assignedModels };
-  return { families: record.family ? [record.family] : launchableFamilies, models: [record.model] };
+  // The record's model counts only as its own family's (`modelOfFamily`): a model left over from another family places no tier.
+  return { families: record.family ? [record.family] : launchableFamilies, models: [modelOfFamily(record.family, record.model)] };
 }
 
 /**

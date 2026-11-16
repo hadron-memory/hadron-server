@@ -134,6 +134,49 @@ describe('the worker record: written from what the session reports, never cleare
     expect(await recordOf(sam)).toEqual({ family: 'claude', model: 'claude-sonnet-5-5', effort: 'LOW' });
   });
 
+  it('a host-started bind that reports ANOTHER family and no model does not inherit the start\'s model (#4295 BLIND, Clark F2)', async () => {
+    await setRecord(sam, { family: 'claude', model: 'claude-opus-5-5', effort: 'HIGH' });
+    const first = await assignTo(sam);
+    const s = await bindFromStart(sam, { family: 'codex' });
+    const row = await db.session.findUniqueOrThrow({ where: { id: s.id } }) as any;
+    expect({ family: row.family, model: row.llmModel, effort: row.effort }).toEqual({ family: 'codex', model: null, effort: 'HIGH' });
+    // The record keeps the model it had (a null never clears), now beside the reported family. It is another family's
+    // model, so the next start names codex and no model, and the matcher places no tier from it.
+    expect(await recordOf(sam)).toEqual({ family: 'codex', model: 'claude-opus-5-5', effort: 'HIGH' });
+    await M.endSession({}, { id: s.id }, ctx(bo.id));
+    await M.cancelAgentTask({}, { taskId: first.id }, ctx(admin.id));
+    // The first start is over (its host reported it), so the next assignment may issue another.
+    await db.hostOperation.updateMany({ where: { workerId: sam.id, status: 'collected' }, data: { status: 'succeeded', finishedAt: new Date() } });
+    const minimum = await queue(null, { minTier: 'low' });
+    await match();
+    expect(await assigneeOf(minimum.id)).toBeNull();
+    const t = await queue(null);
+    await match();
+    expect(await assigneeOf(t.id)).toBe(sam.id);
+    const args = (await startArgs(sam)).find((x) => x.taskId === t.id)!;
+    expect(args).toMatchObject({ family: 'codex', effort: 'HIGH' });
+    expect(args).not.toHaveProperty('model');
+  });
+
+  it('a resume reports too: an open session it resumes and a session it starts both take the effort, into the record; an effort outside the scale refuses before the claim is spent (#4295 BLIND, Clark F4)', async () => {
+    const s = await bind(kit, { llmModel: 'claude-sonnet-5-5', effort: 'LOW' });
+    await M.createResumeClaim({}, { sessionId: s.id }, ctx(bo.id));
+    expect(await refusal(M.resumeSession({}, { input: { effort: 'TURBO' } }, ctx(bo.id)))).toMatchObject({ code: 'BAD_USER_INPUT' });
+    expect((await db.resumeClaim.findFirstOrThrow({ where: { sessionId: s.id } })).consumedAt).toBeNull();
+    // A shed: the same open session is resumed, and its report moves the record.
+    const shed = await M.resumeSession({}, { input: { effort: 'XHIGH', llmModel: 'claude-opus-5-5' } }, ctx(bo.id));
+    expect(shed.outcome).toBe('RESUMED');
+    expect(((await db.session.findUniqueOrThrow({ where: { id: s.id } })) as any).effort).toBe('XHIGH');
+    expect(await recordOf(kit)).toEqual({ family: 'claude', model: 'claude-opus-5-5', effort: 'XHIGH' });
+    // A rotation: the claimed session ended, so the redemption starts the next one, carrying the effort.
+    await M.endSession({}, { id: s.id, handoff: 'h', resumeClaim: true }, ctx(bo.id));
+    const next = await M.resumeSession({}, { input: { effort: 'MAX' } }, ctx(bo.id));
+    expect(next.outcome).toBe('STARTED');
+    const started = await db.session.findFirstOrThrow({ where: { workerId: kit.id, endedAt: null } }) as any;
+    expect(started.effort).toBe('MAX');
+    expect(await recordOf(kit)).toEqual({ family: 'claude', model: 'claude-opus-5-5', effort: 'MAX' });
+  });
+
   it('set-model on a running session updates the record; updateSession(effort: HIGH) sets the session\'s effort and the record\'s; a later model-only update leaves the effort', async () => {
     const s = await bind(kit, { llmModel: 'claude-sonnet-5-5' });
     expect(await recordOf(kit)).toEqual({ family: 'claude', model: 'claude-sonnet-5-5', effort: null });
@@ -333,7 +376,9 @@ describe('a run setting is not a requirement for a worker that is already runnin
     for (const w of [sam, kit]) {
       const s = await bind(w, { llmModel: 'claude-sonnet-5-5', effort: 'MEDIUM' });
       const t = await assignTo(w, { family: 'codex' });
-      await runAsActor({ workerId: w.id, agentId: w === sam ? shortAgent : longAgent }, () => M.startAgentTask({}, { taskId: t.id }, { ...ctx(bo.id), sessionId: s.id } as Context));
+      const answer = await runAsActor({ workerId: w.id, agentId: w === sam ? shortAgent : longAgent }, () => M.startAgentTask({}, { taskId: t.id }, { ...ctx(bo.id), sessionId: s.id } as Context));
+      // The mutation's own answer carries the stamp: startAgentTask returns the row read after its transaction.
+      expect(T.appliedRunSettings(answer)).toEqual({ family: 'claude', model: 'claude-sonnet-5-5', effort: 'MEDIUM' });
       const row = await db.agentTask.findUniqueOrThrow({ where: { id: t.id } });
       expect(row.status).toBe('started');
       expect(T.runSettings(row)).toEqual({ family: 'codex', model: null, tier: null, effort: null });
