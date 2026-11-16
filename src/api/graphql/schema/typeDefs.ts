@@ -9376,6 +9376,20 @@ export const typeDefs = `#graphql
     UNKNOWN; under 5% used, or fewer than 3 snapshots spanning an hour, is INSUFFICIENT_DATA and gives no run-out time.
     """
     accountUsageProjection(appRef: ID!, account: String!, host: String, family: String, whatIf: AccountUsageWhatIfInput): AccountUsageProjection!
+
+    """
+    #4281 — an App's review quality measures for one calendar month, one row per reviewer model family and model
+    (hrn:node:hadronmemory.com:specs:cor:agt:130:06). month is YYYY-MM, a UTC calendar month; anything else is
+    BAD_USER_INPUT. A review is one finished review-seat task carrying at least one verdict; its latest verdict
+    (hrn:node:hadronmemory.com:specs:cor:agt:130:02) decides its row and its month, and its findings are the seat task's
+    result findings with their latest dispositions (hrn:node:hadronmemory.com:specs:cor:agt:050:30). Findings and
+    dispositions recorded after the month still count in it, so the answer for a past month can change: asOf says when it
+    was worked out. Readers: as the App's tasks and events are read (hrn:node:hadronmemory.com:specs:cor:agt:050:21 and
+    hrn:node:hadronmemory.com:specs:cor:agt:050:23): the App's participants and its own key; anyone else is refused
+    APP_NOT_FOUND. Descriptive only: never an input to readiness or matching
+    (hrn:node:hadronmemory.com:specs:cor:agt:130:03).
+    """
+    reviewQualityReport(appRef: ID!, month: String!): ReviewQualityReport!
     """
     #2061 — direct-report lanes from the same roster projection and read gate as teamRoster.
     One bounded RepeatableRead snapshot per call; no hierarchy rollups or role exclusions.
@@ -18119,6 +18133,54 @@ export const typeDefs = `#graphql
     account: String!
     baseline: [AccountUsageWindowProjection!]!
     adjusted: [AccountUsageWindowProjection!]!
+  }
+
+  "#4281 — an App's review quality measures for one UTC calendar month (hrn:node:hadronmemory.com:specs:cor:agt:130:06)."
+  type ReviewQualityReport {
+    "The month asked for, YYYY-MM."
+    month: String!
+    "When the numbers were worked out (the database clock). A past month's numbers can still change after this."
+    asOf: DateTime!
+    "One row per family and model, a reported model apart from an unreported one, ordered by family, model, then reported first; the not-recorded row, when there is one, is last. Empty when the month has no reviews."
+    rows: [ReviewQualityRow!]!
+    "Why defectsMissed is null on every row; null once defect links are counted. Until review.defect-linked events exist (hadron-server#4280) defects missed is not available, which is never the same as 0."
+    defectsMissedUnavailableReason: String
+  }
+
+  """
+  #4281 — one reviewer row of the review quality measures (hrn:node:hadronmemory.com:specs:cor:agt:130:06). Every
+  ratio comes with its numerator and denominator: findingsPerReview = findings / reviews; shareConfirmed =
+  confirmedFindings / findings; defectsMissedPerApprovingReview = defectsMissed / approvingReviews.
+  """
+  type ReviewQualityRow {
+    "False for the one not-recorded row: the reviews whose verdict carries no model family or no model (a person's verdict, a worker with no open session, a session that recorded none, or a verdict from before the snapshot existed). They are never counted under a family."
+    recorded: Boolean!
+    "The reviewer's model family as the verdict recorded it (a self-report); null on the not-recorded row."
+    family: String
+    "The reviewer's model as the verdict recorded it (a self-report); null on the not-recorded row."
+    model: String
+    "Whether the session had reported its model when the verdict was recorded (the verdict's modelReportedAt is set); null on the not-recorded row."
+    modelReported: Boolean
+    "Finished review seats whose latest verdict falls in the month."
+    reviews: Int!
+    "All findings on those seats' tasks."
+    findings: Int!
+    "findings / reviews."
+    findingsPerReview: Float!
+    "Findings whose latest disposition is fixed, accepted or deferred."
+    confirmedFindings: Int!
+    "Findings whose latest disposition is rejected: not confirmed."
+    rejectedFindings: Int!
+    "Findings with no disposition yet: their own count, in neither of the two above."
+    undisposedFindings: Int!
+    "confirmedFindings / findings; null when there are no findings."
+    shareConfirmed: Float
+    "Reviews whose latest verdict is APPROVE, PASS or CARRY."
+    approvingReviews: Int!
+    "Missed defects counted against the approving reviews; null while not available (see defectsMissedUnavailableReason), never 0 for that reason."
+    defectsMissed: Int
+    "defectsMissed / approvingReviews; null while defects missed is not available or there is no approving review."
+    defectsMissedPerApprovingReview: Float
   }
 
   "#3820 — the what-if: the asked account's windows after the change, and, for a move, the target account's."
