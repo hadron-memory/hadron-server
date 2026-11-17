@@ -1484,7 +1484,7 @@ async function insertTask(
     select: { id: true },
   }).catch((e: unknown) => {
     if (a.externalId != null && isUniqueViolationOn(e, EXTERNAL_ID_TARGETS)) {
-      throw taskError('TASK_EXTERNAL_ID_TAKEN', 'This App already has a task for that external id.');
+      throw taskError('TASK_EXTERNAL_ID_TAKEN', 'This App already has an active task for that external id.');
     }
     throw e;
   });
