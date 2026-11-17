@@ -359,35 +359,45 @@ describe.skipIf(!enabled)('#4111 restore-with-rebase on private clusters', { tim
     // ACL refusal), so the probes' concurrency must stay under the working phase's spare slots.
     let inFlight = 0;
     let maxInFlight = 0;
-    const attempts: { at: number; role: string }[] = [];
-    // One loop, roles in turn: at most ONE probe in flight, so the probes can never take the slots pg_restore needs.
-    // (Three parallel loops did, and refused pg_restore's own connection: 'too many connections for database'.)
     const roles = [F.ROLES.serve, F.ROLES.owner, F.ROLES.other];
-    const loops = [
-      (async () => {
-        for (let i = 0; !stop; i++) {
-          const role = roles[i % roles.length]!;
-          inFlight++;
-          maxInFlight = Math.max(maxInFlight, inFlight);
-          const connected = await tryConnect(B.url(target, role, F.PASSWORD));
-          inFlight--;
-          attempts.push({ at: performance.now(), role });
-          if (connected) events.push({ at: performance.now(), what: role });
-          await new Promise((r) => setTimeout(r, 5));
-        }
-      })(),
-    ];
-    await restoreWithRebase(
-      base({
-        target,
-        log: (e) => {
-          if (e.event === 'releasing') releasingAt = performance.now();
-        },
-      }),
-    );
-    await new Promise((r) => setTimeout(r, 300));
-    stop = true;
-    await Promise.all(loops);
+    // Every probe goes through here, so the in-flight count covers the background loop and the checkpoint alike.
+    const probe = async (role: string) => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      try {
+        return await tryConnect(B.url(target, role, F.PASSWORD));
+      } finally {
+        inFlight--;
+      }
+    };
+    // One loop, roles in turn: at most ONE background probe in flight, so the probes can never take the slots pg_restore
+    // needs. (Three parallel loops did, and refused pg_restore's own connection: 'too many connections for database'.)
+    const loop = (async () => {
+      for (let i = 0; !stop; i++) {
+        const role = roles[i % roles.length]!;
+        if (await probe(role)) events.push({ at: performance.now(), what: role });
+        await new Promise((r) => setTimeout(r, 5));
+      }
+    })();
+    // Coverage that cannot race the restore: at the 'fenced' checkpoint (ACL fence done, admission on, pg_restore not yet
+    // started) each role is probed once, in turn, and must be refused. A fast restore cannot skip this.
+    const checkpoint: Record<string, boolean> = {};
+    try {
+      await restoreWithRebase(
+        base({
+          target,
+          log: async (e) => {
+            if (e.event === 'releasing') releasingAt = performance.now();
+            if (e.stage === 'S2' && e.event === 'fenced') for (const role of roles) checkpoint[role] = await probe(role);
+          },
+        }),
+      );
+      await new Promise((r) => setTimeout(r, 300));
+    } finally {
+      // Stop and join the loop even when the restore throws, so no probe outlives the test.
+      stop = true;
+      await loop;
+    }
     // 'releasing' is logged immediately before the release statement is sent: no connect may succeed before it.
     expect(releasingAt).toBeLessThan(Infinity);
     const early = events.filter((e) => e.at < releasingAt);
@@ -396,10 +406,8 @@ describe.skipIf(!enabled)('#4111 restore-with-rebase on private clusters', { tim
     expect(events.some((e) => e.what === F.ROLES.other)).toBe(false);
     // #4322: the limit is 4: the pipeline's session and pg_restore's leave two spare slots, so at most two probes may be in flight.
     expect(maxInFlight).toBeLessThanOrEqual(2);
-    // ...and each denied role must have been refused at least once inside the protected window, or the pin proves nothing.
-    for (const role of [F.ROLES.serve, F.ROLES.owner, F.ROLES.other]) {
-      expect(attempts.some((a) => a.role === role && a.at < releasingAt)).toBe(true);
-    }
+    // ...and each role, the serve role included, was refused at the working-phase checkpoint, or the pin proves nothing.
+    expect(checkpoint).toEqual({ [F.ROLES.serve]: false, [F.ROLES.owner]: false, [F.ROLES.other]: false });
   });
 
   it('P3: a foreign (superuser) session at the hard fence aborts; it is never killed, so the plain drop fails and leaves it', async () => {
