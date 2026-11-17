@@ -721,8 +721,12 @@ export function classify(stmt) {
       // A PARTIALLY captured EXECUTE — concatenation glued to either side —
       // is unanalyzable: the tail can carry DDL only the code-only rule
       // knows, and the loop's replace would hide the verb from it (delta5 D1).
+      // Slice `m.input` (the string the match came from), never the mutable
+      // remainder (#4381 E1), and treat a following quote as glued too:
+      // Postgres concatenates adjacent literals across a newline with no ||
+      // at all (#4381 E3).
       const glued =
-        /^\s*\|\|/.test(body.slice(m.index + m[0].length)) || /\|\|\s*$/.test(body.slice(0, m.index));
+        /^\s*(\|\||')/.test(m.input.slice(m.index + m[0].length)) || /\|\|\s*$/.test(m.input.slice(0, m.index));
       // A STATEMENT-LEADING nested DO (payload-in-payload, unextractable
       // here) refuses the block wherever in the string it sits;
       // `ON CONFLICT DO NOTHING` is not one (delta3 B3).
@@ -734,10 +738,15 @@ export function classify(stmt) {
       // Same shape as the dollar path (delta3 B7): the outer stripper sees a
       // plain-string payload as string CONTENT, so the payload's own comments
       // survive into the DO test and classify — strip them after unescaping
-      // (delta4 C4). Same concatenation guard as the dollar path (delta5 D1).
+      // (delta4 C4). Same concatenation guard as the dollar path (delta5 D1)
+      // — and the same two #4381 corrections: `m.input`, because this loop
+      // rewrites `remainder` after every extraction while `m.index` still
+      // comes from the matchAll snapshot (E1: from the second match on, the
+      // shifted slices missed the || and consumed the glued EXECUTE), and a
+      // following quote as glued (E3: implicit literal continuation).
       const inner = stripPayloadComments(m[1].replace(/''/g, "'"));
       const glued =
-        /^\s*\|\|/.test(remainder.slice(m.index + m[0].length)) || /\|\|\s*$/.test(remainder.slice(0, m.index));
+        /^\s*(\|\||')/.test(m.input.slice(m.index + m[0].length)) || /\|\|\s*$/.test(m.input.slice(0, m.index));
       if (glued || /(^|;)\s*DO\b/i.test(inner)) out.push({ unrecognized: sql });
       else out.push(...classify({ sql: inner }));
       remainder = remainder.replace(m[0], ' ');

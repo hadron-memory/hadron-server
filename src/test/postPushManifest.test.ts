@@ -440,9 +440,15 @@ describe('#434 slice B: the delta5 folds — a partially captured EXECUTE is una
     expect(refusals('DO $do$ … $do$;', "EXECUTE $x$SELECT 1;$x$ || 'CREATE STATISTICS d1b_st ON a, b FROM t'")).toHaveLength(1);
   });
 
-  it('a bare fragment classifies to a refusal, never a malformed row (D1 note)', () => {
-    // `EXECUTE 'CREATE INDEX ' || n` hands classify a head with no name:
-    // it must fall through to unrecognized (loud), not emit a broken row.
+  it('a bare fragment classifies to a refusal, never a malformed row (D1 note, #4381 E2)', () => {
+    // E2: the glued shape never reaches classify — the D1 guard refuses the
+    // block first — so the old body was a third copy of the D1 probe and
+    // pinned nothing its name claimed. Assert the bare fragment directly:
+    // a head with no name must fall through to unrecognized (loud), not emit
+    // a malformed row.
+    expect(refusals('CREATE INDEX ')).toHaveLength(1);
+    // The glued-variable shape stays pinned here (refused via the D1 guard,
+    // which is what this copy actually exercises).
     expect(refusals('DO $do$ … $do$;', "BEGIN EXECUTE 'CREATE INDEX ' || n; END")).toHaveLength(1);
   });
 
