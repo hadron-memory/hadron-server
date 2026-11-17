@@ -117,6 +117,7 @@ import { liveTxContext, withAuthorizedTx } from './authorizedTx.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { deriveFamily, normalizeFamily } from '../../../lib/agentTasks/family.js';
+import { COMPILED_BOOT_PROMPT_NODE_TYPE } from '../../../lib/bootPrompt.js';
 import { effortFromToken, fillEmptyAppliedRunSettings, isEffortLevel, recordRunSettings, type EffortLevel } from '../../../lib/agentTasks/runSettings.js';
 import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
 import { forbiddenError } from '../../../lib/refusals.js';
@@ -520,6 +521,11 @@ export async function writeSessionHandoff(
 
 // ── #2086 / #1931 / #1948: refresh a bound session's model and family ─────────────────────────────────────────
 /** A supplied family must be a valid token; checked before any write (and, on a resume, before the claim is spent). */
+/** #4244: an Agent revision that is not there (unknown or retired loc), refused before any write. */
+function revisionNotFound(revisionLoc: string): GraphQLError {
+  return new GraphQLError(`Revision not found: ${revisionLoc}`, { extensions: { code: 'BAD_USER_INPUT' } });
+}
+
 function explicitFamilyOrThrow(family: string | null | undefined): string | null {
   const explicit = family != null ? normalizeFamily(family) : null;
   if (family != null && !explicit) {
@@ -2339,7 +2345,8 @@ export const sessionMutations = {
       // Snapshot all non-revision nodes + edges in the system memory
       const nodes = await ctx.db.node.findMany({
         where: { memoryId: sysMemId, deletedAt: null, NOT: { loc: { startsWith: 'revisions' } } },
-        select: { loc: true, name: true, nodeType: true, description: true, content: true, data: true, tags: true, seq: true },
+        // #4244: `role` is recorded so a boot-prompt source recreated by a restore keeps the role a compile needs.
+        select: { loc: true, name: true, nodeType: true, role: true, description: true, content: true, data: true, tags: true, seq: true },
       });
       const nodeIds = (await ctx.db.node.findMany({
         where: { memoryId: sysMemId, deletedAt: null, NOT: { loc: { startsWith: 'revisions' } } },
@@ -2440,7 +2447,7 @@ export const sessionMutations = {
       const revNode = await ctx.db.node.findFirst({
         where: { memoryId: sysMemId, loc: revisionLoc, deletedAt: null },
       });
-      if (!revNode) throw new Error(`Revision "${revisionLoc}" not found`);
+      if (!revNode) throw revisionNotFound(revisionLoc);
 
       const revData = (revNode.data as Record<string, unknown>) ?? {};
       const label = versionLabel ?? (revData.label as string) ?? revisionLoc;
@@ -2476,7 +2483,7 @@ export const sessionMutations = {
       const revNode = await ctx.db.node.findFirst({
         where: { memoryId: sysMemId, loc: revisionLoc, deletedAt: null },
       });
-      if (!revNode) throw new Error(`Revision "${revisionLoc}" not found`);
+      if (!revNode) throw revisionNotFound(revisionLoc);
 
       const revData = (revNode.data as Record<string, unknown>) ?? {};
       const snapshot = revData.snapshot as { edgeFormat?: number; nodes: Array<Record<string, unknown>>; edges: Array<Record<string, unknown>> } | undefined;
@@ -2512,8 +2519,21 @@ export const sessionMutations = {
           // snapshot does not restore is a removal; one it restores must not
           // come back without its marker. Both are checked under the guard's
           // row locks, and only the locked rows are tombstoned.
+          // #4244 (cor:agt:040:12): compiling is the only way a compiled boot prompt is written, so a restore leaves
+          // each one as it is. It is not tombstoned here (a retired compiled node would refuse every bind,
+          // cor:agt:040:10), not written below, and a snapshot's copy of one is ignored. `compiled` holds every loc a
+          // compiled row sits at, retired ones included, plus the locs the snapshot holds one at.
+          const compiledRows = await tx.node.findMany({
+            where: { memoryId: sysMemId, nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE },
+            select: { id: true, loc: true },
+          });
+          const compiledIds = compiledRows.map((n) => n.id);
+          const compiled = new Set([
+            ...compiledRows.map((n) => n.loc),
+            ...snapshot.nodes.filter((n) => n.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE).map((n) => n.loc as string),
+          ]);
           const live = await tx.node.findMany({
-            where: { memoryId: sysMemId, deletedAt: null, NOT: { loc: { startsWith: 'revisions' } } },
+            where: { memoryId: sysMemId, deletedAt: null, id: { notIn: compiledIds }, NOT: { loc: { startsWith: 'revisions' } } },
             select: { id: true, loc: true },
           });
           const snapshotTags = new Map(snapshot.nodes.map((n) => [n.loc as string, (n.tags as string[]) ?? []]));
@@ -2532,7 +2552,7 @@ export const sessionMutations = {
 
           // Delete all edges in the system memory
           const currentNodeIds = (await tx.node.findMany({
-            where: { memoryId: sysMemId },
+            where: { memoryId: sysMemId, id: { notIn: compiledIds } }, // #4244: a compiled prompt keeps its edges
             select: { id: true },
           })).map((n) => n.id);
           await tx.edge.updateMany({
@@ -2548,7 +2568,7 @@ export const sessionMutations = {
           // drift reconciled as its own revision, the real predecessor
           // snapshotted, the fingerprint refreshed. Rows are taken in loc
           // order so two concurrent restores lock in the same sequence.
-          const restoreOrder = [...snapshot.nodes].sort((a, b) =>
+          const restoreOrder = snapshot.nodes.filter((n) => !compiled.has(n.loc as string)).sort((a, b) =>
             (a.loc as string) < (b.loc as string) ? -1 : (a.loc as string) > (b.loc as string) ? 1 : 0,
           );
           for (const n of restoreOrder) {
@@ -2598,7 +2618,8 @@ export const sessionMutations = {
             }
             const upserted = await tx.node.upsert({
               where: { loc_memoryId: { loc, memoryId: sysMemId } },
-              create: { id: generateId(), memoryId: sysMemId, loc, ...nodeData },
+              // #4244: a row made anew takes the snapshot's role; over an existing row the live role stays.
+              create: { id: generateId(), memoryId: sysMemId, loc, ...nodeData, role: (n.role as string | null | undefined) ?? null },
               update: {
                 ...nodeData,
                 ...(clearRestoredAuthorship ? clearNodeAuthorship() : {}),
@@ -2615,7 +2636,10 @@ export const sessionMutations = {
           // Restore edges from snapshot. Spec 037: derive loc when an older
           // snapshot predates the edge `loc`/`name` fields (it would carry the
           // legacy `label`); memoryId is the system memory being restored into.
+          // #4244: an edge TO a compiled prompt is another node's and is restored; an edge FROM one was left alone above.
+          for (const c of compiledRows) locToId.set(c.loc, c.id);
           for (const e of snapshot.edges) {
+            if (compiled.has(e.sourceLoc as string)) continue;
             const sourceId = locToId.get(e.sourceLoc as string);
             const targetId = locToId.get(e.targetLoc as string);
             if (sourceId && targetId) {
