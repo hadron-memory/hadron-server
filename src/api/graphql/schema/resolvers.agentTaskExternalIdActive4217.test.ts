@@ -73,6 +73,8 @@ describe('an ended task no longer holds its external id (cor:agt:120:02, 2026-11
       const before = await db.agentTask.count({ where: { appId: app.id } });
       const err = await create({ title: 'second', externalId: X }, member.id).catch((e: any) => e);
       expect(err?.extensions?.code).toBe('TASK_EXTERNAL_ID_TAKEN');
+      // #4330: the refusal text says an ACTIVE task holds the id (finished and cancelled ones do not)
+      expect(err?.message).toBe('This App already has an active task for that external id.');
       const text = JSON.stringify({ m: err?.message, e: err?.extensions });
       for (const secret of [first.id, first.handle, X]) expect(text).not.toContain(secret);
       expect(await db.agentTask.count({ where: { appId: app.id } })).toBe(before);
