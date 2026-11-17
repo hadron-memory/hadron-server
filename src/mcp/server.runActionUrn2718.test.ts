@@ -21,6 +21,7 @@
  * without a transport, so this exercises the production closure.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { setResolutionLimits } from '../lib/includes/resolutionBudget.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb, createDbAppAgent, createDbAppMember, createDbAppWithKey } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
@@ -95,6 +96,19 @@ describe('#2718 — hadron_run_action by action URN', () => {
     expect(byNode).toContain('RUN-BODY-2718 W');
     const byAction = await run(admin.id, actionUrn(agent.urn, CODE), { who: 'W' });
     expect(byAction).toBe(byNode);
+  });
+
+  it('#863: over a content resolution limit both spellings give the same named refusal, nothing partial', async () => {
+    await registerEntry(memoryId, CODE); // its body holds a placeholder, so it is compiled
+    setResolutionLimits({ limits: { maxBytes: 4 } });
+    try {
+      const viaAction = await run(admin.id, actionUrn(agent.urn, CODE), { who: 'W' });
+      expect(viaAction).toContain('CONTENT_RESOLUTION_LIMIT_EXCEEDED');
+      expect(viaAction).not.toContain('RUN-BODY-2718');
+      expect(viaAction).toBe(await run(admin.id, nodeUrn(), { who: 'W' }));
+    } finally {
+      setResolutionLimits(null);
+    }
   });
 
   it('admits an App participant who passes the MEMORY gate but not the Agent gate, on BOTH spellings', async () => {
