@@ -1,0 +1,59 @@
+name: Migration Replay
+
+# #434 Slice C: replay EVERY migration from an empty pgvector database with `prisma migrate deploy` (the production
+# path) and compare its pg_catalog with the dev/test schema (pre-push.sql, `prisma db push`, post-push.sql), against the
+# shrink-only baseline in scripts/db/migration-replay-baseline.txt. It fails on drift the baseline does not list (for
+# example a structural `IF NOT EXISTS` object a migration redefined while post-push.sql kept the old definition) and on a
+# baseline line that no longer differs. A separate workflow, so the Migration Smoke Test's two jobs and their triggers
+# are unchanged.
+
+on:
+  pull_request:
+    paths:
+      - 'prisma/**'
+      - 'scripts/db/migration-replay*'
+      - 'src/test/catalogSnapshot.ts'
+      - 'src/test/schemaTemplate.ts'
+      - '.github/workflows/migration-replay.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'prisma/**'
+      - 'scripts/db/migration-replay*'
+      - 'src/test/catalogSnapshot.ts'
+      - 'src/test/schemaTemplate.ts'
+      - '.github/workflows/migration-replay.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  replay-from-empty:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      # No `version:`: read from package.json `packageManager`.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - name: Replay every migration from empty and compare with push + post-push (shrink-only baseline)
+        env:
+          REPLAY_ADMIN_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: pnpm tsx scripts/db/migration-replay.ts

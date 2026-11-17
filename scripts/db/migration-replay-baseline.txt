@@ -1,0 +1,57 @@
+# #434 Slice C: the SHRINK-ONLY baseline of differences between the migration replay (production's schema) and
+# push + post-push (dev and test), checked by scripts/db/migration-replay.ts. One entry per line:
+#   added  <key>: the object exists only on the migration path
+#   removed <key>: it exists only on push + post-push
+#   changed <key>: both have it, with different definitions
+#
+# The check FAILS on any difference missing from this file (new drift) and on any line here whose difference is gone,
+# so a fix deletes its lines in the same PR. Never add a line to make new drift pass: a new line is a schema decision.
+# Review: adding a line needs the change manager's gate on the PR (named in its body) and the reviewing seats'
+# sign-off on that exact line. Deleting a line needs only the fix that removes the difference.
+#
+# Recorded at origin/main 4954deaf (Bradley, 2026-11-17; spike https://github.com/hadron-memory/hadron-server/issues/434#issuecomment-6949698384).
+
+# Rate-limit CHECKs exist only on the migration path. Escalated (access constraints), needs ruling: #4332
+added con:rate_limit_buckets.rate_limit_buckets_used_check
+added con:rate_limit_policies.rate_limit_policies_enforcement_mode_check
+added con:rate_limit_policies.rate_limit_policies_ip_limit_check
+added con:rate_limit_policies.rate_limit_policies_key_limit_check
+added con:rate_limit_policies.rate_limit_policies_principal_limit_check
+added con:rate_limit_policies.rate_limit_policies_retention_seconds_check
+added con:rate_limit_policies.rate_limit_policies_window_seconds_check
+
+# UNIQUE constraints on the migration path are plain unique indexes after db push: #4333
+added con:coordinator_cadence_episodes.coordinator_cadence_episodes_event_id_key
+added con:dark_worker_episodes.dark_worker_episodes_event_id_key
+added con:host_sweep_episodes.host_sweep_episodes_event_id_key
+added con:post_limit_episodes.post_limit_episodes_event_id_key
+added con:rate_limit_buckets.rate_limit_buckets_field_class_dimension_subject_window_sta_key
+added con:start_failing_episodes.start_failing_episodes_event_id_key
+
+# Partial indexes created by migrations are missing after push + post-push: #4334
+added idx:agents_urn_migration_pending_idx
+added idx:apps_urn_active_uniq
+added idx:apps_urn_migration_pending_idx
+added idx:assets_staged_uploaded_at_idx
+added idx:assets_uploaded_by_staged_idx
+added idx:memories_urn_migration_pending_idx
+
+# Partial on the migration path, full after db push: #4335
+changed idx:memories_user_id_idx
+changed idx:users_external_app_id_external_id_key
+
+# text[] NOT NULL on the migration path, nullable after db push: #4336
+changed col:agent_tasks.unresolved_finding_ids
+changed col:agents.surfaces
+changed col:app_wake_reservations.absorbed_keys
+changed col:apps.surfaces
+changed col:auth_codes.oauth_scopes
+changed col:home_assistant_instances.op_allowlist
+changed col:host_registration_workers.worktrees
+changed col:mcp_servers.tool_allowlist
+changed col:rate_limit_manifests.key_ids
+changed col:tickers.reasons
+changed col:user_api_keys.oauth_scopes
+
+# IDENTITY on the migration path, a sequence default after db push: #4337
+changed col:stamp_signing_keys.id
