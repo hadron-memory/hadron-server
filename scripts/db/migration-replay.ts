@@ -112,7 +112,8 @@ async function main(): Promise<number> {
     if (process.argv.includes('--print')) { for (const e of entries) console.log(e); return 0; }
     const { unexpected, stale } = judge(entries, parseBaseline(readFileSync(BASELINE_PATH, 'utf8')));
     console.log(`migration replay: ${entries.length} difference(s) from push + post-push; baseline lists ${entries.length - unexpected.length}.`);
-    for (const u of unexpected) console.error(`NEW DRIFT (not in the baseline): ${details.get(u)}`);
+    // The entry first (with its fingerprint, exactly as a baseline line would carry it), then both definitions.
+    for (const u of unexpected) console.error(`NEW DRIFT (not in the baseline): ${u}\n${(details.get(u) ?? '').split('\n').slice(1).join('\n')}`);
     for (const s of stale) console.error(`STALE BASELINE LINE (no longer differs, or duplicated; delete it): ${s}`);
     return unexpected.length || stale.length ? 1 : 0;
   } finally {
