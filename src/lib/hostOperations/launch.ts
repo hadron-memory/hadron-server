@@ -111,12 +111,17 @@ function profileArgs(p: LauncherProfile | null | undefined): Record<string, stri
  * empty record the host's own statement (`reg.family` and, under
  * `server`, the assignment's launcher profile). Read on the start's transaction, under its worker row lock, so a
  * session that reports while this start is decided is ordered with it. Pure resolution: `resolveStartSettings`.
+ *
+ * #4305: `taskRun`, when given (even `null`), is the task's settings the caller already read for its host choice and
+ * is used as is, so the host and the args are decided from ONE read of the Agent's lifecycle (that column is not under
+ * the worker row lock, and the transaction is READ COMMITTED). Omitted, it is read here.
  */
 export async function startSettingsFor(
   tx: Prisma.TransactionClient, workerId: string, taskId: string | null, reg: { family: string; profile: LauncherProfile | null },
+  taskRun?: TaskRunSettings | null,
 ): Promise<StartSettings> {
   const record = await loadWorkerRunRecord(tx, workerId);
-  const task = taskId ? await launchTaskSettings(tx, workerId, taskId) : null;
+  const task = taskRun !== undefined ? taskRun : taskId ? await launchTaskSettings(tx, workerId, taskId) : null;
   return resolveStartSettings(task, record, { family: reg.family, model: reg.profile?.model ?? null, effort: reg.profile?.effort ?? null });
 }
 
@@ -328,7 +333,7 @@ export async function launchForAssignment(
       if (!reg) return null;
       return insertWorkerStart(tx, {
         appId: a.appId, hostId: reg.hostId, workerId: a.workerId, worktree: reg.worktrees[0]!, family: reg.family,
-        profile: reg.profile, settings: await startSettingsFor(tx, a.workerId, a.taskId, reg),
+        profile: reg.profile, settings: await startSettingsFor(tx, a.workerId, a.taskId, reg, taskRun),
         taskId: a.taskId, issuer: { issuedBy: 'platform' }, hold,
       });
     });
