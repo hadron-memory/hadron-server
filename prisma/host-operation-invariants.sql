@@ -3,6 +3,13 @@
 -- (pinned by src/lib/hostOperations/invariants.test.ts) and post-push.sql includes this file.
 -- Uses host_operation_token_ok from prisma/agent-task-matching-invariants.sql.
 
+-- #4230 (S1b; #4251 blind P2, Peter #108855): the ONE grammar of a launcher model, used by the host assignment's stored
+-- shape (prisma/host-assignment-invariants.sql) and by worker.start's argument check below, so every model an assignment
+-- can hold is a model a start can carry: a host-operation token of at most 128 characters (S1a's shape; GLM-style names
+-- such as z-ai/glm-4.6 included). The API's own rule for a new write is stricter (src/lib/hostOperations/assignments.ts).
+CREATE OR REPLACE FUNCTION host_launcher_model_ok(t text) RETURNS boolean
+LANGUAGE sql IMMUTABLE AS $$ SELECT host_operation_token_ok(t) AND length(t) <= 128 $$;
+
 -- cor:agt:070:03 — the closed set of typed operations, each with exactly its own
 -- arguments (#1709's T6 table, Proposed): no other key, and every name argument
 -- a host-operation token. There is no free-form or shell type, and no argument
@@ -18,12 +25,16 @@ BEGIN
   IF jsonb_typeof(args) IS DISTINCT FROM 'object' THEN RETURN false; END IF;
   CASE op_type
     WHEN 'worktree.create' THEN required := ARRAY['workerId', 'repo', 'baseBranch', 'branchName', 'label'];
-    WHEN 'worker.start' THEN required := ARRAY['workerId', 'worktree', 'family']; optional := ARRAY['taskId'];
+    -- #4230 (S1b, decision G1): a start may carry its assignment's typed launcher profile and its Agent's lifecycle,
+    -- never a command.
+    -- #4291 (S14): a start whose task names a generic tier carries the tier instead of a model.
+    WHEN 'worker.start' THEN required := ARRAY['workerId', 'worktree', 'family']; optional := ARRAY['taskId', 'model', 'effort', 'accountProfile', 'lifecycle', 'tier'];
     WHEN 'worker.deliver' THEN required := ARRAY['workerId', 'sessionId', 'eventId'];
     WHEN 'worker.end' THEN required := ARRAY['workerId', 'sessionId'];
     WHEN 'worktree.remove' THEN required := ARRAY['workerId', 'worktree'];
     -- #2162 (cor:agt:050:27): reset a worker's context, a shed and never a session end.
-    WHEN 'worker.reset-context' THEN required := ARRAY['workerId', 'sessionId', 'taskId', 'resetId'];
+    -- #4225: the task is named only when there is one (a context-cap reset has none), and the cause is a closed set.
+    WHEN 'worker.reset-context' THEN required := ARRAY['workerId', 'sessionId', 'resetId']; optional := ARRAY['taskId', 'cause'];
     ELSE RETURN false;
   END CASE;
   FOREACH k IN ARRAY required LOOP
@@ -34,8 +45,19 @@ BEGIN
     IF jsonb_typeof(v) IS DISTINCT FROM 'string' THEN RETURN false; END IF;
     IF k IN ('workerId', 'sessionId', 'eventId', 'taskId', 'resetId') THEN
       IF NOT (v #>> '{}') ~ '^[A-Za-z0-9_-]{1,64}$' THEN RETURN false; END IF;
+    ELSIF k = 'cause' THEN
+      IF NOT (v #>> '{}') IN ('task-end', 'context-cap') THEN RETURN false; END IF;
     ELSIF k = 'family' THEN
       IF NOT (v #>> '{}') ~ '^[a-z0-9][a-z0-9._-]{0,63}$' THEN RETURN false; END IF;
+    ELSIF op_type = 'worker.start' AND k IN ('effort', 'accountProfile') THEN
+      IF NOT (v #>> '{}') ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' THEN RETURN false; END IF;
+    -- The model: the one launcher-model grammar the assignment store uses too (host_launcher_model_ok, above).
+    ELSIF op_type = 'worker.start' AND k = 'model' THEN
+      IF NOT host_launcher_model_ok(v #>> '{}') THEN RETURN false; END IF;
+    ELSIF op_type = 'worker.start' AND k = 'lifecycle' THEN
+      IF (v #>> '{}') NOT IN ('LONG_LIVED', 'SHORT_LIVED') THEN RETURN false; END IF;
+    ELSIF op_type = 'worker.start' AND k = 'tier' THEN
+      IF (v #>> '{}') NOT IN ('high', 'mid', 'low') THEN RETURN false; END IF;
     ELSIF NOT host_operation_token_ok(v #>> '{}') THEN
       RETURN false;
     END IF;
@@ -138,7 +160,7 @@ CREATE TRIGGER trg_host_operations_forward_only
 -- never changed, removed only with its key (the cascade).
 ALTER TABLE host_key_uses DROP CONSTRAINT IF EXISTS chk_host_key_uses_shape;
 ALTER TABLE host_key_uses ADD CONSTRAINT chk_host_key_uses_shape CHECK (
-  action IN ('register', 'collect', 'report', 'availability', 'read', 'session', 'issue', 'deliver', 'stop', 'reset', 'terminal', 'checkpoint') AND
+  action IN ('register', 'collect', 'report', 'availability', 'read', 'session', 'issue', 'deliver', 'stop', 'reset', 'terminal', 'checkpoint', 'sweep') AND
   host_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$' AND
   (count IS NULL OR count >= 0) AND
   -- A refused report may name no operation it could see; an accepted one always names its own. #2162: so does a
@@ -178,12 +200,18 @@ ALTER TABLE task_session_end_requests ADD CONSTRAINT chk_task_session_end_reques
 
 -- #2771 (proposed cor:agt:070:09) — a worker's stored terminal report holds exactly the server-built keys and nothing
 -- else (no screen text), with its closed value sets, so a write that bypasses the resolver cannot store more.
+-- #4225 — plus the context size: contextTokens (a whole number from 1 to 2147483647) with contextMeasuredAt, or both
+-- null. Both keys may be absent: a row stored before #4225 has neither.
+-- #4247 — plus the outcome of a refused or failed relaunch: repair (RELAUNCH_REFUSED or RELAUNCH_FAILED), repairReason (from
+-- that outcome's own set) and repairAttempt (a whole number from 1), all three or none, and only on a dark report. An
+-- ABSENT key makes its test SQL NULL, which a CHECK passes, so the three-key branch is wrapped in COALESCE(..., false).
+-- #4259 — the failure set gains SETUP_FAILED and VERIFY_FAILED.
 ALTER TABLE workers DROP CONSTRAINT IF EXISTS chk_workers_terminal_shape;
 ALTER TABLE workers ADD CONSTRAINT chk_workers_terminal_shape CHECK (
   terminal IS NULL OR (
     jsonb_typeof(terminal) = 'object' AND
     terminal ?& ARRAY['host', 'status', 'prompt', 'reason', 'lastTurnAt', 'checkedAt', 'reportedAt'] AND
-    (terminal - 'host' - 'status' - 'prompt' - 'reason' - 'lastTurnAt' - 'checkedAt' - 'reportedAt') = '{}'::jsonb AND
+    (terminal - 'host' - 'status' - 'prompt' - 'reason' - 'lastTurnAt' - 'checkedAt' - 'reportedAt' - 'contextTokens' - 'contextMeasuredAt' - 'repair' - 'repairReason' - 'repairAttempt') = '{}'::jsonb AND
     jsonb_typeof(terminal -> 'host') = 'object' AND
     terminal -> 'host' ?& ARRAY['id', 'label'] AND
     ((terminal -> 'host') - 'id' - 'label') = '{}'::jsonb AND
@@ -196,6 +224,21 @@ ALTER TABLE workers ADD CONSTRAINT chk_workers_terminal_shape CHECK (
           ELSE jsonb_typeof(terminal -> 'reason') = 'null' END) AND
     jsonb_typeof(terminal -> 'lastTurnAt') IN ('string', 'null') AND
     jsonb_typeof(terminal -> 'checkedAt') = 'string' AND
-    jsonb_typeof(terminal -> 'reportedAt') = 'string'
+    jsonb_typeof(terminal -> 'reportedAt') = 'string' AND
+    (CASE WHEN jsonb_typeof(terminal -> 'contextTokens') = 'number'
+          THEN (terminal ->> 'contextTokens') ~ '^[1-9][0-9]{0,9}$' AND
+               (terminal ->> 'contextTokens')::numeric <= 2147483647 AND
+               COALESCE(jsonb_typeof(terminal -> 'contextMeasuredAt') = 'string', false)
+          ELSE COALESCE(jsonb_typeof(terminal -> 'contextTokens'), 'null') = 'null' AND
+               COALESCE(jsonb_typeof(terminal -> 'contextMeasuredAt'), 'null') = 'null' END) AND
+    (NOT (terminal ?| ARRAY['repair', 'repairReason', 'repairAttempt']) OR
+     COALESCE((terminal ->> 'status') = 'dark' AND
+      jsonb_typeof(terminal -> 'repairAttempt') = 'number' AND
+      (terminal ->> 'repairAttempt') ~ '^[1-9][0-9]{0,9}$' AND
+      (terminal ->> 'repairAttempt')::numeric <= 2147483647 AND
+      CASE (terminal ->> 'repair')
+        WHEN 'RELAUNCH_REFUSED' THEN COALESCE((terminal ->> 'repairReason') IN ('IDENTITY_MISMATCH', 'DUPLICATE_AGENT', 'PAUSED', 'HALTED', 'LEAVE_ALONE', 'NO_LAUNCHER_PROFILE'), false)
+        WHEN 'RELAUNCH_FAILED' THEN COALESCE((terminal ->> 'repairReason') IN ('LAUNCH_EXIT_NONZERO', 'TERMINAL_CREATE_REFUSED', 'TIMEOUT', 'SETUP_FAILED', 'VERIFY_FAILED'), false)
+        ELSE false END, false))
   )
 );

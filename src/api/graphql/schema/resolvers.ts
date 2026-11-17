@@ -95,6 +95,9 @@ import { stopSignalMutations, stopSignalQueries } from './resolvers.stopSignal.j
 import { deliveryBatchMutations, deliveryBatchQueries } from './resolvers.deliveryBatch.js';
 import { appKeyScopeMutations, appKeyScopeFieldResolvers } from './resolvers.appKeyScope.js';
 import { hostOperationMutations, hostOperationQueries, hostOperationFieldResolvers } from './resolvers.hostOperation.js';
+import { hostSweepRunMutations, hostSweepRunQueries } from './resolvers.hostSweepRuns.js';
+import { desiredStateMutations, desiredStateQueries, desiredStateWorkerFields } from './resolvers.desiredState.js';
+import { hostAssignmentMutations, hostAssignmentQueries, hostAssignmentFieldResolvers } from './resolvers.hostAssignment.js';
 import {
   agentTaskAlarmMutations,
   agentTaskAlarmQueries,
@@ -102,6 +105,7 @@ import {
 } from './resolvers.agentTaskAlarms.js';
 import { agentTaskMatchingQueries, agentTaskMatchingFieldResolvers } from './resolvers.agentTaskMatching.js';
 import { accountUsageQueries } from './resolvers.accountUsage.js';
+import { reviewQualityQueries } from './resolvers.reviewQuality.js';
 import { memoryConfigMutations, memoryConfigQueries, memoryConfigFieldResolvers } from './resolvers.memoryConfig.js';
 import { memoryConfigApplyMutations } from './resolvers.memoryConfigApply.js';
 import { nodeApprovalFieldResolvers, nodeApprovalMutations, nodeApprovalQueries } from './resolvers.nodeApproval.js';
@@ -149,6 +153,7 @@ export const resolvers = {
   AgentTickerTemplate: agentTickerTemplateFieldResolvers.AgentTickerTemplate,
   ...appKeyScopeFieldResolvers,
   ...hostOperationFieldResolvers,
+  ...hostAssignmentFieldResolvers,
   // #1706 — alarm wakes and availability. AgentTeamEvent already has a block
   // in agentTaskFieldResolvers; the wakes field joins it rather than replacing it.
   ...agentTaskAlarmFieldResolvers,
@@ -165,7 +170,7 @@ export const resolvers = {
   Agent: { ...typeResolvers.Agent, ...registerFieldResolvers.Agent, ...agentExtendedByFieldResolvers.Agent, ...agentClonedFromFieldResolvers.Agent, ...agentOfferReadinessFieldResolvers.Agent, ...bootPromptPointerFieldResolvers.Agent, ...agentTickerTemplateFieldResolvers.Agent },
   // #2045: the boot-prompt pointer read fields join the existing blocks.
   AppAgent: { ...typeResolvers.AppAgent, ...bootPromptPointerFieldResolvers.AppAgent },
-  Worker: { ...workerFieldResolvers.Worker, ...bootPromptPointerFieldResolvers.Worker },
+  Worker: { ...workerFieldResolvers.Worker, ...bootPromptPointerFieldResolvers.Worker, ...desiredStateWorkerFields },
   // Same for Memory: the config field joins the existing type block (#1325).
   Memory: { ...typeResolvers.Memory, ...memoryConfigFieldResolvers.Memory },
   // #1591: approval status joins the existing Node block; #1610 the
@@ -231,9 +236,13 @@ export const resolvers = {
     ...stopSignalQueries,
     ...deliveryBatchQueries,
     ...hostOperationQueries,
+    ...desiredStateQueries,
+    ...hostSweepRunQueries,
+    ...hostAssignmentQueries,
     ...agentTaskAlarmQueries,
     ...agentTaskMatchingQueries,
     ...accountUsageQueries,
+    ...reviewQualityQueries,
     ...utilizationQueries,
     ...registerRoleCandidateQueries,
     ...registerRolePickQueries,
@@ -314,6 +323,9 @@ export const resolvers = {
     ...deliveryBatchMutations,
     ...appKeyScopeMutations,
     ...hostOperationMutations,
+    ...desiredStateMutations,
+    ...hostSweepRunMutations,
+    ...hostAssignmentMutations,
     ...agentTaskAlarmMutations,
     ...memoryConfigMutations,
     ...memoryConfigTemplateMutations,

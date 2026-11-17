@@ -117,6 +117,7 @@ import { liveTxContext, withAuthorizedTx } from './authorizedTx.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { deriveFamily, normalizeFamily } from '../../../lib/agentTasks/family.js';
+import { effortFromToken, fillEmptyAppliedRunSettings, isEffortLevel, recordRunSettings, type EffortLevel } from '../../../lib/agentTasks/runSettings.js';
 import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
 import { forbiddenError } from '../../../lib/refusals.js';
 import { requirePersonAsThemselves } from '../../../lib/auth/personAsThemselves.js';
@@ -217,7 +218,11 @@ async function lockSessionAppActive(tx: Prisma.TransactionClient, appId: string)
  */
 // ── #1709: redeeming a launch grant ────────────────────────────────────────
 
-type LaunchCtx = { grant: LoadedGrant; issuedBy: 'platform' | 'manager'; hold: { holdUserId: string | null; holdAt: Date | null } };
+type LaunchCtx = {
+  grant: LoadedGrant; issuedBy: 'platform' | 'manager'; hold: { holdUserId: string | null; holdAt: Date | null };
+  /** #4291: the settings the start named (`family`, and `model` and `effort` when it carried them): what a bind that reports none runs as. #4306: empty when the bind said the start did not apply them. */
+  args: { family?: string; model?: string; effort?: string };
+};
 
 const launchGrantInvalid = () =>
   new GraphQLError('This launch grant is not valid: unknown, expired, already used, or not yours.', { extensions: { code: 'LAUNCH_GRANT_INVALID' } });
@@ -266,6 +271,11 @@ const LAUNCH_STATE_REFUSALS: Record<string, string> = {
  * changes nothing (no oracle, and no way to fail another's start).
  */
 async function withLaunch<T>(given: SessionInput, ctx: Context, run: (input: SessionInput, launch: LaunchCtx | null) => Promise<T>): Promise<T> {
+  // #4306: `startSettingsApplied: false` qualifies a START. With no launch grant there is no start to qualify, so it
+  // is refused here, before anything is read or written. true, null and absent say nothing and pass.
+  if (given.startSettingsApplied === false && given.launchGrant == null) {
+    throw new GraphQLError('startSettingsApplied: false is only accepted with a launchGrant: it says the start that grant came from did not apply its run settings.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
   if (given.launchGrant == null) return run(given, null);
   if (!ctx.userId || ctx.impersonation) throw launchGrantInvalid();
   if (given.force) {
@@ -274,9 +284,16 @@ async function withLaunch<T>(given: SessionInput, ctx: Context, run: (input: Ses
   const now = new Date();
   const grant = await loadLiveGrant(ctx.db, given.launchGrant, now);
   if (!grant || grant.holderUserId !== ctx.userId) throw launchGrantInvalid();
-  const op = await ctx.db.hostOperation.findUniqueOrThrow({ where: { id: grant.operationId }, select: { issuedBy: true, holdUserId: true, holdAt: true } });
+  const op = await ctx.db.hostOperation.findUniqueOrThrow({ where: { id: grant.operationId }, select: { issuedBy: true, holdUserId: true, holdAt: true, args: true } });
+  const str = (v: unknown) => (typeof v === 'string' ? v : undefined);
+  const opArgs = (op.args ?? {}) as Record<string, unknown>;
   const launch: LaunchCtx = {
     grant, issuedBy: op.issuedBy === 'platform' ? 'platform' : 'manager', hold: { holdUserId: op.holdUserId, holdAt: op.holdAt },
+    // #4306 (cor:agt:070:08, the exception Proposed): a start whose host could not apply its run settings (an exec-path
+    // worker runs its own fixed argv) says so on the bind, and the bind then inherits NONE of them: the session, the
+    // worker's last-used record and the task's applied stamp hold only what the bind itself reports. Emptied here, the
+    // one place the start's args enter a bind, so no later read of `launch.args` can inherit by another path.
+    args: given.startSettingsApplied === false ? {} : { family: str(opArgs.family), model: str(opArgs.model), effort: str(opArgs.effort) },
   };
   try {
     return await run({ ...given, workerRef: given.workerRef ?? grant.workerId }, launch);
@@ -521,10 +538,21 @@ function modelFamilyRefresh(
   explicitFamily: string | null,
   llmModel: string | null | undefined,
   storedTool: string | null,
-): { llmModel?: string; modelReportedAt?: Date; family?: string } {
+  /** #4291: the effort the session reports, written beside the model and family; null or omitted never clears. */
+  effort: EffortLevel | null = null,
+): { llmModel?: string; modelReportedAt?: Date; family?: string; effort?: EffortLevel } {
   const family = explicitFamily ?? (llmModel != null ? deriveFamily({ llmModel, tool: storedTool }) : null);
   // #2252: a supplied model IS a report, so it stamps the time (a repeat of the same model refreshes it).
-  return { ...(llmModel != null ? { llmModel, modelReportedAt: new Date() } : {}), ...(family != null ? { family } : {}) };
+  return { ...(llmModel != null ? { llmModel, modelReportedAt: new Date() } : {}), ...(family != null ? { family } : {}), ...(effort != null ? { effort } : {}) };
+}
+
+/** #4291: a supplied effort must be one of the generic scale; checked before any write (and, on a resume, before the claim is spent). */
+function explicitEffortOrThrow(effort: string | null | undefined): EffortLevel | null {
+  if (effort == null) return null;
+  if (!isEffortLevel(effort)) {
+    throw new GraphQLError('effort is one of LOW, MEDIUM, HIGH, XHIGH, MAX, UNSET or NOT_APPLICABLE.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+  return effort;
 }
 
 // ── #1956: resume claims ───────────────────────────────────────────────────
@@ -537,6 +565,8 @@ type ResumeSessionInput = {
   host?: string | null;
   llmModel?: string | null;
   family?: string | null;
+  /** #4291: refreshed on an open session it resumes, recorded on one it starts. */
+  effort?: string | null;
   transcriptPath?: string | null;
   /** #3822: the worker the caller expects to recover (the CLI worktree's last-bound worker). */
   expectedWorkerId?: string | null;
@@ -787,7 +817,17 @@ export const sessionMutations = {
         }
       } else {
         family = deriveFamily({ llmModel: input.llmModel, tool: input.tool });
+        // #4291: a host-started bind that reports no family runs as its start said. A model the bind itself reports
+        // still decides first; with none, the start's family wins over a guess from the tool.
+        const started = normalizeFamily(launch?.args.family);
+        if (started && (input.llmModel == null || family === null)) family = started;
       }
+      // #4291: the effort a host-started bind runs with is its start's, unless the bind reports its own; so is the model.
+      const effort: EffortLevel | null = explicitEffortOrThrow(input.effort) ?? effortFromToken(launch?.args.effort);
+      // The start's model belongs to the start's family: a bind that reports ANOTHER family (and no model) does not
+      // inherit it, or the session and the worker's record would pair a family with another family's model (#4295 BLIND, Clark F2).
+      const startedModel = launch?.args.model && family === normalizeFamily(launch.args.family) ? launch.args.model : null;
+      const boundModel: string | null = input.llmModel ?? startedModel;
 
       const workerRef = input.workerRef?.trim();
       if (workerRef) {
@@ -1534,9 +1574,10 @@ export const sessionMutations = {
           prNumber: input.prNumber,
           customerId: input.customerId,
           language: input.language,
-          llmModel: input.llmModel,
-          // #2252: a model given at bind is a report.
+          llmModel: boundModel,
+          // #2252: a model given at bind is a report (one taken from the start's args is not self-reported).
           modelReportedAt: input.llmModel != null ? new Date() : null,
+          effort,
           parentSessionId: input.parentSessionId,
           prevSessionId: input.prevSessionId ?? supersedes[0]?.id ?? derivedPrevSessionId,
           // #928 coding-session provenance.
@@ -1561,6 +1602,12 @@ export const sessionMutations = {
         // #1709: the grant is spent by THIS bind, atomically: of two concurrent redemptions one loses here, and its
         // whole bind rolls back.
         if (launch && !(await consumeGrant(tx, launch.grant.id, created.id, new Date()))) throw launchGrantInvalid();
+        // #4291: the bind is the first report; the worker's record follows it (the worker row is held FOR UPDATE above).
+        if (workerId) {
+          await recordRunSettings(tx, created.id);
+          // #4301: a started task reassigned to this worker while it had no session now shows this run.
+          await fillEmptyAppliedRunSettings(tx, created.id);
+        }
         // #1726: set who the worker reports to, in one step with the bind (a
         // spawn brief). Only onto a worker that reports to nobody, or to the
         // same worker (nothing to do): naming a different one would move a
@@ -1621,7 +1668,7 @@ export const sessionMutations = {
     // session ends, and late attribution is better than none.
     updateSession: async (
       _: unknown,
-      { id, prNumber, branch, llmModel, family }: { id: string; prNumber?: number | null; branch?: string | null; llmModel?: string | null; family?: string | null },
+      { id, prNumber, branch, llmModel, family, effort }: { id: string; prNumber?: number | null; branch?: string | null; llmModel?: string | null; family?: string | null; effort?: string | null },
       ctx: Context,
     ) => {
       const session = await ctx.db.session.findUnique({ where: { id } });
@@ -1631,18 +1678,27 @@ export const sessionMutations = {
       await requireSessionWriteAccess(ctx, session);
       // #1931: refresh a binding without guessing a model family from its host.
       // Null/omitted metadata never clears an existing family during recovery.
-      const refresh = modelFamilyRefresh(explicitFamilyOrThrow(family), llmModel, session.tool);
-      return ctx.db.session.update({
-        where: { id },
-        data: {
-          ...(prNumber !== undefined ? { prNumber } : {}),
-          ...(branch !== undefined ? { branch } : {}),
-          ...refresh,
-          updatedBy: ctx.userId ?? ctx.clientId ?? null,
-          // #1543 — a pr/branch edit must not revive a lapsed session.
-          ...(await preserveHeartbeatIfLapsed(ctx.db as never, id)),
-        },
-        include: SESSION_INCLUDE,
+      const refresh = modelFamilyRefresh(explicitFamilyOrThrow(family), llmModel, session.tool, explicitEffortOrThrow(effort));
+      const data = {
+        ...(prNumber !== undefined ? { prNumber } : {}),
+        ...(branch !== undefined ? { branch } : {}),
+        ...refresh,
+        updatedBy: ctx.userId ?? ctx.clientId ?? null,
+        // #1543 — a pr/branch edit must not revive a lapsed session.
+        ...(await preserveHeartbeatIfLapsed(ctx.db as never, id)),
+      };
+      // #4291: a report on a worker's session also moves the worker's record, in one transaction. The worker row is
+      // locked BEFORE the session row is written, the order a bind takes them in (recordRunSettings, LOCK ORDER). An
+      // update that reports nothing, or a session bound to no worker, stays the single write it was.
+      if (!session.workerId || Object.keys(refresh).length === 0) {
+        return ctx.db.session.update({ where: { id }, data, include: SESSION_INCLUDE });
+      }
+      const workerId = session.workerId;
+      return ctx.db.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM workers WHERE id = ${workerId} FOR UPDATE`;
+        const updated = await tx.session.update({ where: { id }, data, include: SESSION_INCLUDE });
+        await recordRunSettings(tx, id);
+        return updated;
       });
     },
 
@@ -1777,6 +1833,7 @@ export const sessionMutations = {
       // #2086: a bad family refuses BEFORE any claim is read or spent. It sits after the NOTHING_TO_RESUME line
       // above, so an App key or an impersonation learns nothing about the value either way.
       const explicitFamily = explicitFamilyOrThrow(given.family);
+      const explicitEffort = explicitEffortOrThrow(given.effort);
       // #3822: likewise a blank expected worker refuses before any read. Null or omitted means no narrowing.
       const expectedWorkerId = given.expectedWorkerId == null ? null : given.expectedWorkerId.trim();
       if (expectedWorkerId === '') {
@@ -1852,8 +1909,12 @@ export const sessionMutations = {
             // #2086: only after the gate permits, inside its transaction, so a refusal or a lost claim writes nothing.
             if (ok) {
               const stored = await tx.session.findUniqueOrThrow({ where: { id: sessionId }, select: { tool: true } });
-              const refresh = modelFamilyRefresh(explicitFamily, given.llmModel, stored.tool);
-              if (Object.keys(refresh).length) await tx.session.update({ where: { id: sessionId }, data: { ...refresh, updatedBy: userId } });
+              const refresh = modelFamilyRefresh(explicitFamily, given.llmModel, stored.tool, explicitEffort);
+              if (Object.keys(refresh).length) {
+                await tx.session.update({ where: { id: sessionId }, data: { ...refresh, updatedBy: userId } });
+                // #4291: the record follows the report (the gate above holds the worker row FOR UPDATE).
+                await recordRunSettings(tx, sessionId);
+              }
             }
             if (claimId) {
               if (!(await consumeResumeClaim(tx, claimId, userId))) throw lost;
@@ -1886,6 +1947,7 @@ export const sessionMutations = {
             host: given.host ?? undefined,
             llmModel: given.llmModel ?? undefined,
             family: given.family ?? undefined,
+            effort: given.effort ?? undefined,
             transcriptPath: given.transcriptPath ?? undefined,
           } as SessionInput,
         }, ctx);
