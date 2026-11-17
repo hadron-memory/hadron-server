@@ -175,11 +175,11 @@ describe('#4301: a started task shows the settings of the run it is on now', () 
   // #4309 (2): both take the destination worker's per-worker lock first. A gate transaction holds that lock while the
   // first operation starts and is seen waiting on it, then the second starts and is seen waiting too, then the gate
   // releases: contention is real every round and the lock queue fixes the order, so each order runs three times.
-  /** Waiters on exactly this worker's lock key (workerLock.ts: classid hashtext('agent-task-matcher:worker'), objid hashtext(id)). */
+  /** Waiters on exactly this worker's lock key, the two-integer form (objsubid 2); the worker id is fresh per test in a private clone database, so only the gate and the two racers can queue on it (workerLock.ts: classid hashtext('agent-task-matcher:worker'), objid hashtext(id)). */
   const waitingOnWorkerLock = async (w: { id: string }) =>
     Number((await db.$queryRaw<Array<{ n: bigint }>>`
       SELECT count(*) AS n FROM pg_locks
-      WHERE locktype = 'advisory' AND NOT granted
+      WHERE locktype = 'advisory' AND objsubid = 2 AND NOT granted
         AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
         AND classid::bigint = (hashtext('agent-task-matcher:worker')::bigint & 4294967295)
         AND objid::bigint = (hashtext(${w.id})::bigint & 4294967295)`)[0]!.n);
@@ -202,6 +202,7 @@ describe('#4301: a started task shows the settings of the run it is on now', () 
     // Each racer's rejection is observed at once, so none is left unhandled while the polling runs.
     const run = (f: () => Promise<unknown>) => { const pr = f(); pr.catch(() => undefined); started.push(pr); };
     let failure: unknown;
+    let failed = false;
     try {
       await heldP;
       run(first);
@@ -210,12 +211,13 @@ describe('#4301: a started task shows the settings of the run it is on now', () 
       await waitUntilWaiting(w, 2);
     } catch (e) {
       failure = e;
+      failed = true;
     } finally {
       release?.(); // always let the gate go, then drain everything that started
       const settled = await Promise.allSettled(started);
-      if (failure === undefined) for (const r of settled) if (r.status === 'rejected') failure = r.reason;
+      if (!failed) for (const r of settled) if (r.status === 'rejected') { failure = r.reason; failed = true; break; }
     }
-    if (failure !== undefined) throw failure;
+    if (failed) throw failure;
   }
 
   it.each([['bind', 'reassignment'], ['reassignment', 'bind']])(
