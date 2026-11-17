@@ -8170,9 +8170,10 @@ export const typeDefs = `#graphql
     """
     #4306 — with launchGrant only: whether the host applied the run settings (family, model, effort) its start named
     (hrn:node:hadronmemory.com:specs:cor:agt:070:08). false: the start's settings were NOT applied (an exec-path worker
-    runs its own fixed command), so this bind inherits none of them; the session, the worker's last-used record and the
-    task's applied settings hold only the family, model and effort this bind itself reports (a family derived from its
-    own llmModel or tool included). true, null or omitted: a bind that reports none runs as its start said, as before,
+    runs its own fixed command), so this bind inherits none of them from its start: the session holds only the family,
+    model and effort this bind itself reports (a family derived from its own llmModel or tool included), and the
+    worker's last-used record and the task's applied settings follow the session, so a record the worker already had
+    stays as it was (a null never clears it). true, null or omitted: a bind that reports none runs as its start said, as before,
     so a client that never sends this is unaffected. false without a launchGrant is refused BAD_USER_INPUT before
     anything is written, because there is no start to qualify.
     """
@@ -9269,15 +9270,16 @@ export const typeDefs = `#graphql
       tagsAll: [String!]
       "Exact opaque source value, without interpretation or prefix matching."
       source: String
-      "#3125 S2: the task with exactly this externalId (compared as written, 1 to 512 characters, else BAD_USER_INPUT). Runs inside the App read gate, so it only finds this App's task."
+      "#3125 S2, #4217: the tasks with exactly this externalId (compared as written, 1 to 512 characters, else BAD_USER_INPUT): at most one ACTIVE task (backlog, pending or started) holds it, and any number of finished or cancelled tasks that held it before it. Newest first, so a caller that wants the live one picks the active one. Runs inside the App read gate, so it only finds this App's tasks."
       externalId: String
       """
       #4084 (hrn:node:hadronmemory.com:specs:cor:agt:120:02): the tasks holding any of these external ids, each compared
       exactly as written. 1 to 100 ids; each entry passes the externalId check (1 to 512 characters, no unpaired
       surrogate), and ONE bad entry refuses the whole list with BAD_USER_INPUT naming its position (externalIds[i]), never
-      its text; an empty list is BAD_USER_INPUT, never "no narrowing". At most one task holds an id, so with limit omitted
-      — and offset omitted or 0 — the page is as long as the list and answers every id; an explicit offset windows the
-      batch like any list. An id no task of this App holds matches nothing. Runs inside
+      its text; an empty list is BAD_USER_INPUT, never "no narrowing". At most one ACTIVE task holds an id, but finished
+      and cancelled tasks keep it (#4217, hrn:node:hadronmemory.com:specs:cor:agt:120:02, 2026-11-14), so an id can match several tasks: with limit
+      omitted — and offset omitted or 0 — the page is every task holding any of the ids, up to the list cap (200); an
+      explicit limit or offset windows the batch like any list. An id no task of this App holds matches nothing. Runs inside
       the App read gate (hrn:node:hadronmemory.com:specs:cor:agt:050:21), so another App's task with the same id never
       appears. ANDed with every other filter, externalId included.
       """
@@ -11888,7 +11890,7 @@ export const typeDefs = `#graphql
     #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.
     """
     setAppTickerSettings(appRef: String!, input: AppTickerSettingsInput!, instruction: ActInstructionInput): AppTickerSettings!
-    "App managers only; omitted preserves, null refuses. Standby activation is unavailable until S7 (hrn:node:hadronmemory.com:specs:cor:agt:080:19). #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only."
+    "App managers only; omitted preserves, null refuses. #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only."
     setAppDeliverySettings(appRef: String!, input: AppDeliverySettingsInput!, instruction: ActInstructionInput): AppDeliverySettings!
     "#2138: pause or resume the whole team, as whoever manages the App. Separate from each worker's own pause: a worker cannot lift it, and ending it clears no self-pause. While paused, no worker is nudged and every worker's check status is PENDING (TEAM_PAUSED). #4223: while paused, the platform issues no worker.start for an assignment; lifting the pause starts the held workers with no open session whose tasks were assigned during it, and no others. #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only."
     setTeamPause(appRef: String!, paused: Boolean!, instruction: ActInstructionInput): TeamPause!
@@ -11985,16 +11987,6 @@ export const typeDefs = `#graphql
     #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.
     """
     setWorkerWakeSettings(workerRef: String!, input: WorkerWakeSettingsInput!, instruction: ActInstructionInput): WorkerWakeSettings!
-    """
-    Deprecated compatibility door: isolation is removed; this call retains its existing audience and refuses without writing.
-    #3606 phase-1 compatibility door. Isolation is removed. Refusals retain the source-exact order:
-    an unknown worker, or one the caller cannot read (a pure App key among them), is WORKER_NOT_FOUND;
-    a worker session with no instruction is WORKER_ISOLATION_FORBIDDEN; everyone else receives
-    WORKER_ISOLATION_UNAVAILABLE before the manager/holder check. The until input is not parsed and nothing is written.
-    """
-    isolateWorker(workerRef: String!, until: DateTime, instruction: ActInstructionInput): WorkerWakeSettings! @deprecated(reason: "Isolation was removed; compatibility door will be removed after client migration (#3606).")
-    "Deprecated no-op: retains the original locked target and manager-or-holder audience (hrn:node:hadronmemory.com:specs:cor:agt:080:29, ruling 0118). Impersonation remains FORBIDDEN; an uninstalled App remains APP_UNINSTALLED. Authorized callers receive current wake settings with no isolation, exemption, or manager-act write."
-    clearWorkerIsolation(workerRef: String!, instruction: ActInstructionInput): WorkerWakeSettings! @deprecated(reason: "Isolation was removed; compatibility door will be removed after client migration (#3606).")
     "#1748 — record that wakes were delivered (hrn:node:hadronmemory.com:specs:cor:agt:080:16). Never moves a read position."
     acknowledgeWakes(proofs: [String!]!): AcknowledgeWakesResult!
     """
@@ -16131,7 +16123,7 @@ export const typeDefs = `#graphql
     READ_TEAM_CHANNEL
     "Fires on every tick, with or without unread. The floor, budget, pause and dormancy still apply."
     EVERY_TICK
-    "#2138: fires when the subscriber has not checked its team channel within the ticker's cadence, whatever is unread, and never for a worker not expected to check (no task, isolated, paused, or a team pause)."
+    "#2138: fires when the subscriber has not checked its team channel within the ticker's cadence, whatever is unread, and never for a worker not expected to check (no task, paused, or a team pause)."
     LIVE_CHECK
   }
 
@@ -16203,8 +16195,6 @@ export const typeDefs = `#graphql
     handle: String!
     "A stable label for the reason, e.g. TASK:<id>:assigned."
     ref: String!
-    "Always null: standby has been removed."
-    standbyHeld: Int @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
   }
 
   "#1748 — one page of due wakes. Counts and ranges only (hrn:node:hadronmemory.com:specs:cor:agt:080:23)."
@@ -16667,8 +16657,6 @@ export const typeDefs = `#graphql
   "#1747 — a worker wake settings (hrn:node:hadronmemory.com:specs:cor:agt:080:03)."
   type WorkerWakeSettings {
     worker: Worker!
-    "Always false: isolation has been removed. Compatibility only; the deprecated clear door retains its original audience. hrn:node:hadronmemory.com:specs:cor:agt:080:29"
-    canManageIsolation: Boolean! @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
     mentions: MentionWake!
     "A pause belongs to the worker, not to a session."
     pausedUntil: DateTime
@@ -16678,13 +16666,6 @@ export const typeDefs = `#graphql
     effectiveCadenceSeconds: Int
     "None of the worker's sessions has had activity within the App's dormancy period (hrn:node:hadronmemory.com:specs:cor:agt:080:07). A dormant worker is never woken."
     dormant: Boolean!
-    "Always null: isolation storage and execution have been removed."
-    isolatedUntil: DateTime @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
-    isolatedAt: DateTime @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
-    "Always null: isolation has been removed."
-    isolatedByHandle: String @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
-    "Always false: isolation has been removed."
-    isolated: Boolean! @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
   }
 
   """
@@ -16877,10 +16858,6 @@ export const typeDefs = `#graphql
     failedChecksToOverdue: Int!
     "#2755: a worker's due wake left unacknowledged this long raises the dark-worker alarm. Whole seconds, 300..86400; default 1800. Independent of stuckWindowSeconds."
     darkAlarmWindowSeconds: Int!
-    "Always false: standby storage and execution have been removed."
-    standbyEnabled: Boolean! @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
-    "Always false: standby has been removed."
-    standbyEffective: Boolean! @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
   }
 
   "Atomic patch: omit to preserve, explicit null refuses. Empty patch returns the current authorized settings."
@@ -16889,7 +16866,6 @@ export const typeDefs = `#graphql
     batchWindowSeconds: Int
     busyDelaySeconds: Int
     stuckWindowSeconds: Int
-    standbyEnabled: Boolean @deprecated(reason: "Removed in phase 1; compatibility field will be removed after client migration (#3606).")
     "#2138: whole seconds, 60..86400."
     checkPeriodSeconds: Int
     "#2138: whole number, 1..100."
@@ -17984,7 +17960,7 @@ export const typeDefs = `#graphql
     OVERDUE
   }
 
-  "#2138 §3.4 — why a worker is PENDING. Precedence: TEAM_PAUSED, STOPPED, PAUSED, NO_TASK. ISOLATED and STANDBY are compatibility-only values never returned."
+  "#2138 §3.4 — why a worker is PENDING. Precedence: TEAM_PAUSED, STOPPED, PAUSED, NO_TASK."
   enum WorkerPendingReason {
     "A team pause is in force (App.teamPausedAt); the worker can't lift it."
     TEAM_PAUSED
@@ -17992,10 +17968,6 @@ export const typeDefs = `#graphql
     STOPPED
     "Its own pause (pausedUntil) is in force."
     PAUSED
-    "Deprecated compatibility value; isolation is removed and this value is never returned."
-    ISOLATED @deprecated(reason: "Removed; never returned (#3606).")
-    "Compatibility-only value: standby has been removed; never returned."
-    STANDBY @deprecated(reason: "Removed; never returned (#3606).")
     "No open task assigned, and its Agent uses tasks."
     NO_TASK
   }

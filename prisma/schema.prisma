@@ -2063,6 +2063,12 @@ model UsageEvent {
 /// (prisma/usage-activity-rollup-invariants.sql), never written by application code. `scopeKind` is `user` (events
 /// attributed to the user) or `memory` (events attributed to the event's own `memoryId`); no FK on purpose, the rollup
 /// follows the events and an event outlives its memory (#796).
+///
+/// CORRECTION (#4320) of a comment in prisma/usage-activity-rollup-invariants.sql ("A cell that nets to zero or below
+/// … is removed"): removal is when BOTH counters are non-positive, so a cell at `reads = -1, writes = 3` stays. Such a
+/// cell exists only before `applies_from` while the backfill is incomplete, where the reader does not trust cells and
+/// the backfill rebuilds them. The SQL file is carried byte for byte by the applied migration and is never edited;
+/// this comment is where a reader of the model lands on that.
 model UsageActivityCell {
   scopeKind String   @map("scope_kind")
   scopeId   String   @map("scope_id")
@@ -6232,8 +6238,9 @@ model AgentTask {
   description          String?
   /// Opaque origin reference (an issue URL, a node URN). Not interpreted.
   source               String?
-  /// #3125 S2 (V29, V46; cor:agt:120:02): the claim on an outside item, set once at create. Unique within an App,
-  /// whatever the task's state, through the partial unique index agent_tasks_app_external_id_uniq (raw SQL in
+  /// #3125 S2 (V29, V46; cor:agt:120:02), amended by #4217: the claim on an outside item, set once at create. Held by at
+  /// most ONE ACTIVE task (backlog, pending, started) within an App; a finished or cancelled task keeps its id without
+  /// blocking a new claim. Through the partial unique index agent_tasks_app_external_id_uniq (raw SQL in
   /// agent-task-external-id-invariants.sql: Prisma cannot model a partial unique). Compared exactly as written.
   externalId           String?   @map("external_id")
   /// Null for a root task. Always in the same App (cor:agt:050:01).

@@ -75,7 +75,7 @@ it('strictly earlier: a finish-by or a start-by exactly at the server clock is n
   expect(isTaskOverdue(pending, now)).toBe(false);
   expect(isTaskOverdue({ ...pending, startBy: at(-1) }, now)).toBe(true);
 });
-it('listing records no event and no alarm', async () => {
+it('listing records no event and no alarm (a stall alarm is an agent_team_events row, so this count covers both)', async () => {
   await task('quiet', started({ finishBy: at(PAST) }));
   const before = await db.agentTeamEvent.count();
   await list({ overdue: true }); await list({ overdue: false });
@@ -129,4 +129,34 @@ it('one request reads the clock once: a deadline crossed between the filter and 
   const rows = (r.body.singleResult.data as any).agentTasks as { title: string; overdue: boolean }[];
   expect(reads).toBe(1);
   expect(rows).toEqual([{ title: 'crossing', overdue: false }]);
+});
+it('a plain list with no overdue argument reads the clock once across concurrent field resolvers', async () => {
+  const t0 = now;
+  await task('past-finish', started({ finishBy: at(PAST) }));
+  await task('past-start', { startBy: at(PAST) });
+  await task('ahead-5s', { finishBy: new Date(t0.getTime() + 5_000) });
+  await task('no-times');
+  await task('far-future', { startBy: at(FUTURE), finishBy: at(FUTURE) });
+  let reads = 0;
+  // Each clock read is 10s later than the last; a second read would flip 'ahead-5s' to overdue.
+  const ticking = new Proxy(db as any, {
+    get(target, prop, recv) {
+      if (prop !== '$queryRaw') return Reflect.get(target, prop, recv);
+      return (strings: TemplateStringsArray, ...rest: unknown[]) =>
+        strings.join('?').includes('date_trunc')
+          ? Promise.resolve([{ now: new Date(t0.getTime() + 10_000 * reads++) }])
+          : target.$queryRaw(strings, ...rest);
+    },
+  });
+  const api = new ApolloServer<Context>({ typeDefs, resolvers });
+  const r = await api.executeOperation(
+    { query: `query($app:ID!){agentTasks(appRef:$app,limit:200){title overdue}}`, variables: { app: appId } },
+    { contextValue: { ...ctx(), db: ticking } },
+  );
+  if (r.body.kind !== 'single' || r.body.singleResult.errors) throw new Error(JSON.stringify(r.body));
+  const rows = (r.body.singleResult.data as any).agentTasks as { title: string; overdue: boolean }[];
+  expect(reads).toBe(1);
+  expect(Object.fromEntries(rows.map((x) => [x.title, x.overdue]))).toEqual({
+    'past-finish': true, 'past-start': true, 'ahead-5s': false, 'no-times': false, 'far-future': false,
+  });
 });

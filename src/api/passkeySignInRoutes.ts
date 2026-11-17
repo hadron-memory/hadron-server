@@ -1,9 +1,15 @@
 /**
- * #1897 slice B1 (cor:aut:030:02): the server-hosted passkey step of an email sign-in.
+ * #1897 slice B1: the server-hosted passkey step of an email sign-in.
+ *
+ * #4339 (decision of 2026-11-17, recorded on the private tracker): SIGN-IN NO LONGER USES THIS. Sign-in never depends on a passkey and never prompts for
+ * one, which reverses the passkey-for-every-magic-link rule this module was built for (cor:aut:030:02, owed a
+ * supersession by the specs engineer). Nothing creates a pending flow from a sign-in path now; the routes and the
+ * pending-flow machinery stay, unreachable that way, for the add-a-passkey slice (gated separately). Read the rest of
+ * this header as the design of the retained machinery, not as live sign-in behavior.
  *
  * Mounted only when `signingSurfacePolicy().registration` is on (#1895); while off nothing is mounted, so the
- * paths are ordinary 404s with no switch oracle. `/auth/email/verify` creates the pending row
- * ({@link beginPasskeySignIn}) and redirects here; nothing is published until `complete` succeeds.
+ * paths are ordinary 404s with no switch oracle. {@link beginPasskeySignIn} creates the pending row and redirects
+ * here; nothing is published until `complete` succeeds.
  *
  * - `GET  /auth/passkey/sign-in`          the page, or the one fixed invalid-flow page. Never completes anything.
  * - `GET  /auth/passkey/sign-in.js`       the page's script (same-origin, so the CSP needs no inline script).
@@ -84,7 +90,7 @@ export async function userHasUnrevokedPasskey(userId: string): Promise<boolean> 
   return rows.length > 0;
 }
 
-/** The page's three states for a live pending flow (cor:aut:030:02). */
+/** The page's three states for a live pending flow (the retained machinery; see the header, #4339). */
 export type PendingPageState = 'assert' | 'enroll' | 'invalid';
 export async function pendingPageState(userId: string): Promise<PendingPageState> {
   if (await userHasUsablePasskey(userId)) return 'assert';
@@ -93,8 +99,11 @@ export async function pendingPageState(userId: string): Promise<PendingPageState
 }
 
 /**
- * Called by `/auth/email/verify` when the registration switch is on and the claimed address belongs to a user.
- * Creates the pending row, sets its cookie and redirects to the page. Publishes nothing.
+ * #4339: NOTHING on a sign-in path calls this any more. Sign-in never depends on a passkey and never prompts for
+ * one (decision of 2026-11-17, recorded on the private tracker); `/auth/email/verify` signs the person in as it does with the switches off. The machinery
+ * stays for the add-a-passkey slice, which is gated separately.
+ *
+ * It was called by `/auth/email/verify` when the registration switch was on. Creates the pending row, sets its cookie and redirects to the page. Publishes nothing.
  *
  * - A user with a usable passkey: a ten-minute flow that ends in an assertion (B1).
  * - A user with NO unrevoked passkey: a thirty-minute flow (B2). The page sends them to the registration page, which
