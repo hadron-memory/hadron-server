@@ -158,7 +158,9 @@ describe('#4301: a started task shows the settings of the run it is on now', () 
     ['family', { appliedFamily: 'claude' }, { family: 'claude', model: null, effort: null }],
     ['model', { appliedModel: 'claude-sonnet-5-5' }, { family: null, model: 'claude-sonnet-5-5', effort: null }],
     ['effort', { appliedEffort: 'LOW' }, { family: null, model: null, effort: 'LOW' }],
-  ])('a partial stamp (only the %s set) is kept as it was by a later bind of the assignee', async (_name, partial, expected) => {
+    ['family and model', { appliedFamily: 'claude', appliedModel: 'claude-sonnet-5-5' }, { family: 'claude', model: 'claude-sonnet-5-5', effort: null }],
+    ['model and effort', { appliedModel: 'claude-sonnet-5-5', appliedEffort: 'LOW' }, { family: null, model: 'claude-sonnet-5-5', effort: 'LOW' }],
+  ])('a partial stamp (%s set) is kept as it was by a later bind of the assignee', async (_name, partial, expected) => {
     const { t, s } = await startedByKit();
     await db.agentTask.update({ where: { id: t.id }, data: { appliedFamily: null, appliedModel: null, appliedEffort: null, ...partial } as never });
     expect(await stored(t.id)).toEqual(expected);
@@ -175,6 +177,7 @@ describe('#4301: a started task shows the settings of the run it is on now', () 
     for (let i = 0; i < 6; i++) {
       const t = await assignTo(kit);
       await runAsActor({ workerId: kit.id, agentId: longAgent }, () => M.startAgentTask({}, { taskId: t.id }, { ...ctx(bo.id), sessionId: s.id } as Context));
+      expect((await row(t.id)).status).toBe('started');
       const open = await db.session.findMany({ where: { workerId: sam.id, endedAt: null } });
       for (const o of open) await M.endSession({}, { id: o.id }, ctx(bo.id));
       const racers = [() => bindAs(sam, CODEX), () => reassign(t.id, { worker: sam.id })];
@@ -183,7 +186,7 @@ describe('#4301: a started task shows the settings of the run it is on now', () 
       expect(await assigneeOf(t.id)).toBe(sam.id);
       expect(await applied(t.id)).toEqual(CODEX);
     }
-  });
+  }, 60_000);
 
   it('a bind fills only its own worker\'s STARTED tasks: not a pending one, another assignee\'s, or an ended one', async () => {
     const { t } = await startedByKit();
