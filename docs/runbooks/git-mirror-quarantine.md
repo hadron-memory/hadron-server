@@ -38,9 +38,9 @@ git log --stat <held-ref>                            # inspect it (it may contai
 ```
 
 1. Remove the cause at the remote (a rejected secret: rotate it and release the push-protection block, or fix the content).
-2. Reset the debt so the sweep retries it: `UPDATE git_mirror_obligations SET state = 'FAILED', attempts = 1 WHERE memory_id = '<id>' AND error_class = 'PUSH_REJECTED';`
+2. Reset the debt so the sweep retries it (a deliberate operator act: the code only ever raises `attempts`, so this is the one sanctioned way to lower it): `UPDATE git_mirror_obligations SET state = 'FAILED', attempts = 1 WHERE memory_id = '<id>' AND error_class = 'PUSH_REJECTED';`
    (a new write to the node also retries it). The next sweep publishes the node's **current** DB content.
 3. The held refs are never deleted automatically. Once the content is accounted for, delete each with
-   `git update-ref -d <held-ref>`. Held work that is still wanted can be restored with `git cherry-pick <held-ref>`.
+   `git update-ref -d <held-ref>`. Deleting the ref does **not** purge the objects: the reflog and the object store keep them until `git reflog expire --expire=now --all && git gc --prune=now`, so run that too if the held content was a secret. Held work that is still wanted can be restored with `git cherry-pick <held-ref>`.
 
 Each refused retry holds one more ref (bounded by the retry cap), so a long-blocked row accrues at most that many.

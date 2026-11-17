@@ -19,6 +19,8 @@ import { generateId } from '../lib/id.js';
 
 const env = vi.hoisted(() => ({
   root: '', bare: '', failPush: null as null | number,
+  /** Throw a RAW error (message carries a secret) on the Nth push of this test, to model a transport failure mid-split. */
+  rawFailOnPush: null as null | number, pushes: 0,
 }));
 vi.mock('../config.js', () => ({ get GRAPHS_PATH() { return env.root; } }));
 vi.mock('../integrations/github/execGit.js', async importOriginal => {
@@ -27,6 +29,9 @@ vi.mock('../integrations/github/execGit.js', async importOriginal => {
     ...real,
     execGit: vi.fn(async (args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}) => {
       if (env.failPush !== null && args[0] === 'push') throw new real.GitCommandError({ exitCode: env.failPush });
+      if (args[0] === 'push' && env.rawFailOnPush !== null && ++env.pushes === env.rawFailOnPush) {
+        throw Object.assign(new Error(`fatal: unable to access 'https://x-access-token:${LEAK}@github.com/acme/repo.git/'`), { exitCode: 128 });
+      }
       try {
         const stdout = execFileSync('git', [
           '-c', 'protocol.allow=never', '-c', 'protocol.file.allow=always',
@@ -49,6 +54,7 @@ const SOURCE = 'https://github.com/acme/repo.git';
 const ORG_URN = 'mirror3234-org';
 const MEMORY_URN = `${ORG_URN}:mem`;
 const BRANCH = 'hadron-updates';
+const LEAK = 'ghs_LEAKED_TOKEN_3234';
 const BAD_BODY = 'SECRET-PUSH-PROTECTED-BODY-3234';
 const IDENT = { GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
 const git = (cwd: string, ...args: string[]) =>
@@ -102,7 +108,7 @@ const tick = () => gitMirrorSweepTick(db, new Date());
 beforeEach(async () => {
   env.root = mkdtempSync(join(tmpdir(), 'bob-q3234-'));
   env.bare = mkdtempSync(join(tmpdir(), 'bob-q3234-bare-'));
-  env.failPush = null;
+  env.failPush = null; env.rawFailOnPush = null; env.pushes = 0;
   logs = [];
   const capture = (...a: unknown[]) => { logs.push(a.map(x => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ')); };
   vi.spyOn(console, 'error').mockImplementation(capture);
@@ -214,6 +220,34 @@ describe('#3234: a rejected unpublished commit is quarantined, so a healthy sibl
       ({ localPath }) => { writeFileSync(join(localPath, 'mine.md'), 'x'); })).toBe('failed');
     expect(heldRefs()).toEqual([]);
     expect(localTree()).toContain('mine.md');
+  });
+
+  it('a transport failure DURING the split stops it: every row is charged once as PUSH_FAILED, nothing reaches the remote, and the failure log carries no raw error text', async () => {
+    await setup(); rejectBad();
+    const bad = await makeNode('bad', BAD_BODY); const healthy = await makeNode('healthy');
+    await owe(bad.id); await owe(healthy.id);
+    env.rawFailOnPush = 2; // push 1 = the refused batch (real hook); push 2 = the first isolated row, which dies on transport
+
+    expect(await tick()).toBe(1);
+
+    expect(remoteHas('bad.md')).toBe(false);
+    expect(remoteHas('healthy.md')).toBe(false);
+    // charged exactly once each (attempts 1 -> 2), by the split's own settle, not again by the outer catch
+    expect((await rows()).map(r => [r.state, r.errorClass, r.attempts])).toEqual([['FAILED', 'PUSH_FAILED', 2], ['FAILED', 'PUSH_FAILED', 2]]);
+    const text = logs.join('\n');
+    expect(text).not.toContain(LEAK);
+    expect(text).not.toMatch(/x-access-token|unable to access/);
+    expect(logs.some(l => l.includes('Row-isolated push failed'))).toBe(true);
+  });
+
+  it('a single-obligation batch that the remote refuses is quarantined and charged PUSH_REJECTED without a split', async () => {
+    await setup(); rejectBad();
+    const bad = await makeNode('bad', BAD_BODY);
+    await owe(bad.id);
+    expect(await tick()).toBe(1);
+    expect((await rows()).map(r => [r.state, r.errorClass, r.attempts])).toEqual([['FAILED', 'PUSH_REJECTED', 2]]);
+    expect(heldRefs()).toHaveLength(1);
+    expect(localTree()).not.toContain('bad.md');
   });
 
   it('acceptance 5: an encrypted memory never reaches the quarantine path (R206 refusal unchanged)', async () => {

@@ -549,7 +549,7 @@ async function isolateRetryRows(a: {
         const rowFailed = ref.kind === 'WRITE' ? result.failedWrites.includes(ref.nodeId)
           : (result.failedRemoves ?? []).some(r => JSON.stringify([r.nodeId, r.removeLoc ?? '', r.branch ?? '']) === key);
         if (rowFailed) { tree.push(ref); continue; }
-      } else if (result === false) { cleared.push(ref); continue; }
+      } else if (result === false) { cleared.push(ref); continue; } // nothing to write: the debt is met, as on the main path (its `settlement` defaults to 'cleared')
       await execGit(['add', '-A'], { cwd: a.localPath });
       const { stdout } = await execGit(['status', '--porcelain'], { cwd: a.localPath });
       if (stdout.trim()) {
