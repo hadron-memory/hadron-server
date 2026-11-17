@@ -275,6 +275,24 @@ describe('C9 + C5: the proof shows the server-built terms only to someone who ma
     expect(await unconsumedGrantSign(admin.id)).toBe(0);
   });
 
+  // LOCAL Cameron P3 + BLIND Arianna P3 (#4165): the read gate runs on EVERY entry of a list, not just the first. A mixed list
+  // (a readable entry first, an unreadable one later) withholds the whole sentence and leaks neither entry's URN.
+  it('#4164: a list whose later entry the issuer cannot read: summary null, canSign false, neither entry named, no ceremony minted', async () => {
+    const { nodeId, nodeUrnPart } = await grantOnUnreadableNode();
+    const g = generateId();
+    await db.$executeRawUnsafe(`INSERT INTO grants (id, app_id, worker_id, action, action_values, reason, max_uses, created_at, updated_at)
+      VALUES ($1, $2, $3, 'schedule.create', $4::jsonb, $5, 3, (clock_timestamp() AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC'))`,
+    g, appId, workerId, JSON.stringify({ entryNode: [entryNodeId, nodeId] }), REASON);
+    const p = await prove((await openRequest(g)).id, admin);
+    expect(p.json.outcome).toBe('open');
+    expect(p.json.view.summary).toBeNull();
+    expect(p.json.canSign).toBe(false);
+    expect(p.text).not.toContain(nodeUrnPart);
+    expect(p.text).not.toContain(nodeId);
+    expect(p.text).not.toContain(entryNodeUrn); // the readable one is not shown either: no partial sentence
+    expect(await unconsumedGrantSign(admin.id)).toBe(0);
+  });
+
   it('Rodolfo P3-2: a later proof that cannot sign retires this browser\'s earlier signing ceremony', async () => {
     const g = await insertGrant();
     const req = await openRequest(g);
