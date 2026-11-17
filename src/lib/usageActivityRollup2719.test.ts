@@ -199,10 +199,21 @@ describe('#2719 the triggers keep the cells equal to a recount on every write pa
     const carol = await db.user.create({ data: { id: generateId(), githubId: 271903, githubUsername: 'rollup-carol' } });
     await insert([{ userId: carol.id, memoryId: memX, createdAt: at(-5) }, { userId: carol.id, memoryId: memX, createdAt: at(-50) }, { userId: alice.id, memoryId: memX, createdAt: at(-5) }]);
     await db.user.delete({ where: { id: carol.id } });
-    const left = await db.$queryRaw<Array<{ n: bigint }>>`SELECT COUNT(*) AS n FROM usage_activity_cells WHERE scope_id = ${carol.id}`;
-    expect(Number(left[0].n)).toBe(0);
+    const left = async (id: string) => Number((await db.$queryRaw<Array<{ n: bigint }>>`SELECT COUNT(*) AS n FROM usage_activity_cells WHERE scope_id = ${id}`)[0].n);
+    expect(await left(carol.id)).toBe(0);
     expect((await drift()).total).toBe(0);
     expect(await cellCount()).toBeGreaterThan(0); // alice's and memX's rows stay
+    // #4320 item 1: the merge leg the name always claimed but never ran (BLIND Dorian, 32f81c04). mergeUsers' raw
+    // reassignment zeroes the loser's user-scope cells — the drop-zero trigger removes them — and moves the counts
+    // to the winner; memory scope never carries a user id, so it is untouched.
+    const dave = await db.user.create({ data: { id: generateId(), githubId: 271906, githubUsername: 'rollup-dave' } });
+    await insert([{ userId: dave.id, memoryId: memX, createdAt: at(-5) }, { type: 'write', userId: dave.id, memoryId: memX, createdAt: at(-6) }]);
+    await db.$executeRaw`UPDATE usage_events SET user_id = ${alice.id} WHERE user_id = ${dave.id}`;
+    expect(await left(dave.id)).toBe(0);
+    const w = { from: at(-60), to: at(0), bucket: 'DAY' as const, timeZone: 'UTC' };
+    const winner = (await getUsageActivity(db, { ...w, userId: alice.id }))[0];
+    expect(winner).toMatchObject({ reads: 2, writes: 1 }); // alice's own read plus both moved counts
+    expect((await drift()).total).toBe(0);
   });
 
   it('an erased user with history from before the install (cells empty, backfill not run) leaves no cell row behind', async () => {
@@ -223,10 +234,18 @@ describe('#2719 the triggers keep the cells equal to a recount on every write pa
   it('an erased user whose cell mixes pre-install and post-install events leaves no cell row (the update goes negative)', async () => {
     const carol = await db.user.create({ data: { id: generateId(), githubId: 271905, githubUsername: 'rollup-carol3' } });
     await db.$executeRaw`DELETE FROM usage_activity_rollup_state WHERE id = 1`;
-    await insert([{ userId: carol.id, memoryId: memX, createdAt: at(-5) }]); // pre-install: never counted
+    // #4320 item 2: explicit timestamps that SHARE a cell, asserted, instead of at(-5)/at(-4) landing together by
+    // accident of T0 (BLIND Dorian, 36a8bde2). cellStart is the 15-minute cell holding at(-5).
+    const cellStart = Math.floor(at(-5).getTime() / 900_000) * 900_000;
+    const preInstall = new Date(cellStart + 60_000), postInstall = new Date(cellStart + 2 * 60_000);
+    expect(Math.floor(preInstall.getTime() / 900_000)).toBe(Math.floor(postInstall.getTime() / 900_000)); // one cell
+    await insert([{ userId: carol.id, memoryId: memX, createdAt: preInstall }]); // pre-install: never counted
     await db.$executeRaw`INSERT INTO usage_activity_rollup_state (id, applies_from, complete) VALUES (1, ${naive(at(60))}::timestamp, false)`;
-    await insert([{ userId: carol.id, memoryId: memX, createdAt: at(-4) }]); // post-install: counted into the same cell
-    expect(await cellCount()).toBeGreaterThan(0);
+    await insert([{ userId: carol.id, memoryId: memX, createdAt: postInstall }]); // post-install: counted into the same cell
+    // The precondition the old `cellCount() > 0` could not show: the user's OWN cell exists, holds exactly the one
+    // counted post-install read, and is the cell both timestamps share — so the delete must net it to -1.
+    const mine = await db.$queryRaw<Array<{ cell: Date; reads: bigint; writes: bigint }>>`SELECT cell, reads, writes FROM usage_activity_cells WHERE scope_kind = 'user' AND scope_id = ${carol.id}`;
+    expect(mine.map((r) => [r.cell.getTime(), Number(r.reads), Number(r.writes)])).toEqual([[cellStart, 1, 0]]);
     await db.user.delete({ where: { id: carol.id } });
     const left = await db.$queryRaw<Array<{ n: bigint }>>`SELECT COUNT(*) AS n FROM usage_activity_cells WHERE scope_id = ${carol.id}`;
     expect(Number(left[0].n)).toBe(0);
@@ -237,6 +256,24 @@ describe('#2719 the triggers keep the cells equal to a recount on every write pa
     await db.$executeRaw`INSERT INTO usage_activity_cells (scope_kind, scope_id, cell, reads, writes) VALUES ('memory', ${alice.id}, ${naive(new Date(Math.floor(at(-60).getTime() / 900_000) * 900_000))}::timestamp, 7, 7)`;
     const scope = { from: at(-300), to: at(0), bucket: 'DAY' as const, timeZone: 'UTC', userId: alice.id };
     expect((await getUsageActivity(db, scope)).reduce((n, b) => n + b.reads + b.writes, 0)).toBe(1);
+  });
+
+  it('an update of a pre-install event keeps the destination\'s count while the source\'s negative cell is dropped', async () => {
+    // #4320 item 3 (BLIND Dorian, 70c15466): moving an event that was never counted (history from before the state row
+    // existed) nets -1 into the source cell — born non-positive, so the insert-drop removes it — and +1 into the
+    // destination cell, which MUST survive with its count even though the same statement touched a dropping row.
+    const carol = await db.user.create({ data: { id: generateId(), githubId: 271907, githubUsername: 'rollup-carol4' } });
+    await db.$executeRaw`DELETE FROM usage_activity_rollup_state WHERE id = 1`;
+    const srcCell = Math.floor(at(-5).getTime() / 900_000) * 900_000;
+    const dstCell = srcCell - 900_000; // the previous 15-minute cell
+    await insert([{ userId: carol.id, memoryId: memX, createdAt: new Date(srcCell + 60_000) }]); // pre-install: never counted
+    await db.$executeRaw`INSERT INTO usage_activity_rollup_state (id, applies_from, complete) VALUES (1, ${naive(at(60))}::timestamp, false)`;
+    await db.$executeRaw`UPDATE usage_events SET created_at = ${naive(new Date(dstCell + 60_000))}::timestamp WHERE user_id = ${carol.id}`;
+    const cells = await db.$queryRaw<Array<{ scope_kind: string; cell: Date; reads: bigint; writes: bigint }>>`SELECT scope_kind, cell, reads, writes FROM usage_activity_cells WHERE scope_id = ${carol.id} OR (scope_kind = 'memory' AND scope_id = ${memX}) ORDER BY scope_kind, cell`;
+    expect(cells.map((r) => [r.scope_kind, r.cell.getTime(), Number(r.reads), Number(r.writes)])).toEqual([
+      ['memory', dstCell, 1, 0], // the destination keeps the moved count in both scopes…
+      ['user', dstCell, 1, 0], // …while the never-counted source nets to no row in either
+    ]);
   });
 
   it('hard delete and truncate', async () => {
@@ -291,34 +328,70 @@ describe('#2719 backfill and the watermark', () => {
   });
 
   it('a change to an already rebuilt span before completion is not lost (delete, soft delete, move, backdated insert)', async () => {
-    await setState(false, at(1));
-    await seedMixed();
-    const ids = (await db.usageEvent.findMany({ where: { userId: alice.id, type: 'read' }, orderBy: { createdAt: 'asc' }, take: 6, select: { id: true } })).map((e) => e.id);
+    // #4320 item 5 (BLIND Dorian, d20dc14e): explicit timestamps replace the seedMixed lean. Four events sit in the
+    // FIRST chunk, a marker one chunk later forces a second; the mutations run at afterChunk(1), when chunk 1 is
+    // committed, and each mutated timestamp is ASSERTED to lie before that chunk's end — the committed boundary.
+    await setState(false, at(-2870));
+    await insert([-3000, -2998, -2996, -2994].map((m) => ({ userId: alice.id, memoryId: memX, createdAt: at(m) })));
+    await insert([{ userId: alice.id, memoryId: memX, createdAt: at(-2900) }]); // chunk 2's marker
+    const chunk1End = Math.floor(at(-3000).getTime() / ROLLUP_CELL_MS) * ROLLUP_CELL_MS + 4 * ROLLUP_CELL_MS; // the job's own arithmetic: floorCell(first) + chunkCells cells
+    for (const m of [-3000, -2998, -2996, -2997]) {
+      expect(at(m).getTime(), `minute ${m} must lie in chunk 1`).toBeLessThan(chunk1End);
+    }
+    const rows = await db.usageEvent.findMany({ where: { userId: alice.id }, select: { id: true, createdAt: true } });
+    const byTime = (m: number) => rows.find((e) => e.createdAt.getTime() === at(m).getTime())!;
     const result = await backfillUsageActivityRollup(db, {
       chunkCells: 4,
       afterChunk: async (i) => {
-        if (i !== 3) return; // the oldest chunks are committed now: change them behind the backfill
-        await db.usageEvent.delete({ where: { id: ids[0] } });
-        await db.usageEvent.update({ where: { id: ids[1] }, data: { deletedAt: new Date() } });
-        await db.usageEvent.update({ where: { id: ids[2] }, data: { userId: bob.id } });
-        await insert([{ userId: alice.id, memoryId: memX, createdAt: at(-44 * 1440) }]);
+        if (i !== 1) return; // chunk 1 is committed now: change it behind the backfill
+        await db.usageEvent.delete({ where: { id: byTime(-3000).id } });
+        await db.usageEvent.update({ where: { id: byTime(-2998).id }, data: { deletedAt: new Date() } });
+        await db.usageEvent.update({ where: { id: byTime(-2996).id }, data: { userId: bob.id } });
+        await insert([{ userId: alice.id, memoryId: memX, createdAt: at(-2997) }]); // backdated into the committed chunk
       },
     });
-    expect(result.chunks).toBeGreaterThan(5);
+    expect(result.chunks).toBeGreaterThanOrEqual(2);
     expect((await drift()).total).toBe(0);
-    const scope = { from: at(-46 * 1440), to: at(1), bucket: 'DAY' as const, timeZone: 'UTC', userId: alice.id };
+    const scope = { from: at(-3020), to: at(-2860), bucket: 'DAY' as const, timeZone: 'UTC', userId: alice.id };
     expect(await getUsageActivity(db, scope)).toEqual(await oracle(scope));
-  }, 30_000);
+  });
 
-  it('two backfills at once end complete, agree with a recount and write no duplicate cell', async () => {
+  it('two backfills at once take their chunks one after the other, and both end complete with no drift', async () => {
+    // #4320 item 4 (BLIND Dorian, d20dc14e): Promise.allSettled alone never proved the runs overlap. The barrier holds
+    // the STATE ROW locked from outside (no usage_events lock), so run A's first chunk takes its LOCK TABLE and then
+    // blocks on that row — holding the table lock the whole time. Run B, started now, must wait at its own LOCK TABLE:
+    // neither run completes a chunk until the barrier lifts. With the chunk's LOCK TABLE removed, B runs its first
+    // chunk under A and the zero-progress assertion fails.
     await setState(false, at(1));
     await seedMixed();
-    const runs = await Promise.allSettled([backfillUsageActivityRollup(db, { chunkCells: 5 }), backfillUsageActivityRollup(db, { chunkCells: 5 })]);
+    const chunksOf = () => { let n = 0; return { get: () => n, after: async () => { n++; } }; };
+    const a = chunksOf(), b = chunksOf();
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let rowLocked!: () => void;
+    const locked = new Promise<void>((r) => { rowLocked = r; });
+    const stateRowHolder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM usage_activity_rollup_state WHERE id = 1 FOR UPDATE`;
+      rowLocked();
+      await held;
+    });
+    await locked; // the row lock is held before A starts, so A's first chunk cannot slip past the barrier
+    const first = backfillUsageActivityRollup(db, { chunkCells: 5, afterChunk: a.after });
+    const tableLockHeld = async () => Number((await db.$queryRaw<Array<{ n: bigint }>>`SELECT COUNT(*) AS n FROM pg_locks WHERE relation = 'usage_events'::regclass AND mode = 'ShareRowExclusiveLock' AND granted`)[0].n) > 0;
+    for (let i = 0; i < 500 && !(await tableLockHeld()); i++) await new Promise((r) => setTimeout(r, 20));
+    expect(await tableLockHeld()).toBe(true); // A is inside its first chunk: table lock held, blocked on the state row
+    const second = backfillUsageActivityRollup(db, { chunkCells: 5, afterChunk: b.after });
+    await new Promise((r) => setTimeout(r, 500));
+    expect(a.get()).toBe(0); // A still parked on the barrier inside chunk 1
+    expect(b.get()).toBe(0); // B waits on A's table lock: the chunks serialize
+    release();
+    await stateRowHolder;
+    const runs = await Promise.allSettled([first, second]);
     expect(runs.map((r) => r.status)).toEqual(['fulfilled', 'fulfilled']);
     expect((await drift()).total).toBe(0);
     const [state] = await db.$queryRaw<Array<{ complete: boolean }>>`SELECT complete FROM usage_activity_rollup_state WHERE id = 1`;
     expect(state.complete).toBe(true);
-  }, 30_000);
+  });
 
   it('a backfill chunk waits for a writer that is mid-transaction, and the cells still equal a recount', async () => {
     await setState(false, at(1));
