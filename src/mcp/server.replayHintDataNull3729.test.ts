@@ -15,11 +15,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
-import { createTestableMcpServer, mcpDoorCanReplay } from './server.js';
+import { createTestableMcpServer, GOVERNED_MCP_DOOR_FIELDS, mcpDoorCanReplay } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
 
+// #3754: a factory whose function carries its own implementation, so neither clearAllMocks nor a Vitest version's reset can strip it.
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
-  writeNodeToGit: vi.fn().mockResolvedValue(undefined),
+  writeNodeToGit: vi.fn(async () => undefined),
 }));
 
 let admin: { id: string };
@@ -31,7 +32,7 @@ const auth = (): AuthContext => ({
 });
 
 beforeEach(async () => {
-  vi.restoreAllMocks();
+  vi.clearAllMocks();
   await cleanDb(db);
   const org = await db.organization.create({
     data: { id: generateId(), name: 'mcp-rh3729-org', urn: 'mcp-rh3729-org' },
@@ -71,6 +72,9 @@ const snapshot = async (id: string) => {
   const node = await db.node.findUniqueOrThrow({ where: { id } });
   return {
     data: JSON.stringify(node.data ?? null),
+    // #3754 item 1: content and abstract too, so "state unchanged" is proven for every field a refused write could touch.
+    content: node.content,
+    abstract: node.abstract,
     revSeq: node.revSeq,
     revisions: await db.nodeRevision.count({ where: { nodeId: id } }),
   };
@@ -112,6 +116,28 @@ describe('MCP replay hint vs data:null (#3729)', () => {
       // Control: the same doors still take a record.
       expect(client.toolParamSchema('hadron_update_task', 'data').parse({ stage: 1 })).toEqual({ stage: 1 });
       expect(client.toolParamSchema('hadron_update_review', 'data').parse({ stage: 1 })).toEqual({ stage: 1 });
+    });
+
+    it('#3754 parity: every governed field whose null the generic update accepts but a door rejects is NOT replayable as null (derived from the registered schemas)', () => {
+      const client = createTestableMcpServer(auth());
+      const takesNull = (tool: string, field: string): boolean | 'absent' => {
+        try {
+          client.toolParamSchema(tool, field).parse(null);
+          return true;
+        } catch (e) {
+          return String((e as Error).message).includes('has no parameter') ? 'absent' : false;
+        }
+      };
+      // A null the generic update schema refuses never reaches the helper, so only these fields can be replayed wrongly.
+      const reachable = GOVERNED_MCP_DOOR_FIELDS.filter((f) => takesNull('hadron_update_node', f) === true);
+      expect(reachable.length, 'the derivation found no nullable generic field: the pin would be vacuous').toBeGreaterThan(0);
+      for (const [kind, door] of [['task', 'hadron_update_task'], ['review', 'hadron_update_review']] as const) {
+        for (const field of reachable) {
+          const doorTakes = takesNull(door, field);
+          if (doorTakes === 'absent') continue; // a door that does not carry the field is refused by the field-list check instead
+          expect(mcpDoorCanReplay({ name: 'n', [field]: null }, kind, 'update'), `${kind} door vs ${field}:null (door takes null: ${doorTakes})`).toBe(doorTakes);
+        }
+      }
     });
 
     it('generic update accepts data:null (#3721) while generic create still refuses it', () => {
@@ -177,16 +203,33 @@ describe('MCP replay hint vs data:null (#3729)', () => {
       expect(nullContent).not.toContain('hadron_update_task');
     });
 
-    it('missing target: data:null still reads as plain not-found (no new entity-existence signal)', async () => {
+    it('#3754 review controls: record data and omitted data still earn the review door hint; content:null still earns none', async () => {
+      const node = await seed('rh3729:review2', { role: 'review' });
       const client = createTestableMcpServer(auth());
-      const text = await client.callToolText('hadron_update_node', {
-        urn: urnFor('rh3729:missing'),
-        data: null,
-      });
-      expect(text).toContain('Node not found');
+      const withRecord = await client.callToolText('hadron_update_node', { urn: urnFor(node.loc), data: { k: 'v' } });
+      expect(withRecord).toMatch(/^\[role_governed\]/);
+      expect(withRecord).toContain('hadron_update_review');
+      const omittedData = await client.callToolText('hadron_update_node', { urn: urnFor(node.loc), content: 'new body' });
+      expect(omittedData).toMatch(/^\[role_governed\]/);
+      expect(omittedData).toContain('hadron_update_review');
+      const nullContent = await client.callToolText('hadron_update_node', { urn: urnFor(node.loc), content: null });
+      expect(nullContent).toMatch(/^\[role_governed\]/);
+      expect(nullContent).not.toContain('hadron_update_review');
     });
 
-    it('retired (ungoverned) target: data:null still clears the bag — the fix adds no new refusal', async () => {
+    it('missing target: data:null still reads as plain not-found (no new entity-existence signal)', async () => {
+      const client = createTestableMcpServer(auth());
+      const missing = urnFor('rh3729:missing');
+      const text = await client.callToolText('hadron_update_node', { urn: missing, data: null });
+      // #3754 item 3: the WHOLE refusal equals a non-null write's to the same missing URN, so any extra leaked text fails.
+      const control = await client.callToolText('hadron_update_node', { urn: missing, content: 'x' });
+      expect(text).toContain('Node not found');
+      expect(text).toBe(control);
+    });
+
+    it('ungoverned target: data:null still clears the bag — the fix adds no new refusal', async () => {
+      // `isRunnable: false` and no `role` is the ungoverned predicate this relies on: no governed kind applies, so no door is named
+      // and nothing is refused. (It seeds an ungoverned row; it does not run a retirement workflow.)
       const node = await seed('rh3729:retired', { isRunnable: false, data: { stage: 3 } });
       const client = createTestableMcpServer(auth());
       const text = await client.callToolText('hadron_update_node', {
