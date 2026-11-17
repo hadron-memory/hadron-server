@@ -91,7 +91,7 @@ import {
 import { GraphQLError } from 'graphql';
 import { Prisma, type PrismaClient } from '../../../generated/prisma/index.js';
 import { tickBatch } from './tickBatch.js';
-import { type Context, isAppParticipant, clampListTake, withoutRequestCaches, pageArgs, pageEnvelope } from './resolvers.helpers.js';
+import { type Context, isAppParticipant, clampListTake, LIST_PAGE_MAX, withoutRequestCaches, pageArgs, pageEnvelope } from './resolvers.helpers.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AppNotFoundError, WorkerNotFoundError } from '../../../lib/entityRef/errors.js';
 import { isId } from '../../../lib/entityRef/shape.js';
@@ -3205,9 +3205,10 @@ export const agentTaskQueries = {
       omit: { resultFindings: true },
       where: { AND: [where, noZero, rootsWhere, ownerWhere, assigneeWhere, creatorWhere, ...filters] },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      // #4084: one task per id at most, so a batch read with no limit answers every id it names (the cap is the list
-      // cap), instead of cutting at the list default.
-      take: args.limit == null && args.externalIds?.length ? args.externalIds.length : clampListTake(args.limit),
+      // #4084, #4217: a batch read with no limit answers every task holding each id it names, up to the list cap, instead of
+      // cutting at the list default. An id may have a history (finished and cancelled tasks no longer hold it, cor:agt:120:02,
+      // 2026-11-14), so the page is NOT as long as the list: sizing it to the id count would drop tasks.
+      take: args.limit == null && args.externalIds?.length ? LIST_PAGE_MAX : clampListTake(args.limit),
       skip: Math.max(0, args.offset ?? 0),
     });
     }, true),
