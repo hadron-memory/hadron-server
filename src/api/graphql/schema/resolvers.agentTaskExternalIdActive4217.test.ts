@@ -8,6 +8,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { readFileSync } from 'node:fs';
+import { Client } from 'pg';
 import { resolvers, type Context } from './resolvers.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
@@ -185,5 +187,35 @@ describe('readers may now get several tasks per external id', () => {
     await finish((await create({ externalId: X })).id);
     await create({ title: 'live', externalId: X });
     expect(await list({ externalIds: [X], limit: 1 })).toHaveLength(1);
+  });
+});
+
+describe('the migration swaps the index atomically (BLIND P2, Clark)', () => {
+  const migration = readFileSync(new URL('../../../../prisma/migrations/20261117400000_agent_task_external_id_active/migration.sql', import.meta.url), 'utf8');
+  const swap = migration.slice(migration.indexOf('DROP INDEX'));
+  const def = async (c: Client) => (await c.query(`SELECT indexdef FROM pg_indexes WHERE indexname = 'agent_tasks_app_external_id_uniq'`)).rows[0]?.indexdef as string;
+
+  it('carries nothing that cannot run inside the one implicit transaction a multi-statement file gets (no CONCURRENTLY, no explicit transaction control)', () => {
+    expect(migration).not.toMatch(/CONCURRENTLY/i);
+    expect(migration).not.toMatch(/^\s*(BEGIN|COMMIT|ROLLBACK)\b/im);
+    expect(swap.split(';').filter(x => x.replace(/--.*$/gm, '').trim()).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('sent as ONE simple query (as prisma migrate deploy sends a file), a failure after the swap leaves the OLD index intact, and success installs the narrowed one', async () => {
+    const c = new Client({ connectionString: process.env.DATABASE_URL });
+    await c.connect();
+    try {
+      // the state before the deploy: the all-status index
+      await c.query('DROP INDEX IF EXISTS agent_tasks_app_external_id_uniq');
+      await c.query('CREATE UNIQUE INDEX agent_tasks_app_external_id_uniq ON agent_tasks (app_id, external_id) WHERE external_id IS NOT NULL');
+      const before = await def(c);
+      expect(before).not.toMatch(/status/);
+      await expect(c.query(`${swap}\nSELECT 1/0;`)).rejects.toThrow(/division by zero/);
+      expect(await def(c)).toBe(before);                       // the DROP rolled back with the failed CREATE... script
+      await c.query(swap);
+      expect(await def(c)).toMatch(/status/);
+    } finally {
+      await c.end();
+    }
   });
 });
