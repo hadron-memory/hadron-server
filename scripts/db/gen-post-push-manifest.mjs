@@ -47,7 +47,7 @@ const KIND_WHY = {
   extension: 'Postgres extension the raw-SQL corpus ensures exists (CREATE EXTENSION); not a Prisma-schema concept.',
   index: 'Index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma.',
   'unique-index': 'Unique index created and owned by the raw-SQL corpus; its exact shape lives in its corpus file, outside schema.prisma.',
-  'check-constraint': 'CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints.',
+  'check-constraint': 'CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints).',
   'foreign-key-constraint': 'Foreign key created and owned by the raw-SQL corpus, not modeled in schema.prisma as written.',
   'unique-constraint': 'Table-level UNIQUE constraint defined in raw SQL; not expressible in the Prisma schema as written.',
   'generated-column': 'STORED generated column maintained by Postgres; Prisma schema language does not model generated columns.',

@@ -91,859 +91,859 @@
       "name": "chk_actions_shape",
       "kind": "check-constraint",
       "file": "grant-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_agent_clone_audit_one_target",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_agent_owner_xor",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_agent_schedule_cron_xor_run_at",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_agent_task_findings",
       "kind": "check-constraint",
       "file": "agent-task-findings-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_agent_task_stall_schedule_range",
       "kind": "check-constraint",
       "file": "agent-task-stall-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_agent_task_stop_holds_shape",
       "kind": "check-constraint",
       "file": "stop-signal-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_agent_tasks_external_id",
       "kind": "check-constraint",
       "file": "agent-task-external-id-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_agent_tasks_hand_back",
       "kind": "check-constraint",
       "file": "agent-task-hand-back-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_agent_tasks_handle",
       "kind": "check-constraint",
       "file": "agent-task-number-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_agent_tasks_references",
       "kind": "check-constraint",
       "file": "agent-task-references-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_agent_tasks_shape",
       "kind": "check-constraint",
       "file": "agent-task-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_agent_tasks_zero_backlog",
       "kind": "check-constraint",
       "file": "agent-task-number-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_agent_team_alarm_schedule_shape",
       "kind": "check-constraint",
       "file": "agent-task-stall-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_agent_team_events_episode",
       "kind": "check-constraint",
       "file": "agent-task-stall-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_agent_team_events_shape",
       "kind": "check-constraint",
       "file": "agent-task-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_agent_ticker_templates_shape",
       "kind": "check-constraint",
       "file": "agent-ticker-template-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_agents_boot_prompt_pointer_pair",
       "kind": "check-constraint",
       "file": "boot-prompt-pointer-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_agents_context_cap",
       "kind": "check-constraint",
       "file": "context-reset-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_ai_service_config_owner",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_app_agent_customizations_boot_prompt_pointer_pair",
       "kind": "check-constraint",
       "file": "derived-install-prompt-pointer-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_app_agents_boot_prompt_pointer_pair",
       "kind": "check-constraint",
       "file": "boot-prompt-pointer-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_app_automation_read_grant_event_shape",
       "kind": "check-constraint",
       "file": "app-automation-read-grant-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_app_automation_read_grant_shape",
       "kind": "check-constraint",
       "file": "app-automation-read-grant-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_app_automation_team_snapshot_grant_event_shape",
       "kind": "check-constraint",
       "file": "app-automation-team-snapshot-grant-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_app_automation_team_snapshot_grant_shape",
       "kind": "check-constraint",
       "file": "app-automation-team-snapshot-grant-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_app_grants_shape",
       "kind": "check-constraint",
       "file": "ticker-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_app_key_scopes_shape",
       "kind": "check-constraint",
       "file": "app-key-scope-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_app_memory_write_grant_event_shape",
       "kind": "check-constraint",
       "file": "app-memory-write-grant-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_app_memory_write_grant_shape",
       "kind": "check-constraint",
       "file": "app-memory-write-grant-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_app_owner_xor",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_app_session_dormancy_days_positive",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_apps_delivery_check_settings",
       "kind": "check-constraint",
       "file": "channel-checks-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_apps_delivery_dark_alarm_window",
       "kind": "check-constraint",
       "file": "dark-alarm-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_apps_delivery_settings",
       "kind": "check-constraint",
       "file": "delivery-settings-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_apps_host_setup_source",
       "kind": "check-constraint",
       "file": "host-assignment-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_apps_properties",
       "kind": "check-constraint",
       "file": "app-properties-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_apps_ticker_settings",
       "kind": "check-constraint",
       "file": "ticker-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_automation_adoption_event_shape",
       "kind": "check-constraint",
       "file": "automation-adoption-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_automation_shape",
       "kind": "check-constraint",
       "file": "automation-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_comment_meta_state_top_level",
       "kind": "check-constraint",
       "file": "comment-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_compiled_prompt_revisions_shape",
       "kind": "check-constraint",
       "file": "compiled-prompt-revision-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_context_resets_cause",
       "kind": "check-constraint",
       "file": "context-reset-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_context_resets_shape",
       "kind": "check-constraint",
       "file": "context-reset-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_coordinator_cadence_episodes_shape",
       "kind": "check-constraint",
       "file": "coordinator-cadence-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_dark_worker_episodes_shape",
       "kind": "check-constraint",
       "file": "dark-alarm-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_edges_governed_anchor",
       "kind": "check-constraint",
       "file": "comment-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_fresh_sign_in_shape",
       "kind": "check-constraint",
       "file": "fresh-sign-in-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_git_mirror_obligation_shape",
       "kind": "check-constraint",
       "file": "git-mirror-obligation-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_grant_events_shape",
       "kind": "check-constraint",
       "file": "grant-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_grant_signature_shape",
       "kind": "check-constraint",
       "file": "grant-signing-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_grant_signing_request_shape",
       "kind": "check-constraint",
       "file": "grant-signing-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_grants_exactly_one_holder",
       "kind": "check-constraint",
       "file": "grant-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_grants_shape",
       "kind": "check-constraint",
       "file": "grant-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_host_key_uses_shape",
       "kind": "check-constraint",
       "file": "host-operation-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_host_operations_hold",
       "kind": "check-constraint",
       "file": "host-launch-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_host_operations_issued_reason",
       "kind": "check-constraint",
       "file": "desired-start-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_host_operations_shape",
       "kind": "check-constraint",
       "file": "host-operation-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_host_registration_workers_family",
       "kind": "check-constraint",
       "file": "agent-task-matching-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_host_registration_workers_worktrees",
       "kind": "check-constraint",
       "file": "agent-task-matching-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_host_registrations_capabilities",
       "kind": "check-constraint",
       "file": "context-reset-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_host_registrations_shape",
       "kind": "check-constraint",
       "file": "agent-task-matching-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_host_sweep_episodes_shape",
       "kind": "check-constraint",
       "file": "host-sweep-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_host_sweep_runs_shape",
       "kind": "check-constraint",
       "file": "host-sweep-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_host_worker_assignments_shape",
       "kind": "check-constraint",
       "file": "host-assignment-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_launch_grants_shape",
       "kind": "check-constraint",
       "file": "host-launch-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_memory_chunk_overlap_valid",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_memory_chunk_tokens_positive",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_memory_class_app_id",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_memory_config_template_org_default_org_only",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_memory_config_template_owner",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_memory_config_template_rule_role_format",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_memory_config_template_rule_task_markers",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_memory_group_no_owner",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_memory_group_visibility",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_memory_max_rev_count_positive",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_memory_owner_xor",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_memory_personal_agent_id",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_memory_shared_agent_scope",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_memory_urn_not_prefixed",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_memory_vector_encrypted_ack",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_memory_visibility_class",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_model_family_availability_shape",
       "kind": "check-constraint",
       "file": "agent-task-stall-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_model_group_owner",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_node_approval_complete",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_node_content_validation_reporter_shape",
       "kind": "check-constraint",
       "file": "content-validation-report-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_node_content_validation_revisions_positive",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_node_mint_complete",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_node_revisions_authorship_shape",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_node_role_rule_role_format",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_node_role_rule_task_markers",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_node_signature_shape",
       "kind": "check-constraint",
       "file": "signing-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_node_signature_stamp",
       "kind": "check-constraint",
       "file": "signing-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_nodes_authorship_shape",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_nodes_comment_unapproved",
       "kind": "check-constraint",
       "file": "comment-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_nodes_compiled_boot_prompt_role",
       "kind": "check-constraint",
       "file": "boot-prompt-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_passkey_cancel_token_shape",
       "kind": "check-constraint",
       "file": "passkey-registration-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_passkey_ceremony_registration",
       "kind": "check-constraint",
       "file": "passkey-registration-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_passkey_registration_notice_shape",
       "kind": "check-constraint",
       "file": "passkey-registration-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_passkey_shape",
       "kind": "check-constraint",
       "file": "passkey-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_pending_email_sign_in_shape",
       "kind": "check-constraint",
       "file": "pending-email-sign-in-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_pending_login_ceremony",
       "kind": "check-constraint",
       "file": "fresh-sign-in-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_pending_login_provider_nonce",
       "kind": "check-constraint",
       "file": "login-nonce-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_personal_visibility_user",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_post_limit_episodes_shape",
       "kind": "check-constraint",
       "file": "post-limit-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_read_state_agent_app",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_read_state_attendee",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_register_attendee",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_register_owner",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_schedule_run_budgets_positive",
       "kind": "check-constraint",
       "file": "trigger-run-budget-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_scope_owner",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_secret_app_key_shape",
       "kind": "check-constraint",
       "file": "secret-app-keys-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_secret_app_value",
       "kind": "check-constraint",
       "file": "secret-versions-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_secret_owner_type",
       "kind": "check-constraint",
       "file": "secret-versions-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_secret_protected_app_only",
       "kind": "check-constraint",
       "file": "secret-versions-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_secret_version_shape",
       "kind": "check-constraint",
       "file": "secret-versions-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_served_prompts_app",
       "kind": "check-constraint",
       "file": "served-prompt-app-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_served_prompts_shape",
       "kind": "check-constraint",
       "file": "served-prompt-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_sessions_family",
       "kind": "check-constraint",
       "file": "agent-task-matching-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_sessions_launch",
       "kind": "check-constraint",
       "file": "host-launch-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_sign_in_shape",
       "kind": "check-constraint",
       "file": "signin-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_signing_request_shape",
       "kind": "check-constraint",
       "file": "signing-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_stamp_signing_key_shape",
       "kind": "check-constraint",
       "file": "signing-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_start_failing_episodes_shape",
       "kind": "check-constraint",
       "file": "desired-start-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_started_not_blocked",
       "kind": "check-constraint",
       "file": "task-blocker-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_task_blocker_self",
       "kind": "check-constraint",
       "file": "task-blocker-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_task_priority",
       "kind": "check-constraint",
       "file": "task-blocker-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_task_session_end_requests_shape",
       "kind": "check-constraint",
       "file": "host-operation-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_team_stop_coverage_shape",
       "kind": "check-constraint",
       "file": "stop-signal-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_team_stop_signals_shape",
       "kind": "check-constraint",
       "file": "stop-signal-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_ticker_subscriptions_shape",
       "kind": "check-constraint",
       "file": "ticker-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_tickers_generated",
       "kind": "check-constraint",
       "file": "agent-ticker-template-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_tickers_shape",
       "kind": "check-constraint",
       "file": "ticker-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_user_api_key_deletion_shape",
       "kind": "check-constraint",
       "file": "user-api-key-deletion-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_user_deletion_reason",
       "kind": "check-constraint",
       "file": "post-push.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_webhook_run_budgets_positive",
       "kind": "check-constraint",
       "file": "trigger-run-budget-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_worker_availability_shape",
       "kind": "check-constraint",
       "file": "agent-task-stall-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_worker_team_choice",
       "kind": "check-constraint",
       "file": "worker-team-choice-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_worker_wake_settings_shape",
       "kind": "check-constraint",
       "file": "ticker-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_workers_boot_prompt_pointer_pair",
       "kind": "check-constraint",
       "file": "boot-prompt-pointer-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_workers_leave_alone_shape",
       "kind": "check-constraint",
       "file": "desired-state-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "chk_workers_terminal_shape",
       "kind": "check-constraint",
       "file": "host-operation-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "tickers_tick_code_shape",
       "kind": "check-constraint",
       "file": "ticker-tick-code-invariants.sql",
-      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language has no constraints."
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
       "name": "vector",

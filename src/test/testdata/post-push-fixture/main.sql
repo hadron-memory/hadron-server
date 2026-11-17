@@ -19,7 +19,11 @@ ALTER TABLE fixture_books ADD COLUMN lower_id text GENERATED ALWAYS AS (lower(id
 -- drop-and-re-add idiom, and one statement creating TWO objects.
 ALTER TABLE public.fixture_qualified ADD CONSTRAINT fixture_qualified_chk CHECK (id <> '');
 ALTER TABLE fixture_books DROP CONSTRAINT IF EXISTS fixture_readd_chk, ADD CONSTRAINT fixture_readd_chk CHECK (id <> '');
-ALTER TABLE fixture_books ADD CONSTRAINT fixture_multi_a CHECK (id <> ''), ADD CONSTRAINT fixture_multi_b UNIQUE (lower(id));
+ALTER TABLE fixture_books ADD CONSTRAINT fixture_multi_a CHECK (id <> ''), ADD CONSTRAINT fixture_multi_b UNIQUE (id);
+-- An E-string with a backslash-escaped quote AND a comma inside a CHECK in a
+-- multi-action statement: the action splitter must honor the escape (the
+-- comma stays inside the string; the top-level comma still splits).
+ALTER TABLE fixture_books ADD CONSTRAINT fixture_escape_chk CHECK (id <> E'x\'y, z'), ADD CONSTRAINT fixture_escape_uq UNIQUE (id);
 -- A GUARDED plain ADD COLUMN is schema-owned skew repair (prisma-modelled,
 -- re-runnable): a recognized non-object, never inventory, never refused.
 ALTER TABLE fixture_books ADD COLUMN IF NOT EXISTS skew_repair_col text;
@@ -67,6 +71,9 @@ SELECT 'string with ; semicolon' WHERE false;
 /* block comment with a ; semicolon (Brooks P3-3): must not split statements */
 SELECT 'plain' /* mid-statement ; comment */ WHERE false;
 SELECT E'escaped \' quote ; semicolon' WHERE false;
+/* nested /* block ; comment */ — Postgres nests, so this is still ONE comment */
+CREATE INDEX fixture_nested_comment_idx ON fixture_books (id);
+CREATE /* separator */ INDEX fixture_comment_sep_idx ON fixture_books (id);
 DROP TRIGGER IF EXISTS old_trig ON fixture_books;
 DROP INDEX IF EXISTS old_idx;
 

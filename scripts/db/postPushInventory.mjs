@@ -54,10 +54,21 @@ const NON_OBJECT_HEADS = /^(INSERT|UPDATE|DELETE|SELECT|SET|RESET|GRANT|REVOKE|C
  * (`EXECUTE $ddl$CREATE UNIQUE INDEX …$ddl$`) and plain dynamic SQL
  * (`EXECUTE 'CREATE TABLE …'`) both match.
  */
-const DO_BLOCK_DDL = /\b(CREATE|ALTER|DROP)\s+((OR\s+REPLACE|TEMP|TEMPORARY|UNIQUE|CONCURRENTLY|IF\s+NOT\s+EXISTS)\s+)*(TABLE|INDEX|CONSTRAINT|EXTENSION|FUNCTION|TRIGGER|SEQUENCE|SCHEMA|TYPE|VIEW|POLICY|COLUMN)\b/i;
+const DO_BLOCK_DDL = /\b(CREATE|ALTER|DROP)\s+((OR\s+REPLACE|TEMP|TEMPORARY|UNLOGGED|MATERIALIZED|UNIQUE|CONCURRENTLY|GLOBAL|LOCAL|RECURSIVE|IF\s+NOT\s+EXISTS)\s+)*(TABLE|INDEX|CONSTRAINT|EXTENSION|FUNCTION|PROCEDURE|TRIGGER|SEQUENCE|SCHEMA|TYPE|DOMAIN|RULE|AGGREGATE|VIEW|POLICY|COLUMN)\b/i;
 
-/** ALTER TABLE actions that are recognized as non-object maintenance, anchored at the action (never the whole statement — `ALTER` is the statement's own head keyword). */
-const BENIGN_ALTER_ACTIONS = /^(DROP|ALTER|VALIDATE\s+CONSTRAINT|CLUSTER|SET|RESET|ENABLE|DISABLE|OWNER|RENAME|ATTACH|DETACH|FORCE|REPLICA)\b/i;
+/**
+ * ALTER TABLE actions that are recognized as non-object maintenance, anchored
+ * at the action (never the whole statement — `ALTER` is the statement's own
+ * head keyword). RENAME is deliberately NOT here: every rename (CONSTRAINT,
+ * COLUMN, or the table's own TO) changes an inventoried identity while the
+ * manifest keeps the old name — such an action must be taught explicitly,
+ * not skipped. `ALTER COLUMN … ADD GENERATED` (identity sequence) is refused
+ * separately below.
+ */
+const BENIGN_ALTER_ACTIONS = /^(DROP|ALTER|VALIDATE\s+CONSTRAINT|CLUSTER|SET|RESET|ENABLE|DISABLE|OWNER|ATTACH|DETACH|FORCE|REPLICA)\b/i;
+
+/** An inline clause that makes a plain ADD COLUMN create objects beyond the column (a constraint, an identity sequence). */
+const ADD_COLUMN_OBJECT_CLAUSE = /\b(CONSTRAINT|CHECK|REFERENCES|UNIQUE|PRIMARY\s+KEY|EXCLUDE|GENERATED|IDENTITY)\b/i;
 
 /** psql meta-commands the parser FOLLOWS (relative to the current file, except `\i` which psql resolves against the working directory). */
 const FOLLOWED_METAS = /^\\(?<cmd>ir|include_relative|i)\s+(?:"(?<dq>[^"]+)"|'(?<sq>[^']+)'|(?<bare>\S+))\s*$/;
@@ -88,16 +99,18 @@ function qualidNameFrom(m, offset) {
   return schema ? `${unquote(schema)}.${name}` : name;
 }
 
-/** Split `text` on commas at paren depth 0, respecting single/double-quoted strings. */
+/** Split `text` on commas at paren depth 0, respecting single/double-quoted strings (E-strings with backslash escapes included). */
 function splitTopLevel(text) {
   const parts = [];
   let cur = '';
   let depth = 0;
   let inS = false;
+  let eS = false; // that string opened with E'…' (backslash escapes)
   let inD = false;
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
     if (inS) {
+      if (eS && ch === '\\') { cur += ch + (text[i + 1] ?? ''); i++; continue; } // \' keeps the string open
       cur += ch;
       if (ch === "'" && text[i + 1] === "'") { cur += "'"; i++; }
       else if (ch === "'") inS = false;
@@ -109,7 +122,14 @@ function splitTopLevel(text) {
       else if (ch === '"') inD = false;
       continue;
     }
-    if (ch === "'") { inS = true; cur += ch; continue; }
+    if (ch === "'") {
+      const prev = cur.slice(-1);
+      const prev2 = cur.slice(-2, -1);
+      eS = (prev === 'E' || prev === 'e') && !/[A-Za-z0-9_$]/.test(prev2);
+      inS = true;
+      cur += ch;
+      continue;
+    }
     if (ch === '"') { inD = true; cur += ch; continue; }
     if (ch === '(') { depth++; cur += ch; continue; }
     if (ch === ')') { depth--; cur += ch; continue; }
@@ -182,11 +202,13 @@ function functionArgs(head) {
   if (open === -1) return null;
   let depth = 0;
   let inS = false;
+  let eS = false;
   let inD = false;
   for (let i = open; i < head.length; i++) {
     const ch = head[i];
     if (inS) {
-      if (ch === "'" && head[i + 1] === "'") i++;
+      if (eS && ch === '\\') i++; // \' keeps the string open
+      else if (ch === "'" && head[i + 1] === "'") i++;
       else if (ch === "'") inS = false;
       continue;
     }
@@ -195,7 +217,13 @@ function functionArgs(head) {
       else if (ch === '"') inD = false;
       continue;
     }
-    if (ch === "'") { inS = true; continue; }
+    if (ch === "'") {
+      const prev = i > 0 ? head[i - 1] : '';
+      const prev2 = i > 1 ? head[i - 2] : '';
+      eS = (prev === 'E' || prev === 'e') && !/[A-Za-z0-9_$]/.test(prev2);
+      inS = true;
+      continue;
+    }
     if (ch === '"') { inD = true; continue; }
     if (ch === '(') depth++;
     if (ch === ')') {
@@ -227,7 +255,7 @@ function scan(entryFile) {
     let inString = false; // inside a single-quoted literal ('' escapes)
     let eString = false; // that literal was E'…' prefixed (backslash escapes)
     let inDQuote = false; // inside a double-quoted identifier ("" escapes)
-    let inBlockComment = false;
+    let blockCommentDepth = 0; // Postgres nests /* /* */ */; track depth
     let stmt = ''; // current statement text
     let payload = ''; // dollar-quoted body text of the current statement
     let stmtLine = 0;
@@ -255,9 +283,13 @@ function scan(entryFile) {
         if (ch === '"') inDQuote = false;
         continue;
       }
-      if (inBlockComment) {
-        if (ch === '*' && text[i + 1] === '/') { i++; inBlockComment = false; }
-        continue; // block comments never reach a statement (a `;` inside cannot split it)
+      if (blockCommentDepth > 0) {
+        // Block comments never reach a statement (a `;` inside cannot split
+        // it) and nest in Postgres. The single space inserted on entry keeps
+        // `CREATE INDEX/*c*/foo` two tokens, not `CREATE INDEXfoo`.
+        if (ch === '/' && text[i + 1] === '*') { blockCommentDepth++; i++; continue; }
+        if (ch === '*' && text[i + 1] === '/') { blockCommentDepth--; i++; continue; }
+        continue;
       }
 
       if (ch === "'") {
@@ -315,7 +347,7 @@ function scan(entryFile) {
         if (text[i] === '\n') i--;
         continue;
       }
-      if (ch === '/' && text[i + 1] === '*') { inBlockComment = true; i++; continue; }
+      if (ch === '/' && text[i + 1] === '*') { blockCommentDepth = 1; stmt += ' '; i++; continue; }
       if (ch === ';') {
         push();
         continue;
@@ -347,6 +379,34 @@ function scan(entryFile) {
 
   scanFile(entryFile);
   return statements;
+}
+
+/**
+ * Strip `-- comments` from a DO payload WITHOUT touching string literals: a
+ * bare global replace would cut at a `--` inside a quoted message and shift
+ * the quote pairing the plain-`EXECUTE '…'` extraction depends on.
+ */
+function stripPayloadComments(body) {
+  let out = '';
+  let inS = false;
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (inS) {
+      out += ch;
+      if (ch === "'" && body[i + 1] === "'") { out += "'"; i++; }
+      else if (ch === "'") inS = false;
+      continue;
+    }
+    if (ch === "'") { inS = true; out += ch; continue; }
+    if (ch === '-' && body[i + 1] === '-') {
+      while (i < body.length && body[i] !== '\n') i++;
+      i--; // the loop's i++ lands ON the newline, preserving it
+      out += ' ';
+      continue;
+    }
+    out += ch;
+  }
+  return out;
 }
 
 /** Cut a trailing `-- comment` off a psql meta-command line (outside quoted arguments). */
@@ -427,15 +487,24 @@ export function classify(stmt) {
         out.push({ kind, name: normalizeName(unquote(am[1] ?? am[2])) });
         continue;
       }
-      if ((am = action.match(new RegExp(`^ADD COLUMN (?:IF NOT EXISTS )?${IDENT}.*?GENERATED ALWAYS AS`, 'is')))) {
+      if ((am = action.match(new RegExp(`^ADD COLUMN (?:IF NOT EXISTS )?${IDENT}.*?GENERATED ALWAYS AS \\(`, 'is')))) {
         out.push({ kind: 'generated-column', name: `${table}.${unquote(am[1] ?? am[2])}` });
         continue;
       }
       // A GUARDED plain ADD COLUMN is schema-owned skew repair (the corpus
       // idiom: every such column is @map'd in schema.prisma; raw-SQL-only
       // columns surface as drift lines in the smoke lane's filter, not as
-      // inventory objects). Unguarded stays refused below: it cannot re-run.
-      if (/^ADD COLUMN IF NOT EXISTS\b/i.test(action) && !/GENERATED ALWAYS AS/i.test(action)) continue;
+      // inventory objects) — but ONLY when the column definition is plain. A
+      // guarded column carrying an inline CONSTRAINT/identity still creates
+      // objects the inventory must see; Prisma does not introspect CHECK
+      // constraints, so an inline one is invisible to both fences. Refuse.
+      if (/^ADD COLUMN IF NOT EXISTS\b/i.test(action) && !ADD_COLUMN_OBJECT_CLAUSE.test(action)) continue;
+      // `ALTER COLUMN … ADD GENERATED … AS IDENTITY` attaches an identity
+      // SEQUENCE to an existing column — a new durable object.
+      if (/^ALTER\s+COLUMN\b.*\bADD\s+GENERATED\b/i.test(action)) {
+        out.push({ unrecognized: sql });
+        continue;
+      }
       if (BENIGN_ALTER_ACTIONS.test(action)) continue;
       out.push({ unrecognized: sql }); // unknown action: structural change the parser cannot name
     }
@@ -447,17 +516,20 @@ export function classify(stmt) {
   // dollar-quoted ($ddl$…$ddl$), sometimes a plain string. Those are
   // extracted and classified like any other statement. DDL that cannot be
   // extracted (bare DDL statements in the body, EXECUTE format(...) with the
-  // DDL hidden in the format string) refuses the whole block.
+  // DDL hidden in the format string, a nested DO whose own payload this
+  // extraction cannot capture) refuses the whole block.
   if (/^DO\b/i.test(head)) {
-    const body = (stmt.payloads ?? '').replace(/--[^\n]*/g, '');
+    const body = stripPayloadComments(stmt.payloads ?? '');
     const out = [];
     let remainder = body;
     for (const m of body.matchAll(/\bEXECUTE\s+\$([A-Za-z_]*)\$([\s\S]*?)\$\1\$/gi)) {
-      out.push(...classify({ sql: m[2] }));
+      if (/^\s*DO\b/i.test(m[2])) out.push({ unrecognized: sql }); // nested DO: payload-in-payload, unextractable here
+      else out.push(...classify({ sql: m[2] }));
       remainder = remainder.replace(m[0], ' ');
     }
     for (const m of remainder.matchAll(/\bEXECUTE\s*'((?:[^']|'')*)'/gi)) {
-      out.push(...classify({ sql: m[1].replace(/''/g, "'") }));
+      if (/^\s*DO\b/i.test(m[1])) out.push({ unrecognized: sql });
+      else out.push(...classify({ sql: m[1].replace(/''/g, "'") }));
       remainder = remainder.replace(m[0], ' ');
     }
     if (DO_BLOCK_DDL.test(remainder)) out.push({ unrecognized: sql });
@@ -465,7 +537,10 @@ export function classify(stmt) {
   }
   if (/^DROP (INDEX|TRIGGER|FUNCTION|VIEW|TABLE|CONSTRAINT|POLICY|SCHEMA|EXTENSION|TYPE|SEQUENCE)\b/i.test(head)) return [];
   if (NON_OBJECT_HEADS.test(head)) return [];
-  if (/^\\(ir|include_relative|i|set|unset|echo|qecho|warn)\b/.test(head)) return [];
+  // No meta-command branch: the scanner only pushes a meta as a statement
+  // when it neither followed nor allowlisted it, and every such line must be
+  // unrecognized (an odd-shaped \i/\ir would otherwise vanish silently —
+  // the delta review's N1). Followed and allowlisted metas never reach here.
   if (/^(BEGIN|COMMIT|ROLLBACK|START TRANSACTION|END)\b/i.test(head)) return [];
   return [{ unrecognized: sql }];
 }
