@@ -1,7 +1,7 @@
 /**
  * #863 (cor:api:060:05, render vs execute) — the MCP run tools render the prompt `runTask` executes.
  *
- * `hadron_run_action` and `hadron_run_task`'s render path used their own assembler (`renderRunNodeBundle`): a literal
+ * `hadron_run_action` and `hadron_run_task`'s render path used an assembler of their own (now deleted): a literal
  * `replaceAll` per argument, with every outgoing edge inlined. `runTask` and the GraphQL `renderRunNode` preview use
  * `assembleRunNodePrompt`: a Mustache compile (the memory's default data, an unsupplied variable renders empty) and
  * no flow-routing (`next*`) edge inlined (D-MN-4: rails, not references). So a preview through MCP showed a prompt
@@ -124,6 +124,14 @@ describe('#863: the MCP run tools return the prompt runTask executes', () => {
     expect(text).toContain('CONTENT_RESOLUTION_LIMIT_EXCEEDED');
     expect(text).not.toContain('Review');
     expect(text).not.toContain(REFERENCE);
+  });
+
+  it.each(tools)('%s: the compiled text counts toward the per-request size limit, as it does for runTask', async (_name, call) => {
+    setResolutionLimits({ requestMaxBytes: 8 });
+    const text = await call('tasks:step-one', { subject: 'the incident' });
+    expect(text).toContain('CONTENT_RESOLUTION_LIMIT_EXCEEDED');
+    expect(text).toContain('per-request');
+    expect(text).not.toContain('Review');
   });
 
   it('the tool admits string arguments only, so a null cannot reach the render', () => {
