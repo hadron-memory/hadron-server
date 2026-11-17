@@ -15,6 +15,7 @@ let users: Record<Principal, string>;
 let customer: string;
 let liveMemory: string;
 let liveSubscription: string;
+let laterSubscription: string;
 let deletedMemory: string;
 
 const ctx = (p: Principal): Context => ({ db, userId: users[p], roles: p === 'platformAdmin' ? ['ADMIN'] : ['READER'] });
@@ -41,26 +42,35 @@ beforeEach(async () => {
   deletedMemory = (await make('gone')).id;
   liveSubscription = (await db.memorySubscription.create({ data: { memoryId: liveMemory, organizationId: customer, createdAt: new Date('2026-01-01') } })).id;
   await db.memorySubscription.create({ data: { memoryId: deletedMemory, organizationId: customer, createdAt: new Date('2026-01-02') } });
+  // A second live subscription created AFTER the deleted one (pins ascending creation order across the dropped row), and a
+  // tombstoned subscription on a LIVE memory (the existing subscription filter must still drop it).
+  const later = await make('later');
+  laterSubscription = (await db.memorySubscription.create({ data: { memoryId: later.id, organizationId: customer, createdAt: new Date('2026-01-03') } })).id;
+  const tomb = await make('tomb');
+  await db.memorySubscription.create({ data: { memoryId: tomb.id, organizationId: customer, createdAt: new Date('2026-01-04'), deletedAt: new Date() } });
   // Soft-delete the memory only; its subscription row stays live.
   await db.memory.update({ where: { id: deletedMemory }, data: { deletedAt: new Date() } });
 });
 
 describe('#2566 Organization.subscriptions and soft-deleted memories', () => {
-  it.each(principals)('eager path: %s sees only the surviving subscription, memory non-null, no errors', async p => {
+  it.each(principals)('eager path: %s sees only the surviving subscriptions, in creation order, memory non-null, no errors', async p => {
     const r = await query(p, 'query($ref: ID!) { organization(ref: $ref) { id subscriptions { id memory { id name } } } }', { ref: customer });
     expect(r.errors).toBeUndefined();
     expect(r.data?.organization).toEqual({ id: customer, subscriptions: [
       { id: liveSubscription, memory: { id: liveMemory, name: 'live' } },
+      { id: laterSubscription, memory: { id: expect.any(String), name: 'later' } },
     ] });
   });
 
-  it.each(principals)('lazy path: %s sees only the surviving subscription', async p => {
+  it.each(principals)('lazy path: %s sees only the surviving subscriptions, in creation order', async p => {
     const rows = await resolvers.Organization.subscriptions({ id: customer }, {}, ctx(p));
-    expect(rows.map(row => row.id)).toEqual([liveSubscription]);
+    expect(rows.map(row => row.id)).toEqual([liveSubscription, laterSubscription]);
   });
 
   it('direct memory(ref:) still refuses the deleted memory for the platform admin (the control)', async () => {
     const r = await query('platformAdmin', 'query($ref: ID!) { memory(ref: $ref) { id } }', { ref: deletedMemory });
-    expect(r.data?.memory ?? null).toBeNull();
+    // an explicit refusal: no GraphQL error, and `memory` is present and null (not a missing `data` from an unrelated failure)
+    expect(r.errors).toBeUndefined();
+    expect(r.data).toEqual({ memory: null });
   });
 });
