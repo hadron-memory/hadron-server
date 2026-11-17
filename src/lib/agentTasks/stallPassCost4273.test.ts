@@ -5,7 +5,14 @@
  * every pass, to find the unique key (task, type, episode start) taken. On the #4271 seed that was 842 re-evaluations a
  * minute (35-41 s). A candidate is now skipped only where an alarm event with its own key exists; a candidate whose
  * episode is new (a reassignment, a restart, another rule) is still decided in its own transaction. The alarms raised
- * are the ones raised before (cor:agt:050:12-:20); only the work for the already-raised ones is gone.
+ * are the ones raised before (hrn:node:hadronmemory.com:specs:cor:agt:050:12 through :20: what counts as activity on a task,
+ * the stall alarms, and who is woken until an acknowledgement stops the escalation); only the work for the already-raised
+ * ones is gone.
+ *
+ * #4285 (Arianna's BLIND P3, naming): despite the name, this file holds every #4273 cost pin, not only the pass's: the
+ * settled-pass skip, the liveness read's transaction-local JIT setting, the per-raise statement budget, the rows a pass
+ * and a whole tick read against history, and the pruned session read's equivalence. Each describe names its own pin. The
+ * file keeps its name so the links from #4273, #4274 and #4285 and their reviews still resolve.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
@@ -15,7 +22,7 @@ import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { PrismaClient } from '../../generated/prisma/index.js';
 import { Client as PgClient } from 'pg';
-import { evaluateStalls, loadStallInputs, raiseStallAlarm, stallCandidates, STALL_WINDOW_DEFAULTS } from './stall.js';
+import { evaluateStalls, loadStallInputs, raiseStallAlarm, stallCandidates, STALL_EVENT_TYPE, STALL_WINDOW_DEFAULTS } from './stall.js';
 import { taskStallTick } from '../../jobs/taskStallEvaluator.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -411,7 +418,11 @@ describe('#4273 — what the skip replaces: a raise for an already-taken key ref
       const now = at('10:15');
       const c = await candidateFor(t.id, now);
       expect(await raiseStallAlarm(db, c, now)).not.toBeNull(); // raised once
-      const [alarm] = await db.agentTeamEvent.findMany({ where: { taskId: t.id } });
+      // #4285 (Arianna New-1): THIS rule's alarm by type, not the task's first event: any other event on the task would
+      // otherwise take the acknowledge/escalation-end below, and those variants would silently test the live state.
+      const alarms = await db.agentTeamEvent.findMany({ where: { taskId: t.id, type: STALL_EVENT_TYPE[c.rule] } });
+      expect(alarms, 'exactly one alarm of this rule was raised').toHaveLength(1);
+      const [alarm] = alarms;
       if (state === 'acknowledged') await db.agentTeamEvent.update({ where: { id: alarm!.id }, data: { acknowledgedAt: at('10:20'), acknowledgedByWorkerId: ada } });
       if (state === 'escalation ended') await db.alarmEscalationEnd.create({ data: { eventId: alarm!.id, endedAt: at('10:30') } });
       const before = await writes();
