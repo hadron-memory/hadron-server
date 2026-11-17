@@ -59,6 +59,18 @@ const NON_OBJECT_HEADS = /^(INSERT|UPDATE|DELETE|SELECT|SET|RESET|GRANT|REVOKE|C
 const REMAINDER_DDL = /\b(CREATE|ALTER|DROP)\s+\w/i;
 
 /**
+ * DDL verb+noun bigram for the RAW remainder (comments stripped, strings
+ * INTACT). The second disjunct of the DO-remainder refusal (delta3 B1):
+ * string-blanking alone made DDL hiding in string literals the EXECUTE
+ * extractor never captured — `EXECUTE format('CREATE INDEX …')`,
+ * `v := 'CREATE …'; EXECUTE v`, `EXECUTE E'CREATE …'` — pass as []. The
+ * bigram still sees that text because it reads strings; and it ignores
+ * prose ("refusing to create the unique index") by requiring the verb's
+ * noun (with the usual modifiers) to follow.
+ */
+const DO_BLOCK_DDL = /\b(CREATE|ALTER|DROP)\s+((OR\s+REPLACE|TEMP|TEMPORARY|UNLOGGED|MATERIALIZED|UNIQUE|CONCURRENTLY|GLOBAL|LOCAL|RECURSIVE|IF\s+NOT\s+EXISTS)\s+)*(TABLE|INDEX|CONSTRAINT|EXTENSION|FUNCTION|PROCEDURE|TRIGGER|SEQUENCE|SCHEMA|TYPE|DOMAIN|RULE|AGGREGATE|VIEW|POLICY|COLUMN)\b/i;
+
+/**
  * ALTER TABLE actions that are recognized as non-object maintenance, anchored
  * at the action (never the whole statement — `ALTER` is the statement's own
  * head keyword). RENAME is deliberately NOT here: every rename (CONSTRAINT,
@@ -397,6 +409,8 @@ function stripPayloadComments(body) {
   let out = '';
   let inS = false;
   let eS = false; // that string opened with E'…' (backslash escapes)
+  let inD = false; // inside a double-quoted identifier (delta3 B6)
+  let blk = 0; // block-comment nesting depth (delta3 B5)
   for (let i = 0; i < body.length; i++) {
     const ch = body[i];
     if (inS) {
@@ -404,6 +418,21 @@ function stripPayloadComments(body) {
       if (eS && ch === '\\') { out += body[i + 1] ?? ''; i++; continue; } // \' keeps the string open
       if (ch === "'" && body[i + 1] === "'") { out += "'"; i++; }
       else if (ch === "'") inS = false;
+      continue;
+    }
+    if (blk > 0) {
+      // inside a block comment: Postgres nests them, so count depth; the
+      // single space emitted at the open stands in for the whole comment.
+      if (ch === '/' && body[i + 1] === '*') { blk++; i++; }
+      else if (ch === '*' && body[i + 1] === '/') { blk--; i++; }
+      continue;
+    }
+    if (inD) {
+      // inside a double-quoted identifier: an apostrophe here is part of the
+      // name, not a quote; a -- here is part of the name, not a comment.
+      out += ch;
+      if (ch === '"' && body[i + 1] === '"') { out += '"'; i++; }
+      else if (ch === '"') inD = false;
       continue;
     }
     if (ch === "'") {
@@ -425,6 +454,8 @@ function stripPayloadComments(body) {
       i = end - 1;
       continue;
     }
+    if (ch === '/' && body[i + 1] === '*') { blk = 1; out += ' '; i++; continue; }
+    if (ch === '"') { inD = true; out += ch; continue; }
     if (ch === '-' && body[i + 1] === '-') {
       while (i < body.length && body[i] !== '\n') i++;
       i--; // the loop's i++ lands ON the newline, preserving it
@@ -454,12 +485,19 @@ function stripPayloadStrings(text) {
   let out = '';
   let inS = false;
   let eS = false;
+  let inD = false; // inside a double-quoted identifier — code, kept (delta3 B6)
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
     if (inS) {
       if (eS && ch === '\\') i++; // \' keeps the string open
       else if (ch === "'" && text[i + 1] === "'") i++;
       else if (ch === "'") { inS = false; out += ' '; }
+      continue;
+    }
+    if (inD) {
+      out += ch;
+      if (ch === '"' && text[i + 1] === '"') { out += '"'; i++; }
+      else if (ch === '"') inD = false;
       continue;
     }
     if (ch === "'") {
@@ -477,6 +515,7 @@ function stripPayloadStrings(text) {
       i = end - 1;
       continue;
     }
+    if (ch === '"') { inD = true; out += ch; continue; }
     out += ch;
   }
   return out;
@@ -599,7 +638,16 @@ export function classify(stmt) {
         out.push({ kind, name: normalizeName(unquote(am[1] ?? am[2])) });
         continue;
       }
-      if ((am = action.match(new RegExp(`^ADD COLUMN (?:IF NOT EXISTS )?${IDENT}.*?GENERATED ALWAYS AS\\s*\\(`, 'is')))) {
+      if ((am = action.match(new RegExp(`^ADD COLUMN (?:IF NOT EXISTS )?${IDENT}(?<pre>.*?)GENERATED ALWAYS AS\\s*\\(`, 'is')))) {
+        // Postgres accepts column constraints in ANY order, so a clause may
+        // sit BEFORE the generation expression too: the lazy `pre` capture
+        // must stay clean of object clauses or the row names the column and
+        // loses them (delta3 B4). CONSTRAINT is not in the list — it can
+        // legitimately name the generation clause itself.
+        if (/\b(CHECK|REFERENCES|UNIQUE|PRIMARY\s+KEY|EXCLUDE)\b/i.test(am.groups.pre ?? '')) {
+          out.push({ unrecognized: sql });
+          continue;
+        }
         // An inline clause AFTER the generation expression (STORED CHECK …,
         // REFERENCES …) creates objects this row does not name: refuse rather
         // than inventory the column and lose them (delta2 A6).
@@ -623,8 +671,11 @@ export function classify(stmt) {
       if (/^ADD COLUMN IF NOT EXISTS\b/i.test(action) && !ADD_COLUMN_OBJECT_CLAUSE.test(action)) continue;
       // `ALTER [COLUMN] … ADD GENERATED … AS IDENTITY` attaches an identity
       // SEQUENCE to an existing column — a new durable object. Postgres makes
-      // the COLUMN keyword optional (delta2 A5).
-      if (/^ALTER\s+(?:COLUMN\s+)?\S+\s+ADD\s+GENERATED\b/i.test(action)) {
+      // the COLUMN keyword optional, and the column name may be a QUOTED
+      // identifier containing spaces, so the object word between ALTER and ADD
+      // cannot be captured by \S+ — anchor on the verb pair alone (delta2 A5,
+      // delta3 B2).
+      if (/^ALTER\b.*\bADD\s+GENERATED\b/i.test(action)) {
         out.push({ unrecognized: sql });
         continue;
       }
@@ -659,16 +710,23 @@ export function classify(stmt) {
     const out = [];
     let remainder = body;
     for (const m of body.matchAll(/\bEXECUTE\s+\$([A-Za-z_]*)\$([\s\S]*?)\$\1\$/gi)) {
-      if (/\bDO\b/i.test(m[2])) out.push({ unrecognized: sql }); // nested DO anywhere in the payload: payload-in-payload, unextractable here
-      else out.push(...classify({ sql: m[2] }));
+      // A dollar-quoted payload is copied VERBATIM by the stripper, so its
+      // own comments would reach classify raw and break its ^-anchored heads
+      // — strip them here first (delta3 B7).
+      const inner = stripPayloadComments(m[2]);
+      // A STATEMENT-LEADING nested DO (payload-in-payload, unextractable
+      // here) refuses the block wherever in the string it sits;
+      // `ON CONFLICT DO NOTHING` is not one (delta3 B3).
+      if (/(^|;)\s*DO\b/i.test(inner)) out.push({ unrecognized: sql });
+      else out.push(...classify({ sql: inner }));
       remainder = remainder.replace(m[0], ' ');
     }
     for (const m of remainder.matchAll(/\bEXECUTE\s*'((?:[^']|'')*)'/gi)) {
-      if (/\bDO\b/i.test(m[1])) out.push({ unrecognized: sql });
+      if (/(^|;)\s*DO\b/i.test(m[1])) out.push({ unrecognized: sql });
       else out.push(...classify({ sql: m[1].replace(/''/g, "'") }));
       remainder = remainder.replace(m[0], ' ');
     }
-    if (REMAINDER_DDL.test(stripPayloadStrings(remainder))) out.push({ unrecognized: sql });
+    if (REMAINDER_DDL.test(stripPayloadStrings(remainder)) || DO_BLOCK_DDL.test(remainder)) out.push({ unrecognized: sql });
     return out;
   }
   if (/^DROP (INDEX|TRIGGER|FUNCTION|VIEW|TABLE|CONSTRAINT|POLICY|SCHEMA|EXTENSION|TYPE|SEQUENCE)\b/i.test(head)) return [];
