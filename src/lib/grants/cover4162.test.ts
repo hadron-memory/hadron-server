@@ -104,6 +104,38 @@ describe('coverSql agrees with valueCovers on every stored shape (one definition
   }
 });
 
+describe('coverSql agrees with valueCovers for accepted wildcards, secret-ref, unknown types and several parameters (BLIND P3, Cloe)', () => {
+  const p = (name: string, type: string, refusesWildcard = true) => ({ name, type, refusesWildcard });
+  const CASES: Array<{ def: ActionDefinition; values: Record<string, string> }> = [
+    { def: { ...synthetic('test.s1a.open', 'node-ref'), parameters: [p('target', 'node-ref', false)], listParameters: ['target'] }, values: { target: 'a' } },
+    { def: { ...synthetic('test.s1a.secret', 'secret-ref'), reach: 'NO_WORKER' }, values: { target: 'a' } },
+    { def: synthetic('test.s1a.weird', 'weird-ref'), values: { target: 'a' } },
+    { def: { ...synthetic('test.s1a.two', 'node-ref'), parameters: [p('one', 'node-ref'), p('two', 'node-ref', false)], listParameters: ['two'], summaryTemplate: '{one} and {two} in {app}' }, values: { one: 'a', two: 'b' } },
+  ];
+  const stored: unknown[] = ['a', 'b', '*', ['a'], ['b'], ['a', 'b'], [], 1, null, { a: 1 }];
+  for (const c of CASES) {
+    it(`${c.def.name}: every stored shape gets the same verdict from the fragment and the function`, async () => {
+      await upsertPlatformActions(db, [c.def]);
+      const params = c.def.parameters;
+      const verdict = new Map<string, boolean>();
+      const shapes = params.length === 1 ? stored.map((v) => ({ [params[0]!.name]: v })) : stored.flatMap((x) => stored.map((y) => ({ [params[0]!.name]: x, [params[1]!.name]: y })));
+      for (const values of shapes) {
+        const g = await insertGrantUnguarded(w, { user_id: null, worker_id: w.workerId, action: c.def.name, action_values: values as never, max_uses: null,
+          activated_at: raw(DB_NOW), verification_kind: 'passkey', verified_by: w.userId, issuer_user_id: w.userId });
+        verdict.set(g, params.every((q) => valueCovers(c.def as CoverableAction, q.name, (values as Record<string, unknown>)[q.name], c.values[q.name]!)));
+      }
+      const rows = await db.$queryRaw<Array<{ id: string }>>(Prisma.sql`SELECT g.id FROM grants g WHERE g.action = ${c.def.name} AND ${coverSql(c.def as CoverableAction, 'g', c.values)}`);
+      const got = new Set(rows.map((r) => r.id));
+      for (const [id, expected] of verdict) expect(got.has(id), `${c.def.name} ${id}`).toBe(expected);
+    });
+  }
+  it('a MISSING parameter value covers nothing (the SQL is FALSE), and an unlisted action covers nothing', async () => {
+    const two = CASES[3]!.def as CoverableAction;
+    expect(coverSql(two, 'g', { one: 'a' }).sql).toBe('FALSE');
+    expect(coverSql({ name: 'x', parameters: [] }, 'g', {}).sql).toBe('FALSE');
+  });
+});
+
 describe('a grant naming subject A does not cover an act on subject B (cor:acl:140:10), for each seeded action', () => {
   for (const [name, param] of [[SCHEDULE, 'entryNode'], [EDIT, 'sourceNode'], [BATCH, 'compiledNode']] as const) {
     it(`${name}: covers A, not B; asking spends nothing and records nothing`, async () => {
@@ -221,14 +253,32 @@ describe('order and locks', () => {
     expect((await cover(action, 'entryNode', w.entryNodeId, { order: 'CAPPED_FIRST' })).map((g) => g.id)).toEqual([capped, uncapped]);
     expect((await cover(action, 'entryNode', w.entryNodeId, { order: 'ACTIVATED' })).map((g) => g.id)).toEqual([uncapped, capped]);
   });
-  it('an UPDATE lock holds the candidate rows to the end of the transaction; SHARE lets a reader in but blocks a writer', async () => {
+  const nowait = (mode: 'UPDATE' | 'SHARE', id: string) => db.$transaction((tx) =>
+    tx.$queryRawUnsafe(`SELECT id FROM grants WHERE id = $1 FOR ${mode} NOWAIT`, id));
+  const cover1 = (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0], lock: 'UPDATE' | 'SHARE') => findCoveringGrants(tx, {
+    appId: w.appId, action: coverableAction(SCHEDULE), workerId: w.workerId, roleAgentId: w.agentId, values: { entryNode: w.entryNodeId }, order: 'CAPPED_FIRST', lock });
+  it('an UPDATE lock blocks a second transaction (NOWAIT refuses) until the first commits, and then releases it (BLIND/LOCAL P3)', async () => {
     const g = await grantOf(SCHEDULE, 'entryNode', w.entryNodeId, { max_uses: 2 });
-    const action = coverableAction(SCHEDULE);
     await db.$transaction(async (tx) => {
-      const found = await findCoveringGrants(tx, { appId: w.appId, action, workerId: w.workerId, roleAgentId: w.agentId, values: { entryNode: w.entryNodeId }, order: 'CAPPED_FIRST', lock: 'UPDATE' });
-      expect(found.map((x) => x.id)).toEqual([g]);
-      const locks = await tx.$queryRawUnsafe<Array<{ mode: string }>>(`SELECT mode FROM pg_locks l JOIN pg_class c ON c.oid = l.relation WHERE c.relname = 'grants' AND l.pid = pg_backend_pid()`);
-      expect(locks.length).toBeGreaterThan(0);
+      expect((await cover1(tx, 'UPDATE')).map((x) => x.id)).toEqual([g]);
+      await expect(nowait('UPDATE', g)).rejects.toThrow(/lock|55P03/i);
+      await expect(nowait('SHARE', g)).rejects.toThrow(/lock|55P03/i);
+    });
+    await expect(nowait('UPDATE', g)).resolves.toBeDefined();   // released at commit
+  });
+  it('a SHARE lock lets a reader hold the row too but blocks a writer', async () => {
+    const g = await grantOf(SCHEDULE, 'entryNode', w.entryNodeId, { max_uses: 2 });
+    await db.$transaction(async (tx) => {
+      expect((await cover1(tx, 'SHARE')).map((x) => x.id)).toEqual([g]);
+      await expect(nowait('SHARE', g)).resolves.toBeDefined();
+      await expect(nowait('UPDATE', g)).rejects.toThrow(/lock|55P03/i);
+    });
+  });
+  it('no lock asked, no lock held: a second transaction takes the row at once', async () => {
+    const g = await grantOf(SCHEDULE, 'entryNode', w.entryNodeId, { max_uses: 2 });
+    await db.$transaction(async (tx) => {
+      expect((await findCoveringGrants(tx, { appId: w.appId, action: coverableAction(SCHEDULE), workerId: w.workerId, roleAgentId: w.agentId, values: { entryNode: w.entryNodeId }, order: 'CAPPED_FIRST' })).map((x) => x.id)).toEqual([g]);
+      await expect(nowait('UPDATE', g)).resolves.toBeDefined();
     });
   });
 });
