@@ -120,10 +120,10 @@ const userCtx = (userId: string, extra: Partial<Context> = {}): Context =>
 const userAuth = (userId: string): AuthContext =>
   ({ userId, roles: [], clientId: `user:${userId}` }) as AuthContext;
 
-/** Is `memoryId` in the caller's accessible set? (`null` = unrestricted.) */
+/** Is `memoryId` in the caller's accessible set? */
 async function inAccessibleSet(ctx: Context, memoryId: string): Promise<boolean> {
   const ids = await getAccessibleMemoryIds(ctx, memoryId);
-  return ids === null || ids.includes(memoryId);
+  return ids.includes(memoryId);
 }
 
 describe('#1196 — the App fold implements participation, not the member table', () => {

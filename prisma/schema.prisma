@@ -185,6 +185,38 @@ enum AgentType {
   CHATBOT
 }
 
+/// #4224 (S3 of #4229) — how long a worker of this Agent runs. LONG_LIVED (default, today's behaviour): its
+/// process should always run. SHORT_LIVED: it should run only while the worker is the assignee of a pending or
+/// started task, one waiting on its child tasks included (G7). Read by the desired-state query
+/// (src/lib/desiredState) and, #4223, by a task's finish or cancellation: the worker's session ends with its last
+/// open task (src/lib/hostOperations/sessionEnd.ts).
+enum AgentLifecycle {
+  LONG_LIVED
+  SHORT_LIVED
+}
+
+/// #4291 (S14 of #4229; decision record run-settings-are-not-worker-identity, settled A) — the generic effort scale of a
+/// run. LOW..MAX are requests the launcher maps to the family's own values (hadron-cli#2199); UNSET is the family's
+/// default. NOT_APPLICABLE is REPORT-ONLY: a session whose family has no effort control records it, and so may the
+/// worker's last-used record; a task never carries it, and a start that falls back to it sends UNSET.
+enum EffortLevel {
+  LOW
+  MEDIUM
+  HIGH
+  XHIGH
+  MAX
+  UNSET
+  NOT_APPLICABLE
+}
+
+/// #4224 (S3 of #4229) — the App's sweep switch. OFF (default): the host sweep acts on no worker and every desired-state
+/// row says SWEEP_OFF. OBSERVE: the sweep compares and reports. APPLY: it also repairs.
+enum SweepMode {
+  OFF
+  OBSERVE
+  APPLY
+}
+
 enum LogLevel {
   DEBUG
   INFO
@@ -1764,6 +1796,8 @@ enum SessionEndReason {
   ended
   superseded
   expired
+  /// #4292: the host that runs a SHORT_LIVED worker ended the session on its proof that no agent runs (cor:agt:050:10, Proposed).
+  agent_absent
 }
 
 model Session {
@@ -1833,6 +1867,9 @@ model Session {
   /// column: no historical backfill. Not `updated_at`, which unrelated writes
   /// move. Describes a self-report, not verified detection.
   modelReportedAt   DateTime?         @map("model_reported_at")
+  /// #4291 — the effort this session runs at, as the launcher applied it and the session reported it (start, resume or
+  /// updateSession). Null until reported; NOT_APPLICABLE for a family with no effort control. A report, never a control.
+  effort            EffortLevel?
   /// #1709 (cor:agt:070:08; Holger via Vera #10773) — a host-launched session:
   /// the host that started it, the `worker.start` operation, the task it was
   /// launched for (none for a manager's start without one), and who issued the
@@ -2045,6 +2082,13 @@ model Agent {
   /// no other started task, the platform asks the worker's host to reset its context: a shed, never a session end.
   /// Off by default; written by whoever manages the Agent, like `usesTasks`.
   resetContextAfterTask Boolean         @default(false) @map("reset_context_after_task")
+  /// #4224 (S3 of #4229) — every worker cast from this Agent shares it. Default LONG_LIVED, so no existing Agent
+  /// changes behaviour; written by whoever manages the Agent, like `usesTasks`.
+  lifecycle             AgentLifecycle  @default(LONG_LIVED)
+  /// #4225 (S4b of #4229, cor:agt:050:27 part 12, Proposed; G4) — the context size, in tokens, above which a worker of this
+  /// LONG_LIVED Agent that its host reports idle is reset (`worker.reset-context`), at most once an hour. Null (the default)
+  /// is no cap. Written by whoever manages the Agent, like `usesTasks`. `chk_agents_context_cap` keeps it at 1 or more.
+  contextCap            Int?            @map("context_cap")
   organizationId        String?         @map("organization_id")
   /// User owner of a user-owned Agent (rooted on the bare `<handle>` — #697 v2,
   /// no `@` sigil). The org/owner XOR is ENFORCED — `chk_agent_owner_xor` in
@@ -2414,7 +2458,7 @@ model AiServiceConfig {
   organizationId  String?   @map("organization_id")
   appId           String?   @map("app_id")
   agentId         String?   @map("agent_id")
-  /// Provider identifier; known: 'anthropic' | 'openai' | 'glm' | 'bedrock' |
+  /// Provider identifier; known: 'anthropic' | 'openai' | 'glm' | 'kimi' | 'bedrock' |
   /// 'openai-compatible' (endpoint required). Validated against the registry
   /// in src/lib/aiConfig.ts.
   provider        String
@@ -2446,8 +2490,10 @@ model AiServiceConfig {
 
   hadronServer HadronServer? @relation(fields: [hadronServerId], references: [id], onDelete: Cascade)
   organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  app          App?          @relation(fields: [appId], references: [id], onDelete: Cascade)
+  app          App?          @relation("AppAiServiceConfigs", fields: [appId], references: [id], onDelete: Cascade)
   agent        Agent?        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  /// #3957: the Apps that name this config as their chatbot config (`App.chatbotAiConfigId`).
+  chatbotOfApps App[]        @relation("AppChatbotAiConfig")
 
   @@index([hadronServerId])
   @@index([organizationId])
@@ -3207,7 +3253,7 @@ model Secret {
   /// key (src/lib/tokenCrypto.ts). NEVER selected into a read surface:
   /// redaction by construction, same as the aiConfig / HA / Resend / MCP
   /// registries. Rotation is overwrite (updateSecret), no versioning (v1).
-  valueEncrypted String   @map("value_encrypted")
+  valueEncrypted String?  @map("value_encrypted")
   /// Key-rotation lineage headroom; unused (null) while HADRON_ENCRYPTION_KEY
   /// is the only key.
   keyId          String?  @map("key_id")
@@ -3215,6 +3261,14 @@ model Secret {
   createdBy      String?  @map("created_by")
   updatedAt      DateTime @updatedAt @map("updated_at")
   updatedBy      String?  @map("updated_by")
+  /// #3997 (S2 of #3991): an App-owned secret keeps NO value here — its value is its newest `secret_versions` row
+  /// (`chk_secret_app_value`: `(owner_type = 'app') = (value_encrypted IS NULL)`). Org and user rows are as before.
+  /// Plain ids, so an agent's write is attributable to a worker as the grant tables do.
+  createdByWorkerId  String? @map("created_by_worker_id")
+  createdBySessionId String? @map("created_by_session_id")
+  /// Only meaningful for App rows (`chk_secret_protected_app_only`); the protection ceremony is S4.
+  protected      Boolean  @default(false)
+  versions       SecretVersion[]
 
   // Hard delete by design (registry-row posture): a deleted secret makes
   // referencing runs fail their resolution loud — the wanted signal.
@@ -3330,6 +3384,7 @@ model WaitingListItem {
 /// in `app_members`, not in `apps`.
 model App {
   id                                String               @id @default(cuid())
+  secretAppKeys                     SecretAppKey[]
   /// Display name.
   name                              String
   /// App-layer action-policy link (cor:acl:040:02) — same allow-list shape
@@ -3397,6 +3452,8 @@ model App {
   teamPausedAt                      DateTime?            @map("team_paused_at")
   /// #2138 §3.6 — when the last team pause ENDED; restarts every worker's check clock (the status is not OVERDUE the moment a pause lifts). NULL = never paused.
   teamResumedAt                     DateTime?            @map("team_resumed_at")
+  /// #4224 (S3 of #4229) — the sweep switch (see SweepMode). OFF by default: one write restores today's behaviour.
+  sweepMode                         SweepMode            @default(OFF) @map("sweep_mode")
   /// The fastest ticker a worker may subscribe ITSELF to: [floor, 86400].
   tickerSelfSubscribeCadenceSeconds Int                  @default(600) @map("ticker_self_subscribe_cadence_seconds")
   /// How many live tickers the App may have: [1, 100].
@@ -3498,6 +3555,9 @@ model App {
   cadenceEpisodes         CoordinatorCadenceEpisode[]
   cadenceClocks           CoordinatorCadenceClock[]
   postLimitEpisodes       PostLimitEpisode[]
+  startFailingEpisodes    StartFailingEpisode[]
+  hostSweepRuns           HostSweepRun[]
+  hostSweepEpisodes       HostSweepEpisode[]
   automationAdoptionEvents AutomationAdoptionEvent[]
   /// #2484 — this App's prefix-scoped write grants for its userless runs, and their append-only history.
   memoryWriteGrants       AppMemoryWriteGrant[]
@@ -3516,6 +3576,11 @@ model App {
   /// #1707 — hosts that registered which workers they can launch (cor:agt:070:01).
   hostRegistrations       HostRegistration[]
   hostOperations          HostOperation[]
+  /// #4222 (cor:agt:070:01, change Proposed) — who states which workers a host runs: `host` (the default: the host
+  /// states it at registration, as before) or `server` (the platform's assignments; a registration is checked against
+  /// them). Set by whoever manages the App. Shape: prisma/host-assignment-invariants.sql.
+  hostSetupSource         String                 @default("host") @map("host_setup_source")
+  hostWorkerAssignments   HostWorkerAssignment[]
   /// #2162 — the context resets of this App's workers.
   contextResets           ContextReset[]
   /// #2022 (S6, cor:agt:090) — the App's stop signals, live and ended.
@@ -3545,7 +3610,12 @@ model App {
   logEntries              AppLogEntry[]
   usageEvents             UsageEvent[]
   pendingSetups           PendingSetup[]
-  aiServiceConfigs        AiServiceConfig[]
+  aiServiceConfigs        AiServiceConfig[] @relation("AppAiServiceConfigs")
+  /// #3957 (cor:dmo:050:10): one of THIS App's own configs, used for its chats unless a chat stored its own
+  /// choice. Same-App ownership and `enabled` are judged where it is read and written (a DB FK cannot say
+  /// "owned by this App"); a deleted config clears it (`SetNull`).
+  chatbotAiConfigId       String?           @map("chatbot_ai_config_id")
+  chatbotAiConfig         AiServiceConfig?  @relation("AppChatbotAiConfig", fields: [chatbotAiConfigId], references: [id], onDelete: SetNull)
   modelGroups             ModelGroup[]
   automationVersions      AutomationVersion[]
   connectionGrants        ConnectionGrant[]         @relation("AppConnectionGrants")
@@ -3561,6 +3631,7 @@ model App {
   @@index([urn])
   @@index([ownerUserId])
   @@index([legacyUrn])
+  @@index([chatbotAiConfigId])
   @@map("apps")
 }
 
@@ -3948,6 +4019,7 @@ model Worker {
   cadenceEpisodes    CoordinatorCadenceEpisode[]
   cadenceClock       CoordinatorCadenceClock?
   postLimitEpisodes PostLimitEpisode[]
+  startFailingEpisodes StartFailingEpisode[]
   appId             String    @map("app_id")
   agentId           String    @map("agent_id")
   /// The worker's name ("Iris") — the identity every surface renders.
@@ -4040,7 +4112,32 @@ model Worker {
   /// availability, matcher, stall rule or alarm. No screen text is ever stored; `chk_workers_terminal_shape` (in
   /// prisma/host-operation-invariants.sql) allows exactly the keys above, so a write that bypasses the resolver still
   /// cannot store more. Read behind `maySeeWorkerInternals` (cor:dmo:050:11).
+  /// #4225 S4a — the object also carries `contextTokens` and `contextMeasuredAt` (the worker's context size as its
+  /// host measured it; both null when the host cannot measure, never 0; absent on a row stored before #4225).
+  /// #4247 — and, for a refused or failed relaunch only, `repair` (RELAUNCH_REFUSED | RELAUNCH_FAILED), `repairReason` and
+  /// `repairAttempt`: all three or none (the other repair outcomes are not stored).
   terminal Json? @map("terminal")
+  /// #4041 (V82) — the last host repair notice the PLATFORM posted for this worker, set in the post's own append
+  /// transaction: a space-separated set of alert tokens (`alert` for a no-snapshot / cap-reached alert, `<outcome>:<reason>` for a refused or
+  /// failed relaunch), each once per episode until a report without a repair outcome or with a relaunch, or `relaunched:<checkedAt>` (so a replayed relaunch report posts nothing twice). Never read by a client.
+  repairNoticeKey String? @map("repair_notice_key")
+  /// #4224 (S3 of #4229) — the leave-alone marker: the host sweep observes and reports this worker but never starts,
+  /// stops or repairs it. Set and cleared by whoever manages the App (`setWorkerLeaveAlone`), each change one
+  /// `worker.leave-alone-changed` team event. The reason, the user who last set it and when are set together with
+  /// the marker and cleared with it (chk_workers_leave_alone_shape, prisma/desired-state-invariants.sql).
+  leaveAlone       Boolean   @default(false) @map("leave_alone")
+  leaveAloneReason String?   @map("leave_alone_reason")
+  /// The user who set the marker (the manager, or the holder a worker acted on the instruction of). A bare id, no FK:
+  /// a record of who acted, like `retiredBy`.
+  leaveAloneBy     String?   @map("leave_alone_by")
+  leaveAloneAt     DateTime? @map("leave_alone_at")
+  /// #4291 (decisions 2 and 8) — the worker's record of its run settings: the family, model and effort its session last
+  /// reported, one value each and no history. A REPORT, not a control: written only from a session's bind or report
+  /// (src/lib/agentTasks/runSettings.ts `recordRunSettings`), never cleared by a null, kept when the worker unbinds. A
+  /// start reads it after the task's own setting (cor:agt:070:08); an unbound worker is matched on it (cor:agt:060:04).
+  lastUsedFamily   String?      @map("last_used_family")
+  lastUsedModel    String?      @map("last_used_model")
+  lastUsedEffort   EffortLevel? @map("last_used_effort")
 
   app                  App                       @relation(fields: [appId], references: [id], onDelete: Cascade)
   /// SetNull: a worker row is never hard-deleted in normal operation, but an
@@ -4072,6 +4169,7 @@ model Worker {
   appGrants            AppGrant[]
   launchableVia        HostRegistrationWorker[]
   hostOperations       HostOperation[]
+  hostAssignments      HostWorkerAssignment[]
   /// #2162 — this worker's context resets (cor:agt:050:27).
   contextResets        ContextReset[]
   /// #2022 — worker- and team-scope stop signals naming this worker as target.
@@ -4080,6 +4178,8 @@ model Worker {
   /// The URN atom's uniqueness. Unfiltered on retirement, like
   /// `workers_app_name_uniq`: a retired worker's URN must keep resolving.
   @@unique([appId, slug], map: "workers_app_slug_uniq")
+  /// #4222: the target of host_worker_assignments' (worker_id, app_id) key; unique trivially (id is the key).
+  @@unique([id, appId], map: "workers_host_assignment_owner_uniq")
   @@index([appId])
   @@index([agentId])
   /// #1050 — "what does this person hold", across Apps.
@@ -4720,6 +4820,87 @@ model NodeSignature {
 /// (`retiredAt` retires minting only, and nothing in PR1 sets it — no ops
 /// surface). Minting always uses the newest unretired key; a stamp names the
 /// key that must verify it.
+/// #3996 (S1 of #3991) — an App's data key, wrapped (AES-256-GCM) under the platform root key `SECRET_ROOT_KEY`.
+/// AAD `hadron:secret-app-key:v1:<appId>:<keyVersion>`; a plaintext that is not exactly 32 bytes makes the row
+/// unusable (fail closed). The partial unique index (one ACTIVE key per App) is in secret-app-keys-invariants.sql.
+model SecretAppKey {
+  appId      String    @map("app_id")
+  keyVersion Int       @map("key_version")
+  /// base64(iv[12] | gcm-tag[16] | ciphertext). Never selected for display, never logged.
+  wrappedKey String    @map("wrapped_key")
+  createdAt  DateTime  @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("created_at")
+  /// A retired key stops encrypting; it still decrypts until no version uses it.
+  retiredAt  DateTime? @map("retired_at")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+  versions SecretVersion[]
+
+  @@id([appId, keyVersion])
+  @@map("secret_app_keys")
+}
+
+/// #3997 (S2 of #3991): one stored value of an App-owned secret. Append-only in practice (a version is never edited);
+/// `superseded_at` is set when a newer one is stored. The ciphertext is left out of every default select at the client
+/// layer (`omit`, R12): only the store path and (S3) the read path select it by name.
+model SecretVersion {
+  id             String    @id @default(cuid())
+  secretId       String    @map("secret_id")
+  versionNo      Int       @map("version_no")
+  /// base64(iv[12] | gcm-tag[16] | ciphertext) under the App key's encryption subkey, AAD `secretVersionAad`.
+  valueEncrypted String    @map("value_encrypted")
+  /// The App and the App key version that encrypted it; (app_id, key_version) restricts deletion of the key.
+  appId          String    @map("app_id")
+  keyVersion     Int       @map("key_version")
+  /// Bytes of the stored plaintext JSON (the cap's unit).
+  sizeBytes      Int       @map("size_bytes")
+  writtenByUserId    String? @map("written_by_user_id")
+  writtenByWorkerId  String? @map("written_by_worker_id")
+  writtenBySessionId String? @map("written_by_session_id")
+  writtenAt      DateTime  @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("written_at")
+  supersededAt   DateTime? @map("superseded_at")
+
+  secret Secret       @relation(fields: [secretId], references: [id], onDelete: Cascade)
+  appKey SecretAppKey @relation(fields: [appId, keyVersion], references: [appId, keyVersion], onDelete: Restrict)
+
+  @@unique([secretId, versionNo], map: "secret_versions_secret_version_uniq")
+  @@map("secret_versions")
+}
+
+/// #3997: the append-only audit trail of App secrets. Plain values only (no foreign keys, so the trail outlives the
+/// secret and its App); never a value, ciphertext or fingerprint. A guard trigger refuses update, and refuses delete
+/// except the one-year purge S8 builds (`secret-events-invariants.sql`).
+model SecretEvent {
+  id          String   @id @default(cuid())
+  ownerType   String   @map("owner_type")
+  ownerId     String   @map("owner_id")
+  secretId    String   @map("secret_id")
+  secretName  String   @map("secret_name")
+  clientId    String?  @map("client_id")
+  versionNo   Int?     @map("version_no")
+  kind        String
+  outcome     String
+  actorUserId String?  @map("actor_user_id")
+  workerId    String?  @map("worker_id")
+  sessionId   String?  @map("session_id")
+  runId       String?  @map("run_id")
+  at          DateTime @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)"))
+
+  @@index([ownerType, ownerId, at], map: "secret_events_owner_at_idx")
+  @@index([secretId, at], map: "secret_events_secret_at_idx")
+  @@map("secret_events")
+}
+
+/// #3997 (R25): the durable start of the one-year event retention for a deleted owner. One row per deleted App that has
+/// events, written once; never updated; deleted only by the purge, last.
+model SecretOwnerTombstone {
+  ownerType String   @map("owner_type")
+  ownerId   String   @map("owner_id")
+  deletedAt DateTime @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("deleted_at")
+
+  @@id([ownerType, ownerId])
+  @@map("secret_owner_tombstones")
+}
+
 model StampSigningKey {
   id          Int       @id @default(autoincrement())
   /// base64(iv[12] | gcm-tag[16] | ciphertext), AES-256-GCM under
@@ -6089,6 +6270,18 @@ model AgentTask {
   /// Set by whoever assigns; T6 acts on it (cor:agt:050:10). False unless the assigner asks (R182, #2249): the
   /// default only reaches a raw insert, since every create path writes the resolved value.
   closeSessionWhenDone Boolean   @default(false) @map("close_session_when_done")
+  /// #4291 (decision 5, settled B) — the task's own run settings, each optional: a family, an exact model OR a generic
+  /// tier (high, mid, low), and an effort (never NOT_APPLICABLE). What a start for this task launches, before the
+  /// worker's record; not a matching requirement. Validated at creation (src/lib/agentTasks/runSettings.ts).
+  runFamily            String?      @map("run_family")
+  runModel             String?      @map("run_model")
+  runTier              String?      @map("run_tier")
+  runEffort            EffortLevel? @map("run_effort")
+  /// #4291 — the settings the run actually used: the assignee's newest open session's, read when the task was started.
+  /// Null until started, for a person, or when that session reported none. Shown beside the task's own settings.
+  appliedFamily        String?      @map("applied_family")
+  appliedModel         String?      @map("applied_model")
+  appliedEffort        EffortLevel? @map("applied_effort")
   /// The latest assignment, by hand or by the matcher, in the #1610 actor shape.
   assignedAt           DateTime? @map("assigned_at")
   assignedBy           String?   @map("assigned_by")
@@ -6205,6 +6398,15 @@ model AgentTeamEvent {
   acknowledgedAt         DateTime? @map("acknowledged_at")
   payload                Json      @default("{}")
   createdAt              DateTime  @default(now()) @map("created_at")
+  /// #4084 (Glen's blind P2 on server#4089): the id of the transaction that wrote the event, set by the database
+  /// (`pg_current_xact_id()`), never by the application. `createdAt` is stamped when the row is written, not when it
+  /// commits, so a reader that advances by `(createdAt, id)` can pass an event whose transaction commits later. A
+  /// transaction id below the reader snapshot's xmin is final: every transaction that could still add a row has an id
+  /// at or above it. agentTaskExternalIdChanges pages by `(txId, createdAt, id)` and serves only finished transactions,
+  /// so a late commit is served late, never skipped. Rows written before this column existed hold `'0'`.
+  /// #4111: NOT NULL (a NULL cursor key would compare NULL and empty every later page); the default stays, so a
+  /// producer that omits it still gets a key. A logical restore re-keys it with `scripts/ops/restore-with-rebase`.
+  txId                   Unsupported("xid8") @default(dbgenerated("pg_current_xact_id()")) @map("tx_id")
   /// #1706 — stall alarms only: when the stall episode began (cor:agt:050:13),
   /// the instant of the move that began the condition, never the evaluator's
   /// clock. With `taskId` and `type` (the rule) it is the episode's key, and
@@ -6220,9 +6422,15 @@ model AgentTeamEvent {
   darkEpisode DarkWorkerEpisode?
   cadenceEpisode CoordinatorCadenceEpisode?
   postLimitEpisode PostLimitEpisode?
+  startFailingEpisode StartFailingEpisode?
+  hostSweepEpisode HostSweepEpisode?
+  /// #3934 (V77): the recorded end of this alarm's escalation, written once by the evaluator pass or the acknowledgement.
+  escalationEnd AlarmEscalationEnd?
 
   @@unique([taskId, type, episodeStart], map: "agent_team_events_episode_uniq")
   @@index([appId, createdAt])
+  /// #4084: the changed-since read's commit-safe order (agentTaskExternalIdChanges).
+  @@index([appId, txId, createdAt, id])
   @@index([taskId])
   /// #1707 — "assigned least recently" (cor:agt:060:06) reads a worker's
   /// latest assignment event.
@@ -6255,6 +6463,21 @@ model AgentTeamAlarmSchedule {
   @@id([eventId, chainIndex])
   @@index([wokenAt, dueAt])
   @@map("agent_team_alarm_schedule")
+}
+
+/// #3934 (cor:agt:050:20, V77; gate disposition on hadron-server#3939): the RECORDED end of an alarm's escalation. The
+/// alarm event stream is append-only, so the end lives here: one row per alarm, written once (a trigger refuses any
+/// UPDATE), by the evaluator pass (every unacknowledged alarm it finds ended) or by the acknowledgement that froze an
+/// ended-but-unrecorded episode. `endedAt` is the earliest end the available history supports at the moment of writing;
+/// it is at most one evaluator tick late and never moves. Reads take the earlier of this and the acknowledgement.
+model AlarmEscalationEnd {
+  eventId    String   @id @map("event_id")
+  endedAt    DateTime @map("ended_at")
+  recordedAt DateTime @default(now()) @map("recorded_at")
+
+  event AgentTeamEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@map("alarm_escalation_ends")
 }
 
 /// #2755 — one dark-worker episode (a worker that went OVERDUE or left a due wake unacknowledged past the App's
@@ -6315,6 +6538,26 @@ model CoordinatorCadenceClock {
   @@map("coordinator_cadence_clocks")
 }
 
+/// #4231 (S8 of #4229) — a worker whose platform starts keep failing: three failed platform `worker.start`s in an hour
+/// stop the desired-state start for it, and ONE `alarm.start-failing` goes to its reporting line per episode. An
+/// episode closes an hour after it opened, so a worker still failing then is alarmed again. At most one open per
+/// worker (a partial unique index, prisma/desired-start-invariants.sql).
+model StartFailingEpisode {
+  id       String    @id @default(cuid())
+  appId    String    @map("app_id")
+  workerId String    @map("worker_id")
+  eventId  String    @unique @map("event_id")
+  openedAt DateTime  @map("opened_at")
+  endedAt  DateTime? @map("ended_at")
+
+  app    App            @relation(fields: [appId], references: [id], onDelete: Cascade)
+  worker Worker         @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  event  AgentTeamEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([appId, endedAt])
+  @@map("start_failing_episodes")
+}
+
 /// #2014 — one post-limit episode: the first refusal of a worker's team-chat post by the rate limit in an hour. It only
 /// de-duplicates the alarm raised with it (agent_team_events, type `alarm.post-limit`); the alarm itself stays open until
 /// acknowledged. At most one OPEN row per worker (partial unique index in prisma/post-limit-invariants.sql); an open
@@ -6333,6 +6576,57 @@ model PostLimitEpisode {
 
   @@index([appId, endedAt])
   @@map("post_limit_episodes")
+}
+
+/// #4233 (S10 of #4229) — one run of a host's one-minute sweep, as the host reported it: when it ran, in which mode, how
+/// many workers it planned to change and what became of them, and up to 50 per-worker lines (`lines`: worker token,
+/// outcome, reason code; never free text). Written once by the host key (`recordHostSweepRun`), never changed except
+/// that `postedAt` is claimed by the run's one summary post. `runKey` is the host's own token for the run: a replayed
+/// report is the same row. Shape: prisma/host-sweep-invariants.sql.
+model HostSweepRun {
+  id         String    @id
+  appId      String    @map("app_id")
+  hostId     String    @map("host_id")
+  runKey     String    @map("run_key")
+  startedAt  DateTime  @map("started_at")
+  endedAt    DateTime  @map("ended_at")
+  mode       SweepMode
+  planned    Int
+  applied    Int
+  skipped    Int
+  failed     Int
+  lines      Json      @default("[]")
+  recordedAt DateTime  @default(now()) @map("recorded_at")
+  /// When the run's summary post was written; NULL for a run that needed none, or whose post has not run yet.
+  postedAt   DateTime? @map("posted_at")
+  /// When the retry pass last tried this run's post and did not land it (no chat, the host gap, a failed append). The retry queue
+  /// orders untried runs first, so a run that cannot post goes to the back and never holds the scan (#4255 Clark F4).
+  summaryTriedAt DateTime? @map("summary_tried_at")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@unique([appId, hostId, runKey], map: "host_sweep_runs_run_uniq")
+  @@index([appId, hostId, recordedAt(sort: Desc)], map: "host_sweep_runs_host_recent_idx")
+  @@map("host_sweep_runs")
+}
+
+/// #4233 — one stale-sweep episode: a host of an App whose sweep mode is OBSERVE or APPLY whose last run is older than five
+/// minutes. It de-duplicates the task-less alarm raised with it (agent_team_events, type `alarm.stale-sweep`, subject worker
+/// NULL). At most one OPEN row per (App, host) (partial unique index in prisma/host-sweep-invariants.sql); the episode ends
+/// when the host records its next run, or when the App's sweep mode goes OFF.
+model HostSweepEpisode {
+  id       String    @id @default(cuid())
+  appId    String    @map("app_id")
+  hostId   String    @map("host_id")
+  eventId  String    @unique @map("event_id")
+  openedAt DateTime  @map("opened_at")
+  endedAt  DateTime? @map("ended_at")
+
+  app   App            @relation(fields: [appId], references: [id], onDelete: Cascade)
+  event AgentTeamEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([appId, endedAt])
+  @@map("host_sweep_episodes")
 }
 
 /// #1706 — one worker's availability for work (cor:agt:060:02). At most one
@@ -6509,6 +6803,41 @@ model HostRegistrationWorker {
   @@map("host_registration_workers")
 }
 
+/// #4222 (S1a of #4229; cor:agt:070:01, change Proposed) — one worker the platform says a host of a team App runs:
+/// the working directory it runs in there (a name token the host resolves: an Orca worktree name, or a plain
+/// directory name for a worker without Git), and its launcher profile (#4230, S1b: family, model, effort, accountProfile,
+/// each a token). Never a path, a command or a credential (cor:agt:070:03). Set and removed by
+/// whoever manages the App. In effect only while the worker is not retired, and used by registration and by starts
+/// only while the App's `hostSetupSource` is `server`. Shape: prisma/host-assignment-invariants.sql.
+model HostWorkerAssignment {
+  id              String   @id
+  appId           String   @map("app_id")
+  hostId          String   @map("host_id")
+  workerId        String   @map("worker_id")
+  workdir         String
+  family          String
+  model           String?
+  /// #4230 (S1b, decision G1): the launcher profile is typed fields, never a command. family above, model, and these two.
+  effort          String?
+  /// The host-local account the launcher runs under (a token the host maps to its launcher; never a path or credential).
+  accountProfile  String?  @map("account_profile")
+  /// The person who made the assignment (a plain id, like a host operation's issuer: it outlives the account).
+  createdByUserId String   @map("created_by_user_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @default(now()) @map("updated_at")
+
+  app    App    @relation(fields: [appId], references: [id], onDelete: Cascade)
+  /// The worker AND its App (#4241 blind review, Diego P2): an assignment names only a worker of its own App, and a worker
+  /// that has assignments keeps its App (onUpdate NoAction). Foreign-key checks see committed rows at every isolation
+  /// level, so this holds when an insert and a move race.
+  worker Worker @relation(fields: [workerId, appId], references: [id, appId], onDelete: Cascade, onUpdate: NoAction, map: "host_worker_assignments_worker_app_fkey")
+
+  @@unique([appId, workerId, hostId], map: "host_worker_assignments_app_worker_host_uniq")
+  @@index([appId, hostId])
+  @@index([workerId])
+  @@map("host_worker_assignments")
+}
+
 /// #1709 (Task Management T6) — one typed operation the platform issued to one
 /// host of a team App (cor:agt:070:02). `type` is one of the closed set of
 /// cor:agt:070:03 and `args` its typed arguments, validated at issue
@@ -6548,6 +6877,10 @@ model HostOperation {
   /// account merge changes the holder (Holger via Vera #10775).
   holdUserId       String?   @map("hold_user_id")
   holdAt           DateTime? @map("hold_at")
+  /// #4231 (S8 of #4229) — why the platform issued it, when that is not a task: `DESIRED_RUNNING` for the start of a
+  /// long-lived worker that should run and has no session (cor:agt:070:05 S7, Proposed). Null for every other
+  /// operation. Shape: prisma/desired-start-invariants.sql.
+  issuedReason     String?   @map("issued_reason")
 
   app    App    @relation(fields: [appId], references: [id], onDelete: Cascade)
   worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
@@ -6632,7 +6965,11 @@ model ContextReset {
   workerId             String    @map("worker_id")
   /// The worker's session open when the task ended: the fence the claim re-checks.
   sessionId            String    @map("session_id")
-  taskId               String    @unique @map("task_id")
+  /// Null for a `context-cap` reset (#4225): it belongs to no task. `chk_context_resets_cause` ties the two together.
+  taskId               String?   @unique @map("task_id")
+  /// #4225: what asked for the reset: `task-end` (a task's finish or cancel, cor:agt:050:27 part 2) or `context-cap` (the
+  /// Agent's cap, part 12). Never changes (`trg_context_resets_cause_immutable`).
+  cause                String    @default("task-end")
   /// The host the reset was issued to; null when no capable live host registered the worker (HOST_UNSUPPORTED).
   hostId               String?   @map("host_id")
   hostOperationId      String?   @unique @map("host_operation_id")
@@ -6677,7 +7014,8 @@ model ContextReset {
 model TaskSessionEndRequest {
   id                  String    @id
   appId               String    @map("app_id")
-  taskId              String    @unique @map("task_id")
+  /// #4223: not unique. A task asks each time it ends under a worker or is reassigned away from a short-lived one.
+  taskId              String    @map("task_id")
   workerId            String    @map("worker_id")
   sessionId           String    @map("session_id")
   /// The `task.session-end-requested` event this request wrote.
@@ -6695,6 +7033,7 @@ model TaskSessionEndRequest {
 
   @@index([resolvedAt, dueAt])
   @@index([workerId])
+  @@index([taskId])
   @@map("task_session_end_requests")
 }
 
@@ -6710,7 +7049,8 @@ model HostKeyUse {
   /// `register` | `collect` | `report` | `availability` | `read` (#1881: the
   /// App's host registrations or host-operations listing, read with the key;
   /// #2931: its host's tickers, `count` the rows returned) |
-  /// `session` (#1969: a refused session write; always carries a refusedCode).
+  /// `session` (#1969: a refused session write, always with a refusedCode; #4292: also
+  /// endAgentlessSession, accepted with refusedCode null and `count` 1 when it ended the session, else 0).
   action      String
   operationId String?  @map("operation_id")
   count       Int?
@@ -7722,6 +8062,10 @@ model Action {
   /// A closed key the server maps to a gate function; never SQL or code.
   issuerRule      String   @map("issuer_rule")
   summaryTemplate String   @map("summary_template")
+  /// #4163: a limit on uses that applies to every grant of this action (NULL: none). A grant's own max_uses can only narrow it.
+  maxUses         Int?     @map("max_uses")
+  /// #4163: a limit on lifetime from activation, in seconds, for every grant of this action (NULL: none). A grant's own expiry can only narrow it.
+  lifetimeSeconds Int?     @map("lifetime_seconds")
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
 

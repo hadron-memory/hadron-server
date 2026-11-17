@@ -51,6 +51,8 @@ export const DIRECT_USER_REFERENCES: ReadonlyArray<readonly [string, string] | r
   // revoker and verifier of a row that ended or was signed. The row guard (prisma/grant-invariants.sql) allows exactly this move,
   // and only along the user_merges row this merge records before these rewrites. grant_events' actor ids are
   // deliberately NOT here: append-only history, sealed like agent_team_events above. A merge never moves a row's App.
+  // #3997: secret_events.actor_user_id (append-only, a trigger refuses the UPDATE) and secret_versions.written_by_user_id (a version is
+  // never edited in place, cor:sec:010:03) are the same sealed provenance: who stored a value is a fact of the time.
   ['grants', 'user_id'],
   ['grants', 'issuer_user_id'],
   ['grants', 'requested_by_user_id'],

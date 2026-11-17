@@ -263,7 +263,7 @@ describe('castWorker — confusable naming (#1677)', () => {
     await cast({ agentRef: roleAgent.id, name: 'Alice' });
     for (const operation of [M.castWorker, Q.castWorkerPreview]) {
       await expect(operation({}, { appRef: app.id, agentRef: roleAgent.id, name: 'Ａlice' }, ctx(outsider.id)))
-        .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+        .rejects.toMatchObject({ extensions: { code: 'APP_NOT_FOUND' } });
     }
   });
 
@@ -683,7 +683,7 @@ describe('castWorker — auth matrix (one case per principal shape)', () => {
   });
 
   it('an org READER (member, but below CONTRIBUTOR) is denied', async () => {
-    await expectCode(cast(args(), ctx(orgReader.id)), 'FORBIDDEN');
+    await expectCode(cast(args(), ctx(orgReader.id)), 'APP_NOT_FOUND');
   });
 
   it('an AppMember who is NOT an org member may cast (the everyday flow)', async () => {
@@ -695,11 +695,11 @@ describe('castWorker — auth matrix (one case per principal shape)', () => {
   });
 
   it('a non-member is denied', async () => {
-    await expectCode(cast(args(), ctx(outsider.id)), 'FORBIDDEN');
+    await expectCode(cast(args(), ctx(outsider.id)), 'APP_NOT_FOUND');
   });
 
   it('an unauthenticated caller is denied', async () => {
-    await expectCode(cast(args(), ctx(undefined)), 'FORBIDDEN');
+    await expectCode(cast(args(), ctx(undefined)), 'APP_NOT_FOUND');
   });
 
   it('a PURE App-key principal is denied — staffing is a human act', async () => {
@@ -727,7 +727,7 @@ describe('castWorker — auth matrix (one case per principal shape)', () => {
       where: { organizationId: org.id, userId: contrib.id },
       data: { deletedAt: new Date() },
     });
-    await expectCode(cast(args(), ctx(contrib.id)), 'FORBIDDEN');
+    await expectCode(cast(args(), ctx(contrib.id)), 'APP_NOT_FOUND');
   });
 });
 
@@ -769,12 +769,12 @@ describe('castWorker — user-owned App (spec 047)', () => {
   it('anyone else — including a platform admin — is denied (strict owner-only)', async () => {
     await expectCode(
       M.castWorker({}, { appRef: personalApp.id, agentRef: personalAgent.id, name: 'Zoe' }, ctx(outsider.id)),
-      'FORBIDDEN',
+      'APP_NOT_FOUND',
     );
     const platformAdmin: Context = { db, userId: outsider.id, roles: ['ADMIN'] };
     await expectCode(
       M.castWorker({}, { appRef: personalApp.id, agentRef: personalAgent.id, name: 'Zoe' }, platformAdmin),
-      'FORBIDDEN',
+      'APP_NOT_FOUND',
     );
   });
 });
@@ -923,7 +923,7 @@ describe('worker / workers queries', () => {
   });
 
   it('workers denies a non-member', async () => {
-    await expectCode(Q.workers({}, { appRef: app.id }, ctx(outsider.id)), 'FORBIDDEN');
+    await expectCode(Q.workers({}, { appRef: app.id }, ctx(outsider.id)), 'APP_NOT_FOUND');
   });
 });
 
@@ -1693,6 +1693,13 @@ describe('hadron-cli#487 — Worker.hasLiveSession / lastActiveAt', () => {
       // attribution, not activity. Both derivations must still read it lapsed.
       Ida: { startedAt: t(-5000), updatedAt: t(-4000), endedAt: null, autoExpiredAt: null,
              eventAt: t(-1), eventCounts: false },
+      // #4271 (#4272 QA P2): the row classes of the liveness guard, which skips usage events only for a session its
+      // own stamps close. Ended with no updated_at and an event inside: the event counts.
+      Nell: { startedAt: t(-900), updatedAt: null, endedAt: t(-600), autoExpiredAt: null, eventAt: t(-700) },
+      // Ended and closed by its own stamps, with an event after the end: capped at the end.
+      Ola: { startedAt: t(-900), updatedAt: t(-600), endedAt: t(-600), autoExpiredAt: null, eventAt: t(-500) },
+      // Ended with updated_at before the end and an event between: the event counts.
+      Pim: { startedAt: t(-900), updatedAt: t(-850), endedAt: t(-600), autoExpiredAt: null, eventAt: t(-700) },
     };
 
     const workers: Record<string, { id: string; appId: string }> = {};

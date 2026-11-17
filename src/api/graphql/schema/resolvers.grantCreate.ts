@@ -8,7 +8,10 @@
  * created where it could not be signed (deploymentSchema's removal set).
  */
 import { GraphQLError } from 'graphql';
-import type { Context } from './resolvers.helpers.js';
+import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
+import { UrnNotQualifiedError } from '../../../lib/urn.js';
+import { isMemoryReadableCached, type Context } from './resolvers.helpers.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { resolveGrantPerson, resolveGrantReader } from './resolvers.grant.js';
 import { manageRefusal, resolveGrantManager } from './resolvers.grantManage.js';
@@ -52,8 +55,16 @@ export const grantCreateMutations = {
     if (!ctx.userId) throw notWorker();
     // A worker session creates in its OWN App: an appRef naming another is refused as the worker gate refuses everything else.
     if (input.appRef) {
-      const named = await ctx.db.app.findFirst({ where: { OR: [{ id: input.appRef }, { urn: input.appRef }], deletedAt: null }, select: { id: true } });
-      if (!named || named.id !== reader.appId) throw notWorker();
+      // #3914 / cor:api:140:01: normalize and follow published aliases through the shared resolver.
+      // Scope the lookup to the caller's App so foreign alias history cannot disclose ambiguity.
+      let named: { id: string };
+      try {
+        named = await resolveAppRef(ctx.db, input.appRef, { scope: { id: reader.appId } });
+      } catch (error) {
+        if (error instanceof AppNotFoundError || error instanceof UrnNotQualifiedError) throw notWorker();
+        throw error; // An operational lookup fault is not an absent or unauthorized App.
+      }
+      if (named.id !== reader.appId) throw notWorker();
     }
     const userId = ctx.userId;
     const kind = input.holderKind.toLowerCase() as 'user' | 'agent' | 'worker' | 'app';
@@ -71,8 +82,9 @@ export const grantCreateMutations = {
           const again = await resolveGrantReader(txCtx);
           if (!again || again.appId !== reader.appId || again.workerId !== reader.workerId) throw notWorker();
         },
-        async (tx) => {
+        async (tx, txCtx) => {
           const id = await createPendingGrant(tx, {
+            canReadMemory: (memoryId) => isMemoryReadableCached(txCtx, memoryId),
             appId: reader.appId,
             requester: { userId, workerId: reader.workerId, sessionId: ctx.sessionId ?? null },
             holder: { kind, id: input.holderRef },
@@ -125,8 +137,9 @@ async function createAsManager(ctx: Context, input: CreateGrantInput) {
         const fresh = await txCtx.db.app.findUnique({ where: { id: app.id }, select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true } });
         if (!fresh || fresh.deletedAt || !(await managesApp(txCtx, fresh))) throw notManager();
       },
-      async (tx) => {
+      async (tx, txCtx) => {
         const id = await createPendingGrant(tx, {
+          canReadMemory: (memoryId) => isMemoryReadableCached(txCtx, memoryId),
           appId: app.id,
           requester: { userId, workerId: null, sessionId: null },
           holder: { kind, id: input.holderRef },

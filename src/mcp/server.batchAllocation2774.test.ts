@@ -8,12 +8,13 @@ import { projectionHashDiagnostic } from '../test/projectionHash2801.js';
  * General batch form/validation coverage lives in server.batchRead.test.ts.
  */
 
-import { it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import * as contentHash from '../lib/contentHash.js';
 import { sessionKeyCache } from '../lib/sessionKeyCache.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
+import { assertGoldenCollation } from '../test/goldenCollation3872.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
@@ -143,30 +144,49 @@ async function measuredRead(scope: 'abstract' | 'all', refs: string[], form: 'pk
   } finally { many.mockRestore(); txSpy.mockRestore(); renderSpy.mockRestore(); }
 }
 
-it.each((['forward', 'reverse'] as const).flatMap(order => ([['abstract', 'pk'], ['abstract', 'urn'], ['abstract', 'prefix'], ['all', 'pk'], ['all', 'urn'], ['all', 'prefix']] as const).map(([scope, form]) => [scope, form, order] as const)))('#2774 bounds endpoint/root payloads with byte-identical %s/%s output (edge insertion %s)', async (scope, form, order) => {
-  const nodes = await denseFixture(order);
-  const result = await measuredRead(scope, nodes.map(n => n.id), form);
-  expect(result.text).not.toMatch(/^Error/);
-  expect(result.loads.some(l => l.phase === 'initial' && l.rows === 12)).toBe(true);
-  expect(result.loads.filter(l => l.phase === 'current').length).toBeGreaterThanOrEqual(12);
-  expect(result.loads.filter(l => l.phase === 'current').every(l => l.rows === 1)).toBe(true);
-  expect.soft(result.maxPendingBodies).toBeLessThanOrEqual(1);
-  // The output hashes are captured on these same deterministic rows. #2967: edge lines now follow
-  // edge loc then id (lexical, so dense-edge:0:10 precedes dense-edge:0:2), where the #2774 values
-  // (abstract 8a33ebc7…, all ee49b72e…) hashed the pre-#2967 insertion order. Sorting each run of
-  // edge lines in the new output reproduces those old hashes exactly: only edge-line order moved.
-  // #3659: every node now prints a Validation tasks line, where the #2967 values were c74221db… and
-  // 2ba30066…. Removing those lines from the new output reproduces those hashes exactly.
-  const baseline = { abstract: '2687cd290c2cb3b35c0422ba885adb12ad3c8ce7753b27d90b194070fab01049', all: 'd2a649b69b145f31087e165618def2179ef76f3dd6eab9078453fcec51ab30a5' };
-  expect(result.hash, projectionHashDiagnostic(result.text, projectionBaseline.scopes[scope].fields)).toBe(baseline[scope]);
-  expect.soft(result.loads.reduce((n, l) => n + l.endpointBodyBytes, 0)).toBe(0);
-  if (scope === 'abstract') {
-    expect.soft(result.loads.filter(l => l.phase === 'current').reduce((n, l) => n + l.rootBodyBytes, 0)).toBe(0);
-    expect.soft(result.loads.filter(l => l.phase === 'initial').reduce((n, l) => n + l.rootBodyBytes, 0)).toBe(0);
-    expect.soft(result.loads.filter(l => l.phase === 'initial').reduce((n, l) => n + l.bytes, 0)).toBeLessThanOrEqual(1_310_720);
-    expect(result.text).toContain('returned 12 node(s)');
-  } else expect(result.text).toContain('truncated: response-size cap reached');
-}, 60_000);
+/**
+ * #3872: the byte-exact hashes below hold only where the test database's collation is en_US.UTF-8 (libc):
+ * the `Referenced by` order is collation-dependent. On any other database this group refuses ONCE, before
+ * a golden comparison runs, with the observed and required collation and the setup remedy (see
+ * src/test/goldenCollation3872.ts and "Local Postgres setup" in CLAUDE.md). The baselines are never
+ * rebaselined or canonicalised: they still pin what #2823/#2967 built them to pin.
+ */
+describe('#2774 golden projection (requires the en_US.UTF-8 database collation, #3872)', () => {
+  // The verdict is read once; ONE ordinary test below reports it, and each golden comparison skips behind it
+  // rather than failing as an opaque hash mismatch. The run is still non-green: that one test fails.
+  let prerequisiteFailure: unknown = null;
+  beforeAll(async () => { prerequisiteFailure = await assertGoldenCollation(db).then(() => null, (e: unknown) => e); });
+
+  it('#3872 the test database has the en_US.UTF-8 collation the golden hashes assume', () => {
+    if (prerequisiteFailure) throw prerequisiteFailure;
+  });
+
+  it.for((['forward', 'reverse'] as const).flatMap(order => ([['abstract', 'pk'], ['abstract', 'urn'], ['abstract', 'prefix'], ['all', 'pk'], ['all', 'urn'], ['all', 'prefix']] as const).map(([scope, form]) => [scope, form, order] as const)))('#2774 bounds endpoint/root payloads with byte-identical %s/%s output (edge insertion %s)', { timeout: 60_000 }, async ([scope, form, order], ctx) => {
+    if (prerequisiteFailure) ctx.skip();
+    const nodes = await denseFixture(order);
+    const result = await measuredRead(scope, nodes.map(n => n.id), form);
+    expect(result.text).not.toMatch(/^Error/);
+    expect(result.loads.some(l => l.phase === 'initial' && l.rows === 12)).toBe(true);
+    expect(result.loads.filter(l => l.phase === 'current').length).toBeGreaterThanOrEqual(12);
+    expect(result.loads.filter(l => l.phase === 'current').every(l => l.rows === 1)).toBe(true);
+    expect.soft(result.maxPendingBodies).toBeLessThanOrEqual(1);
+    // The output hashes are captured on these same deterministic rows. #2967: edge lines now follow
+    // edge loc then id (lexical, so dense-edge:0:10 precedes dense-edge:0:2), where the #2774 values
+    // (abstract 8a33ebc7…, all ee49b72e…) hashed the pre-#2967 insertion order. Sorting each run of
+    // edge lines in the new output reproduces those old hashes exactly: only edge-line order moved.
+    // #3659: every node now prints a Validation tasks line, where the #2967 values were c74221db… and
+    // 2ba30066…. Removing those lines from the new output reproduces those hashes exactly.
+    const baseline = { abstract: '2687cd290c2cb3b35c0422ba885adb12ad3c8ce7753b27d90b194070fab01049', all: 'd2a649b69b145f31087e165618def2179ef76f3dd6eab9078453fcec51ab30a5' };
+    expect(result.hash, projectionHashDiagnostic(result.text, projectionBaseline.scopes[scope].fields)).toBe(baseline[scope]);
+    expect.soft(result.loads.reduce((n, l) => n + l.endpointBodyBytes, 0)).toBe(0);
+    if (scope === 'abstract') {
+      expect.soft(result.loads.filter(l => l.phase === 'current').reduce((n, l) => n + l.rootBodyBytes, 0)).toBe(0);
+      expect.soft(result.loads.filter(l => l.phase === 'initial').reduce((n, l) => n + l.rootBodyBytes, 0)).toBe(0);
+      expect.soft(result.loads.filter(l => l.phase === 'initial').reduce((n, l) => n + l.bytes, 0)).toBeLessThanOrEqual(1_310_720);
+      expect(result.text).toContain('returned 12 node(s)');
+    } else expect(result.text).toContain('truncated: response-size cap reached');
+  });
+});
 
 it.each(['abstract', 'all'] as const)('#2774 preserves PK/URN/prefix and single/batch %s projections', async (contentScope) => {
   const nodes = await denseFixture();

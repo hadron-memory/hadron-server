@@ -161,7 +161,7 @@ export async function mintStampSigningKey(tx: Prisma.TransactionClient): Promise
  */
 const unreadableKeyLogged = new Set<number>();
 
-export async function stampVerificationKey(db: Db, keyId: number): Promise<Buffer | null> {
+export async function stampVerificationKey(db: Pick<PrismaClient, 'stampSigningKey'>, keyId: number): Promise<Buffer | null> {
   const row = await db.stampSigningKey.findUnique({ where: { id: keyId }, select: { keyMaterial: true } });
   if (!row) return null;
   try {

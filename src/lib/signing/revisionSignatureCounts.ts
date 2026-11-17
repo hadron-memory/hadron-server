@@ -61,17 +61,26 @@
  * node, its memory, its revision history, its signature records with their passkeys, their signing requests, and the
  * stamp-key registry.
  */
-import type { PrismaClient, Prisma } from '../../generated/prisma/index.js';
+import type { PrismaClient } from '../../generated/prisma/index.js';
 import { computeApprovalHash } from '../approvalHash.js';
 import { bootPromptOwnerOfMemory } from '../bootPromptApproval.js';
 import { deriveSignatureState } from './state.js';
 import { signatureRecordVerifies } from './verify.js';
 import { stampTagMatches, stampVerificationKey } from './stampKeys.js';
+import type { ApprovalReadMeter } from '../nodeApproval.js';
 
-type Db = PrismaClient | Prisma.TransactionClient;
+/** The read-only database surface needed by signature qualification, including transaction clients. */
+export type SignatureDb = Pick<PrismaClient, 'node' | 'memory' | 'nodeRevision' | 'nodeSignature' | 'signingRequest' | 'stampSigningKey' | 'agent' | 'app' | '$queryRaw'>;
+type Db = SignatureDb;
 
-/** Which rule requires the signature. PR1 has one; PR3's include `signed` setting names its own. */
-export type SignatureRequirement = 'compiled-boot-prompt';
+/** A compiled prompt needs the manager grade; an include needs the ceremony's writer grade. */
+export type SignatureRequirement = 'compiled-boot-prompt' | 'include';
+
+interface SignatureReadOptions {
+  /** Bind the verdict to the exact text the selector will return, rather than a later revision read. */
+  content?: string;
+  meter?: ApprovalReadMeter;
+}
 
 interface WitnessFields {
   name: string;
@@ -106,21 +115,24 @@ async function countingSignatureSpans(
   askCeiling: number | null,
   /** #2973 PR2: when given, a signature that would count but for its first-key window (state PENDING) is recorded here. */
   pendingOut?: CountingSpan[],
+  options: SignatureReadOptions = {},
 ): Promise<CountingSpan[]> {
-  // The requirement type has exactly one member today; this line stops compiling the moment a second joins, so the
-  // grade rules are decided per member instead of silently inheriting this branch (Bob old-8, delta review of
-  // 77c9fda85b: a one-case switch read like runtime dispatch but was only documentation). For
-  // 'compiled-boot-prompt': the stamp's manager grade must name the CURRENT memory's Agent or App (the fence below);
-  // the writer grade alone never satisfies it. There is still no present-day eligibility re-derivation — the owner
-  // resolution below asks WHERE the node serves, never WHO the signer now is.
-  const exhaustiveRequirement: 'compiled-boot-prompt' = requirement;
-  void exhaustiveRequirement;
+  const { meter } = options;
+  // No present-day eligibility re-derivation: both requirements use the same at-signing writer stamp;
+  // compiled prompts additionally need its manager grade for the current memory's Agent/App.
+  switch (requirement) {
+    case 'compiled-boot-prompt': case 'include': break;
+    default: { const exhaustive: never = requirement; throw new Error(`Unknown signature requirement: ${exhaustive}`); }
+  }
+  meter?.chargeLookup();
   const node = await db.node.findUnique({
     where: { id: nodeId },
     select: { revSeq: true, name: true, abstract: true, content: true, memoryId: true, memory: { select: { isEncrypted: true } } },
   });
   if (!node || node.memory.isEncrypted) return [];
+  meter?.chargeLoaded(node.name); meter?.chargeLoaded(node.abstract); meter?.chargeLoaded(node.content);
 
+  meter?.chargeLookup();
   const all = await db.nodeSignature.findMany({
     where: { nodeId },
     include: { passkey: { select: { credentialId: true, publicKey: true, revokedAt: true, windowEndsAt: true, windowEndedAt: true, windowOutcome: true } } },
@@ -132,6 +144,7 @@ async function countingSignatureSpans(
   // The ceremony's verdict for each signature's request, read once: a request the ceremony completed, pinning this
   // node at this revision and this hash. A request still open, or ended any other way (withdrawn, declined, expired,
   // stale), is not a completed signing — necessary, not sufficient: the stamp below is the signer-bound verdict.
+  meter?.chargeLookup();
   const requests = await db.signingRequest.findMany({
     where: { id: { in: [...new Set(signatures.map((s) => s.signingRequestId))] } },
     select: { id: true, state: true, nodeId: true, revision: true, approvalHash: true },
@@ -142,6 +155,7 @@ async function countingSignatureSpans(
   // that is no Agent's system memory and no App's install memory — nothing can match, so nothing counts there).
   const currentOwner = requirement === 'compiled-boot-prompt' ? await bootPromptOwnerOfMemory(db, node.memoryId) : null;
 
+  meter?.chargeLookup();
   const [{ now }] = await db.$queryRaw<Array<{ now: Date }>>`SELECT hadron_signing_now() AS now`;
 
   // One registry read (a query plus an AES-GCM unwrap) per DISTINCT key id this node's signatures
@@ -150,7 +164,10 @@ async function countingSignatureSpans(
   // call only — the registry is small and a rotation between calls must be seen afresh.
   const stampKeys = new Map<number, Buffer | null>();
   const stampKeyOf = async (keyId: number): Promise<Buffer | null> => {
-    if (!stampKeys.has(keyId)) stampKeys.set(keyId, await stampVerificationKey(db, keyId));
+    if (!stampKeys.has(keyId)) {
+      meter?.chargeLookup();
+      stampKeys.set(keyId, await stampVerificationKey(db, keyId));
+    }
     return stampKeys.get(keyId) ?? null;
   };
 
@@ -189,8 +206,9 @@ async function countingSignatureSpans(
     // a memory with no boot-prompt owner counts nothing for this requirement. The stamp's `stampMemoryId` carries the
     // capture-memory binding ALONE — durable and HMAC-bound, so a pruned history cannot weaken it and a metadata-only
     // revision captured in another memory cannot trip it (exact counting parity; no extra NOT_SIGNED refusal).
+    // An include's signer must have been a writer of THIS memory, too, never a different memory before a move.
+    if (sig.stampMemoryId !== node.memoryId) continue;
     if (requirement === 'compiled-boot-prompt') {
-      if (sig.stampMemoryId !== node.memoryId) continue;
       if (currentOwner == null || sig.stampOwnerKind !== currentOwner.kind || sig.stampOwnerId !== currentOwner.id) continue;
     }
 
@@ -207,6 +225,7 @@ async function countingSignatureSpans(
   // RangeError the serve (Bob old-7, delta review of 77c9fda85b).
   let lowestSigned = Number.MAX_SAFE_INTEGER;
   for (const s of eligible) if (s.revision < lowestSigned) lowestSigned = s.revision;
+  meter?.chargeLookup();
   const snapshots = await db.nodeRevision.findMany({
     where: askCeiling == null
       ? { nodeId, revNo: { gte: lowestSigned } }
@@ -216,7 +235,13 @@ async function countingSignatureSpans(
   });
   const spanFields = new Map<number, WitnessFields>();
   for (const s of snapshots) {
+    meter?.chargeLoaded(s.name); meter?.chargeLoaded(s.abstract); meter?.chargeLoaded(s.content);
     if (s.revNo != null && !spanFields.has(s.revNo)) spanFields.set(s.revNo, { name: s.name, abstract: s.abstract, content: s.content });
+  }
+  // The caller already captured the served text. A changed/deleted/replaced witness must not sign different bytes.
+  if (options.content !== undefined && askCeiling != null) {
+    const fields = spanFields.get(askCeiling) ?? (askCeiling === node.revSeq ? node : null);
+    if (!fields || (fields.content ?? '') !== options.content) return [];
   }
 
   // Phase 2 — coverage and state, per eligible signature.
@@ -280,8 +305,9 @@ export async function revisionSignatureCounts(
   nodeId: string,
   revision: number,
   requirement: SignatureRequirement,
+  options?: SignatureReadOptions,
 ): Promise<boolean> {
-  const spans = await countingSignatureSpans(db, nodeId, requirement, revision);
+  const spans = await countingSignatureSpans(db, nodeId, requirement, revision, undefined, options);
   return spanCovers(spans, revision);
 }
 
@@ -303,11 +329,12 @@ export function lazyRevisionSignatureCounts(
   db: Db,
   nodeId: string,
   requirement: SignatureRequirement,
+  meter?: ApprovalReadMeter,
 ): (revision: number) => Promise<boolean> {
   let spans: Promise<CountingSpan[]> | null = null;
   return async (revision: number) => {
     if (spans == null) {
-      const loading = countingSignatureSpans(db, nodeId, requirement, null);
+      const loading = countingSignatureSpans(db, nodeId, requirement, null, undefined, { meter });
       loading.catch(() => { if (spans === loading) spans = null; });
       spans = loading;
     }

@@ -240,7 +240,7 @@ describe('S12 deciding transaction fences', () => {
       const pid = await observed.backendFor(casting);
       await waitForAdvisoryWaiter(db, { pid, key: { form: 'int-pair', first: 'authorization:org', second: owner.organizationId! } }, 2500);
     } finally { release(); await revoker; }
-    expect(await result).toBe('FORBIDDEN');
+    expect(await result).toBe('APP_NOT_FOUND');
     expect(await db.worker.count()).toBe(0);
     expect(await db.agentTeamEvent.count()).toBe(0);
   });
@@ -546,7 +546,7 @@ it('self-leave winning its row lock is rechecked after the cast waits, with no m
       await new Promise(r => setTimeout(r, 10));
     }
   } finally { release(); await leaving; await outcome; }
-  expect(await outcome).toBe('FORBIDDEN');
+  expect(await outcome).toBe('APP_NOT_FOUND');
   expect(await db.worker.count()).toBe(0);
   expect(await db.agentTeamEvent.count()).toBe(0);
 });

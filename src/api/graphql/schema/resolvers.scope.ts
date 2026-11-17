@@ -313,7 +313,7 @@ export const scopeFieldResolvers = {
         orderBy: { position: 'asc' },
       });
       const accessible = await getAccessibleMemoryIds(ctx);
-      const { kept } = narrowToAccessible(rows.map((r) => r.memoryId), accessible === null ? 'unrestricted' : new Set(accessible));
+      const { kept } = narrowToAccessible(rows.map((r) => r.memoryId), new Set(accessible));
       const keptSet = new Set(kept);
       const memories = await ctx.db.memory.findMany({ where: { id: { in: kept } } });
       const byId = new Map(memories.map((m) => [m.id, m]));

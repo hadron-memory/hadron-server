@@ -8,10 +8,10 @@
 import type { GraphQLError } from 'graphql';
 import { type Context } from './resolvers.helpers.js';
 import { taskError, withReadableApp } from './resolvers.agentTask.js';
-import { loadAccountUsageHistory } from '../../../lib/accountUsage/load.js';
+import { loadAccountUsageCensus } from '../../../lib/accountUsage/load.js';
 import { listUsageAccounts } from '../../../lib/accountUsage/list.js';
 import {
-  addBurn, newestSnapshot, projectAccount, withWorkerCount, FIVE_HOUR_MINUTES, SEVEN_DAY_MINUTES,
+  addBurn, incompleteAccount, newestSnapshot, projectAccount, withWorkerCount, FIVE_HOUR_MINUTES, SEVEN_DAY_MINUTES,
   type UsageSnapshot, type WindowBasis, type WindowProjection,
 } from '../../../lib/accountUsage/projection.js';
 
@@ -75,6 +75,8 @@ function parseWhatIf(raw: WhatIfInput | null | undefined, account: string): What
  * read is the structural fix and stays the owner's call (R5).
  */
 export const ACCOUNT_LIST_KEY_TX_TIMEOUT_MS = 30_000;
+/** #3907: the projection's key arm shares the listing's value (one number, one revoker wait). */
+export const ACCOUNT_USAGE_KEY_TX_TIMEOUT_MS = ACCOUNT_LIST_KEY_TX_TIMEOUT_MS;
 
 export const accountUsageQueries = {
   // #3853 (cor:agt:140:05): the accounts the projection would find history for. Same gate as the projection (no allowRun), no
@@ -92,9 +94,12 @@ export const accountUsageQueries = {
       if (account.length === 0 || account.length > MAX_LABEL) throw badInput('account must be an account label of 1 to 64 characters.');
       const what = parseWhatIf(whatIf, account);
       const asOf = new Date();
-      const [sourceRows, targetRows] = await loadAccountUsageHistory(c.db, app.id, asOf, [{ label: account, host, family }, ...(what?.moveWorker ? [{ label: what.moveWorker.toAccount, host: what.moveWorker.toHost, family: what.moveWorker.toFamily }] : [])]);
-      const mine = selectHistory(sourceRows ?? [], host, family);
-      const base = projectAccount(mine, asOf);
+      const [source, target] = await loadAccountUsageCensus(c.db, app.id, asOf, [{ label: account, host, family }, ...(what?.moveWorker ? [{ label: what.moveWorker.toAccount, host: what.moveWorker.toHost, family: what.moveWorker.toFamily }] : [])]);
+      // #3842 (V55): `incomplete` is set only when the probe spent its budget WITHOUT finding a second identity (finding one stops it
+      // and the ambiguity is refused below), so it answers UNKNOWN here, never a definitive answer from one identity.
+      const sourceIncomplete = source?.incomplete === true;
+      const mine = sourceIncomplete ? [] : selectHistory(source?.snaps ?? [], host, family);
+      const base = sourceIncomplete ? incompleteAccount() : projectAccount(mine, asOf);
       const latest = newest(mine);
       const result: Record<string, unknown> = {
         account,
@@ -111,33 +116,37 @@ export const accountUsageQueries = {
       const current = latest && latest.workersConfigured ? latest.workers.length : 0;
 
       if (what.addWorkers != null) {
+        // (an incomplete source has no calc, so withWorkerCount hands its UNKNOWN / HISTORY_INCOMPLETE windows back unchanged)
         result.whatIf = { adjusted: base.map((b) => view(withWorkerCount(b, current + what.addWorkers!).projection)), target: null };
         return result;
       }
 
       const move = what.moveWorker!;
       // A worker the account does not list cannot be moved (V33), whether or not the account has history.
-      if (!latest || !latest.workersConfigured || !latest.workers.includes(move.worker)) {
+      if (!sourceIncomplete && (!latest || !latest.workersConfigured || !latest.workers.includes(move.worker))) {
         throw badInput('The worker is not configured on that account.');
       }
-      const to = selectHistory(targetRows ?? [], move.toHost, move.toFamily);
+      const targetIncomplete = target?.incomplete === true;
+      const to = targetIncomplete ? [] : selectHistory(target?.snaps ?? [], move.toHost, move.toFamily);
       // Same account = same label, host and family (cor:agt:140:01), judged on the resolved identities, qualified or not.
       const toLatest = newest(to);
       if (move.toAccount === account
+        && latest
         && (toLatest ? toLatest.host : move.toHost ?? null) === latest.host
         && (toLatest ? toLatest.family : move.toFamily ?? null) === latest.family) {
         throw badInput('moveWorker must name a different account than the one projected.');
       }
-      const toBase = projectAccount(to, asOf);
+      const toBase = targetIncomplete ? incompleteAccount() : projectAccount(to, asOf);
       const sourceBurn = new Map(base.map((b) => [b.projection.window, b.projection.perWorkerBurn]));
       result.whatIf = {
         adjusted: base.map((b) => view(withWorkerCount(b, current - 1).projection)),
         target: {
           account: move.toAccount,
           baseline: views(toBase),
-          adjusted: toBase.map((b) => view(addBurn(b, sourceBurn.get(b.projection.window) ?? null).projection)),
+          // An unfinished source census gives the target no per-worker burn to add: every window UNKNOWN / HISTORY_INCOMPLETE (V55).
+          adjusted: sourceIncomplete ? views(incompleteAccount()) : toBase.map((b) => view(addBurn(b, sourceBurn.get(b.projection.window) ?? null).projection)),
         },
       };
       return result;
-    }),
+    }, false, ACCOUNT_USAGE_KEY_TX_TIMEOUT_MS),
 };

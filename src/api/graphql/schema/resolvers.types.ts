@@ -41,6 +41,10 @@ import {
 } from '../../../lib/urnEmit.js';
 import { portalUrlForUrn } from '../../../lib/portalUrl.js';
 import { emitEntityUrnV2 } from '../../../lib/urnEmit.js';
+import { composeAiConfigUrn, type AiConfigUrnOwner } from '../../../lib/entityRef/aiConfigRef.js';
+import { loadAiConfigOwners, aiConfigOwnerKey, type AiConfigOwnerInfo, type AiConfigOwnerRef } from '../../../lib/aiConfigOwner.js';
+import { tickBatch } from './tickBatch.js';
+import { currentHadronServerId } from '../../../lib/hadronServer.js';
 import { servedEndpointInEffect, type InheritedFrom } from '../../../lib/effectiveSystemMemory.js';
 import { nodeContentValidationState } from '../../../lib/nodeContentValidation.js';
 // Spec 049 Phase 3b — AppRun.scope: the mint snapshot as the caller may read it.
@@ -103,11 +107,14 @@ import {
   getAccessibleMemoryIds,
   sessionScopeFilter,
   CONTENT_RAW_DEFAULT,
+  PAGE_ARGS_DEFAULT,
+  pageArgs,
+  pageEnvelope,
 } from './resolvers.helpers.js';
 import { loadValidationTaskSet } from './resolvers.validationTaskSet.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { publicReadableMemoryWhere } from '../../../lib/orgDiscoverability.js';
-import { memoryRowToRef, agentRowToRef } from './publicRefs.js';
+import { memoryRowToRef, agentRowToRef, publicOrgMemoryScope, publicOrgAgentScope } from './publicRefs.js';
 import { WORKLOG_LOC } from './resolvers.teamWork.js';
 import { corpusMintStateOf } from '../../../lib/specCorpus.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
@@ -115,6 +122,8 @@ import { isSessionLive, loadLastEventBySession, sessionLapsesAt, sessionState, D
 import type { SessionType } from '../../../generated/prisma/index.js';
 import { hasBoundAppSession, strictSessionMemoryFilter } from '../../../lib/auth/sessionPrivacy.js';
 import { projectSessionEventsFor } from './resolvers.usageProjection.js';
+import { NODE_URN_FALLBACK_EVENT, nodeUrnFallbackEvent } from '../../../lib/nodeUrnDiagnostic.js';
+import { secretFields } from './resolvers.secret.js';
 
 // Request-local only: a session list computes the event memory set once.
 type SessionEventMemorySet = { ids: string[]; delegatedMemoryId: string | null };
@@ -133,7 +142,7 @@ function sessionEventMemoryIds(ctx: Context, parentSessionId: string): Promise<s
       const memories = await ctx.db.memory.findMany({
         where: { AND: [
           { OR: [strictSessionMemoryFilter(ctx), ...(bound?.memoryId ? [{ id: bound.memoryId }] : [])] },
-          ...(accessible === null ? [] : [{ id: { in: accessible } }]),
+          { id: { in: accessible } },
         ] },
         select: { id: true },
       });
@@ -179,7 +188,13 @@ function sessionEventMemoryIds(ctx: Context, parentSessionId: string): Promise<s
  * that opens it are always the same string.
  */
 export async function resolveNodeUrnField(
-  n: { loc: string; memoryId: string; memory?: { urn?: string } | null },
+  n: {
+    loc: string;
+    memoryId: string;
+    memory?: { urn?: string } | null;
+    /** #3927: the node's own id, ONLY from a caller that already holds it (the Node fields). Diagnostics only. */
+    nodeId?: string | null;
+  },
   ctx: Context,
 ): Promise<string> {
   const memUrn =
@@ -192,7 +207,8 @@ export async function resolveNodeUrnField(
   try {
     return emitNodeUrnV2(memUrn, n.loc);
   } catch (err) {
-    console.warn(`[Node.urn] failed to emit v2 node urn for memory "${memUrn}":`, err);
+    // #3927: one closed-schema event; no raw memory urn, loc or exception text (see nodeUrnDiagnostic.ts).
+    console.warn(NODE_URN_FALLBACK_EVENT, nodeUrnFallbackEvent({ memoryId: n.memoryId, nodeId: n.nodeId, memUrn, loc: n.loc, err }));
     // Best-effort flat-v2 fallback (single colon, never throws). Do NOT run
     // the stored urn back through a canonicalizer here — it can itself throw
     // on the same malformed value, defeating the serve-and-log posture of
@@ -684,10 +700,10 @@ async function flushAuthorshipTasks(ctx: Context, batch: { pending: Map<string, 
       select: { id: true, loc: true, memoryId: true },
     });
     const accessible = await getAccessibleMemoryIds(ctx);
-    const readable = accessible === null ? null : new Set(accessible);
+    const readable = new Set(accessible);
     const refs = new Map(await Promise.all(tasks.map(async (task) => [
       task.id,
-      readable === null || readable.has(task.memoryId) ? await resolveNodeUrnField(task, ctx) : null,
+      readable.has(task.memoryId) ? await resolveNodeUrnField(task, ctx) : null,
     ] as const)));
     for (const item of pending) item.resolve(refs.get(item.id) ?? null);
   } catch (error) {
@@ -924,10 +940,10 @@ async function flushValidationBatch(
     // Use the GraphQL node-content gate, including active-session isolation.
     // One access fold replaces a per-report task-memory check.
     const accessible = tasks.length === 0 ? [] : await getAccessibleMemoryIds(ctx);
-    const readable = accessible === null ? null : new Set(accessible);
+    const readable = new Set(accessible);
     const taskRefs = new Map(await Promise.all(tasks.map(async (task) => [
       task.id,
-      readable === null || readable.has(task.memoryId) ? await resolveNodeUrnField(task, ctx) : null,
+      readable.has(task.memoryId) ? await resolveNodeUrnField(task, ctx) : null,
     ] as const)));
     for (const item of pending) {
       const report = byKey.get(item.key) ?? null;
@@ -1100,11 +1116,93 @@ function truncatedChunksBatched(ctx: Context, nodeId: string): Promise<number | 
   return batch.result.then((byId) => byId.get(nodeId));
 }
 
+/**
+ * #3932: `AiServiceConfig.urn` owner lookups raised in the same tick share one query per owner kind
+ * ({@link loadAiConfigOwners}); keyed by the request Context, so nothing is kept past the tick. The batch is keyed by
+ * the string {@link aiConfigOwnerKey}; the ref behind each key is kept beside it, so the key is never parsed back (#3958).
+ */
+const aiConfigOwnerRefs = new WeakMap<Context, Map<string, AiConfigOwnerRef>>();
+const aiConfigOwnerBatch = tickBatch<string, AiConfigOwnerInfo | null>(async (ctx, keys) => {
+  const known = aiConfigOwnerRefs.get(ctx);
+  aiConfigOwnerRefs.delete(ctx); // before any await: a lookup raised after this point starts the next tick's map
+  const refs = keys.flatMap((k) => { const r = known?.get(k); return r ? [r] : []; });
+  return loadAiConfigOwners(ctx.db, refs);
+}, null);
+const aiConfigOwnerLookup = (ctx: Context, ref: AiConfigOwnerRef) => {
+  const key = aiConfigOwnerKey(ref);
+  let known = aiConfigOwnerRefs.get(ctx);
+  if (!known) aiConfigOwnerRefs.set(ctx, (known = new Map()));
+  known.set(key, ref);
+  return aiConfigOwnerBatch(ctx, key);
+};
+
+const aiConfigWarned = new WeakSet<object>();
+/** A warn that speaks once per request: the first call logs, the rest of that request stay quiet. */
+function aiConfigWarnOnce(ctx: Context): (msg: string) => void {
+  return (msg) => {
+    if (aiConfigWarned.has(ctx)) return;
+    aiConfigWarned.add(ctx);
+    console.warn(`${msg} (further aiconf URN misses in this request are not logged)`);
+  };
+}
+
 export const typeResolvers = {
   ...servedPromptTypeResolvers,
+  AiServiceConfig: {
+    /**
+     * #3857 (cor:urn:010:01, V60-V63): the config's URN, COMPUTED from its
+     * owner's current URN plus its name; null (logged) for a name that cannot be
+     * a URN atom. Identity only, so it sits on the row the caller already read
+     * through the config's own gate; it reads the owner's stored urn column and
+     * returns a string, never the owner object.
+     */
+    urn: async (
+      config: { name: string; ownerType: 'HADRON_SERVER' | 'ORGANIZATION' | 'APP' | 'AGENT'; ownerId: string },
+      _: unknown,
+      ctx: Context,
+    ): Promise<string | null> => {
+      // #3932: the owner is loaded per request tick, one query per owner kind; a config that cannot have a URN is
+      // logged once per request (the first one), not once per row.
+      const warn = aiConfigWarnOnce(ctx);
+      let owner: AiConfigUrnOwner | null;
+      const info = await aiConfigOwnerLookup(ctx, { ownerType: config.ownerType, ownerId: config.ownerId });
+      switch (config.ownerType) {
+        case 'HADRON_SERVER':
+          // `server` is the server answering (R3): only the CURRENT server's
+          // configs have the URN; another hadron_server row's would collide.
+          if (info?.current) {
+            owner = { kind: 'server' };
+          } else {
+            warn(`[aiconf-urn] no URN for a config of hadron_server ${config.ownerId}: it is not the current server`);
+            owner = null;
+          }
+          break;
+        case 'ORGANIZATION':
+        case 'APP':
+        case 'AGENT': {
+          // #3958: an owner row that is missing, or has a NULL urn, has no URN to compose from. The answer stays null
+          // (cor:urn:010:01); the data fault is logged once per request like the other null cases.
+          if (info?.urn != null) {
+            owner = { kind: config.ownerType === 'ORGANIZATION' ? 'org' : config.ownerType === 'APP' ? 'app' : 'agent', urn: info.urn };
+          } else {
+            warn(`[aiconf-urn] no URN for a config of ${config.ownerType.toLowerCase()} ${config.ownerId}: ${info ? 'the owner has a NULL urn' : 'the owner row is missing'}`);
+            owner = null;
+          }
+          break;
+        }
+        default:
+          // Every emitter projects through toGqlAiServiceConfig, which always
+          // carries the owner; a row without it must not read as "no URN" quietly.
+          warn('[aiconf-urn] AiServiceConfig parent without a known ownerType; urn is null');
+          owner = null;
+      }
+      return owner ? composeAiConfigUrn(owner, config.name, warn) : null;
+    },
+  },
   Chat: {
     servedPrompts: servedPromptOwnerFields.chatServedPrompts,
   },
+  Secret: secretFields,
   McpServer: {
     // headersEncrypted is not in the GraphQL type at all; readers get only
     // this boolean (write-only secret posture, same as tool-held tokens).
@@ -1292,20 +1390,20 @@ export const typeResolvers = {
     memory: (n: { memoryId: string }, _: unknown, ctx: Context) => loadReadableMemoryRecord(ctx, n.memoryId),
     // #481 — see resolveNodeUrnField.
     urn: (
-      n: { loc: string; memoryId: string; memory?: { urn?: string } | null },
+      n: { id?: string; loc: string; memoryId: string; memory?: { urn?: string } | null },
       _: unknown,
       ctx: Context,
-    ) => resolveNodeUrnField(n, ctx),
+    ) => resolveNodeUrnField({ loc: n.loc, memoryId: n.memoryId, memory: n.memory, nodeId: n.id }, ctx),
     // #881 — the portal link for this node, so a client (the CLI's `node get`,
     // an agent citing a source to a human) hands over a URL instead of
     // assembling one out of a URN spelling the /app/u route may not resolve.
     // Nullable: no configured portal origin ⇒ no link (see lib/portalUrl.ts).
     // Built from the SAME URN the `urn` field returns, so the two can't diverge.
     portalUrl: async (
-      n: { loc: string; memoryId: string; memory?: { urn?: string } | null },
+      n: { id?: string; loc: string; memoryId: string; memory?: { urn?: string } | null },
       _: unknown,
       ctx: Context,
-    ) => portalUrlForUrn(await resolveNodeUrnField(n, ctx)),
+    ) => portalUrlForUrn(await resolveNodeUrnField({ loc: n.loc, memoryId: n.memoryId, memory: n.memory, nodeId: n.id }, ctx)),
     // #2610 — the action-register address for a register:<code> entry in an
     // Agent system memory; null for every other node. A second address beside
     // `urn` (which keeps resolving), computed from the holding Agent's own urn.
@@ -1843,7 +1941,7 @@ export const typeResolvers = {
       });
       if (!row) return null;
       const accessible = await getAccessibleMemoryIds(ctx);
-      return accessible === null || accessible.includes(row.memoryId) ? row : null;
+      return accessible.includes(row.memoryId) ? row : null;
     },
     // 036-ai-service-config: registry-backed reads of the App's
     // 'default' config (legacy ai_* columns dropped).
@@ -2495,21 +2593,35 @@ export const typeResolvers = {
       if (!o.urn) throw new Error('Organization URN is required but not found (partial query?)');
       return safeCanonicalUrn('org', o.urn);
     },
+    // #3873 (cor:api:120:04): the plain fields are bounded to the default page, superseded by the `...Page` siblings
+    // below. Both read through ONE scope per kind, so a page, its total and the plain field cannot disagree about which
+    // rows the public gate admits. Order is (name, id): the id tiebreak keeps rows with equal names from skipping or
+    // repeating across pages.
     publicMemories: async (o: { id: string }, _: unknown, ctx: Context) => {
-      const rows = await ctx.db.memory.findMany({
-        where: { organizationId: o.id, ...publicReadableMemoryWhere() },
-        select: { id: true, name: true, urn: true, shortDescription: true },
-        orderBy: { name: 'asc' },
-      });
+      const rows = await ctx.db.memory.findMany({ ...publicOrgMemoryScope(o.id), take: PAGE_ARGS_DEFAULT });
       return rows.map(memoryRowToRef);
     },
     publicAgents: async (o: { id: string }, _: unknown, ctx: Context) => {
-      const rows = await ctx.db.agent.findMany({
-        where: { organizationId: o.id, deletedAt: null, visibility: 'PUBLIC' },
-        select: { id: true, name: true, urn: true, description: true },
-        orderBy: { name: 'asc' },
-      });
+      const rows = await ctx.db.agent.findMany({ ...publicOrgAgentScope(o.id), take: PAGE_ARGS_DEFAULT });
       return rows.map(agentRowToRef);
+    },
+    publicMemoriesPage: async (o: { id: string }, args: { limit?: number | null; offset?: number | null }, ctx: Context) => {
+      const { take, skip } = pageArgs(args);
+      const scope = publicOrgMemoryScope(o.id);
+      const [total, rows] = await ctx.db.$transaction([
+        ctx.db.memory.count({ where: scope.where }),
+        ctx.db.memory.findMany({ ...scope, take, skip }),
+      ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+      return pageEnvelope(rows.map(memoryRowToRef), total, skip);
+    },
+    publicAgentsPage: async (o: { id: string }, args: { limit?: number | null; offset?: number | null }, ctx: Context) => {
+      const { take, skip } = pageArgs(args);
+      const scope = publicOrgAgentScope(o.id);
+      const [total, rows] = await ctx.db.$transaction([
+        ctx.db.agent.count({ where: scope.where }),
+        ctx.db.agent.findMany({ ...scope, take, skip }),
+      ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+      return pageEnvelope(rows.map(agentRowToRef), total, skip);
     },
   },
   // ExchangeConnection / SlackConnection have no entry: their only resolvers

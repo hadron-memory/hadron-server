@@ -236,7 +236,7 @@ export interface ResolveRegisterArgs {
 /** The accessible-memory sets of one page; `viewer` is the page's caller, shared only when `actor` is that same object. */
 export interface RegisterPageShare {
   viewer: Context;
-  sets: Map<string, Promise<string[] | null>>;
+  sets: Map<string, Promise<string[]>>;
   /** Gate answers for one (principal, App) or (principal, host memory): the same question asked of the same principal for each worker. */
   participant: Map<string, Promise<boolean>>;
 }
@@ -285,7 +285,7 @@ export async function resolveRegister(db: Context['db'], args: ResolveRegisterAr
       })
     ).map((c) => [c.id, c]),
   );
-  const setOf = (key: string, who: Context): Promise<string[] | null> => {
+  const setOf = (key: string, who: Context): Promise<string[]> => {
     const share = args.shared;
     if (!share) return getAccessibleMemoryIds(who);
     let held = share.sets.get(key);
@@ -332,8 +332,9 @@ export async function resolveRegister(db: Context['db'], args: ResolveRegisterAr
   for (const e of rows) {
     const c = channels.get(e.channelId);
     if (!c) continue;
-    const canRead = !!actor && (accessible === null || accessible.includes(c.memoryId));
-    const viewerCanRead = !!viewer && (viewerAccessible === null || viewerAccessible.includes(c.memoryId));
+    // null here means "no principal" (no actor), never unrestricted: the gate always returns a list (#3921).
+    const canRead = !!actor && accessible !== null && accessible.includes(c.memoryId);
+    const viewerCanRead = !!viewer && viewerAccessible !== null && viewerAccessible.includes(c.memoryId);
     let canPost: boolean | 'UNKNOWN' = 'UNKNOWN';
     let disclosure: RegisterDisclosure | null = null;
     if (c.deletedAt) {

@@ -149,7 +149,8 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // #2973: stamp_signing_keys is FK-free itself (node_signatures references IT), so
   // nothing cascades it away — key generations would leak between tests otherwise.
   // #3835: no leftover writer may overlap this TRUNCATE (quiesce, then lock `nodes` first).
-  await truncateAfterQuiescence('TRUNCATE TABLE node_signatures, stamp_signing_keys, signing_requests, passkey_credentials, worker_reference_fences, user_deletion_audits, agent_clone_audits, user_api_key_deletions CASCADE');
+  // #3997: secret_events and secret_owner_tombstones are FK-free and append-only by trigger (a row DELETE is refused), so test cleanup truncates them.
+  await truncateAfterQuiescence('TRUNCATE TABLE node_signatures, stamp_signing_keys, signing_requests, passkey_credentials, worker_reference_fences, user_deletion_audits, agent_clone_audits, user_api_key_deletions, secret_events, secret_owner_tombstones CASCADE');
   // Pending first-party login states (FK-free; keyed on the OAuth state).
   await db.pendingLoginState.deleteMany();
   // #1079 — the URN alias map. Deliberately FK-FREE: it must outlive the row it
@@ -205,7 +206,7 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // fires no row triggers. #1706: agent_team_alarm_schedule references the events, so it is
   // truncated with them. #1708: so is worker_delivery_task_events, for the same reason.
   // #2022: a task's stop holds go with it.
-  await db.$executeRawUnsafe('TRUNCATE dark_worker_episodes, coordinator_cadence_episodes, coordinator_cadence_clocks, post_limit_episodes, worker_delivery_task_events, agent_team_alarm_schedule, agent_team_events, automation_adoption_events, app_memory_write_grant_events, app_memory_write_grants, app_automation_read_grant_events, app_automation_read_grants, grant_events, grant_signatures, grant_signing_requests, grants, agent_task_stop_holds, agent_match_outcomes, agent_task_counters, agent_task_blockers, agent_tasks');
+  await db.$executeRawUnsafe('TRUNCATE alarm_escalation_ends, dark_worker_episodes, coordinator_cadence_episodes, coordinator_cadence_clocks, post_limit_episodes, host_sweep_episodes, host_sweep_runs, start_failing_episodes, worker_delivery_task_events, agent_team_alarm_schedule, agent_team_events, automation_adoption_events, app_memory_write_grant_events, app_memory_write_grants, app_automation_read_grant_events, app_automation_read_grants, grant_events, grant_signatures, grant_signing_requests, grants, agent_task_stop_holds, agent_match_outcomes, agent_task_counters, agent_task_blockers, agent_tasks');
   // #974 Workers before agents: workers_agent_id_fkey is RESTRICT.
   await db.worker.deleteMany();
   await db.node.deleteMany();

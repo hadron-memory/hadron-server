@@ -144,7 +144,7 @@ export async function loadDeliveryChannelPolicy(
   ctx: Context,
   app: AppLike,
   worker: { id: string; heldByUserId: string | null },
-  readers?: { callerIds: string[] | null; holderCache: Map<string, Set<string> | 'all' | null>; channelIds: string[] },
+  readers?: { callerIds: string[]; holderCache: Map<string, Set<string> | 'all' | null>; channelIds: string[] },
 ) {
   const callerIds = readers ? readers.callerIds : await getAccessibleMemoryIds(ctx);
   const holder = worker.heldByUserId
@@ -158,7 +158,7 @@ export async function loadDeliveryChannelPolicy(
     select: { id: true, memoryId: true, lastSeq: true, incarnation: true, memory: { select: { isEncrypted: true } } },
   });
   return channels.filter(c => !c.memory.isEncrypted
-    && (callerIds === null || callerIds.includes(c.memoryId)) && mayRead(holder, c.memoryId));
+    && callerIds.includes(c.memoryId) && mayRead(holder, c.memoryId));
 }
 
 export async function loadDeliveryBatches(args: DeliverySelectionArgs): Promise<LoadedBatchPage> {

@@ -34,6 +34,9 @@ services:
       PASSKEY_SIGNING_ENABLED: ${E2E_PASSKEY_SIGNING_ENABLED:-}
       SIGNING_CEREMONY_ORIGINS: ${E2E_SIGNING_CEREMONY_ORIGINS:-}
       PASSKEY_RP_ID: ${E2E_PASSKEY_RP_ID:-}
+      # #4058: registration rides signing (signingSurfacePolicy); with it on, an email link hands off to the passkey page
+      # and signs nobody in (cor:aut:030:02), which the seed pins. Export E2E_PASSKEY_REGISTRATION_ENABLED=true on `stack.sh up`.
+      PASSKEY_REGISTRATION_ENABLED: ${E2E_PASSKEY_REGISTRATION_ENABLED:-}
       DISABLE_RUN_WORKER: 'true'
       DISABLE_SCHEDULER: 'true'
       GRAPHS_PATH: /var/lib/hadron/graphs

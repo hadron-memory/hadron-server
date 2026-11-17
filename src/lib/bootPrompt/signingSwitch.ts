@@ -22,10 +22,14 @@ import { authorizationDenied } from '../auth/authorizationDenied.js';
 import { LIVE_ORG_MEMBERSHIP } from '../auth/liveOrgMembership.js';
 import { isRunPrincipal } from '../auth/runPrincipal.js';
 import { ROLE_ORDER } from '../auth/orgRole.js';
-import { newestApprovedAndSignedRevisionForServe } from '../nodeApproval.js';
+import { approvalHoldsFor, approvalRecordOf, newestApprovedAndSignedRevisionForServe, newestApprovedRevisionForServe } from '../nodeApproval.js';
+import { computeApprovalHash } from '../approvalHash.js';
+import { parseCompiledProvenance } from '../bootCompile/provenance.js';
 import { lazyRevisionSignatureStatus } from '../signing/revisionSignatureCounts.js';
 import { signingSurfacePolicy } from '../signing/surface.js';
-import { safeNodeUrnV2 } from '../urnEmit.js';
+import { composeWorkerUrn } from '../entityRef/workerRef.js';
+import { normalizeUrnForLookup } from '../urn.js';
+import { emitEntityUrnV2, safeNodeUrnV2 } from '../urnEmit.js';
 import { previewServedBootPrompt } from './serve.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
@@ -43,9 +47,11 @@ export interface SigningPreviewRow {
   appUrn: string;
   agentId: string;
   agentName: string;
+  agentUrn: string | null;
   /** Null for the install-level row (an uncustomised worker, or a chat, shares it). */
   workerId: string | null;
   workerName: string | null;
+  workerUrn: string | null;
   compiledNodeId: string;
   compiledNodeUrn: string | null;
   /** The revision served today. */
@@ -90,11 +96,50 @@ export async function requireSigningSwitchAudience(db: Db, userId: string, orgId
 const SEP = '\u0000';
 const keyOf = (r: { appId: string; agentId: string; workerId: string | null }) => `${r.appId}${SEP}${r.agentId}${SEP}${r.workerId ?? ''}`;
 
+/** #4017: only synchronous URN composition is caught; an un-emittable display address is null, never a fabricated/raw URN. */
+function previewAddress(compose: () => string): string | null {
+  try { return compose(); } catch { return null; }
+}
+
+type PreviewTarget = {
+  appId: string; appUrn: string; agentId: string; agentName: string; agentUrn: string | null;
+  workerId: string | null; workerName: string | null; workerUrn: string | null;
+  /** The pointer of the install (or worker) itself; null falls to the Agent's. */
+  ownPointer: string | null;
+};
+
+type SignatureStatusReader = ReturnType<typeof lazyRevisionSignatureStatus>;
+
+/** Ids per `IN (...)` read: far below the driver's bound-parameter ceiling. */
+const BULK_CHUNK = 500;
+function chunkedBy<T>(items: readonly T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+const chunked = <T,>(items: readonly T[]): T[][] => chunkedBy(items, BULK_CHUNK);
+
+/** The facts of one compiled node the bulk path judges in memory (one read for every node the preview points at). */
+type BulkNode = {
+  id: string; loc: string; deletedAt: Date | null; memoryId: string; name: string; abstract: string | null; content: string | null;
+  revSeq: number; contentRevSeq: number; approvedRevNo: number | null; approvedBy: string | null; approvedByInfo: string | null; approvedAt: Date | null; approvalHash: string | null;
+  memory: { urn: string; deletedAt: Date | null; isEncrypted: boolean };
+};
+
 /**
  * Every row of the preview, in the stable order (app, agent, worker). Empty while the switch is already ENFORCED
  * (nothing would change). A target the serve refuses today (no pointer, nothing approved, licence inactive, …) has no
- * served revision to change and is not a row. Cost is bounded by the organisation's installs and customised workers,
- * not by revision history: one lazy signature read per distinct compiled node.
+ * served revision to change and is not a row.
+ *
+ * #4016 (#4008 slice 2): a SET-WISE path. The per-target serve cost ~23 statements a row inside one 30 s snapshot, and
+ * switch-on's recompute runs the same function, so a 2,000-row organisation sat near the limit. This reads the pointers,
+ * the compiled nodes, their snapshot and provenance and signature presence ONCE for the whole organisation and judges
+ * each target in memory with the serve's own predicates (`approvalRecordOf` / `approvalHoldsFor`, `parseCompiledProvenance`).
+ * It is a fast path, never a second definition: a target it cannot prove identical (a node with revision snapshots, a
+ * provenance record that does not parse, a node carrying signatures) is handed to the unchanged per-target code
+ * (`previewServedBootPrompt`, `newestApprovedRevisionForServe`, `lazyRevisionSignatureStatus`), so a corrupt record
+ * throws exactly what it threw. The organisation's Apps carry an organisation, so the install licence question
+ * (`personalOrgAgentLicenseHolds`) answers true without a read; the audience gates run in the callers, before this.
  */
 export async function computeSigningPreviewRows(db: Db, orgId: string): Promise<SigningPreviewRow[]> {
   const org = await db.organization.findUnique({ where: { id: orgId }, select: { bootPromptSigningRequired: true } });
@@ -105,9 +150,113 @@ export async function computeSigningPreviewRows(db: Db, orgId: string): Promise<
     select: { id: true, urn: true },
     orderBy: { id: 'asc' },
   });
-  const rows: SigningPreviewRow[] = [];
-  const statusByNode = new Map<string, ReturnType<typeof lazyRevisionSignatureStatus>>();
+  if (apps.length === 0) return [];
+  const appIds = apps.map((a) => a.id);
+  const [installs, workers] = await Promise.all([
+    db.appAgent.findMany({
+      where: { appId: { in: appIds } },
+      select: { appId: true, agentId: true, bootPromptNodeId: true, agent: { select: { name: true, urn: true } } },
+      orderBy: [{ appId: 'asc' }, { agentId: 'asc' }],
+    }),
+    db.worker.findMany({
+      where: { appId: { in: appIds }, retiredAt: null, bootPromptNodeId: { not: null } },
+      select: { id: true, appId: true, name: true, slug: true, agentId: true, bootPromptNodeId: true, agent: { select: { name: true, urn: true } } },
+      orderBy: [{ appId: 'asc' }, { id: 'asc' }],
+    }),
+  ]);
+  const appUrn = new Map(apps.map((a) => [a.id, a.urn]));
+  const targets: PreviewTarget[] = [
+    ...installs.map((i) => ({
+      appId: i.appId, appUrn: appUrn.get(i.appId)!, agentId: i.agentId, agentName: i.agent.name, agentUrn: previewAddress(() => emitEntityUrnV2('agent', i.agent.urn)),
+      workerId: null, workerName: null, workerUrn: null, ownPointer: i.bootPromptNodeId,
+    })),
+    ...workers.map((w) => ({
+      appId: w.appId, appUrn: appUrn.get(w.appId)!, agentId: w.agentId, agentName: w.agent.name, agentUrn: previewAddress(() => emitEntityUrnV2('agent', w.agent.urn)),
+      workerId: w.id, workerName: w.name, workerUrn: previewAddress(() => composeWorkerUrn(normalizeUrnForLookup(appUrn.get(w.appId)!), w.slug)), ownPointer: w.bootPromptNodeId,
+    })),
+  ];
+
+  // The deciding pointer (worker, else install, else Agent): the Agent's is read once for every install without its own.
+  const needAgent = [...new Set(targets.filter((t) => !t.ownPointer).map((t) => t.agentId))];
+  const agentPointer = new Map<string, string | null>();
+  for (const ids of chunked(needAgent)) {
+    for (const a of await db.agent.findMany({ where: { id: { in: ids } }, select: { id: true, bootPromptNodeId: true } })) agentPointer.set(a.id, a.bootPromptNodeId);
+  }
+  const pointed = (t: PreviewTarget): string | null => t.ownPointer ?? agentPointer.get(t.agentId) ?? null;
+  const nodeIds = [...new Set(targets.map(pointed).filter((id): id is string => id !== null))];
+
+  const nodes = new Map<string, BulkNode>();
+  const withSnapshots = new Set<string>();
+  const withSignatures = new Set<string>();
+  for (const ids of chunked(nodeIds)) {
+    for (const n of await db.node.findMany({
+      where: { id: { in: ids } },
+      select: {
+        id: true, loc: true, deletedAt: true, memoryId: true, name: true, abstract: true, content: true, revSeq: true, contentRevSeq: true,
+        approvedRevNo: true, approvedBy: true, approvedByInfo: true, approvedAt: true, approvalHash: true,
+        memory: { select: { urn: true, deletedAt: true, isEncrypted: true } },
+      },
+    })) nodes.set(n.id, n);
+    for (const g of await db.nodeRevision.groupBy({ by: ['nodeId'], where: { nodeId: { in: ids } } })) withSnapshots.add(g.nodeId);
+    for (const g of await db.nodeSignature.groupBy({ by: ['nodeId'], where: { nodeId: { in: ids } } })) withSignatures.add(g.nodeId);
+  }
+  // The serve share-locks the node it serves from (in one statement here, in id order so two previews cannot deadlock).
+  const liveIds = [...nodes.values()].filter((n) => n.deletedAt === null && n.memory.deletedAt === null).map((n) => n.id).sort();
+  for (const ids of chunked(liveIds)) await db.$queryRaw`SELECT id FROM nodes WHERE id = ANY(${ids}::text[]) ORDER BY id FOR SHARE`;
+
+  // The approval selection: for a node that has NO revision snapshots the only candidate is its live revision, and
+  // `revisionApprovalOf` then answers APPROVED exactly when the node's current approval still covers its text. A node
+  // with snapshots keeps the serve's own walk (memoized per node).
+  const walked = new Map<string, Promise<number | null>>();
+  const servedRevOf = (n: BulkNode): Promise<number | null> => {
+    if (!withSnapshots.has(n.id)) {
+      if (n.memory.isEncrypted) return Promise.resolve(null);
+      const hash = computeApprovalHash({ title: n.name, abstract: n.abstract, content: n.content });
+      const record = approvalRecordOf(n);
+      return Promise.resolve(record && approvalHoldsFor(n) && hash === record.hash ? n.revSeq : null);
+    }
+    let p = walked.get(n.id);
+    if (!p) walked.set(n.id, p = newestApprovedRevisionForServe(db, n.id).then((r) => r.found?.revNo ?? null));
+    return p;
+  };
+  // The compile record the serve reads provenance from: the greatest at or below the served revision. Its parse and
+  // occurrence count are checked here from one bulk read; anything that does not hold is `unproven`, which hands the
+  // target to the serve itself, so a corrupt record throws exactly what it threw.
+  // One row per (node, served revision): the greatest compile record at or below it, picked by the database, so the
+  // history a node has accumulated is never read into memory and nothing spreads it into a call.
+  const provenanceAtMap = new Map<string, number>();
+  const loadProvenanceAt = async (pairs: Array<{ nodeId: string; rev: number }>): Promise<void> => {
+    const wanted = pairs.filter((p) => !provenanceAtMap.has(`${p.nodeId}${SEP}${p.rev}`));
+    for (const group of chunkedBy(wanted, 1000)) {
+      const rowsRead = await db.$queryRaw<Array<{ node_id: string; rev: number; at: number | null }>>`
+        SELECT w.node_id, w.rev, (SELECT MAX(c.compiled_rev_no) FROM compiled_prompt_revisions c
+          WHERE c.compiled_node_id = w.node_id AND c.compiled_rev_no <= w.rev) AS at
+        FROM unnest(${group.map((p) => p.nodeId)}::text[], ${group.map((p) => p.rev)}::int[]) AS w(node_id, rev)`;
+      for (const r of rowsRead) provenanceAtMap.set(`${r.node_id}${SEP}${r.rev}`, r.at ?? -1);
+    }
+  };
+  const provenanceAt = (nodeId: string, servedRevSeq: number): number => provenanceAtMap.get(`${nodeId}${SEP}${servedRevSeq}`) ?? -1;
+  const provenanceOk = new Map<string, boolean>();
+  const verifyProvenance = async (pairs: Array<{ nodeId: string; at: number }>): Promise<void> => {
+    const wanted = pairs.filter((p) => !provenanceOk.has(`${p.nodeId}${SEP}${p.at}`));
+    for (const group of chunkedBy(wanted, 200)) {
+      const rowsRead = await db.compiledPromptRevision.findMany({
+        where: { OR: group.map((p) => ({ compiledNodeId: p.nodeId, compiledRevNo: p.at })) },
+        select: { compiledNodeId: true, compiledRevNo: true, provenance: true, occurrenceCount: true },
+      });
+      const byKey = new Map(rowsRead.map((r) => [`${r.compiledNodeId}${SEP}${r.compiledRevNo}`, r]));
+      for (const p of group) {
+        const r = byKey.get(`${p.nodeId}${SEP}${p.at}`);
+        let ok = false;
+        try { ok = !!r && parseCompiledProvenance(r.provenance, p.nodeId, p.at).occurrences.length === r.occurrenceCount; } catch { ok = false; }
+        provenanceOk.set(`${p.nodeId}${SEP}${p.at}`, ok);
+      }
+    }
+  };
+
+  const statusByNode = new Map<string, SignatureStatusReader>();
   const nodeUrns = new Map<string, string | null>();
+  for (const n of nodes.values()) nodeUrns.set(n.id, safeNodeUrnV2(n.memory.urn, n.loc));
   const nodeUrnOf = async (nodeId: string): Promise<string | null> => {
     if (!nodeUrns.has(nodeId)) {
       const n = await db.node.findUnique({ where: { id: nodeId }, select: { loc: true, memory: { select: { urn: true } } } });
@@ -116,38 +265,78 @@ export async function computeSigningPreviewRows(db: Db, orgId: string): Promise<
     return nodeUrns.get(nodeId) ?? null;
   };
 
-  for (const app of apps) {
-    const [installs, workers] = await Promise.all([
-      db.appAgent.findMany({ where: { appId: app.id }, select: { agentId: true, agent: { select: { name: true } } }, orderBy: { agentId: 'asc' } }),
-      db.worker.findMany({
-        where: { appId: app.id, retiredAt: null, bootPromptNodeId: { not: null } },
-        select: { id: true, name: true, agentId: true, agent: { select: { name: true } } },
-        orderBy: { id: 'asc' },
-      }),
-    ]);
-    const targets: Array<{ agentId: string; agentName: string; workerId: string | null; workerName: string | null }> = [
-      ...installs.map((i) => ({ agentId: i.agentId, agentName: i.agent.name, workerId: null, workerName: null })),
-      ...workers.map((w) => ({ agentId: w.agentId, agentName: w.agent.name, workerId: w.id, workerName: w.name })),
-    ];
-    for (const t of targets) {
-      const today = await previewServedBootPrompt(db, {
-        surface: 'bind', appId: app.id, agent: { id: t.agentId, name: t.agentName }, workerId: t.workerId,
-      });
-      if (!today.served) continue;
-      const { compiledNodeId, servedRevSeq } = today.served;
+  // Phase 1: which revision each target would be served (null: refused today).
+  const decided = new Map<PreviewTarget, { node: BulkNode; rev: number } | null>();
+  for (const t of targets) {
+    const id = pointed(t);
+    const node = id ? nodes.get(id) : undefined;
+    const rev = node && node.deletedAt === null && node.memory.deletedAt === null ? await servedRevOf(node) : null;
+    decided.set(t, node && rev !== null ? { node, rev } : null);
+  }
+  await loadProvenanceAt([...decided.values()].flatMap((d) => (d ? [{ nodeId: d.node.id, rev: d.rev }] : [])));
+  await verifyProvenance([...decided.values()].flatMap((d) => {
+    if (!d) return [];
+    const at = provenanceAt(d.node.id, d.rev);
+    return at < 0 ? [] : [{ nodeId: d.node.id, at }];
+  }));
+
+  const rows: SigningPreviewRow[] = [];
+  for (const t of targets) {
+    let served: { compiledNodeId: string; servedRevSeq: number } | null | 'unproven' = null;
+    const d = decided.get(t);
+    if (d) {
+      const at = provenanceAt(d.node.id, d.rev);
+      if (at >= 0) served = provenanceOk.get(`${d.node.id}${SEP}${at}`) ? { compiledNodeId: d.node.id, servedRevSeq: d.rev } : 'unproven';
+    }
+    if (served === 'unproven') {
+      const today = await previewServedBootPrompt(db, { surface: 'bind', appId: t.appId, agent: { id: t.agentId, name: t.agentName }, workerId: t.workerId });
+      served = today.served ? { compiledNodeId: today.served.compiledNodeId, servedRevSeq: today.served.servedRevSeq } : null;
+    }
+    if (!served) continue;
+    const { compiledNodeId, servedRevSeq } = served;
+    // #4008: the preview only has rows while the switch is OFF (`computeSigningPreviewRows` returns [] once it is
+    // enforced, and a switch-on's recompute runs before it flips), so the serve is the approval-only walk and
+    // `servedRevSeq` is the newest approved revision, and every revision above it is unapproved. When it itself counts as
+    // signed it IS the newest approved-and-signed one, so the second walk is skipped. A first revision has nothing older
+    // to change to and nothing approved above it, so it is skipped too. Anything else runs the walk FROM THE TOP, as
+    // the enforced serve does (same scan ceiling): a signed revision the serve would not reach must not show as one a
+    // switch-on changes to.
+    // #4016: a node with no signature record at all can count nothing and has nothing pending, so no walk can find a
+    // signed revision: the answer is UNSIGNED_STOPS without a read. A node with any signature runs the walk as before.
+    let state: SigningPreviewState = 'UNSIGNED_STOPS';
+    let changesToRevSeq: number | null = null;
+    if (withSignatures.has(compiledNodeId) || !nodes.has(compiledNodeId)) {
       let status = statusByNode.get(compiledNodeId);
       if (!status) statusByNode.set(compiledNodeId, status = lazyRevisionSignatureStatus(db, compiledNodeId, 'compiled-boot-prompt'));
-      const walk = await newestApprovedAndSignedRevisionForServe(db, compiledNodeId, async (rev) => (await status!(rev)).counts);
-      if (walk.found?.revNo === servedRevSeq) continue;
-      const base = {
-        appId: app.id, appUrn: app.urn, agentId: t.agentId, agentName: t.agentName, workerId: t.workerId, workerName: t.workerName,
-        compiledNodeId, compiledNodeUrn: await nodeUrnOf(compiledNodeId), servedRevSeq,
-      };
-      if (walk.found) rows.push({ ...base, state: 'REVISION_CHANGES', changesToRevSeq: walk.found.revNo });
-      else rows.push({ ...base, state: (await status(servedRevSeq)).pending ? 'SIGNATURE_PENDING' : 'UNSIGNED_STOPS', changesToRevSeq: null });
+      if ((await status(servedRevSeq)).counts) continue;
+      const walk = servedRevSeq <= 1
+        ? { found: null as { revNo: number } | null }
+        : await newestApprovedAndSignedRevisionForServe(db, compiledNodeId, async (rev) => (await status!(rev)).counts);
+      if (walk.found) { state = 'REVISION_CHANGES'; changesToRevSeq = walk.found.revNo; }
+      else state = (await status(servedRevSeq)).pending ? 'SIGNATURE_PENDING' : 'UNSIGNED_STOPS';
     }
+    // #4061: canonical v2 like the sibling addresses (cor:urn:010:01); `appUrn` is non-null, so a stored form that cannot
+    // emit is served as stored, silently (#4054's diagnostic carries no address), rather than the null the nullable siblings use.
+    rows.push({
+      appId: t.appId, appUrn: previewAddress(() => emitEntityUrnV2('app', t.appUrn)) ?? t.appUrn, agentId: t.agentId, agentName: t.agentName, agentUrn: t.agentUrn,
+      workerId: t.workerId, workerName: t.workerName, workerUrn: t.workerUrn,
+      compiledNodeId, compiledNodeUrn: await nodeUrnOf(compiledNodeId), servedRevSeq, state, changesToRevSeq,
+    });
   }
+  warnAddressCompositionFailures(rows);
   return rows.sort((a, b) => (keyOf(a) < keyOf(b) ? -1 : keyOf(a) > keyOf(b) ? 1 : 0));
+}
+
+/**
+ * #4054: one aggregate, redacted warning per computation when a RETURNED row's display address could not be composed
+ * (the row still carries null). Counts displayed nulls per row, not distinct entities; an install-level row's absent
+ * Worker is not a failure. The payload is four fixed keys and carries no identifier, name, address or exception text.
+ */
+function warnAddressCompositionFailures(rows: readonly SigningPreviewRow[]): void {
+  const agentFailures = rows.filter((r) => r.agentUrn === null).length;
+  const workerFailures = rows.filter((r) => r.workerId !== null && r.workerUrn === null).length;
+  if (agentFailures + workerFailures === 0) return;
+  console.warn('signing.preview.address_composition_failed', { schemaVersion: 1, reason: 'COMPOSITION_FAILED', agentFailures, workerFailures });
 }
 
 /** The digest of the FULL preview: every row's target, served revision and state, across all pages. */

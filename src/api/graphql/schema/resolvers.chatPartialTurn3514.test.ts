@@ -50,6 +50,9 @@ beforeEach(async () => {
       create: { id: generateId(), memoryId: systemMemoryId, loc: n.loc, name: n.loc.split(':').pop()!, nodeType: 'system', data: (n.data ?? null) as never, content: n.content ?? null },
     });
   }
+  // #4046: these turn tests start through a licensed App, never an App-less non-manager read.
+  await db.app.create({ data: { name: 'Turn fixture', urn: 'org-3514:chat-app', organizationId: org.id,
+    appAgents: { create: { agentId: agent.id } } } });
   await serveEveryAgent(db);
 });
 
@@ -120,9 +123,9 @@ describe('#3514 — the refused extraction reports what the turn did and did not
     expect(after.revisions).toBe(before.revisions);
   });
 
-  const SUCCESS_KEYS = ['chatEnded', 'conversationHandoff', 'displayMessage', 'newStageName', 'offTrackReason', 'onTrack', 'stageTransitioned'];
+  const SUCCESS_KEYS = ['chatEnded', 'conversationCompleted', 'conversationHandoff', 'detourReturned', 'displayMessage', 'newStageName', 'offTrackReason', 'onTrack', 'routingSkipped', 'stageTransitioned'];
 
-  it('case 1: no role requirement, the extraction changes data: success, shape unchanged, no report', async () => {
+  it('case 1: no role requirement, the extraction changes data: success, additive routing fields, no report', async () => {
     const chatId = await seeded();
     const ok = await respond(chatId, { message: 'x', data: { region: 'US' }, next_stage: 'wrap', onTrack: true });
     expect(Object.keys(ok).sort()).toEqual(SUCCESS_KEYS);

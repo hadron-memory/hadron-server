@@ -9,12 +9,13 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { USER_API_KEY_PREFIX, hashUserApiKey } from '../../../middleware/auth.js';
 import { upsertPlatformActions } from '../../../lib/grants/actions.js';
-import { dropTestActions, insertGrant, seedWorld, type World } from '../../../lib/grants/grantFixtures3668.js';
+import { dropTestActions, insertGrant, seedReadableNodes, seedWorld, type World } from '../../../lib/grants/grantFixtures3668.js';
 import { grantTermsBytes, grantTermsHash } from '../../../lib/grants/terms.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 let http: Server, base: string, w: World, sessionId: string, key: string;
+let pubNodes: string[]; // #4067: nodes the requester can read
 beforeAll(async () => {
   vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'true');
   http = httpServer(await createServer());
@@ -26,7 +27,7 @@ afterAll(async () => {
   await cleanDb(db); await dropTestActions(); await upsertPlatformActions(db); vi.unstubAllEnvs();
 });
 beforeEach(async () => {
-  await cleanDb(db); w = await seedWorld(); await upsertPlatformActions(db);
+  await cleanDb(db); w = await seedWorld(); pubNodes = await seedReadableNodes(w.orgId, 101); await upsertPlatformActions(db);
   await db.orgMember.create({ data: { organizationId: w.orgId, userId: w.userId, role: 'CONTRIBUTOR' } });
   await db.appAgent.create({ data: { appId: w.appId, agentId: w.agentId } });
   await db.worker.update({ where: { id: w.workerId }, data: { heldByUserId: w.userId } });
@@ -37,8 +38,8 @@ beforeEach(async () => {
 async function post(query: string, variables: Record<string, unknown>): Promise<any> {
   return (await fetch(`${base}/graphql`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${key}`, 'x-hadron-session': sessionId }, body: JSON.stringify({ query, variables }) })).json();
 }
-const ids = (n: number) => Array.from({ length: n }, () => generateId());
-const input = (over: Record<string, unknown> = {}) => ({ action: 'schedule.create', holderKind: 'WORKER', holderRef: w.workerId, values: { entryNode: generateId() }, reason: 'because', ...over });
+const ids = (n: number) => pubNodes.slice(0, n);
+const input = (over: Record<string, unknown> = {}) => ({ action: 'schedule.create', holderKind: 'WORKER', holderRef: w.workerId, values: { entryNode: pubNodes[0] }, reason: 'because', ...over });
 const create = (i: Record<string, unknown>) => post('mutation($i:CreateGrantInput!){createGrant(input:$i){id reason values}}', { i });
 async function counts() {
   return db.$queryRaw`SELECT (SELECT count(*) FROM grants)::int AS grants,

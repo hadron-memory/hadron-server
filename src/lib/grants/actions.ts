@@ -27,7 +27,14 @@ export interface ActionDefinition {
   issuerRule: string;
   /** The plain-language template the platform fills from the action and a grant's values only. */
   summaryTemplate: string;
+  /** #4163 (cor:acl:140:02): a limit on uses that applies to every grant of this action. A grant's own count can only narrow it. */
+  maxUses?: number;
+  /** #4163: a limit on lifetime from activation, in seconds, that applies to every grant of this action. A grant's own expiry can only narrow it. */
+  lifetimeSeconds?: number;
 }
+
+/** The platform's hour for a boot-prompt grant (ruling 0267, cor:agt:040:11): from activation, i.e. from the signature. */
+export const BOOT_PROMPT_GRANT_LIFETIME_SECONDS = 3600;
 
 /**
  * Each takes one parameter, the entry node, refuses a wildcard value, is enforced by the server, and is issued by whoever may
@@ -45,6 +52,19 @@ export const PLATFORM_ACTIONS: readonly ActionDefinition[] = [
     name: 'webhook.create', source: 'PLATFORM', parameters: [ENTRY_NODE], tool: null, enforcement: 'SERVER',
     issuerRule: 'APP_WEBHOOK_ADMIN', summaryTemplate: 'Create a webhook in {app} that starts at the entry node {entryNode}',
   },
+  // #3823 (ruling 0267, cor:agt:040:11 r8): the two boot-prompt grants. The edit names ONE source node (a single value, enforced
+  // where it is spent); the batch names the compiled prompts it covers. The signer must manage the App, and what more the signer must
+  // manage for the named node is judged where the grant is spent (src/lib/grants/bootPromptGrant.ts), on the node itself.
+  {
+    name: 'bootprompt.source.edit', source: 'PLATFORM', parameters: [{ name: 'sourceNode', type: 'node-ref', refusesWildcard: true }], tool: null,
+    enforcement: 'SERVER', issuerRule: 'APP_MANAGER', summaryTemplate: 'Change the text of the boot prompt source {sourceNode} in {app}, once, within an hour',
+    maxUses: 1, lifetimeSeconds: BOOT_PROMPT_GRANT_LIFETIME_SECONDS,
+  },
+  {
+    name: 'bootprompt.compile.approve', source: 'PLATFORM', parameters: [{ name: 'compiledNode', type: 'node-ref', refusesWildcard: true }], tool: null,
+    enforcement: 'SERVER', issuerRule: 'APP_MANAGER', summaryTemplate: 'Compile and approve the boot prompts {compiledNode} in {app}, any number of times within an hour',
+    lifetimeSeconds: BOOT_PROMPT_GRANT_LIFETIME_SECONDS,
+  },
 ];
 
 export interface UpsertResult { inserted: number; updated: number; unchanged: number }
@@ -58,6 +78,9 @@ function validate(list: readonly ActionDefinition[]): void {
     if (!(ACTION_ENFORCEMENT as readonly string[]).includes(a.enforcement)) throw new Error(`action ${a.name}: unknown enforcement level`);
     if (a.source !== 'PLATFORM') throw new Error(`action ${a.name}: source must be PLATFORM`);
     if (!a.issuerRule || !a.summaryTemplate) throw new Error(`action ${a.name}: issuerRule and summaryTemplate are required`);
+    for (const [label, v] of [['maxUses', a.maxUses], ['lifetimeSeconds', a.lifetimeSeconds]] as const) {
+      if (v !== undefined && (!Number.isSafeInteger(v) || v <= 0 || v > 2147483647)) throw new Error(`action ${a.name}: ${label} must be a positive integer`);
+    }
     // #3742: a template may name {app} and its action's parameters, nothing else, so no template can ask the renderer for text it must refuse.
     const names = new Set(a.parameters.map((p) => p.name));
     if (names.has('app')) throw new Error(`action ${a.name}: a parameter named "app" would be ambiguous with {app}`);
@@ -65,6 +88,11 @@ function validate(list: readonly ActionDefinition[]): void {
     try { placeholders = summaryPlaceholders(a.summaryTemplate); } catch (e) { throw new Error(`action ${a.name}: summaryTemplate has a malformed placeholder or brace`, { cause: e }); }
     for (const p of placeholders) {
       if (p !== 'app' && !names.has(p)) throw new Error(`action ${a.name}: summaryTemplate names unknown placeholder {${p}}`);
+    }
+    // The signer reads the summary, and the signature covers every value: a parameter the template never names would be a term
+    // the person signs without having been shown it.
+    for (const n of names) {
+      if (!placeholders.includes(n)) throw new Error(`action ${a.name}: summaryTemplate never names the parameter {${n}}`);
     }
   }
 }
@@ -80,14 +108,16 @@ export async function upsertPlatformActions(
   const result: UpsertResult = { inserted: 0, updated: 0, unchanged: 0 };
   for (const a of list) {
     const rows = await client.$queryRaw<Array<{ inserted: boolean }>>(Prisma.sql`
-      INSERT INTO actions (name, source, parameters, tool, enforcement, issuer_rule, summary_template, created_at, updated_at)
+      INSERT INTO actions (name, source, parameters, tool, enforcement, issuer_rule, summary_template, max_uses, lifetime_seconds, created_at, updated_at)
       VALUES (${a.name}, ${a.source}, ${JSON.stringify(a.parameters)}::jsonb, ${a.tool}, ${a.enforcement}, ${a.issuerRule}, ${a.summaryTemplate},
+              ${a.maxUses ?? null}::int, ${a.lifetimeSeconds ?? null}::int,
               (clock_timestamp() AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC'))
       ON CONFLICT (name) DO UPDATE SET
         source = EXCLUDED.source, parameters = EXCLUDED.parameters, tool = EXCLUDED.tool, enforcement = EXCLUDED.enforcement,
-        issuer_rule = EXCLUDED.issuer_rule, summary_template = EXCLUDED.summary_template, updated_at = (clock_timestamp() AT TIME ZONE 'UTC')
-      WHERE (actions.source, actions.parameters, actions.tool, actions.enforcement, actions.issuer_rule, actions.summary_template)
-        IS DISTINCT FROM (EXCLUDED.source, EXCLUDED.parameters, EXCLUDED.tool, EXCLUDED.enforcement, EXCLUDED.issuer_rule, EXCLUDED.summary_template)
+        issuer_rule = EXCLUDED.issuer_rule, summary_template = EXCLUDED.summary_template,
+        max_uses = EXCLUDED.max_uses, lifetime_seconds = EXCLUDED.lifetime_seconds, updated_at = (clock_timestamp() AT TIME ZONE 'UTC')
+      WHERE (actions.source, actions.parameters, actions.tool, actions.enforcement, actions.issuer_rule, actions.summary_template, actions.max_uses, actions.lifetime_seconds)
+        IS DISTINCT FROM (EXCLUDED.source, EXCLUDED.parameters, EXCLUDED.tool, EXCLUDED.enforcement, EXCLUDED.issuer_rule, EXCLUDED.summary_template, EXCLUDED.max_uses, EXCLUDED.lifetime_seconds)
       RETURNING (xmax = 0) AS inserted`);
     if (rows.length === 0) result.unchanged++;
     else if (rows[0].inserted) result.inserted++;

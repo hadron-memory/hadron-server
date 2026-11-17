@@ -115,12 +115,13 @@ interface GrantRow {
   id: string; app_id: string; user_id: string | null; agent_id: string | null; worker_id: string | null; grantee_app_id: string | null;
   action: string; action_values: unknown; starts_at: Date | null; expires_at: Date | null; max_uses: number | null; reason: string;
   version: number; activated_at: Date | null; revoked_at: Date | null; holder_departed_at: Date | null;
+  requested_by_user_id: string | null; requested_by_worker_id: string | null;
 }
 
 async function readGrant(tx: Prisma.TransactionClient, grantId: string, appId: string): Promise<GrantRow | null> {
   const [row] = await tx.$queryRaw<GrantRow[]>`
     SELECT id, app_id, user_id, agent_id, worker_id, grantee_app_id, action, action_values, starts_at, expires_at, max_uses, reason,
-           version, activated_at, revoked_at, holder_departed_at
+           version, activated_at, revoked_at, holder_departed_at, requested_by_user_id, requested_by_worker_id
       FROM grants WHERE id = ${grantId} AND app_id = ${appId}`;
   return row ?? null;
 }
@@ -161,6 +162,12 @@ export interface GrantCeremonyView {
   summary: string | null;
   /** The requester's own words, shown labelled as theirs; never part of the server's sentence. */
   requesterReason: string;
+  /**
+   * Who wrote that reason: the one who asked for the GRANT (`grants.requested_by_*`), and the worker it came through. Null name: the
+   * person was erased, and the link went with them (cor:acl:140:08). Never the account that asked for this signature.
+   */
+  reasonAuthor: { name: string | null; via: string | null };
+  /** Who asked for this SIGNATURE (the signing request's requester). Often a different account from the reason's author. */
   requester: { name: string; via: string | null };
   holder: { kind: 'user' | 'agent' | 'worker' | 'app'; name: string | null };
   app: { urn: string };
@@ -181,6 +188,15 @@ async function requesterOf(tx: Prisma.TransactionClient, r: { requesterUserId: s
     r.requesterWorkerId ? tx.worker.findUnique({ where: { id: r.requesterWorkerId }, select: { name: true } }) : null,
   ]);
   return { name: user?.handle ?? app?.name ?? 'someone', via: worker?.name ?? null };
+}
+
+/** Who asked for the grant, and so wrote its reason: the person by handle (null once erased) and the worker the request came through. */
+async function reasonAuthorOf(tx: Prisma.TransactionClient, g: Pick<GrantRow, 'requested_by_user_id' | 'requested_by_worker_id'>) {
+  const [user, worker] = await Promise.all([
+    g.requested_by_user_id ? tx.user.findFirst({ where: { id: g.requested_by_user_id, deletedAt: null }, select: { handle: true } }) : null,
+    g.requested_by_worker_id ? tx.worker.findUnique({ where: { id: g.requested_by_worker_id }, select: { name: true } }) : null,
+  ]);
+  return { name: user?.handle ?? null, via: worker?.name ?? null };
 }
 
 async function holderName(tx: Prisma.TransactionClient, h: { kind: string; id: string }): Promise<string | null> {
@@ -204,13 +220,17 @@ async function summaryFor(ctx: Context, tx: Prisma.TransactionClient, g: GrantRo
   const refs: Record<string, { urn: string }> = {};
   for (const p of action.parameters) {
     if (p.type !== 'node-ref') continue;
-    const id = values[p.name];
-    if (typeof id !== 'string') continue;
-    const node = await tx.node.findFirst({ where: { id, deletedAt: null }, select: { loc: true, memoryId: true } });
-    if (!node || !(await isMemoryReadableCached(ctx, node.memoryId))) return null;
-    const memory = await tx.memory.findUnique({ where: { id: node.memoryId }, select: { urn: true } });
-    if (!memory) return null;
-    refs[id] = { urn: safeNodeUrnV2(memory.urn, node.loc) };
+    // A single value or a list of them (a batch grant names several nodes): every entry is resolved behind the prover's read gate,
+    // and one the prover cannot read withholds the whole sentence. Anything that is not an id is left for the renderer to refuse.
+    const value = values[p.name];
+    for (const id of Array.isArray(value) ? value : [value]) {
+      if (typeof id !== 'string' || id === '*' || Object.prototype.hasOwnProperty.call(refs, id)) continue;
+      const node = await tx.node.findFirst({ where: { id, deletedAt: null }, select: { loc: true, memoryId: true } });
+      if (!node || !(await isMemoryReadableCached(ctx, node.memoryId))) return null;
+      const memory = await tx.memory.findUnique({ where: { id: node.memoryId }, select: { urn: true } });
+      if (!memory) return null;
+      refs[id] = { urn: safeNodeUrnV2(memory.urn, node.loc) };
+    }
   }
   try {
     return renderGrantSummary({ action, app: { urn: appUrn }, values, refs });
@@ -271,6 +291,7 @@ export async function proveForGrantSigning(db: PrismaClient, a: {
     const view: GrantCeremonyView = {
       summary,
       requesterReason: g.reason,
+      reasonAuthor: await reasonAuthorOf(tx, g),
       requester: await requesterOf(tx, row),
       holder: { kind: holder.kind, name: await holderName(tx, holder) },
       app: { urn: appUrn },

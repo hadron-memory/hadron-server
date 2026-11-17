@@ -7,7 +7,7 @@ import { encryptString } from './crypto.js';
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import { decryptNodeFields, encryptNodeFields, isAuthenticatedDataEnvelope, type MemoryEncryptionInfo } from './nodeCrypto.js';
 import { chatDataObject } from './chatRootCounters.js';
-export const ENGINE_KEYS = ['conversationName', 'stageName', 'routeHistory', 'goalStack', 'lastOffTrackReason', 'lastOffTrackAt'] as const;
+export const ENGINE_KEYS = ['conversationName', 'stageName', 'completedConversations', 'routeHistory', 'goalStack', 'lastOffTrackReason', 'lastOffTrackAt'] as const;
 const MOVED = ['routeHistory', 'goalStack', 'lastOffTrackReason', 'lastOffTrackAt'] as const;
 const invalid = () => new GraphQLError('Chat state is unavailable.', { extensions: { code: 'CHAT_STATE_INVALID' } });
 /** Calendar validation without Date.parse rollover or database timezone conversion. */
@@ -32,6 +32,8 @@ export function validEngineValue(key: string, value: unknown): boolean {
   if (key === 'lastOffTrackReason') return typeof value === 'string';
   if (key === 'lastOffTrackAt') return validEngineTime(value);
   if (!Array.isArray(value)) return false;
+  if (key === 'completedConversations') return value.every(entry => !!entry && typeof entry === 'object' && !Array.isArray(entry)
+    && typeof entry.conversation === 'string' && entry.conversation.trim().length > 0 && validEngineTime(entry.completedAt));
   return value.every(entry => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
     const e = entry as Record<string, unknown>;
@@ -44,7 +46,7 @@ export function validEngineValue(key: string, value: unknown): boolean {
         && (!Object.hasOwn(e.trigger,'content') || (e.trigger as Record<string,unknown>).content === undefined || typeof (e.trigger as Record<string,unknown>).content === 'string')));
     return typeof e.description === 'string' && typeof e.createdBy === 'string' && ['ASSISTANT','USER'].includes(e.createdBy)
       && typeof e.status === 'string' && ['ACTIVE','COMPLETED','ABANDONED'].includes(e.status) && time(e.createdAt)
-      && strings(['language','topicUrn','conversationUrn','nodeUrn','edgeUrn'])
+      && strings(['language','topicUrn','conversationUrn','nodeUrn','edgeUrn','detourTo'])
       && (!Object.hasOwn(e,'completedAt') || time(e.completedAt));
   });
 }

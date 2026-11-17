@@ -99,7 +99,10 @@ import {
   isMemoryReadableCached,
   loadMemoryUrn,
   CONTENT_RAW_DEFAULT,
+  readAiServiceConfigByUrn,
+  aiConfigOwnerOf,
 } from './resolvers.helpers.js';
+import { loadAiConfigOwners, aiConfigOwnerKey } from '../../../lib/aiConfigOwner.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import {
@@ -218,8 +221,8 @@ export async function resolveNodeReadScopeIds(
   let scopeIds: string[];
   if (explicitIds) {
     const requested = requestedIds;
-    const allowed = accessible === null ? null : new Set(accessible);
-    scopeIds = allowed === null ? requested : requested.filter((id) => allowed.has(id));
+    const allowed = new Set(accessible);
+    scopeIds = requested.filter((id) => allowed.has(id));
     // Query only when a class or org filter must be applied to the requested
     // set; otherwise the requested ∩ accessible ids stand as-is.
     if ((memClassClause || orgScopeId) && scopeIds.length > 0) {
@@ -229,13 +232,6 @@ export async function resolveNodeReadScopeIds(
       });
       scopeIds = rows.map((m) => m.id);
     }
-  } else if (accessible === null) {
-    // Admin/broad — resolve scope + class + org filter in one query.
-    const rows = await ctx.db.memory.findMany({
-      where: { deletedAt: null, ...(memClassClause ? { class: memClassClause as never } : {}), ...orgWhere },
-      select: { id: true },
-    });
-    scopeIds = rows.map((m) => m.id);
   } else {
     const rows = await ctx.db.memory.findMany({
       where: { id: { in: accessible }, ...(memClassClause ? { class: memClassClause as never } : {}), ...orgWhere },
@@ -401,7 +397,7 @@ async function finishAppNodes(
  * The admission shared by `nodeRevisions` and `nodeRevisionsPage` (#2212 A1): READER, a node ref that
  * resolves for the caller (a genuine miss collapses to the empty answer; a malformed ref propagates), a
  * live node, read on its CURRENT memory (#602) and no concealed comment history (#1663). `null` is the
- * empty answer. `canRead` is the per-snapshot memory gate; `accessible` (null = unrestricted) is the set
+ * empty answer. `canRead` is the per-snapshot memory gate; `accessible` (a materialised list, #3921) is the set
  * it tests, for callers that push it into SQL.
  */
 export async function nodeRevisionsScope(ctx: Context, nodeRef: string) {
@@ -421,7 +417,7 @@ export async function nodeRevisionsScope(ctx: Context, nodeRef: string) {
   // authenticated caller could read any tenant's node revision history.
   const node = await ctx.db.node.findUnique({ where: { id: nodeId }, select: { memoryId: true } });
   if (!node) return null;
-  // Full accessible-memory set for the principal (null = unrestricted).
+  // Full accessible-memory set for the principal (a materialised list, never unrestricted, #3921).
   // getAccessibleMemoryIds encodes the principal + memory-class rules
   // (spec 034). We gate the node's CURRENT memory AND each snapshot's
   // memory: a node MOVED across memories keeps its stable id (moveNode),
@@ -429,7 +425,7 @@ export async function nodeRevisionsScope(ctx: Context, nodeRef: string) {
   // the caller can't read (#602 / Codex P1) — gating the current memory
   // alone would leak those.
   const accessible = await getAccessibleMemoryIds(ctx);
-  const canRead = (memId: string) => accessible === null || accessible.includes(memId);
+  const canRead = (memId: string) => accessible.includes(memId);
   // No read on the current memory ⇒ empty (no existence disclosure, matching memoryUsageSummary).
   if (!canRead(node.memoryId)) return null;
   // #1663 — a comment stub's history is for memory managers.
@@ -1074,6 +1070,20 @@ export const nodeQueries = {
           // slug (cor:agt:020:02), and history — PR trailers, chat archives —
           // must keep resolving.
           return { kind: 'worker', id, organizationId: app.organizationId };
+        }
+        case 'aiconf': {
+          // #3857 (V63): hrn:aiconf:... behind the config's own read gate, the
+          // one `aiServiceConfig(ref:)` applies; an unreadable config answers
+          // exactly as a missing one. Identity only: the key never rides along.
+          const config = await readAiServiceConfigByUrn(ctx, baseUrn);
+          if (!config) return null;
+          // #3958: an org-owned config already carries its organization; the owner is read only when it does not.
+          let organizationId: string | null = config.organizationId;
+          if (organizationId == null) {
+            const ref = aiConfigOwnerOf(config);
+            organizationId = (await loadAiConfigOwners(ctx.db, [ref])).get(aiConfigOwnerKey(ref))?.organizationId ?? null;
+          }
+          return { kind: 'aiconf', id: config.id, organizationId };
         }
         case 'noderev': {
           // #696: hrn:noderev:<root>:<mem>:<loc...>:<rev> (end-anchored).
@@ -2589,7 +2599,7 @@ export const nodeQueries = {
       const rows = await ctx.db.usageEvent.findMany({
         where: {
           nodeLoc: loc,
-          ...(accessibleMemoryIds !== null ? { memoryId: { in: accessibleMemoryIds } } : {}),
+          memoryId: { in: accessibleMemoryIds },
         },
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: limit ?? 20,
@@ -2604,9 +2614,7 @@ export const nodeQueries = {
       // Each entry carries the memory it was recorded in: a source that later MOVED keeps no more history
       // visible than nodeRevisions shows, so the memory gate is in the `where`, before `take`.
       const rows = await ctx.db.nodeEdgeRemoval.findMany({
-        where: scope.accessible === null
-          ? { sourceId: scope.nodeId }
-          : { sourceId: scope.nodeId, memoryId: { in: scope.accessible } },
+        where: { sourceId: scope.nodeId, memoryId: { in: scope.accessible } },
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: limit ?? 20,
       });
@@ -2652,9 +2660,7 @@ export const nodeQueries = {
       const scope = await nodeRevisionsScope(ctx, args.nodeRef);
       if (!scope) return pageEnvelope([], 0, skip);
       const { nodeId, memoryId, accessible } = scope;
-      const where: Prisma.NodeRevisionWhereInput = accessible === null
-        ? { nodeId }
-        : { nodeId, OR: [{ memoryId: { in: accessible } }, { memoryId: null }] };
+      const where: Prisma.NodeRevisionWhereInput = { nodeId, OR: [{ memoryId: { in: accessible } }, { memoryId: null }] };
       const [total, rows] = await ctx.db.$transaction([
         ctx.db.nodeRevision.count({ where }),
         ctx.db.nodeRevision.findMany({ where, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take, skip }),
@@ -2681,7 +2687,7 @@ export const nodeQueries = {
       // history to any reader of its memory (PR #618 review).
       if (!node || node.deletedAt) return null;
       const accessible = await getAccessibleMemoryIds(ctx);
-      const canRead = (memId: string) => accessible === null || accessible.includes(memId);
+      const canRead = (memId: string) => accessible.includes(memId);
       if (!canRead(node.memoryId)) return null;
       if (!canRead(revision.memoryId ?? node.memoryId)) return null;
       if (await isConcealedCommentHistory(ctx, revision.nodeId)) return null; // #1663

@@ -60,12 +60,14 @@ async function inAudienceSnapshot<T>(
   fn: (tx: Prisma.TransactionClient, orgId: string, userId: string) => Promise<T>,
 ): Promise<T> {
   const { userId, orgId } = await audienceOrgId(ctx, ref);
-  return ctx.db.$transaction(async (tx) => {
+  // #4065: the snapshot's locking reads (`liveTxContext`) can abort with 40001 when the row moved under it. The whole
+  // snapshot is read-only and side-effect-free, so it re-runs on a fresh snapshot; an exhausted budget propagates as before.
+  return retryOnSerializationFailure(() => ctx.db.$transaction(async (tx) => {
     const live = await liveTxContext(ctx, tx);
     requireSelfActingUser(live);
     await requireSigningSwitchAudience(tx, userId, orgId);
     return fn(tx, orgId, userId);
-  }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 30_000 });
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 30_000 }));
 }
 
 const statusOf = async (tx: Prisma.TransactionClient, orgId: string) =>

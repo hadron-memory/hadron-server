@@ -1,3 +1,4 @@
+import { findUnstorableText, unstorableTextMessage } from '../lib/unstorableTextInput.js';
 import { isSessionSupersededError, sessionSupersededEnvelope } from '../lib/sessionSuperseded.js';
 import { RateLimited } from '../lib/rateLimit/index.js';
 import { isPrismaClientError } from '../lib/prismaErrors.js';
@@ -41,6 +42,12 @@ function containsDatabaseDiagnostic(error: unknown): boolean {
 /** A refusal is a tool failure, not a success that happens to say "no": isError is set on every one (#1789). */
 export function refusalResult(text: string) {
   return { isError: true as const, ...textResult(text) };
+}
+
+/** #4096: the typed `[bad_user_input]` refusal for caller text that cannot be stored (a NUL or unpaired surrogate; field named, value never echoed), or null. */
+export function unstorableTextRefusal(fields: Record<string, unknown>): ReturnType<typeof refusalResult> | null {
+  const found = findUnstorableText(fields);
+  return found ? refusalResult(`[bad_user_input] ${unstorableTextMessage(found)}`) : null;
 }
 
 /**
