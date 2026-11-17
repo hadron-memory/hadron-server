@@ -18,10 +18,19 @@
  *    lane, the lane runs on manifest edits, and no whitelisted object name
  *    survives as a hand-written grep in the workflow (the manifest is the
  *    only home for the whitelist).
+ * 4. The executed filter (spawn): the script is RUN, not just text-checked —
+ *    it drops a whitelisted line exactly (CRLF-stripped first), keeps a
+ *    superstring of a whitelisted line (same line, changed definition) as
+ *    drift, and exits 1 on an invalid manifest. These pin the two
+ *    load-bearing behaviors no text check can: a substring-match mutant and
+ *    an exit-0 mutant both survived 13/13 at 5b2c6fee (the LOCAL review's
+ *    P2 — both mutants are killed by the spawn cases below).
  */
 
 import { describe, it, expect } from 'vitest';
-import { readFileSync, existsSync, writeFileSync, rmSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, rmSync, readdirSync, statSync, mkdtempSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 // eslint-disable-next-line import/no-relative-packages -- scripts/ is outside src/ by design; plain node ESM
@@ -183,5 +192,59 @@ describe('#434 slice B: the workflow is wired to the manifest', () => {
       const bare = row.name.includes('.') ? row.name.split('.').pop()! : row.name;
       expect(wf, `${bare} must live only in the manifest, not the workflow`).not.toContain(bare);
     }
+  });
+});
+
+describe('#434 slice B: the drift filter executes its contract (spawn)', () => {
+  // Fence 4 — the script RUNS. The wiring tests above prove the lane calls it;
+  // these prove it does what its header and the workflow comment claim. The
+  // fixtures come from the manifest itself, so this cannot drift from the
+  // whitelist it pins.
+  const FILTER = join(repoRoot, 'scripts/db/migrateDiffFilter.mjs');
+  const aWhitelisted = loadManifest(MANIFEST_PATH).diffWhitelist[0].line;
+  // A superstring of a whitelisted line: the same statement with a CHANGED
+  // definition. Exact matching keeps it (it is drift); a substring-match
+  // mutant (`candidate.includes(l)`) would drop it — this case kills it.
+  const superstring = `${aWhitelisted} WHERE changed = 1;`;
+
+  const run = (args: string[], input: string) =>
+    spawnSync(process.execPath, [FILTER, ...args], { input, encoding: 'utf8' });
+
+  it('drops a whitelisted line exactly, strips CRLF before matching, and keeps a changed definition (superstring) as drift', () => {
+    const res = run([MANIFEST_PATH], `${aWhitelisted}\n${superstring}\r\n${aWhitelisted}\r\nUNRELATED DRIFT;\n`);
+    expect(res.status).toBe(0);
+    // Exact stdout: only the superstring (its \r preserved as passthrough) and
+    // the unrelated line survive; both whitelisted forms are dropped.
+    expect(res.stdout.split('\n')).toEqual([`${superstring}\r`, 'UNRELATED DRIFT;', '']);
+    expect(res.stderr).toContain('dropped 2 whitelisted line(s)');
+  });
+
+  it('an all-whitelisted input exits 0 with empty stdout (empty diff is success)', () => {
+    const res = run([MANIFEST_PATH], `${aWhitelisted}\n`);
+    expect(res.status).toBe(0);
+    expect(res.stdout).toBe(''); // the only surviving "line" is the trailing empty one
+    expect(res.stderr).toContain('dropped 1 whitelisted line(s)');
+  });
+
+  it('an invalid manifest exits 1 (a broken whitelist must never read as "no drift")', () => {
+    // Kills the exit-0 mutant: every process.exit(1) -> process.exit(0) in the
+    // filter fails exactly here.
+    const dir = mkdtempSync(join(tmpdir(), 'migrate-diff-filter-'));
+    try {
+      const bad = join(dir, 'bad-manifest.json');
+      writeFileSync(bad, JSON.stringify({ 'diff-whitelist': [], 'post-push-owned': [], 'unknown-key': true }));
+      const res = run([bad], '');
+      expect(res.status).toBe(1);
+      expect(res.stderr).toContain('unknown key');
+      expect(res.stdout).toBe('');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('usage: no manifest argument exits 2', () => {
+    const res = run([], '');
+    expect(res.status).toBe(2);
+    expect(res.stderr).toContain('usage:');
   });
 });
