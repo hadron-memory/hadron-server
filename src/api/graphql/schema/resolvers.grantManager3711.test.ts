@@ -632,12 +632,16 @@ describe('Riana, Beckett, Dorian (91002379): the second fix batch', () => {
     expect(r.data.withdrawGrant.signatureStatus.signatures).toEqual([]);
   });
 
-  it('Beckett: a non-manager revoke on an uninstalled App answers GRANT_NOT_MANAGER, as a missing grant does', async () => {
+  it('Beckett: a non-manager revoke on an uninstalled App answers GRANT_NOT_MANAGER, as a missing grant does; #4167: the manager now revokes', async () => {
     const id = await active();
     await db.app.update({ where: { id: w.appId }, data: { uninstalledAt: new Date() } });
     expect(code(await post(memberKey, null, REVOKE, { r: id }))).toBe('GRANT_NOT_MANAGER');
-    expect(code(await post(managerKey, null, REVOKE, { r: id }))).toBe('GRANT_NOT_MANAGER');
-    expect((await grantRows())[0].revoked_at).toBeNull();
+    // #4167 (cor:acl:140:05, Holger 2026-11-14): whoever manages the App revokes also while it is uninstalled — the
+    // pre-#4167 refusal was the manager arm too, so this assertion now states the widened rule.
+    const r = await post(managerKey, null, REVOKE, { r: id });
+    expect(r.errors).toBeUndefined();
+    expect((await grantRows())[0].revoked_by).toBe(managerId);
+    expect(await events(id)).toHaveLength(1);
   });
 
   it('Beckett: a manager naming an agent that does not exist gets the holder refusal, not GRANT_NOT_MANAGER', async () => {

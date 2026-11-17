@@ -1,3 +1,4 @@
+import { settledTeamEventQueries } from '../../../test/teamEventHorizon.js';
 /**
  * #2553 (epic #1704, T12, rev 6): every AgentTask has a hierarchical, immutable handle `AT<n>(.<n>)*`: a project is
  * numbered per App (AT3), a task within its parent (AT3.405, AT3.405.16). `AT0` is the reserved project "No project",
@@ -22,7 +23,7 @@ vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGi
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
 
 const M = resolvers.Mutation as any;
-const Q = resolvers.Query as any;
+const Q = settledTeamEventQueries(resolvers.Query, db) as any;
 const T = (resolvers as any).AgentTask as Record<string, (t: any, a: unknown, c: Context) => unknown>;
 
 async function refusal(p: Promise<unknown>): Promise<GraphQLError> {

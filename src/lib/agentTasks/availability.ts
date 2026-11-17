@@ -141,6 +141,21 @@ export async function loadAvailabilityByFamily(
 }
 
 /**
+ * #4291 — whether the App's own record for each of `families` (cor:agt:060:03) leaves it available now: the family
+ * half of {@link loadAvailabilityByFamily}, for a family no worker runs as yet (a task's run setting names it, and the
+ * launch would apply it). The same rows and `recordInEffect`, either persisted spelling.
+ */
+export async function loadFamilyAvailability(
+  db: PrismaClient | Prisma.TransactionClient, appId: string, families: readonly string[], now = new Date(),
+): Promise<Map<string, boolean>> {
+  const wanted = [...new Set(families.map(normalizeFamily).filter((f): f is string => f !== null))];
+  if (wanted.length === 0) return new Map();
+  const rows = await db.modelFamilyAvailability.findMany({ where: { appId, family: { in: wanted.flatMap(familySpellings) } } });
+  const unavailable = new Set(rows.filter((r) => recordInEffect(r, now)).map((r) => normalizeFamily(r.family)));
+  return new Map(wanted.map((f) => [f, !unavailable.has(f)]));
+}
+
+/**
  * cor:agt:060:07 — a not-started or no-progress alarm marks its worker
  * assignee unavailable, reason `stalled`. Runs in the alarm's transaction.
  *

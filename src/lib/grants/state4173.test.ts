@@ -8,7 +8,7 @@ import { Prisma } from '../../generated/prisma/index.js';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
-import { DB_NOW, dropTestActions, insertGrant, insertGrantUnguarded, raw, seedWorld, type World } from './grantFixtures3668.js';
+import { DB_NOW, dropTestActions, grantValues, insertGrant, insertGrantUnguarded, raw, seedWorld, type World } from './grantFixtures3668.js';
 import { grantLiveSql, isGrantLive } from './live.js';
 import { endGrant, GrantManageRefusal } from './manage.js';
 import { getGrantForManager, getGrantForWorker, listGrantsForManager, listGrantsForPerson, listGrantsForWorker } from './read.js';
@@ -25,7 +25,7 @@ const ts = (d: Date | null) => (d ? raw(`'${iso(d)}'::timestamp`) : null);
 const ACT = at(-86_400_000);
 
 const full = (row: Partial<GrantStateFields>): GrantStateFields => ({
-  activatedAt: null, revokedAt: null, withdrawnAt: null, holderDepartedAt: null, appDeletedAt: null, startsAt: null, expiresAt: null, maxUses: null, useCount: 0, ...row,
+  activatedAt: null, revokedAt: null, withdrawnAt: null, holderDepartedAt: null, appDeletedAt: null, startsAt: null, expiresAt: null, maxUses: null, useCount: 0, actionMaxUses: null, actionLifetimeSeconds: null, ...row,
 });
 
 type Case = { name: string; state: GrantState; row: Partial<GrantStateFields> };
@@ -51,6 +51,13 @@ const CASES: Case[] = [
   { name: 'A17 spent and raw-stamped departed: spent', state: 'SPENT', row: { activatedAt: ACT, maxUses: 1, useCount: 1, holderDepartedAt: at(-1000) } },
   { name: 'A18 pre-change withdrawal (revoked, pending, no marker)', state: 'REVOKED', row: { revokedAt: at(-1000), withdrawnAt: null } },
   { name: 'future-start grant revoked shows its end', state: 'REVOKED', row: { activatedAt: ACT, startsAt: at(9000), revokedAt: at(-1000) } },
+  // #4163 (gate: when action limits land, SPENT and EXPIRED read them in the same change as grantLiveSql, with these pins).
+  { name: 'A19 used up to the ACTION cap: SPENT (the grant has no cap of its own)', state: 'SPENT', row: { activatedAt: ACT, actionMaxUses: 1, useCount: 1 } },
+  { name: 'A20 past the ACTION lifetime from activation: EXPIRED', state: 'EXPIRED', row: { activatedAt: at(-3_700_000), actionLifetimeSeconds: 3600 } },
+  { name: 'A20b inside the action lifetime: ACTIVE', state: 'ACTIVE', row: { activatedAt: at(-1_000_000), actionLifetimeSeconds: 3600 } },
+  { name: 'A20c action lifetime ended, then revoked (historical): EXPIRED; revoked first: REVOKED', state: 'EXPIRED', row: { activatedAt: at(-3_700_000), actionLifetimeSeconds: 3600, revokedAt: at(-1000) } },
+  { name: 'A20d revoked before the action lifetime ended: REVOKED', state: 'REVOKED', row: { activatedAt: at(-3_700_000), actionLifetimeSeconds: 3600, revokedAt: at(-3_650_000) } },
+  { name: 'A20e a pending grant has no action lifetime yet: PENDING', state: 'PENDING', row: { actionLifetimeSeconds: 1, actionMaxUses: 1, useCount: 1 } },
   { name: 'pending with a cap and use_count (never activated): not spent', state: 'PENDING', row: { maxUses: 1, useCount: 1 } },
 ];
 
@@ -60,7 +67,8 @@ describe('deriveGrantState (the function)', () => {
 
 describe('grantStateSql (the fragment) agrees with the function, and allows is unchanged', () => {
   it('differential over the named cases and a full grid of the nullable columns', async () => {
-    const rows: Array<{ name: string; row: GrantStateFields }> = CASES.map((c) => ({ name: c.name, row: full(c.row) }));
+    // The action-limit cases need a registered action WITH limits: they run in their own test below, on one that has them.
+    const rows: Array<{ name: string; row: GrantStateFields }> = CASES.filter((c) => c.row.actionMaxUses === undefined && c.row.actionLifetimeSeconds === undefined).map((c) => ({ name: c.name, row: full(c.row) }));
     let n = 0;
     for (const activatedAt of [null, ACT]) for (const revokedAt of [null, at(-3000), at(3000 * 0 - 1000)]) for (const departed of [null, at(-1500)])
       for (const expiresAt of [null, at(-3000), at(-1000), at(0), at(-500), at(4000)]) for (const [maxUses, useCount] of [[null, 0], [2, 1], [2, 2]] as const)
@@ -88,6 +96,49 @@ describe('grantStateSql (the fragment) agrees with the function, and allows is u
       expect(o.live, r.name).toBe(o.state === 'ACTIVE' && (r.row.startsAt === null || r.row.startsAt.getTime() <= NOW.getTime()));
     }
   }, 120_000);
+});
+
+describe('#4163: the SQL fragment reads the action\'s limits exactly as the function does, and allows still equals state ACTIVE', () => {
+  it('a registered action with a use cap and a lifetime: SPENT, EXPIRED, ACTIVE, and the historical-end ties, row against function', async () => {
+    const action = grantValues(w).action as string;
+    await db.$executeRawUnsafe(`UPDATE actions SET max_uses = 2, lifetime_seconds = 3600 WHERE name = $1`, action);
+    try {
+    const mk = (over: Partial<GrantStateFields>) => full({ actionMaxUses: 2, actionLifetimeSeconds: 3600, ...over });
+    const rows: Array<{ name: string; row: GrantStateFields }> = [
+      { name: 'under both', row: mk({ activatedAt: at(-1_000_000), useCount: 1 }) },
+      { name: 'at the action cap', row: mk({ activatedAt: at(-1_000_000), useCount: 2 }) },
+      { name: 'past the lifetime', row: mk({ activatedAt: at(-3_700_000), useCount: 0 }) },
+      { name: 'exactly at the lifetime end (equality is the end)', row: mk({ activatedAt: at(-3_600_000), useCount: 0 }) },
+      { name: 'cap reached and past the lifetime: spent first', row: mk({ activatedAt: at(-3_700_000), useCount: 2 }) },
+      { name: 'past the lifetime, then revoked', row: mk({ activatedAt: at(-3_700_000), revokedAt: at(-1000) }) },
+      { name: 'revoked before the lifetime ended', row: mk({ activatedAt: at(-3_700_000), revokedAt: at(-3_650_000) }) },
+      { name: 'past the lifetime, then the holder went', row: mk({ activatedAt: at(-3_700_000), holderDepartedAt: at(-1000) }) },
+      { name: 'own expiry earlier than the lifetime', row: mk({ activatedAt: at(-1_000_000), expiresAt: at(-500) }) },
+      { name: 'pending', row: mk({ useCount: 2 }) },
+      { name: 'the holder went inside the lifetime', row: mk({ activatedAt: at(-1_000_000), holderDepartedAt: at(-1000) }) },
+    ];
+    const ids = new Map<string, { name: string; row: GrantStateFields }>();
+    for (const r of rows) {
+      const id = await insertGrantUnguarded(w, {
+        activated_at: ts(r.row.activatedAt), revoked_at: ts(r.row.revokedAt), revoked_by: r.row.revokedAt ? w.userId : null,
+        holder_departed_at: ts(r.row.holderDepartedAt), expires_at: ts(r.row.expiresAt), use_count: r.row.useCount,
+      });
+      ids.set(id, r);
+    }
+    const out = await db.$queryRaw<Array<{ id: string; state: string; live: boolean }>>(
+      Prisma.sql`SELECT g.id, (${grantStateSql('g', Prisma.sql`${iso(NOW)}::timestamp`)}) AS state, (${grantLiveSql('g', Prisma.sql`${iso(NOW)}::timestamp`)}) AS live FROM grants g`);
+    expect(out).toHaveLength(rows.length);
+    for (const o of out) {
+      const r = ids.get(o.id)!;
+      expect(o.state, r.name).toBe(deriveGrantState(r.row, NOW));
+      expect(o.live, r.name).toBe(isGrantLive(r.row, NOW));
+      expect(o.live, r.name).toBe(o.state === 'ACTIVE');
+    }
+    expect(new Set(out.map((o) => o.state))).toEqual(new Set(['ACTIVE', 'SPENT', 'EXPIRED', 'REVOKED', 'HOLDER_GONE', 'PENDING']));
+    } finally {
+      await db.$executeRawUnsafe(`UPDATE actions SET max_uses = NULL, lifetime_seconds = NULL WHERE name = $1`, action);
+    }
+  });
 });
 
 const ender = () => ({ userId: w.userId, workerId: null, sessionId: null });

@@ -204,7 +204,7 @@ describe('allows', () => {
       // Fixed JS instants cannot judge a DB-clock row; the stored facts decide the same way at the DB's own instant.
       const [{ now }] = await db.$queryRaw<Array<{ now: Date }>>`SELECT (clock_timestamp() AT TIME ZONE 'UTC') AS now`;
       // The App is live in this fixture, so appDeletedAt (a column of apps, not grants) is null.
-      expect(isGrantLive({ ...row, appDeletedAt: null }, now), `isGrantLive ${name}`).toBe(allows);
+      expect(isGrantLive({ ...row, appDeletedAt: null, actionMaxUses: null, actionLifetimeSeconds: null }, now), `isGrantLive ${name}`).toBe(allows);
     }
   });
 
@@ -215,6 +215,24 @@ describe('allows', () => {
       const r = await asWorker(ONE, { r: future });
       expect(r.data.grant.allows).toBe(false);
     } finally { vi.useRealTimers(); }
+  });
+});
+
+describe('allows reads the ACTION\'s limits (#4163)', () => {
+  const setLimits = (max: string, life: string) => db.$executeRawUnsafe(`UPDATE actions SET max_uses = ${max}, lifetime_seconds = ${life} WHERE name LIKE 'test.s1a.%'`);
+  it('grant(ref) and grants() read an hour-old or once-used grant as allows false though the row states no limit', async () => {
+    await setLimits('1', '3600');
+    try {
+      const old = await live({ activated_at: raw(`${DB_NOW} - interval '2 hours'`) });
+      const used = await live({ use_count: 1 });
+      const fresh = await live({ activated_at: raw(`${DB_NOW} - interval '10 minutes'`) });
+      expect((await asWorker(ONE, { r: old })).data.grant.allows).toBe(false);
+      expect((await asWorker(ONE, { r: used })).data.grant.allows).toBe(false);
+      expect((await asWorker(ONE, { r: fresh })).data.grant.allows).toBe(true);
+      const list = await asWorker(LIST);
+      const by = new Map((list.data.grants.items as Array<{ id: string; allows: boolean }>).map((i) => [i.id, i.allows]));
+      expect([by.get(old), by.get(used), by.get(fresh)]).toEqual([false, false, true]);
+    } finally { await setLimits('NULL', 'NULL'); }
   });
 });
 
