@@ -284,7 +284,7 @@ const PROBES: Probe[] = [
   },
   {
     name: 'replaceSubtree',
-    query: `mutation($r: ID!) { replaceSubtree(ownerRepo: "x", memoryRef: $r, nodes: [], edges: []) }`,
+    query: `mutation($r: String!) { replaceSubtree(ownerRepo: "x", memoryId: $r, nodes: [], edges: []) }`,
     on: 'memUrn', vars: (r) => ({ r }), missingCode: 'MEMORY_NOT_FOUND',
   },
   {

@@ -30,7 +30,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
-import { buildSchema, parse, validate, type GraphQLSchema } from 'graphql';
+import { buildSchema, parse, validate, GraphQLObjectType, type GraphQLSchema } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -88,7 +88,10 @@ const RENAMED: Array<[string, string[]]> = [
   ['setMemorySourceToken', ['id']],
   ['syncMemory', ['id']],
   ['pushMemoryToGit', ['id']],
-  ['replaceSubtree', ['memoryId']],
+  // replaceSubtree is NOT here: #4219 (blind P2-A) keeps its legacy
+  // `memoryId: String!` shape on purpose — the field exists so legacy callers
+  // reach REPLACE_SUBTREE_RETIRED instead of an unknown-argument error. Its
+  // legacy shape is pinned in its own test below.
   ['linkMemoryToUser', ['memoryId']],
   ['encryptMemory', ['memoryId']],
   // C — org
@@ -223,7 +226,7 @@ describe('#4142 S6 chunk B — memory writes', () => {
     );
     expect(anonymous.error?.extensions.code).toBe('UNAUTHENTICATED');
     expect(anonymous.error?.message).toBe(
-      'Creating a user-owned memory (no orgId) requires an authenticated user (the creator is the owner).',
+      'Creating a user-owned memory (no orgRef) requires an authenticated user (the creator is the owner).',
     );
 
     const orgShared = await ask(
@@ -232,8 +235,8 @@ describe('#4142 S6 chunk B — memory writes', () => {
     );
     expect(orgShared.error?.extensions.code).toBe('UNSUPPORTED_MEMORY_CLASS');
     expect(orgShared.error?.message).toBe(
-      `A user-owned memory (no orgId) must be class 'personal' or 'private'; ` +
-        `'knowledge' is org-shared — pass orgId to create it.`,
+      `A user-owned memory (no orgRef) must be class 'personal' or 'private'; ` +
+        `'knowledge' is org-shared — pass orgRef to create it.`,
     );
 
     const owned = await ask(
@@ -242,6 +245,37 @@ describe('#4142 S6 chunk B — memory writes', () => {
     );
     expect(owned.error).toBeNull();
     expect(owned.data).toMatchObject({ organizationId: null, userId: readerUser.id, class: 'personal' });
+  });
+
+  it('createMemory with a BLANK orgRef refuses — it never falls into the user-owned branch (§10 F2)', async () => {
+    // Only orgRef == null (omitted) takes the user-owned branch. A blank is
+    // caller input and must refuse before anything is written, so a mutant
+    // that treated '' as omitted cannot silently mint a user-owned memory.
+    // Observed contract (pinned byte-for-byte): '' is the unqualified-URN
+    // grammar refusal; whitespace resolves to nothing and reads EXACTLY like
+    // an unknown ref's org miss — no distinct "blank" answer to branch on.
+    const empty = await refusal(ask(
+      readerCtx(),
+      `mutation($o: ID!) { createMemory(name: "blank-empty", orgRef: $o, memoryClass: knowledge) { id } }`,
+      { o: '' },
+    ));
+    expect(empty).toEqual({
+      message: 'URN "" is not fully qualified. Expected a org URN with at least 1 hierarchy segment (e.g., "acme.com").',
+      code: 'URN_NOT_QUALIFIED',
+    });
+    const spaces = await refusal(ask(
+      readerCtx(),
+      `mutation($o: ID!) { createMemory(name: "blank-spaces", orgRef: $o, memoryClass: knowledge) { id } }`,
+      { o: '   ' },
+    ));
+    const unknown = await refusal(ask(
+      readerCtx(),
+      `mutation($o: ID!) { createMemory(name: "blank-miss", orgRef: $o, memoryClass: knowledge) { id } }`,
+      { o: generateId() },
+    ));
+    expect(spaces.code).toBe('ORGANIZATION_NOT_FOUND');
+    expect(spaces.code).toBe(unknown.code);
+    expect(await db.memory.count({ where: { name: { startsWith: 'blank' } } })).toBe(0);
   });
 
   it('deleteMemory accepts ref as PK and as URN; an unknown ref is the typed miss', async () => {
@@ -295,21 +329,34 @@ describe('#4142 S6 chunk B — memory writes', () => {
     }
   });
 
-  it('replaceSubtree accepts memoryRef as PK and as URN — and refuses AFTER resolution', async () => {
-    // The operation is retired (#legacy): the pin is that the renamed ref
-    // RESOLVES (the typed retirement, not a miss) and that an unknown ref is
-    // still the resolution miss.
+  it('replaceSubtree keeps its LEGACY memoryId shape (P2-A) and refuses AFTER resolution', async () => {
+    // #4219 (blind P2-A): this field exists ONLY so legacy callers get
+    // REPLACE_SUBTREE_RETIRED — renaming its arg to memoryRef would break
+    // them at argument validation before the retirement ever fires. Pin the
+    // SDL shape first (memoryId: String! present, memoryRef unknown), then
+    // drive the legacy name end to end.
+    const legacy = parse(`mutation($r: String!) { replaceSubtree(ownerRepo: "o/r", memoryId: $r, nodes: [], edges: []) }`);
+    expect(validate(schema, legacy)).toEqual([]);
+    const renamed = parse(`mutation($r: ID!) { replaceSubtree(ownerRepo: "o/r", memoryRef: $r, nodes: [], edges: []) }`);
+    expect(validate(schema, renamed).map((e) => e.message)).toContainEqual(
+      expect.stringContaining('Unknown argument'),
+    );
+    const memoryIdArg = (schema.getType('Mutation') as GraphQLObjectType)
+      .getFields().replaceSubtree.args.find((a) => a.name === 'memoryId');
+    expect(memoryIdArg?.type.toString()).toBe('String!');
+    // The legacy arg still resolves PK and URN, and the refusal is the typed
+    // retirement, not a resolution miss.
     for (const ref of [knowledgeMemory.id, knowledgeMemory.urn]) {
       const a = await ask(
         adminCtx(),
-        `mutation($ref: ID!) { replaceSubtree(ownerRepo: "o/r", memoryRef: $ref, nodes: [], edges: []) }`,
+        `mutation($ref: String!) { replaceSubtree(ownerRepo: "o/r", memoryId: $ref, nodes: [], edges: []) }`,
         { ref },
       );
       expect(a.error?.extensions.code).toBe('REPLACE_SUBTREE_RETIRED');
     }
     const miss = await ask(
       adminCtx(),
-      `mutation($ref: ID!) { replaceSubtree(ownerRepo: "o/r", memoryRef: $ref, nodes: [], edges: []) }`,
+      `mutation($ref: String!) { replaceSubtree(ownerRepo: "o/r", memoryId: $ref, nodes: [], edges: []) }`,
       { ref: generateId() },
     );
     expect(miss.error?.extensions.code).toBe('MEMORY_NOT_FOUND');
@@ -689,6 +736,49 @@ describe('#4142 S6 chunk F — required survivor refs', () => {
     );
     expect(deleted.error).toBeNull();
     expect(deleted.data).toBe(true);
+  });
+
+  it('a PADDED memoryRef to a hidden memory refuses byte-identically to a missing one (§10 F1, trim parity)', async () => {
+    // If the concealment paths dropped their memoryRef.trim(), a padded ref
+    // to a HIDDEN memory would echo the padding while the resolution miss
+    // echoes trimmed — the padding itself would become an oracle separating
+    // "hidden" from "missing". Pin the trimmed echo on both paths (#1381).
+    const hidden = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: subscriberOrg.id, urn: `${subscriberOrg.urn}:s6-hidden`,
+        name: 's6-hidden', class: 'knowledge', visibility: 'ORGANIZATION',
+      },
+    });
+    const missing = generateId();
+    // readerUser is not a member of subscriberOrg, so `hidden` is unreadable
+    // to readerCtx — exactly the caller the concealment protects.
+    const paddedHidden = await refusal(ask(
+      readerCtx(),
+      `mutation($m: ID!) { createMemorySubscription(memoryRef: $m, orgRef: $m, role: READER) { role } }`,
+      { m: `  ${hidden.id}  ` },
+    ));
+    expect(paddedHidden).toEqual({
+      message: `No match for memoryRef "${hidden.id}".`,
+      code: 'NOT_FOUND',
+    });
+    const paddedMissing = await refusal(ask(
+      readerCtx(),
+      `mutation($m: ID!) { createMemorySubscription(memoryRef: $m, orgRef: $m, role: READER) { role } }`,
+      { m: `  ${missing}  ` },
+    ));
+    expect(paddedMissing).toEqual({
+      message: `No match for memoryRef "${missing}".`,
+      code: 'NOT_FOUND',
+    });
+    // deleteMemorySubscription's caller-input conversion carries the same
+    // trim: a padded ref to the hidden memory, with the org ref missing,
+    // converts to the identical memory miss.
+    const paddedHiddenDelete = await refusal(ask(
+      readerCtx(),
+      `mutation($m: ID!, $o: ID!) { deleteMemorySubscription(memoryRef: $m, orgRef: $o) }`,
+      { m: `  ${hidden.id}  `, o: `  ${missing}  ` },
+    ));
+    expect(paddedHiddenDelete).toEqual(paddedHidden);
   });
 
   // -- app membership ---------------------------------------------------

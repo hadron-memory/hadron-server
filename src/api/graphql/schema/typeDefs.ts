@@ -12742,7 +12742,7 @@ export const typeDefs = `#graphql
     calls return REPLACE_SUBTREE_RETIRED without changing nodes or edges. The field remains temporarily so existing clients get a clear
     refusal rather than an unknown-field error.
     """
-    replaceSubtree(ownerRepo: String!, memoryRef: ID!, nodes: [NodeInput!]!, edges: [EdgeInput!]!): Int!
+    replaceSubtree(ownerRepo: String!, memoryId: String!, nodes: [NodeInput!]!, edges: [EdgeInput!]!): Int!
       @deprecated(reason: "Retired (#454): every authorized call refuses with REPLACE_SUBTREE_RETIRED and writes nothing. Use the canonical node write mutations.")
 
     # Edge CRUD — a GROUP note covering create/update/delete, which is why it

@@ -589,7 +589,7 @@ export const memoryMutations = {
       const userOwned = orgRef == null;
       if (userOwned && !ctx.userId) {
         throw new GraphQLError(
-          'Creating a user-owned memory (no orgId) requires an authenticated user (the creator is the owner).',
+          'Creating a user-owned memory (no orgRef) requires an authenticated user (the creator is the owner).',
           { extensions: { code: 'UNAUTHENTICATED' } },
         );
       }
@@ -628,11 +628,11 @@ export const memoryMutations = {
       // spec 047 — the org-less (user-owned) path supports ONLY the owner-only
       // classes `personal`/`private`. `knowledge`/`group` are org-shared: their
       // read audience is visibility-scoped to org members, which is meaningless
-      // without an org — so they still require `orgId`.
+      // without an org — so they still require `orgRef`.
       if (userOwned && !isUserOwned) {
         throw new GraphQLError(
-          `A user-owned memory (no orgId) must be class 'personal' or 'private'; ` +
-            `'${requestedClass}' is org-shared — pass orgId to create it.`,
+          `A user-owned memory (no orgRef) must be class 'personal' or 'private'; ` +
+            `'${requestedClass}' is org-shared — pass orgRef to create it.`,
           { extensions: { code: 'UNSUPPORTED_MEMORY_CLASS' } },
         );
       }

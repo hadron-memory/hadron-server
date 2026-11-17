@@ -146,8 +146,8 @@ describe('replaceSubtree — retired bulk path', () => {
         null,
         {
           ownerRepo: 'acme/repo',
-          memoryRef: memId,
-          nodes: [{ memoryRef: memId, loc: 'imp', name: 'I', objectType: 'competitor', properties: {} }],
+          memoryId: memId,
+          nodes: [{ memoryId: memId, loc: 'imp', name: 'I', objectType: 'competitor', properties: {} }],
           edges: [],
         },
         admin(),

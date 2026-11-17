@@ -66,7 +66,9 @@ const EXPECTED_REF_ARGS: Record<string, string[]> = {
   setMemorySourceToken: ['ref'],
   syncMemory: ['ref'],
   pushMemoryToGit: ['ref'],
-  replaceSubtree: ['memoryRef'],
+  // replaceSubtree is deliberately NOT here (#4219 blind P2-A): its arg keeps
+  // the LEGACY `memoryId` shape so legacy callers reach REPLACE_SUBTREE_RETIRED
+  // instead of an unknown-argument error. It is not a renamed field.
   linkMemoryToUser: ['memoryRef'],
   encryptMemory: ['memoryRef'],
   deleteOrganization: ['ref'],

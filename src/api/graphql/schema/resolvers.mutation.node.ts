@@ -4799,13 +4799,16 @@ export const nodeMutations = {
     // the canonical encryption, embedding, revision, and role gates. Keep the
     // public field for clients that still know it, but refuse every authorized
     // invocation before a transaction or other write side effect.
+    // #4219 (blind P2-A): the arg keeps its LEGACY `memoryId: String!` shape —
+    // the field exists precisely so legacy callers reach REPLACE_SUBTREE_RETIRED
+    // instead of an unknown-argument validation error. Do not rename it.
     replaceSubtree: async (
       _: unknown,
-      { memoryRef }: { memoryRef: string },
+      { memoryId }: { memoryId: string },
       ctx: Context,
     ) => {
       // Preserve the ordinary write-access and concealed-memory boundary.
-      const { id } = await resolveMemoryRefForWrite(ctx, memoryRef);
+      const { id } = await resolveMemoryRefForWrite(ctx, memoryId);
       await requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, id);
       return ctx.db.$transaction(async tx => {
         await lockInstallAuthoritiesFirst(tx, ctx, [id]);
