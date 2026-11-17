@@ -580,12 +580,13 @@ describe('#4142 S6 chunk D — agent mutations', () => {
 
     // restoreRevision's full restore machinery is covered by its own suite;
     // this pin proves the renamed agentRef RESOLVES on both forms before the
-    // revision lookup — a resolved ref answers "Revision … not found" while a
-    // miss answers the Agent miss.
+    // revision lookup — a resolved ref answers "Revision not found: …" (the
+    // text main switched to in the #4219 carry) while a miss answers the
+    // Agent miss.
     for (const ref of [agent.id, agent.urn]) {
       await expect(
         resolvers.Mutation.restoreRevision({}, { agentRef: ref, revisionLoc: 'revisions:none' }, adminCtx()),
-      ).rejects.toThrow(/Revision "revisions:none" not found/);
+      ).rejects.toThrow(/Revision not found: revisions:none/);
     }
     await expect(
       resolvers.Mutation.restoreRevision({}, { agentRef: generateId(), revisionLoc: 'revisions:none' }, adminCtx()),
