@@ -99,10 +99,6 @@ async function eagerRow(id = app.id) {
 }
 
 const WITHHELD = ['members', 'memberCount', 'appAgents', 'agents', 'hasAiApiKey', 'aiProvider', 'aiModel', 'agentId', 'agent', 'installedAgentUrn'] as const;
-// #3765 (ruling 0260): the owner-role member is admitted the ROSTER; only the AI configuration stays withheld from them. Everyone else
-// who reaches the App record (a plain member by an outer-object path) is still withheld all ten.
-const AI_WITHHELD = ['hasAiApiKey', 'aiProvider', 'aiModel'] as const;
-const ROSTER = ['members', 'memberCount', 'appAgents', 'agents', 'agentId', 'agent', 'installedAgentUrn'] as const;
 
 async function readChildren(parent: any, ctx: Context) {
   const out: Record<string, unknown> = {};
@@ -199,8 +195,8 @@ describe('#2089 list admission — Query.apps', () => {
   });
 
   it('does not let filter.agentId answer the install question the withheld fields refuse', async () => {
-    // The owner-role arm of the LIST is membership-only and #3765 does not widen it (the ruling admits the App's roster FIELDS, not
-    // a filter on them); the filter stays an owner-only answer.
+    // The owner-role arm is membership-only; an agent filter would reveal which
+    // Agents the App installs, one readable Agent at a time (App.agents is WITHHELD).
     const filter = { agentId };
     for (const ctx of [as(boss.id), as(adminBoss.id, { roles: ['ADMIN'] })]) {
       const page = await Q.apps({}, { filter }, ctx);
@@ -242,7 +238,7 @@ describe('#2089 nested App-returning surfaces', () => {
     const W = (resolvers as any).Worker;
     const got = await W.app({ appId: app.id }, {}, as(boss.id));
     expect(got?.id).toBe(app.id);
-    expect(await App.members(got, {}, as(boss.id))).toHaveLength(4); // #3765: the roster is admitted to the owner-role member
+    expect(await App.members(got, {}, as(boss.id))).toBeNull();
     expect(await App.hasAiApiKey(got, {}, as(boss.id))).toBeNull();
     expect((await W.app({ appId: app.id }, {}, as(owner.id)))?.id).toBe(app.id);
     for (const who of [cook, stranger]) expect(await W.app({ appId: app.id }, {}, as(who.id))).toBeNull();
@@ -266,26 +262,22 @@ describe('#2089 nested App-returning surfaces', () => {
 });
 
 describe('#2089 child withholding for the newly admitted reader', () => {
-  it('answers null (withheld) for the AI configuration, and the roster as the owner reads it, on the EAGER path', async () => {
+  it('answers null (withheld) for every roster / AI / install field on the EAGER path', async () => {
     const parent = await eager(as(boss.id));
     expect(parent.appAgents).toBeDefined(); // prefetched — must not override the guard
     const out = await readChildren(parent, as(boss.id));
-    for (const f of AI_WITHHELD) expect(out[f], f).toBeNull();
-    for (const f of ROSTER) expect(out[f], f).not.toBeNull();
+    for (const f of WITHHELD) expect(out[f], f).toBeNull();
   });
 
-  it('answers the same on the LAZY path', async () => {
+  it('answers null for the same fields on the LAZY path', async () => {
     const out = await readChildren(await lazy(), as(boss.id));
-    for (const f of AI_WITHHELD) expect(out[f], f).toBeNull();
-    for (const f of ROSTER) expect(out[f], f).not.toBeNull();
+    for (const f of WITHHELD) expect(out[f], f).toBeNull();
   });
 
-  it('never trusts a prefetched relation or count on the parent object: the AI fields stay null, the roster is the real one', async () => {
+  it('answers null even if the parent object carries prefetched relations and counts', async () => {
     const row = { ...(await eagerRow()), _count: { members: 3 }, members: [{ userId: owner.id }] };
     const out = await readChildren(row, as(boss.id));
-    for (const f of AI_WITHHELD) expect(out[f], f).toBeNull();
-    expect(out.memberCount).toBe(4); // the real count, not the bogus 3
-    expect((out.members as { userId: string }[]).length).toBe(4);
+    for (const f of WITHHELD) expect(out[f], f).toBeNull();
   });
 
   it('gives the true owner real values on both paths', async () => {
