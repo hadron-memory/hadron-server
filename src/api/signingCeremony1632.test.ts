@@ -761,6 +761,53 @@ describe('#3121 canonical node identity is post-proof only', () => {
     expect(denied.json).toEqual({ error: 'forbidden' });
     expect(JSON.stringify(denied.json)).not.toContain(urn);
   });
+
+  // #3549. Two STORED fixture classes whose displayed identity is the safe emitter's unvalidated fallback. Neither is
+  // public input and neither is a canonical address: `''` is the supported INTERNAL root-node storage shape (a generic
+  // caller loc of '' is rejected by validateLoc), and `legacy::leaf` is DELIBERATELY INJECTED stored legacy/malformed
+  // data written straight onto the row. The fallback string is only what the safe emitter displays after proof; it is
+  // not row identity and does not round-trip. The cells below pin that none of it reaches an UNPROVED caller.
+  for (const loc of ['', 'legacy::leaf']) it('no response to an unproved caller carries the fallback identity of a stored root/legacy loc: ' + JSON.stringify(loc), async () => {
+    await db.node.update({ where: { id: nodeId }, data: { loc } });
+    // The fixture is the intended node and class, read from the row (not assumed), and the emitter reports fallback.
+    const row = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
+    expect(row.loc).toBe(loc);
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: row.memoryId } });
+    const emission = urnEmit.safeNodeUrnV2Result(memory.urn, row.loc);
+    expect(emission.fellBack).toBe(true);
+    const fallback = emission.urn;
+    expect(fallback.length).toBeGreaterThan(memory.urn.length);
+    const req = await openRequest();
+    // The ordinary-loc display is the control that this fixture is not just unreadable: the proof below shows it.
+    const bodies: Array<[string, string]> = [];
+    const seen = async (label: string, r: Response, status: number, exact?: string) => {
+      const text = await r.text(); // each response body is read exactly once
+      expect(r.status, label).toBe(status);
+      if (exact !== undefined) expect(text, label).toBe(exact);
+      bodies.push([label, text]);
+      return text;
+    };
+    await seen('shell', await fetch(`${base}/signing/${req.id}`), 200);
+    await seen('ceremony.js', await fetch(`${base}/signing/ceremony.js`), 200);
+    const challenge = await post(req.id, 'proof/challenge', {});
+    const cookie = (challenge.headers.get('set-cookie') ?? '').split(';')[0];
+    const challengeText = await seen('proof/challenge', challenge, 200);
+    expect(Object.keys(JSON.parse(challengeText) as object).sort()).toEqual(['ceremonyId', 'challenge', 'rpId']);
+    for (const path of ['proof', 'challenge', 'complete', 'decline']) {
+      await seen(`${path} (empty body, pre-proof cookie)`, await post(req.id, path, {}, cookie), 403, FORBIDDEN);
+    }
+    const denied = await prove(req.id, outsider);
+    expect(denied.status).toBe(403);
+    expect(denied.json).toEqual({ error: 'forbidden' });
+    bodies.push(['outsider proof', JSON.stringify(denied.json)]);
+    expect(bodies.length).toBe(8);
+    for (const [label, text] of bodies) expect(text, label).not.toContain(fallback);
+    // The same fixture, once a reader who may sign proves, still displays the fallback: absence above is not an
+    // unusable fixture or a disabled surface.
+    const p = await prove(req.id, signer);
+    expect(p.status).toBe(200);
+    expect(p.json.view.node.urn).toBe(fallback);
+  });
 });
 
 describe('passkey-proven read access and the named-signer match come BEFORE any content (S5, S6, 130:02 S4)', () => {

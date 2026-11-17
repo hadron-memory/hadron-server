@@ -1,12 +1,15 @@
+import { respondSessionSuperseded } from '../lib/sessionSuperseded.js';
 import { SYNC_NOT_ATTEMPTED, syncNotAttemptedMessage } from '../integrations/github/syncNotAttempted.js';
 import { MCP_WORKER_BINDING_UNSUPPORTED, offTeamTool } from './disabledTools.js';
 import { registerAutomationTeamSnapshotGrantTools } from './automationTeamSnapshotGrantTools.js';
 import { appendDeliveryPending } from '../lib/tickers/deliveryPending.js';
+import { isChatSeqUniqueViolation, CHAT_SEQ_CONFLICT_MESSAGE } from '../lib/prismaErrors.js';
 import { mcpRequestSessionContext } from './requestSession.js';
 import { liveTxContext, liveReadSnapshotContext } from '../api/graphql/schema/authorizedTx.js';
 import { withReconciledNodeRead } from '../lib/includes/reconciledNodeRead.js';
 import { stampEmbeddingObligation } from '../services/embedding/obligation.js';
 import { assertBootPromptWriteAllowed, assertNoBootPromptRows, isBootPromptRole } from '../lib/bootPrompt.js';
+import { assertBootPromptWriteAllowedOrGranted, spendEditGrantFor, suppliedNonTextFields } from '../lib/grants/bootPromptGrant.js';
 import { sessionEndReason } from '../lib/sessionEndReason.js';
 import { governedKindAnnotation } from '../lib/edgeGovernedKind.js';
 import { GraphQLError } from 'graphql';
@@ -94,6 +97,8 @@ import { registerSigningTools } from './signingTools.js';
 import { registerAgentTaskTools } from './agentTaskTools.js';
 import { registerTickerTools } from './tickerTools.js';
 import { registerStopSignalTools } from './stopSignalTools.js';
+import { registerWebPollTools } from './webPollTools.js';
+import { registerGrantTools } from './grantTools.js';
 import { openThreadCounts, type CommentCounts } from '../lib/comments/summary.js';
 import { loadSignatureStatuses, type NodeSignatureStatusView } from '../lib/signing/status.js';
 import { nodeContentValidationState } from '../lib/nodeContentValidation.js';
@@ -137,7 +142,8 @@ import {
   oauthSurfaceRefusal,
   oauthSurfaceRefusalMessage,
   getCurrentUserRoles,
-  resolveAuthContext,
+  resolveCredentialContextWithStatus,
+  bindPresentedSession,
   validateSessionBinding,
   type AuthContext,
 } from '../middleware/auth.js';
@@ -162,7 +168,8 @@ import {
   mcpPrincipalKey,
   releaseOnceOnResponseEnd,
 } from './transportBounds.js';
-import { refusalResult, toolErrorResult, withToolErrorBoundary } from './toolError.js';
+import { unstorableTextRefusal, refusalResult, toolErrorResult, withToolErrorBoundary } from './toolError.js';
+import { edgeTextFields, findUnstorableText, unstorableTextMessage, unstorableTextText } from '../lib/unstorableTextInput.js';
 import { refNamesNothing } from '../lib/entityRef/refNamesNothing.js';
 import { textResult } from './textResult.js';
 import { publicErrorExtensions } from '../lib/errorDiagnostics.js';
@@ -199,7 +206,7 @@ import { getMemberOrgIds } from '../lib/auth/memberOrgIds.js';
 import { lockAgentDefinitionAuthority } from '../lib/auth/managedSystemMemory.js';
 import { publishNodeWritten } from '../lib/events/nodeWritten.js';
 import { computeContentHash, isAbstractUnverified } from '../lib/contentHash.js';
-import { validateMemoryNodes, formatFindingLine } from '../lib/memoryValidation.js';
+import { validateMemoryNodes, formatFindingLine, formatValidationProse } from '../lib/memoryValidation.js';
 import { assertRootAllocationAllowed, lockRootSiblings, nextSiblingSeq } from '../lib/nodeSeq.js';
 import { BATCH_READ_MAX_NODES, BATCH_READ_MAX_BYTES } from '../lib/batchRead.js';
 import { isCiphertext } from '../lib/crypto.js';
@@ -267,7 +274,7 @@ import { lintWarningPageForNodeId, renderLintWarnings } from '../lib/bootPromptL
 const REPLACE_LINT_MAX_NODES = 100;
 import { safePlainPinWarnings, renderIncludePinWarnings, includePinWarningsFor } from '../lib/includes/plainPinWarnings.js';
 import { assertIncludesWritable, includeRefusalText, syncDerivedIncludesEdges } from '../lib/includes/writeIncludes.js';
-import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds, safeCanonicalUrn, isOwnerOrOrgMember } from '../api/graphql/schema/resolvers.helpers.js';
+import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds, safeCanonicalUrn, isOwnerOrOrgMember, throwOnInvalidEntryCondition } from '../api/graphql/schema/resolvers.helpers.js';
 import { composeWorkerPrompt, describeServedWorker, loadAppWorkerActivity, loadAppWorkerCheckStatuses, maySeeWorkerInternals } from '../api/graphql/schema/resolvers.worker.js';
 import { renderCheckStatusLong, renderCheckStatusShort, type WorkerCheckStatus } from '../lib/workerCheckStatus.js';
 import { splitNodeUrnTolerant, nodeFragmentRefusal } from '../lib/splitNodeUrnTolerant.js';
@@ -902,6 +909,10 @@ export async function addEdge(args: {
   // Spec 037: the edge's identity is its loc within the source memory.
   // Author-supplied loc is validated; otherwise derive it deterministically
   // so re-running with the same endpoints + name stays idempotent.
+  // #4106: caller text Postgres would reject (NUL, lone surrogate) is refused typed, after the gates above and before
+  // the loc derives from `name`; `loc` itself is validated just below.
+  const unstorable = findUnstorableText({ name, loc: authoredLoc, description });
+  if (unstorable) return { error: `[bad_user_input] ${unstorableTextMessage(unstorable)}` };
   const edgeLoc =
     authoredLoc != null && authoredLoc !== '' ? authoredLoc : deriveEdgeLoc(sourceNode.loc, name, target.loc);
   try {
@@ -1165,6 +1176,20 @@ function codedRefusalText(e: unknown): string {
   const { code, ...rest } = publicErrorExtensions(e.extensions ?? {});
   const extras = Object.entries(rest).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
   return [`[${String(code ?? 'ERROR').toLowerCase()}] ${e.message}`, ...extras].join('\n');
+}
+
+/**
+ * #4039 (B4): the MCP form of `throwOnInvalidEntryCondition`: the same code, reason and detail, as the typed refusal text
+ * the tools already use for a coded resolver refusal. Null when the write carries no entry condition or a valid one.
+ */
+function entryConditionRefusal(loc: string, data: unknown) {
+  try {
+    throwOnInvalidEntryCondition(loc, data);
+    return null;
+  } catch (e) {
+    if (e instanceof GraphQLError) return refusalResult(codedRefusalText(e));
+    throw e;
+  }
 }
 
 function safeEmitEntityUrnV2(type: 'memory' | 'app' | 'agent' | 'org', bareUrn: string): string {
@@ -1598,7 +1623,7 @@ const readProjectionInclude = {
   memory: { select: { isEncrypted: true } },
 } as const;
 
-/** Reconcile and fetch the complete projection while the node row stays locked. */
+/** Fetch one authorized projection snapshot; unchanged reads use read-only REPEATABLE READ, drift alone takes the exclusive history fence. */
 async function loadCurrentReadProjection(
   nodeId: string,
   authorizedMemoryId: string,
@@ -1627,7 +1652,8 @@ async function loadCurrentReadProjection(
     if (mode === 'metadata' || !row.abstract) return { ...row, content: null };
     if (mode === 'abstract-raw' && !row.memory.isEncrypted && row.abstractOriginHash == null) {
       // Presence is enough for the existing missing-fingerprint marker. Read
-      // it under this node's lock; never trust the earlier metadata snapshot.
+      // it in this authorized snapshot, never from earlier metadata. Unchanged
+      // reads are read-only REPEATABLE READ; only drift takes the exclusive history fence.
       const presence = await tx.$queryRaw<Array<{ present: boolean }>>`
         SELECT (content IS NOT NULL AND octet_length(content) > 0) AS present
         FROM nodes WHERE id = ${nodeId} AND memory_id = ${authorizedMemoryId} AND deleted_at IS NULL`;
@@ -2011,7 +2037,7 @@ async function renderNodeReadProjection(
   // properties of this call, not of the node.
   const shouldCheckStale = scope === 'abstract' || scope === 'all';
   const includeStaleMarker =
-    shouldCheckStale && !node.memory.isEncrypted && isAbstractUnverified(node, node.contentPresent);
+    shouldCheckStale && !node.memory.isEncrypted && isAbstractUnverified(node, node.contentPresent === undefined ? undefined : { contentPresent: node.contentPresent });
 
   // #881: the node's portal URL, ready to hand a human. Emitted so no agent
   // ever *constructs* one — constructing means guessing which URN spelling
@@ -2387,7 +2413,7 @@ export function createMcpServerInstance(
     // Reads and searches.
     'hadron_search', 'hadron_list_memories', 'hadron_server_info', 'hadron_list_apps', 'hadron_list_scopes',
     'hadron_scope_explain', 'hadron_list_channels', 'hadron_register_list', 'hadron_find_nodes', 'hadron_get_node',
-    'hadron_get_nodes', 'hadron_get_next_node', 'hadron_list_nodes', 'hadron_get_object', 'hadron_find_objects',
+    'hadron_get_nodes', 'hadron_get_next_node', 'hadron_agent_boot_prompt', 'hadron_list_nodes', 'hadron_get_object', 'hadron_find_objects',
     'hadron_get_run', 'hadron_whoami', 'hadron_channel_read', 'hadron_team_chat_read', 'hadron_team_chat_search', 'hadron_team_attention',
     'hadron_team_attention_page', 'hadron_list_workers', 'hadron_get_worker', 'hadron_team_work_items',
     'hadron_list_comments', 'hadron_get_comment', 'hadron_team_chat_mark_read',
@@ -2406,6 +2432,10 @@ export function createMcpServerInstance(
     'hadron_agent_ticker_template_list',
     // #2022 — the stop-signal list (its own optional session).
     'hadron_stop_signal_list',
+    // #1562 — the page-monitor watch list (acts as the connection's user; writes nothing).
+    'hadron_web_poll_list',
+    // #3711 — hadron_create_grant acts as the person and clears any worker binding itself (src/mcp/grantTools.ts); no session argument.
+    'hadron_create_grant',
     // Per-connection selections and key handling: nothing authored.
     'hadron_set_active_memory', 'hadron_set_active_app', 'hadron_set_active_org', 'hadron_set_active_scope',
     'hadron_unlock_memory', 'hadron_lock_memory',
@@ -2442,6 +2472,15 @@ export function createMcpServerInstance(
     onBound?: (id: string) => void,
   ): Promise<{ isError: true; content: Array<{ type: 'text'; text: string }> } | null> => {
     if (typeof named === 'string' && named.length > 0) {
+      // #3818 / Xenophon6764807646: end's id is a historical target, not presentation of an execution binding.
+      // Preserve its existing late-metrics path. A presented header/retained binding is validated independently.
+      if (toolName === 'hadron_end_session' && toolOwnsArgument) {
+        const target = await db.session.findUnique({ where: { id: named }, select: { endedAt: true } });
+        if (target?.endedAt) {
+          publishActor({ workerId: null, agentId: null });
+          return null; // The handler still applies the ordinary session-write gate before changing anything.
+        }
+      }
       const valid = await validateSessionBinding(db, auth, named);
       if (valid) {
         onBound?.(valid.sessionId);
@@ -3165,7 +3204,7 @@ export function createMcpServerInstance(
       const accessibleMemoryIds = await getAccessibleMemoryIds(db, auth);
       // The caller's own member orgs (admin or not) — the org allow-list for
       // non-admins, and the #609 hidden-org carve-out for admins.
-      const memberOrgIds = auth.userId ? await getMemberOrgIds(db, auth.userId) : [];
+      const memberOrgIds = auth.userId ? await getMemberOrgIds(db, auth.userId, auth.impersonation?.orgId) : [];
       const orgIds = isPlatformAdmin ? null : memberOrgIds;
       // Spec 049 Phase 3 — the ladder narrows the memory + node slices; a
       // scope's list is already ∩ access (S2), so handing it over narrows only.
@@ -3183,6 +3222,8 @@ export function createMcpServerInstance(
         orgIds: scopeRes?.kind === 'global' && scopeRes.orgScopeId ? [scopeRes.orgScopeId] : orgIds,
         viewerOrgIds: memberOrgIds,
         orgScopeId: scopeRes?.kind === 'global' ? scopeRes.orgScopeId : null,
+        // Same bound as the GraphQL surface: an impersonated session reads only its one org.
+        impersonationOrgId: auth.impersonation?.orgId ?? null,
       };
 
       const { hits, degraded } = await globalSearch(
@@ -3425,7 +3466,7 @@ export function createMcpServerInstance(
             'Use hadron_set_active_memory to work in it.',
         );
       } catch (e) {
-        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'create failed'}`, 'hadron_create_memory:resolver');
+        return toolErrorResult(e, () => unstorableTextText(e) ?? `Error: ${e instanceof Error ? e.message : 'create failed'}`, 'hadron_create_memory:resolver');
       }
     },
   );
@@ -3448,7 +3489,7 @@ export function createMcpServerInstance(
         const created = await resolvers.Mutation.createAppMemory({}, { appRef: app, name, shortDescription, description, tags }, ctx);
         return textResult(`Memory created: ${safeEmitEntityUrnV2('memory', created.urn)} (class: app, id: ${created.id}).`);
       } catch (e) {
-        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'create failed'}`, 'hadron_create_app_memory:resolver');
+        return toolErrorResult(e, () => unstorableTextText(e) ?? `Error: ${e instanceof Error ? e.message : 'create failed'}`, 'hadron_create_app_memory:resolver');
       }
     },
   );
@@ -3829,6 +3870,9 @@ export function createMcpServerInstance(
   registerAgentTaskTools(server, { db, auth });
   registerTickerTools(server, { db, auth });
   registerStopSignalTools(server, { db, auth });
+  registerWebPollTools(server, { db, auth });
+  // #3711 — a person who manages an App asks for a grant (ruling 0255 item 21); never as a worker.
+  registerGrantTools(server, { db, auth });
   registerAutomationPinTools(server, { db, auth });
   // #1892 — an Agent's task and process lists (cor:dmo:050:15, :16).
   registerAgentDefinitionTools(server, { db, auth });
@@ -3938,7 +3982,7 @@ export function createMcpServerInstance(
       db.agent.findMany({ where: { id: { in: scopes.map((s) => s.agentId).filter((x): x is string => !!x) } }, select: { id: true, urn: true } }),
       db.app.findMany({ where: { id: { in: scopes.map((s) => s.appId).filter((x): x is string => !!x) } }, select: { id: true, urn: true } }),
     ]);
-    const readable = accessible === null ? null : new Set(accessible);
+    const readable = new Set(accessible);
     const urnOf = { org: new Map(orgs.map((o) => [o.id, o.urn])), agent: new Map(agents.map((a) => [a.id, a.urn])), app: new Map(apps.map((a) => [a.id, a.urn])) };
     return scopes.map((s) => {
       const kind = s.appId ? 'app' : s.agentId ? 'agent' : 'org';
@@ -3946,7 +3990,7 @@ export function createMcpServerInstance(
       const ownerUrn = urnOf[kind].get(ownerId);
       const ownerLabel = ownerUrn ? safeEmitEntityUrnV2(kind, ownerUrn) : ownerId;
       const mine = joins.filter((j) => j.scopeId === s.id);
-      const shown = mine.filter((j) => readable === null || readable.has(j.memoryId));
+      const shown = mine.filter((j) => readable.has(j.memoryId));
       const hidden = mine.length - shown.length;
       const lines = [
         `**${s.name}** — ${kind === 'org' ? 'organization' : kind}-owned by ${ownerLabel} · id ${s.id}` + (s.description ? ` — ${s.description}` : ''),
@@ -4170,7 +4214,7 @@ export function createMcpServerInstance(
     };
     return rows.map((r) => {
       const ch = channels.get(r.channelId);
-      const readable = !!ch && (accessible === null || accessible.includes(ch.memoryId));
+      const readable = !!ch && accessible.includes(ch.memoryId);
       const channel = readable ? `${ch!.name} (${ch!.loc})` : `channel ${r.channelId} (host memory not readable to you)`;
       return `- ${channel} ← ${attendeeOf(r)} — ${r.role}${r.mentionOnly ? ', mention-only' : ''}${r.installDefault ? ', install default' : ''}\n  owner: ${r.appId ? `App ${r.appId}` : `organization ${r.organizationId}`} · id ${r.id}${r.description ? `\n  ${r.description}` : ''}`;
     });
@@ -4307,6 +4351,9 @@ export function createMcpServerInstance(
       if (!(await canWriteToMemory(db, auth, memoryId, EXPLICIT_REF))) {
         return refusalResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memoryId)}`);
       }
+      // #4096: caller text a NUL or unpaired surrogate would fail the write (Postgres 22021 / encoding) is refused typed, before any write and after authorization.
+      const unstorableParent = unstorableTextRefusal({ name: rawName, description, tags });
+      if (unstorableParent) return unstorableParent;
 
       const parentMemoryState = await db.memory.findUniqueOrThrow({
         where: { id: memoryId }, select: { isEncrypted: true },
@@ -6405,6 +6452,12 @@ export function createMcpServerInstance(
       if (!(await canWriteToMemory(db, auth, memoryId, EXPLICIT_REF))) {
         return refusalResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memoryId)}`);
       }
+      // #4096: as hadron_create_parent_node — typed refusal, field named, before any write and after authorization.
+      const unstorableCreate = unstorableTextRefusal({ name, description, abstract, content, tags, role: rawRole, nodeType, objectType, llmModel, aiAgent, properties, data: nodeData, ...edgeTextFields(edges) });
+      if (unstorableCreate) return unstorableCreate;
+      // #4039 (B4): an invalid entry condition on a conversation node never lands, before any write (parity with writeNodeCore).
+      const entryRefusal = entryConditionRefusal(loc, nodeData);
+      if (entryRefusal) return entryRefusal;
 
       // #1201 — the GOVERNED-KIND gate, on the state this create would PRODUCE.
       // Inline here for the same reason as on hadron_update_node: this handler
@@ -6883,6 +6936,12 @@ export function createMcpServerInstance(
           return written;
         });
       } catch (e) {
+        // #2622: this tool writes through its own inline Prisma calls (not
+        // writeNodeCore), so the #992 per-chat seq conflict must be typed HERE
+        // or the caller sees a raw internal error instead of the named refusal.
+        if (isChatSeqUniqueViolation(e)) {
+          return refusalResult(`[chat_message_seq_conflict] ${CHAT_SEQ_CONFLICT_MESSAGE}`);
+        }
         if (e instanceof NodeSchemaViolation) return refusalResult(`Schema violation: ${e.message}`);
         if (e === LIVE_LOC_CONFLICT) {
           return refusalResult(`Node already exists at "${rawUrn}" — use hadron_update_node.`);
@@ -6954,7 +7013,8 @@ export function createMcpServerInstance(
     'hadron_update_node',
     'Partially update an existing node. Only the fields you provide are changed — everything else is preserved. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Pass expectedRevision from hadron_get_node to refuse atomically if the node changed since you read it.',
     SHAPE_HADRON_UPDATE_NODE,
-    async ({ urn: rawUrn, authoredWith, expectedRevision, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason, install }) => {
+    async (mcpArgs) => {
+      const { urn: rawUrn, authoredWith, expectedRevision, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason, install } = mcpArgs;
       if (install) {
         if (edges || isRunnable || abstractStillAccurate) return textResult('`install` does not support `edges`, `isRunnable` or `abstractStillAccurate`.');
         return writeInstallNodeViaGraphql('update', install, {
@@ -6966,6 +7026,8 @@ export function createMcpServerInstance(
       // #1219 — inline parity writer, not a writeNodeCore delegate (#206):
       // normalize before mergedGovernedState, the door replay and the payload.
       const role = normalizeRole(rawRole);
+      // #3823: what this call supplies besides its text; an edit grant admits none of it (V46).
+      const mcpNonTextFields = suppliedNonTextFields(mcpArgs as Record<string, unknown>);
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
@@ -6990,6 +7052,12 @@ export function createMcpServerInstance(
       if (!(await canWriteToMemory(db, auth, memory.id, EXPLICIT_REF))) {
         return refusalResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memory.id)}`);
       }
+      // #4096: typed refusal for caller text carrying a NUL, after authorization and before any write.
+      const unstorableUpdate = unstorableTextRefusal({ name, description, abstract, content, tags, role: rawRole, nodeType, objectType, llmModel, aiAgent, reason, properties, data: nodeData, ...edgeTextFields(edges) });
+      if (unstorableUpdate) return unstorableUpdate;
+      // #4039 (B4): the same save-time check as hadron_create_node, before any write.
+      const entryRefusal = entryConditionRefusal(loc, nodeData);
+      if (entryRefusal) return entryRefusal;
       // Spec 049 S4: an in-place update takes no lock, so the gate is explicit.
       try {
         await assertLocWritable(db, memory.id, loc, 'update');
@@ -7014,7 +7082,7 @@ export function createMcpServerInstance(
         assertNotCommentWrite(existing?.nodeType, nodeType, 'update');
         // #2987 (V13) — see hadron_create_node; judged only for a live row, a missing one is NODE_NOT_FOUND below.
         if (existing && !existing.deletedAt) assertNoGenericMessageSeqWrite(existing, nodeType, seq, 'update');
-        assertBootPromptWriteAllowed(existing, { nodeType, role: normalizeRole(role) }, 'update');
+        await assertBootPromptWriteAllowedOrGranted(db as unknown as Prisma.TransactionClient, existing, { nodeType, role: normalizeRole(role), otherFields: mcpNonTextFields, hasContent: content !== undefined, door: true, memoryId: memory.id, loc }, 'update');
         assertGovernedWrite(
           existing,
           mergedGovernedState(existing, { role, isRunnable }),
@@ -7247,6 +7315,9 @@ export function createMcpServerInstance(
             }
             // #2987 — re-judged on the locked row, before any write.
             assertNoGenericMessageSeqWrite(current, nodeType, seq, 'update');
+            // #3823 — a worker session's in-place edit of its own boot-prompt source spends its edit grant here, on the locked row, in
+            // this transaction (the GraphQL update path's twin). Any later refusal rolls the spend back.
+            await spendEditGrantFor(tx, current, { nodeType, role: normalizeRole(role), otherFields: mcpNonTextFields, hasContent: content !== undefined, door: true, memoryId: memory.id, loc });
             // #1186 / cor:dmo:020:05 — omitted fields come from the locked
             // row, not the probe, and a refusal leaves no reconciliation.
             await validateNodeSchemaOnWrite(
@@ -7339,6 +7410,11 @@ export function createMcpServerInstance(
             existing.abstract = embeddedPlaintext.abstract;
           });
         } catch (e) {
+          // #2622: same as hadron_create_node — an inline writer needs its own
+          // typed branch for the #992 per-chat seq conflict.
+          if (isChatSeqUniqueViolation(e)) {
+            return refusalResult(`[chat_message_seq_conflict] ${CHAT_SEQ_CONFLICT_MESSAGE}`);
+          }
           if (e instanceof NodeSchemaViolation) return refusalResult(`Schema violation: ${e.message}`);
           if (e instanceof LocProtectedError) return refusalResult(`[loc_protected] ${e.message}`);
           if (isLegacyMessageSeqError(e)) return refusalResult(`[seq_protected] ${e.message}`);
@@ -7616,7 +7692,10 @@ export function createMcpServerInstance(
         const urn = await nodeUrn(node.loc, node.memoryId);
         return textResult(`Node data merged: ${urn} (id: ${node.id})${renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), node.id))}`);
       } catch (e) {
-        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'update failed'}`, 'hadron_update_node_data:resolver');
+        // #4039 (B3): the entry-condition refusal keeps its code, reason and detail, as on hadron_create_node / hadron_update_node.
+        return toolErrorResult(e, () => e instanceof GraphQLError && e.extensions?.code === 'INVALID_ENTRY_CONDITION'
+          ? codedRefusalText(e)
+          : unstorableTextText(e) ?? `Error: ${e instanceof Error ? e.message : 'update failed'}`, 'hadron_update_node_data:resolver');
       }
     },
   );
@@ -7822,7 +7901,7 @@ export function createMcpServerInstance(
         }
         return textResult([header, coverage, ...guidance, ...lines, ...lintLines].join('\n'));
       } catch (e) {
-        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'search-and-replace failed'}`, 'hadron_replace_text:resolver');
+        return toolErrorResult(e, () => unstorableTextText(e) ?? `Error: ${e instanceof Error ? e.message : 'search-and-replace failed'}`, 'hadron_replace_text:resolver');
       }
     },
   );
@@ -7886,7 +7965,7 @@ export function createMcpServerInstance(
           )}`,
         );
       } catch (err) {
-        return roleWriterRefusalText(err) !== null ? refusalResult(roleWriterRefusalText(err) as string) : toolErrorResult(err, () => String((err as Error)?.message ?? err), 'hadron_update_edge');
+        return roleWriterRefusalText(err) !== null ? refusalResult(roleWriterRefusalText(err) as string) : toolErrorResult(err, () => unstorableTextText(err) ?? String((err as Error)?.message ?? err), 'hadron_update_edge');
       }
     },
   );
@@ -8493,6 +8572,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
                 renameAuthoring: attestedAuthoring(recoveryCtx(), authoredWith),
                 authorizeLockedMemory: (memoryId) => assertLockedMemoryWriteAccess(tx, attemptAuth, memoryId),
                 principal: attemptAuth,
+                canReadMemoryId: memoryId => canReadMemory(tx as typeof db, attemptAuth, memoryId, EXPLICIT_REF),
               });
               relocated = subtreeResult.moved;
               linkWarnings = subtreeResult.linkWarnings;
@@ -8557,6 +8637,15 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         relocated = completed.relocated;
         linkWarnings = completed.linkWarnings;
       } catch (e) {
+        // #3786 (Charles QA F1, from #3776's stamped QA matrix): the move is
+        // the third inline writer that can drive the #992 per-chat seq
+        // constraint — a rebase of a seq-bearing chat-message into a taken
+        // (chat, seq). Without this branch the caller saw the raw P2002 as an
+        // internal error while the GraphQL moveNode answered the typed
+        // refusal; the refused move itself was already atomic.
+        if (isChatSeqUniqueViolation(e)) {
+          return refusalResult(`[chat_message_seq_conflict] ${CHAT_SEQ_CONFLICT_MESSAGE}`);
+        }
         if (e instanceof ArchivePlanExhaustedError) return refusalResult('The node was moved concurrently; re-read it and retry.');
         if (e instanceof MoveSourceBeyondReadError) return refusalResult(`Source memory not found: "${fromMemoryUrn}".`);
         if (e instanceof MemoryWriteAccessChangedDuringWriteError) return refusalResult(e.message);
@@ -11852,21 +11941,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         const lines = f.kind === 'INDEX_TRUNCATED' ? informational : issues;
         lines.push(formatFindingLine(f, await nodeUrn(f.nodeLoc, memory.id, memoryUrnOf)));
       }
-      const informationalNote = report.totalInformational
-        ? `\n\nInformational findings (${report.totalInformational}):\n${informational.join('\n')}`
-        : '';
-      // A skipped check is stated rather than silently omitted — a clean bill
-      // of health that quietly skipped a check is worse than no report.
-      const skippedNote = report.skippedChecks.length
-        ? `\n\nSkipped checks:\n${report.skippedChecks.map((c) => `- ${c.check}: ${c.reason}`).join('\n')}`
-        : '';
-
-      if (report.totalFindings === 0) {
-        return textResult(`Validated ${report.nodesChecked} nodes. No issues found.${informationalNote}${skippedNote}`);
-      }
-      return textResult(
-        `Found ${report.totalFindings} issue(s) in ${report.nodesChecked} nodes:\n\n${issues.join('\n')}${informationalNote}${skippedNote}`,
-      );
+      return textResult(formatValidationProse(report, issues, informational));
     },
   );
 
@@ -11939,6 +12014,12 @@ type ActiveMcpTransport = {
    * so a GET/SSE stream, a POST queued behind `requestTail` and a still-open response all pin it.
    */
   inFlight: number;
+  /**
+   * #3797: the held `GET /mcp` SSE responses on this transport (added when the stream opens, dropped when it
+   * ends). A held stream pins `inFlight` for its whole life, so shutdown must end these first and only then wait
+   * for the POSTs that are genuinely in flight.
+   */
+  streams: Set<Response>;
   /** #2261: arrival or completion time of the latest request (epoch ms). */
   lastActivityAt: number;
 };
@@ -11973,6 +12054,42 @@ function evictMcpTransport(sessionId: string, active: ActiveMcpTransport, reason
   unregisterMcpTransport(sessionId, active.transport);
   mcpLog('info', 'mcp_transport_evicted', { mcpSessionId: sessionId, reason, principalKey: active.principalKey });
   void active.transport.close().catch(() => undefined);
+}
+
+/**
+ * #3797: at the end of the stopping drain window, close every registered MCP transport so a held `GET /mcp` stream
+ * cannot keep `httpServer.close()` (and so the process) open to the hard deadline.
+ *
+ * Order matters. A held GET stream pins `inFlight` for its whole life, so waiting for `inFlight` to reach 0 first
+ * would never finish: the held GET streams are ended FIRST, then each transport waits for the requests genuinely in
+ * flight on it (a POST is never cut, bounded by the caller's hard deadline), and only then is it unregistered and
+ * closed (`transport.close()` ends every response on it). Connection-local state only, the same cleanup as
+ * `evictMcpTransport`: the durable worker Session and its hold are never touched (cor:agt:020:03; clients re-attribute
+ * through `X-Hadron-Session`). The synchronous part (ending the streams) runs before the first await.
+ */
+export async function closeMcpTransportsForShutdown(): Promise<number> {
+  const entries = [...transports];
+  for (const [, active] of entries) {
+    for (const res of [...active.streams]) {
+      if (!res.writableEnded) res.end();
+    }
+  }
+  await Promise.all(entries.map(async ([sid, active]) => {
+    while (active.inFlight > 0) {
+      // A GET still authenticating when the first pass ran registers its stream afterwards and pins `inFlight`
+      // until the client leaves; end whatever has registered since, every tick.
+      for (const res of [...active.streams]) {
+        if (!res.writableEnded) res.end();
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
+    if (transports.get(sid) === active) {
+      unregisterMcpTransport(sid, active.transport);
+      mcpLog('info', 'mcp_transport_evicted', { mcpSessionId: sid, reason: 'shutdown', principalKey: active.principalKey });
+    }
+    await active.transport.close().catch(() => undefined);
+  }));
+  return entries.length;
 }
 
 /**
@@ -12369,7 +12486,7 @@ async function authenticateBoundMcpSession(
 ): Promise<AuthContext | null> {
   let presented: AuthContext;
   try {
-    presented = await resolveAuthContext(req, db);
+    presented = (await resolveCredentialContextWithStatus(req, db)).auth;
   } catch {
     res.status(503).json({ error: 'Authentication temporarily unavailable' });
     return null;
@@ -12395,6 +12512,12 @@ async function authenticateBoundMcpSession(
   if (!sameMcpPrincipal(active.auth, presented)) {
     // A foreign principal's session ID is indistinguishable from a missing one.
     respondMcpSessionNotFound(res);
+    return null;
+  }
+  try {
+    await bindPresentedSession(req, db, presented);
+  } catch (error) {
+    if (!respondSessionSuperseded(res, error)) res.status(503).json({ error: 'Authentication temporarily unavailable' });
     return null;
   }
   return presented;
@@ -12425,6 +12548,11 @@ function unregisterMcpTransport(
  * Authenticates via Bearer token, creates or reuses transport sessions.
  */
 export async function handleMcpRequest(req: Request, res: Response): Promise<void> {
+  try { await dispatchMcpRequest(req, res); }
+  catch (error) { if (!respondSessionSuperseded(res, error)) throw error; }
+}
+
+async function dispatchMcpRequest(req: Request, res: Response): Promise<void> {
   // Recheck the presented credential for each request on an existing transport.
   // Its principal was captured at initialization, while platform roles must
   // still be refreshed before every tool-dispatch POST (#1251).
@@ -12459,6 +12587,9 @@ async function handleKnownMcpSession(
   // therefore does not mutate the shared authorization snapshot.
   if (req.method === 'GET') {
     if (!(await authenticateBoundMcpSession(req, res, sessionId, active))) return;
+    // #3797: tracked so the end of the stopping drain window can end it (closeMcpTransportsForShutdown).
+    active.streams.add(res);
+    releaseOnceOnResponseEnd(res, () => active.streams.delete(res));
     await active.transport.handleRequest(req, res, req.body);
     return;
   }
@@ -12589,7 +12720,7 @@ async function openOrRejectMcpSession(
   // canonical way for hadron-client / Claude Code MCP / Cursor / etc. to
   // authenticate; user-credential MCP arrives via OAuth or portal-minted
   // hdr_user_<…> bearer tokens.
-  const auth = await resolveAuthContext(req, db);
+  const { auth } = await resolveCredentialContextWithStatus(req, db);
   // Admin impersonation: impersonation tokens are not accepted on /mcp (v1).
   // MCP binds credential identity at session init. Ordinary-user roles are
   // refreshed per request below, but the impersonation SESSION row's full
@@ -12624,6 +12755,8 @@ async function openOrRejectMcpSession(
     respondMcpAuthenticationRequired(req, res);
     return;
   }
+
+  await bindPresentedSession(req, db, auth);
 
   // #2261: reserve capacity NOW, before the first await below, so concurrent initializes cannot jointly exceed
   // the per-principal cap. The key is read before `auth.appId` is filled in from a default or a restored selection.
@@ -12764,7 +12897,7 @@ async function openOrRejectMcpSession(
     // ended while this handler was suspended, the reservation is already cancelled and its slot freed: do not
     // register, or a burst of aborted initializes would exceed the cap (#2261 review, Dara/Colin P2).
     if (reservation.convert()) {
-      transports.set(sid, { transport, auth, requestTail: Promise.resolve(), principalKey, inFlight: 0, lastActivityAt: Date.now() });
+      transports.set(sid, { transport, auth, requestTail: Promise.resolve(), principalKey, inFlight: 0, streams: new Set(), lastActivityAt: Date.now() });
     } else {
       unregisterMcpTransport(sid, transport);
       await transport.close().catch(() => undefined);

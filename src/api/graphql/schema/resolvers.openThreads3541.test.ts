@@ -88,6 +88,69 @@ describe('A1: sparse lexical/regex admission happens before the page', () => {
   }
 });
 
+describe('#3675: a soft-deleted whole thread and an offset past the end, on lexical and regex', () => {
+  const sq = (prefix: string, value: boolean | null) => ({ hasOpenThreads: value, locPrefix: `${prefix}:` } as any);
+  const idsOf = (rows: Array<{ nodeId: string }>) => rows.map((h) => h.nodeId);
+  // Duplicated from A1 (its helpers are describe-local); same shape, wrong rows first in loc order.
+  async function a1(prefix: string, wrongHasThread: boolean) {
+    const wrong: string[] = [], right: string[] = [];
+    for (let i = 0; i < 8; i++) { const n = await mk(`${prefix}:a${i}`); wrong.push(n.id); if (wrongHasThread) await comment(n.id); }
+    for (let i = 0; i < 3; i++) { const n = await mk(`${prefix}:b${i}`); right.push(n.id); if (!wrongHasThread) await comment(n.id); }
+    return { wrong, right };
+  }
+  async function withDeletedThread(prefix: string, wrongHasThread: boolean) {
+    const { wrong, right } = await a1(prefix, wrongHasThread);
+    // true: a wrong-state row ahead of the page (a8). false: eligible, inside the limit-2/offset-1 page (b0x).
+    const dead = await mk(`${prefix}:${wrongHasThread ? 'b0x' : 'a8'}`);
+    const root = await comment(dead.id);
+    await M.deleteCommentThread(null, { commentRef: root.id, reason: 'a3675 whole-thread deletion' }, ctx(author()));
+    const meta = await db.commentMeta.findUniqueOrThrow({ where: { nodeId: root.id }, include: { node: true } });
+    expect(meta.threadState).toBe('OPEN'); expect(meta.retractedAt).toBeNull(); expect(meta.node.deletedAt).not.toBeNull();
+    if (wrongHasThread) right.splice(1, 0, dead.id); else wrong.push(dead.id);
+    return { wrong, right, dead: dead.id };
+  }
+  const page = async (prefix: string, value: boolean, limit: number, offset: number) => {
+    const common = { db, memoryIds: [memoryId], limit, offset, sort: 'loc' as const, filter: sq(prefix, value) };
+    const lexical = idsOf(await provider.lexicalSearch({ ...common, query: 'sparsemark3541' }));
+    const regex = idsOf(await provider.regexSearch({ ...common, pattern: 'sparsemark3541' }));
+    const modes: Record<string, { ids: string[]; total: unknown }> = {};
+    for (const mode of ['keyword', 'regex'] as const) {
+      const out = await Q.findNodes(null, { query: 'sparsemark3541', mode, sort: 'LOC', limit, offset, includeTotal: true, filter: { memoryIds: [memoryId], locPrefix: `${prefix}:`, hasOpenThreads: value } }, ctx(author()));
+      modes[mode] = { ids: out.hits.map((h: any) => h.node.id), total: out.total };
+    }
+    return { lexical, regex, modes };
+  };
+
+  for (const [value, prefix, wrongHasThread] of [[true, 'dt', false], [false, 'df', true]] as const) {
+    it(`item 1, hasOpenThreads ${value}: a deleted-root thread is "no open thread" on lexicalSearch and regexSearch`, async () => {
+      const { wrong, right, dead } = await withDeletedThread(prefix, wrongHasThread);
+      const common = { db, memoryIds: [memoryId], limit: wrong.length, offset: 0, sort: 'loc' as const, filter: sq(prefix, null) };
+      // Precondition: unfiltered, the first rows in loc order ARE the wrong-state ones (the deleted one included for true).
+      expect(idsOf(await provider.lexicalSearch({ ...common, query: 'sparsemark3541' }))).toEqual(wrong);
+      expect(idsOf(await provider.regexSearch({ ...common, pattern: 'sparsemark3541' }))).toEqual(wrong);
+      const expected = right.slice(1, 3);
+      // false: the deleted-thread row IS on the page; true: it is not.
+      expect(expected.includes(dead)).toBe(!value);
+      const got = await page(prefix, value, 2, 1);
+      expect(got.lexical, 'lexicalSearch').toEqual(expected);
+      expect(got.regex, 'regexSearch').toEqual(expected);
+      for (const mode of ['keyword', 'regex']) expect(got.modes[mode].ids, mode).toEqual(expected);
+    });
+
+    it(`item 2, hasOpenThreads ${value}: an offset past the end returns an empty page and total stays null`, async () => {
+      const { right } = await a1(prefix, wrongHasThread);
+      // Control: offset = last index returns exactly the last eligible row, so the fixture is not empty.
+      const last = await page(prefix, value, 2, right.length - 1);
+      expect(last.lexical).toEqual([right.at(-1)]); expect(last.regex).toEqual([right.at(-1)]);
+      for (const mode of ['keyword', 'regex']) expect(last.modes[mode]).toEqual({ ids: [right.at(-1)], total: null });
+      const past = await page(prefix, value, 2, right.length);
+      expect(past.lexical, 'lexicalSearch').toEqual([]);
+      expect(past.regex, 'regexSearch').toEqual([]);
+      for (const mode of ['keyword', 'regex']) expect(past.modes[mode], mode).toEqual({ ids: [], total: null });
+    });
+  }
+});
+
 // ───────────────────────── A2 ─────────────────────────
 describe('A2: a soft-deleted root never counts as an open thread, on the Prisma and the vector paths', () => {
   it('a whole-thread deletion leaves OPEN, unretracted metadata behind a deleted root, and every path still says "no open thread"', async () => {

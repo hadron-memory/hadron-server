@@ -41,7 +41,8 @@ import {
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
-import { serveBindInTransaction, resolveWorkerIdByNameGated, resolveWorkerBindCandidatesByName, provisionWorkerMemory, requireWorkerReadAccess, resolveReportsToTarget } from './resolvers.worker.js';
+import { isAppGateRefusal } from '../../../lib/auth/workerRead.js';
+import { serveBindInTransaction, resolveReadableWorkerRef, resolveWorkerIdByNameGated, resolveWorkerBindCandidatesByName, provisionWorkerMemory, requireWorkerReadAccess, resolveReportsToTarget } from './resolvers.worker.js';
 import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
 import { eventActor } from '../../../lib/agentTasks/events.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
@@ -67,7 +68,8 @@ import { NodeNotFoundError, AgentNotFoundError, AppNotFoundError } from '../../.
 import { triggerManualRun } from './resolvers.appRun.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
-import type { Prisma } from '../../../generated/prisma/index.js';
+import { Prisma } from '../../../generated/prisma/index.js';
+import { CHAT_SCRIPT_EDGE_FORMAT } from '../../../lib/chatScript.js';
 import { serializeJson } from '../../../integrations/db/provider.js';
 import { deleteToolConnection, runEmailOperation, type ToolCalendarEvent } from '../../../lib/emailClient.js';
 import {
@@ -105,6 +107,7 @@ import {
   consumeResumeClaim,
   liveClaimsOf,
   liveWorkerSessionsOf,
+  firstLiveWorkerSessionOf,
   nothingToResume,
   toCandidates,
   writeResumeClaim,
@@ -114,6 +117,8 @@ import { liveTxContext, withAuthorizedTx } from './authorizedTx.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { deriveFamily, normalizeFamily } from '../../../lib/agentTasks/family.js';
+import { COMPILED_BOOT_PROMPT_NODE_TYPE } from '../../../lib/bootPrompt.js';
+import { effortFromToken, fillEmptyAppliedRunSettings, isEffortLevel, recordRunSettings, type EffortLevel } from '../../../lib/agentTasks/runSettings.js';
 import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
 import { forbiddenError } from '../../../lib/refusals.js';
 import { requirePersonAsThemselves } from '../../../lib/auth/personAsThemselves.js';
@@ -214,7 +219,11 @@ async function lockSessionAppActive(tx: Prisma.TransactionClient, appId: string)
  */
 // ── #1709: redeeming a launch grant ────────────────────────────────────────
 
-type LaunchCtx = { grant: LoadedGrant; issuedBy: 'platform' | 'manager'; hold: { holdUserId: string | null; holdAt: Date | null } };
+type LaunchCtx = {
+  grant: LoadedGrant; issuedBy: 'platform' | 'manager'; hold: { holdUserId: string | null; holdAt: Date | null };
+  /** #4291: the settings the start named (`family`, and `model` and `effort` when it carried them): what a bind that reports none runs as. #4306: empty when the bind said the start did not apply them. */
+  args: { family?: string; model?: string; effort?: string };
+};
 
 const launchGrantInvalid = () =>
   new GraphQLError('This launch grant is not valid: unknown, expired, already used, or not yours.', { extensions: { code: 'LAUNCH_GRANT_INVALID' } });
@@ -239,7 +248,7 @@ async function requireWorkerVisibleOrNotFound(ctx: Context, appId: string, worke
   try {
     await requireWorkerReadAccess(ctx, app);
   } catch (e) {
-    if (!(e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN')) throw e;
+    if (!isAppGateRefusal(e)) throw e;
     throw workerRefNotFound(workerRef);
   }
 }
@@ -263,6 +272,11 @@ const LAUNCH_STATE_REFUSALS: Record<string, string> = {
  * changes nothing (no oracle, and no way to fail another's start).
  */
 async function withLaunch<T>(given: SessionInput, ctx: Context, run: (input: SessionInput, launch: LaunchCtx | null) => Promise<T>): Promise<T> {
+  // #4306: `startSettingsApplied: false` qualifies a START. With no launch grant there is no start to qualify, so it
+  // is refused here, before anything is read or written. true, null and absent say nothing and pass.
+  if (given.startSettingsApplied === false && given.launchGrant == null) {
+    throw new GraphQLError('startSettingsApplied: false is only accepted with a launchGrant: it says the start that grant came from did not apply its run settings.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
   if (given.launchGrant == null) return run(given, null);
   if (!ctx.userId || ctx.impersonation) throw launchGrantInvalid();
   if (given.force) {
@@ -271,9 +285,16 @@ async function withLaunch<T>(given: SessionInput, ctx: Context, run: (input: Ses
   const now = new Date();
   const grant = await loadLiveGrant(ctx.db, given.launchGrant, now);
   if (!grant || grant.holderUserId !== ctx.userId) throw launchGrantInvalid();
-  const op = await ctx.db.hostOperation.findUniqueOrThrow({ where: { id: grant.operationId }, select: { issuedBy: true, holdUserId: true, holdAt: true } });
+  const op = await ctx.db.hostOperation.findUniqueOrThrow({ where: { id: grant.operationId }, select: { issuedBy: true, holdUserId: true, holdAt: true, args: true } });
+  const str = (v: unknown) => (typeof v === 'string' ? v : undefined);
+  const opArgs = (op.args ?? {}) as Record<string, unknown>;
   const launch: LaunchCtx = {
     grant, issuedBy: op.issuedBy === 'platform' ? 'platform' : 'manager', hold: { holdUserId: op.holdUserId, holdAt: op.holdAt },
+    // #4306 (cor:agt:070:08, the exception Proposed): a start whose host could not apply its run settings (an exec-path
+    // worker runs its own fixed argv) says so on the bind, and the bind then inherits NONE of them: the session, the
+    // worker's last-used record and the task's applied stamp hold only what the bind itself reports. Emptied here, the
+    // one place the start's args enter a bind, so no later read of `launch.args` can inherit by another path.
+    args: given.startSettingsApplied === false ? {} : { family: str(opArgs.family), model: str(opArgs.model), effort: str(opArgs.effort) },
   };
   try {
     return await run({ ...given, workerRef: given.workerRef ?? grant.workerId }, launch);
@@ -500,6 +521,11 @@ export async function writeSessionHandoff(
 
 // ── #2086 / #1931 / #1948: refresh a bound session's model and family ─────────────────────────────────────────
 /** A supplied family must be a valid token; checked before any write (and, on a resume, before the claim is spent). */
+/** #4244: an Agent revision that is not there (unknown or retired loc), refused before any write. */
+function revisionNotFound(revisionLoc: string): GraphQLError {
+  return new GraphQLError(`Revision not found: ${revisionLoc}`, { extensions: { code: 'BAD_USER_INPUT' } });
+}
+
 function explicitFamilyOrThrow(family: string | null | undefined): string | null {
   const explicit = family != null ? normalizeFamily(family) : null;
   if (family != null && !explicit) {
@@ -518,10 +544,21 @@ function modelFamilyRefresh(
   explicitFamily: string | null,
   llmModel: string | null | undefined,
   storedTool: string | null,
-): { llmModel?: string; modelReportedAt?: Date; family?: string } {
+  /** #4291: the effort the session reports, written beside the model and family; null or omitted never clears. */
+  effort: EffortLevel | null = null,
+): { llmModel?: string; modelReportedAt?: Date; family?: string; effort?: EffortLevel } {
   const family = explicitFamily ?? (llmModel != null ? deriveFamily({ llmModel, tool: storedTool }) : null);
   // #2252: a supplied model IS a report, so it stamps the time (a repeat of the same model refreshes it).
-  return { ...(llmModel != null ? { llmModel, modelReportedAt: new Date() } : {}), ...(family != null ? { family } : {}) };
+  return { ...(llmModel != null ? { llmModel, modelReportedAt: new Date() } : {}), ...(family != null ? { family } : {}), ...(effort != null ? { effort } : {}) };
+}
+
+/** #4291: a supplied effort must be one of the generic scale; checked before any write (and, on a resume, before the claim is spent). */
+function explicitEffortOrThrow(effort: string | null | undefined): EffortLevel | null {
+  if (effort == null) return null;
+  if (!isEffortLevel(effort)) {
+    throw new GraphQLError('effort is one of LOW, MEDIUM, HIGH, XHIGH, MAX, UNSET or NOT_APPLICABLE.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+  return effort;
 }
 
 // ── #1956: resume claims ───────────────────────────────────────────────────
@@ -534,7 +571,11 @@ type ResumeSessionInput = {
   host?: string | null;
   llmModel?: string | null;
   family?: string | null;
+  /** #4291: refreshed on an open session it resumes, recorded on one it starts. */
+  effort?: string | null;
   transcriptPath?: string | null;
+  /** #3822: the worker the caller expects to recover (the CLI worktree's last-bound worker). */
+  expectedWorkerId?: string | null;
 };
 
 /**
@@ -571,6 +612,48 @@ const resumeRefused = (dormant: boolean) =>
         'its hard expiry or has ended, or another session of the worker is live. Nothing was bound.',
     { extensions: { code: 'RESUME_REFUSED', dormant } },
   );
+
+/**
+ * #3822 (cor:agt:020:03; Vera's FIT and ruling on the issue) — the caller named the worker it expects to recover, nothing
+ * of that worker's waits, and a claim or live session of another of the caller's workers does. Refused before any
+ * write, so that claim or session stays exactly as it was (a following resume naming its worker still binds it).
+ *
+ * Disclosure: the found worker is the caller's own (its claim or live session), so naming it tells nothing new. The
+ * expected worker is caller-supplied, so its NAME is given only when the caller passes the worker read gate
+ * (`resolveReadableWorkerRef`, the gate every worker-state read uses); otherwise only the id it sent is echoed, so this
+ * is no id-to-name oracle (#3901 BLIND, Glen's limit).
+ *
+ * `picked`: the caller chose the found item by `session`. Then A may still have something waiting, so the message
+ * says only that the pick is another worker's (#3901 BLIND, Glen P3-1).
+ */
+const workerMismatch = (
+  expected: { id: string; name: string | null },
+  found: { id: string; name: string; source: 'CLAIM' | 'LIVE_SESSION' },
+  picked: boolean,
+) => {
+  const what = found.source === 'CLAIM' ? 'resume claim' : 'live session';
+  const label = expected.name ?? `worker ${expected.id}`;
+  const head = picked
+    ? `The session you picked is ${found.name}'s ${what}, not ${label}'s.`
+    : `Nothing of ${label}'s waits to resume: the ${what} waiting for you is ${found.name}'s.`;
+  return new GraphQLError(
+    `${head} Nothing was bound, consumed or ended, and ${found.name}'s ${what} is untouched. To recover ` +
+      `${found.name}, resume from its own worktree or name it (startSession with workerRef).`,
+    {
+      extensions: {
+        code: 'RESUME_REFUSED',
+        reason: 'WORKER_MISMATCH',
+        dormant: false,
+        picked,
+        expectedWorkerId: expected.id,
+        expectedWorkerName: expected.name,
+        foundWorkerId: found.id,
+        foundWorkerName: found.name,
+        foundSource: found.source,
+      },
+    },
+  );
+};
 
 const sessionEndedForClaim = (sessionId: string) =>
   new GraphQLError(
@@ -740,7 +823,17 @@ export const sessionMutations = {
         }
       } else {
         family = deriveFamily({ llmModel: input.llmModel, tool: input.tool });
+        // #4291: a host-started bind that reports no family runs as its start said. A model the bind itself reports
+        // still decides first; with none, the start's family wins over a guess from the tool.
+        const started = normalizeFamily(launch?.args.family);
+        if (started && (input.llmModel == null || family === null)) family = started;
       }
+      // #4291: the effort a host-started bind runs with is its start's, unless the bind reports its own; so is the model.
+      const effort: EffortLevel | null = explicitEffortOrThrow(input.effort) ?? effortFromToken(launch?.args.effort);
+      // The start's model belongs to the start's family: a bind that reports ANOTHER family (and no model) does not
+      // inherit it, or the session and the worker's record would pair a family with another family's model (#4295 BLIND, Clark F2).
+      const startedModel = launch?.args.model && family === normalizeFamily(launch.args.family) ? launch.args.model : null;
+      const boundModel: string | null = input.llmModel ?? startedModel;
 
       const workerRef = input.workerRef?.trim();
       if (workerRef) {
@@ -1487,9 +1580,10 @@ export const sessionMutations = {
           prNumber: input.prNumber,
           customerId: input.customerId,
           language: input.language,
-          llmModel: input.llmModel,
-          // #2252: a model given at bind is a report.
+          llmModel: boundModel,
+          // #2252: a model given at bind is a report (one taken from the start's args is not self-reported).
           modelReportedAt: input.llmModel != null ? new Date() : null,
+          effort,
           parentSessionId: input.parentSessionId,
           prevSessionId: input.prevSessionId ?? supersedes[0]?.id ?? derivedPrevSessionId,
           // #928 coding-session provenance.
@@ -1514,6 +1608,12 @@ export const sessionMutations = {
         // #1709: the grant is spent by THIS bind, atomically: of two concurrent redemptions one loses here, and its
         // whole bind rolls back.
         if (launch && !(await consumeGrant(tx, launch.grant.id, created.id, new Date()))) throw launchGrantInvalid();
+        // #4291: the bind is the first report; the worker's record follows it (the worker row is held FOR UPDATE above).
+        if (workerId) {
+          await recordRunSettings(tx, created.id);
+          // #4301: a started task reassigned to this worker while it had no session now shows this run.
+          await fillEmptyAppliedRunSettings(tx, created.id);
+        }
         // #1726: set who the worker reports to, in one step with the bind (a
         // spawn brief). Only onto a worker that reports to nobody, or to the
         // same worker (nothing to do): naming a different one would move a
@@ -1553,7 +1653,7 @@ export const sessionMutations = {
           });
           await tx.session.updateMany({
             where: { id: { in: ids }, endedAt: null },
-            data: { endedAt, endReason: 'superseded' },
+            data: { endedAt, endReason: 'superseded', supersededBySessionId: created.id },
           });
           supersededIds = ids;
         }
@@ -1574,7 +1674,7 @@ export const sessionMutations = {
     // session ends, and late attribution is better than none.
     updateSession: async (
       _: unknown,
-      { id, prNumber, branch, llmModel, family }: { id: string; prNumber?: number | null; branch?: string | null; llmModel?: string | null; family?: string | null },
+      { id, prNumber, branch, llmModel, family, effort }: { id: string; prNumber?: number | null; branch?: string | null; llmModel?: string | null; family?: string | null; effort?: string | null },
       ctx: Context,
     ) => {
       const session = await ctx.db.session.findUnique({ where: { id } });
@@ -1584,18 +1684,27 @@ export const sessionMutations = {
       await requireSessionWriteAccess(ctx, session);
       // #1931: refresh a binding without guessing a model family from its host.
       // Null/omitted metadata never clears an existing family during recovery.
-      const refresh = modelFamilyRefresh(explicitFamilyOrThrow(family), llmModel, session.tool);
-      return ctx.db.session.update({
-        where: { id },
-        data: {
-          ...(prNumber !== undefined ? { prNumber } : {}),
-          ...(branch !== undefined ? { branch } : {}),
-          ...refresh,
-          updatedBy: ctx.userId ?? ctx.clientId ?? null,
-          // #1543 — a pr/branch edit must not revive a lapsed session.
-          ...(await preserveHeartbeatIfLapsed(ctx.db as never, id)),
-        },
-        include: SESSION_INCLUDE,
+      const refresh = modelFamilyRefresh(explicitFamilyOrThrow(family), llmModel, session.tool, explicitEffortOrThrow(effort));
+      const data = {
+        ...(prNumber !== undefined ? { prNumber } : {}),
+        ...(branch !== undefined ? { branch } : {}),
+        ...refresh,
+        updatedBy: ctx.userId ?? ctx.clientId ?? null,
+        // #1543 — a pr/branch edit must not revive a lapsed session.
+        ...(await preserveHeartbeatIfLapsed(ctx.db as never, id)),
+      };
+      // #4291: a report on a worker's session also moves the worker's record, in one transaction. The worker row is
+      // locked BEFORE the session row is written, the order a bind takes them in (recordRunSettings, LOCK ORDER). An
+      // update that reports nothing, or a session bound to no worker, stays the single write it was.
+      if (!session.workerId || Object.keys(refresh).length === 0) {
+        return ctx.db.session.update({ where: { id }, data, include: SESSION_INCLUDE });
+      }
+      const workerId = session.workerId;
+      return ctx.db.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM workers WHERE id = ${workerId} FOR UPDATE`;
+        const updated = await tx.session.update({ where: { id }, data, include: SESSION_INCLUDE });
+        await recordRunSettings(tx, id);
+        return updated;
       });
     },
 
@@ -1730,8 +1839,57 @@ export const sessionMutations = {
       // #2086: a bad family refuses BEFORE any claim is read or spent. It sits after the NOTHING_TO_RESUME line
       // above, so an App key or an impersonation learns nothing about the value either way.
       const explicitFamily = explicitFamilyOrThrow(given.family);
+      const explicitEffort = explicitEffortOrThrow(given.effort);
+      // #3822: likewise a blank expected worker refuses before any read. Null or omitted means no narrowing.
+      const expectedWorkerId = given.expectedWorkerId == null ? null : given.expectedWorkerId.trim();
+      if (expectedWorkerId === '') {
+        throw new GraphQLError('expectedWorkerId must not be blank: omit it to resume without naming a worker.', { extensions: { code: 'BAD_USER_INPUT' } });
+      }
+      // #3912: a URN or a name is not an id. Refuse it here, before any read, so it never reaches the read gate that
+      // would name it back ("Bea's, not Bea's"). After the NOTHING_TO_RESUME line above, so a caller who may not resume
+      // learns nothing about the value; a valid id takes the path it always did.
+      if (expectedWorkerId !== null && !isId(expectedWorkerId)) {
+        throw new GraphQLError('expectedWorkerId must be a worker id, not a URN or a name: pass the id the worker was bound with.', { extensions: { code: 'BAD_USER_INPUT' } });
+      }
       const now = new Date();
-      const claims = await liveClaimsOf(ctx.db, userId, now);
+      // #3901 LOCAL (Gene P2): the expected worker's claims are filtered in the query, before the candidate cap.
+      const claims = await liveClaimsOf(ctx.db, userId, now, expectedWorkerId ? { workerId: expectedWorkerId } : {});
+      // #3822: with an expected worker the call is the no-argument resume restricted to that worker; everything
+      // below decides on its claims and live sessions only. Another worker's items are read only to refuse.
+      // #3901 BLIND (Glen P2): the expected worker's live pool is filtered in the query, BEFORE the scan cap, so
+      // other workers' sessions can never refuse RESUME_AMBIGUOUS on a resume of the expected worker.
+      const liveOfExpected = () =>
+        liveWorkerSessionsOf(ctx.db, userId, now, expectedWorkerId ? { workerId: expectedWorkerId } : {});
+      /**
+       * #3822: nothing of the expected worker's waits (or the pick is another worker's). Refuse WORKER_MISMATCH when
+       * something of another worker of the caller's does (a claim first, as the no-argument resume decides claims
+       * first; else a live session), before any write. Otherwise today's NOTHING_TO_RESUME, so a caller with nothing
+       * learns nothing.
+       */
+      type Found = { workerId: string; appId: string | null; source: 'CLAIM' | 'LIVE_SESSION' };
+      const mismatchOrNothing = async (pick: string | null) => {
+        if (!expectedWorkerId) return nothingToResume();
+        const [other] = await liveClaimsOf(ctx.db, userId, now, { notWorkerId: expectedWorkerId, ...(pick ? { sessionId: pick } : {}) });
+        let found: Found | null = other ? { workerId: other.workerId, appId: other.appId, source: 'CLAIM' } : null;
+        if (!found) {
+          const otherLive = await firstLiveWorkerSessionOf(ctx.db, userId, now, { notWorkerId: expectedWorkerId, ...(pick ? { id: pick } : {}) });
+          if (otherLive) found = { workerId: otherLive.workerId!, appId: otherLive.appId, source: 'LIVE_SESSION' };
+        }
+        if (!found) return nothingToResume();
+        const foundWorker = await ctx.db.worker.findUnique({ where: { id: found.workerId }, select: { name: true } });
+        let expectedName: string | null = null;
+        try {
+          expectedName = (await resolveReadableWorkerRef(ctx, expectedWorkerId)).worker.name;
+        } catch (e) {
+          // Narrow: an absent or unreadable worker is named by nothing but the id the caller sent.
+          if (!(e instanceof GraphQLError && e.extensions?.code === 'WORKER_NOT_FOUND')) throw e;
+        }
+        return workerMismatch(
+          { id: expectedWorkerId, name: expectedName },
+          { id: found.workerId, name: foundWorker?.name ?? found.workerId, source: found.source },
+          pick !== null,
+        );
+      };
 
       const resumed = async (sessionId: string, outcome: 'RESUMED' | 'STARTED') => ({
         outcome,
@@ -1757,8 +1915,12 @@ export const sessionMutations = {
             // #2086: only after the gate permits, inside its transaction, so a refusal or a lost claim writes nothing.
             if (ok) {
               const stored = await tx.session.findUniqueOrThrow({ where: { id: sessionId }, select: { tool: true } });
-              const refresh = modelFamilyRefresh(explicitFamily, given.llmModel, stored.tool);
-              if (Object.keys(refresh).length) await tx.session.update({ where: { id: sessionId }, data: { ...refresh, updatedBy: userId } });
+              const refresh = modelFamilyRefresh(explicitFamily, given.llmModel, stored.tool, explicitEffort);
+              if (Object.keys(refresh).length) {
+                await tx.session.update({ where: { id: sessionId }, data: { ...refresh, updatedBy: userId } });
+                // #4291: the record follows the report (the gate above holds the worker row FOR UPDATE).
+                await recordRunSettings(tx, sessionId);
+              }
             }
             if (claimId) {
               if (!(await consumeResumeClaim(tx, claimId, userId))) throw lost;
@@ -1791,6 +1953,7 @@ export const sessionMutations = {
             host: given.host ?? undefined,
             llmModel: given.llmModel ?? undefined,
             family: given.family ?? undefined,
+            effort: given.effort ?? undefined,
             transcriptPath: given.transcriptPath ?? undefined,
           } as SessionInput,
         }, ctx);
@@ -1802,9 +1965,10 @@ export const sessionMutations = {
       if (given.session) {
         const picked = claims.find((c) => c.sessionId === given.session);
         if (picked) return redeem(picked);
-        const live = await liveWorkerSessionsOf(ctx.db, userId, now);
+        const live = await liveOfExpected();
         if (live.some((l) => l.id === given.session)) return resumeLive(given.session);
-        throw nothingToResume();
+        // #3822: a pick of another worker's claim or live session is the mismatch, never a bind.
+        throw await mismatchOrNothing(given.session);
       }
       if (claims.length === 1) return redeem(claims[0]);
       if (claims.length > 1) {
@@ -1814,7 +1978,7 @@ export const sessionMutations = {
           candidates: await toCandidates(ctx.db, claims.map((c) => ({ sessionId: c.sessionId, workerId: c.workerId, source: 'CLAIM' as const, expiresAt: c.expiresAt }))),
         };
       }
-      const live = await liveWorkerSessionsOf(ctx.db, userId, now);
+      const live = await liveOfExpected();
       if (live.length === 1) return resumeLive(live[0].id);
       if (live.length > 1) {
         return {
@@ -1823,7 +1987,7 @@ export const sessionMutations = {
           candidates: await toCandidates(ctx.db, live.map((l) => ({ sessionId: l.id, workerId: l.workerId!, source: 'LIVE_SESSION' as const, expiresAt: null }))),
         };
       }
-      throw nothingToResume();
+      throw await mismatchOrNothing(null);
     },
 
     recordUsage: async (_: unknown, { event }: { event: UsageEventInput }, ctx: Context) => {
@@ -2181,7 +2345,8 @@ export const sessionMutations = {
       // Snapshot all non-revision nodes + edges in the system memory
       const nodes = await ctx.db.node.findMany({
         where: { memoryId: sysMemId, deletedAt: null, NOT: { loc: { startsWith: 'revisions' } } },
-        select: { loc: true, name: true, nodeType: true, description: true, content: true, data: true, tags: true },
+        // #4244: `role` is recorded so a boot-prompt source recreated by a restore keeps the role a compile needs.
+        select: { loc: true, name: true, nodeType: true, role: true, description: true, content: true, data: true, tags: true, seq: true },
       });
       const nodeIds = (await ctx.db.node.findMany({
         where: { memoryId: sysMemId, deletedAt: null, NOT: { loc: { startsWith: 'revisions' } } },
@@ -2191,6 +2356,8 @@ export const sessionMutations = {
         // Derived INCLUDE edges (#2040) are not snapshotted: restore re-derives them from content.
         where: { sourceId: { in: nodeIds }, deletedAt: null, governedKind: null },
         include: { source: { select: { loc: true } }, target: { select: { loc: true } } },
+        // #4034: the reader breaks equal-priority ties by snapshot order, so write it in the live read's order.
+        orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
       });
       const edgeSnapshots = edges.map((e) => ({
         sourceLoc: e.source.loc,
@@ -2200,6 +2367,9 @@ export const sessionMutations = {
         description: e.description,
         isRunnable: e.isRunnable,
         data: e.data,
+        // #4034 (plan D3, edgeFormat 2): a snapshot that drops these makes a pinned chat fire every conditional rule.
+        condition: e.condition ?? null,
+        priority: e.priority,
       }));
 
       // Ensure revisions parent exists
@@ -2251,7 +2421,7 @@ export const sessionMutations = {
               label,
               published: false,
               createdBy: ctx.userId ?? null,
-              snapshot: { nodes: nodes.map((n) => ({ ...n, tags: n.tags ?? [] })), edges: edgeSnapshots },
+              snapshot: { edgeFormat: CHAT_SCRIPT_EDGE_FORMAT, nodes: nodes.map((n) => ({ ...n, tags: n.tags ?? [] })), edges: edgeSnapshots },
             } as InputJsonValue,
           },
         });
@@ -2277,7 +2447,7 @@ export const sessionMutations = {
       const revNode = await ctx.db.node.findFirst({
         where: { memoryId: sysMemId, loc: revisionLoc, deletedAt: null },
       });
-      if (!revNode) throw new Error(`Revision "${revisionLoc}" not found`);
+      if (!revNode) throw revisionNotFound(revisionLoc);
 
       const revData = (revNode.data as Record<string, unknown>) ?? {};
       const label = versionLabel ?? (revData.label as string) ?? revisionLoc;
@@ -2313,11 +2483,13 @@ export const sessionMutations = {
       const revNode = await ctx.db.node.findFirst({
         where: { memoryId: sysMemId, loc: revisionLoc, deletedAt: null },
       });
-      if (!revNode) throw new Error(`Revision "${revisionLoc}" not found`);
+      if (!revNode) throw revisionNotFound(revisionLoc);
 
       const revData = (revNode.data as Record<string, unknown>) ?? {};
-      const snapshot = revData.snapshot as { nodes: Array<Record<string, unknown>>; edges: Array<Record<string, unknown>> } | undefined;
+      const snapshot = revData.snapshot as { edgeFormat?: number; nodes: Array<Record<string, unknown>>; edges: Array<Record<string, unknown>> } | undefined;
       if (!snapshot) throw new Error('Revision has no snapshot data');
+      // #4034 (D3): only a v2 snapshot holds edge condition/priority and node seq to restore.
+      const restoresScriptFields = snapshot.edgeFormat === CHAT_SCRIPT_EDGE_FORMAT;
 
       // Auto-save current state before restoring
       await sessionMutations.createRevision({}, { agentId: resolvedAgentId, description: `Auto-save before restoring ${revisionLoc}` }, ctx);
@@ -2347,8 +2519,21 @@ export const sessionMutations = {
           // snapshot does not restore is a removal; one it restores must not
           // come back without its marker. Both are checked under the guard's
           // row locks, and only the locked rows are tombstoned.
+          // #4244 (cor:agt:040:12): compiling is the only way a compiled boot prompt is written, so a restore leaves
+          // each one as it is. It is not tombstoned here (a retired compiled node would refuse every bind,
+          // cor:agt:040:10), not written below, and a snapshot's copy of one is ignored. `compiled` holds every loc a
+          // compiled row sits at, retired ones included, plus the locs the snapshot holds one at.
+          const compiledRows = await tx.node.findMany({
+            where: { memoryId: sysMemId, nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE },
+            select: { id: true, loc: true },
+          });
+          const compiledIds = compiledRows.map((n) => n.id);
+          const compiled = new Set([
+            ...compiledRows.map((n) => n.loc),
+            ...snapshot.nodes.filter((n) => n.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE).map((n) => n.loc as string),
+          ]);
           const live = await tx.node.findMany({
-            where: { memoryId: sysMemId, deletedAt: null, NOT: { loc: { startsWith: 'revisions' } } },
+            where: { memoryId: sysMemId, deletedAt: null, id: { notIn: compiledIds }, NOT: { loc: { startsWith: 'revisions' } } },
             select: { id: true, loc: true },
           });
           const snapshotTags = new Map(snapshot.nodes.map((n) => [n.loc as string, (n.tags as string[]) ?? []]));
@@ -2367,7 +2552,7 @@ export const sessionMutations = {
 
           // Delete all edges in the system memory
           const currentNodeIds = (await tx.node.findMany({
-            where: { memoryId: sysMemId },
+            where: { memoryId: sysMemId, id: { notIn: compiledIds } }, // #4244: a compiled prompt keeps its edges
             select: { id: true },
           })).map((n) => n.id);
           await tx.edge.updateMany({
@@ -2383,7 +2568,7 @@ export const sessionMutations = {
           // drift reconciled as its own revision, the real predecessor
           // snapshotted, the fingerprint refreshed. Rows are taken in loc
           // order so two concurrent restores lock in the same sequence.
-          const restoreOrder = [...snapshot.nodes].sort((a, b) =>
+          const restoreOrder = snapshot.nodes.filter((n) => !compiled.has(n.loc as string)).sort((a, b) =>
             (a.loc as string) < (b.loc as string) ? -1 : (a.loc as string) > (b.loc as string) ? 1 : 0,
           );
           for (const n of restoreOrder) {
@@ -2397,6 +2582,8 @@ export const sessionMutations = {
               data: (n.data ?? null) as InputJsonValue,
               tags: (n.tags as string[]) ?? [],
               deletedAt: null,
+              // #4034 (D3): a v2 snapshot carries the sibling order; a pre-v2 one never did, so the live row keeps its own.
+              ...(restoresScriptFields ? { seq: (n.seq as number | null | undefined) ?? null } : {}),
             };
             const prior = await tx.node.findUnique({
               where: { loc_memoryId: { loc, memoryId: sysMemId } },
@@ -2431,7 +2618,8 @@ export const sessionMutations = {
             }
             const upserted = await tx.node.upsert({
               where: { loc_memoryId: { loc, memoryId: sysMemId } },
-              create: { id: generateId(), memoryId: sysMemId, loc, ...nodeData },
+              // #4244: a row made anew takes the snapshot's role; over an existing row the live role stays.
+              create: { id: generateId(), memoryId: sysMemId, loc, ...nodeData, role: (n.role as string | null | undefined) ?? null },
               update: {
                 ...nodeData,
                 ...(clearRestoredAuthorship ? clearNodeAuthorship() : {}),
@@ -2448,7 +2636,10 @@ export const sessionMutations = {
           // Restore edges from snapshot. Spec 037: derive loc when an older
           // snapshot predates the edge `loc`/`name` fields (it would carry the
           // legacy `label`); memoryId is the system memory being restored into.
+          // #4244: an edge TO a compiled prompt is another node's and is restored; an edge FROM one was left alone above.
+          for (const c of compiledRows) locToId.set(c.loc, c.id);
           for (const e of snapshot.edges) {
+            if (compiled.has(e.sourceLoc as string)) continue;
             const sourceId = locToId.get(e.sourceLoc as string);
             const targetId = locToId.get(e.targetLoc as string);
             if (sourceId && targetId) {
@@ -2462,6 +2653,13 @@ export const sessionMutations = {
                 description: (e.description as string | null) ?? null,
                 isRunnable: (e.isRunnable as boolean | null) ?? null,
                 data: (e.data ?? null) as InputJsonValue,
+                // #4034 (D3, ruling R1 (a)): only a v2 snapshot holds these; a pre-v2 one restores as it always did.
+                ...(restoresScriptFields
+                  ? {
+                      condition: (e.condition ?? Prisma.JsonNull) as InputJsonValue,
+                      priority: (e.priority as number | undefined) ?? 0,
+                    }
+                  : {}),
               };
               // Upsert, not create: the edge soft-delete above leaves the
               // (loc, memoryId) slot occupied (Edge @@unique([loc, memoryId]) is

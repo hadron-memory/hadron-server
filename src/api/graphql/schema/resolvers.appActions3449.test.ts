@@ -1,3 +1,4 @@
+import { settledTeamEventQueries } from '../../../test/teamEventHorizon.js';
 /** #3449: App action contract, real database; the stream remains App-wide. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -10,7 +11,7 @@ import { runAsActor } from '../../../lib/requestActor.js';
 import { resolvers, type Context } from './resolvers.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
-const M = resolvers.Mutation as any, Q = resolvers.Query as any;
+const M = resolvers.Mutation as any, Q = settledTeamEventQueries(resolvers.Query, db) as any;
 let userId: string, outsiderId: string, appId: string, foreignAppId: string;
 const ctx = (id = userId): Context => ({ db, userId: id, roles: ['READER'] });
 const record = (args: Record<string, unknown> = {}, c = ctx()) => M.recordAppAction({}, { appRef: appId, code: 'app.team.design.approved', ...args }, c);

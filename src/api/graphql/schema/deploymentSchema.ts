@@ -1,11 +1,17 @@
 import { Kind, parse, print, visit } from 'graphql';
 import { typeDefs } from './typeDefs.js';
 import { resolvers } from './resolvers.js';
-import { signingSurfacePolicy } from '../../../lib/signing/surface.js';
+import { SERVER_INFO_SWITCH_FIELDS, serverInfoFieldPresence, signingSurfacePolicy } from '../../../lib/signing/surface.js';
 
 const signingTypes = new Set([
   'SigningRequestState', 'SignatureState', 'SigningRequester',
   'SigningRequest', 'NodeSignature', 'NodeSignatureStatus',
+  // #3649 slice B: grant signing rides the same switch (ruling 0255, item 17).
+  'GrantSigningRequestState', 'GrantSigningRequest',
+  // #3690 PR 2: creating a grant rides the same switch, so none can be made where it could not be signed.
+  'CreateGrantInput',
+  // #3649 slice D: Grant.signatureStatus goes with them (its type is in this set).
+  'GrantSignatureState', 'GrantSignature', 'GrantSignatureStatus',
 ]);
 
 /** #1631 PR3: the owner's passkey records, a registration-switch read (#1895). */
@@ -13,7 +19,8 @@ const registrationTypes = new Set(['PasskeyCredential', 'PasskeyWindow', 'Passke
 
 /** #1918: public-reference generators consume the same per-flag field data. */
 export const capabilityFields: Readonly<Record<string, Readonly<Record<string, 'signing' | 'registration'>>>> = {
-  ServerInfo: { signing: 'signing', passkeyRegistration: 'registration' },
+  ServerInfo: SERVER_INFO_SWITCH_FIELDS,
+  Mutation: { createGrant: 'signing' },
 };
 
 /** #1895: Apollo execution, introspection and SDL discovery share this schema.
@@ -22,6 +29,7 @@ export const capabilityFields: Readonly<Record<string, Readonly<Record<string, '
  */
 export function deploymentSchema() {
   const policy = signingSurfacePolicy();
+  const present = serverInfoFieldPresence(policy);
   if (policy.signing && policy.registration) return { typeDefs, resolvers };
   const removedFields = new Map<string, Set<string>>();
   const document = visit(parse(typeDefs), {
@@ -34,7 +42,10 @@ export function deploymentSchema() {
       const owner = [...ancestors, parent].reverse().find(item => item && !Array.isArray(item) && 'kind' in item && item.kind === Kind.OBJECT_TYPE_DEFINITION);
       const capabilityFlag = owner && !Array.isArray(owner) && 'name' in owner && owner.name
         ? capabilityFields[owner.name.value]?.[node.name.value] : undefined;
-      const capabilityOff = capabilityFlag !== undefined && !policy[capabilityFlag];
+      // ServerInfo's presence comes from the same function the resolver uses (#4068); other owners read the switch.
+      const capabilityOff = capabilityFlag !== undefined
+        && (owner && !Array.isArray(owner) && 'name' in owner && owner.name?.value === 'ServerInfo'
+          ? !present[node.name.value as keyof typeof present] : !policy[capabilityFlag]);
       const registrationOff = !policy.registration && registrationTypes.has(type.name.value);
       if (!capabilityOff && !registrationOff && (policy.signing || !signingTypes.has(type.name.value))) return;
       if (owner && !Array.isArray(owner) && 'name' in owner && owner.name) {

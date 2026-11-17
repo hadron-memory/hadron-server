@@ -90,8 +90,10 @@ describe('createSecret — gate matrix', () => {
     ).rejects.toThrow('Forbidden');
   });
 
-  it('rejects the superseded app/memory owner types (#696)', async () => {
-    await expect(createSecret({ ownerType: 'app', ownerRef: org.id })).rejects.toThrow(/ownerType must be one of/);
+  // #3997: `app` is an owner type again (D-2026-11-12-001), so its pinned refusal is REPLACED, not deleted: an `app` owner
+  // whose ref names no App the caller may use is refused like any other unauthorized owner; `memory` stays superseded (#696).
+  it('refuses an app owner that names no usable App, and still rejects the superseded memory owner type', async () => {
+    await expect(createSecret({ ownerType: 'app', ownerRef: org.id })).rejects.toThrow('Forbidden');
     await expect(createSecret({ ownerType: 'memory', ownerRef: org.id })).rejects.toThrow(/ownerType must be one of/);
   });
 });
@@ -101,7 +103,7 @@ describe('createSecret — validation + encryption', () => {
     const secret = await createSecret();
     const raw = await db.secret.findUniqueOrThrow({ where: { id: secret.id } });
     expect(JSON.stringify(raw)).not.toContain('sk-secret-123');
-    expect(JSON.parse(decryptToken(raw.valueEncrypted))).toBe('sk-secret-123');
+    expect(JSON.parse(decryptToken(raw.valueEncrypted!))).toBe('sk-secret-123');
   });
 
   it('rejects a bad ownerType, a bad name, an unknown kind, and a missing value', async () => {

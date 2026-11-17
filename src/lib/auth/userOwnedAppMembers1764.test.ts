@@ -1,3 +1,4 @@
+import { settledTeamEventQueries } from '../../test/teamEventHorizon.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /**
  * #1764 — members of a user-owned App are participants (Holger "A", #8151 / #8155; cor:acl:010:01).
@@ -24,7 +25,7 @@ import { serveAgentBootPrompt } from '../../test/servedBootPrompt.js';
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
 
-const Q = resolvers.Query as any;
+const Q = settledTeamEventQueries(resolvers.Query, db) as any;
 const M = resolvers.Mutation as any;
 
 const ctx = (userId?: string, extra: Partial<Context> = {}): Context => ({ db, userId, roles: ['READER'], ...extra }) as Context;
@@ -258,10 +259,10 @@ describe('tasks and the team chat', () => {
     await M.createTeamChatMessage({}, { appRef: app.id, body: 'hello from a member' }, ctx(member.id));
     const page = await Q.teamChatMessages({}, { appRef: app.id }, ctx(member.id));
     expect(page.total).toBe(1);
-    expect(await code(Q.teamChatMessages({}, { appRef: app.id }, ctx(outsider.id)))).toBe('FORBIDDEN');
-    expect(await code(Q.teamChatMessages({}, { appRef: app.id }, ctx(otherMember.id)))).toBe('FORBIDDEN');
-    expect(await code(M.createTeamChatMessage({}, { appRef: app.id, body: 'x' }, ctx(outsider.id)))).toBe('FORBIDDEN');
-    expect(await code(Q.teamChatMessages({}, { appRef: app.id }, ctx(member.id, { impersonation: { orgId: 'x' } as any })))).toBe('FORBIDDEN');
+    expect(await code(Q.teamChatMessages({}, { appRef: app.id }, ctx(outsider.id)))).toBe('APP_NOT_FOUND');
+    expect(await code(Q.teamChatMessages({}, { appRef: app.id }, ctx(otherMember.id)))).toBe('APP_NOT_FOUND');
+    expect(await code(M.createTeamChatMessage({}, { appRef: app.id, body: 'x' }, ctx(outsider.id)))).toBe('APP_NOT_FOUND');
+    expect(await code(Q.teamChatMessages({}, { appRef: app.id }, ctx(member.id, { impersonation: { orgId: 'x' } as any })))).toBe('APP_NOT_FOUND');
   });
 });
 
@@ -326,7 +327,7 @@ describe('nested content behind the widened Worker gate (Riana P1, #1786)', () =
   async function graph(workerId: string, as: string) {
     const { ApolloServer } = await import('@apollo/server');
     const { typeDefs } = await import('../../api/graphql/schema/typeDefs.js');
-    const server = new ApolloServer({ typeDefs, resolvers });
+    const server = new ApolloServer({ typeDefs, resolvers: { ...resolvers, Query: settledTeamEventQueries(resolvers.Query, db) } });
     try {
       const result = await server.executeOperation(
         { query: 'query($ref: ID!) { worker(ref: $ref) { id agent { id description } prompt continuity { handoff { id content data } } } }', variables: { ref: workerId } },

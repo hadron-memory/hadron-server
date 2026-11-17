@@ -314,8 +314,10 @@ describe('startChat (JWT user)', () => {
       where: { memoryId: mem!.id, loc: result.chatId },
     });
     expect(chatNode).not.toBeNull();
-    expect((chatNode!.data as Record<string, unknown>).conversationName).toBe('research');
-    expect((chatNode!.data as Record<string, unknown>).stageName).toBe('scope');
+    // #3557: the names live only in the state row now (no rollback mirror in the root).
+    expect(chatNode!.data as Record<string, unknown>).not.toHaveProperty('conversationName');
+    expect(chatNode!.data as Record<string, unknown>).not.toHaveProperty('stageName');
+    expect((await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: chatNode!.id } })).state).toMatchObject({ conversationName: 'research', stageName: 'scope' });
   });
 
   // Spec 019: the Tester portal endpoint passes isTestRun=true so a
@@ -1385,7 +1387,8 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     expect(messageCount).toBe(3);
     // The turn's own change survived the switch to applying it on fresh data.
     const chatNode = await chatNodeByLocOrThrow(db, start.chatId);
-    expect((chatNode.data as Record<string, unknown>).stageName).toBe('analysis');
+    expect(chatNode.data as Record<string, unknown>).not.toHaveProperty('stageName');
+    expect((await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: chatNode.id } })).state).toMatchObject({ stageName: 'analysis' });
   });
 
   it('#919 — a rename waits for an in-flight turn instead of restoring its count', async () => {
@@ -1971,7 +1974,7 @@ describe('#1717 — chat-by-loc writes', () => {
   });
 });
 
-it('3501: encrypted startChat stores ciphertext root and state at birth, with only name mirrors in root', async () => {
+it('3501: encrypted startChat stores ciphertext root and state at birth, with no engine key in root (#3557)', async () => {
   const { generateDataKey } = await import('../../../lib/crypto.js');
   const { sessionKeyCache } = await import('../../../lib/sessionKeyCache.js');
   const { decryptNodeFields } = await import('../../../lib/nodeCrypto.js');
@@ -1988,7 +1991,7 @@ it('3501: encrypted startChat stores ciphertext root and state at birth, with on
     const info = { id: memory.id, isEncrypted: true };
     const data = decryptNodeFields({ data: root.data }, info).data as Record<string, unknown>;
     const state = decryptNodeFields({ data: engine.state }, info).data;
-    expect(data).toMatchObject({ conversationName: 'research', stageName: 'scope' });
+    expect(data).not.toHaveProperty('conversationName'); expect(data).not.toHaveProperty('stageName');
     expect(data).not.toHaveProperty('goalStack'); expect(data).not.toHaveProperty('routeHistory');
     expect(state).toMatchObject({ conversationName: 'research', stageName: 'scope', goalStack: expect.any(Array), routeHistory: expect.any(Array) });
   } finally { sessionKeyCache.clear(); }

@@ -59,7 +59,18 @@ async function fixture() {
 
   // H: the REAL startChat, no App installs the Agent.
   const startAs = async (u: { id: string }) => {
-    await resolvers.Mutation.startChat({}, { agentId: agent.id }, { db, userId: u.id, roles: ['READER'] } as never);
+    // #4046: create the real standalone holding under lawful manager reach, then
+    // restore the original membership before any MCP/GraphQL holding-access assertion.
+    const key = { organizationId_userId: { organizationId: orgO.id, userId: u.id } };
+    const prior = await db.orgMember.findUnique({ where: key });
+    await db.orgMember.upsert({ where: key,
+      create: { organizationId: orgO.id, userId: u.id, role: 'ADMIN' }, update: { role: 'ADMIN' } });
+    try {
+      await resolvers.Mutation.startChat({}, { agentId: agent.id }, { db, userId: u.id, roles: ['READER'] } as never);
+    } finally {
+      if (prior) await db.orgMember.update({ where: key, data: { role: prior.role } });
+      else await db.orgMember.delete({ where: key });
+    }
     const h = await db.memory.findFirstOrThrow({ where: { userMemoryOfAgentId: agent.id, createdBy: u.id } });
     await db.node.create({ data: { memoryId: h.id, loc: LOC, name: `needle3519 ${h.id}`, content: `secret ${h.id}`, nodeType: 'record' } });
     return h;

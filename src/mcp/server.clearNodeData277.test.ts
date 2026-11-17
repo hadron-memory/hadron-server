@@ -126,6 +126,23 @@ describe.each(['GraphQL', 'MCP'])('%s data replacement', (surface) => {
       expect(persisted?.absent).toBe(true);
       expect((await stored(enc)).content).toBe('body untouched');
     });
+    it('repeated data:null is a revision no-op (#3728)', async () => {
+      await update(surface, { data: null });
+      const first = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+      expect(first.data).toBeNull();
+      expect(await revisions()).toBe(1);
+      const firstRevSeq = first.revSeq;
+      expect(firstRevSeq).toBeGreaterThan(0);
+
+      await update(surface, { data: null });
+      const second = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+      expect((await stored(enc)).data).toBeNull();
+      const [persisted] = await db.$queryRaw<Array<{ absent: boolean }>>`
+        SELECT data IS NULL AS absent FROM nodes WHERE id = ${node.id}`;
+      expect(persisted?.absent).toBe(true);
+      expect(second.revSeq).toBe(firstRevSeq);
+      expect(await revisions()).toBe(1);
+    });
     it('omitting data preserves it', async () => {
       await update(surface, { name: 'Renamed' });
       expect((await stored(enc)).data).toEqual(original);

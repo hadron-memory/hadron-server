@@ -182,7 +182,7 @@ async function usageEventsWhere(
           ...windowFilter,
           ...(type ? { type } : {}),
           ...keyWhere,
-          ...(readable !== null ? { OR: [{ memoryId: { in: readable } }, { memoryId: null }] } : {}),
+          OR: [{ memoryId: { in: readable } }, { memoryId: null }],
         };
       }
       if (!memoryId && !nodeId && !loc && !keyFilter) {
@@ -264,11 +264,8 @@ async function usageEventsWhere(
       // except other users' personal/private. An App key (#2817) gets the
       // memories its App may read — the same READ gate as the memory's content.
       //
-      // The return type is `string[] | null`, where null would mean
-      // "unrestricted (no filter)". In practice every branch returns an
-      // explicit list — ADMIN/OWNER included, so the personal/private carve-out
-      // still applies — so the `!== null` guards below are defensive for that
-      // type contract rather than a live code path today.
+      // The gate always returns an explicit list (#3921) — ADMIN/OWNER included, so the personal/private
+      // carve-out still applies — never an "unrestricted" null.
       // A named memory is checked against that one target (the scoped form of the same predicates), so a
       // gate that admits only a NAMED memory, such as an App key's PUBLIC knowledge read (#3306), applies.
       const resolvedMemoryId = memoryId ? (await resolveMemoryRef(ctx.db, memoryId)).id : undefined;
@@ -277,9 +274,9 @@ async function usageEventsWhere(
       // NAMED memory (an App key's PUBLIC knowledge read) applies to the node's memory too. The scoped check answers
       // [] for an unreadable memory, so this never widens past the memory's READ gate, and the nodeId filter below
       // still bounds the rows to that one node.
-      if (!resolvedMemoryId && nodeMemoryId && accessibleMemoryIds !== null && !accessibleMemoryIds.includes(nodeMemoryId)) {
+      if (!resolvedMemoryId && nodeMemoryId && !accessibleMemoryIds.includes(nodeMemoryId)) {
         const nodeTarget = await getAccessibleMemoryIds(ctx, nodeMemoryId);
-        accessibleMemoryIds = nodeTarget === null ? null : [...accessibleMemoryIds, ...nodeTarget];
+        accessibleMemoryIds = [...accessibleMemoryIds, ...nodeTarget];
       }
 
       // Per-memory scoping (issue #249, moved onto the column in #796): filter
@@ -295,7 +292,7 @@ async function usageEventsWhere(
         // but a MISSING memory throws above, so [] itself meant "exists, not
         // yours". #1381 (`cor:api:140:03`): answer exactly as resolveMemoryRef's
         // miss instead.
-        if (accessibleMemoryIds !== null && !accessibleMemoryIds.includes(resolvedMemoryId)) {
+        if (!accessibleMemoryIds.includes(resolvedMemoryId)) {
           throw new MemoryNotFoundError(memoryId);
         }
         memoryScopeId = resolvedMemoryId;
@@ -305,25 +302,23 @@ async function usageEventsWhere(
       //  - memoryId scoped path → the single, already access-checked memory.
       //  - otherwise (a nodeId or loc was named) → the caller's full
       //    accessible-memory set (#250), bounding any bare-loc filter to
-      //    readable memories. A `null` accessible set = unrestricted.
+      //    readable memories. The accessible set is always a list (#3921).
       //
       // Either way an event with a NULL memoryId is excluded, exactly as the
       // relation filter excluded an event with a null nodeId — `IN` never
       // matches NULL — so this widens results only to events already
       // attributed to a memory the caller can read.
-      const memoryFilter: { memoryId: string } | { memoryId: { in: string[] } } | undefined =
+      const memoryFilter: { memoryId: string } | { memoryId: { in: string[] } } =
         memoryScopeId !== undefined
           ? { memoryId: memoryScopeId }
-          : accessibleMemoryIds !== null
-            ? { memoryId: { in: accessibleMemoryIds } }
-            : undefined;
+          : { memoryId: { in: accessibleMemoryIds } };
 
   return {
           ...windowFilter,
           ...(type ? { type } : {}),
           ...keyWhere,
           ...(nodeIdFilter ? { nodeId: nodeIdFilter } : {}),
-          ...(memoryFilter ?? {}),
+          ...memoryFilter,
           // nodeId-as-bare-loc → exact nodeLoc match (the supported loc filter
           // since the deprecated nodeLoc substring arg was removed in #252).
           ...(nodeLocExact ? { nodeLoc: nodeLocExact } : {}),

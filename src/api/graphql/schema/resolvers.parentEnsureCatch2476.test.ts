@@ -66,31 +66,41 @@ function known(code: string, target?: unknown): Prisma.PrismaClientKnownRequestE
 
 /** `db` with `node.upsert` throwing `err` for the parent at `loc`; everything else is the real client. */
 function dbFailingParentUpsert(loc: string, err: Error): Context['db'] {
-  const node = new Proxy(db.node, {
-    get(target, prop, receiver) {
-      if (prop === 'upsert') {
-        return (args: { where?: { loc_memoryId?: { loc?: string } } }) => {
+  const wrap = (client: any): any => {
+    const node = new Proxy(client.node, {
+      get(target, prop, receiver) {
+        if (prop === 'upsert') return (args: { where?: { loc_memoryId?: { loc?: string } } }) => {
           if (args?.where?.loc_memoryId?.loc === loc) return Promise.reject(err);
-          return target.upsert(args as never);
+          return target.upsert(args);
         };
-      }
-      const v = Reflect.get(target, prop, receiver);
-      return typeof v === 'function' ? v.bind(target) : v;
-    },
-  });
-  return new Proxy(db, {
-    get(target, prop, receiver) {
-      if (prop === 'node') return node;
-      const v = Reflect.get(target, prop, receiver);
-      return typeof v === 'function' ? v.bind(target) : v;
-    },
-  }) as Context['db'];
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    return new Proxy(client, {
+      get(target, prop, receiver) {
+        if (prop === 'node') return node;
+        if (prop === '$transaction') return (work: any, ...options: any[]) =>
+          typeof work === 'function' ? target.$transaction((tx: any) => work(wrap(tx)), ...options) : target.$transaction(work, ...options);
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+  };
+  return wrap(db) as Context['db'];
 }
 
 async function seedParent(loc: string) {
-  await db.node.create({
-    data: { id: generateId(), memoryId: systemMemoryId, loc, name: loc, nodeType: 'system' },
-  });
+  let memoryId = systemMemoryId;
+  if (loc === 'chats') {
+    // Seed the parent in the actual start target, not in the Agent's definition.
+    const home = await db.memory.create({ data: {
+      name: 'Parent fixture home', urn: `parent2476-${generateId()}:home`, class: 'personal',
+      userId: admin.id, ownerUserId: admin.id, userMemoryOfAgentId: agentId, createdBy: admin.id,
+    } });
+    memoryId = home.id;
+  }
+  await db.node.create({ data: { id: generateId(), memoryId, loc, name: loc, nodeType: 'system' } });
 }
 
 const sites = [

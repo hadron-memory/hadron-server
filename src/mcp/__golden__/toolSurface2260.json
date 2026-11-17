@@ -105,6 +105,14 @@
    "2f2c709f30a5d3dd5c3cb09dd7d7f8df72b81f4cc474afc34505a9df4335b6a1"
   ],
   [
+   "hadron_web_poll_list",
+   "729a3600006b5b3a302043a2cd6b06fd7b5a44eb7cd64a9eadcec69cf97dc63c"
+  ],
+  [
+   "hadron_web_poll_cancel",
+   "3db72c050879a9f76722bb50920a98ae381d88fc4943eac02260251180041fe4"
+  ],
+  [
    "hadron_preview_automation",
    "23706da4ebb3d62b5f4d97d6203d0c7bb0085180ccd2bac4d3875858169b02d8"
   ],
@@ -119,6 +127,10 @@
   [
    "hadron_agent_processes",
    "1135780aa004373f12e03cc4ad9ff293423d286535c69fef8c4c8ec9a5e317ab"
+  ],
+  [
+   "hadron_agent_boot_prompt",
+   "5b8e46d793de1fa79c7764100ba4ff06154912c9b7de98104ab06223bf146989"
   ],
   [
    "hadron_agent_set_base",
@@ -411,6 +423,14 @@
    "2f2c709f30a5d3dd5c3cb09dd7d7f8df72b81f4cc474afc34505a9df4335b6a1"
   ],
   [
+   "hadron_web_poll_list",
+   "729a3600006b5b3a302043a2cd6b06fd7b5a44eb7cd64a9eadcec69cf97dc63c"
+  ],
+  [
+   "hadron_web_poll_cancel",
+   "3db72c050879a9f76722bb50920a98ae381d88fc4943eac02260251180041fe4"
+  ],
+  [
    "hadron_preview_automation",
    "23706da4ebb3d62b5f4d97d6203d0c7bb0085180ccd2bac4d3875858169b02d8"
   ],
@@ -425,6 +445,10 @@
   [
    "hadron_agent_processes",
    "1135780aa004373f12e03cc4ad9ff293423d286535c69fef8c4c8ec9a5e317ab"
+  ],
+  [
+   "hadron_agent_boot_prompt",
+   "5b8e46d793de1fa79c7764100ba4ff06154912c9b7de98104ab06223bf146989"
   ],
   [
    "hadron_agent_set_base",
@@ -717,6 +741,14 @@
    "2f2c709f30a5d3dd5c3cb09dd7d7f8df72b81f4cc474afc34505a9df4335b6a1"
   ],
   [
+   "hadron_web_poll_list",
+   "729a3600006b5b3a302043a2cd6b06fd7b5a44eb7cd64a9eadcec69cf97dc63c"
+  ],
+  [
+   "hadron_web_poll_cancel",
+   "3db72c050879a9f76722bb50920a98ae381d88fc4943eac02260251180041fe4"
+  ],
+  [
    "hadron_preview_automation",
    "23706da4ebb3d62b5f4d97d6203d0c7bb0085180ccd2bac4d3875858169b02d8"
   ],
@@ -731,6 +763,10 @@
   [
    "hadron_agent_processes",
    "1135780aa004373f12e03cc4ad9ff293423d286535c69fef8c4c8ec9a5e317ab"
+  ],
+  [
+   "hadron_agent_boot_prompt",
+   "5b8e46d793de1fa79c7764100ba4ff06154912c9b7de98104ab06223bf146989"
   ],
   [
    "hadron_agent_set_base",
@@ -1023,6 +1059,14 @@
    "2f2c709f30a5d3dd5c3cb09dd7d7f8df72b81f4cc474afc34505a9df4335b6a1"
   ],
   [
+   "hadron_web_poll_list",
+   "729a3600006b5b3a302043a2cd6b06fd7b5a44eb7cd64a9eadcec69cf97dc63c"
+  ],
+  [
+   "hadron_web_poll_cancel",
+   "3db72c050879a9f76722bb50920a98ae381d88fc4943eac02260251180041fe4"
+  ],
+  [
    "hadron_preview_automation",
    "23706da4ebb3d62b5f4d97d6203d0c7bb0085180ccd2bac4d3875858169b02d8"
   ],
@@ -1037,6 +1081,10 @@
   [
    "hadron_agent_processes",
    "1135780aa004373f12e03cc4ad9ff293423d286535c69fef8c4c8ec9a5e317ab"
+  ],
+  [
+   "hadron_agent_boot_prompt",
+   "5b8e46d793de1fa79c7764100ba4ff06154912c9b7de98104ab06223bf146989"
   ],
   [
    "hadron_agent_set_base",
