@@ -8144,6 +8144,16 @@ export const typeDefs = `#graphql
     may learn that this one worker was retired (#1945). Any other workerRef sent with a grant is gated first.
     """
     launchGrant: String
+    """
+    #4306 — with launchGrant only: whether the host applied the run settings (family, model, effort) its start named
+    (hrn:node:hadronmemory.com:specs:cor:agt:070:08). false: the start's settings were NOT applied (an exec-path worker
+    runs its own fixed command), so this bind inherits none of them; the session, the worker's last-used record and the
+    task's applied settings hold only the family, model and effort this bind itself reports (a family derived from its
+    own llmModel or tool included). true, null or omitted: a bind that reports none runs as its start said, as before,
+    so a client that never sends this is unaffected. false without a launchGrant is refused BAD_USER_INPUT before
+    anything is written, because there is no start to qualify.
+    """
+    startSettingsApplied: Boolean
     "The session's stated intent (Session.plan) - what this session is about. MCP's hadron_start_session description lands here."
     plan: String
     """

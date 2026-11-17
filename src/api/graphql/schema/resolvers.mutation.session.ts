@@ -221,7 +221,7 @@ async function lockSessionAppActive(tx: Prisma.TransactionClient, appId: string)
 
 type LaunchCtx = {
   grant: LoadedGrant; issuedBy: 'platform' | 'manager'; hold: { holdUserId: string | null; holdAt: Date | null };
-  /** #4291: the settings the start named (`family`, and `model` and `effort` when it carried them): what a bind that reports none runs as. */
+  /** #4291: the settings the start named (`family`, and `model` and `effort` when it carried them): what a bind that reports none runs as. #4306: empty when the bind said the start did not apply them. */
   args: { family?: string; model?: string; effort?: string };
 };
 
@@ -272,6 +272,11 @@ const LAUNCH_STATE_REFUSALS: Record<string, string> = {
  * changes nothing (no oracle, and no way to fail another's start).
  */
 async function withLaunch<T>(given: SessionInput, ctx: Context, run: (input: SessionInput, launch: LaunchCtx | null) => Promise<T>): Promise<T> {
+  // #4306: `startSettingsApplied: false` qualifies a START. With no launch grant there is no start to qualify, so it
+  // is refused here, before anything is read or written. true, null and absent say nothing and pass.
+  if (given.startSettingsApplied === false && given.launchGrant == null) {
+    throw new GraphQLError('startSettingsApplied: false is only accepted with a launchGrant: it says the start that grant came from did not apply its run settings.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
   if (given.launchGrant == null) return run(given, null);
   if (!ctx.userId || ctx.impersonation) throw launchGrantInvalid();
   if (given.force) {
@@ -285,7 +290,11 @@ async function withLaunch<T>(given: SessionInput, ctx: Context, run: (input: Ses
   const opArgs = (op.args ?? {}) as Record<string, unknown>;
   const launch: LaunchCtx = {
     grant, issuedBy: op.issuedBy === 'platform' ? 'platform' : 'manager', hold: { holdUserId: op.holdUserId, holdAt: op.holdAt },
-    args: { family: str(opArgs.family), model: str(opArgs.model), effort: str(opArgs.effort) },
+    // #4306 (cor:agt:070:08, the exception Proposed): a start whose host could not apply its run settings (an exec-path
+    // worker runs its own fixed argv) says so on the bind, and the bind then inherits NONE of them: the session, the
+    // worker's last-used record and the task's applied stamp hold only what the bind itself reports. Emptied here, the
+    // one place the start's args enter a bind, so no later read of `launch.args` can inherit by another path.
+    args: given.startSettingsApplied === false ? {} : { family: str(opArgs.family), model: str(opArgs.model), effort: str(opArgs.effort) },
   };
   try {
     return await run({ ...given, workerRef: given.workerRef ?? grant.workerId }, launch);
