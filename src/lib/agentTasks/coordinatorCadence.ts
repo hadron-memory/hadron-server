@@ -60,8 +60,11 @@ async function lastCountedAssignments(db: PrismaClient, appId: string, workerIds
 }
 
 async function firstSessionStarts(db: PrismaClient, workerIds: string[]): Promise<Map<string, Date>> {
-  const rows = await db.session.groupBy({ by: ['workerId'], where: { workerId: { in: workerIds }, deletedAt: null }, _min: { startedAt: true } });
-  return new Map(rows.filter((r) => r.workerId && r._min.startedAt).map((r) => [r.workerId as string, r._min.startedAt as Date]));
+  // #4273: each worker's earliest start from one end of sessions_worker_started_idx, not a read of all its sessions.
+  const rows = await db.$queryRaw<{ workerId: string; first: Date | null }[]>`
+    SELECT w AS "workerId", (SELECT min(s.started_at) FROM sessions s WHERE s.worker_id = w AND s.deleted_at IS NULL) AS "first"
+    FROM unnest(${workerIds}::text[]) AS w`;
+  return new Map(rows.filter((r) => r.first).map((r) => [r.workerId, r.first as Date]));
 }
 
 /** Record the first pass that saw each coordinator. Never updated: `ON CONFLICT DO NOTHING`, so concurrent passes agree. */

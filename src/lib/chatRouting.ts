@@ -1,6 +1,7 @@
 /** #4036 / cor:cht:030:02: shared turn routing and locked-origin application; S4 adds stage targets and detour returns. */
 import type { ScriptNode, ScriptRule } from './chatScript.js';
 import { decideNextStage } from './chatRouting/nextStage.js';
+import { recordSkippedOnComplete } from './chatRouting/skipMetrics.js';
 
 export interface GoalStackEntry {
   description: string;
@@ -128,8 +129,10 @@ const stagesOf = (node: ScriptNode | null): string[] => {
 const unchanged = (): ChatRoutingResult => ({ stageTransitioned: false, newStageName: null, conversationHandoff: null, conversationCompleted: null, detourReturned: false, routingSkipped: false });
 
 /**
- * Decide one turn using the pinned script supplied by the caller. No database or locks here; the callbacks only read
- * script nodes/evaluate conditions. Rules are first-fires-wins: a rule that resolves (a conversation with a first stage,
+ * Decide one turn using the pinned script supplied by the caller. The decision itself opens no database connection and
+ * takes no locks (#4102 F9); its CALLBACKS may read database layers — `node` reads script nodes and `evaluate` reads
+ * the memory layers behind condition evaluation — so the licensing and pinning gates belong to the caller, before
+ * this runs. Rules are first-fires-wins: a rule that resolves (a conversation with a first stage,
  * or a stage that is in its conversation's `stageOrder`) ends evaluation; one that does not resolve fires nothing, pushes
  * nothing and evaluation goes on (a detour to a conversation with no stages included). Only when the turn completed
  * and no rule fired does the chat return to the most recent active detour goal (Q3/Q5/Q6), else move to the fallback
@@ -137,8 +140,10 @@ const unchanged = (): ChatRoutingResult => ({ stageTransitioned: false, newStage
  */
 export async function decideChatRouting(input: {
   origin: RoutingOrigin;
+  /** The model's raw `next_stage` tool-response value: deliberately `unknown` (arbitrary JSON in), judged only by decideNextStage's runtime validation — never a cast (#4102 F9). */
   nextStage?: unknown;
   stageOrder?: readonly string[] | null;
+  /** The model's raw `goal_reached` tool-response value: deliberately `unknown` (arbitrary JSON in); only the literal boolean `true` completes — cor:cht:030:02 K2, see the strict check below (#4102 F9). */
   goalReached?: unknown;
   rules: readonly ScriptRule[];
   node: (loc: string) => Promise<ScriptNode | null>;
@@ -151,6 +156,8 @@ export async function decideChatRouting(input: {
   const origin = { ...input.origin }, edits: ChatRoutingDecision['edits'] = [], result = unchanged();
   const guards: ChatRoutingDecision['guards'] = [];
   const decision = { origin, edits, guards, result };
+  // Strict on purpose: only the literal boolean `true` completes ('true', 1 and other truthy JSON values must not) —
+  // runtime validation of an unknown JSON input, not a TypeScript assumption (cor:cht:030:02 K2; #4036's suite pins it).
   const completed = input.goalReached === true;
   const conversationLoc = `conversations:${origin.conversationName}`;
   if (completed && origin.conversationName) {
@@ -195,28 +202,34 @@ export async function decideChatRouting(input: {
     result.stageTransitioned = true; result.newStageName = stage;
     result.conversationHandoff = conv !== origin.conversationName ? conv : null;
   };
-  // The script reader already orders by priority with its stable tiebreak. First firing target wins.
-  for (const rule of input.rules) {
-    const timing = (rule.data.timing as string) ?? 'on_complete';
-    if (timing !== 'always' && !(timing === 'on_complete' && completed)) continue;
-    if (!await input.evaluate(rule)) continue;
-    const parts = rule.targetLoc?.split(':') ?? [];
-    if (parts[0] !== 'conversations' || (parts.length !== 2 && parts.length !== 3) || !parts[1]) continue;
-    const targetName = parts[1], targetConv = `conversations:${targetName}`;
-    const order = stagesOf(await input.node(targetConv));
-    const stage = parts.length === 3 ? (order.includes(parts[2]) ? parts[2] : undefined) : order[0];
-    if (!stage) continue; // unresolvable: fires nothing, pushes nothing, evaluation continues
-    const behavior = (rule.data.behavior as string) ?? 'transition';
-    const label = (rule.data.label as string) ?? undefined;
-    if (behavior === 'detour' && origin.conversationName) {
-      edits.push(data => {
-        pushGoal(data, { description: label ?? `Detour to ${targetName}`, createdBy: 'ASSISTANT', conversationUrn: conversationLoc,
-          nodeUrn: origin.stageName ? `${conversationLoc}:${origin.stageName}` : undefined, edgeUrn: rule.id, detourTo: targetConv });
-      });
+  let skippedOnCompleteRules = 0;
+  try {
+    // The script reader already orders by priority with its stable tiebreak. First firing target wins.
+    for (const rule of input.rules) {
+      const timing = (rule.data.timing as string) ?? 'on_complete';
+      if (timing === 'on_complete' && !completed) skippedOnCompleteRules++;
+      if (timing !== 'always' && !(timing === 'on_complete' && completed)) continue;
+      if (!await input.evaluate(rule)) continue;
+      const parts = rule.targetLoc?.split(':') ?? [];
+      if (parts[0] !== 'conversations' || (parts.length !== 2 && parts.length !== 3) || !parts[1]) continue;
+      const targetName = parts[1], targetConv = `conversations:${targetName}`;
+      const order = stagesOf(await input.node(targetConv));
+      const stage = parts.length === 3 ? (order.includes(parts[2]) ? parts[2] : undefined) : order[0];
+      if (!stage) continue; // unresolvable: fires nothing, pushes nothing, evaluation continues
+      const behavior = (rule.data.behavior as string) ?? 'transition';
+      const label = (rule.data.label as string) ?? undefined;
+      if (behavior === 'detour' && origin.conversationName) {
+        edits.push(data => {
+          pushGoal(data, { description: label ?? `Detour to ${targetName}`, createdBy: 'ASSISTANT', conversationUrn: conversationLoc,
+            nodeUrn: origin.stageName ? `${conversationLoc}:${origin.stageName}` : undefined, edgeUrn: rule.id, detourTo: targetConv });
+        });
+      }
+      note(targetName, stage);
+      edits.push(data => moveTo(data, targetName, stage, { type: behavior === 'detour' ? 'DETOUR_EDGE' : 'TRANSITION_EDGE', content: label }, rule.id));
+      return decision;
     }
-    note(targetName, stage);
-    edits.push(data => moveTo(data, targetName, stage, { type: behavior === 'detour' ? 'DETOUR_EDGE' : 'TRANSITION_EDGE', content: label }, rule.id));
-    return decision;
+  } finally {
+    recordSkippedOnComplete(input.goalReached, skippedOnCompleteRules);
   }
   if (!completed || !origin.conversationName) return decision;
   // No rule fired. Return to the most recent active detour goal (the seed goal and legacy goals carry no detourTo).
