@@ -67,6 +67,25 @@ describe('AgentTeamEvent.taskHandle boundary and batching (#4153)', () => {
     expect(rows.find((row: any) => row.taskId === foreign.id).taskHandle).toBe(null);
   });
 
+  it('answers a foreign-App taskId exactly as an unknown id and a null taskId (#4199)', async () => {
+    const foreign = await task(other, stranger.id);
+    const unknownId = generateId(); // matches no task row in any App
+    const rowFor = async (taskId: string | null) => {
+      const created = await event(taskId);
+      const response = await run(pageQuery());
+      expect(response.errors).toBeUndefined();
+      return (response.data?.agentTeamEventsPage as any).events.find((row: any) => row.id === created.id);
+    };
+    const foreignRow = await rowFor(foreign.id);
+    const unknownRow = await rowFor(unknownId);
+    const nullRow = await rowFor(null);
+    expect(unknownRow.taskHandle).toBe(null);
+    expect(nullRow.taskHandle).toBe(null);
+    expect(nullRow.taskId).toBe(null);
+    // Same answer, field for field, apart from the id each row carries.
+    expect({ ...foreignRow, id: 0, taskId: 0 }).toEqual({ ...unknownRow, id: 0, taskId: 0 });
+  });
+
   it('answers a foreign-App taskId null through the acknowledgeAlarm single-event fallback', async () => {
     const foreign = await task(other, stranger.id);
     const raised = await alarm(foreign.id);
@@ -101,7 +120,10 @@ describe('AgentTeamEvent.taskHandle boundary and batching (#4153)', () => {
     expect(response.errors).toBeUndefined();
     const rows = response.data?.agentTeamEvents as any[];
     expect(rows).toHaveLength(50);
-    expect(rows.map((row: any) => row.taskHandle).sort()).toEqual(tasks.map(t => t.handle).sort());
+    // Pair each row's own taskId with its own handle: two sorted lists would let a cross-wise swap pass (#4199).
+    const handleByTask = new Map(tasks.map(t => [t.id, t.handle]));
+    expect(new Set(rows.map((row: any) => row.taskId)).size).toBe(50);
+    for (const row of rows) expect(row.taskHandle).toBe(handleByTask.get(row.taskId));
     expect(new Set(rows.map((row: any) => row.taskHandle)).size).toBe(50);
     expect(many).toHaveBeenCalledTimes(1); expect(unique).not.toHaveBeenCalled(); expect(first).not.toHaveBeenCalled();
   });
