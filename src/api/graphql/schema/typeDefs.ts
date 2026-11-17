@@ -11963,6 +11963,10 @@ export const typeDefs = `#graphql
     behind the call, for OTHER workers only. Idempotent for a live subscription. A grant use is announced
     to the team chat, best-effort: announcement says POSTED or FAILED, and the subscription stands either way.
     #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.
+    #4234: a worker of a SHORT_LIVED Agent is refused TICKER_ON_SHORT_LIVED, after authorization and before anything is
+    written (it runs only while it holds a task, so a ticker could not wake it). The refusal comes before the idempotent
+    answer: re-subscribing such a worker that already has a live subscription is refused too, not answered changed false.
+    Unsubscribing it stays allowed.
     """
     subscribeWorker(tickerRef: String!, workerRef: String!, instruction: ActInstructionInput): SubscribeResult!
 

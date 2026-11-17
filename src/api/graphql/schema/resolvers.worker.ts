@@ -2307,6 +2307,12 @@ export type WorkerActivity = {
  * live session is open AND inside its type-specific idle window; deleted
  * sessions do not count; reaper writes are not genuine activity; and activity
  * after an end is capped at the end instant.
+ *
+ * Side effect (#4273; documented for #4285, Arianna's BLIND P3): the read first runs `set_config('jit', 'off', true)`,
+ * which is LOCAL to the transaction it runs in. On the shared client (which has `$transaction`) both statements run in ONE
+ * short transaction of their own, at the client's default isolation, so the setting dies with it and never reaches the next
+ * pool user. On a caller's transaction client (no `$transaction`) both run ON that transaction: no nested transaction is
+ * opened, its isolation is unchanged, and JIT stays off for the rest of the CALLER's transaction.
  */
 async function queryWorkerActivity(
   ctx: Context,
@@ -2321,10 +2327,11 @@ async function queryWorkerActivity(
     await tx.$executeRaw`SELECT set_config('jit', 'off', true)`;
     return tx.$queryRaw<Row[]>(workerActivitySql(scope, now));
   };
-  const db = ctx.db as unknown as Prisma.TransactionClient & { $transaction?: unknown };
-  const rows = typeof db.$transaction === 'function'
-    ? await (db as unknown as { $transaction: <T>(f: (tx: Prisma.TransactionClient) => Promise<T>) => Promise<T> }).$transaction((tx) => run(tx))
-    : await run(db);
+  // A transaction client exposes no `$transaction`; the shared client does (#4285: one guard instead of two casts).
+  type Runner = { $transaction: <T>(f: (tx: Prisma.TransactionClient) => Promise<T>) => Promise<T> };
+  const db = ctx.db as unknown as Prisma.TransactionClient | Runner;
+  const opensItsOwn = (c: typeof db): c is Runner => typeof (c as Partial<Runner>).$transaction === 'function';
+  const rows = opensItsOwn(db) ? await db.$transaction((tx) => run(tx)) : await run(db);
   return new Map<string, WorkerActivity>(
     rows.map((row) => [
       row.workerId,
@@ -2423,7 +2430,10 @@ export function workerActivitySql(scope: Prisma.Sql, now: Date): Prisma.Sql {
     -- its own start) and cannot be the maximum. The kept ended sessions are those ending at or after that start, served
     -- by sessions_worker_ended_idx and sessions_worker_started_idx, so the rows read follow the open and overlapping
     -- sessions, never the worker's lifetime of them. A session that ended before it started (never written by the
-    -- platform) does not set the latest start. Reading every session made each liveness read, five per stall tick, grow
+    -- platform) does not set the latest start. #4285 (Arianna New-4): so a worker whose ONLY sessions all ended before they
+    -- started has no latest start, the walk below keeps nothing, and the fold returns no row for it (before #4273 it had
+    -- one, with lastActiveAt = ended_at). No real worker is affected while the platform never writes such a session.
+    -- Reading every session made each liveness read, five per stall tick, grow
     -- with the App's whole session history (QA: 42,000 -> 84,000 rows on doubled history).
     JOIN LATERAL (
       SELECT s1.* FROM sessions s1

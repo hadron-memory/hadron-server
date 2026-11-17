@@ -143,6 +143,14 @@ describe('#2763 the rule', () => {
     expect(await evaluateCoordinatorCadence(db, NOW)).toEqual([]);
   });
 
+  it('#4285 item 1: a recent rebind does not reset the clock; the FIRST session\'s start counts (Clark, #4274 LOCAL P3)', async () => {
+    await bind('Liam');
+    await db.coordinatorCadenceClock.create({ data: { workerId: w.Ada.id, appId: app.id, observedAt: at(500) } });
+    await bind('Ada', 300); // the first session, long ago
+    await bind('Ada', 10); // a rebind ten minutes ago: a later session, not a new coordinator
+    expect(await evaluateCoordinatorCadence(db, NOW)).toHaveLength(1); // the clock started 300 min ago, so Ada is late
+  });
+
   it('an App without a coordinator raises nothing, and a retired coordinator is not evaluated', async () => {
     await bind('Liam');
     await db.worker.update({ where: { id: w.Ada.id }, data: { retiredAt: at(1) } });
