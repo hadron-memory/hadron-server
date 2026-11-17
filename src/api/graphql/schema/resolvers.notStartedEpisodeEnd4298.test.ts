@@ -18,6 +18,7 @@ import { recordEndedEscalations } from '../../../lib/agentTasks/stall.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { appendTaskEvent, type TaskEventPayload } from '../../../lib/agentTasks/events.js';
 import { resolvers, type Context } from './resolvers.js';
+import { settledTeamEventQueries } from '../../../test/teamEventHorizon.js';
 import { typeDefs } from './typeDefs.js';
 
 const M = resolvers.Mutation as any;
@@ -27,7 +28,8 @@ const iso = (hhmm: string): string => at(hhmm).toISOString();
 /** The gap Cedar observed between the row's `assignedAt` and its `task.assigned` event. */
 const GAP_MS = 9;
 const ctx = (userId?: string): Context => ({ db, userId, roles: ['READER'] });
-const server = new ApolloServer<Context>({ typeDefs, resolvers });
+// #4098: the forward feed serves only sealed transactions, so a positive read waits for the horizon first.
+const server = new ApolloServer<Context>({ typeDefs, resolvers: { ...resolvers, Query: settledTeamEventQueries(resolvers.Query, db) } });
 
 let app: { id: string };
 let admin: { id: string };
