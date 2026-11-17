@@ -9,8 +9,13 @@ name: Migration Replay
 
 on:
   pull_request:
+    # labeled/unlabeled: the change manager's baseline-growth-approved label re-runs the check (#4338 BLIND F1).
+    types: [opened, synchronize, reopened, labeled, unlabeled]
     paths:
       - 'prisma/**'
+      - 'prisma.config.*'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
       - 'scripts/db/migration-replay*'
       - 'src/test/catalogSnapshot.ts'
       - 'src/test/schemaTemplate.ts'
@@ -19,6 +24,9 @@ on:
     branches: [main]
     paths:
       - 'prisma/**'
+      - 'prisma.config.*'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
       - 'scripts/db/migration-replay*'
       - 'src/test/catalogSnapshot.ts'
       - 'src/test/schemaTemplate.ts'
@@ -53,9 +61,19 @@ jobs:
           node-version: '22'
           cache: 'pnpm'
       - run: pnpm install --frozen-lockfile
+      # #4338 BLIND F1: shrink-only is enforced against the BASE branch's baseline, not only the PR's own file. Growth
+      # fails unless the change manager applied the baseline-growth-approved label (named in the baseline's header).
+      - name: Fetch the base branch's baseline
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+          git show "FETCH_HEAD:scripts/db/migration-replay-baseline.txt" > "$RUNNER_TEMP/base-baseline.txt" \
+            || { echo "the base branch has no baseline yet"; rm -f "$RUNNER_TEMP/base-baseline.txt"; }
       - name: Replay every migration from empty and compare with push + post-push (shrink-only baseline)
         env:
           REPLAY_ADMIN_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          MIGRATION_REPLAY_BASE_BASELINE: ${{ github.event_name == 'pull_request' && format('{0}/base-baseline.txt', runner.temp) || '' }}
+          MIGRATION_REPLAY_ALLOW_GROWTH: ${{ contains(github.event.pull_request.labels.*.name, 'baseline-growth-approved') }}
         run: pnpm tsx scripts/db/migration-replay.ts
       # #4338 BLIND F4: the red controls run here, every time, so the check's teeth are regression-covered. Each seeds one
       # throwaway change in this disposable checkout, expects exit 1 naming the entry, and reverts it.
@@ -64,11 +82,12 @@ jobs:
           REPLAY_ADMIN_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: |
           set -u
-          expect_red() { # <label> <pattern the output must contain>
-            if pnpm -s tsx scripts/db/migration-replay.ts > out.txt 2>&1; then
-              echo "::error::control '$1' stayed green"; cat out.txt; exit 1
-            fi
-            grep -qF -- "$2" out.txt || { echo "::error::control '$1' failed for another reason"; cat out.txt; exit 1; }
+          # #4338 BLIND F5: exit status exactly 1 (a detection, not an operational failure = 2) AND the diagnostic line
+          # naming the exact injected entry.
+          expect_red() { # <label> <the diagnostic line's prefix, ending in the injected entry's key>
+            set +e; pnpm -s tsx scripts/db/migration-replay.ts > out.txt 2>&1; code=$?; set -e
+            [ "$code" -eq 1 ] || { echo "::error::control '$1' exited $code, not 1"; cat out.txt; exit 1; }
+            grep -qF -- "$2" out.txt || { echo "::error::control '$1' did not name its entry"; cat out.txt; exit 1; }
             echo "control '$1': red as expected ($2)"
           }
           probe=prisma/migrations/29991231000000_replay_probe
@@ -91,5 +110,15 @@ jobs:
           cp baseline.bak scripts/db/migration-replay-baseline.txt
 
           { cat baseline.bak; echo 'added idx:no_such_index_anywhere 0000000000000000'; } > scripts/db/migration-replay-baseline.txt
-          expect_red 'stale baseline line' 'STALE BASELINE LINE'
+          expect_red 'stale baseline line' 'STALE BASELINE LINE (no longer differs, or duplicated; delete it): added idx:no_such_index_anywhere 0000000000000000'
           cp baseline.bak scripts/db/migration-replay-baseline.txt
+
+          # Growth over the base branch's baseline fails without the label (F1): the unaltered baseline is no growth
+          # against itself, and a base that lacks a line makes that line growth.
+          cp baseline.bak "$RUNNER_TEMP/growth-base.txt"
+          MIGRATION_REPLAY_BASE_BASELINE="$RUNNER_TEMP/growth-base.txt" MIGRATION_REPLAY_ALLOW_GROWTH=false \
+            pnpm -s tsx scripts/db/migration-replay.ts > /dev/null 2>&1 || { echo "::error::the unaltered baseline is growth against itself"; exit 1; }
+          grep -v '^changed col:tickers.reasons ' baseline.bak > "$RUNNER_TEMP/growth-base.txt"
+          export MIGRATION_REPLAY_BASE_BASELINE="$RUNNER_TEMP/growth-base.txt" MIGRATION_REPLAY_ALLOW_GROWTH=false
+          expect_red 'baseline growth over the base branch' 'BASELINE GROWTH (not on the base branch; needs the change manager'"'"'s baseline-growth-approved label): changed col:tickers.reasons'
+          unset MIGRATION_REPLAY_BASE_BASELINE MIGRATION_REPLAY_ALLOW_GROWTH

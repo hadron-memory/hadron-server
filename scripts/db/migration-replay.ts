@@ -19,12 +19,12 @@
  */
 import { execFile } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { Client } from 'pg';
-import { diff, snapshot, type Snapshot } from '../../src/test/catalogSnapshot.js';
+import { snapshot, squash, type Snapshot } from '../../src/test/catalogSnapshot.js';
 import { buildTestSchema } from '../../src/test/schemaTemplate.js';
 
 const execFileAsync = promisify(execFile);
@@ -33,8 +33,9 @@ export const BASELINE_PATH = join(ROOT, 'scripts/db/migration-replay-baseline.tx
 
 /**
  * The baseline's entries: one `<added|removed|changed|reformatted> <object key> <fingerprint>` per line; `#` comments and
- * blanks skipped. The fingerprint pins BOTH definitions (#4338 BLIND F1), so a baselined object that drifts again, or
- * whose drift grows, no longer matches its line and fails as new drift.
+ * blanks skipped. The key may contain spaces (a routine's signature, `fn:f(x integer, y text)`), so a line is read as
+ * kind up to the FIRST space and fingerprint after the LAST (#4338 BLIND F2). The fingerprint pins BOTH definitions, so a
+ * baselined object that drifts again, or whose drift grows, no longer matches its line and fails as new drift.
  */
 export function parseBaseline(text: string): string[] {
   return text.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
@@ -45,22 +46,48 @@ export function fingerprint(reference: string | undefined, replay: string | unde
   return createHash('sha256').update(`${reference ?? ''}\u0000${replay ?? ''}`).digest('hex').slice(0, 16);
 }
 
+/** One line per entry: a key's backslash and control characters (a quoted identifier may hold a newline) are escaped. */
+export function encodeKey(key: string): string {
+  return key.replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t');
+}
+
 /**
- * Each catalog difference as its baseline entry, `<kind> <key> <fingerprint>`; the definitions stay in `details`. The
- * kind and key come from the shared comparator's `diff`, the fingerprint from the two snapshots' definitions.
+ * The migration engine's own bookkeeping, which exists only on the replay by construction: the EXACT relation
+ * `_prisma_migrations` (its columns, constraints and triggers) and its primary-key index. Nothing that merely starts with
+ * that name (an application table `_prisma_migrations_archive`) is skipped (#4338 BLIND F3).
  */
-export function differenceEntries(
-  differences: string[], reference: Snapshot = new Map(), replay: Snapshot = new Map(),
-): { entries: string[]; details: Map<string, string> } {
+export function isEngineBookkeeping(key: string): boolean {
+  return /^(col|con|tg):_prisma_migrations\./.test(key) || key === 'idx:_prisma_migrations_pkey';
+}
+
+/**
+ * Each catalog difference as its baseline entry, `<kind> <encoded key> <fingerprint>`, with both definitions in
+ * `details`. Built from the two snapshots directly, so kind, key and definitions stay structured until serialization
+ * (#4338 BLIND F2, F6). The kinds are the shared comparator's: a function whose body differs only in SQL whitespace is
+ * `reformatted` (`squash`), anything else `changed`; `added` exists only on the replay, `removed` only on the reference.
+ */
+export function differenceEntries(reference: Snapshot, replay: Snapshot): { entries: string[]; details: Map<string, string> } {
   const details = new Map<string, string>();
-  for (const d of differences) {
-    const head = d.split('\n')[0]!;
-    // The migration engine's own bookkeeping table exists only on the replay by construction; it is not drift.
-    if (/ (col|con|idx|seq|tg):_prisma_migrations[._]/.test(head)) continue;
-    const key = head.slice(head.indexOf(' ') + 1);
-    details.set(`${head} ${fingerprint(reference.get(key), replay.get(key))}`, d);
+  for (const key of [...new Set([...reference.keys(), ...replay.keys()])].sort()) {
+    const before = reference.get(key);
+    const after = replay.get(key);
+    if (before === after || isEngineBookkeeping(key)) continue;
+    const kind = before === undefined ? 'added' : after === undefined ? 'removed'
+      : key.startsWith('fn:') && squash(before) === squash(after) ? 'reformatted' : 'changed';
+    details.set(`${kind} ${encodeKey(key)} ${fingerprint(before, after)}`,
+      `  push + post-push: ${before ?? '(absent)'}\n  migration replay: ${after ?? '(absent)'}`);
   }
   return { entries: [...details.keys()].sort(), details };
+}
+
+/**
+ * Entries the PR's baseline adds over the base branch's (#4338 BLIND F1): the check itself enforces shrink-only, not
+ * just review. Growth fails unless the change manager approved it on the PR (the `baseline-growth-approved` label, which
+ * the workflow turns into MIGRATION_REPLAY_ALLOW_GROWTH=true).
+ */
+export function baselineGrowth(prBaseline: string[], baseBaseline: string[]): string[] {
+  const base = new Set(baseBaseline);
+  return prBaseline.filter((e) => !base.has(e));
 }
 
 /**
@@ -108,14 +135,25 @@ async function main(): Promise<number> {
     // before = the reference (push + post-push), after = the replay: `added` exists only on the migration path.
     const reference = await snap(refUrl);
     const replay = await snap(replayUrl);
-    const { entries, details } = differenceEntries(diff(reference, replay), reference, replay);
+    const { entries, details } = differenceEntries(reference, replay);
     if (process.argv.includes('--print')) { for (const e of entries) console.log(e); return 0; }
-    const { unexpected, stale } = judge(entries, parseBaseline(readFileSync(BASELINE_PATH, 'utf8')));
+    const baseline = parseBaseline(readFileSync(BASELINE_PATH, 'utf8'));
+    const { unexpected, stale } = judge(entries, baseline);
+    let growth: string[] = [];
+    const basePath = process.env.MIGRATION_REPLAY_BASE_BASELINE;
+    if (basePath) {
+      if (existsSync(basePath)) growth = baselineGrowth(baseline, parseBaseline(readFileSync(basePath, 'utf8')));
+      else console.log('migration replay: the base branch has no baseline yet (the bootstrapping PR); growth not judged.');
+    }
+    const growthAllowed = process.env.MIGRATION_REPLAY_ALLOW_GROWTH === 'true';
     console.log(`migration replay: ${entries.length} difference(s) from push + post-push; baseline lists ${entries.length - unexpected.length}.`);
     // The entry first (with its fingerprint, exactly as a baseline line would carry it), then both definitions.
-    for (const u of unexpected) console.error(`NEW DRIFT (not in the baseline): ${u}\n${(details.get(u) ?? '').split('\n').slice(1).join('\n')}`);
+    for (const u of unexpected) console.error(`NEW DRIFT (not in the baseline): ${u}\n${details.get(u) ?? ''}`);
     for (const s of stale) console.error(`STALE BASELINE LINE (no longer differs, or duplicated; delete it): ${s}`);
-    return unexpected.length || stale.length ? 1 : 0;
+    for (const g of growth) {
+      console.error(`${growthAllowed ? 'APPROVED BASELINE GROWTH' : 'BASELINE GROWTH (not on the base branch; needs the change manager\'s baseline-growth-approved label)'}: ${g}`);
+    }
+    return unexpected.length || stale.length || (growth.length && !growthAllowed) ? 1 : 0;
   } finally {
     // #4338 BLIND F3: drop each scratch database independently and report a failure by name; a run that leaves one
     // behind fails, so a green check never hides a leak.

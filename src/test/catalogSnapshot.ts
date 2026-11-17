@@ -1,6 +1,12 @@
 /**
  * #434: the catalog comparator, shared by Slice A's template parity test (templateCatalogParity434.test.ts) and Slice C's
  * migration replay check (scripts/db/migration-replay.ts), so the two can never compare by different rules.
+ *
+ * SCOPE (#4338 BLIND F7), the `public` schema only: columns (type, NOT NULL, default, generated, identity), constraints
+ * (`pg_get_constraintdef` + validated), indexes (`pg_get_indexdef` + valid), non-extension functions and procedures
+ * (`pg_get_functiondef`), sequences (type, start, increment, min, max, cycle), views, and non-internal triggers (+ enabled).
+ * NOT compared: row-level security policies, column collations and statistics targets, sequence cache, ownership and
+ * grants, comments, extensions themselves, and anything outside `public`. A drift in those passes unseen.
  */
 import type { Client } from 'pg';
 
