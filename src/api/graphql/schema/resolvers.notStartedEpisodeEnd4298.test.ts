@@ -104,6 +104,14 @@ describe('#4298 — a not-started episode ends at the start, not at the assignme
     expect(await inEffect()).toEqual([]);
   });
 
+  it('a start stamped at the very instant of the alarm\'s raise is the end: the raise bound is inclusive', async () => {
+    const { t, alarm } = await assignedThenAlarmed();
+    expect(alarm.createdAt).toEqual(at('10:15'));
+    await start(t.id, '10:15');
+    await record('10:16');
+    expect(await events()).toMatchObject([{ id: alarm.id, escalationEndedAt: iso('10:15') }]);
+  });
+
   it('the acknowledgement\'s freeze records the start too, not the opening assignment', async () => {
     const { t, alarm } = await assignedThenAlarmed();
     await start(t.id, '10:17');
@@ -201,7 +209,10 @@ describe('#4298 — a not-started episode ends at the start, not at the assignme
     expect(await events()).toMatchObject([{ id: alarm.id, escalationEndedAt: iso('10:32') }]);
   });
 
-  it('the real write path: a task created with an assignee, alarmed and started, never ends before its alarm', async () => {
+  // The real ASSIGNMENT write path only: it is the one whose two timestamps (row stamp, then event) make the defect. The
+  // start is seeded 17 minutes on, because events are append-only (their time cannot be moved back) and the window is
+  // counted in minutes; the real start mutation's own end is pinned in resolvers.alarmInEffect3934.test.ts ("real start").
+  it('the real assignment path: created with an assignee by createAgentTask, alarmed, then started: the end is the start', async () => {
     const made = await M.createAgentTask({}, { input: { appRef: app.id, title: 'Real', assignee: { worker: anne.id } } }, ctx(admin.id));
     const row = await db.agentTask.findUniqueOrThrow({ where: { id: made.id } });
     const assigned = await db.agentTeamEvent.findFirstOrThrow({ where: { taskId: made.id, type: 'task.assigned' } });

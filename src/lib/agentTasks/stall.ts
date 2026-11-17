@@ -829,11 +829,14 @@ export async function endedAlarmEpisodeInstants(
   const subject = alarms.filter((a): a is { taskId: string; type: string; episodeStart: Date; raisedAt?: Date | null } =>
     !!a.taskId && !!a.episodeStart && STALL_ALARM_TYPES.has(a.type));
   /**
-   * #4298: the instant an ending move must come after. For a not-started alarm, the later of the episode's start and the
-   * alarm's raise; for every other rule the episode's start, unchanged (the gate on #4298 holds the change to this rule).
+   * #4298: the instant an ending move must come AFTER (exclusive). For a not-started alarm whose raise is later than its
+   * episode's start, one millisecond before the raise, so a move stamped at the very instant of the raise still counts
+   * (these columns hold milliseconds: "after raise - 1 ms" is "at or after the raise"), and never before the start, which
+   * stays exclusive. For every other rule the episode's start, unchanged (the gate on #4298 holds the change to this rule).
    */
   const fromOf = (a: { type: string; episodeStart: Date; raisedAt?: Date | null }): Date =>
-    a.type === STALL_EVENT_TYPE['not-started'] && a.raisedAt && a.raisedAt.getTime() > a.episodeStart.getTime() ? a.raisedAt : a.episodeStart;
+    a.type === STALL_EVENT_TYPE['not-started'] && a.raisedAt && a.raisedAt.getTime() > a.episodeStart.getTime()
+      ? new Date(a.raisedAt.getTime() - 1) : a.episodeStart;
   const taskIds = [...new Set(subject.map((a) => a.taskId))];
   if (taskIds.length === 0) return out;
   const tasks = await db.agentTask.findMany({
