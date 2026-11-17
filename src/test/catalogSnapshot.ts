@@ -8,7 +8,9 @@ import type { Client } from 'pg';
 export const SNAPSHOT = `
   SELECT 'col:' || c.relname || '.' || a.attname AS k,
          format_type(a.atttypid, a.atttypmod) || ' notnull=' || a.attnotnull
-           || ' default=' || coalesce(pg_get_expr(d.adbin, d.adrelid), '') || ' generated=' || a.attgenerated::text AS d
+           || ' default=' || coalesce(pg_get_expr(d.adbin, d.adrelid), '') || ' generated=' || a.attgenerated::text
+           -- #4338 BLIND F2: identity semantics ('a' ALWAYS, 'd' BY DEFAULT, '' none); attgenerated does not carry them.
+           || ' identity=' || a.attidentity::text AS d
     FROM pg_attribute a
     JOIN pg_class c ON c.oid = a.attrelid
     JOIN pg_namespace n ON n.oid = c.relnamespace

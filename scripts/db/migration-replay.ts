@@ -18,32 +18,47 @@
  * The admin URL needs CREATEDB; the two scratch databases are created from template0 and dropped afterwards.
  */
 import { execFile } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { Client } from 'pg';
-import { diff, snapshot } from '../../src/test/catalogSnapshot.js';
+import { diff, snapshot, type Snapshot } from '../../src/test/catalogSnapshot.js';
 import { buildTestSchema } from '../../src/test/schemaTemplate.js';
 
 const execFileAsync = promisify(execFile);
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 export const BASELINE_PATH = join(ROOT, 'scripts/db/migration-replay-baseline.txt');
 
-/** The baseline's entries: one `<added|removed|changed|reformatted> <object key>` per line; `#` comments and blanks skipped. */
+/**
+ * The baseline's entries: one `<added|removed|changed|reformatted> <object key> <fingerprint>` per line; `#` comments and
+ * blanks skipped. The fingerprint pins BOTH definitions (#4338 BLIND F1), so a baselined object that drifts again, or
+ * whose drift grows, no longer matches its line and fails as new drift.
+ */
 export function parseBaseline(text: string): string[] {
   return text.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
 }
 
-/** Each catalog difference, reduced to its identity line (`changed con:t.c`); the definitions stay in `details`. */
-export function differenceEntries(differences: string[]): { entries: string[]; details: Map<string, string> } {
+/** A short, stable fingerprint of a difference's two definitions (the reference's, then the replay's; '' when absent). */
+export function fingerprint(reference: string | undefined, replay: string | undefined): string {
+  return createHash('sha256').update(`${reference ?? ''}\u0000${replay ?? ''}`).digest('hex').slice(0, 16);
+}
+
+/**
+ * Each catalog difference as its baseline entry, `<kind> <key> <fingerprint>`; the definitions stay in `details`. The
+ * kind and key come from the shared comparator's `diff`, the fingerprint from the two snapshots' definitions.
+ */
+export function differenceEntries(
+  differences: string[], reference: Snapshot = new Map(), replay: Snapshot = new Map(),
+): { entries: string[]; details: Map<string, string> } {
   const details = new Map<string, string>();
   for (const d of differences) {
-    const entry = d.split('\n')[0]!;
+    const head = d.split('\n')[0]!;
     // The migration engine's own bookkeeping table exists only on the replay by construction; it is not drift.
-    if (/ (col|con|idx|seq|tg):_prisma_migrations[._]/.test(entry)) continue;
-    details.set(entry, d);
+    if (/ (col|con|idx|seq|tg):_prisma_migrations[._]/.test(head)) continue;
+    const key = head.slice(head.indexOf(' ') + 1);
+    details.set(`${head} ${fingerprint(reference.get(key), replay.get(key))}`, d);
   }
   return { entries: [...details.keys()].sort(), details };
 }
@@ -67,6 +82,8 @@ export function judge(entries: string[], baseline: string[]): { unexpected: stri
 const quote = (name: string) => `"${name.replace(/"/g, '""')}"`;
 const withDb = (url: string, name: string) => { const u = new URL(url); u.pathname = `/${name}`; return u.toString(); };
 
+const cleanupFailed: string[] = [];
+
 async function main(): Promise<number> {
   const adminUrl = process.env.REPLAY_ADMIN_URL;
   if (!adminUrl) { console.error('REPLAY_ADMIN_URL is required (a maintenance-database URL with CREATEDB).'); return 2; }
@@ -89,7 +106,9 @@ async function main(): Promise<number> {
       try { return await snapshot(c); } finally { await c.end(); }
     };
     // before = the reference (push + post-push), after = the replay: `added` exists only on the migration path.
-    const { entries, details } = differenceEntries(diff(await snap(refUrl), await snap(replayUrl)));
+    const reference = await snap(refUrl);
+    const replay = await snap(replayUrl);
+    const { entries, details } = differenceEntries(diff(reference, replay), reference, replay);
     if (process.argv.includes('--print')) { for (const e of entries) console.log(e); return 0; }
     const { unexpected, stale } = judge(entries, parseBaseline(readFileSync(BASELINE_PATH, 'utf8')));
     console.log(`migration replay: ${entries.length} difference(s) from push + post-push; baseline lists ${entries.length - unexpected.length}.`);
@@ -97,11 +116,16 @@ async function main(): Promise<number> {
     for (const s of stale) console.error(`STALE BASELINE LINE (no longer differs, or duplicated; delete it): ${s}`);
     return unexpected.length || stale.length ? 1 : 0;
   } finally {
-    for (const db of [replayDb, refDb]) await admin.query(`DROP DATABASE IF EXISTS ${quote(db)} WITH (FORCE)`).catch(() => {});
+    // #4338 BLIND F3: drop each scratch database independently and report a failure by name; a run that leaves one
+    // behind fails, so a green check never hides a leak.
+    for (const db of [replayDb, refDb]) {
+      try { await admin.query(`DROP DATABASE IF EXISTS ${quote(db)} WITH (FORCE)`); }
+      catch (e) { cleanupFailed.push(db); console.error(`CLEANUP FAILED: could not drop scratch database ${db}: ${(e as Error).message}`); }
+    }
     await admin.end().catch(() => {});
   }
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  main().then((code) => process.exit(code), (e) => { console.error(e); process.exit(2); });
+  main().then((code) => process.exit(cleanupFailed.length ? Math.max(code, 1) : code), (e) => { console.error(e); process.exit(2); });
 }

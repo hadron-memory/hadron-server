@@ -57,3 +57,39 @@ jobs:
         env:
           REPLAY_ADMIN_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pnpm tsx scripts/db/migration-replay.ts
+      # #4338 BLIND F4: the red controls run here, every time, so the check's teeth are regression-covered. Each seeds one
+      # throwaway change in this disposable checkout, expects exit 1 naming the entry, and reverts it.
+      - name: Red controls (each must fail the check, naming its entry)
+        env:
+          REPLAY_ADMIN_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: |
+          set -u
+          expect_red() { # <label> <pattern the output must contain>
+            if pnpm -s tsx scripts/db/migration-replay.ts > out.txt 2>&1; then
+              echo "::error::control '$1' stayed green"; cat out.txt; exit 1
+            fi
+            grep -qF -- "$2" out.txt || { echo "::error::control '$1' failed for another reason"; cat out.txt; exit 1; }
+            echo "control '$1': red as expected ($2)"
+          }
+          probe=prisma/migrations/29991231000000_replay_probe
+          cp scripts/db/migration-replay-baseline.txt baseline.bak
+
+          mkdir -p "$probe"; printf 'CREATE INDEX replay_probe_idx ON "nodes" ("created_at");\n' > "$probe/migration.sql"
+          expect_red 'seeded new object' 'NEW DRIFT (not in the baseline): added idx:replay_probe_idx'
+          rm -rf "$probe"
+
+          mkdir -p "$probe"; printf 'DROP INDEX IF EXISTS nodes_embedding_pending_idx;\nCREATE INDEX nodes_embedding_pending_idx ON "nodes" ("embedding_pending_at", "id");\n' > "$probe/migration.sql"
+          expect_red 'stale IF NOT EXISTS redefinition' 'NEW DRIFT (not in the baseline): changed idx:nodes_embedding_pending_idx'
+          rm -rf "$probe"
+
+          mkdir -p "$probe"; printf 'DROP INDEX IF EXISTS memories_user_id_idx;\nCREATE INDEX memories_user_id_idx ON "memories" ("user_id", "id") WHERE "user_id" IS NOT NULL;\n' > "$probe/migration.sql"
+          expect_red 'a baselined object changed again' 'NEW DRIFT (not in the baseline): changed idx:memories_user_id_idx'
+          rm -rf "$probe"
+
+          grep -v '^changed col:tickers.reasons ' baseline.bak > scripts/db/migration-replay-baseline.txt
+          expect_red 'removed baseline line' 'NEW DRIFT (not in the baseline): changed col:tickers.reasons'
+          cp baseline.bak scripts/db/migration-replay-baseline.txt
+
+          { cat baseline.bak; echo 'added idx:no_such_index_anywhere 0000000000000000'; } > scripts/db/migration-replay-baseline.txt
+          expect_red 'stale baseline line' 'STALE BASELINE LINE'
+          cp baseline.bak scripts/db/migration-replay-baseline.txt
