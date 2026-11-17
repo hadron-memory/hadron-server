@@ -37,7 +37,7 @@ import { darkAlarmChain } from '../agentTasks/darkWorker.js';
 import type { AlarmChain } from '../agentTasks/events.js';
 import { isSerializationFailure } from '../agentTasks/stall.js';
 import {
-  fenceHostDecision, insertWorkerStart, LaunchRefusal, liveRegistrationsFor, lockStartableWorker, type StartHold,
+  fenceHostDecision, insertWorkerStart, LaunchRefusal, liveRegistrationsFor, lockStartableWorker, startSettingsFor, type StartHold,
 } from '../hostOperations/launch.js';
 import { loadHostDesiredState } from './desiredState.js';
 
@@ -158,6 +158,8 @@ export async function startDesiredWorker(
         // #4267: the assignment's launcher profile (null under `host`), as the other start paths pass it; with it the
         // start also carries the Agent's lifecycle.
         profile: reg.profile,
+        // #4291 (decision 7): a long-lived worker comes back with its last-used settings; the profile seeds an empty record.
+        settings: await startSettingsFor(tx, a.workerId, null, reg),
         taskId: null, issuer: { issuedBy: 'platform' }, hold, issuedReason: DESIRED_RUNNING,
       });
       return 'issued';

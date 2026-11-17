@@ -4155,6 +4155,8 @@ export interface SessionInput {
   // #1707 / cor:agt:060:04: the model family this session runs as. Omitted:
   // derived from llmModel, then tool (src/lib/agentTasks/family.ts).
   family?: string | null;
+  // #4291: the effort this session runs at, as the launcher applied it (src/lib/agentTasks/runSettings.ts).
+  effort?: string | null;
   // #928 / cor:api:140: the role-Agent driving this session (PK or URN).
   agentRef?: string;
   // #943 / cor:api:140: the App this session is a unit of work for (PK or URN),

@@ -30,6 +30,7 @@ import { renderLintWarnings } from '../../../lib/bootPromptLint.js';
 import { bootPromptRefusal } from '../../../lib/bootPrompt/refusal.js';
 import { previewServedBootPrompt, readRecordedRevisionContent, recordServedPrompt, resolveServedBootPrompt, type PageServedMemo, type ServeTarget } from '../../../lib/bootPrompt/serve.js';
 import { normalizeFamily, tierOf } from '../../../lib/agentTasks/family.js';
+import { workerRunRecordOf, type WorkerRunRecord } from '../../../lib/agentTasks/runSettings.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
 import { reconcileStopCoverage } from '../../../lib/stopSignals/lifecycle.js';
 import { generateId } from '../../../lib/id.js';
@@ -3509,6 +3510,23 @@ export const workerFieldResolvers = {
       ctx: Context,
       info?: { operation?: { operation?: string } },
     ): Promise<string | null> => tierOf((await bindingModelOf(ctx, worker, info))?.bindingModel),
+    /**
+     * #4291 (cor:agt:060:04, Proposed) — the worker's record of what its session last reported (family, model, effort),
+     * kept when it unbinds. A working-state field on the same gate as `family`: null when the caller may not see the
+     * worker's working state. Self-declared; never authorization.
+     */
+    lastUsed: async (
+      worker: WorkerActivityParent & { lastUsedFamily?: string | null; lastUsedModel?: string | null; lastUsedEffort?: string | null },
+      _: unknown,
+      ctx: Context,
+    ): Promise<WorkerRunRecord | null> => {
+      if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+      // A parent projected without the record's columns reads them here, never as an empty record.
+      const row = worker.lastUsedFamily !== undefined
+        ? worker
+        : await ctx.db.worker.findUnique({ where: { id: worker.id }, select: { lastUsedFamily: true, lastUsedModel: true, lastUsedEffort: true } });
+      return workerRunRecordOf(row ?? {});
+    },
     /**
      * hadron-cli#487 — when this worker was last DRIVEN, across every session
      * it has ever had; null for a worker nobody has ever bound.
