@@ -4182,6 +4182,8 @@ export interface SessionInput {
   force?: boolean;
   // #1709: a host-launched agent's single-use launch grant (cor:agt:070:08).
   launchGrant?: string | null;
+  // #4306: false, with a launchGrant, says the start did not apply its run settings: the bind inherits none of them.
+  startSettingsApplied?: boolean | null;
   // The session's stated intent (Session.plan) — MCP's hadron_start_session
   // description lands here since it delegates to startSession (#940 parity).
   plan?: string;
