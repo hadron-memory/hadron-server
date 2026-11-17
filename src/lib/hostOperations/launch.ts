@@ -363,7 +363,7 @@ export async function launchAfterTeamResume(db: PrismaClient, appId: string, pau
       SELECT DISTINCT ON (t.assignee_worker_id) t.id, t.assignee_worker_id AS "workerId",
              (SELECT CASE WHEN e.type = 'assignment.matched' THEN e.payload ->> 'family' END
               FROM agent_team_events e
-              WHERE e.task_id = t.id AND e.type IN ('task.assigned', 'task.reassigned', 'assignment.matched')
+              WHERE e.task_id = t.id AND e.app_id = t.app_id AND e.type IN ('task.assigned', 'task.reassigned', 'assignment.matched')
               ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS family
       FROM agent_tasks t
       WHERE t.app_id = ${appId} AND t.assignee_worker_id IS NOT NULL AND t.status IN ('pending', 'started')
