@@ -360,8 +360,9 @@ describe('#2719 backfill and the watermark', () => {
     // #4320 item 4 (BLIND Dorian, d20dc14e): Promise.allSettled alone never proved the runs overlap. The barrier holds
     // the STATE ROW locked from outside (no usage_events lock), so run A's first chunk takes its LOCK TABLE and then
     // blocks on that row — holding the table lock the whole time. Run B, started now, must wait at its own LOCK TABLE:
-    // neither run completes a chunk until the barrier lifts. With the chunk's LOCK TABLE removed, B runs its first
-    // chunk under A and the zero-progress assertion fails.
+    // neither run completes a chunk until the barrier lifts. Both waits are asserted directly — A by a GRANTED
+    // ShareRowExclusiveLock on usage_events, B by a NOT-granted one (its request queued behind A's); with the chunk's
+    // LOCK TABLE removed, neither lock row appears and the granted assertion fails first.
     await setState(false, at(1));
     await seedMixed();
     const chunksOf = () => { let n = 0; return { get: () => n, after: async () => { n++; } }; };
@@ -377,13 +378,20 @@ describe('#2719 backfill and the watermark', () => {
     });
     await locked; // the row lock is held before A starts, so A's first chunk cannot slip past the barrier
     const first = backfillUsageActivityRollup(db, { chunkCells: 5, afterChunk: a.after });
-    const tableLockHeld = async () => Number((await db.$queryRaw<Array<{ n: bigint }>>`SELECT COUNT(*) AS n FROM pg_locks WHERE relation = 'usage_events'::regclass AND mode = 'ShareRowExclusiveLock' AND granted`)[0].n) > 0;
-    for (let i = 0; i < 500 && !(await tableLockHeld()); i++) await new Promise((r) => setTimeout(r, 20));
-    expect(await tableLockHeld()).toBe(true); // A is inside its first chunk: table lock held, blocked on the state row
+    // pg_locks lists the whole CLUSTER, and the per-worker test databases are clones of one template, so
+    // 'usage_events'::regclass is the same OID in every one of them — a backfill parked in another worker's clone
+    // would satisfy this without the database filter (#4358 READ, Braxton F3).
+    const tableLockHeld = async (granted: boolean) => Number((await db.$queryRaw<Array<{ n: bigint }>>`
+      SELECT COUNT(*) AS n FROM pg_locks
+      WHERE database = (SELECT oid FROM pg_database WHERE datname = current_database())
+        AND relation = 'usage_events'::regclass AND mode = 'ShareRowExclusiveLock' AND granted = ${granted}`)[0].n) > 0;
+    for (let i = 0; i < 500 && !(await tableLockHeld(true)); i++) await new Promise((r) => setTimeout(r, 20));
+    expect(await tableLockHeld(true)).toBe(true); // A is inside its first chunk: table lock held, blocked on the state row
     const second = backfillUsageActivityRollup(db, { chunkCells: 5, afterChunk: b.after });
-    await new Promise((r) => setTimeout(r, 500));
+    for (let i = 0; i < 500 && !(await tableLockHeld(false)); i++) await new Promise((r) => setTimeout(r, 20));
+    expect(await tableLockHeld(false)).toBe(true); // B is parked AT ITS OWN LOCK TABLE, queued behind A's (#4358 READ, F2)
     expect(a.get()).toBe(0); // A still parked on the barrier inside chunk 1
-    expect(b.get()).toBe(0); // B waits on A's table lock: the chunks serialize
+    expect(b.get()).toBe(0); // …and B has completed nothing either: the chunks serialize
     release();
     await stateRowHolder;
     const runs = await Promise.allSettled([first, second]);
