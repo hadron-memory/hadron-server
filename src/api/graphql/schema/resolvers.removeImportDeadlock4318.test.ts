@@ -68,40 +68,64 @@ async function crossedWorld() {
 
 /**
  * Park each parent's FIRST attempt between its reads; once both are parked, land P1 in B and P2 in A, then release both.
- * A retried attempt passes the seam without parking.
+ * A retried attempt passes the seam without parking, and every arrival is counted, so the pin can assert the retry
+ * happened. `abort` releases everything at once (#4354 BLIND F2): a removal that settles before it parks, a failed
+ * install, or the test's own cleanup can never leave the other transaction parked.
  */
 function crossAtTheSeam(p1: string, p2: string) {
-  const parked = new Set<string>();
+  const arrivals = new Map<string, number>();
   let release!: () => void;
   const released = new Promise<void>((r) => { release = r; });
   let bothParked!: () => void;
-  const both = new Promise<void>((r) => { bothParked = r; });
+  let failParking!: (e: Error) => void;
+  const both = new Promise<void>((r, j) => { bothParked = r; failParking = j; });
   removeAgentImportHooks.betweenFenceReads = async (parentAgentId) => {
-    if (parked.has(parentAgentId)) return; // a retry: no second park
-    parked.add(parentAgentId);
-    if (parked.size === 2) bothParked();
+    const n = (arrivals.get(parentAgentId) ?? 0) + 1;
+    arrivals.set(parentAgentId, n);
+    if (n > 1) return; // a retry: no second park
+    if ([p1, p2].every((p) => arrivals.has(p))) bothParked();
     await released;
   };
+  const abort = (why: string) => { failParking(new Error(why)); release(); };
   return {
+    arrivals,
+    abort,
+    /** Wraps a removal so that settling before it parked aborts the crossing instead of hanging it. */
+    removal: (parent: string, run: () => Promise<unknown>) => run().finally(() => {
+      if (!arrivals.has(parent)) abort(`removal of ${parent} settled before it reached the seam`);
+    }),
     cross: async () => {
-      await both;
-      // Plain inserts take FOR KEY SHARE on the App, which the fences' FOR NO KEY UPDATE does not block.
-      await install(w.app2Id, p1); await install(w.appId, p2);
-      release();
+      try {
+        await both;
+        // Plain inserts take FOR KEY SHARE on the App, which the fences' FOR NO KEY UPDATE does not block.
+        await install(w.app2Id, p1); await install(w.appId, p2);
+      } finally {
+        release();
+      }
     },
   };
 }
 
 describe('#4318 crossed removeAgentImport fences', () => {
-  it('two removals crossed between their reads both succeed, and each grant is stamped once', async () => {
+  it('two removals crossed between their reads both succeed (one after a retry), and each grant ends', async () => {
     const { p1, p2, gA, gB } = await crossedWorld();
-    const { cross } = crossAtTheSeam(p1.id, p2.id);
-    const [r1, r2] = await Promise.allSettled([remove(p1, owner1), remove(p2, owner2), cross()]);
-    expect([outcome(r1), outcome(r2)]).toEqual(['ok', 'ok']);
+    const seam = crossAtTheSeam(p1.id, p2.id);
+    try {
+      const results = await Promise.allSettled([
+        seam.removal(p1.id, () => remove(p1, owner1)), seam.removal(p2.id, () => remove(p2, owner2)), seam.cross(),
+      ]);
+      // All three surface: a failed cross-install is a failure of the pin, not something to discard.
+      expect(results.map(outcome)).toEqual(['ok', 'ok', 'ok']);
+    } finally {
+      seam.abort('cleanup');
+    }
+    // The cycle really formed: one parent came back to the seam on a second attempt (the deadlock retry).
+    expect([...seam.arrivals.values()].sort()).toEqual([1, 2]);
     // Both edges are gone and neither parent's install witnesses the child any more: its grants in both Apps end.
     expect(await db.agentImport.count({ where: { importedAgentId: child.id } })).toBe(0);
     expect([await departed(gA), await departed(gB)]).toEqual([true, true]);
-    // ONE unit: a second departure of an ended grant is refused by the guard, so a double stamp cannot happen silently.
+    // Final state: exactly the two grants ended. (That a stamp is written at most once is the grant guard's own rule,
+    // pinned in the grant guard's tests; this asserts the outcome, not a write count.)
     const stamps = await db.$queryRaw<{ n: bigint }[]>(Prisma.sql`
       SELECT count(*) AS n FROM grants WHERE agent_id = ${child.id} AND holder_departed_at IS NOT NULL`);
     expect(Number(stamps[0]!.n)).toBe(2);

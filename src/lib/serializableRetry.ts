@@ -67,15 +67,15 @@ export async function retryOnSerializationFailure<T>(
 }
 
 /**
- * #4318: true when `e` is Postgres's deadlock abort (SQLSTATE 40P01) as Prisma reports it from a raw statement (P2010 with
- * `meta.code === '40P01'`, the form a locking `$queryRaw` raises), or from a model operation / the transaction (P2034,
- * Prisma's "write conflict or a deadlock", whose message names the deadlock). Deliberately SEPARATE from
- * {@link isSerializationFailure}: widening that predicate would change the behaviour of every existing caller.
+ * #4318: true when `e` is Postgres's deadlock abort, by its STRUCTURED SQLSTATE 40P01 only: Prisma's P2010 from a raw
+ * statement with `meta.code === '40P01'` (the form a locking `$queryRaw` raises, as the crossed-fence deadlock does).
+ * Prisma's P2034 is NOT matched: its fixed message names "a write conflict or a deadlock" without a code, so matching it
+ * would retry write conflicts too (#4354 BLIND F1, §10 note F1). Deliberately SEPARATE from {@link isSerializationFailure}:
+ * widening that predicate would change the behaviour of every existing caller.
  */
 export function isDeadlock(e: unknown): boolean {
   if (!(e instanceof Prisma.PrismaClientKnownRequestError)) return false;
-  if (e.code === 'P2010') return (e.meta as { code?: unknown } | undefined)?.code === '40P01';
-  return e.code === 'P2034' && /deadlock/i.test(e.message);
+  return e.code === 'P2010' && (e.meta as { code?: unknown } | undefined)?.code === '40P01';
 }
 
 /** #4318: how many times a deadlocked transaction is re-run (four attempts in all) before the 40P01 surfaces as today. */

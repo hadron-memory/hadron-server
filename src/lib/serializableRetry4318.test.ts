@@ -11,10 +11,9 @@ const p2034 = () => new Prisma.PrismaClientKnownRequestError(
   'Transaction failed due to a write conflict or a deadlock. Please retry your transaction', { code: 'P2034', clientVersion: 'test' });
 
 describe('#4318 isDeadlock', () => {
-  it('matches a raw 40P01 and Prisma\'s conflict-or-deadlock P2034; nothing else', () => {
+  it('matches only the structured SQLSTATE 40P01; Prisma\'s ambiguous conflict-or-deadlock P2034 is not a deadlock', () => {
     expect(isDeadlock(raw('40P01'))).toBe(true);
-    expect(isDeadlock(p2034())).toBe(true);
-    for (const e of [raw('40001'), raw('23505'), new Error('40P01'), undefined, 'deadlock']) expect(isDeadlock(e)).toBe(false);
+    for (const e of [p2034(), raw('40001'), raw('23505'), new Error('40P01'), undefined, 'deadlock']) expect(isDeadlock(e)).toBe(false);
   });
   it('leaves isSerializationFailure unchanged: a raw 40P01 is still not a serialization failure', () => {
     expect(isSerializationFailure(raw('40P01'))).toBe(false);
@@ -34,8 +33,8 @@ describe('#4318 retryOnDeadlock', () => {
     await expect(retryOnDeadlock(async () => { runs++; throw e; })).rejects.toBe(e);
     expect(runs).toBe(DEADLOCK_RETRIES + 1);
   });
-  it('never retries another failure, a serialization abort included', async () => {
-    for (const e of [raw('40001'), raw('23505'), new Error('boom')]) {
+  it('never retries another failure: a serialization abort, a P2034 write conflict or anything else', async () => {
+    for (const e of [raw('40001'), p2034(), raw('23505'), new Error('boom')]) {
       let runs = 0;
       await expect(retryOnDeadlock(async () => { runs++; throw e; })).rejects.toBe(e);
       expect(runs).toBe(1);
