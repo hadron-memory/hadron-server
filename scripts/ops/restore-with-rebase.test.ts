@@ -355,10 +355,20 @@ describe.skipIf(!enabled)('#4111 restore-with-rebase on private clusters', { tim
     const events: { at: number; what: string }[] = [];
     let releasingAt = Infinity;
     let stop = false;
+    // #4322: a denied attempt briefly occupies a slot of the database's CONNECTION LIMIT (after authentication, until its
+    // ACL refusal), so the probes' concurrency must stay under the working phase's spare slots.
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const attempts: { at: number; role: string }[] = [];
     const hammer = (role: string) =>
       (async () => {
         while (!stop) {
-          if (await tryConnect(B.url(target, role, F.PASSWORD))) events.push({ at: performance.now(), what: role });
+          inFlight++;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          const connected = await tryConnect(B.url(target, role, F.PASSWORD));
+          inFlight--;
+          attempts.push({ at: performance.now(), role });
+          if (connected) events.push({ at: performance.now(), what: role });
           await new Promise((r) => setTimeout(r, 5));
         }
       })();
@@ -380,6 +390,12 @@ describe.skipIf(!enabled)('#4111 restore-with-rebase on private clusters', { tim
     expect(early).toEqual([]);
     expect(events.some((e) => e.what === F.ROLES.serve)).toBe(true);
     expect(events.some((e) => e.what === F.ROLES.other)).toBe(false);
+    // #4322: the limit is 4: the pipeline's session and pg_restore's leave two spare slots, so at most two probes may be in flight.
+    expect(maxInFlight).toBeLessThanOrEqual(2);
+    // ...and each denied role must have been refused at least once inside the protected window, or the pin proves nothing.
+    for (const role of [F.ROLES.serve, F.ROLES.owner, F.ROLES.other]) {
+      expect(attempts.some((a) => a.role === role && a.at < releasingAt)).toBe(true);
+    }
   });
 
   it('P3: a foreign (superuser) session at the hard fence aborts; it is never killed, so the plain drop fails and leaves it', async () => {
