@@ -802,6 +802,17 @@ export async function endedAlarmEpisodes(
 }
 
 /**
+ * #4298, #4300 (cor:agt:050:13): the rules whose episode can be opened by one of the rule's own ending moves, written as a
+ * row stamp (the episode's start) and an event milliseconds later: not-started (an assignment, a reassignment, a release),
+ * no-progress (a release, the reassignment of a started task) and couldn't-be-assigned (a release). Their ending moves are
+ * counted from the alarm's raise. Owner-unreactive starts at a child's end and finish-by at its deadline (or a release
+ * its ending moves do not include), so neither is listed.
+ */
+const RAISE_BOUNDED_ALARM_TYPES: ReadonlySet<string> = new Set([
+  STALL_EVENT_TYPE['not-started'], STALL_EVENT_TYPE['no-progress'], STALL_EVENT_TYPE.unassignable,
+]);
+
+/**
  * #3934 — {@link endedAlarmEpisodes} with the instant each episode ended, keyed the same way. The classification is
  * the one above, unchanged; the instant is the FIRST transition after the episode began that ends THIS alarm's rule
  * (cor:agt:050:14–:17): a finish-by alarm ends on a finish-by edit, a finish or a cancellation, never on an assignment;
@@ -812,13 +823,15 @@ export async function endedAlarmEpisodes(
  * Assignee activity is read from the sessions and usage events of whoever held the task while they held it, and a child's
  * end from the children's own stamps, so both are the FIRST such instant, not the latest.
  *
- * #4298: for a not-started alarm, "after the episode began" is counted from the alarm's raise (`raisedAt`, the alarm event's `created_at`) when
- * the caller gives it. The move that OPENS an episode is written twice, as the row stamp that is the episode's start
+ * #4298, #4300: for a not-started, no-progress or couldn't-be-assigned alarm, "after the episode began" is counted from
+ * the alarm's raise (`raisedAt`, the alarm event's `created_at`) when the caller gives it. The move that OPENS an episode is written twice, as the row stamp that is the episode's start
  * (`assignedAt`, `releasedAt`) and as an event a few milliseconds later in the same transaction; counted from the start
- * alone, that event read as the first ending move, and a not-started alarm ended at its own task's assignment. A raise
- * re-evaluates the rule under the task's lock ({@link raiseStallAlarm}), so every move up to it left the episode running
- * and none of them is its end: an end never precedes its alarm. Without `raisedAt` (a caller that reads only which
- * episodes ended, {@link endedAlarmEpisodes}), and for every other rule, the count is from the episode's start, as before.
+ * alone, that event read as the first ending move: a not-started alarm ended at its own task's assignment, and a
+ * no-progress or couldn't-be-assigned one at the release (`task.released`) or the reassignment of a started task
+ * (`task.reassigned`) that opened it. A raise re-evaluates the rule under the task's lock ({@link raiseStallAlarm}), so
+ * every move up to it left the episode running and none of them is its end: an end never precedes its alarm. Without
+ * `raisedAt` (a caller that reads only which episodes ended, {@link endedAlarmEpisodes}), and for the owner-unreactive and
+ * finish-by rules, whose episodes no ending move of theirs opens, the count is from the episode's start, as before.
  */
 export async function endedAlarmEpisodeInstants(
   db: Db,
@@ -829,13 +842,14 @@ export async function endedAlarmEpisodeInstants(
   const subject = alarms.filter((a): a is { taskId: string; type: string; episodeStart: Date; raisedAt?: Date | null } =>
     !!a.taskId && !!a.episodeStart && STALL_ALARM_TYPES.has(a.type));
   /**
-   * #4298: the instant an ending move must come AFTER (exclusive). For a not-started alarm whose raise is later than its
-   * episode's start, one millisecond before the raise, so a move stamped at the very instant of the raise still counts
-   * (these columns hold milliseconds: "after raise - 1 ms" is "at or after the raise"), and never before the start, which
-   * stays exclusive. For every other rule the episode's start, unchanged (the gate on #4298 holds the change to this rule).
+   * #4298, #4300: the instant an ending move must come AFTER (exclusive). For an alarm of a rule an opening move can end
+   * ({@link RAISE_BOUNDED_ALARM_TYPES}) whose raise is later than its episode's start, one millisecond before the raise,
+   * so a move stamped at the very instant of the raise still counts (these columns hold milliseconds: "after raise - 1
+   * ms" is "at or after the raise"), and never before the start, which stays exclusive. For the other rules the episode's
+   * start, unchanged.
    */
   const fromOf = (a: { type: string; episodeStart: Date; raisedAt?: Date | null }): Date =>
-    a.type === STALL_EVENT_TYPE['not-started'] && a.raisedAt && a.raisedAt.getTime() > a.episodeStart.getTime()
+    RAISE_BOUNDED_ALARM_TYPES.has(a.type) && a.raisedAt && a.raisedAt.getTime() > a.episodeStart.getTime()
       ? new Date(a.raisedAt.getTime() - 1) : a.episodeStart;
   const taskIds = [...new Set(subject.map((a) => a.taskId))];
   if (taskIds.length === 0) return out;
