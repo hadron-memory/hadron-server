@@ -262,3 +262,34 @@ export async function stampAppliedRunSettings(tx: Pick<Prisma.TransactionClient,
     ) s
     WHERE t.id = ${taskId} AND t.assignee_worker_id = s.worker_id`;
 }
+
+/**
+ * #4301 (cor:agt:050:01, Proposed): a STARTED task that moves to another assignee shows the run it is on now. Run in
+ * the reassignment's own transaction, after the assignee write: the previous run's values are cleared, then the stamp
+ * is taken from the new assignee's newest open session. A worker with no open session, or a person, leaves it empty
+ * ({@link stampAppliedRunSettings} writes nothing then, which is why the clear comes first).
+ */
+export async function restampAppliedRunSettings(tx: Pick<Prisma.TransactionClient, '$executeRaw'>, taskId: string): Promise<void> {
+  await tx.$executeRaw`
+    UPDATE agent_tasks SET applied_family = NULL, applied_model = NULL, applied_effort = NULL
+    WHERE id = ${taskId} AND (applied_family IS NOT NULL OR applied_model IS NOT NULL OR applied_effort IS NOT NULL)`;
+  await stampAppliedRunSettings(tx, taskId);
+}
+
+/**
+ * #4301: a bind fills an EMPTY stamp. The bound worker's STARTED tasks whose three applied values are all null (a
+ * task reassigned to it while it had no open session) take this session's values, in the bind's transaction. A stamp
+ * that holds any value is never touched here: only a start, a reassignment and a hand-back write over one.
+ *
+ * LOCK ORDER. The bind holds the worker's per-worker lock (src/lib/agentTasks/workerLock.ts) and the worker row; the
+ * task rows are taken after both, the order every task write takes them in.
+ */
+export async function fillEmptyAppliedRunSettings(tx: Pick<Prisma.TransactionClient, '$executeRaw'>, sessionId: string): Promise<void> {
+  await tx.$executeRaw`
+    UPDATE agent_tasks t
+    SET applied_family = s.family, applied_model = s.llm_model, applied_effort = s.effort
+    FROM sessions s
+    WHERE s.id = ${sessionId} AND s.ended_at IS NULL AND s.deleted_at IS NULL
+      AND t.assignee_worker_id = s.worker_id AND t.status = 'started'
+      AND t.applied_family IS NULL AND t.applied_model IS NULL AND t.applied_effort IS NULL`;
+}
