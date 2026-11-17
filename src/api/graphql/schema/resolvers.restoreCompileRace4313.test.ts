@@ -105,23 +105,35 @@ const snapshotNodes = async (revisionLoc: string) =>
   ((await node(revisionLoc)).data as any).snapshot.nodes as Array<Record<string, unknown>>;
 
 
-/** The compile, as another connection commits it: the source and the compiled row, with an edge from the compiled one. */
-async function compileNow() {
-  if (!(await db.node.findFirst({ where: { memoryId: systemMemory.id, loc: SOURCE } }))) await mk(SOURCE, { role: 'boot-prompt', content: 'source' });
-  const made = await mk(COMPILED, { nodeType: 'compiled-boot-prompt', role: 'boot-prompt', content: 'compiled while restoring' });
+/**
+ * What a compile leaves behind, committed in ONE transaction on another connection: the source (if absent), the
+ * compiled row, and an edge from the compiled row. A fixture of the compile's result, not the compile mutation.
+ */
+async function commitCompiledFixture() {
+  const hasSource = await db.node.findFirst({ where: { memoryId: systemMemory.id, loc: SOURCE }, select: { id: true } });
   const target = await node('prompts');
-  await db.edge.create({ data: { id: generateId(), memoryId: systemMemory.id, loc: `${COMPILED}->prompts`, sourceId: made.id, targetId: target.id } as any });
-  return made;
+  const id = generateId();
+  const base = { memoryId: systemMemory.id, tags: [] };
+  await db.$transaction([
+    ...(hasSource ? [] : [db.node.create({ data: { ...base, id: generateId(), loc: SOURCE, name: 'coordinator', nodeType: 'info', role: 'boot-prompt', content: 'source' } as any })]),
+    db.node.create({ data: { ...base, id, loc: COMPILED, name: 'compiled', nodeType: 'compiled-boot-prompt', role: 'boot-prompt', content: 'compiled while restoring' } as any }),
+    db.edge.create({ data: { id: generateId(), memoryId: systemMemory.id, loc: `${COMPILED}->prompts`, sourceId: id, targetId: target.id } as any }),
+  ]);
+  return { id };
 }
 
-type HookPoint = { model: 'node' | 'edge'; op: 'findMany' | 'updateMany'; nth: number };
+/** `where` names the statement by its own predicate (not by its position); `nth` counts the calls that match it. */
+type HookPoint = { model: 'node' | 'edge'; op: 'findMany' | 'updateMany'; nth: number; where?: (where: any) => boolean };
+/** The restore's read of the compiled rows: `nodeType` is the compiled type itself, not a `not` filter. */
+const readsCompiledRows = (where: any) => where?.nodeType === 'compiled-boot-prompt';
 /**
  * A context whose database hands the restore's own transaction a client that runs `during` once, right after the
- * `at.nth` call of `at.model.at.op` in that transaction has run and before its result is returned. `restoreRevision`
- * opens two transactions: the auto-save's slot allocation, then the restore. `fired` says whether the hook ran.
+ * `at.nth` matching call of `at.model.at.op` in that transaction has run and before its result is returned.
+ * `restoreRevision` opens two transactions: the auto-save's slot allocation, then the restore. `fired` says whether
+ * the hook ran, and `seen` is what the hooked statement returned, so a pin can assert it hooked the read it meant.
  */
 function ctxInterleaving(at: HookPoint, during: () => Promise<unknown>) {
-  const state = { fired: false, transactions: 0 };
+  const state = { fired: false, transactions: 0, seen: undefined as unknown };
   const base = adminCtx();
   const proxyDb = new Proxy(base.db, {
     get(target, prop, receiver) {
@@ -137,7 +149,8 @@ function ctxInterleaving(at: HookPoint, during: () => Promise<unknown>) {
               if (mp !== at.op) return Reflect.get(mt, mp, mr);
               return async (...args: unknown[]) => {
                 const result = await mt[at.op](...args);
-                if (++calls === at.nth && !state.fired) { state.fired = true; await during(); }
+                if (at.where && !at.where((args[0] as any)?.where)) return result;
+                if (++calls === at.nth && !state.fired) { state.fired = true; state.seen = result; await during(); }
                 return result;
               };
             },
@@ -159,7 +172,7 @@ describe('#4313: a compile that commits while a restore runs is left as it is', 
   it.each(points)('the compile commits %s: the new compiled prompt stays live, with its edge', async (_when, at) => {
     const rev = await save(); // taken before the first compile: no compiled node in it
     let made: { id: string } | undefined;
-    const { ctx, state } = ctxInterleaving(at, async () => { made = await compileNow(); });
+    const { ctx, state } = ctxInterleaving(at, async () => { made = await commitCompiledFixture(); });
     await M.restoreRevision({}, { agentId: agent.id, revisionLoc: rev.revisionLoc }, ctx);
     expect(state.fired, 'the compile must have committed inside the restore').toBe(true);
     const after = await node(COMPILED);
@@ -177,17 +190,25 @@ describe('#4313: a compile that commits while a restore runs is left as it is', 
     expect((await db.node.findUniqueOrThrow({ where: { id: extra.id } })).deletedAt).not.toBeNull();
   });
 
-  it('a compile that takes an address the snapshot holds an ordinary node at is not written over', async () => {
-    // The snapshot has an ordinary node at the address a compile then writes its compiled prompt to. The restore
-    // reads the compiled rows after its tombstone step, so a compile that commits later still must not be rewritten.
+  it('a compile that takes an address the snapshot holds an ordinary node at is not written over, and gets none of that node\'s edges', async () => {
+    // The snapshot has an ordinary node at the address a compile then writes its compiled prompt to, with an edge
+    // from it. The compile commits right after the restore has read the compiled rows (so that read does not hold
+    // it): only the check on the locked row in the write loop can keep the restore from writing over it.
     const squatter = await mk(COMPILED, { content: 'an ordinary node at the compiled address' });
+    const conversations = await node('conversations');
+    await db.edge.create({ data: { id: generateId(), memoryId: systemMemory.id, loc: `${COMPILED}->conversations`, sourceId: squatter.id, targetId: conversations.id } as any });
     const rev = await save();
+    await db.edge.deleteMany({ where: { sourceId: squatter.id } });
     await db.node.delete({ where: { id: squatter.id } });
     let made: { id: string } | undefined;
-    const { ctx, state } = ctxInterleaving({ model: 'node', op: 'findMany', nth: 2 }, async () => { made = await compileNow(); });
+    const { ctx, state } = ctxInterleaving({ model: 'node', op: 'findMany', nth: 1, where: readsCompiledRows }, async () => { made = await commitCompiledFixture(); });
     await M.restoreRevision({}, { agentId: agent.id, revisionLoc: rev.revisionLoc }, ctx);
     expect(state.fired).toBe(true);
+    expect((state.seen as Array<{ loc: string }>).map((r) => r.loc)).not.toContain(COMPILED); // the hooked read did not hold it
     expect(await node(COMPILED)).toMatchObject({ id: made!.id, deletedAt: null, nodeType: 'compiled-boot-prompt', role: 'boot-prompt', content: 'compiled while restoring' });
+    // The snapshot's edge from the ordinary node is not replayed onto the compiled prompt: it keeps its own edge only.
+    const edges = await db.edge.findMany({ where: { sourceId: made!.id }, select: { loc: true, deletedAt: true } });
+    expect(edges).toEqual([{ loc: `${COMPILED}->prompts`, deletedAt: null }]);
   });
 });
 
