@@ -3398,7 +3398,8 @@ async function readTeamEvents(c: Context, app: { id: string }, args: TeamEventsA
   // tx_id below snapshot xmin is sealed: no transaction can later add a row behind a served cursor. A later
   // transaction with a backdated caller stamp still sorts later by tx_id. Within a sealed transaction, every
   // event is already visible, so (created_at,id) safely breaks ties. Historic tx_id=0 rows retain their old order.
-  // All filters and the row projection run in ONE snapshot, including mutable alarm acknowledgements/ends.
+  // The forward statement applies every filter and projects the row in ONE snapshot, including the mutable alarm
+  // acknowledgements and ends. The cursor check and the task-ref lookup above are separate, earlier statements.
   type EventRow = Prisma.AgentTeamEventGetPayload<Record<string, never>>;
   const events = newestFirst ? await c.db.agentTeamEvent.findMany({
     where: { AND: [where, beforeWhere, inEffect] },

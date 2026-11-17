@@ -5,19 +5,13 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { settleTeamEventHorizon } from '../../../test/teamEventHorizon.js';
 
 let appId:string,userId:string;
 const T=Date.UTC(2026,10,1);
 const context=():Context=>({db,userId,roles:['READER']});
 const event=(at:number)=>db.agentTeamEvent.create({data:{appId,type:'task.created',createdAt:new Date(at)}});
-async function settle(){
- const [{x}]=await db.$queryRaw<Array<{x:string}>>`SELECT pg_current_xact_id()::text AS x`;
- for(let i=0;i<200;i++){
-  const [{done}]=await db.$queryRaw<Array<{done:boolean}>>`SELECT pg_snapshot_xmin(pg_current_snapshot()) > ${x}::xid8 AS done`;
-  if(done)return;await new Promise(r=>setTimeout(r,50));
- }
- throw new Error('snapshot horizon stayed open for 10 seconds');
-}
+const settle=()=>settleTeamEventHorizon(db);
 beforeEach(async()=>{
  await cleanDb(db);
  userId=(await db.user.create({data:{email:`${generateId()}@cursor.test`}})).id;
@@ -73,6 +67,55 @@ describe('#4098 row and filter parity',()=>{
  });
 });
 
+
+/**
+ * BLIND review P2 (Cedric, at ddf1aa38): the forward read states its filters in SQL and the newest-first read states
+ * them through the ORM. Both must select the same events for every filter, alone and combined, so a filter changed on
+ * one path and not the other fails here.
+ */
+describe('#4098 every filter selects the same events on the forward (SQL) and the newest-first (ORM) read',()=>{
+ const ids=(rows:Array<{id:string}>)=>rows.map(r=>r.id).sort();
+ const both=async(filter:Record<string,unknown>)=>({
+  forward:ids(await resolvers.Query.agentTeamEvents({}, {appRef:appId,limit:200,...filter},context())),
+  newest:ids(await resolvers.Query.agentTeamEvents({}, {appRef:appId,limit:200,newestFirst:true,...filter},context())),
+ });
+ it('since, types, codePrefix, alarmsOnly, alarmsInEffect and taskId, alone and combined',async()=>{
+  const taskId=generateId();
+  const mk=(type:string,at:number,extra:Record<string,unknown>={})=>db.agentTeamEvent.create({data:{appId,type,createdAt:new Date(at),...extra} as never});
+  const plain=await mk('task.created',T);
+  const onTask=await mk('task.progress',T+1000,{taskId});
+  const underscore=await mk('task.edited',T+2000);
+  const other=await mk('host.lost',T+3000);
+  const open=await mk('stall.not-started',T+4000,{severity:'alarm',taskId});
+  const acked=await mk('stall.no-progress',T+5000,{severity:'alarm'});
+  await db.agentTeamEvent.update({where:{id:acked.id},data:{acknowledgedAt:new Date(T+6000),acknowledgedByUserId:userId}});
+  const ended=await mk('stall.not-started',T+7000,{severity:'alarm'});
+  await db.alarmEscalationEnd.create({data:{eventId:ended.id,endedAt:new Date(T+8000)}});
+  await settle();
+  const all=[plain,onTask,underscore,other,open,acked,ended].map(e=>e.id).sort();
+  const cases:Array<[Record<string,unknown>,string[]]>=[
+   [{},all],
+   [{since:new Date(T+2000).toISOString()},[other,open,acked,ended].map(e=>e.id)],
+   [{since:new Date(T+2000)},[other,open,acked,ended].map(e=>e.id)],
+   [{types:['task.created','host.lost']},[plain,other].map(e=>e.id)],
+   [{codePrefix:'task.'},[plain,onTask,underscore].map(e=>e.id)],
+   [{codePrefix:'task_'},[]], // a LIKE wildcard in the prefix is a literal on both paths
+   [{codePrefix:'stall.%'},[]],
+   [{types:['task.edited','host.lost'],codePrefix:'task.'},[underscore.id]],
+   [{alarmsOnly:true},[open,acked,ended].map(e=>e.id)],
+   [{alarmsInEffect:true},[open.id]],
+   [{alarmsOnly:true,alarmsInEffect:true},[open.id]],
+   [{taskId},[onTask,open].map(e=>e.id)],
+   [{taskId,alarmsInEffect:true},[open.id]],
+   [{since:new Date(T+4000).toISOString(),alarmsOnly:true,codePrefix:'stall.'},[acked,ended].map(e=>e.id)],
+  ];
+  for(const [filter,expected] of cases){
+   const got=await both(filter);
+   expect(got.forward,`forward ${JSON.stringify(filter)}`).toEqual([...expected].sort());
+   expect(got.newest,`newest-first ${JSON.stringify(filter)}`).toEqual([...expected].sort());
+  }
+ },30000);
+});
 
 describe('#4098 first forward page and continuation agree',()=>{
  it.each(surfaces)('%s: one-row pages keep every event when a later transaction has an older stamp',async(surface)=>{
