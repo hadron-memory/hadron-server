@@ -12,6 +12,7 @@ import { createServer } from '../server.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { insertSoftPasskey, softPasskey } from '../test/softPasskey.js';
+import { beginPending, portalContinuation } from '../test/beginPendingSignIn.js';
 import { generateId } from '../lib/id.js';
 import { page, PAGE_HEADERS, sendPage } from './ceremonyPages.js';
 import { CEREMONY_SCRIPT_PATH } from './ceremonyClientPages.js';
@@ -55,12 +56,10 @@ const SIGN_IN_CSP = "default-src 'none'; script-src 'self'; style-src 'unsafe-in
 const TOO_MANY = 'Too many requests. Wait a minute, then reload this page.';
 
 async function pendingCookie(email: string): Promise<string> {
-  const token = generateId() + generateId();
-  await db.emailVerificationToken.create({ data: { email, token, expiresAt: new Date(Date.now() + 600_000), clientStateHash: sha('portal-nonce') } });
-  const r = await fetch(`${base}/auth/email/verify?token=${token}`, { redirect: 'manual' });
-  const c = (r.headers.getSetCookie?.() ?? []).map((x) => x.split(';')[0]!).find((x) => x.startsWith('hadron_pending_signin='));
-  expect(c).toBeTruthy();
-  return c!;
+  const user = await db.user.findFirstOrThrow({ where: { email } });
+  const begun = await beginPending(user.id, portalContinuation(sha('portal-nonce')));
+  expect(begun.cookie).toBeTruthy();
+  return begun.cookie!;
 }
 
 async function servedPages() {

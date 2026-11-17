@@ -93,8 +93,11 @@ export async function pendingPageState(userId: string): Promise<PendingPageState
 }
 
 /**
- * Called by `/auth/email/verify` when the registration switch is on and the claimed address belongs to a user.
- * Creates the pending row, sets its cookie and redirects to the page. Publishes nothing.
+ * #4339: NOTHING on a sign-in path calls this any more. Sign-in never depends on a passkey and never prompts for
+ * one (Holger, 2026-11-17); `/auth/email/verify` signs the person in as it does with the switches off. The machinery
+ * stays for the add-a-passkey slice, which is gated separately.
+ *
+ * It was called by `/auth/email/verify` when the registration switch was on. Creates the pending row, sets its cookie and redirects to the page. Publishes nothing.
  *
  * - A user with a usable passkey: a ten-minute flow that ends in an assertion (B1).
  * - A user with NO unrevoked passkey: a thirty-minute flow (B2). The page sends them to the registration page, which

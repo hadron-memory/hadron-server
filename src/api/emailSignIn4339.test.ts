@@ -152,6 +152,7 @@ describe('#4339 the other providers, switches ON', () => {
     // the only thing that creates a pending sign-in flow is beginPasskeySignIn, and nothing but its definition names it.
     const walk = (dir: string): string[] => readdirSync(dir).flatMap((f) => {
       const p = join(dir, f);
+      if (p.endsWith('/src/test')) return []; // test helpers may start a flow directly (src/test/beginPendingSignIn.ts)
       return statSync(p).isDirectory() ? walk(p) : p.endsWith('.ts') && !p.endsWith('.test.ts') ? [p] : [];
     });
     const users = walk(join(process.cwd(), 'src')).filter((p) => /beginPasskeySignIn|createPendingEmailSignIn/.test(readFileSync(p, 'utf8')))
