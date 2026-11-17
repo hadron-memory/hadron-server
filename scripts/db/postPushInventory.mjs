@@ -409,6 +409,19 @@ function scan(entryFile) {
  * string is open and keep a LATER comment (delta2 A4: that is how a
  * commented-out `-- EXECUTE 'CREATE INDEX …'` came back as a phantom row).
  */
+/** An EXECUTE match whose literal is concatenated on either side — by `||`, or
+ *  by an adjacent literal (Postgres concatenates quoted strings across
+ *  whitespace holding a newline) — is unanalyzable: the tail can carry DDL
+ *  only the code-only rule knows, and the loop's replace would hide the verb
+ *  from it. Both loops call this with their own match: it reads `m.input`,
+ *  the string the match came from, never a mutable copy — the plain loop
+ *  rewrites its `remainder` between iterations while `m.index` stays
+ *  snapshot-true (#4381 E1). Comments cannot appear in the gap:
+ *  stripPayloadComments has already turned both comment styles into a space
+ *  before either loop runs (#4382 review, pinned). */
+const isGlued = (m) =>
+  /^\s*(?:\|\||')/.test(m.input.slice(m.index + m[0].length)) || /\|\|\s*$/.test(m.input.slice(0, m.index));
+
 function stripPayloadComments(body) {
   let out = '';
   let inS = false;
@@ -719,14 +732,8 @@ export function classify(stmt) {
       // — strip them here first (delta3 B7).
       const inner = stripPayloadComments(m[2]);
       // A PARTIALLY captured EXECUTE — concatenation glued to either side —
-      // is unanalyzable: the tail can carry DDL only the code-only rule
-      // knows, and the loop's replace would hide the verb from it (delta5 D1).
-      // Slice `m.input` (the string the match came from), never the mutable
-      // remainder (#4381 E1), and treat a following quote as glued too:
-      // Postgres concatenates adjacent literals across a newline with no ||
-      // at all (#4381 E3).
-      const glued =
-        /^\s*(\|\||')/.test(m.input.slice(m.index + m[0].length)) || /\|\|\s*$/.test(m.input.slice(0, m.index));
+      // is unanalyzable (delta5 D1); isGlued reads m.input (#4381 E1/E3).
+      const glued = isGlued(m);
       // A STATEMENT-LEADING nested DO (payload-in-payload, unextractable
       // here) refuses the block wherever in the string it sits;
       // `ON CONFLICT DO NOTHING` is not one (delta3 B3).
@@ -738,15 +745,10 @@ export function classify(stmt) {
       // Same shape as the dollar path (delta3 B7): the outer stripper sees a
       // plain-string payload as string CONTENT, so the payload's own comments
       // survive into the DO test and classify — strip them after unescaping
-      // (delta4 C4). Same concatenation guard as the dollar path (delta5 D1)
-      // — and the same two #4381 corrections: `m.input`, because this loop
-      // rewrites `remainder` after every extraction while `m.index` still
-      // comes from the matchAll snapshot (E1: from the second match on, the
-      // shifted slices missed the || and consumed the glued EXECUTE), and a
-      // following quote as glued (E3: implicit literal continuation).
+      // (delta4 C4). Same concatenation guard as the dollar path (delta5 D1);
+      // isGlued reads m.input, not this loop's mutable `remainder` (#4381 E1).
       const inner = stripPayloadComments(m[1].replace(/''/g, "'"));
-      const glued =
-        /^\s*(\|\||')/.test(m.input.slice(m.index + m[0].length)) || /\|\|\s*$/.test(m.input.slice(0, m.index));
+      const glued = isGlued(m);
       if (glued || /(^|;)\s*DO\b/i.test(inner)) out.push({ unrecognized: sql });
       else out.push(...classify({ sql: inner }));
       remainder = remainder.replace(m[0], ' ');
