@@ -30,6 +30,22 @@ const ctx = (userId: string): Context => ({ db, userId, roles: ['READER'] }) as 
 const departed = async (id: string) => (await db.$queryRaw<{ d: boolean }[]>(Prisma.sql`
   SELECT holder_departed_at IS NOT NULL AS d FROM grants WHERE id = ${id}`))[0]!.d;
 const install = (appId: string, agentId: string) => db.appAgent.create({ data: { appId, agentId } });
+/**
+ * A cross-install with a BOUNDED lock wait (#4354 BLIND delta F1): if a lock-mode regression made the insert wait on a
+ * lock a parked removal holds, it fails within `CROSS_LOCK_TIMEOUT` naming the install, and the barrier's `finally`
+ * releases the removals, instead of the test hanging until an external timeout.
+ */
+const CROSS_LOCK_TIMEOUT = '5s';
+const boundedInstall = async (appId: string, agentId: string, label: string) => {
+  try {
+    await db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${CROSS_LOCK_TIMEOUT}'`);
+      await tx.appAgent.create({ data: { appId, agentId } });
+    }, { timeout: 30_000 });
+  } catch (e) {
+    throw new Error(`cross-install ${label} did not land within lock_timeout ${CROSS_LOCK_TIMEOUT}: ${(e as Error)?.message ?? e}`);
+  }
+};
 let edgePos = 100;
 async function importEdge(parentAgentId: string, importedAgentId: string) {
   await db.agentOrgGrant.upsert({
@@ -98,7 +114,7 @@ function crossAtTheSeam(p1: string, p2: string) {
       try {
         await both;
         // Plain inserts take FOR KEY SHARE on the App, which the fences' FOR NO KEY UPDATE does not block.
-        await install(w.app2Id, p1); await install(w.appId, p2);
+        await boundedInstall(w.app2Id, p1, 'P1 into App B'); await boundedInstall(w.appId, p2, 'P2 into App A');
       } finally {
         release();
       }
@@ -129,6 +145,31 @@ describe('#4318 crossed removeAgentImport fences', () => {
     const stamps = await db.$queryRaw<{ n: bigint }[]>(Prisma.sql`
       SELECT count(*) AS n FROM grants WHERE agent_id = ${child.id} AND holder_departed_at IS NOT NULL`);
     expect(Number(stamps[0]!.n)).toBe(2);
+  }, 60_000);
+
+  it('a cross-install blocked by a held App lock fails within its bound, naming the install (#4354 BLIND delta F1)', async () => {
+    const { p1 } = await crossedWorld();
+    // FOR UPDATE on the App conflicts with the insert's FOR KEY SHARE, standing in for a lock a parked removal could hold.
+    let releaseHold!: () => void;
+    const hold = new Promise<void>((r) => { releaseHold = r; });
+    let held!: () => void;
+    const isHeld = new Promise<void>((r) => { held = r; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.$queryRaw(Prisma.sql`SELECT id FROM apps WHERE id = ${w.app2Id} FOR UPDATE`);
+      held();
+      await hold;
+    }, { timeout: 30_000 });
+    try {
+      await isHeld;
+      const started = Date.now();
+      // Postgres's own lock-timeout cancel (not Prisma's 30 s transaction timeout), well inside that timeout.
+      await expect(boundedInstall(w.app2Id, p1.id, 'P1 into App B'))
+        .rejects.toThrow(/^cross-install P1 into App B did not land within lock_timeout 5s: .*lock timeout/s);
+      expect(Date.now() - started).toBeLessThan(20_000);
+    } finally {
+      releaseHold();
+      await holder;
+    }
   }, 60_000);
 
   it('control: a single removal through the same seam (no crossing) succeeds and ends the grant its edge witnessed', async () => {
