@@ -153,6 +153,38 @@ describe('#4301: a started task shows the settings of the run it is on now', () 
     expect(await applied(t.id)).toEqual(CLAUDE);
   });
 
+  // #4309 (1): the fill reads the three applied values as ONE set, so a stamp holding any one of them is not empty.
+  it.each([
+    ['family', { appliedFamily: 'claude' }, { family: 'claude', model: null, effort: null }],
+    ['model', { appliedModel: 'claude-sonnet-5-5' }, { family: null, model: 'claude-sonnet-5-5', effort: null }],
+    ['effort', { appliedEffort: 'LOW' }, { family: null, model: null, effort: 'LOW' }],
+  ])('a partial stamp (only the %s set) is kept as it was by a later bind of the assignee', async (_name, partial, expected) => {
+    const { t, s } = await startedByKit();
+    await db.agentTask.update({ where: { id: t.id }, data: { appliedFamily: null, appliedModel: null, appliedEffort: null, ...partial } as never });
+    expect(await stored(t.id)).toEqual(expected);
+    await M.endSession({}, { id: s.id }, ctx(bo.id));
+    await bindAs(kit, CODEX);
+    expect((await row(t.id)).status).toBe('started');
+    expect(await stored(t.id)).toEqual(expected);
+  });
+
+  // #4309 (2): both take the destination worker's per-worker lock first, so run at once they serialize, and either
+  // order ends with the destination's session values.
+  it('a bind of W and a reassignment of a started task to W, run together and repeated: no deadlock, W\'s values', async () => {
+    const s = await bindAs(kit, CLAUDE);
+    for (let i = 0; i < 6; i++) {
+      const t = await assignTo(kit);
+      await runAsActor({ workerId: kit.id, agentId: longAgent }, () => M.startAgentTask({}, { taskId: t.id }, { ...ctx(bo.id), sessionId: s.id } as Context));
+      const open = await db.session.findMany({ where: { workerId: sam.id, endedAt: null } });
+      for (const o of open) await M.endSession({}, { id: o.id }, ctx(bo.id));
+      const racers = [() => bindAs(sam, CODEX), () => reassign(t.id, { worker: sam.id })];
+      if (i % 2) racers.reverse();
+      await Promise.all(racers.map((f) => f()));
+      expect(await assigneeOf(t.id)).toBe(sam.id);
+      expect(await applied(t.id)).toEqual(CODEX);
+    }
+  });
+
   it('a bind fills only its own worker\'s STARTED tasks: not a pending one, another assignee\'s, or an ended one', async () => {
     const { t } = await startedByKit();
     await reassign(t.id, { worker: sam.id }); // Sam's, started, empty stamp
