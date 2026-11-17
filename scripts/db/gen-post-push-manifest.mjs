@@ -23,6 +23,9 @@ const ROOT = new URL('../..', import.meta.url).pathname;
 const MANIFEST = `${ROOT}prisma/post-push-manifest.json`;
 const ENTRY = `${ROOT}prisma/post-push.sql`;
 
+// One GENERIC reason per kind, stamped on every post-push-owned row of that
+// kind — generated, not a per-object decision (the hand-reviewed, per-object
+// reasons live only in the diff-whitelist rows' `why`).
 const KIND_WHY = {
   extension: 'Postgres extension the raw-SQL corpus ensures exists (CREATE EXTENSION); not a Prisma-schema concept.',
   index: 'Index defined in raw SQL; Prisma schema language cannot express this index (partial expression, operator class, or INCLUDE shape).',

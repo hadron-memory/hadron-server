@@ -104,6 +104,9 @@ jobs:
           # No `|| true`: the filter exits 0 with empty output when every
           # object line is whitelisted, and exits 1 when the MANIFEST itself
           # is invalid — which must fail the job, never read as "no drift".
+          # Mechanics: under the step's default `bash -e` (no pipefail), the
+          # DIFF assignment takes the LAST pipeline stage's status — the
+          # filter's exit, not prisma's — and that is what fails this step.
           if [ -n "$DIFF" ] && [ "$DIFF" != "-- This is an empty migration." ]; then
             echo "::error::Schema drift between migrations and schema.prisma:"
             echo "$DIFF"
