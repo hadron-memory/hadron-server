@@ -74,6 +74,10 @@ describe('an ended task no longer holds its external id (cor:agt:120:02, 2026-11
       const text = JSON.stringify({ m: err?.message, e: err?.extensions });
       for (const secret of [first.id, first.handle, X]) expect(text).not.toContain(secret);
       expect(await db.agentTask.count({ where: { appId: app.id } })).toBe(before);
+      // and no handle number is consumed: the next successful create takes the very next one
+      const next = await create({ title: 'next' });
+      const n = (h: string) => Number(h.split('.').pop());
+      expect(n(next.handle)).toBe(n(first.handle) + 1);
     });
   }
 
@@ -113,16 +117,26 @@ describe('an ended task no longer holds its external id (cor:agt:120:02, 2026-11
 });
 
 describe('no transition leaves finished or cancelled, so create is the only write that meets the index (cor:agt:050:02)', () => {
-  it('a finished task and a cancelled task cannot be restarted, finished again or cancelled, and keep their status', async () => {
+  it('a finished task and a cancelled task, each ASSIGNED to the caller so the assignee gate passes, refuse start, finish and cancel with TASK_ENDED and keep their status', async () => {
     const f = await create({ externalId: X }); await finish(f.id);
-    const c = await create({ externalId: Y }); await cancel(c.id);
+    const c = await create({ externalId: Y });
+    await db.agentTask.update({ where: { id: c.id }, data: { assigneeUserId: owner.id, assignedAt: new Date() } as any });
+    await cancel(c.id);
+    const seen: string[] = [];
     for (const t of [f, c]) {
-      for (const call of [
-        () => M.startAgentTask({}, { taskId: t.id }, ctx()),
-        () => M.finishAgentTask({}, { taskId: t.id, result: { outcome: 'succeeded' } }, ctx()),
-        () => M.cancelAgentTask({}, { taskId: t.id }, ctx()),
-      ]) await expect(call()).rejects.toBeTruthy();
+      for (const [name, call] of [
+        ['start', () => M.startAgentTask({}, { taskId: t.id }, ctx())],
+        ['finish', () => M.finishAgentTask({}, { taskId: t.id, result: { outcome: 'succeeded' } }, ctx())],
+        ['cancel', () => M.cancelAgentTask({}, { taskId: t.id }, ctx())],
+      ] as Array<[string, () => Promise<unknown>]>) {
+        const e: any = await call().then(() => null, (x: any) => x);
+        seen.push(`${t.id === f.id ? 'finished' : 'cancelled'}.${name}:${e?.extensions?.code}`);
+      }
     }
+    expect(seen).toEqual([
+      'finished.start:TASK_ENDED', 'finished.finish:TASK_ENDED', 'finished.cancel:TASK_ENDED',
+      'cancelled.start:TASK_ENDED', 'cancelled.finish:TASK_ENDED', 'cancelled.cancel:TASK_ENDED',
+    ]);
     expect((await db.agentTask.findUniqueOrThrow({ where: { id: f.id } })).status).toBe('finished');
     expect((await db.agentTask.findUniqueOrThrow({ where: { id: c.id } })).status).toBe('cancelled');
   });
@@ -150,6 +164,22 @@ describe('readers may now get several tasks per external id', () => {
     await create({ title: 'live', externalId: X });
     expect(await list({ externalIds: [X] })).toHaveLength(3);
   });
+
+  it('a history longer than the list cap: the first page is the cap, an offset page returns the rest, in a deterministic newest-first order with no overlap', async () => {
+    const made: string[] = [];
+    for (let i = 0; i < 205; i += 20) {
+      made.push(...(await Promise.all(Array.from({ length: Math.min(20, 205 - i) }, (_, k) => create({ title: `h${i + k}` })))).map((t: any) => t.id));
+    }
+    // 205 ended holders of one id (ended rows may share it); the database orders the expectation
+    await db.agentTask.updateMany({ where: { id: { in: made } }, data: { status: 'cancelled', cancelledAt: new Date() } as any });
+    await db.$executeRawUnsafe('UPDATE agent_tasks SET external_id = $1 WHERE id = ANY($2::text[])', X, made);
+    const expected = (await db.$queryRawUnsafe<{ id: string }[]>('SELECT id FROM agent_tasks WHERE id = ANY($1::text[]) ORDER BY created_at DESC, id DESC', made)).map(r => r.id);
+    expect(expected).toHaveLength(205);
+    const page1 = (await list({ externalIds: [X] })).map((r: any) => r.id);
+    const page2 = (await list({ externalIds: [X], offset: 200 })).map((r: any) => r.id);
+    expect(page1).toEqual(expected.slice(0, 200));
+    expect(page2).toEqual(expected.slice(200));
+  }, 60000);
 
   it('an explicit limit still windows the batch', async () => {
     await finish((await create({ externalId: X })).id);
