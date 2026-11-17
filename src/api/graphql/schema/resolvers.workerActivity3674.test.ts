@@ -31,15 +31,18 @@ beforeEach(async () => {
 });
 function observedContext(user=userId) {
   const folds:string[][]=[];
-  const observed=new Proxy(db,{get(target,key){
+  // #4273: the fold runs inside its own JIT-off transaction, so the observer wraps the transaction client too.
+  const observe=(target:any):any=>new Proxy(target,{get(t,key){
     if(key==='$queryRaw') return async (...args:unknown[])=>{
-      const rows=await (target.$queryRaw as (...args:unknown[])=>Promise<unknown>)(...args);
+      const rows=await (t.$queryRaw as (...args:unknown[])=>Promise<unknown>)(...args);
       const sql=args[0] as {strings?:string[]};
       if(sql.strings?.join('').includes('GROUP BY s.worker_id')) folds.push((rows as Array<{workerId:string}>).map(r=>r.workerId));
       return rows;
     };
-    const value=Reflect.get(target,key);return typeof value==='function'?value.bind(target):value;
+    if(key==='$transaction') return (fn:(tx:unknown)=>Promise<unknown>,...rest:unknown[])=>(t.$transaction as (...a:unknown[])=>Promise<unknown>)((tx:unknown)=>fn(observe(tx)),...rest);
+    const value=Reflect.get(t,key);return typeof value==='function'?value.bind(t):value;
   }});
+  const observed=observe(db);
   return {context:{db:observed,userId:user,roles:['READER']} as Context,folds};
 }
 async function wire(query:string,variables:Record<string,unknown>,context:Context) {

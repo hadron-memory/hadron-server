@@ -3146,7 +3146,10 @@ export const nodeMutations = {
       };
       // #4096: `newText` is caller text written through `tx.node.update`, outside the node writer. Refused typed after
       // selection and write authorization, before any write (a dry run is refused too, so its preview never promises a write that fails).
-      assertStorableText({ newText });
+      assertStorableText({ newText, oldText }); // #4106: a lone-surrogate oldText splits a stored pair into unstorable derived text
+      // #4106: a regex `oldText` (an escape such as \ud83d) can match half of a stored pair; the guard above sees only the raw
+      // input, so the DERIVED text of every planned change is checked too, naming `oldText`, before any write.
+      assertStorableText({ oldText: plans.map((p) => p.changed) });
       // A dry run writes nothing, but still makes the manager's deciding
       // gate under the same authority as the write branch.
       if (dryRun) {
@@ -3745,6 +3748,10 @@ export const nodeMutations = {
       if (!tgt || !(await isMemoryReadableCached(ctx, tgt.memoryId))) {
         throw new GraphQLError(`Target node not found: "${targetRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
       }
+      // #4106: caller text a NUL or lone surrogate would make Postgres reject (22021 / 22P05 in jsonb) is refused typed,
+      // after the gates above and before the loc derives from `name` or anything is written. `loc` and `condition`
+      // already refuse with their own typed codes.
+      assertStorableText({ name, loc, description, data, condition });
       const edgeLoc = loc != null && loc !== '' ? loc : deriveEdgeLoc(src.loc, name ?? null, tgt.loc);
       try {
         validateLoc(edgeLoc);
@@ -3866,6 +3873,7 @@ export const nodeMutations = {
         throwOnInvalidCondition(condition);
       }
       if (loc != null && loc !== '') {
+        assertStorableText({ loc }); // #4106: typed, and the value is never echoed (InvalidLocError's message would)
         try {
           validateLoc(loc);
         } catch (e) {
@@ -3929,6 +3937,7 @@ export const nodeMutations = {
         });
       }
       await requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, edgeMem.memoryId);
+      assertStorableText({ name, description, data, condition }); // #4106: after the gates, before any write
       const updatedEdge = await ctx.db.$transaction(async (tx) => {
         await lockInstallAuthoritiesFirst(tx, ctx, [edgeMem.memoryId]);
         await tx.$queryRaw`SELECT id FROM memories WHERE id = ${edgeMem.memoryId} FOR SHARE`;

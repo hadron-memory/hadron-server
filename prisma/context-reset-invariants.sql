@@ -91,3 +91,29 @@ ALTER TABLE host_registrations DROP CONSTRAINT IF EXISTS chk_host_registrations_
 ALTER TABLE host_registrations ADD CONSTRAINT chk_host_registrations_capabilities CHECK (
   capabilities <@ ARRAY['worker.reset-context']::text[]
 );
+
+-- #4225 S4b (epic #4229; cor:agt:050:27 part 12, Proposed): a reset may be asked for by an Agent's context cap, with no task.
+-- `cause` is `task-end` (it names its task) or `context-cap` (it names none), and never changes; an Agent's cap is a
+-- whole number of tokens from 1, or null for none. Every row stored before this carries `task-end` and its task.
+ALTER TABLE context_resets DROP CONSTRAINT IF EXISTS chk_context_resets_cause;
+ALTER TABLE context_resets ADD CONSTRAINT chk_context_resets_cause CHECK (
+  cause IN ('task-end', 'context-cap') AND ((cause = 'task-end') = (task_id IS NOT NULL))
+);
+
+CREATE OR REPLACE FUNCTION context_reset_cause_immutable() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.cause IS DISTINCT FROM OLD.cause THEN
+    RAISE EXCEPTION 'A context reset''s cause never changes' USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_context_resets_cause_immutable ON context_resets;
+CREATE TRIGGER trg_context_resets_cause_immutable
+  BEFORE UPDATE ON context_resets
+  FOR EACH ROW EXECUTE FUNCTION context_reset_cause_immutable();
+
+ALTER TABLE agents DROP CONSTRAINT IF EXISTS chk_agents_context_cap;
+ALTER TABLE agents ADD CONSTRAINT chk_agents_context_cap CHECK (context_cap IS NULL OR context_cap >= 1);
